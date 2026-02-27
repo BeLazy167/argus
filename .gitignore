@@ -1,0 +1,20 @@
+# Binaries
+/argus
+/bin/
+*.exe
+
+# Environment
+.env
+secrets/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+
+# Build
+/dist/
+/tmp/

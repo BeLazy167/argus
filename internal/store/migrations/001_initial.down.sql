@@ -1,0 +1,8 @@
+DROP TABLE IF EXISTS activity_log;
+DROP TABLE IF EXISTS pipeline_states;
+DROP TABLE IF EXISTS review_comments;
+DROP TABLE IF EXISTS reviews;
+DROP TABLE IF EXISTS rules;
+DROP TABLE IF EXISTS model_configs;
+DROP TABLE IF EXISTS repos;
+DROP TABLE IF EXISTS installations;

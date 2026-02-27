@@ -1,0 +1,14 @@
+{{define "review_file"}}Review the following code changes in file "{{.FileName}}" from PR #{{.PRNumber}}: "{{.PRTitle}}" by {{.PRAuthor}}.
+
+Diff:
+{{.Diff}}
+
+Respond with a JSON array of comments. Each comment should have:
+- "line": the line number in the new file (required)
+- "start_line": start of multi-line range (0 if single-line)
+- "body": the review comment (markdown)
+- "severity": one of "critical", "warning", "suggestion", "praise"
+- "category": one of "security", "performance", "style", "bug", "readability"
+
+Only comment on meaningful issues. If the changes look good, return an empty array [].
+Respond ONLY with the JSON array, no other text.{{end}}
