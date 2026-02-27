@@ -1,0 +1,529 @@
+package api
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"strconv"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	ghpkg "github.com/acmeorg/argus/internal/github"
+	"github.com/acmeorg/argus/internal/pipeline"
+	"github.com/acmeorg/argus/internal/store"
+)
+
+type Server struct {
+	router        chi.Router
+	store         *store.Store
+	ghApp         *ghpkg.App
+	orchestrator  *pipeline.Orchestrator
+	webhookSecret []byte
+	logger        *slog.Logger
+}
+
+func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchestrator, webhookSecret string, corsOrigin string, logger *slog.Logger) *Server {
+	s := &Server{
+		store:         st,
+		ghApp:         ghApp,
+		orchestrator:  orchestrator,
+		webhookSecret: []byte(webhookSecret),
+		logger:        logger,
+	}
+
+	r := chi.NewRouter()
+	r.Use(middleware.RequestID)
+	r.Use(middleware.RealIP)
+	r.Use(middleware.Logger)
+	r.Use(middleware.Recoverer)
+	r.Use(middleware.Timeout(60 * time.Second))
+	if corsOrigin != "" {
+		r.Use(cors(corsOrigin))
+	}
+
+	// Health
+	r.Get("/healthz", s.healthz)
+	r.Get("/readyz", s.readyz)
+
+	// Webhooks (unauthenticated, signature-verified)
+	r.Post("/webhooks/github", s.handleWebhook)
+
+	// API v1 (authenticated via SuperTokens JWT)
+	r.Route("/api/v1", func(r chi.Router) {
+		r.Use(s.jwtAuth)
+
+		// Installations
+		r.Post("/installations", s.createInstallation)
+		r.Get("/installations", s.listInstallations)
+
+		// Repos
+		r.Get("/repos", s.listRepos)
+		r.Get("/repos/{repoID}", s.getRepo)
+		r.Patch("/repos/{repoID}", s.updateRepo)
+
+		// Model Config
+		r.Get("/repos/{repoID}/config", s.getModelConfigs)
+		r.Put("/repos/{repoID}/config/{stage}", s.upsertModelConfig)
+		r.Delete("/repos/{repoID}/config/{stage}", s.deleteModelConfig)
+
+		// Reviews
+		r.Get("/repos/{repoID}/reviews", s.listReviews)
+		r.Post("/repos/{repoID}/reviews", s.triggerReview)
+		r.Get("/reviews/{reviewID}", s.getReview)
+		r.Post("/reviews/{reviewID}/retry", s.retryReview)
+
+		// Rules
+		r.Get("/rules", s.listRules)
+		r.Post("/rules", s.createRule)
+		r.Put("/rules/{ruleID}", s.updateRule)
+		r.Delete("/rules/{ruleID}", s.deleteRule)
+
+		// Stats
+		r.Get("/stats", s.getStats)
+		r.Get("/activity", s.getActivity)
+	})
+
+	s.router = r
+	return s
+}
+
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.router.ServeHTTP(w, r)
+}
+
+// --- Health ---
+
+func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.Pool.Ping(r.Context()); err != nil {
+		s.logger.Error("readyz ping failed", "error", err)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not ready"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+}
+
+// --- Webhook ---
+
+func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
+	event, err := ghpkg.ParseWebhook(r, s.webhookSecret)
+	if err != nil {
+		s.logger.Error("webhook parse failed", "error", err)
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid webhook"})
+		return
+	}
+
+	switch event.Type {
+	case "pull_request":
+		prEvent, err := ghpkg.ToPREvent(event)
+		if err != nil {
+			s.logger.Error("parsing PR event", "error", err)
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		go func() {
+			if err := s.orchestrator.HandlePREvent(context.Background(), *prEvent); err != nil {
+				s.logger.Error("review pipeline failed", "error", err, "pr", prEvent.PRNumber)
+			}
+		}()
+
+	case "installation":
+		s.logger.Info("installation event", "action", event.Action)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "accepted"})
+}
+
+// --- Installations ---
+
+func (s *Server) createInstallation(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		InstallationID int64  `json:"installation_id"`
+		OrgLogin       string `json:"org_login"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	inst, err := s.store.CreateInstallation(r.Context(), body.InstallationID, body.OrgLogin)
+	if err != nil {
+		s.logger.Error("create installation", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create installation"})
+		return
+	}
+	writeJSON(w, http.StatusCreated, inst)
+}
+
+func (s *Server) listInstallations(w http.ResponseWriter, r *http.Request) {
+	list, err := s.store.ListInstallations(r.Context())
+	if err != nil {
+		s.logger.Error("list installations", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
+// --- Repos ---
+
+func (s *Server) listRepos(w http.ResponseWriter, r *http.Request) {
+	repos, err := s.store.ListRepos(r.Context())
+	if err != nil {
+		s.logger.Error("list repos", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, repos)
+}
+
+func (s *Server) getRepo(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "repoID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo id"})
+		return
+	}
+	repo, err := s.store.GetRepo(r.Context(), id)
+	if err != nil {
+		s.handleDBError(w, err, "repo not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, repo)
+}
+
+func (s *Server) updateRepo(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "repoID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo id"})
+		return
+	}
+	var body struct {
+		Enabled       *bool   `json:"enabled"`
+		DefaultBranch *string `json:"default_branch"`
+		SettingsJSON  []byte  `json:"settings_json"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	repo, err := s.store.UpdateRepo(r.Context(), id, body.Enabled, body.DefaultBranch, body.SettingsJSON)
+	if err != nil {
+		s.handleDBError(w, err, "repo not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, repo)
+}
+
+// --- Reviews ---
+
+func (s *Server) listReviews(w http.ResponseWriter, r *http.Request) {
+	repoID, err := strconv.ParseInt(chi.URLParam(r, "repoID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo id"})
+		return
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+
+	reviews, err := s.store.ListReviews(r.Context(), repoID, limit, offset)
+	if err != nil {
+		s.logger.Error("list reviews", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, reviews)
+}
+
+func (s *Server) triggerReview(w http.ResponseWriter, r *http.Request) {
+	repoID, err := strconv.ParseInt(chi.URLParam(r, "repoID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo id"})
+		return
+	}
+	var body struct {
+		PRNumber int `json:"pr_number"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.PRNumber == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "pr_number required"})
+		return
+	}
+
+	repo, err := s.store.GetRepo(r.Context(), repoID)
+	if err != nil {
+		s.handleDBError(w, err, "repo not found")
+		return
+	}
+
+	_ = s.store.LogActivity(r.Context(), "manual_review_triggered", "", repo.FullName, nil)
+
+	go func() {
+		if err := s.orchestrator.HandlePREvent(context.Background(), ghpkg.PREvent{
+			Action:       "manual",
+			RepoFullName: repo.FullName,
+			RepoID:       repo.GithubID,
+			PRNumber:     body.PRNumber,
+		}); err != nil {
+			s.logger.Error("manual review failed", "error", err, "repo", repo.FullName, "pr", body.PRNumber)
+		}
+	}()
+
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "triggered", "repo": repo.FullName, "pr_number": fmt.Sprintf("%d", body.PRNumber)})
+}
+
+func (s *Server) getReview(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "reviewID"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid review id"})
+		return
+	}
+	review, err := s.store.GetReview(r.Context(), id)
+	if err != nil {
+		s.handleDBError(w, err, "review not found")
+		return
+	}
+	comments, err := s.store.GetReviewComments(r.Context(), id)
+	if err != nil {
+		s.logger.Error("fetching review comments", "error", err, "review_id", id)
+		comments = nil
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"review":   review,
+		"comments": comments,
+	})
+}
+
+func (s *Server) retryReview(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "reviewID"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid review id"})
+		return
+	}
+	review, err := s.store.GetReview(r.Context(), id)
+	if err != nil {
+		s.handleDBError(w, err, "review not found")
+		return
+	}
+	if review.Status != "failed" {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "only failed reviews can be retried"})
+		return
+	}
+	if err := s.store.UpdateReviewStatus(r.Context(), id, "pending", ""); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "update failed"})
+		return
+	}
+
+	go func() {
+		if err := s.orchestrator.RetryReview(context.Background(), id); err != nil {
+			s.logger.Error("retry review failed", "error", err, "review_id", id)
+		}
+	}()
+
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "retrying", "review_id": id.String()})
+}
+
+// --- Model Config ---
+
+func (s *Server) getModelConfigs(w http.ResponseWriter, r *http.Request) {
+	repoID, err := strconv.ParseInt(chi.URLParam(r, "repoID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo id"})
+		return
+	}
+	configs, err := s.store.ListModelConfigs(r.Context(), repoID)
+	if err != nil {
+		s.logger.Error("list model configs", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, configs)
+}
+
+func (s *Server) upsertModelConfig(w http.ResponseWriter, r *http.Request) {
+	repoID, err := strconv.ParseInt(chi.URLParam(r, "repoID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo id"})
+		return
+	}
+	stage := chi.URLParam(r, "stage")
+	validStages := map[string]bool{"triage": true, "review": true, "synthesis": true, "embedding": true}
+	if !validStages[stage] {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "stage must be triage, review, synthesis, or embedding"})
+		return
+	}
+	var body struct {
+		Provider    string  `json:"provider"`
+		Model       string  `json:"model"`
+		BaseURL     *string `json:"base_url"`
+		MaxTokens   int     `json:"max_tokens"`
+		Temperature float32 `json:"temperature"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	if body.Provider == "" || body.Model == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "provider and model required"})
+		return
+	}
+	if body.MaxTokens <= 0 {
+		body.MaxTokens = 4096
+	}
+	cfg, err := s.store.UpsertModelConfig(r.Context(), repoID, stage, body.Provider, body.Model, body.BaseURL, body.MaxTokens, body.Temperature)
+	if err != nil {
+		s.logger.Error("upsert model config", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save config"})
+		return
+	}
+	writeJSON(w, http.StatusOK, cfg)
+}
+
+func (s *Server) deleteModelConfig(w http.ResponseWriter, r *http.Request) {
+	repoID, err := strconv.ParseInt(chi.URLParam(r, "repoID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo id"})
+		return
+	}
+	stage := chi.URLParam(r, "stage")
+	if err := s.store.DeleteModelConfig(r.Context(), repoID, stage); err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "config not found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// --- Rules ---
+
+func (s *Server) listRules(w http.ResponseWriter, r *http.Request) {
+	rules, err := s.store.ListRules(r.Context())
+	if err != nil {
+		s.logger.Error("list rules", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, rules)
+}
+
+func (s *Server) createRule(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Category string `json:"category"`
+		Content  string `json:"content"`
+		Priority int    `json:"priority"`
+		Enabled  *bool  `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	if body.Category == "" || body.Content == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "category and content required"})
+		return
+	}
+	enabled := true
+	if body.Enabled != nil {
+		enabled = *body.Enabled
+	}
+	rule, err := s.store.CreateRule(r.Context(), body.Category, body.Content, body.Priority, enabled)
+	if err != nil {
+		s.logger.Error("create rule", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create rule"})
+		return
+	}
+	_ = s.store.LogActivity(r.Context(), "rule_created", "", fmt.Sprintf("rule:%d", rule.ID), nil)
+	writeJSON(w, http.StatusCreated, rule)
+}
+
+func (s *Server) updateRule(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "ruleID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid rule id"})
+		return
+	}
+	var body struct {
+		Category *string `json:"category"`
+		Content  *string `json:"content"`
+		Priority *int    `json:"priority"`
+		Enabled  *bool   `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	rule, err := s.store.UpdateRule(r.Context(), id, body.Category, body.Content, body.Priority, body.Enabled)
+	if err != nil {
+		s.handleDBError(w, err, "rule not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, rule)
+}
+
+func (s *Server) deleteRule(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "ruleID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid rule id"})
+		return
+	}
+	if err := s.store.DeleteRule(r.Context(), id); err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "rule not found"})
+		return
+	}
+	_ = s.store.LogActivity(r.Context(), "rule_deleted", "", fmt.Sprintf("rule:%d", id), nil)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// --- Stats / Activity ---
+
+func (s *Server) getStats(w http.ResponseWriter, r *http.Request) {
+	stats, err := s.store.GetStats(r.Context())
+	if err != nil {
+		s.logger.Error("get stats", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, stats)
+}
+
+func (s *Server) getActivity(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	activity, err := s.store.ListActivity(r.Context(), limit)
+	if err != nil {
+		s.logger.Error("list activity", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, activity)
+}
+
+// --- Helpers ---
+
+func writeJSON(w http.ResponseWriter, status int, data any) {
+	buf := &bytes.Buffer{}
+	if err := json.NewEncoder(buf).Encode(data); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"failed to encode response"}`))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = w.Write(buf.Bytes())
+}
+
+// handleDBError distinguishes pgx.ErrNoRows (404) from other errors (500).
+func (s *Server) handleDBError(w http.ResponseWriter, err error, notFoundMsg string) {
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": notFoundMsg})
+		return
+	}
+	s.logger.Error("database error", "error", err)
+	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+}

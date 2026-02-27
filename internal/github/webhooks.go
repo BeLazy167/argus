@@ -1,0 +1,93 @@
+package github
+
+import (
+	"fmt"
+	"io"
+	"net/http"
+
+	gh "github.com/google/go-github/v68/github"
+)
+
+// WebhookEvent represents a parsed GitHub webhook event.
+type WebhookEvent struct {
+	Type    string
+	Action  string
+	Payload interface{}
+}
+
+// PREvent holds the parsed data from a pull_request webhook event.
+type PREvent struct {
+	Action         string
+	InstallationID int64
+	RepoFullName   string
+	RepoID         int64
+	PRNumber       int
+	PRTitle        string
+	PRAuthor       string
+	HeadSHA        string
+	BaseSHA        string
+	BaseRef        string
+	HeadRef        string
+}
+
+// ParseWebhook validates the webhook signature and parses the event.
+func ParseWebhook(r *http.Request, secret []byte) (*WebhookEvent, error) {
+	// Limit webhook body to 10MB to prevent abuse
+	const maxBodySize = 10 << 20
+	payload, err := io.ReadAll(io.LimitReader(r.Body, maxBodySize))
+	if err != nil {
+		return nil, fmt.Errorf("reading body: %w", err)
+	}
+	defer r.Body.Close()
+
+	if err := gh.ValidateSignature(r.Header.Get("X-Hub-Signature-256"), payload, secret); err != nil {
+		return nil, fmt.Errorf("invalid signature: %w", err)
+	}
+
+	eventType := r.Header.Get("X-GitHub-Event")
+	event, err := gh.ParseWebHook(eventType, payload)
+	if err != nil {
+		return nil, fmt.Errorf("parsing webhook: %w", err)
+	}
+
+	return &WebhookEvent{
+		Type:    eventType,
+		Action:  extractAction(event),
+		Payload: event,
+	}, nil
+}
+
+// ToPREvent converts a pull_request webhook payload to a PREvent.
+func ToPREvent(event *WebhookEvent) (*PREvent, error) {
+	prEvent, ok := event.Payload.(*gh.PullRequestEvent)
+	if !ok {
+		return nil, fmt.Errorf("expected PullRequestEvent, got %T", event.Payload)
+	}
+
+	return &PREvent{
+		Action:         event.Action,
+		InstallationID: prEvent.GetInstallation().GetID(),
+		RepoFullName:   prEvent.GetRepo().GetFullName(),
+		RepoID:         prEvent.GetRepo().GetID(),
+		PRNumber:       prEvent.GetPullRequest().GetNumber(),
+		PRTitle:        prEvent.GetPullRequest().GetTitle(),
+		PRAuthor:       prEvent.GetPullRequest().GetUser().GetLogin(),
+		HeadSHA:        prEvent.GetPullRequest().GetHead().GetSHA(),
+		BaseSHA:        prEvent.GetPullRequest().GetBase().GetSHA(),
+		BaseRef:        prEvent.GetPullRequest().GetBase().GetRef(),
+		HeadRef:        prEvent.GetPullRequest().GetHead().GetRef(),
+	}, nil
+}
+
+func extractAction(event interface{}) string {
+	switch e := event.(type) {
+	case *gh.PullRequestEvent:
+		return e.GetAction()
+	case *gh.InstallationEvent:
+		return e.GetAction()
+	case *gh.PullRequestReviewCommentEvent:
+		return e.GetAction()
+	default:
+		return ""
+	}
+}

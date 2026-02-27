@@ -1,0 +1,15 @@
+services:
+  argus:
+    build: .
+    ports:
+      - "${PORT:-8080}:8080"
+    env_file: .env
+    restart: unless-stopped
+
+  smee:
+    image: node:22-alpine
+    command: npx smee-client --url ${SMEE_URL:-https://smee.io/your-channel} --target http://argus:8080/webhooks/github
+    depends_on:
+      - argus
+    profiles:
+      - dev
