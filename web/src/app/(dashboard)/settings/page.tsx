@@ -1,13 +1,14 @@
 "use client";
 
 import { useState } from "react";
-import { Settings, ChevronDown, Loader2, Save } from "lucide-react";
-import { useRepos } from "@/lib/queries/repos";
+import { Settings, Loader2, Save } from "lucide-react";
 import {
   useModelConfigs,
   useUpsertModelConfig,
   useDeleteModelConfig,
 } from "@/lib/queries/model-configs";
+import { useActiveRepo } from "@/lib/hooks/use-active-repo";
+import { RepoSelect } from "@/components/dashboard/repo-select";
 
 const STAGES = ["triage", "review", "synthesis", "embedding"] as const;
 
@@ -138,17 +139,12 @@ function ConfigCard({
 }
 
 export default function SettingsPage() {
-  const { data: repos, isLoading: reposLoading } = useRepos();
-  const [selectedRepoId, setSelectedRepoId] = useState<number>(0);
-
-  const firstRepoId = repos?.[0]?.id ?? 0;
-  const activeRepoId = selectedRepoId || firstRepoId;
+  const { repos, activeId, setSelectedId, isLoading: reposLoading } = useActiveRepo();
 
   const { data: configs, isLoading: configsLoading } =
-    useModelConfigs(activeRepoId);
+    useModelConfigs(activeId);
 
-  const loading = reposLoading || (activeRepoId > 0 && configsLoading);
-
+  const loading = reposLoading || (activeId > 0 && configsLoading);
   const configMap = new Map(configs?.map((c) => [c.stage, c]));
 
   return (
@@ -162,29 +158,14 @@ export default function SettingsPage() {
             Configure which AI models Argus uses for each review stage.
           </p>
         </div>
-        {repos && repos.length > 0 && (
-          <div className="relative">
-            <select
-              value={activeRepoId}
-              onChange={(e) => setSelectedRepoId(Number(e.target.value))}
-              className="appearance-none rounded-md border border-iron bg-charcoal px-4 py-2 pr-8 text-xs font-mono text-foreground focus:border-amber focus:outline-none"
-            >
-              {repos.map((r) => (
-                <option key={r.id} value={r.id}>
-                  {r.full_name}
-                </option>
-              ))}
-            </select>
-            <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-text" />
-          </div>
-        )}
+        <RepoSelect repos={repos} value={activeId} onChange={setSelectedId} />
       </div>
 
       {loading ? (
         <div className="flex items-center justify-center py-20">
           <Loader2 className="h-6 w-6 animate-spin text-slate-text" />
         </div>
-      ) : activeRepoId === 0 ? (
+      ) : activeId === 0 ? (
         <div className="rounded-lg border border-iron bg-charcoal p-10 text-center">
           <Settings className="h-8 w-8 text-slate-text mx-auto mb-3" />
           <p className="text-xs font-mono text-slate-text">
@@ -197,7 +178,7 @@ export default function SettingsPage() {
             <ConfigCard
               key={stage}
               stage={stage}
-              repoId={activeRepoId}
+              repoId={activeId}
               existing={configMap.get(stage)}
             />
           ))}
