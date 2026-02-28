@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Syne, JetBrains_Mono } from "next/font/google";
+import { GeistSans } from "geist/font/sans";
 import { ClerkProvider } from "@clerk/nextjs";
 import { dark } from "@clerk/themes";
 import "./globals.css";
@@ -53,7 +54,7 @@ export default function RootLayout({
     >
       <html
         lang="en"
-        className={`${syne.variable} ${jetbrains.variable} dark`}
+        className={`${syne.variable} ${jetbrains.variable} ${GeistSans.variable} dark`}
         suppressHydrationWarning
       >
         <body className="min-h-screen bg-background font-mono antialiased">

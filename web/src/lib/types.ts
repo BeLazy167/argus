@@ -18,6 +18,19 @@ export type Repo = {
   updated_at: string;
 };
 
+export type StageTokens = {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  cost?: number;
+};
+
+export type TokenUsage = {
+  triage: StageTokens;
+  review: StageTokens[];
+  total: StageTokens;
+};
+
 export type Review = {
   id: string;
   repo_id: number;
@@ -33,6 +46,7 @@ export type Review = {
   trigger: string;
   triggered_by?: string;
   duration_ms?: number;
+  token_usage?: TokenUsage;
   error?: string;
   created_at: string;
   completed_at?: string;
@@ -48,7 +62,20 @@ export type ReviewComment = {
   body: string;
   severity?: "critical" | "warning" | "suggestion" | "praise";
   category?: string;
+  code_snippet?: string;
+  github_comment_id?: number;
   created_at: string;
+};
+
+export type ProviderKey = {
+  id: number;
+  installation_id: number;
+  provider: string;
+  api_key_masked: string;
+  base_url?: string;
+  repo_id?: number;
+  created_at: string;
+  updated_at: string;
 };
 
 export type Rule = {

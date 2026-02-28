@@ -18,9 +18,14 @@ import { githubPrUrl } from "@/lib/github";
 import { ScoreBadge } from "@/components/dashboard/score-badge";
 import { StatusBadge } from "@/components/dashboard/status-badge";
 import { RepoSelect } from "@/components/dashboard/repo-select";
-import type { Review } from "@/lib/types";
+import type { Review, TokenUsage } from "@/lib/types";
 
 const PAGE_SIZE = 20;
+
+function formatTokens(t: TokenUsage): string {
+  const k = t.total.total_tokens / 1000;
+  return k >= 1 ? `${k.toFixed(1)}k` : String(t.total.total_tokens);
+}
 
 function ReviewRow({
   review,
@@ -54,6 +59,14 @@ function ReviewRow({
         </div>
       </div>
       <div className="flex items-center gap-3">
+        {review.token_usage && (
+          <span className="text-[10px] font-mono text-slate-text">
+            {formatTokens(review.token_usage)}
+            {review.token_usage.total.cost != null && (
+              <> &middot; ${review.token_usage.total.cost.toFixed(3)}</>
+            )}
+          </span>
+        )}
         <StatusBadge status={review.status} />
         {review.status === "failed" && (
           <button

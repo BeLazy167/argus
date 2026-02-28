@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -103,7 +104,7 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 	var isIncremental bool
 	var previousReviewID *uuid.UUID
 	if event.Action == "synchronize" {
-		prev, err := o.st.GetLastCompletedReview(ctx, event.RepoID, event.PRNumber)
+		prev, err := o.st.GetLastCompletedReview(ctx, dbRepo.ID, event.PRNumber)
 		if err == nil && prev != nil {
 			// Fetch inter-diff: changes since last reviewed commit
 			interDiff, err := o.ghClient.GetCompareCommitsDiff(ctx, event.InstallationID, owner, repo, prev.HeadSHA, event.HeadSHA)
@@ -231,11 +232,17 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		return fmt.Errorf("posting review: %w", err)
 	}
 
+	// Serialize token usage
+	var tokenUsageJSON []byte
+	if run.Tokens.Total.TotalTokens > 0 {
+		tokenUsageJSON, _ = json.Marshal(run.Tokens)
+	}
+
 	// Update review record
 	_, err = o.db.Exec(ctx, `
-		UPDATE reviews SET status = 'completed', github_review_id = $1, summary = $2, score = $3, completed_at = NOW()
-		WHERE id = $4
-	`, ghReviewID, run.Synthesis.Summary, run.Synthesis.Score, run.ReviewID)
+		UPDATE reviews SET status = 'completed', github_review_id = $1, summary = $2, score = $3, token_usage = $4, completed_at = NOW()
+		WHERE id = $5
+	`, ghReviewID, run.Synthesis.Summary, run.Synthesis.Score, tokenUsageJSON, run.ReviewID)
 	if err != nil {
 		return fmt.Errorf("updating review record: %w", err)
 	}
@@ -243,17 +250,36 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	o.logger.Info("posted review", "github_review_id", ghReviewID, "pr", run.PREvent.PRNumber)
 
 	// Persist comments to DB + index in Supermemory (fire-and-forget)
-	o.indexComments(ctx, run)
+	o.indexComments(ctx, run, ghReviewID)
 
 	return nil
 }
 
-func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun) {
+func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghReviewID int64) {
 	owner, repo, err := splitRepoFullName(run.PREvent.RepoFullName)
 	if err != nil {
 		o.logger.Error("invalid repo name in indexComments", "error", err)
 		return
 	}
+
+	// Fetch GitHub comment IDs for the review we just posted
+	type ghCommentKey struct {
+		Path string
+		Line int
+	}
+	ghCommentIDs := make(map[ghCommentKey]int64)
+	if ghReviewID > 0 && run.PREvent.InstallationID > 0 {
+		ghComments, err := o.ghClient.ListReviewComments(ctx, run.PREvent.InstallationID, owner, repo, run.PREvent.PRNumber, ghReviewID)
+		if err != nil {
+			o.logger.Error("listing review comments from github", "error", err)
+		} else {
+			for _, gc := range ghComments {
+				key := ghCommentKey{Path: gc.GetPath(), Line: gc.GetLine()}
+				ghCommentIDs[key] = gc.GetID()
+			}
+		}
+	}
+
 	side := "RIGHT"
 	for _, fr := range run.FileReviews {
 		for _, c := range fr.Comments {
@@ -265,7 +291,17 @@ func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun) {
 				startLine = &c.StartLine
 			}
 
-			if err := o.st.CreateReviewComment(ctx, run.ReviewID, fr.Path, startLine, &line, &side, c.Body, &sev, &cat); err != nil {
+			var snippet *string
+			if c.CodeSnippet != "" {
+				snippet = &c.CodeSnippet
+			}
+
+			var ghCommentID *int64
+			if id, ok := ghCommentIDs[ghCommentKey{Path: fr.Path, Line: c.Line}]; ok {
+				ghCommentID = &id
+			}
+
+			if err := o.st.CreateReviewComment(ctx, run.ReviewID, fr.Path, startLine, &line, &side, c.Body, &sev, &cat, snippet, ghCommentID); err != nil {
 				o.logger.Error("persisting review comment", "error", err, "file", fr.Path)
 			}
 

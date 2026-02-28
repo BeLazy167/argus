@@ -79,6 +79,80 @@ func ToPREvent(event *WebhookEvent) (*PREvent, error) {
 	}, nil
 }
 
+// CommentEvent holds parsed data from a pull_request_review_comment webhook event.
+type CommentEvent struct {
+	Action         string
+	InstallationID int64
+	RepoFullName   string
+	RepoID         int64
+	PRNumber       int
+	CommentID      int64
+	InReplyToID    int64
+	CommentBody    string
+	CommentAuthor  string
+	FilePath       string
+	DiffHunk       string
+	CommitID       string
+}
+
+// ToCommentEvent converts a pull_request_review_comment webhook payload to a CommentEvent.
+func ToCommentEvent(event *WebhookEvent) (*CommentEvent, error) {
+	e, ok := event.Payload.(*gh.PullRequestReviewCommentEvent)
+	if !ok {
+		return nil, fmt.Errorf("expected PullRequestReviewCommentEvent, got %T", event.Payload)
+	}
+
+	c := e.GetComment()
+	return &CommentEvent{
+		Action:         event.Action,
+		InstallationID: e.GetInstallation().GetID(),
+		RepoFullName:   e.GetRepo().GetFullName(),
+		RepoID:         e.GetRepo().GetID(),
+		PRNumber:       e.GetPullRequest().GetNumber(),
+		CommentID:      c.GetID(),
+		InReplyToID:    c.GetInReplyTo(),
+		CommentBody:    c.GetBody(),
+		CommentAuthor:  c.GetUser().GetLogin(),
+		FilePath:       c.GetPath(),
+		DiffHunk:       c.GetDiffHunk(),
+		CommitID:       c.GetCommitID(),
+	}, nil
+}
+
+// IssueCommentEvent holds parsed data from an issue_comment webhook event (on a PR).
+type IssueCommentEvent struct {
+	Action         string
+	InstallationID int64
+	RepoFullName   string
+	RepoID         int64
+	PRNumber       int
+	CommentID      int64
+	CommentBody    string
+	CommentAuthor  string
+}
+
+// ToIssueCommentEvent converts an issue_comment webhook payload to an IssueCommentEvent.
+// Returns nil if the comment is not on a pull request.
+func ToIssueCommentEvent(event *WebhookEvent) (*IssueCommentEvent, error) {
+	e, ok := event.Payload.(*gh.IssueCommentEvent)
+	if !ok {
+		return nil, fmt.Errorf("expected IssueCommentEvent, got %T", event.Payload)
+	}
+	if !e.GetIssue().IsPullRequest() {
+		return nil, nil
+	}
+	return &IssueCommentEvent{
+		Action:         event.Action,
+		InstallationID: e.GetInstallation().GetID(),
+		RepoFullName:   e.GetRepo().GetFullName(),
+		RepoID:         e.GetRepo().GetID(),
+		PRNumber:       e.GetIssue().GetNumber(),
+		CommentID:      e.GetComment().GetID(),
+		CommentBody:    e.GetComment().GetBody(),
+		CommentAuthor:  e.GetComment().GetUser().GetLogin(),
+	}, nil
+}
+
 func extractAction(event interface{}) string {
 	switch e := event.(type) {
 	case *gh.PullRequestEvent:
@@ -86,6 +160,8 @@ func extractAction(event interface{}) string {
 	case *gh.InstallationEvent:
 		return e.GetAction()
 	case *gh.PullRequestReviewCommentEvent:
+		return e.GetAction()
+	case *gh.IssueCommentEvent:
 		return e.GetAction()
 	default:
 		return ""

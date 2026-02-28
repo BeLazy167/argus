@@ -66,6 +66,7 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 
 	type result struct {
 		review FileReview
+		tokens StageTokens
 		err    error
 	}
 
@@ -85,8 +86,8 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 		go func() {
 			defer wg.Done()
 			for file := range fileCh {
-				review, err := rs.reviewFile(ctx, run, file)
-				resultCh <- result{review: review, err: err}
+				review, tokens, err := rs.reviewFile(ctx, run, file)
+				resultCh <- result{review: review, tokens: tokens, err: err}
 				select {
 				case <-time.After(2 * time.Second):
 				case <-ctx.Done():
@@ -112,8 +113,12 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 			firstErr = fmt.Errorf("reviewing file %s: %w", r.review.Path, r.err)
 			cancel()
 		}
-		if firstErr == nil && len(r.review.Comments) > 0 {
-			run.FileReviews = append(run.FileReviews, r.review)
+		if firstErr == nil {
+			run.Tokens.Review = append(run.Tokens.Review, r.tokens)
+			run.Tokens.addToTotal(r.tokens)
+			if len(r.review.Comments) > 0 {
+				run.FileReviews = append(run.FileReviews, r.review)
+			}
 		}
 	}
 	return firstErr
@@ -128,22 +133,24 @@ func truncateDiff(f diff.FileDiff, maxLines int) diff.FileDiff {
 	return f
 }
 
-func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, file diff.FileDiff) (FileReview, error) {
+func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, file diff.FileDiff) (FileReview, StageTokens, error) {
 	review := FileReview{Path: file.NewName}
+	var tokens StageTokens
+	tokens.File = file.NewName
 
 	var repoConfigs []llm.ModelConfig
 	if dbConfigs, err := rs.store.ListModelConfigs(ctx, run.PREvent.RepoID); err == nil {
 		repoConfigs = storeToLLMConfigs(dbConfigs)
 	}
 	cfg := rs.registry.GetConfig(run.PREvent.RepoID, llm.StageReview, repoConfigs)
-	provider, err := rs.registry.GetProvider(cfg.Provider)
+	provider, err := rs.registry.GetProviderForRepo(ctx, run.PREvent.InstallationID, &run.PREvent.RepoID, cfg.Provider)
 	if err != nil {
-		return review, err
+		return review, tokens, err
 	}
 
 	owner, repo, err := splitRepoFullName(run.PREvent.RepoFullName)
 	if err != nil {
-		return review, err
+		return review, tokens, err
 	}
 	prompt := buildFileReviewPrompt(run, file)
 	messages := []llm.Message{{Role: "user", Content: prompt}}
@@ -168,22 +175,28 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, file di
 			Tools:       tools,
 		})
 		if err != nil {
-			return review, fmt.Errorf("LLM completion: %w", err)
+			return review, tokens, fmt.Errorf("LLM completion: %w", err)
 		}
+
+		// Accumulate tokens from this iteration
+		tokens.PromptTokens += resp.TokensUsed.PromptTokens
+		tokens.CompletionTokens += resp.TokensUsed.CompletionTokens
+		tokens.TotalTokens += resp.TokensUsed.TotalTokens
+		tokens.Cost += resp.Cost
 
 		// If no tool calls, we have the final response
 		if len(resp.ToolCalls) == 0 {
 			comments, err := parseReviewResponse(resp.Content)
 			if err != nil {
-				return review, fmt.Errorf("parsing response: %w", err)
+				return review, tokens, fmt.Errorf("parsing response: %w", err)
 			}
 			review.Comments = validateComments(comments)
-			return review, nil
+			return review, tokens, nil
 		}
 
 		// Guard: if LLM returns tool calls but no handler is available
 		if toolHandler == nil {
-			return review, fmt.Errorf("LLM requested tools but memory is not configured")
+			return review, tokens, fmt.Errorf("LLM requested tools but memory is not configured")
 		}
 
 		// Process tool calls
@@ -206,7 +219,7 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, file di
 		}
 	}
 
-	return review, fmt.Errorf("exceeded max tool iterations (%d) for %s", rs.maxToolIter, file.NewName)
+	return review, tokens, fmt.Errorf("exceeded max tool iterations (%d) for %s", rs.maxToolIter, file.NewName)
 }
 
 func buildFileReviewPrompt(run *PipelineRun, file diff.FileDiff) string {
@@ -224,6 +237,10 @@ Respond with a JSON array of comments. Each comment must have:
 - "body": string, the review comment in markdown
 - "severity": one of "critical", "warning", "suggestion", "praise"
 - "category": one of "security", "performance", "style", "bug", "readability", "error_handling", "type_design", "testing"
+- "code_snippet": string, the exact 3-10 lines of source code this comment references, preserving original indentation. Include enough context for a reader to understand the issue without seeing the full file.
+
+Example:
+[{"line": 42, "start_line": 0, "body": "Potential nil dereference", "severity": "critical", "category": "bug", "code_snippet": "    val := getResult()\n    fmt.Println(val.Name)"}]
 
 Only comment on meaningful issues with high confidence. Return [] if the changes look good.
 JSON array only, no other text.`, file.RawDiff))

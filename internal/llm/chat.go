@@ -96,6 +96,7 @@ func (p *ChatProvider) Complete(ctx context.Context, req CompletionRequest) (Com
 			CompletionTokens: result.Usage.CompletionTokens,
 			TotalTokens:      result.Usage.TotalTokens,
 		},
+		Cost:         result.Usage.Cost,
 		ToolCalls:    result.Choices[0].Message.ToolCalls,
 		FinishReason: result.Choices[0].FinishReason,
 	}, nil
@@ -126,8 +127,9 @@ type chatResponse struct {
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
 	Usage struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
-		TotalTokens      int `json:"total_tokens"`
+		PromptTokens     int     `json:"prompt_tokens"`
+		CompletionTokens int     `json:"completion_tokens"`
+		TotalTokens      int     `json:"total_tokens"`
+		Cost             float64 `json:"cost"`
 	} `json:"usage"`
 }
