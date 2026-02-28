@@ -83,6 +83,11 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		return fmt.Errorf("upserting repo: %w", err)
 	}
 
+	if !dbRepo.Enabled {
+		o.logger.Info("skipping disabled repo", "repo", event.RepoFullName)
+		return nil
+	}
+
 	// Fetch diff
 	rawDiff, err := o.ghClient.GetPRDiff(ctx, event.InstallationID, owner, repo, event.PRNumber)
 	if err != nil {
