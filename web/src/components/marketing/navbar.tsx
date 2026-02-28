@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
 import { SignedIn, SignedOut } from "@clerk/nextjs";
 
@@ -13,7 +13,7 @@ const navLinks = [
 export function Navbar() {
   const [scrolled, setScrolled] = useState(false);
   const [hidden, setHidden] = useState(false);
-  const [lastY, setLastY] = useState(0);
+  const lastYRef = useRef(0);
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
   const [pillStyle, setPillStyle] = useState<{
     left: number;
@@ -29,21 +29,21 @@ export function Navbar() {
       requestAnimationFrame(() => {
         const y = window.scrollY;
         setScrolled(y > 20);
-        setHidden(y > 100 && y > lastY);
-        setLastY(y);
+        setHidden(y > 100 && y > lastYRef.current);
+        lastYRef.current = y;
         ticking = false;
       });
     };
     window.addEventListener("scroll", onScroll, { passive: true });
     return () => window.removeEventListener("scroll", onScroll);
-  }, [lastY]);
+  }, []);
 
   const handleMouseEnter = useCallback(
     (e: React.MouseEvent<HTMLAnchorElement>, idx: number) => {
       const rect = e.currentTarget.getBoundingClientRect();
-      const nav = e.currentTarget.closest("nav")!.getBoundingClientRect();
+      const parent = e.currentTarget.parentElement!.getBoundingClientRect();
       setPillStyle({
-        left: rect.left - nav.left - 8,
+        left: rect.left - parent.left - 8,
         width: rect.width + 16,
         opacity: 1,
       });
