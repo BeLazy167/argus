@@ -7,9 +7,39 @@ export default function BlogPage() {
       <h1 className="font-display text-4xl font-bold text-foreground mb-6">
         Engineering Log
       </h1>
-      <p className="text-sm text-slate-text">
-        No posts yet. We ship code, not blog posts.
+      <p className="text-sm text-slate-text mb-10 max-w-md">
+        We&apos;re heads-down building. Posts are coming. Subscribe to get
+        notified when we publish.
       </p>
+
+      <div className="rounded-lg border border-iron bg-charcoal p-6 max-w-md">
+        <p className="text-xs font-mono text-foreground mb-4">
+          Get notified on new posts and product updates.
+        </p>
+        <form
+          action="https://buttondown.com/api/emails/embed-subscribe/argus"
+          method="post"
+          target="_blank"
+          className="flex gap-2"
+        >
+          <input
+            type="email"
+            name="email"
+            placeholder="you@company.com"
+            required
+            className="flex-1 rounded-md border border-iron bg-background px-3 py-2 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none"
+          />
+          <button
+            type="submit"
+            className="rounded-md bg-amber px-5 py-2 text-xs font-mono font-medium text-void hover:brightness-110 transition-all shrink-0"
+          >
+            Subscribe
+          </button>
+        </form>
+        <p className="text-[10px] font-mono text-iron mt-3">
+          No spam. Unsubscribe anytime.
+        </p>
+      </div>
     </section>
   );
 }

@@ -116,7 +116,7 @@ export default function DashboardLayout({
           </aside>
 
           {/* Main content */}
-          <main className="flex-1 overflow-y-auto bg-background bg-noise">
+          <main className="flex-1 overflow-y-auto scroll-smooth bg-background bg-noise">
             <div className="mx-auto max-w-6xl px-8 py-8">{children}</div>
           </main>
         </div>

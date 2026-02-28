@@ -51,6 +51,7 @@ type Message struct {
 type CompletionResponse struct {
 	Content      string
 	TokensUsed   TokenUsage
+	Cost         float64
 	ToolCalls    []ToolCall
 	FinishReason string
 }

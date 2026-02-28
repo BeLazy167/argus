@@ -36,6 +36,22 @@ const (
 	CategoryTesting       Category = "testing"
 )
 
+// RunTokenUsage tracks token consumption and cost across pipeline stages.
+type RunTokenUsage struct {
+	Triage StageTokens   `json:"triage"`
+	Review []StageTokens `json:"review"`
+	Total  StageTokens   `json:"total"`
+}
+
+// StageTokens holds token counts and cost for a single LLM call or stage aggregate.
+type StageTokens struct {
+	PromptTokens     int     `json:"prompt_tokens"`
+	CompletionTokens int     `json:"completion_tokens"`
+	TotalTokens      int     `json:"total_tokens"`
+	Cost             float64 `json:"cost"`
+	File             string  `json:"file,omitempty"`
+}
+
 // PipelineRun tracks the state and intermediate results of a single review.
 type PipelineRun struct {
 	ID               uuid.UUID
@@ -47,6 +63,7 @@ type PipelineRun struct {
 	TriageResults    []TriageResult
 	FileReviews      []FileReview
 	Synthesis        *SynthesisResult
+	Tokens           RunTokenUsage
 	IsIncremental    bool
 	PreviousReviewID *uuid.UUID
 	Error            string
@@ -66,7 +83,8 @@ type FileComment struct {
 	StartLine int      `json:"start_line"`
 	Body      string   `json:"body"`
 	Severity  Severity `json:"severity"`
-	Category  Category `json:"category"`
+	Category    Category `json:"category"`
+	CodeSnippet string   `json:"code_snippet,omitempty"`
 }
 
 // ValidSeverities is the set of valid severity values.
@@ -89,6 +107,14 @@ type SynthesisResult struct {
 
 // StageFunc is a function that executes a single pipeline stage.
 type StageFunc func(ctx context.Context, run *PipelineRun) error
+
+// addToTotal accumulates stage tokens into the total.
+func (r *RunTokenUsage) addToTotal(s StageTokens) {
+	r.Total.PromptTokens += s.PromptTokens
+	r.Total.CompletionTokens += s.CompletionTokens
+	r.Total.TotalTokens += s.TotalTokens
+	r.Total.Cost += s.Cost
+}
 
 // unmarshalLLMArray parses a JSON array from LLM output, handling markdown code fences.
 func unmarshalLLMArray[T any](content string) ([]T, error) {

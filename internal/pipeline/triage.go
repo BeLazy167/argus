@@ -48,7 +48,7 @@ func (ts *TriageStage) Execute(ctx context.Context, run *PipelineRun) error {
 	}
 
 	cfg := ts.registry.GetConfig(run.PREvent.RepoID, llm.StageTriage, repoConfigs)
-	provider, err := ts.registry.GetProvider(cfg.Provider)
+	provider, err := ts.registry.GetProviderForRepo(ctx, run.PREvent.InstallationID, &run.PREvent.RepoID, cfg.Provider)
 	if err != nil {
 		return fmt.Errorf("triage provider: %w", err)
 	}
@@ -71,6 +71,16 @@ func (ts *TriageStage) Execute(ctx context.Context, run *PipelineRun) error {
 	}
 
 	run.TriageResults = results
+
+	// Accumulate triage token usage
+	run.Tokens.Triage = StageTokens{
+		PromptTokens:     resp.TokensUsed.PromptTokens,
+		CompletionTokens: resp.TokensUsed.CompletionTokens,
+		TotalTokens:      resp.TokensUsed.TotalTokens,
+		Cost:             resp.Cost,
+	}
+	run.Tokens.addToTotal(run.Tokens.Triage)
+
 	return nil
 }
 

@@ -30,6 +30,9 @@ type Config struct {
 	DefaultReviewModel string
 	DefaultTriageModel string
 
+	// Encryption
+	EncryptionKey string
+
 	// Supermemory
 	SupermemoryAPIKey string
 
@@ -82,6 +85,8 @@ func Load() (*Config, error) {
 		LLMBaseURL:         getEnv("LLM_BASE_URL", "https://openrouter.ai/api/v1"),
 		DefaultReviewModel: getEnv("DEFAULT_REVIEW_MODEL", "anthropic/claude-sonnet-4-20250514"),
 		DefaultTriageModel: getEnv("DEFAULT_TRIAGE_MODEL", "openai/gpt-4o-mini"),
+
+		EncryptionKey: os.Getenv("ENCRYPTION_KEY"),
 
 		SupermemoryAPIKey: os.Getenv("SUPERMEMORY_API_KEY"),
 

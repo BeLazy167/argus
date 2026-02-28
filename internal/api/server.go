@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -25,15 +27,17 @@ type Server struct {
 	store         *store.Store
 	ghApp         *ghpkg.App
 	orchestrator  *pipeline.Orchestrator
+	replyAnalyzer *pipeline.ReplyAnalyzer
 	webhookSecret []byte
 	logger        *slog.Logger
 }
 
-func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchestrator, webhookSecret string, corsOrigin string, logger *slog.Logger) *Server {
+func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchestrator, replyAnalyzer *pipeline.ReplyAnalyzer, webhookSecret string, corsOrigin string, logger *slog.Logger) *Server {
 	s := &Server{
 		store:         st,
 		ghApp:         ghApp,
 		orchestrator:  orchestrator,
+		replyAnalyzer: replyAnalyzer,
 		webhookSecret: []byte(webhookSecret),
 		logger:        logger,
 	}
@@ -74,6 +78,11 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 			r.Get("/repos", s.listRepos)
 			r.Get("/repos/{repoID}", s.getRepo)
 			r.Patch("/repos/{repoID}", s.updateRepo)
+
+			// Provider Keys
+			r.Get("/installations/{installationID}/provider-keys", s.listProviderKeys)
+			r.Put("/installations/{installationID}/provider-keys", s.upsertProviderKey)
+			r.Delete("/installations/{installationID}/provider-keys/{keyID}", s.deleteProviderKey)
 
 			// Model Config
 			r.Get("/repos/{repoID}/config", s.getModelConfigs)
@@ -144,6 +153,39 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 				s.logger.Error("review pipeline failed", "error", err, "pr", prEvent.PRNumber)
 			}
 		}()
+
+	case "pull_request_review_comment":
+		if event.Action == "created" && s.replyAnalyzer != nil {
+			commentEvent, err := ghpkg.ToCommentEvent(event)
+			if err != nil {
+				s.logger.Error("parsing comment event", "error", err)
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+				return
+			}
+			if strings.HasSuffix(commentEvent.CommentAuthor, "[bot]") {
+				break
+			}
+			if commentEvent.InReplyToID > 0 {
+				go func() {
+					if err := s.replyAnalyzer.Analyze(context.Background(), *commentEvent); err != nil {
+						s.logger.Error("reply analysis failed", "error", err, "comment_id", commentEvent.CommentID)
+					}
+				}()
+			}
+		}
+
+	case "issue_comment":
+		if event.Action == "created" {
+			issueEvent, err := ghpkg.ToIssueCommentEvent(event)
+			if err != nil {
+				s.logger.Error("parsing issue comment event", "error", err)
+				break
+			}
+			if issueEvent == nil || strings.HasSuffix(issueEvent.CommentAuthor, "[bot]") {
+				break
+			}
+			go s.handleReviewCommand(context.Background(), *issueEvent)
+		}
 
 	case "installation":
 		s.logger.Info("installation event", "action", event.Action)
@@ -292,14 +334,22 @@ func (s *Server) triggerReview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	inst, err := s.store.GetInstallation(r.Context(), repo.InstallationID)
+	if err != nil {
+		s.logger.Error("lookup installation for manual review", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "installation not found"})
+		return
+	}
+
 	_ = s.store.LogActivity(r.Context(), "manual_review_triggered", "", repo.FullName, nil)
 
 	go func() {
 		if err := s.orchestrator.HandlePREvent(context.Background(), ghpkg.PREvent{
-			Action:       "manual",
-			RepoFullName: repo.FullName,
-			RepoID:       repo.GithubID,
-			PRNumber:     body.PRNumber,
+			Action:         "manual",
+			InstallationID: inst.InstallationID,
+			RepoFullName:   repo.FullName,
+			RepoID:         repo.GithubID,
+			PRNumber:       body.PRNumber,
 		}); err != nil {
 			s.logger.Error("manual review failed", "error", err, "repo", repo.FullName, "pr", body.PRNumber)
 		}
@@ -534,6 +584,192 @@ func (s *Server) getActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, activity)
+}
+
+// --- Provider Keys ---
+
+func (s *Server) listProviderKeys(w http.ResponseWriter, r *http.Request) {
+	installationID, err := strconv.ParseInt(chi.URLParam(r, "installationID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid installation id"})
+		return
+	}
+	// Verify user has access to this installation
+	ids := getInstallationIDs(r.Context())
+	if !containsID(ids, installationID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "access denied"})
+		return
+	}
+	keys, err := s.store.ListProviderKeys(r.Context(), installationID)
+	if err != nil {
+		s.logger.Error("list provider keys", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
+		return
+	}
+	// Mask keys — show only last 4 chars
+	type maskedKey struct {
+		ID             int64   `json:"id"`
+		InstallationID int64   `json:"installation_id"`
+		RepoID         *int64  `json:"repo_id,omitempty"`
+		Provider       string  `json:"provider"`
+		APIKeyMasked   string  `json:"api_key_masked"`
+		BaseURL        *string `json:"base_url,omitempty"`
+		CreatedAt      string  `json:"created_at"`
+		UpdatedAt      string  `json:"updated_at"`
+	}
+	result := make([]maskedKey, len(keys))
+	for i, k := range keys {
+		result[i] = maskedKey{
+			ID:             k.ID,
+			InstallationID: k.InstallationID,
+			RepoID:         k.RepoID,
+			Provider:       k.Provider,
+			APIKeyMasked:   maskKey(k.APIKeyEnc),
+			BaseURL:        k.BaseURL,
+			CreatedAt:      k.CreatedAt.Format("2006-01-02T15:04:05Z"),
+			UpdatedAt:      k.UpdatedAt.Format("2006-01-02T15:04:05Z"),
+		}
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) upsertProviderKey(w http.ResponseWriter, r *http.Request) {
+	installationID, err := strconv.ParseInt(chi.URLParam(r, "installationID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid installation id"})
+		return
+	}
+	ids := getInstallationIDs(r.Context())
+	if !containsID(ids, installationID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "access denied"})
+		return
+	}
+	var body struct {
+		RepoID   *int64  `json:"repo_id"`
+		Provider string  `json:"provider"`
+		APIKey   string  `json:"api_key"`
+		BaseURL  *string `json:"base_url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	if body.Provider == "" || body.APIKey == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "provider and api_key required"})
+		return
+	}
+	pk, err := s.store.UpsertProviderKey(r.Context(), installationID, body.RepoID, body.Provider, body.APIKey, body.BaseURL)
+	if err != nil {
+		s.logger.Error("upsert provider key", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save key"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":              pk.ID,
+		"installation_id": pk.InstallationID,
+		"repo_id":         pk.RepoID,
+		"provider":        pk.Provider,
+		"api_key_masked":  maskKey(pk.APIKeyEnc),
+		"base_url":        pk.BaseURL,
+	})
+}
+
+func (s *Server) deleteProviderKey(w http.ResponseWriter, r *http.Request) {
+	installationID, err := strconv.ParseInt(chi.URLParam(r, "installationID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid installation id"})
+		return
+	}
+	ids := getInstallationIDs(r.Context())
+	if !containsID(ids, installationID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "access denied"})
+		return
+	}
+	keyID, err := strconv.ParseInt(chi.URLParam(r, "keyID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid key id"})
+		return
+	}
+	if err := s.store.DeleteProviderKey(r.Context(), keyID, installationID); err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "key not found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+func containsID(ids []int64, target int64) bool {
+	for _, id := range ids {
+		if id == target {
+			return true
+		}
+	}
+	return false
+}
+
+// maskKey decrypts an encrypted key and returns masked version (last 4 chars).
+func maskKey(encKey string) string {
+	// We use the encrypted value length to derive a mask — don't decrypt for listing.
+	// Just show a static mask since we can't safely show any of the real key.
+	if len(encKey) > 0 {
+		return "sk-...****"
+	}
+	return ""
+}
+
+// --- Review Command (comment trigger) ---
+
+var reviewCmdRe = regexp.MustCompile(`(?i)@argus-eye\s+review(\s+--force)?`)
+
+func (s *Server) handleReviewCommand(ctx context.Context, evt ghpkg.IssueCommentEvent) {
+	match := reviewCmdRe.FindStringSubmatch(evt.CommentBody)
+	if match == nil {
+		return
+	}
+	force := strings.TrimSpace(match[1]) == "--force"
+
+	parts := strings.SplitN(evt.RepoFullName, "/", 2)
+	if len(parts) != 2 {
+		return
+	}
+	owner, repo := parts[0], parts[1]
+	ghClient := ghpkg.NewClient(s.ghApp)
+
+	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "eyes")
+
+	prEvent, err := ghClient.GetPullRequest(ctx, evt.InstallationID, owner, repo, evt.PRNumber)
+	if err != nil {
+		s.logger.Error("review command: fetch PR failed", "error", err, "pr", evt.PRNumber)
+		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
+		return
+	}
+
+	if !force {
+		existing, err := s.store.GetLatestReviewBySHA(ctx, evt.RepoFullName, evt.PRNumber, prEvent.HeadSHA)
+		if err == nil && existing != nil {
+			short := prEvent.HeadSHA
+			if len(short) > 7 {
+				short = short[:7]
+			}
+			body := fmt.Sprintf("Already reviewed at `%s`. Use `@argus-eye review --force` to re-review.", short)
+			_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber, body)
+			_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "rocket")
+			return
+		}
+	}
+
+	prEvent.Action = "manual"
+	prEvent.RepoID = evt.RepoID
+	s.logger.Info("review command triggered", "repo", evt.RepoFullName, "pr", evt.PRNumber, "force", force, "by", evt.CommentAuthor)
+
+	if err := s.orchestrator.HandlePREvent(ctx, *prEvent); err != nil {
+		s.logger.Error("review command: pipeline failed", "error", err, "pr", evt.PRNumber)
+		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
+		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
+			"Review failed. Check the Argus dashboard for details.")
+		return
+	}
+
+	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "rocket")
 }
 
 // --- Helpers ---

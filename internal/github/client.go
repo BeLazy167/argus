@@ -108,6 +108,86 @@ func (c *Client) GetCompareCommitsDiff(ctx context.Context, installationID int64
 	return diffStr, nil
 }
 
+// ListReviewComments returns all comments for a specific review, used to capture github_comment_ids after posting.
+func (c *Client) ListReviewComments(ctx context.Context, installationID int64, owner, repo string, prNumber int, reviewID int64) ([]*gh.PullRequestComment, error) {
+	client, err := c.app.ClientForInstallation(installationID)
+	if err != nil {
+		return nil, err
+	}
+
+	var all []*gh.PullRequestComment
+	opts := &gh.ListOptions{PerPage: 100}
+	for {
+		comments, resp, err := client.PullRequests.ListReviewComments(ctx, owner, repo, prNumber, reviewID, opts)
+		if err != nil {
+			return nil, fmt.Errorf("listing review comments: %w", err)
+		}
+		all = append(all, comments...)
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+	return all, nil
+}
+
+// ReplyToComment posts a reply to an existing PR review comment thread.
+func (c *Client) ReplyToComment(ctx context.Context, installationID int64, owner, repo string, prNumber int, commentID int64, body string) (*gh.PullRequestComment, error) {
+	client, err := c.app.ClientForInstallation(installationID)
+	if err != nil {
+		return nil, err
+	}
+
+	reply, _, err := client.PullRequests.CreateCommentInReplyTo(ctx, owner, repo, prNumber, body, commentID)
+	if err != nil {
+		return nil, fmt.Errorf("replying to comment: %w", err)
+	}
+	return reply, nil
+}
+
+// GetPullRequest fetches full PR details (for constructing PREvent from issue_comment).
+func (c *Client) GetPullRequest(ctx context.Context, installationID int64, owner, repo string, prNumber int) (*PREvent, error) {
+	client, err := c.app.ClientForInstallation(installationID)
+	if err != nil {
+		return nil, err
+	}
+	pr, _, err := client.PullRequests.Get(ctx, owner, repo, prNumber)
+	if err != nil {
+		return nil, fmt.Errorf("fetching PR: %w", err)
+	}
+	return &PREvent{
+		InstallationID: installationID,
+		RepoFullName:   owner + "/" + repo,
+		PRNumber:       prNumber,
+		PRTitle:        pr.GetTitle(),
+		PRAuthor:       pr.GetUser().GetLogin(),
+		HeadSHA:        pr.GetHead().GetSHA(),
+		BaseSHA:        pr.GetBase().GetSHA(),
+		BaseRef:        pr.GetBase().GetRef(),
+		HeadRef:        pr.GetHead().GetRef(),
+	}, nil
+}
+
+// AddReaction adds an emoji reaction to an issue comment.
+func (c *Client) AddReaction(ctx context.Context, installationID int64, owner, repo string, commentID int64, reaction string) error {
+	client, err := c.app.ClientForInstallation(installationID)
+	if err != nil {
+		return err
+	}
+	_, _, err = client.Reactions.CreateIssueCommentReaction(ctx, owner, repo, commentID, reaction)
+	return err
+}
+
+// CreateIssueComment posts a comment on an issue or PR.
+func (c *Client) CreateIssueComment(ctx context.Context, installationID int64, owner, repo string, number int, body string) error {
+	client, err := c.app.ClientForInstallation(installationID)
+	if err != nil {
+		return err
+	}
+	_, _, err = client.Issues.CreateComment(ctx, owner, repo, number, &gh.IssueComment{Body: gh.Ptr(body)})
+	return err
+}
+
 // ReviewSubmission represents a formatted review ready to post to GitHub.
 type ReviewSubmission struct {
 	Summary  string

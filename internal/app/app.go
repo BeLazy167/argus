@@ -12,6 +12,7 @@ import (
 
 	"github.com/acmeorg/argus/internal/api"
 	"github.com/acmeorg/argus/internal/config"
+	"github.com/acmeorg/argus/internal/crypto"
 	ghpkg "github.com/acmeorg/argus/internal/github"
 	"github.com/acmeorg/argus/internal/llm"
 	"github.com/acmeorg/argus/internal/memory"
@@ -42,11 +43,19 @@ func Run() error {
 	ghApp := ghpkg.NewApp(cfg.GitHubAppID, cfg.GitHubPrivateKey)
 	ghClient := ghpkg.NewClient(ghApp)
 
+	// Encryption (optional — only required if BYOK keys are used)
+	if cfg.EncryptionKey != "" {
+		if err := crypto.Init(cfg.EncryptionKey); err != nil {
+			return fmt.Errorf("initializing encryption: %w", err)
+		}
+	}
+
 	// LLM (single OpenAI-compatible provider)
 	registry := llm.NewRegistry()
 	if cfg.LLMAPIKey != "" {
 		registry.RegisterProvider("default", llm.NewChatProvider("default", cfg.LLMAPIKey, cfg.LLMBaseURL))
 	}
+	registry.SetResolver(db)
 	registry.SetDefault(llm.StageReview, llm.ModelConfig{
 		Provider:    "default",
 		Model:       cfg.DefaultReviewModel,
@@ -72,6 +81,7 @@ func Run() error {
 	triageStage := pipeline.NewTriageStage(registry, db)
 	reviewStage := pipeline.NewReviewStage(registry, db, memClient, cfg.MaxConcurrentReviews)
 	orchestrator := pipeline.NewOrchestrator(db.Pool, db, ghClient, reviewStage, triageStage, indexer, logger)
+	replyAnalyzer := pipeline.NewReplyAnalyzer(registry, db, ghClient, indexer, logger)
 
 	// Recover incomplete pipeline runs
 	if err := orchestrator.RecoverIncomplete(ctx); err != nil {
@@ -84,7 +94,7 @@ func Run() error {
 	}
 
 	// API Server
-	server := api.NewServer(db, ghApp, orchestrator, cfg.GitHubWebhookSecret, cfg.CORSAllowOrigin, logger)
+	server := api.NewServer(db, ghApp, orchestrator, replyAnalyzer, cfg.GitHubWebhookSecret, cfg.CORSAllowOrigin, logger)
 
 	httpServer := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Port),

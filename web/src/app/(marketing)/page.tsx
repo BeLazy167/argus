@@ -169,6 +169,11 @@ export default function LandingPage() {
             ARGUS
           </h1>
 
+          <div className="inline-flex items-center gap-2 rounded-full border border-amber/30 bg-amber/5 px-4 py-1.5 mb-5">
+            <span className="h-1.5 w-1.5 rounded-full bg-amber animate-pulse" />
+            <span className="text-[11px] font-mono text-amber tracking-wider">EARLY ACCESS &mdash; FREE DURING BETA</span>
+          </div>
+
           <p className="font-display text-lg md:text-2xl text-amber mb-3 font-normal italic">
             Every line. Every commit. Every time.
           </p>
@@ -183,7 +188,7 @@ export default function LandingPage() {
               href="/sign-up"
               className="group inline-flex h-11 items-center rounded-md bg-amber px-8 text-sm font-mono font-medium text-void transition-all hover:brightness-110 hover:shadow-[0_0_24px_-4px_oklch(0.77_0.15_75/0.5)]"
             >
-              Install on GitHub
+              Install in 60 seconds
               <svg
                 className="ml-2 h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5"
                 fill="none"
@@ -264,8 +269,9 @@ export default function LandingPage() {
               Reviews that actually catch bugs.
             </h2>
             <p className="max-w-lg mx-auto text-sm text-ash/70">
-              Not style nits. Not linting warnings. Real vulnerabilities, logic
-              errors, and footguns your team would have shipped.
+              Unlike other review bots that drown you in style nits and linting
+              warnings &mdash; Argus finds real vulnerabilities, logic errors,
+              and footguns your team would have shipped.
             </p>
           </div>
 
@@ -294,9 +300,9 @@ export default function LandingPage() {
                     <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
                   </svg>
                 ),
-                title: "Deep Review",
+                title: "Catch bugs before your users do",
                 description:
-                  "Every PR analyzed for bugs, security, error handling, type design, and test coverage. No surface-level linting.",
+                  "Every PR analyzed for bugs, security holes, error handling gaps, and logic errors. Not style nits — real issues that break production.",
               },
               {
                 icon: (
@@ -304,7 +310,7 @@ export default function LandingPage() {
                     <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 00-2.455 2.456z" />
                   </svg>
                 ),
-                title: "Institutional Memory",
+                title: "Never repeat the same mistake",
                 description:
                   "Remembers past reviews, incidents, and patterns. Flags when you touch code that caused problems before.",
               },
@@ -314,7 +320,7 @@ export default function LandingPage() {
                     <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 21L3 16.5m0 0L7.5 12M3 16.5h13.5m0-13.5L21 7.5m0 0L16.5 12M21 7.5H7.5" />
                   </svg>
                 ),
-                title: "Incremental Re-review",
+                title: "Push again, only new code reviewed",
                 description:
                   "On new pushes, only reviews the delta. No duplicate noise. Knows what it already said.",
               },
@@ -324,9 +330,9 @@ export default function LandingPage() {
                     <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" />
                   </svg>
                 ),
-                title: "Custom Rules",
+                title: "Your standards, enforced every time",
                 description:
-                  "Org-wide rules from your dashboard. Per-repo overrides via .argus/rules.md. Your standards, enforced.",
+                  "Org-wide rules from your dashboard. Per-repo overrides via .argus/rules.md. Consistent reviews across the team.",
               },
               {
                 icon: (
@@ -334,9 +340,9 @@ export default function LandingPage() {
                     <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" />
                   </svg>
                 ),
-                title: "Any LLM Provider",
+                title: "Bring your own model",
                 description:
-                  "OpenRouter, Grok, Claude, GPT, Qwen — any OpenAI-compatible endpoint. You choose the brain.",
+                  "OpenRouter, Claude, GPT, Grok, Qwen — any OpenAI-compatible endpoint. You pick the brain for each pipeline stage.",
               },
               {
                 icon: (
@@ -344,9 +350,9 @@ export default function LandingPage() {
                     <path strokeLinecap="round" strokeLinejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z" />
                   </svg>
                 ),
-                title: "Risk Scoring",
+                title: "Know if a PR is safe to ship",
                 description:
-                  "Every PR gets a risk score. Critical issues tank the score. Clean code ships with confidence.",
+                  "Every PR gets a 1-10 risk score. Critical issues tank it. Green score = merge with confidence.",
               },
             ].map((feature) => (
               <div
@@ -444,54 +450,41 @@ export default function LandingPage() {
         </div>
       </section>
 
-      {/* ── SOCIAL PROOF ── */}
+      {/* ── EARLY ACCESS ── */}
       <section className="border-t border-iron bg-charcoal/30 bg-noise">
-        <div className="mx-auto max-w-5xl px-6 py-24">
-          <div className="text-center mb-16">
+        <div className="mx-auto max-w-4xl px-6 py-24">
+          <div className="text-center mb-12">
             <p className="mb-3 text-[11px] font-mono uppercase tracking-[0.15em] text-amber">
-              Traction
+              Early access
             </p>
             <h2 className="font-display text-2xl md:text-3xl font-bold text-foreground mb-4">
-              Trusted by teams shipping to production daily.
+              We just launched. You&apos;re early.
             </h2>
+            <p className="max-w-lg mx-auto text-sm text-ash/70 leading-relaxed">
+              Argus is in active development. Early adopters get free access to
+              all features, direct input on the roadmap, and a permanent
+              discount when we launch paid tiers.
+            </p>
           </div>
 
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-8 mb-16">
-            <StatCounter value="500+" label="Repos reviewed" />
-            <StatCounter value="10K+" label="Review comments" />
-            <StatCounter value="2.3s" label="Avg review time" />
-            <StatCounter value="94%" label="Issues caught" />
-          </div>
-
-          {/* Placeholder testimonial cards */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="rounded-lg border border-iron bg-charcoal/50 p-6">
-              <p className="text-xs text-ash/70 leading-relaxed mb-4 italic">
-                &ldquo;Argus caught a race condition in our payment flow that three
-                senior engineers missed. Saved us from a very expensive Friday
-                night.&rdquo;
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="rounded-lg border border-iron bg-charcoal/50 p-5 text-center">
+              <div className="font-display text-2xl font-bold text-amber mb-1">Free</div>
+              <p className="text-[11px] font-mono text-slate-text">
+                All features during beta &mdash; no credit card
               </p>
-              <div className="flex items-center gap-3">
-                <div className="h-7 w-7 rounded-full bg-iron" />
-                <div>
-                  <p className="text-[11px] font-mono text-foreground">Staff Engineer</p>
-                  <p className="text-[10px] font-mono text-slate-text">Series B Fintech</p>
-                </div>
-              </div>
             </div>
-            <div className="rounded-lg border border-iron bg-charcoal/50 p-6">
-              <p className="text-xs text-ash/70 leading-relaxed mb-4 italic">
-                &ldquo;We turned off two other review bots after installing Argus.
-                The signal-to-noise ratio is actually usable. It finds real
-                bugs, not style nits.&rdquo;
+            <div className="rounded-lg border border-iron bg-charcoal/50 p-5 text-center">
+              <div className="font-display text-2xl font-bold text-amber mb-1">Direct access</div>
+              <p className="text-[11px] font-mono text-slate-text">
+                Shape the product &mdash; your feedback builds the roadmap
               </p>
-              <div className="flex items-center gap-3">
-                <div className="h-7 w-7 rounded-full bg-iron" />
-                <div>
-                  <p className="text-[11px] font-mono text-foreground">Engineering Lead</p>
-                  <p className="text-[10px] font-mono text-slate-text">YC W24 Startup</p>
-                </div>
-              </div>
+            </div>
+            <div className="rounded-lg border border-iron bg-charcoal/50 p-5 text-center">
+              <div className="font-display text-2xl font-bold text-amber mb-1">Lock in pricing</div>
+              <p className="text-[11px] font-mono text-slate-text">
+                Early adopters keep a permanent discount at launch
+              </p>
             </div>
           </div>
         </div>
@@ -513,11 +506,11 @@ export default function LandingPage() {
             The guardian your main branch deserves.
           </h2>
           <p className="text-sm text-ash/70 mb-3 max-w-md mx-auto">
-            Install the GitHub App. Connect your repos. Argus reviews every PR
-            from the first commit.
+            Install the GitHub App. Connect your repos. First review in under
+            two minutes.
           </p>
           <p className="text-xs text-slate-text mb-8 max-w-sm mx-auto font-mono">
-            Free for open source. No credit card required.
+            Free during early access. No credit card required.
           </p>
           <Link
             href="/sign-up"
@@ -539,41 +532,70 @@ export default function LandingPage() {
 
       {/* ── FOOTER ── */}
       <footer className="border-t border-iron py-10 px-6">
-        <div className="mx-auto flex max-w-6xl items-center justify-between">
-          <span className="wordmark text-xs text-slate-text tracking-[0.15em]">
-            ARGUS
-          </span>
-          <div className="flex gap-6">
-            <Link
-              href="/docs"
-              className="text-[11px] font-mono text-slate-text hover:text-ash transition-colors"
-            >
-              Docs
-            </Link>
-            <Link
-              href="/pricing"
-              className="text-[11px] font-mono text-slate-text hover:text-ash transition-colors"
-            >
-              Pricing
-            </Link>
-            <Link
-              href="/blog"
-              className="text-[11px] font-mono text-slate-text hover:text-ash transition-colors"
-            >
-              Blog
-            </Link>
-            <a
-              href="https://github.com/acmeorg/argus"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-[11px] font-mono text-slate-text hover:text-ash transition-colors"
-            >
-              GitHub
-            </a>
+        <div className="mx-auto max-w-6xl">
+          <div className="flex items-center justify-between mb-8">
+            <span className="wordmark text-xs text-slate-text tracking-[0.15em]">
+              ARGUS
+            </span>
+            <div className="flex gap-6">
+              <Link
+                href="/docs"
+                className="text-[11px] font-mono text-slate-text hover:text-ash transition-colors"
+              >
+                Docs
+              </Link>
+              <Link
+                href="/pricing"
+                className="text-[11px] font-mono text-slate-text hover:text-ash transition-colors"
+              >
+                Pricing
+              </Link>
+              <Link
+                href="/blog"
+                className="text-[11px] font-mono text-slate-text hover:text-ash transition-colors"
+              >
+                Blog
+              </Link>
+              <a
+                href="https://github.com/acmeorg/argus"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-[11px] font-mono text-slate-text hover:text-ash transition-colors"
+              >
+                GitHub
+              </a>
+            </div>
+            <span className="text-[11px] font-mono text-iron">
+              Nothing merges unseen.
+            </span>
           </div>
-          <span className="text-[11px] font-mono text-iron">
-            Nothing merges unseen.
-          </span>
+
+          {/* Newsletter signup */}
+          <div className="flex items-center justify-center gap-3 pt-6 border-t border-iron/50">
+            <span className="text-[11px] font-mono text-slate-text">
+              Get the changelog &mdash;
+            </span>
+            <form
+              action="https://buttondown.com/api/emails/embed-subscribe/argus"
+              method="post"
+              target="_blank"
+              className="flex gap-2"
+            >
+              <input
+                type="email"
+                name="email"
+                placeholder="you@company.com"
+                required
+                className="w-52 rounded-md border border-iron bg-charcoal px-3 py-1.5 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none"
+              />
+              <button
+                type="submit"
+                className="rounded-md bg-amber/10 border border-amber/30 px-4 py-1.5 text-[11px] font-mono text-amber hover:bg-amber/20 transition-colors"
+              >
+                Subscribe
+              </button>
+            </form>
+          </div>
         </div>
       </footer>
 
