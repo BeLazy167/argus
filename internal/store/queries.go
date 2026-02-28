@@ -3,10 +3,20 @@ package store
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
+
+// collectOrEmpty wraps pgx.CollectRows and returns an empty slice instead of nil.
+func collectOrEmpty[T any](rows pgx.Rows, fn pgx.RowToFunc[T]) ([]T, error) {
+	result, err := pgx.CollectRows(rows, fn)
+	if result == nil {
+		result = []T{}
+	}
+	return result, err
+}
 
 // --- Installations ---
 
@@ -27,7 +37,7 @@ func (s *Store) ListInstallations(ctx context.Context) ([]Installation, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	return pgx.CollectRows(rows, pgx.RowToStructByPos[Installation])
+	return collectOrEmpty(rows, pgx.RowToStructByPos[Installation])
 }
 
 // --- Repos ---
@@ -41,7 +51,21 @@ func (s *Store) ListRepos(ctx context.Context) ([]Repo, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	return pgx.CollectRows(rows, pgx.RowToStructByPos[Repo])
+	return collectOrEmpty(rows, pgx.RowToStructByPos[Repo])
+}
+
+func (s *Store) ListReposByOwner(ctx context.Context, ownerPrefix string) ([]Repo, error) {
+	// Escape LIKE wildcards to prevent LLM-controlled injection
+	escaped := strings.NewReplacer("%", "\\%", "_", "\\_").Replace(ownerPrefix)
+	rows, err := s.Pool.Query(ctx, `
+		SELECT id, installation_id, github_id, full_name, default_branch, enabled, settings_json, created_at, updated_at
+		FROM repos WHERE full_name LIKE $1 ESCAPE '\' ORDER BY full_name
+	`, escaped+"/%")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return collectOrEmpty(rows, pgx.RowToStructByPos[Repo])
 }
 
 func (s *Store) GetRepo(ctx context.Context, id int64) (*Repo, error) {
@@ -103,7 +127,7 @@ func (s *Store) ListReviews(ctx context.Context, repoID int64, limit, offset int
 		return nil, err
 	}
 	defer rows.Close()
-	return pgx.CollectRows(rows, pgx.RowToStructByPos[Review])
+	return collectOrEmpty(rows, pgx.RowToStructByPos[Review])
 }
 
 func (s *Store) GetReview(ctx context.Context, id uuid.UUID) (*Review, error) {
@@ -129,7 +153,7 @@ func (s *Store) GetReviewComments(ctx context.Context, reviewID uuid.UUID) ([]Re
 		return nil, err
 	}
 	defer rows.Close()
-	return pgx.CollectRows(rows, pgx.RowToStructByPos[ReviewComment])
+	return collectOrEmpty(rows, pgx.RowToStructByPos[ReviewComment])
 }
 
 func (s *Store) UpdateReviewStatus(ctx context.Context, id uuid.UUID, status, errMsg string) error {
@@ -151,7 +175,7 @@ func (s *Store) ListRules(ctx context.Context) ([]Rule, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	return pgx.CollectRows(rows, pgx.RowToStructByPos[Rule])
+	return collectOrEmpty(rows, pgx.RowToStructByPos[Rule])
 }
 
 func (s *Store) CreateRule(ctx context.Context, category, content string, priority int, enabled bool) (*Rule, error) {
@@ -204,7 +228,7 @@ func (s *Store) ListModelConfigs(ctx context.Context, repoID int64) ([]ModelConf
 		return nil, err
 	}
 	defer rows.Close()
-	return pgx.CollectRows(rows, pgx.RowToStructByPos[ModelConfig])
+	return collectOrEmpty(rows, pgx.RowToStructByPos[ModelConfig])
 }
 
 func (s *Store) UpsertModelConfig(ctx context.Context, repoID int64, stage, provider, model string, baseURL *string, maxTokens int, temperature float32) (*ModelConfig, error) {
@@ -296,7 +320,7 @@ func (s *Store) ListActivity(ctx context.Context, limit int) ([]ActivityLog, err
 		return nil, err
 	}
 	defer rows.Close()
-	return pgx.CollectRows(rows, pgx.RowToStructByPos[ActivityLog])
+	return collectOrEmpty(rows, pgx.RowToStructByPos[ActivityLog])
 }
 
 func (s *Store) LogActivity(ctx context.Context, action, actor, resource string, metadata []byte) error {

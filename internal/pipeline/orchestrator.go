@@ -26,36 +26,31 @@ func splitRepoFullName(fullName string) (owner, repo string, err error) {
 
 // Orchestrator receives PR events and drives them through the review pipeline.
 type Orchestrator struct {
-	db           *pgxpool.Pool
-	st           *store.Store
-	ghClient     *ghpkg.Client
-	sm           *StateMachine
-	reviewStage  *ReviewStage
-	triageStage  *TriageStage
-	contextStage *ContextStage
-	indexer      *memory.Indexer
-	logger       *slog.Logger
+	db          *pgxpool.Pool
+	st          *store.Store
+	ghClient    *ghpkg.Client
+	sm          *StateMachine
+	reviewStage *ReviewStage
+	triageStage *TriageStage
+	indexer     *memory.Indexer
+	logger      *slog.Logger
 }
 
-func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, reviewStage *ReviewStage, triageStage *TriageStage, contextStage *ContextStage, indexer *memory.Indexer, logger *slog.Logger) *Orchestrator {
+func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, reviewStage *ReviewStage, triageStage *TriageStage, indexer *memory.Indexer, logger *slog.Logger) *Orchestrator {
 	sm := NewStateMachine(db, logger)
 
 	o := &Orchestrator{
-		db:           db,
-		st:           st,
-		ghClient:     ghClient,
-		sm:           sm,
-		reviewStage:  reviewStage,
-		triageStage:  triageStage,
-		contextStage: contextStage,
-		indexer:      indexer,
-		logger:       logger,
+		db:          db,
+		st:          st,
+		ghClient:    ghClient,
+		sm:          sm,
+		reviewStage: reviewStage,
+		triageStage: triageStage,
+		indexer:     indexer,
+		logger:      logger,
 	}
 
 	sm.RegisterStage(StateTriaging, triageStage.Execute)
-	if contextStage != nil {
-		sm.RegisterStage(StateRetrievingContext, contextStage.Execute)
-	}
 	sm.RegisterStage(StateReviewing, reviewStage.Execute)
 	sm.RegisterStage(StateSynthesizing, o.synthesize)
 	sm.RegisterStage(StatePosting, o.post)
@@ -249,6 +244,11 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 }
 
 func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun) {
+	owner, repo, err := splitRepoFullName(run.PREvent.RepoFullName)
+	if err != nil {
+		o.logger.Error("invalid repo name in indexComments", "error", err)
+		return
+	}
 	side := "RIGHT"
 	for _, fr := range run.FileReviews {
 		for _, c := range fr.Comments {
@@ -265,7 +265,7 @@ func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun) {
 			}
 
 			if o.indexer != nil {
-				err := o.indexer.IndexReviewComment(ctx, run.PREvent.RepoFullName, memory.ReviewMemory{
+				err := o.indexer.IndexReviewComment(ctx, owner, repo, memory.ReviewMemory{
 					ReviewID:    run.ReviewID.String(),
 					PRNumber:    run.PREvent.PRNumber,
 					FilePath:    fr.Path,
@@ -280,6 +280,17 @@ func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun) {
 			}
 		}
 	}
+}
+
+// truncate returns the first maxLen bytes of s without splitting UTF-8 runes.
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	for maxLen > 0 && maxLen < len(s) && s[maxLen]&0xC0 == 0x80 {
+		maxLen--
+	}
+	return s[:maxLen]
 }
 
 func getDiffContext(run *PipelineRun, path string) string {
