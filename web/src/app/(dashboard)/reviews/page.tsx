@@ -1,20 +1,25 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import {
   MessageSquare,
   Loader2,
   RotateCcw,
   ChevronDown,
   ExternalLink,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 import { useRepos } from "@/lib/queries/repos";
 import { useReviews, useRetryReview } from "@/lib/queries/reviews";
 import { formatDistanceToNow } from "@/lib/time";
 import type { Review } from "@/lib/types";
 
+const PAGE_SIZE = 20;
+
 function ScoreBadge({ score }: { score?: number }) {
-  if (score == null) return null;
+  if (score == null) return <span className="text-lg font-mono text-slate-text">—</span>;
   const color =
     score >= 8
       ? "text-green-400"
@@ -43,20 +48,28 @@ function StatusBadge({ status }: { status: Review["status"] }) {
 
 function ReviewRow({
   review,
+  repoFullName,
+  githubUrl,
   onRetry,
   retrying,
 }: {
   review: Review;
+  repoFullName?: string;
+  githubUrl?: string;
   onRetry: () => void;
   retrying: boolean;
 }) {
   return (
-    <div className="flex items-center justify-between border-b border-iron/50 py-3 last:border-0">
+    <Link
+      href={`/reviews/${review.id}`}
+      className="flex items-center justify-between border-b border-iron/50 py-3 last:border-0 hover:bg-iron/10 -mx-5 px-5 transition-colors"
+    >
       <div className="flex items-center gap-4">
         <ScoreBadge score={review.score} />
         <div>
-          <p className="text-xs font-mono text-foreground">
-            #{review.pr_number} — {review.pr_title}
+          <p className="text-xs font-mono text-foreground truncate max-w-md">
+            {repoFullName && <span className="text-slate-text">{repoFullName} &gt; </span>}
+            #{review.pr_number} {review.pr_title}
           </p>
           <p className="text-[11px] font-mono text-slate-text">
             by {review.pr_author} &middot;{" "}
@@ -69,7 +82,11 @@ function ReviewRow({
         {review.status === "failed" && (
           <button
             type="button"
-            onClick={onRetry}
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              onRetry();
+            }}
             disabled={retrying}
             className="text-slate-text hover:text-amber transition-colors"
             title="Retry review"
@@ -77,11 +94,12 @@ function ReviewRow({
             <RotateCcw className={`h-3.5 w-3.5 ${retrying ? "animate-spin" : ""}`} />
           </button>
         )}
-        {review.github_review_id && (
+        {githubUrl && (
           <a
-            href={`https://github.com/${review.pr_title}/pull/${review.pr_number}#pullrequestreview-${review.github_review_id}`}
+            href={githubUrl}
             target="_blank"
             rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
             className="text-slate-text hover:text-amber transition-colors"
             title="View on GitHub"
           >
@@ -89,22 +107,31 @@ function ReviewRow({
           </a>
         )}
       </div>
-    </div>
+    </Link>
   );
 }
 
 export default function ReviewsPage() {
   const { data: repos, isLoading: reposLoading } = useRepos();
   const [selectedRepoId, setSelectedRepoId] = useState<number>(0);
+  const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [page, setPage] = useState(0);
 
   const firstRepoId = repos?.[0]?.id ?? 0;
   const activeRepoId = selectedRepoId || firstRepoId;
 
+  const repoMap = new Map(repos?.map((r) => [r.id, r]));
+
   const { data: reviews, isLoading: reviewsLoading } = useReviews(
     activeRepoId,
-    50,
+    PAGE_SIZE,
+    page * PAGE_SIZE,
   );
   const retryReview = useRetryReview();
+
+  const filtered = statusFilter === "all"
+    ? reviews
+    : reviews?.filter((r) => r.status === statusFilter);
 
   const loading = reposLoading || (activeRepoId > 0 && reviewsLoading);
 
@@ -120,23 +147,44 @@ export default function ReviewsPage() {
           </p>
         </div>
 
-        {/* Repo selector */}
-        {repos && repos.length > 0 && (
+        <div className="flex items-center gap-3">
+          {/* Status filter */}
           <div className="relative">
             <select
-              value={activeRepoId}
-              onChange={(e) => setSelectedRepoId(Number(e.target.value))}
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value)}
               className="appearance-none rounded-md border border-iron bg-charcoal px-4 py-2 pr-8 text-xs font-mono text-foreground focus:border-amber focus:outline-none"
             >
-              {repos.map((r) => (
-                <option key={r.id} value={r.id}>
-                  {r.full_name}
-                </option>
-              ))}
+              <option value="all">All statuses</option>
+              <option value="pending">Pending</option>
+              <option value="in_progress">In Progress</option>
+              <option value="completed">Completed</option>
+              <option value="failed">Failed</option>
             </select>
             <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-text" />
           </div>
-        )}
+
+          {/* Repo selector */}
+          {repos && repos.length > 0 && (
+            <div className="relative">
+              <select
+                value={activeRepoId}
+                onChange={(e) => {
+                  setSelectedRepoId(Number(e.target.value));
+                  setPage(0);
+                }}
+                className="appearance-none rounded-md border border-iron bg-charcoal px-4 py-2 pr-8 text-xs font-mono text-foreground focus:border-amber focus:outline-none"
+              >
+                {repos.map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {r.full_name}
+                  </option>
+                ))}
+              </select>
+              <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-text" />
+            </div>
+          )}
+        </div>
       </div>
 
       <div className="rounded-lg border border-iron bg-charcoal">
@@ -145,24 +193,57 @@ export default function ReviewsPage() {
             <div className="flex items-center justify-center py-16">
               <Loader2 className="h-5 w-5 animate-spin text-slate-text" />
             </div>
-          ) : !reviews || reviews.length === 0 ? (
+          ) : !filtered || filtered.length === 0 ? (
             <div className="py-16 text-center">
               <MessageSquare className="h-8 w-8 text-slate-text mx-auto mb-3" />
               <p className="text-xs font-mono text-slate-text">
-                No reviews yet for this repo.
+                {statusFilter !== "all"
+                  ? `No ${statusFilter.replace("_", " ")} reviews found.`
+                  : "No reviews yet for this repo."}
               </p>
             </div>
           ) : (
-            reviews.map((r) => (
-              <ReviewRow
-                key={r.id}
-                review={r}
-                onRetry={() => retryReview.mutate(r.id)}
-                retrying={retryReview.isPending}
-              />
-            ))
+            filtered.map((review) => {
+              const repo = repoMap.get(review.repo_id);
+              const githubUrl = repo
+                ? `https://github.com/${repo.full_name}/pull/${review.pr_number}${review.github_review_id ? `#pullrequestreview-${review.github_review_id}` : ""}`
+                : undefined;
+              return (
+                <ReviewRow
+                  key={review.id}
+                  review={review}
+                  repoFullName={repo?.full_name}
+                  githubUrl={githubUrl}
+                  onRetry={() => retryReview.mutate(review.id)}
+                  retrying={retryReview.isPending}
+                />
+              );
+            })
           )}
         </div>
+      </div>
+
+      {/* Pagination */}
+      <div className="flex items-center justify-between mt-4">
+        <button
+          type="button"
+          onClick={() => setPage((p) => Math.max(0, p - 1))}
+          disabled={page === 0}
+          className="flex items-center gap-1 text-xs font-mono text-slate-text hover:text-foreground disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+        >
+          <ChevronLeft className="h-3.5 w-3.5" /> Prev
+        </button>
+        <span className="text-[11px] font-mono text-slate-text">
+          Page {page + 1}
+        </span>
+        <button
+          type="button"
+          onClick={() => setPage((p) => p + 1)}
+          disabled={!reviews || reviews.length < PAGE_SIZE}
+          className="flex items-center gap-1 text-xs font-mono text-slate-text hover:text-foreground disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+        >
+          Next <ChevronRight className="h-3.5 w-3.5" />
+        </button>
       </div>
     </>
   );
