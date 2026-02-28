@@ -21,7 +21,10 @@ import {
 } from "lucide-react";
 import { useReview, useRetryReview } from "@/lib/queries/reviews";
 import { useRepos } from "@/lib/queries/repos";
-import type { Repo, Review, ReviewComment } from "@/lib/types";
+import { githubPrUrl } from "@/lib/github";
+import { ScoreBox } from "@/components/dashboard/score-badge";
+import { StatusBadge } from "@/components/dashboard/status-badge";
+import type { Repo, ReviewComment } from "@/lib/types";
 
 const severityStyles: Record<string, string> = {
   critical: "bg-red-400/10 text-red-400 border-red-400/20",
@@ -37,7 +40,17 @@ const severityDot: Record<string, string> = {
   praise: "bg-green-400",
 };
 
-/** Shared markdown renderer for summary + comment bodies */
+/** Formats a line reference string like "L5" or "L5-10". */
+function lineRef(c: ReviewComment): string {
+  const { start_line, end_line } = c;
+  if (start_line != null && end_line != null && start_line !== end_line) {
+    return `L${start_line}-${end_line}`;
+  }
+  const line = end_line ?? start_line;
+  return line != null ? `L${line}` : "";
+}
+
+/** Shared markdown renderer for summary + comment bodies. */
 function Markdown({ children }: { children: string }) {
   return (
     <ReactMarkdown
@@ -77,8 +90,7 @@ function Markdown({ children }: { children: string }) {
           <strong className="font-semibold text-foreground">{children}</strong>
         ),
         code: ({ className, children }) => {
-          const isBlock = className?.includes("language-");
-          if (isBlock) {
+          if (className?.includes("language-")) {
             return (
               <code className="block bg-void/80 border border-iron/50 rounded-md px-3 py-2 text-[11px] font-mono text-foreground/90 overflow-x-auto my-2">
                 {children}
@@ -109,41 +121,7 @@ function Markdown({ children }: { children: string }) {
   );
 }
 
-function ScoreBadge({ score }: { score?: number }) {
-  if (score == null) return null;
-  const color =
-    score >= 8
-      ? "text-green-400 border-green-400/20 bg-green-400/5"
-      : score >= 5
-        ? "text-amber border-amber/20 bg-amber/5"
-        : "text-red-400 border-red-400/20 bg-red-400/5";
-  return (
-    <div
-      className={`flex items-center justify-center h-14 w-14 rounded-lg border ${color}`}
-    >
-      <span className="font-mono text-2xl font-bold">{score}</span>
-    </div>
-  );
-}
-
-function StatusBadge({ status }: { status: Review["status"] }) {
-  const styles = {
-    completed: "bg-green-400/10 text-green-400 border-green-400/20",
-    in_progress: "bg-amber/10 text-amber border-amber/20",
-    pending: "bg-blue-400/10 text-blue-400 border-blue-400/20",
-    failed: "bg-red-400/10 text-red-400 border-red-400/20",
-  }[status];
-
-  return (
-    <span
-      className={`inline-flex items-center rounded-sm border px-2 py-0.5 text-[10px] font-mono uppercase tracking-wider ${styles}`}
-    >
-      {status.replace("_", " ")}
-    </span>
-  );
-}
-
-/** Generates a fix prompt and copies to clipboard */
+/** Generates a fix prompt and copies to clipboard. */
 function CopyFixButton({
   comment,
   filePath,
@@ -154,15 +132,9 @@ function CopyFixButton({
   const [copied, setCopied] = useState(false);
 
   const handleCopy = useCallback(() => {
-    const lineRef =
-      comment.start_line && comment.end_line && comment.start_line !== comment.end_line
-        ? `lines ${comment.start_line}-${comment.end_line}`
-        : comment.end_line ?? comment.start_line
-          ? `line ${comment.end_line ?? comment.start_line}`
-          : "";
-
+    const ref = lineRef(comment);
     const prompt = [
-      `Fix the following ${comment.severity ?? "issue"} in \`${filePath}\`${lineRef ? ` at ${lineRef}` : ""}:`,
+      `Fix the following ${comment.severity ?? "issue"} in \`${filePath}\`${ref ? ` at ${ref.replace("L", "line ").replace("-", "-")}` : ""}:`,
       "",
       comment.body,
       "",
@@ -196,7 +168,7 @@ function CopyFixButton({
   );
 }
 
-/** Collapsible file group */
+/** Collapsible file group. */
 function FileGroup({
   filePath,
   fileComments,
@@ -205,26 +177,21 @@ function FileGroup({
   fileComments: readonly ReviewComment[];
 }) {
   const [expanded, setExpanded] = useState(true);
+  const Chevron = expanded ? ChevronDown : ChevronRight;
 
   return (
     <div className="rounded-lg border border-iron overflow-hidden transition-all">
-      {/* File header — clickable */}
       <button
         type="button"
         onClick={() => setExpanded(!expanded)}
         className="flex items-center gap-2 w-full bg-charcoal px-4 py-2.5 border-b border-iron hover:bg-iron/30 transition-colors text-left"
       >
-        {expanded ? (
-          <ChevronDown className="h-3.5 w-3.5 text-slate-text shrink-0" />
-        ) : (
-          <ChevronRight className="h-3.5 w-3.5 text-slate-text shrink-0" />
-        )}
+        <Chevron className="h-3.5 w-3.5 text-slate-text shrink-0" />
         <FileCode className="h-3.5 w-3.5 text-slate-text shrink-0" />
         <span className="font-mono text-xs text-foreground truncate">
           {filePath}
         </span>
         <div className="flex items-center gap-2 ml-auto shrink-0">
-          {/* Mini severity dots */}
           {fileComments.some((c) => c.severity === "critical") && (
             <div className="h-1.5 w-1.5 rounded-full bg-red-400" />
           )}
@@ -237,7 +204,6 @@ function FileGroup({
           </span>
         </div>
       </button>
-      {/* Comments — animated collapse */}
       {expanded && (
         <div>
           {fileComments.map((comment, i) => (
@@ -245,7 +211,6 @@ function FileGroup({
               key={comment.id}
               className={`px-4 py-4 bg-background hover:bg-charcoal/30 transition-colors ${i < fileComments.length - 1 ? "border-b border-iron/50" : ""}`}
             >
-              {/* Meta row */}
               <div className="flex items-center gap-2 mb-2.5">
                 {comment.severity && (
                   <span
@@ -259,20 +224,15 @@ function FileGroup({
                     {comment.category}
                   </span>
                 )}
-                {(comment.start_line ?? comment.end_line) != null && (
+                {lineRef(comment) && (
                   <span className="text-[10px] font-mono text-slate-text">
-                    {comment.start_line != null &&
-                    comment.end_line != null &&
-                    comment.start_line !== comment.end_line
-                      ? `L${comment.start_line}-${comment.end_line}`
-                      : `L${comment.end_line ?? comment.start_line}`}
+                    {lineRef(comment)}
                   </span>
                 )}
                 <div className="ml-auto">
                   <CopyFixButton comment={comment} filePath={filePath} />
                 </div>
               </div>
-              {/* Comment body — rendered as markdown */}
               <Markdown>{comment.body}</Markdown>
             </div>
           ))}
@@ -292,9 +252,7 @@ export default function ReviewDetailPage() {
   const comments = data?.comments ?? [];
 
   const repoMap = useMemo(() => {
-    const map = new Map<number, Repo>();
-    for (const r of repos ?? []) map.set(r.id, r);
-    return map;
+    return new Map<number, Repo>((repos ?? []).map((r) => [r.id, r]));
   }, [repos]);
 
   const grouped = useMemo(() => {
@@ -319,7 +277,6 @@ export default function ReviewDetailPage() {
       );
   }, [comments]);
 
-  // Count severities for overview
   const severityCounts = useMemo(() => {
     const counts: Record<string, number> = {};
     for (const c of comments) {
@@ -345,8 +302,8 @@ export default function ReviewDetailPage() {
   }
 
   const repo = repoMap.get(review.repo_id);
-  const githubUrl = repo
-    ? `https://github.com/${repo.full_name}/pull/${review.pr_number}${review.github_review_id ? `#pullrequestreview-${review.github_review_id}` : ""}`
+  const ghUrl = repo
+    ? githubPrUrl(repo.full_name, review.pr_number, review.github_review_id)
     : undefined;
   const duration = review.duration_ms
     ? (review.duration_ms / 1000).toFixed(1) + "s"
@@ -354,7 +311,6 @@ export default function ReviewDetailPage() {
 
   return (
     <>
-      {/* Back link */}
       <Link
         href="/reviews"
         className="inline-flex items-center gap-1.5 text-xs font-mono text-slate-text hover:text-amber transition-colors mb-6"
@@ -375,13 +331,13 @@ export default function ReviewDetailPage() {
                 <GitPullRequest className="h-3.5 w-3.5" />
                 {repo?.full_name ?? "unknown"} #{review.pr_number}
               </span>
-              <span className="text-iron">·</span>
+              <span className="text-iron">&middot;</span>
               <span className="text-xs font-mono text-slate-text">
                 by {review.pr_author}
               </span>
               {duration && (
                 <>
-                  <span className="text-iron">·</span>
+                  <span className="text-iron">&middot;</span>
                   <span className="inline-flex items-center gap-1 text-xs font-mono text-slate-text">
                     <Clock className="h-3 w-3" />
                     {duration}
@@ -392,10 +348,10 @@ export default function ReviewDetailPage() {
             </div>
           </div>
           <div className="flex items-center gap-3 shrink-0">
-            <ScoreBadge score={review.score} />
-            {githubUrl && (
+            <ScoreBox score={review.score} />
+            {ghUrl && (
               <a
-                href={githubUrl}
+                href={ghUrl}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-1.5 rounded-md border border-iron px-3 py-1.5 text-xs font-mono text-slate-text hover:text-amber hover:border-amber/50 transition-colors"
@@ -469,7 +425,7 @@ export default function ReviewDetailPage() {
         </div>
       )}
 
-      {/* Summary card — rendered as markdown */}
+      {/* Summary card */}
       {review.summary && (
         <div className="rounded-lg border border-iron bg-charcoal p-5 mb-6">
           <h2 className="text-xs font-mono uppercase tracking-[0.1em] text-slate-text mb-3">
@@ -496,7 +452,7 @@ export default function ReviewDetailPage() {
       {grouped.length === 0 && review.status === "completed" && (
         <div className="rounded-lg border border-iron bg-charcoal p-10 text-center">
           <p className="text-xs font-mono text-slate-text">
-            No comments — the code looks good!
+            No comments &mdash; the code looks good!
           </p>
         </div>
       )}

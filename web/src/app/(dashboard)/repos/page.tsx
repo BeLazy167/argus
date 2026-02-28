@@ -12,6 +12,7 @@ import {
 import { useRepos, useUpdateRepo } from "@/lib/queries/repos";
 import { useReviews, useTriggerReview } from "@/lib/queries/reviews";
 import { formatDistanceToNow } from "@/lib/time";
+import { scoreColor } from "@/lib/score";
 import type { Repo } from "@/lib/types";
 
 function RepoCard({ repo }: { repo: Repo }) {
@@ -82,15 +83,7 @@ function RepoCard({ repo }: { repo: Repo }) {
         <div className="text-[11px] font-mono text-slate-text mb-3">
           Last review:{" "}
           {lastReview.score != null && (
-            <span
-              className={
-                lastReview.score >= 8
-                  ? "text-green-400"
-                  : lastReview.score >= 5
-                    ? "text-amber"
-                    : "text-red-400"
-              }
-            >
+            <span className={scoreColor(lastReview.score)}>
               {lastReview.score}
             </span>
           )}{" "}
@@ -161,7 +154,7 @@ export default function ReposPage() {
           </p>
         </div>
         <a
-          href="https://github.com/apps/argus-ai/installations/new"
+          href="https://github.com/apps/argus-eye/installations/new"
           target="_blank"
           rel="noopener noreferrer"
           className="inline-flex items-center gap-1.5 rounded-md border border-amber/30 bg-amber/10 px-4 py-2 text-xs font-mono text-amber hover:bg-amber/20 transition-colors"

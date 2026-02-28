@@ -1,6 +1,5 @@
 "use client";
 
-import { useState } from "react";
 import Link from "next/link";
 import {
   Eye,
@@ -8,13 +7,14 @@ import {
   AlertTriangle,
   CheckCircle,
   Loader2,
-  ChevronDown,
 } from "lucide-react";
 import { useStats } from "@/lib/queries/stats";
-import { useRepos } from "@/lib/queries/repos";
 import { useReviews } from "@/lib/queries/reviews";
+import { useActiveRepo } from "@/lib/hooks/use-active-repo";
 import { formatDistanceToNow } from "@/lib/time";
-import type { Review } from "@/lib/types";
+import { ScoreBadge } from "@/components/dashboard/score-badge";
+import { StatusBadge } from "@/components/dashboard/status-badge";
+import { RepoSelect } from "@/components/dashboard/repo-select";
 
 function StatCard({
   label,
@@ -56,50 +56,15 @@ function StatCard({
   );
 }
 
-function ScoreBadge({ score }: { score?: number }) {
-  if (score == null) return <span className="text-lg font-mono text-slate-text">—</span>;
-  const color =
-    score >= 8
-      ? "text-green-400"
-      : score >= 5
-        ? "text-amber"
-        : "text-red-400";
-  return <span className={`font-mono text-lg font-medium ${color}`}>{score}</span>;
-}
-
-function StatusBadge({ status }: { status: Review["status"] }) {
-  const styles = {
-    completed: "bg-green-400/10 text-green-400 border-green-400/20",
-    in_progress: "bg-amber/10 text-amber border-amber/20",
-    pending: "bg-blue-400/10 text-blue-400 border-blue-400/20",
-    failed: "bg-red-400/10 text-red-400 border-red-400/20",
-  }[status];
-
-  return (
-    <span
-      className={`inline-flex items-center rounded-sm border px-2 py-0.5 text-[10px] font-mono uppercase tracking-wider ${styles}`}
-    >
-      {status.replace("_", " ")}
-    </span>
-  );
-}
-
 export default function DashboardPage() {
   const { data: stats, isLoading: statsLoading } = useStats();
-  const { data: repos, isLoading: reposLoading } = useRepos();
-  const [selectedRepoId, setSelectedRepoId] = useState<number>(0);
+  const { repos, activeId, setSelectedId, isLoading: reposLoading } = useActiveRepo();
 
-  const firstRepoId = repos?.[0]?.id ?? 0;
-  const activeRepoId = selectedRepoId || firstRepoId;
+  const repoMap = new Map(repos.map((r) => [r.id, r]));
 
-  const repoMap = new Map(repos?.map((r) => [r.id, r]));
+  const { data: reviews, isLoading: reviewsLoading } = useReviews(activeId, 10);
 
-  const { data: reviews, isLoading: reviewsLoading } = useReviews(
-    activeRepoId,
-    10,
-  );
-
-  const feedLoading = reposLoading || (activeRepoId > 0 && reviewsLoading);
+  const feedLoading = reposLoading || (activeId > 0 && reviewsLoading);
 
   return (
     <>
@@ -112,7 +77,6 @@ export default function DashboardPage() {
         </p>
       </div>
 
-      {/* Stats grid */}
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4 mb-10">
         <StatCard
           label="Reviews today"
@@ -141,7 +105,6 @@ export default function DashboardPage() {
         />
       </div>
 
-      {/* Recent reviews feed */}
       <div className="rounded-lg border border-iron bg-charcoal">
         <div className="flex items-center justify-between border-b border-iron px-5 py-4">
           <h2 className="text-xs font-mono uppercase tracking-[0.1em] text-foreground">
@@ -149,24 +112,9 @@ export default function DashboardPage() {
           </h2>
           <div className="flex items-center gap-4">
             <span className="text-[10px] font-mono text-slate-text">
-              {stats?.total_reviews ?? "—"} total
+              {stats?.total_reviews ?? "\u2014"} total
             </span>
-            {repos && repos.length > 0 && (
-              <div className="relative">
-                <select
-                  value={activeRepoId}
-                  onChange={(e) => setSelectedRepoId(Number(e.target.value))}
-                  className="appearance-none rounded-md border border-iron bg-background px-3 py-1 pr-7 text-[11px] font-mono text-foreground focus:border-amber focus:outline-none"
-                >
-                  {repos.map((r) => (
-                    <option key={r.id} value={r.id}>
-                      {r.full_name}
-                    </option>
-                  ))}
-                </select>
-                <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-3 w-3 -translate-y-1/2 text-slate-text" />
-              </div>
-            )}
+            <RepoSelect repos={repos} value={activeId} onChange={setSelectedId} />
           </div>
         </div>
         <div className="px-5">

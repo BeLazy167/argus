@@ -11,40 +11,16 @@ import {
   ChevronLeft,
   ChevronRight,
 } from "lucide-react";
-import { useRepos } from "@/lib/queries/repos";
 import { useReviews, useRetryReview } from "@/lib/queries/reviews";
+import { useActiveRepo } from "@/lib/hooks/use-active-repo";
 import { formatDistanceToNow } from "@/lib/time";
+import { githubPrUrl } from "@/lib/github";
+import { ScoreBadge } from "@/components/dashboard/score-badge";
+import { StatusBadge } from "@/components/dashboard/status-badge";
+import { RepoSelect } from "@/components/dashboard/repo-select";
 import type { Review } from "@/lib/types";
 
 const PAGE_SIZE = 20;
-
-function ScoreBadge({ score }: { score?: number }) {
-  if (score == null) return <span className="text-lg font-mono text-slate-text">—</span>;
-  const color =
-    score >= 8
-      ? "text-green-400"
-      : score >= 5
-        ? "text-amber"
-        : "text-red-400";
-  return <span className={`font-mono text-lg font-medium ${color}`}>{score}</span>;
-}
-
-function StatusBadge({ status }: { status: Review["status"] }) {
-  const styles = {
-    completed: "bg-green-400/10 text-green-400 border-green-400/20",
-    in_progress: "bg-amber/10 text-amber border-amber/20",
-    pending: "bg-blue-400/10 text-blue-400 border-blue-400/20",
-    failed: "bg-red-400/10 text-red-400 border-red-400/20",
-  }[status];
-
-  return (
-    <span
-      className={`inline-flex items-center rounded-sm border px-2 py-0.5 text-[10px] font-mono uppercase tracking-wider ${styles}`}
-    >
-      {status.replace("_", " ")}
-    </span>
-  );
-}
 
 function ReviewRow({
   review,
@@ -112,18 +88,14 @@ function ReviewRow({
 }
 
 export default function ReviewsPage() {
-  const { data: repos, isLoading: reposLoading } = useRepos();
-  const [selectedRepoId, setSelectedRepoId] = useState<number>(0);
-  const [statusFilter, setStatusFilter] = useState<string>("all");
+  const { repos, activeId, setSelectedId, isLoading: reposLoading } = useActiveRepo();
+  const [statusFilter, setStatusFilter] = useState("all");
   const [page, setPage] = useState(0);
 
-  const firstRepoId = repos?.[0]?.id ?? 0;
-  const activeRepoId = selectedRepoId || firstRepoId;
-
-  const repoMap = new Map(repos?.map((r) => [r.id, r]));
+  const repoMap = new Map(repos.map((r) => [r.id, r]));
 
   const { data: reviews, isLoading: reviewsLoading } = useReviews(
-    activeRepoId,
+    activeId,
     PAGE_SIZE,
     page * PAGE_SIZE,
   );
@@ -133,7 +105,7 @@ export default function ReviewsPage() {
     ? reviews
     : reviews?.filter((r) => r.status === statusFilter);
 
-  const loading = reposLoading || (activeRepoId > 0 && reviewsLoading);
+  const loading = reposLoading || (activeId > 0 && reviewsLoading);
 
   return (
     <>
@@ -148,7 +120,6 @@ export default function ReviewsPage() {
         </div>
 
         <div className="flex items-center gap-3">
-          {/* Status filter */}
           <div className="relative">
             <select
               value={statusFilter}
@@ -164,26 +135,14 @@ export default function ReviewsPage() {
             <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-text" />
           </div>
 
-          {/* Repo selector */}
-          {repos && repos.length > 0 && (
-            <div className="relative">
-              <select
-                value={activeRepoId}
-                onChange={(e) => {
-                  setSelectedRepoId(Number(e.target.value));
-                  setPage(0);
-                }}
-                className="appearance-none rounded-md border border-iron bg-charcoal px-4 py-2 pr-8 text-xs font-mono text-foreground focus:border-amber focus:outline-none"
-              >
-                {repos.map((r) => (
-                  <option key={r.id} value={r.id}>
-                    {r.full_name}
-                  </option>
-                ))}
-              </select>
-              <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-text" />
-            </div>
-          )}
+          <RepoSelect
+            repos={repos}
+            value={activeId}
+            onChange={(id) => {
+              setSelectedId(id);
+              setPage(0);
+            }}
+          />
         </div>
       </div>
 
@@ -205,15 +164,15 @@ export default function ReviewsPage() {
           ) : (
             filtered.map((review) => {
               const repo = repoMap.get(review.repo_id);
-              const githubUrl = repo
-                ? `https://github.com/${repo.full_name}/pull/${review.pr_number}${review.github_review_id ? `#pullrequestreview-${review.github_review_id}` : ""}`
+              const url = repo
+                ? githubPrUrl(repo.full_name, review.pr_number, review.github_review_id)
                 : undefined;
               return (
                 <ReviewRow
                   key={review.id}
                   review={review}
                   repoFullName={repo?.full_name}
-                  githubUrl={githubUrl}
+                  githubUrl={url}
                   onRetry={() => retryReview.mutate(review.id)}
                   retrying={retryReview.isPending}
                 />
@@ -223,7 +182,6 @@ export default function ReviewsPage() {
         </div>
       </div>
 
-      {/* Pagination */}
       <div className="flex items-center justify-between mt-4">
         <button
           type="button"
