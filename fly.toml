@@ -1,4 +1,4 @@
-app = 'argus-bot'
+app = 'argus-ai'
 primary_region = 'iad'
 
 [build]
