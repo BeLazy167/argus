@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Settings, ChevronDown, Loader2, Save, Trash2 } from "lucide-react";
+import { Settings, ChevronDown, Loader2, Save } from "lucide-react";
 import { useRepos } from "@/lib/queries/repos";
 import {
   useModelConfigs,
@@ -10,6 +10,13 @@ import {
 } from "@/lib/queries/model-configs";
 
 const STAGES = ["triage", "review", "synthesis", "embedding"] as const;
+
+const STAGE_DESCRIPTIONS: Record<string, string> = {
+  triage: "Decides which files need detailed review vs. can be skimmed",
+  review: "Analyzes code changes and writes review comments",
+  synthesis: "Combines per-file reviews into a unified summary",
+  embedding: "Generates embeddings for memory and pattern matching",
+};
 
 function ConfigCard({
   stage,
@@ -20,7 +27,7 @@ function ConfigCard({
   repoId: number;
   existing?: { provider: string; model: string; base_url?: string; max_tokens: number; temperature: number };
 }) {
-  const [provider, setProvider] = useState(existing?.provider ?? "default");
+  const [provider, setProvider] = useState(existing?.provider ?? "");
   const [model, setModel] = useState(existing?.model ?? "");
   const [maxTokens, setMaxTokens] = useState(existing?.max_tokens ?? 4096);
   const [temperature, setTemperature] = useState(existing?.temperature ?? 0.2);
@@ -35,21 +42,34 @@ function ConfigCard({
 
   return (
     <div className="rounded-lg border border-iron bg-charcoal p-5">
-      <div className="flex items-center justify-between mb-4">
-        <span className="text-xs font-mono uppercase tracking-wider text-amber">
-          {stage}
-        </span>
+      <div className="flex items-center justify-between mb-1">
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-mono uppercase tracking-wider text-amber">
+            {stage}
+          </span>
+          {existing ? (
+            <span className="inline-flex items-center rounded-sm border border-amber/20 bg-amber/10 px-1.5 py-0.5 text-[9px] font-mono uppercase tracking-wider text-amber">
+              Custom
+            </span>
+          ) : (
+            <span className="inline-flex items-center rounded-sm border border-iron bg-iron/50 px-1.5 py-0.5 text-[9px] font-mono uppercase tracking-wider text-slate-text">
+              Default
+            </span>
+          )}
+        </div>
         {existing && (
           <button
             type="button"
             onClick={() => del.mutate({ repoId, stage })}
-            className="text-slate-text hover:text-red-400 transition-colors"
-            title="Remove override"
+            className="text-[11px] font-mono text-slate-text hover:text-red-400 transition-colors"
           >
-            <Trash2 className="h-3.5 w-3.5" />
+            Reset to default
           </button>
         )}
       </div>
+      <p className="text-[11px] font-mono text-slate-text mb-4">
+        {STAGE_DESCRIPTIONS[stage]}
+      </p>
       <div className="grid grid-cols-2 gap-3 mb-3">
         <div>
           <label className="block text-[10px] font-mono text-slate-text mb-1">
@@ -59,7 +79,8 @@ function ConfigCard({
             type="text"
             value={provider}
             onChange={(e) => setProvider(e.target.value)}
-            className="w-full rounded border border-iron bg-background px-2 py-1.5 text-xs font-mono text-foreground focus:border-amber focus:outline-none"
+            placeholder="Using default"
+            className="w-full rounded border border-iron bg-background px-2 py-1.5 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none"
           />
         </div>
         <div>
@@ -70,7 +91,7 @@ function ConfigCard({
             type="text"
             value={model}
             onChange={(e) => setModel(e.target.value)}
-            placeholder="e.g. glm-5"
+            placeholder="Using default model"
             className="w-full rounded border border-iron bg-background px-2 py-1.5 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none"
           />
         </div>
@@ -109,6 +130,9 @@ function ConfigCard({
         <Save className="h-3 w-3" />
         {upsert.isPending ? "Saving..." : "Save"}
       </button>
+      <p className="text-[10px] font-mono text-iron mt-3">
+        Set provider to &quot;openai&quot;, &quot;anthropic&quot;, etc. to use your own API key.
+      </p>
     </div>
   );
 }
@@ -132,10 +156,10 @@ export default function SettingsPage() {
       <div className="mb-8 flex items-center justify-between">
         <div>
           <h1 className="font-display text-2xl font-bold text-foreground">
-            Settings
+            AI Configuration
           </h1>
           <p className="text-xs font-mono text-slate-text mt-1">
-            Per-repo LLM model configuration.
+            Configure which AI models Argus uses for each review stage.
           </p>
         </div>
         {repos && repos.length > 0 && (

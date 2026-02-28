@@ -37,7 +37,7 @@ function SidebarLink({
       href={href}
       className={`flex items-center gap-3 rounded-md px-3 py-2 text-xs font-mono transition-colors ${
         active
-          ? "bg-sidebar-accent text-amber"
+          ? "border-l-2 border-amber bg-sidebar-accent text-amber"
           : "text-slate-text hover:bg-sidebar-accent hover:text-foreground"
       }`}
     >
@@ -98,7 +98,7 @@ export default function DashboardLayout({
                 <SidebarLink
                   key={item.href}
                   {...item}
-                  active={pathname === item.href}
+                  active={pathname === item.href || (item.href !== "/dashboard" && pathname.startsWith(item.href))}
                 />
               ))}
             </nav>
