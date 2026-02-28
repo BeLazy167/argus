@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 interface ReviewComment {
   line: number;
@@ -59,19 +59,21 @@ const SEVERITY_STYLES = {
 };
 
 export function AnimatedReview() {
-  const [visibleComments, setVisibleComments] = useState<number[]>([]);
-  const [typedChars, setTypedChars] = useState<Record<number, number>>({});
+  const [, forceRender] = useState(0);
   const [hasStarted, setHasStarted] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const animFrameRef = useRef<number>(0);
   const startTimeRef = useRef<number>(0);
+  const visibleRef = useRef<Set<number>>(new Set());
+  const typedRef = useRef<Record<number, number>>({});
 
   useEffect(() => {
     const observer = new IntersectionObserver(
       (entries) => {
         const entry = entries[0];
-        if (entry && entry.isIntersecting && !hasStarted) {
+        if (entry && entry.isIntersecting) {
           setHasStarted(true);
+          observer.disconnect();
         }
       },
       { threshold: 0.3 }
@@ -79,10 +81,8 @@ export function AnimatedReview() {
 
     const el = containerRef.current;
     if (el) observer.observe(el);
-    return () => {
-      if (el) observer.unobserve(el);
-    };
-  }, [hasStarted]);
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     if (!hasStarted) return;
@@ -91,12 +91,12 @@ export function AnimatedReview() {
 
     const tick = (now: number) => {
       const elapsed = now - startTimeRef.current;
+      let changed = false;
 
       REVIEW_COMMENTS.forEach((comment, i) => {
-        if (elapsed >= comment.delay && !visibleComments.includes(i)) {
-          setVisibleComments((prev) =>
-            prev.includes(i) ? prev : [...prev, i]
-          );
+        if (elapsed >= comment.delay && !visibleRef.current.has(i)) {
+          visibleRef.current.add(i);
+          changed = true;
         }
 
         if (elapsed >= comment.delay) {
@@ -105,14 +105,19 @@ export function AnimatedReview() {
             Math.floor(typeElapsed / 20),
             comment.text.length
           );
-          setTypedChars((prev) => ({ ...prev, [i]: charsToShow }));
+          if ((typedRef.current[i] ?? 0) !== charsToShow) {
+            typedRef.current[i] = charsToShow;
+            changed = true;
+          }
         }
       });
 
+      if (changed) forceRender((n) => n + 1);
+
       const allDone = REVIEW_COMMENTS.every(
         (c, i) =>
-          visibleComments.includes(i) &&
-          (typedChars[i] ?? 0) >= c.text.length
+          visibleRef.current.has(i) &&
+          (typedRef.current[i] ?? 0) >= c.text.length
       );
 
       if (!allDone) {
@@ -122,7 +127,7 @@ export function AnimatedReview() {
 
     animFrameRef.current = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(animFrameRef.current);
-  }, [hasStarted, visibleComments, typedChars]);
+  }, [hasStarted]);
 
   return (
     <div ref={containerRef} className="w-full max-w-2xl mx-auto">
@@ -145,7 +150,7 @@ export function AnimatedReview() {
       <div className="border-x border-b border-iron rounded-b-lg overflow-hidden bg-void">
         {DIFF_LINES.map((line, i) => {
           const commentForLine = REVIEW_COMMENTS.find(
-            (c) => c.line === i && visibleComments.includes(REVIEW_COMMENTS.indexOf(c))
+            (c) => c.line === i && visibleRef.current.has(REVIEW_COMMENTS.indexOf(c))
           );
           const commentIndex = commentForLine
             ? REVIEW_COMMENTS.indexOf(commentForLine)
@@ -213,8 +218,8 @@ export function AnimatedReview() {
                   </div>
                   <div className="px-3 py-2">
                     <p className="text-[11px] font-mono text-ash/80 leading-relaxed">
-                      {commentForLine.text.slice(0, typedChars[commentIndex] ?? 0)}
-                      {(typedChars[commentIndex] ?? 0) < commentForLine.text.length && (
+                      {commentForLine.text.slice(0, typedRef.current[commentIndex] ?? 0)}
+                      {(typedRef.current[commentIndex] ?? 0) < commentForLine.text.length && (
                         <span className="inline-block w-[5px] h-[13px] bg-amber/70 ml-px animate-[cursorBlink_0.8s_step-end_infinite]" />
                       )}
                     </p>
