@@ -78,6 +78,16 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		return err
 	}
 
+	// Auto-register installation + repo on first webhook
+	inst, err := o.st.CreateInstallation(ctx, event.InstallationID, owner)
+	if err != nil {
+		return fmt.Errorf("upserting installation: %w", err)
+	}
+	dbRepo, err := o.st.UpsertRepo(ctx, inst.ID, event.RepoID, event.RepoFullName, event.BaseRef)
+	if err != nil {
+		return fmt.Errorf("upserting repo: %w", err)
+	}
+
 	// Fetch diff
 	rawDiff, err := o.ghClient.GetPRDiff(ctx, event.InstallationID, owner, repo, event.PRNumber)
 	if err != nil {
@@ -119,7 +129,7 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 	_, err = o.db.Exec(ctx, `
 		INSERT INTO reviews (id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, status, trigger)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', 'webhook')
-	`, reviewID, event.RepoID, event.PRNumber, event.PRTitle, event.PRAuthor, event.HeadSHA, event.BaseSHA)
+	`, reviewID, dbRepo.ID, event.PRNumber, event.PRTitle, event.PRAuthor, event.HeadSHA, event.BaseSHA)
 	if err != nil {
 		return fmt.Errorf("creating review record: %w", err)
 	}
