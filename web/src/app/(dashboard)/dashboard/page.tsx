@@ -1,15 +1,27 @@
-import { Eye, GitPullRequest, AlertTriangle, CheckCircle } from "lucide-react";
+"use client";
+
+import {
+  Eye,
+  GitPullRequest,
+  AlertTriangle,
+  CheckCircle,
+  Loader2,
+} from "lucide-react";
+import { useStats, useActivity } from "@/lib/queries/stats";
+import { formatDistanceToNow } from "@/lib/time";
 
 function StatCard({
   label,
   value,
   icon: Icon,
   accent = false,
+  loading = false,
 }: {
   label: string;
-  value: string;
+  value: string | number;
   icon: React.ComponentType<{ className?: string }>;
   accent?: boolean;
+  loading?: boolean;
 }) {
   return (
     <div
@@ -32,55 +44,52 @@ function StatCard({
           accent ? "text-amber" : "text-foreground"
         }`}
       >
-        {value}
+        {loading ? <Loader2 className="h-5 w-5 animate-spin" /> : value}
       </p>
     </div>
   );
 }
 
-function ReviewRow({
-  repo,
-  pr,
-  score,
-  status,
+function ActivityRow({
+  action,
+  resource,
+  actor,
   time,
 }: {
-  repo: string;
-  pr: string;
-  score: number;
-  status: "completed" | "reviewing" | "failed";
+  action: string;
+  resource?: string;
+  actor?: string;
   time: string;
 }) {
-  const scoreColor =
-    score >= 8
-      ? "text-green-400"
-      : score >= 5
-        ? "text-amber"
-        : "text-red-400";
-
-  const statusBadge = {
-    completed: "bg-green-400/10 text-green-400 border-green-400/20",
-    reviewing: "bg-amber/10 text-amber border-amber/20",
-    failed: "bg-red-400/10 text-red-400 border-red-400/20",
-  }[status];
+  const label = action.replaceAll("_", " ");
 
   return (
     <div className="flex items-center justify-between border-b border-iron/50 py-3 last:border-0">
-      <div className="flex items-center gap-4">
-        <span className={`font-mono text-lg font-medium ${scoreColor}`}>
-          {score}
-        </span>
+      <div className="flex items-center gap-3">
+        <div
+          className={`h-2 w-2 rounded-full ${
+            action.includes("fail")
+              ? "bg-red-400"
+              : action.includes("complete")
+                ? "bg-green-400"
+                : "bg-amber"
+          }`}
+        />
         <div>
-          <p className="text-xs font-mono text-foreground">{repo}</p>
-          <p className="text-[11px] font-mono text-slate-text">{pr}</p>
+          <p className="text-xs font-mono text-foreground capitalize">
+            {label}
+          </p>
+          {resource && (
+            <p className="text-[11px] font-mono text-slate-text">{resource}</p>
+          )}
         </div>
       </div>
       <div className="flex items-center gap-3">
-        <span
-          className={`inline-flex items-center rounded-sm border px-2 py-0.5 text-[10px] font-mono uppercase tracking-wider ${statusBadge}`}
-        >
-          {status}
-        </span>
+        {actor && (
+          <span className="text-[11px] font-mono text-slate-text">
+            {actor}
+          </span>
+        )}
         <span className="text-[11px] font-mono text-iron">{time}</span>
       </div>
     </div>
@@ -88,6 +97,9 @@ function ReviewRow({
 }
 
 export default function DashboardPage() {
+  const { data: stats, isLoading: statsLoading } = useStats();
+  const { data: activity, isLoading: activityLoading } = useActivity(20);
+
   return (
     <>
       <div className="mb-8">
@@ -103,61 +115,61 @@ export default function DashboardPage() {
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4 mb-10">
         <StatCard
           label="Reviews today"
-          value="23"
+          value={stats?.completed_today ?? 0}
           icon={Eye}
           accent
+          loading={statsLoading}
         />
-        <StatCard label="Open PRs" value="7" icon={GitPullRequest} />
-        <StatCard label="Critical issues" value="3" icon={AlertTriangle} />
-        <StatCard label="Clean ships" value="18" icon={CheckCircle} />
+        <StatCard
+          label="Active repos"
+          value={stats?.active_repos ?? 0}
+          icon={GitPullRequest}
+          loading={statsLoading}
+        />
+        <StatCard
+          label="Critical finds"
+          value={stats?.critical_finds ?? 0}
+          icon={AlertTriangle}
+          loading={statsLoading}
+        />
+        <StatCard
+          label="Avg score"
+          value={stats?.avg_score ?? 0}
+          icon={CheckCircle}
+          loading={statsLoading}
+        />
       </div>
 
-      {/* Recent reviews */}
+      {/* Activity feed */}
       <div className="rounded-lg border border-iron bg-charcoal">
         <div className="flex items-center justify-between border-b border-iron px-5 py-4">
           <h2 className="text-xs font-mono uppercase tracking-[0.1em] text-foreground">
-            Recent Reviews
+            Recent Activity
           </h2>
           <span className="text-[10px] font-mono text-slate-text">
-            Last 24h
+            {stats?.total_reviews ?? "—"} total reviews
           </span>
         </div>
         <div className="px-5">
-          <ReviewRow
-            repo="acmeorg/argus"
-            pr="#142 — Fix auth middleware race condition"
-            score={4}
-            status="completed"
-            time="2m ago"
-          />
-          <ReviewRow
-            repo="acmeorg/argus"
-            pr="#141 — Add webhook retry logic"
-            score={8}
-            status="completed"
-            time="15m ago"
-          />
-          <ReviewRow
-            repo="acme/billing"
-            pr="#89 — Update Stripe integration"
-            score={6}
-            status="reviewing"
-            time="22m ago"
-          />
-          <ReviewRow
-            repo="acme/api"
-            pr="#312 — Migrate to pgx v5"
-            score={9}
-            status="completed"
-            time="1h ago"
-          />
-          <ReviewRow
-            repo="acme/web"
-            pr="#205 — Dark mode support"
-            score={10}
-            status="completed"
-            time="3h ago"
-          />
+          {activityLoading ? (
+            <div className="flex items-center justify-center py-10">
+              <Loader2 className="h-5 w-5 animate-spin text-slate-text" />
+            </div>
+          ) : activity?.length === 0 ? (
+            <div className="py-10 text-center text-xs font-mono text-slate-text">
+              No activity yet. Open a PR to get started.
+            </div>
+          ) : (
+            activity?.map((a) => (
+              <ActivityRow
+                key={a.id}
+                action={a.action}
+                resource={a.resource ?? undefined}
+                actor={a.actor ?? undefined}
+                time={formatDistanceToNow(a.created_at)}
+              />
+            ))
+          )}
         </div>
       </div>
     </>

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
+	"time"
 )
 
 const baseURL = "https://api.supermemory.ai"
@@ -20,7 +22,7 @@ type Client struct {
 func NewClient(apiKey string) *Client {
 	return &Client{
 		apiKey: apiKey,
-		client: &http.Client{},
+		client: &http.Client{Timeout: 30 * time.Second},
 	}
 }
 
@@ -81,9 +83,23 @@ func (c *Client) setHeaders(req *http.Request) {
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 }
 
-// ContainerTag generates a consistent container tag for a given scope.
-func ContainerTag(scope, identifier string) string {
-	return fmt.Sprintf("%s:%s", scope, identifier)
+// tagSanitizer replaces chars invalid in Supermemory container tags.
+var tagSanitizer = strings.NewReplacer(":", "-", "/", "-")
+
+// OwnerTag returns a container tag scoped to an owner (user or org).
+// Uses ~ as segment separator to avoid collisions (e.g. owner "a-b" vs "a" repo "b").
+func OwnerTag(owner, kind string) string {
+	return tagSanitizer.Replace(owner) + "~" + kind
+}
+
+// RepoTag returns a container tag scoped to a specific repo under an owner.
+func RepoTag(owner, repo, kind string) string {
+	return tagSanitizer.Replace(owner) + "~" + tagSanitizer.Replace(repo) + "~" + kind
+}
+
+// ValidateTagScope checks that a container tag belongs to the given owner.
+func ValidateTagScope(tag, owner string) bool {
+	return strings.HasPrefix(tag, tagSanitizer.Replace(owner)+"~")
 }
 
 type AddRequest struct {

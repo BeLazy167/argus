@@ -45,7 +45,6 @@ type PipelineRun struct {
 	Diff             *diff.PatchSet
 	RawDiff          string
 	TriageResults    []TriageResult
-	Context          map[string]ReviewContext // file path → context
 	FileReviews      []FileReview
 	Synthesis        *SynthesisResult
 	IsIncremental    bool
@@ -53,12 +52,6 @@ type PipelineRun struct {
 	Error            string
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
-}
-
-// ReviewContext holds RAG-retrieved context for a single file.
-type ReviewContext struct {
-	PastReviews []string // relevant past review snippets
-	Rules       []string // matched rules
 }
 
 // FileReview holds the review output for a single file.

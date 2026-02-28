@@ -5,24 +5,30 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/acmeorg/argus/internal/llm"
+	"github.com/acmeorg/argus/internal/memory"
 	"github.com/acmeorg/argus/internal/store"
 	"github.com/acmeorg/argus/pkg/diff"
 )
 
 // ReviewStage handles the per-file parallel review using LLM.
 type ReviewStage struct {
-	registry   *llm.Registry
-	store      *store.Store
-	maxWorkers int
+	registry    *llm.Registry
+	store       *store.Store
+	memClient   *memory.Client
+	maxWorkers  int
+	maxToolIter int // max tool-use iterations per file
 }
 
-func NewReviewStage(registry *llm.Registry, st *store.Store, maxWorkers int) *ReviewStage {
+func NewReviewStage(registry *llm.Registry, st *store.Store, memClient *memory.Client, maxWorkers int) *ReviewStage {
 	return &ReviewStage{
-		registry:   registry,
-		store:      st,
-		maxWorkers: maxWorkers,
+		registry:    registry,
+		store:       st,
+		memClient:   memClient,
+		maxWorkers:  maxWorkers,
+		maxToolIter: 5,
 	}
 }
 
@@ -54,6 +60,10 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 		return nil
 	}
 
+	// Cancellable context so workers exit fast on first error
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	type result struct {
 		review FileReview
 		err    error
@@ -67,7 +77,9 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 	if workers > len(filesToReview) {
 		workers = len(filesToReview)
 	}
-
+	if workers > 2 {
+		workers = 2
+	}
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
@@ -75,6 +87,11 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 			for file := range fileCh {
 				review, err := rs.reviewFile(ctx, run, file)
 				resultCh <- result{review: review, err: err}
+				select {
+				case <-time.After(2 * time.Second):
+				case <-ctx.Done():
+					return
+				}
 			}
 		}()
 	}
@@ -89,17 +106,17 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 		close(resultCh)
 	}()
 
+	var firstErr error
 	for r := range resultCh {
-		if r.err != nil {
-			for range resultCh {
-			}
-			return fmt.Errorf("reviewing file %s: %w", r.review.Path, r.err)
+		if r.err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("reviewing file %s: %w", r.review.Path, r.err)
+			cancel()
 		}
-		if len(r.review.Comments) > 0 {
+		if firstErr == nil && len(r.review.Comments) > 0 {
 			run.FileReviews = append(run.FileReviews, r.review)
 		}
 	}
-	return nil
+	return firstErr
 }
 
 // truncateDiff limits a file diff to maxLines of raw diff content.
@@ -124,42 +141,78 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, file di
 		return review, err
 	}
 
-	prompt := buildFileReviewPrompt(run, file)
-	systemPrompt := buildSystemPrompt(run, file.NewName)
-	resp, err := provider.Complete(ctx, llm.CompletionRequest{
-		Model:       cfg.Model,
-		System:      systemPrompt,
-		Messages:    []llm.Message{{Role: "user", Content: prompt}},
-		MaxTokens:   cfg.MaxTokens,
-		Temperature: cfg.Temperature,
-	})
+	owner, repo, err := splitRepoFullName(run.PREvent.RepoFullName)
 	if err != nil {
-		return review, fmt.Errorf("LLM completion: %w", err)
+		return review, err
+	}
+	prompt := buildFileReviewPrompt(run, file)
+	messages := []llm.Message{{Role: "user", Content: prompt}}
+
+	var tools []llm.Tool
+	var toolHandler *ToolHandler
+	systemPrompt := baseSystemPrompt
+	if rs.memClient != nil {
+		tools = memoryTools()
+		toolHandler = NewToolHandler(rs.memClient, rs.store, owner)
+		systemPrompt = buildAgenticSystemPrompt(owner, repo)
 	}
 
-	comments, err := parseReviewResponse(resp.Content)
-	if err != nil {
-		return review, fmt.Errorf("parsing response: %w", err)
+	// Tool-use loop
+	for i := 0; i < rs.maxToolIter; i++ {
+		resp, err := provider.Complete(ctx, llm.CompletionRequest{
+			Model:       cfg.Model,
+			System:      systemPrompt,
+			Messages:    messages,
+			MaxTokens:   cfg.MaxTokens,
+			Temperature: cfg.Temperature,
+			Tools:       tools,
+		})
+		if err != nil {
+			return review, fmt.Errorf("LLM completion: %w", err)
+		}
+
+		// If no tool calls, we have the final response
+		if len(resp.ToolCalls) == 0 {
+			comments, err := parseReviewResponse(resp.Content)
+			if err != nil {
+				return review, fmt.Errorf("parsing response: %w", err)
+			}
+			review.Comments = validateComments(comments)
+			return review, nil
+		}
+
+		// Guard: if LLM returns tool calls but no handler is available
+		if toolHandler == nil {
+			return review, fmt.Errorf("LLM requested tools but memory is not configured")
+		}
+
+		// Process tool calls
+		messages = append(messages, llm.Message{
+			Role:      "assistant",
+			Content:   resp.Content,
+			ToolCalls: resp.ToolCalls,
+		})
+
+		for _, tc := range resp.ToolCalls {
+			result, err := toolHandler.Handle(ctx, tc)
+			if err != nil {
+				result = fmt.Sprintf("Error: %s", err)
+			}
+			messages = append(messages, llm.Message{
+				Role:       "tool",
+				Content:    result,
+				ToolCallID: tc.ID,
+			})
+		}
 	}
-	review.Comments = validateComments(comments)
-	return review, nil
+
+	return review, fmt.Errorf("exceeded max tool iterations (%d) for %s", rs.maxToolIter, file.NewName)
 }
 
 func buildFileReviewPrompt(run *PipelineRun, file diff.FileDiff) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf(`Review the following code changes in file "%s" from PR #%d: "%s" by %s.`,
 		file.NewName, run.PREvent.PRNumber, run.PREvent.PRTitle, run.PREvent.PRAuthor))
-
-	// Inject context if available
-	if rc, ok := run.Context[file.NewName]; ok {
-		if len(rc.PastReviews) > 0 {
-			sb.WriteString("\n\nRelevant past review comments on this file:\n")
-			for i, pr := range rc.PastReviews {
-				sb.WriteString(fmt.Sprintf("--- Past Review %d ---\n%s\n", i+1, pr))
-			}
-		}
-	}
-
 	sb.WriteString(fmt.Sprintf(`
 
 Diff:
@@ -168,13 +221,12 @@ Diff:
 Respond with a JSON array of comments. Each comment must have:
 - "line": int, line number in the new file (required, must be > 0)
 - "start_line": int, start of multi-line range (0 if single-line)
-- "body": string, the review comment in markdown. Include: what's wrong, why it matters, and a concrete fix suggestion
+- "body": string, the review comment in markdown
 - "severity": one of "critical", "warning", "suggestion", "praise"
 - "category": one of "security", "performance", "style", "bug", "readability", "error_handling", "type_design", "testing"
 
 Only comment on meaningful issues with high confidence. Return [] if the changes look good.
 JSON array only, no other text.`, file.RawDiff))
-
 	return sb.String()
 }
 
@@ -257,10 +309,29 @@ const baseSystemPrompt = `You are an expert code reviewer. You review pull reque
 ## Output Format
 Respond ONLY with a JSON array of comments. No other text.`
 
-func buildSystemPrompt(run *PipelineRun, fileName string) string {
-	rc, ok := run.Context[fileName]
-	if !ok || len(rc.Rules) == 0 {
-		return baseSystemPrompt
-	}
-	return baseSystemPrompt + "\n\nProject Rules:\n" + strings.Join(rc.Rules, "\n")
+func buildAgenticSystemPrompt(owner, repo string) string {
+	return baseSystemPrompt + fmt.Sprintf(`
+
+## Memory Access
+
+You have access to Argus memory via tools. Use them to find relevant context before reviewing.
+
+**Container tag convention:**
+- %s — owner-wide learned patterns
+- %s — owner-wide review rules
+- %s — repo-specific patterns
+- %s — repo-specific rules
+- %s — past review comments for this repo
+
+**Guidelines:**
+- Search for relevant patterns/rules BEFORE writing review comments
+- For changes that might affect other repos, use list_repos to discover related repos, then search their memory
+- Prefer repo-specific memory over owner-wide when both exist (most specific wins)
+`,
+		memory.OwnerTag(owner, "patterns"),
+		memory.OwnerTag(owner, "rules"),
+		memory.RepoTag(owner, repo, "patterns"),
+		memory.RepoTag(owner, repo, "rules"),
+		memory.RepoTag(owner, repo, "reviews"),
+	)
 }

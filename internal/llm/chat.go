@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 )
 
 // ChatProvider implements the Provider interface using the OpenAI-compatible
@@ -24,7 +25,7 @@ func NewChatProvider(name, apiKey, baseURL string) *ChatProvider {
 		name:    name,
 		apiKey:  apiKey,
 		baseURL: baseURL,
-		client:  &http.Client{},
+		client:  &http.Client{Timeout: 120 * time.Second},
 	}
 }
 
@@ -36,7 +37,12 @@ func (p *ChatProvider) Complete(ctx context.Context, req CompletionRequest) (Com
 		msgs = append(msgs, chatMessage{Role: "system", Content: req.System})
 	}
 	for _, m := range req.Messages {
-		msgs = append(msgs, chatMessage{Role: m.Role, Content: m.Content})
+		msgs = append(msgs, chatMessage{
+			Role:       m.Role,
+			Content:    m.Content,
+			ToolCalls:  m.ToolCalls,
+			ToolCallID: m.ToolCallID,
+		})
 	}
 
 	body := chatRequest{
@@ -44,6 +50,7 @@ func (p *ChatProvider) Complete(ctx context.Context, req CompletionRequest) (Com
 		Messages:    msgs,
 		MaxTokens:   req.MaxTokens,
 		Temperature: req.Temperature,
+		Tools:       req.Tools,
 	}
 
 	jsonBody, err := json.Marshal(body)
@@ -89,12 +96,16 @@ func (p *ChatProvider) Complete(ctx context.Context, req CompletionRequest) (Com
 			CompletionTokens: result.Usage.CompletionTokens,
 			TotalTokens:      result.Usage.TotalTokens,
 		},
+		ToolCalls:    result.Choices[0].Message.ToolCalls,
+		FinishReason: result.Choices[0].FinishReason,
 	}, nil
 }
 
 type chatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string     `json:"role"`
+	Content    string     `json:"content,omitempty"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
 }
 
 type chatRequest struct {
@@ -102,11 +113,17 @@ type chatRequest struct {
 	Messages    []chatMessage `json:"messages"`
 	MaxTokens   int           `json:"max_tokens,omitempty"`
 	Temperature float64       `json:"temperature,omitempty"`
+	Tools       []Tool        `json:"tools,omitempty"`
 }
 
 type chatResponse struct {
 	Choices []struct {
-		Message chatMessage `json:"message"`
+		Message struct {
+			Role      string     `json:"role"`
+			Content   string     `json:"content"`
+			ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+		} `json:"message"`
+		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
 	Usage struct {
 		PromptTokens     int `json:"prompt_tokens"`

@@ -16,7 +16,6 @@ import (
 	"github.com/acmeorg/argus/internal/llm"
 	"github.com/acmeorg/argus/internal/memory"
 	"github.com/acmeorg/argus/internal/pipeline"
-	"github.com/acmeorg/argus/internal/rules"
 	"github.com/acmeorg/argus/internal/store"
 )
 
@@ -62,23 +61,17 @@ func Run() error {
 	})
 
 	// Memory / RAG
+	var memClient *memory.Client
 	var indexer *memory.Indexer
 	if cfg.SupermemoryAPIKey != "" {
-		memClient := memory.NewClient(cfg.SupermemoryAPIKey)
+		memClient = memory.NewClient(cfg.SupermemoryAPIKey)
 		indexer = memory.NewIndexer(memClient, logger)
 	}
 
-	// Rules engine
-	rulesEngine := rules.NewEngine(db.Pool, ghClient, logger)
-
 	// Pipeline
 	triageStage := pipeline.NewTriageStage(registry, db)
-	reviewStage := pipeline.NewReviewStage(registry, db, cfg.MaxConcurrentReviews)
-	var contextStage *pipeline.ContextStage
-	if indexer != nil {
-		contextStage = pipeline.NewContextStage(indexer, rulesEngine, logger)
-	}
-	orchestrator := pipeline.NewOrchestrator(db.Pool, db, ghClient, reviewStage, triageStage, contextStage, indexer, logger)
+	reviewStage := pipeline.NewReviewStage(registry, db, memClient, cfg.MaxConcurrentReviews)
+	orchestrator := pipeline.NewOrchestrator(db.Pool, db, ghClient, reviewStage, triageStage, indexer, logger)
 
 	// Recover incomplete pipeline runs
 	if err := orchestrator.RecoverIncomplete(ctx); err != nil {

@@ -4,25 +4,23 @@ package pipeline
 type PipelineState string
 
 const (
-	StatePending           PipelineState = "pending"
-	StateTriaging          PipelineState = "triaging"
-	StateRetrievingContext PipelineState = "retrieving_context"
-	StateReviewing         PipelineState = "reviewing"
-	StateSynthesizing      PipelineState = "synthesizing"
-	StatePosting           PipelineState = "posting"
-	StateCompleted         PipelineState = "completed"
-	StateFailed            PipelineState = "failed"
+	StatePending      PipelineState = "pending"
+	StateTriaging     PipelineState = "triaging"
+	StateReviewing    PipelineState = "reviewing"
+	StateSynthesizing PipelineState = "synthesizing"
+	StatePosting      PipelineState = "posting"
+	StateCompleted    PipelineState = "completed"
+	StateFailed       PipelineState = "failed"
 )
 
 // transitions defines the valid next state after each stage succeeds.
 func transitions() map[PipelineState]PipelineState {
 	return map[PipelineState]PipelineState{
-		StatePending:           StateTriaging,
-		StateTriaging:          StateRetrievingContext,
-		StateRetrievingContext: StateReviewing,
-		StateReviewing:         StateSynthesizing,
-		StateSynthesizing:      StatePosting,
-		StatePosting:           StateCompleted,
+		StatePending:      StateTriaging,
+		StateTriaging:     StateReviewing,
+		StateReviewing:    StateSynthesizing,
+		StateSynthesizing: StatePosting,
+		StatePosting:      StateCompleted,
 	}
 }
 

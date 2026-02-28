@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
@@ -21,7 +22,7 @@ type Repo struct {
 	FullName       string    `json:"full_name"`
 	DefaultBranch  string    `json:"default_branch"`
 	Enabled        bool      `json:"enabled"`
-	SettingsJSON   []byte    `json:"settings_json"`
+	SettingsJSON   json.RawMessage `json:"settings_json"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 }
