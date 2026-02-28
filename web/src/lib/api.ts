@@ -1,13 +1,14 @@
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
 
-type FetchOptions = RequestInit & { token?: string };
+type FetchOptions = RequestInit & { token?: string; installationId?: number };
 
 async function apiFetch<T>(path: string, opts: FetchOptions = {}): Promise<T> {
-  const { token, headers, ...rest } = opts;
+  const { token, installationId, headers, ...rest } = opts;
   const res = await fetch(`${API_URL}${path}`, {
     headers: {
       "Content-Type": "application/json",
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(installationId ? { "X-Installation-ID": String(installationId) } : {}),
       ...headers,
     },
     ...rest,
@@ -20,18 +21,18 @@ async function apiFetch<T>(path: string, opts: FetchOptions = {}): Promise<T> {
 }
 
 export const api = {
-  get: <T>(path: string, token?: string) =>
-    apiFetch<T>(path, { token }),
+  get: <T>(path: string, token?: string, installationId?: number) =>
+    apiFetch<T>(path, { token, installationId }),
 
-  post: <T>(path: string, body: unknown, token?: string) =>
-    apiFetch<T>(path, { method: "POST", body: JSON.stringify(body), token }),
+  post: <T>(path: string, body: unknown, token?: string, installationId?: number) =>
+    apiFetch<T>(path, { method: "POST", body: JSON.stringify(body), token, installationId }),
 
-  put: <T>(path: string, body: unknown, token?: string) =>
-    apiFetch<T>(path, { method: "PUT", body: JSON.stringify(body), token }),
+  put: <T>(path: string, body: unknown, token?: string, installationId?: number) =>
+    apiFetch<T>(path, { method: "PUT", body: JSON.stringify(body), token, installationId }),
 
-  patch: <T>(path: string, body: unknown, token?: string) =>
-    apiFetch<T>(path, { method: "PATCH", body: JSON.stringify(body), token }),
+  patch: <T>(path: string, body: unknown, token?: string, installationId?: number) =>
+    apiFetch<T>(path, { method: "PATCH", body: JSON.stringify(body), token, installationId }),
 
-  delete: <T>(path: string, token?: string) =>
-    apiFetch<T>(path, { method: "DELETE", token }),
+  delete: <T>(path: string, token?: string, installationId?: number) =>
+    apiFetch<T>(path, { method: "DELETE", token, installationId }),
 };

@@ -11,6 +11,7 @@ import {
   Settings,
 } from "lucide-react";
 import { QueryProvider } from "@/providers/query-provider";
+import { InstallationProvider, useInstallation } from "@/providers/installation-provider";
 
 const navItems = [
   { href: "/dashboard", label: "Overview", icon: LayoutDashboard },
@@ -46,6 +47,26 @@ function SidebarLink({
   );
 }
 
+function InstallationSwitcher() {
+  const { installations, active, setActive } = useInstallation();
+  if (installations.length <= 1) return null;
+  return (
+    <div className="px-5 py-2 border-b border-sidebar-border">
+      <select
+        value={active?.id ?? ""}
+        onChange={(e) => setActive(Number(e.target.value))}
+        className="w-full bg-sidebar text-xs font-mono text-slate-text border border-sidebar-border rounded px-2 py-1 focus:outline-none focus:border-amber"
+      >
+        {installations.map((inst) => (
+          <option key={inst.id} value={inst.id}>
+            {inst.org_login}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
 export default function DashboardLayout({
   children,
 }: {
@@ -55,47 +76,51 @@ export default function DashboardLayout({
 
   return (
     <QueryProvider>
-      <div className="flex h-screen overflow-hidden">
-        {/* Sidebar */}
-        <aside className="flex w-56 shrink-0 flex-col border-r border-sidebar-border bg-sidebar">
-          {/* Wordmark */}
-          <div className="flex h-14 items-center border-b border-sidebar-border px-5">
-            <Link
-              href="/dashboard"
-              className="wordmark text-xs text-amber tracking-[0.2em]"
-            >
-              ARGUS
-            </Link>
-          </div>
+      <InstallationProvider>
+        <div className="flex h-screen overflow-hidden">
+          {/* Sidebar */}
+          <aside className="flex w-56 shrink-0 flex-col border-r border-sidebar-border bg-sidebar">
+            {/* Wordmark */}
+            <div className="flex h-14 items-center border-b border-sidebar-border px-5">
+              <Link
+                href="/dashboard"
+                className="wordmark text-xs text-amber tracking-[0.2em]"
+              >
+                ARGUS
+              </Link>
+            </div>
 
-          {/* Nav */}
-          <nav className="flex-1 space-y-1 px-3 py-4">
-            {navItems.map((item) => (
-              <SidebarLink
-                key={item.href}
-                {...item}
-                active={pathname === item.href}
+            <InstallationSwitcher />
+
+            {/* Nav */}
+            <nav className="flex-1 space-y-1 px-3 py-4">
+              {navItems.map((item) => (
+                <SidebarLink
+                  key={item.href}
+                  {...item}
+                  active={pathname === item.href}
+                />
+              ))}
+            </nav>
+
+            {/* User */}
+            <div className="border-t border-sidebar-border p-4">
+              <UserButton
+                appearance={{
+                  elements: {
+                    avatarBox: "h-7 w-7",
+                  },
+                }}
               />
-            ))}
-          </nav>
+            </div>
+          </aside>
 
-          {/* User */}
-          <div className="border-t border-sidebar-border p-4">
-            <UserButton
-              appearance={{
-                elements: {
-                  avatarBox: "h-7 w-7",
-                },
-              }}
-            />
-          </div>
-        </aside>
-
-        {/* Main content */}
-        <main className="flex-1 overflow-y-auto bg-background bg-noise">
-          <div className="mx-auto max-w-6xl px-8 py-8">{children}</div>
-        </main>
-      </div>
+          {/* Main content */}
+          <main className="flex-1 overflow-y-auto bg-background bg-noise">
+            <div className="mx-auto max-w-6xl px-8 py-8">{children}</div>
+          </main>
+        </div>
+      </InstallationProvider>
     </QueryProvider>
   );
 }

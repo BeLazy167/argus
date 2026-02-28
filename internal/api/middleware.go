@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"math/big"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +20,7 @@ import (
 type contextKey string
 
 const userIDKey contextKey = "user_id"
+const installationIDsKey contextKey = "installation_ids"
 
 type jwks struct {
 	Keys []jwk `json:"keys"`
@@ -199,13 +201,56 @@ func (s *Server) jwtAuth(next http.Handler) http.Handler {
 	})
 }
 
+func (s *Server) requireInstallationScope(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		userID := getUserID(r.Context())
+		if userID == "" {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		ids, err := s.store.GetUserInstallationIDs(r.Context(), userID)
+		if err != nil {
+			s.logger.Error("get user installation ids", "error", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+			return
+		}
+		if len(ids) == 0 {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "no installations linked"})
+			return
+		}
+		if h := r.Header.Get("X-Installation-ID"); h != "" {
+			reqID, err := strconv.ParseInt(h, 10, 64)
+			if err == nil {
+				for _, id := range ids {
+					if id == reqID {
+						ids = []int64{reqID}
+						break
+					}
+				}
+			}
+		}
+		ctx := context.WithValue(r.Context(), installationIDsKey, ids)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+func getInstallationIDs(ctx context.Context) []int64 {
+	ids, _ := ctx.Value(installationIDsKey).([]int64)
+	return ids
+}
+
+func getUserID(ctx context.Context) string {
+	id, _ := ctx.Value(userIDKey).(string)
+	return id
+}
+
 // cors adds CORS headers for the frontend origin.
 func cors(allowOrigin string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Access-Control-Allow-Origin", allowOrigin)
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Installation-ID")
 			w.Header().Set("Access-Control-Max-Age", "86400")
 
 			if r.Method == http.MethodOptions {

@@ -92,6 +92,14 @@ type ModelConfig struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
+type UserInstallation struct {
+	ID             int64     `json:"id"`
+	ClerkUserID    string    `json:"clerk_user_id"`
+	InstallationID int64     `json:"installation_id"`
+	Role           string    `json:"role"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
 type Stats struct {
 	TotalReviews    int `json:"total_reviews"`
 	CompletedToday  int `json:"completed_today"`

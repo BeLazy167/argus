@@ -91,3 +91,10 @@ export type ActivityLog = {
   metadata?: Record<string, unknown>;
   created_at: string;
 };
+
+export type UserInstallation = {
+  id: number;
+  installation_id: number;
+  role: string;
+  created_at: string;
+};

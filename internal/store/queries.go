@@ -40,6 +40,74 @@ func (s *Store) ListInstallations(ctx context.Context) ([]Installation, error) {
 	return collectOrEmpty(rows, pgx.RowToStructByPos[Installation])
 }
 
+// --- User Installations ---
+
+func (s *Store) LinkUserInstallation(ctx context.Context, clerkUserID string, installationID int64, role string) (*UserInstallation, error) {
+	var ui UserInstallation
+	err := s.Pool.QueryRow(ctx, `
+		INSERT INTO user_installations (clerk_user_id, installation_id, role)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (clerk_user_id, installation_id) DO NOTHING
+		RETURNING id, clerk_user_id, installation_id, role, created_at
+	`, clerkUserID, installationID, role).Scan(&ui.ID, &ui.ClerkUserID, &ui.InstallationID, &ui.Role, &ui.CreatedAt)
+	if err == pgx.ErrNoRows {
+		err = s.Pool.QueryRow(ctx, `
+			SELECT id, clerk_user_id, installation_id, role, created_at
+			FROM user_installations WHERE clerk_user_id = $1 AND installation_id = $2
+		`, clerkUserID, installationID).Scan(&ui.ID, &ui.ClerkUserID, &ui.InstallationID, &ui.Role, &ui.CreatedAt)
+	}
+	return &ui, err
+}
+
+func (s *Store) ListUserInstallations(ctx context.Context, clerkUserID string) ([]Installation, error) {
+	rows, err := s.Pool.Query(ctx, `
+		SELECT i.id, i.installation_id, i.org_login, i.created_at, i.suspended_at
+		FROM installations i
+		JOIN user_installations ui ON ui.installation_id = i.id
+		WHERE ui.clerk_user_id = $1
+		ORDER BY i.created_at DESC
+	`, clerkUserID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return collectOrEmpty(rows, pgx.RowToStructByPos[Installation])
+}
+
+func (s *Store) GetUserInstallationIDs(ctx context.Context, clerkUserID string) ([]int64, error) {
+	rows, err := s.Pool.Query(ctx, `
+		SELECT installation_id FROM user_installations WHERE clerk_user_id = $1
+	`, clerkUserID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if ids == nil {
+		ids = []int64{}
+	}
+	return ids, rows.Err()
+}
+
+func (s *Store) GetInstallationByGitHubID(ctx context.Context, ghInstallationID int64) (*Installation, error) {
+	var inst Installation
+	err := s.Pool.QueryRow(ctx, `
+		SELECT id, installation_id, org_login, created_at, suspended_at
+		FROM installations WHERE installation_id = $1
+	`, ghInstallationID).Scan(&inst.ID, &inst.InstallationID, &inst.OrgLogin, &inst.CreatedAt, &inst.SuspendedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &inst, nil
+}
+
 // --- Repos ---
 
 func (s *Store) ListRepos(ctx context.Context) ([]Repo, error) {
@@ -111,6 +179,30 @@ func (s *Store) UpsertRepo(ctx context.Context, installationID, githubID int64, 
 	return &r, nil
 }
 
+func (s *Store) ListReposScoped(ctx context.Context, installationIDs []int64) ([]Repo, error) {
+	rows, err := s.Pool.Query(ctx, `
+		SELECT id, installation_id, github_id, full_name, default_branch, enabled, settings_json, created_at, updated_at
+		FROM repos WHERE installation_id = ANY($1) ORDER BY full_name
+	`, installationIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return collectOrEmpty(rows, pgx.RowToStructByPos[Repo])
+}
+
+func (s *Store) GetRepoScoped(ctx context.Context, id int64, installationIDs []int64) (*Repo, error) {
+	var r Repo
+	err := s.Pool.QueryRow(ctx, `
+		SELECT id, installation_id, github_id, full_name, default_branch, enabled, settings_json, created_at, updated_at
+		FROM repos WHERE id = $1 AND installation_id = ANY($2)
+	`, id, installationIDs).Scan(&r.ID, &r.InstallationID, &r.GithubID, &r.FullName, &r.DefaultBranch, &r.Enabled, &r.SettingsJSON, &r.CreatedAt, &r.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
 // --- Reviews ---
 
 func (s *Store) ListReviews(ctx context.Context, repoID int64, limit, offset int) ([]Review, error) {
@@ -162,6 +254,25 @@ func (s *Store) UpdateReviewStatus(ctx context.Context, id uuid.UUID, status, er
 		WHERE id = $1
 	`, id, status, nilIfEmpty(errMsg))
 	return err
+}
+
+func (s *Store) ListReviewsScoped(ctx context.Context, repoID int64, installationIDs []int64, limit, offset int) ([]Review, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := s.Pool.Query(ctx, `
+		SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, rv.github_review_id,
+		       rv.status, rv.summary, rv.score, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error, rv.created_at, rv.completed_at
+		FROM reviews rv
+		JOIN repos r ON rv.repo_id = r.id
+		WHERE rv.repo_id = $1 AND r.installation_id = ANY($2)
+		ORDER BY rv.created_at DESC LIMIT $3 OFFSET $4
+	`, repoID, installationIDs, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return collectOrEmpty(rows, pgx.RowToStructByPos[Review])
 }
 
 // --- Rules ---
@@ -303,6 +414,20 @@ func (s *Store) GetStats(ctx context.Context) (*Stats, error) {
 			(SELECT COUNT(*) FROM review_comments WHERE severity = 'critical')::int,
 			(SELECT COUNT(*) FROM reviews WHERE status IN ('pending','in_progress'))::int
 	`).Scan(&st.TotalReviews, &st.CompletedToday, &st.AvgScore, &st.ActiveRepos, &st.CriticalFinds, &st.PendingReviews)
+	return &st, err
+}
+
+func (s *Store) GetStatsScoped(ctx context.Context, installationIDs []int64) (*Stats, error) {
+	var st Stats
+	err := s.Pool.QueryRow(ctx, `
+		SELECT
+			(SELECT COUNT(*) FROM reviews WHERE repo_id IN (SELECT id FROM repos WHERE installation_id = ANY($1)))::int,
+			(SELECT COUNT(*) FROM reviews WHERE repo_id IN (SELECT id FROM repos WHERE installation_id = ANY($1)) AND created_at >= CURRENT_DATE AND status = 'completed')::int,
+			COALESCE((SELECT AVG(score)::int FROM reviews WHERE repo_id IN (SELECT id FROM repos WHERE installation_id = ANY($1)) AND score IS NOT NULL), 0),
+			(SELECT COUNT(*) FROM repos WHERE installation_id = ANY($1) AND enabled = true)::int,
+			(SELECT COUNT(*) FROM review_comments WHERE review_id IN (SELECT id FROM reviews WHERE repo_id IN (SELECT id FROM repos WHERE installation_id = ANY($1))) AND severity = 'critical')::int,
+			(SELECT COUNT(*) FROM reviews WHERE repo_id IN (SELECT id FROM repos WHERE installation_id = ANY($1)) AND status IN ('pending','in_progress'))::int
+	`, installationIDs).Scan(&st.TotalReviews, &st.CompletedToday, &st.AvgScore, &st.ActiveRepos, &st.CriticalFinds, &st.PendingReviews)
 	return &st, err
 }
 

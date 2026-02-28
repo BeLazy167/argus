@@ -55,39 +55,47 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 	// Webhooks (unauthenticated, signature-verified)
 	r.Post("/webhooks/github", s.handleWebhook)
 
-	// API v1 (authenticated via SuperTokens JWT)
+	// API v1 (authenticated via JWT)
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Use(s.jwtAuth)
 
-		// Installations
-		r.Post("/installations", s.createInstallation)
-		r.Get("/installations", s.listInstallations)
+		// Unscoped (user-level)
+		r.Get("/me/installations", s.listMyInstallations)
+		r.Post("/installations/link", s.linkInstallation)
 
-		// Repos
-		r.Get("/repos", s.listRepos)
-		r.Get("/repos/{repoID}", s.getRepo)
-		r.Patch("/repos/{repoID}", s.updateRepo)
+		// Scoped (requires linked installation)
+		r.Group(func(r chi.Router) {
+			r.Use(s.requireInstallationScope)
 
-		// Model Config
-		r.Get("/repos/{repoID}/config", s.getModelConfigs)
-		r.Put("/repos/{repoID}/config/{stage}", s.upsertModelConfig)
-		r.Delete("/repos/{repoID}/config/{stage}", s.deleteModelConfig)
+			// Installations
+			r.Get("/installations", s.listInstallations)
 
-		// Reviews
-		r.Get("/repos/{repoID}/reviews", s.listReviews)
-		r.Post("/repos/{repoID}/reviews", s.triggerReview)
-		r.Get("/reviews/{reviewID}", s.getReview)
-		r.Post("/reviews/{reviewID}/retry", s.retryReview)
+			// Repos
+			r.Get("/repos", s.listRepos)
+			r.Get("/repos/{repoID}", s.getRepo)
+			r.Patch("/repos/{repoID}", s.updateRepo)
 
-		// Rules
-		r.Get("/rules", s.listRules)
-		r.Post("/rules", s.createRule)
-		r.Put("/rules/{ruleID}", s.updateRule)
-		r.Delete("/rules/{ruleID}", s.deleteRule)
+			// Model Config
+			r.Get("/repos/{repoID}/config", s.getModelConfigs)
+			r.Put("/repos/{repoID}/config/{stage}", s.upsertModelConfig)
+			r.Delete("/repos/{repoID}/config/{stage}", s.deleteModelConfig)
 
-		// Stats
-		r.Get("/stats", s.getStats)
-		r.Get("/activity", s.getActivity)
+			// Reviews
+			r.Get("/repos/{repoID}/reviews", s.listReviews)
+			r.Post("/repos/{repoID}/reviews", s.triggerReview)
+			r.Get("/reviews/{reviewID}", s.getReview)
+			r.Post("/reviews/{reviewID}/retry", s.retryReview)
+
+			// Rules
+			r.Get("/rules", s.listRules)
+			r.Post("/rules", s.createRule)
+			r.Put("/rules/{ruleID}", s.updateRule)
+			r.Delete("/rules/{ruleID}", s.deleteRule)
+
+			// Stats
+			r.Get("/stats", s.getStats)
+			r.Get("/activity", s.getActivity)
+		})
 	})
 
 	s.router = r
@@ -146,26 +154,43 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 // --- Installations ---
 
-func (s *Server) createInstallation(w http.ResponseWriter, r *http.Request) {
+func (s *Server) listMyInstallations(w http.ResponseWriter, r *http.Request) {
+	userID := getUserID(r.Context())
+	list, err := s.store.ListUserInstallations(r.Context(), userID)
+	if err != nil {
+		s.logger.Error("list user installations", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
+func (s *Server) linkInstallation(w http.ResponseWriter, r *http.Request) {
+	userID := getUserID(r.Context())
 	var body struct {
-		InstallationID int64  `json:"installation_id"`
-		OrgLogin       string `json:"org_login"`
+		InstallationID int64 `json:"installation_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
 		return
 	}
-	inst, err := s.store.CreateInstallation(r.Context(), body.InstallationID, body.OrgLogin)
+	inst, err := s.store.GetInstallationByGitHubID(r.Context(), body.InstallationID)
 	if err != nil {
-		s.logger.Error("create installation", "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create installation"})
+		s.handleDBError(w, err, "installation not found")
 		return
 	}
-	writeJSON(w, http.StatusCreated, inst)
+	ui, err := s.store.LinkUserInstallation(r.Context(), userID, inst.ID, "owner")
+	if err != nil {
+		s.logger.Error("link installation", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to link installation"})
+		return
+	}
+	writeJSON(w, http.StatusOK, ui)
 }
 
 func (s *Server) listInstallations(w http.ResponseWriter, r *http.Request) {
-	list, err := s.store.ListInstallations(r.Context())
+	userID := getUserID(r.Context())
+	list, err := s.store.ListUserInstallations(r.Context(), userID)
 	if err != nil {
 		s.logger.Error("list installations", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
@@ -177,7 +202,7 @@ func (s *Server) listInstallations(w http.ResponseWriter, r *http.Request) {
 // --- Repos ---
 
 func (s *Server) listRepos(w http.ResponseWriter, r *http.Request) {
-	repos, err := s.store.ListRepos(r.Context())
+	repos, err := s.store.ListReposScoped(r.Context(), getInstallationIDs(r.Context()))
 	if err != nil {
 		s.logger.Error("list repos", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
@@ -192,7 +217,7 @@ func (s *Server) getRepo(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo id"})
 		return
 	}
-	repo, err := s.store.GetRepo(r.Context(), id)
+	repo, err := s.store.GetRepoScoped(r.Context(), id, getInstallationIDs(r.Context()))
 	if err != nil {
 		s.handleDBError(w, err, "repo not found")
 		return
@@ -204,6 +229,10 @@ func (s *Server) updateRepo(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(chi.URLParam(r, "repoID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo id"})
+		return
+	}
+	if _, err := s.store.GetRepoScoped(r.Context(), id, getInstallationIDs(r.Context())); err != nil {
+		s.handleDBError(w, err, "repo not found")
 		return
 	}
 	var body struct {
@@ -234,7 +263,7 @@ func (s *Server) listReviews(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 
-	reviews, err := s.store.ListReviews(r.Context(), repoID, limit, offset)
+	reviews, err := s.store.ListReviewsScoped(r.Context(), repoID, getInstallationIDs(r.Context()), limit, offset)
 	if err != nil {
 		s.logger.Error("list reviews", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
@@ -257,7 +286,7 @@ func (s *Server) triggerReview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	repo, err := s.store.GetRepo(r.Context(), repoID)
+	repo, err := s.store.GetRepoScoped(r.Context(), repoID, getInstallationIDs(r.Context()))
 	if err != nil {
 		s.handleDBError(w, err, "repo not found")
 		return
@@ -287,6 +316,10 @@ func (s *Server) getReview(w http.ResponseWriter, r *http.Request) {
 	}
 	review, err := s.store.GetReview(r.Context(), id)
 	if err != nil {
+		s.handleDBError(w, err, "review not found")
+		return
+	}
+	if _, err := s.store.GetRepoScoped(r.Context(), review.RepoID, getInstallationIDs(r.Context())); err != nil {
 		s.handleDBError(w, err, "review not found")
 		return
 	}
@@ -483,7 +516,7 @@ func (s *Server) deleteRule(w http.ResponseWriter, r *http.Request) {
 // --- Stats / Activity ---
 
 func (s *Server) getStats(w http.ResponseWriter, r *http.Request) {
-	stats, err := s.store.GetStats(r.Context())
+	stats, err := s.store.GetStatsScoped(r.Context(), getInstallationIDs(r.Context()))
 	if err != nil {
 		s.logger.Error("get stats", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})

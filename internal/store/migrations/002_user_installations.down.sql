@@ -1,0 +1,2 @@
+ALTER TABLE repos ALTER COLUMN enabled SET DEFAULT TRUE;
+DROP TABLE IF EXISTS user_installations;
