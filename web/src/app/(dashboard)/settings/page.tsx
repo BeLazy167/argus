@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Settings, Loader2, Save, Trash2, Key, Cpu, ChevronDown, Zap, Check, X, ArrowUp, Info, UserCog, Layers } from "lucide-react";
+import { Settings, Loader2, Save, Trash2, Key, Cpu, ChevronDown, Zap, Check, X, ArrowUp, Info, UserCog, Lock, ShieldCheck, Bug, Blocks, RotateCcw } from "lucide-react";
 import {
   useModelConfigs,
   useUpsertModelConfig,
@@ -50,8 +50,7 @@ const MODEL_PICKS: Record<Provider, string[]> = {
   zhipu: ["glm-5", "glm-4-plus", "glm-4"],
 };
 
-const STAGES = ["triage", "review", "synthesis"] as const;
-const STAGES_WITH_SCORING = ["triage", "review", "scoring", "synthesis"] as const;
+const CORE_STAGES = ["triage", "review", "synthesis"] as const;
 
 const STAGE_DESCRIPTIONS: Record<string, string> = {
   triage: "Decides which files need detailed review vs. can be skimmed",
@@ -59,6 +58,15 @@ const STAGE_DESCRIPTIONS: Record<string, string> = {
   scoring: "Cross-model validation — scores and deduplicates specialist comments",
   synthesis: "Combines per-file reviews into a unified summary",
 };
+
+/* ── Specialists ── */
+
+const SPECIALISTS = [
+  { key: "bug_hunter", label: "Bug Hunter", icon: Bug, color: "text-amber" },
+  { key: "security", label: "Security", icon: ShieldCheck, color: "text-red-400" },
+  { key: "architecture", label: "Architecture", icon: Blocks, color: "text-blue-400" },
+  { key: "regression", label: "Regression", icon: RotateCcw, color: "text-purple-400" },
+] as const;
 
 /* ── Personas ── */
 
@@ -70,6 +78,23 @@ const PERSONAS = [
   { value: "architect", label: "Architect", description: "Design patterns, coupling, API contracts, and module boundaries" },
   { value: "strict", label: "Strict", description: "Comments on everything — no issue too small" },
 ] as const;
+
+/* ── Status Badge ── */
+
+type BadgeVariant = "active" | "configured" | "inactive";
+
+function StatusBadge({ variant, label }: { variant: BadgeVariant; label: string }) {
+  const styles: Record<BadgeVariant, string> = {
+    active: "border-green-400/20 bg-green-400/10 text-green-400",
+    configured: "border-green-400/20 bg-green-400/10 text-green-400",
+    inactive: "border-iron bg-iron/30 text-slate-text/60",
+  };
+  return (
+    <span className={`inline-flex items-center rounded-sm border px-1.5 py-0.5 text-[9px] font-mono uppercase tracking-wider ${styles[variant]}`}>
+      {label}
+    </span>
+  );
+}
 
 /* ── Persona Card ── */
 
@@ -101,9 +126,7 @@ function PersonaCard({
           {persona.label}
         </span>
         {isActive && (
-          <span className="inline-flex items-center rounded-sm border border-amber/30 bg-amber/10 px-1.5 py-0.5 text-[9px] font-mono uppercase tracking-wider text-amber">
-            Active
-          </span>
+          <span className="inline-flex items-center rounded-sm border border-amber/30 bg-amber/10 px-1.5 py-0.5 text-[9px] font-mono uppercase tracking-wider text-amber">active</span>
         )}
       </div>
       <p className="text-[11px] font-mono text-slate-text leading-relaxed">
@@ -146,15 +169,7 @@ function ProviderKeyCard({
             {PROVIDER_LABELS[provider]}
           </span>
         </div>
-        {existing ? (
-          <span className="inline-flex items-center rounded-sm border border-green-400/20 bg-green-400/10 px-1.5 py-0.5 text-[9px] font-mono uppercase tracking-wider text-green-400">
-            Active
-          </span>
-        ) : (
-          <span className="inline-flex items-center rounded-sm border border-iron bg-iron/30 px-1.5 py-0.5 text-[9px] font-mono uppercase tracking-wider text-slate-text/60">
-            Not configured
-          </span>
-        )}
+        <StatusBadge variant={existing ? "active" : "inactive"} label={existing ? "Active" : "Not configured"} />
       </div>
 
       {existing && (
@@ -246,13 +261,20 @@ function ConfigCard({
 
   const [error, setError] = useState("");
 
-  const handleSave = () => {
-    const finalModel = isCustom ? customModel : model;
+  const finalModel = isCustom ? customModel : model;
+
+  /** Returns true if provider+model are valid, sets error otherwise. */
+  const validate = (): boolean => {
     if (!provider || !finalModel) {
       setError(!provider ? "Select a provider" : "Select a model");
-      return;
+      return false;
     }
     setError("");
+    return true;
+  };
+
+  const handleSave = () => {
+    if (!validate()) return;
     upsert.mutate(
       { repoId, stage, provider, model: finalModel, max_tokens: maxTokens, temperature },
       { onError: (err) => setError(err instanceof Error ? err.message : "Save failed") },
@@ -260,12 +282,7 @@ function ConfigCard({
   };
 
   const handleTest = () => {
-    const finalModel = isCustom ? customModel : model;
-    if (!provider || !finalModel) {
-      setError(!provider ? "Select a provider" : "Select a model");
-      return;
-    }
-    setError("");
+    if (!validate()) return;
     setTestResult(null);
     test.mutate(
       { provider, model: finalModel },
@@ -296,15 +313,7 @@ function ConfigCard({
           <span className="text-xs font-mono uppercase tracking-wider text-amber">
             {stage}
           </span>
-          {existing ? (
-            <span className="inline-flex items-center rounded-sm border border-green-400/20 bg-green-400/10 px-1.5 py-0.5 text-[9px] font-mono uppercase tracking-wider text-green-400">
-              Configured
-            </span>
-          ) : (
-            <span className="inline-flex items-center rounded-sm border border-iron bg-iron/30 px-1.5 py-0.5 text-[9px] font-mono uppercase tracking-wider text-slate-text/60">
-              Not set
-            </span>
-          )}
+          <StatusBadge variant={existing ? "configured" : "inactive"} label={existing ? "Configured" : "Not set"} />
         </div>
         {existing && (
           <button
@@ -388,7 +397,7 @@ function ConfigCard({
           ) : (
             <input
               type="text"
-              value={isCustom ? customModel : model}
+              value={finalModel}
               onChange={(e) => isCustom ? setCustomModel(e.target.value) : setModel(e.target.value)}
               placeholder="model-name"
               className="w-full rounded border border-iron bg-background px-2 py-1.5 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none"
@@ -448,7 +457,7 @@ function ConfigCard({
         <button
           type="button"
           onClick={handleSave}
-          disabled={upsert.isPending || (!model && !customModel)}
+          disabled={upsert.isPending || !finalModel}
           className="flex items-center gap-2 rounded border border-amber/30 bg-amber/10 px-3 py-1 text-[11px] font-mono text-amber hover:bg-amber/20 transition-colors disabled:opacity-50"
         >
           <Save className="h-3 w-3" />
@@ -457,12 +466,80 @@ function ConfigCard({
         <button
           type="button"
           onClick={handleTest}
-          disabled={test.isPending || (!model && !customModel)}
+          disabled={test.isPending || !finalModel}
           className="flex items-center gap-2 rounded border border-iron px-3 py-1 text-[11px] font-mono text-slate-text hover:text-foreground hover:border-foreground/30 transition-colors disabled:opacity-50"
         >
           {test.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Zap className="h-3 w-3" />}
           {test.isPending ? "Testing..." : "Test"}
         </button>
+      </div>
+    </div>
+  );
+}
+
+/* ── Deep Review Toggle Card ── */
+
+function DeepReviewCard({
+  enabled,
+  onToggle,
+  pending,
+}: {
+  enabled: boolean;
+  onToggle: () => void;
+  pending: boolean;
+}) {
+  return (
+    <div className={`rounded-lg border p-5 transition-colors ${
+      enabled ? "border-amber/30 bg-amber/5" : "border-iron bg-charcoal"
+    }`}>
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-mono font-medium text-foreground">
+            Deep Review
+          </span>
+          <StatusBadge variant={enabled ? "active" : "inactive"} label={enabled ? "Active" : "Off"} />
+        </div>
+        <button
+          type="button"
+          onClick={onToggle}
+          disabled={pending}
+          aria-label={enabled ? "Disable deep review" : "Enable deep review"}
+          className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 transition-colors duration-200 ease-in-out focus:outline-none focus-visible:ring-2 focus-visible:ring-amber/50 focus-visible:ring-offset-2 focus-visible:ring-offset-background ${
+            enabled ? "border-amber bg-amber" : "border-iron bg-iron/50"
+          }`}
+        >
+          <span
+            className={`pointer-events-none inline-block h-5 w-5 rounded-full bg-foreground shadow-lg ring-0 transition-transform duration-200 ease-in-out ${
+              enabled ? "translate-x-5" : "translate-x-0"
+            }`}
+          />
+        </button>
+      </div>
+
+      <p className="text-[10px] font-mono text-slate-text mb-3">
+        4 parallel specialist agents review files triaged as &quot;deep&quot;
+      </p>
+
+      {/* Specialist chips */}
+      <div className="grid grid-cols-2 gap-2">
+        {SPECIALISTS.map((s) => {
+          const Icon = s.icon;
+          return (
+            <div
+              key={s.key}
+              className={`flex items-center gap-2 rounded border px-2.5 py-1.5 transition-colors ${
+                enabled
+                  ? "border-iron/50 bg-background/50"
+                  : "border-iron/30 bg-iron/10"
+              }`}
+            >
+              <Icon className={`h-3 w-3 ${enabled ? s.color : "text-slate-text/40"}`} />
+              <span className={`text-[10px] font-mono ${enabled ? "text-foreground" : "text-slate-text/40"}`}>
+                {s.label}
+              </span>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -483,13 +560,19 @@ export default function SettingsPage() {
   const activeRepo = repos.find((r) => r.id === activeId);
   const currentPersona = (activeRepo?.settings_json?.persona as string) || "default";
   const deepReview = (activeRepo?.settings_json?.deep_review as boolean) ?? false;
-  const activeStages = deepReview ? STAGES_WITH_SCORING : STAGES;
 
   const loading = reposLoading || keysLoading || (activeId > 0 && configsLoading);
   const configMap = new Map(configs?.map((c) => [c.stage, c]));
   const keyMap = new Map(providerKeys?.map((k) => [k.provider, k]));
   const savedProviders = providerKeys?.map((k) => k.provider) ?? [];
   const configuredCount = savedProviders.length;
+
+  const toggleDeepReview = () => {
+    updateRepo.mutate({
+      id: activeId,
+      settings_json: { ...activeRepo?.settings_json, deep_review: !deepReview },
+    });
+  };
 
   return (
     <>
@@ -549,16 +632,7 @@ export default function SettingsPage() {
             </div>
           </section>
 
-          {/* Connector */}
-          <div className="flex items-center gap-3 px-4">
-            <div className="h-px flex-1 bg-iron/50" />
-            <span className="text-[9px] font-mono uppercase tracking-widest text-slate-text/50">
-              providers flow into model config
-            </span>
-            <div className="h-px flex-1 bg-iron/50" />
-          </div>
-
-          {/* Section 2: Model Configuration */}
+          {/* Section 2: Review Pipeline (models + deep review merged) */}
           <section>
             <div className="flex items-center gap-3 mb-4">
               <span className="inline-flex items-center justify-center h-6 w-6 rounded-full border border-amber/30 bg-amber/10 text-[11px] font-mono font-bold text-amber">
@@ -567,7 +641,7 @@ export default function SettingsPage() {
               <div className="flex items-center gap-2">
                 <Cpu className="h-4 w-4 text-amber" />
                 <h2 className="font-display text-lg font-semibold text-foreground">
-                  Model Configuration
+                  Review Pipeline
                 </h2>
               </div>
             </div>
@@ -601,119 +675,68 @@ export default function SettingsPage() {
                 </p>
               </div>
             ) : (
-              <div className={`grid gap-4 ${activeStages.length > 3 ? "md:grid-cols-2 lg:grid-cols-4" : "md:grid-cols-3"}`}>
-                {activeStages.map((stage) => (
-                  <ConfigCard
-                    key={stage}
-                    stage={stage}
-                    repoId={activeId}
-                    existing={configMap.get(stage)}
-                    savedProviders={savedProviders}
+              <div className="space-y-4">
+                {/* Row 1: Core stages */}
+                <div className="grid gap-4 md:grid-cols-3">
+                  {CORE_STAGES.map((stage) => (
+                    <ConfigCard
+                      key={stage}
+                      stage={stage}
+                      repoId={activeId}
+                      existing={configMap.get(stage)}
+                      savedProviders={savedProviders}
+                    />
+                  ))}
+                </div>
+
+                {/* Row 2: Deep review toggle + scoring */}
+                <div className="grid gap-4 md:grid-cols-2">
+                  <DeepReviewCard
+                    enabled={deepReview}
+                    onToggle={toggleDeepReview}
+                    pending={updateRepo.isPending}
                   />
-                ))}
+
+                  {/* Scoring card — ghosted when deep review is off */}
+                  <div
+                    className={`relative transition-opacity duration-200 ${
+                      deepReview ? "opacity-100" : "opacity-40"
+                    }`}
+                  >
+                    {!deepReview && (
+                      <button
+                        type="button"
+                        onClick={toggleDeepReview}
+                        className="absolute inset-0 z-10 flex items-center justify-center rounded-lg cursor-pointer group"
+                        aria-label="Enable deep review to configure scoring"
+                      >
+                        <div className="flex items-center gap-2 rounded border border-iron/50 bg-charcoal/90 px-3 py-1.5 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
+                          <Lock className="h-3 w-3 text-slate-text" />
+                          <span className="text-[10px] font-mono text-slate-text">
+                            Enable deep review to unlock
+                          </span>
+                        </div>
+                      </button>
+                    )}
+                    <div className={!deepReview ? "pointer-events-none" : undefined}>
+                      <ConfigCard
+                        stage="scoring"
+                        repoId={activeId}
+                        existing={configMap.get("scoring")}
+                        savedProviders={savedProviders}
+                      />
+                    </div>
+                  </div>
+                </div>
               </div>
             )}
           </section>
 
-          {/* Connector */}
-          <div className="flex items-center gap-3 px-4">
-            <div className="h-px flex-1 bg-iron/50" />
-            <span className="text-[9px] font-mono uppercase tracking-widest text-slate-text/50">
-              deep review upgrades analysis
-            </span>
-            <div className="h-px flex-1 bg-iron/50" />
-          </div>
-
-          {/* Section 3: Deep Review */}
+          {/* Section 3: Review Persona */}
           <section>
             <div className="flex items-center gap-3 mb-4">
               <span className="inline-flex items-center justify-center h-6 w-6 rounded-full border border-amber/30 bg-amber/10 text-[11px] font-mono font-bold text-amber">
                 3
-              </span>
-              <div className="flex items-center gap-2">
-                <Layers className="h-4 w-4 text-amber" />
-                <h2 className="font-display text-lg font-semibold text-foreground">
-                  Deep Review
-                </h2>
-              </div>
-            </div>
-            <p className="text-[11px] font-mono text-slate-text mb-4">
-              When enabled, files triaged as &quot;deep&quot; get reviewed by 3 parallel specialist agents
-              (Bug Hunter, Security Auditor, Architecture) with optional cross-model confidence scoring.
-            </p>
-
-            {activeId === 0 ? (
-              <div className="rounded-lg border border-iron bg-charcoal p-10 text-center">
-                <Layers className="h-8 w-8 text-slate-text mx-auto mb-3" />
-                <p className="text-xs font-mono text-slate-text">
-                  Select a repo to configure deep review.
-                </p>
-              </div>
-            ) : (
-              <div className="rounded-lg border border-iron bg-charcoal p-5">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className="text-xs font-mono font-medium text-foreground">
-                        Parallel Specialist Agents
-                      </span>
-                      {deepReview && (
-                        <span className="inline-flex items-center rounded-sm border border-green-400/20 bg-green-400/10 px-1.5 py-0.5 text-[9px] font-mono uppercase tracking-wider text-green-400">
-                          Active
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-[10px] font-mono text-slate-text max-w-md">
-                      Bug Hunter finds logic errors and edge cases. Security Auditor checks injection and secrets.
-                      Architecture Reviewer catches error handling and type safety issues.
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      updateRepo.mutate({
-                        id: activeId,
-                        settings_json: { ...activeRepo?.settings_json, deep_review: !deepReview },
-                      });
-                    }}
-                    disabled={updateRepo.isPending}
-                    className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 transition-colors duration-200 ease-in-out focus:outline-none ${
-                      deepReview ? "border-amber bg-amber" : "border-iron bg-iron/50"
-                    }`}
-                  >
-                    <span
-                      className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-foreground shadow-lg ring-0 transition duration-200 ease-in-out ${
-                        deepReview ? "translate-x-5" : "translate-x-0"
-                      }`}
-                    />
-                  </button>
-                </div>
-                {deepReview && (
-                  <div className="mt-4 pt-3 border-t border-iron/50">
-                    <p className="text-[10px] font-mono text-slate-text">
-                      Configure a <span className="text-amber">scoring</span> model in the Model Configuration section above to enable cross-model validation.
-                      Without it, all specialist comments pass through unfiltered.
-                    </p>
-                  </div>
-                )}
-              </div>
-            )}
-          </section>
-
-          {/* Connector */}
-          <div className="flex items-center gap-3 px-4">
-            <div className="h-px flex-1 bg-iron/50" />
-            <span className="text-[9px] font-mono uppercase tracking-widest text-slate-text/50">
-              persona shapes review style
-            </span>
-            <div className="h-px flex-1 bg-iron/50" />
-          </div>
-
-          {/* Section 4: Review Persona */}
-          <section>
-            <div className="flex items-center gap-3 mb-4">
-              <span className="inline-flex items-center justify-center h-6 w-6 rounded-full border border-amber/30 bg-amber/10 text-[11px] font-mono font-bold text-amber">
-                4
               </span>
               <div className="flex items-center gap-2">
                 <UserCog className="h-4 w-4 text-amber" />

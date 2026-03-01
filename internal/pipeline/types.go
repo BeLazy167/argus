@@ -69,6 +69,7 @@ type PipelineRun struct {
 	Tokens           RunTokenUsage
 	Persona          Persona
 	DeepReview       bool
+	ScoringSkipped   bool // true when scoring provider unavailable — synthesis uses all comments
 	IsIncremental    bool
 	PreviousReviewID *uuid.UUID
 	Error            string

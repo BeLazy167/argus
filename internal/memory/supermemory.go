@@ -146,6 +146,7 @@ func ValidateTagScope(tag, owner string) bool {
 
 type AddRequest struct {
 	Content       string            `json:"content"`
+	CustomID      string            `json:"customId,omitempty"`
 	ContainerTags []string          `json:"containerTags"`
 	Metadata      map[string]string `json:"metadata,omitempty"`
 }
