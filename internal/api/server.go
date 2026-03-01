@@ -320,7 +320,7 @@ func (s *Server) updateRepo(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Enabled       *bool   `json:"enabled"`
 		DefaultBranch *string `json:"default_branch"`
-		SettingsJSON  []byte  `json:"settings_json"`
+		SettingsJSON  json.RawMessage  `json:"settings_json"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
