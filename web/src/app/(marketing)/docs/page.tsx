@@ -20,6 +20,10 @@ import {
   Play,
   SlidersHorizontal,
   Brain,
+  Key,
+  UserCog,
+  Sparkles,
+  Terminal,
 } from "lucide-react";
 
 /* ── Section data ── */
@@ -31,8 +35,12 @@ const SECTIONS = [
   { id: "categories", label: "Categories" },
   { id: "rules", label: "Review Rules" },
   { id: "models", label: "Model Config" },
+  { id: "api-keys", label: "API Keys (BYOK)" },
+  { id: "personas", label: "Review Personas" },
+  { id: "suggestions", label: "Suggestion Blocks" },
   { id: "incremental", label: "Incremental Reviews" },
   { id: "triggers", label: "Manual Triggers" },
+  { id: "commands", label: "Bot Commands" },
   { id: "scoring", label: "Scoring" },
   { id: "memory", label: "Memory & Context" },
 ] as const;
@@ -123,7 +131,7 @@ const PIPELINE_STAGES = [
     step: "02",
     label: "Review",
     icon: MessageSquare,
-    description: "Per-file parallel review with tool access. Deep files get full analysis; skimmed files get a truncated pass. Each file reviewed independently with up to 5 tool-use iterations.",
+    description: "Per-file parallel review with persona-tuned prompts. Deep files get full analysis with suggestion blocks; skimmed files get a truncated pass. Each file reviewed independently.",
     model: "claude-sonnet-4",
   },
   {
@@ -137,7 +145,7 @@ const PIPELINE_STAGES = [
     step: "04",
     label: "Post",
     icon: Send,
-    description: "Review posted as inline GitHub PR comments with severity and category tags. Comments indexed in memory for future context.",
+    description: "Review posted as inline GitHub PR comments with severity tags and one-click suggestion fixes. Comments indexed in memory for future context.",
     model: "\u2014",
   },
 ];
@@ -223,8 +231,8 @@ export default function DocsPage() {
         Argus AI Reference
       </h1>
       <p className="text-sm font-mono text-slate-text mb-16 max-w-xl">
-        Everything you need to know about how Argus reviews your code, what it
-        looks for, and how to configure it.
+        From first install to one-click fixes. Everything you need to ship
+        cleaner code, faster.
       </p>
 
       <div className="flex gap-12">
@@ -255,22 +263,27 @@ export default function DocsPage() {
                 {
                   step: "1",
                   title: "Install the GitHub App",
-                  desc: "Visit github.com/apps/argus-eye and install on your org or personal account.",
+                  desc: "One click at github.com/apps/argus-eye. Works with orgs and personal accounts.",
                 },
                 {
                   step: "2",
                   title: "Select repositories",
-                  desc: "Choose which repos Argus should watch. Repos appear in your dashboard automatically.",
+                  desc: "Pick which repos get watched. They appear in your dashboard instantly.",
                 },
                 {
                   step: "3",
-                  title: "Open a pull request",
-                  desc: "Argus reviews every PR automatically on open and on every new push.",
+                  title: "Add your API key",
+                  desc: "Bring your own key — OpenAI, Anthropic, or any OpenRouter provider. You own the costs, we never see your data.",
                 },
                 {
                   step: "4",
-                  title: "Customize rules",
-                  desc: "Add .argus/rules.md to your repo or create rules in the dashboard.",
+                  title: "Open a pull request",
+                  desc: "Every PR gets reviewed automatically. Argus leaves inline comments with one-click suggestion fixes you can commit from GitHub.",
+                },
+                {
+                  step: "5",
+                  title: "Customize",
+                  desc: "Choose a review persona (security hawk, mentor, architect...), add custom rules, or teach Argus your team's patterns.",
                 },
               ].map((item) => (
                 <div key={item.step} className="flex gap-4">
@@ -294,8 +307,9 @@ export default function DocsPage() {
           <div>
             <SectionHeader id="how-it-works" title="How It Works" />
             <p className="text-xs font-mono text-slate-text mb-6 leading-relaxed">
-              Every PR triggers a 4-stage pipeline. Each stage can use a
-              different LLM model, configurable per-repo.
+              Every PR triggers a 4-stage pipeline that triages, reviews,
+              synthesizes, and posts &mdash; all in under 60 seconds. Each
+              stage runs a different model, configurable per-repo.
             </p>
             <div className="space-y-1">
               {PIPELINE_STAGES.map((stage, i) => {
@@ -399,8 +413,10 @@ export default function DocsPage() {
           <div>
             <SectionHeader id="rules" title="Review Rules" />
             <p className="text-xs font-mono text-slate-text mb-6 leading-relaxed">
-              Customize what Argus focuses on. Rules are injected into the LLM
-              system prompt before each review.
+
+              Tell Argus what matters to your team. Rules are injected into the
+              LLM system prompt before each review, so every comment reflects
+              your standards.
             </p>
 
             <h3 className="text-sm font-bold text-foreground mb-3">
@@ -476,6 +492,112 @@ export default function DocsPage() {
             </p>
           </div>
 
+          {/* API Keys (BYOK) */}
+          <div>
+            <SectionHeader id="api-keys" title="API Keys (BYOK)" />
+            <p className="text-xs font-mono text-slate-text mb-4 leading-relaxed">
+              Your keys, your models, your bill. Argus never stores prompts or
+              code on our servers &mdash; API calls go straight from our backend
+              to your chosen provider. No hidden costs, no surprises.
+            </p>
+            <div className="rounded-lg border border-iron bg-charcoal p-4">
+              <div className="flex items-center gap-3 mb-3">
+                <Key className="h-4 w-4 text-amber" />
+                <span className="text-xs font-mono font-bold text-foreground">
+                  Setup
+                </span>
+              </div>
+              <ol className="list-decimal list-inside space-y-1.5 text-xs font-mono text-slate-text leading-relaxed">
+                <li>Go to <span className="text-amber">Settings</span> in the dashboard</li>
+                <li>Select a repo and choose a provider (OpenAI, Anthropic, etc.)</li>
+                <li>Enter your API key &mdash; it&apos;s encrypted at rest</li>
+                <li>Pick a model for each pipeline stage (triage, review)</li>
+              </ol>
+            </div>
+            <p className="text-[11px] font-mono text-iron mt-3">
+
+              Keys are encrypted at rest and scoped per-installation. Without a
+              key configured, Argus posts a friendly onboarding comment on your
+              first PR linking to Settings.
+            </p>
+          </div>
+
+          {/* Review Personas */}
+          <div>
+            <SectionHeader id="personas" title="Review Personas" />
+            <p className="text-xs font-mono text-slate-text mb-4 leading-relaxed">
+              Not every PR needs the same reviewer. Personas tune Argus&apos;s
+              tone, focus, and severity threshold &mdash; from a gentle mentor
+              to a zero-mercy strict auditor. Set a default per-repo or
+              override per-PR.
+            </p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {[
+                { name: "default", desc: "Balanced across all categories. The standard Argus experience most teams start with." },
+                { name: "security_auditor", desc: "Treats every PR like a pen test. Injection risks, auth flaws, data exposure, SSRF." },
+                { name: "performance_engineer", desc: "Hunts N+1 queries, memory leaks, O(n\u00B2) loops, and missing cache invalidation." },
+                { name: "mentor", desc: "Explains the why behind every comment. Suggests learning resources. Built for growing teams." },
+                { name: "architect", desc: "Thinks in boundaries. API contracts, separation of concerns, dependency direction." },
+                { name: "strict", desc: "No free passes. Comments on everything. Maximum coverage, minimum mercy." },
+              ].map((p) => (
+                <div
+                  key={p.name}
+                  className="rounded-lg border border-iron bg-charcoal p-4"
+                >
+                  <span className="text-xs font-mono font-bold text-amber">
+                    {p.name}
+                  </span>
+                  <p className="text-[11px] font-mono text-slate-text leading-relaxed mt-1">
+                    {p.desc}
+                  </p>
+                </div>
+              ))}
+            </div>
+            <div className="mt-4 rounded-lg border border-iron bg-charcoal p-4">
+              <div className="flex items-center gap-3 mb-2">
+                <UserCog className="h-4 w-4 text-amber" />
+                <span className="text-xs font-mono font-bold text-foreground">
+                  Per-PR override
+                </span>
+              </div>
+              <p className="text-xs font-mono text-slate-text leading-relaxed">
+                Comment on any PR:
+              </p>
+              <CodeBlock>{`@argus-eye review --persona security_auditor`}</CodeBlock>
+            </div>
+          </div>
+
+          {/* Suggestion Blocks */}
+          <div>
+            <SectionHeader id="suggestions" title="Suggestion Blocks" />
+            <p className="text-xs font-mono text-slate-text mb-4 leading-relaxed">
+              Argus doesn&apos;t just tell you what&apos;s wrong &mdash; it
+              writes the fix. Every actionable comment includes a GitHub
+              suggestion block with exact replacement code. One click to
+              commit.
+            </p>
+            <div className="rounded-lg border border-iron bg-charcoal p-4">
+              <div className="flex items-center gap-3 mb-3">
+                <Sparkles className="h-4 w-4 text-amber" />
+                <span className="text-xs font-mono font-bold text-foreground">
+                  How it works
+                </span>
+              </div>
+              <ol className="list-decimal list-inside space-y-1.5 text-xs font-mono text-slate-text leading-relaxed">
+                <li>During review, Argus fetches the full file at HEAD</li>
+                <li>The LLM generates exact replacement code for the flagged line range</li>
+                <li>The suggestion is embedded as a <code className="text-amber bg-iron/40 rounded px-1 py-0.5">```suggestion</code> block</li>
+                <li>GitHub renders a &quot;Commit suggestion&quot; button on the comment</li>
+              </ol>
+            </div>
+            <p className="text-[11px] font-mono text-iron mt-3">
+
+              Suggestions are omitted for praise or when no concrete fix
+              applies. Malformed suggestions are automatically discarded
+              before posting.
+            </p>
+          </div>
+
           {/* Incremental Reviews */}
           <div>
             <SectionHeader id="incremental" title="Incremental Reviews" />
@@ -528,6 +650,61 @@ export default function DocsPage() {
             <p className="text-[11px] font-mono text-iron mt-3">
               Failed reviews can be retried from the review detail page.
             </p>
+          </div>
+
+          {/* Bot Commands */}
+          <div>
+            <SectionHeader id="commands" title="Bot Commands" />
+            <p className="text-xs font-mono text-slate-text mb-6 leading-relaxed">
+
+              Talk to Argus directly from any PR. Mention{" "}
+              <code className="text-amber bg-iron/40 rounded px-1.5 py-0.5">@argus-eye</code>{" "}
+              followed by a command and it responds in seconds.
+            </p>
+            <div className="space-y-3">
+              {[
+                {
+                  cmd: "@argus-eye review",
+                  desc: "Trigger a full review right now. Add --persona to switch review style for this PR only.",
+                  example: "@argus-eye review --persona mentor",
+                },
+                {
+                  cmd: "@argus-eye remember <pattern>",
+                  desc: "Teach Argus something new. Saves a pattern to memory so future reviews catch it. Add --org to apply across all repos.",
+                  example: "@argus-eye remember --org always check for SQL injection in raw queries",
+                },
+                {
+                  cmd: "@argus-eye resolve",
+                  desc: "Clean up after yourself. Scans all bot comments and auto-minimizes ones where the referenced file has been updated.",
+                  example: "@argus-eye resolve",
+                },
+                {
+                  cmd: "@argus-eye fix",
+                  desc: "The magic command. Applies every suggestion block from the review as a single atomic commit pushed straight to your PR branch.",
+                  example: "@argus-eye fix",
+                },
+              ].map((c) => (
+                <div
+                  key={c.cmd}
+                  className="rounded-lg border border-iron bg-charcoal p-4"
+                >
+                  <div className="flex items-center gap-3 mb-2">
+                    <Terminal className="h-3.5 w-3.5 text-amber" />
+                    <code className="text-xs font-mono font-bold text-foreground">
+                      {c.cmd}
+                    </code>
+                  </div>
+                  <p className="text-[11px] font-mono text-slate-text leading-relaxed mb-2">
+                    {c.desc}
+                  </p>
+                  <div className="rounded bg-void/80 border border-iron/50 px-3 py-2">
+                    <code className="text-[11px] font-mono text-foreground/70">
+                      {c.example}
+                    </code>
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
 
           {/* Scoring */}
@@ -583,8 +760,10 @@ export default function DocsPage() {
           <div>
             <SectionHeader id="memory" title="Memory & Context" />
             <p className="text-xs font-mono text-slate-text mb-4 leading-relaxed">
-              Argus can remember patterns from past reviews and use them as
-              context for future ones. Powered by Supermemory.
+
+              Argus gets smarter with every review. Past patterns and feedback
+              are indexed for RAG, so future reviews build on what it&apos;s
+              already learned. Powered by Supermemory.
             </p>
             <div className="rounded-lg border border-iron bg-charcoal p-4">
               <div className="flex items-center gap-3 mb-3">
