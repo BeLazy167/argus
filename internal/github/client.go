@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	gh "github.com/google/go-github/v68/github"
 )
@@ -96,16 +97,16 @@ func (c *Client) GetCompareCommitsDiff(ctx context.Context, installationID int64
 		return "", fmt.Errorf("comparing commits: %w", err)
 	}
 
-	// Build unified diff from file patches
-	var diffStr string
+	var sb strings.Builder
 	for _, f := range comparison.Files {
 		if f.Patch != nil {
-			diffStr += fmt.Sprintf("diff --git a/%s b/%s\n", f.GetFilename(), f.GetFilename())
-			diffStr += fmt.Sprintf("--- a/%s\n+++ b/%s\n", f.GetPreviousFilename(), f.GetFilename())
-			diffStr += f.GetPatch() + "\n"
+			fmt.Fprintf(&sb, "diff --git a/%s b/%s\n", f.GetFilename(), f.GetFilename())
+			fmt.Fprintf(&sb, "--- a/%s\n+++ b/%s\n", f.GetPreviousFilename(), f.GetFilename())
+			sb.WriteString(f.GetPatch())
+			sb.WriteByte('\n')
 		}
 	}
-	return diffStr, nil
+	return sb.String(), nil
 }
 
 // ListReviewComments returns all comments for a specific review, used to capture github_comment_ids after posting.
@@ -185,6 +186,54 @@ func (c *Client) CreateIssueComment(ctx context.Context, installationID int64, o
 		return err
 	}
 	_, _, err = client.Issues.CreateComment(ctx, owner, repo, number, &gh.IssueComment{Body: gh.Ptr(body)})
+	return err
+}
+
+// ListPRComments returns ALL review comments on a PR (across all reviews).
+func (c *Client) ListPRComments(ctx context.Context, installationID int64, owner, repo string, prNumber int) ([]*gh.PullRequestComment, error) {
+	client, err := c.app.ClientForInstallation(installationID)
+	if err != nil {
+		return nil, err
+	}
+
+	var all []*gh.PullRequestComment
+	opts := &gh.PullRequestListCommentsOptions{ListOptions: gh.ListOptions{PerPage: 100}}
+	for {
+		comments, resp, err := client.PullRequests.ListComments(ctx, owner, repo, prNumber, opts)
+		if err != nil {
+			return nil, fmt.Errorf("listing PR comments: %w", err)
+		}
+		all = append(all, comments...)
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+	return all, nil
+}
+
+// MinimizeComment hides a comment via GraphQL minimizeComment mutation.
+func (c *Client) MinimizeComment(ctx context.Context, installationID int64, nodeID, reason string) error {
+	client, err := c.app.ClientForInstallation(installationID)
+	if err != nil {
+		return err
+	}
+
+	body := map[string]any{
+		"query": `mutation($input: MinimizeCommentInput!) { minimizeComment(input: $input) { minimizedComment { isMinimized } } }`,
+		"variables": map[string]any{
+			"input": map[string]string{
+				"subjectId":  nodeID,
+				"classifier": reason,
+			},
+		},
+	}
+
+	req, err := client.NewRequest("POST", "graphql", body)
+	if err != nil {
+		return fmt.Errorf("creating graphql request: %w", err)
+	}
+	_, err = client.Do(ctx, req, nil)
 	return err
 }
 

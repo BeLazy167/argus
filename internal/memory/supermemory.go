@@ -26,14 +26,18 @@ func NewClient(apiKey string) *Client {
 	}
 }
 
-// doJSON posts reqBody as JSON to the given path and decodes the response into result.
-func (c *Client) doJSON(ctx context.Context, path string, reqBody, result any) error {
-	body, err := json.Marshal(reqBody)
-	if err != nil {
-		return fmt.Errorf("marshaling request: %w", err)
+// doRequest sends a request with the given method/path and decodes the response.
+func (c *Client) doRequest(ctx context.Context, method, path string, reqBody, result any) error {
+	var bodyReader io.Reader
+	if reqBody != nil {
+		body, err := json.Marshal(reqBody)
+		if err != nil {
+			return fmt.Errorf("marshaling request: %w", err)
+		}
+		bodyReader = bytes.NewReader(body)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", baseURL+path, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, method, baseURL+path, bodyReader)
 	if err != nil {
 		return fmt.Errorf("creating request: %w", err)
 	}
@@ -51,13 +55,20 @@ func (c *Client) doJSON(ctx context.Context, path string, reqBody, result any) e
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("supermemory %s error (status %d): %s", path, resp.StatusCode, string(respBody))
+		return fmt.Errorf("supermemory %s %s error (status %d): %s", method, path, resp.StatusCode, string(respBody))
 	}
 
-	if err := json.Unmarshal(respBody, result); err != nil {
-		return fmt.Errorf("unmarshaling response: %w", err)
+	if result != nil {
+		if err := json.Unmarshal(respBody, result); err != nil {
+			return fmt.Errorf("unmarshaling response: %w", err)
+		}
 	}
 	return nil
+}
+
+// doJSON is a convenience wrapper that calls doRequest with POST method.
+func (c *Client) doJSON(ctx context.Context, path string, reqBody, result any) error {
+	return c.doRequest(ctx, "POST", path, reqBody, result)
 }
 
 // AddMemory stores a new memory in Supermemory.
@@ -78,28 +89,59 @@ func (c *Client) Search(ctx context.Context, req SearchRequest) (*SearchResponse
 	return &result, nil
 }
 
+// DeleteMemory removes a document by ID.
+func (c *Client) DeleteMemory(ctx context.Context, documentID string) error {
+	return c.doRequest(ctx, "DELETE", "/v3/documents/"+documentID, nil, nil)
+}
+
+// ListDocuments lists documents filtered by containerTags with pagination.
+func (c *Client) ListDocuments(ctx context.Context, req ListRequest) (*ListResponse, error) {
+	var result ListResponse
+	if err := c.doJSON(ctx, "/v3/documents/list", req, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// BulkDelete removes multiple documents by IDs or containerTags.
+// At least one of IDs or ContainerTags must be non-empty.
+func (c *Client) BulkDelete(ctx context.Context, req BulkDeleteRequest) error {
+	if len(req.IDs) == 0 && len(req.ContainerTags) == 0 {
+		return fmt.Errorf("BulkDelete: at least one of IDs or ContainerTags required")
+	}
+	return c.doJSON(ctx, "/v3/documents/bulk/delete", req, &struct{}{})
+}
+
+// GetDocument retrieves a single document by ID.
+func (c *Client) GetDocument(ctx context.Context, documentID string) (*Document, error) {
+	var result Document
+	if err := c.doRequest(ctx, "GET", "/v3/documents/"+documentID, nil, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
 func (c *Client) setHeaders(req *http.Request) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 }
 
 // tagSanitizer replaces chars invalid in Supermemory container tags.
-var tagSanitizer = strings.NewReplacer(":", "-", "/", "-")
+var tagSanitizer = strings.NewReplacer(":", "-", "/", "-", "~", "-")
 
 // OwnerTag returns a container tag scoped to an owner (user or org).
-// Uses ~ as segment separator to avoid collisions (e.g. owner "a-b" vs "a" repo "b").
 func OwnerTag(owner, kind string) string {
-	return tagSanitizer.Replace(owner) + "~" + kind
+	return tagSanitizer.Replace(owner) + "--" + kind
 }
 
 // RepoTag returns a container tag scoped to a specific repo under an owner.
 func RepoTag(owner, repo, kind string) string {
-	return tagSanitizer.Replace(owner) + "~" + tagSanitizer.Replace(repo) + "~" + kind
+	return tagSanitizer.Replace(owner) + "--" + tagSanitizer.Replace(repo) + "--" + kind
 }
 
 // ValidateTagScope checks that a container tag belongs to the given owner.
 func ValidateTagScope(tag, owner string) bool {
-	return strings.HasPrefix(tag, tagSanitizer.Replace(owner)+"~")
+	return strings.HasPrefix(tag, tagSanitizer.Replace(owner)+"--")
 }
 
 type AddRequest struct {
@@ -133,4 +175,27 @@ type SearchResult struct {
 	Memory     string  `json:"memory,omitempty"`
 	Chunk      string  `json:"chunk,omitempty"`
 	Similarity float64 `json:"similarity"`
+}
+
+type ListRequest struct {
+	Limit         int      `json:"limit,omitempty"`
+	Page          int      `json:"page,omitempty"`
+	ContainerTags []string `json:"containerTags,omitempty"`
+	Sort          string   `json:"sort,omitempty"`
+	Order         string   `json:"order,omitempty"`
+}
+
+type ListResponse struct {
+	Memories []Document `json:"memories"`
+}
+
+type Document struct {
+	ID     string `json:"id"`
+	Title  string `json:"title,omitempty"`
+	Status string `json:"status,omitempty"`
+}
+
+type BulkDeleteRequest struct {
+	IDs           []string `json:"ids,omitempty"`
+	ContainerTags []string `json:"containerTags,omitempty"`
 }

@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS patterns;
+ALTER TABLE reviews DROP COLUMN IF EXISTS file_count;

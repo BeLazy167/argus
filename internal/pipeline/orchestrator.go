@@ -34,10 +34,16 @@ type Orchestrator struct {
 	reviewStage *ReviewStage
 	triageStage *TriageStage
 	indexer     *memory.Indexer
+	registry    LLMRegistry
 	logger      *slog.Logger
 }
 
-func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, reviewStage *ReviewStage, triageStage *TriageStage, indexer *memory.Indexer, logger *slog.Logger) *Orchestrator {
+// LLMRegistry is the subset of llm.Registry used by Orchestrator.
+type LLMRegistry interface {
+	HasKeyForRepo(ctx context.Context, installationID int64, repoID *int64, providerName string) bool
+}
+
+func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, reviewStage *ReviewStage, triageStage *TriageStage, indexer *memory.Indexer, registry LLMRegistry, logger *slog.Logger) *Orchestrator {
 	sm := NewStateMachine(db, logger)
 
 	o := &Orchestrator{
@@ -48,6 +54,7 @@ func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, 
 		reviewStage: reviewStage,
 		triageStage: triageStage,
 		indexer:     indexer,
+		registry:    registry,
 		logger:      logger,
 	}
 
@@ -86,6 +93,19 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 
 	if !dbRepo.Enabled {
 		o.logger.Info("skipping disabled repo", "repo", event.RepoFullName)
+		return nil
+	}
+
+	// Check if any LLM provider is available
+	if o.registry != nil && !o.registry.HasKeyForRepo(ctx, event.InstallationID, &dbRepo.ID, "default") {
+		o.logger.Info("no API key configured, posting onboarding comment", "repo", event.RepoFullName)
+		_ = o.ghClient.CreateIssueComment(ctx, event.InstallationID, owner, repo, event.PRNumber,
+			"Welcome to **Argus**! To enable AI code reviews, add your API key at your [Argus Settings](https://argusai.vercel.app/settings).")
+		reviewID := uuid.New()
+		_, _ = o.db.Exec(ctx, `
+			INSERT INTO reviews (id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, status, trigger, error)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, 'failed', 'webhook', 'no_api_key')
+		`, reviewID, dbRepo.ID, event.PRNumber, event.PRTitle, event.PRAuthor, event.HeadSHA, event.BaseSHA)
 		return nil
 	}
 
@@ -240,9 +260,9 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 
 	// Update review record
 	_, err = o.db.Exec(ctx, `
-		UPDATE reviews SET status = 'completed', github_review_id = $1, summary = $2, score = $3, token_usage = $4, completed_at = NOW()
-		WHERE id = $5
-	`, ghReviewID, run.Synthesis.Summary, run.Synthesis.Score, tokenUsageJSON, run.ReviewID)
+		UPDATE reviews SET status = 'completed', github_review_id = $1, summary = $2, score = $3, token_usage = $4, file_count = $5, completed_at = NOW()
+		WHERE id = $6
+	`, ghReviewID, run.Synthesis.Summary, run.Synthesis.Score, tokenUsageJSON, len(run.FileReviews), run.ReviewID)
 	if err != nil {
 		return fmt.Errorf("updating review record: %w", err)
 	}
@@ -274,7 +294,11 @@ func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghRe
 			o.logger.Error("listing review comments from github", "error", err)
 		} else {
 			for _, gc := range ghComments {
-				key := ghCommentKey{Path: gc.GetPath(), Line: gc.GetLine()}
+				line := gc.GetLine()
+				if line == 0 {
+					line = gc.GetPosition()
+				}
+				key := ghCommentKey{Path: gc.GetPath(), Line: line}
 				ghCommentIDs[key] = gc.GetID()
 			}
 		}

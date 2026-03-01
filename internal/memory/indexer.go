@@ -6,7 +6,7 @@ import (
 	"log/slog"
 )
 
-// Indexer stores completed reviews and rules in Supermemory for future retrieval.
+// Indexer manages Supermemory documents: stores reviews, rules, patterns, and topology for future RAG retrieval.
 type Indexer struct {
 	client *Client
 	logger *slog.Logger
@@ -78,17 +78,40 @@ type RuleMemory struct {
 	Content  string
 }
 
-// IndexOwnerPattern stores a promoted pattern at owner scope.
-func (idx *Indexer) IndexOwnerPattern(ctx context.Context, owner, content string, metadata map[string]string) error {
-	_, err := idx.client.AddMemory(ctx, AddRequest{
+// IndexRepoPattern stores a pattern scoped to a specific repo.
+func (idx *Indexer) IndexRepoPattern(ctx context.Context, owner, repo, content string, metadata map[string]string) (*AddResponse, error) {
+	resp, err := idx.client.AddMemory(ctx, AddRequest{
+		Content:       content,
+		ContainerTags: []string{RepoTag(owner, repo, "patterns")},
+		Metadata:      metadata,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("indexing repo pattern: %w", err)
+	}
+	idx.logger.Debug("indexed repo pattern", "owner", owner, "repo", repo)
+	return resp, nil
+}
+
+// IndexOwnerPattern stores a pattern at owner scope (applies to all repos in the org).
+func (idx *Indexer) IndexOwnerPattern(ctx context.Context, owner, content string, metadata map[string]string) (*AddResponse, error) {
+	resp, err := idx.client.AddMemory(ctx, AddRequest{
 		Content:       content,
 		ContainerTags: []string{OwnerTag(owner, "patterns")},
 		Metadata:      metadata,
 	})
 	if err != nil {
-		return fmt.Errorf("indexing owner pattern: %w", err)
+		return nil, fmt.Errorf("indexing owner pattern: %w", err)
 	}
 	idx.logger.Debug("indexed owner pattern", "owner", owner)
+	return resp, nil
+}
+
+// DeleteDocument removes a document from Supermemory by ID.
+func (idx *Indexer) DeleteDocument(ctx context.Context, documentID string) error {
+	if err := idx.client.DeleteMemory(ctx, documentID); err != nil {
+		return fmt.Errorf("deleting document: %w", err)
+	}
+	idx.logger.Debug("deleted document", "id", documentID)
 	return nil
 }
 

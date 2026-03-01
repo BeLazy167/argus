@@ -5,9 +5,8 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   LayoutDashboard,
-  GitFork,
   MessageSquare,
-  ScrollText,
+  Brain,
   Settings,
 } from "lucide-react";
 import { QueryProvider } from "@/providers/query-provider";
@@ -15,9 +14,8 @@ import { InstallationProvider, useInstallation } from "@/providers/installation-
 
 const navItems = [
   { href: "/dashboard", label: "Overview", icon: LayoutDashboard },
-  { href: "/repos", label: "Repos", icon: GitFork },
   { href: "/reviews", label: "Reviews", icon: MessageSquare },
-  { href: "/rules", label: "Rules", icon: ScrollText },
+  { href: "/patterns", label: "Patterns", icon: Brain },
   { href: "/settings", label: "Settings", icon: Settings },
 ];
 
@@ -80,14 +78,18 @@ export default function DashboardLayout({
         <div className="flex h-screen overflow-hidden">
           {/* Sidebar */}
           <aside className="flex w-56 shrink-0 flex-col border-r border-sidebar-border bg-sidebar">
-            {/* Wordmark */}
-            <div className="flex h-14 items-center border-b border-sidebar-border px-5">
+            {/* Wordmark + Status */}
+            <div className="flex h-14 items-center justify-between border-b border-sidebar-border px-5">
               <Link
                 href="/dashboard"
                 className="wordmark text-xs text-amber tracking-[0.2em]"
               >
                 ARGUS
               </Link>
+              <div className="flex items-center gap-1.5">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                <span className="text-[9px] font-mono text-slate-text uppercase tracking-wider">Live</span>
+              </div>
             </div>
 
             <InstallationSwitcher />
