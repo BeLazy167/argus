@@ -139,16 +139,16 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, file di
 	var tokens StageTokens
 	tokens.File = file.NewName
 
-	dbConfigs, err := rs.store.ListModelConfigs(ctx, run.PREvent.RepoID)
+	dbConfigs, err := rs.store.ListModelConfigs(ctx, run.DBRepoID)
 	if err != nil {
-		return review, tokens, fmt.Errorf("loading model configs for repo %d: %w", run.PREvent.RepoID, err)
+		return review, tokens, fmt.Errorf("loading model configs for repo %d: %w", run.DBRepoID, err)
 	}
 	repoConfigs := storeToLLMConfigs(dbConfigs)
-	cfg, err := rs.registry.GetConfig(run.PREvent.RepoID, llm.StageReview, repoConfigs)
+	cfg, err := rs.registry.GetConfig(run.DBRepoID, llm.StageReview, repoConfigs)
 	if err != nil {
 		return review, tokens, err
 	}
-	provider, err := rs.registry.GetProviderForRepo(ctx, run.PREvent.InstallationID, &run.PREvent.RepoID, cfg.Provider)
+	provider, err := rs.registry.GetProviderForRepo(ctx, run.DBInstallationID, &run.DBRepoID, cfg.Provider)
 	if err != nil {
 		return review, tokens, err
 	}
