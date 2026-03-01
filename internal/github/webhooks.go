@@ -27,7 +27,8 @@ type PREvent struct {
 	HeadSHA        string
 	BaseSHA        string
 	BaseRef        string
-	HeadRef        string
+	HeadRef         string
+	PersonaOverride string `json:"-"` // set by @argus-eye review --persona X
 }
 
 // ParseWebhook validates the webhook signature and parses the event.

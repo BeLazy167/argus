@@ -922,7 +922,7 @@ func maskKey(encKey string) string {
 
 // --- Command Dispatch ---
 
-var commandRe = regexp.MustCompile(`(?i)@argus-eye\s+(review|remember|resolve)(.*)`)
+var commandRe = regexp.MustCompile(`(?i)@argus-eye\s+(review|remember|resolve|fix)(.*)`)
 
 func (s *Server) dispatchCommand(ctx context.Context, evt ghpkg.IssueCommentEvent) {
 	match := commandRe.FindStringSubmatch(evt.CommentBody)
@@ -947,11 +947,20 @@ func (s *Server) dispatchCommand(ctx context.Context, evt ghpkg.IssueCommentEven
 		s.handleRememberCommand(ctx, evt, owner, repo, ghClient, args)
 	case "resolve":
 		s.handleResolveCommand(ctx, evt, owner, repo, ghClient)
+	case "fix":
+		s.handleFixCommand(ctx, evt, owner, repo, ghClient)
 	}
 }
 
 func (s *Server) handleReviewCommand(ctx context.Context, evt ghpkg.IssueCommentEvent, owner, repo string, ghClient *ghpkg.Client, args string) {
 	force := strings.Contains(args, "--force")
+	var personaOverride string
+	if idx := strings.Index(args, "--persona"); idx >= 0 {
+		rest := strings.TrimSpace(args[idx+len("--persona"):])
+		if fields := strings.Fields(rest); len(fields) > 0 {
+			personaOverride = fields[0]
+		}
+	}
 
 	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "eyes")
 
@@ -991,6 +1000,7 @@ func (s *Server) handleReviewCommand(ctx context.Context, evt ghpkg.IssueComment
 
 	prEvent.Action = "manual"
 	prEvent.RepoID = evt.RepoID
+	prEvent.PersonaOverride = personaOverride
 	s.logger.Info("review command triggered", "repo", evt.RepoFullName, "pr", evt.PRNumber, "force", force, "by", evt.CommentAuthor)
 
 	if err := s.orchestrator.HandlePREvent(ctx, *prEvent); err != nil {

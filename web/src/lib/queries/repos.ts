@@ -38,7 +38,7 @@ export function useUpdateRepo() {
     mutationFn: async ({
       id,
       ...body
-    }: { id: number; enabled?: boolean; default_branch?: string }) => {
+    }: { id: number; enabled?: boolean; default_branch?: string; settings_json?: Record<string, unknown> }) => {
       const token = await getToken();
       return api.patch<Repo>(`/api/v1/repos/${id}`, body, token ?? undefined, active?.id);
     },

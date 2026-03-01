@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Settings, Loader2, Save, Trash2, Key, Cpu, ChevronDown, Zap, Check, X, ArrowUp, Info } from "lucide-react";
+import { Settings, Loader2, Save, Trash2, Key, Cpu, ChevronDown, Zap, Check, X, ArrowUp, Info, UserCog } from "lucide-react";
 import {
   useModelConfigs,
   useUpsertModelConfig,
@@ -16,6 +16,7 @@ import {
 } from "@/lib/queries/provider-keys";
 import { useActiveRepo } from "@/lib/hooks/use-active-repo";
 import { useInstallation } from "@/providers/installation-provider";
+import { useUpdateRepo } from "@/lib/queries/repos";
 import { RepoSelect } from "@/components/dashboard/repo-select";
 import type { ProviderKey } from "@/lib/types";
 
@@ -56,6 +57,59 @@ const STAGE_DESCRIPTIONS: Record<string, string> = {
   review: "Analyzes code changes and writes review comments",
   synthesis: "Combines per-file reviews into a unified summary",
 };
+
+/* ── Personas ── */
+
+const PERSONAS = [
+  { value: "default", label: "Default", description: "Balanced review across all categories" },
+  { value: "security_auditor", label: "Security Auditor", description: "Prioritizes injection, auth, secrets, and input validation" },
+  { value: "performance_engineer", label: "Performance Engineer", description: "Focuses on N+1 queries, allocations, caching, and complexity" },
+  { value: "mentor", label: "Mentor", description: "Educational tone — explains why, suggests learning paths" },
+  { value: "architect", label: "Architect", description: "Design patterns, coupling, API contracts, and module boundaries" },
+  { value: "strict", label: "Strict", description: "Comments on everything — no issue too small" },
+] as const;
+
+/* ── Persona Card ── */
+
+function PersonaCard({
+  persona,
+  isActive,
+  onSelect,
+  disabled,
+}: {
+  persona: (typeof PERSONAS)[number];
+  isActive: boolean;
+  onSelect: () => void;
+  disabled: boolean;
+}) {
+  return (
+    <button
+      key={persona.value}
+      type="button"
+      onClick={onSelect}
+      disabled={disabled}
+      className={`group cursor-pointer rounded-lg border p-4 text-left transition-all ${
+        isActive
+          ? "border-amber/40 bg-amber/5"
+          : "border-iron bg-charcoal hover:border-iron/80 hover:bg-charcoal/80"
+      }`}
+    >
+      <div className="flex items-center justify-between mb-1.5">
+        <span className={`text-xs font-mono font-medium ${isActive ? "text-amber" : "text-foreground"}`}>
+          {persona.label}
+        </span>
+        {isActive && (
+          <span className="inline-flex items-center rounded-sm border border-amber/30 bg-amber/10 px-1.5 py-0.5 text-[9px] font-mono uppercase tracking-wider text-amber">
+            Active
+          </span>
+        )}
+      </div>
+      <p className="text-[11px] font-mono text-slate-text leading-relaxed">
+        {persona.description}
+      </p>
+    </button>
+  );
+}
 
 /* ── API Key Card ── */
 
@@ -420,6 +474,12 @@ export default function SettingsPage() {
 
   const { data: configs, isLoading: configsLoading } = useModelConfigs(activeId);
   const { data: providerKeys, isLoading: keysLoading } = useProviderKeys();
+  const updateRepo = useUpdateRepo();
+
+  const [personaError, setPersonaError] = useState("");
+
+  const activeRepo = repos.find((r) => r.id === activeId);
+  const currentPersona = (activeRepo?.settings_json?.persona as string) || "default";
 
   const loading = reposLoading || keysLoading || (activeId > 0 && configsLoading);
   const configMap = new Map(configs?.map((c) => [c.stage, c]));
@@ -548,6 +608,74 @@ export default function SettingsPage() {
                   />
                 ))}
               </div>
+            )}
+          </section>
+
+          {/* Connector */}
+          <div className="flex items-center gap-3 px-4">
+            <div className="h-px flex-1 bg-iron/50" />
+            <span className="text-[9px] font-mono uppercase tracking-widest text-slate-text/50">
+              persona shapes review style
+            </span>
+            <div className="h-px flex-1 bg-iron/50" />
+          </div>
+
+          {/* Section 3: Review Persona */}
+          <section>
+            <div className="flex items-center gap-3 mb-4">
+              <span className="inline-flex items-center justify-center h-6 w-6 rounded-full border border-amber/30 bg-amber/10 text-[11px] font-mono font-bold text-amber">
+                3
+              </span>
+              <div className="flex items-center gap-2">
+                <UserCog className="h-4 w-4 text-amber" />
+                <h2 className="font-display text-lg font-semibold text-foreground">
+                  Review Persona
+                </h2>
+              </div>
+            </div>
+            <p className="text-[11px] font-mono text-slate-text mb-4">
+              Choose a review style for{" "}
+              <span className="text-foreground">{activeRepo?.full_name ?? "selected repo"}</span>.
+              Personas adjust the reviewer&apos;s focus and tone. Override per-PR with{" "}
+              <code className="rounded bg-iron/50 px-1 py-0.5 text-amber">@argus-eye review --persona &lt;name&gt;</code>.
+            </p>
+
+            {activeId === 0 ? (
+              <div className="rounded-lg border border-iron bg-charcoal p-10 text-center">
+                <UserCog className="h-8 w-8 text-slate-text mx-auto mb-3" />
+                <p className="text-xs font-mono text-slate-text">
+                  Select a repo to configure persona.
+                </p>
+              </div>
+            ) : (
+              <>
+                <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+                  {PERSONAS.map((p) => (
+                    <PersonaCard
+                      key={p.value}
+                      persona={p}
+                      isActive={currentPersona === p.value}
+                      onSelect={() => {
+                        setPersonaError("");
+                        updateRepo.mutate(
+                          {
+                            id: activeId,
+                            settings_json: { ...activeRepo?.settings_json, persona: p.value },
+                          },
+                          {
+                            onError: (err) =>
+                              setPersonaError(err instanceof Error ? err.message : "Failed to save persona"),
+                          },
+                        );
+                      }}
+                      disabled={updateRepo.isPending}
+                    />
+                  ))}
+                </div>
+                {personaError && (
+                  <p className="text-[10px] font-mono text-red-400 mt-2">{personaError}</p>
+                )}
+              </>
             )}
           </section>
         </div>
