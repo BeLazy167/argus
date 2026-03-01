@@ -409,10 +409,13 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	}
 
 	// Update review record
+	persona := strPtrOrNil(string(run.Persona))
 	_, err = o.db.Exec(ctx, `
-		UPDATE reviews SET status = 'completed', github_review_id = $1, summary = $2, score = $3, token_usage = $4, file_count = $5, completed_at = NOW()
-		WHERE id = $6
-	`, ghReviewID, run.Synthesis.Summary, run.Synthesis.Score, tokenUsageJSON, len(run.FileReviews), run.ReviewID)
+		UPDATE reviews SET status = 'completed', github_review_id = $1, summary = $2, score = $3, token_usage = $4, file_count = $5,
+		       deep_review = $6, persona = $7, is_incremental = $8, completed_at = NOW()
+		WHERE id = $9
+	`, ghReviewID, run.Synthesis.Summary, run.Synthesis.Score, tokenUsageJSON, len(run.FileReviews),
+		run.DeepReview, persona, run.IsIncremental, run.ReviewID)
 	if err != nil {
 		return fmt.Errorf("updating review record: %w", err)
 	}
@@ -589,7 +592,14 @@ func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghRe
 				ghCommentID = &id
 			}
 
-			if err := o.st.CreateReviewComment(ctx, run.ReviewID, fr.Path, startLine, &line, &side, c.Body, &sev, &cat, snippet, ghCommentID); err != nil {
+			specialist := strPtrOrNil(string(c.Specialist))
+			var confidenceScore *int
+			if c.Score > 0 {
+				score := c.Score
+				confidenceScore = &score
+			}
+
+			if err := o.st.CreateReviewComment(ctx, run.ReviewID, fr.Path, startLine, &line, &side, c.Body, &sev, &cat, specialist, snippet, confidenceScore, ghCommentID); err != nil {
 				o.logger.Error("persisting review comment", "error", err, "file", fr.Path)
 			}
 
@@ -641,6 +651,13 @@ func formatCommentBody(c FileComment) string {
 		body += "\n\n```suggestion\n" + strings.TrimRight(c.Suggestion, "\n") + "\n```"
 	}
 	return body
+}
+
+func strPtrOrNil(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 func countComments(run *PipelineRun) int {

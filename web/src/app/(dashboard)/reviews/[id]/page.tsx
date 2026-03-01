@@ -185,6 +185,7 @@ function TokenPill({ usage }: { usage: TokenUsage }) {
     }), { total_tokens: 0, cost: 0 });
     stages.push(["review", reviewTotal]);
   }
+  if (usage.scoring?.total_tokens) stages.push(["scoring", usage.scoring]);
 
   return (
     <div className="group relative">
@@ -437,6 +438,16 @@ function CommentCard({
         {comment.category && (
           <span className="inline-flex items-center rounded-sm border bg-iron/30 text-slate-text border-iron/60 px-2.5 py-0.5 text-[10px] font-mono">
             {comment.category}
+          </span>
+        )}
+        {comment.specialist && (
+          <span className="inline-flex items-center rounded-sm border bg-purple-400/10 text-purple-400 border-purple-400/30 px-2.5 py-0.5 text-[10px] font-mono">
+            {comment.specialist}
+          </span>
+        )}
+        {comment.confidence_score != null && (
+          <span className="text-[10px] font-mono text-slate-text" title="Confidence score">
+            {comment.confidence_score}%
           </span>
         )}
         {lineRef(comment) && (
@@ -778,6 +789,21 @@ export default function ReviewDetailPage() {
                 by {review.pr_author}
               </span>
               <StatusBadge status={review.status} />
+              {review.deep_review && (
+                <span className="inline-flex items-center rounded-sm border bg-purple-400/10 text-purple-400 border-purple-400/30 px-2 py-0.5 text-[10px] font-mono">
+                  Deep
+                </span>
+              )}
+              {review.is_incremental && (
+                <span className="inline-flex items-center rounded-sm border bg-cyan-400/10 text-cyan-400 border-cyan-400/30 px-2 py-0.5 text-[10px] font-mono">
+                  Incremental
+                </span>
+              )}
+              {review.persona && (
+                <span className="inline-flex items-center rounded-sm border bg-iron/30 text-slate-text border-iron/60 px-2 py-0.5 text-[10px] font-mono">
+                  {review.persona}
+                </span>
+              )}
             </div>
             <div className="flex items-center gap-3 mt-2.5 text-[10px] font-mono text-iron">
               {review.created_at && (

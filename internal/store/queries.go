@@ -235,7 +235,8 @@ func (s *Store) ListReviews(ctx context.Context, repoID int64, limit, offset int
 	}
 	rows, err := s.Pool.Query(ctx, `
 		SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, github_review_id,
-		       status, summary, score, token_usage, trigger, triggered_by, duration_ms, error, created_at, completed_at
+		       status, summary, score, token_usage, trigger, triggered_by, duration_ms, error,
+		       deep_review, persona, is_incremental, created_at, completed_at
 		FROM reviews WHERE repo_id = $1
 		ORDER BY created_at DESC LIMIT $2 OFFSET $3
 	`, repoID, limit, offset)
@@ -250,10 +251,12 @@ func (s *Store) GetReview(ctx context.Context, id uuid.UUID) (*Review, error) {
 	var r Review
 	err := s.Pool.QueryRow(ctx, `
 		SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, github_review_id,
-		       status, summary, score, token_usage, trigger, triggered_by, duration_ms, error, created_at, completed_at
+		       status, summary, score, token_usage, trigger, triggered_by, duration_ms, error,
+		       deep_review, persona, is_incremental, created_at, completed_at
 		FROM reviews WHERE id = $1
 	`, id).Scan(&r.ID, &r.RepoID, &r.PRNumber, &r.PRTitle, &r.PRAuthor, &r.HeadSHA, &r.BaseSHA, &r.GithubReviewID,
-		&r.Status, &r.Summary, &r.Score, &r.TokenUsage, &r.Trigger, &r.TriggeredBy, &r.DurationMs, &r.Error, &r.CreatedAt, &r.CompletedAt)
+		&r.Status, &r.Summary, &r.Score, &r.TokenUsage, &r.Trigger, &r.TriggeredBy, &r.DurationMs, &r.Error,
+		&r.DeepReview, &r.Persona, &r.IsIncremental, &r.CreatedAt, &r.CompletedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -262,7 +265,8 @@ func (s *Store) GetReview(ctx context.Context, id uuid.UUID) (*Review, error) {
 
 func (s *Store) GetReviewComments(ctx context.Context, reviewID uuid.UUID) ([]ReviewComment, error) {
 	rows, err := s.Pool.Query(ctx, `
-		SELECT id, review_id, file_path, start_line, end_line, side, body, severity, category, code_snippet, github_comment_id, created_at
+		SELECT id, review_id, file_path, start_line, end_line, side, body, severity, category,
+		       specialist, confidence_score, code_snippet, github_comment_id, created_at
 		FROM review_comments WHERE review_id = $1 ORDER BY file_path, start_line
 	`, reviewID)
 	if err != nil {
@@ -286,7 +290,8 @@ func (s *Store) ListReviewsScoped(ctx context.Context, repoID int64, installatio
 	}
 	rows, err := s.Pool.Query(ctx, `
 		SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, rv.github_review_id,
-		       rv.status, rv.summary, rv.score, rv.token_usage, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error, rv.created_at, rv.completed_at
+		       rv.status, rv.summary, rv.score, rv.token_usage, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error,
+		       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at
 		FROM reviews rv
 		JOIN repos r ON rv.repo_id = r.id
 		WHERE rv.repo_id = $1 AND r.installation_id = ANY($2)
@@ -401,11 +406,11 @@ func (s *Store) DeleteModelConfig(ctx context.Context, repoID int64, stage strin
 
 // --- Review Comments ---
 
-func (s *Store) CreateReviewComment(ctx context.Context, reviewID uuid.UUID, filePath string, startLine, endLine *int, side *string, body string, severity, category, codeSnippet *string, githubCommentID *int64) error {
+func (s *Store) CreateReviewComment(ctx context.Context, reviewID uuid.UUID, filePath string, startLine, endLine *int, side *string, body string, severity, category, specialist, codeSnippet *string, confidenceScore *int, githubCommentID *int64) error {
 	_, err := s.Pool.Exec(ctx, `
-		INSERT INTO review_comments (review_id, file_path, start_line, end_line, side, body, severity, category, code_snippet, github_comment_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-	`, reviewID, filePath, startLine, endLine, side, body, severity, category, codeSnippet, githubCommentID)
+		INSERT INTO review_comments (review_id, file_path, start_line, end_line, side, body, severity, category, specialist, confidence_score, code_snippet, github_comment_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+	`, reviewID, filePath, startLine, endLine, side, body, severity, category, specialist, confidenceScore, codeSnippet, githubCommentID)
 	return err
 }
 
@@ -413,9 +418,11 @@ func (s *Store) CreateReviewComment(ctx context.Context, reviewID uuid.UUID, fil
 func (s *Store) GetCommentByGithubID(ctx context.Context, githubCommentID int64) (*ReviewComment, error) {
 	var c ReviewComment
 	err := s.Pool.QueryRow(ctx, `
-		SELECT id, review_id, file_path, start_line, end_line, side, body, severity, category, code_snippet, github_comment_id, created_at
+		SELECT id, review_id, file_path, start_line, end_line, side, body, severity, category,
+		       specialist, confidence_score, code_snippet, github_comment_id, created_at
 		FROM review_comments WHERE github_comment_id = $1
-	`, githubCommentID).Scan(&c.ID, &c.ReviewID, &c.FilePath, &c.StartLine, &c.EndLine, &c.Side, &c.Body, &c.Severity, &c.Category, &c.CodeSnippet, &c.GithubCommentID, &c.CreatedAt)
+	`, githubCommentID).Scan(&c.ID, &c.ReviewID, &c.FilePath, &c.StartLine, &c.EndLine, &c.Side, &c.Body, &c.Severity, &c.Category,
+		&c.Specialist, &c.ConfidenceScore, &c.CodeSnippet, &c.GithubCommentID, &c.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -427,11 +434,13 @@ func (s *Store) GetLastCompletedReview(ctx context.Context, repoID int64, prNumb
 	var r Review
 	err := s.Pool.QueryRow(ctx, `
 		SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, github_review_id,
-		       status, summary, score, token_usage, trigger, triggered_by, duration_ms, error, created_at, completed_at
+		       status, summary, score, token_usage, trigger, triggered_by, duration_ms, error,
+		       deep_review, persona, is_incremental, created_at, completed_at
 		FROM reviews WHERE repo_id = $1 AND pr_number = $2 AND status = 'completed'
 		ORDER BY completed_at DESC LIMIT 1
 	`, repoID, prNumber).Scan(&r.ID, &r.RepoID, &r.PRNumber, &r.PRTitle, &r.PRAuthor, &r.HeadSHA, &r.BaseSHA, &r.GithubReviewID,
-		&r.Status, &r.Summary, &r.Score, &r.TokenUsage, &r.Trigger, &r.TriggeredBy, &r.DurationMs, &r.Error, &r.CreatedAt, &r.CompletedAt)
+		&r.Status, &r.Summary, &r.Score, &r.TokenUsage, &r.Trigger, &r.TriggeredBy, &r.DurationMs, &r.Error,
+		&r.DeepReview, &r.Persona, &r.IsIncremental, &r.CreatedAt, &r.CompletedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -442,13 +451,15 @@ func (s *Store) GetLatestReviewBySHA(ctx context.Context, repoFullName string, p
 	var r Review
 	err := s.Pool.QueryRow(ctx, `
 		SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, rv.github_review_id,
-		       rv.status, rv.summary, rv.score, rv.token_usage, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error, rv.created_at, rv.completed_at
+		       rv.status, rv.summary, rv.score, rv.token_usage, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error,
+		       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at
 		FROM reviews rv JOIN repos r ON rv.repo_id = r.id
 		WHERE r.full_name = $1 AND rv.pr_number = $2 AND rv.head_sha = $3
 		  AND rv.status = 'completed'
 		ORDER BY rv.created_at DESC LIMIT 1
 	`, repoFullName, prNumber, headSHA).Scan(&r.ID, &r.RepoID, &r.PRNumber, &r.PRTitle, &r.PRAuthor, &r.HeadSHA, &r.BaseSHA, &r.GithubReviewID,
-		&r.Status, &r.Summary, &r.Score, &r.TokenUsage, &r.Trigger, &r.TriggeredBy, &r.DurationMs, &r.Error, &r.CreatedAt, &r.CompletedAt)
+		&r.Status, &r.Summary, &r.Score, &r.TokenUsage, &r.Trigger, &r.TriggeredBy, &r.DurationMs, &r.Error,
+		&r.DeepReview, &r.Persona, &r.IsIncremental, &r.CreatedAt, &r.CompletedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -470,9 +481,10 @@ func (s *Store) GetStats(ctx context.Context) (*Stats, error) {
 			COALESCE((SELECT (COUNT(*) FILTER (WHERE score < 10) * 100 / NULLIF(COUNT(*) FILTER (WHERE status = 'completed'), 0))::int FROM reviews), 0),
 			(SELECT COUNT(*) FROM reviews WHERE created_at >= NOW() - INTERVAL '7 days')::int,
 			(SELECT COUNT(*) FROM reviews WHERE score IS NOT NULL AND score <= 4)::int,
-			COALESCE((SELECT (AVG(EXTRACT(EPOCH FROM (completed_at - created_at)) * 1000))::int FROM reviews WHERE completed_at IS NOT NULL), 0)
+			COALESCE((SELECT (AVG(EXTRACT(EPOCH FROM (completed_at - created_at)) * 1000))::int FROM reviews WHERE completed_at IS NOT NULL), 0),
+			(SELECT COUNT(*) FROM reviews WHERE deep_review = true)::int
 	`).Scan(&st.TotalReviews, &st.CompletedToday, &st.AvgScore, &st.ActiveRepos, &st.CriticalFinds, &st.PendingReviews,
-		&st.CatchRate, &st.PRsThisWeek, &st.HighRiskCount, &st.AvgReviewTimeMs)
+		&st.CatchRate, &st.PRsThisWeek, &st.HighRiskCount, &st.AvgReviewTimeMs, &st.DeepReviewCount)
 	return &st, err
 }
 
@@ -492,10 +504,11 @@ func (s *Store) GetStatsScoped(ctx context.Context, installationIDs []int64) (*S
 			COALESCE((SELECT (COUNT(*) FILTER (WHERE score < 10) * 100 / NULLIF(COUNT(*) FILTER (WHERE status = 'completed'), 0))::int FROM scoped_reviews), 0),
 			(SELECT COUNT(*) FROM scoped_reviews WHERE created_at >= NOW() - INTERVAL '7 days')::int,
 			(SELECT COUNT(*) FROM scoped_reviews WHERE score IS NOT NULL AND score <= 4)::int,
-			COALESCE((SELECT (AVG(EXTRACT(EPOCH FROM (completed_at - created_at)) * 1000))::int FROM scoped_reviews WHERE completed_at IS NOT NULL), 0)
+			COALESCE((SELECT (AVG(EXTRACT(EPOCH FROM (completed_at - created_at)) * 1000))::int FROM scoped_reviews WHERE completed_at IS NOT NULL), 0),
+			(SELECT COUNT(*) FROM scoped_reviews WHERE deep_review = true)::int
 	`, installationIDs).Scan(
 		&st.TotalReviews, &st.CompletedToday, &st.AvgScore, &st.ActiveRepos, &st.CriticalFinds, &st.PendingReviews,
-		&st.CatchRate, &st.PRsThisWeek, &st.HighRiskCount, &st.AvgReviewTimeMs,
+		&st.CatchRate, &st.PRsThisWeek, &st.HighRiskCount, &st.AvgReviewTimeMs, &st.DeepReviewCount,
 	)
 	return &st, err
 }

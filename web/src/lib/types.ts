@@ -28,6 +28,7 @@ export type StageTokens = {
 export type TokenUsage = {
   triage: StageTokens;
   review: StageTokens[];
+  scoring?: StageTokens;
   total: StageTokens;
 };
 
@@ -49,6 +50,9 @@ export type Review = {
   token_usage?: TokenUsage;
   error?: string;
   file_count?: number;
+  deep_review?: boolean;
+  persona?: string;
+  is_incremental?: boolean;
   created_at: string;
   completed_at?: string;
 };
@@ -63,6 +67,8 @@ export type ReviewComment = {
   body: string;
   severity?: "critical" | "warning" | "suggestion" | "praise";
   category?: string;
+  specialist?: string;
+  confidence_score?: number;
   code_snippet?: string;
   github_comment_id?: number;
   created_at: string;
@@ -113,6 +119,7 @@ export type Stats = {
   prs_this_week: number;
   high_risk_count: number;
   avg_review_time_ms: number;
+  deep_review_count: number;
 };
 
 export type ActivityLog = {

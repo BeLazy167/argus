@@ -24,6 +24,8 @@ func (ReviewComment) Fields() []ent.Field {
 		field.Text("body"),
 		field.Enum("severity").Values("critical", "warning", "suggestion", "praise").Optional().Nillable(),
 		field.String("category").Optional().Nillable(),
+		field.String("specialist").Optional().Nillable(),
+		field.Int("confidence_score").Optional().Nillable(),
 		field.Time("created_at").Default(time.Now),
 	}
 }
