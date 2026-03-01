@@ -13,6 +13,7 @@ type PipelineStage string
 const (
 	StageTriage    PipelineStage = "triage"
 	StageReview    PipelineStage = "review"
+	StageScoring   PipelineStage = "scoring"
 	StageSynthesis PipelineStage = "synthesis"
 	StageEmbedding PipelineStage = "embedding"
 )

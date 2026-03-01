@@ -196,8 +196,9 @@ Guidelines:
 - Be concise and professional
 - If the developer is right and you were wrong, acknowledge it gracefully
 - If you learn a project-specific pattern from the reply, include it in "learning"
-- Learning should capture reusable patterns like "this project uses X pattern for Y" or "team prefers approach A over B"
-- If no learning, omit the field or leave empty
+- Include "learning" if and only if the developer revealed something about how THIS SPECIFIC REPO works that you couldn't have known from the diff alone. Examples: "this project intentionally uses X pattern", "Y is handled upstream by Z service", "team convention is to do A instead of B"
+- Do NOT include general programming knowledge as learning
+- If no repo-specific insight was revealed, omit the field
 
 Respond ONLY with JSON: {"action": "resolve|clarify|stand_firm", "reply": "your response", "learning": "optional"}
 No other text.`

@@ -28,15 +28,16 @@ func splitRepoFullName(fullName string) (owner, repo string, err error) {
 
 // Orchestrator receives PR events and drives them through the review pipeline.
 type Orchestrator struct {
-	db          *pgxpool.Pool
-	st          *store.Store
-	ghClient    *ghpkg.Client
-	sm          *StateMachine
-	reviewStage *ReviewStage
-	triageStage *TriageStage
-	indexer     *memory.Indexer
-	registry    LLMRegistry
-	logger      *slog.Logger
+	db           *pgxpool.Pool
+	st           *store.Store
+	ghClient     *ghpkg.Client
+	sm           *StateMachine
+	reviewStage  *ReviewStage
+	triageStage  *TriageStage
+	scoringStage *ScoringStage
+	indexer      *memory.Indexer
+	registry     LLMRegistry
+	logger       *slog.Logger
 }
 
 // LLMRegistry is the subset of llm.Registry used by Orchestrator.
@@ -44,23 +45,26 @@ type LLMRegistry interface {
 	HasKeyForRepo(ctx context.Context, installationID int64, repoID *int64, providerName string) bool
 }
 
-func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, reviewStage *ReviewStage, triageStage *TriageStage, indexer *memory.Indexer, registry LLMRegistry, logger *slog.Logger) *Orchestrator {
+func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, reviewStage *ReviewStage, triageStage *TriageStage, scoringStage *ScoringStage, indexer *memory.Indexer, registry LLMRegistry, logger *slog.Logger) *Orchestrator {
 	sm := NewStateMachine(db, logger)
 
 	o := &Orchestrator{
-		db:          db,
-		st:          st,
-		ghClient:    ghClient,
-		sm:          sm,
-		reviewStage: reviewStage,
-		triageStage: triageStage,
-		indexer:     indexer,
-		registry:    registry,
-		logger:      logger,
+		db:           db,
+		st:           st,
+		ghClient:     ghClient,
+		sm:           sm,
+		reviewStage:  reviewStage,
+		triageStage:  triageStage,
+		scoringStage: scoringStage,
+		indexer:      indexer,
+		registry:     registry,
+		logger:       logger,
 	}
 
 	sm.RegisterStage(StateTriaging, triageStage.Execute)
 	sm.RegisterStage(StateReviewing, reviewStage.Execute)
+	sm.RegisterStage(StateScoring, scoringStage.Execute)
+	sm.RegisterStage(StatePass2, o.pass2)
 	sm.RegisterStage(StateSynthesizing, o.synthesize)
 	sm.RegisterStage(StatePosting, o.post)
 
@@ -99,7 +103,10 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 
 	// Check if repo has a model config + API key for the review stage
 	if o.registry != nil {
-		dbConfigs, _ := o.st.ListModelConfigs(ctx, dbRepo.ID)
+		dbConfigs, err := o.st.ListModelConfigs(ctx, dbRepo.ID)
+		if err != nil {
+			o.logger.Error("loading model configs for readiness check", "error", err, "repo", event.RepoFullName)
+		}
 		var reviewProvider string
 		for _, c := range dbConfigs {
 			if c.Stage == string(llm.StageReview) {
@@ -109,13 +116,17 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		}
 		if reviewProvider == "" || !o.registry.HasKeyForRepo(ctx, inst.ID, &dbRepo.ID, reviewProvider) {
 			o.logger.Info("no API key or model config, posting onboarding comment", "repo", event.RepoFullName, "provider", reviewProvider)
-			_ = o.ghClient.CreateIssueComment(ctx, event.InstallationID, owner, repo, event.PRNumber,
-				"Welcome to **Argus**! To enable AI code reviews, configure your API key and model at your [Argus Settings](https://argusai.vercel.app/settings).")
+			if err := o.ghClient.CreateIssueComment(ctx, event.InstallationID, owner, repo, event.PRNumber,
+				"Welcome to **Argus**! To enable AI code reviews, configure your API key and model at your [Argus Settings](https://argusai.vercel.app/settings)."); err != nil {
+				o.logger.Error("posting onboarding comment", "error", err, "repo", event.RepoFullName)
+			}
 			reviewID := uuid.New()
-			_, _ = o.db.Exec(ctx, `
+			if _, err := o.db.Exec(ctx, `
 				INSERT INTO reviews (id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, status, trigger, error)
 				VALUES ($1, $2, $3, $4, $5, $6, $7, 'failed', 'webhook', 'no_api_key')
-			`, reviewID, dbRepo.ID, event.PRNumber, event.PRTitle, event.PRAuthor, event.HeadSHA, event.BaseSHA)
+			`, reviewID, dbRepo.ID, event.PRNumber, event.PRTitle, event.PRAuthor, event.HeadSHA, event.BaseSHA); err != nil {
+				o.logger.Error("recording skipped review", "error", err, "repo", event.RepoFullName)
+			}
 			return nil
 		}
 	}
@@ -176,6 +187,7 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		Diff:             patchSet,
 		RawDiff:          rawDiff,
 		Persona:          loadPersona(dbRepo.SettingsJSON),
+		DeepReview:       isDeepReviewEnabled(dbRepo.SettingsJSON),
 		IsIncremental:    isIncremental,
 		PreviousReviewID: previousReviewID,
 		CreatedAt:        time.Now(),
@@ -247,6 +259,112 @@ func (o *Orchestrator) synthesize(ctx context.Context, run *PipelineRun) error {
 	return nil
 }
 
+// pass2 re-reviews "hot" files (3+ comments scored 70+) with a fresh Architecture
+// specialist that has no knowledge of prior comments. Implements the Rule of Five:
+// a second pass with a different lens catches things the first pass misses.
+func (o *Orchestrator) pass2(ctx context.Context, run *PipelineRun) error {
+	if !run.DeepReview {
+		return nil
+	}
+
+	const minCommentsForPass2 = 3
+	const minScoreForHot = 70
+
+	// Find hot files
+	var hotPaths []string
+	for _, fr := range run.FileReviews {
+		count := 0
+		for _, c := range fr.Comments {
+			if c.Score >= minScoreForHot {
+				count++
+			}
+		}
+		if count >= minCommentsForPass2 {
+			hotPaths = append(hotPaths, fr.Path)
+		}
+	}
+
+	if len(hotPaths) == 0 {
+		return nil
+	}
+
+	o.logger.Info("pass2 triggered", "hot_files", len(hotPaths))
+
+	// Find original diffs for hot files
+	hotSet := make(map[string]bool, len(hotPaths))
+	for _, p := range hotPaths {
+		hotSet[p] = true
+	}
+
+	owner, repo, err := splitRepoFullName(run.PREvent.RepoFullName)
+	if err != nil {
+		return err
+	}
+
+	// Resolve review provider
+	dbConfigs, err := o.st.ListModelConfigs(ctx, run.DBRepoID)
+	if err != nil {
+		return fmt.Errorf("pass2 model configs: %w", err)
+	}
+	repoConfigs := storeToLLMConfigs(dbConfigs)
+	cfg, err := o.reviewStage.registry.GetConfig(run.DBRepoID, llm.StageReview, repoConfigs)
+	if err != nil {
+		o.logger.Warn("pass2 skipped: no review config", "error", err)
+		return nil
+	}
+	provider, err := o.reviewStage.registry.GetProviderForRepo(ctx, run.DBInstallationID, &run.DBRepoID, cfg.Provider)
+	if err != nil {
+		o.logger.Warn("pass2 skipped: no provider", "error", err)
+		return nil
+	}
+
+	// Prefetch file contents for hot files
+	var hotFiles []diff.FileDiff
+	for _, f := range run.Diff.Files {
+		if hotSet[f.NewName] {
+			hotFiles = append(hotFiles, f)
+		}
+	}
+	fileContents := prefetchFiles(ctx, o.ghClient, run, owner, repo, hotFiles)
+
+	// Fresh Architecture review — no prior comments in context
+	for _, f := range hotFiles {
+		p := reviewParams{
+			file:       f,
+			action:     TriageDeep,
+			specialist: SpecialistArchitecture,
+			systemBase: specialistPrompt(SpecialistArchitecture),
+			deepReview: true,
+		}
+		rev, tok, err := o.reviewStage.reviewFile(ctx, run, p, fileContents, owner, repo, cfg, provider)
+		if err != nil {
+			o.logger.Warn("pass2 review failed", "file", f.NewName, "error", err)
+			continue
+		}
+		run.Tokens.Review = append(run.Tokens.Review, tok)
+		run.Tokens.addToTotal(tok)
+
+		// Tag as pass2 and merge into existing file reviews
+		for i := range rev.Comments {
+			rev.Comments[i].Specialist = "pass2_architecture"
+		}
+		merged := false
+		for idx := range run.FileReviews {
+			if run.FileReviews[idx].Path == rev.Path {
+				run.FileReviews[idx].Comments = append(run.FileReviews[idx].Comments, rev.Comments...)
+				merged = true
+				break
+			}
+		}
+		if !merged && len(rev.Comments) > 0 {
+			run.FileReviews = append(run.FileReviews, rev)
+		}
+	}
+
+	o.logger.Info("pass2 complete", "files_reviewed", len(hotFiles))
+	return nil
+}
+
 func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	owner, repo, err := splitRepoFullName(run.PREvent.RepoFullName)
 	if err != nil {
@@ -283,7 +401,11 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	// Serialize token usage
 	var tokenUsageJSON []byte
 	if run.Tokens.Total.TotalTokens > 0 {
-		tokenUsageJSON, _ = json.Marshal(run.Tokens)
+		if b, err := json.Marshal(run.Tokens); err != nil {
+			slog.Warn("failed to marshal token usage", "error", err)
+		} else {
+			tokenUsageJSON = b
+		}
 	}
 
 	// Update review record

@@ -38,9 +38,10 @@ const (
 
 // RunTokenUsage tracks token consumption and cost across pipeline stages.
 type RunTokenUsage struct {
-	Triage StageTokens   `json:"triage"`
-	Review []StageTokens `json:"review"`
-	Total  StageTokens   `json:"total"`
+	Triage  StageTokens   `json:"triage"`
+	Review  []StageTokens `json:"review"`
+	Scoring StageTokens   `json:"scoring,omitempty"`
+	Total   StageTokens   `json:"total"`
 }
 
 // StageTokens holds token counts and cost for a single LLM call or stage aggregate.
@@ -67,6 +68,7 @@ type PipelineRun struct {
 	Synthesis        *SynthesisResult
 	Tokens           RunTokenUsage
 	Persona          Persona
+	DeepReview       bool
 	IsIncremental    bool
 	PreviousReviewID *uuid.UUID
 	Error            string
@@ -89,6 +91,8 @@ type FileComment struct {
 	Category    Category `json:"category"`
 	CodeSnippet string   `json:"code_snippet,omitempty"`
 	Suggestion  string   `json:"suggestion,omitempty"`
+	Specialist  Specialist `json:"specialist,omitempty"`
+	Score       int        `json:"score"`
 }
 
 // ValidSeverities is the set of valid severity values.
