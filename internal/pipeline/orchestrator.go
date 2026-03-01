@@ -420,19 +420,27 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	return nil
 }
 
-// indexConfirmedPatterns saves comments scored 90+ as confirmed repo patterns in Supermemory.
-// Cheap — no LLM call, just direct indexing of validated high-confidence comments.
+// indexConfirmedPatterns saves high-confidence comments as confirmed repo patterns in Supermemory.
+// When scoring is available, uses score ≥90. When skipped, falls back to critical severity.
 func (o *Orchestrator) indexConfirmedPatterns(ctx context.Context, run *PipelineRun, owner, repo string) {
 	if o.indexer == nil || !run.DeepReview {
 		return
 	}
 
 	const confirmedThreshold = 90
+	var indexed int
 	for _, fr := range run.FileReviews {
 		for _, c := range fr.Comments {
-			if c.Score < confirmedThreshold {
+			var qualifies bool
+			if run.ScoringSkipped {
+				qualifies = c.Severity == SeverityCritical
+			} else {
+				qualifies = c.Score >= confirmedThreshold
+			}
+			if !qualifies {
 				continue
 			}
+			indexed++
 			content := fmt.Sprintf("Confirmed pattern [%s]: %s (file: %s)", c.Category, c.Body, fr.Path)
 			customID := memory.PatternCustomID(owner, repo, "confirmed", content)
 			_, err := o.indexer.IndexRepoPattern(ctx, owner, repo, content, customID, map[string]string{
@@ -446,28 +454,37 @@ func (o *Orchestrator) indexConfirmedPatterns(ctx context.Context, run *Pipeline
 			}
 		}
 	}
+	slog.Info("indexConfirmedPatterns", "indexed", indexed, "scoring_skipped", run.ScoringSkipped)
 }
 
 // autoLearnPatterns uses the review LLM to extract 0-3 reusable patterns from high-confidence
-// comments. Only runs for deep reviews with 2+ comments scoring 85+.
+// comments. When scoring available, needs 2+ at 85+. When skipped, uses critical+warning severity.
 func (o *Orchestrator) autoLearnPatterns(ctx context.Context, run *PipelineRun, owner, repo string) {
 	if o.indexer == nil || !run.DeepReview {
 		return
 	}
 
-	// Collect high-confidence comments
+	// Collect high-confidence comments (score-based or severity-based fallback)
 	const learnThreshold = 85
 	var highConf []string
 	for _, fr := range run.FileReviews {
 		for _, c := range fr.Comments {
-			if c.Score >= learnThreshold {
+			var qualifies bool
+			if run.ScoringSkipped {
+				qualifies = c.Severity == SeverityCritical || c.Severity == SeverityWarning
+			} else {
+				qualifies = c.Score >= learnThreshold
+			}
+			if qualifies {
 				highConf = append(highConf, fmt.Sprintf("[%s|%s] %s:%d — %s", c.Severity, c.Category, fr.Path, c.Line, c.Body))
 			}
 		}
 	}
 	if len(highConf) < 2 {
+		slog.Info("autoLearnPatterns skipped", "qualifying", len(highConf), "scoring_skipped", run.ScoringSkipped)
 		return
 	}
+	slog.Info("autoLearnPatterns", "qualifying", len(highConf), "scoring_skipped", run.ScoringSkipped)
 
 	cfg, provider, err := o.resolveReviewProvider(ctx, run)
 	if err != nil {
@@ -565,8 +582,10 @@ func (o *Orchestrator) synthesizeFileMemories(ctx context.Context, run *Pipeline
 		}
 	}
 	if len(qualifying) == 0 {
+		slog.Info("synthesizeFileMemories skipped", "qualifying_files", 0, "scoring_skipped", run.ScoringSkipped)
 		return
 	}
+	slog.Info("synthesizeFileMemories", "qualifying_files", len(qualifying), "scoring_skipped", run.ScoringSkipped)
 
 	// Cap to avoid unbounded LLM calls on large PRs
 	const maxSynthesisFiles = 10
