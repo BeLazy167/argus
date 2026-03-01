@@ -44,6 +44,9 @@ type Review struct {
 	TriggeredBy    *string          `json:"triggered_by,omitempty"`
 	DurationMs     *int             `json:"duration_ms,omitempty"`
 	Error          *string          `json:"error,omitempty"`
+	DeepReview     bool             `json:"deep_review"`
+	Persona        *string          `json:"persona,omitempty"`
+	IsIncremental  bool             `json:"is_incremental"`
 	CreatedAt      time.Time        `json:"created_at"`
 	CompletedAt    *time.Time       `json:"completed_at,omitempty"`
 }
@@ -58,6 +61,8 @@ type ReviewComment struct {
 	Body            string    `json:"body"`
 	Severity        *string   `json:"severity,omitempty"`
 	Category        *string   `json:"category,omitempty"`
+	Specialist      *string   `json:"specialist,omitempty"`
+	ConfidenceScore *int      `json:"confidence_score,omitempty"`
 	CodeSnippet     *string   `json:"code_snippet,omitempty"`
 	GithubCommentID *int64    `json:"github_comment_id,omitempty"`
 	CreatedAt       time.Time `json:"created_at"`
@@ -125,4 +130,5 @@ type Stats struct {
 	PRsThisWeek     int `json:"prs_this_week"`
 	HighRiskCount   int `json:"high_risk_count"`
 	AvgReviewTimeMs int `json:"avg_review_time_ms"`
+	DeepReviewCount int `json:"deep_review_count"`
 }

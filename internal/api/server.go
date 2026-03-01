@@ -492,9 +492,9 @@ func (s *Server) upsertModelConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	stage := chi.URLParam(r, "stage")
-	validStages := map[string]bool{"triage": true, "review": true, "synthesis": true, "embedding": true}
+	validStages := map[string]bool{"triage": true, "review": true, "synthesis": true, "embedding": true, "scoring": true}
 	if !validStages[stage] {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "stage must be triage, review, synthesis, or embedding"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "stage must be triage, review, synthesis, embedding, or scoring"})
 		return
 	}
 	var body struct {

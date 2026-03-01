@@ -16,7 +16,7 @@ type ModelConfig struct {
 
 func (ModelConfig) Fields() []ent.Field {
 	return []ent.Field{
-		field.Enum("stage").Values("triage", "review", "synthesis", "embedding"),
+		field.Enum("stage").Values("triage", "review", "synthesis", "embedding", "scoring"),
 		field.String("provider"),
 		field.String("model"),
 		field.String("base_url").Optional().Nillable(),

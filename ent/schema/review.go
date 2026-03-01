@@ -31,6 +31,9 @@ func (Review) Fields() []ent.Field {
 		field.String("triggered_by").Optional().Nillable(),
 		field.Int("duration_ms").Optional().Nillable(),
 		field.Text("error").Optional().Nillable(),
+		field.Bool("deep_review").Default(false),
+		field.String("persona").Optional().Nillable(),
+		field.Bool("is_incremental").Default(false),
 		field.Time("created_at").Default(time.Now),
 		field.Time("completed_at").Optional().Nillable(),
 	}

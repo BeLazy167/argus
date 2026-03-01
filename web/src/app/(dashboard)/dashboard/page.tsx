@@ -7,6 +7,7 @@ import {
   ShieldAlert,
   Clock,
   Loader2,
+  Microscope,
 } from "lucide-react";
 import { useStats } from "@/lib/queries/stats";
 import { useReviews } from "@/lib/queries/reviews";
@@ -126,7 +127,7 @@ export default function DashboardPage() {
       </div>
 
       {/* Stat Cards */}
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4 mb-10">
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-5 mb-10">
         <StatCard
           label="Catch Rate"
           value={stats ? `${stats.catch_rate}%` : "--"}
@@ -144,6 +145,12 @@ export default function DashboardPage() {
           label="High Risk"
           value={stats?.high_risk_count ?? 0}
           icon={ShieldAlert}
+          loading={statsLoading}
+        />
+        <StatCard
+          label="Deep Reviews"
+          value={stats?.deep_review_count ?? 0}
+          icon={Microscope}
           loading={statsLoading}
         />
         <StatCard
@@ -206,6 +213,16 @@ export default function DashboardPage() {
                         <span className="text-xs font-mono text-foreground truncate max-w-[300px]">
                           {review.pr_title}
                         </span>
+                        {review.deep_review && (
+                          <span className="inline-flex items-center rounded-sm border bg-purple-400/10 text-purple-400 border-purple-400/30 px-1.5 py-0 text-[9px] font-mono">
+                            Deep
+                          </span>
+                        )}
+                        {review.is_incremental && (
+                          <span className="inline-flex items-center rounded-sm border bg-cyan-400/10 text-cyan-400 border-cyan-400/30 px-1.5 py-0 text-[9px] font-mono">
+                            Inc
+                          </span>
+                        )}
                       </div>
                       <p className="text-[10px] font-mono text-slate-text/60 mt-0.5">
                         {repo?.full_name}
