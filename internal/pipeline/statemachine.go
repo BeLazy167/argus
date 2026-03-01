@@ -49,8 +49,10 @@ func (sm *StateMachine) Run(ctx context.Context, run *PipelineRun) error {
 			}
 			run.State = next
 			run.UpdatedAt = time.Now()
-			if err := sm.persistState(ctx, run); err != nil {
-				return fmt.Errorf("persisting state: %w", err)
+			if shouldPersist(run.State) {
+				if err := sm.persistState(ctx, run); err != nil {
+					return fmt.Errorf("persisting state: %w", err)
+				}
 			}
 			continue
 		}
@@ -73,11 +75,23 @@ func (sm *StateMachine) Run(ctx context.Context, run *PipelineRun) error {
 		}
 		run.State = next
 		run.UpdatedAt = time.Now()
-		if err := sm.persistState(ctx, run); err != nil {
-			return fmt.Errorf("persisting state: %w", err)
+		if shouldPersist(run.State) {
+			if err := sm.persistState(ctx, run); err != nil {
+				return fmt.Errorf("persisting state: %w", err)
+			}
 		}
 	}
 	return nil
+}
+
+// shouldPersist returns true for states worth persisting to DB.
+// Triage and synthesis are fast/instant — just re-run on recovery.
+func shouldPersist(state PipelineState) bool {
+	switch state {
+	case StateReviewing, StatePosting, StateCompleted, StateFailed:
+		return true
+	}
+	return false
 }
 
 // Resume loads and resumes an incomplete pipeline run.

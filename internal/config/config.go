@@ -43,7 +43,7 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid GITHUB_APP_ID: %w", err)
 	}
-	maxWorkers, err := strconv.Atoi(getEnv("MAX_CONCURRENT_REVIEWS", "5"))
+	maxWorkers, err := strconv.Atoi(getEnv("MAX_CONCURRENT_REVIEWS", "10"))
 	if err != nil {
 		return nil, fmt.Errorf("invalid MAX_CONCURRENT_REVIEWS: %w", err)
 	}

@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
-	"time"
 
 	ghpkg "github.com/BeLazy167/argus/internal/github"
 	"github.com/BeLazy167/argus/internal/llm"
@@ -74,6 +73,23 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 		err    error
 	}
 
+	fileContents := prefetchFiles(ctx, rs.ghClient, run, filesToReview)
+
+	// Resolve model config once for all files
+	dbConfigs, err := rs.store.ListModelConfigs(ctx, run.DBRepoID)
+	if err != nil {
+		return fmt.Errorf("loading model configs for repo %d: %w", run.DBRepoID, err)
+	}
+	repoConfigs := storeToLLMConfigs(dbConfigs)
+	cfg, err := rs.registry.GetConfig(run.DBRepoID, llm.StageReview, repoConfigs)
+	if err != nil {
+		return err
+	}
+	provider, err := rs.registry.GetProviderForRepo(ctx, run.DBInstallationID, &run.DBRepoID, cfg.Provider)
+	if err != nil {
+		return err
+	}
+
 	fileCh := make(chan diff.FileDiff, len(filesToReview))
 	resultCh := make(chan result, len(filesToReview))
 
@@ -82,21 +98,16 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 	if workers > len(filesToReview) {
 		workers = len(filesToReview)
 	}
-	if workers > 2 {
-		workers = 2
+	if workers > 10 {
+		workers = 10
 	}
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for file := range fileCh {
-				review, tokens, err := rs.reviewFile(ctx, run, file)
+				review, tokens, err := rs.reviewFile(ctx, run, file, fileContents, triageLookup[file.NewName], cfg, provider)
 				resultCh <- result{review: review, tokens: tokens, err: err}
-				select {
-				case <-time.After(2 * time.Second):
-				case <-ctx.Done():
-					return
-				}
 			}
 		}()
 	}
@@ -128,6 +139,38 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 	return firstErr
 }
 
+func prefetchFiles(ctx context.Context, ghClient *ghpkg.Client, run *PipelineRun, files []diff.FileDiff) map[string]string {
+	if ghClient == nil {
+		return nil
+	}
+	owner, repo, err := splitRepoFullName(run.PREvent.RepoFullName)
+	if err != nil {
+		return nil
+	}
+	contents := make(map[string]string, len(files))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 5) // bound GitHub API concurrency
+	for _, f := range files {
+		wg.Add(1)
+		go func(path string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			content, err := ghClient.GetFileContent(ctx, run.PREvent.InstallationID, owner, repo, path, run.PREvent.HeadSHA)
+			if err != nil {
+				slog.Warn("prefetch file content failed", "file", path, "error", err)
+				return
+			}
+			mu.Lock()
+			contents[path] = content
+			mu.Unlock()
+		}(f.NewName)
+	}
+	wg.Wait()
+	return contents
+}
+
 // truncateDiff limits a file diff to maxLines of raw diff content.
 func truncateDiff(f diff.FileDiff, maxLines int) diff.FileDiff {
 	lines := strings.Split(f.RawDiff, "\n")
@@ -137,40 +180,17 @@ func truncateDiff(f diff.FileDiff, maxLines int) diff.FileDiff {
 	return f
 }
 
-func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, file diff.FileDiff) (FileReview, StageTokens, error) {
+func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, file diff.FileDiff, fileContents map[string]string, action TriageAction, cfg llm.ModelConfig, provider llm.Provider) (FileReview, StageTokens, error) {
 	review := FileReview{Path: file.NewName}
 	var tokens StageTokens
 	tokens.File = file.NewName
-
-	dbConfigs, err := rs.store.ListModelConfigs(ctx, run.DBRepoID)
-	if err != nil {
-		return review, tokens, fmt.Errorf("loading model configs for repo %d: %w", run.DBRepoID, err)
-	}
-	repoConfigs := storeToLLMConfigs(dbConfigs)
-	cfg, err := rs.registry.GetConfig(run.DBRepoID, llm.StageReview, repoConfigs)
-	if err != nil {
-		return review, tokens, err
-	}
-	provider, err := rs.registry.GetProviderForRepo(ctx, run.DBInstallationID, &run.DBRepoID, cfg.Provider)
-	if err != nil {
-		return review, tokens, err
-	}
 
 	owner, repo, err := splitRepoFullName(run.PREvent.RepoFullName)
 	if err != nil {
 		return review, tokens, err
 	}
 
-	// Fetch file content for suggestion context
-	var fileContent string
-	if rs.ghClient != nil {
-		content, err := rs.ghClient.GetFileContent(ctx, run.PREvent.InstallationID, owner, repo, file.NewName, run.PREvent.HeadSHA)
-		if err != nil {
-			slog.Warn("could not fetch file content for suggestions", "file", file.NewName, "error", err)
-		} else {
-			fileContent = content
-		}
-	}
+	fileContent := fileContents[file.NewName]
 
 	prompt := buildFileReviewPrompt(run, file, fileContent)
 	messages := []llm.Message{{Role: "user", Content: prompt}}
@@ -178,7 +198,7 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, file di
 	var tools []llm.Tool
 	var toolHandler *ToolHandler
 	systemPrompt := baseSystemPrompt
-	if rs.memClient != nil {
+	if rs.memClient != nil && action == TriageDeep {
 		tools = memoryTools()
 		toolHandler = NewToolHandler(rs.memClient, rs.store, owner)
 		systemPrompt = buildAgenticSystemPrompt(owner, repo)
