@@ -60,13 +60,14 @@ func (sm *StateMachine) Run(ctx context.Context, run *PipelineRun) error {
 		sm.logger.Info("executing stage", "state", run.State, "review_id", run.ReviewID)
 
 		if err := stage(ctx, run); err != nil {
+			failedState := run.State
 			run.State = StateFailed
 			run.Error = err.Error()
 			run.UpdatedAt = time.Now()
 			if persistErr := sm.persistState(ctx, run); persistErr != nil {
 				sm.logger.Error("failed to persist failure state", "error", persistErr, "review_id", run.ReviewID)
 			}
-			return fmt.Errorf("stage %s failed: %w", run.State, err)
+			return fmt.Errorf("stage %s failed: %w", failedState, err)
 		}
 
 		next, exists := trans[run.State]
@@ -85,10 +86,10 @@ func (sm *StateMachine) Run(ctx context.Context, run *PipelineRun) error {
 }
 
 // shouldPersist returns true for states worth persisting to DB.
-// Triage and synthesis are fast/instant — just re-run on recovery.
+// Triage is fast — just re-run on recovery. Everything after review is persisted.
 func shouldPersist(state PipelineState) bool {
 	switch state {
-	case StateReviewing, StatePosting, StateCompleted, StateFailed:
+	case StateReviewing, StateSynthesizing, StatePosting, StateCompleted, StateFailed:
 		return true
 	}
 	return false
