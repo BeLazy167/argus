@@ -10,11 +10,11 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
-	ghpkg "github.com/acmeorg/argus/internal/github"
-	"github.com/acmeorg/argus/internal/llm"
-	"github.com/acmeorg/argus/internal/memory"
-	"github.com/acmeorg/argus/internal/store"
-	"github.com/acmeorg/argus/pkg/diff"
+	ghpkg "github.com/BeLazy167/argus/internal/github"
+	"github.com/BeLazy167/argus/internal/llm"
+	"github.com/BeLazy167/argus/internal/memory"
+	"github.com/BeLazy167/argus/internal/store"
+	"github.com/BeLazy167/argus/pkg/diff"
 )
 
 // splitRepoFullName splits "owner/repo" into its components.

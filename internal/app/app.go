@@ -10,14 +10,14 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/acmeorg/argus/internal/api"
-	"github.com/acmeorg/argus/internal/config"
-	"github.com/acmeorg/argus/internal/crypto"
-	ghpkg "github.com/acmeorg/argus/internal/github"
-	"github.com/acmeorg/argus/internal/llm"
-	"github.com/acmeorg/argus/internal/memory"
-	"github.com/acmeorg/argus/internal/pipeline"
-	"github.com/acmeorg/argus/internal/store"
+	"github.com/BeLazy167/argus/internal/api"
+	"github.com/BeLazy167/argus/internal/config"
+	"github.com/BeLazy167/argus/internal/crypto"
+	ghpkg "github.com/BeLazy167/argus/internal/github"
+	"github.com/BeLazy167/argus/internal/llm"
+	"github.com/BeLazy167/argus/internal/memory"
+	"github.com/BeLazy167/argus/internal/pipeline"
+	"github.com/BeLazy167/argus/internal/store"
 )
 
 // Run initializes all components and starts the server.

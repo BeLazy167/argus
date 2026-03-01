@@ -8,8 +8,8 @@ import (
 	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
-	"github.com/acmeorg/argus/ent/predicate"
-	"github.com/acmeorg/argus/ent/review"
+	"github.com/BeLazy167/argus/ent/predicate"
+	"github.com/BeLazy167/argus/ent/review"
 )
 
 // ReviewDelete is the builder for deleting a Review entity.

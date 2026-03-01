@@ -10,20 +10,20 @@ import (
 	"reflect"
 
 	"github.com/google/uuid"
-	"github.com/acmeorg/argus/ent/migrate"
+	"github.com/BeLazy167/argus/ent/migrate"
 
 	"entgo.io/ent"
 	"entgo.io/ent/dialect"
 	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
-	"github.com/acmeorg/argus/ent/activitylog"
-	"github.com/acmeorg/argus/ent/installation"
-	"github.com/acmeorg/argus/ent/modelconfig"
-	"github.com/acmeorg/argus/ent/pipelinestate"
-	"github.com/acmeorg/argus/ent/repo"
-	"github.com/acmeorg/argus/ent/review"
-	"github.com/acmeorg/argus/ent/reviewcomment"
-	"github.com/acmeorg/argus/ent/rule"
+	"github.com/BeLazy167/argus/ent/activitylog"
+	"github.com/BeLazy167/argus/ent/installation"
+	"github.com/BeLazy167/argus/ent/modelconfig"
+	"github.com/BeLazy167/argus/ent/pipelinestate"
+	"github.com/BeLazy167/argus/ent/repo"
+	"github.com/BeLazy167/argus/ent/review"
+	"github.com/BeLazy167/argus/ent/reviewcomment"
+	"github.com/BeLazy167/argus/ent/rule"
 )
 
 // Client is the client that holds all ent builders.

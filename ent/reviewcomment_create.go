@@ -11,8 +11,8 @@ import (
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
 	"github.com/google/uuid"
-	"github.com/acmeorg/argus/ent/review"
-	"github.com/acmeorg/argus/ent/reviewcomment"
+	"github.com/BeLazy167/argus/ent/review"
+	"github.com/BeLazy167/argus/ent/reviewcomment"
 )
 
 // ReviewCommentCreate is the builder for creating a ReviewComment entity.

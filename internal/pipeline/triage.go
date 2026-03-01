@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/acmeorg/argus/internal/llm"
-	"github.com/acmeorg/argus/internal/store"
-	"github.com/acmeorg/argus/pkg/diff"
+	"github.com/BeLazy167/argus/internal/llm"
+	"github.com/BeLazy167/argus/internal/store"
+	"github.com/BeLazy167/argus/pkg/diff"
 )
 
 // TriageAction classifies how deeply a file should be reviewed.

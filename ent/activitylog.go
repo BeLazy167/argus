@@ -10,7 +10,7 @@ import (
 
 	"entgo.io/ent"
 	"entgo.io/ent/dialect/sql"
-	"github.com/acmeorg/argus/ent/activitylog"
+	"github.com/BeLazy167/argus/ent/activitylog"
 )
 
 // ActivityLog is the model entity for the ActivityLog schema.

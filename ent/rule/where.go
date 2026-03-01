@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"entgo.io/ent/dialect/sql"
-	"github.com/acmeorg/argus/ent/predicate"
+	"github.com/BeLazy167/argus/ent/predicate"
 )
 
 // ID filters vertices based on their ID field.

@@ -11,9 +11,9 @@ import (
 	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
-	"github.com/acmeorg/argus/ent/modelconfig"
-	"github.com/acmeorg/argus/ent/predicate"
-	"github.com/acmeorg/argus/ent/repo"
+	"github.com/BeLazy167/argus/ent/modelconfig"
+	"github.com/BeLazy167/argus/ent/predicate"
+	"github.com/BeLazy167/argus/ent/repo"
 )
 
 // ModelConfigUpdate is the builder for updating ModelConfig entities.

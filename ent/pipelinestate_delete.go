@@ -8,8 +8,8 @@ import (
 	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
-	"github.com/acmeorg/argus/ent/pipelinestate"
-	"github.com/acmeorg/argus/ent/predicate"
+	"github.com/BeLazy167/argus/ent/pipelinestate"
+	"github.com/BeLazy167/argus/ent/predicate"
 )
 
 // PipelineStateDelete is the builder for deleting a PipelineState entity.

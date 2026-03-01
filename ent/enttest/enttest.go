@@ -5,12 +5,12 @@ package enttest
 import (
 	"context"
 
-	"github.com/acmeorg/argus/ent"
+	"github.com/BeLazy167/argus/ent"
 	// required by schema hooks.
-	_ "github.com/acmeorg/argus/ent/runtime"
+	_ "github.com/BeLazy167/argus/ent/runtime"
 
 	"entgo.io/ent/dialect/sql/schema"
-	"github.com/acmeorg/argus/ent/migrate"
+	"github.com/BeLazy167/argus/ent/migrate"
 )
 
 type (

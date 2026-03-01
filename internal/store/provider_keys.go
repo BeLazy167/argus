@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/acmeorg/argus/internal/crypto"
+	"github.com/BeLazy167/argus/internal/crypto"
 )
 
 func (s *Store) UpsertProviderKey(ctx context.Context, installationID int64, repoID *int64, provider, apiKey string, baseURL *string) (*ProviderKey, error) {

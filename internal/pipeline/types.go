@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/acmeorg/argus/internal/github"
-	"github.com/acmeorg/argus/pkg/diff"
+	"github.com/BeLazy167/argus/internal/github"
+	"github.com/BeLazy167/argus/pkg/diff"
 )
 
 // Severity classifies the impact of a review comment.

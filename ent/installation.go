@@ -9,7 +9,7 @@ import (
 
 	"entgo.io/ent"
 	"entgo.io/ent/dialect/sql"
-	"github.com/acmeorg/argus/ent/installation"
+	"github.com/BeLazy167/argus/ent/installation"
 )
 
 // Installation is the model entity for the Installation schema.

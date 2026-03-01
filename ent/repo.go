@@ -10,8 +10,8 @@ import (
 
 	"entgo.io/ent"
 	"entgo.io/ent/dialect/sql"
-	"github.com/acmeorg/argus/ent/installation"
-	"github.com/acmeorg/argus/ent/repo"
+	"github.com/BeLazy167/argus/ent/installation"
+	"github.com/BeLazy167/argus/ent/repo"
 )
 
 // Repo is the model entity for the Repo schema.

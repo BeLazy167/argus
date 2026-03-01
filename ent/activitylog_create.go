@@ -10,7 +10,7 @@ import (
 
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
-	"github.com/acmeorg/argus/ent/activitylog"
+	"github.com/BeLazy167/argus/ent/activitylog"
 )
 
 // ActivityLogCreate is the builder for creating a ActivityLog entity.

@@ -6,7 +6,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/acmeorg/argus/ent"
+	"github.com/BeLazy167/argus/ent"
 )
 
 // The ActivityLogFunc type is an adapter to allow the use of ordinary

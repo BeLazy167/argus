@@ -10,8 +10,8 @@ import (
 	"entgo.io/ent"
 	"entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
-	"github.com/acmeorg/argus/ent/review"
-	"github.com/acmeorg/argus/ent/reviewcomment"
+	"github.com/BeLazy167/argus/ent/review"
+	"github.com/BeLazy167/argus/ent/reviewcomment"
 )
 
 // ReviewComment is the model entity for the ReviewComment schema.

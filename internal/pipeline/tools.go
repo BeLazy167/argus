@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/acmeorg/argus/internal/llm"
-	"github.com/acmeorg/argus/internal/memory"
-	"github.com/acmeorg/argus/internal/store"
+	"github.com/BeLazy167/argus/internal/llm"
+	"github.com/BeLazy167/argus/internal/memory"
+	"github.com/BeLazy167/argus/internal/store"
 )
 
 // memoryTools returns the tool definitions for agentic RAG.

@@ -7,10 +7,10 @@ import (
 	"log/slog"
 	"strings"
 
-	ghpkg "github.com/acmeorg/argus/internal/github"
-	"github.com/acmeorg/argus/internal/llm"
-	"github.com/acmeorg/argus/internal/memory"
-	"github.com/acmeorg/argus/internal/store"
+	ghpkg "github.com/BeLazy167/argus/internal/github"
+	"github.com/BeLazy167/argus/internal/llm"
+	"github.com/BeLazy167/argus/internal/memory"
+	"github.com/BeLazy167/argus/internal/store"
 )
 
 // ReplyAnalyzer handles incoming replies to Argus review comments.

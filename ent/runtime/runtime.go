@@ -2,7 +2,7 @@
 
 package runtime
 
-// The schema-stitching logic is generated in github.com/acmeorg/argus/ent/runtime.go
+// The schema-stitching logic is generated in github.com/BeLazy167/argus/ent/runtime.go
 
 const (
 	Version = "v0.14.5"                                         // Version of ent codegen.

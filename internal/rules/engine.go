@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	ghpkg "github.com/acmeorg/argus/internal/github"
+	ghpkg "github.com/BeLazy167/argus/internal/github"
 )
 
 // Rule represents a review rule from either org DB or repo .argus/rules.md.

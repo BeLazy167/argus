@@ -9,7 +9,7 @@ import (
 
 	"entgo.io/ent"
 	"entgo.io/ent/dialect/sql"
-	"github.com/acmeorg/argus/ent/rule"
+	"github.com/BeLazy167/argus/ent/rule"
 )
 
 // Rule is the model entity for the Rule schema.
