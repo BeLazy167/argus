@@ -58,18 +58,28 @@ func (ra *ReplyAnalyzer) Analyze(ctx context.Context, event ghpkg.CommentEvent) 
 		return err
 	}
 
+	// Resolve DB IDs (webhook sends GitHub IDs, DB uses serial IDs)
+	inst, err := ra.store.GetInstallationByGitHubID(ctx, event.InstallationID)
+	if err != nil {
+		return fmt.Errorf("resolving installation: %w", err)
+	}
+	dbRepo, err := ra.store.GetRepoByFullName(ctx, event.RepoFullName)
+	if err != nil {
+		return fmt.Errorf("resolving repo: %w", err)
+	}
+
 	// Build LLM prompt
 	prompt := buildReplyPrompt(original, event)
 
 	var repoConfigs []llm.ModelConfig
-	if dbConfigs, err := ra.store.ListModelConfigs(ctx, event.RepoID); err == nil {
+	if dbConfigs, err := ra.store.ListModelConfigs(ctx, dbRepo.ID); err == nil {
 		repoConfigs = storeToLLMConfigs(dbConfigs)
 	}
-	cfg, err := ra.registry.GetConfig(event.RepoID, llm.StageReview, repoConfigs)
+	cfg, err := ra.registry.GetConfig(dbRepo.ID, llm.StageReview, repoConfigs)
 	if err != nil {
 		return fmt.Errorf("reply config: %w", err)
 	}
-	provider, err := ra.registry.GetProviderForRepo(ctx, event.InstallationID, &event.RepoID, cfg.Provider)
+	provider, err := ra.registry.GetProviderForRepo(ctx, inst.ID, &dbRepo.ID, cfg.Provider)
 	if err != nil {
 		return fmt.Errorf("reply provider: %w", err)
 	}

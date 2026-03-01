@@ -107,7 +107,7 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 				break
 			}
 		}
-		if reviewProvider == "" || !o.registry.HasKeyForRepo(ctx, event.InstallationID, &dbRepo.ID, reviewProvider) {
+		if reviewProvider == "" || !o.registry.HasKeyForRepo(ctx, inst.ID, &dbRepo.ID, reviewProvider) {
 			o.logger.Info("no API key or model config, posting onboarding comment", "repo", event.RepoFullName, "provider", reviewProvider)
 			_ = o.ghClient.CreateIssueComment(ctx, event.InstallationID, owner, repo, event.PRNumber,
 				"Welcome to **Argus**! To enable AI code reviews, configure your API key and model at your [Argus Settings](https://argusai.vercel.app/settings).")
@@ -171,6 +171,8 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		ReviewID:         reviewID,
 		State:            StatePending,
 		PREvent:          event,
+		DBInstallationID: inst.ID,
+		DBRepoID:         dbRepo.ID,
 		Diff:             patchSet,
 		RawDiff:          rawDiff,
 		IsIncremental:    isIncremental,

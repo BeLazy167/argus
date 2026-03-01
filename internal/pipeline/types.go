@@ -58,6 +58,8 @@ type PipelineRun struct {
 	ReviewID         uuid.UUID
 	State            PipelineState
 	PREvent          github.PREvent
+	DBInstallationID int64 // DB serial ID (for provider_keys, model_configs lookups)
+	DBRepoID         int64 // DB serial ID (for model_configs, reviews lookups)
 	Diff             *diff.PatchSet
 	RawDiff          string
 	TriageResults    []TriageResult

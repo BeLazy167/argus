@@ -41,17 +41,17 @@ func (ts *TriageStage) Execute(ctx context.Context, run *PipelineRun) error {
 		return nil
 	}
 
-	// Load per-repo model configs from DB
+	// Load per-repo model configs from DB (use DB serial IDs, not GitHub IDs)
 	var repoConfigs []llm.ModelConfig
-	if dbConfigs, err := ts.store.ListModelConfigs(ctx, run.PREvent.RepoID); err == nil {
+	if dbConfigs, err := ts.store.ListModelConfigs(ctx, run.DBRepoID); err == nil {
 		repoConfigs = storeToLLMConfigs(dbConfigs)
 	}
 
-	cfg, err := ts.registry.GetConfig(run.PREvent.RepoID, llm.StageTriage, repoConfigs)
+	cfg, err := ts.registry.GetConfig(run.DBRepoID, llm.StageTriage, repoConfigs)
 	if err != nil {
 		return fmt.Errorf("triage config: %w", err)
 	}
-	provider, err := ts.registry.GetProviderForRepo(ctx, run.PREvent.InstallationID, &run.PREvent.RepoID, cfg.Provider)
+	provider, err := ts.registry.GetProviderForRepo(ctx, run.DBInstallationID, &run.DBRepoID, cfg.Provider)
 	if err != nil {
 		return fmt.Errorf("triage provider: %w", err)
 	}
