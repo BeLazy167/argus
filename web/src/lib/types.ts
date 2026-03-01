@@ -48,6 +48,7 @@ export type Review = {
   duration_ms?: number;
   token_usage?: TokenUsage;
   error?: string;
+  file_count?: number;
   created_at: string;
   completed_at?: string;
 };
@@ -108,6 +109,10 @@ export type Stats = {
   active_repos: number;
   critical_finds: number;
   pending_reviews: number;
+  catch_rate: number;
+  prs_this_week: number;
+  high_risk_count: number;
+  avg_review_time_ms: number;
 };
 
 export type ActivityLog = {
@@ -117,6 +122,17 @@ export type ActivityLog = {
   resource?: string;
   metadata?: Record<string, unknown>;
   created_at: string;
+};
+
+export type Pattern = {
+  id: number;
+  installation_id: number;
+  repo_id?: number;
+  content: string;
+  supermemory_id?: string;
+  created_by?: string;
+  created_at: string;
+  updated_at: string;
 };
 
 export type UserInstallation = {

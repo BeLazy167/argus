@@ -160,6 +160,18 @@ func (s *Store) GetRepo(ctx context.Context, id int64) (*Repo, error) {
 	return &r, nil
 }
 
+func (s *Store) GetRepoByFullName(ctx context.Context, fullName string) (*Repo, error) {
+	var r Repo
+	err := s.Pool.QueryRow(ctx, `
+		SELECT id, installation_id, github_id, full_name, default_branch, enabled, settings_json, created_at, updated_at
+		FROM repos WHERE full_name = $1
+	`, fullName).Scan(&r.ID, &r.InstallationID, &r.GithubID, &r.FullName, &r.DefaultBranch, &r.Enabled, &r.SettingsJSON, &r.CreatedAt, &r.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
 func (s *Store) UpdateRepo(ctx context.Context, id int64, enabled *bool, defaultBranch *string, settingsJSON []byte) (*Repo, error) {
 	var r Repo
 	err := s.Pool.QueryRow(ctx, `
@@ -454,22 +466,37 @@ func (s *Store) GetStats(ctx context.Context) (*Stats, error) {
 			COALESCE((SELECT AVG(score)::int FROM reviews WHERE score IS NOT NULL), 0),
 			(SELECT COUNT(*) FROM repos WHERE enabled = true)::int,
 			(SELECT COUNT(*) FROM review_comments WHERE severity = 'critical')::int,
-			(SELECT COUNT(*) FROM reviews WHERE status IN ('pending','in_progress'))::int
-	`).Scan(&st.TotalReviews, &st.CompletedToday, &st.AvgScore, &st.ActiveRepos, &st.CriticalFinds, &st.PendingReviews)
+			(SELECT COUNT(*) FROM reviews WHERE status IN ('pending','in_progress'))::int,
+			COALESCE((SELECT (COUNT(*) FILTER (WHERE score < 10) * 100 / NULLIF(COUNT(*) FILTER (WHERE status = 'completed'), 0))::int FROM reviews), 0),
+			(SELECT COUNT(*) FROM reviews WHERE created_at >= NOW() - INTERVAL '7 days')::int,
+			(SELECT COUNT(*) FROM reviews WHERE score IS NOT NULL AND score <= 4)::int,
+			COALESCE((SELECT (AVG(EXTRACT(EPOCH FROM (completed_at - created_at)) * 1000))::int FROM reviews WHERE completed_at IS NOT NULL), 0)
+	`).Scan(&st.TotalReviews, &st.CompletedToday, &st.AvgScore, &st.ActiveRepos, &st.CriticalFinds, &st.PendingReviews,
+		&st.CatchRate, &st.PRsThisWeek, &st.HighRiskCount, &st.AvgReviewTimeMs)
 	return &st, err
 }
 
 func (s *Store) GetStatsScoped(ctx context.Context, installationIDs []int64) (*Stats, error) {
 	var st Stats
 	err := s.Pool.QueryRow(ctx, `
+		WITH scoped_reviews AS (
+			SELECT * FROM reviews WHERE repo_id IN (SELECT id FROM repos WHERE installation_id = ANY($1))
+		)
 		SELECT
-			(SELECT COUNT(*) FROM reviews WHERE repo_id IN (SELECT id FROM repos WHERE installation_id = ANY($1)))::int,
-			(SELECT COUNT(*) FROM reviews WHERE repo_id IN (SELECT id FROM repos WHERE installation_id = ANY($1)) AND created_at >= CURRENT_DATE AND status = 'completed')::int,
-			COALESCE((SELECT AVG(score)::int FROM reviews WHERE repo_id IN (SELECT id FROM repos WHERE installation_id = ANY($1)) AND score IS NOT NULL), 0),
+			(SELECT COUNT(*) FROM scoped_reviews)::int,
+			(SELECT COUNT(*) FROM scoped_reviews WHERE created_at >= CURRENT_DATE AND status = 'completed')::int,
+			COALESCE((SELECT AVG(score)::int FROM scoped_reviews WHERE score IS NOT NULL), 0),
 			(SELECT COUNT(*) FROM repos WHERE installation_id = ANY($1) AND enabled = true)::int,
-			(SELECT COUNT(*) FROM review_comments WHERE review_id IN (SELECT id FROM reviews WHERE repo_id IN (SELECT id FROM repos WHERE installation_id = ANY($1))) AND severity = 'critical')::int,
-			(SELECT COUNT(*) FROM reviews WHERE repo_id IN (SELECT id FROM repos WHERE installation_id = ANY($1)) AND status IN ('pending','in_progress'))::int
-	`, installationIDs).Scan(&st.TotalReviews, &st.CompletedToday, &st.AvgScore, &st.ActiveRepos, &st.CriticalFinds, &st.PendingReviews)
+			(SELECT COUNT(*) FROM review_comments WHERE review_id IN (SELECT id FROM scoped_reviews) AND severity = 'critical')::int,
+			(SELECT COUNT(*) FROM scoped_reviews WHERE status IN ('pending','in_progress'))::int,
+			COALESCE((SELECT (COUNT(*) FILTER (WHERE score < 10) * 100 / NULLIF(COUNT(*) FILTER (WHERE status = 'completed'), 0))::int FROM scoped_reviews), 0),
+			(SELECT COUNT(*) FROM scoped_reviews WHERE created_at >= NOW() - INTERVAL '7 days')::int,
+			(SELECT COUNT(*) FROM scoped_reviews WHERE score IS NOT NULL AND score <= 4)::int,
+			COALESCE((SELECT (AVG(EXTRACT(EPOCH FROM (completed_at - created_at)) * 1000))::int FROM scoped_reviews WHERE completed_at IS NOT NULL), 0)
+	`, installationIDs).Scan(
+		&st.TotalReviews, &st.CompletedToday, &st.AvgScore, &st.ActiveRepos, &st.CriticalFinds, &st.PendingReviews,
+		&st.CatchRate, &st.PRsThisWeek, &st.HighRiskCount, &st.AvgReviewTimeMs,
+	)
 	return &st, err
 }
 

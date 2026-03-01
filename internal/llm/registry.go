@@ -144,6 +144,21 @@ func (r *Registry) GetConfig(repoID int64, stage PipelineStage, repoConfigs []Mo
 	}
 }
 
+// HasKeyForRepo returns true if any LLM provider is available for this repo
+// (either a BYOK key via resolver or a static provider fallback).
+func (r *Registry) HasKeyForRepo(ctx context.Context, installationID int64, repoID *int64, providerName string) bool {
+	if r.resolver != nil {
+		_, _, found, err := r.resolver.ResolveAPIKey(ctx, installationID, repoID, providerName)
+		if err == nil && found {
+			return true
+		}
+	}
+	r.mu.RLock()
+	_, ok := r.providers[providerName]
+	r.mu.RUnlock()
+	return ok
+}
+
 func defaultBaseURLForProvider(provider string) string {
 	switch provider {
 	case "openai":

@@ -121,4 +121,8 @@ type Stats struct {
 	ActiveRepos     int `json:"active_repos"`
 	CriticalFinds   int `json:"critical_finds"`
 	PendingReviews  int `json:"pending_reviews"`
+	CatchRate       int `json:"catch_rate"`
+	PRsThisWeek     int `json:"prs_this_week"`
+	HighRiskCount   int `json:"high_risk_count"`
+	AvgReviewTimeMs int `json:"avg_review_time_ms"`
 }

@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -18,28 +19,36 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	ghpkg "github.com/acmeorg/argus/internal/github"
+	"github.com/acmeorg/argus/internal/memory"
 	"github.com/acmeorg/argus/internal/pipeline"
 	"github.com/acmeorg/argus/internal/store"
 )
 
 type Server struct {
-	router        chi.Router
-	store         *store.Store
-	ghApp         *ghpkg.App
-	orchestrator  *pipeline.Orchestrator
-	replyAnalyzer *pipeline.ReplyAnalyzer
-	webhookSecret []byte
-	logger        *slog.Logger
+	router          chi.Router
+	store           *store.Store
+	ghApp           *ghpkg.App
+	orchestrator    *pipeline.Orchestrator
+	replyAnalyzer   *pipeline.ReplyAnalyzer
+	indexer         *memory.Indexer
+	webhookSecret   []byte
+	logger          *slog.Logger
+	rateLimiter     *RateLimiter
+	inFlightReviews sync.Map     // "{repo}:{prNumber}" → struct{}
+	webhookSem      chan struct{} // bounded concurrency for webhook goroutines
 }
 
-func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchestrator, replyAnalyzer *pipeline.ReplyAnalyzer, webhookSecret string, corsOrigin string, logger *slog.Logger) *Server {
+func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchestrator, replyAnalyzer *pipeline.ReplyAnalyzer, indexer *memory.Indexer, webhookSecret string, corsOrigin string, logger *slog.Logger) *Server {
 	s := &Server{
 		store:         st,
 		ghApp:         ghApp,
 		orchestrator:  orchestrator,
 		replyAnalyzer: replyAnalyzer,
+		indexer:       indexer,
 		webhookSecret: []byte(webhookSecret),
 		logger:        logger,
+		rateLimiter:   NewRateLimiter(),
+		webhookSem:    make(chan struct{}, 20),
 	}
 
 	r := chi.NewRouter()
@@ -104,6 +113,11 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 			// Stats
 			r.Get("/stats", s.getStats)
 			r.Get("/activity", s.getActivity)
+
+			// Patterns
+			r.Get("/patterns", s.listPatterns)
+			r.Post("/patterns", s.createPattern)
+			r.Delete("/patterns/{patternID}", s.deletePattern)
 		})
 	})
 
@@ -148,7 +162,24 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
+		orgLogin := strings.SplitN(prEvent.RepoFullName, "/", 2)[0]
+		if !s.rateLimiter.AllowReview(prEvent.RepoFullName, orgLogin, false) {
+			s.logger.Warn("rate limited", "repo", prEvent.RepoFullName)
+			break
+		}
+		if !s.tryAcquireReview(prEvent.RepoFullName, prEvent.PRNumber) {
+			s.logger.Info("review already in-flight", "repo", prEvent.RepoFullName, "pr", prEvent.PRNumber)
+			break
+		}
+		if !s.acquireSem() {
+			s.releaseReview(prEvent.RepoFullName, prEvent.PRNumber)
+			s.logger.Warn("webhook semaphore full")
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "server busy"})
+			return
+		}
 		go func() {
+			defer s.releaseSem()
+			defer s.releaseReview(prEvent.RepoFullName, prEvent.PRNumber)
 			if err := s.orchestrator.HandlePREvent(context.Background(), *prEvent); err != nil {
 				s.logger.Error("review pipeline failed", "error", err, "pr", prEvent.PRNumber)
 			}
@@ -166,7 +197,12 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 			if commentEvent.InReplyToID > 0 {
+				if !s.acquireSem() {
+					s.logger.Warn("webhook semaphore full for reply analysis")
+					break
+				}
 				go func() {
+					defer s.releaseSem()
 					if err := s.replyAnalyzer.Analyze(context.Background(), *commentEvent); err != nil {
 						s.logger.Error("reply analysis failed", "error", err, "comment_id", commentEvent.CommentID)
 					}
@@ -184,7 +220,14 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			if issueEvent == nil || strings.HasSuffix(issueEvent.CommentAuthor, "[bot]") {
 				break
 			}
-			go s.handleReviewCommand(context.Background(), *issueEvent)
+			if !s.acquireSem() {
+				s.logger.Warn("webhook semaphore full for command dispatch")
+				break
+			}
+			go func() {
+				defer s.releaseSem()
+				s.dispatchCommand(context.Background(), *issueEvent)
+			}()
 		}
 
 	case "installation":
@@ -231,14 +274,7 @@ func (s *Server) linkInstallation(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listInstallations(w http.ResponseWriter, r *http.Request) {
-	userID := getUserID(r.Context())
-	list, err := s.store.ListUserInstallations(r.Context(), userID)
-	if err != nil {
-		s.logger.Error("list installations", "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
-		return
-	}
-	writeJSON(w, http.StatusOK, list)
+	s.listMyInstallations(w, r)
 }
 
 // --- Repos ---
@@ -341,9 +377,22 @@ func (s *Server) triggerReview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_ = s.store.LogActivity(r.Context(), "manual_review_triggered", "", repo.FullName, nil)
+	orgLogin := strings.SplitN(repo.FullName, "/", 2)[0]
+	if !s.rateLimiter.AllowReview(repo.FullName, orgLogin, false) {
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate limit exceeded"})
+		return
+	}
+	if !s.tryAcquireReview(repo.FullName, body.PRNumber) {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "review already in-flight"})
+		return
+	}
+
+	if err := s.store.LogActivity(r.Context(), "manual_review_triggered", "", repo.FullName, nil); err != nil {
+		s.logger.Error("failed to log activity", "error", err, "action", "manual_review_triggered")
+	}
 
 	go func() {
+		defer s.releaseReview(repo.FullName, body.PRNumber)
 		if err := s.orchestrator.HandlePREvent(context.Background(), ghpkg.PREvent{
 			Action:         "manual",
 			InstallationID: inst.InstallationID,
@@ -376,7 +425,8 @@ func (s *Server) getReview(w http.ResponseWriter, r *http.Request) {
 	comments, err := s.store.GetReviewComments(r.Context(), id)
 	if err != nil {
 		s.logger.Error("fetching review comments", "error", err, "review_id", id)
-		comments = nil
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load review comments"})
+		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -521,7 +571,9 @@ func (s *Server) createRule(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create rule"})
 		return
 	}
-	_ = s.store.LogActivity(r.Context(), "rule_created", "", fmt.Sprintf("rule:%d", rule.ID), nil)
+	if err := s.store.LogActivity(r.Context(), "rule_created", "", fmt.Sprintf("rule:%d", rule.ID), nil); err != nil {
+		s.logger.Error("failed to log activity", "error", err, "action", "rule_created")
+	}
 	writeJSON(w, http.StatusCreated, rule)
 }
 
@@ -559,7 +611,9 @@ func (s *Server) deleteRule(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "rule not found"})
 		return
 	}
-	_ = s.store.LogActivity(r.Context(), "rule_deleted", "", fmt.Sprintf("rule:%d", id), nil)
+	if err := s.store.LogActivity(r.Context(), "rule_deleted", "", fmt.Sprintf("rule:%d", id), nil); err != nil {
+		s.logger.Error("failed to log activity", "error", err, "action", "rule_deleted")
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
@@ -584,6 +638,101 @@ func (s *Server) getActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, activity)
+}
+
+// --- Patterns ---
+
+func (s *Server) listPatterns(w http.ResponseWriter, r *http.Request) {
+	patterns, err := s.store.ListPatterns(r.Context(), getInstallationIDs(r.Context()))
+	if err != nil {
+		s.logger.Error("list patterns", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, patterns)
+}
+
+func (s *Server) createPattern(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		InstallationID int64  `json:"installation_id"`
+		RepoID         *int64 `json:"repo_id"`
+		Content        string `json:"content"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	if body.Content == "" || body.InstallationID == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "installation_id and content required"})
+		return
+	}
+	ids := getInstallationIDs(r.Context())
+	if !containsID(ids, body.InstallationID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "access denied"})
+		return
+	}
+
+	// Index in Supermemory (respect repo scope)
+	var smID *string
+	if s.indexer != nil {
+		inst, err := s.store.GetInstallation(r.Context(), body.InstallationID)
+		if err != nil {
+			s.logger.Error("create pattern: lookup installation", "error", err)
+		} else {
+			metadata := map[string]string{"source": "dashboard"}
+			var resp *memory.AddResponse
+			if body.RepoID != nil {
+				dbRepo, err := s.store.GetRepo(r.Context(), *body.RepoID)
+				if err == nil {
+					parts := strings.SplitN(dbRepo.FullName, "/", 2)
+					if len(parts) == 2 {
+						resp, err = s.indexer.IndexRepoPattern(r.Context(), parts[0], parts[1], body.Content, metadata)
+					}
+				}
+			} else {
+				resp, err = s.indexer.IndexOwnerPattern(r.Context(), inst.OrgLogin, body.Content, metadata)
+			}
+			if err != nil {
+				s.logger.Error("index pattern in supermemory", "error", err)
+			} else if resp != nil {
+				smID = &resp.ID
+			}
+		}
+	}
+
+	createdBy := getUserID(r.Context())
+	pattern, err := s.store.CreatePattern(r.Context(), body.InstallationID, body.RepoID, body.Content, smID, &createdBy)
+	if err != nil {
+		s.logger.Error("create pattern", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create pattern"})
+		return
+	}
+	writeJSON(w, http.StatusCreated, pattern)
+}
+
+func (s *Server) deletePattern(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "patternID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid pattern id"})
+		return
+	}
+
+	// Fetch pattern for Supermemory cleanup (scoped to user's installations)
+	pattern, getErr := s.store.GetPattern(r.Context(), id)
+
+	// Delete from DB first (scoped auth check)
+	if err := s.store.DeletePattern(r.Context(), id, getInstallationIDs(r.Context())); err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "pattern not found"})
+		return
+	}
+
+	// Only delete from Supermemory after DB deletion succeeds (confirms authorization)
+	if getErr == nil && pattern.SupermemoryID != nil && s.indexer != nil {
+		if err := s.indexer.DeleteDocument(r.Context(), *pattern.SupermemoryID); err != nil {
+			s.logger.Error("delete pattern from supermemory", "error", err)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
 // --- Provider Keys ---
@@ -706,26 +855,23 @@ func containsID(ids []int64, target int64) bool {
 	return false
 }
 
-// maskKey decrypts an encrypted key and returns masked version (last 4 chars).
+// maskKey returns a static masked placeholder for an encrypted key.
 func maskKey(encKey string) string {
-	// We use the encrypted value length to derive a mask — don't decrypt for listing.
-	// Just show a static mask since we can't safely show any of the real key.
 	if len(encKey) > 0 {
 		return "sk-...****"
 	}
 	return ""
 }
 
-// --- Review Command (comment trigger) ---
+// --- Command Dispatch ---
 
-var reviewCmdRe = regexp.MustCompile(`(?i)@argus-eye\s+review(\s+--force)?`)
+var commandRe = regexp.MustCompile(`(?i)@argus-eye\s+(review|remember|resolve)(.*)`)
 
-func (s *Server) handleReviewCommand(ctx context.Context, evt ghpkg.IssueCommentEvent) {
-	match := reviewCmdRe.FindStringSubmatch(evt.CommentBody)
+func (s *Server) dispatchCommand(ctx context.Context, evt ghpkg.IssueCommentEvent) {
+	match := commandRe.FindStringSubmatch(evt.CommentBody)
 	if match == nil {
 		return
 	}
-	force := strings.TrimSpace(match[1]) == "--force"
 
 	parts := strings.SplitN(evt.RepoFullName, "/", 2)
 	if len(parts) != 2 {
@@ -733,6 +879,22 @@ func (s *Server) handleReviewCommand(ctx context.Context, evt ghpkg.IssueComment
 	}
 	owner, repo := parts[0], parts[1]
 	ghClient := ghpkg.NewClient(s.ghApp)
+
+	cmd := strings.ToLower(match[1])
+	args := strings.TrimSpace(match[2])
+
+	switch cmd {
+	case "review":
+		s.handleReviewCommand(ctx, evt, owner, repo, ghClient, args)
+	case "remember":
+		s.handleRememberCommand(ctx, evt, owner, repo, ghClient, args)
+	case "resolve":
+		s.handleResolveCommand(ctx, evt, owner, repo, ghClient)
+	}
+}
+
+func (s *Server) handleReviewCommand(ctx context.Context, evt ghpkg.IssueCommentEvent, owner, repo string, ghClient *ghpkg.Client, args string) {
+	force := strings.Contains(args, "--force")
 
 	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "eyes")
 
@@ -757,6 +919,19 @@ func (s *Server) handleReviewCommand(ctx context.Context, evt ghpkg.IssueComment
 		}
 	}
 
+	if !s.rateLimiter.AllowReview(evt.RepoFullName, owner, force) {
+		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
+			"Rate limit exceeded. Try again later.")
+		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
+		return
+	}
+	if !s.tryAcquireReview(evt.RepoFullName, evt.PRNumber) {
+		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
+			"A review is already in progress for this PR.")
+		return
+	}
+	defer s.releaseReview(evt.RepoFullName, evt.PRNumber)
+
 	prEvent.Action = "manual"
 	prEvent.RepoID = evt.RepoID
 	s.logger.Info("review command triggered", "repo", evt.RepoFullName, "pr", evt.PRNumber, "force", force, "by", evt.CommentAuthor)
@@ -770,6 +945,34 @@ func (s *Server) handleReviewCommand(ctx context.Context, evt ghpkg.IssueComment
 	}
 
 	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "rocket")
+}
+
+// --- Concurrency Guards ---
+
+// tryAcquireReview attempts to mark a PR as in-flight. Returns false if already running.
+func (s *Server) tryAcquireReview(repo string, pr int) bool {
+	key := fmt.Sprintf("%s:%d", repo, pr)
+	_, loaded := s.inFlightReviews.LoadOrStore(key, struct{}{})
+	return !loaded
+}
+
+func (s *Server) releaseReview(repo string, pr int) {
+	key := fmt.Sprintf("%s:%d", repo, pr)
+	s.inFlightReviews.Delete(key)
+}
+
+// acquireSem tries to acquire a webhook goroutine slot. Returns false if full.
+func (s *Server) acquireSem() bool {
+	select {
+	case s.webhookSem <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) releaseSem() {
+	<-s.webhookSem
 }
 
 // --- Helpers ---

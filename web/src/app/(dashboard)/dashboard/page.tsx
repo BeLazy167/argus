@@ -2,18 +2,16 @@
 
 import Link from "next/link";
 import {
-  Eye,
+  Target,
   GitPullRequest,
-  AlertTriangle,
-  CheckCircle,
+  ShieldAlert,
+  Clock,
   Loader2,
 } from "lucide-react";
 import { useStats } from "@/lib/queries/stats";
 import { useReviews } from "@/lib/queries/reviews";
 import { useActiveRepo } from "@/lib/hooks/use-active-repo";
 import { formatDistanceToNow } from "@/lib/time";
-import { ScoreBadge } from "@/components/dashboard/score-badge";
-import { StatusBadge } from "@/components/dashboard/status-badge";
 import { RepoSelect } from "@/components/dashboard/repo-select";
 
 function StatCard({
@@ -56,56 +54,108 @@ function StatCard({
   );
 }
 
+function RiskBadge({ score }: { score?: number }) {
+  if (score == null) return <span className="text-[10px] font-mono text-slate-text">--</span>;
+
+  let label: string;
+  let classes: string;
+  if (score <= 4) {
+    label = "HIGH";
+    classes = "bg-red-500/15 text-red-400 border-red-500/30";
+  } else if (score <= 7) {
+    label = "MED";
+    classes = "bg-amber/15 text-amber border-amber/30";
+  } else {
+    label = "LOW";
+    classes = "bg-emerald-500/15 text-emerald-400 border-emerald-500/30";
+  }
+
+  return (
+    <span className={`inline-flex items-center gap-1.5 rounded border px-2 py-0.5 text-[10px] font-mono font-medium ${classes}`}>
+      {label}
+      <span className="opacity-60">{score}</span>
+    </span>
+  );
+}
+
+function getVerdict(review: { score?: number; status: string }): { label: string; className: string } {
+  if (review.status === "pending" || review.status === "in_progress") {
+    return { label: "In progress", className: "text-blue-400" };
+  }
+  if (review.status === "failed") {
+    return { label: "Failed", className: "text-red-400" };
+  }
+  if (!review.score) return { label: "--", className: "text-slate-text" };
+  if (review.score <= 3) return { label: "Escalated", className: "text-red-400" };
+  if (review.score <= 6) return { label: "Review required", className: "text-amber" };
+  if (review.score <= 8) return { label: "Minor issues", className: "text-yellow-400" };
+  return { label: "Clean. Ship it.", className: "text-emerald-400" };
+}
+
+function formatReviewTime(ms: number): string {
+  if (ms < 60000) return `${Math.round(ms / 1000)}s`;
+  return `${(ms / 60000).toFixed(1)}min`;
+}
+
 export default function DashboardPage() {
   const { data: stats, isLoading: statsLoading } = useStats();
   const { repos, activeId, setSelectedId, isLoading: reposLoading } = useActiveRepo();
 
   const repoMap = new Map(repos.map((r) => [r.id, r]));
-
-  const { data: reviews, isLoading: reviewsLoading } = useReviews(activeId, 10);
+  const { data: reviews, isLoading: reviewsLoading } = useReviews(activeId, 20);
 
   const feedLoading = reposLoading || (activeId > 0 && reviewsLoading);
 
   return (
     <>
-      <div className="mb-8">
-        <h1 className="font-display text-2xl font-bold text-foreground">
-          Mission Control
-        </h1>
-        <p className="text-xs font-mono text-slate-text mt-1">
-          Nothing merges unseen.
-        </p>
+      <div className="mb-8 flex items-end justify-between">
+        <div>
+          <h1 className="font-display text-2xl font-bold text-foreground">
+            Mission Control
+          </h1>
+          <p className="text-xs font-mono text-slate-text mt-1">
+            Nothing merges unseen.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
+          <span className="text-[10px] font-mono text-emerald-400 uppercase tracking-wider">
+            All systems operational
+          </span>
+        </div>
       </div>
 
+      {/* Stat Cards */}
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4 mb-10">
         <StatCard
-          label="Reviews today"
-          value={stats?.completed_today ?? 0}
-          icon={Eye}
+          label="Catch Rate"
+          value={stats ? `${stats.catch_rate}%` : "--"}
+          icon={Target}
           accent
           loading={statsLoading}
         />
         <StatCard
-          label="Active repos"
-          value={stats?.active_repos ?? 0}
+          label="PRs This Week"
+          value={stats?.prs_this_week ?? 0}
           icon={GitPullRequest}
           loading={statsLoading}
         />
         <StatCard
-          label="Critical finds"
-          value={stats?.critical_finds ?? 0}
-          icon={AlertTriangle}
+          label="High Risk"
+          value={stats?.high_risk_count ?? 0}
+          icon={ShieldAlert}
           loading={statsLoading}
         />
         <StatCard
-          label="Avg score"
-          value={stats?.avg_score ?? 0}
-          icon={CheckCircle}
+          label="Avg Review Time"
+          value={stats ? formatReviewTime(stats.avg_review_time_ms) : "--"}
+          icon={Clock}
           loading={statsLoading}
         />
       </div>
 
-      <div className="rounded-lg border border-iron bg-charcoal">
+      {/* PR Table */}
+      <div className="rounded-lg border border-iron bg-charcoal overflow-hidden">
         <div className="flex items-center justify-between border-b border-iron px-5 py-4">
           <h2 className="text-xs font-mono uppercase tracking-[0.1em] text-foreground">
             Recent Reviews
@@ -117,42 +167,79 @@ export default function DashboardPage() {
             <RepoSelect repos={repos} value={activeId} onChange={setSelectedId} />
           </div>
         </div>
-        <div className="px-5">
-          {feedLoading ? (
-            <div className="flex items-center justify-center py-10">
-              <Loader2 className="h-5 w-5 animate-spin text-slate-text" />
-            </div>
-          ) : !reviews || reviews.length === 0 ? (
-            <div className="py-10 text-center text-xs font-mono text-slate-text">
-              No reviews yet. Open a PR to get started.
-            </div>
-          ) : (
-            reviews.map((review) => {
-              const repo = repoMap.get(review.repo_id);
-              return (
-                <Link
-                  key={review.id}
-                  href={`/reviews/${review.id}`}
-                  className="flex items-center justify-between border-b border-iron/50 py-3 last:border-0 hover:bg-iron/10 -mx-5 px-5 transition-colors"
-                >
-                  <div className="flex items-center gap-4">
-                    <ScoreBadge score={review.score} />
-                    <div>
-                      <p className="text-xs font-mono text-foreground truncate max-w-md">
-                        {repo?.full_name} &gt; #{review.pr_number} {review.pr_title}
+
+        {feedLoading ? (
+          <div className="flex items-center justify-center py-10">
+            <Loader2 className="h-5 w-5 animate-spin text-slate-text" />
+          </div>
+        ) : !reviews || reviews.length === 0 ? (
+          <div className="py-10 text-center text-xs font-mono text-slate-text">
+            No reviews yet. Open a PR to get started.
+          </div>
+        ) : (
+          <table className="w-full">
+            <thead>
+              <tr className="border-b border-iron/50 text-[10px] font-mono uppercase tracking-wider text-slate-text">
+                <th className="text-left px-5 py-2.5 font-medium">Pull Request</th>
+                <th className="text-left px-3 py-2.5 font-medium">Author</th>
+                <th className="text-left px-3 py-2.5 font-medium">Risk</th>
+                <th className="text-center px-3 py-2.5 font-medium">Files</th>
+                <th className="text-left px-3 py-2.5 font-medium">Verdict</th>
+                <th className="text-right px-5 py-2.5 font-medium">Time</th>
+              </tr>
+            </thead>
+            <tbody>
+              {reviews.map((review) => {
+                const repo = repoMap.get(review.repo_id);
+                const verdict = getVerdict(review);
+                return (
+                  <tr
+                    key={review.id}
+                    className="border-b border-iron/30 last:border-0 hover:bg-iron/10 transition-colors cursor-pointer"
+                    onClick={() => window.location.href = `/reviews/${review.id}`}
+                  >
+                    <td className="px-5 py-3">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[11px] font-mono text-slate-text">
+                          #{review.pr_number}
+                        </span>
+                        <span className="text-xs font-mono text-foreground truncate max-w-[300px]">
+                          {review.pr_title}
+                        </span>
+                      </div>
+                      <p className="text-[10px] font-mono text-slate-text/60 mt-0.5">
+                        {repo?.full_name}
                       </p>
-                      <p className="text-[11px] font-mono text-slate-text">
-                        by {review.pr_author} &middot;{" "}
+                    </td>
+                    <td className="px-3 py-3">
+                      <span className="text-[11px] font-mono text-slate-text">
+                        @{review.pr_author}
+                      </span>
+                    </td>
+                    <td className="px-3 py-3">
+                      <RiskBadge score={review.score} />
+                    </td>
+                    <td className="px-3 py-3 text-center">
+                      <span className="text-[11px] font-mono text-slate-text">
+                        {review.file_count ?? "--"}
+                      </span>
+                    </td>
+                    <td className="px-3 py-3">
+                      <span className={`text-[11px] font-mono font-medium ${verdict.className}`}>
+                        {verdict.label}
+                      </span>
+                    </td>
+                    <td className="px-5 py-3 text-right">
+                      <span className="text-[10px] font-mono text-slate-text">
                         {formatDistanceToNow(review.created_at)}
-                      </p>
-                    </div>
-                  </div>
-                  <StatusBadge status={review.status} />
-                </Link>
-              );
-            })
-          )}
-        </div>
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
       </div>
     </>
   );

@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -138,10 +139,11 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, file di
 	var tokens StageTokens
 	tokens.File = file.NewName
 
-	var repoConfigs []llm.ModelConfig
-	if dbConfigs, err := rs.store.ListModelConfigs(ctx, run.PREvent.RepoID); err == nil {
-		repoConfigs = storeToLLMConfigs(dbConfigs)
+	dbConfigs, err := rs.store.ListModelConfigs(ctx, run.PREvent.RepoID)
+	if err != nil {
+		return review, tokens, fmt.Errorf("loading model configs for repo %d: %w", run.PREvent.RepoID, err)
 	}
+	repoConfigs := storeToLLMConfigs(dbConfigs)
 	cfg := rs.registry.GetConfig(run.PREvent.RepoID, llm.StageReview, repoConfigs)
 	provider, err := rs.registry.GetProviderForRepo(ctx, run.PREvent.InstallationID, &run.PREvent.RepoID, cfg.Provider)
 	if err != nil {
@@ -209,6 +211,7 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, file di
 		for _, tc := range resp.ToolCalls {
 			result, err := toolHandler.Handle(ctx, tc)
 			if err != nil {
+				slog.Warn("tool call failed", "tool", tc.Function.Name, "error", err, "file", file.NewName)
 				result = fmt.Sprintf("Error: %s", err)
 			}
 			messages = append(messages, llm.Message{
@@ -256,6 +259,7 @@ func validateComments(comments []FileComment) []FileComment {
 	valid := make([]FileComment, 0, len(comments))
 	for _, c := range comments {
 		if c.Line <= 0 || c.Body == "" {
+			slog.Debug("dropped invalid LLM comment", "line", c.Line, "body_empty", c.Body == "")
 			continue
 		}
 		if !ValidSeverities[c.Severity] {
