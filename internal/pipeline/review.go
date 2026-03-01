@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -264,34 +265,87 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, file di
 
 func buildFileReviewPrompt(run *PipelineRun, file diff.FileDiff, fileContent string) string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf(`Review the following code changes in file "%s" from PR #%d: "%s" by %s.`,
+	sb.WriteString(fmt.Sprintf("Review changes in \"%s\" from PR #%d: \"%s\" by %s.\n",
 		file.NewName, run.PREvent.PRNumber, run.PREvent.PRTitle, run.PREvent.PRAuthor))
-	sb.WriteString("\n\nDiff:\n")
+
+	if guide := languageGuidance(file.NewName); guide != "" {
+		sb.WriteString(guide)
+	}
+
+	sb.WriteString("\nDiff:\n")
 	sb.WriteString(file.RawDiff)
 	sb.WriteString("\n")
 
 	if fileContent != "" {
-		sb.WriteString("\nFull file content (for generating exact replacement suggestions):\n```\n")
+		sb.WriteString("\nFull file content:\n```\n")
 		sb.WriteString(truncateLines(fileContent, 500))
 		sb.WriteString("\n```\n")
 	}
 
 	sb.WriteString(`
-Respond with a JSON array of comments. Each comment must have:
-- "line": int, line number in the new file (required, must be > 0)
-- "start_line": int, start of multi-line range (0 if single-line)
-- "body": string, the review comment in markdown
-- "severity": one of "critical", "warning", "suggestion", "praise"
-- "category": one of "security", "performance", "style", "bug", "readability", "error_handling", "type_design", "testing"
-- "code_snippet": string, the exact 3-10 lines of source code this comment references, preserving original indentation
-- "suggestion": string, the exact replacement code for the line range (start_line to line). Must be complete replacement text — no diff markers, no line numbers. Omit for praise or when no fix applies.
+Respond with a JSON array of comments:
+[{
+  "line": 42,                // line number in new file (required, > 0)
+  "start_line": 40,          // start of multi-line range (0 if single-line)
+  "body": "Why this is a problem and what could go wrong",
+  "severity": "critical",    // critical | warning | suggestion | praise
+  "category": "bug",         // bug | security | performance | error_handling | style | readability | type_design | testing
+  "suggestion": "fixed code" // exact replacement for start_line..line (omit for praise)
+}]
 
-Example:
-[{"line": 42, "start_line": 40, "body": "Potential nil dereference — add a nil check", "severity": "critical", "category": "bug", "code_snippet": "    val := getResult()\n    fmt.Println(val.Name)", "suggestion": "    val := getResult()\n    if val != nil {\n        fmt.Println(val.Name)\n    }"}]
-
-Only comment on meaningful issues with high confidence. Return [] if the changes look good.
-JSON array only, no other text.`)
+Return [] if changes look good. JSON array only.`)
 	return sb.String()
+}
+
+// languageGuidance returns language-specific review hints based on file extension.
+func languageGuidance(filename string) string {
+	switch strings.ToLower(filepath.Ext(filename)) {
+	case ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs":
+		return `
+## Language: TypeScript/JavaScript
+Watch specifically for these common pitfalls:
+- == vs === (type coercion bugs)
+- var in loops (closure captures final value — use let/const)
+- forEach with async callback (doesn't await — use for...of or Promise.all+map)
+- parseInt() without radix argument
+- Array.sort() mutates the original array
+- Missing await on async function calls
+- getYear() vs getFullYear()
+- Unanchored or unescaped regex patterns
+`
+	case ".go":
+		return `
+## Language: Go
+Watch specifically for these common pitfalls:
+- Goroutine leaks (missing context cancellation or done channel)
+- Deferred close on potentially nil values
+- Range variable capture in goroutines (pre-Go 1.22)
+- Error shadowing with := in nested scopes
+- Slice append without pre-allocation in hot paths
+- Missing mutex for shared state across goroutines
+`
+	case ".py":
+		return `
+## Language: Python
+Watch specifically for these common pitfalls:
+- Mutable default arguments (def f(x=[]))
+- Late binding closures in loops
+- Bare except: catches SystemExit/KeyboardInterrupt
+- is vs == for value comparison
+- Missing async/await in coroutine calls
+`
+	case ".rs":
+		return `
+## Language: Rust
+Watch specifically for these common pitfalls:
+- Unwrap/expect on Result/Option in library code
+- Clone where a borrow would suffice
+- Missing error propagation (? operator)
+- Deadlock-prone lock ordering
+`
+	default:
+		return ""
+	}
 }
 
 // truncateLines returns content limited to maxLines, appending a note if truncated.
@@ -330,61 +384,26 @@ func validateComments(comments []FileComment) []FileComment {
 	return valid
 }
 
-const baseSystemPrompt = `You are an expert code reviewer. You review pull request diffs and provide actionable, specific feedback.
+const baseSystemPrompt = `You are a senior engineer reviewing a pull request. You are thorough, skeptical, and direct.
 
-## Review Focus Areas
+Assume the code has bugs until proven otherwise. For every function, ask yourself: "What input would break this? What edge case did the author miss? What happens when this fails at 3 AM?"
 
-### Bugs & Logic Errors
-- Off-by-one errors, nil/null dereferences, missing nil checks
-- Race conditions, deadlocks, incorrect concurrency patterns
-- Incorrect boolean logic, missing edge cases, unreachable code
-- Broken invariants or violated assumptions
+## Principles
+1. Only comment on CHANGED lines — never review unchanged code
+2. For every issue, explain WHY it matters and what breaks in production
+3. High confidence only — if you're unsure, don't comment
+4. Fewer high-quality comments beat many low-value ones
+5. Don't nitpick style. Focus on correctness, security, and reliability
+6. Return [] if the changes look good
 
-### Security
-- Injection vulnerabilities (SQL, XSS, command injection)
-- Hardcoded secrets, leaked credentials, insecure defaults
-- Missing input validation at system boundaries
-- Unsafe deserialization, path traversal, SSRF
+## Priority (highest first)
+1. **Bugs** — logic errors, off-by-one, null dereferences, broken invariants, race conditions, incorrect boundary checks
+2. **Security** — injection (SQL/XSS/command), hardcoded secrets, missing input validation, SSRF, path traversal
+3. **Silent failures** — swallowed errors, empty catch blocks, missing error propagation, async operations that silently fail
+4. **Performance** — N+1 queries, unbounded operations, resource leaks, missing pagination
+5. **Type safety** — types that can represent invalid states, missing constraints at construction
 
-### Error Handling & Silent Failures
-- Empty catch blocks or swallowed errors that hide real failures
-- Overly broad error handling (catch-all) that masks specific issues
-- Fallback behavior that silently degrades without logging or alerting
-- Missing error propagation — callers unaware an operation failed
-- Retry logic without backoff or circuit breaking
-
-### Performance
-- N+1 queries, unbounded loops, missing pagination
-- Unnecessary allocations, inefficient data structures
-- Missing caching opportunities, redundant computation
-- Goroutine/thread leaks, unclosed resources
-
-### Type Design
-- Structs/types that expose internal state without encapsulation
-- Types that can represent invalid states (prefer making illegal states unrepresentable)
-- Missing or incorrect type constraints/validations at construction time
-
-### Readability & Maintainability
-- Misleading variable/function names, unclear abstractions
-- Functions doing too many things (violating single responsibility)
-- Dead code, unused parameters, redundant conditions
-
-### Testing Gaps (if test files are in the diff)
-- Missing edge case coverage, untested error paths
-- Tests that pass but don't actually verify behavior (weak assertions)
-- Flaky test patterns (time-dependent, order-dependent)
-
-## Review Principles
-- Only comment on the CHANGED lines in the diff — do not review unchanged code
-- Be specific: reference exact line numbers and quote the problematic code
-- Explain WHY something is a problem and suggest a concrete fix
-- Use confidence-based filtering: only report issues you are confident about
-- Don't nitpick trivial style issues unless they genuinely harm readability
-- Praise genuinely good patterns briefly — developers benefit from positive reinforcement
-- Fewer, high-quality comments beat many low-value ones
-- If the changes look good, return an empty array
-
-## Output Format
+## Output
 Respond ONLY with a JSON array of comments. No other text.`
 
 func buildAgenticSystemPrompt(owner, repo string) string {

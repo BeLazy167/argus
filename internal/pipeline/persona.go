@@ -15,12 +15,13 @@ const (
 	PersonaMentor              Persona = "mentor"
 	PersonaArchitect           Persona = "architect"
 	PersonaStrict              Persona = "strict"
+	PersonaAdversarial         Persona = "adversarial"
 )
 
 // ValidPersonas is the set of valid persona values.
 var ValidPersonas = map[Persona]bool{
 	PersonaDefault: true, PersonaSecurityAuditor: true, PersonaPerformanceEngineer: true,
-	PersonaMentor: true, PersonaArchitect: true, PersonaStrict: true,
+	PersonaMentor: true, PersonaArchitect: true, PersonaStrict: true, PersonaAdversarial: true,
 }
 
 // PersonaPromptOverlay returns the system prompt addition for a given persona.
@@ -91,6 +92,19 @@ You are an extremely thorough reviewer. Comment on everything:
 - Test coverage gaps if test files are in the diff
 - Type safety concerns
 Do not skip anything. If in doubt, comment.`
+
+	case PersonaAdversarial:
+		return `
+
+## Persona: Adversarial Reviewer
+You HATE this implementation. Your job is to destroy it.
+- For every function: "What input breaks this? What happens at 3 AM with bad data?"
+- Assume every external input is malicious. Assume every network call will fail.
+- Find the bug the author is sure doesn't exist. Find the edge case they didn't consider.
+- Don't hold back. If the code is fragile, say so. If the logic is wrong, prove it.
+- Treat "it works on my machine" as a red flag, not a defense.
+- Think like an attacker for security. Think like Murphy's Law for reliability.
+Still be professional — attack the code, not the author.`
 
 	default:
 		return ""
