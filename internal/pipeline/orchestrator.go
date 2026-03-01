@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	ghpkg "github.com/acmeorg/argus/internal/github"
+	"github.com/acmeorg/argus/internal/llm"
 	"github.com/acmeorg/argus/internal/memory"
 	"github.com/acmeorg/argus/internal/store"
 	"github.com/acmeorg/argus/pkg/diff"
@@ -96,17 +97,27 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		return nil
 	}
 
-	// Check if any LLM provider is available
-	if o.registry != nil && !o.registry.HasKeyForRepo(ctx, event.InstallationID, &dbRepo.ID, "default") {
-		o.logger.Info("no API key configured, posting onboarding comment", "repo", event.RepoFullName)
-		_ = o.ghClient.CreateIssueComment(ctx, event.InstallationID, owner, repo, event.PRNumber,
-			"Welcome to **Argus**! To enable AI code reviews, add your API key at your [Argus Settings](https://argusai.vercel.app/settings).")
-		reviewID := uuid.New()
-		_, _ = o.db.Exec(ctx, `
-			INSERT INTO reviews (id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, status, trigger, error)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, 'failed', 'webhook', 'no_api_key')
-		`, reviewID, dbRepo.ID, event.PRNumber, event.PRTitle, event.PRAuthor, event.HeadSHA, event.BaseSHA)
-		return nil
+	// Check if repo has a model config + API key for the review stage
+	if o.registry != nil {
+		dbConfigs, _ := o.st.ListModelConfigs(ctx, dbRepo.ID)
+		var reviewProvider string
+		for _, c := range dbConfigs {
+			if c.Stage == string(llm.StageReview) {
+				reviewProvider = c.Provider
+				break
+			}
+		}
+		if reviewProvider == "" || !o.registry.HasKeyForRepo(ctx, event.InstallationID, &dbRepo.ID, reviewProvider) {
+			o.logger.Info("no API key or model config, posting onboarding comment", "repo", event.RepoFullName, "provider", reviewProvider)
+			_ = o.ghClient.CreateIssueComment(ctx, event.InstallationID, owner, repo, event.PRNumber,
+				"Welcome to **Argus**! To enable AI code reviews, configure your API key and model at your [Argus Settings](https://argusai.vercel.app/settings).")
+			reviewID := uuid.New()
+			_, _ = o.db.Exec(ctx, `
+				INSERT INTO reviews (id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, status, trigger, error)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, 'failed', 'webhook', 'no_api_key')
+			`, reviewID, dbRepo.ID, event.PRNumber, event.PRTitle, event.PRAuthor, event.HeadSHA, event.BaseSHA)
+			return nil
+		}
 	}
 
 	// Fetch diff
