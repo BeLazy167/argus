@@ -128,21 +128,23 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 		close(resultCh)
 	}()
 
-	var firstErr error
+	var skipped int
 	for r := range resultCh {
-		if r.err != nil && firstErr == nil {
-			firstErr = fmt.Errorf("reviewing file %s: %w", r.review.Path, r.err)
-			cancel()
+		if r.err != nil {
+			slog.Warn("skipping file review", "file", r.review.Path, "error", r.err)
+			skipped++
+			continue
 		}
-		if firstErr == nil {
-			run.Tokens.Review = append(run.Tokens.Review, r.tokens)
-			run.Tokens.addToTotal(r.tokens)
-			if len(r.review.Comments) > 0 {
-				run.FileReviews = append(run.FileReviews, r.review)
-			}
+		run.Tokens.Review = append(run.Tokens.Review, r.tokens)
+		run.Tokens.addToTotal(r.tokens)
+		if len(r.review.Comments) > 0 {
+			run.FileReviews = append(run.FileReviews, r.review)
 		}
 	}
-	return firstErr
+	if skipped > 0 {
+		slog.Warn("review completed with skipped files", "skipped", skipped, "total", len(filesToReview))
+	}
+	return nil
 }
 
 func prefetchFiles(ctx context.Context, ghClient *ghpkg.Client, run *PipelineRun, owner, repo string, files []diff.FileDiff) map[string]string {
