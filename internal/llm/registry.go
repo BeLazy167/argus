@@ -37,22 +37,16 @@ type cachedProvider struct {
 	expiresAt time.Time
 }
 
-// Registry manages LLM providers and per-repo model configuration.
+// Registry manages LLM providers via BYOK keys resolved from the database.
 type Registry struct {
-	mu        sync.RWMutex
-	providers map[string]Provider
-	defaults  map[PipelineStage]ModelConfig
-
-	resolver     KeyResolver
-	cacheMu      sync.RWMutex
+	resolver      KeyResolver
+	cacheMu       sync.RWMutex
 	providerCache map[string]cachedProvider
-	cacheTTL     time.Duration
+	cacheTTL      time.Duration
 }
 
 func NewRegistry() *Registry {
 	return &Registry{
-		providers:     make(map[string]Provider),
-		defaults:      make(map[PipelineStage]ModelConfig),
 		providerCache: make(map[string]cachedProvider),
 		cacheTTL:      5 * time.Minute,
 	}
@@ -63,33 +57,10 @@ func (r *Registry) SetResolver(resolver KeyResolver) {
 	r.resolver = resolver
 }
 
-func (r *Registry) RegisterProvider(name string, p Provider) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.providers[name] = p
-}
-
-func (r *Registry) SetDefault(stage PipelineStage, cfg ModelConfig) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.defaults[stage] = cfg
-}
-
-// GetProvider returns the provider for the given name.
-func (r *Registry) GetProvider(name string) (Provider, error) {
-	r.mu.RLock()
-	p, ok := r.providers[name]
-	r.mu.RUnlock()
-	if ok {
-		return p, nil
-	}
-	return nil, fmt.Errorf("unknown provider: %s", name)
-}
-
-// GetProviderForRepo resolves a provider dynamically, checking DB keys first then falling back to static providers.
+// GetProviderForRepo resolves a provider from BYOK keys in the database.
 func (r *Registry) GetProviderForRepo(ctx context.Context, installationID int64, repoID *int64, providerName string) (Provider, error) {
 	if r.resolver == nil {
-		return r.GetProvider(providerName)
+		return nil, fmt.Errorf("no key resolver configured")
 	}
 
 	cacheKey := fmt.Sprintf("%d:%v:%s", installationID, repoID, providerName)
@@ -106,57 +77,38 @@ func (r *Registry) GetProviderForRepo(ctx context.Context, installationID int64,
 		return nil, fmt.Errorf("resolving api key: %w", err)
 	}
 
-	if found {
-		if baseURL == "" {
-			baseURL = defaultBaseURLForProvider(providerName)
-		}
-		p := NewChatProvider(providerName, apiKey, baseURL)
-		r.cacheMu.Lock()
-		r.providerCache[cacheKey] = cachedProvider{provider: p, expiresAt: time.Now().Add(r.cacheTTL)}
-		r.cacheMu.Unlock()
-		return p, nil
+	if !found {
+		return nil, fmt.Errorf("no API key for provider %q — add one at the dashboard settings page", providerName)
 	}
 
-	// Fall back to static provider
-	return r.GetProvider(providerName)
+	if baseURL == "" {
+		baseURL = defaultBaseURLForProvider(providerName)
+	}
+	p := NewChatProvider(providerName, apiKey, baseURL)
+	r.cacheMu.Lock()
+	r.providerCache[cacheKey] = cachedProvider{provider: p, expiresAt: time.Now().Add(r.cacheTTL)}
+	r.cacheMu.Unlock()
+	return p, nil
 }
 
-// GetConfig returns the model config for a repo + stage. Checks repo-specific configs first, then registry defaults.
-func (r *Registry) GetConfig(repoID int64, stage PipelineStage, repoConfigs []ModelConfig) ModelConfig {
-	// Check repo-specific config first
+// GetConfig returns the model config for a repo + stage. Checks repo-specific DB configs only.
+// Returns an error if no config is found — there are no hardcoded fallbacks.
+func (r *Registry) GetConfig(repoID int64, stage PipelineStage, repoConfigs []ModelConfig) (ModelConfig, error) {
 	for _, cfg := range repoConfigs {
 		if cfg.RepoID == repoID && cfg.Stage == stage {
-			return cfg
+			return cfg, nil
 		}
 	}
-	// Fall back to org default
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	if def, ok := r.defaults[stage]; ok {
-		return def
-	}
-	// Ultimate fallback
-	return ModelConfig{
-		Provider:    "default",
-		Model:       "anthropic/claude-sonnet-4-20250514",
-		MaxTokens:   4096,
-		Temperature: 0.2,
-	}
+	return ModelConfig{}, fmt.Errorf("no model config for repo %d stage %s — configure one in the dashboard", repoID, stage)
 }
 
-// HasKeyForRepo returns true if any LLM provider is available for this repo
-// (either a BYOK key via resolver or a static provider fallback).
+// HasKeyForRepo returns true if a BYOK key exists in the database for this provider.
 func (r *Registry) HasKeyForRepo(ctx context.Context, installationID int64, repoID *int64, providerName string) bool {
-	if r.resolver != nil {
-		_, _, found, err := r.resolver.ResolveAPIKey(ctx, installationID, repoID, providerName)
-		if err == nil && found {
-			return true
-		}
+	if r.resolver == nil {
+		return false
 	}
-	r.mu.RLock()
-	_, ok := r.providers[providerName]
-	r.mu.RUnlock()
-	return ok
+	_, _, found, err := r.resolver.ResolveAPIKey(ctx, installationID, repoID, providerName)
+	return err == nil && found
 }
 
 func defaultBaseURLForProvider(provider string) string {
@@ -165,6 +117,8 @@ func defaultBaseURLForProvider(provider string) string {
 		return "https://api.openai.com/v1"
 	case "anthropic":
 		return "https://api.anthropic.com/v1"
+	case "zhipu":
+		return "https://api.z.ai/api/paas/v4"
 	default:
 		return "https://openrouter.ai/api/v1"
 	}
