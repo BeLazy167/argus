@@ -12,6 +12,7 @@ import (
 	"github.com/BeLazy167/argus/internal/memory"
 	"github.com/BeLazy167/argus/internal/store"
 	"github.com/BeLazy167/argus/pkg/diff"
+	"golang.org/x/sync/errgroup"
 )
 
 // ReviewStage handles the per-file parallel review using LLM.
@@ -63,6 +64,11 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 		return nil
 	}
 
+	owner, repo, err := splitRepoFullName(run.PREvent.RepoFullName)
+	if err != nil {
+		return fmt.Errorf("invalid repo name %q: %w", run.PREvent.RepoFullName, err)
+	}
+
 	// Cancellable context so workers exit fast on first error
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -73,7 +79,7 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 		err    error
 	}
 
-	fileContents := prefetchFiles(ctx, rs.ghClient, run, filesToReview)
+	fileContents := prefetchFiles(ctx, rs.ghClient, run, owner, repo, filesToReview)
 
 	// Resolve model config once for all files
 	dbConfigs, err := rs.store.ListModelConfigs(ctx, run.DBRepoID)
@@ -106,7 +112,7 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 		go func() {
 			defer wg.Done()
 			for file := range fileCh {
-				review, tokens, err := rs.reviewFile(ctx, run, file, fileContents, triageLookup[file.NewName], cfg, provider)
+				review, tokens, err := rs.reviewFile(ctx, run, file, fileContents, triageLookup[file.NewName], owner, repo, cfg, provider)
 				resultCh <- result{review: review, tokens: tokens, err: err}
 			}
 		}()
@@ -139,35 +145,29 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 	return firstErr
 }
 
-func prefetchFiles(ctx context.Context, ghClient *ghpkg.Client, run *PipelineRun, files []diff.FileDiff) map[string]string {
+func prefetchFiles(ctx context.Context, ghClient *ghpkg.Client, run *PipelineRun, owner, repo string, files []diff.FileDiff) map[string]string {
 	if ghClient == nil {
-		return nil
-	}
-	owner, repo, err := splitRepoFullName(run.PREvent.RepoFullName)
-	if err != nil {
 		return nil
 	}
 	contents := make(map[string]string, len(files))
 	var mu sync.Mutex
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, 5) // bound GitHub API concurrency
+	g, ctx := errgroup.WithContext(ctx)
+	g.SetLimit(5) // bound GitHub API concurrency
 	for _, f := range files {
-		wg.Add(1)
-		go func(path string) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
+		path := f.NewName
+		g.Go(func() error {
 			content, err := ghClient.GetFileContent(ctx, run.PREvent.InstallationID, owner, repo, path, run.PREvent.HeadSHA)
 			if err != nil {
 				slog.Warn("prefetch file content failed", "file", path, "error", err)
-				return
+				return nil // non-fatal, review proceeds without full file content
 			}
 			mu.Lock()
 			contents[path] = content
 			mu.Unlock()
-		}(f.NewName)
+			return nil
+		})
 	}
-	wg.Wait()
+	_ = g.Wait() // errors are non-fatal (logged above)
 	return contents
 }
 
@@ -180,15 +180,10 @@ func truncateDiff(f diff.FileDiff, maxLines int) diff.FileDiff {
 	return f
 }
 
-func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, file diff.FileDiff, fileContents map[string]string, action TriageAction, cfg llm.ModelConfig, provider llm.Provider) (FileReview, StageTokens, error) {
+func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, file diff.FileDiff, fileContents map[string]string, action TriageAction, owner, repo string, cfg llm.ModelConfig, provider llm.Provider) (FileReview, StageTokens, error) {
 	review := FileReview{Path: file.NewName}
 	var tokens StageTokens
 	tokens.File = file.NewName
-
-	owner, repo, err := splitRepoFullName(run.PREvent.RepoFullName)
-	if err != nil {
-		return review, tokens, err
-	}
 
 	fileContent := fileContents[file.NewName]
 
