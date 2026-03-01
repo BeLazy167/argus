@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 
 	"github.com/BeLazy167/argus/internal/memory"
 )
@@ -137,6 +138,48 @@ func specialistSearchQuery(s Specialist) string {
 	}
 }
 
+// searchMemoryContent searches Supermemory and returns extracted content strings.
+// Non-fatal: returns nil on any error.
+func searchMemoryContent(ctx context.Context, memClient *memory.Client, query, containerTag string, limit int) []string {
+	resp, err := memClient.Search(ctx, memory.SearchRequest{
+		Query:        query,
+		ContainerTag: containerTag,
+		SearchMode:   "hybrid",
+		Limit:        limit,
+		Threshold:    0.5,
+	})
+	if err != nil {
+		slog.Warn("memory search failed", "error", err, "tag", containerTag)
+		return nil
+	}
+
+	var results []string
+	for _, r := range resp.Results {
+		if c := r.Content(); c != "" {
+			if len(c) > 300 {
+				c = c[:300] + "..."
+			}
+			results = append(results, c)
+		}
+	}
+	return results
+}
+
+// formatMemoryBlock builds a numbered markdown block from memory results.
+// Returns empty string if results is empty.
+func formatMemoryBlock(header, footer string, results []string) string {
+	if len(results) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString(header)
+	for i, r := range results {
+		sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, r))
+	}
+	sb.WriteString(footer)
+	return sb.String()
+}
+
 // specialistMemoryBlock fetches repo + org patterns from Supermemory and returns
 // a formatted block to prepend to the specialist's system prompt.
 // Non-fatal: returns empty string on any error.
@@ -146,61 +189,28 @@ func specialistMemoryBlock(ctx context.Context, memClient *memory.Client, owner,
 	}
 
 	query := specialistSearchQuery(s)
+
+	// Parallel repo + org searches to halve latency
+	var repoResults, orgResults []string
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		repoResults = searchMemoryContent(ctx, memClient, query, memory.RepoTag(owner, repo, "patterns"), 3)
+	}()
+	go func() {
+		defer wg.Done()
+		orgResults = searchMemoryContent(ctx, memClient, query, memory.OwnerTag(owner, "patterns"), 3)
+	}()
+	wg.Wait()
+
 	var results []string
+	results = append(results, repoResults...)
+	results = append(results, orgResults...)
 
-	// Repo-level patterns
-	repoResp, err := memClient.Search(ctx, memory.SearchRequest{
-		Query:        query,
-		ContainerTag: memory.RepoTag(owner, repo, "patterns"),
-		SearchMode:   "hybrid",
-		Limit:        3,
-		Threshold:    0.5,
-	})
-	if err != nil {
-		slog.Warn("specialist memory search failed (repo)", "error", err, "specialist", s)
-	} else {
-		for _, r := range repoResp.Results {
-			content := r.Memory
-			if content == "" {
-				content = r.Chunk
-			}
-			if content != "" {
-				results = append(results, content)
-			}
-		}
-	}
-
-	// Org-level patterns
-	orgResp, err := memClient.Search(ctx, memory.SearchRequest{
-		Query:        query,
-		ContainerTag: memory.OwnerTag(owner, "patterns"),
-		SearchMode:   "hybrid",
-		Limit:        3,
-		Threshold:    0.5,
-	})
-	if err != nil {
-		slog.Warn("specialist memory search failed (org)", "error", err, "specialist", s)
-	} else {
-		for _, r := range orgResp.Results {
-			content := r.Memory
-			if content == "" {
-				content = r.Chunk
-			}
-			if content != "" {
-				results = append(results, content)
-			}
-		}
-	}
-
-	if len(results) == 0 {
-		return ""
-	}
-
-	var sb strings.Builder
-	sb.WriteString("\n\n## Repo Memory (patterns from past reviews)\n\n")
-	for i, r := range results {
-		sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, r))
-	}
-	sb.WriteString("\nUse these patterns to inform your review — issues matching known patterns are higher priority.")
-	return sb.String()
+	return formatMemoryBlock(
+		"\n\n## Repo Memory (patterns from past reviews)\n\n",
+		"\nUse these patterns to inform your review — issues matching known patterns are higher priority.",
+		results,
+	)
 }

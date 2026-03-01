@@ -177,6 +177,15 @@ type SearchResult struct {
 	Similarity float64 `json:"similarity"`
 }
 
+// Content returns the best-available text from a search result,
+// preferring Memory over Chunk.
+func (r SearchResult) Content() string {
+	if r.Memory != "" {
+		return r.Memory
+	}
+	return r.Chunk
+}
+
 type ListRequest struct {
 	Limit         int      `json:"limit,omitempty"`
 	Page          int      `json:"page,omitempty"`

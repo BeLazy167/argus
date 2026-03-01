@@ -420,22 +420,17 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	o.logger.Info("posted review", "github_review_id", ghReviewID, "pr", run.PREvent.PRNumber)
 
 	// Persist comments to DB + index in Supermemory (fire-and-forget)
-	o.indexComments(ctx, run, ghReviewID)
-	o.indexConfirmedPatterns(ctx, run)
-	o.autoLearnPatterns(ctx, run)
+	o.indexComments(ctx, run, ghReviewID, owner, repo)
+	o.indexConfirmedPatterns(ctx, run, owner, repo)
+	o.autoLearnPatterns(ctx, run, owner, repo)
 
 	return nil
 }
 
 // indexConfirmedPatterns saves comments scored 90+ as confirmed repo patterns in Supermemory.
 // Cheap — no LLM call, just direct indexing of validated high-confidence comments.
-func (o *Orchestrator) indexConfirmedPatterns(ctx context.Context, run *PipelineRun) {
+func (o *Orchestrator) indexConfirmedPatterns(ctx context.Context, run *PipelineRun, owner, repo string) {
 	if o.indexer == nil || !run.DeepReview {
-		return
-	}
-
-	owner, repo, err := splitRepoFullName(run.PREvent.RepoFullName)
-	if err != nil {
 		return
 	}
 
@@ -461,7 +456,7 @@ func (o *Orchestrator) indexConfirmedPatterns(ctx context.Context, run *Pipeline
 
 // autoLearnPatterns uses the review LLM to extract 0-3 reusable patterns from high-confidence
 // comments. Only runs for deep reviews with 2+ comments scoring 85+.
-func (o *Orchestrator) autoLearnPatterns(ctx context.Context, run *PipelineRun) {
+func (o *Orchestrator) autoLearnPatterns(ctx context.Context, run *PipelineRun, owner, repo string) {
 	if o.indexer == nil || !run.DeepReview {
 		return
 	}
@@ -480,11 +475,6 @@ func (o *Orchestrator) autoLearnPatterns(ctx context.Context, run *PipelineRun) 
 		return
 	}
 
-	owner, repo, err := splitRepoFullName(run.PREvent.RepoFullName)
-	if err != nil {
-		return
-	}
-
 	// Resolve review provider for extraction
 	dbConfigs, err := o.st.ListModelConfigs(ctx, run.DBRepoID)
 	if err != nil {
@@ -494,10 +484,12 @@ func (o *Orchestrator) autoLearnPatterns(ctx context.Context, run *PipelineRun) 
 	repoConfigs := storeToLLMConfigs(dbConfigs)
 	cfg, err := o.reviewStage.registry.GetConfig(run.DBRepoID, llm.StageReview, repoConfigs)
 	if err != nil {
+		o.logger.Warn("auto-learn: no review config", "error", err)
 		return
 	}
 	provider, err := o.reviewStage.registry.GetProviderForRepo(ctx, run.DBInstallationID, &run.DBRepoID, cfg.Provider)
 	if err != nil {
+		o.logger.Warn("auto-learn: provider unavailable", "error", err)
 		return
 	}
 
@@ -530,6 +522,9 @@ Return [] if no repo-specific patterns emerge. JSON array only.`, run.PREvent.Re
 		o.logger.Warn("auto-learn parse failed", "error", err)
 		return
 	}
+	if len(patterns) > 3 {
+		patterns = patterns[:3]
+	}
 
 	for _, p := range patterns {
 		if p.Pattern == "" {
@@ -550,13 +545,7 @@ Return [] if no repo-specific patterns emerge. JSON array only.`, run.PREvent.Re
 	}
 }
 
-func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghReviewID int64) {
-	owner, repo, err := splitRepoFullName(run.PREvent.RepoFullName)
-	if err != nil {
-		o.logger.Error("invalid repo name in indexComments", "error", err)
-		return
-	}
-
+func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghReviewID int64, owner, repo string) {
 	// Fetch GitHub comment IDs for the review we just posted
 	type ghCommentKey struct {
 		Path string
