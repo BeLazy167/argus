@@ -137,11 +137,17 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 			defer wg.Done()
 			for u := range unitCh {
 				if ctx.Err() != nil {
+					// Drain remaining units to avoid blocking sender, count what we skip
+					skipped := 1 // current unit
+					for range unitCh {
+						skipped++
+					}
+					slog.Warn("review worker exiting: context cancelled", "skipped_units", skipped)
 					return
 				}
 				p := reviewParams{file: u.file, action: u.action, specialist: u.specialist, deepReview: run.DeepReview}
 				if u.specialist != "" {
-					p.systemBase = specialistPrompt(u.specialist) + specialistMemoryBlock(ctx, rs.memClient, owner, repo, u.specialist)
+					p.systemBase = specialistPrompt(u.specialist) + specialistMemoryBlock(ctx, rs.memClient, owner, repo, u.specialist, u.file.NewName)
 				} else {
 					p.systemBase = baseSystemPrompt
 					p.promptExtra = PersonaPromptOverlay(run.Persona)
@@ -329,8 +335,11 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p revie
 
 func buildFileReviewPrompt(run *PipelineRun, file diff.FileDiff, fileContent string) string {
 	var sb strings.Builder
+	// Truncate user-controlled fields for prompt injection resistance
+	safeTitle := truncate(run.PREvent.PRTitle, 200)
+	safeAuthor := truncate(run.PREvent.PRAuthor, 100)
 	sb.WriteString(fmt.Sprintf("Review changes in \"%s\" from PR #%d: \"%s\" by %s.\n",
-		file.NewName, run.PREvent.PRNumber, run.PREvent.PRTitle, run.PREvent.PRAuthor))
+		file.NewName, run.PREvent.PRNumber, safeTitle, safeAuthor))
 
 	if run.PREvent.PRBody != "" {
 		sb.WriteString(fmt.Sprintf("\nPR Description: %s\n", run.PREvent.PRBody))

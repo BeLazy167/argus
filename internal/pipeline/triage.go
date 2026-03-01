@@ -3,9 +3,12 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/BeLazy167/argus/internal/llm"
+	"github.com/BeLazy167/argus/internal/memory"
 	"github.com/BeLazy167/argus/internal/store"
 	"github.com/BeLazy167/argus/pkg/diff"
 )
@@ -29,12 +32,13 @@ type TriageResult struct {
 
 // TriageStage classifies files as skip/skim/deep using a fast LLM.
 type TriageStage struct {
-	registry *llm.Registry
-	store    *store.Store
+	registry  *llm.Registry
+	store     *store.Store
+	memClient *memory.Client
 }
 
-func NewTriageStage(registry *llm.Registry, st *store.Store) *TriageStage {
-	return &TriageStage{registry: registry, store: st}
+func NewTriageStage(registry *llm.Registry, st *store.Store, memClient *memory.Client) *TriageStage {
+	return &TriageStage{registry: registry, store: st, memClient: memClient}
 }
 
 func (ts *TriageStage) Execute(ctx context.Context, run *PipelineRun) error {
@@ -57,7 +61,14 @@ func (ts *TriageStage) Execute(ctx context.Context, run *PipelineRun) error {
 		return fmt.Errorf("triage provider: %w", err)
 	}
 
+	owner, repo, err := splitRepoFullName(run.PREvent.RepoFullName)
+	if err != nil {
+		slog.Warn("triage: invalid repo name, skipping memory hints", "error", err)
+	}
 	prompt := buildTriagePrompt(run.Diff.Files)
+	if hints := triageMemoryHints(ctx, ts.memClient, owner, repo, run.Diff.Files); hints != "" {
+		prompt += "\n" + hints
+	}
 	resp, err := provider.Complete(ctx, llm.CompletionRequest{
 		Model:       cfg.Model,
 		System:      triageSystemPrompt,
@@ -93,15 +104,13 @@ func buildTriagePrompt(files []diff.FileDiff) string {
 	sb.WriteString("Classify each file for code review depth.\n\nFiles changed:\n")
 	for _, f := range files {
 		sb.WriteString(fmt.Sprintf("\n--- %s (%s) ---\n", f.NewName, f.Status))
-		// Include first 80 lines of diff for context
+		// Include first N lines of diff for context
+		const maxDiffLines = 80
 		lines := strings.Split(f.RawDiff, "\n")
-		limit := 80
-		if len(lines) < limit {
-			limit = len(lines)
-		}
+		limit := min(len(lines), maxDiffLines)
 		sb.WriteString(strings.Join(lines[:limit], "\n"))
-		if len(lines) > 80 {
-			sb.WriteString(fmt.Sprintf("\n... (%d more lines)\n", len(lines)-80))
+		if len(lines) > maxDiffLines {
+			sb.WriteString(fmt.Sprintf("\n... (%d more lines)\n", len(lines)-maxDiffLines))
 		}
 	}
 	return sb.String()
@@ -149,6 +158,35 @@ func storeToLLMConfigs(dbConfigs []store.ModelConfig) []llm.ModelConfig {
 		}
 	}
 	return out
+}
+
+// triageMemoryHints searches Supermemory for file synthesis docs matching changed files.
+// Returns a hint block for the triage prompt, or empty string if no history found.
+func triageMemoryHints(ctx context.Context, memClient *memory.Client, owner, repo string, files []diff.FileDiff) string {
+	if memClient == nil || owner == "" || repo == "" || len(files) == 0 {
+		return ""
+	}
+
+	// Search for synthesis docs across changed files (single query, top 5)
+	searchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	var fileNames []string
+	for _, f := range files {
+		fileNames = append(fileNames, f.NewName)
+	}
+	query := filePathsQuery("file synthesis review history ", fileNames)
+	results := searchMemoryContent(searchCtx, memClient, query, memory.RepoTag(owner, repo, "patterns"), 5)
+	if len(results) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("\n## File History (from past reviews)\n")
+	for _, r := range results {
+		sb.WriteString(fmt.Sprintf("- %s\n", truncateSnippet(r, 200)))
+	}
+	slog.Debug("triage memory hints", "count", len(results), "owner", owner, "repo", repo)
+	return sb.String()
 }
 
 const triageSystemPrompt = `You are a code review triage assistant. Given a list of changed files with abbreviated diffs, classify each file into one of four review depths:

@@ -52,9 +52,9 @@ func (s *Server) handleRememberCommand(ctx context.Context, evt ghpkg.IssueComme
 		}
 		var resp *memory.AddResponse
 		if isOrg {
-			resp, err = s.indexer.IndexOwnerPattern(ctx, owner, content, metadata)
+			resp, err = s.indexer.IndexOwnerPattern(ctx, owner, content, "", metadata)
 		} else {
-			resp, err = s.indexer.IndexRepoPattern(ctx, owner, repo, content, metadata)
+			resp, err = s.indexer.IndexRepoPattern(ctx, owner, repo, content, "", metadata)
 		}
 		if err != nil {
 			s.logger.Error("remember: index in supermemory", "error", err)

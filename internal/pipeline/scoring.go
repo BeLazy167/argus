@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/BeLazy167/argus/internal/llm"
 	"github.com/BeLazy167/argus/internal/memory"
@@ -41,11 +43,13 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 	cfg, err := ss.registry.GetConfig(run.DBRepoID, llm.StageScoring, repoConfigs)
 	if err != nil {
 		slog.Info("no scoring model configured, passing all comments through", "repo_id", run.DBRepoID)
+		run.ScoringSkipped = true
 		return nil
 	}
 	provider, err := ss.registry.GetProviderForRepo(ctx, run.DBInstallationID, &run.DBRepoID, cfg.Provider)
 	if err != nil {
 		slog.Error("scoring provider unavailable, passing all comments through", "error", err)
+		run.ScoringSkipped = true
 		return nil
 	}
 
@@ -70,7 +74,7 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 	if err != nil {
 		slog.Warn("scoring: invalid repo name, skipping memory context", "error", err)
 	}
-	memContext := fetchScoringContext(ctx, ss.memClient, owner, repo)
+	memContext := fetchScoringContext(ctx, ss.memClient, owner, repo, run.FileReviews)
 
 	prompt := buildScoringPrompt(run, memContext)
 	resp, err := provider.Complete(ctx, llm.CompletionRequest{
@@ -115,9 +119,7 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 		slog.Warn("scoring returned fewer items than comments", "scored", len(scored), "expected", len(allComments))
 	}
 
-	// Apply scores and filter in place
-	var kept, dropped int
-
+	// Apply scores
 	for i, ic := range allComments {
 		score, ok := scoreLookup[i]
 		if !ok {
@@ -126,6 +128,8 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 		run.FileReviews[ic.fileIdx].Comments[ic.commentIdx].Score = score
 	}
 
+	// Filter comments below threshold
+	var kept, dropped int
 	filtered := run.FileReviews[:0]
 	for _, fr := range run.FileReviews {
 		var passing []FileComment
@@ -153,7 +157,10 @@ func buildScoringPrompt(run *PipelineRun, memContext string) string {
 		sb.WriteString(memContext)
 		sb.WriteString("\n")
 	}
-	sb.WriteString(fmt.Sprintf("PR #%d: \"%s\" by %s\n\nScore each comment 0-100:\n\n", run.PREvent.PRNumber, run.PREvent.PRTitle, run.PREvent.PRAuthor))
+	// Truncate user-controlled fields for prompt injection resistance
+	safeTitle := truncate(run.PREvent.PRTitle, 200)
+	safeAuthor := truncate(run.PREvent.PRAuthor, 100)
+	sb.WriteString(fmt.Sprintf("PR #%d: \"%s\" by %s\n\nScore each comment 0-100:\n\n", run.PREvent.PRNumber, safeTitle, safeAuthor))
 	idx := 0
 	for _, fr := range run.FileReviews {
 		for _, c := range fr.Comments {
@@ -190,17 +197,58 @@ Criteria:
 
 Respond ONLY with a JSON array. No other text.`
 
-// fetchScoringContext retrieves repo patterns from Supermemory to calibrate scoring.
+// fetchScoringContext retrieves repo patterns + per-file synthesis from Supermemory to calibrate scoring.
 // Non-fatal: returns empty string on any error.
-func fetchScoringContext(ctx context.Context, memClient *memory.Client, owner, repo string) string {
+func fetchScoringContext(ctx context.Context, memClient *memory.Client, owner, repo string, files []FileReview) string {
 	if memClient == nil || owner == "" || repo == "" {
 		return ""
 	}
 
-	results := searchMemoryContent(ctx, memClient, "confirmed review patterns conventions common issues", memory.RepoTag(owner, repo, "patterns"), 5)
-	return formatMemoryBlock(
-		"## Repo Context (from past reviews)\n\n",
-		"\nUse this context to calibrate scores — issues matching confirmed patterns should score higher.",
-		results,
-	)
+	repoTag := memory.RepoTag(owner, repo, "patterns")
+
+	// Parallel with timeout to avoid stalling the scoring pipeline
+	searchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	var repoResults []string
+	var fileResults []string
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		repoResults = searchMemoryContent(searchCtx, memClient, "confirmed review patterns conventions common issues", repoTag, 5)
+	}()
+	go func() {
+		defer wg.Done()
+		if len(files) > 0 {
+			var paths []string
+			for _, fr := range files {
+				paths = append(paths, fr.Path)
+			}
+			fileResults = searchMemoryContent(searchCtx, memClient, filePathsQuery("file synthesis ", paths), repoTag, 3)
+		}
+	}()
+	wg.Wait()
+
+	var sb strings.Builder
+	if len(fileResults) > 0 {
+		sb.WriteString("## Known File Context\n")
+		for _, r := range fileResults {
+			sb.WriteString("- " + truncateSnippet(r, 200) + "\n")
+		}
+		sb.WriteString("\n")
+	}
+
+	if len(repoResults) > 0 {
+		sb.WriteString(formatMemoryBlock(
+			"## Repo Context (from past reviews)\n\n",
+			"",
+			repoResults,
+		))
+	}
+
+	if sb.Len() > 0 {
+		sb.WriteString("\nUse this context to calibrate scores — issues matching confirmed patterns should score higher.")
+	}
+	return sb.String()
 }

@@ -743,11 +743,11 @@ func (s *Server) createPattern(w http.ResponseWriter, r *http.Request) {
 				if err == nil {
 					parts := strings.SplitN(dbRepo.FullName, "/", 2)
 					if len(parts) == 2 {
-						resp, err = s.indexer.IndexRepoPattern(r.Context(), parts[0], parts[1], body.Content, metadata)
+						resp, err = s.indexer.IndexRepoPattern(r.Context(), parts[0], parts[1], body.Content, "", metadata)
 					}
 				}
 			} else {
-				resp, err = s.indexer.IndexOwnerPattern(r.Context(), inst.OrgLogin, body.Content, metadata)
+				resp, err = s.indexer.IndexOwnerPattern(r.Context(), inst.OrgLogin, body.Content, "", metadata)
 			}
 			if err != nil {
 				s.logger.Error("index pattern in supermemory", "error", err)

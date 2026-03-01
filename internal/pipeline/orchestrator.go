@@ -236,13 +236,14 @@ func (o *Orchestrator) RetryReview(ctx context.Context, reviewID uuid.UUID) erro
 
 func (o *Orchestrator) synthesize(ctx context.Context, run *PipelineRun) error {
 	var summary strings.Builder
+	header := "## Argus Review\n\n"
+	verb := "Reviewed"
 	if run.IsIncremental {
-		summary.WriteString("## Argus Review (Incremental)\n\n")
-		summary.WriteString(fmt.Sprintf("Re-reviewed %d changed files with %d new comments.\n\n", len(run.Diff.Files), countComments(run)))
-	} else {
-		summary.WriteString("## Argus Review\n\n")
-		summary.WriteString(fmt.Sprintf("Reviewed %d files with %d comments.\n\n", len(run.Diff.Files), countComments(run)))
+		header = "## Argus Review (Incremental)\n\n"
+		verb = "Re-reviewed"
 	}
+	summary.WriteString(header)
+	summary.WriteString(fmt.Sprintf("%s %d files with %d comments.\n\n", verb, len(run.Diff.Files), countComments(run)))
 
 	for _, fr := range run.FileReviews {
 		summary.WriteString(fmt.Sprintf("### `%s`\n", fr.Path))
@@ -270,8 +271,8 @@ func (o *Orchestrator) pass2(ctx context.Context, run *PipelineRun) error {
 	const minCommentsForPass2 = 3
 	const minScoreForHot = 70
 
-	// Find hot files
-	var hotPaths []string
+	// Find hot files — 3+ comments scored 70+
+	hotSet := make(map[string]bool)
 	for _, fr := range run.FileReviews {
 		count := 0
 		for _, c := range fr.Comments {
@@ -280,41 +281,24 @@ func (o *Orchestrator) pass2(ctx context.Context, run *PipelineRun) error {
 			}
 		}
 		if count >= minCommentsForPass2 {
-			hotPaths = append(hotPaths, fr.Path)
+			hotSet[fr.Path] = true
 		}
 	}
 
-	if len(hotPaths) == 0 {
+	if len(hotSet) == 0 {
 		return nil
 	}
 
-	o.logger.Info("pass2 triggered", "hot_files", len(hotPaths))
-
-	// Find original diffs for hot files
-	hotSet := make(map[string]bool, len(hotPaths))
-	for _, p := range hotPaths {
-		hotSet[p] = true
-	}
+	o.logger.Info("pass2 triggered", "hot_files", len(hotSet))
 
 	owner, repo, err := splitRepoFullName(run.PREvent.RepoFullName)
 	if err != nil {
 		return err
 	}
 
-	// Resolve review provider
-	dbConfigs, err := o.st.ListModelConfigs(ctx, run.DBRepoID)
+	cfg, provider, err := o.resolveReviewProvider(ctx, run)
 	if err != nil {
-		return fmt.Errorf("pass2 model configs: %w", err)
-	}
-	repoConfigs := storeToLLMConfigs(dbConfigs)
-	cfg, err := o.reviewStage.registry.GetConfig(run.DBRepoID, llm.StageReview, repoConfigs)
-	if err != nil {
-		o.logger.Warn("pass2 skipped: no review config", "error", err)
-		return nil
-	}
-	provider, err := o.reviewStage.registry.GetProviderForRepo(ctx, run.DBInstallationID, &run.DBRepoID, cfg.Provider)
-	if err != nil {
-		o.logger.Warn("pass2 skipped: no provider", "error", err)
+		o.logger.Warn("pass2 skipped", "error", err)
 		return nil
 	}
 
@@ -369,6 +353,10 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	owner, repo, err := splitRepoFullName(run.PREvent.RepoFullName)
 	if err != nil {
 		return err
+	}
+
+	if run.Synthesis == nil {
+		return fmt.Errorf("synthesis result is nil, cannot post review")
 	}
 
 	submission := &ghpkg.ReviewSubmission{
@@ -426,6 +414,8 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	o.indexComments(ctx, run, ghReviewID, owner, repo)
 	o.indexConfirmedPatterns(ctx, run, owner, repo)
 	o.autoLearnPatterns(ctx, run, owner, repo)
+	o.synthesizeFileMemories(ctx, run, owner, repo)
+	o.indexPRSummary(ctx, run, owner, repo)
 
 	return nil
 }
@@ -444,14 +434,15 @@ func (o *Orchestrator) indexConfirmedPatterns(ctx context.Context, run *Pipeline
 				continue
 			}
 			content := fmt.Sprintf("Confirmed pattern [%s]: %s (file: %s)", c.Category, c.Body, fr.Path)
-			_, err := o.indexer.IndexRepoPattern(ctx, owner, repo, content, map[string]string{
+			customID := memory.PatternCustomID(owner, repo, "confirmed", content)
+			_, err := o.indexer.IndexRepoPattern(ctx, owner, repo, content, customID, map[string]string{
 				"source":   "scoring_confirmed",
 				"score":    fmt.Sprintf("%d", c.Score),
 				"pr":       fmt.Sprintf("%d", run.PREvent.PRNumber),
 				"category": string(c.Category),
 			})
 			if err != nil {
-				o.logger.Error("indexing confirmed pattern", "error", err, "file", fr.Path)
+				o.logger.Warn("indexing confirmed pattern", "error", err, "file", fr.Path)
 			}
 		}
 	}
@@ -478,21 +469,9 @@ func (o *Orchestrator) autoLearnPatterns(ctx context.Context, run *PipelineRun, 
 		return
 	}
 
-	// Resolve review provider for extraction
-	dbConfigs, err := o.st.ListModelConfigs(ctx, run.DBRepoID)
+	cfg, provider, err := o.resolveReviewProvider(ctx, run)
 	if err != nil {
-		o.logger.Warn("auto-learn: model configs", "error", err)
-		return
-	}
-	repoConfigs := storeToLLMConfigs(dbConfigs)
-	cfg, err := o.reviewStage.registry.GetConfig(run.DBRepoID, llm.StageReview, repoConfigs)
-	if err != nil {
-		o.logger.Warn("auto-learn: no review config", "error", err)
-		return
-	}
-	provider, err := o.reviewStage.registry.GetProviderForRepo(ctx, run.DBInstallationID, &run.DBRepoID, cfg.Provider)
-	if err != nil {
-		o.logger.Warn("auto-learn: provider unavailable", "error", err)
+		o.logger.Warn("auto-learn skipped", "error", err)
 		return
 	}
 
@@ -533,18 +512,162 @@ Return [] if no repo-specific patterns emerge. JSON array only.`, run.PREvent.Re
 		if p.Pattern == "" {
 			continue
 		}
-		_, err := o.indexer.IndexRepoPattern(ctx, owner, repo, p.Pattern, map[string]string{
+		customID := memory.PatternCustomID(owner, repo, "learned", p.Pattern)
+		_, err := o.indexer.IndexRepoPattern(ctx, owner, repo, p.Pattern, customID, map[string]string{
 			"source":   "auto_learn",
 			"pr":       fmt.Sprintf("%d", run.PREvent.PRNumber),
 			"category": p.Category,
 		})
 		if err != nil {
-			o.logger.Error("indexing auto-learned pattern", "error", err)
+			o.logger.Warn("indexing auto-learned pattern", "error", err)
 		}
 	}
 
 	if len(patterns) > 0 {
 		o.logger.Info("auto-learned patterns", "count", len(patterns), "repo", run.PREvent.RepoFullName)
+	}
+}
+
+// synthesizeFileMemories condenses all review comments per file into a single curated memory document.
+// Only fires for files with strong signal: 2+ comments scored 70+, or any comment 90+.
+// When scoring was skipped, all comments qualify (since Score=0 is not meaningful).
+func (o *Orchestrator) synthesizeFileMemories(ctx context.Context, run *PipelineRun, owner, repo string) {
+	if o.indexer == nil || !run.DeepReview {
+		return
+	}
+
+	// Collect qualifying files
+	type fileComments struct {
+		path     string
+		comments []FileComment
+	}
+	var qualifying []fileComments
+	for _, fr := range run.FileReviews {
+		if run.ScoringSkipped {
+			// Scoring unavailable — qualify any file with 2+ comments
+			if len(fr.Comments) >= 2 {
+				qualifying = append(qualifying, fileComments{path: fr.Path, comments: fr.Comments})
+			}
+			continue
+		}
+		count70 := 0
+		has90 := false
+		for _, c := range fr.Comments {
+			if c.Score >= 70 {
+				count70++
+			}
+			if c.Score >= 90 {
+				has90 = true
+			}
+		}
+		if count70 >= 2 || has90 {
+			qualifying = append(qualifying, fileComments{path: fr.Path, comments: fr.Comments})
+		}
+	}
+	if len(qualifying) == 0 {
+		return
+	}
+
+	// Cap to avoid unbounded LLM calls on large PRs
+	const maxSynthesisFiles = 10
+	if len(qualifying) > maxSynthesisFiles {
+		qualifying = qualifying[:maxSynthesisFiles]
+	}
+
+	cfg, provider, err := o.resolveReviewProvider(ctx, run)
+	if err != nil {
+		o.logger.Warn("synthesis skipped", "error", err)
+		return
+	}
+
+	const synthesisSystem = `You are synthesizing code review findings into institutional memory.
+Given review comments on a single file, produce ONE concise document:
+
+1. Dominant theme (what class of problem does this file have?)
+2. Specific patterns to watch for in future reviews
+3. What a future reviewer should know before touching this file
+4. Any intentional patterns that were explained away
+
+Reference function names and line ranges (not exact numbers — those shift).
+Max 200 words. Be concrete.`
+
+	// Timeout to avoid stalling post-pipeline
+	synthCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	// Sanitize user-controlled fields for prompt injection resistance
+	safeTitle := truncate(run.PREvent.PRTitle, 200)
+	safeAuthor := truncate(run.PREvent.PRAuthor, 100)
+
+	var succeeded, failed int
+	for _, fc := range qualifying {
+		if synthCtx.Err() != nil {
+			o.logger.Warn("synthesis aborted: context cancelled", "succeeded", succeeded, "remaining", len(qualifying)-succeeded-failed)
+			return
+		}
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("File: %s\nPR #%d: \"%s\" by %s\n\nComments:\n",
+			fc.path, run.PREvent.PRNumber, safeTitle, safeAuthor))
+		for _, c := range fc.comments {
+			sb.WriteString(fmt.Sprintf("[%s|%s] L%d (%s, score:%d) — %s\n",
+				c.Severity, c.Category, c.Line, c.Specialist, c.Score, c.Body))
+		}
+
+		resp, err := provider.Complete(synthCtx, llm.CompletionRequest{
+			Model:       cfg.Model,
+			System:      synthesisSystem,
+			Messages:    []llm.Message{{Role: "user", Content: sb.String()}},
+			MaxTokens:   400,
+			Temperature: 0.3,
+		})
+		if err != nil {
+			o.logger.Warn("synthesis LLM failed", "error", err, "file", fc.path)
+			failed++
+			continue
+		}
+
+		customID := memory.SynthesisCustomID(owner, repo, fc.path)
+		_, err = o.indexer.IndexRepoPattern(synthCtx, owner, repo, resp.Content, customID, map[string]string{
+			"source": "synthesis",
+			"pr":     fmt.Sprintf("%d", run.PREvent.PRNumber),
+			"file":   fc.path,
+		})
+		if err != nil {
+			o.logger.Warn("indexing file synthesis", "error", err, "file", fc.path)
+			failed++
+			continue
+		}
+		succeeded++
+	}
+
+	o.logger.Info("synthesized file memories", "succeeded", succeeded, "failed", failed, "repo", run.PREvent.RepoFullName)
+}
+
+// indexPRSummary stores a lightweight PR summary in Supermemory for cross-PR context.
+// No LLM call — built from existing synthesis output.
+func (o *Orchestrator) indexPRSummary(ctx context.Context, run *PipelineRun, owner, repo string) {
+	if o.indexer == nil || run.Synthesis == nil {
+		return
+	}
+
+	var files []string
+	for _, fr := range run.FileReviews {
+		files = append(files, fr.Path)
+	}
+
+	content := fmt.Sprintf("PR #%d \"%s\" by %s\nScore: %d/10\nFiles: %s\n\n%s",
+		run.PREvent.PRNumber, run.PREvent.PRTitle, run.PREvent.PRAuthor,
+		run.Synthesis.Score, strings.Join(files, ", "),
+		truncate(run.Synthesis.Summary, 800))
+
+	customID := memory.PRSummaryCustomID(owner, repo, run.PREvent.PRNumber)
+	_, err := o.indexer.IndexRepoPattern(ctx, owner, repo, content, customID, map[string]string{
+		"source":    "pr_summary",
+		"pr":        fmt.Sprintf("%d", run.PREvent.PRNumber),
+		"pr_author": run.PREvent.PRAuthor,
+	})
+	if err != nil {
+		o.logger.Warn("indexing PR summary", "error", err)
 	}
 }
 
@@ -619,6 +742,24 @@ func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghRe
 			}
 		}
 	}
+}
+
+// resolveReviewProvider loads model configs and returns a review-stage provider.
+func (o *Orchestrator) resolveReviewProvider(ctx context.Context, run *PipelineRun) (llm.ModelConfig, llm.Provider, error) {
+	dbConfigs, err := o.st.ListModelConfigs(ctx, run.DBRepoID)
+	if err != nil {
+		return llm.ModelConfig{}, nil, fmt.Errorf("model configs: %w", err)
+	}
+	repoConfigs := storeToLLMConfigs(dbConfigs)
+	cfg, err := o.reviewStage.registry.GetConfig(run.DBRepoID, llm.StageReview, repoConfigs)
+	if err != nil {
+		return llm.ModelConfig{}, nil, fmt.Errorf("no review config: %w", err)
+	}
+	provider, err := o.reviewStage.registry.GetProviderForRepo(ctx, run.DBInstallationID, &run.DBRepoID, cfg.Provider)
+	if err != nil {
+		return llm.ModelConfig{}, nil, fmt.Errorf("provider unavailable: %w", err)
+	}
+	return cfg, provider, nil
 }
 
 // truncate returns the first maxLen bytes of s without splitting UTF-8 runes.

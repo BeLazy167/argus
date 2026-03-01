@@ -117,7 +117,7 @@ func (ra *ReplyAnalyzer) Analyze(ctx context.Context, event ghpkg.CommentEvent) 
 
 	// Index learning in Supermemory
 	if decision.Learning != "" && ra.indexer != nil {
-		_, err := ra.indexer.IndexOwnerPattern(ctx, owner, decision.Learning, map[string]string{
+		_, err := ra.indexer.IndexOwnerPattern(ctx, owner, decision.Learning, "", map[string]string{
 			"source": "reply_feedback",
 			"repo":   repo,
 			"file":   event.FilePath,

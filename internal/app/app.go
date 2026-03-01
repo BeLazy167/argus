@@ -63,7 +63,7 @@ func Run() error {
 	}
 
 	// Pipeline
-	triageStage := pipeline.NewTriageStage(registry, db)
+	triageStage := pipeline.NewTriageStage(registry, db, memClient)
 	reviewStage := pipeline.NewReviewStage(registry, db, ghClient, memClient, cfg.MaxConcurrentReviews)
 	scoringStage := pipeline.NewScoringStage(registry, db, memClient)
 	orchestrator := pipeline.NewOrchestrator(db.Pool, db, ghClient, reviewStage, triageStage, scoringStage, indexer, registry, logger)

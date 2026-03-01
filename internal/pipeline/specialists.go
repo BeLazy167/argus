@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/BeLazy167/argus/internal/memory"
 )
@@ -138,6 +139,31 @@ func specialistSearchQuery(s Specialist) string {
 	}
 }
 
+// truncateSnippet caps a string at maxLen bytes (rune-safe) and appends "..." if truncated.
+func truncateSnippet(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	// Walk backward to avoid splitting a multi-byte UTF-8 rune
+	for maxLen > 0 && s[maxLen]&0xC0 == 0x80 {
+		maxLen--
+	}
+	return s[:maxLen] + "..."
+}
+
+// filePathsQuery builds a capped search query from a prefix and file paths (rune-safe truncation).
+func filePathsQuery(prefix string, paths []string) string {
+	q := prefix + strings.Join(paths, " ")
+	if len(q) > 500 {
+		cut := 500
+		for cut > 0 && q[cut]&0xC0 == 0x80 {
+			cut--
+		}
+		q = q[:cut]
+	}
+	return q
+}
+
 // searchMemoryContent searches Supermemory and returns extracted content strings.
 // Non-fatal: returns nil on any error.
 func searchMemoryContent(ctx context.Context, memClient *memory.Client, query, containerTag string, limit int) []string {
@@ -149,6 +175,9 @@ func searchMemoryContent(ctx context.Context, memClient *memory.Client, query, c
 		Threshold:    0.5,
 	})
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil // context cancelled, not a real failure
+		}
 		slog.Warn("memory search failed", "error", err, "tag", containerTag)
 		return nil
 	}
@@ -156,10 +185,7 @@ func searchMemoryContent(ctx context.Context, memClient *memory.Client, query, c
 	var results []string
 	for _, r := range resp.Results {
 		if c := r.Content(); c != "" {
-			if len(c) > 300 {
-				c = c[:300] + "..."
-			}
-			results = append(results, c)
+			results = append(results, truncateSnippet(c, 300))
 		}
 	}
 	return results
@@ -180,37 +206,68 @@ func formatMemoryBlock(header, footer string, results []string) string {
 	return sb.String()
 }
 
-// specialistMemoryBlock fetches repo + org patterns from Supermemory and returns
-// a formatted block to prepend to the specialist's system prompt.
+// specialistMemoryBlock fetches file synthesis + repo/org patterns from Supermemory
+// and returns a prioritized briefing for the specialist's system prompt.
+// Priority: file synthesis > repo patterns > org patterns. Budget: ~600 tokens.
 // Non-fatal: returns empty string on any error.
-func specialistMemoryBlock(ctx context.Context, memClient *memory.Client, owner, repo string, s Specialist) string {
+func specialistMemoryBlock(ctx context.Context, memClient *memory.Client, owner, repo string, s Specialist, filePath string) string {
 	if memClient == nil {
 		return ""
 	}
 
 	query := specialistSearchQuery(s)
+	repoTag := memory.RepoTag(owner, repo, "patterns")
 
-	// Parallel repo + org searches to halve latency
-	var repoResults, orgResults []string
+	// Parallel searches with timeout to avoid stalling the review pipeline
+	searchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	var synthResults, repoResults, orgResults []string
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(3)
 	go func() {
 		defer wg.Done()
-		repoResults = searchMemoryContent(ctx, memClient, query, memory.RepoTag(owner, repo, "patterns"), 3)
+		if filePath != "" {
+			synthResults = searchMemoryContent(searchCtx, memClient, "file synthesis "+filePath, repoTag, 2)
+		}
 	}()
 	go func() {
 		defer wg.Done()
-		orgResults = searchMemoryContent(ctx, memClient, query, memory.OwnerTag(owner, "patterns"), 3)
+		repoResults = searchMemoryContent(searchCtx, memClient, query, repoTag, 3)
+	}()
+	go func() {
+		defer wg.Done()
+		orgResults = searchMemoryContent(searchCtx, memClient, query, memory.OwnerTag(owner, "patterns"), 3)
 	}()
 	wg.Wait()
 
-	var results []string
-	results = append(results, repoResults...)
-	results = append(results, orgResults...)
+	var sb strings.Builder
+	hasSynth := len(synthResults) > 0
 
-	return formatMemoryBlock(
-		"\n\n## Repo Memory (patterns from past reviews)\n\n",
-		"\nUse these patterns to inform your review — issues matching known patterns are higher priority.",
-		results,
-	)
+	if hasSynth {
+		sb.WriteString("\n\n## Memory Briefing: " + filePath + "\n\n")
+		sb.WriteString("### File History\n")
+		for _, r := range synthResults {
+			sb.WriteString(r + "\n")
+		}
+	}
+
+	// Combine repo + org patterns
+	patterns := append(repoResults, orgResults...)
+	if len(patterns) > 0 {
+		if !hasSynth {
+			sb.WriteString("\n\n## Repo Memory (patterns from past reviews)\n\n")
+		} else {
+			sb.WriteString("\n### Repo Patterns\n")
+		}
+		for i, r := range patterns {
+			sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, r))
+		}
+	}
+
+	if sb.Len() == 0 {
+		return ""
+	}
+	sb.WriteString("\nUse this context to inform your review — issues matching known patterns are higher priority.")
+	return sb.String()
 }
