@@ -11,8 +11,8 @@ import (
 	"entgo.io/ent"
 	"entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
-	"github.com/qbriad/argus/ent/pipelinestate"
-	"github.com/qbriad/argus/ent/review"
+	"github.com/BeLazy167/argus/ent/pipelinestate"
+	"github.com/BeLazy167/argus/ent/review"
 )
 
 // PipelineState is the model entity for the PipelineState schema.

@@ -11,8 +11,8 @@ import (
 	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
-	"github.com/qbriad/argus/ent/activitylog"
-	"github.com/qbriad/argus/ent/predicate"
+	"github.com/BeLazy167/argus/ent/activitylog"
+	"github.com/BeLazy167/argus/ent/predicate"
 )
 
 // ActivityLogQuery is the builder for querying ActivityLog entities.

@@ -10,7 +10,7 @@ import (
 
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
-	"github.com/qbriad/argus/ent/rule"
+	"github.com/BeLazy167/argus/ent/rule"
 )
 
 // RuleCreate is the builder for creating a Rule entity.

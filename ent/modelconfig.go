@@ -9,8 +9,8 @@ import (
 
 	"entgo.io/ent"
 	"entgo.io/ent/dialect/sql"
-	"github.com/qbriad/argus/ent/modelconfig"
-	"github.com/qbriad/argus/ent/repo"
+	"github.com/BeLazy167/argus/ent/modelconfig"
+	"github.com/BeLazy167/argus/ent/repo"
 )
 
 // ModelConfig is the model entity for the ModelConfig schema.

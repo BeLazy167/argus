@@ -8,8 +8,8 @@ import (
 	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
-	"github.com/qbriad/argus/ent/modelconfig"
-	"github.com/qbriad/argus/ent/predicate"
+	"github.com/BeLazy167/argus/ent/modelconfig"
+	"github.com/BeLazy167/argus/ent/predicate"
 )
 
 // ModelConfigDelete is the builder for deleting a ModelConfig entity.

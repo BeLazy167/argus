@@ -11,10 +11,10 @@ import (
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
 	"github.com/google/uuid"
-	"github.com/qbriad/argus/ent/installation"
-	"github.com/qbriad/argus/ent/modelconfig"
-	"github.com/qbriad/argus/ent/repo"
-	"github.com/qbriad/argus/ent/review"
+	"github.com/BeLazy167/argus/ent/installation"
+	"github.com/BeLazy167/argus/ent/modelconfig"
+	"github.com/BeLazy167/argus/ent/repo"
+	"github.com/BeLazy167/argus/ent/review"
 )
 
 // RepoCreate is the builder for creating a Repo entity.

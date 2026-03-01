@@ -10,14 +10,14 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/qbriad/argus/internal/api"
-	"github.com/qbriad/argus/internal/config"
-	"github.com/qbriad/argus/internal/crypto"
-	ghpkg "github.com/qbriad/argus/internal/github"
-	"github.com/qbriad/argus/internal/llm"
-	"github.com/qbriad/argus/internal/memory"
-	"github.com/qbriad/argus/internal/pipeline"
-	"github.com/qbriad/argus/internal/store"
+	"github.com/BeLazy167/argus/internal/api"
+	"github.com/BeLazy167/argus/internal/config"
+	"github.com/BeLazy167/argus/internal/crypto"
+	ghpkg "github.com/BeLazy167/argus/internal/github"
+	"github.com/BeLazy167/argus/internal/llm"
+	"github.com/BeLazy167/argus/internal/memory"
+	"github.com/BeLazy167/argus/internal/pipeline"
+	"github.com/BeLazy167/argus/internal/store"
 )
 
 // Run initializes all components and starts the server.

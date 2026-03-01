@@ -13,11 +13,11 @@ import (
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
 	"github.com/google/uuid"
-	"github.com/qbriad/argus/ent/pipelinestate"
-	"github.com/qbriad/argus/ent/predicate"
-	"github.com/qbriad/argus/ent/repo"
-	"github.com/qbriad/argus/ent/review"
-	"github.com/qbriad/argus/ent/reviewcomment"
+	"github.com/BeLazy167/argus/ent/pipelinestate"
+	"github.com/BeLazy167/argus/ent/predicate"
+	"github.com/BeLazy167/argus/ent/repo"
+	"github.com/BeLazy167/argus/ent/review"
+	"github.com/BeLazy167/argus/ent/reviewcomment"
 )
 
 // ReviewQuery is the builder for querying Review entities.

@@ -1,4 +1,4 @@
-module github.com/qbriad/argus
+module github.com/BeLazy167/argus
 
 go 1.24.1
 

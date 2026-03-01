@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	ghpkg "github.com/qbriad/argus/internal/github"
-	"github.com/qbriad/argus/internal/memory"
+	ghpkg "github.com/BeLazy167/argus/internal/github"
+	"github.com/BeLazy167/argus/internal/memory"
 )
 
 // handleRememberCommand parses @argus-eye remember, stores the pattern in DB

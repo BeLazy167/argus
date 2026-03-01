@@ -18,11 +18,11 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	ghpkg "github.com/qbriad/argus/internal/github"
-	"github.com/qbriad/argus/internal/llm"
-	"github.com/qbriad/argus/internal/memory"
-	"github.com/qbriad/argus/internal/pipeline"
-	"github.com/qbriad/argus/internal/store"
+	ghpkg "github.com/BeLazy167/argus/internal/github"
+	"github.com/BeLazy167/argus/internal/llm"
+	"github.com/BeLazy167/argus/internal/memory"
+	"github.com/BeLazy167/argus/internal/pipeline"
+	"github.com/BeLazy167/argus/internal/store"
 )
 
 type Server struct {

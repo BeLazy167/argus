@@ -12,14 +12,14 @@ import (
 	"entgo.io/ent"
 	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
-	"github.com/qbriad/argus/ent/activitylog"
-	"github.com/qbriad/argus/ent/installation"
-	"github.com/qbriad/argus/ent/modelconfig"
-	"github.com/qbriad/argus/ent/pipelinestate"
-	"github.com/qbriad/argus/ent/repo"
-	"github.com/qbriad/argus/ent/review"
-	"github.com/qbriad/argus/ent/reviewcomment"
-	"github.com/qbriad/argus/ent/rule"
+	"github.com/BeLazy167/argus/ent/activitylog"
+	"github.com/BeLazy167/argus/ent/installation"
+	"github.com/BeLazy167/argus/ent/modelconfig"
+	"github.com/BeLazy167/argus/ent/pipelinestate"
+	"github.com/BeLazy167/argus/ent/repo"
+	"github.com/BeLazy167/argus/ent/review"
+	"github.com/BeLazy167/argus/ent/reviewcomment"
+	"github.com/BeLazy167/argus/ent/rule"
 )
 
 // ent aliases to avoid import conflicts in user's code.

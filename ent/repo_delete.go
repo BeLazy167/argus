@@ -8,8 +8,8 @@ import (
 	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
-	"github.com/qbriad/argus/ent/predicate"
-	"github.com/qbriad/argus/ent/repo"
+	"github.com/BeLazy167/argus/ent/predicate"
+	"github.com/BeLazy167/argus/ent/repo"
 )
 
 // RepoDelete is the builder for deleting a Repo entity.

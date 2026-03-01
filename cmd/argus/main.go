@@ -3,7 +3,7 @@ package main
 import (
 	"log"
 
-	"github.com/qbriad/argus/internal/app"
+	"github.com/BeLazy167/argus/internal/app"
 )
 
 func main() {
