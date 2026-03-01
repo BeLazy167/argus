@@ -104,8 +104,8 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 	if workers > len(filesToReview) {
 		workers = len(filesToReview)
 	}
-	if workers > 10 {
-		workers = 10
+	if workers > 3 {
+		workers = 3
 	}
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
