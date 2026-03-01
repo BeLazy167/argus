@@ -66,7 +66,10 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 	}
 
 	// Fetch repo memory context for scoring calibration
-	owner, repo, _ := splitRepoFullName(run.PREvent.RepoFullName)
+	owner, repo, err := splitRepoFullName(run.PREvent.RepoFullName)
+	if err != nil {
+		slog.Warn("scoring: invalid repo name, skipping memory context", "error", err)
+	}
 	memContext := fetchScoringContext(ctx, ss.memClient, owner, repo)
 
 	prompt := buildScoringPrompt(run, memContext)
@@ -194,33 +197,10 @@ func fetchScoringContext(ctx context.Context, memClient *memory.Client, owner, r
 		return ""
 	}
 
-	resp, err := memClient.Search(ctx, memory.SearchRequest{
-		Query:        "confirmed review patterns conventions common issues",
-		ContainerTag: memory.RepoTag(owner, repo, "patterns"),
-		SearchMode:   "hybrid",
-		Limit:        5,
-		Threshold:    0.5,
-	})
-	if err != nil {
-		slog.Warn("scoring memory context fetch failed", "error", err)
-		return ""
-	}
-
-	if len(resp.Results) == 0 {
-		return ""
-	}
-
-	var sb strings.Builder
-	sb.WriteString("## Repo Context (from past reviews)\n\n")
-	for i, r := range resp.Results {
-		content := r.Memory
-		if content == "" {
-			content = r.Chunk
-		}
-		if content != "" {
-			sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, content))
-		}
-	}
-	sb.WriteString("\nUse this context to calibrate scores — issues matching confirmed patterns should score higher.")
-	return sb.String()
+	results := searchMemoryContent(ctx, memClient, "confirmed review patterns conventions common issues", memory.RepoTag(owner, repo, "patterns"), 5)
+	return formatMemoryBlock(
+		"## Repo Context (from past reviews)\n\n",
+		"\nUse this context to calibrate scores — issues matching confirmed patterns should score higher.",
+		results,
+	)
 }

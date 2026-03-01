@@ -99,11 +99,7 @@ func (th *ToolHandler) searchMemory(ctx context.Context, argsJSON string) (strin
 
 	var sb strings.Builder
 	for i, r := range resp.Results {
-		content := r.Memory
-		if content == "" {
-			content = r.Chunk
-		}
-		sb.WriteString(fmt.Sprintf("--- Result %d (score: %.2f) ---\n%s\n\n", i+1, r.Similarity, content))
+		sb.WriteString(fmt.Sprintf("--- Result %d (score: %.2f) ---\n%s\n\n", i+1, r.Similarity, r.Content()))
 	}
 	return sb.String(), nil
 }
