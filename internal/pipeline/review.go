@@ -141,7 +141,7 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 				}
 				p := reviewParams{file: u.file, action: u.action, specialist: u.specialist, deepReview: run.DeepReview}
 				if u.specialist != "" {
-					p.systemBase = specialistPrompt(u.specialist)
+					p.systemBase = specialistPrompt(u.specialist) + specialistMemoryBlock(ctx, rs.memClient, owner, repo, u.specialist)
 				} else {
 					p.systemBase = baseSystemPrompt
 					p.promptExtra = PersonaPromptOverlay(run.Persona)

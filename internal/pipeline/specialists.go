@@ -1,5 +1,14 @@
 package pipeline
 
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"strings"
+
+	"github.com/BeLazy167/argus/internal/memory"
+)
+
 // Specialist identifies a focused review agent role.
 type Specialist string
 
@@ -110,4 +119,88 @@ Ignore new code that doesn't modify existing behavior.`
 	default:
 		return ""
 	}
+}
+
+// specialistSearchQuery returns a semantic search query tailored to each specialist's focus.
+func specialistSearchQuery(s Specialist) string {
+	switch s {
+	case SpecialistBugHunter:
+		return "common bugs logic errors edge cases off-by-one"
+	case SpecialistSecurity:
+		return "security vulnerabilities injection auth secrets"
+	case SpecialistArchitecture:
+		return "architecture patterns error handling conventions coupling"
+	case SpecialistRegression:
+		return "breaking changes API contracts regressions compatibility"
+	default:
+		return "code review patterns"
+	}
+}
+
+// specialistMemoryBlock fetches repo + org patterns from Supermemory and returns
+// a formatted block to prepend to the specialist's system prompt.
+// Non-fatal: returns empty string on any error.
+func specialistMemoryBlock(ctx context.Context, memClient *memory.Client, owner, repo string, s Specialist) string {
+	if memClient == nil {
+		return ""
+	}
+
+	query := specialistSearchQuery(s)
+	var results []string
+
+	// Repo-level patterns
+	repoResp, err := memClient.Search(ctx, memory.SearchRequest{
+		Query:        query,
+		ContainerTag: memory.RepoTag(owner, repo, "patterns"),
+		SearchMode:   "hybrid",
+		Limit:        3,
+		Threshold:    0.5,
+	})
+	if err != nil {
+		slog.Warn("specialist memory search failed (repo)", "error", err, "specialist", s)
+	} else {
+		for _, r := range repoResp.Results {
+			content := r.Memory
+			if content == "" {
+				content = r.Chunk
+			}
+			if content != "" {
+				results = append(results, content)
+			}
+		}
+	}
+
+	// Org-level patterns
+	orgResp, err := memClient.Search(ctx, memory.SearchRequest{
+		Query:        query,
+		ContainerTag: memory.OwnerTag(owner, "patterns"),
+		SearchMode:   "hybrid",
+		Limit:        3,
+		Threshold:    0.5,
+	})
+	if err != nil {
+		slog.Warn("specialist memory search failed (org)", "error", err, "specialist", s)
+	} else {
+		for _, r := range orgResp.Results {
+			content := r.Memory
+			if content == "" {
+				content = r.Chunk
+			}
+			if content != "" {
+				results = append(results, content)
+			}
+		}
+	}
+
+	if len(results) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("\n\n## Repo Memory (patterns from past reviews)\n\n")
+	for i, r := range results {
+		sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, r))
+	}
+	sb.WriteString("\nUse these patterns to inform your review — issues matching known patterns are higher priority.")
+	return sb.String()
 }

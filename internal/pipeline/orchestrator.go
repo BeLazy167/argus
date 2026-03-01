@@ -421,8 +421,133 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 
 	// Persist comments to DB + index in Supermemory (fire-and-forget)
 	o.indexComments(ctx, run, ghReviewID)
+	o.indexConfirmedPatterns(ctx, run)
+	o.autoLearnPatterns(ctx, run)
 
 	return nil
+}
+
+// indexConfirmedPatterns saves comments scored 90+ as confirmed repo patterns in Supermemory.
+// Cheap — no LLM call, just direct indexing of validated high-confidence comments.
+func (o *Orchestrator) indexConfirmedPatterns(ctx context.Context, run *PipelineRun) {
+	if o.indexer == nil || !run.DeepReview {
+		return
+	}
+
+	owner, repo, err := splitRepoFullName(run.PREvent.RepoFullName)
+	if err != nil {
+		return
+	}
+
+	const confirmedThreshold = 90
+	for _, fr := range run.FileReviews {
+		for _, c := range fr.Comments {
+			if c.Score < confirmedThreshold {
+				continue
+			}
+			content := fmt.Sprintf("Confirmed pattern [%s]: %s (file: %s)", c.Category, c.Body, fr.Path)
+			_, err := o.indexer.IndexRepoPattern(ctx, owner, repo, content, map[string]string{
+				"source":   "scoring_confirmed",
+				"score":    fmt.Sprintf("%d", c.Score),
+				"pr":       fmt.Sprintf("%d", run.PREvent.PRNumber),
+				"category": string(c.Category),
+			})
+			if err != nil {
+				o.logger.Error("indexing confirmed pattern", "error", err, "file", fr.Path)
+			}
+		}
+	}
+}
+
+// autoLearnPatterns uses the review LLM to extract 0-3 reusable patterns from high-confidence
+// comments. Only runs for deep reviews with 2+ comments scoring 85+.
+func (o *Orchestrator) autoLearnPatterns(ctx context.Context, run *PipelineRun) {
+	if o.indexer == nil || !run.DeepReview {
+		return
+	}
+
+	// Collect high-confidence comments
+	const learnThreshold = 85
+	var highConf []string
+	for _, fr := range run.FileReviews {
+		for _, c := range fr.Comments {
+			if c.Score >= learnThreshold {
+				highConf = append(highConf, fmt.Sprintf("[%s|%s] %s:%d — %s", c.Severity, c.Category, fr.Path, c.Line, c.Body))
+			}
+		}
+	}
+	if len(highConf) < 2 {
+		return
+	}
+
+	owner, repo, err := splitRepoFullName(run.PREvent.RepoFullName)
+	if err != nil {
+		return
+	}
+
+	// Resolve review provider for extraction
+	dbConfigs, err := o.st.ListModelConfigs(ctx, run.DBRepoID)
+	if err != nil {
+		o.logger.Warn("auto-learn: model configs", "error", err)
+		return
+	}
+	repoConfigs := storeToLLMConfigs(dbConfigs)
+	cfg, err := o.reviewStage.registry.GetConfig(run.DBRepoID, llm.StageReview, repoConfigs)
+	if err != nil {
+		return
+	}
+	provider, err := o.reviewStage.registry.GetProviderForRepo(ctx, run.DBInstallationID, &run.DBRepoID, cfg.Provider)
+	if err != nil {
+		return
+	}
+
+	prompt := fmt.Sprintf(`From these high-confidence review findings on %s, extract 0-3 reusable patterns SPECIFIC to this codebase (not generic best practices). Each pattern should help catch similar issues in future PRs.
+
+Findings:
+%s
+
+Return JSON array: [{"pattern": "description", "category": "bug|security|architecture|regression"}]
+Return [] if no repo-specific patterns emerge. JSON array only.`, run.PREvent.RepoFullName, strings.Join(highConf, "\n"))
+
+	resp, err := provider.Complete(ctx, llm.CompletionRequest{
+		Model:       cfg.Model,
+		System:      "You extract reusable code review patterns from review findings. Be specific to this codebase.",
+		Messages:    []llm.Message{{Role: "user", Content: prompt}},
+		MaxTokens:   500,
+		Temperature: 0.3,
+	})
+	if err != nil {
+		o.logger.Warn("auto-learn LLM call failed", "error", err)
+		return
+	}
+
+	type learnedPattern struct {
+		Pattern  string `json:"pattern"`
+		Category string `json:"category"`
+	}
+	patterns, err := unmarshalLLMArray[learnedPattern](resp.Content)
+	if err != nil {
+		o.logger.Warn("auto-learn parse failed", "error", err)
+		return
+	}
+
+	for _, p := range patterns {
+		if p.Pattern == "" {
+			continue
+		}
+		_, err := o.indexer.IndexRepoPattern(ctx, owner, repo, p.Pattern, map[string]string{
+			"source":   "auto_learn",
+			"pr":       fmt.Sprintf("%d", run.PREvent.PRNumber),
+			"category": p.Category,
+		})
+		if err != nil {
+			o.logger.Error("indexing auto-learned pattern", "error", err)
+		}
+	}
+
+	if len(patterns) > 0 {
+		o.logger.Info("auto-learned patterns", "count", len(patterns), "repo", run.PREvent.RepoFullName)
+	}
 }
 
 func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghReviewID int64) {
