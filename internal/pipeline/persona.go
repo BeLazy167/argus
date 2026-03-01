@@ -16,12 +16,13 @@ const (
 	PersonaArchitect           Persona = "architect"
 	PersonaStrict              Persona = "strict"
 	PersonaAdversarial         Persona = "adversarial"
+	PersonaFreshEyes           Persona = "fresh_eyes"
 )
 
 // ValidPersonas is the set of valid persona values.
 var ValidPersonas = map[Persona]bool{
 	PersonaDefault: true, PersonaSecurityAuditor: true, PersonaPerformanceEngineer: true,
-	PersonaMentor: true, PersonaArchitect: true, PersonaStrict: true, PersonaAdversarial: true,
+	PersonaMentor: true, PersonaArchitect: true, PersonaStrict: true, PersonaAdversarial: true, PersonaFreshEyes: true,
 }
 
 // PersonaPromptOverlay returns the system prompt addition for a given persona.
@@ -106,6 +107,19 @@ You HATE this implementation. Your job is to destroy it.
 - Think like an attacker for security. Think like Murphy's Law for reliability.
 Still be professional — attack the code, not the author.`
 
+	case PersonaFreshEyes:
+		return `
+
+## Persona: Fresh Eyes
+You are reviewing this code as if you've never seen the codebase before. Your perspective is:
+- "What does this do?" — If the intent isn't clear from names and structure alone, flag it
+- "Why does this exist?" — Question any logic that isn't self-documenting
+- Missing docstrings on public APIs and exported functions
+- Confusing variable/function names that require context to understand
+- Logic that is technically correct but would confuse a new team member
+- Implicit assumptions that aren't documented anywhere
+Frame comments as "A new developer would ask..." or "This isn't obvious because..."`
+
 	default:
 		return ""
 	}
@@ -113,23 +127,35 @@ Still be professional — attack the code, not the author.`
 
 // repoSettings is the JSON structure stored in repos.settings_json.
 type repoSettings struct {
-	Persona string `json:"persona,omitempty"`
+	Persona    string `json:"persona,omitempty"`
+	DeepReview bool   `json:"deep_review,omitempty"`
+}
+
+func parseRepoSettings(settingsJSON json.RawMessage) (repoSettings, bool) {
+	if len(settingsJSON) == 0 {
+		return repoSettings{}, false
+	}
+	var s repoSettings
+	if err := json.Unmarshal(settingsJSON, &s); err != nil {
+		slog.Warn("corrupt settings_json", "error", err)
+		return repoSettings{}, false
+	}
+	return s, true
+}
+
+// isDeepReviewEnabled checks if deep review is enabled in repo settings.
+func isDeepReviewEnabled(settingsJSON json.RawMessage) bool {
+	s, ok := parseRepoSettings(settingsJSON)
+	return ok && s.DeepReview
 }
 
 // loadPersona extracts the persona from a repo's settings_json.
 func loadPersona(settingsJSON json.RawMessage) Persona {
-	if len(settingsJSON) == 0 {
-		return PersonaDefault
-	}
-	var s repoSettings
-	if err := json.Unmarshal(settingsJSON, &s); err != nil {
-		slog.Warn("corrupt settings_json, defaulting persona", "error", err)
+	s, ok := parseRepoSettings(settingsJSON)
+	if !ok || s.Persona == "" {
 		return PersonaDefault
 	}
 	p := Persona(s.Persona)
-	if p == "" {
-		return PersonaDefault
-	}
 	if !ValidPersonas[p] {
 		slog.Warn("unknown persona in settings, defaulting", "persona", s.Persona)
 		return PersonaDefault

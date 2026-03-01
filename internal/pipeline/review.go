@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -37,6 +38,13 @@ func NewReviewStage(registry *llm.Registry, st *store.Store, ghClient *ghpkg.Cli
 	}
 }
 
+// workUnit represents a single LLM review call — either a skim single-pass or a specialist deep pass.
+type workUnit struct {
+	file       diff.FileDiff
+	action     TriageAction
+	specialist Specialist // empty for skim single-pass
+}
+
 func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 	if run.Diff == nil || len(run.Diff.Files) == 0 {
 		return nil
@@ -48,20 +56,32 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 		triageLookup[t.File] = t.Action
 	}
 
-	// Filter files by triage result
-	var filesToReview []diff.FileDiff
+	// Filter files and build work units
+	var units []workUnit
 	for _, f := range run.Diff.Files {
 		action := triageLookup[f.NewName]
 		if action == TriageSkip {
 			continue
 		}
 		if action == TriageSkim {
-			f = truncateDiff(f, 100) // skim: limit to 100 lines
+			f = truncateDiff(f, 100)
 		}
-		filesToReview = append(filesToReview, f)
+		switch {
+		case action == TriageSecuritySkim:
+			// Security-only specialist pass — saves tokens vs full deep
+			units = append(units, workUnit{file: f, action: action, specialist: SpecialistSecurity})
+		case run.DeepReview && action == TriageDeep:
+			// Deep files get all specialist passes
+			for _, s := range AllSpecialists() {
+				units = append(units, workUnit{file: f, action: action, specialist: s})
+			}
+		default:
+			// Skim or deep-review-disabled: single-pass
+			units = append(units, workUnit{file: f, action: action})
+		}
 	}
 
-	if len(filesToReview) == 0 {
+	if len(units) == 0 {
 		return nil
 	}
 
@@ -70,7 +90,6 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 		return fmt.Errorf("invalid repo name %q: %w", run.PREvent.RepoFullName, err)
 	}
 
-	// Cancellable context so workers exit fast on first error
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -80,7 +99,16 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 		err    error
 	}
 
-	fileContents := prefetchFiles(ctx, rs.ghClient, run, owner, repo, filesToReview)
+	// Collect unique files for prefetch
+	seen := make(map[string]bool)
+	var filesToPrefetch []diff.FileDiff
+	for _, u := range units {
+		if !seen[u.file.NewName] {
+			seen[u.file.NewName] = true
+			filesToPrefetch = append(filesToPrefetch, u.file)
+		}
+	}
+	fileContents := prefetchFiles(ctx, rs.ghClient, run, owner, repo, filesToPrefetch)
 
 	// Resolve model config once for all files
 	dbConfigs, err := rs.store.ListModelConfigs(ctx, run.DBRepoID)
@@ -97,53 +125,76 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 		return err
 	}
 
-	fileCh := make(chan diff.FileDiff, len(filesToReview))
-	resultCh := make(chan result, len(filesToReview))
+	unitCh := make(chan workUnit, len(units))
+	resultCh := make(chan result, len(units))
+
+	workers := min(rs.maxWorkers, len(units), 3)
 
 	var wg sync.WaitGroup
-	workers := rs.maxWorkers
-	if workers > len(filesToReview) {
-		workers = len(filesToReview)
-	}
-	if workers > 3 {
-		workers = 3
-	}
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for file := range fileCh {
-				review, tokens, err := rs.reviewFile(ctx, run, file, fileContents, triageLookup[file.NewName], owner, repo, cfg, provider)
-				resultCh <- result{review: review, tokens: tokens, err: err}
+			for u := range unitCh {
+				if ctx.Err() != nil {
+					return
+				}
+				p := reviewParams{file: u.file, action: u.action, specialist: u.specialist, deepReview: run.DeepReview}
+				if u.specialist != "" {
+					p.systemBase = specialistPrompt(u.specialist)
+				} else {
+					p.systemBase = baseSystemPrompt
+					p.promptExtra = PersonaPromptOverlay(run.Persona)
+				}
+				rev, tok, err := rs.reviewFile(ctx, run, p, fileContents, owner, repo, cfg, provider)
+				resultCh <- result{review: rev, tokens: tok, err: err}
 			}
 		}()
 	}
 
-	for _, f := range filesToReview {
-		fileCh <- f
+	for _, u := range units {
+		unitCh <- u
 	}
-	close(fileCh)
+	close(unitCh)
 
 	go func() {
 		wg.Wait()
 		close(resultCh)
 	}()
 
+	// Collect results, merging specialist comments per file
+	fileReviewMap := make(map[string]*FileReview)
 	var skipped int
 	for r := range resultCh {
 		if r.err != nil {
-			slog.Warn("skipping file review", "file", r.review.Path, "error", r.err)
+			slog.Warn("skipping review unit", "file", r.review.Path, "error", r.err)
 			skipped++
 			continue
 		}
 		run.Tokens.Review = append(run.Tokens.Review, r.tokens)
 		run.Tokens.addToTotal(r.tokens)
 		if len(r.review.Comments) > 0 {
-			run.FileReviews = append(run.FileReviews, r.review)
+			if existing, ok := fileReviewMap[r.review.Path]; ok {
+				existing.Comments = append(existing.Comments, r.review.Comments...)
+			} else {
+				fr := r.review
+				fileReviewMap[fr.Path] = &fr
+			}
 		}
 	}
+
+	for _, fr := range fileReviewMap {
+		run.FileReviews = append(run.FileReviews, *fr)
+	}
+	sort.Slice(run.FileReviews, func(i, j int) bool {
+		return run.FileReviews[i].Path < run.FileReviews[j].Path
+	})
+
+	if skipped == len(units) {
+		return fmt.Errorf("all %d review units failed", len(units))
+	}
 	if skipped > 0 {
-		slog.Warn("review completed with skipped files", "skipped", skipped, "total", len(filesToReview))
+		slog.Warn("review completed with skipped units", "skipped", skipped, "total", len(units))
 	}
 	return nil
 }
@@ -176,35 +227,48 @@ func prefetchFiles(ctx context.Context, ghClient *ghpkg.Client, run *PipelineRun
 
 // truncateDiff limits a file diff to maxLines of raw diff content.
 func truncateDiff(f diff.FileDiff, maxLines int) diff.FileDiff {
-	lines := strings.Split(f.RawDiff, "\n")
-	if len(lines) > maxLines {
-		f.RawDiff = strings.Join(lines[:maxLines], "\n") + fmt.Sprintf("\n... (truncated, %d more lines)", len(lines)-maxLines)
-	}
+	f.RawDiff = truncateLines(f.RawDiff, maxLines)
 	return f
 }
 
-func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, file diff.FileDiff, fileContents map[string]string, action TriageAction, owner, repo string, cfg llm.ModelConfig, provider llm.Provider) (FileReview, StageTokens, error) {
-	review := FileReview{Path: file.NewName}
+// reviewParams configures a single LLM review call (normal or specialist).
+type reviewParams struct {
+	file        diff.FileDiff
+	action      TriageAction
+	specialist  Specialist // empty for normal single-pass
+	systemBase  string     // base system prompt before memory/tools
+	promptExtra string     // appended to system prompt (persona or language guidance)
+	deepReview  bool       // controls agentic memory access for deep files
+}
+
+func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p reviewParams, fileContents map[string]string, owner, repo string, cfg llm.ModelConfig, provider llm.Provider) (FileReview, StageTokens, error) {
+	review := FileReview{Path: p.file.NewName}
 	var tokens StageTokens
-	tokens.File = file.NewName
+	if p.specialist != "" {
+		tokens.File = fmt.Sprintf("%s[%s]", p.file.NewName, p.specialist)
+	} else {
+		tokens.File = p.file.NewName
+	}
 
-	fileContent := fileContents[file.NewName]
-
-	prompt := buildFileReviewPrompt(run, file, fileContent)
+	prompt := buildFileReviewPrompt(run, p.file, fileContents[p.file.NewName])
 	messages := []llm.Message{{Role: "user", Content: prompt}}
 
 	var tools []llm.Tool
 	var toolHandler *ToolHandler
-	systemPrompt := baseSystemPrompt
-	if rs.memClient != nil && action == TriageDeep {
+	systemPrompt := p.systemBase
+	if rs.memClient != nil && p.action == TriageDeep && p.deepReview {
 		tools = memoryTools()
 		toolHandler = NewToolHandler(rs.memClient, rs.store, owner)
-		systemPrompt = buildAgenticSystemPrompt(owner, repo)
+		// Prepend agentic base; keep specialist overlay via systemBase
+		if p.specialist != "" {
+			systemPrompt = buildAgenticSystemPrompt(owner, repo) + specialistOverlay(p.specialist)
+		} else {
+			systemPrompt = buildAgenticSystemPrompt(owner, repo)
+		}
 	}
+	systemPrompt += p.promptExtra
 
-	systemPrompt += PersonaPromptOverlay(run.Persona)
-
-	// Tool-use loop
+	label := string(p.specialist) // empty for normal pass
 	for i := 0; i < rs.maxToolIter; i++ {
 		resp, err := provider.Complete(ctx, llm.CompletionRequest{
 			Model:       cfg.Model,
@@ -215,31 +279,31 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, file di
 			Tools:       tools,
 		})
 		if err != nil {
-			return review, tokens, fmt.Errorf("LLM completion: %w", err)
+			return review, tokens, fmt.Errorf("LLM completion %s: %w", label, err)
 		}
 
-		// Accumulate tokens from this iteration
 		tokens.PromptTokens += resp.TokensUsed.PromptTokens
 		tokens.CompletionTokens += resp.TokensUsed.CompletionTokens
 		tokens.TotalTokens += resp.TokensUsed.TotalTokens
 		tokens.Cost += resp.Cost
 
-		// If no tool calls, we have the final response
 		if len(resp.ToolCalls) == 0 {
 			comments, err := parseReviewResponse(resp.Content)
 			if err != nil {
-				return review, tokens, fmt.Errorf("parsing response: %w", err)
+				return review, tokens, fmt.Errorf("parsing response %s: %w", label, err)
 			}
-			review.Comments = validateComments(comments)
+			validated := validateComments(comments)
+			for i := range validated {
+				validated[i].Specialist = p.specialist
+			}
+			review.Comments = validated
 			return review, tokens, nil
 		}
 
-		// Guard: if LLM returns tool calls but no handler is available
 		if toolHandler == nil {
-			return review, tokens, fmt.Errorf("LLM requested tools but memory is not configured")
+			return review, tokens, fmt.Errorf("LLM requested tools but memory is not configured %s", label)
 		}
 
-		// Process tool calls
 		messages = append(messages, llm.Message{
 			Role:      "assistant",
 			Content:   resp.Content,
@@ -249,7 +313,7 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, file di
 		for _, tc := range resp.ToolCalls {
 			result, err := toolHandler.Handle(ctx, tc)
 			if err != nil {
-				slog.Warn("tool call failed", "tool", tc.Function.Name, "error", err, "file", file.NewName)
+				slog.Warn("tool call failed", "tool", tc.Function.Name, "error", err, "file", p.file.NewName, "specialist", label)
 				result = fmt.Sprintf("Error: %s", err)
 			}
 			messages = append(messages, llm.Message{
@@ -260,13 +324,17 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, file di
 		}
 	}
 
-	return review, tokens, fmt.Errorf("exceeded max tool iterations (%d) for %s", rs.maxToolIter, file.NewName)
+	return review, tokens, fmt.Errorf("exceeded max tool iterations (%d) for %s %s", rs.maxToolIter, p.file.NewName, label)
 }
 
 func buildFileReviewPrompt(run *PipelineRun, file diff.FileDiff, fileContent string) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Review changes in \"%s\" from PR #%d: \"%s\" by %s.\n",
 		file.NewName, run.PREvent.PRNumber, run.PREvent.PRTitle, run.PREvent.PRAuthor))
+
+	if run.PREvent.PRBody != "" {
+		sb.WriteString(fmt.Sprintf("\nPR Description: %s\n", run.PREvent.PRBody))
+	}
 
 	if guide := languageGuidance(file.NewName); guide != "" {
 		sb.WriteString(guide)
@@ -333,6 +401,12 @@ Watch specifically for these common pitfalls:
 - Bare except: catches SystemExit/KeyboardInterrupt
 - is vs == for value comparison
 - Missing async/await in coroutine calls
+- asyncio.run() inside already-async context (RuntimeError)
+- datetime.now() without timezone (silent UTC/local bugs — use datetime.now(tz=...))
+- SQLAlchemy lazy loading in async contexts (greenlet error)
+- Missing __all__ on public modules (leaking internals)
+- logging vs print in production paths
+- f-string with = debug syntax leaking to production
 `
 	case ".rs":
 		return `
@@ -395,6 +469,7 @@ Assume the code has bugs until proven otherwise. For every function, ask yoursel
 4. Fewer high-quality comments beat many low-value ones
 5. Don't nitpick style. Focus on correctness, security, and reliability
 6. Return [] if the changes look good
+7. A false positive that wastes a developer's time is worse than missing a minor issue. If you can't point to the exact line that proves the bug, don't file it
 
 ## Priority (highest first)
 1. **Bugs** — logic errors, off-by-one, null dereferences, broken invariants, race conditions, incorrect boundary checks
@@ -424,6 +499,7 @@ You have access to Argus memory via tools. Use them to find relevant context bef
 - Search for relevant patterns/rules BEFORE writing review comments
 - For changes that might affect other repos, use list_repos to discover related repos, then search their memory
 - Prefer repo-specific memory over owner-wide when both exist (most specific wins)
+- If no relevant patterns or rules are found, proceed with the base review only. Do NOT infer or hallucinate patterns from the code itself
 `,
 		memory.OwnerTag(owner, "patterns"),
 		memory.OwnerTag(owner, "rules"),

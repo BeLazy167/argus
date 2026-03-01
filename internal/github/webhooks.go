@@ -28,6 +28,7 @@ type PREvent struct {
 	BaseSHA        string
 	BaseRef        string
 	HeadRef         string
+	PRBody          string // first ~500 chars of PR description
 	PersonaOverride string `json:"-"` // set by @argus-eye review --persona X
 }
 
@@ -77,6 +78,7 @@ func ToPREvent(event *WebhookEvent) (*PREvent, error) {
 		BaseSHA:        prEvent.GetPullRequest().GetBase().GetSHA(),
 		BaseRef:        prEvent.GetPullRequest().GetBase().GetRef(),
 		HeadRef:        prEvent.GetPullRequest().GetHead().GetRef(),
+		PRBody:         truncatePRBody(prEvent.GetPullRequest().GetBody(), 500),
 	}, nil
 }
 
@@ -152,6 +154,13 @@ func ToIssueCommentEvent(event *WebhookEvent) (*IssueCommentEvent, error) {
 		CommentBody:    e.GetComment().GetBody(),
 		CommentAuthor:  e.GetComment().GetUser().GetLogin(),
 	}, nil
+}
+
+func truncatePRBody(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }
 
 func extractAction(event interface{}) string {

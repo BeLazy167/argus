@@ -14,9 +14,10 @@ import (
 type TriageAction string
 
 const (
-	TriageSkip TriageAction = "skip"
-	TriageSkim TriageAction = "skim"
-	TriageDeep TriageAction = "deep"
+	TriageSkip         TriageAction = "skip"
+	TriageSkim         TriageAction = "skim"
+	TriageSecuritySkim TriageAction = "security_skim"
+	TriageDeep         TriageAction = "deep"
 )
 
 // TriageResult holds the triage classification for a single file.
@@ -92,15 +93,15 @@ func buildTriagePrompt(files []diff.FileDiff) string {
 	sb.WriteString("Classify each file for code review depth.\n\nFiles changed:\n")
 	for _, f := range files {
 		sb.WriteString(fmt.Sprintf("\n--- %s (%s) ---\n", f.NewName, f.Status))
-		// Include first 50 lines of diff for context
+		// Include first 80 lines of diff for context
 		lines := strings.Split(f.RawDiff, "\n")
-		limit := 50
+		limit := 80
 		if len(lines) < limit {
 			limit = len(lines)
 		}
 		sb.WriteString(strings.Join(lines[:limit], "\n"))
-		if len(lines) > 50 {
-			sb.WriteString(fmt.Sprintf("\n... (%d more lines)\n", len(lines)-50))
+		if len(lines) > 80 {
+			sb.WriteString(fmt.Sprintf("\n... (%d more lines)\n", len(lines)-80))
 		}
 	}
 	return sb.String()
@@ -121,7 +122,7 @@ func validateTriageResults(results []TriageResult) []TriageResult {
 			continue
 		}
 		switch r.Action {
-		case TriageSkip, TriageSkim, TriageDeep:
+		case TriageSkip, TriageSkim, TriageSecuritySkim, TriageDeep:
 		default:
 			r.Action = TriageDeep // default to deep if invalid
 		}
@@ -150,11 +151,12 @@ func storeToLLMConfigs(dbConfigs []store.ModelConfig) []llm.ModelConfig {
 	return out
 }
 
-const triageSystemPrompt = `You are a code review triage assistant. Given a list of changed files with abbreviated diffs, classify each file into one of three review depths:
+const triageSystemPrompt = `You are a code review triage assistant. Given a list of changed files with abbreviated diffs, classify each file into one of four review depths:
 
 - "skip": Generated files, lockfiles, configs with no logic, pure renames, vendored deps
 - "skim": Simple changes, typo fixes, minor refactors, test-only changes, style-only changes
+- "security_skim": Auth middleware, input parsing/validation, API route handlers, encryption, session management — files that need a security pass but not full deep review. Saves tokens vs deep.
 - "deep": Business logic, security-sensitive code, API changes, complex algorithms, new features
 
-Respond ONLY with a JSON array. Each element: {"file": "<path>", "action": "skip|skim|deep", "reason": "<brief reason>"}
+Respond ONLY with a JSON array. Each element: {"file": "<path>", "action": "skip|skim|security_skim|deep", "reason": "<brief reason>"}
 Do not include any other text.`

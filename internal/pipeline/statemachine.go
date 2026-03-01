@@ -89,7 +89,7 @@ func (sm *StateMachine) Run(ctx context.Context, run *PipelineRun) error {
 // Triage is fast — just re-run on recovery. Everything after review is persisted.
 func shouldPersist(state PipelineState) bool {
 	switch state {
-	case StateReviewing, StateSynthesizing, StatePosting, StateCompleted, StateFailed:
+	case StateReviewing, StateScoring, StatePass2, StateSynthesizing, StatePosting, StateCompleted, StateFailed:
 		return true
 	}
 	return false

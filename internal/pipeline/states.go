@@ -7,6 +7,8 @@ const (
 	StatePending      PipelineState = "pending"
 	StateTriaging     PipelineState = "triaging"
 	StateReviewing    PipelineState = "reviewing"
+	StateScoring      PipelineState = "scoring"
+	StatePass2        PipelineState = "pass2"
 	StateSynthesizing PipelineState = "synthesizing"
 	StatePosting      PipelineState = "posting"
 	StateCompleted    PipelineState = "completed"
@@ -18,7 +20,9 @@ func transitions() map[PipelineState]PipelineState {
 	return map[PipelineState]PipelineState{
 		StatePending:      StateTriaging,
 		StateTriaging:     StateReviewing,
-		StateReviewing:    StateSynthesizing,
+		StateReviewing:    StateScoring,
+		StateScoring:      StatePass2,
+		StatePass2:        StateSynthesizing,
 		StateSynthesizing: StatePosting,
 		StatePosting:      StateCompleted,
 	}

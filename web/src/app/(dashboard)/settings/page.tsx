@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Settings, Loader2, Save, Trash2, Key, Cpu, ChevronDown, Zap, Check, X, ArrowUp, Info, UserCog } from "lucide-react";
+import { Settings, Loader2, Save, Trash2, Key, Cpu, ChevronDown, Zap, Check, X, ArrowUp, Info, UserCog, Layers } from "lucide-react";
 import {
   useModelConfigs,
   useUpsertModelConfig,
@@ -51,10 +51,12 @@ const MODEL_PICKS: Record<Provider, string[]> = {
 };
 
 const STAGES = ["triage", "review", "synthesis"] as const;
+const STAGES_WITH_SCORING = ["triage", "review", "scoring", "synthesis"] as const;
 
 const STAGE_DESCRIPTIONS: Record<string, string> = {
   triage: "Decides which files need detailed review vs. can be skimmed",
   review: "Analyzes code changes and writes review comments",
+  scoring: "Cross-model validation — scores and deduplicates specialist comments",
   synthesis: "Combines per-file reviews into a unified summary",
 };
 
@@ -480,6 +482,8 @@ export default function SettingsPage() {
 
   const activeRepo = repos.find((r) => r.id === activeId);
   const currentPersona = (activeRepo?.settings_json?.persona as string) || "default";
+  const deepReview = (activeRepo?.settings_json?.deep_review as boolean) ?? false;
+  const activeStages = deepReview ? STAGES_WITH_SCORING : STAGES;
 
   const loading = reposLoading || keysLoading || (activeId > 0 && configsLoading);
   const configMap = new Map(configs?.map((c) => [c.stage, c]));
@@ -597,8 +601,8 @@ export default function SettingsPage() {
                 </p>
               </div>
             ) : (
-              <div className="grid gap-4 md:grid-cols-3">
-                {STAGES.map((stage) => (
+              <div className={`grid gap-4 ${activeStages.length > 3 ? "md:grid-cols-2 lg:grid-cols-4" : "md:grid-cols-3"}`}>
+                {activeStages.map((stage) => (
                   <ConfigCard
                     key={stage}
                     stage={stage}
@@ -615,16 +619,101 @@ export default function SettingsPage() {
           <div className="flex items-center gap-3 px-4">
             <div className="h-px flex-1 bg-iron/50" />
             <span className="text-[9px] font-mono uppercase tracking-widest text-slate-text/50">
+              deep review upgrades analysis
+            </span>
+            <div className="h-px flex-1 bg-iron/50" />
+          </div>
+
+          {/* Section 3: Deep Review */}
+          <section>
+            <div className="flex items-center gap-3 mb-4">
+              <span className="inline-flex items-center justify-center h-6 w-6 rounded-full border border-amber/30 bg-amber/10 text-[11px] font-mono font-bold text-amber">
+                3
+              </span>
+              <div className="flex items-center gap-2">
+                <Layers className="h-4 w-4 text-amber" />
+                <h2 className="font-display text-lg font-semibold text-foreground">
+                  Deep Review
+                </h2>
+              </div>
+            </div>
+            <p className="text-[11px] font-mono text-slate-text mb-4">
+              When enabled, files triaged as &quot;deep&quot; get reviewed by 3 parallel specialist agents
+              (Bug Hunter, Security Auditor, Architecture) with optional cross-model confidence scoring.
+            </p>
+
+            {activeId === 0 ? (
+              <div className="rounded-lg border border-iron bg-charcoal p-10 text-center">
+                <Layers className="h-8 w-8 text-slate-text mx-auto mb-3" />
+                <p className="text-xs font-mono text-slate-text">
+                  Select a repo to configure deep review.
+                </p>
+              </div>
+            ) : (
+              <div className="rounded-lg border border-iron bg-charcoal p-5">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="text-xs font-mono font-medium text-foreground">
+                        Parallel Specialist Agents
+                      </span>
+                      {deepReview && (
+                        <span className="inline-flex items-center rounded-sm border border-green-400/20 bg-green-400/10 px-1.5 py-0.5 text-[9px] font-mono uppercase tracking-wider text-green-400">
+                          Active
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[10px] font-mono text-slate-text max-w-md">
+                      Bug Hunter finds logic errors and edge cases. Security Auditor checks injection and secrets.
+                      Architecture Reviewer catches error handling and type safety issues.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      updateRepo.mutate({
+                        id: activeId,
+                        settings_json: { ...activeRepo?.settings_json, deep_review: !deepReview },
+                      });
+                    }}
+                    disabled={updateRepo.isPending}
+                    className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 transition-colors duration-200 ease-in-out focus:outline-none ${
+                      deepReview ? "border-amber bg-amber" : "border-iron bg-iron/50"
+                    }`}
+                  >
+                    <span
+                      className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-foreground shadow-lg ring-0 transition duration-200 ease-in-out ${
+                        deepReview ? "translate-x-5" : "translate-x-0"
+                      }`}
+                    />
+                  </button>
+                </div>
+                {deepReview && (
+                  <div className="mt-4 pt-3 border-t border-iron/50">
+                    <p className="text-[10px] font-mono text-slate-text">
+                      Configure a <span className="text-amber">scoring</span> model in the Model Configuration section above to enable cross-model validation.
+                      Without it, all specialist comments pass through unfiltered.
+                    </p>
+                  </div>
+                )}
+              </div>
+            )}
+          </section>
+
+          {/* Connector */}
+          <div className="flex items-center gap-3 px-4">
+            <div className="h-px flex-1 bg-iron/50" />
+            <span className="text-[9px] font-mono uppercase tracking-widest text-slate-text/50">
               persona shapes review style
             </span>
             <div className="h-px flex-1 bg-iron/50" />
           </div>
 
-          {/* Section 3: Review Persona */}
+          {/* Section 4: Review Persona */}
           <section>
             <div className="flex items-center gap-3 mb-4">
               <span className="inline-flex items-center justify-center h-6 w-6 rounded-full border border-amber/30 bg-amber/10 text-[11px] font-mono font-bold text-amber">
-                3
+                4
               </span>
               <div className="flex items-center gap-2">
                 <UserCog className="h-4 w-4 text-amber" />
