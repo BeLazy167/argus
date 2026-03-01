@@ -7,18 +7,20 @@ import (
 	"strings"
 
 	"github.com/BeLazy167/argus/internal/llm"
+	"github.com/BeLazy167/argus/internal/memory"
 	"github.com/BeLazy167/argus/internal/store"
 )
 
 // ScoringStage validates review comments using a separate scoring model.
 // If no scoring model is configured, it's a no-op (all comments pass through).
 type ScoringStage struct {
-	registry *llm.Registry
-	store    *store.Store
+	registry  *llm.Registry
+	store     *store.Store
+	memClient *memory.Client
 }
 
-func NewScoringStage(registry *llm.Registry, st *store.Store) *ScoringStage {
-	return &ScoringStage{registry: registry, store: st}
+func NewScoringStage(registry *llm.Registry, st *store.Store, memClient *memory.Client) *ScoringStage {
+	return &ScoringStage{registry: registry, store: st, memClient: memClient}
 }
 
 // scoringThreshold is the minimum score (0-100) for a comment to survive scoring.
@@ -63,7 +65,11 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 		return nil
 	}
 
-	prompt := buildScoringPrompt(run)
+	// Fetch repo memory context for scoring calibration
+	owner, repo, _ := splitRepoFullName(run.PREvent.RepoFullName)
+	memContext := fetchScoringContext(ctx, ss.memClient, owner, repo)
+
+	prompt := buildScoringPrompt(run, memContext)
 	resp, err := provider.Complete(ctx, llm.CompletionRequest{
 		Model:       cfg.Model,
 		System:      scoringSystemPrompt,
@@ -138,8 +144,12 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 	return nil
 }
 
-func buildScoringPrompt(run *PipelineRun) string {
+func buildScoringPrompt(run *PipelineRun, memContext string) string {
 	var sb strings.Builder
+	if memContext != "" {
+		sb.WriteString(memContext)
+		sb.WriteString("\n")
+	}
 	sb.WriteString(fmt.Sprintf("PR #%d: \"%s\" by %s\n\nScore each comment 0-100:\n\n", run.PREvent.PRNumber, run.PREvent.PRTitle, run.PREvent.PRAuthor))
 	idx := 0
 	for _, fr := range run.FileReviews {
@@ -176,3 +186,41 @@ Criteria:
 - If the issue would be caught by a standard linter (ESLint, golint/staticcheck, ruff, clippy), score it no higher than 35 regardless of severity label.
 
 Respond ONLY with a JSON array. No other text.`
+
+// fetchScoringContext retrieves repo patterns from Supermemory to calibrate scoring.
+// Non-fatal: returns empty string on any error.
+func fetchScoringContext(ctx context.Context, memClient *memory.Client, owner, repo string) string {
+	if memClient == nil || owner == "" || repo == "" {
+		return ""
+	}
+
+	resp, err := memClient.Search(ctx, memory.SearchRequest{
+		Query:        "confirmed review patterns conventions common issues",
+		ContainerTag: memory.RepoTag(owner, repo, "patterns"),
+		SearchMode:   "hybrid",
+		Limit:        5,
+		Threshold:    0.5,
+	})
+	if err != nil {
+		slog.Warn("scoring memory context fetch failed", "error", err)
+		return ""
+	}
+
+	if len(resp.Results) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("## Repo Context (from past reviews)\n\n")
+	for i, r := range resp.Results {
+		content := r.Memory
+		if content == "" {
+			content = r.Chunk
+		}
+		if content != "" {
+			sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, content))
+		}
+	}
+	sb.WriteString("\nUse this context to calibrate scores — issues matching confirmed patterns should score higher.")
+	return sb.String()
+}
