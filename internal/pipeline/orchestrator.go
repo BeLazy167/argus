@@ -175,10 +175,25 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		DBRepoID:         dbRepo.ID,
 		Diff:             patchSet,
 		RawDiff:          rawDiff,
+		Persona:          loadPersona(dbRepo.SettingsJSON),
 		IsIncremental:    isIncremental,
 		PreviousReviewID: previousReviewID,
 		CreatedAt:        time.Now(),
 		UpdatedAt:        time.Now(),
+	}
+
+	// Allow command-level persona override
+	if event.PersonaOverride != "" {
+		p := Persona(event.PersonaOverride)
+		if ValidPersonas[p] {
+			run.Persona = p
+		} else {
+			o.logger.Warn("invalid persona override, using repo default",
+				"requested", event.PersonaOverride,
+				"using", string(run.Persona),
+				"repo", event.RepoFullName,
+			)
+		}
 	}
 
 	o.logger.Info("starting review pipeline",
@@ -246,7 +261,7 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		for _, c := range fr.Comments {
 			submission.Comments = append(submission.Comments, ghpkg.ReviewComment{
 				Path:      fr.Path,
-				Body:      fmt.Sprintf("**[%s | %s]** %s", c.Severity, c.Category, c.Body),
+				Body:      formatCommentBody(c),
 				Line:      c.Line,
 				StartLine: c.StartLine,
 				Side:      "RIGHT",
@@ -381,6 +396,15 @@ func getDiffContext(run *PipelineRun, path string) string {
 		}
 	}
 	return ""
+}
+
+// formatCommentBody builds the GitHub review comment body with severity, category, and optional suggestion block.
+func formatCommentBody(c FileComment) string {
+	body := fmt.Sprintf("**[%s | %s]** %s", c.Severity, c.Category, c.Body)
+	if c.Suggestion != "" {
+		body += "\n\n```suggestion\n" + strings.TrimRight(c.Suggestion, "\n") + "\n```"
+	}
+	return body
 }
 
 func countComments(run *PipelineRun) int {

@@ -237,6 +237,100 @@ func (c *Client) MinimizeComment(ctx context.Context, installationID int64, node
 	return err
 }
 
+// --- Git Data API (for @argus-eye fix command) ---
+
+// CreateBlob creates a blob in the repo and returns its SHA.
+func (c *Client) CreateBlob(ctx context.Context, installationID int64, owner, repo, content, encoding string) (string, error) {
+	client, err := c.app.ClientForInstallation(installationID)
+	if err != nil {
+		return "", err
+	}
+	blob, _, err := client.Git.CreateBlob(ctx, owner, repo, &gh.Blob{
+		Content:  gh.Ptr(content),
+		Encoding: gh.Ptr(encoding),
+	})
+	if err != nil {
+		return "", fmt.Errorf("creating blob: %w", err)
+	}
+	return blob.GetSHA(), nil
+}
+
+// CreateTree creates a tree object from entries and returns its SHA.
+func (c *Client) CreateTree(ctx context.Context, installationID int64, owner, repo, baseTreeSHA string, entries []*gh.TreeEntry) (string, error) {
+	client, err := c.app.ClientForInstallation(installationID)
+	if err != nil {
+		return "", err
+	}
+	tree, _, err := client.Git.CreateTree(ctx, owner, repo, baseTreeSHA, entries)
+	if err != nil {
+		return "", fmt.Errorf("creating tree: %w", err)
+	}
+	return tree.GetSHA(), nil
+}
+
+// CreateCommit creates a commit object and returns its SHA.
+func (c *Client) CreateCommit(ctx context.Context, installationID int64, owner, repo, message, treeSHA string, parentSHAs []string) (string, error) {
+	client, err := c.app.ClientForInstallation(installationID)
+	if err != nil {
+		return "", err
+	}
+	parents := make([]*gh.Commit, len(parentSHAs))
+	for i, sha := range parentSHAs {
+		parents[i] = &gh.Commit{SHA: gh.Ptr(sha)}
+	}
+	commit, _, err := client.Git.CreateCommit(ctx, owner, repo, &gh.Commit{
+		Message: gh.Ptr(message),
+		Tree:    &gh.Tree{SHA: gh.Ptr(treeSHA)},
+		Parents: parents,
+	}, nil)
+	if err != nil {
+		return "", fmt.Errorf("creating commit: %w", err)
+	}
+	return commit.GetSHA(), nil
+}
+
+// UpdateRef updates a git reference to point to a new SHA.
+func (c *Client) UpdateRef(ctx context.Context, installationID int64, owner, repo, ref, sha string) error {
+	client, err := c.app.ClientForInstallation(installationID)
+	if err != nil {
+		return err
+	}
+	_, _, err = client.Git.UpdateRef(ctx, owner, repo, &gh.Reference{
+		Ref:    gh.Ptr(ref),
+		Object: &gh.GitObject{SHA: gh.Ptr(sha)},
+	}, false)
+	if err != nil {
+		return fmt.Errorf("updating ref: %w", err)
+	}
+	return nil
+}
+
+// GetRef returns the SHA a ref points to.
+func (c *Client) GetRef(ctx context.Context, installationID int64, owner, repo, ref string) (string, error) {
+	client, err := c.app.ClientForInstallation(installationID)
+	if err != nil {
+		return "", err
+	}
+	r, _, err := client.Git.GetRef(ctx, owner, repo, ref)
+	if err != nil {
+		return "", fmt.Errorf("getting ref: %w", err)
+	}
+	return r.GetObject().GetSHA(), nil
+}
+
+// GetCommitTree returns the tree SHA for a given commit.
+func (c *Client) GetCommitTree(ctx context.Context, installationID int64, owner, repo, commitSHA string) (string, error) {
+	client, err := c.app.ClientForInstallation(installationID)
+	if err != nil {
+		return "", err
+	}
+	commit, _, err := client.Git.GetCommit(ctx, owner, repo, commitSHA)
+	if err != nil {
+		return "", fmt.Errorf("getting commit: %w", err)
+	}
+	return commit.GetTree().GetSHA(), nil
+}
+
 // ReviewSubmission represents a formatted review ready to post to GitHub.
 type ReviewSubmission struct {
 	Summary  string

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	ghpkg "github.com/BeLazy167/argus/internal/github"
 	"github.com/BeLazy167/argus/internal/llm"
 	"github.com/BeLazy167/argus/internal/memory"
 	"github.com/BeLazy167/argus/internal/store"
@@ -18,15 +19,17 @@ import (
 type ReviewStage struct {
 	registry    *llm.Registry
 	store       *store.Store
+	ghClient    *ghpkg.Client
 	memClient   *memory.Client
 	maxWorkers  int
 	maxToolIter int // max tool-use iterations per file
 }
 
-func NewReviewStage(registry *llm.Registry, st *store.Store, memClient *memory.Client, maxWorkers int) *ReviewStage {
+func NewReviewStage(registry *llm.Registry, st *store.Store, ghClient *ghpkg.Client, memClient *memory.Client, maxWorkers int) *ReviewStage {
 	return &ReviewStage{
 		registry:    registry,
 		store:       st,
+		ghClient:    ghClient,
 		memClient:   memClient,
 		maxWorkers:  maxWorkers,
 		maxToolIter: 5,
@@ -157,7 +160,19 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, file di
 	if err != nil {
 		return review, tokens, err
 	}
-	prompt := buildFileReviewPrompt(run, file)
+
+	// Fetch file content for suggestion context
+	var fileContent string
+	if rs.ghClient != nil {
+		content, err := rs.ghClient.GetFileContent(ctx, run.PREvent.InstallationID, owner, repo, file.NewName, run.PREvent.HeadSHA)
+		if err != nil {
+			slog.Warn("could not fetch file content for suggestions", "file", file.NewName, "error", err)
+		} else {
+			fileContent = content
+		}
+	}
+
+	prompt := buildFileReviewPrompt(run, file, fileContent)
 	messages := []llm.Message{{Role: "user", Content: prompt}}
 
 	var tools []llm.Tool
@@ -168,6 +183,8 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, file di
 		toolHandler = NewToolHandler(rs.memClient, rs.store, owner)
 		systemPrompt = buildAgenticSystemPrompt(owner, repo)
 	}
+
+	systemPrompt += PersonaPromptOverlay(run.Persona)
 
 	// Tool-use loop
 	for i := 0; i < rs.maxToolIter; i++ {
@@ -228,29 +245,45 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, file di
 	return review, tokens, fmt.Errorf("exceeded max tool iterations (%d) for %s", rs.maxToolIter, file.NewName)
 }
 
-func buildFileReviewPrompt(run *PipelineRun, file diff.FileDiff) string {
+func buildFileReviewPrompt(run *PipelineRun, file diff.FileDiff, fileContent string) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf(`Review the following code changes in file "%s" from PR #%d: "%s" by %s.`,
 		file.NewName, run.PREvent.PRNumber, run.PREvent.PRTitle, run.PREvent.PRAuthor))
-	sb.WriteString(fmt.Sprintf(`
+	sb.WriteString("\n\nDiff:\n")
+	sb.WriteString(file.RawDiff)
+	sb.WriteString("\n")
 
-Diff:
-%s
+	if fileContent != "" {
+		sb.WriteString("\nFull file content (for generating exact replacement suggestions):\n```\n")
+		sb.WriteString(truncateLines(fileContent, 500))
+		sb.WriteString("\n```\n")
+	}
 
+	sb.WriteString(`
 Respond with a JSON array of comments. Each comment must have:
 - "line": int, line number in the new file (required, must be > 0)
 - "start_line": int, start of multi-line range (0 if single-line)
 - "body": string, the review comment in markdown
 - "severity": one of "critical", "warning", "suggestion", "praise"
 - "category": one of "security", "performance", "style", "bug", "readability", "error_handling", "type_design", "testing"
-- "code_snippet": string, the exact 3-10 lines of source code this comment references, preserving original indentation. Include enough context for a reader to understand the issue without seeing the full file.
+- "code_snippet": string, the exact 3-10 lines of source code this comment references, preserving original indentation
+- "suggestion": string, the exact replacement code for the line range (start_line to line). Must be complete replacement text — no diff markers, no line numbers. Omit for praise or when no fix applies.
 
 Example:
-[{"line": 42, "start_line": 0, "body": "Potential nil dereference", "severity": "critical", "category": "bug", "code_snippet": "    val := getResult()\n    fmt.Println(val.Name)"}]
+[{"line": 42, "start_line": 40, "body": "Potential nil dereference — add a nil check", "severity": "critical", "category": "bug", "code_snippet": "    val := getResult()\n    fmt.Println(val.Name)", "suggestion": "    val := getResult()\n    if val != nil {\n        fmt.Println(val.Name)\n    }"}]
 
 Only comment on meaningful issues with high confidence. Return [] if the changes look good.
-JSON array only, no other text.`, file.RawDiff))
+JSON array only, no other text.`)
 	return sb.String()
+}
+
+// truncateLines returns content limited to maxLines, appending a note if truncated.
+func truncateLines(content string, maxLines int) string {
+	lines := strings.Split(content, "\n")
+	if len(lines) <= maxLines {
+		return content
+	}
+	return strings.Join(lines[:maxLines], "\n") + fmt.Sprintf("\n... (%d more lines)", len(lines)-maxLines)
 }
 
 func parseReviewResponse(content string) ([]FileComment, error) {
@@ -270,6 +303,10 @@ func validateComments(comments []FileComment) []FileComment {
 		}
 		if !ValidCategories[c.Category] {
 			c.Category = CategoryReadability
+		}
+		// Clear suggestion if line range is invalid
+		if c.Suggestion != "" && c.StartLine > c.Line {
+			c.Suggestion = ""
 		}
 		valid = append(valid, c)
 	}

@@ -66,6 +66,7 @@ type PipelineRun struct {
 	FileReviews      []FileReview
 	Synthesis        *SynthesisResult
 	Tokens           RunTokenUsage
+	Persona          Persona
 	IsIncremental    bool
 	PreviousReviewID *uuid.UUID
 	Error            string
@@ -81,12 +82,13 @@ type FileReview struct {
 
 // FileComment is a single review comment on a file.
 type FileComment struct {
-	Line      int      `json:"line"`
-	StartLine int      `json:"start_line"`
-	Body      string   `json:"body"`
-	Severity  Severity `json:"severity"`
+	Line        int      `json:"line"`
+	StartLine   int      `json:"start_line"`
+	Body        string   `json:"body"`
+	Severity    Severity `json:"severity"`
 	Category    Category `json:"category"`
 	CodeSnippet string   `json:"code_snippet,omitempty"`
+	Suggestion  string   `json:"suggestion,omitempty"`
 }
 
 // ValidSeverities is the set of valid severity values.
