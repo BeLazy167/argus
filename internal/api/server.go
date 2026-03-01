@@ -51,7 +51,7 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 		webhookSecret: []byte(webhookSecret),
 		logger:        logger,
 		rateLimiter:   NewRateLimiter(),
-		webhookSem:    make(chan struct{}, 20),
+		webhookSem:    make(chan struct{}, 50),
 	}
 
 	r := chi.NewRouter()

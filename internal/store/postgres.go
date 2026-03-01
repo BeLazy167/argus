@@ -13,7 +13,13 @@ type Store struct {
 }
 
 func New(ctx context.Context, databaseURL string) (*Store, error) {
-	pool, err := pgxpool.New(ctx, databaseURL)
+	config, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("parsing database URL: %w", err)
+	}
+	config.MaxConns = 20
+	config.MinConns = 2
+	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to database: %w", err)
 	}
