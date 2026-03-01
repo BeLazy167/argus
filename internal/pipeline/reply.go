@@ -65,8 +65,11 @@ func (ra *ReplyAnalyzer) Analyze(ctx context.Context, event ghpkg.CommentEvent) 
 	if dbConfigs, err := ra.store.ListModelConfigs(ctx, event.RepoID); err == nil {
 		repoConfigs = storeToLLMConfigs(dbConfigs)
 	}
-	cfg := ra.registry.GetConfig(event.RepoID, llm.StageReview, repoConfigs)
-	provider, err := ra.registry.GetProvider(cfg.Provider)
+	cfg, err := ra.registry.GetConfig(event.RepoID, llm.StageReview, repoConfigs)
+	if err != nil {
+		return fmt.Errorf("reply config: %w", err)
+	}
+	provider, err := ra.registry.GetProviderForRepo(ctx, event.InstallationID, &event.RepoID, cfg.Provider)
 	if err != nil {
 		return fmt.Errorf("reply provider: %w", err)
 	}

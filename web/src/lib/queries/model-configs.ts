@@ -1,8 +1,32 @@
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "@clerk/nextjs";
 import { api } from "../api";
 import type { ModelConfig } from "../types";
 import { useInstallation } from "@/providers/installation-provider";
+
+export type TestResult = {
+  success: boolean;
+  error?: string;
+  response?: string;
+  latency_ms: number;
+  tokens?: number;
+};
+
+export function useTestConfig() {
+  const { getToken } = useAuth();
+  const { active } = useInstallation();
+  return useMutation({
+    mutationFn: async ({ provider, model }: { provider: string; model: string }) => {
+      const token = await getToken();
+      return api.post<TestResult>(
+        `/api/v1/installations/${active?.id}/test-config`,
+        { provider, model },
+        token ?? undefined,
+        active?.id,
+      );
+    },
+  });
+}
 
 export function useModelConfigs(repoId: number) {
   const { getToken } = useAuth();

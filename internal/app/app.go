@@ -50,24 +50,9 @@ func Run() error {
 		}
 	}
 
-	// LLM (single OpenAI-compatible provider)
+	// LLM (BYOK only — keys resolved from DB)
 	registry := llm.NewRegistry()
-	if cfg.LLMAPIKey != "" {
-		registry.RegisterProvider("default", llm.NewChatProvider("default", cfg.LLMAPIKey, cfg.LLMBaseURL))
-	}
 	registry.SetResolver(db)
-	registry.SetDefault(llm.StageReview, llm.ModelConfig{
-		Provider:    "default",
-		Model:       cfg.DefaultReviewModel,
-		MaxTokens:   4096,
-		Temperature: 0.2,
-	})
-	registry.SetDefault(llm.StageTriage, llm.ModelConfig{
-		Provider:    "default",
-		Model:       cfg.DefaultTriageModel,
-		MaxTokens:   2048,
-		Temperature: 0.1,
-	})
 
 	// Memory / RAG
 	var memClient *memory.Client
@@ -94,7 +79,7 @@ func Run() error {
 	}
 
 	// API Server
-	server := api.NewServer(db, ghApp, orchestrator, replyAnalyzer, indexer, cfg.GitHubWebhookSecret, cfg.CORSAllowOrigin, logger)
+	server := api.NewServer(db, ghApp, orchestrator, replyAnalyzer, indexer, registry, cfg.GitHubWebhookSecret, cfg.CORSAllowOrigin, logger)
 
 	httpServer := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Port),

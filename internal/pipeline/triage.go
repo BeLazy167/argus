@@ -47,7 +47,10 @@ func (ts *TriageStage) Execute(ctx context.Context, run *PipelineRun) error {
 		repoConfigs = storeToLLMConfigs(dbConfigs)
 	}
 
-	cfg := ts.registry.GetConfig(run.PREvent.RepoID, llm.StageTriage, repoConfigs)
+	cfg, err := ts.registry.GetConfig(run.PREvent.RepoID, llm.StageTriage, repoConfigs)
+	if err != nil {
+		return fmt.Errorf("triage config: %w", err)
+	}
 	provider, err := ts.registry.GetProviderForRepo(ctx, run.PREvent.InstallationID, &run.PREvent.RepoID, cfg.Provider)
 	if err != nil {
 		return fmt.Errorf("triage provider: %w", err)

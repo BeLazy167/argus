@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	ghpkg "github.com/acmeorg/argus/internal/github"
+	"github.com/acmeorg/argus/internal/llm"
 	"github.com/acmeorg/argus/internal/memory"
 	"github.com/acmeorg/argus/internal/pipeline"
 	"github.com/acmeorg/argus/internal/store"
@@ -31,6 +32,7 @@ type Server struct {
 	orchestrator    *pipeline.Orchestrator
 	replyAnalyzer   *pipeline.ReplyAnalyzer
 	indexer         *memory.Indexer
+	registry        *llm.Registry
 	webhookSecret   []byte
 	logger          *slog.Logger
 	rateLimiter     *RateLimiter
@@ -38,13 +40,14 @@ type Server struct {
 	webhookSem      chan struct{} // bounded concurrency for webhook goroutines
 }
 
-func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchestrator, replyAnalyzer *pipeline.ReplyAnalyzer, indexer *memory.Indexer, webhookSecret string, corsOrigin string, logger *slog.Logger) *Server {
+func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchestrator, replyAnalyzer *pipeline.ReplyAnalyzer, indexer *memory.Indexer, registry *llm.Registry, webhookSecret string, corsOrigin string, logger *slog.Logger) *Server {
 	s := &Server{
 		store:         st,
 		ghApp:         ghApp,
 		orchestrator:  orchestrator,
 		replyAnalyzer: replyAnalyzer,
 		indexer:       indexer,
+		registry:      registry,
 		webhookSecret: []byte(webhookSecret),
 		logger:        logger,
 		rateLimiter:   NewRateLimiter(),
@@ -97,6 +100,7 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 			r.Get("/repos/{repoID}/config", s.getModelConfigs)
 			r.Put("/repos/{repoID}/config/{stage}", s.upsertModelConfig)
 			r.Delete("/repos/{repoID}/config/{stage}", s.deleteModelConfig)
+			r.Post("/installations/{installationID}/test-config", s.testConfig)
 
 			// Reviews
 			r.Get("/repos/{repoID}/reviews", s.listReviews)
@@ -532,6 +536,59 @@ func (s *Server) deleteModelConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// testConfig sends a minimal LLM request to verify API key + model work end-to-end.
+func (s *Server) testConfig(w http.ResponseWriter, r *http.Request) {
+	installationID, err := strconv.ParseInt(chi.URLParam(r, "installationID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid installation id"})
+		return
+	}
+	var body struct {
+		Provider string `json:"provider"`
+		Model    string `json:"model"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	if body.Provider == "" || body.Model == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "provider and model required"})
+		return
+	}
+
+	provider, err := s.registry.GetProviderForRepo(r.Context(), installationID, nil, body.Provider)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("key resolution failed: %s", err)})
+		return
+	}
+
+	start := time.Now()
+	resp, err := provider.Complete(r.Context(), llm.CompletionRequest{
+		Model:       body.Model,
+		System:      "Respond with exactly: ok",
+		Messages:    []llm.Message{{Role: "user", Content: "ping"}},
+		MaxTokens:   8,
+		Temperature: 0,
+	})
+	latency := time.Since(start).Milliseconds()
+
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"success":    false,
+			"error":      err.Error(),
+			"latency_ms": latency,
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success":    true,
+		"response":   resp.Content,
+		"latency_ms": latency,
+		"tokens":     resp.TokensUsed.TotalTokens,
+	})
 }
 
 // --- Rules ---

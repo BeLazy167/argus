@@ -24,12 +24,6 @@ type Config struct {
 	ClerkJWKSURL    string
 	CORSAllowOrigin string
 
-	// LLM (OpenAI-compatible)
-	LLMAPIKey          string
-	LLMBaseURL         string
-	DefaultReviewModel string
-	DefaultTriageModel string
-
 	// Encryption
 	EncryptionKey string
 
@@ -80,11 +74,6 @@ func Load() (*Config, error) {
 
 		ClerkJWKSURL:    os.Getenv("CLERK_JWKS_URL"),
 		CORSAllowOrigin: getEnv("CORS_ALLOW_ORIGIN", "http://localhost:3000"),
-
-		LLMAPIKey:          os.Getenv("LLM_API_KEY"),
-		LLMBaseURL:         getEnv("LLM_BASE_URL", "https://openrouter.ai/api/v1"),
-		DefaultReviewModel: getEnv("DEFAULT_REVIEW_MODEL", "anthropic/claude-sonnet-4-20250514"),
-		DefaultTriageModel: getEnv("DEFAULT_TRIAGE_MODEL", "openai/gpt-4o-mini"),
 
 		EncryptionKey: os.Getenv("ENCRYPTION_KEY"),
 
