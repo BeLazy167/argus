@@ -304,6 +304,26 @@ func (s *Store) ListReviewsScoped(ctx context.Context, repoID int64, installatio
 	return collectOrEmpty(rows, pgx.RowToStructByPos[Review])
 }
 
+func (s *Store) ListAllReviewsScoped(ctx context.Context, installationIDs []int64, limit, offset int) ([]Review, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := s.Pool.Query(ctx, `
+		SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, rv.github_review_id,
+		       rv.status, rv.summary, rv.score, rv.token_usage, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error,
+		       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at
+		FROM reviews rv
+		JOIN repos r ON rv.repo_id = r.id
+		WHERE r.installation_id = ANY($1)
+		ORDER BY rv.created_at DESC LIMIT $2 OFFSET $3
+	`, installationIDs, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return collectOrEmpty(rows, pgx.RowToStructByPos[Review])
+}
+
 // --- Rules ---
 
 func (s *Store) ListRules(ctx context.Context) ([]Rule, error) {

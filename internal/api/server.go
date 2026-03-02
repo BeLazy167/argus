@@ -114,6 +114,7 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 				r.Post("/installations/{installationID}/test-config", s.testConfig)
 
 				// Reviews
+				r.Get("/reviews", s.listAllReviews)
 				r.Get("/repos/{repoID}/reviews", s.listReviews)
 				r.Post("/repos/{repoID}/reviews", s.triggerReview)
 				r.Get("/reviews/{reviewID}", s.getReview)
@@ -347,6 +348,19 @@ func (s *Server) updateRepo(w http.ResponseWriter, r *http.Request) {
 }
 
 // --- Reviews ---
+
+func (s *Server) listAllReviews(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+
+	reviews, err := s.store.ListAllReviewsScoped(r.Context(), getInstallationIDs(r.Context()), limit, offset)
+	if err != nil {
+		s.logger.Error("list all reviews", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, reviews)
+}
 
 func (s *Server) listReviews(w http.ResponseWriter, r *http.Request) {
 	repoID, err := strconv.ParseInt(chi.URLParam(r, "repoID"), 10, 64)
