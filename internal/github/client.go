@@ -189,6 +189,19 @@ func (c *Client) CreateIssueComment(ctx context.Context, installationID int64, o
 	return err
 }
 
+// CreateIssueCommentWithNodeID posts a comment and returns its GraphQL node ID (for minimizing later).
+func (c *Client) CreateIssueCommentWithNodeID(ctx context.Context, installationID int64, owner, repo string, number int, body string) (string, error) {
+	client, err := c.app.ClientForInstallation(installationID)
+	if err != nil {
+		return "", err
+	}
+	comment, _, err := client.Issues.CreateComment(ctx, owner, repo, number, &gh.IssueComment{Body: gh.Ptr(body)})
+	if err != nil {
+		return "", err
+	}
+	return comment.GetNodeID(), nil
+}
+
 // ListPRComments returns ALL review comments on a PR (across all reviews).
 func (c *Client) ListPRComments(ctx context.Context, installationID int64, owner, repo string, prNumber int) ([]*gh.PullRequestComment, error) {
 	client, err := c.app.ClientForInstallation(installationID)

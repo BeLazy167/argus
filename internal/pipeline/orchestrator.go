@@ -105,8 +105,9 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 	}
 
 	// Check if repo has a model config + API key for the review stage
+	var dbConfigs []store.ModelConfig
 	if o.registry != nil {
-		dbConfigs, err := o.st.ListModelConfigs(ctx, dbRepo.ID)
+		dbConfigs, err = o.st.ListModelConfigs(ctx, dbRepo.ID)
 		if err != nil {
 			o.logger.Error("loading model configs for readiness check", "error", err, "repo", event.RepoFullName)
 		}
@@ -228,6 +229,16 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		"incremental", isIncremental,
 	)
 
+	// Post "review started" comment to GitHub
+	var reviewModel string
+	for _, c := range dbConfigs {
+		if c.Stage == string(llm.StageReview) {
+			reviewModel = c.Provider + " / " + c.Model
+			break
+		}
+	}
+	o.postStartedComment(ctx, event, run, reviewModel)
+
 	return o.sm.Run(ctx, run)
 }
 
@@ -249,6 +260,39 @@ func (o *Orchestrator) RetryReview(ctx context.Context, reviewID uuid.UUID) erro
 
 	_, err = o.sm.Resume(ctx, runID)
 	return err
+}
+
+func (o *Orchestrator) postStartedComment(ctx context.Context, event ghpkg.PREvent, run *PipelineRun, reviewModel string) {
+	owner, repo, err := splitRepoFullName(event.RepoFullName)
+	if err != nil {
+		o.logger.Warn("failed to split repo name for started comment", "error", err)
+		return
+	}
+
+	var rows []string
+	if reviewModel != "" {
+		rows = append(rows, fmt.Sprintf("| **Model** | `%s` |", reviewModel))
+	}
+	if run.Persona != "" && run.Persona != PersonaDefault {
+		rows = append(rows, fmt.Sprintf("| **Persona** | %s |", run.Persona))
+	}
+	if run.DeepReview {
+		rows = append(rows, "| **Mode** | Deep review |")
+	} else if run.IsIncremental {
+		rows = append(rows, "| **Mode** | Incremental |")
+	}
+	rows = append(rows, fmt.Sprintf("| **Scope** | %d files, ~%d lines |",
+		len(run.Diff.Files), run.Diff.TotalLinesChanged()))
+
+	body := fmt.Sprintf("> **Argus** is reviewing this PR — [watch live](https://argusai.vercel.app/reviews/%s)\n\n| | |\n|---|---|\n%s",
+		run.ReviewID, strings.Join(rows, "\n"))
+
+	nodeID, err := o.ghClient.CreateIssueCommentWithNodeID(ctx, event.InstallationID, owner, repo, event.PRNumber, body)
+	if err != nil {
+		o.logger.Warn("failed to post review-started comment", "error", err)
+		return
+	}
+	run.StartedCommentNodeID = nodeID
 }
 
 func (o *Orchestrator) synthesize(ctx context.Context, run *PipelineRun) error {
@@ -408,6 +452,13 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	)
 	if err != nil {
 		return fmt.Errorf("posting review: %w", err)
+	}
+
+	// Minimize the "review started" comment now that the full review is posted
+	if run.StartedCommentNodeID != "" {
+		if err := o.ghClient.MinimizeComment(ctx, run.PREvent.InstallationID, run.StartedCommentNodeID, "RESOLVED"); err != nil {
+			o.logger.Warn("failed to minimize started comment", "error", err)
+		}
 	}
 
 	// Serialize token usage
