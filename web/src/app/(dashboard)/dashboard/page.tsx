@@ -105,7 +105,7 @@ export default function DashboardPage() {
   const repoMap = new Map(repos.map((r) => [r.id, r]));
   const { data: reviews, isLoading: reviewsLoading } = useReviews(activeId, 20);
 
-  const feedLoading = reposLoading || (activeId > 0 && reviewsLoading);
+  const feedLoading = reposLoading || reviewsLoading;
 
   return (
     <>
@@ -171,7 +171,7 @@ export default function DashboardPage() {
             <span className="text-[10px] font-mono text-slate-text">
               {stats?.total_reviews ?? "\u2014"} total
             </span>
-            <RepoSelect repos={repos} value={activeId} onChange={setSelectedId} />
+            <RepoSelect repos={repos} value={activeId} onChange={setSelectedId} showAll />
           </div>
         </div>
 

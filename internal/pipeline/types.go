@@ -72,7 +72,8 @@ type PipelineRun struct {
 	ScoringSkipped   bool // true when scoring provider unavailable — synthesis uses all comments
 	IsIncremental    bool
 	PreviousReviewID *uuid.UUID
-	EventBus         *EventBus `json:"-"` // not persisted
+	StartedCommentNodeID string    `json:"-"` // node ID of the "review started" GH comment, for minimizing later
+	EventBus             *EventBus `json:"-"` // not persisted
 	Error            string
 	CreatedAt        time.Time
 	UpdatedAt        time.Time

@@ -115,6 +115,16 @@ func (ra *ReplyAnalyzer) Analyze(ctx context.Context, event ghpkg.CommentEvent) 
 		}
 	}
 
+	// Resolve the thread when the developer addressed the concern
+	if decision.Action == "resolve" && event.NodeID != "" {
+		threadID, err := ra.ghClient.FindThreadForComment(ctx, event.InstallationID, owner, repo, event.PRNumber, event.NodeID)
+		if err != nil {
+			ra.logger.Warn("resolve: find thread", "error", err)
+		} else if err := ra.ghClient.ResolveReviewThread(ctx, event.InstallationID, threadID); err != nil {
+			ra.logger.Warn("resolve: resolve thread", "error", err)
+		}
+	}
+
 	// Index learning in Supermemory
 	if decision.Learning != "" && ra.indexer != nil {
 		_, err := ra.indexer.IndexOwnerPattern(ctx, owner, decision.Learning, "", map[string]string{
