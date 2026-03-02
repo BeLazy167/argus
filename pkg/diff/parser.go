@@ -55,6 +55,20 @@ const (
 	LineDeleted LineType = "deleted"
 )
 
+// ValidCommentLines returns the set of new-file line numbers that GitHub accepts
+// for Side:"RIGHT" review comments (additions + context lines with NewNum > 0).
+func (f *FileDiff) ValidCommentLines() map[int]bool {
+	valid := make(map[int]bool)
+	for _, h := range f.Hunks {
+		for _, l := range h.Lines {
+			if l.NewNum > 0 {
+				valid[l.NewNum] = true
+			}
+		}
+	}
+	return valid
+}
+
 // Parse parses a unified diff string into a PatchSet.
 func Parse(raw string) (*PatchSet, error) {
 	ps := &PatchSet{}

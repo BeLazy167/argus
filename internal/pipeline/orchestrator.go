@@ -431,8 +431,25 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		Summary: run.Synthesis.Summary,
 	}
 
+	// Build valid-line sets from diff to avoid 422 "line could not be resolved"
+	validLines := make(map[string]map[int]bool)
+	for _, f := range run.Diff.Files {
+		validLines[f.NewName] = f.ValidCommentLines()
+	}
+
+	var dropped int
 	for _, fr := range run.FileReviews {
+		fileValid := validLines[fr.Path]
 		for _, c := range fr.Comments {
+			if fileValid != nil && !fileValid[c.Line] {
+				o.logger.Warn("dropping comment: line not in diff",
+					"file", fr.Path, "line", c.Line)
+				dropped++
+				continue
+			}
+			if c.StartLine > 0 && fileValid != nil && !fileValid[c.StartLine] {
+				c.StartLine = 0 // fall back to single-line
+			}
 			submission.Comments = append(submission.Comments, ghpkg.ReviewComment{
 				Path:      fr.Path,
 				Body:      formatCommentBody(c),
@@ -441,6 +458,9 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 				Side:      "RIGHT",
 			})
 		}
+	}
+	if dropped > 0 {
+		o.logger.Warn("dropped comments with lines outside diff", "count", dropped)
 	}
 
 	ghReviewID, err := o.ghClient.PostReview(
