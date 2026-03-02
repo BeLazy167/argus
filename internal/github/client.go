@@ -225,6 +225,190 @@ func (c *Client) ListPRComments(ctx context.Context, installationID int64, owner
 	return all, nil
 }
 
+// ReviewThread represents a review thread from the GraphQL API.
+type ReviewThread struct {
+	ID         string
+	IsResolved bool
+	// First comment in the thread
+	AuthorLogin string
+	Body        string
+	Path        string
+	Line        int
+}
+
+// ListReviewThreads fetches unresolved review threads via GraphQL.
+func (c *Client) ListReviewThreads(ctx context.Context, installationID int64, owner, repo string, prNumber int) ([]ReviewThread, error) {
+	client, err := c.app.ClientForInstallation(installationID)
+	if err != nil {
+		return nil, err
+	}
+
+	body := map[string]any{
+		"query": `query($owner: String!, $repo: String!, $pr: Int!) {
+			repository(owner: $owner, name: $repo) {
+				pullRequest(number: $pr) {
+					reviewThreads(first: 100) {
+						nodes {
+							id
+							isResolved
+							comments(first: 1) {
+								nodes {
+									author { login }
+									body
+									path
+									line
+								}
+							}
+						}
+					}
+				}
+			}
+		}`,
+		"variables": map[string]any{
+			"owner": owner,
+			"repo":  repo,
+			"pr":    prNumber,
+		},
+	}
+
+	req, err := client.NewRequest("POST", "graphql", body)
+	if err != nil {
+		return nil, fmt.Errorf("creating graphql request: %w", err)
+	}
+
+	var result struct {
+		Data struct {
+			Repository struct {
+				PullRequest struct {
+					ReviewThreads struct {
+						Nodes []struct {
+							ID         string `json:"id"`
+							IsResolved bool   `json:"isResolved"`
+							Comments   struct {
+								Nodes []struct {
+									Author struct {
+										Login string `json:"login"`
+									} `json:"author"`
+									Body string `json:"body"`
+									Path string `json:"path"`
+									Line int    `json:"line"`
+								} `json:"nodes"`
+							} `json:"comments"`
+						} `json:"nodes"`
+					} `json:"reviewThreads"`
+				} `json:"pullRequest"`
+			} `json:"repository"`
+		} `json:"data"`
+	}
+
+	_, err = client.Do(ctx, req, &result)
+	if err != nil {
+		return nil, fmt.Errorf("graphql reviewThreads: %w", err)
+	}
+
+	var threads []ReviewThread
+	for _, n := range result.Data.Repository.PullRequest.ReviewThreads.Nodes {
+		t := ReviewThread{ID: n.ID, IsResolved: n.IsResolved}
+		if len(n.Comments.Nodes) > 0 {
+			c0 := n.Comments.Nodes[0]
+			t.AuthorLogin = c0.Author.Login
+			t.Body = c0.Body
+			t.Path = c0.Path
+			t.Line = c0.Line
+		}
+		threads = append(threads, t)
+	}
+	return threads, nil
+}
+
+// ResolveReviewThread marks a review thread as resolved via GraphQL.
+func (c *Client) ResolveReviewThread(ctx context.Context, installationID int64, threadID string) error {
+	client, err := c.app.ClientForInstallation(installationID)
+	if err != nil {
+		return err
+	}
+
+	body := map[string]any{
+		"query": `mutation($input: ResolveReviewThreadInput!) { resolveReviewThread(input: $input) { thread { isResolved } } }`,
+		"variables": map[string]any{
+			"input": map[string]string{
+				"threadId": threadID,
+			},
+		},
+	}
+
+	req, err := client.NewRequest("POST", "graphql", body)
+	if err != nil {
+		return fmt.Errorf("creating graphql request: %w", err)
+	}
+	_, err = client.Do(ctx, req, nil)
+	return err
+}
+
+// FindThreadForComment returns the thread ID for a given review comment node ID.
+func (c *Client) FindThreadForComment(ctx context.Context, installationID int64, owner, repo string, prNumber int, commentNodeID string) (string, error) {
+	client, err := c.app.ClientForInstallation(installationID)
+	if err != nil {
+		return "", err
+	}
+
+	body := map[string]any{
+		"query": `query($owner: String!, $repo: String!, $pr: Int!) {
+			repository(owner: $owner, name: $repo) {
+				pullRequest(number: $pr) {
+					reviewThreads(first: 100) {
+						nodes {
+							id
+							comments(first: 50) {
+								nodes { id }
+							}
+						}
+					}
+				}
+			}
+		}`,
+		"variables": map[string]any{"owner": owner, "repo": repo, "pr": prNumber},
+	}
+
+	req, err := client.NewRequest("POST", "graphql", body)
+	if err != nil {
+		return "", err
+	}
+
+	var result struct {
+		Data struct {
+			Repository struct {
+				PullRequest struct {
+					ReviewThreads struct {
+						Nodes []struct {
+							ID       string `json:"id"`
+							Comments struct {
+								Nodes []struct {
+									ID string `json:"id"`
+								} `json:"nodes"`
+							} `json:"comments"`
+						} `json:"nodes"`
+					} `json:"reviewThreads"`
+				} `json:"pullRequest"`
+			} `json:"repository"`
+		} `json:"data"`
+	}
+
+	_, err = client.Do(ctx, req, &result)
+	if err != nil {
+		return "", err
+	}
+
+	for _, t := range result.Data.Repository.PullRequest.ReviewThreads.Nodes {
+		for _, c := range t.Comments.Nodes {
+			if c.ID == commentNodeID {
+				return t.ID, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("thread not found for comment %s", commentNodeID)
+}
+
 // MinimizeComment hides a comment via GraphQL minimizeComment mutation.
 func (c *Client) MinimizeComment(ctx context.Context, installationID int64, nodeID, reason string) error {
 	client, err := c.app.ClientForInstallation(installationID)
