@@ -934,7 +934,7 @@ func maskKey(encKey string) string {
 
 // --- Command Dispatch ---
 
-var commandRe = regexp.MustCompile(`(?i)@argus-eye\s+(review|remember|resolve|fix)(.*)`)
+var commandRe = regexp.MustCompile(`(?i)@argus-eye\s+(review|remember|resolve|fix|help)(.*)`)
 
 func (s *Server) dispatchCommand(ctx context.Context, evt ghpkg.IssueCommentEvent) {
 	match := commandRe.FindStringSubmatch(evt.CommentBody)
@@ -961,6 +961,8 @@ func (s *Server) dispatchCommand(ctx context.Context, evt ghpkg.IssueCommentEven
 		s.handleResolveCommand(ctx, evt, owner, repo, ghClient)
 	case "fix":
 		s.handleFixCommand(ctx, evt, owner, repo, ghClient)
+	case "help":
+		s.handleHelpCommand(ctx, evt, owner, repo, ghClient)
 	}
 }
 

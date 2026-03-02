@@ -12,6 +12,25 @@ import (
 	"github.com/BeLazy167/argus/internal/memory"
 )
 
+// handleHelpCommand posts available commands and usage.
+func (s *Server) handleHelpCommand(ctx context.Context, evt ghpkg.IssueCommentEvent, owner, repo string, ghClient *ghpkg.Client) {
+	help := `### Argus Commands
+
+| Command | Description |
+|---------|-------------|
+| ` + "`@argus-eye review`" + ` | Trigger a code review on this PR |
+| ` + "`@argus-eye review --force`" + ` | Re-review even if already reviewed at this SHA |
+| ` + "`@argus-eye review --persona <name>`" + ` | Review with a specific persona |
+| ` + "`@argus-eye remember <pattern>`" + ` | Teach Argus a pattern for this repo |
+| ` + "`@argus-eye remember --org <pattern>`" + ` | Teach Argus an org-wide pattern |
+| ` + "`@argus-eye fix`" + ` | Apply all suggestion blocks from review comments as a commit |
+| ` + "`@argus-eye resolve`" + ` | Minimize review comments on files changed since the review |
+| ` + "`@argus-eye help`" + ` | Show this message |`
+
+	_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber, help)
+	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "rocket")
+}
+
 // handleRememberCommand parses @argus-eye remember, stores the pattern in DB
 // (and optionally Supermemory), and posts confirmation.
 func (s *Server) handleRememberCommand(ctx context.Context, evt ghpkg.IssueCommentEvent, owner, repo string, ghClient *ghpkg.Client, args string) {
