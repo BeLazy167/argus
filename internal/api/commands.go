@@ -123,28 +123,23 @@ func (s *Server) handleRememberCommand(ctx context.Context, evt ghpkg.IssueComme
 func (s *Server) handleResolveCommand(ctx context.Context, evt ghpkg.IssueCommentEvent, owner, repo string, ghClient *ghpkg.Client) {
 	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "eyes")
 
-	// List all review comments on the PR
-	allComments, err := ghClient.ListPRComments(ctx, evt.InstallationID, owner, repo, evt.PRNumber)
+	// Fetch review threads via GraphQL
+	threads, err := ghClient.ListReviewThreads(ctx, evt.InstallationID, owner, repo, evt.PRNumber)
 	if err != nil {
-		s.logger.Error("resolve: list comments", "error", err)
+		s.logger.Error("resolve: list threads", "error", err)
 		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
 		return
 	}
 
-	// Filter to bot comments
-	var botComments []botComment
-	for _, c := range allComments {
-		if c.GetUser() != nil && strings.HasSuffix(c.GetUser().GetLogin(), "[bot]") {
-			botComments = append(botComments, botComment{
-				NodeID: c.GetNodeID(),
-				Body:   c.GetBody(),
-				Path:   c.GetPath(),
-				Line:   c.GetLine(),
-			})
+	// Filter to unresolved bot threads
+	var botThreads []ghpkg.ReviewThread
+	for _, t := range threads {
+		if !t.IsResolved && strings.HasSuffix(t.AuthorLogin, "[bot]") {
+			botThreads = append(botThreads, t)
 		}
 	}
 
-	if len(botComments) == 0 {
+	if len(botThreads) == 0 {
 		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
 			"No open review comments to resolve.")
 		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "rocket")
@@ -159,12 +154,13 @@ func (s *Server) handleResolveCommand(ctx context.Context, evt ghpkg.IssueCommen
 		return
 	}
 
-	// Check each comment against the diff
+	// Resolve threads whose file appears in the current diff
 	var resolved, stillOpen int
-	for _, bc := range botComments {
+	for _, t := range botThreads {
+		bc := botComment{Path: t.Path, Body: t.Body, Line: t.Line}
 		if isCommentAddressedInDiff(bc, rawDiff) {
-			if err := ghClient.MinimizeComment(ctx, evt.InstallationID, bc.NodeID, "RESOLVED"); err != nil {
-				s.logger.Error("resolve: minimize comment", "error", err, "node_id", bc.NodeID)
+			if err := ghClient.ResolveReviewThread(ctx, evt.InstallationID, t.ID); err != nil {
+				s.logger.Error("resolve: resolve thread", "error", err, "thread_id", t.ID)
 				stillOpen++
 			} else {
 				resolved++
@@ -175,7 +171,7 @@ func (s *Server) handleResolveCommand(ctx context.Context, evt ghpkg.IssueCommen
 	}
 
 	_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
-		fmt.Sprintf("Resolve complete: **%d addressed**, **%d still open**.", resolved, stillOpen))
+		fmt.Sprintf("Resolve complete: **%d resolved**, **%d still open**.", resolved, stillOpen))
 	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "rocket")
 }
 

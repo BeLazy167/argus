@@ -90,6 +90,7 @@ type CommentEvent struct {
 	RepoID         int64
 	PRNumber       int
 	CommentID      int64
+	NodeID         string
 	InReplyToID    int64
 	CommentBody    string
 	CommentAuthor  string
@@ -113,6 +114,7 @@ func ToCommentEvent(event *WebhookEvent) (*CommentEvent, error) {
 		RepoID:         e.GetRepo().GetID(),
 		PRNumber:       e.GetPullRequest().GetNumber(),
 		CommentID:      c.GetID(),
+		NodeID:         c.GetNodeID(),
 		InReplyToID:    c.GetInReplyTo(),
 		CommentBody:    c.GetBody(),
 		CommentAuthor:  c.GetUser().GetLogin(),
