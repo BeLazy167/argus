@@ -6,7 +6,7 @@ export function useActiveRepo() {
   const { data: repos, isLoading } = useRepos();
   const [selectedId, setSelectedId] = useState(0);
 
-  const activeId = selectedId || (repos?.[0]?.id ?? 0);
+  const activeId = selectedId;
 
   return { repos: repos ?? [], activeId, setSelectedId, isLoading };
 }
