@@ -186,6 +186,19 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 				fr := r.review
 				fileReviewMap[fr.Path] = &fr
 			}
+			// Stream each comment as it arrives
+			if run.EventBus != nil {
+				for _, c := range r.review.Comments {
+					run.EventBus.Publish(run.ReviewID, EventComment, map[string]any{
+						"file_path":  r.review.Path,
+						"line":       c.Line,
+						"severity":   c.Severity,
+						"category":   c.Category,
+						"body":       c.Body,
+						"specialist": c.Specialist,
+					})
+				}
+			}
 		}
 	}
 

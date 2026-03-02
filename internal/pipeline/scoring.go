@@ -147,6 +147,14 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 	}
 	run.FileReviews = filtered
 
+	if run.EventBus != nil {
+		run.EventBus.Publish(run.ReviewID, EventScoringUpdate, map[string]any{
+			"kept":      kept,
+			"dropped":   dropped,
+			"threshold": scoringThreshold,
+		})
+	}
+
 	slog.Info("scoring complete", "kept", kept, "dropped", dropped, "threshold", scoringThreshold)
 	return nil
 }

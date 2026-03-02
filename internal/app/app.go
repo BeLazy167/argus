@@ -63,10 +63,11 @@ func Run() error {
 	}
 
 	// Pipeline
+	eventBus := pipeline.NewEventBus()
 	triageStage := pipeline.NewTriageStage(registry, db, memClient)
 	reviewStage := pipeline.NewReviewStage(registry, db, ghClient, memClient, cfg.MaxConcurrentReviews)
 	scoringStage := pipeline.NewScoringStage(registry, db, memClient)
-	orchestrator := pipeline.NewOrchestrator(db.Pool, db, ghClient, reviewStage, triageStage, scoringStage, indexer, registry, logger)
+	orchestrator := pipeline.NewOrchestrator(db.Pool, db, ghClient, reviewStage, triageStage, scoringStage, indexer, registry, eventBus, logger)
 	replyAnalyzer := pipeline.NewReplyAnalyzer(registry, db, ghClient, indexer, logger)
 
 	// Recover incomplete pipeline runs
@@ -80,7 +81,7 @@ func Run() error {
 	}
 
 	// API Server
-	server := api.NewServer(db, ghApp, orchestrator, replyAnalyzer, indexer, registry, cfg.GitHubWebhookSecret, cfg.CORSAllowOrigin, logger)
+	server := api.NewServer(db, ghApp, orchestrator, replyAnalyzer, indexer, registry, eventBus, cfg.GitHubWebhookSecret, cfg.CORSAllowOrigin, logger)
 
 	httpServer := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Port),

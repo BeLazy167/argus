@@ -33,6 +33,7 @@ type Server struct {
 	replyAnalyzer   *pipeline.ReplyAnalyzer
 	indexer         *memory.Indexer
 	registry        *llm.Registry
+	eventBus        *pipeline.EventBus
 	webhookSecret   []byte
 	logger          *slog.Logger
 	rateLimiter     *RateLimiter
@@ -40,7 +41,7 @@ type Server struct {
 	webhookSem      chan struct{} // bounded concurrency for webhook goroutines
 }
 
-func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchestrator, replyAnalyzer *pipeline.ReplyAnalyzer, indexer *memory.Indexer, registry *llm.Registry, webhookSecret string, corsOrigin string, logger *slog.Logger) *Server {
+func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchestrator, replyAnalyzer *pipeline.ReplyAnalyzer, indexer *memory.Indexer, registry *llm.Registry, eventBus *pipeline.EventBus, webhookSecret string, corsOrigin string, logger *slog.Logger) *Server {
 	s := &Server{
 		store:         st,
 		ghApp:         ghApp,
@@ -48,6 +49,7 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 		replyAnalyzer: replyAnalyzer,
 		indexer:       indexer,
 		registry:      registry,
+		eventBus:      eventBus,
 		webhookSecret: []byte(webhookSecret),
 		logger:        logger,
 		rateLimiter:   NewRateLimiter(),
@@ -59,7 +61,6 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(60 * time.Second))
 	if corsOrigin != "" {
 		r.Use(cors(corsOrigin))
 	}
@@ -75,53 +76,64 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Use(s.jwtAuth)
 
-		// Unscoped (user-level)
-		r.Get("/me/installations", s.listMyInstallations)
-		r.Post("/installations/link", s.linkInstallation)
+		// Unscoped (user-level) — with timeout
+		r.Group(func(r chi.Router) {
+			r.Use(middleware.Timeout(60 * time.Second))
+			r.Get("/me/installations", s.listMyInstallations)
+			r.Post("/installations/link", s.linkInstallation)
+		})
 
 		// Scoped (requires linked installation)
 		r.Group(func(r chi.Router) {
 			r.Use(s.requireInstallationScope)
 
-			// Installations
-			r.Get("/installations", s.listInstallations)
+			// SSE stream — no timeout (long-lived connection)
+			r.Get("/reviews/{reviewID}/stream", s.streamReview)
 
-			// Repos
-			r.Get("/repos", s.listRepos)
-			r.Get("/repos/{repoID}", s.getRepo)
-			r.Patch("/repos/{repoID}", s.updateRepo)
+			// All other scoped routes — with timeout
+			r.Group(func(r chi.Router) {
+				r.Use(middleware.Timeout(60 * time.Second))
 
-			// Provider Keys
-			r.Get("/installations/{installationID}/provider-keys", s.listProviderKeys)
-			r.Put("/installations/{installationID}/provider-keys", s.upsertProviderKey)
-			r.Delete("/installations/{installationID}/provider-keys/{keyID}", s.deleteProviderKey)
+				// Installations
+				r.Get("/installations", s.listInstallations)
 
-			// Model Config
-			r.Get("/repos/{repoID}/config", s.getModelConfigs)
-			r.Put("/repos/{repoID}/config/{stage}", s.upsertModelConfig)
-			r.Delete("/repos/{repoID}/config/{stage}", s.deleteModelConfig)
-			r.Post("/installations/{installationID}/test-config", s.testConfig)
+				// Repos
+				r.Get("/repos", s.listRepos)
+				r.Get("/repos/{repoID}", s.getRepo)
+				r.Patch("/repos/{repoID}", s.updateRepo)
 
-			// Reviews
-			r.Get("/repos/{repoID}/reviews", s.listReviews)
-			r.Post("/repos/{repoID}/reviews", s.triggerReview)
-			r.Get("/reviews/{reviewID}", s.getReview)
-			r.Post("/reviews/{reviewID}/retry", s.retryReview)
+				// Provider Keys
+				r.Get("/installations/{installationID}/provider-keys", s.listProviderKeys)
+				r.Put("/installations/{installationID}/provider-keys", s.upsertProviderKey)
+				r.Delete("/installations/{installationID}/provider-keys/{keyID}", s.deleteProviderKey)
 
-			// Rules
-			r.Get("/rules", s.listRules)
-			r.Post("/rules", s.createRule)
-			r.Put("/rules/{ruleID}", s.updateRule)
-			r.Delete("/rules/{ruleID}", s.deleteRule)
+				// Model Config
+				r.Get("/repos/{repoID}/config", s.getModelConfigs)
+				r.Put("/repos/{repoID}/config/{stage}", s.upsertModelConfig)
+				r.Delete("/repos/{repoID}/config/{stage}", s.deleteModelConfig)
+				r.Post("/installations/{installationID}/test-config", s.testConfig)
 
-			// Stats
-			r.Get("/stats", s.getStats)
-			r.Get("/activity", s.getActivity)
+				// Reviews
+				r.Get("/repos/{repoID}/reviews", s.listReviews)
+				r.Post("/repos/{repoID}/reviews", s.triggerReview)
+				r.Get("/reviews/{reviewID}", s.getReview)
+				r.Post("/reviews/{reviewID}/retry", s.retryReview)
 
-			// Patterns
-			r.Get("/patterns", s.listPatterns)
-			r.Post("/patterns", s.createPattern)
-			r.Delete("/patterns/{patternID}", s.deletePattern)
+				// Rules
+				r.Get("/rules", s.listRules)
+				r.Post("/rules", s.createRule)
+				r.Put("/rules/{ruleID}", s.updateRule)
+				r.Delete("/rules/{ruleID}", s.deleteRule)
+
+				// Stats
+				r.Get("/stats", s.getStats)
+				r.Get("/activity", s.getActivity)
+
+				// Patterns
+				r.Get("/patterns", s.listPatterns)
+				r.Post("/patterns", s.createPattern)
+				r.Delete("/patterns/{patternID}", s.deletePattern)
+			})
 		})
 	})
 
@@ -1012,6 +1024,108 @@ func (s *Server) handleReviewCommand(ctx context.Context, evt ghpkg.IssueComment
 	}
 
 	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "rocket")
+}
+
+// --- SSE Stream ---
+
+func (s *Server) streamReview(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "reviewID"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid review id"})
+		return
+	}
+
+	// Auth: verify review belongs to caller's installation scope
+	review, err := s.store.GetReview(r.Context(), id)
+	if err != nil {
+		s.handleDBError(w, err, "review not found")
+		return
+	}
+	if _, err := s.store.GetRepoScoped(r.Context(), review.RepoID, getInstallationIDs(r.Context())); err != nil {
+		s.handleDBError(w, err, "review not found")
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "streaming not supported"})
+		return
+	}
+
+	// If review is terminal, send final event and return
+	if review.Status == "completed" || review.Status == "failed" {
+		setSSEHeaders(w)
+		evtType := pipeline.EventCompleted
+		if review.Status == "failed" {
+			evtType = pipeline.EventError
+		}
+		writeSSE(w, pipeline.Event{
+			Type:      evtType,
+			Timestamp: time.Now(),
+			Data:      mustMarshal(map[string]string{"status": review.Status}),
+		})
+		flusher.Flush()
+		return
+	}
+
+	// Subscribe to live events
+	if s.eventBus == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "streaming not available"})
+		return
+	}
+
+	events, history, unsub := s.eventBus.Subscribe(id)
+	if events == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no active stream for this review"})
+		return
+	}
+	defer unsub()
+
+	setSSEHeaders(w)
+
+	// Replay history
+	for _, evt := range history {
+		if err := writeSSE(w, evt); err != nil {
+			return
+		}
+	}
+	flusher.Flush()
+
+	// Stream live events
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case evt, ok := <-events:
+			if !ok {
+				return // topic closed
+			}
+			if err := writeSSE(w, evt); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
+}
+
+func setSSEHeaders(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+}
+
+func writeSSE(w http.ResponseWriter, evt pipeline.Event) error {
+	_, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", evt.Type, evt.Data)
+	return err
+}
+
+func mustMarshal(v any) json.RawMessage {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic("mustMarshal: " + err.Error())
+	}
+	return b
 }
 
 // --- Concurrency Guards ---
