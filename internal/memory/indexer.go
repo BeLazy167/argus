@@ -25,7 +25,7 @@ var lineNumRegex = regexp.MustCompile(`(?i)\b(?:line|L)\s*\d+`)
 // truncateIDWithSuffix caps a customId to 100 chars, preserving the suffix (hash/tag).
 // Truncates the prefix to make room (rune-safe) rather than chopping the suffix.
 func truncateIDWithSuffix(prefix, suffix string) string {
-	sep := "/"
+	sep := "--"
 	maxPrefix := 100 - len(suffix) - len(sep)
 	if maxPrefix < 0 {
 		maxPrefix = 0
@@ -56,7 +56,7 @@ func FindingFingerprint(owner, repo, filePath, category, body string) string {
 	}
 	h := sha256.Sum256([]byte(filePath + "|" + category + "|" + normalizeBody(body)))
 	hash := hex.EncodeToString(h[:6]) // 12 hex chars
-	prefix := fmt.Sprintf("%s/%s/%s", owner, repo, tagSanitizer.Replace(filePath))
+	prefix := fmt.Sprintf("%s--%s--%s", owner, repo, tagSanitizer.Replace(filePath))
 	return truncateIDWithSuffix(prefix, hash)
 }
 
@@ -64,21 +64,21 @@ func FindingFingerprint(owner, repo, filePath, category, body string) string {
 // Uses a path hash when the path is too long, to avoid collisions from truncation.
 func SynthesisCustomID(owner, repo, filePath string) string {
 	suffix := "synthesis"
-	prefix := fmt.Sprintf("%s/%s/%s", owner, repo, tagSanitizer.Replace(filePath))
-	id := prefix + "/" + suffix
+	prefix := fmt.Sprintf("%s--%s--%s", owner, repo, tagSanitizer.Replace(filePath))
+	id := prefix + "--" + suffix
 	if len(id) <= 100 {
 		return id
 	}
 	// Path too long — include a hash for uniqueness
 	h := sha256.Sum256([]byte(filePath))
 	hash := hex.EncodeToString(h[:6])
-	return truncateIDWithSuffix(fmt.Sprintf("%s/%s/%s", owner, repo, hash), suffix)
+	return truncateIDWithSuffix(fmt.Sprintf("%s--%s--%s", owner, repo, hash), suffix)
 }
 
 // PRSummaryCustomID returns a stable customId for a PR summary document.
 func PRSummaryCustomID(owner, repo string, prNumber int) string {
-	suffix := fmt.Sprintf("pr/%d/summary", prNumber)
-	prefix := fmt.Sprintf("%s/%s", owner, repo)
+	suffix := fmt.Sprintf("pr-%d-summary", prNumber)
+	prefix := fmt.Sprintf("%s--%s", owner, repo)
 	return truncateIDWithSuffix(prefix, suffix)
 }
 
@@ -86,7 +86,7 @@ func PRSummaryCustomID(owner, repo string, prNumber int) string {
 func PatternCustomID(owner, repo, source, content string) string {
 	h := sha256.Sum256([]byte(normalizeBody(content)))
 	hash := hex.EncodeToString(h[:6])
-	prefix := fmt.Sprintf("%s/%s/%s", owner, repo, source)
+	prefix := fmt.Sprintf("%s--%s--%s", owner, repo, source)
 	return truncateIDWithSuffix(prefix, hash)
 }
 

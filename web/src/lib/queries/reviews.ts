@@ -11,13 +11,12 @@ export function useReviews(repoId: number, limit = 20, offset = 0) {
     queryKey: ["reviews", repoId, limit, offset, active?.id],
     queryFn: async () => {
       const token = await getToken();
-      return api.get<Review[]>(
-        `/api/v1/repos/${repoId}/reviews?limit=${limit}&offset=${offset}`,
-        token ?? undefined,
-        active?.id,
-      );
+      const path = repoId > 0
+        ? `/api/v1/repos/${repoId}/reviews?limit=${limit}&offset=${offset}`
+        : `/api/v1/reviews?limit=${limit}&offset=${offset}`;
+      return api.get<Review[]>(path, token ?? undefined, active?.id);
     },
-    enabled: repoId > 0 && !!active,
+    enabled: !!active,
   });
 }
 

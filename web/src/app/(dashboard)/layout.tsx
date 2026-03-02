@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 import {
   LayoutDashboard,
   MessageSquare,
+  GitFork,
   Brain,
   Settings,
 } from "lucide-react";
@@ -15,6 +16,7 @@ import { InstallationProvider, useInstallation } from "@/providers/installation-
 const navItems = [
   { href: "/dashboard", label: "Overview", icon: LayoutDashboard },
   { href: "/reviews", label: "Reviews", icon: MessageSquare },
+  { href: "/repos", label: "Repos", icon: GitFork },
   { href: "/patterns", label: "Patterns", icon: Brain },
   { href: "/settings", label: "Settings", icon: Settings },
 ];

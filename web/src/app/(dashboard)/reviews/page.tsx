@@ -118,7 +118,7 @@ export default function ReviewsPage() {
     ? reviews
     : reviews?.filter((r) => r.status === statusFilter);
 
-  const loading = reposLoading || (activeId > 0 && reviewsLoading);
+  const loading = reposLoading || reviewsLoading;
 
   return (
     <>
@@ -155,6 +155,7 @@ export default function ReviewsPage() {
               setSelectedId(id);
               setPage(0);
             }}
+            showAll
           />
         </div>
       </div>
