@@ -510,6 +510,7 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	o.indexComments(ctx, run, ghReviewID, owner, repo)
 	o.indexConfirmedPatterns(ctx, run, owner, repo)
 	o.autoLearnPatterns(ctx, run, owner, repo)
+	o.extractConventions(ctx, run, owner, repo)
 	o.synthesizeFileMemories(ctx, run, owner, repo)
 	o.indexPRSummary(ctx, run, owner, repo)
 
@@ -527,11 +528,15 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 // indexConfirmedPatterns saves high-confidence comments as confirmed repo patterns in Supermemory.
 // When scoring is available, uses score ≥90. When skipped, falls back to critical severity.
 func (o *Orchestrator) indexConfirmedPatterns(ctx context.Context, run *PipelineRun, owner, repo string) {
-	if o.indexer == nil || !run.DeepReview {
+	if o.indexer == nil {
 		return
 	}
 
-	const confirmedThreshold = 90
+	// Deep reviews use strict threshold; non-deep use severity-only fallback
+	confirmedThreshold := 90
+	if !run.DeepReview {
+		confirmedThreshold = 95 // higher bar for non-deep to avoid noise
+	}
 	var indexed int
 	for _, fr := range run.FileReviews {
 		for _, c := range fr.Comments {
@@ -564,12 +569,16 @@ func (o *Orchestrator) indexConfirmedPatterns(ctx context.Context, run *Pipeline
 // autoLearnPatterns uses the review LLM to extract 0-3 reusable patterns from high-confidence
 // comments. When scoring available, needs 2+ at 85+. When skipped, uses critical+warning severity.
 func (o *Orchestrator) autoLearnPatterns(ctx context.Context, run *PipelineRun, owner, repo string) {
-	if o.indexer == nil || !run.DeepReview {
+	if o.indexer == nil {
 		return
 	}
 
 	// Collect high-confidence comments (score-based or severity-based fallback)
-	const learnThreshold = 85
+	// Non-deep reviews use a higher threshold to compensate for less context
+	learnThreshold := 85
+	if !run.DeepReview {
+		learnThreshold = 90
+	}
 	var highConf []string
 	for _, fr := range run.FileReviews {
 		for _, c := range fr.Comments {
@@ -584,8 +593,13 @@ func (o *Orchestrator) autoLearnPatterns(ctx context.Context, run *PipelineRun, 
 			}
 		}
 	}
-	if len(highConf) < 2 {
-		slog.Info("autoLearnPatterns skipped", "qualifying", len(highConf), "scoring_skipped", run.ScoringSkipped)
+	// For deep reviews, require 2+ findings for cross-referencing; non-deep accepts 1
+	minRequired := 2
+	if !run.DeepReview {
+		minRequired = 1
+	}
+	if len(highConf) < minRequired {
+		slog.Info("autoLearnPatterns skipped", "qualifying", len(highConf), "min_required", minRequired, "scoring_skipped", run.ScoringSkipped)
 		return
 	}
 	slog.Info("autoLearnPatterns", "qualifying", len(highConf), "scoring_skipped", run.ScoringSkipped)
@@ -657,11 +671,119 @@ Return [] if no repo-specific patterns emerge. JSON array only.`, run.PREvent.Re
 	}
 }
 
+// extractConventions analyzes the PR diff to identify code style conventions and
+// architectural patterns used in the codebase. Unlike autoLearnPatterns (which extracts
+// patterns from review comments), this function learns from the code itself —
+// capturing what the team writes, not what the reviewer flags.
+func (o *Orchestrator) extractConventions(ctx context.Context, run *PipelineRun, owner, repo string) {
+	if o.indexer == nil || run.Diff == nil || len(run.Diff.Files) == 0 {
+		return
+	}
+
+	// Only extract conventions from substantial PRs (3+ files or 100+ changed lines)
+	totalLines := 0
+	for _, f := range run.Diff.Files {
+		totalLines += len(strings.Split(f.RawDiff, "\n"))
+	}
+	if len(run.Diff.Files) < 3 && totalLines < 100 {
+		return
+	}
+
+	// Build a compact sample of the diff (first 2000 chars of additions only)
+	var diffSample strings.Builder
+	for _, f := range run.Diff.Files {
+		if diffSample.Len() >= 2000 {
+			break
+		}
+		diffSample.WriteString(fmt.Sprintf("--- %s ---\n", f.NewName))
+		for _, line := range strings.Split(f.RawDiff, "\n") {
+			if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") {
+				diffSample.WriteString(line + "\n")
+				if diffSample.Len() >= 2000 {
+					break
+				}
+			}
+		}
+	}
+
+	cfg, provider, err := o.resolveReviewProvider(ctx, run)
+	if err != nil {
+		o.logger.Warn("convention extraction skipped", "error", err)
+		return
+	}
+
+	convCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	prompt := fmt.Sprintf(`Analyze these code additions from %s and extract 0-3 codebase conventions or architectural patterns.
+
+Focus on:
+- Error handling patterns (e.g., "errors wrapped with %%w", "custom error types used")
+- Logging conventions (e.g., "structured logging with slog", "log levels follow X pattern")
+- Naming conventions (e.g., "handlers suffixed with Handler", "interfaces prefixed with I")
+- Architecture patterns (e.g., "repository pattern for DB access", "middleware chain pattern")
+- Testing patterns (e.g., "table-driven tests", "test fixtures in testdata/")
+
+Only include patterns that are CLEARLY established (appear multiple times). Skip generic language idioms.
+
+Code additions:
+%s
+
+Return JSON array: [{"convention": "description", "category": "style|architecture|error_handling|testing|naming"}]
+Return [] if no clear conventions emerge. JSON array only.`, run.PREvent.RepoFullName, diffSample.String())
+
+	resp, err := provider.Complete(convCtx, llm.CompletionRequest{
+		Model:       cfg.Model,
+		System:      "You extract codebase conventions from code diffs. Be specific to this project.",
+		Messages:    []llm.Message{{Role: "user", Content: prompt}},
+		MaxTokens:   400,
+		Temperature: 0.3,
+	})
+	if err != nil {
+		o.logger.Warn("convention extraction LLM failed", "error", err)
+		return
+	}
+
+	type convention struct {
+		Convention string `json:"convention"`
+		Category   string `json:"category"`
+	}
+	conventions, err := unmarshalLLMArray[convention](resp.Content)
+	if err != nil {
+		o.logger.Warn("convention extraction parse failed", "error", err)
+		return
+	}
+	if len(conventions) > 3 {
+		conventions = conventions[:3]
+	}
+
+	for _, c := range conventions {
+		if c.Convention == "" {
+			continue
+		}
+		content := fmt.Sprintf("Convention [%s]: %s", c.Category, c.Convention)
+		customID := memory.PatternCustomID(owner, repo, "convention", c.Convention)
+		_, err := o.indexer.IndexRepoPattern(ctx, owner, repo, content, customID, map[string]string{
+			"source":   "convention_extraction",
+			"pr":       fmt.Sprintf("%d", run.PREvent.PRNumber),
+			"category": c.Category,
+		})
+		if err != nil {
+			o.logger.Warn("indexing convention", "error", err)
+		}
+	}
+
+	if len(conventions) > 0 {
+		o.logger.Info("extracted conventions", "count", len(conventions), "repo", run.PREvent.RepoFullName)
+	}
+}
+
+
 // synthesizeFileMemories condenses all review comments per file into a single curated memory document.
 // Only fires for files with strong signal: 2+ comments scored 70+, or any comment 90+.
 // When scoring was skipped, all comments qualify (since Score=0 is not meaningful).
 func (o *Orchestrator) synthesizeFileMemories(ctx context.Context, run *PipelineRun, owner, repo string) {
-	if o.indexer == nil || !run.DeepReview {
+	if o.indexer == nil {
 		return
 	}
 

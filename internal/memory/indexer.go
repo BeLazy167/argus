@@ -207,3 +207,71 @@ func (idx *Indexer) IndexRepoTopology(ctx context.Context, owner, content string
 	return err
 }
 
+
+
+// FeedbackCustomID returns a stable customId for a feedback signal on a finding.
+func FeedbackCustomID(owner, repo, filePath, category, body string) string {
+	h := sha256.Sum256([]byte(filePath + "|" + category + "|" + normalizeBody(body) + "|feedback"))
+	hash := hex.EncodeToString(h[:6])
+	prefix := fmt.Sprintf("%s--%s--feedback", owner, repo)
+	return truncateIDWithSuffix(prefix, hash)
+}
+
+// FeedbackMemory represents developer feedback on a review comment.
+type FeedbackMemory struct {
+	FilePath       string
+	Category       string
+	OriginalBody   string
+	Action         string // "confirmed" or "dismissed"
+	DeveloperReply string
+	PRNumber       int
+}
+
+// IndexFeedbackSignal stores a developer feedback signal (confirmation or dismissal)
+// as a pattern in Supermemory. Confirmed findings are stored as positive patterns;
+// dismissed findings are stored as suppression signals so future reviews can avoid
+// repeating false positives.
+func (idx *Indexer) IndexFeedbackSignal(ctx context.Context, owner, repo string, feedback FeedbackMemory) error {
+	var content string
+	var source string
+	switch feedback.Action {
+	case "confirmed":
+		content = fmt.Sprintf("CONFIRMED pattern [%s] in %s: %s\nDeveloper agreed: %s",
+			feedback.Category, feedback.FilePath, feedback.OriginalBody,
+			truncateFeedback(feedback.DeveloperReply, 200))
+		source = "feedback_confirmed"
+	case "dismissed":
+		content = fmt.Sprintf("DISMISSED finding [%s] in %s: %s\nDeveloper explanation: %s\nFuture reviews should NOT flag similar patterns in this context.",
+			feedback.Category, feedback.FilePath, feedback.OriginalBody,
+			truncateFeedback(feedback.DeveloperReply, 200))
+		source = "feedback_dismissed"
+	default:
+		return nil // no signal to store
+	}
+
+	customID := FeedbackCustomID(owner, repo, feedback.FilePath, feedback.Category, feedback.OriginalBody)
+	_, err := idx.client.AddMemory(ctx, AddRequest{
+		Content:       content,
+		CustomID:      customID,
+		ContainerTags: []string{RepoTag(owner, repo, "patterns")},
+		Metadata: map[string]string{
+			"source":    source,
+			"file_path": feedback.FilePath,
+			"category":  feedback.Category,
+			"pr_number": fmt.Sprintf("%d", feedback.PRNumber),
+			"action":    feedback.Action,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("indexing feedback signal: %w", err)
+	}
+	idx.logger.Debug("indexed feedback signal", "action", feedback.Action, "owner", owner, "repo", repo, "file", feedback.FilePath)
+	return nil
+}
+
+func truncateFeedback(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
