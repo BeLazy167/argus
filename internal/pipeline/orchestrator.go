@@ -274,7 +274,7 @@ func (o *Orchestrator) postStartedComment(ctx context.Context, event ghpkg.PREve
 		rows = append(rows, fmt.Sprintf("| **Model** | `%s` |", reviewModel))
 	}
 	if run.Persona != "" && run.Persona != PersonaDefault {
-		rows = append(rows, fmt.Sprintf("| **Persona** | %s |", run.Persona))
+		rows = append(rows, fmt.Sprintf("| **Persona** | %s |", strings.ReplaceAll(string(run.Persona), "|", "\\|")))
 	}
 	if run.DeepReview {
 		rows = append(rows, "| **Mode** | Deep review |")
@@ -441,20 +441,21 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	for _, fr := range run.FileReviews {
 		fileValid := validLines[fr.Path]
 		for _, c := range fr.Comments {
-			if fileValid != nil && !fileValid[c.Line] {
+			if fileValid == nil || !fileValid[c.Line] {
 				o.logger.Warn("dropping comment: line not in diff",
 					"file", fr.Path, "line", c.Line)
 				dropped++
 				continue
 			}
-			if c.StartLine > 0 && fileValid != nil && !fileValid[c.StartLine] {
-				c.StartLine = 0 // fall back to single-line
+			startLine := c.StartLine
+			if startLine > 0 && !fileValid[startLine] {
+				startLine = 0
 			}
 			submission.Comments = append(submission.Comments, ghpkg.ReviewComment{
 				Path:      fr.Path,
 				Body:      formatCommentBody(c),
 				Line:      c.Line,
-				StartLine: c.StartLine,
+				StartLine: startLine,
 				Side:      "RIGHT",
 			})
 		}
