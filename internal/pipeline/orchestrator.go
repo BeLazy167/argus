@@ -37,6 +37,7 @@ type Orchestrator struct {
 	scoringStage *ScoringStage
 	indexer      *memory.Indexer
 	registry     LLMRegistry
+	eventBus     *EventBus
 	logger       *slog.Logger
 }
 
@@ -45,8 +46,9 @@ type LLMRegistry interface {
 	HasKeyForRepo(ctx context.Context, installationID int64, repoID *int64, providerName string) bool
 }
 
-func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, reviewStage *ReviewStage, triageStage *TriageStage, scoringStage *ScoringStage, indexer *memory.Indexer, registry LLMRegistry, logger *slog.Logger) *Orchestrator {
+func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, reviewStage *ReviewStage, triageStage *TriageStage, scoringStage *ScoringStage, indexer *memory.Indexer, registry LLMRegistry, eventBus *EventBus, logger *slog.Logger) *Orchestrator {
 	sm := NewStateMachine(db, logger)
+	sm.eventBus = eventBus
 
 	o := &Orchestrator{
 		db:           db,
@@ -58,6 +60,7 @@ func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, 
 		scoringStage: scoringStage,
 		indexer:      indexer,
 		registry:     registry,
+		eventBus:     eventBus,
 		logger:       logger,
 	}
 
@@ -169,6 +172,13 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 
 	// Create review record
 	reviewID := uuid.New()
+
+	// Open SSE topic for live streaming
+	if o.eventBus != nil {
+		o.eventBus.OpenTopic(reviewID)
+		defer o.eventBus.CloseTopic(reviewID)
+	}
+
 	_, err = o.db.Exec(ctx, `
 		INSERT INTO reviews (id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, status, trigger)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', 'webhook')
@@ -190,6 +200,7 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		DeepReview:       isDeepReviewEnabled(dbRepo.SettingsJSON),
 		IsIncremental:    isIncremental,
 		PreviousReviewID: previousReviewID,
+		EventBus:         o.eventBus,
 		CreatedAt:        time.Now(),
 		UpdatedAt:        time.Now(),
 	}
@@ -230,6 +241,12 @@ func (o *Orchestrator) RetryReview(ctx context.Context, reviewID uuid.UUID) erro
 	if err != nil {
 		return fmt.Errorf("finding pipeline run for review %s: %w", reviewID, err)
 	}
+
+	if o.eventBus != nil {
+		o.eventBus.OpenTopic(reviewID)
+		defer o.eventBus.CloseTopic(reviewID)
+	}
+
 	_, err = o.sm.Resume(ctx, runID)
 	return err
 }
@@ -256,6 +273,13 @@ func (o *Orchestrator) synthesize(ctx context.Context, run *PipelineRun) error {
 	run.Synthesis = &SynthesisResult{
 		Summary: summary.String(),
 		Score:   calculateScore(run),
+	}
+
+	if run.EventBus != nil {
+		run.EventBus.Publish(run.ReviewID, EventSynthesis, map[string]any{
+			"summary": run.Synthesis.Summary,
+			"score":   run.Synthesis.Score,
+		})
 	}
 	return nil
 }
@@ -417,6 +441,14 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	o.synthesizeFileMemories(ctx, run, owner, repo)
 	o.indexPRSummary(ctx, run, owner, repo)
 
+	if run.EventBus != nil {
+		run.EventBus.Publish(run.ReviewID, EventCompleted, map[string]any{
+			"review_id":      run.ReviewID,
+			"total_comments": countComments(run),
+			"duration_ms":    time.Since(run.CreatedAt).Milliseconds(),
+		})
+	}
+
 	return nil
 }
 
@@ -541,6 +573,14 @@ Return [] if no repo-specific patterns emerge. JSON array only.`, run.PREvent.Re
 	}
 
 	if len(patterns) > 0 {
+		if run.EventBus != nil {
+			for _, p := range patterns {
+				run.EventBus.Publish(run.ReviewID, EventPatternLearned, map[string]string{
+					"pattern":  p.Pattern,
+					"category": p.Category,
+				})
+			}
+		}
 		o.logger.Info("auto-learned patterns", "count", len(patterns), "repo", run.PREvent.RepoFullName)
 	}
 }

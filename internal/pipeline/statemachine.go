@@ -13,9 +13,10 @@ import (
 
 // StateMachine drives a PipelineRun through stages, persisting state to Postgres.
 type StateMachine struct {
-	db     *pgxpool.Pool
-	stages map[PipelineState]StageFunc
-	logger *slog.Logger
+	db       *pgxpool.Pool
+	stages   map[PipelineState]StageFunc
+	eventBus *EventBus
+	logger   *slog.Logger
 }
 
 func NewStateMachine(db *pgxpool.Pool, logger *slog.Logger) *StateMachine {
@@ -42,13 +43,14 @@ func (sm *StateMachine) Run(ctx context.Context, run *PipelineRun) error {
 
 		stage, ok := sm.stages[run.State]
 		if !ok {
-			// No handler for this state — advance to next
+			// No handler for this state -- advance to next
 			next, exists := trans[run.State]
 			if !exists {
 				return fmt.Errorf("no transition from state %s", run.State)
 			}
 			run.State = next
 			run.UpdatedAt = time.Now()
+			publishStageChanged(run)
 			if shouldPersist(run.State) {
 				if err := sm.persistState(ctx, run); err != nil {
 					return fmt.Errorf("persisting state: %w", err)
@@ -64,6 +66,7 @@ func (sm *StateMachine) Run(ctx context.Context, run *PipelineRun) error {
 			run.State = StateFailed
 			run.Error = err.Error()
 			run.UpdatedAt = time.Now()
+			publishError(run, failedState, err)
 			if persistErr := sm.persistState(ctx, run); persistErr != nil {
 				sm.logger.Error("failed to persist failure state", "error", persistErr, "review_id", run.ReviewID)
 			}
@@ -76,6 +79,7 @@ func (sm *StateMachine) Run(ctx context.Context, run *PipelineRun) error {
 		}
 		run.State = next
 		run.UpdatedAt = time.Now()
+		publishStageChanged(run)
 		if shouldPersist(run.State) {
 			if err := sm.persistState(ctx, run); err != nil {
 				return fmt.Errorf("persisting state: %w", err)
@@ -85,8 +89,29 @@ func (sm *StateMachine) Run(ctx context.Context, run *PipelineRun) error {
 	return nil
 }
 
+// publishStageChanged emits a stage_changed event if EventBus is attached.
+func publishStageChanged(run *PipelineRun) {
+	if run.EventBus == nil {
+		return
+	}
+	run.EventBus.Publish(run.ReviewID, EventStageChanged, map[string]string{
+		"stage": string(run.State),
+	})
+}
+
+// publishError emits an error event if EventBus is attached.
+func publishError(run *PipelineRun, failedStage PipelineState, err error) {
+	if run.EventBus == nil {
+		return
+	}
+	run.EventBus.Publish(run.ReviewID, EventError, map[string]string{
+		"stage": string(failedStage),
+		"error": err.Error(),
+	})
+}
+
 // shouldPersist returns true for states worth persisting to DB.
-// Triage is fast — just re-run on recovery. Everything after review is persisted.
+// Triage is fast -- just re-run on recovery. Everything after review is persisted.
 func shouldPersist(state PipelineState) bool {
 	switch state {
 	case StateReviewing, StateScoring, StatePass2, StateSynthesizing, StatePosting, StateCompleted, StateFailed:
@@ -101,6 +126,7 @@ func (sm *StateMachine) Resume(ctx context.Context, runID uuid.UUID) (*PipelineR
 	if err != nil {
 		return nil, fmt.Errorf("loading state: %w", err)
 	}
+	run.EventBus = sm.eventBus
 	if run.State.IsTerminal() {
 		return run, nil
 	}

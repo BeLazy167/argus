@@ -28,6 +28,8 @@ import { githubPrUrl } from "@/lib/github";
 import { ScoreBox } from "@/components/dashboard/score-badge";
 import { StatusBadge } from "@/components/dashboard/status-badge";
 import { formatDistanceToNow } from "@/lib/time";
+import { useReviewStream } from "@/lib/hooks/use-review-stream";
+import { PipelineProgress } from "./progress-bar";
 import type { Repo, ReviewComment, TokenUsage } from "@/lib/types";
 
 /* ── Helpers ─────────────────────────────────── */
@@ -656,6 +658,9 @@ export default function ReviewDetailPage() {
   const review = data?.review;
   const comments = data?.comments ?? [];
 
+  const isLive = review?.status === "pending" || review?.status === "in_progress";
+  const { stage, triageResults, failedStage } = useReviewStream(id, isLive);
+
   const repoMap = useMemo(
     () => new Map<number, Repo>((repos ?? []).map((r) => [r.id, r])),
     [repos],
@@ -855,6 +860,38 @@ export default function ReviewDetailPage() {
           </div>
         </div>
       </header>
+
+      {/* Pipeline progress (live reviews) */}
+      {isLive && <PipelineProgress stage={stage} failedStage={failedStage} />}
+
+      {/* Triage results card */}
+      {triageResults && isLive && (
+        <div className="rounded-lg border border-iron bg-charcoal/80 p-5 mb-6">
+          <h3 className="font-display text-sm font-bold text-foreground mb-3">
+            File Classification
+          </h3>
+          <div className="space-y-1">
+            {triageResults.map((t) => (
+              <div key={t.file} className="flex items-center gap-2 text-xs font-mono">
+                <span
+                  className={`inline-flex items-center rounded-sm border px-2 py-0.5 text-[10px] ${
+                    t.action === "deep"
+                      ? "bg-purple-400/10 text-purple-400 border-purple-400/30"
+                      : t.action === "skip"
+                        ? "bg-iron/30 text-iron border-iron/60"
+                        : t.action === "security_skim"
+                          ? "bg-red-400/10 text-red-400 border-red-400/30"
+                          : "bg-blue-400/10 text-blue-400 border-blue-400/30"
+                  }`}
+                >
+                  {t.action}
+                </span>
+                <span className="text-foreground/70 truncate">{t.file}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Error card */}
       {review.status === "failed" && review.error && (
