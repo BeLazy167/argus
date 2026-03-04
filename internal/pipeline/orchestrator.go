@@ -537,8 +537,14 @@ func (o *Orchestrator) indexConfirmedPatterns(ctx context.Context, run *Pipeline
 	if !run.DeepReview {
 		confirmedThreshold = 90
 	}
+	// Use AllFileReviews (pre-scoring snapshot) when available, so pattern learning
+	// sees comments that were dropped by the posting threshold but still have valid scores.
+	reviews := run.FileReviews
+	if len(run.AllFileReviews) > 0 {
+		reviews = run.AllFileReviews
+	}
 	var indexed int
-	for _, fr := range run.FileReviews {
+	for _, fr := range reviews {
 		for _, c := range fr.Comments {
 			var qualifies bool
 			if run.ScoringSkipped {
@@ -579,8 +585,12 @@ func (o *Orchestrator) autoLearnPatterns(ctx context.Context, run *PipelineRun, 
 	if !run.DeepReview {
 		learnThreshold = 80
 	}
+	reviews := run.FileReviews
+	if len(run.AllFileReviews) > 0 {
+		reviews = run.AllFileReviews
+	}
 	var highConf []string
-	for _, fr := range run.FileReviews {
+	for _, fr := range reviews {
 		for _, c := range fr.Comments {
 			var qualifies bool
 			if run.ScoringSkipped {
@@ -780,8 +790,12 @@ func (o *Orchestrator) synthesizeFileMemories(ctx context.Context, run *Pipeline
 		path     string
 		comments []FileComment
 	}
+	reviews := run.FileReviews
+	if len(run.AllFileReviews) > 0 {
+		reviews = run.AllFileReviews
+	}
 	var qualifying []fileComments
-	for _, fr := range run.FileReviews {
+	for _, fr := range reviews {
 		if run.ScoringSkipped {
 			// Scoring unavailable — qualify any file with 1+ comments
 			if len(fr.Comments) >= 1 {
