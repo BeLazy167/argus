@@ -526,23 +526,23 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 }
 
 // indexConfirmedPatterns saves high-confidence comments as confirmed repo patterns in Supermemory.
-// When scoring is available, uses score ≥90. When skipped, falls back to critical severity.
+// When scoring is available, uses score ≥80 (deep) or ≥90 (non-deep). When skipped, falls back to critical+warning severity.
 func (o *Orchestrator) indexConfirmedPatterns(ctx context.Context, run *PipelineRun, owner, repo string) {
 	if o.indexer == nil {
 		return
 	}
 
-	// Deep reviews use strict threshold; non-deep use severity-only fallback
-	confirmedThreshold := 90
+	// Deep reviews use lower threshold; non-deep uses a higher bar to compensate for less context
+	confirmedThreshold := 80
 	if !run.DeepReview {
-		confirmedThreshold = 95 // higher bar for non-deep to avoid noise
+		confirmedThreshold = 90
 	}
 	var indexed int
 	for _, fr := range run.FileReviews {
 		for _, c := range fr.Comments {
 			var qualifies bool
 			if run.ScoringSkipped {
-				qualifies = c.Severity == SeverityCritical
+				qualifies = c.Severity == SeverityCritical || c.Severity == SeverityWarning
 			} else {
 				qualifies = c.Score >= confirmedThreshold
 			}
@@ -567,7 +567,7 @@ func (o *Orchestrator) indexConfirmedPatterns(ctx context.Context, run *Pipeline
 }
 
 // autoLearnPatterns uses the review LLM to extract 0-3 reusable patterns from high-confidence
-// comments. When scoring available, needs 2+ at 85+. When skipped, uses critical+warning severity.
+// comments. When scoring available, needs 1+ at 75+ (deep) or 80+ (non-deep). When skipped, uses critical+warning severity.
 func (o *Orchestrator) autoLearnPatterns(ctx context.Context, run *PipelineRun, owner, repo string) {
 	if o.indexer == nil {
 		return
@@ -575,9 +575,9 @@ func (o *Orchestrator) autoLearnPatterns(ctx context.Context, run *PipelineRun, 
 
 	// Collect high-confidence comments (score-based or severity-based fallback)
 	// Non-deep reviews use a higher threshold to compensate for less context
-	learnThreshold := 85
+	learnThreshold := 75
 	if !run.DeepReview {
-		learnThreshold = 90
+		learnThreshold = 80
 	}
 	var highConf []string
 	for _, fr := range run.FileReviews {
@@ -593,11 +593,8 @@ func (o *Orchestrator) autoLearnPatterns(ctx context.Context, run *PipelineRun, 
 			}
 		}
 	}
-	// For deep reviews, require 2+ findings for cross-referencing; non-deep accepts 1
-	minRequired := 2
-	if !run.DeepReview {
-		minRequired = 1
-	}
+	// Accept 1+ qualifying comment for pattern extraction
+	minRequired := 1
 	if len(highConf) < minRequired {
 		slog.Info("autoLearnPatterns skipped", "qualifying", len(highConf), "min_required", minRequired, "scoring_skipped", run.ScoringSkipped)
 		return
@@ -677,15 +674,6 @@ Return [] if no repo-specific patterns emerge. JSON array only.`, run.PREvent.Re
 // capturing what the team writes, not what the reviewer flags.
 func (o *Orchestrator) extractConventions(ctx context.Context, run *PipelineRun, owner, repo string) {
 	if o.indexer == nil || run.Diff == nil || len(run.Diff.Files) == 0 {
-		return
-	}
-
-	// Only extract conventions from substantial PRs (3+ files or 100+ changed lines)
-	totalLines := 0
-	for _, f := range run.Diff.Files {
-		totalLines += len(strings.Split(f.RawDiff, "\n"))
-	}
-	if len(run.Diff.Files) < 3 && totalLines < 100 {
 		return
 	}
 
@@ -780,8 +768,8 @@ Return [] if no clear conventions emerge. JSON array only.`, run.PREvent.RepoFul
 
 
 // synthesizeFileMemories condenses all review comments per file into a single curated memory document.
-// Only fires for files with strong signal: 2+ comments scored 70+, or any comment 90+.
-// When scoring was skipped, all comments qualify (since Score=0 is not meaningful).
+// Fires for files with signal: 1+ comment scored 60+, or any comment 80+.
+// When scoring was skipped, any file with 1+ comment qualifies.
 func (o *Orchestrator) synthesizeFileMemories(ctx context.Context, run *PipelineRun, owner, repo string) {
 	if o.indexer == nil {
 		return
@@ -795,23 +783,23 @@ func (o *Orchestrator) synthesizeFileMemories(ctx context.Context, run *Pipeline
 	var qualifying []fileComments
 	for _, fr := range run.FileReviews {
 		if run.ScoringSkipped {
-			// Scoring unavailable — qualify any file with 2+ comments
-			if len(fr.Comments) >= 2 {
+			// Scoring unavailable — qualify any file with 1+ comments
+			if len(fr.Comments) >= 1 {
 				qualifying = append(qualifying, fileComments{path: fr.Path, comments: fr.Comments})
 			}
 			continue
 		}
-		count70 := 0
-		has90 := false
+		count60 := 0
+		has80 := false
 		for _, c := range fr.Comments {
-			if c.Score >= 70 {
-				count70++
+			if c.Score >= 60 {
+				count60++
 			}
-			if c.Score >= 90 {
-				has90 = true
+			if c.Score >= 80 {
+				has80 = true
 			}
 		}
-		if count70 >= 2 || has90 {
+		if count60 >= 1 || has80 {
 			qualifying = append(qualifying, fileComments{path: fr.Path, comments: fr.Comments})
 		}
 	}
