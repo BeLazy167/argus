@@ -128,6 +128,14 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 		run.FileReviews[ic.fileIdx].Comments[ic.commentIdx].Score = score
 	}
 
+	// Snapshot all scored comments before filtering — pattern learning uses this
+	run.AllFileReviews = make([]FileReview, len(run.FileReviews))
+	for i, fr := range run.FileReviews {
+		comments := make([]FileComment, len(fr.Comments))
+		copy(comments, fr.Comments)
+		run.AllFileReviews[i] = FileReview{Path: fr.Path, Comments: comments}
+	}
+
 	// Filter comments below threshold
 	var kept, dropped int
 	filtered := run.FileReviews[:0]
