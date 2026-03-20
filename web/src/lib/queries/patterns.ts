@@ -4,14 +4,17 @@ import { api } from "../api";
 import type { Pattern, PatternStat } from "../types";
 import { useInstallation } from "@/providers/installation-provider";
 
-export function usePatterns() {
+export function usePatterns(repoId?: number) {
   const { getToken } = useAuth();
   const { active } = useInstallation();
   return useQuery({
-    queryKey: ["patterns", active?.id],
+    queryKey: ["patterns", active?.id, repoId],
     queryFn: async () => {
       const token = await getToken();
-      return api.get<Pattern[]>("/api/v1/patterns", token ?? undefined, active?.id);
+      const path = repoId
+        ? `/api/v1/patterns?repo_id=${repoId}`
+        : "/api/v1/patterns";
+      return api.get<Pattern[]>(path, token ?? undefined, active?.id);
     },
     enabled: !!active,
   });
@@ -31,7 +34,7 @@ export function useCreatePattern() {
         active?.id,
       );
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["patterns"] }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["patterns", active?.id] }),
   });
 }
 
@@ -57,6 +60,6 @@ export function useDeletePattern() {
       const token = await getToken();
       return api.delete(`/api/v1/patterns/${id}`, token ?? undefined, active?.id);
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["patterns"] }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["patterns", active?.id] }),
   });
 }

@@ -829,7 +829,19 @@ func (s *Server) getActivity(w http.ResponseWriter, r *http.Request) {
 // --- Patterns ---
 
 func (s *Server) listPatterns(w http.ResponseWriter, r *http.Request) {
-	patterns, err := s.store.ListPatterns(r.Context(), getInstallationIDs(r.Context()))
+	ids := getInstallationIDs(r.Context())
+	var patterns []store.Pattern
+	var err error
+	if rid := r.URL.Query().Get("repo_id"); rid != "" {
+		repoID, parseErr := strconv.ParseInt(rid, 10, 64)
+		if parseErr != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo_id"})
+			return
+		}
+		patterns, err = s.store.ListPatternsForRepo(r.Context(), ids, repoID)
+	} else {
+		patterns, err = s.store.ListPatterns(r.Context(), ids)
+	}
 	if err != nil {
 		s.logger.Error("list patterns", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
