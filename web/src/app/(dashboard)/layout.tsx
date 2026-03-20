@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { QueryProvider } from "@/providers/query-provider";
 import { InstallationProvider, useInstallation } from "@/providers/installation-provider";
+import { ActiveRepoProvider } from "@/providers/active-repo-provider";
 
 const navItems = [
   { href: "/dashboard", label: "Overview", icon: LayoutDashboard },
@@ -77,6 +78,7 @@ export default function DashboardLayout({
   return (
     <QueryProvider>
       <InstallationProvider>
+        <ActiveRepoProvider>
         <div className="flex h-screen overflow-hidden">
           {/* Sidebar */}
           <aside className="flex w-56 shrink-0 flex-col border-r border-sidebar-border bg-sidebar">
@@ -124,6 +126,7 @@ export default function DashboardLayout({
             <div className="mx-auto max-w-6xl px-8 py-8">{children}</div>
           </main>
         </div>
+      </ActiveRepoProvider>
       </InstallationProvider>
     </QueryProvider>
   );
