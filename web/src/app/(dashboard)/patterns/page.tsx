@@ -1,19 +1,49 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { Plus, Trash2, Loader2, Brain, Filter } from "lucide-react";
-import { usePatterns, useCreatePattern, useDeletePattern } from "@/lib/queries/patterns";
+import { Plus, Trash2, Loader2, Brain, Filter, TrendingUp } from "lucide-react";
+import {
+  usePatterns,
+  useCreatePattern,
+  useDeletePattern,
+  usePatternStats,
+} from "@/lib/queries/patterns";
 import { useRepos } from "@/lib/queries/repos";
 import { formatDistanceToNow } from "@/lib/time";
+import {
+  AreaChart,
+  Area,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+} from "recharts";
+
+type SourceFilter = "all" | "manual" | "auto_learn" | "convention";
+
+const SOURCE_LABELS: Record<string, string> = {
+  manual: "Manual",
+  auto_learn: "AI-Learned",
+  convention: "Convention",
+};
+
+const SOURCE_BADGE_STYLES: Record<string, string> = {
+  manual: "border-slate-500/30 bg-slate-500/10 text-slate-400",
+  auto_learn: "border-amber/30 bg-amber/10 text-amber",
+  convention: "border-blue-500/30 bg-blue-500/10 text-blue-400",
+};
 
 export default function PatternsPage() {
   const { data: patterns, isLoading } = usePatterns();
   const { data: repos } = useRepos();
+  const { data: stats } = usePatternStats();
   const createPattern = useCreatePattern();
   const deletePattern = useDeletePattern();
   const [content, setContent] = useState("");
   const [selectedRepoId, setSelectedRepoId] = useState<number | undefined>();
   const [filterRepo, setFilterRepo] = useState<string>("all");
+  const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
 
   const repoMap = useMemo(() => {
     const m = new Map<number, string>();
@@ -25,11 +55,46 @@ export default function PatternsPage() {
 
   const filtered = useMemo(() => {
     if (!patterns) return [];
-    if (filterRepo === "all") return patterns;
-    if (filterRepo === "org") return patterns.filter((p) => !p.repo_id);
-    const repoId = Number(filterRepo);
-    return patterns.filter((p) => p.repo_id === repoId);
-  }, [patterns, filterRepo]);
+    let result = patterns;
+    // Source filter
+    if (sourceFilter === "manual")
+      result = result.filter((p) => !p.source || p.source === "manual");
+    else if (sourceFilter !== "all")
+      result = result.filter((p) => p.source === sourceFilter);
+    // Repo filter
+    if (filterRepo === "org") result = result.filter((p) => !p.repo_id);
+    else if (filterRepo !== "all") {
+      const repoId = Number(filterRepo);
+      result = result.filter((p) => p.repo_id === repoId);
+    }
+    return result;
+  }, [patterns, filterRepo, sourceFilter]);
+
+  const sourceCounts = useMemo(() => {
+    if (!patterns) return { all: 0, manual: 0, auto_learn: 0, convention: 0 };
+    return {
+      all: patterns.length,
+      manual: patterns.filter((p) => !p.source || p.source === "manual").length,
+      auto_learn: patterns.filter((p) => p.source === "auto_learn").length,
+      convention: patterns.filter((p) => p.source === "convention").length,
+    };
+  }, [patterns]);
+
+  // Transform stats for stacked area chart
+  const chartData = useMemo(() => {
+    if (!stats || stats.length === 0) return [];
+    const weekMap = new Map<string, { week: string; manual: number; auto_learn: number; convention: number }>();
+    for (const s of stats) {
+      const weekLabel = new Date(s.week).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+      if (!weekMap.has(weekLabel)) {
+        weekMap.set(weekLabel, { week: weekLabel, manual: 0, auto_learn: 0, convention: 0 });
+      }
+      const entry = weekMap.get(weekLabel)!;
+      const src = s.source === "auto_learn" ? "auto_learn" : s.source === "convention" ? "convention" : "manual";
+      entry[src] += s.count;
+    }
+    return Array.from(weekMap.values());
+  }, [stats]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -37,6 +102,8 @@ export default function PatternsPage() {
     createPattern.mutate({ content: content.trim(), repo_id: selectedRepoId });
     setContent("");
   };
+
+  const getSource = (p: { source?: string }) => p.source || "manual";
 
   return (
     <>
@@ -49,6 +116,49 @@ export default function PatternsPage() {
           <code className="text-amber">@argus-eye remember</code>.
         </p>
       </div>
+
+      {/* Timeline Chart */}
+      {chartData.length > 1 && (
+        <div className="rounded-lg border border-iron bg-charcoal p-5 mb-8">
+          <div className="flex items-center gap-2 mb-4">
+            <TrendingUp className="h-4 w-4 text-slate-text" />
+            <h2 className="text-xs font-mono uppercase tracking-[0.1em] text-foreground">
+              Patterns Over Time
+            </h2>
+            <div className="flex gap-3 ml-auto">
+              <span className="flex items-center gap-1.5 text-[10px] font-mono text-slate-text">
+                <span className="h-2 w-2 rounded-full bg-[var(--chart-3)]" />Manual
+              </span>
+              <span className="flex items-center gap-1.5 text-[10px] font-mono text-slate-text">
+                <span className="h-2 w-2 rounded-full bg-[var(--chart-1)]" />AI-Learned
+              </span>
+              <span className="flex items-center gap-1.5 text-[10px] font-mono text-slate-text">
+                <span className="h-2 w-2 rounded-full bg-[var(--chart-2)]" />Convention
+              </span>
+            </div>
+          </div>
+          <ResponsiveContainer width="100%" height={160}>
+            <AreaChart data={chartData} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+              <XAxis dataKey="week" tick={{ fontSize: 10, fill: "var(--muted-foreground)" }} />
+              <YAxis tick={{ fontSize: 10, fill: "var(--muted-foreground)" }} allowDecimals={false} />
+              <Tooltip
+                contentStyle={{
+                  backgroundColor: "var(--card)",
+                  border: "1px solid var(--border)",
+                  borderRadius: "8px",
+                  fontSize: "11px",
+                  fontFamily: "monospace",
+                }}
+                labelStyle={{ color: "var(--foreground)" }}
+              />
+              <Area type="monotone" dataKey="manual" stackId="1" stroke="var(--chart-3)" fill="var(--chart-3)" fillOpacity={0.4} />
+              <Area type="monotone" dataKey="auto_learn" stackId="1" stroke="var(--chart-1)" fill="var(--chart-1)" fillOpacity={0.4} />
+              <Area type="monotone" dataKey="convention" stackId="1" stroke="var(--chart-2)" fill="var(--chart-2)" fillOpacity={0.4} />
+            </AreaChart>
+          </ResponsiveContainer>
+        </div>
+      )}
 
       {/* Add Pattern Form */}
       <form onSubmit={handleSubmit} className="mb-8">
@@ -89,7 +199,35 @@ export default function PatternsPage() {
         </div>
       </form>
 
-      {/* Filter */}
+      {/* Source Tabs */}
+      <div className="flex items-center gap-3 mb-4">
+        <div className="flex gap-1.5">
+          {(["all", "manual", "auto_learn", "convention"] as const).map((tab) => {
+            const label = tab === "all" ? "All" : SOURCE_LABELS[tab];
+            const count = sourceCounts[tab];
+            const isActive = sourceFilter === tab;
+            const activeStyles: Record<SourceFilter, string> = {
+              all: "border-amber/40 bg-amber/10 text-amber",
+              manual: "border-slate-500/40 bg-slate-500/10 text-slate-300",
+              auto_learn: "border-amber/40 bg-amber/10 text-amber",
+              convention: "border-blue-500/40 bg-blue-500/10 text-blue-400",
+            };
+            return (
+              <button
+                key={tab}
+                onClick={() => setSourceFilter(tab)}
+                className={`rounded border px-2.5 py-1 text-[10px] font-mono transition-colors ${
+                  isActive ? activeStyles[tab] : "border-iron text-slate-text hover:text-foreground"
+                }`}
+              >
+                {label} ({count})
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Repo Filter */}
       <div className="flex items-center gap-3 mb-4">
         <Filter className="h-3.5 w-3.5 text-slate-text" />
         <div className="flex gap-1.5 flex-wrap">
@@ -101,7 +239,7 @@ export default function PatternsPage() {
                 : "border-iron text-slate-text hover:text-foreground"
             }`}
           >
-            All ({patterns?.length ?? 0})
+            All repos
           </button>
           <button
             onClick={() => setFilterRepo("org")}
@@ -111,11 +249,11 @@ export default function PatternsPage() {
                 : "border-iron text-slate-text hover:text-foreground"
             }`}
           >
-            Org-wide ({patterns?.filter((p) => !p.repo_id).length ?? 0})
+            Org-wide
           </button>
           {(repos ?? []).map((r) => {
-            const count = patterns?.filter((p) => p.repo_id === r.id).length ?? 0;
-            if (count === 0) return null;
+            const count = filtered.filter((p) => p.repo_id === r.id).length;
+            if (count === 0 && filterRepo !== String(r.id)) return null;
             return (
               <button
                 key={r.id}
@@ -159,8 +297,8 @@ export default function PatternsPage() {
             <thead>
               <tr className="border-b border-iron/50 text-[10px] font-mono uppercase tracking-wider text-slate-text">
                 <th className="text-left px-5 py-2.5 font-medium">Content</th>
+                <th className="text-left px-3 py-2.5 font-medium">Source</th>
                 <th className="text-left px-3 py-2.5 font-medium">Scope</th>
-                <th className="text-left px-3 py-2.5 font-medium">Added by</th>
                 <th className="text-left px-3 py-2.5 font-medium">Created</th>
                 <th className="text-right px-5 py-2.5 font-medium" />
               </tr>
@@ -175,6 +313,27 @@ export default function PatternsPage() {
                     <p className="text-xs font-mono text-foreground truncate">
                       {pattern.content}
                     </p>
+                    <div className="flex items-center gap-2 mt-1">
+                      {pattern.category && (
+                        <span className="inline-block rounded border border-iron px-1.5 py-0.5 text-[9px] font-mono text-slate-text">
+                          {pattern.category}
+                        </span>
+                      )}
+                      {pattern.pr_number && (
+                        <span className="text-[10px] font-mono text-slate-text">
+                          PR #{pattern.pr_number}
+                        </span>
+                      )}
+                    </div>
+                  </td>
+                  <td className="px-3 py-3">
+                    <span
+                      className={`inline-block rounded border px-2 py-0.5 text-[10px] font-mono ${
+                        SOURCE_BADGE_STYLES[getSource(pattern)] ?? SOURCE_BADGE_STYLES.manual
+                      }`}
+                    >
+                      {SOURCE_LABELS[getSource(pattern)] ?? "Manual"}
+                    </span>
                   </td>
                   <td className="px-3 py-3">
                     <span
@@ -187,11 +346,6 @@ export default function PatternsPage() {
                       {pattern.repo_id
                         ? repoMap.get(pattern.repo_id)?.split("/").pop() ?? "repo"
                         : "org"}
-                    </span>
-                  </td>
-                  <td className="px-3 py-3">
-                    <span className="text-[11px] font-mono text-slate-text">
-                      {pattern.created_by ?? "system"}
                     </span>
                   </td>
                   <td className="px-3 py-3">

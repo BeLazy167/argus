@@ -558,6 +558,69 @@ func (s *Store) LogActivity(ctx context.Context, action, actor, resource string,
 	return err
 }
 
+// --- Comment Outcomes ---
+
+func (s *Store) RecordCommentOutcome(ctx context.Context, reviewCommentID uuid.UUID, outcome string) error {
+	_, err := s.Pool.Exec(ctx, `
+		INSERT INTO comment_outcomes (review_comment_id, outcome)
+		VALUES ($1, $2)
+	`, reviewCommentID, outcome)
+	return err
+}
+
+func (s *Store) GetCommentOutcomes(ctx context.Context, reviewCommentID uuid.UUID) ([]CommentOutcome, error) {
+	rows, err := s.Pool.Query(ctx, `
+		SELECT id, review_comment_id, outcome, created_at
+		FROM comment_outcomes WHERE review_comment_id = $1 ORDER BY created_at DESC
+	`, reviewCommentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return collectOrEmpty(rows, pgx.RowToStructByPos[CommentOutcome])
+}
+
+// --- Prompt Templates ---
+
+func (s *Store) ListPromptTemplates(ctx context.Context, repoID int64) ([]PromptTemplate, error) {
+	rows, err := s.Pool.Query(ctx, `
+		SELECT id, repo_id, stage, prompt_text, created_at, updated_at
+		FROM prompt_templates WHERE repo_id = $1 ORDER BY stage
+	`, repoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return collectOrEmpty(rows, pgx.RowToStructByPos[PromptTemplate])
+}
+
+func (s *Store) UpsertPromptTemplate(ctx context.Context, repoID int64, stage, promptText string) (*PromptTemplate, error) {
+	var pt PromptTemplate
+	err := s.Pool.QueryRow(ctx, `
+		INSERT INTO prompt_templates (repo_id, stage, prompt_text)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (repo_id, stage) DO UPDATE SET
+			prompt_text = EXCLUDED.prompt_text,
+			updated_at = NOW()
+		RETURNING id, repo_id, stage, prompt_text, created_at, updated_at
+	`, repoID, stage, promptText).Scan(&pt.ID, &pt.RepoID, &pt.Stage, &pt.PromptText, &pt.CreatedAt, &pt.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &pt, nil
+}
+
+func (s *Store) DeletePromptTemplate(ctx context.Context, repoID int64, stage string) error {
+	ct, err := s.Pool.Exec(ctx, `DELETE FROM prompt_templates WHERE repo_id = $1 AND stage = $2`, repoID, stage)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return fmt.Errorf("prompt template not found for repo %d stage %s", repoID, stage)
+	}
+	return nil
+}
+
 func nilIfEmpty(s string) *string {
 	if s == "" {
 		return nil

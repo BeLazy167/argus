@@ -107,6 +107,12 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 				r.Put("/installations/{installationID}/provider-keys", s.upsertProviderKey)
 				r.Delete("/installations/{installationID}/provider-keys/{keyID}", s.deleteProviderKey)
 
+				// Prompt Templates
+				r.Get("/repos/{repoID}/prompts", s.listPromptTemplates)
+				r.Put("/repos/{repoID}/prompts/{stage}", s.upsertPromptTemplate)
+				r.Delete("/repos/{repoID}/prompts/{stage}", s.deletePromptTemplate)
+				r.Get("/prompts/defaults", s.listDefaultPrompts)
+
 				// Model Config
 				r.Get("/repos/{repoID}/config", s.getModelConfigs)
 				r.Put("/repos/{repoID}/config/{stage}", s.upsertModelConfig)
@@ -132,8 +138,12 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 
 				// Patterns
 				r.Get("/patterns", s.listPatterns)
+				r.Get("/patterns/stats", s.getPatternStats)
 				r.Post("/patterns", s.createPattern)
 				r.Delete("/patterns/{patternID}", s.deletePattern)
+
+				// OpenRouter
+				r.Get("/openrouter-models", s.listOpenRouterModels)
 			})
 		})
 	})
@@ -617,6 +627,99 @@ func (s *Server) testConfig(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// --- Prompt Templates ---
+
+func (s *Server) listPromptTemplates(w http.ResponseWriter, r *http.Request) {
+	repoID, err := strconv.ParseInt(chi.URLParam(r, "repoID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo id"})
+		return
+	}
+	customs, err := s.store.ListPromptTemplates(r.Context(), repoID)
+	if err != nil {
+		s.logger.Error("list prompt templates", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
+		return
+	}
+	customMap := make(map[string]string, len(customs))
+	for _, c := range customs {
+		customMap[c.Stage] = c.PromptText
+	}
+	defaults := pipeline.DefaultPrompts()
+	type entry struct {
+		Stage      string `json:"stage"`
+		PromptText string `json:"prompt_text"`
+		IsCustom   bool   `json:"is_custom"`
+	}
+	var result []entry
+	for stage, defaultText := range defaults {
+		if custom, ok := customMap[stage]; ok {
+			result = append(result, entry{Stage: stage, PromptText: custom, IsCustom: true})
+		} else {
+			result = append(result, entry{Stage: stage, PromptText: defaultText, IsCustom: false})
+		}
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) upsertPromptTemplate(w http.ResponseWriter, r *http.Request) {
+	repoID, err := strconv.ParseInt(chi.URLParam(r, "repoID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo id"})
+		return
+	}
+	stage := chi.URLParam(r, "stage")
+	if !pipeline.ValidPromptStages[stage] {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid stage"})
+		return
+	}
+	var body struct {
+		PromptText string `json:"prompt_text"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	if body.PromptText == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "prompt_text required"})
+		return
+	}
+	pt, err := s.store.UpsertPromptTemplate(r.Context(), repoID, stage, body.PromptText)
+	if err != nil {
+		s.logger.Error("upsert prompt template", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save prompt"})
+		return
+	}
+	writeJSON(w, http.StatusOK, pt)
+}
+
+func (s *Server) deletePromptTemplate(w http.ResponseWriter, r *http.Request) {
+	repoID, err := strconv.ParseInt(chi.URLParam(r, "repoID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo id"})
+		return
+	}
+	stage := chi.URLParam(r, "stage")
+	if err := s.store.DeletePromptTemplate(r.Context(), repoID, stage); err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "prompt template not found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+func (s *Server) listDefaultPrompts(w http.ResponseWriter, _ *http.Request) {
+	defaults := pipeline.DefaultPrompts()
+	type entry struct {
+		Stage      string `json:"stage"`
+		PromptText string `json:"prompt_text"`
+	}
+	var result []entry
+	for stage, text := range defaults {
+		result = append(result, entry{Stage: stage, PromptText: text})
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 // --- Rules ---
 
 func (s *Server) listRules(w http.ResponseWriter, r *http.Request) {
@@ -735,6 +838,16 @@ func (s *Server) listPatterns(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, patterns)
 }
 
+func (s *Server) getPatternStats(w http.ResponseWriter, r *http.Request) {
+	stats, err := s.store.GetPatternStats(r.Context(), getInstallationIDs(r.Context()))
+	if err != nil {
+		s.logger.Error("get pattern stats", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, stats)
+}
+
 func (s *Server) createPattern(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		InstallationID int64  `json:"installation_id"`
@@ -784,7 +897,7 @@ func (s *Server) createPattern(w http.ResponseWriter, r *http.Request) {
 	}
 
 	createdBy := getUserID(r.Context())
-	pattern, err := s.store.CreatePattern(r.Context(), body.InstallationID, body.RepoID, body.Content, smID, &createdBy)
+	pattern, err := s.store.CreatePattern(r.Context(), body.InstallationID, body.RepoID, body.Content, smID, &createdBy, nil, nil, nil)
 	if err != nil {
 		s.logger.Error("create pattern", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create pattern"})
@@ -951,7 +1064,7 @@ func maskKey(encKey string) string {
 var commandRe = regexp.MustCompile(`(?i)@argus-eye\s+(review|remember|resolve|fix|help)(.*)`)
 
 func (s *Server) dispatchCommand(ctx context.Context, evt ghpkg.IssueCommentEvent) {
-	match := commandRe.FindStringSubmatch(evt.CommentBody)
+	match := commandRe.FindStringSubmatch(strings.TrimSpace(evt.CommentBody))
 	if match == nil {
 		return
 	}

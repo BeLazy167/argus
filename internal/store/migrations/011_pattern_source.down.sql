@@ -1,0 +1,3 @@
+ALTER TABLE patterns DROP COLUMN IF EXISTS source;
+ALTER TABLE patterns DROP COLUMN IF EXISTS category;
+ALTER TABLE patterns DROP COLUMN IF EXISTS pr_number;

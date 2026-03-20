@@ -138,8 +138,17 @@ export type Pattern = {
   content: string;
   supermemory_id?: string;
   created_by?: string;
+  source?: string;
+  category?: string;
+  pr_number?: number;
   created_at: string;
   updated_at: string;
+};
+
+export type PatternStat = {
+  week: string;
+  source: string;
+  count: number;
 };
 
 export type UserInstallation = {
@@ -147,4 +156,20 @@ export type UserInstallation = {
   installation_id: number;
   role: string;
   created_at: string;
+};
+
+export type PromptTemplate = {
+  stage: string;
+  prompt_text: string;
+  is_custom: boolean;
+};
+
+export type OpenRouterModel = {
+  id: string;
+  name: string;
+  context_length: number;
+  pricing: {
+    prompt: string;
+    completion: string;
+  };
 };
