@@ -9,6 +9,7 @@ import {
   usePatternStats,
 } from "@/lib/queries/patterns";
 import { useRepos } from "@/lib/queries/repos";
+import { useActiveRepo } from "@/lib/hooks/use-active-repo";
 import { formatDistanceToNow } from "@/lib/time";
 import {
   AreaChart,
@@ -35,7 +36,9 @@ const SOURCE_BADGE_STYLES: Record<string, string> = {
 };
 
 export default function PatternsPage() {
-  const { data: patterns, isLoading } = usePatterns();
+  const { repos: activeRepos, activeId } = useActiveRepo();
+  const activeRepoId = activeId || undefined;
+  const { data: patterns, isLoading } = usePatterns(activeRepoId);
   const { data: repos } = useRepos();
   const { data: stats } = usePatternStats();
   const createPattern = useCreatePattern();
@@ -252,7 +255,7 @@ export default function PatternsPage() {
             Org-wide
           </button>
           {(repos ?? []).map((r) => {
-            const count = filtered.filter((p) => p.repo_id === r.id).length;
+            const count = (patterns ?? []).filter((p) => p.repo_id === r.id).length;
             if (count === 0 && filterRepo !== String(r.id)) return null;
             return (
               <button

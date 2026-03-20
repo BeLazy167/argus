@@ -39,6 +39,18 @@ func (s *Store) ListPatterns(ctx context.Context, installationIDs []int64) ([]Pa
 	return collectOrEmpty(rows, pgx.RowToStructByPos[Pattern])
 }
 
+// ListPatternsForRepo returns org-wide patterns (repo_id IS NULL) plus patterns scoped to the given repo.
+func (s *Store) ListPatternsForRepo(ctx context.Context, installationIDs []int64, repoID int64) ([]Pattern, error) {
+	rows, err := s.Pool.Query(ctx,
+		`SELECT id, installation_id, repo_id, content, supermemory_id, created_by, COALESCE(source, 'manual'), category, pr_number, created_at, updated_at
+		 FROM patterns WHERE installation_id = ANY($1) AND (repo_id IS NULL OR repo_id = $2) ORDER BY created_at DESC`, installationIDs, repoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return collectOrEmpty(rows, pgx.RowToStructByPos[Pattern])
+}
+
 func (s *Store) CreatePattern(ctx context.Context, installationID int64, repoID *int64, content string, supermemoryID *string, createdBy *string, source *string, category *string, prNumber *int) (*Pattern, error) {
 	var p Pattern
 	err := s.Pool.QueryRow(ctx,
