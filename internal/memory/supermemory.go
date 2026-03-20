@@ -71,10 +71,21 @@ func (c *Client) doJSON(ctx context.Context, path string, reqBody, result any) e
 	return c.doRequest(ctx, "POST", path, reqBody, result)
 }
 
-// AddMemory stores a new memory in Supermemory.
+// AddMemory stores a new memory via v3/documents. Supports customId upserts but documents
+// are queued for processing (not immediately searchable).
 func (c *Client) AddMemory(ctx context.Context, req AddRequest) (*AddResponse, error) {
 	var result AddResponse
 	if err := c.doJSON(ctx, "/v3/documents", req, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// AddMemoryImmediate stores memories via v4/memories. Immediately searchable (embeddings
+// generated on creation) but does NOT support customId upserts.
+func (c *Client) AddMemoryImmediate(ctx context.Context, req AddImmediateRequest) (*AddImmediateResponse, error) {
+	var result AddImmediateResponse
+	if err := c.doJSON(ctx, "/v4/memories", req, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
@@ -203,6 +214,27 @@ type Document struct {
 	ID     string `json:"id"`
 	Title  string `json:"title,omitempty"`
 	Status string `json:"status,omitempty"`
+}
+
+type AddImmediateRequest struct {
+	ContainerTag string             `json:"containerTag"`
+	Memories     []ImmediateMemory  `json:"memories"`
+}
+
+type ImmediateMemory struct {
+	Content  string            `json:"content"`
+	IsStatic bool              `json:"isStatic,omitempty"`
+	Metadata map[string]string `json:"metadata,omitempty"`
+}
+
+type AddImmediateResponse struct {
+	DocumentID string `json:"documentId"`
+	Memories   []struct {
+		ID        string `json:"id"`
+		Memory    string `json:"memory"`
+		IsStatic  bool   `json:"isStatic"`
+		CreatedAt string `json:"createdAt"`
+	} `json:"memories"`
 }
 
 type BulkDeleteRequest struct {

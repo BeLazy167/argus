@@ -157,35 +157,59 @@ type RuleMemory struct {
 }
 
 // IndexRepoPattern stores a pattern scoped to a specific repo.
-// If customID is non-empty, the document is upserted (deduplicated).
+// Uses v4/memories for immediate searchability. Falls back to v3 if customID is provided (for upsert dedup).
 func (idx *Indexer) IndexRepoPattern(ctx context.Context, owner, repo, content, customID string, metadata map[string]string) (*AddResponse, error) {
+	tag := RepoTag(owner, repo, "patterns")
+	if customID == "" {
+		return idx.indexImmediate(ctx, tag, content, metadata, "repo pattern", owner, repo)
+	}
 	resp, err := idx.client.AddMemory(ctx, AddRequest{
 		Content:       content,
 		CustomID:      customID,
-		ContainerTags: []string{RepoTag(owner, repo, "patterns")},
+		ContainerTags: []string{tag},
 		Metadata:      metadata,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("indexing repo pattern: %w", err)
 	}
-	idx.logger.Debug("indexed repo pattern", "owner", owner, "repo", repo)
+	idx.logger.Debug("indexed repo pattern (v3 upsert)", "owner", owner, "repo", repo)
 	return resp, nil
 }
 
 // IndexOwnerPattern stores a pattern at owner scope (applies to all repos in the org).
-// If customID is non-empty, the document is upserted (deduplicated).
+// Uses v4/memories for immediate searchability. Falls back to v3 if customID is provided (for upsert dedup).
 func (idx *Indexer) IndexOwnerPattern(ctx context.Context, owner, content, customID string, metadata map[string]string) (*AddResponse, error) {
+	tag := OwnerTag(owner, "patterns")
+	if customID == "" {
+		return idx.indexImmediate(ctx, tag, content, metadata, "owner pattern", owner, "")
+	}
 	resp, err := idx.client.AddMemory(ctx, AddRequest{
 		Content:       content,
 		CustomID:      customID,
-		ContainerTags: []string{OwnerTag(owner, "patterns")},
+		ContainerTags: []string{tag},
 		Metadata:      metadata,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("indexing owner pattern: %w", err)
 	}
-	idx.logger.Debug("indexed owner pattern", "owner", owner)
+	idx.logger.Debug("indexed owner pattern (v3 upsert)", "owner", owner)
 	return resp, nil
+}
+
+// indexImmediate uses v4/memories for immediate searchability (no queue delay).
+func (idx *Indexer) indexImmediate(ctx context.Context, tag, content string, metadata map[string]string, kind, owner, repo string) (*AddResponse, error) {
+	resp, err := idx.client.AddMemoryImmediate(ctx, AddImmediateRequest{
+		ContainerTag: tag,
+		Memories: []ImmediateMemory{{
+			Content:  content,
+			Metadata: metadata,
+		}},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("indexing %s (v4): %w", kind, err)
+	}
+	idx.logger.Debug("indexed "+kind+" (v4 immediate)", "owner", owner, "repo", repo)
+	return &AddResponse{ID: resp.DocumentID, Status: "created"}, nil
 }
 
 // DeleteDocument removes a document from Supermemory by ID.
