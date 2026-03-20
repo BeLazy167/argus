@@ -71,6 +71,10 @@ export type ReviewComment = {
   confidence_score?: number;
   code_snippet?: string;
   github_comment_id?: number;
+  matched_pattern_id?: number;
+  matched_pattern_score?: number;
+  enforced_rule_content?: string;
+  is_new_finding?: boolean;
   created_at: string;
 };
 
