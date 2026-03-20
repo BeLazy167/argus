@@ -271,3 +271,87 @@ func specialistMemoryBlock(ctx context.Context, memClient *memory.Client, owner,
 	sb.WriteString("\nUse this context to inform your review — issues matching known patterns are higher priority.")
 	return sb.String()
 }
+
+
+// reviewMemoryBlock fetches repo/org patterns, rules, and past reviews from Supermemory
+// for non-specialist, non-agentic review passes. This ensures every review — not just
+// deep/specialist ones — benefits from institutional memory.
+// Budget: ~800 tokens. Non-fatal: returns empty string on any error.
+func reviewMemoryBlock(ctx context.Context, memClient *memory.Client, owner, repo, filePath string) string {
+	if memClient == nil || owner == "" || repo == "" {
+		return ""
+	}
+
+	searchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	query := "code review patterns conventions " + filePath
+	repoPatternTag := memory.RepoTag(owner, repo, "patterns")
+	repoReviewTag := memory.RepoTag(owner, repo, "reviews")
+	ownerPatternTag := memory.OwnerTag(owner, "patterns")
+	ownerRuleTag := memory.OwnerTag(owner, "rules")
+
+	var synthResults, repoPatterns, repoReviews, orgPatterns, orgRules []string
+	var wg sync.WaitGroup
+	wg.Add(5)
+	go func() {
+		defer wg.Done()
+		if filePath != "" {
+			synthResults = searchMemoryContent(searchCtx, memClient, "file synthesis "+filePath, repoPatternTag, 2)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		repoPatterns = searchMemoryContent(searchCtx, memClient, query, repoPatternTag, 3)
+	}()
+	go func() {
+		defer wg.Done()
+		repoReviews = searchMemoryContent(searchCtx, memClient, query, repoReviewTag, 2)
+	}()
+	go func() {
+		defer wg.Done()
+		orgPatterns = searchMemoryContent(searchCtx, memClient, query, ownerPatternTag, 2)
+	}()
+	go func() {
+		defer wg.Done()
+		orgRules = searchMemoryContent(searchCtx, memClient, query, ownerRuleTag, 2)
+	}()
+	wg.Wait()
+
+	var sb strings.Builder
+
+	if len(synthResults) > 0 {
+		sb.WriteString("\n\n## File History\n")
+		for _, r := range synthResults {
+			sb.WriteString("- " + r + "\n")
+		}
+	}
+
+	allPatterns := append(repoPatterns, orgPatterns...)
+	if len(allPatterns) > 0 {
+		sb.WriteString("\n## Established Patterns\n")
+		for i, r := range allPatterns {
+			sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, r))
+		}
+	}
+
+	if len(orgRules) > 0 {
+		sb.WriteString("\n## Review Rules\n")
+		for _, r := range orgRules {
+			sb.WriteString("- " + r + "\n")
+		}
+	}
+
+	if len(repoReviews) > 0 {
+		sb.WriteString("\n## Past Review Findings (this repo)\n")
+		for _, r := range repoReviews {
+			sb.WriteString("- " + r + "\n")
+		}
+	}
+
+	if sb.Len() == 0 {
+		return ""
+	}
+	sb.WriteString("\nApply these patterns and past findings when reviewing. Reference specific past learnings in your comments when relevant (e.g., 'This contradicts the established pattern of...').\n")
+	return sb.String()
+}

@@ -65,6 +65,7 @@ type PipelineRun struct {
 	RawDiff          string
 	TriageResults    []TriageResult
 	FileReviews      []FileReview
+	AllFileReviews   []FileReview // pre-scoring snapshot: all comments with scores, before threshold drop
 	Synthesis        *SynthesisResult
 	Tokens           RunTokenUsage
 	Persona          Persona

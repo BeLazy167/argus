@@ -149,7 +149,7 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 				if u.specialist != "" {
 					p.systemBase = specialistPrompt(u.specialist) + specialistMemoryBlock(ctx, rs.memClient, owner, repo, u.specialist, u.file.NewName)
 				} else {
-					p.systemBase = baseSystemPrompt
+					p.systemBase = baseSystemPrompt + reviewMemoryBlock(ctx, rs.memClient, owner, repo, u.file.NewName)
 					p.promptExtra = PersonaPromptOverlay(run.Persona)
 				}
 				rev, tok, err := rs.reviewFile(ctx, run, p, fileContents, owner, repo, cfg, provider)
@@ -499,6 +499,13 @@ Assume the code has bugs until proven otherwise. For every function, ask yoursel
 3. **Silent failures** — swallowed errors, empty catch blocks, missing error propagation, async operations that silently fail
 4. **Performance** — N+1 queries, unbounded operations, resource leaks, missing pagination
 5. **Type safety** — types that can represent invalid states, missing constraints at construction
+
+## Institutional Memory
+If memory context (patterns, rules, past findings) is provided below, use it to:
+- Prioritize issues that match established patterns from past reviews
+- Reference specific past learnings when applicable (e.g., "Based on past reviews in this repo, this pattern has caused X")
+- Respect established conventions — don't flag code that follows documented project patterns
+- Give higher severity to issues that match previously confirmed problem patterns
 
 ## Output
 Respond ONLY with a JSON array of comments. No other text.`

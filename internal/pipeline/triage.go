@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/BeLazy167/argus/internal/llm"
@@ -166,14 +167,14 @@ func storeToLLMConfigs(dbConfigs []store.ModelConfig) []llm.ModelConfig {
 	return out
 }
 
-// triageMemoryHints searches Supermemory for file synthesis docs matching changed files.
+// triageMemoryHints searches Supermemory for file synthesis docs, repo patterns,
+// owner patterns, and rules matching changed files.
 // Returns a hint block for the triage prompt, or empty string if no history found.
 func triageMemoryHints(ctx context.Context, memClient *memory.Client, owner, repo string, files []diff.FileDiff) string {
 	if memClient == nil || owner == "" || repo == "" || len(files) == 0 {
 		return ""
 	}
 
-	// Search for synthesis docs across changed files (single query, top 5)
 	searchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	var fileNames []string
@@ -181,17 +182,54 @@ func triageMemoryHints(ctx context.Context, memClient *memory.Client, owner, rep
 		fileNames = append(fileNames, f.NewName)
 	}
 	query := filePathsQuery("file synthesis review history ", fileNames)
-	results := searchMemoryContent(searchCtx, memClient, query, memory.RepoTag(owner, repo, "patterns"), 5)
-	if len(results) == 0 {
-		return ""
-	}
+	repoTag := memory.RepoTag(owner, repo, "patterns")
+	ownerTag := memory.OwnerTag(owner, "patterns")
+	rulesTag := memory.OwnerTag(owner, "rules")
+
+	// Parallel searches for repo patterns, owner patterns, and rules
+	var repoResults, ownerResults, ruleResults []string
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		repoResults = searchMemoryContent(searchCtx, memClient, query, repoTag, 5)
+	}()
+	go func() {
+		defer wg.Done()
+		ownerResults = searchMemoryContent(searchCtx, memClient, query, ownerTag, 3)
+	}()
+	go func() {
+		defer wg.Done()
+		ruleResults = searchMemoryContent(searchCtx, memClient, "review rules conventions", rulesTag, 3)
+	}()
+	wg.Wait()
 
 	var sb strings.Builder
-	sb.WriteString("\n## File History (from past reviews)\n")
-	for _, r := range results {
-		sb.WriteString(fmt.Sprintf("- %s\n", truncateSnippet(r, 200)))
+
+	if len(repoResults) > 0 {
+		sb.WriteString("\n## File History (from past reviews)\n")
+		for _, r := range repoResults {
+			sb.WriteString(fmt.Sprintf("- %s\n", truncateSnippet(r, 200)))
+		}
 	}
-	slog.Debug("triage memory hints", "count", len(results), "owner", owner, "repo", repo)
+	if len(ownerResults) > 0 {
+		sb.WriteString("\n## Org-wide Patterns\n")
+		for _, r := range ownerResults {
+			sb.WriteString(fmt.Sprintf("- %s\n", truncateSnippet(r, 200)))
+		}
+	}
+	if len(ruleResults) > 0 {
+		sb.WriteString("\n## Review Rules\n")
+		for _, r := range ruleResults {
+			sb.WriteString(fmt.Sprintf("- %s\n", truncateSnippet(r, 200)))
+		}
+	}
+
+	total := len(repoResults) + len(ownerResults) + len(ruleResults)
+	if total == 0 {
+		return ""
+	}
+	slog.Debug("triage memory hints", "repo_results", len(repoResults), "owner_results", len(ownerResults), "rule_results", len(ruleResults), "owner", owner, "repo", repo)
 	return sb.String()
 }
 

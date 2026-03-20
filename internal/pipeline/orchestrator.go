@@ -510,6 +510,7 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	o.indexComments(ctx, run, ghReviewID, owner, repo)
 	o.indexConfirmedPatterns(ctx, run, owner, repo)
 	o.autoLearnPatterns(ctx, run, owner, repo)
+	o.extractConventions(ctx, run, owner, repo)
 	o.synthesizeFileMemories(ctx, run, owner, repo)
 	o.indexPRSummary(ctx, run, owner, repo)
 
@@ -525,19 +526,29 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 }
 
 // indexConfirmedPatterns saves high-confidence comments as confirmed repo patterns in Supermemory.
-// When scoring is available, uses score ≥90. When skipped, falls back to critical severity.
+// When scoring is available, uses score ≥80 (deep) or ≥90 (non-deep). When skipped, falls back to critical+warning severity.
 func (o *Orchestrator) indexConfirmedPatterns(ctx context.Context, run *PipelineRun, owner, repo string) {
-	if o.indexer == nil || !run.DeepReview {
+	if o.indexer == nil {
 		return
 	}
 
-	const confirmedThreshold = 90
+	// Deep reviews use lower threshold; non-deep uses a higher bar to compensate for less context
+	confirmedThreshold := 80
+	if !run.DeepReview {
+		confirmedThreshold = 90
+	}
+	// Use AllFileReviews (pre-scoring snapshot) when available, so pattern learning
+	// sees comments that were dropped by the posting threshold but still have valid scores.
+	reviews := run.FileReviews
+	if len(run.AllFileReviews) > 0 {
+		reviews = run.AllFileReviews
+	}
 	var indexed int
-	for _, fr := range run.FileReviews {
+	for _, fr := range reviews {
 		for _, c := range fr.Comments {
 			var qualifies bool
 			if run.ScoringSkipped {
-				qualifies = c.Severity == SeverityCritical
+				qualifies = c.Severity == SeverityCritical || c.Severity == SeverityWarning
 			} else {
 				qualifies = c.Score >= confirmedThreshold
 			}
@@ -562,16 +573,24 @@ func (o *Orchestrator) indexConfirmedPatterns(ctx context.Context, run *Pipeline
 }
 
 // autoLearnPatterns uses the review LLM to extract 0-3 reusable patterns from high-confidence
-// comments. When scoring available, needs 2+ at 85+. When skipped, uses critical+warning severity.
+// comments. When scoring available, needs 1+ at 75+ (deep) or 80+ (non-deep). When skipped, uses critical+warning severity.
 func (o *Orchestrator) autoLearnPatterns(ctx context.Context, run *PipelineRun, owner, repo string) {
-	if o.indexer == nil || !run.DeepReview {
+	if o.indexer == nil {
 		return
 	}
 
 	// Collect high-confidence comments (score-based or severity-based fallback)
-	const learnThreshold = 85
+	// Non-deep reviews use a higher threshold to compensate for less context
+	learnThreshold := 75
+	if !run.DeepReview {
+		learnThreshold = 80
+	}
+	reviews := run.FileReviews
+	if len(run.AllFileReviews) > 0 {
+		reviews = run.AllFileReviews
+	}
 	var highConf []string
-	for _, fr := range run.FileReviews {
+	for _, fr := range reviews {
 		for _, c := range fr.Comments {
 			var qualifies bool
 			if run.ScoringSkipped {
@@ -584,8 +603,10 @@ func (o *Orchestrator) autoLearnPatterns(ctx context.Context, run *PipelineRun, 
 			}
 		}
 	}
-	if len(highConf) < 2 {
-		slog.Info("autoLearnPatterns skipped", "qualifying", len(highConf), "scoring_skipped", run.ScoringSkipped)
+	// Accept 1+ qualifying comment for pattern extraction
+	minRequired := 1
+	if len(highConf) < minRequired {
+		slog.Info("autoLearnPatterns skipped", "qualifying", len(highConf), "min_required", minRequired, "scoring_skipped", run.ScoringSkipped)
 		return
 	}
 	slog.Info("autoLearnPatterns", "qualifying", len(highConf), "scoring_skipped", run.ScoringSkipped)
@@ -657,11 +678,110 @@ Return [] if no repo-specific patterns emerge. JSON array only.`, run.PREvent.Re
 	}
 }
 
+// extractConventions analyzes the PR diff to identify code style conventions and
+// architectural patterns used in the codebase. Unlike autoLearnPatterns (which extracts
+// patterns from review comments), this function learns from the code itself —
+// capturing what the team writes, not what the reviewer flags.
+func (o *Orchestrator) extractConventions(ctx context.Context, run *PipelineRun, owner, repo string) {
+	if o.indexer == nil || run.Diff == nil || len(run.Diff.Files) == 0 {
+		return
+	}
+
+	// Build a compact sample of the diff (first 2000 chars of additions only)
+	var diffSample strings.Builder
+	for _, f := range run.Diff.Files {
+		if diffSample.Len() >= 2000 {
+			break
+		}
+		diffSample.WriteString(fmt.Sprintf("--- %s ---\n", f.NewName))
+		for _, line := range strings.Split(f.RawDiff, "\n") {
+			if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") {
+				diffSample.WriteString(line + "\n")
+				if diffSample.Len() >= 2000 {
+					break
+				}
+			}
+		}
+	}
+
+	cfg, provider, err := o.resolveReviewProvider(ctx, run)
+	if err != nil {
+		o.logger.Warn("convention extraction skipped", "error", err)
+		return
+	}
+
+	convCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	prompt := fmt.Sprintf(`Analyze these code additions from %s and extract 0-3 codebase conventions or architectural patterns.
+
+Focus on:
+- Error handling patterns (e.g., "errors wrapped with %%w", "custom error types used")
+- Logging conventions (e.g., "structured logging with slog", "log levels follow X pattern")
+- Naming conventions (e.g., "handlers suffixed with Handler", "interfaces prefixed with I")
+- Architecture patterns (e.g., "repository pattern for DB access", "middleware chain pattern")
+- Testing patterns (e.g., "table-driven tests", "test fixtures in testdata/")
+
+Only include patterns that are CLEARLY established (appear multiple times). Skip generic language idioms.
+
+Code additions:
+%s
+
+Return JSON array: [{"convention": "description", "category": "style|architecture|error_handling|testing|naming"}]
+Return [] if no clear conventions emerge. JSON array only.`, run.PREvent.RepoFullName, diffSample.String())
+
+	resp, err := provider.Complete(convCtx, llm.CompletionRequest{
+		Model:       cfg.Model,
+		System:      "You extract codebase conventions from code diffs. Be specific to this project.",
+		Messages:    []llm.Message{{Role: "user", Content: prompt}},
+		MaxTokens:   400,
+		Temperature: 0.3,
+	})
+	if err != nil {
+		o.logger.Warn("convention extraction LLM failed", "error", err)
+		return
+	}
+
+	type convention struct {
+		Convention string `json:"convention"`
+		Category   string `json:"category"`
+	}
+	conventions, err := unmarshalLLMArray[convention](resp.Content)
+	if err != nil {
+		o.logger.Warn("convention extraction parse failed", "error", err)
+		return
+	}
+	if len(conventions) > 3 {
+		conventions = conventions[:3]
+	}
+
+	for _, c := range conventions {
+		if c.Convention == "" {
+			continue
+		}
+		content := fmt.Sprintf("Convention [%s]: %s", c.Category, c.Convention)
+		customID := memory.PatternCustomID(owner, repo, "convention", c.Convention)
+		_, err := o.indexer.IndexRepoPattern(ctx, owner, repo, content, customID, map[string]string{
+			"source":   "convention_extraction",
+			"pr":       fmt.Sprintf("%d", run.PREvent.PRNumber),
+			"category": c.Category,
+		})
+		if err != nil {
+			o.logger.Warn("indexing convention", "error", err)
+		}
+	}
+
+	if len(conventions) > 0 {
+		o.logger.Info("extracted conventions", "count", len(conventions), "repo", run.PREvent.RepoFullName)
+	}
+}
+
+
 // synthesizeFileMemories condenses all review comments per file into a single curated memory document.
-// Only fires for files with strong signal: 2+ comments scored 70+, or any comment 90+.
-// When scoring was skipped, all comments qualify (since Score=0 is not meaningful).
+// Fires for files with signal: 1+ comment scored 60+, or any comment 80+.
+// When scoring was skipped, any file with 1+ comment qualifies.
 func (o *Orchestrator) synthesizeFileMemories(ctx context.Context, run *PipelineRun, owner, repo string) {
-	if o.indexer == nil || !run.DeepReview {
+	if o.indexer == nil {
 		return
 	}
 
@@ -670,26 +790,30 @@ func (o *Orchestrator) synthesizeFileMemories(ctx context.Context, run *Pipeline
 		path     string
 		comments []FileComment
 	}
+	reviews := run.FileReviews
+	if len(run.AllFileReviews) > 0 {
+		reviews = run.AllFileReviews
+	}
 	var qualifying []fileComments
-	for _, fr := range run.FileReviews {
+	for _, fr := range reviews {
 		if run.ScoringSkipped {
-			// Scoring unavailable — qualify any file with 2+ comments
-			if len(fr.Comments) >= 2 {
+			// Scoring unavailable — qualify any file with 1+ comments
+			if len(fr.Comments) >= 1 {
 				qualifying = append(qualifying, fileComments{path: fr.Path, comments: fr.Comments})
 			}
 			continue
 		}
-		count70 := 0
-		has90 := false
+		count60 := 0
+		has80 := false
 		for _, c := range fr.Comments {
-			if c.Score >= 70 {
-				count70++
+			if c.Score >= 60 {
+				count60++
 			}
-			if c.Score >= 90 {
-				has90 = true
+			if c.Score >= 80 {
+				has80 = true
 			}
 		}
-		if count70 >= 2 || has90 {
+		if count60 >= 1 || has80 {
 			qualifying = append(qualifying, fileComments{path: fr.Path, comments: fr.Comments})
 		}
 	}
