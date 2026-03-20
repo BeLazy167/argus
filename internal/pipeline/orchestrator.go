@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -67,6 +68,7 @@ func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, 
 
 	sm.RegisterStage(StateTriaging, triageStage.Execute)
 	sm.RegisterStage(StateReviewing, reviewStage.Execute)
+	sm.RegisterStage(StateEnriching, o.enrichFindings)
 	sm.RegisterStage(StateScoring, scoringStage.Execute)
 	sm.RegisterStage(StatePass2, o.pass2)
 	sm.RegisterStage(StateSynthesizing, o.synthesize)
@@ -340,6 +342,60 @@ func (o *Orchestrator) autoResolveStaleComments(ctx context.Context, event ghpkg
 	if resolved > 0 {
 		o.logger.Info("auto-resolved stale comments", "count", resolved, "pr", event.PRNumber)
 	}
+}
+
+// enrichFindings annotates each comment with pattern/rule matches and novelty flags.
+// Non-fatal: defaults to is_new_finding=true on any search failure.
+func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) error {
+	if o.indexer == nil {
+		return nil
+	}
+
+	owner, repo, err := splitRepoFullName(run.PREvent.RepoFullName)
+	if err != nil {
+		return nil // non-fatal
+	}
+
+	memClient := o.indexer.Client()
+	sem := make(chan struct{}, 5)
+	var wg sync.WaitGroup
+
+	for i := range run.FileReviews {
+		fr := &run.FileReviews[i]
+		for j := range fr.Comments {
+			c := &fr.Comments[j]
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(c *FileComment) {
+				defer wg.Done()
+				defer func() { <-sem }()
+
+				_, score := o.indexer.SearchPatternMatch(ctx, owner, repo, c.Body)
+
+				var ruleContent string
+				if memClient != nil {
+					results := searchMemoryContent(ctx, memClient, c.Body, memory.OwnerTag(owner, "rules"), 1)
+					if len(results) > 0 {
+						ruleContent = results[0]
+					}
+				}
+
+				if score > 0.75 {
+					c.MatchedPatternScore = score
+				}
+				if ruleContent != "" {
+					c.EnforcedRuleContent = ruleContent
+				}
+				if score <= 0.75 && ruleContent == "" {
+					c.IsNewFinding = true
+				}
+			}(c)
+		}
+	}
+	wg.Wait()
+
+	o.logger.Info("enriched findings", "repo", run.PREvent.RepoFullName, "pr", run.PREvent.PRNumber)
+	return nil
 }
 
 func (o *Orchestrator) synthesize(ctx context.Context, run *PipelineRun) error {
@@ -1091,7 +1147,14 @@ func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghRe
 				confidenceScore = &score
 			}
 
-			if err := o.st.CreateReviewComment(ctx, run.ReviewID, fr.Path, startLine, &line, &side, c.Body, &sev, &cat, specialist, snippet, confidenceScore, ghCommentID); err != nil {
+			var matchedPatternScore *float32
+			if c.MatchedPatternScore > 0 {
+				s := float32(c.MatchedPatternScore)
+				matchedPatternScore = &s
+			}
+			enforcedRule := strPtrOrNil(c.EnforcedRuleContent)
+
+			if err := o.st.CreateReviewComment(ctx, run.ReviewID, fr.Path, startLine, &line, &side, c.Body, &sev, &cat, specialist, snippet, confidenceScore, ghCommentID, nil, matchedPatternScore, enforcedRule, c.IsNewFinding); err != nil {
 				o.logger.Error("persisting review comment", "error", err, "file", fr.Path)
 			}
 

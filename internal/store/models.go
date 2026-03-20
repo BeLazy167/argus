@@ -64,8 +64,12 @@ type ReviewComment struct {
 	Specialist      *string   `json:"specialist,omitempty"`
 	ConfidenceScore *int      `json:"confidence_score,omitempty"`
 	CodeSnippet     *string   `json:"code_snippet,omitempty"`
-	GithubCommentID *int64    `json:"github_comment_id,omitempty"`
-	CreatedAt       time.Time `json:"created_at"`
+	GithubCommentID     *int64    `json:"github_comment_id,omitempty"`
+	MatchedPatternID    *int64    `json:"matched_pattern_id,omitempty"`
+	MatchedPatternScore *float32  `json:"matched_pattern_score,omitempty"`
+	EnforcedRuleContent *string   `json:"enforced_rule_content,omitempty"`
+	IsNewFinding        bool      `json:"is_new_finding"`
+	CreatedAt           time.Time `json:"created_at"`
 }
 
 type Rule struct {

@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"regexp"
 	"strings"
+	"sync"
+	"time"
 )
 
 // Indexer manages Supermemory documents: stores reviews, rules, patterns, and topology for future RAG retrieval.
@@ -18,6 +20,65 @@ type Indexer struct {
 
 func NewIndexer(client *Client, logger *slog.Logger) *Indexer {
 	return &Indexer{client: client, logger: logger}
+}
+
+// Client returns the underlying Supermemory client.
+func (idx *Indexer) Client() *Client { return idx.client }
+
+// SearchPatternMatch searches for the best matching pattern across repo and owner scopes.
+// Returns the matched content and similarity score. Returns ("", 0) if no match above threshold.
+func (idx *Indexer) SearchPatternMatch(ctx context.Context, owner, repo, query string) (content string, score float64) {
+	if idx.client == nil || owner == "" || repo == "" {
+		return "", 0
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	type result struct {
+		content string
+		score   float64
+	}
+
+	var repoRes, ownerRes result
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		resp, err := idx.client.Search(ctx, SearchRequest{
+			Query:        query,
+			ContainerTag: RepoTag(owner, repo, "patterns"),
+			SearchMode:   "hybrid",
+			Limit:        1,
+			Threshold:    0.5,
+		})
+		if err != nil || len(resp.Results) == 0 {
+			return
+		}
+		repoRes = result{content: resp.Results[0].Content(), score: resp.Results[0].Similarity}
+	}()
+
+	go func() {
+		defer wg.Done()
+		resp, err := idx.client.Search(ctx, SearchRequest{
+			Query:        query,
+			ContainerTag: OwnerTag(owner, "patterns"),
+			SearchMode:   "hybrid",
+			Limit:        1,
+			Threshold:    0.5,
+		})
+		if err != nil || len(resp.Results) == 0 {
+			return
+		}
+		ownerRes = result{content: resp.Results[0].Content(), score: resp.Results[0].Similarity}
+	}()
+
+	wg.Wait()
+
+	if repoRes.score >= ownerRes.score {
+		return repoRes.content, repoRes.score
+	}
+	return ownerRes.content, ownerRes.score
 }
 
 var lineNumRegex = regexp.MustCompile(`(?i)\b(?:line|L)\s*\d+`)

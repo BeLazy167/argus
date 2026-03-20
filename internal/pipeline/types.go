@@ -96,8 +96,12 @@ type FileComment struct {
 	Category    Category `json:"category"`
 	CodeSnippet string   `json:"code_snippet,omitempty"`
 	Suggestion  string   `json:"suggestion,omitempty"`
-	Specialist  Specialist `json:"specialist,omitempty"`
-	Score       int        `json:"score"`
+	Specialist          Specialist `json:"specialist,omitempty"`
+	Score               int        `json:"score"`
+	MatchedPatternID    int64      `json:"-"`
+	MatchedPatternScore float64    `json:"-"`
+	EnforcedRuleContent string     `json:"-"`
+	IsNewFinding        bool       `json:"-"`
 }
 
 // ValidSeverities is the set of valid severity values.

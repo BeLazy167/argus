@@ -266,7 +266,9 @@ func (s *Store) GetReview(ctx context.Context, id uuid.UUID) (*Review, error) {
 func (s *Store) GetReviewComments(ctx context.Context, reviewID uuid.UUID) ([]ReviewComment, error) {
 	rows, err := s.Pool.Query(ctx, `
 		SELECT id, review_id, file_path, start_line, end_line, side, body, severity, category,
-		       specialist, confidence_score, code_snippet, github_comment_id, created_at
+		       specialist, confidence_score, code_snippet, github_comment_id,
+		       matched_pattern_id, matched_pattern_score, enforced_rule_content, is_new_finding,
+		       created_at
 		FROM review_comments WHERE review_id = $1 ORDER BY file_path, start_line
 	`, reviewID)
 	if err != nil {
@@ -426,11 +428,11 @@ func (s *Store) DeleteModelConfig(ctx context.Context, repoID int64, stage strin
 
 // --- Review Comments ---
 
-func (s *Store) CreateReviewComment(ctx context.Context, reviewID uuid.UUID, filePath string, startLine, endLine *int, side *string, body string, severity, category, specialist, codeSnippet *string, confidenceScore *int, githubCommentID *int64) error {
+func (s *Store) CreateReviewComment(ctx context.Context, reviewID uuid.UUID, filePath string, startLine, endLine *int, side *string, body string, severity, category, specialist, codeSnippet *string, confidenceScore *int, githubCommentID *int64, matchedPatternID *int64, matchedPatternScore *float32, enforcedRuleContent *string, isNewFinding bool) error {
 	_, err := s.Pool.Exec(ctx, `
-		INSERT INTO review_comments (review_id, file_path, start_line, end_line, side, body, severity, category, specialist, confidence_score, code_snippet, github_comment_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-	`, reviewID, filePath, startLine, endLine, side, body, severity, category, specialist, confidenceScore, codeSnippet, githubCommentID)
+		INSERT INTO review_comments (review_id, file_path, start_line, end_line, side, body, severity, category, specialist, confidence_score, code_snippet, github_comment_id, matched_pattern_id, matched_pattern_score, enforced_rule_content, is_new_finding)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+	`, reviewID, filePath, startLine, endLine, side, body, severity, category, specialist, confidenceScore, codeSnippet, githubCommentID, matchedPatternID, matchedPatternScore, enforcedRuleContent, isNewFinding)
 	return err
 }
 
@@ -439,10 +441,14 @@ func (s *Store) GetCommentByGithubID(ctx context.Context, githubCommentID int64)
 	var c ReviewComment
 	err := s.Pool.QueryRow(ctx, `
 		SELECT id, review_id, file_path, start_line, end_line, side, body, severity, category,
-		       specialist, confidence_score, code_snippet, github_comment_id, created_at
+		       specialist, confidence_score, code_snippet, github_comment_id,
+		       matched_pattern_id, matched_pattern_score, enforced_rule_content, is_new_finding,
+		       created_at
 		FROM review_comments WHERE github_comment_id = $1
 	`, githubCommentID).Scan(&c.ID, &c.ReviewID, &c.FilePath, &c.StartLine, &c.EndLine, &c.Side, &c.Body, &c.Severity, &c.Category,
-		&c.Specialist, &c.ConfidenceScore, &c.CodeSnippet, &c.GithubCommentID, &c.CreatedAt)
+		&c.Specialist, &c.ConfidenceScore, &c.CodeSnippet, &c.GithubCommentID,
+		&c.MatchedPatternID, &c.MatchedPatternScore, &c.EnforcedRuleContent, &c.IsNewFinding,
+		&c.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
