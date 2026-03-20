@@ -24,7 +24,7 @@ func (s *Server) handleHelpCommand(ctx context.Context, evt ghpkg.IssueCommentEv
 | ` + "`@argus-eye remember <pattern>`" + ` | Teach Argus a pattern for this repo |
 | ` + "`@argus-eye remember --org <pattern>`" + ` | Teach Argus an org-wide pattern |
 | ` + "`@argus-eye fix`" + ` | Apply all suggestion blocks from review comments as a commit |
-| ` + "`@argus-eye resolve`" + ` | Minimize review comments on files changed since the review |
+| ` + "`@argus-eye resolve`" + ` | Resolve review threads on files changed since the review |
 | ` + "`@argus-eye help`" + ` | Show this message |`
 
 	_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber, help)
@@ -118,8 +118,8 @@ func (s *Server) handleRememberCommand(ctx context.Context, evt ghpkg.IssueComme
 	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "rocket")
 }
 
-// handleResolveCommand lists all bot review comments on a PR, checks if their
-// referenced files appear in the latest diff, and minimizes those that appear addressed.
+// handleResolveCommand lists all bot review threads on a PR, checks if their
+// referenced files appear in the latest diff, and resolves those that appear addressed.
 func (s *Server) handleResolveCommand(ctx context.Context, evt ghpkg.IssueCommentEvent, owner, repo string, ghClient *ghpkg.Client) {
 	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "eyes")
 

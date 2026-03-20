@@ -557,7 +557,7 @@ export default function LandingPage() {
                 Blog
               </Link>
               <a
-                href="https://github.com/acmeorg/argus"
+                href="https://github.com/BeLazy167/argus"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="text-[11px] font-mono text-slate-text hover:text-ash transition-colors"

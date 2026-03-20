@@ -137,6 +137,39 @@ func (ra *ReplyAnalyzer) Analyze(ctx context.Context, event ghpkg.CommentEvent) 
 		}
 	}
 
+	// Index feedback signal for pattern reinforcement/suppression
+	if ra.indexer != nil && original.Category != nil {
+		var feedbackAction string
+		switch decision.Action {
+		case "resolve":
+			// Developer agreed or Argus acknowledged being wrong.
+			// If Argus stood down (learning extracted), it's a dismissal.
+			// If developer resolved the concern, it's a confirmation.
+			if decision.Learning != "" {
+				feedbackAction = "dismissed"
+			} else {
+				feedbackAction = "confirmed"
+			}
+		case "stand_firm":
+			// Argus maintained its position — reinforces the pattern
+			feedbackAction = "confirmed"
+		}
+
+		if feedbackAction != "" {
+			err := ra.indexer.IndexFeedbackSignal(ctx, owner, repo, memory.FeedbackMemory{
+				FilePath:       original.FilePath,
+				Category:       *original.Category,
+				OriginalBody:   original.Body,
+				Action:         feedbackAction,
+				DeveloperReply: event.CommentBody,
+				PRNumber:       event.PRNumber,
+			})
+			if err != nil {
+				ra.logger.Error("indexing feedback signal", "error", err, "action", feedbackAction)
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -205,7 +238,10 @@ Analyze their reply and choose one action:
 Guidelines:
 - Be concise and professional
 - If the developer is right and you were wrong, acknowledge it gracefully
-- If you learn a project-specific pattern from the reply, include it in "learning"
+- Your action choice affects pattern memory:
+  - "resolve" WITHOUT learning = your finding was correct and developer fixed it (reinforces pattern)
+  - "resolve" WITH learning = you were wrong and learned something (suppresses this pattern)
+  - "stand_firm" = finding is valid, developer hasn't addressed it (reinforces pattern)
 - Include "learning" if and only if the developer revealed something about how THIS SPECIFIC REPO works that you couldn't have known from the diff alone. Examples: "this project intentionally uses X pattern", "Y is handled upstream by Z service", "team convention is to do A instead of B"
 - Do NOT include general programming knowledge as learning
 - If no repo-specific insight was revealed, omit the field

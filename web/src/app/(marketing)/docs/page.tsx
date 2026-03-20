@@ -124,28 +124,35 @@ const PIPELINE_STAGES = [
     step: "01",
     label: "Triage",
     icon: FileSearch,
-    description: "Fast LLM pass classifies every changed file as skip, skim, or deep review. Generated files, lockfiles, and vendored deps are skipped automatically.",
+    description: "Fast LLM pass classifies every changed file as skip, skim, security_skim, or deep review. Generated files, lockfiles, and vendored deps are skipped automatically.",
     model: "gpt-4o-mini",
   },
   {
     step: "02",
     label: "Review",
     icon: MessageSquare,
-    description: "Per-file parallel review with persona-tuned prompts. Deep files get full analysis with suggestion blocks; skimmed files get a truncated pass. Each file reviewed independently.",
+    description: "Per-file parallel review with persona-tuned prompts. Deep reviews activate 4 specialists (bug hunter, security, architecture, regression). Each file reviewed independently with memory context.",
     model: "claude-sonnet-4",
   },
   {
     step: "03",
-    label: "Synthesis",
-    icon: Layers,
-    description: "All file comments are aggregated into a unified summary. A quality score (1\u201310) is calculated based on severity distribution.",
-    model: "same as review",
+    label: "Scoring",
+    icon: SlidersHorizontal,
+    description: "A separate scoring model validates each comment (0\u2013100). Comments below the threshold are dropped to reduce noise. Deduplicates overlapping findings. Skipped if no scoring model is configured.",
+    model: "configurable",
   },
   {
     step: "04",
+    label: "Synthesis",
+    icon: Layers,
+    description: "All surviving comments are aggregated into a unified summary. A quality score (1\u201310) is calculated based on severity distribution.",
+    model: "same as review",
+  },
+  {
+    step: "05",
     label: "Post",
     icon: Send,
-    description: "Review posted as inline GitHub PR comments with severity tags and one-click suggestion fixes. Comments indexed in memory for future context.",
+    description: "Review posted as inline GitHub PR comments with severity tags and one-click suggestion fixes. Comments indexed in memory for future context. Patterns auto-learned for future reviews.",
     model: "\u2014",
   },
 ];
@@ -469,8 +476,8 @@ export default function DocsPage() {
               {[
                 { stage: "triage", model: "gpt-4o-mini", tokens: "2,048", temp: "0.2" },
                 { stage: "review", model: "claude-sonnet-4", tokens: "4,096", temp: "0.2" },
+                { stage: "scoring", model: "configurable", tokens: "4,096", temp: "0.2" },
                 { stage: "synthesis", model: "same as review", tokens: "4,096", temp: "0.2" },
-                { stage: "embedding", model: "text-embedding-3-small", tokens: "\u2014", temp: "\u2014" },
               ].map((row, i, arr) => (
                 <div
                   key={row.stage}
@@ -665,8 +672,8 @@ export default function DocsPage() {
               {[
                 {
                   cmd: "@argus-eye review",
-                  desc: "Trigger a full review right now. Add --persona to switch review style for this PR only.",
-                  example: "@argus-eye review --persona mentor",
+                  desc: "Trigger a full review right now. Add --force to re-review even if already reviewed at this SHA. Add --persona to switch review style for this PR only.",
+                  example: "@argus-eye review --force --persona mentor",
                 },
                 {
                   cmd: "@argus-eye remember <pattern>",
@@ -675,13 +682,18 @@ export default function DocsPage() {
                 },
                 {
                   cmd: "@argus-eye resolve",
-                  desc: "Clean up after yourself. Scans all bot comments and auto-minimizes ones where the referenced file has been updated.",
+                  desc: "Clean up after yourself. Scans all unresolved bot review threads and resolves ones where the referenced file has been updated in the latest diff.",
                   example: "@argus-eye resolve",
                 },
                 {
                   cmd: "@argus-eye fix",
                   desc: "The magic command. Applies every suggestion block from the review as a single atomic commit pushed straight to your PR branch.",
                   example: "@argus-eye fix",
+                },
+                {
+                  cmd: "@argus-eye help",
+                  desc: "Lists all available commands and their usage. Posts a reference table right in the PR.",
+                  example: "@argus-eye help",
                 },
               ].map((c) => (
                 <div
@@ -784,7 +796,7 @@ export default function DocsPage() {
                   <span className="text-amber shrink-0">&bull;</span>
                   <span>
                     <code className="text-foreground/80 bg-iron/40 rounded px-1 py-0.5">repo-patterns</code>{" "}
-                    &mdash; Repo-specific patterns and conventions
+                    &mdash; Repo-specific patterns, conventions, and file synthesis
                   </span>
                 </div>
                 <div className="flex items-start gap-2">
@@ -796,10 +808,45 @@ export default function DocsPage() {
                 </div>
               </div>
               <p className="text-[11px] font-mono text-iron mt-3">
-                During review, the LLM can search memory to find similar past
-                issues and apply consistent feedback.
+                During review, the LLM searches memory for similar past issues,
+                file history, and confirmed patterns to calibrate its findings.
               </p>
             </div>
+
+            <h3 className="text-sm font-bold text-foreground mt-6 mb-3">
+              How memory grows
+            </h3>
+            <p className="text-xs font-mono text-slate-text mb-4 leading-relaxed">
+              After every review, Argus automatically extracts and indexes
+              knowledge through several mechanisms:
+            </p>
+            <div className="space-y-2 text-xs font-mono text-slate-text leading-relaxed">
+              <div className="flex items-start gap-2">
+                <span className="text-amber shrink-0">&bull;</span>
+                <span><strong className="text-foreground/80">Auto-learn patterns</strong> &mdash; High-confidence review comments are distilled into reusable patterns specific to your codebase</span>
+              </div>
+              <div className="flex items-start gap-2">
+                <span className="text-amber shrink-0">&bull;</span>
+                <span><strong className="text-foreground/80">Convention extraction</strong> &mdash; Code style conventions are identified from diff additions (error handling, logging, naming, architecture)</span>
+              </div>
+              <div className="flex items-start gap-2">
+                <span className="text-amber shrink-0">&bull;</span>
+                <span><strong className="text-foreground/80">File synthesis</strong> &mdash; Per-file condensed memory docs capture dominant themes and patterns to watch for</span>
+              </div>
+              <div className="flex items-start gap-2">
+                <span className="text-amber shrink-0">&bull;</span>
+                <span><strong className="text-foreground/80">PR summaries</strong> &mdash; Lightweight summaries of each review for historical context</span>
+              </div>
+            </div>
+
+            <h3 className="text-sm font-bold text-foreground mt-6 mb-3">
+              Feedback loop
+            </h3>
+            <p className="text-xs font-mono text-slate-text mb-4 leading-relaxed">
+              Reply to any Argus comment on GitHub. If you explain why it was
+              wrong, Argus stores a &ldquo;dismissed&rdquo; signal so it avoids
+              similar false positives in the future. If you fix the issue, the
+              pattern is reinforced. Over time, reviews get more accurate.</p>
           </div>
         </div>
       </div>
