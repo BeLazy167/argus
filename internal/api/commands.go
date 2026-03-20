@@ -21,6 +21,7 @@ func (s *Server) handleHelpCommand(ctx context.Context, evt ghpkg.IssueCommentEv
 | ` + "`@argus-eye review`" + ` | Trigger a code review on this PR |
 | ` + "`@argus-eye review --force`" + ` | Re-review even if already reviewed at this SHA |
 | ` + "`@argus-eye review --persona <name>`" + ` | Review with a specific persona |
+| | _Personas: default, security_auditor, performance_engineer, mentor, architect, strict, adversarial, fresh_eyes_ |
 | ` + "`@argus-eye remember <pattern>`" + ` | Teach Argus a pattern for this repo |
 | ` + "`@argus-eye remember --org <pattern>`" + ` | Teach Argus an org-wide pattern |
 | ` + "`@argus-eye fix`" + ` | Apply all suggestion blocks from review comments as a commit |
@@ -98,7 +99,7 @@ func (s *Server) handleRememberCommand(ctx context.Context, evt ghpkg.IssueComme
 	}
 
 	createdBy := evt.CommentAuthor
-	_, err = s.store.CreatePattern(ctx, inst.ID, repoID, content, smID, &createdBy)
+	_, err = s.store.CreatePattern(ctx, inst.ID, repoID, content, smID, &createdBy, nil, nil, nil)
 	if err != nil {
 		s.logger.Error("remember: save to db", "error", err)
 		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
@@ -320,7 +321,7 @@ func (s *Server) handleFixCommand(ctx context.Context, evt ghpkg.IssueCommentEve
 	if err := ghClient.UpdateRef(ctx, evt.InstallationID, owner, repo, "heads/"+pr.HeadRef, commitSHA); err != nil {
 		s.logger.Error("fix: updating ref", "error", err)
 		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
-			"Failed to push fix commit. The bot may not have write access to fork branches.")
+			"Failed to push fix commit. Argus needs write access to create commits. Check your GitHub App permissions at https://github.com/settings/installations")
 		return
 	}
 

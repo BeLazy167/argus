@@ -149,6 +149,29 @@ func isDeepReviewEnabled(settingsJSON json.RawMessage) bool {
 	return ok && s.DeepReview
 }
 
+// PersonaSpecialistHint returns a short directive for appending to specialist prompts.
+// Condensed to avoid diluting specialist focus.
+func PersonaSpecialistHint(p Persona) string {
+	switch p {
+	case PersonaSecurityAuditor:
+		return "\nPersona lens: security-first. Weight security findings highest and flag any trust boundary violations."
+	case PersonaPerformanceEngineer:
+		return "\nPersona lens: performance-focused. Flag allocations, N+1 patterns, and unnecessary complexity."
+	case PersonaMentor:
+		return "\nPersona lens: mentor. Frame findings as learning opportunities with brief explanations of why."
+	case PersonaArchitect:
+		return "\nPersona lens: architect. Prioritize design patterns, coupling, and API surface concerns."
+	case PersonaStrict:
+		return "\nPersona lens: strict. Lower your threshold for reporting — flag anything questionable."
+	case PersonaAdversarial:
+		return "\nPersona lens: adversarial. Assume the worst about every code path — find what breaks under pressure."
+	case PersonaFreshEyes:
+		return "\nPersona lens: fresh eyes. Flag anything that isn't immediately obvious to a newcomer."
+	default:
+		return ""
+	}
+}
+
 // loadPersona extracts the persona from a repo's settings_json.
 func loadPersona(settingsJSON json.RawMessage) Persona {
 	s, ok := parseRepoSettings(settingsJSON)

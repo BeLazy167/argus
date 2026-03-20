@@ -71,6 +71,7 @@ type PipelineRun struct {
 	Persona          Persona
 	DeepReview       bool
 	ScoringSkipped   bool // true when scoring provider unavailable — synthesis uses all comments
+	Prompts          map[string]string // custom prompt overrides per stage
 	IsIncremental    bool
 	PreviousReviewID *uuid.UUID
 	StartedCommentNodeID string    `json:"-"` // node ID of the "review started" GH comment, for minimizing later
@@ -113,6 +114,7 @@ var ValidCategories = map[Category]bool{
 // SynthesisResult is the combined review output.
 type SynthesisResult struct {
 	Summary    string
+	Brief      string
 	Score      int // 1-10
 	TokenUsage map[string]int
 }
@@ -126,6 +128,14 @@ func (r *RunTokenUsage) addToTotal(s StageTokens) {
 	r.Total.CompletionTokens += s.CompletionTokens
 	r.Total.TotalTokens += s.TotalTokens
 	r.Total.Cost += s.Cost
+}
+
+// customOrDefault returns the custom prompt for key if set, otherwise the fallback.
+func customOrDefault(prompts map[string]string, key, fallback string) string {
+	if p, ok := prompts[key]; ok && p != "" {
+		return p
+	}
+	return fallback
 }
 
 // unmarshalLLMArray parses a JSON array from LLM output, handling markdown code fences.

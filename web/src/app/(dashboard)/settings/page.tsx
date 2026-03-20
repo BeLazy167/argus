@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Settings, Loader2, Save, Trash2, Key, Cpu, ChevronDown, Zap, Check, X, ArrowUp, Info, UserCog, Lock, ShieldCheck, Bug, Blocks, RotateCcw } from "lucide-react";
+import { Settings, Loader2, Save, Trash2, Key, Cpu, ChevronDown, Zap, Check, X, ArrowUp, Info, UserCog, Lock, ShieldCheck, Bug, Blocks, RotateCcw, FileText, RotateCw, Search } from "lucide-react";
 import {
   useModelConfigs,
   useUpsertModelConfig,
@@ -14,11 +14,18 @@ import {
   useUpsertProviderKey,
   useDeleteProviderKey,
 } from "@/lib/queries/provider-keys";
+import {
+  usePrompts,
+  useDefaultPrompts,
+  useUpsertPrompt,
+  useDeletePrompt,
+} from "@/lib/queries/prompts";
+import { useOpenRouterModels } from "@/lib/queries/openrouter-models";
 import { useActiveRepo } from "@/lib/hooks/use-active-repo";
 import { useInstallation } from "@/providers/installation-provider";
 import { useUpdateRepo } from "@/lib/queries/repos";
 import { RepoSelect } from "@/components/dashboard/repo-select";
-import type { ProviderKey } from "@/lib/types";
+import type { ProviderKey, PromptTemplate } from "@/lib/types";
 
 /* ── Providers & model quick-picks ── */
 
@@ -78,6 +85,20 @@ const PERSONAS = [
   { value: "architect", label: "Architect", description: "Design patterns, coupling, API contracts, and module boundaries" },
   { value: "strict", label: "Strict", description: "Comments on everything — no issue too small" },
 ] as const;
+
+/* ── Prompt stage labels ── */
+
+const STAGE_LABELS: Record<string, string> = {
+  triage_system: "Triage",
+  review_system: "Review",
+  scoring_system: "Scoring",
+  specialist_bug_hunter: "Bug Hunter Specialist",
+  specialist_security: "Security Specialist",
+  specialist_architecture: "Architecture Specialist",
+  specialist_regression: "Regression Specialist",
+};
+
+const PROMPT_STAGES = Object.keys(STAGE_LABELS);
 
 /* ── Status Badge ── */
 
@@ -238,11 +259,13 @@ function ConfigCard({
   repoId,
   existing,
   savedProviders,
+  installationId,
 }: {
   stage: string;
   repoId: number;
   existing?: { provider: string; model: string; base_url?: string; max_tokens: number; temperature: number };
   savedProviders: string[];
+  installationId?: number;
 }) {
   const [provider, setProvider] = useState(existing?.provider ?? "");
   const [model, setModel] = useState(existing?.model ?? "");
@@ -250,11 +273,15 @@ function ConfigCard({
   const [isCustom, setIsCustom] = useState(false);
   const [maxTokens, setMaxTokens] = useState(existing?.max_tokens ?? 4096);
   const [temperature, setTemperature] = useState(existing?.temperature ?? 0.2);
+  const [modelSearch, setModelSearch] = useState("");
 
   const upsert = useUpsertModelConfig();
   const del = useDeleteModelConfig();
   const test = useTestConfig();
   const [testResult, setTestResult] = useState<TestResult | null>(null);
+
+  const isOpenRouter = provider === "openrouter";
+  const { data: orModels } = useOpenRouterModels(isOpenRouter ? installationId : undefined);
 
   const effectiveProvider = provider as Provider;
   const picks = MODEL_PICKS[effectiveProvider] ?? [];
@@ -379,7 +406,66 @@ function ConfigCard({
           <label className="block text-[10px] font-mono text-slate-text mb-1">
             Model
           </label>
-          {picks.length > 0 && !isCustom ? (
+          {isOpenRouter && orModels && orModels.length > 0 && !isCustom ? (
+            /* Searchable OpenRouter model list */
+            <div className="relative">
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-slate-text" />
+                <input
+                  type="text"
+                  value={modelSearch || model}
+                  onChange={(e) => {
+                    setModelSearch(e.target.value);
+                    setModel("");
+                  }}
+                  placeholder="Search models..."
+                  className="w-full rounded border border-iron bg-background pl-7 pr-2 py-1.5 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none"
+                  list={`or-models-${stage}`}
+                />
+              </div>
+              <datalist id={`or-models-${stage}`}>
+                {orModels
+                  .filter((m) => !modelSearch || m.id.toLowerCase().includes(modelSearch.toLowerCase()) || m.name.toLowerCase().includes(modelSearch.toLowerCase()))
+                  .slice(0, 50)
+                  .map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.name} ({(m.context_length / 1000).toFixed(0)}k ctx)
+                    </option>
+                  ))}
+              </datalist>
+              {/* Select from filtered results or enter custom */}
+              {modelSearch && !model && (
+                <div className="absolute z-20 mt-1 w-full max-h-48 overflow-y-auto rounded border border-iron bg-charcoal shadow-lg">
+                  {orModels
+                    .filter((m) => m.id.toLowerCase().includes(modelSearch.toLowerCase()) || m.name.toLowerCase().includes(modelSearch.toLowerCase()))
+                    .slice(0, 20)
+                    .map((m) => (
+                      <button
+                        key={m.id}
+                        type="button"
+                        onClick={() => {
+                          setModel(m.id);
+                          setModelSearch("");
+                        }}
+                        className="w-full text-left px-3 py-1.5 text-xs font-mono hover:bg-amber/10 transition-colors"
+                      >
+                        <span className="text-foreground">{m.id}</span>
+                        <span className="text-slate-text ml-2">
+                          {(m.context_length / 1000).toFixed(0)}k ctx
+                        </span>
+                      </button>
+                    ))}
+                  <button
+                    type="button"
+                    onClick={() => handleModelSelect("__custom__")}
+                    className="w-full text-left px-3 py-1.5 text-xs font-mono text-amber hover:bg-amber/10 transition-colors border-t border-iron"
+                  >
+                    Custom model...
+                  </button>
+                </div>
+              )}
+            </div>
+          ) : picks.length > 0 && !isCustom ? (
             <div className="relative">
               <select
                 value={model}
@@ -545,6 +631,99 @@ function DeepReviewCard({
   );
 }
 
+/* ── Prompt Editor Card ── */
+
+function PromptCard({
+  stage,
+  repoId,
+  custom,
+  defaultText,
+}: {
+  stage: string;
+  repoId: number;
+  custom?: PromptTemplate;
+  defaultText: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState(custom?.prompt_text ?? "");
+  const upsert = useUpsertPrompt();
+  const del = useDeletePrompt();
+
+  const isCustom = custom?.is_custom ?? false;
+  const displayText = isCustom ? custom!.prompt_text : defaultText;
+
+  const handleSave = () => {
+    if (!draft.trim()) return;
+    upsert.mutate({ repoId, stage, prompt_text: draft });
+  };
+
+  const handleReset = () => {
+    del.mutate(
+      { repoId, stage },
+      { onSuccess: () => setDraft("") },
+    );
+  };
+
+  return (
+    <div className="rounded-lg border border-iron bg-charcoal">
+      <button
+        type="button"
+        onClick={() => {
+          if (!open && !draft) setDraft(displayText);
+          setOpen(!open);
+        }}
+        className="flex w-full items-center justify-between p-4 text-left"
+      >
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-mono font-medium text-foreground">
+            {STAGE_LABELS[stage]}
+          </span>
+          {isCustom && (
+            <span className="inline-flex items-center rounded-sm border border-amber/30 bg-amber/10 px-1.5 py-0.5 text-[9px] font-mono uppercase tracking-wider text-amber">
+              Custom
+            </span>
+          )}
+        </div>
+        <ChevronDown className={`h-3.5 w-3.5 text-slate-text transition-transform ${open ? "rotate-180" : ""}`} />
+      </button>
+
+      {open && (
+        <div className="border-t border-iron px-4 pb-4 pt-3 space-y-3">
+          <textarea
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            placeholder={defaultText}
+            rows={10}
+            className="w-full rounded border border-iron bg-background px-3 py-2 text-xs font-mono text-foreground placeholder:text-iron/60 focus:border-amber focus:outline-none resize-y leading-relaxed"
+          />
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleSave}
+              disabled={upsert.isPending || !draft.trim()}
+              className="flex items-center gap-2 rounded border border-amber/30 bg-amber/10 px-3 py-1 text-[11px] font-mono text-amber hover:bg-amber/20 transition-colors disabled:opacity-50"
+            >
+              <Save className="h-3 w-3" />
+              {upsert.isPending ? "Saving..." : "Save"}
+            </button>
+            {isCustom && (
+              <button
+                type="button"
+                onClick={handleReset}
+                disabled={del.isPending}
+                className="flex items-center gap-2 rounded border border-iron px-3 py-1 text-[11px] font-mono text-slate-text hover:text-foreground hover:border-foreground/30 transition-colors disabled:opacity-50"
+              >
+                <RotateCw className="h-3 w-3" />
+                {del.isPending ? "Resetting..." : "Reset to default"}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ── Page ── */
 
 export default function SettingsPage() {
@@ -553,9 +732,14 @@ export default function SettingsPage() {
 
   const { data: configs, isLoading: configsLoading } = useModelConfigs(activeId);
   const { data: providerKeys, isLoading: keysLoading } = useProviderKeys();
+  const { data: customPrompts } = usePrompts(activeId);
+  const { data: defaultPrompts } = useDefaultPrompts();
   const updateRepo = useUpdateRepo();
 
   const [personaError, setPersonaError] = useState("");
+
+  const promptMap = new Map(customPrompts?.map((p) => [p.stage, p]));
+  const defaultPromptMap = new Map(defaultPrompts?.map((p) => [p.stage, p]));
 
   const activeRepo = repos.find((r) => r.id === activeId);
   const currentPersona = (activeRepo?.settings_json?.persona as string) || "default";
@@ -685,6 +869,7 @@ export default function SettingsPage() {
                       repoId={activeId}
                       existing={configMap.get(stage)}
                       savedProviders={savedProviders}
+                      installationId={active?.id}
                     />
                   ))}
                 </div>
@@ -724,6 +909,7 @@ export default function SettingsPage() {
                         repoId={activeId}
                         existing={configMap.get("scoring")}
                         savedProviders={savedProviders}
+                        installationId={active?.id}
                       />
                     </div>
                   </div>
@@ -788,6 +974,47 @@ export default function SettingsPage() {
                   <p className="text-[10px] font-mono text-red-400 mt-2">{personaError}</p>
                 )}
               </>
+            )}
+          </section>
+
+          {/* Section 4: Review Prompts */}
+          <section>
+            <div className="flex items-center gap-3 mb-4">
+              <span className="inline-flex items-center justify-center h-6 w-6 rounded-full border border-amber/30 bg-amber/10 text-[11px] font-mono font-bold text-amber">
+                4
+              </span>
+              <div className="flex items-center gap-2">
+                <FileText className="h-4 w-4 text-amber" />
+                <h2 className="font-display text-lg font-semibold text-foreground">
+                  Review Prompts
+                </h2>
+              </div>
+            </div>
+            <p className="text-[11px] font-mono text-slate-text mb-4">
+              Customize the AI prompts used in each pipeline stage for{" "}
+              <span className="text-foreground">{activeRepo?.full_name ?? "selected repo"}</span>.
+              Changes override the built-in defaults.
+            </p>
+
+            {activeId === 0 ? (
+              <div className="rounded-lg border border-iron bg-charcoal p-10 text-center">
+                <FileText className="h-8 w-8 text-slate-text mx-auto mb-3" />
+                <p className="text-xs font-mono text-slate-text">
+                  Select a repo to customize prompts.
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {PROMPT_STAGES.map((stage) => (
+                  <PromptCard
+                    key={stage}
+                    stage={stage}
+                    repoId={activeId}
+                    custom={promptMap.get(stage)}
+                    defaultText={defaultPromptMap.get(stage)?.prompt_text ?? ""}
+                  />
+                ))}
+              </div>
             )}
           </section>
         </div>

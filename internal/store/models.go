@@ -119,6 +119,22 @@ type UserInstallation struct {
 	CreatedAt      time.Time `json:"created_at"`
 }
 
+type CommentOutcome struct {
+	ID              int64     `json:"id"`
+	ReviewCommentID uuid.UUID `json:"review_comment_id"`
+	Outcome         string    `json:"outcome"`
+	CreatedAt       time.Time `json:"created_at"`
+}
+
+type PromptTemplate struct {
+	ID         int64     `json:"id"`
+	RepoID     int64     `json:"repo_id"`
+	Stage      string    `json:"stage"`
+	PromptText string    `json:"prompt_text"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
 type Stats struct {
 	TotalReviews    int `json:"total_reviews"`
 	CompletedToday  int `json:"completed_today"`

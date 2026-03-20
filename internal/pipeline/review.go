@@ -147,9 +147,10 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 				}
 				p := reviewParams{file: u.file, action: u.action, specialist: u.specialist, deepReview: run.DeepReview}
 				if u.specialist != "" {
-					p.systemBase = specialistPrompt(u.specialist) + specialistMemoryBlock(ctx, rs.memClient, owner, repo, u.specialist, u.file.NewName)
+					p.systemBase = specialistPrompt(u.specialist, run.Prompts) + specialistMemoryBlock(ctx, rs.memClient, owner, repo, u.specialist, u.file.NewName)
+					p.promptExtra = PersonaSpecialistHint(run.Persona)
 				} else {
-					p.systemBase = baseSystemPrompt + reviewMemoryBlock(ctx, rs.memClient, owner, repo, u.file.NewName)
+					p.systemBase = customOrDefault(run.Prompts, "review_system", baseSystemPrompt) + reviewMemoryBlock(ctx, rs.memClient, owner, repo, u.file.NewName)
 					p.promptExtra = PersonaPromptOverlay(run.Persona)
 				}
 				rev, tok, err := rs.reviewFile(ctx, run, p, fileContents, owner, repo, cfg, provider)
@@ -480,17 +481,17 @@ func validateComments(comments []FileComment) []FileComment {
 	return valid
 }
 
-const baseSystemPrompt = `You are a senior engineer reviewing a pull request. You are thorough, skeptical, and direct.
+const baseSystemPrompt = `You are a senior engineer reviewing a pull request. You are precise, skeptical, and cost-aware.
 
-Assume the code has bugs until proven otherwise. For every function, ask yourself: "What input would break this? What edge case did the author miss? What happens when this fails at 3 AM?"
+Every comment you file costs developer time to read, evaluate, and respond. Only file a comment if you are >90% confident it identifies a real issue and you can point to the exact problematic line.
 
 ## Principles
 1. Only comment on CHANGED lines — never review unchanged code
-2. For every issue, explain WHY it matters and what breaks in production
-3. High confidence only — if you're unsure, don't comment
-4. Fewer high-quality comments beat many low-value ones
-5. Don't nitpick style. Focus on correctness, security, and reliability
-6. Return [] if the changes look good
+2. If the same root cause manifests in multiple places, file ONE comment at the root cause location explaining the pattern. Do not repeat the same finding at each symptom
+3. Prioritize issues in public APIs, module boundaries, and exported interfaces over internal implementation details
+4. Do not comment on code style, naming conventions, or formatting unless it directly causes a bug or significantly harms readability. These are not actionable review comments
+5. For every issue, explain WHY it matters and what breaks in production
+6. Return [] if the changes look good — an empty review is better than a noisy one
 7. A false positive that wastes a developer's time is worse than missing a minor issue. If you can't point to the exact line that proves the bug, don't file it
 
 ## Priority (highest first)
@@ -503,7 +504,6 @@ Assume the code has bugs until proven otherwise. For every function, ask yoursel
 ## Institutional Memory
 If memory context (patterns, rules, past findings) is provided below, use it to:
 - Prioritize issues that match established patterns from past reviews
-- Reference specific past learnings when applicable (e.g., "Based on past reviews in this repo, this pattern has caused X")
 - Respect established conventions — don't flag code that follows documented project patterns
 - Give higher severity to issues that match previously confirmed problem patterns
 

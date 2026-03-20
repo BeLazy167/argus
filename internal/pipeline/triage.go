@@ -72,7 +72,7 @@ func (ts *TriageStage) Execute(ctx context.Context, run *PipelineRun) error {
 	}
 	resp, err := provider.Complete(ctx, llm.CompletionRequest{
 		Model:       cfg.Model,
-		System:      triageSystemPrompt,
+		System:      customOrDefault(run.Prompts, "triage_system", triageSystemPrompt),
 		Messages:    []llm.Message{{Role: "user", Content: prompt}},
 		MaxTokens:   cfg.MaxTokens,
 		Temperature: cfg.Temperature,
@@ -236,9 +236,16 @@ func triageMemoryHints(ctx context.Context, memClient *memory.Client, owner, rep
 const triageSystemPrompt = `You are a code review triage assistant. Given a list of changed files with abbreviated diffs, classify each file into one of four review depths:
 
 - "skip": Generated files, lockfiles, configs with no logic, pure renames, vendored deps
-- "skim": Simple changes, typo fixes, minor refactors, test-only changes, style-only changes
+- "skim": Simple changes, typo fixes, minor refactors, style-only changes
 - "security_skim": Auth middleware, input parsing/validation, API route handlers, encryption, session management — files that need a security pass but not full deep review. Saves tokens vs deep.
 - "deep": Business logic, security-sensitive code, API changes, complex algorithms, new features
+
+## Risk-Aware Rules (apply BEFORE general classification):
+- Files touching authentication, authorization, session management, or cryptography: default to "deep" regardless of diff size
+- Public API surfaces (route handlers, exported interfaces, SDK methods): default to "deep"
+- Lock files (.lock), generated code (.generated., .pb.go, .g.dart), vendor directories: default to "skip"
+- Test files with only assertion changes: default to "skim"
+- Configuration files (.yaml, .json, .toml) with security implications (secrets, permissions, CORS): "security_skim"
 
 Respond ONLY with a JSON array. Each element: {"file": "<path>", "action": "skip|skim|security_skim|deep", "reason": "<brief reason>"}
 Do not include any other text.`

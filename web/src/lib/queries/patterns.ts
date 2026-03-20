@@ -1,7 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "@clerk/nextjs";
 import { api } from "../api";
-import type { Pattern } from "../types";
+import type { Pattern, PatternStat } from "../types";
 import { useInstallation } from "@/providers/installation-provider";
 
 export function usePatterns() {
@@ -32,6 +32,19 @@ export function useCreatePattern() {
       );
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ["patterns"] }),
+  });
+}
+
+export function usePatternStats() {
+  const { getToken } = useAuth();
+  const { active } = useInstallation();
+  return useQuery({
+    queryKey: ["pattern-stats", active?.id],
+    queryFn: async () => {
+      const token = await getToken();
+      return api.get<PatternStat[]>("/api/v1/patterns/stats", token ?? undefined, active?.id);
+    },
+    enabled: !!active,
   });
 }
 

@@ -137,21 +137,37 @@ func (ra *ReplyAnalyzer) Analyze(ctx context.Context, event ghpkg.CommentEvent) 
 		}
 	}
 
+	// Determine outcome for the original comment
+	var outcome string
+	switch decision.Action {
+	case "resolve":
+		if decision.Learning != "" {
+			outcome = "dismissed"
+		} else {
+			outcome = "confirmed"
+		}
+	case "stand_firm":
+		outcome = "confirmed"
+	case "clarify":
+		outcome = "ignored"
+	}
+	if outcome != "" {
+		if err := ra.store.RecordCommentOutcome(ctx, original.ID, outcome); err != nil {
+			ra.logger.Error("recording comment outcome", "error", err, "outcome", outcome)
+		}
+	}
+
 	// Index feedback signal for pattern reinforcement/suppression
 	if ra.indexer != nil && original.Category != nil {
 		var feedbackAction string
 		switch decision.Action {
 		case "resolve":
-			// Developer agreed or Argus acknowledged being wrong.
-			// If Argus stood down (learning extracted), it's a dismissal.
-			// If developer resolved the concern, it's a confirmation.
 			if decision.Learning != "" {
 				feedbackAction = "dismissed"
 			} else {
 				feedbackAction = "confirmed"
 			}
 		case "stand_firm":
-			// Argus maintained its position — reinforces the pattern
 			feedbackAction = "confirmed"
 		}
 
