@@ -30,6 +30,24 @@ export function useRepo(id: number) {
   });
 }
 
+export function useSyncRepos() {
+  const { getToken } = useAuth();
+  const { active } = useInstallation();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async () => {
+      const token = await getToken();
+      return api.post<{ synced: number }>(
+        `/api/v1/installations/${active?.id}/sync-repos`,
+        {},
+        token ?? undefined,
+        active?.id,
+      );
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["repos"] }),
+  });
+}
+
 export function useUpdateRepo() {
   const { getToken } = useAuth();
   const { active } = useInstallation();

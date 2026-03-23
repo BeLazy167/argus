@@ -132,6 +132,11 @@ func (s *Store) GetInstallationByClerkOrgID(ctx context.Context, clerkOrgID stri
 	return &inst, nil
 }
 
+func (s *Store) SuspendInstallation(ctx context.Context, id int64) error {
+	_, err := s.Pool.Exec(ctx, `UPDATE installations SET suspended_at = NOW() WHERE id = $1`, id)
+	return err
+}
+
 func (s *Store) SetInstallationClerkOrgID(ctx context.Context, installationID int64, clerkOrgID string) error {
 	_, err := s.Pool.Exec(ctx, `
 		UPDATE installations SET clerk_org_id = $1 WHERE id = $2
