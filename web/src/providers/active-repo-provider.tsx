@@ -1,5 +1,5 @@
 "use client";
-import { createContext, useContext, useState, useEffect, type ReactNode } from "react";
+import { createContext, useContext, useState, type ReactNode } from "react";
 import { useRepos } from "@/lib/queries/repos";
 import type { Repo } from "@/lib/types";
 
@@ -19,16 +19,11 @@ const ActiveRepoContext = createContext<ActiveRepoContextType>({
 
 export function ActiveRepoProvider({ children }: { children: ReactNode }) {
   const { data: repos, isLoading } = useRepos();
-  const [selectedId, setSelectedIdState] = useState(0);
-
-  useEffect(() => {
-    if (!repos?.length || selectedId) return;
+  const [selectedId, setSelectedIdState] = useState<number>(() => {
+    if (typeof window === "undefined") return 0;
     const stored = localStorage.getItem("argus_active_repo");
-    const id = stored ? Number(stored) : 0;
-    if (id && repos.some((r) => r.id === id)) {
-      setSelectedIdState(id);
-    }
-  }, [repos, selectedId]);
+    return stored ? Number(stored) : 0;
+  });
 
   const setSelectedId = (id: number) => {
     setSelectedIdState(id);

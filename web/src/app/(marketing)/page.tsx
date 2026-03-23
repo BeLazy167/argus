@@ -57,20 +57,6 @@ function PipelineStage({
   );
 }
 
-/* ── Stat Counter ── */
-function StatCounter({ value, label }: { value: string; label: string }) {
-  return (
-    <div className="text-center">
-      <div className="font-display text-3xl md:text-4xl font-bold text-amber mb-1">
-        {value}
-      </div>
-      <div className="text-[11px] font-mono text-slate-text uppercase tracking-wider">
-        {label}
-      </div>
-    </div>
-  );
-}
-
 /* ── Main Page ── */
 export default function LandingPage() {
   const [activeStage, setActiveStage] = useState(0);
@@ -144,7 +130,7 @@ export default function LandingPage() {
     <>
       {/* ── HERO ── */}
       <section className="relative flex min-h-[100vh] flex-col items-center justify-center overflow-hidden bg-noise">
-        {/* Ambient glow */}
+        {/* Ambient glow — oklch radial-gradient not expressible as Tailwind arbitrary value */}
         <div
           className="pointer-events-none absolute top-1/3 left-1/2 -translate-x-1/2 -translate-y-1/2 h-[800px] w-[800px] rounded-full opacity-15"
           style={{
@@ -153,7 +139,7 @@ export default function LandingPage() {
           }}
         />
 
-        {/* Scan lines overlay */}
+        {/* Scan lines — repeating-linear-gradient with rgba stops not expressible in Tailwind */}
         <div
           className="pointer-events-none absolute inset-0 opacity-[0.015]"
           style={{
@@ -492,7 +478,7 @@ export default function LandingPage() {
 
       {/* ── CTA ── */}
       <section className="border-t border-iron bg-noise relative overflow-hidden">
-        {/* Ambient glow */}
+        {/* Ambient glow — oklch radial-gradient not expressible as Tailwind arbitrary value */}
         <div
           className="pointer-events-none absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 h-[500px] w-[500px] rounded-full opacity-10"
           style={{
@@ -598,30 +584,6 @@ export default function LandingPage() {
           </div>
         </div>
       </footer>
-
-      {/* Keyframe animations */}
-      <style>{`
-        @keyframes draw {
-          to { stroke-dashoffset: 0; }
-        }
-        @keyframes fadeIn {
-          to { opacity: 1; }
-        }
-        @keyframes scrollPulse {
-          0%, 100% { opacity: 0.5; }
-          50% { opacity: 1; }
-        }
-        @keyframes pipelinePing {
-          0% {
-            transform: scale(1);
-            opacity: 0.8;
-          }
-          100% {
-            transform: scale(3);
-            opacity: 0;
-          }
-        }
-      `}</style>
     </>
   );
 }

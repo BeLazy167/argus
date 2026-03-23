@@ -1018,9 +1018,9 @@ export default function ReviewDetailPage() {
       })()}
 
       {/* Main content: sidebar + file groups */}
-      <div className={showSidebar ? "grid grid-cols-[200px_1fr] gap-6" : ""}>
+      <div className={showSidebar ? "grid grid-cols-1 gap-6 lg:grid-cols-[200px_1fr]" : ""}>
         {showSidebar && (
-          <aside>
+          <aside className="hidden lg:block">
             <FileTOC
               grouped={grouped}
               severityCounts={severityCounts}

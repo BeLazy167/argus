@@ -12,7 +12,7 @@ import (
 type WebhookEvent struct {
 	Type    string
 	Action  string
-	Payload interface{}
+	Payload any
 }
 
 // PREvent holds the parsed data from a pull_request webhook event.

@@ -8,55 +8,7 @@
 /* Dark-only product. No light theme. Amber-on-void. */
 
 :root {
-  /* Argus brand colors mapped to shadcn semantic tokens */            /* Void #0D0D0D */            /* White #F5F5F5 */
-
-  --card: oklch(1 0 0);                  /* Charcoal #1A1A1A */
-  --card-foreground: oklch(0.147 0.004 49.3);
-
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.147 0.004 49.3);
-
-  --primary: oklch(0.553 0.195 38.402);           /* Argus Amber #F5A623 */
-  --primary-foreground: oklch(0.98 0.016 73.684);    /* Void on amber */
-
-  --secondary: oklch(0.967 0.001 286.375);             /* Iron #2C2C2C */
-  --secondary-foreground: oklch(0.21 0.006 285.885);
-
-  --muted: oklch(0.96 0.002 17.2);
-  --muted-foreground: oklch(0.547 0.021 43.1);      /* Slate #888888 */
-
-  --accent: oklch(0.96 0.002 17.2);            /* Amber accent */
-  --accent-foreground: oklch(0.214 0.009 43.1);
-
-  --destructive: oklch(0.577 0.245 27.325);
-  --destructive-foreground: oklch(0.96 0 0);
-
-  --border: oklch(0.922 0.005 34.3);               /* Iron-ish border */
-  --input: oklch(0.922 0.005 34.3);
-  --ring: oklch(0.714 0.014 41.2);             /* Amber ring */
-
-  /* Charts — amber scale */
-  --chart-1: oklch(0.905 0.182 98.111);          /* Amber */
-  --chart-2: oklch(0.795 0.184 86.047);          /* Dark amber */
-  --chart-3: oklch(0.681 0.162 75.834);          /* Muted amber */
-  --chart-4: oklch(0.554 0.135 66.442);          /* Dim amber */
-  --chart-5: oklch(0.476 0.114 61.907);          /* Near-dark */
-
-  /* Sidebar */
-  --sidebar: oklch(0.986 0.002 67.8);             /* Slightly lighter than void */
-  --sidebar-foreground: oklch(0.147 0.004 49.3);
-  --sidebar-primary: oklch(0.646 0.222 41.116);
-  --sidebar-primary-foreground: oklch(0.98 0.016 73.684);
-  --sidebar-accent: oklch(0.96 0.002 17.2);
-  --sidebar-accent-foreground: oklch(0.214 0.009 43.1);
-  --sidebar-border: oklch(0.922 0.005 34.3);
-  --sidebar-ring: oklch(0.714 0.014 41.2);
-
   --radius: 0;
-
-  --background: oklch(1 0 0);
-
-  --foreground: oklch(0.147 0.004 49.3);
 }
 
 /* ── Tailwind v4 theme bridge ── */
@@ -110,7 +62,7 @@
   /* Fonts */
   --font-display: "Syne", sans-serif;
   --font-sans: var(--font-geist-sans), "Geist Sans", system-ui, sans-serif;
-  --font-mono: var(--font-mono);
+  --font-mono: var(--font-jetbrains-mono), "JetBrains Mono", monospace;
   --font-heading: var(--font-mono);
   --radius-2xl: calc(var(--radius) * 1.8);
   --radius-3xl: calc(var(--radius) * 2.2);
@@ -221,4 +173,84 @@
   --sidebar-border: oklch(1 0 0 / 10%);
 
   --sidebar-ring: oklch(0.547 0.021 43.1);
+}
+
+/* ── Keyframe animations (moved from inline <style> tags) ── */
+
+@keyframes draw {
+  to { stroke-dashoffset: 0; }
+}
+
+@keyframes fadeIn {
+  to { opacity: 1; }
+}
+
+@keyframes scrollPulse {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+
+@keyframes pipelinePing {
+  0% {
+    transform: scale(1);
+    opacity: 0.8;
+  }
+  100% {
+    transform: scale(3);
+    opacity: 0;
+  }
+}
+
+@keyframes reviewSlideIn {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+    max-height: 0;
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    max-height: 200px;
+  }
+}
+
+@keyframes cursorBlink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+@keyframes eyeDraw {
+  to { stroke-dashoffset: 0; }
+}
+
+@keyframes eyeFadeIn {
+  to { opacity: 1; }
+}
+
+/* ── Eye symbol animation classes ── */
+.eye-outline {
+  animation: eyeDraw 1.5s ease-in-out forwards;
+}
+.eye-iris {
+  opacity: 0;
+  animation: eyeFadeIn 0.5s ease-in 0.8s forwards;
+  transition: transform 0.15s ease-out;
+}
+.eye-pupil {
+  opacity: 0;
+  animation: eyeFadeIn 0.4s ease-in 1.0s forwards;
+  transition: transform 0.15s ease-out;
+}
+.eye-marker {
+  opacity: 0;
+  animation: eyeFadeIn 0.4s ease-in 1.2s forwards;
+  transition: transform 0.15s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

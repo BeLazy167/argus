@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -184,14 +185,7 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 			c := run.AllFileReviews[ic.fileIdx].Comments[ic.commentIdx]
 			all = append(all, scoredIdx{fileIdx: ic.fileIdx, commentIdx: ic.commentIdx, score: c.Score})
 		}
-		// Simple descending sort
-		for i := 0; i < len(all); i++ {
-			for j := i + 1; j < len(all); j++ {
-				if all[j].score > all[i].score {
-					all[i], all[j] = all[j], all[i]
-				}
-			}
-		}
+		sort.Slice(all, func(i, j int) bool { return all[i].score > all[j].score })
 		n := minSurvivors
 		if n > len(all) {
 			n = len(all)

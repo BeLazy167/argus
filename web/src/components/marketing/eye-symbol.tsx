@@ -35,93 +35,64 @@ export function EyeSymbol({ className = "", trackMouse = false }: EyeSymbolProps
   }, [trackMouse, handleMouseMove]);
 
   return (
-    <>
-      <svg
-        ref={svgRef}
-        viewBox="0 0 120 60"
+    <svg
+      ref={svgRef}
+      viewBox="0 0 120 60"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      className={className}
+      aria-hidden="true"
+    >
+      {/* Outer eye shape — draw-in */}
+      <path
+        d="M10 30C10 30 30 8 60 8C90 8 110 30 110 30C110 30 90 52 60 52C30 52 10 30 10 30Z"
+        stroke="currentColor"
+        strokeWidth="2"
         fill="none"
-        xmlns="http://www.w3.org/2000/svg"
-        className={className}
-        aria-hidden="true"
+        strokeDasharray="300"
+        strokeDashoffset="300"
+        className="eye-outline"
+      />
+      {/* Iris — use transform for smooth tracking */}
+      <g
+        className="eye-iris"
+        style={{ transform: `translate(${offset.x}px, ${offset.y}px)` }}
       >
-        {/* Outer eye shape — draw-in */}
-        <path
-          d="M10 30C10 30 30 8 60 8C90 8 110 30 110 30C110 30 90 52 60 52C30 52 10 30 10 30Z"
+        <circle
+          cx="60"
+          cy="30"
+          r="14"
           stroke="currentColor"
           strokeWidth="2"
           fill="none"
-          strokeDasharray="300"
-          strokeDashoffset="300"
-          className="eye-outline"
         />
-        {/* Iris — use transform for smooth tracking */}
+      </g>
+      {/* Inner pupil */}
+      {trackMouse && (
         <g
-          className="eye-iris"
-          style={{ transform: `translate(${offset.x}px, ${offset.y}px)` }}
+          className="eye-pupil"
+          style={{ transform: `translate(${offset.x * 1.2}px, ${offset.y * 1.2}px)` }}
         >
-          <circle
-            cx="60"
-            cy="30"
-            r="14"
-            stroke="currentColor"
-            strokeWidth="2"
-            fill="none"
-          />
+          <circle cx="60" cy="30" r="4" fill="currentColor" />
         </g>
-        {/* Inner pupil */}
-        {trackMouse && (
-          <g
-            className="eye-pupil"
-            style={{ transform: `translate(${offset.x * 1.2}px, ${offset.y * 1.2}px)` }}
-          >
-            <circle cx="60" cy="30" r="4" fill="currentColor" />
-          </g>
-        )}
-        {/* Diff marker */}
-        <g
-          className="eye-marker"
-          style={{ transform: `translate(${offset.x}px, ${offset.y}px)` }}
+      )}
+      {/* Diff marker */}
+      <g
+        className="eye-marker"
+        style={{ transform: `translate(${offset.x}px, ${offset.y}px)` }}
+      >
+        <text
+          x="60"
+          y="34"
+          textAnchor="middle"
+          fill="currentColor"
+          fontSize="14"
+          fontFamily="JetBrains Mono, monospace"
+          fontWeight="500"
         >
-          <text
-            x="60"
-            y="34"
-            textAnchor="middle"
-            fill="currentColor"
-            fontSize="14"
-            fontFamily="JetBrains Mono, monospace"
-            fontWeight="500"
-          >
-            &lt;&gt;
-          </text>
-        </g>
-      </svg>
-
-      <style>{`
-        .eye-outline {
-          animation: eyeDraw 1.5s ease-in-out forwards;
-        }
-        .eye-iris {
-          opacity: 0;
-          animation: eyeFadeIn 0.5s ease-in 0.8s forwards;
-          transition: transform 0.15s ease-out;
-        }
-        .eye-pupil {
-          opacity: 0;
-          animation: eyeFadeIn 0.4s ease-in 1.0s forwards;
-          transition: transform 0.15s ease-out;
-        }
-        .eye-marker {
-          opacity: 0;
-          animation: eyeFadeIn 0.4s ease-in 1.2s forwards;
-          transition: transform 0.15s ease-out;
-        }
-        @keyframes eyeDraw {
-          to { stroke-dashoffset: 0; }
-        }
-        @keyframes eyeFadeIn {
-          to { opacity: 1; }
-        }
-      `}</style>
-    </>
+          &lt;&gt;
+        </text>
+      </g>
+    </svg>
   );
 }

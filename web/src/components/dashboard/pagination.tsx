@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 
 const PAGE_SIZE = 15;
@@ -20,8 +21,6 @@ export function usePagination<T>(items: T[], pageSize = PAGE_SIZE) {
     hasPrev: safeP > 0,
   };
 }
-
-import { useState } from "react";
 
 export function PaginationBar({
   page,
@@ -55,6 +54,7 @@ export function PaginationBar({
         <button
           onClick={onPrev}
           disabled={!hasPrev}
+          aria-label="Previous page"
           className="rounded border border-border p-1 text-muted-foreground hover:text-foreground disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
         >
           <ChevronLeft className="h-3.5 w-3.5" />
@@ -65,6 +65,7 @@ export function PaginationBar({
         <button
           onClick={onNext}
           disabled={!hasNext}
+          aria-label="Next page"
           className="rounded border border-border p-1 text-muted-foreground hover:text-foreground disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
         >
           <ChevronRight className="h-3.5 w-3.5" />
