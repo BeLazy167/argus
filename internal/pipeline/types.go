@@ -38,10 +38,11 @@ const (
 
 // RunTokenUsage tracks token consumption and cost across pipeline stages.
 type RunTokenUsage struct {
-	Triage  StageTokens   `json:"triage"`
-	Review  []StageTokens `json:"review"`
-	Scoring StageTokens   `json:"scoring,omitempty"`
-	Total   StageTokens   `json:"total"`
+	Triage    StageTokens   `json:"triage"`
+	Review    []StageTokens `json:"review"`
+	Scoring   StageTokens   `json:"scoring,omitempty"`
+	Synthesis StageTokens   `json:"synthesis,omitempty"`
+	Total     StageTokens   `json:"total"`
 }
 
 // StageTokens holds token counts and cost for a single LLM call or stage aggregate.
@@ -93,6 +94,8 @@ type FileComment struct {
 	Line        int      `json:"line"`
 	StartLine   int      `json:"start_line"`
 	Body        string   `json:"body"`
+	What        string   `json:"what,omitempty"`
+	Why         string   `json:"why,omitempty"`
 	Severity    Severity `json:"severity"`
 	Category    Category `json:"category"`
 	CodeSnippet string   `json:"code_snippet,omitempty"`

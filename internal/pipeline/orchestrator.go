@@ -416,37 +416,31 @@ func (o *Orchestrator) synthesize(ctx context.Context, run *PipelineRun) error {
 	for _, fr := range run.FileReviews {
 		summary.WriteString(fmt.Sprintf("### `%s`\n", fr.Path))
 		for _, c := range fr.Comments {
-			summary.WriteString(fmt.Sprintf("- **[%s]** L%d: %s\n", c.Severity, c.Line, c.Body))
+			desc := c.What
+			if desc == "" {
+				desc = c.Body
+			}
+			summary.WriteString(fmt.Sprintf("- **[%s]** L%d: %s\n", c.Severity, c.Line, desc))
 		}
 		summary.WriteString("\n")
 	}
 
-	// Build concise brief for GitHub review body
+	score := calculateScore(run)
 	totalComments := countComments(run)
+
+	// Build concise brief for GitHub review body
 	var brief string
 	if totalComments == 0 {
-		brief = fmt.Sprintf("Argus reviewed %d files and found no issues.", len(run.Diff.Files))
+		brief = fmt.Sprintf("Argus reviewed %d files and found no issues. Code looks good.", len(run.Diff.Files))
 	} else {
-		var criticals, warnings int
-		for _, fr := range run.FileReviews {
-			for _, c := range fr.Comments {
-				switch c.Severity {
-				case SeverityCritical:
-					criticals++
-				case SeverityWarning:
-					warnings++
-				}
-			}
-		}
-		top := topCategories(run, 2)
-		brief = fmt.Sprintf("Argus found %d issues (%d critical, %d warnings) across %d files. Key concerns: %s.",
-			totalComments, criticals, warnings, len(run.Diff.Files), strings.Join(top, ", "))
+		// Try LLM-generated conversational brief
+		brief = o.generateConversationalBrief(ctx, run, score)
 	}
 
 	run.Synthesis = &SynthesisResult{
 		Summary: summary.String(),
 		Brief:   brief,
-		Score:   calculateScore(run),
+		Score:   score,
 	}
 
 	if run.EventBus != nil {
@@ -456,6 +450,95 @@ func (o *Orchestrator) synthesize(ctx context.Context, run *PipelineRun) error {
 		})
 	}
 	return nil
+}
+
+const synthesisBriefSystemPrompt = `You are a senior software engineer summarizing a code review. Write naturally and concisely — like a quick Slack message to the PR author. Reference specific files when mentioning issues. 3-6 sentences max. No markdown headers, no bullet lists, no filler. Do NOT include a score or link — those are appended separately.`
+
+// generateConversationalBrief calls the LLM to produce a natural-language summary of the review.
+// Falls back to a deterministic brief on failure.
+func (o *Orchestrator) generateConversationalBrief(ctx context.Context, run *PipelineRun, score int) string {
+	// Build deterministic fallback
+	var criticals, warnings int
+	for _, fr := range run.FileReviews {
+		for _, c := range fr.Comments {
+			switch c.Severity {
+			case SeverityCritical:
+				criticals++
+			case SeverityWarning:
+				warnings++
+			}
+		}
+	}
+	top := topCategories(run, 2)
+	fallback := fmt.Sprintf("Argus found %d issues (%d critical, %d warnings) across %d files. Key concerns: %s.",
+		countComments(run), criticals, warnings, len(run.Diff.Files), strings.Join(top, ", "))
+
+	// Resolve synthesis provider (falls back to review provider)
+	lister := storeConfigLister{o.st}
+	provider, cfg, err := o.reviewStage.registry.ResolveProvider(ctx, lister, run.DBInstallationID, run.DBRepoID, llm.StageSynthesis)
+	if err != nil {
+		// Try review stage as fallback
+		provider, cfg, err = o.reviewStage.registry.ResolveProvider(ctx, lister, run.DBInstallationID, run.DBRepoID, llm.StageReview)
+		if err != nil {
+			o.logger.Warn("synthesis brief: no provider available, using fallback", "error", err)
+			return fallback
+		}
+	}
+
+	prompt := buildSynthesisBriefPrompt(run, score)
+	resp, err := provider.Complete(ctx, llm.CompletionRequest{
+		Model:       cfg.Model,
+		System:      synthesisBriefSystemPrompt,
+		Messages:    []llm.Message{{Role: "user", Content: prompt}},
+		MaxTokens:   400,
+		Temperature: 0.7,
+	})
+	if err != nil {
+		o.logger.Warn("synthesis brief LLM call failed, using fallback", "error", err)
+		return fallback
+	}
+
+	run.Tokens.Synthesis = StageTokens{
+		PromptTokens:     resp.TokensUsed.PromptTokens,
+		CompletionTokens: resp.TokensUsed.CompletionTokens,
+		TotalTokens:      resp.TokensUsed.TotalTokens,
+		Cost:             resp.Cost,
+	}
+	run.Tokens.Total.PromptTokens += resp.TokensUsed.PromptTokens
+	run.Tokens.Total.CompletionTokens += resp.TokensUsed.CompletionTokens
+	run.Tokens.Total.TotalTokens += resp.TokensUsed.TotalTokens
+	run.Tokens.Total.Cost += resp.Cost
+
+	brief := strings.TrimSpace(resp.Content)
+	if brief == "" {
+		return fallback
+	}
+	return util.Truncate(brief, 1500, false)
+}
+
+func buildSynthesisBriefPrompt(run *PipelineRun, score int) string {
+	var sb strings.Builder
+	safeTitle := sanitizeUserInput(util.Truncate(run.PREvent.PRTitle, 200, false))
+	safeAuthor := sanitizeUserInput(util.Truncate(run.PREvent.PRAuthor, 100, false))
+	sb.WriteString(fmt.Sprintf("PR #%d: \"%s\" by %s\n", run.PREvent.PRNumber, safeTitle, safeAuthor))
+	sb.WriteString(fmt.Sprintf("Files reviewed: %d, Score: %d/10\n\n", len(run.Diff.Files), score))
+
+	if run.PREvent.PRBody != "" {
+		sb.WriteString("PR description: " + util.Truncate(run.PREvent.PRBody, 300, false) + "\n\n")
+	}
+
+	sb.WriteString("Review comments:\n")
+	for _, fr := range run.FileReviews {
+		for _, c := range fr.Comments {
+			body := c.What
+			if body == "" {
+				body = c.Body
+			}
+			sb.WriteString(fmt.Sprintf("- %s:%d [%s·%s] %s\n", fr.Path, c.Line, c.Severity, c.Category, util.Truncate(body, 120, true)))
+		}
+	}
+	sb.WriteString("\nWrite a brief conversational summary of this review.")
+	return sb.String()
 }
 
 // topCategories returns the top N most frequent comment categories from FileReviews.
@@ -581,8 +664,13 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		return fmt.Errorf("synthesis result is nil, cannot post review")
 	}
 
+	reviewHeader := "## Argus Review\n\n"
+	if run.IsIncremental {
+		reviewHeader = "## Argus Review (Incremental)\n\n"
+	}
 	submission := &ghpkg.ReviewSubmission{
-		Summary: run.Synthesis.Brief + "\n\n[View full review](https://argusai.vercel.app/reviews/" + run.ReviewID.String() + ")",
+		Summary: reviewHeader + run.Synthesis.Brief +
+			fmt.Sprintf("\n\nScore: **%d/10** · [Full review →](https://argusai.vercel.app/reviews/%s)", run.Synthesis.Score, run.ReviewID.String()),
 	}
 
 	// Build valid-line sets from diff to avoid 422 "line could not be resolved"
@@ -1218,11 +1306,31 @@ func getDiffContext(run *PipelineRun, path string) string {
 
 // formatCommentBody builds the GitHub review comment body with severity, category, and optional suggestion block.
 func formatCommentBody(c FileComment) string {
-	body := fmt.Sprintf("**[%s | %s]** %s", c.Severity, c.Category, c.Body)
+	title := fmt.Sprintf("**[%s · %s]** %s", c.Severity, c.Category, commentTitle(c))
+
+	var body string
+	if c.What != "" && c.Why != "" {
+		body = title + "\n\n**What:** " + c.What + "\n\n**Why:** " + c.Why
+	} else {
+		body = title + "\n\n" + c.Body
+	}
+
 	if c.Suggestion != "" {
 		body += "\n\n```suggestion\n" + strings.TrimRight(c.Suggestion, "\n") + "\n```"
 	}
 	return body
+}
+
+// commentTitle extracts a short title from the comment for the header line.
+func commentTitle(c FileComment) string {
+	src := c.What
+	if src == "" {
+		src = c.Body
+	}
+	if idx := strings.Index(src, "."); idx > 0 && idx < 80 {
+		return src[:idx]
+	}
+	return util.Truncate(src, 80, false)
 }
 
 func strPtrOrNil(s string) *string {
