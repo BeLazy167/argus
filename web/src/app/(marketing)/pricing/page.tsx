@@ -96,7 +96,7 @@ export default function PricingPage() {
           Ship with confidence.
         </h1>
         <p className="text-sm text-slate-text">
-          Free for open source. Pay for private repos.
+          Free to start. Pro when you need it.
         </p>
       </div>
 
@@ -105,54 +105,36 @@ export default function PricingPage() {
         One critical bug in production costs more than a year of Argus.
       </p>
 
-      <div className="grid gap-6 md:grid-cols-3">
+      <div className="grid gap-6 md:grid-cols-2 max-w-2xl mx-auto">
         <PlanCard
-          name="Open Source"
+          name="Free"
           price="$0"
           period="/forever"
-          description="Public repos. Unlimited reviews."
+          description="Get started with code review."
           features={[
-            "Unlimited public repos",
-            "Full review pipeline",
-            "Community rules",
-            "Risk scoring",
+            "1 repo",
+            "Basic review pipeline",
+            "Bring your own API keys",
           ]}
           cta="Get started"
           href="/sign-up"
         />
         <PlanCard
-          name="Team"
+          name="Pro"
           price="$29"
-          period="/mo per repo"
-          description="Private repos. Full memory."
+          period="/mo per org"
+          description="Unlimited repos. Deep review."
           features={[
-            "Everything in Open Source",
-            "Private repositories",
-            "Institutional memory (RAG)",
-            "Custom org rules",
-            "Per-repo model config",
+            "Unlimited repos",
+            "Deep review (4 specialists)",
+            "Custom prompts",
+            "Pattern learning",
             "Priority support",
           ]}
           cta="Start free trial"
           href="/sign-up"
           highlighted
-          badge="Most popular"
-        />
-        <PlanCard
-          name="Enterprise"
-          price="From $199"
-          period="/mo"
-          description="Self-hosted. Your infrastructure."
-          features={[
-            "Everything in Team",
-            "Self-hosted deployment",
-            "SSO / SAML",
-            "Audit logs",
-            "Custom SLA",
-            "Dedicated Slack channel",
-          ]}
-          cta="Talk to us"
-          href="mailto:hello@argus.dev"
+          badge="Recommended"
         />
       </div>
 
@@ -170,8 +152,8 @@ export default function PricingPage() {
         </h2>
         <div className="space-y-2">
           <FaqItem
-            q="How does per-repo pricing work?"
-            a="You pay for each private repo with Argus enabled. Disable a repo anytime to stop charges. Public repos are always free."
+            q="How does per-org pricing work?"
+            a="You pay per organization per month. All repos within that org get full access. Personal accounts use the Free plan."
           />
           <FaqItem
             q="Does it work with monorepos?"
@@ -188,10 +170,6 @@ export default function PricingPage() {
           <FaqItem
             q="What if Argus flags something incorrectly?"
             a="Dismiss it. Every comment explains its reasoning — disagree and move on. Over time, Argus learns your codebase patterns and false positives decrease."
-          />
-          <FaqItem
-            q="Can I self-host?"
-            a="Enterprise plan includes self-hosted deployment. Argus is a single Go binary + PostgreSQL. Runs on any container platform."
           />
           <FaqItem
             q="Is there a free trial?"

@@ -96,6 +96,7 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 
 				// Installations
 				r.Get("/installations", s.listInstallations)
+				r.Get("/installations/current", s.getCurrentInstallation)
 
 				// Repos
 				r.Get("/repos", s.listRepos)
@@ -280,7 +281,8 @@ func (s *Server) listMyInstallations(w http.ResponseWriter, r *http.Request) {
 func (s *Server) linkInstallation(w http.ResponseWriter, r *http.Request) {
 	userID := getUserID(r.Context())
 	var body struct {
-		InstallationID int64 `json:"installation_id"`
+		InstallationID int64  `json:"installation_id"`
+		ClerkOrgID     string `json:"clerk_org_id,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
@@ -290,6 +292,13 @@ func (s *Server) linkInstallation(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.handleDBError(w, err, "installation not found")
 		return
+	}
+	if body.ClerkOrgID != "" {
+		if err := s.store.SetInstallationClerkOrgID(r.Context(), inst.ID, body.ClerkOrgID); err != nil {
+			s.logger.Error("set clerk org id", "error", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to link org"})
+			return
+		}
 	}
 	ui, err := s.store.LinkUserInstallation(r.Context(), userID, inst.ID, "owner")
 	if err != nil {
@@ -302,6 +311,20 @@ func (s *Server) linkInstallation(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listInstallations(w http.ResponseWriter, r *http.Request) {
 	s.listMyInstallations(w, r)
+}
+
+func (s *Server) getCurrentInstallation(w http.ResponseWriter, r *http.Request) {
+	ids := getInstallationIDs(r.Context())
+	if len(ids) == 0 {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no active installation"})
+		return
+	}
+	inst, err := s.store.GetInstallation(r.Context(), ids[0])
+	if err != nil {
+		s.handleDBError(w, err, "installation not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, inst)
 }
 
 // --- Repos ---

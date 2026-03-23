@@ -11,6 +11,7 @@ type Installation struct {
 	ID             int64      `json:"id"`
 	InstallationID int64      `json:"installation_id"`
 	OrgLogin       string     `json:"org_login"`
+	ClerkOrgID     *string    `json:"clerk_org_id,omitempty"`
 	CreatedAt      time.Time  `json:"created_at"`
 	SuspendedAt    *time.Time `json:"suspended_at,omitempty"`
 }
