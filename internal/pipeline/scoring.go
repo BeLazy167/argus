@@ -231,9 +231,9 @@ func buildScoringPrompt(run *PipelineRun, memContext string) string {
 		sb.WriteString(memContext)
 		sb.WriteString("\n")
 	}
-	// Truncate user-controlled fields for prompt injection resistance
-	safeTitle := truncate(run.PREvent.PRTitle, 200)
-	safeAuthor := truncate(run.PREvent.PRAuthor, 100)
+	// Sanitize + truncate user-controlled fields
+	safeTitle := sanitizeUserInput(truncate(run.PREvent.PRTitle, 200))
+	safeAuthor := sanitizeUserInput(truncate(run.PREvent.PRAuthor, 100))
 	sb.WriteString(fmt.Sprintf("PR #%d: \"%s\" by %s\n\nScore each comment 0-100:\n\n", run.PREvent.PRNumber, safeTitle, safeAuthor))
 	idx := 0
 	for _, fr := range run.FileReviews {
