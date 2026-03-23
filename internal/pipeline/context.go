@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	ghpkg "github.com/BeLazy167/argus/internal/github"
+	"github.com/BeLazy167/argus/internal/store"
 	"github.com/BeLazy167/argus/internal/util"
 	"github.com/BeLazy167/argus/pkg/diff"
 )
@@ -130,6 +131,22 @@ func FormatRelatedContext(related []RelatedFile) string {
 		sb.WriteString(fmt.Sprintf("File: %s (%s)\n```\n%s\n```\n\n", r.Path, r.Reason, r.Content))
 	}
 	sb.WriteString("</related_context>\n")
+	return sb.String()
+}
+
+// FormatBlastRadius formats code graph blast radius results as a context block for the review prompt.
+func FormatBlastRadius(nodes []store.CodeNode) string {
+	if len(nodes) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("\n<blast_radius>\n")
+	sb.WriteString("The following code symbols transitively depend on the changed files:\n\n")
+	for _, n := range nodes {
+		sb.WriteString(fmt.Sprintf("- [depth %d] %s `%s` in %s\n", n.Depth, n.Kind, n.Name, n.FilePath))
+	}
+	sb.WriteString("\nConsider whether the changes could break these dependents.\n")
+	sb.WriteString("</blast_radius>\n")
 	return sb.String()
 }
 

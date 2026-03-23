@@ -1,0 +1,75 @@
+package pipeline
+
+import (
+	"context"
+	"fmt"
+	"strings"
+
+	"github.com/BeLazy167/argus/internal/store"
+)
+
+// ScenarioSeed is an extracted scenario candidate from a completed review.
+type ScenarioSeed struct {
+	Description string
+	Source      string
+	SourceRef   string
+	Files       []string
+	Severity    string
+}
+
+// ExtractScenariosFromReview generates scenario seeds from significant review findings.
+// Call after a review completes; persist seeds via store.CreateScenario.
+func ExtractScenariosFromReview(run *PipelineRun) []ScenarioSeed {
+	var seeds []ScenarioSeed
+	for _, fr := range run.FileReviews {
+		for _, c := range fr.Comments {
+			if c.Severity != SeverityCritical && c.Severity != SeverityWarning {
+				continue
+			}
+			desc := fmt.Sprintf("In %s: %s", fr.Path, c.What)
+			if c.Why != "" {
+				desc += " — " + c.Why
+			}
+			seeds = append(seeds, ScenarioSeed{
+				Description: desc,
+				Source:      "review",
+				SourceRef:   run.ReviewID.String(),
+				Files:       []string{fr.Path},
+				Severity:    string(c.Severity),
+			})
+		}
+	}
+	return seeds
+}
+
+// StoreScenarioSeeds persists extracted scenario seeds to the database.
+// Wire this into the orchestrator after review completion:
+//
+//	seeds := pipeline.ExtractScenariosFromReview(run)
+//	pipeline.StoreScenarioSeeds(ctx, st, run.DBInstallationID, &run.DBRepoID, seeds)
+func StoreScenarioSeeds(ctx context.Context, st *store.Store, installationID int64, repoID *int64, seeds []ScenarioSeed) {
+	for _, seed := range seeds {
+		_, _ = st.CreateScenario(ctx, installationID, repoID, seed.Description, seed.Source, seed.SourceRef, seed.Files, nil, seed.Severity)
+	}
+}
+
+// FindRelevantScenarios searches for active scenarios matching the changed files.
+func FindRelevantScenarios(ctx context.Context, st *store.Store, repoID int64, changedFiles []string) ([]store.Scenario, error) {
+	return st.ListScenariosForFiles(ctx, repoID, changedFiles)
+}
+
+// FormatScenariosForPrompt renders matched scenarios as an XML block for the review prompt.
+func FormatScenariosForPrompt(scenarios []store.Scenario) string {
+	if len(scenarios) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("\n<known_issues>\n")
+	sb.WriteString("The following known issues/behaviors are relevant to the files in this PR:\n\n")
+	for _, s := range scenarios {
+		sb.WriteString(fmt.Sprintf("- [%s] %s (source: %s)\n", s.Severity, s.Description, s.Source))
+	}
+	sb.WriteString("\nConsider whether the current changes address, worsen, or are unrelated to these known issues.\n")
+	sb.WriteString("</known_issues>\n")
+	return sb.String()
+}

@@ -140,6 +140,15 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 				r.Post("/patterns", s.createPattern)
 				r.Delete("/patterns/{patternID}", s.deletePattern)
 
+				// Scenarios
+				r.Get("/repos/{repoID}/scenarios", s.listScenarios)
+				r.Post("/repos/{repoID}/scenarios", s.createScenario)
+				r.Delete("/scenarios/{scenarioID}", s.deactivateScenario)
+
+				// Traces
+				r.Get("/repos/{repoID}/traces", s.listTraces)
+				r.Get("/repos/{repoID}/risk", s.getRepoRisk)
+
 				// OpenRouter
 				r.Get("/openrouter-models", s.listOpenRouterModels)
 			})

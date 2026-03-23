@@ -140,6 +140,20 @@ type PromptTemplate struct {
 	UpdatedAt  time.Time `json:"updated_at"`
 }
 
+type Scenario struct {
+	ID             int64     `json:"id"`
+	InstallationID int64     `json:"installation_id"`
+	RepoID         *int64    `json:"repo_id,omitempty"`
+	Description    string    `json:"description"`
+	Source         string    `json:"source"`
+	SourceRef      string    `json:"source_ref,omitempty"`
+	Files          []string  `json:"files,omitempty"`
+	Modules        []string  `json:"modules,omitempty"`
+	Severity       string    `json:"severity"`
+	Active         bool      `json:"active"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
 type Stats struct {
 	TotalReviews    int `json:"total_reviews"`
 	CompletedToday  int `json:"completed_today"`
@@ -152,4 +166,16 @@ type Stats struct {
 	HighRiskCount   int `json:"high_risk_count"`
 	AvgReviewTimeMs int `json:"avg_review_time_ms"`
 	DeepReviewCount int `json:"deep_review_count"`
+}
+
+type CodeNode struct {
+	ID        int64  `json:"id"`
+	RepoID    int64  `json:"repo_id"`
+	Kind      string `json:"kind"`
+	Name      string `json:"name"`
+	FilePath  string `json:"file_path"`
+	LineStart int    `json:"line_start"`
+	LineEnd   int    `json:"line_end"`
+	Language  string `json:"language"`
+	Depth     int    `json:"depth,omitempty"`
 }

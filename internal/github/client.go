@@ -575,6 +575,25 @@ func (c *Client) SearchCode(ctx context.Context, installationID int64, owner, re
 	return paths, nil
 }
 
+// GetRepoTree returns all file paths in a repo at a given ref using the Git Trees API (recursive).
+func (c *Client) GetRepoTree(ctx context.Context, installationID int64, owner, repo, ref string) ([]string, error) {
+	client, err := c.app.ClientForInstallation(installationID)
+	if err != nil {
+		return nil, err
+	}
+	tree, _, err := client.Git.GetTree(ctx, owner, repo, ref, true)
+	if err != nil {
+		return nil, fmt.Errorf("fetching repo tree: %w", err)
+	}
+	var paths []string
+	for _, entry := range tree.Entries {
+		if entry.GetType() == "blob" {
+			paths = append(paths, entry.GetPath())
+		}
+	}
+	return paths, nil
+}
+
 // ReviewSubmission represents a formatted review ready to post to GitHub.
 type ReviewSubmission struct {
 	Summary  string
