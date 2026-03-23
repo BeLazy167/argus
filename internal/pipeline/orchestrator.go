@@ -1021,9 +1021,9 @@ Max 200 words. Be concrete.`
 	synthCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	// Sanitize user-controlled fields for prompt injection resistance
-	safeTitle := truncate(run.PREvent.PRTitle, 200)
-	safeAuthor := truncate(run.PREvent.PRAuthor, 100)
+	// Sanitize + truncate user-controlled fields
+	safeTitle := sanitizeUserInput(truncate(run.PREvent.PRTitle, 200))
+	safeAuthor := sanitizeUserInput(truncate(run.PREvent.PRAuthor, 100))
 
 	var succeeded, failed int
 	for _, fc := range qualifying {

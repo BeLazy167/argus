@@ -707,7 +707,12 @@ func (s *Server) upsertPromptTemplate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "prompt_text required"})
 		return
 	}
-	pt, err := s.store.UpsertPromptTemplate(r.Context(), repoID, stage, body.PromptText)
+	validated, errMsg := pipeline.ValidateCustomPrompt(body.PromptText)
+	if errMsg != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": errMsg})
+		return
+	}
+	pt, err := s.store.UpsertPromptTemplate(r.Context(), repoID, stage, validated)
 	if err != nil {
 		s.logger.Error("upsert prompt template", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save prompt"})
