@@ -4,6 +4,7 @@ import { GeistSans } from "geist/font/sans";
 import { ClerkProvider } from "@clerk/nextjs";
 import { dark } from "@clerk/themes";
 import "./globals.css";
+import { cn } from "@/lib/utils";
 
 const syne = Syne({
   subsets: ["latin"],
@@ -12,12 +13,7 @@ const syne = Syne({
   display: "swap",
 });
 
-const jetbrains = JetBrains_Mono({
-  subsets: ["latin"],
-  variable: "--font-mono",
-  weight: ["400", "500"],
-  display: "swap",
-});
+const jetbrainsMono = JetBrains_Mono({subsets:['latin'],variable:'--font-mono'});
 
 export const metadata: Metadata = {
   title: "ARGUS — Nothing merges unseen",
@@ -54,7 +50,7 @@ export default function RootLayout({
     >
       <html
         lang="en"
-        className={`${syne.variable} ${jetbrains.variable} ${GeistSans.variable} dark`}
+        className={cn("dark", syne.variable, GeistSans.variable, "font-mono", jetbrainsMono.variable)}
         suppressHydrationWarning
       >
         <body className="min-h-screen bg-background font-mono antialiased">
