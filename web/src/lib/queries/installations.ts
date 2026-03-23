@@ -18,9 +18,13 @@ export function useLinkInstallation() {
   const { getToken } = useAuth();
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (installationId: number) => {
+    mutationFn: async (params: { installationId: number; clerkOrgId?: string }) => {
       const token = await getToken();
-      return api.post("/api/v1/installations/link", { installation_id: installationId }, token ?? undefined);
+      return api.post(
+        "/api/v1/installations/link",
+        { installation_id: params.installationId, clerk_org_id: params.clerkOrgId },
+        token ?? undefined,
+      );
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ["my-installations"] }),
   });

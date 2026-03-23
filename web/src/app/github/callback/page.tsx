@@ -1,7 +1,7 @@
 "use client";
 import { Suspense, useEffect } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
-import { useAuth } from "@clerk/nextjs";
+import { useAuth, useOrganization } from "@clerk/nextjs";
 import { QueryProvider } from "@/providers/query-provider";
 import { useLinkInstallation } from "@/lib/queries/installations";
 
@@ -9,6 +9,7 @@ function CallbackInner() {
   const params = useSearchParams();
   const router = useRouter();
   const { isSignedIn, isLoaded } = useAuth();
+  const { organization } = useOrganization();
   const linkMutation = useLinkInstallation();
 
   useEffect(() => {
@@ -18,10 +19,16 @@ function CallbackInner() {
       router.push("/dashboard");
       return;
     }
-    linkMutation.mutate(Number(installationId), {
-      onSuccess: () => router.push("/repos"),
-      onError: () => router.push("/dashboard"),
-    });
+    linkMutation.mutate(
+      {
+        installationId: Number(installationId),
+        clerkOrgId: organization?.id,
+      },
+      {
+        onSuccess: () => router.push("/repos"),
+        onError: () => router.push("/dashboard"),
+      },
+    );
   }, [isLoaded, isSignedIn, params]);
 
   return (

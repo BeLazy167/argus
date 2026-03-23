@@ -1,6 +1,8 @@
 "use client";
-import { createContext, useContext, useState, useEffect, type ReactNode } from "react";
-import { useMyInstallations } from "@/lib/queries/installations";
+import { createContext, useContext, type ReactNode } from "react";
+import { useOrganization, useAuth } from "@clerk/nextjs";
+import { useQuery } from "@tanstack/react-query";
+import { api } from "@/lib/api";
 import type { Installation } from "@/lib/types";
 
 type InstallationContextType = {
@@ -18,25 +20,36 @@ const InstallationContext = createContext<InstallationContextType>({
 });
 
 export function InstallationProvider({ children }: { children: ReactNode }) {
-  const { data: installations, isLoading } = useMyInstallations();
-  const [activeId, setActiveId] = useState<number | null>(null);
+  const { getToken } = useAuth();
+  const { organization } = useOrganization();
 
-  useEffect(() => {
-    const first = installations?.[0];
-    if (!first || activeId) return;
-    const stored = localStorage.getItem("argus_active_installation");
-    const id = stored ? Number(stored) : first.id;
-    setActiveId(id);
-  }, [installations, activeId]);
+  const { data: installations, isLoading: listLoading } = useQuery({
+    queryKey: ["my-installations"],
+    queryFn: async () => {
+      const token = await getToken();
+      return api.get<Installation[]>("/api/v1/me/installations", token ?? undefined);
+    },
+  });
 
-  const active = installations?.find((i) => i.id === activeId) ?? null;
-  const setActive = (id: number) => {
-    setActiveId(id);
-    localStorage.setItem("argus_active_installation", String(id));
-  };
+  const { data: current, isLoading: currentLoading } = useQuery({
+    queryKey: ["current-installation", organization?.id],
+    queryFn: async () => {
+      const token = await getToken();
+      return api.get<Installation>("/api/v1/installations/current", token ?? undefined);
+    },
+  });
+
+  const isLoading = listLoading || currentLoading;
 
   return (
-    <InstallationContext.Provider value={{ installations: installations ?? [], active, setActive, isLoading }}>
+    <InstallationContext.Provider
+      value={{
+        installations: installations ?? [],
+        active: current ?? null,
+        setActive: () => {},
+        isLoading,
+      }}
+    >
       {children}
     </InstallationContext.Provider>
   );

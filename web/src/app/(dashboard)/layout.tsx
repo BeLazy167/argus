@@ -1,6 +1,6 @@
 "use client";
 
-import { UserButton } from "@clerk/nextjs";
+import { UserButton, OrganizationSwitcher } from "@clerk/nextjs";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
@@ -9,9 +9,11 @@ import {
   GitFork,
   Brain,
   Settings,
+  Users,
+  CreditCard,
 } from "lucide-react";
 import { QueryProvider } from "@/providers/query-provider";
-import { InstallationProvider, useInstallation } from "@/providers/installation-provider";
+import { InstallationProvider } from "@/providers/installation-provider";
 import { ActiveRepoProvider } from "@/providers/active-repo-provider";
 
 const navItems = [
@@ -19,6 +21,8 @@ const navItems = [
   { href: "/reviews", label: "Reviews", icon: MessageSquare },
   { href: "/repos", label: "Repos", icon: GitFork },
   { href: "/patterns", label: "Patterns", icon: Brain },
+  { href: "/team", label: "Team", icon: Users },
+  { href: "/billing", label: "Billing", icon: CreditCard },
   { href: "/settings", label: "Settings", icon: Settings },
 ];
 
@@ -45,26 +49,6 @@ function SidebarLink({
       <Icon className="h-4 w-4" />
       {label}
     </Link>
-  );
-}
-
-function InstallationSwitcher() {
-  const { installations, active, setActive } = useInstallation();
-  if (installations.length <= 1) return null;
-  return (
-    <div className="px-5 py-2 border-b border-sidebar-border">
-      <select
-        value={active?.id ?? ""}
-        onChange={(e) => setActive(Number(e.target.value))}
-        className="w-full bg-sidebar text-xs font-mono text-slate-text border border-sidebar-border rounded px-2 py-1 focus:outline-none focus:border-amber"
-      >
-        {installations.map((inst) => (
-          <option key={inst.id} value={inst.id}>
-            {inst.org_login}
-          </option>
-        ))}
-      </select>
-    </div>
   );
 }
 
@@ -96,7 +80,20 @@ export default function DashboardLayout({
               </div>
             </div>
 
-            <InstallationSwitcher />
+            {/* Org Switcher */}
+            <div className="px-3 py-2 border-b border-sidebar-border">
+              <OrganizationSwitcher
+                hidePersonal={false}
+                afterSelectOrganizationUrl="/dashboard"
+                afterCreateOrganizationUrl="/dashboard"
+                appearance={{
+                  elements: {
+                    rootBox: "w-full",
+                    organizationSwitcherTrigger: "w-full justify-between px-3 py-2 text-xs font-mono border border-sidebar-border rounded bg-sidebar text-slate-text hover:text-foreground",
+                  }
+                }}
+              />
+            </div>
 
             {/* Nav */}
             <nav className="flex-1 space-y-1 px-3 py-4">
