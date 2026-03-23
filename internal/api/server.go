@@ -628,7 +628,7 @@ func (s *Server) testConfig(w http.ResponseWriter, r *http.Request) {
 		Model:       body.Model,
 		System:      "Respond with exactly: ok",
 		Messages:    []llm.Message{{Role: "user", Content: "ping"}},
-		MaxTokens:   8,
+		MaxTokens:   32,
 		Temperature: 0,
 	})
 	latency := time.Since(start).Milliseconds()
