@@ -277,7 +277,33 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p revie
 		relatedContext = FormatRelatedContext(related)
 	}
 
-	prompt := buildFileReviewPrompt(run, p.file, fileContents[p.file.NewName], relatedContext)
+	// Query blast radius from code graph
+	var blastContext string
+	if rs.store != nil {
+		changedPaths := make([]string, 0, len(run.Diff.Files))
+		for _, f := range run.Diff.Files {
+			changedPaths = append(changedPaths, f.NewName)
+		}
+		nodes, err := rs.store.GetBlastRadius(ctx, run.DBRepoID, changedPaths, 2)
+		if err != nil {
+			slog.Warn("blast radius query failed", "error", err)
+		} else {
+			blastContext = FormatBlastRadius(nodes)
+		}
+	}
+
+	// Look up relevant scenarios for this file
+	var scenarioContext string
+	if rs.store != nil {
+		scenarios, err := FindRelevantScenarios(ctx, rs.store, run.DBRepoID, []string{p.file.NewName})
+		if err != nil {
+			slog.Warn("scenario lookup failed", "file", p.file.NewName, "error", err)
+		} else {
+			scenarioContext = FormatScenariosForPrompt(scenarios)
+		}
+	}
+
+	prompt := buildFileReviewPrompt(run, p.file, fileContents[p.file.NewName], relatedContext, scenarioContext, blastContext)
 	messages := []llm.Message{{Role: "user", Content: prompt}}
 
 	var tools []llm.Tool
@@ -354,7 +380,7 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p revie
 	return review, tokens, fmt.Errorf("exceeded max tool iterations (%d) for %s %s", rs.maxToolIter, p.file.NewName, label)
 }
 
-func buildFileReviewPrompt(run *PipelineRun, file diff.FileDiff, fileContent string, relatedContext string) string {
+func buildFileReviewPrompt(run *PipelineRun, file diff.FileDiff, fileContent string, relatedContext string, scenarioContext string, blastContext string) string {
 	var sb strings.Builder
 	// Sanitize + truncate user-controlled fields
 	safeTitle := sanitizeUserInput(util.Truncate(run.PREvent.PRTitle, 200, false))
@@ -381,6 +407,14 @@ func buildFileReviewPrompt(run *PipelineRun, file diff.FileDiff, fileContent str
 
 	if relatedContext != "" {
 		sb.WriteString(relatedContext)
+	}
+
+	if scenarioContext != "" {
+		sb.WriteString(scenarioContext)
+	}
+
+	if blastContext != "" {
+		sb.WriteString(blastContext)
 	}
 
 	sb.WriteString(`
