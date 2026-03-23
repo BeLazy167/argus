@@ -84,6 +84,7 @@ const PERSONAS = [
   { value: "mentor", label: "Mentor", description: "Educational tone — explains why, suggests learning paths" },
   { value: "architect", label: "Architect", description: "Design patterns, coupling, API contracts, and module boundaries" },
   { value: "strict", label: "Strict", description: "Comments on everything — no issue too small" },
+  { value: "custom", label: "Custom", description: "Write your own persona prompt — define exactly how Argus reviews" },
 ] as const;
 
 /* ── Prompt stage labels ── */
@@ -743,7 +744,9 @@ export default function SettingsPage() {
 
   const activeRepo = repos.find((r) => r.id === activeId);
   const currentPersona = (activeRepo?.settings_json?.persona as string) || "default";
+  const currentCustomPrompt = (activeRepo?.settings_json?.custom_persona_prompt as string) || "";
   const deepReview = (activeRepo?.settings_json?.deep_review as boolean) ?? false;
+  const [customPromptDraft, setCustomPromptDraft] = useState(currentCustomPrompt);
 
   const loading = reposLoading || keysLoading || (activeId > 0 && configsLoading);
   const configMap = new Map(configs?.map((c) => [c.stage, c]));
@@ -970,6 +973,40 @@ export default function SettingsPage() {
                     />
                   ))}
                 </div>
+                {currentPersona === "custom" && (
+                  <div className="mt-4 rounded-lg border border-iron bg-charcoal p-4">
+                    <label className="block text-[11px] font-mono text-slate-text mb-2">
+                      Custom persona prompt — define how Argus should review code
+                    </label>
+                    <textarea
+                      value={customPromptDraft}
+                      onChange={(e) => setCustomPromptDraft(e.target.value)}
+                      placeholder="e.g. You are a reviewer focused on accessibility and i18n. Flag any hardcoded strings, missing aria labels, or RTL layout issues..."
+                      rows={5}
+                      className="w-full rounded-lg border border-iron bg-void px-4 py-3 text-xs font-mono text-foreground placeholder:text-slate-text/40 focus:outline-none focus:border-amber/50 transition-colors resize-y"
+                    />
+                    <button
+                      type="button"
+                      disabled={updateRepo.isPending || customPromptDraft === currentCustomPrompt}
+                      onClick={() => {
+                        setPersonaError("");
+                        updateRepo.mutate(
+                          {
+                            id: activeId,
+                            settings_json: { ...activeRepo?.settings_json, persona: "custom", custom_persona_prompt: customPromptDraft },
+                          },
+                          {
+                            onError: (err) =>
+                              setPersonaError(err instanceof Error ? err.message : "Failed to save"),
+                          },
+                        );
+                      }}
+                      className="mt-2 rounded border border-amber/30 bg-amber/10 px-3 py-1.5 text-[10px] font-mono font-medium text-amber hover:bg-amber/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    >
+                      {updateRepo.isPending ? "Saving..." : "Save Custom Persona"}
+                    </button>
+                  </div>
+                )}
                 {personaError && (
                   <p className="text-[10px] font-mono text-red-400 mt-2">{personaError}</p>
                 )}

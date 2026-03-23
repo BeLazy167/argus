@@ -148,10 +148,18 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 				p := reviewParams{file: u.file, action: u.action, specialist: u.specialist, deepReview: run.DeepReview}
 				if u.specialist != "" {
 					p.systemBase = specialistPrompt(u.specialist, run.Prompts) + specialistMemoryBlock(ctx, rs.memClient, owner, repo, u.specialist, u.file.NewName)
-					p.promptExtra = PersonaSpecialistHint(run.Persona)
+					if run.Persona == PersonaCustom {
+						p.promptExtra = PersonaSpecialistHintCustom(run.CustomPersonaPrompt)
+					} else {
+						p.promptExtra = PersonaSpecialistHint(run.Persona)
+					}
 				} else {
 					p.systemBase = customOrDefault(run.Prompts, "review_system", baseSystemPrompt) + reviewMemoryBlock(ctx, rs.memClient, owner, repo, u.file.NewName)
-					p.promptExtra = PersonaPromptOverlay(run.Persona)
+					if run.Persona == PersonaCustom {
+						p.promptExtra = PersonaPromptOverlayCustom(run.CustomPersonaPrompt)
+					} else {
+						p.promptExtra = PersonaPromptOverlay(run.Persona)
+					}
 				}
 				rev, tok, err := rs.reviewFile(ctx, run, p, fileContents, owner, repo, cfg, provider)
 				resultCh <- result{review: rev, tokens: tok, err: err}

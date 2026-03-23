@@ -68,8 +68,9 @@ type PipelineRun struct {
 	AllFileReviews   []FileReview // pre-scoring snapshot: all comments with scores, before threshold drop
 	Synthesis        *SynthesisResult
 	Tokens           RunTokenUsage
-	Persona          Persona
-	DeepReview       bool
+	Persona             Persona
+	CustomPersonaPrompt string
+	DeepReview          bool
 	ScoringSkipped   bool // true when scoring provider unavailable — synthesis uses all comments
 	Prompts          map[string]string // custom prompt overrides per stage
 	IsIncremental    bool
