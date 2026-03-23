@@ -226,7 +226,11 @@ func buildScoringPrompt(run *PipelineRun, memContext string) string {
 			if c.Specialist != "" {
 				specialist = fmt.Sprintf(" [%s]", c.Specialist)
 			}
-			sb.WriteString(fmt.Sprintf("[%d] %s:%d%s — [%s|%s] %s\n", idx, fr.Path, c.Line, specialist, c.Severity, c.Category, c.Body))
+			desc := c.What
+			if desc == "" {
+				desc = c.Body
+			}
+			sb.WriteString(fmt.Sprintf("[%d] %s:%d%s — [%s|%s] %s\n", idx, fr.Path, c.Line, specialist, c.Severity, c.Category, desc))
 			if c.Suggestion != "" {
 				sb.WriteString(fmt.Sprintf("    suggestion: %s\n", c.Suggestion))
 			}

@@ -377,7 +377,8 @@ Respond with a JSON array of comments:
 [{
   "line": 42,                // line number in new file (required, > 0)
   "start_line": 40,          // start of multi-line range (0 if single-line)
-  "body": "Why this is a problem and what could go wrong",
+  "what": "Factual description of the issue — what is wrong or missing",
+  "why": "Impact and consequences — why this matters, what could go wrong",
   "severity": "critical",    // critical | warning | suggestion | praise
   "category": "bug",         // bug | security | performance | error_handling | style | readability | type_design | testing
   "suggestion": "fixed code" // exact replacement for start_line..line (omit for praise)
@@ -461,7 +462,11 @@ func parseReviewResponse(content string) ([]FileComment, error) {
 func validateComments(comments []FileComment) []FileComment {
 	valid := make([]FileComment, 0, len(comments))
 	for _, c := range comments {
-		if c.Line <= 0 || c.Body == "" {
+		// Backward compat: populate Body from What if LLM used new fields
+		if c.Body == "" && c.What != "" {
+			c.Body = c.What
+		}
+		if c.Line <= 0 || (c.Body == "" && c.What == "") {
 			slog.Debug("dropped invalid LLM comment", "line", c.Line, "body_empty", c.Body == "")
 			continue
 		}
