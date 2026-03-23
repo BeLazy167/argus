@@ -756,6 +756,16 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	o.synthesizeFileMemories(ctx, run, owner, repo)
 	o.indexPRSummary(ctx, run, owner, repo)
 
+	// Collect decision traces from this review
+	traceSeeds := CollectReviewTraces(run)
+	for _, seed := range traceSeeds {
+		_ = o.st.CreateTrace(ctx, run.DBRepoID, seed.FilePath, seed.SymbolName, seed.TraceType, seed.Content, seed.Severity, seed.ReviewID, seed.PRNumber, seed.Metadata)
+	}
+
+	// Auto-extract scenarios from critical/warning findings
+	scenarioSeeds := ExtractScenariosFromReview(run)
+	StoreScenarioSeeds(ctx, o.st, run.DBInstallationID, &run.DBRepoID, scenarioSeeds)
+
 	if run.EventBus != nil {
 		run.EventBus.Publish(run.ReviewID, EventCompleted, map[string]any{
 			"review_id":      run.ReviewID,
