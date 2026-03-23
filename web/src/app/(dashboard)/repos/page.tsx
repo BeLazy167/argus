@@ -9,8 +9,9 @@ import {
   Loader2,
   ExternalLink,
   Play,
+  RefreshCw,
 } from "lucide-react";
-import { useRepos, useUpdateRepo } from "@/lib/queries/repos";
+import { useRepos, useUpdateRepo, useSyncRepos } from "@/lib/queries/repos";
 import { useReviews, useTriggerReview } from "@/lib/queries/reviews";
 import { formatDistanceToNow } from "@/lib/time";
 import { scoreColor } from "@/lib/score";
@@ -142,6 +143,7 @@ function RepoCard({ repo }: { repo: Repo }) {
 
 export default function ReposPage() {
   const { data: repos, isLoading } = useRepos();
+  const syncRepos = useSyncRepos();
   const { page, setPage, totalPages, paginated, pageSize, total, hasNext, hasPrev } = usePagination(repos ?? []);
 
   return (
@@ -155,15 +157,25 @@ export default function ReposPage() {
             Repos connected via the Argus GitHub App.
           </p>
         </div>
-        <a
-          href="https://github.com/apps/argus-eye/installations/new"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="inline-flex items-center gap-1.5 rounded-md border border-amber/30 bg-amber/10 px-4 py-2 text-xs font-mono text-amber hover:bg-amber/20 transition-colors"
-        >
-          <ExternalLink className="h-3.5 w-3.5" />
-          Add repos
-        </a>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => syncRepos.mutate()}
+            disabled={syncRepos.isPending}
+            className="flex items-center gap-2 rounded border border-amber/30 bg-amber/10 px-3 py-1.5 text-[10px] font-mono font-medium text-amber hover:bg-amber/20 disabled:opacity-50 transition-colors"
+          >
+            {syncRepos.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+            Sync from GitHub
+          </button>
+          <a
+            href="https://github.com/apps/argus-eye/installations/new"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 rounded-md border border-amber/30 bg-amber/10 px-4 py-2 text-xs font-mono text-amber hover:bg-amber/20 transition-colors"
+          >
+            <ExternalLink className="h-3.5 w-3.5" />
+            Add repos
+          </a>
+        </div>
       </div>
 
       {isLoading ? (

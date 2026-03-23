@@ -227,8 +227,13 @@ func (s *Server) requireInstallationScope(next http.Handler) http.Handler {
 			if err == nil {
 				ids = []int64{inst.ID}
 			} else {
-				// Org exists in Clerk but not linked yet — return empty scope
-				ids = []int64{}
+				// Org not linked yet — fall back to user-based lookup
+				ids, err = s.store.GetUserInstallationIDs(r.Context(), userID)
+				if err != nil {
+					s.logger.Error("get user installation ids (org fallback)", "error", err)
+					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+					return
+				}
 			}
 		} else {
 			// Personal account fallback

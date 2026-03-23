@@ -16,6 +16,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	gh "github.com/google/go-github/v68/github"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	ghpkg "github.com/BeLazy167/argus/internal/github"
@@ -97,6 +98,7 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 				// Installations
 				r.Get("/installations", s.listInstallations)
 				r.Get("/installations/current", s.getCurrentInstallation)
+				r.Post("/installations/{installationID}/sync-repos", s.syncRepos)
 
 				// Repos
 				r.Get("/repos", s.listRepos)
@@ -260,6 +262,49 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 	case "installation":
 		s.logger.Info("installation event", "action", event.Action)
+		instEvent, ok := event.Payload.(*gh.InstallationEvent)
+		if !ok {
+			s.logger.Error("unexpected installation event payload type")
+			break
+		}
+		ghInstID := instEvent.GetInstallation().GetID()
+		accountLogin := instEvent.GetInstallation().GetAccount().GetLogin()
+
+		switch event.Action {
+		case "created":
+			inst, err := s.store.CreateInstallation(r.Context(), ghInstID, accountLogin)
+			if err != nil {
+				s.logger.Error("create installation", "error", err, "gh_id", ghInstID)
+				break
+			}
+			var synced int
+			for _, repo := range instEvent.Repositories {
+				_, err := s.store.UpsertRepo(r.Context(), inst.ID, repo.GetID(), repo.GetFullName(), repo.GetDefaultBranch())
+				if err != nil {
+					s.logger.Warn("upsert repo from installation event", "error", err, "repo", repo.GetFullName())
+					continue
+				}
+				synced++
+			}
+			s.logger.Info("installation created", "gh_id", ghInstID, "account", accountLogin, "repos_synced", synced)
+
+		case "deleted", "suspend":
+			inst, err := s.store.GetInstallationByGitHubID(r.Context(), ghInstID)
+			if err != nil {
+				s.logger.Warn("installation lookup for suspend/delete", "error", err, "gh_id", ghInstID)
+				break
+			}
+			if err := s.store.SuspendInstallation(r.Context(), inst.ID); err != nil {
+				s.logger.Error("suspend installation", "error", err, "gh_id", ghInstID)
+			}
+
+		case "unsuspend":
+			// Re-create clears suspended_at via ON CONFLICT
+			_, err := s.store.CreateInstallation(r.Context(), ghInstID, accountLogin)
+			if err != nil {
+				s.logger.Error("unsuspend installation", "error", err, "gh_id", ghInstID)
+			}
+		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "accepted"})
@@ -325,6 +370,52 @@ func (s *Server) getCurrentInstallation(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, inst)
+}
+
+func (s *Server) syncRepos(w http.ResponseWriter, r *http.Request) {
+	installationDBID, err := strconv.ParseInt(chi.URLParam(r, "installationID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid installation id"})
+		return
+	}
+
+	ids := getInstallationIDs(r.Context())
+	found := false
+	for _, id := range ids {
+		if id == installationDBID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "installation not in scope"})
+		return
+	}
+
+	inst, err := s.store.GetInstallation(r.Context(), installationDBID)
+	if err != nil {
+		s.handleDBError(w, err, "installation not found")
+		return
+	}
+
+	repos, err := s.ghApp.ListInstallationRepos(r.Context(), inst.InstallationID)
+	if err != nil {
+		s.logger.Error("sync repos: list from github", "error", err)
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to list repos from GitHub"})
+		return
+	}
+
+	var count int
+	for _, repo := range repos {
+		_, err := s.store.UpsertRepo(r.Context(), installationDBID, repo.GetID(), repo.GetFullName(), repo.GetDefaultBranch())
+		if err != nil {
+			s.logger.Warn("sync repo upsert failed", "error", err, "repo", repo.GetFullName())
+			continue
+		}
+		count++
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"synced": count})
 }
 
 // --- Repos ---
