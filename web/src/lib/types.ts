@@ -2,6 +2,7 @@ export type Installation = {
   id: number;
   installation_id: number;
   org_login: string;
+  clerk_org_id?: string;
   created_at: string;
   suspended_at?: string;
 };
