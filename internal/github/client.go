@@ -548,6 +548,33 @@ func (c *Client) GetCommitTree(ctx context.Context, installationID int64, owner,
 	return commit.GetTree().GetSHA(), nil
 }
 
+// SearchCode searches for a symbol name in a repository and returns matching file paths.
+// Uses the GitHub code search API. Returns up to 5 unique file paths.
+func (c *Client) SearchCode(ctx context.Context, installationID int64, owner, repo, query string) ([]string, error) {
+	client, err := c.app.ClientForInstallation(installationID)
+	if err != nil {
+		return nil, err
+	}
+	q := fmt.Sprintf("%s repo:%s/%s", query, owner, repo)
+	result, _, err := client.Search.Code(ctx, q, &gh.SearchOptions{ListOptions: gh.ListOptions{PerPage: 10}})
+	if err != nil {
+		return nil, fmt.Errorf("code search: %w", err)
+	}
+	seen := make(map[string]bool)
+	var paths []string
+	for _, r := range result.CodeResults {
+		path := r.GetPath()
+		if !seen[path] {
+			seen[path] = true
+			paths = append(paths, path)
+		}
+		if len(paths) >= 5 {
+			break
+		}
+	}
+	return paths, nil
+}
+
 // ReviewSubmission represents a formatted review ready to post to GitHub.
 type ReviewSubmission struct {
 	Summary  string
