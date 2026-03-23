@@ -325,24 +325,26 @@ func (o *Orchestrator) autoResolveStaleComments(ctx context.Context, event ghpkg
 		changedFiles[f.NewName] = true
 	}
 
-	var resolved int
+	o.logger.Info("auto-resolve: found threads", "total", len(threads), "changed_files", len(changedFiles), "pr", event.PRNumber)
+
+	var resolved, attempted, botUnresolved int
 	for _, t := range threads {
 		if t.IsResolved || !strings.HasSuffix(t.AuthorLogin, "[bot]") {
 			continue
 		}
+		botUnresolved++
 		if !changedFiles[t.Path] {
 			continue
 		}
+		attempted++
 		if err := o.ghClient.ResolveReviewThread(ctx, event.InstallationID, t.ID); err != nil {
-			o.logger.Warn("auto-resolve: resolve thread", "error", err, "thread_id", t.ID)
+			o.logger.Warn("auto-resolve: resolve thread failed", "error", err, "thread_id", t.ID, "path", t.Path)
 			continue
 		}
 		resolved++
 	}
 
-	if resolved > 0 {
-		o.logger.Info("auto-resolved stale comments", "count", resolved, "pr", event.PRNumber)
-	}
+	o.logger.Info("auto-resolve complete", "resolved", resolved, "attempted", attempted, "bot_unresolved", botUnresolved, "pr", event.PRNumber)
 }
 
 // enrichFindings annotates each comment with pattern/rule matches and novelty flags.
