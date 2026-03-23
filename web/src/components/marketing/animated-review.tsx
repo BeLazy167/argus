@@ -190,10 +190,7 @@ export function AnimatedReview() {
               {/* Review comment */}
               {commentForLine && (
                 <div
-                  className={`mx-2 my-1.5 rounded-md border ${SEVERITY_STYLES[commentForLine.severity].line} bg-charcoal/80 overflow-hidden`}
-                  style={{
-                    animation: "reviewSlideIn 0.3s ease-out forwards",
-                  }}
+                  className={`mx-2 my-1.5 rounded-md border ${SEVERITY_STYLES[commentForLine.severity].line} bg-charcoal/80 overflow-hidden animate-[reviewSlideIn_0.3s_ease-out_forwards]`}
                 >
                   <div className="flex items-center gap-2 px-3 py-1.5 border-b border-iron/50">
                     <div className="h-4 w-4 rounded-full bg-amber/20 flex items-center justify-center">
@@ -230,25 +227,6 @@ export function AnimatedReview() {
           );
         })}
       </div>
-
-      <style>{`
-        @keyframes reviewSlideIn {
-          from {
-            opacity: 0;
-            transform: translateY(-4px);
-            max-height: 0;
-          }
-          to {
-            opacity: 1;
-            transform: translateY(0);
-            max-height: 200px;
-          }
-        }
-        @keyframes cursorBlink {
-          0%, 100% { opacity: 1; }
-          50% { opacity: 0; }
-        }
-      `}</style>
     </div>
   );
 }

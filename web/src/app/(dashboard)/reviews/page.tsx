@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import Link from "next/link";
 import {
   MessageSquare,
@@ -117,8 +117,6 @@ export default function ReviewsPage() {
 
   const { page, setPage, totalPages, paginated, pageSize, total, hasNext, hasPrev } = usePagination(filtered);
 
-  useEffect(() => setPage(0), [statusFilter, activeId, setPage]);
-
   const loading = reposLoading || reviewsLoading;
 
   return (
@@ -137,7 +135,8 @@ export default function ReviewsPage() {
           <div className="relative">
             <select
               value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
+              aria-label="Filter by status"
+              onChange={(e) => { setStatusFilter(e.target.value); setPage(0); }}
               className="appearance-none rounded-md border border-iron bg-charcoal px-4 py-2 pr-8 text-xs font-mono text-foreground focus:border-amber focus:outline-none"
             >
               <option value="all">All statuses</option>
@@ -152,7 +151,7 @@ export default function ReviewsPage() {
           <RepoSelect
             repos={repos}
             value={activeId}
-            onChange={setSelectedId}
+            onChange={(id: number) => { setSelectedId(id); setPage(0); }}
             showAll
           />
         </div>

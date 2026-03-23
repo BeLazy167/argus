@@ -13,7 +13,7 @@ const syne = Syne({
   display: "swap",
 });
 
-const jetbrainsMono = JetBrains_Mono({subsets:['latin'],variable:'--font-mono'});
+const jetbrainsMono = JetBrains_Mono({subsets:['latin'],variable:'--font-jetbrains-mono'});
 
 export const metadata: Metadata = {
   title: "ARGUS — Nothing merges unseen",

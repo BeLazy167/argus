@@ -548,28 +548,6 @@ func (c *Client) GetCommitTree(ctx context.Context, installationID int64, owner,
 	return commit.GetTree().GetSHA(), nil
 }
 
-// ListInstallationRepos returns all repositories accessible to the given installation.
-func (c *Client) ListInstallationRepos(ctx context.Context, installationID int64) ([]*gh.Repository, error) {
-	client, err := c.app.ClientForInstallation(installationID)
-	if err != nil {
-		return nil, err
-	}
-	var allRepos []*gh.Repository
-	opts := &gh.ListOptions{PerPage: 100}
-	for {
-		repos, resp, err := client.Apps.ListRepos(ctx, opts)
-		if err != nil {
-			return nil, fmt.Errorf("listing installation repos: %w", err)
-		}
-		allRepos = append(allRepos, repos.Repositories...)
-		if resp.NextPage == 0 {
-			break
-		}
-		opts.Page = resp.NextPage
-	}
-	return allRepos, nil
-}
-
 // ReviewSubmission represents a formatted review ready to post to GitHub.
 type ReviewSubmission struct {
 	Summary  string

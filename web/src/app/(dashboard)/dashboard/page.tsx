@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
   Target,
   GitPullRequest,
@@ -100,6 +101,7 @@ function formatReviewTime(ms: number): string {
 }
 
 export default function DashboardPage() {
+  const router = useRouter();
   const { data: stats, isLoading: statsLoading } = useStats();
   const { repos, activeId, setSelectedId, isLoading: reposLoading } = useActiveRepo();
 
@@ -205,7 +207,10 @@ export default function DashboardPage() {
                   <tr
                     key={review.id}
                     className="border-b border-iron/30 last:border-0 hover:bg-iron/10 transition-colors cursor-pointer"
-                    onClick={() => window.location.href = `/reviews/${review.id}`}
+                    role="link"
+                    tabIndex={0}
+                    onClick={() => router.push(`/reviews/${review.id}`)}
+                    onKeyDown={(e) => { if (e.key === "Enter") router.push(`/reviews/${review.id}`); }}
                   >
                     <td className="px-5 py-3">
                       <div className="flex items-center gap-2">
