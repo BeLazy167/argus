@@ -71,17 +71,9 @@ func (ra *ReplyAnalyzer) Analyze(ctx context.Context, event ghpkg.CommentEvent) 
 	// Build LLM prompt
 	prompt := buildReplyPrompt(original, event)
 
-	var repoConfigs []llm.ModelConfig
-	if dbConfigs, err := ra.store.ListModelConfigs(ctx, dbRepo.ID); err == nil {
-		repoConfigs = storeToLLMConfigs(dbConfigs)
-	}
-	cfg, err := ra.registry.GetConfig(dbRepo.ID, llm.StageReview, repoConfigs)
+	provider, cfg, err := ra.registry.ResolveProvider(ctx, storeConfigLister{ra.store}, inst.ID, dbRepo.ID, llm.StageReview)
 	if err != nil {
-		return fmt.Errorf("reply config: %w", err)
-	}
-	provider, err := ra.registry.GetProviderForRepo(ctx, inst.ID, &dbRepo.ID, cfg.Provider)
-	if err != nil {
-		return fmt.Errorf("reply provider: %w", err)
+		return fmt.Errorf("reply: %w", err)
 	}
 
 	resp, err := provider.Complete(ctx, llm.CompletionRequest{

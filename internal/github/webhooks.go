@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/BeLazy167/argus/internal/util"
 	gh "github.com/google/go-github/v68/github"
 )
 
@@ -78,7 +79,7 @@ func ToPREvent(event *WebhookEvent) (*PREvent, error) {
 		BaseSHA:        prEvent.GetPullRequest().GetBase().GetSHA(),
 		BaseRef:        prEvent.GetPullRequest().GetBase().GetRef(),
 		HeadRef:        prEvent.GetPullRequest().GetHead().GetRef(),
-		PRBody:         truncatePRBody(prEvent.GetPullRequest().GetBody(), 500),
+		PRBody:         util.Truncate(prEvent.GetPullRequest().GetBody(), 500, false),
 	}, nil
 }
 
@@ -158,12 +159,6 @@ func ToIssueCommentEvent(event *WebhookEvent) (*IssueCommentEvent, error) {
 	}, nil
 }
 
-func truncatePRBody(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "..."
-}
 
 func extractAction(event interface{}) string {
 	switch e := event.(type) {

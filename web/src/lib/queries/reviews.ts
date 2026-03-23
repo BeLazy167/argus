@@ -1,59 +1,45 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useAuth } from "@clerk/nextjs";
-import { api } from "../api";
 import type { Review, ReviewComment } from "../types";
-import { useInstallation } from "@/providers/installation-provider";
+import { useApi } from "@/lib/hooks/use-api";
 
 export function useReviews(repoId: number, limit = 20, offset = 0) {
-  const { getToken } = useAuth();
-  const { active } = useInstallation();
+  const api = useApi();
   return useQuery({
-    queryKey: ["reviews", repoId, limit, offset, active?.id],
-    queryFn: async () => {
-      const token = await getToken();
+    queryKey: ["reviews", repoId, limit, offset, api.active?.id],
+    queryFn: () => {
       const path = repoId > 0
         ? `/api/v1/repos/${repoId}/reviews?limit=${limit}&offset=${offset}`
         : `/api/v1/reviews?limit=${limit}&offset=${offset}`;
-      return api.get<Review[]>(path, token ?? undefined, active?.id);
+      return api.get<Review[]>(path);
     },
-    enabled: !!active,
+    enabled: !!api.active,
   });
 }
 
 export function useReview(id: string) {
-  const { getToken } = useAuth();
-  const { active } = useInstallation();
+  const api = useApi();
   return useQuery({
-    queryKey: ["review", id, active?.id],
-    queryFn: async () => {
-      const token = await getToken();
-      return api.get<{ review: Review; comments: ReviewComment[] }>(
+    queryKey: ["review", id, api.active?.id],
+    queryFn: () =>
+      api.get<{ review: Review; comments: ReviewComment[] }>(
         `/api/v1/reviews/${id}`,
-        token ?? undefined,
-        active?.id,
-      );
-    },
-    enabled: !!id && !!active,
+      ),
+    enabled: !!id && !!api.active,
   });
 }
 
 export function useTriggerReview() {
-  const { getToken } = useAuth();
-  const { active } = useInstallation();
+  const api = useApi();
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async ({
+    mutationFn: ({
       repoId,
       prNumber,
-    }: { repoId: number; prNumber: number }) => {
-      const token = await getToken();
-      return api.post(
+    }: { repoId: number; prNumber: number }) =>
+      api.post(
         `/api/v1/repos/${repoId}/reviews`,
         { pr_number: prNumber },
-        token ?? undefined,
-        active?.id,
-      );
-    },
+      ),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["reviews"] });
       qc.invalidateQueries({ queryKey: ["stats"] });
@@ -62,19 +48,11 @@ export function useTriggerReview() {
 }
 
 export function useRetryReview() {
-  const { getToken } = useAuth();
-  const { active } = useInstallation();
+  const api = useApi();
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (reviewId: string) => {
-      const token = await getToken();
-      return api.post(
-        `/api/v1/reviews/${reviewId}/retry`,
-        {},
-        token ?? undefined,
-        active?.id,
-      );
-    },
+    mutationFn: (reviewId: string) =>
+      api.post(`/api/v1/reviews/${reviewId}/retry`, {}),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["reviews"] });
       qc.invalidateQueries({ queryKey: ["stats"] });

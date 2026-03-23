@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/BeLazy167/argus/internal/util"
 )
 
 // Indexer manages Supermemory documents: stores reviews, rules, patterns, and topology for future RAG retrieval.
@@ -323,12 +325,12 @@ func (idx *Indexer) IndexFeedbackSignal(ctx context.Context, owner, repo string,
 	case "confirmed":
 		content = fmt.Sprintf("CONFIRMED pattern [%s] in %s: %s\nDeveloper agreed: %s",
 			feedback.Category, feedback.FilePath, feedback.OriginalBody,
-			truncateFeedback(feedback.DeveloperReply, 200))
+			util.Truncate(feedback.DeveloperReply, 200, false))
 		source = "feedback_confirmed"
 	case "dismissed":
 		content = fmt.Sprintf("DISMISSED finding [%s] in %s: %s\nDeveloper explanation: %s\nFuture reviews should NOT flag similar patterns in this context.",
 			feedback.Category, feedback.FilePath, feedback.OriginalBody,
-			truncateFeedback(feedback.DeveloperReply, 200))
+			util.Truncate(feedback.DeveloperReply, 200, false))
 		source = "feedback_dismissed"
 	default:
 		return nil // no signal to store
@@ -354,9 +356,3 @@ func (idx *Indexer) IndexFeedbackSignal(ctx context.Context, owner, repo string,
 	return nil
 }
 
-func truncateFeedback(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "..."
-}

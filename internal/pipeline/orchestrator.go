@@ -16,6 +16,7 @@ import (
 	"github.com/BeLazy167/argus/internal/llm"
 	"github.com/BeLazy167/argus/internal/memory"
 	"github.com/BeLazy167/argus/internal/store"
+	"github.com/BeLazy167/argus/internal/util"
 	"github.com/BeLazy167/argus/pkg/diff"
 )
 
@@ -1024,8 +1025,8 @@ Max 200 words. Be concrete.`
 	defer cancel()
 
 	// Sanitize + truncate user-controlled fields
-	safeTitle := sanitizeUserInput(truncate(run.PREvent.PRTitle, 200))
-	safeAuthor := sanitizeUserInput(truncate(run.PREvent.PRAuthor, 100))
+	safeTitle := sanitizeUserInput(util.Truncate(run.PREvent.PRTitle, 200, false))
+	safeAuthor := sanitizeUserInput(util.Truncate(run.PREvent.PRAuthor, 100, false))
 
 	var succeeded, failed int
 	for _, fc := range qualifying {
@@ -1086,7 +1087,7 @@ func (o *Orchestrator) indexPRSummary(ctx context.Context, run *PipelineRun, own
 	content := fmt.Sprintf("PR #%d \"%s\" by %s\nScore: %d/10\nFiles: %s\n\n%s",
 		run.PREvent.PRNumber, run.PREvent.PRTitle, run.PREvent.PRAuthor,
 		run.Synthesis.Score, strings.Join(files, ", "),
-		truncate(run.Synthesis.Summary, 800))
+		util.Truncate(run.Synthesis.Summary, 800, false))
 
 	customID := memory.PRSummaryCustomID(owner, repo, run.PREvent.PRNumber)
 	_, err := o.indexer.IndexRepoPattern(ctx, owner, repo, content, customID, map[string]string{
@@ -1195,32 +1196,13 @@ func (o *Orchestrator) loadPrompts(ctx context.Context, repoID int64) map[string
 
 // resolveReviewProvider loads model configs and returns a review-stage provider.
 func (o *Orchestrator) resolveReviewProvider(ctx context.Context, run *PipelineRun) (llm.ModelConfig, llm.Provider, error) {
-	dbConfigs, err := o.st.ListModelConfigs(ctx, run.DBRepoID)
+	provider, cfg, err := o.reviewStage.registry.ResolveProvider(ctx, storeConfigLister{o.st}, run.DBInstallationID, run.DBRepoID, llm.StageReview)
 	if err != nil {
-		return llm.ModelConfig{}, nil, fmt.Errorf("model configs: %w", err)
-	}
-	repoConfigs := storeToLLMConfigs(dbConfigs)
-	cfg, err := o.reviewStage.registry.GetConfig(run.DBRepoID, llm.StageReview, repoConfigs)
-	if err != nil {
-		return llm.ModelConfig{}, nil, fmt.Errorf("no review config: %w", err)
-	}
-	provider, err := o.reviewStage.registry.GetProviderForRepo(ctx, run.DBInstallationID, &run.DBRepoID, cfg.Provider)
-	if err != nil {
-		return llm.ModelConfig{}, nil, fmt.Errorf("provider unavailable: %w", err)
+		return llm.ModelConfig{}, nil, err
 	}
 	return cfg, provider, nil
 }
 
-// truncate returns the first maxLen bytes of s without splitting UTF-8 runes.
-func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	for maxLen > 0 && maxLen < len(s) && s[maxLen]&0xC0 == 0x80 {
-		maxLen--
-	}
-	return s[:maxLen]
-}
 
 func getDiffContext(run *PipelineRun, path string) string {
 	if run.Diff == nil {
@@ -1228,7 +1210,7 @@ func getDiffContext(run *PipelineRun, path string) string {
 	}
 	for _, f := range run.Diff.Files {
 		if f.NewName == path {
-			return truncate(f.RawDiff, 1000)
+			return util.Truncate(f.RawDiff, 1000, false)
 		}
 	}
 	return ""
