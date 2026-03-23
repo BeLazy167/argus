@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import {
   MessageSquare,
@@ -8,9 +8,8 @@ import {
   RotateCcw,
   ChevronDown,
   ExternalLink,
-  ChevronLeft,
-  ChevronRight,
 } from "lucide-react";
+import { usePagination, PaginationBar } from "@/components/dashboard/pagination";
 import { useReviews, useRetryReview } from "@/lib/queries/reviews";
 import { useActiveRepo } from "@/lib/hooks/use-active-repo";
 import { formatDistanceToNow } from "@/lib/time";
@@ -20,7 +19,7 @@ import { StatusBadge } from "@/components/dashboard/status-badge";
 import { RepoSelect } from "@/components/dashboard/repo-select";
 import type { Review, TokenUsage } from "@/lib/types";
 
-const PAGE_SIZE = 20;
+const FETCH_LIMIT = 200;
 
 function formatTokens(t: TokenUsage): string {
   const k = t.total.total_tokens / 1000;
@@ -103,20 +102,22 @@ function ReviewRow({
 export default function ReviewsPage() {
   const { repos, activeId, setSelectedId, isLoading: reposLoading } = useActiveRepo();
   const [statusFilter, setStatusFilter] = useState("all");
-  const [page, setPage] = useState(0);
 
   const repoMap = new Map(repos.map((r) => [r.id, r]));
 
   const { data: reviews, isLoading: reviewsLoading } = useReviews(
     activeId,
-    PAGE_SIZE,
-    page * PAGE_SIZE,
+    FETCH_LIMIT,
   );
   const retryReview = useRetryReview();
 
   const filtered = statusFilter === "all"
-    ? reviews
-    : reviews?.filter((r) => r.status === statusFilter);
+    ? (reviews ?? [])
+    : (reviews ?? []).filter((r) => r.status === statusFilter);
+
+  const { page, setPage, totalPages, paginated, pageSize, total, hasNext, hasPrev } = usePagination(filtered);
+
+  useEffect(() => setPage(0), [statusFilter, activeId, setPage]);
 
   const loading = reposLoading || reviewsLoading;
 
@@ -151,10 +152,7 @@ export default function ReviewsPage() {
           <RepoSelect
             repos={repos}
             value={activeId}
-            onChange={(id) => {
-              setSelectedId(id);
-              setPage(0);
-            }}
+            onChange={setSelectedId}
             showAll
           />
         </div>
@@ -166,7 +164,7 @@ export default function ReviewsPage() {
             <div className="flex items-center justify-center py-16">
               <Loader2 className="h-5 w-5 animate-spin text-slate-text" />
             </div>
-          ) : !filtered || filtered.length === 0 ? (
+          ) : filtered.length === 0 ? (
             <div className="py-16 text-center">
               <MessageSquare className="h-8 w-8 text-slate-text mx-auto mb-3" />
               <p className="text-xs font-mono text-slate-text">
@@ -176,7 +174,7 @@ export default function ReviewsPage() {
               </p>
             </div>
           ) : (
-            filtered.map((review) => {
+            paginated.map((review) => {
               const repo = repoMap.get(review.repo_id);
               const url = repo
                 ? githubPrUrl(repo.full_name, review.pr_number, review.github_review_id)
@@ -194,28 +192,16 @@ export default function ReviewsPage() {
             })
           )}
         </div>
-      </div>
-
-      <div className="flex items-center justify-between mt-4">
-        <button
-          type="button"
-          onClick={() => setPage((p) => Math.max(0, p - 1))}
-          disabled={page === 0}
-          className="flex items-center gap-1 text-xs font-mono text-slate-text hover:text-foreground disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-        >
-          <ChevronLeft className="h-3.5 w-3.5" /> Prev
-        </button>
-        <span className="text-[11px] font-mono text-slate-text">
-          Page {page + 1}
-        </span>
-        <button
-          type="button"
-          onClick={() => setPage((p) => p + 1)}
-          disabled={!reviews || reviews.length < PAGE_SIZE}
-          className="flex items-center gap-1 text-xs font-mono text-slate-text hover:text-foreground disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-        >
-          Next <ChevronRight className="h-3.5 w-3.5" />
-        </button>
+        <PaginationBar
+          page={page}
+          totalPages={totalPages}
+          total={total}
+          pageSize={pageSize}
+          hasNext={hasNext}
+          hasPrev={hasPrev}
+          onNext={() => setPage(page + 1)}
+          onPrev={() => setPage(page - 1)}
+        />
       </div>
     </>
   );

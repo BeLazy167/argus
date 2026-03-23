@@ -1,6 +1,7 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { usePagination, PaginationBar } from "@/components/dashboard/pagination";
 import { Plus, Trash2, Loader2, Brain, Filter, TrendingUp } from "lucide-react";
 import {
   usePatterns,
@@ -105,6 +106,10 @@ export default function PatternsPage() {
     createPattern.mutate({ content: content.trim(), repo_id: selectedRepoId });
     setContent("");
   };
+
+  const { page, setPage, totalPages, paginated, pageSize, total, hasNext, hasPrev } = usePagination(filtered);
+
+  useEffect(() => setPage(0), [sourceFilter, filterRepo, setPage]);
 
   const getSource = (p: { source?: string }) => p.source || "manual";
 
@@ -307,7 +312,7 @@ export default function PatternsPage() {
               </tr>
             </thead>
             <tbody>
-              {filtered.map((pattern) => (
+              {paginated.map((pattern) => (
                 <tr
                   key={pattern.id}
                   className="border-b border-iron/30 last:border-0 hover:bg-iron/10 transition-colors"
@@ -370,6 +375,16 @@ export default function PatternsPage() {
             </tbody>
           </table>
         )}
+        <PaginationBar
+          page={page}
+          totalPages={totalPages}
+          total={total}
+          pageSize={pageSize}
+          hasNext={hasNext}
+          hasPrev={hasPrev}
+          onNext={() => setPage(page + 1)}
+          onPrev={() => setPage(page - 1)}
+        />
       </div>
     </>
   );

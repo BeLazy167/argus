@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { usePagination, PaginationBar } from "@/components/dashboard/pagination";
 import {
   GitFork,
   ToggleLeft,
@@ -141,6 +142,7 @@ function RepoCard({ repo }: { repo: Repo }) {
 
 export default function ReposPage() {
   const { data: repos, isLoading } = useRepos();
+  const { page, setPage, totalPages, paginated, pageSize, total, hasNext, hasPrev } = usePagination(repos ?? []);
 
   return (
     <>
@@ -177,11 +179,23 @@ export default function ReposPage() {
           </p>
         </div>
       ) : (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          {repos?.map((repo) => (
-            <RepoCard key={repo.id} repo={repo} />
-          ))}
-        </div>
+        <>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            {paginated.map((repo) => (
+              <RepoCard key={repo.id} repo={repo} />
+            ))}
+          </div>
+          <PaginationBar
+            page={page}
+            totalPages={totalPages}
+            total={total}
+            pageSize={pageSize}
+            hasNext={hasNext}
+            hasPrev={hasPrev}
+            onNext={() => setPage(page + 1)}
+            onPrev={() => setPage(page - 1)}
+          />
+        </>
       )}
     </>
   );

@@ -9,6 +9,7 @@ import {
   Loader2,
   Microscope,
 } from "lucide-react";
+import { usePagination, PaginationBar } from "@/components/dashboard/pagination";
 import { useStats } from "@/lib/queries/stats";
 import { useReviews } from "@/lib/queries/reviews";
 import { useActiveRepo } from "@/lib/hooks/use-active-repo";
@@ -103,7 +104,8 @@ export default function DashboardPage() {
   const { repos, activeId, setSelectedId, isLoading: reposLoading } = useActiveRepo();
 
   const repoMap = new Map(repos.map((r) => [r.id, r]));
-  const { data: reviews, isLoading: reviewsLoading } = useReviews(activeId, 20);
+  const { data: reviews, isLoading: reviewsLoading } = useReviews(activeId, 200);
+  const { page, setPage, totalPages, paginated, pageSize, total, hasNext, hasPrev } = usePagination(reviews ?? []);
 
   const feedLoading = reposLoading || reviewsLoading;
 
@@ -196,7 +198,7 @@ export default function DashboardPage() {
               </tr>
             </thead>
             <tbody>
-              {reviews.map((review) => {
+              {paginated.map((review) => {
                 const repo = repoMap.get(review.repo_id);
                 const verdict = getVerdict(review);
                 return (
@@ -257,6 +259,16 @@ export default function DashboardPage() {
             </tbody>
           </table>
         )}
+        <PaginationBar
+          page={page}
+          totalPages={totalPages}
+          total={total}
+          pageSize={pageSize}
+          hasNext={hasNext}
+          hasPrev={hasPrev}
+          onNext={() => setPage(page + 1)}
+          onPrev={() => setPage(page - 1)}
+        />
       </div>
     </>
   );
