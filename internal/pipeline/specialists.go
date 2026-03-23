@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/BeLazy167/argus/internal/memory"
+	"github.com/BeLazy167/argus/internal/util"
 )
 
 // Specialist identifies a focused review agent role.
@@ -182,17 +183,6 @@ func specialistSearchQuery(s Specialist) string {
 	}
 }
 
-// truncateSnippet caps a string at maxLen bytes (rune-safe) and appends "..." if truncated.
-func truncateSnippet(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	// Walk backward to avoid splitting a multi-byte UTF-8 rune
-	for maxLen > 0 && s[maxLen]&0xC0 == 0x80 {
-		maxLen--
-	}
-	return s[:maxLen] + "..."
-}
 
 // filePathsQuery builds a capped search query from a prefix and file paths (rune-safe truncation).
 func filePathsQuery(prefix string, paths []string) string {
@@ -228,7 +218,7 @@ func searchMemoryContent(ctx context.Context, memClient *memory.Client, query, c
 	var results []string
 	for _, r := range resp.Results {
 		if c := r.Content(); c != "" {
-			results = append(results, truncateSnippet(c, 300))
+			results = append(results, util.Truncate(c, 300, true))
 		}
 	}
 	return results

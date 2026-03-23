@@ -12,6 +12,7 @@ import (
 	"github.com/BeLazy167/argus/internal/llm"
 	"github.com/BeLazy167/argus/internal/memory"
 	"github.com/BeLazy167/argus/internal/store"
+	"github.com/BeLazy167/argus/internal/util"
 )
 
 // ScoringStage validates review comments using a separate scoring model.
@@ -39,20 +40,9 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 	}
 
 	// Check if scoring model is configured — if not, pass through
-	dbConfigs, err := ss.store.ListModelConfigs(ctx, run.DBRepoID)
+	provider, cfg, err := ss.registry.ResolveProvider(ctx, storeConfigLister{ss.store}, run.DBInstallationID, run.DBRepoID, llm.StageScoring)
 	if err != nil {
-		return fmt.Errorf("loading model configs: %w", err)
-	}
-	repoConfigs := storeToLLMConfigs(dbConfigs)
-	cfg, err := ss.registry.GetConfig(run.DBRepoID, llm.StageScoring, repoConfigs)
-	if err != nil {
-		slog.Info("no scoring model configured, passing all comments through", "repo_id", run.DBRepoID)
-		run.ScoringSkipped = true
-		return nil
-	}
-	provider, err := ss.registry.GetProviderForRepo(ctx, run.DBInstallationID, &run.DBRepoID, cfg.Provider)
-	if err != nil {
-		slog.Error("scoring provider unavailable, passing all comments through", "error", err)
+		slog.Info("scoring provider unavailable, passing all comments through", "repo_id", run.DBRepoID, "error", err)
 		run.ScoringSkipped = true
 		return nil
 	}
@@ -226,8 +216,8 @@ func buildScoringPrompt(run *PipelineRun, memContext string) string {
 		sb.WriteString("\n")
 	}
 	// Sanitize + truncate user-controlled fields
-	safeTitle := sanitizeUserInput(truncate(run.PREvent.PRTitle, 200))
-	safeAuthor := sanitizeUserInput(truncate(run.PREvent.PRAuthor, 100))
+	safeTitle := sanitizeUserInput(util.Truncate(run.PREvent.PRTitle, 200, false))
+	safeAuthor := sanitizeUserInput(util.Truncate(run.PREvent.PRAuthor, 100, false))
 	sb.WriteString(fmt.Sprintf("PR #%d: \"%s\" by %s\n\nScore each comment 0-100:\n\n", run.PREvent.PRNumber, safeTitle, safeAuthor))
 	idx := 0
 	for _, fr := range run.FileReviews {
@@ -307,7 +297,7 @@ func fetchScoringContext(ctx context.Context, memClient *memory.Client, owner, r
 	if len(fileResults) > 0 {
 		sb.WriteString("## Known File Context\n")
 		for _, r := range fileResults {
-			sb.WriteString("- " + truncateSnippet(r, 200) + "\n")
+			sb.WriteString("- " + util.Truncate(r, 200, true) + "\n")
 		}
 		sb.WriteString("\n")
 	}

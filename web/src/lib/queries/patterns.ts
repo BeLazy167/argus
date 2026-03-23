@@ -1,65 +1,48 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useAuth } from "@clerk/nextjs";
-import { api } from "../api";
 import type { Pattern, PatternStat } from "../types";
-import { useInstallation } from "@/providers/installation-provider";
+import { useApi } from "@/lib/hooks/use-api";
 
 export function usePatterns(repoId?: number) {
-  const { getToken } = useAuth();
-  const { active } = useInstallation();
+  const api = useApi();
   return useQuery({
-    queryKey: ["patterns", active?.id, repoId],
-    queryFn: async () => {
-      const token = await getToken();
+    queryKey: ["patterns", api.active?.id, repoId],
+    queryFn: () => {
       const path = repoId
         ? `/api/v1/patterns?repo_id=${repoId}`
         : "/api/v1/patterns";
-      return api.get<Pattern[]>(path, token ?? undefined, active?.id);
+      return api.get<Pattern[]>(path);
     },
-    enabled: !!active,
+    enabled: !!api.active,
   });
 }
 
 export function useCreatePattern() {
-  const { getToken } = useAuth();
-  const { active } = useInstallation();
+  const api = useApi();
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (body: { content: string; repo_id?: number }) => {
-      const token = await getToken();
-      return api.post<Pattern>(
+    mutationFn: (body: { content: string; repo_id?: number }) =>
+      api.post<Pattern>(
         "/api/v1/patterns",
-        { ...body, installation_id: active?.id },
-        token ?? undefined,
-        active?.id,
-      );
-    },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["patterns", active?.id] }),
+        { ...body, installation_id: api.active?.id },
+      ),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["patterns", api.active?.id] }),
   });
 }
 
 export function usePatternStats() {
-  const { getToken } = useAuth();
-  const { active } = useInstallation();
+  const api = useApi();
   return useQuery({
-    queryKey: ["pattern-stats", active?.id],
-    queryFn: async () => {
-      const token = await getToken();
-      return api.get<PatternStat[]>("/api/v1/patterns/stats", token ?? undefined, active?.id);
-    },
-    enabled: !!active,
+    queryKey: ["pattern-stats", api.active?.id],
+    queryFn: () => api.get<PatternStat[]>("/api/v1/patterns/stats"),
+    enabled: !!api.active,
   });
 }
 
 export function useDeletePattern() {
-  const { getToken } = useAuth();
-  const { active } = useInstallation();
+  const api = useApi();
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (id: number) => {
-      const token = await getToken();
-      return api.delete(`/api/v1/patterns/${id}`, token ?? undefined, active?.id);
-    },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["patterns", active?.id] }),
+    mutationFn: (id: number) => api.delete(`/api/v1/patterns/${id}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["patterns", api.active?.id] }),
   });
 }

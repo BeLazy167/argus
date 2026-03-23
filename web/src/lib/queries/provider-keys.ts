@@ -1,66 +1,49 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useAuth } from "@clerk/nextjs";
-import { api } from "../api";
 import type { ProviderKey } from "../types";
-import { useInstallation } from "@/providers/installation-provider";
+import { useApi } from "@/lib/hooks/use-api";
 
 export function useProviderKeys() {
-  const { getToken } = useAuth();
-  const { active } = useInstallation();
+  const api = useApi();
   return useQuery({
-    queryKey: ["provider-keys", active?.id],
-    queryFn: async () => {
-      const token = await getToken();
-      return api.get<ProviderKey[]>(
-        `/api/v1/installations/${active!.id}/provider-keys`,
-        token ?? undefined,
-        active!.id,
-      );
-    },
-    enabled: !!active,
+    queryKey: ["provider-keys", api.active?.id],
+    queryFn: () =>
+      api.get<ProviderKey[]>(
+        `/api/v1/installations/${api.active!.id}/provider-keys`,
+      ),
+    enabled: !!api.active,
   });
 }
 
 export function useUpsertProviderKey() {
-  const { getToken } = useAuth();
-  const { active } = useInstallation();
+  const api = useApi();
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (body: {
+    mutationFn: (body: {
       provider: string;
       api_key: string;
       base_url?: string;
       repo_id?: number;
-    }) => {
-      const token = await getToken();
-      return api.put<ProviderKey>(
-        `/api/v1/installations/${active!.id}/provider-keys`,
+    }) =>
+      api.put<ProviderKey>(
+        `/api/v1/installations/${api.active!.id}/provider-keys`,
         body,
-        token ?? undefined,
-        active!.id,
-      );
-    },
+      ),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["provider-keys", active?.id] });
+      qc.invalidateQueries({ queryKey: ["provider-keys", api.active?.id] });
     },
   });
 }
 
 export function useDeleteProviderKey() {
-  const { getToken } = useAuth();
-  const { active } = useInstallation();
+  const api = useApi();
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (keyId: number) => {
-      const token = await getToken();
-      return api.delete(
-        `/api/v1/installations/${active!.id}/provider-keys/${keyId}`,
-        token ?? undefined,
-        active!.id,
-      );
-    },
+    mutationFn: (keyId: number) =>
+      api.delete(
+        `/api/v1/installations/${api.active!.id}/provider-keys/${keyId}`,
+      ),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["provider-keys", active?.id] });
+      qc.invalidateQueries({ queryKey: ["provider-keys", api.active?.id] });
     },
   });
 }

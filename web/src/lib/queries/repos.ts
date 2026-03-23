@@ -1,65 +1,47 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useAuth } from "@clerk/nextjs";
-import { api } from "../api";
 import type { Repo } from "../types";
-import { useInstallation } from "@/providers/installation-provider";
+import { useApi } from "@/lib/hooks/use-api";
 
 export function useRepos() {
-  const { getToken } = useAuth();
-  const { active } = useInstallation();
+  const api = useApi();
   return useQuery({
-    queryKey: ["repos", active?.id],
-    queryFn: async () => {
-      const token = await getToken();
-      return api.get<Repo[]>("/api/v1/repos", token ?? undefined, active?.id);
-    },
-    enabled: !!active,
+    queryKey: ["repos", api.active?.id],
+    queryFn: () => api.get<Repo[]>("/api/v1/repos"),
+    enabled: !!api.active,
   });
 }
 
 export function useRepo(id: number) {
-  const { getToken } = useAuth();
-  const { active } = useInstallation();
+  const api = useApi();
   return useQuery({
-    queryKey: ["repos", id, active?.id],
-    queryFn: async () => {
-      const token = await getToken();
-      return api.get<Repo>(`/api/v1/repos/${id}`, token ?? undefined, active?.id);
-    },
-    enabled: id > 0 && !!active,
+    queryKey: ["repos", id, api.active?.id],
+    queryFn: () => api.get<Repo>(`/api/v1/repos/${id}`),
+    enabled: id > 0 && !!api.active,
   });
 }
 
 export function useSyncRepos() {
-  const { getToken } = useAuth();
-  const { active } = useInstallation();
+  const api = useApi();
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async () => {
-      const token = await getToken();
-      return api.post<{ synced: number }>(
-        `/api/v1/installations/${active?.id}/sync-repos`,
+    mutationFn: () =>
+      api.post<{ synced: number }>(
+        `/api/v1/installations/${api.active?.id}/sync-repos`,
         {},
-        token ?? undefined,
-        active?.id,
-      );
-    },
+      ),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["repos"] }),
   });
 }
 
 export function useUpdateRepo() {
-  const { getToken } = useAuth();
-  const { active } = useInstallation();
+  const api = useApi();
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async ({
+    mutationFn: ({
       id,
       ...body
-    }: { id: number; enabled?: boolean; default_branch?: string; settings_json?: Record<string, unknown> }) => {
-      const token = await getToken();
-      return api.patch<Repo>(`/api/v1/repos/${id}`, body, token ?? undefined, active?.id);
-    },
+    }: { id: number; enabled?: boolean; default_branch?: string; settings_json?: Record<string, unknown> }) =>
+      api.patch<Repo>(`/api/v1/repos/${id}`, body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["repos"] });
     },

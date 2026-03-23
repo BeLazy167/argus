@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -11,6 +12,102 @@ import (
 	ghpkg "github.com/BeLazy167/argus/internal/github"
 	"github.com/BeLazy167/argus/internal/memory"
 )
+
+// --- Command Dispatch ---
+
+var commandRe = regexp.MustCompile(`(?i)@argus-eye\s+(review|remember|resolve|fix|help)(.*)`)
+
+func (s *Server) dispatchCommand(ctx context.Context, evt ghpkg.IssueCommentEvent) {
+	match := commandRe.FindStringSubmatch(strings.TrimSpace(evt.CommentBody))
+	if match == nil {
+		return
+	}
+
+	parts := strings.SplitN(evt.RepoFullName, "/", 2)
+	if len(parts) != 2 {
+		return
+	}
+	owner, repo := parts[0], parts[1]
+	ghClient := ghpkg.NewClient(s.ghApp)
+
+	cmd := strings.ToLower(match[1])
+	args := strings.TrimSpace(match[2])
+
+	switch cmd {
+	case "review":
+		s.handleReviewCommand(ctx, evt, owner, repo, ghClient, args)
+	case "remember":
+		s.handleRememberCommand(ctx, evt, owner, repo, ghClient, args)
+	case "resolve":
+		s.handleResolveCommand(ctx, evt, owner, repo, ghClient)
+	case "fix":
+		s.handleFixCommand(ctx, evt, owner, repo, ghClient)
+	case "help":
+		s.handleHelpCommand(ctx, evt, owner, repo, ghClient)
+	}
+}
+
+func (s *Server) handleReviewCommand(ctx context.Context, evt ghpkg.IssueCommentEvent, owner, repo string, ghClient *ghpkg.Client, args string) {
+	force := strings.Contains(args, "--force")
+	var personaOverride string
+	if idx := strings.Index(args, "--persona"); idx >= 0 {
+		rest := strings.TrimSpace(args[idx+len("--persona"):])
+		if fields := strings.Fields(rest); len(fields) > 0 {
+			personaOverride = fields[0]
+		}
+	}
+
+	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "eyes")
+
+	prEvent, err := ghClient.GetPullRequest(ctx, evt.InstallationID, owner, repo, evt.PRNumber)
+	if err != nil {
+		s.logger.Error("review command: fetch PR failed", "error", err, "pr", evt.PRNumber)
+		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
+		return
+	}
+
+	if !force {
+		existing, err := s.store.GetLatestReviewBySHA(ctx, evt.RepoFullName, evt.PRNumber, prEvent.HeadSHA)
+		if err == nil && existing != nil {
+			short := prEvent.HeadSHA
+			if len(short) > 7 {
+				short = short[:7]
+			}
+			body := fmt.Sprintf("Already reviewed at `%s`. Use `@argus-eye review --force` to re-review.", short)
+			_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber, body)
+			_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "rocket")
+			return
+		}
+	}
+
+	if !s.rateLimiter.AllowReview(evt.RepoFullName, owner, force) {
+		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
+			"Rate limit exceeded. Try again later.")
+		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
+		return
+	}
+	if !s.tryAcquireReview(evt.RepoFullName, evt.PRNumber) {
+		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
+			"A review is already in progress for this PR.")
+		return
+	}
+	defer s.releaseReview(evt.RepoFullName, evt.PRNumber)
+
+	prEvent.Action = "manual"
+	prEvent.RepoID = evt.RepoID
+	prEvent.PersonaOverride = personaOverride
+	s.logger.Info("review command triggered", "repo", evt.RepoFullName, "pr", evt.PRNumber, "force", force, "by", evt.CommentAuthor)
+
+	if err := s.orchestrator.HandlePREvent(ctx, *prEvent); err != nil {
+		s.logger.Error("review command: pipeline failed", "error", err, "pr", evt.PRNumber)
+		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
+		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
+			"Review failed. Check the Argus dashboard for details.")
+		return
+	}
+
+	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "rocket")
+}
 
 // handleHelpCommand posts available commands and usage.
 func (s *Server) handleHelpCommand(ctx context.Context, evt ghpkg.IssueCommentEvent, owner, repo string, ghClient *ghpkg.Client) {

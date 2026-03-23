@@ -33,6 +33,11 @@ type KeyResolver interface {
 	ResolveAPIKey(ctx context.Context, installationID int64, repoID *int64, provider string) (apiKey string, baseURL string, found bool, err error)
 }
 
+// ModelConfigLister returns pre-converted llm.ModelConfig entries for a repo.
+type ModelConfigLister interface {
+	ListLLMConfigs(ctx context.Context, repoID int64) ([]ModelConfig, error)
+}
+
 type cachedProvider struct {
 	provider  Provider
 	expiresAt time.Time
@@ -101,6 +106,23 @@ func (r *Registry) GetConfig(repoID int64, stage PipelineStage, repoConfigs []Mo
 		}
 	}
 	return ModelConfig{}, fmt.Errorf("no model config for repo %d stage %s — configure one in the dashboard", repoID, stage)
+}
+
+// ResolveProvider resolves the LLM provider and model config for a pipeline stage.
+func (r *Registry) ResolveProvider(ctx context.Context, cfgLister ModelConfigLister, installationID, repoID int64, stage PipelineStage) (Provider, ModelConfig, error) {
+	configs, err := cfgLister.ListLLMConfigs(ctx, repoID)
+	if err != nil {
+		return nil, ModelConfig{}, fmt.Errorf("resolve %s: list configs: %w", stage, err)
+	}
+	cfg, err := r.GetConfig(repoID, stage, configs)
+	if err != nil {
+		return nil, ModelConfig{}, fmt.Errorf("resolve %s: %w", stage, err)
+	}
+	provider, err := r.GetProviderForRepo(ctx, installationID, &repoID, cfg.Provider)
+	if err != nil {
+		return nil, ModelConfig{}, fmt.Errorf("resolve %s provider: %w", stage, err)
+	}
+	return provider, cfg, nil
 }
 
 // HasKeyForRepo returns true if a BYOK key exists in the database for this provider.

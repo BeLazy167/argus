@@ -11,6 +11,7 @@ import (
 	"github.com/BeLazy167/argus/internal/llm"
 	"github.com/BeLazy167/argus/internal/memory"
 	"github.com/BeLazy167/argus/internal/store"
+	"github.com/BeLazy167/argus/internal/util"
 	"github.com/BeLazy167/argus/pkg/diff"
 )
 
@@ -47,19 +48,9 @@ func (ts *TriageStage) Execute(ctx context.Context, run *PipelineRun) error {
 		return nil
 	}
 
-	// Load per-repo model configs from DB (use DB serial IDs, not GitHub IDs)
-	var repoConfigs []llm.ModelConfig
-	if dbConfigs, err := ts.store.ListModelConfigs(ctx, run.DBRepoID); err == nil {
-		repoConfigs = storeToLLMConfigs(dbConfigs)
-	}
-
-	cfg, err := ts.registry.GetConfig(run.DBRepoID, llm.StageTriage, repoConfigs)
+	provider, cfg, err := ts.registry.ResolveProvider(ctx, storeConfigLister{ts.store}, run.DBInstallationID, run.DBRepoID, llm.StageTriage)
 	if err != nil {
-		return fmt.Errorf("triage config: %w", err)
-	}
-	provider, err := ts.registry.GetProviderForRepo(ctx, run.DBInstallationID, &run.DBRepoID, cfg.Provider)
-	if err != nil {
-		return fmt.Errorf("triage provider: %w", err)
+		return err
 	}
 
 	owner, repo, err := splitRepoFullName(run.PREvent.RepoFullName)
@@ -167,6 +158,17 @@ func storeToLLMConfigs(dbConfigs []store.ModelConfig) []llm.ModelConfig {
 	return out
 }
 
+// storeConfigLister adapts *store.Store to llm.ModelConfigLister.
+type storeConfigLister struct{ st *store.Store }
+
+func (s storeConfigLister) ListLLMConfigs(ctx context.Context, repoID int64) ([]llm.ModelConfig, error) {
+	dbConfigs, err := s.st.ListModelConfigs(ctx, repoID)
+	if err != nil {
+		return nil, err
+	}
+	return storeToLLMConfigs(dbConfigs), nil
+}
+
 // triageMemoryHints searches Supermemory for file synthesis docs, repo patterns,
 // owner patterns, and rules matching changed files.
 // Returns a hint block for the triage prompt, or empty string if no history found.
@@ -209,19 +211,19 @@ func triageMemoryHints(ctx context.Context, memClient *memory.Client, owner, rep
 	if len(repoResults) > 0 {
 		sb.WriteString("\n## File History (from past reviews)\n")
 		for _, r := range repoResults {
-			sb.WriteString(fmt.Sprintf("- %s\n", truncateSnippet(r, 200)))
+			sb.WriteString(fmt.Sprintf("- %s\n", util.Truncate(r, 200, true)))
 		}
 	}
 	if len(ownerResults) > 0 {
 		sb.WriteString("\n## Org-wide Patterns\n")
 		for _, r := range ownerResults {
-			sb.WriteString(fmt.Sprintf("- %s\n", truncateSnippet(r, 200)))
+			sb.WriteString(fmt.Sprintf("- %s\n", util.Truncate(r, 200, true)))
 		}
 	}
 	if len(ruleResults) > 0 {
 		sb.WriteString("\n## Review Rules\n")
 		for _, r := range ruleResults {
-			sb.WriteString(fmt.Sprintf("- %s\n", truncateSnippet(r, 200)))
+			sb.WriteString(fmt.Sprintf("- %s\n", util.Truncate(r, 200, true)))
 		}
 	}
 
