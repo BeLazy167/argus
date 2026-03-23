@@ -2,7 +2,9 @@ package github
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 
 	gh "github.com/google/go-github/v68/github"
@@ -15,6 +17,48 @@ type Client struct {
 
 func NewClient(app *App) *Client {
 	return &Client{app: app}
+}
+
+// graphQLErrors represents GraphQL-level errors in the response.
+type graphQLErrors struct {
+	Errors []struct {
+		Message string `json:"message"`
+		Type    string `json:"type"`
+	} `json:"errors"`
+}
+
+// doGraphQL executes a GraphQL request and checks for both HTTP and GraphQL errors.
+// It reads the raw response body to detect GraphQL errors that go-github's Do ignores.
+func doGraphQL(ctx context.Context, client *gh.Client, body any, result any) error {
+	req, err := client.NewRequest("POST", "graphql", body)
+	if err != nil {
+		return fmt.Errorf("creating graphql request: %w", err)
+	}
+	resp, err := client.Do(ctx, req, nil) // don't decode into result yet
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("reading graphql response: %w", err)
+	}
+	// Check for GraphQL errors
+	var gqlErr graphQLErrors
+	if json.Unmarshal(raw, &gqlErr) == nil && len(gqlErr.Errors) > 0 {
+		msgs := make([]string, len(gqlErr.Errors))
+		for i, e := range gqlErr.Errors {
+			msgs[i] = e.Message
+		}
+		return fmt.Errorf("graphql errors: %s", strings.Join(msgs, "; "))
+	}
+	// Decode the actual result
+	if result != nil {
+		if err := json.Unmarshal(raw, result); err != nil {
+			return fmt.Errorf("decoding graphql result: %w", err)
+		}
+	}
+	return nil
 }
 
 // GetPRDiff fetches the unified diff for a pull request.
@@ -271,11 +315,6 @@ func (c *Client) ListReviewThreads(ctx context.Context, installationID int64, ow
 		},
 	}
 
-	req, err := client.NewRequest("POST", "graphql", body)
-	if err != nil {
-		return nil, fmt.Errorf("creating graphql request: %w", err)
-	}
-
 	var result struct {
 		Data struct {
 			Repository struct {
@@ -301,8 +340,7 @@ func (c *Client) ListReviewThreads(ctx context.Context, installationID int64, ow
 		} `json:"data"`
 	}
 
-	_, err = client.Do(ctx, req, &result)
-	if err != nil {
+	if err := doGraphQL(ctx, client, body, &result); err != nil {
 		return nil, fmt.Errorf("graphql reviewThreads: %w", err)
 	}
 
@@ -327,7 +365,6 @@ func (c *Client) ResolveReviewThread(ctx context.Context, installationID int64, 
 	if err != nil {
 		return err
 	}
-
 	body := map[string]any{
 		"query": `mutation($input: ResolveReviewThreadInput!) { resolveReviewThread(input: $input) { thread { isResolved } } }`,
 		"variables": map[string]any{
@@ -336,13 +373,7 @@ func (c *Client) ResolveReviewThread(ctx context.Context, installationID int64, 
 			},
 		},
 	}
-
-	req, err := client.NewRequest("POST", "graphql", body)
-	if err != nil {
-		return fmt.Errorf("creating graphql request: %w", err)
-	}
-	_, err = client.Do(ctx, req, nil)
-	return err
+	return doGraphQL(ctx, client, body, nil)
 }
 
 // FindThreadForComment returns the thread ID for a given review comment node ID.
@@ -370,11 +401,6 @@ func (c *Client) FindThreadForComment(ctx context.Context, installationID int64,
 		"variables": map[string]any{"owner": owner, "repo": repo, "pr": prNumber},
 	}
 
-	req, err := client.NewRequest("POST", "graphql", body)
-	if err != nil {
-		return "", err
-	}
-
 	var result struct {
 		Data struct {
 			Repository struct {
@@ -394,8 +420,7 @@ func (c *Client) FindThreadForComment(ctx context.Context, installationID int64,
 		} `json:"data"`
 	}
 
-	_, err = client.Do(ctx, req, &result)
-	if err != nil {
+	if err := doGraphQL(ctx, client, body, &result); err != nil {
 		return "", err
 	}
 
@@ -426,12 +451,7 @@ func (c *Client) MinimizeComment(ctx context.Context, installationID int64, node
 		},
 	}
 
-	req, err := client.NewRequest("POST", "graphql", body)
-	if err != nil {
-		return fmt.Errorf("creating graphql request: %w", err)
-	}
-	_, err = client.Do(ctx, req, nil)
-	return err
+	return doGraphQL(ctx, client, body, nil)
 }
 
 // --- Git Data API (for @argus-eye fix command) ---
