@@ -98,6 +98,7 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 				// Installations
 				r.Get("/installations", s.listInstallations)
 				r.Get("/installations/current", s.getCurrentInstallation)
+				r.Post("/installations/auto-link", s.autoLinkInstallation)
 				r.Post("/installations/{installationID}/sync-repos", s.syncRepos)
 
 				// Repos
@@ -370,6 +371,47 @@ func (s *Server) getCurrentInstallation(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, inst)
+}
+
+// autoLinkInstallation matches a user's unlinked installation to the current Clerk org
+// by comparing org_login to the Clerk org slug/name. Called automatically by the frontend.
+func (s *Server) autoLinkInstallation(w http.ResponseWriter, r *http.Request) {
+	orgID := getOrgID(r.Context())
+	if orgID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no org context"})
+		return
+	}
+	var body struct {
+		OrgSlug string `json:"org_slug"` // Clerk org slug or name
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.OrgSlug == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "org_slug required"})
+		return
+	}
+
+	// Find user's installations that match the org slug
+	userID := getUserID(r.Context())
+	installations, err := s.store.ListUserInstallations(r.Context(), userID)
+	if err != nil {
+		s.logger.Error("auto-link: list installations", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
+		return
+	}
+
+	for _, inst := range installations {
+		if strings.EqualFold(inst.OrgLogin, body.OrgSlug) && (inst.ClerkOrgID == nil || *inst.ClerkOrgID == "") {
+			if err := s.store.SetInstallationClerkOrgID(r.Context(), inst.ID, orgID); err != nil {
+				s.logger.Error("auto-link: set clerk_org_id", "error", err)
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to link"})
+				return
+			}
+			s.logger.Info("auto-linked installation to clerk org", "installation", inst.OrgLogin, "clerk_org_id", orgID)
+			writeJSON(w, http.StatusOK, map[string]string{"status": "linked", "org_login": inst.OrgLogin})
+			return
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "no_match"})
 }
 
 func (s *Server) syncRepos(w http.ResponseWriter, r *http.Request) {
