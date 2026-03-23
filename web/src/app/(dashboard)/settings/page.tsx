@@ -419,22 +419,13 @@ function ConfigCard({
                     setModelSearch(e.target.value);
                     setModel("");
                   }}
+                  onFocus={() => { if (model) { setModelSearch(model); setModel(""); } }}
                   placeholder="Search models..."
-                  className="w-full rounded border border-iron bg-background pl-7 pr-2 py-1.5 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none"
-                  list={`or-models-${stage}`}
+                  autoComplete="off"
+                  className="w-full rounded border border-iron bg-background pl-7 pr-8 py-1.5 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none"
                 />
+                <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-3 w-3 -translate-y-1/2 text-slate-text" />
               </div>
-              <datalist id={`or-models-${stage}`}>
-                {orModels
-                  .filter((m) => !modelSearch || m.id.toLowerCase().includes(modelSearch.toLowerCase()) || m.name.toLowerCase().includes(modelSearch.toLowerCase()))
-                  .slice(0, 50)
-                  .map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.name} ({(m.context_length / 1000).toFixed(0)}k ctx)
-                    </option>
-                  ))}
-              </datalist>
-              {/* Select from filtered results or enter custom */}
               {modelSearch && !model && (
                 <div className="absolute z-20 mt-1 w-full max-h-48 overflow-y-auto rounded border border-iron bg-charcoal shadow-lg">
                   {orModels

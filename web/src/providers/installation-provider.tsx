@@ -23,18 +23,20 @@ export function InstallationProvider({ children }: { children: ReactNode }) {
   const { getToken } = useAuth();
   const { organization } = useOrganization();
 
+  const orgId = organization?.id ?? "personal";
+
   const { data: installations, isLoading: listLoading } = useQuery({
-    queryKey: ["my-installations"],
+    queryKey: ["my-installations", orgId],
     queryFn: async () => {
-      const token = await getToken();
+      const token = await getToken({ skipCache: true });
       return api.get<Installation[]>("/api/v1/me/installations", token ?? undefined);
     },
   });
 
   const { data: current, isLoading: currentLoading } = useQuery({
-    queryKey: ["current-installation", organization?.id],
+    queryKey: ["current-installation", orgId],
     queryFn: async () => {
-      const token = await getToken();
+      const token = await getToken({ skipCache: true });
       return api.get<Installation>("/api/v1/installations/current", token ?? undefined);
     },
   });
