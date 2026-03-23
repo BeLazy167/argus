@@ -270,7 +270,14 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p revie
 		tokens.File = p.file.NewName
 	}
 
-	prompt := buildFileReviewPrompt(run, p.file, fileContents[p.file.NewName])
+	// Gather cross-file context for richer reviews
+	var relatedContext string
+	if p.specialist == "" { // only for primary review, not specialists (to save tokens)
+		related := GatherCrossFileContext(ctx, rs.ghClient, run.PREvent.InstallationID, owner, repo, run.PREvent.HeadSHA, p.file, run.Diff.Files)
+		relatedContext = FormatRelatedContext(related)
+	}
+
+	prompt := buildFileReviewPrompt(run, p.file, fileContents[p.file.NewName], relatedContext)
 	messages := []llm.Message{{Role: "user", Content: prompt}}
 
 	var tools []llm.Tool
@@ -347,7 +354,7 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p revie
 	return review, tokens, fmt.Errorf("exceeded max tool iterations (%d) for %s %s", rs.maxToolIter, p.file.NewName, label)
 }
 
-func buildFileReviewPrompt(run *PipelineRun, file diff.FileDiff, fileContent string) string {
+func buildFileReviewPrompt(run *PipelineRun, file diff.FileDiff, fileContent string, relatedContext string) string {
 	var sb strings.Builder
 	// Sanitize + truncate user-controlled fields
 	safeTitle := sanitizeUserInput(util.Truncate(run.PREvent.PRTitle, 200, false))
@@ -370,6 +377,10 @@ func buildFileReviewPrompt(run *PipelineRun, file diff.FileDiff, fileContent str
 		sb.WriteString("\nFull file content:\n```\n")
 		sb.WriteString(truncateLines(fileContent, 500))
 		sb.WriteString("\n```\n")
+	}
+
+	if relatedContext != "" {
+		sb.WriteString(relatedContext)
 	}
 
 	sb.WriteString(`
