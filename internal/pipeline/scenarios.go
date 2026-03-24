@@ -19,25 +19,51 @@ type ScenarioSeed struct {
 
 // ExtractScenariosFromReview generates scenario seeds from significant review findings.
 // Call after a review completes; persist seeds via store.CreateScenario.
+// ExtractScenariosFromReview creates one scenario per file (not per comment)
+// summarizing all critical/warning findings for that file.
 func ExtractScenariosFromReview(run *PipelineRun) []ScenarioSeed {
-	var seeds []ScenarioSeed
+	type fileFindings struct {
+		issues      []string
+		maxSeverity Severity
+	}
+	byFile := make(map[string]*fileFindings)
+
 	for _, fr := range run.FileReviews {
 		for _, c := range fr.Comments {
 			if c.Severity != SeverityCritical && c.Severity != SeverityWarning {
 				continue
 			}
-			desc := fmt.Sprintf("In %s: %s", fr.Path, c.What)
-			if c.Why != "" {
-				desc += " — " + c.Why
+			ff, ok := byFile[fr.Path]
+			if !ok {
+				ff = &fileFindings{}
+				byFile[fr.Path] = ff
 			}
-			seeds = append(seeds, ScenarioSeed{
-				Description: desc,
-				Source:      "review",
-				SourceRef:   run.ReviewID.String(),
-				Files:       []string{fr.Path},
-				Severity:    scenarioSeverity(c.Severity),
-			})
+			issue := c.What
+			if issue == "" {
+				issue = c.Body
+			}
+			ff.issues = append(ff.issues, issue)
+			if c.Severity == SeverityCritical {
+				ff.maxSeverity = SeverityCritical
+			} else if ff.maxSeverity != SeverityCritical {
+				ff.maxSeverity = SeverityWarning
+			}
 		}
+	}
+
+	var seeds []ScenarioSeed
+	for path, ff := range byFile {
+		desc := fmt.Sprintf("In %s: %s", path, ff.issues[0])
+		if len(ff.issues) > 1 {
+			desc += fmt.Sprintf(" (+%d more issues)", len(ff.issues)-1)
+		}
+		seeds = append(seeds, ScenarioSeed{
+			Description: desc,
+			Source:      "review",
+			SourceRef:   run.ReviewID.String(),
+			Files:       []string{path},
+			Severity:    scenarioSeverity(ff.maxSeverity),
+		})
 	}
 	return seeds
 }
