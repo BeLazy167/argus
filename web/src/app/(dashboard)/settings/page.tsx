@@ -25,6 +25,8 @@ import { useActiveRepo } from "@/lib/hooks/use-active-repo";
 import { useInstallation } from "@/providers/installation-provider";
 import { useUpdateRepo } from "@/lib/queries/repos";
 import { RepoSelect } from "@/components/dashboard/repo-select";
+import { Protect } from "@clerk/nextjs";
+import { UpgradePrompt } from "@/components/dashboard/upgrade-prompt";
 import type { ProviderKey, PromptTemplate } from "@/lib/types";
 
 /* ── Providers & model quick-picks ── */
@@ -948,46 +950,48 @@ export default function SettingsPage() {
                   ))}
                 </div>
 
-                {/* Row 2: Deep review toggle + scoring */}
-                <div className="grid gap-4 md:grid-cols-2">
-                  <DeepReviewCard
-                    enabled={deepReview}
-                    onToggle={toggleDeepReview}
-                    pending={updateRepo.isPending}
-                  />
+                {/* Row 2: Deep review toggle + scoring (Pro only) */}
+                <Protect plan="org:pro" fallback={<UpgradePrompt feature="Deep review" />}>
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <DeepReviewCard
+                      enabled={deepReview}
+                      onToggle={toggleDeepReview}
+                      pending={updateRepo.isPending}
+                    />
 
-                  {/* Scoring card — ghosted when deep review is off */}
-                  <div
-                    className={`relative transition-opacity duration-200 ${
-                      deepReview ? "opacity-100" : "opacity-40"
-                    }`}
-                  >
-                    {!deepReview && (
-                      <button
-                        type="button"
-                        onClick={toggleDeepReview}
-                        className="absolute inset-0 z-10 flex items-center justify-center rounded-lg cursor-pointer group"
-                        aria-label="Enable deep review to configure scoring"
-                      >
-                        <div className="flex items-center gap-2 rounded border border-iron/50 bg-charcoal/90 px-3 py-1.5 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
-                          <Lock className="h-3 w-3 text-slate-text" />
-                          <span className="text-[10px] font-mono text-slate-text">
-                            Enable deep review to unlock
-                          </span>
-                        </div>
-                      </button>
-                    )}
-                    <div className={!deepReview ? "pointer-events-none" : undefined}>
-                      <ConfigCard
-                        stage="scoring"
-                        repoId={activeId}
-                        existing={configMap.get("scoring")}
-                        savedProviders={savedProviders}
-                        installationId={active?.id}
-                      />
+                    {/* Scoring card — ghosted when deep review is off */}
+                    <div
+                      className={`relative transition-opacity duration-200 ${
+                        deepReview ? "opacity-100" : "opacity-40"
+                      }`}
+                    >
+                      {!deepReview && (
+                        <button
+                          type="button"
+                          onClick={toggleDeepReview}
+                          className="absolute inset-0 z-10 flex items-center justify-center rounded-lg cursor-pointer group"
+                          aria-label="Enable deep review to configure scoring"
+                        >
+                          <div className="flex items-center gap-2 rounded border border-iron/50 bg-charcoal/90 px-3 py-1.5 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
+                            <Lock className="h-3 w-3 text-slate-text" />
+                            <span className="text-[10px] font-mono text-slate-text">
+                              Enable deep review to unlock
+                            </span>
+                          </div>
+                        </button>
+                      )}
+                      <div className={!deepReview ? "pointer-events-none" : undefined}>
+                        <ConfigCard
+                          stage="scoring"
+                          repoId={activeId}
+                          existing={configMap.get("scoring")}
+                          savedProviders={savedProviders}
+                          installationId={active?.id}
+                        />
+                      </div>
                     </div>
                   </div>
-                </div>
+                </Protect>
               </div>
             )}
           </section>
@@ -1045,38 +1049,40 @@ export default function SettingsPage() {
                   ))}
                 </div>
                 {currentPersona === "custom" && (
-                  <div className="mt-4 rounded-lg border border-iron bg-charcoal p-4">
-                    <label className="block text-[11px] font-mono text-slate-text mb-2">
-                      Custom persona prompt — define how Argus should review code
-                    </label>
-                    <textarea
-                      value={customPromptDraft}
-                      onChange={(e) => setCustomPromptDraft(e.target.value)}
-                      placeholder="e.g. You are a reviewer focused on accessibility and i18n. Flag any hardcoded strings, missing aria labels, or RTL layout issues..."
-                      rows={5}
-                      className="w-full rounded-lg border border-iron bg-void px-4 py-3 text-xs font-mono text-foreground placeholder:text-slate-text/40 focus:outline-none focus:border-amber/50 transition-colors resize-y"
-                    />
-                    <button
-                      type="button"
-                      disabled={updateRepo.isPending || customPromptDraft === currentCustomPrompt}
-                      onClick={() => {
-                        setPersonaError("");
-                        updateRepo.mutate(
-                          {
-                            id: activeId,
-                            settings_json: { ...activeRepo?.settings_json, persona: "custom", custom_persona_prompt: customPromptDraft },
-                          },
-                          {
-                            onError: (err) =>
-                              setPersonaError(err instanceof Error ? err.message : "Failed to save"),
-                          },
-                        );
-                      }}
-                      className="mt-2 rounded border border-amber/30 bg-amber/10 px-3 py-1.5 text-[10px] font-mono font-medium text-amber hover:bg-amber/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                    >
-                      {updateRepo.isPending ? "Saving..." : "Save Custom Persona"}
-                    </button>
-                  </div>
+                  <Protect plan="org:pro" fallback={<UpgradePrompt feature="Custom persona" />}>
+                    <div className="mt-4 rounded-lg border border-iron bg-charcoal p-4">
+                      <label className="block text-[11px] font-mono text-slate-text mb-2">
+                        Custom persona prompt — define how Argus should review code
+                      </label>
+                      <textarea
+                        value={customPromptDraft}
+                        onChange={(e) => setCustomPromptDraft(e.target.value)}
+                        placeholder="e.g. You are a reviewer focused on accessibility and i18n. Flag any hardcoded strings, missing aria labels, or RTL layout issues..."
+                        rows={5}
+                        className="w-full rounded-lg border border-iron bg-void px-4 py-3 text-xs font-mono text-foreground placeholder:text-slate-text/40 focus:outline-none focus:border-amber/50 transition-colors resize-y"
+                      />
+                      <button
+                        type="button"
+                        disabled={updateRepo.isPending || customPromptDraft === currentCustomPrompt}
+                        onClick={() => {
+                          setPersonaError("");
+                          updateRepo.mutate(
+                            {
+                              id: activeId,
+                              settings_json: { ...activeRepo?.settings_json, persona: "custom", custom_persona_prompt: customPromptDraft },
+                            },
+                            {
+                              onError: (err) =>
+                                setPersonaError(err instanceof Error ? err.message : "Failed to save"),
+                            },
+                          );
+                        }}
+                        className="mt-2 rounded border border-amber/30 bg-amber/10 px-3 py-1.5 text-[10px] font-mono font-medium text-amber hover:bg-amber/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                      >
+                        {updateRepo.isPending ? "Saving..." : "Save Custom Persona"}
+                      </button>
+                    </div>
+                  </Protect>
                 )}
                 {personaError && (
                   <p className="text-[10px] font-mono text-red-400 mt-2">{personaError}</p>
@@ -1085,96 +1091,100 @@ export default function SettingsPage() {
             )}
           </section>
 
-          {/* Section 4: Review Prompts */}
-          <section>
-            <div className="flex items-center gap-3 mb-4">
-              <span className="inline-flex items-center justify-center h-6 w-6 rounded-full border border-amber/30 bg-amber/10 text-[11px] font-mono font-bold text-amber">
-                4
-              </span>
-              <div className="flex items-center gap-2">
-                <FileText className="h-4 w-4 text-amber" />
-                <h2 className="font-display text-lg font-semibold text-foreground">
-                  Review Prompts
-                </h2>
+          {/* Section 4: Review Prompts (Pro only) */}
+          <Protect plan="org:pro" fallback={<UpgradePrompt feature="Custom prompts" />}>
+            <section>
+              <div className="flex items-center gap-3 mb-4">
+                <span className="inline-flex items-center justify-center h-6 w-6 rounded-full border border-amber/30 bg-amber/10 text-[11px] font-mono font-bold text-amber">
+                  4
+                </span>
+                <div className="flex items-center gap-2">
+                  <FileText className="h-4 w-4 text-amber" />
+                  <h2 className="font-display text-lg font-semibold text-foreground">
+                    Review Prompts
+                  </h2>
+                </div>
               </div>
-            </div>
-            <p className="text-[11px] font-mono text-slate-text mb-4">
-              Customize the AI prompts used in each pipeline stage for{" "}
-              <span className="text-foreground">{activeRepo?.full_name ?? "selected repo"}</span>.
-              Changes override the built-in defaults.
-            </p>
+              <p className="text-[11px] font-mono text-slate-text mb-4">
+                Customize the AI prompts used in each pipeline stage for{" "}
+                <span className="text-foreground">{activeRepo?.full_name ?? "selected repo"}</span>.
+                Changes override the built-in defaults.
+              </p>
 
-            {activeId === 0 ? (
-              <div className="rounded-lg border border-iron bg-charcoal p-10 text-center">
-                <FileText className="h-8 w-8 text-slate-text mx-auto mb-3" />
-                <p className="text-xs font-mono text-slate-text">
-                  Select a repo to customize prompts.
-                </p>
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {PROMPT_STAGES.map((stage) => (
-                  <PromptCard
-                    key={stage}
-                    stage={stage}
-                    repoId={activeId}
-                    custom={promptMap.get(stage)}
-                    defaultText={defaultPromptMap.get(stage)?.prompt_text ?? ""}
-                  />
-                ))}
-              </div>
-            )}
-          </section>
-
-          {/* Section 5: Advanced Features */}
-          <section>
-            <div className="flex items-center gap-3 mb-4">
-              <span className="inline-flex items-center justify-center h-6 w-6 rounded-full border border-amber/30 bg-amber/10 text-[11px] font-mono font-bold text-amber">
-                5
-              </span>
-              <div className="flex items-center gap-2">
-                <Sliders className="h-4 w-4 text-amber" />
-                <h2 className="font-display text-lg font-semibold text-foreground">
-                  Advanced Features
-                </h2>
-              </div>
-            </div>
-            <p className="text-[11px] font-mono text-slate-text mb-4">
-              Toggle pipeline capabilities for{" "}
-              <span className="text-foreground">{activeRepo?.full_name ?? "selected repo"}</span>.
-              These control which analysis stages run during review.
-            </p>
-
-            {activeId === 0 ? (
-              <div className="rounded-lg border border-iron bg-charcoal p-10 text-center">
-                <Sliders className="h-8 w-8 text-slate-text mx-auto mb-3" />
-                <p className="text-xs font-mono text-slate-text">
-                  Select a repo to configure features.
-                </p>
-              </div>
-            ) : (
-              <div className="grid gap-3 md:grid-cols-2">
-                {FEATURE_TOGGLES.map((toggle) => {
-                  const val = activeRepo?.settings_json?.[toggle.key];
-                  const enabled = typeof val === "boolean" ? val : toggle.defaultValue;
-                  return (
-                    <FeatureToggleCard
-                      key={toggle.key}
-                      toggle={toggle}
-                      enabled={enabled}
-                      pending={updateRepo.isPending}
-                      onToggle={() => {
-                        updateRepo.mutate({
-                          id: activeId,
-                          settings_json: { ...activeRepo?.settings_json, [toggle.key]: !enabled },
-                        });
-                      }}
+              {activeId === 0 ? (
+                <div className="rounded-lg border border-iron bg-charcoal p-10 text-center">
+                  <FileText className="h-8 w-8 text-slate-text mx-auto mb-3" />
+                  <p className="text-xs font-mono text-slate-text">
+                    Select a repo to customize prompts.
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {PROMPT_STAGES.map((stage) => (
+                    <PromptCard
+                      key={stage}
+                      stage={stage}
+                      repoId={activeId}
+                      custom={promptMap.get(stage)}
+                      defaultText={defaultPromptMap.get(stage)?.prompt_text ?? ""}
                     />
-                  );
-                })}
+                  ))}
+                </div>
+              )}
+            </section>
+          </Protect>
+
+          {/* Section 5: Advanced Features (Pro only) */}
+          <Protect plan="org:pro" fallback={<UpgradePrompt feature="Advanced features (cross-file, blast radius, scenarios, simulation)" />}>
+            <section>
+              <div className="flex items-center gap-3 mb-4">
+                <span className="inline-flex items-center justify-center h-6 w-6 rounded-full border border-amber/30 bg-amber/10 text-[11px] font-mono font-bold text-amber">
+                  5
+                </span>
+                <div className="flex items-center gap-2">
+                  <Sliders className="h-4 w-4 text-amber" />
+                  <h2 className="font-display text-lg font-semibold text-foreground">
+                    Advanced Features
+                  </h2>
+                </div>
               </div>
-            )}
-          </section>
+              <p className="text-[11px] font-mono text-slate-text mb-4">
+                Toggle pipeline capabilities for{" "}
+                <span className="text-foreground">{activeRepo?.full_name ?? "selected repo"}</span>.
+                These control which analysis stages run during review.
+              </p>
+
+              {activeId === 0 ? (
+                <div className="rounded-lg border border-iron bg-charcoal p-10 text-center">
+                  <Sliders className="h-8 w-8 text-slate-text mx-auto mb-3" />
+                  <p className="text-xs font-mono text-slate-text">
+                    Select a repo to configure features.
+                  </p>
+                </div>
+              ) : (
+                <div className="grid gap-3 md:grid-cols-2">
+                  {FEATURE_TOGGLES.map((toggle) => {
+                    const val = activeRepo?.settings_json?.[toggle.key];
+                    const enabled = typeof val === "boolean" ? val : toggle.defaultValue;
+                    return (
+                      <FeatureToggleCard
+                        key={toggle.key}
+                        toggle={toggle}
+                        enabled={enabled}
+                        pending={updateRepo.isPending}
+                        onToggle={() => {
+                          updateRepo.mutate({
+                            id: activeId,
+                            settings_json: { ...activeRepo?.settings_json, [toggle.key]: !enabled },
+                          });
+                        }}
+                      />
+                    );
+                  })}
+                </div>
+              )}
+            </section>
+          </Protect>
         </div>
       )}
     </>
