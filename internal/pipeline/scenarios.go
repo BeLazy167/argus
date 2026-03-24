@@ -35,11 +35,25 @@ func ExtractScenariosFromReview(run *PipelineRun) []ScenarioSeed {
 				Source:      "review",
 				SourceRef:   run.ReviewID.String(),
 				Files:       []string{fr.Path},
-				Severity:    string(c.Severity),
+				Severity:    scenarioSeverity(c.Severity),
 			})
 		}
 	}
 	return seeds
+}
+
+// scenarioSeverity maps review severities to scenario severities.
+func scenarioSeverity(s Severity) string {
+	switch s {
+	case SeverityCritical:
+		return "critical"
+	case SeverityWarning:
+		return "high"
+	case SeveritySuggestion:
+		return "medium"
+	default:
+		return "low"
+	}
 }
 
 // StoreScenarioSeeds persists extracted scenario seeds to the database.
