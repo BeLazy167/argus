@@ -56,6 +56,7 @@ func NewAzureProvider(apiKey, baseURL string) *ChatProvider {
 
 // NewGCPVertexProvider creates a provider for GCP Vertex AI (OpenAI-compatible endpoint).
 // baseURL should be: https://{region}-aiplatform.googleapis.com/v1/projects/{project}/locations/{region}/endpoints/openapi
+// API key should be a GCP access token from `gcloud auth print-access-token`.
 func NewGCPVertexProvider(apiKey, baseURL string) *ChatProvider {
 	return &ChatProvider{
 		name:    "gcp_vertex",
@@ -66,13 +67,16 @@ func NewGCPVertexProvider(apiKey, baseURL string) *ChatProvider {
 }
 
 // NewAWSBedrockProvider creates a provider for AWS Bedrock (OpenAI-compatible endpoint).
-// baseURL should be the Bedrock runtime endpoint.
+// baseURL should be: https://bedrock-runtime.{region}.amazonaws.com
 func NewAWSBedrockProvider(apiKey, baseURL string) *ChatProvider {
 	return &ChatProvider{
 		name:    "aws_bedrock",
 		apiKey:  apiKey,
 		baseURL: baseURL,
-		client:  &http.Client{Timeout: 120 * time.Second},
+		pathFn: func(_ string) string {
+			return "/openai/v1/chat/completions"
+		},
+		client: &http.Client{Timeout: 120 * time.Second},
 	}
 }
 
