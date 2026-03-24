@@ -524,7 +524,7 @@ func buildSynthesisBriefPrompt(run *PipelineRun, score int) string {
 	sb.WriteString(fmt.Sprintf("Files reviewed: %d, Score: %d/10\n\n", len(run.Diff.Files), score))
 
 	if run.PREvent.PRBody != "" {
-		sb.WriteString("PR description: " + util.Truncate(run.PREvent.PRBody, 300, false) + "\n\n")
+		sb.WriteString(wrapInDelimiters("pr_description", sanitizeUserInput(util.Truncate(run.PREvent.PRBody, 300, false))) + "\n\n")
 	}
 
 	sb.WriteString("Review comments:\n")
