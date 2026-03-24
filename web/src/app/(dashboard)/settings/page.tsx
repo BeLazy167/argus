@@ -31,13 +31,16 @@ import type { ProviderKey, PromptTemplate } from "@/lib/types";
 
 /* ── Providers & model quick-picks ── */
 
-const PROVIDERS = ["openrouter", "openai", "anthropic", "zhipu"] as const;
+const PROVIDERS = ["openrouter", "openai", "anthropic", "azure", "gcp_vertex", "aws_bedrock", "zhipu"] as const;
 type Provider = (typeof PROVIDERS)[number];
 
 const PROVIDER_LABELS: Record<Provider, string> = {
   openrouter: "OpenRouter",
   openai: "OpenAI",
   anthropic: "Anthropic",
+  azure: "Azure OpenAI",
+  gcp_vertex: "GCP Vertex AI",
+  aws_bedrock: "AWS Bedrock",
   zhipu: "Zhipu AI (GLM)",
 };
 
@@ -45,6 +48,9 @@ const PROVIDER_BASE_URLS: Record<Provider, string> = {
   openrouter: "https://openrouter.ai/api/v1",
   openai: "https://api.openai.com/v1",
   anthropic: "https://api.anthropic.com/v1",
+  azure: "",
+  gcp_vertex: "",
+  aws_bedrock: "",
   zhipu: "https://api.z.ai/api/paas/v4",
 };
 
@@ -56,6 +62,9 @@ const MODEL_PICKS: Record<Provider, string[]> = {
   ],
   openai: ["gpt-4o", "gpt-4o-mini"],
   anthropic: ["claude-sonnet-4-20250514"],
+  azure: ["gpt-4o", "gpt-4o-mini"],
+  gcp_vertex: ["gemini-2.5-pro", "gemini-2.5-flash"],
+  aws_bedrock: ["anthropic.claude-sonnet-4", "anthropic.claude-haiku"],
   zhipu: ["glm-5", "glm-4-plus", "glm-4"],
 };
 

@@ -10,19 +10,66 @@ import (
 	"time"
 )
 
+// AuthStyle controls how the API key is sent in HTTP requests.
+type AuthStyle int
+
+const (
+	AuthBearer AuthStyle = iota // Authorization: Bearer <key> (OpenAI, OpenRouter, Groq, etc.)
+	AuthAPIKey                  // api-key: <key> (Azure OpenAI)
+)
+
 // ChatProvider implements the Provider interface using the OpenAI-compatible
-// chat completions format. Works with OpenRouter, OpenAI, Anthropic, Groq,
-// Together, xAI/Grok, GLM, Minimax, Qwen, DeepSeek, Ollama, vLLM, etc.
+// chat completions format. Works with OpenRouter, OpenAI, Azure, AWS Bedrock,
+// GCP Vertex, Anthropic, Groq, Together, xAI/Grok, DeepSeek, Ollama, vLLM, etc.
 type ChatProvider struct {
-	name    string
-	apiKey  string
-	baseURL string
-	client  *http.Client
+	name      string
+	apiKey    string
+	baseURL   string
+	authStyle AuthStyle
+	pathFn    func(model string) string // custom path builder (nil = default /chat/completions)
+	client    *http.Client
 }
 
 func NewChatProvider(name, apiKey, baseURL string) *ChatProvider {
 	return &ChatProvider{
 		name:    name,
+		apiKey:  apiKey,
+		baseURL: baseURL,
+		client:  &http.Client{Timeout: 120 * time.Second},
+	}
+}
+
+// NewAzureProvider creates a provider for Azure OpenAI Service.
+// baseURL should be: https://{resource}.openai.azure.com/openai
+func NewAzureProvider(apiKey, baseURL string) *ChatProvider {
+	return &ChatProvider{
+		name:      "azure",
+		apiKey:    apiKey,
+		baseURL:   baseURL,
+		authStyle: AuthAPIKey,
+		pathFn: func(model string) string {
+			return "/deployments/" + model + "/chat/completions?api-version=2024-10-21"
+		},
+		client: &http.Client{Timeout: 120 * time.Second},
+	}
+}
+
+// NewGCPVertexProvider creates a provider for GCP Vertex AI (OpenAI-compatible endpoint).
+// baseURL should be: https://{region}-aiplatform.googleapis.com/v1/projects/{project}/locations/{region}/endpoints/openapi
+func NewGCPVertexProvider(apiKey, baseURL string) *ChatProvider {
+	return &ChatProvider{
+		name:    "gcp_vertex",
+		apiKey:  apiKey,
+		baseURL: baseURL,
+		client:  &http.Client{Timeout: 120 * time.Second},
+	}
+}
+
+// NewAWSBedrockProvider creates a provider for AWS Bedrock (OpenAI-compatible endpoint).
+// baseURL should be the Bedrock runtime endpoint.
+func NewAWSBedrockProvider(apiKey, baseURL string) *ChatProvider {
+	return &ChatProvider{
+		name:    "aws_bedrock",
 		apiKey:  apiKey,
 		baseURL: baseURL,
 		client:  &http.Client{Timeout: 120 * time.Second},
@@ -58,12 +105,22 @@ func (p *ChatProvider) Complete(ctx context.Context, req CompletionRequest) (Com
 		return CompletionResponse{}, fmt.Errorf("marshaling request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.baseURL+"/chat/completions", bytes.NewReader(jsonBody))
+	path := "/chat/completions"
+	if p.pathFn != nil {
+		path = p.pathFn(req.Model)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.baseURL+path, bytes.NewReader(jsonBody))
 	if err != nil {
 		return CompletionResponse{}, fmt.Errorf("creating request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+	switch p.authStyle {
+	case AuthAPIKey:
+		httpReq.Header.Set("api-key", p.apiKey)
+	default:
+		httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+	}
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
