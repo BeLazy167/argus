@@ -120,7 +120,7 @@ func (c *Client) BulkDelete(ctx context.Context, req BulkDeleteRequest) error {
 	if len(req.IDs) == 0 && len(req.ContainerTags) == 0 {
 		return fmt.Errorf("BulkDelete: at least one of IDs or ContainerTags required")
 	}
-	return c.doJSON(ctx, "/v3/documents/bulk/delete", req, &struct{}{})
+	return c.doRequest(ctx, "DELETE", "/v3/documents/bulk", req, &struct{}{})
 }
 
 // GetDocument retrieves a single document by ID.
