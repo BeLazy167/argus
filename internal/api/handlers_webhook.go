@@ -10,6 +10,9 @@ import (
 	ghpkg "github.com/BeLazy167/argus/internal/github"
 )
 
+// issueLabelsForScenario are labels that trigger auto-scenario creation from issues.
+var issueLabelsForScenario = map[string]bool{"argus": true, "bug": true}
+
 func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	event, err := ghpkg.ParseWebhook(r, s.webhookSecret)
 	if err != nil {
@@ -113,6 +116,27 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 				s.dispatchCommand(context.Background(), *issueEvent)
 			}()
 		}
+
+	case "issues":
+		issueEvent, ok := event.Payload.(*gh.IssuesEvent)
+		if !ok {
+			break
+		}
+		action := issueEvent.GetAction()
+		if action != "opened" && action != "labeled" {
+			break
+		}
+		hasLabel := false
+		for _, l := range issueEvent.GetIssue().Labels {
+			if issueLabelsForScenario[strings.ToLower(l.GetName())] {
+				hasLabel = true
+				break
+			}
+		}
+		if !hasLabel {
+			break
+		}
+		go s.generateScenarioFromIssue(context.WithoutCancel(r.Context()), issueEvent)
 
 	case "installation":
 		s.logger.Info("installation event", "action", event.Action)

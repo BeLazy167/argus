@@ -170,6 +170,8 @@ func extractAction(event interface{}) string {
 		return e.GetAction()
 	case *gh.IssueCommentEvent:
 		return e.GetAction()
+	case *gh.IssuesEvent:
+		return e.GetAction()
 	default:
 		return ""
 	}

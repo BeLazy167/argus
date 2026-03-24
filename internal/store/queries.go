@@ -544,6 +544,26 @@ func (s *Store) GetLatestReviewBySHA(ctx context.Context, repoFullName string, p
 	return &r, nil
 }
 
+// GetLatestReviewByPR returns the most recent completed review for a repo+PR by full name.
+func (s *Store) GetLatestReviewByPR(ctx context.Context, repoFullName string, prNumber int) (*Review, error) {
+	var r Review
+	err := s.Pool.QueryRow(ctx, `
+		SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, rv.github_review_id,
+		       rv.status, rv.summary, rv.score, rv.token_usage, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error,
+		       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at
+		FROM reviews rv JOIN repos r ON rv.repo_id = r.id
+		WHERE r.full_name = $1 AND rv.pr_number = $2
+		  AND rv.status = 'completed'
+		ORDER BY rv.created_at DESC LIMIT 1
+	`, repoFullName, prNumber).Scan(&r.ID, &r.RepoID, &r.PRNumber, &r.PRTitle, &r.PRAuthor, &r.HeadSHA, &r.BaseSHA, &r.GithubReviewID,
+		&r.Status, &r.Summary, &r.Score, &r.TokenUsage, &r.Trigger, &r.TriggeredBy, &r.DurationMs, &r.Error,
+		&r.DeepReview, &r.Persona, &r.IsIncremental, &r.CreatedAt, &r.CompletedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
 // --- Stats ---
 
 func (s *Store) GetStats(ctx context.Context) (*Stats, error) {

@@ -141,18 +141,28 @@ type PromptTemplate struct {
 	UpdatedAt  time.Time `json:"updated_at"`
 }
 
+type ScenarioStep struct {
+	Action string `json:"action"`
+	Hint   string `json:"hint,omitempty"`
+}
+
 type Scenario struct {
-	ID             int64     `json:"id"`
-	InstallationID int64     `json:"installation_id"`
-	RepoID         *int64    `json:"repo_id,omitempty"`
-	Description    string    `json:"description"`
-	Source         string    `json:"source"`
-	SourceRef      string    `json:"source_ref,omitempty"`
-	Files          []string  `json:"files,omitempty"`
-	Modules        []string  `json:"modules,omitempty"`
-	Severity       string    `json:"severity"`
-	Active         bool      `json:"active"`
-	CreatedAt      time.Time `json:"created_at"`
+	ID              int64          `json:"id"`
+	InstallationID  int64          `json:"installation_id"`
+	RepoID          *int64         `json:"repo_id,omitempty"`
+	Description     string         `json:"description"`
+	Source          string         `json:"source"`
+	SourceRef       string         `json:"source_ref,omitempty"`
+	Files           []string       `json:"files,omitempty"`
+	Modules         []string       `json:"modules,omitempty"`
+	Severity        string         `json:"severity"`
+	Active          bool           `json:"active"`
+	CreatedAt       time.Time      `json:"created_at"`
+	Steps           []ScenarioStep `json:"steps"`
+	InitialState    string         `json:"initial_state"`
+	ExpectedOutcome string         `json:"expected_outcome"`
+	IsOutdated      bool           `json:"is_outdated"`
+	LastRunAt       *time.Time     `json:"last_run_at,omitempty"`
 }
 
 type Stats struct {
