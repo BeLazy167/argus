@@ -285,6 +285,7 @@ function ConfigCard({
   const [isCustom, setIsCustom] = useState(false);
   const [maxTokens, setMaxTokens] = useState(existing?.max_tokens ?? 4096);
   const [temperature, setTemperature] = useState(existing?.temperature ?? 0.2);
+  const [baseURL, setBaseURL] = useState(existing?.base_url ?? "");
   const [modelSearch, setModelSearch] = useState("");
 
   const upsert = useUpsertModelConfig();
@@ -468,31 +469,68 @@ function ConfigCard({
                 </div>
               )}
             </div>
-          ) : picks.length > 0 && !isCustom ? (
-            <div className="relative">
-              <select
-                value={model}
-                onChange={(e) => handleModelSelect(e.target.value)}
-                className="w-full appearance-none rounded border border-iron bg-background px-2 py-1.5 pr-7 text-xs font-mono text-foreground focus:border-amber focus:outline-none"
-              >
-                <option value="">Select model</option>
-                {picks.map((m) => (
-                  <option key={m} value={m}>{m}</option>
-                ))}
-                <option value="__custom__">Custom...</option>
-              </select>
-              <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-3 w-3 -translate-y-1/2 text-slate-text" />
-            </div>
           ) : (
-            <input
-              type="text"
-              value={finalModel}
-              onChange={(e) => isCustom ? setCustomModel(e.target.value) : setModel(e.target.value)}
-              placeholder="model-name"
-              className="w-full rounded border border-iron bg-background px-2 py-1.5 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none"
-            />
+            /* Combo input: type any model name OR click a suggestion */
+            <div className="relative">
+              <input
+                type="text"
+                value={isCustom ? customModel : model}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  if (isCustom) { setCustomModel(v); } else { setModel(v); setIsCustom(false); }
+                }}
+                onFocus={() => setModelSearch("__show__")}
+                onBlur={() => setTimeout(() => setModelSearch(""), 150)}
+                placeholder="Type or select a model..."
+                autoComplete="off"
+                className="w-full rounded border border-iron bg-background px-2 py-1.5 pr-7 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none"
+              />
+              <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-3 w-3 -translate-y-1/2 text-slate-text" />
+              {modelSearch === "__show__" && picks.length > 0 && (
+                <div className="absolute z-20 mt-1 w-full max-h-48 overflow-y-auto rounded border border-iron bg-charcoal shadow-lg">
+                  {picks.map((m) => (
+                    <button
+                      key={m}
+                      type="button"
+                      onMouseDown={(e) => { e.preventDefault(); setModel(m); setIsCustom(false); setModelSearch(""); }}
+                      className="w-full text-left px-3 py-1.5 text-xs font-mono hover:bg-amber/10 transition-colors text-foreground"
+                    >
+                      {m}
+                    </button>
+                  ))}
+                  <div className="px-3 py-1 text-[9px] font-mono text-slate-text/50 border-t border-iron">
+                    Or type any model name above
+                  </div>
+                </div>
+              )}
+            </div>
           )}
         </div>
+
+        {/* Base URL override — shown for providers that need custom endpoints */}
+        {(provider === "azure" || provider === "gcp_vertex" || provider === "aws_bedrock") && (
+          <div className="col-span-2">
+            <label className="block text-[10px] font-mono text-slate-text mb-1">
+              Endpoint URL <span className="text-amber">*</span>
+            </label>
+            <input
+              type="text"
+              value={baseURL}
+              onChange={(e) => setBaseURL(e.target.value)}
+              placeholder={
+                provider === "azure" ? "https://{resource}.openai.azure.com/openai" :
+                provider === "gcp_vertex" ? "https://{region}-aiplatform.googleapis.com/v1/projects/{project}/locations/{region}/endpoints/openapi" :
+                "https://bedrock-runtime.{region}.amazonaws.com"
+              }
+              className="w-full rounded border border-iron bg-background px-2 py-1.5 text-xs font-mono text-foreground placeholder:text-iron/50 focus:border-amber focus:outline-none"
+            />
+            <p className="text-[9px] font-mono text-slate-text/50 mt-1">
+              {provider === "azure" && "Azure OpenAI resource endpoint"}
+              {provider === "gcp_vertex" && "Vertex AI OpenAI-compatible endpoint"}
+              {provider === "aws_bedrock" && "Bedrock runtime endpoint"}
+            </p>
+          </div>
+        )}
 
         {/* Temperature slider */}
         <div>
