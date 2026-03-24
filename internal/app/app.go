@@ -60,6 +60,7 @@ func Run() error {
 	if cfg.SupermemoryAPIKey != "" {
 		memClient = memory.NewClient(cfg.SupermemoryAPIKey)
 		indexer = memory.NewIndexer(memClient, logger)
+		indexer.ConfigureFilterPrompt(ctx)
 	}
 
 	// Pipeline

@@ -27,6 +27,56 @@ func NewIndexer(client *Client, logger *slog.Logger) *Indexer {
 // Client returns the underlying Supermemory client.
 func (idx *Indexer) Client() *Client { return idx.client }
 
+// ConfigureFilterPrompt sets the org-level filter prompt so Supermemory knows
+// what kind of content Argus ingests. Call once on startup.
+func (idx *Indexer) ConfigureFilterPrompt(ctx context.Context) {
+	if idx.client == nil {
+		return
+	}
+	err := idx.client.UpdateSettings(ctx, map[string]any{
+		"shouldLLMFilter": true,
+		"filterPrompt": `You are ingesting content for Argus, an AI code review platform.
+
+Index:
+- Code review findings with file paths, severity, and category
+- Learned code patterns, conventions, and best practices
+- Developer feedback signals (confirmations and dismissals)
+- Known issues, edge cases, and past incident descriptions (scenarios)
+- Decision traces: review findings, developer replies, pattern matches
+
+Skip:
+- Raw diffs or code content without analysis
+- Duplicate findings that are semantically identical to existing memories
+- Generic boilerplate comments without specific insights
+- PR metadata that doesn't contain reviewable insights`,
+	})
+	if err != nil {
+		idx.logger.Warn("failed to configure supermemory filter prompt", "error", err)
+	} else {
+		idx.logger.Info("supermemory filter prompt configured")
+	}
+}
+
+// SetRepoEntityContext sets per-repo context that guides memory extraction.
+func (idx *Indexer) SetRepoEntityContext(ctx context.Context, owner, repo, language, description string) {
+	if idx.client == nil {
+		return
+	}
+	for _, kind := range []string{"reviews", "patterns", "scenarios", "traces"} {
+		tag := RepoTag(owner, repo, kind)
+		entityCtx := fmt.Sprintf("Code review data for %s/%s", owner, repo)
+		if language != "" {
+			entityCtx += fmt.Sprintf(" (primary language: %s)", language)
+		}
+		if description != "" {
+			entityCtx += ". " + description
+		}
+		if err := idx.client.UpdateEntityContext(ctx, tag, entityCtx); err != nil {
+			idx.logger.Debug("failed to set entity context", "tag", tag, "error", err)
+		}
+	}
+}
+
 // SearchPatternMatch searches for the best matching pattern across repo and owner scopes.
 // Returns the matched content and similarity score. Returns ("", 0) if no match above threshold.
 func (idx *Indexer) SearchPatternMatch(ctx context.Context, owner, repo, query string) (content string, score float64) {
