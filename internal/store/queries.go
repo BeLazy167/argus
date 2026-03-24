@@ -26,13 +26,13 @@ func (s *Store) CreateInstallation(ctx context.Context, installationID int64, or
 		INSERT INTO installations (installation_id, org_login)
 		VALUES ($1, $2)
 		ON CONFLICT (installation_id) DO UPDATE SET org_login = $2, suspended_at = NULL
-		RETURNING id, installation_id, org_login, clerk_org_id, created_at, suspended_at
-	`, installationID, orgLogin).Scan(&inst.ID, &inst.InstallationID, &inst.OrgLogin, &inst.ClerkOrgID, &inst.CreatedAt, &inst.SuspendedAt)
+		RETURNING id, installation_id, org_login, clerk_org_id, plan_tier, created_at, suspended_at
+	`, installationID, orgLogin).Scan(&inst.ID, &inst.InstallationID, &inst.OrgLogin, &inst.ClerkOrgID, &inst.PlanTier, &inst.CreatedAt, &inst.SuspendedAt)
 	return &inst, err
 }
 
 func (s *Store) ListInstallations(ctx context.Context) ([]Installation, error) {
-	rows, err := s.Pool.Query(ctx, `SELECT id, installation_id, org_login, clerk_org_id, created_at, suspended_at FROM installations ORDER BY created_at DESC`)
+	rows, err := s.Pool.Query(ctx, `SELECT id, installation_id, org_login, clerk_org_id, plan_tier, created_at, suspended_at FROM installations ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -61,7 +61,7 @@ func (s *Store) LinkUserInstallation(ctx context.Context, clerkUserID string, in
 
 func (s *Store) ListUserInstallations(ctx context.Context, clerkUserID string) ([]Installation, error) {
 	rows, err := s.Pool.Query(ctx, `
-		SELECT i.id, i.installation_id, i.org_login, i.clerk_org_id, i.created_at, i.suspended_at
+		SELECT i.id, i.installation_id, i.org_login, i.clerk_org_id, i.plan_tier, i.created_at, i.suspended_at
 		FROM installations i
 		JOIN user_installations ui ON ui.installation_id = i.id
 		WHERE ui.clerk_user_id = $1
@@ -99,9 +99,9 @@ func (s *Store) GetUserInstallationIDs(ctx context.Context, clerkUserID string) 
 func (s *Store) GetInstallation(ctx context.Context, id int64) (*Installation, error) {
 	var inst Installation
 	err := s.Pool.QueryRow(ctx, `
-		SELECT id, installation_id, org_login, clerk_org_id, created_at, suspended_at
+		SELECT id, installation_id, org_login, clerk_org_id, plan_tier, created_at, suspended_at
 		FROM installations WHERE id = $1
-	`, id).Scan(&inst.ID, &inst.InstallationID, &inst.OrgLogin, &inst.ClerkOrgID, &inst.CreatedAt, &inst.SuspendedAt)
+	`, id).Scan(&inst.ID, &inst.InstallationID, &inst.OrgLogin, &inst.ClerkOrgID, &inst.PlanTier, &inst.CreatedAt, &inst.SuspendedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -111,9 +111,9 @@ func (s *Store) GetInstallation(ctx context.Context, id int64) (*Installation, e
 func (s *Store) GetInstallationByGitHubID(ctx context.Context, ghInstallationID int64) (*Installation, error) {
 	var inst Installation
 	err := s.Pool.QueryRow(ctx, `
-		SELECT id, installation_id, org_login, clerk_org_id, created_at, suspended_at
+		SELECT id, installation_id, org_login, clerk_org_id, plan_tier, created_at, suspended_at
 		FROM installations WHERE installation_id = $1
-	`, ghInstallationID).Scan(&inst.ID, &inst.InstallationID, &inst.OrgLogin, &inst.ClerkOrgID, &inst.CreatedAt, &inst.SuspendedAt)
+	`, ghInstallationID).Scan(&inst.ID, &inst.InstallationID, &inst.OrgLogin, &inst.ClerkOrgID, &inst.PlanTier, &inst.CreatedAt, &inst.SuspendedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -123,13 +123,35 @@ func (s *Store) GetInstallationByGitHubID(ctx context.Context, ghInstallationID 
 func (s *Store) GetInstallationByClerkOrgID(ctx context.Context, clerkOrgID string) (*Installation, error) {
 	var inst Installation
 	err := s.Pool.QueryRow(ctx, `
-		SELECT id, installation_id, org_login, clerk_org_id, created_at, suspended_at
+		SELECT id, installation_id, org_login, clerk_org_id, plan_tier, created_at, suspended_at
 		FROM installations WHERE clerk_org_id = $1
-	`, clerkOrgID).Scan(&inst.ID, &inst.InstallationID, &inst.OrgLogin, &inst.ClerkOrgID, &inst.CreatedAt, &inst.SuspendedAt)
+	`, clerkOrgID).Scan(&inst.ID, &inst.InstallationID, &inst.OrgLogin, &inst.ClerkOrgID, &inst.PlanTier, &inst.CreatedAt, &inst.SuspendedAt)
 	if err != nil {
 		return nil, err
 	}
 	return &inst, nil
+}
+
+func (s *Store) CountReviewsThisMonth(ctx context.Context, installationID int64) (int, error) {
+	var count int
+	err := s.Pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM reviews r
+		JOIN repos rp ON r.repo_id = rp.id
+		WHERE rp.installation_id = $1
+		AND r.created_at >= date_trunc('month', NOW())
+	`, installationID).Scan(&count)
+	return count, err
+}
+
+func (s *Store) GetPlanTier(ctx context.Context, installationID int64) (string, error) {
+	var tier string
+	err := s.Pool.QueryRow(ctx, `SELECT plan_tier FROM installations WHERE id = $1`, installationID).Scan(&tier)
+	return tier, err
+}
+
+func (s *Store) SetPlanTier(ctx context.Context, installationID int64, tier string) error {
+	_, err := s.Pool.Exec(ctx, `UPDATE installations SET plan_tier = $1 WHERE id = $2`, tier, installationID)
+	return err
 }
 
 func (s *Store) SuspendInstallation(ctx context.Context, id int64) error {

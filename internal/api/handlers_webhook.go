@@ -31,6 +31,23 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			s.logger.Warn("rate limited", "repo", prEvent.RepoFullName)
 			break
 		}
+		// Check review limit for this installation
+		inst, instErr := s.store.GetInstallationByGitHubID(r.Context(), prEvent.InstallationID)
+		if instErr != nil {
+			s.logger.Warn("installation lookup for plan check", "error", instErr)
+		} else {
+			reviewCount, countErr := s.store.CountReviewsThisMonth(r.Context(), inst.ID)
+			if countErr != nil {
+				s.logger.Warn("review count check failed", "error", countErr)
+			} else {
+				limit := 500 // default limit, will be plan-aware later
+				if reviewCount >= limit {
+					s.logger.Info("review limit reached", "installation", inst.ID, "count", reviewCount, "limit", limit)
+					break
+				}
+			}
+		}
+
 		if !s.tryAcquireReview(prEvent.RepoFullName, prEvent.PRNumber) {
 			s.logger.Info("review already in-flight", "repo", prEvent.RepoFullName, "pr", prEvent.PRNumber)
 			break

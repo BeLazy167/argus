@@ -3,7 +3,9 @@
 import { useMemo, useState } from "react";
 import { Activity, FileText, Search, Loader2, ExternalLink } from "lucide-react";
 import { usePagination, PaginationBar } from "@/components/dashboard/pagination";
+import { Protect } from "@clerk/nextjs";
 import { useRepoRisk, useTraces } from "@/lib/queries/insights";
+import { UpgradePrompt } from "@/components/dashboard/upgrade-prompt";
 import { useActiveRepo } from "@/lib/hooks/use-active-repo";
 import { formatDistanceToNow } from "@/lib/time";
 
@@ -60,7 +62,7 @@ export default function InsightsPage() {
   const isLoading = risksLoading || tracesLoading;
 
   return (
-    <>
+    <Protect plan="org:pro" fallback={<UpgradePrompt feature="Insights & risk analysis" />}>
       <div className="mb-8">
         <h1 className="font-display text-2xl font-bold text-foreground">
           Insights
@@ -269,6 +271,6 @@ export default function InsightsPage() {
           </div>
         </div>
       )}
-    </>
+    </Protect>
   );
 }
