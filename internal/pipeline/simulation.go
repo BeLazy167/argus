@@ -210,7 +210,7 @@ func parseSimulationResponse(content string, scenario string) (SimulationResult,
 	}
 
 	result.Passes = parsed.Passes
-	result.Confidence = parsed.Confidence
+	result.Confidence = max(0, min(1, parsed.Confidence))
 	result.RootCause = parsed.RootCause
 	result.Impact = parsed.Impact
 	result.Suggestion = parsed.Suggestion

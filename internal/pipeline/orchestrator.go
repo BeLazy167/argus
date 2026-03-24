@@ -758,8 +758,14 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 
 	// Collect decision traces from this review
 	traceSeeds := CollectReviewTraces(run)
+	var traceFails int
 	for _, seed := range traceSeeds {
-		_ = o.st.CreateTrace(ctx, run.DBRepoID, seed.FilePath, seed.SymbolName, seed.TraceType, seed.Content, seed.Severity, seed.ReviewID, seed.PRNumber, seed.Metadata)
+		if err := o.st.CreateTrace(ctx, run.DBRepoID, seed.FilePath, seed.SymbolName, seed.TraceType, seed.Content, seed.Severity, seed.ReviewID, seed.PRNumber, seed.Metadata); err != nil {
+			traceFails++
+		}
+	}
+	if traceFails > 0 {
+		o.logger.Warn("some decision traces failed to persist", "failed", traceFails, "total", len(traceSeeds))
 	}
 
 	// Auto-extract scenarios from critical/warning findings
