@@ -157,7 +157,19 @@ We never see your code. We never see your API keys. Argus runs on your keys, in 
 
 ## Model Configuration
 
-Argus uses BYOK (Bring Your Own Key) — you provide your LLM API key. Supports 7 providers: OpenRouter, OpenAI, Anthropic, Azure OpenAI, GCP Vertex AI, AWS Bedrock, and Zhipu AI. Configure different models per pipeline stage:
+Argus uses BYOK (Bring Your Own Key) — you provide your LLM API key. 7 providers supported:
+
+| Provider | Auth | Notes |
+|----------|------|-------|
+| **OpenRouter** | API key | Routes to any model (default) |
+| **OpenAI** | API key | Direct access |
+| **Anthropic** | API key | Direct access |
+| **Azure OpenAI** | API key + endpoint URL | Custom deployment endpoint required |
+| **GCP Vertex AI** | Bearer token + endpoint URL | OpenAI-compatible endpoint |
+| **AWS Bedrock** | API key + endpoint URL | Bedrock runtime endpoint |
+| **Zhipu AI** | API key | GLM models |
+
+Configure different models per pipeline stage. Type any model name — not limited to presets:
 
 | Stage | Recommended | Purpose |
 |-------|-------------|---------|
@@ -173,9 +185,14 @@ Argus uses BYOK (Bring Your Own Key) — you provide your LLM API key. Supports 
 Choose how Argus communicates:
 
 - **Default** — balanced, professional feedback
-- **Mentor** — encouraging, educational explanations
-- **Strict** — terse, no-nonsense, high standards
+- **Security Auditor** — prioritizes injection, auth, secrets
+- **Performance Engineer** — focuses on N+1 queries, allocations, caching
+- **Mentor** — educational tone, explains why, suggests learning paths
+- **Architect** — design patterns, coupling, API contracts
+- **Strict** — comments on everything, no issue too small
 - **Custom** — write your own system prompt
+
+Override per-PR with `@argus-eye review --persona strict`.
 
 ---
 
@@ -185,11 +202,14 @@ Comment on any PR to trigger actions:
 
 | Command | Description |
 |---------|-------------|
-| `@argus-eye review` | Trigger a manual review |
+| `@argus-eye review` | Trigger a code review |
 | `@argus-eye review --force` | Re-review even if already reviewed |
+| `@argus-eye review --persona <name>` | Review with a specific persona |
+| `@argus-eye test` | Generate a test plan from review findings |
+| `@argus-eye test --code` | Draft executable test code for findings |
 | `@argus-eye remember <pattern>` | Teach Argus a pattern for this repo |
 | `@argus-eye remember --org <pattern>` | Teach an org-wide pattern |
-| `@argus-eye resolve` | Resolve review threads on files changed since review |
+| `@argus-eye resolve` | Resolve threads on files changed since review |
 | `@argus-eye fix` | Apply suggestion blocks as a commit |
 | `@argus-eye help` | Show available commands |
 
@@ -203,7 +223,12 @@ Argus has 4 types of memory:
 Code conventions auto-learned from reviews: "use `errors.Is()` not `==`", "always handle `context.Canceled`". Matched semantically on future PRs.
 
 ### Scenarios
-Behavioral knowledge about what can go wrong: "EU FX rounding breaks during proration." Created from critical findings, activated only after developer 👍 approval.
+Behavioral knowledge about what can go wrong. Three sources:
+- **Auto-extracted** from critical/warning review findings
+- **Auto-generated** from GitHub Issues labeled `argus` or `bug`
+- **Manual** — create via the dashboard with steps, initial state, and expected outcome
+
+Argus marks scenarios as **outdated** when their files change in a PR. React 👎 on a review comment to dismiss.
 
 ### Decision Traces
 Every review finding + developer reply accumulated as institutional memory. Builds a risk profile per file — frequently flagged files get extra scrutiny.
