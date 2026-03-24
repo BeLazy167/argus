@@ -91,6 +91,27 @@ func (c *Client) AddMemoryImmediate(ctx context.Context, req AddImmediateRequest
 	return &result, nil
 }
 
+// GetSettings retrieves current org-level Supermemory settings.
+func (c *Client) GetSettings(ctx context.Context) (map[string]any, error) {
+	var result map[string]any
+	if err := c.doRequest(ctx, "GET", "/v3/settings", nil, &result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// UpdateSettings updates org-level Supermemory settings (filter prompt, chunk size, etc).
+func (c *Client) UpdateSettings(ctx context.Context, settings map[string]any) error {
+	return c.doJSON(ctx, "/v3/settings", settings, &struct{}{})
+}
+
+// UpdateEntityContext sets per-container-tag context that guides memory extraction.
+func (c *Client) UpdateEntityContext(ctx context.Context, containerTag, entityContext string) error {
+	return c.doRequest(ctx, "PATCH", "/v3/container-tags/"+containerTag, map[string]string{
+		"entityContext": entityContext,
+	}, &struct{}{})
+}
+
 // Search performs semantic search across memories.
 func (c *Client) Search(ctx context.Context, req SearchRequest) (*SearchResponse, error) {
 	var result SearchResponse
