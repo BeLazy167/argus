@@ -10,19 +10,22 @@ import {
   ExternalLink,
   Play,
   RefreshCw,
+  AlertTriangle,
 } from "lucide-react";
 import { useRepos, useUpdateRepo, useSyncRepos } from "@/lib/queries/repos";
 import { useReviews, useTriggerReview } from "@/lib/queries/reviews";
+import { useInstallation } from "@/providers/installation-provider";
 import { formatDistanceToNow } from "@/lib/time";
 import { scoreColor } from "@/lib/score";
 import type { Repo } from "@/lib/types";
 
-function RepoCard({ repo }: { repo: Repo }) {
+function RepoCard({ repo, isPro }: { repo: Repo; isPro: boolean }) {
   const { data: reviews } = useReviews(repo.id, 1);
   const updateRepo = useUpdateRepo();
   const triggerReview = useTriggerReview();
   const [showTrigger, setShowTrigger] = useState(false);
   const [prNumber, setPrNumber] = useState("");
+  const [repoError, setRepoError] = useState("");
 
   const lastReview = reviews?.[0];
 
@@ -60,9 +63,18 @@ function RepoCard({ repo }: { repo: Repo }) {
         </div>
         <button
           type="button"
-          onClick={() =>
-            updateRepo.mutate({ id: repo.id, enabled: !repo.enabled })
-          }
+          onClick={() => {
+            setRepoError("");
+            updateRepo.mutate(
+              { id: repo.id, enabled: !repo.enabled },
+              {
+                onError: (err) => {
+                  const msg = err instanceof Error ? err.message : "Failed to update";
+                  setRepoError(msg.includes("Free plan") ? msg : "Failed to update repo");
+                },
+              },
+            );
+          }}
           className="flex items-center gap-1.5 text-xs font-mono shrink-0"
           disabled={updateRepo.isPending}
         >
@@ -79,6 +91,19 @@ function RepoCard({ repo }: { repo: Repo }) {
           )}
         </button>
       </div>
+
+      {/* Repo limit error */}
+      {repoError && (
+        <div className="flex items-center gap-2 rounded border border-red-400/30 bg-red-400/5 px-3 py-2 mb-3">
+          <AlertTriangle className="h-3 w-3 text-red-400 shrink-0" />
+          <p className="text-[10px] font-mono text-red-400">{repoError}</p>
+        </div>
+      )}
+
+      {/* Free plan note */}
+      {!isPro && !repo.enabled && (
+        <p className="text-[10px] font-mono text-slate-text/60 mb-2">Free plan: 3 repos max</p>
+      )}
 
       {/* Middle: last review */}
       {lastReview && (
@@ -144,6 +169,8 @@ function RepoCard({ repo }: { repo: Repo }) {
 export default function ReposPage() {
   const { data: repos, isLoading } = useRepos();
   const syncRepos = useSyncRepos();
+  const { active } = useInstallation();
+  const isPro = active?.plan_tier === "pro";
   const { page, setPage, totalPages, paginated, pageSize, total, hasNext, hasPrev } = usePagination(repos ?? []);
 
   return (
@@ -194,7 +221,7 @@ export default function ReposPage() {
         <>
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             {paginated.map((repo) => (
-              <RepoCard key={repo.id} repo={repo} />
+              <RepoCard key={repo.id} repo={repo} isPro={isPro} />
             ))}
           </div>
           <PaginationBar

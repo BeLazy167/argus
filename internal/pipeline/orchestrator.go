@@ -208,7 +208,10 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		RawDiff:          rawDiff,
 		Persona:             loadPersona(dbRepo.SettingsJSON),
 		CustomPersonaPrompt: loadCustomPersonaPrompt(dbRepo.SettingsJSON),
-		DeepReview:          isDeepReviewEnabled(dbRepo.SettingsJSON),
+		DeepReview:          isDeepReviewEnabled(dbRepo.SettingsJSON) && func() bool {
+			tier, _ := o.st.GetPlanTier(ctx, inst.ID)
+			return tier == "pro"
+		}(),
 		Prompts:          o.loadPrompts(ctx, dbRepo.ID),
 		IsIncremental:    isIncremental,
 		PreviousReviewID: previousReviewID,

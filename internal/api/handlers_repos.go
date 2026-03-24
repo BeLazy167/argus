@@ -43,7 +43,8 @@ func (s *Server) updateRepo(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo id"})
 		return
 	}
-	if _, err := s.store.GetRepoScoped(r.Context(), id, getInstallationIDs(r.Context())); err != nil {
+	scopedRepo, err := s.store.GetRepoScoped(r.Context(), id, getInstallationIDs(r.Context()))
+	if err != nil {
 		s.handleDBError(w, err, "repo not found")
 		return
 	}
@@ -55,6 +56,16 @@ func (s *Server) updateRepo(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
 		return
+	}
+	if body.Enabled != nil && *body.Enabled {
+		tier, _ := s.store.GetPlanTier(r.Context(), scopedRepo.InstallationID)
+		if tier != "pro" {
+			count, _ := s.store.CountEnabledRepos(r.Context(), scopedRepo.InstallationID)
+			if count >= 3 {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "Free plan limited to 3 repos. Upgrade to Pro for unlimited."})
+				return
+			}
+		}
 	}
 	repo, err := s.store.UpdateRepo(r.Context(), id, body.Enabled, body.DefaultBranch, body.SettingsJSON)
 	if err != nil {

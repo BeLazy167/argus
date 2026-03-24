@@ -154,6 +154,12 @@ func (s *Store) SetPlanTier(ctx context.Context, installationID int64, tier stri
 	return err
 }
 
+func (s *Store) CountEnabledRepos(ctx context.Context, installationID int64) (int, error) {
+	var count int
+	err := s.Pool.QueryRow(ctx, `SELECT COUNT(*) FROM repos WHERE installation_id = $1 AND enabled = TRUE`, installationID).Scan(&count)
+	return count, err
+}
+
 func (s *Store) SuspendInstallation(ctx context.Context, id int64) error {
 	_, err := s.Pool.Exec(ctx, `UPDATE installations SET suspended_at = NOW() WHERE id = $1`, id)
 	return err

@@ -40,7 +40,10 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			if countErr != nil {
 				s.logger.Warn("review count check failed", "error", countErr)
 			} else {
-				limit := 500 // default limit, will be plan-aware later
+				limit := 50 // free tier
+				if inst.PlanTier == "pro" {
+					limit = 500
+				}
 				if reviewCount >= limit {
 					s.logger.Info("review limit reached", "installation", inst.ID, "count", reviewCount, "limit", limit)
 					break
