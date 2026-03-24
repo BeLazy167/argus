@@ -168,12 +168,28 @@ type AddResponse struct {
 }
 
 type SearchRequest struct {
-	Query        string  `json:"q"`
-	ContainerTag string  `json:"containerTag"`
-	SearchMode   string  `json:"searchMode,omitempty"` // "hybrid" recommended
-	Limit        int     `json:"limit,omitempty"`
-	Threshold    float64 `json:"threshold,omitempty"`
-	Rerank       bool    `json:"rerank,omitempty"`
+	Query        string         `json:"q"`
+	ContainerTag string         `json:"containerTag"`
+	SearchMode   string         `json:"searchMode,omitempty"` // "hybrid" recommended
+	Limit        int            `json:"limit,omitempty"`
+	Threshold    float64        `json:"threshold,omitempty"`
+	Rerank       bool           `json:"rerank,omitempty"`
+	RewriteQuery bool           `json:"rewriteQuery,omitempty"`
+	Filters      *SearchFilters `json:"filters,omitempty"`
+}
+
+// SearchFilters supports AND/OR metadata filtering per Supermemory docs.
+type SearchFilters struct {
+	AND []FilterCondition `json:"AND,omitempty"`
+	OR  []FilterCondition `json:"OR,omitempty"`
+}
+
+type FilterCondition struct {
+	Key             string `json:"key"`
+	Value           string `json:"value"`
+	FilterType      string `json:"filterType,omitempty"`      // "string_contains", "numeric", "array_contains"
+	NumericOperator string `json:"numericOperator,omitempty"` // ">=", "<=", ">", "<", "="
+	Negate          bool   `json:"negate,omitempty"`
 }
 
 type SearchResponse struct {

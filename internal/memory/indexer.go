@@ -407,20 +407,29 @@ func (idx *Indexer) IndexDecisionTrace(ctx context.Context, owner, repo, filePat
 	return nil
 }
 
-// SearchScenarios performs semantic search over scenarios for a given query.
-func (idx *Indexer) SearchScenarios(ctx context.Context, owner, repo, query string, limit int) []string {
+// SearchScenarios performs semantic search over scenarios with reranking for precision.
+// Optional severity filter narrows results (e.g., only "critical" scenarios).
+func (idx *Indexer) SearchScenarios(ctx context.Context, owner, repo, query, severity string, limit int) []string {
 	if idx.client == nil {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	resp, err := idx.client.Search(ctx, SearchRequest{
+	req := SearchRequest{
 		Query:        query,
 		ContainerTag: RepoTag(owner, repo, "scenarios"),
 		SearchMode:   "hybrid",
+		Rerank:       true,
 		Limit:        limit,
-	})
+	}
+	if severity != "" {
+		req.Filters = &SearchFilters{
+			AND: []FilterCondition{{Key: "severity", Value: severity}},
+		}
+	}
+
+	resp, err := idx.client.Search(ctx, req)
 	if err != nil {
 		idx.logger.Warn("searching scenarios in supermemory", "error", err)
 		return nil
@@ -432,22 +441,64 @@ func (idx *Indexer) SearchScenarios(ctx context.Context, owner, repo, query stri
 	return results
 }
 
-// SearchTraces performs semantic search over decision traces.
-func (idx *Indexer) SearchTraces(ctx context.Context, owner, repo, query string, limit int) []string {
+// SearchTraces performs semantic search over decision traces with reranking.
+// Optional traceType filter narrows results (e.g., only "review_finding" traces).
+func (idx *Indexer) SearchTraces(ctx context.Context, owner, repo, query, traceType string, limit int) []string {
 	if idx.client == nil {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	resp, err := idx.client.Search(ctx, SearchRequest{
+	req := SearchRequest{
 		Query:        query,
 		ContainerTag: RepoTag(owner, repo, "traces"),
 		SearchMode:   "hybrid",
+		Rerank:       true,
 		Limit:        limit,
-	})
+	}
+	if traceType != "" {
+		req.Filters = &SearchFilters{
+			AND: []FilterCondition{{Key: "trace_type", Value: traceType}},
+		}
+	}
+
+	resp, err := idx.client.Search(ctx, req)
 	if err != nil {
 		idx.logger.Warn("searching traces in supermemory", "error", err)
+		return nil
+	}
+	var results []string
+	for _, r := range resp.Results {
+		results = append(results, r.Content())
+	}
+	return results
+}
+
+// SearchPatternsFiltered performs semantic search over patterns with metadata filtering.
+func (idx *Indexer) SearchPatternsFiltered(ctx context.Context, owner, repo, query, category string, limit int) []string {
+	if idx.client == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	req := SearchRequest{
+		Query:        query,
+		ContainerTag: RepoTag(owner, repo, "patterns"),
+		SearchMode:   "hybrid",
+		Rerank:       true,
+		Limit:        limit,
+	}
+	if category != "" {
+		req.Filters = &SearchFilters{
+			AND: []FilterCondition{{Key: "category", Value: category}},
+		}
+	}
+
+	resp, err := idx.client.Search(ctx, req)
+	if err != nil {
+		idx.logger.Warn("searching patterns filtered", "error", err)
 		return nil
 	}
 	var results []string
