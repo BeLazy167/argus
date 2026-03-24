@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/BeLazy167/argus/internal/memory"
 	"github.com/BeLazy167/argus/internal/store"
 	"github.com/BeLazy167/argus/internal/util"
 )
@@ -66,9 +67,20 @@ func scenarioSeverity(s Severity) string {
 //
 //	seeds := pipeline.ExtractScenariosFromReview(run)
 //	pipeline.StoreScenarioSeeds(ctx, st, run.DBInstallationID, &run.DBRepoID, seeds)
-func StoreScenarioSeeds(ctx context.Context, st *store.Store, installationID int64, repoID *int64, seeds []ScenarioSeed) {
+// StoreScenarioSeeds persists seeds, deduping via Supermemory similarity.
+// If a semantically similar scenario already exists (>0.85), skip the new one.
+func StoreScenarioSeeds(ctx context.Context, st *store.Store, indexer *memory.Indexer, owner, repo string, installationID int64, repoID *int64, seeds []ScenarioSeed) {
 	for _, seed := range seeds {
-		_, _ = st.CreateScenario(ctx, installationID, repoID, seed.Description, seed.Source, seed.SourceRef, seed.Files, nil, seed.Severity)
+		if indexer != nil {
+			existing := indexer.SearchScenarios(ctx, owner, repo, seed.Description, "", 1)
+			if len(existing) > 0 {
+				continue // similar scenario already exists
+			}
+		}
+		id, _ := st.CreateScenario(ctx, installationID, repoID, seed.Description, seed.Source, seed.SourceRef, seed.Files, nil, seed.Severity)
+		if indexer != nil && id > 0 {
+			indexer.IndexScenario(ctx, owner, repo, id, seed.Description, seed.Severity, seed.Files)
+		}
 	}
 }
 

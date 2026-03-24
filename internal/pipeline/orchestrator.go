@@ -784,10 +784,7 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	// Auto-learn scenarios from critical/warning findings.
 	// Active by default — devs react 👎 to dismiss false positives.
 	scenarioSeeds := ExtractScenariosFromReview(run)
-	StoreScenarioSeeds(ctx, o.st, run.DBInstallationID, &run.DBRepoID, scenarioSeeds)
-	for _, seed := range scenarioSeeds {
-		o.indexer.IndexScenario(ctx, owner, repo, 0, seed.Description, seed.Severity, seed.Files)
-	}
+	StoreScenarioSeeds(ctx, o.st, o.indexer, owner, repo, run.DBInstallationID, &run.DBRepoID, scenarioSeeds)
 
 	if run.EventBus != nil {
 		run.EventBus.Publish(run.ReviewID, EventCompleted, map[string]any{
