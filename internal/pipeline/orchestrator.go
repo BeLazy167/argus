@@ -756,21 +756,26 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	o.synthesizeFileMemories(ctx, run, owner, repo)
 	o.indexPRSummary(ctx, run, owner, repo)
 
-	// Collect decision traces from this review
+	// Collect decision traces from this review (PostgreSQL + Supermemory dual-write)
 	traceSeeds := CollectReviewTraces(run)
 	var traceFails int
 	for _, seed := range traceSeeds {
 		if err := o.st.CreateTrace(ctx, run.DBRepoID, seed.FilePath, seed.SymbolName, seed.TraceType, seed.Content, seed.Severity, seed.ReviewID, seed.PRNumber, seed.Metadata); err != nil {
 			traceFails++
 		}
+		// Semantic index in Supermemory for "what do we know about X?" queries
+		o.indexer.IndexDecisionTrace(ctx, owner, repo, seed.FilePath, seed.TraceType, seed.Content, seed.Severity)
 	}
 	if traceFails > 0 {
 		o.logger.Warn("some decision traces failed to persist", "failed", traceFails, "total", len(traceSeeds))
 	}
 
-	// Auto-extract scenarios from critical/warning findings
+	// Auto-extract scenarios from critical/warning findings (PostgreSQL + Supermemory dual-write)
 	scenarioSeeds := ExtractScenariosFromReview(run)
 	StoreScenarioSeeds(ctx, o.st, run.DBInstallationID, &run.DBRepoID, scenarioSeeds)
+	for _, seed := range scenarioSeeds {
+		o.indexer.IndexScenario(ctx, owner, repo, 0, seed.Description, seed.Severity, seed.Files)
+	}
 
 	if run.EventBus != nil {
 		run.EventBus.Publish(run.ReviewID, EventCompleted, map[string]any{
