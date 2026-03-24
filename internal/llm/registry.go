@@ -90,7 +90,7 @@ func (r *Registry) GetProviderForRepo(ctx context.Context, installationID int64,
 	if baseURL == "" {
 		baseURL = defaultBaseURLForProvider(providerName)
 	}
-	p := NewChatProvider(providerName, apiKey, baseURL)
+	p := newProviderForName(providerName, apiKey, baseURL)
 	r.cacheMu.Lock()
 	r.providerCache[cacheKey] = cachedProvider{provider: p, expiresAt: time.Now().Add(r.cacheTTL)}
 	r.cacheMu.Unlock()
@@ -134,6 +134,21 @@ func (r *Registry) HasKeyForRepo(ctx context.Context, installationID int64, repo
 	return err == nil && found
 }
 
+// newProviderForName creates the appropriate provider based on the provider name.
+// Azure, GCP, and AWS use specialized constructors; everything else uses the generic ChatProvider.
+func newProviderForName(name, apiKey, baseURL string) *ChatProvider {
+	switch name {
+	case "azure":
+		return NewAzureProvider(apiKey, baseURL)
+	case "gcp_vertex":
+		return NewGCPVertexProvider(apiKey, baseURL)
+	case "aws_bedrock":
+		return NewAWSBedrockProvider(apiKey, baseURL)
+	default:
+		return NewChatProvider(name, apiKey, baseURL)
+	}
+}
+
 func defaultBaseURLForProvider(provider string) string {
 	switch provider {
 	case "openai":
@@ -142,6 +157,12 @@ func defaultBaseURLForProvider(provider string) string {
 		return "https://api.anthropic.com/v1"
 	case "zhipu":
 		return "https://api.z.ai/api/paas/v4"
+	case "azure":
+		return "" // Azure requires user-provided endpoint (https://{resource}.openai.azure.com/openai)
+	case "gcp_vertex":
+		return "" // GCP requires user-provided endpoint
+	case "aws_bedrock":
+		return "" // AWS requires user-provided endpoint
 	default:
 		return "https://openrouter.ai/api/v1"
 	}
