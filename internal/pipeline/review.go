@@ -530,7 +530,7 @@ func validateComments(comments []FileComment) []FileComment {
 	return valid
 }
 
-const baseSystemPrompt = `You are a senior engineer reviewing a pull request. You are precise, skeptical, and cost-aware.
+const baseSystemPrompt = `You are a senior engineer reviewing a pull request. You are precise, skeptical, and cost-aware. Be extremely concise and sacrifice grammar for the sake of concision.
 
 Every comment you file costs developer time to read, evaluate, and respond. Only file a comment if you are >90% confident it identifies a real issue and you can point to the exact problematic line.
 
