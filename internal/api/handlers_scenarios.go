@@ -75,9 +75,9 @@ func (s *Server) deactivateScenario(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid scenario id"})
 		return
 	}
-	if err := s.store.DeactivateScenario(r.Context(), id); err != nil {
-		s.logger.Error("deactivate scenario", "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to deactivate"})
+	// Verify scenario belongs to user's installations before deactivating
+	if err := s.store.DeactivateScenarioScoped(r.Context(), id, getInstallationIDs(r.Context())); err != nil {
+		s.handleDBError(w, err, "scenario not found")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deactivated"})

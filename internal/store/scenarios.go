@@ -23,7 +23,8 @@ func (s *Store) ListScenariosForFiles(ctx context.Context, repoID int64, filePat
 		`SELECT id, installation_id, repo_id, description, source, COALESCE(source_ref,''), files, modules, COALESCE(severity,'medium'), active, created_at
 		 FROM scenarios
 		 WHERE repo_id = $1 AND active = TRUE AND files && $2::text[]
-		 ORDER BY created_at DESC`,
+		 ORDER BY created_at DESC
+		 LIMIT 20`,
 		repoID, filePaths)
 	if err != nil {
 		return nil, err
@@ -52,4 +53,18 @@ func (s *Store) ListScenariosForRepo(ctx context.Context, repoID int64, limit in
 func (s *Store) DeactivateScenario(ctx context.Context, id int64) error {
 	_, err := s.Pool.Exec(ctx, `UPDATE scenarios SET active = FALSE WHERE id = $1`, id)
 	return err
+}
+
+// DeactivateScenarioScoped soft-deletes a scenario only if it belongs to one of the given installations.
+func (s *Store) DeactivateScenarioScoped(ctx context.Context, id int64, installationIDs []int64) error {
+	tag, err := s.Pool.Exec(ctx,
+		`UPDATE scenarios SET active = FALSE WHERE id = $1 AND installation_id = ANY($2)`,
+		id, installationIDs)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
 }

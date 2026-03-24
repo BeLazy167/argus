@@ -10,7 +10,6 @@ import (
 
 	ghpkg "github.com/BeLazy167/argus/internal/github"
 	"github.com/BeLazy167/argus/internal/store"
-	"github.com/BeLazy167/argus/internal/util"
 	"github.com/BeLazy167/argus/pkg/diff"
 )
 
@@ -257,6 +256,3 @@ var keywords = map[string]bool{
 func isKeyword(s string) bool {
 	return keywords[strings.ToLower(s)]
 }
-
-// Ensure util.Truncate is accessible (imported but used via truncateLines which already exists).
-var _ = util.Truncate

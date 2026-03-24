@@ -90,18 +90,12 @@ func (e *SimulationEngine) RunSimulations(ctx context.Context, req SimulationReq
 
 	var results []SimulationResult
 	// Simulate up to 5 most critical scenarios
-	limit := 5
-	if len(req.Scenarios) < limit {
-		limit = len(req.Scenarios)
-	}
+	limit := min(5, len(req.Scenarios))
 
 	for _, scenario := range req.Scenarios[:limit] {
 		result, err := e.simulateScenario(ctx, req, scenario, cfg, provider)
 		if err != nil {
-			desc := scenario.Description
-			if len(desc) > 50 {
-				desc = desc[:50]
-			}
+			desc := util.Truncate(scenario.Description, 50, true)
 			e.logger.Warn("simulation failed for scenario", "error", err, "scenario", desc)
 			continue
 		}
@@ -152,11 +146,11 @@ func (e *SimulationEngine) simulateScenario(ctx context.Context, req SimulationR
 func buildSimulationPrompt(req SimulationRequest, scenario SimScenario) string {
 	var sb strings.Builder
 
-	// PR context
+	// PR context — sanitize user-controlled fields
+	safeTitle := sanitizeUserInput(util.Truncate(req.Run.PREvent.PRTitle, 200, false))
+	safeAuthor := sanitizeUserInput(util.Truncate(req.Run.PREvent.PRAuthor, 100, false))
 	sb.WriteString(fmt.Sprintf("## PR #%d: %s\nBy: %s\n\n",
-		req.Run.PREvent.PRNumber,
-		util.Truncate(req.Run.PREvent.PRTitle, 200, false),
-		req.Run.PREvent.PRAuthor))
+		req.Run.PREvent.PRNumber, safeTitle, safeAuthor))
 
 	// Scenario to test
 	sb.WriteString(fmt.Sprintf("## Scenario to verify\n%s\nSeverity: %s | Source: %s\nRelated files: %s\n\n",
@@ -224,13 +218,26 @@ func parseSimulationResponse(content string, scenario string) (SimulationResult,
 }
 
 // extractJSON finds the first JSON object in a string (handles LLM preamble).
+// Correctly skips braces inside JSON string values.
 func extractJSON(s string) string {
 	start := strings.Index(s, "{")
 	if start < 0 {
 		return s
 	}
 	depth := 0
+	inString := false
 	for i := start; i < len(s); i++ {
+		if s[i] == '\\' && inString {
+			i++ // skip escaped character
+			continue
+		}
+		if s[i] == '"' {
+			inString = !inString
+			continue
+		}
+		if inString {
+			continue
+		}
 		switch s[i] {
 		case '{':
 			depth++
