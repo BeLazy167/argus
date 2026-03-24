@@ -19,6 +19,9 @@ func (s *Server) listTraces(w http.ResponseWriter, r *http.Request) {
 	}
 
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
 	filePath := r.URL.Query().Get("file")
 
 	if filePath != "" {
@@ -53,6 +56,9 @@ func (s *Server) getRepoRisk(w http.ResponseWriter, r *http.Request) {
 	}
 
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
 
 	hotFiles, err := s.store.GetHotFiles(r.Context(), repoID, limit)
 	if err != nil {

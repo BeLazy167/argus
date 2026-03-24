@@ -53,7 +53,7 @@ func (s *Store) GetBlastRadius(ctx context.Context, repoID int64, filePaths []st
 			JOIN affected a ON ce.target_id = a.id
 			WHERE a.depth < $3 AND cn.repo_id = $1
 		)
-		SELECT DISTINCT id, name, file_path, kind, depth FROM affected ORDER BY depth, file_path
+		SELECT DISTINCT id, name, file_path, kind, depth FROM affected ORDER BY depth, file_path LIMIT 50
 	`, repoID, filePaths, maxDepth)
 	if err != nil {
 		return nil, fmt.Errorf("blast radius query: %w", err)

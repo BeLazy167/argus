@@ -50,14 +50,22 @@ func (s *Server) createScenario(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
 		return
 	}
-	if body.Description == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "description required"})
+	if body.Description == "" || len(body.Description) > 2000 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "description required (max 2000 chars)"})
+		return
+	}
+	if len(body.Files) > 20 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "too many files (max 20)"})
 		return
 	}
 	if body.Source == "" {
 		body.Source = "manual"
 	}
+	validSeverities := map[string]bool{"critical": true, "high": true, "medium": true, "low": true}
 	if body.Severity == "" {
+		body.Severity = "medium"
+	}
+	if !validSeverities[body.Severity] {
 		body.Severity = "medium"
 	}
 	id, err := s.store.CreateScenario(r.Context(), repo.InstallationID, &repoID, body.Description, body.Source, body.SourceRef, body.Files, body.Modules, body.Severity)
