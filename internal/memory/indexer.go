@@ -356,3 +356,104 @@ func (idx *Indexer) IndexFeedbackSignal(ctx context.Context, owner, repo string,
 	return nil
 }
 
+// IndexScenario stores a scenario in Supermemory for semantic retrieval.
+// Scenarios are also stored in PostgreSQL for structured queries — this enables
+// "find scenarios related to billing" even when file paths don't overlap.
+func (idx *Indexer) IndexScenario(ctx context.Context, owner, repo string, scenarioID int64, description, severity string, files []string) error {
+	if idx.client == nil {
+		return nil
+	}
+	content := fmt.Sprintf("Scenario [%s]: %s\nRelated files: %s",
+		severity, description, strings.Join(files, ", "))
+
+	customID := fmt.Sprintf("%s--%s--scenario--%d", owner, repo, scenarioID)
+
+	_, err := idx.client.AddMemory(ctx, AddRequest{
+		Content:       content,
+		CustomID:      customID,
+		ContainerTags: []string{RepoTag(owner, repo, "scenarios")},
+		Metadata: map[string]string{
+			"severity":    severity,
+			"scenario_id": fmt.Sprintf("%d", scenarioID),
+		},
+	})
+	if err != nil {
+		idx.logger.Warn("indexing scenario in supermemory", "error", err)
+		return err
+	}
+	return nil
+}
+
+// IndexDecisionTrace stores a decision trace in Supermemory for semantic retrieval.
+func (idx *Indexer) IndexDecisionTrace(ctx context.Context, owner, repo, filePath, traceType, content, severity string) error {
+	if idx.client == nil {
+		return nil
+	}
+	doc := fmt.Sprintf("[%s] %s: %s (severity: %s)", traceType, filePath, content, severity)
+
+	_, err := idx.client.AddMemory(ctx, AddRequest{
+		Content:       doc,
+		ContainerTags: []string{RepoTag(owner, repo, "traces")},
+		Metadata: map[string]string{
+			"file_path":  filePath,
+			"trace_type": traceType,
+			"severity":   severity,
+		},
+	})
+	if err != nil {
+		idx.logger.Warn("indexing trace in supermemory", "error", err)
+		return err
+	}
+	return nil
+}
+
+// SearchScenarios performs semantic search over scenarios for a given query.
+func (idx *Indexer) SearchScenarios(ctx context.Context, owner, repo, query string, limit int) []string {
+	if idx.client == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	resp, err := idx.client.Search(ctx, SearchRequest{
+		Query:        query,
+		ContainerTag: RepoTag(owner, repo, "scenarios"),
+		SearchMode:   "hybrid",
+		Limit:        limit,
+	})
+	if err != nil {
+		idx.logger.Warn("searching scenarios in supermemory", "error", err)
+		return nil
+	}
+	var results []string
+	for _, r := range resp.Results {
+		results = append(results, r.Content())
+	}
+	return results
+}
+
+// SearchTraces performs semantic search over decision traces.
+func (idx *Indexer) SearchTraces(ctx context.Context, owner, repo, query string, limit int) []string {
+	if idx.client == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	resp, err := idx.client.Search(ctx, SearchRequest{
+		Query:        query,
+		ContainerTag: RepoTag(owner, repo, "traces"),
+		SearchMode:   "hybrid",
+		Limit:        limit,
+	})
+	if err != nil {
+		idx.logger.Warn("searching traces in supermemory", "error", err)
+		return nil
+	}
+	var results []string
+	for _, r := range resp.Results {
+		results = append(results, r.Content())
+	}
+	return results
+}
+
