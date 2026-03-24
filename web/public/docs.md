@@ -141,9 +141,23 @@ Example: "All API endpoints must validate authentication tokens before processin
 
 ---
 
+## API Key Security
+
+Your API keys are encrypted at rest using **AES-256-GCM** — the same standard used by banks and government systems. Here's how it works:
+
+- **Encryption**: When you save an API key, it's immediately encrypted with a 256-bit key before touching the database. The plaintext never persists.
+- **Storage**: Only the encrypted ciphertext is stored. Each key has a unique random nonce — even identical keys produce different ciphertext.
+- **Access**: Keys are decrypted in-memory only when making an LLM API call, then immediately discarded. They're never logged, cached, or sent anywhere except the provider you configured.
+- **Isolation**: Keys are scoped to your installation. No other user or workspace can access them.
+- **Display**: The dashboard shows only a masked placeholder (`sk-...****`). The full key is never sent back to the frontend after saving.
+
+We never see your code. We never see your API keys. Argus runs on your keys, in your repos, behind your auth.
+
+---
+
 ## Model Configuration
 
-Argus uses BYOK (Bring Your Own Key) — you provide your LLM API key via OpenRouter. Configure different models per pipeline stage:
+Argus uses BYOK (Bring Your Own Key) — you provide your LLM API key. Supports 7 providers: OpenRouter, OpenAI, Anthropic, Azure OpenAI, GCP Vertex AI, AWS Bedrock, and Zhipu AI. Configure different models per pipeline stage:
 
 | Stage | Recommended | Purpose |
 |-------|-------------|---------|

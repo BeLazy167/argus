@@ -901,8 +901,18 @@ export default function DocsPage() {
                 </li>
               </ol>
             </div>
+            <div className="rounded-lg border border-amber/20 bg-amber/5 p-4 mt-4">
+              <span className="text-xs font-mono font-bold text-amber">Security</span>
+              <ul className="mt-2 space-y-1.5 text-xs font-mono text-slate-text leading-relaxed">
+                <li><span className="text-foreground">AES-256-GCM</span> &mdash; bank-grade encryption at rest. Plaintext never persists.</li>
+                <li><span className="text-foreground">Unique nonce</span> &mdash; every key produces different ciphertext, even if identical.</li>
+                <li><span className="text-foreground">In-memory only</span> &mdash; decrypted for API calls, then discarded. Never logged or cached.</li>
+                <li><span className="text-foreground">Scoped</span> &mdash; isolated per installation. No other workspace can access your keys.</li>
+                <li><span className="text-foreground">Masked</span> &mdash; dashboard shows <code className="text-amber">sk-...****</code> only. Full key never sent to frontend.</li>
+              </ul>
+            </div>
             <p className="text-[11px] font-mono text-iron mt-3">
-              Keys are encrypted at rest and scoped per-installation. Without
+              We never see your code. We never see your keys. Without
               a key configured, Argus posts a friendly onboarding comment on
               your first PR linking to Settings.
             </p>
