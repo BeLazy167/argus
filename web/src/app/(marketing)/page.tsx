@@ -106,9 +106,9 @@ export default function LandingPage() {
 
     const interval = setInterval(() => {
       setActiveStage((prev) => {
-        if (prev >= 4) {
+        if (prev >= 5) {
           clearInterval(interval);
-          return 4;
+          return 5;
         }
         return prev + 1;
       });
@@ -120,28 +120,33 @@ export default function LandingPage() {
   const PIPELINE_STAGES = [
     {
       step: "01",
-      label: "PR PUSH",
-      desc: "You push code. Argus wakes up. Every changed file, every touched function, catalogued in milliseconds.",
+      label: "TRIAGE",
+      desc: "Fast LLM classifies every changed file as skip, skim, or deep. No time wasted on generated code or lock files.",
     },
     {
       step: "02",
       label: "CONTEXT GATHERING",
-      desc: "Traces callers, imports, tests, shared types. Pulls incident history, past reviews, and org rules from memory.",
+      desc: "Traces callers, imports, and tests via GitHub code search. Builds blast radius from the dependency graph. Matches scenarios and decision traces from memory.",
     },
     {
       step: "03",
       label: "DEEP REVIEW",
-      desc: "Cross-file analysis. Bugs, security holes, blast radius. Four specialist reviewers run in parallel.",
+      desc: "Per-file parallel review with four specialists: bug_hunter, security, architecture, regression. Full codebase awareness via related file context.",
     },
     {
       step: "04",
-      label: "SIMULATION",
-      desc: "Executes scenario paths against your diff. Predicts what breaks. Assigns confidence scores.",
+      label: "SCORING",
+      desc: "A separate model scores each comment 0\u2013100. Noise below the threshold is dropped. Duplicates are merged.",
     },
     {
       step: "05",
-      label: "POST",
-      desc: "Conversational inline comments with What/Why sections. Risk score. Blast radius map. Done.",
+      label: "SYNTHESIS",
+      desc: "LLM generates a conversational summary \u2014 like a senior dev\u2019s quick take on the PR, not a list of issues.",
+    },
+    {
+      step: "06",
+      label: "POST & LEARN",
+      desc: "Posts inline What/Why comments. Collects developer reactions \u2014 👍 to learn the pattern, 👎 to dismiss. Every review makes Argus smarter.",
     },
   ];
 
@@ -355,10 +360,10 @@ export default function LandingPage() {
               How it works
             </p>
             <h2 className="font-display text-3xl font-bold text-foreground mb-3">
-              Push &rarr; Comprehend &rarr; Review &rarr; Simulate &rarr; Ship
+              Triage &rarr; Context &rarr; Review &rarr; Score &rarr; Synthesize &rarr; Learn
             </h2>
             <p className="max-w-lg mx-auto text-sm text-ash/70">
-              Five stages. Full codebase awareness. Every PR.
+              Six stages. Full codebase awareness. Every PR.
             </p>
           </div>
 
@@ -473,28 +478,33 @@ export default function LandingPage() {
                 traditional="Not available"
                 argus="Blast radius map of affected code"
               />
+              <ComparisonRow
+                label="Learning"
+                traditional="Same output every time"
+                argus="Learns from every 👍/👎 reaction"
+              />
             </div>
           </div>
         </div>
       </section>
 
-      {/* ── CODE SIMULATION SPOTLIGHT ── */}
+      {/* ── REVIEW OUTPUT SPOTLIGHT ── */}
       <section className="border-t border-iron bg-noise">
         <div className="mx-auto max-w-5xl px-6 py-28">
           <div className="mb-16 text-center">
             <p className="mb-3 text-[11px] font-mono uppercase tracking-[0.15em] text-amber">
-              The big differentiator
+              What you actually get
             </p>
             <h2 className="font-display text-3xl md:text-4xl font-bold text-foreground mb-3">
-              See failures before they happen.
+              Every comment explains What and Why.
             </h2>
             <p className="max-w-lg mx-auto text-sm text-ash/70">
-              Argus doesn&apos;t just flag problems &mdash; it simulates what happens when
-              your code runs. Confidence scores tell you how certain it is.
+              Structured inline comments you can act on. React to teach Argus
+              what matters to your team.
             </p>
           </div>
 
-          {/* Simulation output mock */}
+          {/* Review output mock */}
           <div className="max-w-3xl mx-auto">
             <div className="flex items-center gap-2 rounded-t-lg border border-iron bg-charcoal px-4 py-2.5">
               <div className="flex gap-1.5">
@@ -503,82 +513,48 @@ export default function LandingPage() {
                 <div className="h-2.5 w-2.5 rounded-full bg-iron" />
               </div>
               <span className="ml-2 text-[11px] font-mono text-amber">
-                argus &mdash; simulation output
+                argus &mdash; inline review comment
               </span>
             </div>
             <div className="border-x border-b border-iron rounded-b-lg bg-void p-5 space-y-4">
-              {/* Scenario 1 */}
+              {/* Comment 1 */}
               <div className="space-y-2">
-                <div className="flex items-center gap-2">
-                  <span className="text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded border bg-red-500/20 text-red-400 border-red-500/30">
-                    fails
-                  </span>
-                  <span className="text-[11px] font-mono text-foreground">
-                    Scenario: Concurrent subscription cancellation
-                  </span>
-                  <span className="ml-auto text-[10px] font-mono text-red-400">
-                    confidence 94%
-                  </span>
-                </div>
-                <div className="pl-4 border-l-2 border-red-500/30">
+                <p className="text-[12px] font-mono text-foreground font-bold">
+                  <span className="text-red-400">[critical &middot; bug]</span> JWT expiry not validated
+                </p>
+                <div className="pl-4 border-l-2 border-red-500/30 space-y-2">
                   <p className="text-[11px] font-mono text-ash/70 leading-relaxed">
-                    <span className="text-slate-text">What:</span> Two concurrent cancellation requests for the same subscription reach <code className="text-amber/80">billing.cancel()</code>. First succeeds at Stripe, second throws <code className="text-amber/80">StripeInvalidRequestError</code>. DB update runs for both.
+                    <span className="text-foreground font-medium">What:</span> The <code className="text-amber/80">verifyToken()</code> function checks the signature but skips the <code className="text-amber/80">exp</code> claim.
                   </p>
-                  <p className="text-[11px] font-mono text-ash/70 leading-relaxed mt-1">
-                    <span className="text-slate-text">Why:</span> No mutex or idempotency key on the cancellation path. The Stripe call and DB write are not wrapped in a transaction. Race window is ~200ms under load.
+                  <p className="text-[11px] font-mono text-ash/70 leading-relaxed">
+                    <span className="text-foreground font-medium">Why:</span> Expired tokens pass validation, letting stolen tokens work indefinitely.
                   </p>
                 </div>
               </div>
 
               <div className="border-t border-iron/50" />
 
-              {/* Scenario 2 */}
+              {/* Comment 2 */}
               <div className="space-y-2">
-                <div className="flex items-center gap-2">
-                  <span className="text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded border bg-yellow-500/20 text-yellow-400 border-yellow-500/30">
-                    degrades
-                  </span>
-                  <span className="text-[11px] font-mono text-foreground">
-                    Scenario: Cache key collision under user ID reuse
-                  </span>
-                  <span className="ml-auto text-[10px] font-mono text-yellow-400">
-                    confidence 78%
-                  </span>
-                </div>
-                <div className="pl-4 border-l-2 border-yellow-500/30">
+                <p className="text-[12px] font-mono text-foreground font-bold">
+                  <span className="text-yellow-400">[warning &middot; race condition]</span> Unguarded Stripe cancellation
+                </p>
+                <div className="pl-4 border-l-2 border-yellow-500/30 space-y-2">
                   <p className="text-[11px] font-mono text-ash/70 leading-relaxed">
-                    <span className="text-slate-text">What:</span> Deleted user IDs are recycled. Cache key <code className="text-amber/80">{"`user_${id}`"}</code> with TTL=0 serves stale data from the previous account holder.
+                    <span className="text-foreground font-medium">What:</span> Two concurrent cancellation requests hit <code className="text-amber/80">billing.cancel()</code>. First succeeds at Stripe, second throws. DB update runs for both.
                   </p>
-                  <p className="text-[11px] font-mono text-ash/70 leading-relaxed mt-1">
-                    <span className="text-slate-text">Why:</span> Infinite TTL + recycled IDs = data leakage. Add a generation counter or namespace the key with a creation timestamp.
+                  <p className="text-[11px] font-mono text-ash/70 leading-relaxed">
+                    <span className="text-foreground font-medium">Why:</span> No idempotency key on the cancellation path. The Stripe call and DB write aren&apos;t transactional.
                   </p>
                 </div>
               </div>
 
               <div className="border-t border-iron/50" />
 
-              {/* Scenario 3 */}
-              <div className="space-y-2">
-                <div className="flex items-center gap-2">
-                  <span className="text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded border bg-emerald-500/20 text-emerald-400 border-emerald-500/30">
-                    passes
-                  </span>
-                  <span className="text-[11px] font-mono text-foreground">
-                    Scenario: Token refresh during active session
-                  </span>
-                  <span className="ml-auto text-[10px] font-mono text-emerald-400">
-                    confidence 91%
-                  </span>
-                </div>
-                <div className="pl-4 border-l-2 border-emerald-500/30">
-                  <p className="text-[11px] font-mono text-ash/70 leading-relaxed">
-                    <span className="text-slate-text">What:</span> Bearer token split correctly handles refresh flow. New authorization header parsed without prefix contamination.
-                  </p>
-                  <p className="text-[11px] font-mono text-ash/70 leading-relaxed mt-1">
-                    <span className="text-slate-text">Why:</span> The <code className="text-amber/80">?.split(&quot; &quot;)[1]</code> fix correctly isolates the token. Verified against JWT verify contract.
-                  </p>
-                </div>
-              </div>
+              {/* Reaction prompt */}
+              <p className="text-[11px] font-mono text-slate-text/60 text-center pt-1">
+                React <span className="text-foreground">👍</span> to learn this pattern &middot; <span className="text-foreground">👎</span> to dismiss
+              </p>
             </div>
           </div>
         </div>
@@ -594,9 +570,9 @@ export default function LandingPage() {
             Not perfect. Gets better every review.
           </h2>
           <p className="max-w-xl mx-auto text-sm text-ash/70 leading-relaxed mb-8">
-            Argus is AI. It will sometimes flag things that don&apos;t need flagging. But
-            it learns your codebase, your patterns, your rules. The false positives
-            shrink. The catches that matter stay sharp.
+            Argus is AI. It will sometimes flag things that don&apos;t need flagging.
+            React <span className="text-foreground">👍</span> on the comments that matter, <span className="text-foreground">👎</span> to dismiss the noise.
+            The false positives shrink. The catches that matter stay sharp.
           </p>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             <div className="rounded-lg border border-iron bg-charcoal/50 p-5">
@@ -635,32 +611,56 @@ export default function LandingPage() {
               Pricing
             </p>
             <h2 className="font-display text-2xl md:text-3xl font-bold text-foreground mb-4">
-              Free during early access. Pro when you&apos;re ready.
+              Start free. Scale when you&apos;re ready.
             </h2>
             <p className="max-w-lg mx-auto text-sm text-ash/70 leading-relaxed">
-              Start free. Upgrade when your team needs more. Early adopters lock in
-              a permanent discount.
+              Bring your own LLM key via OpenRouter. You control the model, the cost, and the quality.
             </p>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div className="rounded-lg border border-iron bg-charcoal/50 p-5 text-center">
-              <div className="font-display text-2xl font-bold text-amber mb-1">Free</div>
-              <p className="text-[11px] font-mono text-slate-text">
-                All features during beta &mdash; no credit card
-              </p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 max-w-2xl mx-auto">
+            {/* Free tier */}
+            <div className="rounded-lg border border-iron bg-charcoal/50 p-6">
+              <div className="font-display text-2xl font-bold text-foreground mb-1">Free</div>
+              <p className="text-[11px] font-mono text-slate-text mb-5">No credit card required</p>
+              <ul className="space-y-2.5 text-xs font-mono text-ash/80">
+                <li className="flex items-center gap-2">
+                  <span className="text-amber">&#10003;</span> 3 repositories
+                </li>
+                <li className="flex items-center gap-2">
+                  <span className="text-amber">&#10003;</span> 50 reviews / month
+                </li>
+                <li className="flex items-center gap-2">
+                  <span className="text-amber">&#10003;</span> Full 6-stage pipeline
+                </li>
+                <li className="flex items-center gap-2">
+                  <span className="text-amber">&#10003;</span> BYOK via OpenRouter
+                </li>
+              </ul>
             </div>
-            <div className="rounded-lg border border-iron bg-charcoal/50 p-5 text-center">
-              <div className="font-display text-2xl font-bold text-amber mb-1">Direct access</div>
-              <p className="text-[11px] font-mono text-slate-text">
-                Shape the product &mdash; your feedback builds the roadmap
-              </p>
-            </div>
-            <div className="rounded-lg border border-iron bg-charcoal/50 p-5 text-center">
-              <div className="font-display text-2xl font-bold text-amber mb-1">Lock in pricing</div>
-              <p className="text-[11px] font-mono text-slate-text">
-                Early adopters keep a permanent discount at launch
-              </p>
+            {/* Pro tier */}
+            <div className="rounded-lg border border-amber/40 bg-charcoal/50 p-6 relative">
+              <div className="absolute -top-2.5 right-4 text-[9px] font-mono uppercase tracking-wider px-2 py-0.5 rounded bg-amber text-void font-bold">
+                Recommended
+              </div>
+              <div className="font-display text-2xl font-bold text-amber mb-1">
+                $19<span className="text-base font-normal text-slate-text">/mo per workspace</span>
+              </div>
+              <p className="text-[11px] font-mono text-slate-text mb-5">Everything in Free, plus</p>
+              <ul className="space-y-2.5 text-xs font-mono text-ash/80">
+                <li className="flex items-center gap-2">
+                  <span className="text-amber">&#10003;</span> Unlimited repositories
+                </li>
+                <li className="flex items-center gap-2">
+                  <span className="text-amber">&#10003;</span> 500 reviews / month
+                </li>
+                <li className="flex items-center gap-2">
+                  <span className="text-amber">&#10003;</span> Priority support
+                </li>
+                <li className="flex items-center gap-2">
+                  <span className="text-amber">&#10003;</span> Early access to new features
+                </li>
+              </ul>
             </div>
           </div>
 

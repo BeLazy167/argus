@@ -24,25 +24,36 @@ import {
   UserCog,
   Sparkles,
   Terminal,
+  Network,
+  Activity,
+  Radio,
+  Target,
+  ThumbsUp,
+  ThumbsDown,
+  ToggleRight,
+  BarChart3,
+  Search,
+  History,
 } from "lucide-react";
 
 /* ── Section data ── */
 
 const SECTIONS = [
   { id: "getting-started", label: "Getting Started" },
-  { id: "how-it-works", label: "How It Works" },
+  { id: "pipeline", label: "The Review Pipeline" },
+  { id: "what-argus-sees", label: "What Argus Sees" },
+  { id: "code-simulation", label: "Code Simulation" },
+  { id: "conversational-review", label: "Conversational Review" },
   { id: "severities", label: "Severities" },
   { id: "categories", label: "Categories" },
   { id: "rules", label: "Review Rules" },
   { id: "models", label: "Model Config" },
   { id: "api-keys", label: "API Keys (BYOK)" },
   { id: "personas", label: "Review Personas" },
-  { id: "suggestions", label: "Suggestion Blocks" },
-  { id: "incremental", label: "Incremental Reviews" },
-  { id: "triggers", label: "Manual Triggers" },
   { id: "commands", label: "Bot Commands" },
-  { id: "scoring", label: "Scoring" },
-  { id: "memory", label: "Memory & Context" },
+  { id: "memory", label: "Memory & Learning" },
+  { id: "insights", label: "Insights & Risk" },
+  { id: "settings", label: "Settings & Controls" },
 ] as const;
 
 const SEVERITIES = [
@@ -80,42 +91,50 @@ const CATEGORIES = [
   {
     name: "security",
     icon: Shield,
-    description: "Injection vulnerabilities, leaked credentials, unsafe deserialization, SSRF, path traversal.",
+    description:
+      "Injection vulnerabilities, leaked credentials, unsafe deserialization, SSRF, path traversal.",
   },
   {
     name: "bug",
     icon: Bug,
-    description: "Off-by-one errors, nil dereferences, broken invariants, incorrect boolean logic, missing edge cases.",
+    description:
+      "Off-by-one errors, nil dereferences, broken invariants, incorrect boolean logic, missing edge cases.",
   },
   {
     name: "performance",
     icon: Gauge,
-    description: "N+1 queries, unnecessary allocations, missing caching, O(n\u00B2) where O(n) is possible.",
+    description:
+      "N+1 queries, unnecessary allocations, missing caching, O(n\u00B2) where O(n) is possible.",
   },
   {
     name: "error_handling",
     icon: Zap,
-    description: "Swallowed errors, empty catch blocks, missing error propagation, silent fallbacks.",
+    description:
+      "Swallowed errors, empty catch blocks, missing error propagation, silent fallbacks.",
   },
   {
     name: "readability",
     icon: Eye,
-    description: "Unclear naming, complex nesting, missing comments on non-obvious logic, dead code.",
+    description:
+      "Unclear naming, complex nesting, missing comments on non-obvious logic, dead code.",
   },
   {
     name: "style",
     icon: Paintbrush,
-    description: "Formatting inconsistencies, convention violations, import ordering, naming patterns.",
+    description:
+      "Formatting inconsistencies, convention violations, import ordering, naming patterns.",
   },
   {
     name: "type_design",
     icon: Code2,
-    description: "Weak type invariants, stringly-typed APIs, missing generics, poor encapsulation.",
+    description:
+      "Weak type invariants, stringly-typed APIs, missing generics, poor encapsulation.",
   },
   {
     name: "testing",
     icon: FlaskConical,
-    description: "Missing edge case tests, brittle assertions, untested error paths, test-only code in production.",
+    description:
+      "Missing edge case tests, brittle assertions, untested error paths, test-only code in production.",
   },
 ];
 
@@ -124,36 +143,43 @@ const PIPELINE_STAGES = [
     step: "01",
     label: "Triage",
     icon: FileSearch,
-    description: "Fast LLM pass classifies every changed file as skip, skim, security_skim, or deep review. Generated files, lockfiles, and vendored deps are skipped automatically.",
-    model: "gpt-4o-mini",
+    description:
+      "Classifies every changed file as skip, skim, or deep review. Generated files, lockfiles, and vendored dependencies are discarded before a single token is spent.",
   },
   {
     step: "02",
-    label: "Review",
-    icon: MessageSquare,
-    description: "Per-file parallel review with persona-tuned prompts. Deep reviews activate 4 specialists (bug hunter, security, architecture, regression). Each file reviewed independently with memory context.",
-    model: "claude-sonnet-4",
+    label: "Context Gathering",
+    icon: Network,
+    description:
+      "Cross-file analysis, dependency tracing, scenario matching, and decision trace lookup. Argus builds a complete picture of the change before reviewing a single line.",
   },
   {
     step: "03",
-    label: "Scoring",
-    icon: SlidersHorizontal,
-    description: "A separate scoring model validates each comment (0\u2013100). Comments below the threshold are dropped to reduce noise. Deduplicates overlapping findings. Skipped if no scoring model is configured.",
-    model: "configurable",
+    label: "Deep Review",
+    icon: MessageSquare,
+    description:
+      "Per-file parallel review with four specialists — bug hunter, security auditor, architecture critic, regression analyst — each armed with full codebase awareness.",
   },
   {
     step: "04",
-    label: "Synthesis",
-    icon: Layers,
-    description: "All surviving comments are aggregated into a unified summary. A quality score (1\u201310) is calculated based on severity distribution.",
-    model: "same as review",
+    label: "Scoring & Validation",
+    icon: SlidersHorizontal,
+    description:
+      "A separate model scores each finding independently. Low-confidence noise is dropped. Duplicate findings are merged. What survives is signal.",
   },
   {
     step: "05",
-    label: "Post",
+    label: "Synthesis",
+    icon: Layers,
+    description:
+      "A senior-dev persona reads every surviving finding and writes a conversational summary. Not a list of issues — a colleague's honest take on the PR.",
+  },
+  {
+    step: "06",
+    label: "Post & Learn",
     icon: Send,
-    description: "Review posted as inline GitHub PR comments with severity tags and one-click suggestion fixes. Comments indexed in memory for future context. Patterns auto-learned for future reviews.",
-    model: "\u2014",
+    description:
+      "Review posted as inline GitHub comments. Developer reactions are collected. Approvals reinforce patterns, dismissals suppress future false positives. The system learns.",
   },
 ];
 
@@ -203,6 +229,30 @@ function CodeBlock({ children }: { children: string }) {
   );
 }
 
+function TerminalBlock({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div>
+      <div className="flex items-center gap-2 rounded-t-lg border border-iron bg-charcoal px-4 py-2.5">
+        <div className="flex gap-1.5">
+          <div className="h-2.5 w-2.5 rounded-full bg-iron" />
+          <div className="h-2.5 w-2.5 rounded-full bg-iron" />
+          <div className="h-2.5 w-2.5 rounded-full bg-iron" />
+        </div>
+        <span className="ml-2 text-[11px] font-mono text-amber">{title}</span>
+      </div>
+      <div className="border-x border-b border-iron rounded-b-lg bg-void p-5 space-y-4">
+        {children}
+      </div>
+    </div>
+  );
+}
+
 /* ── Page ── */
 
 export default function DocsPage() {
@@ -238,8 +288,8 @@ export default function DocsPage() {
         Argus AI Reference
       </h1>
       <p className="text-sm font-mono text-slate-text mb-16 max-w-xl">
-        From first install to one-click fixes. Everything you need to ship
-        cleaner code, faster.
+        What Argus sees, what it remembers, and what it does with that
+        knowledge. Everything from first install to institutional memory.
       </p>
 
       <div className="flex gap-12">
@@ -262,35 +312,38 @@ export default function DocsPage() {
 
         {/* Content */}
         <div className="flex-1 min-w-0 space-y-16">
-          {/* Getting Started */}
+          {/* ── Getting Started ── */}
           <div>
             <SectionHeader id="getting-started" title="Getting Started" />
+            <p className="text-xs font-mono text-slate-text mb-6 leading-relaxed">
+              Three minutes from zero to your first automated review.
+            </p>
             <div className="space-y-5">
               {[
                 {
                   step: "1",
                   title: "Install the GitHub App",
-                  desc: "One click at github.com/apps/argus-eye. Works with orgs and personal accounts.",
+                  desc: "One click at github.com/apps/argus-eye. Works with orgs and personal accounts. Your repos appear in the dashboard immediately.",
                 },
                 {
                   step: "2",
                   title: "Select repositories",
-                  desc: "Pick which repos get watched. They appear in your dashboard instantly.",
+                  desc: "Choose which repos Argus watches. Enable all or pick specific ones. You can change this any time.",
                 },
                 {
                   step: "3",
                   title: "Add your API key",
-                  desc: "Bring your own key — OpenAI, Anthropic, or any OpenRouter provider. You own the costs, we never see your data.",
+                  desc: "Bring your own key — OpenAI, Anthropic, or any OpenRouter provider. Your key, your costs, your data stays yours.",
                 },
                 {
                   step: "4",
                   title: "Open a pull request",
-                  desc: "Every PR gets reviewed automatically. Argus leaves inline comments with one-click suggestion fixes you can commit from GitHub.",
+                  desc: "Every PR triggers Argus automatically. Inline comments appear with one-click suggestion fixes you can commit straight from GitHub.",
                 },
                 {
                   step: "5",
-                  title: "Customize",
-                  desc: "Choose a review persona (security hawk, mentor, architect...), add custom rules, or teach Argus your team's patterns.",
+                  title: "Teach it your standards",
+                  desc: "Choose a review persona, add custom rules, or let Argus learn your team's patterns over time. It gets sharper with every review.",
                 },
               ].map((item) => (
                 <div key={item.step} className="flex gap-4">
@@ -310,13 +363,13 @@ export default function DocsPage() {
             </div>
           </div>
 
-          {/* How It Works */}
+          {/* ── The Review Pipeline ── */}
           <div>
-            <SectionHeader id="how-it-works" title="How It Works" />
+            <SectionHeader id="pipeline" title="The Review Pipeline" />
             <p className="text-xs font-mono text-slate-text mb-6 leading-relaxed">
-              Every PR triggers a 4-stage pipeline that triages, reviews,
-              synthesizes, and posts &mdash; all in under 60 seconds. Each
-              stage runs a different model, configurable per-repo.
+              Every PR triggers a six-stage pipeline. Each stage runs a
+              different model, configurable per-repo. The entire sequence
+              completes in under 60 seconds.
             </p>
             <div className="space-y-1">
               {PIPELINE_STAGES.map((stage, i) => {
@@ -342,9 +395,6 @@ export default function DocsPage() {
                         <span className="text-xs font-mono font-bold text-foreground uppercase tracking-wider">
                           {stage.label}
                         </span>
-                        <span className="ml-auto text-[10px] font-mono text-iron">
-                          {stage.model}
-                        </span>
                       </div>
                       <p className="text-xs font-mono text-slate-text leading-relaxed">
                         {stage.description}
@@ -356,11 +406,306 @@ export default function DocsPage() {
             </div>
           </div>
 
-          {/* Severities */}
+          {/* ── What Argus Sees ── */}
+          <div>
+            <SectionHeader id="what-argus-sees" title="What Argus Sees" />
+            <p className="text-xs font-mono text-slate-text mb-3 leading-relaxed">
+              Most review tools see the diff. Argus sees the system.
+            </p>
+            <p className="text-xs font-mono text-slate-text mb-8 leading-relaxed">
+              Before reviewing a single line of code, Argus builds a living
+              model of your codebase that evolves with every review. This is
+              what separates a linter from an engineer.
+            </p>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              {[
+                {
+                  icon: Network,
+                  title: "Cross-file context",
+                  desc: "Argus traces callers, imports, tests, and shared types. When you change a function, Argus already knows who calls it — and what breaks if the contract shifts.",
+                },
+                {
+                  icon: Target,
+                  title: "Blast radius",
+                  desc: "A persistent dependency graph maps every function and class. On each PR, Argus surfaces what downstream code is affected. No more \"I didn't realize that module depended on this.\"",
+                },
+                {
+                  icon: History,
+                  title: "Scenario memory",
+                  desc: "Past bugs, incidents, and edge cases are remembered across team turnover. \"The last time this module changed, EU billing broke.\" Argus remembers so your team doesn't have to.",
+                },
+                {
+                  icon: Brain,
+                  title: "Decision traces",
+                  desc: "Every review, every developer reply, every fix builds a living knowledge graph. Patterns that were dismissed stop recurring. Patterns that were confirmed get reinforced.",
+                },
+              ].map((item) => {
+                const Icon = item.icon;
+                return (
+                  <div
+                    key={item.title}
+                    className="rounded-lg border border-iron bg-charcoal p-5"
+                  >
+                    <div className="flex items-center gap-3 mb-3">
+                      <div className="h-8 w-8 rounded-md bg-amber/10 flex items-center justify-center">
+                        <Icon className="h-4 w-4 text-amber" />
+                      </div>
+                      <span className="text-xs font-mono font-bold text-foreground">
+                        {item.title}
+                      </span>
+                    </div>
+                    <p className="text-[11px] font-mono text-slate-text leading-relaxed">
+                      {item.desc}
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+
+            <p className="text-[11px] font-mono text-iron mt-4">
+              Argus maintains a world model of your codebase. The more it
+              reviews, the more it understands. Context is not a feature — it
+              is the architecture.
+            </p>
+          </div>
+
+          {/* ── Code Simulation ── */}
+          <div>
+            <SectionHeader id="code-simulation" title="Code Simulation" />
+            <p className="text-xs font-mono text-slate-text mb-3 leading-relaxed">
+              Before you merge, Argus imagines what happens.
+            </p>
+            <p className="text-xs font-mono text-slate-text mb-8 leading-relaxed">
+              Given a PR and known scenarios from your codebase history, Argus
+              simulates execution paths and reports what it finds. Confidence
+              scores tell you how certain the system is.
+            </p>
+
+            <TerminalBlock title="argus — simulation output">
+              {/* Scenario 1 */}
+              <div className="space-y-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded border bg-red-500/20 text-red-400 border-red-500/30">
+                    fails
+                  </span>
+                  <span className="text-[11px] font-mono text-foreground">
+                    Scenario: Concurrent subscription cancellation
+                  </span>
+                  <span className="ml-auto text-[10px] font-mono text-red-400">
+                    confidence 94%
+                  </span>
+                </div>
+                <div className="pl-4 border-l-2 border-red-500/30">
+                  <p className="text-[11px] font-mono text-ash/70 leading-relaxed">
+                    <span className="text-slate-text">Root cause:</span> No
+                    idempotency key on the cancellation path. Two concurrent
+                    requests reach the payment provider — first succeeds, second
+                    throws. DB update runs for both.
+                  </p>
+                  <p className="text-[11px] font-mono text-ash/70 leading-relaxed mt-1">
+                    <span className="text-slate-text">Impact:</span> Double
+                    refund issued. Revenue loss proportional to cancellation
+                    volume.
+                  </p>
+                  <p className="text-[11px] font-mono text-amber/60 leading-relaxed mt-1">
+                    <span className="text-slate-text">Fix:</span> Add mutex or
+                    idempotency key. Wrap call + DB write in a transaction.
+                  </p>
+                </div>
+              </div>
+
+              <div className="border-t border-iron/50" />
+
+              {/* Scenario 2 */}
+              <div className="space-y-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded border bg-yellow-500/20 text-yellow-400 border-yellow-500/30">
+                    degrades
+                  </span>
+                  <span className="text-[11px] font-mono text-foreground">
+                    Scenario: Cache key collision under ID reuse
+                  </span>
+                  <span className="ml-auto text-[10px] font-mono text-yellow-400">
+                    confidence 78%
+                  </span>
+                </div>
+                <div className="pl-4 border-l-2 border-yellow-500/30">
+                  <p className="text-[11px] font-mono text-ash/70 leading-relaxed">
+                    <span className="text-slate-text">Root cause:</span>{" "}
+                    Deleted user IDs are recycled. Infinite TTL cache serves
+                    stale data from the previous account holder.
+                  </p>
+                  <p className="text-[11px] font-mono text-ash/70 leading-relaxed mt-1">
+                    <span className="text-slate-text">Impact:</span> Data
+                    leakage between accounts. Severity scales with user churn.
+                  </p>
+                </div>
+              </div>
+
+              <div className="border-t border-iron/50" />
+
+              {/* Scenario 3 */}
+              <div className="space-y-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded border bg-green-500/20 text-green-400 border-green-500/30">
+                    passes
+                  </span>
+                  <span className="text-[11px] font-mono text-foreground">
+                    Scenario: Webhook retry under network partition
+                  </span>
+                  <span className="ml-auto text-[10px] font-mono text-green-400">
+                    confidence 91%
+                  </span>
+                </div>
+                <div className="pl-4 border-l-2 border-green-500/30">
+                  <p className="text-[11px] font-mono text-ash/70 leading-relaxed">
+                    <span className="text-slate-text">Result:</span>{" "}
+                    Idempotency key already present on this path. Retry is
+                    safe. No state corruption detected.
+                  </p>
+                </div>
+              </div>
+            </TerminalBlock>
+
+            <p className="text-[11px] font-mono text-iron mt-4">
+              Simulation is powered by scenario memory — the richer your
+              review history, the more scenarios Argus can test against.
+              Currently in experimental rollout.
+            </p>
+          </div>
+
+          {/* ── The Conversational Review ── */}
+          <div>
+            <SectionHeader
+              id="conversational-review"
+              title="The Conversational Review"
+            />
+            <p className="text-xs font-mono text-slate-text mb-3 leading-relaxed">
+              Argus doesn&apos;t post a list of findings. It writes you a
+              review the way a senior engineer would — conversational,
+              opinionated, and to the point.
+            </p>
+            <p className="text-xs font-mono text-slate-text mb-8 leading-relaxed">
+              Every review has three layers: the summary, the inline comments,
+              and the feedback loop.
+            </p>
+
+            <div className="space-y-6">
+              {/* Summary mock */}
+              <div>
+                <h3 className="text-sm font-bold text-foreground mb-3">
+                  The summary
+                </h3>
+                <TerminalBlock title="argus — review summary">
+                  <p className="text-[11px] font-mono text-foreground/90 leading-relaxed">
+                    Solid refactor overall — the extraction of{" "}
+                    <code className="text-amber/80">PaymentService</code> into
+                    its own module is clean and the tests cover the happy path
+                    well. Two things I&apos;d block on: the cancellation
+                    handler has a race condition under concurrent requests (see
+                    inline), and the new cache key scheme will collide if user
+                    IDs get recycled. The rest is style nits.
+                  </p>
+                  <div className="flex items-center gap-4 mt-3 pt-3 border-t border-iron/50">
+                    <span className="text-[10px] font-mono text-slate-text">
+                      Quality score:{" "}
+                      <span className="text-amber font-bold">7/10</span>
+                    </span>
+                    <span className="text-[10px] font-mono text-slate-text">
+                      1 critical &middot; 1 warning &middot; 3 suggestions
+                      &middot; 2 praise
+                    </span>
+                  </div>
+                </TerminalBlock>
+              </div>
+
+              {/* Inline comment format */}
+              <div>
+                <h3 className="text-sm font-bold text-foreground mb-3">
+                  Inline comments
+                </h3>
+                <p className="text-xs font-mono text-slate-text mb-4 leading-relaxed">
+                  Every inline comment follows a structured format: what the
+                  issue is, why it matters, and a one-click suggestion fix when
+                  applicable.
+                </p>
+                <TerminalBlock title="argus — inline comment">
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded border bg-red-500/20 text-red-400 border-red-500/30">
+                        critical
+                      </span>
+                      <span className="text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded border bg-amber/20 text-amber border-amber/30">
+                        bug
+                      </span>
+                    </div>
+                    <p className="text-[11px] font-mono text-foreground/90 leading-relaxed">
+                      <span className="text-slate-text font-bold">
+                        What:
+                      </span>{" "}
+                      Two concurrent cancellation requests can both pass the{" "}
+                      <code className="text-amber/80">
+                        status === &quot;active&quot;
+                      </code>{" "}
+                      check. First succeeds at the payment provider, second
+                      throws — but the DB update runs for both.
+                    </p>
+                    <p className="text-[11px] font-mono text-foreground/90 leading-relaxed">
+                      <span className="text-slate-text font-bold">Why:</span>{" "}
+                      No lock or idempotency key on this path. The check-then-act
+                      window is ~200ms under load. This will cause double
+                      refunds in production.
+                    </p>
+                  </div>
+                </TerminalBlock>
+              </div>
+
+              {/* Feedback loop */}
+              <div>
+                <h3 className="text-sm font-bold text-foreground mb-3">
+                  The feedback loop
+                </h3>
+                <p className="text-xs font-mono text-slate-text mb-4 leading-relaxed">
+                  Every Argus comment has approval reactions. Your feedback
+                  directly shapes future reviews.
+                </p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="rounded-lg border border-iron bg-charcoal p-4">
+                    <div className="flex items-center gap-2 mb-2">
+                      <ThumbsUp className="h-3.5 w-3.5 text-green-400" />
+                      <span className="text-xs font-mono font-bold text-foreground">
+                        Approve
+                      </span>
+                    </div>
+                    <p className="text-[11px] font-mono text-slate-text leading-relaxed">
+                      Reinforces the pattern. Argus will catch similar issues
+                      with higher confidence in future reviews.
+                    </p>
+                  </div>
+                  <div className="rounded-lg border border-iron bg-charcoal p-4">
+                    <div className="flex items-center gap-2 mb-2">
+                      <ThumbsDown className="h-3.5 w-3.5 text-red-400" />
+                      <span className="text-xs font-mono font-bold text-foreground">
+                        Dismiss
+                      </span>
+                    </div>
+                    <p className="text-[11px] font-mono text-slate-text leading-relaxed">
+                      Suppresses the pattern. Argus stores a &ldquo;dismissed&rdquo;
+                      signal and avoids similar false positives going forward.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* ── Severities ── */}
           <div>
             <SectionHeader id="severities" title="Severities" />
             <p className="text-xs font-mono text-slate-text mb-6 leading-relaxed">
-              Every review comment is tagged with one of four severity levels.
+              Every finding is tagged with one of four severity levels. These
+              drive the quality score and determine what gets posted.
             </p>
             <div className="space-y-3">
               {SEVERITIES.map((sev) => (
@@ -386,12 +731,12 @@ export default function DocsPage() {
             </div>
           </div>
 
-          {/* Categories */}
+          {/* ── Categories ── */}
           <div>
             <SectionHeader id="categories" title="Categories" />
             <p className="text-xs font-mono text-slate-text mb-6 leading-relaxed">
-              Comments are also tagged with a category indicating the type of
-              issue found.
+              Every finding is also tagged with a category — the type of issue
+              detected.
             </p>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               {CATEGORIES.map((cat) => {
@@ -416,14 +761,13 @@ export default function DocsPage() {
             </div>
           </div>
 
-          {/* Review Rules */}
+          {/* ── Review Rules ── */}
           <div>
             <SectionHeader id="rules" title="Review Rules" />
             <p className="text-xs font-mono text-slate-text mb-6 leading-relaxed">
-
-              Tell Argus what matters to your team. Rules are injected into the
-              LLM system prompt before each review, so every comment reflects
-              your standards.
+              Tell Argus what matters to your team. Rules are injected into
+              every review, so every comment reflects your standards — not
+              generic best practices.
             </p>
 
             <h3 className="text-sm font-bold text-foreground mb-3">
@@ -440,7 +784,10 @@ export default function DocsPage() {
               Repo-level rules
             </h3>
             <p className="text-xs font-mono text-slate-text mb-4 leading-relaxed">
-              Add a <code className="text-amber bg-iron/40 rounded px-1.5 py-0.5">.argus/rules.md</code>{" "}
+              Add a{" "}
+              <code className="text-amber bg-iron/40 rounded px-1.5 py-0.5">
+                .argus/rules.md
+              </code>{" "}
               file to your repo. Repo rules override org rules in the same
               category.
             </p>
@@ -458,12 +805,14 @@ export default function DocsPage() {
 - Require JSDoc on exported functions`}</CodeBlock>
           </div>
 
-          {/* Model Configuration */}
+          {/* ── Model Configuration ── */}
           <div>
             <SectionHeader id="models" title="Model Configuration" />
             <p className="text-xs font-mono text-slate-text mb-6 leading-relaxed">
               Override the LLM model for each pipeline stage per-repo from the{" "}
-              <span className="text-amber">Settings</span> page.
+              <span className="text-amber">Settings</span> page. The
+              synthesis stage defaults to the same model as review but can be
+              overridden independently for teams that want a different voice.
             </p>
 
             <div className="rounded-lg border border-iron bg-charcoal overflow-hidden">
@@ -474,10 +823,30 @@ export default function DocsPage() {
                 <div className="px-4 py-2.5">Temperature</div>
               </div>
               {[
-                { stage: "triage", model: "gpt-4o-mini", tokens: "2,048", temp: "0.2" },
-                { stage: "review", model: "claude-sonnet-4", tokens: "4,096", temp: "0.2" },
-                { stage: "scoring", model: "configurable", tokens: "4,096", temp: "0.2" },
-                { stage: "synthesis", model: "same as review", tokens: "4,096", temp: "0.2" },
+                {
+                  stage: "triage",
+                  model: "gpt-4o-mini",
+                  tokens: "2,048",
+                  temp: "0.2",
+                },
+                {
+                  stage: "review",
+                  model: "claude-sonnet-4",
+                  tokens: "4,096",
+                  temp: "0.2",
+                },
+                {
+                  stage: "scoring",
+                  model: "configurable",
+                  tokens: "4,096",
+                  temp: "0.2",
+                },
+                {
+                  stage: "synthesis",
+                  model: "same as review",
+                  tokens: "4,096",
+                  temp: "0.2",
+                },
               ].map((row, i, arr) => (
                 <div
                   key={row.stage}
@@ -494,18 +863,18 @@ export default function DocsPage() {
             </div>
 
             <p className="text-[11px] font-mono text-iron mt-3">
-              Set provider to &quot;openai&quot;, &quot;anthropic&quot;, etc. Any
-              OpenRouter-compatible provider works.
+              Set provider to &quot;openai&quot;, &quot;anthropic&quot;, etc.
+              Any OpenRouter-compatible provider works.
             </p>
           </div>
 
-          {/* API Keys (BYOK) */}
+          {/* ── API Keys (BYOK) ── */}
           <div>
             <SectionHeader id="api-keys" title="API Keys (BYOK)" />
             <p className="text-xs font-mono text-slate-text mb-4 leading-relaxed">
               Your keys, your models, your bill. Argus never stores prompts or
-              code on our servers &mdash; API calls go straight from our backend
-              to your chosen provider. No hidden costs, no surprises.
+              code on our servers &mdash; API calls go straight from our
+              backend to your chosen provider. No hidden costs, no surprises.
             </p>
             <div className="rounded-lg border border-iron bg-charcoal p-4">
               <div className="flex items-center gap-3 mb-3">
@@ -515,37 +884,64 @@ export default function DocsPage() {
                 </span>
               </div>
               <ol className="list-decimal list-inside space-y-1.5 text-xs font-mono text-slate-text leading-relaxed">
-                <li>Go to <span className="text-amber">Settings</span> in the dashboard</li>
-                <li>Select a repo and choose a provider (OpenAI, Anthropic, etc.)</li>
-                <li>Enter your API key &mdash; it&apos;s encrypted at rest</li>
-                <li>Pick a model for each pipeline stage (triage, review)</li>
+                <li>
+                  Go to <span className="text-amber">Settings</span> in the
+                  dashboard
+                </li>
+                <li>
+                  Select a repo and choose a provider (OpenAI, Anthropic,
+                  etc.)
+                </li>
+                <li>
+                  Enter your API key &mdash; it&apos;s encrypted at rest
+                </li>
+                <li>
+                  Pick a model for each pipeline stage (triage, review,
+                  scoring, synthesis)
+                </li>
               </ol>
             </div>
             <p className="text-[11px] font-mono text-iron mt-3">
-
-              Keys are encrypted at rest and scoped per-installation. Without a
-              key configured, Argus posts a friendly onboarding comment on your
-              first PR linking to Settings.
+              Keys are encrypted at rest and scoped per-installation. Without
+              a key configured, Argus posts a friendly onboarding comment on
+              your first PR linking to Settings.
             </p>
           </div>
 
-          {/* Review Personas */}
+          {/* ── Review Personas ── */}
           <div>
             <SectionHeader id="personas" title="Review Personas" />
             <p className="text-xs font-mono text-slate-text mb-4 leading-relaxed">
-              Not every PR needs the same reviewer. Personas tune Argus&apos;s
-              tone, focus, and severity threshold &mdash; from a gentle mentor
-              to a zero-mercy strict auditor. Set a default per-repo or
-              override per-PR.
+              Not every PR needs the same reviewer. Personas tune the tone,
+              focus, and severity threshold &mdash; from a gentle mentor to a
+              zero-mercy auditor. Set a default per-repo or override per-PR.
             </p>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               {[
-                { name: "default", desc: "Balanced across all categories. The standard Argus experience most teams start with." },
-                { name: "security_auditor", desc: "Treats every PR like a pen test. Injection risks, auth flaws, data exposure, SSRF." },
-                { name: "performance_engineer", desc: "Hunts N+1 queries, memory leaks, O(n\u00B2) loops, and missing cache invalidation." },
-                { name: "mentor", desc: "Explains the why behind every comment. Suggests learning resources. Built for growing teams." },
-                { name: "architect", desc: "Thinks in boundaries. API contracts, separation of concerns, dependency direction." },
-                { name: "strict", desc: "No free passes. Comments on everything. Maximum coverage, minimum mercy." },
+                {
+                  name: "default",
+                  desc: "Balanced across all categories. The standard Argus experience most teams start with.",
+                },
+                {
+                  name: "security_auditor",
+                  desc: "Treats every PR like a pen test. Injection risks, auth flaws, data exposure, SSRF.",
+                },
+                {
+                  name: "performance_engineer",
+                  desc: "Hunts N+1 queries, memory leaks, O(n\u00B2) loops, and missing cache invalidation.",
+                },
+                {
+                  name: "mentor",
+                  desc: "Explains the why behind every comment. Suggests learning resources. Built for growing teams.",
+                },
+                {
+                  name: "architect",
+                  desc: "Thinks in boundaries. API contracts, separation of concerns, dependency direction.",
+                },
+                {
+                  name: "strict",
+                  desc: "No free passes. Comments on everything. Maximum coverage, minimum mercy.",
+                },
               ].map((p) => (
                 <div
                   key={p.name}
@@ -574,125 +970,42 @@ export default function DocsPage() {
             </div>
           </div>
 
-          {/* Suggestion Blocks */}
-          <div>
-            <SectionHeader id="suggestions" title="Suggestion Blocks" />
-            <p className="text-xs font-mono text-slate-text mb-4 leading-relaxed">
-              Argus doesn&apos;t just tell you what&apos;s wrong &mdash; it
-              writes the fix. Every actionable comment includes a GitHub
-              suggestion block with exact replacement code. One click to
-              commit.
-            </p>
-            <div className="rounded-lg border border-iron bg-charcoal p-4">
-              <div className="flex items-center gap-3 mb-3">
-                <Sparkles className="h-4 w-4 text-amber" />
-                <span className="text-xs font-mono font-bold text-foreground">
-                  How it works
-                </span>
-              </div>
-              <ol className="list-decimal list-inside space-y-1.5 text-xs font-mono text-slate-text leading-relaxed">
-                <li>During review, Argus fetches the full file at HEAD</li>
-                <li>The LLM generates exact replacement code for the flagged line range</li>
-                <li>The suggestion is embedded as a <code className="text-amber bg-iron/40 rounded px-1 py-0.5">```suggestion</code> block</li>
-                <li>GitHub renders a &quot;Commit suggestion&quot; button on the comment</li>
-              </ol>
-            </div>
-            <p className="text-[11px] font-mono text-iron mt-3">
-
-              Suggestions are omitted for praise or when no concrete fix
-              applies. Malformed suggestions are automatically discarded
-              before posting.
-            </p>
-          </div>
-
-          {/* Incremental Reviews */}
-          <div>
-            <SectionHeader id="incremental" title="Incremental Reviews" />
-            <p className="text-xs font-mono text-slate-text mb-4 leading-relaxed">
-              When you push new commits to an open PR, Argus doesn&apos;t
-              re-review the entire diff. It fetches only the changes between
-              your previous HEAD and the new HEAD, reviewing just the
-              incremental delta.
-            </p>
-            <div className="rounded-lg border border-iron bg-charcoal p-4">
-              <div className="flex items-center gap-3 mb-2">
-                <RefreshCw className="h-4 w-4 text-amber" />
-                <span className="text-xs font-mono font-bold text-foreground">
-                  How it works
-                </span>
-              </div>
-              <ol className="list-decimal list-inside space-y-1.5 text-xs font-mono text-slate-text leading-relaxed">
-                <li>New push triggers <code className="text-amber bg-iron/40 rounded px-1 py-0.5">synchronize</code> webhook</li>
-                <li>Argus finds the last completed review for this PR</li>
-                <li>Fetches inter-diff between previous HEAD and new HEAD</li>
-                <li>Reviews only new/changed files</li>
-                <li>Posts as a new review marked &quot;Incremental&quot;</li>
-              </ol>
-            </div>
-            <p className="text-[11px] font-mono text-iron mt-3">
-              Falls back to full diff if inter-diff fetch fails.
-            </p>
-          </div>
-
-          {/* Manual Triggers */}
-          <div>
-            <SectionHeader id="triggers" title="Manual Triggers" />
-            <p className="text-xs font-mono text-slate-text mb-4 leading-relaxed">
-              Trigger a review on any PR from the dashboard, even if it was
-              opened before Argus was installed.
-            </p>
-            <div className="rounded-lg border border-iron bg-charcoal p-4">
-              <div className="flex items-center gap-3 mb-2">
-                <Play className="h-4 w-4 text-amber" />
-                <span className="text-xs font-mono font-bold text-foreground">
-                  From the Repos page
-                </span>
-              </div>
-              <ol className="list-decimal list-inside space-y-1.5 text-xs font-mono text-slate-text leading-relaxed">
-                <li>Click &quot;Trigger review&quot; on any repo card</li>
-                <li>Enter the PR number</li>
-                <li>Click Run &mdash; Argus fetches the diff and reviews it</li>
-              </ol>
-            </div>
-            <p className="text-[11px] font-mono text-iron mt-3">
-              Failed reviews can be retried from the review detail page.
-            </p>
-          </div>
-
-          {/* Bot Commands */}
+          {/* ── Bot Commands ── */}
           <div>
             <SectionHeader id="commands" title="Bot Commands" />
             <p className="text-xs font-mono text-slate-text mb-6 leading-relaxed">
-
               Talk to Argus directly from any PR. Mention{" "}
-              <code className="text-amber bg-iron/40 rounded px-1.5 py-0.5">@argus-eye</code>{" "}
+              <code className="text-amber bg-iron/40 rounded px-1.5 py-0.5">
+                @argus-eye
+              </code>{" "}
               followed by a command and it responds in seconds.
             </p>
             <div className="space-y-3">
               {[
                 {
                   cmd: "@argus-eye review",
-                  desc: "Trigger a full review right now. Add --force to re-review even if already reviewed at this SHA. Add --persona to switch review style for this PR only.",
+                  desc: "Trigger a full review. Add --force to re-review at the same SHA. Add --persona to switch style for this PR only.",
                   example: "@argus-eye review --force --persona mentor",
                 },
                 {
                   cmd: "@argus-eye remember <pattern>",
-                  desc: "Teach Argus something new. Saves a pattern to memory so future reviews catch it. Add --org to apply across all repos.",
-                  example: "@argus-eye remember --org always check for SQL injection in raw queries",
+                  desc: "Teach Argus something new. Saves a pattern to memory for future reviews. Add --org to apply across all repos.",
+                  example:
+                    "@argus-eye remember --org always check for SQL injection in raw queries",
                 },
                 {
                   cmd: "@argus-eye resolve",
-                  desc: "Clean up after yourself. Scans all unresolved bot review threads and resolves ones where the referenced file has been updated in the latest diff.",
+                  desc: "Scans all unresolved review threads and resolves ones where the referenced file has been updated in the latest push.",
                   example: "@argus-eye resolve",
                 },
                 {
                   cmd: "@argus-eye fix",
-                  desc: "The magic command. Applies every suggestion block from the review as a single atomic commit pushed straight to your PR branch.",
+                  desc: "Applies every suggestion block from the review as a single atomic commit pushed straight to your PR branch.",
                   example: "@argus-eye fix",
                 },
                 {
                   cmd: "@argus-eye help",
-                  desc: "Lists all available commands and their usage. Posts a reference table right in the PR.",
+                  desc: "Lists all available commands and their usage right in the PR.",
                   example: "@argus-eye help",
                 },
               ].map((c) => (
@@ -719,134 +1032,212 @@ export default function DocsPage() {
             </div>
           </div>
 
-          {/* Scoring */}
+          {/* ── Memory & Learning ── */}
           <div>
-            <SectionHeader id="scoring" title="Scoring" />
-            <p className="text-xs font-mono text-slate-text mb-4 leading-relaxed">
-              Each review gets a quality score from 1 to 10, calculated after
-              synthesis based on the severity distribution of comments.
+            <SectionHeader id="memory" title="Memory & Learning" />
+            <p className="text-xs font-mono text-slate-text mb-3 leading-relaxed">
+              Most tools forget between PRs. Argus remembers everything.
             </p>
-            <div className="rounded-lg border border-iron bg-charcoal p-4">
+            <p className="text-xs font-mono text-slate-text mb-8 leading-relaxed">
+              Every review, every developer reaction, every fix and dismissal
+              feeds a growing knowledge base. The system doesn&apos;t just
+              review code — it accumulates institutional memory that survives
+              team turnover.
+            </p>
+
+            <div className="space-y-4">
+              {[
+                {
+                  icon: Paintbrush,
+                  title: "Patterns",
+                  desc: "Code conventions auto-learned from your codebase. Error handling styles, naming patterns, architecture decisions — extracted from what your team actually writes, not what a style guide says.",
+                },
+                {
+                  icon: Activity,
+                  title: "Scenarios",
+                  desc: "Behavioral knowledge about how your system fails. Past bugs, edge cases, and incidents stored with an approval flow — so Argus only remembers what your team confirms is real.",
+                },
+                {
+                  icon: History,
+                  title: "Decision traces",
+                  desc: "Every review comment, every developer reply, every approval and dismissal. This is review history as institutional memory. Why was this pattern introduced? Who approved it? What broke last time?",
+                },
+                {
+                  icon: Network,
+                  title: "Context graph",
+                  desc: "The \"event clock\" of your codebase. A living record of why things are the way they are — connecting reviews, patterns, scenarios, and code changes into a navigable knowledge graph.",
+                },
+              ].map((item) => {
+                const Icon = item.icon;
+                return (
+                  <div
+                    key={item.title}
+                    className="rounded-lg border border-iron bg-charcoal p-4"
+                  >
+                    <div className="flex items-center gap-3 mb-2">
+                      <Icon className="h-4 w-4 text-amber" />
+                      <span className="text-xs font-mono font-bold text-foreground">
+                        {item.title}
+                      </span>
+                    </div>
+                    <p className="text-[11px] font-mono text-slate-text leading-relaxed">
+                      {item.desc}
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="mt-6 rounded-lg border border-amber/20 bg-amber/5 p-4">
               <div className="flex items-center gap-3 mb-2">
-                <SlidersHorizontal className="h-4 w-4 text-amber" />
-                <span className="text-xs font-mono font-bold text-foreground">
-                  Score formula
+                <RefreshCw className="h-4 w-4 text-amber" />
+                <span className="text-xs font-mono font-bold text-amber">
+                  The flywheel
                 </span>
               </div>
-              <p className="text-xs font-mono text-slate-text leading-relaxed mb-2">
-                Starts at 10 and deducts points per finding:
-              </p>
-              <div className="space-y-1 text-xs font-mono">
-                <div className="flex items-center gap-2">
-                  <span className="h-2 w-2 rounded-full bg-red-400" />
-                  <span className="text-red-400">critical</span>
-                  <span className="text-iron">&mdash;</span>
-                  <span className="text-slate-text">&minus;2 points each</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="h-2 w-2 rounded-full bg-amber" />
-                  <span className="text-amber">warning</span>
-                  <span className="text-iron">&mdash;</span>
-                  <span className="text-slate-text">&minus;1 point each</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="h-2 w-2 rounded-full bg-blue-400" />
-                  <span className="text-blue-400">suggestion</span>
-                  <span className="text-iron">&mdash;</span>
-                  <span className="text-slate-text">&minus;0.5 points each</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="h-2 w-2 rounded-full bg-green-400" />
-                  <span className="text-green-400">praise</span>
-                  <span className="text-iron">&mdash;</span>
-                  <span className="text-slate-text">no deduction</span>
-                </div>
-              </div>
-              <p className="text-[11px] font-mono text-iron mt-3">
-                Score is clamped to a minimum of 1.
+              <p className="text-[11px] font-mono text-slate-text leading-relaxed">
+                Every review makes the system smarter. Patterns that get
+                approved are reinforced. Patterns that get dismissed are
+                suppressed. Scenarios that match real bugs get higher
+                confidence. Over time, Argus converges on your team&apos;s
+                actual standards — not generic rules, but the hard-won
+                knowledge that usually lives only in senior engineers&apos;
+                heads.
               </p>
             </div>
           </div>
 
-          {/* Memory & Context */}
+          {/* ── Insights & Risk ── */}
           <div>
-            <SectionHeader id="memory" title="Memory & Context" />
-            <p className="text-xs font-mono text-slate-text mb-4 leading-relaxed">
-
-              Argus gets smarter with every review. Past patterns and feedback
-              are indexed for RAG, so future reviews build on what it&apos;s
-              already learned. Powered by Supermemory.
+            <SectionHeader id="insights" title="Insights & Risk" />
+            <p className="text-xs font-mono text-slate-text mb-3 leading-relaxed">
+              Your codebase has a health score now.
             </p>
-            <div className="rounded-lg border border-iron bg-charcoal p-4">
-              <div className="flex items-center gap-3 mb-3">
-                <Brain className="h-4 w-4 text-amber" />
-                <span className="text-xs font-mono font-bold text-foreground">
-                  Memory containers
-                </span>
-              </div>
-              <div className="space-y-2 text-xs font-mono text-slate-text leading-relaxed">
-                <div className="flex items-start gap-2">
-                  <span className="text-amber shrink-0">&bull;</span>
-                  <span>
-                    <code className="text-foreground/80 bg-iron/40 rounded px-1 py-0.5">org-patterns</code>{" "}
-                    &mdash; Learned patterns across all repos
-                  </span>
+            <p className="text-xs font-mono text-slate-text mb-8 leading-relaxed">
+              The Insights dashboard aggregates everything Argus learns into
+              an operational view of your codebase. Not vanity metrics —
+              actionable risk signals drawn from real review data.
+            </p>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              {[
+                {
+                  icon: BarChart3,
+                  title: "Hot files",
+                  desc: "Files most frequently flagged across reviews. These are the parts of your codebase that keep breaking — the modules that need a rewrite or better test coverage.",
+                },
+                {
+                  icon: Shield,
+                  title: "Risk scores",
+                  desc: "Per-file and per-module risk scores based on severity history, change frequency, and unresolved findings. Higher risk = higher attention from Argus.",
+                },
+                {
+                  icon: History,
+                  title: "Decision trace timeline",
+                  desc: "A chronological view of every review, reaction, and pattern learned. See how your codebase quality trends over time — and which decisions shaped it.",
+                },
+                {
+                  icon: Activity,
+                  title: "Quality trends",
+                  desc: "Track quality scores across PRs, repos, and teams. Spot regressions before they compound. Know when a refactor is paying off.",
+                },
+              ].map((item) => {
+                const Icon = item.icon;
+                return (
+                  <div
+                    key={item.title}
+                    className="rounded-lg border border-iron bg-charcoal p-4"
+                  >
+                    <div className="flex items-center gap-3 mb-2">
+                      <Icon className="h-4 w-4 text-amber" />
+                      <span className="text-xs font-mono font-bold text-foreground">
+                        {item.title}
+                      </span>
+                    </div>
+                    <p className="text-[11px] font-mono text-slate-text leading-relaxed">
+                      {item.desc}
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* ── Settings & Controls ── */}
+          <div>
+            <SectionHeader id="settings" title="Settings & Controls" />
+            <p className="text-xs font-mono text-slate-text mb-6 leading-relaxed">
+              Every advanced capability can be toggled independently per-repo.
+              Start with the defaults and enable features as your team is
+              ready.
+            </p>
+
+            <div className="space-y-3">
+              {[
+                {
+                  label: "Cross-file context",
+                  desc: "Enables dependency tracing and caller analysis across your codebase during review.",
+                  status: "on by default",
+                },
+                {
+                  label: "Blast radius",
+                  desc: "Maps downstream impact of every change using the persistent dependency graph.",
+                  status: "on by default",
+                },
+                {
+                  label: "Scenario memory",
+                  desc: "Matches PR changes against known failure scenarios from your review history.",
+                  status: "on by default",
+                },
+                {
+                  label: "Code simulation",
+                  desc: "Simulates execution paths against known scenarios. Reports confidence, root cause, and impact.",
+                  status: "experimental",
+                },
+                {
+                  label: "Auto-learn patterns",
+                  desc: "Automatically extracts code conventions and patterns from reviewed diffs.",
+                  status: "on by default",
+                },
+                {
+                  label: "Incremental reviews",
+                  desc: "On new pushes, reviews only the delta since last review instead of the full diff.",
+                  status: "on by default",
+                },
+              ].map((toggle) => (
+                <div
+                  key={toggle.label}
+                  className="rounded-lg border border-iron bg-charcoal p-4 flex items-start gap-4"
+                >
+                  <ToggleRight className="h-4 w-4 text-amber mt-0.5 shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-3 mb-1">
+                      <span className="text-xs font-mono font-bold text-foreground">
+                        {toggle.label}
+                      </span>
+                      <span
+                        className={`ml-auto text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded border ${
+                          toggle.status === "experimental"
+                            ? "bg-yellow-500/20 text-yellow-400 border-yellow-500/30"
+                            : "bg-green-500/20 text-green-400 border-green-500/30"
+                        }`}
+                      >
+                        {toggle.status}
+                      </span>
+                    </div>
+                    <p className="text-[11px] font-mono text-slate-text leading-relaxed">
+                      {toggle.desc}
+                    </p>
+                  </div>
                 </div>
-                <div className="flex items-start gap-2">
-                  <span className="text-amber shrink-0">&bull;</span>
-                  <span>
-                    <code className="text-foreground/80 bg-iron/40 rounded px-1 py-0.5">repo-patterns</code>{" "}
-                    &mdash; Repo-specific patterns, conventions, and file synthesis
-                  </span>
-                </div>
-                <div className="flex items-start gap-2">
-                  <span className="text-amber shrink-0">&bull;</span>
-                  <span>
-                    <code className="text-foreground/80 bg-iron/40 rounded px-1 py-0.5">repo-reviews</code>{" "}
-                    &mdash; Past review comments indexed for RAG
-                  </span>
-                </div>
-              </div>
-              <p className="text-[11px] font-mono text-iron mt-3">
-                During review, the LLM searches memory for similar past issues,
-                file history, and confirmed patterns to calibrate its findings.
-              </p>
+              ))}
             </div>
 
-            <h3 className="text-sm font-bold text-foreground mt-6 mb-3">
-              How memory grows
-            </h3>
-            <p className="text-xs font-mono text-slate-text mb-4 leading-relaxed">
-              After every review, Argus automatically extracts and indexes
-              knowledge through several mechanisms:
+            <p className="text-[11px] font-mono text-iron mt-4">
+              All toggles are accessible from{" "}
+              <span className="text-amber">Settings</span> in the dashboard.
+              Changes take effect on the next review.
             </p>
-            <div className="space-y-2 text-xs font-mono text-slate-text leading-relaxed">
-              <div className="flex items-start gap-2">
-                <span className="text-amber shrink-0">&bull;</span>
-                <span><strong className="text-foreground/80">Auto-learn patterns</strong> &mdash; High-confidence review comments are distilled into reusable patterns specific to your codebase</span>
-              </div>
-              <div className="flex items-start gap-2">
-                <span className="text-amber shrink-0">&bull;</span>
-                <span><strong className="text-foreground/80">Convention extraction</strong> &mdash; Code style conventions are identified from diff additions (error handling, logging, naming, architecture)</span>
-              </div>
-              <div className="flex items-start gap-2">
-                <span className="text-amber shrink-0">&bull;</span>
-                <span><strong className="text-foreground/80">File synthesis</strong> &mdash; Per-file condensed memory docs capture dominant themes and patterns to watch for</span>
-              </div>
-              <div className="flex items-start gap-2">
-                <span className="text-amber shrink-0">&bull;</span>
-                <span><strong className="text-foreground/80">PR summaries</strong> &mdash; Lightweight summaries of each review for historical context</span>
-              </div>
-            </div>
-
-            <h3 className="text-sm font-bold text-foreground mt-6 mb-3">
-              Feedback loop
-            </h3>
-            <p className="text-xs font-mono text-slate-text mb-4 leading-relaxed">
-              Reply to any Argus comment on GitHub. If you explain why it was
-              wrong, Argus stores a &ldquo;dismissed&rdquo; signal so it avoids
-              similar false positives in the future. If you fix the issue, the
-              pattern is reinforced. Over time, reviews get more accurate.</p>
           </div>
         </div>
       </div>

@@ -232,7 +232,8 @@ func (s *Server) handleResolveCommand(ctx context.Context, evt ghpkg.IssueCommen
 	// Filter to unresolved bot threads
 	var botThreads []ghpkg.ReviewThread
 	for _, t := range threads {
-		if !t.IsResolved && strings.HasSuffix(t.AuthorLogin, "[bot]") {
+		isBotComment := strings.HasSuffix(t.AuthorLogin, "[bot]") || t.AuthorLogin == "argus-eye"
+		if !t.IsResolved && isBotComment {
 			botThreads = append(botThreads, t)
 		}
 	}

@@ -53,6 +53,13 @@ func StoreScenarioSeeds(ctx context.Context, st *store.Store, installationID int
 	}
 }
 
+// StorePendingScenarioSeeds stores scenarios as inactive (pending dev approval via reaction).
+func StorePendingScenarioSeeds(ctx context.Context, st *store.Store, installationID int64, repoID *int64, seeds []ScenarioSeed) {
+	for _, seed := range seeds {
+		_, _ = st.CreatePendingScenario(ctx, installationID, repoID, seed.Description, seed.Source, seed.SourceRef, seed.Files, nil, seed.Severity)
+	}
+}
+
 // FindRelevantScenarios searches for active scenarios matching the changed files.
 func FindRelevantScenarios(ctx context.Context, st *store.Store, repoID int64, changedFiles []string) ([]store.Scenario, error) {
 	return st.ListScenariosForFiles(ctx, repoID, changedFiles)

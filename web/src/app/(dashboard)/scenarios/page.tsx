@@ -236,6 +236,11 @@ export default function ScenariosPage() {
                       {scenario.description}
                     </p>
                     <div className="flex items-center gap-2 flex-wrap">
+                      {!scenario.active && (
+                        <span className="inline-block rounded border border-zinc-500/30 bg-zinc-500/10 px-2 py-0.5 text-[10px] font-mono text-zinc-400">
+                          pending
+                        </span>
+                      )}
                       <span
                         className={`inline-block rounded border px-2 py-0.5 text-[10px] font-mono capitalize ${
                           SEVERITY_BADGE[scenario.severity] ?? SEVERITY_BADGE.medium

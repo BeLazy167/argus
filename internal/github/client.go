@@ -34,7 +34,9 @@ func doGraphQL(ctx context.Context, client *gh.Client, body any, result any) err
 	if err != nil {
 		return fmt.Errorf("creating graphql request: %w", err)
 	}
-	resp, err := client.Do(ctx, req, nil) // don't decode into result yet
+	// BareDo sends the request without reading/closing the body, so we can read it ourselves.
+	// client.Do(ctx, req, nil) reads and closes the body, making subsequent ReadAll fail.
+	resp, err := client.BareDo(ctx, req)
 	if err != nil {
 		return err
 	}
