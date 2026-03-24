@@ -1,75 +1,5 @@
-import Link from "next/link";
-import { Check, ChevronDown } from "lucide-react";
-
-interface PlanProps {
-  name: string;
-  price: string;
-  period: string;
-  description: string;
-  features: string[];
-  cta: string;
-  href: string;
-  highlighted?: boolean;
-  badge?: string;
-}
-
-function PlanCard({
-  name,
-  price,
-  period,
-  description,
-  features,
-  cta,
-  href,
-  highlighted = false,
-  badge,
-}: PlanProps) {
-  return (
-    <div
-      className={`relative flex flex-col rounded-lg border p-6 ${
-        highlighted
-          ? "border-amber/40 bg-charcoal shadow-[0_0_32px_-8px_oklch(0.77_0.15_75/0.2)]"
-          : "border-iron bg-charcoal"
-      }`}
-    >
-      {badge && (
-        <span className="absolute -top-3 left-6 rounded-sm bg-amber px-3 py-0.5 text-[10px] font-mono font-medium uppercase tracking-wider text-void">
-          {badge}
-        </span>
-      )}
-
-      <h3 className="font-display text-lg font-bold text-foreground">{name}</h3>
-      <p className="mt-1 text-xs text-slate-text">{description}</p>
-
-      <div className="my-6">
-        <span className="font-mono text-3xl font-medium text-foreground">
-          {price}
-        </span>
-        <span className="ml-1 text-xs text-slate-text">{period}</span>
-      </div>
-
-      <ul className="flex-1 space-y-3 mb-8">
-        {features.map((f) => (
-          <li key={f} className="flex items-start gap-2 text-xs text-ash">
-            <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber" />
-            {f}
-          </li>
-        ))}
-      </ul>
-
-      <Link
-        href={href}
-        className={`inline-flex h-10 items-center justify-center rounded-md text-sm font-mono font-medium transition-all ${
-          highlighted
-            ? "bg-amber text-void hover:brightness-110"
-            : "border border-iron text-ash hover:border-slate-text hover:text-foreground"
-        }`}
-      >
-        {cta}
-      </Link>
-    </div>
-  );
-}
+import { ChevronDown } from "lucide-react";
+import { PricingTable } from "@clerk/nextjs";
 
 function FaqItem({ q, a }: { q: string; a: string }) {
   return (
@@ -105,45 +35,7 @@ export default function PricingPage() {
         One critical bug in production costs more than a year of Argus.
       </p>
 
-      <div className="grid gap-6 md:grid-cols-2 max-w-2xl mx-auto">
-        <PlanCard
-          name="Free"
-          price="$0"
-          period="/forever"
-          description="Get started with code review."
-          features={[
-            "1 repo",
-            "Basic review pipeline",
-            "Bring your own API keys",
-          ]}
-          cta="Get started"
-          href="/sign-up"
-        />
-        <PlanCard
-          name="Pro"
-          price="$19"
-          period="/mo per org"
-          description="Unlimited repos. Deep review."
-          features={[
-            "Unlimited repos",
-            "Deep review (4 specialists)",
-            "Custom prompts",
-            "Pattern learning",
-            "Priority support",
-          ]}
-          cta="Start free trial"
-          href="/sign-up"
-          highlighted
-          badge="Recommended"
-        />
-      </div>
-
-      {/* Beta notice */}
-      <div className="mt-8 rounded-lg border border-amber/20 bg-amber/5 px-5 py-3 text-center">
-        <p className="text-xs font-mono text-amber">
-          All plans are free during early access. No credit card required.
-        </p>
-      </div>
+      <PricingTable for="organization" />
 
       {/* FAQ */}
       <div className="mt-20">

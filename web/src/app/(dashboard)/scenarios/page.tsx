@@ -3,11 +3,13 @@
 import { useMemo, useState } from "react";
 import { usePagination, PaginationBar } from "@/components/dashboard/pagination";
 import { Shield, Plus, Trash2, Loader2, X } from "lucide-react";
+import { Protect } from "@clerk/nextjs";
 import {
   useScenarios,
   useCreateScenario,
   useDeleteScenario,
 } from "@/lib/queries/scenarios";
+import { UpgradePrompt } from "@/components/dashboard/upgrade-prompt";
 import { useActiveRepo } from "@/lib/hooks/use-active-repo";
 import { formatDistanceToNow } from "@/lib/time";
 
@@ -79,7 +81,7 @@ export default function ScenariosPage() {
   };
 
   return (
-    <>
+    <Protect plan="org:pro" fallback={<UpgradePrompt feature="Scenario memory" />}>
       <div className="mb-8 flex items-center justify-between">
         <div>
           <h1 className="font-display text-2xl font-bold text-foreground">
@@ -300,6 +302,6 @@ export default function ScenariosPage() {
           onPrev={() => setPage(page - 1)}
         />
       </div>
-    </>
+    </Protect>
   );
 }
