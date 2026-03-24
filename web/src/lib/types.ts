@@ -192,6 +192,11 @@ export type Scenario = {
   severity: string;
   active: boolean;
   created_at: string;
+  steps: { action: string; hint?: string }[];
+  initial_state: string;
+  expected_outcome: string;
+  is_outdated: boolean;
+  last_run_at?: string;
 };
 
 export type FileRisk = {

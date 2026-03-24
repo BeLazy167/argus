@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { usePagination, PaginationBar } from "@/components/dashboard/pagination";
-import { Shield, Plus, Trash2, Loader2, X } from "lucide-react";
+import { Shield, Plus, Trash2, Loader2, X, AlertTriangle } from "lucide-react";
 import { Protect } from "@clerk/nextjs";
 import {
   useScenarios,
@@ -243,6 +243,12 @@ export default function ScenariosPage() {
                           pending
                         </span>
                       )}
+                      {scenario.is_outdated && (
+                        <span className="inline-flex items-center gap-1 rounded border border-yellow-500/30 bg-yellow-500/10 px-2 py-0.5 text-[10px] font-mono text-yellow-400">
+                          <AlertTriangle className="h-2.5 w-2.5" />
+                          outdated
+                        </span>
+                      )}
                       <span
                         className={`inline-block rounded border px-2 py-0.5 text-[10px] font-mono capitalize ${
                           SEVERITY_BADGE[scenario.severity] ?? SEVERITY_BADGE.medium
@@ -277,6 +283,24 @@ export default function ScenariosPage() {
                           </span>
                         ))}
                       </div>
+                    )}
+                    {scenario.steps?.length > 0 && (
+                      <ol className="mt-2 ml-4 list-decimal space-y-0.5">
+                        {scenario.steps.map((step, i) => (
+                          <li key={i} className="text-[10px] font-mono text-slate-text">
+                            <span className="text-foreground">{step.action}</span>
+                            {step.hint && (
+                              <span className="text-iron ml-1">({step.hint})</span>
+                            )}
+                          </li>
+                        ))}
+                      </ol>
+                    )}
+                    {scenario.expected_outcome && (
+                      <p className="mt-1.5 text-[10px] font-mono text-slate-text">
+                        <span className="text-iron">Expected:</span>{" "}
+                        {scenario.expected_outcome}
+                      </p>
                     )}
                   </div>
                   <button

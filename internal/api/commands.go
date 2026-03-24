@@ -10,12 +10,15 @@ import (
 	gh "github.com/google/go-github/v68/github"
 
 	ghpkg "github.com/BeLazy167/argus/internal/github"
+	"github.com/BeLazy167/argus/internal/llm"
 	"github.com/BeLazy167/argus/internal/memory"
+	"github.com/BeLazy167/argus/internal/pipeline"
+	"github.com/BeLazy167/argus/internal/store"
 )
 
 // --- Command Dispatch ---
 
-var commandRe = regexp.MustCompile(`(?i)@argus-eye\s+(review|remember|resolve|fix|help)(.*)`)
+var commandRe = regexp.MustCompile(`(?i)@argus-eye\s+(review|remember|resolve|fix|test|help)(.*)`)
 
 func (s *Server) dispatchCommand(ctx context.Context, evt ghpkg.IssueCommentEvent) {
 	match := commandRe.FindStringSubmatch(strings.TrimSpace(evt.CommentBody))
@@ -42,6 +45,8 @@ func (s *Server) dispatchCommand(ctx context.Context, evt ghpkg.IssueCommentEven
 		s.handleResolveCommand(ctx, evt, owner, repo, ghClient)
 	case "fix":
 		s.handleFixCommand(ctx, evt, owner, repo, ghClient)
+	case "test":
+		s.handleTestCommand(ctx, evt, owner, repo, ghClient, args)
 	case "help":
 		s.handleHelpCommand(ctx, evt, owner, repo, ghClient)
 	}
@@ -123,6 +128,8 @@ func (s *Server) handleHelpCommand(ctx context.Context, evt ghpkg.IssueCommentEv
 | ` + "`@argus-eye remember --org <pattern>`" + ` | Teach Argus an org-wide pattern |
 | ` + "`@argus-eye fix`" + ` | Apply all suggestion blocks from review comments as a commit |
 | ` + "`@argus-eye resolve`" + ` | Resolve review threads on files changed since the review |
+| ` + "`@argus-eye test`" + ` | Generate a test plan for review findings |
+| ` + "`@argus-eye test --code`" + ` | Draft test code for review findings |
 | ` + "`@argus-eye help`" + ` | Show this message |`
 
 	_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber, help)
@@ -476,4 +483,123 @@ func parseSuggestionBlock(body string) string {
 	}
 	suggestion := body[start : start+end]
 	return strings.TrimRight(suggestion, "\n")
+}
+
+// handleTestCommand generates a test plan or draft test code from review findings.
+func (s *Server) handleTestCommand(ctx context.Context, evt ghpkg.IssueCommentEvent, owner, repo string, ghClient *ghpkg.Client, args string) {
+	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "eyes")
+
+	review, err := s.store.GetLatestReviewByPR(ctx, fmt.Sprintf("%s/%s", owner, repo), evt.PRNumber)
+	if err != nil || review == nil {
+		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
+			"No review found for this PR. Run `@argus-eye review` first.")
+		return
+	}
+
+	comments, err := s.store.GetReviewComments(ctx, review.ID)
+	if err != nil || len(comments) == 0 {
+		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
+			"No findings to generate tests for.")
+		return
+	}
+
+	rawDiff, err := ghClient.GetPRDiff(ctx, evt.InstallationID, owner, repo, evt.PRNumber)
+	if err != nil {
+		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
+		return
+	}
+
+	wantCode := strings.Contains(args, "--code")
+
+	inst, err := s.store.GetInstallationByGitHubID(ctx, evt.InstallationID)
+	if err != nil {
+		return
+	}
+
+	lister := pipeline.StoreConfigListerFor(s.store)
+	provider, cfg, err := s.registry.ResolveProvider(ctx, lister, inst.ID, 0, llm.StageReview)
+	if err != nil {
+		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
+			"No LLM provider configured. Add an API key in Settings.")
+		return
+	}
+
+	var prompt string
+	if wantCode {
+		prompt = buildTestCodePrompt(comments, rawDiff)
+	} else {
+		prompt = buildTestPlanPrompt(comments, rawDiff)
+	}
+
+	resp, err := provider.Complete(ctx, llm.CompletionRequest{
+		Model:       cfg.Model,
+		System:      testGenerationSystemPrompt,
+		Messages:    []llm.Message{{Role: "user", Content: prompt}},
+		MaxTokens:   2000,
+		Temperature: 0.3,
+	})
+	if err != nil {
+		s.logger.Error("test generation failed", "error", err)
+		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
+		return
+	}
+
+	header := "## Test Plan"
+	if wantCode {
+		header = "## Draft Test Code"
+	}
+	body := header + "\n\n" + strings.TrimSpace(resp.Content)
+
+	_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber, body)
+	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "rocket")
+}
+
+const testGenerationSystemPrompt = `You are a senior test engineer. Given code review findings and a PR diff, generate comprehensive test suggestions. Be specific — reference exact functions, edge cases, and expected behaviors. Use the project's existing test patterns if visible in the diff.`
+
+func buildTestPlanPrompt(comments []store.ReviewComment, rawDiff string) string {
+	var sb strings.Builder
+	sb.WriteString("## Review Findings\n\n")
+	for _, c := range comments {
+		sb.WriteString(fmt.Sprintf("- [%s] %s:%d — %s\n",
+			stringOr(c.Severity, "info"), c.FilePath, intOr(c.EndLine, 0), c.Body))
+	}
+	sb.WriteString("\n## PR Diff\n```\n")
+	if len(rawDiff) > 5000 {
+		rawDiff = rawDiff[:5000] + "\n...(truncated)"
+	}
+	sb.WriteString(rawDiff)
+	sb.WriteString("\n```\n\n")
+	sb.WriteString("Generate a test plan covering:\n1. Unit tests for each finding\n2. Edge cases identified in the review\n3. Integration tests for cross-file impacts\n4. Regression tests for previously broken behaviors\n\nFormat as a markdown checklist.")
+	return sb.String()
+}
+
+func buildTestCodePrompt(comments []store.ReviewComment, rawDiff string) string {
+	var sb strings.Builder
+	sb.WriteString("## Review Findings\n\n")
+	for _, c := range comments {
+		sb.WriteString(fmt.Sprintf("- [%s] %s:%d — %s\n",
+			stringOr(c.Severity, "info"), c.FilePath, intOr(c.EndLine, 0), c.Body))
+	}
+	sb.WriteString("\n## PR Diff\n```\n")
+	if len(rawDiff) > 5000 {
+		rawDiff = rawDiff[:5000] + "\n...(truncated)"
+	}
+	sb.WriteString(rawDiff)
+	sb.WriteString("\n```\n\n")
+	sb.WriteString("Generate executable test code for the most critical findings. Match the project's testing framework (detect from imports in the diff). Include:\n- Setup/teardown\n- Edge case coverage\n- Assertion messages\n\nOutput as a single fenced code block per test file.")
+	return sb.String()
+}
+
+func stringOr(s *string, def string) string {
+	if s != nil {
+		return *s
+	}
+	return def
+}
+
+func intOr(i *int, def int) int {
+	if i != nil {
+		return *i
+	}
+	return def
 }

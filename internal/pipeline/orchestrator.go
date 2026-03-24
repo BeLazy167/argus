@@ -761,6 +761,13 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	o.synthesizeFileMemories(ctx, run, owner, repo)
 	o.indexPRSummary(ctx, run, owner, repo)
 
+	// Mark scenarios touching changed files as outdated
+	changedPaths := make([]string, 0, len(run.Diff.Files))
+	for _, f := range run.Diff.Files {
+		changedPaths = append(changedPaths, f.NewName)
+	}
+	o.st.MarkScenarioOutdated(ctx, run.DBRepoID, changedPaths)
+
 	// Collect decision traces (auto-indexed — observational, not actionable)
 	traceSeeds := CollectReviewTraces(run)
 	var traceFails int

@@ -158,6 +158,11 @@ func storeToLLMConfigs(dbConfigs []store.ModelConfig) []llm.ModelConfig {
 	return out
 }
 
+// StoreConfigListerFor returns an llm.ModelConfigLister backed by the given store.
+func StoreConfigListerFor(st *store.Store) storeConfigLister {
+	return storeConfigLister{st}
+}
+
 // storeConfigLister adapts *store.Store to llm.ModelConfigLister.
 type storeConfigLister struct{ st *store.Store }
 
