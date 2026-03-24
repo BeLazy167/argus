@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/BeLazy167/argus/internal/store"
+	"github.com/BeLazy167/argus/internal/util"
 )
 
 // ScenarioSeed is an extracted scenario candidate from a completed review.
@@ -19,51 +20,29 @@ type ScenarioSeed struct {
 
 // ExtractScenariosFromReview generates scenario seeds from significant review findings.
 // Call after a review completes; persist seeds via store.CreateScenario.
-// ExtractScenariosFromReview creates one scenario per file (not per comment)
-// summarizing all critical/warning findings for that file.
+// ExtractScenariosFromReview creates one scenario per critical/warning finding.
+// Each scenario captures a specific issue — multiple unrelated issues in the same
+// file become separate scenarios so none are lost.
 func ExtractScenariosFromReview(run *PipelineRun) []ScenarioSeed {
-	type fileFindings struct {
-		issues      []string
-		maxSeverity Severity
-	}
-	byFile := make(map[string]*fileFindings)
-
+	var seeds []ScenarioSeed
 	for _, fr := range run.FileReviews {
 		for _, c := range fr.Comments {
 			if c.Severity != SeverityCritical && c.Severity != SeverityWarning {
 				continue
 			}
-			ff, ok := byFile[fr.Path]
-			if !ok {
-				ff = &fileFindings{}
-				byFile[fr.Path] = ff
+			what := c.What
+			if what == "" {
+				what = c.Body
 			}
-			issue := c.What
-			if issue == "" {
-				issue = c.Body
-			}
-			ff.issues = append(ff.issues, issue)
-			if c.Severity == SeverityCritical {
-				ff.maxSeverity = SeverityCritical
-			} else if ff.maxSeverity != SeverityCritical {
-				ff.maxSeverity = SeverityWarning
-			}
+			desc := fmt.Sprintf("%s: %s", fr.Path, util.Truncate(what, 200, true))
+			seeds = append(seeds, ScenarioSeed{
+				Description: desc,
+				Source:      "review",
+				SourceRef:   run.ReviewID.String(),
+				Files:       []string{fr.Path},
+				Severity:    scenarioSeverity(c.Severity),
+			})
 		}
-	}
-
-	var seeds []ScenarioSeed
-	for path, ff := range byFile {
-		desc := fmt.Sprintf("In %s: %s", path, ff.issues[0])
-		if len(ff.issues) > 1 {
-			desc += fmt.Sprintf(" (+%d more issues)", len(ff.issues)-1)
-		}
-		seeds = append(seeds, ScenarioSeed{
-			Description: desc,
-			Source:      "review",
-			SourceRef:   run.ReviewID.String(),
-			Files:       []string{path},
-			Severity:    scenarioSeverity(ff.maxSeverity),
-		})
 	}
 	return seeds
 }
