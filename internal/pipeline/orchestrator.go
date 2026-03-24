@@ -330,7 +330,9 @@ func (o *Orchestrator) autoResolveStaleComments(ctx context.Context, event ghpkg
 
 	var resolved, attempted, botUnresolved int
 	for _, t := range threads {
-		if t.IsResolved || !strings.HasSuffix(t.AuthorLogin, "[bot]") {
+		// GraphQL returns app login without "[bot]" suffix (e.g., "argus-eye" not "argus-eye[bot]")
+		isBotComment := strings.HasSuffix(t.AuthorLogin, "[bot]") || t.AuthorLogin == "argus-eye"
+		if t.IsResolved || !isBotComment {
 			continue
 		}
 		botUnresolved++
@@ -756,21 +758,21 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	o.synthesizeFileMemories(ctx, run, owner, repo)
 	o.indexPRSummary(ctx, run, owner, repo)
 
-	// Collect decision traces from this review (PostgreSQL + Supermemory dual-write)
+	// Collect decision traces (auto-indexed — observational, not actionable)
 	traceSeeds := CollectReviewTraces(run)
 	var traceFails int
 	for _, seed := range traceSeeds {
 		if err := o.st.CreateTrace(ctx, run.DBRepoID, seed.FilePath, seed.SymbolName, seed.TraceType, seed.Content, seed.Severity, seed.ReviewID, seed.PRNumber, seed.Metadata); err != nil {
 			traceFails++
 		}
-		// Semantic index in Supermemory for "what do we know about X?" queries
 		o.indexer.IndexDecisionTrace(ctx, owner, repo, seed.FilePath, seed.TraceType, seed.Content, seed.Severity)
 	}
 	if traceFails > 0 {
 		o.logger.Warn("some decision traces failed to persist", "failed", traceFails, "total", len(traceSeeds))
 	}
 
-	// Auto-extract scenarios from critical/warning findings (PostgreSQL + Supermemory dual-write)
+	// Auto-learn scenarios from critical/warning findings.
+	// Active by default — devs react 👎 to dismiss false positives.
 	scenarioSeeds := ExtractScenariosFromReview(run)
 	StoreScenarioSeeds(ctx, o.st, run.DBInstallationID, &run.DBRepoID, scenarioSeeds)
 	for _, seed := range scenarioSeeds {
@@ -1339,6 +1341,12 @@ func formatCommentBody(c FileComment) string {
 	if c.Suggestion != "" {
 		body += "\n\n```suggestion\n" + strings.TrimRight(c.Suggestion, "\n") + "\n```"
 	}
+
+	// Feedback prompt — Argus auto-learns, devs can dismiss
+	if c.Severity == SeverityCritical || c.Severity == SeverityWarning {
+		body += "\n\n---\n<sub>Argus learns from this automatically · React 👎 to dismiss</sub>"
+	}
+
 	return body
 }
 

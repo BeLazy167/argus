@@ -151,18 +151,36 @@ func unmarshalLLMArray[T any](content string) ([]T, error) {
 	if content == "" {
 		return nil, nil
 	}
+	// Strip markdown code fences: ```json ... ``` or ``` ... ```
+	cleaned := stripCodeFences(content)
 	var result []T
-	if err := json.Unmarshal([]byte(content), &result); err == nil {
+	if err := json.Unmarshal([]byte(cleaned), &result); err == nil {
 		return result, nil
 	}
-	start := strings.Index(content, "[")
-	end := strings.LastIndex(content, "]")
+	start := strings.Index(cleaned, "[")
+	end := strings.LastIndex(cleaned, "]")
 	if start >= 0 && end > start {
 		var result []T
-		if err := json.Unmarshal([]byte(content[start:end+1]), &result); err != nil {
+		if err := json.Unmarshal([]byte(cleaned[start:end+1]), &result); err != nil {
 			return nil, fmt.Errorf("parsing JSON from response: %w", err)
 		}
 		return result, nil
 	}
 	return nil, fmt.Errorf("no JSON array found in response")
+}
+
+// stripCodeFences removes markdown code fences (```json\n...\n```) from LLM output.
+func stripCodeFences(s string) string {
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, "```") {
+		// Remove opening fence (```json, ```JSON, ```, etc.)
+		if idx := strings.Index(s, "\n"); idx >= 0 {
+			s = s[idx+1:]
+		}
+		// Remove closing fence
+		if idx := strings.LastIndex(s, "```"); idx >= 0 {
+			s = s[:idx]
+		}
+	}
+	return strings.TrimSpace(s)
 }

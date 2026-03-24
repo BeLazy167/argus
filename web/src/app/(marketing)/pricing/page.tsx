@@ -121,7 +121,7 @@ export default function PricingPage() {
         />
         <PlanCard
           name="Pro"
-          price="$29"
+          price="$19"
           period="/mo per org"
           description="Unlimited repos. Deep review."
           features={[
