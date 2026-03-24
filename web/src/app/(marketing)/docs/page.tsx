@@ -34,6 +34,8 @@ import {
   BarChart3,
   Search,
   History,
+  TestTube2,
+  AlertTriangle,
 } from "lucide-react";
 
 /* ── Section data ── */
@@ -51,6 +53,7 @@ const SECTIONS = [
   { id: "api-keys", label: "API Keys (BYOK)" },
   { id: "personas", label: "Review Personas" },
   { id: "commands", label: "Bot Commands" },
+  { id: "test-generation", label: "Test Generation" },
   { id: "memory", label: "Memory & Learning" },
   { id: "insights", label: "Insights & Risk" },
   { id: "settings", label: "Settings & Controls" },
@@ -863,8 +866,9 @@ export default function DocsPage() {
             </div>
 
             <p className="text-[11px] font-mono text-iron mt-3">
-              Set provider to &quot;openai&quot;, &quot;anthropic&quot;, etc.
-              Any OpenRouter-compatible provider works.
+              Supported providers: OpenRouter, OpenAI, Anthropic, Azure OpenAI,
+              GCP Vertex AI, AWS Bedrock, and Zhipu AI. Custom model names are
+              supported &mdash; enter any model identifier your provider accepts.
             </p>
           </div>
 
@@ -952,6 +956,10 @@ export default function DocsPage() {
                   name: "strict",
                   desc: "No free passes. Comments on everything. Maximum coverage, minimum mercy.",
                 },
+                {
+                  name: "custom",
+                  desc: "Define your own persona with a freeform system prompt. Full control over tone, focus, and severity.",
+                },
               ].map((p) => (
                 <div
                   key={p.name}
@@ -974,7 +982,10 @@ export default function DocsPage() {
                 </span>
               </div>
               <p className="text-xs font-mono text-slate-text leading-relaxed">
-                Comment on any PR:
+                Override per-PR with{" "}
+                <code className="text-amber bg-iron/40 rounded px-1.5 py-0.5">
+                  @argus-eye review --persona strict
+                </code>
               </p>
               <CodeBlock>{`@argus-eye review --persona security_auditor`}</CodeBlock>
             </div>
@@ -1014,6 +1025,21 @@ export default function DocsPage() {
                   example: "@argus-eye fix",
                 },
                 {
+                  cmd: "@argus-eye test",
+                  desc: "Generate a test plan from review findings. Covers unit, edge case, integration, and regression tests.",
+                  example: "@argus-eye test",
+                },
+                {
+                  cmd: "@argus-eye test --code",
+                  desc: "Draft executable test code for findings, matching your project's framework and conventions.",
+                  example: "@argus-eye test --code",
+                },
+                {
+                  cmd: "@argus-eye review --persona <name>",
+                  desc: "Review with a specific persona for this PR only. Overrides the repo default.",
+                  example: "@argus-eye review --persona strict",
+                },
+                {
                   cmd: "@argus-eye help",
                   desc: "Lists all available commands and their usage right in the PR.",
                   example: "@argus-eye help",
@@ -1042,6 +1068,60 @@ export default function DocsPage() {
             </div>
           </div>
 
+          {/* ── Test Generation ── */}
+          <div>
+            <SectionHeader id="test-generation" title="Test Generation" />
+            <p className="text-xs font-mono text-slate-text mb-3 leading-relaxed">
+              Turn review findings into tests before you merge.
+            </p>
+            <p className="text-xs font-mono text-slate-text mb-8 leading-relaxed">
+              Argus analyzes its own findings and generates targeted test plans
+              or executable test code. No more &ldquo;I&apos;ll add a test
+              later.&rdquo;
+            </p>
+
+            <div className="space-y-4">
+              <div className="rounded-lg border border-iron bg-charcoal p-4">
+                <div className="flex items-center gap-3 mb-2">
+                  <TestTube2 className="h-4 w-4 text-amber" />
+                  <span className="text-xs font-mono font-bold text-foreground">
+                    Test plan
+                  </span>
+                </div>
+                <p className="text-[11px] font-mono text-slate-text leading-relaxed mb-3">
+                  <code className="text-amber bg-iron/40 rounded px-1.5 py-0.5">
+                    @argus-eye test
+                  </code>{" "}
+                  generates a structured test plan covering unit tests, edge
+                  cases, integration tests, and regression tests &mdash; all
+                  derived from the review findings on the current PR.
+                </p>
+              </div>
+
+              <div className="rounded-lg border border-iron bg-charcoal p-4">
+                <div className="flex items-center gap-3 mb-2">
+                  <Code2 className="h-4 w-4 text-amber" />
+                  <span className="text-xs font-mono font-bold text-foreground">
+                    Executable test code
+                  </span>
+                </div>
+                <p className="text-[11px] font-mono text-slate-text leading-relaxed mb-3">
+                  <code className="text-amber bg-iron/40 rounded px-1.5 py-0.5">
+                    @argus-eye test --code
+                  </code>{" "}
+                  drafts ready-to-run test code that matches your project&apos;s
+                  testing framework and conventions. Copy, paste, run.
+                </p>
+              </div>
+            </div>
+
+            <p className="text-[11px] font-mono text-iron mt-4">
+              Test generation uses the same review context and memory that
+              powers the review pipeline. The richer the review, the better
+              the tests.
+            </p>
+          </div>
+
           {/* ── Memory & Learning ── */}
           <div>
             <SectionHeader id="memory" title="Memory & Learning" />
@@ -1065,7 +1145,7 @@ export default function DocsPage() {
                 {
                   icon: Activity,
                   title: "Scenarios",
-                  desc: "Behavioral knowledge about how your system fails. Past bugs, edge cases, and incidents stored with an approval flow — so Argus only remembers what your team confirms is real.",
+                  desc: "Three sources: auto-extracted from reviews, auto-imported from GitHub Issues labeled argus or bug, and manual via bot command. Each scenario includes steps, initial state, and expected outcome. Scenarios are marked outdated when referenced files change. React \uD83D\uDC4E to dismiss.",
                 },
                 {
                   icon: History,
