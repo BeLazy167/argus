@@ -178,3 +178,35 @@ export type OpenRouterModel = {
     completion: string;
   };
 };
+
+export type Scenario = {
+  id: number;
+  installation_id: number;
+  repo_id: number;
+  description: string;
+  source: string;
+  source_ref: string;
+  files: string[];
+  modules: string[];
+  severity: string;
+  active: boolean;
+  created_at: string;
+};
+
+export type FileRisk = {
+  file_path: string;
+  trace_count: number;
+  last_trace: string;
+};
+
+export type DecisionTrace = {
+  id: number;
+  repo_id: number;
+  file_path: string;
+  kind: string;
+  summary: string;
+  review_id?: string;
+  pr_number?: number;
+  author?: string;
+  created_at: string;
+};

@@ -57,6 +57,25 @@ function PipelineStage({
   );
 }
 
+/* ── Comparison Row ── */
+function ComparisonRow({
+  label,
+  traditional,
+  argus,
+}: {
+  label: string;
+  traditional: string;
+  argus: string;
+}) {
+  return (
+    <div className="grid grid-cols-[1fr_1fr_1fr] gap-4 py-4 border-b border-iron/50 last:border-0">
+      <div className="text-xs font-mono text-foreground font-medium">{label}</div>
+      <div className="text-xs font-mono text-slate-text/60 line-through decoration-iron/60">{traditional}</div>
+      <div className="text-xs font-mono text-amber">{argus}</div>
+    </div>
+  );
+}
+
 /* ── Main Page ── */
 export default function LandingPage() {
   const [activeStage, setActiveStage] = useState(0);
@@ -101,28 +120,91 @@ export default function LandingPage() {
   const PIPELINE_STAGES = [
     {
       step: "01",
-      label: "TRIAGE",
-      desc: "Classifies files by risk. Skips vendored code, configs, lockfiles.",
+      label: "PR PUSH",
+      desc: "You push code. Argus wakes up. Every changed file, every touched function, catalogued in milliseconds.",
     },
     {
       step: "02",
-      label: "CONTEXT",
-      desc: "Retrieves past reviews, rules, and incident history for each file.",
+      label: "CONTEXT GATHERING",
+      desc: "Traces callers, imports, tests, shared types. Pulls incident history, past reviews, and org rules from memory.",
     },
     {
       step: "03",
-      label: "REVIEW",
-      desc: "Deep analysis per file — bugs, security, error handling, types, tests.",
+      label: "DEEP REVIEW",
+      desc: "Cross-file analysis. Bugs, security holes, blast radius. Four specialist reviewers run in parallel.",
     },
     {
       step: "04",
-      label: "SYNTHESIZE",
-      desc: "Aggregates findings. Calculates risk score. Builds the verdict.",
+      label: "SIMULATION",
+      desc: "Executes scenario paths against your diff. Predicts what breaks. Assigns confidence scores.",
     },
     {
       step: "05",
       label: "POST",
-      desc: "Inline comments on the PR. Summary with risk score. Done.",
+      desc: "Conversational inline comments with What/Why sections. Risk score. Blast radius map. Done.",
+    },
+  ];
+
+  const FEATURES = [
+    {
+      icon: (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-5 w-5">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 21L3 16.5m0 0L7.5 12M3 16.5h13.5m0-13.5L21 7.5m0 0L16.5 12M21 7.5H7.5" />
+        </svg>
+      ),
+      title: "Cross-file context",
+      description:
+        "No file is an island. Argus traces callers, imports, tests, and shared types to understand how changes ripple through your entire codebase.",
+    },
+    {
+      icon: (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-5 w-5">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 3.75v4.5m0-4.5h4.5m-4.5 0L9 9M3.75 20.25v-4.5m0 4.5h4.5m-4.5 0L9 15M20.25 3.75h-4.5m4.5 0v4.5m0-4.5L15 9m5.25 11.25h-4.5m4.5 0v-4.5m0 4.5L15 15" />
+        </svg>
+      ),
+      title: "Blast radius analysis",
+      description:
+        "Persistent dependency graph maps every function, class, and import. When you push, Argus shows which downstream code is affected.",
+    },
+    {
+      icon: (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-5 w-5">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 00-2.455 2.456z" />
+        </svg>
+      ),
+      title: "Scenario memory",
+      description:
+        "Institutional knowledge that persists. Past bugs, incidents, and edge cases are remembered. \"Last time this module changed, EU FX rounding broke.\"",
+    },
+    {
+      icon: (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-5 w-5">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6zM13.5 15.75a2.25 2.25 0 012.25-2.25H18a2.25 2.25 0 012.25 2.25V18A2.25 2.25 0 0118 20.25h-2.25A2.25 2.25 0 0113.5 18v-2.25z" />
+        </svg>
+      ),
+      title: "Decision traces",
+      description:
+        "Every review, every developer reply, every fix builds a living knowledge graph. Argus gets smarter with every PR your team merges.",
+    },
+    {
+      icon: (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-5 w-5">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" />
+        </svg>
+      ),
+      title: "Code simulation",
+      description:
+        "Given a scenario and your diff, Argus simulates execution paths and predicts what breaks before you merge. With confidence scores.",
+    },
+    {
+      icon: (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-5 w-5">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M20.25 8.511c.884.284 1.5 1.128 1.5 2.097v4.286c0 1.136-.847 2.1-1.98 2.193-.34.027-.68.052-1.02.072v3.091l-3-3c-1.354 0-2.694-.055-4.02-.163a2.115 2.115 0 01-.825-.242m9.345-8.334a2.126 2.126 0 00-.476-.095 48.64 48.64 0 00-8.048 0c-1.131.094-1.976 1.057-1.976 2.192v4.286c0 .837.46 1.58 1.155 1.951m9.345-8.334V6.637c0-1.621-1.152-3.026-2.76-3.235A48.455 48.455 0 0011.25 3c-2.115 0-4.198.137-6.24.402-1.608.209-2.76 1.614-2.76 3.235v6.226c0 1.621 1.152 3.026 2.76 3.235.577.075 1.157.14 1.74.194V21l4.155-4.155" />
+        </svg>
+      ),
+      title: "Conversational reviews",
+      description:
+        "No robotic issue lists. Argus writes like a senior dev giving feedback &mdash; structured What/Why sections on every inline comment.",
     },
   ];
 
@@ -130,7 +212,7 @@ export default function LandingPage() {
     <>
       {/* ── HERO ── */}
       <section className="relative flex min-h-[100vh] flex-col items-center justify-center overflow-hidden bg-noise">
-        {/* Ambient glow — oklch radial-gradient not expressible as Tailwind arbitrary value */}
+        {/* Ambient glow */}
         <div
           className="pointer-events-none absolute top-1/3 left-1/2 -translate-x-1/2 -translate-y-1/2 h-[800px] w-[800px] rounded-full opacity-15"
           style={{
@@ -139,7 +221,7 @@ export default function LandingPage() {
           }}
         />
 
-        {/* Scan lines — repeating-linear-gradient with rgba stops not expressible in Tailwind */}
+        {/* Scan lines */}
         <div
           className="pointer-events-none absolute inset-0 opacity-[0.015]"
           style={{
@@ -161,12 +243,12 @@ export default function LandingPage() {
           </div>
 
           <p className="font-display text-lg md:text-2xl text-amber mb-3 font-normal italic">
-            Every line. Every commit. Every time.
+            Code that understands itself.
           </p>
 
           <p className="max-w-xl text-sm md:text-base leading-relaxed text-ash/80 mb-10">
-            The AI code reviewer that catches what humans miss and remembers what
-            humans forget. Ship with zero anxiety.
+            Other tools review files. Argus comprehends your codebase &mdash; tracing
+            dependencies, remembering incidents, simulating failures before they ship.
           </p>
 
           <div className="flex flex-col sm:flex-row gap-4 mb-16">
@@ -210,16 +292,16 @@ export default function LandingPage() {
       <section className="border-t border-iron bg-noise">
         <div className="mx-auto max-w-4xl px-6 py-24 text-center">
           <p className="mb-4 text-[11px] font-mono uppercase tracking-[0.15em] text-red-400/80">
-            Without Argus
+            The comprehension gap
           </p>
           <h2 className="font-display text-2xl md:text-4xl font-bold text-foreground mb-6 leading-tight">
-            That one PR on Friday at 5pm?<br />
-            <span className="text-red-400/80">It shipped a SQL injection.</span>
+            Your review tools read diffs.<br />
+            <span className="text-red-400/80">They don&apos;t understand your codebase.</span>
           </h2>
           <p className="max-w-2xl mx-auto text-sm text-ash/70 leading-relaxed mb-8">
-            Human reviewers get tired. They skim diffs. They miss the subtle bugs
-            hiding in refactors. They forget that this exact pattern caused an
-            incident three months ago. Argus doesn&apos;t.
+            File-by-file reviews miss the big picture. They can&apos;t trace a renamed
+            function to its 14 callers, or remember that this exact pattern caused a
+            P0 three months ago. The gaps compound with every PR.
           </p>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6 max-w-2xl mx-auto">
             <div className="rounded-lg border border-iron bg-charcoal/50 p-5">
@@ -265,109 +347,19 @@ export default function LandingPage() {
         </div>
       </section>
 
-      {/* ── FEATURES / CAPABILITIES ── */}
-      <section className="border-t border-iron bg-noise">
-        <div className="mx-auto max-w-5xl px-6 py-28">
-          <div className="mb-16 text-center">
-            <p className="mb-3 text-[11px] font-mono uppercase tracking-[0.15em] text-amber">
-              Capabilities
-            </p>
-            <h2 className="font-display text-3xl font-bold text-foreground">
-              Your codebase has a memory now.
-            </h2>
-          </div>
-
-          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-            {[
-              {
-                icon: (
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-5 w-5">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178z" />
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                  </svg>
-                ),
-                title: "Catch bugs before your users do",
-                description:
-                  "Every PR analyzed for bugs, security holes, error handling gaps, and logic errors. Not style nits — real issues that break production.",
-              },
-              {
-                icon: (
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-5 w-5">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 00-2.455 2.456z" />
-                  </svg>
-                ),
-                title: "Never repeat the same mistake",
-                description:
-                  "Remembers past reviews, incidents, and patterns. Flags when you touch code that caused problems before.",
-              },
-              {
-                icon: (
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-5 w-5">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 21L3 16.5m0 0L7.5 12M3 16.5h13.5m0-13.5L21 7.5m0 0L16.5 12M21 7.5H7.5" />
-                  </svg>
-                ),
-                title: "Push again, only new code reviewed",
-                description:
-                  "On new pushes, only reviews the delta. No duplicate noise. Knows what it already said.",
-              },
-              {
-                icon: (
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-5 w-5">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" />
-                  </svg>
-                ),
-                title: "Your standards, enforced every time",
-                description:
-                  "Org-wide rules from your dashboard. Per-repo overrides via .argus/rules.md. Consistent reviews across the team.",
-              },
-              {
-                icon: (
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-5 w-5">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" />
-                  </svg>
-                ),
-                title: "Bring your own model",
-                description:
-                  "OpenRouter, Claude, GPT, Grok, Qwen — any OpenAI-compatible endpoint. You pick the brain for each pipeline stage.",
-              },
-              {
-                icon: (
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-5 w-5">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z" />
-                  </svg>
-                ),
-                title: "Know if a PR is safe to ship",
-                description:
-                  "Every PR gets a 1-10 risk score. Critical issues tank it. Green score = merge with confidence.",
-              },
-            ].map((feature) => (
-              <div
-                key={feature.title}
-                className="group relative rounded-lg border border-iron bg-charcoal p-6 transition-all hover:border-amber/30 hover:shadow-[0_0_24px_-8px_oklch(0.77_0.15_75/0.2)]"
-              >
-                <div className="mb-4 text-amber">{feature.icon}</div>
-                <h3 className="mb-2 text-sm font-bold text-foreground">
-                  {feature.title}
-                </h3>
-                <p className="text-xs leading-relaxed text-slate-text">
-                  {feature.description}
-                </p>
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      {/* ── PIPELINE ── */}
+      {/* ── HOW IT WORKS — PIPELINE ── */}
       <section className="border-t border-iron bg-charcoal/50 bg-noise">
         <div className="mx-auto max-w-4xl px-6 py-28">
           <div className="mb-16 text-center">
             <p className="mb-3 text-[11px] font-mono uppercase tracking-[0.15em] text-amber">
-              Pipeline
+              How it works
             </p>
-            <h2 className="font-display text-3xl font-bold text-foreground">
-              PR opens. Argus reviews. You ship.
+            <h2 className="font-display text-3xl font-bold text-foreground mb-3">
+              Push &rarr; Comprehend &rarr; Review &rarr; Simulate &rarr; Ship
             </h2>
+            <p className="max-w-lg mx-auto text-sm text-ash/70">
+              Five stages. Full codebase awareness. Every PR.
+            </p>
           </div>
 
           <div ref={pipelineRef} className="relative ml-1.5">
@@ -393,8 +385,207 @@ export default function LandingPage() {
         </div>
       </section>
 
-      {/* ── HONESTY / PRATFALL ── */}
+      {/* ── FEATURES / CAPABILITIES ── */}
       <section className="border-t border-iron bg-noise">
+        <div className="mx-auto max-w-5xl px-6 py-28">
+          <div className="mb-16 text-center">
+            <p className="mb-3 text-[11px] font-mono uppercase tracking-[0.15em] text-amber">
+              Capabilities
+            </p>
+            <h2 className="font-display text-3xl font-bold text-foreground mb-3">
+              Your codebase has a brain now.
+            </h2>
+            <p className="max-w-lg mx-auto text-sm text-ash/70">
+              Not just a reviewer. A comprehension engine that builds a living model of your code.
+            </p>
+          </div>
+
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+            {FEATURES.map((feature) => (
+              <div
+                key={feature.title}
+                className="group relative rounded-lg border border-iron bg-charcoal p-6 transition-all hover:border-amber/30 hover:shadow-[0_0_24px_-8px_oklch(0.77_0.15_75/0.2)]"
+              >
+                <div className="mb-4 text-amber">{feature.icon}</div>
+                <h3 className="mb-2 text-sm font-bold text-foreground">
+                  {feature.title}
+                </h3>
+                <p className="text-xs leading-relaxed text-slate-text">
+                  {feature.description}
+                </p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* ── COMPARISON ── */}
+      <section className="border-t border-iron bg-charcoal/30 bg-noise">
+        <div className="mx-auto max-w-4xl px-6 py-28">
+          <div className="mb-16 text-center">
+            <p className="mb-3 text-[11px] font-mono uppercase tracking-[0.15em] text-amber">
+              The difference
+            </p>
+            <h2 className="font-display text-3xl font-bold text-foreground mb-3">
+              Traditional review tools vs. Argus
+            </h2>
+            <p className="max-w-lg mx-auto text-sm text-ash/70">
+              Most tools look at what changed. Argus understands why it matters.
+            </p>
+          </div>
+
+          <div className="rounded-lg border border-iron bg-charcoal overflow-hidden">
+            {/* Header */}
+            <div className="grid grid-cols-[1fr_1fr_1fr] gap-4 px-6 py-4 border-b border-iron bg-charcoal/80">
+              <div className="text-[11px] font-mono uppercase tracking-wider text-slate-text"></div>
+              <div className="text-[11px] font-mono uppercase tracking-wider text-slate-text/60">Traditional</div>
+              <div className="text-[11px] font-mono uppercase tracking-wider text-amber">Argus</div>
+            </div>
+            {/* Rows */}
+            <div className="px-6">
+              <ComparisonRow
+                label="Scope"
+                traditional="Single-file diff"
+                argus="Cross-file dependency graph"
+              />
+              <ComparisonRow
+                label="Memory"
+                traditional="Stateless per run"
+                argus="Remembers every review, bug, incident"
+              />
+              <ComparisonRow
+                label="Context"
+                traditional="Just the changed lines"
+                argus="Callers, imports, tests, shared types"
+              />
+              <ComparisonRow
+                label="Predictions"
+                traditional="None"
+                argus="Simulates execution paths with confidence"
+              />
+              <ComparisonRow
+                label="Feedback style"
+                traditional="Robotic issue list"
+                argus="Conversational What/Why sections"
+              />
+              <ComparisonRow
+                label="Impact analysis"
+                traditional="Not available"
+                argus="Blast radius map of affected code"
+              />
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* ── CODE SIMULATION SPOTLIGHT ── */}
+      <section className="border-t border-iron bg-noise">
+        <div className="mx-auto max-w-5xl px-6 py-28">
+          <div className="mb-16 text-center">
+            <p className="mb-3 text-[11px] font-mono uppercase tracking-[0.15em] text-amber">
+              The big differentiator
+            </p>
+            <h2 className="font-display text-3xl md:text-4xl font-bold text-foreground mb-3">
+              See failures before they happen.
+            </h2>
+            <p className="max-w-lg mx-auto text-sm text-ash/70">
+              Argus doesn&apos;t just flag problems &mdash; it simulates what happens when
+              your code runs. Confidence scores tell you how certain it is.
+            </p>
+          </div>
+
+          {/* Simulation output mock */}
+          <div className="max-w-3xl mx-auto">
+            <div className="flex items-center gap-2 rounded-t-lg border border-iron bg-charcoal px-4 py-2.5">
+              <div className="flex gap-1.5">
+                <div className="h-2.5 w-2.5 rounded-full bg-iron" />
+                <div className="h-2.5 w-2.5 rounded-full bg-iron" />
+                <div className="h-2.5 w-2.5 rounded-full bg-iron" />
+              </div>
+              <span className="ml-2 text-[11px] font-mono text-amber">
+                argus &mdash; simulation output
+              </span>
+            </div>
+            <div className="border-x border-b border-iron rounded-b-lg bg-void p-5 space-y-4">
+              {/* Scenario 1 */}
+              <div className="space-y-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded border bg-red-500/20 text-red-400 border-red-500/30">
+                    fails
+                  </span>
+                  <span className="text-[11px] font-mono text-foreground">
+                    Scenario: Concurrent subscription cancellation
+                  </span>
+                  <span className="ml-auto text-[10px] font-mono text-red-400">
+                    confidence 94%
+                  </span>
+                </div>
+                <div className="pl-4 border-l-2 border-red-500/30">
+                  <p className="text-[11px] font-mono text-ash/70 leading-relaxed">
+                    <span className="text-slate-text">What:</span> Two concurrent cancellation requests for the same subscription reach <code className="text-amber/80">billing.cancel()</code>. First succeeds at Stripe, second throws <code className="text-amber/80">StripeInvalidRequestError</code>. DB update runs for both.
+                  </p>
+                  <p className="text-[11px] font-mono text-ash/70 leading-relaxed mt-1">
+                    <span className="text-slate-text">Why:</span> No mutex or idempotency key on the cancellation path. The Stripe call and DB write are not wrapped in a transaction. Race window is ~200ms under load.
+                  </p>
+                </div>
+              </div>
+
+              <div className="border-t border-iron/50" />
+
+              {/* Scenario 2 */}
+              <div className="space-y-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded border bg-yellow-500/20 text-yellow-400 border-yellow-500/30">
+                    degrades
+                  </span>
+                  <span className="text-[11px] font-mono text-foreground">
+                    Scenario: Cache key collision under user ID reuse
+                  </span>
+                  <span className="ml-auto text-[10px] font-mono text-yellow-400">
+                    confidence 78%
+                  </span>
+                </div>
+                <div className="pl-4 border-l-2 border-yellow-500/30">
+                  <p className="text-[11px] font-mono text-ash/70 leading-relaxed">
+                    <span className="text-slate-text">What:</span> Deleted user IDs are recycled. Cache key <code className="text-amber/80">{"`user_${id}`"}</code> with TTL=0 serves stale data from the previous account holder.
+                  </p>
+                  <p className="text-[11px] font-mono text-ash/70 leading-relaxed mt-1">
+                    <span className="text-slate-text">Why:</span> Infinite TTL + recycled IDs = data leakage. Add a generation counter or namespace the key with a creation timestamp.
+                  </p>
+                </div>
+              </div>
+
+              <div className="border-t border-iron/50" />
+
+              {/* Scenario 3 */}
+              <div className="space-y-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded border bg-emerald-500/20 text-emerald-400 border-emerald-500/30">
+                    passes
+                  </span>
+                  <span className="text-[11px] font-mono text-foreground">
+                    Scenario: Token refresh during active session
+                  </span>
+                  <span className="ml-auto text-[10px] font-mono text-emerald-400">
+                    confidence 91%
+                  </span>
+                </div>
+                <div className="pl-4 border-l-2 border-emerald-500/30">
+                  <p className="text-[11px] font-mono text-ash/70 leading-relaxed">
+                    <span className="text-slate-text">What:</span> Bearer token split correctly handles refresh flow. New authorization header parsed without prefix contamination.
+                  </p>
+                  <p className="text-[11px] font-mono text-ash/70 leading-relaxed mt-1">
+                    <span className="text-slate-text">Why:</span> The <code className="text-amber/80">?.split(&quot; &quot;)[1]</code> fix correctly isolates the token. Verified against JWT verify contract.
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* ── HONESTY / PRATFALL ── */}
+      <section className="border-t border-iron bg-charcoal/30 bg-noise">
         <div className="mx-auto max-w-3xl px-6 py-24 text-center">
           <p className="mb-3 text-[11px] font-mono uppercase tracking-[0.15em] text-amber">
             Honest take
@@ -436,20 +627,19 @@ export default function LandingPage() {
         </div>
       </section>
 
-      {/* ── EARLY ACCESS ── */}
-      <section className="border-t border-iron bg-charcoal/30 bg-noise">
+      {/* ── PRICING ── */}
+      <section className="border-t border-iron bg-noise">
         <div className="mx-auto max-w-4xl px-6 py-24">
           <div className="text-center mb-12">
             <p className="mb-3 text-[11px] font-mono uppercase tracking-[0.15em] text-amber">
-              Early access
+              Pricing
             </p>
             <h2 className="font-display text-2xl md:text-3xl font-bold text-foreground mb-4">
-              We just launched. You&apos;re early.
+              Free during early access. Pro when you&apos;re ready.
             </h2>
             <p className="max-w-lg mx-auto text-sm text-ash/70 leading-relaxed">
-              Argus is in active development. Early adopters get free access to
-              all features, direct input on the roadmap, and a permanent
-              discount when we launch paid tiers.
+              Start free. Upgrade when your team needs more. Early adopters lock in
+              a permanent discount.
             </p>
           </div>
 
@@ -473,12 +663,24 @@ export default function LandingPage() {
               </p>
             </div>
           </div>
+
+          <div className="mt-8 text-center">
+            <Link
+              href="/pricing"
+              className="inline-flex items-center gap-2 text-sm font-mono text-amber hover:text-amber/80 transition-colors"
+            >
+              View full pricing
+              <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6" />
+              </svg>
+            </Link>
+          </div>
         </div>
       </section>
 
       {/* ── CTA ── */}
-      <section className="border-t border-iron bg-noise relative overflow-hidden">
-        {/* Ambient glow — oklch radial-gradient not expressible as Tailwind arbitrary value */}
+      <section className="border-t border-iron bg-charcoal/30 bg-noise relative overflow-hidden">
+        {/* Ambient glow */}
         <div
           className="pointer-events-none absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 h-[500px] w-[500px] rounded-full opacity-10"
           style={{

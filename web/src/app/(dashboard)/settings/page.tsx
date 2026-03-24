@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Settings, Loader2, Save, Trash2, Key, Cpu, ChevronDown, Zap, Check, X, ArrowUp, Info, UserCog, Lock, ShieldCheck, Bug, Blocks, RotateCcw, FileText, RotateCw, Search } from "lucide-react";
+import { Settings, Loader2, Save, Trash2, Key, Cpu, ChevronDown, Zap, Check, X, ArrowUp, Info, UserCog, Lock, ShieldCheck, Bug, Blocks, RotateCcw, FileText, RotateCw, Search, Sliders, FlaskConical } from "lucide-react";
 import {
   useModelConfigs,
   useUpsertModelConfig,
@@ -716,6 +716,86 @@ function PromptCard({
   );
 }
 
+/* ── Feature Toggles ── */
+
+const FEATURE_TOGGLES = [
+  {
+    key: "cross_file_context",
+    label: "Cross-file context",
+    description: "Include related files (callers, tests, imports) in review context",
+    defaultValue: true,
+  },
+  {
+    key: "blast_radius",
+    label: "Blast radius analysis",
+    description: "Show dependency impact analysis for changed code",
+    defaultValue: true,
+  },
+  {
+    key: "scenario_memory",
+    label: "Scenario memory",
+    description: "Auto-generate and check scenarios from past reviews",
+    defaultValue: true,
+  },
+  {
+    key: "code_simulation",
+    label: "Code simulation",
+    description: "Simulate execution paths to predict breakage (experimental)",
+    defaultValue: false,
+    experimental: true,
+  },
+] as const;
+
+function FeatureToggleCard({
+  toggle,
+  enabled,
+  onToggle,
+  pending,
+}: {
+  toggle: (typeof FEATURE_TOGGLES)[number];
+  enabled: boolean;
+  onToggle: () => void;
+  pending: boolean;
+}) {
+  return (
+    <div className={`rounded-lg border p-4 transition-colors ${
+      enabled ? "border-amber/30 bg-amber/5" : "border-iron bg-charcoal"
+    }`}>
+      <div className="flex items-center justify-between mb-1.5">
+        <div className="flex items-center gap-2">
+          <span className={`text-xs font-mono font-medium ${enabled ? "text-amber" : "text-foreground"}`}>
+            {toggle.label}
+          </span>
+          {"experimental" in toggle && toggle.experimental && (
+            <span className="inline-flex items-center gap-1 rounded-sm border border-purple-400/30 bg-purple-400/10 px-1.5 py-0.5 text-[9px] font-mono uppercase tracking-wider text-purple-400">
+              <FlaskConical className="h-2.5 w-2.5" />
+              experimental
+            </span>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={onToggle}
+          disabled={pending}
+          aria-label={enabled ? `Disable ${toggle.label}` : `Enable ${toggle.label}`}
+          className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 transition-colors duration-200 ease-in-out focus:outline-none focus-visible:ring-2 focus-visible:ring-amber/50 focus-visible:ring-offset-2 focus-visible:ring-offset-background ${
+            enabled ? "border-amber bg-amber" : "border-iron bg-iron/50"
+          }`}
+        >
+          <span
+            className={`pointer-events-none inline-block h-5 w-5 rounded-full bg-foreground shadow-lg ring-0 transition-transform duration-200 ease-in-out ${
+              enabled ? "translate-x-5" : "translate-x-0"
+            }`}
+          />
+        </button>
+      </div>
+      <p className="text-[10px] font-mono text-slate-text leading-relaxed">
+        {toggle.description}
+      </p>
+    </div>
+  );
+}
+
 /* ── Page ── */
 
 export default function SettingsPage() {
@@ -1042,6 +1122,56 @@ export default function SettingsPage() {
                     defaultText={defaultPromptMap.get(stage)?.prompt_text ?? ""}
                   />
                 ))}
+              </div>
+            )}
+          </section>
+
+          {/* Section 5: Advanced Features */}
+          <section>
+            <div className="flex items-center gap-3 mb-4">
+              <span className="inline-flex items-center justify-center h-6 w-6 rounded-full border border-amber/30 bg-amber/10 text-[11px] font-mono font-bold text-amber">
+                5
+              </span>
+              <div className="flex items-center gap-2">
+                <Sliders className="h-4 w-4 text-amber" />
+                <h2 className="font-display text-lg font-semibold text-foreground">
+                  Advanced Features
+                </h2>
+              </div>
+            </div>
+            <p className="text-[11px] font-mono text-slate-text mb-4">
+              Toggle pipeline capabilities for{" "}
+              <span className="text-foreground">{activeRepo?.full_name ?? "selected repo"}</span>.
+              These control which analysis stages run during review.
+            </p>
+
+            {activeId === 0 ? (
+              <div className="rounded-lg border border-iron bg-charcoal p-10 text-center">
+                <Sliders className="h-8 w-8 text-slate-text mx-auto mb-3" />
+                <p className="text-xs font-mono text-slate-text">
+                  Select a repo to configure features.
+                </p>
+              </div>
+            ) : (
+              <div className="grid gap-3 md:grid-cols-2">
+                {FEATURE_TOGGLES.map((toggle) => {
+                  const val = activeRepo?.settings_json?.[toggle.key];
+                  const enabled = typeof val === "boolean" ? val : toggle.defaultValue;
+                  return (
+                    <FeatureToggleCard
+                      key={toggle.key}
+                      toggle={toggle}
+                      enabled={enabled}
+                      pending={updateRepo.isPending}
+                      onToggle={() => {
+                        updateRepo.mutate({
+                          id: activeId,
+                          settings_json: { ...activeRepo?.settings_json, [toggle.key]: !enabled },
+                        });
+                      }}
+                    />
+                  );
+                })}
               </div>
             )}
           </section>
