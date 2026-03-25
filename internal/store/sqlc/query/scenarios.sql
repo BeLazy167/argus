@@ -15,7 +15,7 @@ UPDATE scenarios SET active = TRUE WHERE id = $1;
 SELECT id, installation_id, repo_id, description, source, COALESCE(source_ref,'') as source_ref, files, modules, COALESCE(severity,'medium') as severity, active, created_at, COALESCE(steps,'[]') as steps, COALESCE(initial_state,'') as initial_state, COALESCE(expected_outcome,'') as expected_outcome, COALESCE(is_outdated,FALSE) as is_outdated, last_run_at
 FROM scenarios
 WHERE repo_id = $1 AND active = TRUE AND files && $2::text[]
-ORDER BY created_at DESC
+ORDER BY trigger_count DESC, created_at DESC
 LIMIT 20;
 
 -- name: ListScenariosForRepo :many
@@ -37,3 +37,6 @@ WHERE repo_id = $1 AND active = TRUE AND files && $2::text[];
 
 -- name: UpdateScenarioLastRun :exec
 UPDATE scenarios SET last_run_at = NOW(), is_outdated = FALSE WHERE id = $1;
+
+-- name: IncrementScenarioTriggerCount :exec
+UPDATE scenarios SET trigger_count = trigger_count + 1 WHERE id = $1;

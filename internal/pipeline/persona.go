@@ -153,6 +153,10 @@ type repoSettings struct {
 	Persona             string `json:"persona,omitempty"`
 	CustomPersonaPrompt string `json:"custom_persona_prompt,omitempty"`
 	DeepReview          bool   `json:"deep_review,omitempty"`
+	CrossFileContext    *bool  `json:"cross_file_context,omitempty"`
+	BlastRadius         *bool  `json:"blast_radius,omitempty"`
+	ScenarioMemory      *bool  `json:"scenario_memory,omitempty"`
+	CodeSimulation      bool   `json:"code_simulation,omitempty"`
 }
 
 func parseRepoSettings(settingsJSON json.RawMessage) (repoSettings, bool) {
@@ -171,6 +175,34 @@ func parseRepoSettings(settingsJSON json.RawMessage) (repoSettings, bool) {
 func isDeepReviewEnabled(settingsJSON json.RawMessage) bool {
 	s, ok := parseRepoSettings(settingsJSON)
 	return ok && s.DeepReview
+}
+
+// isCrossFileContextEnabled checks if cross-file context is enabled in repo settings.
+// Defaults to true when not explicitly set.
+func isCrossFileContextEnabled(settingsJSON json.RawMessage) bool {
+	s, ok := parseRepoSettings(settingsJSON)
+	return !ok || s.CrossFileContext == nil || *s.CrossFileContext
+}
+
+// isBlastRadiusEnabled checks if blast radius analysis is enabled in repo settings.
+// Defaults to true when not explicitly set.
+func isBlastRadiusEnabled(settingsJSON json.RawMessage) bool {
+	s, ok := parseRepoSettings(settingsJSON)
+	return !ok || s.BlastRadius == nil || *s.BlastRadius
+}
+
+// isScenarioMemoryEnabled checks if scenario memory is enabled in repo settings.
+// Defaults to true when not explicitly set.
+func isScenarioMemoryEnabled(settingsJSON json.RawMessage) bool {
+	s, ok := parseRepoSettings(settingsJSON)
+	return !ok || s.ScenarioMemory == nil || *s.ScenarioMemory
+}
+
+// isCodeSimulationEnabled checks if code simulation is enabled in repo settings.
+// Defaults to false when not explicitly set (experimental feature).
+func isCodeSimulationEnabled(settingsJSON json.RawMessage) bool {
+	s, ok := parseRepoSettings(settingsJSON)
+	return ok && s.CodeSimulation
 }
 
 // PersonaSpecialistHint returns a short directive for appending to specialist prompts.

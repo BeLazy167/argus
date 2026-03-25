@@ -72,6 +72,10 @@ type PipelineRun struct {
 	Persona             Persona
 	CustomPersonaPrompt string
 	DeepReview          bool
+	CrossFileContext    bool
+	BlastRadius         bool
+	ScenarioMemory      bool
+	CodeSimulation      bool
 	ScoringSkipped   bool // true when scoring provider unavailable — synthesis uses all comments
 	Prompts          map[string]string // custom prompt overrides per stage
 	IsIncremental    bool
@@ -121,10 +125,11 @@ var ValidCategories = map[Category]bool{
 
 // SynthesisResult is the combined review output.
 type SynthesisResult struct {
-	Summary    string
-	Brief      string
-	Score      int // 1-10
-	TokenUsage map[string]int
+	Summary           string
+	Brief             string
+	Score             int // 1-10
+	TokenUsage        map[string]int
+	SimulationResults []SimulationResult
 }
 
 // StageFunc is a function that executes a single pipeline stage.
