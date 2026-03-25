@@ -343,7 +343,7 @@ func (s *Store) GetReview(ctx context.Context, id uuid.UUID) (*Review, error) {
 		       status, summary, score, token_usage, trigger, triggered_by, duration_ms, error,
 		       deep_review, persona, is_incremental, created_at, completed_at
 		FROM reviews WHERE id = $1
-	`, id).Scan(&r.ID, &r.RepoID, &r.PRNumber, &r.PRTitle, &r.PRAuthor, &r.HeadSHA, &r.BaseSHA, &r.GithubReviewID,
+	`, id).Scan(&r.ID, &r.RepoID, &r.PRNumber, &r.PRTitle, &r.PRAuthor, &r.HeadSHA, &r.BaseSHA, &r.HeadRef, &r.GithubReviewID,
 		&r.Status, &r.Summary, &r.Score, &r.TokenUsage, &r.Trigger, &r.TriggeredBy, &r.DurationMs, &r.Error,
 		&r.DeepReview, &r.Persona, &r.IsIncremental, &r.CreatedAt, &r.CompletedAt)
 	if err != nil {
@@ -553,7 +553,7 @@ func (s *Store) GetLastCompletedReview(ctx context.Context, repoID int64, prNumb
 		       deep_review, persona, is_incremental, created_at, completed_at
 		FROM reviews WHERE repo_id = $1 AND pr_number = $2 AND status = 'completed'
 		ORDER BY completed_at DESC LIMIT 1
-	`, repoID, prNumber).Scan(&r.ID, &r.RepoID, &r.PRNumber, &r.PRTitle, &r.PRAuthor, &r.HeadSHA, &r.BaseSHA, &r.GithubReviewID,
+	`, repoID, prNumber).Scan(&r.ID, &r.RepoID, &r.PRNumber, &r.PRTitle, &r.PRAuthor, &r.HeadSHA, &r.BaseSHA, &r.HeadRef, &r.GithubReviewID,
 		&r.Status, &r.Summary, &r.Score, &r.TokenUsage, &r.Trigger, &r.TriggeredBy, &r.DurationMs, &r.Error,
 		&r.DeepReview, &r.Persona, &r.IsIncremental, &r.CreatedAt, &r.CompletedAt)
 	if err != nil {
@@ -572,7 +572,7 @@ func (s *Store) GetLatestReviewBySHA(ctx context.Context, repoFullName string, p
 		WHERE r.full_name = $1 AND rv.pr_number = $2 AND rv.head_sha = $3
 		  AND rv.status = 'completed'
 		ORDER BY rv.created_at DESC LIMIT 1
-	`, repoFullName, prNumber, headSHA).Scan(&r.ID, &r.RepoID, &r.PRNumber, &r.PRTitle, &r.PRAuthor, &r.HeadSHA, &r.BaseSHA, &r.GithubReviewID,
+	`, repoFullName, prNumber, headSHA).Scan(&r.ID, &r.RepoID, &r.PRNumber, &r.PRTitle, &r.PRAuthor, &r.HeadSHA, &r.BaseSHA, &r.HeadRef, &r.GithubReviewID,
 		&r.Status, &r.Summary, &r.Score, &r.TokenUsage, &r.Trigger, &r.TriggeredBy, &r.DurationMs, &r.Error,
 		&r.DeepReview, &r.Persona, &r.IsIncremental, &r.CreatedAt, &r.CompletedAt)
 	if err != nil {
@@ -592,7 +592,7 @@ func (s *Store) GetLatestReviewByPR(ctx context.Context, repoFullName string, pr
 		WHERE r.full_name = $1 AND rv.pr_number = $2
 		  AND rv.status = 'completed'
 		ORDER BY rv.created_at DESC LIMIT 1
-	`, repoFullName, prNumber).Scan(&r.ID, &r.RepoID, &r.PRNumber, &r.PRTitle, &r.PRAuthor, &r.HeadSHA, &r.BaseSHA, &r.GithubReviewID,
+	`, repoFullName, prNumber).Scan(&r.ID, &r.RepoID, &r.PRNumber, &r.PRTitle, &r.PRAuthor, &r.HeadSHA, &r.BaseSHA, &r.HeadRef, &r.GithubReviewID,
 		&r.Status, &r.Summary, &r.Score, &r.TokenUsage, &r.Trigger, &r.TriggeredBy, &r.DurationMs, &r.Error,
 		&r.DeepReview, &r.Persona, &r.IsIncremental, &r.CreatedAt, &r.CompletedAt)
 	if err != nil {
