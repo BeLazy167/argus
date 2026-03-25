@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -172,6 +173,42 @@ func (s *Store) SetInstallationClerkOrgID(ctx context.Context, installationID in
 	return err
 }
 
+// --- Org Default Settings ---
+
+func (s *Store) GetOrgDefaults(ctx context.Context, installationID int64) (json.RawMessage, error) {
+	var settings json.RawMessage
+	err := s.Pool.QueryRow(ctx, `SELECT COALESCE(default_settings, '{}') FROM installations WHERE id = $1`, installationID).Scan(&settings)
+	return settings, err
+}
+
+func (s *Store) SetOrgDefaults(ctx context.Context, installationID int64, settings json.RawMessage) error {
+	_, err := s.Pool.Exec(ctx, `UPDATE installations SET default_settings = $1 WHERE id = $2`, settings, installationID)
+	return err
+}
+
+// GetMergedSettings returns org defaults merged with repo overrides (repo wins).
+func (s *Store) GetMergedSettings(ctx context.Context, installationID int64, repoID int64) (json.RawMessage, error) {
+	var orgDefaults, repoSettings json.RawMessage
+	_ = s.Pool.QueryRow(ctx, `SELECT COALESCE(default_settings, '{}') FROM installations WHERE id = $1`, installationID).Scan(&orgDefaults)
+	_ = s.Pool.QueryRow(ctx, `SELECT COALESCE(settings_json, '{}') FROM repos WHERE id = $1`, repoID).Scan(&repoSettings)
+	return mergeJSON(orgDefaults, repoSettings), nil
+}
+
+// mergeJSON does a shallow merge where override keys replace base keys.
+func mergeJSON(base, override json.RawMessage) json.RawMessage {
+	var baseMap, overrideMap map[string]interface{}
+	json.Unmarshal(base, &baseMap)
+	json.Unmarshal(override, &overrideMap)
+	if baseMap == nil {
+		baseMap = make(map[string]interface{})
+	}
+	for k, v := range overrideMap {
+		baseMap[k] = v
+	}
+	result, _ := json.Marshal(baseMap)
+	return result
+}
+
 // --- Repos ---
 
 func (s *Store) ListRepos(ctx context.Context) ([]Repo, error) {
@@ -286,7 +323,7 @@ func (s *Store) ListReviews(ctx context.Context, repoID int64, limit, offset int
 		limit = 20
 	}
 	rows, err := s.Pool.Query(ctx, `
-		SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, github_review_id,
+		SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, COALESCE(head_ref,''), github_review_id,
 		       status, summary, score, token_usage, trigger, triggered_by, duration_ms, error,
 		       deep_review, persona, is_incremental, created_at, completed_at
 		FROM reviews WHERE repo_id = $1
@@ -302,7 +339,7 @@ func (s *Store) ListReviews(ctx context.Context, repoID int64, limit, offset int
 func (s *Store) GetReview(ctx context.Context, id uuid.UUID) (*Review, error) {
 	var r Review
 	err := s.Pool.QueryRow(ctx, `
-		SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, github_review_id,
+		SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, COALESCE(head_ref,''), github_review_id,
 		       status, summary, score, token_usage, trigger, triggered_by, duration_ms, error,
 		       deep_review, persona, is_incremental, created_at, completed_at
 		FROM reviews WHERE id = $1
@@ -511,7 +548,7 @@ func (s *Store) GetCommentByGithubID(ctx context.Context, githubCommentID int64)
 func (s *Store) GetLastCompletedReview(ctx context.Context, repoID int64, prNumber int) (*Review, error) {
 	var r Review
 	err := s.Pool.QueryRow(ctx, `
-		SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, github_review_id,
+		SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, COALESCE(head_ref,''), github_review_id,
 		       status, summary, score, token_usage, trigger, triggered_by, duration_ms, error,
 		       deep_review, persona, is_incremental, created_at, completed_at
 		FROM reviews WHERE repo_id = $1 AND pr_number = $2 AND status = 'completed'

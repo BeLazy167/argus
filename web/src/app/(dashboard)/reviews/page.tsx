@@ -27,6 +27,7 @@ type PRGroup = {
   prNumber: number;
   prTitle: string;
   author: string;
+  branch: string;
   repoName: string;
   repoId: number;
   reviews: Review[];
@@ -138,11 +139,11 @@ function PRAccordionRow({
           <ScoreBadge score={group.latestScore} />
           <div className="min-w-0">
             <p className="text-xs font-mono text-foreground truncate max-w-md">
-              {repoFullName && <span className="text-slate-text">{repoFullName} &gt; </span>}
-              #{group.prNumber} {group.prTitle}
+              <span className="text-amber">#{group.prNumber}</span> {group.prTitle}
             </p>
             <p className="text-[11px] font-mono text-slate-text">
-              by {group.author} &middot; {group.reviews.length} review{group.reviews.length !== 1 ? "s" : ""}
+              {group.branch && <><span className="text-blue-400">{group.branch}</span> &middot; </>}
+              {group.author} &middot; {group.reviews.length} review{group.reviews.length !== 1 ? "s" : ""}
             </p>
           </div>
         </div>
@@ -225,6 +226,7 @@ export default function ReviewsPage() {
           prNumber: latest.pr_number,
           prTitle: latest.pr_title,
           author: latest.pr_author,
+          branch: latest.head_ref || "",
           repoName: repoMap.get(latest.repo_id)?.full_name ?? "",
           repoId: latest.repo_id,
           reviews: sorted,

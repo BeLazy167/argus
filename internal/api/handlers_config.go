@@ -354,3 +354,47 @@ func (s *Server) deleteProviderKey(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
+
+// --- Org Default Settings ---
+
+func (s *Server) getOrgDefaults(w http.ResponseWriter, r *http.Request) {
+	installationID, err := strconv.ParseInt(chi.URLParam(r, "installationID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid installation id"})
+		return
+	}
+	if !containsID(getInstallationIDs(r.Context()), installationID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not authorized"})
+		return
+	}
+	settings, err := s.store.GetOrgDefaults(r.Context(), installationID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(settings)
+}
+
+func (s *Server) setOrgDefaults(w http.ResponseWriter, r *http.Request) {
+	installationID, err := strconv.ParseInt(chi.URLParam(r, "installationID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid installation id"})
+		return
+	}
+	if !containsID(getInstallationIDs(r.Context()), installationID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not authorized"})
+		return
+	}
+	var settings json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&settings); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	if err := s.store.SetOrgDefaults(r.Context(), installationID, settings); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "saved"})
+}

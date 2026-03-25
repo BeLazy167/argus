@@ -111,6 +111,10 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 				r.Delete("/repos/{repoID}/prompts/{stage}", s.deletePromptTemplate)
 				r.Get("/prompts/defaults", s.listDefaultPrompts)
 
+				// Org Default Settings
+				r.Get("/installations/{installationID}/defaults", s.getOrgDefaults)
+				r.Put("/installations/{installationID}/defaults", s.setOrgDefaults)
+
 				// Model Config
 				r.Get("/repos/{repoID}/config", s.getModelConfigs)
 				r.Put("/repos/{repoID}/config/{stage}", s.upsertModelConfig)
