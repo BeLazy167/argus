@@ -17,15 +17,18 @@ const (
 	PersonaStrict              Persona = "strict"
 	PersonaAdversarial         Persona = "adversarial"
 	PersonaFreshEyes           Persona = "fresh_eyes"
+	PersonaCustom              Persona = "custom"
 )
 
 // ValidPersonas is the set of valid persona values.
 var ValidPersonas = map[Persona]bool{
 	PersonaDefault: true, PersonaSecurityAuditor: true, PersonaPerformanceEngineer: true,
 	PersonaMentor: true, PersonaArchitect: true, PersonaStrict: true, PersonaAdversarial: true, PersonaFreshEyes: true,
+	PersonaCustom: true,
 }
 
 // PersonaPromptOverlay returns the system prompt addition for a given persona.
+// For custom personas, use PersonaPromptOverlayCustom instead.
 func PersonaPromptOverlay(p Persona) string {
 	switch p {
 	case PersonaSecurityAuditor:
@@ -125,10 +128,31 @@ Frame comments as "A new developer would ask..." or "This isn't obvious because.
 	}
 }
 
+// PersonaPromptOverlayCustom returns the overlay for a custom persona prompt.
+func PersonaPromptOverlayCustom(customPrompt string) string {
+	if customPrompt == "" {
+		return ""
+	}
+	return "\n\n## Persona: Custom\n" + customPrompt
+}
+
+// PersonaSpecialistHintCustom returns a condensed hint from a custom persona prompt.
+func PersonaSpecialistHintCustom(customPrompt string) string {
+	if customPrompt == "" {
+		return ""
+	}
+	hint := customPrompt
+	if len(hint) > 150 {
+		hint = hint[:150] + "..."
+	}
+	return "\nPersona lens (custom): " + hint
+}
+
 // repoSettings is the JSON structure stored in repos.settings_json.
 type repoSettings struct {
-	Persona    string `json:"persona,omitempty"`
-	DeepReview bool   `json:"deep_review,omitempty"`
+	Persona             string `json:"persona,omitempty"`
+	CustomPersonaPrompt string `json:"custom_persona_prompt,omitempty"`
+	DeepReview          bool   `json:"deep_review,omitempty"`
 }
 
 func parseRepoSettings(settingsJSON json.RawMessage) (repoSettings, bool) {
@@ -149,6 +173,29 @@ func isDeepReviewEnabled(settingsJSON json.RawMessage) bool {
 	return ok && s.DeepReview
 }
 
+// PersonaSpecialistHint returns a short directive for appending to specialist prompts.
+// Condensed to avoid diluting specialist focus.
+func PersonaSpecialistHint(p Persona) string {
+	switch p {
+	case PersonaSecurityAuditor:
+		return "\nPersona lens: security-first. Weight security findings highest and flag any trust boundary violations."
+	case PersonaPerformanceEngineer:
+		return "\nPersona lens: performance-focused. Flag allocations, N+1 patterns, and unnecessary complexity."
+	case PersonaMentor:
+		return "\nPersona lens: mentor. Frame findings as learning opportunities with brief explanations of why."
+	case PersonaArchitect:
+		return "\nPersona lens: architect. Prioritize design patterns, coupling, and API surface concerns."
+	case PersonaStrict:
+		return "\nPersona lens: strict. Lower your threshold for reporting — flag anything questionable."
+	case PersonaAdversarial:
+		return "\nPersona lens: adversarial. Assume the worst about every code path — find what breaks under pressure."
+	case PersonaFreshEyes:
+		return "\nPersona lens: fresh eyes. Flag anything that isn't immediately obvious to a newcomer."
+	default:
+		return ""
+	}
+}
+
 // loadPersona extracts the persona from a repo's settings_json.
 func loadPersona(settingsJSON json.RawMessage) Persona {
 	s, ok := parseRepoSettings(settingsJSON)
@@ -161,4 +208,13 @@ func loadPersona(settingsJSON json.RawMessage) Persona {
 		return PersonaDefault
 	}
 	return p
+}
+
+// loadCustomPersonaPrompt extracts the custom persona prompt from settings_json.
+func loadCustomPersonaPrompt(settingsJSON json.RawMessage) string {
+	s, ok := parseRepoSettings(settingsJSON)
+	if !ok {
+		return ""
+	}
+	return s.CustomPersonaPrompt
 }

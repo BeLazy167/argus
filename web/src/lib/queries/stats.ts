@@ -1,35 +1,26 @@
 import { useQuery } from "@tanstack/react-query";
-import { useAuth } from "@clerk/nextjs";
-import { api } from "../api";
 import type { Stats, ActivityLog } from "../types";
-import { useInstallation } from "@/providers/installation-provider";
+import { useApi } from "@/lib/hooks/use-api";
 
-export function useStats() {
-  const { getToken } = useAuth();
-  const { active } = useInstallation();
+export function useStats(repoId?: number) {
+  const api = useApi();
   return useQuery({
-    queryKey: ["stats", active?.id],
-    queryFn: async () => {
-      const token = await getToken();
-      return api.get<Stats>("/api/v1/stats", token ?? undefined, active?.id);
+    queryKey: ["stats", api.active?.id, repoId],
+    queryFn: () => {
+      const path = repoId && repoId > 0
+        ? `/api/v1/stats?repo_id=${repoId}`
+        : `/api/v1/stats`;
+      return api.get<Stats>(path);
     },
-    enabled: !!active,
+    enabled: !!api.active,
   });
 }
 
 export function useActivity(limit = 50) {
-  const { getToken } = useAuth();
-  const { active } = useInstallation();
+  const api = useApi();
   return useQuery({
-    queryKey: ["activity", limit, active?.id],
-    queryFn: async () => {
-      const token = await getToken();
-      return api.get<ActivityLog[]>(
-        `/api/v1/activity?limit=${limit}`,
-        token ?? undefined,
-        active?.id,
-      );
-    },
-    enabled: !!active,
+    queryKey: ["activity", limit, api.active?.id],
+    queryFn: () => api.get<ActivityLog[]>(`/api/v1/activity?limit=${limit}`),
+    enabled: !!api.active,
   });
 }

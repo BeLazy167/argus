@@ -11,6 +11,7 @@ import (
 	"github.com/BeLazy167/argus/internal/llm"
 	"github.com/BeLazy167/argus/internal/memory"
 	"github.com/BeLazy167/argus/internal/store"
+	"github.com/BeLazy167/argus/internal/util"
 	"github.com/BeLazy167/argus/pkg/diff"
 )
 
@@ -47,19 +48,9 @@ func (ts *TriageStage) Execute(ctx context.Context, run *PipelineRun) error {
 		return nil
 	}
 
-	// Load per-repo model configs from DB (use DB serial IDs, not GitHub IDs)
-	var repoConfigs []llm.ModelConfig
-	if dbConfigs, err := ts.store.ListModelConfigs(ctx, run.DBRepoID); err == nil {
-		repoConfigs = storeToLLMConfigs(dbConfigs)
-	}
-
-	cfg, err := ts.registry.GetConfig(run.DBRepoID, llm.StageTriage, repoConfigs)
+	provider, cfg, err := ts.registry.ResolveProvider(ctx, storeConfigLister{st: ts.store, installationID: run.DBInstallationID}, run.DBInstallationID, run.DBRepoID, llm.StageTriage)
 	if err != nil {
-		return fmt.Errorf("triage config: %w", err)
-	}
-	provider, err := ts.registry.GetProviderForRepo(ctx, run.DBInstallationID, &run.DBRepoID, cfg.Provider)
-	if err != nil {
-		return fmt.Errorf("triage provider: %w", err)
+		return err
 	}
 
 	owner, repo, err := splitRepoFullName(run.PREvent.RepoFullName)
@@ -72,7 +63,7 @@ func (ts *TriageStage) Execute(ctx context.Context, run *PipelineRun) error {
 	}
 	resp, err := provider.Complete(ctx, llm.CompletionRequest{
 		Model:       cfg.Model,
-		System:      triageSystemPrompt,
+		System:      customOrDefault(run.Prompts, "triage_system", triageSystemPrompt),
 		Messages:    []llm.Message{{Role: "user", Content: prompt}},
 		MaxTokens:   cfg.MaxTokens,
 		Temperature: cfg.Temperature,
@@ -167,6 +158,32 @@ func storeToLLMConfigs(dbConfigs []store.ModelConfig) []llm.ModelConfig {
 	return out
 }
 
+// StoreConfigListerFor returns an llm.ModelConfigLister backed by the given store.
+func StoreConfigListerFor(st *store.Store, installationID int64) storeConfigLister {
+	return storeConfigLister{st: st, installationID: installationID}
+}
+
+// storeConfigLister adapts *store.Store to llm.ModelConfigLister with org fallback.
+type storeConfigLister struct {
+	st             *store.Store
+	installationID int64
+}
+
+func (s storeConfigLister) ListLLMConfigs(ctx context.Context, repoID int64) ([]llm.ModelConfig, error) {
+	if s.installationID > 0 {
+		dbConfigs, err := s.st.ListModelConfigsWithFallback(ctx, s.installationID, repoID)
+		if err != nil {
+			return nil, err
+		}
+		return storeToLLMConfigs(dbConfigs), nil
+	}
+	dbConfigs, err := s.st.ListModelConfigs(ctx, repoID)
+	if err != nil {
+		return nil, err
+	}
+	return storeToLLMConfigs(dbConfigs), nil
+}
+
 // triageMemoryHints searches Supermemory for file synthesis docs, repo patterns,
 // owner patterns, and rules matching changed files.
 // Returns a hint block for the triage prompt, or empty string if no history found.
@@ -209,19 +226,19 @@ func triageMemoryHints(ctx context.Context, memClient *memory.Client, owner, rep
 	if len(repoResults) > 0 {
 		sb.WriteString("\n## File History (from past reviews)\n")
 		for _, r := range repoResults {
-			sb.WriteString(fmt.Sprintf("- %s\n", truncateSnippet(r, 200)))
+			sb.WriteString(fmt.Sprintf("- %s\n", util.Truncate(r, 200, true)))
 		}
 	}
 	if len(ownerResults) > 0 {
 		sb.WriteString("\n## Org-wide Patterns\n")
 		for _, r := range ownerResults {
-			sb.WriteString(fmt.Sprintf("- %s\n", truncateSnippet(r, 200)))
+			sb.WriteString(fmt.Sprintf("- %s\n", util.Truncate(r, 200, true)))
 		}
 	}
 	if len(ruleResults) > 0 {
 		sb.WriteString("\n## Review Rules\n")
 		for _, r := range ruleResults {
-			sb.WriteString(fmt.Sprintf("- %s\n", truncateSnippet(r, 200)))
+			sb.WriteString(fmt.Sprintf("- %s\n", util.Truncate(r, 200, true)))
 		}
 	}
 
@@ -236,9 +253,16 @@ func triageMemoryHints(ctx context.Context, memClient *memory.Client, owner, rep
 const triageSystemPrompt = `You are a code review triage assistant. Given a list of changed files with abbreviated diffs, classify each file into one of four review depths:
 
 - "skip": Generated files, lockfiles, configs with no logic, pure renames, vendored deps
-- "skim": Simple changes, typo fixes, minor refactors, test-only changes, style-only changes
+- "skim": Simple changes, typo fixes, minor refactors, style-only changes
 - "security_skim": Auth middleware, input parsing/validation, API route handlers, encryption, session management — files that need a security pass but not full deep review. Saves tokens vs deep.
 - "deep": Business logic, security-sensitive code, API changes, complex algorithms, new features
+
+## Risk-Aware Rules (apply BEFORE general classification):
+- Files touching authentication, authorization, session management, or cryptography: default to "deep" regardless of diff size
+- Public API surfaces (route handlers, exported interfaces, SDK methods): default to "deep"
+- Lock files (.lock), generated code (.generated., .pb.go, .g.dart), vendor directories: default to "skip"
+- Test files with only assertion changes: default to "skim"
+- Configuration files (.yaml, .json, .toml) with security implications (secrets, permissions, CORS): "security_skim"
 
 Respond ONLY with a JSON array. Each element: {"file": "<path>", "action": "skip|skim|security_skim|deep", "reason": "<brief reason>"}
 Do not include any other text.`

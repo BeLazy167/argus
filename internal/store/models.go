@@ -11,6 +11,8 @@ type Installation struct {
 	ID             int64      `json:"id"`
 	InstallationID int64      `json:"installation_id"`
 	OrgLogin       string     `json:"org_login"`
+	ClerkOrgID     *string    `json:"clerk_org_id,omitempty"`
+	PlanTier       string     `json:"plan_tier"`
 	CreatedAt      time.Time  `json:"created_at"`
 	SuspendedAt    *time.Time `json:"suspended_at,omitempty"`
 }
@@ -35,6 +37,7 @@ type Review struct {
 	PRAuthor       string           `json:"pr_author"`
 	HeadSHA        string           `json:"head_sha"`
 	BaseSHA        string           `json:"base_sha"`
+	HeadRef        string           `json:"head_ref"`
 	GithubReviewID *int64           `json:"github_review_id,omitempty"`
 	Status         string           `json:"status"`
 	Summary        *string          `json:"summary,omitempty"`
@@ -64,8 +67,12 @@ type ReviewComment struct {
 	Specialist      *string   `json:"specialist,omitempty"`
 	ConfidenceScore *int      `json:"confidence_score,omitempty"`
 	CodeSnippet     *string   `json:"code_snippet,omitempty"`
-	GithubCommentID *int64    `json:"github_comment_id,omitempty"`
-	CreatedAt       time.Time `json:"created_at"`
+	GithubCommentID     *int64    `json:"github_comment_id,omitempty"`
+	MatchedPatternID    *int64    `json:"matched_pattern_id,omitempty"`
+	MatchedPatternScore *float32  `json:"matched_pattern_score,omitempty"`
+	EnforcedRuleContent *string   `json:"enforced_rule_content,omitempty"`
+	IsNewFinding        bool      `json:"is_new_finding"`
+	CreatedAt           time.Time `json:"created_at"`
 }
 
 type Rule struct {
@@ -88,16 +95,17 @@ type ActivityLog struct {
 }
 
 type ModelConfig struct {
-	ID          int64     `json:"id"`
-	RepoID      *int64    `json:"repo_id,omitempty"`
-	Stage       string    `json:"stage"`
-	Provider    string    `json:"provider"`
-	Model       string    `json:"model"`
-	BaseURL     *string   `json:"base_url,omitempty"`
-	MaxTokens   int       `json:"max_tokens"`
-	Temperature float32   `json:"temperature"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID             int64     `json:"id"`
+	RepoID         *int64    `json:"repo_id,omitempty"`
+	InstallationID *int64    `json:"installation_id,omitempty"`
+	Stage          string    `json:"stage"`
+	Provider       string    `json:"provider"`
+	Model          string    `json:"model"`
+	BaseURL        *string   `json:"base_url,omitempty"`
+	MaxTokens      int       `json:"max_tokens"`
+	Temperature    float32   `json:"temperature"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 type ProviderKey struct {
@@ -119,6 +127,46 @@ type UserInstallation struct {
 	CreatedAt      time.Time `json:"created_at"`
 }
 
+type CommentOutcome struct {
+	ID              int64     `json:"id"`
+	ReviewCommentID uuid.UUID `json:"review_comment_id"`
+	Outcome         string    `json:"outcome"`
+	CreatedAt       time.Time `json:"created_at"`
+}
+
+type PromptTemplate struct {
+	ID         int64     `json:"id"`
+	RepoID     int64     `json:"repo_id"`
+	Stage      string    `json:"stage"`
+	PromptText string    `json:"prompt_text"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+type ScenarioStep struct {
+	Action string `json:"action"`
+	Hint   string `json:"hint,omitempty"`
+}
+
+type Scenario struct {
+	ID              int64          `json:"id"`
+	InstallationID  int64          `json:"installation_id"`
+	RepoID          *int64         `json:"repo_id,omitempty"`
+	Description     string         `json:"description"`
+	Source          string         `json:"source"`
+	SourceRef       string         `json:"source_ref,omitempty"`
+	Files           []string       `json:"files,omitempty"`
+	Modules         []string       `json:"modules,omitempty"`
+	Severity        string         `json:"severity"`
+	Active          bool           `json:"active"`
+	CreatedAt       time.Time      `json:"created_at"`
+	Steps           []ScenarioStep `json:"steps"`
+	InitialState    string         `json:"initial_state"`
+	ExpectedOutcome string         `json:"expected_outcome"`
+	IsOutdated      bool           `json:"is_outdated"`
+	LastRunAt       *time.Time     `json:"last_run_at,omitempty"`
+}
+
 type Stats struct {
 	TotalReviews    int `json:"total_reviews"`
 	CompletedToday  int `json:"completed_today"`
@@ -131,4 +179,16 @@ type Stats struct {
 	HighRiskCount   int `json:"high_risk_count"`
 	AvgReviewTimeMs int `json:"avg_review_time_ms"`
 	DeepReviewCount int `json:"deep_review_count"`
+}
+
+type CodeNode struct {
+	ID        int64  `json:"id"`
+	RepoID    int64  `json:"repo_id"`
+	Kind      string `json:"kind"`
+	Name      string `json:"name"`
+	FilePath  string `json:"file_path"`
+	LineStart int    `json:"line_start"`
+	LineEnd   int    `json:"line_end"`
+	Language  string `json:"language"`
+	Depth     int    `json:"depth,omitempty"`
 }

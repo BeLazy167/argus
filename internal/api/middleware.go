@@ -21,6 +21,8 @@ type contextKey string
 
 const userIDKey contextKey = "user_id"
 const installationIDsKey contextKey = "installation_ids"
+const orgIDKey contextKey = "org_id"
+const orgRoleKey contextKey = "org_role"
 
 type jwks struct {
 	Keys []jwk `json:"keys"`
@@ -183,8 +185,10 @@ func (s *Server) jwtAuth(next http.Handler) http.Handler {
 			return
 		}
 		var claims struct {
-			Sub string  `json:"sub"`
-			Exp float64 `json:"exp"`
+			Sub     string  `json:"sub"`
+			Exp     float64 `json:"exp"`
+			OrgID   string  `json:"org_id"`
+			OrgRole string  `json:"org_role"`
 		}
 		if err := json.Unmarshal(payloadBytes, &claims); err != nil {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid claims"})
@@ -197,6 +201,12 @@ func (s *Server) jwtAuth(next http.Handler) http.Handler {
 		}
 
 		ctx := context.WithValue(r.Context(), userIDKey, claims.Sub)
+		if claims.OrgID != "" {
+			ctx = context.WithValue(ctx, orgIDKey, claims.OrgID)
+		}
+		if claims.OrgRole != "" {
+			ctx = context.WithValue(ctx, orgRoleKey, claims.OrgRole)
+		}
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -208,12 +218,34 @@ func (s *Server) requireInstallationScope(next http.Handler) http.Handler {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 			return
 		}
-		ids, err := s.store.GetUserInstallationIDs(r.Context(), userID)
-		if err != nil {
-			s.logger.Error("get user installation ids", "error", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
-			return
+
+		var ids []int64
+
+		// Org-based lookup takes priority
+		if orgID := getOrgID(r.Context()); orgID != "" {
+			inst, err := s.store.GetInstallationByClerkOrgID(r.Context(), orgID)
+			if err == nil {
+				ids = []int64{inst.ID}
+			} else {
+				// Org not linked yet — fall back to user-based lookup
+				ids, err = s.store.GetUserInstallationIDs(r.Context(), userID)
+				if err != nil {
+					s.logger.Error("get user installation ids (org fallback)", "error", err)
+					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+					return
+				}
+			}
+		} else {
+			// Personal account fallback
+			var err error
+			ids, err = s.store.GetUserInstallationIDs(r.Context(), userID)
+			if err != nil {
+				s.logger.Error("get user installation ids", "error", err)
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+				return
+			}
 		}
+
 		if len(ids) == 0 {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "no installations linked"})
 			return
@@ -242,6 +274,16 @@ func getInstallationIDs(ctx context.Context) []int64 {
 func getUserID(ctx context.Context) string {
 	id, _ := ctx.Value(userIDKey).(string)
 	return id
+}
+
+func getOrgID(ctx context.Context) string {
+	id, _ := ctx.Value(orgIDKey).(string)
+	return id
+}
+
+func getOrgRole(ctx context.Context) string {
+	role, _ := ctx.Value(orgRoleKey).(string)
+	return role
 }
 
 // cors adds CORS headers for the frontend origin.

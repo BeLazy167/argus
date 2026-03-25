@@ -2,6 +2,8 @@ export type Installation = {
   id: number;
   installation_id: number;
   org_login: string;
+  clerk_org_id?: string;
+  plan_tier: string;
   created_at: string;
   suspended_at?: string;
 };
@@ -40,6 +42,7 @@ export type Review = {
   pr_author: string;
   head_sha: string;
   base_sha: string;
+  head_ref: string;
   github_review_id?: number;
   status: "pending" | "in_progress" | "completed" | "failed";
   summary?: string;
@@ -71,6 +74,10 @@ export type ReviewComment = {
   confidence_score?: number;
   code_snippet?: string;
   github_comment_id?: number;
+  matched_pattern_id?: number;
+  matched_pattern_score?: number;
+  enforced_rule_content?: string;
+  is_new_finding?: boolean;
   created_at: string;
 };
 
@@ -98,6 +105,7 @@ export type Rule = {
 export type ModelConfig = {
   id: number;
   repo_id?: number;
+  installation_id?: number;
   stage: string;
   provider: string;
   model: string;
@@ -138,13 +146,75 @@ export type Pattern = {
   content: string;
   supermemory_id?: string;
   created_by?: string;
+  source?: string;
+  category?: string;
+  pr_number?: number;
   created_at: string;
   updated_at: string;
+};
+
+export type PatternStat = {
+  week: string;
+  source: string;
+  count: number;
 };
 
 export type UserInstallation = {
   id: number;
   installation_id: number;
   role: string;
+  created_at: string;
+};
+
+export type PromptTemplate = {
+  stage: string;
+  prompt_text: string;
+  is_custom: boolean;
+};
+
+export type OpenRouterModel = {
+  id: string;
+  name: string;
+  context_length: number;
+  pricing: {
+    prompt: string;
+    completion: string;
+  };
+};
+
+export type Scenario = {
+  id: number;
+  installation_id: number;
+  repo_id: number;
+  description: string;
+  source: string;
+  source_ref: string;
+  files: string[];
+  modules: string[];
+  severity: string;
+  active: boolean;
+  created_at: string;
+  steps: { action: string; hint?: string }[];
+  initial_state: string;
+  expected_outcome: string;
+  is_outdated: boolean;
+  last_run_at?: string;
+};
+
+export type FileRisk = {
+  file_path: string;
+  trace_count: number;
+  last_trace: string;
+};
+
+export type DecisionTrace = {
+  id: number;
+  repo_id: number;
+  file_path: string;
+  kind: string;
+  summary: string;
+  review_id?: string;
+  pr_number?: number;
+  author?: string;
   created_at: string;
 };

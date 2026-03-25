@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -14,6 +16,7 @@ import (
 	"github.com/BeLazy167/argus/internal/llm"
 	"github.com/BeLazy167/argus/internal/memory"
 	"github.com/BeLazy167/argus/internal/store"
+	"github.com/BeLazy167/argus/internal/util"
 	"github.com/BeLazy167/argus/pkg/diff"
 )
 
@@ -66,6 +69,7 @@ func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, 
 
 	sm.RegisterStage(StateTriaging, triageStage.Execute)
 	sm.RegisterStage(StateReviewing, reviewStage.Execute)
+	sm.RegisterStage(StateEnriching, o.enrichFindings)
 	sm.RegisterStage(StateScoring, scoringStage.Execute)
 	sm.RegisterStage(StatePass2, o.pass2)
 	sm.RegisterStage(StateSynthesizing, o.synthesize)
@@ -126,9 +130,9 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 			}
 			reviewID := uuid.New()
 			if _, err := o.db.Exec(ctx, `
-				INSERT INTO reviews (id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, status, trigger, error)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, 'failed', 'webhook', 'no_api_key')
-			`, reviewID, dbRepo.ID, event.PRNumber, event.PRTitle, event.PRAuthor, event.HeadSHA, event.BaseSHA); err != nil {
+				INSERT INTO reviews (id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, head_ref, status, trigger, error)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'failed', 'webhook', 'no_api_key')
+			`, reviewID, dbRepo.ID, event.PRNumber, event.PRTitle, event.PRAuthor, event.HeadSHA, event.BaseSHA, event.HeadRef); err != nil {
 				o.logger.Error("recording skipped review", "error", err, "repo", event.RepoFullName)
 			}
 			return nil
@@ -171,6 +175,11 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		}
 	}
 
+	// Auto-resolve stale bot comments on incremental re-push (fire-and-forget)
+	if isIncremental {
+		go o.autoResolveStaleComments(context.WithoutCancel(ctx), event, patchSet)
+	}
+
 	// Create review record
 	reviewID := uuid.New()
 
@@ -181,12 +190,15 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 	}
 
 	_, err = o.db.Exec(ctx, `
-		INSERT INTO reviews (id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, status, trigger)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', 'webhook')
-	`, reviewID, dbRepo.ID, event.PRNumber, event.PRTitle, event.PRAuthor, event.HeadSHA, event.BaseSHA)
+		INSERT INTO reviews (id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, head_ref, status, trigger, resolved_stale_count)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', 'webhook', 0)
+	`, reviewID, dbRepo.ID, event.PRNumber, event.PRTitle, event.PRAuthor, event.HeadSHA, event.BaseSHA, event.HeadRef)
 	if err != nil {
 		return fmt.Errorf("creating review record: %w", err)
 	}
+
+	// Merge org defaults with repo overrides (repo wins)
+	mergedSettings, _ := o.st.GetMergedSettings(ctx, inst.ID, dbRepo.ID)
 
 	run := &PipelineRun{
 		ID:               uuid.New(),
@@ -197,8 +209,13 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		DBRepoID:         dbRepo.ID,
 		Diff:             patchSet,
 		RawDiff:          rawDiff,
-		Persona:          loadPersona(dbRepo.SettingsJSON),
-		DeepReview:       isDeepReviewEnabled(dbRepo.SettingsJSON),
+		Persona:             loadPersona(mergedSettings),
+		CustomPersonaPrompt: loadCustomPersonaPrompt(mergedSettings),
+		DeepReview:          isDeepReviewEnabled(mergedSettings) && func() bool {
+			tier, _ := o.st.GetPlanTier(ctx, inst.ID)
+			return tier == "pro"
+		}(),
+		Prompts:          o.loadPrompts(ctx, dbRepo.ID),
 		IsIncremental:    isIncremental,
 		PreviousReviewID: previousReviewID,
 		EventBus:         o.eventBus,
@@ -295,6 +312,104 @@ func (o *Orchestrator) postStartedComment(ctx context.Context, event ghpkg.PREve
 	run.StartedCommentNodeID = nodeID
 }
 
+// autoResolveStaleComments resolves bot review threads on files changed in the new push.
+func (o *Orchestrator) autoResolveStaleComments(ctx context.Context, event ghpkg.PREvent, patchSet *diff.PatchSet) {
+	owner, repo, err := splitRepoFullName(event.RepoFullName)
+	if err != nil {
+		o.logger.Warn("auto-resolve: bad repo name", "error", err)
+		return
+	}
+
+	threads, err := o.ghClient.ListReviewThreads(ctx, event.InstallationID, owner, repo, event.PRNumber)
+	if err != nil {
+		o.logger.Warn("auto-resolve: listing threads", "error", err)
+		return
+	}
+
+	// Build set of changed file paths
+	changedFiles := make(map[string]bool)
+	for _, f := range patchSet.Files {
+		changedFiles[f.NewName] = true
+	}
+
+	o.logger.Info("auto-resolve: found threads", "total", len(threads), "changed_files", len(changedFiles), "pr", event.PRNumber)
+
+	var resolved, attempted, botUnresolved int
+	for _, t := range threads {
+		// GraphQL returns app login without "[bot]" suffix (e.g., "argus-eye" not "argus-eye[bot]")
+		isBotComment := strings.HasSuffix(t.AuthorLogin, "[bot]") || t.AuthorLogin == "argus-eye"
+		if t.IsResolved || !isBotComment {
+			continue
+		}
+		botUnresolved++
+		if !changedFiles[t.Path] {
+			continue
+		}
+		attempted++
+		if err := o.ghClient.ResolveReviewThread(ctx, event.InstallationID, t.ID); err != nil {
+			o.logger.Warn("auto-resolve: resolve thread failed", "error", err, "thread_id", t.ID, "path", t.Path)
+			continue
+		}
+		resolved++
+	}
+
+	o.logger.Info("auto-resolve complete", "resolved", resolved, "attempted", attempted, "bot_unresolved", botUnresolved, "pr", event.PRNumber)
+}
+
+// enrichFindings annotates each comment with pattern/rule matches and novelty flags.
+// Non-fatal: defaults to is_new_finding=true on any search failure.
+func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) error {
+	if o.indexer == nil {
+		return nil
+	}
+
+	owner, repo, err := splitRepoFullName(run.PREvent.RepoFullName)
+	if err != nil {
+		return nil // non-fatal
+	}
+
+	memClient := o.indexer.Client()
+	sem := make(chan struct{}, 5)
+	var wg sync.WaitGroup
+
+	for i := range run.FileReviews {
+		fr := &run.FileReviews[i]
+		for j := range fr.Comments {
+			c := &fr.Comments[j]
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(c *FileComment) {
+				defer wg.Done()
+				defer func() { <-sem }()
+
+				_, score := o.indexer.SearchPatternMatch(ctx, owner, repo, c.Body)
+
+				var ruleContent string
+				if memClient != nil {
+					results := searchMemoryContent(ctx, memClient, c.Body, memory.OwnerTag(owner, "rules"), 1)
+					if len(results) > 0 {
+						ruleContent = results[0]
+					}
+				}
+
+				if score > 0.75 {
+					c.MatchedPatternScore = score
+				}
+				if ruleContent != "" {
+					c.EnforcedRuleContent = ruleContent
+				}
+				if score <= 0.75 && ruleContent == "" {
+					c.IsNewFinding = true
+				}
+			}(c)
+		}
+	}
+	wg.Wait()
+
+	o.logger.Info("enriched findings", "repo", run.PREvent.RepoFullName, "pr", run.PREvent.PRNumber)
+	return nil
+}
+
 func (o *Orchestrator) synthesize(ctx context.Context, run *PipelineRun) error {
 	var summary strings.Builder
 	header := "## Argus Review\n\n"
@@ -309,14 +424,31 @@ func (o *Orchestrator) synthesize(ctx context.Context, run *PipelineRun) error {
 	for _, fr := range run.FileReviews {
 		summary.WriteString(fmt.Sprintf("### `%s`\n", fr.Path))
 		for _, c := range fr.Comments {
-			summary.WriteString(fmt.Sprintf("- **[%s]** L%d: %s\n", c.Severity, c.Line, c.Body))
+			desc := c.What
+			if desc == "" {
+				desc = c.Body
+			}
+			summary.WriteString(fmt.Sprintf("- **[%s]** L%d: %s\n", c.Severity, c.Line, desc))
 		}
 		summary.WriteString("\n")
 	}
 
+	score := calculateScore(run)
+	totalComments := countComments(run)
+
+	// Build concise brief for GitHub review body
+	var brief string
+	if totalComments == 0 {
+		brief = fmt.Sprintf("Argus reviewed %d files and found no issues. Code looks good.", len(run.Diff.Files))
+	} else {
+		// Try LLM-generated conversational brief
+		brief = o.generateConversationalBrief(ctx, run, score)
+	}
+
 	run.Synthesis = &SynthesisResult{
 		Summary: summary.String(),
-		Score:   calculateScore(run),
+		Brief:   brief,
+		Score:   score,
 	}
 
 	if run.EventBus != nil {
@@ -326,6 +458,119 @@ func (o *Orchestrator) synthesize(ctx context.Context, run *PipelineRun) error {
 		})
 	}
 	return nil
+}
+
+const synthesisBriefSystemPrompt = `You are a senior software engineer summarizing a code review. Write naturally and concisely — like a quick Slack message to the PR author. Reference specific files when mentioning issues. 3-6 sentences max. No markdown headers, no bullet lists, no filler. Do NOT include a score or link — those are appended separately.`
+
+// generateConversationalBrief calls the LLM to produce a natural-language summary of the review.
+// Falls back to a deterministic brief on failure.
+func (o *Orchestrator) generateConversationalBrief(ctx context.Context, run *PipelineRun, score int) string {
+	// Build deterministic fallback
+	var criticals, warnings int
+	for _, fr := range run.FileReviews {
+		for _, c := range fr.Comments {
+			switch c.Severity {
+			case SeverityCritical:
+				criticals++
+			case SeverityWarning:
+				warnings++
+			}
+		}
+	}
+	top := topCategories(run, 2)
+	fallback := fmt.Sprintf("Argus found %d issues (%d critical, %d warnings) across %d files. Key concerns: %s.",
+		countComments(run), criticals, warnings, len(run.Diff.Files), strings.Join(top, ", "))
+
+	// Resolve synthesis provider (falls back to review provider)
+	lister := storeConfigLister{st: o.st, installationID: run.DBInstallationID}
+	provider, cfg, err := o.reviewStage.registry.ResolveProvider(ctx, lister, run.DBInstallationID, run.DBRepoID, llm.StageSynthesis)
+	if err != nil {
+		// Try review stage as fallback
+		provider, cfg, err = o.reviewStage.registry.ResolveProvider(ctx, lister, run.DBInstallationID, run.DBRepoID, llm.StageReview)
+		if err != nil {
+			o.logger.Warn("synthesis brief: no provider available, using fallback", "error", err)
+			return fallback
+		}
+	}
+
+	prompt := buildSynthesisBriefPrompt(run, score)
+	resp, err := provider.Complete(ctx, llm.CompletionRequest{
+		Model:       cfg.Model,
+		System:      synthesisBriefSystemPrompt,
+		Messages:    []llm.Message{{Role: "user", Content: prompt}},
+		MaxTokens:   400,
+		Temperature: 0.7,
+	})
+	if err != nil {
+		o.logger.Warn("synthesis brief LLM call failed, using fallback", "error", err)
+		return fallback
+	}
+
+	run.Tokens.Synthesis = StageTokens{
+		PromptTokens:     resp.TokensUsed.PromptTokens,
+		CompletionTokens: resp.TokensUsed.CompletionTokens,
+		TotalTokens:      resp.TokensUsed.TotalTokens,
+		Cost:             resp.Cost,
+	}
+	run.Tokens.Total.PromptTokens += resp.TokensUsed.PromptTokens
+	run.Tokens.Total.CompletionTokens += resp.TokensUsed.CompletionTokens
+	run.Tokens.Total.TotalTokens += resp.TokensUsed.TotalTokens
+	run.Tokens.Total.Cost += resp.Cost
+
+	brief := strings.TrimSpace(resp.Content)
+	if brief == "" {
+		return fallback
+	}
+	return util.Truncate(brief, 1500, false)
+}
+
+func buildSynthesisBriefPrompt(run *PipelineRun, score int) string {
+	var sb strings.Builder
+	safeTitle := sanitizeUserInput(util.Truncate(run.PREvent.PRTitle, 200, false))
+	safeAuthor := sanitizeUserInput(util.Truncate(run.PREvent.PRAuthor, 100, false))
+	sb.WriteString(fmt.Sprintf("PR #%d: \"%s\" by %s\n", run.PREvent.PRNumber, safeTitle, safeAuthor))
+	sb.WriteString(fmt.Sprintf("Files reviewed: %d, Score: %d/10\n\n", len(run.Diff.Files), score))
+
+	if run.PREvent.PRBody != "" {
+		sb.WriteString(wrapInDelimiters("pr_description", sanitizeUserInput(util.Truncate(run.PREvent.PRBody, 300, false))) + "\n\n")
+	}
+
+	sb.WriteString("Review comments:\n")
+	for _, fr := range run.FileReviews {
+		for _, c := range fr.Comments {
+			body := c.What
+			if body == "" {
+				body = c.Body
+			}
+			sb.WriteString(fmt.Sprintf("- %s:%d [%s·%s] %s\n", fr.Path, c.Line, c.Severity, c.Category, util.Truncate(body, 120, true)))
+		}
+	}
+	sb.WriteString("\nWrite a brief conversational summary of this review.")
+	return sb.String()
+}
+
+// topCategories returns the top N most frequent comment categories from FileReviews.
+func topCategories(run *PipelineRun, n int) []string {
+	counts := make(map[Category]int)
+	for _, fr := range run.FileReviews {
+		for _, c := range fr.Comments {
+			counts[c.Category]++
+		}
+	}
+	type catCount struct {
+		cat   Category
+		count int
+	}
+	var sorted []catCount
+	for cat, count := range counts {
+		sorted = append(sorted, catCount{cat, count})
+	}
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].count > sorted[j].count })
+	var result []string
+	for i := 0; i < n && i < len(sorted); i++ {
+		result = append(result, string(sorted[i].cat))
+	}
+	return result
 }
 
 // pass2 re-reviews "hot" files (3+ comments scored 70+) with a fresh Architecture
@@ -385,7 +630,7 @@ func (o *Orchestrator) pass2(ctx context.Context, run *PipelineRun) error {
 			file:       f,
 			action:     TriageDeep,
 			specialist: SpecialistArchitecture,
-			systemBase: specialistPrompt(SpecialistArchitecture),
+			systemBase: specialistPrompt(SpecialistArchitecture, run.Prompts),
 			deepReview: true,
 		}
 		rev, tok, err := o.reviewStage.reviewFile(ctx, run, p, fileContents, owner, repo, cfg, provider)
@@ -427,8 +672,13 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		return fmt.Errorf("synthesis result is nil, cannot post review")
 	}
 
+	reviewHeader := "## Argus Review\n\n"
+	if run.IsIncremental {
+		reviewHeader = "## Argus Review (Incremental)\n\n"
+	}
 	submission := &ghpkg.ReviewSubmission{
-		Summary: run.Synthesis.Summary,
+		Summary: reviewHeader + run.Synthesis.Brief +
+			fmt.Sprintf("\n\nScore: **%d/10** · [Full review →](https://argusai.vercel.app/reviews/%s)", run.Synthesis.Score, run.ReviewID.String()),
 	}
 
 	// Build valid-line sets from diff to avoid 422 "line could not be resolved"
@@ -513,6 +763,31 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	o.extractConventions(ctx, run, owner, repo)
 	o.synthesizeFileMemories(ctx, run, owner, repo)
 	o.indexPRSummary(ctx, run, owner, repo)
+
+	// Mark scenarios touching changed files as outdated
+	changedPaths := make([]string, 0, len(run.Diff.Files))
+	for _, f := range run.Diff.Files {
+		changedPaths = append(changedPaths, f.NewName)
+	}
+	o.st.MarkScenarioOutdated(ctx, run.DBRepoID, changedPaths)
+
+	// Collect decision traces (auto-indexed — observational, not actionable)
+	traceSeeds := CollectReviewTraces(run)
+	var traceFails int
+	for _, seed := range traceSeeds {
+		if err := o.st.CreateTrace(ctx, run.DBRepoID, seed.FilePath, seed.SymbolName, seed.TraceType, seed.Content, seed.Severity, seed.ReviewID, seed.PRNumber, seed.Metadata); err != nil {
+			traceFails++
+		}
+		o.indexer.IndexDecisionTrace(ctx, owner, repo, seed.FilePath, seed.TraceType, seed.Content, seed.Severity)
+	}
+	if traceFails > 0 {
+		o.logger.Warn("some decision traces failed to persist", "failed", traceFails, "total", len(traceSeeds))
+	}
+
+	// Auto-learn scenarios from critical/warning findings.
+	// Active by default — devs react 👎 to dismiss false positives.
+	scenarioSeeds := ExtractScenariosFromReview(run)
+	StoreScenarioSeeds(ctx, o.st, o.indexer, owner, repo, run.DBInstallationID, &run.DBRepoID, scenarioSeeds)
 
 	if run.EventBus != nil {
 		run.EventBus.Publish(run.ReviewID, EventCompleted, map[string]any{
@@ -655,13 +930,23 @@ Return [] if no repo-specific patterns emerge. JSON array only.`, run.PREvent.Re
 			continue
 		}
 		customID := memory.PatternCustomID(owner, repo, "learned", p.Pattern)
-		_, err := o.indexer.IndexRepoPattern(ctx, owner, repo, p.Pattern, customID, map[string]string{
+		smResp, err := o.indexer.IndexRepoPattern(ctx, owner, repo, p.Pattern, customID, map[string]string{
 			"source":   "auto_learn",
 			"pr":       fmt.Sprintf("%d", run.PREvent.PRNumber),
 			"category": p.Category,
 		})
 		if err != nil {
 			o.logger.Warn("indexing auto-learned pattern", "error", err)
+		}
+		var smID *string
+		if smResp != nil {
+			smID = &smResp.ID
+		}
+		src := "auto_learn"
+		cat := strPtrOrNil(p.Category)
+		prNum := run.PREvent.PRNumber
+		if _, dbErr := o.st.CreatePattern(ctx, run.DBInstallationID, &run.DBRepoID, p.Pattern, smID, strPtrOrNil("argus:auto_learn"), &src, cat, &prNum); dbErr != nil {
+			o.logger.Warn("persisting auto-learned pattern", "error", dbErr)
 		}
 	}
 
@@ -761,13 +1046,23 @@ Return [] if no clear conventions emerge. JSON array only.`, run.PREvent.RepoFul
 		}
 		content := fmt.Sprintf("Convention [%s]: %s", c.Category, c.Convention)
 		customID := memory.PatternCustomID(owner, repo, "convention", c.Convention)
-		_, err := o.indexer.IndexRepoPattern(ctx, owner, repo, content, customID, map[string]string{
+		smResp, err := o.indexer.IndexRepoPattern(ctx, owner, repo, content, customID, map[string]string{
 			"source":   "convention_extraction",
 			"pr":       fmt.Sprintf("%d", run.PREvent.PRNumber),
 			"category": c.Category,
 		})
 		if err != nil {
 			o.logger.Warn("indexing convention", "error", err)
+		}
+		var smID *string
+		if smResp != nil {
+			smID = &smResp.ID
+		}
+		src := "convention"
+		cat := strPtrOrNil(c.Category)
+		prNum := run.PREvent.PRNumber
+		if _, dbErr := o.st.CreatePattern(ctx, run.DBInstallationID, &run.DBRepoID, content, smID, strPtrOrNil("argus:convention"), &src, cat, &prNum); dbErr != nil {
+			o.logger.Warn("persisting convention pattern", "error", dbErr)
 		}
 	}
 
@@ -850,9 +1145,9 @@ Max 200 words. Be concrete.`
 	synthCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	// Sanitize user-controlled fields for prompt injection resistance
-	safeTitle := truncate(run.PREvent.PRTitle, 200)
-	safeAuthor := truncate(run.PREvent.PRAuthor, 100)
+	// Sanitize + truncate user-controlled fields
+	safeTitle := sanitizeUserInput(util.Truncate(run.PREvent.PRTitle, 200, false))
+	safeAuthor := sanitizeUserInput(util.Truncate(run.PREvent.PRAuthor, 100, false))
 
 	var succeeded, failed int
 	for _, fc := range qualifying {
@@ -913,7 +1208,7 @@ func (o *Orchestrator) indexPRSummary(ctx context.Context, run *PipelineRun, own
 	content := fmt.Sprintf("PR #%d \"%s\" by %s\nScore: %d/10\nFiles: %s\n\n%s",
 		run.PREvent.PRNumber, run.PREvent.PRTitle, run.PREvent.PRAuthor,
 		run.Synthesis.Score, strings.Join(files, ", "),
-		truncate(run.Synthesis.Summary, 800))
+		util.Truncate(run.Synthesis.Summary, 800, false))
 
 	customID := memory.PRSummaryCustomID(owner, repo, run.PREvent.PRNumber)
 	_, err := o.indexer.IndexRepoPattern(ctx, owner, repo, content, customID, map[string]string{
@@ -977,7 +1272,14 @@ func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghRe
 				confidenceScore = &score
 			}
 
-			if err := o.st.CreateReviewComment(ctx, run.ReviewID, fr.Path, startLine, &line, &side, c.Body, &sev, &cat, specialist, snippet, confidenceScore, ghCommentID); err != nil {
+			var matchedPatternScore *float32
+			if c.MatchedPatternScore > 0 {
+				s := float32(c.MatchedPatternScore)
+				matchedPatternScore = &s
+			}
+			enforcedRule := strPtrOrNil(c.EnforcedRuleContent)
+
+			if err := o.st.CreateReviewComment(ctx, run.ReviewID, fr.Path, startLine, &line, &side, c.Body, &sev, &cat, specialist, snippet, confidenceScore, ghCommentID, nil, matchedPatternScore, enforcedRule, c.IsNewFinding); err != nil {
 				o.logger.Error("persisting review comment", "error", err, "file", fr.Path)
 			}
 
@@ -999,34 +1301,29 @@ func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghRe
 	}
 }
 
+// loadPrompts fetches custom prompt templates for a repo and returns a stage→prompt_text map.
+func (o *Orchestrator) loadPrompts(ctx context.Context, repoID int64) map[string]string {
+	templates, err := o.st.ListPromptTemplates(ctx, repoID)
+	if err != nil {
+		o.logger.Warn("loading custom prompts", "error", err)
+		return map[string]string{}
+	}
+	m := make(map[string]string, len(templates))
+	for _, t := range templates {
+		m[t.Stage] = t.PromptText
+	}
+	return m
+}
+
 // resolveReviewProvider loads model configs and returns a review-stage provider.
 func (o *Orchestrator) resolveReviewProvider(ctx context.Context, run *PipelineRun) (llm.ModelConfig, llm.Provider, error) {
-	dbConfigs, err := o.st.ListModelConfigs(ctx, run.DBRepoID)
+	provider, cfg, err := o.reviewStage.registry.ResolveProvider(ctx, storeConfigLister{st: o.st, installationID: run.DBInstallationID}, run.DBInstallationID, run.DBRepoID, llm.StageReview)
 	if err != nil {
-		return llm.ModelConfig{}, nil, fmt.Errorf("model configs: %w", err)
-	}
-	repoConfigs := storeToLLMConfigs(dbConfigs)
-	cfg, err := o.reviewStage.registry.GetConfig(run.DBRepoID, llm.StageReview, repoConfigs)
-	if err != nil {
-		return llm.ModelConfig{}, nil, fmt.Errorf("no review config: %w", err)
-	}
-	provider, err := o.reviewStage.registry.GetProviderForRepo(ctx, run.DBInstallationID, &run.DBRepoID, cfg.Provider)
-	if err != nil {
-		return llm.ModelConfig{}, nil, fmt.Errorf("provider unavailable: %w", err)
+		return llm.ModelConfig{}, nil, err
 	}
 	return cfg, provider, nil
 }
 
-// truncate returns the first maxLen bytes of s without splitting UTF-8 runes.
-func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	for maxLen > 0 && maxLen < len(s) && s[maxLen]&0xC0 == 0x80 {
-		maxLen--
-	}
-	return s[:maxLen]
-}
 
 func getDiffContext(run *PipelineRun, path string) string {
 	if run.Diff == nil {
@@ -1034,7 +1331,7 @@ func getDiffContext(run *PipelineRun, path string) string {
 	}
 	for _, f := range run.Diff.Files {
 		if f.NewName == path {
-			return truncate(f.RawDiff, 1000)
+			return util.Truncate(f.RawDiff, 1000, false)
 		}
 	}
 	return ""
@@ -1042,11 +1339,37 @@ func getDiffContext(run *PipelineRun, path string) string {
 
 // formatCommentBody builds the GitHub review comment body with severity, category, and optional suggestion block.
 func formatCommentBody(c FileComment) string {
-	body := fmt.Sprintf("**[%s | %s]** %s", c.Severity, c.Category, c.Body)
+	title := fmt.Sprintf("**[%s · %s]** %s", c.Severity, c.Category, commentTitle(c))
+
+	var body string
+	if c.What != "" && c.Why != "" {
+		body = title + "\n\n**What:** " + c.What + "\n\n**Why:** " + c.Why
+	} else {
+		body = title + "\n\n" + c.Body
+	}
+
 	if c.Suggestion != "" {
 		body += "\n\n```suggestion\n" + strings.TrimRight(c.Suggestion, "\n") + "\n```"
 	}
+
+	// Feedback prompt — Argus auto-learns, devs can dismiss
+	if c.Severity == SeverityCritical || c.Severity == SeverityWarning {
+		body += "\n\n---\n<sub>Argus learns from this automatically · React 👎 to dismiss</sub>"
+	}
+
 	return body
+}
+
+// commentTitle extracts a short title from the comment for the header line.
+func commentTitle(c FileComment) string {
+	src := c.What
+	if src == "" {
+		src = c.Body
+	}
+	if idx := strings.Index(src, "."); idx > 0 && idx < 80 {
+		return src[:idx]
+	}
+	return util.Truncate(src, 80, false)
 }
 
 func strPtrOrNil(s string) *string {

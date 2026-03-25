@@ -1,0 +1,5 @@
+ALTER TABLE scenarios ADD COLUMN steps JSONB DEFAULT '[]';
+ALTER TABLE scenarios ADD COLUMN initial_state TEXT DEFAULT '';
+ALTER TABLE scenarios ADD COLUMN expected_outcome TEXT DEFAULT '';
+ALTER TABLE scenarios ADD COLUMN is_outdated BOOLEAN DEFAULT FALSE;
+ALTER TABLE scenarios ADD COLUMN last_run_at TIMESTAMPTZ;

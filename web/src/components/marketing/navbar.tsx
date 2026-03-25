@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
 import { SignedIn, SignedOut } from "@clerk/nextjs";
+import { Menu, X } from "lucide-react";
 
 const navLinks = [
   { href: "/pricing", label: "Pricing" },
@@ -15,6 +16,7 @@ export function Navbar() {
   const [hidden, setHidden] = useState(false);
   const lastYRef = useRef(0);
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
   const [pillStyle, setPillStyle] = useState<{
     left: number;
     width: number;
@@ -132,6 +134,15 @@ export function Navbar() {
           ))}
         </div>
 
+        {/* Mobile hamburger */}
+        <button
+          onClick={() => setMenuOpen(!menuOpen)}
+          className="p-2 md:hidden"
+          aria-label={menuOpen ? "Close menu" : "Open menu"}
+        >
+          {menuOpen ? <X className="h-5 w-5 text-zinc-400" /> : <Menu className="h-5 w-5 text-zinc-400" />}
+        </button>
+
         {/* Right side: auth */}
         <div className="flex items-center gap-3">
           <SignedOut>
@@ -160,6 +171,24 @@ export function Navbar() {
           </SignedIn>
         </div>
       </div>
+
+      {/* Mobile dropdown */}
+      {menuOpen && (
+        <div className="border-t border-zinc-800 bg-void/95 backdrop-blur-sm md:hidden">
+          <div className="flex flex-col gap-1 px-6 py-4">
+            {navLinks.map((link) => (
+              <Link
+                key={link.href}
+                href={link.href}
+                onClick={() => setMenuOpen(false)}
+                className="py-2 text-xs font-mono text-slate-text hover:text-foreground transition-colors"
+              >
+                {link.label}
+              </Link>
+            ))}
+          </div>
+        </div>
+      )}
     </nav>
   );
 }

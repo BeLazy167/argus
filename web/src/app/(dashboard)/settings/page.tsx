@@ -1,43 +1,49 @@
 "use client";
 
 import { useState } from "react";
-import { Settings, Loader2, Save, Trash2, Key, Cpu, ChevronDown, Zap, Check, X, ArrowUp, Info, UserCog, Lock, ShieldCheck, Bug, Blocks, RotateCcw } from "lucide-react";
+import { Settings, Loader2, Save, Key, Cpu, ChevronDown, Zap, Check, X, ArrowUp, Info, UserCog, Lock, ShieldCheck, Bug, Blocks, RotateCcw, FileText, RotateCw, Search, Sliders, FlaskConical } from "lucide-react";
 import {
   useModelConfigs,
   useUpsertModelConfig,
   useDeleteModelConfig,
   useTestConfig,
+  useOrgModelConfigs,
+  useUpsertOrgModelConfig,
+  useDeleteOrgModelConfig,
   type TestResult,
 } from "@/lib/queries/model-configs";
+import { useProviderKeys } from "@/lib/queries/provider-keys";
 import {
-  useProviderKeys,
-  useUpsertProviderKey,
-  useDeleteProviderKey,
-} from "@/lib/queries/provider-keys";
+  usePrompts,
+  useDefaultPrompts,
+  useUpsertPrompt,
+  useDeletePrompt,
+} from "@/lib/queries/prompts";
+import { useOpenRouterModels } from "@/lib/queries/openrouter-models";
 import { useActiveRepo } from "@/lib/hooks/use-active-repo";
 import { useInstallation } from "@/providers/installation-provider";
 import { useUpdateRepo } from "@/lib/queries/repos";
 import { RepoSelect } from "@/components/dashboard/repo-select";
-import type { ProviderKey } from "@/lib/types";
+import { Protect } from "@clerk/nextjs";
+import { UpgradePrompt } from "@/components/dashboard/upgrade-prompt";
+import type { PromptTemplate } from "@/lib/types";
+import { useOrgDefaults, useSaveOrgDefaults } from "@/lib/queries/org-defaults";
 
 /* ── Providers & model quick-picks ── */
 
-const PROVIDERS = ["openrouter", "openai", "anthropic", "zhipu"] as const;
+const PROVIDERS = ["openrouter", "openai", "anthropic", "azure", "gcp_vertex", "aws_bedrock", "zhipu"] as const;
 type Provider = (typeof PROVIDERS)[number];
 
 const PROVIDER_LABELS: Record<Provider, string> = {
   openrouter: "OpenRouter",
   openai: "OpenAI",
   anthropic: "Anthropic",
+  azure: "Azure OpenAI",
+  gcp_vertex: "GCP Vertex AI",
+  aws_bedrock: "AWS Bedrock",
   zhipu: "Zhipu AI (GLM)",
 };
 
-const PROVIDER_BASE_URLS: Record<Provider, string> = {
-  openrouter: "https://openrouter.ai/api/v1",
-  openai: "https://api.openai.com/v1",
-  anthropic: "https://api.anthropic.com/v1",
-  zhipu: "https://api.z.ai/api/paas/v4",
-};
 
 const MODEL_PICKS: Record<Provider, string[]> = {
   openrouter: [
@@ -47,10 +53,13 @@ const MODEL_PICKS: Record<Provider, string[]> = {
   ],
   openai: ["gpt-4o", "gpt-4o-mini"],
   anthropic: ["claude-sonnet-4-20250514"],
+  azure: ["gpt-4o", "gpt-4o-mini"],
+  gcp_vertex: ["gemini-2.5-pro", "gemini-2.5-flash"],
+  aws_bedrock: ["anthropic.claude-sonnet-4", "anthropic.claude-haiku"],
   zhipu: ["glm-5", "glm-4-plus", "glm-4"],
 };
 
-const CORE_STAGES = ["triage", "review", "synthesis"] as const;
+const CORE_STAGES = ["triage", "review", "scoring", "synthesis"] as const;
 
 const STAGE_DESCRIPTIONS: Record<string, string> = {
   triage: "Decides which files need detailed review vs. can be skimmed",
@@ -77,7 +86,22 @@ const PERSONAS = [
   { value: "mentor", label: "Mentor", description: "Educational tone — explains why, suggests learning paths" },
   { value: "architect", label: "Architect", description: "Design patterns, coupling, API contracts, and module boundaries" },
   { value: "strict", label: "Strict", description: "Comments on everything — no issue too small" },
+  { value: "custom", label: "Custom", description: "Write your own persona prompt — define exactly how Argus reviews" },
 ] as const;
+
+/* ── Prompt stage labels ── */
+
+const STAGE_LABELS: Record<string, string> = {
+  triage_system: "Triage",
+  review_system: "Review",
+  scoring_system: "Scoring",
+  specialist_bug_hunter: "Bug Hunter Specialist",
+  specialist_security: "Security Specialist",
+  specialist_architecture: "Architecture Specialist",
+  specialist_regression: "Regression Specialist",
+};
+
+const PROMPT_STAGES = Object.keys(STAGE_LABELS);
 
 /* ── Status Badge ── */
 
@@ -136,101 +160,6 @@ function PersonaCard({
   );
 }
 
-/* ── API Key Card ── */
-
-function ProviderKeyCard({
-  provider,
-  existing,
-}: {
-  provider: Provider;
-  existing?: ProviderKey;
-}) {
-  const [apiKey, setApiKey] = useState("");
-  const [baseUrl, setBaseUrl] = useState(existing?.base_url ?? "");
-  const upsert = useUpsertProviderKey();
-  const del = useDeleteProviderKey();
-
-  const handleSave = () => {
-    if (!apiKey && !existing) return;
-    upsert.mutate({
-      provider,
-      api_key: apiKey,
-      base_url: baseUrl || undefined,
-    });
-    setApiKey("");
-  };
-
-  return (
-    <div className="rounded-lg border border-iron bg-charcoal p-5">
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-2">
-          <Key className="h-3.5 w-3.5 text-amber" />
-          <span className="text-xs font-mono font-medium text-foreground">
-            {PROVIDER_LABELS[provider]}
-          </span>
-        </div>
-        <StatusBadge variant={existing ? "active" : "inactive"} label={existing ? "Active" : "Not configured"} />
-      </div>
-
-      {existing && (
-        <p className="text-[11px] font-mono text-slate-text mb-3">
-          Key: {existing.api_key_masked}
-        </p>
-      )}
-
-      <div className="space-y-2 mb-3">
-        <div>
-          <label className="block text-[10px] font-mono text-slate-text mb-1">
-            {existing ? "Replace API key" : "API key"}
-          </label>
-          <input
-            type="password"
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-            placeholder={existing ? "Enter new key to replace" : "sk-..."}
-            className="w-full rounded border border-iron bg-background px-2 py-1.5 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none"
-          />
-        </div>
-        <div>
-          <label className="block text-[10px] font-mono text-slate-text mb-1">
-            Base URL override (optional)
-          </label>
-          <input
-            type="text"
-            value={baseUrl}
-            onChange={(e) => setBaseUrl(e.target.value)}
-            placeholder={PROVIDER_BASE_URLS[provider]}
-            className="w-full rounded border border-iron bg-background px-2 py-1.5 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none"
-          />
-        </div>
-      </div>
-
-      <div className="flex items-center gap-2">
-        <button
-          type="button"
-          onClick={handleSave}
-          disabled={upsert.isPending || (!apiKey && !existing)}
-          className="flex items-center gap-2 rounded border border-amber/30 bg-amber/10 px-3 py-1 text-[11px] font-mono text-amber hover:bg-amber/20 transition-colors disabled:opacity-50"
-        >
-          <Save className="h-3 w-3" />
-          {upsert.isPending ? "Saving..." : "Save"}
-        </button>
-        {existing && (
-          <button
-            type="button"
-            onClick={() => del.mutate(existing!.id)}
-            disabled={del.isPending}
-            className="flex items-center gap-2 rounded border border-red-400/30 px-3 py-1 text-[11px] font-mono text-red-400 hover:bg-red-400/10 transition-colors disabled:opacity-50"
-          >
-            <Trash2 className="h-3 w-3" />
-            {del.isPending ? "Deleting..." : "Delete"}
-          </button>
-        )}
-      </div>
-    </div>
-  );
-}
-
 /* ── Model Config Card ── */
 
 function ConfigCard({
@@ -238,11 +167,17 @@ function ConfigCard({
   repoId,
   existing,
   savedProviders,
+  installationId,
+  onSave,
+  onDelete,
 }: {
   stage: string;
   repoId: number;
   existing?: { provider: string; model: string; base_url?: string; max_tokens: number; temperature: number };
   savedProviders: string[];
+  installationId?: number;
+  onSave?: (data: { stage: string; provider: string; model: string; base_url?: string; max_tokens: number; temperature: number }) => void;
+  onDelete?: (stage: string) => void;
 }) {
   const [provider, setProvider] = useState(existing?.provider ?? "");
   const [model, setModel] = useState(existing?.model ?? "");
@@ -250,11 +185,16 @@ function ConfigCard({
   const [isCustom, setIsCustom] = useState(false);
   const [maxTokens, setMaxTokens] = useState(existing?.max_tokens ?? 4096);
   const [temperature, setTemperature] = useState(existing?.temperature ?? 0.2);
+  const [baseURL, setBaseURL] = useState(existing?.base_url ?? "");
+  const [modelSearch, setModelSearch] = useState("");
 
   const upsert = useUpsertModelConfig();
   const del = useDeleteModelConfig();
   const test = useTestConfig();
   const [testResult, setTestResult] = useState<TestResult | null>(null);
+
+  const isOpenRouter = provider === "openrouter";
+  const { data: orModels } = useOpenRouterModels(isOpenRouter ? installationId : undefined);
 
   const effectiveProvider = provider as Provider;
   const picks = MODEL_PICKS[effectiveProvider] ?? [];
@@ -275,10 +215,14 @@ function ConfigCard({
 
   const handleSave = () => {
     if (!validate()) return;
-    upsert.mutate(
-      { repoId, stage, provider, model: finalModel, max_tokens: maxTokens, temperature },
-      { onError: (err) => setError(err instanceof Error ? err.message : "Save failed") },
-    );
+    if (onSave) {
+      onSave({ stage, provider, model: finalModel, max_tokens: maxTokens, temperature });
+    } else {
+      upsert.mutate(
+        { repoId, stage, provider, model: finalModel, max_tokens: maxTokens, temperature },
+        { onError: (err) => setError(err instanceof Error ? err.message : "Save failed") },
+      );
+    }
   };
 
   const handleTest = () => {
@@ -318,7 +262,7 @@ function ConfigCard({
         {existing && (
           <button
             type="button"
-            onClick={() => del.mutate({ repoId, stage })}
+            onClick={() => onDelete ? onDelete(stage) : del.mutate({ repoId, stage })}
             className="text-[11px] font-mono text-slate-text hover:text-red-400 transition-colors"
           >
             Reset
@@ -379,31 +323,118 @@ function ConfigCard({
           <label className="block text-[10px] font-mono text-slate-text mb-1">
             Model
           </label>
-          {picks.length > 0 && !isCustom ? (
+          {isOpenRouter && orModels && orModels.length > 0 && !isCustom ? (
+            /* Searchable OpenRouter model list */
             <div className="relative">
-              <select
-                value={model}
-                onChange={(e) => handleModelSelect(e.target.value)}
-                className="w-full appearance-none rounded border border-iron bg-background px-2 py-1.5 pr-7 text-xs font-mono text-foreground focus:border-amber focus:outline-none"
-              >
-                <option value="">Select model</option>
-                {picks.map((m) => (
-                  <option key={m} value={m}>{m}</option>
-                ))}
-                <option value="__custom__">Custom...</option>
-              </select>
-              <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-3 w-3 -translate-y-1/2 text-slate-text" />
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-slate-text" />
+                <input
+                  type="text"
+                  value={modelSearch || model}
+                  onChange={(e) => {
+                    setModelSearch(e.target.value);
+                    setModel("");
+                  }}
+                  onFocus={() => { if (model) { setModelSearch(model); setModel(""); } }}
+                  placeholder="Search models..."
+                  autoComplete="off"
+                  className="w-full rounded border border-iron bg-background pl-7 pr-8 py-1.5 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none"
+                />
+                <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-3 w-3 -translate-y-1/2 text-slate-text" />
+              </div>
+              {modelSearch && !model && (
+                <div className="absolute z-20 mt-1 w-full max-h-48 overflow-y-auto rounded border border-iron bg-charcoal shadow-lg">
+                  {orModels
+                    .filter((m) => m.id.toLowerCase().includes(modelSearch.toLowerCase()) || m.name.toLowerCase().includes(modelSearch.toLowerCase()))
+                    .slice(0, 20)
+                    .map((m) => (
+                      <button
+                        key={m.id}
+                        type="button"
+                        onClick={() => {
+                          setModel(m.id);
+                          setModelSearch("");
+                        }}
+                        className="w-full text-left px-3 py-1.5 text-xs font-mono hover:bg-amber/10 transition-colors"
+                      >
+                        <span className="text-foreground">{m.id}</span>
+                        <span className="text-slate-text ml-2">
+                          {(m.context_length / 1000).toFixed(0)}k ctx
+                        </span>
+                      </button>
+                    ))}
+                  <button
+                    type="button"
+                    onClick={() => handleModelSelect("__custom__")}
+                    className="w-full text-left px-3 py-1.5 text-xs font-mono text-amber hover:bg-amber/10 transition-colors border-t border-iron"
+                  >
+                    Custom model...
+                  </button>
+                </div>
+              )}
             </div>
           ) : (
-            <input
-              type="text"
-              value={finalModel}
-              onChange={(e) => isCustom ? setCustomModel(e.target.value) : setModel(e.target.value)}
-              placeholder="model-name"
-              className="w-full rounded border border-iron bg-background px-2 py-1.5 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none"
-            />
+            /* Combo input: type any model name OR click a suggestion */
+            <div className="relative">
+              <input
+                type="text"
+                value={isCustom ? customModel : model}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  if (isCustom) { setCustomModel(v); } else { setModel(v); setIsCustom(false); }
+                }}
+                onFocus={() => setModelSearch("__show__")}
+                onBlur={() => setTimeout(() => setModelSearch(""), 150)}
+                placeholder="Type or select a model..."
+                autoComplete="off"
+                className="w-full rounded border border-iron bg-background px-2 py-1.5 pr-7 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none"
+              />
+              <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-3 w-3 -translate-y-1/2 text-slate-text" />
+              {modelSearch === "__show__" && picks.length > 0 && (
+                <div className="absolute z-20 mt-1 w-full max-h-48 overflow-y-auto rounded border border-iron bg-charcoal shadow-lg">
+                  {picks.map((m) => (
+                    <button
+                      key={m}
+                      type="button"
+                      onMouseDown={(e) => { e.preventDefault(); setModel(m); setIsCustom(false); setModelSearch(""); }}
+                      className="w-full text-left px-3 py-1.5 text-xs font-mono hover:bg-amber/10 transition-colors text-foreground"
+                    >
+                      {m}
+                    </button>
+                  ))}
+                  <div className="px-3 py-1 text-[9px] font-mono text-slate-text/50 border-t border-iron">
+                    Or type any model name above
+                  </div>
+                </div>
+              )}
+            </div>
           )}
         </div>
+
+        {/* Base URL override — shown for providers that need custom endpoints */}
+        {(provider === "azure" || provider === "gcp_vertex" || provider === "aws_bedrock") && (
+          <div className="col-span-2">
+            <label className="block text-[10px] font-mono text-slate-text mb-1">
+              Endpoint URL <span className="text-amber">*</span>
+            </label>
+            <input
+              type="text"
+              value={baseURL}
+              onChange={(e) => setBaseURL(e.target.value)}
+              placeholder={
+                provider === "azure" ? "https://{resource}.openai.azure.com/openai" :
+                provider === "gcp_vertex" ? "https://{region}-aiplatform.googleapis.com/v1/projects/{project}/locations/{region}/endpoints/openapi" :
+                "https://bedrock-runtime.{region}.amazonaws.com"
+              }
+              className="w-full rounded border border-iron bg-background px-2 py-1.5 text-xs font-mono text-foreground placeholder:text-iron/50 focus:border-amber focus:outline-none"
+            />
+            <p className="text-[9px] font-mono text-slate-text/50 mt-1">
+              {provider === "azure" && "Azure OpenAI resource endpoint"}
+              {provider === "gcp_vertex" && "Vertex AI OpenAI-compatible endpoint"}
+              {provider === "aws_bedrock" && "Bedrock runtime endpoint"}
+            </p>
+          </div>
+        )}
 
         {/* Temperature slider */}
         <div>
@@ -545,6 +576,179 @@ function DeepReviewCard({
   );
 }
 
+/* ── Prompt Editor Card ── */
+
+function PromptCard({
+  stage,
+  repoId,
+  custom,
+  defaultText,
+}: {
+  stage: string;
+  repoId: number;
+  custom?: PromptTemplate;
+  defaultText: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState(custom?.prompt_text ?? "");
+  const upsert = useUpsertPrompt();
+  const del = useDeletePrompt();
+
+  const isCustom = custom?.is_custom ?? false;
+  const displayText = isCustom ? custom!.prompt_text : defaultText;
+
+  const handleSave = () => {
+    if (!draft.trim()) return;
+    upsert.mutate({ repoId, stage, prompt_text: draft });
+  };
+
+  const handleReset = () => {
+    del.mutate(
+      { repoId, stage },
+      { onSuccess: () => setDraft("") },
+    );
+  };
+
+  return (
+    <div className="rounded-lg border border-iron bg-charcoal">
+      <button
+        type="button"
+        onClick={() => {
+          if (!open && !draft) setDraft(displayText);
+          setOpen(!open);
+        }}
+        className="flex w-full items-center justify-between p-4 text-left"
+      >
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-mono font-medium text-foreground">
+            {STAGE_LABELS[stage]}
+          </span>
+          {isCustom && (
+            <span className="inline-flex items-center rounded-sm border border-amber/30 bg-amber/10 px-1.5 py-0.5 text-[9px] font-mono uppercase tracking-wider text-amber">
+              Custom
+            </span>
+          )}
+        </div>
+        <ChevronDown className={`h-3.5 w-3.5 text-slate-text transition-transform ${open ? "rotate-180" : ""}`} />
+      </button>
+
+      {open && (
+        <div className="border-t border-iron px-4 pb-4 pt-3 space-y-3">
+          <textarea
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            placeholder={defaultText}
+            rows={10}
+            className="w-full rounded border border-iron bg-background px-3 py-2 text-xs font-mono text-foreground placeholder:text-iron/60 focus:border-amber focus:outline-none resize-y leading-relaxed"
+          />
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleSave}
+              disabled={upsert.isPending || !draft.trim()}
+              className="flex items-center gap-2 rounded border border-amber/30 bg-amber/10 px-3 py-1 text-[11px] font-mono text-amber hover:bg-amber/20 transition-colors disabled:opacity-50"
+            >
+              <Save className="h-3 w-3" />
+              {upsert.isPending ? "Saving..." : "Save"}
+            </button>
+            {isCustom && (
+              <button
+                type="button"
+                onClick={handleReset}
+                disabled={del.isPending}
+                className="flex items-center gap-2 rounded border border-iron px-3 py-1 text-[11px] font-mono text-slate-text hover:text-foreground hover:border-foreground/30 transition-colors disabled:opacity-50"
+              >
+                <RotateCw className="h-3 w-3" />
+                {del.isPending ? "Resetting..." : "Reset to default"}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── Feature Toggles ── */
+
+const FEATURE_TOGGLES = [
+  {
+    key: "cross_file_context",
+    label: "Cross-file context",
+    description: "Include related files (callers, tests, imports) in review context",
+    defaultValue: true,
+  },
+  {
+    key: "blast_radius",
+    label: "Blast radius analysis",
+    description: "Show dependency impact analysis for changed code",
+    defaultValue: true,
+  },
+  {
+    key: "scenario_memory",
+    label: "Scenario memory",
+    description: "Auto-generate and check scenarios from past reviews",
+    defaultValue: true,
+  },
+  {
+    key: "code_simulation",
+    label: "Code simulation",
+    description: "Simulate execution paths to predict breakage (experimental)",
+    defaultValue: false,
+    experimental: true,
+  },
+] as const;
+
+function FeatureToggleCard({
+  toggle,
+  enabled,
+  onToggle,
+  pending,
+}: {
+  toggle: (typeof FEATURE_TOGGLES)[number];
+  enabled: boolean;
+  onToggle: () => void;
+  pending: boolean;
+}) {
+  return (
+    <div className={`rounded-lg border p-4 transition-colors ${
+      enabled ? "border-amber/30 bg-amber/5" : "border-iron bg-charcoal"
+    }`}>
+      <div className="flex items-center justify-between mb-1.5">
+        <div className="flex items-center gap-2">
+          <span className={`text-xs font-mono font-medium ${enabled ? "text-amber" : "text-foreground"}`}>
+            {toggle.label}
+          </span>
+          {"experimental" in toggle && toggle.experimental && (
+            <span className="inline-flex items-center gap-1 rounded-sm border border-purple-400/30 bg-purple-400/10 px-1.5 py-0.5 text-[9px] font-mono uppercase tracking-wider text-purple-400">
+              <FlaskConical className="h-2.5 w-2.5" />
+              experimental
+            </span>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={onToggle}
+          disabled={pending}
+          aria-label={enabled ? `Disable ${toggle.label}` : `Enable ${toggle.label}`}
+          className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 transition-colors duration-200 ease-in-out focus:outline-none focus-visible:ring-2 focus-visible:ring-amber/50 focus-visible:ring-offset-2 focus-visible:ring-offset-background ${
+            enabled ? "border-amber bg-amber" : "border-iron bg-iron/50"
+          }`}
+        >
+          <span
+            className={`pointer-events-none inline-block h-5 w-5 rounded-full bg-foreground shadow-lg ring-0 transition-transform duration-200 ease-in-out ${
+              enabled ? "translate-x-5" : "translate-x-0"
+            }`}
+          />
+        </button>
+      </div>
+      <p className="text-[10px] font-mono text-slate-text leading-relaxed">
+        {toggle.description}
+      </p>
+    </div>
+  );
+}
+
 /* ── Page ── */
 
 export default function SettingsPage() {
@@ -553,17 +757,40 @@ export default function SettingsPage() {
 
   const { data: configs, isLoading: configsLoading } = useModelConfigs(activeId);
   const { data: providerKeys, isLoading: keysLoading } = useProviderKeys();
+  const { data: customPrompts } = usePrompts(activeId);
+  const { data: defaultPrompts } = useDefaultPrompts();
   const updateRepo = useUpdateRepo();
 
   const [personaError, setPersonaError] = useState("");
+  const [settingsScope, setSettingsScope] = useState<"org" | "repo">("repo");
+
+  // Org defaults
+  const { data: orgDefaults, isLoading: orgDefaultsLoading } = useOrgDefaults();
+  const saveOrgDefaults = useSaveOrgDefaults();
+
+  // Org model configs
+  const { data: orgConfigs } = useOrgModelConfigs();
+  const upsertOrgConfig = useUpsertOrgModelConfig();
+  const deleteOrgConfig = useDeleteOrgModelConfig();
+  const orgConfigMap = new Map(orgConfigs?.map((c) => [c.stage, c]));
+
+  const promptMap = new Map(customPrompts?.map((p) => [p.stage, p]));
+  const defaultPromptMap = new Map(defaultPrompts?.map((p) => [p.stage, p]));
 
   const activeRepo = repos.find((r) => r.id === activeId);
   const currentPersona = (activeRepo?.settings_json?.persona as string) || "default";
+  const currentCustomPrompt = (activeRepo?.settings_json?.custom_persona_prompt as string) || "";
   const deepReview = (activeRepo?.settings_json?.deep_review as boolean) ?? false;
+  const [customPromptDraft, setCustomPromptDraft] = useState(currentCustomPrompt);
+
+  // Org defaults state
+  const orgPersona = (orgDefaults?.persona as string) || "default";
+  const orgCustomPrompt = (orgDefaults?.custom_persona_prompt as string) || "";
+  const orgDeepReview = (orgDefaults?.deep_review as boolean) ?? false;
+  const [orgCustomPromptDraft, setOrgCustomPromptDraft] = useState(orgCustomPrompt);
 
   const loading = reposLoading || keysLoading || (activeId > 0 && configsLoading);
   const configMap = new Map(configs?.map((c) => [c.stage, c]));
-  const keyMap = new Map(providerKeys?.map((k) => [k.provider, k]));
   const savedProviders = providerKeys?.map((k) => k.provider) ?? [];
   const configuredCount = savedProviders.length;
 
@@ -574,9 +801,13 @@ export default function SettingsPage() {
     });
   };
 
+  const toggleOrgDeepReview = () => {
+    saveOrgDefaults.mutate({ ...orgDefaults, deep_review: !orgDeepReview });
+  };
+
   return (
     <>
-      <div className="mb-8 flex items-center justify-between">
+      <div className="mb-6 flex items-center justify-between">
         <div>
           <h1 className="font-display text-2xl font-bold text-foreground">
             Settings
@@ -585,10 +816,200 @@ export default function SettingsPage() {
             API keys and model configuration for {active?.org_login ?? "your org"}.
           </p>
         </div>
-        <RepoSelect repos={repos} value={activeId} onChange={setSelectedId} />
+        {settingsScope === "repo" && (
+          <RepoSelect repos={repos} value={activeId} onChange={setSelectedId} />
+        )}
       </div>
 
-      {loading ? (
+      {/* Scope tabs */}
+      <div className="flex items-center gap-1 mb-8 border-b border-iron">
+        <button
+          type="button"
+          onClick={() => setSettingsScope("org")}
+          className={`px-4 py-2 text-xs font-mono transition-colors border-b-2 -mb-px ${
+            settingsScope === "org"
+              ? "border-amber text-amber"
+              : "border-transparent text-slate-text hover:text-foreground"
+          }`}
+        >
+          Org Defaults
+        </button>
+        <button
+          type="button"
+          onClick={() => setSettingsScope("repo")}
+          className={`px-4 py-2 text-xs font-mono transition-colors border-b-2 -mb-px ${
+            settingsScope === "repo"
+              ? "border-amber text-amber"
+              : "border-transparent text-slate-text hover:text-foreground"
+          }`}
+        >
+          Repo Overrides
+        </button>
+      </div>
+
+      {/* Org Defaults Tab */}
+      {settingsScope === "org" && (
+        <>
+          {!active || orgDefaultsLoading ? (
+            <div className="flex items-center justify-center py-20">
+              <Loader2 className="h-6 w-6 animate-spin text-slate-text" />
+            </div>
+          ) : (
+            <div className="space-y-10">
+              <div className="rounded-lg border border-amber/20 bg-amber/5 px-4 py-3 flex items-start gap-2.5">
+                <Info className="h-3.5 w-3.5 text-amber mt-0.5 shrink-0" />
+                <p className="text-[11px] font-mono text-amber/80">
+                  These defaults apply to all repos in <span className="text-amber font-medium">{active?.org_login}</span>.
+                  Repos can override individual settings on the &quot;Repo Overrides&quot; tab.
+                </p>
+              </div>
+
+              {/* Org: Persona */}
+              <section>
+                <div className="flex items-center gap-3 mb-4">
+                  <div className="flex items-center gap-2">
+                    <UserCog className="h-4 w-4 text-amber" />
+                    <h2 className="font-display text-lg font-semibold text-foreground">
+                      Default Persona
+                    </h2>
+                  </div>
+                </div>
+                <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+                  {PERSONAS.map((p) => (
+                    <PersonaCard
+                      key={p.value}
+                      persona={p}
+                      isActive={orgPersona === p.value}
+                      onSelect={() => {
+                        saveOrgDefaults.mutate({ ...orgDefaults, persona: p.value });
+                      }}
+                      disabled={saveOrgDefaults.isPending}
+                    />
+                  ))}
+                </div>
+                {orgPersona === "custom" && (
+                  <div className="mt-4 rounded-lg border border-iron bg-charcoal p-4">
+                    <label className="block text-[11px] font-mono text-slate-text mb-2">
+                      Custom persona prompt (org default)
+                    </label>
+                    <textarea
+                      value={orgCustomPromptDraft}
+                      onChange={(e) => setOrgCustomPromptDraft(e.target.value)}
+                      placeholder="e.g. You are a reviewer focused on accessibility and i18n..."
+                      rows={5}
+                      className="w-full rounded-lg border border-iron bg-void px-4 py-3 text-xs font-mono text-foreground placeholder:text-slate-text/40 focus:outline-none focus:border-amber/50 transition-colors resize-y"
+                    />
+                    <button
+                      type="button"
+                      disabled={saveOrgDefaults.isPending || orgCustomPromptDraft === orgCustomPrompt}
+                      onClick={() => {
+                        saveOrgDefaults.mutate({ ...orgDefaults, persona: "custom", custom_persona_prompt: orgCustomPromptDraft });
+                      }}
+                      className="mt-2 rounded border border-amber/30 bg-amber/10 px-3 py-1.5 text-[10px] font-mono font-medium text-amber hover:bg-amber/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    >
+                      {saveOrgDefaults.isPending ? "Saving..." : "Save Custom Persona"}
+                    </button>
+                  </div>
+                )}
+              </section>
+
+              {/* Org: Deep Review */}
+              <section>
+                <div className="flex items-center gap-3 mb-4">
+                  <div className="flex items-center gap-2">
+                    <Cpu className="h-4 w-4 text-amber" />
+                    <h2 className="font-display text-lg font-semibold text-foreground">
+                      Deep Review
+                    </h2>
+                  </div>
+                </div>
+                <Protect plan="org:pro" fallback={<UpgradePrompt feature="Deep review" />}>
+                  <DeepReviewCard
+                    enabled={orgDeepReview}
+                    onToggle={toggleOrgDeepReview}
+                    pending={saveOrgDefaults.isPending}
+                  />
+                </Protect>
+              </section>
+
+              {/* Org: Review Pipeline */}
+              <section>
+                <div className="flex items-center gap-3 mb-4">
+                  <div className="flex items-center gap-2">
+                    <Cpu className="h-4 w-4 text-amber" />
+                    <h2 className="font-display text-lg font-semibold text-foreground">
+                      Review Pipeline
+                    </h2>
+                  </div>
+                </div>
+                <p className="text-xs font-mono text-slate-text mb-4">
+                  Configure the default model for each review stage. Applies to all repos unless overridden.
+                </p>
+
+                {configuredCount === 0 ? (
+                  <div className="rounded-lg border border-iron/50 bg-iron/10 px-4 py-3 flex items-start gap-2.5">
+                    <Info className="h-3.5 w-3.5 text-slate-text mt-0.5 shrink-0" />
+                    <p className="text-[11px] font-mono text-slate-text">
+                      No API keys configured yet. <a href="/providers" className="text-amber underline underline-offset-2 hover:text-foreground transition-colors">Add an API key</a> to unlock provider selection.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+                      {CORE_STAGES.map((stage) => (
+                        <ConfigCard
+                          key={`org-${stage}`}
+                          stage={stage}
+                          repoId={0}
+                          existing={orgConfigMap.get(stage)}
+                          savedProviders={savedProviders}
+                          installationId={active?.id}
+                          onSave={(data) => upsertOrgConfig.mutate(data)}
+                          onDelete={(s) => deleteOrgConfig.mutate({ stage: s })}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </section>
+
+              {/* Org: Feature Toggles */}
+              <Protect plan="org:pro" fallback={<UpgradePrompt feature="Advanced features" />}>
+                <section>
+                  <div className="flex items-center gap-3 mb-4">
+                    <div className="flex items-center gap-2">
+                      <Sliders className="h-4 w-4 text-amber" />
+                      <h2 className="font-display text-lg font-semibold text-foreground">
+                        Default Feature Toggles
+                      </h2>
+                    </div>
+                  </div>
+                  <div className="grid gap-3 md:grid-cols-2">
+                    {FEATURE_TOGGLES.map((toggle) => {
+                      const val = orgDefaults?.[toggle.key];
+                      const enabled = typeof val === "boolean" ? val : toggle.defaultValue;
+                      return (
+                        <FeatureToggleCard
+                          key={toggle.key}
+                          toggle={toggle}
+                          enabled={enabled}
+                          pending={saveOrgDefaults.isPending}
+                          onToggle={() => {
+                            saveOrgDefaults.mutate({ ...orgDefaults, [toggle.key]: !enabled });
+                          }}
+                        />
+                      );
+                    })}
+                  </div>
+                </section>
+              </Protect>
+            </div>
+          )}
+        </>
+      )}
+
+      {/* Repo Overrides Tab */}
+      {settingsScope === "repo" && (loading ? (
         <div className="flex items-center justify-center py-20">
           <Loader2 className="h-6 w-6 animate-spin text-slate-text" />
         </div>
@@ -601,8 +1022,14 @@ export default function SettingsPage() {
         </div>
       ) : (
         <div className="space-y-10">
-          {/* Section 1: API Keys */}
-          <section id="api-keys">
+          <div className="rounded-lg border border-iron/50 bg-iron/10 px-4 py-3 flex items-start gap-2.5">
+            <Info className="h-3.5 w-3.5 text-slate-text mt-0.5 shrink-0" />
+            <p className="text-[11px] font-mono text-slate-text">
+              Settings not configured here fall back to org defaults.
+            </p>
+          </div>
+          {/* API Keys link */}
+          <section>
             <div className="flex items-center gap-3 mb-4">
               <span className="inline-flex items-center justify-center h-6 w-6 rounded-full border border-amber/30 bg-amber/10 text-[11px] font-mono font-bold text-amber">
                 1
@@ -617,19 +1044,9 @@ export default function SettingsPage() {
                 {configuredCount}/{PROVIDERS.length} configured
               </span>
             </div>
-            <p className="text-[11px] font-mono text-slate-text mb-4">
-              Bring your own API keys. Keys are encrypted at rest and scoped to your organization.
-              Providers configured here become available for model selection below.
+            <p className="text-[11px] font-mono text-slate-text">
+              Manage API keys in <a href="/providers" className="text-amber underline underline-offset-2 hover:text-foreground transition-colors">Providers</a>.
             </p>
-            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-              {PROVIDERS.map((p) => (
-                <ProviderKeyCard
-                  key={p}
-                  provider={p}
-                  existing={keyMap.get(p)}
-                />
-              ))}
-            </div>
           </section>
 
           {/* Section 2: Review Pipeline (models + deep review merged) */}
@@ -677,7 +1094,7 @@ export default function SettingsPage() {
             ) : (
               <div className="space-y-4">
                 {/* Row 1: Core stages */}
-                <div className="grid gap-4 md:grid-cols-3">
+                <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
                   {CORE_STAGES.map((stage) => (
                     <ConfigCard
                       key={stage}
@@ -685,49 +1102,19 @@ export default function SettingsPage() {
                       repoId={activeId}
                       existing={configMap.get(stage)}
                       savedProviders={savedProviders}
+                      installationId={active?.id}
                     />
                   ))}
                 </div>
 
-                {/* Row 2: Deep review toggle + scoring */}
-                <div className="grid gap-4 md:grid-cols-2">
+                {/* Row 2: Deep review toggle (Pro only) */}
+                <Protect plan="org:pro" fallback={<UpgradePrompt feature="Deep review" />}>
                   <DeepReviewCard
                     enabled={deepReview}
                     onToggle={toggleDeepReview}
                     pending={updateRepo.isPending}
                   />
-
-                  {/* Scoring card — ghosted when deep review is off */}
-                  <div
-                    className={`relative transition-opacity duration-200 ${
-                      deepReview ? "opacity-100" : "opacity-40"
-                    }`}
-                  >
-                    {!deepReview && (
-                      <button
-                        type="button"
-                        onClick={toggleDeepReview}
-                        className="absolute inset-0 z-10 flex items-center justify-center rounded-lg cursor-pointer group"
-                        aria-label="Enable deep review to configure scoring"
-                      >
-                        <div className="flex items-center gap-2 rounded border border-iron/50 bg-charcoal/90 px-3 py-1.5 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
-                          <Lock className="h-3 w-3 text-slate-text" />
-                          <span className="text-[10px] font-mono text-slate-text">
-                            Enable deep review to unlock
-                          </span>
-                        </div>
-                      </button>
-                    )}
-                    <div className={!deepReview ? "pointer-events-none" : undefined}>
-                      <ConfigCard
-                        stage="scoring"
-                        repoId={activeId}
-                        existing={configMap.get("scoring")}
-                        savedProviders={savedProviders}
-                      />
-                    </div>
-                  </div>
-                </div>
+                </Protect>
               </div>
             )}
           </section>
@@ -784,14 +1171,145 @@ export default function SettingsPage() {
                     />
                   ))}
                 </div>
+                {currentPersona === "custom" && (
+                  <Protect plan="org:pro" fallback={<UpgradePrompt feature="Custom persona" />}>
+                    <div className="mt-4 rounded-lg border border-iron bg-charcoal p-4">
+                      <label className="block text-[11px] font-mono text-slate-text mb-2">
+                        Custom persona prompt — define how Argus should review code
+                      </label>
+                      <textarea
+                        value={customPromptDraft}
+                        onChange={(e) => setCustomPromptDraft(e.target.value)}
+                        placeholder="e.g. You are a reviewer focused on accessibility and i18n. Flag any hardcoded strings, missing aria labels, or RTL layout issues..."
+                        rows={5}
+                        className="w-full rounded-lg border border-iron bg-void px-4 py-3 text-xs font-mono text-foreground placeholder:text-slate-text/40 focus:outline-none focus:border-amber/50 transition-colors resize-y"
+                      />
+                      <button
+                        type="button"
+                        disabled={updateRepo.isPending || customPromptDraft === currentCustomPrompt}
+                        onClick={() => {
+                          setPersonaError("");
+                          updateRepo.mutate(
+                            {
+                              id: activeId,
+                              settings_json: { ...activeRepo?.settings_json, persona: "custom", custom_persona_prompt: customPromptDraft },
+                            },
+                            {
+                              onError: (err) =>
+                                setPersonaError(err instanceof Error ? err.message : "Failed to save"),
+                            },
+                          );
+                        }}
+                        className="mt-2 rounded border border-amber/30 bg-amber/10 px-3 py-1.5 text-[10px] font-mono font-medium text-amber hover:bg-amber/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                      >
+                        {updateRepo.isPending ? "Saving..." : "Save Custom Persona"}
+                      </button>
+                    </div>
+                  </Protect>
+                )}
                 {personaError && (
                   <p className="text-[10px] font-mono text-red-400 mt-2">{personaError}</p>
                 )}
               </>
             )}
           </section>
+
+          {/* Section 4: Review Prompts (Pro only) */}
+          <Protect plan="org:pro" fallback={<UpgradePrompt feature="Custom prompts" />}>
+            <section>
+              <div className="flex items-center gap-3 mb-4">
+                <span className="inline-flex items-center justify-center h-6 w-6 rounded-full border border-amber/30 bg-amber/10 text-[11px] font-mono font-bold text-amber">
+                  4
+                </span>
+                <div className="flex items-center gap-2">
+                  <FileText className="h-4 w-4 text-amber" />
+                  <h2 className="font-display text-lg font-semibold text-foreground">
+                    Review Prompts
+                  </h2>
+                </div>
+              </div>
+              <p className="text-[11px] font-mono text-slate-text mb-4">
+                Customize the AI prompts used in each pipeline stage for{" "}
+                <span className="text-foreground">{activeRepo?.full_name ?? "selected repo"}</span>.
+                Changes override the built-in defaults.
+              </p>
+
+              {activeId === 0 ? (
+                <div className="rounded-lg border border-iron bg-charcoal p-10 text-center">
+                  <FileText className="h-8 w-8 text-slate-text mx-auto mb-3" />
+                  <p className="text-xs font-mono text-slate-text">
+                    Select a repo to customize prompts.
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {PROMPT_STAGES.map((stage) => (
+                    <PromptCard
+                      key={stage}
+                      stage={stage}
+                      repoId={activeId}
+                      custom={promptMap.get(stage)}
+                      defaultText={defaultPromptMap.get(stage)?.prompt_text ?? ""}
+                    />
+                  ))}
+                </div>
+              )}
+            </section>
+          </Protect>
+
+          {/* Section 5: Advanced Features (Pro only) */}
+          <Protect plan="org:pro" fallback={<UpgradePrompt feature="Advanced features (cross-file, blast radius, scenarios, simulation)" />}>
+            <section>
+              <div className="flex items-center gap-3 mb-4">
+                <span className="inline-flex items-center justify-center h-6 w-6 rounded-full border border-amber/30 bg-amber/10 text-[11px] font-mono font-bold text-amber">
+                  5
+                </span>
+                <div className="flex items-center gap-2">
+                  <Sliders className="h-4 w-4 text-amber" />
+                  <h2 className="font-display text-lg font-semibold text-foreground">
+                    Advanced Features
+                  </h2>
+                </div>
+              </div>
+              <p className="text-[11px] font-mono text-slate-text mb-4">
+                Toggle pipeline capabilities for{" "}
+                <span className="text-foreground">{activeRepo?.full_name ?? "selected repo"}</span>.
+                These control which analysis stages run during review.
+              </p>
+
+              {activeId === 0 ? (
+                <div className="rounded-lg border border-iron bg-charcoal p-10 text-center">
+                  <Sliders className="h-8 w-8 text-slate-text mx-auto mb-3" />
+                  <p className="text-xs font-mono text-slate-text">
+                    Select a repo to configure features.
+                  </p>
+                </div>
+              ) : (
+                <div className="grid gap-3 md:grid-cols-2">
+                  {FEATURE_TOGGLES.map((toggle) => {
+                    const val = activeRepo?.settings_json?.[toggle.key];
+                    const enabled = typeof val === "boolean" ? val : toggle.defaultValue;
+                    return (
+                      <FeatureToggleCard
+                        key={toggle.key}
+                        toggle={toggle}
+                        enabled={enabled}
+                        pending={updateRepo.isPending}
+                        onToggle={() => {
+                          updateRepo.mutate({
+                            id: activeId,
+                            settings_json: { ...activeRepo?.settings_json, [toggle.key]: !enabled },
+                          });
+                        }}
+                      />
+                    );
+                  })}
+                </div>
+              )}
+            </section>
+          </Protect>
         </div>
-      )}
+      ))}
     </>
   );
 }

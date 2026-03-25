@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
   Target,
   GitPullRequest,
@@ -9,11 +10,12 @@ import {
   Loader2,
   Microscope,
 } from "lucide-react";
+import { usePagination, PaginationBar } from "@/components/dashboard/pagination";
 import { useStats } from "@/lib/queries/stats";
 import { useReviews } from "@/lib/queries/reviews";
 import { useActiveRepo } from "@/lib/hooks/use-active-repo";
 import { formatDistanceToNow } from "@/lib/time";
-import { RepoSelect } from "@/components/dashboard/repo-select";
+
 
 function StatCard({
   label,
@@ -99,11 +101,13 @@ function formatReviewTime(ms: number): string {
 }
 
 export default function DashboardPage() {
-  const { data: stats, isLoading: statsLoading } = useStats();
-  const { repos, activeId, setSelectedId, isLoading: reposLoading } = useActiveRepo();
+  const router = useRouter();
+  const { repos, activeId, isLoading: reposLoading } = useActiveRepo();
+  const { data: stats, isLoading: statsLoading } = useStats(activeId || undefined);
 
   const repoMap = new Map(repos.map((r) => [r.id, r]));
-  const { data: reviews, isLoading: reviewsLoading } = useReviews(activeId, 20);
+  const { data: reviews, isLoading: reviewsLoading } = useReviews(activeId, 200);
+  const { page, setPage, totalPages, paginated, pageSize, total, hasNext, hasPrev } = usePagination(reviews ?? []);
 
   const feedLoading = reposLoading || reviewsLoading;
 
@@ -167,12 +171,9 @@ export default function DashboardPage() {
           <h2 className="text-xs font-mono uppercase tracking-[0.1em] text-foreground">
             Recent Reviews
           </h2>
-          <div className="flex items-center gap-4">
-            <span className="text-[10px] font-mono text-slate-text">
-              {stats?.total_reviews ?? "\u2014"} total
-            </span>
-            <RepoSelect repos={repos} value={activeId} onChange={setSelectedId} showAll />
-          </div>
+          <span className="text-[10px] font-mono text-slate-text">
+            {reviews?.length ?? 0} total
+          </span>
         </div>
 
         {feedLoading ? (
@@ -196,14 +197,17 @@ export default function DashboardPage() {
               </tr>
             </thead>
             <tbody>
-              {reviews.map((review) => {
+              {paginated.map((review) => {
                 const repo = repoMap.get(review.repo_id);
                 const verdict = getVerdict(review);
                 return (
                   <tr
                     key={review.id}
                     className="border-b border-iron/30 last:border-0 hover:bg-iron/10 transition-colors cursor-pointer"
-                    onClick={() => window.location.href = `/reviews/${review.id}`}
+                    role="link"
+                    tabIndex={0}
+                    onClick={() => router.push(`/reviews/${review.id}`)}
+                    onKeyDown={(e) => { if (e.key === "Enter") router.push(`/reviews/${review.id}`); }}
                   >
                     <td className="px-5 py-3">
                       <div className="flex items-center gap-2">
@@ -257,6 +261,16 @@ export default function DashboardPage() {
             </tbody>
           </table>
         )}
+        <PaginationBar
+          page={page}
+          totalPages={totalPages}
+          total={total}
+          pageSize={pageSize}
+          hasNext={hasNext}
+          hasPrev={hasPrev}
+          onNext={() => setPage(page + 1)}
+          onPrev={() => setPage(page - 1)}
+        />
       </div>
     </>
   );

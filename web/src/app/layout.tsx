@@ -4,6 +4,7 @@ import { GeistSans } from "geist/font/sans";
 import { ClerkProvider } from "@clerk/nextjs";
 import { dark } from "@clerk/themes";
 import "./globals.css";
+import { cn } from "@/lib/utils";
 
 const syne = Syne({
   subsets: ["latin"],
@@ -12,24 +13,32 @@ const syne = Syne({
   display: "swap",
 });
 
-const jetbrains = JetBrains_Mono({
-  subsets: ["latin"],
-  variable: "--font-mono",
-  weight: ["400", "500"],
-  display: "swap",
-});
+const jetbrainsMono = JetBrains_Mono({subsets:['latin'],variable:'--font-jetbrains-mono'});
 
 export const metadata: Metadata = {
-  title: "ARGUS — Nothing merges unseen",
+  metadataBase: new URL("https://argusai.vercel.app"),
+  title: {
+    default: "ARGUS — AI Code Review That Builds Institutional Memory",
+    template: "%s | ARGUS",
+  },
   description:
-    "AI code review that builds institutional memory. The longer it runs, the smarter it gets about your codebase.",
-  metadataBase: new URL(
-    process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000"
-  ),
+    "AI-powered code review that traces dependencies, remembers incidents, and simulates failures before they ship. Install in 60 seconds.",
+  robots: { index: true, follow: true },
+  alternates: { canonical: "https://argusai.vercel.app" },
   openGraph: {
-    title: "ARGUS",
-    description: "Nothing merges unseen.",
+    type: "website",
+    locale: "en_US",
+    url: "https://argusai.vercel.app",
     siteName: "ARGUS",
+    title: "ARGUS — AI Code Review That Builds Institutional Memory",
+    description:
+      "Nothing merges unseen. AI code review that gets smarter with every PR.",
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "ARGUS — AI Code Review That Builds Institutional Memory",
+    description:
+      "Nothing merges unseen. AI code review that gets smarter with every PR.",
   },
 };
 
@@ -54,7 +63,7 @@ export default function RootLayout({
     >
       <html
         lang="en"
-        className={`${syne.variable} ${jetbrains.variable} ${GeistSans.variable} dark`}
+        className={cn("dark", syne.variable, GeistSans.variable, "font-mono", jetbrainsMono.variable)}
         suppressHydrationWarning
       >
         <body className="min-h-screen bg-background font-mono antialiased">

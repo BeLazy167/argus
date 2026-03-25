@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -26,13 +27,13 @@ func (s *Store) CreateInstallation(ctx context.Context, installationID int64, or
 		INSERT INTO installations (installation_id, org_login)
 		VALUES ($1, $2)
 		ON CONFLICT (installation_id) DO UPDATE SET org_login = $2, suspended_at = NULL
-		RETURNING id, installation_id, org_login, created_at, suspended_at
-	`, installationID, orgLogin).Scan(&inst.ID, &inst.InstallationID, &inst.OrgLogin, &inst.CreatedAt, &inst.SuspendedAt)
+		RETURNING id, installation_id, org_login, clerk_org_id, plan_tier, created_at, suspended_at
+	`, installationID, orgLogin).Scan(&inst.ID, &inst.InstallationID, &inst.OrgLogin, &inst.ClerkOrgID, &inst.PlanTier, &inst.CreatedAt, &inst.SuspendedAt)
 	return &inst, err
 }
 
 func (s *Store) ListInstallations(ctx context.Context) ([]Installation, error) {
-	rows, err := s.Pool.Query(ctx, `SELECT id, installation_id, org_login, created_at, suspended_at FROM installations ORDER BY created_at DESC`)
+	rows, err := s.Pool.Query(ctx, `SELECT id, installation_id, org_login, clerk_org_id, plan_tier, created_at, suspended_at FROM installations ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -61,7 +62,7 @@ func (s *Store) LinkUserInstallation(ctx context.Context, clerkUserID string, in
 
 func (s *Store) ListUserInstallations(ctx context.Context, clerkUserID string) ([]Installation, error) {
 	rows, err := s.Pool.Query(ctx, `
-		SELECT i.id, i.installation_id, i.org_login, i.created_at, i.suspended_at
+		SELECT i.id, i.installation_id, i.org_login, i.clerk_org_id, i.plan_tier, i.created_at, i.suspended_at
 		FROM installations i
 		JOIN user_installations ui ON ui.installation_id = i.id
 		WHERE ui.clerk_user_id = $1
@@ -99,9 +100,9 @@ func (s *Store) GetUserInstallationIDs(ctx context.Context, clerkUserID string) 
 func (s *Store) GetInstallation(ctx context.Context, id int64) (*Installation, error) {
 	var inst Installation
 	err := s.Pool.QueryRow(ctx, `
-		SELECT id, installation_id, org_login, created_at, suspended_at
+		SELECT id, installation_id, org_login, clerk_org_id, plan_tier, created_at, suspended_at
 		FROM installations WHERE id = $1
-	`, id).Scan(&inst.ID, &inst.InstallationID, &inst.OrgLogin, &inst.CreatedAt, &inst.SuspendedAt)
+	`, id).Scan(&inst.ID, &inst.InstallationID, &inst.OrgLogin, &inst.ClerkOrgID, &inst.PlanTier, &inst.CreatedAt, &inst.SuspendedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -111,13 +112,101 @@ func (s *Store) GetInstallation(ctx context.Context, id int64) (*Installation, e
 func (s *Store) GetInstallationByGitHubID(ctx context.Context, ghInstallationID int64) (*Installation, error) {
 	var inst Installation
 	err := s.Pool.QueryRow(ctx, `
-		SELECT id, installation_id, org_login, created_at, suspended_at
+		SELECT id, installation_id, org_login, clerk_org_id, plan_tier, created_at, suspended_at
 		FROM installations WHERE installation_id = $1
-	`, ghInstallationID).Scan(&inst.ID, &inst.InstallationID, &inst.OrgLogin, &inst.CreatedAt, &inst.SuspendedAt)
+	`, ghInstallationID).Scan(&inst.ID, &inst.InstallationID, &inst.OrgLogin, &inst.ClerkOrgID, &inst.PlanTier, &inst.CreatedAt, &inst.SuspendedAt)
 	if err != nil {
 		return nil, err
 	}
 	return &inst, nil
+}
+
+func (s *Store) GetInstallationByClerkOrgID(ctx context.Context, clerkOrgID string) (*Installation, error) {
+	var inst Installation
+	err := s.Pool.QueryRow(ctx, `
+		SELECT id, installation_id, org_login, clerk_org_id, plan_tier, created_at, suspended_at
+		FROM installations WHERE clerk_org_id = $1
+	`, clerkOrgID).Scan(&inst.ID, &inst.InstallationID, &inst.OrgLogin, &inst.ClerkOrgID, &inst.PlanTier, &inst.CreatedAt, &inst.SuspendedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &inst, nil
+}
+
+func (s *Store) CountReviewsThisMonth(ctx context.Context, installationID int64) (int, error) {
+	var count int
+	err := s.Pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM reviews r
+		JOIN repos rp ON r.repo_id = rp.id
+		WHERE rp.installation_id = $1
+		AND r.created_at >= date_trunc('month', NOW())
+	`, installationID).Scan(&count)
+	return count, err
+}
+
+func (s *Store) GetPlanTier(ctx context.Context, installationID int64) (string, error) {
+	var tier string
+	err := s.Pool.QueryRow(ctx, `SELECT plan_tier FROM installations WHERE id = $1`, installationID).Scan(&tier)
+	return tier, err
+}
+
+func (s *Store) SetPlanTier(ctx context.Context, installationID int64, tier string) error {
+	_, err := s.Pool.Exec(ctx, `UPDATE installations SET plan_tier = $1 WHERE id = $2`, tier, installationID)
+	return err
+}
+
+func (s *Store) CountEnabledRepos(ctx context.Context, installationID int64) (int, error) {
+	var count int
+	err := s.Pool.QueryRow(ctx, `SELECT COUNT(*) FROM repos WHERE installation_id = $1 AND enabled = TRUE`, installationID).Scan(&count)
+	return count, err
+}
+
+func (s *Store) SuspendInstallation(ctx context.Context, id int64) error {
+	_, err := s.Pool.Exec(ctx, `UPDATE installations SET suspended_at = NOW() WHERE id = $1`, id)
+	return err
+}
+
+func (s *Store) SetInstallationClerkOrgID(ctx context.Context, installationID int64, clerkOrgID string) error {
+	_, err := s.Pool.Exec(ctx, `
+		UPDATE installations SET clerk_org_id = $1 WHERE id = $2
+	`, clerkOrgID, installationID)
+	return err
+}
+
+// --- Org Default Settings ---
+
+func (s *Store) GetOrgDefaults(ctx context.Context, installationID int64) (json.RawMessage, error) {
+	var settings json.RawMessage
+	err := s.Pool.QueryRow(ctx, `SELECT COALESCE(default_settings, '{}') FROM installations WHERE id = $1`, installationID).Scan(&settings)
+	return settings, err
+}
+
+func (s *Store) SetOrgDefaults(ctx context.Context, installationID int64, settings json.RawMessage) error {
+	_, err := s.Pool.Exec(ctx, `UPDATE installations SET default_settings = $1 WHERE id = $2`, settings, installationID)
+	return err
+}
+
+// GetMergedSettings returns org defaults merged with repo overrides (repo wins).
+func (s *Store) GetMergedSettings(ctx context.Context, installationID int64, repoID int64) (json.RawMessage, error) {
+	var orgDefaults, repoSettings json.RawMessage
+	_ = s.Pool.QueryRow(ctx, `SELECT COALESCE(default_settings, '{}') FROM installations WHERE id = $1`, installationID).Scan(&orgDefaults)
+	_ = s.Pool.QueryRow(ctx, `SELECT COALESCE(settings_json, '{}') FROM repos WHERE id = $1`, repoID).Scan(&repoSettings)
+	return mergeJSON(orgDefaults, repoSettings), nil
+}
+
+// mergeJSON does a shallow merge where override keys replace base keys.
+func mergeJSON(base, override json.RawMessage) json.RawMessage {
+	var baseMap, overrideMap map[string]interface{}
+	json.Unmarshal(base, &baseMap)
+	json.Unmarshal(override, &overrideMap)
+	if baseMap == nil {
+		baseMap = make(map[string]interface{})
+	}
+	for k, v := range overrideMap {
+		baseMap[k] = v
+	}
+	result, _ := json.Marshal(baseMap)
+	return result
 }
 
 // --- Repos ---
@@ -234,7 +323,7 @@ func (s *Store) ListReviews(ctx context.Context, repoID int64, limit, offset int
 		limit = 20
 	}
 	rows, err := s.Pool.Query(ctx, `
-		SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, github_review_id,
+		SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, COALESCE(head_ref,''), github_review_id,
 		       status, summary, score, token_usage, trigger, triggered_by, duration_ms, error,
 		       deep_review, persona, is_incremental, created_at, completed_at
 		FROM reviews WHERE repo_id = $1
@@ -250,11 +339,11 @@ func (s *Store) ListReviews(ctx context.Context, repoID int64, limit, offset int
 func (s *Store) GetReview(ctx context.Context, id uuid.UUID) (*Review, error) {
 	var r Review
 	err := s.Pool.QueryRow(ctx, `
-		SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, github_review_id,
+		SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, COALESCE(head_ref,''), github_review_id,
 		       status, summary, score, token_usage, trigger, triggered_by, duration_ms, error,
 		       deep_review, persona, is_incremental, created_at, completed_at
 		FROM reviews WHERE id = $1
-	`, id).Scan(&r.ID, &r.RepoID, &r.PRNumber, &r.PRTitle, &r.PRAuthor, &r.HeadSHA, &r.BaseSHA, &r.GithubReviewID,
+	`, id).Scan(&r.ID, &r.RepoID, &r.PRNumber, &r.PRTitle, &r.PRAuthor, &r.HeadSHA, &r.BaseSHA, &r.HeadRef, &r.GithubReviewID,
 		&r.Status, &r.Summary, &r.Score, &r.TokenUsage, &r.Trigger, &r.TriggeredBy, &r.DurationMs, &r.Error,
 		&r.DeepReview, &r.Persona, &r.IsIncremental, &r.CreatedAt, &r.CompletedAt)
 	if err != nil {
@@ -266,7 +355,9 @@ func (s *Store) GetReview(ctx context.Context, id uuid.UUID) (*Review, error) {
 func (s *Store) GetReviewComments(ctx context.Context, reviewID uuid.UUID) ([]ReviewComment, error) {
 	rows, err := s.Pool.Query(ctx, `
 		SELECT id, review_id, file_path, start_line, end_line, side, body, severity, category,
-		       specialist, confidence_score, code_snippet, github_comment_id, created_at
+		       specialist, confidence_score, code_snippet, github_comment_id,
+		       matched_pattern_id, matched_pattern_score, enforced_rule_content, is_new_finding,
+		       created_at
 		FROM review_comments WHERE review_id = $1 ORDER BY file_path, start_line
 	`, reviewID)
 	if err != nil {
@@ -289,7 +380,7 @@ func (s *Store) ListReviewsScoped(ctx context.Context, repoID int64, installatio
 		limit = 20
 	}
 	rows, err := s.Pool.Query(ctx, `
-		SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, rv.github_review_id,
+		SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, COALESCE(rv.head_ref,''), rv.github_review_id,
 		       rv.status, rv.summary, rv.score, rv.token_usage, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error,
 		       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at
 		FROM reviews rv
@@ -309,7 +400,7 @@ func (s *Store) ListAllReviewsScoped(ctx context.Context, installationIDs []int6
 		limit = 20
 	}
 	rows, err := s.Pool.Query(ctx, `
-		SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, rv.github_review_id,
+		SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, COALESCE(rv.head_ref,''), rv.github_review_id,
 		       rv.status, rv.summary, rv.score, rv.token_usage, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error,
 		       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at
 		FROM reviews rv
@@ -381,7 +472,7 @@ func (s *Store) DeleteRule(ctx context.Context, id int64) error {
 
 func (s *Store) ListModelConfigs(ctx context.Context, repoID int64) ([]ModelConfig, error) {
 	rows, err := s.Pool.Query(ctx, `
-		SELECT id, repo_id, stage, provider, model, base_url, max_tokens, temperature, created_at, updated_at
+		SELECT id, repo_id, installation_id, stage, provider, model, base_url, max_tokens, temperature, created_at, updated_at
 		FROM model_configs WHERE repo_id = $1 ORDER BY stage
 	`, repoID)
 	if err != nil {
@@ -403,9 +494,9 @@ func (s *Store) UpsertModelConfig(ctx context.Context, repoID int64, stage, prov
 			max_tokens = EXCLUDED.max_tokens,
 			temperature = EXCLUDED.temperature,
 			updated_at = NOW()
-		RETURNING id, repo_id, stage, provider, model, base_url, max_tokens, temperature, created_at, updated_at
+		RETURNING id, repo_id, installation_id, stage, provider, model, base_url, max_tokens, temperature, created_at, updated_at
 	`, repoID, stage, provider, model, baseURL, maxTokens, temperature).Scan(
-		&mc.ID, &mc.RepoID, &mc.Stage, &mc.Provider, &mc.Model, &mc.BaseURL,
+		&mc.ID, &mc.RepoID, &mc.InstallationID, &mc.Stage, &mc.Provider, &mc.Model, &mc.BaseURL,
 		&mc.MaxTokens, &mc.Temperature, &mc.CreatedAt, &mc.UpdatedAt)
 	if err != nil {
 		return nil, err
@@ -424,13 +515,72 @@ func (s *Store) DeleteModelConfig(ctx context.Context, repoID int64, stage strin
 	return nil
 }
 
+// ListOrgModelConfigs returns installation-level model configs (repo_id IS NULL).
+func (s *Store) ListOrgModelConfigs(ctx context.Context, installationID int64) ([]ModelConfig, error) {
+	rows, err := s.Pool.Query(ctx, `
+		SELECT id, repo_id, installation_id, stage, provider, model, base_url, max_tokens, temperature, created_at, updated_at
+		FROM model_configs WHERE installation_id = $1 AND repo_id IS NULL ORDER BY stage
+	`, installationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return collectOrEmpty(rows, pgx.RowToStructByPos[ModelConfig])
+}
+
+// UpsertOrgModelConfig saves an installation-level model config.
+func (s *Store) UpsertOrgModelConfig(ctx context.Context, installationID int64, stage, provider, model string, baseURL *string, maxTokens int, temperature float32) (*ModelConfig, error) {
+	var mc ModelConfig
+	err := s.Pool.QueryRow(ctx, `
+		INSERT INTO model_configs (installation_id, repo_id, stage, provider, model, base_url, max_tokens, temperature)
+		VALUES ($1, NULL, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (installation_id, stage) WHERE repo_id IS NULL DO UPDATE SET
+			provider = EXCLUDED.provider, model = EXCLUDED.model, base_url = EXCLUDED.base_url,
+			max_tokens = EXCLUDED.max_tokens, temperature = EXCLUDED.temperature, updated_at = NOW()
+		RETURNING id, repo_id, installation_id, stage, provider, model, base_url, max_tokens, temperature, created_at, updated_at
+	`, installationID, stage, provider, model, baseURL, maxTokens, temperature).Scan(
+		&mc.ID, &mc.RepoID, &mc.InstallationID, &mc.Stage, &mc.Provider, &mc.Model, &mc.BaseURL,
+		&mc.MaxTokens, &mc.Temperature, &mc.CreatedAt, &mc.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &mc, nil
+}
+
+// DeleteOrgModelConfig removes an installation-level config.
+func (s *Store) DeleteOrgModelConfig(ctx context.Context, installationID int64, stage string) error {
+	ct, err := s.Pool.Exec(ctx, `DELETE FROM model_configs WHERE installation_id = $1 AND stage = $2 AND repo_id IS NULL`, installationID, stage)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return fmt.Errorf("org config not found for installation %d stage %s", installationID, stage)
+	}
+	return nil
+}
+
+// ListModelConfigsWithFallback returns repo configs, falling back to org configs for missing stages.
+func (s *Store) ListModelConfigsWithFallback(ctx context.Context, installationID, repoID int64) ([]ModelConfig, error) {
+	rows, err := s.Pool.Query(ctx, `
+		SELECT DISTINCT ON (stage) id, repo_id, installation_id, stage, provider, model, base_url, max_tokens, temperature, created_at, updated_at
+		FROM model_configs
+		WHERE (repo_id = $2 OR (installation_id = $1 AND repo_id IS NULL))
+		ORDER BY stage, repo_id NULLS LAST
+	`, installationID, repoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return collectOrEmpty(rows, pgx.RowToStructByPos[ModelConfig])
+}
+
 // --- Review Comments ---
 
-func (s *Store) CreateReviewComment(ctx context.Context, reviewID uuid.UUID, filePath string, startLine, endLine *int, side *string, body string, severity, category, specialist, codeSnippet *string, confidenceScore *int, githubCommentID *int64) error {
+func (s *Store) CreateReviewComment(ctx context.Context, reviewID uuid.UUID, filePath string, startLine, endLine *int, side *string, body string, severity, category, specialist, codeSnippet *string, confidenceScore *int, githubCommentID *int64, matchedPatternID *int64, matchedPatternScore *float32, enforcedRuleContent *string, isNewFinding bool) error {
 	_, err := s.Pool.Exec(ctx, `
-		INSERT INTO review_comments (review_id, file_path, start_line, end_line, side, body, severity, category, specialist, confidence_score, code_snippet, github_comment_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-	`, reviewID, filePath, startLine, endLine, side, body, severity, category, specialist, confidenceScore, codeSnippet, githubCommentID)
+		INSERT INTO review_comments (review_id, file_path, start_line, end_line, side, body, severity, category, specialist, confidence_score, code_snippet, github_comment_id, matched_pattern_id, matched_pattern_score, enforced_rule_content, is_new_finding)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+	`, reviewID, filePath, startLine, endLine, side, body, severity, category, specialist, confidenceScore, codeSnippet, githubCommentID, matchedPatternID, matchedPatternScore, enforcedRuleContent, isNewFinding)
 	return err
 }
 
@@ -439,10 +589,14 @@ func (s *Store) GetCommentByGithubID(ctx context.Context, githubCommentID int64)
 	var c ReviewComment
 	err := s.Pool.QueryRow(ctx, `
 		SELECT id, review_id, file_path, start_line, end_line, side, body, severity, category,
-		       specialist, confidence_score, code_snippet, github_comment_id, created_at
+		       specialist, confidence_score, code_snippet, github_comment_id,
+		       matched_pattern_id, matched_pattern_score, enforced_rule_content, is_new_finding,
+		       created_at
 		FROM review_comments WHERE github_comment_id = $1
 	`, githubCommentID).Scan(&c.ID, &c.ReviewID, &c.FilePath, &c.StartLine, &c.EndLine, &c.Side, &c.Body, &c.Severity, &c.Category,
-		&c.Specialist, &c.ConfidenceScore, &c.CodeSnippet, &c.GithubCommentID, &c.CreatedAt)
+		&c.Specialist, &c.ConfidenceScore, &c.CodeSnippet, &c.GithubCommentID,
+		&c.MatchedPatternID, &c.MatchedPatternScore, &c.EnforcedRuleContent, &c.IsNewFinding,
+		&c.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -453,12 +607,12 @@ func (s *Store) GetCommentByGithubID(ctx context.Context, githubCommentID int64)
 func (s *Store) GetLastCompletedReview(ctx context.Context, repoID int64, prNumber int) (*Review, error) {
 	var r Review
 	err := s.Pool.QueryRow(ctx, `
-		SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, github_review_id,
+		SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, COALESCE(head_ref,''), github_review_id,
 		       status, summary, score, token_usage, trigger, triggered_by, duration_ms, error,
 		       deep_review, persona, is_incremental, created_at, completed_at
 		FROM reviews WHERE repo_id = $1 AND pr_number = $2 AND status = 'completed'
 		ORDER BY completed_at DESC LIMIT 1
-	`, repoID, prNumber).Scan(&r.ID, &r.RepoID, &r.PRNumber, &r.PRTitle, &r.PRAuthor, &r.HeadSHA, &r.BaseSHA, &r.GithubReviewID,
+	`, repoID, prNumber).Scan(&r.ID, &r.RepoID, &r.PRNumber, &r.PRTitle, &r.PRAuthor, &r.HeadSHA, &r.BaseSHA, &r.HeadRef, &r.GithubReviewID,
 		&r.Status, &r.Summary, &r.Score, &r.TokenUsage, &r.Trigger, &r.TriggeredBy, &r.DurationMs, &r.Error,
 		&r.DeepReview, &r.Persona, &r.IsIncremental, &r.CreatedAt, &r.CompletedAt)
 	if err != nil {
@@ -470,14 +624,34 @@ func (s *Store) GetLastCompletedReview(ctx context.Context, repoID int64, prNumb
 func (s *Store) GetLatestReviewBySHA(ctx context.Context, repoFullName string, prNumber int, headSHA string) (*Review, error) {
 	var r Review
 	err := s.Pool.QueryRow(ctx, `
-		SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, rv.github_review_id,
+		SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, COALESCE(rv.head_ref,''), rv.github_review_id,
 		       rv.status, rv.summary, rv.score, rv.token_usage, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error,
 		       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at
 		FROM reviews rv JOIN repos r ON rv.repo_id = r.id
 		WHERE r.full_name = $1 AND rv.pr_number = $2 AND rv.head_sha = $3
 		  AND rv.status = 'completed'
 		ORDER BY rv.created_at DESC LIMIT 1
-	`, repoFullName, prNumber, headSHA).Scan(&r.ID, &r.RepoID, &r.PRNumber, &r.PRTitle, &r.PRAuthor, &r.HeadSHA, &r.BaseSHA, &r.GithubReviewID,
+	`, repoFullName, prNumber, headSHA).Scan(&r.ID, &r.RepoID, &r.PRNumber, &r.PRTitle, &r.PRAuthor, &r.HeadSHA, &r.BaseSHA, &r.HeadRef, &r.GithubReviewID,
+		&r.Status, &r.Summary, &r.Score, &r.TokenUsage, &r.Trigger, &r.TriggeredBy, &r.DurationMs, &r.Error,
+		&r.DeepReview, &r.Persona, &r.IsIncremental, &r.CreatedAt, &r.CompletedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
+// GetLatestReviewByPR returns the most recent completed review for a repo+PR by full name.
+func (s *Store) GetLatestReviewByPR(ctx context.Context, repoFullName string, prNumber int) (*Review, error) {
+	var r Review
+	err := s.Pool.QueryRow(ctx, `
+		SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, COALESCE(rv.head_ref,''), rv.github_review_id,
+		       rv.status, rv.summary, rv.score, rv.token_usage, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error,
+		       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at
+		FROM reviews rv JOIN repos r ON rv.repo_id = r.id
+		WHERE r.full_name = $1 AND rv.pr_number = $2
+		  AND rv.status = 'completed'
+		ORDER BY rv.created_at DESC LIMIT 1
+	`, repoFullName, prNumber).Scan(&r.ID, &r.RepoID, &r.PRNumber, &r.PRTitle, &r.PRAuthor, &r.HeadSHA, &r.BaseSHA, &r.HeadRef, &r.GithubReviewID,
 		&r.Status, &r.Summary, &r.Score, &r.TokenUsage, &r.Trigger, &r.TriggeredBy, &r.DurationMs, &r.Error,
 		&r.DeepReview, &r.Persona, &r.IsIncremental, &r.CreatedAt, &r.CompletedAt)
 	if err != nil {
@@ -556,6 +730,69 @@ func (s *Store) LogActivity(ctx context.Context, action, actor, resource string,
 		VALUES ($1, $2, $3, $4)
 	`, action, nilIfEmpty(actor), nilIfEmpty(resource), metadata)
 	return err
+}
+
+// --- Comment Outcomes ---
+
+func (s *Store) RecordCommentOutcome(ctx context.Context, reviewCommentID uuid.UUID, outcome string) error {
+	_, err := s.Pool.Exec(ctx, `
+		INSERT INTO comment_outcomes (review_comment_id, outcome)
+		VALUES ($1, $2)
+	`, reviewCommentID, outcome)
+	return err
+}
+
+func (s *Store) GetCommentOutcomes(ctx context.Context, reviewCommentID uuid.UUID) ([]CommentOutcome, error) {
+	rows, err := s.Pool.Query(ctx, `
+		SELECT id, review_comment_id, outcome, created_at
+		FROM comment_outcomes WHERE review_comment_id = $1 ORDER BY created_at DESC
+	`, reviewCommentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return collectOrEmpty(rows, pgx.RowToStructByPos[CommentOutcome])
+}
+
+// --- Prompt Templates ---
+
+func (s *Store) ListPromptTemplates(ctx context.Context, repoID int64) ([]PromptTemplate, error) {
+	rows, err := s.Pool.Query(ctx, `
+		SELECT id, repo_id, stage, prompt_text, created_at, updated_at
+		FROM prompt_templates WHERE repo_id = $1 ORDER BY stage
+	`, repoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return collectOrEmpty(rows, pgx.RowToStructByPos[PromptTemplate])
+}
+
+func (s *Store) UpsertPromptTemplate(ctx context.Context, repoID int64, stage, promptText string) (*PromptTemplate, error) {
+	var pt PromptTemplate
+	err := s.Pool.QueryRow(ctx, `
+		INSERT INTO prompt_templates (repo_id, stage, prompt_text)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (repo_id, stage) DO UPDATE SET
+			prompt_text = EXCLUDED.prompt_text,
+			updated_at = NOW()
+		RETURNING id, repo_id, stage, prompt_text, created_at, updated_at
+	`, repoID, stage, promptText).Scan(&pt.ID, &pt.RepoID, &pt.Stage, &pt.PromptText, &pt.CreatedAt, &pt.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &pt, nil
+}
+
+func (s *Store) DeletePromptTemplate(ctx context.Context, repoID int64, stage string) error {
+	ct, err := s.Pool.Exec(ctx, `DELETE FROM prompt_templates WHERE repo_id = $1 AND stage = $2`, repoID, stage)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return fmt.Errorf("prompt template not found for repo %d stage %s", repoID, stage)
+	}
+	return nil
 }
 
 func nilIfEmpty(s string) *string {

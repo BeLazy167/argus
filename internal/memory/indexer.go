@@ -8,6 +8,10 @@ import (
 	"log/slog"
 	"regexp"
 	"strings"
+	"sync"
+	"time"
+
+	"github.com/BeLazy167/argus/internal/util"
 )
 
 // Indexer manages Supermemory documents: stores reviews, rules, patterns, and topology for future RAG retrieval.
@@ -18,6 +22,115 @@ type Indexer struct {
 
 func NewIndexer(client *Client, logger *slog.Logger) *Indexer {
 	return &Indexer{client: client, logger: logger}
+}
+
+// Client returns the underlying Supermemory client.
+func (idx *Indexer) Client() *Client { return idx.client }
+
+// ConfigureFilterPrompt sets the org-level filter prompt so Supermemory knows
+// what kind of content Argus ingests. Call once on startup.
+func (idx *Indexer) ConfigureFilterPrompt(ctx context.Context) {
+	if idx.client == nil {
+		return
+	}
+	err := idx.client.UpdateSettings(ctx, map[string]any{
+		"shouldLLMFilter": true,
+		"filterPrompt": `You are ingesting content for Argus, an AI code review platform.
+
+Index:
+- Code review findings with file paths, severity, and category
+- Learned code patterns, conventions, and best practices
+- Developer feedback signals (confirmations and dismissals)
+- Known issues, edge cases, and past incident descriptions (scenarios)
+- Decision traces: review findings, developer replies, pattern matches
+
+Skip:
+- Raw diffs or code content without analysis
+- Duplicate findings that are semantically identical to existing memories
+- Generic boilerplate comments without specific insights
+- PR metadata that doesn't contain reviewable insights`,
+	})
+	if err != nil {
+		idx.logger.Warn("failed to configure supermemory filter prompt", "error", err)
+	} else {
+		idx.logger.Info("supermemory filter prompt configured")
+	}
+}
+
+// SetRepoEntityContext sets per-repo context that guides memory extraction.
+func (idx *Indexer) SetRepoEntityContext(ctx context.Context, owner, repo, language, description string) {
+	if idx.client == nil {
+		return
+	}
+	for _, kind := range []string{"reviews", "patterns", "scenarios", "traces"} {
+		tag := RepoTag(owner, repo, kind)
+		entityCtx := fmt.Sprintf("Code review data for %s/%s", owner, repo)
+		if language != "" {
+			entityCtx += fmt.Sprintf(" (primary language: %s)", language)
+		}
+		if description != "" {
+			entityCtx += ". " + description
+		}
+		if err := idx.client.UpdateEntityContext(ctx, tag, entityCtx); err != nil {
+			idx.logger.Debug("failed to set entity context", "tag", tag, "error", err)
+		}
+	}
+}
+
+// SearchPatternMatch searches for the best matching pattern across repo and owner scopes.
+// Returns the matched content and similarity score. Returns ("", 0) if no match above threshold.
+func (idx *Indexer) SearchPatternMatch(ctx context.Context, owner, repo, query string) (content string, score float64) {
+	if idx.client == nil || owner == "" || repo == "" {
+		return "", 0
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	type result struct {
+		content string
+		score   float64
+	}
+
+	var repoRes, ownerRes result
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		resp, err := idx.client.Search(ctx, SearchRequest{
+			Query:        query,
+			ContainerTag: RepoTag(owner, repo, "patterns"),
+			SearchMode:   "hybrid",
+			Limit:        1,
+			Threshold:    0.5,
+		})
+		if err != nil || len(resp.Results) == 0 {
+			return
+		}
+		repoRes = result{content: resp.Results[0].Content(), score: resp.Results[0].Similarity}
+	}()
+
+	go func() {
+		defer wg.Done()
+		resp, err := idx.client.Search(ctx, SearchRequest{
+			Query:        query,
+			ContainerTag: OwnerTag(owner, "patterns"),
+			SearchMode:   "hybrid",
+			Limit:        1,
+			Threshold:    0.5,
+		})
+		if err != nil || len(resp.Results) == 0 {
+			return
+		}
+		ownerRes = result{content: resp.Results[0].Content(), score: resp.Results[0].Similarity}
+	}()
+
+	wg.Wait()
+
+	if repoRes.score >= ownerRes.score {
+		return repoRes.content, repoRes.score
+	}
+	return ownerRes.content, ownerRes.score
 }
 
 var lineNumRegex = regexp.MustCompile(`(?i)\b(?:line|L)\s*\d+`)
@@ -157,35 +270,59 @@ type RuleMemory struct {
 }
 
 // IndexRepoPattern stores a pattern scoped to a specific repo.
-// If customID is non-empty, the document is upserted (deduplicated).
+// Uses v4/memories for immediate searchability. Falls back to v3 if customID is provided (for upsert dedup).
 func (idx *Indexer) IndexRepoPattern(ctx context.Context, owner, repo, content, customID string, metadata map[string]string) (*AddResponse, error) {
+	tag := RepoTag(owner, repo, "patterns")
+	if customID == "" {
+		return idx.indexImmediate(ctx, tag, content, metadata, "repo pattern", owner, repo)
+	}
 	resp, err := idx.client.AddMemory(ctx, AddRequest{
 		Content:       content,
 		CustomID:      customID,
-		ContainerTags: []string{RepoTag(owner, repo, "patterns")},
+		ContainerTags: []string{tag},
 		Metadata:      metadata,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("indexing repo pattern: %w", err)
 	}
-	idx.logger.Debug("indexed repo pattern", "owner", owner, "repo", repo)
+	idx.logger.Debug("indexed repo pattern (v3 upsert)", "owner", owner, "repo", repo)
 	return resp, nil
 }
 
 // IndexOwnerPattern stores a pattern at owner scope (applies to all repos in the org).
-// If customID is non-empty, the document is upserted (deduplicated).
+// Uses v4/memories for immediate searchability. Falls back to v3 if customID is provided (for upsert dedup).
 func (idx *Indexer) IndexOwnerPattern(ctx context.Context, owner, content, customID string, metadata map[string]string) (*AddResponse, error) {
+	tag := OwnerTag(owner, "patterns")
+	if customID == "" {
+		return idx.indexImmediate(ctx, tag, content, metadata, "owner pattern", owner, "")
+	}
 	resp, err := idx.client.AddMemory(ctx, AddRequest{
 		Content:       content,
 		CustomID:      customID,
-		ContainerTags: []string{OwnerTag(owner, "patterns")},
+		ContainerTags: []string{tag},
 		Metadata:      metadata,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("indexing owner pattern: %w", err)
 	}
-	idx.logger.Debug("indexed owner pattern", "owner", owner)
+	idx.logger.Debug("indexed owner pattern (v3 upsert)", "owner", owner)
 	return resp, nil
+}
+
+// indexImmediate uses v4/memories for immediate searchability (no queue delay).
+func (idx *Indexer) indexImmediate(ctx context.Context, tag, content string, metadata map[string]string, kind, owner, repo string) (*AddResponse, error) {
+	resp, err := idx.client.AddMemoryImmediate(ctx, AddImmediateRequest{
+		ContainerTag: tag,
+		Memories: []ImmediateMemory{{
+			Content:  content,
+			Metadata: metadata,
+		}},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("indexing %s (v4): %w", kind, err)
+	}
+	idx.logger.Debug("indexed "+kind+" (v4 immediate)", "owner", owner, "repo", repo)
+	return &AddResponse{ID: resp.DocumentID, Status: "created"}, nil
 }
 
 // DeleteDocument removes a document from Supermemory by ID.
@@ -238,12 +375,12 @@ func (idx *Indexer) IndexFeedbackSignal(ctx context.Context, owner, repo string,
 	case "confirmed":
 		content = fmt.Sprintf("CONFIRMED pattern [%s] in %s: %s\nDeveloper agreed: %s",
 			feedback.Category, feedback.FilePath, feedback.OriginalBody,
-			truncateFeedback(feedback.DeveloperReply, 200))
+			util.Truncate(feedback.DeveloperReply, 200, false))
 		source = "feedback_confirmed"
 	case "dismissed":
 		content = fmt.Sprintf("DISMISSED finding [%s] in %s: %s\nDeveloper explanation: %s\nFuture reviews should NOT flag similar patterns in this context.",
 			feedback.Category, feedback.FilePath, feedback.OriginalBody,
-			truncateFeedback(feedback.DeveloperReply, 200))
+			util.Truncate(feedback.DeveloperReply, 200, false))
 		source = "feedback_dismissed"
 	default:
 		return nil // no signal to store
@@ -269,9 +406,155 @@ func (idx *Indexer) IndexFeedbackSignal(ctx context.Context, owner, repo string,
 	return nil
 }
 
-func truncateFeedback(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
+// IndexScenario stores a scenario in Supermemory for semantic retrieval.
+// Scenarios are also stored in PostgreSQL for structured queries — this enables
+// "find scenarios related to billing" even when file paths don't overlap.
+func (idx *Indexer) IndexScenario(ctx context.Context, owner, repo string, scenarioID int64, description, severity string, files []string) error {
+	if idx.client == nil {
+		return nil
 	}
-	return s[:maxLen] + "..."
+	content := fmt.Sprintf("Scenario [%s]: %s\nRelated files: %s",
+		severity, description, strings.Join(files, ", "))
+
+	customID := fmt.Sprintf("%s--%s--scenario--%d", owner, repo, scenarioID)
+
+	_, err := idx.client.AddMemory(ctx, AddRequest{
+		Content:       content,
+		CustomID:      customID,
+		ContainerTags: []string{RepoTag(owner, repo, "scenarios")},
+		Metadata: map[string]string{
+			"severity":    severity,
+			"scenario_id": fmt.Sprintf("%d", scenarioID),
+		},
+	})
+	if err != nil {
+		idx.logger.Warn("indexing scenario in supermemory", "error", err)
+		return err
+	}
+	return nil
 }
+
+// IndexDecisionTrace stores a decision trace in Supermemory for semantic retrieval.
+func (idx *Indexer) IndexDecisionTrace(ctx context.Context, owner, repo, filePath, traceType, content, severity string) error {
+	if idx.client == nil {
+		return nil
+	}
+	doc := fmt.Sprintf("[%s] %s: %s (severity: %s)", traceType, filePath, content, severity)
+
+	_, err := idx.client.AddMemory(ctx, AddRequest{
+		Content:       doc,
+		ContainerTags: []string{RepoTag(owner, repo, "traces")},
+		Metadata: map[string]string{
+			"file_path":  filePath,
+			"trace_type": traceType,
+			"severity":   severity,
+		},
+	})
+	if err != nil {
+		idx.logger.Warn("indexing trace in supermemory", "error", err)
+		return err
+	}
+	return nil
+}
+
+// SearchScenarios performs semantic search over scenarios with reranking for precision.
+// Optional severity filter narrows results (e.g., only "critical" scenarios).
+func (idx *Indexer) SearchScenarios(ctx context.Context, owner, repo, query, severity string, limit int) []string {
+	if idx.client == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	req := SearchRequest{
+		Query:        query,
+		ContainerTag: RepoTag(owner, repo, "scenarios"),
+		SearchMode:   "hybrid",
+		Rerank:       true,
+		Limit:        limit,
+	}
+	if severity != "" {
+		req.Filters = &SearchFilters{
+			AND: []FilterCondition{{Key: "severity", Value: severity}},
+		}
+	}
+
+	resp, err := idx.client.Search(ctx, req)
+	if err != nil {
+		idx.logger.Warn("searching scenarios in supermemory", "error", err)
+		return nil
+	}
+	var results []string
+	for _, r := range resp.Results {
+		results = append(results, r.Content())
+	}
+	return results
+}
+
+// SearchTraces performs semantic search over decision traces with reranking.
+// Optional traceType filter narrows results (e.g., only "review_finding" traces).
+func (idx *Indexer) SearchTraces(ctx context.Context, owner, repo, query, traceType string, limit int) []string {
+	if idx.client == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	req := SearchRequest{
+		Query:        query,
+		ContainerTag: RepoTag(owner, repo, "traces"),
+		SearchMode:   "hybrid",
+		Rerank:       true,
+		Limit:        limit,
+	}
+	if traceType != "" {
+		req.Filters = &SearchFilters{
+			AND: []FilterCondition{{Key: "trace_type", Value: traceType}},
+		}
+	}
+
+	resp, err := idx.client.Search(ctx, req)
+	if err != nil {
+		idx.logger.Warn("searching traces in supermemory", "error", err)
+		return nil
+	}
+	var results []string
+	for _, r := range resp.Results {
+		results = append(results, r.Content())
+	}
+	return results
+}
+
+// SearchPatternsFiltered performs semantic search over patterns with metadata filtering.
+func (idx *Indexer) SearchPatternsFiltered(ctx context.Context, owner, repo, query, category string, limit int) []string {
+	if idx.client == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	req := SearchRequest{
+		Query:        query,
+		ContainerTag: RepoTag(owner, repo, "patterns"),
+		SearchMode:   "hybrid",
+		Rerank:       true,
+		Limit:        limit,
+	}
+	if category != "" {
+		req.Filters = &SearchFilters{
+			AND: []FilterCondition{{Key: "category", Value: category}},
+		}
+	}
+
+	resp, err := idx.client.Search(ctx, req)
+	if err != nil {
+		idx.logger.Warn("searching patterns filtered", "error", err)
+		return nil
+	}
+	var results []string
+	for _, r := range resp.Results {
+		results = append(results, r.Content())
+	}
+	return results
+}
+
