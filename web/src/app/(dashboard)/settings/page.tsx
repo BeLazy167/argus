@@ -955,7 +955,7 @@ export default function SettingsPage() {
                   </div>
                 ) : (
                   <div className="space-y-4">
-                    <div className="grid gap-4 md:grid-cols-3">
+                    <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
                       {CORE_STAGES.map((stage) => (
                         <ConfigCard
                           key={`org-${stage}`}
@@ -1094,7 +1094,7 @@ export default function SettingsPage() {
             ) : (
               <div className="space-y-4">
                 {/* Row 1: Core stages */}
-                <div className="grid gap-4 md:grid-cols-3">
+                <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
                   {CORE_STAGES.map((stage) => (
                     <ConfigCard
                       key={stage}
@@ -1107,47 +1107,13 @@ export default function SettingsPage() {
                   ))}
                 </div>
 
-                {/* Row 2: Deep review toggle + scoring (Pro only) */}
+                {/* Row 2: Deep review toggle (Pro only) */}
                 <Protect plan="org:pro" fallback={<UpgradePrompt feature="Deep review" />}>
-                  <div className="grid gap-4 md:grid-cols-2">
-                    <DeepReviewCard
-                      enabled={deepReview}
-                      onToggle={toggleDeepReview}
-                      pending={updateRepo.isPending}
-                    />
-
-                    {/* Scoring card — ghosted when deep review is off */}
-                    <div
-                      className={`relative transition-opacity duration-200 ${
-                        deepReview ? "opacity-100" : "opacity-40"
-                      }`}
-                    >
-                      {!deepReview && (
-                        <button
-                          type="button"
-                          onClick={toggleDeepReview}
-                          className="absolute inset-0 z-10 flex items-center justify-center rounded-lg cursor-pointer group"
-                          aria-label="Enable deep review to configure scoring"
-                        >
-                          <div className="flex items-center gap-2 rounded border border-iron/50 bg-charcoal/90 px-3 py-1.5 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
-                            <Lock className="h-3 w-3 text-slate-text" />
-                            <span className="text-[10px] font-mono text-slate-text">
-                              Enable deep review to unlock
-                            </span>
-                          </div>
-                        </button>
-                      )}
-                      <div className={!deepReview ? "pointer-events-none" : undefined}>
-                        <ConfigCard
-                          stage="scoring"
-                          repoId={activeId}
-                          existing={configMap.get("scoring")}
-                          savedProviders={savedProviders}
-                          installationId={active?.id}
-                        />
-                      </div>
-                    </div>
-                  </div>
+                  <DeepReviewCard
+                    enabled={deepReview}
+                    onToggle={toggleDeepReview}
+                    pending={updateRepo.isPending}
+                  />
                 </Protect>
               </div>
             )}
