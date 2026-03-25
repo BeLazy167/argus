@@ -19,7 +19,18 @@ import {
 import { useState } from "react";
 import { QueryProvider } from "@/providers/query-provider";
 import { InstallationProvider } from "@/providers/installation-provider";
-import { ActiveRepoProvider } from "@/providers/active-repo-provider";
+import { ActiveRepoProvider, useActiveRepo } from "@/providers/active-repo-provider";
+import { RepoSelect } from "@/components/dashboard/repo-select";
+
+function TopBar() {
+  const { repos, activeId, setSelectedId } = useActiveRepo();
+  if (!repos.length) return null;
+  return (
+    <div className="sticky top-0 z-10 flex items-center justify-end border-b border-iron/30 bg-background/80 backdrop-blur-sm px-4 py-2 md:px-8">
+      <RepoSelect repos={repos} value={activeId} onChange={setSelectedId} showAll={false} />
+    </div>
+  );
+}
 
 const navItems = [
   { href: "/dashboard", label: "Overview", icon: LayoutDashboard },
@@ -147,7 +158,8 @@ export default function DashboardLayout({
 
           {/* Main content */}
           <main className="flex-1 overflow-y-auto scroll-smooth bg-background bg-noise">
-            <div className="mx-auto max-w-6xl px-4 py-8 pt-16 md:px-8 md:pt-8">{children}</div>
+            <TopBar />
+            <div className="mx-auto max-w-6xl px-4 py-4 pt-12 md:px-8 md:pt-4">{children}</div>
           </main>
         </div>
       </ActiveRepoProvider>

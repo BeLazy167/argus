@@ -274,12 +274,6 @@ export default function ReviewsPage() {
             <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-text" />
           </div>
 
-          <RepoSelect
-            repos={repos}
-            value={activeId}
-            onChange={(id: number) => { setSelectedId(id); setPage(0); }}
-            showAll
-          />
         </div>
       </div>
 
