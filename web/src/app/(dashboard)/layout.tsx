@@ -22,9 +22,13 @@ import { InstallationProvider } from "@/providers/installation-provider";
 import { ActiveRepoProvider, useActiveRepo } from "@/providers/active-repo-provider";
 import { RepoSelect } from "@/components/dashboard/repo-select";
 
+const REPO_SCOPED_PAGES = ["/reviews", "/patterns", "/scenarios", "/insights"];
+
 function SidebarRepoSelector() {
   const { repos, activeId, setSelectedId } = useActiveRepo();
-  if (!repos.length) return null;
+  const pathname = usePathname();
+  const isRepoPage = REPO_SCOPED_PAGES.some(p => pathname === p || pathname.startsWith(p + "/"));
+  if (!repos.length || !isRepoPage) return null;
   return (
     <div className="px-3 py-2 border-b border-sidebar-border">
       <label className="block text-[9px] font-mono text-slate-text uppercase tracking-wider mb-1 px-1">Repo</label>
@@ -33,13 +37,19 @@ function SidebarRepoSelector() {
   );
 }
 
-const navItems = [
+const orgNavItems = [
   { href: "/dashboard", label: "Overview", icon: LayoutDashboard },
-  { href: "/reviews", label: "Reviews", icon: MessageSquare },
   { href: "/repos", label: "Repos", icon: GitFork },
+];
+
+const repoNavItems = [
+  { href: "/reviews", label: "Reviews", icon: MessageSquare },
   { href: "/patterns", label: "Patterns", icon: Brain },
   { href: "/scenarios", label: "Scenarios", icon: Shield },
   { href: "/insights", label: "Insights", icon: Activity },
+];
+
+const settingsNavItems = [
   { href: "/team", label: "Team", icon: Users },
   { href: "/billing", label: "Billing", icon: CreditCard },
   { href: "/settings", label: "Settings", icon: Settings },
@@ -107,14 +117,25 @@ export default function DashboardLayout({
         />
       </div>
       <SidebarRepoSelector />
-      <nav className="flex-1 space-y-1 px-3 py-4">
-        {navItems.map((item) => (
-          <SidebarLink
-            key={item.href}
-            {...item}
-            active={isActive(item.href)}
-          />
-        ))}
+      <nav className="flex-1 px-3 py-4">
+        <div className="space-y-1">
+          {orgNavItems.map((item) => (
+            <SidebarLink key={item.href} {...item} active={isActive(item.href)} />
+          ))}
+        </div>
+        <div className="my-2 border-t border-sidebar-border" />
+        <p className="px-3 pt-1 pb-1.5 text-[9px] font-mono text-slate-text/50 uppercase tracking-wider">Repo</p>
+        <div className="space-y-1">
+          {repoNavItems.map((item) => (
+            <SidebarLink key={item.href} {...item} active={isActive(item.href)} />
+          ))}
+        </div>
+        <div className="my-2 border-t border-sidebar-border" />
+        <div className="space-y-1">
+          {settingsNavItems.map((item) => (
+            <SidebarLink key={item.href} {...item} active={isActive(item.href)} />
+          ))}
+        </div>
       </nav>
       <div className="border-t border-sidebar-border p-4">
         <UserButton appearance={{ elements: { avatarBox: "h-7 w-7" } }} />
