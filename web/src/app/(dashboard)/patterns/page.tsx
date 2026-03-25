@@ -11,6 +11,7 @@ import {
 } from "@/lib/queries/patterns";
 import { useRepos } from "@/lib/queries/repos";
 import { useActiveRepo } from "@/lib/hooks/use-active-repo";
+import { RepoSelect } from "@/components/dashboard/repo-select";
 import { formatDistanceToNow } from "@/lib/time";
 import {
   AreaChart,
@@ -37,7 +38,7 @@ const SOURCE_BADGE_STYLES: Record<string, string> = {
 };
 
 export default function PatternsPage() {
-  const { repos: activeRepos, activeId } = useActiveRepo();
+  const { repos: activeRepos, activeId, setSelectedId } = useActiveRepo();
   const activeRepoId = activeId || undefined;
   const { data: patterns, isLoading } = usePatterns(activeRepoId);
   const { data: repos } = useRepos();
@@ -113,14 +114,17 @@ export default function PatternsPage() {
 
   return (
     <>
-      <div className="mb-8">
-        <h1 className="font-display text-2xl font-bold text-foreground">
-          Patterns
-        </h1>
-        <p className="text-xs font-mono text-slate-text mt-1">
-          Remembered patterns shape future reviews. Add via dashboard or{" "}
-          <code className="text-amber">@argus-eye remember</code>.
-        </p>
+      <div className="mb-8 flex items-center justify-between">
+        <div>
+          <h1 className="font-display text-2xl font-bold text-foreground">
+            Patterns
+          </h1>
+          <p className="text-xs font-mono text-slate-text mt-1">
+            Remembered patterns shape future reviews. Add via dashboard or{" "}
+            <code className="text-amber">@argus-eye remember</code>.
+          </p>
+        </div>
+        <div className="flex items-center gap-3" />
       </div>
 
       {/* Timeline Chart */}

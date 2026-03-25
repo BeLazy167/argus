@@ -7,6 +7,7 @@ import { Protect } from "@clerk/nextjs";
 import { useRepoRisk, useTraces } from "@/lib/queries/insights";
 import { UpgradePrompt } from "@/components/dashboard/upgrade-prompt";
 import { useActiveRepo } from "@/lib/hooks/use-active-repo";
+import { RepoSelect } from "@/components/dashboard/repo-select";
 import { formatDistanceToNow } from "@/lib/time";
 
 const KIND_BADGE: Record<string, string> = {
@@ -17,7 +18,7 @@ const KIND_BADGE: Record<string, string> = {
 };
 
 export default function InsightsPage() {
-  const { activeId } = useActiveRepo();
+  const { repos, activeId, setSelectedId } = useActiveRepo();
   const { data: risks, isLoading: risksLoading } = useRepoRisk();
   const [fileFilter, setFileFilter] = useState("");
   const { data: traces, isLoading: tracesLoading } = useTraces(
@@ -63,13 +64,16 @@ export default function InsightsPage() {
 
   return (
     <Protect plan="org:pro" fallback={<UpgradePrompt feature="Insights & risk analysis" />}>
-      <div className="mb-8">
-        <h1 className="font-display text-2xl font-bold text-foreground">
-          Insights
-        </h1>
-        <p className="text-xs font-mono text-slate-text mt-1">
-          Code health signals — hot files, risk scores, and decision traces.
-        </p>
+      <div className="mb-8 flex items-center justify-between">
+        <div>
+          <h1 className="font-display text-2xl font-bold text-foreground">
+            Insights
+          </h1>
+          <p className="text-xs font-mono text-slate-text mt-1">
+            Code health signals — hot files, risk scores, and decision traces.
+          </p>
+        </div>
+        <div className="flex items-center gap-3" />
       </div>
 
       {/* File search */}

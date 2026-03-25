@@ -1,5 +1,5 @@
 "use client";
-import { createContext, useContext, useState, type ReactNode } from "react";
+import { createContext, useContext, useState, useMemo, type ReactNode } from "react";
 import { useRepos } from "@/lib/queries/repos";
 import type { Repo } from "@/lib/types";
 
@@ -34,9 +34,16 @@ export function ActiveRepoProvider({ children }: { children: ReactNode }) {
     }
   };
 
+  const effectiveId = useMemo(() => {
+    const repoList = repos ?? [];
+    if (selectedId && repoList.some(r => r.id === selectedId)) return selectedId;
+    const firstEnabled = repoList.find(r => r.enabled);
+    return firstEnabled?.id ?? 0;
+  }, [selectedId, repos]);
+
   return (
     <ActiveRepoContext.Provider
-      value={{ repos: repos ?? [], activeId: selectedId, setSelectedId, isLoading }}
+      value={{ repos: repos ?? [], activeId: effectiveId, setSelectedId, isLoading }}
     >
       {children}
     </ActiveRepoContext.Provider>

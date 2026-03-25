@@ -1024,6 +1024,24 @@ export default function SettingsPage() {
                 </Protect>
               </section>
 
+              {/* Org: Model Configuration Note */}
+              <section>
+                <div className="flex items-center gap-3 mb-4">
+                  <div className="flex items-center gap-2">
+                    <Cpu className="h-4 w-4 text-amber" />
+                    <h2 className="font-display text-lg font-semibold text-foreground">
+                      Model Configuration
+                    </h2>
+                  </div>
+                </div>
+                <div className="rounded-lg border border-iron/50 bg-iron/10 px-4 py-3 flex items-start gap-2.5">
+                  <Info className="h-3.5 w-3.5 text-slate-text mt-0.5 shrink-0" />
+                  <p className="text-[11px] font-mono text-slate-text">
+                    Model configuration (API keys, stage models, prompts) applies per-repo. Set defaults in the <span className="text-amber font-medium">Repo Overrides</span> tab.
+                  </p>
+                </div>
+              </section>
+
               {/* Org: Feature Toggles */}
               <Protect plan="org:pro" fallback={<UpgradePrompt feature="Advanced features" />}>
                 <section>

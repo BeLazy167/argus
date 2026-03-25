@@ -11,6 +11,7 @@ import {
 } from "@/lib/queries/scenarios";
 import { UpgradePrompt } from "@/components/dashboard/upgrade-prompt";
 import { useActiveRepo } from "@/lib/hooks/use-active-repo";
+import { RepoSelect } from "@/components/dashboard/repo-select";
 import { formatDistanceToNow } from "@/lib/time";
 
 type SeverityFilter = "all" | "critical" | "high" | "medium" | "low";
@@ -29,7 +30,7 @@ const SOURCE_BADGE: Record<string, string> = {
 };
 
 export default function ScenariosPage() {
-  const { activeId } = useActiveRepo();
+  const { repos, activeId, setSelectedId } = useActiveRepo();
   const { data: scenarios, isLoading } = useScenarios();
   const createScenario = useCreateScenario();
   const deleteScenario = useDeleteScenario();
@@ -91,14 +92,16 @@ export default function ScenariosPage() {
             Known risk scenarios Argus watches for in every review.
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => setShowForm(!showForm)}
-          className="flex items-center gap-2 rounded-md border border-amber/30 bg-amber/10 px-3 py-1.5 text-xs font-mono text-amber hover:bg-amber/20 transition-colors"
-        >
-          <Plus className="h-3.5 w-3.5" />
-          Add scenario
-        </button>
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => setShowForm(!showForm)}
+            className="flex items-center gap-2 rounded-md border border-amber/30 bg-amber/10 px-3 py-1.5 text-xs font-mono text-amber hover:bg-amber/20 transition-colors"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            Add scenario
+          </button>
+        </div>
       </div>
 
       {/* Create form */}
