@@ -136,6 +136,88 @@ func (s *Server) testConfig(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// --- Org Model Config ---
+
+func (s *Server) getOrgModelConfigs(w http.ResponseWriter, r *http.Request) {
+	installationID, err := strconv.ParseInt(chi.URLParam(r, "installationID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid installation id"})
+		return
+	}
+	if !containsID(getInstallationIDs(r.Context()), installationID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "access denied"})
+		return
+	}
+	configs, err := s.store.ListOrgModelConfigs(r.Context(), installationID)
+	if err != nil {
+		s.logger.Error("list org model configs", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, configs)
+}
+
+func (s *Server) upsertOrgModelConfig(w http.ResponseWriter, r *http.Request) {
+	installationID, err := strconv.ParseInt(chi.URLParam(r, "installationID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid installation id"})
+		return
+	}
+	if !containsID(getInstallationIDs(r.Context()), installationID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "access denied"})
+		return
+	}
+	stage := chi.URLParam(r, "stage")
+	validStages := map[string]bool{"triage": true, "review": true, "synthesis": true, "embedding": true, "scoring": true}
+	if !validStages[stage] {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "stage must be triage, review, synthesis, embedding, or scoring"})
+		return
+	}
+	var body struct {
+		Provider    string  `json:"provider"`
+		Model       string  `json:"model"`
+		BaseURL     *string `json:"base_url"`
+		MaxTokens   int     `json:"max_tokens"`
+		Temperature float32 `json:"temperature"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	if body.Provider == "" || body.Model == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "provider and model required"})
+		return
+	}
+	if body.MaxTokens <= 0 {
+		body.MaxTokens = 4096
+	}
+	cfg, err := s.store.UpsertOrgModelConfig(r.Context(), installationID, stage, body.Provider, body.Model, body.BaseURL, body.MaxTokens, body.Temperature)
+	if err != nil {
+		s.logger.Error("upsert org model config", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save config"})
+		return
+	}
+	writeJSON(w, http.StatusOK, cfg)
+}
+
+func (s *Server) deleteOrgModelConfig(w http.ResponseWriter, r *http.Request) {
+	installationID, err := strconv.ParseInt(chi.URLParam(r, "installationID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid installation id"})
+		return
+	}
+	if !containsID(getInstallationIDs(r.Context()), installationID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "access denied"})
+		return
+	}
+	stage := chi.URLParam(r, "stage")
+	if err := s.store.DeleteOrgModelConfig(r.Context(), installationID, stage); err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "config not found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
 // --- Prompt Templates ---
 
 func (s *Server) listPromptTemplates(w http.ResponseWriter, r *http.Request) {

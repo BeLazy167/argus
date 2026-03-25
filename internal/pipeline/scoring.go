@@ -40,7 +40,7 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 	}
 
 	// Check if scoring model is configured — if not, pass through
-	provider, cfg, err := ss.registry.ResolveProvider(ctx, storeConfigLister{ss.store}, run.DBInstallationID, run.DBRepoID, llm.StageScoring)
+	provider, cfg, err := ss.registry.ResolveProvider(ctx, storeConfigLister{st: ss.store, installationID: run.DBInstallationID}, run.DBInstallationID, run.DBRepoID, llm.StageScoring)
 	if err != nil {
 		slog.Info("scoring provider unavailable, passing all comments through", "repo_id", run.DBRepoID, "error", err)
 		run.ScoringSkipped = true

@@ -112,7 +112,7 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 	fileContents := prefetchFiles(ctx, rs.ghClient, run, owner, repo, filesToPrefetch)
 
 	// Resolve model config once for all files
-	provider, cfg, err := rs.registry.ResolveProvider(ctx, storeConfigLister{rs.store}, run.DBInstallationID, run.DBRepoID, llm.StageReview)
+	provider, cfg, err := rs.registry.ResolveProvider(ctx, storeConfigLister{st: rs.store, installationID: run.DBInstallationID}, run.DBInstallationID, run.DBRepoID, llm.StageReview)
 	if err != nil {
 		return err
 	}

@@ -71,7 +71,7 @@ func (ra *ReplyAnalyzer) Analyze(ctx context.Context, event ghpkg.CommentEvent) 
 	// Build LLM prompt
 	prompt := buildReplyPrompt(original, event)
 
-	provider, cfg, err := ra.registry.ResolveProvider(ctx, storeConfigLister{ra.store}, inst.ID, dbRepo.ID, llm.StageReview)
+	provider, cfg, err := ra.registry.ResolveProvider(ctx, storeConfigLister{st: ra.store, installationID: inst.ID}, inst.ID, dbRepo.ID, llm.StageReview)
 	if err != nil {
 		return fmt.Errorf("reply: %w", err)
 	}
