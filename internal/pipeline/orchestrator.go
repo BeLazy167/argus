@@ -482,7 +482,7 @@ func (o *Orchestrator) generateConversationalBrief(ctx context.Context, run *Pip
 		countComments(run), criticals, warnings, len(run.Diff.Files), strings.Join(top, ", "))
 
 	// Resolve synthesis provider (falls back to review provider)
-	lister := storeConfigLister{o.st}
+	lister := storeConfigLister{st: o.st, installationID: run.DBInstallationID}
 	provider, cfg, err := o.reviewStage.registry.ResolveProvider(ctx, lister, run.DBInstallationID, run.DBRepoID, llm.StageSynthesis)
 	if err != nil {
 		// Try review stage as fallback
@@ -1317,7 +1317,7 @@ func (o *Orchestrator) loadPrompts(ctx context.Context, repoID int64) map[string
 
 // resolveReviewProvider loads model configs and returns a review-stage provider.
 func (o *Orchestrator) resolveReviewProvider(ctx context.Context, run *PipelineRun) (llm.ModelConfig, llm.Provider, error) {
-	provider, cfg, err := o.reviewStage.registry.ResolveProvider(ctx, storeConfigLister{o.st}, run.DBInstallationID, run.DBRepoID, llm.StageReview)
+	provider, cfg, err := o.reviewStage.registry.ResolveProvider(ctx, storeConfigLister{st: o.st, installationID: run.DBInstallationID}, run.DBInstallationID, run.DBRepoID, llm.StageReview)
 	if err != nil {
 		return llm.ModelConfig{}, nil, err
 	}

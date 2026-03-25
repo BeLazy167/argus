@@ -121,6 +121,11 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 				r.Delete("/repos/{repoID}/config/{stage}", s.deleteModelConfig)
 				r.Post("/installations/{installationID}/test-config", s.testConfig)
 
+				// Org Model Config
+				r.Get("/installations/{installationID}/config", s.getOrgModelConfigs)
+				r.Put("/installations/{installationID}/config/{stage}", s.upsertOrgModelConfig)
+				r.Delete("/installations/{installationID}/config/{stage}", s.deleteOrgModelConfig)
+
 				// Reviews
 				r.Get("/reviews", s.listAllReviews)
 				r.Get("/repos/{repoID}/reviews", s.listReviews)

@@ -72,3 +72,54 @@ export function useDeleteModelConfig() {
     },
   });
 }
+
+export function useOrgModelConfigs() {
+  const api = useApi();
+  return useQuery({
+    queryKey: ["org-model-configs", api.active?.id],
+    queryFn: () =>
+      api.get<ModelConfig[]>(
+        `/api/v1/installations/${api.active?.id}/config`,
+      ),
+    enabled: !!api.active,
+  });
+}
+
+export function useUpsertOrgModelConfig() {
+  const api = useApi();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      stage,
+      ...body
+    }: {
+      stage: string;
+      provider: string;
+      model: string;
+      base_url?: string;
+      max_tokens: number;
+      temperature: number;
+    }) =>
+      api.put<ModelConfig>(
+        `/api/v1/installations/${api.active?.id}/config/${stage}`,
+        body,
+      ),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["org-model-configs"] });
+    },
+  });
+}
+
+export function useDeleteOrgModelConfig() {
+  const api = useApi();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ stage }: { stage: string }) =>
+      api.delete(
+        `/api/v1/installations/${api.active?.id}/config/${stage}`,
+      ),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["org-model-configs"] });
+    },
+  });
+}

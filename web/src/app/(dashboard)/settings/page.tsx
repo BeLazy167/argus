@@ -7,6 +7,9 @@ import {
   useUpsertModelConfig,
   useDeleteModelConfig,
   useTestConfig,
+  useOrgModelConfigs,
+  useUpsertOrgModelConfig,
+  useDeleteOrgModelConfig,
   type TestResult,
 } from "@/lib/queries/model-configs";
 import { useProviderKeys } from "@/lib/queries/provider-keys";
@@ -165,12 +168,16 @@ function ConfigCard({
   existing,
   savedProviders,
   installationId,
+  onSave,
+  onDelete,
 }: {
   stage: string;
   repoId: number;
   existing?: { provider: string; model: string; base_url?: string; max_tokens: number; temperature: number };
   savedProviders: string[];
   installationId?: number;
+  onSave?: (data: { stage: string; provider: string; model: string; base_url?: string; max_tokens: number; temperature: number }) => void;
+  onDelete?: (stage: string) => void;
 }) {
   const [provider, setProvider] = useState(existing?.provider ?? "");
   const [model, setModel] = useState(existing?.model ?? "");
@@ -208,10 +215,14 @@ function ConfigCard({
 
   const handleSave = () => {
     if (!validate()) return;
-    upsert.mutate(
-      { repoId, stage, provider, model: finalModel, max_tokens: maxTokens, temperature },
-      { onError: (err) => setError(err instanceof Error ? err.message : "Save failed") },
-    );
+    if (onSave) {
+      onSave({ stage, provider, model: finalModel, max_tokens: maxTokens, temperature });
+    } else {
+      upsert.mutate(
+        { repoId, stage, provider, model: finalModel, max_tokens: maxTokens, temperature },
+        { onError: (err) => setError(err instanceof Error ? err.message : "Save failed") },
+      );
+    }
   };
 
   const handleTest = () => {
@@ -251,7 +262,7 @@ function ConfigCard({
         {existing && (
           <button
             type="button"
-            onClick={() => del.mutate({ repoId, stage })}
+            onClick={() => onDelete ? onDelete(stage) : del.mutate({ repoId, stage })}
             className="text-[11px] font-mono text-slate-text hover:text-red-400 transition-colors"
           >
             Reset
@@ -757,6 +768,12 @@ export default function SettingsPage() {
   const { data: orgDefaults, isLoading: orgDefaultsLoading } = useOrgDefaults();
   const saveOrgDefaults = useSaveOrgDefaults();
 
+  // Org model configs
+  const { data: orgConfigs } = useOrgModelConfigs();
+  const upsertOrgConfig = useUpsertOrgModelConfig();
+  const deleteOrgConfig = useDeleteOrgModelConfig();
+  const orgConfigMap = new Map(orgConfigs?.map((c) => [c.stage, c]));
+
   const promptMap = new Map(customPrompts?.map((p) => [p.stage, p]));
   const defaultPromptMap = new Map(defaultPrompts?.map((p) => [p.stage, p]));
 
@@ -915,22 +932,19 @@ export default function SettingsPage() {
                 </Protect>
               </section>
 
-              {/* Org: Model Configuration */}
+              {/* Org: Review Pipeline */}
               <section>
                 <div className="flex items-center gap-3 mb-4">
                   <div className="flex items-center gap-2">
                     <Cpu className="h-4 w-4 text-amber" />
                     <h2 className="font-display text-lg font-semibold text-foreground">
-                      Model Configuration
+                      Review Pipeline
                     </h2>
                   </div>
                 </div>
-                <div className="rounded-lg border border-amber/20 bg-amber/5 px-4 py-3 flex items-start gap-2.5 mb-4">
-                  <Info className="h-3.5 w-3.5 text-amber mt-0.5 shrink-0" />
-                  <p className="text-[11px] font-mono text-amber/80">
-                    These settings apply as defaults when no repo-specific config is set.
-                  </p>
-                </div>
+                <p className="text-xs font-mono text-slate-text mb-4">
+                  Configure the default model for each review stage. Applies to all repos unless overridden.
+                </p>
 
                 {configuredCount === 0 ? (
                   <div className="rounded-lg border border-iron/50 bg-iron/10 px-4 py-3 flex items-start gap-2.5">
@@ -947,9 +961,11 @@ export default function SettingsPage() {
                           key={`org-${stage}`}
                           stage={stage}
                           repoId={0}
-                          existing={configMap.get(stage)}
+                          existing={orgConfigMap.get(stage)}
                           savedProviders={savedProviders}
                           installationId={active?.id}
+                          onSave={(data) => upsertOrgConfig.mutate(data)}
+                          onDelete={(s) => deleteOrgConfig.mutate({ stage: s })}
                         />
                       ))}
                     </div>

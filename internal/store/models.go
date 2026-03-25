@@ -95,16 +95,17 @@ type ActivityLog struct {
 }
 
 type ModelConfig struct {
-	ID          int64     `json:"id"`
-	RepoID      *int64    `json:"repo_id,omitempty"`
-	Stage       string    `json:"stage"`
-	Provider    string    `json:"provider"`
-	Model       string    `json:"model"`
-	BaseURL     *string   `json:"base_url,omitempty"`
-	MaxTokens   int       `json:"max_tokens"`
-	Temperature float32   `json:"temperature"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID             int64     `json:"id"`
+	RepoID         *int64    `json:"repo_id,omitempty"`
+	InstallationID *int64    `json:"installation_id,omitempty"`
+	Stage          string    `json:"stage"`
+	Provider       string    `json:"provider"`
+	Model          string    `json:"model"`
+	BaseURL        *string   `json:"base_url,omitempty"`
+	MaxTokens      int       `json:"max_tokens"`
+	Temperature    float32   `json:"temperature"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 type ProviderKey struct {

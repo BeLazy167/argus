@@ -516,7 +516,7 @@ func (s *Server) handleTestCommand(ctx context.Context, evt ghpkg.IssueCommentEv
 		return
 	}
 
-	lister := pipeline.StoreConfigListerFor(s.store)
+	lister := pipeline.StoreConfigListerFor(s.store, inst.ID)
 	provider, cfg, err := s.registry.ResolveProvider(ctx, lister, inst.ID, 0, llm.StageReview)
 	if err != nil {
 		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,

@@ -97,13 +97,23 @@ func (r *Registry) GetProviderForRepo(ctx context.Context, installationID int64,
 	return p, nil
 }
 
-// GetConfig returns the model config for a repo + stage. Checks repo-specific DB configs only.
-// Returns an error if no config is found — there are no hardcoded fallbacks.
+// GetConfig returns the model config for a repo + stage.
+// Prefers repo-specific config; falls back to org-level (RepoID == 0) if present.
 func (r *Registry) GetConfig(repoID int64, stage PipelineStage, repoConfigs []ModelConfig) (ModelConfig, error) {
+	var orgFallback *ModelConfig
 	for _, cfg := range repoConfigs {
-		if cfg.RepoID == repoID && cfg.Stage == stage {
-			return cfg, nil
+		if cfg.Stage == stage {
+			if cfg.RepoID == repoID {
+				return cfg, nil
+			}
+			if cfg.RepoID == 0 {
+				c := cfg
+				orgFallback = &c
+			}
 		}
+	}
+	if orgFallback != nil {
+		return *orgFallback, nil
 	}
 	return ModelConfig{}, fmt.Errorf("no model config for repo %d stage %s — configure one in the dashboard", repoID, stage)
 }

@@ -472,7 +472,7 @@ func (s *Store) DeleteRule(ctx context.Context, id int64) error {
 
 func (s *Store) ListModelConfigs(ctx context.Context, repoID int64) ([]ModelConfig, error) {
 	rows, err := s.Pool.Query(ctx, `
-		SELECT id, repo_id, stage, provider, model, base_url, max_tokens, temperature, created_at, updated_at
+		SELECT id, repo_id, installation_id, stage, provider, model, base_url, max_tokens, temperature, created_at, updated_at
 		FROM model_configs WHERE repo_id = $1 ORDER BY stage
 	`, repoID)
 	if err != nil {
@@ -494,9 +494,9 @@ func (s *Store) UpsertModelConfig(ctx context.Context, repoID int64, stage, prov
 			max_tokens = EXCLUDED.max_tokens,
 			temperature = EXCLUDED.temperature,
 			updated_at = NOW()
-		RETURNING id, repo_id, stage, provider, model, base_url, max_tokens, temperature, created_at, updated_at
+		RETURNING id, repo_id, installation_id, stage, provider, model, base_url, max_tokens, temperature, created_at, updated_at
 	`, repoID, stage, provider, model, baseURL, maxTokens, temperature).Scan(
-		&mc.ID, &mc.RepoID, &mc.Stage, &mc.Provider, &mc.Model, &mc.BaseURL,
+		&mc.ID, &mc.RepoID, &mc.InstallationID, &mc.Stage, &mc.Provider, &mc.Model, &mc.BaseURL,
 		&mc.MaxTokens, &mc.Temperature, &mc.CreatedAt, &mc.UpdatedAt)
 	if err != nil {
 		return nil, err
@@ -513,6 +513,65 @@ func (s *Store) DeleteModelConfig(ctx context.Context, repoID int64, stage strin
 		return fmt.Errorf("config not found for repo %d stage %s", repoID, stage)
 	}
 	return nil
+}
+
+// ListOrgModelConfigs returns installation-level model configs (repo_id IS NULL).
+func (s *Store) ListOrgModelConfigs(ctx context.Context, installationID int64) ([]ModelConfig, error) {
+	rows, err := s.Pool.Query(ctx, `
+		SELECT id, repo_id, installation_id, stage, provider, model, base_url, max_tokens, temperature, created_at, updated_at
+		FROM model_configs WHERE installation_id = $1 AND repo_id IS NULL ORDER BY stage
+	`, installationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return collectOrEmpty(rows, pgx.RowToStructByPos[ModelConfig])
+}
+
+// UpsertOrgModelConfig saves an installation-level model config.
+func (s *Store) UpsertOrgModelConfig(ctx context.Context, installationID int64, stage, provider, model string, baseURL *string, maxTokens int, temperature float32) (*ModelConfig, error) {
+	var mc ModelConfig
+	err := s.Pool.QueryRow(ctx, `
+		INSERT INTO model_configs (installation_id, repo_id, stage, provider, model, base_url, max_tokens, temperature)
+		VALUES ($1, NULL, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (installation_id, stage) WHERE repo_id IS NULL DO UPDATE SET
+			provider = EXCLUDED.provider, model = EXCLUDED.model, base_url = EXCLUDED.base_url,
+			max_tokens = EXCLUDED.max_tokens, temperature = EXCLUDED.temperature, updated_at = NOW()
+		RETURNING id, repo_id, installation_id, stage, provider, model, base_url, max_tokens, temperature, created_at, updated_at
+	`, installationID, stage, provider, model, baseURL, maxTokens, temperature).Scan(
+		&mc.ID, &mc.RepoID, &mc.InstallationID, &mc.Stage, &mc.Provider, &mc.Model, &mc.BaseURL,
+		&mc.MaxTokens, &mc.Temperature, &mc.CreatedAt, &mc.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &mc, nil
+}
+
+// DeleteOrgModelConfig removes an installation-level config.
+func (s *Store) DeleteOrgModelConfig(ctx context.Context, installationID int64, stage string) error {
+	ct, err := s.Pool.Exec(ctx, `DELETE FROM model_configs WHERE installation_id = $1 AND stage = $2 AND repo_id IS NULL`, installationID, stage)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return fmt.Errorf("org config not found for installation %d stage %s", installationID, stage)
+	}
+	return nil
+}
+
+// ListModelConfigsWithFallback returns repo configs, falling back to org configs for missing stages.
+func (s *Store) ListModelConfigsWithFallback(ctx context.Context, installationID, repoID int64) ([]ModelConfig, error) {
+	rows, err := s.Pool.Query(ctx, `
+		SELECT DISTINCT ON (stage) id, repo_id, installation_id, stage, provider, model, base_url, max_tokens, temperature, created_at, updated_at
+		FROM model_configs
+		WHERE (repo_id = $2 OR (installation_id = $1 AND repo_id IS NULL))
+		ORDER BY stage, repo_id NULLS LAST
+	`, installationID, repoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return collectOrEmpty(rows, pgx.RowToStructByPos[ModelConfig])
 }
 
 // --- Review Comments ---

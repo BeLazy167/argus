@@ -48,7 +48,7 @@ func (ts *TriageStage) Execute(ctx context.Context, run *PipelineRun) error {
 		return nil
 	}
 
-	provider, cfg, err := ts.registry.ResolveProvider(ctx, storeConfigLister{ts.store}, run.DBInstallationID, run.DBRepoID, llm.StageTriage)
+	provider, cfg, err := ts.registry.ResolveProvider(ctx, storeConfigLister{st: ts.store, installationID: run.DBInstallationID}, run.DBInstallationID, run.DBRepoID, llm.StageTriage)
 	if err != nil {
 		return err
 	}
@@ -159,14 +159,24 @@ func storeToLLMConfigs(dbConfigs []store.ModelConfig) []llm.ModelConfig {
 }
 
 // StoreConfigListerFor returns an llm.ModelConfigLister backed by the given store.
-func StoreConfigListerFor(st *store.Store) storeConfigLister {
-	return storeConfigLister{st}
+func StoreConfigListerFor(st *store.Store, installationID int64) storeConfigLister {
+	return storeConfigLister{st: st, installationID: installationID}
 }
 
-// storeConfigLister adapts *store.Store to llm.ModelConfigLister.
-type storeConfigLister struct{ st *store.Store }
+// storeConfigLister adapts *store.Store to llm.ModelConfigLister with org fallback.
+type storeConfigLister struct {
+	st             *store.Store
+	installationID int64
+}
 
 func (s storeConfigLister) ListLLMConfigs(ctx context.Context, repoID int64) ([]llm.ModelConfig, error) {
+	if s.installationID > 0 {
+		dbConfigs, err := s.st.ListModelConfigsWithFallback(ctx, s.installationID, repoID)
+		if err != nil {
+			return nil, err
+		}
+		return storeToLLMConfigs(dbConfigs), nil
+	}
 	dbConfigs, err := s.st.ListModelConfigs(ctx, repoID)
 	if err != nil {
 		return nil, err

@@ -78,7 +78,7 @@ func (e *SimulationEngine) RunSimulations(ctx context.Context, req SimulationReq
 	}
 
 	// Resolve provider — use synthesis stage config
-	lister := storeConfigLister{e.store}
+	lister := storeConfigLister{st: e.store, installationID: req.Run.DBInstallationID}
 	provider, cfg, err := e.registry.ResolveProvider(ctx, lister, req.Run.DBInstallationID, req.Run.DBRepoID, llm.StageSynthesis)
 	if err != nil {
 		// fallback to review

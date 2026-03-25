@@ -105,6 +105,7 @@ export type Rule = {
 export type ModelConfig = {
   id: number;
   repo_id?: number;
+  installation_id?: number;
   stage: string;
   provider: string;
   model: string;
