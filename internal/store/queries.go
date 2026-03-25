@@ -380,7 +380,7 @@ func (s *Store) ListReviewsScoped(ctx context.Context, repoID int64, installatio
 		limit = 20
 	}
 	rows, err := s.Pool.Query(ctx, `
-		SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, rv.github_review_id,
+		SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, COALESCE(rv.head_ref,''), rv.github_review_id,
 		       rv.status, rv.summary, rv.score, rv.token_usage, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error,
 		       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at
 		FROM reviews rv
@@ -400,7 +400,7 @@ func (s *Store) ListAllReviewsScoped(ctx context.Context, installationIDs []int6
 		limit = 20
 	}
 	rows, err := s.Pool.Query(ctx, `
-		SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, rv.github_review_id,
+		SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, COALESCE(rv.head_ref,''), rv.github_review_id,
 		       rv.status, rv.summary, rv.score, rv.token_usage, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error,
 		       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at
 		FROM reviews rv
@@ -565,7 +565,7 @@ func (s *Store) GetLastCompletedReview(ctx context.Context, repoID int64, prNumb
 func (s *Store) GetLatestReviewBySHA(ctx context.Context, repoFullName string, prNumber int, headSHA string) (*Review, error) {
 	var r Review
 	err := s.Pool.QueryRow(ctx, `
-		SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, rv.github_review_id,
+		SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, COALESCE(rv.head_ref,''), rv.github_review_id,
 		       rv.status, rv.summary, rv.score, rv.token_usage, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error,
 		       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at
 		FROM reviews rv JOIN repos r ON rv.repo_id = r.id
@@ -585,7 +585,7 @@ func (s *Store) GetLatestReviewBySHA(ctx context.Context, repoFullName string, p
 func (s *Store) GetLatestReviewByPR(ctx context.Context, repoFullName string, prNumber int) (*Review, error) {
 	var r Review
 	err := s.Pool.QueryRow(ctx, `
-		SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, rv.github_review_id,
+		SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, COALESCE(rv.head_ref,''), rv.github_review_id,
 		       rv.status, rv.summary, rv.score, rv.token_usage, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error,
 		       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at
 		FROM reviews rv JOIN repos r ON rv.repo_id = r.id
