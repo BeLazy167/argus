@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Settings, Loader2, Save, Trash2, Key, Cpu, ChevronDown, Zap, Check, X, ArrowUp, Info, UserCog, Lock, ShieldCheck, Bug, Blocks, RotateCcw, FileText, RotateCw, Search, Sliders, FlaskConical } from "lucide-react";
+import { Settings, Loader2, Save, Key, Cpu, ChevronDown, Zap, Check, X, ArrowUp, Info, UserCog, Lock, ShieldCheck, Bug, Blocks, RotateCcw, FileText, RotateCw, Search, Sliders, FlaskConical } from "lucide-react";
 import {
   useModelConfigs,
   useUpsertModelConfig,
@@ -9,11 +9,7 @@ import {
   useTestConfig,
   type TestResult,
 } from "@/lib/queries/model-configs";
-import {
-  useProviderKeys,
-  useUpsertProviderKey,
-  useDeleteProviderKey,
-} from "@/lib/queries/provider-keys";
+import { useProviderKeys } from "@/lib/queries/provider-keys";
 import {
   usePrompts,
   useDefaultPrompts,
@@ -27,7 +23,7 @@ import { useUpdateRepo } from "@/lib/queries/repos";
 import { RepoSelect } from "@/components/dashboard/repo-select";
 import { Protect } from "@clerk/nextjs";
 import { UpgradePrompt } from "@/components/dashboard/upgrade-prompt";
-import type { ProviderKey, PromptTemplate } from "@/lib/types";
+import type { PromptTemplate } from "@/lib/types";
 import { useOrgDefaults, useSaveOrgDefaults } from "@/lib/queries/org-defaults";
 
 /* ── Providers & model quick-picks ── */
@@ -45,15 +41,6 @@ const PROVIDER_LABELS: Record<Provider, string> = {
   zhipu: "Zhipu AI (GLM)",
 };
 
-const PROVIDER_BASE_URLS: Record<Provider, string> = {
-  openrouter: "https://openrouter.ai/api/v1",
-  openai: "https://api.openai.com/v1",
-  anthropic: "https://api.anthropic.com/v1",
-  azure: "",
-  gcp_vertex: "",
-  aws_bedrock: "",
-  zhipu: "https://api.z.ai/api/paas/v4",
-};
 
 const MODEL_PICKS: Record<Provider, string[]> = {
   openrouter: [
@@ -167,101 +154,6 @@ function PersonaCard({
         {persona.description}
       </p>
     </button>
-  );
-}
-
-/* ── API Key Card ── */
-
-function ProviderKeyCard({
-  provider,
-  existing,
-}: {
-  provider: Provider;
-  existing?: ProviderKey;
-}) {
-  const [apiKey, setApiKey] = useState("");
-  const [baseUrl, setBaseUrl] = useState(existing?.base_url ?? "");
-  const upsert = useUpsertProviderKey();
-  const del = useDeleteProviderKey();
-
-  const handleSave = () => {
-    if (!apiKey && !existing) return;
-    upsert.mutate({
-      provider,
-      api_key: apiKey,
-      base_url: baseUrl || undefined,
-    });
-    setApiKey("");
-  };
-
-  return (
-    <div className="rounded-lg border border-iron bg-charcoal p-5">
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-2">
-          <Key className="h-3.5 w-3.5 text-amber" />
-          <span className="text-xs font-mono font-medium text-foreground">
-            {PROVIDER_LABELS[provider]}
-          </span>
-        </div>
-        <StatusBadge variant={existing ? "active" : "inactive"} label={existing ? "Active" : "Not configured"} />
-      </div>
-
-      {existing && (
-        <p className="text-[11px] font-mono text-slate-text mb-3">
-          Key: {existing.api_key_masked}
-        </p>
-      )}
-
-      <div className="space-y-2 mb-3">
-        <div>
-          <label className="block text-[10px] font-mono text-slate-text mb-1">
-            {existing ? "Replace API key" : "API key"}
-          </label>
-          <input
-            type="password"
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-            placeholder={existing ? "Enter new key to replace" : "sk-..."}
-            className="w-full rounded border border-iron bg-background px-2 py-1.5 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none"
-          />
-        </div>
-        <div>
-          <label className="block text-[10px] font-mono text-slate-text mb-1">
-            Base URL override (optional)
-          </label>
-          <input
-            type="text"
-            value={baseUrl}
-            onChange={(e) => setBaseUrl(e.target.value)}
-            placeholder={PROVIDER_BASE_URLS[provider]}
-            className="w-full rounded border border-iron bg-background px-2 py-1.5 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none"
-          />
-        </div>
-      </div>
-
-      <div className="flex items-center gap-2">
-        <button
-          type="button"
-          onClick={handleSave}
-          disabled={upsert.isPending || (!apiKey && !existing)}
-          className="flex items-center gap-2 rounded border border-amber/30 bg-amber/10 px-3 py-1 text-[11px] font-mono text-amber hover:bg-amber/20 transition-colors disabled:opacity-50"
-        >
-          <Save className="h-3 w-3" />
-          {upsert.isPending ? "Saving..." : "Save"}
-        </button>
-        {existing && (
-          <button
-            type="button"
-            onClick={() => del.mutate(existing!.id)}
-            disabled={del.isPending}
-            className="flex items-center gap-2 rounded border border-red-400/30 px-3 py-1 text-[11px] font-mono text-red-400 hover:bg-red-400/10 transition-colors disabled:opacity-50"
-          >
-            <Trash2 className="h-3 w-3" />
-            {del.isPending ? "Deleting..." : "Delete"}
-          </button>
-        )}
-      </div>
-    </div>
   );
 }
 
@@ -882,7 +774,6 @@ export default function SettingsPage() {
 
   const loading = reposLoading || keysLoading || (activeId > 0 && configsLoading);
   const configMap = new Map(configs?.map((c) => [c.stage, c]));
-  const keyMap = new Map(providerKeys?.map((k) => [k.provider, k]));
   const savedProviders = providerKeys?.map((k) => k.provider) ?? [];
   const configuredCount = savedProviders.length;
 
@@ -1024,7 +915,7 @@ export default function SettingsPage() {
                 </Protect>
               </section>
 
-              {/* Org: Model Configuration Note */}
+              {/* Org: Model Configuration */}
               <section>
                 <div className="flex items-center gap-3 mb-4">
                   <div className="flex items-center gap-2">
@@ -1034,12 +925,36 @@ export default function SettingsPage() {
                     </h2>
                   </div>
                 </div>
-                <div className="rounded-lg border border-iron/50 bg-iron/10 px-4 py-3 flex items-start gap-2.5">
-                  <Info className="h-3.5 w-3.5 text-slate-text mt-0.5 shrink-0" />
-                  <p className="text-[11px] font-mono text-slate-text">
-                    Model configuration (API keys, stage models, prompts) applies per-repo. Set defaults in the <span className="text-amber font-medium">Repo Overrides</span> tab.
+                <div className="rounded-lg border border-amber/20 bg-amber/5 px-4 py-3 flex items-start gap-2.5 mb-4">
+                  <Info className="h-3.5 w-3.5 text-amber mt-0.5 shrink-0" />
+                  <p className="text-[11px] font-mono text-amber/80">
+                    These settings apply as defaults when no repo-specific config is set.
                   </p>
                 </div>
+
+                {configuredCount === 0 ? (
+                  <div className="rounded-lg border border-iron/50 bg-iron/10 px-4 py-3 flex items-start gap-2.5">
+                    <Info className="h-3.5 w-3.5 text-slate-text mt-0.5 shrink-0" />
+                    <p className="text-[11px] font-mono text-slate-text">
+                      No API keys configured yet. <a href="/providers" className="text-amber underline underline-offset-2 hover:text-foreground transition-colors">Add an API key</a> to unlock provider selection.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    <div className="grid gap-4 md:grid-cols-3">
+                      {CORE_STAGES.map((stage) => (
+                        <ConfigCard
+                          key={`org-${stage}`}
+                          stage={stage}
+                          repoId={0}
+                          existing={configMap.get(stage)}
+                          savedProviders={savedProviders}
+                          installationId={active?.id}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                )}
               </section>
 
               {/* Org: Feature Toggles */}
@@ -1097,8 +1012,8 @@ export default function SettingsPage() {
               Settings not configured here fall back to org defaults.
             </p>
           </div>
-          {/* Section 1: API Keys */}
-          <section id="api-keys">
+          {/* API Keys link */}
+          <section>
             <div className="flex items-center gap-3 mb-4">
               <span className="inline-flex items-center justify-center h-6 w-6 rounded-full border border-amber/30 bg-amber/10 text-[11px] font-mono font-bold text-amber">
                 1
@@ -1113,19 +1028,9 @@ export default function SettingsPage() {
                 {configuredCount}/{PROVIDERS.length} configured
               </span>
             </div>
-            <p className="text-[11px] font-mono text-slate-text mb-4">
-              Bring your own API keys. Keys are encrypted at rest and scoped to your organization.
-              Providers configured here become available for model selection below.
+            <p className="text-[11px] font-mono text-slate-text">
+              Manage API keys in <a href="/providers" className="text-amber underline underline-offset-2 hover:text-foreground transition-colors">Providers</a>.
             </p>
-            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-              {PROVIDERS.map((p) => (
-                <ProviderKeyCard
-                  key={p}
-                  provider={p}
-                  existing={keyMap.get(p)}
-                />
-              ))}
-            </div>
           </section>
 
           {/* Section 2: Review Pipeline (models + deep review merged) */}
