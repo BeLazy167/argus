@@ -56,8 +56,18 @@ export type Review = {
   deep_review?: boolean;
   persona?: string;
   is_incremental?: boolean;
+  simulation_results?: SimulationResult[];
   created_at: string;
   completed_at?: string;
+};
+
+export type SimulationResult = {
+  scenario: string;
+  passes: boolean;
+  confidence: number;
+  root_cause: string;
+  impact?: string;
+  suggestion?: string;
 };
 
 export type ReviewComment = {

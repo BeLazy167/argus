@@ -39,6 +39,7 @@ type Orchestrator struct {
 	triageStage  *TriageStage
 	scoringStage *ScoringStage
 	indexer      *memory.Indexer
+	simEngine    *SimulationEngine
 	registry     LLMRegistry
 	eventBus     *EventBus
 	logger       *slog.Logger
@@ -66,6 +67,7 @@ func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, 
 		eventBus:     eventBus,
 		logger:       logger,
 	}
+	o.simEngine = NewSimulationEngine(o.reviewStage.registry, st, ghClient, logger)
 
 	sm.RegisterStage(StateTriaging, triageStage.Execute)
 	sm.RegisterStage(StateReviewing, reviewStage.Execute)
@@ -215,6 +217,10 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 			tier, _ := o.st.GetPlanTier(ctx, inst.ID)
 			return tier == "pro"
 		}(),
+		CrossFileContext: isCrossFileContextEnabled(mergedSettings),
+		BlastRadius:     isBlastRadiusEnabled(mergedSettings),
+		ScenarioMemory:  isScenarioMemoryEnabled(mergedSettings),
+		CodeSimulation:  isCodeSimulationEnabled(mergedSettings),
 		Prompts:          o.loadPrompts(ctx, dbRepo.ID),
 		IsIncremental:    isIncremental,
 		PreviousReviewID: previousReviewID,
@@ -436,6 +442,31 @@ func (o *Orchestrator) synthesize(ctx context.Context, run *PipelineRun) error {
 	score := calculateScore(run)
 	totalComments := countComments(run)
 
+	// Run code simulations if enabled
+	var simResults []SimulationResult
+	if run.CodeSimulation && o.simEngine != nil {
+		changedFiles := make([]string, 0, len(run.Diff.Files))
+		for _, f := range run.Diff.Files {
+			changedFiles = append(changedFiles, f.NewName)
+		}
+		scenarios, err := FindRelevantScenarios(ctx, o.st, run.DBRepoID, changedFiles)
+		if err != nil {
+			o.logger.Warn("scenario lookup for simulation failed", "error", err)
+		} else if len(scenarios) > 0 {
+			simScenarios := make([]SimScenario, len(scenarios))
+			for i, s := range scenarios {
+				simScenarios[i] = SimScenario{Description: s.Description}
+			}
+			req := SimulationRequest{Run: run, Scenarios: simScenarios}
+			results, simErr := o.simEngine.RunSimulations(ctx, req)
+			if simErr != nil {
+				o.logger.Warn("simulation failed", "error", simErr)
+			} else {
+				simResults = results
+			}
+		}
+	}
+
 	// Build concise brief for GitHub review body
 	var brief string
 	if totalComments == 0 {
@@ -446,9 +477,14 @@ func (o *Orchestrator) synthesize(ctx context.Context, run *PipelineRun) error {
 	}
 
 	run.Synthesis = &SynthesisResult{
-		Summary: summary.String(),
-		Brief:   brief,
-		Score:   score,
+		Summary:           summary.String(),
+		Brief:             brief,
+		Score:             score,
+		SimulationResults: simResults,
+	}
+
+	if len(simResults) > 0 {
+		run.Synthesis.Brief += FormatSimulationResults(simResults)
 	}
 
 	if run.EventBus != nil {
@@ -744,12 +780,13 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 
 	// Update review record
 	persona := strPtrOrNil(string(run.Persona))
+	simResultsJSON, _ := json.Marshal(run.Synthesis.SimulationResults)
 	_, err = o.db.Exec(ctx, `
 		UPDATE reviews SET status = 'completed', github_review_id = $1, summary = $2, score = $3, token_usage = $4, file_count = $5,
-		       deep_review = $6, persona = $7, is_incremental = $8, completed_at = NOW()
-		WHERE id = $9
+		       deep_review = $6, persona = $7, is_incremental = $8, simulation_results = $9, completed_at = NOW()
+		WHERE id = $10
 	`, ghReviewID, run.Synthesis.Summary, run.Synthesis.Score, tokenUsageJSON, len(run.FileReviews),
-		run.DeepReview, persona, run.IsIncremental, run.ReviewID)
+		run.DeepReview, persona, run.IsIncremental, simResultsJSON, run.ReviewID)
 	if err != nil {
 		return fmt.Errorf("updating review record: %w", err)
 	}
@@ -763,6 +800,27 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	o.extractConventions(ctx, run, owner, repo)
 	o.synthesizeFileMemories(ctx, run, owner, repo)
 	o.indexPRSummary(ctx, run, owner, repo)
+
+	if len(run.Synthesis.SimulationResults) > 0 && o.indexer != nil {
+		changedFiles := make([]string, 0, len(run.Diff.Files))
+		for _, f := range run.Diff.Files {
+			changedFiles = append(changedFiles, f.NewName)
+		}
+		for _, result := range run.Synthesis.SimulationResults {
+			if err := o.indexer.IndexSimulationResult(ctx, owner, repo, run.PREvent.PRNumber, changedFiles,
+				result.Passes, result.Scenario, result.Confidence, result.RootCause, result.Impact); err != nil {
+				o.logger.Warn("indexing simulation result", "error", err)
+			}
+			if !result.Passes && result.Confidence >= 0.5 {
+				matches := o.indexer.SearchScenariosWithIDs(ctx, owner, repo, result.Scenario, "", 1)
+				if len(matches) > 0 && matches[0].Similarity >= 0.75 {
+					if err := o.st.Q.IncrementScenarioTriggerCount(ctx, matches[0].ID); err != nil {
+						o.logger.Warn("incrementing scenario trigger count", "error", err)
+					}
+				}
+			}
+		}
+	}
 
 	// Mark scenarios touching changed files as outdated
 	changedPaths := make([]string, 0, len(run.Diff.Files))
@@ -784,10 +842,11 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		o.logger.Warn("some decision traces failed to persist", "failed", traceFails, "total", len(traceSeeds))
 	}
 
-	// Auto-learn scenarios from critical/warning findings.
-	// Active by default — devs react 👎 to dismiss false positives.
-	scenarioSeeds := ExtractScenariosFromReview(run)
-	StoreScenarioSeeds(ctx, o.st, o.indexer, owner, repo, run.DBInstallationID, &run.DBRepoID, scenarioSeeds)
+	// Auto-learn scenarios from critical/warning findings (gated by feature flag).
+	if run.ScenarioMemory {
+		scenarioSeeds := ExtractScenariosFromReview(run)
+		StoreScenarioSeeds(ctx, o.st, o.indexer, owner, repo, run.DBInstallationID, &run.DBRepoID, scenarioSeeds)
+	}
 
 	if run.EventBus != nil {
 		run.EventBus.Publish(run.ReviewID, EventCompleted, map[string]any{

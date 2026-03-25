@@ -272,14 +272,14 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p revie
 
 	// Gather cross-file context for richer reviews
 	var relatedContext string
-	if p.specialist == "" { // only for primary review, not specialists (to save tokens)
+	if run.CrossFileContext && p.specialist == "" { // only for primary review, not specialists (to save tokens)
 		related := GatherCrossFileContext(ctx, rs.ghClient, run.PREvent.InstallationID, owner, repo, run.PREvent.HeadSHA, p.file, run.Diff.Files)
 		relatedContext = FormatRelatedContext(related)
 	}
 
 	// Query blast radius from code graph
 	var blastContext string
-	if rs.store != nil {
+	if run.BlastRadius && rs.store != nil {
 		changedPaths := make([]string, 0, len(run.Diff.Files))
 		for _, f := range run.Diff.Files {
 			changedPaths = append(changedPaths, f.NewName)
@@ -294,7 +294,7 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p revie
 
 	// Look up relevant scenarios for this file
 	var scenarioContext string
-	if rs.store != nil {
+	if run.ScenarioMemory && rs.store != nil {
 		scenarios, err := FindRelevantScenarios(ctx, rs.store, run.DBRepoID, []string{p.file.NewName})
 		if err != nil {
 			slog.Warn("scenario lookup failed", "file", p.file.NewName, "error", err)
