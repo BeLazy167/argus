@@ -15,7 +15,7 @@ import { useStats } from "@/lib/queries/stats";
 import { useReviews } from "@/lib/queries/reviews";
 import { useActiveRepo } from "@/lib/hooks/use-active-repo";
 import { formatDistanceToNow } from "@/lib/time";
-import { RepoSelect } from "@/components/dashboard/repo-select";
+
 
 function StatCard({
   label,
@@ -102,8 +102,8 @@ function formatReviewTime(ms: number): string {
 
 export default function DashboardPage() {
   const router = useRouter();
-  const { data: stats, isLoading: statsLoading } = useStats();
-  const { repos, activeId, setSelectedId, isLoading: reposLoading } = useActiveRepo();
+  const { repos, activeId, isLoading: reposLoading } = useActiveRepo();
+  const { data: stats, isLoading: statsLoading } = useStats(activeId || undefined);
 
   const repoMap = new Map(repos.map((r) => [r.id, r]));
   const { data: reviews, isLoading: reviewsLoading } = useReviews(activeId, 200);
@@ -171,12 +171,9 @@ export default function DashboardPage() {
           <h2 className="text-xs font-mono uppercase tracking-[0.1em] text-foreground">
             Recent Reviews
           </h2>
-          <div className="flex items-center gap-4">
-            <span className="text-[10px] font-mono text-slate-text">
-              {stats?.total_reviews ?? "\u2014"} total
-            </span>
-            <RepoSelect repos={repos} value={activeId} onChange={setSelectedId} showAll />
-          </div>
+          <span className="text-[10px] font-mono text-slate-text">
+            {reviews?.length ?? 0} total
+          </span>
         </div>
 
         {feedLoading ? (

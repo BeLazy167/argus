@@ -27,16 +27,16 @@ export function ActiveRepoProvider({ children }: { children: ReactNode }) {
 
   const setSelectedId = (id: number) => {
     setSelectedIdState(id);
-    if (id) {
-      localStorage.setItem("argus_active_repo", String(id));
-    } else {
-      localStorage.removeItem("argus_active_repo");
-    }
+    localStorage.setItem("argus_active_repo", String(id));
   };
 
   const effectiveId = useMemo(() => {
     const repoList = repos ?? [];
+    // User explicitly selected "All repos" (value=0)
+    if (selectedId === 0 && typeof window !== "undefined" && localStorage.getItem("argus_active_repo") === "0") return 0;
+    // Selected repo exists in list
     if (selectedId && repoList.some(r => r.id === selectedId)) return selectedId;
+    // Default to first enabled repo
     const firstEnabled = repoList.find(r => r.enabled);
     return firstEnabled?.id ?? 0;
   }, [selectedId, repos]);
