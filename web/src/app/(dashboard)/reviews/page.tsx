@@ -17,7 +17,7 @@ import { formatDistanceToNow } from "@/lib/time";
 import { githubPrUrl } from "@/lib/github";
 import { ScoreBadge } from "@/components/dashboard/score-badge";
 import { StatusBadge } from "@/components/dashboard/status-badge";
-import { RepoSelect } from "@/components/dashboard/repo-select";
+
 import type { Review } from "@/lib/types";
 
 const FETCH_LIMIT = 200;

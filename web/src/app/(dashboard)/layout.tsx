@@ -22,17 +22,13 @@ import { InstallationProvider } from "@/providers/installation-provider";
 import { ActiveRepoProvider, useActiveRepo } from "@/providers/active-repo-provider";
 import { RepoSelect } from "@/components/dashboard/repo-select";
 
-const REPO_SCOPED_PAGES = ["/reviews", "/patterns", "/scenarios", "/insights"];
-
 function SidebarRepoSelector() {
   const { repos, activeId, setSelectedId } = useActiveRepo();
-  const pathname = usePathname();
-  const isRepoPage = REPO_SCOPED_PAGES.some(p => pathname === p || pathname.startsWith(p + "/"));
-  if (!repos.length || !isRepoPage) return null;
+  if (!repos.length) return null;
   return (
     <div className="px-3 py-2 border-b border-sidebar-border">
       <label className="block text-[9px] font-mono text-slate-text uppercase tracking-wider mb-1 px-1">Repo</label>
-      <RepoSelect repos={repos} value={activeId} onChange={setSelectedId} showAll={false} />
+      <RepoSelect repos={repos} value={activeId} onChange={setSelectedId} showAll />
     </div>
   );
 }
