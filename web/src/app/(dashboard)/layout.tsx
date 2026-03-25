@@ -28,7 +28,7 @@ function SidebarRepoSelector() {
   return (
     <div className="px-3 py-2 border-b border-sidebar-border">
       <label className="block text-[9px] font-mono text-slate-text uppercase tracking-wider mb-1 px-1">Repo</label>
-      <RepoSelect repos={repos} value={activeId} onChange={setSelectedId} showAll />
+      <RepoSelect repos={repos} value={activeId} onChange={setSelectedId} showAll className="w-full" />
     </div>
   );
 }
@@ -133,8 +133,18 @@ export default function DashboardLayout({
           ))}
         </div>
       </nav>
-      <div className="border-t border-sidebar-border p-4">
-        <UserButton appearance={{ elements: { avatarBox: "h-7 w-7" } }} />
+      <div className="border-t border-sidebar-border px-3 py-3">
+        <UserButton
+          showName
+          appearance={{
+            elements: {
+              rootBox: "w-full",
+              userButtonTrigger: "w-full justify-start gap-2 px-2 py-1.5 rounded-md hover:bg-sidebar-accent transition-colors",
+              userButtonAvatarBox: "h-6 w-6",
+              userButtonOuterIdentifier: "text-xs font-mono text-slate-text truncate",
+            },
+          }}
+        />
       </div>
     </>
   );
