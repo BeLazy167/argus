@@ -165,6 +165,7 @@ type Review struct {
 	Persona            *string            `json:"persona"`
 	IsIncremental      bool               `json:"is_incremental"`
 	ResolvedStaleCount *int32             `json:"resolved_stale_count"`
+	HeadRef            *string            `json:"head_ref"`
 }
 
 type ReviewComment struct {
