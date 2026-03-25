@@ -22,11 +22,12 @@ import { InstallationProvider } from "@/providers/installation-provider";
 import { ActiveRepoProvider, useActiveRepo } from "@/providers/active-repo-provider";
 import { RepoSelect } from "@/components/dashboard/repo-select";
 
-function TopBar() {
+function SidebarRepoSelector() {
   const { repos, activeId, setSelectedId } = useActiveRepo();
   if (!repos.length) return null;
   return (
-    <div className="sticky top-0 z-10 flex items-center justify-end border-b border-iron/30 bg-background/80 backdrop-blur-sm px-4 py-2 md:px-8">
+    <div className="px-3 py-2 border-b border-sidebar-border">
+      <label className="block text-[9px] font-mono text-slate-text uppercase tracking-wider mb-1 px-1">Repo</label>
       <RepoSelect repos={repos} value={activeId} onChange={setSelectedId} showAll={false} />
     </div>
   );
@@ -105,6 +106,7 @@ export default function DashboardLayout({
           }}
         />
       </div>
+      <SidebarRepoSelector />
       <nav className="flex-1 space-y-1 px-3 py-4">
         {navItems.map((item) => (
           <SidebarLink
@@ -158,8 +160,7 @@ export default function DashboardLayout({
 
           {/* Main content */}
           <main className="flex-1 overflow-y-auto scroll-smooth bg-background bg-noise">
-            <TopBar />
-            <div className="mx-auto max-w-6xl px-4 py-4 pt-12 md:px-8 md:pt-4">{children}</div>
+            <div className="mx-auto max-w-6xl px-4 py-8 pt-16 md:px-8 md:pt-8">{children}</div>
           </main>
         </div>
       </ActiveRepoProvider>
