@@ -1,5 +1,40 @@
+import type { Metadata } from "next";
 import { ChevronDown } from "lucide-react";
 import { PricingTable } from "@clerk/nextjs";
+
+const FAQ_ITEMS = [
+  {
+    q: "How does per-org pricing work?",
+    a: "You pay per organization per month. All repos within that org get full access. Personal accounts use the Free plan.",
+  },
+  {
+    q: "Does it work with monorepos?",
+    a: "Yes. Argus reviews the diff of each PR regardless of repo structure. It triages files individually, so large PRs in monorepos still get fast, focused reviews.",
+  },
+  {
+    q: "What data does Argus store?",
+    a: "PR metadata (title, author, branch), the diff, review comments, and optionally past patterns for memory. We never store your full source code. Diffs are processed in-memory and discarded after review.",
+  },
+  {
+    q: "Can I use my own LLM API key?",
+    a: "Yes. Configure any OpenAI-compatible provider (OpenRouter, Anthropic, OpenAI, etc.) per pipeline stage from the Settings page. Bring your own key or use ours.",
+  },
+  {
+    q: "What if Argus flags something incorrectly?",
+    a: "Dismiss it. Every comment explains its reasoning — disagree and move on. Over time, Argus learns your codebase patterns and false positives decrease.",
+  },
+  {
+    q: "Is there a free trial?",
+    a: "All features are free during early access — no trial needed. When paid plans launch, early adopters get a permanent discount.",
+  },
+];
+
+export const metadata: Metadata = {
+  title: "Pricing",
+  description:
+    "Free to start, Pro at $19/mo. AI code review for teams that ship fast. Bring your own LLM key.",
+  alternates: { canonical: "https://argusai.vercel.app/pricing" },
+};
 
 function FaqItem({ q, a }: { q: string; a: string }) {
   return (
@@ -43,32 +78,30 @@ export default function PricingPage() {
           Questions
         </h2>
         <div className="space-y-2">
-          <FaqItem
-            q="How does per-org pricing work?"
-            a="You pay per organization per month. All repos within that org get full access. Personal accounts use the Free plan."
-          />
-          <FaqItem
-            q="Does it work with monorepos?"
-            a="Yes. Argus reviews the diff of each PR regardless of repo structure. It triages files individually, so large PRs in monorepos still get fast, focused reviews."
-          />
-          <FaqItem
-            q="What data does Argus store?"
-            a="PR metadata (title, author, branch), the diff, review comments, and optionally past patterns for memory. We never store your full source code. Diffs are processed in-memory and discarded after review."
-          />
-          <FaqItem
-            q="Can I use my own LLM API key?"
-            a="Yes. Configure any OpenAI-compatible provider (OpenRouter, Anthropic, OpenAI, etc.) per pipeline stage from the Settings page. Bring your own key or use ours."
-          />
-          <FaqItem
-            q="What if Argus flags something incorrectly?"
-            a="Dismiss it. Every comment explains its reasoning — disagree and move on. Over time, Argus learns your codebase patterns and false positives decrease."
-          />
-          <FaqItem
-            q="Is there a free trial?"
-            a="All features are free during early access — no trial needed. When paid plans launch, early adopters get a permanent discount."
-          />
+          {FAQ_ITEMS.map((item) => (
+            <FaqItem key={item.q} q={item.q} a={item.a} />
+          ))}
         </div>
       </div>
+
+      {/* FAQ JSON-LD for rich results */}
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{
+          __html: JSON.stringify({
+            "@context": "https://schema.org",
+            "@type": "FAQPage",
+            mainEntity: FAQ_ITEMS.map((item) => ({
+              "@type": "Question",
+              name: item.q,
+              acceptedAnswer: {
+                "@type": "Answer",
+                text: item.a,
+              },
+            })),
+          }),
+        }}
+      />
     </section>
   );
 }

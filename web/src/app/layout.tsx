@@ -16,16 +16,29 @@ const syne = Syne({
 const jetbrainsMono = JetBrains_Mono({subsets:['latin'],variable:'--font-jetbrains-mono'});
 
 export const metadata: Metadata = {
-  title: "ARGUS — Nothing merges unseen",
+  metadataBase: new URL("https://argusai.vercel.app"),
+  title: {
+    default: "ARGUS — AI Code Review That Builds Institutional Memory",
+    template: "%s | ARGUS",
+  },
   description:
-    "AI code review that builds institutional memory. The longer it runs, the smarter it gets about your codebase.",
-  metadataBase: new URL(
-    process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000"
-  ),
+    "AI-powered code review that traces dependencies, remembers incidents, and simulates failures before they ship. Install in 60 seconds.",
+  robots: { index: true, follow: true },
+  alternates: { canonical: "https://argusai.vercel.app" },
   openGraph: {
-    title: "ARGUS",
-    description: "Nothing merges unseen.",
+    type: "website",
+    locale: "en_US",
+    url: "https://argusai.vercel.app",
     siteName: "ARGUS",
+    title: "ARGUS — AI Code Review That Builds Institutional Memory",
+    description:
+      "Nothing merges unseen. AI code review that gets smarter with every PR.",
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "ARGUS — AI Code Review That Builds Institutional Memory",
+    description:
+      "Nothing merges unseen. AI code review that gets smarter with every PR.",
   },
 };
 
