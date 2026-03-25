@@ -59,7 +59,7 @@ const MODEL_PICKS: Record<Provider, string[]> = {
   zhipu: ["glm-5", "glm-4-plus", "glm-4"],
 };
 
-const CORE_STAGES = ["triage", "review", "synthesis"] as const;
+const CORE_STAGES = ["triage", "review", "scoring", "synthesis"] as const;
 
 const STAGE_DESCRIPTIONS: Record<string, string> = {
   triage: "Decides which files need detailed review vs. can be skimmed",
