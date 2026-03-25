@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/BeLazy167/argus/internal/store/db"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Store wraps a PostgreSQL connection pool.
+// Store wraps a PostgreSQL connection pool and sqlc-generated queries.
 type Store struct {
 	Pool *pgxpool.Pool
+	Q    *db.Queries
 }
 
 func New(ctx context.Context, databaseURL string) (*Store, error) {
@@ -26,7 +28,7 @@ func New(ctx context.Context, databaseURL string) (*Store, error) {
 	if err := pool.Ping(ctx); err != nil {
 		return nil, fmt.Errorf("pinging database: %w", err)
 	}
-	return &Store{Pool: pool}, nil
+	return &Store{Pool: pool, Q: db.New(pool)}, nil
 }
 
 func (s *Store) Close() {
