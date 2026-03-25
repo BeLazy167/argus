@@ -1,0 +1,1 @@
+ALTER TABLE scenarios ADD COLUMN trigger_count INT NOT NULL DEFAULT 0;

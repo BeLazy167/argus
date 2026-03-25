@@ -7,12 +7,20 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/BeLazy167/argus/internal/util"
 )
+
+// ScenarioSearchResult holds a semantic search result with the parsed Postgres scenario ID.
+type ScenarioSearchResult struct {
+	ID         int64
+	Content    string
+	Similarity float64
+}
 
 // Indexer manages Supermemory documents: stores reviews, rules, patterns, and topology for future RAG retrieval.
 type Indexer struct {
@@ -413,8 +421,8 @@ func (idx *Indexer) IndexScenario(ctx context.Context, owner, repo string, scena
 	if idx.client == nil {
 		return nil
 	}
-	content := fmt.Sprintf("Scenario [%s]: %s\nRelated files: %s",
-		severity, description, strings.Join(files, ", "))
+	content := fmt.Sprintf("[scenario_id:%d] Scenario [%s]: %s\nRelated files: %s",
+		scenarioID, severity, description, strings.Join(files, ", "))
 
 	customID := fmt.Sprintf("%s--%s--scenario--%d", owner, repo, scenarioID)
 
@@ -489,6 +497,90 @@ func (idx *Indexer) SearchScenarios(ctx context.Context, owner, repo, query, sev
 		results = append(results, r.Content())
 	}
 	return results
+}
+
+// SearchScenariosWithIDs performs semantic search over scenarios and returns results with
+// parsed Postgres IDs extracted from the embedded [scenario_id:N] prefix in content.
+func (idx *Indexer) SearchScenariosWithIDs(ctx context.Context, owner, repo, query, severity string, limit int) []ScenarioSearchResult {
+	if idx.client == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	req := SearchRequest{
+		Query:        query,
+		ContainerTag: RepoTag(owner, repo, "scenarios"),
+		SearchMode:   "hybrid",
+		Rerank:       true,
+		Limit:        limit,
+	}
+	if severity != "" {
+		req.Filters = &SearchFilters{
+			AND: []FilterCondition{{Key: "severity", Value: severity}},
+		}
+	}
+
+	resp, err := idx.client.Search(ctx, req)
+	if err != nil {
+		idx.logger.Warn("searching scenarios with IDs in supermemory", "error", err)
+		return nil
+	}
+
+	idRe := regexp.MustCompile(`\[scenario_id:(\d+)\]`)
+	var results []ScenarioSearchResult
+	for _, r := range resp.Results {
+		content := r.Content()
+		matches := idRe.FindStringSubmatch(content)
+		if len(matches) < 2 {
+			continue
+		}
+		id, err := strconv.ParseInt(matches[1], 10, 64)
+		if err != nil {
+			continue
+		}
+		results = append(results, ScenarioSearchResult{
+			ID:         id,
+			Content:    content,
+			Similarity: r.Similarity,
+		})
+	}
+	return results
+}
+
+// IndexSimulationResult indexes a simulation result into Supermemory traces for future review context.
+// Both passes and failures are indexed so future reviews can see the full history of what changes
+// are safe vs risky for each scenario.
+func (idx *Indexer) IndexSimulationResult(ctx context.Context, owner, repo string, prNumber int, changedFiles []string, passes bool, scenario string, confidence float64, rootCause, impact string) error {
+	if idx.client == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	status := "PASS"
+	if !passes {
+		status = "FAIL"
+	}
+	content := fmt.Sprintf(
+		"Simulation %s on PR #%d: scenario '%s' (%.0f%% confidence).\nRoot cause: %s\nImpact: %s\nChanged files: %s",
+		status, prNumber, util.Truncate(scenario, 200, true),
+		confidence*100, rootCause, impact,
+		strings.Join(changedFiles, ", "))
+
+	_, err := idx.client.AddMemoryImmediate(ctx, AddImmediateRequest{
+		ContainerTag: RepoTag(owner, repo, "traces"),
+		Memories: []ImmediateMemory{{
+			Content: content,
+			Metadata: map[string]string{
+				"trace_type": "simulation_result",
+				"passes":     fmt.Sprintf("%t", passes),
+				"pr_number":  fmt.Sprintf("%d", prNumber),
+				"confidence": fmt.Sprintf("%.2f", confidence),
+			},
+		}},
+	})
+	return err
 }
 
 // SearchTraces performs semantic search over decision traces with reranking.

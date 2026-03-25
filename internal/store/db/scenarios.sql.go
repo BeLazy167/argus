@@ -113,11 +113,20 @@ func (q *Queries) DeactivateScenarioScoped(ctx context.Context, arg DeactivateSc
 	return result.RowsAffected(), nil
 }
 
+const incrementScenarioTriggerCount = `-- name: IncrementScenarioTriggerCount :exec
+UPDATE scenarios SET trigger_count = trigger_count + 1 WHERE id = $1
+`
+
+func (q *Queries) IncrementScenarioTriggerCount(ctx context.Context, id int64) error {
+	_, err := q.db.Exec(ctx, incrementScenarioTriggerCount, id)
+	return err
+}
+
 const listScenariosForFiles = `-- name: ListScenariosForFiles :many
 SELECT id, installation_id, repo_id, description, source, COALESCE(source_ref,'') as source_ref, files, modules, COALESCE(severity,'medium') as severity, active, created_at, COALESCE(steps,'[]') as steps, COALESCE(initial_state,'') as initial_state, COALESCE(expected_outcome,'') as expected_outcome, COALESCE(is_outdated,FALSE) as is_outdated, last_run_at
 FROM scenarios
 WHERE repo_id = $1 AND active = TRUE AND files && $2::text[]
-ORDER BY created_at DESC
+ORDER BY trigger_count DESC, created_at DESC
 LIMIT 20
 `
 
