@@ -12,6 +12,7 @@ import {
   Activity,
   Settings,
   Users,
+  Key,
   CreditCard,
   Menu,
   X,
@@ -47,6 +48,7 @@ const repoNavItems = [
 
 const settingsNavItems = [
   { href: "/team", label: "Team", icon: Users },
+  { href: "/providers", label: "Providers", icon: Key },
   { href: "/billing", label: "Billing", icon: CreditCard },
   { href: "/settings", label: "Settings", icon: Settings },
 ];
