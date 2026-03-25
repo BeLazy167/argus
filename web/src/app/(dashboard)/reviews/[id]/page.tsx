@@ -984,6 +984,36 @@ export default function ReviewDetailPage() {
         )}
       </div>
 
+      {/* Simulation Results */}
+      {review.simulation_results && review.simulation_results.length > 0 && (
+        <div className="rounded-lg border border-iron bg-charcoal/80 p-4 mb-6">
+          <div className="mb-3 flex items-center gap-2">
+            <span className="text-sm font-medium text-foreground">Simulation Results</span>
+            <span className="rounded px-1.5 py-0.5 text-xs bg-charcoal text-slate-text">
+              {review.simulation_results.length} scenario{review.simulation_results.length !== 1 ? 's' : ''}
+            </span>
+          </div>
+          <div className="space-y-2">
+            {review.simulation_results.map((result, i) => (
+              <div key={i} className="flex items-start gap-3 rounded-md border border-iron bg-charcoal px-3 py-2">
+                <span className={`mt-0.5 shrink-0 text-xs font-bold ${result.passes ? 'text-emerald-500' : 'text-red-500'}`}>
+                  {result.passes ? 'PASS' : 'FAIL'}
+                </span>
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs text-foreground/70 truncate">{result.scenario}</p>
+                  {!result.passes && result.root_cause && (
+                    <p className="mt-0.5 text-xs text-slate-text">{result.root_cause}</p>
+                  )}
+                </div>
+                <span className={`shrink-0 text-xs tabular-nums ${result.confidence >= 0.7 ? 'text-amber' : 'text-slate-text'}`}>
+                  {Math.round(result.confidence * 100)}%
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Findings enrichment summary */}
       {comments.length > 0 && (() => {
         const newFindings = comments.filter((c) => c.is_new_finding === true).length;

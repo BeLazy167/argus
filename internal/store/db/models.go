@@ -73,16 +73,17 @@ type Installation struct {
 }
 
 type ModelConfig struct {
-	ID          int64              `json:"id"`
-	RepoID      *int64             `json:"repo_id"`
-	Stage       string             `json:"stage"`
-	Provider    string             `json:"provider"`
-	Model       string             `json:"model"`
-	BaseUrl     *string            `json:"base_url"`
-	MaxTokens   int32              `json:"max_tokens"`
-	Temperature float32            `json:"temperature"`
-	CreatedAt   pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+	ID             int64              `json:"id"`
+	RepoID         *int64             `json:"repo_id"`
+	Stage          string             `json:"stage"`
+	Provider       string             `json:"provider"`
+	Model          string             `json:"model"`
+	BaseUrl        *string            `json:"base_url"`
+	MaxTokens      int32              `json:"max_tokens"`
+	Temperature    float32            `json:"temperature"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	InstallationID *int64             `json:"installation_id"`
 }
 
 type Pattern struct {
@@ -166,6 +167,7 @@ type Review struct {
 	IsIncremental      bool               `json:"is_incremental"`
 	ResolvedStaleCount *int32             `json:"resolved_stale_count"`
 	HeadRef            *string            `json:"head_ref"`
+	SimulationResults  []byte             `json:"simulation_results"`
 }
 
 type ReviewComment struct {
@@ -216,6 +218,7 @@ type Scenario struct {
 	ExpectedOutcome *string            `json:"expected_outcome"`
 	IsOutdated      *bool              `json:"is_outdated"`
 	LastRunAt       pgtype.Timestamptz `json:"last_run_at"`
+	TriggerCount    int32              `json:"trigger_count"`
 }
 
 type UserInstallation struct {
