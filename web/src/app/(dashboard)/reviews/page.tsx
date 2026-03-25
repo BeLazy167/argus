@@ -1,12 +1,13 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import Link from "next/link";
 import {
   MessageSquare,
   Loader2,
   RotateCcw,
   ChevronDown,
+  ChevronRight,
   ExternalLink,
 } from "lucide-react";
 import { usePagination, PaginationBar } from "@/components/dashboard/pagination";
@@ -17,56 +18,57 @@ import { githubPrUrl } from "@/lib/github";
 import { ScoreBadge } from "@/components/dashboard/score-badge";
 import { StatusBadge } from "@/components/dashboard/status-badge";
 import { RepoSelect } from "@/components/dashboard/repo-select";
-import type { Review, TokenUsage } from "@/lib/types";
+import type { Review } from "@/lib/types";
 
 const FETCH_LIMIT = 200;
 
-function formatTokens(t: TokenUsage): string {
-  const k = t.total.total_tokens / 1000;
-  return k >= 1 ? `${k.toFixed(1)}k` : String(t.total.total_tokens);
-}
+type PRGroup = {
+  key: string;
+  prNumber: number;
+  prTitle: string;
+  author: string;
+  repoName: string;
+  repoId: number;
+  reviews: Review[];
+  latestScore?: number;
+};
 
 function ReviewRow({
   review,
-  repoFullName,
-  githubUrl,
   onRetry,
   retrying,
+  githubUrl,
 }: {
   review: Review;
-  repoFullName?: string;
-  githubUrl?: string;
   onRetry: () => void;
   retrying: boolean;
+  githubUrl?: string;
 }) {
+  const typeBadge = review.is_incremental ? "Inc" : review.deep_review ? "Deep" : "Review";
+  const badgeColor = review.deep_review
+    ? "bg-purple-400/10 text-purple-400 border-purple-400/20"
+    : review.is_incremental
+      ? "bg-blue-400/10 text-blue-400 border-blue-400/20"
+      : "bg-iron/30 text-slate-text border-iron";
+
   return (
-    <Link
-      href={`/reviews/${review.id}`}
-      className="flex items-center justify-between border-b border-iron/50 py-3 last:border-0 hover:bg-iron/10 -mx-5 px-5 transition-colors"
-    >
-      <div className="flex items-center gap-4">
+    <div className="flex items-center justify-between py-2 group">
+      <Link
+        href={`/reviews/${review.id}`}
+        className="flex items-center gap-3 flex-1 min-w-0"
+      >
+        <span
+          className={`inline-flex items-center rounded-sm border px-2 py-0.5 text-[10px] font-mono uppercase tracking-wider shrink-0 ${badgeColor}`}
+        >
+          {typeBadge}
+        </span>
         <ScoreBadge score={review.score} />
-        <div>
-          <p className="text-xs font-mono text-foreground truncate max-w-md">
-            {repoFullName && <span className="text-slate-text">{repoFullName} &gt; </span>}
-            #{review.pr_number} {review.pr_title}
-          </p>
-          <p className="text-[11px] font-mono text-slate-text">
-            by {review.pr_author} &middot;{" "}
-            {formatDistanceToNow(review.created_at)}
-          </p>
-        </div>
-      </div>
-      <div className="flex items-center gap-3">
-        {review.token_usage && (
-          <span className="text-[10px] font-mono text-slate-text">
-            {formatTokens(review.token_usage)}
-            {review.token_usage.total.cost != null && (
-              <> &middot; ${review.token_usage.total.cost.toFixed(3)}</>
-            )}
-          </span>
-        )}
         <StatusBadge status={review.status} />
+        <span className="text-[11px] font-mono text-slate-text">
+          {formatDistanceToNow(review.created_at)}
+        </span>
+      </Link>
+      <div className="flex items-center gap-2">
         {review.status === "failed" && (
           <button
             type="button"
@@ -94,14 +96,102 @@ function ReviewRow({
             <ExternalLink className="h-3.5 w-3.5" />
           </a>
         )}
+        <Link
+          href={`/reviews/${review.id}`}
+          className="text-slate-text hover:text-amber transition-colors"
+          title="View review"
+        >
+          <ChevronRight className="h-3.5 w-3.5" />
+        </Link>
       </div>
-    </Link>
+    </div>
+  );
+}
+
+function PRAccordionRow({
+  group,
+  expanded,
+  onToggle,
+  repoFullName,
+  retryReview,
+}: {
+  group: PRGroup;
+  expanded: boolean;
+  onToggle: () => void;
+  repoFullName?: string;
+  retryReview: ReturnType<typeof useRetryReview>;
+}) {
+  const latestReview = group.reviews[0] as Review | undefined;
+  const githubUrl = repoFullName && latestReview
+    ? githubPrUrl(repoFullName, group.prNumber, latestReview.github_review_id)
+    : undefined;
+
+  return (
+    <div className="border-b border-iron/50 last:border-0">
+      {/* PR header row */}
+      <button
+        type="button"
+        onClick={onToggle}
+        className="flex items-center justify-between w-full py-3 -mx-5 px-5 hover:bg-iron/10 transition-colors text-left"
+      >
+        <div className="flex items-center gap-4 min-w-0">
+          <ScoreBadge score={group.latestScore} />
+          <div className="min-w-0">
+            <p className="text-xs font-mono text-foreground truncate max-w-md">
+              {repoFullName && <span className="text-slate-text">{repoFullName} &gt; </span>}
+              #{group.prNumber} {group.prTitle}
+            </p>
+            <p className="text-[11px] font-mono text-slate-text">
+              by {group.author} &middot; {group.reviews.length} review{group.reviews.length !== 1 ? "s" : ""}
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center gap-3 shrink-0">
+          {githubUrl && (
+            <a
+              href={githubUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(e) => e.stopPropagation()}
+              className="text-slate-text hover:text-amber transition-colors"
+              title="View on GitHub"
+            >
+              <ExternalLink className="h-3.5 w-3.5" />
+            </a>
+          )}
+          <ChevronDown
+            className={`h-4 w-4 text-slate-text transition-transform duration-200 ${expanded ? "rotate-0" : "-rotate-90"}`}
+          />
+        </div>
+      </button>
+
+      {/* Expanded reviews */}
+      {expanded && (
+        <div className="ml-8 mr-2 mb-3 border-l-2 border-iron/40 pl-4">
+          {group.reviews.map((review) => {
+            const url = repoFullName
+              ? githubPrUrl(repoFullName, review.pr_number, review.github_review_id)
+              : undefined;
+            return (
+              <ReviewRow
+                key={review.id}
+                review={review}
+                githubUrl={url}
+                onRetry={() => retryReview.mutate(review.id)}
+                retrying={retryReview.isPending}
+              />
+            );
+          })}
+        </div>
+      )}
+    </div>
   );
 }
 
 export default function ReviewsPage() {
   const { repos, activeId, setSelectedId, isLoading: reposLoading } = useActiveRepo();
   const [statusFilter, setStatusFilter] = useState("all");
+  const [expandedPR, setExpandedPR] = useState<string | null>(null);
 
   const repoMap = new Map(repos.map((r) => [r.id, r]));
 
@@ -115,7 +205,41 @@ export default function ReviewsPage() {
     ? (reviews ?? [])
     : (reviews ?? []).filter((r) => r.status === statusFilter);
 
-  const { page, setPage, totalPages, paginated, pageSize, total, hasNext, hasPrev } = usePagination(filtered);
+  /** Group filtered reviews by repo_id:pr_number */
+  const grouped: PRGroup[] = useMemo(() => {
+    const map = new Map<string, Review[]>();
+    for (const r of filtered) {
+      const key = `${r.repo_id}:${r.pr_number}`;
+      const list = map.get(key) ?? [];
+      list.push(r);
+      map.set(key, list);
+    }
+    return Array.from(map.entries())
+      .map(([key, revs]) => {
+        const sorted = revs.sort(
+          (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+        );
+        const latest = sorted[0]!;
+        return {
+          key,
+          prNumber: latest.pr_number,
+          prTitle: latest.pr_title,
+          author: latest.pr_author,
+          repoName: repoMap.get(latest.repo_id)?.full_name ?? "",
+          repoId: latest.repo_id,
+          reviews: sorted,
+          latestScore: latest.score,
+        };
+      })
+      .sort(
+        (a, b) =>
+          new Date(b.reviews[0]!.created_at).getTime() -
+          new Date(a.reviews[0]!.created_at).getTime(),
+      );
+  }, [filtered, repoMap]);
+
+  const { page, setPage, totalPages, paginated, pageSize, total, hasNext, hasPrev } =
+    usePagination(grouped);
 
   const loading = reposLoading || reviewsLoading;
 
@@ -163,7 +287,7 @@ export default function ReviewsPage() {
             <div className="flex items-center justify-center py-16">
               <Loader2 className="h-5 w-5 animate-spin text-slate-text" />
             </div>
-          ) : filtered.length === 0 ? (
+          ) : grouped.length === 0 ? (
             <div className="py-16 text-center">
               <MessageSquare className="h-8 w-8 text-slate-text mx-auto mb-3" />
               <p className="text-xs font-mono text-slate-text">
@@ -173,19 +297,18 @@ export default function ReviewsPage() {
               </p>
             </div>
           ) : (
-            paginated.map((review) => {
-              const repo = repoMap.get(review.repo_id);
-              const url = repo
-                ? githubPrUrl(repo.full_name, review.pr_number, review.github_review_id)
-                : undefined;
+            paginated.map((group) => {
+              const repo = repoMap.get(group.repoId);
               return (
-                <ReviewRow
-                  key={review.id}
-                  review={review}
+                <PRAccordionRow
+                  key={group.key}
+                  group={group}
+                  expanded={expandedPR === group.key}
+                  onToggle={() =>
+                    setExpandedPR(expandedPR === group.key ? null : group.key)
+                  }
                   repoFullName={repo?.full_name}
-                  githubUrl={url}
-                  onRetry={() => retryReview.mutate(review.id)}
-                  retrying={retryReview.isPending}
+                  retryReview={retryReview}
                 />
               );
             })
