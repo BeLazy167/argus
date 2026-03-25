@@ -71,17 +71,9 @@ func (ra *ReplyAnalyzer) Analyze(ctx context.Context, event ghpkg.CommentEvent) 
 	// Build LLM prompt
 	prompt := buildReplyPrompt(original, event)
 
-	var repoConfigs []llm.ModelConfig
-	if dbConfigs, err := ra.store.ListModelConfigs(ctx, dbRepo.ID); err == nil {
-		repoConfigs = storeToLLMConfigs(dbConfigs)
-	}
-	cfg, err := ra.registry.GetConfig(dbRepo.ID, llm.StageReview, repoConfigs)
+	provider, cfg, err := ra.registry.ResolveProvider(ctx, storeConfigLister{st: ra.store, installationID: inst.ID}, inst.ID, dbRepo.ID, llm.StageReview)
 	if err != nil {
-		return fmt.Errorf("reply config: %w", err)
-	}
-	provider, err := ra.registry.GetProviderForRepo(ctx, inst.ID, &dbRepo.ID, cfg.Provider)
-	if err != nil {
-		return fmt.Errorf("reply provider: %w", err)
+		return fmt.Errorf("reply: %w", err)
 	}
 
 	resp, err := provider.Complete(ctx, llm.CompletionRequest{
@@ -137,21 +129,37 @@ func (ra *ReplyAnalyzer) Analyze(ctx context.Context, event ghpkg.CommentEvent) 
 		}
 	}
 
+	// Determine outcome for the original comment
+	var outcome string
+	switch decision.Action {
+	case "resolve":
+		if decision.Learning != "" {
+			outcome = "dismissed"
+		} else {
+			outcome = "confirmed"
+		}
+	case "stand_firm":
+		outcome = "confirmed"
+	case "clarify":
+		outcome = "ignored"
+	}
+	if outcome != "" {
+		if err := ra.store.RecordCommentOutcome(ctx, original.ID, outcome); err != nil {
+			ra.logger.Error("recording comment outcome", "error", err, "outcome", outcome)
+		}
+	}
+
 	// Index feedback signal for pattern reinforcement/suppression
 	if ra.indexer != nil && original.Category != nil {
 		var feedbackAction string
 		switch decision.Action {
 		case "resolve":
-			// Developer agreed or Argus acknowledged being wrong.
-			// If Argus stood down (learning extracted), it's a dismissal.
-			// If developer resolved the concern, it's a confirmation.
 			if decision.Learning != "" {
 				feedbackAction = "dismissed"
 			} else {
 				feedbackAction = "confirmed"
 			}
 		case "stand_firm":
-			// Argus maintained its position — reinforces the pattern
 			feedbackAction = "confirmed"
 		}
 

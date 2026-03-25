@@ -424,10 +424,11 @@ function CommentCard({
   const bgClass = comment.severity
     ? (severityBg[comment.severity] ?? "")
     : "";
+  const newFindingBorder = comment.is_new_finding ? "border-l-2 border-l-emerald-500/40" : "";
 
   return (
     <div
-      className={`group border-l-[3px] ${borderClass} ${bgClass} hover:bg-charcoal/40 transition-colors px-5 py-4 mx-4 my-2 rounded-r-md`}
+      className={`group border-l-[3px] ${borderClass} ${bgClass} ${newFindingBorder} hover:bg-charcoal/40 transition-colors px-5 py-4 mx-4 my-2 rounded-r-md`}
     >
       <div className="flex items-center gap-2 mb-3">
         {comment.severity && (
@@ -461,6 +462,25 @@ function CommentCard({
           <CopyFixButton comment={comment} filePath={filePath} />
         </div>
       </div>
+      {(comment.is_new_finding || comment.matched_pattern_score || comment.enforced_rule_content) && (
+        <div className="flex flex-wrap gap-1.5 mt-1.5 mb-3">
+          {comment.is_new_finding && (
+            <span className="inline-flex items-center gap-1 rounded border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-mono text-emerald-400">
+              New Finding
+            </span>
+          )}
+          {comment.matched_pattern_score && (
+            <span className="inline-flex items-center gap-1 rounded border border-amber/30 bg-amber/10 px-2 py-0.5 text-[10px] font-mono text-amber">
+              Pattern Match ({Math.round(comment.matched_pattern_score * 100)}%)
+            </span>
+          )}
+          {comment.enforced_rule_content && (
+            <span className="inline-flex items-center gap-1 rounded border border-purple-500/30 bg-purple-500/10 px-2 py-0.5 text-[10px] font-mono text-purple-400" title={comment.enforced_rule_content}>
+              Enforces: {comment.enforced_rule_content.slice(0, 60)}{comment.enforced_rule_content.length > 60 ? '...' : ''}
+            </span>
+          )}
+        </div>
+      )}
       <Markdown filePath={filePath}>{comment.body}</Markdown>
     </div>
   );
@@ -964,10 +984,43 @@ export default function ReviewDetailPage() {
         )}
       </div>
 
+      {/* Findings enrichment summary */}
+      {comments.length > 0 && (() => {
+        const newFindings = comments.filter((c) => c.is_new_finding === true).length;
+        const patternMatches = comments.filter((c) => c.matched_pattern_id).length;
+        const rulesEnforced = comments.filter((c) => c.enforced_rule_content).length;
+        if (!newFindings && !patternMatches && !rulesEnforced) return null;
+        return (
+          <div className="flex items-center gap-4 rounded-lg border border-iron bg-charcoal px-5 py-3 mb-6">
+            {newFindings > 0 && (
+              <div className="flex items-center gap-2 text-xs font-mono">
+                <div className="h-2 w-2 rounded-full bg-emerald-500" />
+                <span className="text-foreground">{newFindings}</span>
+                <span className="text-slate-text">New Findings</span>
+              </div>
+            )}
+            {patternMatches > 0 && (
+              <div className="flex items-center gap-2 text-xs font-mono">
+                <div className="h-2 w-2 rounded-full bg-amber" />
+                <span className="text-foreground">{patternMatches}</span>
+                <span className="text-slate-text">Pattern Matches</span>
+              </div>
+            )}
+            {rulesEnforced > 0 && (
+              <div className="flex items-center gap-2 text-xs font-mono">
+                <div className="h-2 w-2 rounded-full bg-purple-500" />
+                <span className="text-foreground">{rulesEnforced}</span>
+                <span className="text-slate-text">Rules Enforced</span>
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
       {/* Main content: sidebar + file groups */}
-      <div className={showSidebar ? "grid grid-cols-[200px_1fr] gap-6" : ""}>
+      <div className={showSidebar ? "grid grid-cols-1 gap-6 lg:grid-cols-[200px_1fr]" : ""}>
         {showSidebar && (
-          <aside>
+          <aside className="hidden lg:block">
             <FileTOC
               grouped={grouped}
               severityCounts={severityCounts}

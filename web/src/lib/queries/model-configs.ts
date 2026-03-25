@@ -1,8 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useAuth } from "@clerk/nextjs";
-import { api } from "../api";
 import type { ModelConfig } from "../types";
-import { useInstallation } from "@/providers/installation-provider";
+import { useApi } from "@/lib/hooks/use-api";
 
 export type TestResult = {
   success: boolean;
@@ -13,44 +11,31 @@ export type TestResult = {
 };
 
 export function useTestConfig() {
-  const { getToken } = useAuth();
-  const { active } = useInstallation();
+  const api = useApi();
   return useMutation({
-    mutationFn: async ({ provider, model }: { provider: string; model: string }) => {
-      const token = await getToken();
-      return api.post<TestResult>(
-        `/api/v1/installations/${active?.id}/test-config`,
+    mutationFn: ({ provider, model }: { provider: string; model: string }) =>
+      api.post<TestResult>(
+        `/api/v1/installations/${api.active?.id}/test-config`,
         { provider, model },
-        token ?? undefined,
-        active?.id,
-      );
-    },
+      ),
   });
 }
 
 export function useModelConfigs(repoId: number) {
-  const { getToken } = useAuth();
-  const { active } = useInstallation();
+  const api = useApi();
   return useQuery({
-    queryKey: ["model-configs", repoId, active?.id],
-    queryFn: async () => {
-      const token = await getToken();
-      return api.get<ModelConfig[]>(
-        `/api/v1/repos/${repoId}/config`,
-        token ?? undefined,
-        active?.id,
-      );
-    },
-    enabled: repoId > 0 && !!active,
+    queryKey: ["model-configs", repoId, api.active?.id],
+    queryFn: () =>
+      api.get<ModelConfig[]>(`/api/v1/repos/${repoId}/config`),
+    enabled: repoId > 0 && !!api.active,
   });
 }
 
 export function useUpsertModelConfig() {
-  const { getToken } = useAuth();
-  const { active } = useInstallation();
+  const api = useApi();
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async ({
+    mutationFn: ({
       repoId,
       stage,
       ...body
@@ -62,15 +47,11 @@ export function useUpsertModelConfig() {
       base_url?: string;
       max_tokens: number;
       temperature: number;
-    }) => {
-      const token = await getToken();
-      return api.put<ModelConfig>(
+    }) =>
+      api.put<ModelConfig>(
         `/api/v1/repos/${repoId}/config/${stage}`,
         body,
-        token ?? undefined,
-        active?.id,
-      );
-    },
+      ),
     onSuccess: (_data, vars) => {
       qc.invalidateQueries({ queryKey: ["model-configs", vars.repoId] });
     },
@@ -78,23 +59,67 @@ export function useUpsertModelConfig() {
 }
 
 export function useDeleteModelConfig() {
-  const { getToken } = useAuth();
-  const { active } = useInstallation();
+  const api = useApi();
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async ({
+    mutationFn: ({
       repoId,
       stage,
-    }: { repoId: number; stage: string }) => {
-      const token = await getToken();
-      return api.delete(
-        `/api/v1/repos/${repoId}/config/${stage}`,
-        token ?? undefined,
-        active?.id,
-      );
-    },
+    }: { repoId: number; stage: string }) =>
+      api.delete(`/api/v1/repos/${repoId}/config/${stage}`),
     onSuccess: (_data, vars) => {
       qc.invalidateQueries({ queryKey: ["model-configs", vars.repoId] });
+    },
+  });
+}
+
+export function useOrgModelConfigs() {
+  const api = useApi();
+  return useQuery({
+    queryKey: ["org-model-configs", api.active?.id],
+    queryFn: () =>
+      api.get<ModelConfig[]>(
+        `/api/v1/installations/${api.active?.id}/config`,
+      ),
+    enabled: !!api.active,
+  });
+}
+
+export function useUpsertOrgModelConfig() {
+  const api = useApi();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      stage,
+      ...body
+    }: {
+      stage: string;
+      provider: string;
+      model: string;
+      base_url?: string;
+      max_tokens: number;
+      temperature: number;
+    }) =>
+      api.put<ModelConfig>(
+        `/api/v1/installations/${api.active?.id}/config/${stage}`,
+        body,
+      ),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["org-model-configs"] });
+    },
+  });
+}
+
+export function useDeleteOrgModelConfig() {
+  const api = useApi();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ stage }: { stage: string }) =>
+      api.delete(
+        `/api/v1/installations/${api.active?.id}/config/${stage}`,
+      ),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["org-model-configs"] });
     },
   });
 }

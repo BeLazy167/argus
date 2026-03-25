@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { ScrollText, Plus, Trash2, Loader2, ToggleLeft, ToggleRight } from "lucide-react";
+import { usePagination, PaginationBar } from "@/components/dashboard/pagination";
 import {
   useRules,
   useCreateRule,
@@ -36,6 +37,7 @@ const priorityLabel = (p: number) =>
 
 export default function RulesPage() {
   const { data: rules, isLoading } = useRules();
+  const { page, setPage, totalPages, paginated, pageSize, total, hasNext, hasPrev } = usePagination(rules ?? []);
   const createRule = useCreateRule();
   const updateRule = useUpdateRule();
   const deleteRule = useDeleteRule();
@@ -187,7 +189,7 @@ export default function RulesPage() {
         </div>
       ) : (
         <div className="space-y-3">
-          {rules?.map((rule) => (
+          {paginated.map((rule) => (
             <div
               key={rule.id}
               className={`rounded-lg border border-iron bg-charcoal px-5 py-4 cursor-pointer ${
@@ -315,6 +317,16 @@ export default function RulesPage() {
               )}
             </div>
           ))}
+          <PaginationBar
+            page={page}
+            totalPages={totalPages}
+            total={total}
+            pageSize={pageSize}
+            hasNext={hasNext}
+            hasPrev={hasPrev}
+            onNext={() => setPage(page + 1)}
+            onPrev={() => setPage(page - 1)}
+          />
         </div>
       )}
     </>

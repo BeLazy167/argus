@@ -33,6 +33,11 @@ type KeyResolver interface {
 	ResolveAPIKey(ctx context.Context, installationID int64, repoID *int64, provider string) (apiKey string, baseURL string, found bool, err error)
 }
 
+// ModelConfigLister returns pre-converted llm.ModelConfig entries for a repo.
+type ModelConfigLister interface {
+	ListLLMConfigs(ctx context.Context, repoID int64) ([]ModelConfig, error)
+}
+
 type cachedProvider struct {
 	provider  Provider
 	expiresAt time.Time
@@ -85,22 +90,49 @@ func (r *Registry) GetProviderForRepo(ctx context.Context, installationID int64,
 	if baseURL == "" {
 		baseURL = defaultBaseURLForProvider(providerName)
 	}
-	p := NewChatProvider(providerName, apiKey, baseURL)
+	p := newProviderForName(providerName, apiKey, baseURL)
 	r.cacheMu.Lock()
 	r.providerCache[cacheKey] = cachedProvider{provider: p, expiresAt: time.Now().Add(r.cacheTTL)}
 	r.cacheMu.Unlock()
 	return p, nil
 }
 
-// GetConfig returns the model config for a repo + stage. Checks repo-specific DB configs only.
-// Returns an error if no config is found — there are no hardcoded fallbacks.
+// GetConfig returns the model config for a repo + stage.
+// Prefers repo-specific config; falls back to org-level (RepoID == 0) if present.
 func (r *Registry) GetConfig(repoID int64, stage PipelineStage, repoConfigs []ModelConfig) (ModelConfig, error) {
+	var orgFallback *ModelConfig
 	for _, cfg := range repoConfigs {
-		if cfg.RepoID == repoID && cfg.Stage == stage {
-			return cfg, nil
+		if cfg.Stage == stage {
+			if cfg.RepoID == repoID {
+				return cfg, nil
+			}
+			if cfg.RepoID == 0 {
+				c := cfg
+				orgFallback = &c
+			}
 		}
 	}
+	if orgFallback != nil {
+		return *orgFallback, nil
+	}
 	return ModelConfig{}, fmt.Errorf("no model config for repo %d stage %s — configure one in the dashboard", repoID, stage)
+}
+
+// ResolveProvider resolves the LLM provider and model config for a pipeline stage.
+func (r *Registry) ResolveProvider(ctx context.Context, cfgLister ModelConfigLister, installationID, repoID int64, stage PipelineStage) (Provider, ModelConfig, error) {
+	configs, err := cfgLister.ListLLMConfigs(ctx, repoID)
+	if err != nil {
+		return nil, ModelConfig{}, fmt.Errorf("resolve %s: list configs: %w", stage, err)
+	}
+	cfg, err := r.GetConfig(repoID, stage, configs)
+	if err != nil {
+		return nil, ModelConfig{}, fmt.Errorf("resolve %s: %w", stage, err)
+	}
+	provider, err := r.GetProviderForRepo(ctx, installationID, &repoID, cfg.Provider)
+	if err != nil {
+		return nil, ModelConfig{}, fmt.Errorf("resolve %s provider: %w", stage, err)
+	}
+	return provider, cfg, nil
 }
 
 // HasKeyForRepo returns true if a BYOK key exists in the database for this provider.
@@ -112,6 +144,21 @@ func (r *Registry) HasKeyForRepo(ctx context.Context, installationID int64, repo
 	return err == nil && found
 }
 
+// newProviderForName creates the appropriate provider based on the provider name.
+// Azure, GCP, and AWS use specialized constructors; everything else uses the generic ChatProvider.
+func newProviderForName(name, apiKey, baseURL string) *ChatProvider {
+	switch name {
+	case "azure":
+		return NewAzureProvider(apiKey, baseURL)
+	case "gcp_vertex":
+		return NewGCPVertexProvider(apiKey, baseURL)
+	case "aws_bedrock":
+		return NewAWSBedrockProvider(apiKey, baseURL)
+	default:
+		return NewChatProvider(name, apiKey, baseURL)
+	}
+}
+
 func defaultBaseURLForProvider(provider string) string {
 	switch provider {
 	case "openai":
@@ -120,6 +167,12 @@ func defaultBaseURLForProvider(provider string) string {
 		return "https://api.anthropic.com/v1"
 	case "zhipu":
 		return "https://api.z.ai/api/paas/v4"
+	case "azure":
+		return "" // Azure requires user-provided endpoint (https://{resource}.openai.azure.com/openai)
+	case "gcp_vertex":
+		return "" // GCP requires user-provided endpoint
+	case "aws_bedrock":
+		return "" // AWS requires user-provided endpoint
 	default:
 		return "https://openrouter.ai/api/v1"
 	}

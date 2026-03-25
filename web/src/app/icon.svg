@@ -1,0 +1,21 @@
+<svg viewBox="0 0 120 60" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Outer eye shape -->
+  <path
+    d="M10 30C10 30 30 8 60 8C90 8 110 30 110 30C110 30 90 52 60 52C30 52 10 30 10 30Z"
+    stroke="#F5A623"
+    stroke-width="3"
+    fill="none"
+  />
+  <!-- Iris -->
+  <circle cx="60" cy="30" r="14" stroke="#F5A623" stroke-width="2.5" fill="none" />
+  <!-- Diff marker -->
+  <text
+    x="60"
+    y="35"
+    text-anchor="middle"
+    fill="#F5A623"
+    font-size="16"
+    font-family="monospace"
+    font-weight="600"
+  >&lt;&gt;</text>
+</svg>

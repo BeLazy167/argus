@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/BeLazy167/argus/internal/memory"
+	"github.com/BeLazy167/argus/internal/util"
 )
 
 // Specialist identifies a focused review agent role.
@@ -31,9 +32,36 @@ func AllSpecialists() []Specialist {
 	return []Specialist{SpecialistBugHunter, SpecialistSecurity, SpecialistArchitecture, SpecialistRegression}
 }
 
+// ValidPromptStages is the set of valid stage keys for custom prompt templates.
+var ValidPromptStages = map[string]bool{
+	"triage_system":           true,
+	"review_system":           true,
+	"scoring_system":          true,
+	"specialist_bug_hunter":   true,
+	"specialist_security":     true,
+	"specialist_architecture": true,
+	"specialist_regression":   true,
+}
+
+// DefaultPrompts returns the default prompt text for all customizable stages.
+func DefaultPrompts() map[string]string {
+	return map[string]string{
+		"triage_system":           triageSystemPrompt,
+		"review_system":           baseSystemPrompt,
+		"scoring_system":          scoringSystemPrompt,
+		"specialist_bug_hunter":   baseSystemPrompt + specialistOverlay(SpecialistBugHunter),
+		"specialist_security":     baseSystemPrompt + specialistOverlay(SpecialistSecurity),
+		"specialist_architecture": baseSystemPrompt + specialistOverlay(SpecialistArchitecture),
+		"specialist_regression":   baseSystemPrompt + specialistOverlay(SpecialistRegression),
+	}
+}
+
 // specialistPrompt returns the full system prompt for a specialist agent.
-// Specialists do NOT get persona overlay — they have fixed roles.
-func specialistPrompt(s Specialist) string {
+// If a custom prompt exists in customPrompts, it is used instead.
+func specialistPrompt(s Specialist, customPrompts map[string]string) string {
+	if p, ok := customPrompts["specialist_"+string(s)]; ok && p != "" {
+		return p
+	}
 	return baseSystemPrompt + specialistOverlay(s)
 }
 
@@ -54,6 +82,10 @@ Focus exclusively on:
 - Edge cases the author didn't consider
 - Silent data corruption and wrong return values
 - Type coercion traps and implicit conversions
+
+After identifying a potential bug, argue against yourself: is there a guard, validation, or invariant elsewhere that prevents this? Only report if the bug survives your own skepticism.
+
+Prefer concrete examples: "When X is null and Y calls Z, this panics" over vague warnings.
 
 Ignore style, naming, documentation. Only report real bugs with concrete failure scenarios.
 
@@ -76,6 +108,10 @@ Focus exclusively on:
 - Missing rate limiting on sensitive endpoints
 - Information leakage in error messages
 
+Before reporting a finding, consider whether this pattern is intentional or has been addressed elsewhere in the codebase.
+
+For each finding, describe the specific attack vector: who is the attacker, what input do they control, and what is the impact?
+
 Lower your threshold — flag anything suspicious even at "warning" level.
 Ignore non-security issues entirely.`
 
@@ -96,6 +132,10 @@ Focus exclusively on:
 - Missing timeouts on network calls or database queries
 - Concurrency: missing locks, deadlock-prone patterns
 
+Focus on public APIs and module boundaries. Internal implementation details are lower priority.
+
+Ask: what breaks if this code runs at 10x the current scale? What breaks if the dependency it relies on is slow or unavailable?
+
 Ignore style, naming, minor formatting. Only report architectural and reliability issues.`
 
 	case SpecialistRegression:
@@ -114,6 +154,10 @@ Focus exclusively on:
 - Changed default values or configuration that affect existing deployments
 - Removed validation or authorization checks that were previously enforced
 - Reordered operations that relied on a specific execution sequence
+
+Only report a regression risk if you can name or describe the existing caller, consumer, or test that would break.
+
+Changed internal behavior that maintains the same external contract is NOT a regression.
 
 For each issue, explain WHAT previously worked and HOW this change breaks it.
 Ignore new code that doesn't modify existing behavior.`
@@ -139,17 +183,6 @@ func specialistSearchQuery(s Specialist) string {
 	}
 }
 
-// truncateSnippet caps a string at maxLen bytes (rune-safe) and appends "..." if truncated.
-func truncateSnippet(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	// Walk backward to avoid splitting a multi-byte UTF-8 rune
-	for maxLen > 0 && s[maxLen]&0xC0 == 0x80 {
-		maxLen--
-	}
-	return s[:maxLen] + "..."
-}
 
 // filePathsQuery builds a capped search query from a prefix and file paths (rune-safe truncation).
 func filePathsQuery(prefix string, paths []string) string {
@@ -185,7 +218,7 @@ func searchMemoryContent(ctx context.Context, memClient *memory.Client, query, c
 	var results []string
 	for _, r := range resp.Results {
 		if c := r.Content(); c != "" {
-			results = append(results, truncateSnippet(c, 300))
+			results = append(results, util.Truncate(c, 300, true))
 		}
 	}
 	return results

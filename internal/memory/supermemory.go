@@ -71,13 +71,45 @@ func (c *Client) doJSON(ctx context.Context, path string, reqBody, result any) e
 	return c.doRequest(ctx, "POST", path, reqBody, result)
 }
 
-// AddMemory stores a new memory in Supermemory.
+// AddMemory stores a new memory via v3/documents. Supports customId upserts but documents
+// are queued for processing (not immediately searchable).
 func (c *Client) AddMemory(ctx context.Context, req AddRequest) (*AddResponse, error) {
 	var result AddResponse
 	if err := c.doJSON(ctx, "/v3/documents", req, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
+}
+
+// AddMemoryImmediate stores memories via v4/memories. Immediately searchable (embeddings
+// generated on creation) but does NOT support customId upserts.
+func (c *Client) AddMemoryImmediate(ctx context.Context, req AddImmediateRequest) (*AddImmediateResponse, error) {
+	var result AddImmediateResponse
+	if err := c.doJSON(ctx, "/v4/memories", req, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// GetSettings retrieves current org-level Supermemory settings.
+func (c *Client) GetSettings(ctx context.Context) (map[string]any, error) {
+	var result map[string]any
+	if err := c.doRequest(ctx, "GET", "/v3/settings", nil, &result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// UpdateSettings updates org-level Supermemory settings (filter prompt, chunk size, etc).
+func (c *Client) UpdateSettings(ctx context.Context, settings map[string]any) error {
+	return c.doJSON(ctx, "/v3/settings", settings, &struct{}{})
+}
+
+// UpdateEntityContext sets per-container-tag context that guides memory extraction.
+func (c *Client) UpdateEntityContext(ctx context.Context, containerTag, entityContext string) error {
+	return c.doRequest(ctx, "PATCH", "/v3/container-tags/"+containerTag, map[string]string{
+		"entityContext": entityContext,
+	}, &struct{}{})
 }
 
 // Search performs semantic search across memories.
@@ -109,7 +141,7 @@ func (c *Client) BulkDelete(ctx context.Context, req BulkDeleteRequest) error {
 	if len(req.IDs) == 0 && len(req.ContainerTags) == 0 {
 		return fmt.Errorf("BulkDelete: at least one of IDs or ContainerTags required")
 	}
-	return c.doJSON(ctx, "/v3/documents/bulk/delete", req, &struct{}{})
+	return c.doRequest(ctx, "DELETE", "/v3/documents/bulk", req, &struct{}{})
 }
 
 // GetDocument retrieves a single document by ID.
@@ -157,12 +189,28 @@ type AddResponse struct {
 }
 
 type SearchRequest struct {
-	Query        string  `json:"q"`
-	ContainerTag string  `json:"containerTag"`
-	SearchMode   string  `json:"searchMode,omitempty"` // "hybrid" recommended
-	Limit        int     `json:"limit,omitempty"`
-	Threshold    float64 `json:"threshold,omitempty"`
-	Rerank       bool    `json:"rerank,omitempty"`
+	Query        string         `json:"q"`
+	ContainerTag string         `json:"containerTag"`
+	SearchMode   string         `json:"searchMode,omitempty"` // "hybrid" recommended
+	Limit        int            `json:"limit,omitempty"`
+	Threshold    float64        `json:"threshold,omitempty"`
+	Rerank       bool           `json:"rerank,omitempty"`
+	RewriteQuery bool           `json:"rewriteQuery,omitempty"`
+	Filters      *SearchFilters `json:"filters,omitempty"`
+}
+
+// SearchFilters supports AND/OR metadata filtering per Supermemory docs.
+type SearchFilters struct {
+	AND []FilterCondition `json:"AND,omitempty"`
+	OR  []FilterCondition `json:"OR,omitempty"`
+}
+
+type FilterCondition struct {
+	Key             string `json:"key"`
+	Value           string `json:"value"`
+	FilterType      string `json:"filterType,omitempty"`      // "string_contains", "numeric", "array_contains"
+	NumericOperator string `json:"numericOperator,omitempty"` // ">=", "<=", ">", "<", "="
+	Negate          bool   `json:"negate,omitempty"`
 }
 
 type SearchResponse struct {
@@ -203,6 +251,27 @@ type Document struct {
 	ID     string `json:"id"`
 	Title  string `json:"title,omitempty"`
 	Status string `json:"status,omitempty"`
+}
+
+type AddImmediateRequest struct {
+	ContainerTag string             `json:"containerTag"`
+	Memories     []ImmediateMemory  `json:"memories"`
+}
+
+type ImmediateMemory struct {
+	Content  string            `json:"content"`
+	IsStatic bool              `json:"isStatic,omitempty"`
+	Metadata map[string]string `json:"metadata,omitempty"`
+}
+
+type AddImmediateResponse struct {
+	DocumentID string `json:"documentId"`
+	Memories   []struct {
+		ID        string `json:"id"`
+		Memory    string `json:"memory"`
+		IsStatic  bool   `json:"isStatic"`
+		CreatedAt string `json:"createdAt"`
+	} `json:"memories"`
 }
 
 type BulkDeleteRequest struct {

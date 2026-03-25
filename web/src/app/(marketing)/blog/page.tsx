@@ -1,3 +1,12 @@
+import type { Metadata } from "next";
+
+export const metadata: Metadata = {
+  title: "Engineering Log",
+  description:
+    "Technical deep dives on AI code review, codebase comprehension, and how Argus gets smarter with every pull request.",
+  alternates: { canonical: "https://argusai.vercel.app/blog" },
+};
+
 export default function BlogPage() {
   return (
     <section className="mx-auto max-w-3xl px-6 py-28">

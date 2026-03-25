@@ -3,14 +3,116 @@ package api
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
 	gh "github.com/google/go-github/v68/github"
 
 	ghpkg "github.com/BeLazy167/argus/internal/github"
+	"github.com/BeLazy167/argus/internal/llm"
 	"github.com/BeLazy167/argus/internal/memory"
+	"github.com/BeLazy167/argus/internal/pipeline"
+	"github.com/BeLazy167/argus/internal/store"
 )
+
+// --- Command Dispatch ---
+
+var commandRe = regexp.MustCompile(`(?i)@argus-eye\s+(review|remember|resolve|fix|test|help)(.*)`)
+
+func (s *Server) dispatchCommand(ctx context.Context, evt ghpkg.IssueCommentEvent) {
+	match := commandRe.FindStringSubmatch(strings.TrimSpace(evt.CommentBody))
+	if match == nil {
+		return
+	}
+
+	parts := strings.SplitN(evt.RepoFullName, "/", 2)
+	if len(parts) != 2 {
+		return
+	}
+	owner, repo := parts[0], parts[1]
+	ghClient := ghpkg.NewClient(s.ghApp)
+
+	cmd := strings.ToLower(match[1])
+	args := strings.TrimSpace(match[2])
+
+	switch cmd {
+	case "review":
+		s.handleReviewCommand(ctx, evt, owner, repo, ghClient, args)
+	case "remember":
+		s.handleRememberCommand(ctx, evt, owner, repo, ghClient, args)
+	case "resolve":
+		s.handleResolveCommand(ctx, evt, owner, repo, ghClient)
+	case "fix":
+		s.handleFixCommand(ctx, evt, owner, repo, ghClient)
+	case "test":
+		s.handleTestCommand(ctx, evt, owner, repo, ghClient, args)
+	case "help":
+		s.handleHelpCommand(ctx, evt, owner, repo, ghClient)
+	}
+}
+
+func (s *Server) handleReviewCommand(ctx context.Context, evt ghpkg.IssueCommentEvent, owner, repo string, ghClient *ghpkg.Client, args string) {
+	force := strings.Contains(args, "--force")
+	var personaOverride string
+	if idx := strings.Index(args, "--persona"); idx >= 0 {
+		rest := strings.TrimSpace(args[idx+len("--persona"):])
+		if fields := strings.Fields(rest); len(fields) > 0 {
+			personaOverride = fields[0]
+		}
+	}
+
+	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "eyes")
+
+	prEvent, err := ghClient.GetPullRequest(ctx, evt.InstallationID, owner, repo, evt.PRNumber)
+	if err != nil {
+		s.logger.Error("review command: fetch PR failed", "error", err, "pr", evt.PRNumber)
+		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
+		return
+	}
+
+	if !force {
+		existing, err := s.store.GetLatestReviewBySHA(ctx, evt.RepoFullName, evt.PRNumber, prEvent.HeadSHA)
+		if err == nil && existing != nil {
+			short := prEvent.HeadSHA
+			if len(short) > 7 {
+				short = short[:7]
+			}
+			body := fmt.Sprintf("Already reviewed at `%s`. Use `@argus-eye review --force` to re-review.", short)
+			_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber, body)
+			_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "rocket")
+			return
+		}
+	}
+
+	if !s.rateLimiter.AllowReview(evt.RepoFullName, owner, force) {
+		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
+			"Rate limit exceeded. Try again later.")
+		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
+		return
+	}
+	if !s.tryAcquireReview(evt.RepoFullName, evt.PRNumber) {
+		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
+			"A review is already in progress for this PR.")
+		return
+	}
+	defer s.releaseReview(evt.RepoFullName, evt.PRNumber)
+
+	prEvent.Action = "manual"
+	prEvent.RepoID = evt.RepoID
+	prEvent.PersonaOverride = personaOverride
+	s.logger.Info("review command triggered", "repo", evt.RepoFullName, "pr", evt.PRNumber, "force", force, "by", evt.CommentAuthor)
+
+	if err := s.orchestrator.HandlePREvent(ctx, *prEvent); err != nil {
+		s.logger.Error("review command: pipeline failed", "error", err, "pr", evt.PRNumber)
+		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
+		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
+			"Review failed. Check the Argus dashboard for details.")
+		return
+	}
+
+	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "rocket")
+}
 
 // handleHelpCommand posts available commands and usage.
 func (s *Server) handleHelpCommand(ctx context.Context, evt ghpkg.IssueCommentEvent, owner, repo string, ghClient *ghpkg.Client) {
@@ -21,10 +123,13 @@ func (s *Server) handleHelpCommand(ctx context.Context, evt ghpkg.IssueCommentEv
 | ` + "`@argus-eye review`" + ` | Trigger a code review on this PR |
 | ` + "`@argus-eye review --force`" + ` | Re-review even if already reviewed at this SHA |
 | ` + "`@argus-eye review --persona <name>`" + ` | Review with a specific persona |
+| | _Personas: default, security_auditor, performance_engineer, mentor, architect, strict, adversarial, fresh_eyes_ |
 | ` + "`@argus-eye remember <pattern>`" + ` | Teach Argus a pattern for this repo |
 | ` + "`@argus-eye remember --org <pattern>`" + ` | Teach Argus an org-wide pattern |
 | ` + "`@argus-eye fix`" + ` | Apply all suggestion blocks from review comments as a commit |
 | ` + "`@argus-eye resolve`" + ` | Resolve review threads on files changed since the review |
+| ` + "`@argus-eye test`" + ` | Generate a test plan for review findings |
+| ` + "`@argus-eye test --code`" + ` | Draft test code for review findings |
 | ` + "`@argus-eye help`" + ` | Show this message |`
 
 	_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber, help)
@@ -98,7 +203,7 @@ func (s *Server) handleRememberCommand(ctx context.Context, evt ghpkg.IssueComme
 	}
 
 	createdBy := evt.CommentAuthor
-	_, err = s.store.CreatePattern(ctx, inst.ID, repoID, content, smID, &createdBy)
+	_, err = s.store.CreatePattern(ctx, inst.ID, repoID, content, smID, &createdBy, nil, nil, nil)
 	if err != nil {
 		s.logger.Error("remember: save to db", "error", err)
 		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
@@ -134,7 +239,8 @@ func (s *Server) handleResolveCommand(ctx context.Context, evt ghpkg.IssueCommen
 	// Filter to unresolved bot threads
 	var botThreads []ghpkg.ReviewThread
 	for _, t := range threads {
-		if !t.IsResolved && strings.HasSuffix(t.AuthorLogin, "[bot]") {
+		isBotComment := strings.HasSuffix(t.AuthorLogin, "[bot]") || t.AuthorLogin == "argus-eye"
+		if !t.IsResolved && isBotComment {
 			botThreads = append(botThreads, t)
 		}
 	}
@@ -320,7 +426,7 @@ func (s *Server) handleFixCommand(ctx context.Context, evt ghpkg.IssueCommentEve
 	if err := ghClient.UpdateRef(ctx, evt.InstallationID, owner, repo, "heads/"+pr.HeadRef, commitSHA); err != nil {
 		s.logger.Error("fix: updating ref", "error", err)
 		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
-			"Failed to push fix commit. The bot may not have write access to fork branches.")
+			"Failed to push fix commit. Argus needs write access to create commits. Check your GitHub App permissions at https://github.com/settings/installations")
 		return
 	}
 
@@ -377,4 +483,123 @@ func parseSuggestionBlock(body string) string {
 	}
 	suggestion := body[start : start+end]
 	return strings.TrimRight(suggestion, "\n")
+}
+
+// handleTestCommand generates a test plan or draft test code from review findings.
+func (s *Server) handleTestCommand(ctx context.Context, evt ghpkg.IssueCommentEvent, owner, repo string, ghClient *ghpkg.Client, args string) {
+	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "eyes")
+
+	review, err := s.store.GetLatestReviewByPR(ctx, fmt.Sprintf("%s/%s", owner, repo), evt.PRNumber)
+	if err != nil || review == nil {
+		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
+			"No review found for this PR. Run `@argus-eye review` first.")
+		return
+	}
+
+	comments, err := s.store.GetReviewComments(ctx, review.ID)
+	if err != nil || len(comments) == 0 {
+		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
+			"No findings to generate tests for.")
+		return
+	}
+
+	rawDiff, err := ghClient.GetPRDiff(ctx, evt.InstallationID, owner, repo, evt.PRNumber)
+	if err != nil {
+		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
+		return
+	}
+
+	wantCode := strings.Contains(args, "--code")
+
+	inst, err := s.store.GetInstallationByGitHubID(ctx, evt.InstallationID)
+	if err != nil {
+		return
+	}
+
+	lister := pipeline.StoreConfigListerFor(s.store, inst.ID)
+	provider, cfg, err := s.registry.ResolveProvider(ctx, lister, inst.ID, 0, llm.StageReview)
+	if err != nil {
+		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
+			"No LLM provider configured. Add an API key in Settings.")
+		return
+	}
+
+	var prompt string
+	if wantCode {
+		prompt = buildTestCodePrompt(comments, rawDiff)
+	} else {
+		prompt = buildTestPlanPrompt(comments, rawDiff)
+	}
+
+	resp, err := provider.Complete(ctx, llm.CompletionRequest{
+		Model:       cfg.Model,
+		System:      testGenerationSystemPrompt,
+		Messages:    []llm.Message{{Role: "user", Content: prompt}},
+		MaxTokens:   2000,
+		Temperature: 0.3,
+	})
+	if err != nil {
+		s.logger.Error("test generation failed", "error", err)
+		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
+		return
+	}
+
+	header := "## Test Plan"
+	if wantCode {
+		header = "## Draft Test Code"
+	}
+	body := header + "\n\n" + strings.TrimSpace(resp.Content)
+
+	_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber, body)
+	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "rocket")
+}
+
+const testGenerationSystemPrompt = `You are a senior test engineer. Given code review findings and a PR diff, generate comprehensive test suggestions. Be specific — reference exact functions, edge cases, and expected behaviors. Use the project's existing test patterns if visible in the diff.`
+
+func buildTestPlanPrompt(comments []store.ReviewComment, rawDiff string) string {
+	var sb strings.Builder
+	sb.WriteString("## Review Findings\n\n")
+	for _, c := range comments {
+		sb.WriteString(fmt.Sprintf("- [%s] %s:%d — %s\n",
+			stringOr(c.Severity, "info"), c.FilePath, intOr(c.EndLine, 0), c.Body))
+	}
+	sb.WriteString("\n## PR Diff\n```\n")
+	if len(rawDiff) > 5000 {
+		rawDiff = rawDiff[:5000] + "\n...(truncated)"
+	}
+	sb.WriteString(rawDiff)
+	sb.WriteString("\n```\n\n")
+	sb.WriteString("Generate a test plan covering:\n1. Unit tests for each finding\n2. Edge cases identified in the review\n3. Integration tests for cross-file impacts\n4. Regression tests for previously broken behaviors\n\nFormat as a markdown checklist.")
+	return sb.String()
+}
+
+func buildTestCodePrompt(comments []store.ReviewComment, rawDiff string) string {
+	var sb strings.Builder
+	sb.WriteString("## Review Findings\n\n")
+	for _, c := range comments {
+		sb.WriteString(fmt.Sprintf("- [%s] %s:%d — %s\n",
+			stringOr(c.Severity, "info"), c.FilePath, intOr(c.EndLine, 0), c.Body))
+	}
+	sb.WriteString("\n## PR Diff\n```\n")
+	if len(rawDiff) > 5000 {
+		rawDiff = rawDiff[:5000] + "\n...(truncated)"
+	}
+	sb.WriteString(rawDiff)
+	sb.WriteString("\n```\n\n")
+	sb.WriteString("Generate executable test code for the most critical findings. Match the project's testing framework (detect from imports in the diff). Include:\n- Setup/teardown\n- Edge case coverage\n- Assertion messages\n\nOutput as a single fenced code block per test file.")
+	return sb.String()
+}
+
+func stringOr(s *string, def string) string {
+	if s != nil {
+		return *s
+	}
+	return def
+}
+
+func intOr(i *int, def int) int {
+	if i != nil {
+		return *i
+	}
+	return def
 }

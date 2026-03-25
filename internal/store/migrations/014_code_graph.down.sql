@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS code_edges;
+DROP TABLE IF EXISTS code_nodes;

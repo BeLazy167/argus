@@ -1,45 +1,34 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useAuth } from "@clerk/nextjs";
-import { api } from "../api";
 import type { Rule } from "../types";
-import { useInstallation } from "@/providers/installation-provider";
+import { useApi } from "@/lib/hooks/use-api";
 
 export function useRules() {
-  const { getToken } = useAuth();
-  const { active } = useInstallation();
+  const api = useApi();
   return useQuery({
-    queryKey: ["rules", active?.id],
-    queryFn: async () => {
-      const token = await getToken();
-      return api.get<Rule[]>("/api/v1/rules", token ?? undefined, active?.id);
-    },
-    enabled: !!active,
+    queryKey: ["rules", api.active?.id],
+    queryFn: () => api.get<Rule[]>("/api/v1/rules"),
+    enabled: !!api.active,
   });
 }
 
 export function useCreateRule() {
-  const { getToken } = useAuth();
-  const { active } = useInstallation();
+  const api = useApi();
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (
+    mutationFn: (
       body: Pick<Rule, "category" | "content" | "priority"> & {
         enabled?: boolean;
       },
-    ) => {
-      const token = await getToken();
-      return api.post<Rule>("/api/v1/rules", body, token ?? undefined, active?.id);
-    },
+    ) => api.post<Rule>("/api/v1/rules", body),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["rules"] }),
   });
 }
 
 export function useUpdateRule() {
-  const { getToken } = useAuth();
-  const { active } = useInstallation();
+  const api = useApi();
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async ({
+    mutationFn: ({
       id,
       ...body
     }: {
@@ -48,23 +37,16 @@ export function useUpdateRule() {
       content?: string;
       priority?: number;
       enabled?: boolean;
-    }) => {
-      const token = await getToken();
-      return api.put<Rule>(`/api/v1/rules/${id}`, body, token ?? undefined, active?.id);
-    },
+    }) => api.put<Rule>(`/api/v1/rules/${id}`, body),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["rules"] }),
   });
 }
 
 export function useDeleteRule() {
-  const { getToken } = useAuth();
-  const { active } = useInstallation();
+  const api = useApi();
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (id: number) => {
-      const token = await getToken();
-      return api.delete(`/api/v1/rules/${id}`, token ?? undefined, active?.id);
-    },
+    mutationFn: (id: number) => api.delete(`/api/v1/rules/${id}`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["rules"] }),
   });
 }

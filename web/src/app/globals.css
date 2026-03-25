@@ -1,5 +1,6 @@
 @import "tailwindcss";
 @import "tw-animate-css";
+@import "shadcn/tailwind.css";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -7,53 +8,7 @@
 /* Dark-only product. No light theme. Amber-on-void. */
 
 :root {
-  /* Argus brand colors mapped to shadcn semantic tokens */
-  --background: oklch(0.07 0 0);            /* Void #0D0D0D */
-  --foreground: oklch(0.96 0 0);            /* White #F5F5F5 */
-
-  --card: oklch(0.11 0 0);                  /* Charcoal #1A1A1A */
-  --card-foreground: oklch(0.96 0 0);
-
-  --popover: oklch(0.11 0 0);
-  --popover-foreground: oklch(0.96 0 0);
-
-  --primary: oklch(0.77 0.15 75);           /* Argus Amber #F5A623 */
-  --primary-foreground: oklch(0.07 0 0);    /* Void on amber */
-
-  --secondary: oklch(0.18 0 0);             /* Iron #2C2C2C */
-  --secondary-foreground: oklch(0.96 0 0);
-
-  --muted: oklch(0.18 0 0);
-  --muted-foreground: oklch(0.55 0 0);      /* Slate #888888 */
-
-  --accent: oklch(0.77 0.15 75);            /* Amber accent */
-  --accent-foreground: oklch(0.07 0 0);
-
-  --destructive: oklch(0.577 0.245 27.325);
-  --destructive-foreground: oklch(0.96 0 0);
-
-  --border: oklch(0.22 0 0);               /* Iron-ish border */
-  --input: oklch(0.22 0 0);
-  --ring: oklch(0.77 0.15 75);             /* Amber ring */
-
-  /* Charts — amber scale */
-  --chart-1: oklch(0.77 0.15 75);          /* Amber */
-  --chart-2: oklch(0.65 0.12 75);          /* Dark amber */
-  --chart-3: oklch(0.50 0.08 75);          /* Muted amber */
-  --chart-4: oklch(0.40 0.05 75);          /* Dim amber */
-  --chart-5: oklch(0.30 0.03 75);          /* Near-dark */
-
-  /* Sidebar */
-  --sidebar: oklch(0.09 0 0);             /* Slightly lighter than void */
-  --sidebar-foreground: oklch(0.96 0 0);
-  --sidebar-primary: oklch(0.77 0.15 75);
-  --sidebar-primary-foreground: oklch(0.07 0 0);
-  --sidebar-accent: oklch(0.15 0 0);
-  --sidebar-accent-foreground: oklch(0.96 0 0);
-  --sidebar-border: oklch(0.18 0 0);
-  --sidebar-ring: oklch(0.77 0.15 75);
-
-  --radius: 0.5rem;
+  --radius: 0;
 }
 
 /* ── Tailwind v4 theme bridge ── */
@@ -95,19 +50,23 @@
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
 
-  /* Argus extended palette */
-  --color-void: oklch(0.07 0 0);
-  --color-charcoal: oklch(0.11 0 0);
-  --color-iron: oklch(0.18 0 0);
-  --color-amber: oklch(0.77 0.15 75);
-  --color-ember: oklch(0.77 0.15 75 / 0.5);
-  --color-ash: oklch(0.80 0 0);
-  --color-slate-text: oklch(0.55 0 0);
+  /* Argus extended palette — synced with shadcn preset dark theme */
+  --color-void: var(--background);
+  --color-charcoal: var(--card);
+  --color-iron: var(--border);
+  --color-amber: var(--primary);
+  --color-ember: var(--primary) / 0.5;
+  --color-ash: var(--muted-foreground);
+  --color-slate-text: var(--muted-foreground);
 
   /* Fonts */
   --font-display: "Syne", sans-serif;
   --font-sans: var(--font-geist-sans), "Geist Sans", system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", monospace;
+  --font-mono: var(--font-jetbrains-mono), "JetBrains Mono", monospace;
+  --font-heading: var(--font-mono);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
 }
 
 @layer base {
@@ -115,7 +74,7 @@
     @apply border-border outline-ring/50;
   }
   body {
-    @apply bg-background text-foreground font-mono antialiased;
+    @apply font-mono antialiased bg-background text-foreground;
   }
   h1, h2, h3, h4, h5, h6 {
     font-family: var(--font-display);
@@ -124,6 +83,9 @@
     outline: 2px solid oklch(0.77 0.15 75);
     outline-offset: 2px;
     border-radius: 2px;
+  }
+  html {
+    @apply font-mono;
   }
 }
 
@@ -145,5 +107,150 @@
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.2em;
+  }
+}
+
+.dark {
+
+  --background: oklch(0.147 0.004 49.3);
+
+  --foreground: oklch(0.986 0.002 67.8);
+
+  --card: oklch(0.214 0.009 43.1);
+
+  --card-foreground: oklch(0.986 0.002 67.8);
+
+  --popover: oklch(0.214 0.009 43.1);
+
+  --popover-foreground: oklch(0.986 0.002 67.8);
+
+  --primary: oklch(0.47 0.157 37.304);
+
+  --primary-foreground: oklch(0.98 0.016 73.684);
+
+  --secondary: oklch(0.274 0.006 286.033);
+
+  --secondary-foreground: oklch(0.985 0 0);
+
+  --muted: oklch(0.268 0.011 36.5);
+
+  --muted-foreground: oklch(0.714 0.014 41.2);
+
+  --accent: oklch(0.268 0.011 36.5);
+
+  --accent-foreground: oklch(0.986 0.002 67.8);
+
+  --destructive: oklch(0.704 0.191 22.216);
+
+  --border: oklch(1 0 0 / 10%);
+
+  --input: oklch(1 0 0 / 15%);
+
+  --ring: oklch(0.547 0.021 43.1);
+
+  --chart-1: oklch(0.905 0.182 98.111);
+
+  --chart-2: oklch(0.795 0.184 86.047);
+
+  --chart-3: oklch(0.681 0.162 75.834);
+
+  --chart-4: oklch(0.554 0.135 66.442);
+
+  --chart-5: oklch(0.476 0.114 61.907);
+
+  --sidebar: oklch(0.214 0.009 43.1);
+
+  --sidebar-foreground: oklch(0.986 0.002 67.8);
+
+  --sidebar-primary: oklch(0.705 0.213 47.604);
+
+  --sidebar-primary-foreground: oklch(0.98 0.016 73.684);
+
+  --sidebar-accent: oklch(0.268 0.011 36.5);
+
+  --sidebar-accent-foreground: oklch(0.986 0.002 67.8);
+
+  --sidebar-border: oklch(1 0 0 / 10%);
+
+  --sidebar-ring: oklch(0.547 0.021 43.1);
+}
+
+/* ── Keyframe animations (moved from inline <style> tags) ── */
+
+@keyframes draw {
+  to { stroke-dashoffset: 0; }
+}
+
+@keyframes fadeIn {
+  to { opacity: 1; }
+}
+
+@keyframes scrollPulse {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+
+@keyframes pipelinePing {
+  0% {
+    transform: scale(1);
+    opacity: 0.8;
+  }
+  100% {
+    transform: scale(3);
+    opacity: 0;
+  }
+}
+
+@keyframes reviewSlideIn {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+    max-height: 0;
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    max-height: 200px;
+  }
+}
+
+@keyframes cursorBlink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+@keyframes eyeDraw {
+  to { stroke-dashoffset: 0; }
+}
+
+@keyframes eyeFadeIn {
+  to { opacity: 1; }
+}
+
+/* ── Eye symbol animation classes ── */
+.eye-outline {
+  animation: eyeDraw 1.5s ease-in-out forwards;
+}
+.eye-iris {
+  opacity: 0;
+  animation: eyeFadeIn 0.5s ease-in 0.8s forwards;
+  transition: transform 0.15s ease-out;
+}
+.eye-pupil {
+  opacity: 0;
+  animation: eyeFadeIn 0.4s ease-in 1.0s forwards;
+  transition: transform 0.15s ease-out;
+}
+.eye-marker {
+  opacity: 0;
+  animation: eyeFadeIn 0.4s ease-in 1.2s forwards;
+  transition: transform 0.15s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }

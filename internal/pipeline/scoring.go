@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/BeLazy167/argus/internal/llm"
 	"github.com/BeLazy167/argus/internal/memory"
 	"github.com/BeLazy167/argus/internal/store"
+	"github.com/BeLazy167/argus/internal/util"
 )
 
 // ScoringStage validates review comments using a separate scoring model.
@@ -26,7 +28,10 @@ func NewScoringStage(registry *llm.Registry, st *store.Store, memClient *memory.
 }
 
 // scoringThreshold is the minimum score (0-100) for a comment to survive scoring.
-const scoringThreshold = 80
+const scoringThreshold = 65
+
+// minSurvivors is the minimum number of comments to keep even if all fall below threshold.
+const minSurvivors = 3
 
 func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 	// No-op if deep review is off
@@ -35,20 +40,9 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 	}
 
 	// Check if scoring model is configured — if not, pass through
-	dbConfigs, err := ss.store.ListModelConfigs(ctx, run.DBRepoID)
+	provider, cfg, err := ss.registry.ResolveProvider(ctx, storeConfigLister{st: ss.store, installationID: run.DBInstallationID}, run.DBInstallationID, run.DBRepoID, llm.StageScoring)
 	if err != nil {
-		return fmt.Errorf("loading model configs: %w", err)
-	}
-	repoConfigs := storeToLLMConfigs(dbConfigs)
-	cfg, err := ss.registry.GetConfig(run.DBRepoID, llm.StageScoring, repoConfigs)
-	if err != nil {
-		slog.Info("no scoring model configured, passing all comments through", "repo_id", run.DBRepoID)
-		run.ScoringSkipped = true
-		return nil
-	}
-	provider, err := ss.registry.GetProviderForRepo(ctx, run.DBInstallationID, &run.DBRepoID, cfg.Provider)
-	if err != nil {
-		slog.Error("scoring provider unavailable, passing all comments through", "error", err)
+		slog.Info("scoring provider unavailable, passing all comments through", "repo_id", run.DBRepoID, "error", err)
 		run.ScoringSkipped = true
 		return nil
 	}
@@ -69,6 +63,20 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 		return nil
 	}
 
+	// Deduplicate similar comments before scoring
+	run.FileReviews = deduplicateComments(run.FileReviews)
+
+	// Re-index after dedup
+	allComments = allComments[:0]
+	for fi, fr := range run.FileReviews {
+		for ci := range fr.Comments {
+			allComments = append(allComments, indexedComment{fileIdx: fi, commentIdx: ci})
+		}
+	}
+	if len(allComments) == 0 {
+		return nil
+	}
+
 	// Fetch repo memory context for scoring calibration
 	owner, repo, err := splitRepoFullName(run.PREvent.RepoFullName)
 	if err != nil {
@@ -79,7 +87,7 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 	prompt := buildScoringPrompt(run, memContext)
 	resp, err := provider.Complete(ctx, llm.CompletionRequest{
 		Model:       cfg.Model,
-		System:      scoringSystemPrompt,
+		System:      customOrDefault(run.Prompts, "scoring_system", scoringSystemPrompt),
 		Messages:    []llm.Message{{Role: "user", Content: prompt}},
 		MaxTokens:   cfg.MaxTokens,
 		Temperature: cfg.Temperature,
@@ -153,6 +161,40 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 			filtered = append(filtered, FileReview{Path: fr.Path, Comments: passing})
 		}
 	}
+
+	// MinSurvivors fallback: if all comments were dropped, keep the top-N by score
+	if kept == 0 && len(allComments) > 0 {
+		// Sort allComments indices by score descending
+		type scoredIdx struct {
+			fileIdx    int
+			commentIdx int
+			score      int
+		}
+		var all []scoredIdx
+		for _, ic := range allComments {
+			c := run.AllFileReviews[ic.fileIdx].Comments[ic.commentIdx]
+			all = append(all, scoredIdx{fileIdx: ic.fileIdx, commentIdx: ic.commentIdx, score: c.Score})
+		}
+		sort.Slice(all, func(i, j int) bool { return all[i].score > all[j].score })
+		n := minSurvivors
+		if n > len(all) {
+			n = len(all)
+		}
+		// Rebuild filtered from top-N using AllFileReviews snapshot
+		survivors := make(map[string][]FileComment)
+		for _, s := range all[:n] {
+			fr := run.AllFileReviews[s.fileIdx]
+			survivors[fr.Path] = append(survivors[fr.Path], fr.Comments[s.commentIdx])
+		}
+		filtered = filtered[:0]
+		for path, comments := range survivors {
+			filtered = append(filtered, FileReview{Path: path, Comments: comments})
+		}
+		kept = n
+		dropped = len(allComments) - n
+		slog.Info("scoring: all comments below threshold, keeping top survivors", "minSurvivors", n)
+	}
+
 	run.FileReviews = filtered
 
 	if run.EventBus != nil {
@@ -173,9 +215,9 @@ func buildScoringPrompt(run *PipelineRun, memContext string) string {
 		sb.WriteString(memContext)
 		sb.WriteString("\n")
 	}
-	// Truncate user-controlled fields for prompt injection resistance
-	safeTitle := truncate(run.PREvent.PRTitle, 200)
-	safeAuthor := truncate(run.PREvent.PRAuthor, 100)
+	// Sanitize + truncate user-controlled fields
+	safeTitle := sanitizeUserInput(util.Truncate(run.PREvent.PRTitle, 200, false))
+	safeAuthor := sanitizeUserInput(util.Truncate(run.PREvent.PRAuthor, 100, false))
 	sb.WriteString(fmt.Sprintf("PR #%d: \"%s\" by %s\n\nScore each comment 0-100:\n\n", run.PREvent.PRNumber, safeTitle, safeAuthor))
 	idx := 0
 	for _, fr := range run.FileReviews {
@@ -184,7 +226,11 @@ func buildScoringPrompt(run *PipelineRun, memContext string) string {
 			if c.Specialist != "" {
 				specialist = fmt.Sprintf(" [%s]", c.Specialist)
 			}
-			sb.WriteString(fmt.Sprintf("[%d] %s:%d%s — [%s|%s] %s\n", idx, fr.Path, c.Line, specialist, c.Severity, c.Category, c.Body))
+			desc := c.What
+			if desc == "" {
+				desc = c.Body
+			}
+			sb.WriteString(fmt.Sprintf("[%d] %s:%d%s — [%s|%s] %s\n", idx, fr.Path, c.Line, specialist, c.Severity, c.Category, desc))
 			if c.Suggestion != "" {
 				sb.WriteString(fmt.Sprintf("    suggestion: %s\n", c.Suggestion))
 			}
@@ -197,18 +243,23 @@ func buildScoringPrompt(run *PipelineRun, memContext string) string {
 
 const scoringSystemPrompt = `You are a code review quality judge. Score each comment 0-100.
 
-90-100: Definite real bug or security flaw with clear evidence in the diff
-70-89: Likely valid issue but may be minor or context-dependent
-40-69: Speculative, stylistic, or low-confidence
-0-39: False positive, nitpick, or wrong
+Specialist comments (tagged with [bug_hunter], [security], [architecture], [regression], etc.) carry domain-specific intent. Score the finding on its technical merit within that specialty, not whether a generalist would agree.
 
-Deduplication: if multiple comments flag the same issue on the same line, score the BEST version normally, score duplicates 0.
+90-100: Definite real bug, security flaw, or regression with clear evidence in the diff
+70-89: Likely valid issue — may be minor or context-dependent, but technically sound within its domain
+40-69: Speculative, low-confidence, or only tangentially related to correctness
+0-39: False positive, wrong, or duplicate of a higher-scored comment
+
+Style-only comments (naming, formatting, whitespace) that don't affect correctness or readability: maximum score 30.
+Security findings with a concrete exploit scenario or clear vulnerability path: minimum score 70.
+
+Deduplication: if multiple comments flag variants of the same root issue, score only the clearest and most actionable one above threshold. Score duplicates at 0.
 
 Criteria:
 - Is it a real issue? Does the diff actually show the problem?
 - Does it explain WHY it matters?
 - Is any suggested fix correct?
-- Would a senior engineer agree this needs attention?
+- For specialist comments: does it reflect genuine domain expertise?
 - If the issue would be caught by a standard linter (ESLint, golint/staticcheck, ruff, clippy), score it no higher than 35 regardless of severity label.
 
 Respond ONLY with a JSON array. No other text.`
@@ -250,7 +301,7 @@ func fetchScoringContext(ctx context.Context, memClient *memory.Client, owner, r
 	if len(fileResults) > 0 {
 		sb.WriteString("## Known File Context\n")
 		for _, r := range fileResults {
-			sb.WriteString("- " + truncateSnippet(r, 200) + "\n")
+			sb.WriteString("- " + util.Truncate(r, 200, true) + "\n")
 		}
 		sb.WriteString("\n")
 	}
@@ -267,4 +318,114 @@ func fetchScoringContext(ctx context.Context, memClient *memory.Client, owner, r
 		sb.WriteString("\nUse this context to calibrate scores — issues matching confirmed patterns should score higher.")
 	}
 	return sb.String()
+}
+
+// deduplicateComments groups comments by file path + overlapping line range (within 5 lines),
+// then removes near-duplicates (>80% token overlap), keeping the longest comment in each group.
+func deduplicateComments(fileReviews []FileReview) []FileReview {
+	var result []FileReview
+	for _, fr := range fileReviews {
+		if len(fr.Comments) <= 1 {
+			result = append(result, fr)
+			continue
+		}
+
+		// Assign each comment to a line-proximity group
+		groups := make([]int, len(fr.Comments))
+		nextGroup := 0
+		for i := range fr.Comments {
+			groups[i] = -1
+		}
+		for i := range fr.Comments {
+			if groups[i] >= 0 {
+				continue
+			}
+			groups[i] = nextGroup
+			for j := i + 1; j < len(fr.Comments); j++ {
+				if groups[j] >= 0 {
+					continue
+				}
+				if linesOverlap(fr.Comments[i].Line, fr.Comments[j].Line, 5) {
+					groups[j] = nextGroup
+				}
+			}
+			nextGroup++
+		}
+
+		// Within each group, remove duplicates by body similarity
+		kept := make([]bool, len(fr.Comments))
+		for i := range kept {
+			kept[i] = true
+		}
+		for g := 0; g < nextGroup; g++ {
+			var idxs []int
+			for i, gi := range groups {
+				if gi == g {
+					idxs = append(idxs, i)
+				}
+			}
+			for i := 0; i < len(idxs); i++ {
+				if !kept[idxs[i]] {
+					continue
+				}
+				for j := i + 1; j < len(idxs); j++ {
+					if !kept[idxs[j]] {
+						continue
+					}
+					if tokenSimilarity(fr.Comments[idxs[i]].Body, fr.Comments[idxs[j]].Body) > 0.8 {
+						// Keep the longer comment
+						if len(fr.Comments[idxs[i]].Body) >= len(fr.Comments[idxs[j]].Body) {
+							kept[idxs[j]] = false
+						} else {
+							kept[idxs[i]] = false
+							break
+						}
+					}
+				}
+			}
+		}
+
+		var passing []FileComment
+		for i, c := range fr.Comments {
+			if kept[i] {
+				passing = append(passing, c)
+			}
+		}
+		if len(passing) > 0 {
+			result = append(result, FileReview{Path: fr.Path, Comments: passing})
+		}
+	}
+	return result
+}
+
+func linesOverlap(a, b, threshold int) bool {
+	d := a - b
+	if d < 0 {
+		d = -d
+	}
+	return d <= threshold
+}
+
+// tokenSimilarity returns the ratio of shared tokens to the max token count of two strings.
+func tokenSimilarity(a, b string) float64 {
+	tokA := strings.Fields(strings.ToLower(a))
+	tokB := strings.Fields(strings.ToLower(b))
+	if len(tokA) == 0 || len(tokB) == 0 {
+		return 0
+	}
+	set := make(map[string]bool, len(tokA))
+	for _, t := range tokA {
+		set[t] = true
+	}
+	shared := 0
+	for _, t := range tokB {
+		if set[t] {
+			shared++
+		}
+	}
+	maxLen := len(tokA)
+	if len(tokB) > maxLen {
+		maxLen = len(tokB)
+	}
+	return float64(shared) / float64(maxLen)
 }
