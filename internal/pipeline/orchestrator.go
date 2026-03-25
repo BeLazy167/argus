@@ -130,9 +130,9 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 			}
 			reviewID := uuid.New()
 			if _, err := o.db.Exec(ctx, `
-				INSERT INTO reviews (id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, status, trigger, error)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, 'failed', 'webhook', 'no_api_key')
-			`, reviewID, dbRepo.ID, event.PRNumber, event.PRTitle, event.PRAuthor, event.HeadSHA, event.BaseSHA); err != nil {
+				INSERT INTO reviews (id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, head_ref, status, trigger, error)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'failed', 'webhook', 'no_api_key')
+			`, reviewID, dbRepo.ID, event.PRNumber, event.PRTitle, event.PRAuthor, event.HeadSHA, event.BaseSHA, event.HeadRef); err != nil {
 				o.logger.Error("recording skipped review", "error", err, "repo", event.RepoFullName)
 			}
 			return nil
@@ -190,12 +190,15 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 	}
 
 	_, err = o.db.Exec(ctx, `
-		INSERT INTO reviews (id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, status, trigger, resolved_stale_count)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', 'webhook', 0)
-	`, reviewID, dbRepo.ID, event.PRNumber, event.PRTitle, event.PRAuthor, event.HeadSHA, event.BaseSHA)
+		INSERT INTO reviews (id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, head_ref, status, trigger, resolved_stale_count)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', 'webhook', 0)
+	`, reviewID, dbRepo.ID, event.PRNumber, event.PRTitle, event.PRAuthor, event.HeadSHA, event.BaseSHA, event.HeadRef)
 	if err != nil {
 		return fmt.Errorf("creating review record: %w", err)
 	}
+
+	// Merge org defaults with repo overrides (repo wins)
+	mergedSettings, _ := o.st.GetMergedSettings(ctx, inst.ID, dbRepo.ID)
 
 	run := &PipelineRun{
 		ID:               uuid.New(),
@@ -206,9 +209,9 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		DBRepoID:         dbRepo.ID,
 		Diff:             patchSet,
 		RawDiff:          rawDiff,
-		Persona:             loadPersona(dbRepo.SettingsJSON),
-		CustomPersonaPrompt: loadCustomPersonaPrompt(dbRepo.SettingsJSON),
-		DeepReview:          isDeepReviewEnabled(dbRepo.SettingsJSON) && func() bool {
+		Persona:             loadPersona(mergedSettings),
+		CustomPersonaPrompt: loadCustomPersonaPrompt(mergedSettings),
+		DeepReview:          isDeepReviewEnabled(mergedSettings) && func() bool {
 			tier, _ := o.st.GetPlanTier(ctx, inst.ID)
 			return tier == "pro"
 		}(),

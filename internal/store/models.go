@@ -37,6 +37,7 @@ type Review struct {
 	PRAuthor       string           `json:"pr_author"`
 	HeadSHA        string           `json:"head_sha"`
 	BaseSHA        string           `json:"base_sha"`
+	HeadRef        string           `json:"head_ref"`
 	GithubReviewID *int64           `json:"github_review_id,omitempty"`
 	Status         string           `json:"status"`
 	Summary        *string          `json:"summary,omitempty"`

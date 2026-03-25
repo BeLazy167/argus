@@ -42,6 +42,7 @@ export type Review = {
   pr_author: string;
   head_sha: string;
   base_sha: string;
+  head_ref: string;
   github_review_id?: number;
   status: "pending" | "in_progress" | "completed" | "failed";
   summary?: string;

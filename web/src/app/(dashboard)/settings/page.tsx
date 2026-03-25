@@ -28,6 +28,7 @@ import { RepoSelect } from "@/components/dashboard/repo-select";
 import { Protect } from "@clerk/nextjs";
 import { UpgradePrompt } from "@/components/dashboard/upgrade-prompt";
 import type { ProviderKey, PromptTemplate } from "@/lib/types";
+import { useOrgDefaults, useSaveOrgDefaults } from "@/lib/queries/org-defaults";
 
 /* ── Providers & model quick-picks ── */
 
@@ -858,6 +859,11 @@ export default function SettingsPage() {
   const updateRepo = useUpdateRepo();
 
   const [personaError, setPersonaError] = useState("");
+  const [settingsScope, setSettingsScope] = useState<"org" | "repo">("repo");
+
+  // Org defaults
+  const { data: orgDefaults, isLoading: orgDefaultsLoading } = useOrgDefaults();
+  const saveOrgDefaults = useSaveOrgDefaults();
 
   const promptMap = new Map(customPrompts?.map((p) => [p.stage, p]));
   const defaultPromptMap = new Map(defaultPrompts?.map((p) => [p.stage, p]));
@@ -867,6 +873,12 @@ export default function SettingsPage() {
   const currentCustomPrompt = (activeRepo?.settings_json?.custom_persona_prompt as string) || "";
   const deepReview = (activeRepo?.settings_json?.deep_review as boolean) ?? false;
   const [customPromptDraft, setCustomPromptDraft] = useState(currentCustomPrompt);
+
+  // Org defaults state
+  const orgPersona = (orgDefaults?.persona as string) || "default";
+  const orgCustomPrompt = (orgDefaults?.custom_persona_prompt as string) || "";
+  const orgDeepReview = (orgDefaults?.deep_review as boolean) ?? false;
+  const [orgCustomPromptDraft, setOrgCustomPromptDraft] = useState(orgCustomPrompt);
 
   const loading = reposLoading || keysLoading || (activeId > 0 && configsLoading);
   const configMap = new Map(configs?.map((c) => [c.stage, c]));
@@ -881,9 +893,13 @@ export default function SettingsPage() {
     });
   };
 
+  const toggleOrgDeepReview = () => {
+    saveOrgDefaults.mutate({ ...orgDefaults, deep_review: !orgDeepReview });
+  };
+
   return (
     <>
-      <div className="mb-8 flex items-center justify-between">
+      <div className="mb-6 flex items-center justify-between">
         <div>
           <h1 className="font-display text-2xl font-bold text-foreground">
             Settings
@@ -892,10 +908,159 @@ export default function SettingsPage() {
             API keys and model configuration for {active?.org_login ?? "your org"}.
           </p>
         </div>
-        <RepoSelect repos={repos} value={activeId} onChange={setSelectedId} />
+        {settingsScope === "repo" && (
+          <RepoSelect repos={repos} value={activeId} onChange={setSelectedId} />
+        )}
       </div>
 
-      {loading ? (
+      {/* Scope tabs */}
+      <div className="flex items-center gap-1 mb-8 border-b border-iron">
+        <button
+          type="button"
+          onClick={() => setSettingsScope("org")}
+          className={`px-4 py-2 text-xs font-mono transition-colors border-b-2 -mb-px ${
+            settingsScope === "org"
+              ? "border-amber text-amber"
+              : "border-transparent text-slate-text hover:text-foreground"
+          }`}
+        >
+          Org Defaults
+        </button>
+        <button
+          type="button"
+          onClick={() => setSettingsScope("repo")}
+          className={`px-4 py-2 text-xs font-mono transition-colors border-b-2 -mb-px ${
+            settingsScope === "repo"
+              ? "border-amber text-amber"
+              : "border-transparent text-slate-text hover:text-foreground"
+          }`}
+        >
+          Repo Overrides
+        </button>
+      </div>
+
+      {/* Org Defaults Tab */}
+      {settingsScope === "org" && (
+        <>
+          {!active || orgDefaultsLoading ? (
+            <div className="flex items-center justify-center py-20">
+              <Loader2 className="h-6 w-6 animate-spin text-slate-text" />
+            </div>
+          ) : (
+            <div className="space-y-10">
+              <div className="rounded-lg border border-amber/20 bg-amber/5 px-4 py-3 flex items-start gap-2.5">
+                <Info className="h-3.5 w-3.5 text-amber mt-0.5 shrink-0" />
+                <p className="text-[11px] font-mono text-amber/80">
+                  These defaults apply to all repos in <span className="text-amber font-medium">{active?.org_login}</span>.
+                  Repos can override individual settings on the &quot;Repo Overrides&quot; tab.
+                </p>
+              </div>
+
+              {/* Org: Persona */}
+              <section>
+                <div className="flex items-center gap-3 mb-4">
+                  <div className="flex items-center gap-2">
+                    <UserCog className="h-4 w-4 text-amber" />
+                    <h2 className="font-display text-lg font-semibold text-foreground">
+                      Default Persona
+                    </h2>
+                  </div>
+                </div>
+                <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+                  {PERSONAS.map((p) => (
+                    <PersonaCard
+                      key={p.value}
+                      persona={p}
+                      isActive={orgPersona === p.value}
+                      onSelect={() => {
+                        saveOrgDefaults.mutate({ ...orgDefaults, persona: p.value });
+                      }}
+                      disabled={saveOrgDefaults.isPending}
+                    />
+                  ))}
+                </div>
+                {orgPersona === "custom" && (
+                  <div className="mt-4 rounded-lg border border-iron bg-charcoal p-4">
+                    <label className="block text-[11px] font-mono text-slate-text mb-2">
+                      Custom persona prompt (org default)
+                    </label>
+                    <textarea
+                      value={orgCustomPromptDraft}
+                      onChange={(e) => setOrgCustomPromptDraft(e.target.value)}
+                      placeholder="e.g. You are a reviewer focused on accessibility and i18n..."
+                      rows={5}
+                      className="w-full rounded-lg border border-iron bg-void px-4 py-3 text-xs font-mono text-foreground placeholder:text-slate-text/40 focus:outline-none focus:border-amber/50 transition-colors resize-y"
+                    />
+                    <button
+                      type="button"
+                      disabled={saveOrgDefaults.isPending || orgCustomPromptDraft === orgCustomPrompt}
+                      onClick={() => {
+                        saveOrgDefaults.mutate({ ...orgDefaults, persona: "custom", custom_persona_prompt: orgCustomPromptDraft });
+                      }}
+                      className="mt-2 rounded border border-amber/30 bg-amber/10 px-3 py-1.5 text-[10px] font-mono font-medium text-amber hover:bg-amber/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    >
+                      {saveOrgDefaults.isPending ? "Saving..." : "Save Custom Persona"}
+                    </button>
+                  </div>
+                )}
+              </section>
+
+              {/* Org: Deep Review */}
+              <section>
+                <div className="flex items-center gap-3 mb-4">
+                  <div className="flex items-center gap-2">
+                    <Cpu className="h-4 w-4 text-amber" />
+                    <h2 className="font-display text-lg font-semibold text-foreground">
+                      Deep Review
+                    </h2>
+                  </div>
+                </div>
+                <Protect plan="org:pro" fallback={<UpgradePrompt feature="Deep review" />}>
+                  <DeepReviewCard
+                    enabled={orgDeepReview}
+                    onToggle={toggleOrgDeepReview}
+                    pending={saveOrgDefaults.isPending}
+                  />
+                </Protect>
+              </section>
+
+              {/* Org: Feature Toggles */}
+              <Protect plan="org:pro" fallback={<UpgradePrompt feature="Advanced features" />}>
+                <section>
+                  <div className="flex items-center gap-3 mb-4">
+                    <div className="flex items-center gap-2">
+                      <Sliders className="h-4 w-4 text-amber" />
+                      <h2 className="font-display text-lg font-semibold text-foreground">
+                        Default Feature Toggles
+                      </h2>
+                    </div>
+                  </div>
+                  <div className="grid gap-3 md:grid-cols-2">
+                    {FEATURE_TOGGLES.map((toggle) => {
+                      const val = orgDefaults?.[toggle.key];
+                      const enabled = typeof val === "boolean" ? val : toggle.defaultValue;
+                      return (
+                        <FeatureToggleCard
+                          key={toggle.key}
+                          toggle={toggle}
+                          enabled={enabled}
+                          pending={saveOrgDefaults.isPending}
+                          onToggle={() => {
+                            saveOrgDefaults.mutate({ ...orgDefaults, [toggle.key]: !enabled });
+                          }}
+                        />
+                      );
+                    })}
+                  </div>
+                </section>
+              </Protect>
+            </div>
+          )}
+        </>
+      )}
+
+      {/* Repo Overrides Tab */}
+      {settingsScope === "repo" && (loading ? (
         <div className="flex items-center justify-center py-20">
           <Loader2 className="h-6 w-6 animate-spin text-slate-text" />
         </div>
@@ -908,6 +1073,12 @@ export default function SettingsPage() {
         </div>
       ) : (
         <div className="space-y-10">
+          <div className="rounded-lg border border-iron/50 bg-iron/10 px-4 py-3 flex items-start gap-2.5">
+            <Info className="h-3.5 w-3.5 text-slate-text mt-0.5 shrink-0" />
+            <p className="text-[11px] font-mono text-slate-text">
+              Settings not configured here fall back to org defaults.
+            </p>
+          </div>
           {/* Section 1: API Keys */}
           <section id="api-keys">
             <div className="flex items-center gap-3 mb-4">
@@ -1233,7 +1404,7 @@ export default function SettingsPage() {
             </section>
           </Protect>
         </div>
-      )}
+      ))}
     </>
   );
 }
