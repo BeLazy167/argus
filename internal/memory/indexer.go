@@ -235,7 +235,7 @@ func (idx *Indexer) IndexReviewComment(ctx context.Context, owner, repo string, 
 		return fmt.Errorf("indexing review comment: %w", err)
 	}
 
-	idx.logger.Debug("indexed review comment", "owner", owner, "repo", repo, "file", comment.FilePath)
+	idx.logger.Info("indexed review comment", "owner", owner, "repo", repo, "file", comment.FilePath)
 	return nil
 }
 
@@ -293,7 +293,7 @@ func (idx *Indexer) IndexRepoPattern(ctx context.Context, owner, repo, content, 
 	if err != nil {
 		return nil, fmt.Errorf("indexing repo pattern: %w", err)
 	}
-	idx.logger.Debug("indexed repo pattern (v3 upsert)", "owner", owner, "repo", repo)
+	idx.logger.Info("indexed repo pattern (v3 upsert)", "owner", owner, "repo", repo)
 	return resp, nil
 }
 
@@ -313,7 +313,7 @@ func (idx *Indexer) IndexOwnerPattern(ctx context.Context, owner, content, custo
 	if err != nil {
 		return nil, fmt.Errorf("indexing owner pattern: %w", err)
 	}
-	idx.logger.Debug("indexed owner pattern (v3 upsert)", "owner", owner)
+	idx.logger.Info("indexed owner pattern (v3 upsert)", "owner", owner)
 	return resp, nil
 }
 
@@ -329,7 +329,7 @@ func (idx *Indexer) indexImmediate(ctx context.Context, tag, content string, met
 	if err != nil {
 		return nil, fmt.Errorf("indexing %s (v4): %w", kind, err)
 	}
-	idx.logger.Debug("indexed "+kind+" (v4 immediate)", "owner", owner, "repo", repo)
+	idx.logger.Info("indexed "+kind+" (v4 immediate)", "owner", owner, "repo", repo)
 	return &AddResponse{ID: resp.DocumentID, Status: "created"}, nil
 }
 
@@ -410,7 +410,7 @@ func (idx *Indexer) IndexFeedbackSignal(ctx context.Context, owner, repo string,
 	if err != nil {
 		return fmt.Errorf("indexing feedback signal: %w", err)
 	}
-	idx.logger.Debug("indexed feedback signal", "action", feedback.Action, "owner", owner, "repo", repo, "file", feedback.FilePath)
+	idx.logger.Info("indexed feedback signal", "action", feedback.Action, "owner", owner, "repo", repo, "file", feedback.FilePath)
 	return nil
 }
 

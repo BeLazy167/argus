@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { usePagination, PaginationBar } from "@/components/dashboard/pagination";
-import { Shield, Plus, Trash2, Loader2, X, AlertTriangle } from "lucide-react";
+import { Shield, Plus, Trash2, Loader2, X, AlertTriangle, ChevronDown } from "lucide-react";
 import { Protect } from "@clerk/nextjs";
 import {
   useScenarios,
@@ -40,6 +40,7 @@ export default function ScenariosPage() {
   const [description, setDescription] = useState("");
   const [severity, setSeverity] = useState("medium");
   const [filesInput, setFilesInput] = useState("");
+  const [expandedId, setExpandedId] = useState<number | null>(null);
 
   const filtered = useMemo(() => {
     if (!scenarios) return [];
@@ -233,13 +234,23 @@ export default function ScenariosPage() {
             {paginated.map((scenario) => (
               <div
                 key={scenario.id}
-                className="px-5 py-4 hover:bg-iron/10 transition-colors"
+                className="px-5 py-4 hover:bg-iron/10 transition-colors cursor-pointer"
+                onClick={() => setExpandedId(expandedId === scenario.id ? null : scenario.id)}
               >
                 <div className="flex items-start justify-between gap-4">
                   <div className="flex-1 min-w-0">
-                    <p className="text-xs font-mono text-foreground mb-2">
-                      {scenario.description}
-                    </p>
+                    <div className="flex items-start gap-1.5 mb-2">
+                      <ChevronDown
+                        className={`h-3.5 w-3.5 shrink-0 mt-0.5 text-slate-text transition-transform ${
+                          expandedId === scenario.id ? "rotate-0" : "-rotate-90"
+                        }`}
+                      />
+                      <p className={`text-xs font-mono text-foreground ${
+                        expandedId === scenario.id ? "" : "line-clamp-2"
+                      }`}>
+                        {scenario.description}
+                      </p>
+                    </div>
                     <div className="flex items-center gap-2 flex-wrap">
                       {!scenario.active && (
                         <span className="inline-block rounded border border-zinc-500/30 bg-zinc-500/10 px-2 py-0.5 text-[10px] font-mono text-zinc-400">
@@ -305,9 +316,37 @@ export default function ScenariosPage() {
                         {scenario.expected_outcome}
                       </p>
                     )}
+                    {expandedId === scenario.id && (
+                      <div className="mt-3 pt-3 border-t border-iron/30 space-y-2">
+                        {scenario.source_ref && (
+                          <div className="text-[10px] font-mono">
+                            <span className="text-slate-text">Source ref: </span>
+                            <span className="text-foreground">{scenario.source_ref}</span>
+                          </div>
+                        )}
+                        {scenario.initial_state && (
+                          <div className="text-[10px] font-mono">
+                            <span className="text-slate-text">Initial state: </span>
+                            <span className="text-foreground">{scenario.initial_state}</span>
+                          </div>
+                        )}
+                        {scenario.modules?.length > 0 && (
+                          <div className="text-[10px] font-mono">
+                            <span className="text-slate-text">Modules: </span>
+                            <span className="text-foreground">{scenario.modules.join(", ")}</span>
+                          </div>
+                        )}
+                        {scenario.last_run_at && (
+                          <div className="text-[10px] font-mono">
+                            <span className="text-slate-text">Last run: </span>
+                            <span className="text-foreground">{new Date(scenario.last_run_at).toLocaleString()}</span>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                   <button
-                    onClick={() => deleteScenario.mutate(scenario.id)}
+                    onClick={(e) => { e.stopPropagation(); deleteScenario.mutate(scenario.id); }}
                     disabled={deleteScenario.isPending}
                     className="text-slate-text hover:text-red-400 transition-colors disabled:opacity-50 shrink-0"
                   >

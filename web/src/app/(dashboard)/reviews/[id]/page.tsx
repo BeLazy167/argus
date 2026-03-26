@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 import { useReview, useRetryReview } from "@/lib/queries/reviews";
 import { useRepos } from "@/lib/queries/repos";
+import { usePattern } from "@/lib/queries/patterns";
 import { githubPrUrl } from "@/lib/github";
 import { ScoreBox } from "@/components/dashboard/score-badge";
 import { StatusBadge } from "@/components/dashboard/status-badge";
@@ -411,6 +412,22 @@ function CopyFixButton({
   );
 }
 
+function PatternDetail({ patternId }: { patternId: number }) {
+  const { data: pattern, isLoading } = usePattern(patternId);
+  if (isLoading) return <div className="mt-2 text-[10px] font-mono text-slate-text">Loading pattern...</div>;
+  if (!pattern) return <div className="mt-2 text-[10px] font-mono text-slate-text">Pattern not found</div>;
+  return (
+    <div className="mt-2 rounded border border-iron bg-iron/10 p-3">
+      <p className="text-[10px] font-mono text-slate-text uppercase tracking-wider mb-1">Matched Pattern</p>
+      <p className="text-xs font-mono text-foreground whitespace-pre-wrap">{pattern.content}</p>
+      <div className="flex gap-4 mt-2 text-[10px] font-mono text-slate-text">
+        {pattern.source && <span>Source: {pattern.source}</span>}
+        {pattern.category && <span>Category: {pattern.category}</span>}
+      </div>
+    </div>
+  );
+}
+
 function CommentCard({
   comment,
   filePath,
@@ -425,6 +442,7 @@ function CommentCard({
     ? (severityBg[comment.severity] ?? "")
     : "";
   const newFindingBorder = comment.is_new_finding ? "border-l-2 border-l-emerald-500/40" : "";
+  const [patternExpanded, setPatternExpanded] = useState(false);
 
   return (
     <div
@@ -469,10 +487,22 @@ function CommentCard({
               New Finding
             </span>
           )}
-          {comment.matched_pattern_score && (
-            <span className="inline-flex items-center gap-1 rounded border border-amber/30 bg-amber/10 px-2 py-0.5 text-[10px] font-mono text-amber">
-              Pattern Match ({Math.round(comment.matched_pattern_score * 100)}%)
-            </span>
+          {comment.matched_pattern_id && comment.matched_pattern_score && (
+            <div>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setPatternExpanded((prev) => !prev);
+                }}
+                className="inline-flex items-center gap-1 rounded border border-amber/30 bg-amber/10 px-1.5 py-0.5 text-[9px] font-mono text-amber hover:bg-amber/20 transition-colors cursor-pointer"
+              >
+                Pattern Match ({Math.round(comment.matched_pattern_score * 100)}%)
+                <ChevronDown className={`h-2.5 w-2.5 transition-transform ${patternExpanded ? "rotate-180" : ""}`} />
+              </button>
+              {patternExpanded && (
+                <PatternDetail patternId={comment.matched_pattern_id} />
+              )}
+            </div>
           )}
           {comment.enforced_rule_content && (
             <span className="inline-flex items-center gap-1 rounded border border-purple-500/30 bg-purple-500/10 px-2 py-0.5 text-[10px] font-mono text-purple-400" title={comment.enforced_rule_content}>

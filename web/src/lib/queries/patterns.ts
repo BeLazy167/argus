@@ -38,6 +38,15 @@ export function usePatternStats() {
   });
 }
 
+export function usePattern(id: number | undefined) {
+  const api = useApi();
+  return useQuery({
+    queryKey: ["pattern", id],
+    queryFn: () => api.get<Pattern>(`/api/v1/patterns/${id}`),
+    enabled: !!id && !!api.active,
+  });
+}
+
 export function useDeletePattern() {
   const api = useApi();
   const qc = useQueryClient();

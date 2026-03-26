@@ -397,9 +397,16 @@ func buildFileReviewPrompt(run *PipelineRun, file diff.FileDiff, fileContent str
 		sb.WriteString(guide)
 	}
 
-	sb.WriteString("\n" + wrapInDelimiters("pr_diff", file.RawDiff) + "\n")
+	if file.LargeFile && file.FullContent != "" {
+		sb.WriteString("\nThis file was heavily modified (diff too large for GitHub to return). Review the full file content below.\n")
+		sb.WriteString("\n" + wrapInDelimiters("file_content", truncateLines(file.FullContent, 500)) + "\n")
+	} else if file.LargeFile {
+		sb.WriteString("\nThis file was heavily modified but content could not be fetched. Skip detailed review.\n")
+	} else {
+		sb.WriteString("\n" + wrapInDelimiters("pr_diff", file.RawDiff) + "\n")
+	}
 
-	if fileContent != "" {
+	if fileContent != "" && !file.LargeFile {
 		sb.WriteString("\nFull file content:\n```\n")
 		sb.WriteString(truncateLines(fileContent, 500))
 		sb.WriteString("\n```\n")
