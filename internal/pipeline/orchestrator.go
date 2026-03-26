@@ -1709,10 +1709,131 @@ Rules:
 	o.logger.Info("extracted architecture graph", "nodes", len(nodeIDs), "edges", len(result.Edges), "repo", run.PREvent.RepoFullName)
 }
 
+// ─── Lead Agent Helpers ──────────────────────────────────────────────────────
+
+// resolveLeadProvider resolves an LLM provider for lead agent stages,
+// trying synthesis first, falling back to review.
+func (o *Orchestrator) resolveLeadProvider(ctx context.Context, run *PipelineRun, stage string) (llm.Provider, llm.ModelConfig, bool) {
+	lister := storeConfigLister{st: o.st, installationID: run.DBInstallationID}
+	provider, cfg, err := o.reviewStage.registry.ResolveProvider(ctx, lister, run.DBInstallationID, run.DBRepoID, llm.StageSynthesis)
+	if err != nil {
+		provider, cfg, err = o.reviewStage.registry.ResolveProvider(ctx, lister, run.DBInstallationID, run.DBRepoID, llm.StageReview)
+		if err != nil {
+			o.logger.Warn(stage+": no provider", "error", err)
+			return nil, llm.ModelConfig{}, false
+		}
+	}
+	return provider, cfg, true
+}
+
+// collectAgentResults converts FileReviews into AgentResults keyed by specialist.
+func collectAgentResults(reviews []FileReview) []AgentResult {
+	var results []AgentResult
+	for _, fr := range reviews {
+		specialist := "review"
+		if len(fr.Comments) > 0 && fr.Comments[0].Specialist != "" {
+			specialist = string(fr.Comments[0].Specialist)
+		}
+		results = append(results, AgentResult{AgentName: specialist, FileReviews: []FileReview{fr}})
+	}
+	return results
+}
+
+// diffFilePaths returns the list of changed file paths from a PatchSet.
+func diffFilePaths(d *diff.PatchSet) []string {
+	paths := make([]string, 0, len(d.Files))
+	for _, f := range d.Files {
+		paths = append(paths, f.NewName)
+	}
+	return paths
+}
+
+// writeDiffSummary appends truncated diffs for each changed file to a prompt builder.
+func writeDiffSummary(sb *strings.Builder, files []diff.FileDiff, maxPerFile int) {
+	for _, f := range files {
+		sb.WriteString(fmt.Sprintf("\n--- %s ---\n", f.NewName))
+		raw := util.Truncate(f.RawDiff, maxPerFile, false)
+		if len(raw) < len(f.RawDiff) {
+			raw += "\n...(truncated)"
+		}
+		sb.WriteString(raw)
+	}
+}
+
+// writeCrossCutting appends cross-cutting concerns from a LeadBrief to a prompt builder.
+func writeCrossCutting(sb *strings.Builder, brief *LeadBrief) {
+	if brief == nil || len(brief.CrossCutting) == 0 {
+		return
+	}
+	sb.WriteString("\nCross-cutting concerns from briefing:\n")
+	for _, cc := range brief.CrossCutting {
+		sb.WriteString(fmt.Sprintf("- %s\n", cc))
+	}
+}
+
+// groupByFile converts a map of file path -> comments into a slice of FileReviews.
+func groupByFile(byFile map[string][]FileComment) []FileReview {
+	reviews := make([]FileReview, 0, len(byFile))
+	for fp, cs := range byFile {
+		reviews = append(reviews, FileReview{Path: fp, Comments: cs})
+	}
+	return reviews
+}
+
+// writeAgentFindings writes a summary of agent file review comments to the builder.
+func writeAgentFindings(sb *strings.Builder, results []AgentResult) {
+	for _, ar := range results {
+		sb.WriteString(fmt.Sprintf("\n## %s\n", ar.AgentName))
+		for _, fr := range ar.FileReviews {
+			for _, c := range fr.Comments {
+				body := c.What
+				if body == "" {
+					body = c.Body
+				}
+				sb.WriteString(fmt.Sprintf("- %s:%d [%s] %s\n", fr.Path, c.Line, c.Severity, util.Truncate(body, 100, true)))
+			}
+		}
+	}
+}
+
+// writeDetailedAgentFindings writes full agent results (comments, simulations, blast impacts).
+func writeDetailedAgentFindings(sb *strings.Builder, results []AgentResult) {
+	for _, ar := range results {
+		sb.WriteString(fmt.Sprintf("\n## %s\n", ar.AgentName))
+		for _, fr := range ar.FileReviews {
+			for _, c := range fr.Comments {
+				body := c.What
+				if body == "" {
+					body = c.Body
+				}
+				sb.WriteString(fmt.Sprintf("- file=%s line=%d sev=%s cat=%s: %s\n",
+					fr.Path, c.Line, c.Severity, c.Category, util.Truncate(body, 150, true)))
+				if c.Why != "" {
+					sb.WriteString(fmt.Sprintf("  why: %s\n", util.Truncate(c.Why, 100, true)))
+				}
+				if c.Suggestion != "" {
+					sb.WriteString(fmt.Sprintf("  suggestion: %s\n", util.Truncate(c.Suggestion, 100, true)))
+				}
+			}
+		}
+		for _, sim := range ar.SimResults {
+			status := "PASS"
+			if !sim.Passes {
+				status = "FAIL"
+			}
+			sb.WriteString(fmt.Sprintf("- [simulation %s] %s: %s\n", status, sim.Scenario, util.Truncate(sim.RootCause, 100, true)))
+		}
+		for _, bi := range ar.BlastImpacts {
+			sb.WriteString(fmt.Sprintf("- [blast %s] %s.%s: %s → %s\n",
+				bi.Severity, bi.DependentFile, bi.DependentSymbol,
+				util.Truncate(bi.AssumptionViolated, 80, true), util.Truncate(bi.FailureMode, 80, true)))
+		}
+	}
+}
+
 // ─── Lead Agent Stage Wrappers ───────────────────────────────────────────────
 
 // leadBriefStage runs the Lead Agent's briefing phase (Phase 1).
-// Skipped for non-deep reviews (no handler registered = auto-skip).
 func (o *Orchestrator) leadBriefStage(ctx context.Context, run *PipelineRun) error {
 	if !run.DeepReview {
 		return nil
@@ -1722,12 +1843,15 @@ func (o *Orchestrator) leadBriefStage(ctx context.Context, run *PipelineRun) err
 		o.logger.Warn("lead brief failed, continuing without brief", "error", err)
 		return nil // non-fatal
 	}
+	if brief == nil {
+		o.logger.Info("lead brief returned nil, specialists will run without brief")
+	}
 	run.LeadBrief = brief
 	return nil
 }
 
 // broadcastStage runs the Lead Agent's broadcast phase (Phase 2b + 2c).
-// Collects findings from review, identifies cross-agent signals, runs targeted second passes.
+// Collects findings, identifies cross-agent signals, runs targeted second passes.
 func (o *Orchestrator) broadcastStage(ctx context.Context, run *PipelineRun) error {
 	if !run.DeepReview || run.LeadBrief == nil {
 		return nil
@@ -1735,77 +1859,20 @@ func (o *Orchestrator) broadcastStage(ctx context.Context, run *PipelineRun) err
 
 	owner, repo, err := splitRepoFullName(run.PREvent.RepoFullName)
 	if err != nil {
+		o.logger.Warn("broadcastStage: bad repo name", "error", err)
 		return nil
 	}
 
-	// Collect current findings as AgentResults
-	var allResults []AgentResult
-	for _, fr := range run.FileReviews {
-		specialist := ""
-		if len(fr.Comments) > 0 {
-			specialist = string(fr.Comments[0].Specialist)
-		}
-		if specialist == "" {
-			specialist = "review"
-		}
-		allResults = append(allResults, AgentResult{AgentName: specialist, FileReviews: []FileReview{fr}})
+	allResults := collectAgentResults(run.FileReviews)
+	changedPaths := diffFilePaths(run.Diff)
+
+	if simResult := o.runSimulationAgent(ctx, run, changedPaths); simResult != nil {
+		allResults = append(allResults, *simResult)
+	}
+	if blastResult := o.runBlastRadiusAgent(ctx, run, owner, repo, changedPaths); blastResult != nil {
+		allResults = append(allResults, *blastResult)
 	}
 
-	// Run simulation agent in parallel with broadcast analysis
-	if run.CodeSimulation && o.simEngine != nil {
-		changedFiles := make([]string, 0, len(run.Diff.Files))
-		for _, f := range run.Diff.Files {
-			changedFiles = append(changedFiles, f.NewName)
-		}
-		scenarios, err := FindRelevantScenarios(ctx, o.st, run.DBRepoID, changedFiles)
-		if err == nil && len(scenarios) > 0 {
-			simScenarios := make([]SimScenario, len(scenarios))
-			for i, s := range scenarios {
-				simScenarios[i] = SimScenario{Description: s.Description}
-			}
-			req := SimulationRequest{Run: run, Scenarios: simScenarios}
-			results, simErr := o.simEngine.RunSimulations(ctx, req)
-			if simErr != nil {
-				o.logger.Warn("simulation failed", "error", simErr)
-			} else {
-				allResults = append(allResults, AgentResult{AgentName: "simulation", SimResults: results})
-			}
-		}
-	}
-
-	// Run blast radius agent
-	if run.BlastRadius && o.st != nil {
-		changedPaths := make([]string, 0, len(run.Diff.Files))
-		changedSet := make(map[string]bool)
-		for _, f := range run.Diff.Files {
-			changedPaths = append(changedPaths, f.NewName)
-			changedSet[f.NewName] = true
-		}
-		nodes, err := o.st.GetBlastRadius(ctx, run.DBRepoID, changedPaths, 2)
-		if err == nil && len(nodes) > 0 {
-			// Fetch dependent file contents
-			depContents := make(map[string]string)
-			seen := make(map[string]bool)
-			for _, n := range nodes {
-				if n.Depth != 1 || changedSet[n.FilePath] || seen[n.FilePath] || len(depContents) >= 3 {
-					continue
-				}
-				seen[n.FilePath] = true
-				content, fetchErr := o.ghClient.GetFileContent(ctx, run.PREvent.InstallationID, owner, repo, n.FilePath, run.PREvent.HeadSHA)
-				if fetchErr == nil {
-					depContents[n.FilePath] = truncateLines(content, 200)
-				}
-			}
-			if len(depContents) > 0 {
-				impacts := o.analyzeBlastRadius(ctx, run, owner, repo, depContents)
-				if len(impacts) > 0 {
-					allResults = append(allResults, AgentResult{AgentName: "blast_radius", BlastImpacts: impacts})
-				}
-			}
-		}
-	}
-
-	// Phase 2b: Lead Broadcast — identify cross-agent signals
 	signals := o.leadBroadcast(ctx, run, allResults, run.LeadBrief)
 	if len(signals) == 0 {
 		return nil
@@ -1815,16 +1882,72 @@ func (o *Orchestrator) broadcastStage(ctx context.Context, run *PipelineRun) err
 	for _, sig := range signals {
 		fileContents := make(map[string]string)
 		for _, path := range sig.FilesToCheck {
-			content, err := o.ghClient.GetFileContent(ctx, run.PREvent.InstallationID, owner, repo, path, run.PREvent.HeadSHA)
-			if err == nil {
+			content, fetchErr := o.ghClient.GetFileContent(ctx, run.PREvent.InstallationID, owner, repo, path, run.PREvent.HeadSHA)
+			if fetchErr == nil {
 				fileContents[path] = truncateLines(content, 200)
 			}
 		}
-		secondPassFindings := o.agentSecondPass(ctx, run, sig, fileContents)
-		run.FileReviews = append(run.FileReviews, secondPassFindings...)
+		run.FileReviews = append(run.FileReviews, o.agentSecondPass(ctx, run, sig, fileContents)...)
 	}
 
 	return nil
+}
+
+// runSimulationAgent runs the code simulation sub-agent if enabled.
+func (o *Orchestrator) runSimulationAgent(ctx context.Context, run *PipelineRun, changedPaths []string) *AgentResult {
+	if !run.CodeSimulation || o.simEngine == nil {
+		return nil
+	}
+	scenarios, err := FindRelevantScenarios(ctx, o.st, run.DBRepoID, changedPaths)
+	if err != nil || len(scenarios) == 0 {
+		return nil
+	}
+	simScenarios := make([]SimScenario, len(scenarios))
+	for i, s := range scenarios {
+		simScenarios[i] = SimScenario{Description: s.Description}
+	}
+	results, err := o.simEngine.RunSimulations(ctx, SimulationRequest{Run: run, Scenarios: simScenarios})
+	if err != nil {
+		o.logger.Warn("simulation failed", "error", err)
+		return nil
+	}
+	return &AgentResult{AgentName: "simulation", SimResults: results}
+}
+
+// runBlastRadiusAgent runs the blast radius sub-agent if enabled.
+func (o *Orchestrator) runBlastRadiusAgent(ctx context.Context, run *PipelineRun, owner, repo string, changedPaths []string) *AgentResult {
+	if !run.BlastRadius || o.st == nil {
+		return nil
+	}
+	changedSet := make(map[string]bool, len(changedPaths))
+	for _, p := range changedPaths {
+		changedSet[p] = true
+	}
+	nodes, err := o.st.GetBlastRadius(ctx, run.DBRepoID, changedPaths, 2)
+	if err != nil || len(nodes) == 0 {
+		return nil
+	}
+	// Fetch up to 3 dependent file contents (depth-1 only, excluding changed files)
+	depContents := make(map[string]string)
+	seen := make(map[string]bool)
+	for _, n := range nodes {
+		if n.Depth != 1 || changedSet[n.FilePath] || seen[n.FilePath] || len(depContents) >= 3 {
+			continue
+		}
+		seen[n.FilePath] = true
+		content, fetchErr := o.ghClient.GetFileContent(ctx, run.PREvent.InstallationID, owner, repo, n.FilePath, run.PREvent.HeadSHA)
+		if fetchErr == nil {
+			depContents[n.FilePath] = truncateLines(content, 200)
+		}
+	}
+	if len(depContents) == 0 {
+		return nil
+	}
+	impacts := o.analyzeBlastRadius(ctx, run, owner, repo, depContents)
+	if len(impacts) == 0 {
+		return nil
+	}
+	return &AgentResult{AgentName: "blast_radius", BlastImpacts: impacts}
 }
 
 // crossCheckStage runs the Lead Agent's cross-check phase (Phase 3).
@@ -1834,24 +1957,23 @@ func (o *Orchestrator) crossCheckStage(ctx context.Context, run *PipelineRun) er
 		return nil
 	}
 
-	// Collect all results for cross-check
-	var allResults []AgentResult
-	for _, fr := range run.FileReviews {
-		specialist := ""
-		if len(fr.Comments) > 0 {
-			specialist = string(fr.Comments[0].Specialist)
-		}
-		allResults = append(allResults, AgentResult{AgentName: specialist, FileReviews: []FileReview{fr}})
-	}
+	allResults := collectAgentResults(run.FileReviews)
 
 	// Save pre-crosscheck snapshot for pattern learning
 	run.AllFileReviews = make([]FileReview, len(run.FileReviews))
 	copy(run.AllFileReviews, run.FileReviews)
 
 	crossChecked := o.leadCrossCheck(ctx, run, allResults, run.LeadBrief)
-	if crossChecked != nil {
-		run.FileReviews = crossChecked
+	if crossChecked == nil {
+		o.logger.Warn("cross-check failed, posting unfiltered findings")
+		return nil
 	}
+	// Safety: don't wipe all findings if cross-check returns empty but we had findings
+	if len(crossChecked) == 0 && len(run.FileReviews) > 0 {
+		o.logger.Warn("cross-check returned empty, keeping original findings", "original_count", len(run.FileReviews))
+		return nil
+	}
+	run.FileReviews = crossChecked
 	return nil
 }
 
@@ -1895,28 +2017,16 @@ func (o *Orchestrator) leadBrief(ctx context.Context, run *PipelineRun) (*LeadBr
 		return nil, nil
 	}
 
-	lister := storeConfigLister{st: o.st, installationID: run.DBInstallationID}
-	provider, cfg, err := o.reviewStage.registry.ResolveProvider(ctx, lister, run.DBInstallationID, run.DBRepoID, llm.StageSynthesis)
-	if err != nil {
-		provider, cfg, err = o.reviewStage.registry.ResolveProvider(ctx, lister, run.DBInstallationID, run.DBRepoID, llm.StageReview)
-		if err != nil {
-			o.logger.Warn("leadBrief: no provider", "error", err)
-			return nil, nil
-		}
+	provider, cfg, ok := o.resolveLeadProvider(ctx, run, "leadBrief")
+	if !ok {
+		return nil, nil
 	}
 
 	var prompt strings.Builder
 	safeTitle := sanitizeUserInput(util.Truncate(run.PREvent.PRTitle, 200, false))
 	safeAuthor := sanitizeUserInput(util.Truncate(run.PREvent.PRAuthor, 100, false))
 	prompt.WriteString(fmt.Sprintf("PR #%d: \"%s\" by %s\n\nChanged files:\n", run.PREvent.PRNumber, safeTitle, safeAuthor))
-	for _, f := range run.Diff.Files {
-		prompt.WriteString(fmt.Sprintf("\n--- %s ---\n", f.NewName))
-		raw := util.Truncate(f.RawDiff, 500, false)
-		if len(raw) < len(f.RawDiff) {
-			raw += "\n...(truncated)"
-		}
-		prompt.WriteString(raw)
-	}
+	writeDiffSummary(&prompt, run.Diff.Files, 500)
 
 	briefCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
@@ -1961,37 +2071,15 @@ Output JSON array:
 // leadBroadcast identifies cross-agent signals after all agents finish.
 // Non-fatal: returns empty slice on error so second pass is skipped.
 func (o *Orchestrator) leadBroadcast(ctx context.Context, run *PipelineRun, allResults []AgentResult, brief *LeadBrief) []CrossAgentSignal {
-	lister := storeConfigLister{st: o.st, installationID: run.DBInstallationID}
-	provider, cfg, err := o.reviewStage.registry.ResolveProvider(ctx, lister, run.DBInstallationID, run.DBRepoID, llm.StageSynthesis)
-	if err != nil {
-		provider, cfg, err = o.reviewStage.registry.ResolveProvider(ctx, lister, run.DBInstallationID, run.DBRepoID, llm.StageReview)
-		if err != nil {
-			o.logger.Warn("leadBroadcast: no provider", "error", err)
-			return nil
-		}
+	provider, cfg, ok := o.resolveLeadProvider(ctx, run, "leadBroadcast")
+	if !ok {
+		return nil
 	}
 
 	var prompt strings.Builder
 	prompt.WriteString("Agent findings:\n")
-	for _, ar := range allResults {
-		prompt.WriteString(fmt.Sprintf("\n## %s\n", ar.AgentName))
-		for _, fr := range ar.FileReviews {
-			for _, c := range fr.Comments {
-				body := c.What
-				if body == "" {
-					body = c.Body
-				}
-				prompt.WriteString(fmt.Sprintf("- %s:%d [%s] %s\n", fr.Path, c.Line, c.Severity, util.Truncate(body, 100, true)))
-			}
-		}
-	}
-
-	if brief != nil && len(brief.CrossCutting) > 0 {
-		prompt.WriteString("\nCross-cutting concerns from briefing:\n")
-		for _, cc := range brief.CrossCutting {
-			prompt.WriteString(fmt.Sprintf("- %s\n", cc))
-		}
-	}
+	writeAgentFindings(&prompt, allResults)
+	writeCrossCutting(&prompt, brief)
 
 	broadcastCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -2056,29 +2144,39 @@ func (o *Orchestrator) agentSecondPass(ctx context.Context, run *PipelineRun, si
 		return nil
 	}
 
-	comments, err := unmarshalLLMArray[FileComment](resp.Content)
+	type secondPassComment struct {
+		FilePath   string   `json:"file_path"`
+		Severity   Severity `json:"severity"`
+		Category   Category `json:"category"`
+		Line       int      `json:"line"`
+		What       string   `json:"what"`
+		Why        string   `json:"why"`
+		Suggestion string   `json:"suggestion"`
+	}
+	parsed, err := unmarshalLLMArray[secondPassComment](resp.Content)
 	if err != nil {
 		o.logger.Warn("agentSecondPass parse failed", "error", err, "agent", signal.ToAgent)
 		return nil
 	}
 
-	// Group comments by file path
+	// Group comments by file path; fallback to first file if LLM omits file_path
 	byFile := make(map[string][]FileComment)
-	for _, c := range comments {
-		fp := c.CodeSnippet // try file_path field fallback below
-		// Comments from the LLM should reference files from signal.FilesToCheck;
-		// if file_path not in comment, assign to first file.
-		if _, ok := fileContents[fp]; !ok && len(signal.FilesToCheck) > 0 {
+	for _, c := range parsed {
+		fp := c.FilePath
+		if fp == "" && len(signal.FilesToCheck) > 0 {
 			fp = signal.FilesToCheck[0]
 		}
-		byFile[fp] = append(byFile[fp], c)
+		byFile[fp] = append(byFile[fp], FileComment{
+			Severity:   c.Severity,
+			Category:   c.Category,
+			Line:       c.Line,
+			What:       c.What,
+			Why:        c.Why,
+			Suggestion: c.Suggestion,
+			Specialist: Specialist(signal.ToAgent + "_second_pass"),
+		})
 	}
-
-	var reviews []FileReview
-	for fp, cs := range byFile {
-		reviews = append(reviews, FileReview{Path: fp, Comments: cs})
-	}
-	return reviews
+	return groupByFile(byFile)
 }
 
 const blastRadiusAgentPrompt = `You analyze dependency impact. Given changed code and dependent file source, identify concrete breaking changes.
@@ -2101,26 +2199,14 @@ func (o *Orchestrator) analyzeBlastRadius(ctx context.Context, run *PipelineRun,
 		return nil
 	}
 
-	lister := storeConfigLister{st: o.st, installationID: run.DBInstallationID}
-	provider, cfg, err := o.reviewStage.registry.ResolveProvider(ctx, lister, run.DBInstallationID, run.DBRepoID, llm.StageSynthesis)
-	if err != nil {
-		provider, cfg, err = o.reviewStage.registry.ResolveProvider(ctx, lister, run.DBInstallationID, run.DBRepoID, llm.StageReview)
-		if err != nil {
-			o.logger.Warn("analyzeBlastRadius: no provider", "error", err)
-			return nil
-		}
+	provider, cfg, ok := o.resolveLeadProvider(ctx, run, "analyzeBlastRadius")
+	if !ok {
+		return nil
 	}
 
 	var prompt strings.Builder
 	prompt.WriteString("Changed files:\n")
-	for _, f := range run.Diff.Files {
-		prompt.WriteString(fmt.Sprintf("\n--- %s ---\n", f.NewName))
-		raw := util.Truncate(f.RawDiff, 500, false)
-		if len(raw) < len(f.RawDiff) {
-			raw += "\n...(truncated)"
-		}
-		prompt.WriteString(raw)
-	}
+	writeDiffSummary(&prompt, run.Diff.Files, 500)
 
 	prompt.WriteString("\n\nDependent files:\n")
 	for fp, content := range depContents {
@@ -2168,56 +2254,15 @@ Each comment must have: severity, category, line, what, why, suggestion (optiona
 // leadCrossCheck synthesizes all findings from agents, deduplicates, and produces
 // the final set of review comments. Replaces the scoring stage.
 func (o *Orchestrator) leadCrossCheck(ctx context.Context, run *PipelineRun, allResults []AgentResult, brief *LeadBrief) []FileReview {
-	lister := storeConfigLister{st: o.st, installationID: run.DBInstallationID}
-	provider, cfg, err := o.reviewStage.registry.ResolveProvider(ctx, lister, run.DBInstallationID, run.DBRepoID, llm.StageSynthesis)
-	if err != nil {
-		provider, cfg, err = o.reviewStage.registry.ResolveProvider(ctx, lister, run.DBInstallationID, run.DBRepoID, llm.StageReview)
-		if err != nil {
-			o.logger.Warn("leadCrossCheck: no provider", "error", err)
-			return nil
-		}
+	provider, cfg, ok := o.resolveLeadProvider(ctx, run, "leadCrossCheck")
+	if !ok {
+		return nil
 	}
 
 	var prompt strings.Builder
 	prompt.WriteString("All agent findings:\n")
-	for _, ar := range allResults {
-		prompt.WriteString(fmt.Sprintf("\n## %s\n", ar.AgentName))
-		for _, fr := range ar.FileReviews {
-			for _, c := range fr.Comments {
-				body := c.What
-				if body == "" {
-					body = c.Body
-				}
-				prompt.WriteString(fmt.Sprintf("- file=%s line=%d sev=%s cat=%s: %s\n",
-					fr.Path, c.Line, c.Severity, c.Category, util.Truncate(body, 150, true)))
-				if c.Why != "" {
-					prompt.WriteString(fmt.Sprintf("  why: %s\n", util.Truncate(c.Why, 100, true)))
-				}
-				if c.Suggestion != "" {
-					prompt.WriteString(fmt.Sprintf("  suggestion: %s\n", util.Truncate(c.Suggestion, 100, true)))
-				}
-			}
-		}
-		for _, sim := range ar.SimResults {
-			status := "PASS"
-			if !sim.Passes {
-				status = "FAIL"
-			}
-			prompt.WriteString(fmt.Sprintf("- [simulation %s] %s: %s\n", status, sim.Scenario, util.Truncate(sim.RootCause, 100, true)))
-		}
-		for _, bi := range ar.BlastImpacts {
-			prompt.WriteString(fmt.Sprintf("- [blast %s] %s.%s: %s → %s\n",
-				bi.Severity, bi.DependentFile, bi.DependentSymbol,
-				util.Truncate(bi.AssumptionViolated, 80, true), util.Truncate(bi.FailureMode, 80, true)))
-		}
-	}
-
-	if brief != nil && len(brief.CrossCutting) > 0 {
-		prompt.WriteString("\nCross-cutting concerns from briefing:\n")
-		for _, cc := range brief.CrossCutting {
-			prompt.WriteString(fmt.Sprintf("- %s\n", cc))
-		}
-	}
+	writeDetailedAgentFindings(&prompt, allResults)
+	writeCrossCutting(&prompt, brief)
 
 	crossCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -2250,15 +2295,14 @@ func (o *Orchestrator) leadCrossCheck(ctx context.Context, run *PipelineRun, all
 		return nil
 	}
 
-	// Group by file path into FileReview slices
 	byFile := make(map[string][]FileComment)
 	for _, c := range comments {
 		fc := FileComment{
-			Line:     c.Line,
-			Severity: c.Severity,
-			Category: c.Category,
-			What:     c.What,
-			Why:      c.Why,
+			Line:       c.Line,
+			Severity:   c.Severity,
+			Category:   c.Category,
+			What:       c.What,
+			Why:        c.Why,
 			Suggestion: c.Suggestion,
 		}
 		if !ValidSeverities[fc.Severity] {
@@ -2270,11 +2314,7 @@ func (o *Orchestrator) leadCrossCheck(ctx context.Context, run *PipelineRun, all
 		byFile[c.FilePath] = append(byFile[c.FilePath], fc)
 	}
 
-	var reviews []FileReview
-	for fp, cs := range byFile {
-		reviews = append(reviews, FileReview{Path: fp, Comments: cs})
-	}
-
+	reviews := groupByFile(byFile)
 	o.logger.Info("lead cross-check complete", "files", len(reviews), "comments", len(comments))
 	return reviews
 }
