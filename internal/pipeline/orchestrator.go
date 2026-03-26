@@ -939,18 +939,22 @@ const (
 	enrichmentEndMarker   = "<!-- argus-enrichment-end -->"
 )
 
-const enrichmentSystemPrompt = `You enrich a PR description with additional technical context from the code review. Your tone is helpful and collaborative — like a teammate adding useful notes, never accusatory or critical.
+const enrichmentSystemPrompt = `You help complete a PR description by adding what the author missed or forgot. Think of yourself as a helpful co-author — you read the code changes and add the parts the author didn't write.
 
-Do two things:
-1. Identify notable technical details from the changes that would help a reviewer understand the PR better. Focus on: architectural decisions, algorithm choices, new dependencies, behavioral changes, and things that add useful context. Keep each point to ONE short sentence. Do NOT mention security issues or bugs — those belong in review comments, not here.
-2. Generate a clean Mermaid diagram showing how the changed components relate. Pick the best type: flowchart for data flow, graph TD for architecture, sequenceDiagram for interactions. Keep it simple — max 8 nodes.
+Rules:
+- If the PR description is EMPTY: write a complete summary of what this PR does (3-6 bullet points covering key changes).
+- If the PR description is PARTIAL: only add bullet points for features/changes the author didn't mention. Match their style and tone.
+- If the PR description already covers everything: return empty arrays.
+- Write from the author's perspective ("Adds...", "Updates...", "Introduces...") — NOT as a reviewer.
+- Focus on WHAT the code does, not bugs or issues. No security warnings, no criticism.
+- Keep each point to one concise sentence.
 
-If the changes are trivial or the PR description already covers everything, respond with empty arrays/strings.
+Also generate a clean Mermaid diagram showing how the changed components relate. Keep it simple (max 8 nodes). Use flowchart for data flow, graph TD for architecture.
 
 Respond with JSON only:
 {
-  "missing_points": ["Adds Redis caching layer for session tokens", "Switches to batch processing for webhook payloads"],
-  "diagram": "flowchart LR\n  A[API] --> B[Cache]",
+  "missing_points": ["Adds batch processing with configurable concurrency and retry logic", "Introduces fuzzy search with Levenshtein distance scoring"],
+  "diagram": "flowchart LR\n  A[API] --> B[Processor]",
   "diagram_title": "Architecture"
 }`
 
@@ -1004,22 +1008,25 @@ func (o *Orchestrator) enrichPRDescription(ctx context.Context, run *PipelineRun
 
 	// Build enrichment section
 	var section strings.Builder
-	section.WriteString(enrichmentStartMarker + "\n---\n")
-	section.WriteString("<details>\n<summary>📋 <b>Argus Review Context</b></summary>\n\n")
+	section.WriteString(enrichmentStartMarker + "\n\n")
 	if len(result.MissingPoints) > 0 {
-		section.WriteString("**Additional context from code review:**\n")
+		section.WriteString("**Also in this PR:**\n")
 		for _, p := range result.MissingPoints {
 			section.WriteString(fmt.Sprintf("- %s\n", sanitizeUserInput(p)))
 		}
 		section.WriteString("\n")
 	}
 	if result.Diagram != "" {
+		section.WriteString("<details>\n")
+		title := "Architecture"
 		if result.DiagramTitle != "" {
-			section.WriteString(fmt.Sprintf("**%s**\n", sanitizeUserInput(result.DiagramTitle)))
+			title = sanitizeUserInput(result.DiagramTitle)
 		}
+		section.WriteString(fmt.Sprintf("<summary>%s</summary>\n\n", title))
 		section.WriteString("```mermaid\n" + result.Diagram + "\n```\n")
+		section.WriteString("</details>\n")
 	}
-	section.WriteString("</details>\n")
+	section.WriteString("\n<sub>Auto-enriched by [Argus](https://argusai.vercel.app)</sub>\n")
 	section.WriteString(enrichmentEndMarker)
 
 	// Fetch current PR body (may have been edited since webhook)
