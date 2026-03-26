@@ -120,7 +120,7 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 	unitCh := make(chan workUnit, len(units))
 	resultCh := make(chan result, len(units))
 
-	workers := min(rs.maxWorkers, len(units), 3)
+	workers := min(rs.maxWorkers, len(units))
 
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
@@ -277,18 +277,34 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p revie
 		relatedContext = FormatRelatedContext(related)
 	}
 
-	// Query blast radius from code graph
+	// Query blast radius from code graph + fetch dependent file contents
 	var blastContext string
 	if run.BlastRadius && rs.store != nil {
 		changedPaths := make([]string, 0, len(run.Diff.Files))
+		changedSet := make(map[string]bool, len(run.Diff.Files))
 		for _, f := range run.Diff.Files {
 			changedPaths = append(changedPaths, f.NewName)
+			changedSet[f.NewName] = true
 		}
 		nodes, err := rs.store.GetBlastRadius(ctx, run.DBRepoID, changedPaths, 2)
 		if err != nil {
 			slog.Warn("blast radius query failed", "error", err)
 		} else {
-			blastContext = FormatBlastRadius(nodes)
+			// Fetch content of depth-1 dependents NOT in the diff (max 3 files, 200 lines each)
+			depContents := make(map[string]string)
+			seen := make(map[string]bool)
+			for _, n := range nodes {
+				if n.Depth != 1 || changedSet[n.FilePath] || seen[n.FilePath] || len(depContents) >= 3 {
+					continue
+				}
+				seen[n.FilePath] = true
+				content, fetchErr := rs.ghClient.GetFileContent(ctx, run.PREvent.InstallationID, owner, repo, n.FilePath, run.PREvent.HeadSHA)
+				if fetchErr != nil {
+					continue
+				}
+				depContents[n.FilePath] = truncateLines(content, 200)
+			}
+			blastContext = FormatBlastRadius(nodes, depContents)
 		}
 	}
 
@@ -556,10 +572,16 @@ Every comment you file costs developer time to read, evaluate, and respond. Only
 - Suggestions to "add error handling" without a concrete failure scenario
 - Anything that is a matter of preference rather than correctness
 
+## Analysis techniques — apply these BEFORE writing comments
+1. **Trace every return path**: for each function, verify every branch returns the correct type/value. Watch for early returns that skip cleanup, and catch blocks that change the return semantics.
+2. **Trace exception flow**: follow throw/catch chains across function boundaries. Does a rethrow inside a fallback/retry loop defeat the fallback? Does a catch swallow an error that a caller depends on?
+3. **Verify arithmetic step by step**: trace unit conversions, divisions, and multiplications. If a value is divided by 1000 for "per-unit" and again by 1000 for display, that's a double-division bug.
+4. **Check blast radius**: if <blast_radius> context is provided, consider how the changed code affects its dependents. Would callers break if a function now returns null instead of throwing? Would consumers of a registry break if entries are silently overwritten?
+
 ## Priority (highest first)
-1. **Bugs** — logic errors, off-by-one, null dereferences, broken invariants, race conditions, incorrect boundary checks
+1. **Bugs** — logic errors, off-by-one, null dereferences, broken invariants, race conditions, incorrect boundary checks, arithmetic errors
 2. **Security** — injection (SQL/XSS/command), hardcoded secrets, missing input validation, SSRF, path traversal
-3. **Silent failures** — swallowed errors, empty catch blocks, missing error propagation, async operations that silently fail
+3. **Silent failures** — swallowed errors, empty catch blocks, missing error propagation, async operations that silently fail, functions that return success on error conditions
 4. **Performance** — N+1 queries, unbounded operations, resource leaks, missing pagination
 5. **Type safety** — types that can represent invalid states, missing constraints at construction
 

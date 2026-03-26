@@ -88,11 +88,7 @@ After identifying a potential bug, argue against yourself: is there a guard, val
 
 Prefer concrete examples: "When X is null and Y calls Z, this panics" over vague warnings.
 
-**Scope boundary — do NOT report:**
-- Security vulnerabilities (injection, secrets, auth) → Security Auditor handles these
-- Architecture/reliability (resource leaks, missing timeouts) → Architecture Reviewer handles these
-- Regression risks (breaking callers, changed contracts) → Regression Reviewer handles these
-- Style, naming, documentation
+Ignore style, naming, documentation. Only report real bugs with concrete failure scenarios.
 
 **Output tone:** Your analysis should be adversarial, but the comments you write to the developer must be professional and constructive. Explain the bug clearly — attack the code, not the author.`
 
@@ -119,12 +115,7 @@ Before reporting, consider whether this pattern is intentional or addressed else
 For each finding, describe the specific attack vector: who is the attacker, what input do they control, and what is the impact?
 
 Lower your threshold — flag anything suspicious even at "warning" level.
-
-**Scope boundary — do NOT report:**
-- Logic bugs (off-by-one, null deref) → Bug Hunter handles these
-- Architecture issues (resource leaks, coupling) → Architecture Reviewer handles these
-- Regression risks → Regression Reviewer handles these
-- Style, naming, documentation`
+Ignore non-security issues entirely.`
 
 	case SpecialistArchitecture:
 		return `
@@ -147,11 +138,7 @@ Focus on public APIs and module boundaries. Internal implementation details are 
 
 Ask: what breaks if this code runs at 10x the current scale? What breaks if the dependency it relies on is slow or unavailable?
 
-**Scope boundary — do NOT report:**
-- Logic bugs (off-by-one, null deref, wrong return values) → Bug Hunter handles these
-- Security vulnerabilities (injection, secrets, auth) → Security Auditor handles these
-- Regression risks (breaking callers, changed contracts) → Regression Reviewer handles these
-- Style, naming, minor formatting`
+Ignore style, naming, minor formatting. Only report architectural and reliability issues.`
 
 	case SpecialistRegression:
 		return `
@@ -176,13 +163,7 @@ Only report a regression risk if you can name or describe the existing caller, c
 Changed internal behavior that maintains the same external contract is NOT a regression.
 
 For each issue, explain WHAT previously worked and HOW this change breaks it.
-
-**Scope boundary — do NOT report:**
-- Logic bugs in new code → Bug Hunter handles these
-- Security vulnerabilities → Security Auditor handles these
-- Architecture/reliability (resource leaks, timeouts) → Architecture Reviewer handles these
-- Style, naming, documentation
-- New code that doesn't modify existing behavior`
+Ignore new code that doesn't modify existing behavior.`
 
 	default:
 		return ""
