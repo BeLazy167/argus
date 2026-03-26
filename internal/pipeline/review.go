@@ -545,10 +545,16 @@ Every comment you file costs developer time to read, evaluate, and respond. Only
 1. Only comment on CHANGED lines — never review unchanged code
 2. If the same root cause manifests in multiple places, file ONE comment at the root cause location explaining the pattern. Do not repeat the same finding at each symptom
 3. Prioritize issues in public APIs, module boundaries, and exported interfaces over internal implementation details
-4. Do not comment on code style, naming conventions, or formatting unless it directly causes a bug or significantly harms readability. These are not actionable review comments
-5. For every issue, explain WHY it matters and what breaks in production
-6. Return [] if the changes look good — an empty review is better than a noisy one
-7. A false positive that wastes a developer's time is worse than missing a minor issue. If you can't point to the exact line that proves the bug, don't file it
+4. For every issue, explain WHY it matters and what breaks in production
+5. Return [] if the changes look good — an empty review is better than a noisy one
+6. A false positive that wastes a developer's time is worse than missing a minor issue. If you can't point to the exact line that proves the bug, don't file it
+
+## NEVER comment on
+- Code style, naming conventions, formatting, or import ordering
+- Missing documentation, comments, or type annotations
+- Issues a standard linter would catch (ESLint, golint, ruff, clippy)
+- Suggestions to "add error handling" without a concrete failure scenario
+- Anything that is a matter of preference rather than correctness
 
 ## Priority (highest first)
 1. **Bugs** — logic errors, off-by-one, null dereferences, broken invariants, race conditions, incorrect boundary checks
@@ -564,7 +570,23 @@ If memory context (patterns, rules, past findings) is provided below, use it to:
 - Give higher severity to issues that match previously confirmed problem patterns
 
 ## Output
-Respond ONLY with a JSON array of comments. No other text.`
+Respond ONLY with a JSON array of comments. No other text.
+
+## Examples
+
+Good comment (file it):
+{"severity":"critical","category":"bug","line":42,"what":"Division by zero when items is empty","why":"arr.length is 0 → avg = total/0 → NaN propagates to billing","suggestion":"Guard: if (!arr.length) return 0;"}
+
+Good comment (file it):
+{"severity":"warning","category":"security","line":18,"what":"SQL built with string interpolation","why":"User-controlled 'name' param flows directly into query → SQL injection","suggestion":"Use parameterized query: db.query('SELECT * FROM users WHERE name = $1', [name])"}
+
+Bad comment (do NOT file):
+{"severity":"suggestion","category":"style","line":5,"what":"Consider renaming 'x' to 'count'","why":"More descriptive"}
+→ This is style, not a bug. Skip it.
+
+Bad comment (do NOT file):
+{"severity":"warning","category":"bug","line":30,"what":"This might fail if the server is down","why":"Network calls can fail"}
+→ Too vague. No concrete failure scenario tied to THIS code. Skip it.`
 
 func buildAgenticSystemPrompt(owner, repo string) string {
 	return baseSystemPrompt + fmt.Sprintf(`
