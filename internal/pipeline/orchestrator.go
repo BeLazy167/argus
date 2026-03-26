@@ -130,9 +130,10 @@ func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, 
 	o.simEngine = NewSimulationEngine(o.reviewStage.registry, st, ghClient, logger)
 
 	sm.RegisterStage(StateTriaging, triageStage.Execute)
+	sm.RegisterStage(StateBriefing, o.leadBriefStage)
 	sm.RegisterStage(StateReviewing, reviewStage.Execute)
-	sm.RegisterStage(StateEnriching, o.enrichFindings)
-	sm.RegisterStage(StateScoring, scoringStage.Execute)
+	sm.RegisterStage(StateBroadcasting, o.broadcastStage)
+	sm.RegisterStage(StateCrossChecking, o.crossCheckStage)
 	sm.RegisterStage(StatePass2, o.pass2)
 	sm.RegisterStage(StateSynthesizing, o.synthesize)
 	sm.RegisterStage(StatePosting, o.post)
@@ -1706,6 +1707,576 @@ Rules:
 	}
 
 	o.logger.Info("extracted architecture graph", "nodes", len(nodeIDs), "edges", len(result.Edges), "repo", run.PREvent.RepoFullName)
+}
+
+// ─── Lead Agent Stage Wrappers ───────────────────────────────────────────────
+
+// leadBriefStage runs the Lead Agent's briefing phase (Phase 1).
+// Skipped for non-deep reviews (no handler registered = auto-skip).
+func (o *Orchestrator) leadBriefStage(ctx context.Context, run *PipelineRun) error {
+	if !run.DeepReview {
+		return nil
+	}
+	brief, err := o.leadBrief(ctx, run)
+	if err != nil {
+		o.logger.Warn("lead brief failed, continuing without brief", "error", err)
+		return nil // non-fatal
+	}
+	run.LeadBrief = brief
+	return nil
+}
+
+// broadcastStage runs the Lead Agent's broadcast phase (Phase 2b + 2c).
+// Collects findings from review, identifies cross-agent signals, runs targeted second passes.
+func (o *Orchestrator) broadcastStage(ctx context.Context, run *PipelineRun) error {
+	if !run.DeepReview || run.LeadBrief == nil {
+		return nil
+	}
+
+	owner, repo, err := splitRepoFullName(run.PREvent.RepoFullName)
+	if err != nil {
+		return nil
+	}
+
+	// Collect current findings as AgentResults
+	var allResults []AgentResult
+	for _, fr := range run.FileReviews {
+		specialist := ""
+		if len(fr.Comments) > 0 {
+			specialist = string(fr.Comments[0].Specialist)
+		}
+		if specialist == "" {
+			specialist = "review"
+		}
+		allResults = append(allResults, AgentResult{AgentName: specialist, FileReviews: []FileReview{fr}})
+	}
+
+	// Run simulation agent in parallel with broadcast analysis
+	if run.CodeSimulation && o.simEngine != nil {
+		changedFiles := make([]string, 0, len(run.Diff.Files))
+		for _, f := range run.Diff.Files {
+			changedFiles = append(changedFiles, f.NewName)
+		}
+		scenarios, err := FindRelevantScenarios(ctx, o.st, run.DBRepoID, changedFiles)
+		if err == nil && len(scenarios) > 0 {
+			simScenarios := make([]SimScenario, len(scenarios))
+			for i, s := range scenarios {
+				simScenarios[i] = SimScenario{Description: s.Description}
+			}
+			req := SimulationRequest{Run: run, Scenarios: simScenarios}
+			results, simErr := o.simEngine.RunSimulations(ctx, req)
+			if simErr != nil {
+				o.logger.Warn("simulation failed", "error", simErr)
+			} else {
+				allResults = append(allResults, AgentResult{AgentName: "simulation", SimResults: results})
+			}
+		}
+	}
+
+	// Run blast radius agent
+	if run.BlastRadius && o.st != nil {
+		changedPaths := make([]string, 0, len(run.Diff.Files))
+		changedSet := make(map[string]bool)
+		for _, f := range run.Diff.Files {
+			changedPaths = append(changedPaths, f.NewName)
+			changedSet[f.NewName] = true
+		}
+		nodes, err := o.st.GetBlastRadius(ctx, run.DBRepoID, changedPaths, 2)
+		if err == nil && len(nodes) > 0 {
+			// Fetch dependent file contents
+			depContents := make(map[string]string)
+			seen := make(map[string]bool)
+			for _, n := range nodes {
+				if n.Depth != 1 || changedSet[n.FilePath] || seen[n.FilePath] || len(depContents) >= 3 {
+					continue
+				}
+				seen[n.FilePath] = true
+				content, fetchErr := o.ghClient.GetFileContent(ctx, run.PREvent.InstallationID, owner, repo, n.FilePath, run.PREvent.HeadSHA)
+				if fetchErr == nil {
+					depContents[n.FilePath] = truncateLines(content, 200)
+				}
+			}
+			if len(depContents) > 0 {
+				impacts := o.analyzeBlastRadius(ctx, run, owner, repo, depContents)
+				if len(impacts) > 0 {
+					allResults = append(allResults, AgentResult{AgentName: "blast_radius", BlastImpacts: impacts})
+				}
+			}
+		}
+	}
+
+	// Phase 2b: Lead Broadcast — identify cross-agent signals
+	signals := o.leadBroadcast(ctx, run, allResults, run.LeadBrief)
+	if len(signals) == 0 {
+		return nil
+	}
+
+	// Phase 2c: Targeted second passes
+	for _, sig := range signals {
+		fileContents := make(map[string]string)
+		for _, path := range sig.FilesToCheck {
+			content, err := o.ghClient.GetFileContent(ctx, run.PREvent.InstallationID, owner, repo, path, run.PREvent.HeadSHA)
+			if err == nil {
+				fileContents[path] = truncateLines(content, 200)
+			}
+		}
+		secondPassFindings := o.agentSecondPass(ctx, run, sig, fileContents)
+		run.FileReviews = append(run.FileReviews, secondPassFindings...)
+	}
+
+	return nil
+}
+
+// crossCheckStage runs the Lead Agent's cross-check phase (Phase 3).
+// Deduplicates, cross-references, and quality-filters all findings.
+func (o *Orchestrator) crossCheckStage(ctx context.Context, run *PipelineRun) error {
+	if !run.DeepReview || run.LeadBrief == nil {
+		return nil
+	}
+
+	// Collect all results for cross-check
+	var allResults []AgentResult
+	for _, fr := range run.FileReviews {
+		specialist := ""
+		if len(fr.Comments) > 0 {
+			specialist = string(fr.Comments[0].Specialist)
+		}
+		allResults = append(allResults, AgentResult{AgentName: specialist, FileReviews: []FileReview{fr}})
+	}
+
+	// Save pre-crosscheck snapshot for pattern learning
+	run.AllFileReviews = make([]FileReview, len(run.FileReviews))
+	copy(run.AllFileReviews, run.FileReviews)
+
+	crossChecked := o.leadCrossCheck(ctx, run, allResults, run.LeadBrief)
+	if crossChecked != nil {
+		run.FileReviews = crossChecked
+	}
+	return nil
+}
+
+// ─── Lead Agent Functions ────────────────────────────────────────────────────
+
+const leadBriefSystemPrompt = `You are the lead code reviewer coordinating a team of 4 specialist reviewers: Bug Hunter, Security Auditor, Architecture Reviewer, and Regression Reviewer.
+
+Read the entire PR and produce a briefing for your team.
+
+For each changed file, write a 2-3 sentence brief:
+1. What the file does and what changed
+2. Key concerns to investigate per specialist
+3. Cross-file dependencies
+
+Also identify cross-cutting concerns spanning multiple files:
+- Shared state or singletons
+- Consistent error handling patterns (or inconsistencies)
+- Data flow chains (user input → validation → storage → response)
+- Arithmetic/unit conversion chains
+
+Output JSON only:
+{
+  "file_briefs": {
+    "src/auth.ts": {
+      "summary": "Session management with token refresh",
+      "bug_hunter_focus": "Token expiry edge cases, race in concurrent refresh",
+      "security_focus": "Token storage mechanism, session fixation, CSRF",
+      "architecture_focus": "Error propagation from refresh to callers",
+      "regression_focus": "Return type change affects all authenticated endpoints"
+    }
+  },
+  "cross_cutting": [
+    "auth.ts and api.ts share a global session cache — mutations in one affect the other"
+  ]
+}`
+
+// leadBrief produces focus areas for each specialist by reading the whole PR.
+// Non-fatal: returns nil on error so specialists run without briefs.
+func (o *Orchestrator) leadBrief(ctx context.Context, run *PipelineRun) (*LeadBrief, error) {
+	if run.Diff == nil || len(run.Diff.Files) == 0 {
+		return nil, nil
+	}
+
+	lister := storeConfigLister{st: o.st, installationID: run.DBInstallationID}
+	provider, cfg, err := o.reviewStage.registry.ResolveProvider(ctx, lister, run.DBInstallationID, run.DBRepoID, llm.StageSynthesis)
+	if err != nil {
+		provider, cfg, err = o.reviewStage.registry.ResolveProvider(ctx, lister, run.DBInstallationID, run.DBRepoID, llm.StageReview)
+		if err != nil {
+			o.logger.Warn("leadBrief: no provider", "error", err)
+			return nil, nil
+		}
+	}
+
+	var prompt strings.Builder
+	safeTitle := sanitizeUserInput(util.Truncate(run.PREvent.PRTitle, 200, false))
+	safeAuthor := sanitizeUserInput(util.Truncate(run.PREvent.PRAuthor, 100, false))
+	prompt.WriteString(fmt.Sprintf("PR #%d: \"%s\" by %s\n\nChanged files:\n", run.PREvent.PRNumber, safeTitle, safeAuthor))
+	for _, f := range run.Diff.Files {
+		prompt.WriteString(fmt.Sprintf("\n--- %s ---\n", f.NewName))
+		raw := util.Truncate(f.RawDiff, 500, false)
+		if len(raw) < len(f.RawDiff) {
+			raw += "\n...(truncated)"
+		}
+		prompt.WriteString(raw)
+	}
+
+	briefCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+
+	resp, err := provider.Complete(briefCtx, llm.CompletionRequest{
+		Model:       cfg.Model,
+		System:      leadBriefSystemPrompt,
+		Messages:    []llm.Message{{Role: "user", Content: prompt.String()}},
+		MaxTokens:   1200,
+		Temperature: 0.2,
+	})
+	if err != nil {
+		o.logger.Warn("leadBrief LLM failed", "error", err)
+		return nil, nil
+	}
+
+	var brief LeadBrief
+	jsonStr := extractJSON(resp.Content)
+	if err := json.Unmarshal([]byte(jsonStr), &brief); err != nil {
+		o.logger.Warn("leadBrief parse failed", "error", err, "response_prefix", util.Truncate(resp.Content, 200, true))
+		return nil, nil
+	}
+
+	o.logger.Info("lead brief produced", "files", len(brief.FileBriefs), "cross_cutting", len(brief.CrossCutting))
+	return &brief, nil
+}
+
+const leadBroadcastSystemPrompt = `You have findings from multiple specialist agents reviewing a PR. Identify cross-agent signals — cases where one agent's finding should trigger another agent to re-examine specific code.
+
+Only flag signals where a second pass would likely find something NEW that the first pass missed.
+
+Examples:
+- Security found auth bypass → Bug Hunter should check callers
+- Simulation predicts scenario breaks → Architecture should verify error chain
+- Blast Radius shows dependent breaks → Regression should verify caller handling
+
+Return [] if no cross-agent signals needed.
+
+Output JSON array:
+[{"from_agent": "security", "to_agent": "bug_hunter", "signal": "Auth bypass in session.validate()", "question": "Do callers handle false positive auth?", "files_to_check": ["src/api/handler.ts"]}]`
+
+// leadBroadcast identifies cross-agent signals after all agents finish.
+// Non-fatal: returns empty slice on error so second pass is skipped.
+func (o *Orchestrator) leadBroadcast(ctx context.Context, run *PipelineRun, allResults []AgentResult, brief *LeadBrief) []CrossAgentSignal {
+	lister := storeConfigLister{st: o.st, installationID: run.DBInstallationID}
+	provider, cfg, err := o.reviewStage.registry.ResolveProvider(ctx, lister, run.DBInstallationID, run.DBRepoID, llm.StageSynthesis)
+	if err != nil {
+		provider, cfg, err = o.reviewStage.registry.ResolveProvider(ctx, lister, run.DBInstallationID, run.DBRepoID, llm.StageReview)
+		if err != nil {
+			o.logger.Warn("leadBroadcast: no provider", "error", err)
+			return nil
+		}
+	}
+
+	var prompt strings.Builder
+	prompt.WriteString("Agent findings:\n")
+	for _, ar := range allResults {
+		prompt.WriteString(fmt.Sprintf("\n## %s\n", ar.AgentName))
+		for _, fr := range ar.FileReviews {
+			for _, c := range fr.Comments {
+				body := c.What
+				if body == "" {
+					body = c.Body
+				}
+				prompt.WriteString(fmt.Sprintf("- %s:%d [%s] %s\n", fr.Path, c.Line, c.Severity, util.Truncate(body, 100, true)))
+			}
+		}
+	}
+
+	if brief != nil && len(brief.CrossCutting) > 0 {
+		prompt.WriteString("\nCross-cutting concerns from briefing:\n")
+		for _, cc := range brief.CrossCutting {
+			prompt.WriteString(fmt.Sprintf("- %s\n", cc))
+		}
+	}
+
+	broadcastCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	resp, err := provider.Complete(broadcastCtx, llm.CompletionRequest{
+		Model:       cfg.Model,
+		System:      leadBroadcastSystemPrompt,
+		Messages:    []llm.Message{{Role: "user", Content: prompt.String()}},
+		MaxTokens:   600,
+		Temperature: 0.2,
+	})
+	if err != nil {
+		o.logger.Warn("leadBroadcast LLM failed", "error", err)
+		return nil
+	}
+
+	signals, err := unmarshalLLMArray[CrossAgentSignal](resp.Content)
+	if err != nil {
+		o.logger.Warn("leadBroadcast parse failed", "error", err, "response_prefix", util.Truncate(resp.Content, 200, true))
+		return nil
+	}
+
+	o.logger.Info("lead broadcast signals", "count", len(signals))
+	return signals
+}
+
+// agentSecondPass re-examines files based on a cross-agent signal.
+// Non-fatal: returns empty slice on error.
+func (o *Orchestrator) agentSecondPass(ctx context.Context, run *PipelineRun, signal CrossAgentSignal, fileContents map[string]string) []FileReview {
+	lister := storeConfigLister{st: o.st, installationID: run.DBInstallationID}
+	provider, cfg, err := o.reviewStage.registry.ResolveProvider(ctx, lister, run.DBInstallationID, run.DBRepoID, llm.StageReview)
+	if err != nil {
+		o.logger.Warn("agentSecondPass: no provider", "error", err)
+		return nil
+	}
+
+	systemPrompt := specialistPrompt(Specialist(signal.ToAgent), run.Prompts)
+
+	var prompt strings.Builder
+	prompt.WriteString(fmt.Sprintf("Cross-agent signal from %s:\n", signal.FromAgent))
+	prompt.WriteString(fmt.Sprintf("Signal: %s\n", signal.Signal))
+	prompt.WriteString(fmt.Sprintf("Question: %s\n\n", signal.Question))
+	prompt.WriteString("Files to re-examine:\n")
+	for _, fp := range signal.FilesToCheck {
+		if content, ok := fileContents[fp]; ok {
+			prompt.WriteString(fmt.Sprintf("\n--- %s ---\n%s\n", fp, util.Truncate(content, 2000, false)))
+		}
+	}
+
+	passCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+
+	resp, err := provider.Complete(passCtx, llm.CompletionRequest{
+		Model:       cfg.Model,
+		System:      systemPrompt,
+		Messages:    []llm.Message{{Role: "user", Content: prompt.String()}},
+		MaxTokens:   600,
+		Temperature: 0.3,
+	})
+	if err != nil {
+		o.logger.Warn("agentSecondPass LLM failed", "error", err, "agent", signal.ToAgent)
+		return nil
+	}
+
+	comments, err := unmarshalLLMArray[FileComment](resp.Content)
+	if err != nil {
+		o.logger.Warn("agentSecondPass parse failed", "error", err, "agent", signal.ToAgent)
+		return nil
+	}
+
+	// Group comments by file path
+	byFile := make(map[string][]FileComment)
+	for _, c := range comments {
+		fp := c.CodeSnippet // try file_path field fallback below
+		// Comments from the LLM should reference files from signal.FilesToCheck;
+		// if file_path not in comment, assign to first file.
+		if _, ok := fileContents[fp]; !ok && len(signal.FilesToCheck) > 0 {
+			fp = signal.FilesToCheck[0]
+		}
+		byFile[fp] = append(byFile[fp], c)
+	}
+
+	var reviews []FileReview
+	for fp, cs := range byFile {
+		reviews = append(reviews, FileReview{Path: fp, Comments: cs})
+	}
+	return reviews
+}
+
+const blastRadiusAgentPrompt = `You analyze dependency impact. Given changed code and dependent file source, identify concrete breaking changes.
+
+For each dependent:
+1. What does it assume about the changed code? (return type, error behavior, side effects)
+2. Do the changes violate those assumptions?
+3. What's the concrete failure mode?
+
+Only report with evidence from BOTH changed code AND dependent code.
+
+Output JSON array:
+[{"dependent_file": "...", "dependent_symbol": "...", "assumption_violated": "...", "failure_mode": "...", "severity": "critical|warning"}]
+Return [] if nothing breaks.`
+
+// analyzeBlastRadius checks if dependent code breaks due to PR changes.
+// Non-fatal: returns nil on error.
+func (o *Orchestrator) analyzeBlastRadius(ctx context.Context, run *PipelineRun, owner, repo string, depContents map[string]string) []BlastRadiusImpact {
+	if run.Diff == nil || len(run.Diff.Files) == 0 || len(depContents) == 0 {
+		return nil
+	}
+
+	lister := storeConfigLister{st: o.st, installationID: run.DBInstallationID}
+	provider, cfg, err := o.reviewStage.registry.ResolveProvider(ctx, lister, run.DBInstallationID, run.DBRepoID, llm.StageSynthesis)
+	if err != nil {
+		provider, cfg, err = o.reviewStage.registry.ResolveProvider(ctx, lister, run.DBInstallationID, run.DBRepoID, llm.StageReview)
+		if err != nil {
+			o.logger.Warn("analyzeBlastRadius: no provider", "error", err)
+			return nil
+		}
+	}
+
+	var prompt strings.Builder
+	prompt.WriteString("Changed files:\n")
+	for _, f := range run.Diff.Files {
+		prompt.WriteString(fmt.Sprintf("\n--- %s ---\n", f.NewName))
+		raw := util.Truncate(f.RawDiff, 500, false)
+		if len(raw) < len(f.RawDiff) {
+			raw += "\n...(truncated)"
+		}
+		prompt.WriteString(raw)
+	}
+
+	prompt.WriteString("\n\nDependent files:\n")
+	for fp, content := range depContents {
+		prompt.WriteString(fmt.Sprintf("\n--- %s ---\n%s\n", fp, util.Truncate(content, 1500, false)))
+	}
+
+	blastCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+
+	resp, err := provider.Complete(blastCtx, llm.CompletionRequest{
+		Model:       cfg.Model,
+		System:      blastRadiusAgentPrompt,
+		Messages:    []llm.Message{{Role: "user", Content: prompt.String()}},
+		MaxTokens:   600,
+		Temperature: 0.2,
+	})
+	if err != nil {
+		o.logger.Warn("analyzeBlastRadius LLM failed", "error", err)
+		return nil
+	}
+
+	impacts, err := unmarshalLLMArray[BlastRadiusImpact](resp.Content)
+	if err != nil {
+		o.logger.Warn("analyzeBlastRadius parse failed", "error", err, "response_prefix", util.Truncate(resp.Content, 200, true))
+		return nil
+	}
+
+	o.logger.Info("blast radius analysis", "impacts", len(impacts), "repo", fmt.Sprintf("%s/%s", owner, repo))
+	return impacts
+}
+
+const leadCrossCheckSystemPrompt = `You are the lead reviewer finalizing your team's findings.
+
+Tasks:
+1. DEDUPLICATE: Keep the best explanation for each unique issue. Remove duplicates.
+2. CROSS-REFERENCE: Connect related findings across files into unified findings.
+3. GAP CHECK: Were all cross-cutting concerns from the brief addressed? Flag unaddressed ones.
+4. SEVERITY: Ensure consistent severity. Same class of bug = same severity.
+5. QUALITY FILTER: Remove speculative findings, vague suggestions, linter-catchable issues.
+6. INTEGRATE: Merge simulation failures and blast radius impacts with specialist findings.
+
+Output: Final JSON array of comments, same format as specialist output.
+Each comment must have: severity, category, line, what, why, suggestion (optional), file_path.`
+
+// leadCrossCheck synthesizes all findings from agents, deduplicates, and produces
+// the final set of review comments. Replaces the scoring stage.
+func (o *Orchestrator) leadCrossCheck(ctx context.Context, run *PipelineRun, allResults []AgentResult, brief *LeadBrief) []FileReview {
+	lister := storeConfigLister{st: o.st, installationID: run.DBInstallationID}
+	provider, cfg, err := o.reviewStage.registry.ResolveProvider(ctx, lister, run.DBInstallationID, run.DBRepoID, llm.StageSynthesis)
+	if err != nil {
+		provider, cfg, err = o.reviewStage.registry.ResolveProvider(ctx, lister, run.DBInstallationID, run.DBRepoID, llm.StageReview)
+		if err != nil {
+			o.logger.Warn("leadCrossCheck: no provider", "error", err)
+			return nil
+		}
+	}
+
+	var prompt strings.Builder
+	prompt.WriteString("All agent findings:\n")
+	for _, ar := range allResults {
+		prompt.WriteString(fmt.Sprintf("\n## %s\n", ar.AgentName))
+		for _, fr := range ar.FileReviews {
+			for _, c := range fr.Comments {
+				body := c.What
+				if body == "" {
+					body = c.Body
+				}
+				prompt.WriteString(fmt.Sprintf("- file=%s line=%d sev=%s cat=%s: %s\n",
+					fr.Path, c.Line, c.Severity, c.Category, util.Truncate(body, 150, true)))
+				if c.Why != "" {
+					prompt.WriteString(fmt.Sprintf("  why: %s\n", util.Truncate(c.Why, 100, true)))
+				}
+				if c.Suggestion != "" {
+					prompt.WriteString(fmt.Sprintf("  suggestion: %s\n", util.Truncate(c.Suggestion, 100, true)))
+				}
+			}
+		}
+		for _, sim := range ar.SimResults {
+			status := "PASS"
+			if !sim.Passes {
+				status = "FAIL"
+			}
+			prompt.WriteString(fmt.Sprintf("- [simulation %s] %s: %s\n", status, sim.Scenario, util.Truncate(sim.RootCause, 100, true)))
+		}
+		for _, bi := range ar.BlastImpacts {
+			prompt.WriteString(fmt.Sprintf("- [blast %s] %s.%s: %s → %s\n",
+				bi.Severity, bi.DependentFile, bi.DependentSymbol,
+				util.Truncate(bi.AssumptionViolated, 80, true), util.Truncate(bi.FailureMode, 80, true)))
+		}
+	}
+
+	if brief != nil && len(brief.CrossCutting) > 0 {
+		prompt.WriteString("\nCross-cutting concerns from briefing:\n")
+		for _, cc := range brief.CrossCutting {
+			prompt.WriteString(fmt.Sprintf("- %s\n", cc))
+		}
+	}
+
+	crossCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	resp, err := provider.Complete(crossCtx, llm.CompletionRequest{
+		Model:       cfg.Model,
+		System:      leadCrossCheckSystemPrompt,
+		Messages:    []llm.Message{{Role: "user", Content: prompt.String()}},
+		MaxTokens:   2000,
+		Temperature: 0.3,
+	})
+	if err != nil {
+		o.logger.Warn("leadCrossCheck LLM failed", "error", err)
+		return nil
+	}
+
+	type crossCheckComment struct {
+		FilePath   string   `json:"file_path"`
+		Line       int      `json:"line"`
+		Severity   Severity `json:"severity"`
+		Category   Category `json:"category"`
+		What       string   `json:"what"`
+		Why        string   `json:"why"`
+		Suggestion string   `json:"suggestion,omitempty"`
+	}
+
+	comments, err := unmarshalLLMArray[crossCheckComment](resp.Content)
+	if err != nil {
+		o.logger.Warn("leadCrossCheck parse failed", "error", err, "response_prefix", util.Truncate(resp.Content, 200, true))
+		return nil
+	}
+
+	// Group by file path into FileReview slices
+	byFile := make(map[string][]FileComment)
+	for _, c := range comments {
+		fc := FileComment{
+			Line:     c.Line,
+			Severity: c.Severity,
+			Category: c.Category,
+			What:     c.What,
+			Why:      c.Why,
+			Suggestion: c.Suggestion,
+		}
+		if !ValidSeverities[fc.Severity] {
+			fc.Severity = SeverityWarning
+		}
+		if !ValidCategories[fc.Category] {
+			fc.Category = CategoryBug
+		}
+		byFile[c.FilePath] = append(byFile[c.FilePath], fc)
+	}
+
+	var reviews []FileReview
+	for fp, cs := range byFile {
+		reviews = append(reviews, FileReview{Path: fp, Comments: cs})
+	}
+
+	o.logger.Info("lead cross-check complete", "files", len(reviews), "comments", len(comments))
+	return reviews
 }
 
 func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghReviewID int64, owner, repo string) {

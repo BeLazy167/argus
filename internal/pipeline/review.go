@@ -409,6 +409,26 @@ func buildFileReviewPrompt(run *PipelineRun, file diff.FileDiff, fileContent str
 		sb.WriteString("\n" + wrapInDelimiters("pr_description", sanitizeUserInput(util.Truncate(run.PREvent.PRBody, 2000, false))) + "\n")
 	}
 
+	// Inject lead brief if available (from Lead Agent Phase 1)
+	if run.LeadBrief != nil {
+		if fb, ok := run.LeadBrief.FileBriefs[file.NewName]; ok {
+			sb.WriteString("\n<lead_brief>\n")
+			sb.WriteString(fmt.Sprintf("Summary: %s\n", fb.Summary))
+			sb.WriteString(fmt.Sprintf("Bug focus: %s\n", fb.BugHunterFocus))
+			sb.WriteString(fmt.Sprintf("Security focus: %s\n", fb.SecurityFocus))
+			sb.WriteString(fmt.Sprintf("Architecture focus: %s\n", fb.ArchitectureFocus))
+			sb.WriteString(fmt.Sprintf("Regression focus: %s\n", fb.RegressionFocus))
+			sb.WriteString("</lead_brief>\n")
+		}
+		if len(run.LeadBrief.CrossCutting) > 0 {
+			sb.WriteString("\n<cross_cutting_concerns>\n")
+			for _, cc := range run.LeadBrief.CrossCutting {
+				sb.WriteString(fmt.Sprintf("- %s\n", cc))
+			}
+			sb.WriteString("</cross_cutting_concerns>\n")
+		}
+	}
+
 	if guide := languageGuidance(file.NewName); guide != "" {
 		sb.WriteString(guide)
 	}

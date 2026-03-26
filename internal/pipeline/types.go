@@ -76,6 +76,7 @@ type PipelineRun struct {
 	BlastRadius         bool
 	ScenarioMemory      bool
 	CodeSimulation      bool
+	LeadBrief        *LeadBrief `json:"lead_brief,omitempty"`
 	ScoringSkipped   bool // true when scoring provider unavailable — synthesis uses all comments
 	Prompts          map[string]string // custom prompt overrides per stage
 	IsIncremental    bool
@@ -85,6 +86,46 @@ type PipelineRun struct {
 	Error            string
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
+}
+
+// LeadBrief is the output of the Lead Agent's briefing phase.
+type LeadBrief struct {
+	FileBriefs   map[string]FileBrief `json:"file_briefs"`
+	CrossCutting []string             `json:"cross_cutting"`
+}
+
+type FileBrief struct {
+	Summary           string `json:"summary"`
+	BugHunterFocus    string `json:"bug_hunter_focus"`
+	SecurityFocus     string `json:"security_focus"`
+	ArchitectureFocus string `json:"architecture_focus"`
+	RegressionFocus   string `json:"regression_focus"`
+}
+
+// CrossAgentSignal represents a finding from one agent that another should investigate.
+type CrossAgentSignal struct {
+	FromAgent    string   `json:"from_agent"`
+	ToAgent      string   `json:"to_agent"`
+	Signal       string   `json:"signal"`
+	Question     string   `json:"question"`
+	FilesToCheck []string `json:"files_to_check"`
+}
+
+// BlastRadiusImpact represents a concrete breaking change found by the blast radius agent.
+type BlastRadiusImpact struct {
+	DependentFile      string `json:"dependent_file"`
+	DependentSymbol    string `json:"dependent_symbol"`
+	AssumptionViolated string `json:"assumption_violated"`
+	FailureMode        string `json:"failure_mode"`
+	Severity           string `json:"severity"`
+}
+
+// AgentResult is the unified output from any agent in the team.
+type AgentResult struct {
+	AgentName    string
+	FileReviews  []FileReview
+	SimResults   []SimulationResult
+	BlastImpacts []BlastRadiusImpact
 }
 
 // FileReview holds the review output for a single file.

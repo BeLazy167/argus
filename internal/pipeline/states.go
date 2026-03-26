@@ -7,9 +7,12 @@ const (
 	StatePending      PipelineState = "pending"
 	StateTriaging     PipelineState = "triaging"
 	StateReviewing    PipelineState = "reviewing"
-	StateEnriching    PipelineState = "enriching"
-	StateScoring      PipelineState = "scoring"
-	StatePass2        PipelineState = "pass2"
+	StateEnriching     PipelineState = "enriching"
+	StateScoring       PipelineState = "scoring"
+	StateBriefing      PipelineState = "briefing"
+	StateBroadcasting  PipelineState = "broadcasting"
+	StateCrossChecking PipelineState = "cross_checking"
+	StatePass2         PipelineState = "pass2"
 	StateSynthesizing PipelineState = "synthesizing"
 	StatePosting      PipelineState = "posting"
 	StateCompleted    PipelineState = "completed"
@@ -19,14 +22,15 @@ const (
 // transitions defines the valid next state after each stage succeeds.
 func transitions() map[PipelineState]PipelineState {
 	return map[PipelineState]PipelineState{
-		StatePending:      StateTriaging,
-		StateTriaging:     StateReviewing,
-		StateReviewing:    StateEnriching,
-		StateEnriching:    StateScoring,
-		StateScoring:      StatePass2,
-		StatePass2:        StateSynthesizing,
-		StateSynthesizing: StatePosting,
-		StatePosting:      StateCompleted,
+		StatePending:       StateTriaging,
+		StateTriaging:      StateBriefing,
+		StateBriefing:      StateReviewing,
+		StateReviewing:     StateBroadcasting,
+		StateBroadcasting:  StateCrossChecking,
+		StateCrossChecking: StatePass2,
+		StatePass2:         StateSynthesizing,
+		StateSynthesizing:  StatePosting,
+		StatePosting:       StateCompleted,
 	}
 }
 
