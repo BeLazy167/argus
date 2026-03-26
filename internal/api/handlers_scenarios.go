@@ -96,6 +96,25 @@ func (s *Server) deactivateScenario(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deactivated"})
 }
 
+func (s *Server) getScenario(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "scenarioID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid scenario id"})
+		return
+	}
+	scenario, err := s.store.GetScenario(r.Context(), id)
+	if err != nil {
+		s.handleDBError(w, err, "scenario not found")
+		return
+	}
+	ids := getInstallationIDs(r.Context())
+	if !containsID(ids, scenario.InstallationID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "access denied"})
+		return
+	}
+	writeJSON(w, http.StatusOK, scenario)
+}
+
 // generateScenarioFromIssue creates a scenario from a GitHub issue webhook event.
 func (s *Server) generateScenarioFromIssue(ctx context.Context, event *gh.IssuesEvent) {
 	issue := event.GetIssue()

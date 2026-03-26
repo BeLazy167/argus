@@ -3,13 +3,17 @@ package pipeline
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"path"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	gh "github.com/google/go-github/v68/github"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	ghpkg "github.com/BeLazy167/argus/internal/github"
@@ -27,6 +31,62 @@ func splitRepoFullName(fullName string) (owner, repo string, err error) {
 		return "", "", fmt.Errorf("invalid repo name: %s", fullName)
 	}
 	return parts[0], parts[1], nil
+}
+
+// isDiffTooLarge checks if a GitHub API error is a 406 (diff exceeded max lines).
+func isDiffTooLarge(err error) bool {
+	var ghErr *gh.ErrorResponse
+	if errors.As(err, &ghErr) && ghErr.Response != nil {
+		return ghErr.Response.StatusCode == http.StatusNotAcceptable
+	}
+	return false
+}
+
+// fetchDiffViaFiles fetches per-file patches when the unified diff is too large.
+func (o *Orchestrator) fetchDiffViaFiles(ctx context.Context, event *ghpkg.PREvent, owner, repo string) (*diff.PatchSet, string, error) {
+	ghFiles, err := o.ghClient.GetPRFiles(ctx, event.InstallationID, owner, repo, event.PRNumber)
+	if err != nil {
+		return nil, "", fmt.Errorf("listing PR files: %w", err)
+	}
+
+	files := make([]diff.FileInfo, len(ghFiles))
+	for i, f := range ghFiles {
+		files[i] = diff.FileInfo{
+			Name:    f.GetFilename(),
+			OldName: f.GetPreviousFilename(),
+			Status:  f.GetStatus(),
+			Patch:   f.GetPatch(),
+		}
+	}
+
+	patchSet, err := diff.ParseFromFiles(files)
+	if err != nil {
+		return nil, "", fmt.Errorf("parsing file patches: %w", err)
+	}
+
+	// Fetch full content for large files (patch missing)
+	for i, f := range patchSet.Files {
+		if f.LargeFile {
+			content, fetchErr := o.ghClient.GetFileContent(ctx, event.InstallationID, owner, repo, f.NewName, event.HeadSHA)
+			if fetchErr != nil {
+				o.logger.Warn("skipping large file content fetch", "file", f.NewName, "error", fetchErr)
+				continue
+			}
+			patchSet.Files[i].FullContent = content
+		}
+	}
+
+	// Reconstruct a raw diff string from file patches for storage
+	var sb strings.Builder
+	for _, f := range patchSet.Files {
+		if f.RawDiff != "" {
+			sb.WriteString(f.RawDiff)
+			sb.WriteByte('\n')
+		}
+	}
+
+	o.logger.Info("fetched diff via files API", "files", len(patchSet.Files), "large_files", patchSet.CountLargeFiles())
+	return patchSet, sb.String(), nil
 }
 
 // Orchestrator receives PR events and drives them through the review pipeline.
@@ -141,15 +201,22 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		}
 	}
 
-	// Fetch diff
+	// Fetch diff — fall back to per-file API if GitHub returns 406 (diff too large)
 	rawDiff, err := o.ghClient.GetPRDiff(ctx, event.InstallationID, owner, repo, event.PRNumber)
-	if err != nil {
+	var patchSet *diff.PatchSet
+	if err != nil && isDiffTooLarge(err) {
+		o.logger.Warn("diff too large, falling back to files API", "pr", event.PRNumber, "error", err)
+		patchSet, rawDiff, err = o.fetchDiffViaFiles(ctx, &event, owner, repo)
+		if err != nil {
+			return fmt.Errorf("fallback files API: %w", err)
+		}
+	} else if err != nil {
 		return fmt.Errorf("fetching diff: %w", err)
-	}
-
-	patchSet, err := diff.Parse(rawDiff)
-	if err != nil {
-		return fmt.Errorf("parsing diff: %w", err)
+	} else {
+		patchSet, err = diff.Parse(rawDiff)
+		if err != nil {
+			return fmt.Errorf("parsing diff: %w", err)
+		}
 	}
 
 	// Check for incremental re-review on synchronize
@@ -793,6 +860,16 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 
 	o.logger.Info("posted review", "github_review_id", ghReviewID, "pr", run.PREvent.PRNumber)
 
+	// Enrich PR description with missing context (fire-and-forget)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				o.logger.Error("enrichPRDescription panic", "recover", r, "pr", run.PREvent.PRNumber)
+			}
+		}()
+		o.enrichPRDescription(context.WithoutCancel(ctx), run, owner, repo)
+	}()
+
 	// Persist comments to DB + index in Supermemory (fire-and-forget)
 	o.indexComments(ctx, run, ghReviewID, owner, repo)
 	o.indexConfirmedPatterns(ctx, run, owner, repo)
@@ -801,13 +878,15 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	o.synthesizeFileMemories(ctx, run, owner, repo)
 	o.indexPRSummary(ctx, run, owner, repo)
 
+	// Collect changed file paths once for simulation indexing + scenario outdating
+	changedPaths := make([]string, 0, len(run.Diff.Files))
+	for _, f := range run.Diff.Files {
+		changedPaths = append(changedPaths, f.NewName)
+	}
+
 	if len(run.Synthesis.SimulationResults) > 0 && o.indexer != nil {
-		changedFiles := make([]string, 0, len(run.Diff.Files))
-		for _, f := range run.Diff.Files {
-			changedFiles = append(changedFiles, f.NewName)
-		}
 		for _, result := range run.Synthesis.SimulationResults {
-			if err := o.indexer.IndexSimulationResult(ctx, owner, repo, run.PREvent.PRNumber, changedFiles,
+			if err := o.indexer.IndexSimulationResult(ctx, owner, repo, run.PREvent.PRNumber, changedPaths,
 				result.Passes, result.Scenario, result.Confidence, result.RootCause, result.Impact); err != nil {
 				o.logger.Warn("indexing simulation result", "error", err)
 			}
@@ -823,10 +902,6 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	}
 
 	// Mark scenarios touching changed files as outdated
-	changedPaths := make([]string, 0, len(run.Diff.Files))
-	for _, f := range run.Diff.Files {
-		changedPaths = append(changedPaths, f.NewName)
-	}
 	o.st.MarkScenarioOutdated(ctx, run.DBRepoID, changedPaths)
 
 	// Collect decision traces (auto-indexed — observational, not actionable)
@@ -857,6 +932,153 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	}
 
 	return nil
+}
+
+const (
+	enrichmentStartMarker = "<!-- argus-enrichment-start -->"
+	enrichmentEndMarker   = "<!-- argus-enrichment-end -->"
+)
+
+const enrichmentSystemPrompt = `You compare a PR description against actual code changes. Do two things:
+1. Identify significant changes the author didn't mention in their PR description. Only flag things that matter to a reviewer or future reader — not trivial formatting, minor refactors, or obvious changes.
+2. Generate a Mermaid diagram that best represents the change. Pick the most appropriate type: flowchart for data/control flow changes, graph TD for dependency/impact, sequenceDiagram for interaction changes. Use emoji markers: ✏️ modified, ✨ new, 🗑️ deleted.
+If nothing is missing and the change is too trivial for a diagram, respond with empty arrays/strings.
+
+Respond with JSON only:
+{
+  "missing_points": ["Switched to quicksort in pkg/sort.go", ...],
+  "diagram": "flowchart LR\n  A[...] --> B[...]",
+  "diagram_title": "Change flow"
+}`
+
+// enrichPRDescription appends missing context and a mermaid diagram to the PR description.
+// Compares what the PR says it does vs what Argus found it actually does.
+func (o *Orchestrator) enrichPRDescription(ctx context.Context, run *PipelineRun, owner, repo string) {
+	if run.Synthesis == nil || len(run.FileReviews) == 0 {
+		return
+	}
+
+	// Resolve provider
+	lister := storeConfigLister{st: o.st, installationID: run.DBInstallationID}
+	provider, cfg, err := o.reviewStage.registry.ResolveProvider(ctx, lister, run.DBInstallationID, run.DBRepoID, llm.StageSynthesis)
+	if err != nil {
+		o.logger.Warn("enrichPRDescription: synthesis provider unavailable, trying review", "error", err)
+		provider, cfg, err = o.reviewStage.registry.ResolveProvider(ctx, lister, run.DBInstallationID, run.DBRepoID, llm.StageReview)
+		if err != nil {
+			o.logger.Warn("enrichPRDescription: no provider", "error", err)
+			return
+		}
+	}
+
+	prompt := buildEnrichmentPrompt(run)
+	resp, err := provider.Complete(ctx, llm.CompletionRequest{
+		Model:       cfg.Model,
+		System:      enrichmentSystemPrompt,
+		Messages:    []llm.Message{{Role: "user", Content: prompt}},
+		MaxTokens:   500,
+		Temperature: 0.3,
+	})
+	if err != nil {
+		o.logger.Warn("enrichPRDescription: LLM call failed", "error", err)
+		return
+	}
+
+	var result struct {
+		MissingPoints []string `json:"missing_points"`
+		Diagram       string   `json:"diagram"`
+		DiagramTitle  string   `json:"diagram_title"`
+	}
+	cleaned := extractJSON(resp.Content)
+	if err := json.Unmarshal([]byte(cleaned), &result); err != nil {
+		o.logger.Warn("enrichPRDescription: failed to parse LLM response", "error", err, "response_prefix", util.Truncate(resp.Content, 200, true))
+		return
+	}
+
+	if len(result.MissingPoints) == 0 && result.Diagram == "" {
+		o.logger.Info("enrichPRDescription: nothing missing, skipping")
+		return
+	}
+
+	// Build enrichment section
+	var section strings.Builder
+	section.WriteString(enrichmentStartMarker + "\n---\n")
+	if len(result.MissingPoints) > 0 {
+		section.WriteString("> **Argus noticed these changes aren't mentioned in the PR description:**\n")
+		for _, p := range result.MissingPoints {
+			section.WriteString(fmt.Sprintf("> - %s\n", sanitizeUserInput(p)))
+		}
+		section.WriteString("\n")
+	}
+	if result.Diagram != "" {
+		if result.DiagramTitle != "" {
+			section.WriteString(fmt.Sprintf("**%s**\n", sanitizeUserInput(result.DiagramTitle)))
+		}
+		section.WriteString("```mermaid\n" + result.Diagram + "\n```\n")
+	}
+	section.WriteString(enrichmentEndMarker)
+
+	// Fetch current PR body (may have been edited since webhook)
+	prEvent, fetchErr := o.ghClient.GetPullRequest(ctx, run.PREvent.InstallationID, owner, repo, run.PREvent.PRNumber)
+	if fetchErr != nil {
+		o.logger.Warn("enrichPRDescription: failed to fetch PR", "error", fetchErr)
+		return
+	}
+	body := prEvent.PRBody
+
+	// Replace existing enrichment or append
+	newBody := replaceOrAppendSection(body, enrichmentStartMarker, enrichmentEndMarker, section.String())
+
+	if err := o.ghClient.UpdatePRDescription(ctx, run.PREvent.InstallationID, owner, repo, run.PREvent.PRNumber, newBody); err != nil {
+		o.logger.Warn("enrichPRDescription: failed to update PR", "error", err)
+		return
+	}
+	o.logger.Info("enriched PR description", "pr", run.PREvent.PRNumber)
+}
+
+// replaceOrAppendSection replaces content between markers or appends if not found.
+func replaceOrAppendSection(body, startMarker, endMarker, section string) string {
+	startIdx := strings.Index(body, startMarker)
+	endIdx := strings.Index(body, endMarker)
+	if startIdx >= 0 && endIdx >= 0 && startIdx < endIdx {
+		return body[:startIdx] + section + body[endIdx+len(endMarker):]
+	}
+	return strings.TrimRight(body, "\n") + "\n\n" + section
+}
+
+func buildEnrichmentPrompt(run *PipelineRun) string {
+	var sb strings.Builder
+	safeTitle := sanitizeUserInput(util.Truncate(run.PREvent.PRTitle, 200, false))
+	sb.WriteString(fmt.Sprintf("## PR #%d: %s\n\n", run.PREvent.PRNumber, safeTitle))
+
+	sb.WriteString("### PR Description (what the author says this PR does):\n")
+	if run.PREvent.PRBody != "" {
+		sb.WriteString(sanitizeUserInput(util.Truncate(run.PREvent.PRBody, 2000, false)))
+	} else {
+		sb.WriteString("(empty — no description provided)")
+	}
+	sb.WriteString("\n\n### Actual changes found by code review:\n")
+
+	for _, fr := range run.FileReviews {
+		sb.WriteString(fmt.Sprintf("**%s**\n", fr.Path))
+		for _, c := range fr.Comments {
+			what := c.What
+			if what == "" {
+				what = util.Truncate(c.Body, 100, true)
+			}
+			sb.WriteString(fmt.Sprintf("- [%s] %s\n", c.Severity, what))
+		}
+	}
+
+	sb.WriteString("\n### Changed files:\n")
+	for _, f := range run.Diff.Files {
+		status := string(f.Status)
+		if f.LargeFile {
+			status += " (large)"
+		}
+		sb.WriteString(fmt.Sprintf("- %s (%s)\n", f.NewName, status))
+	}
+
+	return sb.String()
 }
 
 // indexConfirmedPatterns saves high-confidence comments as confirmed repo patterns in Supermemory.
@@ -904,6 +1126,25 @@ func (o *Orchestrator) indexConfirmedPatterns(ctx context.Context, run *Pipeline
 		}
 	}
 	slog.Info("indexConfirmedPatterns", "indexed", indexed, "scoring_skipped", run.ScoringSkipped)
+}
+
+// isGenericPattern returns true if the pattern doesn't reference file paths from the PR diff.
+// Generic patterns are promoted to org-level so they apply across all repos.
+func isGenericPattern(pattern string, patchSet *diff.PatchSet) bool {
+	if patchSet == nil {
+		return false
+	}
+	patternLower := strings.ToLower(pattern)
+	for _, f := range patchSet.Files {
+		if strings.Contains(patternLower, strings.ToLower(f.NewName)) {
+			return false
+		}
+		baseName := path.Base(f.NewName)
+		if len(baseName) > 3 && strings.Contains(patternLower, strings.ToLower(baseName)) {
+			return false
+		}
+	}
+	return true
 }
 
 // autoLearnPatterns uses the review LLM to extract 0-3 reusable patterns from high-confidence
@@ -1006,6 +1247,27 @@ Return [] if no repo-specific patterns emerge. JSON array only.`, run.PREvent.Re
 		prNum := run.PREvent.PRNumber
 		if _, dbErr := o.st.CreatePattern(ctx, run.DBInstallationID, &run.DBRepoID, p.Pattern, smID, strPtrOrNil("argus:auto_learn"), &src, cat, &prNum); dbErr != nil {
 			o.logger.Warn("persisting auto-learned pattern", "error", dbErr)
+		}
+
+		// Also store as org-level if pattern is generic (doesn't reference repo-specific file paths)
+		if isGenericPattern(p.Pattern, run.Diff) {
+			orgCustomID := memory.PatternCustomID(owner, "", "org_learned", p.Pattern)
+			var orgSmID *string
+			orgResp, orgErr := o.indexer.IndexOwnerPattern(ctx, owner, p.Pattern, orgCustomID, map[string]string{
+				"source":   "auto_learn",
+				"pr":       fmt.Sprintf("%d", run.PREvent.PRNumber),
+				"category": p.Category,
+				"repo":     run.PREvent.RepoFullName,
+			})
+			if orgErr != nil {
+				o.logger.Warn("indexing org pattern", "error", orgErr)
+			} else if orgResp != nil {
+				orgSmID = &orgResp.ID
+			}
+			if _, dbErr := o.st.CreatePattern(ctx, run.DBInstallationID, nil, p.Pattern, orgSmID, strPtrOrNil("argus:auto_learn"), &src, cat, &prNum); dbErr != nil {
+				o.logger.Warn("persisting org-level pattern", "error", dbErr)
+			}
+			o.logger.Info("promoted pattern to org level", "pattern", util.Truncate(p.Pattern, 80, true))
 		}
 	}
 

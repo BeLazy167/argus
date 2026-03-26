@@ -13,11 +13,13 @@ type PatchSet struct {
 
 // FileDiff represents changes to a single file.
 type FileDiff struct {
-	OldName string
-	NewName string
-	Status  FileStatus // added, modified, deleted, renamed
-	Hunks   []Hunk
-	RawDiff string // The raw unified diff for this file
+	OldName     string
+	NewName     string
+	Status      FileStatus // added, modified, deleted, renamed
+	Hunks       []Hunk
+	RawDiff     string // The raw unified diff for this file
+	LargeFile   bool   // true when patch was too large for GitHub to return
+	FullContent string // full file content fetched separately for large files
 }
 
 // Hunk represents a contiguous block of changes within a file.
@@ -58,6 +60,9 @@ const (
 // ValidCommentLines returns the set of new-file line numbers that GitHub accepts
 // for Side:"RIGHT" review comments (additions + context lines with NewNum > 0).
 func (f *FileDiff) ValidCommentLines() map[int]bool {
+	if f.LargeFile {
+		return make(map[int]bool)
+	}
 	valid := make(map[int]bool)
 	for _, h := range f.Hunks {
 		for _, l := range h.Lines {
@@ -97,6 +102,67 @@ func (ps *PatchSet) TotalLinesChanged() int {
 		}
 	}
 	return total
+}
+
+// CountLargeFiles returns the number of files that were too large for GitHub to return a patch.
+func (ps *PatchSet) CountLargeFiles() int {
+	n := 0
+	for _, f := range ps.Files {
+		if f.LargeFile {
+			n++
+		}
+	}
+	return n
+}
+
+// FileInfo holds per-file data from GitHub's List PR Files API.
+type FileInfo struct {
+	Name    string
+	OldName string
+	Status  string // "added", "modified", "removed", "renamed"
+	Patch   string // may be empty for large files
+}
+
+// ParseFromFiles builds a PatchSet from GitHub's per-file API data.
+// Files with a patch are parsed normally; files without are marked as LargeFile.
+func ParseFromFiles(files []FileInfo) (*PatchSet, error) {
+	ps := &PatchSet{}
+	for _, f := range files {
+		var status FileStatus
+		switch f.Status {
+		case "added":
+			status = FileAdded
+		case "removed":
+			status = FileDeleted
+		case "renamed":
+			status = FileRenamed
+		default:
+			status = FileModified
+		}
+
+		oldName := f.OldName
+		if oldName == "" {
+			oldName = f.Name
+		}
+
+		if f.Patch != "" {
+			raw := fmt.Sprintf("diff --git a/%s b/%s\n--- a/%s\n+++ b/%s\n%s\n", oldName, f.Name, oldName, f.Name, f.Patch)
+			fd, err := parseFileDiff(raw)
+			if err != nil {
+				return nil, fmt.Errorf("parsing patch for %s: %w", f.Name, err)
+			}
+			fd.Status = status
+			ps.Files = append(ps.Files, *fd)
+		} else {
+			ps.Files = append(ps.Files, FileDiff{
+				OldName:   oldName,
+				NewName:   f.Name,
+				Status:    status,
+				LargeFile: true,
+			})
+		}
+	}
+	return ps, nil
 }
 
 func splitFiles(raw string) []string {

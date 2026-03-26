@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import React, { useMemo, useState } from "react";
 import { usePagination, PaginationBar } from "@/components/dashboard/pagination";
 import { Plus, Trash2, Loader2, Brain, Filter, TrendingUp } from "lucide-react";
 import {
@@ -49,6 +49,7 @@ export default function PatternsPage() {
   const [selectedRepoId, setSelectedRepoId] = useState<number | undefined>();
   const [filterRepo, setFilterRepo] = useState<string>("all");
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
+  const [expandedId, setExpandedId] = useState<number | null>(null);
 
   const repoMap = useMemo(() => {
     const m = new Map<number, string>();
@@ -315,12 +316,13 @@ export default function PatternsPage() {
             </thead>
             <tbody>
               {paginated.map((pattern) => (
+                <React.Fragment key={pattern.id}>
                 <tr
-                  key={pattern.id}
-                  className="border-b border-iron/30 last:border-0 hover:bg-iron/10 transition-colors"
+                  className="border-b border-iron/30 last:border-0 hover:bg-iron/10 transition-colors cursor-pointer"
+                  onClick={() => setExpandedId(expandedId === pattern.id ? null : pattern.id)}
                 >
                   <td className="px-5 py-3 max-w-md">
-                    <p className="text-xs font-mono text-foreground truncate">
+                    <p className={`text-xs font-mono text-foreground ${expandedId === pattern.id ? "whitespace-pre-wrap" : "truncate"}`}>
                       {pattern.content}
                     </p>
                     <div className="flex items-center gap-2 mt-1">
@@ -365,7 +367,7 @@ export default function PatternsPage() {
                   </td>
                   <td className="px-5 py-3 text-right">
                     <button
-                      onClick={() => deletePattern.mutate(pattern.id)}
+                      onClick={(e) => { e.stopPropagation(); deletePattern.mutate(pattern.id); }}
                       disabled={deletePattern.isPending}
                       className="text-slate-text hover:text-red-400 transition-colors disabled:opacity-50"
                     >
@@ -373,6 +375,39 @@ export default function PatternsPage() {
                     </button>
                   </td>
                 </tr>
+                {expandedId === pattern.id && (
+                  <tr className="bg-iron/5">
+                    <td colSpan={5} className="px-5 py-4">
+                      <div className="space-y-3">
+                        <div>
+                          <span className="text-[10px] font-mono text-slate-text uppercase tracking-wider">Full Content</span>
+                          <p className="mt-1 text-xs font-mono text-foreground whitespace-pre-wrap break-words">
+                            {pattern.content}
+                          </p>
+                        </div>
+                        <div className="flex flex-wrap gap-x-6 gap-y-2 text-[10px] font-mono">
+                          {pattern.created_by && (
+                            <div>
+                              <span className="text-slate-text">Created by: </span>
+                              <span className="text-foreground">{pattern.created_by}</span>
+                            </div>
+                          )}
+                          {pattern.supermemory_id && (
+                            <div>
+                              <span className="text-slate-text">Indexed: </span>
+                              <span className="text-green-400">✓ Supermemory</span>
+                            </div>
+                          )}
+                          <div>
+                            <span className="text-slate-text">Updated: </span>
+                            <span className="text-foreground">{new Date(pattern.updated_at).toLocaleString()}</span>
+                          </div>
+                        </div>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+                </React.Fragment>
               ))}
             </tbody>
           </table>

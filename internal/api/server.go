@@ -148,11 +148,13 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 				r.Get("/patterns/stats", s.getPatternStats)
 				r.Post("/patterns", s.createPattern)
 				r.Delete("/patterns/{patternID}", s.deletePattern)
+				r.Get("/patterns/{patternID}", s.getPattern)
 
 				// Scenarios
 				r.Get("/repos/{repoID}/scenarios", s.listScenarios)
 				r.Post("/repos/{repoID}/scenarios", s.createScenario)
 				r.Delete("/scenarios/{scenarioID}", s.deactivateScenario)
+				r.Get("/scenarios/{scenarioID}", s.getScenario)
 
 				// Traces
 				r.Get("/repos/{repoID}/traces", s.listTraces)

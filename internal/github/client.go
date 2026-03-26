@@ -77,6 +77,42 @@ func (c *Client) GetPRDiff(ctx context.Context, installationID int64, owner, rep
 	return diff, nil
 }
 
+// GetPRFiles fetches per-file change data for a pull request with pagination.
+func (c *Client) GetPRFiles(ctx context.Context, installationID int64, owner, repo string, prNumber int) ([]*gh.CommitFile, error) {
+	client, err := c.app.ClientForInstallation(installationID)
+	if err != nil {
+		return nil, err
+	}
+
+	var all []*gh.CommitFile
+	opts := &gh.ListOptions{PerPage: 100}
+	for {
+		files, resp, err := client.PullRequests.ListFiles(ctx, owner, repo, prNumber, opts)
+		if err != nil {
+			return nil, fmt.Errorf("listing PR files: %w", err)
+		}
+		all = append(all, files...)
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+	return all, nil
+}
+
+// UpdatePRDescription updates the body of a pull request.
+func (c *Client) UpdatePRDescription(ctx context.Context, installationID int64, owner, repo string, prNumber int, body string) error {
+	client, err := c.app.ClientForInstallation(installationID)
+	if err != nil {
+		return err
+	}
+
+	if _, _, err = client.PullRequests.Edit(ctx, owner, repo, prNumber, &gh.PullRequest{Body: gh.Ptr(body)}); err != nil {
+		return fmt.Errorf("updating PR description: %w", err)
+	}
+	return nil
+}
+
 // GetFileContent fetches the content of a file from a repo at a specific ref.
 func (c *Client) GetFileContent(ctx context.Context, installationID int64, owner, repo, path, ref string) (string, error) {
 	client, err := c.app.ClientForInstallation(installationID)
@@ -212,6 +248,7 @@ func (c *Client) GetPullRequest(ctx context.Context, installationID int64, owner
 		BaseSHA:        pr.GetBase().GetSHA(),
 		BaseRef:        pr.GetBase().GetRef(),
 		HeadRef:        pr.GetHead().GetRef(),
+		PRBody:         pr.GetBody(),
 	}, nil
 }
 
