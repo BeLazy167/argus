@@ -939,16 +939,19 @@ const (
 	enrichmentEndMarker   = "<!-- argus-enrichment-end -->"
 )
 
-const enrichmentSystemPrompt = `You compare a PR description against actual code changes. Do two things:
-1. Identify significant changes the author didn't mention in their PR description. Only flag things that matter to a reviewer or future reader — not trivial formatting, minor refactors, or obvious changes.
-2. Generate a Mermaid diagram that best represents the change. Pick the most appropriate type: flowchart for data/control flow changes, graph TD for dependency/impact, sequenceDiagram for interaction changes. Use emoji markers: ✏️ modified, ✨ new, 🗑️ deleted.
-If nothing is missing and the change is too trivial for a diagram, respond with empty arrays/strings.
+const enrichmentSystemPrompt = `You enrich a PR description with additional technical context from the code review. Your tone is helpful and collaborative — like a teammate adding useful notes, never accusatory or critical.
+
+Do two things:
+1. Identify notable technical details from the changes that would help a reviewer understand the PR better. Focus on: architectural decisions, algorithm choices, new dependencies, behavioral changes, and things that add useful context. Keep each point to ONE short sentence. Do NOT mention security issues or bugs — those belong in review comments, not here.
+2. Generate a clean Mermaid diagram showing how the changed components relate. Pick the best type: flowchart for data flow, graph TD for architecture, sequenceDiagram for interactions. Keep it simple — max 8 nodes.
+
+If the changes are trivial or the PR description already covers everything, respond with empty arrays/strings.
 
 Respond with JSON only:
 {
-  "missing_points": ["Switched to quicksort in pkg/sort.go", ...],
-  "diagram": "flowchart LR\n  A[...] --> B[...]",
-  "diagram_title": "Change flow"
+  "missing_points": ["Adds Redis caching layer for session tokens", "Switches to batch processing for webhook payloads"],
+  "diagram": "flowchart LR\n  A[API] --> B[Cache]",
+  "diagram_title": "Architecture"
 }`
 
 // enrichPRDescription appends missing context and a mermaid diagram to the PR description.
@@ -1002,10 +1005,11 @@ func (o *Orchestrator) enrichPRDescription(ctx context.Context, run *PipelineRun
 	// Build enrichment section
 	var section strings.Builder
 	section.WriteString(enrichmentStartMarker + "\n---\n")
+	section.WriteString("<details>\n<summary>📋 <b>Argus Review Context</b></summary>\n\n")
 	if len(result.MissingPoints) > 0 {
-		section.WriteString("> **Argus noticed these changes aren't mentioned in the PR description:**\n")
+		section.WriteString("**Additional context from code review:**\n")
 		for _, p := range result.MissingPoints {
-			section.WriteString(fmt.Sprintf("> - %s\n", sanitizeUserInput(p)))
+			section.WriteString(fmt.Sprintf("- %s\n", sanitizeUserInput(p)))
 		}
 		section.WriteString("\n")
 	}
@@ -1015,6 +1019,7 @@ func (o *Orchestrator) enrichPRDescription(ctx context.Context, run *PipelineRun
 		}
 		section.WriteString("```mermaid\n" + result.Diagram + "\n```\n")
 	}
+	section.WriteString("</details>\n")
 	section.WriteString(enrichmentEndMarker)
 
 	// Fetch current PR body (may have been edited since webhook)
