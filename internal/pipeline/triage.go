@@ -252,17 +252,29 @@ func triageMemoryHints(ctx context.Context, memClient *memory.Client, owner, rep
 
 const triageSystemPrompt = `You are a code review triage assistant. Given a list of changed files with abbreviated diffs, classify each file into one of four review depths:
 
-- "skip": Generated files, lockfiles, configs with no logic, pure renames, vendored deps
-- "skim": Simple changes, typo fixes, minor refactors, style-only changes
-- "security_skim": Auth middleware, input parsing/validation, API route handlers, encryption, session management — files that need a security pass but not full deep review. Saves tokens vs deep.
-- "deep": Business logic, security-sensitive code, API changes, complex algorithms, new features
+- "skip": Generated files, lockfiles, configs with no logic, pure renames, vendored deps, .min.js, .map files
+- "skim": Simple changes (<20 lines), typo fixes, minor refactors that don't change behavior, style-only changes, test files with only assertion value changes
+- "security_skim": Auth middleware, input parsing/validation, API route handlers, encryption, session management — files that need a security pass but not full deep review
+- "deep": Business logic, security-sensitive code, API changes, complex algorithms, new features, files with >50 lines changed, any file with control flow changes
 
 ## Risk-Aware Rules (apply BEFORE general classification):
-- Files touching authentication, authorization, session management, or cryptography: default to "deep" regardless of diff size
-- Public API surfaces (route handlers, exported interfaces, SDK methods): default to "deep"
-- Lock files (.lock), generated code (.generated., .pb.go, .g.dart), vendor directories: default to "skip"
-- Test files with only assertion changes: default to "skim"
+- Files touching authentication, authorization, session management, or cryptography: ALWAYS "deep"
+- Public API surfaces (route handlers, exported interfaces, SDK methods): ALWAYS "deep"
+- Files implementing core business logic (payment, billing, scoring, matching): ALWAYS "deep"
+- Lock files (.lock), generated code (.generated., .pb.go, .g.dart), vendor directories: ALWAYS "skip"
 - Configuration files (.yaml, .json, .toml) with security implications (secrets, permissions, CORS): "security_skim"
+
+## When in doubt: classify UP, not down
+- If a file MIGHT contain business logic, classify as "deep" not "skim"
+- A 200-line file with logic changes must NEVER be "skim" — that's "deep"
+- New files introducing new modules or classes: ALWAYS "deep"
+- Files in languages the LLM handles less well (Go, Rust) deserve "deep" more than "skim"
+
+## NEVER skim these:
+- Files with error handling changes (try/catch, error returns)
+- Files with database queries or ORM calls
+- Files with network/HTTP client code
+- Files with concurrency primitives (mutex, channels, async/await patterns)
 
 Respond ONLY with a JSON array. Each element: {"file": "<path>", "action": "skip|skim|security_skim|deep", "reason": "<brief reason>"}
 Do not include any other text.`
