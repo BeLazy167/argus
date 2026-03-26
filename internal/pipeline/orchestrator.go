@@ -1016,7 +1016,7 @@ func (o *Orchestrator) enrichPRDescription(ctx context.Context, run *PipelineRun
 		}
 		section.WriteString("\n")
 	}
-	if result.Diagram != "" {
+	if result.Diagram != "" && isValidMermaid(result.Diagram) {
 		section.WriteString("<details>\n")
 		title := "Architecture"
 		if result.DiagramTitle != "" {
@@ -1055,6 +1055,34 @@ func replaceOrAppendSection(body, startMarker, endMarker, section string) string
 		return body[:startIdx] + section + body[endIdx+len(endMarker):]
 	}
 	return strings.TrimRight(body, "\n") + "\n\n" + section
+}
+
+// isValidMermaid does a basic syntax check on mermaid diagram text.
+// Checks balanced brackets/pipes and rejects common LLM syntax errors.
+func isValidMermaid(diagram string) bool {
+	var brackets, pipes int
+	for _, c := range diagram {
+		switch c {
+		case '[':
+			brackets++
+		case ']':
+			brackets--
+		case '|':
+			pipes++
+		case '(':
+			brackets++
+		case ')':
+			brackets--
+		case '{':
+			brackets++
+		case '}':
+			brackets--
+		}
+		if brackets < 0 {
+			return false
+		}
+	}
+	return brackets == 0 && pipes%2 == 0
 }
 
 func buildEnrichmentPrompt(run *PipelineRun) string {
