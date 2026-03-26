@@ -975,7 +975,7 @@ func (o *Orchestrator) enrichPRDescription(ctx context.Context, run *PipelineRun
 		Model:       cfg.Model,
 		System:      enrichmentSystemPrompt,
 		Messages:    []llm.Message{{Role: "user", Content: prompt}},
-		MaxTokens:   500,
+		MaxTokens:   800,
 		Temperature: 0.3,
 	})
 	if err != nil {
