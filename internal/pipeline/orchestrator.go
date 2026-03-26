@@ -877,6 +877,7 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	o.extractConventions(ctx, run, owner, repo)
 	o.synthesizeFileMemories(ctx, run, owner, repo)
 	o.indexPRSummary(ctx, run, owner, repo)
+	o.extractArchitectureGraph(ctx, run, owner, repo)
 
 	// Collect changed file paths once for simulation indexing + scenario outdating
 	changedPaths := make([]string, 0, len(run.Diff.Files))
@@ -958,8 +959,8 @@ Respond with JSON only:
   "diagram_title": "Architecture"
 }`
 
-// enrichPRDescription appends missing context and a mermaid diagram to the PR description.
-// Compares what the PR says it does vs what Argus found it actually does.
+// enrichPRDescription fills in missing parts of the PR description as a co-author.
+// If empty, writes a full summary. If partial, adds what the author missed.
 func (o *Orchestrator) enrichPRDescription(ctx context.Context, run *PipelineRun, owner, repo string) {
 	if run.Synthesis == nil || len(run.FileReviews) == 0 {
 		return
@@ -1060,29 +1061,29 @@ func replaceOrAppendSection(body, startMarker, endMarker, section string) string
 // isValidMermaid does a basic syntax check on mermaid diagram text.
 // Checks balanced brackets/pipes and rejects common LLM syntax errors.
 func isValidMermaid(diagram string) bool {
-	var brackets, pipes int
+	var squares, parens, braces, pipes int
 	for _, c := range diagram {
 		switch c {
 		case '[':
-			brackets++
+			squares++
 		case ']':
-			brackets--
+			squares--
+		case '(':
+			parens++
+		case ')':
+			parens--
+		case '{':
+			braces++
+		case '}':
+			braces--
 		case '|':
 			pipes++
-		case '(':
-			brackets++
-		case ')':
-			brackets--
-		case '{':
-			brackets++
-		case '}':
-			brackets--
 		}
-		if brackets < 0 {
+		if squares < 0 || parens < 0 || braces < 0 {
 			return false
 		}
 	}
-	return brackets == 0 && pipes%2 == 0
+	return squares == 0 && parens == 0 && braces == 0 && pipes%2 == 0
 }
 
 func buildEnrichmentPrompt(run *PipelineRun) string {
@@ -1580,6 +1581,131 @@ func (o *Orchestrator) indexPRSummary(ctx context.Context, run *PipelineRun, own
 	if err != nil {
 		o.logger.Warn("indexing PR summary", "error", err)
 	}
+}
+
+// extractArchitectureGraph uses an LLM to identify architectural components from
+// changed files and upserts nodes/edges into the code graph.
+func (o *Orchestrator) extractArchitectureGraph(ctx context.Context, run *PipelineRun, owner, repo string) {
+	if run.Diff == nil || len(run.Diff.Files) == 0 {
+		return
+	}
+
+	// Build prompt with file paths + abbreviated diffs
+	var prompt strings.Builder
+	prompt.WriteString("Changed files:\n")
+	for _, f := range run.Diff.Files {
+		prompt.WriteString(fmt.Sprintf("\n--- %s ---\n", f.NewName))
+		raw := util.Truncate(f.RawDiff, 500, false)
+		if len(raw) < len(f.RawDiff) {
+			raw += "\n...(truncated)"
+		}
+		prompt.WriteString(raw)
+	}
+
+	// Resolve provider: synthesis first, fallback to review
+	lister := storeConfigLister{st: o.st, installationID: run.DBInstallationID}
+	provider, cfg, err := o.reviewStage.registry.ResolveProvider(ctx, lister, run.DBInstallationID, run.DBRepoID, llm.StageSynthesis)
+	if err != nil {
+		provider, cfg, err = o.reviewStage.registry.ResolveProvider(ctx, lister, run.DBInstallationID, run.DBRepoID, llm.StageReview)
+		if err != nil {
+			o.logger.Warn("extractArchitectureGraph: no provider", "error", err)
+			return
+		}
+	}
+
+	graphCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+
+	systemPrompt := `You extract architectural components from code changes. For each changed file, identify the key module, class, or component it belongs to and its dependencies.
+
+Output JSON:
+{"nodes": [{"name": "ComponentName", "kind": "module|class|function", "file_path": "path/to/file.ts", "language": "typescript"}], "edges": [{"source": "ComponentName", "target": "DependencyName", "kind": "imports|calls|uses_type"}]}
+
+Rules:
+- Use high-level component names, not individual functions (unless the function IS the component)
+- "kind" for nodes: module, class, function, file
+- "kind" for edges: imports, calls, uses_type, implements
+- Only include components visible in the changed files
+- Keep it concise — max 20 nodes per extraction`
+
+	resp, err := provider.Complete(graphCtx, llm.CompletionRequest{
+		Model:  cfg.Model,
+		System: systemPrompt,
+		Messages: []llm.Message{
+			{Role: "user", Content: prompt.String()},
+		},
+		MaxTokens:   800,
+		Temperature: 0.2,
+	})
+	if err != nil {
+		o.logger.Warn("extractArchitectureGraph LLM failed", "error", err)
+		return
+	}
+
+	type graphNode struct {
+		Name     string `json:"name"`
+		Kind     string `json:"kind"`
+		FilePath string `json:"file_path"`
+		Language string `json:"language"`
+	}
+	type graphEdge struct {
+		Source string `json:"source"`
+		Target string `json:"target"`
+		Kind   string `json:"kind"`
+	}
+	type graphResult struct {
+		Nodes []graphNode `json:"nodes"`
+		Edges []graphEdge `json:"edges"`
+	}
+
+	jsonStr := extractJSON(resp.Content)
+	var result graphResult
+	if err := json.Unmarshal([]byte(jsonStr), &result); err != nil {
+		o.logger.Warn("extractArchitectureGraph parse failed", "error", err, "response_prefix", util.Truncate(resp.Content, 200, true))
+		return
+	}
+
+	if len(result.Nodes) == 0 {
+		return
+	}
+
+	// Delete stale nodes for removed files
+	for _, f := range run.Diff.Files {
+		if f.Status == diff.FileDeleted {
+			if err := o.st.DeleteNodesByFile(ctx, run.DBRepoID, f.NewName); err != nil {
+				o.logger.Warn("deleteNodesByFile", "error", err, "file", f.NewName)
+			}
+		}
+	}
+
+	// Upsert nodes, collect name→ID
+	nodeIDs := make(map[string]int64, len(result.Nodes))
+	for _, n := range result.Nodes {
+		if n.Name == "" || n.FilePath == "" || n.Kind == "" {
+			continue
+		}
+		id, err := o.st.UpsertCodeNode(ctx, run.DBRepoID, n.Kind, n.Name, n.FilePath, 0, 0, n.Language)
+		if err != nil {
+			o.logger.Warn("upsertCodeNode", "error", err, "name", n.Name)
+			continue
+		}
+		nodeIDs[n.Name] = id
+	}
+
+	// Upsert edges
+	for _, e := range result.Edges {
+		srcID, ok1 := nodeIDs[e.Source]
+		tgtID, ok2 := nodeIDs[e.Target]
+		if !ok1 || !ok2 {
+			o.logger.Debug("extractArchitectureGraph: skipping edge, unresolved name", "source", e.Source, "target", e.Target)
+			continue
+		}
+		if err := o.st.UpsertCodeEdge(ctx, run.DBRepoID, srcID, tgtID, e.Kind); err != nil {
+			o.logger.Warn("upsertCodeEdge", "error", err, "edge", e.Source+"->"+e.Target)
+		}
+	}
+
+	o.logger.Info("extracted architecture graph", "nodes", len(nodeIDs), "edges", len(result.Edges), "repo", run.PREvent.RepoFullName)
 }
 
 func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghReviewID int64, owner, repo string) {

@@ -13,6 +13,18 @@ ON CONFLICT (repo_id, source_id, target_id, kind) DO NOTHING;
 -- name: DeleteNodesByFile :exec
 DELETE FROM code_nodes WHERE repo_id = $1 AND file_path = $2;
 
+-- name: ListGraphNodes :many
+SELECT id, repo_id, kind, name, file_path, line_start, line_end, language
+FROM code_nodes WHERE repo_id = $1 ORDER BY file_path, name;
+
+-- name: ListGraphEdges :many
+SELECT ce.id, ce.repo_id, ce.source_id, ce.target_id, ce.kind,
+       sn.name as source_name, tn.name as target_name
+FROM code_edges ce
+JOIN code_nodes sn ON sn.id = ce.source_id
+JOIN code_nodes tn ON tn.id = ce.target_id
+WHERE ce.repo_id = $1;
+
 -- name: GetBlastRadius :many
 WITH RECURSIVE affected AS (
     SELECT id, name, file_path, kind, 0 as depth

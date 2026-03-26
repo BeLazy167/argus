@@ -228,3 +228,24 @@ export type DecisionTrace = {
   author?: string;
   created_at: string;
 };
+
+export type GraphNode = {
+  id: number;
+  repo_id: number;
+  kind: string;
+  name: string;
+  file_path: string;
+  line_start: number;
+  line_end: number;
+  language: string;
+};
+
+export type GraphEdge = {
+  id: number;
+  repo_id: number;
+  source_id: number;
+  target_id: number;
+  kind: string;
+  source_name: string;
+  target_name: string;
+};

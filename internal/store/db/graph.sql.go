@@ -77,6 +77,98 @@ func (q *Queries) GetBlastRadius(ctx context.Context, arg GetBlastRadiusParams) 
 	return items, nil
 }
 
+const listGraphEdges = `-- name: ListGraphEdges :many
+SELECT ce.id, ce.repo_id, ce.source_id, ce.target_id, ce.kind,
+       sn.name as source_name, tn.name as target_name
+FROM code_edges ce
+JOIN code_nodes sn ON sn.id = ce.source_id
+JOIN code_nodes tn ON tn.id = ce.target_id
+WHERE ce.repo_id = $1
+`
+
+type ListGraphEdgesRow struct {
+	ID         int64  `json:"id"`
+	RepoID     int64  `json:"repo_id"`
+	SourceID   int64  `json:"source_id"`
+	TargetID   int64  `json:"target_id"`
+	Kind       string `json:"kind"`
+	SourceName string `json:"source_name"`
+	TargetName string `json:"target_name"`
+}
+
+func (q *Queries) ListGraphEdges(ctx context.Context, repoID int64) ([]ListGraphEdgesRow, error) {
+	rows, err := q.db.Query(ctx, listGraphEdges, repoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListGraphEdgesRow
+	for rows.Next() {
+		var i ListGraphEdgesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.RepoID,
+			&i.SourceID,
+			&i.TargetID,
+			&i.Kind,
+			&i.SourceName,
+			&i.TargetName,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listGraphNodes = `-- name: ListGraphNodes :many
+SELECT id, repo_id, kind, name, file_path, line_start, line_end, language
+FROM code_nodes WHERE repo_id = $1 ORDER BY file_path, name
+`
+
+type ListGraphNodesRow struct {
+	ID        int64   `json:"id"`
+	RepoID    int64   `json:"repo_id"`
+	Kind      string  `json:"kind"`
+	Name      string  `json:"name"`
+	FilePath  string  `json:"file_path"`
+	LineStart *int32  `json:"line_start"`
+	LineEnd   *int32  `json:"line_end"`
+	Language  *string `json:"language"`
+}
+
+func (q *Queries) ListGraphNodes(ctx context.Context, repoID int64) ([]ListGraphNodesRow, error) {
+	rows, err := q.db.Query(ctx, listGraphNodes, repoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListGraphNodesRow
+	for rows.Next() {
+		var i ListGraphNodesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.RepoID,
+			&i.Kind,
+			&i.Name,
+			&i.FilePath,
+			&i.LineStart,
+			&i.LineEnd,
+			&i.Language,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const upsertCodeEdge = `-- name: UpsertCodeEdge :exec
 INSERT INTO code_edges (repo_id, source_id, target_id, kind, updated_at)
 VALUES ($1, $2, $3, $4, NOW())

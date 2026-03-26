@@ -7,6 +7,8 @@ package db
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const deleteModelConfig = `-- name: DeleteModelConfig :execrows
@@ -31,15 +33,28 @@ SELECT id, repo_id, stage, provider, model, base_url, max_tokens, temperature, c
 FROM model_configs WHERE repo_id = $1 ORDER BY stage
 `
 
-func (q *Queries) ListModelConfigs(ctx context.Context, repoID *int64) ([]ModelConfig, error) {
+type ListModelConfigsRow struct {
+	ID          int64              `json:"id"`
+	RepoID      *int64             `json:"repo_id"`
+	Stage       string             `json:"stage"`
+	Provider    string             `json:"provider"`
+	Model       string             `json:"model"`
+	BaseUrl     *string            `json:"base_url"`
+	MaxTokens   int32              `json:"max_tokens"`
+	Temperature float32            `json:"temperature"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+}
+
+func (q *Queries) ListModelConfigs(ctx context.Context, repoID *int64) ([]ListModelConfigsRow, error) {
 	rows, err := q.db.Query(ctx, listModelConfigs, repoID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []ModelConfig
+	var items []ListModelConfigsRow
 	for rows.Next() {
-		var i ModelConfig
+		var i ListModelConfigsRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.RepoID,
@@ -85,7 +100,20 @@ type UpsertModelConfigParams struct {
 	Temperature float32 `json:"temperature"`
 }
 
-func (q *Queries) UpsertModelConfig(ctx context.Context, arg UpsertModelConfigParams) (ModelConfig, error) {
+type UpsertModelConfigRow struct {
+	ID          int64              `json:"id"`
+	RepoID      *int64             `json:"repo_id"`
+	Stage       string             `json:"stage"`
+	Provider    string             `json:"provider"`
+	Model       string             `json:"model"`
+	BaseUrl     *string            `json:"base_url"`
+	MaxTokens   int32              `json:"max_tokens"`
+	Temperature float32            `json:"temperature"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+}
+
+func (q *Queries) UpsertModelConfig(ctx context.Context, arg UpsertModelConfigParams) (UpsertModelConfigRow, error) {
 	row := q.db.QueryRow(ctx, upsertModelConfig,
 		arg.RepoID,
 		arg.Stage,
@@ -95,7 +123,7 @@ func (q *Queries) UpsertModelConfig(ctx context.Context, arg UpsertModelConfigPa
 		arg.MaxTokens,
 		arg.Temperature,
 	)
-	var i ModelConfig
+	var i UpsertModelConfigRow
 	err := row.Scan(
 		&i.ID,
 		&i.RepoID,
