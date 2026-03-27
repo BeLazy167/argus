@@ -252,7 +252,11 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 
 	// Auto-resolve stale bot comments on incremental re-push (fire-and-forget)
 	if isIncremental {
-		go o.autoResolveStaleComments(context.WithoutCancel(ctx), event, patchSet)
+		resolveCtx, resolveCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		go func() {
+			defer resolveCancel()
+			o.autoResolveStaleComments(resolveCtx, event, patchSet)
+		}()
 	}
 
 	// Create review record
@@ -925,7 +929,11 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 
 	// Update review record
 	persona := strPtrOrNil(string(run.Persona))
-	simResultsJSON, _ := json.Marshal(run.Synthesis.SimulationResults)
+	simResultsJSON, err := json.Marshal(run.Synthesis.SimulationResults)
+	if err != nil {
+		o.logger.Warn("failed to marshal simulation results", "error", err)
+		simResultsJSON = nil
+	}
 	_, err = o.db.Exec(ctx, `
 		UPDATE reviews SET status = 'completed', github_review_id = $1, summary = $2, score = $3, token_usage = $4, file_count = $5,
 		       deep_review = $6, persona = $7, is_incremental = $8, simulation_results = $9, completed_at = NOW()
@@ -940,24 +948,24 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		"comments", countComments(run), "files", len(run.FileReviews), "score", run.Synthesis.Score,
 		"deep_review", run.DeepReview, "duration_ms", time.Since(run.CreatedAt).Milliseconds())
 
-	// Enrich PR description with missing context (fire-and-forget)
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				o.logger.Error("enrichPRDescription panic", "recover", r, "pr", run.PREvent.PRNumber)
-			}
-		}()
-		o.enrichPRDescription(context.WithoutCancel(ctx), run, owner, repo)
-	}()
-
-	// Persist comments to DB + index in Supermemory (fire-and-forget)
+	// Persist comments to DB + index in Supermemory
 	o.indexComments(ctx, run, ghReviewID, owner, repo)
 	o.indexConfirmedPatterns(ctx, run, owner, repo)
+
+	// LLM-based post-review ops run sequentially to avoid rate-limit contention
 	o.autoLearnPatterns(ctx, run, owner, repo)
 	o.extractConventions(ctx, run, owner, repo)
 	o.synthesizeFileMemories(ctx, run, owner, repo)
 	o.indexPRSummary(ctx, run, owner, repo)
 	o.extractArchitectureGraph(ctx, run, owner, repo)
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				o.logger.Error("enrichPRDescription panic", "recover", r, "pr", run.PREvent.PRNumber)
+			}
+		}()
+		o.enrichPRDescription(ctx, run, owner, repo)
+	}()
 
 	// Collect changed file paths once for simulation indexing + scenario outdating
 	changedPaths := make([]string, 0, len(run.Diff.Files))
@@ -983,7 +991,9 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	}
 
 	// Mark scenarios touching changed files as outdated
-	o.st.MarkScenarioOutdated(ctx, run.DBRepoID, changedPaths)
+	if err := o.st.MarkScenarioOutdated(ctx, run.DBRepoID, changedPaths); err != nil {
+		o.logger.Warn("marking scenarios outdated", "error", err, "pr", run.PREvent.PRNumber)
+	}
 
 	// Collect decision traces (auto-indexed — observational, not actionable)
 	traceSeeds := CollectReviewTraces(run)
@@ -992,7 +1002,9 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		if err := o.st.CreateTrace(ctx, run.DBRepoID, seed.FilePath, seed.SymbolName, seed.TraceType, seed.Content, seed.Severity, seed.ReviewID, seed.PRNumber, seed.Metadata); err != nil {
 			traceFails++
 		}
-		o.indexer.IndexDecisionTrace(ctx, owner, repo, seed.FilePath, seed.TraceType, seed.Content, seed.Severity)
+		if err := o.indexer.IndexDecisionTrace(ctx, owner, repo, seed.FilePath, seed.TraceType, seed.Content, seed.Severity); err != nil {
+			o.logger.Warn("indexing decision trace", "error", err, "file", seed.FilePath)
+		}
 	}
 	if traceFails > 0 {
 		o.logger.Warn("some decision traces failed to persist", "failed", traceFails, "total", len(traceSeeds))
@@ -1068,6 +1080,10 @@ func (o *Orchestrator) enrichPRDescription(ctx context.Context, run *PipelineRun
 	})
 	if err != nil {
 		o.logger.Warn("enrichPRDescription: LLM call failed", "error", err)
+		return
+	}
+	if strings.TrimSpace(resp.Content) == "" {
+		o.logger.Warn("enrichPRDescription: empty LLM response")
 		return
 	}
 
@@ -1721,6 +1737,10 @@ Rules:
 	})
 	if err != nil {
 		o.logger.Warn("extractArchitectureGraph LLM failed", "error", err)
+		return
+	}
+	if strings.TrimSpace(resp.Content) == "" {
+		o.logger.Warn("extractArchitectureGraph: empty LLM response")
 		return
 	}
 

@@ -189,21 +189,26 @@ func (s *Store) SetOrgDefaults(ctx context.Context, installationID int64, settin
 // GetMergedSettings returns org defaults merged with repo overrides (repo wins).
 func (s *Store) GetMergedSettings(ctx context.Context, installationID int64, repoID int64) (json.RawMessage, error) {
 	var orgDefaults, repoSettings json.RawMessage
-	_ = s.Pool.QueryRow(ctx, `SELECT COALESCE(default_settings, '{}') FROM installations WHERE id = $1`, installationID).Scan(&orgDefaults)
-	_ = s.Pool.QueryRow(ctx, `SELECT COALESCE(settings_json, '{}') FROM repos WHERE id = $1`, repoID).Scan(&repoSettings)
+	if err := s.Pool.QueryRow(ctx, `SELECT COALESCE(default_settings, '{}') FROM installations WHERE id = $1`, installationID).Scan(&orgDefaults); err != nil {
+		return nil, fmt.Errorf("fetching org defaults: %w", err)
+	}
+	if err := s.Pool.QueryRow(ctx, `SELECT COALESCE(settings_json, '{}') FROM repos WHERE id = $1`, repoID).Scan(&repoSettings); err != nil {
+		return nil, fmt.Errorf("fetching repo settings: %w", err)
+	}
 	return mergeJSON(orgDefaults, repoSettings), nil
 }
 
 // mergeJSON does a shallow merge where override keys replace base keys.
 func mergeJSON(base, override json.RawMessage) json.RawMessage {
-	var baseMap, overrideMap map[string]interface{}
-	json.Unmarshal(base, &baseMap)
-	json.Unmarshal(override, &overrideMap)
-	if baseMap == nil {
+	var baseMap map[string]interface{}
+	if err := json.Unmarshal(base, &baseMap); err != nil || baseMap == nil {
 		baseMap = make(map[string]interface{})
 	}
-	for k, v := range overrideMap {
-		baseMap[k] = v
+	var overrideMap map[string]interface{}
+	if err := json.Unmarshal(override, &overrideMap); err == nil {
+		for k, v := range overrideMap {
+			baseMap[k] = v
+		}
 	}
 	result, _ := json.Marshal(baseMap)
 	return result

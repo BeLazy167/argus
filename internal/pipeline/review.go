@@ -114,7 +114,7 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 	// Resolve model config once for all files
 	provider, cfg, err := rs.registry.ResolveProvider(ctx, storeConfigLister{st: rs.store, installationID: run.DBInstallationID}, run.DBInstallationID, run.DBRepoID, llm.StageReview)
 	if err != nil {
-		return err
+		return fmt.Errorf("resolve review provider: %w", err)
 	}
 
 	unitCh := make(chan workUnit, len(units))
@@ -279,7 +279,7 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p revie
 
 	// Query blast radius from code graph + fetch dependent file contents
 	var blastContext string
-	if run.BlastRadius && rs.store != nil {
+	if run.BlastRadius && rs.store != nil && rs.ghClient != nil {
 		changedPaths := make([]string, 0, len(run.Diff.Files))
 		changedSet := make(map[string]bool, len(run.Diff.Files))
 		for _, f := range run.Diff.Files {

@@ -50,7 +50,7 @@ func (ts *TriageStage) Execute(ctx context.Context, run *PipelineRun) error {
 
 	provider, cfg, err := ts.registry.ResolveProvider(ctx, storeConfigLister{st: ts.store, installationID: run.DBInstallationID}, run.DBInstallationID, run.DBRepoID, llm.StageTriage)
 	if err != nil {
-		return err
+		return fmt.Errorf("resolve triage provider: %w", err)
 	}
 
 	owner, repo, err := splitRepoFullName(run.PREvent.RepoFullName)

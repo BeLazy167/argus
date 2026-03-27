@@ -136,7 +136,14 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		if !hasLabel {
 			break
 		}
-		go s.generateScenarioFromIssue(context.WithoutCancel(r.Context()), issueEvent)
+		if !s.acquireSem() {
+			s.logger.Warn("webhook semaphore full for issue scenario")
+			break
+		}
+		go func() {
+			defer s.releaseSem()
+			s.generateScenarioFromIssue(context.WithoutCancel(r.Context()), issueEvent)
+		}()
 
 	case "installation":
 		s.logger.Info("installation event", "action", event.Action)

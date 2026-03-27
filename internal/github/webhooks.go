@@ -38,11 +38,11 @@ type PREvent struct {
 func ParseWebhook(r *http.Request, secret []byte) (*WebhookEvent, error) {
 	// Limit webhook body to 10MB to prevent abuse
 	const maxBodySize = 10 << 20
+	defer r.Body.Close()
 	payload, err := io.ReadAll(io.LimitReader(r.Body, maxBodySize))
 	if err != nil {
 		return nil, fmt.Errorf("reading body: %w", err)
 	}
-	defer r.Body.Close()
 
 	if err := gh.ValidateSignature(r.Header.Get("X-Hub-Signature-256"), payload, secret); err != nil {
 		return nil, fmt.Errorf("invalid signature: %w", err)
