@@ -133,8 +133,9 @@ func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, 
 	sm.RegisterStage(StateTriaging, triageStage.Execute)
 	sm.RegisterStage(StateBriefing, o.leadBriefStage)
 	sm.RegisterStage(StateReviewing, reviewStage.Execute)
-	sm.RegisterStage(StateBroadcasting, o.broadcastStage)
-	sm.RegisterStage(StateCrossChecking, o.crossCheckStage)
+	sm.RegisterStage(StateDeduping, o.dedupStage)
+	sm.RegisterStage(StateValidating, o.validateStage)
+	sm.RegisterStage(StateScoring, scoringStage.Execute)
 	sm.RegisterStage(StatePass2, o.pass2)
 	sm.RegisterStage(StateSynthesizing, o.synthesize)
 	sm.RegisterStage(StatePosting, o.post)
@@ -1822,6 +1823,7 @@ func groupByFile(byFile map[string][]FileComment) []FileReview {
 }
 
 // writeAgentFindings writes a summary of agent file review comments to the builder.
+// writeAgentFindings writes detailed per-comment findings (for cross-check).
 func writeAgentFindings(sb *strings.Builder, results []AgentResult) {
 	for _, ar := range results {
 		sb.WriteString(fmt.Sprintf("\n## %s\n", ar.AgentName))
@@ -1834,6 +1836,41 @@ func writeAgentFindings(sb *strings.Builder, results []AgentResult) {
 				sb.WriteString(fmt.Sprintf("- %s:%d [%s] %s\n", fr.Path, c.Line, c.Severity, util.Truncate(body, 100, true)))
 			}
 		}
+	}
+}
+
+// writeAgentSummary writes a compact per-agent summary (for broadcast — fits in fewer tokens).
+func writeAgentSummary(sb *strings.Builder, results []AgentResult) {
+	for _, ar := range results {
+		var critical, warning, total int
+		files := make(map[string]bool)
+		var topFindings []string
+		for _, fr := range ar.FileReviews {
+			files[fr.Path] = true
+			for _, c := range fr.Comments {
+				total++
+				if c.Severity == SeverityCritical {
+					critical++
+				} else if c.Severity == SeverityWarning {
+					warning++
+				}
+				if len(topFindings) < 3 {
+					what := c.What
+					if what == "" {
+						what = util.Truncate(c.Body, 60, true)
+					}
+					topFindings = append(topFindings, what)
+				}
+			}
+		}
+		if total == 0 {
+			continue
+		}
+		sb.WriteString(fmt.Sprintf("- %s: %d findings (%d critical, %d warning) across %d files", ar.AgentName, total, critical, warning, len(files)))
+		if len(topFindings) > 0 {
+			sb.WriteString(": " + strings.Join(topFindings, "; "))
+		}
+		sb.WriteString("\n")
 	}
 }
 
@@ -2022,40 +2059,139 @@ func (o *Orchestrator) runBlastRadiusAgent(ctx context.Context, run *PipelineRun
 	return &AgentResult{AgentName: "blast_radius", BlastImpacts: impacts}
 }
 
-// crossCheckStage runs the Lead Agent's cross-check phase (Phase 3).
-// Deduplicates, cross-references, and quality-filters all findings.
-// Runs even without LeadBrief — dedup + quality filtering still valuable.
-func (o *Orchestrator) crossCheckStage(ctx context.Context, run *PipelineRun) error {
+func (o *Orchestrator) dedupStage(ctx context.Context, run *PipelineRun) error {
 	if !run.DeepReview {
-		o.logger.Info("[cross_check] skipped — deep review not enabled", "pr", run.PREvent.PRNumber)
 		return nil
 	}
-	start := time.Now()
-	beforeCount := countComments(run)
-	o.logger.Info("[cross_check] starting", "findings_in", beforeCount, "files", len(run.FileReviews), "has_brief", run.LeadBrief != nil, "pr", run.PREvent.PRNumber)
-
-	allResults := collectAgentResults(run.FileReviews)
-
-	// Save pre-crosscheck snapshot for pattern learning
+	before := countComments(run)
 	run.AllFileReviews = make([]FileReview, len(run.FileReviews))
 	copy(run.AllFileReviews, run.FileReviews)
 
-	crossChecked := o.leadCrossCheck(ctx, run, allResults, run.LeadBrief)
-	if crossChecked == nil {
-		o.logger.Warn("[cross_check] FAILED — posting unfiltered findings", "findings_kept", beforeCount, "duration_ms", time.Since(start).Milliseconds(), "pr", run.PREvent.PRNumber)
+	run.FileReviews = dedupFindings(run.FileReviews, 5)
+	after := countComments(run)
+	o.logger.Info("[dedup] OK", "before", before, "after", after, "removed", before-after, "pr", run.PREvent.PRNumber)
+	return nil
+}
+
+// validateStage enriches deduplicated findings with blast radius and simulation data.
+// Runs blast radius + simulation in parallel on the clean finding set.
+func (o *Orchestrator) validateStage(ctx context.Context, run *PipelineRun) error {
+	if !run.DeepReview {
+		o.logger.Info("[validate] skipped — deep review not enabled", "pr", run.PREvent.PRNumber)
 		return nil
 	}
-	// Safety: don't wipe all findings if cross-check returns empty but we had findings
-	if len(crossChecked) == 0 && len(run.FileReviews) > 0 {
-		o.logger.Warn("[cross_check] returned empty — keeping original findings", "original_count", beforeCount, "duration_ms", time.Since(start).Milliseconds(), "pr", run.PREvent.PRNumber)
+	start := time.Now()
+	o.logger.Info("[validate] starting", "findings", countComments(run), "pr", run.PREvent.PRNumber)
+
+	owner, repo, err := splitRepoFullName(run.PREvent.RepoFullName)
+	if err != nil {
 		return nil
 	}
-	afterCount := 0
-	for _, fr := range crossChecked {
-		afterCount += len(fr.Comments)
+
+	changedPaths := diffFilePaths(run.Diff)
+
+	// Run blast radius and simulation in parallel
+	var blastImpacts []BlastRadiusImpact
+	var simResults []SimulationResult
+	var wg sync.WaitGroup
+
+	// Blast Radius
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if !run.BlastRadius || o.st == nil {
+			return
+		}
+		changedSet := make(map[string]bool, len(changedPaths))
+		for _, p := range changedPaths {
+			changedSet[p] = true
+		}
+		nodes, err := o.st.GetBlastRadius(ctx, run.DBRepoID, changedPaths, 2)
+		if err != nil || len(nodes) == 0 {
+			return
+		}
+		depContents := make(map[string]string)
+		seen := make(map[string]bool)
+		for _, n := range nodes {
+			if n.Depth != 1 || changedSet[n.FilePath] || seen[n.FilePath] || len(depContents) >= 3 {
+				continue
+			}
+			seen[n.FilePath] = true
+			content, fetchErr := o.ghClient.GetFileContent(ctx, run.PREvent.InstallationID, owner, repo, n.FilePath, run.PREvent.HeadSHA)
+			if fetchErr == nil {
+				depContents[n.FilePath] = truncateLines(content, 200)
+			}
+		}
+		if len(depContents) > 0 {
+			blastImpacts = o.analyzeBlastRadius(ctx, run, owner, repo, depContents)
+		}
+		o.logger.Info("[validate] blast radius", "impacts", len(blastImpacts), "dependents_checked", len(depContents), "pr", run.PREvent.PRNumber)
+	}()
+
+	// Simulation
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if !run.CodeSimulation || o.simEngine == nil {
+			return
+		}
+		scenarios, err := FindRelevantScenarios(ctx, o.st, run.DBRepoID, changedPaths)
+		if err != nil || len(scenarios) == 0 {
+			return
+		}
+		simScenarios := make([]SimScenario, len(scenarios))
+		for i, s := range scenarios {
+			simScenarios[i] = SimScenario{Description: s.Description, Severity: s.Severity, Files: s.Files}
+		}
+		// Include confirmed findings as context for simulation
+		var findingsSummary strings.Builder
+		findingsSummary.WriteString("Confirmed review findings:\n")
+		for _, fr := range run.FileReviews {
+			for _, c := range fr.Comments {
+				what := c.What
+				if what == "" {
+					what = util.Truncate(c.Body, 80, true)
+				}
+				findingsSummary.WriteString(fmt.Sprintf("- %s:%d [%s] %s\n", fr.Path, c.Line, c.Severity, what))
+			}
+		}
+		req := SimulationRequest{Run: run, Scenarios: simScenarios}
+		results, simErr := o.simEngine.RunSimulations(ctx, req)
+		if simErr != nil {
+			o.logger.Warn("[validate] simulation failed", "error", simErr, "pr", run.PREvent.PRNumber)
+		} else {
+			simResults = results
+		}
+		o.logger.Info("[validate] simulation", "scenarios_tested", len(simScenarios), "results", len(simResults), "pr", run.PREvent.PRNumber)
+	}()
+
+	wg.Wait()
+
+	// Store results on PipelineRun for scoring and synthesis to use
+	if run.Synthesis == nil {
+		run.Synthesis = &SynthesisResult{}
 	}
-	o.logger.Info("[cross_check] OK", "before", beforeCount, "after", afterCount, "deduped", beforeCount-afterCount, "duration_ms", time.Since(start).Milliseconds(), "pr", run.PREvent.PRNumber)
-	run.FileReviews = crossChecked
+	run.Synthesis.SimulationResults = simResults
+
+	// Annotate findings with blast radius data
+	// For each finding, check if its file has blast radius impacts
+	if len(blastImpacts) > 0 {
+		impactByFile := make(map[string]int)
+		for _, bi := range blastImpacts {
+			impactByFile[bi.DependentFile]++
+		}
+		for i := range run.FileReviews {
+			fr := &run.FileReviews[i]
+			if count, ok := impactByFile[fr.Path]; ok && count > 0 {
+				for j := range fr.Comments {
+					// Boost: add blast radius context to the comment
+					fr.Comments[j].BlastRadius = count
+				}
+			}
+		}
+	}
+
+	o.logger.Info("[validate] OK", "blast_impacts", len(blastImpacts), "sim_results", len(simResults), "duration_ms", time.Since(start).Milliseconds(), "pr", run.PREvent.PRNumber)
 	return nil
 }
 
@@ -2154,18 +2290,18 @@ func (o *Orchestrator) leadBroadcast(ctx context.Context, run *PipelineRun, allR
 	}
 
 	var prompt strings.Builder
-	prompt.WriteString("Agent findings:\n")
-	writeAgentFindings(&prompt, allResults)
+	prompt.WriteString("Agent findings summary:\n")
+	writeAgentSummary(&prompt, allResults)
 	writeCrossCutting(&prompt, brief)
 
-	broadcastCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	broadcastCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 
 	resp, err := provider.Complete(broadcastCtx, llm.CompletionRequest{
 		Model:       cfg.Model,
 		System:      leadBroadcastSystemPrompt,
 		Messages:    []llm.Message{{Role: "user", Content: prompt.String()}},
-		MaxTokens:   600,
+		MaxTokens:   800,
 		Temperature: 0.2,
 	})
 	if err != nil {
@@ -2341,7 +2477,7 @@ func (o *Orchestrator) leadCrossCheck(ctx context.Context, run *PipelineRun, all
 	writeDetailedAgentFindings(&prompt, allResults)
 	writeCrossCutting(&prompt, brief)
 
-	crossCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	crossCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 
 	resp, err := provider.Complete(crossCtx, llm.CompletionRequest{

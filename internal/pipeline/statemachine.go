@@ -114,7 +114,7 @@ func publishError(run *PipelineRun, failedStage PipelineState, err error) {
 // Triage is fast -- just re-run on recovery. Everything after review is persisted.
 func shouldPersist(state PipelineState) bool {
 	switch state {
-	case StateReviewing, StateBriefing, StateBroadcasting, StateCrossChecking, StatePass2, StateSynthesizing, StatePosting, StateCompleted, StateFailed:
+	case StateReviewing, StateBriefing, StateDeduping, StateValidating, StateBroadcasting, StateCrossChecking, StatePass2, StateSynthesizing, StatePosting, StateCompleted, StateFailed:
 		return true
 	}
 	return false

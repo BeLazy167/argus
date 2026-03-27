@@ -234,6 +234,9 @@ func buildScoringPrompt(run *PipelineRun, memContext string) string {
 			if c.Suggestion != "" {
 				sb.WriteString(fmt.Sprintf("    suggestion: %s\n", c.Suggestion))
 			}
+			if c.BlastRadius > 0 {
+				sb.WriteString(fmt.Sprintf("    blast_radius: This finding affects %d downstream dependents\n", c.BlastRadius))
+			}
 			idx++
 		}
 	}
@@ -261,6 +264,7 @@ Criteria:
 - Is any suggested fix correct?
 - For specialist comments: does it reflect genuine domain expertise?
 - If the issue would be caught by a standard linter (ESLint, golint/staticcheck, ruff, clippy), score it no higher than 35 regardless of severity label.
+- If a finding has blast_radius > 0, it affects downstream dependents. Score at least 70 regardless of specialist confidence.
 
 Respond ONLY with a JSON array. No other text.`
 

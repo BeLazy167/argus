@@ -175,8 +175,10 @@ type FileComment struct {
 	Score               int        `json:"score"`
 	MatchedPatternID    int64      `json:"-"`
 	MatchedPatternScore float64    `json:"-"`
+	BlastRadius         int        `json:"blast_radius,omitempty"` // number of downstream dependents affected
 	EnforcedRuleContent string     `json:"-"`
 	IsNewFinding        bool       `json:"-"`
+	DedupCount          int        `json:"dedup_count,omitempty"` // how many duplicate findings were merged into this one
 }
 
 // ValidSeverities is the set of valid severity values.
