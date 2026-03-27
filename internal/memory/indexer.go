@@ -349,7 +349,10 @@ func (idx *Indexer) IndexRepoTopology(ctx context.Context, owner, content string
 		ContainerTags: []string{OwnerTag(owner, "patterns")},
 		Metadata:      map[string]string{"type": "topology"},
 	})
-	return err
+	if err != nil {
+		return fmt.Errorf("indexing repo topology: %w", err)
+	}
+	return nil
 }
 
 
@@ -437,7 +440,7 @@ func (idx *Indexer) IndexScenario(ctx context.Context, owner, repo string, scena
 	})
 	if err != nil {
 		idx.logger.Warn("indexing scenario in supermemory", "error", err)
-		return err
+		return fmt.Errorf("indexing scenario: %w", err)
 	}
 	return nil
 }
@@ -460,7 +463,7 @@ func (idx *Indexer) IndexDecisionTrace(ctx context.Context, owner, repo, filePat
 	})
 	if err != nil {
 		idx.logger.Warn("indexing trace in supermemory", "error", err)
-		return err
+		return fmt.Errorf("indexing decision trace: %w", err)
 	}
 	return nil
 }
@@ -580,7 +583,10 @@ func (idx *Indexer) IndexSimulationResult(ctx context.Context, owner, repo strin
 			},
 		}},
 	})
-	return err
+	if err != nil {
+		return fmt.Errorf("indexing simulation result: %w", err)
+	}
+	return nil
 }
 
 // SearchTraces performs semantic search over decision traces with reranking.

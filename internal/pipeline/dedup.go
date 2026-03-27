@@ -18,11 +18,6 @@ func dedupFindings(reviews []FileReview, lineThreshold int) []FileReview {
 		lineThreshold = 5
 	}
 
-	type dedupKey struct {
-		path string
-		line int // normalized to nearest lineThreshold bucket
-	}
-
 	var all []taggedComment
 	for _, fr := range reviews {
 		for _, c := range fr.Comments {
@@ -30,14 +25,43 @@ func dedupFindings(reviews []FileReview, lineThreshold int) []FileReview {
 		}
 	}
 
-	// Group by file + line bucket
-	groups := make(map[dedupKey][]taggedComment)
-	for _, tc := range all {
-		key := dedupKey{
-			path: tc.filePath,
-			line: (tc.comment.Line / lineThreshold) * lineThreshold,
+	// Group by file + line proximity using union-find to avoid bucket-boundary misses.
+	// Fixed-width bucketing would split lines 9 and 10 (threshold=5) into different
+	// buckets despite being only 1 line apart.
+	parent := make([]int, len(all))
+	for i := range parent {
+		parent[i] = i
+	}
+	var find func(int) int
+	find = func(i int) int {
+		for parent[i] != i {
+			parent[i] = parent[parent[i]]
+			i = parent[i]
 		}
-		groups[key] = append(groups[key], tc)
+		return i
+	}
+	union := func(a, b int) {
+		ra, rb := find(a), find(b)
+		if ra != rb {
+			parent[ra] = rb
+		}
+	}
+	for i := 0; i < len(all); i++ {
+		for j := i + 1; j < len(all); j++ {
+			if all[i].filePath == all[j].filePath {
+				d := all[i].comment.Line - all[j].comment.Line
+				if d < 0 {
+					d = -d
+				}
+				if d <= lineThreshold {
+					union(i, j)
+				}
+			}
+		}
+	}
+	groups := make(map[int][]taggedComment)
+	for i, tc := range all {
+		groups[find(i)] = append(groups[find(i)], tc)
 	}
 
 	// For each group, find duplicates by content similarity and keep the best

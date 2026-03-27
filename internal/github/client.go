@@ -37,10 +37,12 @@ func doGraphQL(ctx context.Context, client *gh.Client, body any, result any) err
 	// BareDo sends the request without reading/closing the body, so we can read it ourselves.
 	// client.Do(ctx, req, nil) reads and closes the body, making subsequent ReadAll fail.
 	resp, err := client.BareDo(ctx, req)
+	if resp != nil && resp.Body != nil {
+		defer resp.Body.Close()
+	}
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return fmt.Errorf("reading graphql response: %w", err)

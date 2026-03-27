@@ -149,7 +149,10 @@ func (sm *StateMachine) persistState(ctx context.Context, run *PipelineRun) erro
 			error = EXCLUDED.error,
 			updated_at = NOW()
 	`, run.ID, run.ReviewID, run.State, payload, run.Error)
-	return err
+	if err != nil {
+		return fmt.Errorf("upserting pipeline_states: %w", err)
+	}
+	return nil
 }
 
 func (sm *StateMachine) loadState(ctx context.Context, runID uuid.UUID) (*PipelineRun, error) {

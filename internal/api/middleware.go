@@ -68,7 +68,13 @@ func (c *jwksCache) getKey(kid string) (*rsa.PublicKey, error) {
 		return key, nil
 	}
 
-	resp, err := http.Get(c.url)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating JWKS request: %w", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetching JWKS: %w", err)
 	}

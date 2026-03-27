@@ -159,7 +159,7 @@ func (c *Client) setHeaders(req *http.Request) {
 }
 
 // tagSanitizer replaces chars invalid in Supermemory container tags.
-var tagSanitizer = strings.NewReplacer(":", "-", "/", "-", "~", "-")
+var tagSanitizer = strings.NewReplacer(":", "-", "/", "-", "~", "-", ".", "-")
 
 // OwnerTag returns a container tag scoped to an owner (user or org).
 func OwnerTag(owner, kind string) string {
