@@ -1822,8 +1822,7 @@ func groupByFile(byFile map[string][]FileComment) []FileReview {
 	return reviews
 }
 
-// writeAgentFindings writes a summary of agent file review comments to the builder.
-// writeAgentFindings writes detailed per-comment findings (for cross-check).
+// writeAgentFindings writes detailed per-comment findings to the builder.
 func writeAgentFindings(sb *strings.Builder, results []AgentResult) {
 	for _, ar := range results {
 		sb.WriteString(fmt.Sprintf("\n## %s\n", ar.AgentName))
@@ -2085,6 +2084,7 @@ func (o *Orchestrator) validateStage(ctx context.Context, run *PipelineRun) erro
 
 	owner, repo, err := splitRepoFullName(run.PREvent.RepoFullName)
 	if err != nil {
+		o.logger.Warn("[validate] bad repo name, skipping", "error", err, "pr", run.PREvent.PRNumber)
 		return nil
 	}
 
@@ -2098,6 +2098,11 @@ func (o *Orchestrator) validateStage(ctx context.Context, run *PipelineRun) erro
 	// Blast Radius
 	wg.Add(1)
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				o.logger.Error("[validate] blast radius goroutine panic", "recover", r, "pr", run.PREvent.PRNumber)
+			}
+		}()
 		defer wg.Done()
 		if !run.BlastRadius || o.st == nil {
 			return
@@ -2107,7 +2112,11 @@ func (o *Orchestrator) validateStage(ctx context.Context, run *PipelineRun) erro
 			changedSet[p] = true
 		}
 		nodes, err := o.st.GetBlastRadius(ctx, run.DBRepoID, changedPaths, 2)
-		if err != nil || len(nodes) == 0 {
+		if err != nil {
+			o.logger.Warn("[validate] blast radius query failed", "error", err, "pr", run.PREvent.PRNumber)
+			return
+		}
+		if len(nodes) == 0 {
 			return
 		}
 		depContents := make(map[string]string)
@@ -2132,28 +2141,25 @@ func (o *Orchestrator) validateStage(ctx context.Context, run *PipelineRun) erro
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				o.logger.Error("[validate] simulation goroutine panic", "recover", r, "pr", run.PREvent.PRNumber)
+			}
+		}()
 		if !run.CodeSimulation || o.simEngine == nil {
 			return
 		}
 		scenarios, err := FindRelevantScenarios(ctx, o.st, run.DBRepoID, changedPaths)
-		if err != nil || len(scenarios) == 0 {
+		if err != nil {
+			o.logger.Warn("[validate] scenario lookup failed", "error", err, "pr", run.PREvent.PRNumber)
+			return
+		}
+		if len(scenarios) == 0 {
 			return
 		}
 		simScenarios := make([]SimScenario, len(scenarios))
 		for i, s := range scenarios {
 			simScenarios[i] = SimScenario{Description: s.Description, Severity: s.Severity, Files: s.Files}
-		}
-		// Include confirmed findings as context for simulation
-		var findingsSummary strings.Builder
-		findingsSummary.WriteString("Confirmed review findings:\n")
-		for _, fr := range run.FileReviews {
-			for _, c := range fr.Comments {
-				what := c.What
-				if what == "" {
-					what = util.Truncate(c.Body, 80, true)
-				}
-				findingsSummary.WriteString(fmt.Sprintf("- %s:%d [%s] %s\n", fr.Path, c.Line, c.Severity, what))
-			}
 		}
 		req := SimulationRequest{Run: run, Scenarios: simScenarios}
 		results, simErr := o.simEngine.RunSimulations(ctx, req)
@@ -2174,18 +2180,19 @@ func (o *Orchestrator) validateStage(ctx context.Context, run *PipelineRun) erro
 	run.Synthesis.SimulationResults = simResults
 
 	// Annotate findings with blast radius data
-	// For each finding, check if its file has blast radius impacts
+	// Count total dependents for each changed file (not the dependent files themselves)
 	if len(blastImpacts) > 0 {
-		impactByFile := make(map[string]int)
-		for _, bi := range blastImpacts {
-			impactByFile[bi.DependentFile]++
+		// All changed files have blast radius impact — count total downstream breakage
+		totalImpacts := len(blastImpacts)
+		changedSet := make(map[string]bool, len(changedPaths))
+		for _, p := range changedPaths {
+			changedSet[p] = true
 		}
 		for i := range run.FileReviews {
 			fr := &run.FileReviews[i]
-			if count, ok := impactByFile[fr.Path]; ok && count > 0 {
+			if changedSet[fr.Path] {
 				for j := range fr.Comments {
-					// Boost: add blast radius context to the comment
-					fr.Comments[j].BlastRadius = count
+					fr.Comments[j].BlastRadius = totalImpacts
 				}
 			}
 		}

@@ -63,10 +63,8 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 		return nil
 	}
 
-	// Deduplicate similar comments before scoring
-	run.FileReviews = deduplicateComments(run.FileReviews)
-
-	// Re-index after dedup
+	// Note: dedup is now handled by the dedicated dedupStage before scoring.
+	// Re-index for scoring
 	allComments = allComments[:0]
 	for fi, fr := range run.FileReviews {
 		for ci := range fr.Comments {

@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"sort"
 	"strings"
 )
 
@@ -77,10 +78,15 @@ func dedupFindings(reviews []FileReview, lineThreshold int) []FileReview {
 		}
 	}
 
-	// Rebuild FileReview list
+	// Rebuild FileReview list (sorted by path for deterministic output)
+	paths := make([]string, 0, len(kept))
+	for path := range kept {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
 	var result []FileReview
-	for path, comments := range kept {
-		result = append(result, FileReview{Path: path, Comments: comments})
+	for _, path := range paths {
+		result = append(result, FileReview{Path: path, Comments: kept[path]})
 	}
 	return result
 }
