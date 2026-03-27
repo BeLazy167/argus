@@ -859,7 +859,9 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		return fmt.Errorf("updating review record: %w", err)
 	}
 
-	o.logger.Info("posted review", "github_review_id", ghReviewID, "pr", run.PREvent.PRNumber)
+	o.logger.Info("[posted] review", "github_review_id", ghReviewID, "pr", run.PREvent.PRNumber,
+		"comments", countComments(run), "files", len(run.FileReviews), "score", run.Synthesis.Score,
+		"deep_review", run.DeepReview, "duration_ms", time.Since(run.CreatedAt).Milliseconds())
 
 	// Enrich PR description with missing context (fire-and-forget)
 	go func() {
@@ -1842,17 +1844,27 @@ func writeDetailedAgentFindings(sb *strings.Builder, results []AgentResult) {
 // leadBriefStage runs the Lead Agent's briefing phase (Phase 1).
 func (o *Orchestrator) leadBriefStage(ctx context.Context, run *PipelineRun) error {
 	if !run.DeepReview {
+		o.logger.Info("[briefing] skipped — deep review not enabled", "pr", run.PREvent.PRNumber)
 		return nil
 	}
+	start := time.Now()
 	brief, err := o.leadBrief(ctx, run)
+	dur := time.Since(start)
 	if err != nil {
 		run.LeadAgentError = fmt.Sprintf("leadBriefStage: %s", err)
-		o.logger.Warn("lead brief failed, continuing without brief", "error", err)
-		return nil // non-fatal
+		o.logger.Warn("[briefing] FAILED", "error", err, "duration_ms", dur.Milliseconds(), "pr", run.PREvent.PRNumber)
+		return nil
 	}
 	if brief == nil {
-		o.logger.Info("lead brief returned nil, specialists will run without brief",
-			"lead_agent_error", run.LeadAgentError)
+		o.logger.Warn("[briefing] returned nil — specialists run without brief", "lead_agent_error", run.LeadAgentError, "duration_ms", dur.Milliseconds(), "pr", run.PREvent.PRNumber)
+	} else {
+		var fileCount int
+		for _, item := range brief.Items {
+			if item.File != "" {
+				fileCount++
+			}
+		}
+		o.logger.Info("[briefing] OK", "files_briefed", fileCount, "cross_cutting", len(brief.CrossCuttingConcerns()), "duration_ms", dur.Milliseconds(), "pr", run.PREvent.PRNumber)
 	}
 	run.LeadBrief = brief
 	return nil
@@ -1863,12 +1875,15 @@ func (o *Orchestrator) leadBriefStage(ctx context.Context, run *PipelineRun) err
 // Runs even without LeadBrief — simulation and blast radius agents are still valuable.
 func (o *Orchestrator) broadcastStage(ctx context.Context, run *PipelineRun) error {
 	if !run.DeepReview {
+		o.logger.Info("[broadcast] skipped — deep review not enabled", "pr", run.PREvent.PRNumber)
 		return nil
 	}
+	start := time.Now()
+	o.logger.Info("[broadcast] starting", "findings_in", len(run.FileReviews), "pr", run.PREvent.PRNumber)
 
 	owner, repo, err := splitRepoFullName(run.PREvent.RepoFullName)
 	if err != nil {
-		o.logger.Warn("broadcastStage: bad repo name", "error", err)
+		o.logger.Warn("[broadcast] FAILED — bad repo name", "error", err, "pr", run.PREvent.PRNumber)
 		return nil
 	}
 
@@ -1876,15 +1891,27 @@ func (o *Orchestrator) broadcastStage(ctx context.Context, run *PipelineRun) err
 	changedPaths := diffFilePaths(run.Diff)
 
 	if simResult := o.runSimulationAgent(ctx, run, changedPaths); simResult != nil {
+		o.logger.Info("[broadcast] simulation agent returned", "scenarios", len(simResult.SimResults), "pr", run.PREvent.PRNumber)
 		allResults = append(allResults, *simResult)
+	} else {
+		o.logger.Info("[broadcast] simulation agent: no results (no scenarios or disabled)", "pr", run.PREvent.PRNumber)
 	}
 	if blastResult := o.runBlastRadiusAgent(ctx, run, owner, repo, changedPaths); blastResult != nil {
+		o.logger.Info("[broadcast] blast radius agent returned", "impacts", len(blastResult.BlastImpacts), "pr", run.PREvent.PRNumber)
 		allResults = append(allResults, *blastResult)
+	} else {
+		o.logger.Info("[broadcast] blast radius agent: no results (no graph data or disabled)", "pr", run.PREvent.PRNumber)
 	}
 
 	signals := o.leadBroadcast(ctx, run, allResults, run.LeadBrief)
 	if len(signals) == 0 {
+		o.logger.Info("[broadcast] OK — no cross-agent signals", "duration_ms", time.Since(start).Milliseconds(), "pr", run.PREvent.PRNumber)
 		return nil
+	}
+
+	o.logger.Info("[broadcast] cross-agent signals found", "signals", len(signals), "pr", run.PREvent.PRNumber)
+	for i, sig := range signals {
+		o.logger.Info("[broadcast] signal", "i", i, "from", sig.FromAgent, "to", sig.ToAgent, "files", len(sig.FilesToCheck))
 	}
 
 	// Phase 2c: Targeted second passes
@@ -1896,9 +1923,12 @@ func (o *Orchestrator) broadcastStage(ctx context.Context, run *PipelineRun) err
 				fileContents[path] = truncateLines(content, 200)
 			}
 		}
-		run.FileReviews = append(run.FileReviews, o.agentSecondPass(ctx, run, sig, fileContents)...)
+		secondPassResults := o.agentSecondPass(ctx, run, sig, fileContents)
+		o.logger.Info("[broadcast] second pass complete", "agent", sig.ToAgent, "new_findings", len(secondPassResults))
+		run.FileReviews = append(run.FileReviews, secondPassResults...)
 	}
 
+	o.logger.Info("[broadcast] OK", "total_signals", len(signals), "findings_out", len(run.FileReviews), "duration_ms", time.Since(start).Milliseconds(), "pr", run.PREvent.PRNumber)
 	return nil
 }
 
@@ -1964,8 +1994,12 @@ func (o *Orchestrator) runBlastRadiusAgent(ctx context.Context, run *PipelineRun
 // Runs even without LeadBrief — dedup + quality filtering still valuable.
 func (o *Orchestrator) crossCheckStage(ctx context.Context, run *PipelineRun) error {
 	if !run.DeepReview {
+		o.logger.Info("[cross_check] skipped — deep review not enabled", "pr", run.PREvent.PRNumber)
 		return nil
 	}
+	start := time.Now()
+	beforeCount := countComments(run)
+	o.logger.Info("[cross_check] starting", "findings_in", beforeCount, "files", len(run.FileReviews), "has_brief", run.LeadBrief != nil, "pr", run.PREvent.PRNumber)
 
 	allResults := collectAgentResults(run.FileReviews)
 
@@ -1975,14 +2009,19 @@ func (o *Orchestrator) crossCheckStage(ctx context.Context, run *PipelineRun) er
 
 	crossChecked := o.leadCrossCheck(ctx, run, allResults, run.LeadBrief)
 	if crossChecked == nil {
-		o.logger.Warn("cross-check failed, posting unfiltered findings")
+		o.logger.Warn("[cross_check] FAILED — posting unfiltered findings", "findings_kept", beforeCount, "duration_ms", time.Since(start).Milliseconds(), "pr", run.PREvent.PRNumber)
 		return nil
 	}
 	// Safety: don't wipe all findings if cross-check returns empty but we had findings
 	if len(crossChecked) == 0 && len(run.FileReviews) > 0 {
-		o.logger.Warn("cross-check returned empty, keeping original findings", "original_count", len(run.FileReviews))
+		o.logger.Warn("[cross_check] returned empty — keeping original findings", "original_count", beforeCount, "duration_ms", time.Since(start).Milliseconds(), "pr", run.PREvent.PRNumber)
 		return nil
 	}
+	afterCount := 0
+	for _, fr := range crossChecked {
+		afterCount += len(fr.Comments)
+	}
+	o.logger.Info("[cross_check] OK", "before", beforeCount, "after", afterCount, "deduped", beforeCount-afterCount, "duration_ms", time.Since(start).Milliseconds(), "pr", run.PREvent.PRNumber)
 	run.FileReviews = crossChecked
 	return nil
 }
