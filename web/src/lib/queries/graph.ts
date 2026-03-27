@@ -25,8 +25,8 @@ export function useFileMemory(repoId: number | undefined, filePath: string | nul
         file_path: string;
         risk_score: { trace_count: number; last_trace: string };
         patterns: { content: string; source: string }[];
-        recent_comments: { severity: string; body: string; pr_number: number }[];
-        traces: { kind: string; summary: string; created_at: string }[];
+        recent_comments: { severity: string; category: string; body: string; created_at: string }[];
+        traces: { trace_type: string; content: string; pr_number: number; created_at: string }[];
       }>(`/api/v1/repos/${repoId}/files/${filePath}`),
     enabled: !!repoId && !!filePath && !!api.active,
   });
