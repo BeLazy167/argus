@@ -101,6 +101,8 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 		CompletionTokens: resp.TokensUsed.CompletionTokens,
 		TotalTokens:      resp.TokensUsed.TotalTokens,
 		Cost:             resp.Cost,
+		Model:            cfg.Model,
+		Provider:         cfg.Provider,
 	}
 	run.Tokens.addToTotal(run.Tokens.Scoring)
 
