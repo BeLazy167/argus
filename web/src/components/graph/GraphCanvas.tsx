@@ -21,10 +21,10 @@ import { getLayoutedElements } from "./layout";
 const nodeTypes = { module: ModuleNode };
 
 const EDGE_STYLES: Record<string, Partial<Edge>> = {
-  imports: { style: { stroke: "#64748b", strokeWidth: 2 }, animated: false },
+  imports: { style: { stroke: "#475569", strokeWidth: 1.5 } },
   calls: { style: { stroke: "#f59e0b", strokeWidth: 1.5, strokeDasharray: "5 5" }, animated: true },
-  uses_type: { style: { stroke: "#8b5cf6", strokeWidth: 1, strokeDasharray: "2 4" }, animated: false },
-  implements: { style: { stroke: "#22c55e", strokeWidth: 2 }, animated: false },
+  uses_type: { style: { stroke: "#7c3aed", strokeWidth: 1, strokeDasharray: "3 3" } },
+  implements: { style: { stroke: "#22c55e", strokeWidth: 1.5 } },
 };
 
 type Props = {
@@ -34,7 +34,12 @@ type Props = {
   defaultBranch: string;
 };
 
-function transformData(graphNodes: GraphNode[], graphEdges: GraphEdge[], repoFullName: string, defaultBranch: string): { nodes: Node[]; edges: Edge[] } {
+function transformData(
+  graphNodes: GraphNode[],
+  graphEdges: GraphEdge[],
+  repoFullName: string,
+  defaultBranch: string
+): { nodes: Node[]; edges: Edge[] } {
   const nodes: Node[] = graphNodes.map((n) => ({
     id: String(n.id),
     type: "module",
@@ -48,13 +53,12 @@ function transformData(graphNodes: GraphNode[], graphEdges: GraphEdge[], repoFul
     },
   }));
 
+  // No labels on edges — cleaner. Tooltip on hover via title.
   const edges: Edge[] = graphEdges.map((e) => ({
     id: String(e.id),
     source: String(e.source_id),
     target: String(e.target_id),
-    markerEnd: { type: MarkerType.ArrowClosed, width: 15, height: 15 },
-    label: e.kind,
-    labelStyle: { fontSize: 9, fill: "#64748b" },
+    markerEnd: { type: MarkerType.ArrowClosed, width: 12, height: 12, color: "#475569" },
     ...(EDGE_STYLES[e.kind] || EDGE_STYLES.imports),
   }));
 
@@ -89,12 +93,19 @@ function GraphCanvasInner({ graphNodes, graphEdges, repoFullName, defaultBranch,
       onEdgesChange={onEdgesChange}
       nodeTypes={nodeTypes}
       fitView
+      fitViewOptions={{ padding: 0.2 }}
       proOptions={{ hideAttribution: true }}
       className="bg-charcoal"
+      minZoom={0.3}
+      maxZoom={2}
     >
-      <Background color="#333" gap={20} />
+      <Background color="#1e1e2e" gap={24} size={1} />
       <Controls className="!bg-charcoal !border-iron !shadow-xl [&>button]:!bg-charcoal [&>button]:!border-iron [&>button]:!text-slate-text [&>button:hover]:!bg-iron/30" />
-      <MiniMap className="!bg-charcoal !border-iron" nodeColor={langColor} />
+      <MiniMap
+        className="!bg-charcoal/80 !border-iron"
+        nodeColor={langColor}
+        maskColor="rgba(0,0,0,0.7)"
+      />
     </ReactFlow>
   );
 }
@@ -110,10 +121,12 @@ export default function GraphCanvas(props: Props) {
             key={d}
             onClick={() => setDirection(d)}
             className={`rounded border px-2 py-1 text-[10px] font-mono transition-colors ${
-              direction === d ? "border-amber/50 bg-amber/10 text-amber" : "border-iron bg-iron/30 text-slate-text hover:text-foreground"
+              direction === d
+                ? "border-amber/50 bg-amber/10 text-amber"
+                : "border-iron bg-iron/30 text-slate-text hover:text-foreground"
             }`}
           >
-            {d}
+            {d === "TB" ? "↕ Vertical" : "↔ Horizontal"}
           </button>
         ))}
       </div>

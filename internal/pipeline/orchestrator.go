@@ -1617,17 +1617,19 @@ func (o *Orchestrator) extractArchitectureGraph(ctx context.Context, run *Pipeli
 	graphCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 
-	systemPrompt := `You extract architectural components from code changes. For each changed file, identify the key module, class, or component it belongs to and its dependencies.
+	systemPrompt := `Extract architectural components from code changes for a dependency graph visualization.
 
 Output JSON:
-{"nodes": [{"name": "ComponentName", "kind": "module|class|function", "file_path": "path/to/file.ts", "language": "typescript"}], "edges": [{"source": "ComponentName", "target": "DependencyName", "kind": "imports|calls|uses_type"}]}
+{"nodes": [{"name": "Name", "kind": "module|class|function", "file_path": "path/to/file.ts", "language": "typescript"}], "edges": [{"source": "Name", "target": "DependencyName", "kind": "imports|calls|uses_type|implements"}]}
 
 Rules:
-- Use high-level component names, not individual functions (unless the function IS the component)
-- "kind" for nodes: module, class, function, file
-- "kind" for edges: imports, calls, uses_type, implements
-- Only include components visible in the changed files
-- Keep it concise — max 20 nodes per extraction`
+- Prefer concrete classes/structs over interfaces. Only include interfaces if they are central to the architecture (e.g. a core interface that multiple providers implement).
+- Use the actual class/struct/module name from the code, not a description.
+- "kind" for nodes: module (a file's primary export), class (concrete class/struct), function (standalone function that IS the component)
+- "kind" for edges: imports (file-level dependency), calls (runtime invocation), uses_type (type reference), implements (interface implementation)
+- Include "calls" edges when you can see function calls between components in the diff — these are the most useful for tracing impact.
+- Max 15 nodes per extraction. Quality over quantity.
+- file_path must be the exact path from the diff header.`
 
 	resp, err := provider.Complete(graphCtx, llm.CompletionRequest{
 		Model:  cfg.Model,
