@@ -1,21 +1,23 @@
 import dagre from "dagre";
 import { Position, type Node, type Edge } from "@xyflow/react";
 
-const NODE_WIDTH = 180;
-const NODE_HEIGHT = 60;
-const GROUP_PADDING = 40;
+const NODE_WIDTH = 160;
+const NODE_HEIGHT = 44;
+const GROUP_PAD_X = 30;
+const GROUP_PAD_Y = 50; // extra top for label
 
-/** Extract directory group from a file path (e.g. "src/lib/core/interfaces.ts" → "src/lib/core") */
+/** Extract directory group from file path */
 function dirGroup(filePath: string): string {
   const parts = filePath.split("/");
   if (parts.length <= 1) return "root";
   return parts.slice(0, -1).join("/");
 }
 
-/** Get a short label for a directory group */
+/** Short readable label for a directory */
 function groupLabel(dir: string): string {
   const parts = dir.split("/");
-  return parts[parts.length - 1] || dir;
+  // Use last 2 segments for readability: "lib/providers" not just "providers"
+  return parts.slice(-2).join("/");
 }
 
 export function getLayoutedElements(
@@ -23,13 +25,8 @@ export function getLayoutedElements(
   edges: Edge[],
   direction: "TB" | "LR" = "TB"
 ) {
-  const g = new dagre.graphlib.Graph({ compound: true }).setDefaultEdgeLabel(
-    () => ({})
-  );
-  g.setGraph({ rankdir: direction, nodesep: 50, ranksep: 100, marginx: 30, marginy: 30 });
-
-  // Collect unique groups from file paths
-  const groups = new Map<string, string[]>(); // dir → node IDs
+  // Phase 1: Compute groups
+  const groups = new Map<string, string[]>();
   nodes.forEach((node) => {
     const fp = (node.data?.filePath as string) || "";
     const group = dirGroup(fp);
@@ -37,42 +34,19 @@ export function getLayoutedElements(
     groups.get(group)!.push(node.id);
   });
 
-  // Create group (parent) nodes
-  const groupNodes: Node[] = [];
-  groups.forEach((memberIds, dir) => {
-    if (memberIds.length < 2) return; // don't group singletons
-    const groupId = `group:${dir}`;
-    g.setNode(groupId, {
-      width: NODE_WIDTH * 2 + GROUP_PADDING,
-      height: NODE_HEIGHT * Math.ceil(memberIds.length / 2) + GROUP_PADDING * 2,
-    });
-    groupNodes.push({
-      id: groupId,
-      type: "group",
-      position: { x: 0, y: 0 },
-      data: { label: groupLabel(dir) },
-      style: {
-        width: NODE_WIDTH * 2 + GROUP_PADDING * 2,
-        height: NODE_HEIGHT * Math.ceil(memberIds.length / 2) + GROUP_PADDING * 3,
-        backgroundColor: "rgba(30, 30, 40, 0.6)",
-        borderRadius: 12,
-        border: "1px solid rgba(100, 116, 139, 0.2)",
-        padding: GROUP_PADDING,
-      },
-    });
+  // Phase 2: Layout with dagre (flat — no compound, more reliable)
+  const g = new dagre.graphlib.Graph().setDefaultEdgeLabel(() => ({}));
+  g.setGraph({
+    rankdir: direction,
+    nodesep: 70,
+    ranksep: 120,
+    marginx: 50,
+    marginy: 50,
   });
 
-  // Add all real nodes with group parents
   nodes.forEach((node) => {
-    const fp = (node.data?.filePath as string) || "";
-    const group = dirGroup(fp);
-    const groupId = `group:${group}`;
     g.setNode(node.id, { width: NODE_WIDTH, height: NODE_HEIGHT });
-    if (groups.has(group) && groups.get(group)!.length >= 2) {
-      g.setParent(node.id, groupId);
-    }
   });
-
   edges.forEach((edge) => {
     g.setEdge(edge.source, edge.target);
   });
@@ -81,47 +55,60 @@ export function getLayoutedElements(
 
   const isHorizontal = direction === "LR";
 
-  // Position group nodes
-  const positionedGroups = groupNodes.map((gn) => {
-    const pos = g.node(gn.id);
-    if (!pos) return gn;
-    return {
-      ...gn,
-      position: { x: pos.x - (pos.width || 0) / 2, y: pos.y - (pos.height || 0) / 2 },
-    };
-  });
-
-  // Position child nodes (relative to parent if grouped)
+  // Position nodes from dagre
   const positionedNodes = nodes.map((node) => {
     const pos = g.node(node.id);
-    const fp = (node.data?.filePath as string) || "";
-    const group = dirGroup(fp);
-    const groupId = `group:${group}`;
-    const hasGroup = groups.has(group) && groups.get(group)!.length >= 2;
-
-    let x = pos.x - NODE_WIDTH / 2;
-    let y = pos.y - NODE_HEIGHT / 2;
-
-    // If grouped, make position relative to parent
-    if (hasGroup) {
-      const parentPos = g.node(groupId);
-      if (parentPos) {
-        x = x - (parentPos.x - (parentPos.width || 0) / 2);
-        y = y - (parentPos.y - (parentPos.height || 0) / 2);
-      }
-    }
-
     return {
       ...node,
       targetPosition: isHorizontal ? Position.Left : Position.Top,
       sourcePosition: isHorizontal ? Position.Right : Position.Bottom,
-      position: { x, y },
-      ...(hasGroup ? { parentId: groupId, extent: "parent" as const } : {}),
+      position: { x: pos.x - NODE_WIDTH / 2, y: pos.y - NODE_HEIGHT / 2 },
     };
   });
 
+  // Phase 3: Compute group bounding boxes from positioned nodes
+  const groupNodes: Node[] = [];
+  groups.forEach((memberIds, dir) => {
+    if (memberIds.length < 2) return;
+
+    // Find bounding box of member nodes
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const id of memberIds) {
+      const node = positionedNodes.find((n) => n.id === id);
+      if (!node) continue;
+      minX = Math.min(minX, node.position.x);
+      minY = Math.min(minY, node.position.y);
+      maxX = Math.max(maxX, node.position.x + NODE_WIDTH);
+      maxY = Math.max(maxY, node.position.y + NODE_HEIGHT);
+    }
+
+    const groupId = `group:${dir}`;
+    const gx = minX - GROUP_PAD_X;
+    const gy = minY - GROUP_PAD_Y;
+    const gw = maxX - minX + NODE_WIDTH + GROUP_PAD_X * 2;
+    const gh = maxY - minY + NODE_HEIGHT + GROUP_PAD_Y + GROUP_PAD_X;
+
+    groupNodes.push({
+      id: groupId,
+      type: "group",
+      position: { x: gx, y: gy },
+      data: { label: groupLabel(dir) },
+      style: {
+        width: gw,
+        height: gh,
+        backgroundColor: "rgba(20, 20, 30, 0.5)",
+        borderRadius: 16,
+        border: "1px solid rgba(71, 85, 105, 0.15)",
+        pointerEvents: "none" as const,
+      },
+      selectable: false,
+      draggable: false,
+    });
+  });
+
+  // Groups go first (rendered behind), then nodes on top
   return {
-    nodes: [...positionedGroups, ...positionedNodes],
+    nodes: [...groupNodes, ...positionedNodes],
     edges,
   };
 }
