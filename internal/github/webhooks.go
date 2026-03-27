@@ -30,6 +30,7 @@ type PREvent struct {
 	BaseRef        string
 	HeadRef         string
 	PRBody          string // first ~500 chars of PR description
+	Merged          bool
 	PersonaOverride string `json:"-"` // set by @argus-eye review --persona X
 }
 
@@ -80,6 +81,7 @@ func ToPREvent(event *WebhookEvent) (*PREvent, error) {
 		BaseRef:        prEvent.GetPullRequest().GetBase().GetRef(),
 		HeadRef:        prEvent.GetPullRequest().GetHead().GetRef(),
 		PRBody:         util.Truncate(prEvent.GetPullRequest().GetBody(), 500, false),
+		Merged:         prEvent.GetPullRequest().GetMerged(),
 	}, nil
 }
 

@@ -23,6 +23,20 @@ func (q *Queries) DeleteNodesByFile(ctx context.Context, arg DeleteNodesByFilePa
 	return err
 }
 
+const deleteUnmergedNodesByPR = `-- name: DeleteUnmergedNodesByPR :exec
+DELETE FROM code_nodes WHERE repo_id = $1 AND pr_number = $2 AND is_merged = false
+`
+
+type DeleteUnmergedNodesByPRParams struct {
+	RepoID   int64  `json:"repo_id"`
+	PrNumber *int32 `json:"pr_number"`
+}
+
+func (q *Queries) DeleteUnmergedNodesByPR(ctx context.Context, arg DeleteUnmergedNodesByPRParams) error {
+	_, err := q.db.Exec(ctx, deleteUnmergedNodesByPR, arg.RepoID, arg.PrNumber)
+	return err
+}
+
 const getBlastRadius = `-- name: GetBlastRadius :many
 WITH RECURSIVE affected AS (
     SELECT id, name, file_path, kind, 0 as depth
@@ -125,7 +139,7 @@ func (q *Queries) ListGraphEdges(ctx context.Context, repoID int64) ([]ListGraph
 }
 
 const listGraphNodes = `-- name: ListGraphNodes :many
-SELECT id, repo_id, kind, name, file_path, line_start, line_end, language
+SELECT id, repo_id, kind, name, file_path, line_start, line_end, language, pr_number, is_merged
 FROM code_nodes WHERE repo_id = $1 ORDER BY file_path, name
 `
 
@@ -138,6 +152,8 @@ type ListGraphNodesRow struct {
 	LineStart *int32  `json:"line_start"`
 	LineEnd   *int32  `json:"line_end"`
 	Language  *string `json:"language"`
+	PrNumber  *int32  `json:"pr_number"`
+	IsMerged  bool    `json:"is_merged"`
 }
 
 func (q *Queries) ListGraphNodes(ctx context.Context, repoID int64) ([]ListGraphNodesRow, error) {
@@ -158,6 +174,8 @@ func (q *Queries) ListGraphNodes(ctx context.Context, repoID int64) ([]ListGraph
 			&i.LineStart,
 			&i.LineEnd,
 			&i.Language,
+			&i.PrNumber,
+			&i.IsMerged,
 		); err != nil {
 			return nil, err
 		}
@@ -167,6 +185,20 @@ func (q *Queries) ListGraphNodes(ctx context.Context, repoID int64) ([]ListGraph
 		return nil, err
 	}
 	return items, nil
+}
+
+const markNodesMerged = `-- name: MarkNodesMerged :exec
+UPDATE code_nodes SET is_merged = true WHERE repo_id = $1 AND pr_number = $2
+`
+
+type MarkNodesMergedParams struct {
+	RepoID   int64  `json:"repo_id"`
+	PrNumber *int32 `json:"pr_number"`
+}
+
+func (q *Queries) MarkNodesMerged(ctx context.Context, arg MarkNodesMergedParams) error {
+	_, err := q.db.Exec(ctx, markNodesMerged, arg.RepoID, arg.PrNumber)
+	return err
 }
 
 const upsertCodeEdge = `-- name: UpsertCodeEdge :exec
@@ -193,10 +225,10 @@ func (q *Queries) UpsertCodeEdge(ctx context.Context, arg UpsertCodeEdgeParams) 
 }
 
 const upsertCodeNode = `-- name: UpsertCodeNode :one
-INSERT INTO code_nodes (repo_id, kind, name, file_path, line_start, line_end, language, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+INSERT INTO code_nodes (repo_id, kind, name, file_path, line_start, line_end, language, pr_number, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
 ON CONFLICT (repo_id, file_path, kind, name)
-DO UPDATE SET line_start = $5, line_end = $6, language = $7, updated_at = NOW()
+DO UPDATE SET line_start = $5, line_end = $6, language = $7, pr_number = $8, updated_at = NOW()
 RETURNING id
 `
 
@@ -208,6 +240,7 @@ type UpsertCodeNodeParams struct {
 	LineStart *int32  `json:"line_start"`
 	LineEnd   *int32  `json:"line_end"`
 	Language  *string `json:"language"`
+	PrNumber  *int32  `json:"pr_number"`
 }
 
 func (q *Queries) UpsertCodeNode(ctx context.Context, arg UpsertCodeNodeParams) (int64, error) {
@@ -219,6 +252,7 @@ func (q *Queries) UpsertCodeNode(ctx context.Context, arg UpsertCodeNodeParams) 
 		arg.LineStart,
 		arg.LineEnd,
 		arg.Language,
+		arg.PrNumber,
 	)
 	var id int64
 	err := row.Scan(&id)

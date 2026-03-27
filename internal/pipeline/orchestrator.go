@@ -146,6 +146,9 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 	// Only review on opened, synchronize, reopened, manual
 	switch event.Action {
 	case "opened", "synchronize", "reopened", "manual":
+		// continue to review
+	case "closed":
+		return o.handlePRClosed(ctx, event)
 	default:
 		o.logger.Info("ignoring PR action", "action", event.Action)
 		return nil
@@ -331,6 +334,27 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 	o.postStartedComment(ctx, event, run, reviewModel)
 
 	return o.sm.Run(ctx, run)
+}
+
+func (o *Orchestrator) handlePRClosed(ctx context.Context, event ghpkg.PREvent) error {
+	dbRepo, err := o.st.GetRepoByFullName(ctx, event.RepoFullName)
+	if err != nil {
+		o.logger.Info("[closed] repo not found, skipping", "repo", event.RepoFullName, "error", err)
+		return nil
+	}
+
+	if event.Merged {
+		if err := o.st.MarkNodesMerged(ctx, dbRepo.ID, event.PRNumber); err != nil {
+			o.logger.Warn("[closed] failed to mark nodes merged", "error", err, "pr", event.PRNumber)
+		}
+		o.logger.Info("[closed] PR merged — nodes marked permanent", "pr", event.PRNumber, "repo", event.RepoFullName)
+	} else {
+		if err := o.st.DeleteUnmergedNodesByPR(ctx, dbRepo.ID, event.PRNumber); err != nil {
+			o.logger.Warn("[closed] failed to delete unmerged nodes", "error", err, "pr", event.PRNumber)
+		}
+		o.logger.Info("[closed] PR closed without merge — unmerged nodes removed", "pr", event.PRNumber, "repo", event.RepoFullName)
+	}
+	return nil
 }
 
 // RetryReview resumes a pipeline run for a given review ID.
@@ -1689,7 +1713,7 @@ Rules:
 		if n.Name == "" || n.FilePath == "" || n.Kind == "" {
 			continue
 		}
-		id, err := o.st.UpsertCodeNode(ctx, run.DBRepoID, n.Kind, n.Name, n.FilePath, 0, 0, n.Language)
+		id, err := o.st.UpsertCodeNode(ctx, run.DBRepoID, n.Kind, n.Name, n.FilePath, 0, 0, n.Language, run.PREvent.PRNumber)
 		if err != nil {
 			o.logger.Warn("upsertCodeNode", "error", err, "name", n.Name)
 			continue
