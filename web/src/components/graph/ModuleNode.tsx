@@ -24,7 +24,7 @@ function ModuleNode({ data }: NodeProps) {
         shadow-lg ${lang.glow} transition-all duration-200
         hover:shadow-xl hover:brightness-125 hover:border-opacity-60 cursor-pointer
         ${isInterface ? "px-2.5 py-1.5 min-w-[100px]" : "px-3 py-2 min-w-[130px]"}`}
-      onClick={() => {
+      onDoubleClick={() => {
         if (data.githubUrl) window.open(data.githubUrl as string, "_blank");
       }}
     >
