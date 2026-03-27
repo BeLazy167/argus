@@ -1,11 +1,13 @@
 "use client";
+import { useState } from "react";
 import { Network, Loader2, GitBranch } from "lucide-react";
 import { useActiveRepo } from "@/lib/hooks/use-active-repo";
 import { useGraphData } from "@/lib/queries/graph";
 import { useRepos } from "@/lib/queries/repos";
 import GraphCanvas from "@/components/graph/GraphCanvas";
+import FileMemorySidebar from "@/components/graph/FileMemorySidebar";
 
-function GraphBody() {
+function GraphBody({ onSelectFile }: { onSelectFile?: (filePath: string | null) => void }) {
   const { activeId } = useActiveRepo();
   const { data: graphData, isLoading, error } = useGraphData();
   const { data: repos } = useRepos();
@@ -63,12 +65,14 @@ function GraphBody() {
       graphEdges={graphData.edges}
       repoFullName={activeRepo?.full_name || ""}
       defaultBranch={activeRepo?.default_branch || "main"}
+      onSelectFile={onSelectFile}
     />
   );
 }
 
 export default function ArchitecturePage() {
   const { data: graphData } = useGraphData();
+  const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
 
   return (
     <div className="flex flex-col h-[calc(100vh-4rem)] bg-[#0a0a12]">
@@ -85,8 +89,16 @@ export default function ArchitecturePage() {
         )}
       </div>
 
-      <div className="flex-1 min-h-0">
-        <GraphBody />
+      <div className="flex-1 min-h-0 flex">
+        <div className="flex-1">
+          <GraphBody onSelectFile={setSelectedFilePath} />
+        </div>
+        {selectedFilePath && (
+          <FileMemorySidebar
+            filePath={selectedFilePath}
+            onClose={() => setSelectedFilePath(null)}
+          />
+        )}
       </div>
     </div>
   );

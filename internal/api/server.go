@@ -152,6 +152,7 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 
 				// Graph
 				r.Get("/repos/{repoID}/graph", s.getGraph)
+				r.Get("/repos/{repoID}/files/*", s.getFileMemory)
 
 				// Scenarios
 				r.Get("/repos/{repoID}/scenarios", s.listScenarios)

@@ -35,6 +35,7 @@ type Props = {
   graphEdges: GraphEdge[];
   repoFullName: string;
   defaultBranch: string;
+  onSelectFile?: (filePath: string | null) => void;
 };
 
 function langColor(n: Node): string {
@@ -48,7 +49,7 @@ function langColor(n: Node): string {
 
 type InnerProps = Props & { direction: "TB" | "LR" };
 
-function GraphCanvasInner({ graphNodes, graphEdges, repoFullName, defaultBranch, direction }: InnerProps) {
+function GraphCanvasInner({ graphNodes, graphEdges, repoFullName, defaultBranch, direction, onSelectFile }: InnerProps) {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
 
   // Compute initial layout once (only when data/direction changes)
@@ -158,12 +159,15 @@ function GraphCanvasInner({ graphNodes, graphEdges, repoFullName, defaultBranch,
 
   const onNodeClick: NodeMouseHandler = useCallback((_event, node) => {
     if (node.type === "group") return;
-    setSelectedNodeId((prev) => (prev === node.id ? null : node.id));
-  }, []);
+    const isDeselect = selectedNodeId === node.id;
+    setSelectedNodeId(isDeselect ? null : node.id);
+    onSelectFile?.(isDeselect ? null : (node.data?.filePath as string) ?? null);
+  }, [selectedNodeId, onSelectFile]);
 
   const onPaneClick = useCallback(() => {
     setSelectedNodeId(null);
-  }, []);
+    onSelectFile?.(null);
+  }, [onSelectFile]);
 
   return (
     <ReactFlow
