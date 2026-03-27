@@ -15,6 +15,7 @@ import (
 
 	gh "github.com/google/go-github/v68/github"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	ghpkg "github.com/BeLazy167/argus/internal/github"
 	"github.com/BeLazy167/argus/internal/llm"
@@ -339,18 +340,26 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 func (o *Orchestrator) handlePRClosed(ctx context.Context, event ghpkg.PREvent) error {
 	dbRepo, err := o.st.GetRepoByFullName(ctx, event.RepoFullName)
 	if err != nil {
-		o.logger.Info("[closed] repo not found, skipping", "repo", event.RepoFullName, "error", err)
+		if errors.Is(err, pgx.ErrNoRows) {
+			o.logger.Info("[closed] repo not tracked, skipping", "repo", event.RepoFullName)
+			return nil
+		}
+		return fmt.Errorf("handlePRClosed: lookup repo %s: %w", event.RepoFullName, err)
+	}
+	if !dbRepo.Enabled {
 		return nil
 	}
 
 	if event.Merged {
 		if err := o.st.MarkNodesMerged(ctx, dbRepo.ID, event.PRNumber); err != nil {
-			o.logger.Warn("[closed] failed to mark nodes merged", "error", err, "pr", event.PRNumber)
+			o.logger.Error("[closed] failed to mark nodes merged", "error", err, "pr", event.PRNumber, "repo", event.RepoFullName)
+			return nil // non-fatal for webhook response
 		}
 		o.logger.Info("[closed] PR merged — nodes marked permanent", "pr", event.PRNumber, "repo", event.RepoFullName)
 	} else {
 		if err := o.st.DeleteUnmergedNodesByPR(ctx, dbRepo.ID, event.PRNumber); err != nil {
-			o.logger.Warn("[closed] failed to delete unmerged nodes", "error", err, "pr", event.PRNumber)
+			o.logger.Error("[closed] failed to delete unmerged nodes", "error", err, "pr", event.PRNumber, "repo", event.RepoFullName)
+			return nil
 		}
 		o.logger.Info("[closed] PR closed without merge — unmerged nodes removed", "pr", event.PRNumber, "repo", event.RepoFullName)
 	}
