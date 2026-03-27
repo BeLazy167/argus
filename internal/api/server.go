@@ -69,6 +69,9 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 
 	// API v1 (authenticated via JWT)
 	r.Route("/api/v1", func(r chi.Router) {
+		// WebSocket stream — handles its own auth from query params
+		r.Get("/reviews/{reviewID}/stream", s.streamReviewWS)
+
 		r.Use(s.jwtAuth)
 
 		// Unscoped (user-level) — with timeout
@@ -81,9 +84,6 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 		// Scoped (requires linked installation)
 		r.Group(func(r chi.Router) {
 			r.Use(s.requireInstallationScope)
-
-			// SSE stream — no timeout (long-lived connection)
-			r.Get("/reviews/{reviewID}/stream", s.streamReview)
 
 			// All other scoped routes — with timeout
 			r.Group(func(r chi.Router) {

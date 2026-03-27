@@ -102,7 +102,7 @@ func (c *Client) GetSettings(ctx context.Context) (map[string]any, error) {
 
 // UpdateSettings updates org-level Supermemory settings (filter prompt, chunk size, etc).
 func (c *Client) UpdateSettings(ctx context.Context, settings map[string]any) error {
-	return c.doJSON(ctx, "/v3/settings", settings, &struct{}{})
+	return c.doRequest(ctx, "PATCH", "/v3/settings", settings, &struct{}{})
 }
 
 // UpdateEntityContext sets per-container-tag context that guides memory extraction.

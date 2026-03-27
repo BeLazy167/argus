@@ -25,12 +25,20 @@ export type StageTokens = {
   completion_tokens: number;
   total_tokens: number;
   cost?: number;
+  model?: string;
+  provider?: string;
 };
 
 export type TokenUsage = {
   triage: StageTokens;
   review: StageTokens[];
   scoring?: StageTokens;
+  synthesis?: StageTokens;
+  enrichment?: StageTokens;
+  conventions?: StageTokens;
+  patterns?: StageTokens;
+  file_synthesis?: StageTokens[];
+  graph?: StageTokens;
   total: StageTokens;
 };
 

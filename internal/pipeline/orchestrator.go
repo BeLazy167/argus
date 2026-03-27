@@ -771,7 +771,15 @@ func (o *Orchestrator) pass2(ctx context.Context, run *PipelineRun) error {
 	fileContents := prefetchFiles(ctx, o.ghClient, run, owner, repo, hotFiles)
 
 	// Fresh Architecture review — no prior comments in context
+	pass2Ctx, pass2Cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer pass2Cancel()
+
+	var completed int
 	for _, f := range hotFiles {
+		if pass2Ctx.Err() != nil {
+			o.logger.Warn("pass2 timeout — returning partial results", "completed", completed, "total", len(hotFiles))
+			break
+		}
 		p := reviewParams{
 			file:       f,
 			action:     TriageDeep,
@@ -779,7 +787,7 @@ func (o *Orchestrator) pass2(ctx context.Context, run *PipelineRun) error {
 			systemBase: specialistPrompt(SpecialistArchitecture, run.Prompts),
 			deepReview: true,
 		}
-		rev, tok, err := o.reviewStage.reviewFile(ctx, run, p, fileContents, owner, repo, cfg, provider)
+		rev, tok, err := o.reviewStage.reviewFile(pass2Ctx, run, p, fileContents, owner, repo, cfg, provider)
 		if err != nil {
 			o.logger.Warn("pass2 review failed", "file", f.NewName, "error", err)
 			continue
@@ -802,9 +810,10 @@ func (o *Orchestrator) pass2(ctx context.Context, run *PipelineRun) error {
 		if !merged && len(rev.Comments) > 0 {
 			run.FileReviews = append(run.FileReviews, rev)
 		}
+		completed++
 	}
 
-	o.logger.Info("pass2 complete", "files_reviewed", len(hotFiles))
+	o.logger.Info("pass2 complete", "files_reviewed", completed, "total_hot", len(hotFiles))
 
 	// Re-validate all comments against diff to prevent 422 from GitHub
 	validLines := make(map[string]map[int]bool)
