@@ -67,11 +67,11 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 	// Webhooks (unauthenticated, signature-verified)
 	r.Post("/webhooks/github", s.handleWebhook)
 
+	// WebSocket stream — outside /api/v1 auth, handles its own auth from query params
+	r.Get("/api/v1/reviews/{reviewID}/stream", s.streamReviewWS)
+
 	// API v1 (authenticated via JWT)
 	r.Route("/api/v1", func(r chi.Router) {
-		// WebSocket stream — handles its own auth from query params
-		r.Get("/reviews/{reviewID}/stream", s.streamReviewWS)
-
 		r.Use(s.jwtAuth)
 
 		// Unscoped (user-level) — with timeout
