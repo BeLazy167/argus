@@ -859,6 +859,20 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		run.PREvent.PRNumber,
 		submission,
 	)
+	if err != nil && strings.Contains(err.Error(), "422") {
+		// Retry without multi-line start positions (GitHub can't resolve them)
+		o.logger.Warn("posting review failed with 422, retrying without start_line", "error", err, "pr", run.PREvent.PRNumber)
+		for i := range submission.Comments {
+			submission.Comments[i].StartLine = 0
+		}
+		ghReviewID, err = o.ghClient.PostReview(
+			ctx,
+			run.PREvent.InstallationID,
+			owner, repo,
+			run.PREvent.PRNumber,
+			submission,
+		)
+	}
 	if err != nil {
 		return fmt.Errorf("posting review: %w", err)
 	}
