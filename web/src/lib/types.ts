@@ -238,6 +238,8 @@ export type GraphNode = {
   line_start: number;
   line_end: number;
   language: string;
+  pr_number: number | null;
+  is_merged: boolean;
 };
 
 export type GraphEdge = {

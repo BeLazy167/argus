@@ -17,13 +17,17 @@ function ModuleNode({ data }: NodeProps) {
   const kind = data.kind as string;
   const name = data.label as string;
   const isInterface = kind === "interface" || (name.startsWith("I") && name[1] === name[1]?.toUpperCase() && kind === "class");
+  const isMerged = data.isMerged as boolean;
+  const prNumber = data.prNumber as number | null;
+  const isOpenPR = prNumber != null && !isMerged;
 
   return (
     <div
       className={`group relative rounded-md border ${lang.border} bg-[#12121a]/90 backdrop-blur-md
         shadow-lg ${lang.glow} transition-all duration-200
         hover:shadow-xl hover:brightness-125 hover:border-opacity-60 cursor-pointer
-        ${isInterface ? "px-2.5 py-1.5 min-w-[100px]" : "px-3 py-2 min-w-[130px]"}`}
+        ${isInterface ? "px-2.5 py-1.5 min-w-[100px]" : "px-3 py-2 min-w-[130px]"}
+        ${isOpenPR ? "border-dashed animate-pulse-subtle" : ""}`}
       onDoubleClick={() => {
         if (data.githubUrl) window.open(data.githubUrl as string, "_blank");
       }}
@@ -44,6 +48,12 @@ function ModuleNode({ data }: NodeProps) {
       {!isInterface && (
         <span className="text-[8px] font-mono text-slate-600 uppercase tracking-wider mt-0.5 block">
           {kind}
+        </span>
+      )}
+
+      {isOpenPR && (
+        <span className="absolute -bottom-1 -right-1 rounded-full bg-amber-500/20 border border-amber-500/30 px-1 py-0.5 text-[7px] font-mono text-amber-400">
+          PR #{prNumber}
         </span>
       )}
 

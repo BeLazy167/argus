@@ -19,15 +19,15 @@ type FileMemory struct {
 }
 
 // UpsertCodeNode inserts or updates a code node, returning its ID.
-func (s *Store) UpsertCodeNode(ctx context.Context, repoID int64, kind, name, filePath string, lineStart, lineEnd int, language string) (int64, error) {
+func (s *Store) UpsertCodeNode(ctx context.Context, repoID int64, kind, name, filePath string, lineStart, lineEnd int, language string, prNumber int) (int64, error) {
 	var id int64
 	err := s.Pool.QueryRow(ctx, `
-		INSERT INTO code_nodes (repo_id, kind, name, file_path, line_start, line_end, language, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+		INSERT INTO code_nodes (repo_id, kind, name, file_path, line_start, line_end, language, pr_number, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
 		ON CONFLICT (repo_id, file_path, kind, name)
-		DO UPDATE SET line_start = $5, line_end = $6, language = $7, updated_at = NOW()
+		DO UPDATE SET line_start = $5, line_end = $6, language = $7, pr_number = $8, updated_at = NOW()
 		RETURNING id
-	`, repoID, kind, name, filePath, lineStart, lineEnd, language).Scan(&id)
+	`, repoID, kind, name, filePath, lineStart, lineEnd, language, prNumber).Scan(&id)
 	return id, err
 }
 
@@ -38,6 +38,22 @@ func (s *Store) UpsertCodeEdge(ctx context.Context, repoID, sourceID, targetID i
 		VALUES ($1, $2, $3, $4, NOW())
 		ON CONFLICT (repo_id, source_id, target_id, kind) DO NOTHING
 	`, repoID, sourceID, targetID, kind)
+	return err
+}
+
+// MarkNodesMerged marks all code_nodes for a given PR as permanently merged.
+func (s *Store) MarkNodesMerged(ctx context.Context, repoID int64, prNumber int) error {
+	_, err := s.Pool.Exec(ctx,
+		`UPDATE code_nodes SET is_merged = true WHERE repo_id = $1 AND pr_number = $2`,
+		repoID, prNumber)
+	return err
+}
+
+// DeleteUnmergedNodesByPR deletes code_nodes added by a specific PR that haven't been merged.
+func (s *Store) DeleteUnmergedNodesByPR(ctx context.Context, repoID int64, prNumber int) error {
+	_, err := s.Pool.Exec(ctx,
+		`DELETE FROM code_nodes WHERE repo_id = $1 AND pr_number = $2 AND is_merged = false`,
+		repoID, prNumber)
 	return err
 }
 

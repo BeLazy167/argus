@@ -64,6 +64,8 @@ function GraphCanvasInner({ graphNodes, graphEdges, repoFullName, defaultBranch,
         language: n.language,
         filePath: n.file_path,
         githubUrl: `https://github.com/${repoFullName}/blob/${defaultBranch}/${n.file_path}`,
+        isMerged: n.is_merged,
+        prNumber: n.pr_number,
       },
     }));
 
