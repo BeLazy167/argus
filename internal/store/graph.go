@@ -19,13 +19,16 @@ type FileMemory struct {
 }
 
 // UpsertCodeNode inserts or updates a code node, returning its ID.
+// If prNumber is 0 (e.g. from indexer), preserves the existing pr_number.
 func (s *Store) UpsertCodeNode(ctx context.Context, repoID int64, kind, name, filePath string, lineStart, lineEnd int, language string, prNumber int) (int64, error) {
 	var id int64
 	err := s.Pool.QueryRow(ctx, `
 		INSERT INTO code_nodes (repo_id, kind, name, file_path, line_start, line_end, language, pr_number, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+		VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8, 0), NOW())
 		ON CONFLICT (repo_id, file_path, kind, name)
-		DO UPDATE SET line_start = $5, line_end = $6, language = $7, pr_number = $8, updated_at = NOW()
+		DO UPDATE SET line_start = $5, line_end = $6, language = $7,
+		             pr_number = COALESCE(NULLIF($8, 0), code_nodes.pr_number),
+		             updated_at = NOW()
 		RETURNING id
 	`, repoID, kind, name, filePath, lineStart, lineEnd, language, prNumber).Scan(&id)
 	return id, err
