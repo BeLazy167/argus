@@ -125,8 +125,103 @@ func parseRSAPublicKey(k jwk) (*rsa.PublicKey, error) {
 	}, nil
 }
 
+type jwtClaims struct {
+	Sub     string
+	OrgID   string
+	OrgRole string
+}
+
+// validateToken parses and verifies a JWT, returning claims.
+func validateToken(raw string) (jwtClaims, error) {
+	if cache == nil || cache.url == "" {
+		return jwtClaims{}, fmt.Errorf("JWKS not configured")
+	}
+	parts := strings.Split(raw, ".")
+	if len(parts) != 3 {
+		return jwtClaims{}, fmt.Errorf("invalid token format")
+	}
+	headerBytes, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return jwtClaims{}, fmt.Errorf("invalid token header")
+	}
+	var header struct {
+		Kid string `json:"kid"`
+		Alg string `json:"alg"`
+	}
+	if err := json.Unmarshal(headerBytes, &header); err != nil {
+		return jwtClaims{}, fmt.Errorf("invalid token header")
+	}
+	if header.Alg != "RS256" {
+		return jwtClaims{}, fmt.Errorf("unsupported signing algorithm")
+	}
+	pubKey, err := cache.getKey(header.Kid)
+	if err != nil {
+		return jwtClaims{}, fmt.Errorf("unknown signing key")
+	}
+	sigBytes, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		return jwtClaims{}, fmt.Errorf("invalid signature")
+	}
+	hash := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
+	if err := rsa.VerifyPKCS1v15(pubKey, crypto.SHA256, hash[:], sigBytes); err != nil {
+		return jwtClaims{}, fmt.Errorf("invalid signature")
+	}
+	payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return jwtClaims{}, fmt.Errorf("invalid token payload")
+	}
+	var claims struct {
+		Sub     string  `json:"sub"`
+		Exp     float64 `json:"exp"`
+		OrgID   string  `json:"org_id"`
+		OrgRole string  `json:"org_role"`
+	}
+	if err := json.Unmarshal(payloadBytes, &claims); err != nil {
+		return jwtClaims{}, fmt.Errorf("invalid claims")
+	}
+	if time.Now().Unix() > int64(claims.Exp) {
+		return jwtClaims{}, fmt.Errorf("token expired")
+	}
+	return jwtClaims{Sub: claims.Sub, OrgID: claims.OrgID, OrgRole: claims.OrgRole}, nil
+}
+
+// resolveInstallationIDs resolves the installation IDs a user has access to.
+func (s *Server) resolveInstallationIDs(ctx context.Context, claims jwtClaims, installationIDHint string) ([]int64, error) {
+	var ids []int64
+	if claims.OrgID != "" {
+		inst, err := s.store.GetInstallationByClerkOrgID(ctx, claims.OrgID)
+		if err == nil {
+			ids = []int64{inst.ID}
+		} else {
+			ids, err = s.store.GetUserInstallationIDs(ctx, claims.Sub)
+			if err != nil {
+				return nil, fmt.Errorf("resolving installation IDs: %w", err)
+			}
+		}
+	} else {
+		var err error
+		ids, err = s.store.GetUserInstallationIDs(ctx, claims.Sub)
+		if err != nil {
+			return nil, fmt.Errorf("resolving installation IDs: %w", err)
+		}
+	}
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("no installations linked")
+	}
+	if installationIDHint != "" {
+		reqID, err := strconv.ParseInt(installationIDHint, 10, 64)
+		if err == nil {
+			for _, id := range ids {
+				if id == reqID {
+					return []int64{reqID}, nil
+				}
+			}
+		}
+	}
+	return ids, nil
+}
+
 // jwtAuth validates JWTs via JWKS. Works with both Clerk and SuperTokens.
-// Bypasses auth in dev mode if JWKS URL not configured.
 func (s *Server) jwtAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if cache == nil || cache.url == "" {
@@ -134,78 +229,16 @@ func (s *Server) jwtAuth(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-
 		auth := r.Header.Get("Authorization")
 		if !strings.HasPrefix(auth, "Bearer ") {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "missing authorization"})
 			return
 		}
-		token := strings.TrimPrefix(auth, "Bearer ")
-
-		parts := strings.Split(token, ".")
-		if len(parts) != 3 {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid token format"})
-			return
-		}
-
-		headerBytes, err := base64.RawURLEncoding.DecodeString(parts[0])
+		claims, err := validateToken(strings.TrimPrefix(auth, "Bearer "))
 		if err != nil {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid token header"})
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
 			return
 		}
-		var header struct {
-			Kid string `json:"kid"`
-			Alg string `json:"alg"`
-		}
-		if err := json.Unmarshal(headerBytes, &header); err != nil {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid token header"})
-			return
-		}
-
-		if header.Alg != "RS256" {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unsupported signing algorithm"})
-			return
-		}
-
-		pubKey, err := cache.getKey(header.Kid)
-		if err != nil {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unknown signing key"})
-			return
-		}
-
-		sigBytes, err := base64.RawURLEncoding.DecodeString(parts[2])
-		if err != nil {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid signature"})
-			return
-		}
-
-		hash := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
-		if err := rsa.VerifyPKCS1v15(pubKey, crypto.SHA256, hash[:], sigBytes); err != nil {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid signature"})
-			return
-		}
-
-		payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
-		if err != nil {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid token payload"})
-			return
-		}
-		var claims struct {
-			Sub     string  `json:"sub"`
-			Exp     float64 `json:"exp"`
-			OrgID   string  `json:"org_id"`
-			OrgRole string  `json:"org_role"`
-		}
-		if err := json.Unmarshal(payloadBytes, &claims); err != nil {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid claims"})
-			return
-		}
-
-		if time.Now().Unix() > int64(claims.Exp) {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "token expired"})
-			return
-		}
-
 		ctx := context.WithValue(r.Context(), userIDKey, claims.Sub)
 		if claims.OrgID != "" {
 			ctx = context.WithValue(ctx, orgIDKey, claims.OrgID)
@@ -224,48 +257,12 @@ func (s *Server) requireInstallationScope(next http.Handler) http.Handler {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 			return
 		}
-
-		var ids []int64
-
-		// Org-based lookup takes priority
-		if orgID := getOrgID(r.Context()); orgID != "" {
-			inst, err := s.store.GetInstallationByClerkOrgID(r.Context(), orgID)
-			if err == nil {
-				ids = []int64{inst.ID}
-			} else {
-				// Org not linked yet — fall back to user-based lookup
-				ids, err = s.store.GetUserInstallationIDs(r.Context(), userID)
-				if err != nil {
-					s.logger.Error("get user installation ids (org fallback)", "error", err)
-					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
-					return
-				}
-			}
-		} else {
-			// Personal account fallback
-			var err error
-			ids, err = s.store.GetUserInstallationIDs(r.Context(), userID)
-			if err != nil {
-				s.logger.Error("get user installation ids", "error", err)
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
-				return
-			}
-		}
-
-		if len(ids) == 0 {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "no installations linked"})
+		claims := jwtClaims{Sub: userID, OrgID: getOrgID(r.Context()), OrgRole: getOrgRole(r.Context())}
+		ids, err := s.resolveInstallationIDs(r.Context(), claims, r.Header.Get("X-Installation-ID"))
+		if err != nil {
+			s.logger.Error("resolving installation scope", "error", err)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 			return
-		}
-		if h := r.Header.Get("X-Installation-ID"); h != "" {
-			reqID, err := strconv.ParseInt(h, 10, 64)
-			if err == nil {
-				for _, id := range ids {
-					if id == reqID {
-						ids = []int64{reqID}
-						break
-					}
-				}
-			}
 		}
 		ctx := context.WithValue(r.Context(), installationIDsKey, ids)
 		next.ServeHTTP(w, r.WithContext(ctx))

@@ -84,64 +84,7 @@ function langFromPath(path: string): string {
  * Keep only the high-level synthesis prose.
  */
 function extractSynthesis(summary: string): string {
-  const lines = summary.split("\n");
-  const cleaned: string[] = [];
-  let skipping = false;
-  let inCodeBlock = false;
-
-  for (const line of lines) {
-    // Strip ALL code blocks from summary — they duplicate the detail view
-    if (/^```/.test(line.trim())) {
-      inCodeBlock = !inCodeBlock;
-      continue;
-    }
-    if (inCodeBlock) continue;
-
-    // Skip headings like "# Argus Review" or "## Review Summary"
-    if (/^#{1,3}\s*(argus\s*review|review\s*summary)/i.test(line)) continue;
-    // Skip "Reviewed N files with M comments" stat lines
-    if (/reviewed\s+\d+\s+file/i.test(line)) continue;
-    // Skip file name references — start skipping per-file details
-    if (
-      /^[`*\s]*[\w/.-]+\.(md|ts|tsx|js|jsx|go|py|rs|css|html|json|yaml|yml|toml|sql)[`*\s]*$/i.test(
-        line.trim(),
-      )
-    ) {
-      skipping = true;
-      continue;
-    }
-    // Skip file headings like "### src/lib/foo.ts"
-    if (/^#{2,4}\s+[`*]*[\w/.-]+\.\w+/i.test(line)) {
-      skipping = true;
-      continue;
-    }
-    // Skip bullet lines with severity tags
-    if (
-      /^\s*[-*•]\s*\*?\*?\[?(critical|warning|suggestion|praise)\]?\*?\*?/i.test(line)
-    ) {
-      skipping = true;
-      continue;
-    }
-    if (/^\s*[-*•]\s*\*{0,2}\[/.test(line)) {
-      skipping = true;
-      continue;
-    }
-    // Skip "If you need to..." fix instruction lines
-    if (/^\s*(if you need|consider|you (should|could|can)|instead|use )/i.test(line.trim()) && skipping) {
-      continue;
-    }
-    if (skipping) {
-      if (line.trim() === "") skipping = false;
-      else if (/^\s{2,}/.test(line) || /^\s*[-*•]/.test(line)) continue;
-      else skipping = false;
-    }
-    if (!skipping) cleaned.push(line);
-  }
-
-  return cleaned
-    .join("\n")
-    .replace(/^\n+|\n+$/g, "")
-    .replace(/\n{3,}/g, "\n\n");
+  return summary.replace(/^\n+|\n+$/g, "");
 }
 
 /* ── Severity Maps ───────────────────────────── */
@@ -179,16 +122,30 @@ const severityBg: Record<string, string> = {
 function TokenPill({ usage }: { usage: TokenUsage }) {
   const total = usage.total;
   const label = `${formatTokens(total)} tokens${total.cost != null ? ` · $${total.cost.toFixed(3)}` : ""}`;
-  const stages: [string, { total_tokens: number; cost?: number }][] = [];
+  const stages: [string, { total_tokens: number; cost?: number; model?: string }][] = [];
   if (usage.triage?.total_tokens) stages.push(["triage", usage.triage]);
+  if (usage.enrichment?.total_tokens) stages.push(["enrichment", usage.enrichment]);
+  if (usage.conventions?.total_tokens) stages.push(["conventions", usage.conventions]);
+  if (usage.patterns?.total_tokens) stages.push(["patterns", usage.patterns]);
   if (usage.review?.length) {
     const reviewTotal = usage.review.reduce((acc, r) => ({
       total_tokens: acc.total_tokens + r.total_tokens,
       cost: (acc.cost ?? 0) + (r.cost ?? 0),
-    }), { total_tokens: 0, cost: 0 });
+      model: r.model,
+    }), { total_tokens: 0, cost: 0, model: undefined as string | undefined });
     stages.push(["review", reviewTotal]);
   }
+  if (usage.file_synthesis?.length) {
+    const fsTotal = usage.file_synthesis.reduce((acc, r) => ({
+      total_tokens: acc.total_tokens + r.total_tokens,
+      cost: (acc.cost ?? 0) + (r.cost ?? 0),
+      model: r.model,
+    }), { total_tokens: 0, cost: 0, model: undefined as string | undefined });
+    stages.push(["file_synthesis", fsTotal]);
+  }
   if (usage.scoring?.total_tokens) stages.push(["scoring", usage.scoring]);
+  if (usage.synthesis?.total_tokens) stages.push(["synthesis", usage.synthesis]);
+  if (usage.graph?.total_tokens) stages.push(["graph", usage.graph]);
 
   return (
     <div className="group relative">
@@ -212,6 +169,7 @@ function TokenPill({ usage }: { usage: TokenUsage }) {
                 <span className="text-[10px] font-mono text-foreground">
                   {formatTokens(s)}
                   {s.cost != null && <> · ${s.cost.toFixed(3)}</>}
+                  {s.model && <span className="text-slate-text"> ({s.model})</span>}
                 </span>
               </div>
             ))}
