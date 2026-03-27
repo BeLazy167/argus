@@ -27,7 +27,7 @@ export function useFileMemory(repoId: number | undefined, filePath: string | nul
         patterns: { content: string; source: string }[];
         recent_comments: { severity: string; body: string; pr_number: number }[];
         traces: { kind: string; summary: string; created_at: string }[];
-      }>(`/api/v1/repos/${repoId}/files/${encodeURIComponent(filePath!)}`),
+      }>(`/api/v1/repos/${repoId}/files/${filePath}`),
     enabled: !!repoId && !!filePath && !!api.active,
   });
 }
