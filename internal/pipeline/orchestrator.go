@@ -2008,6 +2008,7 @@ func (o *Orchestrator) leadBrief(ctx context.Context, run *PipelineRun) (*LeadBr
 
 	provider, cfg, ok := o.resolveLeadProvider(ctx, run, "leadBrief")
 	if !ok {
+		run.LeadAgentError = "leadBrief: no LLM provider available"
 		return nil, nil
 	}
 
@@ -2037,6 +2038,11 @@ func (o *Orchestrator) leadBrief(ctx context.Context, run *PipelineRun) (*LeadBr
 	if err != nil {
 		run.LeadAgentError = fmt.Sprintf("leadBrief parse failed: %s | response: %s", err, util.Truncate(resp.Content, 300, true))
 		o.logger.Warn("leadBrief parse failed", "error", err, "response_prefix", util.Truncate(resp.Content, 200, true))
+		return nil, nil
+	}
+	if len(items) == 0 {
+		run.LeadAgentError = "leadBrief: LLM returned empty array"
+		o.logger.Warn("leadBrief returned empty array")
 		return nil, nil
 	}
 
