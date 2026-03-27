@@ -15,3 +15,19 @@ export function useGraphData() {
     enabled: !!activeId && !!api.active,
   });
 }
+
+export function useFileMemory(repoId: number | undefined, filePath: string | null) {
+  const api = useApi();
+  return useQuery({
+    queryKey: ["file-memory", api.active?.id, repoId, filePath],
+    queryFn: () =>
+      api.get<{
+        file_path: string;
+        risk_score: { trace_count: number; last_trace: string };
+        patterns: { content: string; source: string }[];
+        recent_comments: { severity: string; body: string; pr_number: number }[];
+        traces: { kind: string; summary: string; created_at: string }[];
+      }>(`/api/v1/repos/${repoId}/files/${encodeURIComponent(filePath!)}`),
+    enabled: !!repoId && !!filePath && !!api.active,
+  });
+}
