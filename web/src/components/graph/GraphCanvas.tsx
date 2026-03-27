@@ -1,5 +1,5 @@
 "use client";
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import {
   ReactFlow,
   Controls,
@@ -11,6 +11,7 @@ import {
   MarkerType,
   type Edge,
   type Node,
+  type NodeMouseHandler,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 
@@ -21,25 +22,20 @@ import { getLayoutedElements } from "./layout";
 
 const nodeTypes = { module: ModuleNode, group: GroupNode };
 
-/** Edge styles by relationship kind — muted, elegant */
-const EDGE_STYLES: Record<string, Partial<Edge>> = {
-  imports: {
-    style: { stroke: "#334155", strokeWidth: 1.5 },
-    markerEnd: { type: MarkerType.ArrowClosed, width: 10, height: 10, color: "#334155" },
-  },
-  calls: {
-    style: { stroke: "#854d0e", strokeWidth: 1.5, strokeDasharray: "6 4" },
-    animated: true,
-    markerEnd: { type: MarkerType.ArrowClosed, width: 10, height: 10, color: "#854d0e" },
-  },
-  uses_type: {
-    style: { stroke: "#4c1d95", strokeWidth: 1, strokeDasharray: "3 3" },
-    markerEnd: { type: MarkerType.ArrowClosed, width: 8, height: 8, color: "#4c1d95" },
-  },
-  implements: {
-    style: { stroke: "#14532d", strokeWidth: 1.5 },
-    markerEnd: { type: MarkerType.ArrowClosed, width: 10, height: 10, color: "#14532d" },
-  },
+/** Base edge styles by relationship kind */
+const EDGE_STYLES: Record<string, { stroke: string; width: number; dash?: string; animated?: boolean }> = {
+  imports: { stroke: "#334155", width: 1.5 },
+  calls: { stroke: "#854d0e", width: 1.5, dash: "6 4", animated: true },
+  uses_type: { stroke: "#4c1d95", width: 1, dash: "3 3" },
+  implements: { stroke: "#14532d", width: 1.5 },
+};
+
+/** Highlighted edge colors (brighter versions) */
+const EDGE_HIGHLIGHT: Record<string, string> = {
+  imports: "#64748b",
+  calls: "#f59e0b",
+  uses_type: "#8b5cf6",
+  implements: "#22c55e",
 };
 
 type Props = {
@@ -49,13 +45,38 @@ type Props = {
   defaultBranch: string;
 };
 
-function transformData(
+function buildEdge(e: GraphEdge, highlighted: boolean, dimmed: boolean, kind: string): Edge {
+  const style = EDGE_STYLES[kind] ?? EDGE_STYLES.imports!;
+  const highlightColor = EDGE_HIGHLIGHT[kind] ?? "#64748b";
+
+  return {
+    id: String(e.id),
+    source: String(e.source_id),
+    target: String(e.target_id),
+    type: "smoothstep",
+    animated: highlighted ? true : (style.animated || false),
+    style: {
+      stroke: highlighted ? highlightColor : style.stroke,
+      strokeWidth: highlighted ? style.width + 1 : style.width,
+      strokeDasharray: style.dash,
+      opacity: dimmed ? 0.1 : 1,
+      transition: "opacity 0.2s, stroke 0.2s, stroke-width 0.2s",
+    },
+    markerEnd: {
+      type: MarkerType.ArrowClosed,
+      width: highlighted ? 14 : 10,
+      height: highlighted ? 14 : 10,
+      color: highlighted ? highlightColor : style.stroke,
+    },
+  };
+}
+
+function transformNodes(
   graphNodes: GraphNode[],
-  graphEdges: GraphEdge[],
   repoFullName: string,
-  defaultBranch: string
-): { nodes: Node[]; edges: Edge[] } {
-  const nodes: Node[] = graphNodes.map((n) => ({
+  defaultBranch: string,
+): Node[] {
+  return graphNodes.map((n) => ({
     id: String(n.id),
     type: "module",
     position: { x: 0, y: 0 },
@@ -67,16 +88,6 @@ function transformData(
       githubUrl: `https://github.com/${repoFullName}/blob/${defaultBranch}/${n.file_path}`,
     },
   }));
-
-  const edges: Edge[] = graphEdges.map((e) => ({
-    id: String(e.id),
-    source: String(e.source_id),
-    target: String(e.target_id),
-    type: "smoothstep",
-    ...(EDGE_STYLES[e.kind] || EDGE_STYLES.imports),
-  }));
-
-  return { nodes, edges };
 }
 
 function langColor(n: Node): string {
@@ -91,13 +102,61 @@ function langColor(n: Node): string {
 type InnerProps = Props & { direction: "TB" | "LR" };
 
 function GraphCanvasInner({ graphNodes, graphEdges, repoFullName, defaultBranch, direction }: InnerProps) {
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+
+  // Compute connected node/edge sets for the selected node
+  const { connectedNodeIds, connectedEdgeIds } = useMemo(() => {
+    if (!selectedNodeId) return { connectedNodeIds: new Set<string>(), connectedEdgeIds: new Set<string>() };
+    const nodeIds = new Set<string>([selectedNodeId]);
+    const edgeIds = new Set<string>();
+    for (const e of graphEdges) {
+      const src = String(e.source_id);
+      const tgt = String(e.target_id);
+      if (src === selectedNodeId || tgt === selectedNodeId) {
+        edgeIds.add(String(e.id));
+        nodeIds.add(src);
+        nodeIds.add(tgt);
+      }
+    }
+    return { connectedNodeIds: nodeIds, connectedEdgeIds: edgeIds };
+  }, [selectedNodeId, graphEdges]);
+
   const { nodes: layoutedNodes, edges: layoutedEdges } = useMemo(() => {
-    const { nodes, edges } = transformData(graphNodes, graphEdges, repoFullName, defaultBranch);
+    const rawNodes = transformNodes(graphNodes, repoFullName, defaultBranch);
+
+    const edges = graphEdges.map((e) => {
+      const isHighlighted = connectedEdgeIds.has(String(e.id));
+      const isDimmed = selectedNodeId !== null && !connectedEdgeIds.has(String(e.id));
+      return buildEdge(e, isHighlighted, isDimmed, e.kind);
+    });
+
+    // Apply dimming to nodes
+    const nodes = rawNodes.map((n) => {
+      const isDimmed = selectedNodeId !== null && !connectedNodeIds.has(n.id);
+      return {
+        ...n,
+        style: {
+          ...(n.style || {}),
+          opacity: isDimmed ? 0.15 : 1,
+          transition: "opacity 0.2s",
+        },
+      };
+    });
+
     return getLayoutedElements(nodes, edges, direction);
-  }, [graphNodes, graphEdges, repoFullName, defaultBranch, direction]);
+  }, [graphNodes, graphEdges, repoFullName, defaultBranch, direction, selectedNodeId, connectedNodeIds, connectedEdgeIds]);
 
   const [nodes, , onNodesChange] = useNodesState(layoutedNodes);
   const [edges, , onEdgesChange] = useEdgesState(layoutedEdges);
+
+  const onNodeClick: NodeMouseHandler = useCallback((_event, node) => {
+    if (node.type === "group") return;
+    setSelectedNodeId((prev) => (prev === node.id ? null : node.id));
+  }, []);
+
+  const onPaneClick = useCallback(() => {
+    setSelectedNodeId(null);
+  }, []);
 
   return (
     <ReactFlow
@@ -105,6 +164,8 @@ function GraphCanvasInner({ graphNodes, graphEdges, repoFullName, defaultBranch,
       edges={edges}
       onNodesChange={onNodesChange}
       onEdgesChange={onEdgesChange}
+      onNodeClick={onNodeClick}
+      onPaneClick={onPaneClick}
       nodeTypes={nodeTypes}
       fitView
       fitViewOptions={{ padding: 0.15 }}
