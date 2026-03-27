@@ -1852,8 +1852,9 @@ func (o *Orchestrator) leadBriefStage(ctx context.Context, run *PipelineRun) err
 
 // broadcastStage runs the Lead Agent's broadcast phase (Phase 2b + 2c).
 // Collects findings, identifies cross-agent signals, runs targeted second passes.
+// Runs even without LeadBrief — simulation and blast radius agents are still valuable.
 func (o *Orchestrator) broadcastStage(ctx context.Context, run *PipelineRun) error {
-	if !run.DeepReview || run.LeadBrief == nil {
+	if !run.DeepReview {
 		return nil
 	}
 
@@ -1952,8 +1953,9 @@ func (o *Orchestrator) runBlastRadiusAgent(ctx context.Context, run *PipelineRun
 
 // crossCheckStage runs the Lead Agent's cross-check phase (Phase 3).
 // Deduplicates, cross-references, and quality-filters all findings.
+// Runs even without LeadBrief — dedup + quality filtering still valuable.
 func (o *Orchestrator) crossCheckStage(ctx context.Context, run *PipelineRun) error {
-	if !run.DeepReview || run.LeadBrief == nil {
+	if !run.DeepReview {
 		return nil
 	}
 
