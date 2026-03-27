@@ -2,41 +2,38 @@
 import { memo } from "react";
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 
-const LANG_COLORS: Record<string, string> = {
-  typescript: "border-blue-500/50 bg-blue-500/5",
-  javascript: "border-yellow-500/50 bg-yellow-500/5",
-  go: "border-cyan-500/50 bg-cyan-500/5",
-  python: "border-green-500/50 bg-green-500/5",
-  rust: "border-orange-500/50 bg-orange-500/5",
+const LANG_COLORS: Record<string, { border: string; bg: string; dot: string }> = {
+  typescript: { border: "border-blue-500/40", bg: "bg-blue-950/40", dot: "bg-blue-400" },
+  javascript: { border: "border-yellow-500/40", bg: "bg-yellow-950/40", dot: "bg-yellow-400" },
+  go: { border: "border-cyan-500/40", bg: "bg-cyan-950/40", dot: "bg-cyan-400" },
+  python: { border: "border-green-500/40", bg: "bg-green-950/40", dot: "bg-green-400" },
+  rust: { border: "border-orange-500/40", bg: "bg-orange-950/40", dot: "bg-orange-400" },
 };
 
-const KIND_BADGES: Record<string, string> = {
-  module: "bg-purple-500/20 text-purple-400",
-  class: "bg-blue-500/20 text-blue-400",
-  function: "bg-amber-500/20 text-amber-400",
-  file: "bg-slate-500/20 text-slate-400",
-};
+const DEFAULT_LANG = { border: "border-iron", bg: "bg-iron/10", dot: "bg-slate-400" };
 
 function ModuleNode({ data }: NodeProps) {
-  const langClass = LANG_COLORS[data.language as string] || "border-iron bg-iron/5";
-  const kindClass = KIND_BADGES[data.kind as string] || KIND_BADGES.file;
+  const lang = LANG_COLORS[data.language as string] || DEFAULT_LANG;
+  const kind = data.kind as string;
+  const isInterface = kind === "interface" || (data.label as string).startsWith("I") && kind === "class";
 
   return (
     <div
-      className={`rounded-lg border-2 ${langClass} px-4 py-3 min-w-[160px] shadow-lg backdrop-blur-sm transition-all hover:shadow-xl hover:scale-[1.02] cursor-pointer`}
+      className={`rounded-lg border ${lang.border} ${lang.bg} px-3 py-2 shadow-md backdrop-blur-sm transition-all hover:shadow-lg hover:brightness-110 cursor-pointer ${
+        isInterface ? "opacity-70 min-w-[120px]" : "min-w-[150px]"
+      }`}
       onClick={() => {
         if (data.githubUrl) window.open(data.githubUrl as string, "_blank");
       }}
     >
-      <Handle type="target" position={Position.Top} className="!bg-slate-500 !w-2 !h-2 !border-0" />
-      <div className="flex items-center gap-2 mb-1">
-        <span className={`rounded px-1.5 py-0.5 text-[9px] font-mono uppercase ${kindClass}`}>
-          {data.kind as string}
-        </span>
+      <Handle type="target" position={Position.Top} className="!bg-slate-600 !w-1.5 !h-1.5 !border-0" />
+      <div className="flex items-center gap-1.5">
+        <span className={`w-2 h-2 rounded-full ${lang.dot} shrink-0`} />
+        <p className={`font-semibold text-foreground truncate ${isInterface ? "text-[10px]" : "text-xs"}`}>
+          {data.label as string}
+        </p>
       </div>
-      <p className="text-xs font-semibold text-foreground truncate">{data.label as string}</p>
-      <p className="text-[10px] font-mono text-slate-text truncate mt-0.5">{data.filePath as string}</p>
-      <Handle type="source" position={Position.Bottom} className="!bg-slate-500 !w-2 !h-2 !border-0" />
+      <Handle type="source" position={Position.Bottom} className="!bg-slate-600 !w-1.5 !h-1.5 !border-0" />
     </div>
   );
 }
