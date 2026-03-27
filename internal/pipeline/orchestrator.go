@@ -1762,12 +1762,16 @@ func writeDiffSummary(sb *strings.Builder, files []diff.FileDiff, maxPerFile int
 
 // writeCrossCutting appends cross-cutting concerns from a LeadBrief to a prompt builder.
 func writeCrossCutting(sb *strings.Builder, brief *LeadBrief) {
-	if brief == nil || len(brief.CrossCutting) == 0 {
+	if brief == nil {
+		return
+	}
+	cc := brief.CrossCuttingConcerns()
+	if len(cc) == 0 {
 		return
 	}
 	sb.WriteString("\nCross-cutting concerns from briefing:\n")
-	for _, cc := range brief.CrossCutting {
-		sb.WriteString(fmt.Sprintf("- %s\n", cc))
+	for _, c := range cc {
+		sb.WriteString(fmt.Sprintf("- %s\n", c))
 	}
 }
 
@@ -1840,11 +1844,13 @@ func (o *Orchestrator) leadBriefStage(ctx context.Context, run *PipelineRun) err
 	}
 	brief, err := o.leadBrief(ctx, run)
 	if err != nil {
+		run.LeadAgentError = fmt.Sprintf("leadBriefStage: %s", err)
 		o.logger.Warn("lead brief failed, continuing without brief", "error", err)
 		return nil // non-fatal
 	}
 	if brief == nil {
-		o.logger.Info("lead brief returned nil, specialists will run without brief")
+		o.logger.Info("lead brief returned nil, specialists will run without brief",
+			"lead_agent_error", run.LeadAgentError)
 	}
 	run.LeadBrief = brief
 	return nil
@@ -1981,36 +1987,17 @@ func (o *Orchestrator) crossCheckStage(ctx context.Context, run *PipelineRun) er
 
 // ─── Lead Agent Functions ────────────────────────────────────────────────────
 
-const leadBriefSystemPrompt = `You are the lead code reviewer coordinating a team of 4 specialist reviewers: Bug Hunter, Security Auditor, Architecture Reviewer, and Regression Reviewer.
+const leadBriefSystemPrompt = `You coordinate 4 specialist reviewers: Bug Hunter, Security Auditor, Architecture Reviewer, Regression Reviewer.
 
-Read the entire PR and produce a briefing for your team.
+Read the PR and produce a briefing as a JSON array. Each element is either a file brief or a cross-cutting concern.
 
-For each changed file, write a 2-3 sentence brief:
-1. What the file does and what changed
-2. Key concerns to investigate per specialist
-3. Cross-file dependencies
+File brief: {"file": "path", "summary": "what changed", "bug": "focus for bug hunter", "security": "focus for security", "arch": "focus for architecture", "regression": "focus for regression"}
+Cross-cutting: {"cross_cutting": "concern spanning multiple files"}
 
-Also identify cross-cutting concerns spanning multiple files:
-- Shared state or singletons
-- Consistent error handling patterns (or inconsistencies)
-- Data flow chains (user input → validation → storage → response)
-- Arithmetic/unit conversion chains
+Keep each focus field to 1 sentence. Output JSON array only.
 
-Output JSON only:
-{
-  "file_briefs": {
-    "src/auth.ts": {
-      "summary": "Session management with token refresh",
-      "bug_hunter_focus": "Token expiry edge cases, race in concurrent refresh",
-      "security_focus": "Token storage mechanism, session fixation, CSRF",
-      "architecture_focus": "Error propagation from refresh to callers",
-      "regression_focus": "Return type change affects all authenticated endpoints"
-    }
-  },
-  "cross_cutting": [
-    "auth.ts and api.ts share a global session cache — mutations in one affect the other"
-  ]
-}`
+Example:
+[{"file": "src/auth.ts", "summary": "Session management with token refresh", "bug": "Token expiry edge cases, race in concurrent refresh", "security": "Session fixation, CSRF, token storage", "arch": "Error propagation from refresh to callers", "regression": "Return type change affects authenticated endpoints"}, {"cross_cutting": "auth.ts and api.ts share a global session cache"}]`
 
 // leadBrief produces focus areas for each specialist by reading the whole PR.
 // Non-fatal: returns nil on error so specialists run without briefs.
@@ -2037,23 +2024,31 @@ func (o *Orchestrator) leadBrief(ctx context.Context, run *PipelineRun) (*LeadBr
 		Model:       cfg.Model,
 		System:      leadBriefSystemPrompt,
 		Messages:    []llm.Message{{Role: "user", Content: prompt.String()}},
-		MaxTokens:   1200,
+		MaxTokens:   1500,
 		Temperature: 0.2,
 	})
 	if err != nil {
+		run.LeadAgentError = fmt.Sprintf("leadBrief LLM failed: %s", err)
 		o.logger.Warn("leadBrief LLM failed", "error", err)
 		return nil, nil
 	}
 
-	var brief LeadBrief
-	jsonStr := extractJSON(resp.Content)
-	if err := json.Unmarshal([]byte(jsonStr), &brief); err != nil {
+	items, err := unmarshalLLMArray[BriefItem](resp.Content)
+	if err != nil {
+		run.LeadAgentError = fmt.Sprintf("leadBrief parse failed: %s | response: %s", err, util.Truncate(resp.Content, 300, true))
 		o.logger.Warn("leadBrief parse failed", "error", err, "response_prefix", util.Truncate(resp.Content, 200, true))
 		return nil, nil
 	}
 
-	o.logger.Info("lead brief produced", "files", len(brief.FileBriefs), "cross_cutting", len(brief.CrossCutting))
-	return &brief, nil
+	brief := &LeadBrief{Items: items}
+	var fileCount int
+	for _, item := range items {
+		if item.File != "" {
+			fileCount++
+		}
+	}
+	o.logger.Info("lead brief produced", "files", fileCount, "cross_cutting", len(brief.CrossCuttingConcerns()))
+	return brief, nil
 }
 
 const leadBroadcastSystemPrompt = `You have findings from multiple specialist agents reviewing a PR. Identify cross-agent signals — cases where one agent's finding should trigger another agent to re-examine specific code.

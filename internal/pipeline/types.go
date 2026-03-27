@@ -77,6 +77,7 @@ type PipelineRun struct {
 	ScenarioMemory      bool
 	CodeSimulation      bool
 	LeadBrief        *LeadBrief `json:"lead_brief,omitempty"`
+	LeadAgentError   string     `json:"lead_agent_error,omitempty"`
 	ScoringSkipped   bool // true when scoring provider unavailable — synthesis uses all comments
 	Prompts          map[string]string // custom prompt overrides per stage
 	IsIncremental    bool
@@ -89,17 +90,42 @@ type PipelineRun struct {
 }
 
 // LeadBrief is the output of the Lead Agent's briefing phase.
+// Stored as a flat array — each item is either a file brief or a cross-cutting concern.
 type LeadBrief struct {
-	FileBriefs   map[string]FileBrief `json:"file_briefs"`
-	CrossCutting []string             `json:"cross_cutting"`
+	Items []BriefItem `json:"items"`
 }
 
-type FileBrief struct {
-	Summary           string `json:"summary"`
-	BugHunterFocus    string `json:"bug_hunter_focus"`
-	SecurityFocus     string `json:"security_focus"`
-	ArchitectureFocus string `json:"architecture_focus"`
-	RegressionFocus   string `json:"regression_focus"`
+// BriefItem is a single element in the lead brief array.
+// Either a file brief (File non-empty) or a cross-cutting concern (CrossCutting non-empty).
+type BriefItem struct {
+	File         string `json:"file,omitempty"`
+	Summary      string `json:"summary,omitempty"`
+	Bug          string `json:"bug,omitempty"`
+	Security     string `json:"security,omitempty"`
+	Arch         string `json:"arch,omitempty"`
+	Regression   string `json:"regression,omitempty"`
+	CrossCutting string `json:"cross_cutting,omitempty"`
+}
+
+// FileBrief returns the brief for a specific file, or nil if not found.
+func (b *LeadBrief) FileBrief(path string) *BriefItem {
+	for i := range b.Items {
+		if b.Items[i].File == path {
+			return &b.Items[i]
+		}
+	}
+	return nil
+}
+
+// CrossCuttingConcerns returns all cross-cutting items from the brief.
+func (b *LeadBrief) CrossCuttingConcerns() []string {
+	var cc []string
+	for _, item := range b.Items {
+		if item.CrossCutting != "" {
+			cc = append(cc, item.CrossCutting)
+		}
+	}
+	return cc
 }
 
 // CrossAgentSignal represents a finding from one agent that another should investigate.
