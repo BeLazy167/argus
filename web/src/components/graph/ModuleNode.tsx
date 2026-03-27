@@ -2,38 +2,52 @@
 import { memo } from "react";
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 
-const LANG_COLORS: Record<string, { border: string; bg: string; dot: string }> = {
-  typescript: { border: "border-blue-500/40", bg: "bg-blue-950/40", dot: "bg-blue-400" },
-  javascript: { border: "border-yellow-500/40", bg: "bg-yellow-950/40", dot: "bg-yellow-400" },
-  go: { border: "border-cyan-500/40", bg: "bg-cyan-950/40", dot: "bg-cyan-400" },
-  python: { border: "border-green-500/40", bg: "bg-green-950/40", dot: "bg-green-400" },
-  rust: { border: "border-orange-500/40", bg: "bg-orange-950/40", dot: "bg-orange-400" },
+const LANG_THEME: Record<string, { glow: string; dot: string; border: string; text: string }> = {
+  typescript: { glow: "shadow-blue-500/20", dot: "bg-blue-400", border: "border-blue-500/30", text: "text-blue-300" },
+  javascript: { glow: "shadow-amber-500/20", dot: "bg-amber-400", border: "border-amber-500/30", text: "text-amber-300" },
+  go: { glow: "shadow-cyan-500/20", dot: "bg-cyan-400", border: "border-cyan-500/30", text: "text-cyan-300" },
+  python: { glow: "shadow-emerald-500/20", dot: "bg-emerald-400", border: "border-emerald-500/30", text: "text-emerald-300" },
+  rust: { glow: "shadow-orange-500/20", dot: "bg-orange-400", border: "border-orange-500/30", text: "text-orange-300" },
 };
 
-const DEFAULT_LANG = { border: "border-iron", bg: "bg-iron/10", dot: "bg-slate-400" };
+const DEFAULT_THEME = { glow: "shadow-slate-500/10", dot: "bg-slate-400", border: "border-slate-500/20", text: "text-slate-300" };
 
 function ModuleNode({ data }: NodeProps) {
-  const lang = LANG_COLORS[data.language as string] || DEFAULT_LANG;
+  const lang = LANG_THEME[data.language as string] || DEFAULT_THEME;
   const kind = data.kind as string;
-  const isInterface = kind === "interface" || (data.label as string).startsWith("I") && kind === "class";
+  const name = data.label as string;
+  const isInterface = kind === "interface" || (name.startsWith("I") && name[1] === name[1]?.toUpperCase() && kind === "class");
 
   return (
     <div
-      className={`rounded-lg border ${lang.border} ${lang.bg} px-3 py-2 shadow-md backdrop-blur-sm transition-all hover:shadow-lg hover:brightness-110 cursor-pointer ${
-        isInterface ? "opacity-70 min-w-[120px]" : "min-w-[150px]"
-      }`}
+      className={`group relative rounded-md border ${lang.border} bg-[#12121a]/90 backdrop-blur-md
+        shadow-lg ${lang.glow} transition-all duration-200
+        hover:shadow-xl hover:brightness-125 hover:border-opacity-60 cursor-pointer
+        ${isInterface ? "px-2.5 py-1.5 min-w-[100px]" : "px-3 py-2 min-w-[130px]"}`}
       onClick={() => {
         if (data.githubUrl) window.open(data.githubUrl as string, "_blank");
       }}
     >
-      <Handle type="target" position={Position.Top} className="!bg-slate-600 !w-1.5 !h-1.5 !border-0" />
+      <Handle type="target" position={Position.Top} className="!bg-transparent !w-3 !h-1.5 !rounded-full !border-0 !-top-[3px]" />
+
+      {/* Language indicator line at top */}
+      <div className={`absolute -top-px left-3 right-3 h-px ${lang.dot} opacity-40 rounded-full`} />
+
       <div className="flex items-center gap-1.5">
-        <span className={`w-2 h-2 rounded-full ${lang.dot} shrink-0`} />
-        <p className={`font-semibold text-foreground truncate ${isInterface ? "text-[10px]" : "text-xs"}`}>
-          {data.label as string}
-        </p>
+        <span className={`w-1.5 h-1.5 rounded-full ${lang.dot} shrink-0 ${isInterface ? "opacity-50" : ""}`} />
+        <span className={`font-mono font-medium truncate leading-tight ${isInterface ? "text-[10px] opacity-60" : "text-[11px]"} ${lang.text}`}>
+          {name}
+        </span>
       </div>
-      <Handle type="source" position={Position.Bottom} className="!bg-slate-600 !w-1.5 !h-1.5 !border-0" />
+
+      {/* Subtle kind indicator */}
+      {!isInterface && (
+        <span className="text-[8px] font-mono text-slate-600 uppercase tracking-wider mt-0.5 block">
+          {kind}
+        </span>
+      )}
+
+      <Handle type="source" position={Position.Bottom} className="!bg-transparent !w-3 !h-1.5 !rounded-full !border-0 !-bottom-[3px]" />
     </div>
   );
 }

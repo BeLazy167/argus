@@ -1,5 +1,5 @@
 "use client";
-import { Network, Loader2 } from "lucide-react";
+import { Network, Loader2, GitBranch } from "lucide-react";
 import { useActiveRepo } from "@/lib/hooks/use-active-repo";
 import { useGraphData } from "@/lib/queries/graph";
 import { useRepos } from "@/lib/queries/repos";
@@ -12,8 +12,11 @@ function GraphBody() {
 
   if (!activeId) {
     return (
-      <div className="flex items-center justify-center h-full text-xs font-mono text-slate-text">
-        Select a repo to view its architecture graph.
+      <div className="flex items-center justify-center h-full">
+        <div className="text-center">
+          <GitBranch className="h-8 w-8 text-slate-700 mx-auto mb-3" />
+          <p className="text-xs font-mono text-slate-500">Select a repo to view its architecture.</p>
+        </div>
       </div>
     );
   }
@@ -21,29 +24,33 @@ function GraphBody() {
   if (isLoading) {
     return (
       <div className="flex items-center justify-center h-full">
-        <Loader2 className="h-5 w-5 animate-spin text-slate-text" />
+        <Loader2 className="h-4 w-4 animate-spin text-slate-600" />
       </div>
     );
   }
 
   if (error) {
     return (
-      <div className="flex flex-col items-center justify-center h-full gap-3 text-center px-8">
-        <Network className="h-10 w-10 text-red-500/50" />
-        <p className="text-xs font-mono text-red-400 max-w-sm">
-          Failed to load architecture graph. Try refreshing the page.
-        </p>
+      <div className="flex items-center justify-center h-full">
+        <div className="text-center">
+          <Network className="h-8 w-8 text-red-900 mx-auto mb-3" />
+          <p className="text-[11px] font-mono text-red-400/70">Failed to load graph.</p>
+        </div>
       </div>
     );
   }
 
   if (!graphData || !graphData.nodes || graphData.nodes.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center h-full gap-3 text-center px-8">
-        <Network className="h-10 w-10 text-iron" />
-        <p className="text-xs font-mono text-slate-text max-w-sm">
-          No architecture data yet. The graph builds automatically as Argus reviews PRs for this repo.
-        </p>
+      <div className="flex items-center justify-center h-full">
+        <div className="text-center max-w-xs">
+          <div className="w-12 h-12 rounded-full bg-slate-800/50 flex items-center justify-center mx-auto mb-4">
+            <Network className="h-5 w-5 text-slate-600" />
+          </div>
+          <p className="text-[11px] font-mono text-slate-500 leading-relaxed">
+            No architecture data yet. The graph builds automatically as Argus reviews PRs.
+          </p>
+        </div>
       </div>
     );
   }
@@ -64,15 +71,16 @@ export default function ArchitecturePage() {
   const { data: graphData } = useGraphData();
 
   return (
-    <div className="flex flex-col h-[calc(100vh-4rem)]">
-      <div className="flex items-center gap-2 border-b border-iron px-5 py-4 shrink-0">
-        <Network className="h-4 w-4 text-slate-text" />
-        <h2 className="text-xs font-mono uppercase tracking-[0.1em] text-foreground">
-          Architecture Map
-        </h2>
-        {graphData && (
-          <span className="text-[10px] font-mono text-slate-text ml-auto">
-            {graphData.nodes.length} nodes · {graphData.edges.length} edges
+    <div className="flex flex-col h-[calc(100vh-4rem)] bg-[#0a0a12]">
+      {/* Minimal header — the graph is the star */}
+      <div className="flex items-center gap-3 border-b border-slate-800/50 px-5 py-3 shrink-0 bg-[#0a0a12]">
+        <Network className="h-3.5 w-3.5 text-slate-600" />
+        <span className="text-[10px] font-mono uppercase tracking-[0.15em] text-slate-500">
+          Architecture
+        </span>
+        {graphData && graphData.nodes && graphData.nodes.length > 0 && (
+          <span className="text-[10px] font-mono text-slate-700 ml-auto">
+            {graphData.nodes.length} components · {graphData.edges.length} dependencies
           </span>
         )}
       </div>
