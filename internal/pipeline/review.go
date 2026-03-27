@@ -411,19 +411,19 @@ func buildFileReviewPrompt(run *PipelineRun, file diff.FileDiff, fileContent str
 
 	// Inject lead brief if available (from Lead Agent Phase 1)
 	if run.LeadBrief != nil {
-		if fb, ok := run.LeadBrief.FileBriefs[file.NewName]; ok {
+		if fb := run.LeadBrief.FileBrief(file.NewName); fb != nil {
 			sb.WriteString("\n<lead_brief>\n")
 			sb.WriteString(fmt.Sprintf("Summary: %s\n", fb.Summary))
-			sb.WriteString(fmt.Sprintf("Bug focus: %s\n", fb.BugHunterFocus))
-			sb.WriteString(fmt.Sprintf("Security focus: %s\n", fb.SecurityFocus))
-			sb.WriteString(fmt.Sprintf("Architecture focus: %s\n", fb.ArchitectureFocus))
-			sb.WriteString(fmt.Sprintf("Regression focus: %s\n", fb.RegressionFocus))
+			sb.WriteString(fmt.Sprintf("Bug focus: %s\n", fb.Bug))
+			sb.WriteString(fmt.Sprintf("Security focus: %s\n", fb.Security))
+			sb.WriteString(fmt.Sprintf("Architecture focus: %s\n", fb.Arch))
+			sb.WriteString(fmt.Sprintf("Regression focus: %s\n", fb.Regression))
 			sb.WriteString("</lead_brief>\n")
 		}
-		if len(run.LeadBrief.CrossCutting) > 0 {
+		if cc := run.LeadBrief.CrossCuttingConcerns(); len(cc) > 0 {
 			sb.WriteString("\n<cross_cutting_concerns>\n")
-			for _, cc := range run.LeadBrief.CrossCutting {
-				sb.WriteString(fmt.Sprintf("- %s\n", cc))
+			for _, c := range cc {
+				sb.WriteString(fmt.Sprintf("- %s\n", c))
 			}
 			sb.WriteString("</cross_cutting_concerns>\n")
 		}
