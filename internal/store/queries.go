@@ -372,12 +372,16 @@ func (s *Store) GetReviewComments(ctx context.Context, reviewID uuid.UUID) ([]Re
 	return collectOrEmpty(rows, pgx.RowToStructByPos[ReviewComment])
 }
 
-func (s *Store) UpdateReviewStatus(ctx context.Context, id uuid.UUID, status, errMsg string) error {
+func (s *Store) UpdateReviewStatus(ctx context.Context, id uuid.UUID, status, errMsg string, tokenUsage []byte) error {
 	_, err := s.Pool.Exec(ctx, `
-		UPDATE reviews SET status = $2, error = $3, completed_at = CASE WHEN $2 IN ('completed','failed') THEN NOW() ELSE NULL END
+		UPDATE reviews SET status = $2, error = $3, token_usage = COALESCE($4, token_usage),
+		       completed_at = CASE WHEN $2 IN ('completed','failed') THEN NOW() ELSE NULL END
 		WHERE id = $1
-	`, id, status, nilIfEmpty(errMsg))
-	return err
+	`, id, status, nilIfEmpty(errMsg), tokenUsage)
+	if err != nil {
+		return fmt.Errorf("updating review status: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) ListReviewsScoped(ctx context.Context, repoID int64, installationIDs []int64, limit, offset int) ([]Review, error) {

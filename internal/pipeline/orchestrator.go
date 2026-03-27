@@ -112,7 +112,7 @@ type LLMRegistry interface {
 }
 
 func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, reviewStage *ReviewStage, triageStage *TriageStage, scoringStage *ScoringStage, indexer *memory.Indexer, registry LLMRegistry, eventBus *EventBus, logger *slog.Logger) *Orchestrator {
-	sm := NewStateMachine(db, logger)
+	sm := NewStateMachine(db, st, logger)
 	sm.eventBus = eventBus
 
 	o := &Orchestrator{
@@ -297,7 +297,12 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		CrossFileContext: isCrossFileContextEnabled(mergedSettings),
 		BlastRadius:     isBlastRadiusEnabled(mergedSettings),
 		ScenarioMemory:  isScenarioMemoryEnabled(mergedSettings),
-		CodeSimulation:  isCodeSimulationEnabled(mergedSettings),
+		CodeSimulation:    isCodeSimulationEnabled(mergedSettings),
+		PREnrichment:      isPREnrichmentEnabled(mergedSettings),
+		LearnPatterns:     isLearnPatternsEnabled(mergedSettings),
+		LearnConventions:  isLearnConventionsEnabled(mergedSettings),
+		FileSynthesis:     isFileSynthesisEnabled(mergedSettings),
+		ArchitectureGraph: isArchitectureGraphEnabled(mergedSettings),
 		Prompts:          o.loadPrompts(ctx, dbRepo.ID),
 		IsIncremental:    isIncremental,
 		PreviousReviewID: previousReviewID,
@@ -653,11 +658,10 @@ func (o *Orchestrator) generateConversationalBrief(ctx context.Context, run *Pip
 		CompletionTokens: resp.TokensUsed.CompletionTokens,
 		TotalTokens:      resp.TokensUsed.TotalTokens,
 		Cost:             resp.Cost,
+		Model:            cfg.Model,
+		Provider:         cfg.Provider,
 	}
-	run.Tokens.Total.PromptTokens += resp.TokensUsed.PromptTokens
-	run.Tokens.Total.CompletionTokens += resp.TokensUsed.CompletionTokens
-	run.Tokens.Total.TotalTokens += resp.TokensUsed.TotalTokens
-	run.Tokens.Total.Cost += resp.Cost
+	run.Tokens.addToTotal(run.Tokens.Synthesis)
 
 	brief := strings.TrimSpace(resp.Content)
 	if brief == "" {
@@ -953,19 +957,29 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	o.indexConfirmedPatterns(ctx, run, owner, repo)
 
 	// LLM-based post-review ops run sequentially to avoid rate-limit contention
-	o.autoLearnPatterns(ctx, run, owner, repo)
-	o.extractConventions(ctx, run, owner, repo)
-	o.synthesizeFileMemories(ctx, run, owner, repo)
+	if run.LearnPatterns {
+		o.autoLearnPatterns(ctx, run, owner, repo)
+	}
+	if run.LearnConventions {
+		o.extractConventions(ctx, run, owner, repo)
+	}
+	if run.FileSynthesis {
+		o.synthesizeFileMemories(ctx, run, owner, repo)
+	}
 	o.indexPRSummary(ctx, run, owner, repo)
-	o.extractArchitectureGraph(ctx, run, owner, repo)
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				o.logger.Error("enrichPRDescription panic", "recover", r, "pr", run.PREvent.PRNumber)
-			}
+	if run.ArchitectureGraph {
+		o.extractArchitectureGraph(ctx, run, owner, repo)
+	}
+	if run.PREnrichment {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					o.logger.Error("enrichPRDescription panic", "recover", r, "pr", run.PREvent.PRNumber)
+				}
+			}()
+			o.enrichPRDescription(ctx, run, owner, repo)
 		}()
-		o.enrichPRDescription(ctx, run, owner, repo)
-	}()
+	}
 
 	// Collect changed file paths once for simulation indexing + scenario outdating
 	changedPaths := make([]string, 0, len(run.Diff.Files))
@@ -1082,6 +1096,15 @@ func (o *Orchestrator) enrichPRDescription(ctx context.Context, run *PipelineRun
 		o.logger.Warn("enrichPRDescription: LLM call failed", "error", err)
 		return
 	}
+	run.Tokens.Enrichment = StageTokens{
+		PromptTokens:     resp.TokensUsed.PromptTokens,
+		CompletionTokens: resp.TokensUsed.CompletionTokens,
+		TotalTokens:      resp.TokensUsed.TotalTokens,
+		Cost:             resp.Cost,
+		Model:            cfg.Model,
+		Provider:         cfg.Provider,
+	}
+	run.Tokens.addToTotal(run.Tokens.Enrichment)
 	if strings.TrimSpace(resp.Content) == "" {
 		o.logger.Warn("enrichPRDescription: empty LLM response")
 		return
@@ -1348,6 +1371,15 @@ Return [] if no repo-specific patterns emerge. JSON array only.`, run.PREvent.Re
 		o.logger.Warn("auto-learn LLM call failed", "error", err)
 		return
 	}
+	run.Tokens.Patterns = StageTokens{
+		PromptTokens:     resp.TokensUsed.PromptTokens,
+		CompletionTokens: resp.TokensUsed.CompletionTokens,
+		TotalTokens:      resp.TokensUsed.TotalTokens,
+		Cost:             resp.Cost,
+		Model:            cfg.Model,
+		Provider:         cfg.Provider,
+	}
+	run.Tokens.addToTotal(run.Tokens.Patterns)
 
 	type learnedPattern struct {
 		Pattern  string `json:"pattern"`
@@ -1484,6 +1516,15 @@ Return [] if no clear conventions emerge. JSON array only.`, run.PREvent.RepoFul
 		o.logger.Warn("convention extraction LLM failed", "error", err)
 		return
 	}
+	run.Tokens.Conventions = StageTokens{
+		PromptTokens:     resp.TokensUsed.PromptTokens,
+		CompletionTokens: resp.TokensUsed.CompletionTokens,
+		TotalTokens:      resp.TokensUsed.TotalTokens,
+		Cost:             resp.Cost,
+		Model:            cfg.Model,
+		Provider:         cfg.Provider,
+	}
+	run.Tokens.addToTotal(run.Tokens.Conventions)
 
 	type convention struct {
 		Convention string `json:"convention"`
@@ -1633,6 +1674,17 @@ Max 200 words. Be concrete.`
 			failed++
 			continue
 		}
+		fileTok := StageTokens{
+			PromptTokens:     resp.TokensUsed.PromptTokens,
+			CompletionTokens: resp.TokensUsed.CompletionTokens,
+			TotalTokens:      resp.TokensUsed.TotalTokens,
+			Cost:             resp.Cost,
+			Model:            cfg.Model,
+			Provider:         cfg.Provider,
+			File:             fc.path,
+		}
+		run.Tokens.FileSynthesis = append(run.Tokens.FileSynthesis, fileTok)
+		run.Tokens.addToTotal(fileTok)
 
 		customID := memory.SynthesisCustomID(owner, repo, fc.path)
 		_, err = o.indexer.IndexRepoPattern(synthCtx, owner, repo, resp.Content, customID, map[string]string{
@@ -1739,6 +1791,15 @@ Rules:
 		o.logger.Warn("extractArchitectureGraph LLM failed", "error", err)
 		return
 	}
+	run.Tokens.Graph = StageTokens{
+		PromptTokens:     resp.TokensUsed.PromptTokens,
+		CompletionTokens: resp.TokensUsed.CompletionTokens,
+		TotalTokens:      resp.TokensUsed.TotalTokens,
+		Cost:             resp.Cost,
+		Model:            cfg.Model,
+		Provider:         cfg.Provider,
+	}
+	run.Tokens.addToTotal(run.Tokens.Graph)
 	if strings.TrimSpace(resp.Content) == "" {
 		o.logger.Warn("extractArchitectureGraph: empty LLM response")
 		return

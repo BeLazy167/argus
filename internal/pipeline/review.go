@@ -264,6 +264,8 @@ type reviewParams struct {
 func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p reviewParams, fileContents map[string]string, owner, repo string, cfg llm.ModelConfig, provider llm.Provider) (FileReview, StageTokens, error) {
 	review := FileReview{Path: p.file.NewName}
 	var tokens StageTokens
+	tokens.Model = cfg.Model
+	tokens.Provider = cfg.Provider
 	if p.specialist != "" {
 		tokens.File = fmt.Sprintf("%s[%s]", p.file.NewName, p.specialist)
 	} else {

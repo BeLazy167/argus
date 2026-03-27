@@ -88,7 +88,7 @@ func (s *Server) retryReview(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "only failed reviews can be retried"})
 		return
 	}
-	if err := s.store.UpdateReviewStatus(r.Context(), id, "pending", ""); err != nil {
+	if err := s.store.UpdateReviewStatus(r.Context(), id, "pending", "", nil); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "update failed"})
 		return
 	}

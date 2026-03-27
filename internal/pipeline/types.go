@@ -38,11 +38,16 @@ const (
 
 // RunTokenUsage tracks token consumption and cost across pipeline stages.
 type RunTokenUsage struct {
-	Triage    StageTokens   `json:"triage"`
-	Review    []StageTokens `json:"review"`
-	Scoring   StageTokens   `json:"scoring,omitempty"`
-	Synthesis StageTokens   `json:"synthesis,omitempty"`
-	Total     StageTokens   `json:"total"`
+	Triage        StageTokens   `json:"triage"`
+	Review        []StageTokens `json:"review"`
+	Scoring       StageTokens   `json:"scoring,omitempty"`
+	Synthesis     StageTokens   `json:"synthesis,omitempty"`
+	Enrichment    StageTokens   `json:"enrichment,omitempty"`
+	Conventions   StageTokens   `json:"conventions,omitempty"`
+	Patterns      StageTokens   `json:"patterns,omitempty"`
+	FileSynthesis []StageTokens `json:"file_synthesis,omitempty"`
+	Graph         StageTokens   `json:"graph,omitempty"`
+	Total         StageTokens   `json:"total"`
 }
 
 // StageTokens holds token counts and cost for a single LLM call or stage aggregate.
@@ -51,6 +56,8 @@ type StageTokens struct {
 	CompletionTokens int     `json:"completion_tokens"`
 	TotalTokens      int     `json:"total_tokens"`
 	Cost             float64 `json:"cost"`
+	Model            string  `json:"model,omitempty"`
+	Provider         string  `json:"provider,omitempty"`
 	File             string  `json:"file,omitempty"`
 }
 
@@ -76,6 +83,11 @@ type PipelineRun struct {
 	BlastRadius         bool
 	ScenarioMemory      bool
 	CodeSimulation      bool
+	PREnrichment      bool
+	LearnPatterns     bool
+	LearnConventions  bool
+	FileSynthesis     bool
+	ArchitectureGraph bool
 	LeadBrief        *LeadBrief `json:"lead_brief,omitempty"`
 	LeadAgentError   string     `json:"lead_agent_error,omitempty"`
 	ScoringSkipped   bool // true when scoring provider unavailable — synthesis uses all comments
