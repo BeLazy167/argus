@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ReactFlow,
   Controls,
@@ -23,19 +23,11 @@ import { getLayoutedElements } from "./layout";
 const nodeTypes = { module: ModuleNode, group: GroupNode };
 
 /** Base edge styles by relationship kind */
-const EDGE_STYLES: Record<string, { stroke: string; width: number; dash?: string; animated?: boolean }> = {
-  imports: { stroke: "#334155", width: 1.5 },
-  calls: { stroke: "#854d0e", width: 1.5, dash: "6 4", animated: true },
-  uses_type: { stroke: "#4c1d95", width: 1, dash: "3 3" },
-  implements: { stroke: "#14532d", width: 1.5 },
-};
-
-/** Highlighted edge colors (brighter versions) */
-const EDGE_HIGHLIGHT: Record<string, string> = {
-  imports: "#64748b",
-  calls: "#f59e0b",
-  uses_type: "#8b5cf6",
-  implements: "#22c55e",
+const EDGE_COLORS: Record<string, { base: string; highlight: string; width: number; dash?: string }> = {
+  imports: { base: "#334155", highlight: "#64748b", width: 1.5 },
+  calls: { base: "#854d0e", highlight: "#f59e0b", width: 1.5, dash: "6 4" },
+  uses_type: { base: "#4c1d95", highlight: "#8b5cf6", width: 1, dash: "3 3" },
+  implements: { base: "#14532d", highlight: "#22c55e", width: 1.5 },
 };
 
 type Props = {
@@ -44,51 +36,6 @@ type Props = {
   repoFullName: string;
   defaultBranch: string;
 };
-
-function buildEdge(e: GraphEdge, highlighted: boolean, dimmed: boolean, kind: string): Edge {
-  const style = EDGE_STYLES[kind] ?? EDGE_STYLES.imports!;
-  const highlightColor = EDGE_HIGHLIGHT[kind] ?? "#64748b";
-
-  return {
-    id: String(e.id),
-    source: String(e.source_id),
-    target: String(e.target_id),
-    type: "smoothstep",
-    animated: highlighted ? true : (style.animated || false),
-    style: {
-      stroke: highlighted ? highlightColor : style.stroke,
-      strokeWidth: highlighted ? style.width + 1 : style.width,
-      strokeDasharray: style.dash,
-      opacity: dimmed ? 0.1 : 1,
-      transition: "opacity 0.2s, stroke 0.2s, stroke-width 0.2s",
-    },
-    markerEnd: {
-      type: MarkerType.ArrowClosed,
-      width: highlighted ? 14 : 10,
-      height: highlighted ? 14 : 10,
-      color: highlighted ? highlightColor : style.stroke,
-    },
-  };
-}
-
-function transformNodes(
-  graphNodes: GraphNode[],
-  repoFullName: string,
-  defaultBranch: string,
-): Node[] {
-  return graphNodes.map((n) => ({
-    id: String(n.id),
-    type: "module",
-    position: { x: 0, y: 0 },
-    data: {
-      label: n.name,
-      kind: n.kind,
-      language: n.language,
-      filePath: n.file_path,
-      githubUrl: `https://github.com/${repoFullName}/blob/${defaultBranch}/${n.file_path}`,
-    },
-  }));
-}
 
 function langColor(n: Node): string {
   const lang = n.data?.language as string;
@@ -104,50 +51,110 @@ type InnerProps = Props & { direction: "TB" | "LR" };
 function GraphCanvasInner({ graphNodes, graphEdges, repoFullName, defaultBranch, direction }: InnerProps) {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
 
-  // Compute connected node/edge sets for the selected node
-  const { connectedNodeIds, connectedEdgeIds } = useMemo(() => {
-    if (!selectedNodeId) return { connectedNodeIds: new Set<string>(), connectedEdgeIds: new Set<string>() };
-    const nodeIds = new Set<string>([selectedNodeId]);
-    const edgeIds = new Set<string>();
-    for (const e of graphEdges) {
-      const src = String(e.source_id);
-      const tgt = String(e.target_id);
-      if (src === selectedNodeId || tgt === selectedNodeId) {
-        edgeIds.add(String(e.id));
-        nodeIds.add(src);
-        nodeIds.add(tgt);
-      }
-    }
-    return { connectedNodeIds: nodeIds, connectedEdgeIds: edgeIds };
-  }, [selectedNodeId, graphEdges]);
+  // Compute initial layout once (only when data/direction changes)
+  const layout = useMemo(() => {
+    const rfNodes: Node[] = graphNodes.map((n) => ({
+      id: String(n.id),
+      type: "module",
+      position: { x: 0, y: 0 },
+      data: {
+        label: n.name,
+        kind: n.kind,
+        language: n.language,
+        filePath: n.file_path,
+        githubUrl: `https://github.com/${repoFullName}/blob/${defaultBranch}/${n.file_path}`,
+      },
+    }));
 
-  const { nodes: layoutedNodes, edges: layoutedEdges } = useMemo(() => {
-    const rawNodes = transformNodes(graphNodes, repoFullName, defaultBranch);
-
-    const edges = graphEdges.map((e) => {
-      const isHighlighted = connectedEdgeIds.has(String(e.id));
-      const isDimmed = selectedNodeId !== null && !connectedEdgeIds.has(String(e.id));
-      return buildEdge(e, isHighlighted, isDimmed, e.kind);
-    });
-
-    // Apply dimming to nodes
-    const nodes = rawNodes.map((n) => {
-      const isDimmed = selectedNodeId !== null && !connectedNodeIds.has(n.id);
+    const rfEdges: Edge[] = graphEdges.map((e) => {
+      const colors = EDGE_COLORS[e.kind] ?? EDGE_COLORS.imports!;
       return {
-        ...n,
-        style: {
-          ...(n.style || {}),
-          opacity: isDimmed ? 0.15 : 1,
-          transition: "opacity 0.2s",
-        },
+        id: String(e.id),
+        source: String(e.source_id),
+        target: String(e.target_id),
+        type: "smoothstep",
+        style: { stroke: colors.base, strokeWidth: colors.width, strokeDasharray: colors.dash },
+        markerEnd: { type: MarkerType.ArrowClosed, width: 10, height: 10, color: colors.base },
+        data: { kind: e.kind },
       };
     });
 
-    return getLayoutedElements(nodes, edges, direction);
-  }, [graphNodes, graphEdges, repoFullName, defaultBranch, direction, selectedNodeId, connectedNodeIds, connectedEdgeIds]);
+    return getLayoutedElements(rfNodes, rfEdges, direction);
+  }, [graphNodes, graphEdges, repoFullName, defaultBranch, direction]);
 
-  const [nodes, , onNodesChange] = useNodesState(layoutedNodes);
-  const [edges, , onEdgesChange] = useEdgesState(layoutedEdges);
+  const [nodes, setNodes, onNodesChange] = useNodesState(layout.nodes);
+  const [edges, setEdges, onEdgesChange] = useEdgesState(layout.edges);
+
+  // When selection changes, update node opacity and edge styles
+  useEffect(() => {
+    if (!selectedNodeId) {
+      // Reset all to full opacity
+      setNodes((nds) =>
+        nds.map((n) => ({
+          ...n,
+          style: { ...(n.style || {}), opacity: 1, transition: "opacity 0.2s" },
+        }))
+      );
+      setEdges((eds) =>
+        eds.map((e) => {
+          const colors = EDGE_COLORS[e.data?.kind as string] ?? EDGE_COLORS.imports!;
+          return {
+            ...e,
+            animated: false,
+            style: { ...e.style, stroke: colors.base, strokeWidth: colors.width, opacity: 1, transition: "all 0.2s" },
+            markerEnd: { type: MarkerType.ArrowClosed, width: 10, height: 10, color: colors.base },
+          };
+        })
+      );
+      return;
+    }
+
+    // Find connected edges and nodes
+    const connectedEdgeIds = new Set<string>();
+    const connectedNodeIds = new Set<string>([selectedNodeId]);
+    for (const e of edges) {
+      if (e.source === selectedNodeId || e.target === selectedNodeId) {
+        connectedEdgeIds.add(e.id);
+        connectedNodeIds.add(e.source);
+        connectedNodeIds.add(e.target);
+      }
+    }
+
+    setNodes((nds) =>
+      nds.map((n) => ({
+        ...n,
+        style: {
+          ...(n.style || {}),
+          opacity: connectedNodeIds.has(n.id) ? 1 : 0.12,
+          transition: "opacity 0.2s",
+        },
+      }))
+    );
+
+    setEdges((eds) =>
+      eds.map((e) => {
+        const isConnected = connectedEdgeIds.has(e.id);
+        const colors = EDGE_COLORS[e.data?.kind as string] ?? EDGE_COLORS.imports!;
+        return {
+          ...e,
+          animated: isConnected,
+          style: {
+            ...e.style,
+            stroke: isConnected ? colors.highlight : colors.base,
+            strokeWidth: isConnected ? colors.width + 1 : colors.width,
+            opacity: isConnected ? 1 : 0.08,
+            transition: "all 0.2s",
+          },
+          markerEnd: {
+            type: MarkerType.ArrowClosed,
+            width: isConnected ? 14 : 10,
+            height: isConnected ? 14 : 10,
+            color: isConnected ? colors.highlight : colors.base,
+          },
+        };
+      })
+    );
+  }, [selectedNodeId, setNodes, setEdges]);
 
   const onNodeClick: NodeMouseHandler = useCallback((_event, node) => {
     if (node.type === "group") return;
@@ -199,7 +206,6 @@ export default function GraphCanvas(props: Props) {
 
   return (
     <div className="h-full w-full relative">
-      {/* Direction toggle */}
       <div className="absolute top-4 right-4 z-10 flex gap-1 bg-[#12121a]/80 backdrop-blur-sm rounded-lg border border-slate-800 p-0.5">
         {([
           { key: "TB" as const, label: "↕" },
@@ -219,7 +225,6 @@ export default function GraphCanvas(props: Props) {
         ))}
       </div>
 
-      {/* Legend */}
       <div className="absolute bottom-4 left-16 z-10 flex gap-3 bg-[#12121a]/80 backdrop-blur-sm rounded-lg border border-slate-800 px-3 py-1.5">
         {[
           { color: "bg-blue-400", label: "TS" },
