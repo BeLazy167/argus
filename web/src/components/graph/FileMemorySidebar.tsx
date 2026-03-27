@@ -236,9 +236,9 @@ export default function FileMemorySidebar({ filePath, onClose }: FileMemorySideb
                         >
                           {c.severity}
                         </span>
-                        <span className="text-[9px] font-mono text-slate-600">
-                          PR #{c.pr_number}
-                        </span>
+                        {c.category && (
+                          <span className="text-[9px] font-mono text-slate-600">{c.category}</span>
+                        )}
                       </div>
                       <p className="text-[10px] font-mono text-slate-400 leading-relaxed line-clamp-3">
                         {c.body}
@@ -270,17 +270,20 @@ export default function FileMemorySidebar({ filePath, onClose }: FileMemorySideb
                       <div className="flex items-center gap-2 mb-1">
                         <span
                           className={`inline-block rounded border px-1.5 py-0.5 text-[9px] font-mono ${
-                            KIND_BADGE_STYLES[t.kind] ?? "border-slate-500/30 bg-slate-500/10 text-slate-400"
+                            KIND_BADGE_STYLES[t.trace_type] ?? "border-slate-500/30 bg-slate-500/10 text-slate-400"
                           }`}
                         >
-                          {t.kind}
+                          {t.trace_type}
                         </span>
+                        {t.pr_number > 0 && (
+                          <span className="text-[9px] font-mono text-slate-600">PR #{t.pr_number}</span>
+                        )}
                         <span className="text-[9px] font-mono text-slate-600 ml-auto">
                           {formatDistanceToNow(t.created_at)}
                         </span>
                       </div>
                       <p className="text-[10px] font-mono text-slate-400 leading-relaxed line-clamp-2">
-                        {t.summary}
+                        {t.content}
                       </p>
                     </div>
                   ))}
