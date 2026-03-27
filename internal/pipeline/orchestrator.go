@@ -797,6 +797,35 @@ func (o *Orchestrator) pass2(ctx context.Context, run *PipelineRun) error {
 	}
 
 	o.logger.Info("pass2 complete", "files_reviewed", len(hotFiles))
+
+	// Re-validate all comments against diff to prevent 422 from GitHub
+	validLines := make(map[string]map[int]bool)
+	for _, f := range run.Diff.Files {
+		validLines[f.NewName] = f.ValidCommentLines()
+	}
+	var cleaned []FileReview
+	var droppedAfterPass2 int
+	for _, fr := range run.FileReviews {
+		fileValid := validLines[fr.Path]
+		var validComments []FileComment
+		for _, c := range fr.Comments {
+			if fileValid == nil || !fileValid[c.Line] {
+				droppedAfterPass2++
+				continue
+			}
+			if c.StartLine > 0 && !fileValid[c.StartLine] {
+				c.StartLine = 0
+			}
+			validComments = append(validComments, c)
+		}
+		if len(validComments) > 0 {
+			cleaned = append(cleaned, FileReview{Path: fr.Path, Comments: validComments})
+		}
+	}
+	if droppedAfterPass2 > 0 {
+		o.logger.Warn("dropped invalid comments after pass2", "count", droppedAfterPass2, "pr", run.PREvent.PRNumber)
+	}
+	run.FileReviews = cleaned
 	return nil
 }
 
