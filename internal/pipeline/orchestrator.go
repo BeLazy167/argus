@@ -561,6 +561,11 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 }
 
 func (o *Orchestrator) synthesize(ctx context.Context, run *PipelineRun) error {
+	// Annotate findings with pattern matches and novelty flags before building summary
+	if err := o.enrichFindings(ctx, run); err != nil {
+		o.logger.Warn("enrichFindings failed, continuing", "error", err)
+	}
+
 	var summary strings.Builder
 	verb := "Reviewed"
 	if run.IsIncremental {
