@@ -2852,7 +2852,7 @@ func countComments(run *PipelineRun) int {
 }
 
 func calculateScore(run *PipelineRun) int {
-	var criticals, warnings int
+	var criticals, warnings, suggestions int
 	for _, fr := range run.FileReviews {
 		for _, c := range fr.Comments {
 			switch c.Severity {
@@ -2860,10 +2860,20 @@ func calculateScore(run *PipelineRun) int {
 				criticals++
 			case SeverityWarning:
 				warnings++
+			case SeveritySuggestion:
+				suggestions++
 			}
 		}
 	}
-	return max(1, 10-criticals*3-warnings)
+	total := criticals + warnings + suggestions
+	if total == 0 {
+		return 10
+	}
+	files := max(1, len(run.FileReviews))
+	// Weighted penalty normalized by file count — more files = more tolerance
+	penalty := float64(criticals*5+warnings*2+suggestions) / float64(files)
+	score := int(10 - penalty)
+	return max(1, min(10, score))
 }
 
 // RecoverIncomplete resumes any in-flight pipeline runs after a restart.
