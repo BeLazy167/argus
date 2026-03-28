@@ -83,7 +83,7 @@ export function GitHubReviewMock() {
               setVisibleReviews((prev) =>
                 prev.includes(i) ? prev : [...prev, i]
               );
-            }, i * 400);
+            }, i * 300);
           });
           observer.disconnect();
         }
@@ -162,10 +162,10 @@ export function GitHubReviewMock() {
           return (
             <div
               key={i}
-              className="transition-all duration-500"
+              className="transition-[opacity,transform] duration-400 ease-out"
               style={{
                 opacity: isVisible ? 1 : 0,
-                transform: isVisible ? "translateY(0)" : "translateY(8px)",
+                transform: isVisible ? "translateY(0)" : "translateY(6px)",
               }}
             >
               {/* File path header */}
