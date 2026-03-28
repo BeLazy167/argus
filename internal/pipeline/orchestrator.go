@@ -917,37 +917,32 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	if run.IsIncremental {
 		reviewHeader = "## Argus Review (Incremental)\n\n"
 	}
-	submission := &ghpkg.ReviewSubmission{
-		Summary: reviewHeader + run.Synthesis.Brief +
-			fmt.Sprintf("\n\nScore: **%d/10** · [Full review →](https://argusai.vercel.app/reviews/%s)", run.Synthesis.Score, run.ReviewID.String()),
-		HeadSHA: run.PREvent.HeadSHA,
-	}
-
 	// Build valid-line sets from diff to avoid 422 "line could not be resolved"
 	validLines := make(map[string]map[int]bool)
 	for _, f := range run.Diff.Files {
 		validLines[f.NewName] = f.ValidCommentLines()
 	}
 
-	var fileLevelCount int
+	// Split: inline comments (valid lines) go in the review, invalid-line comments
+	// are folded into the summary body so everything ships in ONE atomic API call.
+	var inlineComments []ghpkg.ReviewComment
+	var foldedLines []string
 	for _, fr := range run.FileReviews {
 		fileValid := validLines[fr.Path]
 		for _, c := range fr.Comments {
 			if fileValid == nil || !fileValid[c.Line] {
-				// Can't post inline — post as file-level comment instead
-				submission.Comments = append(submission.Comments, ghpkg.ReviewComment{
-					Path:        fr.Path,
-					Body:        fmt.Sprintf("**L%d** — %s", c.Line, formatCommentBody(c)),
-					SubjectType: "file",
-				})
-				fileLevelCount++
+				title := c.What
+				if title == "" {
+					title = util.Truncate(c.Body, 100, true)
+				}
+				foldedLines = append(foldedLines, fmt.Sprintf("- `%s:L%d` [%s] — %s", fr.Path, c.Line, c.Severity, title))
 				continue
 			}
 			startLine := c.StartLine
 			if startLine > 0 && !fileValid[startLine] {
 				startLine = 0
 			}
-			submission.Comments = append(submission.Comments, ghpkg.ReviewComment{
+			inlineComments = append(inlineComments, ghpkg.ReviewComment{
 				Path:      fr.Path,
 				Body:      formatCommentBody(c),
 				Line:      c.Line,
@@ -956,8 +951,25 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 			})
 		}
 	}
-	if fileLevelCount > 0 {
-		o.logger.Info("posting file-level comments for lines outside diff", "count", fileLevelCount)
+
+	// Build summary: header + brief + folded comments (if any) + score
+	var summaryBody strings.Builder
+	summaryBody.WriteString(reviewHeader)
+	summaryBody.WriteString(run.Synthesis.Brief)
+	if len(foldedLines) > 0 {
+		summaryBody.WriteString("\n\n<details><summary>")
+		summaryBody.WriteString(fmt.Sprintf("%d findings on lines outside the diff", len(foldedLines)))
+		summaryBody.WriteString("</summary>\n\n")
+		summaryBody.WriteString(strings.Join(foldedLines, "\n"))
+		summaryBody.WriteString("\n\n</details>")
+		o.logger.Info("folded non-inline comments into summary", "count", len(foldedLines))
+	}
+	summaryBody.WriteString(fmt.Sprintf("\n\nScore: **%d/10** · [Full review →](https://argusai.vercel.app/reviews/%s)", run.Synthesis.Score, run.ReviewID.String()))
+
+	submission := &ghpkg.ReviewSubmission{
+		Summary:  summaryBody.String(),
+		HeadSHA:  run.PREvent.HeadSHA,
+		Comments: inlineComments,
 	}
 
 	ghReviewID, err := o.ghClient.PostReview(
@@ -967,20 +979,6 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		run.PREvent.PRNumber,
 		submission,
 	)
-	if err != nil && strings.Contains(err.Error(), "422") {
-		// Retry without multi-line start positions (GitHub can't resolve them)
-		o.logger.Warn("posting review failed with 422, retrying without start_line", "error", err, "pr", run.PREvent.PRNumber)
-		for i := range submission.Comments {
-			submission.Comments[i].StartLine = 0
-		}
-		ghReviewID, err = o.ghClient.PostReview(
-			ctx,
-			run.PREvent.InstallationID,
-			owner, repo,
-			run.PREvent.PRNumber,
-			submission,
-		)
-	}
 	// Persist review data BEFORE posting to GitHub so a 502 doesn't lose results
 	var tokenUsageJSON []byte
 	if run.Tokens.Total.TotalTokens > 0 {
