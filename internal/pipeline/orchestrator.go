@@ -3014,11 +3014,12 @@ func mergeAdjacentComments(comments []ghpkg.ReviewComment, validLines map[string
 		i := 0
 		for i < len(group) {
 			merged := group[i]
+			anchorLine := merged.Line // fixed anchor to prevent unbounded chaining
 			j := i + 1
-			// Greedily merge adjacent comments within 5 lines
-			for j < len(group) && group[j].Line-merged.Line <= 5 {
+			// Merge adjacent comments within 5 lines of the anchor
+			for j < len(group) && group[j].Line-anchorLine <= 5 {
 				// Set start_line to span the range, validate it
-				startLine := merged.Line
+				startLine := anchorLine
 				if merged.StartLine > 0 && merged.StartLine < startLine {
 					startLine = merged.StartLine
 				}
