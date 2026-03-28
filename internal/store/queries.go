@@ -822,8 +822,8 @@ func (s *Store) RecoverStaleReviews(ctx context.Context, maxAge time.Duration) (
 		UPDATE reviews SET status = 'failed', error = 'review timed out — server restarted',
 		       completed_at = NOW()
 		WHERE status IN ('pending', 'in_progress')
-		  AND created_at < NOW() - ($1 || ' seconds')::interval
-	`, int64(maxAge.Seconds()))
+		  AND created_at < NOW() - make_interval(secs => $1)
+	`, float64(maxAge.Seconds()))
 	if err != nil {
 		return 0, fmt.Errorf("recovering stale reviews: %w", err)
 	}
