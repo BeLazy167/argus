@@ -139,12 +139,20 @@ function MermaidChart({ chart }: { chart: string }) {
           startOnLoad: false,
           theme: "dark",
           themeVariables: {
-            primaryColor: "#c2410c",
+            primaryColor: "#44403c",
             primaryTextColor: "#f5f0eb",
-            primaryBorderColor: "#3a3632",
-            lineColor: "#6b6560",
+            primaryBorderColor: "#57534e",
+            lineColor: "#78716c",
             secondaryColor: "#292524",
             tertiaryColor: "#1c1917",
+            nodeTextColor: "#f5f0eb",
+            nodeBorder: "#57534e",
+            mainBkg: "#44403c",
+            clusterBkg: "#292524",
+            clusterBorder: "#57534e",
+            titleColor: "#f5f0eb",
+            edgeLabelBackground: "#292524",
+            textColor: "#f5f0eb",
           },
         });
         if (!ref.current) return;
@@ -153,7 +161,10 @@ function MermaidChart({ chart }: { chart: string }) {
       })
       .then((result) => {
         if (cancelled || !ref.current || !result) return;
-        const clean = DOMPurify.sanitize(result.svg, { USE_PROFILES: { svg: true } });
+        const clean = DOMPurify.sanitize(result.svg, {
+          USE_PROFILES: { svg: true, svgFilters: true },
+          ADD_TAGS: ["foreignObject"],
+        });
         ref.current.innerHTML = clean;
       })
       .catch(() => {
