@@ -130,8 +130,8 @@ func isSimilarFinding(a, b FileComment) bool {
 		}
 	}
 
-	// Different category — require higher overlap or substring containment
-	if a.What != "" && b.What != "" {
+	// Different category — require higher overlap or substring containment (min 15 chars to avoid false merges)
+	if len(a.What) >= 15 && len(b.What) >= 15 {
 		aLower := strings.ToLower(a.What)
 		bLower := strings.ToLower(b.What)
 		if strings.Contains(aLower, bLower) || strings.Contains(bLower, aLower) {
@@ -168,12 +168,11 @@ func wordOverlap(a, b string) float64 {
 }
 
 var stopWords = map[string]bool{
-	"function": true, "return": true, "error": true, "value": true,
+	"function": true, "value": true,
 	"should": true, "could": true, "would": true, "this": true,
 	"that": true, "with": true, "from": true, "when": true,
 	"will": true, "have": true, "been": true, "does": true,
-	"missing": true, "check": true, "handle": true, "undefined": true,
-	"null": true, "string": true, "number": true, "object": true,
+	"string": true, "number": true, "object": true,
 	"type": true, "const": true, "async": true, "await": true,
 }
 
