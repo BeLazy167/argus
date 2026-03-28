@@ -580,7 +580,8 @@ func (o *Orchestrator) synthesize(ctx context.Context, run *PipelineRun) error {
 			if desc == "" {
 				desc = c.Body
 			}
-			summary.WriteString(fmt.Sprintf("- **[%s]** L%d: %s\n", c.Severity, c.Line, desc))
+			emoji := severityEmoji(c.Severity)
+			summary.WriteString(fmt.Sprintf("- %s **[%s]** L%d: %s\n", emoji, c.Severity, c.Line, desc))
 		}
 		summary.WriteString("\n")
 	}
@@ -642,18 +643,32 @@ func (o *Orchestrator) synthesize(ctx context.Context, run *PipelineRun) error {
 	return nil
 }
 
-const synthesisBriefSystemPrompt = `You are writing a short verdict for a pull request. The per-file findings are shown separately below the summary, so do NOT repeat them.
+const synthesisBriefSystemPrompt = `You are writing a concise verdict for a pull request review. Per-file inline comments are shown separately — do NOT repeat them.
 
 Format (markdown):
-**Verdict:** [1-2 sentences: what this PR does and whether it's ready to merge. Mention the most important issue if critical.]
+
+**Verdict:** [1-2 sentences: what this PR does and whether it's ready to merge.]
+
+| | Count | Key files |
+|---|---|---|
+| 🔴 Blockers | N | file1.ts, file2.ts |
+| 🟡 Should fix | N | file3.ts |
+| 💡 Suggestions | N | file4.ts |
+| ✅ Clean | N | file5.ts, file6.ts |
+
+**Top priority:** [Name the single most important issue to fix first, with file:line.]
+
+**Architecture:** [1 sentence on structural patterns — what's good, what to watch.]
 
 Rules:
-- Maximum 2 sentences. Be direct.
-- If score >= 8, just say what the PR does and that it looks good.
-- If critical issues exist, name the single most important one.
-- Do NOT list individual file findings — those are shown per-file below.
-- Do NOT include a score, link, file count, or comment count — those are shown separately.
-- No greetings, no "hey", no conversational tone.`
+- Populate the table from the findings provided. Count by severity.
+- "Clean" = files with 0 findings or only praise comments.
+- If score >= 8, keep the verdict positive and brief.
+- If critical issues exist, the Top priority line is required.
+- If no critical issues, omit the Top priority line.
+- Do NOT list individual findings — those are inline.
+- Use "we" not "you". Collaborative tone.
+- No greetings, no score, no link, no comment count — those are shown separately.`
 
 // generateConversationalBrief calls the LLM to produce a natural-language summary of the review.
 // Falls back to a deterministic brief on failure.
@@ -2917,13 +2932,15 @@ func getDiffContext(run *PipelineRun, path string) string {
 	return ""
 }
 
-// formatCommentBody builds the GitHub review comment body with severity, category, and optional suggestion block.
+// formatCommentBody builds the GitHub review comment body.
+// Structure: emoji severity + category title, then what → why → fix.
 func formatCommentBody(c FileComment) string {
-	title := fmt.Sprintf("**[%s · %s]** %s", c.Severity, c.Category, commentTitle(c))
+	emoji := severityEmoji(c.Severity)
+	title := fmt.Sprintf("%s **%s:** %s", emoji, capitalizeCategory(string(c.Category)), commentTitle(c))
 
 	var body string
 	if c.What != "" && c.Why != "" {
-		body = title + "\n\n**What:** " + c.What + "\n\n**Why:** " + c.Why
+		body = title + "\n\n" + c.What + "\n\n" + c.Why
 	} else {
 		body = title + "\n\n" + c.Body
 	}
@@ -2932,12 +2949,33 @@ func formatCommentBody(c FileComment) string {
 		body += "\n\n```suggestion\n" + strings.TrimRight(c.Suggestion, "\n") + "\n```"
 	}
 
-	// Feedback prompt — Argus auto-learns, devs can dismiss
 	if c.Severity == SeverityCritical || c.Severity == SeverityWarning {
-		body += "\n\n---\n<sub>Argus learns from this automatically · React 👎 to dismiss</sub>"
+		body += "\n\n---\n<sub>React 👎 to dismiss · Argus learns from feedback</sub>"
 	}
 
 	return body
+}
+
+func severityEmoji(s Severity) string {
+	switch s {
+	case SeverityCritical:
+		return "\U0001F534" // red circle
+	case SeverityWarning:
+		return "\U0001F7E1" // yellow circle
+	case SeveritySuggestion:
+		return "\U0001F4A1" // lightbulb
+	case SeverityPraise:
+		return "\u2705" // green check
+	default:
+		return "\U0001F4A1"
+	}
+}
+
+func capitalizeCategory(cat string) string {
+	if len(cat) == 0 {
+		return cat
+	}
+	return strings.ToUpper(cat[:1]) + cat[1:]
 }
 
 // commentTitle extracts a short title from the comment for the header line.
