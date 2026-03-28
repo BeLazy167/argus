@@ -972,13 +972,6 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		Comments: inlineComments,
 	}
 
-	ghReviewID, err := o.ghClient.PostReview(
-		ctx,
-		run.PREvent.InstallationID,
-		owner, repo,
-		run.PREvent.PRNumber,
-		submission,
-	)
 	// Persist review data BEFORE posting to GitHub so a 502 doesn't lose results
 	var tokenUsageJSON []byte
 	if run.Tokens.Total.TotalTokens > 0 {
@@ -1004,6 +997,13 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		o.logger.Warn("pre-post DB update failed", "error", dbErr)
 	}
 
+	ghReviewID, err := o.ghClient.PostReview(
+		ctx,
+		run.PREvent.InstallationID,
+		owner, repo,
+		run.PREvent.PRNumber,
+		submission,
+	)
 	if err != nil {
 		return fmt.Errorf("posting review: %w", err)
 	}
