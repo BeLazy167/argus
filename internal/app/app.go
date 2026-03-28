@@ -78,10 +78,12 @@ func Run() error {
 		logger.Info("recovered stale reviews", "count", count)
 	}
 
-	// Recover incomplete pipeline runs
-	if err := orchestrator.RecoverIncomplete(ctx); err != nil {
-		logger.Error("recovering incomplete pipelines", "error", err)
-	}
+	// Recover incomplete pipeline runs (async — don't block server startup)
+	go func() {
+		if err := orchestrator.RecoverIncomplete(context.Background()); err != nil {
+			logger.Error("recovering incomplete pipelines", "error", err)
+		}
+	}()
 
 	// JWT auth (Clerk or SuperTokens)
 	if cfg.ClerkJWKSURL != "" {
