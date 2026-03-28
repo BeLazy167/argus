@@ -1169,6 +1169,11 @@ func (o *Orchestrator) enrichPRDescription(ctx context.Context, run *PipelineRun
 		section.WriteString("\n")
 	}
 	if result.Diagram != "" && isValidMermaid(result.Diagram) {
+		// Save diagram to review record
+		if _, err := o.db.Exec(ctx, `UPDATE reviews SET diagram = $1, diagram_title = $2 WHERE id = $3`,
+			result.Diagram, result.DiagramTitle, run.ReviewID); err != nil {
+			o.logger.Warn("failed to save diagram", "error", err)
+		}
 		section.WriteString("<details>\n")
 		title := "Architecture"
 		if result.DiagramTitle != "" {

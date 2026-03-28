@@ -1,0 +1,2 @@
+ALTER TABLE reviews DROP COLUMN IF EXISTS diagram;
+ALTER TABLE reviews DROP COLUMN IF EXISTS diagram_title;

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, useCallback, useEffect } from "react";
+import { useMemo, useState, useCallback, useEffect, useRef } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import dynamic from "next/dynamic";
@@ -121,6 +121,43 @@ const severityBg: Record<string, string> = {
   suggestion: "bg-blue-400/[0.03]",
   praise: "bg-green-400/[0.03]",
 };
+
+/* ── Mermaid ─────────────────────────────────── */
+
+function MermaidChart({ chart }: { chart: string }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    import("mermaid").then((m) => {
+      m.default.initialize({
+        startOnLoad: false,
+        theme: "dark",
+        themeVariables: {
+          primaryColor: "#c2410c",
+          primaryTextColor: "#f5f0eb",
+          primaryBorderColor: "#3a3632",
+          lineColor: "#6b6560",
+          secondaryColor: "#292524",
+          tertiaryColor: "#1c1917",
+        },
+      });
+      if (ref.current) {
+        ref.current.textContent = "";
+        m.default
+          .render("mermaid-" + Math.random().toString(36).slice(2), chart)
+          .then(({ svg }) => {
+            if (ref.current) {
+              const parser = new DOMParser();
+              const doc = parser.parseFromString(svg, "image/svg+xml");
+              const svgEl = doc.documentElement;
+              ref.current.textContent = "";
+              ref.current.appendChild(ref.current.ownerDocument.importNode(svgEl, true));
+            }
+          });
+      }
+    });
+  }, [chart]);
+  return <div ref={ref} className="flex justify-center" />;
+}
 
 /* ── Sub-components ──────────────────────────── */
 
@@ -820,43 +857,88 @@ export default function ReviewDetailPage() {
 
       {/* Summary card */}
       <div className="rounded-lg border border-iron bg-charcoal/80 p-6 mb-8">
-        {/* Heading inside card */}
         <h2 className="font-display text-base font-bold text-foreground mb-4">
           Summary
         </h2>
 
-        {/* Stats bar */}
-        <div className="flex items-center gap-3 mb-5 pb-4 border-b border-iron/40">
-          <span className="text-xs font-sans text-slate-text">
-            {comments.length} comment{comments.length !== 1 ? "s" : ""} across{" "}
+        {/* Verdict */}
+        {review.summary ? (
+          <p className="text-sm text-foreground leading-relaxed mb-4">
+            {review.summary.match(/^[^•\-*\n]+(?:\.[^•\-*\n]+)?\.?/)?.[0]?.trim() ?? review.summary.slice(0, 200)}
+          </p>
+        ) : (
+          <p className="text-sm text-foreground/50 mb-4">No summary generated.</p>
+        )}
+
+        {/* Top 3 critical/warning findings */}
+        {(() => {
+          const topFindings = [...comments]
+            .filter((c) => c.severity === "critical" || c.severity === "warning")
+            .sort((a, b) => {
+              const sevOrder = { critical: 0, warning: 1 } as Record<string, number>;
+              const diff = (sevOrder[a.severity ?? ""] ?? 2) - (sevOrder[b.severity ?? ""] ?? 2);
+              if (diff !== 0) return diff;
+              return (b.confidence_score ?? 0) - (a.confidence_score ?? 0);
+            });
+          const top3 = topFindings.slice(0, 3);
+          const remaining = topFindings.length - 3;
+          if (top3.length === 0) return null;
+          return (
+            <div className="mb-4 pb-4 border-b border-iron/40">
+              {top3.map((c) => {
+                const shortPath = c.file_path.split("/").slice(-2).join("/");
+                const line = c.end_line ?? c.start_line;
+                const sevColor = c.severity === "critical" ? "bg-red-400" : "bg-amber";
+                const body = c.body.length > 80 ? c.body.slice(0, 80) + "\u2026" : c.body;
+                return (
+                  <div key={c.id} className="flex items-start gap-2 py-1.5">
+                    <div className={`h-1.5 w-1.5 rounded-full mt-1.5 shrink-0 ${sevColor}`} />
+                    <span className="text-[11px] font-mono text-amber shrink-0">
+                      {shortPath}{line != null ? `:${line}` : ""}
+                    </span>
+                    <span className="text-xs text-foreground">{body}</span>
+                  </div>
+                );
+              })}
+              {remaining > 0 && (
+                <p className="text-[11px] font-mono text-slate-text mt-1 pl-3.5">
+                  (+{remaining} more in detail below)
+                </p>
+              )}
+            </div>
+          );
+        })()}
+
+        {/* Stats row */}
+        <div className="flex items-center gap-3 text-[11px] font-mono text-slate-text">
+          <span>
+            {comments.length} comment{comments.length !== 1 ? "s" : ""}
+          </span>
+          <span className="text-iron">·</span>
+          <span>
             {grouped.length} file{grouped.length !== 1 ? "s" : ""}
           </span>
-          <div className="h-3.5 w-px bg-iron/40" />
-          <div className="flex flex-wrap items-center gap-3">
-            {(["critical", "warning", "suggestion", "praise"] as const).map(
-              (sev) =>
-                severityCounts[sev] ? (
-                  <div key={sev} className="flex items-center gap-1.5">
-                    <div
-                      className={`h-2.5 w-2.5 rounded-full ${severityDot[sev]}`}
-                    />
-                    <span className="text-xs font-sans text-foreground/70">
-                      {severityCounts[sev]}{" "}
-                      <span className="hidden sm:inline">{sev}</span>
-                    </span>
-                  </div>
-                ) : null,
-            )}
-          </div>
+          {(["critical", "warning", "suggestion", "praise"] as const).map(
+            (sev) =>
+              severityCounts[sev] ? (
+                <div key={sev} className="flex items-center gap-1.5">
+                  <div className={`h-2 w-2 rounded-full ${severityDot[sev]}`} />
+                  <span>{severityCounts[sev]} {sev}</span>
+                </div>
+              ) : null,
+          )}
         </div>
 
-        {/* AI synthesis — proportional font, stripped of per-file duplication */}
-        {review.summary ? (
-          <Markdown>{extractSynthesis(review.summary)}</Markdown>
-        ) : (
-          <p className="text-sm font-sans text-foreground/50">
-            No summary generated.
-          </p>
+        {/* Mermaid diagram (collapsible) */}
+        {review.diagram && (
+          <details className="mt-4 pt-4 border-t border-iron/40">
+            <summary className="text-[11px] font-mono text-slate-text cursor-pointer hover:text-foreground transition-colors">
+              {review.diagram_title || "Architecture"} diagram
+            </summary>
+            <div className="mt-3 rounded-lg border border-iron bg-void/50 p-4 overflow-x-auto">
+              <MermaidChart chart={review.diagram} />
+            </div>
+          </details>
         )}
       </div>
 
