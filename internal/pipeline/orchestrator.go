@@ -526,8 +526,14 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 				}
 
 				if score > 0.80 {
-					c.MatchedPatternScore = score
-					o.logger.Debug("pattern match found", "file", filePath, "line", c.Line, "score", fmt.Sprintf("%.3f", score), "pattern_prefix", util.Truncate(content, 80, true))
+					// Skip self-matches: if the pattern is nearly identical to this comment,
+					// it's from a previous review of the same code (re-review noise)
+					if content != "" && wordOverlap(strings.ToLower(content), strings.ToLower(c.Body)) > 0.7 {
+						score = 0
+					} else {
+						c.MatchedPatternScore = score
+						o.logger.Debug("pattern match found", "file", filePath, "line", c.Line, "score", fmt.Sprintf("%.3f", score), "pattern_prefix", util.Truncate(content, 80, true))
+					}
 				}
 				if ruleContent != "" {
 					c.EnforcedRuleContent = ruleContent
@@ -925,6 +931,14 @@ func (o *Orchestrator) pass2(ctx context.Context, run *PipelineRun) error {
 	}
 
 	o.logger.Info("pass2 complete", "files_reviewed", completed, "total_hot", len(hotFiles))
+
+	// Re-dedup after pass2 — pass2 findings often overlap with pass1
+	beforeDedup := countComments(run)
+	run.FileReviews = dedupFindings(run.FileReviews, 5)
+	afterDedup := countComments(run)
+	if beforeDedup != afterDedup {
+		o.logger.Info("pass2 dedup", "before", beforeDedup, "after", afterDedup, "removed", beforeDedup-afterDedup)
+	}
 
 	// Re-validate all comments against diff to prevent 422 from GitHub
 	validLines := make(map[string]map[int]bool)
