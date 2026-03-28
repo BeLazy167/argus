@@ -217,6 +217,7 @@ export type Scenario = {
   expected_outcome: string;
   is_outdated: boolean;
   last_run_at?: string;
+  trigger_count?: number;
 };
 
 export type FileRisk = {
