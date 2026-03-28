@@ -3052,6 +3052,8 @@ func capitalizeCategory(cat string) string {
 	if len(cat) == 0 {
 		return cat
 	}
+	// Normalize: "error_handling" → "Error handling", "type_design" → "Type design"
+	cat = strings.ReplaceAll(cat, "_", " ")
 	return strings.ToUpper(cat[:1]) + cat[1:]
 }
 
