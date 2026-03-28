@@ -940,7 +940,7 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 
 	// Split: inline comments (valid lines) go in the review, invalid-line comments
 	// are folded into the summary body so everything ships in ONE atomic API call.
-	var inlineComments []ghpkg.ReviewComment
+	var rawInline []ghpkg.ReviewComment
 	var foldedLines []string
 	for _, fr := range run.FileReviews {
 		fileValid := validLines[fr.Path]
@@ -957,7 +957,7 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 			if startLine > 0 && !fileValid[startLine] {
 				startLine = 0
 			}
-			inlineComments = append(inlineComments, ghpkg.ReviewComment{
+			rawInline = append(rawInline, ghpkg.ReviewComment{
 				Path:      fr.Path,
 				Body:      formatCommentBody(c),
 				Line:      c.Line,
@@ -966,6 +966,9 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 			})
 		}
 	}
+
+	// Merge adjacent same-file comments into range comments (start_line..line)
+	inlineComments := mergeAdjacentComments(rawInline, validLines)
 
 	// Build summary: header + brief + folded comments (if any) + score
 	var summaryBody strings.Builder
@@ -2988,6 +2991,50 @@ func commentTitle(c FileComment) string {
 		return src[:idx]
 	}
 	return util.Truncate(src, 80, false)
+}
+
+// mergeAdjacentComments combines same-file comments within 5 lines into range comments.
+// Two comments on client.ts:39 and client.ts:41 become one comment spanning lines 39-41.
+func mergeAdjacentComments(comments []ghpkg.ReviewComment, validLines map[string]map[int]bool) []ghpkg.ReviewComment {
+	if len(comments) <= 1 {
+		return comments
+	}
+
+	// Group by path
+	byPath := make(map[string][]ghpkg.ReviewComment)
+	for _, c := range comments {
+		byPath[c.Path] = append(byPath[c.Path], c)
+	}
+
+	var result []ghpkg.ReviewComment
+	for _, group := range byPath {
+		// Sort by line number
+		sort.Slice(group, func(i, j int) bool { return group[i].Line < group[j].Line })
+
+		i := 0
+		for i < len(group) {
+			merged := group[i]
+			j := i + 1
+			// Greedily merge adjacent comments within 5 lines
+			for j < len(group) && group[j].Line-merged.Line <= 5 {
+				// Set start_line to span the range, validate it
+				startLine := merged.Line
+				if merged.StartLine > 0 && merged.StartLine < startLine {
+					startLine = merged.StartLine
+				}
+				fileValid := validLines[merged.Path]
+				if fileValid != nil && fileValid[startLine] {
+					merged.StartLine = startLine
+				}
+				merged.Line = group[j].Line
+				merged.Body += "\n\n---\n\n" + group[j].Body
+				j++
+			}
+			result = append(result, merged)
+			i = j
+		}
+	}
+	return result
 }
 
 func strPtrOrNil(s string) *string {
