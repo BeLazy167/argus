@@ -44,6 +44,7 @@ export function usePattern(id: number | undefined) {
     queryKey: ["pattern", id],
     queryFn: () => api.get<Pattern>(`/api/v1/patterns/${id}`),
     enabled: !!id && !!api.active,
+    staleTime: 5 * 60 * 1000,
   });
 }
 
