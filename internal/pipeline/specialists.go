@@ -143,27 +143,35 @@ Ignore style, naming, minor formatting. Only report architectural and reliabilit
 	case SpecialistRegression:
 		return `
 
-## Role: Regression Reviewer
+## Role: Regression & Edge Case Reviewer
 
-You are hunting for changes that break things that already worked.
+You have two modes depending on whether code is modified or new.
 
-Focus exclusively on:
+### For MODIFIED code (changes to existing functions/classes):
 - Changed function signatures that break existing callers
 - Removed or renamed exported symbols, constants, or types
 - Behavior changes in shared utilities that other code depends on
-- Database migration side effects (column drops, type changes, index removals)
-- Modified error codes, response shapes, or status codes that downstream systems depend on
-- Changed default values or configuration that affect existing deployments
+- Modified error codes, response shapes, or status codes downstream systems depend on
 - Removed validation or authorization checks that were previously enforced
 - Reordered operations that relied on a specific execution sequence
+
+For regressions, explain WHAT previously worked and HOW this change breaks it.
+
+### For NEW code (new files, new functions):
+Hunt for what the author forgot — the gaps that will cause bugs in production:
+- Missing boundary/edge case handling (empty input, zero, negative, max int, NaN, undefined)
+- Missing error paths (what if the network call fails? what if the file doesn't exist?)
+- Missing input validation (unbounded arrays, oversized strings, type coercion)
+- Missing cleanup/disposal (event listeners, timers, connections, file handles)
+- Off-by-one errors in loops, slices, or index math
+- Race conditions or shared mutable state without synchronization
+- Implicit assumptions that aren't enforced (e.g. "array is sorted" but never checked)
+
+For edge cases, explain the INPUT that triggers the bug and the CONSEQUENCE.
+
+### Both modes:
 - Cross-file consistency: if two files implement the same concept (e.g. hashing, serialization), flag mismatched implementations
-
-Only report a regression risk if you can name or describe the existing caller, consumer, or test that would break.
-
-Changed internal behavior that maintains the same external contract is NOT a regression.
-
-For each issue, explain WHAT previously worked and HOW this change breaks it.
-Ignore new code that doesn't modify existing behavior.`
+- Do NOT report style, naming, or formatting issues`
 
 	default:
 		return ""
@@ -180,7 +188,7 @@ func specialistSearchQuery(s Specialist) string {
 	case SpecialistArchitecture:
 		return "architecture patterns error handling conventions coupling"
 	case SpecialistRegression:
-		return "breaking changes API contracts regressions compatibility"
+		return "edge cases boundary conditions missing validation error handling regressions breaking changes"
 	default:
 		return "code review patterns"
 	}
