@@ -502,7 +502,7 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 
 				// Build a richer query: category + file + body gives Supermemory more semantic signal
 				query := fmt.Sprintf("[%s|%s] %s:%d %s", c.Severity, c.Category, fr.Path, c.Line, c.Body)
-				_, score := o.indexer.SearchPatternMatch(ctx, owner, repo, query)
+				content, score := o.indexer.SearchPatternMatch(ctx, owner, repo, query)
 
 				var ruleContent string
 				if memClient != nil {
@@ -514,9 +514,11 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 
 				if score > 0.55 {
 					c.MatchedPatternScore = score
+					o.logger.Debug("pattern match found", "file", fr.Path, "line", c.Line, "score", fmt.Sprintf("%.3f", score), "pattern_prefix", util.Truncate(content, 80, true))
 				}
 				if ruleContent != "" {
 					c.EnforcedRuleContent = ruleContent
+					o.logger.Debug("rule enforced", "file", fr.Path, "line", c.Line, "rule_prefix", util.Truncate(ruleContent, 80, true))
 				}
 				if score <= 0.55 && ruleContent == "" {
 					c.IsNewFinding = true
@@ -526,7 +528,22 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 	}
 	wg.Wait()
 
-	o.logger.Info("enriched findings", "repo", run.PREvent.RepoFullName, "pr", run.PREvent.PRNumber)
+	var matched, enforced, novel int
+	for _, fr := range run.FileReviews {
+		for _, c := range fr.Comments {
+			if c.MatchedPatternScore > 0 {
+				matched++
+			}
+			if c.EnforcedRuleContent != "" {
+				enforced++
+			}
+			if c.IsNewFinding {
+				novel++
+			}
+		}
+	}
+	o.logger.Info("enriched findings", "repo", run.PREvent.RepoFullName, "pr", run.PREvent.PRNumber,
+		"total", matched+enforced+novel, "pattern_matches", matched, "rules_enforced", enforced, "new_findings", novel)
 	return nil
 }
 
