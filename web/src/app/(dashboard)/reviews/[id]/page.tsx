@@ -29,6 +29,7 @@ import { StatusBadge } from "@/components/dashboard/status-badge";
 import { formatDistanceToNow } from "@/lib/time";
 import { useReviewStream } from "@/lib/hooks/use-review-stream";
 import { PipelineProgress } from "./progress-bar";
+import { ActivityTimeline } from "./activity-timeline";
 import type { Repo, ReviewComment, TokenUsage } from "@/lib/types";
 
 const Markdown = dynamic(() => import("./markdown").then(m => ({ default: m.Markdown })), { ssr: false });
@@ -523,7 +524,13 @@ export default function ReviewDetailPage() {
   const comments = data?.comments ?? [];
 
   const isLive = review?.status === "pending" || review?.status === "in_progress";
-  const { stage, triageResults, failedStage } = useReviewStream(id, isLive);
+  const { stage, triageResults, failedStage, timeline, liveTokens } = useReviewStream(id, isLive);
+
+  const filesReviewed = useMemo(() =>
+    new Set(timeline.filter(e => e.type === "file").map(e => e.message)).size,
+    [timeline]
+  );
+  const totalFiles = triageResults?.length ?? 0;
 
   const repoMap = useMemo(
     () => new Map<number, Repo>((repos ?? []).map((r) => [r.id, r])),
@@ -738,7 +745,17 @@ export default function ReviewDetailPage() {
       </header>
 
       {/* Pipeline progress (live reviews) */}
-      {isLive && <PipelineProgress stage={stage} failedStage={failedStage} />}
+      {isLive && <PipelineProgress stage={stage} failedStage={failedStage} filesReviewed={filesReviewed} totalFiles={totalFiles} />}
+
+      {/* Activity timeline (live reviews) */}
+      {isLive && timeline.length > 0 && (
+        <ActivityTimeline
+          timeline={timeline}
+          liveTokens={liveTokens}
+          stage={stage}
+          startedAt={review.created_at}
+        />
+      )}
 
       {/* Triage results card */}
       {triageResults && isLive && (

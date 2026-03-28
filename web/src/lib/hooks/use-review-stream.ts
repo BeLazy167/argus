@@ -29,6 +29,20 @@ export type ScoringUpdate = {
   threshold: number;
 };
 
+export type TimelineEntry = {
+  id: string;
+  type: string;
+  timestamp: Date;
+  message: string;
+  detail?: string;
+  icon: "stage" | "file" | "comment" | "scoring" | "done" | "error";
+};
+
+export type LiveTokens = {
+  total_tokens: number;
+  cost: number;
+};
+
 type WSEvent = {
   type: string;
   data: Record<string, unknown>;
@@ -50,6 +64,8 @@ export function useReviewStream(reviewId: string, enabled: boolean) {
   const [triageResults, setTriageResults] = useState<TriageFile[] | null>(null);
   const [scoringUpdate, setScoringUpdate] = useState<ScoringUpdate | null>(null);
   const [connected, setConnected] = useState(false);
+  const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
+  const [liveTokens, setLiveTokens] = useState<LiveTokens | null>(null);
   const backoffRef = useRef(1000);
 
   useEffect(() => {
@@ -68,15 +84,25 @@ export function useReviewStream(reviewId: string, enabled: boolean) {
       });
     };
 
+    const addEntry = (entry: Omit<TimelineEntry, "id" | "timestamp">) => {
+      setTimeline(prev => [...prev, { ...entry, id: crypto.randomUUID(), timestamp: new Date() }]);
+    };
+
     const processEvent = (evt: WSEvent) => {
       switch (evt.type) {
         case "stage_changed":
           setStage(evt.data.stage as PipelineStage);
           patchReview({ status: mapStageToStatus(evt.data.stage as string) });
+          addEntry({ type: "stage", message: stageMessage(evt.data.stage as string), icon: "stage" });
           break;
 
         case "triage_complete":
           setTriageResults(evt.data.files as TriageFile[]);
+          addEntry({ type: "triage", message: `Classified ${(evt.data.files as TriageFile[]).length} files`, detail: summarizeTriage(evt.data.files as TriageFile[]), icon: "stage" });
+          break;
+
+        case "file_review_started":
+          addEntry({ type: "file", message: `Reviewing ${shortPath(evt.data.file_path as string)}`, detail: [evt.data.specialist, evt.data.action].filter(Boolean).join(" \u00b7 ") || undefined, icon: "file" });
           break;
 
         case "comment":
@@ -95,6 +121,7 @@ export function useReviewStream(reviewId: string, enabled: boolean) {
             };
             return { ...old, comments: [...old.comments, comment] };
           });
+          addEntry({ type: "comment", message: truncate(evt.data.body as string, 60), detail: `${evt.data.severity} \u00b7 ${shortPath(evt.data.file_path as string)}:${evt.data.line}`, icon: "comment" });
           break;
 
         case "scoring_update":
@@ -103,6 +130,11 @@ export function useReviewStream(reviewId: string, enabled: boolean) {
             dropped: evt.data.dropped as number,
             threshold: evt.data.threshold as number,
           });
+          addEntry({ type: "scoring", message: `Kept ${evt.data.kept}, dropped ${evt.data.dropped}`, detail: `threshold: ${evt.data.threshold}`, icon: "scoring" });
+          break;
+
+        case "token_update":
+          setLiveTokens({ total_tokens: evt.data.total_tokens as number, cost: evt.data.cost as number });
           break;
 
         case "synthesis":
@@ -110,12 +142,14 @@ export function useReviewStream(reviewId: string, enabled: boolean) {
             summary: evt.data.summary as string,
             score: evt.data.score as number,
           });
+          addEntry({ type: "done", message: `Review complete \u2014 score ${evt.data.score}/10`, icon: "done" });
           break;
 
         case "completed":
           qc.invalidateQueries({ queryKey: ["review", reviewId] });
           qc.invalidateQueries({ queryKey: ["reviews"] });
           setStage("completed");
+          addEntry({ type: "done", message: "Posted to GitHub", icon: "done" });
           break;
 
         case "error":
@@ -123,6 +157,7 @@ export function useReviewStream(reviewId: string, enabled: boolean) {
           qc.invalidateQueries({ queryKey: ["reviews"] });
           setFailedStage(evt.data.stage as string);
           setStage("failed");
+          addEntry({ type: "error", message: `Failed at ${evt.data.stage}: ${evt.data.error}`, icon: "error" });
           break;
       }
     };
@@ -175,11 +210,41 @@ export function useReviewStream(reviewId: string, enabled: boolean) {
     };
   }, [reviewId, enabled, active, getToken, qc]);
 
-  return { stage, failedStage, triageResults, scoringUpdate, connected };
+  return { stage, failedStage, triageResults, scoringUpdate, connected, timeline, liveTokens };
 }
 
 function mapStageToStatus(stage: string): Review["status"] {
   if (stage === "completed") return "completed";
   if (stage === "failed") return "failed";
   return "in_progress";
+}
+
+function stageMessage(stage: string): string {
+  const map: Record<string, string> = {
+    triaging: "Triaging files...",
+    reviewing: "Starting file reviews...",
+    scoring: "Scoring comments...",
+    synthesizing: "Generating synthesis...",
+    posting: "Posting to GitHub...",
+    pass2: "Re-reviewing hot files...",
+  };
+  return map[stage] ?? `Stage: ${stage}`;
+}
+
+function summarizeTriage(files: TriageFile[]): string {
+  const counts: Record<string, number> = {};
+  for (const f of files) {
+    counts[f.action] = (counts[f.action] ?? 0) + 1;
+  }
+  return Object.entries(counts).map(([k, v]) => `${v} ${k}`).join(" \u00b7 ");
+}
+
+function shortPath(path: string): string {
+  const parts = path.split("/");
+  return parts.length <= 2 ? path : parts.slice(-2).join("/");
+}
+
+function truncate(str: string, max: number): string {
+  if (str.length <= max) return str;
+  return str.slice(0, max - 1) + "\u2026";
 }

@@ -39,7 +39,7 @@ function getStepState(
   return currentStage === "failed" ? "failed" : "active";
 }
 
-export function PipelineProgress({ stage, failedStage }: { stage: PipelineStage; failedStage?: string }) {
+export function PipelineProgress({ stage, failedStage, filesReviewed, totalFiles }: { stage: PipelineStage; failedStage?: string; filesReviewed?: number; totalFiles?: number }) {
   return (
     <div className="rounded-lg border border-iron bg-charcoal/80 p-4 mb-6">
       <div className="flex items-center gap-1" role="progressbar" aria-label="Pipeline progress" aria-valuetext={stage}>
@@ -51,6 +51,9 @@ export function PipelineProgress({ stage, failedStage }: { stage: PipelineStage;
                 <StepIcon state={state} />
                 <span className={`text-[11px] font-mono ${labelColor[state] ?? "text-slate-text"}`}>
                   {step.label}
+                  {step.key === "reviewing" && stage === "reviewing" && filesReviewed != null && totalFiles != null && (
+                    <span className="text-[11px] font-mono text-amber ml-1">{filesReviewed}/{totalFiles}</span>
+                  )}
                 </span>
               </div>
               {i < stages.length - 1 && (
