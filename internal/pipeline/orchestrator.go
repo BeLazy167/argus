@@ -1229,13 +1229,14 @@ Rules:
 - Focus on WHAT the code does, not bugs or issues. No security warnings, no criticism.
 - Keep each point to one concise sentence.
 
-Also generate a clean Mermaid diagram showing how the changed components relate. Keep it simple (max 8 nodes). Use flowchart for data flow, graph TD for architecture.
+You will also be given diagram instructions at the end of the prompt. Follow them exactly.
 
 Respond with JSON only:
 {
-  "missing_points": ["Adds batch processing with configurable concurrency and retry logic", "Introduces fuzzy search with Levenshtein distance scoring"],
-  "diagram": "flowchart LR\n  A[API] --> B[Processor]",
-  "diagram_title": "Architecture"
+  "missing_points": ["Adds batch processing with configurable concurrency and retry logic"],
+  "diagrams": [
+    {"type": "sequence", "title": "Request Flow", "mermaid": "sequenceDiagram\n  Client->>API: fetch()\n  API->>Config: loadConfig()"}
+  ]
 }`
 
 // enrichPRDescription fills in missing parts of the PR description as a co-author.
@@ -1283,10 +1284,17 @@ func (o *Orchestrator) enrichPRDescription(ctx context.Context, run *PipelineRun
 		return
 	}
 
+	type diagramResult struct {
+		Type    string `json:"type"`
+		Title   string `json:"title"`
+		Mermaid string `json:"mermaid"`
+	}
 	var result struct {
-		MissingPoints []string `json:"missing_points"`
-		Diagram       string   `json:"diagram"`
-		DiagramTitle  string   `json:"diagram_title"`
+		MissingPoints []string        `json:"missing_points"`
+		Diagrams      []diagramResult `json:"diagrams"`
+		// Legacy single-diagram fields (backwards compat)
+		Diagram      string `json:"diagram"`
+		DiagramTitle string `json:"diagram_title"`
 	}
 	cleaned := extractJSON(resp.Content)
 	if err := json.Unmarshal([]byte(cleaned), &result); err != nil {
@@ -1294,7 +1302,16 @@ func (o *Orchestrator) enrichPRDescription(ctx context.Context, run *PipelineRun
 		return
 	}
 
-	if len(result.MissingPoints) == 0 && result.Diagram == "" {
+	// Backwards compat: migrate legacy single diagram to diagrams array
+	if result.Diagram != "" && len(result.Diagrams) == 0 {
+		title := result.DiagramTitle
+		if title == "" {
+			title = "Architecture"
+		}
+		result.Diagrams = []diagramResult{{Type: "dependency", Title: title, Mermaid: result.Diagram}}
+	}
+
+	if len(result.MissingPoints) == 0 && len(result.Diagrams) == 0 {
 		o.logger.Info("enrichPRDescription: nothing missing, skipping")
 		return
 	}
@@ -1309,22 +1326,31 @@ func (o *Orchestrator) enrichPRDescription(ctx context.Context, run *PipelineRun
 		}
 		section.WriteString("\n")
 	}
-	if result.Diagram != "" && isValidMermaid(result.Diagram) {
-		// Save diagram to review record
-		if _, err := o.db.Exec(ctx, `UPDATE reviews SET diagram = $1, diagram_title = $2 WHERE id = $3`,
-			result.Diagram, result.DiagramTitle, run.ReviewID); err != nil {
-			o.logger.Warn("failed to save diagram", "error", err)
+
+	// Render diagrams (save first valid one to DB for dashboard)
+	var savedToDB bool
+	for _, d := range result.Diagrams {
+		if d.Mermaid == "" || !isValidMermaid(d.Mermaid) {
+			o.logger.Warn("skipping invalid diagram", "type", d.Type, "title", d.Title)
+			continue
+		}
+		if !savedToDB {
+			if _, err := o.db.Exec(ctx, `UPDATE reviews SET diagram = $1, diagram_title = $2 WHERE id = $3`,
+				d.Mermaid, d.Title, run.ReviewID); err != nil {
+				o.logger.Warn("failed to save diagram", "error", err)
+			}
+			savedToDB = true
+		}
+		title := sanitizeUserInput(d.Title)
+		if title == "" {
+			title = strings.Title(d.Type)
 		}
 		section.WriteString("<details>\n")
-		title := "Architecture"
-		if result.DiagramTitle != "" {
-			title = sanitizeUserInput(result.DiagramTitle)
-		}
 		section.WriteString(fmt.Sprintf("<summary>%s</summary>\n\n", title))
-		section.WriteString("```mermaid\n" + result.Diagram + "\n```\n")
-		section.WriteString("</details>\n")
+		section.WriteString("```mermaid\n" + d.Mermaid + "\n```\n")
+		section.WriteString("</details>\n\n")
 	}
-	section.WriteString("\n<sub>Auto-enriched by [Argus](https://argusai.vercel.app)</sub>\n")
+	section.WriteString("<sub>Auto-enriched by [Argus](https://argusai.vercel.app)</sub>\n")
 	section.WriteString(enrichmentEndMarker)
 
 	// Fetch current PR body (may have been edited since webhook)
@@ -1414,6 +1440,18 @@ func buildEnrichmentPrompt(run *PipelineRun) string {
 			status += " (large)"
 		}
 		sb.WriteString(fmt.Sprintf("- %s (%s)\n", f.NewName, status))
+	}
+
+	// Diagram instructions (deterministic selection, LLM generates content)
+	specs := selectDiagramTypes(run)
+	if len(specs) > 0 {
+		sb.WriteString("\n### Diagram instructions:\n")
+		sb.WriteString("Generate the following diagrams in the `diagrams` array. Each must be valid Mermaid syntax.\n\n")
+		for _, s := range specs {
+			sb.WriteString(fmt.Sprintf("**%s** (max %d nodes):\n%s\n\n", s.Title, s.MaxNodes, s.Instruction))
+		}
+	} else {
+		sb.WriteString("\n### Diagram instructions:\nNo diagrams needed — return empty `diagrams` array.\n")
 	}
 
 	return sb.String()
@@ -3069,6 +3107,112 @@ func mergeAdjacentComments(comments []ghpkg.ReviewComment, validLines map[string
 		}
 	}
 	return result
+}
+
+type diagramSpec struct {
+	Type        string // "sequence", "dataflow", "dependency"
+	Title       string
+	Instruction string // LLM instruction for this diagram type
+	MaxNodes    int
+}
+
+// selectDiagramTypes picks up to 2 diagram types based on PR characteristics.
+// Priority: sequence > dataflow > dependency.
+func selectDiagramTypes(run *PipelineRun) []diagramSpec {
+	var specs []diagramSpec
+
+	fileCount := 0
+	if run.Diff != nil {
+		fileCount = len(run.Diff.Files)
+	}
+
+	// Sequence diagram: 3+ changed files
+	if fileCount >= 3 {
+		specs = append(specs, diagramSpec{
+			Type:  "sequence",
+			Title: "Call Sequence",
+			Instruction: "Generate a Mermaid sequenceDiagram showing which changed files/modules call each other. " +
+				"Annotate any participants involved in bugs with ⚠️. Max 12 participants.",
+			MaxNodes: 12,
+		})
+	}
+
+	// Data flow diagram: security findings, sensitive file paths, or injection-related content
+	dataflow := false
+	sensitivePaths := []string{
+		"auth", "token", "session", "fetch", "api", "login",
+		"oauth", "password", "credential", "validate", "input", "config",
+	}
+	contentKeywords := []string{
+		"injection", "xss", "ssrf", "redirect", "sanitiz", "escap",
+	}
+
+	for _, fr := range run.FileReviews {
+		if dataflow {
+			break
+		}
+		for _, c := range fr.Comments {
+			if strings.ToLower(string(c.Category)) == "security" {
+				dataflow = true
+				break
+			}
+			lower := strings.ToLower(c.What + " " + c.Body)
+			for _, kw := range contentKeywords {
+				if strings.Contains(lower, kw) {
+					dataflow = true
+					break
+				}
+			}
+			if dataflow {
+				break
+			}
+		}
+	}
+
+	if !dataflow && run.Diff != nil {
+		for _, f := range run.Diff.Files {
+			lowerPath := strings.ToLower(f.NewName)
+			for _, sp := range sensitivePaths {
+				if strings.Contains(lowerPath, sp) {
+					dataflow = true
+					break
+				}
+			}
+			if dataflow {
+				break
+			}
+		}
+	}
+
+	if dataflow {
+		specs = append(specs, diagramSpec{
+			Type:  "dataflow",
+			Title: "Data Flow",
+			Instruction: "Generate a Mermaid flowchart TD tracing untrusted input through the system. " +
+				"Mark tainted paths with ⚠️. Max 10 nodes.",
+			MaxNodes: 10,
+		})
+	}
+
+	// Dependency graph: 10+ changed files
+	if fileCount >= 10 {
+		specs = append(specs, diagramSpec{
+			Type:  "dependency",
+			Title: "Dependency Graph",
+			Instruction: "Generate a Mermaid graph LR showing import relationships between changed files. " +
+				"Max 12 nodes.",
+			MaxNodes: 12,
+		})
+	}
+
+	// Cap at 2 (priority order already correct: sequence > dataflow > dependency)
+	if len(specs) > 2 {
+		specs = specs[:2]
+	}
+	if len(specs) == 0 {
+		return nil
+	}
+	return specs
 }
 
 func strPtrOrNil(s string) *string {
