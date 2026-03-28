@@ -139,99 +139,59 @@ func (c *Client) GetFileContent(ctx context.Context, installationID int64, owner
 	return decoded, nil
 }
 
-// PostReview creates a pull request review with inline comments.
+// PostReview creates a pull request review with all inline comments in one atomic API call.
+// Comments must be pre-validated — invalid lines should be folded into the summary body
+// by the caller, not included in the Comments slice.
 func (c *Client) PostReview(ctx context.Context, installationID int64, owner, repo string, prNumber int, review *ReviewSubmission) (int64, error) {
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("creating github client: %w", err)
 	}
 
-	// Split inline vs file-level comments
-	var inlineComments []*gh.DraftReviewComment
-	var fileComments []ReviewComment
-	for _, comment := range review.Comments {
-		if comment.SubjectType == "file" {
-			fileComments = append(fileComments, comment)
-			continue
+	comments := make([]*gh.DraftReviewComment, len(review.Comments))
+	for i, rc := range review.Comments {
+		comments[i] = &gh.DraftReviewComment{
+			Path: gh.Ptr(rc.Path),
+			Body: gh.Ptr(rc.Body),
+			Line: gh.Ptr(rc.Line),
+			Side: gh.Ptr(rc.Side),
 		}
-		dc := &gh.DraftReviewComment{
-			Path: gh.Ptr(comment.Path),
-			Body: gh.Ptr(comment.Body),
-			Line: gh.Ptr(comment.Line),
-			Side: gh.Ptr(comment.Side),
+		if rc.StartLine > 0 {
+			comments[i].StartLine = gh.Ptr(rc.StartLine)
+			comments[i].StartSide = gh.Ptr(rc.Side)
 		}
-		if comment.StartLine > 0 {
-			dc.StartLine = gh.Ptr(comment.StartLine)
-			dc.StartSide = gh.Ptr(comment.Side)
-		}
-		inlineComments = append(inlineComments, dc)
 	}
 
-	// Try posting all inline comments in one review. If GitHub 502s (too large),
-	// fall back to capped batch + overflow as individual comments.
-	ghReview, _, err := client.PullRequests.CreateReview(ctx, owner, repo, prNumber, &gh.PullRequestReviewRequest{
+	req := &gh.PullRequestReviewRequest{
 		Body:     gh.Ptr(review.Summary),
 		Event:    gh.Ptr("COMMENT"),
-		Comments: inlineComments,
-	})
-	if err != nil && len(inlineComments) > 30 {
-		// Retry with first 30 only
-		slog.Warn("review too large, retrying with capped comments", "total", len(inlineComments), "error", err)
-		ghReview, _, err = client.PullRequests.CreateReview(ctx, owner, repo, prNumber, &gh.PullRequestReviewRequest{
-			Body:     gh.Ptr(review.Summary),
-			Event:    gh.Ptr("COMMENT"),
-			Comments: inlineComments[:30],
-		})
-		if err != nil {
-			return 0, fmt.Errorf("posting review: %w", err)
+		Comments: comments,
+	}
+
+	// Single atomic call. Retry once on 5xx (transient GitHub errors).
+	ghReview, _, err := client.PullRequests.CreateReview(ctx, owner, repo, prNumber, req)
+	if err != nil && isRetryable(err) {
+		slog.Warn("review post failed, retrying", "comments", len(comments), "error", err)
+		time.Sleep(2 * time.Second)
+		ghReview, _, err = client.PullRequests.CreateReview(ctx, owner, repo, prNumber, req)
+	}
+	if err != nil {
+		// Last resort: retry without start_line (GitHub sometimes can't resolve multi-line ranges)
+		for i := range comments {
+			comments[i].StartLine = nil
+			comments[i].StartSide = nil
 		}
-		// Post overflow individually with throttling
-		for _, oc := range inlineComments[30:] {
-			if ctx.Err() != nil {
-				break
-			}
-			postCommentWithRetry(ctx, client, owner, repo, prNumber, &gh.PullRequestComment{
-				Path: oc.Path, Body: oc.Body, Line: oc.Line, Side: oc.Side,
-				CommitID: gh.Ptr(review.HeadSHA),
-			})
-		}
-	} else if err != nil {
+		ghReview, _, err = client.PullRequests.CreateReview(ctx, owner, repo, prNumber, req)
+	}
+	if err != nil {
 		return 0, fmt.Errorf("posting review: %w", err)
 	}
-	reviewID := ghReview.GetID()
-
-	// Post file-level comments individually with throttling
-	for _, fc := range fileComments {
-		if ctx.Err() != nil {
-			break
-		}
-		postCommentWithRetry(ctx, client, owner, repo, prNumber, &gh.PullRequestComment{
-			Path: gh.Ptr(fc.Path), Body: gh.Ptr(fc.Body),
-			CommitID: gh.Ptr(review.HeadSHA), SubjectType: gh.Ptr("file"),
-		})
-	}
-
-	return reviewID, nil
+	return ghReview.GetID(), nil
 }
 
-// postCommentWithRetry posts a single PR comment with retry on "submitted too quickly" errors.
-func postCommentWithRetry(ctx context.Context, client *gh.Client, owner, repo string, prNumber int, comment *gh.PullRequestComment) {
-	for attempt := 0; attempt < 3; attempt++ {
-		if ctx.Err() != nil {
-			return
-		}
-		_, _, err := client.PullRequests.CreateComment(ctx, owner, repo, prNumber, comment)
-		if err == nil {
-			break
-		}
-		if strings.Contains(err.Error(), "submitted too quickly") || strings.Contains(err.Error(), "429") {
-			time.Sleep(time.Duration(attempt+1) * time.Second)
-			continue
-		}
-		slog.Warn("failed to post comment", "path", comment.GetPath(), "error", err)
-		break
-	}
-	time.Sleep(500 * time.Millisecond)
+func isRetryable(err error) bool {
+	s := err.Error()
+	return strings.Contains(s, "502") || strings.Contains(s, "503") || strings.Contains(s, "504")
 }
 
 // GetCompareCommitsDiff fetches the diff between two commits (for incremental re-review).
@@ -708,11 +668,12 @@ type ReviewSubmission struct {
 }
 
 // ReviewComment is a single inline comment on a PR.
+// All comments must have valid line numbers within the diff.
+// Invalid-line comments should be folded into the review summary by the caller.
 type ReviewComment struct {
-	Path        string
-	Body        string
-	Line        int
-	StartLine   int    // 0 if single-line comment
-	Side        string // "RIGHT" for additions, "LEFT" for deletions
-	SubjectType string // "file" for file-level comments (no line needed)
+	Path      string
+	Body      string
+	Line      int
+	StartLine int    // 0 if single-line comment
+	Side      string // "RIGHT" for additions, "LEFT" for deletions
 }
