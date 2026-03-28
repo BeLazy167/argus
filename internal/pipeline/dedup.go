@@ -148,6 +148,7 @@ func isSimilarFinding(a, b FileComment) bool {
 }
 
 // wordOverlap returns the fraction of significant words in a that also appear in b.
+// Excludes common programming stop-words and requires at least 2 overlapping words.
 func wordOverlap(a, b string) float64 {
 	words := strings.Fields(a)
 	if len(words) == 0 {
@@ -155,11 +156,28 @@ func wordOverlap(a, b string) float64 {
 	}
 	overlap := 0
 	for _, w := range words {
-		if len(w) > 3 && strings.Contains(b, w) {
+		if len(w) > 3 && !isStopWord(w) && strings.Contains(b, w) {
 			overlap++
 		}
 	}
+	if overlap < 2 {
+		return 0
+	}
 	return float64(overlap) / float64(len(words))
+}
+
+var stopWords = map[string]bool{
+	"function": true, "return": true, "error": true, "value": true,
+	"should": true, "could": true, "would": true, "this": true,
+	"that": true, "with": true, "from": true, "when": true,
+	"will": true, "have": true, "been": true, "does": true,
+	"missing": true, "check": true, "handle": true, "undefined": true,
+	"null": true, "string": true, "number": true, "object": true,
+	"type": true, "const": true, "async": true, "await": true,
+}
+
+func isStopWord(w string) bool {
+	return stopWords[w]
 }
 
 // pickBest selects the best comment from a cluster of duplicates.
