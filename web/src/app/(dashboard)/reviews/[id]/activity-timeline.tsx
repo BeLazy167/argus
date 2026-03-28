@@ -45,6 +45,7 @@ function relativeTimestamp(entry: Date, start: Date): string {
 const COLLAPSED_THRESHOLD = 8;
 
 export function ActivityTimeline({ timeline, liveTokens, stage, startedAt }: Props) {
+  const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const [elapsed, setElapsed] = useState(0);
   const [showAll, setShowAll] = useState(false);
@@ -59,7 +60,12 @@ export function ActivityTimeline({ timeline, liveTokens, stage, startedAt }: Pro
   }, [startedAt]);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    const container = scrollRef.current;
+    if (!container) return;
+    const atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 60;
+    if (atBottom) {
+      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
   }, [timeline.length]);
 
   const collapsed = !showAll && timeline.length > COLLAPSED_THRESHOLD;
@@ -80,7 +86,7 @@ export function ActivityTimeline({ timeline, liveTokens, stage, startedAt }: Pro
       </div>
 
       {/* Scrollable timeline */}
-      <div className="max-h-[400px] overflow-y-auto">
+      <div ref={scrollRef} className="max-h-[400px] overflow-y-auto">
         {hiddenCount > 0 && (
           <button
             type="button"
