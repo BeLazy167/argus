@@ -46,6 +46,7 @@ const SECTIONS = [
   { id: "what-argus-sees", label: "What Argus Sees" },
   { id: "code-simulation", label: "Code Simulation" },
   { id: "conversational-review", label: "Conversational Review" },
+  { id: "live-timeline", label: "Live Activity Timeline" },
   { id: "severities", label: "Severities" },
   { id: "categories", label: "Categories" },
   { id: "rules", label: "Review Rules" },
@@ -56,6 +57,7 @@ const SECTIONS = [
   { id: "test-generation", label: "Test Generation" },
   { id: "memory", label: "Memory & Learning" },
   { id: "insights", label: "Insights & Risk" },
+  { id: "token-tracking", label: "Token & Cost Tracking" },
   { id: "settings", label: "Settings & Controls" },
 ] as const;
 
@@ -151,38 +153,59 @@ const PIPELINE_STAGES = [
   },
   {
     step: "02",
-    label: "Context Gathering",
-    icon: Network,
+    label: "Briefing",
+    icon: BookOpen,
     description:
-      "Cross-file analysis, dependency tracing, scenario matching, and decision trace lookup. Argus builds a complete picture of the change before reviewing a single line.",
+      "Lead agent produces a brief for each file, identifying cross-cutting concerns, blast radius, and relevant context from memory before specialists begin.",
   },
   {
     step: "03",
     label: "Deep Review",
     icon: MessageSquare,
     description:
-      "Per-file parallel review with four specialists — bug hunter, security auditor, architecture critic, regression analyst — each armed with full codebase awareness.",
+      "4 specialists per file run in parallel — bug_hunter, security, architecture, regression — each reviewing with full codebase context and the briefing document.",
   },
   {
     step: "04",
-    label: "Scoring & Validation",
-    icon: SlidersHorizontal,
+    label: "Dedup",
+    icon: Layers,
     description:
-      "A separate model scores each finding independently. Low-confidence noise is dropped. Duplicate findings are merged. What survives is signal.",
+      "Union-find deduplication removes duplicate findings across specialists. Same issue caught by multiple specialists is merged into a single finding.",
   },
   {
     step: "05",
-    label: "Synthesis",
-    icon: Layers,
+    label: "Validate",
+    icon: Search,
     description:
-      "A senior-dev persona reads every surviving finding and writes a conversational summary. Not a list of issues — a colleague's honest take on the PR.",
+      "Validates all findings have correct line ranges, file paths, and comment structure. Malformed findings are repaired or dropped before scoring.",
   },
   {
     step: "06",
+    label: "Scoring",
+    icon: SlidersHorizontal,
+    description:
+      "A separate model scores each finding 0\u2013100 independently. Threshold at 65 drops noise. Only high-signal findings survive to the next stage.",
+  },
+  {
+    step: "07",
+    label: "Pass2",
+    icon: RefreshCw,
+    description:
+      "Re-reviews hot files (3+ high-scoring comments) with the architecture specialist. Catches systemic issues that only emerge after seeing the full finding set.",
+  },
+  {
+    step: "08",
+    label: "Synthesis",
+    icon: Sparkles,
+    description:
+      "Generates a structured verdict with critical issues, warnings, and a top findings summary. Not a paragraph — a scannable, actionable review.",
+  },
+  {
+    step: "09",
     label: "Post & Learn",
     icon: Send,
     description:
-      "Review posted as inline GitHub comments. Developer reactions are collected. Approvals reinforce patterns, dismissals suppress future false positives. The system learns.",
+      "Posts to GitHub as inline comments. Learns reusable patterns, extracts codebase conventions, enriches the PR description with missing context and mermaid diagrams, and builds the architecture graph.",
   },
 ];
 
@@ -370,7 +393,7 @@ export function DocsContent() {
           <div>
             <SectionHeader id="pipeline" title="The Review Pipeline" />
             <p className="text-xs font-mono text-slate-text mb-6 leading-relaxed">
-              Every PR triggers a six-stage pipeline. Each stage runs a
+              Every PR triggers a nine-stage pipeline. Each stage runs a
               different model, configurable per-repo. The entire sequence
               completes in under 60 seconds.
             </p>
@@ -601,23 +624,46 @@ export function DocsContent() {
                   The summary
                 </h3>
                 <TerminalBlock title="argus — review summary">
-                  <p className="text-[11px] font-mono text-foreground/90 leading-relaxed">
-                    Solid refactor overall — the extraction of{" "}
-                    <code className="text-amber/80">PaymentService</code> into
-                    its own module is clean and the tests cover the happy path
-                    well. Two things I&apos;d block on: the cancellation
-                    handler has a race condition under concurrent requests (see
-                    inline), and the new cache key scheme will collide if user
-                    IDs get recycled. The rest is style nits.
-                  </p>
+                  <div className="space-y-3">
+                    <p className="text-[11px] font-mono text-foreground/90 leading-relaxed">
+                      <span className="font-bold text-foreground">Verdict:</span>{" "}
+                      Adds 20 utility modules but has critical security and
+                      correctness issues that must be fixed before merging.
+                    </p>
+                    <div>
+                      <p className="text-[11px] font-mono font-bold text-red-400 mb-1">
+                        Critical issues:
+                      </p>
+                      <ul className="space-y-1 text-[11px] font-mono text-foreground/90 leading-relaxed">
+                        <li>
+                          <code className="text-amber/80">src/lib/convert/units.ts:L15</code>{" "}
+                          &mdash; Hour multiplier is 360,000ms instead of 3,600,000ms
+                        </li>
+                        <li>
+                          <code className="text-amber/80">src/lib/filter/predicate.ts:L42</code>{" "}
+                          &mdash; User input passed directly to RegExp without escaping
+                        </li>
+                      </ul>
+                    </div>
+                    <div>
+                      <p className="text-[11px] font-mono font-bold text-yellow-400 mb-1">
+                        Warnings:
+                      </p>
+                      <ul className="space-y-1 text-[11px] font-mono text-foreground/90 leading-relaxed">
+                        <li>
+                          <code className="text-amber/80">src/lib/color/grade.ts:L10</code>{" "}
+                          &mdash; No NaN check before clamping
+                        </li>
+                        <li>
+                          <code className="text-amber/80">src/lib/counter/rolling.ts:L28</code>{" "}
+                          &mdash; Unbounded bucket array (+4 more)
+                        </li>
+                      </ul>
+                    </div>
+                  </div>
                   <div className="flex items-center gap-4 mt-3 pt-3 border-t border-iron/50">
                     <span className="text-[10px] font-mono text-slate-text">
-                      Quality score:{" "}
-                      <span className="text-amber font-bold">7/10</span>
-                    </span>
-                    <span className="text-[10px] font-mono text-slate-text">
-                      1 critical &middot; 1 warning &middot; 3 suggestions
-                      &middot; 2 praise
+                      2 critical &middot; 2 warnings &middot; 4 suggestions
                     </span>
                   </div>
                 </TerminalBlock>
@@ -701,6 +747,67 @@ export function DocsContent() {
                 </div>
               </div>
             </div>
+          </div>
+
+          {/* ── Live Activity Timeline ── */}
+          <div>
+            <SectionHeader id="live-timeline" title="Live Activity Timeline" />
+            <p className="text-xs font-mono text-slate-text mb-3 leading-relaxed">
+              Watch reviews happen in real time.
+            </p>
+            <p className="text-xs font-mono text-slate-text mb-8 leading-relaxed">
+              When a review is in progress, the review detail page streams live
+              activity via WebSocket. You see exactly what Argus is doing as it
+              happens.
+            </p>
+
+            <div className="space-y-3">
+              {[
+                {
+                  icon: Radio,
+                  title: "Live streaming",
+                  desc: "WebSocket-powered real-time updates. See which file is being reviewed, which specialist is assigned, and comments as they arrive.",
+                },
+                {
+                  icon: SlidersHorizontal,
+                  title: "Scoring results",
+                  desc: "Watch findings get scored in real time. Low-confidence findings drop out as scoring completes.",
+                },
+                {
+                  icon: BarChart3,
+                  title: "Token & cost counter",
+                  desc: "Live token usage and cost counter updates as each pipeline stage completes.",
+                },
+                {
+                  icon: Activity,
+                  title: "Elapsed timer",
+                  desc: "Running timer shows total review duration. Auto-scrolls when you're at the bottom, stops auto-scroll when you scroll up to read.",
+                },
+              ].map((item) => {
+                const Icon = item.icon;
+                return (
+                  <div
+                    key={item.title}
+                    className="rounded-lg border border-iron bg-charcoal p-4"
+                  >
+                    <div className="flex items-center gap-3 mb-2">
+                      <Icon className="h-4 w-4 text-amber" />
+                      <span className="text-xs font-mono font-bold text-foreground">
+                        {item.title}
+                      </span>
+                    </div>
+                    <p className="text-[11px] font-mono text-slate-text leading-relaxed">
+                      {item.desc}
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+
+            <p className="text-[11px] font-mono text-iron mt-4">
+              The timeline is collapsible for long reviews. All activity
+              persists in the review detail page after completion.
+            </p>
           </div>
 
           {/* ── Severities ── */}
@@ -812,10 +919,10 @@ export function DocsContent() {
           <div>
             <SectionHeader id="models" title="Model Configuration" />
             <p className="text-xs font-mono text-slate-text mb-6 leading-relaxed">
-              Override the LLM model for each pipeline stage per-repo from the{" "}
-              <span className="text-amber">Settings</span> page. The
-              synthesis stage defaults to the same model as review but can be
-              overridden independently for teams that want a different voice.
+              All 4 pipeline stages are independently configurable per-repo from
+              the <span className="text-amber">Settings</span> page. Default
+              model depends on your OpenRouter key. Temperature and MaxTokens
+              are adjustable per stage via sliders.
             </p>
 
             <div className="rounded-lg border border-iron bg-charcoal overflow-hidden">
@@ -828,27 +935,27 @@ export function DocsContent() {
               {[
                 {
                   stage: "triage",
-                  model: "gpt-4o-mini",
-                  tokens: "2,048",
-                  temp: "0.2",
+                  model: "configurable",
+                  tokens: "configurable",
+                  temp: "configurable",
                 },
                 {
                   stage: "review",
-                  model: "claude-sonnet-4",
-                  tokens: "4,096",
-                  temp: "0.2",
+                  model: "configurable",
+                  tokens: "configurable",
+                  temp: "configurable",
                 },
                 {
                   stage: "scoring",
                   model: "configurable",
-                  tokens: "4,096",
-                  temp: "0.2",
+                  tokens: "configurable",
+                  temp: "configurable",
                 },
                 {
                   stage: "synthesis",
-                  model: "same as review",
-                  tokens: "4,096",
-                  temp: "0.2",
+                  model: "configurable",
+                  tokens: "configurable",
+                  temp: "configurable",
                 },
               ].map((row, i, arr) => (
                 <div
@@ -1253,6 +1360,49 @@ export function DocsContent() {
             </div>
           </div>
 
+          {/* ── Token & Cost Tracking ── */}
+          <div>
+            <SectionHeader id="token-tracking" title="Token & Cost Tracking" />
+            <p className="text-xs font-mono text-slate-text mb-3 leading-relaxed">
+              Know exactly what every review costs.
+            </p>
+            <p className="text-xs font-mono text-slate-text mb-8 leading-relaxed">
+              Argus records per-stage token usage and cost for every review.
+              Model and provider are tracked independently for each stage.
+              Token data persists even on failed reviews.
+            </p>
+
+            <div className="space-y-3">
+              <div className="rounded-lg border border-iron bg-charcoal p-4">
+                <div className="flex items-center gap-3 mb-2">
+                  <Gauge className="h-4 w-4 text-amber" />
+                  <span className="text-xs font-mono font-bold text-foreground">
+                    Per-stage breakdown
+                  </span>
+                </div>
+                <p className="text-[11px] font-mono text-slate-text leading-relaxed">
+                  Token usage tracked for: triage, review, scoring, synthesis,
+                  enrichment, conventions, patterns, file_synthesis, and graph.
+                  Each stage records input tokens, output tokens, model, and
+                  cost.
+                </p>
+              </div>
+
+              <div className="rounded-lg border border-iron bg-charcoal p-4">
+                <div className="flex items-center gap-3 mb-2">
+                  <Eye className="h-4 w-4 text-amber" />
+                  <span className="text-xs font-mono font-bold text-foreground">
+                    TokenPill
+                  </span>
+                </div>
+                <p className="text-[11px] font-mono text-slate-text leading-relaxed">
+                  Hover any TokenPill in the review detail page to see the full
+                  cost breakdown per stage, including model name and provider.
+                </p>
+              </div>
+            </div>
+          </div>
+
           {/* ── Settings & Controls ── */}
           <div>
             <SectionHeader id="settings" title="Settings & Controls" />
@@ -1265,33 +1415,48 @@ export function DocsContent() {
             <div className="space-y-3">
               {[
                 {
-                  label: "Cross-file context",
+                  label: "Deep Review",
+                  desc: "Enables the 4-specialist parallel review (bug_hunter, security, architecture, regression) per file.",
+                  status: "off",
+                },
+                {
+                  label: "Cross-File Context",
                   desc: "Enables dependency tracing and caller analysis across your codebase during review.",
                   status: "on by default",
                 },
                 {
-                  label: "Blast radius",
+                  label: "Blast Radius Analysis",
                   desc: "Maps downstream impact of every change using the persistent dependency graph.",
                   status: "on by default",
                 },
                 {
-                  label: "Scenario memory",
-                  desc: "Matches PR changes against known failure scenarios from your review history.",
-                  status: "on by default",
-                },
-                {
-                  label: "Code simulation",
+                  label: "Simulation & Scenarios",
                   desc: "Simulates execution paths against known scenarios. Reports confidence, root cause, and impact.",
-                  status: "experimental",
+                  status: "off",
                 },
                 {
-                  label: "Auto-learn patterns",
-                  desc: "Automatically extracts code conventions and patterns from reviewed diffs.",
+                  label: "PR Enrichment",
+                  desc: "Auto-enriches PR descriptions with missing context and mermaid diagrams.",
                   status: "on by default",
                 },
                 {
-                  label: "Incremental reviews",
-                  desc: "On new pushes, reviews only the delta since last review instead of the full diff.",
+                  label: "Pattern Learning",
+                  desc: "Learns reusable patterns from high-confidence findings across reviews.",
+                  status: "on by default",
+                },
+                {
+                  label: "Convention Learning",
+                  desc: "Extracts codebase conventions from diffs — naming, error handling, architecture patterns.",
+                  status: "on by default",
+                },
+                {
+                  label: "File Synthesis",
+                  desc: "Creates per-file institutional memory — summaries of what each file does and how it has changed.",
+                  status: "on by default",
+                },
+                {
+                  label: "Architecture Graph",
+                  desc: "Extracts dependency graph from code changes. Powers blast radius analysis and cross-file context.",
                   status: "on by default",
                 },
               ].map((toggle) => (
@@ -1307,8 +1472,8 @@ export function DocsContent() {
                       </span>
                       <span
                         className={`ml-auto text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded border ${
-                          toggle.status === "experimental"
-                            ? "bg-yellow-500/20 text-yellow-400 border-yellow-500/30"
+                          toggle.status === "off"
+                            ? "bg-iron/20 text-slate-text border-iron"
                             : "bg-green-500/20 text-green-400 border-green-500/30"
                         }`}
                       >
