@@ -116,27 +116,21 @@ func dedupFindings(reviews []FileReview, lineThreshold int) []FileReview {
 }
 
 // isSimilarFinding checks if two comments are about the same issue.
-// Uses simple heuristics: same category + overlapping keywords in What/Body.
+// Same-category comments on nearby lines are aggressively merged (>25% word overlap).
+// Cross-category comments require higher similarity.
 func isSimilarFinding(a, b FileComment) bool {
-	// Same category is a strong signal
+	aText := strings.ToLower(a.What + " " + a.Body)
+	bText := strings.ToLower(b.What + " " + b.Body)
+
+	// Same category on nearby lines — these are almost always the same finding
+	// from different specialists. Use a low threshold.
 	if a.Category != "" && a.Category == b.Category {
-		aText := strings.ToLower(a.What + " " + a.Body)
-		bText := strings.ToLower(b.What + " " + b.Body)
-		// Check for significant word overlap
-		aWords := strings.Fields(aText)
-		overlap := 0
-		for _, w := range aWords {
-			if len(w) > 3 && strings.Contains(bText, w) {
-				overlap++
-			}
-		}
-		// If >40% of significant words overlap, likely the same finding
-		if len(aWords) > 0 && float64(overlap)/float64(len(aWords)) > 0.4 {
+		if wordOverlap(aText, bText) > 0.25 {
 			return true
 		}
 	}
 
-	// Different category but very similar What field
+	// Different category — require higher overlap or substring containment
 	if a.What != "" && b.What != "" {
 		aLower := strings.ToLower(a.What)
 		bLower := strings.ToLower(b.What)
@@ -145,7 +139,27 @@ func isSimilarFinding(a, b FileComment) bool {
 		}
 	}
 
+	// Cross-category but high word overlap (e.g., bug_hunter and security both found injection)
+	if wordOverlap(aText, bText) > 0.5 {
+		return true
+	}
+
 	return false
+}
+
+// wordOverlap returns the fraction of significant words in a that also appear in b.
+func wordOverlap(a, b string) float64 {
+	words := strings.Fields(a)
+	if len(words) == 0 {
+		return 0
+	}
+	overlap := 0
+	for _, w := range words {
+		if len(w) > 3 && strings.Contains(b, w) {
+			overlap++
+		}
+	}
+	return float64(overlap) / float64(len(words))
 }
 
 // pickBest selects the best comment from a cluster of duplicates.
