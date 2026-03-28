@@ -151,19 +151,20 @@ func isSimilarFinding(a, b FileComment) bool {
 // Excludes common programming stop-words and requires at least 2 overlapping words.
 func wordOverlap(a, b string) float64 {
 	words := strings.Fields(a)
-	if len(words) == 0 {
-		return 0
-	}
-	overlap := 0
+	var sigWords, overlap int
 	for _, w := range words {
-		if len(w) > 3 && !isStopWord(w) && strings.Contains(b, w) {
+		if len(w) <= 3 || isStopWord(w) {
+			continue
+		}
+		sigWords++
+		if strings.Contains(b, w) {
 			overlap++
 		}
 	}
-	if overlap < 2 {
+	if sigWords == 0 || overlap < 2 {
 		return 0
 	}
-	return float64(overlap) / float64(len(words))
+	return float64(overlap) / float64(sigWords)
 }
 
 var stopWords = map[string]bool{

@@ -1343,7 +1343,7 @@ func (o *Orchestrator) enrichPRDescription(ctx context.Context, run *PipelineRun
 		}
 		title := sanitizeUserInput(d.Title)
 		if title == "" {
-			title = strings.Title(d.Type)
+			title = capitalizeCategory(d.Type)
 		}
 		section.WriteString("<details>\n")
 		section.WriteString(fmt.Sprintf("<summary>%s</summary>\n\n", title))
@@ -3077,8 +3077,16 @@ func mergeAdjacentComments(comments []ghpkg.ReviewComment, validLines map[string
 		byPath[c.Path] = append(byPath[c.Path], c)
 	}
 
+	// Sort paths for deterministic comment ordering
+	paths := make([]string, 0, len(byPath))
+	for p := range byPath {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+
 	var result []ghpkg.ReviewComment
-	for _, group := range byPath {
+	for _, p := range paths {
+		group := byPath[p]
 		// Sort by line number
 		sort.Slice(group, func(i, j int) bool { return group[i].Line < group[j].Line })
 
