@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"path"
 	"sort"
@@ -1826,7 +1827,7 @@ Rules:
 		Messages: []llm.Message{
 			{Role: "user", Content: prompt.String()},
 		},
-		MaxTokens:   400,
+		MaxTokens:   600,
 		Temperature: 0.2,
 	}
 
@@ -2896,14 +2897,22 @@ func calculateScore(run *PipelineRun) int {
 			}
 		}
 	}
-	total := criticals + warnings + suggestions
-	if total == 0 {
+	if criticals+warnings+suggestions == 0 {
 		return 10
 	}
-	files := max(1, len(run.FileReviews))
-	// Weighted penalty normalized by file count — more files = more tolerance
-	penalty := float64(criticals*5+warnings*2+suggestions) / float64(files)
-	score := int(10 - penalty)
+	// Log-scaled penalty: diminishing impact per additional finding
+	// 1 critical = 2.0, 5 criticals = 3.2, 10 criticals = 3.6
+	penalty := 0.0
+	if criticals > 0 {
+		penalty += math.Log2(float64(criticals)+1) * 1.5
+	}
+	if warnings > 0 {
+		penalty += math.Log2(float64(warnings)+1) * 0.7
+	}
+	if suggestions > 0 {
+		penalty += math.Log2(float64(suggestions)+1) * 0.2
+	}
+	score := int(math.Round(10 - penalty))
 	return max(1, min(10, score))
 }
 
