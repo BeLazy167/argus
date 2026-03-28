@@ -503,7 +503,7 @@ Respond with a JSON array of comments:
   "why": "Why it matters — concrete impact, what breaks in production, attack scenario if security",
   "severity": "critical",    // critical | warning | suggestion | praise
   "category": "bug",         // bug | security | performance | error_handling | style | readability | type_design | testing
-  "suggestion": "fixed code" // exact replacement for start_line..line (omit for praise)
+  "suggestion": "line1\nline2\nline3" // exact replacement for start_line..line, with REAL newlines (\n), properly indented, omit for praise
 }]
 
 ## Tone
@@ -657,11 +657,11 @@ Respond ONLY with a JSON array of comments. No other text.
 
 ## Examples
 
-Good comment (critical — state as fact):
-{"severity":"critical","category":"bug","line":42,"what":"Division by zero when the items array is empty","why":"arr.length is 0 → avg = total/0 → NaN propagates through billing calculations, silently corrupting every downstream value","suggestion":"if (!arr.length) return 0;"}
+Good comment (critical — state as fact, single-line fix):
+{"severity":"critical","category":"bug","line":42,"start_line":0,"what":"Division by zero when the items array is empty","why":"arr.length is 0 → avg = total/0 → NaN propagates through billing calculations, silently corrupting every downstream value","suggestion":"if (!arr.length) return 0;"}
 
-Good comment (warning — explain attack scenario):
-{"severity":"warning","category":"security","line":18,"what":"SQL built with string interpolation from user input","why":"An attacker controlling the 'name' param can inject arbitrary SQL — e.g. '; DROP TABLE users;--","suggestion":"db.query('SELECT * FROM users WHERE name = $1', [name])"}
+Good comment (warning — explain attack scenario, multi-line fix with real newlines):
+{"severity":"warning","category":"security","line":20,"start_line":18,"what":"SQL built with string interpolation from user input","why":"An attacker controlling the 'name' param can inject arbitrary SQL — e.g. '; DROP TABLE users;--","suggestion":"const query = 'SELECT * FROM users WHERE name = $1';\nconst result = await db.query(query, [name]);"}
 
 Good comment (praise — acknowledge good code):
 {"severity":"praise","category":"bug","line":15,"what":"Good edge-case handling — the empty-array guard here prevents the NaN propagation we've seen in similar code","why":""}

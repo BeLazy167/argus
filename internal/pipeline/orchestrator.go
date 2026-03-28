@@ -1045,7 +1045,8 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	`, run.Synthesis.Summary, run.Synthesis.Score, tokenUsageJSON, len(run.FileReviews),
 		run.DeepReview, persona, run.IsIncremental, simResultsJSON, run.ReviewID)
 	if dbErr != nil {
-		o.logger.Warn("pre-post DB update failed", "error", dbErr)
+		o.logger.Error("pre-post DB update failed — review data at risk if PostReview also fails",
+			"error", dbErr, "review_id", run.ReviewID)
 	}
 
 	ghReviewID, err := o.ghClient.PostReview(
@@ -3109,6 +3110,10 @@ func mergeAdjacentComments(comments []ghpkg.ReviewComment, validLines map[string
 				merged.Line = group[j].Line
 				merged.Body += "\n\n---\n\n" + group[j].Body
 				j++
+			}
+			// Guard: StartLine must be strictly less than Line
+			if merged.StartLine > 0 && merged.StartLine >= merged.Line {
+				merged.StartLine = 0
 			}
 			result = append(result, merged)
 			i = j

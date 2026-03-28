@@ -177,13 +177,18 @@ func (c *Client) PostReview(ctx context.Context, installationID int64, owner, re
 		ghReview, _, err = client.PullRequests.CreateReview(ctx, owner, repo, prNumber, req)
 	}
 	if err != nil && is422(err) {
-		// Last resort: retry without start_line (GitHub sometimes can't resolve multi-line ranges)
-		slog.Warn("review post failed (422), retrying without start_line", "comments", len(comments), "error", err)
-		for i := range comments {
-			comments[i].StartLine = nil
-			comments[i].StartSide = nil
+		errStr := err.Error()
+		// Only strip start_line if the 422 is about line resolution, not other validation errors
+		if strings.Contains(errStr, "pull_request_review_thread") || strings.Contains(errStr, "line") || strings.Contains(errStr, "start_line") {
+			slog.Warn("review post failed (422 line resolution), retrying without start_line", "comments", len(comments), "error", err)
+			for i := range comments {
+				comments[i].StartLine = nil
+				comments[i].StartSide = nil
+			}
+			ghReview, _, err = client.PullRequests.CreateReview(ctx, owner, repo, prNumber, req)
+		} else {
+			slog.Warn("review post failed (422 non-line)", "comments", len(comments), "error", err)
 		}
-		ghReview, _, err = client.PullRequests.CreateReview(ctx, owner, repo, prNumber, req)
 	}
 	if err != nil {
 		return 0, fmt.Errorf("posting review: %w", err)
