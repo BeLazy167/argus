@@ -239,19 +239,21 @@ function TokenPill({ usage }: { usage: TokenUsage }) {
             )}
             <div className="space-y-1">
               {stages.map(([stage, s]) => (
-                <div
-                  key={stage}
-                  className="flex items-center justify-between"
-                >
-                  <span className="text-[11px] font-mono text-ash">
-                    {stageLabels[stage] ?? stage}
-                  </span>
-                  <span className="text-[11px] font-mono text-foreground tabular-nums">
-                    {formatTokens(s)}
-                    {s.cost != null && s.cost > 0 && (
-                      <span className="text-slate-text ml-1.5">${s.cost.toFixed(3)}</span>
-                    )}
-                  </span>
+                <div key={stage}>
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-mono text-ash">
+                      {stageLabels[stage] ?? stage}
+                    </span>
+                    <span className="text-[11px] font-mono text-foreground tabular-nums">
+                      {formatTokens(s)}
+                      {s.cost != null && s.cost > 0 && (
+                        <span className="text-slate-text ml-1.5">${s.cost.toFixed(3)}</span>
+                      )}
+                    </span>
+                  </div>
+                  {!singleModel && s.model && (
+                    <p className="text-[9px] font-mono text-slate-text/50 truncate">{s.model}</p>
+                  )}
                 </div>
               ))}
             </div>
