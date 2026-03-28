@@ -19,6 +19,7 @@ import {
   Copy,
   MessageSquare,
   Filter,
+  Zap,
 } from "lucide-react";
 import { useReview, useRetryReview } from "@/lib/queries/reviews";
 import { useRepos } from "@/lib/queries/repos";
@@ -580,13 +581,12 @@ export default function ReviewDetailPage() {
     return set;
   }, [grouped, activeSeverity]);
 
-  const enrichmentStats = useMemo(() => {
-    if (!comments.length) return null;
-    const newFindings = comments.filter((c) => c.is_new_finding === true).length;
-    const patternMatches = comments.filter((c) => c.matched_pattern_id).length;
-    const rulesEnforced = comments.filter((c) => c.enforced_rule_content).length;
-    if (!newFindings && !patternMatches && !rulesEnforced) return null;
-    return { newFindings, patternMatches, rulesEnforced };
+  const memoryStats = useMemo(() => {
+    const newFindings = comments.filter(c => c.is_new_finding).length;
+    const patternMatches = comments.filter(c => c.matched_pattern_id || (c.matched_pattern_score && c.matched_pattern_score > 0)).length;
+    const rulesEnforced = comments.filter(c => c.enforced_rule_content).length;
+    const memoryUsed = patternMatches + rulesEnforced;
+    return { newFindings, patternMatches, rulesEnforced, memoryUsed, total: comments.length };
   }, [comments]);
 
   // Scroll-aware active file tracking
@@ -860,6 +860,63 @@ export default function ReviewDetailPage() {
         )}
       </div>
 
+      {/* Intelligence card */}
+      {review.status === "completed" && comments.length > 0 && (() => {
+        const coverage = memoryStats.total > 0 ? memoryStats.memoryUsed / memoryStats.total : 0;
+        const coveragePct = Math.round(coverage * 100);
+        const barColor = coverage > 0.6 ? "bg-green-400" : coverage > 0.3 ? "bg-amber" : "bg-blue-400";
+        const highCoverage = coverage > 0.6;
+        const allNovel = memoryStats.memoryUsed === 0;
+
+        return (
+          <div className={`rounded-lg border bg-charcoal/80 p-5 mb-8 transition-colors ${highCoverage ? "border-green-400/20" : "border-iron"}`}>
+            <div className="flex items-center gap-2 mb-4">
+              <Zap className="h-3.5 w-3.5 text-amber" />
+              <span className="text-[11px] font-mono uppercase tracking-wider text-slate-text">
+                Intelligence
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
+              <div className="rounded-md bg-iron/10 border border-iron/30 px-4 py-3 text-center">
+                <div className="text-xl font-display font-bold text-foreground">{memoryStats.total}</div>
+                <div className="text-[11px] font-mono text-slate-text mt-0.5">findings total</div>
+              </div>
+              <div className="rounded-md bg-iron/10 border border-iron/30 px-4 py-3 text-center">
+                <div className="text-xl font-display font-bold text-purple-400">{memoryStats.patternMatches}</div>
+                <div className="text-[11px] font-mono text-slate-text mt-0.5">pattern matches</div>
+              </div>
+              <div className="rounded-md bg-iron/10 border border-iron/30 px-4 py-3 text-center">
+                <div className="text-xl font-display font-bold text-amber">{memoryStats.rulesEnforced}</div>
+                <div className="text-[11px] font-mono text-slate-text mt-0.5">rules enforced</div>
+              </div>
+              <div className="rounded-md bg-iron/10 border border-iron/30 px-4 py-3 text-center">
+                <div className="text-xl font-display font-bold text-emerald-400">{memoryStats.newFindings}</div>
+                <div className="text-[11px] font-mono text-slate-text mt-0.5">new findings</div>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex items-center gap-3">
+                <span className="text-[11px] font-mono text-slate-text shrink-0">Memory coverage</span>
+                <div className="flex-1 h-1.5 rounded-full bg-iron/20 overflow-hidden">
+                  <div
+                    className={`h-1.5 rounded-full ${barColor} transition-all duration-500`}
+                    style={{ width: `${coveragePct}%` }}
+                  />
+                </div>
+                <span className="text-[11px] font-mono text-slate-text shrink-0">{coveragePct}%</span>
+              </div>
+              <p className="text-[11px] font-mono text-slate-text">
+                {allNovel
+                  ? "All findings are novel \u2014 memory will improve with future reviews"
+                  : `${memoryStats.memoryUsed} of ${memoryStats.total} findings informed by institutional memory`}
+              </p>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* Simulation Results */}
       {review.simulation_results && review.simulation_results.length > 0 && (
         <div className="rounded-lg border border-iron bg-charcoal/80 p-4 mb-6">
@@ -890,32 +947,6 @@ export default function ReviewDetailPage() {
         </div>
       )}
 
-      {/* Findings enrichment summary */}
-      {enrichmentStats && (
-        <div className="flex flex-wrap items-center gap-4 rounded-lg border border-iron bg-charcoal px-5 py-3 mb-6">
-          {enrichmentStats.newFindings > 0 && (
-            <div className="flex items-center gap-2 text-xs font-mono">
-              <div className="h-2 w-2 rounded-full bg-emerald-500" />
-              <span className="text-foreground">{enrichmentStats.newFindings}</span>
-              <span className="text-slate-text">New Findings</span>
-            </div>
-          )}
-          {enrichmentStats.patternMatches > 0 && (
-            <div className="flex items-center gap-2 text-xs font-mono">
-              <div className="h-2 w-2 rounded-full bg-amber" />
-              <span className="text-foreground">{enrichmentStats.patternMatches}</span>
-              <span className="text-slate-text">Pattern Matches</span>
-            </div>
-          )}
-          {enrichmentStats.rulesEnforced > 0 && (
-            <div className="flex items-center gap-2 text-xs font-mono">
-              <div className="h-2 w-2 rounded-full bg-purple-500" />
-              <span className="text-foreground">{enrichmentStats.rulesEnforced}</span>
-              <span className="text-slate-text">Rules Enforced</span>
-            </div>
-          )}
-        </div>
-      )}
 
       {/* Main content: sidebar + file groups */}
       <div className={showSidebar ? "grid grid-cols-1 gap-6 lg:grid-cols-[200px_1fr]" : ""}>
