@@ -26,7 +26,10 @@ function GraphBody({ onSelectFile }: { onSelectFile?: (filePath: string | null) 
   if (isLoading) {
     return (
       <div className="flex items-center justify-center h-full">
-        <Loader2 className="h-4 w-4 animate-spin text-slate-600" />
+        <div className="flex flex-col items-center gap-3">
+          <Loader2 className="h-4 w-4 animate-spin text-slate-600" />
+          <p className="text-[11px] font-mono text-slate-500">Loading architecture graph...</p>
+        </div>
       </div>
     );
   }
@@ -45,12 +48,13 @@ function GraphBody({ onSelectFile }: { onSelectFile?: (filePath: string | null) 
   if (!graphData || !graphData.nodes || graphData.nodes.length === 0) {
     return (
       <div className="flex items-center justify-center h-full">
-        <div className="text-center max-w-xs">
-          <div className="w-12 h-12 rounded-full bg-slate-800/50 flex items-center justify-center mx-auto mb-4">
-            <Network className="h-5 w-5 text-slate-600" />
+        <div className="text-center max-w-sm">
+          <div className="w-14 h-14 rounded-full border border-slate-800/50 bg-slate-800/30 flex items-center justify-center mx-auto mb-5">
+            <Network className="h-6 w-6 text-slate-500" />
           </div>
+          <h3 className="text-sm font-mono font-medium text-slate-400 mb-2">No architecture data yet</h3>
           <p className="text-[11px] font-mono text-slate-500 leading-relaxed">
-            No architecture data yet. The graph builds automatically as Argus reviews PRs.
+            Architecture data is extracted automatically when Argus reviews pull requests. Trigger a review to start building the graph.
           </p>
         </div>
       </div>
@@ -84,11 +88,11 @@ export default function ArchitecturePage() {
       {/* Minimal header — the graph is the star */}
       <div className="flex items-center gap-3 border-b border-slate-800/50 px-5 py-3 shrink-0 bg-[#0a0a12]">
         <Network className="h-3.5 w-3.5 text-slate-600" />
-        <span className="text-[10px] font-mono uppercase tracking-[0.15em] text-slate-500">
+        <span className="text-[11px] font-mono uppercase tracking-[0.15em] text-slate-500">
           Architecture
         </span>
         {graphData && graphData.nodes && graphData.nodes.length > 0 && (
-          <span className="text-[10px] font-mono text-slate-700 ml-auto">
+          <span className="text-[11px] font-mono text-slate-700 ml-auto">
             {graphData.nodes.length} components · {graphData.edges.length} dependencies
           </span>
         )}

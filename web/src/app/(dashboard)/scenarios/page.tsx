@@ -298,7 +298,14 @@ export default function ScenariosPage() {
             {paginated.map((scenario) => (
               <div
                 key={scenario.id}
-                className="flex hover:bg-iron/10 transition-colors cursor-pointer"
+                className={`flex hover:bg-iron/10 transition-all cursor-pointer ${
+                  {
+                    critical: "hover:shadow-[0_0_8px_rgba(239,68,68,0.3)]",
+                    high: "hover:shadow-[0_0_8px_rgba(249,115,22,0.3)]",
+                    medium: "hover:shadow-[0_0_8px_rgba(245,158,11,0.3)]",
+                    low: "hover:shadow-[0_0_8px_rgba(59,130,246,0.3)]",
+                  }[scenario.severity] ?? "hover:shadow-[0_0_8px_rgba(245,158,11,0.3)]"
+                }`}
                 onClick={() => setExpandedId(expandedId === scenario.id ? null : scenario.id)}
               >
                 {/* Severity indicator bar */}
@@ -363,7 +370,7 @@ export default function ScenariosPage() {
                           {scenario.files.map((f) => (
                             <span
                               key={f}
-                              className="inline-block rounded border border-iron/60 bg-iron/10 px-2 py-0.5 text-[11px] font-mono text-slate-text"
+                              className="inline-block rounded border border-iron/60 bg-iron/10 px-2.5 py-1 text-xs font-mono text-slate-text"
                             >
                               {f}
                             </span>
@@ -428,13 +435,13 @@ export default function ScenariosPage() {
                       disabled={deleteScenario.isPending}
                       className={`flex items-center gap-1.5 shrink-0 transition-colors disabled:opacity-50 cursor-pointer ${
                         confirmDeleteId === scenario.id
-                          ? "text-red-400"
+                          ? "text-red-400 animate-pulse"
                           : "text-slate-text hover:text-red-400"
                       }`}
                     >
                       <Trash2 className="h-3.5 w-3.5" />
                       {confirmDeleteId === scenario.id && (
-                        <span className="text-[10px] font-mono">confirm</span>
+                        <span className="text-[11px] font-mono">confirm</span>
                       )}
                     </button>
                   </div>

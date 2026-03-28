@@ -9,6 +9,10 @@ import {
   Clock,
   Loader2,
   Microscope,
+  AlertTriangle,
+  AlertCircle,
+  Check,
+  X,
 } from "lucide-react";
 import { usePagination, PaginationBar } from "@/components/dashboard/pagination";
 import { useStats } from "@/lib/queries/stats";
@@ -32,7 +36,7 @@ function StatCard({
 }) {
   return (
     <div
-      className={`rounded-lg border p-5 ${
+      className={`rounded-lg border p-5 hover:-translate-y-0.5 transition-transform duration-200 ${
         accent
           ? "border-amber/30 bg-charcoal shadow-[0_0_16px_-6px_oklch(0.77_0.15_75/0.2)]"
           : "border-iron bg-charcoal"
@@ -81,18 +85,18 @@ function RiskBadge({ score }: { score?: number }) {
   );
 }
 
-function getVerdict(review: { score?: number; status: string }): { label: string; className: string } {
+function getVerdict(review: { score?: number; status: string }): { label: string; className: string; icon?: React.ComponentType<{ className?: string }> } {
   if (review.status === "pending" || review.status === "in_progress") {
     return { label: "In progress", className: "text-blue-400" };
   }
   if (review.status === "failed") {
-    return { label: "Failed", className: "text-red-400" };
+    return { label: "Failed", className: "text-red-400", icon: X };
   }
   if (!review.score) return { label: "--", className: "text-slate-text" };
-  if (review.score <= 3) return { label: "Escalated", className: "text-red-400" };
-  if (review.score <= 6) return { label: "Review required", className: "text-amber" };
-  if (review.score <= 8) return { label: "Minor issues", className: "text-yellow-400" };
-  return { label: "Clean. Ship it.", className: "text-emerald-400" };
+  if (review.score <= 3) return { label: "Escalated", className: "text-red-400", icon: AlertTriangle };
+  if (review.score <= 6) return { label: "Review required", className: "text-amber", icon: AlertTriangle };
+  if (review.score <= 8) return { label: "Minor issues", className: "text-blue-400", icon: AlertCircle };
+  return { label: "Clean", className: "text-emerald-400", icon: Check };
 }
 
 function formatReviewTime(ms: number): string {
@@ -181,8 +185,11 @@ export default function DashboardPage() {
             <Loader2 className="h-5 w-5 animate-spin text-slate-text" />
           </div>
         ) : !reviews || reviews.length === 0 ? (
-          <div className="py-10 text-center text-xs font-mono text-slate-text">
-            No reviews yet. Open a PR to get started.
+          <div className="py-10 text-center">
+            <GitPullRequest className="h-8 w-8 text-slate-text mx-auto mb-3" />
+            <p className="text-sm font-mono text-slate-text">
+              No reviews yet. Open a PR to get started.
+            </p>
           </div>
         ) : (
           <table className="w-full">
@@ -246,7 +253,8 @@ export default function DashboardPage() {
                       </span>
                     </td>
                     <td className="px-3 py-3">
-                      <span className={`text-[11px] font-mono font-medium ${verdict.className}`}>
+                      <span className={`inline-flex items-center gap-1 text-[11px] font-mono font-medium ${verdict.className}`}>
+                        {verdict.icon && <verdict.icon className="h-3 w-3" />}
                         {verdict.label}
                       </span>
                     </td>
