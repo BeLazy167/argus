@@ -748,22 +748,55 @@ func buildSynthesisBriefPrompt(run *PipelineRun, score int) string {
 		sb.WriteString(wrapInDelimiters("pr_description", sanitizeUserInput(util.Truncate(run.PREvent.PRBody, 300, false))) + "\n\n")
 	}
 
-	// Only pass severity counts — NOT individual findings (those are shown per-file)
-	var criticals, warnings, suggestions int
+	// Per-file severity counts so the LLM can populate the heatmap table
+	type fileSeverity struct {
+		critical, warning, suggestion, praise int
+	}
+	perFile := make(map[string]*fileSeverity)
+	var allFiles []string
 	for _, fr := range run.FileReviews {
+		fs, ok := perFile[fr.Path]
+		if !ok {
+			fs = &fileSeverity{}
+			perFile[fr.Path] = fs
+			allFiles = append(allFiles, fr.Path)
+		}
 		for _, c := range fr.Comments {
 			switch c.Severity {
 			case SeverityCritical:
-				criticals++
+				fs.critical++
 			case SeverityWarning:
-				warnings++
+				fs.warning++
 			case SeveritySuggestion:
-				suggestions++
+				fs.suggestion++
+			case SeverityPraise:
+				fs.praise++
 			}
 		}
 	}
-	sb.WriteString(fmt.Sprintf("Severity breakdown: %d critical, %d warning, %d suggestion\n", criticals, warnings, suggestions))
-	sb.WriteString("\nWrite a short verdict following the system prompt format. Focus on WHAT the PR does and WHETHER it's ready.")
+	sort.Strings(allFiles)
+
+	// Add files from diff that had no findings (clean files)
+	reviewedFiles := make(map[string]bool)
+	for _, f := range allFiles {
+		reviewedFiles[f] = true
+	}
+	var cleanFiles []string
+	for _, f := range run.Diff.Files {
+		if !reviewedFiles[f.NewName] {
+			cleanFiles = append(cleanFiles, f.NewName)
+		}
+	}
+
+	sb.WriteString("Per-file findings:\n")
+	for _, path := range allFiles {
+		fs := perFile[path]
+		sb.WriteString(fmt.Sprintf("- %s: %d critical, %d warning, %d suggestion\n", path, fs.critical, fs.warning, fs.suggestion))
+	}
+	if len(cleanFiles) > 0 {
+		sb.WriteString(fmt.Sprintf("- Clean (0 findings): %s\n", strings.Join(cleanFiles, ", ")))
+	}
+	sb.WriteString("\nWrite a short verdict following the system prompt format. Populate the table with per-file data above.")
 	return sb.String()
 }
 
