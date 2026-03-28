@@ -170,6 +170,8 @@ type Review struct {
 	ResolvedStaleCount *int32             `json:"resolved_stale_count"`
 	HeadRef            *string            `json:"head_ref"`
 	SimulationResults  []byte             `json:"simulation_results"`
+	Diagram            *string            `json:"diagram"`
+	DiagramTitle       *string            `json:"diagram_title"`
 }
 
 type ReviewComment struct {
