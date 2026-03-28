@@ -17,7 +17,7 @@ ORDER BY rv.created_at DESC LIMIT $2 OFFSET $3;
 -- name: GetReview :one
 SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, COALESCE(head_ref,'') as head_ref, github_review_id,
        status, summary, score, token_usage, trigger, triggered_by, duration_ms, error,
-       deep_review, persona, is_incremental, created_at, completed_at, simulation_results
+       deep_review, persona, is_incremental, created_at, completed_at, simulation_results, diagram, diagram_title
 FROM reviews WHERE id = $1;
 
 -- name: GetLastCompletedReview :one
