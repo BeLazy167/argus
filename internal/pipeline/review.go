@@ -372,14 +372,33 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p revie
 		tokens.Cost += resp.Cost
 
 		if len(resp.ToolCalls) == 0 {
+			if resp.FinishReason == "length" {
+				slog.Warn("review response truncated",
+					"file", p.file.NewName, "specialist", label,
+					"prompt_tokens", resp.TokensUsed.PromptTokens,
+					"completion_tokens", resp.TokensUsed.CompletionTokens,
+					"max_tokens", cfg.MaxTokens)
+			}
 			comments, err := parseReviewResponse(resp.Content)
 			if err != nil {
+				slog.Warn("review parse failed",
+					"file", p.file.NewName, "specialist", label,
+					"finish_reason", resp.FinishReason,
+					"response_len", len(resp.Content),
+					"error", err)
 				return review, tokens, fmt.Errorf("parsing response %s: %w", label, err)
 			}
 			validated := validateComments(comments)
 			for i := range validated {
 				validated[i].Specialist = p.specialist
 			}
+			slog.Info("review file result",
+				"file", p.file.NewName, "specialist", label,
+				"finish_reason", resp.FinishReason,
+				"prompt_tokens", resp.TokensUsed.PromptTokens,
+				"completion_tokens", resp.TokensUsed.CompletionTokens,
+				"comments", len(validated),
+				"response_len", len(resp.Content))
 			review.Comments = validated
 			return review, tokens, nil
 		}
