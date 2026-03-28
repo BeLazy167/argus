@@ -207,32 +207,63 @@ function TokenPill({ usage }: { usage: TokenUsage }) {
   if (usage.synthesis?.total_tokens) stages.push(["synthesis", usage.synthesis]);
   if (usage.graph?.total_tokens) stages.push(["graph", usage.graph]);
 
+  const stageLabels: Record<string, string> = {
+    triage: "Triage",
+    enrichment: "Enrichment",
+    conventions: "Conventions",
+    patterns: "Patterns",
+    review: "Review",
+    file_synthesis: "File synthesis",
+    scoring: "Scoring",
+    synthesis: "Synthesis",
+    graph: "Graph",
+  };
+
+  // Group model name — show once if all stages use the same model
+  const models = stages.map(([, s]) => s.model).filter(Boolean);
+  const uniqueModels = [...new Set(models)];
+  const singleModel = uniqueModels.length === 1 ? uniqueModels[0] : null;
+
   return (
     <div className="group relative">
-      <span className="inline-flex items-center rounded-md border border-iron bg-iron/30 px-2.5 py-1 text-[11px] font-mono text-slate-text">
+      <span className="inline-flex items-center rounded-md border border-iron bg-iron/30 px-2.5 py-1 text-[11px] font-mono text-slate-text cursor-default">
         {label}
       </span>
       {stages.length > 0 && (
-        <div className="absolute right-0 top-full mt-1.5 z-10 hidden group-hover:block">
-          <div className="rounded-lg border border-iron bg-charcoal p-3 shadow-xl min-w-[180px]">
-            <p className="text-[11px] font-mono uppercase tracking-wider text-slate-text mb-2">
-              By stage
-            </p>
-            {stages.map(([stage, s]) => (
-              <div
-                key={stage}
-                className="flex items-center justify-between py-0.5"
-              >
-                <span className="text-[11px] font-mono text-amber">
-                  {stage}
-                </span>
-                <span className="text-[11px] font-mono text-foreground">
-                  {formatTokens(s)}
-                  {s.cost != null && <> · ${s.cost.toFixed(3)}</>}
-                  {s.model && <span className="text-slate-text"> ({s.model})</span>}
-                </span>
-              </div>
-            ))}
+        <div className="absolute left-0 top-full mt-1.5 z-10 hidden group-hover:block">
+          <div className="rounded-lg border border-iron bg-charcoal p-3 shadow-xl w-[240px]">
+            {singleModel && (
+              <p className="text-[10px] font-mono text-slate-text/60 mb-2 truncate">
+                {singleModel}
+              </p>
+            )}
+            <div className="space-y-1">
+              {stages.map(([stage, s]) => (
+                <div
+                  key={stage}
+                  className="flex items-center justify-between"
+                >
+                  <span className="text-[11px] font-mono text-ash">
+                    {stageLabels[stage] ?? stage}
+                  </span>
+                  <span className="text-[11px] font-mono text-foreground tabular-nums">
+                    {formatTokens(s)}
+                    {s.cost != null && s.cost > 0 && (
+                      <span className="text-slate-text ml-1.5">${s.cost.toFixed(3)}</span>
+                    )}
+                  </span>
+                </div>
+              ))}
+            </div>
+            <div className="mt-2 pt-2 border-t border-iron flex items-center justify-between">
+              <span className="text-[11px] font-mono text-amber">Total</span>
+              <span className="text-[11px] font-mono text-foreground tabular-nums">
+                {formatTokens(total)}
+                {total.cost != null && (
+                  <span className="text-amber ml-1.5">${total.cost.toFixed(3)}</span>
+                )}
+              </span>
+            </div>
           </div>
         </div>
       )}
