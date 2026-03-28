@@ -656,16 +656,22 @@ Format (markdown):
 | 💡 Suggestions | N | file4.ts |
 | ✅ Clean | N | file5.ts, file6.ts |
 
-**Top priority:** [Name the single most important issue to fix first, with file:line.]
+**Top priority:** [Name the single most important root cause to fix first.]
+
+**Suggested fix order:**
+1. file.ts — reason (other fixes depend on this)
+2. file2.ts — reason
 
 **Architecture:** [1 sentence on structural patterns — what's good, what to watch.]
 
 Rules:
 - Populate the table from the findings provided. Count by severity.
 - "Clean" = files with 0 findings or only praise comments.
-- If score >= 8, keep the verdict positive and brief.
-- If critical issues exist, the Top priority line is required.
-- If no critical issues, omit the Top priority line.
+- If score >= 8, keep the verdict positive and brief. Omit fix order.
+- If critical issues exist, the Top priority and Suggested fix order are required.
+- If no critical issues, omit both.
+- Group related findings by ROOT CAUSE in your reasoning, then surface the root cause in Top priority (not individual symptoms).
+- Fix order: list files in dependency order. If fixing file A changes the API that file B uses, list A first.
 - Do NOT list individual findings — those are inline.
 - Use "we" not "you". Collaborative tone.
 - No greetings, no score, no link, no comment count — those are shown separately.`
@@ -1000,8 +1006,7 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		}
 	}
 
-	// Merge adjacent same-file comments into range comments (start_line..line)
-	inlineComments := mergeAdjacentComments(rawInline, validLines)
+	inlineComments := rawInline
 
 	// Build summary: header + brief + folded comments (if any) + score
 	var summaryBody strings.Builder
