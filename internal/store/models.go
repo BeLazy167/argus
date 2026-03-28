@@ -52,6 +52,8 @@ type Review struct {
 	IsIncremental  bool             `json:"is_incremental"`
 	CreatedAt      time.Time        `json:"created_at"`
 	CompletedAt    *time.Time       `json:"completed_at,omitempty"`
+	Diagram        *string          `json:"diagram,omitempty"`
+	DiagramTitle   *string          `json:"diagram_title,omitempty"`
 }
 
 type ReviewComment struct {
