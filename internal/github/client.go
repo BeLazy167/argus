@@ -166,17 +166,49 @@ func (c *Client) PostReview(ctx context.Context, installationID int64, owner, re
 		inlineComments = append(inlineComments, dc)
 	}
 
+	// Cap inline comments per review to avoid GitHub 502 on large payloads.
+	// First batch goes in the review; overflow is posted as individual comments.
+	const maxReviewComments = 30
+	reviewBatch := inlineComments
+	var overflowComments []*gh.DraftReviewComment
+	if len(inlineComments) > maxReviewComments {
+		reviewBatch = inlineComments[:maxReviewComments]
+		overflowComments = inlineComments[maxReviewComments:]
+	}
+
 	ghReview, _, err := client.PullRequests.CreateReview(ctx, owner, repo, prNumber, &gh.PullRequestReviewRequest{
 		Body:     gh.Ptr(review.Summary),
 		Event:    gh.Ptr("COMMENT"),
-		Comments: inlineComments,
+		Comments: reviewBatch,
 	})
 	if err != nil {
 		return 0, fmt.Errorf("posting review: %w", err)
 	}
+	reviewID := ghReview.GetID()
 
-	// Post file-level comments separately (GitHub review API doesn't support subject_type)
+	// Post overflow inline comments individually (tied to same commit)
+	for _, oc := range overflowComments {
+		if ctx.Err() != nil {
+			slog.Warn("context cancelled, skipping remaining overflow comments", "remaining", len(overflowComments))
+			break
+		}
+		_, _, ocErr := client.PullRequests.CreateComment(ctx, owner, repo, prNumber, &gh.PullRequestComment{
+			Path:     oc.Path,
+			Body:     oc.Body,
+			Line:     oc.Line,
+			Side:     oc.Side,
+			CommitID: gh.Ptr(review.HeadSHA),
+		})
+		if ocErr != nil {
+			slog.Warn("failed to post overflow comment", "path", oc.GetPath(), "line", oc.GetLine(), "error", ocErr)
+		}
+	}
+
+	// Post file-level comments (GitHub review API doesn't support subject_type)
 	for _, fc := range fileComments {
+		if ctx.Err() != nil {
+			break
+		}
 		_, _, fcErr := client.PullRequests.CreateComment(ctx, owner, repo, prNumber, &gh.PullRequestComment{
 			Path:        gh.Ptr(fc.Path),
 			Body:        gh.Ptr(fc.Body),
@@ -188,7 +220,7 @@ func (c *Client) PostReview(ctx context.Context, installationID int64, owner, re
 		}
 	}
 
-	return ghReview.GetID(), nil
+	return reviewID, nil
 }
 
 // GetCompareCommitsDiff fetches the diff between two commits (for incremental re-review).
