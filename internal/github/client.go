@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 
 	gh "github.com/google/go-github/v68/github"
@@ -144,28 +145,49 @@ func (c *Client) PostReview(ctx context.Context, installationID int64, owner, re
 		return 0, err
 	}
 
-	comments := make([]*gh.DraftReviewComment, len(review.Comments))
-	for i, comment := range review.Comments {
-		comments[i] = &gh.DraftReviewComment{
+	// Split inline vs file-level comments
+	var inlineComments []*gh.DraftReviewComment
+	var fileComments []ReviewComment
+	for _, comment := range review.Comments {
+		if comment.SubjectType == "file" {
+			fileComments = append(fileComments, comment)
+			continue
+		}
+		dc := &gh.DraftReviewComment{
 			Path: gh.Ptr(comment.Path),
 			Body: gh.Ptr(comment.Body),
 			Line: gh.Ptr(comment.Line),
 			Side: gh.Ptr(comment.Side),
 		}
 		if comment.StartLine > 0 {
-			comments[i].StartLine = gh.Ptr(comment.StartLine)
-			comments[i].StartSide = gh.Ptr(comment.Side)
+			dc.StartLine = gh.Ptr(comment.StartLine)
+			dc.StartSide = gh.Ptr(comment.Side)
 		}
+		inlineComments = append(inlineComments, dc)
 	}
 
 	ghReview, _, err := client.PullRequests.CreateReview(ctx, owner, repo, prNumber, &gh.PullRequestReviewRequest{
 		Body:     gh.Ptr(review.Summary),
 		Event:    gh.Ptr("COMMENT"),
-		Comments: comments,
+		Comments: inlineComments,
 	})
 	if err != nil {
 		return 0, fmt.Errorf("posting review: %w", err)
 	}
+
+	// Post file-level comments separately (GitHub review API doesn't support subject_type)
+	for _, fc := range fileComments {
+		_, _, fcErr := client.PullRequests.CreateComment(ctx, owner, repo, prNumber, &gh.PullRequestComment{
+			Path:        gh.Ptr(fc.Path),
+			Body:        gh.Ptr(fc.Body),
+			CommitID:    gh.Ptr(review.HeadSHA),
+			SubjectType: gh.Ptr("file"),
+		})
+		if fcErr != nil {
+			slog.Warn("failed to post file-level comment", "file", fc.Path, "error", fcErr)
+		}
+	}
+
 	return ghReview.GetID(), nil
 }
 
@@ -638,14 +660,16 @@ func (c *Client) GetRepoTree(ctx context.Context, installationID int64, owner, r
 // ReviewSubmission represents a formatted review ready to post to GitHub.
 type ReviewSubmission struct {
 	Summary  string
+	HeadSHA  string
 	Comments []ReviewComment
 }
 
 // ReviewComment is a single inline comment on a PR.
 type ReviewComment struct {
-	Path      string
-	Body      string
-	Line      int
-	StartLine int // 0 if single-line comment
-	Side      string // "RIGHT" for additions, "LEFT" for deletions
+	Path        string
+	Body        string
+	Line        int
+	StartLine   int    // 0 if single-line comment
+	Side        string // "RIGHT" for additions, "LEFT" for deletions
+	SubjectType string // "file" for file-level comments (no line needed)
 }

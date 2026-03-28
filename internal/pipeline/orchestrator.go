@@ -920,6 +920,7 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	submission := &ghpkg.ReviewSubmission{
 		Summary: reviewHeader + run.Synthesis.Brief +
 			fmt.Sprintf("\n\nScore: **%d/10** · [Full review →](https://argusai.vercel.app/reviews/%s)", run.Synthesis.Score, run.ReviewID.String()),
+		HeadSHA: run.PREvent.HeadSHA,
 	}
 
 	// Build valid-line sets from diff to avoid 422 "line could not be resolved"
@@ -928,14 +929,18 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		validLines[f.NewName] = f.ValidCommentLines()
 	}
 
-	var dropped int
+	var fileLevelCount int
 	for _, fr := range run.FileReviews {
 		fileValid := validLines[fr.Path]
 		for _, c := range fr.Comments {
 			if fileValid == nil || !fileValid[c.Line] {
-				o.logger.Warn("dropping comment: line not in diff",
-					"file", fr.Path, "line", c.Line)
-				dropped++
+				// Can't post inline — post as file-level comment instead
+				submission.Comments = append(submission.Comments, ghpkg.ReviewComment{
+					Path:        fr.Path,
+					Body:        fmt.Sprintf("**L%d** — %s", c.Line, formatCommentBody(c)),
+					SubjectType: "file",
+				})
+				fileLevelCount++
 				continue
 			}
 			startLine := c.StartLine
@@ -951,8 +956,8 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 			})
 		}
 	}
-	if dropped > 0 {
-		o.logger.Warn("dropped comments with lines outside diff", "count", dropped)
+	if fileLevelCount > 0 {
+		o.logger.Info("posting file-level comments for lines outside diff", "count", fileLevelCount)
 	}
 
 	ghReviewID, err := o.ghClient.PostReview(
