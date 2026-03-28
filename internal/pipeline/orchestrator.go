@@ -500,23 +500,25 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 				defer wg.Done()
 				defer func() { <-sem }()
 
-				_, score := o.indexer.SearchPatternMatch(ctx, owner, repo, c.Body)
+				// Build a richer query: category + file + body gives Supermemory more semantic signal
+				query := fmt.Sprintf("[%s|%s] %s:%d %s", c.Severity, c.Category, fr.Path, c.Line, c.Body)
+				_, score := o.indexer.SearchPatternMatch(ctx, owner, repo, query)
 
 				var ruleContent string
 				if memClient != nil {
-					results := searchMemoryContent(ctx, memClient, c.Body, memory.OwnerTag(owner, "rules"), 1)
+					results := searchMemoryContent(ctx, memClient, query, memory.OwnerTag(owner, "rules"), 1)
 					if len(results) > 0 {
 						ruleContent = results[0]
 					}
 				}
 
-				if score > 0.65 {
+				if score > 0.55 {
 					c.MatchedPatternScore = score
 				}
 				if ruleContent != "" {
 					c.EnforcedRuleContent = ruleContent
 				}
-				if score <= 0.65 && ruleContent == "" {
+				if score <= 0.55 && ruleContent == "" {
 					c.IsNewFinding = true
 				}
 			}(c)
