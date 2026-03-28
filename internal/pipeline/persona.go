@@ -156,7 +156,7 @@ type repoSettings struct {
 	CrossFileContext    *bool  `json:"cross_file_context,omitempty"`
 	BlastRadius         *bool  `json:"blast_radius,omitempty"`
 	ScenarioMemory      *bool  `json:"scenario_memory,omitempty"`
-	CodeSimulation      bool   `json:"code_simulation,omitempty"`
+	CodeSimulation      *bool  `json:"code_simulation,omitempty"`
 	PREnrichment      *bool `json:"pr_enrichment,omitempty"`
 	LearnPatterns     *bool `json:"learn_patterns,omitempty"`
 	LearnConventions  *bool `json:"learn_conventions,omitempty"`
@@ -204,10 +204,10 @@ func isScenarioMemoryEnabled(settingsJSON json.RawMessage) bool {
 }
 
 // isCodeSimulationEnabled checks if code simulation is enabled in repo settings.
-// Defaults to false when not explicitly set (experimental feature).
+// Defaults to true when not explicitly set.
 func isCodeSimulationEnabled(settingsJSON json.RawMessage) bool {
 	s, ok := parseRepoSettings(settingsJSON)
-	return ok && s.CodeSimulation
+	return !ok || s.CodeSimulation == nil || *s.CodeSimulation
 }
 
 func isPREnrichmentEnabled(settingsJSON json.RawMessage) bool {
