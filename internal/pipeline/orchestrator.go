@@ -525,7 +525,7 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 					}
 				}
 
-				if score > 0.55 {
+				if score > 0.80 {
 					c.MatchedPatternScore = score
 					o.logger.Debug("pattern match found", "file", filePath, "line", c.Line, "score", fmt.Sprintf("%.3f", score), "pattern_prefix", util.Truncate(content, 80, true))
 				}
@@ -533,7 +533,7 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 					c.EnforcedRuleContent = ruleContent
 					o.logger.Debug("rule enforced", "file", filePath, "line", c.Line, "rule_prefix", util.Truncate(ruleContent, 80, true))
 				}
-				if score <= 0.55 && ruleContent == "" {
+				if score <= 0.80 && ruleContent == "" {
 					c.IsNewFinding = true
 				}
 			}(c, fr.Path)
