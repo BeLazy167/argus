@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -171,12 +172,13 @@ func (c *Client) PostReview(ctx context.Context, installationID int64, owner, re
 	// Single atomic call. Retry once on 5xx (transient GitHub errors).
 	ghReview, _, err := client.PullRequests.CreateReview(ctx, owner, repo, prNumber, req)
 	if err != nil && isRetryable(err) {
-		slog.Warn("review post failed, retrying", "comments", len(comments), "error", err)
+		slog.Warn("review post failed (5xx), retrying", "comments", len(comments), "error", err)
 		time.Sleep(2 * time.Second)
 		ghReview, _, err = client.PullRequests.CreateReview(ctx, owner, repo, prNumber, req)
 	}
-	if err != nil {
+	if err != nil && is422(err) {
 		// Last resort: retry without start_line (GitHub sometimes can't resolve multi-line ranges)
+		slog.Warn("review post failed (422), retrying without start_line", "comments", len(comments), "error", err)
 		for i := range comments {
 			comments[i].StartLine = nil
 			comments[i].StartSide = nil
@@ -190,8 +192,20 @@ func (c *Client) PostReview(ctx context.Context, installationID int64, owner, re
 }
 
 func isRetryable(err error) bool {
-	s := err.Error()
-	return strings.Contains(s, "502") || strings.Contains(s, "503") || strings.Contains(s, "504")
+	var ghErr *gh.ErrorResponse
+	if errors.As(err, &ghErr) {
+		code := ghErr.Response.StatusCode
+		return code == 502 || code == 503 || code == 504
+	}
+	return false
+}
+
+func is422(err error) bool {
+	var ghErr *gh.ErrorResponse
+	if errors.As(err, &ghErr) {
+		return ghErr.Response.StatusCode == 422
+	}
+	return false
 }
 
 // GetCompareCommitsDiff fetches the diff between two commits (for incremental re-review).
