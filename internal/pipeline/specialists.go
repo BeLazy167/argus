@@ -335,7 +335,7 @@ func specialistMemoryBlock(ctx context.Context, memClient *memory.Client, owner,
 	if sb.Len() == 0 {
 		return ""
 	}
-	sb.WriteString("\nUse this context to inform your review — issues matching known patterns are higher priority.")
+	sb.WriteString("\nUse this context to inform your review — issues matching known patterns are higher priority.\nWhen a finding matches a known pattern above, add a tag at the end of your comment: *[Matches pattern: <pattern description>]*. Only tag when there is a clear match — do not fabricate references.")
 	return sb.String()
 }
 
@@ -419,6 +419,6 @@ func reviewMemoryBlock(ctx context.Context, memClient *memory.Client, owner, rep
 	if sb.Len() == 0 {
 		return ""
 	}
-	sb.WriteString("\nApply these patterns and past findings when reviewing. Reference specific past learnings in your comments when relevant (e.g., 'This contradicts the established pattern of...').\n")
+	sb.WriteString("\nApply these patterns and past findings when reviewing. When a finding matches a known pattern above, add a tag at the end of your comment: *[Matches pattern: <pattern description>]*. Only tag when there is a clear match — do not fabricate references.\n")
 	return sb.String()
 }
