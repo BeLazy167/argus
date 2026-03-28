@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"time"
 
 	gh "github.com/google/go-github/v68/github"
 )
@@ -166,61 +167,71 @@ func (c *Client) PostReview(ctx context.Context, installationID int64, owner, re
 		inlineComments = append(inlineComments, dc)
 	}
 
-	// Cap inline comments per review to avoid GitHub 502 on large payloads.
-	// First batch goes in the review; overflow is posted as individual comments.
-	const maxReviewComments = 30
-	reviewBatch := inlineComments
-	var overflowComments []*gh.DraftReviewComment
-	if len(inlineComments) > maxReviewComments {
-		reviewBatch = inlineComments[:maxReviewComments]
-		overflowComments = inlineComments[maxReviewComments:]
-	}
-
+	// Try posting all inline comments in one review. If GitHub 502s (too large),
+	// fall back to capped batch + overflow as individual comments.
 	ghReview, _, err := client.PullRequests.CreateReview(ctx, owner, repo, prNumber, &gh.PullRequestReviewRequest{
 		Body:     gh.Ptr(review.Summary),
 		Event:    gh.Ptr("COMMENT"),
-		Comments: reviewBatch,
+		Comments: inlineComments,
 	})
-	if err != nil {
+	if err != nil && len(inlineComments) > 30 {
+		// Retry with first 30 only
+		slog.Warn("review too large, retrying with capped comments", "total", len(inlineComments), "error", err)
+		ghReview, _, err = client.PullRequests.CreateReview(ctx, owner, repo, prNumber, &gh.PullRequestReviewRequest{
+			Body:     gh.Ptr(review.Summary),
+			Event:    gh.Ptr("COMMENT"),
+			Comments: inlineComments[:30],
+		})
+		if err != nil {
+			return 0, fmt.Errorf("posting review: %w", err)
+		}
+		// Post overflow individually with throttling
+		for _, oc := range inlineComments[30:] {
+			if ctx.Err() != nil {
+				break
+			}
+			postCommentWithRetry(ctx, client, owner, repo, prNumber, &gh.PullRequestComment{
+				Path: oc.Path, Body: oc.Body, Line: oc.Line, Side: oc.Side,
+				CommitID: gh.Ptr(review.HeadSHA),
+			})
+		}
+	} else if err != nil {
 		return 0, fmt.Errorf("posting review: %w", err)
 	}
 	reviewID := ghReview.GetID()
 
-	// Post overflow inline comments individually (tied to same commit)
-	for _, oc := range overflowComments {
-		if ctx.Err() != nil {
-			slog.Warn("context cancelled, skipping remaining overflow comments", "remaining", len(overflowComments))
-			break
-		}
-		_, _, ocErr := client.PullRequests.CreateComment(ctx, owner, repo, prNumber, &gh.PullRequestComment{
-			Path:     oc.Path,
-			Body:     oc.Body,
-			Line:     oc.Line,
-			Side:     oc.Side,
-			CommitID: gh.Ptr(review.HeadSHA),
-		})
-		if ocErr != nil {
-			slog.Warn("failed to post overflow comment", "path", oc.GetPath(), "line", oc.GetLine(), "error", ocErr)
-		}
-	}
-
-	// Post file-level comments (GitHub review API doesn't support subject_type)
+	// Post file-level comments individually with throttling
 	for _, fc := range fileComments {
 		if ctx.Err() != nil {
 			break
 		}
-		_, _, fcErr := client.PullRequests.CreateComment(ctx, owner, repo, prNumber, &gh.PullRequestComment{
-			Path:        gh.Ptr(fc.Path),
-			Body:        gh.Ptr(fc.Body),
-			CommitID:    gh.Ptr(review.HeadSHA),
-			SubjectType: gh.Ptr("file"),
+		postCommentWithRetry(ctx, client, owner, repo, prNumber, &gh.PullRequestComment{
+			Path: gh.Ptr(fc.Path), Body: gh.Ptr(fc.Body),
+			CommitID: gh.Ptr(review.HeadSHA), SubjectType: gh.Ptr("file"),
 		})
-		if fcErr != nil {
-			slog.Warn("failed to post file-level comment", "file", fc.Path, "error", fcErr)
-		}
 	}
 
 	return reviewID, nil
+}
+
+// postCommentWithRetry posts a single PR comment with retry on "submitted too quickly" errors.
+func postCommentWithRetry(ctx context.Context, client *gh.Client, owner, repo string, prNumber int, comment *gh.PullRequestComment) {
+	for attempt := 0; attempt < 3; attempt++ {
+		if ctx.Err() != nil {
+			return
+		}
+		_, _, err := client.PullRequests.CreateComment(ctx, owner, repo, prNumber, comment)
+		if err == nil {
+			break
+		}
+		if strings.Contains(err.Error(), "submitted too quickly") || strings.Contains(err.Error(), "429") {
+			time.Sleep(time.Duration(attempt+1) * time.Second)
+			continue
+		}
+		slog.Warn("failed to post comment", "path", comment.GetPath(), "error", err)
+		break
+	}
+	time.Sleep(500 * time.Millisecond)
 }
 
 // GetCompareCommitsDiff fetches the diff between two commits (for incremental re-review).
