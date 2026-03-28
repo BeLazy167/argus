@@ -249,17 +249,17 @@
 }
 .eye-iris {
   opacity: 0;
-  animation: eyeFadeIn 0.5s ease-in 0.8s forwards;
+  animation: eyeFadeIn 0.5s ease-out 0.8s forwards;
   transition: transform 0.15s ease-out;
 }
 .eye-pupil {
   opacity: 0;
-  animation: eyeFadeIn 0.4s ease-in 1.0s forwards;
+  animation: eyeFadeIn 0.4s ease-out 1.0s forwards;
   transition: transform 0.15s ease-out;
 }
 .eye-marker {
   opacity: 0;
-  animation: eyeFadeIn 0.4s ease-in 1.2s forwards;
+  animation: eyeFadeIn 0.4s ease-out 1.2s forwards;
   transition: transform 0.15s ease-out;
 }
 

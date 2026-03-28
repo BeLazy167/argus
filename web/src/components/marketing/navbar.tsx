@@ -61,7 +61,7 @@ export function Navbar() {
 
   return (
     <nav
-      className={`fixed top-0 z-50 w-full transition-all duration-300 ${
+      className={`fixed top-0 z-50 w-full transition-[transform,background-color,border-color,box-shadow] duration-300 ease-[cubic-bezier(0.23,1,0.32,1)] ${
         hidden ? "-translate-y-full" : "translate-y-0"
       } ${
         scrolled
@@ -71,7 +71,7 @@ export function Navbar() {
     >
       {/* Ambient top line */}
       <div
-        className={`absolute inset-x-0 top-0 h-px transition-opacity duration-500 ${
+        className={`absolute inset-x-0 top-0 h-px transition-opacity duration-300 ${
           scrolled ? "opacity-100" : "opacity-0"
         }`}
         style={{
@@ -90,7 +90,7 @@ export function Navbar() {
           <svg
             viewBox="0 0 24 12"
             fill="none"
-            className="h-3 w-6 text-amber transition-all duration-300 group-hover:drop-shadow-[0_0_6px_oklch(0.77_0.15_75/0.5)]"
+            className="h-3 w-6 text-amber transition-[filter] duration-200 group-hover:drop-shadow-[0_0_6px_oklch(0.77_0.15_75/0.5)]"
           >
             <path
               d="M2 6C2 6 6 1.5 12 1.5C18 1.5 22 6 22 6C22 6 18 10.5 12 10.5C6 10.5 2 6 2 6Z"
@@ -100,7 +100,7 @@ export function Navbar() {
             />
             <circle cx="12" cy="6" r="2.5" fill="currentColor" />
           </svg>
-          <span className="wordmark text-sm text-amber tracking-[0.2em] transition-all duration-300 group-hover:text-shadow-[0_0_12px_oklch(0.77_0.15_75/0.4)]">
+          <span className="wordmark text-sm text-amber tracking-[0.2em] transition-[text-shadow] duration-200 group-hover:text-shadow-[0_0_12px_oklch(0.77_0.15_75/0.4)]">
             ARGUS
           </span>
         </Link>
@@ -154,7 +154,7 @@ export function Navbar() {
             </Link>
             <Link
               href="/sign-up"
-              className="group relative inline-flex h-8 items-center rounded-md bg-amber px-5 text-xs font-mono font-medium text-void transition-all duration-200 hover:shadow-[0_0_20px_-4px_oklch(0.77_0.15_75/0.5)]"
+              className="group relative inline-flex h-8 items-center rounded-md bg-amber px-5 text-xs font-mono font-medium text-void transition-[transform,box-shadow] duration-200 ease-out hover:shadow-[0_0_20px_-4px_oklch(0.77_0.15_75/0.5)] active:scale-[0.97]"
             >
               <span className="relative z-10">Get started</span>
               <div className="absolute inset-0 rounded-md bg-gradient-to-r from-amber to-[oklch(0.82_0.14_80)] opacity-0 transition-opacity duration-200 group-hover:opacity-100" />
@@ -163,7 +163,7 @@ export function Navbar() {
           <SignedIn>
             <Link
               href="/dashboard"
-              className="group relative inline-flex h-8 items-center rounded-md bg-amber px-5 text-xs font-mono font-medium text-void transition-all duration-200 hover:shadow-[0_0_20px_-4px_oklch(0.77_0.15_75/0.5)]"
+              className="group relative inline-flex h-8 items-center rounded-md bg-amber px-5 text-xs font-mono font-medium text-void transition-[transform,box-shadow] duration-200 ease-out hover:shadow-[0_0_20px_-4px_oklch(0.77_0.15_75/0.5)] active:scale-[0.97]"
             >
               <span className="relative z-10">Dashboard</span>
               <div className="absolute inset-0 rounded-md bg-gradient-to-r from-amber to-[oklch(0.82_0.14_80)] opacity-0 transition-opacity duration-200 group-hover:opacity-100" />
