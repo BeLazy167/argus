@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { FileCode, MessageSquare, Zap, Check, X, Loader2 } from "lucide-react";
+import { FileCode, MessageSquare, Zap, Check, X, Loader2, ChevronUp } from "lucide-react";
 import type { TimelineEntry, LiveTokens } from "@/lib/hooks/use-review-stream";
 
 type Props = {
@@ -79,20 +79,24 @@ export function ActivityTimeline({ timeline, liveTokens, stage, startedAt }: Pro
         <span className="text-[11px] font-mono uppercase tracking-wider text-slate-text">
           Activity
         </span>
-        <span className="inline-flex items-center rounded-md border border-amber/30 bg-amber/10 px-2 py-0.5 text-[11px] font-mono text-amber">
+        <span className={`inline-flex items-center rounded-md border border-amber/30 bg-amber/10 px-2 py-0.5 text-[11px] font-mono text-amber ${isActive ? "animate-pulse" : ""}`}>
           {isActive && <Loader2 className="h-3 w-3 mr-1.5 animate-spin" />}
           {formatElapsed(elapsed)}
         </span>
       </div>
 
       {/* Scrollable timeline */}
-      <div ref={scrollRef} className="max-h-[400px] overflow-y-auto">
+      <div ref={scrollRef} className="relative max-h-[400px] overflow-y-auto">
+        {hiddenCount > 0 && (
+          <div className="pointer-events-none absolute inset-x-0 top-0 h-6 bg-gradient-to-b from-charcoal/80 to-transparent z-10" />
+        )}
         {hiddenCount > 0 && (
           <button
             type="button"
             onClick={() => setShowAll(true)}
-            className="text-[11px] font-mono text-amber hover:underline mb-2 cursor-pointer"
+            className="inline-flex items-center gap-1 text-[11px] font-mono text-amber hover:underline mb-2 px-2 py-1 cursor-pointer"
           >
+            <ChevronUp className="h-3 w-3" />
             Show {hiddenCount} earlier
           </button>
         )}
@@ -120,7 +124,7 @@ export function ActivityTimeline({ timeline, liveTokens, stage, startedAt }: Pro
                 {/* Content */}
                 <div className="pb-3 min-w-0 flex-1">
                   <div className="flex items-center gap-2">
-                    <Icon className="h-3 w-3 text-slate-text shrink-0" />
+                    <Icon className="h-3.5 w-3.5 text-slate-text shrink-0" />
                     <span className="text-[11px] font-mono text-slate-text shrink-0">
                       {relativeTimestamp(entry.timestamp, startDate)}
                     </span>

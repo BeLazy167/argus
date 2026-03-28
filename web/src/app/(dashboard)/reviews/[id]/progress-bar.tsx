@@ -46,19 +46,19 @@ export function PipelineProgress({ stage, failedStage, filesReviewed, totalFiles
         {stages.map((step, i) => {
           const state = getStepState(step.key, stage, failedStage);
           return (
-            <div key={step.key} className="flex items-center flex-1 last:flex-none">
+            <div key={step.key} className="flex items-center flex-1 last:flex-none" title={step.label}>
               <div className="flex flex-col items-center gap-1.5">
                 <StepIcon state={state} />
-                <span className={`text-[11px] font-mono ${labelColor[state] ?? "text-slate-text"}`}>
+                <span className={`text-xs font-mono ${labelColor[state] ?? "text-slate-text"}`}>
                   {step.label}
                   {step.key === "reviewing" && stage === "reviewing" && filesReviewed != null && totalFiles != null && (
-                    <span className="text-[11px] font-mono text-amber ml-1">{filesReviewed}/{totalFiles}</span>
+                    <span className="text-xs font-mono text-amber ml-1">{filesReviewed}/{totalFiles}</span>
                   )}
                 </span>
               </div>
               {i < stages.length - 1 && (
                 <div
-                  className={`h-px flex-1 mx-1.5 mt-[-18px] ${
+                  className={`h-0.5 flex-1 mx-1.5 mt-[-18px] ${
                     state === "completed" ? "bg-green-400/40" : "bg-iron/30"
                   }`}
                 />

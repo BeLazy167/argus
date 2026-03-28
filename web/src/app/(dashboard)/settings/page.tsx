@@ -254,7 +254,7 @@ function ConfigCard({
           <button
             type="button"
             onClick={() => onDelete ? onDelete(stage) : del.mutate({ repoId, stage })}
-            className="text-[11px] font-mono text-slate-text hover:text-red-400 transition-colors"
+            className="text-[11px] font-mono text-slate-text hover:text-red-400 transition-colors cursor-pointer"
           >
             Reset
           </button>
@@ -480,7 +480,7 @@ function ConfigCard({
           type="button"
           onClick={handleSave}
           disabled={upsert.isPending || !finalModel}
-          className="flex items-center gap-2 rounded border border-amber/30 bg-amber/10 px-3 py-1 text-[11px] font-mono text-amber hover:bg-amber/20 transition-colors disabled:opacity-50"
+          className="flex items-center gap-2 rounded border border-amber/30 bg-amber/10 px-3 py-1 text-[11px] font-mono text-amber hover:bg-amber/20 transition-colors disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
         >
           <Save className="h-3 w-3" />
           {upsert.isPending ? "Saving..." : "Save"}
@@ -489,7 +489,7 @@ function ConfigCard({
           type="button"
           onClick={handleTest}
           disabled={test.isPending || !finalModel}
-          className="flex items-center gap-2 rounded border border-iron px-3 py-1 text-[11px] font-mono text-slate-text hover:text-foreground hover:border-foreground/30 transition-colors disabled:opacity-50"
+          className="flex items-center gap-2 rounded border border-iron px-3 py-1 text-[11px] font-mono text-slate-text hover:text-foreground hover:border-foreground/30 transition-colors disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
         >
           {test.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Zap className="h-3 w-3" />}
           {test.isPending ? "Testing..." : "Test"}
@@ -540,7 +540,7 @@ function PromptCard({
           if (!open && !draft) setDraft(displayText);
           setOpen(!open);
         }}
-        className="flex w-full items-center justify-between p-4 text-left"
+        className="flex w-full items-center justify-between p-4 text-left cursor-pointer"
       >
         <div className="flex items-center gap-2">
           <span className="text-xs font-mono font-medium text-foreground">
@@ -569,7 +569,7 @@ function PromptCard({
               type="button"
               onClick={handleSave}
               disabled={upsert.isPending || !draft.trim()}
-              className="flex items-center gap-2 rounded border border-amber/30 bg-amber/10 px-3 py-1 text-[11px] font-mono text-amber hover:bg-amber/20 transition-colors disabled:opacity-50"
+              className="flex items-center gap-2 rounded border border-amber/30 bg-amber/10 px-3 py-1 text-[11px] font-mono text-amber hover:bg-amber/20 transition-colors disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
             >
               <Save className="h-3 w-3" />
               {upsert.isPending ? "Saving..." : "Save"}
@@ -579,7 +579,7 @@ function PromptCard({
                 type="button"
                 onClick={handleReset}
                 disabled={del.isPending}
-                className="flex items-center gap-2 rounded border border-iron px-3 py-1 text-[11px] font-mono text-slate-text hover:text-foreground hover:border-foreground/30 transition-colors disabled:opacity-50"
+                className="flex items-center gap-2 rounded border border-iron px-3 py-1 text-[11px] font-mono text-slate-text hover:text-foreground hover:border-foreground/30 transition-colors disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
               >
                 <RotateCw className="h-3 w-3" />
                 {del.isPending ? "Resetting..." : "Reset to default"}
@@ -598,24 +598,28 @@ const PIPELINE_FEATURES = [
   {
     key: "deep_review",
     label: "Deep Review",
+    hint: "4 specialist agents review each file in parallel",
     description: "Run 4 specialist reviewers (Bug Hunter, Security, Architecture, Regression) with lead agent coordination",
     defaultValue: false,
   },
   {
     key: "cross_file_context",
     label: "Cross-File Context",
+    hint: "Traces callers, imports, and shared types across files",
     description: "Fetch related files for richer review context",
     defaultValue: true,
   },
   {
     key: "blast_radius",
     label: "Blast Radius Analysis",
+    hint: "Maps downstream dependents affected by changes",
     description: "Trace dependency impact via code graph. Finds how changes affect downstream callers.",
     defaultValue: true,
   },
   {
     key: "simulation",
     label: "Simulation & Scenarios",
+    hint: "Tests known risk scenarios against the PR",
     description: "Run stored scenarios against the diff to predict breakage. Requires Deep Review.",
     defaultValue: false,
     requiresDeepReview: true,
@@ -623,30 +627,35 @@ const PIPELINE_FEATURES = [
   {
     key: "pr_enrichment",
     label: "PR Enrichment",
+    hint: "Auto-enriches PR descriptions with missing context",
     description: "Enrich review context with PR metadata, labels, and linked issues.",
     defaultValue: true,
   },
   {
     key: "learn_patterns",
     label: "Pattern Learning",
+    hint: "Learns reusable patterns from high-confidence findings",
     description: "Learn recurring code patterns from review feedback to improve future reviews.",
     defaultValue: true,
   },
   {
     key: "learn_conventions",
     label: "Convention Learning",
+    hint: "Extracts codebase conventions from code diffs",
     description: "Learn team coding conventions from approved PRs and apply them in reviews.",
     defaultValue: true,
   },
   {
     key: "file_synthesis",
     label: "File Synthesis",
+    hint: "Creates per-file institutional memory summaries",
     description: "Combine per-file reviews into a unified PR summary with cross-cutting insights.",
     defaultValue: true,
   },
   {
     key: "architecture_graph",
     label: "Architecture Graph",
+    hint: "Extracts dependency graph from code changes",
     description: "Build and maintain a dependency graph from reviewed code for blast radius analysis.",
     defaultValue: true,
   },
@@ -671,10 +680,11 @@ function PipelineFeatureCard({
       disabled ? "border-iron/50 bg-charcoal/50 opacity-60" : enabled ? "border-amber/30 bg-amber/5" : "border-iron bg-charcoal"
     }`}>
       <div className="flex items-center justify-between mb-1.5">
-        <div className="flex items-center gap-2">
+        <div className="flex flex-col gap-0.5">
           <span className={`text-xs font-mono font-medium ${disabled ? "text-slate-text/60" : enabled ? "text-amber" : "text-foreground"}`}>
             {toggle.label}
           </span>
+          <span className="text-[11px] font-mono text-slate-text">{toggle.hint}</span>
         </div>
         <button
           type="button"
@@ -692,7 +702,7 @@ function PipelineFeatureCard({
           />
         </button>
       </div>
-      <p className="text-[10px] font-mono text-slate-text leading-relaxed">
+      <p className="text-[11px] font-mono text-slate-text leading-relaxed">
         {toggle.description}
       </p>
       {disabled && "requiresDeepReview" in toggle && toggle.requiresDeepReview && (
@@ -770,7 +780,7 @@ export default function SettingsPage() {
         <button
           type="button"
           onClick={() => setSettingsScope("org")}
-          className={`px-4 py-2 text-xs font-mono transition-colors border-b-2 -mb-px ${
+          className={`px-4 py-2 text-xs font-mono transition-colors border-b-2 -mb-px cursor-pointer ${
             settingsScope === "org"
               ? "border-amber text-amber"
               : "border-transparent text-slate-text hover:text-foreground"
@@ -781,7 +791,7 @@ export default function SettingsPage() {
         <button
           type="button"
           onClick={() => setSettingsScope("repo")}
-          className={`px-4 py-2 text-xs font-mono transition-colors border-b-2 -mb-px ${
+          className={`px-4 py-2 text-xs font-mono transition-colors border-b-2 -mb-px cursor-pointer ${
             settingsScope === "repo"
               ? "border-amber text-amber"
               : "border-transparent text-slate-text hover:text-foreground"
@@ -849,7 +859,7 @@ export default function SettingsPage() {
                       onClick={() => {
                         saveOrgDefaults.mutate({ ...orgDefaults, persona: "custom", custom_persona_prompt: orgCustomPromptDraft });
                       }}
-                      className="mt-2 rounded border border-amber/30 bg-amber/10 px-3 py-1.5 text-[10px] font-mono font-medium text-amber hover:bg-amber/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                      className="mt-2 rounded border border-amber/30 bg-amber/10 px-3 py-1.5 text-[11px] font-mono font-medium text-amber hover:bg-amber/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors cursor-pointer"
                     >
                       {saveOrgDefaults.isPending ? "Saving..." : "Save Custom Persona"}
                     </button>
@@ -1144,7 +1154,7 @@ export default function SettingsPage() {
                             },
                           );
                         }}
-                        className="mt-2 rounded border border-amber/30 bg-amber/10 px-3 py-1.5 text-[10px] font-mono font-medium text-amber hover:bg-amber/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                        className="mt-2 rounded border border-amber/30 bg-amber/10 px-3 py-1.5 text-[11px] font-mono font-medium text-amber hover:bg-amber/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors cursor-pointer"
                       >
                         {updateRepo.isPending ? "Saving..." : "Save Custom Persona"}
                       </button>

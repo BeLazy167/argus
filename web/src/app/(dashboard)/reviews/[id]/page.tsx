@@ -16,6 +16,7 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  ChevronUp,
   Copy,
   MessageSquare,
   Filter,
@@ -251,7 +252,7 @@ function CopyFixButton({
       type="button"
       onClick={handleCopy}
       aria-label={`Copy fix prompt for ${filePath}${ref ? ` ${ref}` : ""} ${comment.severity ?? ""}`}
-      className="inline-flex items-center gap-1.5 rounded-md border border-iron/50 bg-iron/20 px-2.5 py-1 text-[11px] font-mono text-slate-text hover:text-amber hover:border-amber/30 hover:bg-amber/5 transition-all opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+      className="inline-flex items-center gap-1.5 rounded-md border border-iron/50 bg-iron/20 px-2.5 py-1 text-[11px] font-mono text-slate-text hover:text-amber hover:border-amber/30 hover:bg-amber/5 transition-all opacity-0 group-hover:opacity-100 focus-visible:opacity-100 cursor-pointer"
     >
       {copied ? (
         <>
@@ -302,23 +303,23 @@ function CommentCard({
 
   return (
     <div
-      className={`group border-l-[3px] ${borderClass} ${bgClass} ${newFindingBorder} hover:bg-charcoal/40 transition-colors px-5 py-4 mx-4 my-2 rounded-r-md`}
+      className={`group border-l-[3px] ${borderClass} ${bgClass} ${newFindingBorder} hover:bg-iron/15 transition-colors px-5 py-4 mx-4 my-2 rounded-r-md`}
     >
       <div className="flex items-center gap-2 mb-3">
         {comment.severity && (
           <span
-            className={`inline-flex items-center rounded-sm border px-2.5 py-0.5 text-[11px] font-mono uppercase tracking-wider font-medium ${severityStyles[comment.severity] ?? ""}`}
+            className={`inline-flex items-center rounded-sm border px-2 py-0.5 text-[11px] font-mono uppercase tracking-wider font-medium ${severityStyles[comment.severity] ?? ""}`}
           >
             {comment.severity}
           </span>
         )}
         {comment.category && (
-          <span className="inline-flex items-center rounded-sm border bg-iron/30 text-slate-text border-iron/60 px-2.5 py-0.5 text-[11px] font-mono">
+          <span className="inline-flex items-center rounded-sm border bg-iron/30 text-slate-text border-iron/60 px-2 py-0.5 text-[11px] font-mono">
             {comment.category}
           </span>
         )}
         {comment.specialist && (
-          <span className="inline-flex items-center rounded-sm border bg-purple-400/10 text-purple-400 border-purple-400/30 px-2.5 py-0.5 text-[11px] font-mono">
+          <span className="inline-flex items-center rounded-sm border bg-purple-400/10 text-purple-400 border-purple-400/30 px-2 py-0.5 text-[11px] font-mono">
             {comment.specialist}
           </span>
         )}
@@ -350,7 +351,7 @@ function CommentCard({
                   e.stopPropagation();
                   setPatternExpanded((prev) => !prev);
                 }}
-                className="inline-flex items-center gap-1 rounded border border-amber/30 bg-amber/10 px-1.5 py-0.5 text-[10px] font-mono text-amber hover:bg-amber/20 transition-colors cursor-pointer"
+                className="inline-flex items-center gap-1 rounded border border-amber/30 bg-amber/10 px-2 py-0.5 text-[11px] font-mono text-amber hover:bg-amber/20 transition-colors cursor-pointer"
               >
                 Pattern Match ({Math.round(comment.matched_pattern_score * 100)}%)
                 <ChevronDown className={`h-2.5 w-2.5 transition-transform ${patternExpanded ? "rotate-180" : ""}`} />
@@ -377,13 +378,19 @@ function FileGroup({
   fileComments,
   id,
   hidden,
+  forceExpanded,
 }: {
   filePath: string;
   fileComments: readonly ReviewComment[];
   id: string;
   hidden: boolean;
+  forceExpanded?: boolean;
 }) {
   const [expanded, setExpanded] = useState(true);
+
+  useEffect(() => {
+    if (forceExpanded !== undefined) setExpanded(forceExpanded);
+  }, [forceExpanded]);
   const Chevron = expanded ? ChevronDown : ChevronRight;
   const contentId = `${id}-content`;
   const language = langFromPath(filePath);
@@ -406,7 +413,7 @@ function FileGroup({
         onClick={() => setExpanded(!expanded)}
         aria-expanded={expanded}
         aria-controls={contentId}
-        className="flex items-center gap-2 w-full bg-charcoal px-4 py-3 border-b border-iron hover:bg-iron/20 transition-colors text-left"
+        className="flex items-center gap-2 w-full bg-charcoal px-4 py-3 border-b border-iron hover:bg-iron/20 transition-colors text-left cursor-pointer"
       >
         <Chevron className="h-3.5 w-3.5 text-slate-text shrink-0" />
         <FileCode className="h-3.5 w-3.5 text-slate-text shrink-0" />
@@ -560,6 +567,8 @@ export default function ReviewDetailPage() {
   const { data: repos } = useRepos();
   const retryReview = useRetryReview();
   const [activeSeverity, setActiveSeverity] = useState<string | null>(null);
+  const [allExpanded, setAllExpanded] = useState(true);
+  const [expandToggle, setExpandToggle] = useState(0);
 
   const review = data?.review;
   const comments = data?.comments ?? [];
@@ -772,7 +781,7 @@ export default function ReviewDetailPage() {
                 type="button"
                 onClick={() => retryReview.mutate(review.id)}
                 disabled={retryReview.isPending}
-                className="inline-flex items-center gap-1.5 rounded-md border border-amber/30 bg-amber/10 px-3 py-2 text-xs font-mono text-amber hover:bg-amber/20 transition-colors"
+                className="inline-flex items-center gap-1.5 rounded-md border border-amber/30 bg-amber/10 px-3 py-2 text-xs font-mono text-amber hover:bg-amber/20 transition-colors cursor-pointer"
               >
                 <RotateCcw
                   className={`h-3.5 w-3.5 ${retryReview.isPending ? "animate-spin" : ""}`}
@@ -845,7 +854,7 @@ export default function ReviewDetailPage() {
             type="button"
             onClick={() => retryReview.mutate(review.id)}
             disabled={retryReview.isPending}
-            className="inline-flex items-center gap-1.5 rounded-md border border-red-400/30 px-3 py-1.5 text-xs font-mono text-red-400 hover:bg-red-400/10 transition-colors"
+            className="inline-flex items-center gap-1.5 rounded-md border border-red-400/30 px-3 py-1.5 text-xs font-mono text-red-400 hover:bg-red-400/10 transition-colors cursor-pointer"
           >
             <RotateCcw
               className={`h-3.5 w-3.5 ${retryReview.isPending ? "animate-spin" : ""}`}
@@ -910,7 +919,7 @@ export default function ReviewDetailPage() {
         })()}
 
         {/* Stats row */}
-        <div className="flex items-center gap-3 text-[11px] font-mono text-slate-text">
+        <div className="flex items-center gap-4 text-[11px] font-mono text-slate-text">
           <span>
             {comments.length} comment{comments.length !== 1 ? "s" : ""}
           </span>
@@ -960,19 +969,19 @@ export default function ReviewDetailPage() {
             </div>
 
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
-              <div className="rounded-md bg-iron/10 border border-iron/30 px-4 py-3 text-center">
+              <div className="rounded-md bg-iron/10 border border-iron/30 px-4 py-3 text-center hover:bg-iron/20 transition-colors">
                 <div className="text-xl font-display font-bold text-foreground">{memoryStats.total}</div>
                 <div className="text-[11px] font-mono text-slate-text mt-0.5">findings total</div>
               </div>
-              <div className="rounded-md bg-iron/10 border border-iron/30 px-4 py-3 text-center">
+              <div className="rounded-md bg-iron/10 border border-iron/30 px-4 py-3 text-center hover:bg-iron/20 transition-colors">
                 <div className="text-xl font-display font-bold text-purple-400">{memoryStats.patternMatches}</div>
                 <div className="text-[11px] font-mono text-slate-text mt-0.5">pattern matches</div>
               </div>
-              <div className="rounded-md bg-iron/10 border border-iron/30 px-4 py-3 text-center">
+              <div className="rounded-md bg-iron/10 border border-iron/30 px-4 py-3 text-center hover:bg-iron/20 transition-colors">
                 <div className="text-xl font-display font-bold text-amber">{memoryStats.rulesEnforced}</div>
                 <div className="text-[11px] font-mono text-slate-text mt-0.5">rules enforced</div>
               </div>
-              <div className="rounded-md bg-iron/10 border border-iron/30 px-4 py-3 text-center">
+              <div className="rounded-md bg-iron/10 border border-iron/30 px-4 py-3 text-center hover:bg-iron/20 transition-colors">
                 <div className="text-xl font-display font-bold text-emerald-400">{memoryStats.newFindings}</div>
                 <div className="text-[11px] font-mono text-slate-text mt-0.5">new findings</div>
               </div>
@@ -1046,6 +1055,25 @@ export default function ReviewDetailPage() {
 
         {grouped.length > 0 ? (
           <div className="space-y-5">
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setAllExpanded((v) => !v);
+                  setExpandToggle((v) => v + 1);
+                }}
+                className="text-[11px] font-mono text-slate-text hover:text-foreground transition-colors cursor-pointer"
+              >
+                {allExpanded ? (
+                  <span className="inline-flex items-center gap-1"><ChevronUp className="h-3 w-3" />Collapse all</span>
+                ) : (
+                  <span className="inline-flex items-center gap-1"><ChevronDown className="h-3 w-3" />Expand all</span>
+                )}
+              </button>
+              <span className="text-[11px] font-mono text-slate-text ml-auto">
+                Showing {activeSeverity ? comments.filter(c => c.severity === activeSeverity).length : comments.length} of {comments.length}
+              </span>
+            </div>
             {grouped.map(([filePath, fileComments]) => {
               const fid = `file-${filePath.replace(/[^a-zA-Z0-9]/g, "-")}`;
               // Filter comments by severity if active
@@ -1060,6 +1088,7 @@ export default function ReviewDetailPage() {
                   filePath={filePath}
                   fileComments={filtered}
                   hidden={!visibleFiles.has(filePath)}
+                  forceExpanded={expandToggle > 0 ? allExpanded : undefined}
                 />
               );
             })}

@@ -15,10 +15,18 @@ const labels: Record<Review["status"], string> = {
   failed: "FAILED",
 };
 
+const titles: Record<Review["status"], string> = {
+  pending: "Review queued, waiting to start",
+  in_progress: "Review pipeline running",
+  completed: "Review posted to GitHub",
+  failed: "Review failed — check error details",
+};
+
 export function StatusBadge({ status }: { status: Review["status"] }) {
   return (
     <span
-      className={`inline-flex items-center gap-1 rounded-sm border px-2 py-0.5 text-[10px] font-mono uppercase tracking-wider ${styles[status]}`}
+      className={`inline-flex items-center gap-1 rounded-sm border px-2 py-0.5 text-[11px] font-mono uppercase tracking-wider ${styles[status]} ${status === "in_progress" ? "animate-pulse" : ""}`}
+      title={titles[status]}
     >
       {status === "in_progress" && (
         <Loader2 className="h-2.5 w-2.5 animate-spin" />
