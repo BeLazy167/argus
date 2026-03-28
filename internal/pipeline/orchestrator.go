@@ -662,6 +662,12 @@ func (o *Orchestrator) generateConversationalBrief(ctx context.Context, run *Pip
 		Provider:         cfg.Provider,
 	}
 	run.Tokens.addToTotal(run.Tokens.Synthesis)
+	if run.EventBus != nil {
+		run.EventBus.Publish(run.ReviewID, EventTokenUpdate, map[string]any{
+			"total_tokens": run.Tokens.Total.TotalTokens,
+			"cost":         run.Tokens.Total.Cost,
+		})
+	}
 
 	brief := strings.TrimSpace(resp.Content)
 	if brief == "" {

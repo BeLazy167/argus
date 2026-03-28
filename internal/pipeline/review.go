@@ -153,6 +153,13 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 						p.promptExtra = PersonaPromptOverlay(run.Persona)
 					}
 				}
+				if run.EventBus != nil {
+					run.EventBus.Publish(run.ReviewID, EventFileReviewStarted, map[string]any{
+						"file_path":  p.file.NewName,
+						"specialist": string(p.specialist),
+						"action":     string(p.action),
+					})
+				}
 				rev, tok, err := rs.reviewFile(ctx, run, p, fileContents, owner, repo, cfg, provider)
 				resultCh <- result{review: rev, tokens: tok, err: err}
 			}
@@ -180,6 +187,12 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 		}
 		run.Tokens.Review = append(run.Tokens.Review, r.tokens)
 		run.Tokens.addToTotal(r.tokens)
+		if run.EventBus != nil {
+			run.EventBus.Publish(run.ReviewID, EventTokenUpdate, map[string]any{
+				"total_tokens": run.Tokens.Total.TotalTokens,
+				"cost":         run.Tokens.Total.Cost,
+			})
+		}
 		if len(r.review.Comments) > 0 {
 			if existing, ok := fileReviewMap[r.review.Path]; ok {
 				existing.Comments = append(existing.Comments, r.review.Comments...)

@@ -20,7 +20,9 @@ const (
 	EventSynthesis      EventType = "synthesis"
 	EventPatternLearned EventType = "pattern_learned"
 	EventCompleted      EventType = "completed"
-	EventError          EventType = "error"
+	EventError              EventType = "error"
+	EventFileReviewStarted  EventType = "file_review_started"
+	EventTokenUpdate        EventType = "token_update"
 )
 
 const maxHistoryEvents = 500

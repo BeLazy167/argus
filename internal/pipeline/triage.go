@@ -95,6 +95,12 @@ func (ts *TriageStage) Execute(ctx context.Context, run *PipelineRun) error {
 		Provider:         cfg.Provider,
 	}
 	run.Tokens.addToTotal(run.Tokens.Triage)
+	if run.EventBus != nil {
+		run.EventBus.Publish(run.ReviewID, EventTokenUpdate, map[string]any{
+			"total_tokens": run.Tokens.Total.TotalTokens,
+			"cost":         run.Tokens.Total.Cost,
+		})
+	}
 
 	return nil
 }
