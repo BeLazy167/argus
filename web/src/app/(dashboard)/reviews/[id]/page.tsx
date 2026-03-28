@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState, useCallback, useEffect, useRef } from "react";
+import DOMPurify from "dompurify";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import dynamic from "next/dynamic";
@@ -127,36 +128,41 @@ const severityBg: Record<string, string> = {
 
 function MermaidChart({ chart }: { chart: string }) {
   const ref = useRef<HTMLDivElement>(null);
+  const [error, setError] = useState(false);
+
   useEffect(() => {
-    import("mermaid").then((m) => {
-      m.default.initialize({
-        startOnLoad: false,
-        theme: "dark",
-        themeVariables: {
-          primaryColor: "#c2410c",
-          primaryTextColor: "#f5f0eb",
-          primaryBorderColor: "#3a3632",
-          lineColor: "#6b6560",
-          secondaryColor: "#292524",
-          tertiaryColor: "#1c1917",
-        },
-      });
-      if (ref.current) {
+    let cancelled = false;
+    import("mermaid")
+      .then((m) => {
+        if (cancelled) return;
+        m.default.initialize({
+          startOnLoad: false,
+          theme: "dark",
+          themeVariables: {
+            primaryColor: "#c2410c",
+            primaryTextColor: "#f5f0eb",
+            primaryBorderColor: "#3a3632",
+            lineColor: "#6b6560",
+            secondaryColor: "#292524",
+            tertiaryColor: "#1c1917",
+          },
+        });
+        if (!ref.current) return;
         ref.current.textContent = "";
-        m.default
-          .render("mermaid-" + Math.random().toString(36).slice(2), chart)
-          .then(({ svg }) => {
-            if (ref.current) {
-              const parser = new DOMParser();
-              const doc = parser.parseFromString(svg, "image/svg+xml");
-              const svgEl = doc.documentElement;
-              ref.current.textContent = "";
-              ref.current.appendChild(ref.current.ownerDocument.importNode(svgEl, true));
-            }
-          });
-      }
-    });
+        return m.default.render("mermaid-" + Math.random().toString(36).slice(2), chart);
+      })
+      .then((result) => {
+        if (cancelled || !ref.current || !result) return;
+        const clean = DOMPurify.sanitize(result.svg, { USE_PROFILES: { svg: true } });
+        ref.current.innerHTML = clean;
+      })
+      .catch(() => {
+        if (!cancelled) setError(true);
+      });
+    return () => { cancelled = true; };
   }, [chart]);
+
+  if (error) return <p className="text-[11px] font-mono text-slate-text">Diagram could not be rendered</p>;
   return <div ref={ref} className="flex justify-center" />;
 }
 
@@ -242,8 +248,7 @@ function CopyFixButton({
       `Category: ${comment.category ?? "general"}`,
     ].join("\n");
 
-    navigator.clipboard.writeText(prompt);
-    setCopied(true);
+    navigator.clipboard.writeText(prompt).then(() => setCopied(true)).catch(() => {});
     setTimeout(() => setCopied(false), 2000);
   }, [comment, filePath, ref]);
 
@@ -661,7 +666,7 @@ export default function ReviewDetailPage() {
       clearTimeout(timer);
       observer.disconnect();
     };
-  }, [grouped]);
+  }, [grouped.length]);
 
   if (isLoading) {
     return (

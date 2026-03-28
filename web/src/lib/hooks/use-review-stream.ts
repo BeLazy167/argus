@@ -67,6 +67,8 @@ export function useReviewStream(reviewId: string, enabled: boolean) {
   const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
   const [liveTokens, setLiveTokens] = useState<LiveTokens | null>(null);
   const backoffRef = useRef(1000);
+  const getTokenRef = useRef(getToken);
+  useEffect(() => { getTokenRef.current = getToken; }, [getToken]);
 
   useEffect(() => {
     if (!enabled || !reviewId || !active) return;
@@ -164,7 +166,7 @@ export function useReviewStream(reviewId: string, enabled: boolean) {
 
     const connect = async () => {
       if (unmounted) return;
-      const token = await getToken();
+      const token = await getTokenRef.current();
       if (unmounted || !token) return;
 
       const wsBase = API_URL.replace(/^http/, "ws");
@@ -197,18 +199,18 @@ export function useReviewStream(reviewId: string, enabled: boolean) {
       };
 
       ws.onerror = () => {
-        // onclose will fire after this — reconnect handled there
+        console.error("WebSocket error");
       };
     };
 
-    connect();
+    connect().catch(() => {});
 
     return () => {
       unmounted = true;
       clearTimeout(reconnectTimer);
       if (ws) ws.close(1000, "unmount");
     };
-  }, [reviewId, enabled, active, getToken, qc]);
+  }, [reviewId, enabled, active, qc]);
 
   return { stage, failedStage, triageResults, scoringUpdate, connected, timeline, liveTokens };
 }

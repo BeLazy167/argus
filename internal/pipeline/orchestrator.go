@@ -256,6 +256,11 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		resolveCtx, resolveCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		go func() {
 			defer resolveCancel()
+			defer func() {
+				if r := recover(); r != nil {
+					o.logger.Error("autoResolveStaleComments panic", "recover", r, "pr", event.PRNumber)
+				}
+			}()
 			o.autoResolveStaleComments(resolveCtx, event, patchSet)
 		}()
 	}
@@ -278,7 +283,10 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 	}
 
 	// Merge org defaults with repo overrides (repo wins)
-	mergedSettings, _ := o.st.GetMergedSettings(ctx, inst.ID, dbRepo.ID)
+	mergedSettings, mergedErr := o.st.GetMergedSettings(ctx, inst.ID, dbRepo.ID)
+	if mergedErr != nil {
+		o.logger.Error("failed to load merged settings, using defaults", "error", mergedErr, "installation", inst.ID, "repo", dbRepo.ID)
+	}
 
 	run := &PipelineRun{
 		ID:               uuid.New(),
@@ -496,12 +504,17 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 			c := &fr.Comments[j]
 			wg.Add(1)
 			sem <- struct{}{}
-			go func(c *FileComment) {
+			go func(c *FileComment, filePath string) {
+				defer func() {
+					if r := recover(); r != nil {
+						o.logger.Error("enrichFindings goroutine panic", "recover", r, "file", filePath)
+					}
+				}()
 				defer wg.Done()
 				defer func() { <-sem }()
 
 				// Build a richer query: category + file + body gives Supermemory more semantic signal
-				query := fmt.Sprintf("[%s|%s] %s:%d %s", c.Severity, c.Category, fr.Path, c.Line, c.Body)
+				query := fmt.Sprintf("[%s|%s] %s:%d %s", c.Severity, c.Category, filePath, c.Line, c.Body)
 				content, score := o.indexer.SearchPatternMatch(ctx, owner, repo, query)
 
 				var ruleContent string
@@ -514,16 +527,16 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 
 				if score > 0.55 {
 					c.MatchedPatternScore = score
-					o.logger.Debug("pattern match found", "file", fr.Path, "line", c.Line, "score", fmt.Sprintf("%.3f", score), "pattern_prefix", util.Truncate(content, 80, true))
+					o.logger.Debug("pattern match found", "file", filePath, "line", c.Line, "score", fmt.Sprintf("%.3f", score), "pattern_prefix", util.Truncate(content, 80, true))
 				}
 				if ruleContent != "" {
 					c.EnforcedRuleContent = ruleContent
-					o.logger.Debug("rule enforced", "file", fr.Path, "line", c.Line, "rule_prefix", util.Truncate(ruleContent, 80, true))
+					o.logger.Debug("rule enforced", "file", filePath, "line", c.Line, "rule_prefix", util.Truncate(ruleContent, 80, true))
 				}
 				if score <= 0.55 && ruleContent == "" {
 					c.IsNewFinding = true
 				}
-			}(c)
+			}(c, fr.Path)
 		}
 	}
 	wg.Wait()
@@ -1015,17 +1028,52 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	postCtx := context.WithoutCancel(ctx)
 
 	if run.LearnPatterns {
-		o.autoLearnPatterns(postCtx, run, owner, repo)
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					o.logger.Error("post-review panic", "recover", r, "op", "autoLearnPatterns", "pr", run.PREvent.PRNumber)
+				}
+			}()
+			o.autoLearnPatterns(postCtx, run, owner, repo)
+		}()
 	}
 	if run.LearnConventions {
-		o.extractConventions(postCtx, run, owner, repo)
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					o.logger.Error("post-review panic", "recover", r, "op", "extractConventions", "pr", run.PREvent.PRNumber)
+				}
+			}()
+			o.extractConventions(postCtx, run, owner, repo)
+		}()
 	}
 	if run.FileSynthesis {
-		o.synthesizeFileMemories(postCtx, run, owner, repo)
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					o.logger.Error("post-review panic", "recover", r, "op", "synthesizeFileMemories", "pr", run.PREvent.PRNumber)
+				}
+			}()
+			o.synthesizeFileMemories(postCtx, run, owner, repo)
+		}()
 	}
-	o.indexPRSummary(postCtx, run, owner, repo)
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				o.logger.Error("post-review panic", "recover", r, "op", "indexPRSummary", "pr", run.PREvent.PRNumber)
+			}
+		}()
+		o.indexPRSummary(postCtx, run, owner, repo)
+	}()
 	if run.ArchitectureGraph {
-		o.extractArchitectureGraph(postCtx, run, owner, repo)
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					o.logger.Error("post-review panic", "recover", r, "op", "extractArchitectureGraph", "pr", run.PREvent.PRNumber)
+				}
+			}()
+			o.extractArchitectureGraph(postCtx, run, owner, repo)
+		}()
 	}
 	if run.PREnrichment {
 		func() {
@@ -1036,6 +1084,15 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 			}()
 			o.enrichPRDescription(postCtx, run, owner, repo)
 		}()
+	}
+
+	// Persist final token usage including post-review ops
+	if run.Tokens.Total.TotalTokens > 0 {
+		if b, err := json.Marshal(run.Tokens); err == nil {
+			if _, err := o.db.Exec(ctx, `UPDATE reviews SET token_usage = $1 WHERE id = $2`, b, run.ReviewID); err != nil {
+				o.logger.Warn("failed to persist post-review tokens", "error", err)
+			}
+		}
 	}
 
 	// Collect changed file paths once for simulation indexing + scenario outdating
