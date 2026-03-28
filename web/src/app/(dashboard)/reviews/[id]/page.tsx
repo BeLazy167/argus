@@ -3,9 +3,7 @@
 import { useMemo, useState, useCallback, useEffect } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
-import ReactMarkdown from "react-markdown";
-import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
-import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
+import dynamic from "next/dynamic";
 import {
   ArrowLeft,
   ExternalLink,
@@ -33,6 +31,9 @@ import { useReviewStream } from "@/lib/hooks/use-review-stream";
 import { PipelineProgress } from "./progress-bar";
 import type { Repo, ReviewComment, TokenUsage } from "@/lib/types";
 
+const Markdown = dynamic(() => import("./markdown").then(m => ({ default: m.Markdown })), { ssr: false });
+const CodeSnippet = dynamic(() => import("./markdown").then(m => ({ default: m.CodeSnippet })), { ssr: false });
+
 /* ── Helpers ─────────────────────────────────── */
 
 function formatTokens(t: { total_tokens: number }): string {
@@ -48,7 +49,6 @@ function lineRef(c: ReviewComment): string {
   return line != null ? `L${line}` : "";
 }
 
-/** Guess language from file extension for syntax highlighting. */
 function langFromPath(path: string): string {
   const ext = path.split(".").pop()?.toLowerCase() ?? "";
   const map: Record<string, string> = {
@@ -155,7 +155,7 @@ function TokenPill({ usage }: { usage: TokenUsage }) {
       {stages.length > 0 && (
         <div className="absolute right-0 top-full mt-1.5 z-10 hidden group-hover:block">
           <div className="rounded-lg border border-iron bg-charcoal p-3 shadow-xl min-w-[180px]">
-            <p className="text-[10px] font-mono uppercase tracking-wider text-slate-text mb-2">
+            <p className="text-[11px] font-mono uppercase tracking-wider text-slate-text mb-2">
               By stage
             </p>
             {stages.map(([stage, s]) => (
@@ -163,10 +163,10 @@ function TokenPill({ usage }: { usage: TokenUsage }) {
                 key={stage}
                 className="flex items-center justify-between py-0.5"
               >
-                <span className="text-[10px] font-mono text-amber">
+                <span className="text-[11px] font-mono text-amber">
                   {stage}
                 </span>
-                <span className="text-[10px] font-mono text-foreground">
+                <span className="text-[11px] font-mono text-foreground">
                   {formatTokens(s)}
                   {s.cost != null && <> · ${s.cost.toFixed(3)}</>}
                   {s.model && <span className="text-slate-text"> ({s.model})</span>}
@@ -176,150 +176,6 @@ function TokenPill({ usage }: { usage: TokenUsage }) {
           </div>
         </div>
       )}
-    </div>
-  );
-}
-
-/** Prose markdown with Geist Sans for body, syntax highlighting for code blocks. */
-function Markdown({
-  children,
-  filePath,
-}: {
-  children: string;
-  filePath?: string;
-}) {
-  const lang = filePath ? langFromPath(filePath) : "text";
-
-  return (
-    <div className="font-sans">
-      <ReactMarkdown
-        components={{
-          h1: ({ children }) => (
-            <h3 className="font-display text-base font-bold text-foreground mt-5 mb-2 first:mt-0">
-              {children}
-            </h3>
-          ),
-          h2: ({ children }) => (
-            <h3 className="font-display text-base font-bold text-foreground mt-5 mb-2 first:mt-0">
-              {children}
-            </h3>
-          ),
-          h3: ({ children }) => (
-            <h4 className="font-display text-sm font-semibold text-foreground mt-4 mb-1.5 first:mt-0">
-              {children}
-            </h4>
-          ),
-          p: ({ children }) => (
-            <p className="text-[13px] text-foreground/80 leading-[1.75] mb-3 last:mb-0">
-              {children}
-            </p>
-          ),
-          ul: ({ children }) => (
-            <ul className="list-disc list-outside ml-4 space-y-1.5 mb-3 text-[13px] text-foreground/80">
-              {children}
-            </ul>
-          ),
-          ol: ({ children }) => (
-            <ol className="list-decimal list-outside ml-4 space-y-1.5 mb-3 text-[13px] text-foreground/80">
-              {children}
-            </ol>
-          ),
-          li: ({ children }) => (
-            <li className="leading-[1.75] pl-1">{children}</li>
-          ),
-          strong: ({ children }) => (
-            <strong className="font-semibold text-foreground">{children}</strong>
-          ),
-          code: ({ className, children }) => {
-            const match = className?.match(/language-(\w+)/);
-            const codeLang = match?.[1] ?? lang;
-            const codeStr = String(children).replace(/\n$/, "");
-
-            if (className?.includes("language-") || codeStr.includes("\n")) {
-              return (
-                <SyntaxHighlighter
-                  style={oneDark}
-                  language={codeLang}
-                  customStyle={{
-                    margin: "12px 0",
-                    borderRadius: "6px",
-                    fontSize: "12px",
-                    border: "1px solid oklch(0.18 0 0 / 0.6)",
-                    background: "oklch(0.07 0 0 / 0.8)",
-                  }}
-                >
-                  {codeStr}
-                </SyntaxHighlighter>
-              );
-            }
-            return (
-              <code className="bg-amber/10 border border-amber/20 rounded px-1.5 py-0.5 text-[11px] font-mono text-amber">
-                {children}
-              </code>
-            );
-          },
-          pre: ({ children }) => <>{children}</>,
-          a: ({ href, children }) => (
-            <a
-              href={href}
-              className="text-amber hover:underline underline-offset-2"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              {children}
-            </a>
-          ),
-        }}
-      >
-        {children}
-      </ReactMarkdown>
-    </div>
-  );
-}
-
-function CodeSnippet({
-  code,
-  startLine,
-  language,
-}: {
-  code: string;
-  startLine?: number;
-  language: string;
-}) {
-  if (!code) return null;
-  const start = startLine ?? 1;
-
-  return (
-    <div className="mx-4 mt-3 mb-1 rounded-md overflow-hidden border border-iron/40">
-      <SyntaxHighlighter
-        style={oneDark}
-        language={language}
-        showLineNumbers
-        startingLineNumber={start}
-        lineNumberStyle={{
-          minWidth: "3em",
-          paddingRight: "1em",
-          color: "oklch(0.18 0 0 / 0.6)",
-          borderRight: "1px solid oklch(0.18 0 0 / 0.3)",
-          marginRight: "1em",
-          userSelect: "none",
-        }}
-        customStyle={{
-          margin: 0,
-          borderRadius: 0,
-          fontSize: "11px",
-          lineHeight: "1.65",
-          background: "oklch(0.07 0 0 / 0.8)",
-          padding: "8px 0",
-        }}
-        wrapLines
-        lineProps={() => ({
-          style: { display: "flex", paddingRight: "1em" },
-          className: "hover:bg-[oklch(0.18_0_0/0.15)]",
-        })}
-      >
-        {code}
-      </SyntaxHighlighter>
     </div>
   );
 }
@@ -353,7 +209,7 @@ function CopyFixButton({
       type="button"
       onClick={handleCopy}
       aria-label={`Copy fix prompt for ${filePath}${ref ? ` ${ref}` : ""} ${comment.severity ?? ""}`}
-      className="inline-flex items-center gap-1.5 rounded-md border border-iron/50 bg-iron/20 px-2.5 py-1 text-[10px] font-mono text-slate-text hover:text-amber hover:border-amber/30 hover:bg-amber/5 transition-all opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+      className="inline-flex items-center gap-1.5 rounded-md border border-iron/50 bg-iron/20 px-2.5 py-1 text-[11px] font-mono text-slate-text hover:text-amber hover:border-amber/30 hover:bg-amber/5 transition-all opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
     >
       {copied ? (
         <>
@@ -372,13 +228,13 @@ function CopyFixButton({
 
 function PatternDetail({ patternId }: { patternId: number }) {
   const { data: pattern, isLoading } = usePattern(patternId);
-  if (isLoading) return <div className="mt-2 text-[10px] font-mono text-slate-text">Loading pattern...</div>;
-  if (!pattern) return <div className="mt-2 text-[10px] font-mono text-slate-text">Pattern not found</div>;
+  if (isLoading) return <div className="mt-2 text-[11px] font-mono text-slate-text">Loading pattern...</div>;
+  if (!pattern) return <div className="mt-2 text-[11px] font-mono text-slate-text">Pattern not found</div>;
   return (
     <div className="mt-2 rounded border border-iron bg-iron/10 p-3">
-      <p className="text-[10px] font-mono text-slate-text uppercase tracking-wider mb-1">Matched Pattern</p>
+      <p className="text-[11px] font-mono text-slate-text uppercase tracking-wider mb-1">Matched Pattern</p>
       <p className="text-xs font-mono text-foreground whitespace-pre-wrap">{pattern.content}</p>
-      <div className="flex gap-4 mt-2 text-[10px] font-mono text-slate-text">
+      <div className="flex gap-4 mt-2 text-[11px] font-mono text-slate-text">
         {pattern.source && <span>Source: {pattern.source}</span>}
         {pattern.category && <span>Category: {pattern.category}</span>}
       </div>
@@ -409,28 +265,28 @@ function CommentCard({
       <div className="flex items-center gap-2 mb-3">
         {comment.severity && (
           <span
-            className={`inline-flex items-center rounded-sm border px-2.5 py-0.5 text-[10px] font-mono uppercase tracking-wider font-medium ${severityStyles[comment.severity] ?? ""}`}
+            className={`inline-flex items-center rounded-sm border px-2.5 py-0.5 text-[11px] font-mono uppercase tracking-wider font-medium ${severityStyles[comment.severity] ?? ""}`}
           >
             {comment.severity}
           </span>
         )}
         {comment.category && (
-          <span className="inline-flex items-center rounded-sm border bg-iron/30 text-slate-text border-iron/60 px-2.5 py-0.5 text-[10px] font-mono">
+          <span className="inline-flex items-center rounded-sm border bg-iron/30 text-slate-text border-iron/60 px-2.5 py-0.5 text-[11px] font-mono">
             {comment.category}
           </span>
         )}
         {comment.specialist && (
-          <span className="inline-flex items-center rounded-sm border bg-purple-400/10 text-purple-400 border-purple-400/30 px-2.5 py-0.5 text-[10px] font-mono">
+          <span className="inline-flex items-center rounded-sm border bg-purple-400/10 text-purple-400 border-purple-400/30 px-2.5 py-0.5 text-[11px] font-mono">
             {comment.specialist}
           </span>
         )}
         {comment.confidence_score != null && (
-          <span className="text-[10px] font-mono text-slate-text" title="Confidence score">
+          <span className="text-[11px] font-mono text-slate-text" title="Confidence score">
             {comment.confidence_score}%
           </span>
         )}
         {lineRef(comment) && (
-          <span className="text-[10px] font-mono text-slate-text">
+          <span className="text-[11px] font-mono text-slate-text">
             {lineRef(comment)}
           </span>
         )}
@@ -441,7 +297,7 @@ function CommentCard({
       {(comment.is_new_finding || comment.matched_pattern_score || comment.enforced_rule_content) && (
         <div className="flex flex-wrap gap-1.5 mt-1.5 mb-3">
           {comment.is_new_finding && (
-            <span className="inline-flex items-center gap-1 rounded border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-mono text-emerald-400">
+            <span className="inline-flex items-center gap-1 rounded border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-mono text-emerald-400">
               New Finding
             </span>
           )}
@@ -452,7 +308,7 @@ function CommentCard({
                   e.stopPropagation();
                   setPatternExpanded((prev) => !prev);
                 }}
-                className="inline-flex items-center gap-1 rounded border border-amber/30 bg-amber/10 px-1.5 py-0.5 text-[9px] font-mono text-amber hover:bg-amber/20 transition-colors cursor-pointer"
+                className="inline-flex items-center gap-1 rounded border border-amber/30 bg-amber/10 px-1.5 py-0.5 text-[10px] font-mono text-amber hover:bg-amber/20 transition-colors cursor-pointer"
               >
                 Pattern Match ({Math.round(comment.matched_pattern_score * 100)}%)
                 <ChevronDown className={`h-2.5 w-2.5 transition-transform ${patternExpanded ? "rotate-180" : ""}`} />
@@ -463,7 +319,7 @@ function CommentCard({
             </div>
           )}
           {comment.enforced_rule_content && (
-            <span className="inline-flex items-center gap-1 rounded border border-purple-500/30 bg-purple-500/10 px-2 py-0.5 text-[10px] font-mono text-purple-400" title={comment.enforced_rule_content}>
+            <span className="inline-flex items-center gap-1 rounded border border-purple-500/30 bg-purple-500/10 px-2 py-0.5 text-[11px] font-mono text-purple-400" title={comment.enforced_rule_content}>
               Enforces: {comment.enforced_rule_content.slice(0, 60)}{comment.enforced_rule_content.length > 60 ? '...' : ''}
             </span>
           )}
@@ -521,7 +377,7 @@ function FileGroup({
               className={`h-2 w-2 rounded-full ${severityDot[maxSeverity]}`}
             />
           )}
-          <span className="text-[10px] font-mono text-slate-text">
+          <span className="text-[11px] font-mono text-slate-text">
             <MessageSquare className="inline h-3 w-3 mr-1 -mt-0.5" />
             {fileComments.length}
           </span>
@@ -566,7 +422,7 @@ function FileTOC({
 }) {
   return (
     <nav className="sticky top-6 space-y-1" aria-label="File navigation">
-      <p className="text-[10px] font-mono uppercase tracking-[0.15em] text-slate-text mb-3 px-2">
+      <p className="text-[11px] font-mono uppercase tracking-[0.15em] text-slate-text mb-3 px-2">
         Files
       </p>
       {grouped.map(([filePath, fileComments]) => {
@@ -596,7 +452,7 @@ function FileTOC({
               />
             )}
             <span className="truncate">{filePath.split("/").pop()}</span>
-            <span className="ml-auto text-[10px] text-iron shrink-0">
+            <span className="ml-auto text-[11px] text-slate-text shrink-0">
               {fileComments.length}
             </span>
           </a>
@@ -608,7 +464,7 @@ function FileTOC({
         <div className="pt-3 mt-3 border-t border-iron/30 space-y-0.5">
           <div className="flex items-center gap-1.5 px-2 mb-2">
             <Filter className="h-3 w-3 text-slate-text" />
-            <p className="text-[10px] font-mono uppercase tracking-[0.15em] text-slate-text">
+            <p className="text-[11px] font-mono uppercase tracking-[0.15em] text-slate-text">
               Filter
             </p>
           </div>
@@ -633,7 +489,7 @@ function FileTOC({
                     className={`h-2 w-2 rounded-full ${severityDot[sev]}`}
                   />
                   <span className="capitalize">{sev}</span>
-                  <span className="ml-auto text-iron">
+                  <span className="ml-auto text-slate-text">
                     {severityCounts[sev]}
                   </span>
                 </button>
@@ -643,7 +499,7 @@ function FileTOC({
             <button
               type="button"
               onClick={() => onSeverityFilter(null)}
-              className="flex items-center gap-1 w-full px-2 py-1 text-[10px] font-mono text-amber hover:underline cursor-pointer"
+              className="flex items-center gap-1 w-full px-2 py-1 text-[11px] font-mono text-amber hover:underline cursor-pointer"
             >
               Clear filter
             </button>
@@ -714,6 +570,15 @@ export default function ReviewDetailPage() {
     return set;
   }, [grouped, activeSeverity]);
 
+  const enrichmentStats = useMemo(() => {
+    if (!comments.length) return null;
+    const newFindings = comments.filter((c) => c.is_new_finding === true).length;
+    const patternMatches = comments.filter((c) => c.matched_pattern_id).length;
+    const rulesEnforced = comments.filter((c) => c.enforced_rule_content).length;
+    if (!newFindings && !patternMatches && !rulesEnforced) return null;
+    return { newFindings, patternMatches, rulesEnforced };
+  }, [comments]);
+
   // Scroll-aware active file tracking
   const [activeFileId, setActiveFileId] = useState<string | null>(null);
 
@@ -744,8 +609,11 @@ export default function ReviewDetailPage() {
 
   if (isLoading) {
     return (
-      <div className="flex items-center justify-center py-20">
-        <Loader2 className="h-6 w-6 animate-spin text-slate-text" />
+      <div className="space-y-6 p-6">
+        <div className="h-8 w-64 animate-pulse rounded bg-iron/20" />
+        <div className="h-40 animate-pulse rounded-lg border border-iron bg-charcoal/40" />
+        <div className="h-60 animate-pulse rounded-lg border border-iron bg-charcoal/40" />
+        <div className="h-40 animate-pulse rounded-lg border border-iron bg-charcoal/40" />
       </div>
     );
   }
@@ -780,16 +648,16 @@ export default function ReviewDetailPage() {
           Reviews
         </Link>
         <span className="text-iron text-xs">/</span>
-        <span className="text-xs font-sans text-foreground/60 truncate max-w-[300px]">
+        <span className="text-xs font-sans text-foreground/60 truncate max-w-[300px]" title={review.pr_title}>
           {review.pr_title}
         </span>
       </nav>
 
       {/* Header card */}
       <header className="rounded-lg border border-iron bg-charcoal p-6 mb-6">
-        <div className="flex items-start justify-between gap-6">
+        <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 sm:gap-6">
           <div className="flex-1 min-w-0">
-            <h1 className="font-display text-xl font-bold text-foreground mb-2 truncate">
+            <h1 className="font-display text-xl font-bold text-foreground mb-2 truncate" title={review.pr_title}>
               {review.pr_title}
             </h1>
             <div className="flex items-center gap-3 flex-wrap">
@@ -803,22 +671,22 @@ export default function ReviewDetailPage() {
               </span>
               <StatusBadge status={review.status} />
               {review.deep_review && (
-                <span className="inline-flex items-center rounded-sm border bg-purple-400/10 text-purple-400 border-purple-400/30 px-2 py-0.5 text-[10px] font-mono">
+                <span className="inline-flex items-center rounded-sm border bg-purple-400/10 text-purple-400 border-purple-400/30 px-2 py-0.5 text-[11px] font-mono">
                   Deep
                 </span>
               )}
               {review.is_incremental && (
-                <span className="inline-flex items-center rounded-sm border bg-cyan-400/10 text-cyan-400 border-cyan-400/30 px-2 py-0.5 text-[10px] font-mono">
+                <span className="inline-flex items-center rounded-sm border bg-cyan-400/10 text-cyan-400 border-cyan-400/30 px-2 py-0.5 text-[11px] font-mono">
                   Incremental
                 </span>
               )}
               {review.persona && (
-                <span className="inline-flex items-center rounded-sm border bg-iron/30 text-slate-text border-iron/60 px-2 py-0.5 text-[10px] font-mono">
+                <span className="inline-flex items-center rounded-sm border bg-iron/30 text-slate-text border-iron/60 px-2 py-0.5 text-[11px] font-mono">
                   {review.persona}
                 </span>
               )}
             </div>
-            <div className="flex items-center gap-3 mt-2.5 text-[10px] font-mono text-iron">
+            <div className="flex items-center gap-3 mt-2.5 text-[11px] font-mono text-slate-text">
               {review.created_at && (
                 <span className="inline-flex items-center gap-1">
                   <Clock className="h-3 w-3" />
@@ -882,11 +750,11 @@ export default function ReviewDetailPage() {
             {triageResults.map((t) => (
               <div key={t.file} className="flex items-center gap-2 text-xs font-mono">
                 <span
-                  className={`inline-flex items-center rounded-sm border px-2 py-0.5 text-[10px] ${
+                  className={`inline-flex items-center rounded-sm border px-2 py-0.5 text-[11px] ${
                     t.action === "deep"
                       ? "bg-purple-400/10 text-purple-400 border-purple-400/30"
                       : t.action === "skip"
-                        ? "bg-iron/30 text-iron border-iron/60"
+                        ? "bg-iron/30 text-slate-text border-iron/60"
                         : t.action === "security_skim"
                           ? "bg-red-400/10 text-red-400 border-red-400/30"
                           : "bg-blue-400/10 text-blue-400 border-blue-400/30"
@@ -944,7 +812,7 @@ export default function ReviewDetailPage() {
             {grouped.length} file{grouped.length !== 1 ? "s" : ""}
           </span>
           <div className="h-3.5 w-px bg-iron/40" />
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             {(["critical", "warning", "suggestion", "praise"] as const).map(
               (sev) =>
                 severityCounts[sev] ? (
@@ -983,7 +851,7 @@ export default function ReviewDetailPage() {
           </div>
           <div className="space-y-2">
             {review.simulation_results.map((result, i) => (
-              <div key={i} className="flex items-start gap-3 rounded-md border border-iron bg-charcoal px-3 py-2">
+              <div key={`sim-${i}`} className="flex items-start gap-3 rounded-md border border-iron bg-charcoal px-3 py-2">
                 <span className={`mt-0.5 shrink-0 text-xs font-bold ${result.passes ? 'text-emerald-500' : 'text-red-500'}`}>
                   {result.passes ? 'PASS' : 'FAIL'}
                 </span>
@@ -1003,37 +871,31 @@ export default function ReviewDetailPage() {
       )}
 
       {/* Findings enrichment summary */}
-      {comments.length > 0 && (() => {
-        const newFindings = comments.filter((c) => c.is_new_finding === true).length;
-        const patternMatches = comments.filter((c) => c.matched_pattern_id).length;
-        const rulesEnforced = comments.filter((c) => c.enforced_rule_content).length;
-        if (!newFindings && !patternMatches && !rulesEnforced) return null;
-        return (
-          <div className="flex items-center gap-4 rounded-lg border border-iron bg-charcoal px-5 py-3 mb-6">
-            {newFindings > 0 && (
-              <div className="flex items-center gap-2 text-xs font-mono">
-                <div className="h-2 w-2 rounded-full bg-emerald-500" />
-                <span className="text-foreground">{newFindings}</span>
-                <span className="text-slate-text">New Findings</span>
-              </div>
-            )}
-            {patternMatches > 0 && (
-              <div className="flex items-center gap-2 text-xs font-mono">
-                <div className="h-2 w-2 rounded-full bg-amber" />
-                <span className="text-foreground">{patternMatches}</span>
-                <span className="text-slate-text">Pattern Matches</span>
-              </div>
-            )}
-            {rulesEnforced > 0 && (
-              <div className="flex items-center gap-2 text-xs font-mono">
-                <div className="h-2 w-2 rounded-full bg-purple-500" />
-                <span className="text-foreground">{rulesEnforced}</span>
-                <span className="text-slate-text">Rules Enforced</span>
-              </div>
-            )}
-          </div>
-        );
-      })()}
+      {enrichmentStats && (
+        <div className="flex flex-wrap items-center gap-4 rounded-lg border border-iron bg-charcoal px-5 py-3 mb-6">
+          {enrichmentStats.newFindings > 0 && (
+            <div className="flex items-center gap-2 text-xs font-mono">
+              <div className="h-2 w-2 rounded-full bg-emerald-500" />
+              <span className="text-foreground">{enrichmentStats.newFindings}</span>
+              <span className="text-slate-text">New Findings</span>
+            </div>
+          )}
+          {enrichmentStats.patternMatches > 0 && (
+            <div className="flex items-center gap-2 text-xs font-mono">
+              <div className="h-2 w-2 rounded-full bg-amber" />
+              <span className="text-foreground">{enrichmentStats.patternMatches}</span>
+              <span className="text-slate-text">Pattern Matches</span>
+            </div>
+          )}
+          {enrichmentStats.rulesEnforced > 0 && (
+            <div className="flex items-center gap-2 text-xs font-mono">
+              <div className="h-2 w-2 rounded-full bg-purple-500" />
+              <span className="text-foreground">{enrichmentStats.rulesEnforced}</span>
+              <span className="text-slate-text">Rules Enforced</span>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Main content: sidebar + file groups */}
       <div className={showSidebar ? "grid grid-cols-1 gap-6 lg:grid-cols-[200px_1fr]" : ""}>

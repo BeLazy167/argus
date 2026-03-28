@@ -22,7 +22,7 @@ const labelColor: Record<string, string> = {
   active: "text-amber font-medium",
   completed: "text-green-400",
   failed: "text-red-400",
-  pending: "text-iron",
+  pending: "text-slate-text",
 };
 
 function getStepState(
@@ -42,14 +42,14 @@ function getStepState(
 export function PipelineProgress({ stage, failedStage }: { stage: PipelineStage; failedStage?: string }) {
   return (
     <div className="rounded-lg border border-iron bg-charcoal/80 p-4 mb-6">
-      <div className="flex items-center gap-1">
+      <div className="flex items-center gap-1" role="progressbar" aria-label="Pipeline progress" aria-valuetext={stage}>
         {stages.map((step, i) => {
           const state = getStepState(step.key, stage, failedStage);
           return (
             <div key={step.key} className="flex items-center flex-1 last:flex-none">
               <div className="flex flex-col items-center gap-1.5">
                 <StepIcon state={state} />
-                <span className={`text-[10px] font-mono ${labelColor[state] ?? "text-iron"}`}>
+                <span className={`text-[11px] font-mono ${labelColor[state] ?? "text-slate-text"}`}>
                   {step.label}
                 </span>
               </div>
@@ -79,7 +79,7 @@ function StepIcon({ state }: { state: "completed" | "active" | "pending" | "fail
       );
     case "active":
       return (
-        <div className={`${base} bg-amber/20 border border-amber/40 animate-pulse`}>
+        <div className={`${base} bg-amber/20 border border-amber/40`}>
           <Loader2 className="h-3 w-3 text-amber animate-spin" />
         </div>
       );
