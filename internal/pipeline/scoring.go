@@ -293,7 +293,7 @@ func fetchScoringContext(ctx context.Context, memClient *memory.Client, owner, r
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		repoResults = searchMemoryContent(searchCtx, memClient, "confirmed review patterns conventions common issues", repoTag, 5)
+		repoResults = searchMemoryRich(searchCtx, memClient, "confirmed review patterns conventions common issues", repoTag, 5)
 	}()
 	go func() {
 		defer wg.Done()
@@ -302,7 +302,7 @@ func fetchScoringContext(ctx context.Context, memClient *memory.Client, owner, r
 			for _, fr := range files {
 				paths = append(paths, fr.Path)
 			}
-			fileResults = searchMemoryContent(searchCtx, memClient, filePathsQuery("file synthesis ", paths), repoTag, 3)
+			fileResults = searchMemoryRich(searchCtx, memClient, filePathsQuery("file synthesis ", paths), repoTag, 3)
 		}
 	}()
 	wg.Wait()
