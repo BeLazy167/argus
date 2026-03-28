@@ -499,11 +499,11 @@ Respond with a JSON array of comments:
 [{
   "line": 42,                // line number in new file (required, > 0)
   "start_line": 40,          // start of multi-line range (0 if single-line)
-  "what": "What's happening — explain the issue clearly, use 'we' not 'you'",
-  "why": "Why it matters — concrete impact, what breaks in production, attack scenario if security",
+  "what": "One sentence: what's wrong. Use 'we' not 'you'",
+  "why": "One sentence: concrete impact in production. No arrow chains (→). Plain English",
   "severity": "critical",    // critical | warning | suggestion | praise
   "category": "bug",         // bug | security | performance | error_handling | style | readability | type_design | testing
-  "suggestion": "line1\nline2\nline3" // exact replacement for start_line..line, with REAL newlines (\n), properly indented, omit for praise
+  "suggestion": "line1\nline2\nline3" // ONLY valid code that replaces start_line..line. NEVER prose, comments, or "Replace lines X-Y:" prefixes. Must compile/run if applied. Use real \n for newlines. Match the file's indentation. Omit for praise
 }]
 
 ## Tone
