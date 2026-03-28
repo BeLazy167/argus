@@ -509,13 +509,13 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 					}
 				}
 
-				if score > 0.75 {
+				if score > 0.65 {
 					c.MatchedPatternScore = score
 				}
 				if ruleContent != "" {
 					c.EnforcedRuleContent = ruleContent
 				}
-				if score <= 0.75 && ruleContent == "" {
+				if score <= 0.65 && ruleContent == "" {
 					c.IsNewFinding = true
 				}
 			}(c)
@@ -695,17 +695,22 @@ func buildSynthesisBriefPrompt(run *PipelineRun, score int) string {
 		sb.WriteString(wrapInDelimiters("pr_description", sanitizeUserInput(util.Truncate(run.PREvent.PRBody, 300, false))) + "\n\n")
 	}
 
-	sb.WriteString("Review comments:\n")
+	// Only pass severity counts — NOT individual findings (those are shown per-file)
+	var criticals, warnings, suggestions int
 	for _, fr := range run.FileReviews {
 		for _, c := range fr.Comments {
-			body := c.What
-			if body == "" {
-				body = c.Body
+			switch c.Severity {
+			case SeverityCritical:
+				criticals++
+			case SeverityWarning:
+				warnings++
+			case SeveritySuggestion:
+				suggestions++
 			}
-			sb.WriteString(fmt.Sprintf("- %s:%d [%s·%s] %s\n", fr.Path, c.Line, c.Severity, c.Category, util.Truncate(body, 120, true)))
 		}
 	}
-	sb.WriteString("\nWrite a structured review summary following the system prompt format.")
+	sb.WriteString(fmt.Sprintf("Severity breakdown: %d critical, %d warning, %d suggestion\n", criticals, warnings, suggestions))
+	sb.WriteString("\nWrite a short verdict following the system prompt format. Focus on WHAT the PR does and WHETHER it's ready.")
 	return sb.String()
 }
 
