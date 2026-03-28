@@ -79,8 +79,10 @@ func Run() error {
 	}
 
 	// Recover incomplete pipeline runs (async — don't block server startup)
+	appCtx, appCancel := context.WithCancel(context.Background())
+	defer appCancel()
 	go func() {
-		if err := orchestrator.RecoverIncomplete(context.Background()); err != nil {
+		if err := orchestrator.RecoverIncomplete(appCtx); err != nil {
 			logger.Error("recovering incomplete pipelines", "error", err)
 		}
 	}()
