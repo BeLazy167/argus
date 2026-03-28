@@ -217,15 +217,15 @@ func triageMemoryHints(ctx context.Context, memClient *memory.Client, owner, rep
 	wg.Add(3)
 	go func() {
 		defer wg.Done()
-		repoResults = searchMemoryContent(searchCtx, memClient, query, repoTag, 5)
+		repoResults = searchMemoryRich(searchCtx, memClient, query, repoTag, 5)
 	}()
 	go func() {
 		defer wg.Done()
-		ownerResults = searchMemoryContent(searchCtx, memClient, query, ownerTag, 3)
+		ownerResults = searchMemoryRich(searchCtx, memClient, query, ownerTag, 3)
 	}()
 	go func() {
 		defer wg.Done()
-		ruleResults = searchMemoryContent(searchCtx, memClient, "review rules conventions", rulesTag, 3)
+		ruleResults = searchMemoryRich(searchCtx, memClient, "review rules conventions", rulesTag, 3)
 	}()
 	wg.Wait()
 

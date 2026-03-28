@@ -227,6 +227,37 @@ func searchMemoryContent(ctx context.Context, memClient *memory.Client, query, c
 	return results
 }
 
+// searchMemoryRich searches Supermemory with rerank + includes and returns enriched content.
+// Non-fatal: returns nil on any error.
+func searchMemoryRich(ctx context.Context, memClient *memory.Client, query, containerTag string, limit int) []string {
+	resp, err := memClient.Search(ctx, memory.SearchRequest{
+		Query:        query,
+		ContainerTag: containerTag,
+		SearchMode:   "hybrid",
+		Limit:        limit,
+		Threshold:    0.5,
+		Rerank:       true,
+		Include: &memory.SearchInclude{
+			RelatedMemories: true,
+			Summaries:       true,
+		},
+	})
+	if err != nil {
+		if ctx.Err() == nil {
+			slog.Warn("memory search failed", "error", err, "tag", containerTag)
+		}
+		return nil
+	}
+	results := make([]string, 0, len(resp.Results))
+	for _, r := range resp.Results {
+		content := r.RichContent(2)
+		if content != "" {
+			results = append(results, util.Truncate(content, 500, true))
+		}
+	}
+	return results
+}
+
 // formatMemoryBlock builds a numbered markdown block from memory results.
 // Returns empty string if results is empty.
 func formatMemoryBlock(header, footer string, results []string) string {
@@ -264,16 +295,16 @@ func specialistMemoryBlock(ctx context.Context, memClient *memory.Client, owner,
 	go func() {
 		defer wg.Done()
 		if filePath != "" {
-			synthResults = searchMemoryContent(searchCtx, memClient, "file synthesis "+filePath, repoTag, 2)
+			synthResults = searchMemoryRich(searchCtx, memClient, "file synthesis "+filePath, repoTag, 2)
 		}
 	}()
 	go func() {
 		defer wg.Done()
-		repoResults = searchMemoryContent(searchCtx, memClient, query, repoTag, 3)
+		repoResults = searchMemoryRich(searchCtx, memClient, query, repoTag, 3)
 	}()
 	go func() {
 		defer wg.Done()
-		orgResults = searchMemoryContent(searchCtx, memClient, query, memory.OwnerTag(owner, "patterns"), 3)
+		orgResults = searchMemoryRich(searchCtx, memClient, query, memory.OwnerTag(owner, "patterns"), 3)
 	}()
 	wg.Wait()
 
@@ -333,24 +364,24 @@ func reviewMemoryBlock(ctx context.Context, memClient *memory.Client, owner, rep
 	go func() {
 		defer wg.Done()
 		if filePath != "" {
-			synthResults = searchMemoryContent(searchCtx, memClient, "file synthesis "+filePath, repoPatternTag, 2)
+			synthResults = searchMemoryRich(searchCtx, memClient, "file synthesis "+filePath, repoPatternTag, 2)
 		}
 	}()
 	go func() {
 		defer wg.Done()
-		repoPatterns = searchMemoryContent(searchCtx, memClient, query, repoPatternTag, 3)
+		repoPatterns = searchMemoryRich(searchCtx, memClient, query, repoPatternTag, 3)
 	}()
 	go func() {
 		defer wg.Done()
-		repoReviews = searchMemoryContent(searchCtx, memClient, query, repoReviewTag, 2)
+		repoReviews = searchMemoryRich(searchCtx, memClient, query, repoReviewTag, 2)
 	}()
 	go func() {
 		defer wg.Done()
-		orgPatterns = searchMemoryContent(searchCtx, memClient, query, ownerPatternTag, 2)
+		orgPatterns = searchMemoryRich(searchCtx, memClient, query, ownerPatternTag, 2)
 	}()
 	go func() {
 		defer wg.Done()
-		orgRules = searchMemoryContent(searchCtx, memClient, query, ownerRuleTag, 2)
+		orgRules = searchMemoryRich(searchCtx, memClient, query, ownerRuleTag, 2)
 	}()
 	wg.Wait()
 

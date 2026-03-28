@@ -11,6 +11,27 @@ import (
 	"time"
 )
 
+// SearchInclude controls which extra fields the v4 search API returns.
+type SearchInclude struct {
+	Documents       bool `json:"documents,omitempty"`
+	RelatedMemories bool `json:"relatedMemories,omitempty"`
+	Summaries       bool `json:"summaries,omitempty"`
+}
+
+// RelatedMemory represents a memory related to a search result.
+type RelatedMemory struct {
+	Memory   string `json:"memory"`
+	Relation string `json:"relation"`
+	Version  int    `json:"version"`
+}
+
+// DocumentLink represents a linked document returned by v4 search.
+type DocumentLink struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+	Type  string `json:"type"`
+}
+
 const baseURL = "https://api.supermemory.ai"
 
 // Client wraps the Supermemory REST API for memory storage and retrieval.
@@ -197,6 +218,7 @@ type SearchRequest struct {
 	Rerank       bool           `json:"rerank,omitempty"`
 	RewriteQuery bool           `json:"rewriteQuery,omitempty"`
 	Filters      *SearchFilters `json:"filters,omitempty"`
+	Include      *SearchInclude `json:"include,omitempty"`
 }
 
 // SearchFilters supports AND/OR metadata filtering per Supermemory docs.
@@ -220,10 +242,14 @@ type SearchResponse struct {
 }
 
 type SearchResult struct {
-	ID         string  `json:"id"`
-	Memory     string  `json:"memory,omitempty"`
-	Chunk      string  `json:"chunk,omitempty"`
-	Similarity float64 `json:"similarity"`
+	ID              string          `json:"id"`
+	Memory          string          `json:"memory,omitempty"`
+	Chunk           string          `json:"chunk,omitempty"`
+	Similarity      float64         `json:"similarity"`
+	Metadata        json.RawMessage `json:"metadata,omitempty"`
+	Summary         string          `json:"summary,omitempty"`
+	RelatedMemories []RelatedMemory `json:"relatedMemories,omitempty"`
+	Documents       []DocumentLink  `json:"documents,omitempty"`
 }
 
 // Content returns the best-available text from a search result,
@@ -232,7 +258,28 @@ func (r SearchResult) Content() string {
 	if r.Memory != "" {
 		return r.Memory
 	}
-	return r.Chunk
+	if r.Chunk != "" {
+		return r.Chunk
+	}
+	return ""
+}
+
+// RichContent returns the primary content plus related memories and summary for fuller context.
+func (r SearchResult) RichContent(maxRelated int) string {
+	var sb strings.Builder
+	sb.WriteString(r.Content())
+	if r.Summary != "" {
+		sb.WriteString("\nSummary: ")
+		sb.WriteString(r.Summary)
+	}
+	for i, rm := range r.RelatedMemories {
+		if i >= maxRelated {
+			break
+		}
+		sb.WriteString("\nRelated: ")
+		sb.WriteString(rm.Memory)
+	}
+	return sb.String()
 }
 
 type ListRequest struct {

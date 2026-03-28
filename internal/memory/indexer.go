@@ -111,6 +111,7 @@ func (idx *Indexer) SearchPatternMatch(ctx context.Context, owner, repo, query s
 			SearchMode:   "hybrid",
 			Limit:        1,
 			Threshold:    0.5,
+			Rerank:       true,
 		})
 		if err != nil || len(resp.Results) == 0 {
 			return
@@ -126,6 +127,7 @@ func (idx *Indexer) SearchPatternMatch(ctx context.Context, owner, repo, query s
 			SearchMode:   "hybrid",
 			Limit:        1,
 			Threshold:    0.5,
+			Rerank:       true,
 		})
 		if err != nil || len(resp.Results) == 0 {
 			return
