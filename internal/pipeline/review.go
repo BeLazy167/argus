@@ -499,12 +499,19 @@ Respond with a JSON array of comments:
 [{
   "line": 42,                // line number in new file (required, > 0)
   "start_line": 40,          // start of multi-line range (0 if single-line)
-  "what": "Factual description of the issue — what is wrong or missing",
-  "why": "Impact and consequences — why this matters, what could go wrong",
+  "what": "What's happening — explain the issue clearly, use 'we' not 'you'",
+  "why": "Why it matters — concrete impact, what breaks in production, attack scenario if security",
   "severity": "critical",    // critical | warning | suggestion | praise
   "category": "bug",         // bug | security | performance | error_handling | style | readability | type_design | testing
   "suggestion": "fixed code" // exact replacement for start_line..line (omit for praise)
 }]
+
+## Tone
+- Use "we" not "you" — collaborative, not adversarial ("we should validate" not "you forgot to validate")
+- For critical/warning: state the issue as fact ("This will crash when..." / "This leaks the auth token to...")
+- For suggestion: frame as question ("Could this cause issues when...?" / "Worth checking: does this handle...?")
+- Always explain the concrete failure scenario, not just the label
+- When the code is well-written, file a praise comment acknowledging it
 
 Return [] if changes look good. JSON array only.`)
 	return sb.String()
@@ -650,11 +657,14 @@ Respond ONLY with a JSON array of comments. No other text.
 
 ## Examples
 
-Good comment (file it):
-{"severity":"critical","category":"bug","line":42,"what":"Division by zero when items is empty","why":"arr.length is 0 → avg = total/0 → NaN propagates to billing","suggestion":"Guard: if (!arr.length) return 0;"}
+Good comment (critical — state as fact):
+{"severity":"critical","category":"bug","line":42,"what":"Division by zero when the items array is empty","why":"arr.length is 0 → avg = total/0 → NaN propagates through billing calculations, silently corrupting every downstream value","suggestion":"if (!arr.length) return 0;"}
 
-Good comment (file it):
-{"severity":"warning","category":"security","line":18,"what":"SQL built with string interpolation","why":"User-controlled 'name' param flows directly into query → SQL injection","suggestion":"Use parameterized query: db.query('SELECT * FROM users WHERE name = $1', [name])"}
+Good comment (warning — explain attack scenario):
+{"severity":"warning","category":"security","line":18,"what":"SQL built with string interpolation from user input","why":"An attacker controlling the 'name' param can inject arbitrary SQL — e.g. '; DROP TABLE users;--","suggestion":"db.query('SELECT * FROM users WHERE name = $1', [name])"}
+
+Good comment (praise — acknowledge good code):
+{"severity":"praise","category":"bug","line":15,"what":"Good edge-case handling — the empty-array guard here prevents the NaN propagation we've seen in similar code","why":""}
 
 Bad comment (do NOT file):
 {"severity":"suggestion","category":"style","line":5,"what":"Consider renaming 'x' to 'count'","why":"More descriptive"}
