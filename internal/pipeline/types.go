@@ -246,9 +246,17 @@ func unmarshalLLMArray[T any](content string) ([]T, error) {
 	start := strings.Index(cleaned, "[")
 	end := strings.LastIndex(cleaned, "]")
 	if start >= 0 && end > start {
+		chunk := cleaned[start : end+1]
 		var result []T
-		if err := json.Unmarshal([]byte(cleaned[start:end+1]), &result); err != nil {
-			return nil, fmt.Errorf("parsing JSON from response: %w", err)
+		if err := json.Unmarshal([]byte(chunk), &result); err != nil {
+			// Attempt repair: insert missing commas between }{ or } {
+			repaired := strings.ReplaceAll(chunk, "}\n{", "},\n{")
+			repaired = strings.ReplaceAll(repaired, "} {", "}, {")
+			repaired = strings.ReplaceAll(repaired, "}\t{", "},\t{")
+			if err2 := json.Unmarshal([]byte(repaired), &result); err2 != nil {
+				return nil, fmt.Errorf("parsing JSON from response: %w", err)
+			}
+			return result, nil
 		}
 		return result, nil
 	}
