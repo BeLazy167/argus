@@ -1,5 +1,6 @@
 "use client";
 
+import { useMemo } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -109,7 +110,7 @@ export default function DashboardPage() {
   const { repos, activeId, isLoading: reposLoading } = useActiveRepo();
   const { data: stats, isLoading: statsLoading } = useStats(activeId || undefined);
 
-  const repoMap = new Map(repos.map((r) => [r.id, r]));
+  const repoMap = useMemo(() => new Map(repos?.map((r) => [r.id, r]) ?? []), [repos]);
   const { data: reviews, isLoading: reviewsLoading } = useReviews(activeId, 200);
   const { page, setPage, totalPages, paginated, pageSize, total, hasNext, hasPrev } = usePagination(reviews ?? []);
 

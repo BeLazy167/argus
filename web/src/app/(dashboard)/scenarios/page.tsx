@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { usePagination, PaginationBar } from "@/components/dashboard/pagination";
 import { Shield, Plus, Trash2, Loader2, X, AlertTriangle, ChevronDown } from "lucide-react";
 import { Protect } from "@clerk/nextjs";
@@ -49,6 +49,9 @@ export default function ScenariosPage() {
   const [filesInput, setFilesInput] = useState("");
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
+  const deleteTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+
+  useEffect(() => () => clearTimeout(deleteTimerRef.current), []);
 
   const filtered = useMemo(() => {
     if (!scenarios) return [];
@@ -106,7 +109,8 @@ export default function ScenariosPage() {
       setConfirmDeleteId(null);
     } else {
       setConfirmDeleteId(scenarioId);
-      setTimeout(() => setConfirmDeleteId((prev) => (prev === scenarioId ? null : prev)), 3000);
+      clearTimeout(deleteTimerRef.current);
+      deleteTimerRef.current = setTimeout(() => setConfirmDeleteId(null), 3000);
     }
   };
 
@@ -431,6 +435,8 @@ export default function ScenariosPage() {
                       )}
                     </div>
                     <button
+                      type="button"
+                      aria-label="Delete scenario"
                       onClick={(e) => handleDelete(e, scenario.id)}
                       disabled={deleteScenario.isPending}
                       className={`flex items-center gap-1.5 shrink-0 transition-colors disabled:opacity-50 cursor-pointer ${

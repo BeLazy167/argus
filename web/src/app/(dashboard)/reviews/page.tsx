@@ -200,7 +200,7 @@ export default function ReviewsPage() {
   const [statusFilter, setStatusFilter] = useState("all");
   const [expandedPR, setExpandedPR] = useState<string | null>(null);
 
-  const repoMap = new Map(repos.map((r) => [r.id, r]));
+  const repoMap = useMemo(() => new Map(repos?.map((r) => [r.id, r]) ?? []), [repos]);
 
   const { data: reviews, isLoading: reviewsLoading } = useReviews(
     activeId,

@@ -82,6 +82,11 @@ func Run() error {
 	appCtx, appCancel := context.WithCancel(context.Background())
 	defer appCancel()
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logger.Error("RecoverIncomplete panic", "recover", r)
+			}
+		}()
 		if err := orchestrator.RecoverIncomplete(appCtx); err != nil {
 			logger.Error("recovering incomplete pipelines", "error", err)
 		}
