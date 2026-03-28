@@ -604,26 +604,18 @@ func (o *Orchestrator) synthesize(ctx context.Context, run *PipelineRun) error {
 	return nil
 }
 
-const synthesisBriefSystemPrompt = `You are writing a concise review summary for a pull request.
+const synthesisBriefSystemPrompt = `You are writing a short verdict for a pull request. The per-file findings are shown separately below the summary, so do NOT repeat them.
 
 Format (markdown):
-**Verdict:** [One sentence: what this PR does and whether it's ready to merge]
-
-**Critical issues:**
-- ` + "`file.ts:L42`" + ` — [one-line description]
-
-**Warnings:**
-- ` + "`file.ts:L10`" + ` — [one-line description]
+**Verdict:** [1-2 sentences: what this PR does and whether it's ready to merge. Mention the most important issue if critical.]
 
 Rules:
-- Verdict is ONE sentence. State what the PR does, then whether it needs fixes.
-- List max 3 critical issues and 3 warnings. If more exist, say "(+N more)".
-- Each finding is ONE line: backtick file:line, em dash, description.
-- No greetings, no "hey", no conversational tone.
-- If score >= 8, skip the issues lists and just give the verdict.
-- If no critical issues, omit that section entirely.
-- If no warnings, omit that section entirely.
-- Do NOT include a score or link — those are appended separately.`
+- Maximum 2 sentences. Be direct.
+- If score >= 8, just say what the PR does and that it looks good.
+- If critical issues exist, name the single most important one.
+- Do NOT list individual file findings — those are shown per-file below.
+- Do NOT include a score, link, file count, or comment count — those are shown separately.
+- No greetings, no "hey", no conversational tone.`
 
 // generateConversationalBrief calls the LLM to produce a natural-language summary of the review.
 // Falls back to a deterministic brief on failure.
