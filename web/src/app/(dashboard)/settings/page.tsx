@@ -620,6 +620,36 @@ const PIPELINE_FEATURES = [
     defaultValue: false,
     requiresDeepReview: true,
   },
+  {
+    key: "pr_enrichment",
+    label: "PR Enrichment",
+    description: "Enrich review context with PR metadata, labels, and linked issues.",
+    defaultValue: true,
+  },
+  {
+    key: "learn_patterns",
+    label: "Pattern Learning",
+    description: "Learn recurring code patterns from review feedback to improve future reviews.",
+    defaultValue: true,
+  },
+  {
+    key: "learn_conventions",
+    label: "Convention Learning",
+    description: "Learn team coding conventions from approved PRs and apply them in reviews.",
+    defaultValue: true,
+  },
+  {
+    key: "file_synthesis",
+    label: "File Synthesis",
+    description: "Combine per-file reviews into a unified PR summary with cross-cutting insights.",
+    defaultValue: true,
+  },
+  {
+    key: "architecture_graph",
+    label: "Architecture Graph",
+    description: "Build and maintain a dependency graph from reviewed code for blast radius analysis.",
+    defaultValue: true,
+  },
 ] as const;
 
 function PipelineFeatureCard({

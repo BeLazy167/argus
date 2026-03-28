@@ -71,6 +71,13 @@ func Run() error {
 	orchestrator := pipeline.NewOrchestrator(db.Pool, db, ghClient, reviewStage, triageStage, scoringStage, indexer, registry, eventBus, logger)
 	replyAnalyzer := pipeline.NewReplyAnalyzer(registry, db, ghClient, indexer, logger)
 
+	// Mark stale reviews as failed before resuming incomplete pipelines
+	if count, err := db.RecoverStaleReviews(ctx, 10*time.Minute); err != nil {
+		logger.Warn("failed to recover stale reviews", "error", err)
+	} else if count > 0 {
+		logger.Info("recovered stale reviews", "count", count)
+	}
+
 	// Recover incomplete pipeline runs
 	if err := orchestrator.RecoverIncomplete(ctx); err != nil {
 		logger.Error("recovering incomplete pipelines", "error", err)

@@ -76,6 +76,11 @@ export default function ArchitecturePage() {
 
   return (
     <div className="flex flex-col h-[calc(100vh-4rem)] bg-[#0a0a12]">
+      {/* Page heading */}
+      <div className="px-5 pt-5 pb-2 shrink-0 bg-[#0a0a12]">
+        <h1 className="font-display text-2xl font-bold text-foreground mb-1">Architecture</h1>
+        <p className="text-sm text-slate-text mb-6">Dependency graph extracted from code reviews.</p>
+      </div>
       {/* Minimal header — the graph is the star */}
       <div className="flex items-center gap-3 border-b border-slate-800/50 px-5 py-3 shrink-0 bg-[#0a0a12]">
         <Network className="h-3.5 w-3.5 text-slate-600" />

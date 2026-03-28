@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -802,6 +803,20 @@ func (s *Store) DeletePromptTemplate(ctx context.Context, repoID int64, stage st
 		return fmt.Errorf("prompt template not found for repo %d stage %s", repoID, stage)
 	}
 	return nil
+}
+
+// RecoverStaleReviews marks old in-progress/pending reviews as failed.
+func (s *Store) RecoverStaleReviews(ctx context.Context, maxAge time.Duration) (int64, error) {
+	tag, err := s.Pool.Exec(ctx, `
+		UPDATE reviews SET status = 'failed', error = 'review timed out — server restarted',
+		       completed_at = NOW()
+		WHERE status IN ('pending', 'in_progress')
+		  AND created_at < NOW() - $1::interval
+	`, maxAge.String())
+	if err != nil {
+		return 0, fmt.Errorf("recovering stale reviews: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 func nilIfEmpty(s string) *string {
