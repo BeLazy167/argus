@@ -3008,16 +3008,18 @@ func getDiffContext(run *PipelineRun, path string) string {
 }
 
 // formatCommentBody builds the GitHub review comment body.
-// Structure: emoji severity + category title, then what → why → fix.
+// Structure: emoji severity + category title, then why (impact), then fix.
 func formatCommentBody(c FileComment) string {
 	emoji := severityEmoji(c.Severity)
-	title := fmt.Sprintf("%s **%s:** %s", emoji, capitalizeCategory(string(c.Category)), commentTitle(c))
+	header := fmt.Sprintf("%s **%s:** %s", emoji, capitalizeCategory(string(c.Category)), commentTitle(c))
 
 	var body string
-	if c.What != "" && c.Why != "" {
-		body = title + "\n\n" + c.What + "\n\n" + c.Why
+	if c.Why != "" {
+		body = header + "\n\n" + c.Why
+	} else if c.Body != "" {
+		body = header + "\n\n" + c.Body
 	} else {
-		body = title + "\n\n" + c.Body
+		body = header
 	}
 
 	if c.Suggestion != "" {
