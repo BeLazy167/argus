@@ -925,6 +925,31 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 			submission,
 		)
 	}
+	// Persist review data BEFORE posting to GitHub so a 502 doesn't lose results
+	var tokenUsageJSON []byte
+	if run.Tokens.Total.TotalTokens > 0 {
+		if b, err := json.Marshal(run.Tokens); err != nil {
+			slog.Warn("failed to marshal token usage", "error", err)
+		} else {
+			tokenUsageJSON = b
+		}
+	}
+	persona := strPtrOrNil(string(run.Persona))
+	simResultsJSON, simErr := json.Marshal(run.Synthesis.SimulationResults)
+	if simErr != nil {
+		o.logger.Warn("failed to marshal simulation results", "error", simErr)
+		simResultsJSON = nil
+	}
+	_, dbErr := o.db.Exec(ctx, `
+		UPDATE reviews SET summary = $1, score = $2, token_usage = $3, file_count = $4,
+		       deep_review = $5, persona = $6, is_incremental = $7, simulation_results = $8
+		WHERE id = $9
+	`, run.Synthesis.Summary, run.Synthesis.Score, tokenUsageJSON, len(run.FileReviews),
+		run.DeepReview, persona, run.IsIncremental, simResultsJSON, run.ReviewID)
+	if dbErr != nil {
+		o.logger.Warn("pre-post DB update failed", "error", dbErr)
+	}
+
 	if err != nil {
 		return fmt.Errorf("posting review: %w", err)
 	}
@@ -936,29 +961,11 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		}
 	}
 
-	// Serialize token usage
-	var tokenUsageJSON []byte
-	if run.Tokens.Total.TotalTokens > 0 {
-		if b, err := json.Marshal(run.Tokens); err != nil {
-			slog.Warn("failed to marshal token usage", "error", err)
-		} else {
-			tokenUsageJSON = b
-		}
-	}
-
-	// Update review record
-	persona := strPtrOrNil(string(run.Persona))
-	simResultsJSON, err := json.Marshal(run.Synthesis.SimulationResults)
-	if err != nil {
-		o.logger.Warn("failed to marshal simulation results", "error", err)
-		simResultsJSON = nil
-	}
+	// Mark completed + store github_review_id
 	_, err = o.db.Exec(ctx, `
-		UPDATE reviews SET status = 'completed', github_review_id = $1, summary = $2, score = $3, token_usage = $4, file_count = $5,
-		       deep_review = $6, persona = $7, is_incremental = $8, simulation_results = $9, completed_at = NOW()
-		WHERE id = $10
-	`, ghReviewID, run.Synthesis.Summary, run.Synthesis.Score, tokenUsageJSON, len(run.FileReviews),
-		run.DeepReview, persona, run.IsIncremental, simResultsJSON, run.ReviewID)
+		UPDATE reviews SET status = 'completed', github_review_id = $1, completed_at = NOW()
+		WHERE id = $2
+	`, ghReviewID, run.ReviewID)
 	if err != nil {
 		return fmt.Errorf("updating review record: %w", err)
 	}
