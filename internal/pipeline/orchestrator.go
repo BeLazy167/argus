@@ -607,7 +607,26 @@ func (o *Orchestrator) synthesize(ctx context.Context, run *PipelineRun) error {
 	return nil
 }
 
-const synthesisBriefSystemPrompt = `You are a senior software engineer summarizing a code review. Write naturally and concisely — like a quick Slack message to the PR author. Reference specific files when mentioning issues. 3-6 sentences max. No markdown headers, no bullet lists, no filler. Do NOT include a score or link — those are appended separately.`
+const synthesisBriefSystemPrompt = `You are writing a concise review summary for a pull request.
+
+Format (markdown):
+**Verdict:** [One sentence: what this PR does and whether it's ready to merge]
+
+**Critical issues:**
+- ` + "`file.ts:L42`" + ` — [one-line description]
+
+**Warnings:**
+- ` + "`file.ts:L10`" + ` — [one-line description]
+
+Rules:
+- Verdict is ONE sentence. State what the PR does, then whether it needs fixes.
+- List max 3 critical issues and 3 warnings. If more exist, say "(+N more)".
+- Each finding is ONE line: backtick file:line, em dash, description.
+- No greetings, no "hey", no conversational tone.
+- If score >= 8, skip the issues lists and just give the verdict.
+- If no critical issues, omit that section entirely.
+- If no warnings, omit that section entirely.
+- Do NOT include a score or link — those are appended separately.`
 
 // generateConversationalBrief calls the LLM to produce a natural-language summary of the review.
 // Falls back to a deterministic brief on failure.
@@ -697,7 +716,7 @@ func buildSynthesisBriefPrompt(run *PipelineRun, score int) string {
 			sb.WriteString(fmt.Sprintf("- %s:%d [%s·%s] %s\n", fr.Path, c.Line, c.Severity, c.Category, util.Truncate(body, 120, true)))
 		}
 	}
-	sb.WriteString("\nWrite a brief conversational summary of this review.")
+	sb.WriteString("\nWrite a structured review summary following the system prompt format.")
 	return sb.String()
 }
 
@@ -978,19 +997,21 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	o.indexComments(ctx, run, ghReviewID, owner, repo)
 	o.indexConfirmedPatterns(ctx, run, owner, repo)
 
-	// LLM-based post-review ops run sequentially to avoid rate-limit contention
+	// Post-review ops use detached context — pipeline is done, these are best-effort
+	postCtx := context.WithoutCancel(ctx)
+
 	if run.LearnPatterns {
-		o.autoLearnPatterns(ctx, run, owner, repo)
+		o.autoLearnPatterns(postCtx, run, owner, repo)
 	}
 	if run.LearnConventions {
-		o.extractConventions(ctx, run, owner, repo)
+		o.extractConventions(postCtx, run, owner, repo)
 	}
 	if run.FileSynthesis {
-		o.synthesizeFileMemories(ctx, run, owner, repo)
+		o.synthesizeFileMemories(postCtx, run, owner, repo)
 	}
-	o.indexPRSummary(ctx, run, owner, repo)
+	o.indexPRSummary(postCtx, run, owner, repo)
 	if run.ArchitectureGraph {
-		o.extractArchitectureGraph(ctx, run, owner, repo)
+		o.extractArchitectureGraph(postCtx, run, owner, repo)
 	}
 	if run.PREnrichment {
 		func() {
@@ -999,7 +1020,7 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 					o.logger.Error("enrichPRDescription panic", "recover", r, "pr", run.PREvent.PRNumber)
 				}
 			}()
-			o.enrichPRDescription(ctx, run, owner, repo)
+			o.enrichPRDescription(postCtx, run, owner, repo)
 		}()
 	}
 
@@ -1111,7 +1132,7 @@ func (o *Orchestrator) enrichPRDescription(ctx context.Context, run *PipelineRun
 		Model:       cfg.Model,
 		System:      enrichmentSystemPrompt,
 		Messages:    []llm.Message{{Role: "user", Content: prompt}},
-		MaxTokens:   800,
+		MaxTokens:   500,
 		Temperature: 0.3,
 	})
 	if err != nil {
@@ -1783,7 +1804,7 @@ func (o *Orchestrator) extractArchitectureGraph(ctx context.Context, run *Pipeli
 		}
 	}
 
-	graphCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	graphCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	systemPrompt := `Extract architectural components from code changes for a dependency graph visualization.
@@ -1800,18 +1821,29 @@ Rules:
 - Max 15 nodes per extraction. Quality over quantity.
 - file_path must be the exact path from the diff header.`
 
-	resp, err := provider.Complete(graphCtx, llm.CompletionRequest{
+	req := llm.CompletionRequest{
 		Model:  cfg.Model,
 		System: systemPrompt,
 		Messages: []llm.Message{
 			{Role: "user", Content: prompt.String()},
 		},
-		MaxTokens:   800,
+		MaxTokens:   400,
 		Temperature: 0.2,
-	})
+	}
+
+	resp, err := provider.Complete(graphCtx, req)
 	if err != nil {
-		o.logger.Warn("extractArchitectureGraph LLM failed", "error", err)
-		return
+		if graphCtx.Err() != nil {
+			// Timeout — retry once with fresh context
+			o.logger.Warn("extractArchitectureGraph timeout, retrying", "error", err)
+			retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
+			defer retryCancel()
+			resp, err = provider.Complete(retryCtx, req)
+		}
+		if err != nil {
+			o.logger.Warn("extractArchitectureGraph LLM failed", "error", err)
+			return
+		}
 	}
 	run.Tokens.Graph = StageTokens{
 		PromptTokens:     resp.TokensUsed.PromptTokens,
