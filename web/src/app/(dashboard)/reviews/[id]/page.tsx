@@ -85,7 +85,10 @@ function langFromPath(path: string): string {
  * Keep only the high-level synthesis prose.
  */
 function extractSynthesis(summary: string): string {
-  return summary.replace(/^\n+|\n+$/g, "");
+  return summary
+    .replace(/^#+\s*Argus Review\s*\n*/i, "")
+    .replace(/^Reviewed \d+ files with \d+ comments\.\s*\n*/i, "")
+    .replace(/^\n+|\n+$/g, "");
 }
 
 /* ── Severity Maps ───────────────────────────── */

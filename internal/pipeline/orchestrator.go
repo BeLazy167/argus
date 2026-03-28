@@ -529,13 +529,10 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 
 func (o *Orchestrator) synthesize(ctx context.Context, run *PipelineRun) error {
 	var summary strings.Builder
-	header := "## Argus Review\n\n"
 	verb := "Reviewed"
 	if run.IsIncremental {
-		header = "## Argus Review (Incremental)\n\n"
 		verb = "Re-reviewed"
 	}
-	summary.WriteString(header)
 	summary.WriteString(fmt.Sprintf("%s %d files with %d comments.\n\n", verb, len(run.Diff.Files), countComments(run)))
 
 	for _, fr := range run.FileReviews {
