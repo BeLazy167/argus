@@ -2,10 +2,16 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import { EyeSymbol } from "@/components/marketing/eye-symbol";
 import { AnimatedReview } from "@/components/marketing/animated-review";
 import { GitHubReviewMock } from "@/components/marketing/github-review-mock";
 import { FadeIn } from "@/components/marketing/fade-in";
+
+const ConstellationBackground = dynamic(
+  () => import("@/components/marketing/constellation").then((m) => m.ConstellationBackground),
+  { ssr: false }
+);
 
 /* ── Pipeline Stage ── */
 function PipelineStage({
@@ -223,6 +229,9 @@ export function LandingContent() {
               "radial-gradient(circle, oklch(0.77 0.15 75 / 0.35) 0%, transparent 65%)",
           }}
         />
+
+        {/* 3D constellation background */}
+        <ConstellationBackground />
 
         {/* Scan lines */}
         <div
