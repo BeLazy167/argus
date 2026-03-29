@@ -655,29 +655,24 @@ Format (markdown):
 
 **Verdict:** [1-2 sentences: what this PR does and whether it's ready to merge.]
 
-| | Count | Key files |
-|---|---|---|
-| 🔴 Blockers | N | file1.ts, file2.ts |
-| 🟡 Should fix | N | file3.ts |
-| 💡 Suggestions | N | file4.ts |
-| ✅ Clean | N | file5.ts, file6.ts |
+[severity line — compact inline, only non-zero counts, e.g.:]
+🔴 4 blockers · 🟡 3 should fix · 2 files reviewed
 
-**Top priority:** [Name the single most important root cause to fix first.]
+**Top priority:** [The single most important root cause to fix first.]
 
-**Suggested fix order:**
-1. file.ts — reason (other fixes depend on this)
-2. file2.ts — reason
+**Fix order:** file1.ts → file2.ts → file3.ts
+[One line. Arrow-separated. Dependency order.]
 
-**Architecture:** [1 sentence on structural patterns — what's good, what to watch.]
+**Architecture:** [1 sentence — what's good, what to watch.]
 
 Rules:
-- Populate the table from the findings provided. Count by severity.
-- "Clean" = files with 0 findings or only praise comments.
-- If score >= 8, keep the verdict positive and brief. Omit fix order.
-- If critical issues exist, the Top priority and Suggested fix order are required.
+- Severity line: only include non-zero counts. Never show "0 suggestions" or "0 clean".
+- Do NOT use a markdown table. Use the compact inline format shown above.
+- If score >= 8, keep the verdict positive and brief. Omit fix order and top priority.
+- If critical issues exist, Top priority and Fix order are required.
 - If no critical issues, omit both.
-- Group related findings by ROOT CAUSE in your reasoning, then surface the root cause in Top priority (not individual symptoms).
-- Fix order: list files in dependency order. If fixing file A changes the API that file B uses, list A first.
+- Group related findings by ROOT CAUSE, then surface the root cause in Top priority.
+- Fix order: dependency order. If fixing file A changes the API file B uses, list A first.
 - Do NOT list individual findings — those are inline.
 - Use "we" not "you". Collaborative tone.
 - No greetings, no score, no link, no comment count — those are shown separately.`
