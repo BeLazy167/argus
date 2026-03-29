@@ -17,35 +17,44 @@ Argus is an AI code review platform that doesn't just read your diffs — it und
 
 ## The Review Pipeline
 
-Every PR goes through 6 stages:
+Every PR goes through 9 stages:
 
 ### 01 — Triage
 A fast LLM pass classifies every changed file: **skip** (generated/vendored), **skim** (low-risk), **security_skim**, or **deep** (complex changes needing specialist review).
 
-### 02 — Context Gathering
-Before reviewing, Argus gathers full context:
-- **Cross-file analysis**: traces callers, imports, tests, and shared types for every changed file
-- **Blast radius**: queries the dependency graph to find downstream code affected by the change
-- **Scenario matching**: searches known issues, past bugs, and edge cases relevant to the changed files
-- **Decision traces**: looks up review history — what was flagged before, what developers agreed or dismissed
+### 02 — Lead Brief
+A lead agent gathers cross-file context before reviewing: traces callers, imports, shared types, dependency graph, scenario matches, and decision traces. This brief is shared with all specialists.
 
 ### 03 — Deep Review
 Per-file parallel review with full codebase awareness. For files triaged as "deep," 4 specialist reviewers activate:
 - **Bug Hunter** — logic errors, edge cases, off-by-one
 - **Security** — injection, auth bypass, data exposure
 - **Architecture** — coupling, abstraction leaks, design issues
-- **Regression** — behavior changes that could break existing functionality
+- **Edge Case Hunter** — boundary conditions, unusual inputs, race conditions
 
-### 04 — Scoring & Validation
-A separate model scores each finding (0–100). Comments below the threshold are dropped to reduce noise. Overlapping findings are deduplicated. This is why Argus doesn't spam your PRs.
+### 04 — Deduplication
+Cross-specialist dedup removes duplicate findings. When bug_hunter and security both flag the same line, the best explanation wins. Uses word-overlap clustering to catch near-duplicates.
 
-### 05 — Synthesis
-An LLM generates a conversational summary — like a senior dev giving a quick take on the PR. Not "found X issues," but natural language feedback.
+### 05 — Validation & Simulation
+Each comment is validated against the diff. Blast radius analysis checks downstream impact. Code simulations test known scenarios against the changed code.
 
-### 06 — Post & Learn
-The review is posted with structured inline comments (What happened + Why it matters). Developers react:
-- 👍 to confirm a finding — Argus learns the pattern
-- 👎 to dismiss — Argus learns to avoid similar false positives
+### 06 — Scoring
+A separate model scores each finding (0–100). Comments below the threshold are dropped. Severity is rebalanced — if >50% are critical, lowest-confidence criticals are downgraded.
+
+### 07 — Pass 2
+Hot files (3+ high-scoring findings) get a second review from the Architecture specialist for deeper structural analysis.
+
+### 08 — Synthesis
+An LLM generates a compact summary with severity counts, fix ordering, and root-cause analysis. Conditional diagrams (sequence + data flow) are generated for complex PRs.
+
+### 09 — Post & Learn
+The review is posted as one atomic GitHub review with emoji severity prefixes:
+- 🔴 **Blockers** — must fix before merge
+- 🟡 **Should fix** — important but not blocking
+- 💡 **Suggestions** — nice to have
+- ✅ **Praise** — good code acknowledged
+
+Developers react: 👍 to confirm, 👎 to dismiss. Argus learns from both.
 
 ---
 
@@ -84,35 +93,39 @@ Simulations run on the most critical scenarios first. Only findings above the co
 ## The Conversational Review
 
 ### Summary
-Instead of "Argus found 3 issues," the review summary reads like a senior dev's assessment:
+The review summary gives a senior dev's quick take with severity counts, fix ordering, and root cause:
 
-> Overall this looks solid — clean separation of concerns and good test coverage. Found 3 things worth addressing: The JWT validation in `auth/handler.go` doesn't check token expiry, which could allow expired sessions through. That's the main blocker.
+> **Verdict:** This PR adds auth middleware and session handling. Not ready to merge due to 2 critical blockers.
 >
-> Score: **7/10** · [Full review →](https://argusai.vercel.app/reviews/...)
+> 🔴 2 blockers · 🟡 3 should fix · 5 files reviewed
+>
+> **Top priority:** Token verification in auth.ts doesn't check expiry — expired sessions pass through.
+>
+> **Fix order:** auth.ts → middleware.ts → session.ts
+>
+> Score: **4/10** · [Full review →](https://argusai.vercel.app/reviews/...)
 
 ### Inline Comments
-Every comment has structured What/Why sections:
+Every comment follows: emoji severity + category title, then why it matters:
 
 ```
-[critical · bug] JWT expiry not validated
+🔴 **Security:** Token expiry not validated
 
-What: The verifyToken() function checks the signature but skips
-the exp claim, accepting expired tokens as valid.
-
-Why: An attacker with a stolen expired token could access protected
-endpoints indefinitely. This bypasses session timeout controls.
+verifyToken() checks the signature but skips the exp claim.
+An expired token passes validation, allowing stale sessions
+to access protected endpoints indefinitely.
 ```
 
 ---
 
 ## Severities
 
-| Severity | Description |
-|----------|-------------|
-| **critical** | Bugs, security vulnerabilities, data loss risks that will cause production failures |
-| **warning** | Performance issues, error handling gaps, fragile code that works but could break |
-| **suggestion** | Readability improvements, style consistency, minor refactors |
-| **praise** | Well-written code, good patterns, clever solutions worth highlighting |
+| | Severity | Description |
+|---|----------|-------------|
+| 🔴 | **Blocker** | Will crash, corrupt data, or create a security vulnerability in production. Blocks merge. |
+| 🟡 | **Should fix** | Should fix before merge but won't cause immediate harm. Design smells, missing edge cases, silent failures. |
+| 💡 | **Suggestion** | Nice to have — could improve later. Readability, minor refactors. |
+| ✅ | **Praise** | Good code worth acknowledging. Clean patterns, clever solutions. |
 
 ## Categories
 
@@ -126,6 +139,20 @@ endpoints indefinitely. This bypasses session timeout controls.
 | **style** | Formatting, convention violations, import ordering |
 | **type_design** | Weak type invariants, stringly-typed APIs, poor encapsulation |
 | **testing** | Missing edge case tests, brittle assertions, untested error paths |
+
+---
+
+## PR Diagrams
+
+Argus auto-generates Mermaid diagrams in the PR description for complex PRs:
+
+| Diagram | Triggers when | Shows |
+|---------|---------------|-------|
+| **Sequence** | 3+ changed files | Call flow between modules with bug annotations (⚠️) |
+| **Data Flow** | Security findings or auth/API/input files touched | Untrusted input traced through the system, tainted paths marked |
+| **Dependency** | 10+ changed files | Import relationships between changed files |
+
+Diagrams appear as collapsible `<details>` blocks in the PR description — click to expand. Max 2 diagrams per review.
 
 ---
 
@@ -209,7 +236,7 @@ Comment on any PR to trigger actions:
 | `@argus-eye test --code` | Draft executable test code for findings |
 | `@argus-eye remember <pattern>` | Teach Argus a pattern for this repo |
 | `@argus-eye remember --org <pattern>` | Teach an org-wide pattern |
-| `@argus-eye resolve` | Resolve threads on files changed since review |
+| `@argus-eye resolve` | Resolve threads whose referenced file appears in the latest diff |
 | `@argus-eye fix` | Apply suggestion blocks as a commit |
 | `@argus-eye help` | Show available commands |
 
