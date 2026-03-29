@@ -967,6 +967,14 @@ func (o *Orchestrator) pass2(ctx context.Context, run *PipelineRun) error {
 }
 
 func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
+	// Guard: don't re-post if this review was already posted (stale recovery)
+	var existingReviewID *int64
+	_ = o.db.QueryRow(ctx, `SELECT github_review_id FROM reviews WHERE id = $1`, run.ReviewID).Scan(&existingReviewID)
+	if existingReviewID != nil && *existingReviewID > 0 {
+		o.logger.Warn("skipping post — review already posted", "review_id", run.ReviewID, "github_review_id", *existingReviewID)
+		return nil
+	}
+
 	owner, repo, err := splitRepoFullName(run.PREvent.RepoFullName)
 	if err != nil {
 		return err
