@@ -311,11 +311,11 @@ export function DocsContent() {
         Documentation
       </p>
       <h1 className="font-display text-4xl font-bold text-foreground mb-3">
-        Argus AI Reference
+        Argus Documentation
       </h1>
       <p className="text-sm font-mono text-slate-text mb-16 max-w-xl">
-        What Argus sees, what it remembers, and what it does with that
-        knowledge. Everything from first install to institutional memory.
+        Find the bugs your team missed. Setup, pipeline, memory, commands
+        &mdash; everything you need to get started.
       </p>
 
       <div className="flex gap-12">
