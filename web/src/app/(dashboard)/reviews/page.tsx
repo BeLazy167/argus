@@ -46,6 +46,11 @@ function ReviewRow({
   githubUrl?: string;
 }) {
   const typeBadge = review.is_incremental ? "Inc" : review.deep_review ? "Deep" : "Review";
+  const typeTitle = review.is_incremental
+    ? "Incremental review"
+    : review.deep_review
+      ? "Deep review with 4 specialists"
+      : "Standard review";
   const badgeColor = review.deep_review
     ? "bg-purple-400/10 text-purple-400 border-purple-400/20"
     : review.is_incremental
@@ -56,10 +61,11 @@ function ReviewRow({
     <div className="flex items-center justify-between py-2 group">
       <Link
         href={`/reviews/${review.id}`}
-        className="flex items-center gap-3 flex-1 min-w-0"
+        className="flex items-center gap-3 flex-1 min-w-0 cursor-pointer"
       >
         <span
-          className={`inline-flex items-center rounded-sm border px-2 py-0.5 text-[10px] font-mono uppercase tracking-wider shrink-0 ${badgeColor}`}
+          className={`inline-flex items-center rounded-sm border px-2 py-0.5 text-[11px] font-mono uppercase tracking-wider shrink-0 ${badgeColor}`}
+          title={typeTitle}
         >
           {typeBadge}
         </span>
@@ -133,7 +139,7 @@ function PRAccordionRow({
       <button
         type="button"
         onClick={onToggle}
-        className="flex items-center justify-between w-full py-3 -mx-5 px-5 hover:bg-iron/10 transition-colors text-left"
+        className="flex items-center justify-between w-full py-3 -mx-5 px-5 hover:bg-iron/15 transition-colors text-left cursor-pointer"
       >
         <div className="flex items-center gap-4 min-w-0">
           <ScoreBadge score={group.latestScore} />
@@ -168,7 +174,7 @@ function PRAccordionRow({
 
       {/* Expanded reviews */}
       {expanded && (
-        <div className="ml-8 mr-2 mb-3 border-l-2 border-iron/40 pl-4">
+        <div className="ml-8 mr-2 mb-3 border-l-2 border-iron/40 pl-4 transition-all duration-200 ease-out">
           {group.reviews.map((review) => {
             const url = repoFullName
               ? githubPrUrl(repoFullName, review.pr_number, review.github_review_id)
@@ -194,7 +200,7 @@ export default function ReviewsPage() {
   const [statusFilter, setStatusFilter] = useState("all");
   const [expandedPR, setExpandedPR] = useState<string | null>(null);
 
-  const repoMap = new Map(repos.map((r) => [r.id, r]));
+  const repoMap = useMemo(() => new Map(repos?.map((r) => [r.id, r]) ?? []), [repos]);
 
   const { data: reviews, isLoading: reviewsLoading } = useReviews(
     activeId,
@@ -273,7 +279,9 @@ export default function ReviewsPage() {
             </select>
             <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-text" />
           </div>
-
+          <span className="text-[11px] font-mono text-slate-text">
+            Showing {filtered.length} of {(reviews ?? []).length}
+          </span>
         </div>
       </div>
 

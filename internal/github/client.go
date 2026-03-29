@@ -3,9 +3,12 @@ package github
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
+	"time"
 
 	gh "github.com/google/go-github/v68/github"
 )
@@ -37,10 +40,12 @@ func doGraphQL(ctx context.Context, client *gh.Client, body any, result any) err
 	// BareDo sends the request without reading/closing the body, so we can read it ourselves.
 	// client.Do(ctx, req, nil) reads and closes the body, making subsequent ReadAll fail.
 	resp, err := client.BareDo(ctx, req)
+	if resp != nil && resp.Body != nil {
+		defer resp.Body.Close()
+	}
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return fmt.Errorf("reading graphql response: %w", err)
@@ -77,6 +82,42 @@ func (c *Client) GetPRDiff(ctx context.Context, installationID int64, owner, rep
 	return diff, nil
 }
 
+// GetPRFiles fetches per-file change data for a pull request with pagination.
+func (c *Client) GetPRFiles(ctx context.Context, installationID int64, owner, repo string, prNumber int) ([]*gh.CommitFile, error) {
+	client, err := c.app.ClientForInstallation(installationID)
+	if err != nil {
+		return nil, err
+	}
+
+	var all []*gh.CommitFile
+	opts := &gh.ListOptions{PerPage: 100}
+	for {
+		files, resp, err := client.PullRequests.ListFiles(ctx, owner, repo, prNumber, opts)
+		if err != nil {
+			return nil, fmt.Errorf("listing PR files: %w", err)
+		}
+		all = append(all, files...)
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+	return all, nil
+}
+
+// UpdatePRDescription updates the body of a pull request.
+func (c *Client) UpdatePRDescription(ctx context.Context, installationID int64, owner, repo string, prNumber int, body string) error {
+	client, err := c.app.ClientForInstallation(installationID)
+	if err != nil {
+		return err
+	}
+
+	if _, _, err = client.PullRequests.Edit(ctx, owner, repo, prNumber, &gh.PullRequest{Body: gh.Ptr(body)}); err != nil {
+		return fmt.Errorf("updating PR description: %w", err)
+	}
+	return nil
+}
+
 // GetFileContent fetches the content of a file from a repo at a specific ref.
 func (c *Client) GetFileContent(ctx context.Context, installationID int64, owner, repo, path, ref string) (string, error) {
 	client, err := c.app.ClientForInstallation(installationID)
@@ -99,36 +140,77 @@ func (c *Client) GetFileContent(ctx context.Context, installationID int64, owner
 	return decoded, nil
 }
 
-// PostReview creates a pull request review with inline comments.
+// PostReview creates a pull request review with all inline comments in one atomic API call.
+// Comments must be pre-validated — invalid lines should be folded into the summary body
+// by the caller, not included in the Comments slice.
 func (c *Client) PostReview(ctx context.Context, installationID int64, owner, repo string, prNumber int, review *ReviewSubmission) (int64, error) {
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("creating github client: %w", err)
 	}
 
 	comments := make([]*gh.DraftReviewComment, len(review.Comments))
-	for i, comment := range review.Comments {
+	for i, rc := range review.Comments {
 		comments[i] = &gh.DraftReviewComment{
-			Path: gh.Ptr(comment.Path),
-			Body: gh.Ptr(comment.Body),
-			Line: gh.Ptr(comment.Line),
-			Side: gh.Ptr(comment.Side),
+			Path: gh.Ptr(rc.Path),
+			Body: gh.Ptr(rc.Body),
+			Line: gh.Ptr(rc.Line),
+			Side: gh.Ptr(rc.Side),
 		}
-		if comment.StartLine > 0 {
-			comments[i].StartLine = gh.Ptr(comment.StartLine)
-			comments[i].StartSide = gh.Ptr(comment.Side)
+		if rc.StartLine > 0 {
+			comments[i].StartLine = gh.Ptr(rc.StartLine)
+			comments[i].StartSide = gh.Ptr(rc.Side)
 		}
 	}
 
-	ghReview, _, err := client.PullRequests.CreateReview(ctx, owner, repo, prNumber, &gh.PullRequestReviewRequest{
+	req := &gh.PullRequestReviewRequest{
 		Body:     gh.Ptr(review.Summary),
 		Event:    gh.Ptr("COMMENT"),
 		Comments: comments,
-	})
+	}
+
+	// Single atomic call. Retry once on 5xx (transient GitHub errors).
+	ghReview, _, err := client.PullRequests.CreateReview(ctx, owner, repo, prNumber, req)
+	if err != nil && isRetryable(err) {
+		slog.Warn("review post failed (5xx), retrying", "comments", len(comments), "error", err)
+		time.Sleep(2 * time.Second)
+		ghReview, _, err = client.PullRequests.CreateReview(ctx, owner, repo, prNumber, req)
+	}
+	if err != nil && is422(err) {
+		errStr := err.Error()
+		// Only strip start_line if the 422 is about line resolution, not other validation errors
+		if strings.Contains(errStr, "pull_request_review_thread") || strings.Contains(errStr, "line") || strings.Contains(errStr, "start_line") {
+			slog.Warn("review post failed (422 line resolution), retrying without start_line", "comments", len(comments), "error", err)
+			for i := range comments {
+				comments[i].StartLine = nil
+				comments[i].StartSide = nil
+			}
+			ghReview, _, err = client.PullRequests.CreateReview(ctx, owner, repo, prNumber, req)
+		} else {
+			slog.Warn("review post failed (422 non-line)", "comments", len(comments), "error", err)
+		}
+	}
 	if err != nil {
 		return 0, fmt.Errorf("posting review: %w", err)
 	}
 	return ghReview.GetID(), nil
+}
+
+func isRetryable(err error) bool {
+	var ghErr *gh.ErrorResponse
+	if errors.As(err, &ghErr) {
+		code := ghErr.Response.StatusCode
+		return code == 502 || code == 503 || code == 504
+	}
+	return false
+}
+
+func is422(err error) bool {
+	var ghErr *gh.ErrorResponse
+	if errors.As(err, &ghErr) {
+		return ghErr.Response.StatusCode == 422
+	}
+	return false
 }
 
 // GetCompareCommitsDiff fetches the diff between two commits (for incremental re-review).
@@ -212,6 +294,7 @@ func (c *Client) GetPullRequest(ctx context.Context, installationID int64, owner
 		BaseSHA:        pr.GetBase().GetSHA(),
 		BaseRef:        pr.GetBase().GetRef(),
 		HeadRef:        pr.GetHead().GetRef(),
+		PRBody:         pr.GetBody(),
 	}, nil
 }
 
@@ -599,14 +682,17 @@ func (c *Client) GetRepoTree(ctx context.Context, installationID int64, owner, r
 // ReviewSubmission represents a formatted review ready to post to GitHub.
 type ReviewSubmission struct {
 	Summary  string
+	HeadSHA  string
 	Comments []ReviewComment
 }
 
 // ReviewComment is a single inline comment on a PR.
+// All comments must have valid line numbers within the diff.
+// Invalid-line comments should be folded into the review summary by the caller.
 type ReviewComment struct {
 	Path      string
 	Body      string
 	Line      int
-	StartLine int // 0 if single-line comment
+	StartLine int    // 0 if single-line comment
 	Side      string // "RIGHT" for additions, "LEFT" for deletions
 }

@@ -218,8 +218,9 @@ func parseSimulationResponse(content string, scenario string) (SimulationResult,
 }
 
 // extractJSON finds the first JSON object in a string (handles LLM preamble).
-// Correctly skips braces inside JSON string values.
+// Strips markdown code fences and correctly skips braces inside JSON string values.
 func extractJSON(s string) string {
+	s = stripCodeFences(s)
 	start := strings.Index(s, "{")
 	if start < 0 {
 		return s

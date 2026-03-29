@@ -78,10 +78,11 @@ For every function ask: "What input crashes this? What happens at 3 AM with bad 
 Focus exclusively on:
 - Logic errors, off-by-one, null/undefined dereferences
 - Broken invariants and incorrect boundary checks
-- Race conditions and concurrency bugs
-- Edge cases the author didn't consider
+- Race conditions: shared mutable state in async/concurrent code (e.g. counter++ inside Promise.all, goroutine without mutex)
+- Edge cases the author didn't consider (empty arrays, zero values, max int, unicode)
 - Silent data corruption and wrong return values
 - Type coercion traps and implicit conversions
+- Shallow copy bugs: spread operator on nested objects, JSON.parse(JSON.stringify) losing types
 
 After identifying a potential bug, argue against yourself: is there a guard, validation, or invariant elsewhere that prevents this? Only report if the bug survives your own skepticism.
 
@@ -99,16 +100,17 @@ Ignore style, naming, documentation. Only report real bugs with concrete failure
 Assume every external input is attacker-controlled. Assume every network call will fail or be intercepted.
 
 Focus exclusively on:
-- Injection: SQL, XSS, command, LDAP, template
+- Injection: SQL, XSS, command, LDAP, template injection
 - Hardcoded secrets, API keys, credentials in code
-- Authentication and authorization flaws
+- Authentication and authorization flaws (broken access control, privilege escalation)
 - Input validation gaps at every trust boundary
 - Unsafe deserialization, path traversal, SSRF
-- Cryptographic misuse (weak algos, hardcoded IVs, predictable randomness)
+- Cryptographic misuse (weak algos, hardcoded IVs, predictable randomness like Math.random for tokens)
 - Missing rate limiting on sensitive endpoints
 - Information leakage in error messages
+- ReDoS: unanchored regex with user input, catastrophic backtracking patterns
 
-Before reporting a finding, consider whether this pattern is intentional or has been addressed elsewhere in the codebase.
+Before reporting, consider whether this pattern is intentional or addressed elsewhere in the codebase.
 
 For each finding, describe the specific attack vector: who is the attacker, what input do they control, and what is the impact?
 
@@ -125,12 +127,12 @@ Review from a systems design and reliability perspective.
 Focus exclusively on:
 - Error handling design: swallowed errors, empty catch blocks, missing error propagation
 - Type safety: types that can represent invalid states, missing constraints
-- Resource management: leaks, unclosed handles, missing cleanup
+- Resource management: leaks, unclosed handles, missing cleanup (files, connections, goroutines)
 - Coupling and dependency direction issues
 - API contract problems: backwards compatibility, missing validation
 - Silent failures: async operations that fail without logging
 - Missing timeouts on network calls or database queries
-- Concurrency: missing locks, deadlock-prone patterns
+- Global mutable state that breaks under concurrency
 
 Focus on public APIs and module boundaries. Internal implementation details are lower priority.
 
@@ -141,26 +143,35 @@ Ignore style, naming, minor formatting. Only report architectural and reliabilit
 	case SpecialistRegression:
 		return `
 
-## Role: Regression Reviewer
+## Role: Regression & Edge Case Reviewer
 
-You are hunting for changes that break things that already worked.
+You have two modes depending on whether code is modified or new.
 
-Focus exclusively on:
+### For MODIFIED code (changes to existing functions/classes):
 - Changed function signatures that break existing callers
 - Removed or renamed exported symbols, constants, or types
 - Behavior changes in shared utilities that other code depends on
-- Database migration side effects (column drops, type changes, index removals)
-- Modified error codes, response shapes, or status codes that downstream systems depend on
-- Changed default values or configuration that affect existing deployments
+- Modified error codes, response shapes, or status codes downstream systems depend on
 - Removed validation or authorization checks that were previously enforced
 - Reordered operations that relied on a specific execution sequence
 
-Only report a regression risk if you can name or describe the existing caller, consumer, or test that would break.
+For regressions, explain WHAT previously worked and HOW this change breaks it.
 
-Changed internal behavior that maintains the same external contract is NOT a regression.
+### For NEW code (new files, new functions):
+Hunt for what the author forgot — the gaps that will cause bugs in production:
+- Missing boundary/edge case handling (empty input, zero, negative, max int, NaN, undefined)
+- Missing error paths (what if the network call fails? what if the file doesn't exist?)
+- Missing input validation (unbounded arrays, oversized strings, type coercion)
+- Missing cleanup/disposal (event listeners, timers, connections, file handles)
+- Off-by-one errors in loops, slices, or index math
+- Race conditions or shared mutable state without synchronization
+- Implicit assumptions that aren't enforced (e.g. "array is sorted" but never checked)
 
-For each issue, explain WHAT previously worked and HOW this change breaks it.
-Ignore new code that doesn't modify existing behavior.`
+For edge cases, explain the INPUT that triggers the bug and the CONSEQUENCE.
+
+### Both modes:
+- Cross-file consistency: if two files implement the same concept (e.g. hashing, serialization), flag mismatched implementations
+- Do NOT report style, naming, or formatting issues`
 
 	default:
 		return ""
@@ -177,7 +188,7 @@ func specialistSearchQuery(s Specialist) string {
 	case SpecialistArchitecture:
 		return "architecture patterns error handling conventions coupling"
 	case SpecialistRegression:
-		return "breaking changes API contracts regressions compatibility"
+		return "edge cases boundary conditions missing validation error handling regressions breaking changes"
 	default:
 		return "code review patterns"
 	}
@@ -224,6 +235,37 @@ func searchMemoryContent(ctx context.Context, memClient *memory.Client, query, c
 	return results
 }
 
+// searchMemoryRich searches Supermemory with rerank + includes and returns enriched content.
+// Non-fatal: returns nil on any error.
+func searchMemoryRich(ctx context.Context, memClient *memory.Client, query, containerTag string, limit int) []string {
+	resp, err := memClient.Search(ctx, memory.SearchRequest{
+		Query:        query,
+		ContainerTag: containerTag,
+		SearchMode:   "hybrid",
+		Limit:        limit,
+		Threshold:    0.5,
+		Rerank:       true,
+		Include: &memory.SearchInclude{
+			RelatedMemories: true,
+			Summaries:       true,
+		},
+	})
+	if err != nil {
+		if ctx.Err() == nil {
+			slog.Warn("memory search failed", "error", err, "tag", containerTag)
+		}
+		return nil
+	}
+	results := make([]string, 0, len(resp.Results))
+	for _, r := range resp.Results {
+		content := r.RichContent(2)
+		if content != "" {
+			results = append(results, util.Truncate(content, 500, true))
+		}
+	}
+	return results
+}
+
 // formatMemoryBlock builds a numbered markdown block from memory results.
 // Returns empty string if results is empty.
 func formatMemoryBlock(header, footer string, results []string) string {
@@ -261,16 +303,16 @@ func specialistMemoryBlock(ctx context.Context, memClient *memory.Client, owner,
 	go func() {
 		defer wg.Done()
 		if filePath != "" {
-			synthResults = searchMemoryContent(searchCtx, memClient, "file synthesis "+filePath, repoTag, 2)
+			synthResults = searchMemoryRich(searchCtx, memClient, "file synthesis "+filePath, repoTag, 2)
 		}
 	}()
 	go func() {
 		defer wg.Done()
-		repoResults = searchMemoryContent(searchCtx, memClient, query, repoTag, 3)
+		repoResults = searchMemoryRich(searchCtx, memClient, query, repoTag, 3)
 	}()
 	go func() {
 		defer wg.Done()
-		orgResults = searchMemoryContent(searchCtx, memClient, query, memory.OwnerTag(owner, "patterns"), 3)
+		orgResults = searchMemoryRich(searchCtx, memClient, query, memory.OwnerTag(owner, "patterns"), 3)
 	}()
 	wg.Wait()
 
@@ -301,7 +343,7 @@ func specialistMemoryBlock(ctx context.Context, memClient *memory.Client, owner,
 	if sb.Len() == 0 {
 		return ""
 	}
-	sb.WriteString("\nUse this context to inform your review — issues matching known patterns are higher priority.")
+	sb.WriteString("\nUse this context to inform your review — issues matching known patterns are higher priority.\nWhen a finding matches a known pattern above, add a tag at the end of your comment: *[Matches pattern: <pattern description>]*. Only tag when there is a clear match — do not fabricate references.")
 	return sb.String()
 }
 
@@ -330,24 +372,24 @@ func reviewMemoryBlock(ctx context.Context, memClient *memory.Client, owner, rep
 	go func() {
 		defer wg.Done()
 		if filePath != "" {
-			synthResults = searchMemoryContent(searchCtx, memClient, "file synthesis "+filePath, repoPatternTag, 2)
+			synthResults = searchMemoryRich(searchCtx, memClient, "file synthesis "+filePath, repoPatternTag, 2)
 		}
 	}()
 	go func() {
 		defer wg.Done()
-		repoPatterns = searchMemoryContent(searchCtx, memClient, query, repoPatternTag, 3)
+		repoPatterns = searchMemoryRich(searchCtx, memClient, query, repoPatternTag, 3)
 	}()
 	go func() {
 		defer wg.Done()
-		repoReviews = searchMemoryContent(searchCtx, memClient, query, repoReviewTag, 2)
+		repoReviews = searchMemoryRich(searchCtx, memClient, query, repoReviewTag, 2)
 	}()
 	go func() {
 		defer wg.Done()
-		orgPatterns = searchMemoryContent(searchCtx, memClient, query, ownerPatternTag, 2)
+		orgPatterns = searchMemoryRich(searchCtx, memClient, query, ownerPatternTag, 2)
 	}()
 	go func() {
 		defer wg.Done()
-		orgRules = searchMemoryContent(searchCtx, memClient, query, ownerRuleTag, 2)
+		orgRules = searchMemoryRich(searchCtx, memClient, query, ownerRuleTag, 2)
 	}()
 	wg.Wait()
 
@@ -385,6 +427,6 @@ func reviewMemoryBlock(ctx context.Context, memClient *memory.Client, owner, rep
 	if sb.Len() == 0 {
 		return ""
 	}
-	sb.WriteString("\nApply these patterns and past findings when reviewing. Reference specific past learnings in your comments when relevant (e.g., 'This contradicts the established pattern of...').\n")
+	sb.WriteString("\nApply these patterns and past findings when reviewing. When a finding matches a known pattern above, add a tag at the end of your comment: *[Matches pattern: <pattern description>]*. Only tag when there is a clear match — do not fabricate references.\n")
 	return sb.String()
 }

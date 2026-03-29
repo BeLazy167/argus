@@ -87,7 +87,7 @@ func indexFileSet(ctx context.Context, st *store.Store, ghClient *ghpkg.Client, 
 
 	for _, res := range results {
 		for _, sym := range res.symbols {
-			id, err := st.UpsertCodeNode(ctx, repoDBID, sym.Kind, sym.Name, sym.FilePath, sym.LineStart, sym.LineEnd, lang(sym.FilePath))
+			id, err := st.UpsertCodeNode(ctx, repoDBID, sym.Kind, sym.Name, sym.FilePath, sym.LineStart, sym.LineEnd, lang(sym.FilePath), 0)
 			if err != nil {
 				slog.Warn("graph: upsert node failed", "name", sym.Name, "error", err)
 				continue

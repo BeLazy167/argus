@@ -38,11 +38,16 @@ const (
 
 // RunTokenUsage tracks token consumption and cost across pipeline stages.
 type RunTokenUsage struct {
-	Triage    StageTokens   `json:"triage"`
-	Review    []StageTokens `json:"review"`
-	Scoring   StageTokens   `json:"scoring,omitempty"`
-	Synthesis StageTokens   `json:"synthesis,omitempty"`
-	Total     StageTokens   `json:"total"`
+	Triage        StageTokens   `json:"triage"`
+	Review        []StageTokens `json:"review"`
+	Scoring       StageTokens   `json:"scoring,omitempty"`
+	Synthesis     StageTokens   `json:"synthesis,omitempty"`
+	Enrichment    StageTokens   `json:"enrichment,omitempty"`
+	Conventions   StageTokens   `json:"conventions,omitempty"`
+	Patterns      StageTokens   `json:"patterns,omitempty"`
+	FileSynthesis []StageTokens `json:"file_synthesis,omitempty"`
+	Graph         StageTokens   `json:"graph,omitempty"`
+	Total         StageTokens   `json:"total"`
 }
 
 // StageTokens holds token counts and cost for a single LLM call or stage aggregate.
@@ -51,6 +56,8 @@ type StageTokens struct {
 	CompletionTokens int     `json:"completion_tokens"`
 	TotalTokens      int     `json:"total_tokens"`
 	Cost             float64 `json:"cost"`
+	Model            string  `json:"model,omitempty"`
+	Provider         string  `json:"provider,omitempty"`
 	File             string  `json:"file,omitempty"`
 }
 
@@ -76,6 +83,13 @@ type PipelineRun struct {
 	BlastRadius         bool
 	ScenarioMemory      bool
 	CodeSimulation      bool
+	PREnrichment      bool
+	LearnPatterns     bool
+	LearnConventions  bool
+	FileSynthesis     bool
+	ArchitectureGraph bool
+	LeadBrief        *LeadBrief `json:"lead_brief,omitempty"`
+	LeadAgentError   string     `json:"lead_agent_error,omitempty"`
 	ScoringSkipped   bool // true when scoring provider unavailable — synthesis uses all comments
 	Prompts          map[string]string // custom prompt overrides per stage
 	IsIncremental    bool
@@ -85,6 +99,71 @@ type PipelineRun struct {
 	Error            string
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
+}
+
+// LeadBrief is the output of the Lead Agent's briefing phase.
+// Stored as a flat array — each item is either a file brief or a cross-cutting concern.
+type LeadBrief struct {
+	Items []BriefItem `json:"items"`
+}
+
+// BriefItem is a single element in the lead brief array.
+// Either a file brief (File non-empty) or a cross-cutting concern (CrossCutting non-empty).
+type BriefItem struct {
+	File         string `json:"file,omitempty"`
+	Summary      string `json:"summary,omitempty"`
+	Bug          string `json:"bug,omitempty"`
+	Security     string `json:"security,omitempty"`
+	Arch         string `json:"arch,omitempty"`
+	Regression   string `json:"regression,omitempty"`
+	CrossCutting string `json:"cross_cutting,omitempty"`
+}
+
+// FileBrief returns the brief for a specific file, or nil if not found.
+func (b *LeadBrief) FileBrief(path string) *BriefItem {
+	for i := range b.Items {
+		if b.Items[i].File == path {
+			return &b.Items[i]
+		}
+	}
+	return nil
+}
+
+// CrossCuttingConcerns returns all cross-cutting items from the brief.
+func (b *LeadBrief) CrossCuttingConcerns() []string {
+	var cc []string
+	for _, item := range b.Items {
+		if item.CrossCutting != "" {
+			cc = append(cc, item.CrossCutting)
+		}
+	}
+	return cc
+}
+
+// CrossAgentSignal represents a finding from one agent that another should investigate.
+type CrossAgentSignal struct {
+	FromAgent    string   `json:"from_agent"`
+	ToAgent      string   `json:"to_agent"`
+	Signal       string   `json:"signal"`
+	Question     string   `json:"question"`
+	FilesToCheck []string `json:"files_to_check"`
+}
+
+// BlastRadiusImpact represents a concrete breaking change found by the blast radius agent.
+type BlastRadiusImpact struct {
+	DependentFile      string `json:"dependent_file"`
+	DependentSymbol    string `json:"dependent_symbol"`
+	AssumptionViolated string `json:"assumption_violated"`
+	FailureMode        string `json:"failure_mode"`
+	Severity           string `json:"severity"`
+}
+
+// AgentResult is the unified output from any agent in the team.
+type AgentResult struct {
+	AgentName    string
+	FileReviews  []FileReview
+	SimResults   []SimulationResult
+	BlastImpacts []BlastRadiusImpact
 }
 
 // FileReview holds the review output for a single file.
@@ -108,8 +187,10 @@ type FileComment struct {
 	Score               int        `json:"score"`
 	MatchedPatternID    int64      `json:"-"`
 	MatchedPatternScore float64    `json:"-"`
+	BlastRadius         int        `json:"blast_radius,omitempty"` // number of downstream dependents affected
 	EnforcedRuleContent string     `json:"-"`
 	IsNewFinding        bool       `json:"-"`
+	DedupCount          int        `json:"dedup_count,omitempty"` // how many duplicate findings were merged into this one
 }
 
 // ValidSeverities is the set of valid severity values.
@@ -165,9 +246,17 @@ func unmarshalLLMArray[T any](content string) ([]T, error) {
 	start := strings.Index(cleaned, "[")
 	end := strings.LastIndex(cleaned, "]")
 	if start >= 0 && end > start {
+		chunk := cleaned[start : end+1]
 		var result []T
-		if err := json.Unmarshal([]byte(cleaned[start:end+1]), &result); err != nil {
-			return nil, fmt.Errorf("parsing JSON from response: %w", err)
+		if err := json.Unmarshal([]byte(chunk), &result); err != nil {
+			// Attempt repair: insert missing commas between }{ or } {
+			repaired := strings.ReplaceAll(chunk, "}\n{", "},\n{")
+			repaired = strings.ReplaceAll(repaired, "} {", "}, {")
+			repaired = strings.ReplaceAll(repaired, "}\t{", "},\t{")
+			if err2 := json.Unmarshal([]byte(repaired), &result); err2 != nil {
+				return nil, fmt.Errorf("parsing JSON from response: %w", err)
+			}
+			return result, nil
 		}
 		return result, nil
 	}

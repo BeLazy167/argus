@@ -4,29 +4,42 @@ package pipeline
 type PipelineState string
 
 const (
-	StatePending      PipelineState = "pending"
-	StateTriaging     PipelineState = "triaging"
-	StateReviewing    PipelineState = "reviewing"
-	StateEnriching    PipelineState = "enriching"
-	StateScoring      PipelineState = "scoring"
-	StatePass2        PipelineState = "pass2"
-	StateSynthesizing PipelineState = "synthesizing"
-	StatePosting      PipelineState = "posting"
-	StateCompleted    PipelineState = "completed"
-	StateFailed       PipelineState = "failed"
+	StatePending       PipelineState = "pending"
+	StateTriaging      PipelineState = "triaging"
+	StateBriefing      PipelineState = "briefing"
+	StateReviewing     PipelineState = "reviewing"
+	StateDeduping      PipelineState = "deduping"
+	StateValidating    PipelineState = "validating"
+	StateScoring       PipelineState = "scoring"
+	StatePass2         PipelineState = "pass2"
+	StateSynthesizing  PipelineState = "synthesizing"
+	StatePosting       PipelineState = "posting"
+	StateCompleted     PipelineState = "completed"
+	StateFailed        PipelineState = "failed"
+
+	// Deprecated: kept for in-flight migration
+	StateEnriching     PipelineState = "enriching"
+	StateBroadcasting  PipelineState = "broadcasting"
+	StateCrossChecking PipelineState = "cross_checking"
 )
 
 // transitions defines the valid next state after each stage succeeds.
 func transitions() map[PipelineState]PipelineState {
 	return map[PipelineState]PipelineState{
 		StatePending:      StateTriaging,
-		StateTriaging:     StateReviewing,
-		StateReviewing:    StateEnriching,
-		StateEnriching:    StateScoring,
+		StateTriaging:     StateBriefing,
+		StateBriefing:     StateReviewing,
+		StateReviewing:    StateDeduping,
+		StateDeduping:     StateValidating,
+		StateValidating:   StateScoring,
 		StateScoring:      StatePass2,
 		StatePass2:        StateSynthesizing,
 		StateSynthesizing: StatePosting,
 		StatePosting:      StateCompleted,
+		// Migration from old pipeline
+		StateEnriching:     StateValidating,
+		StateBroadcasting:  StateDeduping,
+		StateCrossChecking: StateScoring,
 	}
 }
 

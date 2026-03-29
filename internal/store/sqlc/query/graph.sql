@@ -1,8 +1,8 @@
 -- name: UpsertCodeNode :one
-INSERT INTO code_nodes (repo_id, kind, name, file_path, line_start, line_end, language, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+INSERT INTO code_nodes (repo_id, kind, name, file_path, line_start, line_end, language, pr_number, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
 ON CONFLICT (repo_id, file_path, kind, name)
-DO UPDATE SET line_start = $5, line_end = $6, language = $7, updated_at = NOW()
+DO UPDATE SET line_start = $5, line_end = $6, language = $7, pr_number = $8, updated_at = NOW()
 RETURNING id;
 
 -- name: UpsertCodeEdge :exec
@@ -12,6 +12,24 @@ ON CONFLICT (repo_id, source_id, target_id, kind) DO NOTHING;
 
 -- name: DeleteNodesByFile :exec
 DELETE FROM code_nodes WHERE repo_id = $1 AND file_path = $2;
+
+-- name: ListGraphNodes :many
+SELECT id, repo_id, kind, name, file_path, line_start, line_end, language, pr_number, is_merged
+FROM code_nodes WHERE repo_id = $1 ORDER BY file_path, name;
+
+-- name: ListGraphEdges :many
+SELECT ce.id, ce.repo_id, ce.source_id, ce.target_id, ce.kind,
+       sn.name as source_name, tn.name as target_name
+FROM code_edges ce
+JOIN code_nodes sn ON sn.id = ce.source_id
+JOIN code_nodes tn ON tn.id = ce.target_id
+WHERE ce.repo_id = $1;
+
+-- name: MarkNodesMerged :exec
+UPDATE code_nodes SET is_merged = true WHERE repo_id = $1 AND pr_number = $2;
+
+-- name: DeleteUnmergedNodesByPR :exec
+DELETE FROM code_nodes WHERE repo_id = $1 AND pr_number = $2 AND is_merged = false;
 
 -- name: GetBlastRadius :many
 WITH RECURSIVE affected AS (

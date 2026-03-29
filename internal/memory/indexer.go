@@ -111,6 +111,7 @@ func (idx *Indexer) SearchPatternMatch(ctx context.Context, owner, repo, query s
 			SearchMode:   "hybrid",
 			Limit:        1,
 			Threshold:    0.5,
+			Rerank:       true,
 		})
 		if err != nil || len(resp.Results) == 0 {
 			return
@@ -126,6 +127,7 @@ func (idx *Indexer) SearchPatternMatch(ctx context.Context, owner, repo, query s
 			SearchMode:   "hybrid",
 			Limit:        1,
 			Threshold:    0.5,
+			Rerank:       true,
 		})
 		if err != nil || len(resp.Results) == 0 {
 			return
@@ -235,7 +237,7 @@ func (idx *Indexer) IndexReviewComment(ctx context.Context, owner, repo string, 
 		return fmt.Errorf("indexing review comment: %w", err)
 	}
 
-	idx.logger.Debug("indexed review comment", "owner", owner, "repo", repo, "file", comment.FilePath)
+	idx.logger.Info("indexed review comment", "owner", owner, "repo", repo, "file", comment.FilePath)
 	return nil
 }
 
@@ -293,7 +295,7 @@ func (idx *Indexer) IndexRepoPattern(ctx context.Context, owner, repo, content, 
 	if err != nil {
 		return nil, fmt.Errorf("indexing repo pattern: %w", err)
 	}
-	idx.logger.Debug("indexed repo pattern (v3 upsert)", "owner", owner, "repo", repo)
+	idx.logger.Info("indexed repo pattern (v3 upsert)", "owner", owner, "repo", repo)
 	return resp, nil
 }
 
@@ -313,7 +315,7 @@ func (idx *Indexer) IndexOwnerPattern(ctx context.Context, owner, content, custo
 	if err != nil {
 		return nil, fmt.Errorf("indexing owner pattern: %w", err)
 	}
-	idx.logger.Debug("indexed owner pattern (v3 upsert)", "owner", owner)
+	idx.logger.Info("indexed owner pattern (v3 upsert)", "owner", owner)
 	return resp, nil
 }
 
@@ -329,7 +331,7 @@ func (idx *Indexer) indexImmediate(ctx context.Context, tag, content string, met
 	if err != nil {
 		return nil, fmt.Errorf("indexing %s (v4): %w", kind, err)
 	}
-	idx.logger.Debug("indexed "+kind+" (v4 immediate)", "owner", owner, "repo", repo)
+	idx.logger.Info("indexed "+kind+" (v4 immediate)", "owner", owner, "repo", repo)
 	return &AddResponse{ID: resp.DocumentID, Status: "created"}, nil
 }
 
@@ -349,7 +351,10 @@ func (idx *Indexer) IndexRepoTopology(ctx context.Context, owner, content string
 		ContainerTags: []string{OwnerTag(owner, "patterns")},
 		Metadata:      map[string]string{"type": "topology"},
 	})
-	return err
+	if err != nil {
+		return fmt.Errorf("indexing repo topology: %w", err)
+	}
+	return nil
 }
 
 
@@ -410,7 +415,7 @@ func (idx *Indexer) IndexFeedbackSignal(ctx context.Context, owner, repo string,
 	if err != nil {
 		return fmt.Errorf("indexing feedback signal: %w", err)
 	}
-	idx.logger.Debug("indexed feedback signal", "action", feedback.Action, "owner", owner, "repo", repo, "file", feedback.FilePath)
+	idx.logger.Info("indexed feedback signal", "action", feedback.Action, "owner", owner, "repo", repo, "file", feedback.FilePath)
 	return nil
 }
 
@@ -437,7 +442,7 @@ func (idx *Indexer) IndexScenario(ctx context.Context, owner, repo string, scena
 	})
 	if err != nil {
 		idx.logger.Warn("indexing scenario in supermemory", "error", err)
-		return err
+		return fmt.Errorf("indexing scenario: %w", err)
 	}
 	return nil
 }
@@ -460,7 +465,7 @@ func (idx *Indexer) IndexDecisionTrace(ctx context.Context, owner, repo, filePat
 	})
 	if err != nil {
 		idx.logger.Warn("indexing trace in supermemory", "error", err)
-		return err
+		return fmt.Errorf("indexing decision trace: %w", err)
 	}
 	return nil
 }
@@ -580,7 +585,10 @@ func (idx *Indexer) IndexSimulationResult(ctx context.Context, owner, repo strin
 			},
 		}},
 	})
-	return err
+	if err != nil {
+		return fmt.Errorf("indexing simulation result: %w", err)
+	}
+	return nil
 }
 
 // SearchTraces performs semantic search over decision traces with reranking.

@@ -3,13 +3,14 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"nhooyr.io/websocket"
+	"nhooyr.io/websocket/wsjson"
 
 	"github.com/BeLazy167/argus/internal/pipeline"
 )
@@ -88,7 +89,7 @@ func (s *Server) retryReview(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "only failed reviews can be retried"})
 		return
 	}
-	if err := s.store.UpdateReviewStatus(r.Context(), id, "pending", ""); err != nil {
+	if err := s.store.UpdateReviewStatus(r.Context(), id, "pending", "", nil); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "update failed"})
 		return
 	}
@@ -102,98 +103,119 @@ func (s *Server) retryReview(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "retrying", "review_id": id.String()})
 }
 
-// --- SSE Stream ---
+// --- WebSocket Stream ---
 
-func (s *Server) streamReview(w http.ResponseWriter, r *http.Request) {
+func (s *Server) streamReviewWS(w http.ResponseWriter, r *http.Request) {
+	// Auth via query params (browser WebSocket API can't set headers)
+	token := r.URL.Query().Get("token")
+	installationHint := r.URL.Query().Get("installation_id")
+	if token == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "missing token"})
+		return
+	}
+	claims, err := validateToken(token)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+		return
+	}
+	ids, err := s.resolveInstallationIDs(r.Context(), claims, installationHint)
+	if err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		return
+	}
+
 	id, err := uuid.Parse(chi.URLParam(r, "reviewID"))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid review id"})
 		return
 	}
 
-	// Auth: verify review belongs to caller's installation scope
 	review, err := s.store.GetReview(r.Context(), id)
 	if err != nil {
 		s.handleDBError(w, err, "review not found")
 		return
 	}
-	if _, err := s.store.GetRepoScoped(r.Context(), review.RepoID, getInstallationIDs(r.Context())); err != nil {
+	if _, err := s.store.GetRepoScoped(r.Context(), review.RepoID, ids); err != nil {
 		s.handleDBError(w, err, "review not found")
 		return
 	}
 
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "streaming not supported"})
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+		InsecureSkipVerify: true, // CORS handled by chi middleware
+	})
+	if err != nil {
+		s.logger.Warn("websocket accept failed", "error", err)
 		return
 	}
+	defer conn.CloseNow()
 
-	// If review is terminal, send final event and return
+	ctx := conn.CloseRead(r.Context())
+
+	// Terminal state: send final event and close
 	if review.Status == "completed" || review.Status == "failed" {
-		setSSEHeaders(w)
 		evtType := pipeline.EventCompleted
 		if review.Status == "failed" {
 			evtType = pipeline.EventError
 		}
-		writeSSE(w, pipeline.Event{
+		_ = wsjson.Write(ctx, conn, pipeline.Event{
 			Type:      evtType,
 			Timestamp: time.Now(),
 			Data:      mustMarshal(map[string]string{"status": review.Status}),
 		})
-		flusher.Flush()
+		conn.Close(websocket.StatusNormalClosure, "review already "+review.Status)
 		return
 	}
 
-	// Subscribe to live events
 	if s.eventBus == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "streaming not available"})
+		conn.Close(websocket.StatusInternalError, "streaming not available")
 		return
 	}
 
 	events, history, unsub := s.eventBus.Subscribe(id)
 	if events == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no active stream for this review"})
+		conn.Close(websocket.StatusNormalClosure, "no active stream")
 		return
 	}
 	defer unsub()
 
-	setSSEHeaders(w)
+	// Keepalive: ping every 30s to prevent Fly proxy timeout
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := conn.Ping(ctx); err != nil {
+					return
+				}
+			}
+		}
+	}()
 
 	// Replay history
 	for _, evt := range history {
-		if err := writeSSE(w, evt); err != nil {
+		if err := wsjson.Write(ctx, conn, evt); err != nil {
 			return
 		}
 	}
-	flusher.Flush()
 
 	// Stream live events
 	for {
 		select {
-		case <-r.Context().Done():
+		case <-ctx.Done():
 			return
 		case evt, ok := <-events:
 			if !ok {
-				return // topic closed
-			}
-			if err := writeSSE(w, evt); err != nil {
+				conn.Close(websocket.StatusNormalClosure, "stream ended")
 				return
 			}
-			flusher.Flush()
+			if err := wsjson.Write(ctx, conn, evt); err != nil {
+				return
+			}
 		}
 	}
-}
-
-func setSSEHeaders(w http.ResponseWriter) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-}
-
-func writeSSE(w http.ResponseWriter, evt pipeline.Event) error {
-	_, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", evt.Type, evt.Data)
-	return err
 }
 
 func mustMarshal(v any) json.RawMessage {

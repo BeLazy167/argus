@@ -10,6 +10,7 @@ import {
   Brain,
   Shield,
   Activity,
+  Network,
   Settings,
   Users,
   Key,
@@ -44,6 +45,7 @@ const repoNavItems = [
   { href: "/patterns", label: "Patterns", icon: Brain },
   { href: "/scenarios", label: "Scenarios", icon: Shield },
   { href: "/insights", label: "Insights", icon: Activity },
+  { href: "/architecture", label: "Architecture", icon: Network },
 ];
 
 const settingsNavItems = [

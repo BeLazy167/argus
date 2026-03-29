@@ -44,6 +44,25 @@ func (s *Server) getPatternStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, stats)
 }
 
+func (s *Server) getPattern(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "patternID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid pattern id"})
+		return
+	}
+	pattern, err := s.store.GetPattern(r.Context(), id)
+	if err != nil {
+		s.handleDBError(w, err, "pattern not found")
+		return
+	}
+	ids := getInstallationIDs(r.Context())
+	if !containsID(ids, pattern.InstallationID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "access denied"})
+		return
+	}
+	writeJSON(w, http.StatusOK, pattern)
+}
+
 func (s *Server) createPattern(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		InstallationID int64  `json:"installation_id"`

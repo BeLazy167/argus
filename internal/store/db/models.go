@@ -38,6 +38,8 @@ type CodeNode struct {
 	LineEnd   *int32             `json:"line_end"`
 	Language  *string            `json:"language"`
 	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
+	PrNumber  *int32             `json:"pr_number"`
+	IsMerged  bool               `json:"is_merged"`
 }
 
 type CommentOutcome struct {
@@ -168,6 +170,8 @@ type Review struct {
 	ResolvedStaleCount *int32             `json:"resolved_stale_count"`
 	HeadRef            *string            `json:"head_ref"`
 	SimulationResults  []byte             `json:"simulation_results"`
+	Diagram            *string            `json:"diagram"`
+	DiagramTitle       *string            `json:"diagram_title"`
 }
 
 type ReviewComment struct {

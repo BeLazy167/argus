@@ -69,6 +69,19 @@ func (s *Store) ListScenariosForRepo(ctx context.Context, repoID int64, limit in
 	return collectOrEmpty(rows, pgx.RowToStructByPos[Scenario])
 }
 
+func (s *Store) GetScenario(ctx context.Context, id int64) (*Scenario, error) {
+	rows, err := s.Pool.Query(ctx, `SELECT `+scenarioCols+` FROM scenarios WHERE id = $1`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	sc, err := pgx.CollectOneRow(rows, pgx.RowToStructByPos[Scenario])
+	if err != nil {
+		return nil, err
+	}
+	return &sc, nil
+}
+
 // DeactivateScenario soft-deletes a scenario by setting active = false.
 func (s *Store) DeactivateScenario(ctx context.Context, id int64) error {
 	_, err := s.Pool.Exec(ctx, `UPDATE scenarios SET active = FALSE WHERE id = $1`, id)

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/BeLazy167/argus/internal/store"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -14,14 +15,16 @@ import (
 // StateMachine drives a PipelineRun through stages, persisting state to Postgres.
 type StateMachine struct {
 	db       *pgxpool.Pool
+	st       *store.Store
 	stages   map[PipelineState]StageFunc
 	eventBus *EventBus
 	logger   *slog.Logger
 }
 
-func NewStateMachine(db *pgxpool.Pool, logger *slog.Logger) *StateMachine {
+func NewStateMachine(db *pgxpool.Pool, st *store.Store, logger *slog.Logger) *StateMachine {
 	return &StateMachine{
 		db:     db,
+		st:     st,
 		stages: make(map[PipelineState]StageFunc),
 		logger: logger,
 	}
@@ -70,6 +73,13 @@ func (sm *StateMachine) Run(ctx context.Context, run *PipelineRun) error {
 			if persistErr := sm.persistState(ctx, run); persistErr != nil {
 				sm.logger.Error("failed to persist failure state", "error", persistErr, "review_id", run.ReviewID)
 			}
+			var tokenUsage []byte
+			if run.Tokens.Total.TotalTokens > 0 {
+				tokenUsage, _ = json.Marshal(run.Tokens)
+			}
+			if persistErr := sm.st.UpdateReviewStatus(ctx, run.ReviewID, string(StateFailed), run.Error, tokenUsage); persistErr != nil {
+				sm.logger.Error("failed to update review status on failure", "error", persistErr, "review_id", run.ReviewID)
+			}
 			return fmt.Errorf("stage %s failed: %w", failedState, err)
 		}
 
@@ -114,7 +124,7 @@ func publishError(run *PipelineRun, failedStage PipelineState, err error) {
 // Triage is fast -- just re-run on recovery. Everything after review is persisted.
 func shouldPersist(state PipelineState) bool {
 	switch state {
-	case StateReviewing, StateEnriching, StateScoring, StatePass2, StateSynthesizing, StatePosting, StateCompleted, StateFailed:
+	case StateReviewing, StateBriefing, StateDeduping, StateValidating, StateScoring, StateBroadcasting, StateCrossChecking, StatePass2, StateSynthesizing, StatePosting, StateCompleted, StateFailed:
 		return true
 	}
 	return false
@@ -149,7 +159,10 @@ func (sm *StateMachine) persistState(ctx context.Context, run *PipelineRun) erro
 			error = EXCLUDED.error,
 			updated_at = NOW()
 	`, run.ID, run.ReviewID, run.State, payload, run.Error)
-	return err
+	if err != nil {
+		return fmt.Errorf("upserting pipeline_states: %w", err)
+	}
+	return nil
 }
 
 func (sm *StateMachine) loadState(ctx context.Context, runID uuid.UUID) (*PipelineRun, error) {

@@ -25,7 +25,7 @@ function PipelineStage({
       {/* Dot + connecting line */}
       <div className="flex flex-col items-center shrink-0">
         <div
-          className={`relative h-3 w-3 rounded-full border-2 transition-all duration-700 ${
+          className={`relative h-3 w-3 rounded-full border-2 transition-[background-color,border-color,box-shadow] duration-500 ${
             isActive
               ? "border-amber bg-amber shadow-[0_0_12px_oklch(0.77_0.15_75/0.6)]"
               : isComplete
@@ -41,7 +41,7 @@ function PipelineStage({
 
       {/* Content */}
       <div
-        className={`transition-all duration-500 ${
+        className={`transition-opacity duration-400 ${
           isActive || isComplete ? "opacity-100" : "opacity-30"
         }`}
       >
@@ -251,7 +251,7 @@ export function LandingContent() {
           <div className="flex flex-col sm:flex-row gap-4 mb-16">
             <Link
               href="/sign-up"
-              className="group inline-flex h-11 items-center rounded-md bg-amber px-8 text-sm font-mono font-medium text-void transition-all hover:brightness-110 hover:shadow-[0_0_24px_-4px_oklch(0.77_0.15_75/0.5)]"
+              className="group inline-flex h-11 items-center rounded-md bg-amber px-8 text-sm font-mono font-medium text-void transition-[transform,filter,box-shadow] duration-200 ease-out hover:brightness-110 hover:shadow-[0_0_24px_-4px_oklch(0.77_0.15_75/0.5)] active:scale-[0.97]"
             >
               Install in 60 seconds
               <svg
@@ -668,7 +668,7 @@ export function LandingContent() {
           </p>
           <Link
             href="/sign-up"
-            className="group inline-flex h-12 items-center rounded-md bg-amber px-10 text-sm font-mono font-medium text-void transition-all hover:brightness-110 hover:shadow-[0_0_30px_-4px_oklch(0.77_0.15_75/0.5)]"
+            className="group inline-flex h-12 items-center rounded-md bg-amber px-10 text-sm font-mono font-medium text-void transition-[transform,filter,box-shadow] duration-200 ease-out hover:brightness-110 hover:shadow-[0_0_30px_-4px_oklch(0.77_0.15_75/0.5)] active:scale-[0.97]"
           >
             Get started free
             <svg

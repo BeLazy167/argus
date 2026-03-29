@@ -237,7 +237,7 @@ func (q *Queries) GetLatestReviewBySHA(ctx context.Context, arg GetLatestReviewB
 const getReview = `-- name: GetReview :one
 SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, COALESCE(head_ref,'') as head_ref, github_review_id,
        status, summary, score, token_usage, trigger, triggered_by, duration_ms, error,
-       deep_review, persona, is_incremental, created_at, completed_at, simulation_results
+       deep_review, persona, is_incremental, created_at, completed_at, simulation_results, diagram, diagram_title
 FROM reviews WHERE id = $1
 `
 
@@ -265,6 +265,8 @@ type GetReviewRow struct {
 	CreatedAt         pgtype.Timestamptz `json:"created_at"`
 	CompletedAt       pgtype.Timestamptz `json:"completed_at"`
 	SimulationResults []byte             `json:"simulation_results"`
+	Diagram           *string            `json:"diagram"`
+	DiagramTitle      *string            `json:"diagram_title"`
 }
 
 func (q *Queries) GetReview(ctx context.Context, id pgtype.UUID) (GetReviewRow, error) {
@@ -294,6 +296,8 @@ func (q *Queries) GetReview(ctx context.Context, id pgtype.UUID) (GetReviewRow, 
 		&i.CreatedAt,
 		&i.CompletedAt,
 		&i.SimulationResults,
+		&i.Diagram,
+		&i.DiagramTitle,
 	)
 	return i, err
 }

@@ -22,7 +22,7 @@ const labelColor: Record<string, string> = {
   active: "text-amber font-medium",
   completed: "text-green-400",
   failed: "text-red-400",
-  pending: "text-iron",
+  pending: "text-slate-text",
 };
 
 function getStepState(
@@ -39,23 +39,26 @@ function getStepState(
   return currentStage === "failed" ? "failed" : "active";
 }
 
-export function PipelineProgress({ stage, failedStage }: { stage: PipelineStage; failedStage?: string }) {
+export function PipelineProgress({ stage, failedStage, filesReviewed, totalFiles }: { stage: PipelineStage; failedStage?: string; filesReviewed?: number; totalFiles?: number }) {
   return (
     <div className="rounded-lg border border-iron bg-charcoal/80 p-4 mb-6">
-      <div className="flex items-center gap-1">
+      <div className="flex items-center gap-1" role="progressbar" aria-label="Pipeline progress" aria-valuetext={stage}>
         {stages.map((step, i) => {
           const state = getStepState(step.key, stage, failedStage);
           return (
-            <div key={step.key} className="flex items-center flex-1 last:flex-none">
+            <div key={step.key} className="flex items-center flex-1 last:flex-none" title={step.label}>
               <div className="flex flex-col items-center gap-1.5">
                 <StepIcon state={state} />
-                <span className={`text-[10px] font-mono ${labelColor[state] ?? "text-iron"}`}>
+                <span className={`text-xs font-mono ${labelColor[state] ?? "text-slate-text"}`}>
                   {step.label}
+                  {step.key === "reviewing" && stage === "reviewing" && filesReviewed != null && totalFiles != null && (
+                    <span className="text-xs font-mono text-amber ml-1">{filesReviewed}/{totalFiles}</span>
+                  )}
                 </span>
               </div>
               {i < stages.length - 1 && (
                 <div
-                  className={`h-px flex-1 mx-1.5 mt-[-18px] ${
+                  className={`h-0.5 flex-1 mx-1.5 mt-[-18px] ${
                     state === "completed" ? "bg-green-400/40" : "bg-iron/30"
                   }`}
                 />
@@ -79,7 +82,7 @@ function StepIcon({ state }: { state: "completed" | "active" | "pending" | "fail
       );
     case "active":
       return (
-        <div className={`${base} bg-amber/20 border border-amber/40 animate-pulse`}>
+        <div className={`${base} bg-amber/20 border border-amber/40`}>
           <Loader2 className="h-3 w-3 text-amber animate-spin" />
         </div>
       );
