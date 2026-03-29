@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { EyeSymbol } from "@/components/marketing/eye-symbol";
 import { AnimatedReview } from "@/components/marketing/animated-review";
 import { GitHubReviewMock } from "@/components/marketing/github-review-mock";
+import { FadeIn } from "@/components/marketing/fade-in";
 
 /* ── Pipeline Stage ── */
 function PipelineStage({
@@ -293,25 +294,20 @@ export function LandingContent() {
       {/* ── SOCIAL PROOF ── */}
       <section aria-label="Social proof" className="border-t border-iron bg-charcoal/30">
         <div className="mx-auto max-w-3xl px-6 py-10 flex flex-wrap items-center justify-center gap-8 md:gap-14">
-          <div className="text-center">
-            <div className="font-display text-2xl font-bold text-foreground">80%</div>
-            <p className="text-[10px] font-mono text-slate-text mt-1">bug recall</p>
-          </div>
-          <div className="h-8 w-px bg-iron hidden md:block" />
-          <div className="text-center">
-            <div className="font-display text-2xl font-bold text-foreground">95%</div>
-            <p className="text-[10px] font-mono text-slate-text mt-1">precision</p>
-          </div>
-          <div className="h-8 w-px bg-iron hidden md:block" />
-          <div className="text-center">
-            <div className="font-display text-2xl font-bold text-foreground">&lt;2 min</div>
-            <p className="text-[10px] font-mono text-slate-text mt-1">per review</p>
-          </div>
-          <div className="h-8 w-px bg-iron hidden md:block" />
-          <div className="text-center">
-            <div className="font-display text-2xl font-bold text-foreground">4</div>
-            <p className="text-[10px] font-mono text-slate-text mt-1">specialist reviewers</p>
-          </div>
+          {[
+            { value: "80%", label: "bug recall" },
+            { value: "95%", label: "precision" },
+            { value: "<2 min", label: "per review" },
+            { value: "4", label: "specialist reviewers" },
+          ].map((stat, i) => (
+            <FadeIn key={stat.label} delay={i * 80} className="flex items-center gap-8 md:gap-14">
+              {i > 0 && <div className="h-8 w-px bg-iron hidden md:block" />}
+              <div className="text-center">
+                <div className="font-display text-2xl font-bold text-foreground">{stat.value}</div>
+                <p className="text-[10px] font-mono text-slate-text mt-1">{stat.label}</p>
+              </div>
+            </FadeIn>
+          ))}
         </div>
       </section>
 
@@ -331,7 +327,9 @@ export function LandingContent() {
             </p>
           </div>
 
-          <GitHubReviewMock />
+          <FadeIn>
+            <GitHubReviewMock />
+          </FadeIn>
         </div>
       </section>
 
@@ -339,39 +337,35 @@ export function LandingContent() {
       <section aria-label="Why Argus" className="border-t border-iron bg-noise">
         <div className="mx-auto max-w-4xl px-6 py-24">
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-            <div className="rounded-lg border border-iron bg-charcoal/50 p-6">
-              <div className="text-amber mb-3">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-6 w-6">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 21L3 16.5m0 0L7.5 12M3 16.5h13.5m0-13.5L21 7.5m0 0L16.5 12M21 7.5H7.5" />
-                </svg>
-              </div>
-              <h3 className="font-display text-sm font-bold text-foreground mb-2">Sees across files</h3>
-              <p className="text-[11px] font-mono text-slate-text leading-relaxed">
-                When you change a function, Argus traces who calls it, what tests cover it, and what breaks downstream. Not just the diff.
-              </p>
-            </div>
-            <div className="rounded-lg border border-iron bg-charcoal/50 p-6">
-              <div className="text-amber mb-3">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-6 w-6">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-              </div>
-              <h3 className="font-display text-sm font-bold text-foreground mb-2">Remembers everything</h3>
-              <p className="text-[11px] font-mono text-slate-text leading-relaxed">
-                That edge case from 6 months ago? Still in memory. Past bugs, incidents, and team decisions inform every future review.
-              </p>
-            </div>
-            <div className="rounded-lg border border-iron bg-charcoal/50 p-6">
-              <div className="text-amber mb-3">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-6 w-6">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" />
-                </svg>
-              </div>
-              <h3 className="font-display text-sm font-bold text-foreground mb-2">Gets smarter every review</h3>
-              <p className="text-[11px] font-mono text-slate-text leading-relaxed">
-                React 👍 to confirm findings, 👎 to dismiss. Argus learns your patterns. False positives shrink. Real catches stay sharp.
-              </p>
-            </div>
+            {[
+              {
+                icon: <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 21L3 16.5m0 0L7.5 12M3 16.5h13.5m0-13.5L21 7.5m0 0L16.5 12M21 7.5H7.5" />,
+                title: "Sees across files",
+                desc: "When you change a function, Argus traces who calls it, what tests cover it, and what breaks downstream. Not just the diff.",
+              },
+              {
+                icon: <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />,
+                title: "Remembers everything",
+                desc: "That edge case from 6 months ago? Still in memory. Past bugs, incidents, and team decisions inform every future review.",
+              },
+              {
+                icon: <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" />,
+                title: "Gets smarter every review",
+                desc: "React 👍 to confirm findings, 👎 to dismiss. Argus learns your patterns. False positives shrink. Real catches stay sharp.",
+              },
+            ].map((card, i) => (
+              <FadeIn key={card.title} delay={i * 100}>
+                <div className="rounded-lg border border-iron bg-charcoal/50 p-6 h-full">
+                  <div className="text-amber mb-3">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-6 w-6">
+                      {card.icon}
+                    </svg>
+                  </div>
+                  <h3 className="font-display text-sm font-bold text-foreground mb-2">{card.title}</h3>
+                  <p className="text-[11px] font-mono text-slate-text leading-relaxed">{card.desc}</p>
+                </div>
+              </FadeIn>
+            ))}
           </div>
         </div>
       </section>
@@ -379,17 +373,19 @@ export function LandingContent() {
       {/* ── HOW IT WORKS — PIPELINE ── */}
       <section aria-label="How it works" className="border-t border-iron bg-charcoal/50 bg-noise">
         <div className="mx-auto max-w-4xl px-6 py-28">
-          <div className="mb-16 text-center">
-            <p className="mb-3 text-[11px] font-mono uppercase tracking-[0.15em] text-amber">
-              How it works
-            </p>
-            <h2 className="font-display text-3xl font-bold text-foreground mb-3">
-              7 stages. Under 2 minutes.
-            </h2>
-            <p className="max-w-lg mx-auto text-sm text-ash/70">
-              Every PR gets the same rigorous pipeline. No shortcuts.
-            </p>
-          </div>
+          <FadeIn>
+            <div className="mb-16 text-center">
+              <p className="mb-3 text-[11px] font-mono uppercase tracking-[0.15em] text-amber">
+                How it works
+              </p>
+              <h2 className="font-display text-3xl font-bold text-foreground mb-3">
+                7 stages. Under 2 minutes.
+              </h2>
+              <p className="max-w-lg mx-auto text-sm text-ash/70">
+                Every PR gets the same rigorous pipeline. No shortcuts.
+              </p>
+            </div>
+          </FadeIn>
 
           <div ref={pipelineRef} className="relative ml-1.5">
             {/* Connecting vertical line */}
@@ -417,17 +413,19 @@ export function LandingContent() {
       {/* ── PRICING ── */}
       <section aria-label="Pricing" className="border-t border-iron bg-noise">
         <div className="mx-auto max-w-4xl px-6 py-24">
-          <div className="text-center mb-12">
-            <p className="mb-3 text-[11px] font-mono uppercase tracking-[0.15em] text-amber">
-              Pricing
-            </p>
-            <h2 className="font-display text-2xl md:text-3xl font-bold text-foreground mb-4">
-              Start free. Scale when you&apos;re ready.
-            </h2>
-            <p className="max-w-lg mx-auto text-sm text-ash/70 leading-relaxed">
-              Bring your own LLM key via OpenRouter. You control the model, the cost, and the quality.
-            </p>
-          </div>
+          <FadeIn>
+            <div className="text-center mb-12">
+              <p className="mb-3 text-[11px] font-mono uppercase tracking-[0.15em] text-amber">
+                Pricing
+              </p>
+              <h2 className="font-display text-2xl md:text-3xl font-bold text-foreground mb-4">
+                Start free. Scale when you&apos;re ready.
+              </h2>
+              <p className="max-w-lg mx-auto text-sm text-ash/70 leading-relaxed">
+                Bring your own LLM key via OpenRouter. You control the model, the cost, and the quality.
+              </p>
+            </div>
+          </FadeIn>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6 max-w-2xl mx-auto">
             {/* Free tier */}
@@ -499,10 +497,10 @@ export function LandingContent() {
               "radial-gradient(circle, oklch(0.77 0.15 75 / 0.4) 0%, transparent 70%)",
           }}
         />
-        <div className="relative z-10 mx-auto max-w-3xl px-6 py-28 text-center">
+        <FadeIn className="relative z-10 mx-auto max-w-3xl px-6 py-28 text-center">
           <EyeSymbol className="mx-auto mb-6 h-12 w-auto text-amber/60" />
           <h2 className="font-display text-3xl md:text-4xl font-bold text-foreground mb-4">
-            The guardian your main branch deserves.
+            Stop shipping bugs.
           </h2>
           <p className="text-sm text-ash/70 mb-3 max-w-md mx-auto">
             Install the GitHub App. Connect your repos. First review in under
@@ -526,7 +524,7 @@ export function LandingContent() {
               <path strokeLinecap="round" strokeLinejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6" />
             </svg>
           </Link>
-        </div>
+        </FadeIn>
       </section>
 
       {/* ── FOOTER ── */}
