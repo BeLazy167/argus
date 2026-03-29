@@ -5,18 +5,39 @@ import { useRef, useMemo } from "react";
 import { Canvas, useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 
-const PARTICLE_COUNT = 80;
-const CONNECTION_DISTANCE = 2.2;
-const DRIFT_SPEED = 0.08;
-const BOUNDS = { x: 8, y: 4.5, z: 2 };
+const PARTICLE_COUNT = 60;
+const CONNECTION_DISTANCE = 2.5;
+const DRIFT_SPEED = 0.04;
+const BOUNDS = { x: 8, y: 5, z: 1.5 };
 
 /** Amber color from Argus palette — oklch(0.77 0.15 75) ≈ #d4952a */
 const AMBER = new THREE.Color(0.83, 0.58, 0.16);
 const AMBER_DIM = new THREE.Color(0.83, 0.58, 0.16).multiplyScalar(0.3);
 
+/** Generate a soft circular particle texture */
+function createCircleTexture(): THREE.Texture {
+  const size = 64;
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  if (ctx) {
+    const gradient = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+    gradient.addColorStop(0, "rgba(255,255,255,1)");
+    gradient.addColorStop(0.3, "rgba(255,255,255,0.8)");
+    gradient.addColorStop(1, "rgba(255,255,255,0)");
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, size, size);
+  }
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.needsUpdate = true;
+  return texture;
+}
+
 function Particles() {
   const pointsRef = useRef<THREE.Points>(null);
   const linesRef = useRef<THREE.LineSegments>(null);
+  const circleTexture = useMemo(() => createCircleTexture(), []);
 
   // Initialize particle positions + velocities
   const { positions, velocities } = useMemo(() => {
@@ -133,10 +154,11 @@ function Particles() {
           />
         </bufferGeometry>
         <pointsMaterial
-          size={2}
+          size={0.08}
           color={AMBER}
+          map={circleTexture}
           transparent
-          opacity={0.6}
+          opacity={0.7}
           sizeAttenuation
           depthWrite={false}
           blending={THREE.AdditiveBlending}
@@ -162,7 +184,7 @@ function Particles() {
         <lineBasicMaterial
           vertexColors
           transparent
-          opacity={0.4}
+          opacity={0.25}
           depthWrite={false}
           blending={THREE.AdditiveBlending}
         />
@@ -173,7 +195,7 @@ function Particles() {
 
 export function ConstellationBackground() {
   return (
-    <div className="absolute inset-0 -z-10 opacity-40">
+    <div className="absolute inset-0 -z-10 opacity-60">
       <Canvas
         camera={{ position: [0, 0, 6], fov: 60 }}
         dpr={[1, 1.5]}
