@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -189,21 +190,26 @@ func (s *Store) SetOrgDefaults(ctx context.Context, installationID int64, settin
 // GetMergedSettings returns org defaults merged with repo overrides (repo wins).
 func (s *Store) GetMergedSettings(ctx context.Context, installationID int64, repoID int64) (json.RawMessage, error) {
 	var orgDefaults, repoSettings json.RawMessage
-	_ = s.Pool.QueryRow(ctx, `SELECT COALESCE(default_settings, '{}') FROM installations WHERE id = $1`, installationID).Scan(&orgDefaults)
-	_ = s.Pool.QueryRow(ctx, `SELECT COALESCE(settings_json, '{}') FROM repos WHERE id = $1`, repoID).Scan(&repoSettings)
+	if err := s.Pool.QueryRow(ctx, `SELECT COALESCE(default_settings, '{}') FROM installations WHERE id = $1`, installationID).Scan(&orgDefaults); err != nil {
+		return nil, fmt.Errorf("fetching org defaults: %w", err)
+	}
+	if err := s.Pool.QueryRow(ctx, `SELECT COALESCE(settings_json, '{}') FROM repos WHERE id = $1`, repoID).Scan(&repoSettings); err != nil {
+		return nil, fmt.Errorf("fetching repo settings: %w", err)
+	}
 	return mergeJSON(orgDefaults, repoSettings), nil
 }
 
 // mergeJSON does a shallow merge where override keys replace base keys.
 func mergeJSON(base, override json.RawMessage) json.RawMessage {
-	var baseMap, overrideMap map[string]interface{}
-	json.Unmarshal(base, &baseMap)
-	json.Unmarshal(override, &overrideMap)
-	if baseMap == nil {
+	var baseMap map[string]interface{}
+	if err := json.Unmarshal(base, &baseMap); err != nil || baseMap == nil {
 		baseMap = make(map[string]interface{})
 	}
-	for k, v := range overrideMap {
-		baseMap[k] = v
+	var overrideMap map[string]interface{}
+	if err := json.Unmarshal(override, &overrideMap); err == nil {
+		for k, v := range overrideMap {
+			baseMap[k] = v
+		}
 	}
 	result, _ := json.Marshal(baseMap)
 	return result
@@ -325,7 +331,8 @@ func (s *Store) ListReviews(ctx context.Context, repoID int64, limit, offset int
 	rows, err := s.Pool.Query(ctx, `
 		SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, COALESCE(head_ref,''), github_review_id,
 		       status, summary, score, token_usage, trigger, triggered_by, duration_ms, error,
-		       deep_review, persona, is_incremental, created_at, completed_at
+		       deep_review, persona, is_incremental, created_at, completed_at,
+		       diagram, diagram_title
 		FROM reviews WHERE repo_id = $1
 		ORDER BY created_at DESC LIMIT $2 OFFSET $3
 	`, repoID, limit, offset)
@@ -341,11 +348,13 @@ func (s *Store) GetReview(ctx context.Context, id uuid.UUID) (*Review, error) {
 	err := s.Pool.QueryRow(ctx, `
 		SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, COALESCE(head_ref,''), github_review_id,
 		       status, summary, score, token_usage, trigger, triggered_by, duration_ms, error,
-		       deep_review, persona, is_incremental, created_at, completed_at
+		       deep_review, persona, is_incremental, created_at, completed_at,
+		       diagram, diagram_title
 		FROM reviews WHERE id = $1
 	`, id).Scan(&r.ID, &r.RepoID, &r.PRNumber, &r.PRTitle, &r.PRAuthor, &r.HeadSHA, &r.BaseSHA, &r.HeadRef, &r.GithubReviewID,
 		&r.Status, &r.Summary, &r.Score, &r.TokenUsage, &r.Trigger, &r.TriggeredBy, &r.DurationMs, &r.Error,
-		&r.DeepReview, &r.Persona, &r.IsIncremental, &r.CreatedAt, &r.CompletedAt)
+		&r.DeepReview, &r.Persona, &r.IsIncremental, &r.CreatedAt, &r.CompletedAt,
+		&r.Diagram, &r.DiagramTitle)
 	if err != nil {
 		return nil, err
 	}
@@ -367,12 +376,16 @@ func (s *Store) GetReviewComments(ctx context.Context, reviewID uuid.UUID) ([]Re
 	return collectOrEmpty(rows, pgx.RowToStructByPos[ReviewComment])
 }
 
-func (s *Store) UpdateReviewStatus(ctx context.Context, id uuid.UUID, status, errMsg string) error {
+func (s *Store) UpdateReviewStatus(ctx context.Context, id uuid.UUID, status, errMsg string, tokenUsage []byte) error {
 	_, err := s.Pool.Exec(ctx, `
-		UPDATE reviews SET status = $2, error = $3, completed_at = CASE WHEN $2 IN ('completed','failed') THEN NOW() ELSE NULL END
+		UPDATE reviews SET status = $2, error = $3, token_usage = COALESCE($4, token_usage),
+		       completed_at = CASE WHEN $2 IN ('completed','failed') THEN NOW() ELSE NULL END
 		WHERE id = $1
-	`, id, status, nilIfEmpty(errMsg))
-	return err
+	`, id, status, nilIfEmpty(errMsg), tokenUsage)
+	if err != nil {
+		return fmt.Errorf("updating review status: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) ListReviewsScoped(ctx context.Context, repoID int64, installationIDs []int64, limit, offset int) ([]Review, error) {
@@ -382,7 +395,8 @@ func (s *Store) ListReviewsScoped(ctx context.Context, repoID int64, installatio
 	rows, err := s.Pool.Query(ctx, `
 		SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, COALESCE(rv.head_ref,''), rv.github_review_id,
 		       rv.status, rv.summary, rv.score, rv.token_usage, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error,
-		       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at
+		       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at,
+		       rv.diagram, rv.diagram_title
 		FROM reviews rv
 		JOIN repos r ON rv.repo_id = r.id
 		WHERE rv.repo_id = $1 AND r.installation_id = ANY($2)
@@ -402,7 +416,8 @@ func (s *Store) ListAllReviewsScoped(ctx context.Context, installationIDs []int6
 	rows, err := s.Pool.Query(ctx, `
 		SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, COALESCE(rv.head_ref,''), rv.github_review_id,
 		       rv.status, rv.summary, rv.score, rv.token_usage, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error,
-		       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at
+		       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at,
+		       rv.diagram, rv.diagram_title
 		FROM reviews rv
 		JOIN repos r ON rv.repo_id = r.id
 		WHERE r.installation_id = ANY($1)
@@ -609,12 +624,14 @@ func (s *Store) GetLastCompletedReview(ctx context.Context, repoID int64, prNumb
 	err := s.Pool.QueryRow(ctx, `
 		SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, COALESCE(head_ref,''), github_review_id,
 		       status, summary, score, token_usage, trigger, triggered_by, duration_ms, error,
-		       deep_review, persona, is_incremental, created_at, completed_at
+		       deep_review, persona, is_incremental, created_at, completed_at,
+		       diagram, diagram_title
 		FROM reviews WHERE repo_id = $1 AND pr_number = $2 AND status = 'completed'
 		ORDER BY completed_at DESC LIMIT 1
 	`, repoID, prNumber).Scan(&r.ID, &r.RepoID, &r.PRNumber, &r.PRTitle, &r.PRAuthor, &r.HeadSHA, &r.BaseSHA, &r.HeadRef, &r.GithubReviewID,
 		&r.Status, &r.Summary, &r.Score, &r.TokenUsage, &r.Trigger, &r.TriggeredBy, &r.DurationMs, &r.Error,
-		&r.DeepReview, &r.Persona, &r.IsIncremental, &r.CreatedAt, &r.CompletedAt)
+		&r.DeepReview, &r.Persona, &r.IsIncremental, &r.CreatedAt, &r.CompletedAt,
+		&r.Diagram, &r.DiagramTitle)
 	if err != nil {
 		return nil, err
 	}
@@ -626,14 +643,16 @@ func (s *Store) GetLatestReviewBySHA(ctx context.Context, repoFullName string, p
 	err := s.Pool.QueryRow(ctx, `
 		SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, COALESCE(rv.head_ref,''), rv.github_review_id,
 		       rv.status, rv.summary, rv.score, rv.token_usage, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error,
-		       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at
+		       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at,
+		       rv.diagram, rv.diagram_title
 		FROM reviews rv JOIN repos r ON rv.repo_id = r.id
 		WHERE r.full_name = $1 AND rv.pr_number = $2 AND rv.head_sha = $3
 		  AND rv.status = 'completed'
 		ORDER BY rv.created_at DESC LIMIT 1
 	`, repoFullName, prNumber, headSHA).Scan(&r.ID, &r.RepoID, &r.PRNumber, &r.PRTitle, &r.PRAuthor, &r.HeadSHA, &r.BaseSHA, &r.HeadRef, &r.GithubReviewID,
 		&r.Status, &r.Summary, &r.Score, &r.TokenUsage, &r.Trigger, &r.TriggeredBy, &r.DurationMs, &r.Error,
-		&r.DeepReview, &r.Persona, &r.IsIncremental, &r.CreatedAt, &r.CompletedAt)
+		&r.DeepReview, &r.Persona, &r.IsIncremental, &r.CreatedAt, &r.CompletedAt,
+		&r.Diagram, &r.DiagramTitle)
 	if err != nil {
 		return nil, err
 	}
@@ -646,14 +665,16 @@ func (s *Store) GetLatestReviewByPR(ctx context.Context, repoFullName string, pr
 	err := s.Pool.QueryRow(ctx, `
 		SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, COALESCE(rv.head_ref,''), rv.github_review_id,
 		       rv.status, rv.summary, rv.score, rv.token_usage, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error,
-		       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at
+		       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at,
+		       rv.diagram, rv.diagram_title
 		FROM reviews rv JOIN repos r ON rv.repo_id = r.id
 		WHERE r.full_name = $1 AND rv.pr_number = $2
 		  AND rv.status = 'completed'
 		ORDER BY rv.created_at DESC LIMIT 1
 	`, repoFullName, prNumber).Scan(&r.ID, &r.RepoID, &r.PRNumber, &r.PRTitle, &r.PRAuthor, &r.HeadSHA, &r.BaseSHA, &r.HeadRef, &r.GithubReviewID,
 		&r.Status, &r.Summary, &r.Score, &r.TokenUsage, &r.Trigger, &r.TriggeredBy, &r.DurationMs, &r.Error,
-		&r.DeepReview, &r.Persona, &r.IsIncremental, &r.CreatedAt, &r.CompletedAt)
+		&r.DeepReview, &r.Persona, &r.IsIncremental, &r.CreatedAt, &r.CompletedAt,
+		&r.Diagram, &r.DiagramTitle)
 	if err != nil {
 		return nil, err
 	}
@@ -793,6 +814,20 @@ func (s *Store) DeletePromptTemplate(ctx context.Context, repoID int64, stage st
 		return fmt.Errorf("prompt template not found for repo %d stage %s", repoID, stage)
 	}
 	return nil
+}
+
+// RecoverStaleReviews marks old in-progress/pending reviews as failed.
+func (s *Store) RecoverStaleReviews(ctx context.Context, maxAge time.Duration) (int64, error) {
+	tag, err := s.Pool.Exec(ctx, `
+		UPDATE reviews SET status = 'failed', error = 'review timed out — server restarted',
+		       completed_at = NOW()
+		WHERE status IN ('pending', 'in_progress')
+		  AND created_at < NOW() - make_interval(secs => $1)
+	`, float64(maxAge.Seconds()))
+	if err != nil {
+		return 0, fmt.Errorf("recovering stale reviews: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 func nilIfEmpty(s string) *string {

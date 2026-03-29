@@ -30,6 +30,7 @@ type PREvent struct {
 	BaseRef        string
 	HeadRef         string
 	PRBody          string // first ~500 chars of PR description
+	Merged          bool
 	PersonaOverride string `json:"-"` // set by @argus-eye review --persona X
 }
 
@@ -37,11 +38,11 @@ type PREvent struct {
 func ParseWebhook(r *http.Request, secret []byte) (*WebhookEvent, error) {
 	// Limit webhook body to 10MB to prevent abuse
 	const maxBodySize = 10 << 20
+	defer r.Body.Close()
 	payload, err := io.ReadAll(io.LimitReader(r.Body, maxBodySize))
 	if err != nil {
 		return nil, fmt.Errorf("reading body: %w", err)
 	}
-	defer r.Body.Close()
 
 	if err := gh.ValidateSignature(r.Header.Get("X-Hub-Signature-256"), payload, secret); err != nil {
 		return nil, fmt.Errorf("invalid signature: %w", err)
@@ -80,6 +81,7 @@ func ToPREvent(event *WebhookEvent) (*PREvent, error) {
 		BaseRef:        prEvent.GetPullRequest().GetBase().GetRef(),
 		HeadRef:        prEvent.GetPullRequest().GetHead().GetRef(),
 		PRBody:         util.Truncate(prEvent.GetPullRequest().GetBody(), 500, false),
+		Merged:         prEvent.GetPullRequest().GetMerged(),
 	}, nil
 }
 

@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/BeLazy167/argus/internal/memory"
@@ -77,9 +78,15 @@ func StoreScenarioSeeds(ctx context.Context, st *store.Store, indexer *memory.In
 				continue // similar scenario already exists
 			}
 		}
-		id, _ := st.CreateScenario(ctx, installationID, repoID, seed.Description, seed.Source, seed.SourceRef, seed.Files, nil, seed.Severity)
+		id, err := st.CreateScenario(ctx, installationID, repoID, seed.Description, seed.Source, seed.SourceRef, seed.Files, nil, seed.Severity)
+		if err != nil {
+			slog.Warn("failed to create scenario", "error", err, "description", seed.Description)
+			continue
+		}
 		if indexer != nil && id > 0 {
-			indexer.IndexScenario(ctx, owner, repo, id, seed.Description, seed.Severity, seed.Files)
+			if err := indexer.IndexScenario(ctx, owner, repo, id, seed.Description, seed.Severity, seed.Files); err != nil {
+				slog.Warn("failed to index scenario", "error", err, "id", id)
+			}
 		}
 	}
 }

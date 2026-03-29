@@ -134,17 +134,27 @@ func FormatRelatedContext(related []RelatedFile) string {
 }
 
 // FormatBlastRadius formats code graph blast radius results as a context block for the review prompt.
-func FormatBlastRadius(nodes []store.CodeNode) string {
+// If fileContents is provided, includes source code of key dependent files (depth 1 only, capped).
+func FormatBlastRadius(nodes []store.CodeNode, fileContents map[string]string) string {
 	if len(nodes) == 0 {
 		return ""
 	}
 	var sb strings.Builder
 	sb.WriteString("\n<blast_radius>\n")
-	sb.WriteString("The following code symbols transitively depend on the changed files:\n\n")
+	sb.WriteString("These code symbols depend on the changed files. Check if your changes break them:\n\n")
 	for _, n := range nodes {
 		sb.WriteString(fmt.Sprintf("- [depth %d] %s `%s` in %s\n", n.Depth, n.Kind, n.Name, n.FilePath))
 	}
-	sb.WriteString("\nConsider whether the changes could break these dependents.\n")
+
+	// Include source of depth-1 dependents so the LLM can trace call chains
+	if len(fileContents) > 0 {
+		sb.WriteString("\n### Dependent file contents (outside the diff — for reference only, do NOT comment on these files)\n\n")
+		for path, content := range fileContents {
+			sb.WriteString(fmt.Sprintf("**%s**\n```\n%s\n```\n\n", path, content))
+		}
+	}
+
+	sb.WriteString("Key questions: Do callers assume a specific return type/value that changed? Do dependents handle the error cases you introduced? Could a new null/undefined return break a dependent that doesn't check for it?\n")
 	sb.WriteString("</blast_radius>\n")
 	return sb.String()
 }

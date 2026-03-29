@@ -114,13 +114,13 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 	// Resolve model config once for all files
 	provider, cfg, err := rs.registry.ResolveProvider(ctx, storeConfigLister{st: rs.store, installationID: run.DBInstallationID}, run.DBInstallationID, run.DBRepoID, llm.StageReview)
 	if err != nil {
-		return err
+		return fmt.Errorf("resolve review provider: %w", err)
 	}
 
 	unitCh := make(chan workUnit, len(units))
 	resultCh := make(chan result, len(units))
 
-	workers := min(rs.maxWorkers, len(units), 3)
+	workers := min(rs.maxWorkers, len(units))
 
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
@@ -153,6 +153,13 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 						p.promptExtra = PersonaPromptOverlay(run.Persona)
 					}
 				}
+				if run.EventBus != nil {
+					run.EventBus.Publish(run.ReviewID, EventFileReviewStarted, map[string]any{
+						"file_path":  p.file.NewName,
+						"specialist": string(p.specialist),
+						"action":     string(p.action),
+					})
+				}
 				rev, tok, err := rs.reviewFile(ctx, run, p, fileContents, owner, repo, cfg, provider)
 				resultCh <- result{review: rev, tokens: tok, err: err}
 			}
@@ -180,6 +187,12 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 		}
 		run.Tokens.Review = append(run.Tokens.Review, r.tokens)
 		run.Tokens.addToTotal(r.tokens)
+		if run.EventBus != nil {
+			run.EventBus.Publish(run.ReviewID, EventTokenUpdate, map[string]any{
+				"total_tokens": run.Tokens.Total.TotalTokens,
+				"cost":         run.Tokens.Total.Cost,
+			})
+		}
 		if len(r.review.Comments) > 0 {
 			if existing, ok := fileReviewMap[r.review.Path]; ok {
 				existing.Comments = append(existing.Comments, r.review.Comments...)
@@ -264,6 +277,8 @@ type reviewParams struct {
 func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p reviewParams, fileContents map[string]string, owner, repo string, cfg llm.ModelConfig, provider llm.Provider) (FileReview, StageTokens, error) {
 	review := FileReview{Path: p.file.NewName}
 	var tokens StageTokens
+	tokens.Model = cfg.Model
+	tokens.Provider = cfg.Provider
 	if p.specialist != "" {
 		tokens.File = fmt.Sprintf("%s[%s]", p.file.NewName, p.specialist)
 	} else {
@@ -277,18 +292,34 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p revie
 		relatedContext = FormatRelatedContext(related)
 	}
 
-	// Query blast radius from code graph
+	// Query blast radius from code graph + fetch dependent file contents
 	var blastContext string
-	if run.BlastRadius && rs.store != nil {
+	if run.BlastRadius && rs.store != nil && rs.ghClient != nil {
 		changedPaths := make([]string, 0, len(run.Diff.Files))
+		changedSet := make(map[string]bool, len(run.Diff.Files))
 		for _, f := range run.Diff.Files {
 			changedPaths = append(changedPaths, f.NewName)
+			changedSet[f.NewName] = true
 		}
 		nodes, err := rs.store.GetBlastRadius(ctx, run.DBRepoID, changedPaths, 2)
 		if err != nil {
 			slog.Warn("blast radius query failed", "error", err)
 		} else {
-			blastContext = FormatBlastRadius(nodes)
+			// Fetch content of depth-1 dependents NOT in the diff (max 3 files, 200 lines each)
+			depContents := make(map[string]string)
+			seen := make(map[string]bool)
+			for _, n := range nodes {
+				if n.Depth != 1 || changedSet[n.FilePath] || seen[n.FilePath] || len(depContents) >= 3 {
+					continue
+				}
+				seen[n.FilePath] = true
+				content, fetchErr := rs.ghClient.GetFileContent(ctx, run.PREvent.InstallationID, owner, repo, n.FilePath, run.PREvent.HeadSHA)
+				if fetchErr != nil {
+					continue
+				}
+				depContents[n.FilePath] = truncateLines(content, 200)
+			}
+			blastContext = FormatBlastRadius(nodes, depContents)
 		}
 	}
 
@@ -341,14 +372,33 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p revie
 		tokens.Cost += resp.Cost
 
 		if len(resp.ToolCalls) == 0 {
+			if resp.FinishReason == "length" {
+				slog.Warn("review response truncated",
+					"file", p.file.NewName, "specialist", label,
+					"prompt_tokens", resp.TokensUsed.PromptTokens,
+					"completion_tokens", resp.TokensUsed.CompletionTokens,
+					"max_tokens", cfg.MaxTokens)
+			}
 			comments, err := parseReviewResponse(resp.Content)
 			if err != nil {
+				slog.Warn("review parse failed",
+					"file", p.file.NewName, "specialist", label,
+					"finish_reason", resp.FinishReason,
+					"response_len", len(resp.Content),
+					"error", err)
 				return review, tokens, fmt.Errorf("parsing response %s: %w", label, err)
 			}
 			validated := validateComments(comments)
 			for i := range validated {
 				validated[i].Specialist = p.specialist
 			}
+			slog.Info("review file result",
+				"file", p.file.NewName, "specialist", label,
+				"finish_reason", resp.FinishReason,
+				"prompt_tokens", resp.TokensUsed.PromptTokens,
+				"completion_tokens", resp.TokensUsed.CompletionTokens,
+				"comments", len(validated),
+				"response_len", len(resp.Content))
 			review.Comments = validated
 			return review, tokens, nil
 		}
@@ -393,13 +443,40 @@ func buildFileReviewPrompt(run *PipelineRun, file diff.FileDiff, fileContent str
 		sb.WriteString("\n" + wrapInDelimiters("pr_description", sanitizeUserInput(util.Truncate(run.PREvent.PRBody, 2000, false))) + "\n")
 	}
 
+	// Inject lead brief if available (from Lead Agent Phase 1)
+	if run.LeadBrief != nil {
+		if fb := run.LeadBrief.FileBrief(file.NewName); fb != nil {
+			sb.WriteString("\n<lead_brief>\n")
+			sb.WriteString(fmt.Sprintf("Summary: %s\n", fb.Summary))
+			sb.WriteString(fmt.Sprintf("Bug focus: %s\n", fb.Bug))
+			sb.WriteString(fmt.Sprintf("Security focus: %s\n", fb.Security))
+			sb.WriteString(fmt.Sprintf("Architecture focus: %s\n", fb.Arch))
+			sb.WriteString(fmt.Sprintf("Regression focus: %s\n", fb.Regression))
+			sb.WriteString("</lead_brief>\n")
+		}
+		if cc := run.LeadBrief.CrossCuttingConcerns(); len(cc) > 0 {
+			sb.WriteString("\n<cross_cutting_concerns>\n")
+			for _, c := range cc {
+				sb.WriteString(fmt.Sprintf("- %s\n", c))
+			}
+			sb.WriteString("</cross_cutting_concerns>\n")
+		}
+	}
+
 	if guide := languageGuidance(file.NewName); guide != "" {
 		sb.WriteString(guide)
 	}
 
-	sb.WriteString("\n" + wrapInDelimiters("pr_diff", file.RawDiff) + "\n")
+	if file.LargeFile && file.FullContent != "" {
+		sb.WriteString("\nThis file was heavily modified (diff too large for GitHub to return). Review the full file content below.\n")
+		sb.WriteString("\n" + wrapInDelimiters("file_content", truncateLines(file.FullContent, 500)) + "\n")
+	} else if file.LargeFile {
+		sb.WriteString("\nThis file was heavily modified but content could not be fetched. Skip detailed review.\n")
+	} else {
+		sb.WriteString("\n" + wrapInDelimiters("pr_diff", file.RawDiff) + "\n")
+	}
 
-	if fileContent != "" {
+	if fileContent != "" && !file.LargeFile {
 		sb.WriteString("\nFull file content:\n```\n")
 		sb.WriteString(truncateLines(fileContent, 500))
 		sb.WriteString("\n```\n")
@@ -422,12 +499,19 @@ Respond with a JSON array of comments:
 [{
   "line": 42,                // line number in new file (required, > 0)
   "start_line": 40,          // start of multi-line range (0 if single-line)
-  "what": "Factual description of the issue — what is wrong or missing",
-  "why": "Impact and consequences — why this matters, what could go wrong",
+  "what": "One sentence: what's wrong. Use 'we' not 'you'",
+  "why": "One sentence: concrete impact in production. No arrow chains (→). Plain English",
   "severity": "critical",    // critical | warning | suggestion | praise
   "category": "bug",         // bug | security | performance | error_handling | style | readability | type_design | testing
-  "suggestion": "fixed code" // exact replacement for start_line..line (omit for praise)
+  "suggestion": "line1\nline2\nline3" // ONLY valid code that replaces start_line..line. NEVER prose, comments, or "Replace lines X-Y:" prefixes. Must compile/run if applied. Use real \n for newlines. Match the file's indentation. Omit for praise
 }]
+
+## Tone
+- Use "we" not "you" — collaborative, not adversarial ("we should validate" not "you forgot to validate")
+- For critical/warning: state the issue as fact ("This will crash when..." / "This leaks the auth token to...")
+- For suggestion: frame as question ("Could this cause issues when...?" / "Worth checking: does this handle...?")
+- Always explain the concrete failure scenario, not just the label
+- When the code is well-written, file a praise comment acknowledging it
 
 Return [] if changes look good. JSON array only.`)
 	return sb.String()
@@ -538,15 +622,34 @@ Every comment you file costs developer time to read, evaluate, and respond. Only
 1. Only comment on CHANGED lines — never review unchanged code
 2. If the same root cause manifests in multiple places, file ONE comment at the root cause location explaining the pattern. Do not repeat the same finding at each symptom
 3. Prioritize issues in public APIs, module boundaries, and exported interfaces over internal implementation details
-4. Do not comment on code style, naming conventions, or formatting unless it directly causes a bug or significantly harms readability. These are not actionable review comments
-5. For every issue, explain WHY it matters and what breaks in production
-6. Return [] if the changes look good — an empty review is better than a noisy one
-7. A false positive that wastes a developer's time is worse than missing a minor issue. If you can't point to the exact line that proves the bug, don't file it
+4. For every issue, explain WHY it matters and what breaks in production
+5. Return [] if the changes look good — an empty review is better than a noisy one
+6. A false positive that wastes a developer's time is worse than missing a minor issue. If you can't point to the exact line that proves the bug, don't file it
+
+## Severity calibration
+- "critical" = will crash, corrupt data, or create a security vulnerability in production. Use sparingly — if >50% of your comments are critical, you're inflating severity
+- "warning" = should fix before merge but won't cause immediate harm. Design smells, missing edge cases, silent failures
+- "suggestion" = nice to have, could improve later
+- "praise" = good code worth acknowledging
+- Only use "attacker" framing for code that handles external/user input. For internal libraries, say "if invalid input reaches this" instead
+
+## NEVER comment on
+- Code style, naming conventions, formatting, or import ordering
+- Missing documentation, comments, or type annotations
+- Issues a standard linter would catch (ESLint, golint, ruff, clippy)
+- Suggestions to "add error handling" without a concrete failure scenario
+- Anything that is a matter of preference rather than correctness
+
+## Analysis techniques — apply these BEFORE writing comments
+1. **Trace every return path**: for each function, verify every branch returns the correct type/value. Watch for early returns that skip cleanup, and catch blocks that change the return semantics.
+2. **Trace exception flow**: follow throw/catch chains across function boundaries. Does a rethrow inside a fallback/retry loop defeat the fallback? Does a catch swallow an error that a caller depends on?
+3. **Verify arithmetic step by step**: trace unit conversions, divisions, and multiplications. If a value is divided by 1000 for "per-unit" and again by 1000 for display, that's a double-division bug.
+4. **Check blast radius**: if <blast_radius> context is provided, consider how the changed code affects its dependents. Would callers break if a function now returns null instead of throwing? Would consumers of a registry break if entries are silently overwritten?
 
 ## Priority (highest first)
-1. **Bugs** — logic errors, off-by-one, null dereferences, broken invariants, race conditions, incorrect boundary checks
+1. **Bugs** — logic errors, off-by-one, null dereferences, broken invariants, race conditions, incorrect boundary checks, arithmetic errors
 2. **Security** — injection (SQL/XSS/command), hardcoded secrets, missing input validation, SSRF, path traversal
-3. **Silent failures** — swallowed errors, empty catch blocks, missing error propagation, async operations that silently fail
+3. **Silent failures** — swallowed errors, empty catch blocks, missing error propagation, async operations that silently fail, functions that return success on error conditions
 4. **Performance** — N+1 queries, unbounded operations, resource leaks, missing pagination
 5. **Type safety** — types that can represent invalid states, missing constraints at construction
 
@@ -557,7 +660,26 @@ If memory context (patterns, rules, past findings) is provided below, use it to:
 - Give higher severity to issues that match previously confirmed problem patterns
 
 ## Output
-Respond ONLY with a JSON array of comments. No other text.`
+Respond ONLY with a JSON array of comments. No other text.
+
+## Examples
+
+Good comment (critical — state as fact, single-line fix):
+{"severity":"critical","category":"bug","line":42,"start_line":0,"what":"Division by zero when the items array is empty","why":"arr.length is 0 → avg = total/0 → NaN propagates through billing calculations, silently corrupting every downstream value","suggestion":"if (!arr.length) return 0;"}
+
+Good comment (warning — explain attack scenario, multi-line fix with real newlines):
+{"severity":"warning","category":"security","line":20,"start_line":18,"what":"SQL built with string interpolation from user input","why":"An attacker controlling the 'name' param can inject arbitrary SQL — e.g. '; DROP TABLE users;--","suggestion":"const query = 'SELECT * FROM users WHERE name = $1';\nconst result = await db.query(query, [name]);"}
+
+Good comment (praise — acknowledge good code):
+{"severity":"praise","category":"bug","line":15,"what":"Good edge-case handling — the empty-array guard here prevents the NaN propagation we've seen in similar code","why":""}
+
+Bad comment (do NOT file):
+{"severity":"suggestion","category":"style","line":5,"what":"Consider renaming 'x' to 'count'","why":"More descriptive"}
+→ This is style, not a bug. Skip it.
+
+Bad comment (do NOT file):
+{"severity":"warning","category":"bug","line":30,"what":"This might fail if the server is down","why":"Network calls can fail"}
+→ Too vague. No concrete failure scenario tied to THIS code. Skip it.`
 
 func buildAgenticSystemPrompt(owner, repo string) string {
 	return baseSystemPrompt + fmt.Sprintf(`

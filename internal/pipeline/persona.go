@@ -156,7 +156,12 @@ type repoSettings struct {
 	CrossFileContext    *bool  `json:"cross_file_context,omitempty"`
 	BlastRadius         *bool  `json:"blast_radius,omitempty"`
 	ScenarioMemory      *bool  `json:"scenario_memory,omitempty"`
-	CodeSimulation      bool   `json:"code_simulation,omitempty"`
+	CodeSimulation      *bool  `json:"code_simulation,omitempty"`
+	PREnrichment      *bool `json:"pr_enrichment,omitempty"`
+	LearnPatterns     *bool `json:"learn_patterns,omitempty"`
+	LearnConventions  *bool `json:"learn_conventions,omitempty"`
+	FileSynthesis     *bool `json:"file_synthesis,omitempty"`
+	ArchitectureGraph *bool `json:"architecture_graph,omitempty"`
 }
 
 func parseRepoSettings(settingsJSON json.RawMessage) (repoSettings, bool) {
@@ -199,10 +204,35 @@ func isScenarioMemoryEnabled(settingsJSON json.RawMessage) bool {
 }
 
 // isCodeSimulationEnabled checks if code simulation is enabled in repo settings.
-// Defaults to false when not explicitly set (experimental feature).
+// Defaults to true when not explicitly set.
 func isCodeSimulationEnabled(settingsJSON json.RawMessage) bool {
 	s, ok := parseRepoSettings(settingsJSON)
-	return ok && s.CodeSimulation
+	return !ok || s.CodeSimulation == nil || *s.CodeSimulation
+}
+
+func isPREnrichmentEnabled(settingsJSON json.RawMessage) bool {
+	s, ok := parseRepoSettings(settingsJSON)
+	return !ok || s.PREnrichment == nil || *s.PREnrichment
+}
+
+func isLearnPatternsEnabled(settingsJSON json.RawMessage) bool {
+	s, ok := parseRepoSettings(settingsJSON)
+	return !ok || s.LearnPatterns == nil || *s.LearnPatterns
+}
+
+func isLearnConventionsEnabled(settingsJSON json.RawMessage) bool {
+	s, ok := parseRepoSettings(settingsJSON)
+	return !ok || s.LearnConventions == nil || *s.LearnConventions
+}
+
+func isFileSynthesisEnabled(settingsJSON json.RawMessage) bool {
+	s, ok := parseRepoSettings(settingsJSON)
+	return !ok || s.FileSynthesis == nil || *s.FileSynthesis
+}
+
+func isArchitectureGraphEnabled(settingsJSON json.RawMessage) bool {
+	s, ok := parseRepoSettings(settingsJSON)
+	return !ok || s.ArchitectureGraph == nil || *s.ArchitectureGraph
 }
 
 // PersonaSpecialistHint returns a short directive for appending to specialist prompts.

@@ -25,12 +25,20 @@ export type StageTokens = {
   completion_tokens: number;
   total_tokens: number;
   cost?: number;
+  model?: string;
+  provider?: string;
 };
 
 export type TokenUsage = {
   triage: StageTokens;
   review: StageTokens[];
   scoring?: StageTokens;
+  synthesis?: StageTokens;
+  enrichment?: StageTokens;
+  conventions?: StageTokens;
+  patterns?: StageTokens;
+  file_synthesis?: StageTokens[];
+  graph?: StageTokens;
   total: StageTokens;
 };
 
@@ -57,6 +65,8 @@ export type Review = {
   persona?: string;
   is_incremental?: boolean;
   simulation_results?: SimulationResult[];
+  diagram?: string;
+  diagram_title?: string;
   created_at: string;
   completed_at?: string;
 };
@@ -209,6 +219,7 @@ export type Scenario = {
   expected_outcome: string;
   is_outdated: boolean;
   last_run_at?: string;
+  trigger_count?: number;
 };
 
 export type FileRisk = {
@@ -227,4 +238,27 @@ export type DecisionTrace = {
   pr_number?: number;
   author?: string;
   created_at: string;
+};
+
+export type GraphNode = {
+  id: number;
+  repo_id: number;
+  kind: string;
+  name: string;
+  file_path: string;
+  line_start: number;
+  line_end: number;
+  language: string;
+  pr_number: number | null;
+  is_merged: boolean;
+};
+
+export type GraphEdge = {
+  id: number;
+  repo_id: number;
+  source_id: number;
+  target_id: number;
+  kind: string;
+  source_name: string;
+  target_name: string;
 };

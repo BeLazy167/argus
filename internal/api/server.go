@@ -67,6 +67,9 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 	// Webhooks (unauthenticated, signature-verified)
 	r.Post("/webhooks/github", s.handleWebhook)
 
+	// WebSocket stream — outside /api/v1 auth, handles its own auth from query params
+	r.Get("/api/v1/reviews/{reviewID}/stream", s.streamReviewWS)
+
 	// API v1 (authenticated via JWT)
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Use(s.jwtAuth)
@@ -81,9 +84,6 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 		// Scoped (requires linked installation)
 		r.Group(func(r chi.Router) {
 			r.Use(s.requireInstallationScope)
-
-			// SSE stream — no timeout (long-lived connection)
-			r.Get("/reviews/{reviewID}/stream", s.streamReview)
 
 			// All other scoped routes — with timeout
 			r.Group(func(r chi.Router) {
@@ -148,11 +148,17 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 				r.Get("/patterns/stats", s.getPatternStats)
 				r.Post("/patterns", s.createPattern)
 				r.Delete("/patterns/{patternID}", s.deletePattern)
+				r.Get("/patterns/{patternID}", s.getPattern)
+
+				// Graph
+				r.Get("/repos/{repoID}/graph", s.getGraph)
+				r.Get("/repos/{repoID}/files/*", s.getFileMemory)
 
 				// Scenarios
 				r.Get("/repos/{repoID}/scenarios", s.listScenarios)
 				r.Post("/repos/{repoID}/scenarios", s.createScenario)
 				r.Delete("/scenarios/{scenarioID}", s.deactivateScenario)
+				r.Get("/scenarios/{scenarioID}", s.getScenario)
 
 				// Traces
 				r.Get("/repos/{repoID}/traces", s.listTraces)

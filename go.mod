@@ -33,4 +33,5 @@ require (
 	github.com/zclconf/go-cty-yaml v1.1.0 // indirect
 	golang.org/x/mod v0.27.0 // indirect
 	golang.org/x/text v0.29.0 // indirect
+	nhooyr.io/websocket v1.8.17 // indirect
 )

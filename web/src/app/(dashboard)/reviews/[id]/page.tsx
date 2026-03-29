@@ -1,11 +1,10 @@
 "use client";
 
-import { useMemo, useState, useCallback, useEffect } from "react";
+import { useMemo, useState, useCallback, useEffect, useRef } from "react";
+import DOMPurify from "dompurify";
 import { useParams } from "next/navigation";
 import Link from "next/link";
-import ReactMarkdown from "react-markdown";
-import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
-import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
+import dynamic from "next/dynamic";
 import {
   ArrowLeft,
   ExternalLink,
@@ -18,19 +17,26 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  ChevronUp,
   Copy,
   MessageSquare,
   Filter,
+  Zap,
 } from "lucide-react";
 import { useReview, useRetryReview } from "@/lib/queries/reviews";
 import { useRepos } from "@/lib/queries/repos";
+import { usePattern } from "@/lib/queries/patterns";
 import { githubPrUrl } from "@/lib/github";
 import { ScoreBox } from "@/components/dashboard/score-badge";
 import { StatusBadge } from "@/components/dashboard/status-badge";
 import { formatDistanceToNow } from "@/lib/time";
 import { useReviewStream } from "@/lib/hooks/use-review-stream";
 import { PipelineProgress } from "./progress-bar";
+import { ActivityTimeline } from "./activity-timeline";
 import type { Repo, ReviewComment, TokenUsage } from "@/lib/types";
+
+const Markdown = dynamic(() => import("./markdown").then(m => ({ default: m.Markdown })), { ssr: false });
+const CodeSnippet = dynamic(() => import("./markdown").then(m => ({ default: m.CodeSnippet })), { ssr: false });
 
 /* ── Helpers ─────────────────────────────────── */
 
@@ -47,7 +53,6 @@ function lineRef(c: ReviewComment): string {
   return line != null ? `L${line}` : "";
 }
 
-/** Guess language from file extension for syntax highlighting. */
 function langFromPath(path: string): string {
   const ext = path.split(".").pop()?.toLowerCase() ?? "";
   const map: Record<string, string> = {
@@ -83,64 +88,10 @@ function langFromPath(path: string): string {
  * Keep only the high-level synthesis prose.
  */
 function extractSynthesis(summary: string): string {
-  const lines = summary.split("\n");
-  const cleaned: string[] = [];
-  let skipping = false;
-  let inCodeBlock = false;
-
-  for (const line of lines) {
-    // Strip ALL code blocks from summary — they duplicate the detail view
-    if (/^```/.test(line.trim())) {
-      inCodeBlock = !inCodeBlock;
-      continue;
-    }
-    if (inCodeBlock) continue;
-
-    // Skip headings like "# Argus Review" or "## Review Summary"
-    if (/^#{1,3}\s*(argus\s*review|review\s*summary)/i.test(line)) continue;
-    // Skip "Reviewed N files with M comments" stat lines
-    if (/reviewed\s+\d+\s+file/i.test(line)) continue;
-    // Skip file name references — start skipping per-file details
-    if (
-      /^[`*\s]*[\w/.-]+\.(md|ts|tsx|js|jsx|go|py|rs|css|html|json|yaml|yml|toml|sql)[`*\s]*$/i.test(
-        line.trim(),
-      )
-    ) {
-      skipping = true;
-      continue;
-    }
-    // Skip file headings like "### src/lib/foo.ts"
-    if (/^#{2,4}\s+[`*]*[\w/.-]+\.\w+/i.test(line)) {
-      skipping = true;
-      continue;
-    }
-    // Skip bullet lines with severity tags
-    if (
-      /^\s*[-*•]\s*\*?\*?\[?(critical|warning|suggestion|praise)\]?\*?\*?/i.test(line)
-    ) {
-      skipping = true;
-      continue;
-    }
-    if (/^\s*[-*•]\s*\*{0,2}\[/.test(line)) {
-      skipping = true;
-      continue;
-    }
-    // Skip "If you need to..." fix instruction lines
-    if (/^\s*(if you need|consider|you (should|could|can)|instead|use )/i.test(line.trim()) && skipping) {
-      continue;
-    }
-    if (skipping) {
-      if (line.trim() === "") skipping = false;
-      else if (/^\s{2,}/.test(line) || /^\s*[-*•]/.test(line)) continue;
-      else skipping = false;
-    }
-    if (!skipping) cleaned.push(line);
-  }
-
-  return cleaned
-    .join("\n")
-    .replace(/^\n+|\n+$/g, "")
-    .replace(/\n{3,}/g, "\n\n");
+  return summary
+    .replace(/^#+\s*Argus Review\s*\n*/i, "")
+    .replace(/^Reviewed \d+ files with \d+ comments\.\s*\n*/i, "")
+    .replace(/^\n+|\n+$/g, "");
 }
 
 /* ── Severity Maps ───────────────────────────── */
@@ -173,194 +124,151 @@ const severityBg: Record<string, string> = {
   praise: "bg-green-400/[0.03]",
 };
 
+/* ── Mermaid ─────────────────────────────────── */
+
+function MermaidChart({ chart }: { chart: string }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [error, setError] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    import("mermaid")
+      .then((m) => {
+        if (cancelled) return;
+        m.default.initialize({
+          startOnLoad: false,
+          theme: "dark",
+          themeVariables: {
+            primaryColor: "#44403c",
+            primaryTextColor: "#f5f0eb",
+            primaryBorderColor: "#57534e",
+            lineColor: "#78716c",
+            secondaryColor: "#292524",
+            tertiaryColor: "#1c1917",
+            nodeTextColor: "#f5f0eb",
+            nodeBorder: "#57534e",
+            mainBkg: "#44403c",
+            clusterBkg: "#292524",
+            clusterBorder: "#57534e",
+            titleColor: "#f5f0eb",
+            edgeLabelBackground: "#292524",
+            textColor: "#f5f0eb",
+          },
+        });
+        if (!ref.current) return;
+        ref.current.textContent = "";
+        return m.default.render("mermaid-" + Math.random().toString(36).slice(2), chart);
+      })
+      .then((result) => {
+        if (cancelled || !ref.current || !result) return;
+        const clean = DOMPurify.sanitize(result.svg, {
+          USE_PROFILES: { svg: true, svgFilters: true },
+          ADD_TAGS: ["foreignObject"],
+        });
+        ref.current.innerHTML = clean;
+      })
+      .catch(() => {
+        if (!cancelled) setError(true);
+      });
+    return () => { cancelled = true; };
+  }, [chart]);
+
+  if (error) return <p className="text-[11px] font-mono text-slate-text">Diagram could not be rendered</p>;
+  return <div ref={ref} className="flex justify-center" />;
+}
+
 /* ── Sub-components ──────────────────────────── */
 
 function TokenPill({ usage }: { usage: TokenUsage }) {
   const total = usage.total;
   const label = `${formatTokens(total)} tokens${total.cost != null ? ` · $${total.cost.toFixed(3)}` : ""}`;
-  const stages: [string, { total_tokens: number; cost?: number }][] = [];
+  const stages: [string, { total_tokens: number; cost?: number; model?: string }][] = [];
   if (usage.triage?.total_tokens) stages.push(["triage", usage.triage]);
+  if (usage.enrichment?.total_tokens) stages.push(["enrichment", usage.enrichment]);
+  if (usage.conventions?.total_tokens) stages.push(["conventions", usage.conventions]);
+  if (usage.patterns?.total_tokens) stages.push(["patterns", usage.patterns]);
   if (usage.review?.length) {
     const reviewTotal = usage.review.reduce((acc, r) => ({
       total_tokens: acc.total_tokens + r.total_tokens,
       cost: (acc.cost ?? 0) + (r.cost ?? 0),
-    }), { total_tokens: 0, cost: 0 });
+      model: r.model,
+    }), { total_tokens: 0, cost: 0, model: undefined as string | undefined });
     stages.push(["review", reviewTotal]);
   }
+  if (usage.file_synthesis?.length) {
+    const fsTotal = usage.file_synthesis.reduce((acc, r) => ({
+      total_tokens: acc.total_tokens + r.total_tokens,
+      cost: (acc.cost ?? 0) + (r.cost ?? 0),
+      model: r.model,
+    }), { total_tokens: 0, cost: 0, model: undefined as string | undefined });
+    stages.push(["file_synthesis", fsTotal]);
+  }
   if (usage.scoring?.total_tokens) stages.push(["scoring", usage.scoring]);
+  if (usage.synthesis?.total_tokens) stages.push(["synthesis", usage.synthesis]);
+  if (usage.graph?.total_tokens) stages.push(["graph", usage.graph]);
+
+  const stageLabels: Record<string, string> = {
+    triage: "Triage",
+    enrichment: "Enrichment",
+    conventions: "Conventions",
+    patterns: "Patterns",
+    review: "Review",
+    file_synthesis: "File synthesis",
+    scoring: "Scoring",
+    synthesis: "Synthesis",
+    graph: "Graph",
+  };
+
+  // Group model name — show once if all stages use the same model
+  const models = stages.map(([, s]) => s.model).filter(Boolean);
+  const uniqueModels = [...new Set(models)];
+  const singleModel = uniqueModels.length === 1 ? uniqueModels[0] : null;
 
   return (
     <div className="group relative">
-      <span className="inline-flex items-center rounded-md border border-iron bg-iron/30 px-2.5 py-1 text-[11px] font-mono text-slate-text">
+      <span className="inline-flex items-center rounded-md border border-iron bg-iron/30 px-2.5 py-1 text-[11px] font-mono text-slate-text cursor-default">
         {label}
       </span>
       {stages.length > 0 && (
-        <div className="absolute right-0 top-full mt-1.5 z-10 hidden group-hover:block">
-          <div className="rounded-lg border border-iron bg-charcoal p-3 shadow-xl min-w-[180px]">
-            <p className="text-[10px] font-mono uppercase tracking-wider text-slate-text mb-2">
-              By stage
-            </p>
-            {stages.map(([stage, s]) => (
-              <div
-                key={stage}
-                className="flex items-center justify-between py-0.5"
-              >
-                <span className="text-[10px] font-mono text-amber">
-                  {stage}
-                </span>
-                <span className="text-[10px] font-mono text-foreground">
-                  {formatTokens(s)}
-                  {s.cost != null && <> · ${s.cost.toFixed(3)}</>}
-                </span>
-              </div>
-            ))}
+        <div className="absolute left-0 top-full mt-1.5 z-10 hidden group-hover:block">
+          <div className="rounded-lg border border-iron bg-charcoal p-3 shadow-xl w-[240px]">
+            {singleModel && (
+              <p className="text-[10px] font-mono text-slate-text/60 mb-2 truncate">
+                {singleModel}
+              </p>
+            )}
+            <div className="space-y-1">
+              {stages.map(([stage, s]) => (
+                <div key={stage}>
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-mono text-ash">
+                      {stageLabels[stage] ?? stage}
+                    </span>
+                    <span className="text-[11px] font-mono text-foreground tabular-nums">
+                      {formatTokens(s)}
+                      {s.cost != null && s.cost > 0 && (
+                        <span className="text-slate-text ml-1.5">${s.cost.toFixed(3)}</span>
+                      )}
+                    </span>
+                  </div>
+                  {!singleModel && s.model && (
+                    <p className="text-[9px] font-mono text-slate-text/50 truncate">{s.model}</p>
+                  )}
+                </div>
+              ))}
+            </div>
+            <div className="mt-2 pt-2 border-t border-iron flex items-center justify-between">
+              <span className="text-[11px] font-mono text-amber">Total</span>
+              <span className="text-[11px] font-mono text-foreground tabular-nums">
+                {formatTokens(total)}
+                {total.cost != null && (
+                  <span className="text-amber ml-1.5">${total.cost.toFixed(3)}</span>
+                )}
+              </span>
+            </div>
           </div>
         </div>
       )}
-    </div>
-  );
-}
-
-/** Prose markdown with Geist Sans for body, syntax highlighting for code blocks. */
-function Markdown({
-  children,
-  filePath,
-}: {
-  children: string;
-  filePath?: string;
-}) {
-  const lang = filePath ? langFromPath(filePath) : "text";
-
-  return (
-    <div className="font-sans">
-      <ReactMarkdown
-        components={{
-          h1: ({ children }) => (
-            <h3 className="font-display text-base font-bold text-foreground mt-5 mb-2 first:mt-0">
-              {children}
-            </h3>
-          ),
-          h2: ({ children }) => (
-            <h3 className="font-display text-base font-bold text-foreground mt-5 mb-2 first:mt-0">
-              {children}
-            </h3>
-          ),
-          h3: ({ children }) => (
-            <h4 className="font-display text-sm font-semibold text-foreground mt-4 mb-1.5 first:mt-0">
-              {children}
-            </h4>
-          ),
-          p: ({ children }) => (
-            <p className="text-[13px] text-foreground/80 leading-[1.75] mb-3 last:mb-0">
-              {children}
-            </p>
-          ),
-          ul: ({ children }) => (
-            <ul className="list-disc list-outside ml-4 space-y-1.5 mb-3 text-[13px] text-foreground/80">
-              {children}
-            </ul>
-          ),
-          ol: ({ children }) => (
-            <ol className="list-decimal list-outside ml-4 space-y-1.5 mb-3 text-[13px] text-foreground/80">
-              {children}
-            </ol>
-          ),
-          li: ({ children }) => (
-            <li className="leading-[1.75] pl-1">{children}</li>
-          ),
-          strong: ({ children }) => (
-            <strong className="font-semibold text-foreground">{children}</strong>
-          ),
-          code: ({ className, children }) => {
-            const match = className?.match(/language-(\w+)/);
-            const codeLang = match?.[1] ?? lang;
-            const codeStr = String(children).replace(/\n$/, "");
-
-            if (className?.includes("language-") || codeStr.includes("\n")) {
-              return (
-                <SyntaxHighlighter
-                  style={oneDark}
-                  language={codeLang}
-                  customStyle={{
-                    margin: "12px 0",
-                    borderRadius: "6px",
-                    fontSize: "12px",
-                    border: "1px solid oklch(0.18 0 0 / 0.6)",
-                    background: "oklch(0.07 0 0 / 0.8)",
-                  }}
-                >
-                  {codeStr}
-                </SyntaxHighlighter>
-              );
-            }
-            return (
-              <code className="bg-amber/10 border border-amber/20 rounded px-1.5 py-0.5 text-[11px] font-mono text-amber">
-                {children}
-              </code>
-            );
-          },
-          pre: ({ children }) => <>{children}</>,
-          a: ({ href, children }) => (
-            <a
-              href={href}
-              className="text-amber hover:underline underline-offset-2"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              {children}
-            </a>
-          ),
-        }}
-      >
-        {children}
-      </ReactMarkdown>
-    </div>
-  );
-}
-
-function CodeSnippet({
-  code,
-  startLine,
-  language,
-}: {
-  code: string;
-  startLine?: number;
-  language: string;
-}) {
-  if (!code) return null;
-  const start = startLine ?? 1;
-
-  return (
-    <div className="mx-4 mt-3 mb-1 rounded-md overflow-hidden border border-iron/40">
-      <SyntaxHighlighter
-        style={oneDark}
-        language={language}
-        showLineNumbers
-        startingLineNumber={start}
-        lineNumberStyle={{
-          minWidth: "3em",
-          paddingRight: "1em",
-          color: "oklch(0.18 0 0 / 0.6)",
-          borderRight: "1px solid oklch(0.18 0 0 / 0.3)",
-          marginRight: "1em",
-          userSelect: "none",
-        }}
-        customStyle={{
-          margin: 0,
-          borderRadius: 0,
-          fontSize: "11px",
-          lineHeight: "1.65",
-          background: "oklch(0.07 0 0 / 0.8)",
-          padding: "8px 0",
-        }}
-        wrapLines
-        lineProps={() => ({
-          style: { display: "flex", paddingRight: "1em" },
-          className: "hover:bg-[oklch(0.18_0_0/0.15)]",
-        })}
-      >
-        {code}
-      </SyntaxHighlighter>
     </div>
   );
 }
@@ -384,8 +292,7 @@ function CopyFixButton({
       `Category: ${comment.category ?? "general"}`,
     ].join("\n");
 
-    navigator.clipboard.writeText(prompt);
-    setCopied(true);
+    navigator.clipboard.writeText(prompt).then(() => setCopied(true)).catch(() => {});
     setTimeout(() => setCopied(false), 2000);
   }, [comment, filePath, ref]);
 
@@ -394,7 +301,7 @@ function CopyFixButton({
       type="button"
       onClick={handleCopy}
       aria-label={`Copy fix prompt for ${filePath}${ref ? ` ${ref}` : ""} ${comment.severity ?? ""}`}
-      className="inline-flex items-center gap-1.5 rounded-md border border-iron/50 bg-iron/20 px-2.5 py-1 text-[10px] font-mono text-slate-text hover:text-amber hover:border-amber/30 hover:bg-amber/5 transition-all opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+      className="inline-flex items-center gap-1.5 rounded-md border border-iron/50 bg-iron/20 px-2.5 py-1 text-[11px] font-mono text-slate-text hover:text-amber hover:border-amber/30 hover:bg-amber/5 transition-all opacity-0 group-hover:opacity-100 focus-visible:opacity-100 cursor-pointer"
     >
       {copied ? (
         <>
@@ -408,6 +315,22 @@ function CopyFixButton({
         </>
       )}
     </button>
+  );
+}
+
+function PatternDetail({ patternId }: { patternId: number }) {
+  const { data: pattern, isLoading } = usePattern(patternId);
+  if (isLoading) return <div className="mt-2 text-[11px] font-mono text-slate-text">Loading pattern...</div>;
+  if (!pattern) return <div className="mt-2 text-[11px] font-mono text-slate-text">Pattern not found</div>;
+  return (
+    <div className="mt-2 rounded border border-iron bg-iron/10 p-3">
+      <p className="text-[11px] font-mono text-slate-text uppercase tracking-wider mb-1">Matched Pattern</p>
+      <p className="text-xs font-mono text-foreground whitespace-pre-wrap">{pattern.content}</p>
+      <div className="flex gap-4 mt-2 text-[11px] font-mono text-slate-text">
+        {pattern.source && <span>Source: {pattern.source}</span>}
+        {pattern.category && <span>Category: {pattern.category}</span>}
+      </div>
+    </div>
   );
 }
 
@@ -425,36 +348,37 @@ function CommentCard({
     ? (severityBg[comment.severity] ?? "")
     : "";
   const newFindingBorder = comment.is_new_finding ? "border-l-2 border-l-emerald-500/40" : "";
+  const [patternExpanded, setPatternExpanded] = useState(false);
 
   return (
     <div
-      className={`group border-l-[3px] ${borderClass} ${bgClass} ${newFindingBorder} hover:bg-charcoal/40 transition-colors px-5 py-4 mx-4 my-2 rounded-r-md`}
+      className={`group border-l-[3px] ${borderClass} ${bgClass} ${newFindingBorder} hover:bg-iron/15 transition-colors px-5 py-4 mx-4 my-2 rounded-r-md`}
     >
       <div className="flex items-center gap-2 mb-3">
         {comment.severity && (
           <span
-            className={`inline-flex items-center rounded-sm border px-2.5 py-0.5 text-[10px] font-mono uppercase tracking-wider font-medium ${severityStyles[comment.severity] ?? ""}`}
+            className={`inline-flex items-center rounded-sm border px-2 py-0.5 text-[11px] font-mono uppercase tracking-wider font-medium ${severityStyles[comment.severity] ?? ""}`}
           >
             {comment.severity}
           </span>
         )}
         {comment.category && (
-          <span className="inline-flex items-center rounded-sm border bg-iron/30 text-slate-text border-iron/60 px-2.5 py-0.5 text-[10px] font-mono">
+          <span className="inline-flex items-center rounded-sm border bg-iron/30 text-slate-text border-iron/60 px-2 py-0.5 text-[11px] font-mono">
             {comment.category}
           </span>
         )}
         {comment.specialist && (
-          <span className="inline-flex items-center rounded-sm border bg-purple-400/10 text-purple-400 border-purple-400/30 px-2.5 py-0.5 text-[10px] font-mono">
+          <span className="inline-flex items-center rounded-sm border bg-purple-400/10 text-purple-400 border-purple-400/30 px-2 py-0.5 text-[11px] font-mono">
             {comment.specialist}
           </span>
         )}
         {comment.confidence_score != null && (
-          <span className="text-[10px] font-mono text-slate-text" title="Confidence score">
+          <span className="text-[11px] font-mono text-slate-text" title="Confidence score">
             {comment.confidence_score}%
           </span>
         )}
         {lineRef(comment) && (
-          <span className="text-[10px] font-mono text-slate-text">
+          <span className="text-[11px] font-mono text-slate-text">
             {lineRef(comment)}
           </span>
         )}
@@ -465,17 +389,29 @@ function CommentCard({
       {(comment.is_new_finding || comment.matched_pattern_score || comment.enforced_rule_content) && (
         <div className="flex flex-wrap gap-1.5 mt-1.5 mb-3">
           {comment.is_new_finding && (
-            <span className="inline-flex items-center gap-1 rounded border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-mono text-emerald-400">
+            <span className="inline-flex items-center gap-1 rounded border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-mono text-emerald-400">
               New Finding
             </span>
           )}
-          {comment.matched_pattern_score && (
-            <span className="inline-flex items-center gap-1 rounded border border-amber/30 bg-amber/10 px-2 py-0.5 text-[10px] font-mono text-amber">
-              Pattern Match ({Math.round(comment.matched_pattern_score * 100)}%)
-            </span>
+          {comment.matched_pattern_id && comment.matched_pattern_score && (
+            <div>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setPatternExpanded((prev) => !prev);
+                }}
+                className="inline-flex items-center gap-1 rounded border border-amber/30 bg-amber/10 px-2 py-0.5 text-[11px] font-mono text-amber hover:bg-amber/20 transition-colors cursor-pointer"
+              >
+                Pattern Match ({Math.round(comment.matched_pattern_score * 100)}%)
+                <ChevronDown className={`h-2.5 w-2.5 transition-transform ${patternExpanded ? "rotate-180" : ""}`} />
+              </button>
+              {patternExpanded && (
+                <PatternDetail patternId={comment.matched_pattern_id} />
+              )}
+            </div>
           )}
           {comment.enforced_rule_content && (
-            <span className="inline-flex items-center gap-1 rounded border border-purple-500/30 bg-purple-500/10 px-2 py-0.5 text-[10px] font-mono text-purple-400" title={comment.enforced_rule_content}>
+            <span className="inline-flex items-center gap-1 rounded border border-purple-500/30 bg-purple-500/10 px-2 py-0.5 text-[11px] font-mono text-purple-400" title={comment.enforced_rule_content}>
               Enforces: {comment.enforced_rule_content.slice(0, 60)}{comment.enforced_rule_content.length > 60 ? '...' : ''}
             </span>
           )}
@@ -491,13 +427,19 @@ function FileGroup({
   fileComments,
   id,
   hidden,
+  forceExpanded,
 }: {
   filePath: string;
   fileComments: readonly ReviewComment[];
   id: string;
   hidden: boolean;
+  forceExpanded?: boolean;
 }) {
   const [expanded, setExpanded] = useState(true);
+
+  useEffect(() => {
+    if (forceExpanded !== undefined) setExpanded(forceExpanded);
+  }, [forceExpanded]);
   const Chevron = expanded ? ChevronDown : ChevronRight;
   const contentId = `${id}-content`;
   const language = langFromPath(filePath);
@@ -520,7 +462,7 @@ function FileGroup({
         onClick={() => setExpanded(!expanded)}
         aria-expanded={expanded}
         aria-controls={contentId}
-        className="flex items-center gap-2 w-full bg-charcoal px-4 py-3 border-b border-iron hover:bg-iron/20 transition-colors text-left"
+        className="flex items-center gap-2 w-full bg-charcoal px-4 py-3 border-b border-iron hover:bg-iron/20 transition-colors text-left cursor-pointer"
       >
         <Chevron className="h-3.5 w-3.5 text-slate-text shrink-0" />
         <FileCode className="h-3.5 w-3.5 text-slate-text shrink-0" />
@@ -533,7 +475,7 @@ function FileGroup({
               className={`h-2 w-2 rounded-full ${severityDot[maxSeverity]}`}
             />
           )}
-          <span className="text-[10px] font-mono text-slate-text">
+          <span className="text-[11px] font-mono text-slate-text">
             <MessageSquare className="inline h-3 w-3 mr-1 -mt-0.5" />
             {fileComments.length}
           </span>
@@ -578,7 +520,7 @@ function FileTOC({
 }) {
   return (
     <nav className="sticky top-6 space-y-1" aria-label="File navigation">
-      <p className="text-[10px] font-mono uppercase tracking-[0.15em] text-slate-text mb-3 px-2">
+      <p className="text-[11px] font-mono uppercase tracking-[0.15em] text-slate-text mb-3 px-2">
         Files
       </p>
       {grouped.map(([filePath, fileComments]) => {
@@ -608,7 +550,7 @@ function FileTOC({
               />
             )}
             <span className="truncate">{filePath.split("/").pop()}</span>
-            <span className="ml-auto text-[10px] text-iron shrink-0">
+            <span className="ml-auto text-[11px] text-slate-text shrink-0">
               {fileComments.length}
             </span>
           </a>
@@ -620,7 +562,7 @@ function FileTOC({
         <div className="pt-3 mt-3 border-t border-iron/30 space-y-0.5">
           <div className="flex items-center gap-1.5 px-2 mb-2">
             <Filter className="h-3 w-3 text-slate-text" />
-            <p className="text-[10px] font-mono uppercase tracking-[0.15em] text-slate-text">
+            <p className="text-[11px] font-mono uppercase tracking-[0.15em] text-slate-text">
               Filter
             </p>
           </div>
@@ -645,7 +587,7 @@ function FileTOC({
                     className={`h-2 w-2 rounded-full ${severityDot[sev]}`}
                   />
                   <span className="capitalize">{sev}</span>
-                  <span className="ml-auto text-iron">
+                  <span className="ml-auto text-slate-text">
                     {severityCounts[sev]}
                   </span>
                 </button>
@@ -655,7 +597,7 @@ function FileTOC({
             <button
               type="button"
               onClick={() => onSeverityFilter(null)}
-              className="flex items-center gap-1 w-full px-2 py-1 text-[10px] font-mono text-amber hover:underline cursor-pointer"
+              className="flex items-center gap-1 w-full px-2 py-1 text-[11px] font-mono text-amber hover:underline cursor-pointer"
             >
               Clear filter
             </button>
@@ -674,12 +616,20 @@ export default function ReviewDetailPage() {
   const { data: repos } = useRepos();
   const retryReview = useRetryReview();
   const [activeSeverity, setActiveSeverity] = useState<string | null>(null);
+  const [allExpanded, setAllExpanded] = useState(true);
+  const [expandToggle, setExpandToggle] = useState(0);
 
   const review = data?.review;
   const comments = data?.comments ?? [];
 
   const isLive = review?.status === "pending" || review?.status === "in_progress";
-  const { stage, triageResults, failedStage } = useReviewStream(id, isLive);
+  const { stage, triageResults, failedStage, timeline, liveTokens } = useReviewStream(id, isLive);
+
+  const filesReviewed = useMemo(() =>
+    new Set(timeline.filter(e => e.type === "file").map(e => e.message)).size,
+    [timeline]
+  );
+  const totalFiles = triageResults?.length ?? 0;
 
   const repoMap = useMemo(
     () => new Map<number, Repo>((repos ?? []).map((r) => [r.id, r])),
@@ -726,6 +676,14 @@ export default function ReviewDetailPage() {
     return set;
   }, [grouped, activeSeverity]);
 
+  const memoryStats = useMemo(() => {
+    const newFindings = comments.filter(c => c.is_new_finding).length;
+    const patternMatches = comments.filter(c => c.matched_pattern_id || (c.matched_pattern_score && c.matched_pattern_score > 0)).length;
+    const rulesEnforced = comments.filter(c => c.enforced_rule_content).length;
+    const memoryUsed = patternMatches + rulesEnforced;
+    return { newFindings, patternMatches, rulesEnforced, memoryUsed, total: comments.length };
+  }, [comments]);
+
   // Scroll-aware active file tracking
   const [activeFileId, setActiveFileId] = useState<string | null>(null);
 
@@ -752,12 +710,15 @@ export default function ReviewDetailPage() {
       clearTimeout(timer);
       observer.disconnect();
     };
-  }, [grouped]);
+  }, [grouped.length]);
 
   if (isLoading) {
     return (
-      <div className="flex items-center justify-center py-20">
-        <Loader2 className="h-6 w-6 animate-spin text-slate-text" />
+      <div className="space-y-6 p-6">
+        <div className="h-8 w-64 animate-pulse rounded bg-iron/20" />
+        <div className="h-40 animate-pulse rounded-lg border border-iron bg-charcoal/40" />
+        <div className="h-60 animate-pulse rounded-lg border border-iron bg-charcoal/40" />
+        <div className="h-40 animate-pulse rounded-lg border border-iron bg-charcoal/40" />
       </div>
     );
   }
@@ -792,16 +753,16 @@ export default function ReviewDetailPage() {
           Reviews
         </Link>
         <span className="text-iron text-xs">/</span>
-        <span className="text-xs font-sans text-foreground/60 truncate max-w-[300px]">
+        <span className="text-xs font-sans text-foreground/60 truncate max-w-[300px]" title={review.pr_title}>
           {review.pr_title}
         </span>
       </nav>
 
       {/* Header card */}
       <header className="rounded-lg border border-iron bg-charcoal p-6 mb-6">
-        <div className="flex items-start justify-between gap-6">
+        <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 sm:gap-6">
           <div className="flex-1 min-w-0">
-            <h1 className="font-display text-xl font-bold text-foreground mb-2 truncate">
+            <h1 className="font-display text-xl font-bold text-foreground mb-2 truncate" title={review.pr_title}>
               {review.pr_title}
             </h1>
             <div className="flex items-center gap-3 flex-wrap">
@@ -815,22 +776,22 @@ export default function ReviewDetailPage() {
               </span>
               <StatusBadge status={review.status} />
               {review.deep_review && (
-                <span className="inline-flex items-center rounded-sm border bg-purple-400/10 text-purple-400 border-purple-400/30 px-2 py-0.5 text-[10px] font-mono">
+                <span className="inline-flex items-center rounded-sm border bg-purple-400/10 text-purple-400 border-purple-400/30 px-2 py-0.5 text-[11px] font-mono">
                   Deep
                 </span>
               )}
               {review.is_incremental && (
-                <span className="inline-flex items-center rounded-sm border bg-cyan-400/10 text-cyan-400 border-cyan-400/30 px-2 py-0.5 text-[10px] font-mono">
+                <span className="inline-flex items-center rounded-sm border bg-cyan-400/10 text-cyan-400 border-cyan-400/30 px-2 py-0.5 text-[11px] font-mono">
                   Incremental
                 </span>
               )}
               {review.persona && (
-                <span className="inline-flex items-center rounded-sm border bg-iron/30 text-slate-text border-iron/60 px-2 py-0.5 text-[10px] font-mono">
+                <span className="inline-flex items-center rounded-sm border bg-iron/30 text-slate-text border-iron/60 px-2 py-0.5 text-[11px] font-mono">
                   {review.persona}
                 </span>
               )}
             </div>
-            <div className="flex items-center gap-3 mt-2.5 text-[10px] font-mono text-iron">
+            <div className="flex items-center gap-3 mt-2.5 text-[11px] font-mono text-slate-text">
               {review.created_at && (
                 <span className="inline-flex items-center gap-1">
                   <Clock className="h-3 w-3" />
@@ -869,7 +830,7 @@ export default function ReviewDetailPage() {
                 type="button"
                 onClick={() => retryReview.mutate(review.id)}
                 disabled={retryReview.isPending}
-                className="inline-flex items-center gap-1.5 rounded-md border border-amber/30 bg-amber/10 px-3 py-2 text-xs font-mono text-amber hover:bg-amber/20 transition-colors"
+                className="inline-flex items-center gap-1.5 rounded-md border border-amber/30 bg-amber/10 px-3 py-2 text-xs font-mono text-amber hover:bg-amber/20 transition-colors cursor-pointer"
               >
                 <RotateCcw
                   className={`h-3.5 w-3.5 ${retryReview.isPending ? "animate-spin" : ""}`}
@@ -882,7 +843,17 @@ export default function ReviewDetailPage() {
       </header>
 
       {/* Pipeline progress (live reviews) */}
-      {isLive && <PipelineProgress stage={stage} failedStage={failedStage} />}
+      {isLive && <PipelineProgress stage={stage} failedStage={failedStage} filesReviewed={filesReviewed} totalFiles={totalFiles} />}
+
+      {/* Activity timeline (live reviews) */}
+      {isLive && timeline.length > 0 && (
+        <ActivityTimeline
+          timeline={timeline}
+          liveTokens={liveTokens}
+          stage={stage}
+          startedAt={review.created_at}
+        />
+      )}
 
       {/* Triage results card */}
       {triageResults && isLive && (
@@ -894,11 +865,11 @@ export default function ReviewDetailPage() {
             {triageResults.map((t) => (
               <div key={t.file} className="flex items-center gap-2 text-xs font-mono">
                 <span
-                  className={`inline-flex items-center rounded-sm border px-2 py-0.5 text-[10px] ${
+                  className={`inline-flex items-center rounded-sm border px-2 py-0.5 text-[11px] ${
                     t.action === "deep"
                       ? "bg-purple-400/10 text-purple-400 border-purple-400/30"
                       : t.action === "skip"
-                        ? "bg-iron/30 text-iron border-iron/60"
+                        ? "bg-iron/30 text-slate-text border-iron/60"
                         : t.action === "security_skim"
                           ? "bg-red-400/10 text-red-400 border-red-400/30"
                           : "bg-blue-400/10 text-blue-400 border-blue-400/30"
@@ -932,7 +903,7 @@ export default function ReviewDetailPage() {
             type="button"
             onClick={() => retryReview.mutate(review.id)}
             disabled={retryReview.isPending}
-            className="inline-flex items-center gap-1.5 rounded-md border border-red-400/30 px-3 py-1.5 text-xs font-mono text-red-400 hover:bg-red-400/10 transition-colors"
+            className="inline-flex items-center gap-1.5 rounded-md border border-red-400/30 px-3 py-1.5 text-xs font-mono text-red-400 hover:bg-red-400/10 transition-colors cursor-pointer"
           >
             <RotateCcw
               className={`h-3.5 w-3.5 ${retryReview.isPending ? "animate-spin" : ""}`}
@@ -944,45 +915,147 @@ export default function ReviewDetailPage() {
 
       {/* Summary card */}
       <div className="rounded-lg border border-iron bg-charcoal/80 p-6 mb-8">
-        {/* Heading inside card */}
         <h2 className="font-display text-base font-bold text-foreground mb-4">
           Summary
         </h2>
 
-        {/* Stats bar */}
-        <div className="flex items-center gap-3 mb-5 pb-4 border-b border-iron/40">
-          <span className="text-xs font-sans text-slate-text">
-            {comments.length} comment{comments.length !== 1 ? "s" : ""} across{" "}
+        {/* Verdict */}
+        {review.summary ? (
+          <p className="text-sm text-foreground leading-relaxed mb-4">
+            {review.summary.match(/^[^•\-*\n]+(?:\.[^•\-*\n]+)?\.?/)?.[0]?.trim() ?? review.summary.slice(0, 200)}
+          </p>
+        ) : (
+          <p className="text-sm text-foreground/50 mb-4">No summary generated.</p>
+        )}
+
+        {/* Top 3 critical/warning findings */}
+        {(() => {
+          const topFindings = [...comments]
+            .filter((c) => c.severity === "critical" || c.severity === "warning")
+            .sort((a, b) => {
+              const sevOrder = { critical: 0, warning: 1 } as Record<string, number>;
+              const diff = (sevOrder[a.severity ?? ""] ?? 2) - (sevOrder[b.severity ?? ""] ?? 2);
+              if (diff !== 0) return diff;
+              return (b.confidence_score ?? 0) - (a.confidence_score ?? 0);
+            });
+          const top3 = topFindings.slice(0, 3);
+          const remaining = topFindings.length - 3;
+          if (top3.length === 0) return null;
+          return (
+            <div className="mb-4 pb-4 border-b border-iron/40">
+              {top3.map((c) => {
+                const shortPath = c.file_path.split("/").slice(-2).join("/");
+                const line = c.end_line ?? c.start_line;
+                const sevColor = c.severity === "critical" ? "bg-red-400" : "bg-amber";
+                const body = c.body.length > 80 ? c.body.slice(0, 80) + "\u2026" : c.body;
+                return (
+                  <div key={c.id} className="flex items-start gap-2 py-1.5">
+                    <div className={`h-1.5 w-1.5 rounded-full mt-1.5 shrink-0 ${sevColor}`} />
+                    <span className="text-[11px] font-mono text-amber shrink-0">
+                      {shortPath}{line != null ? `:${line}` : ""}
+                    </span>
+                    <span className="text-xs text-foreground">{body}</span>
+                  </div>
+                );
+              })}
+              {remaining > 0 && (
+                <p className="text-[11px] font-mono text-slate-text mt-1 pl-3.5">
+                  (+{remaining} more in detail below)
+                </p>
+              )}
+            </div>
+          );
+        })()}
+
+        {/* Stats row */}
+        <div className="flex items-center gap-4 text-[11px] font-mono text-slate-text">
+          <span>
+            {comments.length} comment{comments.length !== 1 ? "s" : ""}
+          </span>
+          <span className="text-iron">·</span>
+          <span>
             {grouped.length} file{grouped.length !== 1 ? "s" : ""}
           </span>
-          <div className="h-3.5 w-px bg-iron/40" />
-          <div className="flex items-center gap-3">
-            {(["critical", "warning", "suggestion", "praise"] as const).map(
-              (sev) =>
-                severityCounts[sev] ? (
-                  <div key={sev} className="flex items-center gap-1.5">
-                    <div
-                      className={`h-2.5 w-2.5 rounded-full ${severityDot[sev]}`}
-                    />
-                    <span className="text-xs font-sans text-foreground/70">
-                      {severityCounts[sev]}{" "}
-                      <span className="hidden sm:inline">{sev}</span>
-                    </span>
-                  </div>
-                ) : null,
-            )}
-          </div>
+          {(["critical", "warning", "suggestion", "praise"] as const).map(
+            (sev) =>
+              severityCounts[sev] ? (
+                <div key={sev} className="flex items-center gap-1.5">
+                  <div className={`h-2 w-2 rounded-full ${severityDot[sev]}`} />
+                  <span>{severityCounts[sev]} {sev}</span>
+                </div>
+              ) : null,
+          )}
         </div>
 
-        {/* AI synthesis — proportional font, stripped of per-file duplication */}
-        {review.summary ? (
-          <Markdown>{extractSynthesis(review.summary)}</Markdown>
-        ) : (
-          <p className="text-sm font-sans text-foreground/50">
-            No summary generated.
-          </p>
+        {/* Mermaid diagram (collapsible) */}
+        {review.diagram && (
+          <details className="mt-4 pt-4 border-t border-iron/40">
+            <summary className="text-[11px] font-mono text-slate-text cursor-pointer hover:text-foreground transition-colors">
+              {review.diagram_title || "Architecture"} diagram
+            </summary>
+            <div className="mt-3 rounded-lg border border-iron bg-void/50 p-4 overflow-x-auto">
+              <MermaidChart chart={review.diagram} />
+            </div>
+          </details>
         )}
       </div>
+
+      {/* Intelligence card */}
+      {review.status === "completed" && comments.length > 0 && (() => {
+        const coverage = memoryStats.total > 0 ? memoryStats.memoryUsed / memoryStats.total : 0;
+        const coveragePct = Math.round(coverage * 100);
+        const barColor = coverage > 0.6 ? "bg-green-400" : coverage > 0.3 ? "bg-amber" : "bg-blue-400";
+        const highCoverage = coverage > 0.6;
+        const allNovel = memoryStats.memoryUsed === 0;
+
+        return (
+          <div className={`rounded-lg border bg-charcoal/80 p-5 mb-8 transition-colors ${highCoverage ? "border-green-400/20" : "border-iron"}`}>
+            <div className="flex items-center gap-2 mb-4">
+              <Zap className="h-3.5 w-3.5 text-amber" />
+              <span className="text-[11px] font-mono uppercase tracking-wider text-slate-text">
+                Intelligence
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
+              <div className="rounded-md bg-iron/10 border border-iron/30 px-4 py-3 text-center hover:bg-iron/20 transition-colors">
+                <div className="text-xl font-display font-bold text-foreground">{memoryStats.total}</div>
+                <div className="text-[11px] font-mono text-slate-text mt-0.5">findings total</div>
+              </div>
+              <div className="rounded-md bg-iron/10 border border-iron/30 px-4 py-3 text-center hover:bg-iron/20 transition-colors">
+                <div className="text-xl font-display font-bold text-purple-400">{memoryStats.patternMatches}</div>
+                <div className="text-[11px] font-mono text-slate-text mt-0.5">pattern matches</div>
+              </div>
+              <div className="rounded-md bg-iron/10 border border-iron/30 px-4 py-3 text-center hover:bg-iron/20 transition-colors">
+                <div className="text-xl font-display font-bold text-amber">{memoryStats.rulesEnforced}</div>
+                <div className="text-[11px] font-mono text-slate-text mt-0.5">rules enforced</div>
+              </div>
+              <div className="rounded-md bg-iron/10 border border-iron/30 px-4 py-3 text-center hover:bg-iron/20 transition-colors">
+                <div className="text-xl font-display font-bold text-emerald-400">{memoryStats.newFindings}</div>
+                <div className="text-[11px] font-mono text-slate-text mt-0.5">new findings</div>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex items-center gap-3">
+                <span className="text-[11px] font-mono text-slate-text shrink-0">Memory coverage</span>
+                <div className="flex-1 h-1.5 rounded-full bg-iron/20 overflow-hidden">
+                  <div
+                    className={`h-1.5 rounded-full ${barColor} transition-all duration-500`}
+                    style={{ width: `${coveragePct}%` }}
+                  />
+                </div>
+                <span className="text-[11px] font-mono text-slate-text shrink-0">{coveragePct}%</span>
+              </div>
+              <p className="text-[11px] font-mono text-slate-text">
+                {allNovel
+                  ? "All findings are novel \u2014 memory will improve with future reviews"
+                  : `${memoryStats.memoryUsed} of ${memoryStats.total} findings informed by institutional memory`}
+              </p>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Simulation Results */}
       {review.simulation_results && review.simulation_results.length > 0 && (
@@ -995,7 +1068,7 @@ export default function ReviewDetailPage() {
           </div>
           <div className="space-y-2">
             {review.simulation_results.map((result, i) => (
-              <div key={i} className="flex items-start gap-3 rounded-md border border-iron bg-charcoal px-3 py-2">
+              <div key={`sim-${i}`} className="flex items-start gap-3 rounded-md border border-iron bg-charcoal px-3 py-2">
                 <span className={`mt-0.5 shrink-0 text-xs font-bold ${result.passes ? 'text-emerald-500' : 'text-red-500'}`}>
                   {result.passes ? 'PASS' : 'FAIL'}
                 </span>
@@ -1014,38 +1087,6 @@ export default function ReviewDetailPage() {
         </div>
       )}
 
-      {/* Findings enrichment summary */}
-      {comments.length > 0 && (() => {
-        const newFindings = comments.filter((c) => c.is_new_finding === true).length;
-        const patternMatches = comments.filter((c) => c.matched_pattern_id).length;
-        const rulesEnforced = comments.filter((c) => c.enforced_rule_content).length;
-        if (!newFindings && !patternMatches && !rulesEnforced) return null;
-        return (
-          <div className="flex items-center gap-4 rounded-lg border border-iron bg-charcoal px-5 py-3 mb-6">
-            {newFindings > 0 && (
-              <div className="flex items-center gap-2 text-xs font-mono">
-                <div className="h-2 w-2 rounded-full bg-emerald-500" />
-                <span className="text-foreground">{newFindings}</span>
-                <span className="text-slate-text">New Findings</span>
-              </div>
-            )}
-            {patternMatches > 0 && (
-              <div className="flex items-center gap-2 text-xs font-mono">
-                <div className="h-2 w-2 rounded-full bg-amber" />
-                <span className="text-foreground">{patternMatches}</span>
-                <span className="text-slate-text">Pattern Matches</span>
-              </div>
-            )}
-            {rulesEnforced > 0 && (
-              <div className="flex items-center gap-2 text-xs font-mono">
-                <div className="h-2 w-2 rounded-full bg-purple-500" />
-                <span className="text-foreground">{rulesEnforced}</span>
-                <span className="text-slate-text">Rules Enforced</span>
-              </div>
-            )}
-          </div>
-        );
-      })()}
 
       {/* Main content: sidebar + file groups */}
       <div className={showSidebar ? "grid grid-cols-1 gap-6 lg:grid-cols-[200px_1fr]" : ""}>
@@ -1063,6 +1104,25 @@ export default function ReviewDetailPage() {
 
         {grouped.length > 0 ? (
           <div className="space-y-5">
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setAllExpanded((v) => !v);
+                  setExpandToggle((v) => v + 1);
+                }}
+                className="text-[11px] font-mono text-slate-text hover:text-foreground transition-colors cursor-pointer"
+              >
+                {allExpanded ? (
+                  <span className="inline-flex items-center gap-1"><ChevronUp className="h-3 w-3" />Collapse all</span>
+                ) : (
+                  <span className="inline-flex items-center gap-1"><ChevronDown className="h-3 w-3" />Expand all</span>
+                )}
+              </button>
+              <span className="text-[11px] font-mono text-slate-text ml-auto">
+                Showing {activeSeverity ? comments.filter(c => c.severity === activeSeverity).length : comments.length} of {comments.length}
+              </span>
+            </div>
             {grouped.map(([filePath, fileComments]) => {
               const fid = `file-${filePath.replace(/[^a-zA-Z0-9]/g, "-")}`;
               // Filter comments by severity if active
@@ -1077,6 +1137,7 @@ export default function ReviewDetailPage() {
                   filePath={filePath}
                   fileComments={filtered}
                   hidden={!visibleFiles.has(filePath)}
+                  forceExpanded={expandToggle > 0 ? allExpanded : undefined}
                 />
               );
             })}

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Settings, Loader2, Save, Key, Cpu, ChevronDown, Zap, Check, X, ArrowUp, Info, UserCog, Lock, ShieldCheck, Bug, Blocks, RotateCcw, FileText, RotateCw, Search, Sliders, FlaskConical } from "lucide-react";
+import { Settings, Loader2, Save, Key, Cpu, ChevronDown, Zap, Check, X, ArrowUp, Info, UserCog, Lock, FileText, RotateCw, Search, Sliders } from "lucide-react";
 import {
   useModelConfigs,
   useUpsertModelConfig,
@@ -67,15 +67,6 @@ const STAGE_DESCRIPTIONS: Record<string, string> = {
   scoring: "Cross-model validation — scores and deduplicates specialist comments",
   synthesis: "Combines per-file reviews into a unified summary",
 };
-
-/* ── Specialists ── */
-
-const SPECIALISTS = [
-  { key: "bug_hunter", label: "Bug Hunter", icon: Bug, color: "text-amber" },
-  { key: "security", label: "Security", icon: ShieldCheck, color: "text-red-400" },
-  { key: "architecture", label: "Architecture", icon: Blocks, color: "text-blue-400" },
-  { key: "regression", label: "Regression", icon: RotateCcw, color: "text-purple-400" },
-] as const;
 
 /* ── Personas ── */
 
@@ -263,7 +254,7 @@ function ConfigCard({
           <button
             type="button"
             onClick={() => onDelete ? onDelete(stage) : del.mutate({ repoId, stage })}
-            className="text-[11px] font-mono text-slate-text hover:text-red-400 transition-colors"
+            className="text-[11px] font-mono text-slate-text hover:text-red-400 transition-colors cursor-pointer"
           >
             Reset
           </button>
@@ -489,7 +480,7 @@ function ConfigCard({
           type="button"
           onClick={handleSave}
           disabled={upsert.isPending || !finalModel}
-          className="flex items-center gap-2 rounded border border-amber/30 bg-amber/10 px-3 py-1 text-[11px] font-mono text-amber hover:bg-amber/20 transition-colors disabled:opacity-50"
+          className="flex items-center gap-2 rounded border border-amber/30 bg-amber/10 px-3 py-1 text-[11px] font-mono text-amber hover:bg-amber/20 transition-colors disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
         >
           <Save className="h-3 w-3" />
           {upsert.isPending ? "Saving..." : "Save"}
@@ -498,79 +489,11 @@ function ConfigCard({
           type="button"
           onClick={handleTest}
           disabled={test.isPending || !finalModel}
-          className="flex items-center gap-2 rounded border border-iron px-3 py-1 text-[11px] font-mono text-slate-text hover:text-foreground hover:border-foreground/30 transition-colors disabled:opacity-50"
+          className="flex items-center gap-2 rounded border border-iron px-3 py-1 text-[11px] font-mono text-slate-text hover:text-foreground hover:border-foreground/30 transition-colors disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
         >
           {test.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Zap className="h-3 w-3" />}
           {test.isPending ? "Testing..." : "Test"}
         </button>
-      </div>
-    </div>
-  );
-}
-
-/* ── Deep Review Toggle Card ── */
-
-function DeepReviewCard({
-  enabled,
-  onToggle,
-  pending,
-}: {
-  enabled: boolean;
-  onToggle: () => void;
-  pending: boolean;
-}) {
-  return (
-    <div className={`rounded-lg border p-5 transition-colors ${
-      enabled ? "border-amber/30 bg-amber/5" : "border-iron bg-charcoal"
-    }`}>
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-2">
-          <span className="text-xs font-mono font-medium text-foreground">
-            Deep Review
-          </span>
-          <StatusBadge variant={enabled ? "active" : "inactive"} label={enabled ? "Active" : "Off"} />
-        </div>
-        <button
-          type="button"
-          onClick={onToggle}
-          disabled={pending}
-          aria-label={enabled ? "Disable deep review" : "Enable deep review"}
-          className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 transition-colors duration-200 ease-in-out focus:outline-none focus-visible:ring-2 focus-visible:ring-amber/50 focus-visible:ring-offset-2 focus-visible:ring-offset-background ${
-            enabled ? "border-amber bg-amber" : "border-iron bg-iron/50"
-          }`}
-        >
-          <span
-            className={`pointer-events-none inline-block h-5 w-5 rounded-full bg-foreground shadow-lg ring-0 transition-transform duration-200 ease-in-out ${
-              enabled ? "translate-x-5" : "translate-x-0"
-            }`}
-          />
-        </button>
-      </div>
-
-      <p className="text-[10px] font-mono text-slate-text mb-3">
-        4 parallel specialist agents review files triaged as &quot;deep&quot;
-      </p>
-
-      {/* Specialist chips */}
-      <div className="grid grid-cols-2 gap-2">
-        {SPECIALISTS.map((s) => {
-          const Icon = s.icon;
-          return (
-            <div
-              key={s.key}
-              className={`flex items-center gap-2 rounded border px-2.5 py-1.5 transition-colors ${
-                enabled
-                  ? "border-iron/50 bg-background/50"
-                  : "border-iron/30 bg-iron/10"
-              }`}
-            >
-              <Icon className={`h-3 w-3 ${enabled ? s.color : "text-slate-text/40"}`} />
-              <span className={`text-[10px] font-mono ${enabled ? "text-foreground" : "text-slate-text/40"}`}>
-                {s.label}
-              </span>
-            </div>
-          );
-        })}
       </div>
     </div>
   );
@@ -617,7 +540,7 @@ function PromptCard({
           if (!open && !draft) setDraft(displayText);
           setOpen(!open);
         }}
-        className="flex w-full items-center justify-between p-4 text-left"
+        className="flex w-full items-center justify-between p-4 text-left cursor-pointer"
       >
         <div className="flex items-center gap-2">
           <span className="text-xs font-mono font-medium text-foreground">
@@ -646,7 +569,7 @@ function PromptCard({
               type="button"
               onClick={handleSave}
               disabled={upsert.isPending || !draft.trim()}
-              className="flex items-center gap-2 rounded border border-amber/30 bg-amber/10 px-3 py-1 text-[11px] font-mono text-amber hover:bg-amber/20 transition-colors disabled:opacity-50"
+              className="flex items-center gap-2 rounded border border-amber/30 bg-amber/10 px-3 py-1 text-[11px] font-mono text-amber hover:bg-amber/20 transition-colors disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
             >
               <Save className="h-3 w-3" />
               {upsert.isPending ? "Saving..." : "Save"}
@@ -656,7 +579,7 @@ function PromptCard({
                 type="button"
                 onClick={handleReset}
                 disabled={del.isPending}
-                className="flex items-center gap-2 rounded border border-iron px-3 py-1 text-[11px] font-mono text-slate-text hover:text-foreground hover:border-foreground/30 transition-colors disabled:opacity-50"
+                className="flex items-center gap-2 rounded border border-iron px-3 py-1 text-[11px] font-mono text-slate-text hover:text-foreground hover:border-foreground/30 transition-colors disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
               >
                 <RotateCw className="h-3 w-3" />
                 {del.isPending ? "Resetting..." : "Reset to default"}
@@ -669,82 +592,125 @@ function PromptCard({
   );
 }
 
-/* ── Feature Toggles ── */
+/* ── Pipeline Feature Toggles ── */
 
-const FEATURE_TOGGLES = [
+const PIPELINE_FEATURES = [
+  {
+    key: "deep_review",
+    label: "Deep Review",
+    hint: "4 specialist agents review each file in parallel",
+    description: "Run 4 specialist reviewers (Bug Hunter, Security, Architecture, Regression) with lead agent coordination",
+    defaultValue: false,
+  },
   {
     key: "cross_file_context",
-    label: "Cross-file context",
-    description: "Include related files (callers, tests, imports) in review context",
+    label: "Cross-File Context",
+    hint: "Traces callers, imports, and shared types across files",
+    description: "Fetch related files for richer review context",
     defaultValue: true,
   },
   {
     key: "blast_radius",
-    label: "Blast radius analysis",
-    description: "Show dependency impact analysis for changed code",
+    label: "Blast Radius Analysis",
+    hint: "Maps downstream dependents affected by changes",
+    description: "Trace dependency impact via code graph. Finds how changes affect downstream callers.",
     defaultValue: true,
   },
   {
-    key: "scenario_memory",
-    label: "Scenario memory",
-    description: "Auto-generate and check scenarios from past reviews",
-    defaultValue: true,
-  },
-  {
-    key: "code_simulation",
-    label: "Code simulation",
-    description: "Simulate execution paths to predict breakage (experimental)",
+    key: "simulation",
+    label: "Simulation & Scenarios",
+    hint: "Tests known risk scenarios against the PR",
+    description: "Run stored scenarios against the diff to predict breakage. Requires Deep Review.",
     defaultValue: false,
-    experimental: true,
+    requiresDeepReview: true,
+  },
+  {
+    key: "pr_enrichment",
+    label: "PR Enrichment",
+    hint: "Auto-enriches PR descriptions with missing context",
+    description: "Enrich review context with PR metadata, labels, and linked issues.",
+    defaultValue: true,
+  },
+  {
+    key: "learn_patterns",
+    label: "Pattern Learning",
+    hint: "Learns reusable patterns from high-confidence findings",
+    description: "Learn recurring code patterns from review feedback to improve future reviews.",
+    defaultValue: true,
+  },
+  {
+    key: "learn_conventions",
+    label: "Convention Learning",
+    hint: "Extracts codebase conventions from code diffs",
+    description: "Learn team coding conventions from approved PRs and apply them in reviews.",
+    defaultValue: true,
+  },
+  {
+    key: "file_synthesis",
+    label: "File Synthesis",
+    hint: "Creates per-file institutional memory summaries",
+    description: "Combine per-file reviews into a unified PR summary with cross-cutting insights.",
+    defaultValue: true,
+  },
+  {
+    key: "architecture_graph",
+    label: "Architecture Graph",
+    hint: "Extracts dependency graph from code changes",
+    description: "Build and maintain a dependency graph from reviewed code for blast radius analysis.",
+    defaultValue: true,
   },
 ] as const;
 
-function FeatureToggleCard({
+function PipelineFeatureCard({
   toggle,
   enabled,
   onToggle,
   pending,
+  disabled,
 }: {
-  toggle: (typeof FEATURE_TOGGLES)[number];
+  toggle: (typeof PIPELINE_FEATURES)[number];
   enabled: boolean;
   onToggle: () => void;
   pending: boolean;
+  disabled?: boolean;
 }) {
+  const isDisabled = disabled || pending;
   return (
     <div className={`rounded-lg border p-4 transition-colors ${
-      enabled ? "border-amber/30 bg-amber/5" : "border-iron bg-charcoal"
+      disabled ? "border-iron/50 bg-charcoal/50 opacity-60" : enabled ? "border-amber/30 bg-amber/5" : "border-iron bg-charcoal"
     }`}>
       <div className="flex items-center justify-between mb-1.5">
-        <div className="flex items-center gap-2">
-          <span className={`text-xs font-mono font-medium ${enabled ? "text-amber" : "text-foreground"}`}>
+        <div className="flex flex-col gap-0.5">
+          <span className={`text-xs font-mono font-medium ${disabled ? "text-slate-text/60" : enabled ? "text-amber" : "text-foreground"}`}>
             {toggle.label}
           </span>
-          {"experimental" in toggle && toggle.experimental && (
-            <span className="inline-flex items-center gap-1 rounded-sm border border-purple-400/30 bg-purple-400/10 px-1.5 py-0.5 text-[9px] font-mono uppercase tracking-wider text-purple-400">
-              <FlaskConical className="h-2.5 w-2.5" />
-              experimental
-            </span>
-          )}
+          <span className="text-[11px] font-mono text-slate-text">{toggle.hint}</span>
         </div>
         <button
           type="button"
           onClick={onToggle}
-          disabled={pending}
+          disabled={isDisabled}
           aria-label={enabled ? `Disable ${toggle.label}` : `Enable ${toggle.label}`}
-          className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 transition-colors duration-200 ease-in-out focus:outline-none focus-visible:ring-2 focus-visible:ring-amber/50 focus-visible:ring-offset-2 focus-visible:ring-offset-background ${
-            enabled ? "border-amber bg-amber" : "border-iron bg-iron/50"
+          className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 transition-colors duration-200 ease-in-out focus:outline-none focus-visible:ring-2 focus-visible:ring-amber/50 focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-not-allowed ${
+            enabled && !disabled ? "border-amber bg-amber" : "border-iron bg-iron/50"
           }`}
         >
           <span
             className={`pointer-events-none inline-block h-5 w-5 rounded-full bg-foreground shadow-lg ring-0 transition-transform duration-200 ease-in-out ${
-              enabled ? "translate-x-5" : "translate-x-0"
+              enabled && !disabled ? "translate-x-5" : "translate-x-0"
             }`}
           />
         </button>
       </div>
-      <p className="text-[10px] font-mono text-slate-text leading-relaxed">
+      <p className="text-[11px] font-mono text-slate-text leading-relaxed">
         {toggle.description}
       </p>
+      {disabled && "requiresDeepReview" in toggle && toggle.requiresDeepReview && (
+        <p className="text-[9px] font-mono text-amber/60 mt-1.5 flex items-center gap-1">
+          <Lock className="h-2.5 w-2.5" />
+          Requires Deep Review to be enabled
+        </p>
+      )}
     </div>
   );
 }
@@ -786,24 +752,12 @@ export default function SettingsPage() {
   // Org defaults state
   const orgPersona = (orgDefaults?.persona as string) || "default";
   const orgCustomPrompt = (orgDefaults?.custom_persona_prompt as string) || "";
-  const orgDeepReview = (orgDefaults?.deep_review as boolean) ?? false;
   const [orgCustomPromptDraft, setOrgCustomPromptDraft] = useState(orgCustomPrompt);
 
   const loading = reposLoading || keysLoading || (activeId > 0 && configsLoading);
   const configMap = new Map(configs?.map((c) => [c.stage, c]));
   const savedProviders = providerKeys?.map((k) => k.provider) ?? [];
   const configuredCount = savedProviders.length;
-
-  const toggleDeepReview = () => {
-    updateRepo.mutate({
-      id: activeId,
-      settings_json: { ...activeRepo?.settings_json, deep_review: !deepReview },
-    });
-  };
-
-  const toggleOrgDeepReview = () => {
-    saveOrgDefaults.mutate({ ...orgDefaults, deep_review: !orgDeepReview });
-  };
 
   return (
     <>
@@ -826,7 +780,7 @@ export default function SettingsPage() {
         <button
           type="button"
           onClick={() => setSettingsScope("org")}
-          className={`px-4 py-2 text-xs font-mono transition-colors border-b-2 -mb-px ${
+          className={`px-4 py-2 text-xs font-mono transition-colors border-b-2 -mb-px cursor-pointer ${
             settingsScope === "org"
               ? "border-amber text-amber"
               : "border-transparent text-slate-text hover:text-foreground"
@@ -837,7 +791,7 @@ export default function SettingsPage() {
         <button
           type="button"
           onClick={() => setSettingsScope("repo")}
-          className={`px-4 py-2 text-xs font-mono transition-colors border-b-2 -mb-px ${
+          className={`px-4 py-2 text-xs font-mono transition-colors border-b-2 -mb-px cursor-pointer ${
             settingsScope === "repo"
               ? "border-amber text-amber"
               : "border-transparent text-slate-text hover:text-foreground"
@@ -905,31 +859,12 @@ export default function SettingsPage() {
                       onClick={() => {
                         saveOrgDefaults.mutate({ ...orgDefaults, persona: "custom", custom_persona_prompt: orgCustomPromptDraft });
                       }}
-                      className="mt-2 rounded border border-amber/30 bg-amber/10 px-3 py-1.5 text-[10px] font-mono font-medium text-amber hover:bg-amber/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                      className="mt-2 rounded border border-amber/30 bg-amber/10 px-3 py-1.5 text-[11px] font-mono font-medium text-amber hover:bg-amber/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors cursor-pointer"
                     >
                       {saveOrgDefaults.isPending ? "Saving..." : "Save Custom Persona"}
                     </button>
                   </div>
                 )}
-              </section>
-
-              {/* Org: Deep Review */}
-              <section>
-                <div className="flex items-center gap-3 mb-4">
-                  <div className="flex items-center gap-2">
-                    <Cpu className="h-4 w-4 text-amber" />
-                    <h2 className="font-display text-lg font-semibold text-foreground">
-                      Deep Review
-                    </h2>
-                  </div>
-                </div>
-                <Protect plan="org:pro" fallback={<UpgradePrompt feature="Deep review" />}>
-                  <DeepReviewCard
-                    enabled={orgDeepReview}
-                    onToggle={toggleOrgDeepReview}
-                    pending={saveOrgDefaults.isPending}
-                  />
-                </Protect>
               </section>
 
               {/* Org: Review Pipeline */}
@@ -973,29 +908,56 @@ export default function SettingsPage() {
                 )}
               </section>
 
-              {/* Org: Feature Toggles */}
-              <Protect plan="org:pro" fallback={<UpgradePrompt feature="Advanced features" />}>
+              {/* Org: Pipeline Features */}
+              <Protect plan="org:pro" fallback={<UpgradePrompt feature="Pipeline features" />}>
                 <section>
                   <div className="flex items-center gap-3 mb-4">
                     <div className="flex items-center gap-2">
                       <Sliders className="h-4 w-4 text-amber" />
                       <h2 className="font-display text-lg font-semibold text-foreground">
-                        Default Feature Toggles
+                        Pipeline Features
                       </h2>
                     </div>
                   </div>
                   <div className="grid gap-3 md:grid-cols-2">
-                    {FEATURE_TOGGLES.map((toggle) => {
+                    {PIPELINE_FEATURES.map((toggle) => {
+                      const isSimulation = toggle.key === "simulation";
+                      const orgDrVal = orgDefaults?.["deep_review"];
+                      const orgDrEnabled = typeof orgDrVal === "boolean" ? orgDrVal : false;
+
+                      if (isSimulation) {
+                        const smVal = orgDefaults?.["scenario_memory"];
+                        const csVal = orgDefaults?.["code_simulation"];
+                        const enabled = (typeof smVal === "boolean" ? smVal : false) && (typeof csVal === "boolean" ? csVal : false);
+                        return (
+                          <PipelineFeatureCard
+                            key={toggle.key}
+                            toggle={toggle}
+                            enabled={enabled}
+                            disabled={!orgDrEnabled}
+                            pending={saveOrgDefaults.isPending}
+                            onToggle={() => {
+                              saveOrgDefaults.mutate({ ...orgDefaults, scenario_memory: !enabled, code_simulation: !enabled });
+                            }}
+                          />
+                        );
+                      }
+
                       const val = orgDefaults?.[toggle.key];
                       const enabled = typeof val === "boolean" ? val : toggle.defaultValue;
                       return (
-                        <FeatureToggleCard
+                        <PipelineFeatureCard
                           key={toggle.key}
                           toggle={toggle}
                           enabled={enabled}
                           pending={saveOrgDefaults.isPending}
                           onToggle={() => {
-                            saveOrgDefaults.mutate({ ...orgDefaults, [toggle.key]: !enabled });
+                            const updates: Record<string, unknown> = { ...orgDefaults, [toggle.key]: !enabled };
+                            if (toggle.key === "deep_review" && enabled) {
+                              updates.scenario_memory = false;
+                              updates.code_simulation = false;
+                            }
+                            saveOrgDefaults.mutate(updates);
                           }}
                         />
                       );
@@ -1107,14 +1069,6 @@ export default function SettingsPage() {
                   ))}
                 </div>
 
-                {/* Row 2: Deep review toggle (Pro only) */}
-                <Protect plan="org:pro" fallback={<UpgradePrompt feature="Deep review" />}>
-                  <DeepReviewCard
-                    enabled={deepReview}
-                    onToggle={toggleDeepReview}
-                    pending={updateRepo.isPending}
-                  />
-                </Protect>
               </div>
             )}
           </section>
@@ -1200,7 +1154,7 @@ export default function SettingsPage() {
                             },
                           );
                         }}
-                        className="mt-2 rounded border border-amber/30 bg-amber/10 px-3 py-1.5 text-[10px] font-mono font-medium text-amber hover:bg-amber/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                        className="mt-2 rounded border border-amber/30 bg-amber/10 px-3 py-1.5 text-[11px] font-mono font-medium text-amber hover:bg-amber/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors cursor-pointer"
                       >
                         {updateRepo.isPending ? "Saving..." : "Save Custom Persona"}
                       </button>
@@ -1257,8 +1211,8 @@ export default function SettingsPage() {
             </section>
           </Protect>
 
-          {/* Section 5: Advanced Features (Pro only) */}
-          <Protect plan="org:pro" fallback={<UpgradePrompt feature="Advanced features (cross-file, blast radius, scenarios, simulation)" />}>
+          {/* Section 5: Pipeline Features (Pro only) */}
+          <Protect plan="org:pro" fallback={<UpgradePrompt feature="Pipeline features (deep review, cross-file, blast radius, simulation)" />}>
             <section>
               <div className="flex items-center gap-3 mb-4">
                 <span className="inline-flex items-center justify-center h-6 w-6 rounded-full border border-amber/30 bg-amber/10 text-[11px] font-mono font-bold text-amber">
@@ -1267,7 +1221,7 @@ export default function SettingsPage() {
                 <div className="flex items-center gap-2">
                   <Sliders className="h-4 w-4 text-amber" />
                   <h2 className="font-display text-lg font-semibold text-foreground">
-                    Advanced Features
+                    Pipeline Features
                   </h2>
                 </div>
               </div>
@@ -1286,20 +1240,46 @@ export default function SettingsPage() {
                 </div>
               ) : (
                 <div className="grid gap-3 md:grid-cols-2">
-                  {FEATURE_TOGGLES.map((toggle) => {
+                  {PIPELINE_FEATURES.map((toggle) => {
+                    const isSimulation = toggle.key === "simulation";
+                    const drEnabled = deepReview;
+
+                    if (isSimulation) {
+                      const smVal = activeRepo?.settings_json?.["scenario_memory"];
+                      const csVal = activeRepo?.settings_json?.["code_simulation"];
+                      const enabled = (typeof smVal === "boolean" ? smVal : false) && (typeof csVal === "boolean" ? csVal : false);
+                      return (
+                        <PipelineFeatureCard
+                          key={toggle.key}
+                          toggle={toggle}
+                          enabled={enabled}
+                          disabled={!drEnabled}
+                          pending={updateRepo.isPending}
+                          onToggle={() => {
+                            updateRepo.mutate({
+                              id: activeId,
+                              settings_json: { ...activeRepo?.settings_json, scenario_memory: !enabled, code_simulation: !enabled },
+                            });
+                          }}
+                        />
+                      );
+                    }
+
                     const val = activeRepo?.settings_json?.[toggle.key];
                     const enabled = typeof val === "boolean" ? val : toggle.defaultValue;
                     return (
-                      <FeatureToggleCard
+                      <PipelineFeatureCard
                         key={toggle.key}
                         toggle={toggle}
                         enabled={enabled}
                         pending={updateRepo.isPending}
                         onToggle={() => {
-                          updateRepo.mutate({
-                            id: activeId,
-                            settings_json: { ...activeRepo?.settings_json, [toggle.key]: !enabled },
-                          });
+                          const newSettings: Record<string, unknown> = { ...activeRepo?.settings_json, [toggle.key]: !enabled };
+                          if (toggle.key === "deep_review" && enabled) {
+                            newSettings.scenario_memory = false;
+                            newSettings.code_simulation = false;
+                          }
+                          updateRepo.mutate({ id: activeId, settings_json: newSettings });
                         }}
                       />
                     );

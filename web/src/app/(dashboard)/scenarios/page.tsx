@@ -1,8 +1,8 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { usePagination, PaginationBar } from "@/components/dashboard/pagination";
-import { Shield, Plus, Trash2, Loader2, X, AlertTriangle } from "lucide-react";
+import { Shield, Plus, Trash2, Loader2, X, AlertTriangle, ChevronDown } from "lucide-react";
 import { Protect } from "@clerk/nextjs";
 import {
   useScenarios,
@@ -23,6 +23,13 @@ const SEVERITY_BADGE: Record<string, string> = {
   low: "border-blue-500/30 bg-blue-500/10 text-blue-400",
 };
 
+const SEVERITY_BAR: Record<string, string> = {
+  critical: "bg-red-500",
+  high: "bg-orange-500",
+  medium: "bg-amber",
+  low: "bg-blue-500",
+};
+
 const SOURCE_BADGE: Record<string, string> = {
   manual: "border-slate-500/30 bg-slate-500/10 text-slate-400",
   review: "border-amber/30 bg-amber/10 text-amber",
@@ -40,6 +47,11 @@ export default function ScenariosPage() {
   const [description, setDescription] = useState("");
   const [severity, setSeverity] = useState("medium");
   const [filesInput, setFilesInput] = useState("");
+  const [expandedId, setExpandedId] = useState<number | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
+  const deleteTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+
+  useEffect(() => () => clearTimeout(deleteTimerRef.current), []);
 
   const filtered = useMemo(() => {
     if (!scenarios) return [];
@@ -55,6 +67,15 @@ export default function ScenariosPage() {
       high: scenarios.filter((s) => s.severity === "high").length,
       medium: scenarios.filter((s) => s.severity === "medium").length,
       low: scenarios.filter((s) => s.severity === "low").length,
+    };
+  }, [scenarios]);
+
+  const stats = useMemo(() => {
+    if (!scenarios) return { active: 0, triggered: 0, outdated: 0 };
+    return {
+      active: scenarios.filter((s) => s.active !== false).length,
+      triggered: scenarios.filter((s) => s.last_run_at).length,
+      outdated: scenarios.filter((s) => s.is_outdated).length,
     };
   }, [scenarios]);
 
@@ -81,6 +102,18 @@ export default function ScenariosPage() {
     );
   };
 
+  const handleDelete = (e: React.MouseEvent, scenarioId: number) => {
+    e.stopPropagation();
+    if (confirmDeleteId === scenarioId) {
+      deleteScenario.mutate(scenarioId);
+      setConfirmDeleteId(null);
+    } else {
+      setConfirmDeleteId(scenarioId);
+      clearTimeout(deleteTimerRef.current);
+      deleteTimerRef.current = setTimeout(() => setConfirmDeleteId(null), 3000);
+    }
+  };
+
   return (
     <Protect plan="org:pro" fallback={<UpgradePrompt feature="Scenario memory" />}>
       <div className="mb-8 flex items-center justify-between">
@@ -96,7 +129,7 @@ export default function ScenariosPage() {
           <button
             type="button"
             onClick={() => setShowForm(!showForm)}
-            className="flex items-center gap-2 rounded-md border border-amber/30 bg-amber/10 px-3 py-1.5 text-xs font-mono text-amber hover:bg-amber/20 transition-colors"
+            className="flex items-center gap-2 rounded-md border border-amber/30 bg-amber/10 px-3 py-1.5 text-xs font-mono text-amber hover:bg-amber/20 transition-colors cursor-pointer"
           >
             <Plus className="h-3.5 w-3.5" />
             Add scenario
@@ -105,11 +138,15 @@ export default function ScenariosPage() {
       </div>
 
       {/* Create form */}
-      {showForm && (
-        <div className="mb-6 rounded-lg border border-amber/30 bg-charcoal p-5 space-y-4">
-          <form onSubmit={handleCreate} className="space-y-4">
+      <div
+        className={`overflow-hidden transition-all duration-300 ease-out ${
+          showForm ? "max-h-[500px] opacity-100 mb-6" : "max-h-0 opacity-0"
+        }`}
+      >
+        <div className="rounded-lg border border-amber/30 bg-charcoal p-5 space-y-5">
+          <form onSubmit={handleCreate} className="space-y-5">
             <div>
-              <label className="block text-[11px] font-mono uppercase tracking-wider text-slate-text mb-1">
+              <label className="block text-[11px] font-mono uppercase tracking-wider text-slate-text mb-1.5">
                 Description
               </label>
               <textarea
@@ -120,9 +157,9 @@ export default function ScenariosPage() {
                 className="w-full rounded-md border border-iron bg-background px-3 py-2 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none resize-none"
               />
             </div>
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-2 gap-5">
               <div>
-                <label className="block text-[11px] font-mono uppercase tracking-wider text-slate-text mb-1">
+                <label className="block text-[11px] font-mono uppercase tracking-wider text-slate-text mb-1.5">
                   Severity
                 </label>
                 <div className="flex">
@@ -131,10 +168,10 @@ export default function ScenariosPage() {
                       key={s}
                       type="button"
                       onClick={() => setSeverity(s)}
-                      className={`flex-1 border px-2 py-2 text-xs font-mono transition-colors first:rounded-l-md last:rounded-r-md capitalize ${
+                      className={`flex-1 border px-2 py-2 text-xs font-mono transition-colors cursor-pointer first:rounded-l-md last:rounded-r-md capitalize ${
                         severity === s
                           ? SEVERITY_BADGE[s]
-                          : "bg-background text-slate-text border-iron"
+                          : "bg-background text-slate-text border-iron hover:text-foreground"
                       }`}
                     >
                       {s}
@@ -143,7 +180,7 @@ export default function ScenariosPage() {
                 </div>
               </div>
               <div>
-                <label className="block text-[11px] font-mono uppercase tracking-wider text-slate-text mb-1">
+                <label className="block text-[11px] font-mono uppercase tracking-wider text-slate-text mb-1.5">
                   Related files (comma-separated)
                 </label>
                 <input
@@ -155,28 +192,28 @@ export default function ScenariosPage() {
                 />
               </div>
             </div>
-            <div className="flex justify-end gap-3">
+            <div className="flex justify-end gap-3 pt-1">
               <button
                 type="button"
                 onClick={() => setShowForm(false)}
-                className="rounded-md px-3 py-1.5 text-xs font-mono text-slate-text hover:text-foreground transition-colors"
+                className="rounded-md px-3 py-1.5 text-xs font-mono text-slate-text hover:text-foreground transition-colors cursor-pointer"
               >
                 Cancel
               </button>
               <button
                 type="submit"
                 disabled={createScenario.isPending || !description.trim()}
-                className="rounded-md border border-amber bg-amber/10 px-4 py-1.5 text-xs font-mono text-amber hover:bg-amber/20 transition-colors disabled:opacity-50"
+                className="rounded-md border border-amber bg-amber/10 px-4 py-1.5 text-xs font-mono text-amber hover:bg-amber/20 transition-colors disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
               >
                 {createScenario.isPending ? "Creating..." : "Create scenario"}
               </button>
             </div>
           </form>
         </div>
-      )}
+      </div>
 
       {/* Severity Filters */}
-      <div className="flex items-center gap-3 mb-4">
+      <div className="flex items-center gap-3 mb-3">
         <div className="flex gap-1.5">
           {(["all", "critical", "high", "medium", "low"] as const).map((tab) => {
             const label = tab === "all" ? "All" : tab.charAt(0).toUpperCase() + tab.slice(1);
@@ -193,7 +230,7 @@ export default function ScenariosPage() {
               <button
                 key={tab}
                 onClick={() => { setSeverityFilter(tab); setPage(0); }}
-                className={`rounded border px-2.5 py-1 text-[10px] font-mono transition-colors ${
+                className={`rounded border px-2.5 py-1 text-[11px] font-mono transition-colors cursor-pointer ${
                   isActive ? activeStyles[tab] : "border-iron text-slate-text hover:text-foreground"
                 }`}
               >
@@ -204,6 +241,22 @@ export default function ScenariosPage() {
         </div>
       </div>
 
+      {/* Stats row */}
+      {scenarios && scenarios.length > 0 && (
+        <div className="mb-4 text-[11px] font-mono text-slate-text flex items-center gap-1.5">
+          <span className="text-foreground">{stats.active}</span> active
+          <span className="text-iron mx-1">&middot;</span>
+          <span className="text-foreground">{stats.triggered}</span> triggered
+          {stats.outdated > 0 && (
+            <>
+              <span className="text-iron mx-1">&middot;</span>
+              <span className="text-yellow-400">{stats.outdated}</span>
+              <span className="text-yellow-400">outdated</span>
+            </>
+          )}
+        </div>
+      )}
+
       {/* Scenarios List */}
       <div className="rounded-lg border border-iron bg-charcoal overflow-hidden">
         <div className="flex items-center gap-2 border-b border-iron px-5 py-4">
@@ -211,7 +264,7 @@ export default function ScenariosPage() {
           <h2 className="text-xs font-mono uppercase tracking-[0.1em] text-foreground">
             Active Scenarios
           </h2>
-          <span className="text-[10px] font-mono text-slate-text ml-auto">
+          <span className="text-[11px] font-mono text-slate-text ml-auto">
             {filtered.length} scenarios
           </span>
         </div>
@@ -225,94 +278,179 @@ export default function ScenariosPage() {
             Select a repo to view scenarios.
           </div>
         ) : filtered.length === 0 ? (
-          <div className="py-10 text-center text-xs font-mono text-slate-text">
-            No scenarios yet. Scenarios are auto-generated from reviews or you can add them manually.
+          <div className="py-16 flex flex-col items-center gap-4">
+            <div className="rounded-full border border-iron/50 bg-iron/10 p-4">
+              <Shield className="h-7 w-7 text-slate-text" />
+            </div>
+            <div className="text-center">
+              <p className="text-sm font-mono text-foreground mb-1">No scenarios yet</p>
+              <p className="text-xs font-mono text-slate-text max-w-xs">
+                Scenarios are auto-generated from reviews or create one manually.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowForm(true)}
+              className="mt-1 flex items-center gap-2 rounded-md border border-amber/30 bg-amber/10 px-4 py-2 text-xs font-mono text-amber hover:bg-amber/20 transition-colors cursor-pointer"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              Add scenario
+            </button>
           </div>
         ) : (
           <div className="divide-y divide-iron/30">
             {paginated.map((scenario) => (
               <div
                 key={scenario.id}
-                className="px-5 py-4 hover:bg-iron/10 transition-colors"
+                className={`flex hover:bg-iron/10 transition-all cursor-pointer ${
+                  {
+                    critical: "hover:shadow-[0_0_8px_rgba(239,68,68,0.3)]",
+                    high: "hover:shadow-[0_0_8px_rgba(249,115,22,0.3)]",
+                    medium: "hover:shadow-[0_0_8px_rgba(245,158,11,0.3)]",
+                    low: "hover:shadow-[0_0_8px_rgba(59,130,246,0.3)]",
+                  }[scenario.severity] ?? "hover:shadow-[0_0_8px_rgba(245,158,11,0.3)]"
+                }`}
+                onClick={() => setExpandedId(expandedId === scenario.id ? null : scenario.id)}
               >
-                <div className="flex items-start justify-between gap-4">
-                  <div className="flex-1 min-w-0">
-                    <p className="text-xs font-mono text-foreground mb-2">
-                      {scenario.description}
-                    </p>
-                    <div className="flex items-center gap-2 flex-wrap">
-                      {!scenario.active && (
-                        <span className="inline-block rounded border border-zinc-500/30 bg-zinc-500/10 px-2 py-0.5 text-[10px] font-mono text-zinc-400">
-                          pending
-                        </span>
-                      )}
-                      {scenario.is_outdated && (
-                        <span className="inline-flex items-center gap-1 rounded border border-yellow-500/30 bg-yellow-500/10 px-2 py-0.5 text-[10px] font-mono text-yellow-400">
-                          <AlertTriangle className="h-2.5 w-2.5" />
-                          outdated
-                        </span>
-                      )}
-                      <span
-                        className={`inline-block rounded border px-2 py-0.5 text-[10px] font-mono capitalize ${
-                          SEVERITY_BADGE[scenario.severity] ?? SEVERITY_BADGE.medium
-                        }`}
-                      >
-                        {scenario.severity}
-                      </span>
-                      <span
-                        className={`inline-block rounded border px-2 py-0.5 text-[10px] font-mono ${
-                          SOURCE_BADGE[scenario.source] ?? SOURCE_BADGE.manual
-                        }`}
-                      >
-                        {scenario.source || "manual"}
-                      </span>
-                      {scenario.files?.length > 0 && (
-                        <span className="text-[10px] font-mono text-slate-text">
-                          {scenario.files.length} file{scenario.files.length !== 1 ? "s" : ""}
-                        </span>
-                      )}
-                      <span className="text-[10px] font-mono text-slate-text">
-                        {formatDistanceToNow(scenario.created_at)}
-                      </span>
-                    </div>
-                    {scenario.files?.length > 0 && (
-                      <div className="flex gap-1.5 mt-2 flex-wrap">
-                        {scenario.files.map((f) => (
-                          <span
-                            key={f}
-                            className="inline-block rounded border border-iron px-1.5 py-0.5 text-[9px] font-mono text-slate-text"
-                          >
-                            {f}
-                          </span>
-                        ))}
+                {/* Severity indicator bar */}
+                <div
+                  className={`w-1 shrink-0 ${
+                    SEVERITY_BAR[scenario.severity] ?? SEVERITY_BAR.medium
+                  }`}
+                />
+
+                <div className="flex-1 min-w-0 px-5 py-4">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-start gap-1.5 mb-2.5">
+                        <ChevronDown
+                          className={`h-3.5 w-3.5 shrink-0 mt-0.5 text-slate-text transition-transform ${
+                            expandedId === scenario.id ? "rotate-0" : "-rotate-90"
+                          }`}
+                        />
+                        <p className={`text-sm font-mono text-foreground leading-snug ${
+                          expandedId === scenario.id ? "" : "line-clamp-2"
+                        }`}>
+                          {scenario.description}
+                        </p>
                       </div>
-                    )}
-                    {scenario.steps?.length > 0 && (
-                      <ol className="mt-2 ml-4 list-decimal space-y-0.5">
-                        {scenario.steps.map((step, i) => (
-                          <li key={i} className="text-[10px] font-mono text-slate-text">
-                            <span className="text-foreground">{step.action}</span>
-                            {step.hint && (
-                              <span className="text-iron ml-1">({step.hint})</span>
-                            )}
-                          </li>
-                        ))}
-                      </ol>
-                    )}
-                    {scenario.expected_outcome && (
-                      <p className="mt-1.5 text-[10px] font-mono text-slate-text">
-                        <span className="text-iron">Expected:</span>{" "}
-                        {scenario.expected_outcome}
-                      </p>
-                    )}
+                      <div className="flex items-center gap-2.5 flex-wrap">
+                        {!scenario.active && (
+                          <span className="inline-block rounded border border-zinc-500/30 bg-zinc-500/10 px-2 py-0.5 text-[11px] font-mono text-zinc-400">
+                            pending
+                          </span>
+                        )}
+                        {scenario.is_outdated && (
+                          <span className="inline-flex items-center gap-1 rounded border border-yellow-500/30 bg-yellow-500/10 px-2 py-0.5 text-[11px] font-mono text-yellow-400">
+                            <AlertTriangle className="h-2.5 w-2.5" />
+                            outdated
+                          </span>
+                        )}
+                        <span
+                          className={`inline-block rounded border px-2 py-0.5 text-[11px] font-mono capitalize ${
+                            SEVERITY_BADGE[scenario.severity] ?? SEVERITY_BADGE.medium
+                          }`}
+                        >
+                          {scenario.severity}
+                        </span>
+                        <span
+                          className={`inline-block rounded border px-2 py-0.5 text-[11px] font-mono ${
+                            SOURCE_BADGE[scenario.source] ?? SOURCE_BADGE.manual
+                          }`}
+                        >
+                          {scenario.source || "manual"}
+                        </span>
+                        {scenario.files?.length > 0 && (
+                          <span className="text-[11px] font-mono text-slate-text">
+                            {scenario.files.length} file{scenario.files.length !== 1 ? "s" : ""}
+                          </span>
+                        )}
+                        <span className="text-[11px] font-mono text-slate-text">
+                          {formatDistanceToNow(scenario.created_at)}
+                        </span>
+                      </div>
+                      {scenario.files?.length > 0 && (
+                        <div className="flex gap-1.5 mt-2.5 flex-wrap">
+                          {scenario.files.map((f) => (
+                            <span
+                              key={f}
+                              className="inline-block rounded border border-iron/60 bg-iron/10 px-2.5 py-1 text-xs font-mono text-slate-text"
+                            >
+                              {f}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      {scenario.steps?.length > 0 && (
+                        <ol className="mt-2.5 ml-4 list-decimal space-y-0.5">
+                          {scenario.steps.map((step, i) => (
+                            <li key={i} className="text-[11px] font-mono text-slate-text">
+                              <span className="text-foreground">{step.action}</span>
+                              {step.hint && (
+                                <span className="text-iron ml-1">({step.hint})</span>
+                              )}
+                            </li>
+                          ))}
+                        </ol>
+                      )}
+                      {scenario.expected_outcome && (
+                        <p className="mt-2 text-[11px] font-mono text-slate-text">
+                          <span className="text-iron">Expected:</span>{" "}
+                          {scenario.expected_outcome}
+                        </p>
+                      )}
+                      {expandedId === scenario.id && (
+                        <div className="mt-4 pt-4 border-t border-iron/30 space-y-3">
+                          {scenario.source_ref && (
+                            <div className="text-[11px] font-mono">
+                              <span className="text-slate-text mr-2">Source ref</span>
+                              <span className="text-foreground">{scenario.source_ref}</span>
+                            </div>
+                          )}
+                          {scenario.initial_state && (
+                            <div className="text-[11px] font-mono">
+                              <span className="text-slate-text mr-2">Initial state</span>
+                              <span className="text-foreground">{scenario.initial_state}</span>
+                            </div>
+                          )}
+                          {scenario.modules?.length > 0 && (
+                            <div className="text-[11px] font-mono">
+                              <span className="text-slate-text mr-2">Modules</span>
+                              <span className="text-foreground">{scenario.modules.join(", ")}</span>
+                            </div>
+                          )}
+                          {scenario.trigger_count != null && scenario.trigger_count > 0 && (
+                            <div className="text-[11px] font-mono">
+                              <span className="text-slate-text mr-2">Triggered</span>
+                              <span className="text-foreground">{scenario.trigger_count} time{scenario.trigger_count !== 1 ? "s" : ""}</span>
+                            </div>
+                          )}
+                          {scenario.last_run_at && (
+                            <div className="text-[11px] font-mono">
+                              <span className="text-slate-text mr-2">Last triggered</span>
+                              <span className="text-foreground">{formatDistanceToNow(scenario.last_run_at)}</span>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      aria-label="Delete scenario"
+                      onClick={(e) => handleDelete(e, scenario.id)}
+                      disabled={deleteScenario.isPending}
+                      className={`flex items-center gap-1.5 shrink-0 transition-colors disabled:opacity-50 cursor-pointer ${
+                        confirmDeleteId === scenario.id
+                          ? "text-red-400 animate-pulse"
+                          : "text-slate-text hover:text-red-400"
+                      }`}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                      {confirmDeleteId === scenario.id && (
+                        <span className="text-[11px] font-mono">confirm</span>
+                      )}
+                    </button>
                   </div>
-                  <button
-                    onClick={() => deleteScenario.mutate(scenario.id)}
-                    disabled={deleteScenario.isPending}
-                    className="text-slate-text hover:text-red-400 transition-colors disabled:opacity-50 shrink-0"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
                 </div>
               </div>
             ))}

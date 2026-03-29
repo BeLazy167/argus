@@ -63,10 +63,8 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 		return nil
 	}
 
-	// Deduplicate similar comments before scoring
-	run.FileReviews = deduplicateComments(run.FileReviews)
-
-	// Re-index after dedup
+	// Note: dedup is now handled by the dedicated dedupStage before scoring.
+	// Re-index for scoring
 	allComments = allComments[:0]
 	for fi, fr := range run.FileReviews {
 		for ci := range fr.Comments {
@@ -103,8 +101,16 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 		CompletionTokens: resp.TokensUsed.CompletionTokens,
 		TotalTokens:      resp.TokensUsed.TotalTokens,
 		Cost:             resp.Cost,
+		Model:            cfg.Model,
+		Provider:         cfg.Provider,
 	}
 	run.Tokens.addToTotal(run.Tokens.Scoring)
+	if run.EventBus != nil {
+		run.EventBus.Publish(run.ReviewID, EventTokenUpdate, map[string]any{
+			"total_tokens": run.Tokens.Total.TotalTokens,
+			"cost":         run.Tokens.Total.Cost,
+		})
+	}
 
 	// Parse scored results
 	type scoredItem struct {
@@ -234,6 +240,9 @@ func buildScoringPrompt(run *PipelineRun, memContext string) string {
 			if c.Suggestion != "" {
 				sb.WriteString(fmt.Sprintf("    suggestion: %s\n", c.Suggestion))
 			}
+			if c.BlastRadius > 0 {
+				sb.WriteString(fmt.Sprintf("    blast_radius: This finding affects %d downstream dependents\n", c.BlastRadius))
+			}
 			idx++
 		}
 	}
@@ -261,6 +270,7 @@ Criteria:
 - Is any suggested fix correct?
 - For specialist comments: does it reflect genuine domain expertise?
 - If the issue would be caught by a standard linter (ESLint, golint/staticcheck, ruff, clippy), score it no higher than 35 regardless of severity label.
+- If a finding has blast_radius > 0, it affects downstream dependents. Score at least 70 regardless of specialist confidence.
 
 Respond ONLY with a JSON array. No other text.`
 
@@ -283,7 +293,7 @@ func fetchScoringContext(ctx context.Context, memClient *memory.Client, owner, r
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		repoResults = searchMemoryContent(searchCtx, memClient, "confirmed review patterns conventions common issues", repoTag, 5)
+		repoResults = searchMemoryRich(searchCtx, memClient, "confirmed review patterns conventions common issues", repoTag, 5)
 	}()
 	go func() {
 		defer wg.Done()
@@ -292,7 +302,7 @@ func fetchScoringContext(ctx context.Context, memClient *memory.Client, owner, r
 			for _, fr := range files {
 				paths = append(paths, fr.Path)
 			}
-			fileResults = searchMemoryContent(searchCtx, memClient, filePathsQuery("file synthesis ", paths), repoTag, 3)
+			fileResults = searchMemoryRich(searchCtx, memClient, filePathsQuery("file synthesis ", paths), repoTag, 3)
 		}
 	}()
 	wg.Wait()
