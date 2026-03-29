@@ -30,7 +30,7 @@ Per-file parallel review with full codebase awareness. For files triaged as "dee
 - **Bug Hunter** — logic errors, edge cases, off-by-one
 - **Security** — injection, auth bypass, data exposure
 - **Architecture** — coupling, abstraction leaks, design issues
-- **Edge Case Hunter** — boundary conditions, unusual inputs, race conditions
+- **Regression & Edge Case** — behavior changes that break existing functionality + boundary conditions in new code
 
 ### 04 — Deduplication
 Cross-specialist dedup removes duplicate findings. When bug_hunter and security both flag the same line, the best explanation wins. Uses word-overlap clustering to catch near-duplicates.
@@ -39,10 +39,10 @@ Cross-specialist dedup removes duplicate findings. When bug_hunter and security 
 Each comment is validated against the diff. Blast radius analysis checks downstream impact. Code simulations test known scenarios against the changed code.
 
 ### 06 — Scoring
-A separate model scores each finding (0–100). Comments below the threshold are dropped. Severity is rebalanced — if >50% are critical, lowest-confidence criticals are downgraded.
+A separate model scores each finding (0–100). Comments scoring below 65 are dropped (minimum 3 kept per review to avoid empty reviews).
 
 ### 07 — Pass 2
-Hot files (3+ high-scoring findings) get a second review from the Architecture specialist for deeper structural analysis.
+Hot files (3+ comments scored 70+) get a second review from the Architecture specialist for deeper structural analysis.
 
 ### 08 — Synthesis
 An LLM generates a compact summary with severity counts, fix ordering, and root-cause analysis. Conditional diagrams (sequence + data flow) are generated for complex PRs.
@@ -217,6 +217,8 @@ Choose how Argus communicates:
 - **Mentor** — educational tone, explains why, suggests learning paths
 - **Architect** — design patterns, coupling, API contracts
 - **Strict** — comments on everything, no issue too small
+- **Adversarial** — assumes worst-case inputs, probes for failure modes
+- **Fresh Eyes** — reviews as if seeing the codebase for the first time
 - **Custom** — write your own system prompt
 
 Override per-PR with `@argus-eye review --persona strict`.
