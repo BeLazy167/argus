@@ -88,7 +88,7 @@ export function GitHubReviewMock() {
           observer.disconnect();
         }
       },
-      { threshold: 0.2 }
+      { threshold: 0.3 }
     );
 
     const el = sectionRef.current;

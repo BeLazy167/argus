@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
-import { ChevronDown } from "lucide-react";
-import { PricingTable } from "@clerk/nextjs";
+import Link from "next/link";
+import { ChevronDown, Check } from "lucide-react";
 
 const FAQ_ITEMS = [
   {
@@ -70,7 +70,72 @@ export default function PricingPage() {
         One critical bug in production costs more than a year of Argus.
       </p>
 
-      <PricingTable for="organization" />
+      {/* Custom pricing cards */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 max-w-2xl mx-auto">
+        {/* Free */}
+        <div className="rounded-lg border border-iron bg-charcoal p-6">
+          <h3 className="font-display text-lg font-bold text-foreground mb-1">Free</h3>
+          <div className="flex items-baseline gap-1 mb-1">
+            <span className="font-display text-3xl font-bold text-foreground">$0</span>
+          </div>
+          <p className="text-[11px] font-mono text-slate-text mb-6">Always free</p>
+          <ul className="space-y-3 mb-8">
+            {[
+              "3 repos",
+              "50 reviews / month",
+              "Basic single-pass review",
+              "Pattern memory",
+              "BYOK — bring your own LLM key",
+            ].map((f) => (
+              <li key={f} className="flex items-start gap-2.5 text-xs font-mono text-ash">
+                <Check className="h-3.5 w-3.5 text-amber shrink-0 mt-0.5" />
+                {f}
+              </li>
+            ))}
+          </ul>
+          <Link
+            href="/sign-up"
+            className="block w-full rounded-md border border-iron bg-iron/30 py-2.5 text-center text-xs font-mono text-foreground transition-colors hover:bg-iron/50"
+          >
+            Get started free
+          </Link>
+        </div>
+
+        {/* Pro */}
+        <div className="rounded-lg border border-amber/40 bg-charcoal p-6 relative">
+          <div className="absolute -top-3 left-6 rounded-full bg-amber px-3 py-0.5 text-[10px] font-mono font-medium text-void">
+            Recommended
+          </div>
+          <h3 className="font-display text-lg font-bold text-amber mb-1">Pro</h3>
+          <div className="flex items-baseline gap-1 mb-1">
+            <span className="font-display text-3xl font-bold text-foreground">$19</span>
+            <span className="text-xs font-mono text-slate-text">/month</span>
+          </div>
+          <p className="text-[11px] font-mono text-slate-text mb-6">Per workspace, billed monthly</p>
+          <ul className="space-y-3 mb-8">
+            {[
+              "Unlimited repos",
+              "500 reviews / month",
+              "4 specialist deep review + Pass 2",
+              "Full memory — patterns, scenarios, traces",
+              "Code simulation",
+              "PR diagrams (sequence + data flow)",
+              "Priority support",
+            ].map((f) => (
+              <li key={f} className="flex items-start gap-2.5 text-xs font-mono text-ash">
+                <Check className="h-3.5 w-3.5 text-amber shrink-0 mt-0.5" />
+                {f}
+              </li>
+            ))}
+          </ul>
+          <Link
+            href="/sign-up"
+            className="block w-full rounded-md bg-amber py-2.5 text-center text-xs font-mono font-medium text-void transition-[transform,filter] duration-200 ease-out hover:brightness-110 active:scale-[0.97]"
+          >
+            Start Pro trial
+          </Link>
+        </div>
+      </div>
 
       {/* FAQ */}
       <div className="mt-20">
