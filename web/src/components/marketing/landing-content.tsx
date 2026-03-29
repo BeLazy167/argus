@@ -290,24 +290,89 @@ export function LandingContent() {
         </div>
       </section>
 
+      {/* ── SOCIAL PROOF ── */}
+      <section aria-label="Social proof" className="border-t border-iron bg-charcoal/30">
+        <div className="mx-auto max-w-3xl px-6 py-10 flex flex-wrap items-center justify-center gap-8 md:gap-14">
+          <div className="text-center">
+            <div className="font-display text-2xl font-bold text-foreground">80%</div>
+            <p className="text-[10px] font-mono text-slate-text mt-1">bug recall</p>
+          </div>
+          <div className="h-8 w-px bg-iron hidden md:block" />
+          <div className="text-center">
+            <div className="font-display text-2xl font-bold text-foreground">95%</div>
+            <p className="text-[10px] font-mono text-slate-text mt-1">precision</p>
+          </div>
+          <div className="h-8 w-px bg-iron hidden md:block" />
+          <div className="text-center">
+            <div className="font-display text-2xl font-bold text-foreground">&lt;2 min</div>
+            <p className="text-[10px] font-mono text-slate-text mt-1">per review</p>
+          </div>
+          <div className="h-8 w-px bg-iron hidden md:block" />
+          <div className="text-center">
+            <div className="font-display text-2xl font-bold text-foreground">4</div>
+            <p className="text-[10px] font-mono text-slate-text mt-1">specialist reviewers</p>
+          </div>
+        </div>
+      </section>
+
       {/* ── SEE IT IN ACTION ── */}
       <section aria-label="See it in action" className="border-t border-iron bg-charcoal/30 bg-noise">
         <div className="mx-auto max-w-5xl px-6 py-28">
           <div className="mb-16 text-center">
             <p className="mb-3 text-[11px] font-mono uppercase tracking-[0.15em] text-amber">
-              See it in action
+              Real bugs, not lint warnings
             </p>
             <h2 className="font-display text-3xl md:text-4xl font-bold text-foreground mb-4">
-              Reviews that actually catch bugs.
+              This is what Argus posts on your PRs.
             </h2>
             <p className="max-w-lg mx-auto text-sm text-ash/70">
-              Unlike other review bots that drown you in style nits and linting
-              warnings &mdash; Argus finds real vulnerabilities, logic errors,
-              and footguns your team would have shipped.
+              SQL injection. Auth bypass. Race conditions. The bugs that pass
+              code review and break production at 2am.
             </p>
           </div>
 
           <GitHubReviewMock />
+        </div>
+      </section>
+
+      {/* ── WHY ARGUS ── */}
+      <section aria-label="Why Argus" className="border-t border-iron bg-noise">
+        <div className="mx-auto max-w-4xl px-6 py-24">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <div className="rounded-lg border border-iron bg-charcoal/50 p-6">
+              <div className="text-amber mb-3">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-6 w-6">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 21L3 16.5m0 0L7.5 12M3 16.5h13.5m0-13.5L21 7.5m0 0L16.5 12M21 7.5H7.5" />
+                </svg>
+              </div>
+              <h3 className="font-display text-sm font-bold text-foreground mb-2">Sees across files</h3>
+              <p className="text-[11px] font-mono text-slate-text leading-relaxed">
+                When you change a function, Argus traces who calls it, what tests cover it, and what breaks downstream. Not just the diff.
+              </p>
+            </div>
+            <div className="rounded-lg border border-iron bg-charcoal/50 p-6">
+              <div className="text-amber mb-3">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-6 w-6">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              </div>
+              <h3 className="font-display text-sm font-bold text-foreground mb-2">Remembers everything</h3>
+              <p className="text-[11px] font-mono text-slate-text leading-relaxed">
+                That edge case from 6 months ago? Still in memory. Past bugs, incidents, and team decisions inform every future review.
+              </p>
+            </div>
+            <div className="rounded-lg border border-iron bg-charcoal/50 p-6">
+              <div className="text-amber mb-3">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-6 w-6">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" />
+                </svg>
+              </div>
+              <h3 className="font-display text-sm font-bold text-foreground mb-2">Gets smarter every review</h3>
+              <p className="text-[11px] font-mono text-slate-text leading-relaxed">
+                React 👍 to confirm findings, 👎 to dismiss. Argus learns your patterns. False positives shrink. Real catches stay sharp.
+              </p>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -319,10 +384,10 @@ export function LandingContent() {
               How it works
             </p>
             <h2 className="font-display text-3xl font-bold text-foreground mb-3">
-              Triage &rarr; Context &rarr; Review &rarr; Score &rarr; Synthesize &rarr; Learn
+              7 stages. Under 2 minutes.
             </h2>
             <p className="max-w-lg mx-auto text-sm text-ash/70">
-              Six stages. Full codebase awareness. Every PR.
+              Every PR gets the same rigorous pipeline. No shortcuts.
             </p>
           </div>
 
