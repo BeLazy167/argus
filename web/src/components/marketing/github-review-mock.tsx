@@ -19,7 +19,7 @@ const REVIEWS: ReviewItem[] = [
 + const token = req.headers.authorization?.split(" ")[1];
   const decoded = jwt.verify(token, SECRET);`,
     comment:
-      "**What:** Raw header includes the `Bearer ` prefix. `jwt.verify` fails silently on malformed tokens and returns the header string as decoded payload.\n\n**Why:** This is a privilege escalation vector \u2014 any string passes as a valid token.",
+      "Raw header includes 'Bearer ' prefix. jwt.verify will fail silently on malformed tokens and return the header string as the decoded payload. This is a privilege escalation vector.",
   },
   {
     file: "services/billing.ts",
@@ -28,7 +28,7 @@ const REVIEWS: ReviewItem[] = [
     code: `  await stripe.subscriptions.del(sub.id);
 + await db.subscriptions.update({ id: sub.id, status: "cancelled" });`,
     comment:
-      "**What:** If the DB update fails after Stripe cancellation succeeds, the user is cancelled in Stripe but active in your system.\n\n**Why:** No transaction boundary around the two writes. Add idempotency or a reconciliation check.",
+      "Stripe cancellation succeeds but if the DB update fails, the user is cancelled in Stripe but active in your system. Wrap in a transaction or add a reconciliation check.",
   },
   {
     file: "utils/cache.ts",
@@ -38,7 +38,7 @@ const REVIEWS: ReviewItem[] = [
     let cached: T | undefined;
     return () => cached ?? (cached = fn());`,
     comment:
-      "**What:** This memoize holds references indefinitely with no eviction.\n\n**Why:** On long-running server processes, this leaks memory. Consider a WeakRef or TTL.",
+      "This memoize implementation holds references indefinitely. For server-side usage, consider a WeakRef or TTL to avoid memory leaks across long-running requests.",
   },
 ];
 
@@ -222,7 +222,7 @@ export function GitHubReviewMock() {
                   </div>
                   <span className="text-[11px] font-mono font-medium text-amber">argus</span>
                   <span className={`text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded border ${config.badge}`}>
-                    {review.severity}
+                    {review.severity === "critical" ? "\uD83D\uDD34 blocker" : review.severity === "warning" ? "\uD83D\uDFE1 should fix" : "\uD83D\uDCA1 suggestion"}
                   </span>
                 </div>
                 <div className="text-[11px] font-mono text-ash/75 leading-relaxed pl-6 space-y-1.5">
@@ -230,12 +230,10 @@ export function GitHubReviewMock() {
                     <p key={bi}>
                       {block.startsWith("**What:**") ? (
                         <>
-                          <span className="text-foreground font-medium">What: </span>
                           {block.replace("**What:** ", "")}
                         </>
                       ) : block.startsWith("**Why:**") ? (
                         <>
-                          <span className="text-foreground font-medium">Why: </span>
                           {block.replace("**Why:** ", "")}
                         </>
                       ) : (
