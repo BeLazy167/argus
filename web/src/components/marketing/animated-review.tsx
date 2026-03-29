@@ -43,17 +43,17 @@ const REVIEW_COMMENTS: ReviewComment[] = [
 const SEVERITY_STYLES = {
   critical: {
     badge: "bg-red-500/20 text-red-400 border-red-500/30",
-    label: "critical",
+    label: "\uD83D\uDD34 Security",
     line: "border-red-500/40",
   },
   warning: {
     badge: "bg-yellow-500/20 text-yellow-400 border-yellow-500/30",
-    label: "warning",
+    label: "\uD83D\uDFE1 Bug",
     line: "border-yellow-500/40",
   },
   suggestion: {
     badge: "bg-blue-500/20 text-blue-400 border-blue-500/30",
-    label: "suggestion",
+    label: "\uD83D\uDCA1 Suggestion",
     line: "border-blue-500/40",
   },
 };
