@@ -222,7 +222,12 @@ func (p *ChatProvider) isOpenRouter() bool {
 
 func isOpenAIReasoning(m string) bool {
 	for _, prefix := range []string{"o1", "o3", "o4"} {
-		if strings.HasPrefix(m, prefix) || strings.Contains(m, "/"+prefix) {
+		if m == prefix ||
+			strings.HasPrefix(m, prefix+"-") ||
+			strings.HasPrefix(m, prefix+".") ||
+			strings.Contains(m, "/"+prefix+"-") ||
+			strings.Contains(m, "/"+prefix+".") ||
+			strings.HasSuffix(m, "/"+prefix) {
 			return true
 		}
 	}
