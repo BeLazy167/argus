@@ -11,15 +11,6 @@ export function useRepos() {
   });
 }
 
-export function useRepo(id: number) {
-  const api = useApi();
-  return useQuery({
-    queryKey: ["repos", id, api.active?.id],
-    queryFn: () => api.get<Repo>(`/api/v1/repos/${id}`),
-    enabled: id > 0 && !!api.active,
-  });
-}
-
 export function useSyncRepos() {
   const api = useApi();
   const qc = useQueryClient();

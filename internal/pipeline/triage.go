@@ -74,7 +74,38 @@ func (ts *TriageStage) Execute(ctx context.Context, run *PipelineRun) error {
 
 	results, err := parseTriageResponse(resp.Content)
 	if err != nil {
-		return fmt.Errorf("parsing triage: %w", err)
+		// Log the failed response for diagnostics, then retry once.
+		slog.Warn("triage parse failed, retrying",
+			"error", err,
+			"model", cfg.Model,
+			"provider", cfg.Provider,
+			"finish_reason", resp.FinishReason,
+			"response_len", len(resp.Content),
+			"response_prefix", util.Truncate(resp.Content, 300, true),
+			"pr", run.PREvent.PRNumber)
+
+		resp, err = provider.Complete(ctx, llm.CompletionRequest{
+			Model:       cfg.Model,
+			System:      customOrDefault(run.Prompts, "triage_system", triageSystemPrompt),
+			Messages:    []llm.Message{{Role: "user", Content: prompt}},
+			MaxTokens:   cfg.MaxTokens,
+			Temperature: cfg.Temperature,
+		})
+		if err != nil {
+			return fmt.Errorf("triage LLM retry: %w", err)
+		}
+		results, err = parseTriageResponse(resp.Content)
+		if err != nil {
+			slog.Error("triage parse failed after retry",
+				"error", err,
+				"model", cfg.Model,
+				"provider", cfg.Provider,
+				"finish_reason", resp.FinishReason,
+				"response_len", len(resp.Content),
+				"response_prefix", util.Truncate(resp.Content, 300, true),
+				"pr", run.PREvent.PRNumber)
+			return fmt.Errorf("parsing triage: %w", err)
+		}
 	}
 
 	run.TriageResults = results

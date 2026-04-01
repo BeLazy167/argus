@@ -17,13 +17,13 @@ export type PipelineStage =
   | "completed"
   | "failed";
 
-export type TriageFile = {
+type TriageFile = {
   file: string;
   action: string;
   reason: string;
 };
 
-export type ScoringUpdate = {
+type ScoringUpdate = {
   kept: number;
   dropped: number;
   threshold: number;

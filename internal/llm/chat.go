@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -96,12 +97,21 @@ func (p *ChatProvider) Complete(ctx context.Context, req CompletionRequest) (Com
 		})
 	}
 
+	reasoning := isReasoningModel(req.Model)
+
 	body := chatRequest{
-		Model:       req.Model,
-		Messages:    msgs,
-		MaxTokens:   req.MaxTokens,
-		Temperature: req.Temperature,
-		Tools:       req.Tools,
+		Model:    req.Model,
+		Messages: msgs,
+		Tools:    req.Tools,
+	}
+
+	if reasoning {
+		// Reasoning models (o1, o3, etc.) use max_completion_tokens and
+		// do not accept temperature or max_tokens.
+		body.MaxCompletionTokens = req.MaxTokens
+	} else {
+		body.MaxTokens = req.MaxTokens
+		body.Temperature = &req.Temperature
 	}
 
 	jsonBody, err := json.Marshal(body)
@@ -171,11 +181,31 @@ type chatMessage struct {
 }
 
 type chatRequest struct {
-	Model       string        `json:"model"`
-	Messages    []chatMessage `json:"messages"`
-	MaxTokens   int           `json:"max_tokens,omitempty"`
-	Temperature float64       `json:"temperature,omitempty"`
-	Tools       []Tool        `json:"tools,omitempty"`
+	Model               string        `json:"model"`
+	Messages            []chatMessage `json:"messages"`
+	MaxTokens           int           `json:"max_tokens,omitempty"`
+	MaxCompletionTokens int           `json:"max_completion_tokens,omitempty"`
+	Temperature         *float64      `json:"temperature,omitempty"`
+	Tools               []Tool        `json:"tools,omitempty"`
+}
+
+// isReasoningModel returns true for models that use max_completion_tokens
+// instead of max_tokens and do not accept a temperature parameter.
+func isReasoningModel(model string) bool {
+	m := strings.ToLower(model)
+	// OpenAI reasoning family: o1, o3, o4-mini, etc.
+	for _, prefix := range []string{"o1", "o3", "o4"} {
+		if strings.HasPrefix(m, prefix) {
+			return true
+		}
+	}
+	// Explicit model names via providers (openrouter slugs, etc.)
+	for _, sub := range []string{"/o1", "/o3", "/o4"} {
+		if strings.Contains(m, sub) {
+			return true
+		}
+	}
+	return false
 }
 
 type chatResponse struct {
