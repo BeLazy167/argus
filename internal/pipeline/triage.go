@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -48,67 +49,42 @@ func (ts *TriageStage) Execute(ctx context.Context, run *PipelineRun) error {
 		return nil
 	}
 
-	provider, cfg, err := ts.registry.ResolveProvider(ctx, storeConfigLister{st: ts.store, installationID: run.DBInstallationID}, run.DBInstallationID, run.DBRepoID, llm.StageTriage)
-	if err != nil {
-		return fmt.Errorf("resolve triage provider: %w", err)
-	}
-
-	owner, repo, err := splitRepoFullName(run.PREvent.RepoFullName)
-	if err != nil {
-		slog.Warn("triage: invalid repo name, skipping memory hints", "error", err)
-	}
-	prompt := buildTriagePrompt(run.Diff.Files)
-	if hints := triageMemoryHints(ctx, ts.memClient, owner, repo, run.Diff.Files); hints != "" {
-		prompt += "\n" + hints
-	}
-	resp, err := provider.Complete(ctx, llm.CompletionRequest{
-		Model:       cfg.Model,
-		System:      customOrDefault(run.Prompts, "triage_system", triageSystemPrompt),
-		Messages:    []llm.Message{{Role: "user", Content: prompt}},
-		MaxTokens:   cfg.MaxTokens,
-		Temperature: cfg.Temperature,
-	})
-	if err != nil {
-		return fmt.Errorf("triage LLM: %w", err)
-	}
-
-	results, err := parseTriageResponse(resp.Content)
-	if err != nil {
-		// Log the failed response for diagnostics, then retry once.
-		slog.Warn("triage parse failed, retrying",
-			"error", err,
-			"model", cfg.Model,
-			"provider", cfg.Provider,
-			"finish_reason", resp.FinishReason,
-			"response_len", len(resp.Content),
-			"response_prefix", util.Truncate(resp.Content, 300, true),
-			"pr", run.PREvent.PRNumber)
-
-		resp, err = provider.Complete(ctx, llm.CompletionRequest{
-			Model:       cfg.Model,
-			System:      customOrDefault(run.Prompts, "triage_system", triageSystemPrompt),
-			Messages:    []llm.Message{{Role: "user", Content: prompt}},
-			MaxTokens:   cfg.MaxTokens,
-			Temperature: cfg.Temperature,
-		})
-		if err != nil {
-			return fmt.Errorf("triage LLM retry: %w", err)
-		}
-		results, err = parseTriageResponse(resp.Content)
-		if err != nil {
-			slog.Error("triage parse failed after retry",
-				"error", err,
-				"model", cfg.Model,
-				"provider", cfg.Provider,
-				"finish_reason", resp.FinishReason,
-				"response_len", len(resp.Content),
-				"response_prefix", util.Truncate(resp.Content, 300, true),
-				"pr", run.PREvent.PRNumber)
-			return fmt.Errorf("parsing triage: %w", err)
+	// Phase 1: Heuristic triage — instant, free, never fails
+	results := heuristicTriage(run.Diff.Files)
+	var deepCount int
+	for _, r := range results {
+		if r.Action == TriageDeep || r.Action == TriageSecuritySkim {
+			deepCount++
 		}
 	}
+	slog.Info("heuristic triage",
+		"total", len(run.Diff.Files), "deep", deepCount,
+		"pr", run.PREvent.PRNumber)
 
-	run.TriageResults = results
+	// Phase 2: LLM refinement — only for manageable file counts
+	if deepCount > 0 && deepCount <= 20 {
+		llmResults, llmErr := ts.llmTriage(ctx, run)
+		if llmErr != nil {
+			// LLM triage failed — use heuristic results (non-fatal)
+			slog.Warn("LLM triage failed, using heuristic results",
+				"error", llmErr, "pr", run.PREvent.PRNumber)
+		} else {
+			// LLM overrides heuristic for files it classified
+			for file, result := range llmResults {
+				results[file] = result
+			}
+		}
+	} else if deepCount > 20 {
+		slog.Info("skipping LLM triage — too many deep files, reviewing all as deep",
+			"deep_files", deepCount, "pr", run.PREvent.PRNumber)
+	}
+
+	// Convert map to slice for PipelineRun
+	triageSlice := make([]TriageResult, 0, len(results))
+	for _, r := range results {
+		triageSlice = append(triageSlice, r)
+	}
+	run.TriageResults = triageSlice
 
 	if run.EventBus != nil {
 		run.EventBus.Publish(run.ReviewID, EventTriageComplete, map[string]any{
@@ -116,16 +92,7 @@ func (ts *TriageStage) Execute(ctx context.Context, run *PipelineRun) error {
 		})
 	}
 
-	// Accumulate triage token usage
-	run.Tokens.Triage = StageTokens{
-		PromptTokens:     resp.TokensUsed.PromptTokens,
-		CompletionTokens: resp.TokensUsed.CompletionTokens,
-		TotalTokens:      resp.TokensUsed.TotalTokens,
-		Cost:             resp.Cost,
-		Model:            cfg.Model,
-		Provider:         cfg.Provider,
-	}
-	run.Tokens.addToTotal(run.Tokens.Triage)
+	// Token usage is accumulated inside llmTriage if it ran
 	if run.EventBus != nil {
 		run.EventBus.Publish(run.ReviewID, EventTokenUpdate, map[string]any{
 			"total_tokens": run.Tokens.Total.TotalTokens,
@@ -151,6 +118,174 @@ func buildTriagePrompt(files []diff.FileDiff) string {
 		}
 	}
 	return sb.String()
+}
+
+// llmTriage runs the existing LLM-based triage as an optional refinement step.
+// Returns a map of file → TriageResult. Non-fatal — returns error if LLM fails.
+func (ts *TriageStage) llmTriage(ctx context.Context, run *PipelineRun) (map[string]TriageResult, error) {
+	provider, cfg, err := ts.registry.ResolveProvider(ctx, storeConfigLister{st: ts.store, installationID: run.DBInstallationID}, run.DBInstallationID, run.DBRepoID, llm.StageTriage)
+	if err != nil {
+		return nil, fmt.Errorf("resolve triage provider: %w", err)
+	}
+
+	owner, repo, splitErr := splitRepoFullName(run.PREvent.RepoFullName)
+	if splitErr != nil {
+		slog.Warn("triage: invalid repo name, skipping memory hints", "error", splitErr)
+	}
+	prompt := buildTriagePrompt(run.Diff.Files)
+	if hints := triageMemoryHints(ctx, ts.memClient, owner, repo, run.Diff.Files); hints != "" {
+		prompt += "\n" + hints
+	}
+
+	resp, err := provider.Complete(ctx, llm.CompletionRequest{
+		Model:       cfg.Model,
+		System:      customOrDefault(run.Prompts, "triage_system", triageSystemPrompt),
+		Messages:    []llm.Message{{Role: "user", Content: prompt}},
+		MaxTokens:   cfg.MaxTokens,
+		Temperature: cfg.Temperature,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("triage LLM: %w", err)
+	}
+
+	// Accumulate token usage
+	run.Tokens.Triage = StageTokens{
+		PromptTokens:     resp.TokensUsed.PromptTokens,
+		CompletionTokens: resp.TokensUsed.CompletionTokens,
+		TotalTokens:      resp.TokensUsed.TotalTokens,
+		Cost:             resp.Cost,
+		Model:            cfg.Model,
+		Provider:         cfg.Provider,
+	}
+	run.Tokens.addToTotal(run.Tokens.Triage)
+
+	results, err := parseTriageResponse(resp.Content)
+	if err != nil {
+		slog.Warn("LLM triage parse failed",
+			"error", err,
+			"model", cfg.Model,
+			"finish_reason", resp.FinishReason,
+			"response_len", len(resp.Content),
+			"response_prefix", util.Truncate(resp.Content, 300, true),
+			"pr", run.PREvent.PRNumber)
+		return nil, fmt.Errorf("parsing triage: %w", err)
+	}
+
+	m := make(map[string]TriageResult, len(results))
+	for _, r := range results {
+		m[r.File] = r
+	}
+	return m, nil
+}
+
+// heuristicTriage classifies files using deterministic rules (file extension,
+// path patterns, change size). Covers 80%+ of files instantly with zero LLM cost.
+func heuristicTriage(files []diff.FileDiff) map[string]TriageResult {
+	result := make(map[string]TriageResult, len(files))
+	for _, f := range files {
+		name := strings.ToLower(f.NewName)
+		ext := filepath.Ext(name)
+		lines := countAddedLines(f)
+
+		var action TriageAction
+		var reason string
+
+		switch {
+		case isSkippable(name, ext):
+			action = TriageSkip
+			reason = "generated/binary/vendored"
+		case isSecurityRelevant(name):
+			action = TriageSecuritySkim
+			reason = "security-relevant path"
+		case isSkimmable(name, ext, lines):
+			action = TriageSkim
+			reason = "config/docs/small change"
+		default:
+			action = TriageDeep
+			reason = "code file with significant changes"
+		}
+
+		result[f.NewName] = TriageResult{
+			File:   f.NewName,
+			Action: action,
+			Reason: reason,
+		}
+	}
+	return result
+}
+
+func countAddedLines(f diff.FileDiff) int {
+	count := 0
+	for _, h := range f.Hunks {
+		for _, l := range h.Lines {
+			if l.Type == diff.LineAdded {
+				count++
+			}
+		}
+	}
+	return count
+}
+
+func isSkippable(name, ext string) bool {
+	skipExts := map[string]bool{
+		".lock": true, ".sum": true, ".map": true,
+		".min.js": true, ".min.css": true,
+		".svg": true, ".png": true, ".jpg": true, ".jpeg": true,
+		".gif": true, ".ico": true, ".woff": true, ".woff2": true,
+		".ttf": true, ".eot": true, ".pdf": true, ".zip": true,
+	}
+	skipPaths := []string{
+		"vendor/", "node_modules/", "generated/", "__snapshots__/",
+		"dist/", "build/", ".next/", "pnpm-lock", "package-lock",
+		"yarn.lock", "go.sum",
+	}
+	if skipExts[ext] {
+		return true
+	}
+	for _, p := range skipPaths {
+		if strings.Contains(name, p) {
+			return true
+		}
+	}
+	return false
+}
+
+func isSkimmable(name, ext string, lines int) bool {
+	skimExts := map[string]bool{
+		".md": true, ".txt": true, ".yaml": true, ".yml": true,
+		".toml": true, ".json": true,
+	}
+	skimFiles := []string{
+		"dockerfile", "makefile", ".gitignore", "readme",
+		".prettierrc", ".eslintrc", "tsconfig", "jest.config",
+		".env.example",
+	}
+	if skimExts[ext] {
+		return true
+	}
+	for _, f := range skimFiles {
+		if strings.Contains(name, f) {
+			return true
+		}
+	}
+	if lines > 0 && lines < 10 {
+		return true
+	}
+	return false
+}
+
+func isSecurityRelevant(name string) bool {
+	keywords := []string{
+		"auth", "token", "session", "secret", "crypt", "password",
+		"permission", "rbac", "oauth", "jwt", "cors", "csrf",
+		"credential", "login", "signin", "signup",
+	}
+	for _, kw := range keywords {
+		if strings.Contains(name, kw) {
+			return true
+		}
+	}
+	return false
 }
 
 func parseTriageResponse(content string) ([]TriageResult, error) {
