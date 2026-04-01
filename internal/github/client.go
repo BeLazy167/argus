@@ -172,8 +172,20 @@ func (c *Client) PostReview(ctx context.Context, installationID int64, owner, re
 	// Single atomic call. Retry once on 5xx (transient GitHub errors).
 	ghReview, _, err := client.PullRequests.CreateReview(ctx, owner, repo, prNumber, req)
 	if err != nil && isRetryable(err) {
-		slog.Warn("review post failed (5xx), retrying", "comments", len(comments), "error", err)
+		slog.Warn("review post failed (5xx), checking if review was created anyway",
+			"comments", len(comments), "error", err)
 		time.Sleep(2 * time.Second)
+
+		// GitHub 502s are phantom failures — the review may have been created
+		// despite the error response. Check before retrying to avoid duplicates.
+		existingID, checkErr := findBotReview(ctx, client, owner, repo, prNumber)
+		if checkErr == nil && existingID > 0 {
+			slog.Info("review was created despite 5xx, skipping retry",
+				"github_review_id", existingID)
+			return existingID, nil
+		}
+
+		slog.Warn("no existing review found, retrying", "check_error", checkErr)
 		ghReview, _, err = client.PullRequests.CreateReview(ctx, owner, repo, prNumber, req)
 	}
 	if err != nil && is422(err) {
@@ -211,6 +223,25 @@ func is422(err error) bool {
 		return ghErr.Response.StatusCode == 422
 	}
 	return false
+}
+
+// findBotReview checks if argus-eye[bot] already has a review on this PR
+// created in the last 5 minutes. Handles GitHub phantom 502s where the review
+// was created server-side but the response was lost.
+func findBotReview(ctx context.Context, client *gh.Client, owner, repo string, prNumber int) (int64, error) {
+	reviews, _, err := client.PullRequests.ListReviews(ctx, owner, repo, prNumber, &gh.ListOptions{PerPage: 30})
+	if err != nil {
+		return 0, fmt.Errorf("listing reviews: %w", err)
+	}
+	cutoff := time.Now().Add(-5 * time.Minute)
+	for i := len(reviews) - 1; i >= 0; i-- {
+		r := reviews[i]
+		login := r.GetUser().GetLogin()
+		if (login == "argus-eye[bot]" || login == "argus-eye") && r.GetSubmittedAt().Time.After(cutoff) {
+			return r.GetID(), nil
+		}
+	}
+	return 0, nil
 }
 
 // GetCompareCommitsDiff fetches the diff between two commits (for incremental re-review).
