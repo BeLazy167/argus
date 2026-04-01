@@ -159,7 +159,7 @@ func (p *ChatProvider) Complete(ctx context.Context, req CompletionRequest) (Com
 	}
 
 	return CompletionResponse{
-		Content: result.Choices[0].Message.Content,
+		Content: cleanResponseContent(result.Choices[0].Message.Content),
 		TokensUsed: TokenUsage{
 			PromptTokens:     result.Usage.PromptTokens,
 			CompletionTokens: result.Usage.CompletionTokens,
@@ -189,7 +189,8 @@ type chatRequest struct {
 }
 
 type reasoningConfig struct {
-	Effort string `json:"effort,omitempty"`
+	Effort  string `json:"effort,omitempty"`
+	Exclude bool   `json:"exclude,omitempty"`
 }
 
 // adjustRequestForProvider modifies the chat request based on provider and model
@@ -197,11 +198,16 @@ type reasoningConfig struct {
 func (p *ChatProvider) adjustRequestForProvider(body *chatRequest, model string) {
 	m := strings.ToLower(model)
 
+	// Layer 1: OpenRouter — always exclude reasoning from content field.
+	// This prevents thinking tokens from leaking into the response for ALL models.
+	if p.isOpenRouter() {
+		body.Reasoning = &reasoningConfig{Exclude: true}
+	}
+
 	switch {
 	case p.isOpenRouter() && isOpenAIReasoning(m):
-		// OpenRouter normalizes reasoning params across providers.
-		// Use their unified reasoning.effort parameter.
-		body.Reasoning = &reasoningConfig{Effort: "medium"}
+		// OpenRouter + o-series: also set reasoning effort
+		body.Reasoning.Effort = "medium"
 
 	case isOpenAIReasoning(m):
 		// Direct OpenAI / Azure: o-series needs max_completion_tokens, no temperature
@@ -253,4 +259,60 @@ type chatResponse struct {
 		TotalTokens      int     `json:"total_tokens"`
 		Cost             float64 `json:"cost"`
 	} `json:"usage"`
+}
+
+// cleanResponseContent strips reasoning model chain-of-thought from response content.
+// Handles: <think> tags (DeepSeek R1, Kimi K2, Qwen QwQ), <reasoning>/<thought> variants,
+// and untagged reasoning prefixes (Fireworks-routed models that dump "The user wants..." text).
+// Applied to every LLM response in Complete() so all downstream callers get clean content.
+func cleanResponseContent(content string) string {
+	if content == "" {
+		return content
+	}
+
+	// Layer 2: Strip <think>...</think> and variant tags
+	for _, tag := range []string{"think", "reasoning", "thought"} {
+		open := "<" + tag + ">"
+		close := "</" + tag + ">"
+		for {
+			start := strings.Index(content, open)
+			if start == -1 {
+				break
+			}
+			end := strings.Index(content[start:], close)
+			if end == -1 {
+				// Unclosed tag — strip from open tag to end of content
+				content = content[:start]
+				break
+			}
+			content = content[:start] + content[start+end+len(close):]
+		}
+	}
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return content
+	}
+
+	// Layer 3+4: If content doesn't start with expected output (JSON, markdown),
+	// find the first structural marker and discard reasoning prefix
+	first := content[0]
+	if first == '[' || first == '{' || first == '#' || first == '|' ||
+		strings.HasPrefix(content, "**") || strings.HasPrefix(content, "```") {
+		return content // Already clean
+	}
+
+	// Content starts with reasoning text — find actual output
+	markers := []string{"[{", "[\"", "{\"", "**Verdict:**", "**", "```", "# "}
+	bestIdx := -1
+	for _, m := range markers {
+		idx := strings.Index(content, m)
+		if idx > 0 && (bestIdx == -1 || idx < bestIdx) {
+			bestIdx = idx
+		}
+	}
+	if bestIdx > 0 {
+		content = strings.TrimSpace(content[bestIdx:])
+	}
+
+	return content
 }
