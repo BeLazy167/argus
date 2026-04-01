@@ -88,7 +88,7 @@ func (ts *TriageStage) Execute(ctx context.Context, run *PipelineRun) error {
 
 	if run.EventBus != nil {
 		run.EventBus.Publish(run.ReviewID, EventTriageComplete, map[string]any{
-			"files": results,
+			"files": triageSlice,
 		})
 	}
 
