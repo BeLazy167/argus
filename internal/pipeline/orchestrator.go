@@ -320,6 +320,53 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		UpdatedAt:        time.Now(),
 	}
 
+	// Load prior review comments for incremental reviews so the LLM can
+	// avoid duplicating previously-flagged issues and verify fixes.
+	if isIncremental && previousReviewID != nil {
+		priorComments, err := o.st.GetReviewComments(ctx, *previousReviewID)
+		if err != nil {
+			o.logger.Warn("failed to load prior review comments", "error", err, "previous_review_id", *previousReviewID)
+		} else if len(priorComments) > 0 {
+			run.PriorComments = make(map[string][]PriorComment)
+			for _, c := range priorComments {
+				// DB stores StartLine (range start) and EndLine (range end / single line).
+				// Map directly: Line = start of range, EndLine = end of range.
+				line := 0
+				endLine := 0
+				if c.StartLine != nil {
+					line = *c.StartLine
+				}
+				if c.EndLine != nil {
+					endLine = *c.EndLine
+				}
+				// If only EndLine is set (single-line comment), use it as both
+				if line == 0 && endLine > 0 {
+					line = endLine
+				}
+				sev := "suggestion"
+				if c.Severity != nil {
+					sev = *c.Severity
+				}
+				cat := ""
+				if c.Category != nil {
+					cat = *c.Category
+				}
+				run.PriorComments[c.FilePath] = append(run.PriorComments[c.FilePath], PriorComment{
+					FilePath: c.FilePath,
+					Line:     line,
+					EndLine:  endLine,
+					Body:     c.Body,
+					Severity: sev,
+					Category: cat,
+				})
+			}
+			o.logger.Info("loaded prior review comments for incremental review",
+				"previous_review_id", *previousReviewID,
+				"total_comments", len(priorComments),
+				"files_with_comments", len(run.PriorComments))
+		}
+	}
+
 	// Allow command-level persona override
 	if event.PersonaOverride != "" {
 		p := Persona(event.PersonaOverride)
@@ -438,7 +485,11 @@ func (o *Orchestrator) postStartedComment(ctx context.Context, event ghpkg.PREve
 	run.StartedCommentNodeID = nodeID
 }
 
-// autoResolveStaleComments resolves bot review threads on files changed in the new push.
+// autoResolveStaleComments resolves bot review threads whose specific lines
+// were modified in the new push. Uses line-level checking: a thread is resolved
+// only if the changed lines in the inter-diff overlap with the comment's line
+// range (within a proximity window). Falls back to file-level for threads with
+// no line information (e.g., file-level comments).
 func (o *Orchestrator) autoResolveStaleComments(ctx context.Context, event ghpkg.PREvent, patchSet *diff.PatchSet) {
 	owner, repo, err := splitRepoFullName(event.RepoFullName)
 	if err != nil {
@@ -452,15 +503,18 @@ func (o *Orchestrator) autoResolveStaleComments(ctx context.Context, event ghpkg
 		return
 	}
 
-	// Build set of changed file paths
+	// Build per-file changed line sets and a file-presence set
 	changedFiles := make(map[string]bool)
+	fileChangedLines := make(map[string]map[int]bool)
+	const lineProximity = 3 // resolve if changed line is within 3 lines of comment
 	for _, f := range patchSet.Files {
 		changedFiles[f.NewName] = true
+		fileChangedLines[f.NewName] = f.ChangedLines()
 	}
 
 	o.logger.Info("auto-resolve: found threads", "total", len(threads), "changed_files", len(changedFiles), "pr", event.PRNumber)
 
-	var resolved, attempted, botUnresolved int
+	var resolved, attempted, botUnresolved, lineHit, fileHit int
 	for _, t := range threads {
 		// GraphQL returns app login without "[bot]" suffix (e.g., "argus-eye" not "argus-eye[bot]")
 		isBotComment := strings.HasSuffix(t.AuthorLogin, "[bot]") || t.AuthorLogin == "argus-eye"
@@ -468,9 +522,33 @@ func (o *Orchestrator) autoResolveStaleComments(ctx context.Context, event ghpkg
 			continue
 		}
 		botUnresolved++
+
 		if !changedFiles[t.Path] {
 			continue
 		}
+
+		// Line-level check: did the specific lines this comment refers to get modified?
+		shouldResolve := false
+		changedLineSet := fileChangedLines[t.Path]
+		if t.Line > 0 && len(changedLineSet) > 0 {
+			// Check if any changed line falls within proximity of the comment's line
+			for changedLine := range changedLineSet {
+				if util.IntAbs(changedLine-t.Line) <= lineProximity {
+					shouldResolve = true
+					lineHit++
+					break
+				}
+			}
+		} else {
+			// No line info (file-level comment) or no parsed hunks — fall back to file-level
+			shouldResolve = true
+			fileHit++
+		}
+
+		if !shouldResolve {
+			continue
+		}
+
 		attempted++
 		if err := o.ghClient.ResolveReviewThread(ctx, event.InstallationID, t.ID); err != nil {
 			o.logger.Warn("auto-resolve: resolve thread failed", "error", err, "thread_id", t.ID, "path", t.Path)
@@ -479,7 +557,11 @@ func (o *Orchestrator) autoResolveStaleComments(ctx context.Context, event ghpkg
 		resolved++
 	}
 
-	o.logger.Info("auto-resolve complete", "resolved", resolved, "attempted", attempted, "bot_unresolved", botUnresolved, "pr", event.PRNumber)
+	o.logger.Info("auto-resolve complete",
+		"resolved", resolved, "attempted", attempted,
+		"bot_unresolved", botUnresolved,
+		"line_level_hits", lineHit, "file_level_fallbacks", fileHit,
+		"pr", event.PRNumber)
 }
 
 // enrichFindings annotates each comment with pattern/rule matches and novelty flags.

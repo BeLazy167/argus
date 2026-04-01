@@ -494,6 +494,22 @@ func buildFileReviewPrompt(run *PipelineRun, file diff.FileDiff, fileContent str
 		sb.WriteString(blastContext)
 	}
 
+	// Inject prior review comments for incremental reviews so the LLM can
+	// check if issues were fixed and avoid re-flagging addressed items.
+	if run.IsIncremental && len(run.PriorComments) > 0 {
+		if priors, ok := run.PriorComments[file.NewName]; ok && len(priors) > 0 {
+			sb.WriteString("\n<prior_review_comments>\n")
+			sb.WriteString("These comments were filed in the PREVIOUS review of this file. ")
+			sb.WriteString("For each prior comment: if the new diff clearly fixes the issue, do NOT re-flag it. ")
+			sb.WriteString("If the issue persists or the fix is incomplete, re-flag it with updated context. ")
+			sb.WriteString("Do NOT duplicate prior comments that are already addressed.\n\n")
+			for _, pc := range priors {
+				sb.WriteString(fmt.Sprintf("- [%s|%s] L%d: %s\n", pc.Severity, pc.Category, pc.Line, util.Truncate(pc.Body, 200, true)))
+			}
+			sb.WriteString("</prior_review_comments>\n")
+		}
+	}
+
 	sb.WriteString(`
 Respond with a JSON array of comments:
 [{

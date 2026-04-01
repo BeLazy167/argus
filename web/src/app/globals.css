@@ -272,10 +272,167 @@
   50% { opacity: 0.7; }
 }
 
+/* ── Hero staggered reveal animations ── */
+@keyframes heroReveal {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+    filter: blur(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
+}
+
+@keyframes heroTitleReveal {
+  from {
+    opacity: 0;
+    transform: translateY(30px) scale(0.95);
+    filter: blur(8px);
+  }
+  60% {
+    filter: blur(0);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: blur(0);
+  }
+}
+
+@keyframes heroGlowPulse {
+  0%, 100% {
+    opacity: 0.15;
+    transform: translate(-50%, -50%) scale(1);
+  }
+  50% {
+    opacity: 0.25;
+    transform: translate(-50%, -50%) scale(1.05);
+  }
+}
+
+@keyframes heroScanLine {
+  0% {
+    top: -1px;
+    opacity: 0;
+  }
+  10% {
+    opacity: 1;
+  }
+  90% {
+    opacity: 1;
+  }
+  100% {
+    top: 100%;
+    opacity: 0;
+  }
+}
+
+@keyframes heroTitleShimmer {
+  0% {
+    background-position: -200% center;
+  }
+  100% {
+    background-position: 200% center;
+  }
+}
+
+@keyframes heroStatusPulse {
+  0%, 100% {
+    opacity: 1;
+    box-shadow: 0 0 0 0 oklch(0.77 0.15 75 / 0.6);
+  }
+  50% {
+    opacity: 0.7;
+    box-shadow: 0 0 0 4px oklch(0.77 0.15 75 / 0);
+  }
+}
+
+@keyframes eyeGlowPulse {
+  0%, 100% {
+    filter: drop-shadow(0 0 8px oklch(0.77 0.15 75 / 0.3));
+  }
+  50% {
+    filter: drop-shadow(0 0 16px oklch(0.77 0.15 75 / 0.5));
+  }
+}
+
+/* Hero reveal classes with staggered delays */
+.hero-reveal {
+  opacity: 0;
+  animation: heroReveal 0.8s cubic-bezier(0.23, 1, 0.32, 1) forwards;
+}
+.hero-reveal-1 { animation-delay: 0.1s; }
+.hero-reveal-2 {
+  animation-name: heroTitleReveal;
+  animation-duration: 1s;
+  animation-delay: 0.3s;
+}
+.hero-reveal-3 { animation-delay: 0.6s; }
+.hero-reveal-4 { animation-delay: 0.8s; }
+.hero-reveal-5 { animation-delay: 1.0s; }
+.hero-reveal-6 { animation-delay: 1.2s; }
+.hero-reveal-7 { animation-delay: 1.4s; }
+.hero-reveal-8 { animation-delay: 1.8s; }
+.hero-reveal-9 { animation-delay: 2.2s; }
+
+/* Hero glow pulse */
+.hero-glow-pulse {
+  animation: heroGlowPulse 4s ease-in-out infinite;
+}
+.hero-glow-pulse-delayed {
+  animation: heroGlowPulse 5s ease-in-out 1s infinite;
+}
+
+/* Scan line */
+.hero-scan-line {
+  animation: heroScanLine 8s linear infinite;
+}
+
+/* Title shimmer */
+.hero-title-shimmer {
+  background: linear-gradient(
+    90deg,
+    oklch(0.986 0.002 67.8) 0%,
+    oklch(0.986 0.002 67.8) 40%,
+    oklch(0.77 0.15 75) 50%,
+    oklch(0.986 0.002 67.8) 60%,
+    oklch(0.986 0.002 67.8) 100%
+  );
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: heroTitleShimmer 6s ease-in-out infinite;
+  animation-delay: 2s;
+}
+
+/* Status badge pulse */
+.hero-status-pulse {
+  animation: heroStatusPulse 2s ease-in-out infinite;
+}
+
+/* Eye glow */
+.hero-eye-glow {
+  animation: eyeGlowPulse 3s ease-in-out infinite;
+  animation-delay: 1.5s;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+  }
+  .hero-reveal {
+    opacity: 1 !important;
+    transform: none !important;
+    filter: none !important;
+  }
+  .hero-title-shimmer {
+    background: none !important;
+    -webkit-text-fill-color: unset !important;
   }
 }

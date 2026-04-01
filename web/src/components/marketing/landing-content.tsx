@@ -221,12 +221,12 @@ export function LandingContent() {
     <>
       {/* ── HERO ── */}
       <section aria-label="Hero" className="relative flex min-h-[100vh] flex-col items-center justify-center overflow-hidden bg-noise">
-        {/* Ambient glow */}
+        {/* Subtle ambient glow */}
         <div
-          className="pointer-events-none absolute top-1/3 left-1/2 -translate-x-1/2 -translate-y-1/2 h-[800px] w-[800px] rounded-full opacity-15"
+          className="pointer-events-none absolute top-1/3 left-1/2 -translate-x-1/2 -translate-y-1/2 h-[500px] w-[500px] rounded-full opacity-10"
           style={{
             background:
-              "radial-gradient(circle, oklch(0.77 0.15 75 / 0.35) 0%, transparent 65%)",
+              "radial-gradient(circle, oklch(0.77 0.15 75 / 0.3) 0%, transparent 60%)",
           }}
         />
 
@@ -235,64 +235,98 @@ export function LandingContent() {
 
         {/* Scan lines */}
         <div
-          className="pointer-events-none absolute inset-0 opacity-[0.015]"
+          className="pointer-events-none absolute inset-0 opacity-[0.012]"
           style={{
             backgroundImage:
-              "repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(245,166,35,0.1) 2px, rgba(245,166,35,0.1) 4px)",
+              "repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(245,166,35,0.08) 2px, rgba(245,166,35,0.08) 4px)",
           }}
         />
 
+        {/* Horizontal scan line animation */}
+        <div className="pointer-events-none absolute inset-0 overflow-hidden">
+          <div className="hero-scan-line absolute left-0 right-0 h-px bg-gradient-to-r from-transparent via-amber/20 to-transparent" />
+        </div>
+
         <div className="relative z-10 flex flex-col items-center text-center px-6 pt-20">
-          <EyeSymbol className="mb-6 h-20 w-auto text-amber" trackMouse />
-
-          <h1 className="wordmark text-5xl md:text-7xl lg:text-8xl text-foreground mb-4 tracking-[0.15em]">
-            ARGUS
-          </h1>
-
-          <div className="inline-flex items-center gap-2 rounded-full border border-amber/30 bg-amber/5 px-4 py-1.5 mb-5">
-            <span className="h-1.5 w-1.5 rounded-full bg-amber animate-pulse" />
-            <span className="text-[11px] font-mono text-amber tracking-wider">EARLY ACCESS &mdash; FREE DURING BETA</span>
+          {/* Eye symbol with staggered entry */}
+          <div className="hero-reveal hero-reveal-1">
+            <EyeSymbol className="mb-6 h-20 w-auto text-amber hero-eye-glow" trackMouse />
           </div>
 
-          <p className="font-display text-lg md:text-2xl text-amber mb-3 font-normal italic">
-            Find the bugs your team missed.
-          </p>
+          {/* Title with cinematic reveal */}
+          <div className="hero-reveal hero-reveal-2 overflow-hidden">
+            <h1 className="wordmark text-5xl md:text-7xl lg:text-8xl text-foreground mb-2 tracking-[0.15em] hero-title-shimmer">
+              ARGUS
+            </h1>
+          </div>
 
-          <p className="max-w-xl text-sm md:text-base leading-relaxed text-ash/80 mb-10">
-            AI code review that understands your whole system &mdash; not just the diff.
-            Traces dependencies, remembers past incidents, catches the bugs that ship to production.
-          </p>
+          {/* Subtitle with typewriter feel */}
+          <div className="hero-reveal hero-reveal-3">
+            <p className="text-[11px] md:text-xs font-mono text-amber/60 tracking-[0.35em] uppercase mb-5">
+              The All-Seeing Code Reviewer
+            </p>
+          </div>
 
-          <div className="flex flex-col sm:flex-row gap-4 mb-16">
+          {/* Beta badge */}
+          <div className="hero-reveal hero-reveal-4">
+            <div className="inline-flex items-center gap-2 rounded-full border border-amber/30 bg-amber/5 px-4 py-1.5 mb-6 backdrop-blur-sm">
+              <span className="h-1.5 w-1.5 rounded-full bg-amber hero-status-pulse" />
+              <span className="text-[11px] font-mono text-amber tracking-wider">EARLY ACCESS &mdash; FREE DURING BETA</span>
+            </div>
+          </div>
+
+          {/* Tagline */}
+          <div className="hero-reveal hero-reveal-5">
+            <p className="font-display text-lg md:text-2xl text-amber mb-3 font-normal italic text-balance">
+              Find the bugs your team missed.
+            </p>
+          </div>
+
+          {/* Description */}
+          <div className="hero-reveal hero-reveal-6">
+            <p className="max-w-xl text-sm md:text-base leading-relaxed text-ash/80 mb-10 text-pretty">
+              AI code review that understands your whole system &mdash; not just the diff.
+              Traces dependencies, remembers past incidents, catches the bugs that ship to production.
+            </p>
+          </div>
+
+          {/* CTA buttons */}
+          <div className="hero-reveal hero-reveal-7 flex flex-col sm:flex-row gap-4 mb-16">
             <Link
               href="/sign-up"
-              className="group inline-flex h-11 items-center rounded-md bg-amber px-8 text-sm font-mono font-medium text-void transition-[transform,filter,box-shadow] duration-200 ease-out hover:brightness-110 hover:shadow-[0_0_24px_-4px_oklch(0.77_0.15_75/0.5)] active:scale-[0.97]"
+              className="group relative inline-flex h-12 items-center rounded-md bg-amber px-8 text-sm font-mono font-medium text-void transition-[transform,filter,box-shadow] duration-300 ease-out hover:brightness-110 hover:shadow-[0_0_32px_-4px_oklch(0.77_0.15_75/0.6)] active:scale-[0.97] overflow-hidden"
             >
-              Install in 60 seconds
-              <svg
-                className="ml-2 h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                strokeWidth={2}
-              >
-                <path strokeLinecap="round" strokeLinejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6" />
-              </svg>
+              <span className="relative z-10 flex items-center">
+                Install in 60 seconds
+                <svg
+                  className="ml-2 h-3.5 w-3.5 transition-transform duration-300 group-hover:translate-x-1"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  strokeWidth={2}
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6" />
+                </svg>
+              </span>
+              {/* Button shimmer */}
+              <div className="absolute inset-0 -translate-x-full group-hover:translate-x-full transition-transform duration-700 bg-gradient-to-r from-transparent via-white/20 to-transparent" />
             </Link>
             <Link
               href="/docs"
-              className="inline-flex h-11 items-center rounded-md border border-iron px-8 text-sm font-mono text-ash transition-colors hover:border-slate-text hover:text-foreground"
+              className="group inline-flex h-12 items-center rounded-md border border-iron px-8 text-sm font-mono text-ash transition-all duration-300 hover:border-amber/40 hover:text-foreground hover:shadow-[0_0_16px_-6px_oklch(0.77_0.15_75/0.3)]"
             >
               Read the docs
             </Link>
           </div>
 
           {/* Live review animation */}
-          <AnimatedReview />
+          <div className="hero-reveal hero-reveal-8">
+            <AnimatedReview />
+          </div>
         </div>
 
         {/* Scroll indicator */}
-        <div className="absolute bottom-8 flex flex-col items-center gap-2 text-slate-text">
+        <div className="absolute bottom-8 flex flex-col items-center gap-2 text-slate-text hero-reveal hero-reveal-9">
           <span className="text-[10px] font-mono uppercase tracking-widest">
             Scroll
           </span>

@@ -2,6 +2,7 @@ package diff
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -56,6 +57,50 @@ const (
 	LineAdded   LineType = "added"
 	LineDeleted LineType = "deleted"
 )
+
+// ChangedLines returns the set of new-file line numbers that were actually
+// added or modified (LineAdded) in this file diff. Unlike ValidCommentLines,
+// this excludes context lines — only lines that represent real changes.
+func (f *FileDiff) ChangedLines() map[int]bool {
+	changed := make(map[int]bool)
+	for _, h := range f.Hunks {
+		for _, l := range h.Lines {
+			if l.Type == LineAdded && l.NewNum > 0 {
+				changed[l.NewNum] = true
+			}
+		}
+	}
+	return changed
+}
+
+// ChangedLineRanges returns a sorted list of contiguous line ranges that were
+// modified in this file. Each range is [start, end] inclusive. Adjacent changed
+// lines are merged into a single range with a configurable proximity gap.
+func (f *FileDiff) ChangedLineRanges(proximity int) [][2]int {
+	changed := f.ChangedLines()
+	if len(changed) == 0 {
+		return nil
+	}
+	// Collect and sort
+	lines := make([]int, 0, len(changed))
+	for l := range changed {
+		lines = append(lines, l)
+	}
+	sort.Ints(lines)
+
+	var ranges [][2]int
+	start, end := lines[0], lines[0]
+	for _, l := range lines[1:] {
+		if l <= end+proximity+1 {
+			end = l
+		} else {
+			ranges = append(ranges, [2]int{start, end})
+			start, end = l, l
+		}
+	}
+	ranges = append(ranges, [2]int{start, end})
+	return ranges
+}
 
 // ValidCommentLines returns the set of new-file line numbers that GitHub accepts
 // for Side:"RIGHT" review comments (additions + context lines with NewNum > 0).
