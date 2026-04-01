@@ -94,6 +94,7 @@ type PipelineRun struct {
 	Prompts          map[string]string // custom prompt overrides per stage
 	IsIncremental    bool
 	PreviousReviewID *uuid.UUID
+	PriorComments    map[string][]PriorComment // file path -> prior unresolved comments from previous review
 	StartedCommentNodeID string    `json:"-"` // node ID of the "review started" GH comment, for minimizing later
 	EventBus             *EventBus `json:"-"` // not persisted
 	Error            string
@@ -277,4 +278,16 @@ func stripCodeFences(s string) string {
 		}
 	}
 	return strings.TrimSpace(s)
+}
+
+// PriorComment represents a comment from a previous review that was not yet
+// resolved. Used during incremental reviews to give the LLM awareness of what
+// was previously flagged so it can avoid duplicates and verify fixes.
+type PriorComment struct {
+	FilePath string
+	Line     int
+	EndLine  int
+	Body     string
+	Severity string
+	Category string
 }

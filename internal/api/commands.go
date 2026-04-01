@@ -14,6 +14,8 @@ import (
 	"github.com/BeLazy167/argus/internal/memory"
 	"github.com/BeLazy167/argus/internal/pipeline"
 	"github.com/BeLazy167/argus/internal/store"
+	"github.com/BeLazy167/argus/internal/util"
+	"github.com/BeLazy167/argus/pkg/diff"
 )
 
 // --- Command Dispatch ---
@@ -252,7 +254,7 @@ func (s *Server) handleResolveCommand(ctx context.Context, evt ghpkg.IssueCommen
 		return
 	}
 
-	// Fetch latest diff
+	// Fetch latest diff and parse it for line-level resolution
 	rawDiff, err := ghClient.GetPRDiff(ctx, evt.InstallationID, owner, repo, evt.PRNumber)
 	if err != nil {
 		s.logger.Error("resolve: fetch diff", "error", err)
@@ -260,11 +262,41 @@ func (s *Server) handleResolveCommand(ctx context.Context, evt ghpkg.IssueCommen
 		return
 	}
 
-	// Resolve threads whose file appears in the current diff
+	// Parse diff for line-level checking; fall back to file-level on parse failure
+	patchSet, parseErr := diff.Parse(rawDiff)
+	if parseErr != nil {
+		s.logger.Warn("resolve: failed to parse diff, using file-level heuristic", "error", parseErr)
+	}
+
+	// Build per-file changed line sets for line-level resolution
+	fileChangedLines := make(map[string]map[int]bool)
+	if patchSet != nil {
+		for _, f := range patchSet.Files {
+			fileChangedLines[f.NewName] = f.ChangedLines()
+		}
+	}
+
+	// Resolve threads whose file (and ideally specific lines) appear in the current diff
+	const lineProximity = 5 // manual resolve uses wider proximity than auto-resolve
 	var resolved, stillOpen int
 	for _, t := range botThreads {
 		bc := botComment{Path: t.Path, Body: t.Body, Line: t.Line}
-		if isCommentAddressedInDiff(bc, rawDiff) {
+		addressed := false
+
+		if changedLines, ok := fileChangedLines[bc.Path]; ok && bc.Line > 0 && len(changedLines) > 0 {
+			// Line-level: check if any changed line is within proximity of the comment
+			for changedLine := range changedLines {
+				if util.IntAbs(changedLine-bc.Line) <= lineProximity {
+					addressed = true
+					break
+				}
+			}
+		} else {
+			// Fall back to file-level heuristic (file-level comments or unparsed diff)
+			addressed = isCommentAddressedInDiff(bc, rawDiff)
+		}
+
+		if addressed {
 			if err := ghClient.ResolveReviewThread(ctx, evt.InstallationID, t.ID); err != nil {
 				s.logger.Error("resolve: resolve thread", "error", err, "thread_id", t.ID)
 				stillOpen++
@@ -298,6 +330,7 @@ type fileFix struct {
 
 // isCommentAddressedInDiff checks if the file referenced by the comment
 // has changes in the current diff (heuristic: if the file appears in the diff, consider it addressed).
+// Used as a fallback when line-level checking is not possible.
 func isCommentAddressedInDiff(bc botComment, rawDiff string) bool {
 	if bc.Path == "" {
 		return false
