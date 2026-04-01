@@ -119,7 +119,13 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 	}
 	scored, err := unmarshalLLMArray[scoredItem](resp.Content)
 	if err != nil {
-		slog.Error("failed to parse scoring response, keeping all comments", "error", err)
+		slog.Error("failed to parse scoring response, keeping all comments",
+			"error", err,
+			"model", cfg.Model,
+			"provider", cfg.Provider,
+			"finish_reason", resp.FinishReason,
+			"response_len", len(resp.Content),
+			"response_prefix", util.Truncate(resp.Content, 300, true))
 		return nil // non-fatal
 	}
 

@@ -179,13 +179,6 @@ export type PatternStat = {
   count: number;
 };
 
-export type UserInstallation = {
-  id: number;
-  installation_id: number;
-  role: string;
-  created_at: string;
-};
-
 export type PromptTemplate = {
   stage: string;
   prompt_text: string;
