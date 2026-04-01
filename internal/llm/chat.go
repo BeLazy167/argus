@@ -97,22 +97,16 @@ func (p *ChatProvider) Complete(ctx context.Context, req CompletionRequest) (Com
 		})
 	}
 
-	reasoning := isReasoningModel(req.Model)
-
 	body := chatRequest{
 		Model:    req.Model,
 		Messages: msgs,
 		Tools:    req.Tools,
 	}
 
-	if reasoning {
-		// Reasoning models (o1, o3, etc.) use max_completion_tokens and
-		// do not accept temperature or max_tokens.
-		body.MaxCompletionTokens = req.MaxTokens
-	} else {
-		body.MaxTokens = req.MaxTokens
-		body.Temperature = &req.Temperature
-	}
+	// Set standard params, then let provider-specific adjustments override
+	body.MaxTokens = req.MaxTokens
+	body.Temperature = &req.Temperature
+	p.adjustRequestForProvider(&body, req.Model)
 
 	jsonBody, err := json.Marshal(body)
 	if err != nil {
@@ -134,6 +128,10 @@ func (p *ChatProvider) Complete(ctx context.Context, req CompletionRequest) (Com
 		httpReq.Header.Set("api-key", p.apiKey)
 	default:
 		httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+	}
+	if p.isOpenRouter() {
+		httpReq.Header.Set("HTTP-Referer", "https://argusai.vercel.app")
+		httpReq.Header.Set("X-Title", "Argus")
 	}
 
 	resp, err := p.client.Do(httpReq)
@@ -181,31 +179,58 @@ type chatMessage struct {
 }
 
 type chatRequest struct {
-	Model               string        `json:"model"`
-	Messages            []chatMessage `json:"messages"`
-	MaxTokens           int           `json:"max_tokens,omitempty"`
-	MaxCompletionTokens int           `json:"max_completion_tokens,omitempty"`
-	Temperature         *float64      `json:"temperature,omitempty"`
-	Tools               []Tool        `json:"tools,omitempty"`
+	Model               string           `json:"model"`
+	Messages            []chatMessage    `json:"messages"`
+	MaxTokens           int              `json:"max_tokens,omitempty"`
+	MaxCompletionTokens int              `json:"max_completion_tokens,omitempty"`
+	Temperature         *float64         `json:"temperature,omitempty"`
+	Tools               []Tool           `json:"tools,omitempty"`
+	Reasoning           *reasoningConfig `json:"reasoning,omitempty"`
 }
 
-// isReasoningModel returns true for models that use max_completion_tokens
-// instead of max_tokens and do not accept a temperature parameter.
-func isReasoningModel(model string) bool {
+type reasoningConfig struct {
+	Effort string `json:"effort,omitempty"`
+}
+
+// adjustRequestForProvider modifies the chat request based on provider and model
+// capabilities. Each provider has different rules for reasoning models.
+func (p *ChatProvider) adjustRequestForProvider(body *chatRequest, model string) {
 	m := strings.ToLower(model)
-	// OpenAI reasoning family: o1, o3, o4-mini, etc.
-	for _, prefix := range []string{"o1", "o3", "o4"} {
-		if strings.HasPrefix(m, prefix) {
-			return true
-		}
+
+	switch {
+	case p.isOpenRouter() && isOpenAIReasoning(m):
+		// OpenRouter normalizes reasoning params across providers.
+		// Use their unified reasoning.effort parameter.
+		body.Reasoning = &reasoningConfig{Effort: "medium"}
+
+	case isOpenAIReasoning(m):
+		// Direct OpenAI / Azure: o-series needs max_completion_tokens, no temperature
+		body.MaxCompletionTokens = body.MaxTokens
+		body.MaxTokens = 0
+		body.Temperature = nil
+
+	case p.name == "anthropic" && isAnthropicThinking(m):
+		// Anthropic extended thinking requires temperature=1.0
+		temp := 1.0
+		body.Temperature = &temp
 	}
-	// Explicit model names via providers (openrouter slugs, etc.)
-	for _, sub := range []string{"/o1", "/o3", "/o4"} {
-		if strings.Contains(m, sub) {
+}
+
+func (p *ChatProvider) isOpenRouter() bool {
+	return p.name == "openrouter" || strings.Contains(p.baseURL, "openrouter.ai")
+}
+
+func isOpenAIReasoning(m string) bool {
+	for _, prefix := range []string{"o1", "o3", "o4"} {
+		if strings.HasPrefix(m, prefix) || strings.Contains(m, "/"+prefix) {
 			return true
 		}
 	}
 	return false
+}
+
+func isAnthropicThinking(m string) bool {
+	return strings.Contains(m, "thinking") || strings.Contains(m, "extended")
 }
 
 type chatResponse struct {
