@@ -11,15 +11,30 @@ import (
 	"time"
 
 	gh "github.com/google/go-github/v68/github"
+	"golang.org/x/time/rate"
 )
 
 // Client wraps go-github operations needed by the review pipeline.
+// All methods are rate-limited to avoid GitHub's secondary rate limits.
 type Client struct {
 	app *App
+
+	// restLimiter throttles REST API calls (Contents, PullRequests, Issues, etc.).
+	// GitHub's secondary rate limit triggers at ~100 requests in a short window.
+	// 20 req/s with burst 5 keeps us well under the threshold.
+	restLimiter *rate.Limiter
+
+	// searchLimiter throttles Code Search API calls, which have stricter limits
+	// (~30 req/min). 1 req/2s with burst 2 keeps us safe.
+	searchLimiter *rate.Limiter
 }
 
 func NewClient(app *App) *Client {
-	return &Client{app: app}
+	return &Client{
+		app:           app,
+		restLimiter:   rate.NewLimiter(rate.Limit(20), 5),  // 20 req/s, burst 5
+		searchLimiter: rate.NewLimiter(rate.Every(2*time.Second), 2), // 1 req/2s, burst 2
+	}
 }
 
 // graphQLErrors represents GraphQL-level errors in the response.
@@ -75,6 +90,9 @@ func (c *Client) GetPRDiff(ctx context.Context, installationID int64, owner, rep
 		return "", err
 	}
 
+	if err := c.restLimiter.Wait(ctx); err != nil {
+		return "", fmt.Errorf("rate limit wait: %w", err)
+	}
 	diff, _, err := client.PullRequests.GetRaw(ctx, owner, repo, prNumber, gh.RawOptions{Type: gh.Diff})
 	if err != nil {
 		return "", fmt.Errorf("fetching PR diff: %w", err)
@@ -92,6 +110,9 @@ func (c *Client) GetPRFiles(ctx context.Context, installationID int64, owner, re
 	var all []*gh.CommitFile
 	opts := &gh.ListOptions{PerPage: 100}
 	for {
+		if err := c.restLimiter.Wait(ctx); err != nil {
+			return nil, fmt.Errorf("rate limit wait: %w", err)
+		}
 		files, resp, err := client.PullRequests.ListFiles(ctx, owner, repo, prNumber, opts)
 		if err != nil {
 			return nil, fmt.Errorf("listing PR files: %w", err)
@@ -112,6 +133,9 @@ func (c *Client) UpdatePRDescription(ctx context.Context, installationID int64, 
 		return err
 	}
 
+	if err := c.restLimiter.Wait(ctx); err != nil {
+		return fmt.Errorf("rate limit wait: %w", err)
+	}
 	if _, _, err = client.PullRequests.Edit(ctx, owner, repo, prNumber, &gh.PullRequest{Body: gh.Ptr(body)}); err != nil {
 		return fmt.Errorf("updating PR description: %w", err)
 	}
@@ -125,6 +149,9 @@ func (c *Client) GetFileContent(ctx context.Context, installationID int64, owner
 		return "", err
 	}
 
+	if err := c.restLimiter.Wait(ctx); err != nil {
+		return "", fmt.Errorf("rate limit wait: %w", err)
+	}
 	content, _, _, err := client.Repositories.GetContents(ctx, owner, repo, path, &gh.RepositoryContentGetOptions{Ref: ref})
 	if err != nil {
 		return "", fmt.Errorf("fetching file content: %w", err)
@@ -177,8 +204,36 @@ func (c *Client) PostReview(ctx context.Context, installationID int64, owner, re
 		req.CommitID = gh.Ptr(review.HeadSHA)
 	}
 
-	// Single atomic call. Retry once on 5xx (transient GitHub errors).
+	// Single atomic call. Retry on transient errors.
+	if err := c.restLimiter.Wait(ctx); err != nil {
+		return 0, fmt.Errorf("rate limit wait: %w", err)
+	}
 	ghReview, _, err := client.PullRequests.CreateReview(ctx, owner, repo, prNumber, req)
+
+	// Handle secondary rate limit (403) — respect Retry-After and retry once.
+	if err != nil {
+		var abuseErr *gh.AbuseRateLimitError
+		if errors.As(err, &abuseErr) {
+			wait := 60 * time.Second // default if no Retry-After header
+			if abuseErr.RetryAfter != nil && *abuseErr.RetryAfter > 0 {
+				wait = *abuseErr.RetryAfter
+			}
+			// Cap the wait to avoid blocking the pipeline too long
+			if wait > 2*time.Minute {
+				wait = 2 * time.Minute
+			}
+			slog.Warn("review post hit secondary rate limit, waiting",
+				"retry_after", wait, "comments", len(comments), "error", err)
+			select {
+			case <-time.After(wait):
+			case <-ctx.Done():
+				return 0, fmt.Errorf("context cancelled during rate limit wait: %w", ctx.Err())
+			}
+			ghReview, _, err = client.PullRequests.CreateReview(ctx, owner, repo, prNumber, req)
+		}
+	}
+
+	// Retry once on 5xx (transient GitHub errors).
 	if err != nil && isRetryable(err) {
 		slog.Warn("review post failed (5xx), checking if review was created anyway",
 			"comments", len(comments), "error", err)
@@ -280,6 +335,10 @@ func (c *Client) GetCompareCommitsDiff(ctx context.Context, installationID int64
 		return "", err
 	}
 
+	if err := c.restLimiter.Wait(ctx); err != nil {
+		return "", fmt.Errorf("rate limit wait: %w", err)
+	}
+
 	comparison, _, err := client.Repositories.CompareCommits(ctx, owner, repo, base, head, nil)
 	if err != nil {
 		return "", fmt.Errorf("comparing commits: %w", err)
@@ -307,6 +366,9 @@ func (c *Client) ListReviewComments(ctx context.Context, installationID int64, o
 	var all []*gh.PullRequestComment
 	opts := &gh.ListOptions{PerPage: 100}
 	for {
+		if err := c.restLimiter.Wait(ctx); err != nil {
+			return nil, fmt.Errorf("rate limit wait: %w", err)
+		}
 		comments, resp, err := client.PullRequests.ListReviewComments(ctx, owner, repo, prNumber, reviewID, opts)
 		if err != nil {
 			return nil, fmt.Errorf("listing review comments: %w", err)
@@ -327,6 +389,9 @@ func (c *Client) ReplyToComment(ctx context.Context, installationID int64, owner
 		return nil, err
 	}
 
+	if err := c.restLimiter.Wait(ctx); err != nil {
+		return nil, fmt.Errorf("rate limit wait: %w", err)
+	}
 	reply, _, err := client.PullRequests.CreateCommentInReplyTo(ctx, owner, repo, prNumber, body, commentID)
 	if err != nil {
 		return nil, fmt.Errorf("replying to comment: %w", err)
@@ -339,6 +404,9 @@ func (c *Client) GetPullRequest(ctx context.Context, installationID int64, owner
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return nil, err
+	}
+	if err := c.restLimiter.Wait(ctx); err != nil {
+		return nil, fmt.Errorf("rate limit wait: %w", err)
 	}
 	pr, _, err := client.PullRequests.Get(ctx, owner, repo, prNumber)
 	if err != nil {
@@ -364,6 +432,9 @@ func (c *Client) AddReaction(ctx context.Context, installationID int64, owner, r
 	if err != nil {
 		return err
 	}
+	if err := c.restLimiter.Wait(ctx); err != nil {
+		return fmt.Errorf("rate limit wait: %w", err)
+	}
 	_, _, err = client.Reactions.CreateIssueCommentReaction(ctx, owner, repo, commentID, reaction)
 	return err
 }
@@ -374,6 +445,9 @@ func (c *Client) CreateIssueComment(ctx context.Context, installationID int64, o
 	if err != nil {
 		return err
 	}
+	if err := c.restLimiter.Wait(ctx); err != nil {
+		return fmt.Errorf("rate limit wait: %w", err)
+	}
 	_, _, err = client.Issues.CreateComment(ctx, owner, repo, number, &gh.IssueComment{Body: gh.Ptr(body)})
 	return err
 }
@@ -383,6 +457,9 @@ func (c *Client) CreateIssueCommentWithNodeID(ctx context.Context, installationI
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return "", err
+	}
+	if err := c.restLimiter.Wait(ctx); err != nil {
+		return "", fmt.Errorf("rate limit wait: %w", err)
 	}
 	comment, _, err := client.Issues.CreateComment(ctx, owner, repo, number, &gh.IssueComment{Body: gh.Ptr(body)})
 	if err != nil {
@@ -401,6 +478,9 @@ func (c *Client) ListPRComments(ctx context.Context, installationID int64, owner
 	var all []*gh.PullRequestComment
 	opts := &gh.PullRequestListCommentsOptions{ListOptions: gh.ListOptions{PerPage: 100}}
 	for {
+		if err := c.restLimiter.Wait(ctx); err != nil {
+			return nil, fmt.Errorf("rate limit wait: %w", err)
+		}
 		comments, resp, err := client.PullRequests.ListComments(ctx, owner, repo, prNumber, opts)
 		if err != nil {
 			return nil, fmt.Errorf("listing PR comments: %w", err)
@@ -485,6 +565,9 @@ func (c *Client) ListReviewThreads(ctx context.Context, installationID int64, ow
 		} `json:"data"`
 	}
 
+	if err := c.restLimiter.Wait(ctx); err != nil {
+		return nil, fmt.Errorf("rate limit wait: %w", err)
+	}
 	if err := doGraphQL(ctx, client, body, &result); err != nil {
 		return nil, fmt.Errorf("graphql reviewThreads: %w", err)
 	}
@@ -517,6 +600,9 @@ func (c *Client) ResolveReviewThread(ctx context.Context, installationID int64, 
 				"threadId": threadID,
 			},
 		},
+	}
+	if err := c.restLimiter.Wait(ctx); err != nil {
+		return fmt.Errorf("rate limit wait: %w", err)
 	}
 	return doGraphQL(ctx, client, body, nil)
 }
@@ -565,6 +651,9 @@ func (c *Client) FindThreadForComment(ctx context.Context, installationID int64,
 		} `json:"data"`
 	}
 
+	if err := c.restLimiter.Wait(ctx); err != nil {
+		return "", fmt.Errorf("rate limit wait: %w", err)
+	}
 	if err := doGraphQL(ctx, client, body, &result); err != nil {
 		return "", err
 	}
@@ -596,6 +685,9 @@ func (c *Client) MinimizeComment(ctx context.Context, installationID int64, node
 		},
 	}
 
+	if err := c.restLimiter.Wait(ctx); err != nil {
+		return fmt.Errorf("rate limit wait: %w", err)
+	}
 	return doGraphQL(ctx, client, body, nil)
 }
 
@@ -606,6 +698,9 @@ func (c *Client) CreateBlob(ctx context.Context, installationID int64, owner, re
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return "", err
+	}
+	if err := c.restLimiter.Wait(ctx); err != nil {
+		return "", fmt.Errorf("rate limit wait: %w", err)
 	}
 	blob, _, err := client.Git.CreateBlob(ctx, owner, repo, &gh.Blob{
 		Content:  gh.Ptr(content),
@@ -622,6 +717,9 @@ func (c *Client) CreateTree(ctx context.Context, installationID int64, owner, re
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return "", err
+	}
+	if err := c.restLimiter.Wait(ctx); err != nil {
+		return "", fmt.Errorf("rate limit wait: %w", err)
 	}
 	tree, _, err := client.Git.CreateTree(ctx, owner, repo, baseTreeSHA, entries)
 	if err != nil {
@@ -640,6 +738,9 @@ func (c *Client) CreateCommit(ctx context.Context, installationID int64, owner, 
 	for i, sha := range parentSHAs {
 		parents[i] = &gh.Commit{SHA: gh.Ptr(sha)}
 	}
+	if err := c.restLimiter.Wait(ctx); err != nil {
+		return "", fmt.Errorf("rate limit wait: %w", err)
+	}
 	commit, _, err := client.Git.CreateCommit(ctx, owner, repo, &gh.Commit{
 		Message: gh.Ptr(message),
 		Tree:    &gh.Tree{SHA: gh.Ptr(treeSHA)},
@@ -657,6 +758,9 @@ func (c *Client) UpdateRef(ctx context.Context, installationID int64, owner, rep
 	if err != nil {
 		return err
 	}
+	if err := c.restLimiter.Wait(ctx); err != nil {
+		return fmt.Errorf("rate limit wait: %w", err)
+	}
 	_, _, err = client.Git.UpdateRef(ctx, owner, repo, &gh.Reference{
 		Ref:    gh.Ptr(ref),
 		Object: &gh.GitObject{SHA: gh.Ptr(sha)},
@@ -673,6 +777,9 @@ func (c *Client) GetRef(ctx context.Context, installationID int64, owner, repo, 
 	if err != nil {
 		return "", err
 	}
+	if err := c.restLimiter.Wait(ctx); err != nil {
+		return "", fmt.Errorf("rate limit wait: %w", err)
+	}
 	r, _, err := client.Git.GetRef(ctx, owner, repo, ref)
 	if err != nil {
 		return "", fmt.Errorf("getting ref: %w", err)
@@ -685,6 +792,9 @@ func (c *Client) GetCommitTree(ctx context.Context, installationID int64, owner,
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return "", err
+	}
+	if err := c.restLimiter.Wait(ctx); err != nil {
+		return "", fmt.Errorf("rate limit wait: %w", err)
 	}
 	commit, _, err := client.Git.GetCommit(ctx, owner, repo, commitSHA)
 	if err != nil {
@@ -701,6 +811,9 @@ func (c *Client) SearchCode(ctx context.Context, installationID int64, owner, re
 		return nil, err
 	}
 	q := fmt.Sprintf("%s repo:%s/%s", query, owner, repo)
+	if err := c.searchLimiter.Wait(ctx); err != nil {
+		return nil, fmt.Errorf("rate limit wait: %w", err)
+	}
 	result, _, err := client.Search.Code(ctx, q, &gh.SearchOptions{ListOptions: gh.ListOptions{PerPage: 10}})
 	if err != nil {
 		return nil, fmt.Errorf("code search: %w", err)
@@ -725,6 +838,9 @@ func (c *Client) GetRepoTree(ctx context.Context, installationID int64, owner, r
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return nil, err
+	}
+	if err := c.restLimiter.Wait(ctx); err != nil {
+		return nil, fmt.Errorf("rate limit wait: %w", err)
 	}
 	tree, _, err := client.Git.GetTree(ctx, owner, repo, ref, true)
 	if err != nil {
