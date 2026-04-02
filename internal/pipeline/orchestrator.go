@@ -208,6 +208,13 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		}
 	}
 
+	// On synchronize (new push), GitHub computes the diff asynchronously.
+	// A brief delay avoids fetching stale/incomplete diff data and prevents
+	// "submitted too quickly" 422 errors when posting the review later.
+	if event.Action == "synchronize" {
+		time.Sleep(3 * time.Second)
+	}
+
 	// Fetch diff — fall back to per-file API if GitHub returns 406 (diff too large)
 	rawDiff, err := o.ghClient.GetPRDiff(ctx, event.InstallationID, owner, repo, event.PRNumber)
 	var patchSet *diff.PatchSet
@@ -1017,34 +1024,31 @@ func (o *Orchestrator) pass2(ctx context.Context, run *PipelineRun) error {
 		o.logger.Info("pass2 dedup", "before", beforeDedup, "after", afterDedup, "removed", beforeDedup-afterDedup)
 	}
 
-	// Re-validate all comments against diff to prevent 422 from GitHub
+	// Validate StartLine against diff — clear invalid start_line to prevent
+	// GitHub 422 "start_line could not be resolved". Comments with invalid Line
+	// are NOT dropped here; the post stage folds them into the review summary
+	// so findings on affected (non-diff) lines are still surfaced to the user.
 	validLines := make(map[string]map[int]bool)
 	for _, f := range run.Diff.Files {
 		validLines[f.NewName] = f.ValidCommentLines()
 	}
-	var cleaned []FileReview
-	var droppedAfterPass2 int
-	for _, fr := range run.FileReviews {
+	var nonDiffCount int
+	for i := range run.FileReviews {
+		fr := &run.FileReviews[i]
 		fileValid := validLines[fr.Path]
-		var validComments []FileComment
-		for _, c := range fr.Comments {
+		for j := range fr.Comments {
+			c := &fr.Comments[j]
 			if fileValid == nil || !fileValid[c.Line] {
-				droppedAfterPass2++
-				continue
+				nonDiffCount++
 			}
-			if c.StartLine > 0 && !fileValid[c.StartLine] {
+			if c.StartLine > 0 && (fileValid == nil || !fileValid[c.StartLine]) {
 				c.StartLine = 0
 			}
-			validComments = append(validComments, c)
-		}
-		if len(validComments) > 0 {
-			cleaned = append(cleaned, FileReview{Path: fr.Path, Comments: validComments})
 		}
 	}
-	if droppedAfterPass2 > 0 {
-		o.logger.Warn("dropped invalid comments after pass2", "count", droppedAfterPass2, "pr", run.PREvent.PRNumber)
+	if nonDiffCount > 0 {
+		o.logger.Info("pass2 comments on non-diff lines (will fold into summary)", "count", nonDiffCount, "pr", run.PREvent.PRNumber)
 	}
-	run.FileReviews = cleaned
 	return nil
 }
 
@@ -1078,8 +1082,10 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 
 	// Split: inline comments (valid lines) go in the review, invalid-line comments
 	// are folded into the summary body so everything ships in ONE atomic API call.
+	// Critical/warning findings on non-diff lines are shown prominently; others are collapsed.
 	var rawInline []ghpkg.ReviewComment
-	var foldedLines []string
+	var importantFolded []string // critical/warning — shown prominently
+	var minorFolded []string     // suggestion/praise — collapsed
 	for _, fr := range run.FileReviews {
 		fileValid := validLines[fr.Path]
 		for _, c := range fr.Comments {
@@ -1088,7 +1094,16 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 				if title == "" {
 					title = util.Truncate(c.Body, 100, true)
 				}
-				foldedLines = append(foldedLines, fmt.Sprintf("- `%s:L%d` [%s] — %s", fr.Path, c.Line, c.Severity, title))
+				emoji := severityEmoji(c.Severity)
+				entry := fmt.Sprintf("- %s `%s:L%d` **[%s]** %s", emoji, fr.Path, c.Line, c.Severity, title)
+				if c.Why != "" {
+					entry += fmt.Sprintf("\n  > %s", util.Truncate(c.Why, 200, true))
+				}
+				if c.Severity == SeverityCritical || c.Severity == SeverityWarning {
+					importantFolded = append(importantFolded, entry)
+				} else {
+					minorFolded = append(minorFolded, entry)
+				}
 				continue
 			}
 			startLine := c.StartLine
@@ -1107,17 +1122,27 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 
 	inlineComments := rawInline
 
-	// Build summary: header + brief + folded comments (if any) + score
+	// Build summary: header + brief + affected-file findings + score
 	var summaryBody strings.Builder
 	summaryBody.WriteString(reviewHeader)
 	summaryBody.WriteString(run.Synthesis.Brief)
-	if len(foldedLines) > 0 {
+	totalFolded := len(importantFolded) + len(minorFolded)
+	if totalFolded > 0 {
+		o.logger.Info("folded non-inline comments into summary", "important", len(importantFolded), "minor", len(minorFolded))
+	}
+	// Important findings (critical/warning) shown visibly — not collapsed
+	if len(importantFolded) > 0 {
+		summaryBody.WriteString(fmt.Sprintf("\n\n### Affected code outside the diff (%d)\n\n", len(importantFolded)))
+		summaryBody.WriteString("_These findings are on lines not in the diff but may be impacted by this change._\n\n")
+		summaryBody.WriteString(strings.Join(importantFolded, "\n"))
+	}
+	// Minor findings (suggestion/praise) collapsed
+	if len(minorFolded) > 0 {
 		summaryBody.WriteString("\n\n<details><summary>")
-		summaryBody.WriteString(fmt.Sprintf("%d findings on lines outside the diff", len(foldedLines)))
+		summaryBody.WriteString(fmt.Sprintf("%d additional findings on lines outside the diff", len(minorFolded)))
 		summaryBody.WriteString("</summary>\n\n")
-		summaryBody.WriteString(strings.Join(foldedLines, "\n"))
+		summaryBody.WriteString(strings.Join(minorFolded, "\n"))
 		summaryBody.WriteString("\n\n</details>")
-		o.logger.Info("folded non-inline comments into summary", "count", len(foldedLines))
 	}
 	summaryBody.WriteString(fmt.Sprintf("\n\nScore: **%d/10** · [Full review →](https://argusai.vercel.app/reviews/%s)", run.Synthesis.Score, run.ReviewID.String()))
 
