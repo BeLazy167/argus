@@ -168,6 +168,14 @@ func (c *Client) PostReview(ctx context.Context, installationID int64, owner, re
 		Event:    gh.Ptr("COMMENT"),
 		Comments: comments,
 	}
+	// Pin the review to the exact commit the diff was fetched against.
+	// Without this, GitHub resolves line numbers against the current HEAD,
+	// which may have changed since we fetched the diff (force-push, new commit).
+	// This also prevents "submitted too quickly" errors on synchronize events
+	// because GitHub can resolve positions against a known commit SHA.
+	if review.HeadSHA != "" {
+		req.CommitID = gh.Ptr(review.HeadSHA)
+	}
 
 	// Single atomic call. Retry once on 5xx (transient GitHub errors).
 	ghReview, _, err := client.PullRequests.CreateReview(ctx, owner, repo, prNumber, req)
@@ -190,8 +198,29 @@ func (c *Client) PostReview(ctx context.Context, installationID int64, owner, re
 	}
 	if err != nil && is422(err) {
 		errStr := err.Error()
+		if strings.Contains(errStr, "submitted too quickly") {
+			// GitHub hasn't computed the diff yet — wait and retry with all comments intact.
+			slog.Warn("review post failed (422 submitted too quickly), waiting before retry",
+				"comments", len(comments), "error", err)
+			time.Sleep(10 * time.Second)
+			ghReview, _, err = client.PullRequests.CreateReview(ctx, owner, repo, prNumber, req)
+			// If still failing with position errors after the wait, fall through to start_line stripping.
+			if err != nil && is422(err) {
+				errStr = err.Error()
+				if strings.Contains(errStr, "submitted too quickly") {
+					// Second attempt also too quick — wait longer.
+					slog.Warn("review post still too quick, waiting longer",
+						"comments", len(comments), "error", err)
+					time.Sleep(20 * time.Second)
+					ghReview, _, err = client.PullRequests.CreateReview(ctx, owner, repo, prNumber, req)
+				}
+			}
+		}
+	}
+	if err != nil && is422(err) {
+		errStr := err.Error()
 		// Only strip start_line if the 422 is about line resolution, not other validation errors
-		if strings.Contains(errStr, "pull_request_review_thread") || strings.Contains(errStr, "line") || strings.Contains(errStr, "start_line") {
+		if strings.Contains(errStr, "pull_request_review_thread") || strings.Contains(errStr, "line") || strings.Contains(errStr, "start_line") || strings.Contains(errStr, "position") {
 			slog.Warn("review post failed (422 line resolution), retrying without start_line", "comments", len(comments), "error", err)
 			for i := range comments {
 				comments[i].StartLine = nil
