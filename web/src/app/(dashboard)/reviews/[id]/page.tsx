@@ -126,6 +126,62 @@ const severityBg: Record<string, string> = {
 
 /* ── Mermaid ─────────────────────────────────── */
 
+/* ── Friendly Errors ─────────────────────────── */
+
+function friendlyError(raw: string): {
+  title: string;
+  detail: string;
+  action: string;
+} {
+  if (raw.includes("secondary rate limit")) {
+    return {
+      title: "GitHub rate limit reached",
+      detail:
+        "GitHub temporarily blocked posting due to too many requests. The review is complete \u2014 findings are shown below.",
+      action: "Wait a few minutes and click Retry to post to GitHub.",
+    };
+  }
+  if (raw.includes("submitted too quickly")) {
+    return {
+      title: "GitHub hasn\u2019t processed the diff yet",
+      detail:
+        "The review was submitted before GitHub finished computing the PR diff.",
+      action: "Click Retry \u2014 it usually works on the second attempt.",
+    };
+  }
+  if (/\b502\b/.test(raw) || /\b503\b/.test(raw)) {
+    return {
+      title: "GitHub server error",
+      detail:
+        "GitHub returned a server error but may have posted the review anyway.",
+      action: "Check the PR on GitHub. If no review appears, click Retry.",
+    };
+  }
+  if (raw.includes("422")) {
+    return {
+      title: "GitHub rejected the review",
+      detail:
+        "GitHub could not process the review, likely due to line positions that no longer match the diff.",
+      action: "Click Retry to re-run the review against the latest diff.",
+    };
+  }
+  if (raw.includes("stage") && raw.includes("failed")) {
+    return {
+      title: "Review pipeline error",
+      detail:
+        raw.length > 200 ? raw.slice(0, 200) + "\u2026" : raw,
+      action: "Click Retry to re-run the review.",
+    };
+  }
+  return {
+    title: "Review failed to post",
+    detail: raw.length > 200 ? raw.slice(0, 200) + "\u2026" : raw,
+    action: "Click Retry to try again.",
+  };
+}
+
+/* ── Mermaid (chart) ─────────────────────────── */
+
 function MermaidChart({ chart }: { chart: string }) {
   const ref = useRef<HTMLDivElement>(null);
   const [error, setError] = useState(false);
@@ -885,33 +941,49 @@ export default function ReviewDetailPage() {
       )}
 
       {/* Error card */}
-      {review.status === "failed" && review.error && (
-        <div
-          className="rounded-lg border border-red-400/30 bg-red-400/5 p-5 mb-6"
-          role="alert"
-        >
-          <div className="flex items-center gap-2 mb-3">
-            <AlertTriangle className="h-4 w-4 text-red-400" />
-            <h2 className="font-display text-sm font-bold text-red-400">
-              Review Failed
-            </h2>
-          </div>
-          <p className="font-mono text-xs text-red-400/80 whitespace-pre-wrap mb-4">
-            {review.error}
-          </p>
-          <button
-            type="button"
-            onClick={() => retryReview.mutate(review.id)}
-            disabled={retryReview.isPending}
-            className="inline-flex items-center gap-1.5 rounded-md border border-red-400/30 px-3 py-1.5 text-xs font-mono text-red-400 hover:bg-red-400/10 transition-colors cursor-pointer"
+      {review.status === "failed" && review.error && (() => {
+        const err = friendlyError(review.error);
+        return (
+          <div
+            className="rounded-lg border border-red-400/30 bg-red-400/5 p-5 mb-6"
+            role="alert"
           >
-            <RotateCcw
-              className={`h-3.5 w-3.5 ${retryReview.isPending ? "animate-spin" : ""}`}
-            />
-            Retry
-          </button>
-        </div>
-      )}
+            <div className="flex items-center gap-2 mb-2">
+              <AlertTriangle className="h-4 w-4 text-red-400" />
+              <h2 className="font-display text-sm font-bold text-red-400">
+                {err.title}
+              </h2>
+            </div>
+            <p className="text-sm text-foreground/70 mb-2">
+              {err.detail}
+            </p>
+            <p className="text-xs text-amber mb-4">
+              {err.action}
+            </p>
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => retryReview.mutate(review.id)}
+                disabled={retryReview.isPending}
+                className="inline-flex items-center gap-1.5 rounded-md border border-red-400/30 px-3 py-1.5 text-xs font-mono text-red-400 hover:bg-red-400/10 transition-colors cursor-pointer"
+              >
+                <RotateCcw
+                  className={`h-3.5 w-3.5 ${retryReview.isPending ? "animate-spin" : ""}`}
+                />
+                Retry
+              </button>
+            </div>
+            <details className="mt-3">
+              <summary className="text-xs text-foreground/40 cursor-pointer hover:text-foreground/60">
+                Technical details
+              </summary>
+              <pre className="mt-2 font-mono text-xs text-red-400/60 whitespace-pre-wrap break-all">
+                {review.error}
+              </pre>
+            </details>
+          </div>
+        );
+      })()}
 
       {/* Summary card */}
       <div className="rounded-lg border border-iron bg-charcoal/80 p-6 mb-8">

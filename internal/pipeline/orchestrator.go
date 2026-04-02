@@ -1178,6 +1178,18 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 			"error", dbErr, "review_id", run.ReviewID)
 	}
 
+	// Persist comments to DB BEFORE posting to GitHub.
+	// If PostReview fails (403 rate limit, 502, etc.), comments are still
+	// visible on the dashboard. ghReviewID=0 means github_comment_id is nil
+	// for now — backfilled after successful post.
+	// Guard: skip if comments already persisted (retry after post failure).
+	var existingComments int
+	_ = o.db.QueryRow(ctx, `SELECT COUNT(*) FROM review_comments WHERE review_id = $1`, run.ReviewID).Scan(&existingComments)
+	if existingComments == 0 {
+		o.indexComments(ctx, run, 0, owner, repo)
+	}
+	o.indexConfirmedPatterns(ctx, run, owner, repo)
+
 	ghReviewID, err := o.ghClient.PostReview(
 		ctx,
 		run.PREvent.InstallationID,
@@ -1209,9 +1221,8 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		"comments", countComments(run), "files", len(run.FileReviews), "score", run.Synthesis.Score,
 		"deep_review", run.DeepReview, "duration_ms", time.Since(run.CreatedAt).Milliseconds())
 
-	// Persist comments to DB + index in Supermemory
-	o.indexComments(ctx, run, ghReviewID, owner, repo)
-	o.indexConfirmedPatterns(ctx, run, owner, repo)
+	// Backfill github_comment_ids now that we have the ghReviewID
+	o.backfillGitHubCommentIDs(ctx, run, ghReviewID, owner, repo)
 
 	// Post-review ops use detached context — pipeline is done, these are best-effort
 	postCtx := context.WithoutCancel(ctx)
@@ -3097,6 +3108,40 @@ func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghRe
 				}
 			}
 		}
+	}
+}
+
+// backfillGitHubCommentIDs fetches the actual GitHub comment IDs from the
+// posted review and updates the pre-persisted review_comments rows.
+func (o *Orchestrator) backfillGitHubCommentIDs(ctx context.Context, run *PipelineRun, ghReviewID int64, owner, repo string) {
+	if ghReviewID == 0 {
+		return
+	}
+	ghComments, err := o.ghClient.ListReviewComments(ctx, run.PREvent.InstallationID, owner, repo, run.PREvent.PRNumber, ghReviewID)
+	if err != nil {
+		o.logger.Error("listing review comments for backfill", "error", err)
+		return
+	}
+	updated := 0
+	for _, gc := range ghComments {
+		line := gc.GetLine()
+		if line == 0 {
+			line = gc.GetPosition()
+		}
+		ghID := gc.GetID()
+		_, err := o.db.Exec(ctx, `
+			UPDATE review_comments
+			SET github_comment_id = $1
+			WHERE review_id = $2 AND file_path = $3 AND end_line = $4 AND github_comment_id IS NULL
+		`, ghID, run.ReviewID, gc.GetPath(), line)
+		if err != nil {
+			o.logger.Error("backfilling github_comment_id", "error", err, "file", gc.GetPath(), "line", line)
+		} else {
+			updated++
+		}
+	}
+	if updated > 0 {
+		o.logger.Info("backfilled github comment IDs", "count", updated, "review_id", run.ReviewID)
 	}
 }
 
