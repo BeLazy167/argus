@@ -101,9 +101,9 @@ Every PR goes through 9 stages. You don't need to understand these — but if yo
 | **Triage** | Classifies files by risk: skip, skim, security_skim, or deep |
 | **Lead Brief** | Gathers cross-file context — callers, imports, dependency graph, past bugs |
 | **Deep Review** | 4 specialists review in parallel: Bug Hunter, Security, Architecture, Regression & Edge Case |
-| **Dedup** | Removes duplicate findings across specialists |
+| **Dedup** | 3-layer deterministic dedup: groups by vulnerability type, clusters by text similarity, merges by line proximity. Reduces 150+ findings to ~50 unique. |
 | **Validation** | Validates against diff, checks blast radius, runs code simulations |
-| **Scoring** | Scores each finding 0–100. Below 65 dropped. Minimum 3 kept. |
+| **Scoring** | LLM judge catches remaining duplicates and scores each finding 0–100. Below 65 dropped. Minimum 3 kept. |
 | **Pass 2** | Hot files (3+ findings scored 70+) get a second Architecture review |
 | **Synthesis** | Generates summary, fix ordering, root-cause analysis, diagrams |
 | **Post & Learn** | Posts review. Indexes patterns. Learns from your feedback. |
