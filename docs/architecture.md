@@ -30,7 +30,7 @@ Argus is an AI-powered code review bot that installs as a GitHub App. When a pul
 |-----------|------|---------|
 | **API Server** | `internal/api/` | HTTP server (Chi router). Handles GitHub webhooks, REST API for dashboard, Clerk JWT auth, rate limiting, semaphore-based concurrency control |
 | **GitHub App** | `internal/github/` | GitHub App authentication (JWT + installation tokens), PR diff fetching, review posting, GraphQL thread resolution, Git data API for `@argus-eye fix` |
-| **Pipeline** | `internal/pipeline/` | State machine orchestrator with 6 stages: Triage → Review → Scoring → Pass2 → Synthesis → Post (memory indexing is part of Post) |
+| **Pipeline** | `internal/pipeline/` | State machine orchestrator with 9 stages: Triage → Briefing → Review → Dedup → Validate → Scoring → Pass2 → Synthesis → Post (memory indexing is part of Post) |
 | **LLM Registry** | `internal/llm/` | Multi-provider LLM abstraction (OpenRouter, OpenAI, Anthropic, Groq, etc.). BYOK key resolution, per-repo model configs, tool-use support |
 | **Memory** | `internal/memory/` | Supermemory REST client for semantic storage/retrieval. Indexer with deduplication (content-hashed `customId`). Container tag hierarchy for scoping |
 | **Store** | `internal/store/` | PostgreSQL via pgx. Models: Installation, Repo, Review, ReviewComment, Rule, ProviderKey, ModelConfig, Pattern |
@@ -54,10 +54,16 @@ stateDiagram-v2
     Triaging --> Reviewing: TriageStage.Execute\nclassifies files by risk\n(skip/skim/security_skim/deep),\nqueries memory hints
     Triaging --> Failed: stage error
 
-    Reviewing --> Scoring: ReviewStage.Execute\nparallel file reviews,\nspecialist + agentic passes,\nmemory context injected
+    Reviewing --> Deduping: ReviewStage.Execute\nparallel file reviews,\nspecialist + agentic passes,\nmemory context injected
     Reviewing --> Failed: stage error
 
-    Scoring --> Pass2: ScoringStage.Execute\nvalidates comments (threshold 80/100),\ndrops low-confidence findings
+    Deduping --> Validating: SmartDedup\n3-layer deterministic dedup:\ncanonical type fingerprint,\nTF-IDF cosine similarity,\nline proximity
+    Deduping --> Failed: stage error
+
+    Validating --> Scoring: validateStage\nblast radius analysis,\ncode simulation
+    Validating --> Failed: stage error
+
+    Scoring --> Pass2: ScoringStage.Execute\nLLM judge: groups + scores (0-100),\ndrops below 65, min 3 kept
     Scoring --> Failed: stage error
 
     Pass2 --> Synthesizing: pass2()\nre-reviews hot files\nwith Architecture specialist\n(deep review only)
@@ -86,10 +92,12 @@ stateDiagram-v2
 |-------|---------|----------------|
 | `Triaging` | `TriageStage.Execute` | Classifies files into `skip`/`skim`/`security_skim`/`deep`. Queries `triageMemoryHints()` for file history + org patterns + rules |
 | `Reviewing` | `ReviewStage.Execute` | Assigns specialists (BugHunter, Security, Architecture, Regression) based on triage action + `DeepReview` flag. Fan-out: N worker goroutines review files in parallel. Three review modes: (1) base prompt + `reviewMemoryBlock`, (2) specialist prompt + `specialistMemoryBlock`, (3) agentic tool-use loop with `search_memory`/`list_repos` tools. `security_skim` files get a single Security specialist pass. Publishes `EventComment` per file |
-| `Scoring` | `ScoringStage.Execute` | Validates each comment with a separate scoring model. Drops comments below threshold (80/100). Fetches repo memory for calibration. No-op if scoring model not configured or `!DeepReview`. Sets `ScoringSkipped` flag when skipped, affecting downstream indexing thresholds |
-| `Pass2` | `Orchestrator.pass2` | Deep review only. Identifies "hot" files (3+ comments scored 70+). Re-reviews with Architecture specialist. Merges pass2 comments into existing reviews |
+| `Deduping` | `Orchestrator.dedupStage` | 3-layer deterministic dedup via `SmartDedup()`: **Layer 1** canonical vuln type fingerprint (15 types — sql_injection, xss, path_traversal, etc.) groups findings by (file, vuln_type). **Layer 2** TF-IDF cosine similarity clusters ungrouped findings (>0.7 threshold). **Layer 3** line proximity merges same-file/same-category within 5 lines. Saves pre-dedup snapshot to `AllFileReviews` for pattern learning |
+| `Validating` | `Orchestrator.validateStage` | Blast radius analysis (dependency graph impact) and code simulation on deduplicated findings |
+| `Scoring` | `ScoringStage.Execute` | LLM judge scores findings 0-100 AND groups remaining duplicates (Layer 4 sweeper). Output: `judgeGroup` with representative, score, severity override, duplicates. Drops below threshold (65/100), min 3 kept. Fallback: if LLM fails, deterministic dedup stands (`ScoringSkipped=true`). Score clamped to [0,100]. Fetches repo memory for calibration |
+| `Pass2` | `Orchestrator.pass2` | Deep review only. Identifies "hot" files (3+ comments scored 70+). Re-reviews with Architecture specialist. Merges pass2 comments, re-runs `SmartDedup` |
 | `Synthesizing` | `Orchestrator.synthesize` | Builds markdown summary from all file reviews. Calculates overall score (1-10). Publishes `EventSynthesis`. Incremental reviews use "Re-reviewed" header |
-| `Posting` | `Orchestrator.post` | Validates comment line numbers against diff via `ValidCommentLines()` — drops comments targeting lines outside diff hunks. Posts review to GitHub via `ghClient.PostReview()`. Minimizes "review started" comment. Updates review record in DB. Fires 6 memory indexing functions (fire-and-forget) |
+| `Posting` | `Orchestrator.post` | Runs `rebalanceSeverity()` (caps criticals at 50% of total). Validates comment line numbers against diff via `ValidCommentLines()` — drops comments targeting lines outside diff hunks. Posts review to GitHub via `ghClient.PostReview()`. Minimizes "review started" comment. Updates review record in DB. Fires 6 memory indexing functions (fire-and-forget) |
 
 ### "Review Started" Comment
 
@@ -387,3 +395,25 @@ All IDs are truncated to 100 characters max via `truncateIDWithSuffix()` to resp
 ### Unwired Functions
 
 - **`IndexRepoTopology`** (`internal/memory/indexer.go`): Stores inferred repo role/dependencies at owner scope with `{"type": "topology"}` metadata in `{owner}--patterns` container. Currently exists but is not called from any pipeline stage.
+
+---
+
+## Licensing
+
+Argus follows the **Sustainable Use License** model (similar to n8n):
+
+- **Core**: Licensed under the [Sustainable Use License](../LICENSE). Free for internal business use and non-commercial/personal use. Self-hosting is allowed.
+- **Enterprise**: Files containing `.ee.` in their filename or `.ee/` in their directory path require a commercial Argus Enterprise License.
+
+**What the Sustainable Use License allows:**
+- Self-host Argus for your internal code reviews
+- Modify and customize for your own use
+- Free for personal and non-commercial projects
+
+**What it restricts:**
+- Cannot offer Argus as a competing hosted/SaaS service
+- Cannot remove licensing notices
+
+The hosted SaaS at argusai.vercel.app includes both core and enterprise features. Revenue comes from managed hosting and enterprise subscriptions.
+
+Examples of this model: n8n, Cal.com
