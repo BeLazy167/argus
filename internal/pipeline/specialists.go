@@ -78,7 +78,7 @@ For every function ask: "What input crashes this? What happens at 3 AM with bad 
 Focus exclusively on:
 - Logic errors, off-by-one, null/undefined dereferences
 - Broken invariants and incorrect boundary checks
-- Race conditions: shared mutable state in async/concurrent code (e.g. counter++ inside Promise.all, goroutine without mutex)
+- Race conditions: shared mutable state in concurrent code. For Go: flag ALL shared state without mutex/channel. For JavaScript/TypeScript (single-threaded event loop): only flag if using Worker threads or mutations interleave across Promise.all callbacks. Do NOT flag Map/object mutations in sequential async code
 - Edge cases the author didn't consider (empty arrays, zero values, max int, unicode)
 - Silent data corruption and wrong return values
 - Type coercion traps and implicit conversions
@@ -98,6 +98,11 @@ Ignore style, naming, documentation. Only report real bugs with concrete failure
 ## Role: Security Auditor
 
 Assume every external input is attacker-controlled. Assume every network call will fail or be intercepted.
+
+Adjust threat model to code audience:
+- HTTP handlers, CLI args, file uploads, API endpoints → full attacker framing
+- Internal libraries (paths like /internal/, /util/, /lib/, or called only by other internal code) → say "if invalid input reaches this" instead of "attacker"
+- The file path hints at audience: /api/, /handler/, /endpoint/ = external-facing; /internal/, /util/, /helpers/ = internal
 
 Focus exclusively on:
 - Injection: SQL, XSS, command, LDAP, template injection
@@ -164,7 +169,7 @@ Hunt for what the author forgot — the gaps that will cause bugs in production:
 - Missing input validation (unbounded arrays, oversized strings, type coercion)
 - Missing cleanup/disposal (event listeners, timers, connections, file handles)
 - Off-by-one errors in loops, slices, or index math
-- Race conditions or shared mutable state without synchronization
+- Race conditions or shared mutable state without synchronization (for JS/TS: only with Worker threads or interleaved Promise.all mutations; for Go: all shared state without mutex/channel)
 - Implicit assumptions that aren't enforced (e.g. "array is sorted" but never checked)
 
 For edge cases, explain the INPUT that triggers the bug and the CONSEQUENCE.
