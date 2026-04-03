@@ -830,6 +830,23 @@ func (o *Orchestrator) generateConversationalBrief(ctx context.Context, run *Pip
 	if brief == "" {
 		return fallback
 	}
+
+	// Strip reasoning preamble that leaks the system prompt.
+	// Reasoning models (kimi, qwen) often output "The user wants..." before the verdict.
+	// cleanResponseContent handles <think> tags but not plain-prose reasoning.
+	if !strings.HasPrefix(brief, "**") {
+		if idx := strings.Index(brief, "**Verdict:"); idx > 0 {
+			brief = strings.TrimSpace(brief[idx:])
+		} else if idx := strings.Index(brief, "**"); idx > 0 {
+			brief = strings.TrimSpace(brief[idx:])
+		} else {
+			// No markdown structure — model failed to follow format. Use fallback.
+			o.logger.Warn("synthesis brief has no markdown structure, using fallback",
+				"response_prefix", util.Truncate(brief, 100, true))
+			return fallback
+		}
+	}
+
 	return util.Truncate(brief, 1500, false)
 }
 

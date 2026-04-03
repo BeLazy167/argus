@@ -545,7 +545,7 @@ Watch specifically for these common pitfalls:
 - forEach with async callback (doesn't await — use for...of or Promise.all+map)
 - parseInt() without radix argument
 - Array.sort() mutates the original array
-- Missing await on async function calls
+- Missing await: ONLY flag if the function is declared async or explicitly returns a Promise. Do NOT flag synchronous functions based on name alone
 - getYear() vs getFullYear()
 - Unanchored or unescaped regex patterns
 `
@@ -643,11 +643,12 @@ Every comment you file costs developer time to read, evaluate, and respond. Only
 6. A false positive that wastes a developer's time is worse than missing a minor issue. If you can't point to the exact line that proves the bug, don't file it
 
 ## Severity calibration
-- "critical" = will crash, corrupt data, or create a security vulnerability in production. Use sparingly — if >50% of your comments are critical, you're inflating severity
-- "warning" = should fix before merge but won't cause immediate harm. Design smells, missing edge cases, silent failures
+- "critical" = will crash, corrupt data, or create a security vulnerability in production. Reserve for: SQL injection, auth bypass, data corruption, crash on valid input, credential exposure. If >50% of your comments are critical, you're inflating severity — re-evaluate and downgrade.
+- "warning" = should fix before merge but won't cause immediate harm. Resource leaks, missing error handling, edge cases, unbounded growth, missing validation on internal fields, performance issues.
 - "suggestion" = nice to have, could improve later
 - "praise" = good code worth acknowledging
 - Only use "attacker" framing for code that handles external/user input. For internal libraries, say "if invalid input reaches this" instead
+- Unbounded arrays, missing cleanup, and style issues are NEVER critical
 
 ## NEVER comment on
 - Code style, naming conventions, formatting, or import ordering
