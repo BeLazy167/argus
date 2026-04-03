@@ -1018,7 +1018,7 @@ func (o *Orchestrator) pass2(ctx context.Context, run *PipelineRun) error {
 
 	// Re-dedup after pass2 — pass2 findings often overlap with pass1
 	beforeDedup := countComments(run)
-	run.FileReviews = dedupFindings(run.FileReviews, 5)
+	run.FileReviews = SmartDedup(run.FileReviews, 5, 0.7)
 	afterDedup := countComments(run)
 	if beforeDedup != afterDedup {
 		o.logger.Info("pass2 dedup", "before", beforeDedup, "after", afterDedup, "removed", beforeDedup-afterDedup)
@@ -1073,8 +1073,7 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	// Rebalance severity: if >50% critical, downgrade lowest-confidence criticals
 	rebalanceSeverity(run.FileReviews)
 
-	// Root-cause grouping: merge findings on same file about the same pattern
-	rootCauseGroup(run.FileReviews)
+	// Root-cause grouping now handled by SmartDedup Layer 1 (canonical type fingerprint)
 
 	reviewHeader := "## Argus Review\n\n"
 	if run.IsIncremental {
@@ -2590,7 +2589,7 @@ func (o *Orchestrator) dedupStage(ctx context.Context, run *PipelineRun) error {
 	run.AllFileReviews = make([]FileReview, len(run.FileReviews))
 	copy(run.AllFileReviews, run.FileReviews)
 
-	run.FileReviews = dedupFindings(run.FileReviews, 5)
+	run.FileReviews = SmartDedup(run.FileReviews, 5, 0.7)
 	after := countComments(run)
 	o.logger.Info("[dedup] OK", "before", before, "after", after, "removed", before-after, "pr", run.PREvent.PRNumber)
 	return nil
@@ -3468,96 +3467,6 @@ func rebalanceSeverity(reviews []FileReview) {
 		reviews[ref.fileIdx].Comments[ref.commentIdx].Severity = SeverityWarning
 	}
 	slog.Info("rebalanced severity", "total", total, "criticals_before", len(criticals), "downgraded", excess)
-}
-
-// rootCauseGroup merges findings on the same file that describe the same root cause.
-// Example: 6 "SQL injection" findings on query-builder.ts → 1 merged finding listing all affected lines.
-func rootCauseGroup(reviews []FileReview) {
-	for i := range reviews {
-		fr := &reviews[i]
-		if len(fr.Comments) <= 1 {
-			continue
-		}
-		// Group by normalized What (lowercase, trimmed)
-		type group struct {
-			key     string
-			indices []int
-		}
-		groups := make(map[string]*group)
-		var order []string
-		for ci, c := range fr.Comments {
-			key := normalizeForGrouping(c.What)
-			if key == "" {
-				key = normalizeForGrouping(c.Body)
-			}
-			if g, ok := groups[key]; ok {
-				g.indices = append(g.indices, ci)
-			} else {
-				groups[key] = &group{key: key, indices: []int{ci}}
-				order = append(order, key)
-			}
-		}
-
-		// Merge groups with >1 member
-		var merged []FileComment
-		used := make(map[int]bool)
-		for _, key := range order {
-			g := groups[key]
-			if len(g.indices) <= 1 {
-				continue
-			}
-			// Keep the best comment, append line refs from others
-			best := g.indices[0]
-			bestScore := fr.Comments[best].Score
-			for _, idx := range g.indices[1:] {
-				if fr.Comments[idx].Score > bestScore {
-					best = idx
-					bestScore = fr.Comments[idx].Score
-				}
-			}
-			bc := fr.Comments[best]
-			var otherLines []string
-			for _, idx := range g.indices {
-				if idx != best {
-					otherLines = append(otherLines, fmt.Sprintf("L%d", fr.Comments[idx].Line))
-				}
-				used[idx] = true
-			}
-			if len(otherLines) > 0 {
-				bc.Why += fmt.Sprintf(" (same pattern also at %s)", strings.Join(otherLines, ", "))
-			}
-			bc.DedupCount = len(g.indices)
-			merged = append(merged, bc)
-		}
-		// Add ungrouped comments
-		for ci, c := range fr.Comments {
-			if !used[ci] {
-				merged = append(merged, c)
-			}
-		}
-		if len(merged) < len(fr.Comments) {
-			slog.Info("root-cause grouped",
-				"file", fr.Path,
-				"before", len(fr.Comments),
-				"after", len(merged))
-			fr.Comments = merged
-		}
-	}
-}
-
-// normalizeForGrouping extracts a short key from a comment's What field
-// for root-cause grouping. Strips line numbers, articles, and normalizes case.
-func normalizeForGrouping(s string) string {
-	s = strings.ToLower(s)
-	// Remove line references like "L42", "line 42"
-	for _, pat := range []string{"l%d", "line %d"} {
-		_ = pat // regex would be better but keeping it simple
-	}
-	// Extract first significant phrase (before first period or dash)
-	if idx := strings.IndexAny(s, ".-:"); idx > 15 && idx < 80 {
-		s = s[:idx]
-	}
-	return strings.TrimSpace(s)
 }
 
 func strPtrOrNil(s string) *string {

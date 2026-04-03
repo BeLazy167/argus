@@ -58,19 +58,6 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 			allComments = append(allComments, indexedComment{fileIdx: fi, commentIdx: ci})
 		}
 	}
-
-	if len(allComments) == 0 {
-		return nil
-	}
-
-	// Note: dedup is now handled by the dedicated dedupStage before scoring.
-	// Re-index for scoring
-	allComments = allComments[:0]
-	for fi, fr := range run.FileReviews {
-		for ci := range fr.Comments {
-			allComments = append(allComments, indexedComment{fileIdx: fi, commentIdx: ci})
-		}
-	}
 	if len(allComments) == 0 {
 		return nil
 	}
@@ -92,6 +79,7 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 	})
 	if err != nil {
 		slog.Error("scoring LLM call failed, keeping all comments", "error", err)
+		run.ScoringSkipped = true
 		return nil // non-fatal
 	}
 
@@ -112,40 +100,79 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 		})
 	}
 
-	// Parse scored results
-	type scoredItem struct {
-		Index int `json:"index"`
-		Score int `json:"score"`
-	}
-	scored, err := unmarshalLLMArray[scoredItem](resp.Content)
+	// Parse judge output (Layer 4: LLM sweeper)
+	groups, err := unmarshalLLMArray[judgeGroup](resp.Content)
 	if err != nil {
-		slog.Error("failed to parse scoring response, keeping all comments",
+		slog.Error("failed to parse judge response, keeping deterministic results",
 			"error", err,
 			"model", cfg.Model,
 			"provider", cfg.Provider,
 			"finish_reason", resp.FinishReason,
 			"response_len", len(resp.Content),
 			"response_prefix", util.Truncate(resp.Content, 300, true))
-		return nil // non-fatal
+		run.ScoringSkipped = true
+		return nil // non-fatal — deterministic dedup results stand
 	}
 
-	// Build score lookup
-	scoreLookup := make(map[int]int, len(scored))
-	for _, s := range scored {
-		scoreLookup[s.Index] = s.Score
+	// Validate structural integrity
+	if vErr := validateJudgeOutput(groups, len(allComments)); vErr != nil {
+		slog.Warn("judge output invalid, keeping deterministic results",
+			"error", vErr,
+			"groups", len(groups),
+			"total_findings", len(allComments))
+		run.ScoringSkipped = true
+		return nil // non-fatal — deterministic dedup results stand
 	}
 
-	if len(scored) < len(allComments) {
-		slog.Warn("scoring returned fewer items than comments", "scored", len(scored), "expected", len(allComments))
-	}
-
-	// Apply scores
-	for i, ic := range allComments {
-		score, ok := scoreLookup[i]
-		if !ok {
-			score = 100 // unscored comments default to passing
+	// Clamp scores to [0, 100] — LLMs don't reliably respect numeric ranges
+	for i := range groups {
+		if groups[i].Score < 0 {
+			groups[i].Score = 0
 		}
-		run.FileReviews[ic.fileIdx].Comments[ic.commentIdx].Score = score
+		if groups[i].Score > 100 {
+			groups[i].Score = 100
+		}
+	}
+
+	// Apply scores and mark duplicates
+	dupSet := make(map[int]bool)
+	for _, g := range groups {
+		for _, d := range g.Duplicates {
+			dupSet[d] = true
+		}
+		// Apply score to representative
+		ic := allComments[g.Representative]
+		run.FileReviews[ic.fileIdx].Comments[ic.commentIdx].Score = g.Score
+		// Override severity if the judge changed it
+		if sev := Severity(g.Severity); ValidSeverities[sev] {
+			run.FileReviews[ic.fileIdx].Comments[ic.commentIdx].Severity = sev
+		}
+		// Track how many were merged by judge
+		if len(g.Duplicates) > 0 {
+			existing := run.FileReviews[ic.fileIdx].Comments[ic.commentIdx].DedupCount
+			if existing == 0 {
+				existing = 1
+			}
+			run.FileReviews[ic.fileIdx].Comments[ic.commentIdx].DedupCount = existing + len(g.Duplicates)
+		}
+	}
+	// Build representative set for O(1) lookup
+	repSet := make(map[int]bool, len(groups))
+	for _, g := range groups {
+		repSet[g.Representative] = true
+	}
+	// Score unmentioned findings at 100 (pass through)
+	var defaultScored int
+	for i, ic := range allComments {
+		if dupSet[i] || repSet[i] {
+			continue
+		}
+		run.FileReviews[ic.fileIdx].Comments[ic.commentIdx].Score = 100
+		defaultScored++
+	}
+	if defaultScored > 0 {
+		slog.Warn("scoring: findings not mentioned by judge assigned default score 100",
+			"count", defaultScored, "total", len(allComments))
 	}
 
 	// Snapshot all scored comments before filtering — pattern learning uses this
@@ -156,12 +183,26 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 		run.AllFileReviews[i] = FileReview{Path: fr.Path, Comments: comments}
 	}
 
-	// Filter comments below threshold
-	var kept, dropped int
+	// Build (fileIdx, commentIdx) set for duplicates to skip
+	type commentKey struct{ fi, ci int }
+	skipSet := make(map[commentKey]bool)
+	for d := range dupSet {
+		if d < len(allComments) {
+			ic := allComments[d]
+			skipSet[commentKey{ic.fileIdx, ic.commentIdx}] = true
+		}
+	}
+
+	// Filter: remove duplicates and comments below threshold
+	var kept, dropped, duped int
 	filtered := run.FileReviews[:0]
-	for _, fr := range run.FileReviews {
+	for fi, fr := range run.FileReviews {
 		var passing []FileComment
-		for _, c := range fr.Comments {
+		for ci, c := range fr.Comments {
+			if skipSet[commentKey{fi, ci}] {
+				duped++
+				continue
+			}
 			if c.Score >= scoringThreshold {
 				passing = append(passing, c)
 				kept++
@@ -183,7 +224,10 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 			score      int
 		}
 		var all []scoredIdx
-		for _, ic := range allComments {
+		for i, ic := range allComments {
+			if dupSet[i] {
+				continue // don't resurrect judge-marked duplicates
+			}
 			c := run.AllFileReviews[ic.fileIdx].Comments[ic.commentIdx]
 			all = append(all, scoredIdx{fileIdx: ic.fileIdx, commentIdx: ic.commentIdx, score: c.Score})
 		}
@@ -217,7 +261,7 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 		})
 	}
 
-	slog.Info("scoring complete", "kept", kept, "dropped", dropped, "threshold", scoringThreshold)
+	slog.Info("scoring complete", "kept", kept, "dropped", dropped, "duped_by_judge", duped, "threshold", scoringThreshold)
 	return nil
 }
 
@@ -252,33 +296,79 @@ func buildScoringPrompt(run *PipelineRun, memContext string) string {
 			idx++
 		}
 	}
-	sb.WriteString("\nRespond with JSON array: [{\"index\": 0, \"score\": 85}, ...]\nScore every comment. JSON array only.")
+	sb.WriteString("\nGroup duplicates and score each group. JSON array only:\n[{\"representative\": 0, \"score\": 85, \"severity\": \"critical\", \"duplicates\": [3], \"reason\": \"...\"}]")
 	return sb.String()
 }
 
-const scoringSystemPrompt = `You are a code review quality judge. Score each comment 0-100.
+// judgeGroup is the structured output from the LLM sweeper (Layer 4).
+type judgeGroup struct {
+	Representative int    `json:"representative"`
+	Score          int    `json:"score"`
+	Severity       string `json:"severity"`
+	Duplicates     []int  `json:"duplicates"`
+	Reason         string `json:"reason"`
+}
 
-Specialist comments (tagged with [bug_hunter], [security], [architecture], [regression], etc.) carry domain-specific intent. Score the finding on its technical merit within that specialty, not whether a generalist would agree.
+// validateJudgeOutput checks that the LLM output is structurally valid:
+// 1. All indices in [0, totalFindings)
+// 2. No index appears in more than one group
+// 3. Coverage >= 80% of findings
+func validateJudgeOutput(groups []judgeGroup, totalFindings int) error {
+	if len(groups) == 0 {
+		return fmt.Errorf("empty judge output")
+	}
+	seen := make(map[int]bool)
+	for gi, g := range groups {
+		if g.Representative < 0 || g.Representative >= totalFindings {
+			return fmt.Errorf("group %d: representative %d out of range [0,%d)", gi, g.Representative, totalFindings)
+		}
+		if seen[g.Representative] {
+			return fmt.Errorf("group %d: representative %d already claimed", gi, g.Representative)
+		}
+		seen[g.Representative] = true
+		for _, d := range g.Duplicates {
+			if d < 0 || d >= totalFindings {
+				return fmt.Errorf("group %d: duplicate %d out of range [0,%d)", gi, d, totalFindings)
+			}
+			if seen[d] {
+				return fmt.Errorf("group %d: duplicate %d already claimed", gi, d)
+			}
+			seen[d] = true
+		}
+	}
+	coverage := float64(len(seen)) / float64(totalFindings)
+	if coverage < 0.8 {
+		return fmt.Errorf("low coverage: %d/%d findings (%.0f%%) — need ≥80%%", len(seen), totalFindings, coverage*100)
+	}
+	return nil
+}
 
-90-100: Definite real bug, security flaw, or regression with clear evidence in the diff
-70-89: Likely valid issue — may be minor or context-dependent, but technically sound within its domain
-40-69: Speculative, low-confidence, or only tangentially related to correctness
-0-39: False positive, wrong, or duplicate of a higher-scored comment
+const scoringSystemPrompt = `You are a code review judge. Your job is to score findings AND group remaining duplicates.
 
-Style-only comments (naming, formatting, whitespace) that don't affect correctness or readability: maximum score 30.
-Security findings with a concrete exploit scenario or clear vulnerability path: minimum score 70.
+Most deduplication was already handled. You are the final pass — catch any semantic duplicates the deterministic layers missed, and score each group.
 
-Deduplication: if multiple comments flag variants of the same root issue, score only the clearest and most actionable one above threshold. Score duplicates at 0.
+For each finding or group of related findings, output:
+- representative: index of the best/clearest finding
+- score: 0-100 quality score for the group
+- severity: override if miscalibrated (critical/warning/suggestion/praise)
+- duplicates: indices of findings that are duplicates of the representative (empty array if unique)
+- reason: 1-sentence explanation
 
-Criteria:
-- Is it a real issue? Does the diff actually show the problem?
-- Does it explain WHY it matters?
-- Is any suggested fix correct?
-- For specialist comments: does it reflect genuine domain expertise?
-- If the issue would be caught by a standard linter (ESLint, golint/staticcheck, ruff, clippy), score it no higher than 35 regardless of severity label.
-- If a finding has blast_radius > 0, it affects downstream dependents. Score at least 70 regardless of specialist confidence.
+Scoring guide:
+90-100: Definite bug, security flaw, or regression with clear evidence
+70-89: Likely valid — minor or context-dependent but technically sound
+40-69: Speculative, low-confidence, or tangential
+0-39: False positive, style-only, or linter-catchable
 
-Respond ONLY with a JSON array. No other text.`
+Rules:
+- Every finding index must appear exactly once (as representative OR in a duplicates array)
+- Style-only comments: max 30
+- Security with concrete exploit: min 70
+- blast_radius > 0: min 70
+- Linter-catchable: max 35
+
+Respond ONLY with a JSON array. No other text.
+[{"representative": 0, "score": 85, "severity": "critical", "duplicates": [3], "reason": "real SQL injection"}]`
 
 // fetchScoringContext retrieves repo patterns + per-file synthesis from Supermemory to calibrate scoring.
 // Non-fatal: returns empty string on any error.
@@ -336,112 +426,3 @@ func fetchScoringContext(ctx context.Context, memClient *memory.Client, owner, r
 	return sb.String()
 }
 
-// deduplicateComments groups comments by file path + overlapping line range (within 5 lines),
-// then removes near-duplicates (>80% token overlap), keeping the longest comment in each group.
-func deduplicateComments(fileReviews []FileReview) []FileReview {
-	var result []FileReview
-	for _, fr := range fileReviews {
-		if len(fr.Comments) <= 1 {
-			result = append(result, fr)
-			continue
-		}
-
-		// Assign each comment to a line-proximity group
-		groups := make([]int, len(fr.Comments))
-		nextGroup := 0
-		for i := range fr.Comments {
-			groups[i] = -1
-		}
-		for i := range fr.Comments {
-			if groups[i] >= 0 {
-				continue
-			}
-			groups[i] = nextGroup
-			for j := i + 1; j < len(fr.Comments); j++ {
-				if groups[j] >= 0 {
-					continue
-				}
-				if linesOverlap(fr.Comments[i].Line, fr.Comments[j].Line, 5) {
-					groups[j] = nextGroup
-				}
-			}
-			nextGroup++
-		}
-
-		// Within each group, remove duplicates by body similarity
-		kept := make([]bool, len(fr.Comments))
-		for i := range kept {
-			kept[i] = true
-		}
-		for g := 0; g < nextGroup; g++ {
-			var idxs []int
-			for i, gi := range groups {
-				if gi == g {
-					idxs = append(idxs, i)
-				}
-			}
-			for i := 0; i < len(idxs); i++ {
-				if !kept[idxs[i]] {
-					continue
-				}
-				for j := i + 1; j < len(idxs); j++ {
-					if !kept[idxs[j]] {
-						continue
-					}
-					if tokenSimilarity(fr.Comments[idxs[i]].Body, fr.Comments[idxs[j]].Body) > 0.8 {
-						// Keep the longer comment
-						if len(fr.Comments[idxs[i]].Body) >= len(fr.Comments[idxs[j]].Body) {
-							kept[idxs[j]] = false
-						} else {
-							kept[idxs[i]] = false
-							break
-						}
-					}
-				}
-			}
-		}
-
-		var passing []FileComment
-		for i, c := range fr.Comments {
-			if kept[i] {
-				passing = append(passing, c)
-			}
-		}
-		if len(passing) > 0 {
-			result = append(result, FileReview{Path: fr.Path, Comments: passing})
-		}
-	}
-	return result
-}
-
-func linesOverlap(a, b, threshold int) bool {
-	d := a - b
-	if d < 0 {
-		d = -d
-	}
-	return d <= threshold
-}
-
-// tokenSimilarity returns the ratio of shared tokens to the max token count of two strings.
-func tokenSimilarity(a, b string) float64 {
-	tokA := strings.Fields(strings.ToLower(a))
-	tokB := strings.Fields(strings.ToLower(b))
-	if len(tokA) == 0 || len(tokB) == 0 {
-		return 0
-	}
-	set := make(map[string]bool, len(tokA))
-	for _, t := range tokA {
-		set[t] = true
-	}
-	shared := 0
-	for _, t := range tokB {
-		if set[t] {
-			shared++
-		}
-	}
-	maxLen := len(tokA)
-	if len(tokB) > maxLen {
-		maxLen = len(tokB)
-	}
-	return float64(shared) / float64(maxLen)
-}
