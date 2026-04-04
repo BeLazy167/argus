@@ -187,6 +187,13 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 			"count", defaultScored, "total", len(allComments))
 	}
 
+	// Assign confidence levels based on scores
+	for fi := range run.FileReviews {
+		for ci := range run.FileReviews[fi].Comments {
+			run.FileReviews[fi].Comments[ci].Confidence = assignConfidence(run.FileReviews[fi].Comments[ci].Score)
+		}
+	}
+
 	// Snapshot all scored comments before filtering — pattern learning uses this
 	run.AllFileReviews = make([]FileReview, len(run.FileReviews))
 	for i, fr := range run.FileReviews {
@@ -574,3 +581,14 @@ func fileExt(path string) string {
 	return ""
 }
 
+// assignConfidence maps a 0-100 score to a confidence level string.
+func assignConfidence(score int) string {
+	switch {
+	case score >= 80:
+		return "high"
+	case score >= 65:
+		return "medium"
+	default:
+		return "low"
+	}
+}

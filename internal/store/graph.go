@@ -114,6 +114,24 @@ func (s *Store) GetBlastRadius(ctx context.Context, repoID int64, filePaths []st
 	})
 }
 
+// GetCodeNodesForFile returns all code nodes for a given file, ordered by line_start.
+func (s *Store) GetCodeNodesForFile(ctx context.Context, repoID int64, filePath string) ([]CodeNode, error) {
+	rows, err := s.Pool.Query(ctx, `
+		SELECT id, repo_id, kind, name, file_path, COALESCE(line_start, 0), COALESCE(line_end, 0), COALESCE(language, '')
+		FROM code_nodes WHERE repo_id = $1 AND file_path = $2
+		ORDER BY line_start
+	`, repoID, filePath)
+	if err != nil {
+		return nil, fmt.Errorf("get code nodes for file: %w", err)
+	}
+	defer rows.Close()
+	return collectOrEmpty(rows, func(row pgx.CollectableRow) (CodeNode, error) {
+		var n CodeNode
+		err := row.Scan(&n.ID, &n.RepoID, &n.Kind, &n.Name, &n.FilePath, &n.LineStart, &n.LineEnd, &n.Language)
+		return n, err
+	})
+}
+
 // GetFileMemory returns patterns, review comments, decision traces, and risk score for a file.
 func (s *Store) GetFileMemory(ctx context.Context, repoID int64, filePath string) (*FileMemory, error) {
 	mem := &FileMemory{
