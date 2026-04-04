@@ -78,7 +78,10 @@ For every function ask: "What input crashes this? What happens at 3 AM with bad 
 Focus exclusively on:
 - Logic errors, off-by-one, null/undefined dereferences
 - Broken invariants and incorrect boundary checks
-- Race conditions: shared mutable state in concurrent code. For Go: flag ALL shared state without mutex/channel. For JavaScript/TypeScript (single-threaded event loop): only flag if using Worker threads or mutations interleave across Promise.all callbacks. Do NOT flag Map/object mutations in sequential async code
+- Race conditions — rules by runtime:
+  * Go: goroutines create real data races. Flag shared state accessed from multiple goroutines without sync primitives (mutex, channel, atomic)
+  * JavaScript/TypeScript: single-threaded event loop. NO data races possible unless using Worker threads or SharedArrayBuffer. Do NOT flag Promise.all, concurrent fetch, or callback patterns as race conditions
+  * Python: GIL prevents most data races. Only flag with threading module + shared mutable state
 - Edge cases the author didn't consider (empty arrays, zero values, max int, unicode)
 - Silent data corruption and wrong return values
 - Type coercion traps and implicit conversions
@@ -99,9 +102,10 @@ Ignore style, naming, documentation. Only report real bugs with concrete failure
 
 Assume every external input is attacker-controlled. Assume every network call will fail or be intercepted.
 
-Adjust threat model to code audience:
-- HTTP handlers, CLI args, file uploads, API endpoints → full attacker framing
-- Internal libraries (paths like /internal/, /util/, /lib/, or called only by other internal code) → say "if invalid input reaches this" instead of "attacker"
+Threat model scoping:
+- EXTERNAL code (API handlers, route handlers, middleware, controllers, endpoints, CLI args, file uploads): full attacker model applies. Flag injection, auth bypass, SSRF, etc.
+- INTERNAL code (internal/, lib/, util/, helper/, pkg/, private methods): use "unexpected input" framing. Do NOT assume an attacker controls input to internal utility functions unless they are directly reachable from an external entry point
+- When unsure: trace the call chain. If the function is only called from other internal functions, use internal framing
 - The file path hints at audience: /api/, /handler/, /endpoint/ = external-facing; /internal/, /util/, /helpers/ = internal
 
 Focus exclusively on:
@@ -364,8 +368,14 @@ func specialistMemoryBlock(ctx context.Context, memClient *memory.Client, owner,
 	if sb.Len() == 0 {
 		return ""
 	}
-	sb.WriteString("\nUse this context to inform your review — issues matching known patterns are higher priority.\nWhen a finding matches a known pattern above, add a tag at the end of your comment: *[Matches pattern: <pattern description>]*. Only tag when there is a clear match — do not fabricate references.")
-	return sb.String()
+	footer := "\nUse this context to inform your review — issues matching known patterns are higher priority.\nWhen a finding matches a known pattern above, add a tag at the end of your comment: *[Matches pattern: <pattern description>]*. Only tag when there is a clear match — do not fabricate references."
+
+	// Cap memory content to ~600 tokens (~2400 chars) BEFORE appending footer to avoid truncating instructions
+	result := sb.String()
+	if len(result) > 2400 {
+		result = util.Truncate(result, 2400, true)
+	}
+	return result + footer
 }
 
 
@@ -465,5 +475,11 @@ func reviewMemoryBlock(ctx context.Context, memClient *memory.Client, owner, rep
 		return ""
 	}
 	sb.WriteString("\nApply these patterns and past findings when reviewing. When a finding matches a known pattern above, add a tag at the end of your comment: *[Matches pattern: <pattern description>]*. Only tag when there is a clear match — do not fabricate references.\n")
-	return sb.String()
+
+	// Cap total memory block to ~800 tokens (~3200 chars) to avoid drowning the review prompt
+	result := sb.String()
+	if len(result) > 3200 {
+		result = util.Truncate(result, 3200, true)
+	}
+	return result
 }

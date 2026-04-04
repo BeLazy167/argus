@@ -650,6 +650,12 @@ Every comment you file costs developer time to read, evaluate, and respond. Only
 - Only use "attacker" framing for code that handles external/user input. For internal libraries, say "if invalid input reaches this" instead
 - Unbounded arrays, missing cleanup, and style issues are NEVER critical
 
+## False Positive Prevention
+- "Missing await": ONLY flag if the function is explicitly declared with the async keyword or has a return type of Promise<T>. If the function signature shows no async/Promise, DO NOT flag missing await
+- JavaScript/TypeScript is single-threaded. DATA RACES (concurrent memory access without synchronization) CANNOT occur in standard JS/TS code. ONLY flag data races if Worker threads, SharedArrayBuffer, or Atomics are used.
+- LOGICAL race conditions (TOCTOU, check-then-act on stale async state) CAN occur in JS/TS and should still be flagged when relevant.
+- For code in internal/, lib/, util/, helper/, or pkg/ paths: use "invalid input" framing, NOT "attacker" framing. Say "if this receives unexpected input" instead of "an attacker could". Reserve attacker framing for: API route handlers, authentication code, authorization middleware, and code that directly processes external HTTP requests
+
 ## NEVER comment on
 - Code style, naming conventions, formatting, or import ordering
 - Missing documentation, comments, or type annotations
