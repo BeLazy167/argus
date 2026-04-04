@@ -92,6 +92,35 @@ func Run() error {
 		}
 	}()
 
+	// Pattern decay goroutine — runs daily, cleans stale low-quality patterns
+	go func() {
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				installations, err := db.ListInstallations(ctx)
+				if err != nil {
+					logger.Error("pattern decay: list installations", "error", err)
+					cancel()
+					continue
+				}
+				for _, inst := range installations {
+					deleted, err := db.DecayStalePatterns(ctx, inst.ID, 90*24*time.Hour, 0.3)
+					if err != nil {
+						logger.Error("pattern decay", "installation", inst.ID, "error", err)
+					} else if deleted > 0 {
+						logger.Info("pattern decay", "installation", inst.ID, "deleted", deleted)
+					}
+				}
+				cancel()
+			case <-appCtx.Done():
+				return
+			}
+		}
+	}()
+
 	// JWT auth (Clerk or SuperTokens)
 	if cfg.ClerkJWKSURL != "" {
 		api.InitJWKS(cfg.ClerkJWKSURL, logger)

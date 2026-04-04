@@ -146,6 +146,7 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 				// Patterns
 				r.Get("/patterns", s.listPatterns)
 				r.Get("/patterns/stats", s.getPatternStats)
+				r.Get("/patterns/health", s.patternHealth)
 				r.Post("/patterns", s.createPattern)
 				r.Delete("/patterns/{patternID}", s.deletePattern)
 				r.Get("/patterns/{patternID}", s.getPattern)
