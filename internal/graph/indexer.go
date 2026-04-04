@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	ghpkg "github.com/BeLazy167/argus/internal/github"
@@ -110,5 +111,93 @@ func indexFileSet(ctx context.Context, st *store.Store, ghClient *ghpkg.Client, 
 		}
 	}
 
+	// Second pass: resolve uses_type edges from return types and parameter types
+	var allSyms []Symbol
+	for _, res := range results {
+		allSyms = append(allSyms, res.symbols...)
+	}
+	for _, edge := range resolveTypeEdges(allSyms, nameToID) {
+		sourceID := nameToID[edge.SourceName]
+		targetID := nameToID[edge.TargetName]
+		if err := st.UpsertCodeEdge(ctx, repoDBID, sourceID, targetID, edge.Kind); err != nil {
+			slog.Warn("graph: upsert type edge failed", "source", edge.SourceName, "target", edge.TargetName, "error", err)
+		}
+	}
+
 	return nil
+}
+
+// typeNameRe extracts identifiers from type expressions, stripping pointers, slices, maps, etc.
+var typeNameRe = regexp.MustCompile(`\b([A-Za-z]\w+)`)
+
+// typeKeywords are common language keywords/builtins that should not be treated as type names.
+var typeKeywords = map[string]bool{
+	"func": true, "return": true, "if": true, "else": true, "for": true,
+	"var": true, "const": true, "let": true, "string": true, "int": true,
+	"bool": true, "float": true, "void": true, "nil": true, "null": true,
+	"true": true, "false": true, "error": true, "context": true, "map": true,
+	"chan": true, "byte": true, "rune": true, "int64": true, "float64": true,
+	"uint": true, "uint64": true, "int32": true, "uint32": true,
+}
+
+// extractTypeNames parses a type expression string and returns unique type names found.
+// Strips *, [], map, chan prefixes and returns identifiers that aren't common keywords.
+func extractTypeNames(typeExpr string) []string {
+	if typeExpr == "" {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var names []string
+	for _, match := range typeNameRe.FindAllStringSubmatch(typeExpr, -1) {
+		m := match[1]
+		if !seen[m] && !typeKeywords[m] {
+			seen[m] = true
+			names = append(names, m)
+		}
+	}
+	return names
+}
+
+// resolveTypeEdges creates uses_type edges by inspecting each symbol's ReturnType
+// and Params for type names that exist in nameToID.
+func resolveTypeEdges(symbols []Symbol, nameToID map[string]int64) []Edge {
+	var edges []Edge
+	seen := make(map[[2]string]bool)
+
+	for _, sym := range symbols {
+		if _, ok := nameToID[sym.Name]; !ok {
+			continue
+		}
+		// Check return type
+		for _, typeName := range extractTypeNames(sym.ReturnType) {
+			if typeName == sym.Name {
+				continue
+			}
+			if _, ok := nameToID[typeName]; !ok {
+				continue
+			}
+			key := [2]string{sym.Name, typeName}
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			edges = append(edges, Edge{SourceName: sym.Name, TargetName: typeName, Kind: "uses_type"})
+		}
+		// Check params
+		for _, typeName := range extractTypeNames(sym.Params) {
+			if typeName == sym.Name {
+				continue
+			}
+			if _, ok := nameToID[typeName]; !ok {
+				continue
+			}
+			key := [2]string{sym.Name, typeName}
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			edges = append(edges, Edge{SourceName: sym.Name, TargetName: typeName, Kind: "uses_type"})
+		}
+	}
+	return edges
 }
