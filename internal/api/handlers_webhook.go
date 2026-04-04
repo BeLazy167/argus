@@ -73,7 +73,7 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		}()
 
 	case "pull_request_review_comment":
-		if event.Action == "created" && s.replyAnalyzer != nil {
+		if event.Action == "created" {
 			commentEvent, err := ghpkg.ToCommentEvent(event)
 			if err != nil {
 				s.logger.Error("parsing comment event", "error", err)
@@ -83,17 +83,33 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			if strings.HasSuffix(commentEvent.CommentAuthor, "[bot]") {
 				break
 			}
-			if commentEvent.InReplyToID > 0 {
-				if !s.acquireSem() {
+			// Reply analysis (existing)
+			if commentEvent.InReplyToID > 0 && s.replyAnalyzer != nil {
+				if s.acquireSem() {
+					go func() {
+						defer s.releaseSem()
+						if err := s.replyAnalyzer.Analyze(context.Background(), *commentEvent); err != nil {
+							s.logger.Error("reply analysis failed", "error", err, "comment_id", commentEvent.CommentID)
+						}
+					}()
+				} else {
 					s.logger.Warn("webhook semaphore full for reply analysis")
-					break
 				}
-				go func() {
-					defer s.releaseSem()
-					if err := s.replyAnalyzer.Analyze(context.Background(), *commentEvent); err != nil {
-						s.logger.Error("reply analysis failed", "error", err, "comment_id", commentEvent.CommentID)
-					}
-				}()
+			}
+			// Reaction analysis: check reactions on the parent Argus comment
+			if commentEvent.InReplyToID > 0 && s.reactionAnalyzer != nil {
+				parentEvent := *commentEvent
+				parentEvent.CommentID = commentEvent.InReplyToID
+				if s.acquireSem() {
+					go func() {
+						defer s.releaseSem()
+						if err := s.reactionAnalyzer.HandleCommentReactions(context.Background(), parentEvent); err != nil {
+							s.logger.Error("reaction analysis failed", "error", err, "comment_id", parentEvent.CommentID)
+						}
+					}()
+				} else {
+					s.logger.Warn("webhook semaphore full for reaction analysis")
+				}
 			}
 		}
 

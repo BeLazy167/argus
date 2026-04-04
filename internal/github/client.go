@@ -439,6 +439,45 @@ func (c *Client) AddReaction(ctx context.Context, installationID int64, owner, r
 	return err
 }
 
+// CommentReaction represents a single reaction on a PR review comment.
+type CommentReaction struct {
+	ID      int64
+	User    string
+	Content string // "+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"
+}
+
+// ListCommentReactions fetches all reactions on a pull request review comment.
+func (c *Client) ListCommentReactions(ctx context.Context, installationID int64, owner, repo string, commentID int64) ([]CommentReaction, error) {
+	client, err := c.app.ClientForInstallation(installationID)
+	if err != nil {
+		return nil, err
+	}
+
+	var all []CommentReaction
+	opts := &gh.ListOptions{PerPage: 100}
+	for {
+		if err := c.restLimiter.Wait(ctx); err != nil {
+			return nil, fmt.Errorf("rate limit wait: %w", err)
+		}
+		reactions, resp, err := client.Reactions.ListPullRequestCommentReactions(ctx, owner, repo, commentID, opts)
+		if err != nil {
+			return nil, fmt.Errorf("listing comment reactions: %w", err)
+		}
+		for _, r := range reactions {
+			all = append(all, CommentReaction{
+				ID:      r.GetID(),
+				User:    r.GetUser().GetLogin(),
+				Content: r.GetContent(),
+			})
+		}
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+	return all, nil
+}
+
 // CreateIssueComment posts a comment on an issue or PR.
 func (c *Client) CreateIssueComment(ctx context.Context, installationID int64, owner, repo string, number int, body string) error {
 	client, err := c.app.ClientForInstallation(installationID)

@@ -70,6 +70,7 @@ func Run() error {
 	scoringStage := pipeline.NewScoringStage(registry, db, memClient)
 	orchestrator := pipeline.NewOrchestrator(db.Pool, db, ghClient, reviewStage, triageStage, scoringStage, indexer, registry, eventBus, logger)
 	replyAnalyzer := pipeline.NewReplyAnalyzer(registry, db, ghClient, indexer, logger)
+	reactionAnalyzer := pipeline.NewReactionAnalyzer(db, ghClient, indexer, logger)
 
 	// Mark stale reviews as failed before resuming incomplete pipelines
 	if count, err := db.RecoverStaleReviews(ctx, 10*time.Minute); err != nil {
@@ -127,7 +128,7 @@ func Run() error {
 	}
 
 	// API Server
-	server := api.NewServer(db, ghApp, orchestrator, replyAnalyzer, indexer, registry, eventBus, cfg.GitHubWebhookSecret, cfg.CORSAllowOrigin, logger)
+	server := api.NewServer(db, ghApp, orchestrator, replyAnalyzer, reactionAnalyzer, indexer, registry, eventBus, cfg.GitHubWebhookSecret, cfg.CORSAllowOrigin, logger)
 
 	httpServer := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Port),

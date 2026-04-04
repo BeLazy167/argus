@@ -21,34 +21,36 @@ import (
 )
 
 type Server struct {
-	router          chi.Router
-	store           *store.Store
-	ghApp           *ghpkg.App
-	orchestrator    *pipeline.Orchestrator
-	replyAnalyzer   *pipeline.ReplyAnalyzer
-	indexer         *memory.Indexer
-	registry        *llm.Registry
-	eventBus        *pipeline.EventBus
-	webhookSecret   []byte
-	logger          *slog.Logger
-	rateLimiter     *RateLimiter
-	inFlightReviews sync.Map     // "{repo}:{prNumber}" → struct{}
-	webhookSem      chan struct{} // bounded concurrency for webhook goroutines
+	router           chi.Router
+	store            *store.Store
+	ghApp            *ghpkg.App
+	orchestrator     *pipeline.Orchestrator
+	replyAnalyzer    *pipeline.ReplyAnalyzer
+	reactionAnalyzer *pipeline.ReactionAnalyzer
+	indexer          *memory.Indexer
+	registry         *llm.Registry
+	eventBus         *pipeline.EventBus
+	webhookSecret    []byte
+	logger           *slog.Logger
+	rateLimiter      *RateLimiter
+	inFlightReviews  sync.Map     // "{repo}:{prNumber}" → struct{}
+	webhookSem       chan struct{} // bounded concurrency for webhook goroutines
 }
 
-func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchestrator, replyAnalyzer *pipeline.ReplyAnalyzer, indexer *memory.Indexer, registry *llm.Registry, eventBus *pipeline.EventBus, webhookSecret string, corsOrigin string, logger *slog.Logger) *Server {
+func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchestrator, replyAnalyzer *pipeline.ReplyAnalyzer, reactionAnalyzer *pipeline.ReactionAnalyzer, indexer *memory.Indexer, registry *llm.Registry, eventBus *pipeline.EventBus, webhookSecret string, corsOrigin string, logger *slog.Logger) *Server {
 	s := &Server{
-		store:         st,
-		ghApp:         ghApp,
-		orchestrator:  orchestrator,
-		replyAnalyzer: replyAnalyzer,
-		indexer:       indexer,
-		registry:      registry,
-		eventBus:      eventBus,
-		webhookSecret: []byte(webhookSecret),
-		logger:        logger,
-		rateLimiter:   NewRateLimiter(),
-		webhookSem:    make(chan struct{}, 50),
+		store:            st,
+		ghApp:            ghApp,
+		orchestrator:     orchestrator,
+		replyAnalyzer:    replyAnalyzer,
+		reactionAnalyzer: reactionAnalyzer,
+		indexer:          indexer,
+		registry:         registry,
+		eventBus:         eventBus,
+		webhookSecret:    []byte(webhookSecret),
+		logger:           logger,
+		rateLimiter:      NewRateLimiter(),
+		webhookSem:       make(chan struct{}, 50),
 	}
 
 	r := chi.NewRouter()
