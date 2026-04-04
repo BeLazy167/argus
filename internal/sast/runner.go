@@ -25,6 +25,15 @@ type Runner interface {
 	Run(ctx context.Context, files map[string]string) ([]Finding, error)
 }
 
+// DefaultRunners returns all available SAST runners.
+func DefaultRunners() []Runner {
+	return []Runner{
+		&StaticcheckRunner{},
+		&ESLintRunner{},
+		&SemgrepRunner{},
+	}
+}
+
 // RunAll executes all eligible runners in parallel, collecting their findings.
 // Each runner gets a 15-second timeout. Runners that error are skipped;
 // findings from successful runners are still returned.

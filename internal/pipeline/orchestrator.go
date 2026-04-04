@@ -2777,7 +2777,7 @@ func (o *Orchestrator) validateStage(ctx context.Context, run *PipelineRun) erro
 		if len(files) == 0 {
 			return
 		}
-		runners := []sast.Runner{&sast.StaticcheckRunner{}, &sast.ESLintRunner{}}
+		runners := sast.DefaultRunners()
 		sastCtx, sastCancel := context.WithTimeout(ctx, 30*time.Second)
 		defer sastCancel()
 		results, err := sast.RunAll(sastCtx, runners, lang, files)
@@ -3794,10 +3794,32 @@ func dominantLanguage(paths []string) string {
 			counts["javascript"]++
 		case ".py":
 			counts["python"]++
+		case ".java":
+			counts["java"]++
+		case ".rs":
+			counts["rust"]++
+		case ".cs":
+			counts["csharp"]++
+		case ".rb":
+			counts["ruby"]++
+		case ".kt", ".kts":
+			counts["kotlin"]++
+		case ".swift":
+			counts["swift"]++
+		case ".c", ".h":
+			counts["c"]++
+		case ".cpp", ".cc", ".cxx", ".hpp":
+			counts["cpp"]++
+		case ".php":
+			counts["php"]++
+		case ".scala":
+			counts["scala"]++
+		case ".dart":
+			counts["dart"]++
 		}
 	}
 	// Fixed priority order for deterministic tie-breaking
-	priority := []string{"go", "typescript", "javascript", "python"}
+	priority := []string{"go", "typescript", "javascript", "python", "java", "rust", "csharp", "ruby", "kotlin", "swift", "c", "cpp", "php", "scala", "dart"}
 	var best string
 	var bestCount int
 	for _, lang := range priority {
