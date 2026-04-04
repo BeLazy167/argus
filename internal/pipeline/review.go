@@ -323,6 +323,12 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p revie
 		}
 	}
 
+	// Query type context from code graph
+	var typeCtx string
+	if rs.store != nil {
+		typeCtx = FormatTypeContext(ctx, rs.store, run.DBRepoID, p.file.NewName)
+	}
+
 	// Look up relevant scenarios for this file
 	var scenarioContext string
 	if run.ScenarioMemory && rs.store != nil {
@@ -334,7 +340,7 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p revie
 		}
 	}
 
-	prompt := buildFileReviewPrompt(run, p.file, fileContents[p.file.NewName], relatedContext, scenarioContext, blastContext)
+	prompt := buildFileReviewPrompt(run, p.file, fileContents[p.file.NewName], relatedContext, scenarioContext, blastContext, typeCtx)
 	messages := []llm.Message{{Role: "user", Content: prompt}}
 
 	var tools []llm.Tool
@@ -430,7 +436,7 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p revie
 	return review, tokens, fmt.Errorf("exceeded max tool iterations (%d) for %s %s", rs.maxToolIter, p.file.NewName, label)
 }
 
-func buildFileReviewPrompt(run *PipelineRun, file diff.FileDiff, fileContent string, relatedContext string, scenarioContext string, blastContext string) string {
+func buildFileReviewPrompt(run *PipelineRun, file diff.FileDiff, fileContent string, relatedContext string, scenarioContext string, blastContext string, typeContext string) string {
 	var sb strings.Builder
 	// Sanitize + truncate user-controlled fields
 	safeTitle := sanitizeUserInput(util.Truncate(run.PREvent.PRTitle, 200, false))
@@ -492,6 +498,10 @@ func buildFileReviewPrompt(run *PipelineRun, file diff.FileDiff, fileContent str
 
 	if blastContext != "" {
 		sb.WriteString(blastContext)
+	}
+
+	if typeContext != "" {
+		sb.WriteString(typeContext)
 	}
 
 	// Inject prior review comments for incremental reviews so the LLM can

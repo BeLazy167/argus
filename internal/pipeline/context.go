@@ -3,10 +3,12 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 
 	ghpkg "github.com/BeLazy167/argus/internal/github"
 	"github.com/BeLazy167/argus/internal/store"
@@ -130,6 +132,82 @@ func FormatRelatedContext(related []RelatedFile) string {
 		sb.WriteString(fmt.Sprintf("File: %s (%s)\n```\n%s\n```\n\n", r.Path, r.Reason, r.Content))
 	}
 	sb.WriteString("</related_context>\n")
+	return sb.String()
+}
+
+// maxTypeContextLen caps the type context block to ~500 tokens (~2000 chars).
+const maxTypeContextLen = 2000
+
+// FormatTypeContext queries the code graph for type information about symbols
+// in the given file, returning a formatted string for LLM prompt injection.
+// Returns empty string if graph is not indexed or store is nil.
+func FormatTypeContext(ctx context.Context, st *store.Store, repoID int64, filePath string) string {
+	if st == nil {
+		return ""
+	}
+	nodes, err := st.GetCodeNodesForFile(ctx, repoID, filePath)
+	if err != nil {
+		slog.Debug("type context query failed", "file", filePath, "error", err)
+		return ""
+	}
+	if len(nodes) == 0 {
+		return ""
+	}
+
+	// Group by kind
+	functions := make([]store.CodeNode, 0)
+	types := make([]store.CodeNode, 0)
+	for _, n := range nodes {
+		switch n.Kind {
+		case "function", "method":
+			functions = append(functions, n)
+		case "class", "type", "interface":
+			types = append(types, n)
+		}
+	}
+
+	if len(functions) == 0 && len(types) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("\n<type_context file=%q>\n", filePath))
+
+	if len(functions) > 0 {
+		sb.WriteString("Functions:\n")
+		for _, n := range functions {
+			exported := "unexported"
+			if len(n.Name) > 0 && unicode.IsUpper(rune(n.Name[0])) {
+				exported = "exported"
+			}
+			asyncLabel := "sync"
+			if n.IsAsync {
+				asyncLabel = "async"
+			}
+			sb.WriteString(fmt.Sprintf("- %s (%s) [%s, %s]\n", n.Name, n.Kind, exported, asyncLabel))
+			if sb.Len() > maxTypeContextLen {
+				sb.WriteString("... (truncated)\n")
+				break
+			}
+		}
+	}
+
+	if len(types) > 0 && sb.Len() < maxTypeContextLen {
+		sb.WriteString("Types:\n")
+		for _, n := range types {
+			exported := "unexported"
+			if len(n.Name) > 0 && unicode.IsUpper(rune(n.Name[0])) {
+				exported = "exported"
+			}
+			sb.WriteString(fmt.Sprintf("- %s (%s) [%s]\n", n.Name, n.Kind, exported))
+			if sb.Len() > maxTypeContextLen {
+				sb.WriteString("... (truncated)\n")
+				break
+			}
+		}
+	}
+
+	sb.WriteString("</type_context>\n")
 	return sb.String()
 }
 

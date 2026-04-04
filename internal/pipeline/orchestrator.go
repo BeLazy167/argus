@@ -3370,6 +3370,13 @@ func formatCommentBody(c FileComment) string {
 		body += "\n\n---\n<sub>React 👎 to dismiss · Argus learns from feedback</sub>"
 	}
 
+	// Wrap medium-confidence findings in collapsible details
+	if c.Confidence == "medium" {
+		inner := strings.TrimPrefix(body, header)
+		inner = strings.TrimPrefix(inner, "\n\n")
+		body = fmt.Sprintf("<details><summary>%s (medium confidence)</summary>\n\n%s\n</details>", header, inner)
+	}
+
 	return body
 }
 

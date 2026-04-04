@@ -95,6 +95,8 @@ type PipelineRun struct {
 	IsIncremental    bool
 	PreviousReviewID *uuid.UUID
 	PriorComments    map[string][]PriorComment // file path -> prior unresolved comments from previous review
+	// SastFindings holds SAST tool results keyed by file path.
+	SastFindings         map[string][]SastFinding `json:"-"`
 	StartedCommentNodeID string    `json:"-"` // node ID of the "review started" GH comment, for minimizing later
 	EventBus             *EventBus `json:"-"` // not persisted
 	Error            string
@@ -192,7 +194,8 @@ type FileComment struct {
 	EnforcedRuleContent string     `json:"-"`
 	IsNewFinding        bool       `json:"-"`
 	DedupCount          int        `json:"dedup_count,omitempty"` // how many duplicate findings were merged into this one
-	SastCorroborated    bool       `json:"sast_corroborated,omitempty"` // true when a SAST tool independently flagged this
+	SastCorroborated bool   `json:"sast_corroborated,omitempty"`
+	Confidence       string `json:"confidence,omitempty"`
 }
 
 // ValidSeverities is the set of valid severity values.
@@ -291,4 +294,13 @@ type PriorComment struct {
 	Body     string
 	Severity string
 	Category string
+}
+
+// SastFinding represents a single finding from a SAST tool.
+type SastFinding struct {
+	File     string
+	Line     int
+	Rule     string
+	Message  string
+	Severity string
 }
