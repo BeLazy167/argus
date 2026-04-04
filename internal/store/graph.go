@@ -19,7 +19,8 @@ type FileMemory struct {
 }
 
 // UpsertCodeNode inserts or updates a code node, returning its ID.
-// If prNumber is 0 (e.g. from indexer), preserves the existing pr_number.
+// Only updates base columns (kind, name, file_path, lines, language, pr_number).
+// Does NOT overwrite type-info columns (return_type, params, etc.) if they already exist.
 func (s *Store) UpsertCodeNode(ctx context.Context, repoID int64, kind, name, filePath string, lineStart, lineEnd int, language string, prNumber int) (int64, error) {
 	var id int64
 	err := s.Pool.QueryRow(ctx, `
@@ -31,6 +32,23 @@ func (s *Store) UpsertCodeNode(ctx context.Context, repoID int64, kind, name, fi
 		             updated_at = NOW()
 		RETURNING id
 	`, repoID, kind, name, filePath, lineStart, lineEnd, language, prNumber).Scan(&id)
+	return id, err
+}
+
+// UpsertCodeNodeFull inserts or updates a code node with type info, returning its ID.
+func (s *Store) UpsertCodeNodeFull(ctx context.Context, repoID int64, kind, name, filePath string, lineStart, lineEnd int, language string, prNumber int, returnType, params, visibility string, isAsync bool, receiverType, scope string) (int64, error) {
+	var id int64
+	err := s.Pool.QueryRow(ctx, `
+		INSERT INTO code_nodes (repo_id, kind, name, file_path, line_start, line_end, language, pr_number, return_type, params, visibility, is_async, receiver_type, scope, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8, 0), $9, $10, $11, $12, $13, $14, NOW())
+		ON CONFLICT (repo_id, file_path, kind, name)
+		DO UPDATE SET line_start = $5, line_end = $6, language = $7,
+		             pr_number = COALESCE(NULLIF($8, 0), code_nodes.pr_number),
+		             return_type = $9, params = $10, visibility = $11,
+		             is_async = $12, receiver_type = $13, scope = $14,
+		             updated_at = NOW()
+		RETURNING id
+	`, repoID, kind, name, filePath, lineStart, lineEnd, language, prNumber, returnType, params, visibility, isAsync, receiverType, scope).Scan(&id)
 	return id, err
 }
 

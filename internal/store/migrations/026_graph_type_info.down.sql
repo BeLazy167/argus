@@ -1,0 +1,6 @@
+ALTER TABLE code_nodes DROP COLUMN IF EXISTS return_type;
+ALTER TABLE code_nodes DROP COLUMN IF EXISTS params;
+ALTER TABLE code_nodes DROP COLUMN IF EXISTS visibility;
+ALTER TABLE code_nodes DROP COLUMN IF EXISTS is_async;
+ALTER TABLE code_nodes DROP COLUMN IF EXISTS receiver_type;
+ALTER TABLE code_nodes DROP COLUMN IF EXISTS scope;
