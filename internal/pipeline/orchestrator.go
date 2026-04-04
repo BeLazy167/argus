@@ -1105,7 +1105,12 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	// Split: inline comments (valid lines) go in the review, invalid-line comments
 	// are folded into the summary body so everything ships in ONE atomic API call.
 	// Critical/warning findings on non-diff lines are shown prominently; others are collapsed.
-	var rawInline []ghpkg.ReviewComment
+	type rankedComment struct {
+		comment  ghpkg.ReviewComment
+		severity Severity
+		score    int
+	}
+	var rawInline []rankedComment
 	var importantFolded []string // critical/warning — shown prominently
 	var minorFolded []string     // suggestion/praise — collapsed
 	for _, fr := range run.FileReviews {
@@ -1132,17 +1137,42 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 			if startLine > 0 && !fileValid[startLine] {
 				startLine = 0
 			}
-			rawInline = append(rawInline, ghpkg.ReviewComment{
-				Path:      fr.Path,
-				Body:      formatCommentBody(c),
-				Line:      c.Line,
-				StartLine: startLine,
-				Side:      "RIGHT",
+			rawInline = append(rawInline, rankedComment{
+				comment: ghpkg.ReviewComment{
+					Path:      fr.Path,
+					Body:      formatCommentBody(c),
+					Line:      c.Line,
+					StartLine: startLine,
+					Side:      "RIGHT",
+				},
+				severity: c.Severity,
+				score:    c.Score,
 			})
 		}
 	}
 
-	inlineComments := rawInline
+	// Cap inline comments posted to GitHub at 40.
+	// All findings are persisted to the dashboard via indexComments (pre-post).
+	// Selection: sort by severity (critical→warning→suggestion→praise), then by score desc.
+	const maxInlineComments = 40
+	if len(rawInline) > maxInlineComments {
+		sevRank := map[Severity]int{SeverityCritical: 4, SeverityWarning: 3, SeveritySuggestion: 2, SeverityPraise: 1}
+		sort.SliceStable(rawInline, func(i, j int) bool {
+			ri, rj := sevRank[rawInline[i].severity], sevRank[rawInline[j].severity]
+			if ri != rj {
+				return ri > rj
+			}
+			return rawInline[i].score > rawInline[j].score
+		})
+		o.logger.Info("capping inline comments for GitHub",
+			"total", len(rawInline), "cap", maxInlineComments,
+			"dropped", len(rawInline)-maxInlineComments)
+		rawInline = rawInline[:maxInlineComments]
+	}
+	inlineComments := make([]ghpkg.ReviewComment, len(rawInline))
+	for i, rc := range rawInline {
+		inlineComments[i] = rc.comment
+	}
 
 	// Build summary: header + brief + affected-file findings + score
 	var summaryBody strings.Builder
@@ -1238,6 +1268,48 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	}
 	o.indexConfirmedPatterns(ctx, run, owner, repo)
 
+	// Run pattern learning BEFORE posting — if PostReview fails (403/502),
+	// patterns are still learned and the dashboard patterns page updates.
+	prePostCtx := context.WithoutCancel(ctx)
+	if run.LearnPatterns {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					o.logger.Error("pre-post panic", "recover", r, "op", "autoLearnPatterns", "pr", run.PREvent.PRNumber)
+				}
+			}()
+			o.autoLearnPatterns(prePostCtx, run, owner, repo)
+		}()
+	}
+	if run.LearnConventions {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					o.logger.Error("pre-post panic", "recover", r, "op", "extractConventions", "pr", run.PREvent.PRNumber)
+				}
+			}()
+			o.extractConventions(prePostCtx, run, owner, repo)
+		}()
+	}
+	if run.FileSynthesis {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					o.logger.Error("pre-post panic", "recover", r, "op", "synthesizeFileMemories", "pr", run.PREvent.PRNumber)
+				}
+			}()
+			o.synthesizeFileMemories(prePostCtx, run, owner, repo)
+		}()
+	}
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				o.logger.Error("pre-post panic", "recover", r, "op", "indexPRSummary", "pr", run.PREvent.PRNumber)
+			}
+		}()
+		o.indexPRSummary(prePostCtx, run, owner, repo)
+	}()
+
 	ghReviewID, err := o.ghClient.PostReview(
 		ctx,
 		run.PREvent.InstallationID,
@@ -1272,47 +1344,9 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	// Backfill github_comment_ids now that we have the ghReviewID
 	o.backfillGitHubCommentIDs(ctx, run, ghReviewID, owner, repo)
 
-	// Post-review ops use detached context — pipeline is done, these are best-effort
+	// Pattern learning, conventions, file synthesis, and PR summary
+	// now run BEFORE PostReview (see above). Only architecture graph + PR enrichment remain post-review.
 	postCtx := context.WithoutCancel(ctx)
-
-	if run.LearnPatterns {
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					o.logger.Error("post-review panic", "recover", r, "op", "autoLearnPatterns", "pr", run.PREvent.PRNumber)
-				}
-			}()
-			o.autoLearnPatterns(postCtx, run, owner, repo)
-		}()
-	}
-	if run.LearnConventions {
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					o.logger.Error("post-review panic", "recover", r, "op", "extractConventions", "pr", run.PREvent.PRNumber)
-				}
-			}()
-			o.extractConventions(postCtx, run, owner, repo)
-		}()
-	}
-	if run.FileSynthesis {
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					o.logger.Error("post-review panic", "recover", r, "op", "synthesizeFileMemories", "pr", run.PREvent.PRNumber)
-				}
-			}()
-			o.synthesizeFileMemories(postCtx, run, owner, repo)
-		}()
-	}
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				o.logger.Error("post-review panic", "recover", r, "op", "indexPRSummary", "pr", run.PREvent.PRNumber)
-			}
-		}()
-		o.indexPRSummary(postCtx, run, owner, repo)
-	}()
 	if run.ArchitectureGraph {
 		func() {
 			defer func() {
