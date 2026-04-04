@@ -114,10 +114,13 @@ func (s *Store) GetBlastRadius(ctx context.Context, repoID int64, filePaths []st
 	})
 }
 
-// GetCodeNodesForFile returns all code nodes for a given file, ordered by line_start.
+// GetCodeNodesForFile returns all code nodes for a given file with full type info, ordered by line_start.
 func (s *Store) GetCodeNodesForFile(ctx context.Context, repoID int64, filePath string) ([]CodeNode, error) {
 	rows, err := s.Pool.Query(ctx, `
-		SELECT id, repo_id, kind, name, file_path, COALESCE(line_start, 0), COALESCE(line_end, 0), COALESCE(language, '')
+		SELECT id, repo_id, kind, name, file_path,
+		       COALESCE(line_start, 0), COALESCE(line_end, 0), COALESCE(language, ''),
+		       COALESCE(return_type, ''), COALESCE(params, ''), COALESCE(visibility, ''),
+		       COALESCE(is_async, false), COALESCE(receiver_type, ''), COALESCE(scope, '')
 		FROM code_nodes WHERE repo_id = $1 AND file_path = $2
 		ORDER BY line_start
 	`, repoID, filePath)
@@ -127,7 +130,10 @@ func (s *Store) GetCodeNodesForFile(ctx context.Context, repoID int64, filePath 
 	defer rows.Close()
 	return collectOrEmpty(rows, func(row pgx.CollectableRow) (CodeNode, error) {
 		var n CodeNode
-		err := row.Scan(&n.ID, &n.RepoID, &n.Kind, &n.Name, &n.FilePath, &n.LineStart, &n.LineEnd, &n.Language)
+		err := row.Scan(&n.ID, &n.RepoID, &n.Kind, &n.Name, &n.FilePath,
+			&n.LineStart, &n.LineEnd, &n.Language,
+			&n.ReturnType, &n.Params, &n.Visibility,
+			&n.IsAsync, &n.ReceiverType, &n.Scope)
 		return n, err
 	})
 }
