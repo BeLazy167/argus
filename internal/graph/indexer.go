@@ -15,6 +15,10 @@ import (
 var sourceExts = map[string]bool{
 	".go": true, ".ts": true, ".tsx": true, ".js": true, ".jsx": true,
 	".mjs": true, ".cjs": true, ".py": true,
+	".java": true, ".rs": true, ".cs": true, ".rb": true,
+	".kt": true, ".kts": true, ".swift": true,
+	".c": true, ".h": true, ".cpp": true, ".cc": true, ".cxx": true, ".hpp": true,
+	".php": true, ".scala": true, ".dart": true,
 }
 
 // IndexRepo performs a full code graph index for a repository.
