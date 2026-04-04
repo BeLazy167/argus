@@ -400,21 +400,55 @@ func (idx *Indexer) IndexFeedbackSignal(ctx context.Context, owner, repo string,
 	}
 
 	customID := FeedbackCustomID(owner, repo, feedback.FilePath, feedback.Category, feedback.OriginalBody)
+	metadata := map[string]string{
+		"source":    source,
+		"file_path": feedback.FilePath,
+		"category":  feedback.Category,
+		"pr_number": fmt.Sprintf("%d", feedback.PRNumber),
+		"action":    feedback.Action,
+	}
+
+	// Store to general patterns container (existing behavior)
 	_, err := idx.client.AddMemory(ctx, AddRequest{
 		Content:       content,
 		CustomID:      customID,
 		ContainerTags: []string{RepoTag(owner, repo, "patterns")},
-		Metadata: map[string]string{
-			"source":    source,
-			"file_path": feedback.FilePath,
-			"category":  feedback.Category,
-			"pr_number": fmt.Sprintf("%d", feedback.PRNumber),
-			"action":    feedback.Action,
-		},
+		Metadata:      metadata,
 	})
 	if err != nil {
 		return fmt.Errorf("indexing feedback signal: %w", err)
 	}
+
+	// Also store to dedicated negative/positive pattern container for targeted suppression/boosting
+	var patternTag string
+	var patternContent string
+	switch feedback.Action {
+	case "dismissed":
+		patternTag = NegativePatternTag(owner, repo)
+		patternContent = fmt.Sprintf("NEGATIVE_PATTERN: [%s] in %s — %s. Developer: %s",
+			feedback.Category, feedback.FilePath,
+			util.Truncate(feedback.OriginalBody, 200, true),
+			util.Truncate(feedback.DeveloperReply, 150, false))
+	case "confirmed":
+		patternTag = PositivePatternTag(owner, repo)
+		patternContent = fmt.Sprintf("POSITIVE_PATTERN: [%s] in %s — %s. Developer: %s",
+			feedback.Category, feedback.FilePath,
+			util.Truncate(feedback.OriginalBody, 200, true),
+			util.Truncate(feedback.DeveloperReply, 150, false))
+	}
+	if patternTag != "" {
+		patternID := PatternCustomID(owner, repo, feedback.Action, patternContent)
+		_, err = idx.client.AddMemory(ctx, AddRequest{
+			Content:       patternContent,
+			CustomID:      patternID,
+			ContainerTags: []string{patternTag},
+			Metadata:      metadata,
+		})
+		if err != nil {
+			idx.logger.Warn("indexing pattern signal to dedicated container", "action", feedback.Action, "error", err)
+		}
+	}
+
 	idx.logger.Info("indexed feedback signal", "action", feedback.Action, "owner", owner, "repo", repo, "file", feedback.FilePath)
 	return nil
 }

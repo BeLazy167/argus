@@ -192,6 +192,16 @@ func RepoTag(owner, repo, kind string) string {
 	return tagSanitizer.Replace(owner) + "--" + tagSanitizer.Replace(repo) + "--" + kind
 }
 
+// NegativePatternTag returns a Supermemory tag for false-positive patterns that should be suppressed.
+func NegativePatternTag(owner, repo string) string {
+	return RepoTag(owner, repo, "negative_patterns")
+}
+
+// PositivePatternTag returns a Supermemory tag for confirmed good patterns.
+func PositivePatternTag(owner, repo string) string {
+	return RepoTag(owner, repo, "positive_patterns")
+}
+
 // ValidateTagScope checks that a container tag belongs to the given owner.
 func ValidateTagScope(tag, owner string) bool {
 	return strings.HasPrefix(tag, tagSanitizer.Replace(owner)+"--")

@@ -302,9 +302,9 @@ func specialistMemoryBlock(ctx context.Context, memClient *memory.Client, owner,
 	searchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	var synthResults, repoResults, orgResults []string
+	var synthResults, repoResults, orgResults, negResults, posResults []string
 	var wg sync.WaitGroup
-	wg.Add(3)
+	wg.Add(5)
 	go func() {
 		defer wg.Done()
 		if filePath != "" {
@@ -318,6 +318,14 @@ func specialistMemoryBlock(ctx context.Context, memClient *memory.Client, owner,
 	go func() {
 		defer wg.Done()
 		orgResults = searchMemoryRich(searchCtx, memClient, query, memory.OwnerTag(owner, "patterns"), 3)
+	}()
+	go func() {
+		defer wg.Done()
+		negResults = searchMemoryRich(searchCtx, memClient, query, memory.NegativePatternTag(owner, repo), 3)
+	}()
+	go func() {
+		defer wg.Done()
+		posResults = searchMemoryRich(searchCtx, memClient, query, memory.PositivePatternTag(owner, repo), 3)
 	}()
 	wg.Wait()
 
@@ -343,6 +351,14 @@ func specialistMemoryBlock(ctx context.Context, memClient *memory.Client, owner,
 		for i, r := range patterns {
 			sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, r))
 		}
+	}
+
+	if block := formatMemoryBlock("\n## Known False Positives (DO NOT re-flag these patterns)\n", "", negResults); block != "" {
+		sb.WriteString(block)
+	}
+
+	if block := formatMemoryBlock("\n## Approved Patterns (do not flag code following these)\n", "", posResults); block != "" {
+		sb.WriteString(block)
 	}
 
 	if sb.Len() == 0 {
@@ -371,9 +387,9 @@ func reviewMemoryBlock(ctx context.Context, memClient *memory.Client, owner, rep
 	ownerPatternTag := memory.OwnerTag(owner, "patterns")
 	ownerRuleTag := memory.OwnerTag(owner, "rules")
 
-	var synthResults, repoPatterns, repoReviews, orgPatterns, orgRules []string
+	var synthResults, repoPatterns, repoReviews, orgPatterns, orgRules, negResults, posResults []string
 	var wg sync.WaitGroup
-	wg.Add(5)
+	wg.Add(7)
 	go func() {
 		defer wg.Done()
 		if filePath != "" {
@@ -395,6 +411,14 @@ func reviewMemoryBlock(ctx context.Context, memClient *memory.Client, owner, rep
 	go func() {
 		defer wg.Done()
 		orgRules = searchMemoryRich(searchCtx, memClient, query, ownerRuleTag, 2)
+	}()
+	go func() {
+		defer wg.Done()
+		negResults = searchMemoryRich(searchCtx, memClient, query, memory.NegativePatternTag(owner, repo), 3)
+	}()
+	go func() {
+		defer wg.Done()
+		posResults = searchMemoryRich(searchCtx, memClient, query, memory.PositivePatternTag(owner, repo), 3)
 	}()
 	wg.Wait()
 
@@ -427,6 +451,14 @@ func reviewMemoryBlock(ctx context.Context, memClient *memory.Client, owner, rep
 		for _, r := range repoReviews {
 			sb.WriteString("- " + r + "\n")
 		}
+	}
+
+	if block := formatMemoryBlock("\n## Known False Positives (DO NOT re-flag these patterns)\n", "", negResults); block != "" {
+		sb.WriteString(block)
+	}
+
+	if block := formatMemoryBlock("\n## Approved Patterns (do not flag code following these)\n", "", posResults); block != "" {
+		sb.WriteString(block)
 	}
 
 	if sb.Len() == 0 {
