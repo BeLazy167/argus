@@ -745,7 +745,7 @@ Format (markdown):
 **Verdict:** [1-2 sentences: what this PR does and whether it's ready to merge.]
 
 [severity line — compact inline, only non-zero counts, e.g.:]
-🔴 4 blockers · 🟡 3 should fix · 2 files reviewed
+🔴 4 P0 · 🟡 3 P1 · 💡 2 P2 · 64 files reviewed
 
 **Top priority:** [The single most important root cause to fix first.]
 
@@ -1198,31 +1198,64 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	}
 	summaryBody.WriteString(fmt.Sprintf("\n\nScore: **%d/10** · [Full review →](https://argusai.vercel.app/reviews/%s)", run.Synthesis.Score, run.ReviewID.String()))
 
-	// Structured JSON for LLM agents (e.g., @argus fix)
-	summaryBody.WriteString("\n\n<details><summary>Structured findings (for AI agents)</summary>\n\n```json\n")
-	type findingJSON struct {
-		File     string `json:"file"`
-		Line     int    `json:"line"`
-		Severity string `json:"severity"`
-		Category string `json:"category"`
-		What     string `json:"what"`
+	// Structured output for LLM agents (e.g., @argus fix, Cursor, Copilot)
+	summaryBody.WriteString("\n\n<details><summary>Prompt for AI agents (unresolved issues)</summary>\n\n")
+
+	// XML format — designed for LLM consumption (file-grouped violations with priority)
+	type xmlFinding struct {
+		file     string
+		line     int
+		priority string
+		conf     int
+		category string
+		what     string
+		fix      string
 	}
-	var findings []findingJSON
+	var xmlFindings []xmlFinding
 	for _, fr := range run.FileReviews {
 		for _, c := range fr.Comments {
-			findings = append(findings, findingJSON{
-				File:     fr.Path,
-				Line:     c.Line,
-				Severity: string(c.Severity),
-				Category: string(c.Category),
-				What:     c.What,
+			prio := priorityLabel(c.Severity)
+			if prio == "" {
+				continue // skip praise in agent output
+			}
+			xmlFindings = append(xmlFindings, xmlFinding{
+				file:     fr.Path,
+				line:     c.Line,
+				priority: prio,
+				conf:     confidenceScore(c),
+				category: string(c.Category),
+				what:     c.What,
+				fix:      c.Suggestion,
 			})
 		}
 	}
-	if jsonBytes, err := json.Marshal(findings); err == nil {
-		summaryBody.Write(jsonBytes)
+	// Group by file
+	fileGroups := make(map[string][]xmlFinding)
+	var fileOrder []string
+	for _, f := range xmlFindings {
+		if _, exists := fileGroups[f.file]; !exists {
+			fileOrder = append(fileOrder, f.file)
+		}
+		fileGroups[f.file] = append(fileGroups[f.file], f)
 	}
-	summaryBody.WriteString("\n```\n\n</details>")
+	vNum := 1
+	for _, file := range fileOrder {
+		summaryBody.WriteString(fmt.Sprintf("<file name=\"%s\">\n", file))
+		for _, f := range fileGroups[file] {
+			summaryBody.WriteString(fmt.Sprintf("  <violation number=\"%d\" location=\"%s:%d\" confidence=\"%d\">\n", vNum, f.file, f.line, f.conf))
+			summaryBody.WriteString(fmt.Sprintf("    %s [%s]: %s\n", f.priority, f.category, f.what))
+			if f.fix != "" {
+				summaryBody.WriteString(fmt.Sprintf("    ```suggestion\n    %s\n    ```\n", strings.TrimRight(f.fix, "\n")))
+			}
+			summaryBody.WriteString("  </violation>\n")
+			vNum++
+		}
+		summaryBody.WriteString("</file>\n")
+	}
+
+	summaryBody.WriteString("\nUse sub-agents to investigate and fix each issue separately.\n")
+	summaryBody.WriteString(fmt.Sprintf("\n[Full review with all %d findings →](https://argusai.vercel.app/reviews/%s)\n", countComments(run), run.ReviewID.String()))
+	summaryBody.WriteString("\n</details>")
 
 	submission := &ghpkg.ReviewSubmission{
 		Summary:  summaryBody.String(),
@@ -3265,9 +3298,60 @@ func getDiffContext(run *PipelineRun, path string) string {
 
 // formatCommentBody builds the GitHub review comment body.
 // Structure: emoji severity + category title, then why (impact), then fix.
+// priorityLabel maps severity to P0/P1/P2/P3 priority labels.
+func priorityLabel(s Severity) string {
+	switch s {
+	case SeverityCritical:
+		return "P0"
+	case SeverityWarning:
+		return "P1"
+	case SeveritySuggestion:
+		return "P2"
+	default:
+		return ""
+	}
+}
+
+// confidenceScore returns a 1-10 confidence score.
+// Uses LLM judge score when available (Score > 0), otherwise derives from severity.
+func confidenceScore(c FileComment) int {
+	if c.Score > 0 {
+		s := c.Score / 10
+		if s < 1 {
+			s = 1
+		}
+		if s > 10 {
+			s = 10
+		}
+		return s
+	}
+	// Fallback: derive from severity when scoring failed
+	switch c.Severity {
+	case SeverityCritical:
+		return 9
+	case SeverityWarning:
+		return 7
+	case SeveritySuggestion:
+		return 4
+	case SeverityPraise:
+		return 10
+	default:
+		return 5
+	}
+}
+
 func formatCommentBody(c FileComment) string {
 	emoji := severityEmoji(c.Severity)
-	header := fmt.Sprintf("%s **%s:** %s", emoji, capitalizeCategory(string(c.Category)), commentTitle(c))
+	prio := priorityLabel(c.Severity)
+	conf := confidenceScore(c)
+
+	var header string
+	if prio != "" {
+		header = fmt.Sprintf("%s **%s (%d/10) · %s:** %s", emoji, prio, conf, capitalizeCategory(string(c.Category)), commentTitle(c))
+	} else {
+		// Praise — no priority label
+		header = fmt.Sprintf("%s **%s:** %s", emoji, capitalizeCategory(string(c.Category)), commentTitle(c))
+	}
 
 	var body string
 	if c.Why != "" {
