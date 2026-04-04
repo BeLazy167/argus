@@ -359,6 +359,42 @@ func (idx *Indexer) IndexRepoTopology(ctx context.Context, owner, content string
 
 
 
+// IndexPositivePattern stores a positive pattern (praise/confirmed good code) to the
+// dedicated positive_patterns container for future false-positive suppression.
+func (idx *Indexer) IndexPositivePattern(ctx context.Context, owner, repo, content, customID string, metadata map[string]string) error {
+	if idx.client == nil {
+		return nil
+	}
+	tag := PositivePatternTag(owner, repo)
+	_, err := idx.client.AddMemory(ctx, AddRequest{
+		Content:       content,
+		CustomID:      customID,
+		ContainerTags: []string{tag},
+		Metadata:      metadata,
+	})
+	if err != nil {
+		return fmt.Errorf("indexing positive pattern: %w", err)
+	}
+	idx.logger.Info("indexed positive pattern", "owner", owner, "repo", repo)
+	return nil
+}
+
+// FormatPositivePattern builds a structured positive pattern string from review data.
+// Output is capped at 200 chars for concise memory storage.
+func FormatPositivePattern(category, filePath string, line int, body string) string {
+	pattern := fmt.Sprintf("POSITIVE_PATTERN: [%s] %s:%d — %s",
+		category, filePath, line, body)
+	if len(pattern) > 200 {
+		// Rune-safe truncation
+		cut := 197
+		for cut > 0 && pattern[cut]&0xC0 == 0x80 {
+			cut--
+		}
+		pattern = pattern[:cut] + "..."
+	}
+	return pattern
+}
+
 // FeedbackCustomID returns a stable customId for a feedback signal on a finding.
 func FeedbackCustomID(owner, repo, filePath, category, body string) string {
 	h := sha256.Sum256([]byte(filePath + "|" + category + "|" + normalizeBody(body) + "|feedback"))
@@ -431,10 +467,12 @@ func (idx *Indexer) IndexFeedbackSignal(ctx context.Context, owner, repo string,
 			util.Truncate(feedback.DeveloperReply, 150, false))
 	case "confirmed":
 		patternTag = PositivePatternTag(owner, repo)
-		patternContent = fmt.Sprintf("POSITIVE_PATTERN: [%s] in %s — %s. Developer: %s",
+		patternContent = fmt.Sprintf("POSITIVE_PATTERN: [%s] Confirmed good pattern in %s. Pattern: %s",
 			feedback.Category, feedback.FilePath,
-			util.Truncate(feedback.OriginalBody, 200, true),
-			util.Truncate(feedback.DeveloperReply, 150, false))
+			util.Truncate(feedback.OriginalBody, 200, true))
+		if feedback.DeveloperReply != "" {
+			patternContent += fmt.Sprintf(" Developer: %s", util.Truncate(feedback.DeveloperReply, 100, false))
+		}
 	}
 	if patternTag != "" {
 		patternID := PatternCustomID(owner, repo, feedback.Action, patternContent)

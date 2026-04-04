@@ -1341,6 +1341,14 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 			}()
 			o.autoLearnPatterns(prePostCtx, run, owner, repo)
 		}()
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					o.logger.Error("pre-post panic", "recover", r, "op", "learnPositivePatterns", "pr", run.PREvent.PRNumber)
+				}
+			}()
+			o.learnPositivePatterns(prePostCtx, run, owner, repo)
+		}()
 	}
 	if run.LearnConventions {
 		func() {
@@ -1786,6 +1794,49 @@ func (o *Orchestrator) indexConfirmedPatterns(ctx context.Context, run *Pipeline
 		}
 	}
 	slog.Info("indexConfirmedPatterns", "indexed", indexed, "scoring_skipped", run.ScoringSkipped)
+}
+
+// learnPositivePatterns indexes praise comments as positive patterns in Supermemory.
+// These patterns suppress future false positives on similar good code.
+func (o *Orchestrator) learnPositivePatterns(ctx context.Context, run *PipelineRun, owner, repo string) int {
+	if o.indexer == nil || !run.LearnPatterns {
+		return 0
+	}
+
+	reviews := run.FileReviews
+	if len(run.AllFileReviews) > 0 {
+		reviews = run.AllFileReviews
+	}
+
+	var indexed int
+	for _, fr := range reviews {
+		for _, c := range fr.Comments {
+			if c.Severity != SeverityPraise {
+				continue
+			}
+			content := memory.FormatPositivePattern(string(c.Category), fr.Path, c.Line, c.Body)
+			customID := memory.PatternCustomID(owner, repo, "positive", content)
+			if err := o.indexer.IndexPositivePattern(ctx, owner, repo, content, customID, map[string]string{
+				"source":   "praise_comment",
+				"category": string(c.Category),
+				"pr":       fmt.Sprintf("%d", run.PREvent.PRNumber),
+			}); err != nil {
+				o.logger.Warn("positive pattern indexing failed", "error", err)
+			} else {
+				indexed++
+			}
+		}
+	}
+
+	if indexed > 0 {
+		o.logger.Info("pattern_learning_event",
+			"action", "positive_patterns",
+			"count", indexed,
+			"repo", run.PREvent.RepoFullName,
+			"pr", run.PREvent.PRNumber,
+		)
+	}
+	return indexed
 }
 
 // isGenericPattern returns true if the pattern doesn't reference file paths from the PR diff.
