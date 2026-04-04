@@ -27,8 +27,21 @@ func NewScoringStage(registry *llm.Registry, st *store.Store, memClient *memory.
 	return &ScoringStage{registry: registry, store: st, memClient: memClient}
 }
 
-// scoringThreshold is the minimum score (0-100) for a comment to survive scoring.
-const scoringThreshold = 65
+// scoringThresholdForSeverity returns the minimum score for a comment to survive
+// scoring, varying by severity. Critical findings use a lower bar; suggestions/info
+// require higher confidence.
+func scoringThresholdForSeverity(severity string) int {
+	switch strings.ToLower(severity) {
+	case "critical":
+		return 55
+	case "warning":
+		return 65
+	case "suggestion", "info":
+		return 75
+	default:
+		return 65
+	}
+}
 
 // minSurvivors is the minimum number of comments to keep even if all fall below threshold.
 const minSurvivors = 3
@@ -48,10 +61,6 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 	}
 
 	// Flatten all comments into indexed list
-	type indexedComment struct {
-		fileIdx    int
-		commentIdx int
-	}
 	var allComments []indexedComment
 	for fi, fr := range run.FileReviews {
 		for ci := range fr.Comments {
@@ -134,6 +143,9 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 		}
 	}
 
+	// Deterministic FP caps / TP floors — post-LLM, pre-threshold
+	adjustScores(run, groups, allComments)
+
 	// Apply scores and mark duplicates
 	dupSet := make(map[int]bool)
 	for _, g := range groups {
@@ -203,7 +215,7 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 				duped++
 				continue
 			}
-			if c.Score >= scoringThreshold {
+			if c.Score >= scoringThresholdForSeverity(string(c.Severity)) {
 				passing = append(passing, c)
 				kept++
 			} else {
@@ -255,13 +267,20 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 
 	if run.EventBus != nil {
 		run.EventBus.Publish(run.ReviewID, EventScoringUpdate, map[string]any{
-			"kept":      kept,
-			"dropped":   dropped,
-			"threshold": scoringThreshold,
+			"kept":    kept,
+			"dropped": dropped,
+			"thresholds": map[string]int{
+				"critical":   scoringThresholdForSeverity("critical"),
+				"warning":    scoringThresholdForSeverity("warning"),
+				"suggestion": scoringThresholdForSeverity("suggestion"),
+			},
 		})
 	}
 
-	slog.Info("scoring complete", "kept", kept, "dropped", dropped, "duped_by_judge", duped, "threshold", scoringThreshold)
+	slog.Info("scoring complete", "kept", kept, "dropped", dropped, "duped_by_judge", duped,
+		"threshold_critical", scoringThresholdForSeverity("critical"),
+		"threshold_warning", scoringThresholdForSeverity("warning"),
+		"threshold_suggestion", scoringThresholdForSeverity("suggestion"))
 	return nil
 }
 
@@ -424,5 +443,134 @@ func fetchScoringContext(ctx context.Context, memClient *memory.Client, owner, r
 		sb.WriteString("\nUse this context to calibrate scores — issues matching confirmed patterns should score higher.")
 	}
 	return sb.String()
+}
+
+// indexedComment maps a flattened comment index back to its FileReview/Comment position.
+type indexedComment struct {
+	fileIdx    int
+	commentIdx int
+}
+
+// scoredComment bundles a FileComment with its file path for FP-detection helpers.
+type scoredComment struct {
+	FileComment
+	FilePath string
+}
+
+// adjustScores applies deterministic post-LLM caps/floors to known FP/TP patterns.
+// Runs after LLM judge scoring, before threshold filtering.
+func adjustScores(run *PipelineRun, groups []judgeGroup, allComments []indexedComment) {
+	for i := range groups {
+		g := &groups[i]
+		c := getCommentFromIndex(allComments, g.Representative, run)
+
+		// 1. Type confusion: "missing await" on non-async function
+		if isAwaitFinding(c) && !isAsyncFunction(c) {
+			g.Score = min(g.Score, 25)
+			g.Reason += " [FP-cap: await-on-non-async]"
+		}
+
+		// 2. Threading model error: race condition in single-threaded JS/TS
+		if isRaceConditionFinding(c) && isSingleThreadedJS(c) {
+			g.Score = min(g.Score, 20)
+			g.Reason += " [FP-cap: race-in-single-threaded-js]"
+		}
+
+		// 3. Threat model mismatch: attacker framing on internal code
+		if isAttackerFraming(c) && isInternalCode(c) {
+			g.Score = max(0, g.Score-30)
+			g.Reason += " [FP-cap: attacker-framing-internal]"
+		}
+
+		// 4. Speculative assertion: no specific code line cited
+		if isSpeculativeAssertion(c) {
+			g.Score = min(g.Score, 40)
+			g.Reason += " [FP-cap: speculative]"
+		}
+
+		// 5. SAST corroboration — floor at 75
+		if c.SastCorroborated {
+			g.Score = max(g.Score, 75)
+			g.Reason += " [SAST-corroborated]"
+		}
+	}
+}
+
+// getCommentFromIndex resolves a flattened comment index to its scoredComment.
+func getCommentFromIndex(allComments []indexedComment, idx int, run *PipelineRun) scoredComment {
+	ic := allComments[idx]
+	return scoredComment{
+		FileComment: run.FileReviews[ic.fileIdx].Comments[ic.commentIdx],
+		FilePath:    run.FileReviews[ic.fileIdx].Path,
+	}
+}
+
+// --- FP-detection helpers (all private, case-insensitive) ---
+
+func isAwaitFinding(c scoredComment) bool {
+	lower := strings.ToLower(c.Body)
+	return strings.Contains(lower, "missing await") ||
+		strings.Contains(lower, "should be awaited") ||
+		strings.Contains(lower, "not awaited")
+}
+
+func isAsyncFunction(c scoredComment) bool {
+	lower := strings.ToLower(c.Body)
+	return strings.Contains(lower, "async")
+}
+
+func isRaceConditionFinding(c scoredComment) bool {
+	lower := strings.ToLower(c.Body)
+	return strings.Contains(lower, "race condition") ||
+		strings.Contains(lower, "data race") ||
+		strings.Contains(lower, "concurrent")
+}
+
+func isSingleThreadedJS(c scoredComment) bool {
+	lower := strings.ToLower(c.Body)
+	ext := strings.ToLower(fileExt(c.FilePath))
+	if ext != ".js" && ext != ".ts" && ext != ".tsx" && ext != ".jsx" {
+		return false
+	}
+	return !strings.Contains(lower, "worker") && !strings.Contains(lower, "sharedarraybuffer")
+}
+
+func isAttackerFraming(c scoredComment) bool {
+	lower := strings.ToLower(c.Body)
+	return strings.Contains(lower, "attacker") ||
+		strings.Contains(lower, "malicious user") ||
+		strings.Contains(lower, "adversary")
+}
+
+func isInternalCode(c scoredComment) bool {
+	lower := strings.ToLower(c.FilePath)
+	return strings.Contains(lower, "internal/") ||
+		strings.Contains(lower, "lib/") ||
+		strings.Contains(lower, "util/") ||
+		strings.Contains(lower, "helper/")
+}
+
+func isSpeculativeAssertion(c scoredComment) bool {
+	lower := strings.ToLower(c.Body)
+	hasSpeculative := strings.Contains(lower, "might") ||
+		strings.Contains(lower, "could potentially") ||
+		strings.Contains(lower, "may cause")
+	if !hasSpeculative {
+		return false
+	}
+	return c.Line == 0
+}
+
+// fileExt returns the file extension including the dot, e.g. ".go".
+func fileExt(path string) string {
+	for i := len(path) - 1; i >= 0; i-- {
+		if path[i] == '.' {
+			return path[i:]
+		}
+		if path[i] == '/' {
+			break
+		}
+	}
+	return ""
 }
 
