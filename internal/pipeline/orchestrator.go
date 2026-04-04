@@ -19,8 +19,10 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	ghpkg "github.com/BeLazy167/argus/internal/github"
+	"github.com/BeLazy167/argus/internal/graph"
 	"github.com/BeLazy167/argus/internal/llm"
 	"github.com/BeLazy167/argus/internal/memory"
+	"github.com/BeLazy167/argus/internal/sast"
 	"github.com/BeLazy167/argus/internal/store"
 	"github.com/BeLazy167/argus/internal/util"
 	"github.com/BeLazy167/argus/pkg/diff"
@@ -388,6 +390,21 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		}
 	}
 
+	// Incremental graph indexing for changed files (non-blocking, 10s timeout)
+	graphCtx, graphCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	go func() {
+		defer graphCancel()
+		changedFiles := diffFilePaths(patchSet)
+		if len(changedFiles) == 0 {
+			return
+		}
+		if err := graph.IndexFiles(graphCtx, o.st, o.ghClient, event.InstallationID, owner, repo, event.HeadSHA, dbRepo.ID, changedFiles); err != nil {
+			o.logger.Warn("[graph] incremental index failed", "error", err, "pr", event.PRNumber)
+		} else {
+			o.logger.Info("[graph] incremental index done", "files", len(changedFiles), "pr", event.PRNumber)
+		}
+	}()
+
 	o.logger.Info("starting review pipeline",
 		"review_id", reviewID,
 		"repo", event.RepoFullName,
@@ -429,6 +446,17 @@ func (o *Orchestrator) handlePRClosed(ctx context.Context, event ghpkg.PREvent) 
 			return nil // non-fatal for webhook response
 		}
 		o.logger.Info("[closed] PR merged — nodes marked permanent", "pr", event.PRNumber, "repo", event.RepoFullName)
+		// Full graph re-index on merge (fire-and-forget)
+		owner, repo, _ := splitRepoFullName(event.RepoFullName)
+		go func() {
+			reindexCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			if err := graph.IndexRepo(reindexCtx, o.st, o.ghClient, event.InstallationID, owner, repo, event.BaseRef, dbRepo.ID); err != nil {
+				slog.Warn("[graph] full re-index on merge failed", "error", err, "repo", event.RepoFullName)
+			} else {
+				slog.Info("[graph] full re-index on merge done", "repo", event.RepoFullName)
+			}
+		}()
 	} else {
 		if err := o.st.DeleteUnmergedNodesByPR(ctx, dbRepo.ID, event.PRNumber); err != nil {
 			o.logger.Error("[closed] failed to delete unmerged nodes", "error", err, "pr", event.PRNumber, "repo", event.RepoFullName)
@@ -1813,10 +1841,23 @@ func (o *Orchestrator) autoLearnPatterns(ctx context.Context, run *PipelineRun, 
 	// Accept 1+ qualifying comment for pattern extraction
 	minRequired := 1
 	if len(highConf) < minRequired {
-		slog.Info("autoLearnPatterns skipped", "qualifying", len(highConf), "min_required", minRequired, "scoring_skipped", run.ScoringSkipped)
+		o.logger.Info("pattern_learning_event",
+			"action", "skipped",
+			"qualifying", len(highConf),
+			"min_required", minRequired,
+			"scoring_skipped", run.ScoringSkipped,
+			"repo", run.PREvent.RepoFullName,
+			"pr", run.PREvent.PRNumber,
+		)
 		return
 	}
-	slog.Info("autoLearnPatterns", "qualifying", len(highConf), "scoring_skipped", run.ScoringSkipped)
+	o.logger.Info("pattern_learning_event",
+		"action", "extracting",
+		"qualifying", len(highConf),
+		"scoring_skipped", run.ScoringSkipped,
+		"repo", run.PREvent.RepoFullName,
+		"pr", run.PREvent.PRNumber,
+	)
 
 	cfg, provider, err := o.resolveReviewProvider(ctx, run)
 	if err != nil {
@@ -2697,10 +2738,56 @@ func (o *Orchestrator) validateStage(ctx context.Context, run *PipelineRun) erro
 
 	changedPaths := diffFilePaths(run.Diff)
 
-	// Run blast radius and simulation in parallel
+	// Run SAST, blast radius, and simulation in parallel
 	var blastImpacts []BlastRadiusImpact
 	var simResults []SimulationResult
+	var sastFindings []sast.Finding
 	var wg sync.WaitGroup
+
+	// SAST analysis
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				o.logger.Error("[validate] SAST goroutine panic", "recover", r, "pr", run.PREvent.PRNumber)
+			}
+		}()
+		if len(changedPaths) > 50 {
+			o.logger.Info("[validate] SAST skipped — too many files", "files", len(changedPaths), "pr", run.PREvent.PRNumber)
+			return
+		}
+		// Determine dominant language from changed files
+		lang := dominantLanguage(changedPaths)
+		if lang == "" {
+			return
+		}
+		// Collect file contents — use FullContent if available, otherwise fetch via API
+		files := make(map[string]string)
+		for _, f := range run.Diff.Files {
+			if f.FullContent != "" {
+				files[f.NewName] = f.FullContent
+			} else if f.NewName != "" {
+				content, err := o.ghClient.GetFileContent(ctx, run.PREvent.InstallationID, owner, repo, f.NewName, run.PREvent.HeadSHA)
+				if err == nil && content != "" {
+					files[f.NewName] = content
+				}
+			}
+		}
+		if len(files) == 0 {
+			return
+		}
+		runners := []sast.Runner{&sast.StaticcheckRunner{}, &sast.ESLintRunner{}}
+		sastCtx, sastCancel := context.WithTimeout(ctx, 30*time.Second)
+		defer sastCancel()
+		results, err := sast.RunAll(sastCtx, runners, lang, files)
+		if err != nil {
+			o.logger.Warn("[validate] SAST failed", "error", err, "pr", run.PREvent.PRNumber)
+			return
+		}
+		sastFindings = results
+		o.logger.Info("[validate] SAST done", "findings", len(results), "lang", lang, "pr", run.PREvent.PRNumber)
+	}()
 
 	// Blast Radius
 	wg.Add(1)
@@ -2779,6 +2866,34 @@ func (o *Orchestrator) validateStage(ctx context.Context, run *PipelineRun) erro
 	}()
 
 	wg.Wait()
+
+	// Store SAST findings on PipelineRun for scoring corroboration
+	if len(sastFindings) > 0 {
+		run.SastFindings = make(map[string][]SastFinding)
+		for _, f := range sastFindings {
+			run.SastFindings[f.File] = append(run.SastFindings[f.File], SastFinding{
+				File: f.File, Line: f.Line, Rule: f.Rule, Message: f.Message, Severity: f.Severity,
+			})
+		}
+		// Mark comments corroborated by SAST
+		for i := range run.FileReviews {
+			fr := &run.FileReviews[i]
+			fileSast, ok := run.SastFindings[fr.Path]
+			if !ok {
+				continue
+			}
+			for j := range fr.Comments {
+				c := &fr.Comments[j]
+				for _, sf := range fileSast {
+					if util.IntAbs(c.Line-sf.Line) <= 3 {
+						c.SastCorroborated = true
+						break
+					}
+				}
+			}
+		}
+		o.logger.Info("[validate] SAST corroboration", "corroborated", countCorroborated(run), "pr", run.PREvent.PRNumber)
+	}
 
 	// Store results on PipelineRun for scoring and synthesis to use
 	if run.Synthesis == nil {
@@ -3662,4 +3777,47 @@ func calculateScore(run *PipelineRun) int {
 // RecoverIncomplete resumes any in-flight pipeline runs after a restart.
 func (o *Orchestrator) RecoverIncomplete(ctx context.Context) error {
 	return o.sm.RecoverIncomplete(ctx)
+}
+
+// dominantLanguage returns the most common language among changed file paths.
+// On ties, uses a fixed priority: go > typescript > javascript > python.
+func dominantLanguage(paths []string) string {
+	counts := map[string]int{}
+	for _, p := range paths {
+		ext := strings.ToLower(path.Ext(p))
+		switch ext {
+		case ".go":
+			counts["go"]++
+		case ".ts", ".tsx":
+			counts["typescript"]++
+		case ".js", ".jsx", ".mjs", ".cjs":
+			counts["javascript"]++
+		case ".py":
+			counts["python"]++
+		}
+	}
+	// Fixed priority order for deterministic tie-breaking
+	priority := []string{"go", "typescript", "javascript", "python"}
+	var best string
+	var bestCount int
+	for _, lang := range priority {
+		if c := counts[lang]; c > bestCount {
+			best = lang
+			bestCount = c
+		}
+	}
+	return best
+}
+
+// countCorroborated counts findings marked as SAST-corroborated.
+func countCorroborated(run *PipelineRun) int {
+	n := 0
+	for _, fr := range run.FileReviews {
+		for _, c := range fr.Comments {
+			if c.SastCorroborated {
+				n++
+			}
+		}
+	}
+	return n
 }
