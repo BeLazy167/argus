@@ -192,6 +192,7 @@ type FileComment struct {
 	EnforcedRuleContent string     `json:"-"`
 	IsNewFinding        bool       `json:"-"`
 	DedupCount          int        `json:"dedup_count,omitempty"` // how many duplicate findings were merged into this one
+	SastCorroborated    bool       `json:"sast_corroborated,omitempty"` // true when a SAST tool independently flagged this
 }
 
 // ValidSeverities is the set of valid severity values.
