@@ -53,6 +53,28 @@ var pyClassRe = regexp.MustCompile(`(?m)^class\s+(\w+)`)
 var pyImportRe = regexp.MustCompile(`(?m)^(?:from\s+(\S+)\s+import|import\s+(\S+))`)
 var pyInheritsRe = regexp.MustCompile(`(?m)^class\s+\w+\(([^)]+)\)`)
 
+// --- Java patterns ---
+
+var javaClassRe = regexp.MustCompile(`(?m)^(?:public\s+)?(?:abstract\s+)?class\s+(\w+)`)
+var javaMethodRe = regexp.MustCompile(`(?m)^\s+(?:public|private|protected)\s+\w+\s+(\w+)\s*\(`)
+var javaInterfaceRe = regexp.MustCompile(`(?m)^(?:public\s+)?interface\s+(\w+)`)
+var javaImportRe = regexp.MustCompile(`(?m)^import\s+(.+);`)
+
+// --- Rust patterns ---
+
+var rustFnRe = regexp.MustCompile(`(?m)^(?:pub\s+)?(?:async\s+)?fn\s+(\w+)`)
+var rustStructRe = regexp.MustCompile(`(?m)^(?:pub\s+)?struct\s+(\w+)`)
+var rustTraitRe = regexp.MustCompile(`(?m)^(?:pub\s+)?trait\s+(\w+)`)
+var rustImplRe = regexp.MustCompile(`(?m)^impl(?:<[^>]+>)?\s+(?:\w+\s+for\s+)?(\w+)`)
+var rustUseRe = regexp.MustCompile(`(?m)^use\s+(.+);`)
+
+// --- C# patterns ---
+
+var csClassRe = regexp.MustCompile(`(?m)^(?:public|internal|private)?\s*(?:abstract|sealed|static)?\s*class\s+(\w+)`)
+var csMethodRe = regexp.MustCompile(`(?m)^\s+(?:public|private|protected|internal)\s+\w+\s+(\w+)\s*\(`)
+var csInterfaceRe = regexp.MustCompile(`(?m)^(?:public|internal)?\s*interface\s+(\w+)`)
+var csUsingRe = regexp.MustCompile(`(?m)^using\s+(.+);`)
+
 // langForFile returns a language string for the file extension, or empty.
 func langForFile(path string) string {
 	switch strings.ToLower(filepath.Ext(path)) {
@@ -64,30 +86,69 @@ func langForFile(path string) string {
 		return "javascript"
 	case ".py":
 		return "python"
+	case ".java":
+		return "java"
+	case ".rs":
+		return "rust"
+	case ".cs":
+		return "csharp"
+	case ".rb":
+		return "ruby"
+	case ".kt", ".kts":
+		return "kotlin"
+	case ".swift":
+		return "swift"
+	case ".c", ".h":
+		return "c"
+	case ".cpp", ".cc", ".cxx", ".hpp":
+		return "cpp"
+	case ".php":
+		return "php"
+	case ".scala":
+		return "scala"
+	case ".dart":
+		return "dart"
 	default:
 		return ""
 	}
 }
 
-// ParseFileSymbols extracts symbols and edges from a source file using regex.
-// Returns nil slices for unsupported languages.
+// ParseFileSymbols extracts symbols and edges from a source file.
+// Dispatch order: Go AST > ctags > regex fallback > empty.
 func ParseFileSymbols(filePath, content string) ([]Symbol, []Edge) {
 	lang := langForFile(filePath)
 	if lang == "" {
 		return nil, nil
 	}
 	lines := strings.Split(content, "\n")
-	switch lang {
-	case "go":
+
+	// Go: prefer AST parser, then regex
+	if lang == "go" {
 		syms, edges := parseGoAST(filePath, content)
 		if syms != nil || edges != nil {
 			return syms, edges
 		}
 		return parseGo(filePath, content, lines)
+	}
+
+	// Non-Go: try ctags first
+	syms, edges := parseCTags(filePath, content)
+	if syms != nil || edges != nil {
+		return syms, edges
+	}
+
+	// ctags unavailable — fall back to regex parsers
+	switch lang {
 	case "typescript", "javascript":
 		return parseTS(filePath, content, lines)
 	case "python":
 		return parsePython(filePath, content, lines)
+	case "java":
+		return parseJava(filePath, content, lines)
+	case "rust":
+		return parseRust(filePath, content, lines)
+	case "csharp":
+		return parseCSharp(filePath, content, lines)
 	default:
 		return nil, nil
 	}
@@ -326,4 +387,137 @@ var builtins = map[string]bool{
 
 func isBuiltin(name string) bool {
 	return builtins[name] || len(name) < 2
+}
+
+func parseJava(filePath, content string, lines []string) ([]Symbol, []Edge) {
+	var syms []Symbol
+	var edges []Edge
+
+	for _, m := range javaClassRe.FindAllStringSubmatchIndex(content, -1) {
+		name := content[m[2]:m[3]]
+		line := lineAt(content, m[0])
+		snippet := content[m[0]:m[1]]
+		vis := javaVisibility(snippet)
+		syms = append(syms, Symbol{Kind: "class", Name: name, FilePath: filePath, LineStart: line, LineEnd: findBlockEnd(lines, line), Visibility: vis})
+	}
+
+	for _, m := range javaInterfaceRe.FindAllStringSubmatchIndex(content, -1) {
+		name := content[m[2]:m[3]]
+		line := lineAt(content, m[0])
+		snippet := content[m[0]:m[1]]
+		vis := javaVisibility(snippet)
+		syms = append(syms, Symbol{Kind: "interface", Name: name, FilePath: filePath, LineStart: line, LineEnd: findBlockEnd(lines, line), Visibility: vis})
+	}
+
+	for _, m := range javaMethodRe.FindAllStringSubmatchIndex(content, -1) {
+		name := content[m[2]:m[3]]
+		line := lineAt(content, m[0])
+		end := findBlockEnd(lines, line)
+		snippet := content[m[0]:m[1]]
+		vis := javaVisibility(snippet)
+		syms = append(syms, Symbol{Kind: "method", Name: name, FilePath: filePath, LineStart: line, LineEnd: end, Scope: "method", Visibility: vis})
+		edges = append(edges, extractCalls(name, lines, line, end)...)
+	}
+
+	for _, m := range javaImportRe.FindAllStringSubmatch(content, -1) {
+		edges = append(edges, Edge{SourceName: filePath, TargetName: m[1], Kind: "imports"})
+	}
+
+	return syms, edges
+}
+
+func javaVisibility(snippet string) string {
+	if strings.Contains(snippet, "private") {
+		return "unexported"
+	}
+	if strings.Contains(snippet, "protected") {
+		return "unexported"
+	}
+	if strings.Contains(snippet, "public") {
+		return "exported"
+	}
+	return "unexported" // Java default (package-private) = unexported
+}
+
+func parseRust(filePath, content string, lines []string) ([]Symbol, []Edge) {
+	var syms []Symbol
+	var edges []Edge
+
+	for _, m := range rustFnRe.FindAllStringSubmatchIndex(content, -1) {
+		name := content[m[2]:m[3]]
+		line := lineAt(content, m[0])
+		end := findBlockEnd(lines, line)
+		vis := "unexported"
+		snippet := content[m[0]:m[1]]
+		if strings.HasPrefix(snippet, "pub") {
+			vis = "exported"
+		}
+		syms = append(syms, Symbol{Kind: "function", Name: name, FilePath: filePath, LineStart: line, LineEnd: end, Visibility: vis})
+		edges = append(edges, extractCalls(name, lines, line, end)...)
+	}
+
+	for _, m := range rustStructRe.FindAllStringSubmatchIndex(content, -1) {
+		name := content[m[2]:m[3]]
+		line := lineAt(content, m[0])
+		vis := "unexported"
+		snippet := content[m[0]:m[1]]
+		if strings.HasPrefix(snippet, "pub") {
+			vis = "exported"
+		}
+		syms = append(syms, Symbol{Kind: "type", Name: name, FilePath: filePath, LineStart: line, LineEnd: findBlockEnd(lines, line), Visibility: vis})
+	}
+
+	for _, m := range rustTraitRe.FindAllStringSubmatchIndex(content, -1) {
+		name := content[m[2]:m[3]]
+		line := lineAt(content, m[0])
+		vis := "unexported"
+		snippet := content[m[0]:m[1]]
+		if strings.HasPrefix(snippet, "pub") {
+			vis = "exported"
+		}
+		syms = append(syms, Symbol{Kind: "interface", Name: name, FilePath: filePath, LineStart: line, LineEnd: findBlockEnd(lines, line), Visibility: vis})
+	}
+
+	for _, m := range rustImplRe.FindAllStringSubmatchIndex(content, -1) {
+		name := content[m[2]:m[3]]
+		line := lineAt(content, m[0])
+		syms = append(syms, Symbol{Kind: "type", Name: name + "_impl", FilePath: filePath, LineStart: line, LineEnd: findBlockEnd(lines, line)})
+	}
+
+	for _, m := range rustUseRe.FindAllStringSubmatch(content, -1) {
+		edges = append(edges, Edge{SourceName: filePath, TargetName: m[1], Kind: "imports"})
+	}
+
+	return syms, edges
+}
+
+func parseCSharp(filePath, content string, lines []string) ([]Symbol, []Edge) {
+	var syms []Symbol
+	var edges []Edge
+
+	for _, m := range csClassRe.FindAllStringSubmatchIndex(content, -1) {
+		name := content[m[2]:m[3]]
+		line := lineAt(content, m[0])
+		syms = append(syms, Symbol{Kind: "class", Name: name, FilePath: filePath, LineStart: line, LineEnd: findBlockEnd(lines, line), Visibility: "exported"})
+	}
+
+	for _, m := range csInterfaceRe.FindAllStringSubmatchIndex(content, -1) {
+		name := content[m[2]:m[3]]
+		line := lineAt(content, m[0])
+		syms = append(syms, Symbol{Kind: "interface", Name: name, FilePath: filePath, LineStart: line, LineEnd: findBlockEnd(lines, line), Visibility: "exported"})
+	}
+
+	for _, m := range csMethodRe.FindAllStringSubmatchIndex(content, -1) {
+		name := content[m[2]:m[3]]
+		line := lineAt(content, m[0])
+		end := findBlockEnd(lines, line)
+		syms = append(syms, Symbol{Kind: "method", Name: name, FilePath: filePath, LineStart: line, LineEnd: end, Scope: "method"})
+		edges = append(edges, extractCalls(name, lines, line, end)...)
+	}
+
+	for _, m := range csUsingRe.FindAllStringSubmatch(content, -1) {
+		edges = append(edges, Edge{SourceName: filePath, TargetName: m[1], Kind: "imports"})
+	}
+
+	return syms, edges
 }
