@@ -184,13 +184,19 @@ type Stats struct {
 }
 
 type CodeNode struct {
-	ID        int64  `json:"id"`
-	RepoID    int64  `json:"repo_id"`
-	Kind      string `json:"kind"`
-	Name      string `json:"name"`
-	FilePath  string `json:"file_path"`
-	LineStart int    `json:"line_start"`
-	LineEnd   int    `json:"line_end"`
-	Language  string `json:"language"`
-	Depth     int    `json:"depth,omitempty"`
+	ID           int64  `json:"id"`
+	RepoID       int64  `json:"repo_id"`
+	Kind         string `json:"kind"`
+	Name         string `json:"name"`
+	FilePath     string `json:"file_path"`
+	LineStart    int    `json:"line_start"`
+	LineEnd      int    `json:"line_end"`
+	Language     string `json:"language"`
+	Depth        int    `json:"depth,omitempty"`
+	ReturnType   string `json:"return_type,omitempty"`
+	Params       string `json:"params,omitempty"`
+	Visibility   string `json:"visibility,omitempty"`
+	IsAsync      bool   `json:"is_async"`
+	ReceiverType string `json:"receiver_type,omitempty"`
+	Scope        string `json:"scope,omitempty"`
 }

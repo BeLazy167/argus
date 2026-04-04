@@ -8,11 +8,17 @@ import (
 
 // Symbol represents a code symbol extracted from a source file.
 type Symbol struct {
-	Kind      string // function, method, class, type, interface
-	Name      string
-	FilePath  string
-	LineStart int
-	LineEnd   int
+	Kind       string // function, method, class, type, interface
+	Name       string
+	FilePath   string
+	LineStart  int
+	LineEnd    int
+	ReturnType string // "(int, error)", "error", etc.
+	Params     string // "(ctx context.Context, id int64)"
+	Visibility string // "exported" | "unexported"
+	IsAsync    bool   // Go: always false; TS: true if async; Python: true if async def
+	Receiver   string // Go method receiver type
+	Scope      string // "package" | "method" | "nested"
 }
 
 // Edge represents a relationship between two symbols.
@@ -73,6 +79,10 @@ func ParseFileSymbols(filePath, content string) ([]Symbol, []Edge) {
 	lines := strings.Split(content, "\n")
 	switch lang {
 	case "go":
+		syms, edges := parseGoAST(filePath, content)
+		if syms != nil || edges != nil {
+			return syms, edges
+		}
 		return parseGo(filePath, content, lines)
 	case "typescript", "javascript":
 		return parseTS(filePath, content, lines)
