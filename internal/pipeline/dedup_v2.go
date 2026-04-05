@@ -95,21 +95,17 @@ func classifyVulnType(what, body string) VulnType {
 	return VulnNone
 }
 
-// layer1CanonicalGroup groups findings by (file, canonical vuln type).
+// layer1CanonicalGroup groups findings by canonical vuln type across all files.
+// Keeps max 2 representatives per VulnType (from different files when possible).
 // Findings with VulnNone are returned as ungrouped.
-// Within each group, pickBest selects the best representative; the rest are merged.
 func layer1CanonicalGroup(all []taggedComment) (grouped, ungrouped []taggedComment) {
-	type fingerprint struct {
-		file     string
-		vulnType VulnType
-	}
 	type group struct {
-		key     fingerprint
-		members []taggedComment
+		vulnType VulnType
+		members  []taggedComment
 	}
 
-	groups := make(map[fingerprint]*group)
-	var order []fingerprint
+	groups := make(map[VulnType]*group)
+	var order []VulnType
 
 	for _, tc := range all {
 		vt := classifyVulnType(tc.comment.What, tc.comment.Body)
@@ -117,36 +113,90 @@ func layer1CanonicalGroup(all []taggedComment) (grouped, ungrouped []taggedComme
 			ungrouped = append(ungrouped, tc)
 			continue
 		}
-		fp := fingerprint{file: tc.filePath, vulnType: vt}
-		if g, ok := groups[fp]; ok {
+		if g, ok := groups[vt]; ok {
 			g.members = append(g.members, tc)
 		} else {
-			groups[fp] = &group{key: fp, members: []taggedComment{tc}}
-			order = append(order, fp)
+			groups[vt] = &group{vulnType: vt, members: []taggedComment{tc}}
+			order = append(order, vt)
 		}
 	}
 
-	for _, fp := range order {
-		g := groups[fp]
+	const maxPerVulnType = 2
+	for _, vt := range order {
+		g := groups[vt]
 		if len(g.members) == 1 {
 			grouped = append(grouped, g.members[0])
 			continue
 		}
-		best := pickBest(g.members)
-		// Collect line references from merged findings
-		var otherLines []string
+		// Pick best representatives from different files
+		reps := pickBestCrossFile(g.members, maxPerVulnType)
+		// Annotate with merged locations
+		var otherLocs []string
+		repSet := make(map[int]bool)
+		for _, r := range reps {
+			repSet[r.comment.Line] = true
+		}
 		for _, m := range g.members {
-			if m.comment.Line != best.comment.Line {
-				otherLines = append(otherLines, fmt.Sprintf("L%d", m.comment.Line))
+			if !repSet[m.comment.Line] || len(otherLocs) > 5 {
+				otherLocs = append(otherLocs, fmt.Sprintf("%s:L%d", m.filePath, m.comment.Line))
 			}
 		}
-		if len(otherLines) > 0 {
-			best.comment.Why += fmt.Sprintf(" (same pattern also at %s)", strings.Join(otherLines, ", "))
+		for i := range reps {
+			reps[i].comment.DedupCount = len(g.members)
+			if len(otherLocs) > 0 {
+				reps[i].comment.Why += fmt.Sprintf(" (same pattern also at %s)", strings.Join(otherLocs, ", "))
+			}
+			grouped = append(grouped, reps[i])
 		}
-		best.comment.DedupCount = len(g.members)
-		grouped = append(grouped, best)
 	}
 	return grouped, ungrouped
+}
+
+// pickBestCrossFile selects up to maxReps representatives from different files.
+// Prioritizes by severity then score. If all from same file, returns 1.
+func pickBestCrossFile(members []taggedComment, maxReps int) []taggedComment {
+	// Sort by severity desc, score desc
+	sorted := make([]taggedComment, len(members))
+	copy(sorted, members)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		si := severityRank(sorted[i].comment.Severity)
+		sj := severityRank(sorted[j].comment.Severity)
+		if si != sj {
+			return si > sj
+		}
+		return sorted[i].comment.Score > sorted[j].comment.Score
+	})
+
+	var reps []taggedComment
+	seenFiles := make(map[string]bool)
+	// First pass: pick best from each unique file
+	for _, tc := range sorted {
+		if len(reps) >= maxReps {
+			break
+		}
+		if !seenFiles[tc.filePath] {
+			seenFiles[tc.filePath] = true
+			reps = append(reps, tc)
+		}
+	}
+	// If only 1 file represented, return just 1 rep
+	if len(seenFiles) == 1 && len(reps) > 1 {
+		return reps[:1]
+	}
+	return reps
+}
+
+func severityRank(s Severity) int {
+	switch s {
+	case SeverityCritical:
+		return 4
+	case SeverityWarning:
+		return 3
+	case SeveritySuggestion:
+		return 2
+	default:
+		return 1
+	}
 }
 
 // ---------- Layer 2: TF-IDF Cosine Similarity ----------
@@ -277,13 +327,15 @@ func layer2TFIDFCluster(ungrouped []taggedComment, threshold float64) []taggedCo
 		}
 	}
 
-	// Pairwise cosine — only merge findings on the same file
+	// Pairwise cosine — same-file uses threshold, cross-file uses 0.9 (stricter)
+	const crossFileThreshold = 0.9
 	for i := 0; i < n; i++ {
 		for j := i + 1; j < n; j++ {
-			if ungrouped[i].filePath != ungrouped[j].filePath {
-				continue
-			}
-			if cosineSimilarity(vectors[i], vectors[j]) > threshold {
+			sim := cosineSimilarity(vectors[i], vectors[j])
+			sameFile := ungrouped[i].filePath == ungrouped[j].filePath
+			if sameFile && sim > threshold {
+				union(i, j)
+			} else if !sameFile && sim > crossFileThreshold {
 				union(i, j)
 			}
 		}
