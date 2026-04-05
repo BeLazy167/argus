@@ -1063,7 +1063,7 @@ func (o *Orchestrator) pass2(ctx context.Context, run *PipelineRun) error {
 
 	// Re-dedup after pass2 — pass2 findings often overlap with pass1
 	beforeDedup := countComments(run)
-	run.FileReviews = SmartDedup(run.FileReviews, 5, 0.7)
+	run.FileReviews = SmartDedup(run.FileReviews, 10, 0.7)
 	afterDedup := countComments(run)
 	if beforeDedup != afterDedup {
 		o.logger.Info("pass2 dedup", "before", beforeDedup, "after", afterDedup, "removed", beforeDedup-afterDedup)
@@ -1133,11 +1133,6 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	// Split: inline comments (valid lines) go in the review, invalid-line comments
 	// are folded into the summary body so everything ships in ONE atomic API call.
 	// Critical/warning findings on non-diff lines are shown prominently; others are collapsed.
-	type rankedComment struct {
-		comment  ghpkg.ReviewComment
-		severity Severity
-		score    int
-	}
 	var rawInline []rankedComment
 	var importantFolded []string // critical/warning — shown prominently
 	var minorFolded []string     // suggestion/praise — collapsed
@@ -1179,11 +1174,11 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		}
 	}
 
-	// Cap inline comments posted to GitHub at 40.
+	// Cap inline comments posted to GitHub at 40 with file-diversity round-robin.
 	// All findings are persisted to the dashboard via indexComments (pre-post).
-	// Selection: sort by severity (critical→warning→suggestion→praise), then by score desc.
 	const maxInlineComments = 40
 	if len(rawInline) > maxInlineComments {
+		// Sort by severity desc, then score desc
 		sevRank := map[Severity]int{SeverityCritical: 4, SeverityWarning: 3, SeveritySuggestion: 2, SeverityPraise: 1}
 		sort.SliceStable(rawInline, func(i, j int) bool {
 			ri, rj := sevRank[rawInline[i].severity], sevRank[rawInline[j].severity]
@@ -1192,11 +1187,46 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 			}
 			return rawInline[i].score > rawInline[j].score
 		})
+
+		// Round-robin: limit per-file representation to spread across files
+		uniqueFiles := make(map[string]bool)
+		for _, rc := range rawInline {
+			uniqueFiles[rc.comment.Path] = true
+		}
+		maxPerFile := maxInlineComments / len(uniqueFiles)
+		if maxPerFile < 2 {
+			maxPerFile = 2
+		}
+
+		fileSeen := make(map[string]int)
+		selected := make([]rankedComment, 0, maxInlineComments)
+		var overflow []rankedComment
+		for _, rc := range rawInline {
+			if fileSeen[rc.comment.Path] < maxPerFile && len(selected) < maxInlineComments {
+				fileSeen[rc.comment.Path]++
+				selected = append(selected, rc)
+			} else {
+				overflow = append(overflow, rc)
+			}
+		}
+		// Fill remaining slots from overflow (severity+score order, already sorted)
+		for _, rc := range overflow {
+			if len(selected) >= maxInlineComments {
+				break
+			}
+			selected = append(selected, rc)
+		}
+
 		o.logger.Info("capping inline comments for GitHub",
 			"total", len(rawInline), "cap", maxInlineComments,
-			"dropped", len(rawInline)-maxInlineComments)
-		rawInline = rawInline[:maxInlineComments]
+			"unique_files", len(uniqueFiles), "max_per_file", maxPerFile,
+			"dropped", len(rawInline)-len(selected))
+		rawInline = selected
 	}
+
+	// Post-selection dedup: remove near-identical comments in the final 40
+	rawInline = postSelectionDedup(rawInline)
+
 	inlineComments := make([]ghpkg.ReviewComment, len(rawInline))
 	for i, rc := range rawInline {
 		inlineComments[i] = rc.comment
@@ -2780,7 +2810,7 @@ func (o *Orchestrator) dedupStage(ctx context.Context, run *PipelineRun) error {
 	run.AllFileReviews = make([]FileReview, len(run.FileReviews))
 	copy(run.AllFileReviews, run.FileReviews)
 
-	run.FileReviews = SmartDedup(run.FileReviews, 5, 0.7)
+	run.FileReviews = SmartDedup(run.FileReviews, 10, 0.7)
 	after := countComments(run)
 	o.logger.Info("[dedup] OK", "before", before, "after", after, "removed", before-after, "pr", run.PREvent.PRNumber)
 	return nil
@@ -3895,6 +3925,77 @@ func dominantLanguage(paths []string) string {
 		}
 	}
 	return best
+}
+
+type rankedComment struct {
+	comment  ghpkg.ReviewComment
+	severity Severity
+	score    int
+}
+
+// postSelectionDedup removes near-duplicate comments from the final selection.
+// Uses token-set Jaccard similarity on the comment body. If overlap > 0.8, drops the lower-scored one.
+func postSelectionDedup(selected []rankedComment) []rankedComment {
+	if len(selected) <= 1 {
+		return selected
+	}
+	// Tokenize each comment body
+	tokenSets := make([]map[string]bool, len(selected))
+	for i, rc := range selected {
+		tokens := tokenize(rc.comment.Body)
+		set := make(map[string]bool, len(tokens))
+		for _, t := range tokens {
+			set[t] = true
+		}
+		tokenSets[i] = set
+	}
+	// Mark duplicates via Jaccard similarity
+	drop := make(map[int]bool)
+	for i := 0; i < len(selected); i++ {
+		if drop[i] {
+			continue
+		}
+		for j := i + 1; j < len(selected); j++ {
+			if drop[j] {
+				continue
+			}
+			if jaccardSimilarity(tokenSets[i], tokenSets[j]) > 0.8 {
+				if selected[i].score >= selected[j].score {
+					drop[j] = true
+				} else {
+					drop[i] = true
+					break
+				}
+			}
+		}
+	}
+	if len(drop) == 0 {
+		return selected
+	}
+	result := make([]rankedComment, 0, len(selected)-len(drop))
+	for i, rc := range selected {
+		if !drop[i] {
+			result = append(result, rc)
+		}
+	}
+	return result
+}
+
+func jaccardSimilarity(a, b map[string]bool) float64 {
+	if len(a) == 0 && len(b) == 0 {
+		return 0
+	}
+	intersection := 0
+	for k := range a {
+		if b[k] {
+			intersection++
+		}
+	}
+	union := len(a) + len(b) - intersection
+	if union == 0 {
+		return 0
+	}
+	return float64(intersection) / float64(union)
 }
 
 // countCorroborated counts findings marked as SAST-corroborated.
