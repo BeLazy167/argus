@@ -1210,13 +1210,19 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	if totalFolded > 0 {
 		o.logger.Info("folded non-inline comments into summary", "important", len(importantFolded), "minor", len(minorFolded))
 	}
-	// Important findings (critical/warning) shown visibly — not collapsed
+	// Important findings (critical/warning) shown visibly — cap at 10 to prevent summary bloat
+	if len(importantFolded) > 10 {
+		importantFolded = importantFolded[:10]
+	}
 	if len(importantFolded) > 0 {
 		summaryBody.WriteString(fmt.Sprintf("\n\n### Affected code outside the diff (%d)\n\n", len(importantFolded)))
 		summaryBody.WriteString("_These findings are on lines not in the diff but may be impacted by this change._\n\n")
 		summaryBody.WriteString(strings.Join(importantFolded, "\n"))
 	}
-	// Minor findings (suggestion/praise) collapsed
+	// Minor findings (suggestion/praise) collapsed — cap at 10
+	if len(minorFolded) > 10 {
+		minorFolded = minorFolded[:10]
+	}
 	if len(minorFolded) > 0 {
 		summaryBody.WriteString("\n\n<details><summary>")
 		summaryBody.WriteString(fmt.Sprintf("%d additional findings on lines outside the diff", len(minorFolded)))
@@ -1230,6 +1236,8 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	summaryBody.WriteString("\n\n<details><summary>Prompt for AI agents (unresolved issues)</summary>\n\n")
 
 	// XML format — designed for LLM consumption (file-grouped violations with priority)
+	// Only include findings that made it into inline comments (capped at 40) to avoid
+	// blowing up the review body payload on large PRs.
 	type xmlFinding struct {
 		file     string
 		line     int
@@ -1239,12 +1247,19 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		what     string
 		fix      string
 	}
+	inlineSet := make(map[string]bool, len(inlineComments))
+	for _, ic := range inlineComments {
+		inlineSet[fmt.Sprintf("%s:%d", ic.Path, ic.Line)] = true
+	}
 	var xmlFindings []xmlFinding
 	for _, fr := range run.FileReviews {
 		for _, c := range fr.Comments {
 			prio := priorityLabel(c.Severity)
 			if prio == "" {
-				continue // skip praise in agent output
+				continue
+			}
+			if !inlineSet[fmt.Sprintf("%s:%d", fr.Path, c.Line)] {
+				continue // only include findings posted as inline comments
 			}
 			xmlFindings = append(xmlFindings, xmlFinding{
 				file:     fr.Path,
