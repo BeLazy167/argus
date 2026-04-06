@@ -130,16 +130,21 @@ func layer1CanonicalGroup(all []taggedComment) (grouped, ungrouped []taggedComme
 		}
 		// Pick best representatives from different files
 		reps := pickBestCrossFile(g.members, maxPerVulnType)
-		// Annotate with merged locations
+		// Annotate with merged locations (key by filePath:line to avoid cross-file collisions)
 		var otherLocs []string
-		repSet := make(map[int]bool)
+		repSet := make(map[string]bool)
 		for _, r := range reps {
-			repSet[r.comment.Line] = true
+			repSet[fmt.Sprintf("%s:%d", r.filePath, r.comment.Line)] = true
 		}
 		for _, m := range g.members {
-			if !repSet[m.comment.Line] || len(otherLocs) > 5 {
-				otherLocs = append(otherLocs, fmt.Sprintf("%s:L%d", m.filePath, m.comment.Line))
+			key := fmt.Sprintf("%s:%d", m.filePath, m.comment.Line)
+			if repSet[key] {
+				continue
 			}
+			if len(otherLocs) >= 5 {
+				break
+			}
+			otherLocs = append(otherLocs, fmt.Sprintf("%s:L%d", m.filePath, m.comment.Line))
 		}
 		for i := range reps {
 			reps[i].comment.DedupCount = len(g.members)
