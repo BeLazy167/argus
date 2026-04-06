@@ -394,6 +394,11 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 	graphCtx, graphCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	go func() {
 		defer graphCancel()
+		defer func() {
+			if r := recover(); r != nil {
+				o.logger.Error("[graph] incremental index panic", "recover", r, "pr", event.PRNumber)
+			}
+		}()
 		changedFiles := diffFilePaths(patchSet)
 		if len(changedFiles) == 0 {
 			return
@@ -447,16 +452,25 @@ func (o *Orchestrator) handlePRClosed(ctx context.Context, event ghpkg.PREvent) 
 		}
 		o.logger.Info("[closed] PR merged — nodes marked permanent", "pr", event.PRNumber, "repo", event.RepoFullName)
 		// Full graph re-index on merge (fire-and-forget)
-		owner, repo, _ := splitRepoFullName(event.RepoFullName)
-		go func() {
-			reindexCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-			defer cancel()
-			if err := graph.IndexRepo(reindexCtx, o.st, o.ghClient, event.InstallationID, owner, repo, event.BaseRef, dbRepo.ID); err != nil {
-				slog.Warn("[graph] full re-index on merge failed", "error", err, "repo", event.RepoFullName)
-			} else {
-				slog.Info("[graph] full re-index on merge done", "repo", event.RepoFullName)
-			}
-		}()
+		owner, repo, splitErr := splitRepoFullName(event.RepoFullName)
+		if splitErr != nil {
+			o.logger.Warn("[closed] bad repo name, skipping re-index", "error", splitErr, "repo", event.RepoFullName)
+		} else {
+			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						o.logger.Error("[graph] re-index on merge panic", "recover", r, "repo", event.RepoFullName)
+					}
+				}()
+				reindexCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+				defer cancel()
+				if err := graph.IndexRepo(reindexCtx, o.st, o.ghClient, event.InstallationID, owner, repo, event.BaseRef, dbRepo.ID); err != nil {
+					o.logger.Warn("[graph] full re-index on merge failed", "error", err, "repo", event.RepoFullName)
+				} else {
+					o.logger.Info("[graph] full re-index on merge done", "repo", event.RepoFullName)
+				}
+			}()
+		}
 	} else {
 		if err := o.st.DeleteUnmergedNodesByPR(ctx, dbRepo.ID, event.PRNumber); err != nil {
 			o.logger.Error("[closed] failed to delete unmerged nodes", "error", err, "pr", event.PRNumber, "repo", event.RepoFullName)
@@ -1179,9 +1193,8 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	const maxInlineComments = 40
 	if len(rawInline) > maxInlineComments {
 		// Sort by severity desc, then score desc
-		sevRank := map[Severity]int{SeverityCritical: 4, SeverityWarning: 3, SeveritySuggestion: 2, SeverityPraise: 1}
 		sort.SliceStable(rawInline, func(i, j int) bool {
-			ri, rj := sevRank[rawInline[i].severity], sevRank[rawInline[j].severity]
+			ri, rj := severityRank(rawInline[i].severity), severityRank(rawInline[j].severity)
 			if ri != rj {
 				return ri > rj
 			}
@@ -1225,7 +1238,12 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	}
 
 	// Post-selection dedup: remove near-identical comments in the final 40
+	beforePostDedup := len(rawInline)
 	rawInline = postSelectionDedup(rawInline)
+	if len(rawInline) < beforePostDedup {
+		o.logger.Info("post-selection dedup", "before", beforePostDedup, "after", len(rawInline),
+			"removed", beforePostDedup-len(rawInline))
+	}
 
 	inlineComments := make([]ghpkg.ReviewComment, len(rawInline))
 	for i, rc := range rawInline {
@@ -1241,16 +1259,23 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		o.logger.Info("folded non-inline comments into summary", "important", len(importantFolded), "minor", len(minorFolded))
 	}
 	// Important findings (critical/warning) shown visibly — cap at 10 to prevent summary bloat
-	if len(importantFolded) > 10 {
+	totalImportant := len(importantFolded)
+	if totalImportant > 10 {
 		importantFolded = importantFolded[:10]
 	}
 	if len(importantFolded) > 0 {
-		summaryBody.WriteString(fmt.Sprintf("\n\n### Affected code outside the diff (%d)\n\n", len(importantFolded)))
+		header := fmt.Sprintf("\n\n### Affected code outside the diff (%d", totalImportant)
+		if totalImportant > 10 {
+			header += ", showing top 10"
+		}
+		header += ")\n\n"
+		summaryBody.WriteString(header)
 		summaryBody.WriteString("_These findings are on lines not in the diff but may be impacted by this change._\n\n")
 		summaryBody.WriteString(strings.Join(importantFolded, "\n"))
 	}
 	// Minor findings (suggestion/praise) collapsed — cap at 10
-	if len(minorFolded) > 10 {
+	totalMinor := len(minorFolded)
+	if totalMinor > 10 {
 		minorFolded = minorFolded[:10]
 	}
 	if len(minorFolded) > 0 {
@@ -2865,7 +2890,9 @@ func (o *Orchestrator) validateStage(ctx context.Context, run *PipelineRun) erro
 				files[f.NewName] = f.FullContent
 			} else if f.NewName != "" {
 				content, err := o.ghClient.GetFileContent(ctx, run.PREvent.InstallationID, owner, repo, f.NewName, run.PREvent.HeadSHA)
-				if err == nil && content != "" {
+				if err != nil {
+					o.logger.Warn("[validate] SAST: failed to fetch file", "file", f.NewName, "error", err, "pr", run.PREvent.PRNumber)
+				} else if content != "" {
 					files[f.NewName] = content
 				}
 			}
@@ -3960,7 +3987,9 @@ func postSelectionDedup(selected []rankedComment) []rankedComment {
 				continue
 			}
 			if jaccardSimilarity(tokenSets[i], tokenSets[j]) > 0.8 {
-				if selected[i].score >= selected[j].score {
+				// Use severity-first tiebreaker, consistent with upstream sort
+				si, sj := severityRank(selected[i].severity), severityRank(selected[j].severity)
+				if si > sj || (si == sj && selected[i].score >= selected[j].score) {
 					drop[j] = true
 				} else {
 					drop[i] = true
@@ -3982,9 +4011,6 @@ func postSelectionDedup(selected []rankedComment) []rankedComment {
 }
 
 func jaccardSimilarity(a, b map[string]bool) float64 {
-	if len(a) == 0 && len(b) == 0 {
-		return 0
-	}
 	intersection := 0
 	for k := range a {
 		if b[k] {
