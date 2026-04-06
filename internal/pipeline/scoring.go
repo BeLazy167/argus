@@ -33,13 +33,13 @@ func NewScoringStage(registry *llm.Registry, st *store.Store, memClient *memory.
 func scoringThresholdForSeverity(severity string) int {
 	switch strings.ToLower(severity) {
 	case "critical":
-		return 55
+		return 35
 	case "warning":
-		return 65
+		return 45
 	case "suggestion", "info":
-		return 75
+		return 55
 	default:
-		return 65
+		return 45
 	}
 }
 
