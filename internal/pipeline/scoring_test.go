@@ -7,16 +7,16 @@ func TestScoringThresholdForSeverity(t *testing.T) {
 		severity string
 		want     int
 	}{
-		{"critical", 55},
-		{"Critical", 55},
-		{"CRITICAL", 55},
-		{"warning", 65},
-		{"Warning", 65},
-		{"suggestion", 75},
-		{"info", 75},
-		{"praise", 65},   // default
-		{"unknown", 65},  // default
-		{"", 65},         // default
+		{"critical", 35},
+		{"Critical", 35},
+		{"CRITICAL", 35},
+		{"warning", 45},
+		{"Warning", 45},
+		{"suggestion", 55},
+		{"info", 55},
+		{"praise", 45},   // default
+		{"unknown", 45},  // default
+		{"", 45},         // default
 	}
 	for _, tt := range tests {
 		t.Run(tt.severity, func(t *testing.T) {
@@ -176,12 +176,12 @@ func TestVariableThresholdFiltering(t *testing.T) {
 		score    int
 		wantKept bool
 	}{
-		{"critical at 55 passes", SeverityCritical, 55, true},
-		{"critical at 54 dropped", SeverityCritical, 54, false},
-		{"warning at 65 passes", SeverityWarning, 65, true},
-		{"warning at 64 dropped", SeverityWarning, 64, false},
-		{"suggestion at 75 passes", SeveritySuggestion, 75, true},
-		{"suggestion at 74 dropped", SeveritySuggestion, 74, false},
+		{"critical at 35 passes", SeverityCritical, 35, true},
+		{"critical at 34 dropped", SeverityCritical, 34, false},
+		{"warning at 45 passes", SeverityWarning, 45, true},
+		{"warning at 44 dropped", SeverityWarning, 44, false},
+		{"suggestion at 55 passes", SeveritySuggestion, 55, true},
+		{"suggestion at 54 dropped", SeveritySuggestion, 54, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
