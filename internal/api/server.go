@@ -133,6 +133,7 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 				r.Get("/repos/{repoID}/reviews", s.listReviews)
 				r.Post("/repos/{repoID}/reviews", s.triggerReview)
 				r.Get("/reviews/{reviewID}", s.getReview)
+				r.Get("/reviews/{reviewID}/export", s.exportReview)
 				r.Post("/reviews/{reviewID}/retry", s.retryReview)
 
 				// Rules

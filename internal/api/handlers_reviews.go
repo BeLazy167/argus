@@ -3,8 +3,10 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -72,6 +74,135 @@ func (s *Server) getReview(w http.ResponseWriter, r *http.Request) {
 		"review":   review,
 		"comments": comments,
 	})
+}
+
+func (s *Server) exportReview(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "reviewID"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid review id"})
+		return
+	}
+	review, err := s.store.GetReview(r.Context(), id)
+	if err != nil {
+		s.handleDBError(w, err, "review not found")
+		return
+	}
+	if _, err := s.store.GetRepoScoped(r.Context(), review.RepoID, getInstallationIDs(r.Context())); err != nil {
+		s.handleDBError(w, err, "review not found")
+		return
+	}
+	comments, err := s.store.GetReviewComments(r.Context(), id)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load comments"})
+		return
+	}
+
+	format := r.URL.Query().Get("format")
+	if format == "" {
+		format = "json"
+	}
+
+	type exportFinding struct {
+		File       string `json:"file"`
+		Line       int    `json:"line,omitempty"`
+		Priority   string `json:"priority"`
+		Confidence int    `json:"confidence,omitempty"`
+		Category   string `json:"category,omitempty"`
+		Severity   string `json:"severity,omitempty"`
+		Body       string `json:"body"`
+		Specialist string `json:"specialist,omitempty"`
+	}
+
+	findings := make([]exportFinding, 0, len(comments))
+	for _, c := range comments {
+		sev := "suggestion"
+		if c.Severity != nil {
+			sev = *c.Severity
+		}
+		cat := ""
+		if c.Category != nil {
+			cat = *c.Category
+		}
+		spec := ""
+		if c.Specialist != nil {
+			spec = *c.Specialist
+		}
+		conf := 0
+		if c.ConfidenceScore != nil {
+			conf = *c.ConfidenceScore
+		}
+		line := 0
+		if c.EndLine != nil {
+			line = *c.EndLine
+		}
+
+		prio := "P2"
+		switch sev {
+		case "critical":
+			prio = "P0"
+		case "warning":
+			prio = "P1"
+		}
+
+		findings = append(findings, exportFinding{
+			File:       c.FilePath,
+			Line:       line,
+			Priority:   prio,
+			Confidence: conf,
+			Category:   cat,
+			Severity:   sev,
+			Body:       c.Body,
+			Specialist: spec,
+		})
+	}
+
+	switch format {
+	case "md", "markdown":
+		w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=argus-review-%s.md", id.String()[:8]))
+
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("# Argus Review Export\n\n"))
+		sb.WriteString(fmt.Sprintf("- **Review:** %s\n", id.String()))
+		sb.WriteString(fmt.Sprintf("- **PR:** #%d\n", review.PRNumber))
+		sb.WriteString(fmt.Sprintf("- **Score:** %d/10\n", review.Score))
+		sb.WriteString(fmt.Sprintf("- **Total findings:** %d\n\n", len(findings)))
+
+		// Group by file
+		fileGroups := make(map[string][]exportFinding)
+		var fileOrder []string
+		for _, f := range findings {
+			if _, exists := fileGroups[f.File]; !exists {
+				fileOrder = append(fileOrder, f.File)
+			}
+			fileGroups[f.File] = append(fileGroups[f.File], f)
+		}
+
+		for _, file := range fileOrder {
+			sb.WriteString(fmt.Sprintf("## %s\n\n", file))
+			for _, f := range fileGroups[file] {
+				sb.WriteString(fmt.Sprintf("- [ ] **%s** (L%d) [%s] %s\n", f.Priority, f.Line, f.Category, f.Body))
+			}
+			sb.WriteString("\n")
+		}
+
+		w.Write([]byte(sb.String()))
+
+	default: // json
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=argus-review-%s.json", id.String()[:8]))
+
+		export := map[string]any{
+			"review_id":      id.String(),
+			"pr_number":      review.PRNumber,
+			"pr_title":       review.PRTitle,
+			"score":          review.Score,
+			"status":         review.Status,
+			"total_findings": len(findings),
+			"findings":       findings,
+		}
+		json.NewEncoder(w).Encode(export)
+	}
 }
 
 func (s *Server) retryReview(w http.ResponseWriter, r *http.Request) {
