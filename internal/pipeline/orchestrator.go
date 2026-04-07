@@ -1375,73 +1375,14 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	}
 	summaryBody.WriteString(fmt.Sprintf("\n\nScore: **%d/10** · [Full review →](https://argusai.vercel.app/reviews/%s)", run.Synthesis.Score, run.ReviewID.String()))
 
-	// Structured output for LLM agents (e.g., @argus fix, Cursor, Copilot)
-	summaryBody.WriteString("\n\n<details><summary>Prompt for AI agents (unresolved issues)</summary>\n\n")
-
-	// XML format — designed for LLM consumption (file-grouped violations with priority)
-	// Only include findings that made it into inline comments (capped at 40) to avoid
-	// blowing up the review body payload on large PRs.
-	type xmlFinding struct {
-		file     string
-		line     int
-		priority string
-		conf     int
-		category string
-		what     string
-		fix      string
-	}
-	inlineSet := make(map[string]bool, len(inlineComments))
-	for _, ic := range inlineComments {
-		inlineSet[fmt.Sprintf("%s:%d", ic.Path, ic.Line)] = true
-	}
-	var xmlFindings []xmlFinding
-	for _, fr := range run.FileReviews {
-		for _, c := range fr.Comments {
-			prio := priorityLabel(c.Severity)
-			if prio == "" {
-				continue
-			}
-			if !inlineSet[fmt.Sprintf("%s:%d", fr.Path, c.Line)] {
-				continue // only include findings posted as inline comments
-			}
-			xmlFindings = append(xmlFindings, xmlFinding{
-				file:     fr.Path,
-				line:     c.Line,
-				priority: prio,
-				conf:     confidenceScore(c),
-				category: string(c.Category),
-				what:     c.What,
-				fix:      c.Suggestion,
-			})
-		}
-	}
-	// Group by file
-	fileGroups := make(map[string][]xmlFinding)
-	var fileOrder []string
-	for _, f := range xmlFindings {
-		if _, exists := fileGroups[f.file]; !exists {
-			fileOrder = append(fileOrder, f.file)
-		}
-		fileGroups[f.file] = append(fileGroups[f.file], f)
-	}
-	vNum := 1
-	for _, file := range fileOrder {
-		summaryBody.WriteString(fmt.Sprintf("<file name=\"%s\">\n", file))
-		for _, f := range fileGroups[file] {
-			summaryBody.WriteString(fmt.Sprintf("  <violation number=\"%d\" location=\"%s:%d\" confidence=\"%d\">\n", vNum, f.file, f.line, f.conf))
-			summaryBody.WriteString(fmt.Sprintf("    %s [%s]: %s\n", f.priority, f.category, f.what))
-			if f.fix != "" {
-				summaryBody.WriteString(fmt.Sprintf("    ```suggestion\n    %s\n    ```\n", strings.TrimRight(f.fix, "\n")))
-			}
-			summaryBody.WriteString("  </violation>\n")
-			vNum++
-		}
-		summaryBody.WriteString("</file>\n")
-	}
-
-	summaryBody.WriteString("\nUse sub-agents to investigate and fix each issue separately.\n")
-	summaryBody.WriteString(fmt.Sprintf("\n[Full review with all %d findings →](https://argusai.vercel.app/reviews/%s)\n", countComments(run), run.ReviewID.String()))
-	summaryBody.WriteString("\n</details>")
+	// Links to structured exports for AI agents
+	baseURL := "https://argus-ai.fly.dev/api/v1"
+	dashURL := "https://argusai.vercel.app"
+	totalFindings := countComments(run)
+	summaryBody.WriteString(fmt.Sprintf("\n\n**For AI agents:**\n"))
+	summaryBody.WriteString(fmt.Sprintf("- [Posted findings (JSON)](%s/reviews/%s/export?format=json) — %d inline findings\n", baseURL, run.ReviewID.String(), len(inlineComments)))
+	summaryBody.WriteString(fmt.Sprintf("- [All findings (JSON)](%s/reviews/%s/export?format=json) — all %d findings\n", baseURL, run.ReviewID.String(), totalFindings))
+	summaryBody.WriteString(fmt.Sprintf("- [Full review →](%s/reviews/%s)\n", dashURL, run.ReviewID.String()))
 
 	submission := &ghpkg.ReviewSubmission{
 		Summary:  summaryBody.String(),
