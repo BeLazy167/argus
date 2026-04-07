@@ -504,6 +504,22 @@ func buildFileReviewPrompt(run *PipelineRun, file diff.FileDiff, fileContent str
 		sb.WriteString(typeContext)
 	}
 
+	// Inject SAST findings as hints for the reviewer to verify
+	if run.SastFindings != nil {
+		if fileSast, ok := run.SastFindings[file.NewName]; ok && len(fileSast) > 0 {
+			sb.WriteString("\n<sast_findings>\n")
+			sb.WriteString("Static analysis tools found these issues in this file. Verify each and include in your review if valid:\n")
+			for i, f := range fileSast {
+				if i >= 10 {
+					sb.WriteString(fmt.Sprintf("... and %d more SAST findings\n", len(fileSast)-10))
+					break
+				}
+				sb.WriteString(fmt.Sprintf("- Line %d: [%s] %s (%s)\n", f.Line, f.Rule, f.Message, f.Severity))
+			}
+			sb.WriteString("</sast_findings>\n")
+		}
+	}
+
 	// Inject prior review comments for incremental reviews so the LLM can
 	// check if issues were fixed and avoid re-flagging addressed items.
 	if run.IsIncremental && len(run.PriorComments) > 0 {
@@ -569,6 +585,10 @@ Watch specifically for these common pitfalls:
 - Error shadowing with := in nested scopes
 - Slice append without pre-allocation in hot paths
 - Missing mutex for shared state across goroutines
+- Command injection via os/exec with unsanitized user input
+- os.MkdirAll/os.WriteFile with 0777 permissions — overly permissive
+- Missing filepath.Clean() on user-provided file paths
+- Hardcoded API keys, secrets, or credentials
 `
 	case ".py":
 		return `
@@ -594,6 +614,116 @@ Watch specifically for these common pitfalls:
 - Clone where a borrow would suffice
 - Missing error propagation (? operator)
 - Deadlock-prone lock ordering
+- unsafe blocks without justification
+- Command::new() with user input
+`
+	case ".php":
+		return `
+## Language: PHP
+Watch specifically for these security pitfalls:
+- SQL injection via string concatenation — use prepared statements
+- MD5/SHA1 for password hashing — use password_hash()/password_verify()
+- eval(), system(), shell_exec(), passthru() with user input — command injection
+- File upload without extension/MIME validation — remote code risk
+- unserialize() on user input — object injection
+- Unsigned/unencrypted tokens (base64 is NOT encryption — use HMAC or JWT)
+- extract() on user input — variable injection
+- include/require with user-controlled paths
+- Missing htmlspecialchars() on output — XSS
+`
+	case ".rb":
+		return `
+## Language: Ruby
+Watch specifically for these security pitfalls:
+- eval(), send(), public_send() with user input — code injection
+- YAML.load() on untrusted data — use YAML.safe_load()
+- Backtick operator, system() with user input — command injection
+- Marshal.load() on untrusted data — deserialization attack
+- Mass assignment without strong parameters (permit)
+- find_by_sql/where with string interpolation — SQL injection
+- open() with user-controlled URLs — SSRF
+`
+	case ".tf", ".hcl":
+		return `
+## Language: Terraform/IaC
+Watch specifically for these infrastructure security issues:
+- S3 buckets with acl = "public-read" or "public-read-write" — data exposure
+- Security groups with ingress 0.0.0.0/0 (especially on non-80/443 ports)
+- RDS/databases with publicly_accessible = true
+- Hardcoded passwords, secrets, or API keys in resource blocks
+- Missing encryption (at rest and in transit) — kms_key_id, ssl_policy
+- IAM policies with Action:* or Resource:* — overly permissive
+- Missing logging/monitoring (CloudTrail, VPC flow logs)
+`
+	case ".swift":
+		return `
+## Language: Swift
+Watch specifically for these common pitfalls:
+- Force unwrap (!) — crashes on nil, use guard let/if let
+- try! — crashes on error, use do/catch
+- Hardcoded API keys or secrets
+- Storing sensitive data in UserDefaults — use Keychain
+- Missing auth checks on destructive endpoints
+- Force cast (as!) — crashes on type mismatch
+`
+	case ".cs":
+		return `
+## Language: C#
+Watch specifically for these security pitfalls:
+- SQL injection via string concatenation — use parameterized queries
+- catch (Exception) { } swallowing all errors silently
+- Thread-unsafe shared static collections — use Concurrent variants
+- SHA1/MD5 for security purposes — use SHA256+ or BCrypt
+- SSRF via unvalidated URLs in HttpClient
+- Hardcoded connection strings or credentials
+- Missing Dispose/using on IDisposable resources
+- XML parsing without disabling external entities (XXE)
+`
+	case ".java", ".kt", ".kts":
+		return `
+## Language: Java/Kotlin
+Watch specifically for these security pitfalls:
+- SQL injection via string concatenation — use PreparedStatement
+- MD5/SHA1 for passwords — use BCrypt/Argon2
+- Hardcoded credentials, API keys, or secrets
+- Resource leaks — missing try-with-resources/use{}
+- Runtime.getRuntime() with user input — command injection
+- XXE in XML parsing — disable external entities
+- Deserialization of untrusted data (ObjectInputStream)
+- Kotlin !! throws NPE on null — use safe calls
+- Kotlin GlobalScope causes coroutine leaks
+`
+	case ".c", ".h":
+		return `
+## Language: C
+Watch specifically for these common pitfalls:
+- Buffer overflow: strcpy, sprintf, gets — use bounded variants
+- Use-after-free and double-free
+- Format string: printf(user_input) — use printf("%s", input)
+- Integer overflow/underflow in size calculations
+- Missing NULL check after malloc/calloc
+- system()/popen() with user input — command injection
+- Missing bounds checks on array indexing
+`
+	case ".cpp", ".cc", ".cxx", ".hpp":
+		return `
+## Language: C++
+Watch specifically for these common pitfalls:
+- Buffer overflow: raw arrays without bounds checking
+- Use-after-free, double-free, dangling references
+- Format string vulnerabilities
+- Integer overflow/underflow
+- new without delete — prefer smart pointers
+- std::move from still-used objects
+- Race conditions on shared data without mutex
+`
+	case ".scala":
+		return `
+## Language: Scala
+Watch specifically for these pitfalls:
+- .get on Option/Try — use map/flatMap/getOrElse
+- SQL string interpolation — use parameterized queries
+- Blocking calls in Future contexts
 `
 	default:
 		return ""

@@ -410,6 +410,41 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		}
 	}()
 
+	// Pre-run SAST so review stage can use findings as hints (30s timeout)
+	if len(patchSet.Files) <= 50 {
+		sastCtx, sastCancel := context.WithTimeout(ctx, 30*time.Second)
+		lang := dominantLanguage(diffFilePaths(patchSet))
+		if lang != "" {
+			files := make(map[string]string)
+			for _, f := range patchSet.Files {
+				if f.FullContent != "" {
+					files[f.NewName] = f.FullContent
+				} else if f.NewName != "" {
+					content, fetchErr := o.ghClient.GetFileContent(sastCtx, event.InstallationID, owner, repo, f.NewName, event.HeadSHA)
+					if fetchErr == nil && content != "" {
+						files[f.NewName] = content
+					}
+				}
+			}
+			if len(files) > 0 {
+				runners := sast.DefaultRunners()
+				findings, sastErr := sast.RunAll(sastCtx, runners, lang, files)
+				if sastErr != nil {
+					o.logger.Warn("[pre-review] SAST failed", "error", sastErr, "pr", event.PRNumber)
+				} else if len(findings) > 0 {
+					run.SastFindings = make(map[string][]SastFinding)
+					for _, f := range findings {
+						run.SastFindings[f.File] = append(run.SastFindings[f.File], SastFinding{
+							File: f.File, Line: f.Line, Rule: f.Rule, Message: f.Message, Severity: f.Severity,
+						})
+					}
+					o.logger.Info("[pre-review] SAST hints ready", "findings", len(findings), "lang", lang, "pr", event.PRNumber)
+				}
+			}
+		}
+		sastCancel()
+	}
+
 	o.logger.Info("starting review pipeline",
 		"review_id", reviewID,
 		"repo", event.RepoFullName,
@@ -1074,6 +1109,59 @@ func (o *Orchestrator) pass2(ctx context.Context, run *PipelineRun) error {
 	}
 
 	o.logger.Info("pass2 complete", "files_reviewed", completed, "total_hot", len(hotFiles))
+
+	// Cold file pass: re-review files with 0 comments and >50 changed lines
+	// These are likely under-reviewed, not clean
+	const maxColdFiles = 5
+	const minLinesForCold = 50
+	commentedFiles := make(map[string]bool)
+	for _, fr := range run.FileReviews {
+		if len(fr.Comments) > 0 {
+			commentedFiles[fr.Path] = true
+		}
+	}
+	var coldFiles []diff.FileDiff
+	for _, f := range run.Diff.Files {
+		if len(coldFiles) >= maxColdFiles {
+			break
+		}
+		if !commentedFiles[f.NewName] && len(f.ChangedLines()) >= minLinesForCold {
+			coldFiles = append(coldFiles, f)
+		}
+	}
+	if len(coldFiles) > 0 {
+		o.logger.Info("cold file pass starting", "files", len(coldFiles))
+		coldContents := make(map[string]string)
+		for _, f := range coldFiles {
+			content, fetchErr := o.ghClient.GetFileContent(ctx, run.PREvent.InstallationID, owner, repo, f.NewName, run.PREvent.HeadSHA)
+			if fetchErr == nil {
+				coldContents[f.NewName] = content
+			}
+		}
+		for _, f := range coldFiles {
+			p := reviewParams{
+				file:       f,
+				action:     TriageDeep,
+				specialist: SpecialistSecurity,
+				systemBase: specialistPrompt(SpecialistSecurity, run.Prompts),
+				deepReview: true,
+			}
+			rev, tok, err := o.reviewStage.reviewFile(ctx, run, p, coldContents, owner, repo, cfg, provider)
+			if err != nil {
+				o.logger.Warn("cold file review failed", "file", f.NewName, "error", err)
+				continue
+			}
+			run.Tokens.Review = append(run.Tokens.Review, tok)
+			run.Tokens.addToTotal(tok)
+			for i := range rev.Comments {
+				rev.Comments[i].Specialist = "cold_security"
+			}
+			if len(rev.Comments) > 0 {
+				run.FileReviews = append(run.FileReviews, rev)
+			}
+		}
+		o.logger.Info("cold file pass complete", "files_reviewed", len(coldFiles))
+	}
 
 	// Re-dedup after pass2 — pass2 findings often overlap with pass1
 	beforeDedup := countComments(run)
