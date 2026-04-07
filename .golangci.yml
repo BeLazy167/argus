@@ -1,0 +1,41 @@
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - govet
+    - errcheck
+    - gosimple
+    - ineffassign
+    - staticcheck
+    - unused
+
+issues:
+  # Only report issues in new code for initial open source release.
+  # Pre-existing lint debt will be cleaned up incrementally.
+  new: false
+  exclude-rules:
+    # Deprecated websocket library (migration tracked separately)
+    - path: internal/api/handlers_reviews\.go
+      linters: [staticcheck, errcheck]
+    # Union-find pattern (var + recursive func is idiomatic here)
+    - path: internal/pipeline/dedup
+      linters: [gosimple]
+      text: "S1021"
+    # Pre-existing unused functions in orchestrator (agent framework, broadcast)
+    - path: internal/pipeline/orchestrator\.go
+      linters: [unused]
+    # Pre-existing unused functions in old dedup
+    - path: internal/pipeline/dedup\.go
+      linters: [unused]
+    # Pre-existing ineffectual assignment
+    - path: internal/api/handlers_patterns\.go
+      linters: [ineffassign]
+    # Pre-existing unused err value
+    - path: internal/api/handlers_patterns\.go
+      linters: [staticcheck]
+      text: "SA4006"
+    # Pre-existing struct literal conversion
+    - path: internal/llm/chat\.go
+      linters: [gosimple]
+      text: "S1016"
