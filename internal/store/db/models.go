@@ -29,17 +29,23 @@ type CodeEdge struct {
 }
 
 type CodeNode struct {
-	ID        int64              `json:"id"`
-	RepoID    int64              `json:"repo_id"`
-	Kind      string             `json:"kind"`
-	Name      string             `json:"name"`
-	FilePath  string             `json:"file_path"`
-	LineStart *int32             `json:"line_start"`
-	LineEnd   *int32             `json:"line_end"`
-	Language  *string            `json:"language"`
-	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
-	PrNumber  *int32             `json:"pr_number"`
-	IsMerged  bool               `json:"is_merged"`
+	ID           int64              `json:"id"`
+	RepoID       int64              `json:"repo_id"`
+	Kind         string             `json:"kind"`
+	Name         string             `json:"name"`
+	FilePath     string             `json:"file_path"`
+	LineStart    *int32             `json:"line_start"`
+	LineEnd      *int32             `json:"line_end"`
+	Language     *string            `json:"language"`
+	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
+	PrNumber     *int32             `json:"pr_number"`
+	IsMerged     bool               `json:"is_merged"`
+	ReturnType   *string            `json:"return_type"`
+	Params       *string            `json:"params"`
+	Visibility   *string            `json:"visibility"`
+	IsAsync      *bool              `json:"is_async"`
+	ReceiverType *string            `json:"receiver_type"`
+	Scope        *string            `json:"scope"`
 }
 
 type CommentOutcome struct {
@@ -100,6 +106,22 @@ type Pattern struct {
 	Source         *string            `json:"source"`
 	Category       *string            `json:"category"`
 	PrNumber       *int32             `json:"pr_number"`
+}
+
+type PatternStat struct {
+	ID             int64              `json:"id"`
+	InstallationID int64              `json:"installation_id"`
+	RepoID         *int64             `json:"repo_id"`
+	SupermemoryID  string             `json:"supermemory_id"`
+	ContentHash    string             `json:"content_hash"`
+	Category       string             `json:"category"`
+	TimesMatched   int32              `json:"times_matched"`
+	TimesConfirmed int32              `json:"times_confirmed"`
+	TimesDismissed int32              `json:"times_dismissed"`
+	QualityScore   float64            `json:"quality_score"`
+	LastMatchedAt  pgtype.Timestamptz `json:"last_matched_at"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
 }
 
 type PipelineState struct {
