@@ -1380,8 +1380,8 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	dashURL := "https://argusai.vercel.app"
 	totalFindings := countComments(run)
 	summaryBody.WriteString(fmt.Sprintf("\n\n**For AI agents:**\n"))
-	summaryBody.WriteString(fmt.Sprintf("- [Posted findings (JSON)](%s/reviews/%s/export?format=json) — %d inline findings\n", baseURL, run.ReviewID.String(), len(inlineComments)))
-	summaryBody.WriteString(fmt.Sprintf("- [All findings (JSON)](%s/reviews/%s/export?format=json) — all %d findings\n", baseURL, run.ReviewID.String(), totalFindings))
+	summaryBody.WriteString(fmt.Sprintf("- [Posted findings (MD)](%s/reviews/%s/export?format=md) — %d inline findings\n", baseURL, run.ReviewID.String(), len(inlineComments)))
+	summaryBody.WriteString(fmt.Sprintf("- [All findings (MD)](%s/reviews/%s/export?format=md) — all %d findings\n", baseURL, run.ReviewID.String(), totalFindings))
 	summaryBody.WriteString(fmt.Sprintf("- [Full review →](%s/reviews/%s)\n", dashURL, run.ReviewID.String()))
 
 	submission := &ghpkg.ReviewSubmission{
