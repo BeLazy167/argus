@@ -1889,7 +1889,7 @@ func (o *Orchestrator) indexConfirmedPatterns(ctx context.Context, run *Pipeline
 			indexed++
 			content := fmt.Sprintf("Confirmed pattern [%s]: %s (file: %s)", c.Category, c.Body, fr.Path)
 			customID := memory.PatternCustomID(owner, repo, "confirmed", content)
-			_, err := o.indexer.IndexRepoPattern(ctx, owner, repo, content, customID, map[string]string{
+			resp, err := o.indexer.IndexRepoPattern(ctx, owner, repo, content, customID, map[string]string{
 				"source":   "scoring_confirmed",
 				"score":    fmt.Sprintf("%d", c.Score),
 				"pr":       fmt.Sprintf("%d", run.PREvent.PRNumber),
@@ -1897,6 +1897,17 @@ func (o *Orchestrator) indexConfirmedPatterns(ctx context.Context, run *Pipeline
 			})
 			if err != nil {
 				o.logger.Warn("indexing confirmed pattern", "error", err, "file", fr.Path)
+			}
+			// Also persist to local DB so the patterns dashboard stays current
+			var smID *string
+			if resp != nil && resp.ID != "" {
+				smID = &resp.ID
+			}
+			src := "scoring_confirmed"
+			cat := string(c.Category)
+			prNum := run.PREvent.PRNumber
+			if _, dbErr := o.st.CreatePattern(ctx, run.DBInstallationID, &run.DBRepoID, content, smID, strPtrOrNil("argus:confirmed"), &src, &cat, &prNum); dbErr != nil {
+				o.logger.Warn("persisting confirmed pattern to DB", "error", dbErr, "file", fr.Path)
 			}
 		}
 	}
