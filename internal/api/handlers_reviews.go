@@ -181,9 +181,10 @@ func (s *Server) exportReview(w http.ResponseWriter, r *http.Request) {
 		for _, file := range fileOrder {
 			sb.WriteString(fmt.Sprintf("## %s\n\n", file))
 			for _, f := range fileGroups[file] {
-				sb.WriteString(fmt.Sprintf("- [ ] **%s** (L%d) [%s] %s\n", f.Priority, f.Line, f.Category, f.Body))
+				sb.WriteString(fmt.Sprintf("### %s L%d — %s [%s]\n\n", f.Priority, f.Line, f.Category, f.Severity))
+				sb.WriteString(f.Body)
+				sb.WriteString("\n\n---\n\n")
 			}
-			sb.WriteString("\n")
 		}
 
 		if _, err := w.Write([]byte(sb.String())); err != nil {

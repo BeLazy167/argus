@@ -3479,7 +3479,8 @@ func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghRe
 			}
 			enforcedRule := strPtrOrNil(c.EnforcedRuleContent)
 
-			if err := o.st.CreateReviewComment(ctx, run.ReviewID, fr.Path, startLine, &line, &side, c.Body, &sev, &cat, specialist, snippet, confidenceScore, ghCommentID, nil, matchedPatternScore, enforcedRule, c.IsNewFinding); err != nil {
+			formattedBody := formatCommentBody(c)
+			if err := o.st.CreateReviewComment(ctx, run.ReviewID, fr.Path, startLine, &line, &side, formattedBody, &sev, &cat, specialist, snippet, confidenceScore, ghCommentID, nil, matchedPatternScore, enforcedRule, c.IsNewFinding); err != nil {
 				o.logger.Error("persisting review comment", "error", err, "file", fr.Path)
 			}
 
