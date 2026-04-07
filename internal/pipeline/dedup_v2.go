@@ -184,10 +184,6 @@ func pickBestCrossFile(members []taggedComment, maxReps int) []taggedComment {
 			reps = append(reps, tc)
 		}
 	}
-	// If only 1 file represented, return just 1 rep
-	if len(seenFiles) == 1 && len(reps) > 1 {
-		return reps[:1]
-	}
 	return reps
 }
 

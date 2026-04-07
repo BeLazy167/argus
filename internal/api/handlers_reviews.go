@@ -17,6 +17,17 @@ import (
 	"github.com/BeLazy167/argus/internal/pipeline"
 )
 
+type exportFinding struct {
+	File       string `json:"file"`
+	Line       int    `json:"line,omitempty"`
+	Priority   string `json:"priority"`
+	Confidence int    `json:"confidence,omitempty"`
+	Category   string `json:"category,omitempty"`
+	Severity   string `json:"severity,omitempty"`
+	Body       string `json:"body"`
+	Specialist string `json:"specialist,omitempty"`
+}
+
 func (s *Server) listAllReviews(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
@@ -102,17 +113,6 @@ func (s *Server) exportReview(w http.ResponseWriter, r *http.Request) {
 		format = "json"
 	}
 
-	type exportFinding struct {
-		File       string `json:"file"`
-		Line       int    `json:"line,omitempty"`
-		Priority   string `json:"priority"`
-		Confidence int    `json:"confidence,omitempty"`
-		Category   string `json:"category,omitempty"`
-		Severity   string `json:"severity,omitempty"`
-		Body       string `json:"body"`
-		Specialist string `json:"specialist,omitempty"`
-	}
-
 	findings := make([]exportFinding, 0, len(comments))
 	for _, c := range comments {
 		sev := "suggestion"
@@ -186,7 +186,9 @@ func (s *Server) exportReview(w http.ResponseWriter, r *http.Request) {
 			sb.WriteString("\n")
 		}
 
-		w.Write([]byte(sb.String()))
+		if _, err := w.Write([]byte(sb.String())); err != nil {
+			s.logger.Warn("export write failed", "error", err)
+		}
 
 	default: // json
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -201,7 +203,9 @@ func (s *Server) exportReview(w http.ResponseWriter, r *http.Request) {
 			"total_findings": len(findings),
 			"findings":       findings,
 		}
-		json.NewEncoder(w).Encode(export)
+		if err := json.NewEncoder(w).Encode(export); err != nil {
+			s.logger.Warn("export encode failed", "error", err)
+		}
 	}
 }
 
