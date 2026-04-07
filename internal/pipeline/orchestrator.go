@@ -421,7 +421,9 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 					files[f.NewName] = f.FullContent
 				} else if f.NewName != "" {
 					content, fetchErr := o.ghClient.GetFileContent(sastCtx, event.InstallationID, owner, repo, f.NewName, event.HeadSHA)
-					if fetchErr == nil && content != "" {
+					if fetchErr != nil {
+						o.logger.Warn("[pre-review] SAST: failed to fetch file", "file", f.NewName, "error", fetchErr, "pr", event.PRNumber)
+					} else if content != "" {
 						files[f.NewName] = content
 					}
 				}
@@ -1131,14 +1133,20 @@ func (o *Orchestrator) pass2(ctx context.Context, run *PipelineRun) error {
 	}
 	if len(coldFiles) > 0 {
 		o.logger.Info("cold file pass starting", "files", len(coldFiles))
+		coldCtx, coldCancel := context.WithTimeout(ctx, 60*time.Second)
+		defer coldCancel()
 		coldContents := make(map[string]string)
 		for _, f := range coldFiles {
-			content, fetchErr := o.ghClient.GetFileContent(ctx, run.PREvent.InstallationID, owner, repo, f.NewName, run.PREvent.HeadSHA)
+			content, fetchErr := o.ghClient.GetFileContent(coldCtx, run.PREvent.InstallationID, owner, repo, f.NewName, run.PREvent.HeadSHA)
 			if fetchErr == nil {
 				coldContents[f.NewName] = content
 			}
 		}
 		for _, f := range coldFiles {
+			if coldCtx.Err() != nil {
+				o.logger.Warn("cold file pass timeout", "completed", len(coldFiles), "pr", run.PREvent.PRNumber)
+				break
+			}
 			p := reviewParams{
 				file:       f,
 				action:     TriageDeep,
@@ -1146,7 +1154,7 @@ func (o *Orchestrator) pass2(ctx context.Context, run *PipelineRun) error {
 				systemBase: specialistPrompt(SpecialistSecurity, run.Prompts),
 				deepReview: true,
 			}
-			rev, tok, err := o.reviewStage.reviewFile(ctx, run, p, coldContents, owner, repo, cfg, provider)
+			rev, tok, err := o.reviewStage.reviewFile(coldCtx, run, p, coldContents, owner, repo, cfg, provider)
 			if err != nil {
 				o.logger.Warn("cold file review failed", "file", f.NewName, "error", err)
 				continue
