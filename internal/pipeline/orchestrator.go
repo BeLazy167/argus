@@ -1379,7 +1379,7 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	baseURL := "https://argus-ai.fly.dev/api/v1"
 	dashURL := "https://argusai.vercel.app"
 	totalFindings := countComments(run)
-	summaryBody.WriteString(fmt.Sprintf("\n\n**For AI agents:**\n"))
+	summaryBody.WriteString("\n\n**For AI agents:**\n")
 	summaryBody.WriteString(fmt.Sprintf("- [Posted findings (MD)](%s/reviews/%s/export?format=md) — %d inline findings\n", baseURL, run.ReviewID.String(), len(inlineComments)))
 	summaryBody.WriteString(fmt.Sprintf("- [All findings (MD)](%s/reviews/%s/export?format=md) — all %d findings\n", baseURL, run.ReviewID.String(), totalFindings))
 	summaryBody.WriteString(fmt.Sprintf("- [Full review →](%s/reviews/%s)\n", dashURL, run.ReviewID.String()))

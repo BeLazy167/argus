@@ -162,7 +162,7 @@ func (s *Server) exportReview(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=argus-review-%s.md", id.String()[:8]))
 
 		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("# Argus Review Export\n\n"))
+		sb.WriteString("# Argus Review Export\n\n")
 		sb.WriteString(fmt.Sprintf("- **Review:** %s\n", id.String()))
 		sb.WriteString(fmt.Sprintf("- **PR:** #%d\n", review.PRNumber))
 		sb.WriteString(fmt.Sprintf("- **Score:** %d/10\n", review.Score))
