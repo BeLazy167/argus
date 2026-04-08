@@ -13,12 +13,25 @@ import (
 	"github.com/BeLazy167/argus/internal/pipeline"
 )
 
-// --- Model Config ---
-
-func (s *Server) getModelConfigs(w http.ResponseWriter, r *http.Request) {
+// verifyRepoAccess parses repoID from URL and verifies it belongs to the caller's installations.
+func (s *Server) verifyRepoAccess(w http.ResponseWriter, r *http.Request) (int64, bool) {
 	repoID, err := strconv.ParseInt(chi.URLParam(r, "repoID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo id"})
+		return 0, false
+	}
+	if _, err := s.store.GetRepoScoped(r.Context(), repoID, getInstallationIDs(r.Context())); err != nil {
+		s.handleDBError(w, err, "repo not found")
+		return 0, false
+	}
+	return repoID, true
+}
+
+// --- Model Config ---
+
+func (s *Server) getModelConfigs(w http.ResponseWriter, r *http.Request) {
+	repoID, ok := s.verifyRepoAccess(w, r)
+	if !ok {
 		return
 	}
 	configs, err := s.store.ListModelConfigs(r.Context(), repoID)
@@ -31,9 +44,8 @@ func (s *Server) getModelConfigs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) upsertModelConfig(w http.ResponseWriter, r *http.Request) {
-	repoID, err := strconv.ParseInt(chi.URLParam(r, "repoID"), 10, 64)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo id"})
+	repoID, ok := s.verifyRepoAccess(w, r)
+	if !ok {
 		return
 	}
 	stage := chi.URLParam(r, "stage")
@@ -70,9 +82,8 @@ func (s *Server) upsertModelConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteModelConfig(w http.ResponseWriter, r *http.Request) {
-	repoID, err := strconv.ParseInt(chi.URLParam(r, "repoID"), 10, 64)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo id"})
+	repoID, ok := s.verifyRepoAccess(w, r)
+	if !ok {
 		return
 	}
 	stage := chi.URLParam(r, "stage")
@@ -221,9 +232,8 @@ func (s *Server) deleteOrgModelConfig(w http.ResponseWriter, r *http.Request) {
 // --- Prompt Templates ---
 
 func (s *Server) listPromptTemplates(w http.ResponseWriter, r *http.Request) {
-	repoID, err := strconv.ParseInt(chi.URLParam(r, "repoID"), 10, 64)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo id"})
+	repoID, ok := s.verifyRepoAccess(w, r)
+	if !ok {
 		return
 	}
 	customs, err := s.store.ListPromptTemplates(r.Context(), repoID)
@@ -254,9 +264,8 @@ func (s *Server) listPromptTemplates(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) upsertPromptTemplate(w http.ResponseWriter, r *http.Request) {
-	repoID, err := strconv.ParseInt(chi.URLParam(r, "repoID"), 10, 64)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo id"})
+	repoID, ok := s.verifyRepoAccess(w, r)
+	if !ok {
 		return
 	}
 	stage := chi.URLParam(r, "stage")
@@ -300,9 +309,8 @@ func (s *Server) upsertPromptTemplate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deletePromptTemplate(w http.ResponseWriter, r *http.Request) {
-	repoID, err := strconv.ParseInt(chi.URLParam(r, "repoID"), 10, 64)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo id"})
+	repoID, ok := s.verifyRepoAccess(w, r)
+	if !ok {
 		return
 	}
 	stage := chi.URLParam(r, "stage")
