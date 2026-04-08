@@ -3495,20 +3495,27 @@ func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghRe
 				o.logger.Error("persisting review comment", "error", err, "file", fr.Path)
 			}
 
-			if o.indexer != nil {
-				err := o.indexer.IndexReviewComment(ctx, owner, repo, memory.ReviewMemory{
+		}
+	}
+
+	// Batch index all comments to Supermemory in a single API call
+	if o.indexer != nil {
+		var batch []memory.ReviewMemory
+		for _, fr := range run.FileReviews {
+			for _, c := range fr.Comments {
+				batch = append(batch, memory.ReviewMemory{
 					ReviewID:    run.ReviewID.String(),
 					PRNumber:    run.PREvent.PRNumber,
 					FilePath:    fr.Path,
 					Body:        c.Body,
-					Severity:    sev,
-					Category:    cat,
+					Severity:    string(c.Severity),
+					Category:    string(c.Category),
 					DiffContext: getDiffContext(run, fr.Path),
 				})
-				if err != nil {
-					o.logger.Error("indexing review comment", "error", err, "file", fr.Path)
-				}
 			}
+		}
+		if err := o.indexer.IndexReviewCommentsBatch(ctx, owner, repo, batch); err != nil {
+			o.logger.Error("batch indexing review comments", "error", err, "count", len(batch))
 		}
 	}
 }

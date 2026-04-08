@@ -102,6 +102,35 @@ func (c *Client) AddMemory(ctx context.Context, req AddRequest) (*AddResponse, e
 	return &result, nil
 }
 
+// BatchDocument is a single document in a batch add request.
+type BatchDocument struct {
+	Content  string            `json:"content"`
+	CustomID string            `json:"customId,omitempty"`
+	Metadata map[string]string `json:"metadata,omitempty"`
+}
+
+// BatchAddRequest is the request body for POST /v3/documents/batch.
+type BatchAddRequest struct {
+	ContainerTag string            `json:"containerTag,omitempty"`
+	Metadata     map[string]string `json:"metadata,omitempty"`
+	Documents    []BatchDocument   `json:"documents"`
+}
+
+// BatchAddResponse is the response from POST /v3/documents/batch.
+type BatchAddResponse struct {
+	IDs []string `json:"ids"`
+}
+
+// AddMemoryBatch stores multiple documents in a single API call via v3/documents/batch.
+// Max 600 documents per call. Counts as 1 request for rate limiting.
+func (c *Client) AddMemoryBatch(ctx context.Context, req BatchAddRequest) (*BatchAddResponse, error) {
+	var result BatchAddResponse
+	if err := c.doJSON(ctx, "/v3/documents/batch", req, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
 // AddMemoryImmediate stores memories via v4/memories. Immediately searchable (embeddings
 // generated on creation) but does NOT support customId upserts.
 func (c *Client) AddMemoryImmediate(ctx context.Context, req AddImmediateRequest) (*AddImmediateResponse, error) {
