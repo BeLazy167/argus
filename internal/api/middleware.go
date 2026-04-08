@@ -290,10 +290,19 @@ func getOrgRole(ctx context.Context) string {
 }
 
 // cors adds CORS headers for the frontend origin.
+// allowOrigin can be comma-separated for multiple origins.
 func cors(allowOrigin string) func(http.Handler) http.Handler {
+	allowed := make(map[string]bool)
+	for _, o := range strings.Split(allowOrigin, ",") {
+		allowed[strings.TrimSpace(o)] = true
+	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Access-Control-Allow-Origin", allowOrigin)
+			origin := r.Header.Get("Origin")
+			if allowed[origin] {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Vary", "Origin")
+			}
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Installation-ID")
 			w.Header().Set("Access-Control-Max-Age", "86400")
