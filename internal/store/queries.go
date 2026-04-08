@@ -432,11 +432,11 @@ func (s *Store) ListAllReviewsScoped(ctx context.Context, installationIDs []int6
 
 // --- Rules ---
 
-func (s *Store) ListRules(ctx context.Context) ([]Rule, error) {
+func (s *Store) ListRules(ctx context.Context, installationIDs []int64) ([]Rule, error) {
 	rows, err := s.Pool.Query(ctx, `
-		SELECT id, category, content, priority, enabled, created_at, updated_at
-		FROM rules ORDER BY priority DESC, category
-	`)
+		SELECT id, installation_id, category, content, priority, enabled, created_at, updated_at
+		FROM rules WHERE installation_id = ANY($1::bigint[]) ORDER BY priority DESC, category
+	`, installationIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -444,36 +444,36 @@ func (s *Store) ListRules(ctx context.Context) ([]Rule, error) {
 	return collectOrEmpty(rows, pgx.RowToStructByPos[Rule])
 }
 
-func (s *Store) CreateRule(ctx context.Context, category, content string, priority int, enabled bool) (*Rule, error) {
+func (s *Store) CreateRule(ctx context.Context, installationID int64, category, content string, priority int, enabled bool) (*Rule, error) {
 	var r Rule
 	err := s.Pool.QueryRow(ctx, `
-		INSERT INTO rules (category, content, priority, enabled)
-		VALUES ($1, $2, $3, $4)
-		RETURNING id, category, content, priority, enabled, created_at, updated_at
-	`, category, content, priority, enabled).Scan(&r.ID, &r.Category, &r.Content, &r.Priority, &r.Enabled, &r.CreatedAt, &r.UpdatedAt)
+		INSERT INTO rules (installation_id, category, content, priority, enabled)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING id, installation_id, category, content, priority, enabled, created_at, updated_at
+	`, installationID, category, content, priority, enabled).Scan(&r.ID, &r.InstallationID, &r.Category, &r.Content, &r.Priority, &r.Enabled, &r.CreatedAt, &r.UpdatedAt)
 	return &r, err
 }
 
-func (s *Store) UpdateRule(ctx context.Context, id int64, category, content *string, priority *int, enabled *bool) (*Rule, error) {
+func (s *Store) UpdateRule(ctx context.Context, id int64, installationIDs []int64, category, content *string, priority *int, enabled *bool) (*Rule, error) {
 	var r Rule
 	err := s.Pool.QueryRow(ctx, `
 		UPDATE rules SET
-			category = COALESCE($2, category),
-			content = COALESCE($3, content),
-			priority = COALESCE($4, priority),
-			enabled = COALESCE($5, enabled),
+			category = COALESCE($3, category),
+			content = COALESCE($4, content),
+			priority = COALESCE($5, priority),
+			enabled = COALESCE($6, enabled),
 			updated_at = NOW()
-		WHERE id = $1
-		RETURNING id, category, content, priority, enabled, created_at, updated_at
-	`, id, category, content, priority, enabled).Scan(&r.ID, &r.Category, &r.Content, &r.Priority, &r.Enabled, &r.CreatedAt, &r.UpdatedAt)
+		WHERE id = $1 AND installation_id = ANY($2::bigint[])
+		RETURNING id, installation_id, category, content, priority, enabled, created_at, updated_at
+	`, id, installationIDs, category, content, priority, enabled).Scan(&r.ID, &r.InstallationID, &r.Category, &r.Content, &r.Priority, &r.Enabled, &r.CreatedAt, &r.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
 	return &r, nil
 }
 
-func (s *Store) DeleteRule(ctx context.Context, id int64) error {
-	ct, err := s.Pool.Exec(ctx, `DELETE FROM rules WHERE id = $1`, id)
+func (s *Store) DeleteRule(ctx context.Context, id int64, installationIDs []int64) error {
+	ct, err := s.Pool.Exec(ctx, `DELETE FROM rules WHERE id = $1 AND installation_id = ANY($2::bigint[])`, id, installationIDs)
 	if err != nil {
 		return err
 	}
@@ -730,14 +730,14 @@ func (s *Store) GetStatsScoped(ctx context.Context, installationIDs []int64) (*S
 
 // --- Activity ---
 
-func (s *Store) ListActivity(ctx context.Context, limit int) ([]ActivityLog, error) {
+func (s *Store) ListActivity(ctx context.Context, installationIDs []int64, limit int) ([]ActivityLog, error) {
 	if limit <= 0 {
 		limit = 50
 	}
 	rows, err := s.Pool.Query(ctx, `
-		SELECT id, action, actor, resource, metadata, created_at
-		FROM activity_log ORDER BY created_at DESC LIMIT $1
-	`, limit)
+		SELECT id, installation_id, action, actor, resource, metadata, created_at
+		FROM activity_log WHERE installation_id = ANY($1::bigint[]) ORDER BY created_at DESC LIMIT $2
+	`, installationIDs, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -745,11 +745,11 @@ func (s *Store) ListActivity(ctx context.Context, limit int) ([]ActivityLog, err
 	return collectOrEmpty(rows, pgx.RowToStructByPos[ActivityLog])
 }
 
-func (s *Store) LogActivity(ctx context.Context, action, actor, resource string, metadata []byte) error {
+func (s *Store) LogActivity(ctx context.Context, installationID *int64, action, actor, resource string, metadata []byte) error {
 	_, err := s.Pool.Exec(ctx, `
-		INSERT INTO activity_log (action, actor, resource, metadata)
-		VALUES ($1, $2, $3, $4)
-	`, action, nilIfEmpty(actor), nilIfEmpty(resource), metadata)
+		INSERT INTO activity_log (installation_id, action, actor, resource, metadata)
+		VALUES ($1, $2, $3, $4, $5)
+	`, installationID, action, nilIfEmpty(actor), nilIfEmpty(resource), metadata)
 	return err
 }
 

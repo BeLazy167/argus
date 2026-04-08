@@ -15,11 +15,9 @@ func (s *Server) getStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, stats)
 }
 
-// TODO: activity_log table lacks installation_id — returns all tenants' activity.
-// Before multi-tenant launch, add installation_id and scope queries.
 func (s *Server) getActivity(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	activity, err := s.store.ListActivity(r.Context(), limit)
+	activity, err := s.store.ListActivity(r.Context(), getInstallationIDs(r.Context()), limit)
 	if err != nil {
 		s.logger.Error("list activity", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})

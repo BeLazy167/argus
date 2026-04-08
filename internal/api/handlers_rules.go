@@ -9,10 +9,8 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
-// TODO: Rules table lacks installation_id — all rules are global across tenants.
-// Before multi-tenant launch, add installation_id column and scope all queries.
 func (s *Server) listRules(w http.ResponseWriter, r *http.Request) {
-	rules, err := s.store.ListRules(r.Context())
+	rules, err := s.store.ListRules(r.Context(), getInstallationIDs(r.Context()))
 	if err != nil {
 		s.logger.Error("list rules", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
@@ -40,13 +38,18 @@ func (s *Server) createRule(w http.ResponseWriter, r *http.Request) {
 	if body.Enabled != nil {
 		enabled = *body.Enabled
 	}
-	rule, err := s.store.CreateRule(r.Context(), body.Category, body.Content, body.Priority, enabled)
+	ids := getInstallationIDs(r.Context())
+	if len(ids) == 0 {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "no installation"})
+		return
+	}
+	rule, err := s.store.CreateRule(r.Context(), ids[0], body.Category, body.Content, body.Priority, enabled)
 	if err != nil {
 		s.logger.Error("create rule", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create rule"})
 		return
 	}
-	if err := s.store.LogActivity(r.Context(), "rule_created", "", fmt.Sprintf("rule:%d", rule.ID), nil); err != nil {
+	if err := s.store.LogActivity(r.Context(), &ids[0], "rule_created", "", fmt.Sprintf("rule:%d", rule.ID), nil); err != nil {
 		s.logger.Error("failed to log activity", "error", err, "action", "rule_created")
 	}
 	writeJSON(w, http.StatusCreated, rule)
@@ -68,7 +71,7 @@ func (s *Server) updateRule(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
 		return
 	}
-	rule, err := s.store.UpdateRule(r.Context(), id, body.Category, body.Content, body.Priority, body.Enabled)
+	rule, err := s.store.UpdateRule(r.Context(), id, getInstallationIDs(r.Context()), body.Category, body.Content, body.Priority, body.Enabled)
 	if err != nil {
 		s.handleDBError(w, err, "rule not found")
 		return
@@ -82,11 +85,11 @@ func (s *Server) deleteRule(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid rule id"})
 		return
 	}
-	if err := s.store.DeleteRule(r.Context(), id); err != nil {
+	if err := s.store.DeleteRule(r.Context(), id, getInstallationIDs(r.Context())); err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "rule not found"})
 		return
 	}
-	if err := s.store.LogActivity(r.Context(), "rule_deleted", "", fmt.Sprintf("rule:%d", id), nil); err != nil {
+	if err := s.store.LogActivity(r.Context(), nil, "rule_deleted", "", fmt.Sprintf("rule:%d", id), nil); err != nil {
 		s.logger.Error("failed to log activity", "error", err, "action", "rule_deleted")
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})

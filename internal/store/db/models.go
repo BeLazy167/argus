@@ -11,12 +11,13 @@ import (
 )
 
 type ActivityLog struct {
-	ID        int64              `json:"id"`
-	Action    string             `json:"action"`
-	Actor     *string            `json:"actor"`
-	Resource  *string            `json:"resource"`
-	Metadata  []byte             `json:"metadata"`
-	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	ID             int64              `json:"id"`
+	Action         string             `json:"action"`
+	Actor          *string            `json:"actor"`
+	Resource       *string            `json:"resource"`
+	Metadata       []byte             `json:"metadata"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	InstallationID *int64             `json:"installation_id"`
 }
 
 type CodeEdge struct {
@@ -218,13 +219,14 @@ type ReviewComment struct {
 }
 
 type Rule struct {
-	ID        int64              `json:"id"`
-	Category  string             `json:"category"`
-	Content   string             `json:"content"`
-	Priority  int32              `json:"priority"`
-	Enabled   bool               `json:"enabled"`
-	CreatedAt pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
+	ID             int64              `json:"id"`
+	Category       string             `json:"category"`
+	Content        string             `json:"content"`
+	Priority       int32              `json:"priority"`
+	Enabled        bool               `json:"enabled"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	InstallationID *int64             `json:"installation_id"`
 }
 
 type Scenario struct {

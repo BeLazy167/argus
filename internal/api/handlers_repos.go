@@ -112,7 +112,7 @@ func (s *Server) triggerReview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.store.LogActivity(r.Context(), "manual_review_triggered", "", repo.FullName, nil); err != nil {
+	if err := s.store.LogActivity(r.Context(), nil, "manual_review_triggered", "", repo.FullName, nil); err != nil {
 		s.logger.Error("failed to log activity", "error", err, "action", "manual_review_triggered")
 	}
 
