@@ -33,7 +33,7 @@ export const metadata: Metadata = {
   title: "Pricing",
   description:
     "Free to start, Pro at $19/mo. AI code review for teams that ship fast. Bring your own LLM key.",
-  alternates: { canonical: "https://argusai.vercel.app/pricing" },
+  alternates: { canonical: "https://argus.reviews/pricing" },
 };
 
 function FaqItem({ q, a }: { q: string; a: string }) {

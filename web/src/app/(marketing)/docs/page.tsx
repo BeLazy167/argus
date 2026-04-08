@@ -5,7 +5,7 @@ export const metadata: Metadata = {
   title: "Documentation",
   description:
     "Complete reference for Argus AI code review: pipeline stages, code simulation, memory system, bot commands, configuration, and integration guide.",
-  alternates: { canonical: "https://argusai.vercel.app/docs" },
+  alternates: { canonical: "https://argus.reviews/docs" },
 };
 
 export default function DocsPage() {

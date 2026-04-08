@@ -130,7 +130,7 @@ func (p *ChatProvider) Complete(ctx context.Context, req CompletionRequest) (Com
 		httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
 	}
 	if p.isOpenRouter() {
-		httpReq.Header.Set("HTTP-Referer", "https://argusai.vercel.app")
+		httpReq.Header.Set("HTTP-Referer", "https://argus.reviews")
 		httpReq.Header.Set("X-Title", "Argus")
 	}
 

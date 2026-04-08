@@ -196,7 +196,7 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		if reviewProvider == "" || !o.registry.HasKeyForRepo(ctx, inst.ID, &dbRepo.ID, reviewProvider) {
 			o.logger.Info("no API key or model config, posting onboarding comment", "repo", event.RepoFullName, "provider", reviewProvider)
 			if err := o.ghClient.CreateIssueComment(ctx, event.InstallationID, owner, repo, event.PRNumber,
-				"Welcome to **Argus**! To enable AI code reviews, configure your API key and model at your [Argus Settings](https://argusai.vercel.app/settings)."); err != nil {
+				"Welcome to **Argus**! To enable AI code reviews, configure your API key and model at your [Argus Settings](https://app.argus.reviews/settings)."); err != nil {
 				o.logger.Error("posting onboarding comment", "error", err, "repo", event.RepoFullName)
 			}
 			reviewID := uuid.New()
@@ -560,7 +560,7 @@ func (o *Orchestrator) postStartedComment(ctx context.Context, event ghpkg.PREve
 	rows = append(rows, fmt.Sprintf("| **Scope** | %d files, ~%d lines |",
 		len(run.Diff.Files), run.Diff.TotalLinesChanged()))
 
-	body := fmt.Sprintf("> **Argus** is reviewing this PR — [watch live](https://argusai.vercel.app/reviews/%s)\n\n| | |\n|---|---|\n%s",
+	body := fmt.Sprintf("> **Argus** is reviewing this PR — [watch live](https://app.argus.reviews/reviews/%s)\n\n| | |\n|---|---|\n%s",
 		run.ReviewID, strings.Join(rows, "\n"))
 
 	nodeID, err := o.ghClient.CreateIssueCommentWithNodeID(ctx, event.InstallationID, owner, repo, event.PRNumber, body)
@@ -1381,11 +1381,11 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		summaryBody.WriteString(strings.Join(minorFolded, "\n"))
 		summaryBody.WriteString("\n\n</details>")
 	}
-	summaryBody.WriteString(fmt.Sprintf("\n\nScore: **%d/10** · [Full review →](https://argusai.vercel.app/reviews/%s)", run.Synthesis.Score, run.ReviewID.String()))
+	summaryBody.WriteString(fmt.Sprintf("\n\nScore: **%d/10** · [Full review →](https://app.argus.reviews/reviews/%s)", run.Synthesis.Score, run.ReviewID.String()))
 
 	// Links to structured exports for AI agents
-	baseURL := "https://argus-ai.fly.dev/api/v1"
-	dashURL := "https://argusai.vercel.app"
+	baseURL := "https://api.argus.reviews/api/v1"
+	dashURL := "https://app.argus.reviews"
 	totalFindings := countComments(run)
 	summaryBody.WriteString("\n\n**For AI agents:**\n")
 	summaryBody.WriteString(fmt.Sprintf("- [Posted findings (MD)](%s/reviews/%s/export?format=md) — %d inline findings\n", baseURL, run.ReviewID.String(), len(inlineComments)))
@@ -1749,7 +1749,7 @@ func (o *Orchestrator) enrichPRDescription(ctx context.Context, run *PipelineRun
 		section.WriteString("```mermaid\n" + d.Mermaid + "\n```\n")
 		section.WriteString("</details>\n\n")
 	}
-	section.WriteString("<sub>Auto-enriched by [Argus](https://argusai.vercel.app)</sub>\n")
+	section.WriteString("<sub>Auto-enriched by [Argus](https://app.argus.reviews)</sub>\n")
 	section.WriteString(enrichmentEndMarker)
 
 	// Fetch current PR body (may have been edited since webhook)
