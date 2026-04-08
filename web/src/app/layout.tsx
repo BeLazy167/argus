@@ -5,6 +5,7 @@ import { ClerkProvider } from "@clerk/nextjs";
 import { dark } from "@clerk/themes";
 import "./globals.css";
 import { cn } from "@/lib/utils";
+import { Analytics } from "@vercel/analytics/next";
 
 const syne = Syne({
   subsets: ["latin"],
@@ -68,6 +69,7 @@ export default function RootLayout({
       >
         <body className="min-h-screen bg-background font-mono antialiased">
           {children}
+          <Analytics />
         </body>
       </html>
     </ClerkProvider>
