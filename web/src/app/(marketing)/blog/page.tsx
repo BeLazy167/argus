@@ -4,7 +4,7 @@ export const metadata: Metadata = {
   title: "Engineering Log",
   description:
     "Technical deep dives on AI code review, codebase comprehension, and how Argus gets smarter with every pull request.",
-  alternates: { canonical: "https://argusai.vercel.app/blog" },
+  alternates: { canonical: "https://argus.reviews/blog" },
 };
 
 export default function BlogPage() {

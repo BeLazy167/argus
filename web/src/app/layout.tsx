@@ -17,7 +17,7 @@ const syne = Syne({
 const jetbrainsMono = JetBrains_Mono({subsets:['latin'],variable:'--font-jetbrains-mono'});
 
 export const metadata: Metadata = {
-  metadataBase: new URL("https://argusai.vercel.app"),
+  metadataBase: new URL("https://argus.reviews"),
   title: {
     default: "ARGUS — AI Code Review That Builds Institutional Memory",
     template: "%s | ARGUS",
@@ -25,11 +25,11 @@ export const metadata: Metadata = {
   description:
     "AI-powered code review that traces dependencies, remembers incidents, and simulates failures before they ship. Install in 60 seconds.",
   robots: { index: true, follow: true },
-  alternates: { canonical: "https://argusai.vercel.app" },
+  alternates: { canonical: "https://argus.reviews" },
   openGraph: {
     type: "website",
     locale: "en_US",
-    url: "https://argusai.vercel.app",
+    url: "https://argus.reviews",
     siteName: "ARGUS",
     title: "ARGUS — AI Code Review That Builds Institutional Memory",
     description:

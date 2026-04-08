@@ -7,7 +7,7 @@ export function SoftwareAppJsonLd() {
     operatingSystem: "Web",
     description:
       "AI-powered code review that builds institutional memory. Traces dependencies, remembers incidents, and simulates failures before they ship.",
-    url: "https://argusai.vercel.app",
+    url: "https://argus.reviews",
     offers: [
       { "@type": "Offer", price: "0", priceCurrency: "USD", name: "Free" },
       {

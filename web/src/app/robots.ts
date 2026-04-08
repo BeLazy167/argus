@@ -9,6 +9,6 @@ export default function robots(): MetadataRoute.Robots {
         disallow: ["/dashboard", "/sign-in", "/sign-up", "/github/"],
       },
     ],
-    sitemap: "https://argusai.vercel.app/sitemap.xml",
+    sitemap: "https://argus.reviews/sitemap.xml",
   };
 }
