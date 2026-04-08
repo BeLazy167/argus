@@ -241,6 +241,39 @@ func (idx *Indexer) IndexReviewComment(ctx context.Context, owner, repo string, 
 	return nil
 }
 
+// IndexReviewCommentsBatch stores multiple review comments in a single API call.
+// Uses v3/documents/batch (max 600 per call, counts as 1 request for rate limiting).
+func (idx *Indexer) IndexReviewCommentsBatch(ctx context.Context, owner, repo string, comments []ReviewMemory) error {
+	if idx.client == nil || len(comments) == 0 {
+		return nil
+	}
+	docs := make([]BatchDocument, 0, len(comments))
+	for _, c := range comments {
+		content := fmt.Sprintf("File: %s\nSeverity: %s\nCategory: %s\n\n%s\n\nContext:\n%s",
+			c.FilePath, c.Severity, c.Category, c.Body, c.DiffContext)
+		docs = append(docs, BatchDocument{
+			Content:  content,
+			CustomID: FindingFingerprint(owner, repo, c.FilePath, c.Category, c.Body),
+			Metadata: map[string]string{
+				"file_path": c.FilePath,
+				"severity":  c.Severity,
+				"category":  c.Category,
+				"pr_number": fmt.Sprintf("%d", c.PRNumber),
+				"review_id": c.ReviewID,
+			},
+		})
+	}
+	_, err := idx.client.AddMemoryBatch(ctx, BatchAddRequest{
+		ContainerTag: RepoTag(owner, repo, "reviews"),
+		Documents:    docs,
+	})
+	if err != nil {
+		return fmt.Errorf("batch indexing review comments: %w", err)
+	}
+	idx.logger.Info("batch indexed review comments", "owner", owner, "repo", repo, "count", len(docs))
+	return nil
+}
+
 // IndexRule stores an owner-scoped rule for semantic matching during review.
 func (idx *Indexer) IndexRule(ctx context.Context, owner string, rule RuleMemory) error {
 	content := fmt.Sprintf("Category: %s\nPriority: %d\n\n%s",
