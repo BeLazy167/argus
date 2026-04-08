@@ -30,9 +30,9 @@ SELECT
     (SELECT COUNT(*) FROM scoped_reviews WHERE deep_review = true)::int as deep_review_count;
 
 -- name: ListActivity :many
-SELECT id, action, actor, resource, metadata, created_at
-FROM activity_log ORDER BY created_at DESC LIMIT $1;
+SELECT id, installation_id, action, actor, resource, metadata, created_at
+FROM activity_log WHERE installation_id = ANY($1::bigint[]) ORDER BY created_at DESC LIMIT $2;
 
 -- name: LogActivity :exec
-INSERT INTO activity_log (action, actor, resource, metadata)
-VALUES ($1, $2, $3, $4);
+INSERT INTO activity_log (installation_id, action, actor, resource, metadata)
+VALUES ($1, $2, $3, $4, $5);

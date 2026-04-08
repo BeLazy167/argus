@@ -7,6 +7,8 @@ package db
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const getStats = `-- name: GetStats :one
@@ -109,21 +111,37 @@ func (q *Queries) GetStatsScoped(ctx context.Context, dollar_1 []int64) (GetStat
 }
 
 const listActivity = `-- name: ListActivity :many
-SELECT id, action, actor, resource, metadata, created_at
-FROM activity_log ORDER BY created_at DESC LIMIT $1
+SELECT id, installation_id, action, actor, resource, metadata, created_at
+FROM activity_log WHERE installation_id = ANY($1::bigint[]) ORDER BY created_at DESC LIMIT $2
 `
 
-func (q *Queries) ListActivity(ctx context.Context, limit int32) ([]ActivityLog, error) {
-	rows, err := q.db.Query(ctx, listActivity, limit)
+type ListActivityParams struct {
+	Column1 []int64 `json:"column_1"`
+	Limit   int32   `json:"limit"`
+}
+
+type ListActivityRow struct {
+	ID             int64              `json:"id"`
+	InstallationID *int64             `json:"installation_id"`
+	Action         string             `json:"action"`
+	Actor          *string            `json:"actor"`
+	Resource       *string            `json:"resource"`
+	Metadata       []byte             `json:"metadata"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+}
+
+func (q *Queries) ListActivity(ctx context.Context, arg ListActivityParams) ([]ListActivityRow, error) {
+	rows, err := q.db.Query(ctx, listActivity, arg.Column1, arg.Limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []ActivityLog
+	var items []ListActivityRow
 	for rows.Next() {
-		var i ActivityLog
+		var i ListActivityRow
 		if err := rows.Scan(
 			&i.ID,
+			&i.InstallationID,
 			&i.Action,
 			&i.Actor,
 			&i.Resource,
@@ -141,19 +159,21 @@ func (q *Queries) ListActivity(ctx context.Context, limit int32) ([]ActivityLog,
 }
 
 const logActivity = `-- name: LogActivity :exec
-INSERT INTO activity_log (action, actor, resource, metadata)
-VALUES ($1, $2, $3, $4)
+INSERT INTO activity_log (installation_id, action, actor, resource, metadata)
+VALUES ($1, $2, $3, $4, $5)
 `
 
 type LogActivityParams struct {
-	Action   string  `json:"action"`
-	Actor    *string `json:"actor"`
-	Resource *string `json:"resource"`
-	Metadata []byte  `json:"metadata"`
+	InstallationID *int64  `json:"installation_id"`
+	Action         string  `json:"action"`
+	Actor          *string `json:"actor"`
+	Resource       *string `json:"resource"`
+	Metadata       []byte  `json:"metadata"`
 }
 
 func (q *Queries) LogActivity(ctx context.Context, arg LogActivityParams) error {
 	_, err := q.db.Exec(ctx, logActivity,
+		arg.InstallationID,
 		arg.Action,
 		arg.Actor,
 		arg.Resource,

@@ -78,17 +78,19 @@ type ReviewComment struct {
 }
 
 type Rule struct {
-	ID        int64     `json:"id"`
-	Category  string    `json:"category"`
-	Content   string    `json:"content"`
-	Priority  int       `json:"priority"`
-	Enabled   bool      `json:"enabled"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID             int64  `json:"id"`
+	InstallationID *int64 `json:"installation_id,omitempty"`
+	Category       string `json:"category"`
+	Content        string `json:"content"`
+	Priority       int    `json:"priority"`
+	Enabled        bool   `json:"enabled"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 type ActivityLog struct {
-	ID        int64     `json:"id"`
+	ID             int64  `json:"id"`
+	InstallationID *int64 `json:"installation_id,omitempty"`
 	Action    string    `json:"action"`
 	Actor     *string   `json:"actor,omitempty"`
 	Resource  *string   `json:"resource,omitempty"`

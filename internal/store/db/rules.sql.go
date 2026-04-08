@@ -7,31 +7,47 @@ package db
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const createRule = `-- name: CreateRule :one
-INSERT INTO rules (category, content, priority, enabled)
-VALUES ($1, $2, $3, $4)
-RETURNING id, category, content, priority, enabled, created_at, updated_at
+INSERT INTO rules (installation_id, category, content, priority, enabled)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, installation_id, category, content, priority, enabled, created_at, updated_at
 `
 
 type CreateRuleParams struct {
-	Category string `json:"category"`
-	Content  string `json:"content"`
-	Priority int32  `json:"priority"`
-	Enabled  bool   `json:"enabled"`
+	InstallationID *int64 `json:"installation_id"`
+	Category       string `json:"category"`
+	Content        string `json:"content"`
+	Priority       int32  `json:"priority"`
+	Enabled        bool   `json:"enabled"`
 }
 
-func (q *Queries) CreateRule(ctx context.Context, arg CreateRuleParams) (Rule, error) {
+type CreateRuleRow struct {
+	ID             int64              `json:"id"`
+	InstallationID *int64             `json:"installation_id"`
+	Category       string             `json:"category"`
+	Content        string             `json:"content"`
+	Priority       int32              `json:"priority"`
+	Enabled        bool               `json:"enabled"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+}
+
+func (q *Queries) CreateRule(ctx context.Context, arg CreateRuleParams) (CreateRuleRow, error) {
 	row := q.db.QueryRow(ctx, createRule,
+		arg.InstallationID,
 		arg.Category,
 		arg.Content,
 		arg.Priority,
 		arg.Enabled,
 	)
-	var i Rule
+	var i CreateRuleRow
 	err := row.Scan(
 		&i.ID,
+		&i.InstallationID,
 		&i.Category,
 		&i.Content,
 		&i.Priority,
@@ -43,11 +59,16 @@ func (q *Queries) CreateRule(ctx context.Context, arg CreateRuleParams) (Rule, e
 }
 
 const deleteRule = `-- name: DeleteRule :execrows
-DELETE FROM rules WHERE id = $1
+DELETE FROM rules WHERE id = $1 AND installation_id = ANY($2::bigint[])
 `
 
-func (q *Queries) DeleteRule(ctx context.Context, id int64) (int64, error) {
-	result, err := q.db.Exec(ctx, deleteRule, id)
+type DeleteRuleParams struct {
+	ID      int64   `json:"id"`
+	Column2 []int64 `json:"column_2"`
+}
+
+func (q *Queries) DeleteRule(ctx context.Context, arg DeleteRuleParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteRule, arg.ID, arg.Column2)
 	if err != nil {
 		return 0, err
 	}
@@ -55,21 +76,33 @@ func (q *Queries) DeleteRule(ctx context.Context, id int64) (int64, error) {
 }
 
 const listRules = `-- name: ListRules :many
-SELECT id, category, content, priority, enabled, created_at, updated_at
-FROM rules ORDER BY priority DESC, category
+SELECT id, installation_id, category, content, priority, enabled, created_at, updated_at
+FROM rules WHERE installation_id = ANY($1::bigint[]) ORDER BY priority DESC, category
 `
 
-func (q *Queries) ListRules(ctx context.Context) ([]Rule, error) {
-	rows, err := q.db.Query(ctx, listRules)
+type ListRulesRow struct {
+	ID             int64              `json:"id"`
+	InstallationID *int64             `json:"installation_id"`
+	Category       string             `json:"category"`
+	Content        string             `json:"content"`
+	Priority       int32              `json:"priority"`
+	Enabled        bool               `json:"enabled"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+}
+
+func (q *Queries) ListRules(ctx context.Context, dollar_1 []int64) ([]ListRulesRow, error) {
+	rows, err := q.db.Query(ctx, listRules, dollar_1)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []Rule
+	var items []ListRulesRow
 	for rows.Next() {
-		var i Rule
+		var i ListRulesRow
 		if err := rows.Scan(
 			&i.ID,
+			&i.InstallationID,
 			&i.Category,
 			&i.Content,
 			&i.Priority,
@@ -89,34 +122,48 @@ func (q *Queries) ListRules(ctx context.Context) ([]Rule, error) {
 
 const updateRule = `-- name: UpdateRule :one
 UPDATE rules SET
-    category = COALESCE($2, category),
-    content = COALESCE($3, content),
-    priority = COALESCE($4, priority),
-    enabled = COALESCE($5, enabled),
+    category = COALESCE($3, category),
+    content = COALESCE($4, content),
+    priority = COALESCE($5, priority),
+    enabled = COALESCE($6, enabled),
     updated_at = NOW()
-WHERE id = $1
-RETURNING id, category, content, priority, enabled, created_at, updated_at
+WHERE id = $1 AND installation_id = ANY($2::bigint[])
+RETURNING id, installation_id, category, content, priority, enabled, created_at, updated_at
 `
 
 type UpdateRuleParams struct {
-	ID       int64  `json:"id"`
-	Category string `json:"category"`
-	Content  string `json:"content"`
-	Priority int32  `json:"priority"`
-	Enabled  bool   `json:"enabled"`
+	ID       int64   `json:"id"`
+	Column2  []int64 `json:"column_2"`
+	Category string  `json:"category"`
+	Content  string  `json:"content"`
+	Priority int32   `json:"priority"`
+	Enabled  bool    `json:"enabled"`
 }
 
-func (q *Queries) UpdateRule(ctx context.Context, arg UpdateRuleParams) (Rule, error) {
+type UpdateRuleRow struct {
+	ID             int64              `json:"id"`
+	InstallationID *int64             `json:"installation_id"`
+	Category       string             `json:"category"`
+	Content        string             `json:"content"`
+	Priority       int32              `json:"priority"`
+	Enabled        bool               `json:"enabled"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+}
+
+func (q *Queries) UpdateRule(ctx context.Context, arg UpdateRuleParams) (UpdateRuleRow, error) {
 	row := q.db.QueryRow(ctx, updateRule,
 		arg.ID,
+		arg.Column2,
 		arg.Category,
 		arg.Content,
 		arg.Priority,
 		arg.Enabled,
 	)
-	var i Rule
+	var i UpdateRuleRow
 	err := row.Scan(
 		&i.ID,
+		&i.InstallationID,
 		&i.Category,
 		&i.Content,
 		&i.Priority,
