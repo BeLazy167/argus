@@ -9,6 +9,8 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
+// TODO: Rules table lacks installation_id — all rules are global across tenants.
+// Before multi-tenant launch, add installation_id column and scope all queries.
 func (s *Server) listRules(w http.ResponseWriter, r *http.Request) {
 	rules, err := s.store.ListRules(r.Context())
 	if err != nil {

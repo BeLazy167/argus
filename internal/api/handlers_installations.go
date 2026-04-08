@@ -35,6 +35,18 @@ func (s *Server) linkInstallation(w http.ResponseWriter, r *http.Request) {
 		s.handleDBError(w, err, "installation not found")
 		return
 	}
+	// Security: only allow linking if the user is already linked (re-link/idempotent)
+	// or if no users are linked yet (first claim after GitHub App install).
+	var claimedCount int
+	_ = s.store.Pool.QueryRow(r.Context(), "SELECT count(*) FROM user_installations WHERE installation_id = $1", inst.ID).Scan(&claimedCount)
+	if claimedCount > 0 {
+		var alreadyLinked int
+		_ = s.store.Pool.QueryRow(r.Context(), "SELECT count(*) FROM user_installations WHERE installation_id = $1 AND clerk_user_id = $2", inst.ID, userID).Scan(&alreadyLinked)
+		if alreadyLinked == 0 {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "installation already claimed — ask an existing member to invite you"})
+			return
+		}
+	}
 	if body.ClerkOrgID != "" {
 		if err := s.store.SetInstallationClerkOrgID(r.Context(), inst.ID, body.ClerkOrgID); err != nil {
 			s.logger.Error("set clerk org id", "error", err)

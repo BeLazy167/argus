@@ -225,8 +225,8 @@ func (s *Server) resolveInstallationIDs(ctx context.Context, claims jwtClaims, i
 func (s *Server) jwtAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if cache == nil || cache.url == "" {
-			s.logger.Warn("JWT auth bypassed: JWKS URL not configured")
-			next.ServeHTTP(w, r)
+			s.logger.Error("JWT auth unavailable: JWKS URL not configured")
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "authentication not configured"})
 			return
 		}
 		auth := r.Header.Get("Authorization")
