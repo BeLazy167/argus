@@ -167,6 +167,14 @@ func defaultBaseURLForProvider(provider string) string {
 		return "https://api.anthropic.com/v1"
 	case "zhipu":
 		return "https://api.z.ai/api/paas/v4"
+	case "fireworks":
+		return "https://api.fireworks.ai/inference/v1"
+	case "groq":
+		return "https://api.groq.com/openai/v1"
+	case "together":
+		return "https://api.together.xyz/v1"
+	case "deepseek":
+		return "https://api.deepseek.com/v1"
 	case "azure":
 		return "" // Azure requires user-provided endpoint (https://{resource}.openai.azure.com/openai)
 	case "gcp_vertex":
