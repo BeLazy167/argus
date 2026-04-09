@@ -193,10 +193,8 @@ func (s *Server) resolveInstallationIDs(ctx context.Context, claims jwtClaims, i
 		if err == nil {
 			ids = []int64{inst.ID}
 		} else {
-			ids, err = s.store.GetUserInstallationIDs(ctx, claims.Sub)
-			if err != nil {
-				return nil, fmt.Errorf("resolving installation IDs: %w", err)
-			}
+			// Org has no linked installation — return empty, don't leak other orgs' data
+			return nil, fmt.Errorf("no installations linked to this organization")
 		}
 	} else {
 		var err error
