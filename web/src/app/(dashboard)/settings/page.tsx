@@ -30,13 +30,17 @@ import { useOrgDefaults, useSaveOrgDefaults } from "@/lib/queries/org-defaults";
 
 /* ── Providers & model quick-picks ── */
 
-const PROVIDERS = ["openrouter", "openai", "anthropic", "azure", "gcp_vertex", "aws_bedrock", "zhipu"] as const;
+const PROVIDERS = ["openrouter", "openai", "anthropic", "fireworks", "groq", "together", "deepseek", "azure", "gcp_vertex", "aws_bedrock", "zhipu"] as const;
 type Provider = (typeof PROVIDERS)[number];
 
 const PROVIDER_LABELS: Record<Provider, string> = {
   openrouter: "OpenRouter",
   openai: "OpenAI",
   anthropic: "Anthropic",
+  fireworks: "Fireworks AI",
+  groq: "Groq",
+  together: "Together AI",
+  deepseek: "DeepSeek",
   azure: "Azure OpenAI",
   gcp_vertex: "GCP Vertex AI",
   aws_bedrock: "AWS Bedrock",
@@ -52,6 +56,10 @@ const MODEL_PICKS: Record<Provider, string[]> = {
   ],
   openai: ["gpt-4o", "gpt-4o-mini"],
   anthropic: ["claude-sonnet-4-20250514"],
+  fireworks: ["accounts/fireworks/models/glm-5p1", "accounts/fireworks/models/deepseek-r1", "accounts/fireworks/models/llama-v3p3-70b-instruct"],
+  groq: ["llama-3.3-70b-versatile", "mixtral-8x7b-32768", "gemma2-9b-it"],
+  together: ["deepseek-ai/DeepSeek-V3.1", "meta-llama/Llama-3.3-70B-Instruct-Turbo", "Qwen/Qwen2.5-72B-Instruct-Turbo"],
+  deepseek: ["deepseek-chat", "deepseek-reasoner"],
   azure: ["gpt-4o", "gpt-4o-mini"],
   gcp_vertex: ["gemini-2.5-pro", "gemini-2.5-flash"],
   aws_bedrock: ["anthropic.claude-sonnet-4", "anthropic.claude-haiku"],
