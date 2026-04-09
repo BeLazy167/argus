@@ -15,9 +15,42 @@ import {
 import { useRepos, useUpdateRepo, useSyncRepos } from "@/lib/queries/repos";
 import { useReviews, useTriggerReview } from "@/lib/queries/reviews";
 import { useInstallation } from "@/providers/installation-provider";
+import { useApi } from "@/lib/hooks/use-api";
+import { useOrganization } from "@clerk/nextjs";
 import { formatDistanceToNow } from "@/lib/time";
 import { scoreColor } from "@/lib/score";
 import type { Repo } from "@/lib/types";
+
+function AddReposButton() {
+  const api = useApi();
+  const { organization } = useOrganization();
+  const [loading, setLoading] = useState(false);
+
+  const handleClick = async () => {
+    setLoading(true);
+    try {
+      const orgName = organization?.slug || organization?.name || "";
+      const data = await api.get<{ url: string }>(`/api/v1/installations/install-url?org=${encodeURIComponent(orgName)}`);
+      window.open(data.url, "_blank");
+    } catch {
+      // Fallback to generic URL
+      window.open("https://github.com/apps/argus-eye/installations/new", "_blank");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <button
+      onClick={handleClick}
+      disabled={loading}
+      className="inline-flex items-center gap-1.5 rounded-md border border-amber/30 bg-amber/10 px-4 py-2 text-xs font-mono text-amber hover:bg-amber/20 transition-colors disabled:opacity-50"
+    >
+      {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ExternalLink className="h-3.5 w-3.5" />}
+      Add repos
+    </button>
+  );
+}
 
 function RepoCard({ repo, isPro }: { repo: Repo; isPro: boolean }) {
   const { data: reviews } = useReviews(repo.id, 1);
@@ -193,15 +226,7 @@ export default function ReposPage() {
             {syncRepos.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
             Sync from GitHub
           </button>
-          <a
-            href="https://github.com/apps/argus-eye/installations/new"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center gap-1.5 rounded-md border border-amber/30 bg-amber/10 px-4 py-2 text-xs font-mono text-amber hover:bg-amber/20 transition-colors"
-          >
-            <ExternalLink className="h-3.5 w-3.5" />
-            Add repos
-          </a>
+          <AddReposButton />
         </div>
       </div>
 

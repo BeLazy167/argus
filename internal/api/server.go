@@ -81,6 +81,7 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 			r.Use(middleware.Timeout(60 * time.Second))
 			r.Get("/me/installations", s.listMyInstallations)
 			r.Post("/installations/link", s.linkInstallation)
+			r.Get("/installations/install-url", s.getInstallURL)
 		})
 
 		// Scoped (requires linked installation)
