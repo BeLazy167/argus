@@ -2,6 +2,7 @@
 
 import { UserButton, OrganizationSwitcher } from "@clerk/nextjs";
 import Link from "next/link";
+import { OnboardingChecklist } from "@/components/dashboard/onboarding-checklist";
 import { usePathname } from "next/navigation";
 import {
   LayoutDashboard,
@@ -191,6 +192,7 @@ export default function DashboardLayout({
 
           {/* Main content */}
           <main className="flex-1 overflow-y-auto scroll-smooth bg-background bg-noise">
+            <OnboardingChecklist />
             <div className="mx-auto max-w-6xl px-4 py-8 pt-16 md:px-8 md:pt-8">{children}</div>
           </main>
         </div>

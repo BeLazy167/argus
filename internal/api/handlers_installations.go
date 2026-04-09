@@ -1,10 +1,12 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -60,6 +62,26 @@ func (s *Server) linkInstallation(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to link installation"})
 		return
 	}
+
+	// Auto-sync repos so they appear immediately after linking
+	go func() {
+		syncCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if s.ghApp != nil {
+			repos, listErr := s.ghApp.ListInstallationRepos(syncCtx, inst.InstallationID)
+			if listErr != nil {
+				s.logger.Warn("auto-sync repos after link failed", "error", listErr, "installation", inst.ID)
+				return
+			}
+			for _, r := range repos {
+				if _, upsertErr := s.store.UpsertRepo(syncCtx, inst.ID, r.GetID(), r.GetFullName(), r.GetDefaultBranch()); upsertErr != nil {
+					s.logger.Warn("auto-sync upsert repo failed", "error", upsertErr, "repo", r.GetFullName())
+				}
+			}
+			s.logger.Info("auto-synced repos after link", "count", len(repos), "installation", inst.ID)
+		}
+	}()
+
 	writeJSON(w, http.StatusOK, ui)
 }
 
