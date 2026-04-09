@@ -24,8 +24,7 @@ import { useActiveRepo } from "@/lib/hooks/use-active-repo";
 import { useInstallation } from "@/providers/installation-provider";
 import { useUpdateRepo } from "@/lib/queries/repos";
 import { RepoSelect } from "@/components/dashboard/repo-select";
-import { Protect } from "@clerk/nextjs";
-import { UpgradePrompt } from "@/components/dashboard/upgrade-prompt";
+import { ProGate } from "@/components/dashboard/pro-gate";
 import type { PromptTemplate } from "@/lib/types";
 import { useOrgDefaults, useSaveOrgDefaults } from "@/lib/queries/org-defaults";
 
@@ -909,7 +908,7 @@ export default function SettingsPage() {
               </section>
 
               {/* Org: Pipeline Features */}
-              <Protect plan="org:pro" fallback={<UpgradePrompt feature="Pipeline features" />}>
+              <ProGate feature="Pipeline features">
                 <section>
                   <div className="flex items-center gap-3 mb-4">
                     <div className="flex items-center gap-2">
@@ -964,7 +963,7 @@ export default function SettingsPage() {
                     })}
                   </div>
                 </section>
-              </Protect>
+              </ProGate>
             </div>
           )}
         </>
@@ -1126,7 +1125,7 @@ export default function SettingsPage() {
                   ))}
                 </div>
                 {currentPersona === "custom" && (
-                  <Protect plan="org:pro" fallback={<UpgradePrompt feature="Custom persona" />}>
+                  <ProGate feature="Custom persona">
                     <div className="mt-4 rounded-lg border border-iron bg-charcoal p-4">
                       <label className="block text-[11px] font-mono text-slate-text mb-2">
                         Custom persona prompt — define how Argus should review code
@@ -1159,7 +1158,7 @@ export default function SettingsPage() {
                         {updateRepo.isPending ? "Saving..." : "Save Custom Persona"}
                       </button>
                     </div>
-                  </Protect>
+                  </ProGate>
                 )}
                 {personaError && (
                   <p className="text-[10px] font-mono text-red-400 mt-2">{personaError}</p>
@@ -1169,7 +1168,7 @@ export default function SettingsPage() {
           </section>
 
           {/* Section 4: Review Prompts (Pro only) */}
-          <Protect plan="org:pro" fallback={<UpgradePrompt feature="Custom prompts" />}>
+          <ProGate feature="Custom prompts">
             <section>
               <div className="flex items-center gap-3 mb-4">
                 <span className="inline-flex items-center justify-center h-6 w-6 rounded-full border border-amber/30 bg-amber/10 text-[11px] font-mono font-bold text-amber">
@@ -1209,10 +1208,10 @@ export default function SettingsPage() {
                 </div>
               )}
             </section>
-          </Protect>
+          </ProGate>
 
           {/* Section 5: Pipeline Features (Pro only) */}
-          <Protect plan="org:pro" fallback={<UpgradePrompt feature="Pipeline features (deep review, cross-file, blast radius, simulation)" />}>
+          <ProGate feature="Pipeline features (deep review, cross-file, blast radius, simulation)">
             <section>
               <div className="flex items-center gap-3 mb-4">
                 <span className="inline-flex items-center justify-center h-6 w-6 rounded-full border border-amber/30 bg-amber/10 text-[11px] font-mono font-bold text-amber">
@@ -1287,7 +1286,7 @@ export default function SettingsPage() {
                 </div>
               )}
             </section>
-          </Protect>
+          </ProGate>
         </div>
       ))}
     </>
