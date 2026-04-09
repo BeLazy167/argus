@@ -44,7 +44,7 @@ export function OnboardingChecklist() {
 
   if (isLoading || dismissed) return null;
 
-  const hasInstallation = installations.length > 0;
+  const hasInstallation = active !== null;
   const enabledCount = repos.filter((r) => r.enabled).length;
   const hasEnabledRepo = enabledCount > 0;
 
