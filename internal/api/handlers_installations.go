@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -142,6 +143,48 @@ func (s *Server) autoLinkInstallation(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "no_match"})
+}
+
+// getInstallURL returns a GitHub App install URL with suggested_target_id pre-selecting the org.
+func (s *Server) getInstallURL(w http.ResponseWriter, r *http.Request) {
+	orgName := r.URL.Query().Get("org")
+	baseURL := "https://github.com/apps/argus-eye/installations/new"
+
+	if orgName == "" {
+		writeJSON(w, http.StatusOK, map[string]string{"url": baseURL})
+		return
+	}
+
+	// Look up GitHub org ID by name (public API, no auth needed)
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", "https://api.github.com/orgs/"+orgName, nil)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]string{"url": baseURL})
+		return
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != 200 {
+		// Org not found or API error — fall back to generic URL
+		writeJSON(w, http.StatusOK, map[string]string{"url": baseURL})
+		return
+	}
+	defer resp.Body.Close()
+
+	var org struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&org); err != nil || org.ID == 0 {
+		writeJSON(w, http.StatusOK, map[string]string{"url": baseURL})
+		return
+	}
+
+	// Return URL with suggested_target_id to pre-select the org
+	url := fmt.Sprintf("%s/permissions?suggested_target_id=%d", baseURL, org.ID)
+	writeJSON(w, http.StatusOK, map[string]string{"url": url})
 }
 
 func (s *Server) syncRepos(w http.ResponseWriter, r *http.Request) {

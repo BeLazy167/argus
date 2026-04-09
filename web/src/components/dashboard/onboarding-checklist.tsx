@@ -55,7 +55,7 @@ export function OnboardingChecklist() {
       done: hasInstallation,
       cta: hasInstallation
         ? undefined
-        : { label: "Install", href: "https://github.com/apps/argus-eye/installations/new", external: true },
+        : { label: "Add repos", href: "/repos" },
     },
     {
       label: hasEnabledRepo ? `${enabledCount} repo${enabledCount > 1 ? "s" : ""} enabled` : "Enable a repo",
