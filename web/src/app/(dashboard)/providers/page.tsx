@@ -10,13 +10,17 @@ import {
 import { useInstallation } from "@/providers/installation-provider";
 import type { ProviderKey } from "@/lib/types";
 
-const PROVIDERS = ["openrouter", "openai", "anthropic", "azure", "gcp_vertex", "aws_bedrock", "zhipu"] as const;
+const PROVIDERS = ["openrouter", "openai", "anthropic", "fireworks", "groq", "together", "deepseek", "azure", "gcp_vertex", "aws_bedrock", "zhipu"] as const;
 type Provider = (typeof PROVIDERS)[number];
 
 const PROVIDER_LABELS: Record<Provider, string> = {
   openrouter: "OpenRouter",
   openai: "OpenAI",
   anthropic: "Anthropic",
+  fireworks: "Fireworks AI",
+  groq: "Groq",
+  together: "Together AI",
+  deepseek: "DeepSeek",
   azure: "Azure OpenAI",
   gcp_vertex: "GCP Vertex AI",
   aws_bedrock: "AWS Bedrock",
@@ -27,6 +31,10 @@ const PROVIDER_BASE_URLS: Record<Provider, string> = {
   openrouter: "https://openrouter.ai/api/v1",
   openai: "https://api.openai.com/v1",
   anthropic: "https://api.anthropic.com/v1",
+  fireworks: "https://api.fireworks.ai/inference/v1",
+  groq: "https://api.groq.com/openai/v1",
+  together: "https://api.together.xyz/v1",
+  deepseek: "https://api.deepseek.com/v1",
   azure: "",
   gcp_vertex: "",
   aws_bedrock: "",
