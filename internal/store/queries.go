@@ -423,7 +423,8 @@ func (s *Store) ListReviewsScoped(ctx context.Context, repoID int64, installatio
 		SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, COALESCE(rv.head_ref,''), rv.github_review_id,
 		       rv.status, rv.summary, rv.score, rv.token_usage, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error,
 		       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at,
-		       rv.diagram, rv.diagram_title
+		       rv.diagram, rv.diagram_title,
+		       COALESCE(rv.diagrams, '[]'::jsonb), COALESCE(rv.truncated_files, '[]'::jsonb)
 		FROM reviews rv
 		JOIN repos r ON rv.repo_id = r.id
 		WHERE rv.repo_id = $1 AND r.installation_id = ANY($2)
@@ -444,7 +445,8 @@ func (s *Store) ListAllReviewsScoped(ctx context.Context, installationIDs []int6
 		SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, COALESCE(rv.head_ref,''), rv.github_review_id,
 		       rv.status, rv.summary, rv.score, rv.token_usage, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error,
 		       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at,
-		       rv.diagram, rv.diagram_title
+		       rv.diagram, rv.diagram_title,
+		       COALESCE(rv.diagrams, '[]'::jsonb), COALESCE(rv.truncated_files, '[]'::jsonb)
 		FROM reviews rv
 		JOIN repos r ON rv.repo_id = r.id
 		WHERE r.installation_id = ANY($1)
