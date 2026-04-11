@@ -1030,19 +1030,26 @@ export default function ReviewDetailPage() {
         </h2>
 
         {/* Verdict — prefer the LLM-generated Brief (same text posted to the GitHub PR
-            body). Falls back to extractSynthesis(summary) for legacy reviews without a
-            brief column. */}
-        {review.brief ? (
-          <div className="mb-4">
-            <Markdown>{review.brief}</Markdown>
-          </div>
-        ) : review.summary ? (
-          <div className="mb-4">
-            <Markdown>{extractSynthesis(review.summary)}</Markdown>
-          </div>
-        ) : (
-          <p className="text-sm text-foreground/50 mb-4">No summary generated.</p>
-        )}
+            body). Fall back to extractSynthesis(summary) for legacy reviews without a
+            brief column. If even extractSynthesis returns empty (legacy reviews where
+            the summary is ALL file-dump with no prose), show the raw summary as-is
+            so users see something instead of blank space. */}
+        {(() => {
+          if (review.brief && review.brief.trim()) {
+            return <div className="mb-4"><Markdown>{review.brief}</Markdown></div>;
+          }
+          if (review.summary && review.summary.trim()) {
+            const extracted = extractSynthesis(review.summary).trim();
+            if (extracted) {
+              return <div className="mb-4"><Markdown>{extracted}</Markdown></div>;
+            }
+            // Legacy review: brief column is NULL and the summary is pure file-dump.
+            // Fall back to rendering the raw summary so users see the per-file findings
+            // instead of an empty card.
+            return <div className="mb-4"><Markdown>{review.summary}</Markdown></div>;
+          }
+          return <p className="text-sm text-foreground/50 mb-4">No summary generated.</p>;
+        })()}
 
         {/* Top 3 critical/warning findings */}
         {(() => {
