@@ -2,8 +2,36 @@
 
 import { useMemo } from "react";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import rehypeRaw from "rehype-raw";
+import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
+
+/**
+ * Sanitize schema extended to allow the HTML tags the backend's judge prompts
+ * generate for collapsible "reason" sections and subtle hint lines:
+ * <details>, <summary>, <sub>, plus GFM additions.
+ * Everything else falls back to react-markdown's default safe schema.
+ */
+const sanitizeSchema = {
+  ...defaultSchema,
+  tagNames: [
+    ...(defaultSchema.tagNames ?? []),
+    "details",
+    "summary",
+    "sub",
+    "sup",
+    "kbd",
+    "mark",
+  ],
+  attributes: {
+    ...defaultSchema.attributes,
+    // Allow className on code blocks for syntax highlighting
+    code: [...(defaultSchema.attributes?.code ?? []), "className"],
+    details: ["open"],
+  },
+};
 
 /** Guess language from file extension for syntax highlighting. */
 function langFromPath(path: string): string {
@@ -134,13 +162,49 @@ export function Markdown({
           {children}
         </a>
       ),
+      details: ({ children }: { children?: React.ReactNode }) => (
+        <details className="my-2 rounded border border-iron/40 bg-charcoal/40 px-3 py-2 text-[13px] text-foreground/80">
+          {children}
+        </details>
+      ),
+      summary: ({ children }: { children?: React.ReactNode }) => (
+        <summary className="cursor-pointer font-mono text-[12px] text-foreground/90 hover:text-foreground transition-colors [&::-webkit-details-marker]:text-amber/60">
+          {children}
+        </summary>
+      ),
+      sub: ({ children }: { children?: React.ReactNode }) => (
+        <sub className="text-[10px] font-mono text-slate-text/60 block mt-2 not-italic">
+          {children}
+        </sub>
+      ),
+      table: ({ children }: { children?: React.ReactNode }) => (
+        <div className="overflow-x-auto my-3">
+          <table className="min-w-full text-[12px] border-collapse border border-iron/40">
+            {children}
+          </table>
+        </div>
+      ),
+      th: ({ children }: { children?: React.ReactNode }) => (
+        <th className="border border-iron/40 px-2 py-1 font-mono text-left bg-charcoal/60">
+          {children}
+        </th>
+      ),
+      td: ({ children }: { children?: React.ReactNode }) => (
+        <td className="border border-iron/40 px-2 py-1 align-top">{children}</td>
+      ),
     }),
     [lang],
   );
 
   return (
     <div className="font-sans">
-      <ReactMarkdown components={components}>{children}</ReactMarkdown>
+      <ReactMarkdown
+        components={components}
+        remarkPlugins={[remarkGfm]}
+        rehypePlugins={[rehypeRaw, [rehypeSanitize, sanitizeSchema]]}
+      >
+        {children}
+      </ReactMarkdown>
     </div>
   );
 }

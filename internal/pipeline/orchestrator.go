@@ -1664,9 +1664,13 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		}
 	}
 
-	// Mark completed + store github_review_id
+	// Mark completed + store github_review_id + clear any stale error.
+	// The error column gets set by RecoverStaleReviews ("review timed out —
+	// server restarted") if the recovery job ran before we finished posting.
+	// Clearing it prevents completed reviews from showing a ghost timeout error.
 	_, err = o.db.Exec(ctx, `
-		UPDATE reviews SET status = 'completed', github_review_id = $1, completed_at = NOW()
+		UPDATE reviews
+		SET status = 'completed', github_review_id = $1, completed_at = NOW(), error = NULL
 		WHERE id = $2
 	`, ghReviewID, run.ReviewID)
 	if err != nil {

@@ -27,6 +27,7 @@ import { RepoSelect } from "@/components/dashboard/repo-select";
 import { ProGate } from "@/components/dashboard/pro-gate";
 import type { PromptTemplate } from "@/lib/types";
 import { useOrgDefaults, useSaveOrgDefaults } from "@/lib/queries/org-defaults";
+import { useFeatureFlags, useSaveFeatureFlags, type FeatureFlags } from "@/lib/queries/features";
 
 /* ── Providers & model quick-picks ── */
 
@@ -723,6 +724,66 @@ function PipelineFeatureCard({
   );
 }
 
+/**
+ * Toggle card for feature-flag-backed verification workers (issue acceptance,
+ * cross-PR compatibility). Mirrors PipelineFeatureCard's visual language so
+ * users perceive them as part of the same control panel — but this one wires
+ * to the feature_flags JSONB column instead of default_settings.
+ */
+function VerificationToggle({
+  label,
+  hint,
+  description,
+  cost,
+  enabled,
+  pending,
+  onToggle,
+}: {
+  label: string;
+  hint: string;
+  description: string;
+  cost: string;
+  enabled: boolean;
+  pending: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <div className={`border p-4 transition-colors ${
+      enabled ? "border-amber/30 bg-amber/5" : "border-iron bg-charcoal"
+    }`}>
+      <div className="flex items-center justify-between mb-1.5">
+        <div className="flex flex-col gap-0.5">
+          <span className={`text-xs font-mono font-medium ${enabled ? "text-amber" : "text-foreground"}`}>
+            {label}
+          </span>
+          <span className="text-[11px] font-mono text-slate-text">{hint}</span>
+        </div>
+        <button
+          type="button"
+          onClick={onToggle}
+          disabled={pending}
+          aria-label={enabled ? `Disable ${label}` : `Enable ${label}`}
+          className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 transition-colors duration-200 ease-in-out focus:outline-none focus-visible:ring-2 focus-visible:ring-amber/50 focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-not-allowed ${
+            enabled ? "border-amber bg-amber" : "border-iron bg-iron/50"
+          }`}
+        >
+          <span
+            className={`pointer-events-none inline-block h-5 w-5 rounded-full bg-foreground shadow-lg ring-0 transition-transform duration-200 ease-in-out ${
+              enabled ? "translate-x-5" : "translate-x-0"
+            }`}
+          />
+        </button>
+      </div>
+      <p className="text-[11px] font-mono text-slate-text leading-relaxed mb-2">
+        {description}
+      </p>
+      <p className="text-[10px] font-mono text-slate-text/60 uppercase tracking-wide">
+        {cost}
+      </p>
+    </div>
+  );
+}
+
 /* ── Page ── */
 
 export default function SettingsPage() {
@@ -741,6 +802,8 @@ export default function SettingsPage() {
   // Org defaults
   const { data: orgDefaults, isLoading: orgDefaultsLoading } = useOrgDefaults();
   const saveOrgDefaults = useSaveOrgDefaults();
+  const { data: featureFlags } = useFeatureFlags();
+  const saveFeatureFlags = useSaveFeatureFlags();
 
   // Org model configs
   const { data: orgConfigs } = useOrgModelConfigs();
@@ -969,6 +1032,78 @@ export default function SettingsPage() {
                         />
                       );
                     })}
+                  </div>
+                </section>
+              </ProGate>
+
+              {/* Org: Verification Features (issue acceptance + cross-repo PR) */}
+              <ProGate feature="Verification features">
+                <section>
+                  <div className="flex items-center gap-3 mb-4">
+                    <div className="flex items-center gap-2">
+                      <Sliders className="h-4 w-4 text-amber" />
+                      <h2 className="font-mono text-lg font-semibold text-foreground">
+                        Verification Features
+                      </h2>
+                    </div>
+                    <span className="text-[11px] font-mono text-slate-text">
+                      Per-installation toggles for optional review passes
+                    </span>
+                  </div>
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <VerificationToggle
+                      label="Issue acceptance check"
+                      hint="Verify PRs against linked issue acceptance criteria"
+                      description="Auto-detects linked issues via GitHub's closingIssuesReferences (PR body `Closes #N` OR the Development UI panel). Extracts criteria from issue body and uses an LLM judge to classify each criterion as addressed/partial/unaddressed/ambiguous."
+                      cost="+1 LLM call per linked issue (~1-2k tokens)"
+                      enabled={featureFlags?.issue_acceptance ?? true}
+                      pending={saveFeatureFlags.isPending}
+                      onToggle={() => {
+                        const next: FeatureFlags = {
+                          issue_acceptance: !(featureFlags?.issue_acceptance ?? true),
+                          cross_pr_checks: featureFlags?.cross_pr_checks ?? false,
+                          max_linked_prs: featureFlags?.max_linked_prs ?? 5,
+                        };
+                        saveFeatureFlags.mutate(next);
+                      }}
+                    />
+                    <VerificationToggle
+                      label="Cross-repo PR checks"
+                      hint="Check compatibility with linked PRs from other repos"
+                      description="Auto-detects GitHub PR URLs in your PR body (up to max_linked_prs). Fetches accessible peer PR diffs and uses an LLM to check for API contract / shared type incompatibilities. Inaccessible repos are noted as 'partial coverage' without severity impact."
+                      cost="+1 LLM call per review (skipped if no linked PRs)"
+                      enabled={featureFlags?.cross_pr_checks ?? false}
+                      pending={saveFeatureFlags.isPending}
+                      onToggle={() => {
+                        const next: FeatureFlags = {
+                          issue_acceptance: featureFlags?.issue_acceptance ?? true,
+                          cross_pr_checks: !(featureFlags?.cross_pr_checks ?? false),
+                          max_linked_prs: featureFlags?.max_linked_prs ?? 5,
+                        };
+                        saveFeatureFlags.mutate(next);
+                      }}
+                    />
+                  </div>
+                  <div className="mt-3 flex items-center gap-3 text-[11px] font-mono text-slate-text">
+                    <label htmlFor="max-linked-prs">Max linked PRs per review:</label>
+                    <input
+                      id="max-linked-prs"
+                      type="number"
+                      min={1}
+                      max={20}
+                      value={featureFlags?.max_linked_prs ?? 5}
+                      onChange={(e) => {
+                        const n = parseInt(e.target.value, 10);
+                        if (isNaN(n) || n < 1 || n > 20) return;
+                        saveFeatureFlags.mutate({
+                          issue_acceptance: featureFlags?.issue_acceptance ?? true,
+                          cross_pr_checks: featureFlags?.cross_pr_checks ?? false,
+                          max_linked_prs: n,
+                        });
+                      }}
+                      className="w-16 bg-charcoal border border-iron px-2 py-1 text-center text-foreground focus:border-amber focus:outline-none"
+                    />
+                    <span className="text-slate-text/70">bounded 1–20</span>
                   </div>
                 </section>
               </ProGate>
