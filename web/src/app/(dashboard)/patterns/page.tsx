@@ -117,7 +117,7 @@ export default function PatternsPage() {
     <>
       <div className="mb-8 flex items-center justify-between">
         <div>
-          <h1 className="font-display text-2xl font-bold text-foreground">
+          <h1 className="font-mono text-2xl font-bold text-foreground">
             Patterns
           </h1>
           <p className="text-xs font-mono text-slate-text mt-1">
@@ -130,7 +130,7 @@ export default function PatternsPage() {
 
       {/* Timeline Chart */}
       {chartData.length > 1 && (
-        <div className="rounded-lg border border-iron bg-charcoal p-5 mb-8">
+        <div className="border border-iron bg-charcoal p-5 mb-8">
           <div className="flex items-center gap-2 mb-4">
             <TrendingUp className="h-4 w-4 text-slate-text" />
             <h2 className="text-xs font-mono uppercase tracking-[0.1em] text-foreground">
@@ -173,20 +173,21 @@ export default function PatternsPage() {
 
       {/* Add Pattern Form */}
       <form onSubmit={handleSubmit} className="mb-8">
-        <div className="flex gap-3">
+        <div className="flex flex-col sm:flex-row gap-3">
           <input
             type="text"
             value={content}
             onChange={(e) => setContent(e.target.value)}
             placeholder="e.g. Always use guard clauses instead of nested if statements"
-            className="flex-1 rounded-lg border border-iron bg-charcoal px-4 py-2.5 text-xs font-mono text-foreground placeholder:text-slate-text/50 focus:outline-none focus:border-amber/50 transition-colors"
+            className="flex-1 border border-iron bg-charcoal px-4 py-2.5 text-xs font-mono text-foreground placeholder:text-slate-text/50 focus:outline-none focus:border-amber/50 transition-colors"
           />
           <select
             value={selectedRepoId ?? ""}
             onChange={(e) =>
               setSelectedRepoId(e.target.value ? Number(e.target.value) : undefined)
             }
-            className="rounded-lg border border-iron bg-charcoal px-3 py-2.5 text-xs font-mono text-foreground focus:outline-none focus:border-amber/50 transition-colors"
+            style={{ backgroundColor: 'var(--card)', color: 'var(--foreground)' }}
+            className="border border-iron bg-charcoal px-3 py-2.5 text-xs font-mono text-foreground focus:outline-none focus:border-amber/50 transition-[border-color] duration-150"
           >
             <option value="">Org-wide</option>
             {(repos ?? []).map((r) => (
@@ -198,7 +199,7 @@ export default function PatternsPage() {
           <button
             type="submit"
             disabled={!content.trim() || createPattern.isPending}
-            className="flex items-center gap-2 rounded-lg border border-amber/30 bg-amber/10 px-4 py-2.5 text-xs font-mono font-medium text-amber hover:bg-amber/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            className="flex items-center gap-2 border border-amber/30 bg-amber/10 px-4 py-2.5 text-xs font-mono font-medium text-amber hover:bg-amber/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           >
             {createPattern.isPending ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -283,7 +284,7 @@ export default function PatternsPage() {
       </div>
 
       {/* Patterns Table */}
-      <div className="rounded-lg border border-iron bg-charcoal overflow-hidden">
+      <div className="border border-iron bg-charcoal overflow-x-auto">
         <div className="flex items-center gap-2 border-b border-iron px-5 py-4">
           <Brain className="h-4 w-4 text-slate-text" />
           <h2 className="text-xs font-mono uppercase tracking-[0.1em] text-foreground">
@@ -327,7 +328,7 @@ export default function PatternsPage() {
                     </p>
                     <div className="flex items-center gap-2 mt-1">
                       {pattern.category && (
-                        <span className="inline-block rounded border border-iron px-1.5 py-0.5 text-[9px] font-mono text-slate-text">
+                        <span className="inline-block border border-iron px-1.5 py-0.5 text-[9px] font-mono text-slate-text">
                           {pattern.category}
                         </span>
                       )}

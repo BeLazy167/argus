@@ -78,7 +78,7 @@ function ProviderKeyCard({
   };
 
   return (
-    <div className="rounded-lg border border-iron bg-charcoal p-5">
+    <div className="border border-iron bg-charcoal p-5">
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
           <Key className="h-3.5 w-3.5 text-amber" />
@@ -105,7 +105,7 @@ function ProviderKeyCard({
             value={apiKey}
             onChange={(e) => setApiKey(e.target.value)}
             placeholder={existing ? "Enter new key to replace" : "sk-..."}
-            className="w-full rounded border border-iron bg-background px-2 py-1.5 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none"
+            className="w-full border border-iron bg-background px-2 py-1.5 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none"
           />
         </div>
         <div>
@@ -117,7 +117,7 @@ function ProviderKeyCard({
             value={baseUrl}
             onChange={(e) => setBaseUrl(e.target.value)}
             placeholder={PROVIDER_BASE_URLS[provider]}
-            className="w-full rounded border border-iron bg-background px-2 py-1.5 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none"
+            className="w-full border border-iron bg-background px-2 py-1.5 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none"
           />
         </div>
       </div>
@@ -166,7 +166,7 @@ export default function ProvidersPage() {
   return (
     <>
       <div className="mb-6">
-        <h1 className="font-display text-2xl font-bold text-foreground">
+        <h1 className="font-mono text-2xl font-bold text-foreground">
           Providers
         </h1>
         <p className="text-xs font-mono text-slate-text mt-1">
@@ -177,7 +177,7 @@ export default function ProvidersPage() {
       <div className="flex items-center gap-3 mb-4">
         <div className="flex items-center gap-2">
           <Key className="h-4 w-4 text-amber" />
-          <h2 className="font-display text-lg font-semibold text-foreground">
+          <h2 className="font-mono text-lg font-semibold text-foreground">
             API Keys
           </h2>
         </div>

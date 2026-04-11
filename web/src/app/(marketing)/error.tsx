@@ -9,7 +9,7 @@ export default function MarketingError({
 }) {
   return (
     <div className="flex min-h-screen flex-col items-center justify-center bg-black p-8">
-      <div className="rounded-lg border border-red-500/20 bg-red-500/5 p-6 text-center">
+      <div className="border border-red-500/20 bg-red-500/5 p-6 text-center">
         <h2 className="mb-2 font-mono text-sm font-medium text-red-400">
           Something went wrong
         </h2>

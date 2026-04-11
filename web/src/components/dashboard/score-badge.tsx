@@ -16,7 +16,7 @@ export function ScoreBox({ score }: { score?: number }) {
         ? "text-amber border-amber/20 bg-amber/5"
         : "text-red-400 border-red-400/20 bg-red-400/5";
   return (
-    <div className={`flex flex-col items-center justify-center h-16 w-16 rounded-lg border ${border}`}>
+    <div className={`flex flex-col items-center justify-center h-16 w-16 border ${border}`}>
       <span className="font-mono text-2xl font-bold leading-none">{score}</span>
       <span className="text-[9px] font-mono uppercase tracking-wider opacity-60 mt-1">/10</span>
     </div>

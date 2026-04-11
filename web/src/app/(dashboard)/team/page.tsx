@@ -5,7 +5,7 @@ export default function TeamPage() {
   return (
     <>
       <div className="mb-8">
-        <h1 className="font-display text-2xl font-bold text-foreground">Team</h1>
+        <h1 className="font-mono text-2xl font-bold text-foreground">Team</h1>
         <p className="text-xs font-mono text-slate-text mt-1">
           Manage members, roles, and invitations.
         </p>

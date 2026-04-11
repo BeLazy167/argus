@@ -3,9 +3,8 @@
 import { useMemo, useState } from "react";
 import { Activity, FileText, Search, Loader2, ExternalLink } from "lucide-react";
 import { usePagination, PaginationBar } from "@/components/dashboard/pagination";
-import { Protect } from "@clerk/nextjs";
+import { ProGate } from "@/components/dashboard/pro-gate";
 import { useRepoRisk, useTraces } from "@/lib/queries/insights";
-import { UpgradePrompt } from "@/components/dashboard/upgrade-prompt";
 import { useActiveRepo } from "@/lib/hooks/use-active-repo";
 import { RepoSelect } from "@/components/dashboard/repo-select";
 import { formatDistanceToNow } from "@/lib/time";
@@ -63,10 +62,10 @@ export default function InsightsPage() {
   const isLoading = risksLoading || tracesLoading;
 
   return (
-    <Protect plan="org:pro" fallback={<UpgradePrompt feature="Insights & risk analysis" />}>
+    <ProGate feature="Insights & risk analysis">
       <div className="mb-8 flex items-center justify-between">
         <div>
-          <h1 className="font-display text-2xl font-bold text-foreground">
+          <h1 className="font-mono text-2xl font-bold text-foreground">
             Insights
           </h1>
           <p className="text-xs font-mono text-slate-text mt-1">
@@ -84,20 +83,20 @@ export default function InsightsPage() {
             type="text"
             value={fileFilter}
             onChange={(e) => setFileFilter(e.target.value)}
-            placeholder="Filter by file path..."
-            className="w-full rounded-lg border border-iron bg-charcoal pl-9 pr-4 py-2.5 text-xs font-mono text-foreground placeholder:text-slate-text/50 focus:outline-none focus:border-amber/50 transition-colors"
+            placeholder="Filter by file path…"
+            className="w-full border border-iron bg-charcoal pl-9 pr-4 py-2.5 text-xs font-mono text-foreground placeholder:text-slate-text/50 focus:outline-none focus:border-amber/50 transition-colors"
           />
         </div>
       </div>
 
       {!activeId ? (
-        <div className="rounded-lg border border-iron bg-charcoal py-10 text-center text-xs font-mono text-slate-text">
+        <div className="border border-iron bg-charcoal py-10 text-center text-xs font-mono text-slate-text">
           Select a repo to view insights.
         </div>
       ) : (
         <div className="space-y-8">
           {/* Hot Files */}
-          <div className="rounded-lg border border-iron bg-charcoal overflow-hidden">
+          <div className="border border-iron bg-charcoal overflow-x-auto">
             <div className="flex items-center gap-2 border-b border-iron px-5 py-4">
               <FileText className="h-4 w-4 text-slate-text" />
               <h2 className="text-xs font-mono uppercase tracking-[0.1em] text-foreground">
@@ -122,7 +121,7 @@ export default function InsightsPage() {
                   <tr className="border-b border-iron/50 text-[10px] font-mono uppercase tracking-wider text-slate-text">
                     <th className="text-left px-5 py-2.5 font-medium">File</th>
                     <th className="text-left px-3 py-2.5 font-medium">Traces</th>
-                    <th className="text-left px-3 py-2.5 font-medium w-48">Risk</th>
+                    <th className="text-left px-3 py-2.5 font-medium min-w-[120px]">Risk</th>
                     <th className="text-left px-5 py-2.5 font-medium">Last Trace</th>
                   </tr>
                 </thead>
@@ -157,7 +156,7 @@ export default function InsightsPage() {
                           <div className="flex items-center gap-2">
                             <div className="flex-1 h-1.5 rounded-full bg-iron/30 overflow-hidden">
                               <div
-                                className={`h-full rounded-full ${barColor} transition-all`}
+                                 className={`h-full rounded-full ${barColor} transition-[width] duration-300`}
                                 style={{ width: `${pct}%` }}
                               />
                             </div>
@@ -190,7 +189,7 @@ export default function InsightsPage() {
           </div>
 
           {/* Recent Activity / Decision Traces */}
-          <div className="rounded-lg border border-iron bg-charcoal overflow-hidden">
+          <div className="border border-iron bg-charcoal overflow-x-auto">
             <div className="flex items-center gap-2 border-b border-iron px-5 py-4">
               <Activity className="h-4 w-4 text-slate-text" />
               <h2 className="text-xs font-mono uppercase tracking-[0.1em] text-foreground">
@@ -275,6 +274,6 @@ export default function InsightsPage() {
           </div>
         </div>
       )}
-    </Protect>
+    </ProGate>
   );
 }

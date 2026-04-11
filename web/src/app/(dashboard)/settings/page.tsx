@@ -137,7 +137,7 @@ function PersonaCard({
       type="button"
       onClick={onSelect}
       disabled={disabled}
-      className={`group cursor-pointer rounded-lg border p-4 text-left transition-all ${
+      className={`group cursor-pointer border p-4 text-left transition-all ${
         isActive
           ? "border-amber/40 bg-amber/5"
           : "border-iron bg-charcoal hover:border-iron/80 hover:bg-charcoal/80"
@@ -249,7 +249,7 @@ function ConfigCard({
   const hasNoKeys = savedProviders.length === 0;
 
   return (
-    <div className="rounded-lg border border-iron bg-charcoal p-5">
+    <div className="border border-iron bg-charcoal p-5">
       <div className="flex items-center justify-between mb-1">
         <div className="flex items-center gap-2">
           <span className="text-xs font-mono uppercase tracking-wider text-amber">
@@ -272,7 +272,7 @@ function ConfigCard({
       </p>
 
       {existing && (
-        <div className="rounded border border-iron/50 bg-background/50 px-3 py-2 mb-3">
+        <div className="border border-iron/50 bg-background/50 px-3 py-2 mb-3">
           <p className="text-[10px] font-mono text-slate-text">Active config</p>
           <p className="text-xs font-mono text-foreground mt-0.5">
             {PROVIDER_LABELS[existing.provider as Provider] ?? existing.provider}{" "}
@@ -284,7 +284,7 @@ function ConfigCard({
         </div>
       )}
 
-      <div className="grid grid-cols-2 gap-3 mb-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
         {/* Provider dropdown — shows all providers, disables unconfigured */}
         <div>
           <label className="block text-[10px] font-mono text-slate-text mb-1">
@@ -298,7 +298,8 @@ function ConfigCard({
                 setModel("");
                 setIsCustom(false);
               }}
-              className="w-full appearance-none rounded border border-iron bg-background px-2 py-1.5 pr-7 text-xs font-mono text-foreground focus:border-amber focus:outline-none"
+              style={{ backgroundColor: 'var(--background)', color: 'var(--foreground)' }}
+              className="w-full appearance-none border border-iron bg-background px-2 py-1.5 pr-7 text-xs font-mono text-foreground focus:border-amber focus:outline-none"
             >
               <option value="">
                 {hasNoKeys ? "Add an API key first" : "Select provider"}
@@ -334,14 +335,14 @@ function ConfigCard({
                     setModel("");
                   }}
                   onFocus={() => { if (model) { setModelSearch(model); setModel(""); } }}
-                  placeholder="Search models..."
+                  placeholder="Search models…"
                   autoComplete="off"
-                  className="w-full rounded border border-iron bg-background pl-7 pr-8 py-1.5 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none"
+                  className="w-full border border-iron bg-background pl-7 pr-8 py-1.5 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none"
                 />
                 <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-3 w-3 -translate-y-1/2 text-slate-text" />
               </div>
               {modelSearch && !model && (
-                <div className="absolute z-20 mt-1 w-full max-h-48 overflow-y-auto rounded border border-iron bg-charcoal shadow-lg">
+                <div className="absolute z-20 mt-1 w-full max-h-48 overflow-y-auto border border-iron bg-charcoal shadow-lg">
                   {orModels
                     .filter((m) => m.id.toLowerCase().includes(modelSearch.toLowerCase()) || m.name.toLowerCase().includes(modelSearch.toLowerCase()))
                     .slice(0, 20)
@@ -383,13 +384,13 @@ function ConfigCard({
                 }}
                 onFocus={() => setModelSearch("__show__")}
                 onBlur={() => setTimeout(() => setModelSearch(""), 150)}
-                placeholder="Type or select a model..."
+                placeholder="Type or select a model…"
                 autoComplete="off"
-                className="w-full rounded border border-iron bg-background px-2 py-1.5 pr-7 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none"
+                className="w-full border border-iron bg-background px-2 py-1.5 pr-7 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none"
               />
               <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-3 w-3 -translate-y-1/2 text-slate-text" />
               {modelSearch === "__show__" && picks.length > 0 && (
-                <div className="absolute z-20 mt-1 w-full max-h-48 overflow-y-auto rounded border border-iron bg-charcoal shadow-lg">
+                <div className="absolute z-20 mt-1 w-full max-h-48 overflow-y-auto border border-iron bg-charcoal shadow-lg">
                   {picks.map((m) => (
                     <button
                       key={m}
@@ -424,7 +425,7 @@ function ConfigCard({
                 provider === "gcp_vertex" ? "https://{region}-aiplatform.googleapis.com/v1/projects/{project}/locations/{region}/endpoints/openapi" :
                 "https://bedrock-runtime.{region}.amazonaws.com"
               }
-              className="w-full rounded border border-iron bg-background px-2 py-1.5 text-xs font-mono text-foreground placeholder:text-iron/50 focus:border-amber focus:outline-none"
+              className="w-full border border-iron bg-background px-2 py-1.5 text-xs font-mono text-foreground placeholder:text-iron/50 focus:border-amber focus:outline-none"
             />
             <p className="text-[9px] font-mono text-slate-text/50 mt-1">
               {provider === "azure" && "Azure OpenAI resource endpoint"}
@@ -459,7 +460,7 @@ function ConfigCard({
             type="number"
             value={maxTokens}
             onChange={(e) => setMaxTokens(Number(e.target.value))}
-            className="w-full rounded border border-iron bg-background px-2 py-1.5 text-xs font-mono text-foreground focus:border-amber focus:outline-none"
+            className="w-full border border-iron bg-background px-2 py-1.5 text-xs font-mono text-foreground focus:border-amber focus:outline-none"
           />
         </div>
       </div>
@@ -496,7 +497,7 @@ function ConfigCard({
           type="button"
           onClick={handleTest}
           disabled={test.isPending || !finalModel}
-          className="flex items-center gap-2 rounded border border-iron px-3 py-1 text-[11px] font-mono text-slate-text hover:text-foreground hover:border-foreground/30 transition-colors disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
+          className="flex items-center gap-2 bg-charcoal border border-iron px-3 py-1 text-[11px] font-mono text-slate-text hover:text-foreground hover:border-foreground/30 transition-colors disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
         >
           {test.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Zap className="h-3 w-3" />}
           {test.isPending ? "Testing..." : "Test"}
@@ -540,7 +541,7 @@ function PromptCard({
   };
 
   return (
-    <div className="rounded-lg border border-iron bg-charcoal">
+    <div className="border border-iron bg-charcoal">
       <button
         type="button"
         onClick={() => {
@@ -569,7 +570,7 @@ function PromptCard({
             onChange={(e) => setDraft(e.target.value)}
             placeholder={defaultText}
             rows={10}
-            className="w-full rounded border border-iron bg-background px-3 py-2 text-xs font-mono text-foreground placeholder:text-iron/60 focus:border-amber focus:outline-none resize-y leading-relaxed"
+            className="w-full border border-iron bg-background px-3 py-2 text-xs font-mono text-foreground placeholder:text-iron/60 focus:border-amber focus:outline-none resize-y leading-relaxed"
           />
           <div className="flex items-center gap-2">
             <button
@@ -586,7 +587,7 @@ function PromptCard({
                 type="button"
                 onClick={handleReset}
                 disabled={del.isPending}
-                className="flex items-center gap-2 rounded border border-iron px-3 py-1 text-[11px] font-mono text-slate-text hover:text-foreground hover:border-foreground/30 transition-colors disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
+                className="flex items-center gap-2 bg-charcoal border border-iron px-3 py-1 text-[11px] font-mono text-slate-text hover:text-foreground hover:border-foreground/30 transition-colors disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
               >
                 <RotateCw className="h-3 w-3" />
                 {del.isPending ? "Resetting..." : "Reset to default"}
@@ -634,8 +635,8 @@ const PIPELINE_FEATURES = [
   {
     key: "pr_enrichment",
     label: "PR Enrichment",
-    hint: "Auto-enriches PR descriptions with missing context",
-    description: "Enrich review context with PR metadata, labels, and linked issues.",
+    hint: "Auto-enriches PR descriptions with missing context and diagrams",
+    description: "Auto-enriches PR descriptions with missing context and architecture diagrams (sequence, data flow, dependency).",
     defaultValue: true,
   },
   {
@@ -683,7 +684,7 @@ function PipelineFeatureCard({
 }) {
   const isDisabled = disabled || pending;
   return (
-    <div className={`rounded-lg border p-4 transition-colors ${
+    <div className={`border p-4 transition-colors ${
       disabled ? "border-iron/50 bg-charcoal/50 opacity-60" : enabled ? "border-amber/30 bg-amber/5" : "border-iron bg-charcoal"
     }`}>
       <div className="flex items-center justify-between mb-1.5">
@@ -770,7 +771,7 @@ export default function SettingsPage() {
     <>
       <div className="mb-6 flex items-center justify-between">
         <div>
-          <h1 className="font-display text-2xl font-bold text-foreground">
+          <h1 className="font-mono text-2xl font-bold text-foreground">
             Settings
           </h1>
           <p className="text-xs font-mono text-slate-text mt-1">
@@ -787,7 +788,7 @@ export default function SettingsPage() {
         <button
           type="button"
           onClick={() => setSettingsScope("org")}
-          className={`px-4 py-2 text-xs font-mono transition-colors border-b-2 -mb-px cursor-pointer ${
+          className={`px-4 py-3 text-xs font-mono transition-colors border-b-2 -mb-px cursor-pointer ${
             settingsScope === "org"
               ? "border-amber text-amber"
               : "border-transparent text-slate-text hover:text-foreground"
@@ -796,9 +797,8 @@ export default function SettingsPage() {
           Org Defaults
         </button>
         <button
-          type="button"
           onClick={() => setSettingsScope("repo")}
-          className={`px-4 py-2 text-xs font-mono transition-colors border-b-2 -mb-px cursor-pointer ${
+          className={`px-4 py-3 text-xs font-mono transition-colors border-b-2 -mb-px cursor-pointer ${
             settingsScope === "repo"
               ? "border-amber text-amber"
               : "border-transparent text-slate-text hover:text-foreground"
@@ -817,7 +817,7 @@ export default function SettingsPage() {
             </div>
           ) : (
             <div className="space-y-10">
-              <div className="rounded-lg border border-amber/20 bg-amber/5 px-4 py-3 flex items-start gap-2.5">
+              <div className="border border-amber/20 bg-amber/5 px-4 py-3 flex items-start gap-2.5">
                 <Info className="h-3.5 w-3.5 text-amber mt-0.5 shrink-0" />
                 <p className="text-[11px] font-mono text-amber/80">
                   These defaults apply to all repos in <span className="text-amber font-medium">{active?.org_login}</span>.
@@ -830,7 +830,7 @@ export default function SettingsPage() {
                 <div className="flex items-center gap-3 mb-4">
                   <div className="flex items-center gap-2">
                     <UserCog className="h-4 w-4 text-amber" />
-                    <h2 className="font-display text-lg font-semibold text-foreground">
+                    <h2 className="font-mono text-lg font-semibold text-foreground">
                       Default Persona
                     </h2>
                   </div>
@@ -849,16 +849,16 @@ export default function SettingsPage() {
                   ))}
                 </div>
                 {orgPersona === "custom" && (
-                  <div className="mt-4 rounded-lg border border-iron bg-charcoal p-4">
+                  <div className="mt-4 border border-iron bg-charcoal p-4">
                     <label className="block text-[11px] font-mono text-slate-text mb-2">
                       Custom persona prompt (org default)
                     </label>
                     <textarea
                       value={orgCustomPromptDraft}
                       onChange={(e) => setOrgCustomPromptDraft(e.target.value)}
-                      placeholder="e.g. You are a reviewer focused on accessibility and i18n..."
+                      placeholder="e.g. You are a reviewer focused on accessibility and i18n…"
                       rows={5}
-                      className="w-full rounded-lg border border-iron bg-void px-4 py-3 text-xs font-mono text-foreground placeholder:text-slate-text/40 focus:outline-none focus:border-amber/50 transition-colors resize-y"
+                      className="w-full border border-iron bg-void px-4 py-3 text-xs font-mono text-foreground placeholder:text-slate-text/40 focus:outline-none focus:border-amber/50 transition-colors resize-y"
                     />
                     <button
                       type="button"
@@ -879,7 +879,7 @@ export default function SettingsPage() {
                 <div className="flex items-center gap-3 mb-4">
                   <div className="flex items-center gap-2">
                     <Cpu className="h-4 w-4 text-amber" />
-                    <h2 className="font-display text-lg font-semibold text-foreground">
+                    <h2 className="font-mono text-lg font-semibold text-foreground">
                       Review Pipeline
                     </h2>
                   </div>
@@ -889,7 +889,7 @@ export default function SettingsPage() {
                 </p>
 
                 {configuredCount === 0 ? (
-                  <div className="rounded-lg border border-iron/50 bg-iron/10 px-4 py-3 flex items-start gap-2.5">
+                  <div className="border border-iron/50 bg-iron/10 px-4 py-3 flex items-start gap-2.5">
                     <Info className="h-3.5 w-3.5 text-slate-text mt-0.5 shrink-0" />
                     <p className="text-[11px] font-mono text-slate-text">
                       No API keys configured yet. <a href="/providers" className="text-amber underline underline-offset-2 hover:text-foreground transition-colors">Add an API key</a> to unlock provider selection.
@@ -921,7 +921,7 @@ export default function SettingsPage() {
                   <div className="flex items-center gap-3 mb-4">
                     <div className="flex items-center gap-2">
                       <Sliders className="h-4 w-4 text-amber" />
-                      <h2 className="font-display text-lg font-semibold text-foreground">
+                      <h2 className="font-mono text-lg font-semibold text-foreground">
                         Pipeline Features
                       </h2>
                     </div>
@@ -983,7 +983,7 @@ export default function SettingsPage() {
           <Loader2 className="h-6 w-6 animate-spin text-slate-text" />
         </div>
       ) : !active ? (
-        <div className="rounded-lg border border-iron bg-charcoal p-10 text-center">
+        <div className="border border-iron bg-charcoal p-10 text-center">
           <Settings className="h-8 w-8 text-slate-text mx-auto mb-3" />
           <p className="text-xs font-mono text-slate-text">
             No installation found.
@@ -991,7 +991,7 @@ export default function SettingsPage() {
         </div>
       ) : (
         <div className="space-y-10">
-          <div className="rounded-lg border border-iron/50 bg-iron/10 px-4 py-3 flex items-start gap-2.5">
+          <div className="border border-iron/50 bg-iron/10 px-4 py-3 flex items-start gap-2.5">
             <Info className="h-3.5 w-3.5 text-slate-text mt-0.5 shrink-0" />
             <p className="text-[11px] font-mono text-slate-text">
               Settings not configured here fall back to org defaults.
@@ -1005,7 +1005,7 @@ export default function SettingsPage() {
               </span>
               <div className="flex items-center gap-2">
                 <Key className="h-4 w-4 text-amber" />
-                <h2 className="font-display text-lg font-semibold text-foreground">
+                <h2 className="font-mono text-lg font-semibold text-foreground">
                   API Keys
                 </h2>
               </div>
@@ -1026,14 +1026,14 @@ export default function SettingsPage() {
               </span>
               <div className="flex items-center gap-2">
                 <Cpu className="h-4 w-4 text-amber" />
-                <h2 className="font-display text-lg font-semibold text-foreground">
+                <h2 className="font-mono text-lg font-semibold text-foreground">
                   Review Pipeline
                 </h2>
               </div>
             </div>
 
             {configuredCount === 0 ? (
-              <div className="rounded-lg border border-amber/20 bg-amber/5 px-4 py-3 mb-4 flex items-start gap-2.5">
+              <div className="border border-amber/20 bg-amber/5 px-4 py-3 mb-4 flex items-start gap-2.5">
                 <Info className="h-3.5 w-3.5 text-amber mt-0.5 shrink-0" />
                 <p className="text-[11px] font-mono text-amber/80">
                   No API keys configured yet. <a href="#api-keys" className="text-amber underline underline-offset-2 hover:text-foreground transition-colors">Add an API key above</a> to unlock provider selection.
@@ -1054,7 +1054,7 @@ export default function SettingsPage() {
             )}
 
             {activeId === 0 ? (
-              <div className="rounded-lg border border-iron bg-charcoal p-10 text-center">
+              <div className="border border-iron bg-charcoal p-10 text-center">
                 <Settings className="h-8 w-8 text-slate-text mx-auto mb-3" />
                 <p className="text-xs font-mono text-slate-text">
                   Select a repo to configure models.
@@ -1088,7 +1088,7 @@ export default function SettingsPage() {
               </span>
               <div className="flex items-center gap-2">
                 <UserCog className="h-4 w-4 text-amber" />
-                <h2 className="font-display text-lg font-semibold text-foreground">
+                <h2 className="font-mono text-lg font-semibold text-foreground">
                   Review Persona
                 </h2>
               </div>
@@ -1101,7 +1101,7 @@ export default function SettingsPage() {
             </p>
 
             {activeId === 0 ? (
-              <div className="rounded-lg border border-iron bg-charcoal p-10 text-center">
+              <div className="border border-iron bg-charcoal p-10 text-center">
                 <UserCog className="h-8 w-8 text-slate-text mx-auto mb-3" />
                 <p className="text-xs font-mono text-slate-text">
                   Select a repo to configure persona.
@@ -1134,16 +1134,16 @@ export default function SettingsPage() {
                 </div>
                 {currentPersona === "custom" && (
                   <ProGate feature="Custom persona">
-                    <div className="mt-4 rounded-lg border border-iron bg-charcoal p-4">
+                    <div className="mt-4 border border-iron bg-charcoal p-4">
                       <label className="block text-[11px] font-mono text-slate-text mb-2">
                         Custom persona prompt — define how Argus should review code
                       </label>
                       <textarea
                         value={customPromptDraft}
                         onChange={(e) => setCustomPromptDraft(e.target.value)}
-                        placeholder="e.g. You are a reviewer focused on accessibility and i18n. Flag any hardcoded strings, missing aria labels, or RTL layout issues..."
+                        placeholder="e.g. You are a reviewer focused on accessibility and i18n. Flag any hardcoded strings, missing aria labels, or RTL layout issues…"
                         rows={5}
-                        className="w-full rounded-lg border border-iron bg-void px-4 py-3 text-xs font-mono text-foreground placeholder:text-slate-text/40 focus:outline-none focus:border-amber/50 transition-colors resize-y"
+                        className="w-full border border-iron bg-void px-4 py-3 text-xs font-mono text-foreground placeholder:text-slate-text/40 focus:outline-none focus:border-amber/50 transition-colors resize-y"
                       />
                       <button
                         type="button"
@@ -1184,7 +1184,7 @@ export default function SettingsPage() {
                 </span>
                 <div className="flex items-center gap-2">
                   <FileText className="h-4 w-4 text-amber" />
-                  <h2 className="font-display text-lg font-semibold text-foreground">
+                  <h2 className="font-mono text-lg font-semibold text-foreground">
                     Review Prompts
                   </h2>
                 </div>
@@ -1196,7 +1196,7 @@ export default function SettingsPage() {
               </p>
 
               {activeId === 0 ? (
-                <div className="rounded-lg border border-iron bg-charcoal p-10 text-center">
+                <div className="border border-iron bg-charcoal p-10 text-center">
                   <FileText className="h-8 w-8 text-slate-text mx-auto mb-3" />
                   <p className="text-xs font-mono text-slate-text">
                     Select a repo to customize prompts.
@@ -1227,7 +1227,7 @@ export default function SettingsPage() {
                 </span>
                 <div className="flex items-center gap-2">
                   <Sliders className="h-4 w-4 text-amber" />
-                  <h2 className="font-display text-lg font-semibold text-foreground">
+                  <h2 className="font-mono text-lg font-semibold text-foreground">
                     Pipeline Features
                   </h2>
                 </div>
@@ -1239,7 +1239,7 @@ export default function SettingsPage() {
               </p>
 
               {activeId === 0 ? (
-                <div className="rounded-lg border border-iron bg-charcoal p-10 text-center">
+                <div className="border border-iron bg-charcoal p-10 text-center">
                   <Sliders className="h-8 w-8 text-slate-text mx-auto mb-3" />
                   <p className="text-xs font-mono text-slate-text">
                     Select a repo to configure features.

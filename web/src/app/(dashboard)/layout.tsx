@@ -70,9 +70,9 @@ function SidebarLink({
   return (
     <Link
       href={href}
-      className={`flex items-center gap-3 rounded-md px-3 py-2 text-xs font-mono transition-colors ${
+      className={`flex items-center gap-3 px-3 py-3 text-xs font-mono transition-colors ${
         active
-          ? "border-l-2 border-amber bg-sidebar-accent text-amber"
+          ? "bg-sidebar-accent text-amber"
           : "text-slate-text hover:bg-sidebar-accent hover:text-foreground"
       }`}
     >
@@ -99,10 +99,7 @@ export default function DashboardLayout({
         <Link href="/dashboard" className="wordmark text-xs text-amber tracking-[0.2em]">
           ARGUS
         </Link>
-        <div className="flex items-center gap-1.5">
-          <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
-          <span className="text-[9px] font-mono text-slate-text uppercase tracking-wider">Live</span>
-        </div>
+        <span className="h-1.5 w-1.5 rounded-full bg-amber animate-pulse" />
       </div>
       <div className="px-3 py-2 border-b border-sidebar-border">
         <OrganizationSwitcher
@@ -159,10 +156,13 @@ export default function DashboardLayout({
       <InstallationProvider>
         <ActiveRepoProvider>
         <div className="flex h-screen overflow-hidden">
+          <a href="#main-content" className="sr-only focus:not-sr-only focus:absolute focus:top-4 focus:left-4 focus:z-[60] focus:px-4 focus:py-2 focus:bg-amber focus:text-void focus:font-mono focus:text-xs">
+            Skip to content
+          </a>
           {/* Mobile hamburger */}
           <button
             onClick={() => setMobileOpen(true)}
-            className="fixed left-4 top-4 z-50 rounded-lg border border-zinc-800 bg-zinc-900 p-2 md:hidden"
+            className="fixed left-4 top-4 z-50 border border-zinc-800 bg-zinc-900 p-3 md:hidden"
             aria-label="Open navigation"
           >
             <Menu className="h-5 w-5 text-zinc-400" />
@@ -191,7 +191,7 @@ export default function DashboardLayout({
           </aside>
 
           {/* Main content */}
-          <main className="flex-1 overflow-y-auto scroll-smooth bg-background bg-noise">
+          <main id="main-content" className="flex-1 overflow-y-auto scroll-smooth bg-background bg-noise">
             <OnboardingChecklist />
             <div className="mx-auto max-w-6xl px-4 py-8 pt-16 md:px-8 md:pt-8">{children}</div>
           </main>

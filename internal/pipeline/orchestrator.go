@@ -8,24 +8,27 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"os"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	gh "github.com/google/go-github/v68/github"
-	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	ghpkg "github.com/BeLazy167/argus/internal/github"
 	"github.com/BeLazy167/argus/internal/graph"
 	"github.com/BeLazy167/argus/internal/llm"
 	"github.com/BeLazy167/argus/internal/memory"
 	"github.com/BeLazy167/argus/internal/sast"
 	"github.com/BeLazy167/argus/internal/store"
+	"github.com/BeLazy167/argus/internal/store/db"
 	"github.com/BeLazy167/argus/internal/util"
 	"github.com/BeLazy167/argus/pkg/diff"
+	gh "github.com/google/go-github/v68/github"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // splitRepoFullName splits "owner/repo" into its components.
@@ -196,7 +199,7 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		if reviewProvider == "" || !o.registry.HasKeyForRepo(ctx, inst.ID, &dbRepo.ID, reviewProvider) {
 			o.logger.Info("no API key or model config, posting onboarding comment", "repo", event.RepoFullName, "provider", reviewProvider)
 			if err := o.ghClient.CreateIssueComment(ctx, event.InstallationID, owner, repo, event.PRNumber,
-				"Welcome to **Argus**! To enable AI code reviews, configure your API key and model at your [Argus Settings](https://app.argus.reviews/settings)."); err != nil {
+				"Welcome to **Argus**! To enable AI code reviews, configure your API key and model at your [Argus Settings](https://argus.reviews/settings)."); err != nil {
 				o.logger.Error("posting onboarding comment", "error", err, "repo", event.RepoFullName)
 			}
 			reviewID := uuid.New()
@@ -298,35 +301,35 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 	}
 
 	run := &PipelineRun{
-		ID:               uuid.New(),
-		ReviewID:         reviewID,
-		State:            StatePending,
-		PREvent:          event,
-		DBInstallationID: inst.ID,
-		DBRepoID:         dbRepo.ID,
-		Diff:             patchSet,
-		RawDiff:          rawDiff,
+		ID:                  uuid.New(),
+		ReviewID:            reviewID,
+		State:               StatePending,
+		PREvent:             event,
+		DBInstallationID:    inst.ID,
+		DBRepoID:            dbRepo.ID,
+		Diff:                patchSet,
+		RawDiff:             rawDiff,
 		Persona:             loadPersona(mergedSettings),
 		CustomPersonaPrompt: loadCustomPersonaPrompt(mergedSettings),
-		DeepReview:          isDeepReviewEnabled(mergedSettings) && func() bool {
+		DeepReview: isDeepReviewEnabled(mergedSettings) && func() bool {
 			tier, _ := o.st.GetPlanTier(ctx, inst.ID)
 			return tier == "pro"
 		}(),
-		CrossFileContext: isCrossFileContextEnabled(mergedSettings),
-		BlastRadius:     isBlastRadiusEnabled(mergedSettings),
-		ScenarioMemory:  isScenarioMemoryEnabled(mergedSettings),
+		CrossFileContext:  isCrossFileContextEnabled(mergedSettings),
+		BlastRadius:       isBlastRadiusEnabled(mergedSettings),
+		ScenarioMemory:    isScenarioMemoryEnabled(mergedSettings),
 		CodeSimulation:    isCodeSimulationEnabled(mergedSettings),
 		PREnrichment:      isPREnrichmentEnabled(mergedSettings),
 		LearnPatterns:     isLearnPatternsEnabled(mergedSettings),
 		LearnConventions:  isLearnConventionsEnabled(mergedSettings),
 		FileSynthesis:     isFileSynthesisEnabled(mergedSettings),
 		ArchitectureGraph: isArchitectureGraphEnabled(mergedSettings),
-		Prompts:          o.loadPrompts(ctx, dbRepo.ID),
-		IsIncremental:    isIncremental,
-		PreviousReviewID: previousReviewID,
-		EventBus:         o.eventBus,
-		CreatedAt:        time.Now(),
-		UpdatedAt:        time.Now(),
+		Prompts:           o.loadPrompts(ctx, dbRepo.ID),
+		IsIncremental:     isIncremental,
+		PreviousReviewID:  previousReviewID,
+		EventBus:          o.eventBus,
+		CreatedAt:         time.Now(),
+		UpdatedAt:         time.Now(),
 	}
 
 	// Load prior review comments for incremental reviews so the LLM can
@@ -447,6 +450,108 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		sastCancel()
 	}
 
+	// Pre-review: fetch architecture context for changed files (choke points, hotspots).
+	// This makes the LLM aware of which files are high-risk before reviewing.
+	// Non-fatal — if it fails, review proceeds without architecture hints.
+	//
+	// Two bulk queries (edges + bug density) beat the previous N+1 per-file
+	// pattern which serialized 2*N round-trips inside a 5s budget.
+	{
+		archCtx, archCancel := context.WithTimeout(ctx, 5*time.Second)
+		archMap := make(map[string]ArchContextEntry, len(patchSet.Files))
+
+		edges, edgeErr := o.st.Q.ListArchFileEdges(archCtx, dbRepo.ID)
+		if edgeErr != nil {
+			o.logger.Warn("[pre-review] arch edges query failed", "error", edgeErr, "pr", event.PRNumber)
+		}
+		density, densErr := o.st.Q.ListArchBugDensity(archCtx, dbRepo.ID)
+		if densErr != nil {
+			o.logger.Warn("[pre-review] arch bug density query failed", "error", densErr, "pr", event.PRNumber)
+		}
+
+		if edgeErr == nil || densErr == nil {
+			fanInByFile := make(map[string]int, len(edges))
+			for _, e := range edges {
+				fanInByFile[e.TargetPath]++
+			}
+			bugsByFile := make(map[string]int, len(density))
+			for _, d := range density {
+				bugsByFile[d.FilePath] = int(d.Bugs)
+			}
+
+			processed := 0
+			for _, f := range patchSet.Files {
+				if archCtx.Err() != nil {
+					o.logger.Warn("[pre-review] arch context budget exceeded, partial data", "processed", processed, "total", len(patchSet.Files), "pr", event.PRNumber)
+					break
+				}
+				if f.NewName == "" {
+					continue
+				}
+				processed++
+				fanIn := fanInByFile[f.NewName]
+				bugs := bugsByFile[f.NewName]
+				if fanIn >= ArchChokePointFanIn || bugs >= ArchHotspotBugCount {
+					archMap[f.NewName] = ArchContextEntry{FanIn: fanIn, BugCount: bugs}
+				}
+			}
+		}
+
+		if len(archMap) > 0 {
+			run.ArchContext = archMap
+			o.logger.Info("[pre-review] arch context ready", "high_risk_files", len(archMap), "pr", event.PRNumber)
+		}
+		archCancel()
+	}
+
+	// Pre-review: detect linked issues + cross-PRs from PR body and GitHub's
+	// closingIssuesReferences. Primary source is GraphQL (covers UI panel,
+	// branch-name patterns); regex fallback catches non-closing mentions.
+	// Non-fatal — review proceeds without link context if anything fails.
+	{
+		linkCtx, linkCancel := context.WithTimeout(ctx, 10*time.Second)
+		var primary []IssueLink
+		if owner, repo, splitErr := splitRepoFullName(run.PREvent.RepoFullName); splitErr == nil {
+			closing, err := o.ghClient.GetClosingIssues(linkCtx, event.InstallationID, owner, repo, event.PRNumber)
+			if err != nil {
+				o.logger.Warn("[pre-review] closing issues fetch failed", "pr", event.PRNumber, "error", err)
+			} else {
+				primary = make([]IssueLink, 0, len(closing))
+				for _, c := range closing {
+					primary = append(primary, IssueLink{
+						Owner:      c.Owner,
+						Repo:       c.Repo,
+						Number:     c.Number,
+						URL:        c.URL,
+						Title:      c.Title,
+						Body:       c.Body,
+						Accessible: true,
+					})
+				}
+			}
+		}
+		linkCancel()
+
+		fallback := ExtractLinkedIssues(run.PREvent.PRBody, run.PREvent.RepoFullName)
+		run.LinkedIssues = MergeIssueLinks(primary, fallback)
+
+		maxLinkedPRs := 5
+		if v := os.Getenv("ARGUS_MAX_LINKED_PRS"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 20 {
+				maxLinkedPRs = n
+			}
+		}
+		run.LinkedPRs = ExtractLinkedPRs(run.PREvent.PRBody, run.PREvent.RepoFullName, event.PRNumber, maxLinkedPRs)
+
+		if len(run.LinkedIssues) > 0 || len(run.LinkedPRs) > 0 {
+			o.logger.Info("[pre-review] links detected", "issues", len(run.LinkedIssues), "prs", len(run.LinkedPRs), "pr", event.PRNumber)
+		}
+
+		// Load per-installation feature flags (issue acceptance + cross-PR toggles).
+		// Defaults: issue_acceptance on, cross_pr_checks off, max_linked_prs=5.
+		run.FeatureFlags = loadFeatureFlags(linkCtx, o.st, run.DBInstallationID)
+	}
+
 	o.logger.Info("starting review pipeline",
 		"review_id", reviewID,
 		"repo", event.RepoFullName,
@@ -560,7 +665,7 @@ func (o *Orchestrator) postStartedComment(ctx context.Context, event ghpkg.PREve
 	rows = append(rows, fmt.Sprintf("| **Scope** | %d files, ~%d lines |",
 		len(run.Diff.Files), run.Diff.TotalLinesChanged()))
 
-	body := fmt.Sprintf("> **Argus** is reviewing this PR — [watch live](https://app.argus.reviews/reviews/%s)\n\n| | |\n|---|---|\n%s",
+	body := fmt.Sprintf("> **Argus** is reviewing this PR — [watch live](https://argus.reviews/reviews/%s)\n\n| | |\n|---|---|\n%s",
 		run.ReviewID, strings.Join(rows, "\n"))
 
 	nodeID, err := o.ghClient.CreateIssueCommentWithNodeID(ctx, event.InstallationID, owner, repo, event.PRNumber, body)
@@ -760,6 +865,16 @@ func (o *Orchestrator) synthesize(ctx context.Context, run *PipelineRun) error {
 		summary.WriteString("\n")
 	}
 
+	// Inject issue acceptance coverage (from validateStage's issueAcceptance worker).
+	if section := formatIssueCoverageSection(run.IssueAcceptance); section != "" {
+		summary.WriteString(section)
+	}
+
+	// Inject cross-repo PR coverage (from validateStage's crosspr worker).
+	if section := formatCrossPRCoverageSection(run.CrossPRCoverage); section != "" {
+		summary.WriteString(section)
+	}
+
 	score := calculateScore(run)
 	totalComments := countComments(run)
 
@@ -881,7 +996,7 @@ func (o *Orchestrator) generateConversationalBrief(ctx context.Context, run *Pip
 		Model:       cfg.Model,
 		System:      synthesisBriefSystemPrompt,
 		Messages:    []llm.Message{{Role: "user", Content: prompt}},
-		MaxTokens:   400,
+		MaxTokens:   800,
 		Temperature: 0.7,
 	})
 	if err != nil {
@@ -910,23 +1025,45 @@ func (o *Orchestrator) generateConversationalBrief(ctx context.Context, run *Pip
 		return fallback
 	}
 
-	// Strip reasoning preamble that leaks the system prompt.
-	// Reasoning models (kimi, qwen) often output "The user wants..." before the verdict.
-	// cleanResponseContent handles <think> tags but not plain-prose reasoning.
 	if !strings.HasPrefix(brief, "**") {
 		if idx := strings.Index(brief, "**Verdict:"); idx > 0 {
 			brief = strings.TrimSpace(brief[idx:])
 		} else if idx := strings.Index(brief, "**"); idx > 0 {
 			brief = strings.TrimSpace(brief[idx:])
 		} else {
-			// No markdown structure — model failed to follow format. Use fallback.
-			o.logger.Warn("synthesis brief has no markdown structure, using fallback",
-				"response_prefix", util.Truncate(brief, 100, true))
-			return fallback
+			firstSentences := extractFirstSentences(brief, 2)
+			if firstSentences != "" {
+				brief = fmt.Sprintf("**Verdict:** %s", firstSentences)
+			} else {
+				o.logger.Info("synthesis brief: no parseable content, using fallback")
+				return fallback
+			}
 		}
 	}
 
-	return util.Truncate(brief, 1500, false)
+	return brief
+}
+
+func extractFirstSentences(text string, n int) string {
+	sentences := strings.SplitAfterN(text, ". ", n+1)
+	if len(sentences) > n {
+		sentences = sentences[:n]
+	}
+	joined := strings.Join(sentences, "")
+	joined = strings.TrimSpace(joined)
+	for _, prefix := range []string{"The user ", "Looking at ", "Based on ", "I ", "Let me "} {
+		if strings.HasPrefix(joined, prefix) {
+			if idx := strings.Index(joined, ". "); idx > 0 {
+				joined = strings.TrimSpace(joined[idx+1:])
+			} else {
+				return ""
+			}
+		}
+	}
+	if len(joined) < 20 {
+		return ""
+	}
+	return joined
 }
 
 func buildSynthesisBriefPrompt(run *PipelineRun, score int) string {
@@ -1350,6 +1487,16 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	var summaryBody strings.Builder
 	summaryBody.WriteString(reviewHeader)
 	summaryBody.WriteString(run.Synthesis.Brief)
+	if len(run.TruncatedFiles) > 0 {
+		summaryBody.WriteString("\n\n> ⚠️ Review for ")
+		for i, f := range run.TruncatedFiles {
+			if i > 0 {
+				summaryBody.WriteString(", ")
+			}
+			summaryBody.WriteString(fmt.Sprintf("`%s`", f))
+		}
+		summaryBody.WriteString(" was truncated — additional findings may exist.\n")
+	}
 	totalFolded := len(importantFolded) + len(minorFolded)
 	if totalFolded > 0 {
 		o.logger.Info("folded non-inline comments into summary", "important", len(importantFolded), "minor", len(minorFolded))
@@ -1381,11 +1528,11 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		summaryBody.WriteString(strings.Join(minorFolded, "\n"))
 		summaryBody.WriteString("\n\n</details>")
 	}
-	summaryBody.WriteString(fmt.Sprintf("\n\nScore: **%d/10** · [Full review →](https://app.argus.reviews/reviews/%s)", run.Synthesis.Score, run.ReviewID.String()))
+	summaryBody.WriteString(fmt.Sprintf("\n\nScore: **%d/10** · [Full review →](https://argus.reviews/reviews/%s)", run.Synthesis.Score, run.ReviewID.String()))
 
 	// Links to structured exports for AI agents
 	baseURL := "https://api.argus.reviews/api/v1"
-	dashURL := "https://app.argus.reviews"
+	dashURL := "https://argus.reviews"
 	totalFindings := countComments(run)
 	summaryBody.WriteString("\n\n**For AI agents:**\n")
 	summaryBody.WriteString(fmt.Sprintf("- [Posted findings (MD)](%s/reviews/%s/export?format=md) — %d inline findings\n", baseURL, run.ReviewID.String(), len(inlineComments)))
@@ -1413,12 +1560,17 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		o.logger.Warn("failed to marshal simulation results", "error", simErr)
 		simResultsJSON = nil
 	}
+	var truncatedFilesJSON []byte
+	if len(run.TruncatedFiles) > 0 {
+		truncatedFilesJSON, _ = json.Marshal(run.TruncatedFiles)
+	}
 	_, dbErr := o.db.Exec(ctx, `
 		UPDATE reviews SET summary = $1, score = $2, token_usage = $3, file_count = $4,
-		       deep_review = $5, persona = $6, is_incremental = $7, simulation_results = $8
-		WHERE id = $9
+		       deep_review = $5, persona = $6, is_incremental = $7, simulation_results = $8,
+		       truncated_files = $9
+		WHERE id = $10
 	`, run.Synthesis.Summary, run.Synthesis.Score, tokenUsageJSON, len(run.FileReviews),
-		run.DeepReview, persona, run.IsIncremental, simResultsJSON, run.ReviewID)
+		run.DeepReview, persona, run.IsIncremental, simResultsJSON, truncatedFilesJSON, run.ReviewID)
 	if dbErr != nil {
 		o.logger.Error("pre-post DB update failed — review data at risk if PostReview also fails",
 			"error", dbErr, "review_id", run.ReviewID)
@@ -1484,6 +1636,14 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 			}
 		}()
 		o.indexPRSummary(prePostCtx, run, owner, repo)
+	}()
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				o.logger.Error("pre-post panic", "recover", r, "op", "indexArchitectureSummary", "pr", run.PREvent.PRNumber)
+			}
+		}()
+		o.indexArchitectureSummary(prePostCtx, run, owner, repo)
 	}()
 
 	ghReviewID, err := o.ghClient.PostReview(
@@ -1662,7 +1822,7 @@ func (o *Orchestrator) enrichPRDescription(ctx context.Context, run *PipelineRun
 		Model:       cfg.Model,
 		System:      enrichmentSystemPrompt,
 		Messages:    []llm.Message{{Role: "user", Content: prompt}},
-		MaxTokens:   500,
+		MaxTokens:   1500,
 		Temperature: 0.3,
 	})
 	if err != nil {
@@ -1691,9 +1851,8 @@ func (o *Orchestrator) enrichPRDescription(ctx context.Context, run *PipelineRun
 	var result struct {
 		MissingPoints []string        `json:"missing_points"`
 		Diagrams      []diagramResult `json:"diagrams"`
-		// Legacy single-diagram fields (backwards compat)
-		Diagram      string `json:"diagram"`
-		DiagramTitle string `json:"diagram_title"`
+		Diagram       string          `json:"diagram"`
+		DiagramTitle  string          `json:"diagram_title"`
 	}
 	cleaned := extractJSON(resp.Content)
 	if err := json.Unmarshal([]byte(cleaned), &result); err != nil {
@@ -1726,20 +1885,28 @@ func (o *Orchestrator) enrichPRDescription(ctx context.Context, run *PipelineRun
 		section.WriteString("\n")
 	}
 
-	// Render diagrams (save first valid one to DB for dashboard)
-	var savedToDB bool
+	var validDiagrams []diagramResult
 	for _, d := range result.Diagrams {
 		if d.Mermaid == "" || !isValidMermaid(d.Mermaid) {
 			o.logger.Warn("skipping invalid diagram", "type", d.Type, "title", d.Title)
 			continue
 		}
-		if !savedToDB {
-			if _, err := o.db.Exec(ctx, `UPDATE reviews SET diagram = $1, diagram_title = $2 WHERE id = $3`,
-				d.Mermaid, d.Title, run.ReviewID); err != nil {
-				o.logger.Warn("failed to save diagram", "error", err)
-			}
-			savedToDB = true
+		validDiagrams = append(validDiagrams, d)
+	}
+	if len(validDiagrams) > 0 {
+		diagramsJSON, marshalErr := json.Marshal(validDiagrams)
+		if marshalErr != nil {
+			o.logger.Warn("failed to marshal diagrams", "error", marshalErr)
+		} else if _, dbErr := o.db.Exec(ctx, `UPDATE reviews SET diagrams = $1 WHERE id = $2`,
+			diagramsJSON, run.ReviewID); dbErr != nil {
+			o.logger.Warn("failed to save diagrams", "error", dbErr)
 		}
+		if _, dbErr := o.db.Exec(ctx, `UPDATE reviews SET diagram = $1, diagram_title = $2 WHERE id = $3`,
+			validDiagrams[0].Mermaid, validDiagrams[0].Title, run.ReviewID); dbErr != nil {
+			o.logger.Warn("failed to save legacy diagram", "error", dbErr)
+		}
+	}
+	for _, d := range validDiagrams {
 		title := sanitizeUserInput(d.Title)
 		if title == "" {
 			title = capitalizeCategory(d.Type)
@@ -1749,7 +1916,7 @@ func (o *Orchestrator) enrichPRDescription(ctx context.Context, run *PipelineRun
 		section.WriteString("```mermaid\n" + d.Mermaid + "\n```\n")
 		section.WriteString("</details>\n\n")
 	}
-	section.WriteString("<sub>Auto-enriched by [Argus](https://app.argus.reviews)</sub>\n")
+	section.WriteString("<sub>Auto-enriched by [Argus](https://argus.reviews)</sub>\n")
 	section.WriteString(enrichmentEndMarker)
 
 	// Fetch current PR body (may have been edited since webhook)
@@ -1783,6 +1950,18 @@ func replaceOrAppendSection(body, startMarker, endMarker, section string) string
 // isValidMermaid does a basic syntax check on mermaid diagram text.
 // Checks balanced brackets/pipes and rejects common LLM syntax errors.
 func isValidMermaid(diagram string) bool {
+	diagramLower := strings.ToLower(diagram)
+	validKeywords := []string{"sequencediagram", "graph ", "flowchart", "classdiagram", "erdiagram", "gantt", "pie", "statediagram", "journey", "gitgraph"}
+	hasKeyword := false
+	for _, kw := range validKeywords {
+		if strings.Contains(diagramLower, kw) {
+			hasKeyword = true
+			break
+		}
+	}
+	if !hasKeyword {
+		return false
+	}
 	var squares, parens, braces, pipes int
 	for _, c := range diagram {
 		switch c {
@@ -2252,7 +2431,6 @@ Return [] if no clear conventions emerge. JSON array only.`, run.PREvent.RepoFul
 	}
 }
 
-
 // synthesizeFileMemories condenses all review comments per file into a single curated memory document.
 // Fires for files with signal: 1+ comment scored 60+, or any comment 80+.
 // When scoring was skipped, any file with 1+ comment qualifies.
@@ -2411,6 +2589,49 @@ func (o *Orchestrator) indexPRSummary(ctx context.Context, run *PipelineRun, own
 	if err != nil {
 		o.logger.Warn("indexing PR summary", "error", err)
 	}
+}
+
+// indexArchitectureSummary indexes the repo's top choke points into Supermemory so
+// future reviews can surface architectural risk context. Idempotent (uses customID per repo).
+// Skips repos with fewer than 3 choke points.
+func (o *Orchestrator) indexArchitectureSummary(ctx context.Context, run *PipelineRun, owner, repo string) {
+	if o.indexer == nil {
+		return
+	}
+
+	chokeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	rows, err := o.st.Q.GetTopChokePoints(chokeCtx, db.GetTopChokePointsParams{
+		RepoID: run.DBRepoID,
+		Limit:  10,
+	})
+	if err != nil {
+		o.logger.Warn("indexing arch summary: query", "error", err)
+		return
+	}
+	if len(rows) < 3 {
+		return // not enough signal yet
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Architecture Summary for %s/%s:\n\n", owner, repo))
+	sb.WriteString("Choke points (files with high fan-in — many other files depend on them):\n")
+	for _, r := range rows {
+		sb.WriteString(fmt.Sprintf("- %s (fan_in=%d)\n", r.FilePath, r.FanIn))
+	}
+	sb.WriteString("\nWhen reviewing changes to these files, apply extra scrutiny: defects propagate to all dependent modules.")
+
+	customID := fmt.Sprintf("arch-summary:%s/%s", owner, repo)
+	_, err = o.indexer.IndexRepoPattern(chokeCtx, owner, repo, sb.String(), customID, map[string]string{
+		"source":       "arch_summary",
+		"choke_points": fmt.Sprintf("%d", len(rows)),
+	})
+	if err != nil {
+		o.logger.Warn("indexing arch summary", "error", err)
+		return
+	}
+	o.logger.Info("indexed architecture summary", "owner", owner, "repo", repo, "choke_points", len(rows))
 }
 
 // extractArchitectureGraph uses an LLM to identify architectural components from
@@ -3036,6 +3257,30 @@ func (o *Orchestrator) validateStage(ctx context.Context, run *PipelineRun) erro
 		o.logger.Info("[validate] simulation", "scenarios_tested", len(simScenarios), "results", len(simResults), "pr", run.PREvent.PRNumber)
 	}()
 
+	// Issue acceptance — judges PR diff against linked issue criteria.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				o.logger.Error("[validate] issue acceptance goroutine panic", "recover", r, "pr", run.PREvent.PRNumber)
+			}
+		}()
+		o.runIssueAcceptanceWorker(ctx, run)
+	}()
+
+	// Cross-repo PR compatibility — fetches linked PRs and judges coherence.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				o.logger.Error("[validate] crosspr goroutine panic", "recover", r, "pr", run.PREvent.PRNumber)
+			}
+		}()
+		o.runCrossPRWorker(ctx, run)
+	}()
+
 	wg.Wait()
 
 	// Store SAST findings on PipelineRun for scoring corroboration
@@ -3576,7 +3821,6 @@ func (o *Orchestrator) resolveReviewProvider(ctx context.Context, run *PipelineR
 	}
 	return cfg, provider, nil
 }
-
 
 func getDiffContext(run *PipelineRun, path string) string {
 	if run.Diff == nil {

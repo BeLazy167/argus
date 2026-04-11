@@ -66,17 +66,17 @@ export function Markdown({
   const components = useMemo(
     () => ({
       h1: ({ children }: { children?: React.ReactNode }) => (
-        <h3 className="font-display text-base font-bold text-foreground mt-5 mb-2 first:mt-0">
+        <h3 className="font-mono text-base font-bold text-foreground mt-5 mb-2 first:mt-0">
           {children}
         </h3>
       ),
       h2: ({ children }: { children?: React.ReactNode }) => (
-        <h3 className="font-display text-base font-bold text-foreground mt-5 mb-2 first:mt-0">
+        <h3 className="font-mono text-base font-bold text-foreground mt-5 mb-2 first:mt-0">
           {children}
         </h3>
       ),
       h3: ({ children }: { children?: React.ReactNode }) => (
-        <h4 className="font-display text-sm font-semibold text-foreground mt-4 mb-1.5 first:mt-0">
+        <h4 className="font-mono text-sm font-semibold text-foreground mt-4 mb-1.5 first:mt-0">
           {children}
         </h4>
       ),

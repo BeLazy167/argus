@@ -132,7 +132,7 @@ export function AnimatedReview() {
   return (
     <div ref={containerRef} className="w-full max-w-2xl mx-auto">
       {/* File header */}
-      <div className="flex items-center gap-2 rounded-t-lg border border-iron bg-charcoal px-4 py-2.5">
+      <div className="flex items-center gap-2 border-t border border-iron bg-charcoal px-4 py-2.5">
         <div className="flex gap-1.5">
           <div className="h-2.5 w-2.5 rounded-full bg-iron" />
           <div className="h-2.5 w-2.5 rounded-full bg-iron" />
@@ -147,7 +147,7 @@ export function AnimatedReview() {
       </div>
 
       {/* Diff content */}
-      <div className="border-x border-b border-iron rounded-b-lg overflow-hidden bg-void">
+      <div className="border-x border-b border-iron overflow-hidden bg-void">
         {DIFF_LINES.map((line, i) => {
           const commentForLine = REVIEW_COMMENTS.find(
             (c) => c.line === i && visibleRef.current.has(REVIEW_COMMENTS.indexOf(c))
@@ -190,7 +190,7 @@ export function AnimatedReview() {
               {/* Review comment */}
               {commentForLine && (
                 <div
-                  className={`mx-2 my-1.5 rounded-md border ${SEVERITY_STYLES[commentForLine.severity].line} bg-charcoal/80 overflow-hidden animate-[reviewSlideIn_0.3s_ease-out_forwards]`}
+                  className={`mx-2 my-1.5 border ${SEVERITY_STYLES[commentForLine.severity].line} bg-charcoal/80 overflow-hidden animate-[reviewSlideIn_0.25s_cubic-bezier(0.23,1,0.32,1)_forwards]`}
                 >
                   <div className="flex items-center gap-2 px-3 py-1.5 border-b border-iron/50">
                     <div className="h-4 w-4 rounded-full bg-amber/20 flex items-center justify-center">

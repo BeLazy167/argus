@@ -520,6 +520,24 @@ func buildFileReviewPrompt(run *PipelineRun, file diff.FileDiff, fileContent str
 		}
 	}
 
+	// Inject architecture context for high-risk files (choke points / hotspots).
+	// Tells the LLM to apply extra scrutiny when reviewing files that many other files depend on,
+	// or that have a history of bugs.
+	if run.ArchContext != nil {
+		if arch, ok := run.ArchContext[file.NewName]; ok {
+			sb.WriteString("\n<architecture_context>\n")
+			switch {
+			case arch.IsChokePoint() && arch.IsHotspot():
+				sb.WriteString(fmt.Sprintf("⚠ CRITICAL: This file is both a choke point AND a bug hotspot. %d other files depend on it, and %d bugs have been found here in past reviews. Review with maximum scrutiny — defects here cascade.\n", arch.FanIn, arch.BugCount))
+			case arch.IsChokePoint():
+				sb.WriteString(fmt.Sprintf("⚠ Choke point: %d other files depend on this. Bugs here affect many downstream files. Review API contracts and side effects carefully.\n", arch.FanIn))
+			case arch.IsHotspot():
+				sb.WriteString(fmt.Sprintf("⚠ Hotspot: %d bugs have been found in this file in past reviews. Apply extra scrutiny — historical defect rate is high.\n", arch.BugCount))
+			}
+			sb.WriteString("</architecture_context>\n")
+		}
+	}
+
 	// Inject prior review comments for incremental reviews so the LLM can
 	// check if issues were fixed and avoid re-flagging addressed items.
 	if run.IsIncremental && len(run.PriorComments) > 0 {

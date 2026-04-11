@@ -80,7 +80,7 @@ export function OnboardingChecklist() {
   };
 
   return (
-    <div className="mx-4 mt-4 rounded-lg border border-iron bg-charcoal p-4">
+    <div className="mx-4 mt-4 border border-iron bg-charcoal p-4">
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
           <h3 className="text-sm font-semibold text-white font-mono">Get started with Argus</h3>

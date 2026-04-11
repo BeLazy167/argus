@@ -186,12 +186,30 @@ func validateToken(raw string) (jwtClaims, error) {
 }
 
 // resolveInstallationIDs resolves the installation IDs a user has access to.
+// When resolving via org scope, it also auto-creates a user_installations row
+// so that /api/v1/me/installations and other user-scoped queries work correctly.
 func (s *Server) resolveInstallationIDs(ctx context.Context, claims jwtClaims, installationIDHint string) ([]int64, error) {
 	var ids []int64
 	if claims.OrgID != "" {
 		inst, err := s.store.GetInstallationByClerkOrgID(ctx, claims.OrgID)
 		if err == nil {
 			ids = []int64{inst.ID}
+			// Ensure the user has a user_installations row for this org's installation.
+			// Check first — LinkUserInstallation does an ON CONFLICT UPSERT, so
+			// calling it unconditionally costs a write per request. Most requests
+			// already have the link, so we skip the write on the hot path.
+			alreadyLinked, checkErr := s.store.IsUserLinkedToInstallation(ctx, claims.Sub, inst.ID)
+			if checkErr != nil {
+				s.logger.Warn("auto-link precheck failed", "user", claims.Sub, "installation", inst.ID, "error", checkErr)
+			} else if !alreadyLinked {
+				role := claims.OrgRole
+				if role == "" {
+					role = "org_member"
+				}
+				if _, linkErr := s.store.LinkUserInstallation(ctx, claims.Sub, inst.ID, role); linkErr != nil {
+					s.logger.Warn("auto-link user to org installation failed", "user", claims.Sub, "installation", inst.ID, "error", linkErr)
+				}
+			}
 		} else {
 			// Org has no linked installation — return empty, don't leak other orgs' data
 			return nil, fmt.Errorf("no installations linked to this organization")

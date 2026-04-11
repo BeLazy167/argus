@@ -1,18 +1,11 @@
 import type { Metadata } from "next";
-import { Syne, JetBrains_Mono } from "next/font/google";
+import { JetBrains_Mono } from "next/font/google";
 import { GeistSans } from "geist/font/sans";
 import { ClerkProvider } from "@clerk/nextjs";
 import { dark } from "@clerk/themes";
 import "./globals.css";
 import { cn } from "@/lib/utils";
 import { Analytics } from "@vercel/analytics/next";
-
-const syne = Syne({
-  subsets: ["latin"],
-  variable: "--font-display",
-  weight: ["400", "700"],
-  display: "swap",
-});
 
 const jetbrainsMono = JetBrains_Mono({subsets:['latin'],variable:'--font-jetbrains-mono'});
 
@@ -41,6 +34,7 @@ export const metadata: Metadata = {
     description:
       "Nothing merges unseen. AI code review that gets smarter with every PR.",
   },
+  other: { "theme-color": "#1A1A1A" },
 };
 
 export default function RootLayout({
@@ -64,7 +58,8 @@ export default function RootLayout({
     >
       <html
         lang="en"
-        className={cn("dark", syne.variable, GeistSans.variable, "font-mono", jetbrainsMono.variable)}
+        style={{ colorScheme: "dark" }}
+        className={cn("dark", GeistSans.variable, "font-mono", jetbrainsMono.variable)}
         suppressHydrationWarning
       >
         <body className="min-h-screen bg-background font-mono antialiased">

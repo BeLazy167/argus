@@ -25,6 +25,7 @@ func (s *Server) listMyInstallations(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) linkInstallation(w http.ResponseWriter, r *http.Request) {
 	userID := getUserID(r.Context())
+	orgID := getOrgID(r.Context())
 	var body struct {
 		InstallationID int64  `json:"installation_id"`
 		ClerkOrgID     string `json:"clerk_org_id,omitempty"`
@@ -38,18 +39,42 @@ func (s *Server) linkInstallation(w http.ResponseWriter, r *http.Request) {
 		s.handleDBError(w, err, "installation not found")
 		return
 	}
-	// Security: only allow linking if the user is already linked (re-link/idempotent)
-	// or if no users are linked yet (first claim after GitHub App install).
-	var claimedCount int
-	_ = s.store.Pool.QueryRow(r.Context(), "SELECT count(*) FROM user_installations WHERE installation_id = $1", inst.ID).Scan(&claimedCount)
+
+	// Security: allow linking if:
+	// 1. No users linked yet (first claim after GitHub App install), OR
+	// 2. User is already linked (re-link/idempotent), OR
+	// 3. User is in the same Clerk org as the installation (org member joining)
+	//
+	// DB errors on the auth path must fail closed — never fall through as a
+	// first-owner claim when the claim-count or membership check errors out.
+	claimedCount, countErr := s.store.CountInstallationUsers(r.Context(), inst.ID)
+	if countErr != nil {
+		s.logger.Error("count installation users", "error", countErr, "installation", inst.ID)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to validate installation claim"})
+		return
+	}
 	if claimedCount > 0 {
-		var alreadyLinked int
-		_ = s.store.Pool.QueryRow(r.Context(), "SELECT count(*) FROM user_installations WHERE installation_id = $1 AND clerk_user_id = $2", inst.ID, userID).Scan(&alreadyLinked)
-		if alreadyLinked == 0 {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "installation already claimed — ask an existing member to invite you"})
+		alreadyLinked, linkErr := s.store.IsUserLinkedToInstallation(r.Context(), userID, inst.ID)
+		if linkErr != nil {
+			s.logger.Error("check user installation link", "error", linkErr, "installation", inst.ID, "user", userID)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to validate installation claim"})
 			return
 		}
+		if !alreadyLinked {
+			// Not already linked — check if user is in the same Clerk org
+			if inst.ClerkOrgID == nil || *inst.ClerkOrgID == "" || *inst.ClerkOrgID != orgID {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "installation already claimed — ask an existing member to invite you"})
+				return
+			}
+		}
 	}
+
+	// Determine role: owner for first claim, org_member for subsequent org members
+	role := "org_member"
+	if claimedCount == 0 {
+		role = "owner"
+	}
+
 	if body.ClerkOrgID != "" {
 		if err := s.store.SetInstallationClerkOrgID(r.Context(), inst.ID, body.ClerkOrgID); err != nil {
 			s.logger.Error("set clerk org id", "error", err)
@@ -57,7 +82,7 @@ func (s *Server) linkInstallation(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	ui, err := s.store.LinkUserInstallation(r.Context(), userID, inst.ID, "owner")
+	ui, err := s.store.LinkUserInstallation(r.Context(), userID, inst.ID, role)
 	if err != nil {
 		s.logger.Error("link installation", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to link installation"})
@@ -104,8 +129,12 @@ func (s *Server) getCurrentInstallation(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, inst)
 }
 
-// autoLinkInstallation matches a user's unlinked installation to the current Clerk org
-// by comparing org_login to the Clerk org slug/name. Called automatically by the frontend.
+// autoLinkInstallation matches a user's installation to the current Clerk org.
+// Two paths:
+//  1. Unlinked: installation matches org slug and clerk_org_id is not yet set → set it
+//  2. Already linked: installation's clerk_org_id matches the current org → ensure user_installations row exists
+//
+// Called automatically by the frontend when a user is in a Clerk org but has no scoped installation.
 func (s *Server) autoLinkInstallation(w http.ResponseWriter, r *http.Request) {
 	orgID := getOrgID(r.Context())
 	if orgID == "" {
@@ -120,8 +149,26 @@ func (s *Server) autoLinkInstallation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Find user's installations that match the org slug
 	userID := getUserID(r.Context())
+
+	// Path 1: Find installations already linked to this Clerk org.
+	// This handles new org members whose user_installations row was auto-created
+	// by resolveInstallationIDs but whose frontend hasn't refreshed yet.
+	inst, err := s.store.GetInstallationByClerkOrgID(r.Context(), orgID)
+	if err == nil && inst != nil {
+		// Ensure the user has a user_installations row
+		role := getOrgRole(r.Context())
+		if role == "" {
+			role = "org_member"
+		}
+		if _, linkErr := s.store.LinkUserInstallation(r.Context(), userID, inst.ID, role); linkErr != nil {
+			s.logger.Warn("auto-link: ensure user_installations row", "error", linkErr)
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "linked", "org_login": inst.OrgLogin})
+		return
+	}
+
+	// Path 2: Find user's installations that match the org slug and are not yet linked to a Clerk org.
 	installations, err := s.store.ListUserInstallations(r.Context(), userID)
 	if err != nil {
 		s.logger.Error("auto-link: list installations", "error", err)

@@ -139,6 +139,17 @@ func (q *Queries) GetInstallationByGitHubID(ctx context.Context, installationID 
 	return i, err
 }
 
+const getInstallationFeatureFlags = `-- name: GetInstallationFeatureFlags :one
+SELECT COALESCE(feature_flags, '{}')::jsonb FROM installations WHERE id = $1
+`
+
+func (q *Queries) GetInstallationFeatureFlags(ctx context.Context, id int64) (json.RawMessage, error) {
+	row := q.db.QueryRow(ctx, getInstallationFeatureFlags, id)
+	var column_1 json.RawMessage
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const getOrgDefaults = `-- name: GetOrgDefaults :one
 SELECT COALESCE(default_settings, '{}')::jsonb FROM installations WHERE id = $1
 `
@@ -209,5 +220,19 @@ UPDATE installations SET suspended_at = NOW() WHERE installation_id = $1
 
 func (q *Queries) SuspendInstallation(ctx context.Context, installationID int64) error {
 	_, err := q.db.Exec(ctx, suspendInstallation, installationID)
+	return err
+}
+
+const updateInstallationFeatureFlags = `-- name: UpdateInstallationFeatureFlags :exec
+UPDATE installations SET feature_flags = $2 WHERE id = $1
+`
+
+type UpdateInstallationFeatureFlagsParams struct {
+	ID           int64           `json:"id"`
+	FeatureFlags json.RawMessage `json:"feature_flags"`
+}
+
+func (q *Queries) UpdateInstallationFeatureFlags(ctx context.Context, arg UpdateInstallationFeatureFlagsParams) error {
+	_, err := q.db.Exec(ctx, updateInstallationFeatureFlags, arg.ID, arg.FeatureFlags)
 	return err
 }

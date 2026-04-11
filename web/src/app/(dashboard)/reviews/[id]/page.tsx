@@ -87,9 +87,13 @@ function langFromPath(path: string): string {
  * Strip per-file comment listings and code blocks from summary.
  * Keep only the high-level synthesis prose.
  */
+function capitalize(s: string): string {
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
 function extractSynthesis(summary: string): string {
   return summary
-    .replace(/^#+\s*Argus Review\s*\n*/i, "")
+    .replace(/^#+\s*Argus Review\s*(\(Incremental\))?\s*\n*/i, "")
     .replace(/^Reviewed \d+ files with \d+ comments\.\s*\n*/i, "")
     .replace(/^\n+|\n+$/g, "");
 }
@@ -110,19 +114,7 @@ const severityDot: Record<string, string> = {
   praise: "bg-green-400",
 };
 
-const severityBorder: Record<string, string> = {
-  critical: "border-l-red-400",
-  warning: "border-l-amber",
-  suggestion: "border-l-blue-400",
-  praise: "border-l-green-400",
-};
 
-const severityBg: Record<string, string> = {
-  critical: "bg-red-400/[0.03]",
-  warning: "bg-amber/[0.03]",
-  suggestion: "bg-blue-400/[0.03]",
-  praise: "bg-green-400/[0.03]",
-};
 
 /* ── Mermaid ─────────────────────────────────── */
 
@@ -176,7 +168,7 @@ function friendlyError(raw: string): {
   return {
     title: "Review failed to post",
     detail: raw.length > 200 ? raw.slice(0, 200) + "\u2026" : raw,
-    action: "Click Retry to try again.",
+    action: "Check your API key and provider settings, then click Retry.",
   };
 }
 
@@ -282,12 +274,12 @@ function TokenPill({ usage }: { usage: TokenUsage }) {
 
   return (
     <div className="group relative">
-      <span className="inline-flex items-center rounded-md border border-iron bg-iron/30 px-2.5 py-1 text-[11px] font-mono text-slate-text cursor-default">
+      <span className="inline-flex items-center border border-iron bg-iron/30 px-2.5 py-1 text-[11px] font-mono text-slate-text cursor-default">
         {label}
       </span>
       {stages.length > 0 && (
         <div className="absolute left-0 top-full mt-1.5 z-10 hidden group-hover:block">
-          <div className="rounded-lg border border-iron bg-charcoal p-3 shadow-xl w-[240px]">
+          <div className="border border-iron bg-charcoal p-3 shadow-xl w-[240px]">
             {singleModel && (
               <p className="text-[10px] font-mono text-slate-text/60 mb-2 truncate">
                 {singleModel}
@@ -357,7 +349,7 @@ function CopyFixButton({
       type="button"
       onClick={handleCopy}
       aria-label={`Copy fix prompt for ${filePath}${ref ? ` ${ref}` : ""} ${comment.severity ?? ""}`}
-      className="inline-flex items-center gap-1.5 rounded-md border border-iron/50 bg-iron/20 px-2.5 py-1 text-[11px] font-mono text-slate-text hover:text-amber hover:border-amber/30 hover:bg-amber/5 transition-all opacity-0 group-hover:opacity-100 focus-visible:opacity-100 cursor-pointer"
+      className="inline-flex items-center gap-1.5 border border-iron/50 bg-iron/20 px-2.5 py-1 text-[11px] font-mono text-slate-text hover:text-amber hover:border-amber/30 hover:bg-amber/5 transition-[color,border-color,background-color] duration-150 opacity-100 md:opacity-0 md:group-hover:opacity-100 md:focus-visible:opacity-100 cursor-pointer"
     >
       {copied ? (
         <>
@@ -379,7 +371,7 @@ function PatternDetail({ patternId }: { patternId: number }) {
   if (isLoading) return <div className="mt-2 text-[11px] font-mono text-slate-text">Loading pattern...</div>;
   if (!pattern) return <div className="mt-2 text-[11px] font-mono text-slate-text">Pattern not found</div>;
   return (
-    <div className="mt-2 rounded border border-iron bg-iron/10 p-3">
+    <div className="mt-2 border border-iron bg-iron/10 p-3">
       <p className="text-[11px] font-mono text-slate-text uppercase tracking-wider mb-1">Matched Pattern</p>
       <p className="text-xs font-mono text-foreground whitespace-pre-wrap">{pattern.content}</p>
       <div className="flex gap-4 mt-2 text-[11px] font-mono text-slate-text">
@@ -397,18 +389,14 @@ function CommentCard({
   comment: ReviewComment;
   filePath: string;
 }) {
-  const borderClass = comment.severity
-    ? (severityBorder[comment.severity] ?? "")
-    : "";
-  const bgClass = comment.severity
-    ? (severityBg[comment.severity] ?? "")
-    : "";
-  const newFindingBorder = comment.is_new_finding ? "border-l-2 border-l-emerald-500/40" : "";
+  const severityClass = comment.severity
+    ? severityStyles[comment.severity] ?? "border-iron"
+    : "border-iron";
   const [patternExpanded, setPatternExpanded] = useState(false);
 
   return (
     <div
-      className={`group border-l-[3px] ${borderClass} ${bgClass} ${newFindingBorder} hover:bg-iron/15 transition-colors px-5 py-4 mx-4 my-2 rounded-r-md`}
+      className={`group border ${severityClass} hover:bg-iron/15 transition-colors px-5 py-4 my-2`}
     >
       <div className="flex items-center gap-2 mb-3">
         {comment.severity && (
@@ -511,7 +499,7 @@ function FileGroup({
   return (
     <section
       id={id}
-      className="scroll-mt-6 rounded-lg border border-iron overflow-hidden"
+      className="scroll-mt-6 border border-iron overflow-hidden"
     >
       <button
         type="button"
@@ -679,7 +667,7 @@ export default function ReviewDetailPage() {
   const comments = data?.comments ?? [];
 
   const isLive = review?.status === "pending" || review?.status === "in_progress";
-  const { stage, triageResults, failedStage, timeline, liveTokens } = useReviewStream(id, isLive);
+  const { stage, triageResults, failedStage, timeline, liveTokens, seenStages } = useReviewStream(id, isLive);
 
   const filesReviewed = useMemo(() =>
     new Set(timeline.filter(e => e.type === "file").map(e => e.message)).size,
@@ -772,9 +760,9 @@ export default function ReviewDetailPage() {
     return (
       <div className="space-y-6 p-6">
         <div className="h-8 w-64 animate-pulse rounded bg-iron/20" />
-        <div className="h-40 animate-pulse rounded-lg border border-iron bg-charcoal/40" />
-        <div className="h-60 animate-pulse rounded-lg border border-iron bg-charcoal/40" />
-        <div className="h-40 animate-pulse rounded-lg border border-iron bg-charcoal/40" />
+        <div className="h-40 animate-pulse border border-iron bg-charcoal/40" />
+        <div className="h-60 animate-pulse border border-iron bg-charcoal/40" />
+        <div className="h-40 animate-pulse border border-iron bg-charcoal/40" />
       </div>
     );
   }
@@ -815,10 +803,10 @@ export default function ReviewDetailPage() {
       </nav>
 
       {/* Header card */}
-      <header className="rounded-lg border border-iron bg-charcoal p-6 mb-6">
+      <header className="border border-iron bg-charcoal p-6 mb-6">
         <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 sm:gap-6">
           <div className="flex-1 min-w-0">
-            <h1 className="font-display text-xl font-bold text-foreground mb-2 truncate" title={review.pr_title}>
+            <h1 className="font-mono text-xl font-bold text-foreground mb-2 truncate" title={review.pr_title}>
               {review.pr_title}
             </h1>
             <div className="flex items-center gap-3 flex-wrap">
@@ -875,7 +863,7 @@ export default function ReviewDetailPage() {
                 href={ghUrl}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="inline-flex items-center gap-1.5 rounded-md border border-iron px-3 py-2 text-xs font-mono text-slate-text hover:text-amber hover:border-amber/50 transition-colors"
+                className="inline-flex items-center gap-1.5 border border-iron px-3 py-2 text-xs font-mono text-slate-text hover:text-amber hover:border-amber/50 transition-colors"
               >
                 <ExternalLink className="h-3.5 w-3.5" />
                 GitHub
@@ -886,12 +874,12 @@ export default function ReviewDetailPage() {
                 type="button"
                 onClick={() => retryReview.mutate(review.id)}
                 disabled={retryReview.isPending}
-                className="inline-flex items-center gap-1.5 rounded-md border border-amber/30 bg-amber/10 px-3 py-2 text-xs font-mono text-amber hover:bg-amber/20 transition-colors cursor-pointer"
+                className="inline-flex items-center gap-1.5 border border-amber/30 bg-amber/10 px-3 py-2 text-xs font-mono text-amber hover:bg-amber/20 transition-colors cursor-pointer"
               >
                 <RotateCcw
                   className={`h-3.5 w-3.5 ${retryReview.isPending ? "animate-spin" : ""}`}
                 />
-                Retry
+                {retryReview.isPending ? "Retrying\u2026" : "Retry"}
               </button>
             )}
           </div>
@@ -899,7 +887,7 @@ export default function ReviewDetailPage() {
       </header>
 
       {/* Pipeline progress (live reviews) */}
-      {isLive && <PipelineProgress stage={stage} failedStage={failedStage} filesReviewed={filesReviewed} totalFiles={totalFiles} />}
+      {isLive && <PipelineProgress stage={stage} failedStage={failedStage} filesReviewed={filesReviewed} totalFiles={totalFiles} seenStages={seenStages} />}
 
       {/* Activity timeline (live reviews) */}
       {isLive && timeline.length > 0 && (
@@ -913,8 +901,8 @@ export default function ReviewDetailPage() {
 
       {/* Triage results card */}
       {triageResults && isLive && (
-        <div className="rounded-lg border border-iron bg-charcoal/80 p-5 mb-6">
-          <h3 className="font-display text-sm font-bold text-foreground mb-3">
+        <div className="border border-iron bg-charcoal/80 p-5 mb-6">
+          <h3 className="font-mono text-sm font-bold text-foreground mb-3">
             File Classification
           </h3>
           <div className="space-y-1">
@@ -945,12 +933,12 @@ export default function ReviewDetailPage() {
         const err = friendlyError(review.error);
         return (
           <div
-            className="rounded-lg border border-red-400/30 bg-red-400/5 p-5 mb-6"
+            className="border border-red-400/30 bg-red-400/5 p-5 mb-6"
             role="alert"
           >
             <div className="flex items-center gap-2 mb-2">
               <AlertTriangle className="h-4 w-4 text-red-400" />
-              <h2 className="font-display text-sm font-bold text-red-400">
+              <h2 className="font-mono text-sm font-bold text-red-400">
                 {err.title}
               </h2>
             </div>
@@ -965,12 +953,12 @@ export default function ReviewDetailPage() {
                 type="button"
                 onClick={() => retryReview.mutate(review.id)}
                 disabled={retryReview.isPending}
-                className="inline-flex items-center gap-1.5 rounded-md border border-red-400/30 px-3 py-1.5 text-xs font-mono text-red-400 hover:bg-red-400/10 transition-colors cursor-pointer"
+                className="inline-flex items-center gap-1.5 border border-red-400/30 px-3 py-1.5 text-xs font-mono text-red-400 hover:bg-red-400/10 transition-colors cursor-pointer"
               >
                 <RotateCcw
                   className={`h-3.5 w-3.5 ${retryReview.isPending ? "animate-spin" : ""}`}
                 />
-                Retry
+                {retryReview.isPending ? "Retrying\u2026" : "Retry"}
               </button>
             </div>
             <details className="mt-3">
@@ -986,16 +974,31 @@ export default function ReviewDetailPage() {
       })()}
 
       {/* Summary card */}
-      <div className="rounded-lg border border-iron bg-charcoal/80 p-6 mb-8">
-        <h2 className="font-display text-base font-bold text-foreground mb-4">
+      <div className="border border-iron bg-charcoal/80 p-6 mb-8">
+        <h2 className="font-mono text-base font-bold text-foreground mb-4">
           Summary
         </h2>
 
         {/* Verdict */}
         {review.summary ? (
-          <p className="text-sm text-foreground leading-relaxed mb-4">
-            {review.summary.match(/^[^•\-*\n]+(?:\.[^•\-*\n]+)?\.?/)?.[0]?.trim() ?? review.summary.slice(0, 200)}
-          </p>
+          (() => {
+            const clean = extractSynthesis(review.summary);
+            const isLong = clean.length > 300;
+            return (
+              <div className="text-sm text-foreground leading-relaxed mb-4">
+                {isLong ? (
+                  <details>
+                    <summary className="cursor-pointer text-foreground/80 hover:text-foreground transition-colors">
+                      {clean.slice(0, 300)}...
+                    </summary>
+                    <div className="mt-2 whitespace-pre-wrap">{clean.slice(300)}</div>
+                  </details>
+                ) : (
+                  <p>{clean}</p>
+                )}
+              </div>
+            );
+          })()
         ) : (
           <p className="text-sm text-foreground/50 mb-4">No summary generated.</p>
         )}
@@ -1059,17 +1062,38 @@ export default function ReviewDetailPage() {
           )}
         </div>
 
-        {/* Mermaid diagram (collapsible) */}
-        {review.diagram && (
-          <details className="mt-4 pt-4 border-t border-iron/40">
-            <summary className="text-[11px] font-mono text-slate-text cursor-pointer hover:text-foreground transition-colors">
-              {review.diagram_title || "Architecture"} diagram
-            </summary>
-            <div className="mt-3 rounded-lg border border-iron bg-void/50 p-4 overflow-x-auto">
-              <MermaidChart chart={review.diagram} />
-            </div>
-          </details>
+        {/* Truncation notice */}
+        {review.truncated_files && Array.isArray(review.truncated_files) && review.truncated_files.length > 0 && (
+          <div className="mb-4 px-3 py-2 border border-amber/30 bg-amber/5 text-xs text-amber">
+            Review for {review.truncated_files.map((f: string) => <code key={f}>{f}</code>).reduce<React.ReactNode[]>((prev, curr, i) => i > 0 ? [...prev, ", ", curr] : [curr], [])} was truncated — additional findings may exist.
+          </div>
         )}
+
+        {/* Mermaid diagrams */}
+        {(() => {
+          type DiagramItem = { type?: string; title?: string; mermaid: string };
+          let diagrams: DiagramItem[] = [];
+          if (review.diagrams && Array.isArray(review.diagrams)) {
+            diagrams = review.diagrams;
+          } else if (review.diagram) {
+            diagrams = [{ type: "dependency", title: review.diagram_title || "Architecture", mermaid: review.diagram }];
+          }
+          if (diagrams.length === 0) return null;
+          return (
+            <div className="mt-4 pt-4 border-t border-iron/40 space-y-3">
+              {diagrams.map((d, i) => (
+                <details key={i} open={i === 0}>
+                  <summary className="text-[11px] font-mono text-slate-text cursor-pointer hover:text-foreground transition-colors">
+                    {d.title || capitalize(d.type || "Architecture")} diagram
+                  </summary>
+                  <div className="mt-3 border border-iron bg-void/50 p-4 overflow-x-auto">
+                    <MermaidChart chart={d.mermaid} />
+                  </div>
+                </details>
+              ))}
+            </div>
+          );
+        })()}
       </div>
 
       {/* Intelligence card */}
@@ -1081,7 +1105,7 @@ export default function ReviewDetailPage() {
         const allNovel = memoryStats.memoryUsed === 0;
 
         return (
-          <div className={`rounded-lg border bg-charcoal/80 p-5 mb-8 transition-colors ${highCoverage ? "border-green-400/20" : "border-iron"}`}>
+          <div className={`border bg-charcoal/80 p-5 mb-8 transition-colors ${highCoverage ? "border-green-400/20" : "border-iron"}`}>
             <div className="flex items-center gap-2 mb-4">
               <Zap className="h-3.5 w-3.5 text-amber" />
               <span className="text-[11px] font-mono uppercase tracking-wider text-slate-text">
@@ -1090,20 +1114,20 @@ export default function ReviewDetailPage() {
             </div>
 
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
-              <div className="rounded-md bg-iron/10 border border-iron/30 px-4 py-3 text-center hover:bg-iron/20 transition-colors">
-                <div className="text-xl font-display font-bold text-foreground">{memoryStats.total}</div>
+              <div className="bg-iron/10 border border-iron/30 px-4 py-3 text-center hover:bg-iron/20 transition-colors">
+                <div className="text-xl font-mono font-bold text-foreground">{memoryStats.total}</div>
                 <div className="text-[11px] font-mono text-slate-text mt-0.5">findings total</div>
               </div>
-              <div className="rounded-md bg-iron/10 border border-iron/30 px-4 py-3 text-center hover:bg-iron/20 transition-colors">
-                <div className="text-xl font-display font-bold text-purple-400">{memoryStats.patternMatches}</div>
+              <div className="bg-iron/10 border border-iron/30 px-4 py-3 text-center hover:bg-iron/20 transition-colors">
+                <div className="text-xl font-mono font-bold text-purple-400">{memoryStats.patternMatches}</div>
                 <div className="text-[11px] font-mono text-slate-text mt-0.5">pattern matches</div>
               </div>
-              <div className="rounded-md bg-iron/10 border border-iron/30 px-4 py-3 text-center hover:bg-iron/20 transition-colors">
-                <div className="text-xl font-display font-bold text-amber">{memoryStats.rulesEnforced}</div>
+              <div className="bg-iron/10 border border-iron/30 px-4 py-3 text-center hover:bg-iron/20 transition-colors">
+                <div className="text-xl font-mono font-bold text-amber">{memoryStats.rulesEnforced}</div>
                 <div className="text-[11px] font-mono text-slate-text mt-0.5">rules enforced</div>
               </div>
-              <div className="rounded-md bg-iron/10 border border-iron/30 px-4 py-3 text-center hover:bg-iron/20 transition-colors">
-                <div className="text-xl font-display font-bold text-emerald-400">{memoryStats.newFindings}</div>
+              <div className="bg-iron/10 border border-iron/30 px-4 py-3 text-center hover:bg-iron/20 transition-colors">
+                <div className="text-xl font-mono font-bold text-emerald-400">{memoryStats.newFindings}</div>
                 <div className="text-[11px] font-mono text-slate-text mt-0.5">new findings</div>
               </div>
             </div>
@@ -1113,7 +1137,7 @@ export default function ReviewDetailPage() {
                 <span className="text-[11px] font-mono text-slate-text shrink-0">Memory coverage</span>
                 <div className="flex-1 h-1.5 rounded-full bg-iron/20 overflow-hidden">
                   <div
-                    className={`h-1.5 rounded-full ${barColor} transition-all duration-500`}
+                    className={`h-1.5 rounded-full ${barColor} transition-[width] duration-400`}
                     style={{ width: `${coveragePct}%` }}
                   />
                 </div>
@@ -1131,7 +1155,7 @@ export default function ReviewDetailPage() {
 
       {/* Simulation Results */}
       {review.simulation_results && review.simulation_results.length > 0 && (
-        <div className="rounded-lg border border-iron bg-charcoal/80 p-4 mb-6">
+        <div className="border border-iron bg-charcoal/80 p-4 mb-6">
           <div className="mb-3 flex items-center gap-2">
             <span className="text-sm font-medium text-foreground">Simulation Results</span>
             <span className="rounded px-1.5 py-0.5 text-xs bg-charcoal text-slate-text">
@@ -1140,7 +1164,7 @@ export default function ReviewDetailPage() {
           </div>
           <div className="space-y-2">
             {review.simulation_results.map((result, i) => (
-              <div key={`sim-${i}`} className="flex items-start gap-3 rounded-md border border-iron bg-charcoal px-3 py-2">
+              <div key={`sim-${i}`} className="flex items-start gap-3 border border-iron bg-charcoal px-3 py-2">
                 <span className={`mt-0.5 shrink-0 text-xs font-bold ${result.passes ? 'text-emerald-500' : 'text-red-500'}`}>
                   {result.passes ? 'PASS' : 'FAIL'}
                 </span>
@@ -1214,18 +1238,18 @@ export default function ReviewDetailPage() {
               );
             })}
             {activeSeverity && visibleFiles.size === 0 && (
-              <div className="rounded-lg border border-iron bg-charcoal p-10 text-center">
-                <p className="font-sans text-sm text-slate-text">
-                  No {activeSeverity} comments found.
-                </p>
-              </div>
+            <div className="border border-iron bg-charcoal p-10">
+              <p className="font-mono text-sm text-slate-text">
+                // No {activeSeverity} comments found.
+              </p>
+            </div>
             )}
           </div>
         ) : (
           review.status === "completed" && (
-            <div className="rounded-lg border border-iron bg-charcoal p-10 text-center">
-              <p className="font-sans text-sm text-slate-text">
-                No comments — the code looks good!
+            <div className="border border-iron bg-charcoal p-10">
+              <p className="font-mono text-sm text-slate-text">
+                // No findings. Code looks good.
               </p>
             </div>
           )

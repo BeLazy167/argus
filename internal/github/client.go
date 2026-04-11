@@ -911,3 +911,144 @@ type ReviewComment struct {
 	StartLine int    // 0 if single-line comment
 	Side      string // "RIGHT" for additions, "LEFT" for deletions
 }
+
+// Issue is a trimmed view of a GitHub issue used by the acceptance worker.
+// Only the fields we actually read are exported; the full go-github Issue
+// type carries many more.
+type Issue struct {
+	Owner  string
+	Repo   string
+	Number int
+	URL    string
+	Title  string
+	Body   string
+	State  string // "open" | "closed"
+}
+
+// GetIssue fetches a single issue's title + body via the REST API.
+// Returns an *Issue (or error) for the given owner/repo/number. Used by the
+// acceptance worker to pull criteria from issue descriptions.
+func (c *Client) GetIssue(ctx context.Context, installationID int64, owner, repo string, number int) (*Issue, error) {
+	client, err := c.app.ClientForInstallation(installationID)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.restLimiter.Wait(ctx); err != nil {
+		return nil, fmt.Errorf("rate limit wait: %w", err)
+	}
+	issue, _, err := client.Issues.Get(ctx, owner, repo, number)
+	if err != nil {
+		return nil, fmt.Errorf("fetching issue %s/%s#%d: %w", owner, repo, number, err)
+	}
+	return &Issue{
+		Owner:  owner,
+		Repo:   repo,
+		Number: number,
+		URL:    issue.GetHTMLURL(),
+		Title:  issue.GetTitle(),
+		Body:   issue.GetBody(),
+		State:  issue.GetState(),
+	}, nil
+}
+
+// ClosingIssueRef is a single issue returned by GitHub's
+// closingIssuesReferences GraphQL field. This is GitHub's authoritative
+// answer to "what issues does this PR close" — covers PR body text, the
+// "Development" UI panel, and branch-name patterns.
+type ClosingIssueRef struct {
+	Owner  string
+	Repo   string
+	Number int
+	URL    string
+	Title  string
+	Body   string
+}
+
+// GetClosingIssues runs the closingIssuesReferences GraphQL query and returns
+// issues GitHub's own parser resolved for this PR. Primary source of issue
+// linkage for the acceptance worker — regex fallback only catches non-closing
+// mentions ("refs #N") that GraphQL won't return.
+//
+// Caps at 50 closing issues per PR (first: 50 in the query). PRs that close
+// more than 50 issues are extremely rare; if they exist, we return the first
+// 50 GitHub serves. Pagination via pageInfo.endCursor is left as a future
+// upgrade when a real workload needs it.
+func (c *Client) GetClosingIssues(ctx context.Context, installationID int64, owner, repo string, prNumber int) ([]ClosingIssueRef, error) {
+	client, err := c.app.ClientForInstallation(installationID)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.restLimiter.Wait(ctx); err != nil {
+		return nil, fmt.Errorf("rate limit wait: %w", err)
+	}
+
+	query := `query($owner: String!, $repo: String!, $number: Int!) {
+		repository(owner: $owner, name: $repo) {
+			pullRequest(number: $number) {
+				closingIssuesReferences(first: 50) {
+					nodes {
+						number
+						title
+						body
+						url
+						repository { nameWithOwner }
+					}
+				}
+			}
+		}
+	}`
+
+	body := map[string]any{
+		"query": query,
+		"variables": map[string]any{
+			"owner":  owner,
+			"repo":   repo,
+			"number": prNumber,
+		},
+	}
+
+	var resp struct {
+		Data struct {
+			Repository struct {
+				PullRequest struct {
+					ClosingIssuesReferences struct {
+						Nodes []struct {
+							Number     int    `json:"number"`
+							Title      string `json:"title"`
+							Body       string `json:"body"`
+							URL        string `json:"url"`
+							Repository struct {
+								NameWithOwner string `json:"nameWithOwner"`
+							} `json:"repository"`
+						} `json:"nodes"`
+					} `json:"closingIssuesReferences"`
+				} `json:"pullRequest"`
+			} `json:"repository"`
+		} `json:"data"`
+	}
+
+	if err := doGraphQL(ctx, client, body, &resp); err != nil {
+		return nil, fmt.Errorf("closing issues graphql: %w", err)
+	}
+
+	nodes := resp.Data.Repository.PullRequest.ClosingIssuesReferences.Nodes
+	out := make([]ClosingIssueRef, 0, len(nodes))
+	for _, n := range nodes {
+		// Split nameWithOwner into owner/repo
+		nOwner, nRepo := owner, repo
+		if nwo := n.Repository.NameWithOwner; nwo != "" {
+			if i := strings.Index(nwo, "/"); i > 0 {
+				nOwner, nRepo = nwo[:i], nwo[i+1:]
+			}
+		}
+		out = append(out, ClosingIssueRef{
+			Owner:  nOwner,
+			Repo:   nRepo,
+			Number: n.Number,
+			URL:    n.URL,
+			Title:  n.Title,
+			Body:   n.Body,
+		})
+	}
+	return out, nil
+}

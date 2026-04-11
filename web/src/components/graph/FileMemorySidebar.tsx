@@ -9,10 +9,14 @@ import {
   GitBranch,
   AlertTriangle,
   Loader2,
+  Activity,
+  Zap,
+  Network,
 } from "lucide-react";
 import { useFileMemory } from "@/lib/queries/graph";
 import { useActiveRepo } from "@/lib/hooks/use-active-repo";
 import { formatDistanceToNow } from "@/lib/time";
+import type { ArchFile } from "@/lib/queries/architecture";
 
 const SEVERITY_STYLES: Record<string, string> = {
   critical: "border-red-500/30 bg-red-500/10 text-red-400",
@@ -40,7 +44,7 @@ function riskColor(traceCount: number) {
   return "border-green-500/40 bg-green-500/15 text-green-400";
 }
 
-type SectionKey = "risk" | "patterns" | "findings" | "traces";
+type SectionKey = "metrics" | "deps" | "risk" | "patterns" | "findings" | "traces";
 
 type SectionProps = {
   id: SectionKey;
@@ -91,21 +95,55 @@ function EmptyState({ text }: { text: string }) {
   );
 }
 
+function MetricRow({ label, value, pct }: { label: string; value: number | string; pct?: string }) {
+  return (
+    <div className="flex items-center justify-between text-[10px] font-mono">
+      <span className="text-slate-500">{label}</span>
+      <div className="flex items-center gap-2">
+        <span className="text-slate-300 tabular-nums">{value}</span>
+        {pct && <span className="text-amber-500/80">{pct}</span>}
+      </div>
+    </div>
+  );
+}
+
 type FileMemorySidebarProps = {
   filePath: string;
   onClose: () => void;
+  archFile?: ArchFile;
+  allFiles?: ArchFile[];
 };
 
-export default function FileMemorySidebar({ filePath, onClose }: FileMemorySidebarProps) {
+/** Risk color for the progress bar */
+function riskBarColor(score: number): string {
+  if (score >= 7) return "bg-red-500";
+  if (score >= 4) return "bg-amber-500";
+  return "bg-emerald-500";
+}
+
+/** Format percentile rank — only show callouts for unusual values, hide noise. */
+function formatPercentile(pct: number): string {
+  if (pct >= 95) return `top ${Math.max(100 - pct, 1)}%`;
+  if (pct >= 90) return `top 10%`;
+  if (pct >= 75) return `top 25%`;
+  return ""; // suppress everything else — too noisy
+}
+
+export default function FileMemorySidebar({ filePath, onClose, archFile, allFiles }: FileMemorySidebarProps) {
   const { activeId } = useActiveRepo();
   const { data, isLoading } = useFileMemory(activeId ?? undefined, filePath);
 
   const [expanded, setExpanded] = useState<Record<SectionKey, boolean>>({
-    risk: true,
+    metrics: true,
+    deps: true,
+    risk: false,
     patterns: false,
-    findings: false,
+    findings: true,
     traces: false,
   });
+
+  // Resolve dependents/dependencies from allFiles via coupling + edges
+  // For the sidebar, show top coupled files from archFile.coupling.
 
   const toggle = (key: SectionKey) =>
     setExpanded((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -113,7 +151,7 @@ export default function FileMemorySidebar({ filePath, onClose }: FileMemorySideb
   const fileName = filePath.split("/").pop() ?? filePath;
 
   return (
-    <div className="w-[320px] shrink-0 h-full bg-[#0e0e18] border-l border-slate-800/50 flex flex-col overflow-hidden animate-slide-in-right">
+    <div className="md:w-[320px] md:shrink-0 h-full bg-[#0e0e18] md:border-l border-slate-800/50 flex flex-col overflow-hidden animate-slide-in-right">
       {/* Header */}
       <div className="flex items-center gap-2 px-4 py-3 border-b border-slate-800/50 shrink-0">
         <div className="flex-1 min-w-0">
@@ -144,11 +182,130 @@ export default function FileMemorySidebar({ filePath, onClose }: FileMemorySideb
           </div>
         ) : (
           <>
+            {/* Architecture metrics */}
+            {archFile && (
+              <Section
+                id="metrics"
+                icon={<Activity className="h-3 w-3 text-slate-500" />}
+                title="Metrics"
+                expanded={expanded.metrics}
+                onToggle={() => toggle("metrics")}
+              >
+                <div className="space-y-3">
+                  {/* Risk score bar */}
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-[10px] font-mono text-slate-500">Risk Score</span>
+                      <span className="text-[10px] font-mono text-slate-300 font-semibold">
+                        {archFile.risk_score.toFixed(1)}/10
+                      </span>
+                    </div>
+                    <div className="h-1.5 bg-slate-800/50 rounded-full overflow-hidden">
+                      <div
+                        className={`h-full ${riskBarColor(archFile.risk_score)} transition-all duration-500`}
+                        style={{ width: `${Math.min(archFile.risk_score * 10, 100)}%` }}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Individual metrics */}
+                  <div className="space-y-1.5">
+                    <MetricRow
+                      label="fan_in"
+                      value={archFile.fan_in}
+                      pct={formatPercentile(archFile.percentiles.fan_in)}
+                    />
+                    <MetricRow label="fan_out" value={archFile.fan_out} />
+                    <MetricRow
+                      label="bugs / 100L"
+                      value={archFile.bug_density.toFixed(2)}
+                      pct={formatPercentile(archFile.percentiles.bug_density)}
+                    />
+                    <MetricRow
+                      label="PRs touched"
+                      value={archFile.change_frequency}
+                      pct={formatPercentile(archFile.percentiles.change_frequency)}
+                    />
+                  </div>
+
+                  {/* Insight */}
+                  {archFile.insight && (
+                    <div className="rounded border border-amber-500/30 bg-amber-500/5 px-2.5 py-2">
+                      <div className="flex items-start gap-1.5">
+                        <Zap className="h-3 w-3 text-amber-400 shrink-0 mt-0.5" />
+                        <p className="text-[10px] font-mono text-amber-300 leading-relaxed">
+                          {archFile.insight}
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </Section>
+            )}
+
+            {/* Dependencies */}
+            {archFile && (archFile.coupling.length > 0 || archFile.symbols.length > 0) && (
+              <Section
+                id="deps"
+                icon={<Network className="h-3 w-3 text-slate-500" />}
+                title="Dependencies"
+                count={archFile.coupling.length}
+                expanded={expanded.deps}
+                onToggle={() => toggle("deps")}
+              >
+                {archFile.coupling.length > 0 ? (
+                  <div className="space-y-1.5">
+                    <p className="text-[9px] font-mono text-slate-600 uppercase tracking-wider">
+                      Coupled files (co-change)
+                    </p>
+                    {archFile.coupling.map((c, i) => (
+                      <div
+                        key={i}
+                        className="flex items-center justify-between text-[10px] font-mono rounded border border-slate-800/40 bg-slate-900/30 px-2 py-1.5"
+                      >
+                        <span className="text-slate-400 truncate" title={c.path}>
+                          {c.path.split("/").pop()}
+                        </span>
+                        <span className="text-slate-600 ml-2 shrink-0">
+                          {(c.score * 100).toFixed(0)}%
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <EmptyState text="No strong couplings detected." />
+                )}
+
+                {archFile.symbols.length > 0 && (
+                  <div className="mt-3 space-y-1">
+                    <p className="text-[9px] font-mono text-slate-600 uppercase tracking-wider">
+                      Symbols ({archFile.symbols.length})
+                    </p>
+                    <div className="flex flex-wrap gap-1">
+                      {archFile.symbols.slice(0, 10).map((s, i) => (
+                        <span
+                          key={i}
+                          className="text-[9px] font-mono text-slate-500 bg-slate-800/40 rounded px-1.5 py-0.5"
+                        >
+                          {s}
+                        </span>
+                      ))}
+                      {archFile.symbols.length > 10 && (
+                        <span className="text-[9px] font-mono text-slate-600">
+                          +{archFile.symbols.length - 10} more
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </Section>
+            )}
+
             {/* Risk Section */}
             <Section
               id="risk"
               icon={<Shield className="h-3 w-3 text-slate-500" />}
-              title="Risk"
+              title="Trace Risk"
               expanded={expanded.risk}
               onToggle={() => toggle("risk")}
             >

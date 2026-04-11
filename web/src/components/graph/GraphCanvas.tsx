@@ -212,7 +212,7 @@ export default function GraphCanvas(props: Props) {
 
   return (
     <div className="h-full w-full relative">
-      <div className="absolute top-4 right-4 z-10 flex gap-1 bg-[#12121a]/80 backdrop-blur-sm rounded-lg border border-slate-800 p-0.5">
+      <div className="absolute top-4 right-4 z-10 flex gap-1 bg-[#12121a]/80 backdrop-blur-sm border border-slate-800 p-0.5">
         {([
           { key: "TB" as const, label: "↕" },
           { key: "LR" as const, label: "↔" },
@@ -231,7 +231,7 @@ export default function GraphCanvas(props: Props) {
         ))}
       </div>
 
-      <div className="absolute bottom-4 left-16 z-10 flex gap-3 bg-[#12121a]/80 backdrop-blur-sm rounded-lg border border-slate-800 px-3 py-1.5">
+      <div className="absolute bottom-4 left-16 z-10 flex gap-3 bg-[#12121a]/80 backdrop-blur-sm border border-slate-800 px-3 py-1.5">
         {[
           { color: "bg-blue-400", label: "TS" },
           { color: "bg-emerald-400", label: "PY" },

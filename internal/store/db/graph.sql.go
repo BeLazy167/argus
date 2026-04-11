@@ -91,6 +91,241 @@ func (q *Queries) GetBlastRadius(ctx context.Context, arg GetBlastRadiusParams) 
 	return items, nil
 }
 
+const getFileBugCount = `-- name: GetFileBugCount :one
+SELECT COUNT(*)::int as bugs
+FROM review_comments rc
+JOIN reviews r ON r.id = rc.review_id
+WHERE r.repo_id = $1 AND rc.file_path = $2 AND rc.severity IN ('critical','warning')
+`
+
+type GetFileBugCountParams struct {
+	RepoID   int64  `json:"repo_id"`
+	FilePath string `json:"file_path"`
+}
+
+// Single-file bug count for review prompt enrichment.
+func (q *Queries) GetFileBugCount(ctx context.Context, arg GetFileBugCountParams) (int32, error) {
+	row := q.db.QueryRow(ctx, getFileBugCount, arg.RepoID, arg.FilePath)
+	var bugs int32
+	err := row.Scan(&bugs)
+	return bugs, err
+}
+
+const getFileFanIn = `-- name: GetFileFanIn :one
+SELECT COUNT(DISTINCT src.file_path)::int as fan_in
+FROM code_edges ce
+JOIN code_nodes src ON src.id = ce.source_id
+JOIN code_nodes tgt ON tgt.id = ce.target_id
+WHERE ce.repo_id = $1 AND tgt.file_path = $2 AND src.file_path != tgt.file_path
+`
+
+type GetFileFanInParams struct {
+	RepoID   int64  `json:"repo_id"`
+	FilePath string `json:"file_path"`
+}
+
+// Single-file fan-in lookup for review prompt enrichment.
+func (q *Queries) GetFileFanIn(ctx context.Context, arg GetFileFanInParams) (int32, error) {
+	row := q.db.QueryRow(ctx, getFileFanIn, arg.RepoID, arg.FilePath)
+	var fan_in int32
+	err := row.Scan(&fan_in)
+	return fan_in, err
+}
+
+const getTopChokePoints = `-- name: GetTopChokePoints :many
+SELECT tgt.file_path, COUNT(DISTINCT src.file_path)::int as fan_in
+FROM code_edges ce
+JOIN code_nodes src ON src.id = ce.source_id
+JOIN code_nodes tgt ON tgt.id = ce.target_id
+WHERE ce.repo_id = $1 AND src.file_path != tgt.file_path
+GROUP BY tgt.file_path
+ORDER BY fan_in DESC
+LIMIT $2
+`
+
+type GetTopChokePointsParams struct {
+	RepoID int64 `json:"repo_id"`
+	Limit  int32 `json:"limit"`
+}
+
+type GetTopChokePointsRow struct {
+	FilePath string `json:"file_path"`
+	FanIn    int32  `json:"fan_in"`
+}
+
+// Top files by fan_in (used for review prompt context injection + memory indexing).
+func (q *Queries) GetTopChokePoints(ctx context.Context, arg GetTopChokePointsParams) ([]GetTopChokePointsRow, error) {
+	rows, err := q.db.Query(ctx, getTopChokePoints, arg.RepoID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GetTopChokePointsRow
+	for rows.Next() {
+		var i GetTopChokePointsRow
+		if err := rows.Scan(&i.FilePath, &i.FanIn); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listArchBugDensity = `-- name: ListArchBugDensity :many
+SELECT rc.file_path,
+       COUNT(DISTINCT CONCAT(r.pr_number::text, ':', COALESCE(rc.end_line::text, '0')))
+           FILTER (WHERE rc.severity IN ('critical','warning'))::int AS bugs,
+       COUNT(DISTINCT r.pr_number)::int AS prs
+FROM review_comments rc
+JOIN reviews r ON r.id = rc.review_id
+WHERE r.repo_id = $1
+GROUP BY rc.file_path
+`
+
+type ListArchBugDensityRow struct {
+	FilePath string `json:"file_path"`
+	Bugs     int32  `json:"bugs"`
+	Prs      int32  `json:"prs"`
+}
+
+// Returns bug count + PR count per file for bug density and change frequency metrics.
+// Bugs are deduped by (pr_number, end_line) so a single defect reported many
+// times in one PR counts once — a noisy PR no longer inflates density.
+func (q *Queries) ListArchBugDensity(ctx context.Context, repoID int64) ([]ListArchBugDensityRow, error) {
+	rows, err := q.db.Query(ctx, listArchBugDensity, repoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListArchBugDensityRow
+	for rows.Next() {
+		var i ListArchBugDensityRow
+		if err := rows.Scan(&i.FilePath, &i.Bugs, &i.Prs); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listArchCoupling = `-- name: ListArchCoupling :many
+SELECT r.pr_number, array_agg(DISTINCT rc.file_path)::text[] AS files
+FROM review_comments rc
+JOIN reviews r ON r.id = rc.review_id
+WHERE r.repo_id = $1 AND r.status = 'completed'
+GROUP BY r.pr_number
+ORDER BY r.pr_number DESC
+LIMIT 200
+`
+
+type ListArchCouplingRow struct {
+	PrNumber int32    `json:"pr_number"`
+	Files    []string `json:"files"`
+}
+
+// Returns last 200 PRs with their touched files for Jaccard co-change coupling.
+func (q *Queries) ListArchCoupling(ctx context.Context, repoID int64) ([]ListArchCouplingRow, error) {
+	rows, err := q.db.Query(ctx, listArchCoupling, repoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListArchCouplingRow
+	for rows.Next() {
+		var i ListArchCouplingRow
+		if err := rows.Scan(&i.PrNumber, &i.Files); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listArchFileEdges = `-- name: ListArchFileEdges :many
+SELECT src.file_path as source_path, tgt.file_path as target_path, ce.kind
+FROM code_edges ce
+JOIN code_nodes src ON src.id = ce.source_id
+JOIN code_nodes tgt ON tgt.id = ce.target_id
+WHERE ce.repo_id = $1 AND src.file_path != tgt.file_path
+`
+
+type ListArchFileEdgesRow struct {
+	SourcePath string `json:"source_path"`
+	TargetPath string `json:"target_path"`
+	Kind       string `json:"kind"`
+}
+
+// Returns inter-file edges (excludes self-references) for fan-in/fan-out + edge graph.
+func (q *Queries) ListArchFileEdges(ctx context.Context, repoID int64) ([]ListArchFileEdgesRow, error) {
+	rows, err := q.db.Query(ctx, listArchFileEdges, repoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListArchFileEdgesRow
+	for rows.Next() {
+		var i ListArchFileEdgesRow
+		if err := rows.Scan(&i.SourcePath, &i.TargetPath, &i.Kind); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listArchNodes = `-- name: ListArchNodes :many
+SELECT file_path, COALESCE(language, '')::text as language, name,
+       (COALESCE(line_end, 0) - COALESCE(line_start, 0) + 1)::int as line_span
+FROM code_nodes
+WHERE repo_id = $1
+ORDER BY file_path, line_start
+`
+
+type ListArchNodesRow struct {
+	FilePath string `json:"file_path"`
+	Language string `json:"language"`
+	Name     string `json:"name"`
+	LineSpan int32  `json:"line_span"`
+}
+
+// Returns all code nodes for a repo, used to compute file-level architecture metrics.
+func (q *Queries) ListArchNodes(ctx context.Context, repoID int64) ([]ListArchNodesRow, error) {
+	rows, err := q.db.Query(ctx, listArchNodes, repoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListArchNodesRow
+	for rows.Next() {
+		var i ListArchNodesRow
+		if err := rows.Scan(
+			&i.FilePath,
+			&i.Language,
+			&i.Name,
+			&i.LineSpan,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listGraphEdges = `-- name: ListGraphEdges :many
 SELECT ce.id, ce.repo_id, ce.source_id, ce.target_id, ce.kind,
        sn.name as source_name, tn.name as target_name

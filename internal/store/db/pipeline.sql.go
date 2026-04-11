@@ -7,9 +7,30 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/jackc/pgx/v5/pgtype"
 )
+
+const getAllFileReviewsForReview = `-- name: GetAllFileReviewsForReview :one
+SELECT (payload->'AllFileReviews')::jsonb AS all_file_reviews
+FROM pipeline_states
+WHERE review_id = $1
+ORDER BY updated_at DESC
+LIMIT 1
+`
+
+// Returns the unfiltered comments (before dedup/scoring) from the latest pipeline run for a review.
+// Used by the export endpoint to surface dropped findings.
+// Explicit ::jsonb cast is needed so sqlc infers a concrete type and applies
+// the RawMessage override from sqlc.yaml (otherwise it defaults to interface{}
+// which pgx decodes via json.Unmarshal, breaking the []byte assertion in export).
+func (q *Queries) GetAllFileReviewsForReview(ctx context.Context, reviewID pgtype.UUID) (json.RawMessage, error) {
+	row := q.db.QueryRow(ctx, getAllFileReviewsForReview, reviewID)
+	var all_file_reviews json.RawMessage
+	err := row.Scan(&all_file_reviews)
+	return all_file_reviews, err
+}
 
 const getLatestRunForReview = `-- name: GetLatestRunForReview :one
 SELECT id FROM pipeline_states WHERE review_id = $1 ORDER BY updated_at DESC LIMIT 1

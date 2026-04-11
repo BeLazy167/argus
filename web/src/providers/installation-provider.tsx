@@ -44,15 +44,21 @@ export function InstallationProvider({ children }: { children: ReactNode }) {
     },
   });
 
-  // Auto-link: if in a Clerk org but no installation scoped, try to match by org name
+  // Auto-link: if in a Clerk org but no installation scoped, try to match by org name.
+  // First attempt: match installations where clerk_org_id is NOT yet set (admin hasn't linked).
+  // Second attempt: match installations already linked to this Clerk org (member joining).
   useEffect(() => {
     if (!organization || !orgSlug || !installations?.length) return;
     if (current) return; // already scoped — no need to auto-link
     if (autoLinked.current === orgId) return; // already tried
 
-    const match = installations.find(
-      (i) => i.org_login.toLowerCase() === orgSlug.toLowerCase() && !i.clerk_org_id,
-    );
+    const match =
+      installations.find(
+        (i) => i.org_login.toLowerCase() === orgSlug.toLowerCase() && !i.clerk_org_id,
+      ) ??
+      installations.find(
+        (i) => i.clerk_org_id === orgId,
+      );
     if (!match) return;
 
     autoLinked.current = orgId;

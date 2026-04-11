@@ -43,7 +43,17 @@ func TestExtractTypeNames(t *testing.T) {
 }
 
 func TestResolveTypeEdges(t *testing.T) {
-	nameToID := map[string]int64{
+	// Build composite-key map from plain names, using a default file path
+	const testFile = "test.go"
+	makeKeyToID := func(names map[string]int64) map[string]int64 {
+		m := make(map[string]int64, len(names))
+		for name, id := range names {
+			m[nodeKey(testFile, name)] = id
+		}
+		return m
+	}
+
+	plainNameToID := map[string]int64{
 		"Order":       1,
 		"Item":        2,
 		"GetOrder":    3,
@@ -62,59 +72,59 @@ func TestResolveTypeEdges(t *testing.T) {
 		{
 			name: "return type creates edge",
 			symbols: []Symbol{
-				{Name: "GetOrder", ReturnType: "(*Order, error)"},
+				{Name: "GetOrder", FilePath: testFile, ReturnType: "(*Order, error)"},
 			},
 			want: []Edge{
-				{SourceName: "GetOrder", TargetName: "Order", Kind: "uses_type"},
+				{SourceName: nodeKey(testFile, "GetOrder"), TargetName: nodeKey(testFile, "Order"), Kind: "uses_type"},
 			},
 		},
 		{
 			name: "params create edges",
 			symbols: []Symbol{
-				{Name: "ListItems", Params: "(ctx Context, items []Item)"},
+				{Name: "ListItems", FilePath: testFile, Params: "(ctx Context, items []Item)"},
 			},
 			want: []Edge{
-				{SourceName: "ListItems", TargetName: "Context", Kind: "uses_type"},
-				{SourceName: "ListItems", TargetName: "Item", Kind: "uses_type"},
+				{SourceName: nodeKey(testFile, "ListItems"), TargetName: nodeKey(testFile, "Context"), Kind: "uses_type"},
+				{SourceName: nodeKey(testFile, "ListItems"), TargetName: nodeKey(testFile, "Item"), Kind: "uses_type"},
 			},
 		},
 		{
 			name: "both return and params",
 			symbols: []Symbol{
-				{Name: "NewService", ReturnType: "*UserService", Params: "(cfg Config)"},
+				{Name: "NewService", FilePath: testFile, ReturnType: "*UserService", Params: "(cfg Config)"},
 			},
 			want: []Edge{
-				{SourceName: "NewService", TargetName: "UserService", Kind: "uses_type"},
-				{SourceName: "NewService", TargetName: "Config", Kind: "uses_type"},
+				{SourceName: nodeKey(testFile, "NewService"), TargetName: nodeKey(testFile, "UserService"), Kind: "uses_type"},
+				{SourceName: nodeKey(testFile, "NewService"), TargetName: nodeKey(testFile, "Config"), Kind: "uses_type"},
 			},
 		},
 		{
 			name: "skip unknown types",
 			symbols: []Symbol{
-				{Name: "GetOrder", ReturnType: "*Unknown"},
+				{Name: "GetOrder", FilePath: testFile, ReturnType: "*Unknown"},
 			},
 			want: nil,
 		},
 		{
 			name: "skip self reference",
 			symbols: []Symbol{
-				{Name: "Order", ReturnType: "*Order"},
+				{Name: "Order", FilePath: testFile, ReturnType: "*Order"},
 			},
 			want: nil,
 		},
 		{
 			name: "dedup across return and params",
 			symbols: []Symbol{
-				{Name: "GetOrder", ReturnType: "*Order", Params: "(o *Order)"},
+				{Name: "GetOrder", FilePath: testFile, ReturnType: "*Order", Params: "(o *Order)"},
 			},
 			want: []Edge{
-				{SourceName: "GetOrder", TargetName: "Order", Kind: "uses_type"},
+				{SourceName: nodeKey(testFile, "GetOrder"), TargetName: nodeKey(testFile, "Order"), Kind: "uses_type"},
 			},
 		},
 		{
-			name: "symbol not in nameToID skipped",
+			name: "symbol not in keyToID skipped",
 			symbols: []Symbol{
-				{Name: "Missing", ReturnType: "*Order"},
+				{Name: "Missing", FilePath: testFile, ReturnType: "*Order"},
 			},
 			want: nil,
 		},
@@ -127,7 +137,8 @@ func TestResolveTypeEdges(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := resolveTypeEdges(tt.symbols, nameToID)
+			keyToID := makeKeyToID(plainNameToID)
+			got := resolveTypeEdges(tt.symbols, keyToID)
 
 			if len(got) == 0 {
 				got = nil
