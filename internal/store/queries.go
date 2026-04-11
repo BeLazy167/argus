@@ -376,12 +376,12 @@ func (s *Store) GetReview(ctx context.Context, id uuid.UUID) (*Review, error) {
 		SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, COALESCE(head_ref,''), github_review_id,
 		       status, summary, score, token_usage, trigger, triggered_by, duration_ms, error,
 		       deep_review, persona, is_incremental, created_at, completed_at,
-		       diagram, diagram_title, diagrams, truncated_files
+		       diagram, diagram_title, diagrams, truncated_files, brief
 		FROM reviews WHERE id = $1
 	`, id).Scan(&r.ID, &r.RepoID, &r.PRNumber, &r.PRTitle, &r.PRAuthor, &r.HeadSHA, &r.BaseSHA, &r.HeadRef, &r.GithubReviewID,
 		&r.Status, &r.Summary, &r.Score, &r.TokenUsage, &r.Trigger, &r.TriggeredBy, &r.DurationMs, &r.Error,
 		&r.DeepReview, &r.Persona, &r.IsIncremental, &r.CreatedAt, &r.CompletedAt,
-		&r.Diagram, &r.DiagramTitle, &r.Diagrams, &r.TruncatedFiles)
+		&r.Diagram, &r.DiagramTitle, &r.Diagrams, &r.TruncatedFiles, &r.Brief)
 	if err != nil {
 		return nil, err
 	}
@@ -424,7 +424,8 @@ func (s *Store) ListReviewsScoped(ctx context.Context, repoID int64, installatio
 		       rv.status, rv.summary, rv.score, rv.token_usage, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error,
 		       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at,
 		       rv.diagram, rv.diagram_title,
-		       COALESCE(rv.diagrams, '[]'::jsonb), COALESCE(rv.truncated_files, '[]'::jsonb)
+		       COALESCE(rv.diagrams, '[]'::jsonb), COALESCE(rv.truncated_files, '[]'::jsonb),
+		       rv.brief
 		FROM reviews rv
 		JOIN repos r ON rv.repo_id = r.id
 		WHERE rv.repo_id = $1 AND r.installation_id = ANY($2)
@@ -446,7 +447,8 @@ func (s *Store) ListAllReviewsScoped(ctx context.Context, installationIDs []int6
 		       rv.status, rv.summary, rv.score, rv.token_usage, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error,
 		       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at,
 		       rv.diagram, rv.diagram_title,
-		       COALESCE(rv.diagrams, '[]'::jsonb), COALESCE(rv.truncated_files, '[]'::jsonb)
+		       COALESCE(rv.diagrams, '[]'::jsonb), COALESCE(rv.truncated_files, '[]'::jsonb),
+		       rv.brief
 		FROM reviews rv
 		JOIN repos r ON rv.repo_id = r.id
 		WHERE r.installation_id = ANY($1)

@@ -56,6 +56,7 @@ type Review struct {
 	DiagramTitle   *string          `json:"diagram_title,omitempty"`
 	Diagrams       json.RawMessage  `json:"diagrams,omitempty"`
 	TruncatedFiles json.RawMessage  `json:"truncated_files,omitempty"`
+	Brief          *string          `json:"brief,omitempty"`
 }
 
 type ReviewComment struct {

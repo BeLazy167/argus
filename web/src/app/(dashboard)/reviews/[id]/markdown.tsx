@@ -6,7 +6,7 @@ import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
-import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
+import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
 
 /**
  * Sanitize schema extended to allow the HTML tags the backend's judge prompts
@@ -137,7 +137,7 @@ export function Markdown({
         if (className?.includes("language-") || codeStr.includes("\n")) {
           return (
             <SyntaxHighlighter
-              style={oneDark}
+              style={vscDarkPlus}
               language={codeLang}
               customStyle={codeBlockStyle}
             >
@@ -224,7 +224,7 @@ export function CodeSnippet({
   return (
     <div className="mx-4 mt-3 mb-1 rounded-md overflow-hidden border border-iron/40">
       <SyntaxHighlighter
-        style={oneDark}
+        style={vscDarkPlus}
         language={language}
         showLineNumbers
         startingLineNumber={start}

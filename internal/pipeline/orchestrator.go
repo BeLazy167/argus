@@ -1567,10 +1567,11 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	_, dbErr := o.db.Exec(ctx, `
 		UPDATE reviews SET summary = $1, score = $2, token_usage = $3, file_count = $4,
 		       deep_review = $5, persona = $6, is_incremental = $7, simulation_results = $8,
-		       truncated_files = $9
-		WHERE id = $10
+		       truncated_files = $9, brief = $10
+		WHERE id = $11
 	`, run.Synthesis.Summary, run.Synthesis.Score, tokenUsageJSON, len(run.FileReviews),
-		run.DeepReview, persona, run.IsIncremental, simResultsJSON, truncatedFilesJSON, run.ReviewID)
+		run.DeepReview, persona, run.IsIncremental, simResultsJSON, truncatedFilesJSON,
+		run.Synthesis.Brief, run.ReviewID)
 	if dbErr != nil {
 		o.logger.Error("pre-post DB update failed — review data at risk if PostReview also fails",
 			"error", dbErr, "review_id", run.ReviewID)

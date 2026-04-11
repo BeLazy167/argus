@@ -1029,8 +1029,14 @@ export default function ReviewDetailPage() {
           Summary
         </h2>
 
-        {/* Verdict — render as markdown so headings/bullets/details parse. */}
-        {review.summary ? (
+        {/* Verdict — prefer the LLM-generated Brief (same text posted to the GitHub PR
+            body). Falls back to extractSynthesis(summary) for legacy reviews without a
+            brief column. */}
+        {review.brief ? (
+          <div className="mb-4">
+            <Markdown>{review.brief}</Markdown>
+          </div>
+        ) : review.summary ? (
           <div className="mb-4">
             <Markdown>{extractSynthesis(review.summary)}</Markdown>
           </div>
