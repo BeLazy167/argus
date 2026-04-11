@@ -69,6 +69,12 @@ export type Review = {
   diagram_title?: string;
   diagrams?: { type?: string; title?: string; mermaid: string }[];
   truncated_files?: string[];
+  /**
+   * LLM-generated conversational verdict from synthesis. Posted to the GitHub
+   * PR comment body; also surfaced on the dashboard Summary card as the
+   * primary readout (preferred over the raw per-file `summary`).
+   */
+  brief?: string;
   created_at: string;
   completed_at?: string;
 };
