@@ -1430,6 +1430,82 @@ export default function SettingsPage() {
               )}
             </section>
           </ProGate>
+
+          {/* Section 6: Verification Features (installation-scoped, shown on both tabs) */}
+          <ProGate feature="Verification features">
+            <section>
+              <div className="flex items-center gap-3 mb-4">
+                <span className="inline-flex items-center justify-center h-6 w-6 rounded-full border border-amber/30 bg-amber/10 text-[11px] font-mono font-bold text-amber">
+                  6
+                </span>
+                <div className="flex items-center gap-2">
+                  <Sliders className="h-4 w-4 text-amber" />
+                  <h2 className="font-mono text-lg font-semibold text-foreground">
+                    Verification Features
+                  </h2>
+                </div>
+              </div>
+              <p className="text-[11px] font-mono text-slate-text mb-4">
+                Installation-scoped toggles for issue acceptance and cross-repo PR checks.
+                These apply to every repo in this installation.
+              </p>
+              <div className="grid gap-3 md:grid-cols-2">
+                <VerificationToggle
+                  label="Issue acceptance check"
+                  hint="Verify PRs against linked issue acceptance criteria"
+                  description="Auto-detects linked issues via GitHub's closingIssuesReferences (PR body `Closes #N` OR the Development UI panel). Extracts criteria and uses an LLM judge to classify each as addressed / partial / unaddressed / ambiguous."
+                  cost="+1 LLM call per linked issue (~1-2k tokens)"
+                  enabled={featureFlags?.issue_acceptance ?? true}
+                  pending={saveFeatureFlags.isPending}
+                  onToggle={() => {
+                    const next: FeatureFlags = {
+                      issue_acceptance: !(featureFlags?.issue_acceptance ?? true),
+                      cross_pr_checks: featureFlags?.cross_pr_checks ?? false,
+                      max_linked_prs: featureFlags?.max_linked_prs ?? 5,
+                    };
+                    saveFeatureFlags.mutate(next);
+                  }}
+                />
+                <VerificationToggle
+                  label="Cross-repo PR checks"
+                  hint="Check compatibility with linked PRs from other repos"
+                  description="Auto-detects GitHub PR URLs in your PR body. Fetches accessible peer PR diffs and uses an LLM to check for API contract / shared type incompatibilities. Inaccessible repos are noted as 'partial coverage' without severity impact."
+                  cost="+1 LLM call per review (skipped if no linked PRs)"
+                  enabled={featureFlags?.cross_pr_checks ?? false}
+                  pending={saveFeatureFlags.isPending}
+                  onToggle={() => {
+                    const next: FeatureFlags = {
+                      issue_acceptance: featureFlags?.issue_acceptance ?? true,
+                      cross_pr_checks: !(featureFlags?.cross_pr_checks ?? false),
+                      max_linked_prs: featureFlags?.max_linked_prs ?? 5,
+                    };
+                    saveFeatureFlags.mutate(next);
+                  }}
+                />
+              </div>
+              <div className="mt-3 flex items-center gap-3 text-[11px] font-mono text-slate-text">
+                <label htmlFor="max-linked-prs-repo">Max linked PRs per review:</label>
+                <input
+                  id="max-linked-prs-repo"
+                  type="number"
+                  min={1}
+                  max={20}
+                  value={featureFlags?.max_linked_prs ?? 5}
+                  onChange={(e) => {
+                    const n = parseInt(e.target.value, 10);
+                    if (isNaN(n) || n < 1 || n > 20) return;
+                    saveFeatureFlags.mutate({
+                      issue_acceptance: featureFlags?.issue_acceptance ?? true,
+                      cross_pr_checks: featureFlags?.cross_pr_checks ?? false,
+                      max_linked_prs: n,
+                    });
+                  }}
+                  className="w-16 bg-charcoal border border-iron px-2 py-1 text-center text-foreground focus:border-amber focus:outline-none"
+                />
+                <span className="text-slate-text/70">bounded 1–20</span>
+              </div>
+            </section>
+          </ProGate>
         </div>
       ))}
     </>
