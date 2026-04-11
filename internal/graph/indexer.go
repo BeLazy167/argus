@@ -149,12 +149,15 @@ func indexFileSet(ctx context.Context, st *store.Store, ghClient *ghpkg.Client, 
 					continue
 				}
 				// Import targets are external packages — they won't be in nameToIDs.
-				// Create a synthetic import node so the edge is preserved.
+				// Create a synthetic "module" node so the edge is preserved.
+				// The code_nodes_kind_check constraint only allows
+				// function|method|class|type|interface|file|module, so we
+				// use "module" for external package references.
 				targetID, tok := resolveEdgeTarget(filePath, edge.TargetName)
 				if !tok {
 					// Create a placeholder node for the external import target
 					var err error
-					targetID, err = st.UpsertCodeNode(ctx, repoDBID, "import", edge.TargetName, filePath, 0, 0, "", 0)
+					targetID, err = st.UpsertCodeNode(ctx, repoDBID, "module", edge.TargetName, filePath, 0, 0, "", 0)
 					if err != nil {
 						slog.Warn("graph: upsert import node failed", "target", edge.TargetName, "error", err)
 						continue
