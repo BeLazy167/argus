@@ -99,6 +99,26 @@ function capitalize(s: string): string {
  * `### \`...\`` heading (the real synthesis prose) plus any `## Issue Coverage`
  * or `## Cross-Repo PR Coverage` sections that come AFTER the file listing.
  */
+/**
+ * Strip HTML tags and common markdown syntax from a comment body so it
+ * renders cleanly in a plain-text preview (top findings card). We keep
+ * the human-readable text and drop the scaffolding:
+ * - `<details>`, `<summary>`, `<sub>`, `<sup>` tags removed
+ * - `**bold**`, `*italic*`, `_emphasis_` markers stripped (text preserved)
+ * - `` `code` `` backticks removed
+ * - Collapsed internal whitespace
+ */
+function stripMarkdownForPreview(s: string): string {
+  return s
+    .replace(/<\/?(details|summary|sub|sup|kbd|mark)[^>]*>/gi, "")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/\*([^*]+)\*/g, "$1")
+    .replace(/_([^_]+)_/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function extractSynthesis(summary: string): string {
   const cleaned = summary
     .replace(/^#+\s*Argus Review\s*(\(Incremental\))?\s*\n*/i, "")
@@ -813,7 +833,7 @@ export default function ReviewDetailPage() {
   const showSidebar = grouped.length > 1;
 
   return (
-    <div className="mx-auto max-w-[1400px]">
+    <>
       {/* Breadcrumb */}
       <nav className="flex items-center gap-2 mb-6" aria-label="Breadcrumb">
         <Link
@@ -1034,7 +1054,8 @@ export default function ReviewDetailPage() {
                 const shortPath = c.file_path.split("/").slice(-2).join("/");
                 const line = c.end_line ?? c.start_line;
                 const sevColor = c.severity === "critical" ? "bg-red-400" : "bg-amber";
-                const body = c.body.length > 80 ? c.body.slice(0, 80) + "\u2026" : c.body;
+                const cleanBody = stripMarkdownForPreview(c.body);
+                const body = cleanBody.length > 80 ? cleanBody.slice(0, 80) + "\u2026" : cleanBody;
                 return (
                   <div key={c.id} className="flex items-start gap-2 py-1.5">
                     <div className={`h-1.5 w-1.5 rounded-full mt-1.5 shrink-0 ${sevColor}`} />
@@ -1267,6 +1288,6 @@ export default function ReviewDetailPage() {
           )
         )}
       </div>
-    </div>
+    </>
   );
 }
