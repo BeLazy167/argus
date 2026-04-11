@@ -126,7 +126,10 @@ function extractSynthesis(summary: string): string {
     .replace(/^\n+|\n+$/g, "");
 
   // Find the first per-file heading (### `path/to/file`) via .search().
-  const fileHeadingRe = /\n#{3}\s+`[^`]+`/;
+  // Must match at string start OR after a newline — the `m` flag makes `^`
+  // match line starts. The previous version required a literal `\n` prefix
+  // and missed the first heading when it was at position 0.
+  const fileHeadingRe = /^#{3}\s+`[^`]+`/m;
   const fileIdx = cleaned.search(fileHeadingRe);
   if (fileIdx < 0) return cleaned;
 
