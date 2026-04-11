@@ -231,7 +231,13 @@ function ArchCanvasInner({ files, edges, lens, direction, onSelectFile }: InnerP
   const [nodes, setNodes, onNodesChange] = useNodesState(layout.nodes);
   const [rfEdges, setEdges, onEdgesChange] = useEdgesState(layout.edges);
 
-  // Highlight connected nodes on selection
+  // Highlight connected nodes on selection.
+  //
+  // The effect reads `layout.edges` — a stable memo — instead of the stateful
+  // `rfEdges`. Using `rfEdges` as a dep + calling `setEdges` inside creates
+  // an infinite loop (each setEdges update re-triggers the effect).
+  // `setNodes` / `setEdges` are stable refs from useNodesState/useEdgesState
+  // and don't need to be in the dep array.
   useEffect(() => {
     if (!selectedNodeId) {
       setNodes((nds) =>
@@ -254,7 +260,7 @@ function ArchCanvasInner({ files, edges, lens, direction, onSelectFile }: InnerP
 
     const connectedEdgeIds = new Set<string>();
     const connectedNodeIds = new Set<string>([selectedNodeId]);
-    for (const e of rfEdges) {
+    for (const e of layout.edges) {
       if (e.source === selectedNodeId || e.target === selectedNodeId) {
         connectedEdgeIds.add(e.id);
         connectedNodeIds.add(e.source);
@@ -279,7 +285,10 @@ function ArchCanvasInner({ files, edges, lens, direction, onSelectFile }: InnerP
         };
       })
     );
-  }, [selectedNodeId, lens, setNodes, setEdges, rfEdges, files]);
+    // Intentionally excluding setNodes/setEdges (stable from state hooks)
+    // and files (subsumed by layout which already depends on files).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedNodeId, lens, layout]);
 
   const onNodeClick: NodeMouseHandler = useCallback(
     (_event, node) => {
