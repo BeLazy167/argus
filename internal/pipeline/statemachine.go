@@ -36,6 +36,14 @@ func (sm *StateMachine) RegisterStage(state PipelineState, fn StageFunc) {
 
 // Run executes the pipeline from the current state to completion or failure.
 func (sm *StateMachine) Run(ctx context.Context, run *PipelineRun) error {
+	// Transition review status pending → in_progress on first tick.
+	// Historically nothing did this, so every review looked stuck on "pending"
+	// until it completed/failed, which broke the dashboard's `isLive` check
+	// and stream handshake timing. Non-fatal: log Warn if the DB is down.
+	if updErr := sm.st.UpdateReviewStatus(ctx, run.ReviewID, "in_progress", "", nil); updErr != nil {
+		sm.logger.Warn("failed to mark review in_progress", "error", updErr, "review_id", run.ReviewID)
+	}
+
 	trans := transitions()
 	for !run.State.IsTerminal() {
 		select {
@@ -131,6 +139,11 @@ func shouldPersist(state PipelineState) bool {
 }
 
 // Resume loads and resumes an incomplete pipeline run.
+//
+// IMPORTANT: this path must register the review's event-bus topic before
+// calling Run, otherwise Publish/Subscribe no-op and WebSocket clients
+// reconnect-loop. HandlePREvent opens the topic for new reviews; Resume
+// must mirror that for recovered reviews (e.g. after fly deploy restarts).
 func (sm *StateMachine) Resume(ctx context.Context, runID uuid.UUID) (*PipelineRun, error) {
 	run, err := sm.loadState(ctx, runID)
 	if err != nil {
@@ -139,6 +152,10 @@ func (sm *StateMachine) Resume(ctx context.Context, runID uuid.UUID) (*PipelineR
 	run.EventBus = sm.eventBus
 	if run.State.IsTerminal() {
 		return run, nil
+	}
+	if sm.eventBus != nil {
+		sm.eventBus.OpenTopic(run.ReviewID)
+		defer sm.eventBus.CloseTopic(run.ReviewID)
 	}
 	sm.logger.Info("resuming pipeline", "run_id", runID, "state", run.State)
 	return run, sm.Run(ctx, run)

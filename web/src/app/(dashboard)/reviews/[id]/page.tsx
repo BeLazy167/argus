@@ -91,11 +91,38 @@ function capitalize(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
+/**
+ * Strip the auto-generated per-file listing from the summary. The backend
+ * includes `### file/path.ts\n- [severity] L42: ...` sections for every file,
+ * but those are already rendered as first-class comment cards below the
+ * summary — showing them twice is noise. We keep everything ABOVE the first
+ * `### \`...\`` heading (the real synthesis prose) plus any `## Issue Coverage`
+ * or `## Cross-Repo PR Coverage` sections that come AFTER the file listing.
+ */
 function extractSynthesis(summary: string): string {
-  return summary
+  const cleaned = summary
     .replace(/^#+\s*Argus Review\s*(\(Incremental\))?\s*\n*/i, "")
     .replace(/^Reviewed \d+ files with \d+ comments\.\s*\n*/i, "")
     .replace(/^\n+|\n+$/g, "");
+
+  // Find the first per-file heading (### `path/to/file`) via .search().
+  const fileHeadingRe = /\n#{3}\s+`[^`]+`/;
+  const fileIdx = cleaned.search(fileHeadingRe);
+  if (fileIdx < 0) return cleaned;
+
+  // Before-file-listing prose (the real synthesis).
+  const prose = cleaned.slice(0, fileIdx).trim();
+
+  // Preserve coverage sections added by synthesize() (## Issue Coverage / ##
+  // Cross-Repo PR Coverage) even though they appear after the file listing.
+  const coverageRe = /\n## (Issue Coverage|Cross-Repo PR Coverage)/;
+  const afterFiles = cleaned.slice(fileIdx);
+  const coverageIdx = afterFiles.search(coverageRe);
+  if (coverageIdx >= 0) {
+    const coveragePart = afterFiles.slice(coverageIdx).trim();
+    return prose ? `${prose}\n\n${coveragePart}` : coveragePart;
+  }
+  return prose;
 }
 
 /* ── Severity Maps ───────────────────────────── */
@@ -786,7 +813,7 @@ export default function ReviewDetailPage() {
   const showSidebar = grouped.length > 1;
 
   return (
-    <>
+    <div className="mx-auto max-w-[1400px]">
       {/* Breadcrumb */}
       <nav className="flex items-center gap-2 mb-6" aria-label="Breadcrumb">
         <Link
@@ -979,26 +1006,11 @@ export default function ReviewDetailPage() {
           Summary
         </h2>
 
-        {/* Verdict */}
+        {/* Verdict — render as markdown so headings/bullets/details parse. */}
         {review.summary ? (
-          (() => {
-            const clean = extractSynthesis(review.summary);
-            const isLong = clean.length > 300;
-            return (
-              <div className="text-sm text-foreground leading-relaxed mb-4">
-                {isLong ? (
-                  <details>
-                    <summary className="cursor-pointer text-foreground/80 hover:text-foreground transition-colors">
-                      {clean.slice(0, 300)}...
-                    </summary>
-                    <div className="mt-2 whitespace-pre-wrap">{clean.slice(300)}</div>
-                  </details>
-                ) : (
-                  <p>{clean}</p>
-                )}
-              </div>
-            );
-          })()
+          <div className="mb-4">
+            <Markdown>{extractSynthesis(review.summary)}</Markdown>
+          </div>
         ) : (
           <p className="text-sm text-foreground/50 mb-4">No summary generated.</p>
         )}
@@ -1255,6 +1267,6 @@ export default function ReviewDetailPage() {
           )
         )}
       </div>
-    </>
+    </div>
   );
 }
