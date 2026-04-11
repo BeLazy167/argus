@@ -1,10 +1,14 @@
 package graph
 
 import (
+	"log/slog"
 	"path/filepath"
 	"regexp"
 	"strings"
 )
+
+// maxContentBytes limits source file size to prevent OOM on minified/binary files.
+const maxContentBytes = 2 << 20 // 2 MB
 
 // Symbol represents a code symbol extracted from a source file.
 type Symbol struct {
@@ -14,7 +18,8 @@ type Symbol struct {
 	LineStart  int
 	LineEnd    int
 	ReturnType string // "(int, error)", "error", etc.
-	Params     string // "(ctx context.Context, id int64)"
+	Params     string // "(ctx context.Context, id int64)" — display only
+	ParamCount int    // derived arity, or 0 if unknown
 	Visibility string // "exported" | "unexported"
 	IsAsync    bool   // Go: always false; TS: true if async; Python: true if async def
 	Receiver   string // Go method receiver type
@@ -26,6 +31,36 @@ type Edge struct {
 	SourceName string
 	TargetName string
 	Kind       string // calls, imports, inherits, implements, uses_type
+}
+
+// SymbolKind enumerates valid Symbol.Kind values. Kept as string alias
+// for backwards compat with existing callers that use raw strings.
+type SymbolKind = string
+
+const (
+	KindFunction  SymbolKind = "function"
+	KindMethod    SymbolKind = "method"
+	KindClass     SymbolKind = "class"
+	KindType      SymbolKind = "type"
+	KindInterface SymbolKind = "interface"
+)
+
+// EdgeKind enumerates valid Edge.Kind values.
+type EdgeKind = string
+
+const (
+	EdgeCalls      EdgeKind = "calls"
+	EdgeImports    EdgeKind = "imports"
+	EdgeInherits   EdgeKind = "inherits"
+	EdgeImplements EdgeKind = "implements"
+	EdgeUsesType   EdgeKind = "uses_type"
+)
+
+// nodeKey returns a unique map key for a symbol within a repo.
+// Uses filePath+name to avoid collisions when multiple files define
+// symbols with the same name (e.g. Config in different packages).
+func nodeKey(filePath, name string) string {
+	return filePath + "\x00" + name
 }
 
 // --- Go patterns ---
@@ -114,10 +149,14 @@ func langForFile(path string) string {
 }
 
 // ParseFileSymbols extracts symbols and edges from a source file.
-// Dispatch order: Go AST > ctags > regex fallback > empty.
+// Dispatch order: Go AST > tree-sitter > regex fallback > empty.
 func ParseFileSymbols(filePath, content string) ([]Symbol, []Edge) {
 	lang := langForFile(filePath)
 	if lang == "" {
+		return nil, nil
+	}
+	if len(content) > maxContentBytes {
+		slog.Warn("graph: file too large, skipping", "file", filePath, "bytes", len(content))
 		return nil, nil
 	}
 	lines := strings.Split(content, "\n")
@@ -131,13 +170,13 @@ func ParseFileSymbols(filePath, content string) ([]Symbol, []Edge) {
 		return parseGo(filePath, content, lines)
 	}
 
-	// Non-Go: try ctags first
-	syms, edges := parseCTags(filePath, content)
+	// Non-Go: try tree-sitter first
+	syms, edges := parseTreeSitter(filePath, content)
 	if syms != nil || edges != nil {
 		return syms, edges
 	}
 
-	// ctags unavailable — fall back to regex parsers
+	// tree-sitter unavailable — fall back to regex parsers
 	switch lang {
 	case "typescript", "javascript":
 		return parseTS(filePath, content, lines)

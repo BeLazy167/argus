@@ -73,13 +73,13 @@ export function ActivityTimeline({ timeline, liveTokens, stage, startedAt }: Pro
   const hiddenCount = collapsed ? timeline.length - COLLAPSED_THRESHOLD : 0;
 
   return (
-    <div className="rounded-lg border border-iron bg-charcoal/80 p-5 mb-8">
+    <div className="border border-iron bg-charcoal/80 p-5 mb-8">
       {/* Header */}
       <div className="flex items-center justify-between mb-4">
         <span className="text-[11px] font-mono uppercase tracking-wider text-slate-text">
           Activity
         </span>
-        <span className={`inline-flex items-center rounded-md border border-amber/30 bg-amber/10 px-2 py-0.5 text-[11px] font-mono text-amber ${isActive ? "animate-pulse" : ""}`}>
+        <span className={`inline-flex items-center border border-amber/30 bg-amber/10 px-2 py-0.5 text-[11px] font-mono text-amber ${isActive ? "animate-pulse" : ""}`}>
           {isActive && <Loader2 className="h-3 w-3 mr-1.5 animate-spin" />}
           {formatElapsed(elapsed)}
         </span>

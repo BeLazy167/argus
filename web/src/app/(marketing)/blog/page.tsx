@@ -21,7 +21,7 @@ export default function BlogPage() {
         notified when we publish.
       </p>
 
-      <div className="rounded-lg border border-iron bg-charcoal p-6 max-w-md">
+      <div className="border border-iron bg-charcoal p-6 max-w-md">
         <p className="text-xs font-mono text-foreground mb-4">
           Get notified on new posts and product updates.
         </p>
@@ -36,11 +36,11 @@ export default function BlogPage() {
             name="email"
             placeholder="you@company.com"
             required
-            className="flex-1 rounded-md border border-iron bg-background px-3 py-2 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none"
+            className="flex-1 border border-iron bg-background px-3 py-2 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none"
           />
           <button
             type="submit"
-            className="rounded-md bg-amber px-5 py-2 text-xs font-mono font-medium text-void hover:brightness-110 transition-all shrink-0"
+            className="bg-amber px-5 py-2 text-xs font-mono font-medium text-void hover:brightness-110 transition-all shrink-0"
           >
             Subscribe
           </button>

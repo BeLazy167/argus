@@ -55,7 +55,7 @@ export function PaginationBar({
           onClick={onPrev}
           disabled={!hasPrev}
           aria-label="Previous page"
-          className="rounded border border-border p-1 text-muted-foreground hover:text-foreground disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+          className="rounded border border-border p-2.5 text-muted-foreground hover:text-foreground disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
         >
           <ChevronLeft className="h-3.5 w-3.5" />
         </button>
@@ -66,7 +66,7 @@ export function PaginationBar({
           onClick={onNext}
           disabled={!hasNext}
           aria-label="Next page"
-          className="rounded border border-border p-1 text-muted-foreground hover:text-foreground disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+          className="rounded border border-border p-2.5 text-muted-foreground hover:text-foreground disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
         >
           <ChevronRight className="h-3.5 w-3.5" />
         </button>

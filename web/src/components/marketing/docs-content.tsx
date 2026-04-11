@@ -223,10 +223,10 @@ function SidebarLink({
   return (
     <a
       href={`#${id}`}
-      className={`block py-1.5 text-xs font-mono transition-colors border-l-2 pl-3 ${
+      className={`block py-1.5 text-xs font-mono transition-[color,border-color] duration-150 pl-3 ${
         active
-          ? "border-amber text-amber"
-          : "border-transparent text-slate-text hover:text-foreground hover:border-iron"
+          ? "text-amber border-l-2 border-amber"
+          : "text-slate-text hover:text-foreground border-l-2 border-transparent hover:border-iron"
       }`}
     >
       {label}
@@ -237,7 +237,7 @@ function SidebarLink({
 function SectionHeader({ id, title }: { id: string; title: string }) {
   return (
     <div id={id} className="scroll-mt-24">
-      <h2 className="font-display text-xl font-bold text-foreground mb-1">
+      <h2 className="font-mono text-xl font-bold text-foreground mb-1">
         {title}
       </h2>
       <div className="h-px bg-iron mb-6" />
@@ -247,7 +247,7 @@ function SectionHeader({ id, title }: { id: string; title: string }) {
 
 function CodeBlock({ children }: { children: string }) {
   return (
-    <pre className="rounded-lg border border-iron bg-void/80 p-4 overflow-x-auto">
+    <pre className="border border-iron bg-void/80 p-4 overflow-x-auto">
       <code className="text-xs font-mono text-foreground/80 leading-relaxed">
         {children}
       </code>
@@ -264,7 +264,7 @@ function TerminalBlock({
 }) {
   return (
     <div>
-      <div className="flex items-center gap-2 rounded-t-lg border border-iron bg-charcoal px-4 py-2.5">
+      <div className="flex items-center gap-2 border border-iron bg-charcoal px-4 py-2.5">
         <div className="flex gap-1.5">
           <div className="h-2.5 w-2.5 rounded-full bg-iron" />
           <div className="h-2.5 w-2.5 rounded-full bg-iron" />
@@ -272,7 +272,7 @@ function TerminalBlock({
         </div>
         <span className="ml-2 text-[11px] font-mono text-amber">{title}</span>
       </div>
-      <div className="border-x border-b border-iron rounded-b-lg bg-void p-5 space-y-4">
+      <div className="border-x border-b border-iron bg-void p-5 space-y-4">
         {children}
       </div>
     </div>
@@ -373,7 +373,7 @@ export function DocsContent() {
                 },
               ].map((item) => (
                 <div key={item.step} className="flex gap-4">
-                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-amber/10 text-xs font-mono font-medium text-amber">
+                  <span className="flex h-7 w-7 shrink-0 items-center justify-center bg-amber/10 text-xs font-mono font-medium text-amber">
                     {item.step}
                   </span>
                   <div>
@@ -403,10 +403,10 @@ export function DocsContent() {
                 return (
                   <div
                     key={stage.step}
-                    className="rounded-lg border border-iron bg-charcoal p-4 flex gap-4"
+                    className="border border-iron bg-charcoal p-4 flex gap-4"
                   >
                     <div className="flex flex-col items-center shrink-0 pt-0.5">
-                      <div className="h-8 w-8 rounded-md bg-amber/10 flex items-center justify-center">
+                      <div className="h-8 w-8 bg-amber/10 flex items-center justify-center">
                         <Icon className="h-4 w-4 text-amber" />
                       </div>
                       {i < PIPELINE_STAGES.length - 1 && (
@@ -471,10 +471,10 @@ export function DocsContent() {
                 return (
                   <div
                     key={item.title}
-                    className="rounded-lg border border-iron bg-charcoal p-5"
+                    className="border border-iron bg-charcoal p-5"
                   >
                     <div className="flex items-center gap-3 mb-3">
-                      <div className="h-8 w-8 rounded-md bg-amber/10 flex items-center justify-center">
+                      <div className="h-8 w-8 bg-amber/10 flex items-center justify-center">
                         <Icon className="h-4 w-4 text-amber" />
                       </div>
                       <span className="text-xs font-mono font-bold text-foreground">
@@ -720,7 +720,7 @@ export function DocsContent() {
                   directly shapes future reviews.
                 </p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div className="rounded-lg border border-iron bg-charcoal p-4">
+                  <div className="border border-iron bg-charcoal p-4">
                     <div className="flex items-center gap-2 mb-2">
                       <ThumbsUp className="h-3.5 w-3.5 text-green-400" />
                       <span className="text-xs font-mono font-bold text-foreground">
@@ -732,7 +732,7 @@ export function DocsContent() {
                       with higher confidence in future reviews.
                     </p>
                   </div>
-                  <div className="rounded-lg border border-iron bg-charcoal p-4">
+                  <div className="border border-iron bg-charcoal p-4">
                     <div className="flex items-center gap-2 mb-2">
                       <ThumbsDown className="h-3.5 w-3.5 text-red-400" />
                       <span className="text-xs font-mono font-bold text-foreground">
@@ -788,7 +788,7 @@ export function DocsContent() {
                 return (
                   <div
                     key={item.title}
-                    className="rounded-lg border border-iron bg-charcoal p-4"
+                    className="border border-iron bg-charcoal p-4"
                   >
                     <div className="flex items-center gap-3 mb-2">
                       <Icon className="h-4 w-4 text-amber" />
@@ -821,7 +821,7 @@ export function DocsContent() {
               {SEVERITIES.map((sev) => (
                 <div
                   key={sev.name}
-                  className="flex items-start gap-3 rounded-lg border border-iron bg-charcoal p-4"
+                  className="flex items-start gap-3 border border-iron bg-charcoal p-4"
                 >
                   <div
                     className={`h-2.5 w-2.5 rounded-full ${sev.dot} mt-1 shrink-0`}
@@ -854,7 +854,7 @@ export function DocsContent() {
                 return (
                   <div
                     key={cat.name}
-                    className="rounded-lg border border-iron bg-charcoal p-4"
+                    className="border border-iron bg-charcoal p-4"
                   >
                     <div className="flex items-center gap-2 mb-2">
                       <Icon className="h-3.5 w-3.5 text-amber" />
@@ -925,8 +925,8 @@ export function DocsContent() {
               are adjustable per stage via sliders.
             </p>
 
-            <div className="rounded-lg border border-iron bg-charcoal overflow-hidden">
-              <div className="grid grid-cols-4 text-[10px] font-mono uppercase tracking-wider text-slate-text border-b border-iron">
+            <div className="border border-iron bg-charcoal overflow-x-auto">
+              <div className="grid grid-cols-2 sm:grid-cols-4 text-[10px] font-mono uppercase tracking-wider text-slate-text border-b border-iron min-w-[480px]">
                 <div className="px-4 py-2.5">Stage</div>
                 <div className="px-4 py-2.5">Default Model</div>
                 <div className="px-4 py-2.5">Max Tokens</div>
@@ -960,7 +960,7 @@ export function DocsContent() {
               ].map((row, i, arr) => (
                 <div
                   key={row.stage}
-                  className={`grid grid-cols-4 text-xs font-mono ${
+                  className={`grid grid-cols-2 sm:grid-cols-4 text-xs font-mono min-w-[480px] ${
                     i < arr.length - 1 ? "border-b border-iron/50" : ""
                   }`}
                 >
@@ -987,7 +987,7 @@ export function DocsContent() {
               code on our servers &mdash; API calls go straight from our
               backend to your chosen provider. No hidden costs, no surprises.
             </p>
-            <div className="rounded-lg border border-iron bg-charcoal p-4">
+            <div className="border border-iron bg-charcoal p-4">
               <div className="flex items-center gap-3 mb-3">
                 <Key className="h-4 w-4 text-amber" />
                 <span className="text-xs font-mono font-bold text-foreground">
@@ -1012,7 +1012,7 @@ export function DocsContent() {
                 </li>
               </ol>
             </div>
-            <div className="rounded-lg border border-amber/20 bg-amber/5 p-4 mt-4">
+            <div className="border border-amber/20 bg-amber/5 p-4 mt-4">
               <span className="text-xs font-mono font-bold text-amber">Security</span>
               <ul className="mt-2 space-y-1.5 text-xs font-mono text-slate-text leading-relaxed">
                 <li><span className="text-foreground">AES-256-GCM</span> &mdash; bank-grade encryption at rest. Plaintext never persists.</li>
@@ -1070,7 +1070,7 @@ export function DocsContent() {
               ].map((p) => (
                 <div
                   key={p.name}
-                  className="rounded-lg border border-iron bg-charcoal p-4"
+                  className="border border-iron bg-charcoal p-4"
                 >
                   <span className="text-xs font-mono font-bold text-amber">
                     {p.name}
@@ -1081,7 +1081,7 @@ export function DocsContent() {
                 </div>
               ))}
             </div>
-            <div className="mt-4 rounded-lg border border-iron bg-charcoal p-4">
+            <div className="mt-4 border border-iron bg-charcoal p-4">
               <div className="flex items-center gap-3 mb-2">
                 <UserCog className="h-4 w-4 text-amber" />
                 <span className="text-xs font-mono font-bold text-foreground">
@@ -1154,7 +1154,7 @@ export function DocsContent() {
               ].map((c) => (
                 <div
                   key={c.cmd}
-                  className="rounded-lg border border-iron bg-charcoal p-4"
+                  className="border border-iron bg-charcoal p-4"
                 >
                   <div className="flex items-center gap-3 mb-2">
                     <Terminal className="h-3.5 w-3.5 text-amber" />
@@ -1188,7 +1188,7 @@ export function DocsContent() {
             </p>
 
             <div className="space-y-4">
-              <div className="rounded-lg border border-iron bg-charcoal p-4">
+              <div className="border border-iron bg-charcoal p-4">
                 <div className="flex items-center gap-3 mb-2">
                   <TestTube2 className="h-4 w-4 text-amber" />
                   <span className="text-xs font-mono font-bold text-foreground">
@@ -1205,7 +1205,7 @@ export function DocsContent() {
                 </p>
               </div>
 
-              <div className="rounded-lg border border-iron bg-charcoal p-4">
+              <div className="border border-iron bg-charcoal p-4">
                 <div className="flex items-center gap-3 mb-2">
                   <Code2 className="h-4 w-4 text-amber" />
                   <span className="text-xs font-mono font-bold text-foreground">
@@ -1269,7 +1269,7 @@ export function DocsContent() {
                 return (
                   <div
                     key={item.title}
-                    className="rounded-lg border border-iron bg-charcoal p-4"
+                    className="border border-iron bg-charcoal p-4"
                   >
                     <div className="flex items-center gap-3 mb-2">
                       <Icon className="h-4 w-4 text-amber" />
@@ -1285,7 +1285,7 @@ export function DocsContent() {
               })}
             </div>
 
-            <div className="mt-6 rounded-lg border border-amber/20 bg-amber/5 p-4">
+            <div className="mt-6 border border-amber/20 bg-amber/5 p-4">
               <div className="flex items-center gap-3 mb-2">
                 <RefreshCw className="h-4 w-4 text-amber" />
                 <span className="text-xs font-mono font-bold text-amber">
@@ -1343,7 +1343,7 @@ export function DocsContent() {
                 return (
                   <div
                     key={item.title}
-                    className="rounded-lg border border-iron bg-charcoal p-4"
+                    className="border border-iron bg-charcoal p-4"
                   >
                     <div className="flex items-center gap-3 mb-2">
                       <Icon className="h-4 w-4 text-amber" />
@@ -1373,7 +1373,7 @@ export function DocsContent() {
             </p>
 
             <div className="space-y-3">
-              <div className="rounded-lg border border-iron bg-charcoal p-4">
+              <div className="border border-iron bg-charcoal p-4">
                 <div className="flex items-center gap-3 mb-2">
                   <Gauge className="h-4 w-4 text-amber" />
                   <span className="text-xs font-mono font-bold text-foreground">
@@ -1388,7 +1388,7 @@ export function DocsContent() {
                 </p>
               </div>
 
-              <div className="rounded-lg border border-iron bg-charcoal p-4">
+              <div className="border border-iron bg-charcoal p-4">
                 <div className="flex items-center gap-3 mb-2">
                   <Eye className="h-4 w-4 text-amber" />
                   <span className="text-xs font-mono font-bold text-foreground">
@@ -1462,7 +1462,7 @@ export function DocsContent() {
               ].map((toggle) => (
                 <div
                   key={toggle.label}
-                  className="rounded-lg border border-iron bg-charcoal p-4 flex items-start gap-4"
+                  className="border border-iron bg-charcoal p-4 flex items-start gap-4"
                 >
                   <ToggleRight className="h-4 w-4 text-amber mt-0.5 shrink-0" />
                   <div className="flex-1 min-w-0">

@@ -67,6 +67,8 @@ export type Review = {
   simulation_results?: SimulationResult[];
   diagram?: string;
   diagram_title?: string;
+  diagrams?: { type?: string; title?: string; mermaid: string }[];
+  truncated_files?: string[];
   created_at: string;
   completed_at?: string;
 };

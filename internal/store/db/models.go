@@ -79,6 +79,7 @@ type Installation struct {
 	ClerkOrgID      *string            `json:"clerk_org_id"`
 	PlanTier        string             `json:"plan_tier"`
 	DefaultSettings []byte             `json:"default_settings"`
+	FeatureFlags    json.RawMessage    `json:"feature_flags"`
 }
 
 type ModelConfig struct {
@@ -195,6 +196,8 @@ type Review struct {
 	SimulationResults  []byte             `json:"simulation_results"`
 	Diagram            *string            `json:"diagram"`
 	DiagramTitle       *string            `json:"diagram_title"`
+	Diagrams           []byte             `json:"diagrams"`
+	TruncatedFiles     []byte             `json:"truncated_files"`
 }
 
 type ReviewComment struct {

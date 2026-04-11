@@ -33,3 +33,9 @@ SELECT COALESCE(default_settings, '{}')::jsonb FROM installations WHERE id = $1;
 
 -- name: SetOrgDefaults :exec
 UPDATE installations SET default_settings = $1 WHERE id = $2;
+
+-- name: GetInstallationFeatureFlags :one
+SELECT COALESCE(feature_flags, '{}')::jsonb FROM installations WHERE id = $1;
+
+-- name: UpdateInstallationFeatureFlags :exec
+UPDATE installations SET feature_flags = $2 WHERE id = $1;

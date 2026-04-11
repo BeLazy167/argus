@@ -99,13 +99,13 @@ export function GitHubReviewMock() {
   return (
     <div ref={sectionRef} className="w-full max-w-3xl mx-auto">
       {/* PR Header */}
-      <div className="rounded-t-lg border border-iron bg-charcoal px-5 py-4">
+      <div className="border-t border border-iron bg-charcoal px-5 py-4">
         <div className="flex items-center gap-3 mb-2">
           <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/15 border border-emerald-500/25 px-2.5 py-0.5 text-[10px] font-mono text-emerald-400">
             <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
             Open
           </span>
-          <h3 className="font-display text-sm font-bold text-foreground">
+          <h3 className="font-mono text-sm font-bold text-foreground">
             feat: add subscription billing &amp; session refresh
           </h3>
         </div>
@@ -154,7 +154,7 @@ export function GitHubReviewMock() {
       </div>
 
       {/* Review comments */}
-      <div className="border-x border-b border-iron rounded-b-lg overflow-hidden divide-y divide-iron">
+      <div className="border-x border-b border-iron overflow-hidden divide-y divide-iron">
         {REVIEWS.map((review, i) => {
           const config = SEVERITY_CONFIG[review.severity];
           const isVisible = visibleReviews.includes(i);

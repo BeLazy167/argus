@@ -3,13 +3,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { usePagination, PaginationBar } from "@/components/dashboard/pagination";
 import { Shield, Plus, Trash2, Loader2, X, AlertTriangle, ChevronDown } from "lucide-react";
-import { Protect } from "@clerk/nextjs";
+import { ProGate } from "@/components/dashboard/pro-gate";
 import {
   useScenarios,
   useCreateScenario,
   useDeleteScenario,
 } from "@/lib/queries/scenarios";
-import { UpgradePrompt } from "@/components/dashboard/upgrade-prompt";
 import { useActiveRepo } from "@/lib/hooks/use-active-repo";
 import { RepoSelect } from "@/components/dashboard/repo-select";
 import { formatDistanceToNow } from "@/lib/time";
@@ -115,10 +114,10 @@ export default function ScenariosPage() {
   };
 
   return (
-    <Protect plan="org:pro" fallback={<UpgradePrompt feature="Scenario memory" />}>
+    <ProGate feature="Scenario memory">
       <div className="mb-8 flex items-center justify-between">
         <div>
-          <h1 className="font-display text-2xl font-bold text-foreground">
+          <h1 className="font-mono text-2xl font-bold text-foreground">
             Scenarios
           </h1>
           <p className="text-xs font-mono text-slate-text mt-1">
@@ -129,7 +128,7 @@ export default function ScenariosPage() {
           <button
             type="button"
             onClick={() => setShowForm(!showForm)}
-            className="flex items-center gap-2 rounded-md border border-amber/30 bg-amber/10 px-3 py-1.5 text-xs font-mono text-amber hover:bg-amber/20 transition-colors cursor-pointer"
+            className="flex items-center gap-2 border border-amber/30 bg-amber/10 px-3 py-1.5 text-xs font-mono text-amber hover:bg-amber/20 transition-colors cursor-pointer"
           >
             <Plus className="h-3.5 w-3.5" />
             Add scenario
@@ -139,11 +138,11 @@ export default function ScenariosPage() {
 
       {/* Create form */}
       <div
-        className={`overflow-hidden transition-all duration-300 ease-out ${
+        className={`overflow-hidden transition-[max-height,opacity] duration-250 ease-out ${
           showForm ? "max-h-[500px] opacity-100 mb-6" : "max-h-0 opacity-0"
         }`}
       >
-        <div className="rounded-lg border border-amber/30 bg-charcoal p-5 space-y-5">
+        <div className="border border-amber/30 bg-charcoal p-5 space-y-5">
           <form onSubmit={handleCreate} className="space-y-5">
             <div>
               <label className="block text-[11px] font-mono uppercase tracking-wider text-slate-text mb-1.5">
@@ -152,12 +151,18 @@ export default function ScenariosPage() {
               <textarea
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
+                onKeyDown={(e) => {
+                  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                    e.preventDefault();
+                    handleCreate(e as React.FormEvent);
+                  }
+                }}
                 rows={3}
-                placeholder="Describe the risk scenario..."
-                className="w-full rounded-md border border-iron bg-background px-3 py-2 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none resize-none"
+                placeholder="Describe the risk scenario\u2026"
+                className="w-full border border-iron bg-background px-3 py-2 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none resize-none"
               />
             </div>
-            <div className="grid grid-cols-2 gap-5">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
               <div>
                 <label className="block text-[11px] font-mono uppercase tracking-wider text-slate-text mb-1.5">
                   Severity
@@ -188,7 +193,7 @@ export default function ScenariosPage() {
                   value={filesInput}
                   onChange={(e) => setFilesInput(e.target.value)}
                   placeholder="src/auth.ts, lib/db.ts"
-                  className="w-full rounded-md border border-iron bg-background px-3 py-2 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none"
+                  className="w-full border border-iron bg-background px-3 py-2 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none"
                 />
               </div>
             </div>
@@ -203,7 +208,7 @@ export default function ScenariosPage() {
               <button
                 type="submit"
                 disabled={createScenario.isPending || !description.trim()}
-                className="rounded-md border border-amber bg-amber/10 px-4 py-1.5 text-xs font-mono text-amber hover:bg-amber/20 transition-colors disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
+                className="border border-amber bg-amber/10 px-4 py-1.5 text-xs font-mono text-amber hover:bg-amber/20 transition-colors disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
               >
                 {createScenario.isPending ? "Creating..." : "Create scenario"}
               </button>
@@ -258,7 +263,7 @@ export default function ScenariosPage() {
       )}
 
       {/* Scenarios List */}
-      <div className="rounded-lg border border-iron bg-charcoal overflow-hidden">
+      <div className="border border-iron bg-charcoal overflow-hidden">
         <div className="flex items-center gap-2 border-b border-iron px-5 py-4">
           <Shield className="h-4 w-4 text-slate-text" />
           <h2 className="text-xs font-mono uppercase tracking-[0.1em] text-foreground">
@@ -291,7 +296,7 @@ export default function ScenariosPage() {
             <button
               type="button"
               onClick={() => setShowForm(true)}
-              className="mt-1 flex items-center gap-2 rounded-md border border-amber/30 bg-amber/10 px-4 py-2 text-xs font-mono text-amber hover:bg-amber/20 transition-colors cursor-pointer"
+              className="mt-1 flex items-center gap-2 border border-amber/30 bg-amber/10 px-4 py-2 text-xs font-mono text-amber hover:bg-amber/20 transition-colors cursor-pointer"
             >
               <Plus className="h-3.5 w-3.5" />
               Add scenario
@@ -374,7 +379,7 @@ export default function ScenariosPage() {
                           {scenario.files.map((f) => (
                             <span
                               key={f}
-                              className="inline-block rounded border border-iron/60 bg-iron/10 px-2.5 py-1 text-xs font-mono text-slate-text"
+                              className="inline-block border border-iron/60 bg-iron/10 px-2.5 py-1 text-xs font-mono text-slate-text"
                             >
                               {f}
                             </span>
@@ -467,6 +472,6 @@ export default function ScenariosPage() {
           onPrev={() => setPage(page - 1)}
         />
       </div>
-    </Protect>
+    </ProGate>
   );
 }

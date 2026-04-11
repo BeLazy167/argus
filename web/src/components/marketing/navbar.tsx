@@ -154,7 +154,7 @@ export function Navbar() {
             </Link>
             <Link
               href="/sign-up"
-              className="group relative inline-flex h-8 items-center rounded-md bg-amber px-5 text-xs font-mono font-medium text-void transition-[transform,box-shadow] duration-200 ease-out hover:shadow-[0_0_20px_-4px_oklch(0.77_0.15_75/0.5)] active:scale-[0.97]"
+              className="group relative inline-flex h-8 items-center bg-amber px-5 text-xs font-mono font-medium text-void transition-[transform,box-shadow] duration-200 ease-out hover:shadow-[0_0_20px_-4px_oklch(0.77_0.15_75/0.5)] active:scale-[0.97]"
             >
               <span className="relative z-10">Get started</span>
               <div className="absolute inset-0 rounded-md bg-gradient-to-r from-amber to-[oklch(0.82_0.14_80)] opacity-0 transition-opacity duration-200 group-hover:opacity-100" />
@@ -163,7 +163,7 @@ export function Navbar() {
           <SignedIn>
             <Link
               href="/dashboard"
-              className="group relative inline-flex h-8 items-center rounded-md bg-amber px-5 text-xs font-mono font-medium text-void transition-[transform,box-shadow] duration-200 ease-out hover:shadow-[0_0_20px_-4px_oklch(0.77_0.15_75/0.5)] active:scale-[0.97]"
+              className="group relative inline-flex h-8 items-center bg-amber px-5 text-xs font-mono font-medium text-void transition-[transform,box-shadow] duration-200 ease-out hover:shadow-[0_0_20px_-4px_oklch(0.77_0.15_75/0.5)] active:scale-[0.97]"
             >
               <span className="relative z-10">Dashboard</span>
               <div className="absolute inset-0 rounded-md bg-gradient-to-r from-amber to-[oklch(0.82_0.14_80)] opacity-0 transition-opacity duration-200 group-hover:opacity-100" />
@@ -186,6 +186,32 @@ export function Navbar() {
                 {link.label}
               </Link>
             ))}
+            <div className="my-2 border-t border-zinc-800" />
+            <SignedOut>
+              <Link
+                href="/sign-in"
+                onClick={() => setMenuOpen(false)}
+                className="py-2 text-xs font-mono text-slate-text hover:text-foreground transition-colors"
+              >
+                Sign in
+              </Link>
+              <Link
+                href="/sign-up"
+                onClick={() => setMenuOpen(false)}
+                className="inline-flex items-center justify-center bg-amber px-4 py-2 text-xs font-mono font-medium text-void"
+              >
+                Get started
+              </Link>
+            </SignedOut>
+            <SignedIn>
+              <Link
+                href="/dashboard"
+                onClick={() => setMenuOpen(false)}
+                className="inline-flex items-center justify-center bg-amber px-4 py-2 text-xs font-mono font-medium text-void"
+              >
+                Dashboard
+              </Link>
+            </SignedIn>
           </div>
         </div>
       )}

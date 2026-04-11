@@ -174,7 +174,7 @@ function PRAccordionRow({
 
       {/* Expanded reviews */}
       {expanded && (
-        <div className="ml-8 mr-2 mb-3 border-l-2 border-iron/40 pl-4 transition-all duration-200 ease-out">
+        <div className="ml-8 mr-2 mb-3 border-l border-iron/40 pl-4 transition-all duration-200 ease-out">
           {group.reviews.map((review) => {
             const url = repoFullName
               ? githubPrUrl(repoFullName, review.pr_number, review.github_review_id)
@@ -255,7 +255,7 @@ export default function ReviewsPage() {
     <>
       <div className="mb-8 flex items-center justify-between">
         <div>
-          <h1 className="font-display text-2xl font-bold text-foreground">
+          <h1 className="font-mono text-2xl font-bold text-foreground">
             Reviews
           </h1>
           <p className="text-xs font-mono text-slate-text mt-1">
@@ -269,7 +269,8 @@ export default function ReviewsPage() {
               value={statusFilter}
               aria-label="Filter by status"
               onChange={(e) => { setStatusFilter(e.target.value); setPage(0); }}
-              className="appearance-none rounded-md border border-iron bg-charcoal px-4 py-2 pr-8 text-xs font-mono text-foreground focus:border-amber focus:outline-none"
+              style={{ backgroundColor: 'var(--card)', color: 'var(--foreground)' }}
+              className="appearance-none border border-iron bg-charcoal px-4 py-2 pr-8 text-xs font-mono text-foreground focus:border-amber focus:outline-none"
             >
               <option value="all">All statuses</option>
               <option value="pending">Pending</option>
@@ -285,7 +286,7 @@ export default function ReviewsPage() {
         </div>
       </div>
 
-      <div className="rounded-lg border border-iron bg-charcoal">
+      <div className="border border-iron bg-charcoal">
         <div className="px-5">
           {loading ? (
             <div className="flex items-center justify-center py-16">
@@ -296,8 +297,8 @@ export default function ReviewsPage() {
               <MessageSquare className="h-8 w-8 text-slate-text mx-auto mb-3" />
               <p className="text-xs font-mono text-slate-text">
                 {statusFilter !== "all"
-                  ? `No ${statusFilter.replace("_", " ")} reviews found.`
-                  : "No reviews yet for this repo."}
+                  ? `// No ${statusFilter.replace("_", " ")} reviews found.`
+                  : "// No reviews yet for this repo."}
               </p>
             </div>
           ) : (

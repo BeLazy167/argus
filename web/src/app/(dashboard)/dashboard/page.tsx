@@ -4,12 +4,8 @@ import { useMemo } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
-  Target,
   GitPullRequest,
-  ShieldAlert,
-  Clock,
   Loader2,
-  Microscope,
   AlertTriangle,
   AlertCircle,
   Check,
@@ -22,41 +18,28 @@ import { useActiveRepo } from "@/lib/hooks/use-active-repo";
 import { formatDistanceToNow } from "@/lib/time";
 
 
-function StatCard({
+function StatReadout({
   label,
   value,
-  icon: Icon,
   accent = false,
   loading = false,
 }: {
   label: string;
   value: string | number;
-  icon: React.ComponentType<{ className?: string }>;
   accent?: boolean;
   loading?: boolean;
 }) {
   return (
-    <div
-      className={`rounded-lg border p-5 hover:-translate-y-0.5 transition-transform duration-200 ${
-        accent
-          ? "border-amber/30 bg-charcoal shadow-[0_0_16px_-6px_oklch(0.77_0.15_75/0.2)]"
-          : "border-iron bg-charcoal"
-      }`}
-    >
-      <div className="flex items-center justify-between mb-3">
-        <span className="text-[11px] font-mono uppercase tracking-[0.1em] text-slate-text">
-          {label}
-        </span>
-        <Icon
-          className={`h-4 w-4 ${accent ? "text-amber" : "text-slate-text"}`}
-        />
-      </div>
+    <div className="border-b border-iron/40 pb-3">
+      <span className="text-[10px] font-mono uppercase tracking-[0.15em] text-slate-text block">
+        {label}
+      </span>
       <p
-        className={`text-2xl font-mono font-medium ${
+        className={`text-xl font-mono font-medium mt-0.5 ${
           accent ? "text-amber" : "text-foreground"
         }`}
       >
-        {loading ? <Loader2 className="h-5 w-5 animate-spin" /> : value}
+        {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : value}
       </p>
     </div>
   );
@@ -79,7 +62,7 @@ function RiskBadge({ score }: { score?: number }) {
   }
 
   return (
-    <span className={`inline-flex items-center gap-1.5 rounded border px-2 py-0.5 text-[10px] font-mono font-medium ${classes}`}>
+    <span className={`inline-flex items-center gap-1.5 border px-2 py-0.5 text-[10px] font-mono font-medium ${classes}`}>
       {label}
       <span className="opacity-60">{score}</span>
     </span>
@@ -120,7 +103,7 @@ export default function DashboardPage() {
     <>
       <div className="mb-8 flex items-end justify-between">
         <div>
-          <h1 className="font-display text-2xl font-bold text-foreground">
+          <h1 className="font-mono text-2xl font-bold text-foreground">
             Mission Control
           </h1>
           <p className="text-xs font-mono text-slate-text mt-1">
@@ -128,50 +111,45 @@ export default function DashboardPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
-          <span className="text-[10px] font-mono text-emerald-400 uppercase tracking-wider">
-            All systems operational
+          <span className="h-2 w-2 rounded-full bg-amber animate-pulse" />
+          <span className="text-[10px] font-mono text-amber/70 uppercase tracking-wider">
+            Operational
           </span>
         </div>
       </div>
 
-      {/* Stat Cards */}
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-5 mb-10">
-        <StatCard
+      {/* Stat Readouts */}
+      <div className="grid gap-x-6 gap-y-3 md:grid-cols-2 lg:grid-cols-5 mb-10">
+        <StatReadout
           label="Catch Rate"
           value={stats ? `${stats.catch_rate}%` : "--"}
-          icon={Target}
           accent
           loading={statsLoading}
         />
-        <StatCard
+        <StatReadout
           label="PRs This Week"
           value={stats?.prs_this_week ?? 0}
-          icon={GitPullRequest}
           loading={statsLoading}
         />
-        <StatCard
+        <StatReadout
           label="High Risk"
           value={stats?.high_risk_count ?? 0}
-          icon={ShieldAlert}
           loading={statsLoading}
         />
-        <StatCard
+        <StatReadout
           label="Deep Reviews"
           value={stats?.deep_review_count ?? 0}
-          icon={Microscope}
           loading={statsLoading}
         />
-        <StatCard
+        <StatReadout
           label="Avg Review Time"
           value={stats ? formatReviewTime(stats.avg_review_time_ms) : "--"}
-          icon={Clock}
           loading={statsLoading}
         />
       </div>
 
       {/* PR Table */}
-      <div className="rounded-lg border border-iron bg-charcoal overflow-hidden">
+      <div className="border border-iron bg-charcoal overflow-x-auto">
         <div className="flex items-center justify-between border-b border-iron px-5 py-4">
           <h2 className="text-xs font-mono uppercase tracking-[0.1em] text-foreground">
             Recent Reviews
@@ -189,7 +167,7 @@ export default function DashboardPage() {
           <div className="py-10 text-center">
             <GitPullRequest className="h-8 w-8 text-slate-text mx-auto mb-3" />
             <p className="text-sm font-mono text-slate-text">
-              No reviews yet. Open a PR to get started.
+              // No reviews yet. Open a PR to get started.
             </p>
           </div>
         ) : (

@@ -9,7 +9,7 @@ export default function DashboardError({
 }) {
   return (
     <div className="flex h-full flex-col items-center justify-center gap-4 p-8">
-      <div className="rounded-lg border border-red-500/20 bg-red-500/5 p-6 text-center">
+      <div className="border border-red-500/20 bg-red-500/5 p-6 text-center">
         <h2 className="mb-2 font-mono text-sm font-medium text-red-400">
           Something went wrong
         </h2>

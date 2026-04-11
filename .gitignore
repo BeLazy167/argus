@@ -21,3 +21,4 @@ secrets/
 
 # QA / Dogfood
 dogfood-output/
+.soulforge

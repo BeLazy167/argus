@@ -9,7 +9,10 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
 export type PipelineStage =
   | "pending"
   | "triaging"
+  | "briefing"
   | "reviewing"
+  | "deduping"
+  | "validating"
   | "scoring"
   | "pass2"
   | "synthesizing"
@@ -66,6 +69,7 @@ export function useReviewStream(reviewId: string, enabled: boolean) {
   const [connected, setConnected] = useState(false);
   const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
   const [liveTokens, setLiveTokens] = useState<LiveTokens | null>(null);
+  const seenStagesRef = useRef<Set<PipelineStage>>(new Set());
   const backoffRef = useRef(1000);
   const getTokenRef = useRef(getToken);
   useEffect(() => { getTokenRef.current = getToken; }, [getToken]);
@@ -94,6 +98,7 @@ export function useReviewStream(reviewId: string, enabled: boolean) {
       switch (evt.type) {
         case "stage_changed":
           setStage(evt.data.stage as PipelineStage);
+          seenStagesRef.current.add(evt.data.stage as PipelineStage);
           patchReview({ status: mapStageToStatus(evt.data.stage as string) });
           addEntry({ type: "stage", message: stageMessage(evt.data.stage as string), icon: "stage" });
           break;
@@ -212,7 +217,7 @@ export function useReviewStream(reviewId: string, enabled: boolean) {
     };
   }, [reviewId, enabled, active, qc]);
 
-  return { stage, failedStage, triageResults, scoringUpdate, connected, timeline, liveTokens };
+  return { stage, failedStage, triageResults, scoringUpdate, connected, timeline, liveTokens, seenStages: seenStagesRef.current };
 }
 
 function mapStageToStatus(stage: string): Review["status"] {
@@ -224,11 +229,14 @@ function mapStageToStatus(stage: string): Review["status"] {
 function stageMessage(stage: string): string {
   const map: Record<string, string> = {
     triaging: "Triaging files...",
+    briefing: "Building lead brief...",
     reviewing: "Starting file reviews...",
+    deduping: "Deduplicating findings...",
+    validating: "Validating (SAST + blast + acceptance + cross-PR)...",
     scoring: "Scoring comments...",
+    pass2: "Re-reviewing hot files...",
     synthesizing: "Generating synthesis...",
     posting: "Posting to GitHub...",
-    pass2: "Re-reviewing hot files...",
   };
   return map[stage] ?? `Stage: ${stage}`;
 }

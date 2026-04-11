@@ -38,7 +38,7 @@ export const metadata: Metadata = {
 
 function FaqItem({ q, a }: { q: string; a: string }) {
   return (
-    <details className="group rounded-lg border border-iron bg-charcoal">
+    <details className="group border border-iron bg-charcoal">
       <summary className="flex cursor-pointer items-center justify-between px-5 py-4 text-sm font-mono text-foreground hover:text-amber transition-colors list-none">
         {q}
         <ChevronDown className="h-4 w-4 text-slate-text shrink-0 transition-transform group-open:rotate-180" />
@@ -66,17 +66,20 @@ export default function PricingPage() {
       </div>
 
       {/* Anchoring line */}
-      <p className="text-center text-xs font-mono text-iron mb-16">
+      <p className="text-center text-xs font-mono text-iron mb-4">
         One critical bug in production costs more than a year of Argus.
+      </p>
+      <p className="text-center text-[11px] font-sans text-slate-text mb-16">
+        Pro works out to $0.63/day — less than the coffee you drink during review.
       </p>
 
       {/* Custom pricing cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6 max-w-2xl mx-auto">
         {/* Free */}
-        <div className="rounded-lg border border-iron bg-charcoal p-6">
-          <h3 className="font-display text-lg font-bold text-foreground mb-1">Free</h3>
+        <div className="border border-iron bg-charcoal p-6">
+          <h3 className="font-mono text-lg font-bold text-foreground mb-1">Free</h3>
           <div className="flex items-baseline gap-1 mb-1">
-            <span className="font-display text-3xl font-bold text-foreground">$0</span>
+            <span className="font-mono text-3xl font-bold text-foreground">$0</span>
           </div>
           <p className="text-[11px] font-mono text-slate-text mb-6">Always free</p>
           <ul className="space-y-3 mb-8">
@@ -95,20 +98,20 @@ export default function PricingPage() {
           </ul>
           <Link
             href="/sign-up"
-            className="block w-full rounded-md border border-iron bg-iron/30 py-2.5 text-center text-xs font-mono text-foreground transition-colors hover:bg-iron/50"
+            className="block w-full border border-iron bg-iron/30 py-2.5 text-center text-xs font-mono text-foreground transition-colors hover:bg-iron/50"
           >
             Get started free
           </Link>
         </div>
 
         {/* Pro */}
-        <div className="rounded-lg border border-amber/40 bg-charcoal p-6 relative">
+        <div className="border border-amber/40 bg-charcoal p-6 relative">
           <div className="absolute -top-3 left-6 rounded-full bg-amber px-3 py-0.5 text-[10px] font-mono font-medium text-void">
             Recommended
           </div>
-          <h3 className="font-display text-lg font-bold text-amber mb-1">Pro</h3>
+          <h3 className="font-mono text-lg font-bold text-amber mb-1">Pro</h3>
           <div className="flex items-baseline gap-1 mb-1">
-            <span className="font-display text-3xl font-bold text-foreground">$19</span>
+            <span className="font-mono text-3xl font-bold text-foreground">$19</span>
             <span className="text-xs font-mono text-slate-text">/month</span>
           </div>
           <p className="text-[11px] font-mono text-slate-text mb-6">Per workspace, billed monthly</p>
@@ -130,7 +133,7 @@ export default function PricingPage() {
           </ul>
           <Link
             href="/sign-up"
-            className="block w-full rounded-md bg-amber py-2.5 text-center text-xs font-mono font-medium text-void transition-[transform,filter] duration-200 ease-out hover:brightness-110 active:scale-[0.97]"
+            className="block w-full bg-amber py-2.5 text-center text-xs font-mono font-medium text-void transition-[transform,filter] duration-200 ease-out hover:brightness-110 active:scale-[0.97]"
           >
             Start Pro trial
           </Link>
@@ -139,7 +142,7 @@ export default function PricingPage() {
 
       {/* FAQ */}
       <div className="mt-20">
-        <h2 className="font-display text-2xl font-bold text-foreground mb-8 text-center">
+        <h2 className="font-mono text-2xl font-bold text-foreground mb-8 text-center">
           Questions
         </h2>
         <div className="space-y-2">

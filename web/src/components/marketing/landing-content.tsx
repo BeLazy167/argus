@@ -32,7 +32,7 @@ function PipelineStage({
       {/* Dot + connecting line */}
       <div className="flex flex-col items-center shrink-0">
         <div
-          className={`relative h-3 w-3 rounded-full border-2 transition-[background-color,border-color,box-shadow] duration-500 ${
+          className={`relative h-3 w-3 rounded-full border-2 transition-[background-color,border-color,box-shadow] duration-300 ${
             isActive
               ? "border-amber bg-amber shadow-[0_0_12px_oklch(0.77_0.15_75/0.6)]"
               : isComplete
@@ -255,7 +255,7 @@ export function LandingContent() {
 
           {/* Title with cinematic reveal */}
           <div className="hero-reveal hero-reveal-2 overflow-hidden">
-            <h1 className="wordmark text-5xl md:text-7xl lg:text-8xl text-foreground mb-2 tracking-[0.15em] hero-title-shimmer">
+              <h1 className="wordmark text-5xl md:text-7xl lg:text-8xl text-foreground mb-2 tracking-[0.15em] hero-title-stencil">
               ARGUS
             </h1>
           </div>
@@ -277,7 +277,7 @@ export function LandingContent() {
 
           {/* Tagline */}
           <div className="hero-reveal hero-reveal-5">
-            <p className="font-display text-lg md:text-2xl text-amber mb-3 font-normal italic text-balance">
+            <p className="font-mono text-lg md:text-2xl text-amber mb-3 font-normal italic text-balance">
               Find the bugs your team missed.
             </p>
           </div>
@@ -294,7 +294,7 @@ export function LandingContent() {
           <div className="hero-reveal hero-reveal-7 flex flex-col sm:flex-row gap-4 mb-16">
             <Link
               href="/sign-up"
-              className="group relative inline-flex h-12 items-center rounded-md bg-amber px-8 text-sm font-mono font-medium text-void transition-[transform,filter,box-shadow] duration-300 ease-out hover:brightness-110 hover:shadow-[0_0_32px_-4px_oklch(0.77_0.15_75/0.6)] active:scale-[0.97] overflow-hidden"
+              className="group relative inline-flex h-12 items-center border bg-amber px-8 text-sm font-mono font-medium text-void transition-[transform,filter,box-shadow] duration-200 ease-out hover:brightness-110 hover:shadow-[0_0_32px_-4px_oklch(0.77_0.15_75/0.6)] active:scale-[0.97] overflow-hidden"
             >
               <span className="relative z-10 flex items-center">
                 Install in 60 seconds
@@ -313,7 +313,7 @@ export function LandingContent() {
             </Link>
             <Link
               href="/docs"
-              className="group inline-flex h-12 items-center rounded-md border border-iron px-8 text-sm font-mono text-ash transition-all duration-300 hover:border-amber/40 hover:text-foreground hover:shadow-[0_0_16px_-6px_oklch(0.77_0.15_75/0.3)]"
+              className="group inline-flex h-12 items-center border border-iron px-8 text-sm font-mono text-ash transition-[border-color,color,box-shadow] duration-200 hover:border-amber/40 hover:text-foreground hover:shadow-[0_0_16px_-6px_oklch(0.77_0.15_75/0.3)]"
             >
               Read the docs
             </Link>
@@ -346,7 +346,7 @@ export function LandingContent() {
             <FadeIn key={stat.label} delay={i * 80} className="flex items-center gap-8 md:gap-14">
               {i > 0 && <div className="h-8 w-px bg-iron hidden md:block" />}
               <div className="text-center">
-                <div className="font-display text-2xl font-bold text-foreground">{stat.value}</div>
+                <div className="font-mono text-2xl font-bold text-foreground">{stat.value}</div>
                 <p className="text-[10px] font-mono text-slate-text mt-1">{stat.label}</p>
               </div>
             </FadeIn>
@@ -361,7 +361,7 @@ export function LandingContent() {
             <p className="mb-3 text-[11px] font-mono uppercase tracking-[0.15em] text-amber">
               Real bugs, not lint warnings
             </p>
-            <h2 className="font-display text-3xl md:text-4xl font-bold text-foreground mb-4">
+            <h2 className="font-mono text-3xl md:text-4xl font-bold text-foreground mb-4">
               This is what Argus posts on your PRs.
             </h2>
             <p className="max-w-lg mx-auto text-sm text-ash/70">
@@ -398,13 +398,13 @@ export function LandingContent() {
               },
             ].map((card, i) => (
               <FadeIn key={card.title} delay={i * 100}>
-                <div className="rounded-lg border border-iron bg-charcoal/50 p-6 h-full">
+                <div className="border border-iron bg-charcoal/50 p-6 h-full">
                   <div className="text-amber mb-3">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-6 w-6">
                       {card.icon}
                     </svg>
                   </div>
-                  <h3 className="font-display text-sm font-bold text-foreground mb-2">{card.title}</h3>
+                  <h3 className="font-mono text-sm font-bold text-foreground mb-2">{card.title}</h3>
                   <p className="text-[11px] font-mono text-slate-text leading-relaxed">{card.desc}</p>
                 </div>
               </FadeIn>
@@ -421,7 +421,7 @@ export function LandingContent() {
               <p className="mb-3 text-[11px] font-mono uppercase tracking-[0.15em] text-amber">
                 How it works
               </p>
-              <h2 className="font-display text-3xl font-bold text-foreground mb-3">
+              <h2 className="font-mono text-3xl font-bold text-foreground mb-3">
                 7 stages. Under 2 minutes.
               </h2>
               <p className="max-w-lg mx-auto text-sm text-ash/70">
@@ -434,7 +434,7 @@ export function LandingContent() {
             {/* Connecting vertical line */}
             <div className="absolute left-[5px] top-5 bottom-5 w-px bg-iron">
               <div
-                className="w-full bg-gradient-to-b from-amber to-amber/20 transition-all duration-1000 ease-out"
+                className="w-full bg-gradient-to-b from-amber to-amber/20 transition-[height] duration-700 ease-out"
                 style={{
                   height: `${Math.min(((activeStage + 1) / PIPELINE_STAGES.length) * 100, 100)}%`,
                 }}
@@ -461,7 +461,7 @@ export function LandingContent() {
               <p className="mb-3 text-[11px] font-mono uppercase tracking-[0.15em] text-amber">
                 Pricing
               </p>
-              <h2 className="font-display text-2xl md:text-3xl font-bold text-foreground mb-4">
+              <h2 className="font-mono text-2xl md:text-3xl font-bold text-foreground mb-4">
                 Start free. Scale when you&apos;re ready.
               </h2>
               <p className="max-w-lg mx-auto text-sm text-ash/70 leading-relaxed">
@@ -472,8 +472,8 @@ export function LandingContent() {
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6 max-w-2xl mx-auto">
             {/* Free tier */}
-            <div className="rounded-lg border border-iron bg-charcoal/50 p-6">
-              <div className="font-display text-2xl font-bold text-foreground mb-1">Free</div>
+            <div className="border border-iron bg-charcoal/50 p-6">
+              <div className="font-mono text-2xl font-bold text-foreground mb-1">Free</div>
               <p className="text-[11px] font-mono text-slate-text mb-5">No credit card required</p>
               <ul className="space-y-2.5 text-xs font-mono text-ash/80">
                 <li className="flex items-center gap-2">
@@ -491,11 +491,11 @@ export function LandingContent() {
               </ul>
             </div>
             {/* Pro tier */}
-            <div className="rounded-lg border border-amber/40 bg-charcoal/50 p-6 relative">
-              <div className="absolute -top-2.5 right-4 text-[9px] font-mono uppercase tracking-wider px-2 py-0.5 rounded bg-amber text-void font-bold">
+            <div className="border border-amber/40 bg-charcoal/50 p-6 relative">
+              <div className="absolute -top-2.5 right-4 text-[9px] font-mono uppercase tracking-wider px-2 py-0.5 bg-amber text-void font-bold">
                 Recommended
               </div>
-              <div className="font-display text-2xl font-bold text-amber mb-1">
+              <div className="font-mono text-2xl font-bold text-amber mb-1">
                 $19<span className="text-base font-normal text-slate-text">/mo per workspace</span>
               </div>
               <p className="text-[11px] font-mono text-slate-text mb-5">Everything in Free, plus</p>
@@ -542,7 +542,7 @@ export function LandingContent() {
         />
         <FadeIn className="relative z-10 mx-auto max-w-3xl px-6 py-28 text-center">
           <EyeSymbol className="mx-auto mb-6 h-12 w-auto text-amber/60" />
-          <h2 className="font-display text-3xl md:text-4xl font-bold text-foreground mb-4">
+          <h2 className="font-mono text-3xl md:text-4xl font-bold text-foreground mb-4">
             Stop shipping bugs.
           </h2>
           <p className="text-sm text-ash/70 mb-3 max-w-md mx-auto">
@@ -554,7 +554,7 @@ export function LandingContent() {
           </p>
           <Link
             href="/sign-up"
-            className="group inline-flex h-12 items-center rounded-md bg-amber px-10 text-sm font-mono font-medium text-void transition-[transform,filter,box-shadow] duration-200 ease-out hover:brightness-110 hover:shadow-[0_0_30px_-4px_oklch(0.77_0.15_75/0.5)] active:scale-[0.97]"
+            className="group inline-flex h-12 items-center border bg-amber px-10 text-sm font-mono font-medium text-void transition-[transform,filter,box-shadow] duration-150 ease-out hover:brightness-110 hover:shadow-[0_0_30px_-4px_oklch(0.77_0.15_75/0.5)] active:scale-[0.97]"
           >
             Get started free
             <svg
@@ -573,7 +573,7 @@ export function LandingContent() {
       {/* ── FOOTER ── */}
       <footer className="border-t border-iron py-10 px-6">
         <div className="mx-auto max-w-6xl">
-          <div className="flex items-center justify-between mb-8">
+          <div className="flex flex-col md:flex-row items-center justify-between mb-8 gap-4">
             <span className="wordmark text-xs text-slate-text tracking-[0.15em]">
               ARGUS
             </span>
@@ -626,11 +626,11 @@ export function LandingContent() {
                 name="email"
                 placeholder="you@company.com"
                 required
-                className="w-52 rounded-md border border-iron bg-charcoal px-3 py-1.5 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none"
+                className="w-52 border border-iron bg-charcoal px-3 py-1.5 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none"
               />
               <button
                 type="submit"
-                className="rounded-md bg-amber/10 border border-amber/30 px-4 py-1.5 text-[11px] font-mono text-amber hover:bg-amber/20 transition-colors"
+                className="border bg-amber/10 border-amber/30 px-4 py-1.5 text-[11px] font-mono text-amber hover:bg-amber/20 transition-[background-color] duration-150"
               >
                 Subscribe
               </button>

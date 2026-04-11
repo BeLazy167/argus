@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -59,6 +60,32 @@ func (s *Store) LinkUserInstallation(ctx context.Context, clerkUserID string, in
 		`, clerkUserID, installationID).Scan(&ui.ID, &ui.ClerkUserID, &ui.InstallationID, &ui.Role, &ui.CreatedAt)
 	}
 	return &ui, err
+}
+
+// IsUserLinkedToInstallation checks if a user is already linked to an installation.
+// Returns (linked, error). DB errors are surfaced to the caller so they cannot
+// silently degrade authorization decisions (cubic P1 — a query failure used to
+// return false and fall through as a first-owner claim).
+// A pgx.ErrNoRows result is treated as "not linked" with a nil error.
+func (s *Store) IsUserLinkedToInstallation(ctx context.Context, clerkUserID string, installationID int64) (bool, error) {
+	var exists int
+	err := s.Pool.QueryRow(ctx, `
+		SELECT 1 FROM user_installations WHERE installation_id = $1 AND clerk_user_id = $2
+	`, installationID, clerkUserID).Scan(&exists)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	return exists == 1, nil
+}
+
+// CountInstallationUsers returns the number of users linked to an installation.
+func (s *Store) CountInstallationUsers(ctx context.Context, installationID int64) (int, error) {
+	var count int
+	err := s.Pool.QueryRow(ctx, `SELECT count(*) FROM user_installations WHERE installation_id = $1`, installationID).Scan(&count)
+	return count, err
 }
 
 func (s *Store) ListUserInstallations(ctx context.Context, clerkUserID string) ([]Installation, error) {
@@ -349,12 +376,12 @@ func (s *Store) GetReview(ctx context.Context, id uuid.UUID) (*Review, error) {
 		SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, COALESCE(head_ref,''), github_review_id,
 		       status, summary, score, token_usage, trigger, triggered_by, duration_ms, error,
 		       deep_review, persona, is_incremental, created_at, completed_at,
-		       diagram, diagram_title
+		       diagram, diagram_title, diagrams, truncated_files
 		FROM reviews WHERE id = $1
 	`, id).Scan(&r.ID, &r.RepoID, &r.PRNumber, &r.PRTitle, &r.PRAuthor, &r.HeadSHA, &r.BaseSHA, &r.HeadRef, &r.GithubReviewID,
 		&r.Status, &r.Summary, &r.Score, &r.TokenUsage, &r.Trigger, &r.TriggeredBy, &r.DurationMs, &r.Error,
 		&r.DeepReview, &r.Persona, &r.IsIncremental, &r.CreatedAt, &r.CompletedAt,
-		&r.Diagram, &r.DiagramTitle)
+		&r.Diagram, &r.DiagramTitle, &r.Diagrams, &r.TruncatedFiles)
 	if err != nil {
 		return nil, err
 	}

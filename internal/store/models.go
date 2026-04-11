@@ -18,15 +18,15 @@ type Installation struct {
 }
 
 type Repo struct {
-	ID             int64     `json:"id"`
-	InstallationID int64     `json:"installation_id"`
-	GithubID       int64     `json:"github_id"`
-	FullName       string    `json:"full_name"`
-	DefaultBranch  string    `json:"default_branch"`
-	Enabled        bool      `json:"enabled"`
+	ID             int64           `json:"id"`
+	InstallationID int64           `json:"installation_id"`
+	GithubID       int64           `json:"github_id"`
+	FullName       string          `json:"full_name"`
+	DefaultBranch  string          `json:"default_branch"`
+	Enabled        bool            `json:"enabled"`
 	SettingsJSON   json.RawMessage `json:"settings_json"`
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
 }
 
 type Review struct {
@@ -54,21 +54,23 @@ type Review struct {
 	CompletedAt    *time.Time       `json:"completed_at,omitempty"`
 	Diagram        *string          `json:"diagram,omitempty"`
 	DiagramTitle   *string          `json:"diagram_title,omitempty"`
+	Diagrams       json.RawMessage  `json:"diagrams,omitempty"`
+	TruncatedFiles json.RawMessage  `json:"truncated_files,omitempty"`
 }
 
 type ReviewComment struct {
-	ID              uuid.UUID `json:"id"`
-	ReviewID        uuid.UUID `json:"review_id"`
-	FilePath        string    `json:"file_path"`
-	StartLine       *int      `json:"start_line,omitempty"`
-	EndLine         *int      `json:"end_line,omitempty"`
-	Side            *string   `json:"side,omitempty"`
-	Body            string    `json:"body"`
-	Severity        *string   `json:"severity,omitempty"`
-	Category        *string   `json:"category,omitempty"`
-	Specialist      *string   `json:"specialist,omitempty"`
-	ConfidenceScore *int      `json:"confidence_score,omitempty"`
-	CodeSnippet     *string   `json:"code_snippet,omitempty"`
+	ID                  uuid.UUID `json:"id"`
+	ReviewID            uuid.UUID `json:"review_id"`
+	FilePath            string    `json:"file_path"`
+	StartLine           *int      `json:"start_line,omitempty"`
+	EndLine             *int      `json:"end_line,omitempty"`
+	Side                *string   `json:"side,omitempty"`
+	Body                string    `json:"body"`
+	Severity            *string   `json:"severity,omitempty"`
+	Category            *string   `json:"category,omitempty"`
+	Specialist          *string   `json:"specialist,omitempty"`
+	ConfidenceScore     *int      `json:"confidence_score,omitempty"`
+	CodeSnippet         *string   `json:"code_snippet,omitempty"`
 	GithubCommentID     *int64    `json:"github_comment_id,omitempty"`
 	MatchedPatternID    *int64    `json:"matched_pattern_id,omitempty"`
 	MatchedPatternScore *float32  `json:"matched_pattern_score,omitempty"`
@@ -78,24 +80,24 @@ type ReviewComment struct {
 }
 
 type Rule struct {
-	ID             int64  `json:"id"`
-	InstallationID *int64 `json:"installation_id,omitempty"`
-	Category       string `json:"category"`
-	Content        string `json:"content"`
-	Priority       int    `json:"priority"`
-	Enabled        bool   `json:"enabled"`
+	ID             int64     `json:"id"`
+	InstallationID *int64    `json:"installation_id,omitempty"`
+	Category       string    `json:"category"`
+	Content        string    `json:"content"`
+	Priority       int       `json:"priority"`
+	Enabled        bool      `json:"enabled"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 type ActivityLog struct {
-	ID             int64  `json:"id"`
-	InstallationID *int64 `json:"installation_id,omitempty"`
-	Action    string    `json:"action"`
-	Actor     *string   `json:"actor,omitempty"`
-	Resource  *string   `json:"resource,omitempty"`
-	Metadata  []byte    `json:"metadata,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
+	ID             int64     `json:"id"`
+	InstallationID *int64    `json:"installation_id,omitempty"`
+	Action         string    `json:"action"`
+	Actor          *string   `json:"actor,omitempty"`
+	Resource       *string   `json:"resource,omitempty"`
+	Metadata       []byte    `json:"metadata,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 type ModelConfig struct {

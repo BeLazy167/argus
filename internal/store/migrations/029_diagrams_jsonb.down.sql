@@ -1,0 +1,2 @@
+ALTER TABLE reviews DROP COLUMN IF EXISTS diagrams;
+ALTER TABLE reviews DROP COLUMN IF EXISTS truncated_files;

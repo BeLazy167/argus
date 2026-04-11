@@ -86,28 +86,109 @@ func indexFileSet(ctx context.Context, st *store.Store, ghClient *ghpkg.Client, 
 		results[f] = fileResult{symbols: syms, edges: edges}
 	}
 
-	// Upsert all nodes, building a name->ID lookup
-	nameToID := make(map[string]int64)
+	// Upsert all nodes, building composite-key -> ID and name -> []ID lookups.
+	// The composite key (filePath+name) avoids collisions when multiple files
+	// define symbols with the same name. The name-only index supports
+	// resolving edges that reference symbols by name alone.
+	keyToID := make(map[string]int64)     // composite key -> node ID
+	nameToIDs := make(map[string][]int64) // symbol name -> all node IDs with that name
 	lang := func(path string) string { return langForFile(path) }
 
 	for _, res := range results {
 		for _, sym := range res.symbols {
 			id, err := st.UpsertCodeNodeFull(ctx, repoDBID, sym.Kind, sym.Name, sym.FilePath, sym.LineStart, sym.LineEnd, lang(sym.FilePath), 0, sym.ReturnType, sym.Params, sym.Visibility, sym.IsAsync, sym.Receiver, sym.Scope)
 			if err != nil {
-				slog.Warn("graph: upsert node failed", "name", sym.Name, "error", err)
+				slog.Warn("graph: upsert node failed", "name", sym.Name, "file", sym.FilePath, "error", err)
 				continue
 			}
-			nameToID[sym.Name] = id
+			key := nodeKey(sym.FilePath, sym.Name)
+			keyToID[key] = id
+			nameToIDs[sym.Name] = append(nameToIDs[sym.Name], id)
 		}
 	}
 
-	// Upsert edges where both source and target exist in the graph
-	for _, res := range results {
+	// resolveEdgeTarget finds the best node ID for an edge target name.
+	// For same-file references, prefer the node in the source file.
+	// Otherwise, pick the first (most common) match.
+	resolveEdgeTarget := func(sourceFile, targetName string) (int64, bool) {
+		// Try same-file first (most precise)
+		if id, ok := keyToID[nodeKey(sourceFile, targetName)]; ok {
+			return id, true
+		}
+		// Fall back to any file
+		ids := nameToIDs[targetName]
+		if len(ids) > 0 {
+			return ids[0], true
+		}
+		return 0, false
+	}
+
+	// Upsert edges where both source and target exist in the graph.
+	// Iterate with filePath so we resolve edge source in its own file (composite key),
+	// avoiding cross-file name collisions (e.g. multiple `init`, `New`, `Handle`).
+	for filePath, res := range results {
 		for _, edge := range res.edges {
-			sourceID, sok := nameToID[edge.SourceName]
-			targetID, tok := nameToID[edge.TargetName]
-			if !sok || !tok {
+			// Import edges: SourceName is a file path, not a symbol name.
+			// These represent file-level dependencies and are resolved differently.
+			if edge.Kind == "imports" {
+				// Use any symbol defined in filePath as the edge source.
+				// The import edge semantically means "this file depends on that module".
+				var sourceID int64
+				var found bool
+				for _, sym := range res.symbols {
+					if sym.FilePath != filePath {
+						continue
+					}
+					if id, ok := keyToID[nodeKey(filePath, sym.Name)]; ok {
+						sourceID = id
+						found = true
+						break
+					}
+				}
+				if !found {
+					continue
+				}
+				// Import targets are external packages — they won't be in nameToIDs.
+				// Create a synthetic import node so the edge is preserved.
+				targetID, tok := resolveEdgeTarget(filePath, edge.TargetName)
+				if !tok {
+					// Create a placeholder node for the external import target
+					var err error
+					targetID, err = st.UpsertCodeNode(ctx, repoDBID, "import", edge.TargetName, filePath, 0, 0, "", 0)
+					if err != nil {
+						slog.Warn("graph: upsert import node failed", "target", edge.TargetName, "error", err)
+						continue
+					}
+					// Cache for future lookups
+					keyToID[nodeKey(filePath, edge.TargetName)] = targetID
+					nameToIDs[edge.TargetName] = append(nameToIDs[edge.TargetName], targetID)
+				}
+				if err := st.UpsertCodeEdge(ctx, repoDBID, sourceID, targetID, edge.Kind); err != nil {
+					slog.Warn("graph: upsert edge failed", "source", filePath, "target", edge.TargetName, "error", err)
+				}
 				continue
+			}
+
+			// Non-import edges: resolve source in the file that produced the edge
+			// (composite key) so two files defining a symbol with the same name
+			// (e.g. `init`, `New`) don't have their call edges collapsed.
+			sourceID, ok := keyToID[nodeKey(filePath, edge.SourceName)]
+			if !ok {
+				// Fallback: edge synthesized across files — pick first match.
+				sourceIDs := nameToIDs[edge.SourceName]
+				if len(sourceIDs) == 0 {
+					continue
+				}
+				sourceID = sourceIDs[0]
+			}
+
+			targetID, tok := resolveEdgeTarget(filePath, edge.TargetName)
+			if !tok {
+				targetIDs := nameToIDs[edge.TargetName]
+				if len(targetIDs) == 0 {
+					continue
+				}
+				targetID = targetIDs[0]
 			}
 			if err := st.UpsertCodeEdge(ctx, repoDBID, sourceID, targetID, edge.Kind); err != nil {
 				slog.Warn("graph: upsert edge failed", "source", edge.SourceName, "target", edge.TargetName, "error", err)
@@ -120,9 +201,9 @@ func indexFileSet(ctx context.Context, st *store.Store, ghClient *ghpkg.Client, 
 	for _, res := range results {
 		allSyms = append(allSyms, res.symbols...)
 	}
-	for _, edge := range resolveTypeEdges(allSyms, nameToID) {
-		sourceID := nameToID[edge.SourceName]
-		targetID := nameToID[edge.TargetName]
+	for _, edge := range resolveTypeEdges(allSyms, keyToID) {
+		sourceID := keyToID[edge.SourceName]
+		targetID := keyToID[edge.TargetName]
 		if err := st.UpsertCodeEdge(ctx, repoDBID, sourceID, targetID, edge.Kind); err != nil {
 			slog.Warn("graph: upsert type edge failed", "source", edge.SourceName, "target", edge.TargetName, "error", err)
 		}
@@ -163,13 +244,29 @@ func extractTypeNames(typeExpr string) []string {
 }
 
 // resolveTypeEdges creates uses_type edges by inspecting each symbol's ReturnType
-// and Params for type names that exist in nameToID.
-func resolveTypeEdges(symbols []Symbol, nameToID map[string]int64) []Edge {
+// and Params for type names that exist in keyToID.
+// SourceName and TargetName in returned edges use composite keys (filePath\x00name).
+func resolveTypeEdges(symbols []Symbol, keyToID map[string]int64) []Edge {
 	var edges []Edge
 	seen := make(map[[2]string]bool)
 
+	// Build a name-only lookup for type resolution (type names don't carry file paths)
+	nameToKey := make(map[string]string) // symbol name -> first composite key found
+	for key := range keyToID {
+		// key format is "filePath\x00name"
+		idx := strings.Index(key, "\x00")
+		if idx < 0 {
+			continue
+		}
+		name := key[idx+1:]
+		if _, exists := nameToKey[name]; !exists {
+			nameToKey[name] = key
+		}
+	}
+
 	for _, sym := range symbols {
-		if _, ok := nameToID[sym.Name]; !ok {
+		srcKey := nodeKey(sym.FilePath, sym.Name)
+		if _, ok := keyToID[srcKey]; !ok {
 			continue
 		}
 		// Check return type
@@ -177,30 +274,32 @@ func resolveTypeEdges(symbols []Symbol, nameToID map[string]int64) []Edge {
 			if typeName == sym.Name {
 				continue
 			}
-			if _, ok := nameToID[typeName]; !ok {
+			tgtKey, ok := nameToKey[typeName]
+			if !ok {
 				continue
 			}
-			key := [2]string{sym.Name, typeName}
-			if seen[key] {
+			edgeKey := [2]string{srcKey, tgtKey}
+			if seen[edgeKey] {
 				continue
 			}
-			seen[key] = true
-			edges = append(edges, Edge{SourceName: sym.Name, TargetName: typeName, Kind: "uses_type"})
+			seen[edgeKey] = true
+			edges = append(edges, Edge{SourceName: srcKey, TargetName: tgtKey, Kind: "uses_type"})
 		}
 		// Check params
 		for _, typeName := range extractTypeNames(sym.Params) {
 			if typeName == sym.Name {
 				continue
 			}
-			if _, ok := nameToID[typeName]; !ok {
+			tgtKey, ok := nameToKey[typeName]
+			if !ok {
 				continue
 			}
-			key := [2]string{sym.Name, typeName}
-			if seen[key] {
+			edgeKey := [2]string{srcKey, tgtKey}
+			if seen[edgeKey] {
 				continue
 			}
-			seen[key] = true
-			edges = append(edges, Edge{SourceName: sym.Name, TargetName: typeName, Kind: "uses_type"})
+			seen[edgeKey] = true
+			edges = append(edges, Edge{SourceName: srcKey, TargetName: tgtKey, Kind: "uses_type"})
 		}
 	}
 	return edges

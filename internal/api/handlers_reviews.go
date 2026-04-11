@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 	"nhooyr.io/websocket"
 	"nhooyr.io/websocket/wsjson"
 
@@ -26,6 +27,7 @@ type exportFinding struct {
 	Severity   string `json:"severity,omitempty"`
 	Body       string `json:"body"`
 	Specialist string `json:"specialist,omitempty"`
+	Dropped    bool   `json:"dropped,omitempty"` // true = generated but filtered out (dedup/scoring)
 }
 
 func (s *Server) listAllReviews(w http.ResponseWriter, r *http.Request) {
@@ -88,6 +90,36 @@ func (s *Server) getReview(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) exportReview(w http.ResponseWriter, r *http.Request) {
+	// Auth: this route is outside the /api/v1 JWT middleware group (so browsers
+	// can download exports without a pre-auth handshake), so we parse the token
+	// ourselves from either the Authorization: Bearer header or the ?token=
+	// query param. Header path is for API clients; query-param path is for
+	// browser direct-link downloads where headers can't be set.
+	ids := getInstallationIDs(r.Context())
+	if len(ids) == 0 {
+		var token string
+		if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+			token = strings.TrimPrefix(auth, "Bearer ")
+		} else {
+			token = r.URL.Query().Get("token")
+		}
+		if token == "" {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "missing authorization"})
+			return
+		}
+		claims, err := validateToken(token)
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+			return
+		}
+		resolved, err := s.resolveInstallationIDs(r.Context(), claims, r.URL.Query().Get("installation_id"))
+		if err != nil {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+		ids = resolved
+	}
+
 	id, err := uuid.Parse(chi.URLParam(r, "reviewID"))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid review id"})
@@ -98,7 +130,7 @@ func (s *Server) exportReview(w http.ResponseWriter, r *http.Request) {
 		s.handleDBError(w, err, "review not found")
 		return
 	}
-	if _, err := s.store.GetRepoScoped(r.Context(), review.RepoID, getInstallationIDs(r.Context())); err != nil {
+	if _, err := s.store.GetRepoScoped(r.Context(), review.RepoID, ids); err != nil {
 		s.handleDBError(w, err, "review not found")
 		return
 	}
@@ -111,6 +143,26 @@ func (s *Server) exportReview(w http.ResponseWriter, r *http.Request) {
 	format := r.URL.Query().Get("format")
 	if format == "" {
 		format = "json"
+	}
+
+	// Build a key set for posted comments so we can detect dropped ones from the unfiltered set.
+	// Key is (file, line, specialist) since each specialist produces at most one
+	// finding per file:line. Synthesis rephrases bodies, so body-prefix keys
+	// misclassified rephrased comments as "dropped" duplicates.
+	postedKey := func(file string, line int, specialist string) string {
+		return fmt.Sprintf("%s:%d:%s", file, line, specialist)
+	}
+	postedKeys := make(map[string]bool, len(comments))
+	for _, c := range comments {
+		line := 0
+		if c.EndLine != nil {
+			line = *c.EndLine
+		}
+		spec := ""
+		if c.Specialist != nil {
+			spec = *c.Specialist
+		}
+		postedKeys[postedKey(c.FilePath, line, spec)] = true
 	}
 
 	findings := make([]exportFinding, 0, len(comments))
@@ -156,16 +208,96 @@ func (s *Server) exportReview(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	// Merge in dropped findings from the unfiltered pipeline payload.
+	// These are comments the LLM generated but were filtered by dedup/scoring.
+	pgUUID := pgtype.UUID{Bytes: id, Valid: true}
+	rawPayload, perr := s.store.Q.GetAllFileReviewsForReview(r.Context(), pgUUID)
+	if perr != nil {
+		s.logger.Warn("export: load unfiltered payload failed", "review_id", id, "error", perr)
+	} else if len(rawPayload) > 0 {
+		// rawPayload is json.RawMessage (via sqlc's jsonb → RawMessage override).
+		// A null JSONB path result scans as literal bytes "null" or zero length.
+		if string(rawPayload) == "null" {
+			// No unfiltered reviews recorded for this run (legacy pipeline_states rows).
+		} else {
+			var allFileReviews []struct {
+				Path     string `json:"Path"`
+				Comments []struct {
+					What       string `json:"what"`
+					Body       string `json:"body"`
+					Line       int    `json:"line"`
+					StartLine  int    `json:"start_line"`
+					Score      int    `json:"score"`
+					Severity   string `json:"severity"`
+					Category   string `json:"category"`
+					Confidence string `json:"confidence"`
+					Specialist string `json:"specialist"`
+				} `json:"Comments"`
+			}
+			if err := json.Unmarshal(rawPayload, &allFileReviews); err != nil {
+				s.logger.Warn("export: unfiltered payload unmarshal failed", "review_id", id, "error", err)
+			} else {
+				for _, fr := range allFileReviews {
+					for _, c := range fr.Comments {
+						line := c.Line
+						if line == 0 {
+							line = c.StartLine
+						}
+						body := c.Body
+						if body == "" {
+							body = c.What
+						}
+						if postedKeys[postedKey(fr.Path, line, c.Specialist)] {
+							continue // already in posted set
+						}
+						prio := "P2"
+						switch c.Severity {
+						case "critical":
+							prio = "P0"
+						case "warning":
+							prio = "P1"
+						}
+						findings = append(findings, exportFinding{
+							File:       fr.Path,
+							Line:       line,
+							Priority:   prio,
+							Confidence: c.Score,
+							Category:   c.Category,
+							Severity:   c.Severity,
+							Body:       body,
+							Specialist: c.Specialist,
+							Dropped:    true,
+						})
+					}
+				}
+			}
+		}
+	}
+
 	switch format {
 	case "md", "markdown":
 		w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=argus-review-%s.md", id.String()[:8]))
+
+		// Count posted vs dropped
+		posted, dropped := 0, 0
+		for _, f := range findings {
+			if f.Dropped {
+				dropped++
+			} else {
+				posted++
+			}
+		}
 
 		var sb strings.Builder
 		sb.WriteString("# Argus Review Export\n\n")
 		sb.WriteString(fmt.Sprintf("- **Review:** %s\n", id.String()))
 		sb.WriteString(fmt.Sprintf("- **PR:** #%d\n", review.PRNumber))
 		sb.WriteString(fmt.Sprintf("- **Score:** %d/10\n", review.Score))
+		sb.WriteString(fmt.Sprintf("- **Posted findings:** %d\n", posted))
+		if dropped > 0 {
+			sb.WriteString(fmt.Sprintf("- **Dropped findings:** %d _(filtered by dedup/scoring)_\n", dropped))
+		}
 		sb.WriteString(fmt.Sprintf("- **Total findings:** %d\n\n", len(findings)))
 
 		// Group by file
@@ -181,7 +313,11 @@ func (s *Server) exportReview(w http.ResponseWriter, r *http.Request) {
 		for _, file := range fileOrder {
 			sb.WriteString(fmt.Sprintf("## %s\n\n", file))
 			for _, f := range fileGroups[file] {
-				sb.WriteString(fmt.Sprintf("### %s L%d — %s [%s]\n\n", f.Priority, f.Line, f.Category, f.Severity))
+				dropMark := ""
+				if f.Dropped {
+					dropMark = " _(dropped)_"
+				}
+				sb.WriteString(fmt.Sprintf("### %s L%d — %s [%s]%s\n\n", f.Priority, f.Line, f.Category, f.Severity, dropMark))
 				sb.WriteString(f.Body)
 				sb.WriteString("\n\n---\n\n")
 			}

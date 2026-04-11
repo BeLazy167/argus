@@ -9,11 +9,11 @@ export default function BillingPage() {
   return (
     <>
       <div className="mb-8">
-        <h1 className="font-display text-2xl font-bold text-foreground">Billing</h1>
+        <h1 className="font-mono text-2xl font-bold text-foreground">Billing</h1>
         <p className="mt-1 text-sm text-slate-text">Manage your subscription and plan.</p>
       </div>
 
-      <div className="rounded-lg border border-iron bg-charcoal p-6">
+      <div className="border border-iron bg-charcoal p-6">
         <div className="flex items-center justify-between">
           <div>
             <h2 className="text-lg font-semibold text-white font-mono">
@@ -37,7 +37,7 @@ export default function BillingPage() {
         </div>
 
         {tier === "free" && (
-          <div className="mt-6 rounded-md border border-amber/20 bg-amber/5 p-4">
+          <div className="mt-6 border border-amber/20 bg-amber/5 p-4">
             <p className="text-sm text-amber font-mono">
               Upgrade to Pro for unlimited repos, deep review with 4 specialists, and 500 reviews/month.
             </p>
@@ -48,25 +48,25 @@ export default function BillingPage() {
         )}
 
         <div className="mt-6 grid grid-cols-2 gap-4">
-          <div className="rounded border border-iron p-3">
+          <div className="bg-charcoal border border-iron p-3">
             <p className="text-xs text-zinc-500 font-mono">Repos</p>
             <p className="text-lg font-semibold text-white font-mono">
               {tier === "pro" ? "Unlimited" : "3 max"}
             </p>
           </div>
-          <div className="rounded border border-iron p-3">
+          <div className="bg-charcoal border border-iron p-3">
             <p className="text-xs text-zinc-500 font-mono">Reviews/month</p>
             <p className="text-lg font-semibold text-white font-mono">
               {tier === "pro" ? "500" : "50"}
             </p>
           </div>
-          <div className="rounded border border-iron p-3">
+          <div className="bg-charcoal border border-iron p-3">
             <p className="text-xs text-zinc-500 font-mono">Deep Review</p>
             <p className="text-lg font-semibold text-white font-mono">
               {tier === "pro" ? "Enabled" : "Disabled"}
             </p>
           </div>
-          <div className="rounded border border-iron p-3">
+          <div className="bg-charcoal border border-iron p-3">
             <p className="text-xs text-zinc-500 font-mono">Specialists</p>
             <p className="text-lg font-semibold text-white font-mono">
               {tier === "pro" ? "4 (all)" : "1 (primary)"}

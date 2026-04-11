@@ -44,7 +44,7 @@ function AddReposButton() {
     <button
       onClick={handleClick}
       disabled={loading}
-      className="inline-flex items-center gap-1.5 rounded-md border border-amber/30 bg-amber/10 px-4 py-2 text-xs font-mono text-amber hover:bg-amber/20 transition-colors disabled:opacity-50"
+      className="inline-flex items-center gap-1.5 border border-amber/30 bg-amber/10 px-4 py-2 text-xs font-mono text-amber hover:bg-amber/20 transition-colors disabled:opacity-50"
     >
       {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ExternalLink className="h-3.5 w-3.5" />}
       Add repos
@@ -77,7 +77,7 @@ function RepoCard({ repo, isPro }: { repo: Repo; isPro: boolean }) {
 
   return (
     <div
-      className={`rounded-lg border p-5 ${
+      className={`border p-5 ${
         repo.enabled
           ? "border-iron bg-charcoal"
           : "border-iron border-dashed bg-charcoal opacity-60"
@@ -160,13 +160,13 @@ function RepoCard({ repo, isPro }: { repo: Repo; isPro: boolean }) {
             value={prNumber}
             onChange={(e) => setPrNumber(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && handleTrigger()}
-            className="w-24 rounded-md border border-iron bg-background px-2.5 py-1.5 text-xs font-mono text-foreground placeholder:text-slate-text focus:border-amber focus:outline-none"
+            className="w-24 border border-iron bg-background px-2.5 py-1.5 text-xs font-mono text-foreground placeholder:text-slate-text focus:border-amber focus:outline-none"
           />
           <button
             type="button"
             onClick={handleTrigger}
             disabled={triggerReview.isPending || !prNumber}
-            className="inline-flex items-center gap-1.5 rounded-md border border-amber/30 bg-amber/10 px-3 py-1.5 text-xs font-mono text-amber hover:bg-amber/20 transition-colors disabled:opacity-50"
+            className="inline-flex items-center gap-1.5 border border-amber/30 bg-amber/10 px-3 py-1.5 text-xs font-mono text-amber hover:bg-amber/20 transition-colors disabled:opacity-50"
           >
             {triggerReview.isPending ? (
               <Loader2 className="h-3 w-3 animate-spin" />
@@ -210,14 +210,14 @@ export default function ReposPage() {
     <>
       <div className="mb-8 flex items-center justify-between">
         <div>
-          <h1 className="font-display text-2xl font-bold text-foreground">
+          <h1 className="font-mono text-2xl font-bold text-foreground">
             Repositories
           </h1>
           <p className="text-xs font-mono text-slate-text mt-1">
             Repos connected via the Argus GitHub App.
           </p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
           <button
             onClick={() => syncRepos.mutate()}
             disabled={syncRepos.isPending}
@@ -235,7 +235,7 @@ export default function ReposPage() {
           <Loader2 className="h-6 w-6 animate-spin text-slate-text" />
         </div>
       ) : repos?.length === 0 ? (
-        <div className="rounded-lg border border-iron bg-charcoal p-10 text-center">
+        <div className="border border-iron bg-charcoal p-10 text-center">
           <GitFork className="h-8 w-8 text-slate-text mx-auto mb-3" />
           <p className="text-sm font-mono text-foreground mb-1">No repos yet</p>
           <p className="text-xs font-mono text-slate-text">
