@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { memo, useMemo, useState } from "react";
 import { Key, Save, Trash2, Loader2 } from "lucide-react";
 import {
   useProviderKeys,
@@ -43,19 +43,20 @@ const PROVIDER_BASE_URLS: Record<Provider, string> = {
 
 type BadgeVariant = "active" | "inactive";
 
+const BADGE_STYLES: Record<BadgeVariant, string> = {
+  active: "border-green-400/20 bg-green-400/10 text-green-400",
+  inactive: "border-iron bg-iron/30 text-slate-text/60",
+};
+
 function StatusBadge({ variant, label }: { variant: BadgeVariant; label: string }) {
-  const styles: Record<BadgeVariant, string> = {
-    active: "border-green-400/20 bg-green-400/10 text-green-400",
-    inactive: "border-iron bg-iron/30 text-slate-text/60",
-  };
   return (
-    <span className={`inline-flex items-center rounded-sm border px-1.5 py-0.5 text-[9px] font-mono uppercase tracking-wider ${styles[variant]}`}>
+    <span className={`inline-flex items-center rounded-sm border px-1.5 py-0.5 text-[9px] font-mono uppercase tracking-wider ${BADGE_STYLES[variant]}`}>
       {label}
     </span>
   );
 }
 
-function ProviderKeyCard({
+const ProviderKeyCard = memo(function ProviderKeyCard({
   provider,
   existing,
 }: {
@@ -146,13 +147,16 @@ function ProviderKeyCard({
       </div>
     </div>
   );
-}
+});
 
 export default function ProvidersPage() {
   const { active } = useInstallation();
   const { data: providerKeys, isLoading } = useProviderKeys();
 
-  const keyMap = new Map(providerKeys?.map((k) => [k.provider, k]) ?? []);
+  const keyMap = useMemo(
+    () => new Map(providerKeys?.map((k) => [k.provider, k]) ?? []),
+    [providerKeys],
+  );
   const configuredCount = providerKeys?.length ?? 0;
 
   if (isLoading) {

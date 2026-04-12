@@ -35,6 +35,23 @@ const SOURCE_BADGE: Record<string, string> = {
   auto: "border-purple-500/30 bg-purple-500/10 text-purple-400",
 };
 
+const SEVERITY_HOVER_SHADOW: Record<string, string> = {
+  critical: "hover:shadow-[0_0_8px_rgba(239,68,68,0.3)]",
+  high: "hover:shadow-[0_0_8px_rgba(249,115,22,0.3)]",
+  medium: "hover:shadow-[0_0_8px_rgba(245,158,11,0.3)]",
+  low: "hover:shadow-[0_0_8px_rgba(59,130,246,0.3)]",
+};
+
+const SEVERITY_TAB_ACTIVE: Record<SeverityFilter, string> = {
+  all: "border-amber/40 bg-amber/10 text-amber",
+  critical: "border-red-500/40 bg-red-500/10 text-red-400",
+  high: "border-orange-500/40 bg-orange-500/10 text-orange-400",
+  medium: "border-amber/40 bg-amber/10 text-amber",
+  low: "border-blue-500/40 bg-blue-500/10 text-blue-400",
+};
+
+const SEVERITY_TABS = ["all", "critical", "high", "medium", "low"] as const;
+
 export default function ScenariosPage() {
   const { repos, activeId, setSelectedId } = useActiveRepo();
   const { data: scenarios, isLoading } = useScenarios();
