@@ -37,6 +37,17 @@ const SOURCE_BADGE_STYLES: Record<string, string> = {
   convention: "border-blue-500/30 bg-blue-500/10 text-blue-400",
 };
 
+const SOURCE_TAB_ACTIVE_STYLES: Record<SourceFilter, string> = {
+  all: "border-amber/40 bg-amber/10 text-amber",
+  manual: "border-slate-500/40 bg-slate-500/10 text-slate-300",
+  auto_learn: "border-amber/40 bg-amber/10 text-amber",
+  convention: "border-blue-500/40 bg-blue-500/10 text-blue-400",
+};
+
+const SOURCE_TABS = ["all", "manual", "auto_learn", "convention"] as const;
+
+const getSource = (p: { source?: string }) => p.source || "manual";
+
 export default function PatternsPage() {
   const { repos: activeRepos, activeId, setSelectedId } = useActiveRepo();
   const activeRepoId = activeId || undefined;
@@ -61,29 +72,32 @@ export default function PatternsPage() {
 
   const filtered = useMemo(() => {
     if (!patterns) return [];
-    let result = patterns;
-    // Source filter
-    if (sourceFilter === "manual")
-      result = result.filter((p) => !p.source || p.source === "manual");
-    else if (sourceFilter !== "all")
-      result = result.filter((p) => p.source === sourceFilter);
-    // Repo filter
-    if (filterRepo === "org") result = result.filter((p) => !p.repo_id);
-    else if (filterRepo !== "all") {
-      const repoId = Number(filterRepo);
-      result = result.filter((p) => p.repo_id === repoId);
+    const repoId = filterRepo !== "all" && filterRepo !== "org" ? Number(filterRepo) : null;
+    const result: typeof patterns = [];
+    for (const p of patterns) {
+      const src = getSource(p);
+      if (sourceFilter !== "all" && src !== sourceFilter) continue;
+      if (filterRepo === "org" && p.repo_id) continue;
+      if (repoId !== null && p.repo_id !== repoId) continue;
+      result.push(p);
     }
     return result;
   }, [patterns, filterRepo, sourceFilter]);
 
-  const sourceCounts = useMemo(() => {
-    if (!patterns) return { all: 0, manual: 0, auto_learn: 0, convention: 0 };
-    return {
-      all: patterns.length,
-      manual: patterns.filter((p) => !p.source || p.source === "manual").length,
-      auto_learn: patterns.filter((p) => p.source === "auto_learn").length,
-      convention: patterns.filter((p) => p.source === "convention").length,
-    };
+  // Single-pass counts: source counts + per-repo pattern counts.
+  const { sourceCounts, repoCounts } = useMemo(() => {
+    const source = { all: 0, manual: 0, auto_learn: 0, convention: 0 };
+    const repo = new Map<number, number>();
+    if (!patterns) return { sourceCounts: source, repoCounts: repo };
+    source.all = patterns.length;
+    for (const p of patterns) {
+      const src = getSource(p);
+      if (src === "manual") source.manual++;
+      else if (src === "auto_learn") source.auto_learn++;
+      else if (src === "convention") source.convention++;
+      if (p.repo_id) repo.set(p.repo_id, (repo.get(p.repo_id) ?? 0) + 1);
+    }
+    return { sourceCounts: source, repoCounts: repo };
   }, [patterns]);
 
   // Transform stats for stacked area chart
@@ -110,8 +124,6 @@ export default function PatternsPage() {
   };
 
   const { page, setPage, totalPages, paginated, pageSize, total, hasNext, hasPrev } = usePagination(filtered);
-
-  const getSource = (p: { source?: string }) => p.source || "manual";
 
   return (
     <>
@@ -214,22 +226,16 @@ export default function PatternsPage() {
       {/* Source Tabs */}
       <div className="flex items-center gap-3 mb-4">
         <div className="flex gap-1.5">
-          {(["all", "manual", "auto_learn", "convention"] as const).map((tab) => {
+          {SOURCE_TABS.map((tab) => {
             const label = tab === "all" ? "All" : SOURCE_LABELS[tab];
             const count = sourceCounts[tab];
             const isActive = sourceFilter === tab;
-            const activeStyles: Record<SourceFilter, string> = {
-              all: "border-amber/40 bg-amber/10 text-amber",
-              manual: "border-slate-500/40 bg-slate-500/10 text-slate-300",
-              auto_learn: "border-amber/40 bg-amber/10 text-amber",
-              convention: "border-blue-500/40 bg-blue-500/10 text-blue-400",
-            };
             return (
               <button
                 key={tab}
                 onClick={() => { setSourceFilter(tab); setPage(0); }}
                 className={`rounded border px-2.5 py-1 text-[10px] font-mono transition-colors ${
-                  isActive ? activeStyles[tab] : "border-iron text-slate-text hover:text-foreground"
+                  isActive ? SOURCE_TAB_ACTIVE_STYLES[tab] : "border-iron text-slate-text hover:text-foreground"
                 }`}
               >
                 {label} ({count})
@@ -264,7 +270,7 @@ export default function PatternsPage() {
             Org-wide
           </button>
           {(repos ?? []).map((r) => {
-            const count = (patterns ?? []).filter((p) => p.repo_id === r.id).length;
+            const count = repoCounts.get(r.id) ?? 0;
             if (count === 0 && filterRepo !== String(r.id)) return null;
             return (
               <button

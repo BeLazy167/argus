@@ -1,6 +1,14 @@
 "use client";
 import { OrganizationProfile } from "@clerk/nextjs";
 
+const ORG_PROFILE_APPEARANCE = {
+  elements: {
+    rootBox: "w-full",
+    cardBox: "shadow-none border border-iron bg-charcoal rounded-lg",
+    navbar: "hidden",
+  },
+};
+
 export default function TeamPage() {
   return (
     <>
@@ -10,15 +18,7 @@ export default function TeamPage() {
           Manage members, roles, and invitations.
         </p>
       </div>
-      <OrganizationProfile
-        appearance={{
-          elements: {
-            rootBox: "w-full",
-            cardBox: "shadow-none border border-iron bg-charcoal rounded-lg",
-            navbar: "hidden",
-          }
-        }}
-      />
+      <OrganizationProfile appearance={ORG_PROFILE_APPEARANCE} />
     </>
   );
 }

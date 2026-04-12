@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, useCallback, useEffect, useRef } from "react";
+import { memo, useMemo, useState, useCallback, useEffect, useRef } from "react";
 import DOMPurify from "dompurify";
 import { useParams } from "next/navigation";
 import Link from "next/link";
@@ -53,34 +53,35 @@ function lineRef(c: ReviewComment): string {
   return line != null ? `L${line}` : "";
 }
 
+const LANG_MAP: Record<string, string> = {
+  ts: "typescript",
+  tsx: "tsx",
+  js: "javascript",
+  jsx: "jsx",
+  go: "go",
+  py: "python",
+  rs: "rust",
+  rb: "ruby",
+  java: "java",
+  kt: "kotlin",
+  cs: "csharp",
+  css: "css",
+  scss: "scss",
+  html: "html",
+  json: "json",
+  yaml: "yaml",
+  yml: "yaml",
+  toml: "toml",
+  sql: "sql",
+  sh: "bash",
+  bash: "bash",
+  md: "markdown",
+  dockerfile: "docker",
+};
+
 function langFromPath(path: string): string {
   const ext = path.split(".").pop()?.toLowerCase() ?? "";
-  const map: Record<string, string> = {
-    ts: "typescript",
-    tsx: "tsx",
-    js: "javascript",
-    jsx: "jsx",
-    go: "go",
-    py: "python",
-    rs: "rust",
-    rb: "ruby",
-    java: "java",
-    kt: "kotlin",
-    cs: "csharp",
-    css: "css",
-    scss: "scss",
-    html: "html",
-    json: "json",
-    yaml: "yaml",
-    yml: "yaml",
-    toml: "toml",
-    sql: "sql",
-    sh: "bash",
-    bash: "bash",
-    md: "markdown",
-    dockerfile: "docker",
-  };
-  return map[ext] ?? "text";
+  return LANG_MAP[ext] ?? "text";
 }
 
 /**
@@ -108,29 +109,42 @@ function capitalize(s: string): string {
  * - `` `code` `` backticks removed
  * - Collapsed internal whitespace
  */
+// Hoisted regexes: created once at module load instead of per-call.
+const HTML_TAG_RE = /<\/?(details|summary|sub|sup|kbd|mark)[^>]*>/gi;
+const BOLD_RE = /\*\*([^*]+)\*\*/g;
+const ITALIC_RE = /\*([^*]+)\*/g;
+const UNDERSCORE_RE = /_([^_]+)_/g;
+const BACKTICK_RE = /`([^`]+)`/g;
+const WHITESPACE_RE = /\s+/g;
+
 function stripMarkdownForPreview(s: string): string {
   return s
-    .replace(/<\/?(details|summary|sub|sup|kbd|mark)[^>]*>/gi, "")
-    .replace(/\*\*([^*]+)\*\*/g, "$1")
-    .replace(/\*([^*]+)\*/g, "$1")
-    .replace(/_([^_]+)_/g, "$1")
-    .replace(/`([^`]+)`/g, "$1")
-    .replace(/\s+/g, " ")
+    .replace(HTML_TAG_RE, "")
+    .replace(BOLD_RE, "$1")
+    .replace(ITALIC_RE, "$1")
+    .replace(UNDERSCORE_RE, "$1")
+    .replace(BACKTICK_RE, "$1")
+    .replace(WHITESPACE_RE, " ")
     .trim();
 }
 
+const ARGUS_HEADING_RE = /^#+\s*Argus Review\s*(\(Incremental\))?\s*\n*/i;
+const REVIEWED_LINE_RE = /^Reviewed \d+ files with \d+ comments\.\s*\n*/i;
+const TRIM_NEWLINES_RE = /^\n+|\n+$/g;
+const FILE_HEADING_RE = /^#{3}\s+`[^`]+`/m;
+const COVERAGE_RE = /\n## (Issue Coverage|Cross-Repo PR Coverage)/;
+
 function extractSynthesis(summary: string): string {
   const cleaned = summary
-    .replace(/^#+\s*Argus Review\s*(\(Incremental\))?\s*\n*/i, "")
-    .replace(/^Reviewed \d+ files with \d+ comments\.\s*\n*/i, "")
-    .replace(/^\n+|\n+$/g, "");
+    .replace(ARGUS_HEADING_RE, "")
+    .replace(REVIEWED_LINE_RE, "")
+    .replace(TRIM_NEWLINES_RE, "");
 
   // Find the first per-file heading (### `path/to/file`) via .search().
   // Must match at string start OR after a newline — the `m` flag makes `^`
   // match line starts. The previous version required a literal `\n` prefix
   // and missed the first heading when it was at position 0.
-  const fileHeadingRe = /^#{3}\s+`[^`]+`/m;
-  const fileIdx = cleaned.search(fileHeadingRe);
+  const fileIdx = cleaned.search(FILE_HEADING_RE);
   if (fileIdx < 0) return cleaned;
 
   // Before-file-listing prose (the real synthesis).
@@ -138,9 +152,8 @@ function extractSynthesis(summary: string): string {
 
   // Preserve coverage sections added by synthesize() (## Issue Coverage / ##
   // Cross-Repo PR Coverage) even though they appear after the file listing.
-  const coverageRe = /\n## (Issue Coverage|Cross-Repo PR Coverage)/;
   const afterFiles = cleaned.slice(fileIdx);
-  const coverageIdx = afterFiles.search(coverageRe);
+  const coverageIdx = afterFiles.search(COVERAGE_RE);
   if (coverageIdx >= 0) {
     const coveragePart = afterFiles.slice(coverageIdx).trim();
     return prose ? `${prose}\n\n${coveragePart}` : coveragePart;
@@ -170,6 +183,9 @@ const severityDot: Record<string, string> = {
 
 /* ── Friendly Errors ─────────────────────────── */
 
+const HTTP_502_RE = /\b502\b/;
+const HTTP_503_RE = /\b503\b/;
+
 function friendlyError(raw: string): {
   title: string;
   detail: string;
@@ -191,7 +207,7 @@ function friendlyError(raw: string): {
       action: "Click Retry \u2014 it usually works on the second attempt.",
     };
   }
-  if (/\b502\b/.test(raw) || /\b503\b/.test(raw)) {
+  if (HTTP_502_RE.test(raw) || HTTP_503_RE.test(raw)) {
     return {
       title: "GitHub server error",
       detail:
@@ -224,7 +240,7 @@ function friendlyError(raw: string): {
 
 /* ── Mermaid (chart) ─────────────────────────── */
 
-function MermaidChart({ chart }: { chart: string }) {
+const MermaidChart = memo(function MermaidChart({ chart }: { chart: string }) {
   const ref = useRef<HTMLDivElement>(null);
   const [error, setError] = useState(false);
 
@@ -273,7 +289,7 @@ function MermaidChart({ chart }: { chart: string }) {
 
   if (error) return <p className="text-[11px] font-mono text-slate-text">Diagram could not be rendered</p>;
   return <div ref={ref} className="flex justify-center" />;
-}
+});
 
 /* ── Sub-components ──────────────────────────── */
 
