@@ -207,6 +207,7 @@ func judgeIssue(
 		Messages:    []llm.Message{{Role: "user", Content: prompt.String()}},
 		MaxTokens:   800,
 		Temperature: 0.1,
+		JSONMode:    true,
 	})
 	if err != nil {
 		o.logger.Warn("[validate] acceptance: LLM call failed",

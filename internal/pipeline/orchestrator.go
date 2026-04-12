@@ -1829,6 +1829,7 @@ func (o *Orchestrator) enrichPRDescription(ctx context.Context, run *PipelineRun
 		Messages:    []llm.Message{{Role: "user", Content: prompt}},
 		MaxTokens:   1500,
 		Temperature: 0.3,
+		JSONMode:    true,
 	})
 	if err != nil {
 		o.logger.Warn("enrichPRDescription: LLM call failed", "error", err)
@@ -2223,8 +2224,8 @@ func (o *Orchestrator) autoLearnPatterns(ctx context.Context, run *PipelineRun, 
 Findings:
 %s
 
-Return JSON array: [{"pattern": "description", "category": "bug|security|architecture|regression"}]
-Return [] if no repo-specific patterns emerge. JSON array only.`, run.PREvent.RepoFullName, strings.Join(highConf, "\n"))
+Return JSON array: [{"pattern": "<concrete reusable pattern text>", "category": "bug|security|architecture|regression"}]
+The "pattern" value must be the actual pattern text, NOT the word "description". Return [] if no repo-specific patterns emerge. JSON array only.`, run.PREvent.RepoFullName, strings.Join(highConf, "\n"))
 
 	resp, err := provider.Complete(ctx, llm.CompletionRequest{
 		Model:       cfg.Model,
@@ -2232,6 +2233,7 @@ Return [] if no repo-specific patterns emerge. JSON array only.`, run.PREvent.Re
 		Messages:    []llm.Message{{Role: "user", Content: prompt}},
 		MaxTokens:   500,
 		Temperature: 0.3,
+		JSONMode:    true,
 	})
 	if err != nil {
 		o.logger.Warn("auto-learn LLM call failed", "error", err)
@@ -2261,7 +2263,7 @@ Return [] if no repo-specific patterns emerge. JSON array only.`, run.PREvent.Re
 	}
 
 	for _, p := range patterns {
-		if p.Pattern == "" {
+		if p.Pattern == "" || p.Pattern == "description" {
 			continue
 		}
 		customID := memory.PatternCustomID(owner, repo, "learned", p.Pattern)
@@ -3118,12 +3120,7 @@ func (o *Orchestrator) dedupStage(ctx context.Context, run *PipelineRun) error {
 // validateStage enriches deduplicated findings with blast radius and simulation data.
 // Runs blast radius + simulation in parallel on the clean finding set.
 func (o *Orchestrator) validateStage(ctx context.Context, run *PipelineRun) error {
-	if !run.DeepReview {
-		o.logger.Info("[validate] skipped — deep review not enabled", "pr", run.PREvent.PRNumber)
-		return nil
-	}
 	start := time.Now()
-	o.logger.Info("[validate] starting", "findings", countComments(run), "pr", run.PREvent.PRNumber)
 
 	owner, repo, err := splitRepoFullName(run.PREvent.RepoFullName)
 	if err != nil {
@@ -3133,134 +3130,143 @@ func (o *Orchestrator) validateStage(ctx context.Context, run *PipelineRun) erro
 
 	changedPaths := diffFilePaths(run.Diff)
 
-	// Run SAST, blast radius, and simulation in parallel
+	// Run SAST, blast radius, and simulation in parallel (deep-review only),
+	// plus issue acceptance + cross-PR checks (always, gated by their own flags).
 	var blastImpacts []BlastRadiusImpact
 	var simResults []SimulationResult
 	var sastFindings []sast.Finding
 	var wg sync.WaitGroup
 
-	// SAST analysis
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		defer func() {
-			if r := recover(); r != nil {
-				o.logger.Error("[validate] SAST goroutine panic", "recover", r, "pr", run.PREvent.PRNumber)
+	if run.DeepReview {
+		o.logger.Info("[validate] starting", "findings", countComments(run), "pr", run.PREvent.PRNumber)
+
+		// SAST analysis
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					o.logger.Error("[validate] SAST goroutine panic", "recover", r, "pr", run.PREvent.PRNumber)
+				}
+			}()
+			if len(changedPaths) > 50 {
+				o.logger.Info("[validate] SAST skipped — too many files", "files", len(changedPaths), "pr", run.PREvent.PRNumber)
+				return
 			}
-		}()
-		if len(changedPaths) > 50 {
-			o.logger.Info("[validate] SAST skipped — too many files", "files", len(changedPaths), "pr", run.PREvent.PRNumber)
-			return
-		}
-		// Determine dominant language from changed files
-		lang := dominantLanguage(changedPaths)
-		if lang == "" {
-			return
-		}
-		// Collect file contents — use FullContent if available, otherwise fetch via API
-		files := make(map[string]string)
-		for _, f := range run.Diff.Files {
-			if f.FullContent != "" {
-				files[f.NewName] = f.FullContent
-			} else if f.NewName != "" {
-				content, err := o.ghClient.GetFileContent(ctx, run.PREvent.InstallationID, owner, repo, f.NewName, run.PREvent.HeadSHA)
-				if err != nil {
-					o.logger.Warn("[validate] SAST: failed to fetch file", "file", f.NewName, "error", err, "pr", run.PREvent.PRNumber)
-				} else if content != "" {
-					files[f.NewName] = content
+			// Determine dominant language from changed files
+			lang := dominantLanguage(changedPaths)
+			if lang == "" {
+				return
+			}
+			// Collect file contents — use FullContent if available, otherwise fetch via API
+			files := make(map[string]string)
+			for _, f := range run.Diff.Files {
+				if f.FullContent != "" {
+					files[f.NewName] = f.FullContent
+				} else if f.NewName != "" {
+					content, err := o.ghClient.GetFileContent(ctx, run.PREvent.InstallationID, owner, repo, f.NewName, run.PREvent.HeadSHA)
+					if err != nil {
+						o.logger.Warn("[validate] SAST: failed to fetch file", "file", f.NewName, "error", err, "pr", run.PREvent.PRNumber)
+					} else if content != "" {
+						files[f.NewName] = content
+					}
 				}
 			}
-		}
-		if len(files) == 0 {
-			return
-		}
-		runners := sast.DefaultRunners()
-		sastCtx, sastCancel := context.WithTimeout(ctx, 30*time.Second)
-		defer sastCancel()
-		results, err := sast.RunAll(sastCtx, runners, lang, files)
-		if err != nil {
-			o.logger.Warn("[validate] SAST failed", "error", err, "pr", run.PREvent.PRNumber)
-			return
-		}
-		sastFindings = results
-		o.logger.Info("[validate] SAST done", "findings", len(results), "lang", lang, "pr", run.PREvent.PRNumber)
-	}()
-
-	// Blast Radius
-	wg.Add(1)
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				o.logger.Error("[validate] blast radius goroutine panic", "recover", r, "pr", run.PREvent.PRNumber)
+			if len(files) == 0 {
+				return
 			}
+			runners := sast.DefaultRunners()
+			sastCtx, sastCancel := context.WithTimeout(ctx, 30*time.Second)
+			defer sastCancel()
+			results, err := sast.RunAll(sastCtx, runners, lang, files)
+			if err != nil {
+				o.logger.Warn("[validate] SAST failed", "error", err, "pr", run.PREvent.PRNumber)
+				return
+			}
+			sastFindings = results
+			o.logger.Info("[validate] SAST done", "findings", len(results), "lang", lang, "pr", run.PREvent.PRNumber)
 		}()
-		defer wg.Done()
-		if !run.BlastRadius || o.st == nil {
-			return
-		}
-		changedSet := make(map[string]bool, len(changedPaths))
-		for _, p := range changedPaths {
-			changedSet[p] = true
-		}
-		nodes, err := o.st.GetBlastRadius(ctx, run.DBRepoID, changedPaths, 2)
-		if err != nil {
-			o.logger.Warn("[validate] blast radius query failed", "error", err, "pr", run.PREvent.PRNumber)
-			return
-		}
-		if len(nodes) == 0 {
-			return
-		}
-		depContents := make(map[string]string)
-		seen := make(map[string]bool)
-		for _, n := range nodes {
-			if n.Depth != 1 || changedSet[n.FilePath] || seen[n.FilePath] || len(depContents) >= 3 {
-				continue
-			}
-			seen[n.FilePath] = true
-			content, fetchErr := o.ghClient.GetFileContent(ctx, run.PREvent.InstallationID, owner, repo, n.FilePath, run.PREvent.HeadSHA)
-			if fetchErr == nil {
-				depContents[n.FilePath] = truncateLines(content, 200)
-			}
-		}
-		if len(depContents) > 0 {
-			blastImpacts = o.analyzeBlastRadius(ctx, run, owner, repo, depContents)
-		}
-		o.logger.Info("[validate] blast radius", "impacts", len(blastImpacts), "dependents_checked", len(depContents), "pr", run.PREvent.PRNumber)
-	}()
 
-	// Simulation
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		defer func() {
-			if r := recover(); r != nil {
-				o.logger.Error("[validate] simulation goroutine panic", "recover", r, "pr", run.PREvent.PRNumber)
+		// Blast Radius
+		wg.Add(1)
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					o.logger.Error("[validate] blast radius goroutine panic", "recover", r, "pr", run.PREvent.PRNumber)
+				}
+			}()
+			defer wg.Done()
+			if !run.BlastRadius || o.st == nil {
+				return
 			}
+			changedSet := make(map[string]bool, len(changedPaths))
+			for _, p := range changedPaths {
+				changedSet[p] = true
+			}
+			nodes, err := o.st.GetBlastRadius(ctx, run.DBRepoID, changedPaths, 2)
+			if err != nil {
+				o.logger.Warn("[validate] blast radius query failed", "error", err, "pr", run.PREvent.PRNumber)
+				return
+			}
+			if len(nodes) == 0 {
+				return
+			}
+			depContents := make(map[string]string)
+			seen := make(map[string]bool)
+			for _, n := range nodes {
+				if n.Depth != 1 || changedSet[n.FilePath] || seen[n.FilePath] || len(depContents) >= 3 {
+					continue
+				}
+				seen[n.FilePath] = true
+				content, fetchErr := o.ghClient.GetFileContent(ctx, run.PREvent.InstallationID, owner, repo, n.FilePath, run.PREvent.HeadSHA)
+				if fetchErr == nil {
+					depContents[n.FilePath] = truncateLines(content, 200)
+				}
+			}
+			if len(depContents) > 0 {
+				blastImpacts = o.analyzeBlastRadius(ctx, run, owner, repo, depContents)
+			}
+			o.logger.Info("[validate] blast radius", "impacts", len(blastImpacts), "dependents_checked", len(depContents), "pr", run.PREvent.PRNumber)
 		}()
-		if !run.CodeSimulation || o.simEngine == nil {
-			return
-		}
-		scenarios, err := FindRelevantScenarios(ctx, o.st, run.DBRepoID, changedPaths)
-		if err != nil {
-			o.logger.Warn("[validate] scenario lookup failed", "error", err, "pr", run.PREvent.PRNumber)
-			return
-		}
-		if len(scenarios) == 0 {
-			return
-		}
-		simScenarios := make([]SimScenario, len(scenarios))
-		for i, s := range scenarios {
-			simScenarios[i] = SimScenario{Description: s.Description, Severity: s.Severity, Files: s.Files}
-		}
-		req := SimulationRequest{Run: run, Scenarios: simScenarios}
-		results, simErr := o.simEngine.RunSimulations(ctx, req)
-		if simErr != nil {
-			o.logger.Warn("[validate] simulation failed", "error", simErr, "pr", run.PREvent.PRNumber)
-		} else {
-			simResults = results
-		}
-		o.logger.Info("[validate] simulation", "scenarios_tested", len(simScenarios), "results", len(simResults), "pr", run.PREvent.PRNumber)
-	}()
+
+		// Simulation
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					o.logger.Error("[validate] simulation goroutine panic", "recover", r, "pr", run.PREvent.PRNumber)
+				}
+			}()
+			if !run.CodeSimulation || o.simEngine == nil {
+				return
+			}
+			scenarios, err := FindRelevantScenarios(ctx, o.st, run.DBRepoID, changedPaths)
+			if err != nil {
+				o.logger.Warn("[validate] scenario lookup failed", "error", err, "pr", run.PREvent.PRNumber)
+				return
+			}
+			if len(scenarios) == 0 {
+				return
+			}
+			simScenarios := make([]SimScenario, len(scenarios))
+			for i, s := range scenarios {
+				simScenarios[i] = SimScenario{Description: s.Description, Severity: s.Severity, Files: s.Files}
+			}
+			req := SimulationRequest{Run: run, Scenarios: simScenarios}
+			results, simErr := o.simEngine.RunSimulations(ctx, req)
+			if simErr != nil {
+				o.logger.Warn("[validate] simulation failed", "error", simErr, "pr", run.PREvent.PRNumber)
+			} else {
+				simResults = results
+			}
+			o.logger.Info("[validate] simulation", "scenarios_tested", len(simScenarios), "results", len(simResults), "pr", run.PREvent.PRNumber)
+		}()
+	} else {
+		o.logger.Info("[validate] deep-review workers skipped — not deep review", "pr", run.PREvent.PRNumber)
+	}
+
+	// Issue acceptance + cross-PR always run (gated by their own feature flags, not deep review).
 
 	// Issue acceptance — judges PR diff against linked issue criteria.
 	wg.Add(1)

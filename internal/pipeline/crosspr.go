@@ -122,6 +122,7 @@ func (o *Orchestrator) runCrossPRWorker(ctx context.Context, run *PipelineRun) {
 		Messages:    []llm.Message{{Role: "user", Content: prompt.String()}},
 		MaxTokens:   800,
 		Temperature: 0.1,
+		JSONMode:    true,
 	})
 	if err != nil {
 		o.logger.Warn("[validate] crosspr: LLM call failed", "error", err, "pr", run.PREvent.PRNumber)

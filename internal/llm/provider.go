@@ -39,6 +39,7 @@ type CompletionRequest struct {
 	Temperature float64
 	MaxTokens   int
 	Tools       []Tool `json:"tools,omitempty"`
+	JSONMode    bool   // When true, sends response_format: {"type": "json_object"}
 }
 
 type Message struct {
