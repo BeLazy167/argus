@@ -121,6 +121,7 @@ type ProviderKey struct {
 	RepoID         *int64    `json:"repo_id,omitempty"`
 	Provider       string    `json:"provider"`
 	APIKeyEnc      string    `json:"-"`
+	KeyHint        string    `json:"key_hint,omitempty"`
 	BaseURL        *string   `json:"base_url,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`

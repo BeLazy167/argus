@@ -72,12 +72,19 @@ func (s *Server) upsertModelConfig(w http.ResponseWriter, r *http.Request) {
 	if body.MaxTokens <= 0 {
 		body.MaxTokens = 4096
 	}
+	if body.Temperature < 0 {
+		body.Temperature = 0
+	}
+	if body.Temperature > 2.0 {
+		body.Temperature = 2.0
+	}
 	cfg, err := s.store.UpsertModelConfig(r.Context(), repoID, stage, body.Provider, body.Model, body.BaseURL, body.MaxTokens, body.Temperature)
 	if err != nil {
 		s.logger.Error("upsert model config", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save config"})
 		return
 	}
+	s.auditSettings(r, 0, "model_config.upsert", map[string]interface{}{"stage": stage, "provider": body.Provider, "repo_id": repoID})
 	writeJSON(w, http.StatusOK, cfg)
 }
 
@@ -91,6 +98,7 @@ func (s *Server) deleteModelConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "config not found"})
 		return
 	}
+	s.auditSettings(r, 0, "model_config.delete", map[string]interface{}{"stage": stage, "repo_id": repoID})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
@@ -202,12 +210,19 @@ func (s *Server) upsertOrgModelConfig(w http.ResponseWriter, r *http.Request) {
 	if body.MaxTokens <= 0 {
 		body.MaxTokens = 4096
 	}
+	if body.Temperature < 0 {
+		body.Temperature = 0
+	}
+	if body.Temperature > 2.0 {
+		body.Temperature = 2.0
+	}
 	cfg, err := s.store.UpsertOrgModelConfig(r.Context(), installationID, stage, body.Provider, body.Model, body.BaseURL, body.MaxTokens, body.Temperature)
 	if err != nil {
 		s.logger.Error("upsert org model config", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save config"})
 		return
 	}
+	s.auditSettings(r, installationID, "org_model_config.upsert", map[string]interface{}{"stage": stage, "provider": body.Provider})
 	writeJSON(w, http.StatusOK, cfg)
 }
 
@@ -226,6 +241,7 @@ func (s *Server) deleteOrgModelConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "config not found"})
 		return
 	}
+	s.auditSettings(r, installationID, "org_model_config.delete", map[string]interface{}{"stage": stage})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
@@ -305,6 +321,7 @@ func (s *Server) upsertPromptTemplate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save prompt"})
 		return
 	}
+	s.auditSettings(r, repo.InstallationID, "prompt.upsert", map[string]interface{}{"stage": stage, "repo_id": repoID})
 	writeJSON(w, http.StatusOK, pt)
 }
 
@@ -318,6 +335,7 @@ func (s *Server) deletePromptTemplate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "prompt template not found"})
 		return
 	}
+	s.auditSettings(r, 0, "prompt.delete", map[string]interface{}{"stage": stage, "repo_id": repoID})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
@@ -372,7 +390,7 @@ func (s *Server) listProviderKeys(w http.ResponseWriter, r *http.Request) {
 			InstallationID: k.InstallationID,
 			RepoID:         k.RepoID,
 			Provider:       k.Provider,
-			APIKeyMasked:   maskKey(k.APIKeyEnc),
+			APIKeyMasked:   maskKey(k.KeyHint),
 			BaseURL:        k.BaseURL,
 			CreatedAt:      k.CreatedAt.Format("2006-01-02T15:04:05Z"),
 			UpdatedAt:      k.UpdatedAt.Format("2006-01-02T15:04:05Z"),
@@ -412,12 +430,13 @@ func (s *Server) upsertProviderKey(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save key"})
 		return
 	}
+	s.auditSettings(r, installationID, "provider_key.upsert", map[string]interface{}{"provider": body.Provider})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":              pk.ID,
 		"installation_id": pk.InstallationID,
 		"repo_id":         pk.RepoID,
 		"provider":        pk.Provider,
-		"api_key_masked":  maskKey(pk.APIKeyEnc),
+		"api_key_masked":  maskKey(pk.KeyHint),
 		"base_url":        pk.BaseURL,
 	})
 }
@@ -442,6 +461,7 @@ func (s *Server) deleteProviderKey(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "key not found"})
 		return
 	}
+	s.auditSettings(r, installationID, "provider_key.delete", map[string]interface{}{"key_id": keyID})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
@@ -477,14 +497,66 @@ func (s *Server) setOrgDefaults(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not authorized"})
 		return
 	}
-	var settings json.RawMessage
-	if err := json.NewDecoder(r.Body).Decode(&settings); err != nil {
+	var body struct {
+		Persona             string `json:"persona,omitempty"`
+		CustomPersonaPrompt string `json:"custom_persona_prompt,omitempty"`
+		DeepReview          *bool  `json:"deep_review,omitempty"`
+		CrossFileContext    *bool  `json:"cross_file_context,omitempty"`
+		BlastRadius         *bool  `json:"blast_radius,omitempty"`
+		ScenarioMemory      *bool  `json:"scenario_memory,omitempty"`
+		CodeSimulation      *bool  `json:"code_simulation,omitempty"`
+		PREnrichment        *bool  `json:"pr_enrichment,omitempty"`
+		LearnPatterns       *bool  `json:"learn_patterns,omitempty"`
+		LearnConventions    *bool  `json:"learn_conventions,omitempty"`
+		FileSynthesis       *bool  `json:"file_synthesis,omitempty"`
+		ArchitectureGraph   *bool  `json:"architecture_graph,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	if body.Persona != "" {
+		p := pipeline.Persona(body.Persona)
+		if !pipeline.ValidPersonas[p] {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid persona"})
+			return
+		}
+	}
+	settings, err := json.Marshal(body)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "marshal failed"})
 		return
 	}
 	if err := s.store.SetOrgDefaults(r.Context(), installationID, settings); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save"})
 		return
 	}
+	s.auditSettings(r, installationID, "org_defaults.update", map[string]interface{}{"persona": body.Persona})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "saved"})
+}
+
+// deleteRepoSettingKey removes a single key from repo settings_json, reverting it to org default inheritance.
+func (s *Server) deleteRepoSettingKey(w http.ResponseWriter, r *http.Request) {
+	repoID, ok := s.verifyRepoAccess(w, r)
+	if !ok {
+		return
+	}
+	key := chi.URLParam(r, "key")
+	validKeys := map[string]bool{
+		"persona": true, "custom_persona_prompt": true, "deep_review": true,
+		"cross_file_context": true, "blast_radius": true, "scenario_memory": true,
+		"code_simulation": true, "pr_enrichment": true, "learn_patterns": true,
+		"learn_conventions": true, "file_synthesis": true, "architecture_graph": true,
+	}
+	if !validKeys[key] {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown setting key"})
+		return
+	}
+	if _, err := s.store.Pool.Exec(r.Context(), `UPDATE repos SET settings_json = settings_json - $2, updated_at = NOW() WHERE id = $1`, repoID, key); err != nil {
+		s.logger.Error("delete repo setting key", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to remove key"})
+		return
+	}
+	s.auditSettings(r, 0, "repo_setting.delete", map[string]interface{}{"key": key, "repo_id": repoID})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted", "key": key})
 }

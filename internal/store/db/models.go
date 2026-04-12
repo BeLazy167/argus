@@ -154,6 +154,7 @@ type ProviderKey struct {
 	BaseUrl        *string            `json:"base_url"`
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	KeyHint        *string            `json:"key_hint"`
 }
 
 type Repo struct {
@@ -198,6 +199,7 @@ type Review struct {
 	DiagramTitle       *string            `json:"diagram_title"`
 	Diagrams           []byte             `json:"diagrams"`
 	TruncatedFiles     []byte             `json:"truncated_files"`
+	Brief              *string            `json:"brief"`
 }
 
 type ReviewComment struct {
