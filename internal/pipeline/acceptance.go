@@ -107,7 +107,6 @@ func (o *Orchestrator) runIssueAcceptanceWorker(ctx context.Context, run *Pipeli
 		o.logger.Warn("[validate] acceptance: bad repo name", "error", splitErr, "pr", run.PREvent.PRNumber)
 		return
 	}
-	_ = repo // may be used for cross-repo install fallback in the future
 
 	// Hydrate issue bodies if GraphQL didn't populate them, cap total count.
 	toJudge := make([]IssueLink, 0, len(run.LinkedIssues))
