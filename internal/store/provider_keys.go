@@ -13,31 +13,37 @@ func (s *Store) UpsertProviderKey(ctx context.Context, installationID int64, rep
 	if err != nil {
 		return nil, fmt.Errorf("encrypting api key: %w", err)
 	}
+	hint := ""
+	if len(apiKey) >= 4 {
+		hint = apiKey[len(apiKey)-4:]
+	}
 	var pk ProviderKey
 	// Use appropriate ON CONFLICT target: partial index for org-level (repo_id IS NULL),
 	// composite unique for repo-level keys.
 	var query string
 	if repoID == nil {
 		query = `
-			INSERT INTO provider_keys (installation_id, repo_id, provider, api_key_enc, base_url)
-			VALUES ($1, $2, $3, $4, $5)
+			INSERT INTO provider_keys (installation_id, repo_id, provider, api_key_enc, key_hint, base_url)
+			VALUES ($1, $2, $3, $4, $5, $6)
 			ON CONFLICT (installation_id, provider) WHERE repo_id IS NULL DO UPDATE SET
 				api_key_enc = EXCLUDED.api_key_enc,
+				key_hint = EXCLUDED.key_hint,
 				base_url = EXCLUDED.base_url,
 				updated_at = NOW()
-			RETURNING id, installation_id, repo_id, provider, api_key_enc, base_url, created_at, updated_at`
+			RETURNING id, installation_id, repo_id, provider, api_key_enc, key_hint, base_url, created_at, updated_at`
 	} else {
 		query = `
-			INSERT INTO provider_keys (installation_id, repo_id, provider, api_key_enc, base_url)
-			VALUES ($1, $2, $3, $4, $5)
+			INSERT INTO provider_keys (installation_id, repo_id, provider, api_key_enc, key_hint, base_url)
+			VALUES ($1, $2, $3, $4, $5, $6)
 			ON CONFLICT (installation_id, repo_id, provider) DO UPDATE SET
 				api_key_enc = EXCLUDED.api_key_enc,
+				key_hint = EXCLUDED.key_hint,
 				base_url = EXCLUDED.base_url,
 				updated_at = NOW()
-			RETURNING id, installation_id, repo_id, provider, api_key_enc, base_url, created_at, updated_at`
+			RETURNING id, installation_id, repo_id, provider, api_key_enc, key_hint, base_url, created_at, updated_at`
 	}
-	err = s.Pool.QueryRow(ctx, query, installationID, repoID, provider, enc, baseURL).Scan(
-		&pk.ID, &pk.InstallationID, &pk.RepoID, &pk.Provider, &pk.APIKeyEnc, &pk.BaseURL, &pk.CreatedAt, &pk.UpdatedAt)
+	err = s.Pool.QueryRow(ctx, query, installationID, repoID, provider, enc, hint, baseURL).Scan(
+		&pk.ID, &pk.InstallationID, &pk.RepoID, &pk.Provider, &pk.APIKeyEnc, &pk.KeyHint, &pk.BaseURL, &pk.CreatedAt, &pk.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -46,7 +52,7 @@ func (s *Store) UpsertProviderKey(ctx context.Context, installationID int64, rep
 
 func (s *Store) ListProviderKeys(ctx context.Context, installationID int64) ([]ProviderKey, error) {
 	rows, err := s.Pool.Query(ctx, `
-		SELECT id, installation_id, repo_id, provider, api_key_enc, base_url, created_at, updated_at
+		SELECT id, installation_id, repo_id, provider, api_key_enc, key_hint, base_url, created_at, updated_at
 		FROM provider_keys WHERE installation_id = $1 ORDER BY provider, repo_id NULLS FIRST
 	`, installationID)
 	if err != nil {

@@ -35,6 +35,7 @@ type Server struct {
 	rateLimiter      *RateLimiter
 	inFlightReviews  sync.Map     // "{repo}:{prNumber}" → struct{}
 	webhookSem       chan struct{} // bounded concurrency for webhook goroutines
+	audit            *auditLogger
 }
 
 func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchestrator, replyAnalyzer *pipeline.ReplyAnalyzer, reactionAnalyzer *pipeline.ReactionAnalyzer, indexer *memory.Indexer, registry *llm.Registry, eventBus *pipeline.EventBus, webhookSecret string, corsOrigin string, logger *slog.Logger) *Server {
@@ -51,6 +52,7 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 		logger:           logger,
 		rateLimiter:      NewRateLimiter(),
 		webhookSem:       make(chan struct{}, 50),
+		audit:            newAuditLogger(logger),
 	}
 
 	r := chi.NewRouter()
@@ -121,6 +123,9 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 				// Feature flags (issue acceptance, cross-PR checks, linked-PR cap)
 				r.Get("/installations/{installationID}/features", s.getFeatureFlags)
 				r.Put("/installations/{installationID}/features", s.setFeatureFlags)
+
+				// Repo Settings
+				r.Delete("/repos/{repoID}/settings/{key}", s.deleteRepoSettingKey)
 
 				// Model Config
 				r.Get("/repos/{repoID}/config", s.getModelConfigs)
@@ -240,11 +245,11 @@ func containsID(ids []int64, target int64) bool {
 	return false
 }
 
-func maskKey(encKey string) string {
-	if len(encKey) > 0 {
-		return "sk-...****"
+func maskKey(hint string) string {
+	if hint != "" {
+		return "****" + hint
 	}
-	return ""
+	return "sk-...****"
 }
 
 func writeJSON(w http.ResponseWriter, status int, data any) {

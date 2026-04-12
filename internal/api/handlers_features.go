@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/BeLazy167/argus/internal/pipeline"
 	"github.com/BeLazy167/argus/internal/store/db"
 )
 
@@ -21,13 +22,12 @@ type featureFlagsResponse struct {
 	MaxLinkedPRs    int  `json:"max_linked_prs"`
 }
 
-// defaultFeatureFlags mirrors pipeline.DefaultFeatureFlags — kept here to
-// avoid importing the pipeline package from api just for three constants.
 func defaultFeatureFlags() featureFlagsResponse {
+	d := pipeline.DefaultFeatureFlags()
 	return featureFlagsResponse{
-		IssueAcceptance: true,
-		CrossPRChecks:   false,
-		MaxLinkedPRs:    5,
+		IssueAcceptance: d.IssueAcceptance,
+		CrossPRChecks:   d.CrossPRChecks,
+		MaxLinkedPRs:    d.MaxLinkedPRs,
 	}
 }
 
@@ -92,7 +92,7 @@ func (s *Server) setFeatureFlags(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Clamp max_linked_prs to safe range.
-	if body.MaxLinkedPRs <= 0 {
+	if body.MaxLinkedPRs < 1 {
 		body.MaxLinkedPRs = 5
 	}
 	if body.MaxLinkedPRs > 20 {
@@ -111,5 +111,8 @@ func (s *Server) setFeatureFlags(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "save failed"})
 		return
 	}
+	s.auditSettings(r, installationID, "feature_flags.update", map[string]interface{}{
+		"issue_acceptance": body.IssueAcceptance, "cross_pr_checks": body.CrossPRChecks, "max_linked_prs": body.MaxLinkedPRs,
+	})
 	writeJSON(w, http.StatusOK, body)
 }

@@ -28,6 +28,23 @@ func (q *Queries) DeleteModelConfig(ctx context.Context, arg DeleteModelConfigPa
 	return result.RowsAffected(), nil
 }
 
+const deleteOrgModelConfig = `-- name: DeleteOrgModelConfig :execrows
+DELETE FROM model_configs WHERE installation_id = $1 AND stage = $2 AND repo_id IS NULL
+`
+
+type DeleteOrgModelConfigParams struct {
+	InstallationID *int64 `json:"installation_id"`
+	Stage          string `json:"stage"`
+}
+
+func (q *Queries) DeleteOrgModelConfig(ctx context.Context, arg DeleteOrgModelConfigParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteOrgModelConfig, arg.InstallationID, arg.Stage)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const listModelConfigs = `-- name: ListModelConfigs :many
 SELECT id, repo_id, stage, provider, model, base_url, max_tokens, temperature, created_at, updated_at
 FROM model_configs WHERE repo_id = $1 ORDER BY stage
@@ -58,6 +75,115 @@ func (q *Queries) ListModelConfigs(ctx context.Context, repoID *int64) ([]ListMo
 		if err := rows.Scan(
 			&i.ID,
 			&i.RepoID,
+			&i.Stage,
+			&i.Provider,
+			&i.Model,
+			&i.BaseUrl,
+			&i.MaxTokens,
+			&i.Temperature,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listModelConfigsWithFallback = `-- name: ListModelConfigsWithFallback :many
+SELECT DISTINCT ON (stage) id, repo_id, installation_id, stage, provider, model, base_url, max_tokens, temperature, created_at, updated_at
+FROM model_configs
+WHERE (repo_id = $2 OR (installation_id = $1 AND repo_id IS NULL))
+ORDER BY stage, repo_id NULLS LAST
+`
+
+type ListModelConfigsWithFallbackParams struct {
+	InstallationID *int64 `json:"installation_id"`
+	RepoID         *int64 `json:"repo_id"`
+}
+
+type ListModelConfigsWithFallbackRow struct {
+	ID             int64              `json:"id"`
+	RepoID         *int64             `json:"repo_id"`
+	InstallationID *int64             `json:"installation_id"`
+	Stage          string             `json:"stage"`
+	Provider       string             `json:"provider"`
+	Model          string             `json:"model"`
+	BaseUrl        *string            `json:"base_url"`
+	MaxTokens      int32              `json:"max_tokens"`
+	Temperature    float32            `json:"temperature"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+}
+
+func (q *Queries) ListModelConfigsWithFallback(ctx context.Context, arg ListModelConfigsWithFallbackParams) ([]ListModelConfigsWithFallbackRow, error) {
+	rows, err := q.db.Query(ctx, listModelConfigsWithFallback, arg.InstallationID, arg.RepoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListModelConfigsWithFallbackRow
+	for rows.Next() {
+		var i ListModelConfigsWithFallbackRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.RepoID,
+			&i.InstallationID,
+			&i.Stage,
+			&i.Provider,
+			&i.Model,
+			&i.BaseUrl,
+			&i.MaxTokens,
+			&i.Temperature,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listOrgModelConfigs = `-- name: ListOrgModelConfigs :many
+SELECT id, repo_id, installation_id, stage, provider, model, base_url, max_tokens, temperature, created_at, updated_at
+FROM model_configs WHERE installation_id = $1 AND repo_id IS NULL ORDER BY stage
+`
+
+type ListOrgModelConfigsRow struct {
+	ID             int64              `json:"id"`
+	RepoID         *int64             `json:"repo_id"`
+	InstallationID *int64             `json:"installation_id"`
+	Stage          string             `json:"stage"`
+	Provider       string             `json:"provider"`
+	Model          string             `json:"model"`
+	BaseUrl        *string            `json:"base_url"`
+	MaxTokens      int32              `json:"max_tokens"`
+	Temperature    float32            `json:"temperature"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+}
+
+func (q *Queries) ListOrgModelConfigs(ctx context.Context, installationID *int64) ([]ListOrgModelConfigsRow, error) {
+	rows, err := q.db.Query(ctx, listOrgModelConfigs, installationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListOrgModelConfigsRow
+	for rows.Next() {
+		var i ListOrgModelConfigsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.RepoID,
+			&i.InstallationID,
 			&i.Stage,
 			&i.Provider,
 			&i.Model,
@@ -127,6 +253,66 @@ func (q *Queries) UpsertModelConfig(ctx context.Context, arg UpsertModelConfigPa
 	err := row.Scan(
 		&i.ID,
 		&i.RepoID,
+		&i.Stage,
+		&i.Provider,
+		&i.Model,
+		&i.BaseUrl,
+		&i.MaxTokens,
+		&i.Temperature,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const upsertOrgModelConfig = `-- name: UpsertOrgModelConfig :one
+INSERT INTO model_configs (installation_id, repo_id, stage, provider, model, base_url, max_tokens, temperature)
+VALUES ($1, NULL, $2, $3, $4, $5, $6, $7)
+ON CONFLICT (installation_id, stage) WHERE repo_id IS NULL DO UPDATE SET
+    provider = EXCLUDED.provider, model = EXCLUDED.model, base_url = EXCLUDED.base_url,
+    max_tokens = EXCLUDED.max_tokens, temperature = EXCLUDED.temperature, updated_at = NOW()
+RETURNING id, repo_id, installation_id, stage, provider, model, base_url, max_tokens, temperature, created_at, updated_at
+`
+
+type UpsertOrgModelConfigParams struct {
+	InstallationID *int64  `json:"installation_id"`
+	Stage          string  `json:"stage"`
+	Provider       string  `json:"provider"`
+	Model          string  `json:"model"`
+	BaseUrl        *string `json:"base_url"`
+	MaxTokens      int32   `json:"max_tokens"`
+	Temperature    float32 `json:"temperature"`
+}
+
+type UpsertOrgModelConfigRow struct {
+	ID             int64              `json:"id"`
+	RepoID         *int64             `json:"repo_id"`
+	InstallationID *int64             `json:"installation_id"`
+	Stage          string             `json:"stage"`
+	Provider       string             `json:"provider"`
+	Model          string             `json:"model"`
+	BaseUrl        *string            `json:"base_url"`
+	MaxTokens      int32              `json:"max_tokens"`
+	Temperature    float32            `json:"temperature"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+}
+
+func (q *Queries) UpsertOrgModelConfig(ctx context.Context, arg UpsertOrgModelConfigParams) (UpsertOrgModelConfigRow, error) {
+	row := q.db.QueryRow(ctx, upsertOrgModelConfig,
+		arg.InstallationID,
+		arg.Stage,
+		arg.Provider,
+		arg.Model,
+		arg.BaseUrl,
+		arg.MaxTokens,
+		arg.Temperature,
+	)
+	var i UpsertOrgModelConfigRow
+	err := row.Scan(
+		&i.ID,
+		&i.RepoID,
+		&i.InstallationID,
 		&i.Stage,
 		&i.Provider,
 		&i.Model,
