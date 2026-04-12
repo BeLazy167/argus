@@ -338,7 +338,15 @@ func (s *Server) retryReview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Open event bus topic before goroutine so WebSocket can subscribe immediately.
+	if s.eventBus != nil {
+		s.eventBus.OpenTopic(id)
+	}
+
 	go func() {
+		if s.eventBus != nil {
+			defer s.eventBus.CloseTopic(id)
+		}
 		if err := s.orchestrator.RetryReview(context.Background(), id); err != nil {
 			s.logger.Error("retry review failed", "error", err, "review_id", id)
 		}

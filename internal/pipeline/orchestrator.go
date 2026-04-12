@@ -665,9 +665,10 @@ func (o *Orchestrator) RetryReview(ctx context.Context, reviewID uuid.UUID) erro
 		return fmt.Errorf("finding pipeline run for review %s: %w", reviewID, err)
 	}
 
+	// Topic may already be opened by the caller (retry handler opens it
+	// before spawning the goroutine so the WebSocket can subscribe immediately).
 	if o.eventBus != nil {
 		o.eventBus.OpenTopic(reviewID)
-		defer o.eventBus.CloseTopic(reviewID)
 	}
 
 	_, err = o.sm.Resume(ctx, runID)
