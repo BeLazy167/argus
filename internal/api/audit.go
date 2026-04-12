@@ -65,6 +65,44 @@ func (a *auditLogger) close() {
 	a.client.Close()
 }
 
+// posthogTracker implements pipeline.EventTracker using PostHog.
+type posthogTracker struct {
+	audit *auditLogger
+}
+
+func (t *posthogTracker) TrackReviewStarted(installationID int64, repo string, prNumber int, reviewID string, isIncremental bool, deepReview bool) {
+	t.audit.logSettingsChange(context.Background(), "system", installationID, "review.started", map[string]interface{}{
+		"repo": repo, "pr_number": prNumber, "review_id": reviewID,
+		"is_incremental": isIncremental, "deep_review": deepReview,
+	})
+}
+
+func (t *posthogTracker) TrackStageCompleted(installationID int64, repo string, prNumber int, reviewID string, stage string, durationMs int64) {
+	t.audit.logSettingsChange(context.Background(), "system", installationID, "stage.completed", map[string]interface{}{
+		"repo": repo, "pr_number": prNumber, "review_id": reviewID,
+		"stage": stage, "duration_ms": durationMs,
+	})
+}
+
+func (t *posthogTracker) TrackReviewCompleted(installationID int64, repo string, prNumber int, reviewID string, score int, commentCount int, durationMs int64) {
+	t.audit.logSettingsChange(context.Background(), "system", installationID, "review.completed", map[string]interface{}{
+		"repo": repo, "pr_number": prNumber, "review_id": reviewID,
+		"score": score, "comment_count": commentCount, "duration_ms": durationMs,
+	})
+}
+
+func (t *posthogTracker) TrackReviewFailed(installationID int64, repo string, prNumber int, reviewID string, stage string, errMsg string) {
+	t.audit.logSettingsChange(context.Background(), "system", installationID, "review.failed", map[string]interface{}{
+		"repo": repo, "pr_number": prNumber, "review_id": reviewID,
+		"failed_stage": stage, "error": errMsg,
+	})
+}
+
+// newEventTracker creates a pipeline.EventTracker backed by PostHog.
+func newEventTracker(audit *auditLogger) *posthogTracker {
+	return &posthogTracker{audit: audit}
+}
+
 // auditSettings logs a settings change to both PostHog and activity_log.
 // installationID can be 0 for repo-scoped operations (looked up from context).
 func (s *Server) auditSettings(r *http.Request, installationID int64, action string, props map[string]interface{}) {

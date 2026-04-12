@@ -18,6 +18,7 @@ type StateMachine struct {
 	st       *store.Store
 	stages   map[PipelineState]StageFunc
 	eventBus *EventBus
+	tracker  EventTracker
 	logger   *slog.Logger
 }
 
@@ -71,6 +72,7 @@ func (sm *StateMachine) Run(ctx context.Context, run *PipelineRun) error {
 		}
 
 		sm.logger.Info("executing stage", "state", run.State, "review_id", run.ReviewID)
+		stageStart := time.Now()
 
 		if err := stage(ctx, run); err != nil {
 			failedState := run.State
@@ -89,6 +91,10 @@ func (sm *StateMachine) Run(ctx context.Context, run *PipelineRun) error {
 				sm.logger.Error("failed to update review status on failure", "error", persistErr, "review_id", run.ReviewID)
 			}
 			return fmt.Errorf("stage %s failed: %w", failedState, err)
+		}
+
+		if sm.tracker != nil {
+			sm.tracker.TrackStageCompleted(run.DBInstallationID, run.PREvent.RepoFullName, run.PREvent.PRNumber, run.ReviewID.String(), string(run.State), time.Since(stageStart).Milliseconds())
 		}
 
 		next, exists := trans[run.State]

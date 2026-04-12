@@ -109,6 +109,7 @@ type Orchestrator struct {
 	simEngine    *SimulationEngine
 	registry     LLMRegistry
 	eventBus     *EventBus
+	tracker      EventTracker
 	logger       *slog.Logger
 }
 
@@ -117,9 +118,10 @@ type LLMRegistry interface {
 	HasKeyForRepo(ctx context.Context, installationID int64, repoID *int64, providerName string) bool
 }
 
-func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, reviewStage *ReviewStage, triageStage *TriageStage, scoringStage *ScoringStage, indexer *memory.Indexer, registry LLMRegistry, eventBus *EventBus, logger *slog.Logger) *Orchestrator {
+func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, reviewStage *ReviewStage, triageStage *TriageStage, scoringStage *ScoringStage, indexer *memory.Indexer, registry LLMRegistry, eventBus *EventBus, logger *slog.Logger, tracker EventTracker) *Orchestrator {
 	sm := NewStateMachine(db, st, logger)
 	sm.eventBus = eventBus
+	sm.tracker = tracker
 
 	o := &Orchestrator{
 		db:           db,
@@ -132,7 +134,11 @@ func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, 
 		indexer:      indexer,
 		registry:     registry,
 		eventBus:     eventBus,
+		tracker:      tracker,
 		logger:       logger,
+	}
+	if o.tracker == nil {
+		o.tracker = noopTracker{}
 	}
 	o.simEngine = NewSimulationEngine(o.reviewStage.registry, st, ghClient, logger)
 
@@ -147,6 +153,12 @@ func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, 
 	sm.RegisterStage(StatePosting, o.post)
 
 	return o
+}
+
+// SetTracker injects an EventTracker for pipeline observability.
+func (o *Orchestrator) SetTracker(t EventTracker) {
+	o.tracker = t
+	o.sm.tracker = t
 }
 
 // HandlePREvent processes a pull request webhook event.
@@ -571,7 +583,26 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 	}
 	o.postStartedComment(ctx, event, run, reviewModel)
 
-	return o.sm.Run(ctx, run)
+	o.tracker.TrackReviewStarted(inst.ID, event.RepoFullName, event.PRNumber, run.ReviewID.String(), isIncremental, run.DeepReview)
+
+	startTime := time.Now()
+	err = o.sm.Run(ctx, run)
+	durationMs := time.Since(startTime).Milliseconds()
+
+	if err != nil {
+		o.tracker.TrackReviewFailed(inst.ID, event.RepoFullName, event.PRNumber, run.ReviewID.String(), string(run.State), err.Error())
+	} else {
+		score := 0
+		if run.Synthesis != nil && run.Synthesis.Score > 0 {
+			score = run.Synthesis.Score
+		}
+		commentCount := 0
+		for _, fr := range run.FileReviews {
+			commentCount += len(fr.Comments)
+		}
+		o.tracker.TrackReviewCompleted(inst.ID, event.RepoFullName, event.PRNumber, run.ReviewID.String(), score, commentCount, durationMs)
+	}
+	return err
 }
 
 func (o *Orchestrator) handlePRClosed(ctx context.Context, event ghpkg.PREvent) error {
