@@ -171,22 +171,25 @@ func (s *Server) handleRememberCommand(ctx context.Context, evt ghpkg.IssueComme
 	// Index in Supermemory
 	var smID *string
 	var smWarning string
-	if s.indexer != nil {
-		metadata := map[string]string{
-			"source":     "remember_command",
-			"created_by": evt.CommentAuthor,
-		}
-		var resp *memory.AddResponse
-		if isOrg {
-			resp, err = s.indexer.IndexOwnerPattern(ctx, owner, content, "", metadata)
-		} else {
-			resp, err = s.indexer.IndexRepoPattern(ctx, owner, repo, content, "", metadata)
-		}
-		if err != nil {
-			s.logger.Error("remember: index in supermemory", "error", err)
-			smWarning = "\n\n_Warning: semantic search indexing failed. Pattern saved to DB only._"
-		} else if resp != nil {
-			smID = &resp.ID
+	if s.memRegistry != nil {
+		indexer := s.memRegistry.GetIndexer(ctx, inst.ID)
+		if indexer != nil {
+			metadata := map[string]string{
+				"source":     "remember_command",
+				"created_by": evt.CommentAuthor,
+			}
+			var resp *memory.AddResponse
+			if isOrg {
+				resp, err = indexer.IndexOwnerPattern(ctx, owner, content, "", metadata)
+			} else {
+				resp, err = indexer.IndexRepoPattern(ctx, owner, repo, content, "", metadata)
+			}
+			if err != nil {
+				s.logger.Error("remember: index in supermemory", "error", err)
+				smWarning = "\n\n_Warning: semantic search indexing failed. Pattern saved to DB only._"
+			} else if resp != nil {
+				smID = &resp.ID
+			}
 		}
 	}
 

@@ -18,13 +18,13 @@ import (
 // ScoringStage validates review comments using a separate scoring model.
 // If no scoring model is configured, it's a no-op (all comments pass through).
 type ScoringStage struct {
-	registry  *llm.Registry
-	store     *store.Store
-	memClient *memory.Client
+	registry    *llm.Registry
+	store       *store.Store
+	memRegistry *memory.Registry
 }
 
-func NewScoringStage(registry *llm.Registry, st *store.Store, memClient *memory.Client) *ScoringStage {
-	return &ScoringStage{registry: registry, store: st, memClient: memClient}
+func NewScoringStage(registry *llm.Registry, st *store.Store, memRegistry *memory.Registry) *ScoringStage {
+	return &ScoringStage{registry: registry, store: st, memRegistry: memRegistry}
 }
 
 // scoringThresholdForSeverity returns the minimum score for a comment to survive
@@ -76,7 +76,11 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 	if err != nil {
 		slog.Warn("scoring: invalid repo name, skipping memory context", "error", err)
 	}
-	memContext := fetchScoringContext(ctx, ss.memClient, owner, repo, run.FileReviews)
+	var memClient *memory.Client
+	if ss.memRegistry != nil {
+		memClient = ss.memRegistry.GetClient(ctx, run.DBInstallationID)
+	}
+	memContext := fetchScoringContext(ctx, memClient, owner, repo, run.FileReviews)
 
 	prompt := buildScoringPrompt(run, memContext)
 	resp, err := provider.Complete(ctx, llm.CompletionRequest{

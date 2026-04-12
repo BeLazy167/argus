@@ -23,17 +23,17 @@ type ReviewStage struct {
 	registry    *llm.Registry
 	store       *store.Store
 	ghClient    *ghpkg.Client
-	memClient   *memory.Client
+	memRegistry *memory.Registry
 	maxWorkers  int
 	maxToolIter int // max tool-use iterations per file
 }
 
-func NewReviewStage(registry *llm.Registry, st *store.Store, ghClient *ghpkg.Client, memClient *memory.Client, maxWorkers int) *ReviewStage {
+func NewReviewStage(registry *llm.Registry, st *store.Store, ghClient *ghpkg.Client, memRegistry *memory.Registry, maxWorkers int) *ReviewStage {
 	return &ReviewStage{
 		registry:    registry,
 		store:       st,
 		ghClient:    ghClient,
-		memClient:   memClient,
+		memRegistry: memRegistry,
 		maxWorkers:  maxWorkers,
 		maxToolIter: 5,
 	}
@@ -117,6 +117,11 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 		return fmt.Errorf("resolve review provider: %w", err)
 	}
 
+	var memClient *memory.Client
+	if rs.memRegistry != nil {
+		memClient = rs.memRegistry.GetClient(ctx, run.DBInstallationID)
+	}
+
 	unitCh := make(chan workUnit, len(units))
 	resultCh := make(chan result, len(units))
 
@@ -139,14 +144,14 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 				}
 				p := reviewParams{file: u.file, action: u.action, specialist: u.specialist, deepReview: run.DeepReview}
 				if u.specialist != "" {
-					p.systemBase = specialistPrompt(u.specialist, run.Prompts) + specialistMemoryBlock(ctx, rs.memClient, owner, repo, u.specialist, u.file.NewName)
+					p.systemBase = specialistPrompt(u.specialist, run.Prompts) + specialistMemoryBlock(ctx, memClient, owner, repo, u.specialist, u.file.NewName)
 					if run.Persona == PersonaCustom {
 						p.promptExtra = PersonaSpecialistHintCustom(run.CustomPersonaPrompt)
 					} else {
 						p.promptExtra = PersonaSpecialistHint(run.Persona)
 					}
 				} else {
-					p.systemBase = customOrDefault(run.Prompts, "review_system", baseSystemPrompt) + reviewMemoryBlock(ctx, rs.memClient, owner, repo, u.file.NewName)
+					p.systemBase = customOrDefault(run.Prompts, "review_system", baseSystemPrompt) + reviewMemoryBlock(ctx, memClient, owner, repo, u.file.NewName)
 					if run.Persona == PersonaCustom {
 						p.promptExtra = PersonaPromptOverlayCustom(run.CustomPersonaPrompt)
 					} else {
@@ -275,6 +280,11 @@ type reviewParams struct {
 }
 
 func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p reviewParams, fileContents map[string]string, owner, repo string, cfg llm.ModelConfig, provider llm.Provider) (FileReview, StageTokens, error) {
+	var memClient *memory.Client
+	if rs.memRegistry != nil {
+		memClient = rs.memRegistry.GetClient(ctx, run.DBInstallationID)
+	}
+
 	review := FileReview{Path: p.file.NewName}
 	var tokens StageTokens
 	tokens.Model = cfg.Model
@@ -346,9 +356,9 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p revie
 	var tools []llm.Tool
 	var toolHandler *ToolHandler
 	systemPrompt := p.systemBase
-	if rs.memClient != nil && p.action == TriageDeep && p.deepReview {
+	if memClient != nil && p.action == TriageDeep && p.deepReview {
 		tools = memoryTools()
-		toolHandler = NewToolHandler(rs.memClient, rs.store, owner)
+		toolHandler = NewToolHandler(memClient, rs.store, owner)
 		// Prepend agentic base; keep specialist overlay via systemBase
 		if p.specialist != "" {
 			systemPrompt = buildAgenticSystemPrompt(owner, repo) + specialistOverlay(p.specialist)

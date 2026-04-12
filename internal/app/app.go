@@ -54,23 +54,17 @@ func Run() error {
 	registry := llm.NewRegistry()
 	registry.SetResolver(db)
 
-	// Memory / RAG
-	var memClient *memory.Client
-	var indexer *memory.Indexer
-	if cfg.SupermemoryAPIKey != "" {
-		memClient = memory.NewClient(cfg.SupermemoryAPIKey)
-		indexer = memory.NewIndexer(memClient, logger)
-		indexer.ConfigureFilterPrompt(ctx)
-	}
+	// Memory / RAG (per-org via registry)
+	memRegistry := memory.NewRegistry(db, logger)
 
 	// Pipeline
 	eventBus := pipeline.NewEventBus()
-	triageStage := pipeline.NewTriageStage(registry, db, memClient)
-	reviewStage := pipeline.NewReviewStage(registry, db, ghClient, memClient, cfg.MaxConcurrentReviews)
-	scoringStage := pipeline.NewScoringStage(registry, db, memClient)
-	orchestrator := pipeline.NewOrchestrator(db.Pool, db, ghClient, reviewStage, triageStage, scoringStage, indexer, registry, eventBus, logger, nil)
-	replyAnalyzer := pipeline.NewReplyAnalyzer(registry, db, ghClient, indexer, logger)
-	reactionAnalyzer := pipeline.NewReactionAnalyzer(db, ghClient, indexer, logger)
+	triageStage := pipeline.NewTriageStage(registry, db, memRegistry)
+	reviewStage := pipeline.NewReviewStage(registry, db, ghClient, memRegistry, cfg.MaxConcurrentReviews)
+	scoringStage := pipeline.NewScoringStage(registry, db, memRegistry)
+	orchestrator := pipeline.NewOrchestrator(db.Pool, db, ghClient, reviewStage, triageStage, scoringStage, memRegistry, registry, eventBus, logger, nil)
+	replyAnalyzer := pipeline.NewReplyAnalyzer(registry, db, ghClient, memRegistry, logger)
+	reactionAnalyzer := pipeline.NewReactionAnalyzer(db, ghClient, memRegistry, logger)
 
 	// Mark stale reviews as failed before resuming incomplete pipelines
 	if count, err := db.RecoverStaleReviews(ctx, 10*time.Minute); err != nil {
@@ -128,7 +122,7 @@ func Run() error {
 	}
 
 	// API Server
-	server := api.NewServer(db, ghApp, orchestrator, replyAnalyzer, reactionAnalyzer, indexer, registry, eventBus, cfg.GitHubWebhookSecret, cfg.CORSAllowOrigin, logger)
+	server := api.NewServer(db, ghApp, orchestrator, replyAnalyzer, reactionAnalyzer, registry, eventBus, cfg.GitHubWebhookSecret, cfg.CORSAllowOrigin, logger, memRegistry)
 	defer server.Close()
 	orchestrator.SetTracker(server.EventTracker())
 

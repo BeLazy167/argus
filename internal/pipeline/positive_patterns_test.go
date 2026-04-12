@@ -19,11 +19,11 @@ func TestLearnPositivePatterns_NilIndexer(t *testing.T) {
 }
 
 func TestLearnPositivePatterns_Disabled(t *testing.T) {
-	o := &Orchestrator{
-		indexer: memory.NewIndexer(nil, slog.Default()),
-		logger:  slog.Default(),
+	o := &Orchestrator{logger: slog.Default()}
+	run := &PipelineRun{
+		LearnPatterns: false,
+		Indexer:       memory.NewIndexer(nil, slog.Default()),
 	}
-	run := &PipelineRun{LearnPatterns: false}
 	got := o.learnPositivePatterns(context.Background(), run, "owner", "repo")
 	if got != 0 {
 		t.Errorf("disabled: expected 0, got %d", got)
@@ -31,12 +31,10 @@ func TestLearnPositivePatterns_Disabled(t *testing.T) {
 }
 
 func TestLearnPositivePatterns_NoPraiseComments(t *testing.T) {
-	o := &Orchestrator{
-		indexer: memory.NewIndexer(nil, slog.Default()),
-		logger:  slog.Default(),
-	}
+	o := &Orchestrator{logger: slog.Default()}
 	run := &PipelineRun{
 		LearnPatterns: true,
+		Indexer:       memory.NewIndexer(nil, slog.Default()),
 		PREvent:       github.PREvent{PRNumber: 1, RepoFullName: "owner/repo"},
 		FileReviews: []FileReview{
 			{
@@ -55,12 +53,10 @@ func TestLearnPositivePatterns_NoPraiseComments(t *testing.T) {
 }
 
 func TestLearnPositivePatterns_CollectsPraiseOnly(t *testing.T) {
-	o := &Orchestrator{
-		indexer: memory.NewIndexer(nil, slog.Default()),
-		logger:  slog.Default(),
-	}
+	o := &Orchestrator{logger: slog.Default()}
 	run := &PipelineRun{
 		LearnPatterns: true,
+		Indexer:       memory.NewIndexer(nil, slog.Default()),
 		PREvent:       github.PREvent{PRNumber: 42, RepoFullName: "acme/widget"},
 		FileReviews: []FileReview{
 			{
@@ -86,12 +82,10 @@ func TestLearnPositivePatterns_CollectsPraiseOnly(t *testing.T) {
 }
 
 func TestLearnPositivePatterns_UsesAllFileReviews(t *testing.T) {
-	o := &Orchestrator{
-		indexer: memory.NewIndexer(nil, slog.Default()),
-		logger:  slog.Default(),
-	}
+	o := &Orchestrator{logger: slog.Default()}
 	run := &PipelineRun{
 		LearnPatterns: true,
+		Indexer:       memory.NewIndexer(nil, slog.Default()),
 		PREvent:       github.PREvent{PRNumber: 10, RepoFullName: "org/repo"},
 		FileReviews:   nil,
 		AllFileReviews: []FileReview{

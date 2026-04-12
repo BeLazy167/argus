@@ -1,12 +1,17 @@
 "use client";
 
 import { memo, useMemo, useState } from "react";
-import { Key, Save, Trash2, Loader2 } from "lucide-react";
+import { Key, Save, Trash2, Loader2, Brain } from "lucide-react";
 import {
   useProviderKeys,
   useUpsertProviderKey,
   useDeleteProviderKey,
 } from "@/lib/queries/provider-keys";
+import {
+  useSupermemoryKeyStatus,
+  useSetSupermemoryKey,
+  useDeleteSupermemoryKey,
+} from "@/lib/queries/supermemory";
 import { useInstallation } from "@/providers/installation-provider";
 import type { ProviderKey } from "@/lib/types";
 
@@ -149,6 +154,83 @@ const ProviderKeyCard = memo(function ProviderKeyCard({
   );
 });
 
+function SupermemoryCard() {
+  const { data: status, isLoading } = useSupermemoryKeyStatus();
+  const setKey = useSetSupermemoryKey();
+  const delKey = useDeleteSupermemoryKey();
+  const [apiKey, setApiKey] = useState("");
+
+  const handleSave = () => {
+    if (!apiKey) return;
+    setKey.mutate(apiKey, { onSuccess: () => setApiKey("") });
+  };
+
+  if (isLoading) return null;
+
+  const configured = status?.configured ?? false;
+
+  return (
+    <div className="border border-iron bg-charcoal p-5">
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <Brain className="h-3.5 w-3.5 text-amber" />
+          <span className="text-xs font-mono font-medium text-foreground">
+            Supermemory
+          </span>
+        </div>
+        <StatusBadge
+          variant={configured ? "active" : "inactive"}
+          label={configured ? "Active" : "Not configured"}
+        />
+      </div>
+
+      <p className="text-[10px] font-mono text-slate-text mb-3 leading-relaxed">
+        {configured
+          ? "Memory features active. Pattern learning, RAG context, and scenario search enabled."
+          : "Connect your Supermemory account to enable pattern learning, RAG context injection, and scenario-based testing."}
+      </p>
+
+      <div className="space-y-2 mb-3">
+        <div>
+          <label className="block text-[10px] font-mono text-slate-text mb-1">
+            {configured ? "Replace API key" : "API key"}
+          </label>
+          <input
+            type="password"
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+            placeholder={configured ? "Enter new key to replace" : "sm_..."}
+            className="w-full border border-iron bg-background px-2 py-1.5 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none"
+          />
+        </div>
+      </div>
+
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={handleSave}
+          disabled={setKey.isPending || !apiKey}
+          className="flex items-center gap-2 border border-amber/30 bg-amber/10 px-3 py-1 text-[11px] font-mono text-amber hover:bg-amber/20 transition-colors disabled:opacity-50"
+        >
+          <Save className="h-3 w-3" />
+          {setKey.isPending ? "Saving..." : "Save"}
+        </button>
+        {configured && (
+          <button
+            type="button"
+            onClick={() => delKey.mutate()}
+            disabled={delKey.isPending}
+            className="flex items-center gap-2 border border-red-400/30 px-3 py-1 text-[11px] font-mono text-red-400 hover:bg-red-400/10 transition-colors disabled:opacity-50"
+          >
+            <Trash2 className="h-3 w-3" />
+            {delKey.isPending ? "Removing..." : "Remove"}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function ProvidersPage() {
   const { active } = useInstallation();
   const { data: providerKeys, isLoading } = useProviderKeys();
@@ -180,9 +262,25 @@ export default function ProvidersPage() {
 
       <div className="flex items-center gap-3 mb-4">
         <div className="flex items-center gap-2">
+          <Brain className="h-4 w-4 text-amber" />
+          <h2 className="font-mono text-lg font-semibold text-foreground">
+            Memory
+          </h2>
+        </div>
+      </div>
+      <p className="text-[11px] font-mono text-slate-text mb-4">
+        Institutional memory powered by Supermemory. Bring your own API key from{" "}
+        <a href="https://app.supermemory.ai" target="_blank" rel="noopener noreferrer" className="text-amber hover:underline">app.supermemory.ai</a>.
+      </p>
+      <div className="mb-10 max-w-md">
+        <SupermemoryCard />
+      </div>
+
+      <div className="flex items-center gap-3 mb-4">
+        <div className="flex items-center gap-2">
           <Key className="h-4 w-4 text-amber" />
           <h2 className="font-mono text-lg font-semibold text-foreground">
-            API Keys
+            LLM Providers
           </h2>
         </div>
         <span className="text-[10px] font-mono text-slate-text ml-auto">

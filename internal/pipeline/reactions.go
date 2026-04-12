@@ -16,18 +16,18 @@ import (
 // ReactionAnalyzer checks reactions on Argus review comments and indexes
 // feedback signals. Thumbs-up = confirmed, thumbs-down = dismissed.
 type ReactionAnalyzer struct {
-	store    *store.Store
-	ghClient *ghpkg.Client
-	indexer  *memory.Indexer
-	logger   *slog.Logger
+	store       *store.Store
+	ghClient    *ghpkg.Client
+	memRegistry *memory.Registry
+	logger      *slog.Logger
 }
 
-func NewReactionAnalyzer(st *store.Store, ghClient *ghpkg.Client, indexer *memory.Indexer, logger *slog.Logger) *ReactionAnalyzer {
+func NewReactionAnalyzer(st *store.Store, ghClient *ghpkg.Client, memRegistry *memory.Registry, logger *slog.Logger) *ReactionAnalyzer {
 	return &ReactionAnalyzer{
-		store:    st,
-		ghClient: ghClient,
-		indexer:  indexer,
-		logger:   logger,
+		store:       st,
+		ghClient:    ghClient,
+		memRegistry: memRegistry,
+		logger:      logger,
 	}
 }
 
@@ -122,8 +122,14 @@ func (ra *ReactionAnalyzer) HandleCommentReactions(ctx context.Context, event gh
 	}
 
 	// Index feedback signal for pattern reinforcement/suppression
-	if ra.indexer != nil && comment.Category != nil {
-		err := ra.indexer.IndexFeedbackSignal(ctx, owner, repo, memory.FeedbackMemory{
+	var indexer *memory.Indexer
+	if ra.memRegistry != nil {
+		if inst, instErr := ra.store.GetInstallationByGitHubID(ctx, event.InstallationID); instErr == nil {
+			indexer = ra.memRegistry.GetIndexer(ctx, inst.ID)
+		}
+	}
+	if indexer != nil && comment.Category != nil {
+		err := indexer.IndexFeedbackSignal(ctx, owner, repo, memory.FeedbackMemory{
 			FilePath:       comment.FilePath,
 			Category:       *comment.Category,
 			OriginalBody:   comment.Body,

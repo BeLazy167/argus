@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/BeLazy167/argus/internal/crypto"
 	"github.com/BeLazy167/argus/internal/llm"
 	"github.com/BeLazy167/argus/internal/pipeline"
 )
@@ -559,4 +560,82 @@ func (s *Server) deleteRepoSettingKey(w http.ResponseWriter, r *http.Request) {
 	}
 	s.auditSettings(r, 0, "repo_setting.delete", map[string]interface{}{"key": key, "repo_id": repoID})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted", "key": key})
+}
+
+// --- Supermemory Key ---
+
+func (s *Server) getSupermemoryKeyStatus(w http.ResponseWriter, r *http.Request) {
+	installationID, err := strconv.ParseInt(chi.URLParam(r, "installationID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid installation id"})
+		return
+	}
+	if !containsID(getInstallationIDs(r.Context()), installationID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not authorized"})
+		return
+	}
+	enc, err := s.store.GetSupermemoryKey(r.Context(), installationID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"configured": enc != ""})
+}
+
+func (s *Server) setSupermemoryKey(w http.ResponseWriter, r *http.Request) {
+	installationID, err := strconv.ParseInt(chi.URLParam(r, "installationID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid installation id"})
+		return
+	}
+	if !containsID(getInstallationIDs(r.Context()), installationID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not authorized"})
+		return
+	}
+	var body struct {
+		APIKey string `json:"api_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	if body.APIKey == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "api_key required"})
+		return
+	}
+	enc, err := crypto.Encrypt(body.APIKey)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "encryption failed"})
+		return
+	}
+	if err := s.store.SetSupermemoryKey(r.Context(), installationID, enc); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "save failed"})
+		return
+	}
+	if s.memRegistry != nil {
+		s.memRegistry.InvalidateClient(installationID)
+	}
+	s.auditSettings(r, installationID, "supermemory_key.set", nil)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "saved"})
+}
+
+func (s *Server) deleteSupermemoryKey(w http.ResponseWriter, r *http.Request) {
+	installationID, err := strconv.ParseInt(chi.URLParam(r, "installationID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid installation id"})
+		return
+	}
+	if !containsID(getInstallationIDs(r.Context()), installationID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not authorized"})
+		return
+	}
+	if err := s.store.ClearSupermemoryKey(r.Context(), installationID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delete failed"})
+		return
+	}
+	if s.memRegistry != nil {
+		s.memRegistry.InvalidateClient(installationID)
+	}
+	s.auditSettings(r, installationID, "supermemory_key.delete", nil)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
