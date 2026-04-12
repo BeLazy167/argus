@@ -102,6 +102,9 @@ func (p *ChatProvider) Complete(ctx context.Context, req CompletionRequest) (Com
 		Messages: msgs,
 		Tools:    req.Tools,
 	}
+	if req.JSONMode {
+		body.ResponseFormat = &responseFormat{Type: "json_object"}
+	}
 
 	// Set standard params, then let provider-specific adjustments override
 	body.MaxTokens = req.MaxTokens
@@ -179,13 +182,18 @@ type chatMessage struct {
 }
 
 type chatRequest struct {
-	Model               string           `json:"model"`
-	Messages            []chatMessage    `json:"messages"`
-	MaxTokens           int              `json:"max_tokens,omitempty"`
-	MaxCompletionTokens int              `json:"max_completion_tokens,omitempty"`
-	Temperature         *float64         `json:"temperature,omitempty"`
-	Tools               []Tool           `json:"tools,omitempty"`
-	Reasoning           *reasoningConfig `json:"reasoning,omitempty"`
+	Model               string            `json:"model"`
+	Messages            []chatMessage     `json:"messages"`
+	MaxTokens           int               `json:"max_tokens,omitempty"`
+	MaxCompletionTokens int               `json:"max_completion_tokens,omitempty"`
+	Temperature         *float64          `json:"temperature,omitempty"`
+	Tools               []Tool            `json:"tools,omitempty"`
+	Reasoning           *reasoningConfig  `json:"reasoning,omitempty"`
+	ResponseFormat      *responseFormat   `json:"response_format,omitempty"`
+}
+
+type responseFormat struct {
+	Type string `json:"type"` // "json_object" or "text"
 }
 
 type reasoningConfig struct {

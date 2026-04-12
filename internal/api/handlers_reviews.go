@@ -90,35 +90,7 @@ func (s *Server) getReview(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) exportReview(w http.ResponseWriter, r *http.Request) {
-	// Auth: this route is outside the /api/v1 JWT middleware group (so browsers
-	// can download exports without a pre-auth handshake), so we parse the token
-	// ourselves from either the Authorization: Bearer header or the ?token=
-	// query param. Header path is for API clients; query-param path is for
-	// browser direct-link downloads where headers can't be set.
 	ids := getInstallationIDs(r.Context())
-	if len(ids) == 0 {
-		var token string
-		if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-			token = strings.TrimPrefix(auth, "Bearer ")
-		} else {
-			token = r.URL.Query().Get("token")
-		}
-		if token == "" {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "missing authorization"})
-			return
-		}
-		claims, err := validateToken(token)
-		if err != nil {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
-			return
-		}
-		resolved, err := s.resolveInstallationIDs(r.Context(), claims, r.URL.Query().Get("installation_id"))
-		if err != nil {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
-			return
-		}
-		ids = resolved
-	}
 
 	id, err := uuid.Parse(chi.URLParam(r, "reviewID"))
 	if err != nil {

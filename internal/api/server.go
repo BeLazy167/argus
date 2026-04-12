@@ -69,9 +69,8 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 	// Webhooks (unauthenticated, signature-verified)
 	r.Post("/webhooks/github", s.handleWebhook)
 
-	// WebSocket stream & export — outside /api/v1 auth, handles own auth from query params
+	// WebSocket stream — outside /api/v1 auth, handles own auth from query params
 	r.Get("/api/v1/reviews/{reviewID}/stream", s.streamReviewWS)
-	r.Get("/api/v1/reviews/{reviewID}/export", s.exportReview)
 
 	// API v1 (authenticated via JWT)
 	r.Route("/api/v1", func(r chi.Router) {
@@ -139,6 +138,7 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 				r.Get("/repos/{repoID}/reviews", s.listReviews)
 				r.Post("/repos/{repoID}/reviews", s.triggerReview)
 				r.Get("/reviews/{reviewID}", s.getReview)
+				r.Get("/reviews/{reviewID}/export", s.exportReview)
 				r.Post("/reviews/{reviewID}/retry", s.retryReview)
 
 				// Rules
