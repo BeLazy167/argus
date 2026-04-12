@@ -68,7 +68,7 @@ func Run() error {
 	triageStage := pipeline.NewTriageStage(registry, db, memClient)
 	reviewStage := pipeline.NewReviewStage(registry, db, ghClient, memClient, cfg.MaxConcurrentReviews)
 	scoringStage := pipeline.NewScoringStage(registry, db, memClient)
-	orchestrator := pipeline.NewOrchestrator(db.Pool, db, ghClient, reviewStage, triageStage, scoringStage, indexer, registry, eventBus, logger)
+	orchestrator := pipeline.NewOrchestrator(db.Pool, db, ghClient, reviewStage, triageStage, scoringStage, indexer, registry, eventBus, logger, nil)
 	replyAnalyzer := pipeline.NewReplyAnalyzer(registry, db, ghClient, indexer, logger)
 	reactionAnalyzer := pipeline.NewReactionAnalyzer(db, ghClient, indexer, logger)
 
@@ -129,6 +129,8 @@ func Run() error {
 
 	// API Server
 	server := api.NewServer(db, ghApp, orchestrator, replyAnalyzer, reactionAnalyzer, indexer, registry, eventBus, cfg.GitHubWebhookSecret, cfg.CORSAllowOrigin, logger)
+	defer server.Close()
+	orchestrator.SetTracker(server.EventTracker())
 
 	httpServer := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Port),

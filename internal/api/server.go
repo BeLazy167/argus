@@ -252,6 +252,16 @@ func maskKey(hint string) string {
 	return "sk-...****"
 }
 
+// Close flushes audit events. Call on shutdown.
+func (s *Server) Close() {
+	s.audit.close()
+}
+
+// EventTracker returns a pipeline.EventTracker backed by PostHog.
+func (s *Server) EventTracker() pipeline.EventTracker {
+	return newEventTracker(s.audit)
+}
+
 func writeJSON(w http.ResponseWriter, status int, data any) {
 	buf := &bytes.Buffer{}
 	if err := json.NewEncoder(buf).Encode(data); err != nil {
