@@ -14,9 +14,9 @@ const countEnabledRepos = `-- name: CountEnabledRepos :one
 SELECT COUNT(*)::int FROM repos WHERE installation_id = $1 AND enabled = TRUE
 `
 
-func (q *Queries) CountEnabledRepos(ctx context.Context, installationID int64) (int32, error) {
+func (q *Queries) CountEnabledRepos(ctx context.Context, installationID int64) (int, error) {
 	row := q.db.QueryRow(ctx, countEnabledRepos, installationID)
-	var column_1 int32
+	var column_1 int
 	err := row.Scan(&column_1)
 	return column_1, err
 }
@@ -36,7 +36,7 @@ func (q *Queries) GetRepo(ctx context.Context, id int64) (Repo, error) {
 		&i.FullName,
 		&i.DefaultBranch,
 		&i.Enabled,
-		&i.SettingsJson,
+		&i.SettingsJSON,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -58,7 +58,7 @@ func (q *Queries) GetRepoByFullName(ctx context.Context, fullName string) (Repo,
 		&i.FullName,
 		&i.DefaultBranch,
 		&i.Enabled,
-		&i.SettingsJson,
+		&i.SettingsJSON,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -85,7 +85,7 @@ func (q *Queries) GetRepoScoped(ctx context.Context, arg GetRepoScopedParams) (R
 		&i.FullName,
 		&i.DefaultBranch,
 		&i.Enabled,
-		&i.SettingsJson,
+		&i.SettingsJSON,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -113,7 +113,7 @@ func (q *Queries) ListReposScoped(ctx context.Context, dollar_1 []int64) ([]Repo
 			&i.FullName,
 			&i.DefaultBranch,
 			&i.Enabled,
-			&i.SettingsJson,
+			&i.SettingsJSON,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -131,7 +131,7 @@ const updateRepo = `-- name: UpdateRepo :one
 UPDATE repos SET
     enabled = COALESCE($2, enabled),
     default_branch = COALESCE($3, default_branch),
-    settings_json = COALESCE($4, settings_json),
+    settings_json = CASE WHEN $4 IS NULL THEN settings_json ELSE settings_json || $4 END,
     updated_at = NOW()
 WHERE id = $1
 RETURNING id, installation_id, github_id, full_name, default_branch, enabled, settings_json, created_at, updated_at
@@ -141,7 +141,7 @@ type UpdateRepoParams struct {
 	ID            int64           `json:"id"`
 	Enabled       bool            `json:"enabled"`
 	DefaultBranch string          `json:"default_branch"`
-	SettingsJson  json.RawMessage `json:"settings_json"`
+	SettingsJSON  json.RawMessage `json:"settings_json"`
 }
 
 func (q *Queries) UpdateRepo(ctx context.Context, arg UpdateRepoParams) (Repo, error) {
@@ -149,7 +149,7 @@ func (q *Queries) UpdateRepo(ctx context.Context, arg UpdateRepoParams) (Repo, e
 		arg.ID,
 		arg.Enabled,
 		arg.DefaultBranch,
-		arg.SettingsJson,
+		arg.SettingsJSON,
 	)
 	var i Repo
 	err := row.Scan(
@@ -159,7 +159,7 @@ func (q *Queries) UpdateRepo(ctx context.Context, arg UpdateRepoParams) (Repo, e
 		&i.FullName,
 		&i.DefaultBranch,
 		&i.Enabled,
-		&i.SettingsJson,
+		&i.SettingsJSON,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -195,7 +195,7 @@ func (q *Queries) UpsertRepo(ctx context.Context, arg UpsertRepoParams) (Repo, e
 		&i.FullName,
 		&i.DefaultBranch,
 		&i.Enabled,
-		&i.SettingsJson,
+		&i.SettingsJSON,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)

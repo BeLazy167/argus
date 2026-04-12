@@ -7,8 +7,7 @@ package db
 
 import (
 	"context"
-
-	"github.com/jackc/pgx/v5/pgtype"
+	"time"
 )
 
 const deleteProviderKey = `-- name: DeleteProviderKey :execrows
@@ -34,15 +33,15 @@ FROM provider_keys WHERE installation_id = $1 ORDER BY provider, repo_id NULLS F
 `
 
 type ListProviderKeysRow struct {
-	ID             int64              `json:"id"`
-	InstallationID int64              `json:"installation_id"`
-	RepoID         *int64             `json:"repo_id"`
-	Provider       string             `json:"provider"`
-	ApiKeyEnc      string             `json:"api_key_enc"`
-	BaseUrl        *string            `json:"base_url"`
-	KeyHint        *string            `json:"key_hint"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	ID             int64     `json:"id"`
+	InstallationID int64     `json:"installation_id"`
+	RepoID         *int64    `json:"repo_id"`
+	Provider       string    `json:"provider"`
+	APIKeyEnc      string    `json:"api_key_enc"`
+	BaseURL        *string   `json:"base_url"`
+	KeyHint        *string   `json:"key_hint"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 func (q *Queries) ListProviderKeys(ctx context.Context, installationID int64) ([]ListProviderKeysRow, error) {
@@ -59,8 +58,8 @@ func (q *Queries) ListProviderKeys(ctx context.Context, installationID int64) ([
 			&i.InstallationID,
 			&i.RepoID,
 			&i.Provider,
-			&i.ApiKeyEnc,
-			&i.BaseUrl,
+			&i.APIKeyEnc,
+			&i.BaseURL,
 			&i.KeyHint,
 			&i.CreatedAt,
 			&i.UpdatedAt,
@@ -86,14 +85,14 @@ type ResolveAPIKeyOrgLevelParams struct {
 }
 
 type ResolveAPIKeyOrgLevelRow struct {
-	ApiKeyEnc string  `json:"api_key_enc"`
-	BaseUrl   *string `json:"base_url"`
+	APIKeyEnc string  `json:"api_key_enc"`
+	BaseURL   *string `json:"base_url"`
 }
 
 func (q *Queries) ResolveAPIKeyOrgLevel(ctx context.Context, arg ResolveAPIKeyOrgLevelParams) (ResolveAPIKeyOrgLevelRow, error) {
 	row := q.db.QueryRow(ctx, resolveAPIKeyOrgLevel, arg.InstallationID, arg.Provider)
 	var i ResolveAPIKeyOrgLevelRow
-	err := row.Scan(&i.ApiKeyEnc, &i.BaseUrl)
+	err := row.Scan(&i.APIKeyEnc, &i.BaseURL)
 	return i, err
 }
 
@@ -109,14 +108,14 @@ type ResolveAPIKeyRepoLevelParams struct {
 }
 
 type ResolveAPIKeyRepoLevelRow struct {
-	ApiKeyEnc string  `json:"api_key_enc"`
-	BaseUrl   *string `json:"base_url"`
+	APIKeyEnc string  `json:"api_key_enc"`
+	BaseURL   *string `json:"base_url"`
 }
 
 func (q *Queries) ResolveAPIKeyRepoLevel(ctx context.Context, arg ResolveAPIKeyRepoLevelParams) (ResolveAPIKeyRepoLevelRow, error) {
 	row := q.db.QueryRow(ctx, resolveAPIKeyRepoLevel, arg.InstallationID, arg.RepoID, arg.Provider)
 	var i ResolveAPIKeyRepoLevelRow
-	err := row.Scan(&i.ApiKeyEnc, &i.BaseUrl)
+	err := row.Scan(&i.APIKeyEnc, &i.BaseURL)
 	return i, err
 }
 
@@ -134,29 +133,29 @@ RETURNING id, installation_id, repo_id, provider, api_key_enc, base_url, key_hin
 type UpsertProviderKeyOrgLevelParams struct {
 	InstallationID int64   `json:"installation_id"`
 	Provider       string  `json:"provider"`
-	ApiKeyEnc      string  `json:"api_key_enc"`
-	BaseUrl        *string `json:"base_url"`
+	APIKeyEnc      string  `json:"api_key_enc"`
+	BaseURL        *string `json:"base_url"`
 	KeyHint        *string `json:"key_hint"`
 }
 
 type UpsertProviderKeyOrgLevelRow struct {
-	ID             int64              `json:"id"`
-	InstallationID int64              `json:"installation_id"`
-	RepoID         *int64             `json:"repo_id"`
-	Provider       string             `json:"provider"`
-	ApiKeyEnc      string             `json:"api_key_enc"`
-	BaseUrl        *string            `json:"base_url"`
-	KeyHint        *string            `json:"key_hint"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	ID             int64     `json:"id"`
+	InstallationID int64     `json:"installation_id"`
+	RepoID         *int64    `json:"repo_id"`
+	Provider       string    `json:"provider"`
+	APIKeyEnc      string    `json:"api_key_enc"`
+	BaseURL        *string   `json:"base_url"`
+	KeyHint        *string   `json:"key_hint"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 func (q *Queries) UpsertProviderKeyOrgLevel(ctx context.Context, arg UpsertProviderKeyOrgLevelParams) (UpsertProviderKeyOrgLevelRow, error) {
 	row := q.db.QueryRow(ctx, upsertProviderKeyOrgLevel,
 		arg.InstallationID,
 		arg.Provider,
-		arg.ApiKeyEnc,
-		arg.BaseUrl,
+		arg.APIKeyEnc,
+		arg.BaseURL,
 		arg.KeyHint,
 	)
 	var i UpsertProviderKeyOrgLevelRow
@@ -165,8 +164,8 @@ func (q *Queries) UpsertProviderKeyOrgLevel(ctx context.Context, arg UpsertProvi
 		&i.InstallationID,
 		&i.RepoID,
 		&i.Provider,
-		&i.ApiKeyEnc,
-		&i.BaseUrl,
+		&i.APIKeyEnc,
+		&i.BaseURL,
 		&i.KeyHint,
 		&i.CreatedAt,
 		&i.UpdatedAt,
@@ -189,21 +188,21 @@ type UpsertProviderKeyRepoLevelParams struct {
 	InstallationID int64   `json:"installation_id"`
 	RepoID         *int64  `json:"repo_id"`
 	Provider       string  `json:"provider"`
-	ApiKeyEnc      string  `json:"api_key_enc"`
-	BaseUrl        *string `json:"base_url"`
+	APIKeyEnc      string  `json:"api_key_enc"`
+	BaseURL        *string `json:"base_url"`
 	KeyHint        *string `json:"key_hint"`
 }
 
 type UpsertProviderKeyRepoLevelRow struct {
-	ID             int64              `json:"id"`
-	InstallationID int64              `json:"installation_id"`
-	RepoID         *int64             `json:"repo_id"`
-	Provider       string             `json:"provider"`
-	ApiKeyEnc      string             `json:"api_key_enc"`
-	BaseUrl        *string            `json:"base_url"`
-	KeyHint        *string            `json:"key_hint"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	ID             int64     `json:"id"`
+	InstallationID int64     `json:"installation_id"`
+	RepoID         *int64    `json:"repo_id"`
+	Provider       string    `json:"provider"`
+	APIKeyEnc      string    `json:"api_key_enc"`
+	BaseURL        *string   `json:"base_url"`
+	KeyHint        *string   `json:"key_hint"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 func (q *Queries) UpsertProviderKeyRepoLevel(ctx context.Context, arg UpsertProviderKeyRepoLevelParams) (UpsertProviderKeyRepoLevelRow, error) {
@@ -211,8 +210,8 @@ func (q *Queries) UpsertProviderKeyRepoLevel(ctx context.Context, arg UpsertProv
 		arg.InstallationID,
 		arg.RepoID,
 		arg.Provider,
-		arg.ApiKeyEnc,
-		arg.BaseUrl,
+		arg.APIKeyEnc,
+		arg.BaseURL,
 		arg.KeyHint,
 	)
 	var i UpsertProviderKeyRepoLevelRow
@@ -221,8 +220,8 @@ func (q *Queries) UpsertProviderKeyRepoLevel(ctx context.Context, arg UpsertProv
 		&i.InstallationID,
 		&i.RepoID,
 		&i.Provider,
-		&i.ApiKeyEnc,
-		&i.BaseUrl,
+		&i.APIKeyEnc,
+		&i.BaseURL,
 		&i.KeyHint,
 		&i.CreatedAt,
 		&i.UpdatedAt,

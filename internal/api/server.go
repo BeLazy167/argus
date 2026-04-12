@@ -13,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5"
+	"github.com/BeLazy167/argus/internal/crypto"
 	ghpkg "github.com/BeLazy167/argus/internal/github"
 	"github.com/BeLazy167/argus/internal/llm"
 	"github.com/BeLazy167/argus/internal/memory"
@@ -245,9 +246,11 @@ func containsID(ids []int64, target int64) bool {
 	return false
 }
 
-func maskKey(hint string) string {
-	if hint != "" {
-		return "****" + hint
+func maskKey(encHint string) string {
+	if encHint != "" {
+		if plain, err := crypto.Decrypt(encHint); err == nil {
+			return "****" + plain
+		}
 	}
 	return "sk-...****"
 }

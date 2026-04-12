@@ -1,4 +1,175 @@
 version: "2"
+overrides:
+  go:
+    rename:
+      base_url: "BaseURL"
+      api_key_enc: "APIKeyEnc"
+      api_key_masked: "APIKeyMasked"
+      github_id: "GithubID"
+      clerk_org_id: "ClerkOrgID"
+      installation_id: "InstallationID"
+      repo_id: "RepoID"
+      review_id: "ReviewID"
+      head_sha: "HeadSHA"
+      base_sha: "BaseSHA"
+      head_ref: "HeadRef"
+      pr_number: "PRNumber"
+      pr_title: "PRTitle"
+      pr_author: "PRAuthor"
+      github_review_id: "GithubReviewID"
+      github_comment_id: "GithubCommentID"
+      key_hint: "KeyHint"
+      supermemory_id: "SupermemoryID"
+      settings_json: "SettingsJSON"
+      source_ref: "SourceRef"
+      token_usage: "TokenUsage"
+      duration_ms: "DurationMs"
+      file_count: "FileCount"
+      resolved_stale_count: "ResolvedStaleCount"
+      simulation_results: "SimulationResults"
+      diagram_title: "DiagramTitle"
+      truncated_files: "TruncatedFiles"
+      triggered_by: "TriggeredBy"
+      code_snippet: "CodeSnippet"
+      confidence_score: "ConfidenceScore"
+      matched_pattern_id: "MatchedPatternID"
+      matched_pattern_score: "MatchedPatternScore"
+      enforced_rule_content: "EnforcedRuleContent"
+      is_new_finding: "IsNewFinding"
+      created_by: "CreatedBy"
+      content_hash: "ContentHash"
+      times_matched: "TimesMatched"
+      times_confirmed: "TimesConfirmed"
+      times_dismissed: "TimesDismissed"
+      quality_score: "QualityScore"
+      last_matched_at: "LastMatchedAt"
+      initial_state: "InitialState"
+      expected_outcome: "ExpectedOutcome"
+      is_outdated: "IsOutdated"
+      last_run_at: "LastRunAt"
+      trigger_count: "TriggerCount"
+      line_start: "LineStart"
+      line_end: "LineEnd"
+      source_id: "SourceID"
+      target_id: "TargetID"
+      is_merged: "IsMerged"
+      return_type: "ReturnType"
+      is_async: "IsAsync"
+      receiver_type: "ReceiverType"
+      file_path: "FilePath"
+      symbol_name: "SymbolName"
+      trace_type: "TraceType"
+      completed_at: "CompletedAt"
+      deep_review: "DeepReview"
+      is_incremental: "IsIncremental"
+      default_settings: "DefaultSettings"
+      feature_flags: "FeatureFlags"
+      default_branch: "DefaultBranch"
+      full_name: "FullName"
+      org_login: "OrgLogin"
+      plan_tier: "PlanTier"
+      suspended_at: "SuspendedAt"
+      created_at: "CreatedAt"
+      updated_at: "UpdatedAt"
+      prompt_text: "PromptText"
+      clerk_user_id: "ClerkUserID"
+      start_line: "StartLine"
+      end_line: "EndLine"
+    overrides:
+      - db_type: "pg_catalog.timestamptz"
+        engine: "postgresql"
+        go_type:
+          type: "Time"
+          import: "time"
+      - db_type: "pg_catalog.timestamptz"
+        engine: "postgresql"
+        nullable: true
+        go_type:
+          type: "Time"
+          import: "time"
+          pointer: true
+      - db_type: "timestamptz"
+        engine: "postgresql"
+        go_type:
+          type: "Time"
+          import: "time"
+      - db_type: "timestamptz"
+        engine: "postgresql"
+        nullable: true
+        go_type:
+          type: "Time"
+          import: "time"
+          pointer: true
+      - db_type: "pg_catalog.uuid"
+        engine: "postgresql"
+        go_type:
+          type: "UUID"
+          import: "github.com/google/uuid"
+      - db_type: "pg_catalog.uuid"
+        engine: "postgresql"
+        nullable: true
+        go_type:
+          type: "UUID"
+          import: "github.com/google/uuid"
+          pointer: true
+      - db_type: "uuid"
+        engine: "postgresql"
+        go_type:
+          type: "UUID"
+          import: "github.com/google/uuid"
+      - db_type: "uuid"
+        engine: "postgresql"
+        nullable: true
+        go_type:
+          type: "UUID"
+          import: "github.com/google/uuid"
+          pointer: true
+      - db_type: "pg_catalog.int4"
+        engine: "postgresql"
+        go_type:
+          type: "int"
+      - db_type: "pg_catalog.int4"
+        engine: "postgresql"
+        nullable: true
+        go_type:
+          type: "int"
+          pointer: true
+      - db_type: "pg_catalog.int8"
+        engine: "postgresql"
+        go_type:
+          type: "int64"
+      - db_type: "pg_catalog.int8"
+        engine: "postgresql"
+        nullable: true
+        go_type:
+          type: "int64"
+          pointer: true
+      - db_type: "pg_catalog.int2"
+        engine: "postgresql"
+        go_type:
+          type: "int"
+      - db_type: "pg_catalog.int2"
+        engine: "postgresql"
+        nullable: true
+        go_type:
+          type: "int"
+          pointer: true
+      - db_type: "serial"
+        engine: "postgresql"
+        go_type:
+          type: "int"
+      - db_type: "pg_catalog.serial4"
+        engine: "postgresql"
+        go_type:
+          type: "int"
+      - db_type: "pg_catalog.float8"
+        engine: "postgresql"
+        go_type:
+          type: "float64"
+      - db_type: "pg_catalog.float4"
+        engine: "postgresql"
+        go_type:
+          type: "float32"
 sql:
   - engine: "postgresql"
     queries: "internal/store/sqlc/query"
@@ -18,3 +189,27 @@ sql:
             go_type:
               type: "RawMessage"
               import: "encoding/json"
+          - db_type: "pg_catalog.int4"
+            go_type:
+              type: "int"
+          - db_type: "pg_catalog.int4"
+            nullable: true
+            go_type:
+              type: "int"
+              pointer: true
+          - db_type: "pg_catalog.int8"
+            go_type:
+              type: "int64"
+          - db_type: "pg_catalog.int8"
+            nullable: true
+            go_type:
+              type: "int64"
+              pointer: true
+          - db_type: "pg_catalog.int2"
+            go_type:
+              type: "int"
+          - db_type: "pg_catalog.int2"
+            nullable: true
+            go_type:
+              type: "int"
+              pointer: true

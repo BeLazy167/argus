@@ -7,8 +7,7 @@ package db
 
 import (
 	"context"
-
-	"github.com/jackc/pgx/v5/pgtype"
+	"time"
 )
 
 const getStats = `-- name: GetStats :one
@@ -27,17 +26,17 @@ SELECT
 `
 
 type GetStatsRow struct {
-	TotalReviews    int32       `json:"total_reviews"`
-	CompletedToday  int32       `json:"completed_today"`
+	TotalReviews    int         `json:"total_reviews"`
+	CompletedToday  int         `json:"completed_today"`
 	AvgScore        interface{} `json:"avg_score"`
-	ActiveRepos     int32       `json:"active_repos"`
-	CriticalFinds   int32       `json:"critical_finds"`
-	PendingReviews  int32       `json:"pending_reviews"`
+	ActiveRepos     int         `json:"active_repos"`
+	CriticalFinds   int         `json:"critical_finds"`
+	PendingReviews  int         `json:"pending_reviews"`
 	CatchRate       interface{} `json:"catch_rate"`
-	PrsThisWeek     int32       `json:"prs_this_week"`
-	HighRiskCount   int32       `json:"high_risk_count"`
+	PrsThisWeek     int         `json:"prs_this_week"`
+	HighRiskCount   int         `json:"high_risk_count"`
 	AvgReviewTimeMs interface{} `json:"avg_review_time_ms"`
-	DeepReviewCount int32       `json:"deep_review_count"`
+	DeepReviewCount int         `json:"deep_review_count"`
 }
 
 func (q *Queries) GetStats(ctx context.Context) (GetStatsRow, error) {
@@ -78,17 +77,17 @@ SELECT
 `
 
 type GetStatsScopedRow struct {
-	TotalReviews    int32       `json:"total_reviews"`
-	CompletedToday  int32       `json:"completed_today"`
+	TotalReviews    int         `json:"total_reviews"`
+	CompletedToday  int         `json:"completed_today"`
 	AvgScore        interface{} `json:"avg_score"`
-	ActiveRepos     int32       `json:"active_repos"`
-	CriticalFinds   int32       `json:"critical_finds"`
-	PendingReviews  int32       `json:"pending_reviews"`
+	ActiveRepos     int         `json:"active_repos"`
+	CriticalFinds   int         `json:"critical_finds"`
+	PendingReviews  int         `json:"pending_reviews"`
 	CatchRate       interface{} `json:"catch_rate"`
-	PrsThisWeek     int32       `json:"prs_this_week"`
-	HighRiskCount   int32       `json:"high_risk_count"`
+	PrsThisWeek     int         `json:"prs_this_week"`
+	HighRiskCount   int         `json:"high_risk_count"`
 	AvgReviewTimeMs interface{} `json:"avg_review_time_ms"`
-	DeepReviewCount int32       `json:"deep_review_count"`
+	DeepReviewCount int         `json:"deep_review_count"`
 }
 
 func (q *Queries) GetStatsScoped(ctx context.Context, dollar_1 []int64) (GetStatsScopedRow, error) {
@@ -121,13 +120,13 @@ type ListActivityParams struct {
 }
 
 type ListActivityRow struct {
-	ID             int64              `json:"id"`
-	InstallationID *int64             `json:"installation_id"`
-	Action         string             `json:"action"`
-	Actor          *string            `json:"actor"`
-	Resource       *string            `json:"resource"`
-	Metadata       []byte             `json:"metadata"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	ID             int64     `json:"id"`
+	InstallationID *int64    `json:"installation_id"`
+	Action         string    `json:"action"`
+	Actor          *string   `json:"actor"`
+	Resource       *string   `json:"resource"`
+	Metadata       []byte    `json:"metadata"`
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 func (q *Queries) ListActivity(ctx context.Context, arg ListActivityParams) ([]ListActivityRow, error) {

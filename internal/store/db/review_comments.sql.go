@@ -7,8 +7,9 @@ package db
 
 import (
 	"context"
+	"time"
 
-	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/google/uuid"
 )
 
 const createReviewComment = `-- name: CreateReviewComment :exec
@@ -17,22 +18,22 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 `
 
 type CreateReviewCommentParams struct {
-	ReviewID            pgtype.UUID `json:"review_id"`
-	FilePath            string      `json:"file_path"`
-	StartLine           *int32      `json:"start_line"`
-	EndLine             *int32      `json:"end_line"`
-	Side                *string     `json:"side"`
-	Body                string      `json:"body"`
-	Severity            *string     `json:"severity"`
-	Category            *string     `json:"category"`
-	Specialist          *string     `json:"specialist"`
-	ConfidenceScore     *int32      `json:"confidence_score"`
-	CodeSnippet         *string     `json:"code_snippet"`
-	GithubCommentID     *int64      `json:"github_comment_id"`
-	MatchedPatternID    *int64      `json:"matched_pattern_id"`
-	MatchedPatternScore *float32    `json:"matched_pattern_score"`
-	EnforcedRuleContent *string     `json:"enforced_rule_content"`
-	IsNewFinding        *bool       `json:"is_new_finding"`
+	ReviewID            uuid.UUID `json:"review_id"`
+	FilePath            string    `json:"file_path"`
+	StartLine           *int      `json:"start_line"`
+	EndLine             *int      `json:"end_line"`
+	Side                *string   `json:"side"`
+	Body                string    `json:"body"`
+	Severity            *string   `json:"severity"`
+	Category            *string   `json:"category"`
+	Specialist          *string   `json:"specialist"`
+	ConfidenceScore     *int      `json:"confidence_score"`
+	CodeSnippet         *string   `json:"code_snippet"`
+	GithubCommentID     *int64    `json:"github_comment_id"`
+	MatchedPatternID    *int64    `json:"matched_pattern_id"`
+	MatchedPatternScore *float32  `json:"matched_pattern_score"`
+	EnforcedRuleContent *string   `json:"enforced_rule_content"`
+	IsNewFinding        *bool     `json:"is_new_finding"`
 }
 
 func (q *Queries) CreateReviewComment(ctx context.Context, arg CreateReviewCommentParams) error {
@@ -66,24 +67,24 @@ FROM review_comments WHERE github_comment_id = $1
 `
 
 type GetCommentByGithubIDRow struct {
-	ID                  pgtype.UUID        `json:"id"`
-	ReviewID            pgtype.UUID        `json:"review_id"`
-	FilePath            string             `json:"file_path"`
-	StartLine           *int32             `json:"start_line"`
-	EndLine             *int32             `json:"end_line"`
-	Side                *string            `json:"side"`
-	Body                string             `json:"body"`
-	Severity            *string            `json:"severity"`
-	Category            *string            `json:"category"`
-	Specialist          *string            `json:"specialist"`
-	ConfidenceScore     *int32             `json:"confidence_score"`
-	CodeSnippet         *string            `json:"code_snippet"`
-	GithubCommentID     *int64             `json:"github_comment_id"`
-	MatchedPatternID    *int64             `json:"matched_pattern_id"`
-	MatchedPatternScore *float32           `json:"matched_pattern_score"`
-	EnforcedRuleContent *string            `json:"enforced_rule_content"`
-	IsNewFinding        *bool              `json:"is_new_finding"`
-	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	ID                  uuid.UUID `json:"id"`
+	ReviewID            uuid.UUID `json:"review_id"`
+	FilePath            string    `json:"file_path"`
+	StartLine           *int      `json:"start_line"`
+	EndLine             *int      `json:"end_line"`
+	Side                *string   `json:"side"`
+	Body                string    `json:"body"`
+	Severity            *string   `json:"severity"`
+	Category            *string   `json:"category"`
+	Specialist          *string   `json:"specialist"`
+	ConfidenceScore     *int      `json:"confidence_score"`
+	CodeSnippet         *string   `json:"code_snippet"`
+	GithubCommentID     *int64    `json:"github_comment_id"`
+	MatchedPatternID    *int64    `json:"matched_pattern_id"`
+	MatchedPatternScore *float32  `json:"matched_pattern_score"`
+	EnforcedRuleContent *string   `json:"enforced_rule_content"`
+	IsNewFinding        *bool     `json:"is_new_finding"`
+	CreatedAt           time.Time `json:"created_at"`
 }
 
 func (q *Queries) GetCommentByGithubID(ctx context.Context, githubCommentID *int64) (GetCommentByGithubIDRow, error) {
@@ -117,7 +118,7 @@ SELECT id, review_comment_id, outcome, created_at
 FROM comment_outcomes WHERE review_comment_id = $1 ORDER BY created_at DESC
 `
 
-func (q *Queries) GetCommentOutcomes(ctx context.Context, reviewCommentID pgtype.UUID) ([]CommentOutcome, error) {
+func (q *Queries) GetCommentOutcomes(ctx context.Context, reviewCommentID uuid.UUID) ([]CommentOutcome, error) {
 	rows, err := q.db.Query(ctx, getCommentOutcomes, reviewCommentID)
 	if err != nil {
 		return nil, err
@@ -151,27 +152,27 @@ FROM review_comments WHERE review_id = $1 ORDER BY file_path, start_line
 `
 
 type GetReviewCommentsRow struct {
-	ID                  pgtype.UUID        `json:"id"`
-	ReviewID            pgtype.UUID        `json:"review_id"`
-	FilePath            string             `json:"file_path"`
-	StartLine           *int32             `json:"start_line"`
-	EndLine             *int32             `json:"end_line"`
-	Side                *string            `json:"side"`
-	Body                string             `json:"body"`
-	Severity            *string            `json:"severity"`
-	Category            *string            `json:"category"`
-	Specialist          *string            `json:"specialist"`
-	ConfidenceScore     *int32             `json:"confidence_score"`
-	CodeSnippet         *string            `json:"code_snippet"`
-	GithubCommentID     *int64             `json:"github_comment_id"`
-	MatchedPatternID    *int64             `json:"matched_pattern_id"`
-	MatchedPatternScore *float32           `json:"matched_pattern_score"`
-	EnforcedRuleContent *string            `json:"enforced_rule_content"`
-	IsNewFinding        *bool              `json:"is_new_finding"`
-	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	ID                  uuid.UUID `json:"id"`
+	ReviewID            uuid.UUID `json:"review_id"`
+	FilePath            string    `json:"file_path"`
+	StartLine           *int      `json:"start_line"`
+	EndLine             *int      `json:"end_line"`
+	Side                *string   `json:"side"`
+	Body                string    `json:"body"`
+	Severity            *string   `json:"severity"`
+	Category            *string   `json:"category"`
+	Specialist          *string   `json:"specialist"`
+	ConfidenceScore     *int      `json:"confidence_score"`
+	CodeSnippet         *string   `json:"code_snippet"`
+	GithubCommentID     *int64    `json:"github_comment_id"`
+	MatchedPatternID    *int64    `json:"matched_pattern_id"`
+	MatchedPatternScore *float32  `json:"matched_pattern_score"`
+	EnforcedRuleContent *string   `json:"enforced_rule_content"`
+	IsNewFinding        *bool     `json:"is_new_finding"`
+	CreatedAt           time.Time `json:"created_at"`
 }
 
-func (q *Queries) GetReviewComments(ctx context.Context, reviewID pgtype.UUID) ([]GetReviewCommentsRow, error) {
+func (q *Queries) GetReviewComments(ctx context.Context, reviewID uuid.UUID) ([]GetReviewCommentsRow, error) {
 	rows, err := q.db.Query(ctx, getReviewComments, reviewID)
 	if err != nil {
 		return nil, err
@@ -216,8 +217,8 @@ VALUES ($1, $2)
 `
 
 type RecordCommentOutcomeParams struct {
-	ReviewCommentID pgtype.UUID `json:"review_comment_id"`
-	Outcome         string      `json:"outcome"`
+	ReviewCommentID uuid.UUID `json:"review_comment_id"`
+	Outcome         string    `json:"outcome"`
 }
 
 func (q *Queries) RecordCommentOutcome(ctx context.Context, arg RecordCommentOutcomeParams) error {

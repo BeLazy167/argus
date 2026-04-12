@@ -7,6 +7,7 @@ package db
 
 import (
 	"context"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 )
@@ -25,21 +26,21 @@ type CreatePatternParams struct {
 	CreatedBy      *string     `json:"created_by"`
 	Column6        interface{} `json:"column_6"`
 	Category       *string     `json:"category"`
-	PrNumber       *int32      `json:"pr_number"`
+	PRNumber       *int        `json:"pr_number"`
 }
 
 type CreatePatternRow struct {
-	ID             int32              `json:"id"`
-	InstallationID int64              `json:"installation_id"`
-	RepoID         *int64             `json:"repo_id"`
-	Content        string             `json:"content"`
-	SupermemoryID  *string            `json:"supermemory_id"`
-	CreatedBy      *string            `json:"created_by"`
-	Source         string             `json:"source"`
-	Category       *string            `json:"category"`
-	PrNumber       *int32             `json:"pr_number"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	ID             int        `json:"id"`
+	InstallationID int64      `json:"installation_id"`
+	RepoID         *int64     `json:"repo_id"`
+	Content        string     `json:"content"`
+	SupermemoryID  *string    `json:"supermemory_id"`
+	CreatedBy      *string    `json:"created_by"`
+	Source         string     `json:"source"`
+	Category       *string    `json:"category"`
+	PRNumber       *int       `json:"pr_number"`
+	CreatedAt      *time.Time `json:"created_at"`
+	UpdatedAt      *time.Time `json:"updated_at"`
 }
 
 func (q *Queries) CreatePattern(ctx context.Context, arg CreatePatternParams) (CreatePatternRow, error) {
@@ -51,7 +52,7 @@ func (q *Queries) CreatePattern(ctx context.Context, arg CreatePatternParams) (C
 		arg.CreatedBy,
 		arg.Column6,
 		arg.Category,
-		arg.PrNumber,
+		arg.PRNumber,
 	)
 	var i CreatePatternRow
 	err := row.Scan(
@@ -63,7 +64,7 @@ func (q *Queries) CreatePattern(ctx context.Context, arg CreatePatternParams) (C
 		&i.CreatedBy,
 		&i.Source,
 		&i.Category,
-		&i.PrNumber,
+		&i.PRNumber,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -75,7 +76,7 @@ DELETE FROM patterns WHERE id = $1 AND installation_id = ANY($2::bigint[])
 `
 
 type DeletePatternParams struct {
-	ID      int32   `json:"id"`
+	ID      int     `json:"id"`
 	Column2 []int64 `json:"column_2"`
 }
 
@@ -93,20 +94,20 @@ FROM patterns WHERE id = $1
 `
 
 type GetPatternRow struct {
-	ID             int32              `json:"id"`
-	InstallationID int64              `json:"installation_id"`
-	RepoID         *int64             `json:"repo_id"`
-	Content        string             `json:"content"`
-	SupermemoryID  *string            `json:"supermemory_id"`
-	CreatedBy      *string            `json:"created_by"`
-	Source         string             `json:"source"`
-	Category       *string            `json:"category"`
-	PrNumber       *int32             `json:"pr_number"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	ID             int        `json:"id"`
+	InstallationID int64      `json:"installation_id"`
+	RepoID         *int64     `json:"repo_id"`
+	Content        string     `json:"content"`
+	SupermemoryID  *string    `json:"supermemory_id"`
+	CreatedBy      *string    `json:"created_by"`
+	Source         string     `json:"source"`
+	Category       *string    `json:"category"`
+	PRNumber       *int       `json:"pr_number"`
+	CreatedAt      *time.Time `json:"created_at"`
+	UpdatedAt      *time.Time `json:"updated_at"`
 }
 
-func (q *Queries) GetPattern(ctx context.Context, id int32) (GetPatternRow, error) {
+func (q *Queries) GetPattern(ctx context.Context, id int) (GetPatternRow, error) {
 	row := q.db.QueryRow(ctx, getPattern, id)
 	var i GetPatternRow
 	err := row.Scan(
@@ -118,7 +119,7 @@ func (q *Queries) GetPattern(ctx context.Context, id int32) (GetPatternRow, erro
 		&i.CreatedBy,
 		&i.Source,
 		&i.Category,
-		&i.PrNumber,
+		&i.PRNumber,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -134,7 +135,7 @@ GROUP BY week, source ORDER BY week
 type GetPatternStatsRow struct {
 	Week   pgtype.Interval `json:"week"`
 	Source string          `json:"source"`
-	Count  int32           `json:"count"`
+	Count  int             `json:"count"`
 }
 
 func (q *Queries) GetPatternStats(ctx context.Context, dollar_1 []int64) ([]GetPatternStatsRow, error) {
@@ -163,17 +164,17 @@ FROM patterns WHERE installation_id = ANY($1::bigint[]) ORDER BY created_at DESC
 `
 
 type ListPatternsRow struct {
-	ID             int32              `json:"id"`
-	InstallationID int64              `json:"installation_id"`
-	RepoID         *int64             `json:"repo_id"`
-	Content        string             `json:"content"`
-	SupermemoryID  *string            `json:"supermemory_id"`
-	CreatedBy      *string            `json:"created_by"`
-	Source         string             `json:"source"`
-	Category       *string            `json:"category"`
-	PrNumber       *int32             `json:"pr_number"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	ID             int        `json:"id"`
+	InstallationID int64      `json:"installation_id"`
+	RepoID         *int64     `json:"repo_id"`
+	Content        string     `json:"content"`
+	SupermemoryID  *string    `json:"supermemory_id"`
+	CreatedBy      *string    `json:"created_by"`
+	Source         string     `json:"source"`
+	Category       *string    `json:"category"`
+	PRNumber       *int       `json:"pr_number"`
+	CreatedAt      *time.Time `json:"created_at"`
+	UpdatedAt      *time.Time `json:"updated_at"`
 }
 
 func (q *Queries) ListPatterns(ctx context.Context, dollar_1 []int64) ([]ListPatternsRow, error) {
@@ -194,7 +195,7 @@ func (q *Queries) ListPatterns(ctx context.Context, dollar_1 []int64) ([]ListPat
 			&i.CreatedBy,
 			&i.Source,
 			&i.Category,
-			&i.PrNumber,
+			&i.PRNumber,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -219,17 +220,17 @@ type ListPatternsForRepoParams struct {
 }
 
 type ListPatternsForRepoRow struct {
-	ID             int32              `json:"id"`
-	InstallationID int64              `json:"installation_id"`
-	RepoID         *int64             `json:"repo_id"`
-	Content        string             `json:"content"`
-	SupermemoryID  *string            `json:"supermemory_id"`
-	CreatedBy      *string            `json:"created_by"`
-	Source         string             `json:"source"`
-	Category       *string            `json:"category"`
-	PrNumber       *int32             `json:"pr_number"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	ID             int        `json:"id"`
+	InstallationID int64      `json:"installation_id"`
+	RepoID         *int64     `json:"repo_id"`
+	Content        string     `json:"content"`
+	SupermemoryID  *string    `json:"supermemory_id"`
+	CreatedBy      *string    `json:"created_by"`
+	Source         string     `json:"source"`
+	Category       *string    `json:"category"`
+	PRNumber       *int       `json:"pr_number"`
+	CreatedAt      *time.Time `json:"created_at"`
+	UpdatedAt      *time.Time `json:"updated_at"`
 }
 
 func (q *Queries) ListPatternsForRepo(ctx context.Context, arg ListPatternsForRepoParams) ([]ListPatternsForRepoRow, error) {
@@ -250,7 +251,7 @@ func (q *Queries) ListPatternsForRepo(ctx context.Context, arg ListPatternsForRe
 			&i.CreatedBy,
 			&i.Source,
 			&i.Category,
-			&i.PrNumber,
+			&i.PRNumber,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {

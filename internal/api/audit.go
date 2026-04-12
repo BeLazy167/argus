@@ -35,8 +35,15 @@ func newAuditLogger(logger *slog.Logger) *auditLogger {
 	return &auditLogger{client: client, logger: logger}
 }
 
+// sensitiveKeys are property names that must never be sent to PostHog.
+var sensitiveKeys = map[string]bool{
+	"api_key": true, "api_key_enc": true, "prompt_text": true,
+	"custom_persona_prompt": true, "password": true, "secret": true,
+	"token": true, "key_hint": true,
+}
+
 // logSettingsChange sends a settings_changed event to PostHog.
-// Properties must NOT contain secrets (api keys, prompts, persona prompts).
+// Sensitive keys are stripped automatically via denylist.
 func (a *auditLogger) logSettingsChange(ctx context.Context, clerkUserID string, installationID int64, action string, properties map[string]interface{}) {
 	if a == nil {
 		return
@@ -45,6 +52,9 @@ func (a *auditLogger) logSettingsChange(ctx context.Context, clerkUserID string,
 	props.Set("installation_id", installationID)
 	props.Set("action", action)
 	for k, v := range properties {
+		if sensitiveKeys[k] {
+			continue
+		}
 		props.Set(k, v)
 	}
 	err := a.client.Enqueue(posthog.Capture{

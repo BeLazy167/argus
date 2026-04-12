@@ -7,8 +7,9 @@ package db
 
 import (
 	"context"
+	"time"
 
-	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/google/uuid"
 )
 
 const countReviewsThisMonth = `-- name: CountReviewsThisMonth :one
@@ -18,9 +19,9 @@ WHERE rp.installation_id = $1
 AND r.created_at >= date_trunc('month', NOW())
 `
 
-func (q *Queries) CountReviewsThisMonth(ctx context.Context, installationID int64) (int32, error) {
+func (q *Queries) CountReviewsThisMonth(ctx context.Context, installationID int64) (int, error) {
 	row := q.db.QueryRow(ctx, countReviewsThisMonth, installationID)
-	var column_1 int32
+	var column_1 int
 	err := row.Scan(&column_1)
 	return column_1, err
 }
@@ -35,45 +36,45 @@ ORDER BY completed_at DESC LIMIT 1
 
 type GetLastCompletedReviewParams struct {
 	RepoID   int64 `json:"repo_id"`
-	PrNumber int32 `json:"pr_number"`
+	PRNumber int   `json:"pr_number"`
 }
 
 type GetLastCompletedReviewRow struct {
-	ID             pgtype.UUID        `json:"id"`
-	RepoID         int64              `json:"repo_id"`
-	PrNumber       int32              `json:"pr_number"`
-	PrTitle        string             `json:"pr_title"`
-	PrAuthor       string             `json:"pr_author"`
-	HeadSha        string             `json:"head_sha"`
-	BaseSha        string             `json:"base_sha"`
-	HeadRef        string             `json:"head_ref"`
-	GithubReviewID *int64             `json:"github_review_id"`
-	Status         string             `json:"status"`
-	Summary        *string            `json:"summary"`
-	Score          *int32             `json:"score"`
-	TokenUsage     []byte             `json:"token_usage"`
-	Trigger        string             `json:"trigger"`
-	TriggeredBy    *string            `json:"triggered_by"`
-	DurationMs     *int32             `json:"duration_ms"`
-	Error          *string            `json:"error"`
-	DeepReview     bool               `json:"deep_review"`
-	Persona        *string            `json:"persona"`
-	IsIncremental  bool               `json:"is_incremental"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	CompletedAt    pgtype.Timestamptz `json:"completed_at"`
+	ID             uuid.UUID  `json:"id"`
+	RepoID         int64      `json:"repo_id"`
+	PRNumber       int        `json:"pr_number"`
+	PRTitle        string     `json:"pr_title"`
+	PRAuthor       string     `json:"pr_author"`
+	HeadSHA        string     `json:"head_sha"`
+	BaseSHA        string     `json:"base_sha"`
+	HeadRef        string     `json:"head_ref"`
+	GithubReviewID *int64     `json:"github_review_id"`
+	Status         string     `json:"status"`
+	Summary        *string    `json:"summary"`
+	Score          *int       `json:"score"`
+	TokenUsage     []byte     `json:"token_usage"`
+	Trigger        string     `json:"trigger"`
+	TriggeredBy    *string    `json:"triggered_by"`
+	DurationMs     *int       `json:"duration_ms"`
+	Error          *string    `json:"error"`
+	DeepReview     bool       `json:"deep_review"`
+	Persona        *string    `json:"persona"`
+	IsIncremental  bool       `json:"is_incremental"`
+	CreatedAt      time.Time  `json:"created_at"`
+	CompletedAt    *time.Time `json:"completed_at"`
 }
 
 func (q *Queries) GetLastCompletedReview(ctx context.Context, arg GetLastCompletedReviewParams) (GetLastCompletedReviewRow, error) {
-	row := q.db.QueryRow(ctx, getLastCompletedReview, arg.RepoID, arg.PrNumber)
+	row := q.db.QueryRow(ctx, getLastCompletedReview, arg.RepoID, arg.PRNumber)
 	var i GetLastCompletedReviewRow
 	err := row.Scan(
 		&i.ID,
 		&i.RepoID,
-		&i.PrNumber,
-		&i.PrTitle,
-		&i.PrAuthor,
-		&i.HeadSha,
-		&i.BaseSha,
+		&i.PRNumber,
+		&i.PRTitle,
+		&i.PRAuthor,
+		&i.HeadSHA,
+		&i.BaseSHA,
 		&i.HeadRef,
 		&i.GithubReviewID,
 		&i.Status,
@@ -105,45 +106,45 @@ ORDER BY rv.created_at DESC LIMIT 1
 
 type GetLatestReviewByPRParams struct {
 	FullName string `json:"full_name"`
-	PrNumber int32  `json:"pr_number"`
+	PRNumber int    `json:"pr_number"`
 }
 
 type GetLatestReviewByPRRow struct {
-	ID             pgtype.UUID        `json:"id"`
-	RepoID         int64              `json:"repo_id"`
-	PrNumber       int32              `json:"pr_number"`
-	PrTitle        string             `json:"pr_title"`
-	PrAuthor       string             `json:"pr_author"`
-	HeadSha        string             `json:"head_sha"`
-	BaseSha        string             `json:"base_sha"`
-	HeadRef        string             `json:"head_ref"`
-	GithubReviewID *int64             `json:"github_review_id"`
-	Status         string             `json:"status"`
-	Summary        *string            `json:"summary"`
-	Score          *int32             `json:"score"`
-	TokenUsage     []byte             `json:"token_usage"`
-	Trigger        string             `json:"trigger"`
-	TriggeredBy    *string            `json:"triggered_by"`
-	DurationMs     *int32             `json:"duration_ms"`
-	Error          *string            `json:"error"`
-	DeepReview     bool               `json:"deep_review"`
-	Persona        *string            `json:"persona"`
-	IsIncremental  bool               `json:"is_incremental"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	CompletedAt    pgtype.Timestamptz `json:"completed_at"`
+	ID             uuid.UUID  `json:"id"`
+	RepoID         int64      `json:"repo_id"`
+	PRNumber       int        `json:"pr_number"`
+	PRTitle        string     `json:"pr_title"`
+	PRAuthor       string     `json:"pr_author"`
+	HeadSHA        string     `json:"head_sha"`
+	BaseSHA        string     `json:"base_sha"`
+	HeadRef        string     `json:"head_ref"`
+	GithubReviewID *int64     `json:"github_review_id"`
+	Status         string     `json:"status"`
+	Summary        *string    `json:"summary"`
+	Score          *int       `json:"score"`
+	TokenUsage     []byte     `json:"token_usage"`
+	Trigger        string     `json:"trigger"`
+	TriggeredBy    *string    `json:"triggered_by"`
+	DurationMs     *int       `json:"duration_ms"`
+	Error          *string    `json:"error"`
+	DeepReview     bool       `json:"deep_review"`
+	Persona        *string    `json:"persona"`
+	IsIncremental  bool       `json:"is_incremental"`
+	CreatedAt      time.Time  `json:"created_at"`
+	CompletedAt    *time.Time `json:"completed_at"`
 }
 
 func (q *Queries) GetLatestReviewByPR(ctx context.Context, arg GetLatestReviewByPRParams) (GetLatestReviewByPRRow, error) {
-	row := q.db.QueryRow(ctx, getLatestReviewByPR, arg.FullName, arg.PrNumber)
+	row := q.db.QueryRow(ctx, getLatestReviewByPR, arg.FullName, arg.PRNumber)
 	var i GetLatestReviewByPRRow
 	err := row.Scan(
 		&i.ID,
 		&i.RepoID,
-		&i.PrNumber,
-		&i.PrTitle,
-		&i.PrAuthor,
-		&i.HeadSha,
-		&i.BaseSha,
+		&i.PRNumber,
+		&i.PRTitle,
+		&i.PRAuthor,
+		&i.HeadSHA,
+		&i.BaseSHA,
 		&i.HeadRef,
 		&i.GithubReviewID,
 		&i.Status,
@@ -175,46 +176,46 @@ ORDER BY rv.created_at DESC LIMIT 1
 
 type GetLatestReviewBySHAParams struct {
 	FullName string `json:"full_name"`
-	PrNumber int32  `json:"pr_number"`
-	HeadSha  string `json:"head_sha"`
+	PRNumber int    `json:"pr_number"`
+	HeadSHA  string `json:"head_sha"`
 }
 
 type GetLatestReviewBySHARow struct {
-	ID             pgtype.UUID        `json:"id"`
-	RepoID         int64              `json:"repo_id"`
-	PrNumber       int32              `json:"pr_number"`
-	PrTitle        string             `json:"pr_title"`
-	PrAuthor       string             `json:"pr_author"`
-	HeadSha        string             `json:"head_sha"`
-	BaseSha        string             `json:"base_sha"`
-	HeadRef        string             `json:"head_ref"`
-	GithubReviewID *int64             `json:"github_review_id"`
-	Status         string             `json:"status"`
-	Summary        *string            `json:"summary"`
-	Score          *int32             `json:"score"`
-	TokenUsage     []byte             `json:"token_usage"`
-	Trigger        string             `json:"trigger"`
-	TriggeredBy    *string            `json:"triggered_by"`
-	DurationMs     *int32             `json:"duration_ms"`
-	Error          *string            `json:"error"`
-	DeepReview     bool               `json:"deep_review"`
-	Persona        *string            `json:"persona"`
-	IsIncremental  bool               `json:"is_incremental"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	CompletedAt    pgtype.Timestamptz `json:"completed_at"`
+	ID             uuid.UUID  `json:"id"`
+	RepoID         int64      `json:"repo_id"`
+	PRNumber       int        `json:"pr_number"`
+	PRTitle        string     `json:"pr_title"`
+	PRAuthor       string     `json:"pr_author"`
+	HeadSHA        string     `json:"head_sha"`
+	BaseSHA        string     `json:"base_sha"`
+	HeadRef        string     `json:"head_ref"`
+	GithubReviewID *int64     `json:"github_review_id"`
+	Status         string     `json:"status"`
+	Summary        *string    `json:"summary"`
+	Score          *int       `json:"score"`
+	TokenUsage     []byte     `json:"token_usage"`
+	Trigger        string     `json:"trigger"`
+	TriggeredBy    *string    `json:"triggered_by"`
+	DurationMs     *int       `json:"duration_ms"`
+	Error          *string    `json:"error"`
+	DeepReview     bool       `json:"deep_review"`
+	Persona        *string    `json:"persona"`
+	IsIncremental  bool       `json:"is_incremental"`
+	CreatedAt      time.Time  `json:"created_at"`
+	CompletedAt    *time.Time `json:"completed_at"`
 }
 
 func (q *Queries) GetLatestReviewBySHA(ctx context.Context, arg GetLatestReviewBySHAParams) (GetLatestReviewBySHARow, error) {
-	row := q.db.QueryRow(ctx, getLatestReviewBySHA, arg.FullName, arg.PrNumber, arg.HeadSha)
+	row := q.db.QueryRow(ctx, getLatestReviewBySHA, arg.FullName, arg.PRNumber, arg.HeadSHA)
 	var i GetLatestReviewBySHARow
 	err := row.Scan(
 		&i.ID,
 		&i.RepoID,
-		&i.PrNumber,
-		&i.PrTitle,
-		&i.PrAuthor,
-		&i.HeadSha,
-		&i.BaseSha,
+		&i.PRNumber,
+		&i.PRTitle,
+		&i.PRAuthor,
+		&i.HeadSHA,
+		&i.BaseSHA,
 		&i.HeadRef,
 		&i.GithubReviewID,
 		&i.Status,
@@ -242,44 +243,44 @@ FROM reviews WHERE id = $1
 `
 
 type GetReviewRow struct {
-	ID                pgtype.UUID        `json:"id"`
-	RepoID            int64              `json:"repo_id"`
-	PrNumber          int32              `json:"pr_number"`
-	PrTitle           string             `json:"pr_title"`
-	PrAuthor          string             `json:"pr_author"`
-	HeadSha           string             `json:"head_sha"`
-	BaseSha           string             `json:"base_sha"`
-	HeadRef           string             `json:"head_ref"`
-	GithubReviewID    *int64             `json:"github_review_id"`
-	Status            string             `json:"status"`
-	Summary           *string            `json:"summary"`
-	Score             *int32             `json:"score"`
-	TokenUsage        []byte             `json:"token_usage"`
-	Trigger           string             `json:"trigger"`
-	TriggeredBy       *string            `json:"triggered_by"`
-	DurationMs        *int32             `json:"duration_ms"`
-	Error             *string            `json:"error"`
-	DeepReview        bool               `json:"deep_review"`
-	Persona           *string            `json:"persona"`
-	IsIncremental     bool               `json:"is_incremental"`
-	CreatedAt         pgtype.Timestamptz `json:"created_at"`
-	CompletedAt       pgtype.Timestamptz `json:"completed_at"`
-	SimulationResults []byte             `json:"simulation_results"`
-	Diagram           *string            `json:"diagram"`
-	DiagramTitle      *string            `json:"diagram_title"`
+	ID                uuid.UUID  `json:"id"`
+	RepoID            int64      `json:"repo_id"`
+	PRNumber          int        `json:"pr_number"`
+	PRTitle           string     `json:"pr_title"`
+	PRAuthor          string     `json:"pr_author"`
+	HeadSHA           string     `json:"head_sha"`
+	BaseSHA           string     `json:"base_sha"`
+	HeadRef           string     `json:"head_ref"`
+	GithubReviewID    *int64     `json:"github_review_id"`
+	Status            string     `json:"status"`
+	Summary           *string    `json:"summary"`
+	Score             *int       `json:"score"`
+	TokenUsage        []byte     `json:"token_usage"`
+	Trigger           string     `json:"trigger"`
+	TriggeredBy       *string    `json:"triggered_by"`
+	DurationMs        *int       `json:"duration_ms"`
+	Error             *string    `json:"error"`
+	DeepReview        bool       `json:"deep_review"`
+	Persona           *string    `json:"persona"`
+	IsIncremental     bool       `json:"is_incremental"`
+	CreatedAt         time.Time  `json:"created_at"`
+	CompletedAt       *time.Time `json:"completed_at"`
+	SimulationResults []byte     `json:"simulation_results"`
+	Diagram           *string    `json:"diagram"`
+	DiagramTitle      *string    `json:"diagram_title"`
 }
 
-func (q *Queries) GetReview(ctx context.Context, id pgtype.UUID) (GetReviewRow, error) {
+func (q *Queries) GetReview(ctx context.Context, id uuid.UUID) (GetReviewRow, error) {
 	row := q.db.QueryRow(ctx, getReview, id)
 	var i GetReviewRow
 	err := row.Scan(
 		&i.ID,
 		&i.RepoID,
-		&i.PrNumber,
-		&i.PrTitle,
-		&i.PrAuthor,
-		&i.HeadSha,
-		&i.BaseSha,
+		&i.PRNumber,
+		&i.PRTitle,
+		&i.PRAuthor,
+		&i.HeadSHA,
+		&i.BaseSHA,
 		&i.HeadRef,
 		&i.GithubReviewID,
 		&i.Status,
@@ -319,28 +320,28 @@ type ListAllReviewsScopedParams struct {
 }
 
 type ListAllReviewsScopedRow struct {
-	ID             pgtype.UUID        `json:"id"`
-	RepoID         int64              `json:"repo_id"`
-	PrNumber       int32              `json:"pr_number"`
-	PrTitle        string             `json:"pr_title"`
-	PrAuthor       string             `json:"pr_author"`
-	HeadSha        string             `json:"head_sha"`
-	BaseSha        string             `json:"base_sha"`
-	HeadRef        string             `json:"head_ref"`
-	GithubReviewID *int64             `json:"github_review_id"`
-	Status         string             `json:"status"`
-	Summary        *string            `json:"summary"`
-	Score          *int32             `json:"score"`
-	TokenUsage     []byte             `json:"token_usage"`
-	Trigger        string             `json:"trigger"`
-	TriggeredBy    *string            `json:"triggered_by"`
-	DurationMs     *int32             `json:"duration_ms"`
-	Error          *string            `json:"error"`
-	DeepReview     bool               `json:"deep_review"`
-	Persona        *string            `json:"persona"`
-	IsIncremental  bool               `json:"is_incremental"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	CompletedAt    pgtype.Timestamptz `json:"completed_at"`
+	ID             uuid.UUID  `json:"id"`
+	RepoID         int64      `json:"repo_id"`
+	PRNumber       int        `json:"pr_number"`
+	PRTitle        string     `json:"pr_title"`
+	PRAuthor       string     `json:"pr_author"`
+	HeadSHA        string     `json:"head_sha"`
+	BaseSHA        string     `json:"base_sha"`
+	HeadRef        string     `json:"head_ref"`
+	GithubReviewID *int64     `json:"github_review_id"`
+	Status         string     `json:"status"`
+	Summary        *string    `json:"summary"`
+	Score          *int       `json:"score"`
+	TokenUsage     []byte     `json:"token_usage"`
+	Trigger        string     `json:"trigger"`
+	TriggeredBy    *string    `json:"triggered_by"`
+	DurationMs     *int       `json:"duration_ms"`
+	Error          *string    `json:"error"`
+	DeepReview     bool       `json:"deep_review"`
+	Persona        *string    `json:"persona"`
+	IsIncremental  bool       `json:"is_incremental"`
+	CreatedAt      time.Time  `json:"created_at"`
+	CompletedAt    *time.Time `json:"completed_at"`
 }
 
 func (q *Queries) ListAllReviewsScoped(ctx context.Context, arg ListAllReviewsScopedParams) ([]ListAllReviewsScopedRow, error) {
@@ -355,11 +356,11 @@ func (q *Queries) ListAllReviewsScoped(ctx context.Context, arg ListAllReviewsSc
 		if err := rows.Scan(
 			&i.ID,
 			&i.RepoID,
-			&i.PrNumber,
-			&i.PrTitle,
-			&i.PrAuthor,
-			&i.HeadSha,
-			&i.BaseSha,
+			&i.PRNumber,
+			&i.PRTitle,
+			&i.PRAuthor,
+			&i.HeadSHA,
+			&i.BaseSHA,
 			&i.HeadRef,
 			&i.GithubReviewID,
 			&i.Status,
@@ -401,28 +402,28 @@ type ListReviewsParams struct {
 }
 
 type ListReviewsRow struct {
-	ID             pgtype.UUID        `json:"id"`
-	RepoID         int64              `json:"repo_id"`
-	PrNumber       int32              `json:"pr_number"`
-	PrTitle        string             `json:"pr_title"`
-	PrAuthor       string             `json:"pr_author"`
-	HeadSha        string             `json:"head_sha"`
-	BaseSha        string             `json:"base_sha"`
-	HeadRef        string             `json:"head_ref"`
-	GithubReviewID *int64             `json:"github_review_id"`
-	Status         string             `json:"status"`
-	Summary        *string            `json:"summary"`
-	Score          *int32             `json:"score"`
-	TokenUsage     []byte             `json:"token_usage"`
-	Trigger        string             `json:"trigger"`
-	TriggeredBy    *string            `json:"triggered_by"`
-	DurationMs     *int32             `json:"duration_ms"`
-	Error          *string            `json:"error"`
-	DeepReview     bool               `json:"deep_review"`
-	Persona        *string            `json:"persona"`
-	IsIncremental  bool               `json:"is_incremental"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	CompletedAt    pgtype.Timestamptz `json:"completed_at"`
+	ID             uuid.UUID  `json:"id"`
+	RepoID         int64      `json:"repo_id"`
+	PRNumber       int        `json:"pr_number"`
+	PRTitle        string     `json:"pr_title"`
+	PRAuthor       string     `json:"pr_author"`
+	HeadSHA        string     `json:"head_sha"`
+	BaseSHA        string     `json:"base_sha"`
+	HeadRef        string     `json:"head_ref"`
+	GithubReviewID *int64     `json:"github_review_id"`
+	Status         string     `json:"status"`
+	Summary        *string    `json:"summary"`
+	Score          *int       `json:"score"`
+	TokenUsage     []byte     `json:"token_usage"`
+	Trigger        string     `json:"trigger"`
+	TriggeredBy    *string    `json:"triggered_by"`
+	DurationMs     *int       `json:"duration_ms"`
+	Error          *string    `json:"error"`
+	DeepReview     bool       `json:"deep_review"`
+	Persona        *string    `json:"persona"`
+	IsIncremental  bool       `json:"is_incremental"`
+	CreatedAt      time.Time  `json:"created_at"`
+	CompletedAt    *time.Time `json:"completed_at"`
 }
 
 func (q *Queries) ListReviews(ctx context.Context, arg ListReviewsParams) ([]ListReviewsRow, error) {
@@ -437,11 +438,11 @@ func (q *Queries) ListReviews(ctx context.Context, arg ListReviewsParams) ([]Lis
 		if err := rows.Scan(
 			&i.ID,
 			&i.RepoID,
-			&i.PrNumber,
-			&i.PrTitle,
-			&i.PrAuthor,
-			&i.HeadSha,
-			&i.BaseSha,
+			&i.PRNumber,
+			&i.PRTitle,
+			&i.PRAuthor,
+			&i.HeadSHA,
+			&i.BaseSHA,
 			&i.HeadRef,
 			&i.GithubReviewID,
 			&i.Status,
@@ -486,28 +487,28 @@ type ListReviewsScopedParams struct {
 }
 
 type ListReviewsScopedRow struct {
-	ID             pgtype.UUID        `json:"id"`
-	RepoID         int64              `json:"repo_id"`
-	PrNumber       int32              `json:"pr_number"`
-	PrTitle        string             `json:"pr_title"`
-	PrAuthor       string             `json:"pr_author"`
-	HeadSha        string             `json:"head_sha"`
-	BaseSha        string             `json:"base_sha"`
-	HeadRef        string             `json:"head_ref"`
-	GithubReviewID *int64             `json:"github_review_id"`
-	Status         string             `json:"status"`
-	Summary        *string            `json:"summary"`
-	Score          *int32             `json:"score"`
-	TokenUsage     []byte             `json:"token_usage"`
-	Trigger        string             `json:"trigger"`
-	TriggeredBy    *string            `json:"triggered_by"`
-	DurationMs     *int32             `json:"duration_ms"`
-	Error          *string            `json:"error"`
-	DeepReview     bool               `json:"deep_review"`
-	Persona        *string            `json:"persona"`
-	IsIncremental  bool               `json:"is_incremental"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	CompletedAt    pgtype.Timestamptz `json:"completed_at"`
+	ID             uuid.UUID  `json:"id"`
+	RepoID         int64      `json:"repo_id"`
+	PRNumber       int        `json:"pr_number"`
+	PRTitle        string     `json:"pr_title"`
+	PRAuthor       string     `json:"pr_author"`
+	HeadSHA        string     `json:"head_sha"`
+	BaseSHA        string     `json:"base_sha"`
+	HeadRef        string     `json:"head_ref"`
+	GithubReviewID *int64     `json:"github_review_id"`
+	Status         string     `json:"status"`
+	Summary        *string    `json:"summary"`
+	Score          *int       `json:"score"`
+	TokenUsage     []byte     `json:"token_usage"`
+	Trigger        string     `json:"trigger"`
+	TriggeredBy    *string    `json:"triggered_by"`
+	DurationMs     *int       `json:"duration_ms"`
+	Error          *string    `json:"error"`
+	DeepReview     bool       `json:"deep_review"`
+	Persona        *string    `json:"persona"`
+	IsIncremental  bool       `json:"is_incremental"`
+	CreatedAt      time.Time  `json:"created_at"`
+	CompletedAt    *time.Time `json:"completed_at"`
 }
 
 func (q *Queries) ListReviewsScoped(ctx context.Context, arg ListReviewsScopedParams) ([]ListReviewsScopedRow, error) {
@@ -527,11 +528,11 @@ func (q *Queries) ListReviewsScoped(ctx context.Context, arg ListReviewsScopedPa
 		if err := rows.Scan(
 			&i.ID,
 			&i.RepoID,
-			&i.PrNumber,
-			&i.PrTitle,
-			&i.PrAuthor,
-			&i.HeadSha,
-			&i.BaseSha,
+			&i.PRNumber,
+			&i.PRTitle,
+			&i.PRAuthor,
+			&i.HeadSHA,
+			&i.BaseSHA,
 			&i.HeadRef,
 			&i.GithubReviewID,
 			&i.Status,
@@ -564,9 +565,9 @@ WHERE id = $1
 `
 
 type UpdateReviewStatusParams struct {
-	ID     pgtype.UUID `json:"id"`
-	Status string      `json:"status"`
-	Error  *string     `json:"error"`
+	ID     uuid.UUID `json:"id"`
+	Status string    `json:"status"`
+	Error  *string   `json:"error"`
 }
 
 func (q *Queries) UpdateReviewStatus(ctx context.Context, arg UpdateReviewStatusParams) error {

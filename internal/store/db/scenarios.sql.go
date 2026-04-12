@@ -8,8 +8,7 @@ package db
 import (
 	"context"
 	"encoding/json"
-
-	"github.com/jackc/pgx/v5/pgtype"
+	"time"
 )
 
 const activateScenario = `-- name: ActivateScenario :exec
@@ -136,22 +135,22 @@ type ListScenariosForFilesParams struct {
 }
 
 type ListScenariosForFilesRow struct {
-	ID              int64              `json:"id"`
-	InstallationID  int64              `json:"installation_id"`
-	RepoID          *int64             `json:"repo_id"`
-	Description     string             `json:"description"`
-	Source          string             `json:"source"`
-	SourceRef       string             `json:"source_ref"`
-	Files           []string           `json:"files"`
-	Modules         []string           `json:"modules"`
-	Severity        string             `json:"severity"`
-	Active          *bool              `json:"active"`
-	CreatedAt       pgtype.Timestamptz `json:"created_at"`
-	Steps           json.RawMessage    `json:"steps"`
-	InitialState    string             `json:"initial_state"`
-	ExpectedOutcome string             `json:"expected_outcome"`
-	IsOutdated      bool               `json:"is_outdated"`
-	LastRunAt       pgtype.Timestamptz `json:"last_run_at"`
+	ID              int64           `json:"id"`
+	InstallationID  int64           `json:"installation_id"`
+	RepoID          *int64          `json:"repo_id"`
+	Description     string          `json:"description"`
+	Source          string          `json:"source"`
+	SourceRef       string          `json:"source_ref"`
+	Files           []string        `json:"files"`
+	Modules         []string        `json:"modules"`
+	Severity        string          `json:"severity"`
+	Active          *bool           `json:"active"`
+	CreatedAt       *time.Time      `json:"created_at"`
+	Steps           json.RawMessage `json:"steps"`
+	InitialState    string          `json:"initial_state"`
+	ExpectedOutcome string          `json:"expected_outcome"`
+	IsOutdated      bool            `json:"is_outdated"`
+	LastRunAt       *time.Time      `json:"last_run_at"`
 }
 
 func (q *Queries) ListScenariosForFiles(ctx context.Context, arg ListScenariosForFilesParams) ([]ListScenariosForFilesRow, error) {
@@ -205,22 +204,22 @@ type ListScenariosForRepoParams struct {
 }
 
 type ListScenariosForRepoRow struct {
-	ID              int64              `json:"id"`
-	InstallationID  int64              `json:"installation_id"`
-	RepoID          *int64             `json:"repo_id"`
-	Description     string             `json:"description"`
-	Source          string             `json:"source"`
-	SourceRef       string             `json:"source_ref"`
-	Files           []string           `json:"files"`
-	Modules         []string           `json:"modules"`
-	Severity        string             `json:"severity"`
-	Active          *bool              `json:"active"`
-	CreatedAt       pgtype.Timestamptz `json:"created_at"`
-	Steps           json.RawMessage    `json:"steps"`
-	InitialState    string             `json:"initial_state"`
-	ExpectedOutcome string             `json:"expected_outcome"`
-	IsOutdated      bool               `json:"is_outdated"`
-	LastRunAt       pgtype.Timestamptz `json:"last_run_at"`
+	ID              int64           `json:"id"`
+	InstallationID  int64           `json:"installation_id"`
+	RepoID          *int64          `json:"repo_id"`
+	Description     string          `json:"description"`
+	Source          string          `json:"source"`
+	SourceRef       string          `json:"source_ref"`
+	Files           []string        `json:"files"`
+	Modules         []string        `json:"modules"`
+	Severity        string          `json:"severity"`
+	Active          *bool           `json:"active"`
+	CreatedAt       *time.Time      `json:"created_at"`
+	Steps           json.RawMessage `json:"steps"`
+	InitialState    string          `json:"initial_state"`
+	ExpectedOutcome string          `json:"expected_outcome"`
+	IsOutdated      bool            `json:"is_outdated"`
+	LastRunAt       *time.Time      `json:"last_run_at"`
 }
 
 func (q *Queries) ListScenariosForRepo(ctx context.Context, arg ListScenariosForRepoParams) ([]ListScenariosForRepoRow, error) {
