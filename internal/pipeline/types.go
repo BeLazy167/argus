@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/BeLazy167/argus/internal/github"
+	"github.com/BeLazy167/argus/internal/memory"
 	"github.com/BeLazy167/argus/pkg/diff"
 	"github.com/google/uuid"
 )
@@ -113,6 +114,7 @@ type PipelineRun struct {
 	// FeatureFlags holds per-installation toggles loaded once per run.
 	FeatureFlags    FeatureFlags       `json:"-"`
 	StartedCommentNodeID string                       `json:"-"` // node ID of the "review started" GH comment, for minimizing later
+	Indexer              *memory.Indexer              `json:"-"` // per-org indexer resolved from Registry
 	EventBus             *EventBus                    `json:"-"` // not persisted
 	Error                string
 	CreatedAt            time.Time

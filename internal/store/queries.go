@@ -861,6 +861,24 @@ func (s *Store) RecoverStaleReviews(ctx context.Context, maxAge time.Duration) (
 	return tag.RowsAffected(), nil
 }
 
+// --- Supermemory Key ---
+
+func (s *Store) GetSupermemoryKey(ctx context.Context, installationID int64) (string, error) {
+	var enc string
+	err := s.Pool.QueryRow(ctx, `SELECT COALESCE(supermemory_key_enc, '') FROM installations WHERE id = $1`, installationID).Scan(&enc)
+	return enc, err
+}
+
+func (s *Store) SetSupermemoryKey(ctx context.Context, installationID int64, encKey string) error {
+	_, err := s.Pool.Exec(ctx, `UPDATE installations SET supermemory_key_enc = $2 WHERE id = $1`, installationID, encKey)
+	return err
+}
+
+func (s *Store) ClearSupermemoryKey(ctx context.Context, installationID int64) error {
+	_, err := s.Pool.Exec(ctx, `UPDATE installations SET supermemory_key_enc = '' WHERE id = $1`, installationID)
+	return err
+}
+
 func nilIfEmpty(s string) *string {
 	if s == "" {
 		return nil

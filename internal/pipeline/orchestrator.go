@@ -105,7 +105,7 @@ type Orchestrator struct {
 	reviewStage  *ReviewStage
 	triageStage  *TriageStage
 	scoringStage *ScoringStage
-	indexer      *memory.Indexer
+	memRegistry  *memory.Registry
 	simEngine    *SimulationEngine
 	registry     LLMRegistry
 	eventBus     *EventBus
@@ -118,7 +118,7 @@ type LLMRegistry interface {
 	HasKeyForRepo(ctx context.Context, installationID int64, repoID *int64, providerName string) bool
 }
 
-func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, reviewStage *ReviewStage, triageStage *TriageStage, scoringStage *ScoringStage, indexer *memory.Indexer, registry LLMRegistry, eventBus *EventBus, logger *slog.Logger, tracker EventTracker) *Orchestrator {
+func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, reviewStage *ReviewStage, triageStage *TriageStage, scoringStage *ScoringStage, memRegistry *memory.Registry, registry LLMRegistry, eventBus *EventBus, logger *slog.Logger, tracker EventTracker) *Orchestrator {
 	sm := NewStateMachine(db, st, logger)
 	sm.eventBus = eventBus
 	sm.tracker = tracker
@@ -131,7 +131,7 @@ func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, 
 		reviewStage:  reviewStage,
 		triageStage:  triageStage,
 		scoringStage: scoringStage,
-		indexer:      indexer,
+		memRegistry:  memRegistry,
 		registry:     registry,
 		eventBus:     eventBus,
 		tracker:      tracker,
@@ -306,6 +306,15 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		return fmt.Errorf("creating review record: %w", err)
 	}
 
+	// Resolve per-org memory indexer
+	var indexer *memory.Indexer
+	if o.memRegistry != nil {
+		indexer = o.memRegistry.GetIndexer(ctx, inst.ID)
+	}
+	if indexer != nil {
+		_, _ = o.db.Exec(ctx, `UPDATE reviews SET memory_enabled = true WHERE id = $1`, reviewID)
+	}
+
 	// Merge org defaults with repo overrides (repo wins)
 	mergedSettings, mergedErr := o.st.GetMergedSettings(ctx, inst.ID, dbRepo.ID)
 	if mergedErr != nil {
@@ -339,6 +348,7 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		Prompts:           o.loadPrompts(ctx, dbRepo.ID),
 		IsIncremental:     isIncremental,
 		PreviousReviewID:  previousReviewID,
+		Indexer:           indexer,
 		EventBus:          o.eventBus,
 		CreatedAt:         time.Now(),
 		UpdatedAt:         time.Now(),
@@ -790,7 +800,7 @@ func (o *Orchestrator) autoResolveStaleComments(ctx context.Context, event ghpkg
 // enrichFindings annotates each comment with pattern/rule matches and novelty flags.
 // Non-fatal: defaults to is_new_finding=true on any search failure.
 func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) error {
-	if o.indexer == nil {
+	if run.Indexer == nil {
 		return nil
 	}
 
@@ -799,7 +809,7 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 		return nil // non-fatal
 	}
 
-	memClient := o.indexer.Client()
+	memClient := run.Indexer.Client()
 	sem := make(chan struct{}, 5)
 	var wg sync.WaitGroup
 
@@ -820,7 +830,7 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 
 				// Build a richer query: category + file + body gives Supermemory more semantic signal
 				query := fmt.Sprintf("[%s|%s] %s:%d %s", c.Severity, c.Category, filePath, c.Line, c.Body)
-				content, score := o.indexer.SearchPatternMatch(ctx, owner, repo, query)
+				content, score := run.Indexer.SearchPatternMatch(ctx, owner, repo, query)
 
 				var ruleContent string
 				if memClient != nil {
@@ -1756,14 +1766,14 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		changedPaths = append(changedPaths, f.NewName)
 	}
 
-	if len(run.Synthesis.SimulationResults) > 0 && o.indexer != nil {
+	if len(run.Synthesis.SimulationResults) > 0 && run.Indexer != nil {
 		for _, result := range run.Synthesis.SimulationResults {
-			if err := o.indexer.IndexSimulationResult(ctx, owner, repo, run.PREvent.PRNumber, changedPaths,
+			if err := run.Indexer.IndexSimulationResult(ctx, owner, repo, run.PREvent.PRNumber, changedPaths,
 				result.Passes, result.Scenario, result.Confidence, result.RootCause, result.Impact); err != nil {
 				o.logger.Warn("indexing simulation result", "error", err)
 			}
 			if !result.Passes && result.Confidence >= 0.5 {
-				matches := o.indexer.SearchScenariosWithIDs(ctx, owner, repo, result.Scenario, "", 1)
+				matches := run.Indexer.SearchScenariosWithIDs(ctx, owner, repo, result.Scenario, "", 1)
 				if len(matches) > 0 && matches[0].Similarity >= 0.75 {
 					if err := o.st.Q.IncrementScenarioTriggerCount(ctx, matches[0].ID); err != nil {
 						o.logger.Warn("incrementing scenario trigger count", "error", err)
@@ -1785,8 +1795,10 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		if err := o.st.CreateTrace(ctx, run.DBRepoID, seed.FilePath, seed.SymbolName, seed.TraceType, seed.Content, seed.Severity, seed.ReviewID, seed.PRNumber, seed.Metadata); err != nil {
 			traceFails++
 		}
-		if err := o.indexer.IndexDecisionTrace(ctx, owner, repo, seed.FilePath, seed.TraceType, seed.Content, seed.Severity); err != nil {
-			o.logger.Warn("indexing decision trace", "error", err, "file", seed.FilePath)
+		if run.Indexer != nil {
+			if err := run.Indexer.IndexDecisionTrace(ctx, owner, repo, seed.FilePath, seed.TraceType, seed.Content, seed.Severity); err != nil {
+				o.logger.Warn("indexing decision trace", "error", err, "file", seed.FilePath)
+			}
 		}
 	}
 	if traceFails > 0 {
@@ -1796,7 +1808,7 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	// Auto-learn scenarios from critical/warning findings (gated by feature flag).
 	if run.ScenarioMemory {
 		scenarioSeeds := ExtractScenariosFromReview(run)
-		StoreScenarioSeeds(ctx, o.st, o.indexer, owner, repo, run.DBInstallationID, &run.DBRepoID, scenarioSeeds)
+		StoreScenarioSeeds(ctx, o.st, run.Indexer, owner, repo, run.DBInstallationID, &run.DBRepoID, scenarioSeeds)
 	}
 
 	if run.EventBus != nil {
@@ -2076,7 +2088,7 @@ func buildEnrichmentPrompt(run *PipelineRun) string {
 // indexConfirmedPatterns saves high-confidence comments as confirmed repo patterns in Supermemory.
 // When scoring is available, uses score ≥80 (deep) or ≥90 (non-deep). When skipped, falls back to critical+warning severity.
 func (o *Orchestrator) indexConfirmedPatterns(ctx context.Context, run *PipelineRun, owner, repo string) {
-	if o.indexer == nil {
+	if run.Indexer == nil {
 		return
 	}
 
@@ -2106,7 +2118,7 @@ func (o *Orchestrator) indexConfirmedPatterns(ctx context.Context, run *Pipeline
 			indexed++
 			content := fmt.Sprintf("Confirmed pattern [%s]: %s (file: %s)", c.Category, c.Body, fr.Path)
 			customID := memory.PatternCustomID(owner, repo, "confirmed", content)
-			resp, err := o.indexer.IndexRepoPattern(ctx, owner, repo, content, customID, map[string]string{
+			resp, err := run.Indexer.IndexRepoPattern(ctx, owner, repo, content, customID, map[string]string{
 				"source":   "scoring_confirmed",
 				"score":    fmt.Sprintf("%d", c.Score),
 				"pr":       fmt.Sprintf("%d", run.PREvent.PRNumber),
@@ -2134,7 +2146,7 @@ func (o *Orchestrator) indexConfirmedPatterns(ctx context.Context, run *Pipeline
 // learnPositivePatterns indexes praise comments as positive patterns in Supermemory.
 // These patterns suppress future false positives on similar good code.
 func (o *Orchestrator) learnPositivePatterns(ctx context.Context, run *PipelineRun, owner, repo string) int {
-	if o.indexer == nil || !run.LearnPatterns {
+	if run.Indexer == nil || !run.LearnPatterns {
 		return 0
 	}
 
@@ -2151,7 +2163,7 @@ func (o *Orchestrator) learnPositivePatterns(ctx context.Context, run *PipelineR
 			}
 			content := memory.FormatPositivePattern(string(c.Category), fr.Path, c.Line, c.Body)
 			customID := memory.PatternCustomID(owner, repo, "positive", content)
-			if err := o.indexer.IndexPositivePattern(ctx, owner, repo, content, customID, map[string]string{
+			if err := run.Indexer.IndexPositivePattern(ctx, owner, repo, content, customID, map[string]string{
 				"source":   "praise_comment",
 				"category": string(c.Category),
 				"pr":       fmt.Sprintf("%d", run.PREvent.PRNumber),
@@ -2196,7 +2208,7 @@ func isGenericPattern(pattern string, patchSet *diff.PatchSet) bool {
 // autoLearnPatterns uses the review LLM to extract 0-3 reusable patterns from high-confidence
 // comments. When scoring available, needs 1+ at 75+ (deep) or 80+ (non-deep). When skipped, uses critical+warning severity.
 func (o *Orchestrator) autoLearnPatterns(ctx context.Context, run *PipelineRun, owner, repo string) {
-	if o.indexer == nil {
+	if run.Indexer == nil {
 		return
 	}
 
@@ -2299,7 +2311,7 @@ The "pattern" value must be the actual pattern text, NOT the word "description".
 			continue
 		}
 		customID := memory.PatternCustomID(owner, repo, "learned", p.Pattern)
-		smResp, err := o.indexer.IndexRepoPattern(ctx, owner, repo, p.Pattern, customID, map[string]string{
+		smResp, err := run.Indexer.IndexRepoPattern(ctx, owner, repo, p.Pattern, customID, map[string]string{
 			"source":   "auto_learn",
 			"pr":       fmt.Sprintf("%d", run.PREvent.PRNumber),
 			"category": p.Category,
@@ -2322,7 +2334,7 @@ The "pattern" value must be the actual pattern text, NOT the word "description".
 		if isGenericPattern(p.Pattern, run.Diff) {
 			orgCustomID := memory.PatternCustomID(owner, "", "org_learned", p.Pattern)
 			var orgSmID *string
-			orgResp, orgErr := o.indexer.IndexOwnerPattern(ctx, owner, p.Pattern, orgCustomID, map[string]string{
+			orgResp, orgErr := run.Indexer.IndexOwnerPattern(ctx, owner, p.Pattern, orgCustomID, map[string]string{
 				"source":   "auto_learn",
 				"pr":       fmt.Sprintf("%d", run.PREvent.PRNumber),
 				"category": p.Category,
@@ -2358,7 +2370,7 @@ The "pattern" value must be the actual pattern text, NOT the word "description".
 // patterns from review comments), this function learns from the code itself —
 // capturing what the team writes, not what the reviewer flags.
 func (o *Orchestrator) extractConventions(ctx context.Context, run *PipelineRun, owner, repo string) {
-	if o.indexer == nil || run.Diff == nil || len(run.Diff.Files) == 0 {
+	if run.Indexer == nil || run.Diff == nil || len(run.Diff.Files) == 0 {
 		return
 	}
 
@@ -2445,7 +2457,7 @@ Return [] if no clear conventions emerge. JSON array only.`, run.PREvent.RepoFul
 		}
 		content := fmt.Sprintf("Convention [%s]: %s", c.Category, c.Convention)
 		customID := memory.PatternCustomID(owner, repo, "convention", c.Convention)
-		smResp, err := o.indexer.IndexRepoPattern(ctx, owner, repo, content, customID, map[string]string{
+		smResp, err := run.Indexer.IndexRepoPattern(ctx, owner, repo, content, customID, map[string]string{
 			"source":   "convention_extraction",
 			"pr":       fmt.Sprintf("%d", run.PREvent.PRNumber),
 			"category": c.Category,
@@ -2474,7 +2486,7 @@ Return [] if no clear conventions emerge. JSON array only.`, run.PREvent.RepoFul
 // Fires for files with signal: 1+ comment scored 60+, or any comment 80+.
 // When scoring was skipped, any file with 1+ comment qualifies.
 func (o *Orchestrator) synthesizeFileMemories(ctx context.Context, run *PipelineRun, owner, repo string) {
-	if o.indexer == nil {
+	if run.Indexer == nil {
 		return
 	}
 
@@ -2586,7 +2598,7 @@ Max 200 words. Be concrete.`
 		run.Tokens.addToTotal(fileTok)
 
 		customID := memory.SynthesisCustomID(owner, repo, fc.path)
-		_, err = o.indexer.IndexRepoPattern(synthCtx, owner, repo, resp.Content, customID, map[string]string{
+		_, err = run.Indexer.IndexRepoPattern(synthCtx, owner, repo, resp.Content, customID, map[string]string{
 			"source": "synthesis",
 			"pr":     fmt.Sprintf("%d", run.PREvent.PRNumber),
 			"file":   fc.path,
@@ -2605,7 +2617,7 @@ Max 200 words. Be concrete.`
 // indexPRSummary stores a lightweight PR summary in Supermemory for cross-PR context.
 // No LLM call — built from existing synthesis output.
 func (o *Orchestrator) indexPRSummary(ctx context.Context, run *PipelineRun, owner, repo string) {
-	if o.indexer == nil || run.Synthesis == nil {
+	if run.Indexer == nil || run.Synthesis == nil {
 		return
 	}
 
@@ -2620,7 +2632,7 @@ func (o *Orchestrator) indexPRSummary(ctx context.Context, run *PipelineRun, own
 		util.Truncate(run.Synthesis.Summary, 800, false))
 
 	customID := memory.PRSummaryCustomID(owner, repo, run.PREvent.PRNumber)
-	_, err := o.indexer.IndexRepoPattern(ctx, owner, repo, content, customID, map[string]string{
+	_, err := run.Indexer.IndexRepoPattern(ctx, owner, repo, content, customID, map[string]string{
 		"source":    "pr_summary",
 		"pr":        fmt.Sprintf("%d", run.PREvent.PRNumber),
 		"pr_author": run.PREvent.PRAuthor,
@@ -2634,7 +2646,7 @@ func (o *Orchestrator) indexPRSummary(ctx context.Context, run *PipelineRun, own
 // future reviews can surface architectural risk context. Idempotent (uses customID per repo).
 // Skips repos with fewer than 3 choke points.
 func (o *Orchestrator) indexArchitectureSummary(ctx context.Context, run *PipelineRun, owner, repo string) {
-	if o.indexer == nil {
+	if run.Indexer == nil {
 		return
 	}
 
@@ -2662,7 +2674,7 @@ func (o *Orchestrator) indexArchitectureSummary(ctx context.Context, run *Pipeli
 	sb.WriteString("\nWhen reviewing changes to these files, apply extra scrutiny: defects propagate to all dependent modules.")
 
 	customID := fmt.Sprintf("arch-summary:%s/%s", owner, repo)
-	_, err = o.indexer.IndexRepoPattern(chokeCtx, owner, repo, sb.String(), customID, map[string]string{
+	_, err = run.Indexer.IndexRepoPattern(chokeCtx, owner, repo, sb.String(), customID, map[string]string{
 		"source":       "arch_summary",
 		"choke_points": fmt.Sprintf("%d", len(rows)),
 	})
@@ -3787,7 +3799,7 @@ func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghRe
 	}
 
 	// Batch index all comments to Supermemory in a single API call
-	if o.indexer != nil {
+	if run.Indexer != nil {
 		var batch []memory.ReviewMemory
 		for _, fr := range run.FileReviews {
 			for _, c := range fr.Comments {
@@ -3802,7 +3814,7 @@ func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghRe
 				})
 			}
 		}
-		if err := o.indexer.IndexReviewCommentsBatch(ctx, owner, repo, batch); err != nil {
+		if err := run.Indexer.IndexReviewCommentsBatch(ctx, owner, repo, batch); err != nil {
 			o.logger.Error("batch indexing review comments", "error", err, "count", len(batch))
 		}
 	}

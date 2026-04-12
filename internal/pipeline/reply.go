@@ -15,20 +15,20 @@ import (
 
 // ReplyAnalyzer handles incoming replies to Argus review comments.
 type ReplyAnalyzer struct {
-	registry *llm.Registry
-	store    *store.Store
-	ghClient *ghpkg.Client
-	indexer  *memory.Indexer
-	logger   *slog.Logger
+	registry    *llm.Registry
+	store       *store.Store
+	ghClient    *ghpkg.Client
+	memRegistry *memory.Registry
+	logger      *slog.Logger
 }
 
-func NewReplyAnalyzer(registry *llm.Registry, st *store.Store, ghClient *ghpkg.Client, indexer *memory.Indexer, logger *slog.Logger) *ReplyAnalyzer {
+func NewReplyAnalyzer(registry *llm.Registry, st *store.Store, ghClient *ghpkg.Client, memRegistry *memory.Registry, logger *slog.Logger) *ReplyAnalyzer {
 	return &ReplyAnalyzer{
-		registry: registry,
-		store:    st,
-		ghClient: ghClient,
-		indexer:  indexer,
-		logger:   logger,
+		registry:    registry,
+		store:       st,
+		ghClient:    ghClient,
+		memRegistry: memRegistry,
+		logger:      logger,
 	}
 }
 
@@ -63,6 +63,12 @@ func (ra *ReplyAnalyzer) Analyze(ctx context.Context, event ghpkg.CommentEvent) 
 	if err != nil {
 		return fmt.Errorf("resolving installation: %w", err)
 	}
+
+	var indexer *memory.Indexer
+	if ra.memRegistry != nil {
+		indexer = ra.memRegistry.GetIndexer(ctx, inst.ID)
+	}
+
 	dbRepo, err := ra.store.GetRepoByFullName(ctx, event.RepoFullName)
 	if err != nil {
 		return fmt.Errorf("resolving repo: %w", err)
@@ -118,8 +124,8 @@ func (ra *ReplyAnalyzer) Analyze(ctx context.Context, event ghpkg.CommentEvent) 
 	}
 
 	// Index learning in Supermemory
-	if decision.Learning != "" && ra.indexer != nil {
-		_, err := ra.indexer.IndexOwnerPattern(ctx, owner, decision.Learning, "", map[string]string{
+	if decision.Learning != "" && indexer != nil {
+		_, err := indexer.IndexOwnerPattern(ctx, owner, decision.Learning, "", map[string]string{
 			"source": "reply_feedback",
 			"repo":   repo,
 			"file":   event.FilePath,
@@ -150,7 +156,7 @@ func (ra *ReplyAnalyzer) Analyze(ctx context.Context, event ghpkg.CommentEvent) 
 	}
 
 	// Index feedback signal for pattern reinforcement/suppression
-	if ra.indexer != nil && original.Category != nil {
+	if indexer != nil && original.Category != nil {
 		var feedbackAction string
 		switch decision.Action {
 		case "resolve":
@@ -164,7 +170,7 @@ func (ra *ReplyAnalyzer) Analyze(ctx context.Context, event ghpkg.CommentEvent) 
 		}
 
 		if feedbackAction != "" {
-			err := ra.indexer.IndexFeedbackSignal(ctx, owner, repo, memory.FeedbackMemory{
+			err := indexer.IndexFeedbackSignal(ctx, owner, repo, memory.FeedbackMemory{
 				FilePath:       original.FilePath,
 				Category:       *original.Category,
 				OriginalBody:   original.Body,

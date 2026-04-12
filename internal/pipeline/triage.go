@@ -35,13 +35,13 @@ type TriageResult struct {
 
 // TriageStage classifies files as skip/skim/deep using a fast LLM.
 type TriageStage struct {
-	registry  *llm.Registry
-	store     *store.Store
-	memClient *memory.Client
+	registry    *llm.Registry
+	store       *store.Store
+	memRegistry *memory.Registry
 }
 
-func NewTriageStage(registry *llm.Registry, st *store.Store, memClient *memory.Client) *TriageStage {
-	return &TriageStage{registry: registry, store: st, memClient: memClient}
+func NewTriageStage(registry *llm.Registry, st *store.Store, memRegistry *memory.Registry) *TriageStage {
+	return &TriageStage{registry: registry, store: st, memRegistry: memRegistry}
 }
 
 func (ts *TriageStage) Execute(ctx context.Context, run *PipelineRun) error {
@@ -133,7 +133,11 @@ func (ts *TriageStage) llmTriage(ctx context.Context, run *PipelineRun) (map[str
 		slog.Warn("triage: invalid repo name, skipping memory hints", "error", splitErr)
 	}
 	prompt := buildTriagePrompt(run.Diff.Files)
-	if hints := triageMemoryHints(ctx, ts.memClient, owner, repo, run.Diff.Files); hints != "" {
+	var memClient *memory.Client
+	if ts.memRegistry != nil {
+		memClient = ts.memRegistry.GetClient(ctx, run.DBInstallationID)
+	}
+	if hints := triageMemoryHints(ctx, memClient, owner, repo, run.Diff.Files); hints != "" {
 		prompt += "\n" + hints
 	}
 

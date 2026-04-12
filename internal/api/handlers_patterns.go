@@ -85,28 +85,31 @@ func (s *Server) createPattern(w http.ResponseWriter, r *http.Request) {
 
 	// Index in Supermemory (respect repo scope)
 	var smID *string
-	if s.indexer != nil {
-		inst, err := s.store.GetInstallation(r.Context(), body.InstallationID)
-		if err != nil {
-			s.logger.Error("create pattern: lookup installation", "error", err)
-		} else {
-			metadata := map[string]string{"source": "dashboard"}
-			var resp *memory.AddResponse
-			if body.RepoID != nil {
-				dbRepo, err := s.store.GetRepo(r.Context(), *body.RepoID)
-				if err == nil {
-					parts := strings.SplitN(dbRepo.FullName, "/", 2)
-					if len(parts) == 2 {
-						resp, err = s.indexer.IndexRepoPattern(r.Context(), parts[0], parts[1], body.Content, "", metadata)
-					}
-				}
-			} else {
-				resp, err = s.indexer.IndexOwnerPattern(r.Context(), inst.OrgLogin, body.Content, "", metadata)
-			}
+	if s.memRegistry != nil {
+		indexer := s.memRegistry.GetIndexer(r.Context(), body.InstallationID)
+		if indexer != nil {
+			inst, err := s.store.GetInstallation(r.Context(), body.InstallationID)
 			if err != nil {
-				s.logger.Error("index pattern in supermemory", "error", err)
-			} else if resp != nil {
-				smID = &resp.ID
+				s.logger.Error("create pattern: lookup installation", "error", err)
+			} else {
+				metadata := map[string]string{"source": "dashboard"}
+				var resp *memory.AddResponse
+				if body.RepoID != nil {
+					dbRepo, err := s.store.GetRepo(r.Context(), *body.RepoID)
+					if err == nil {
+						parts := strings.SplitN(dbRepo.FullName, "/", 2)
+						if len(parts) == 2 {
+							resp, err = indexer.IndexRepoPattern(r.Context(), parts[0], parts[1], body.Content, "", metadata)
+						}
+					}
+				} else {
+					resp, err = indexer.IndexOwnerPattern(r.Context(), inst.OrgLogin, body.Content, "", metadata)
+				}
+				if err != nil {
+					s.logger.Error("index pattern in supermemory", "error", err)
+				} else if resp != nil {
+					smID = &resp.ID
+				}
 			}
 		}
 	}
@@ -138,9 +141,12 @@ func (s *Server) deletePattern(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Only delete from Supermemory after DB deletion succeeds (confirms authorization)
-	if getErr == nil && pattern.SupermemoryID != nil && s.indexer != nil {
-		if err := s.indexer.DeleteDocument(r.Context(), *pattern.SupermemoryID); err != nil {
-			s.logger.Error("delete pattern from supermemory", "error", err)
+	if getErr == nil && pattern.SupermemoryID != nil && s.memRegistry != nil {
+		indexer := s.memRegistry.GetIndexer(r.Context(), pattern.InstallationID)
+		if indexer != nil {
+			if err := indexer.DeleteDocument(r.Context(), *pattern.SupermemoryID); err != nil {
+				s.logger.Error("delete pattern from supermemory", "error", err)
+			}
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})

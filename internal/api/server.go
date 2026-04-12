@@ -28,7 +28,6 @@ type Server struct {
 	orchestrator     *pipeline.Orchestrator
 	replyAnalyzer    *pipeline.ReplyAnalyzer
 	reactionAnalyzer *pipeline.ReactionAnalyzer
-	indexer          *memory.Indexer
 	registry         *llm.Registry
 	eventBus         *pipeline.EventBus
 	webhookSecret    []byte
@@ -37,16 +36,16 @@ type Server struct {
 	inFlightReviews  sync.Map     // "{repo}:{prNumber}" → struct{}
 	webhookSem       chan struct{} // bounded concurrency for webhook goroutines
 	audit            *auditLogger
+	memRegistry      *memory.Registry
 }
 
-func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchestrator, replyAnalyzer *pipeline.ReplyAnalyzer, reactionAnalyzer *pipeline.ReactionAnalyzer, indexer *memory.Indexer, registry *llm.Registry, eventBus *pipeline.EventBus, webhookSecret string, corsOrigin string, logger *slog.Logger) *Server {
+func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchestrator, replyAnalyzer *pipeline.ReplyAnalyzer, reactionAnalyzer *pipeline.ReactionAnalyzer, registry *llm.Registry, eventBus *pipeline.EventBus, webhookSecret string, corsOrigin string, logger *slog.Logger, memRegistry *memory.Registry) *Server {
 	s := &Server{
 		store:            st,
 		ghApp:            ghApp,
 		orchestrator:     orchestrator,
 		replyAnalyzer:    replyAnalyzer,
 		reactionAnalyzer: reactionAnalyzer,
-		indexer:          indexer,
 		registry:         registry,
 		eventBus:         eventBus,
 		webhookSecret:    []byte(webhookSecret),
@@ -54,6 +53,7 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 		rateLimiter:      NewRateLimiter(),
 		webhookSem:       make(chan struct{}, 50),
 		audit:            newAuditLogger(logger),
+		memRegistry:      memRegistry,
 	}
 
 	r := chi.NewRouter()
@@ -116,6 +116,11 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 				r.Put("/repos/{repoID}/prompts/{stage}", s.upsertPromptTemplate)
 				r.Delete("/repos/{repoID}/prompts/{stage}", s.deletePromptTemplate)
 				r.Get("/prompts/defaults", s.listDefaultPrompts)
+
+				// Supermemory Key
+				r.Get("/installations/{installationID}/supermemory-key", s.getSupermemoryKeyStatus)
+				r.Put("/installations/{installationID}/supermemory-key", s.setSupermemoryKey)
+				r.Delete("/installations/{installationID}/supermemory-key", s.deleteSupermemoryKey)
 
 				// Org Default Settings
 				r.Get("/installations/{installationID}/defaults", s.getOrgDefaults)
