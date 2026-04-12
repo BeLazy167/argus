@@ -7,8 +7,7 @@ package db
 
 import (
 	"context"
-
-	"github.com/jackc/pgx/v5/pgtype"
+	"time"
 )
 
 const createRule = `-- name: CreateRule :one
@@ -21,19 +20,19 @@ type CreateRuleParams struct {
 	InstallationID *int64 `json:"installation_id"`
 	Category       string `json:"category"`
 	Content        string `json:"content"`
-	Priority       int32  `json:"priority"`
+	Priority       int    `json:"priority"`
 	Enabled        bool   `json:"enabled"`
 }
 
 type CreateRuleRow struct {
-	ID             int64              `json:"id"`
-	InstallationID *int64             `json:"installation_id"`
-	Category       string             `json:"category"`
-	Content        string             `json:"content"`
-	Priority       int32              `json:"priority"`
-	Enabled        bool               `json:"enabled"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	ID             int64     `json:"id"`
+	InstallationID *int64    `json:"installation_id"`
+	Category       string    `json:"category"`
+	Content        string    `json:"content"`
+	Priority       int       `json:"priority"`
+	Enabled        bool      `json:"enabled"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 func (q *Queries) CreateRule(ctx context.Context, arg CreateRuleParams) (CreateRuleRow, error) {
@@ -81,14 +80,14 @@ FROM rules WHERE installation_id = ANY($1::bigint[]) ORDER BY priority DESC, cat
 `
 
 type ListRulesRow struct {
-	ID             int64              `json:"id"`
-	InstallationID *int64             `json:"installation_id"`
-	Category       string             `json:"category"`
-	Content        string             `json:"content"`
-	Priority       int32              `json:"priority"`
-	Enabled        bool               `json:"enabled"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	ID             int64     `json:"id"`
+	InstallationID *int64    `json:"installation_id"`
+	Category       string    `json:"category"`
+	Content        string    `json:"content"`
+	Priority       int       `json:"priority"`
+	Enabled        bool      `json:"enabled"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 func (q *Queries) ListRules(ctx context.Context, dollar_1 []int64) ([]ListRulesRow, error) {
@@ -136,19 +135,19 @@ type UpdateRuleParams struct {
 	Column2  []int64 `json:"column_2"`
 	Category string  `json:"category"`
 	Content  string  `json:"content"`
-	Priority int32   `json:"priority"`
+	Priority int     `json:"priority"`
 	Enabled  bool    `json:"enabled"`
 }
 
 type UpdateRuleRow struct {
-	ID             int64              `json:"id"`
-	InstallationID *int64             `json:"installation_id"`
-	Category       string             `json:"category"`
-	Content        string             `json:"content"`
-	Priority       int32              `json:"priority"`
-	Enabled        bool               `json:"enabled"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	ID             int64     `json:"id"`
+	InstallationID *int64    `json:"installation_id"`
+	Category       string    `json:"category"`
+	Content        string    `json:"content"`
+	Priority       int       `json:"priority"`
+	Enabled        bool      `json:"enabled"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 func (q *Queries) UpdateRule(ctx context.Context, arg UpdateRuleParams) (UpdateRuleRow, error) {

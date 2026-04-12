@@ -7,8 +7,7 @@ package db
 
 import (
 	"context"
-
-	"github.com/jackc/pgx/v5/pgtype"
+	"time"
 )
 
 const deleteModelConfig = `-- name: DeleteModelConfig :execrows
@@ -51,16 +50,16 @@ FROM model_configs WHERE repo_id = $1 ORDER BY stage
 `
 
 type ListModelConfigsRow struct {
-	ID          int64              `json:"id"`
-	RepoID      *int64             `json:"repo_id"`
-	Stage       string             `json:"stage"`
-	Provider    string             `json:"provider"`
-	Model       string             `json:"model"`
-	BaseUrl     *string            `json:"base_url"`
-	MaxTokens   int32              `json:"max_tokens"`
-	Temperature float32            `json:"temperature"`
-	CreatedAt   pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+	ID          int64     `json:"id"`
+	RepoID      *int64    `json:"repo_id"`
+	Stage       string    `json:"stage"`
+	Provider    string    `json:"provider"`
+	Model       string    `json:"model"`
+	BaseURL     *string   `json:"base_url"`
+	MaxTokens   int       `json:"max_tokens"`
+	Temperature float32   `json:"temperature"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 func (q *Queries) ListModelConfigs(ctx context.Context, repoID *int64) ([]ListModelConfigsRow, error) {
@@ -78,7 +77,7 @@ func (q *Queries) ListModelConfigs(ctx context.Context, repoID *int64) ([]ListMo
 			&i.Stage,
 			&i.Provider,
 			&i.Model,
-			&i.BaseUrl,
+			&i.BaseURL,
 			&i.MaxTokens,
 			&i.Temperature,
 			&i.CreatedAt,
@@ -107,17 +106,17 @@ type ListModelConfigsWithFallbackParams struct {
 }
 
 type ListModelConfigsWithFallbackRow struct {
-	ID             int64              `json:"id"`
-	RepoID         *int64             `json:"repo_id"`
-	InstallationID *int64             `json:"installation_id"`
-	Stage          string             `json:"stage"`
-	Provider       string             `json:"provider"`
-	Model          string             `json:"model"`
-	BaseUrl        *string            `json:"base_url"`
-	MaxTokens      int32              `json:"max_tokens"`
-	Temperature    float32            `json:"temperature"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	ID             int64     `json:"id"`
+	RepoID         *int64    `json:"repo_id"`
+	InstallationID *int64    `json:"installation_id"`
+	Stage          string    `json:"stage"`
+	Provider       string    `json:"provider"`
+	Model          string    `json:"model"`
+	BaseURL        *string   `json:"base_url"`
+	MaxTokens      int       `json:"max_tokens"`
+	Temperature    float32   `json:"temperature"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 func (q *Queries) ListModelConfigsWithFallback(ctx context.Context, arg ListModelConfigsWithFallbackParams) ([]ListModelConfigsWithFallbackRow, error) {
@@ -136,7 +135,7 @@ func (q *Queries) ListModelConfigsWithFallback(ctx context.Context, arg ListMode
 			&i.Stage,
 			&i.Provider,
 			&i.Model,
-			&i.BaseUrl,
+			&i.BaseURL,
 			&i.MaxTokens,
 			&i.Temperature,
 			&i.CreatedAt,
@@ -158,17 +157,17 @@ FROM model_configs WHERE installation_id = $1 AND repo_id IS NULL ORDER BY stage
 `
 
 type ListOrgModelConfigsRow struct {
-	ID             int64              `json:"id"`
-	RepoID         *int64             `json:"repo_id"`
-	InstallationID *int64             `json:"installation_id"`
-	Stage          string             `json:"stage"`
-	Provider       string             `json:"provider"`
-	Model          string             `json:"model"`
-	BaseUrl        *string            `json:"base_url"`
-	MaxTokens      int32              `json:"max_tokens"`
-	Temperature    float32            `json:"temperature"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	ID             int64     `json:"id"`
+	RepoID         *int64    `json:"repo_id"`
+	InstallationID *int64    `json:"installation_id"`
+	Stage          string    `json:"stage"`
+	Provider       string    `json:"provider"`
+	Model          string    `json:"model"`
+	BaseURL        *string   `json:"base_url"`
+	MaxTokens      int       `json:"max_tokens"`
+	Temperature    float32   `json:"temperature"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 func (q *Queries) ListOrgModelConfigs(ctx context.Context, installationID *int64) ([]ListOrgModelConfigsRow, error) {
@@ -187,7 +186,7 @@ func (q *Queries) ListOrgModelConfigs(ctx context.Context, installationID *int64
 			&i.Stage,
 			&i.Provider,
 			&i.Model,
-			&i.BaseUrl,
+			&i.BaseURL,
 			&i.MaxTokens,
 			&i.Temperature,
 			&i.CreatedAt,
@@ -221,22 +220,22 @@ type UpsertModelConfigParams struct {
 	Stage       string  `json:"stage"`
 	Provider    string  `json:"provider"`
 	Model       string  `json:"model"`
-	BaseUrl     *string `json:"base_url"`
-	MaxTokens   int32   `json:"max_tokens"`
+	BaseURL     *string `json:"base_url"`
+	MaxTokens   int     `json:"max_tokens"`
 	Temperature float32 `json:"temperature"`
 }
 
 type UpsertModelConfigRow struct {
-	ID          int64              `json:"id"`
-	RepoID      *int64             `json:"repo_id"`
-	Stage       string             `json:"stage"`
-	Provider    string             `json:"provider"`
-	Model       string             `json:"model"`
-	BaseUrl     *string            `json:"base_url"`
-	MaxTokens   int32              `json:"max_tokens"`
-	Temperature float32            `json:"temperature"`
-	CreatedAt   pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+	ID          int64     `json:"id"`
+	RepoID      *int64    `json:"repo_id"`
+	Stage       string    `json:"stage"`
+	Provider    string    `json:"provider"`
+	Model       string    `json:"model"`
+	BaseURL     *string   `json:"base_url"`
+	MaxTokens   int       `json:"max_tokens"`
+	Temperature float32   `json:"temperature"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 func (q *Queries) UpsertModelConfig(ctx context.Context, arg UpsertModelConfigParams) (UpsertModelConfigRow, error) {
@@ -245,7 +244,7 @@ func (q *Queries) UpsertModelConfig(ctx context.Context, arg UpsertModelConfigPa
 		arg.Stage,
 		arg.Provider,
 		arg.Model,
-		arg.BaseUrl,
+		arg.BaseURL,
 		arg.MaxTokens,
 		arg.Temperature,
 	)
@@ -256,7 +255,7 @@ func (q *Queries) UpsertModelConfig(ctx context.Context, arg UpsertModelConfigPa
 		&i.Stage,
 		&i.Provider,
 		&i.Model,
-		&i.BaseUrl,
+		&i.BaseURL,
 		&i.MaxTokens,
 		&i.Temperature,
 		&i.CreatedAt,
@@ -279,23 +278,23 @@ type UpsertOrgModelConfigParams struct {
 	Stage          string  `json:"stage"`
 	Provider       string  `json:"provider"`
 	Model          string  `json:"model"`
-	BaseUrl        *string `json:"base_url"`
-	MaxTokens      int32   `json:"max_tokens"`
+	BaseURL        *string `json:"base_url"`
+	MaxTokens      int     `json:"max_tokens"`
 	Temperature    float32 `json:"temperature"`
 }
 
 type UpsertOrgModelConfigRow struct {
-	ID             int64              `json:"id"`
-	RepoID         *int64             `json:"repo_id"`
-	InstallationID *int64             `json:"installation_id"`
-	Stage          string             `json:"stage"`
-	Provider       string             `json:"provider"`
-	Model          string             `json:"model"`
-	BaseUrl        *string            `json:"base_url"`
-	MaxTokens      int32              `json:"max_tokens"`
-	Temperature    float32            `json:"temperature"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	ID             int64     `json:"id"`
+	RepoID         *int64    `json:"repo_id"`
+	InstallationID *int64    `json:"installation_id"`
+	Stage          string    `json:"stage"`
+	Provider       string    `json:"provider"`
+	Model          string    `json:"model"`
+	BaseURL        *string   `json:"base_url"`
+	MaxTokens      int       `json:"max_tokens"`
+	Temperature    float32   `json:"temperature"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 func (q *Queries) UpsertOrgModelConfig(ctx context.Context, arg UpsertOrgModelConfigParams) (UpsertOrgModelConfigRow, error) {
@@ -304,7 +303,7 @@ func (q *Queries) UpsertOrgModelConfig(ctx context.Context, arg UpsertOrgModelCo
 		arg.Stage,
 		arg.Provider,
 		arg.Model,
-		arg.BaseUrl,
+		arg.BaseURL,
 		arg.MaxTokens,
 		arg.Temperature,
 	)
@@ -316,7 +315,7 @@ func (q *Queries) UpsertOrgModelConfig(ctx context.Context, arg UpsertOrgModelCo
 		&i.Stage,
 		&i.Provider,
 		&i.Model,
-		&i.BaseUrl,
+		&i.BaseURL,
 		&i.MaxTokens,
 		&i.Temperature,
 		&i.CreatedAt,

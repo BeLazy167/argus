@@ -15,7 +15,11 @@ func (s *Store) UpsertProviderKey(ctx context.Context, installationID int64, rep
 	}
 	hint := ""
 	if len(apiKey) >= 4 {
-		hint = apiKey[len(apiKey)-4:]
+		raw := apiKey[len(apiKey)-4:]
+		hint, err = crypto.Encrypt(raw)
+		if err != nil {
+			return nil, fmt.Errorf("encrypting key hint: %w", err)
+		}
 	}
 	var pk ProviderKey
 	// Use appropriate ON CONFLICT target: partial index for org-level (repo_id IS NULL),

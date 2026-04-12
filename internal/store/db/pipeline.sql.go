@@ -9,7 +9,7 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/google/uuid"
 )
 
 const getAllFileReviewsForReview = `-- name: GetAllFileReviewsForReview :one
@@ -25,7 +25,7 @@ LIMIT 1
 // Explicit ::jsonb cast is needed so sqlc infers a concrete type and applies
 // the RawMessage override from sqlc.yaml (otherwise it defaults to interface{}
 // which pgx decodes via json.Unmarshal, breaking the []byte assertion in export).
-func (q *Queries) GetAllFileReviewsForReview(ctx context.Context, reviewID pgtype.UUID) (json.RawMessage, error) {
+func (q *Queries) GetAllFileReviewsForReview(ctx context.Context, reviewID uuid.UUID) (json.RawMessage, error) {
 	row := q.db.QueryRow(ctx, getAllFileReviewsForReview, reviewID)
 	var all_file_reviews json.RawMessage
 	err := row.Scan(&all_file_reviews)
@@ -36,9 +36,9 @@ const getLatestRunForReview = `-- name: GetLatestRunForReview :one
 SELECT id FROM pipeline_states WHERE review_id = $1 ORDER BY updated_at DESC LIMIT 1
 `
 
-func (q *Queries) GetLatestRunForReview(ctx context.Context, reviewID pgtype.UUID) (pgtype.UUID, error) {
+func (q *Queries) GetLatestRunForReview(ctx context.Context, reviewID uuid.UUID) (uuid.UUID, error) {
 	row := q.db.QueryRow(ctx, getLatestRunForReview, reviewID)
-	var id pgtype.UUID
+	var id uuid.UUID
 	err := row.Scan(&id)
 	return id, err
 }
@@ -52,15 +52,15 @@ type ListIncompleteRunsParams struct {
 	State_2 string `json:"state_2"`
 }
 
-func (q *Queries) ListIncompleteRuns(ctx context.Context, arg ListIncompleteRunsParams) ([]pgtype.UUID, error) {
+func (q *Queries) ListIncompleteRuns(ctx context.Context, arg ListIncompleteRunsParams) ([]uuid.UUID, error) {
 	rows, err := q.db.Query(ctx, listIncompleteRuns, arg.State, arg.State_2)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []pgtype.UUID
+	var items []uuid.UUID
 	for rows.Next() {
-		var id pgtype.UUID
+		var id uuid.UUID
 		if err := rows.Scan(&id); err != nil {
 			return nil, err
 		}
@@ -76,7 +76,7 @@ const loadPipelineState = `-- name: LoadPipelineState :one
 SELECT payload FROM pipeline_states WHERE id = $1
 `
 
-func (q *Queries) LoadPipelineState(ctx context.Context, id pgtype.UUID) ([]byte, error) {
+func (q *Queries) LoadPipelineState(ctx context.Context, id uuid.UUID) ([]byte, error) {
 	row := q.db.QueryRow(ctx, loadPipelineState, id)
 	var payload []byte
 	err := row.Scan(&payload)
@@ -94,11 +94,11 @@ ON CONFLICT (id) DO UPDATE SET
 `
 
 type UpsertPipelineStateParams struct {
-	ID       pgtype.UUID `json:"id"`
-	ReviewID pgtype.UUID `json:"review_id"`
-	State    string      `json:"state"`
-	Payload  []byte      `json:"payload"`
-	Error    *string     `json:"error"`
+	ID       uuid.UUID `json:"id"`
+	ReviewID uuid.UUID `json:"review_id"`
+	State    string    `json:"state"`
+	Payload  []byte    `json:"payload"`
+	Error    *string   `json:"error"`
 }
 
 func (q *Queries) UpsertPipelineState(ctx context.Context, arg UpsertPipelineStateParams) error {

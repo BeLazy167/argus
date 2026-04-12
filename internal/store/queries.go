@@ -580,7 +580,7 @@ func (s *Store) UpsertOrgModelConfig(ctx context.Context, installationID int64, 
 	err := s.Pool.QueryRow(ctx, `
 		INSERT INTO model_configs (installation_id, repo_id, stage, provider, model, base_url, max_tokens, temperature)
 		VALUES ($1, NULL, $2, $3, $4, $5, $6, $7)
-		ON CONFLICT (installation_id, stage) WHERE repo_id IS NULL DO UPDATE SET
+		ON CONFLICT (installation_id, stage) WHERE repo_id IS NULL AND installation_id IS NOT NULL DO UPDATE SET
 			provider = EXCLUDED.provider, model = EXCLUDED.model, base_url = EXCLUDED.base_url,
 			max_tokens = EXCLUDED.max_tokens, temperature = EXCLUDED.temperature, updated_at = NOW()
 		RETURNING id, repo_id, installation_id, stage, provider, model, base_url, max_tokens, temperature, created_at, updated_at

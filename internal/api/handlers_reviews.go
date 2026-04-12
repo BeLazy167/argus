@@ -11,7 +11,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgtype"
 	"nhooyr.io/websocket"
 	"nhooyr.io/websocket/wsjson"
 
@@ -182,8 +181,7 @@ func (s *Server) exportReview(w http.ResponseWriter, r *http.Request) {
 
 	// Merge in dropped findings from the unfiltered pipeline payload.
 	// These are comments the LLM generated but were filtered by dedup/scoring.
-	pgUUID := pgtype.UUID{Bytes: id, Valid: true}
-	rawPayload, perr := s.store.Q.GetAllFileReviewsForReview(r.Context(), pgUUID)
+	rawPayload, perr := s.store.Q.GetAllFileReviewsForReview(r.Context(), id)
 	if perr != nil {
 		s.logger.Warn("export: load unfiltered payload failed", "review_id", id, "error", perr)
 	} else if len(rawPayload) > 0 {

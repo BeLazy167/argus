@@ -8,8 +8,7 @@ package db
 import (
 	"context"
 	"encoding/json"
-
-	"github.com/jackc/pgx/v5/pgtype"
+	"time"
 )
 
 const createInstallation = `-- name: CreateInstallation :one
@@ -25,13 +24,13 @@ type CreateInstallationParams struct {
 }
 
 type CreateInstallationRow struct {
-	ID             int64              `json:"id"`
-	InstallationID int64              `json:"installation_id"`
-	OrgLogin       string             `json:"org_login"`
-	ClerkOrgID     *string            `json:"clerk_org_id"`
-	PlanTier       string             `json:"plan_tier"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	SuspendedAt    pgtype.Timestamptz `json:"suspended_at"`
+	ID             int64      `json:"id"`
+	InstallationID int64      `json:"installation_id"`
+	OrgLogin       string     `json:"org_login"`
+	ClerkOrgID     *string    `json:"clerk_org_id"`
+	PlanTier       string     `json:"plan_tier"`
+	CreatedAt      time.Time  `json:"created_at"`
+	SuspendedAt    *time.Time `json:"suspended_at"`
 }
 
 func (q *Queries) CreateInstallation(ctx context.Context, arg CreateInstallationParams) (CreateInstallationRow, error) {
@@ -55,13 +54,13 @@ FROM installations WHERE id = $1
 `
 
 type GetInstallationRow struct {
-	ID             int64              `json:"id"`
-	InstallationID int64              `json:"installation_id"`
-	OrgLogin       string             `json:"org_login"`
-	ClerkOrgID     *string            `json:"clerk_org_id"`
-	PlanTier       string             `json:"plan_tier"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	SuspendedAt    pgtype.Timestamptz `json:"suspended_at"`
+	ID             int64      `json:"id"`
+	InstallationID int64      `json:"installation_id"`
+	OrgLogin       string     `json:"org_login"`
+	ClerkOrgID     *string    `json:"clerk_org_id"`
+	PlanTier       string     `json:"plan_tier"`
+	CreatedAt      time.Time  `json:"created_at"`
+	SuspendedAt    *time.Time `json:"suspended_at"`
 }
 
 func (q *Queries) GetInstallation(ctx context.Context, id int64) (GetInstallationRow, error) {
@@ -85,13 +84,13 @@ FROM installations WHERE clerk_org_id = $1
 `
 
 type GetInstallationByClerkOrgIDRow struct {
-	ID             int64              `json:"id"`
-	InstallationID int64              `json:"installation_id"`
-	OrgLogin       string             `json:"org_login"`
-	ClerkOrgID     *string            `json:"clerk_org_id"`
-	PlanTier       string             `json:"plan_tier"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	SuspendedAt    pgtype.Timestamptz `json:"suspended_at"`
+	ID             int64      `json:"id"`
+	InstallationID int64      `json:"installation_id"`
+	OrgLogin       string     `json:"org_login"`
+	ClerkOrgID     *string    `json:"clerk_org_id"`
+	PlanTier       string     `json:"plan_tier"`
+	CreatedAt      time.Time  `json:"created_at"`
+	SuspendedAt    *time.Time `json:"suspended_at"`
 }
 
 func (q *Queries) GetInstallationByClerkOrgID(ctx context.Context, clerkOrgID *string) (GetInstallationByClerkOrgIDRow, error) {
@@ -115,13 +114,13 @@ FROM installations WHERE installation_id = $1
 `
 
 type GetInstallationByGitHubIDRow struct {
-	ID             int64              `json:"id"`
-	InstallationID int64              `json:"installation_id"`
-	OrgLogin       string             `json:"org_login"`
-	ClerkOrgID     *string            `json:"clerk_org_id"`
-	PlanTier       string             `json:"plan_tier"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	SuspendedAt    pgtype.Timestamptz `json:"suspended_at"`
+	ID             int64      `json:"id"`
+	InstallationID int64      `json:"installation_id"`
+	OrgLogin       string     `json:"org_login"`
+	ClerkOrgID     *string    `json:"clerk_org_id"`
+	PlanTier       string     `json:"plan_tier"`
+	CreatedAt      time.Time  `json:"created_at"`
+	SuspendedAt    *time.Time `json:"suspended_at"`
 }
 
 func (q *Queries) GetInstallationByGitHubID(ctx context.Context, installationID int64) (GetInstallationByGitHubIDRow, error) {

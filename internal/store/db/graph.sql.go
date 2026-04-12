@@ -28,12 +28,12 @@ DELETE FROM code_nodes WHERE repo_id = $1 AND pr_number = $2 AND is_merged = fal
 `
 
 type DeleteUnmergedNodesByPRParams struct {
-	RepoID   int64  `json:"repo_id"`
-	PrNumber *int32 `json:"pr_number"`
+	RepoID   int64 `json:"repo_id"`
+	PRNumber *int  `json:"pr_number"`
 }
 
 func (q *Queries) DeleteUnmergedNodesByPR(ctx context.Context, arg DeleteUnmergedNodesByPRParams) error {
-	_, err := q.db.Exec(ctx, deleteUnmergedNodesByPR, arg.RepoID, arg.PrNumber)
+	_, err := q.db.Exec(ctx, deleteUnmergedNodesByPR, arg.RepoID, arg.PRNumber)
 	return err
 }
 
@@ -54,7 +54,7 @@ SELECT DISTINCT id, name, file_path, kind, depth FROM affected ORDER BY depth, f
 type GetBlastRadiusParams struct {
 	RepoID    int64    `json:"repo_id"`
 	FilePaths []string `json:"file_paths"`
-	MaxDepth  int32    `json:"max_depth"`
+	MaxDepth  int      `json:"max_depth"`
 }
 
 type GetBlastRadiusRow struct {
@@ -104,9 +104,9 @@ type GetFileBugCountParams struct {
 }
 
 // Single-file bug count for review prompt enrichment.
-func (q *Queries) GetFileBugCount(ctx context.Context, arg GetFileBugCountParams) (int32, error) {
+func (q *Queries) GetFileBugCount(ctx context.Context, arg GetFileBugCountParams) (int, error) {
 	row := q.db.QueryRow(ctx, getFileBugCount, arg.RepoID, arg.FilePath)
-	var bugs int32
+	var bugs int
 	err := row.Scan(&bugs)
 	return bugs, err
 }
@@ -125,9 +125,9 @@ type GetFileFanInParams struct {
 }
 
 // Single-file fan-in lookup for review prompt enrichment.
-func (q *Queries) GetFileFanIn(ctx context.Context, arg GetFileFanInParams) (int32, error) {
+func (q *Queries) GetFileFanIn(ctx context.Context, arg GetFileFanInParams) (int, error) {
 	row := q.db.QueryRow(ctx, getFileFanIn, arg.RepoID, arg.FilePath)
-	var fan_in int32
+	var fan_in int
 	err := row.Scan(&fan_in)
 	return fan_in, err
 }
@@ -150,7 +150,7 @@ type GetTopChokePointsParams struct {
 
 type GetTopChokePointsRow struct {
 	FilePath string `json:"file_path"`
-	FanIn    int32  `json:"fan_in"`
+	FanIn    int    `json:"fan_in"`
 }
 
 // Top files by fan_in (used for review prompt context injection + memory indexing).
@@ -187,8 +187,8 @@ GROUP BY rc.file_path
 
 type ListArchBugDensityRow struct {
 	FilePath string `json:"file_path"`
-	Bugs     int32  `json:"bugs"`
-	Prs      int32  `json:"prs"`
+	Bugs     int    `json:"bugs"`
+	Prs      int    `json:"prs"`
 }
 
 // Returns bug count + PR count per file for bug density and change frequency metrics.
@@ -225,7 +225,7 @@ LIMIT 200
 `
 
 type ListArchCouplingRow struct {
-	PrNumber int32    `json:"pr_number"`
+	PRNumber int      `json:"pr_number"`
 	Files    []string `json:"files"`
 }
 
@@ -239,7 +239,7 @@ func (q *Queries) ListArchCoupling(ctx context.Context, repoID int64) ([]ListArc
 	var items []ListArchCouplingRow
 	for rows.Next() {
 		var i ListArchCouplingRow
-		if err := rows.Scan(&i.PrNumber, &i.Files); err != nil {
+		if err := rows.Scan(&i.PRNumber, &i.Files); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -297,7 +297,7 @@ type ListArchNodesRow struct {
 	FilePath string `json:"file_path"`
 	Language string `json:"language"`
 	Name     string `json:"name"`
-	LineSpan int32  `json:"line_span"`
+	LineSpan int    `json:"line_span"`
 }
 
 // Returns all code nodes for a repo, used to compute file-level architecture metrics.
@@ -384,10 +384,10 @@ type ListGraphNodesRow struct {
 	Kind      string  `json:"kind"`
 	Name      string  `json:"name"`
 	FilePath  string  `json:"file_path"`
-	LineStart *int32  `json:"line_start"`
-	LineEnd   *int32  `json:"line_end"`
+	LineStart *int    `json:"line_start"`
+	LineEnd   *int    `json:"line_end"`
 	Language  *string `json:"language"`
-	PrNumber  *int32  `json:"pr_number"`
+	PRNumber  *int    `json:"pr_number"`
 	IsMerged  bool    `json:"is_merged"`
 }
 
@@ -409,7 +409,7 @@ func (q *Queries) ListGraphNodes(ctx context.Context, repoID int64) ([]ListGraph
 			&i.LineStart,
 			&i.LineEnd,
 			&i.Language,
-			&i.PrNumber,
+			&i.PRNumber,
 			&i.IsMerged,
 		); err != nil {
 			return nil, err
@@ -427,12 +427,12 @@ UPDATE code_nodes SET is_merged = true WHERE repo_id = $1 AND pr_number = $2
 `
 
 type MarkNodesMergedParams struct {
-	RepoID   int64  `json:"repo_id"`
-	PrNumber *int32 `json:"pr_number"`
+	RepoID   int64 `json:"repo_id"`
+	PRNumber *int  `json:"pr_number"`
 }
 
 func (q *Queries) MarkNodesMerged(ctx context.Context, arg MarkNodesMergedParams) error {
-	_, err := q.db.Exec(ctx, markNodesMerged, arg.RepoID, arg.PrNumber)
+	_, err := q.db.Exec(ctx, markNodesMerged, arg.RepoID, arg.PRNumber)
 	return err
 }
 
@@ -472,10 +472,10 @@ type UpsertCodeNodeParams struct {
 	Kind      string  `json:"kind"`
 	Name      string  `json:"name"`
 	FilePath  string  `json:"file_path"`
-	LineStart *int32  `json:"line_start"`
-	LineEnd   *int32  `json:"line_end"`
+	LineStart *int    `json:"line_start"`
+	LineEnd   *int    `json:"line_end"`
 	Language  *string `json:"language"`
-	PrNumber  *int32  `json:"pr_number"`
+	PRNumber  *int    `json:"pr_number"`
 }
 
 func (q *Queries) UpsertCodeNode(ctx context.Context, arg UpsertCodeNodeParams) (int64, error) {
@@ -487,7 +487,7 @@ func (q *Queries) UpsertCodeNode(ctx context.Context, arg UpsertCodeNodeParams) 
 		arg.LineStart,
 		arg.LineEnd,
 		arg.Language,
-		arg.PrNumber,
+		arg.PRNumber,
 	)
 	var id int64
 	err := row.Scan(&id)

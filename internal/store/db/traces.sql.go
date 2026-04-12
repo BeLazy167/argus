@@ -8,8 +8,9 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"time"
 
-	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/google/uuid"
 )
 
 const createTrace = `-- name: CreateTrace :exec
@@ -24,8 +25,8 @@ type CreateTraceParams struct {
 	TraceType string      `json:"trace_type"`
 	Content   string      `json:"content"`
 	Column6   interface{} `json:"column_6"`
-	ReviewID  pgtype.UUID `json:"review_id"`
-	PrNumber  *int32      `json:"pr_number"`
+	ReviewID  *uuid.UUID  `json:"review_id"`
+	PRNumber  *int        `json:"pr_number"`
 	Metadata  []byte      `json:"metadata"`
 }
 
@@ -38,7 +39,7 @@ func (q *Queries) CreateTrace(ctx context.Context, arg CreateTraceParams) error 
 		arg.Content,
 		arg.Column6,
 		arg.ReviewID,
-		arg.PrNumber,
+		arg.PRNumber,
 		arg.Metadata,
 	)
 	return err
@@ -62,9 +63,9 @@ type GetFileRiskScoreParams struct {
 	FilePath string `json:"file_path"`
 }
 
-func (q *Queries) GetFileRiskScore(ctx context.Context, arg GetFileRiskScoreParams) (int32, error) {
+func (q *Queries) GetFileRiskScore(ctx context.Context, arg GetFileRiskScoreParams) (int, error) {
 	row := q.db.QueryRow(ctx, getFileRiskScore, arg.RepoID, arg.FilePath)
-	var risk_score int32
+	var risk_score int
 	err := row.Scan(&risk_score)
 	return risk_score, err
 }
@@ -85,7 +86,7 @@ type GetHotFilesParams struct {
 
 type GetHotFilesRow struct {
 	FilePath   string      `json:"file_path"`
-	TraceCount int32       `json:"trace_count"`
+	TraceCount int         `json:"trace_count"`
 	LastTrace  interface{} `json:"last_trace"`
 }
 
@@ -124,17 +125,17 @@ type ListTracesForFilesParams struct {
 }
 
 type ListTracesForFilesRow struct {
-	ID         int64              `json:"id"`
-	RepoID     int64              `json:"repo_id"`
-	FilePath   string             `json:"file_path"`
-	SymbolName string             `json:"symbol_name"`
-	TraceType  string             `json:"trace_type"`
-	Content    string             `json:"content"`
-	Severity   string             `json:"severity"`
-	ReviewID   pgtype.UUID        `json:"review_id"`
-	PrNumber   int32              `json:"pr_number"`
-	Metadata   json.RawMessage    `json:"metadata"`
-	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+	ID         int64           `json:"id"`
+	RepoID     int64           `json:"repo_id"`
+	FilePath   string          `json:"file_path"`
+	SymbolName string          `json:"symbol_name"`
+	TraceType  string          `json:"trace_type"`
+	Content    string          `json:"content"`
+	Severity   string          `json:"severity"`
+	ReviewID   *uuid.UUID      `json:"review_id"`
+	PRNumber   int             `json:"pr_number"`
+	Metadata   json.RawMessage `json:"metadata"`
+	CreatedAt  *time.Time      `json:"created_at"`
 }
 
 func (q *Queries) ListTracesForFiles(ctx context.Context, arg ListTracesForFilesParams) ([]ListTracesForFilesRow, error) {
@@ -155,7 +156,7 @@ func (q *Queries) ListTracesForFiles(ctx context.Context, arg ListTracesForFiles
 			&i.Content,
 			&i.Severity,
 			&i.ReviewID,
-			&i.PrNumber,
+			&i.PRNumber,
 			&i.Metadata,
 			&i.CreatedAt,
 		); err != nil {
@@ -183,17 +184,17 @@ type ListTracesForRepoParams struct {
 }
 
 type ListTracesForRepoRow struct {
-	ID         int64              `json:"id"`
-	RepoID     int64              `json:"repo_id"`
-	FilePath   string             `json:"file_path"`
-	SymbolName string             `json:"symbol_name"`
-	TraceType  string             `json:"trace_type"`
-	Content    string             `json:"content"`
-	Severity   string             `json:"severity"`
-	ReviewID   pgtype.UUID        `json:"review_id"`
-	PrNumber   int32              `json:"pr_number"`
-	Metadata   json.RawMessage    `json:"metadata"`
-	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+	ID         int64           `json:"id"`
+	RepoID     int64           `json:"repo_id"`
+	FilePath   string          `json:"file_path"`
+	SymbolName string          `json:"symbol_name"`
+	TraceType  string          `json:"trace_type"`
+	Content    string          `json:"content"`
+	Severity   string          `json:"severity"`
+	ReviewID   *uuid.UUID      `json:"review_id"`
+	PRNumber   int             `json:"pr_number"`
+	Metadata   json.RawMessage `json:"metadata"`
+	CreatedAt  *time.Time      `json:"created_at"`
 }
 
 func (q *Queries) ListTracesForRepo(ctx context.Context, arg ListTracesForRepoParams) ([]ListTracesForRepoRow, error) {
@@ -214,7 +215,7 @@ func (q *Queries) ListTracesForRepo(ctx context.Context, arg ListTracesForRepoPa
 			&i.Content,
 			&i.Severity,
 			&i.ReviewID,
-			&i.PrNumber,
+			&i.PRNumber,
 			&i.Metadata,
 			&i.CreatedAt,
 		); err != nil {

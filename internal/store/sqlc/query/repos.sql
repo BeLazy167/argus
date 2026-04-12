@@ -10,7 +10,7 @@ FROM repos WHERE full_name = $1;
 UPDATE repos SET
     enabled = COALESCE($2, enabled),
     default_branch = COALESCE($3, default_branch),
-    settings_json = COALESCE($4, settings_json),
+    settings_json = CASE WHEN $4 IS NULL THEN settings_json ELSE settings_json || $4 END,
     updated_at = NOW()
 WHERE id = $1
 RETURNING id, installation_id, github_id, full_name, default_branch, enabled, settings_json, created_at, updated_at;

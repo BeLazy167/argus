@@ -7,8 +7,7 @@ package db
 
 import (
 	"context"
-
-	"github.com/jackc/pgx/v5/pgtype"
+	"time"
 )
 
 const getUserInstallationByUserAndInstallation = `-- name: GetUserInstallationByUserAndInstallation :one
@@ -93,13 +92,13 @@ ORDER BY i.created_at DESC
 `
 
 type ListUserInstallationsRow struct {
-	ID             int64              `json:"id"`
-	InstallationID int64              `json:"installation_id"`
-	OrgLogin       string             `json:"org_login"`
-	ClerkOrgID     *string            `json:"clerk_org_id"`
-	PlanTier       string             `json:"plan_tier"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	SuspendedAt    pgtype.Timestamptz `json:"suspended_at"`
+	ID             int64      `json:"id"`
+	InstallationID int64      `json:"installation_id"`
+	OrgLogin       string     `json:"org_login"`
+	ClerkOrgID     *string    `json:"clerk_org_id"`
+	PlanTier       string     `json:"plan_tier"`
+	CreatedAt      time.Time  `json:"created_at"`
+	SuspendedAt    *time.Time `json:"suspended_at"`
 }
 
 func (q *Queries) ListUserInstallations(ctx context.Context, clerkUserID string) ([]ListUserInstallationsRow, error) {
