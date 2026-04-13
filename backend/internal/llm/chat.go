@@ -287,6 +287,11 @@ func (p *ChatProvider) adjustRequestForProvider(body *chatRequest, model string)
 		body.MaxTokens = 0
 		body.Temperature = nil
 
+	case requiresMaxCompletionTokens(m):
+		// GPT-5+ and other newer models require max_completion_tokens instead of max_tokens
+		body.MaxCompletionTokens = body.MaxTokens
+		body.MaxTokens = 0
+
 	case p.name == "anthropic" && isAnthropicThinking(m):
 		// Anthropic extended thinking requires temperature=1.0
 		temp := 1.0
@@ -310,6 +315,12 @@ func isOpenAIReasoning(m string) bool {
 		}
 	}
 	return false
+}
+
+// requiresMaxCompletionTokens returns true for models that reject max_tokens
+// and require max_completion_tokens instead (GPT-5+).
+func requiresMaxCompletionTokens(m string) bool {
+	return strings.HasPrefix(m, "gpt-5") || strings.Contains(m, "/gpt-5")
 }
 
 func isAnthropicThinking(m string) bool {
