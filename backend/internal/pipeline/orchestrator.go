@@ -4003,10 +4003,12 @@ func commentTitle(c FileComment) string {
 	if src == "" {
 		src = c.Body
 	}
-	if idx := strings.Index(src, "."); idx > 0 && idx < 80 {
-		return src[:idx]
+	// Use first sentence if it ends within 200 chars, otherwise truncate.
+	// Skip periods inside backticks, numbers (e.g., "v1.2"), and common abbreviations.
+	if idx := strings.Index(src, ". "); idx > 0 && idx < 200 {
+		return src[:idx+1] // include the period
 	}
-	return util.Truncate(src, 80, false)
+	return util.Truncate(src, 200, true)
 }
 
 // mergeAdjacentComments combines same-file comments within 5 lines into range comments.
