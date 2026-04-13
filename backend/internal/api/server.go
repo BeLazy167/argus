@@ -122,6 +122,11 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 				r.Put("/installations/{installationID}/supermemory-key", s.setSupermemoryKey)
 				r.Delete("/installations/{installationID}/supermemory-key", s.deleteSupermemoryKey)
 
+				// Model Pricing (global)
+				r.Get("/pricing", s.listPricing)
+				r.Put("/pricing", s.upsertPricing)
+				r.Delete("/pricing/{pattern}", s.deletePricing)
+
 				// Org Default Settings
 				r.Get("/installations/{installationID}/defaults", s.getOrgDefaults)
 				r.Put("/installations/{installationID}/defaults", s.setOrgDefaults)

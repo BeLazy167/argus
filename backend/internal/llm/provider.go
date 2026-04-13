@@ -63,52 +63,25 @@ type TokenUsage struct {
 	TotalTokens      int
 }
 
-// modelPricing holds per-1M-token pricing for known models.
-// Used to estimate cost when the API doesn't return it (Azure, direct OpenAI, etc.).
-type modelPricing struct {
-	Input  float64 // $ per 1M input tokens
-	Output float64 // $ per 1M output tokens
-}
+// PricingLookup resolves model pricing. Returns (inputPer1M, outputPer1M, found).
+type PricingLookup func(model string) (float64, float64, bool)
 
-var knownPricing = map[string]modelPricing{
-	// OpenAI
-	"gpt-4o":            {2.50, 10.00},
-	"gpt-4o-mini":       {0.15, 0.60},
-	"gpt-4.1":           {2.00, 8.00},
-	"gpt-4.1-mini":      {0.40, 1.60},
-	"gpt-4.1-nano":      {0.10, 0.40},
-	"gpt-5.4":           {2.00, 8.00},
-	"o3":                {2.00, 8.00},
-	"o3-mini":           {1.10, 4.40},
-	"o4-mini":           {1.10, 4.40},
-	// Anthropic
-	"claude-sonnet-4-5-20241022": {3.00, 15.00},
-	"claude-3-5-haiku-20241022":  {0.80, 4.00},
-	"claude-opus-4-5-20250219":   {15.00, 75.00},
-	// DeepSeek
-	"deepseek-chat":     {0.14, 0.28},
-	"deepseek-reasoner": {0.55, 2.19},
-	// Fireworks
-	"accounts/fireworks/models/glm-5p1": {0.10, 0.10},
-}
+// pricingLookup is set at startup by the server. If nil, cost estimation is skipped.
+var pricingLookup PricingLookup
 
-// EstimateCost calculates cost from token counts when the API doesn't return it.
-// Returns 0 if the model isn't in the pricing table.
+// SetPricingLookup configures the global pricing resolver (called once at server init).
+func SetPricingLookup(fn PricingLookup) { pricingLookup = fn }
+
+// EstimateCost calculates cost from token counts using the DB-backed pricing table.
+// Returns 0 if no pricing lookup is configured or model isn't found.
 func EstimateCost(model string, usage TokenUsage) float64 {
-	p, ok := knownPricing[model]
-	if !ok {
-		// Try prefix match for versioned models (gpt-5.4-2026-03-05 → gpt-5.4)
-		for prefix, pricing := range knownPricing {
-			if len(model) > len(prefix) && model[:len(prefix)] == prefix && (model[len(prefix)] == '-' || model[len(prefix)] == '.') {
-				p = pricing
-				ok = true
-				break
-			}
-		}
-		if !ok {
-			return 0
-		}
+	if pricingLookup == nil {
+		return 0
 	}
-	return (float64(usage.PromptTokens) * p.Input / 1_000_000) +
-		(float64(usage.CompletionTokens) * p.Output / 1_000_000)
+	input, output, ok := pricingLookup(model)
+	if !ok {
+		return 0
+	}
+	return (float64(usage.PromptTokens) * input / 1_000_000) +
+		(float64(usage.CompletionTokens) * output / 1_000_000)
 }

@@ -54,6 +54,12 @@ func Run() error {
 	registry := llm.NewRegistry()
 	registry.SetResolver(db)
 
+	// Pricing (DB-backed, cached 10min)
+	pricingCache := store.NewPricingCache(db)
+	llm.SetPricingLookup(func(model string) (float64, float64, bool) {
+		return pricingCache.Lookup(ctx, model)
+	})
+
 	// Memory / RAG (per-org via registry)
 	memRegistry := memory.NewRegistry(db, logger)
 
