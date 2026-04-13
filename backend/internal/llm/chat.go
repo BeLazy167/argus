@@ -16,8 +16,9 @@ import (
 type AuthStyle int
 
 const (
-	AuthBearer AuthStyle = iota // Authorization: Bearer <key> (OpenAI, OpenRouter, Groq, etc.)
-	AuthAPIKey                  // api-key: <key> (Azure OpenAI)
+	AuthBearer  AuthStyle = iota // Authorization: Bearer <key> (OpenAI, OpenRouter, Groq, etc.)
+	AuthAPIKey                   // api-key: <key> (Azure OpenAI)
+	AuthAPIM                     // Ocp-Apim-Subscription-Key: <key> (Azure API Management)
 )
 
 // ChatProvider implements the Provider interface using the OpenAI-compatible
@@ -65,13 +66,22 @@ func NewAzureProvider(apiKey, baseURL string) *ChatProvider {
 	isMaaS := strings.Contains(baseURL, ".inference.ai.azure.com") ||
 		strings.Contains(baseURL, ".services.ai.azure.com")
 
-	// Cognitive Services / AI Foundry endpoints use deployment path with Bearer auth
+	// Cognitive Services / AI Foundry endpoints use Responses API with Bearer auth
 	isCognitive := strings.Contains(baseURL, ".cognitiveservices.azure.com")
+
+	// Azure API Management gateway (e.g., spend limiter proxy)
+	isAPIM := strings.Contains(baseURL, ".azure-api.net")
 
 	authStyle := AuthAPIKey
 	var pathFn func(string) string
 
-	if isCognitive {
+	if isAPIM {
+		// APIM proxy: standard deployment path, Ocp-Apim-Subscription-Key auth
+		authStyle = AuthAPIM
+		pathFn = func(model string) string {
+			return "/openai/deployments/" + model + "/chat/completions?api-version=" + apiVersion
+		}
+	} else if isCognitive {
 		// Azure AI Foundry (cognitiveservices): Responses API, Bearer auth, model in body
 		authStyle = AuthBearer
 		if apiVersion == "2024-10-21" {
@@ -176,6 +186,8 @@ func (p *ChatProvider) Complete(ctx context.Context, req CompletionRequest) (Com
 	switch p.authStyle {
 	case AuthAPIKey:
 		httpReq.Header.Set("api-key", p.apiKey)
+	case AuthAPIM:
+		httpReq.Header.Set("Ocp-Apim-Subscription-Key", p.apiKey)
 	default:
 		httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
 	}
