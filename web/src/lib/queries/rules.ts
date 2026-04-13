@@ -8,6 +8,7 @@ export function useRules() {
     queryKey: ["rules", api.active?.id],
     queryFn: () => api.get<Rule[]>("/api/v1/rules"),
     enabled: !!api.active,
+    staleTime: 2 * 60 * 1000,
   });
 }
 
@@ -21,6 +22,9 @@ export function useCreateRule() {
       },
     ) => api.post<Rule>("/api/v1/rules", body),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["rules"] }),
+    onError: (err: Error) => {
+      console.error("[create-rule] failed:", err.message);
+    },
   });
 }
 
@@ -39,6 +43,9 @@ export function useUpdateRule() {
       enabled?: boolean;
     }) => api.put<Rule>(`/api/v1/rules/${id}`, body),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["rules"] }),
+    onError: (err: Error) => {
+      console.error("[update-rule] failed:", err.message);
+    },
   });
 }
 
@@ -48,5 +55,8 @@ export function useDeleteRule() {
   return useMutation({
     mutationFn: (id: number) => api.delete(`/api/v1/rules/${id}`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["rules"] }),
+    onError: (err: Error) => {
+      console.error("[delete-rule] failed:", err.message);
+    },
   });
 }

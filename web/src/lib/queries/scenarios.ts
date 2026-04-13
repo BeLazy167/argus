@@ -10,6 +10,7 @@ export function useScenarios() {
     queryKey: ["scenarios", api.active?.id, activeId],
     queryFn: () => api.get<Scenario[]>(`/api/v1/repos/${activeId}/scenarios`),
     enabled: !!activeId,
+    staleTime: 2 * 60 * 1000,
   });
 }
 
@@ -21,6 +22,9 @@ export function useCreateScenario() {
     mutationFn: (body: { description: string; severity: string; files: string[] }) =>
       api.post(`/api/v1/repos/${activeId}/scenarios`, body),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["scenarios"] }),
+    onError: (err: Error) => {
+      console.error("[create-scenario] failed:", err.message);
+    },
   });
 }
 
@@ -30,5 +34,8 @@ export function useDeleteScenario() {
   return useMutation({
     mutationFn: (id: number) => api.delete(`/api/v1/scenarios/${id}`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["scenarios"] }),
+    onError: (err: Error) => {
+      console.error("[delete-scenario] failed:", err.message);
+    },
   });
 }

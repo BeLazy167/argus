@@ -13,6 +13,7 @@ export function useReviews(repoId: number, limit = 20, offset = 0) {
       return api.get<Review[]>(path);
     },
     enabled: !!api.active,
+    refetchOnWindowFocus: true,
   });
 }
 
@@ -25,6 +26,7 @@ export function useReview(id: string) {
         `/api/v1/reviews/${id}`,
       ),
     enabled: !!id && !!api.active,
+    refetchOnWindowFocus: true,
   });
 }
 
@@ -44,6 +46,9 @@ export function useTriggerReview() {
       qc.invalidateQueries({ queryKey: ["reviews"] });
       qc.invalidateQueries({ queryKey: ["stats"] });
     },
+    onError: (err: Error) => {
+      console.error("[trigger-review] failed:", err.message);
+    },
   });
 }
 
@@ -56,6 +61,9 @@ export function useRetryReview() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["reviews"] });
       qc.invalidateQueries({ queryKey: ["stats"] });
+    },
+    onError: (err: Error) => {
+      console.error("[retry-review] failed:", err.message);
     },
   });
 }

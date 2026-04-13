@@ -10,6 +10,7 @@ export function useSupermemoryKeyStatus() {
         `/api/v1/installations/${api.active!.id}/supermemory-key`,
       ),
     enabled: !!api.active,
+    staleTime: 5 * 60 * 1000,
   });
 }
 
@@ -25,6 +26,9 @@ export function useSetSupermemoryKey() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["supermemory-key", api.active?.id] });
     },
+    onError: (err: Error) => {
+      console.error("[set-supermemory-key] failed:", err.message);
+    },
   });
 }
 
@@ -38,6 +42,9 @@ export function useDeleteSupermemoryKey() {
       ),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["supermemory-key", api.active?.id] });
+    },
+    onError: (err: Error) => {
+      console.error("[delete-supermemory-key] failed:", err.message);
     },
   });
 }

@@ -9,6 +9,7 @@ export function usePrompts(repoId: number) {
     queryFn: () =>
       api.get<PromptTemplate[]>(`/api/v1/repos/${repoId}/prompts`),
     enabled: repoId > 0 && !!api.active,
+    staleTime: 2 * 60 * 1000,
   });
 }
 
@@ -19,6 +20,7 @@ export function useDefaultPrompts() {
     queryFn: () =>
       api.get<PromptTemplate[]>("/api/v1/prompts/defaults"),
     enabled: !!api.active,
+    staleTime: 2 * 60 * 1000,
   });
 }
 
@@ -42,6 +44,9 @@ export function useUpsertPrompt() {
     onSuccess: (_data, vars) => {
       qc.invalidateQueries({ queryKey: ["prompts", vars.repoId] });
     },
+    onError: (err: Error) => {
+      console.error("[upsert-prompt] failed:", err.message);
+    },
   });
 }
 
@@ -56,6 +61,9 @@ export function useDeletePrompt() {
       api.delete(`/api/v1/repos/${repoId}/prompts/${stage}`),
     onSuccess: (_data, vars) => {
       qc.invalidateQueries({ queryKey: ["prompts", vars.repoId] });
+    },
+    onError: (err: Error) => {
+      console.error("[delete-prompt] failed:", err.message);
     },
   });
 }

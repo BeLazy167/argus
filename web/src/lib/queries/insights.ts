@@ -10,6 +10,7 @@ export function useRepoRisk() {
     queryKey: ["repo-risk", api.active?.id, activeId],
     queryFn: () => api.get<FileRisk[]>(`/api/v1/repos/${activeId}/risk`),
     enabled: !!activeId,
+    staleTime: 2 * 60 * 1000,
   });
 }
 
@@ -21,5 +22,6 @@ export function useTraces(file?: string) {
     queryKey: ["traces", api.active?.id, activeId, file],
     queryFn: () => api.get<DecisionTrace[]>(`/api/v1/repos/${activeId}/traces${params}`),
     enabled: !!activeId,
+    staleTime: 2 * 60 * 1000,
   });
 }

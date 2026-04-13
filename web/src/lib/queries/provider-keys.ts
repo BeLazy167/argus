@@ -11,6 +11,7 @@ export function useProviderKeys() {
         `/api/v1/installations/${api.active!.id}/provider-keys`,
       ),
     enabled: !!api.active,
+    staleTime: 5 * 60 * 1000,
   });
 }
 
@@ -31,6 +32,9 @@ export function useUpsertProviderKey() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["provider-keys", api.active?.id] });
     },
+    onError: (err: Error) => {
+      console.error("[upsert-provider-key] failed:", err.message);
+    },
   });
 }
 
@@ -44,6 +48,9 @@ export function useDeleteProviderKey() {
       ),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["provider-keys", api.active?.id] });
+    },
+    onError: (err: Error) => {
+      console.error("[delete-provider-key] failed:", err.message);
     },
   });
 }

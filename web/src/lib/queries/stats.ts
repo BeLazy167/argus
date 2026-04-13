@@ -13,5 +13,7 @@ export function useStats(repoId?: number) {
       return api.get<Stats>(path);
     },
     enabled: !!api.active,
+    staleTime: 60 * 1000,
+    refetchOnWindowFocus: true,
   });
 }

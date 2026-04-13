@@ -18,6 +18,9 @@ export function useTestConfig() {
         `/api/v1/installations/${api.active?.id}/test-config`,
         { provider, model },
       ),
+    onError: (err: Error) => {
+      console.error("[test-config] failed:", err.message);
+    },
   });
 }
 
@@ -28,6 +31,7 @@ export function useModelConfigs(repoId: number) {
     queryFn: () =>
       api.get<ModelConfig[]>(`/api/v1/repos/${repoId}/config`),
     enabled: repoId > 0 && !!api.active,
+    staleTime: 5 * 60 * 1000,
   });
 }
 
@@ -55,6 +59,9 @@ export function useUpsertModelConfig() {
     onSuccess: (_data, vars) => {
       qc.invalidateQueries({ queryKey: ["model-configs", vars.repoId] });
     },
+    onError: (err: Error) => {
+      console.error("[upsert-model-config] failed:", err.message);
+    },
   });
 }
 
@@ -70,6 +77,9 @@ export function useDeleteModelConfig() {
     onSuccess: (_data, vars) => {
       qc.invalidateQueries({ queryKey: ["model-configs", vars.repoId] });
     },
+    onError: (err: Error) => {
+      console.error("[delete-model-config] failed:", err.message);
+    },
   });
 }
 
@@ -82,6 +92,7 @@ export function useOrgModelConfigs() {
         `/api/v1/installations/${api.active?.id}/config`,
       ),
     enabled: !!api.active,
+    staleTime: 5 * 60 * 1000,
   });
 }
 
@@ -107,6 +118,9 @@ export function useUpsertOrgModelConfig() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["org-model-configs"] });
     },
+    onError: (err: Error) => {
+      console.error("[upsert-org-model-config] failed:", err.message);
+    },
   });
 }
 
@@ -120,6 +134,9 @@ export function useDeleteOrgModelConfig() {
       ),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["org-model-configs"] });
+    },
+    onError: (err: Error) => {
+      console.error("[delete-org-model-config] failed:", err.message);
     },
   });
 }

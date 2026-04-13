@@ -8,6 +8,7 @@ export function useRepos() {
     queryKey: ["repos", api.active?.id],
     queryFn: () => api.get<Repo[]>("/api/v1/repos"),
     enabled: !!api.active,
+    staleTime: 2 * 60 * 1000,
   });
 }
 
@@ -21,6 +22,9 @@ export function useSyncRepos() {
         {},
       ),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["repos"] }),
+    onError: (err: Error) => {
+      console.error("[sync-repos] failed:", err.message);
+    },
   });
 }
 
@@ -35,6 +39,9 @@ export function useUpdateRepo() {
       api.patch<Repo>(`/api/v1/repos/${id}`, body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["repos"] });
+    },
+    onError: (err: Error) => {
+      console.error("[update-repo] failed:", err.message);
     },
   });
 }

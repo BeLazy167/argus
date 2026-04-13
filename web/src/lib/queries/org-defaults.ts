@@ -10,6 +10,7 @@ export function useOrgDefaults() {
         `/api/v1/installations/${api.active?.id}/defaults`,
       ),
     enabled: !!api.active,
+    staleTime: 5 * 60 * 1000,
   });
 }
 
@@ -23,5 +24,8 @@ export function useSaveOrgDefaults() {
         settings,
       ),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["org-defaults"] }),
+    onError: (err: Error) => {
+      console.error("[save-org-defaults] failed:", err.message);
+    },
   });
 }

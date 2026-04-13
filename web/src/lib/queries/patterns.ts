@@ -13,6 +13,7 @@ export function usePatterns(repoId?: number) {
       return api.get<Pattern[]>(path);
     },
     enabled: !!api.active,
+    staleTime: 2 * 60 * 1000,
   });
 }
 
@@ -26,6 +27,9 @@ export function useCreatePattern() {
         { ...body, installation_id: api.active?.id },
       ),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["patterns", api.active?.id] }),
+    onError: (err: Error) => {
+      console.error("[create-pattern] failed:", err.message);
+    },
   });
 }
 
@@ -35,6 +39,7 @@ export function usePatternStats() {
     queryKey: ["pattern-stats", api.active?.id],
     queryFn: () => api.get<PatternStat[]>("/api/v1/patterns/stats"),
     enabled: !!api.active,
+    staleTime: 2 * 60 * 1000,
   });
 }
 
@@ -44,7 +49,7 @@ export function usePattern(id: number | undefined) {
     queryKey: ["pattern", id],
     queryFn: () => api.get<Pattern>(`/api/v1/patterns/${id}`),
     enabled: !!id && !!api.active,
-    staleTime: 5 * 60 * 1000,
+    staleTime: 2 * 60 * 1000,
   });
 }
 
@@ -54,5 +59,8 @@ export function useDeletePattern() {
   return useMutation({
     mutationFn: (id: number) => api.delete(`/api/v1/patterns/${id}`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["patterns", api.active?.id] }),
+    onError: (err: Error) => {
+      console.error("[delete-pattern] failed:", err.message);
+    },
   });
 }

@@ -15,5 +15,8 @@ export function useLinkInstallation() {
       );
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ["my-installations"] }),
+    onError: (err: Error) => {
+      console.error("[link-installation] failed:", err.message);
+    },
   });
 }
