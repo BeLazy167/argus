@@ -34,6 +34,7 @@ function fanInBorder(fanIn: number): string {
 
 interface FileNodeData {
   label: string;
+  fullPath: string;
   language: string;
   riskScore: number;
   fanIn: number;
@@ -42,6 +43,7 @@ interface FileNodeData {
   insight?: string;
   isChokePoint: boolean;
   isHotspot: boolean;
+  selected: boolean;
   lens: string;
   [key: string]: unknown;
 }
@@ -49,6 +51,7 @@ interface FileNodeData {
 function FileNode({ data }: NodeProps) {
   const {
     label,
+    fullPath,
     language,
     riskScore,
     fanIn,
@@ -56,6 +59,7 @@ function FileNode({ data }: NodeProps) {
     changeFrequency,
     isChokePoint,
     isHotspot,
+    selected,
   } = data as FileNodeData;
 
   const lang = LANG_COLORS[language] || DEFAULT_LANG;
@@ -64,13 +68,15 @@ function FileNode({ data }: NodeProps) {
 
   return (
     <div
-      className={`group relative rounded-md bg-[#12121a]/90 backdrop-blur-md
-        shadow-lg ${densityGlow(bugDensity)} ${densityBorderColor(bugDensity)}
-        transition-[box-shadow,filter,border-color] duration-200
-        [@media(hover:hover)]:hover:shadow-xl [@media(hover:hover)]:hover:brightness-125
+      className={`group relative bg-[#12121a]/90 backdrop-blur-md
+        shadow-lg ${densityGlow(bugDensity)}
+        ${selected ? "border-amber-500/80 shadow-[0_0_12px_rgba(245,158,11,0.15)]" : densityBorderColor(bugDensity)}
+        transition-[box-shadow,filter,border-color,transform] duration-200
+        [@media(hover:hover)]:hover:border-amber-500/60 [@media(hover:hover)]:hover:shadow-xl [@media(hover:hover)]:hover:scale-[1.03]
         px-3 py-2 min-w-[120px] cursor-pointer
         ${shouldPulse ? "animate-pulse-subtle" : ""}`}
       style={{ borderWidth: fanInBorder(fanIn), borderStyle: "solid" }}
+      title={`${fullPath}\nRisk: ${riskScore.toFixed(1)} · Fan-in: ${fanIn} · Bugs: ${bugDensity.toFixed(2)}`}
     >
       <Handle
         type="target"

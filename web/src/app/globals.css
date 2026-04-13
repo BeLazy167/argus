@@ -186,6 +186,45 @@
   --sidebar-ring: oklch(0.547 0.021 43.1);
 }
 
+.light {
+  --background: oklch(0.97 0.005 60);
+  --foreground: oklch(0.18 0.01 45);
+  --card: oklch(0.93 0.006 55);
+  --card-foreground: oklch(0.18 0.01 45);
+  --popover: oklch(0.93 0.006 55);
+  --popover-foreground: oklch(0.18 0.01 45);
+  --primary: oklch(0.42 0.157 37.304);
+  --primary-foreground: oklch(0.97 0.005 60);
+  --secondary: oklch(0.90 0.008 55);
+  --secondary-foreground: oklch(0.18 0.01 45);
+  --muted: oklch(0.92 0.006 55);
+  --muted-foreground: oklch(0.45 0.015 42);
+  --accent: oklch(0.92 0.006 55);
+  --accent-foreground: oklch(0.18 0.01 45);
+  --destructive: oklch(0.55 0.22 25);
+  --border: oklch(0 0 0 / 10%);
+  --input: oklch(0 0 0 / 8%);
+  --ring: oklch(0.42 0.157 37.304);
+  --chart-1: oklch(0.55 0.20 37);
+  --chart-2: oklch(0.50 0.18 45);
+  --chart-3: oklch(0.45 0.16 55);
+  --chart-4: oklch(0.40 0.14 60);
+  --chart-5: oklch(0.35 0.12 65);
+  --sidebar: oklch(0.93 0.006 55);
+  --sidebar-foreground: oklch(0.18 0.01 45);
+  --sidebar-primary: oklch(0.42 0.157 37.304);
+  --sidebar-primary-foreground: oklch(0.97 0.005 60);
+  --sidebar-accent: oklch(0.90 0.008 55);
+  --sidebar-accent-foreground: oklch(0.18 0.01 45);
+  --sidebar-border: oklch(0 0 0 / 10%);
+  --sidebar-ring: oklch(0.42 0.157 37.304);
+}
+
+/* Light mode noise texture adjustment */
+.light .bg-noise {
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.02'/%3E%3C/svg%3E");
+}
+
 /* ── Keyframe animations (moved from inline <style> tags) ── */
 
 @keyframes draw {

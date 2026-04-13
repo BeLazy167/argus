@@ -24,6 +24,7 @@ import { QueryProvider } from "@/providers/query-provider";
 import { InstallationProvider } from "@/providers/installation-provider";
 import { ActiveRepoProvider, useActiveRepo } from "@/providers/active-repo-provider";
 import { RepoSelect } from "@/components/dashboard/repo-select";
+import { ThemeToggle } from "@/components/dashboard/theme-toggle";
 
 function SidebarRepoSelector() {
   const { repos, activeId, setSelectedId } = useActiveRepo();
@@ -135,18 +136,21 @@ export default function DashboardLayout({
           ))}
         </div>
       </nav>
-      <div className="border-t border-sidebar-border px-3 py-3">
-        <UserButton
-          showName
-          appearance={{
-            elements: {
-              rootBox: "w-full",
-              userButtonTrigger: "w-full justify-start gap-2 px-2 py-1.5 rounded-md hover:bg-sidebar-accent transition-colors",
-              userButtonAvatarBox: "h-6 w-6",
-              userButtonOuterIdentifier: "text-xs font-mono text-slate-text truncate",
-            },
-          }}
-        />
+      <div className="border-t border-sidebar-border px-3 py-3 flex items-center gap-2">
+        <div className="flex-1 min-w-0">
+          <UserButton
+            showName
+            appearance={{
+              elements: {
+                rootBox: "w-full",
+                userButtonTrigger: "w-full justify-start gap-2 px-2 py-1.5 rounded-md hover:bg-sidebar-accent transition-colors",
+                userButtonAvatarBox: "h-6 w-6",
+                userButtonOuterIdentifier: "text-xs font-mono text-slate-text truncate",
+              },
+            }}
+          />
+        </div>
+        <ThemeToggle />
       </div>
     </>
   );

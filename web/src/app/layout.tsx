@@ -6,6 +6,7 @@ import { dark } from "@clerk/themes";
 import "./globals.css";
 import { cn } from "@/lib/utils";
 import { Analytics } from "@vercel/analytics/next";
+import { ThemeScript } from "@/components/dashboard/theme-script";
 
 const jetbrainsMono = JetBrains_Mono({subsets:['latin'],variable:'--font-jetbrains-mono'});
 const blackOpsOne = Black_Ops_One({weight:'400',subsets:['latin'],variable:'--font-black-ops-one'});
@@ -64,6 +65,7 @@ export default function RootLayout({
         suppressHydrationWarning
       >
         <body className="min-h-screen bg-background font-mono antialiased">
+          <ThemeScript />
           {children}
           <Analytics />
         </body>

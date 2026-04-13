@@ -1,6 +1,6 @@
 "use client";
 import { useMemo, useState } from "react";
-import { Network, Loader2, GitBranch, AlertTriangle } from "lucide-react";
+import { Network, Loader2, GitBranch, AlertTriangle, Search, Info, X } from "lucide-react";
 import { useActiveRepo } from "@/lib/hooks/use-active-repo";
 import { useArchitectureData } from "@/lib/queries/architecture";
 import ArchitectureCanvas, { type Lens } from "@/components/graph/ArchitectureCanvas";
@@ -12,6 +12,10 @@ export default function ArchitecturePage() {
   const { data: archData, isLoading, error } = useArchitectureData();
   const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
   const [lens, setLens] = useState<Lens>("risk");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [showGuide, setShowGuide] = useState(() =>
+    typeof window !== "undefined" ? localStorage.getItem("argus-arch-guide-dismissed") !== "1" : true
+  );
 
   const selectedFile = useMemo(
     () => archData?.files.find((f) => f.path === selectedFilePath),
@@ -24,6 +28,17 @@ export default function ArchitecturePage() {
     return [...archData.files].sort((a, b) => b.risk_score - a.risk_score)[0];
   }, [archData]);
 
+  const lensCounts = useMemo(() => {
+    if (!archData) return undefined;
+    const f = archData.files;
+    return {
+      risk: f.length,
+      choke: f.filter((x) => x.fan_in >= 3).length,
+      hotspot: f.filter((x) => x.bug_density > 0).length,
+      coupling: f.filter((x) => x.coupling.length > 0).length,
+    };
+  }, [archData]);
+
   return (
     <div className="flex flex-col h-[calc(100vh-4rem)] bg-[#0a0a12]">
       {/* Page heading */}
@@ -34,14 +49,26 @@ export default function ArchitecturePage() {
         </p>
       </div>
 
-      {/* Toolbar: lens switcher + stats */}
-      <div className="flex items-center gap-4 border-b border-slate-800/50 px-5 py-3 shrink-0 bg-[#0a0a12]">
-        <LensBar active={lens} onChange={(l) => setLens(l as Lens)} />
+      {/* Toolbar: lens switcher + search + stats */}
+      <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3 border-b border-slate-800/50 px-5 py-3 shrink-0 bg-[#0a0a12]">
+        <LensBar active={lens} onChange={(l) => setLens(l as Lens)} fileCounts={lensCounts} />
+
+        {/* Search */}
+        <div className="relative">
+          <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 text-slate-600" />
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Find file..."
+            className="pl-7 pr-2 py-1.5 w-44 text-[11px] font-mono bg-[#12121a] border border-slate-800 text-slate-300 placeholder:text-slate-600 focus:border-amber-500/50 focus:outline-none transition-colors"
+          />
+        </div>
 
         <div className="flex-1" />
 
         {archData && archData.files.length > 0 && (
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-4 flex-wrap">
             {topRiskFile && topRiskFile.risk_score >= 7 && (
               <button
                 onClick={() => setSelectedFilePath(topRiskFile.path)}
@@ -58,16 +85,56 @@ export default function ArchitecturePage() {
                 </span>
               </button>
             )}
-            <div className="flex items-center gap-3 text-[11px] font-mono text-slate-600 tabular-nums">
+            <div className="flex items-center gap-3 text-[11px] font-mono text-slate-500 tabular-nums">
               <span>{archData.files.length} files</span>
-              <span className="text-slate-800">·</span>
+              <span className="text-slate-700">·</span>
               <span>{archData.edges.length} deps</span>
-              <span className="text-slate-800">·</span>
-              <span>{archData.summary.choke_points.length} chokepoints</span>
+              <span className="text-slate-700">·</span>
+              <span className={archData.summary.choke_points.length > 0 ? "text-amber-500" : ""}>
+                {archData.summary.choke_points.length} chokepoints
+              </span>
+              <span className="text-slate-700">·</span>
+              <span className={archData.summary.hotspots.length > 0 ? "text-amber-500" : ""}>
+                {archData.summary.hotspots.length} hotspots
+              </span>
             </div>
           </div>
         )}
+
+        {/* Guide toggle */}
+        {!showGuide && (
+          <button
+            onClick={() => setShowGuide(true)}
+            className="p-1 text-slate-600 hover:text-slate-400 transition-colors shrink-0"
+            title="Show guide"
+          >
+            <Info className="h-3.5 w-3.5" />
+          </button>
+        )}
       </div>
+
+      {/* Onboarding guide */}
+      {showGuide && archData && archData.files.length > 0 && (
+        <div className="px-5 py-2 border-b border-slate-800/50 bg-[#12121a]/50 flex items-start gap-3 shrink-0">
+          <Info className="h-3 w-3 text-amber-500 mt-0.5 shrink-0" />
+          <div className="text-[10px] font-mono text-slate-400 leading-relaxed space-y-0.5">
+            <p>
+              Node size = risk score. Border color = bug density (
+              <span className="text-emerald-400">green</span> →{" "}
+              <span className="text-red-400">red</span>). Badges:{" "}
+              <span className="text-amber-400">choke</span> = high fan-in,{" "}
+              <span className="text-red-400">hot</span> = high bug density.
+            </p>
+            <p>Click a node to inspect. Switch lenses above to highlight choke points, hotspots, or coupling.</p>
+          </div>
+          <button
+            onClick={() => { setShowGuide(false); localStorage.setItem("argus-arch-guide-dismissed", "1"); }}
+            className="text-slate-600 hover:text-slate-400 shrink-0 ml-auto"
+          >
+            <X className="h-3 w-3" />
+          </button>
+        </div>
+      )}
 
       <div className="flex-1 min-h-0 flex flex-col md:flex-row">
         <div className="flex-1 relative">
@@ -116,13 +183,14 @@ export default function ArchitecturePage() {
               files={archData.files}
               edges={archData.edges}
               lens={lens}
+              searchQuery={searchQuery}
               onSelectFile={setSelectedFilePath}
             />
           )}
         </div>
 
         {selectedFilePath && (
-          <div className="border-t md:border-t-0 md:border-l border-slate-800/50 bg-[#0a0a12] md:w-[320px] md:shrink-0 max-h-[40vh] md:max-h-none overflow-y-auto">
+          <div className="border-t md:border-t-0 md:border-l border-slate-800/50 bg-[#0a0a12] md:w-[320px] md:shrink-0 h-[50vh] md:h-auto overflow-hidden">
             <FileMemorySidebar
               filePath={selectedFilePath}
               archFile={selectedFile}
