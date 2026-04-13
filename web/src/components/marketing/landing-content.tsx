@@ -220,7 +220,7 @@ export function LandingContent() {
   return (
     <>
       {/* ── HERO ── */}
-      <section aria-label="Hero" className="relative flex min-h-[100vh] flex-col items-center justify-center overflow-hidden bg-noise">
+      <section aria-label="Hero" className="relative flex min-h-[90vh] md:min-h-[100vh] flex-col items-center justify-center overflow-hidden bg-noise">
         {/* Subtle ambient glow */}
         <div
           className="pointer-events-none absolute top-1/3 left-1/2 -translate-x-1/2 -translate-y-1/2 h-[500px] w-[500px] rounded-full opacity-10"

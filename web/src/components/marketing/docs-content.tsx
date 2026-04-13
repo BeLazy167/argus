@@ -36,6 +36,14 @@ import {
   History,
   TestTube2,
   AlertTriangle,
+  Sun,
+  GitCompare,
+  Workflow,
+  Database,
+  Focus,
+  Compass,
+  Scan,
+  Flag,
 } from "lucide-react";
 
 /* ── Section data ── */
@@ -43,8 +51,12 @@ import {
 const SECTIONS = [
   { id: "getting-started", label: "Getting Started" },
   { id: "pipeline", label: "The Review Pipeline" },
+  { id: "deep-review", label: "Deep Review" },
+  { id: "incremental-reviews", label: "Incremental Reviews" },
   { id: "what-argus-sees", label: "What Argus Sees" },
+  { id: "architecture-viz", label: "Architecture Visualization" },
   { id: "code-simulation", label: "Code Simulation" },
+  { id: "pr-enrichment", label: "PR Enrichment & Diagrams" },
   { id: "conversational-review", label: "Conversational Review" },
   { id: "live-timeline", label: "Live Activity Timeline" },
   { id: "severities", label: "Severities" },
@@ -52,12 +64,15 @@ const SECTIONS = [
   { id: "rules", label: "Review Rules" },
   { id: "models", label: "Model Config" },
   { id: "api-keys", label: "API Keys (BYOK)" },
+  { id: "supermemory", label: "BYOT Supermemory" },
   { id: "personas", label: "Review Personas" },
   { id: "commands", label: "Bot Commands" },
   { id: "test-generation", label: "Test Generation" },
   { id: "memory", label: "Memory & Learning" },
   { id: "insights", label: "Insights & Risk" },
   { id: "token-tracking", label: "Token & Cost Tracking" },
+  { id: "light-mode", label: "Light Mode" },
+  { id: "feature-flags", label: "Feature Flags" },
   { id: "settings", label: "Settings & Controls" },
 ] as const;
 
@@ -321,7 +336,7 @@ export function DocsContent() {
       <div className="flex gap-12">
         {/* Sidebar */}
         <nav aria-label="Documentation navigation" className="hidden lg:block w-48 shrink-0">
-          <div className="sticky top-24 space-y-0.5">
+          <div className="sticky top-20 max-h-[calc(100vh-6rem)] overflow-y-auto space-y-0.5 pb-8">
             <p className="text-[10px] font-mono uppercase tracking-[0.15em] text-iron mb-3">
               On this page
             </p>
@@ -337,7 +352,7 @@ export function DocsContent() {
         </nav>
 
         {/* Content */}
-        <div className="flex-1 min-w-0 space-y-16">
+        <div className="flex-1 min-w-0 max-w-full space-y-16 overflow-hidden" style={{ overflowWrap: "break-word" }}>
           {/* ── Getting Started ── */}
           <div>
             <SectionHeader id="getting-started" title="Getting Started" />
@@ -432,6 +447,132 @@ export function DocsContent() {
             </div>
           </div>
 
+          {/* ── Deep Review ── */}
+          <div>
+            <SectionHeader id="deep-review" title="Deep Review" />
+            <p className="text-xs font-mono text-slate-text mb-3 leading-relaxed">
+              Four specialist agents review every file in parallel.
+            </p>
+            <p className="text-xs font-mono text-slate-text mb-8 leading-relaxed">
+              Instead of one pass, Argus deploys four domain specialists
+              per file. Each brings a different lens &mdash; and they run
+              concurrently, so it doesn&apos;t slow you down.
+            </p>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {[
+                {
+                  icon: Bug,
+                  name: "bug_hunter",
+                  desc: "Logic errors, off-by-ones, nil dereferences, broken invariants, incorrect boolean chains. The specialist that catches what compiles but doesn\u2019t work.",
+                },
+                {
+                  icon: Shield,
+                  name: "security",
+                  desc: "Injection, auth bypass, SSRF, path traversal, leaked credentials, insecure deserialization. Reviews with a pen-tester\u2019s eye.",
+                },
+                {
+                  icon: Network,
+                  name: "architecture",
+                  desc: "Dependency direction, API contracts, separation of concerns, blast radius. Flags when a change violates the system\u2019s structural intent.",
+                },
+                {
+                  icon: History,
+                  name: "regression",
+                  desc: "Uses scenario memory and past review history to detect changes that re-introduce previously fixed bugs or break known invariants.",
+                },
+              ].map((specialist) => {
+                const Icon = specialist.icon;
+                return (
+                  <div
+                    key={specialist.name}
+                    className="border border-iron bg-charcoal p-5"
+                  >
+                    <div className="flex items-center gap-3 mb-3">
+                      <div className="h-8 w-8 bg-amber/10 flex items-center justify-center">
+                        <Icon className="h-4 w-4 text-amber" />
+                      </div>
+                      <span className="text-xs font-mono font-bold text-amber">
+                        {specialist.name}
+                      </span>
+                    </div>
+                    <p className="text-[11px] font-mono text-slate-text leading-relaxed">
+                      {specialist.desc}
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+
+            <p className="text-[11px] font-mono text-iron mt-4">
+              Deep Review triggers automatically for complex PRs. Enable it
+              globally in{" "}
+              <span className="text-amber">Settings &rarr; Features</span>.
+              Findings from all four specialists are deduplicated before
+              scoring.
+            </p>
+          </div>
+
+          {/* ── Incremental Reviews ── */}
+          <div>
+            <SectionHeader id="incremental-reviews" title="Incremental Reviews" />
+            <p className="text-xs font-mono text-slate-text mb-3 leading-relaxed">
+              Push again? Argus only reviews what changed.
+            </p>
+            <p className="text-xs font-mono text-slate-text mb-8 leading-relaxed">
+              When you push new commits to an already-reviewed PR, Argus
+              computes the diff since the last review and only analyzes the
+              delta. Previous findings that are still relevant are preserved.
+              Resolved findings are dropped.
+            </p>
+
+            <div className="space-y-3">
+              {[
+                {
+                  icon: GitCompare,
+                  title: "Delta detection",
+                  desc: "Compares HEAD against the last-reviewed SHA. Only new or modified hunks enter the pipeline. Unchanged files are skipped entirely.",
+                },
+                {
+                  icon: RefreshCw,
+                  title: "Finding lifecycle",
+                  desc: "Findings from the previous review are carried forward if the relevant code is unchanged. Updated code triggers a fresh review of that file only.",
+                },
+                {
+                  icon: Gauge,
+                  title: "Cost reduction",
+                  desc: "Incremental reviews typically use 30\u201370% fewer tokens than a full re-review, depending on how much changed between pushes.",
+                },
+              ].map((item) => {
+                const Icon = item.icon;
+                return (
+                  <div
+                    key={item.title}
+                    className="border border-iron bg-charcoal p-4"
+                  >
+                    <div className="flex items-center gap-3 mb-2">
+                      <Icon className="h-4 w-4 text-amber" />
+                      <span className="text-xs font-mono font-bold text-foreground">
+                        {item.title}
+                      </span>
+                    </div>
+                    <p className="text-[11px] font-mono text-slate-text leading-relaxed">
+                      {item.desc}
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+
+            <p className="text-[11px] font-mono text-iron mt-4">
+              Force a full re-review with{" "}
+              <code className="text-amber bg-iron/40 rounded px-1.5 py-0.5">
+                @argus-eye review --force
+              </code>
+              .
+            </p>
+          </div>
+
           {/* ── What Argus Sees ── */}
           <div>
             <SectionHeader id="what-argus-sees" title="What Argus Sees" />
@@ -493,6 +634,109 @@ export function DocsContent() {
               Argus maintains a world model of your codebase. The more it
               reviews, the more it understands. Context is not a feature — it
               is the architecture.
+            </p>
+          </div>
+
+          {/* ── Architecture Visualization ── */}
+          <div>
+            <SectionHeader id="architecture-viz" title="Architecture Visualization" />
+            <p className="text-xs font-mono text-slate-text mb-3 leading-relaxed">
+              See your codebase as a dependency graph.
+            </p>
+            <p className="text-xs font-mono text-slate-text mb-8 leading-relaxed">
+              The Architecture page renders an interactive dependency graph
+              built from every review. Nodes are files, edges are
+              import/call/type relationships. Four analytical lenses let you
+              see different dimensions of the system.
+            </p>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-6">
+              {[
+                {
+                  icon: AlertTriangle,
+                  name: "Risk",
+                  desc: "Colors nodes by cumulative risk score. High-severity findings, frequent changes, and unresolved comments push a file\u2019s risk up.",
+                },
+                {
+                  icon: Focus,
+                  name: "Choke Points",
+                  desc: "Highlights files with high fan-in \u2014 the modules everything depends on. Breaking these breaks everything.",
+                },
+                {
+                  icon: Activity,
+                  name: "Hotspots",
+                  desc: "Surfaces files with the most review activity. Frequent changes + frequent findings = code that needs attention.",
+                },
+                {
+                  icon: Layers,
+                  name: "Coupling",
+                  desc: "Shows tightly coupled file clusters. Files that always change together likely share hidden dependencies.",
+                },
+              ].map((lens) => {
+                const Icon = lens.icon;
+                return (
+                  <div
+                    key={lens.name}
+                    className="border border-iron bg-charcoal p-4"
+                  >
+                    <div className="flex items-center gap-3 mb-2">
+                      <Icon className="h-4 w-4 text-amber" />
+                      <span className="text-xs font-mono font-bold text-foreground">
+                        {lens.name}
+                      </span>
+                    </div>
+                    <p className="text-[11px] font-mono text-slate-text leading-relaxed">
+                      {lens.desc}
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+
+            <h3 className="text-sm font-bold text-foreground mb-3">
+              Navigation
+            </h3>
+            <div className="space-y-3">
+              {[
+                {
+                  icon: Search,
+                  title: "File search",
+                  desc: "Fuzzy search across all nodes. Select a result to center and highlight it in the graph.",
+                },
+                {
+                  icon: Compass,
+                  title: "Smart zoom",
+                  desc: "On first load, the graph auto-zooms to the highest-risk cluster so you see what matters immediately.",
+                },
+                {
+                  icon: Scan,
+                  title: "Node hover",
+                  desc: "Hover any node for a metrics tooltip: risk score, review count, finding breakdown, and last review date.",
+                },
+              ].map((item) => {
+                const Icon = item.icon;
+                return (
+                  <div
+                    key={item.title}
+                    className="border border-iron bg-charcoal p-4"
+                  >
+                    <div className="flex items-center gap-3 mb-2">
+                      <Icon className="h-4 w-4 text-amber" />
+                      <span className="text-xs font-mono font-bold text-foreground">
+                        {item.title}
+                      </span>
+                    </div>
+                    <p className="text-[11px] font-mono text-slate-text leading-relaxed">
+                      {item.desc}
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+
+            <p className="text-[11px] font-mono text-iron mt-4">
+              The graph builds incrementally with each review. An onboarding
+              guide walks new users through the interface on first visit.
             </p>
           </div>
 
@@ -598,6 +842,62 @@ export function DocsContent() {
               Simulation is powered by scenario memory — the richer your
               review history, the more scenarios Argus can test against.
               Currently in experimental rollout.
+            </p>
+          </div>
+
+          {/* ── PR Enrichment & Diagrams ── */}
+          <div>
+            <SectionHeader id="pr-enrichment" title="PR Enrichment & Mermaid Diagrams" />
+            <p className="text-xs font-mono text-slate-text mb-3 leading-relaxed">
+              Argus writes the context your PR description forgot.
+            </p>
+            <p className="text-xs font-mono text-slate-text mb-8 leading-relaxed">
+              After reviewing, Argus appends auto-generated Mermaid diagrams
+              and missing context directly to the PR description. Reviewers
+              see the system impact before reading a single line of diff.
+            </p>
+
+            <div className="space-y-3">
+              {[
+                {
+                  icon: Workflow,
+                  title: "Sequence diagrams",
+                  desc: "Generated from call paths affected by the PR. Shows the request flow through services, middleware, and handlers.",
+                },
+                {
+                  icon: Activity,
+                  title: "Data flow diagrams",
+                  desc: "Maps how data transforms as it moves through the changed code. Input \u2192 validation \u2192 processing \u2192 output, with types annotated.",
+                },
+                {
+                  icon: Network,
+                  title: "Dependency diagrams",
+                  desc: "Shows which modules the PR touches and their upstream/downstream relationships. Highlights the blast radius visually.",
+                },
+              ].map((item) => {
+                const Icon = item.icon;
+                return (
+                  <div
+                    key={item.title}
+                    className="border border-iron bg-charcoal p-4"
+                  >
+                    <div className="flex items-center gap-3 mb-2">
+                      <Icon className="h-4 w-4 text-amber" />
+                      <span className="text-xs font-mono font-bold text-foreground">
+                        {item.title}
+                      </span>
+                    </div>
+                    <p className="text-[11px] font-mono text-slate-text leading-relaxed">
+                      {item.desc}
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+
+            <p className="text-[11px] font-mono text-iron mt-4">
+              Diagrams render natively on GitHub. Toggle in{" "}
+              <span className="text-amber">Settings &rarr; Features &rarr; PR Enrichment</span>.
             </p>
           </div>
 
@@ -1029,6 +1329,58 @@ export function DocsContent() {
             </p>
           </div>
 
+          {/* ── BYOT Supermemory ── */}
+          <div>
+            <SectionHeader id="supermemory" title="BYOT Supermemory" />
+            <p className="text-xs font-mono text-slate-text mb-3 leading-relaxed">
+              Bring Your Own Token for Supermemory.
+            </p>
+            <p className="text-xs font-mono text-slate-text mb-8 leading-relaxed">
+              Argus uses{" "}
+              <a
+                href="https://supermemory.com"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-amber hover:text-foreground transition-colors"
+              >
+                Supermemory
+              </a>{" "}
+              for RAG-powered memory &mdash; storing review patterns,
+              codebase conventions, and scenario history. You can bring your
+              own Supermemory API key for full control over your data.
+            </p>
+
+            <div className="border border-iron bg-charcoal p-4 mb-4">
+              <div className="flex items-center gap-3 mb-3">
+                <Database className="h-4 w-4 text-amber" />
+                <span className="text-xs font-mono font-bold text-foreground">
+                  Setup
+                </span>
+              </div>
+              <ol className="list-decimal list-inside space-y-1.5 text-xs font-mono text-slate-text leading-relaxed">
+                <li>
+                  Go to{" "}
+                  <span className="text-amber">
+                    Integrations
+                  </span>{" "}
+                  in the dashboard
+                </li>
+                <li>
+                  Enter your Supermemory API key under the Supermemory section
+                </li>
+                <li>
+                  Key is scoped per-org &mdash; all repos in the org share
+                  the same memory backend
+                </li>
+              </ol>
+            </div>
+
+            <p className="text-[11px] font-mono text-iron">
+              Without a custom key, Argus uses its shared Supermemory
+              instance. Your data is isolated per-installation regardless.
+            </p>
+          </div>
+
           {/* ── Review Personas ── */}
           <div>
             <SectionHeader id="personas" title="Review Personas" />
@@ -1401,6 +1753,143 @@ export function DocsContent() {
                 </p>
               </div>
             </div>
+          </div>
+
+          {/* ── Light Mode ── */}
+          <div>
+            <SectionHeader id="light-mode" title="Light Mode" />
+            <p className="text-xs font-mono text-slate-text mb-3 leading-relaxed">
+              Dark isn&apos;t the only option anymore.
+            </p>
+            <p className="text-xs font-mono text-slate-text mb-8 leading-relaxed">
+              Toggle between dark and light themes using the Sun/Moon icon
+              in the sidebar footer. Your preference persists via
+              localStorage and is applied instantly without a page reload.
+            </p>
+
+            <div className="space-y-3">
+              {[
+                {
+                  icon: Sun,
+                  title: "Toggle",
+                  desc: "Click the Sun/Moon icon in the sidebar footer. Dark \u2192 Light \u2192 Dark. No page refresh required.",
+                },
+                {
+                  icon: Eye,
+                  title: "System preference",
+                  desc: "On first visit, Argus respects your OS prefers-color-scheme setting. After manual toggle, your choice takes precedence.",
+                },
+                {
+                  icon: Paintbrush,
+                  title: "Full coverage",
+                  desc: "All dashboard pages, the architecture graph, code diffs, and marketing pages support both themes. Graph tokens use a warm cream palette in light mode.",
+                },
+              ].map((item) => {
+                const Icon = item.icon;
+                return (
+                  <div
+                    key={item.title}
+                    className="border border-iron bg-charcoal p-4"
+                  >
+                    <div className="flex items-center gap-3 mb-2">
+                      <Icon className="h-4 w-4 text-amber" />
+                      <span className="text-xs font-mono font-bold text-foreground">
+                        {item.title}
+                      </span>
+                    </div>
+                    <p className="text-[11px] font-mono text-slate-text leading-relaxed">
+                      {item.desc}
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* ── Feature Flags ── */}
+          <div>
+            <SectionHeader id="feature-flags" title="Feature Flags" />
+            <p className="text-xs font-mono text-slate-text mb-3 leading-relaxed">
+              Toggle capabilities per-org from the dashboard.
+            </p>
+            <p className="text-xs font-mono text-slate-text mb-8 leading-relaxed">
+              Feature flags let you enable or disable advanced capabilities
+              without code changes. All flags are scoped per-org and take
+              effect on the next review.
+            </p>
+
+            <div className="space-y-3">
+              {[
+                {
+                  label: "Cross-PR Checks",
+                  desc: "Detect linked PRs across repos and run compatibility verification. Adds one extra LLM call per linked PR.",
+                  status: "off",
+                },
+                {
+                  label: "Issue Acceptance",
+                  desc: "Verify that PR diffs address linked issue acceptance criteria. Works with GitHub\u2019s native issue-linking keywords.",
+                  status: "on by default",
+                },
+                {
+                  label: "Deep Review",
+                  desc: "4-specialist parallel review per file. Higher coverage, higher token cost.",
+                  status: "off",
+                },
+                {
+                  label: "PR Enrichment",
+                  desc: "Append Mermaid diagrams and missing context to PR descriptions after review.",
+                  status: "on by default",
+                },
+                {
+                  label: "Pattern Learning",
+                  desc: "Auto-extract reusable code patterns from high-confidence findings.",
+                  status: "on by default",
+                },
+                {
+                  label: "Convention Learning",
+                  desc: "Extract naming, error handling, and architecture conventions from diffs.",
+                  status: "on by default",
+                },
+                {
+                  label: "Architecture Graph",
+                  desc: "Build and maintain a persistent dependency graph from code changes.",
+                  status: "on by default",
+                },
+              ].map((toggle) => (
+                <div
+                  key={toggle.label}
+                  className="border border-iron bg-charcoal p-4 flex items-start gap-4"
+                >
+                  <Flag className="h-4 w-4 text-amber mt-0.5 shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-3 mb-1">
+                      <span className="text-xs font-mono font-bold text-foreground">
+                        {toggle.label}
+                      </span>
+                      <span
+                        className={`ml-auto text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded border ${
+                          toggle.status === "off"
+                            ? "bg-iron/20 text-slate-text border-iron"
+                            : "bg-green-500/20 text-green-400 border-green-500/30"
+                        }`}
+                      >
+                        {toggle.status}
+                      </span>
+                    </div>
+                    <p className="text-[11px] font-mono text-slate-text leading-relaxed">
+                      {toggle.desc}
+                    </p>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <p className="text-[11px] font-mono text-iron mt-4">
+              Manage flags in{" "}
+              <span className="text-amber">Settings &rarr; Features</span>.
+              Changes apply to the next review triggered on any repo in the
+              org.
+            </p>
           </div>
 
           {/* ── Settings & Controls ── */}

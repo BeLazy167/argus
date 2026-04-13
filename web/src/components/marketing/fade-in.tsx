@@ -17,22 +17,20 @@ export function FadeIn({
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
-
     const observer = new IntersectionObserver(
       ([entry]) => {
         if (entry?.isIntersecting) {
-          if (delay > 0) {
-            setTimeout(() => setVisible(true), delay);
-          } else {
-            setVisible(true);
-          }
+          if (delay > 0) setTimeout(() => setVisible(true), delay);
+          else setVisible(true);
           observer.disconnect();
         }
       },
-      { threshold: 0.15 }
+      { threshold: 0.05 }
     );
     observer.observe(el);
-    return () => observer.disconnect();
+    // Fallback: force visible after timeout
+    const fallback = setTimeout(() => setVisible(true), 2000 + delay);
+    return () => { observer.disconnect(); clearTimeout(fallback); };
   }, [delay]);
 
   return (

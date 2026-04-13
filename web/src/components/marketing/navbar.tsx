@@ -145,29 +145,27 @@ export function Navbar() {
         </button>
 
         {/* Right side: auth */}
-        <div className="flex items-center gap-3">
+        <div className="hidden md:flex items-center gap-3">
           <SignedOut>
             <Link
               href="/sign-in"
-              className="text-xs font-mono text-slate-text hover:text-foreground transition-colors duration-200"
+              className="text-xs font-mono text-slate-text hover:text-foreground transition-colors"
             >
               Sign in
             </Link>
             <Link
               href="/sign-up"
-              className="group relative inline-flex h-8 items-center bg-amber px-5 text-xs font-mono font-medium text-void transition-[transform,box-shadow] duration-200 ease-out hover:shadow-[0_0_20px_-4px_color-mix(in_oklch,var(--color-amber-glow)_50%,transparent)] active:scale-[0.97]"
+              className="bg-amber text-background font-mono text-xs font-medium px-4 py-2 hover:bg-amber/90 transition-colors"
             >
-              <span className="relative z-10">Get started</span>
-              <div className="absolute inset-0 bg-gradient-to-r from-amber to-amber/80 opacity-0 transition-opacity duration-200 group-hover:opacity-100" />
+              Get started
             </Link>
           </SignedOut>
           <SignedIn>
             <Link
               href="/dashboard"
-              className="group relative inline-flex h-8 items-center bg-amber px-5 text-xs font-mono font-medium text-void transition-[transform,box-shadow] duration-200 ease-out hover:shadow-[0_0_20px_-4px_color-mix(in_oklch,var(--color-amber-glow)_50%,transparent)] active:scale-[0.97]"
+              className="bg-amber text-background font-mono text-xs font-medium px-4 py-2 hover:bg-amber/90 transition-colors"
             >
-              <span className="relative z-10">Dashboard</span>
-              <div className="absolute inset-0 bg-gradient-to-r from-amber to-amber/80 opacity-0 transition-opacity duration-200 group-hover:opacity-100" />
+              Dashboard
             </Link>
           </SignedIn>
         </div>
