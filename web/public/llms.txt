@@ -1,0 +1,42 @@
+# Argus — AI Code Review That Builds Institutional Memory
+
+> AI-powered code review that traces dependencies, remembers incidents, and simulates failures before they ship.
+
+Argus is an AI code review tool for engineering teams. It installs as a GitHub App and automatically reviews every pull request with a multi-pass specialist pipeline.
+
+## Core Features
+
+- **Multi-pass review pipeline**: 7 stages — Triage, Review, Scoring, Deep Review (4 specialists: bug hunter, security, architecture, regression), Synthesis, PR Enrichment
+- **Institutional memory**: Learns from past reviews, incidents, and team decisions. Every review makes the next one smarter.
+- **Architecture analysis**: Dependency graph visualization with risk scoring, choke point detection, hotspot analysis, and coupling tracking
+- **Failure simulation**: Predicts what breaks before code ships by simulating failure scenarios
+- **Cross-PR dependency tracking**: Traces how changes in one PR affect others
+- **PR enrichment with Mermaid diagrams**: Auto-generates sequence, data flow, and dependency diagrams
+- **BYOK (Bring Your Own Key)**: Use OpenAI, Anthropic, or any OpenRouter-compatible LLM provider
+- **Incremental reviews**: Re-reviews updated PRs analyzing only the delta
+
+## Pricing
+
+- **Free**: 50 reviews/month, single reviewer persona
+- **Pro ($19/mo per workspace)**: Unlimited reviews, 4-specialist deep review, custom personas, priority support
+
+## Links
+
+- Website: https://argus.reviews
+- Documentation: https://argus.reviews/docs
+- Pricing: https://argus.reviews/pricing
+- Compare with alternatives: https://argus.reviews/compare
+- GitHub App: https://github.com/apps/argus-eye
+- Blog: https://argus.reviews/blog
+
+## Competitors
+
+Argus competes with CodeRabbit, Greptile, Cubic, Sourcery, Qodo, GitHub Copilot code review, Codacy, SonarQube, and Semgrep. Detailed comparisons at https://argus.reviews/compare
+
+## Technical Details
+
+- Installs in 60 seconds via GitHub App
+- Reviews complete in under 2 minutes
+- Supports all languages GitHub supports
+- SOC 2 compliant — code is never stored or used for training
+- Self-hosted option available for enterprise

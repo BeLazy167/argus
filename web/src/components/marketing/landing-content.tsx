@@ -365,8 +365,9 @@ export function LandingContent() {
               This is what Argus posts on your PRs.
             </h2>
             <p className="max-w-lg mx-auto text-sm text-ash/70">
-              SQL injection. Auth bypass. Race conditions. The bugs that pass
-              code review and break production at 2am.
+              SQL injection. Auth bypass. Race conditions. The{" "}
+              <a href="https://owasp.org/www-project-top-ten/" target="_blank" rel="noopener noreferrer" className="text-amber/70 hover:text-amber transition-colors">OWASP Top 10</a>{" "}
+              bugs that pass code review and break production at 2am.
             </p>
           </div>
 
@@ -410,6 +411,11 @@ export function LandingContent() {
               </FadeIn>
             ))}
           </div>
+          <FadeIn className="mt-8 text-center">
+            <Link href="/compare" className="text-xs font-mono text-amber hover:text-amber/80 transition-colors">
+              See how Argus compares to CodeRabbit, Copilot, and 7 other tools →
+            </Link>
+          </FadeIn>
         </div>
       </section>
 
@@ -450,6 +456,11 @@ export function LandingContent() {
               />
             ))}
           </div>
+          <FadeIn className="mt-10 text-center">
+            <Link href="/docs" className="text-xs font-mono text-amber hover:text-amber/80 transition-colors">
+              Read the full pipeline documentation →
+            </Link>
+          </FadeIn>
         </div>
       </section>
 
