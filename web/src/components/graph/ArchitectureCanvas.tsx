@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import {
   ReactFlow,
   Controls,
@@ -21,6 +21,21 @@ import dagre from "dagre";
 import FileNode from "./FileNode";
 import GroupNode from "./GroupNode";
 import type { ArchFile, ArchEdge } from "@/lib/queries/architecture";
+import type { ColorMode } from "@xyflow/react";
+
+/** Subscribe to theme changes on <html> class list */
+function useColorMode(): ColorMode {
+  const subscribe = useCallback((cb: () => void) => {
+    const obs = new MutationObserver(cb);
+    obs.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
+    return () => obs.disconnect();
+  }, []);
+  const getSnapshot = useCallback(
+    () => (document.documentElement.classList.contains("light") ? "light" as const : "dark" as const),
+    []
+  );
+  return useSyncExternalStore(subscribe, getSnapshot, () => "dark" as const);
+}
 
 /** Color for bug density: 0=green, mid=yellow, high=red */
 function densityColor(density: number, maxDensity: number): string {
@@ -129,6 +144,7 @@ type InnerProps = Props & {
 
 function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQuery, onSelectFile }: InnerProps) {
   const { fitView } = useReactFlow();
+  const colorMode = useColorMode();
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const maxDensity = useMemo(() => Math.max(...files.map((f) => f.bug_density), 0.01), [files]);
 
@@ -399,6 +415,7 @@ function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQu
         onNodeClick={onNodeClick}
         onPaneClick={onPaneClick}
         nodeTypes={nodeTypes}
+        colorMode={colorMode}
         proOptions={{ hideAttribution: true }}
         className="!bg-[var(--graph-bg)]"
         minZoom={0.15}

@@ -26,7 +26,7 @@ const SEVERITY_STYLES: Record<string, string> = {
 };
 
 const SOURCE_BADGE_STYLES: Record<string, string> = {
-  manual: "border-slate-500/30 bg-slate-500/10 text-slate-400",
+  manual: "border-slate-500/30 bg-slate-500/10 text-[var(--graph-text-dim)]",
   auto_learn: "border-amber-500/30 bg-amber-500/10 text-amber-400",
   convention: "border-blue-500/30 bg-blue-500/10 text-blue-400",
 };
@@ -58,22 +58,22 @@ type SectionProps = {
 
 function Section({ icon, title, count, expanded, onToggle, children }: SectionProps) {
   return (
-    <div className="border-b border-slate-800/50 last:border-0">
+    <div className="border-b border-[var(--graph-border)] last:border-0">
       <button
         onClick={onToggle}
-        className="flex items-center gap-2 w-full px-4 py-3 hover:bg-slate-800/20 transition-colors"
+        className="flex items-center gap-2 w-full px-4 py-3 hover:bg-[var(--graph-control-bg)] transition-colors"
       >
         {icon}
-        <span className="text-[10px] font-mono uppercase tracking-[0.12em] text-slate-300">
+        <span className="text-[10px] font-mono uppercase tracking-[0.12em] text-[var(--graph-text)]">
           {title}
         </span>
         {count !== undefined && (
-          <span className="text-[9px] font-mono text-slate-600 ml-1">
+          <span className="text-[9px] font-mono text-[var(--graph-text-muted)] ml-1">
             ({count})
           </span>
         )}
         <ChevronDown
-          className={`h-3 w-3 text-slate-600 ml-auto transition-transform duration-200 ${
+          className={`h-3 w-3 text-[var(--graph-text-muted)] ml-auto transition-transform duration-200 ${
             expanded ? "rotate-0" : "-rotate-90"
           }`}
         />
@@ -91,16 +91,16 @@ function Section({ icon, title, count, expanded, onToggle, children }: SectionPr
 
 function EmptyState({ text }: { text: string }) {
   return (
-    <p className="text-[10px] font-mono text-slate-600 py-1">{text}</p>
+    <p className="text-[10px] font-mono text-[var(--graph-text-muted)] py-1">{text}</p>
   );
 }
 
 function MetricRow({ label, value, pct }: { label: string; value: number | string; pct?: string }) {
   return (
     <div className="flex items-center justify-between text-[10px] font-mono">
-      <span className="text-slate-500">{label}</span>
+      <span className="text-[var(--graph-text-muted)]">{label}</span>
       <div className="flex items-center gap-2">
-        <span className="text-slate-300 tabular-nums">{value}</span>
+        <span className="text-[var(--graph-text)] tabular-nums">{value}</span>
         {pct && <span className="text-amber-500/80">{pct}</span>}
       </div>
     </div>
@@ -153,18 +153,18 @@ export default function FileMemorySidebar({ filePath, onClose, archFile, allFile
   return (
     <div className="h-full bg-[var(--graph-panel)] flex flex-col overflow-hidden animate-slide-in-right">
       {/* Header */}
-      <div className="flex items-center gap-2 px-4 py-3 border-b border-slate-800/50 shrink-0">
+      <div className="flex items-center gap-2 px-4 py-3 border-b border-[var(--graph-border)] shrink-0">
         <div className="flex-1 min-w-0">
-          <p className="text-[11px] font-mono text-slate-200 truncate" title={filePath}>
+          <p className="text-[11px] font-mono text-[var(--graph-text)] truncate" title={filePath}>
             {fileName}
           </p>
-          <p className="text-[9px] font-mono text-slate-600 truncate" title={filePath}>
+          <p className="text-[9px] font-mono text-[var(--graph-text-muted)] truncate" title={filePath}>
             {filePath}
           </p>
         </div>
         <button
           onClick={onClose}
-          className="p-1 rounded hover:bg-slate-800/50 text-slate-600 hover:text-slate-400 transition-colors shrink-0"
+          className="p-1 rounded hover:bg-[var(--graph-control-bg)] text-[var(--graph-text-muted)] hover:text-[var(--graph-text-dim)] transition-colors shrink-0"
         >
           <X className="h-3.5 w-3.5" />
         </button>
@@ -174,11 +174,11 @@ export default function FileMemorySidebar({ filePath, onClose, archFile, allFile
       <div className="flex-1 overflow-y-auto">
         {isLoading ? (
           <div className="flex items-center justify-center py-12">
-            <Loader2 className="h-4 w-4 animate-spin text-slate-600" />
+            <Loader2 className="h-4 w-4 animate-spin text-[var(--graph-text-muted)]" />
           </div>
         ) : !data ? (
           <div className="flex items-center justify-center py-12">
-            <p className="text-[10px] font-mono text-slate-600">No memory data yet.</p>
+            <p className="text-[10px] font-mono text-[var(--graph-text-muted)]">No memory data yet.</p>
           </div>
         ) : (
           <>
@@ -186,7 +186,7 @@ export default function FileMemorySidebar({ filePath, onClose, archFile, allFile
             {archFile && (
               <Section
                 id="metrics"
-                icon={<Activity className="h-3 w-3 text-slate-500" />}
+                icon={<Activity className="h-3 w-3 text-[var(--graph-text-muted)]" />}
                 title="Metrics"
                 expanded={expanded.metrics}
                 onToggle={() => toggle("metrics")}
@@ -195,12 +195,12 @@ export default function FileMemorySidebar({ filePath, onClose, archFile, allFile
                   {/* Risk score bar */}
                   <div>
                     <div className="flex items-center justify-between mb-1">
-                      <span className="text-[10px] font-mono text-slate-500">Risk Score</span>
-                      <span className="text-[10px] font-mono text-slate-300 font-semibold">
+                      <span className="text-[10px] font-mono text-[var(--graph-text-muted)]">Risk Score</span>
+                      <span className="text-[10px] font-mono text-[var(--graph-text)] font-semibold">
                         {archFile.risk_score.toFixed(1)}/10
                       </span>
                     </div>
-                    <div className="h-1.5 bg-slate-800/50 rounded-full overflow-hidden">
+                    <div className="h-1.5 bg-[var(--graph-control-bg)] rounded-full overflow-hidden">
                       <div
                         className={`h-full ${riskBarColor(archFile.risk_score)} transition-all duration-500`}
                         style={{ width: `${Math.min(archFile.risk_score * 10, 100)}%` }}
@@ -247,7 +247,7 @@ export default function FileMemorySidebar({ filePath, onClose, archFile, allFile
             {archFile && (archFile.coupling.length > 0 || archFile.symbols.length > 0) && (
               <Section
                 id="deps"
-                icon={<Network className="h-3 w-3 text-slate-500" />}
+                icon={<Network className="h-3 w-3 text-[var(--graph-text-muted)]" />}
                 title="Dependencies"
                 count={archFile.coupling.length}
                 expanded={expanded.deps}
@@ -255,18 +255,18 @@ export default function FileMemorySidebar({ filePath, onClose, archFile, allFile
               >
                 {archFile.coupling.length > 0 ? (
                   <div className="space-y-1.5">
-                    <p className="text-[9px] font-mono text-slate-600 uppercase tracking-wider">
+                    <p className="text-[9px] font-mono text-[var(--graph-text-muted)] uppercase tracking-wider">
                       Coupled files (co-change)
                     </p>
                     {archFile.coupling.map((c, i) => (
                       <div
                         key={i}
-                        className="flex items-center justify-between text-[10px] font-mono rounded border border-slate-800/40 bg-slate-900/30 px-2 py-1.5"
+                        className="flex items-center justify-between text-[10px] font-mono rounded border border-[var(--graph-border)] bg-[var(--graph-bg)]/30 px-2 py-1.5"
                       >
-                        <span className="text-slate-400 truncate" title={c.path}>
+                        <span className="text-[var(--graph-text-dim)] truncate" title={c.path}>
                           {c.path.split("/").pop()}
                         </span>
-                        <span className="text-slate-600 ml-2 shrink-0">
+                        <span className="text-[var(--graph-text-muted)] ml-2 shrink-0">
                           {(c.score * 100).toFixed(0)}%
                         </span>
                       </div>
@@ -278,20 +278,20 @@ export default function FileMemorySidebar({ filePath, onClose, archFile, allFile
 
                 {archFile.symbols.length > 0 && (
                   <div className="mt-3 space-y-1">
-                    <p className="text-[9px] font-mono text-slate-600 uppercase tracking-wider">
+                    <p className="text-[9px] font-mono text-[var(--graph-text-muted)] uppercase tracking-wider">
                       Symbols ({archFile.symbols.length})
                     </p>
                     <div className="flex flex-wrap gap-1">
                       {archFile.symbols.slice(0, 10).map((s, i) => (
                         <span
                           key={i}
-                          className="text-[9px] font-mono text-slate-500 bg-slate-800/40 rounded px-1.5 py-0.5"
+                          className="text-[9px] font-mono text-[var(--graph-text-muted)] bg-[var(--graph-control-bg)] rounded px-1.5 py-0.5"
                         >
                           {s}
                         </span>
                       ))}
                       {archFile.symbols.length > 10 && (
-                        <span className="text-[9px] font-mono text-slate-600">
+                        <span className="text-[9px] font-mono text-[var(--graph-text-muted)]">
                           +{archFile.symbols.length - 10} more
                         </span>
                       )}
@@ -304,7 +304,7 @@ export default function FileMemorySidebar({ filePath, onClose, archFile, allFile
             {/* Risk Section */}
             <Section
               id="risk"
-              icon={<Shield className="h-3 w-3 text-slate-500" />}
+              icon={<Shield className="h-3 w-3 text-[var(--graph-text-muted)]" />}
               title="Trace Risk"
               expanded={expanded.risk}
               onToggle={() => toggle("risk")}
@@ -321,7 +321,7 @@ export default function FileMemorySidebar({ filePath, onClose, archFile, allFile
                     </span>
                   </div>
                   {data.risk_score.last_trace && (
-                    <p className="text-[10px] font-mono text-slate-500">
+                    <p className="text-[10px] font-mono text-[var(--graph-text-muted)]">
                       Last trace: {formatDistanceToNow(data.risk_score.last_trace)}
                     </p>
                   )}
@@ -334,7 +334,7 @@ export default function FileMemorySidebar({ filePath, onClose, archFile, allFile
             {/* Patterns Section */}
             <Section
               id="patterns"
-              icon={<AlertTriangle className="h-3 w-3 text-slate-500" />}
+              icon={<AlertTriangle className="h-3 w-3 text-[var(--graph-text-muted)]" />}
               title="Patterns"
               count={data.patterns?.length ?? 0}
               expanded={expanded.patterns}
@@ -345,9 +345,9 @@ export default function FileMemorySidebar({ filePath, onClose, archFile, allFile
                   {data.patterns.map((p, i) => (
                     <div
                       key={i}
-                      className="rounded border border-slate-800/40 bg-slate-900/30 px-3 py-2"
+                      className="rounded border border-[var(--graph-border)] bg-[var(--graph-bg)]/30 px-3 py-2"
                     >
-                      <p className="text-[10px] font-mono text-slate-300 leading-relaxed">
+                      <p className="text-[10px] font-mono text-[var(--graph-text)] leading-relaxed">
                         {p.content}
                       </p>
                       <span
@@ -372,7 +372,7 @@ export default function FileMemorySidebar({ filePath, onClose, archFile, allFile
             {/* Findings Section */}
             <Section
               id="findings"
-              icon={<Bug className="h-3 w-3 text-slate-500" />}
+              icon={<Bug className="h-3 w-3 text-[var(--graph-text-muted)]" />}
               title="Findings"
               count={data.recent_comments?.length ?? 0}
               expanded={expanded.findings}
@@ -383,7 +383,7 @@ export default function FileMemorySidebar({ filePath, onClose, archFile, allFile
                   {data.recent_comments.slice(0, 5).map((c, i) => (
                     <div
                       key={i}
-                      className="rounded border border-slate-800/40 bg-slate-900/30 px-3 py-2"
+                      className="rounded border border-[var(--graph-border)] bg-[var(--graph-bg)]/30 px-3 py-2"
                     >
                       <div className="flex items-center gap-2 mb-1">
                         <span
@@ -394,10 +394,10 @@ export default function FileMemorySidebar({ filePath, onClose, archFile, allFile
                           {c.severity}
                         </span>
                         {c.category && (
-                          <span className="text-[9px] font-mono text-slate-600">{c.category}</span>
+                          <span className="text-[9px] font-mono text-[var(--graph-text-muted)]">{c.category}</span>
                         )}
                       </div>
-                      <p className="text-[10px] font-mono text-slate-400 leading-relaxed line-clamp-3">
+                      <p className="text-[10px] font-mono text-[var(--graph-text-dim)] leading-relaxed line-clamp-3">
                         {c.body}
                       </p>
                     </div>
@@ -411,7 +411,7 @@ export default function FileMemorySidebar({ filePath, onClose, archFile, allFile
             {/* Traces Section */}
             <Section
               id="traces"
-              icon={<GitBranch className="h-3 w-3 text-slate-500" />}
+              icon={<GitBranch className="h-3 w-3 text-[var(--graph-text-muted)]" />}
               title="Traces"
               count={data.traces?.length ?? 0}
               expanded={expanded.traces}
@@ -422,24 +422,24 @@ export default function FileMemorySidebar({ filePath, onClose, archFile, allFile
                   {data.traces.map((t, i) => (
                     <div
                       key={i}
-                      className="rounded border border-slate-800/40 bg-slate-900/30 px-3 py-2"
+                      className="rounded border border-[var(--graph-border)] bg-[var(--graph-bg)]/30 px-3 py-2"
                     >
                       <div className="flex items-center gap-2 mb-1">
                         <span
                           className={`inline-block rounded border px-1.5 py-0.5 text-[9px] font-mono ${
-                            KIND_BADGE_STYLES[t.trace_type] ?? "border-slate-500/30 bg-slate-500/10 text-slate-400"
+                            KIND_BADGE_STYLES[t.trace_type] ?? "border-slate-500/30 bg-slate-500/10 text-[var(--graph-text-dim)]"
                           }`}
                         >
                           {t.trace_type}
                         </span>
                         {t.pr_number > 0 && (
-                          <span className="text-[9px] font-mono text-slate-600">PR #{t.pr_number}</span>
+                          <span className="text-[9px] font-mono text-[var(--graph-text-muted)]">PR #{t.pr_number}</span>
                         )}
-                        <span className="text-[9px] font-mono text-slate-600 ml-auto">
+                        <span className="text-[9px] font-mono text-[var(--graph-text-muted)] ml-auto">
                           {formatDistanceToNow(t.created_at)}
                         </span>
                       </div>
-                      <p className="text-[10px] font-mono text-slate-400 leading-relaxed line-clamp-2">
+                      <p className="text-[10px] font-mono text-[var(--graph-text-dim)] leading-relaxed line-clamp-2">
                         {t.content}
                       </p>
                     </div>

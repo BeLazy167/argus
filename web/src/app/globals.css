@@ -215,11 +215,11 @@
 }
 
 .light {
-  /* Graph tokens */
-  --graph-bg: #f5f3ef;
-  --graph-surface: #ebe8e3;
-  --graph-panel: #e8e5e0;
-  --graph-dots: #d5d0c8;
+  /* Graph tokens — warm cream palette, WCAG 3:1+ for graph elements, 4.5:1+ for text */
+  --graph-bg: #f8f6f1;
+  --graph-surface: #ffffff;
+  --graph-panel: #f3f0ea;
+  --graph-dots: #ddd8cf;
   --graph-edge-import: #94a3b8;
   --graph-edge-import-hi: #64748b;
   --graph-edge-call: #d97706;
@@ -235,10 +235,10 @@
   --graph-lang-default: #64748b;
   --graph-text: #1e293b;
   --graph-text-dim: #475569;
-  --graph-text-muted: #94a3b8;
-  --graph-border: rgba(148, 163, 184, 0.4);
-  --graph-control-bg: rgba(226, 222, 215, 0.8);
-  --graph-group-bg: rgba(226, 222, 215, 0.5);
+  --graph-text-muted: #78716c;
+  --graph-border: rgba(120, 113, 108, 0.3);
+  --graph-control-bg: rgba(255, 255, 255, 0.9);
+  --graph-group-bg: rgba(243, 240, 234, 0.7);
 
   --background: oklch(0.97 0.005 60);
   --foreground: oklch(0.18 0.01 45);
@@ -276,6 +276,23 @@
 /* Light mode noise texture adjustment */
 .light .bg-noise {
   background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.02'/%3E%3C/svg%3E");
+}
+
+/* ── React Flow light mode overrides ── */
+.light .react-flow {
+  --xy-background-color-default: var(--graph-bg);
+  --xy-node-background-color-default: var(--graph-surface);
+  --xy-node-border-color-default: var(--graph-border);
+  --xy-node-color-default: var(--graph-text);
+  --xy-edge-stroke-default: var(--graph-edge-import);
+  --xy-minimap-background-color-default: var(--graph-bg);
+  --xy-controls-button-background-color-default: var(--graph-control-bg);
+  --xy-controls-button-border-color-default: var(--graph-border);
+  --xy-controls-button-color-default: var(--graph-text-dim);
+}
+.light .react-flow .react-flow__controls button:hover {
+  background-color: var(--graph-surface);
+  color: var(--graph-text);
 }
 
 /* ── Keyframe animations (moved from inline <style> tags) ── */
