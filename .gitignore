@@ -1,10 +1,11 @@
 # Binaries
-/argus
-/bin/
 *.exe
+backend/argus
+backend/bin/
 
 # Environment
 .env
+backend/.env
 secrets/
 
 # IDE
@@ -21,4 +22,8 @@ secrets/
 
 # QA / Dogfood
 dogfood-output/
-.soulforge
+
+# Tooling artifacts
+.soulforge/
+.forge/
+.serena/
