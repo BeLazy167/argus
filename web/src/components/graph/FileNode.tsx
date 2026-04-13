@@ -3,14 +3,14 @@ import { memo } from "react";
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 
 const LANG_COLORS: Record<string, { dot: string; text: string }> = {
-  typescript: { dot: "bg-blue-400", text: "text-blue-300" },
-  javascript: { dot: "bg-amber-400", text: "text-amber-300" },
-  go: { dot: "bg-cyan-400", text: "text-cyan-300" },
-  python: { dot: "bg-emerald-400", text: "text-emerald-300" },
-  rust: { dot: "bg-orange-400", text: "text-orange-300" },
+  typescript: { dot: "bg-blue-500", text: "text-blue-600 dark:text-blue-300" },
+  javascript: { dot: "bg-amber-500", text: "text-amber-700 dark:text-amber-300" },
+  go: { dot: "bg-cyan-500", text: "text-cyan-700 dark:text-cyan-300" },
+  python: { dot: "bg-emerald-500", text: "text-emerald-700 dark:text-emerald-300" },
+  rust: { dot: "bg-orange-500", text: "text-orange-700 dark:text-orange-300" },
 };
 
-const DEFAULT_LANG = { dot: "bg-slate-400", text: "text-slate-300" };
+const DEFAULT_LANG = { dot: "bg-slate-400", text: "text-[var(--graph-text)]" };
 
 /** Maps bug_density (bugs per 100 lines) to a border color from green→yellow→red. */
 function densityBorderColor(d: number): string {
@@ -89,12 +89,12 @@ function FileNode({ data }: NodeProps) {
         <span className={`font-mono font-medium text-[11px] truncate leading-tight ${lang.text}`}>
           {label}
         </span>
-        <span className="ml-auto font-mono text-[9px] font-semibold text-slate-400 bg-slate-800/60 rounded px-1 py-0.5 shrink-0">
+        <span className="ml-auto font-mono text-[9px] font-semibold text-[var(--graph-text-dim)] bg-[var(--graph-control-bg)] px-1 py-0.5 shrink-0">
           {riskScore.toFixed(1)}
         </span>
       </div>
 
-      <div className="text-[8px] font-mono text-slate-600 mt-0.5">
+      <div className="text-[8px] font-mono text-[var(--graph-text-muted)] mt-0.5">
         fan_in: {fanIn} · bugs: {bugDensity.toFixed(2)}
       </div>
 

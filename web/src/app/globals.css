@@ -144,6 +144,12 @@
   --graph-lang-py: #10b981;
   --graph-lang-rs: #f97316;
   --graph-lang-default: #475569;
+  --graph-text: #cbd5e1;
+  --graph-text-dim: #64748b;
+  --graph-text-muted: #475569;
+  --graph-border: rgba(30, 41, 59, 0.5);
+  --graph-control-bg: rgba(30, 41, 59, 0.6);
+  --graph-group-bg: rgba(20, 20, 30, 0.5);
 
   --background: oklch(0.147 0.004 49.3);
 
@@ -227,6 +233,12 @@
   --graph-lang-py: #059669;
   --graph-lang-rs: #ea580c;
   --graph-lang-default: #64748b;
+  --graph-text: #1e293b;
+  --graph-text-dim: #475569;
+  --graph-text-muted: #94a3b8;
+  --graph-border: rgba(148, 163, 184, 0.4);
+  --graph-control-bg: rgba(226, 222, 215, 0.8);
+  --graph-group-bg: rgba(226, 222, 215, 0.5);
 
   --background: oklch(0.97 0.005 60);
   --foreground: oklch(0.18 0.01 45);
