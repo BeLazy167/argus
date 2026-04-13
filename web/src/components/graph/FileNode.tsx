@@ -68,8 +68,8 @@ function FileNode({ data }: NodeProps) {
 
   return (
     <div
-      className={`group relative bg-[var(--graph-surface)]/90 backdrop-blur-md
-        shadow-lg ${densityGlow(bugDensity)}
+      className={`group relative bg-[var(--graph-surface)] backdrop-blur-md
+        shadow-md ${densityGlow(bugDensity)}
         ${selected ? "border-amber-500/80 shadow-[0_0_12px_rgba(245,158,11,0.15)]" : densityBorderColor(bugDensity)}
         transition-[box-shadow,filter,border-color,transform] duration-200
         [@media(hover:hover)]:hover:border-amber-500/60 [@media(hover:hover)]:hover:shadow-xl [@media(hover:hover)]:hover:scale-[1.03]
