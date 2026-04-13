@@ -64,20 +64,20 @@ func NewAzureProvider(apiKey, baseURL string) *ChatProvider {
 	isMaaS := strings.Contains(baseURL, ".inference.ai.azure.com") ||
 		strings.Contains(baseURL, ".services.ai.azure.com")
 
-	// Cognitive Services / AI Foundry endpoints use /openai/chat/completions with Bearer auth
+	// Cognitive Services / AI Foundry endpoints use deployment path with Bearer auth
 	isCognitive := strings.Contains(baseURL, ".cognitiveservices.azure.com")
 
 	authStyle := AuthAPIKey
 	var pathFn func(string) string
 
 	if isCognitive {
-		// Cognitive Services: model in body, /openai/chat/completions path, Bearer auth
+		// Cognitive Services: deployment-based path, Bearer auth
 		authStyle = AuthBearer
 		if apiVersion == "2024-10-21" {
 			apiVersion = "2025-04-01-preview"
 		}
-		pathFn = func(_ string) string {
-			return "/openai/chat/completions?api-version=" + apiVersion
+		pathFn = func(model string) string {
+			return "/openai/deployments/" + model + "/chat/completions?api-version=" + apiVersion
 		}
 	} else if !isMaaS {
 		// Classic Azure OpenAI: deployment name in URL path
