@@ -16,6 +16,7 @@ export function useFeatureFlags() {
         `/api/v1/installations/${api.active?.id}/features`,
       ),
     enabled: !!api.active,
+    staleTime: 5 * 60 * 1000,
   });
 }
 
@@ -29,5 +30,8 @@ export function useSaveFeatureFlags() {
         flags,
       ),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["feature-flags"] }),
+    onError: (err: Error) => {
+      console.error("[save-feature-flags] failed:", err.message);
+    },
   });
 }

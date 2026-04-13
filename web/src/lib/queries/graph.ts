@@ -13,6 +13,7 @@ export function useGraphData() {
         `/api/v1/repos/${activeId}/graph`
       ),
     enabled: !!activeId && !!api.active,
+    staleTime: 2 * 60 * 1000,
   });
 }
 
@@ -29,5 +30,6 @@ export function useFileMemory(repoId: number | undefined, filePath: string | nul
         traces: { trace_type: string; content: string; pr_number: number; created_at: string }[];
       }>(`/api/v1/repos/${repoId}/files/${filePath}`),
     enabled: !!repoId && !!filePath && !!api.active,
+    staleTime: 2 * 60 * 1000,
   });
 }
