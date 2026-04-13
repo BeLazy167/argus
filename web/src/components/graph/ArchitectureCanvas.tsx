@@ -246,9 +246,9 @@ function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQu
         style: {
           width: maxX - minX + PAD_X * 2,
           height: maxY - minY + PAD_Y + PAD_X,
-          backgroundColor: "rgba(20, 20, 30, 0.5)",
+          backgroundColor: "var(--graph-group-bg)",
           borderRadius: 0,
-          border: "1px solid rgba(71, 85, 105, 0.3)",
+          border: "1px solid var(--graph-border)",
           pointerEvents: "none" as const,
         },
         selectable: false,
@@ -408,13 +408,13 @@ function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQu
         <Background color="var(--graph-dots)" gap={32} size={1} />
         <Controls
           position="bottom-left"
-          className="!bg-[var(--graph-surface)] !border-slate-800 !shadow-2xl
-            [&>button]:!bg-[var(--graph-surface)] [&>button]:!border-slate-800 [&>button]:!text-slate-500
-            [&>button:hover]:!bg-slate-800/50 [&>button:hover]:!text-slate-300"
+          className="!bg-[var(--graph-surface)] !border-[var(--graph-border)] !shadow-2xl
+            [&>button]:!bg-[var(--graph-surface)] [&>button]:!border-[var(--graph-border)] [&>button]:!text-[var(--graph-text-dim)]
+            [&>button:hover]:!bg-[var(--graph-control-bg)] [&>button:hover]:!text-[var(--graph-text)]"
         />
         <MiniMap
           position="bottom-right"
-          className="!bg-[var(--graph-bg)]/90 !border-slate-800"
+          className="!bg-[var(--graph-bg)]/90 !border-[var(--graph-border)]"
           nodeColor={(n) => LANG_COLORS[n.data?.language as string] ?? "var(--graph-lang-default)"}
           maskColor="rgba(0,0,0,0.7)"
           pannable
@@ -423,7 +423,7 @@ function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQu
       </ReactFlow>
 
       {/* Direction toggle + fit-all */}
-      <div className="absolute top-4 right-4 z-10 flex gap-1 bg-[var(--graph-surface)]/80 backdrop-blur-sm border border-slate-800 p-0.5">
+      <div className="absolute top-4 right-4 z-10 flex gap-1 bg-[var(--graph-surface)]/80 backdrop-blur-sm border border-[var(--graph-border)] p-0.5">
         {([
           { key: "TB" as const, label: "↕", title: "Top-to-bottom layout" },
           { key: "LR" as const, label: "↔", title: "Left-to-right layout" },
@@ -433,43 +433,43 @@ function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQu
             onClick={() => setDirection(key)}
             title={title}
             className={`px-2.5 py-1 text-[11px] font-mono transition-all duration-200 ${
-              direction === key ? "bg-slate-800 text-slate-200 shadow-sm" : "text-slate-500 hover:text-slate-300"
+              direction === key ? "bg-[var(--graph-control-bg)] text-[var(--graph-text)] shadow-sm" : "text-[var(--graph-text-dim)] hover:text-[var(--graph-text)]"
             }`}
           >
             {label}
             <span className="hidden lg:inline ml-1">{key === "TB" ? "Vertical" : "Horizontal"}</span>
           </button>
         ))}
-        <div className="w-px bg-slate-800 mx-0.5" />
+        <div className="w-px bg-[var(--graph-border)] mx-0.5" />
         <button
           onClick={() => fitView({ padding: 0.15, duration: 300 })}
           title="Fit all nodes"
-          className="px-2.5 py-1 text-[11px] font-mono text-slate-500 hover:text-slate-300 transition-all duration-200"
+          className="px-2.5 py-1 text-[11px] font-mono text-[var(--graph-text-dim)] hover:text-[var(--graph-text)] transition-all duration-200"
         >
           ⊞
         </button>
       </div>
 
       {/* Language + risk legend */}
-      <div className="absolute top-4 left-4 z-10 bg-[var(--graph-surface)]/80 backdrop-blur-sm border border-slate-800 px-3 py-2">
+      <div className="absolute top-4 left-4 z-10 bg-[var(--graph-surface)]/80 backdrop-blur-sm border border-[var(--graph-border)] px-3 py-2">
         <div className="flex gap-3 items-center">
           {[
-            { color: "bg-blue-400", label: "TS" },
-            { color: "bg-emerald-400", label: "PY" },
-            { color: "bg-cyan-400", label: "Go" },
-            { color: "bg-orange-400", label: "RS" },
+            { color: "bg-blue-500", label: "TS" },
+            { color: "bg-emerald-500", label: "PY" },
+            { color: "bg-cyan-500", label: "Go" },
+            { color: "bg-orange-500", label: "RS" },
           ].map(({ color, label }) => (
             <div key={label} className="flex items-center gap-1">
               <span className={`w-1.5 h-1.5 rounded-full ${color}`} />
-              <span className="text-[10px] font-mono text-slate-400">{label}</span>
+              <span className="text-[10px] font-mono text-[var(--graph-text-dim)]">{label}</span>
             </div>
           ))}
         </div>
-        <div className="flex items-center gap-1.5 mt-1.5 pt-1.5 border-t border-slate-800/50">
-          <span className="text-[9px] font-mono text-slate-500">0</span>
+        <div className="flex items-center gap-1.5 mt-1.5 pt-1.5 border-t border-[var(--graph-border)]">
+          <span className="text-[9px] font-mono text-[var(--graph-text-muted)]">0</span>
           <div className="h-1.5 w-20 bg-gradient-to-r from-emerald-500 via-yellow-500 to-red-500 opacity-70" />
-          <span className="text-[9px] font-mono text-slate-500">10</span>
-          <span className="text-[9px] font-mono text-slate-600 ml-1">risk</span>
+          <span className="text-[9px] font-mono text-[var(--graph-text-muted)]">10</span>
+          <span className="text-[9px] font-mono text-[var(--graph-text-muted)] ml-1">risk</span>
         </div>
       </div>
     </>

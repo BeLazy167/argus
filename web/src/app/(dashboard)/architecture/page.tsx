@@ -50,18 +50,18 @@ export default function ArchitecturePage() {
       </div>
 
       {/* Toolbar: lens switcher + search + stats */}
-      <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3 border-b border-slate-800/50 px-5 py-3 shrink-0 bg-[var(--graph-bg)]">
+      <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3 border-b border-iron px-5 py-3 shrink-0 bg-[var(--graph-bg)]">
         <LensBar active={lens} onChange={(l) => setLens(l as Lens)} fileCounts={lensCounts} />
 
         {/* Search */}
         <div className="relative">
-          <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 text-slate-600" />
+          <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 text-slate-text" />
           <input
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder="Find file..."
-            className="pl-7 pr-2 py-1.5 w-44 text-[11px] font-mono bg-[var(--graph-surface)] border border-slate-800 text-slate-300 placeholder:text-slate-600 focus:border-amber-500/50 focus:outline-none transition-colors"
+            className="pl-7 pr-2 py-1.5 w-44 text-[11px] font-mono bg-card border border-iron text-foreground placeholder:text-slate-text focus:border-amber-500/50 focus:outline-none transition-colors"
           />
         </div>
 
@@ -87,13 +87,13 @@ export default function ArchitecturePage() {
             )}
             <div className="flex items-center gap-3 text-[11px] font-mono text-slate-500 tabular-nums">
               <span>{archData.files.length} files</span>
-              <span className="text-slate-700">·</span>
+              <span className="text-iron">·</span>
               <span>{archData.edges.length} deps</span>
-              <span className="text-slate-700">·</span>
+              <span className="text-iron">·</span>
               <span className={archData.summary.choke_points.length > 0 ? "text-amber-500" : ""}>
                 {archData.summary.choke_points.length} chokepoints
               </span>
-              <span className="text-slate-700">·</span>
+              <span className="text-iron">·</span>
               <span className={archData.summary.hotspots.length > 0 ? "text-amber-500" : ""}>
                 {archData.summary.hotspots.length} hotspots
               </span>
@@ -115,7 +115,7 @@ export default function ArchitecturePage() {
 
       {/* Onboarding guide */}
       {showGuide && archData && archData.files.length > 0 && (
-        <div className="px-5 py-2 border-b border-slate-800/50 bg-[var(--graph-surface)]/50 flex items-start gap-3 shrink-0">
+        <div className="px-5 py-2 border-b border-iron bg-card/50 flex items-start gap-3 shrink-0">
           <Info className="h-3 w-3 text-amber-500 mt-0.5 shrink-0" />
           <div className="text-[10px] font-mono text-slate-400 leading-relaxed space-y-0.5">
             <p>
@@ -166,7 +166,7 @@ export default function ArchitecturePage() {
           ) : !archData || archData.files.length === 0 ? (
             <div className="flex items-center justify-center h-full">
               <div className="text-center max-w-sm">
-                <div className="w-14 h-14 rounded-full border border-slate-800/50 bg-slate-800/30 flex items-center justify-center mx-auto mb-5">
+                <div className="w-14 h-14 rounded-full border border-iron bg-card/30 flex items-center justify-center mx-auto mb-5">
                   <Network className="h-6 w-6 text-slate-500" />
                 </div>
                 <h3 className="text-sm font-mono font-medium text-slate-400 mb-2">
@@ -190,7 +190,7 @@ export default function ArchitecturePage() {
         </div>
 
         {selectedFilePath && (
-          <div className="border-t md:border-t-0 md:border-l border-slate-800/50 bg-[var(--graph-bg)] md:w-[320px] md:shrink-0 h-[50vh] md:h-auto overflow-hidden">
+          <div className="border-t md:border-t-0 md:border-l border-iron bg-[var(--graph-bg)] md:w-[320px] md:shrink-0 h-[50vh] md:h-auto overflow-hidden">
             <FileMemorySidebar
               filePath={selectedFilePath}
               archFile={selectedFile}
