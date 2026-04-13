@@ -23,7 +23,7 @@ function ModuleNode({ data }: NodeProps) {
 
   return (
     <div
-      className={`group relative border ${lang.border} bg-[#12121a]/90 backdrop-blur-md
+      className={`group relative border ${lang.border} bg-[var(--graph-surface)]/90 backdrop-blur-md
         shadow-lg ${lang.glow} transition-[box-shadow,filter,border-color] duration-200
         [@media(hover:hover)]:hover:shadow-xl [@media(hover:hover)]:hover:brightness-125 [@media(hover:hover)]:hover:border-opacity-60 cursor-pointer
         ${isInterface ? "px-2.5 py-1.5 min-w-[100px]" : "px-3 py-2 min-w-[130px]"}

@@ -151,7 +151,7 @@ export default function FileMemorySidebar({ filePath, onClose, archFile, allFile
   const fileName = filePath.split("/").pop() ?? filePath;
 
   return (
-    <div className="h-full bg-[#0e0e18] flex flex-col overflow-hidden animate-slide-in-right">
+    <div className="h-full bg-[var(--graph-panel)] flex flex-col overflow-hidden animate-slide-in-right">
       {/* Header */}
       <div className="flex items-center gap-2 px-4 py-3 border-b border-slate-800/50 shrink-0">
         <div className="flex-1 min-w-0">

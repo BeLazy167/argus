@@ -24,10 +24,10 @@ const nodeTypes = { module: ModuleNode, group: GroupNode };
 
 /** Base edge styles by relationship kind */
 const EDGE_COLORS: Record<string, { base: string; highlight: string; width: number; dash?: string }> = {
-  imports: { base: "#334155", highlight: "#64748b", width: 1.5 },
-  calls: { base: "#854d0e", highlight: "#f59e0b", width: 1.5, dash: "6 4" },
-  uses_type: { base: "#4c1d95", highlight: "#8b5cf6", width: 1, dash: "3 3" },
-  implements: { base: "#14532d", highlight: "#22c55e", width: 1.5 },
+  imports: { base: "var(--graph-edge-import)", highlight: "var(--graph-edge-import-hi)", width: 1.5 },
+  calls: { base: "var(--graph-edge-call)", highlight: "var(--graph-edge-call-hi)", width: 1.5, dash: "6 4" },
+  uses_type: { base: "var(--graph-edge-type)", highlight: "var(--graph-edge-type-hi)", width: 1, dash: "3 3" },
+  implements: { base: "var(--graph-edge-impl)", highlight: "var(--graph-edge-impl-hi)", width: 1.5 },
 };
 
 type Props = {
@@ -40,11 +40,11 @@ type Props = {
 
 function langColor(n: Node): string {
   const lang = n.data?.language as string;
-  if (lang === "typescript" || lang === "javascript") return "#3b82f6";
-  if (lang === "go") return "#06b6d4";
-  if (lang === "python") return "#10b981";
-  if (lang === "rust") return "#f97316";
-  return "#475569";
+  if (lang === "typescript" || lang === "javascript") return "var(--graph-lang-ts)";
+  if (lang === "go") return "var(--graph-lang-go)";
+  if (lang === "python") return "var(--graph-lang-py)";
+  if (lang === "rust") return "var(--graph-lang-rs)";
+  return "var(--graph-lang-default)";
 }
 
 type InnerProps = Props & { direction: "TB" | "LR" };
@@ -183,21 +183,21 @@ function GraphCanvasInner({ graphNodes, graphEdges, repoFullName, defaultBranch,
       fitView
       fitViewOptions={{ padding: 0.15 }}
       proOptions={{ hideAttribution: true }}
-      className="!bg-[#0a0a12]"
+      className="!bg-[var(--graph-bg)]"
       minZoom={0.2}
       maxZoom={2.5}
       defaultEdgeOptions={{ type: "smoothstep" }}
     >
-      <Background color="#1a1a2e" gap={32} size={1} />
+      <Background color="var(--graph-dots)" gap={32} size={1} />
       <Controls
         position="bottom-left"
-        className="!bg-[#12121a] !border-slate-800 !shadow-2xl !rounded-lg
-          [&>button]:!bg-[#12121a] [&>button]:!border-slate-800 [&>button]:!text-slate-500
+        className="!bg-[var(--graph-surface)] !border-slate-800 !shadow-2xl !rounded-lg
+          [&>button]:!bg-[var(--graph-surface)] [&>button]:!border-slate-800 [&>button]:!text-slate-500
           [&>button:hover]:!bg-slate-800/50 [&>button:hover]:!text-slate-300"
       />
       <MiniMap
         position="bottom-right"
-        className="!bg-[#0a0a12]/90 !border-slate-800 !rounded-lg"
+        className="!bg-[var(--graph-bg)]/90 !border-slate-800 !rounded-lg"
         nodeColor={langColor}
         maskColor="rgba(0,0,0,0.8)"
         pannable
@@ -212,7 +212,7 @@ export default function GraphCanvas(props: Props) {
 
   return (
     <div className="h-full w-full relative">
-      <div className="absolute top-4 right-4 z-10 flex gap-1 bg-[#12121a]/80 backdrop-blur-sm border border-slate-800 p-0.5">
+      <div className="absolute top-4 right-4 z-10 flex gap-1 bg-[var(--graph-surface)]/80 backdrop-blur-sm border border-slate-800 p-0.5">
         {([
           { key: "TB" as const, label: "↕" },
           { key: "LR" as const, label: "↔" },
@@ -231,7 +231,7 @@ export default function GraphCanvas(props: Props) {
         ))}
       </div>
 
-      <div className="absolute bottom-4 left-16 z-10 flex gap-3 bg-[#12121a]/80 backdrop-blur-sm border border-slate-800 px-3 py-1.5">
+      <div className="absolute bottom-4 left-16 z-10 flex gap-3 bg-[var(--graph-surface)]/80 backdrop-blur-sm border border-slate-800 px-3 py-1.5">
         {[
           { color: "bg-blue-400", label: "TS" },
           { color: "bg-emerald-400", label: "PY" },

@@ -25,7 +25,7 @@ const titles: Record<Review["status"], string> = {
 export function StatusBadge({ status }: { status: Review["status"] }) {
   return (
     <span
-      className={`inline-flex items-center gap-1 rounded-sm border px-2 py-0.5 text-[11px] font-mono uppercase tracking-wider ${styles[status]} ${status === "in_progress" ? "animate-pulse" : ""}`}
+      className={`inline-flex items-center gap-1 border px-2 py-0.5 text-[11px] font-mono uppercase tracking-wider ${styles[status]} ${status === "in_progress" ? "animate-pulse" : ""}`}
       title={titles[status]}
     >
       {status === "in_progress" && (

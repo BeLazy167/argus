@@ -16,7 +16,7 @@ interface LensBarProps {
 export default function LensBar({ active, onChange, fileCounts }: LensBarProps) {
   return (
     <div
-      className="flex items-center gap-1 bg-[#12121a]/80 backdrop-blur-sm border border-slate-800 p-1"
+      className="flex items-center gap-1 bg-[var(--graph-surface)]/80 backdrop-blur-sm border border-slate-800 p-1"
       role="tablist"
       aria-label="Architecture view lens"
     >

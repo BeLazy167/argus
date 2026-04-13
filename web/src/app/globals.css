@@ -45,6 +45,9 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
+  --color-graph-bg: var(--graph-bg);
+  --color-graph-surface: var(--graph-surface);
+  --color-graph-panel: var(--graph-panel);
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -58,6 +61,7 @@
   --color-ember: var(--primary) / 0.5;
   --color-ash: var(--muted-foreground);
   --color-slate-text: var(--muted-foreground);
+  --color-amber-glow: oklch(0.77 0.15 75);
 
   /* Fonts */
   --font-display: var(--font-black-ops-one, "Black Ops One"), sans-serif;
@@ -105,10 +109,10 @@
 /* ── Argus-specific utilities ── */
 @layer utilities {
   .text-amber-glow {
-    color: oklch(0.77 0.15 75);
+    color: var(--color-amber-glow);
   }
   .border-amber-glow {
-    border-color: oklch(0.77 0.15 75 / 0.4);
+    border-color: color-mix(in oklch, var(--color-amber-glow) 40%, transparent);
   }
   .bg-noise {
     background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.03'/%3E%3C/svg%3E");
@@ -122,6 +126,24 @@
 }
 
 .dark {
+  /* Graph tokens */
+  --graph-bg: #0a0a12;
+  --graph-surface: #12121a;
+  --graph-panel: #0e0e18;
+  --graph-dots: #1a1a2e;
+  --graph-edge-import: #334155;
+  --graph-edge-import-hi: #64748b;
+  --graph-edge-call: #854d0e;
+  --graph-edge-call-hi: #f59e0b;
+  --graph-edge-type: #4c1d95;
+  --graph-edge-type-hi: #8b5cf6;
+  --graph-edge-impl: #14532d;
+  --graph-edge-impl-hi: #22c55e;
+  --graph-lang-ts: #3b82f6;
+  --graph-lang-go: #06b6d4;
+  --graph-lang-py: #10b981;
+  --graph-lang-rs: #f97316;
+  --graph-lang-default: #475569;
 
   --background: oklch(0.147 0.004 49.3);
 
@@ -187,6 +209,25 @@
 }
 
 .light {
+  /* Graph tokens */
+  --graph-bg: #f5f3ef;
+  --graph-surface: #ebe8e3;
+  --graph-panel: #e8e5e0;
+  --graph-dots: #d5d0c8;
+  --graph-edge-import: #94a3b8;
+  --graph-edge-import-hi: #64748b;
+  --graph-edge-call: #d97706;
+  --graph-edge-call-hi: #b45309;
+  --graph-edge-type: #7c3aed;
+  --graph-edge-type-hi: #6d28d9;
+  --graph-edge-impl: #16a34a;
+  --graph-edge-impl-hi: #15803d;
+  --graph-lang-ts: #2563eb;
+  --graph-lang-go: #0891b2;
+  --graph-lang-py: #059669;
+  --graph-lang-rs: #ea580c;
+  --graph-lang-default: #64748b;
+
   --background: oklch(0.97 0.005 60);
   --foreground: oklch(0.18 0.01 45);
   --card: oklch(0.93 0.006 55);

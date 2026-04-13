@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useMemo, useState } from "react";
-import { usePagination, PaginationBar } from "@/components/dashboard/pagination";
+import { usePagination, PaginationBar, useSearchParamState, useUpdateSearchParams } from "@/components/dashboard/pagination";
 import { Plus, Trash2, Loader2, Brain, Filter, TrendingUp } from "lucide-react";
 import {
   usePatterns,
@@ -58,8 +58,9 @@ export default function PatternsPage() {
   const deletePattern = useDeletePattern();
   const [content, setContent] = useState("");
   const [selectedRepoId, setSelectedRepoId] = useState<number | undefined>();
-  const [filterRepo, setFilterRepo] = useState<string>("all");
-  const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
+  const [filterRepo] = useSearchParamState("repo", "all");
+  const [sourceFilter] = useSearchParamState("source", "all");
+  const updateParams = useUpdateSearchParams();
   const [expandedId, setExpandedId] = useState<number | null>(null);
 
   const repoMap = useMemo(() => {
@@ -233,7 +234,7 @@ export default function PatternsPage() {
             return (
               <button
                 key={tab}
-                onClick={() => { setSourceFilter(tab); setPage(0); }}
+                onClick={() => updateParams({ source: tab === "all" ? "" : tab, page: "" })}
                 className={`rounded border px-2.5 py-1 text-[10px] font-mono transition-colors ${
                   isActive ? SOURCE_TAB_ACTIVE_STYLES[tab] : "border-iron text-slate-text hover:text-foreground"
                 }`}
@@ -250,7 +251,7 @@ export default function PatternsPage() {
         <Filter className="h-3.5 w-3.5 text-slate-text" />
         <div className="flex gap-1.5 flex-wrap">
           <button
-            onClick={() => { setFilterRepo("all"); setPage(0); }}
+            onClick={() => updateParams({ repo: "", page: "" })}
             className={`rounded border px-2.5 py-1 text-[10px] font-mono transition-colors ${
               filterRepo === "all"
                 ? "border-amber/40 bg-amber/10 text-amber"
@@ -260,7 +261,7 @@ export default function PatternsPage() {
             All repos
           </button>
           <button
-            onClick={() => { setFilterRepo("org"); setPage(0); }}
+            onClick={() => updateParams({ repo: "org", page: "" })}
             className={`rounded border px-2.5 py-1 text-[10px] font-mono transition-colors ${
               filterRepo === "org"
                 ? "border-purple-500/40 bg-purple-500/10 text-purple-400"
@@ -275,7 +276,7 @@ export default function PatternsPage() {
             return (
               <button
                 key={r.id}
-                onClick={() => { setFilterRepo(String(r.id)); setPage(0); }}
+                onClick={() => updateParams({ repo: String(r.id), page: "" })}
                 className={`rounded border px-2.5 py-1 text-[10px] font-mono transition-colors ${
                   filterRepo === String(r.id)
                     ? "border-blue-500/40 bg-blue-500/10 text-blue-400"

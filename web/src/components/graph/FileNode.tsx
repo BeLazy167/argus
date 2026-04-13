@@ -68,7 +68,7 @@ function FileNode({ data }: NodeProps) {
 
   return (
     <div
-      className={`group relative bg-[#12121a]/90 backdrop-blur-md
+      className={`group relative bg-[var(--graph-surface)]/90 backdrop-blur-md
         shadow-lg ${densityGlow(bugDensity)}
         ${selected ? "border-amber-500/80 shadow-[0_0_12px_rgba(245,158,11,0.15)]" : densityBorderColor(bugDensity)}
         transition-[box-shadow,filter,border-color,transform] duration-200
