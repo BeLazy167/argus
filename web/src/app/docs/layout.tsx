@@ -8,18 +8,20 @@ import type { ReactNode } from "react";
 export default function DocsLayout({ children }: { children: ReactNode }) {
   return (
     <div className="flex min-h-screen bg-[#0a0a12] text-slate-200">
-      <aside className="w-64 border-r border-slate-800 p-6 shrink-0">
-        <Link href="/" className="block text-sm font-mono text-slate-300 hover:text-slate-100 mb-6">
-          ← Back
-        </Link>
-        <h2 className="text-xs font-mono text-slate-500 uppercase mb-3 tracking-wider">Docs</h2>
-        <nav className="space-y-1">
-          <DocLink href="/docs/features/issue-acceptance">Issue acceptance</DocLink>
-          <DocLink href="/docs/features/cross-pr-checks">Cross-repo PR checks</DocLink>
-          <DocLink href="/docs/faq">FAQ</DocLink>
-        </nav>
+      <aside className="w-64 border-r border-slate-800 shrink-0">
+        <div className="sticky top-20 p-6 max-h-[calc(100vh-5rem)] overflow-y-auto">
+          <Link href="/" className="block text-sm font-mono text-slate-300 hover:text-slate-100 mb-6">
+            &larr; Back
+          </Link>
+          <h2 className="text-xs font-mono text-slate-500 uppercase mb-3 tracking-wider">Docs</h2>
+          <nav className="space-y-1">
+            <DocLink href="/docs/features/issue-acceptance">Issue acceptance</DocLink>
+            <DocLink href="/docs/features/cross-pr-checks">Cross-repo PR checks</DocLink>
+            <DocLink href="/docs/faq">FAQ</DocLink>
+          </nav>
+        </div>
       </aside>
-      <main className="flex-1 max-w-3xl p-10 font-mono text-slate-300 leading-relaxed">
+      <main className="flex-1 max-w-3xl p-10 font-mono text-slate-300 leading-relaxed" style={{ overflowWrap: "break-word" }}>
         {children}
       </main>
     </div>
