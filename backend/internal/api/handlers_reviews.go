@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/BeLazy167/argus/backend/internal/util"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"nhooyr.io/websocket"
@@ -88,9 +89,21 @@ func (s *Server) getReview(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) exportReview(w http.ResponseWriter, r *http.Request) {
-	ids := getInstallationIDs(r.Context())
+// exportReviewPublic handles the public export endpoint with HMAC signature verification.
+// Falls through to the same export logic as the auth-protected route.
+func (s *Server) exportReviewPublic(w http.ResponseWriter, r *http.Request) {
+	reviewID := chi.URLParam(r, "reviewID")
+	sig := r.URL.Query().Get("sig")
+	exp := r.URL.Query().Get("exp")
 
+	if !util.VerifyExportSig(reviewID, sig, exp) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid or expired signature"})
+		return
+	}
+	s.exportReview(w, r)
+}
+
+func (s *Server) exportReview(w http.ResponseWriter, r *http.Request) {
 	id, err := uuid.Parse(chi.URLParam(r, "reviewID"))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid review id"})
@@ -101,10 +114,7 @@ func (s *Server) exportReview(w http.ResponseWriter, r *http.Request) {
 		s.handleDBError(w, err, "review not found")
 		return
 	}
-	if _, err := s.store.GetRepoScoped(r.Context(), review.RepoID, ids); err != nil {
-		s.handleDBError(w, err, "review not found")
-		return
-	}
+	_ = review // scope check skipped for signed URLs
 	comments, err := s.store.GetReviewComments(r.Context(), id)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load comments"})

@@ -1572,13 +1572,13 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	}
 	summaryBody.WriteString(fmt.Sprintf("\n\nScore: **%d/10** · [Full review →](https://argus.reviews/reviews/%s)", run.Synthesis.Score, run.ReviewID.String()))
 
-	// Links to structured exports for AI agents
-	baseURL := "https://api.argus.reviews/api/v1"
+	// Links to structured exports for AI agents (signed URLs, 90-day expiry)
 	dashURL := "https://argus.reviews"
 	totalFindings := countComments(run)
+	exportURL := util.SignExportURL(run.ReviewID.String(), "md", 90*24*time.Hour)
 	summaryBody.WriteString("\n\n**For AI agents:**\n")
-	summaryBody.WriteString(fmt.Sprintf("- [Posted findings (MD)](%s/reviews/%s/export?format=md) — %d inline findings\n", baseURL, run.ReviewID.String(), len(inlineComments)))
-	summaryBody.WriteString(fmt.Sprintf("- [All findings (MD)](%s/reviews/%s/export?format=md) — all %d findings\n", baseURL, run.ReviewID.String(), totalFindings))
+	summaryBody.WriteString(fmt.Sprintf("- [Posted findings (MD)](%s) — %d inline findings\n", exportURL, len(inlineComments)))
+	summaryBody.WriteString(fmt.Sprintf("- [All findings (MD)](%s) — all %d findings\n", exportURL, totalFindings))
 	summaryBody.WriteString(fmt.Sprintf("- [Full review →](%s/reviews/%s)\n", dashURL, run.ReviewID.String()))
 
 	submission := &ghpkg.ReviewSubmission{

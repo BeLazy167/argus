@@ -75,6 +75,9 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 	// WebSocket stream — outside /api/v1 auth, handles own auth from query params
 	r.Get("/api/v1/reviews/{reviewID}/stream", s.streamReviewWS)
 
+	// Public export — verified via HMAC signature in URL (linked from GitHub comments)
+	r.Get("/api/v1/reviews/{reviewID}/export", s.exportReviewPublic)
+
 	// API v1 (authenticated via JWT)
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Use(s.jwtAuth)
@@ -154,7 +157,7 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 				r.Get("/repos/{repoID}/reviews", s.listReviews)
 				r.Post("/repos/{repoID}/reviews", s.triggerReview)
 				r.Get("/reviews/{reviewID}", s.getReview)
-				r.Get("/reviews/{reviewID}/export", s.exportReview)
+				// export also accessible via signed URL at public route above
 				r.Post("/reviews/{reviewID}/retry", s.retryReview)
 
 				// Rules
