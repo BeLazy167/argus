@@ -31,11 +31,11 @@ function StatReadout({
 }) {
   return (
     <div className="border-b border-iron/40 pb-3">
-      <span className="text-[10px] font-mono uppercase tracking-[0.15em] text-slate-text block">
+      <span className="text-[10px] font-mono uppercase tracking-[0.1em] text-slate-text block whitespace-nowrap">
         {label}
       </span>
       <p
-        className={`text-xl font-mono font-medium mt-0.5 ${
+        className={`text-lg font-mono font-medium mt-0.5 ${
           accent ? "text-amber" : "text-foreground"
         }`}
       >
