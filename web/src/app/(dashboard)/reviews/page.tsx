@@ -47,9 +47,9 @@ function ReviewRow({
 }) {
   const typeBadge = review.is_incremental ? "Inc" : review.deep_review ? "Deep" : "Review";
   const typeTitle = review.is_incremental
-    ? "Incremental review"
+    ? "Incremental \u2014 re-review of updated PR"
     : review.deep_review
-      ? "Deep review with 4 specialists"
+      ? "Deep Review \u2014 multi-specialist analysis"
       : "Standard review";
   const badgeColor = review.deep_review
     ? "bg-purple-400/10 text-purple-400 border-purple-400/20"

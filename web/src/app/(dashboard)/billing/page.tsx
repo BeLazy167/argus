@@ -47,7 +47,7 @@ export default function BillingPage() {
           </div>
         )}
 
-        <div className="mt-6 grid grid-cols-2 gap-4">
+        <div className="mt-6 grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div className="bg-charcoal border border-iron p-3">
             <p className="text-xs text-zinc-500 font-mono">Repos</p>
             <p className="text-lg font-semibold text-white font-mono">
@@ -72,6 +72,28 @@ export default function BillingPage() {
               {tier === "pro" ? "4 (all)" : "1 (primary)"}
             </p>
           </div>
+        </div>
+
+        <div className="mt-6 border border-iron bg-charcoal p-5">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-[11px] font-mono text-slate-text uppercase tracking-wider">Monthly Usage</span>
+          </div>
+          <div className="flex items-center gap-3">
+            <div className="flex-1 h-1.5 bg-iron/30">
+              <div className="h-full bg-amber" style={{ width: '0%' }} />
+            </div>
+            <span className="text-[10px] font-mono text-slate-text">&mdash; / &mdash; reviews</span>
+          </div>
+          <p className="text-[10px] font-mono text-slate-text/60 mt-2">Usage data available after first review cycle.</p>
+        </div>
+
+        <div className="mt-4">
+          <a
+            href="mailto:support@argus.reviews"
+            className="text-[11px] font-mono text-amber hover:underline"
+          >
+            Contact support to manage subscription &rarr;
+          </a>
         </div>
       </div>
     </>

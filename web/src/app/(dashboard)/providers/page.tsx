@@ -57,7 +57,7 @@ const BADGE_STYLES: Record<BadgeVariant, string> = {
 
 function StatusBadge({ variant, label }: { variant: BadgeVariant; label: string }) {
   return (
-    <span className={`inline-flex items-center rounded-sm border px-1.5 py-0.5 text-[9px] font-mono uppercase tracking-wider ${BADGE_STYLES[variant]}`}>
+    <span className={`inline-flex items-center rounded-sm border px-1.5 py-0.5 text-[9px] font-mono uppercase tracking-wider whitespace-nowrap ${BADGE_STYLES[variant]}`}>
       {label}
     </span>
   );
@@ -242,7 +242,7 @@ function SupermemoryCard() {
             className="flex items-center gap-2 border border-red-400/30 px-3 py-1 text-[11px] font-mono text-red-400 hover:bg-red-400/10 transition-colors disabled:opacity-50"
           >
             <Trash2 className="h-3 w-3" />
-            {delKey.isPending ? "Removing..." : "Remove"}
+            {delKey.isPending ? "Deleting..." : "Delete"}
           </button>
         )}
       </div>
@@ -272,10 +272,10 @@ export default function ProvidersPage() {
     <>
       <div className="mb-6">
         <h1 className="font-mono text-2xl font-bold text-foreground">
-          Providers
+          Integrations
         </h1>
         <p className="text-xs font-mono text-slate-text mt-1">
-          API keys for LLM providers. Keys are encrypted at rest with AES-256-GCM.
+          API keys and service connections. Keys are encrypted at rest with AES-256-GCM.
         </p>
       </div>
 
@@ -291,7 +291,7 @@ export default function ProvidersPage() {
         Institutional memory powered by Supermemory. Bring your own API key from{" "}
         <a href="https://app.supermemory.ai" target="_blank" rel="noopener noreferrer" className="text-amber hover:underline">app.supermemory.ai</a>.
       </p>
-      <div className="mb-10 max-w-md">
+      <div className="mb-10 max-w-sm">
         <SupermemoryCard />
       </div>
 
@@ -302,15 +302,15 @@ export default function ProvidersPage() {
             LLM Providers
           </h2>
         </div>
-        <span className="text-[10px] font-mono text-slate-text ml-auto">
+        <span className="text-[10px] font-mono text-slate-text">
           {configuredCount}/{PROVIDERS.length} configured
         </span>
       </div>
-      <p className="text-[11px] font-mono text-slate-text mb-4">
+      <p className="text-[11px] font-mono text-slate-text mb-4 break-words">
         Bring your own API keys. Keys are scoped to <span className="text-foreground">{active?.org_login ?? "your org"}</span>.
         Providers configured here become available for model selection in settings.
       </p>
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
         {PROVIDERS.map((p) => (
           <ProviderKeyCard
             key={p}

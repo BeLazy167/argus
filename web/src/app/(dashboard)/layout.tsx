@@ -115,14 +115,14 @@ export default function DashboardLayout({
         />
       </div>
       <SidebarRepoSelector />
-      <nav className="flex-1 px-3 py-4">
+      <nav className="flex-1 overflow-y-auto px-3 py-4">
         <div className="space-y-1">
           {orgNavItems.map((item) => (
             <SidebarLink key={item.href} {...item} active={isActive(item.href)} />
           ))}
         </div>
         <div className="my-2 border-t border-sidebar-border" />
-        <p className="px-3 pt-1 pb-1.5 text-[9px] font-mono text-slate-text/50 uppercase tracking-wider">Repo</p>
+        <p className="px-3 pt-1 pb-1.5 text-[9px] font-mono text-slate-text/50 uppercase tracking-wider">Analysis</p>
         <div className="space-y-1">
           {repoNavItems.map((item) => (
             <SidebarLink key={item.href} {...item} active={isActive(item.href)} />

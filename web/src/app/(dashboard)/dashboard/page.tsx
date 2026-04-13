@@ -45,8 +45,8 @@ function StatReadout({
   );
 }
 
-function RiskBadge({ score }: { score?: number }) {
-  if (score == null) return <span className="text-[10px] font-mono text-slate-text">--</span>;
+function RiskBadge({ score, status }: { score?: number; status?: string }) {
+  if (score == null) return <span className="text-[10px] font-mono text-slate-text/50">{status === "pending" || status === "in_progress" ? "Pending" : "\u2014"}</span>;
 
   let label: string;
   let classes: string;
@@ -62,7 +62,7 @@ function RiskBadge({ score }: { score?: number }) {
   }
 
   return (
-    <span className={`inline-flex items-center gap-1.5 border px-2 py-0.5 text-[10px] font-mono font-medium ${classes}`}>
+    <span className={`inline-flex items-center gap-1.5 border px-2 py-0.5 text-[10px] font-mono font-medium ${classes}`} title="Review quality score (0-10)">
       {label}
       <span className="opacity-60">{score}</span>
     </span>
@@ -76,7 +76,7 @@ function getVerdict(review: { score?: number; status: string }): { label: string
   if (review.status === "failed") {
     return { label: "Failed", className: "text-red-400", icon: X };
   }
-  if (!review.score) return { label: "--", className: "text-slate-text" };
+  if (review.score == null) return { label: "\u2014", className: "text-slate-text/50" };
   if (review.score <= 3) return { label: "Escalated", className: "text-red-400", icon: AlertTriangle };
   if (review.score <= 6) return { label: "Review required", className: "text-amber", icon: AlertTriangle };
   if (review.score <= 8) return { label: "Minor issues", className: "text-blue-400", icon: AlertCircle };
@@ -119,7 +119,7 @@ export default function DashboardPage() {
       </div>
 
       {/* Stat Readouts */}
-      <div className="grid gap-x-6 gap-y-3 md:grid-cols-2 lg:grid-cols-5 mb-10">
+      <div className="grid gap-x-6 gap-y-3 grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 mb-10">
         <StatReadout
           label="Catch Rate"
           value={stats ? `${stats.catch_rate}%` : "--"}
@@ -171,15 +171,15 @@ export default function DashboardPage() {
             </p>
           </div>
         ) : (
-          <table className="w-full">
+          <table className="w-full min-w-[700px]">
             <thead>
               <tr className="border-b border-iron/50 text-[10px] font-mono uppercase tracking-wider text-slate-text">
-                <th className="text-left px-5 py-2.5 font-medium">Pull Request</th>
-                <th className="text-left px-3 py-2.5 font-medium">Author</th>
-                <th className="text-left px-3 py-2.5 font-medium">Risk</th>
-                <th className="text-center px-3 py-2.5 font-medium">Files</th>
-                <th className="text-left px-3 py-2.5 font-medium">Verdict</th>
-                <th className="text-right px-5 py-2.5 font-medium">Time</th>
+                <th className="text-left px-5 py-2.5 font-medium whitespace-nowrap">Pull Request</th>
+                <th className="text-left px-3 py-2.5 font-medium whitespace-nowrap">Author</th>
+                <th className="text-left px-3 py-2.5 font-medium whitespace-nowrap">Risk</th>
+                <th className="text-center px-3 py-2.5 font-medium whitespace-nowrap">Files</th>
+                <th className="text-left px-3 py-2.5 font-medium whitespace-nowrap">Verdict</th>
+                <th className="text-right px-5 py-2.5 font-medium whitespace-nowrap">Time</th>
               </tr>
             </thead>
             <tbody>
@@ -200,16 +200,16 @@ export default function DashboardPage() {
                         <span className="text-[11px] font-mono text-slate-text">
                           #{review.pr_number}
                         </span>
-                        <span className="text-xs font-mono text-foreground truncate max-w-[300px]">
+                        <span className="text-xs font-mono text-foreground truncate max-w-[240px]">
                           {review.pr_title}
                         </span>
                         {review.deep_review && (
-                          <span className="inline-flex items-center rounded-sm border bg-purple-400/10 text-purple-400 border-purple-400/30 px-1.5 py-0 text-[9px] font-mono">
+                          <span className="inline-flex items-center rounded-sm border bg-purple-400/10 text-purple-400 border-purple-400/30 px-1.5 py-0 text-[9px] font-mono" title="Deep Review — multi-specialist analysis">
                             Deep
                           </span>
                         )}
                         {review.is_incremental && (
-                          <span className="inline-flex items-center rounded-sm border bg-cyan-400/10 text-cyan-400 border-cyan-400/30 px-1.5 py-0 text-[9px] font-mono">
+                          <span className="inline-flex items-center rounded-sm border bg-cyan-400/10 text-cyan-400 border-cyan-400/30 px-1.5 py-0 text-[9px] font-mono" title="Incremental — re-review of updated PR">
                             Inc
                           </span>
                         )}
@@ -224,11 +224,11 @@ export default function DashboardPage() {
                       </span>
                     </td>
                     <td className="px-3 py-3">
-                      <RiskBadge score={review.score} />
+                      <RiskBadge score={review.score} status={review.status} />
                     </td>
                     <td className="px-3 py-3 text-center">
-                      <span className="text-[11px] font-mono text-slate-text">
-                        {review.file_count ?? "--"}
+                      <span className={`text-[11px] font-mono ${review.file_count != null ? "text-slate-text" : "text-slate-text/50"}`}>
+                        {review.file_count != null ? review.file_count : (review.status === "pending" || review.status === "in_progress" ? "Pending" : "\u2014")}
                       </span>
                     </td>
                     <td className="px-3 py-3">
