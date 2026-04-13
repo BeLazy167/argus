@@ -87,7 +87,7 @@ export function EyeSymbol({ className = "", trackMouse = false }: EyeSymbolProps
           textAnchor="middle"
           fill="currentColor"
           fontSize="14"
-          fontFamily="JetBrains Mono, monospace"
+          fontFamily="var(--font-mono)"
           fontWeight="500"
         >
           &lt;&gt;

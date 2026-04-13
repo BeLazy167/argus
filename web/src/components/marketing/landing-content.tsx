@@ -34,7 +34,7 @@ function PipelineStage({
         <div
           className={`relative h-3 w-3 rounded-full border-2 transition-[background-color,border-color,box-shadow] duration-300 ${
             isActive
-              ? "border-amber bg-amber shadow-[0_0_12px_oklch(0.77_0.15_75/0.6)]"
+              ? "border-amber bg-amber shadow-[0_0_12px_color-mix(in_oklch,var(--color-amber-glow)_60%,transparent)]"
               : isComplete
                 ? "border-amber bg-amber/40"
                 : "border-iron bg-void"
@@ -226,7 +226,7 @@ export function LandingContent() {
           className="pointer-events-none absolute top-1/3 left-1/2 -translate-x-1/2 -translate-y-1/2 h-[500px] w-[500px] rounded-full opacity-10"
           style={{
             background:
-              "radial-gradient(circle, oklch(0.77 0.15 75 / 0.3) 0%, transparent 60%)",
+              "radial-gradient(circle, color-mix(in oklch, var(--color-amber-glow) 30%, transparent) 0%, transparent 60%)",
           }}
         />
 
@@ -294,7 +294,7 @@ export function LandingContent() {
           <div className="hero-reveal hero-reveal-7 flex flex-col sm:flex-row gap-4 mb-16">
             <Link
               href="/sign-up"
-              className="group relative inline-flex h-12 items-center border bg-amber px-8 text-sm font-mono font-medium text-void transition-[transform,filter,box-shadow] duration-200 ease-out hover:brightness-110 hover:shadow-[0_0_32px_-4px_oklch(0.77_0.15_75/0.6)] active:scale-[0.97] overflow-hidden"
+              className="group relative inline-flex h-12 items-center border bg-amber px-8 text-sm font-mono font-medium text-void transition-[transform,filter,box-shadow] duration-200 ease-out hover:brightness-110 hover:shadow-[0_0_32px_-4px_color-mix(in_oklch,var(--color-amber-glow)_60%,transparent)] active:scale-[0.97] overflow-hidden"
             >
               <span className="relative z-10 flex items-center">
                 Install in 60 seconds
@@ -313,7 +313,7 @@ export function LandingContent() {
             </Link>
             <Link
               href="/docs"
-              className="group inline-flex h-12 items-center border border-iron px-8 text-sm font-mono text-ash transition-[border-color,color,box-shadow] duration-200 hover:border-amber/40 hover:text-foreground hover:shadow-[0_0_16px_-6px_oklch(0.77_0.15_75/0.3)]"
+              className="group inline-flex h-12 items-center border border-iron px-8 text-sm font-mono text-ash transition-[border-color,color,box-shadow] duration-200 hover:border-amber/40 hover:text-foreground hover:shadow-[0_0_16px_-6px_color-mix(in_oklch,var(--color-amber-glow)_30%,transparent)]"
             >
               Read the docs
             </Link>
@@ -537,7 +537,7 @@ export function LandingContent() {
           className="pointer-events-none absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 h-[500px] w-[500px] rounded-full opacity-10"
           style={{
             background:
-              "radial-gradient(circle, oklch(0.77 0.15 75 / 0.4) 0%, transparent 70%)",
+              "radial-gradient(circle, color-mix(in oklch, var(--color-amber-glow) 40%, transparent) 0%, transparent 70%)",
           }}
         />
         <FadeIn className="relative z-10 mx-auto max-w-3xl px-6 py-28 text-center">
@@ -554,7 +554,7 @@ export function LandingContent() {
           </p>
           <Link
             href="/sign-up"
-            className="group inline-flex h-12 items-center border bg-amber px-10 text-sm font-mono font-medium text-void transition-[transform,filter,box-shadow] duration-150 ease-out hover:brightness-110 hover:shadow-[0_0_30px_-4px_oklch(0.77_0.15_75/0.5)] active:scale-[0.97]"
+            className="group inline-flex h-12 items-center border bg-amber px-10 text-sm font-mono font-medium text-void transition-[transform,filter,box-shadow] duration-150 ease-out hover:brightness-110 hover:shadow-[0_0_30px_-4px_color-mix(in_oklch,var(--color-amber-glow)_50%,transparent)] active:scale-[0.97]"
           >
             Get started free
             <svg

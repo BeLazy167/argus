@@ -40,19 +40,19 @@ function densityGlow(density: number, maxDensity: number): string {
 }
 
 const LANG_COLORS: Record<string, string> = {
-  typescript: "#3b82f6",
-  javascript: "#3b82f6",
-  go: "#06b6d4",
-  python: "#10b981",
-  rust: "#f97316",
+  typescript: "var(--graph-lang-ts)",
+  javascript: "var(--graph-lang-ts)",
+  go: "var(--graph-lang-go)",
+  python: "var(--graph-lang-py)",
+  rust: "var(--graph-lang-rs)",
 };
 
-const DEFAULT_EDGE_COLORS = { base: "#334155", highlight: "#64748b" } as const;
+const DEFAULT_EDGE_COLORS = { base: "var(--graph-edge-import)", highlight: "var(--graph-edge-import-hi)" } as const;
 const EDGE_COLORS: Record<string, { base: string; highlight: string }> = {
-  imports: { base: "#334155", highlight: "#64748b" },
-  calls: { base: "#854d0e", highlight: "#f59e0b" },
-  uses_type: { base: "#4c1d95", highlight: "#8b5cf6" },
-  implements: { base: "#14532d", highlight: "#22c55e" },
+  imports: { base: "var(--graph-edge-import)", highlight: "var(--graph-edge-import-hi)" },
+  calls: { base: "var(--graph-edge-call)", highlight: "var(--graph-edge-call-hi)" },
+  uses_type: { base: "var(--graph-edge-type)", highlight: "var(--graph-edge-type-hi)" },
+  implements: { base: "var(--graph-edge-impl)", highlight: "var(--graph-edge-impl-hi)" },
 };
 function edgeColorsFor(kind: string) {
   return EDGE_COLORS[kind] ?? DEFAULT_EDGE_COLORS;
@@ -400,22 +400,22 @@ function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQu
         onPaneClick={onPaneClick}
         nodeTypes={nodeTypes}
         proOptions={{ hideAttribution: true }}
-        className="!bg-[#0a0a12]"
+        className="!bg-[var(--graph-bg)]"
         minZoom={0.15}
         maxZoom={2.5}
         defaultEdgeOptions={{ type: "smoothstep" }}
       >
-        <Background color="#1a1a2e" gap={32} size={1} />
+        <Background color="var(--graph-dots)" gap={32} size={1} />
         <Controls
           position="bottom-left"
-          className="!bg-[#12121a] !border-slate-800 !shadow-2xl
-            [&>button]:!bg-[#12121a] [&>button]:!border-slate-800 [&>button]:!text-slate-500
+          className="!bg-[var(--graph-surface)] !border-slate-800 !shadow-2xl
+            [&>button]:!bg-[var(--graph-surface)] [&>button]:!border-slate-800 [&>button]:!text-slate-500
             [&>button:hover]:!bg-slate-800/50 [&>button:hover]:!text-slate-300"
         />
         <MiniMap
           position="bottom-right"
-          className="!bg-[#0a0a12]/90 !border-slate-800"
-          nodeColor={(n) => LANG_COLORS[n.data?.language as string] ?? "#475569"}
+          className="!bg-[var(--graph-bg)]/90 !border-slate-800"
+          nodeColor={(n) => LANG_COLORS[n.data?.language as string] ?? "var(--graph-lang-default)"}
           maskColor="rgba(0,0,0,0.7)"
           pannable
           zoomable
@@ -423,7 +423,7 @@ function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQu
       </ReactFlow>
 
       {/* Direction toggle + fit-all */}
-      <div className="absolute top-4 right-4 z-10 flex gap-1 bg-[#12121a]/80 backdrop-blur-sm border border-slate-800 p-0.5">
+      <div className="absolute top-4 right-4 z-10 flex gap-1 bg-[var(--graph-surface)]/80 backdrop-blur-sm border border-slate-800 p-0.5">
         {([
           { key: "TB" as const, label: "↕", title: "Top-to-bottom layout" },
           { key: "LR" as const, label: "↔", title: "Left-to-right layout" },
@@ -451,7 +451,7 @@ function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQu
       </div>
 
       {/* Language + risk legend */}
-      <div className="absolute top-4 left-4 z-10 bg-[#12121a]/80 backdrop-blur-sm border border-slate-800 px-3 py-2">
+      <div className="absolute top-4 left-4 z-10 bg-[var(--graph-surface)]/80 backdrop-blur-sm border border-slate-800 px-3 py-2">
         <div className="flex gap-3 items-center">
           {[
             { color: "bg-blue-400", label: "TS" },

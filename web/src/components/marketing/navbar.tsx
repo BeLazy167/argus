@@ -66,7 +66,7 @@ export function Navbar() {
         hidden ? "-translate-y-full" : "translate-y-0"
       } ${
         scrolled
-          ? "border-b border-amber/10 bg-void/90 backdrop-blur-xl shadow-[0_1px_24px_-8px_oklch(0.77_0.15_75/0.08)]"
+          ? "border-b border-amber/10 bg-void/90 backdrop-blur-xl shadow-[0_1px_24px_-8px_color-mix(in_oklch,var(--color-amber-glow)_8%,transparent)]"
           : "border-b border-transparent bg-transparent"
       }`}
     >
@@ -77,7 +77,7 @@ export function Navbar() {
         }`}
         style={{
           background:
-            "linear-gradient(90deg, transparent 0%, oklch(0.77 0.15 75 / 0.4) 50%, transparent 100%)",
+            "linear-gradient(90deg, transparent 0%, color-mix(in oklch, var(--color-amber-glow) 40%, transparent) 50%, transparent 100%)",
         }}
       />
 
@@ -91,7 +91,7 @@ export function Navbar() {
           <svg
             viewBox="0 0 24 12"
             fill="none"
-            className="h-3 w-6 text-amber transition-[filter] duration-200 group-hover:drop-shadow-[0_0_6px_oklch(0.77_0.15_75/0.5)]"
+            className="h-3 w-6 text-amber transition-[filter] duration-200 group-hover:drop-shadow-[0_0_6px_color-mix(in_oklch,var(--color-amber-glow)_50%,transparent)]"
           >
             <path
               d="M2 6C2 6 6 1.5 12 1.5C18 1.5 22 6 22 6C22 6 18 10.5 12 10.5C6 10.5 2 6 2 6Z"
@@ -101,7 +101,7 @@ export function Navbar() {
             />
             <circle cx="12" cy="6" r="2.5" fill="currentColor" />
           </svg>
-          <span className="wordmark text-sm text-amber tracking-[0.2em] transition-[text-shadow] duration-200 group-hover:text-shadow-[0_0_12px_oklch(0.77_0.15_75/0.4)]">
+          <span className="wordmark text-sm text-amber tracking-[0.2em] transition-[text-shadow] duration-200 group-hover:text-shadow-[0_0_12px_color-mix(in_oklch,var(--color-amber-glow)_40%,transparent)]">
             ARGUS
           </span>
         </Link>
@@ -113,7 +113,7 @@ export function Navbar() {
         >
           {/* Hover pill */}
           <div
-            className="absolute top-1/2 -translate-y-1/2 h-8 rounded-md bg-iron/60 transition-all duration-200 ease-out pointer-events-none"
+            className="absolute top-1/2 -translate-y-1/2 h-8 bg-iron/60 transition-all duration-200 ease-out pointer-events-none"
             style={{
               left: pillStyle.left,
               width: pillStyle.width,
@@ -155,19 +155,19 @@ export function Navbar() {
             </Link>
             <Link
               href="/sign-up"
-              className="group relative inline-flex h-8 items-center bg-amber px-5 text-xs font-mono font-medium text-void transition-[transform,box-shadow] duration-200 ease-out hover:shadow-[0_0_20px_-4px_oklch(0.77_0.15_75/0.5)] active:scale-[0.97]"
+              className="group relative inline-flex h-8 items-center bg-amber px-5 text-xs font-mono font-medium text-void transition-[transform,box-shadow] duration-200 ease-out hover:shadow-[0_0_20px_-4px_color-mix(in_oklch,var(--color-amber-glow)_50%,transparent)] active:scale-[0.97]"
             >
               <span className="relative z-10">Get started</span>
-              <div className="absolute inset-0 rounded-md bg-gradient-to-r from-amber to-[oklch(0.82_0.14_80)] opacity-0 transition-opacity duration-200 group-hover:opacity-100" />
+              <div className="absolute inset-0 bg-gradient-to-r from-amber to-amber/80 opacity-0 transition-opacity duration-200 group-hover:opacity-100" />
             </Link>
           </SignedOut>
           <SignedIn>
             <Link
               href="/dashboard"
-              className="group relative inline-flex h-8 items-center bg-amber px-5 text-xs font-mono font-medium text-void transition-[transform,box-shadow] duration-200 ease-out hover:shadow-[0_0_20px_-4px_oklch(0.77_0.15_75/0.5)] active:scale-[0.97]"
+              className="group relative inline-flex h-8 items-center bg-amber px-5 text-xs font-mono font-medium text-void transition-[transform,box-shadow] duration-200 ease-out hover:shadow-[0_0_20px_-4px_color-mix(in_oklch,var(--color-amber-glow)_50%,transparent)] active:scale-[0.97]"
             >
               <span className="relative z-10">Dashboard</span>
-              <div className="absolute inset-0 rounded-md bg-gradient-to-r from-amber to-[oklch(0.82_0.14_80)] opacity-0 transition-opacity duration-200 group-hover:opacity-100" />
+              <div className="absolute inset-0 bg-gradient-to-r from-amber to-amber/80 opacity-0 transition-opacity duration-200 group-hover:opacity-100" />
             </Link>
           </SignedIn>
         </div>

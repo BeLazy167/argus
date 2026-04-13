@@ -19,7 +19,7 @@ import {
   Menu,
   X,
 } from "lucide-react";
-import { useState } from "react";
+import { Suspense, useState } from "react";
 import { QueryProvider } from "@/providers/query-provider";
 import { InstallationProvider } from "@/providers/installation-provider";
 import { ActiveRepoProvider, useActiveRepo } from "@/providers/active-repo-provider";
@@ -197,7 +197,9 @@ export default function DashboardLayout({
           {/* Main content */}
           <main id="main-content" className="flex-1 overflow-y-auto scroll-smooth bg-background bg-noise">
             <OnboardingChecklist />
-            <div className="mx-auto max-w-6xl px-4 py-8 pt-16 md:px-8 md:pt-8">{children}</div>
+            <Suspense>
+              <div className="px-4 py-8 pt-16 md:px-8 md:pt-8">{children}</div>
+            </Suspense>
           </main>
         </div>
       </ActiveRepoProvider>

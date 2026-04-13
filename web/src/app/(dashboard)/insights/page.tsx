@@ -1,8 +1,8 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { Activity, FileText, Search, Loader2, ExternalLink } from "lucide-react";
-import { usePagination, PaginationBar } from "@/components/dashboard/pagination";
+import { usePagination, PaginationBar, useSearchParamState } from "@/components/dashboard/pagination";
 import { ProGate } from "@/components/dashboard/pro-gate";
 import { useRepoRisk, useTraces } from "@/lib/queries/insights";
 import { useActiveRepo } from "@/lib/hooks/use-active-repo";
@@ -19,7 +19,7 @@ const KIND_BADGE: Record<string, string> = {
 export default function InsightsPage() {
   const { repos, activeId, setSelectedId } = useActiveRepo();
   const { data: risks, isLoading: risksLoading } = useRepoRisk();
-  const [fileFilter, setFileFilter] = useState("");
+  const [fileFilter, setFileFilter] = useSearchParamState("file");
   const { data: traces, isLoading: tracesLoading } = useTraces(
     fileFilter || undefined,
   );
@@ -46,7 +46,7 @@ export default function InsightsPage() {
     total: riskTotal,
     hasNext: riskHasNext,
     hasPrev: riskHasPrev,
-  } = usePagination(filteredRisks);
+  } = usePagination(filteredRisks, undefined, "riskPage");
 
   const {
     page: tracePage,
@@ -57,7 +57,7 @@ export default function InsightsPage() {
     total: traceTotal,
     hasNext: traceHasNext,
     hasPrev: traceHasPrev,
-  } = usePagination(traces ?? []);
+  } = usePagination(traces ?? [], undefined, "tracePage");
 
   const isLoading = risksLoading || tracesLoading;
 

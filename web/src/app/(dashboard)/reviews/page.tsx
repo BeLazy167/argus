@@ -10,7 +10,7 @@ import {
   ChevronRight,
   ExternalLink,
 } from "lucide-react";
-import { usePagination, PaginationBar } from "@/components/dashboard/pagination";
+import { usePagination, PaginationBar, useSearchParamState, useUpdateSearchParams } from "@/components/dashboard/pagination";
 import { useReviews, useRetryReview } from "@/lib/queries/reviews";
 import { useActiveRepo } from "@/lib/hooks/use-active-repo";
 import { formatDistanceToNow } from "@/lib/time";
@@ -197,7 +197,8 @@ function PRAccordionRow({
 
 export default function ReviewsPage() {
   const { repos, activeId, setSelectedId, isLoading: reposLoading } = useActiveRepo();
-  const [statusFilter, setStatusFilter] = useState("all");
+  const [statusFilter] = useSearchParamState("status", "all");
+  const updateParams = useUpdateSearchParams();
   const [expandedPR, setExpandedPR] = useState<string | null>(null);
 
   const repoMap = useMemo(() => new Map(repos?.map((r) => [r.id, r]) ?? []), [repos]);
@@ -268,7 +269,7 @@ export default function ReviewsPage() {
             <select
               value={statusFilter}
               aria-label="Filter by status"
-              onChange={(e) => { setStatusFilter(e.target.value); setPage(0); }}
+              onChange={(e) => updateParams({ status: e.target.value === "all" ? "" : e.target.value, page: "" })}
               style={{ backgroundColor: 'var(--card)', color: 'var(--foreground)' }}
               className="appearance-none border border-iron bg-charcoal px-4 py-2 pr-8 text-xs font-mono text-foreground focus:border-amber focus:outline-none"
             >
