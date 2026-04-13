@@ -24,12 +24,13 @@ const (
 // chat completions format. Works with OpenRouter, OpenAI, Azure, AWS Bedrock,
 // GCP Vertex, Anthropic, Groq, Together, xAI/Grok, DeepSeek, Ollama, vLLM, etc.
 type ChatProvider struct {
-	name      string
-	apiKey    string
-	baseURL   string
-	authStyle AuthStyle
-	pathFn    func(model string) string // custom path builder (nil = default /chat/completions)
-	client    *http.Client
+	name            string
+	apiKey          string
+	baseURL         string
+	authStyle       AuthStyle
+	pathFn          func(model string) string // custom path builder (nil = default /chat/completions)
+	useResponsesAPI bool                      // Azure Foundry Responses API format
+	client          *http.Client
 }
 
 func NewChatProvider(name, apiKey, baseURL string) *ChatProvider {
@@ -71,13 +72,13 @@ func NewAzureProvider(apiKey, baseURL string) *ChatProvider {
 	var pathFn func(string) string
 
 	if isCognitive {
-		// Cognitive Services: deployment-based path, Bearer auth
+		// Azure AI Foundry (cognitiveservices): Responses API, Bearer auth, model in body
 		authStyle = AuthBearer
 		if apiVersion == "2024-10-21" {
 			apiVersion = "2025-04-01-preview"
 		}
-		pathFn = func(model string) string {
-			return "/openai/deployments/" + model + "/chat/completions?api-version=" + apiVersion
+		pathFn = func(_ string) string {
+			return "/openai/responses?api-version=" + apiVersion
 		}
 	} else if !isMaaS {
 		// Classic Azure OpenAI: deployment name in URL path
@@ -87,12 +88,13 @@ func NewAzureProvider(apiKey, baseURL string) *ChatProvider {
 	}
 
 	return &ChatProvider{
-		name:      "azure",
-		apiKey:    apiKey,
-		baseURL:   baseURL,
-		authStyle: authStyle,
-		pathFn:    pathFn,
-		client:    &http.Client{Timeout: 120 * time.Second},
+		name:            "azure",
+		apiKey:          apiKey,
+		baseURL:         baseURL,
+		authStyle:       authStyle,
+		pathFn:          pathFn,
+		useResponsesAPI: isCognitive,
+		client:          &http.Client{Timeout: 120 * time.Second},
 	}
 }
 
@@ -148,7 +150,11 @@ func (p *ChatProvider) Complete(ctx context.Context, req CompletionRequest) (Com
 	}
 
 	// Set standard params, then let provider-specific adjustments override
-	body.MaxTokens = req.MaxTokens
+	if p.useResponsesAPI {
+		body.MaxCompletionTokens = req.MaxTokens
+	} else {
+		body.MaxTokens = req.MaxTokens
+	}
 	body.Temperature = &req.Temperature
 	p.adjustRequestForProvider(&body, req.Model)
 
@@ -191,6 +197,11 @@ func (p *ChatProvider) Complete(ctx context.Context, req CompletionRequest) (Com
 
 	if resp.StatusCode != http.StatusOK {
 		return CompletionResponse{}, fmt.Errorf("LLM API error (status %d): %s", resp.StatusCode, string(respBody))
+	}
+
+	// Azure Responses API has a different response structure
+	if p.useResponsesAPI {
+		return p.parseResponsesAPI(respBody)
 	}
 
 	var result chatResponse
@@ -291,6 +302,87 @@ func isOpenAIReasoning(m string) bool {
 
 func isAnthropicThinking(m string) bool {
 	return strings.Contains(m, "thinking") || strings.Contains(m, "extended")
+}
+
+// parseResponsesAPI handles Azure AI Foundry Responses API format.
+// Response: {"output": [{"type":"message","content":[{"type":"output_text","text":"..."}]}], "usage":{...}}
+func (p *ChatProvider) parseResponsesAPI(body []byte) (CompletionResponse, error) {
+	var result struct {
+		Output []struct {
+			Type    string `json:"type"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+			// Fallback: some responses use "message" format
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"output"`
+		// Chat completions compat: try choices too
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+		Usage struct {
+			InputTokens  int `json:"input_tokens"`
+			OutputTokens int `json:"output_tokens"`
+			TotalTokens  int `json:"total_tokens"`
+			// Chat completions compat
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return CompletionResponse{}, fmt.Errorf("unmarshaling responses API: %w", err)
+	}
+
+	var content string
+	// Try Responses API output format
+	for _, out := range result.Output {
+		for _, c := range out.Content {
+			if c.Type == "output_text" && c.Text != "" {
+				content = c.Text
+				break
+			}
+		}
+		if content == "" && out.Message.Content != "" {
+			content = out.Message.Content
+		}
+		if content != "" {
+			break
+		}
+	}
+	// Fallback to chat completions choices
+	if content == "" && len(result.Choices) > 0 {
+		content = result.Choices[0].Message.Content
+	}
+	if content == "" {
+		return CompletionResponse{}, fmt.Errorf("no content in responses API output: %s", string(body[:min(len(body), 200)]))
+	}
+
+	prompt := result.Usage.InputTokens
+	if prompt == 0 {
+		prompt = result.Usage.PromptTokens
+	}
+	completion := result.Usage.OutputTokens
+	if completion == 0 {
+		completion = result.Usage.CompletionTokens
+	}
+	total := result.Usage.TotalTokens
+	if total == 0 {
+		total = prompt + completion
+	}
+
+	return CompletionResponse{
+		Content: cleanResponseContent(content),
+		TokensUsed: TokenUsage{
+			PromptTokens:     prompt,
+			CompletionTokens: completion,
+			TotalTokens:      total,
+		},
+	}, nil
 }
 
 type chatResponse struct {
