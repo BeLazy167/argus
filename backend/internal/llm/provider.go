@@ -62,3 +62,53 @@ type TokenUsage struct {
 	CompletionTokens int
 	TotalTokens      int
 }
+
+// modelPricing holds per-1M-token pricing for known models.
+// Used to estimate cost when the API doesn't return it (Azure, direct OpenAI, etc.).
+type modelPricing struct {
+	Input  float64 // $ per 1M input tokens
+	Output float64 // $ per 1M output tokens
+}
+
+var knownPricing = map[string]modelPricing{
+	// OpenAI
+	"gpt-4o":            {2.50, 10.00},
+	"gpt-4o-mini":       {0.15, 0.60},
+	"gpt-4.1":           {2.00, 8.00},
+	"gpt-4.1-mini":      {0.40, 1.60},
+	"gpt-4.1-nano":      {0.10, 0.40},
+	"gpt-5.4":           {2.00, 8.00},
+	"o3":                {2.00, 8.00},
+	"o3-mini":           {1.10, 4.40},
+	"o4-mini":           {1.10, 4.40},
+	// Anthropic
+	"claude-sonnet-4-5-20241022": {3.00, 15.00},
+	"claude-3-5-haiku-20241022":  {0.80, 4.00},
+	"claude-opus-4-5-20250219":   {15.00, 75.00},
+	// DeepSeek
+	"deepseek-chat":     {0.14, 0.28},
+	"deepseek-reasoner": {0.55, 2.19},
+	// Fireworks
+	"accounts/fireworks/models/glm-5p1": {0.10, 0.10},
+}
+
+// EstimateCost calculates cost from token counts when the API doesn't return it.
+// Returns 0 if the model isn't in the pricing table.
+func EstimateCost(model string, usage TokenUsage) float64 {
+	p, ok := knownPricing[model]
+	if !ok {
+		// Try prefix match for versioned models (gpt-5.4-2026-03-05 → gpt-5.4)
+		for prefix, pricing := range knownPricing {
+			if len(model) > len(prefix) && model[:len(prefix)] == prefix && (model[len(prefix)] == '-' || model[len(prefix)] == '.') {
+				p = pricing
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return 0
+		}
+	}
+	return (float64(usage.PromptTokens) * p.Input / 1_000_000) +
+		(float64(usage.CompletionTokens) * p.Output / 1_000_000)
+}

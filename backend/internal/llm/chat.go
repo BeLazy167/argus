@@ -213,7 +213,7 @@ func (p *ChatProvider) Complete(ctx context.Context, req CompletionRequest) (Com
 
 	// Azure Responses API has a different response structure
 	if p.useResponsesAPI {
-		return p.parseResponsesAPI(respBody)
+		return p.parseResponsesAPI(respBody, req.Model)
 	}
 
 	var result chatResponse
@@ -225,14 +225,19 @@ func (p *ChatProvider) Complete(ctx context.Context, req CompletionRequest) (Com
 		return CompletionResponse{}, fmt.Errorf("no choices in response")
 	}
 
+	usage := TokenUsage{
+		PromptTokens:     result.Usage.PromptTokens,
+		CompletionTokens: result.Usage.CompletionTokens,
+		TotalTokens:      result.Usage.TotalTokens,
+	}
+	cost := result.Usage.Cost
+	if cost == 0 {
+		cost = EstimateCost(req.Model, usage)
+	}
 	return CompletionResponse{
-		Content: cleanResponseContent(result.Choices[0].Message.Content),
-		TokensUsed: TokenUsage{
-			PromptTokens:     result.Usage.PromptTokens,
-			CompletionTokens: result.Usage.CompletionTokens,
-			TotalTokens:      result.Usage.TotalTokens,
-		},
-		Cost:         result.Usage.Cost,
+		Content:      cleanResponseContent(result.Choices[0].Message.Content),
+		TokensUsed:   usage,
+		Cost:         cost,
 		ToolCalls:    result.Choices[0].Message.ToolCalls,
 		FinishReason: result.Choices[0].FinishReason,
 	}, nil
@@ -329,7 +334,7 @@ func isAnthropicThinking(m string) bool {
 
 // parseResponsesAPI handles Azure AI Foundry Responses API format.
 // Response: {"output": [{"type":"message","content":[{"type":"output_text","text":"..."}]}], "usage":{...}}
-func (p *ChatProvider) parseResponsesAPI(body []byte) (CompletionResponse, error) {
+func (p *ChatProvider) parseResponsesAPI(body []byte, model string) (CompletionResponse, error) {
 	var result struct {
 		Output []struct {
 			Type    string `json:"type"`
@@ -398,13 +403,15 @@ func (p *ChatProvider) parseResponsesAPI(body []byte) (CompletionResponse, error
 		total = prompt + completion
 	}
 
+	usage := TokenUsage{
+		PromptTokens:     prompt,
+		CompletionTokens: completion,
+		TotalTokens:      total,
+	}
 	return CompletionResponse{
-		Content: cleanResponseContent(content),
-		TokensUsed: TokenUsage{
-			PromptTokens:     prompt,
-			CompletionTokens: completion,
-			TotalTokens:      total,
-		},
+		Content:    cleanResponseContent(content),
+		TokensUsed: usage,
+		Cost:       EstimateCost(model, usage),
 	}, nil
 }
 
