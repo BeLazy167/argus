@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -41,17 +42,39 @@ func NewChatProvider(name, apiKey, baseURL string) *ChatProvider {
 }
 
 // NewAzureProvider creates a provider for Azure OpenAI Service.
-// baseURL should be: https://{resource}.openai.azure.com/openai
+// baseURL should be: https://{resource}.openai.azure.com/openai (classic)
+// or: https://{endpoint}.inference.ai.azure.com/v1 (Foundry MaaS)
+// Append ?api-version=YYYY-MM-DD to baseURL to override the default version.
 func NewAzureProvider(apiKey, baseURL string) *ChatProvider {
+	apiVersion := "2024-10-21"
+	if u, err := url.Parse(baseURL); err == nil {
+		if v := u.Query().Get("api-version"); v != "" {
+			apiVersion = v
+			q := u.Query()
+			q.Del("api-version")
+			u.RawQuery = q.Encode()
+			baseURL = u.String()
+		}
+	}
+
+	// Foundry MaaS endpoints use standard OpenAI-compatible paths (no deployment prefix)
+	isMaaS := strings.Contains(baseURL, ".inference.ai.azure.com") ||
+		strings.Contains(baseURL, ".services.ai.azure.com")
+
+	var pathFn func(string) string
+	if !isMaaS {
+		pathFn = func(model string) string {
+			return "/deployments/" + model + "/chat/completions?api-version=" + apiVersion
+		}
+	}
+
 	return &ChatProvider{
 		name:      "azure",
 		apiKey:    apiKey,
 		baseURL:   baseURL,
 		authStyle: AuthAPIKey,
-		pathFn: func(model string) string {
-			return "/deployments/" + model + "/chat/completions?api-version=2024-10-21"
-		},
-		client: &http.Client{Timeout: 120 * time.Second},
+		pathFn:    pathFn,
+		client:    &http.Client{Timeout: 120 * time.Second},
 	}
 }
 

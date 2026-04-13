@@ -410,6 +410,11 @@ function ConfigCard({
             </div>
           )}
         </div>
+        {provider === "azure" && (
+          <p className="text-[9px] font-mono text-slate-text/70 mt-1">
+            {"Enter your Azure deployment name (must match exactly)"}
+          </p>
+        )}
 
         {/* Base URL override — shown for providers that need custom endpoints */}
         {(provider === "azure" || provider === "gcp_vertex" || provider === "aws_bedrock") && (
