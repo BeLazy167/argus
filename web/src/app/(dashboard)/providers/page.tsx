@@ -40,11 +40,13 @@ const PROVIDER_BASE_URLS: Record<Provider, string> = {
   groq: "https://api.groq.com/openai/v1",
   together: "https://api.together.xyz/v1",
   deepseek: "https://api.deepseek.com/v1",
-  azure: "",
+  azure: "https://{resource}.openai.azure.com/openai",
   gcp_vertex: "",
   aws_bedrock: "",
   zhipu: "https://api.z.ai/api/paas/v4",
 };
+
+const CLOUD_PROVIDERS: Set<Provider> = new Set(["azure", "gcp_vertex", "aws_bedrock"]);
 
 type BadgeVariant = "active" | "inactive";
 
@@ -104,7 +106,7 @@ const ProviderKeyCard = memo(function ProviderKeyCard({
       <div className="space-y-2 mb-3">
         <div>
           <label className="block text-[10px] font-mono text-slate-text mb-1">
-            {existing ? "Replace API key" : "API key"}
+            {provider === "gcp_vertex" ? "Access token" : (existing ? "Replace API key" : "API key")}
           </label>
           <input
             type="password"
@@ -116,7 +118,7 @@ const ProviderKeyCard = memo(function ProviderKeyCard({
         </div>
         <div>
           <label className="block text-[10px] font-mono text-slate-text mb-1">
-            Base URL override (optional)
+            Base URL {CLOUD_PROVIDERS.has(provider) ? "(required)" : "(optional)"}
           </label>
           <input
             type="text"
@@ -126,6 +128,23 @@ const ProviderKeyCard = memo(function ProviderKeyCard({
             className="w-full border border-iron bg-background px-2 py-1.5 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none"
           />
         </div>
+        {provider === "azure" && (
+          <p className="text-[9px] font-mono text-slate-text/70 mt-1 leading-relaxed">
+            {"OpenAI: https://<resource>.openai.azure.com/openai"}<br/>
+            {"Foundry (Claude, Llama): https://<endpoint>.inference.ai.azure.com/v1"}<br/>
+            {"Model field = deployment name"}
+          </p>
+        )}
+        {provider === "gcp_vertex" && (
+          <p className="text-[9px] font-mono text-slate-text/70 mt-1 leading-relaxed">
+            {"API key = GCP access token (short-lived ~1hr). Run: gcloud auth print-access-token"}
+          </p>
+        )}
+        {provider === "aws_bedrock" && (
+          <p className="text-[9px] font-mono text-slate-text/70 mt-1 leading-relaxed">
+            {"Requires IAM credentials. API key = AWS session token. Limited support."}
+          </p>
+        )}
       </div>
 
       <div className="flex items-center gap-2">

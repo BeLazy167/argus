@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -424,6 +426,29 @@ func (s *Server) upsertProviderKey(w http.ResponseWriter, r *http.Request) {
 	if body.Provider == "" || body.APIKey == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "provider and api_key required"})
 		return
+	}
+	if body.Provider == "azure" || body.Provider == "gcp_vertex" || body.Provider == "aws_bedrock" {
+		if body.BaseURL != nil {
+			trimmed := strings.TrimSpace(*body.BaseURL)
+			body.BaseURL = &trimmed
+		}
+		if body.BaseURL == nil || *body.BaseURL == "" {
+			msgs := map[string]string{
+				"azure":       "Azure requires a base URL. OpenAI models: https://{resource}.openai.azure.com/openai — Foundry models: https://{endpoint}.inference.ai.azure.com/v1",
+				"gcp_vertex":  "GCP Vertex requires a base URL: https://{region}-aiplatform.googleapis.com/v1/projects/{project}/locations/{region}/endpoints/openapi",
+				"aws_bedrock": "AWS Bedrock requires a base URL: https://bedrock-runtime.{region}.amazonaws.com",
+			}
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": msgs[body.Provider]})
+			return
+		}
+		u := strings.TrimRight(*body.BaseURL, "/")
+		if body.Provider == "azure" && strings.Contains(u, ".openai.azure.com") {
+			if parsed, err := url.Parse(u); err == nil && !strings.HasSuffix(parsed.Path, "/openai") {
+				parsed.Path = strings.TrimRight(parsed.Path, "/") + "/openai"
+				u = parsed.String()
+			}
+		}
+		body.BaseURL = &u
 	}
 	pk, err := s.store.UpsertProviderKey(r.Context(), installationID, body.RepoID, body.Provider, body.APIKey, body.BaseURL)
 	if err != nil {
