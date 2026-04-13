@@ -42,8 +42,11 @@ func NewChatProvider(name, apiKey, baseURL string) *ChatProvider {
 }
 
 // NewAzureProvider creates a provider for Azure OpenAI Service.
-// baseURL should be: https://{resource}.openai.azure.com/openai (classic)
-// or: https://{endpoint}.inference.ai.azure.com/v1 (Foundry MaaS)
+// Supports three endpoint styles:
+//   - Classic: https://{resource}.openai.azure.com (deployment-based path)
+//   - Foundry MaaS: https://{endpoint}.inference.ai.azure.com (OpenAI-compatible)
+//   - Cognitive Services: https://{resource}.cognitiveservices.azure.com (Responses API, Bearer auth)
+//
 // Append ?api-version=YYYY-MM-DD to baseURL to override the default version.
 func NewAzureProvider(apiKey, baseURL string) *ChatProvider {
 	apiVersion := "2024-10-21"
@@ -57,14 +60,29 @@ func NewAzureProvider(apiKey, baseURL string) *ChatProvider {
 		}
 	}
 
-	// Foundry MaaS endpoints use standard OpenAI-compatible paths (no deployment prefix)
+	// Foundry MaaS endpoints use standard OpenAI-compatible paths
 	isMaaS := strings.Contains(baseURL, ".inference.ai.azure.com") ||
 		strings.Contains(baseURL, ".services.ai.azure.com")
 
+	// Cognitive Services / AI Foundry endpoints use /openai/chat/completions with Bearer auth
+	isCognitive := strings.Contains(baseURL, ".cognitiveservices.azure.com")
+
+	authStyle := AuthAPIKey
 	var pathFn func(string) string
-	if !isMaaS {
+
+	if isCognitive {
+		// Cognitive Services: model in body, /openai/chat/completions path, Bearer auth
+		authStyle = AuthBearer
+		if apiVersion == "2024-10-21" {
+			apiVersion = "2025-04-01-preview"
+		}
+		pathFn = func(_ string) string {
+			return "/openai/chat/completions?api-version=" + apiVersion
+		}
+	} else if !isMaaS {
+		// Classic Azure OpenAI: deployment name in URL path
 		pathFn = func(model string) string {
-			return "/deployments/" + model + "/chat/completions?api-version=" + apiVersion
+			return "/openai/deployments/" + model + "/chat/completions?api-version=" + apiVersion
 		}
 	}
 
@@ -72,7 +90,7 @@ func NewAzureProvider(apiKey, baseURL string) *ChatProvider {
 		name:      "azure",
 		apiKey:    apiKey,
 		baseURL:   baseURL,
-		authStyle: AuthAPIKey,
+		authStyle: authStyle,
 		pathFn:    pathFn,
 		client:    &http.Client{Timeout: 120 * time.Second},
 	}
