@@ -7,6 +7,7 @@ import {
   MiniMap,
   useNodesState,
   useEdgesState,
+  useReactFlow,
   ReactFlowProvider,
   MarkerType,
   Position,
@@ -63,8 +64,30 @@ type Props = {
   files: ArchFile[];
   edges: ArchEdge[];
   lens: Lens;
+  searchQuery?: string;
   onSelectFile?: (filePath: string | null) => void;
 };
+
+/** Per-lens border/glow for highlighted nodes */
+function lensHighlightStyle(file: ArchFile, lens: Lens): { borderColor?: string; boxShadow?: string } {
+  if (lensNodeOpacity(file, lens) < 1) return {};
+  switch (lens) {
+    case "choke":
+      return file.fan_in >= 5
+        ? { borderColor: "rgba(245,158,11,0.6)", boxShadow: "0 0 10px rgba(245,158,11,0.2)" }
+        : {};
+    case "hotspot":
+      return file.bug_density > 0 && file.percentiles.bug_density >= 90
+        ? { borderColor: "rgba(239,68,68,0.6)", boxShadow: "0 0 10px rgba(239,68,68,0.2)" }
+        : {};
+    case "coupling":
+      return file.coupling.length > 0
+        ? { borderColor: "rgba(139,92,246,0.6)", boxShadow: "0 0 10px rgba(139,92,246,0.2)" }
+        : {};
+    default:
+      return {};
+  }
+}
 
 /** Extract directory for grouping */
 function dirGroup(filePath: string): string {
@@ -99,9 +122,13 @@ function lensNodeOpacity(file: ArchFile, lens: Lens): number {
   }
 }
 
-type InnerProps = Props & { direction: "TB" | "LR" };
+type InnerProps = Props & {
+  direction: "TB" | "LR";
+  setDirection: (d: "TB" | "LR") => void;
+};
 
-function ArchCanvasInner({ files, edges, lens, direction, onSelectFile }: InnerProps) {
+function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQuery, onSelectFile }: InnerProps) {
+  const { fitView } = useReactFlow();
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const maxDensity = useMemo(() => Math.max(...files.map((f) => f.bug_density), 0.01), [files]);
 
@@ -114,6 +141,7 @@ function ArchCanvasInner({ files, edges, lens, direction, onSelectFile }: InnerP
     const rfNodes: Node[] = files.map((f) => {
       const size = nodeSize(f.risk_score);
       const fileName = f.path.split("/").pop() ?? f.path;
+      const lensStyle = lensHighlightStyle(f, lens);
       g.setNode(f.path, { width: size.width, height: size.height });
       return {
         id: f.path,
@@ -131,6 +159,7 @@ function ArchCanvasInner({ files, edges, lens, direction, onSelectFile }: InnerP
           insight: f.insight,
           isChokePoint: f.fan_in >= 5,
           isHotspot: f.bug_density > 0 && f.percentiles.bug_density >= 90,
+          selected: false,
           lens,
           borderColor: densityColor(f.bug_density, maxDensity),
           glowColor: densityGlow(f.bug_density, maxDensity),
@@ -141,7 +170,9 @@ function ArchCanvasInner({ files, edges, lens, direction, onSelectFile }: InnerP
           width: size.width,
           height: size.height,
           opacity: lensNodeOpacity(f, lens),
-          transition: "opacity 0.3s",
+          transition: "opacity 0.3s, border-color 0.3s, box-shadow 0.3s",
+          ...(lensStyle.borderColor ? { borderColor: lensStyle.borderColor } : {}),
+          ...(lensStyle.boxShadow ? { boxShadow: lensStyle.boxShadow } : {}),
         },
       };
     });
@@ -216,8 +247,8 @@ function ArchCanvasInner({ files, edges, lens, direction, onSelectFile }: InnerP
           width: maxX - minX + PAD_X * 2,
           height: maxY - minY + PAD_Y + PAD_X,
           backgroundColor: "rgba(20, 20, 30, 0.5)",
-          borderRadius: 16,
-          border: "1px solid rgba(71, 85, 105, 0.15)",
+          borderRadius: 0,
+          border: "1px solid rgba(71, 85, 105, 0.3)",
           pointerEvents: "none" as const,
         },
         selectable: false,
@@ -231,20 +262,72 @@ function ArchCanvasInner({ files, edges, lens, direction, onSelectFile }: InnerP
   const [nodes, setNodes, onNodesChange] = useNodesState(layout.nodes);
   const [rfEdges, setEdges, onEdgesChange] = useEdgesState(layout.edges);
 
-  // Highlight connected nodes on selection.
-  //
-  // The effect reads `layout.edges` — a stable memo — instead of the stateful
-  // `rfEdges`. Using `rfEdges` as a dep + calling `setEdges` inside creates
-  // an infinite loop (each setEdges update re-triggers the effect).
-  // `setNodes` / `setEdges` are stable refs from useNodesState/useEdgesState
-  // and don't need to be in the dep array.
+  // Smart default zoom: focus on top-risk cluster instead of fitting all nodes.
+  const initialZoomDone = useMemo(() => ({ current: false }), []);
   useEffect(() => {
+    if (initialZoomDone.current) return;
+    initialZoomDone.current = true;
+    const sorted = [...files].sort((a, b) => b.risk_score - a.risk_score);
+    const topN = sorted.slice(0, Math.min(15, files.length));
+    if (topN.length < 15 || files.length <= 15) {
+      // Small repo — fit everything
+      fitView({ padding: 0.15, duration: 400 });
+      return;
+    }
+    const focusSet = new Set(topN.map((f) => f.path));
+    for (const e of edges) {
+      if (focusSet.has(e.source) || focusSet.has(e.target)) {
+        focusSet.add(e.source);
+        focusSet.add(e.target);
+      }
+    }
+    fitView({
+      nodes: Array.from(focusSet).map((id) => ({ id })),
+      padding: 0.2,
+      duration: 400,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [files, edges]);
+
+  // Highlight connected nodes on selection, search, or lens change.
+  //
+  // Reads `layout.edges` (stable memo) instead of stateful `rfEdges` to
+  // avoid infinite loops. setNodes/setEdges are stable refs from hooks.
+  const searchLower = searchQuery?.toLowerCase().trim() ?? "";
+  useEffect(() => {
+    // Search mode: dim non-matching nodes
+    if (searchLower && !selectedNodeId) {
+      const matchIds = new Set(
+        files.filter((f) => f.path.toLowerCase().includes(searchLower)).map((f) => f.path)
+      );
+      setNodes((nds) =>
+        nds.map((n) => ({
+          ...n,
+          data: { ...n.data, selected: false },
+          style: { ...n.style, opacity: matchIds.has(n.id) ? 1 : 0.1, transition: "opacity 0.3s" },
+        }))
+      );
+      setEdges((eds) =>
+        eds.map((e) => {
+          const colors = edgeColorsFor((e.data?.kinds as string[])?.[0] ?? "imports");
+          const isConn = matchIds.has(e.source) && matchIds.has(e.target);
+          return { ...e, animated: false, style: { ...e.style, stroke: colors.base, opacity: isConn ? 1 : 0.05, transition: "all 0.3s" } };
+        })
+      );
+      // Auto-fit to matches
+      if (matchIds.size > 0 && matchIds.size < files.length) {
+        fitView({ nodes: Array.from(matchIds).map((id) => ({ id })), padding: 0.3, duration: 300 });
+      }
+      return;
+    }
+
     if (!selectedNodeId) {
       setNodes((nds) =>
         nds.map((n) => {
           const f = files.find((f) => f.path === n.id);
           return {
             ...n,
+            data: { ...n.data, selected: false },
             style: { ...n.style, opacity: f ? lensNodeOpacity(f, lens) : 1, transition: "opacity 0.3s" },
           };
         })
@@ -271,6 +354,7 @@ function ArchCanvasInner({ files, edges, lens, direction, onSelectFile }: InnerP
     setNodes((nds) =>
       nds.map((n) => ({
         ...n,
+        data: { ...n.data, selected: n.id === selectedNodeId },
         style: { ...n.style, opacity: connectedNodeIds.has(n.id) ? 1 : 0.1, transition: "opacity 0.3s" },
       }))
     );
@@ -288,7 +372,7 @@ function ArchCanvasInner({ files, edges, lens, direction, onSelectFile }: InnerP
     // Intentionally excluding setNodes/setEdges (stable from state hooks)
     // and files (subsumed by layout which already depends on files).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedNodeId, lens, layout]);
+  }, [selectedNodeId, lens, layout, searchLower]);
 
   const onNodeClick: NodeMouseHandler = useCallback(
     (_event, node) => {
@@ -306,38 +390,89 @@ function ArchCanvasInner({ files, edges, lens, direction, onSelectFile }: InnerP
   }, [onSelectFile]);
 
   return (
-    <ReactFlow
-      nodes={nodes}
-      edges={rfEdges}
-      onNodesChange={onNodesChange}
-      onEdgesChange={onEdgesChange}
-      onNodeClick={onNodeClick}
-      onPaneClick={onPaneClick}
-      nodeTypes={nodeTypes}
-      fitView
-      fitViewOptions={{ padding: 0.15 }}
-      proOptions={{ hideAttribution: true }}
-      className="!bg-[#0a0a12]"
-      minZoom={0.15}
-      maxZoom={2.5}
-      defaultEdgeOptions={{ type: "smoothstep" }}
-    >
-      <Background color="#1a1a2e" gap={32} size={1} />
-      <Controls
-        position="bottom-left"
-        className="!bg-[#12121a] !border-slate-800 !shadow-2xl !rounded-lg
-          [&>button]:!bg-[#12121a] [&>button]:!border-slate-800 [&>button]:!text-slate-500
-          [&>button:hover]:!bg-slate-800/50 [&>button:hover]:!text-slate-300"
-      />
-      <MiniMap
-        position="bottom-right"
-        className="!bg-[#0a0a12]/90 !border-slate-800 !rounded-lg"
-        nodeColor={(n) => LANG_COLORS[n.data?.language as string] ?? "#475569"}
-        maskColor="rgba(0,0,0,0.8)"
-        pannable
-        zoomable
-      />
-    </ReactFlow>
+    <>
+      <ReactFlow
+        nodes={nodes}
+        edges={rfEdges}
+        onNodesChange={onNodesChange}
+        onEdgesChange={onEdgesChange}
+        onNodeClick={onNodeClick}
+        onPaneClick={onPaneClick}
+        nodeTypes={nodeTypes}
+        proOptions={{ hideAttribution: true }}
+        className="!bg-[#0a0a12]"
+        minZoom={0.15}
+        maxZoom={2.5}
+        defaultEdgeOptions={{ type: "smoothstep" }}
+      >
+        <Background color="#1a1a2e" gap={32} size={1} />
+        <Controls
+          position="bottom-left"
+          className="!bg-[#12121a] !border-slate-800 !shadow-2xl
+            [&>button]:!bg-[#12121a] [&>button]:!border-slate-800 [&>button]:!text-slate-500
+            [&>button:hover]:!bg-slate-800/50 [&>button:hover]:!text-slate-300"
+        />
+        <MiniMap
+          position="bottom-right"
+          className="!bg-[#0a0a12]/90 !border-slate-800"
+          nodeColor={(n) => LANG_COLORS[n.data?.language as string] ?? "#475569"}
+          maskColor="rgba(0,0,0,0.7)"
+          pannable
+          zoomable
+        />
+      </ReactFlow>
+
+      {/* Direction toggle + fit-all */}
+      <div className="absolute top-4 right-4 z-10 flex gap-1 bg-[#12121a]/80 backdrop-blur-sm border border-slate-800 p-0.5">
+        {([
+          { key: "TB" as const, label: "↕", title: "Top-to-bottom layout" },
+          { key: "LR" as const, label: "↔", title: "Left-to-right layout" },
+        ]).map(({ key, label, title }) => (
+          <button
+            key={key}
+            onClick={() => setDirection(key)}
+            title={title}
+            className={`px-2.5 py-1 text-[11px] font-mono transition-all duration-200 ${
+              direction === key ? "bg-slate-800 text-slate-200 shadow-sm" : "text-slate-500 hover:text-slate-300"
+            }`}
+          >
+            {label}
+            <span className="hidden lg:inline ml-1">{key === "TB" ? "Vertical" : "Horizontal"}</span>
+          </button>
+        ))}
+        <div className="w-px bg-slate-800 mx-0.5" />
+        <button
+          onClick={() => fitView({ padding: 0.15, duration: 300 })}
+          title="Fit all nodes"
+          className="px-2.5 py-1 text-[11px] font-mono text-slate-500 hover:text-slate-300 transition-all duration-200"
+        >
+          ⊞
+        </button>
+      </div>
+
+      {/* Language + risk legend */}
+      <div className="absolute top-4 left-4 z-10 bg-[#12121a]/80 backdrop-blur-sm border border-slate-800 px-3 py-2">
+        <div className="flex gap-3 items-center">
+          {[
+            { color: "bg-blue-400", label: "TS" },
+            { color: "bg-emerald-400", label: "PY" },
+            { color: "bg-cyan-400", label: "Go" },
+            { color: "bg-orange-400", label: "RS" },
+          ].map(({ color, label }) => (
+            <div key={label} className="flex items-center gap-1">
+              <span className={`w-1.5 h-1.5 rounded-full ${color}`} />
+              <span className="text-[10px] font-mono text-slate-400">{label}</span>
+            </div>
+          ))}
+        </div>
+        <div className="flex items-center gap-1.5 mt-1.5 pt-1.5 border-t border-slate-800/50">
+          <span className="text-[9px] font-mono text-slate-500">0</span>
+          <div className="h-1.5 w-20 bg-gradient-to-r from-emerald-500 via-yellow-500 to-red-500 opacity-70" />
+          <span className="text-[9px] font-mono text-slate-500">10</span>
+          <span className="text-[9px] font-mono text-slate-600 ml-1">risk</span>
+        </div>
+      </div>
+    </>
   );
 }
 
@@ -348,51 +483,9 @@ export default function ArchitectureCanvas(props: Props) {
 
   return (
     <div className="h-full w-full relative">
-      {/* Direction toggle */}
-      <div className="absolute top-4 right-4 z-10 flex gap-1 bg-[#12121a]/80 backdrop-blur-sm border border-slate-800 p-0.5">
-        {([
-          { key: "TB" as const, label: "↕" },
-          { key: "LR" as const, label: "↔" },
-        ]).map(({ key, label }) => (
-          <button
-            key={key}
-            onClick={() => setDirection(key)}
-            className={`rounded-md px-2.5 py-1 text-[11px] font-mono transition-all duration-200 ${
-              direction === key ? "bg-slate-800 text-slate-200 shadow-sm" : "text-slate-500 hover:text-slate-300"
-            }`}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
-
-      {/* Language legend */}
-      <div className="absolute bottom-4 left-16 z-10 flex gap-3 bg-[#12121a]/80 backdrop-blur-sm border border-slate-800 px-3 py-1.5">
-        {[
-          { color: "bg-blue-400", label: "TS" },
-          { color: "bg-emerald-400", label: "PY" },
-          { color: "bg-cyan-400", label: "Go" },
-          { color: "bg-orange-400", label: "RS" },
-        ].map(({ color, label }) => (
-          <div key={label} className="flex items-center gap-1">
-            <span className={`w-1.5 h-1.5 rounded-full ${color}`} />
-            <span className="text-[9px] font-mono text-slate-500">{label}</span>
-          </div>
-        ))}
-        <div className="w-px h-3 bg-slate-800 mx-1" />
-        <div className="flex items-center gap-1">
-          <span className="w-1.5 h-1.5 rounded-full bg-green-400" />
-          <span className="text-[9px] font-mono text-slate-500">Low risk</span>
-        </div>
-        <div className="flex items-center gap-1">
-          <span className="w-1.5 h-1.5 rounded-full bg-red-400" />
-          <span className="text-[9px] font-mono text-slate-500">High risk</span>
-        </div>
-      </div>
-
       {/* Only remount on direction change (which recomputes layout); lens changes update in place. */}
       <ReactFlowProvider key={direction}>
-        <ArchCanvasInner {...props} direction={direction} />
+        <ArchCanvasInner {...props} direction={direction} setDirection={setDirection} />
       </ReactFlowProvider>
     </div>
   );

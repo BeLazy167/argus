@@ -10,9 +10,10 @@ const LENSES = [
 interface LensBarProps {
   active: string;
   onChange: (lens: string) => void;
+  fileCounts?: Record<string, number>;
 }
 
-export default function LensBar({ active, onChange }: LensBarProps) {
+export default function LensBar({ active, onChange, fileCounts }: LensBarProps) {
   return (
     <div
       className="flex items-center gap-1 bg-[#12121a]/80 backdrop-blur-sm border border-slate-800 p-1"
@@ -37,6 +38,9 @@ export default function LensBar({ active, onChange }: LensBarProps) {
           >
             <span className={`w-2 h-2 rounded-full ${color} shrink-0 ${isActive ? "" : "opacity-60"}`} />
             {label}
+            {fileCounts?.[key] !== undefined && (
+              <span className="text-[9px] text-slate-600 tabular-nums">{fileCounts[key]}</span>
+            )}
           </button>
         );
       })}
