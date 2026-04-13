@@ -41,8 +41,10 @@ const CodeSnippet = dynamic(() => import("./markdown").then(m => ({ default: m.C
 /* ── Helpers ─────────────────────────────────── */
 
 function formatTokens(t: { total_tokens: number }): string {
-  const k = t.total_tokens / 1000;
-  return k >= 1 ? `${k.toFixed(1)}k` : String(t.total_tokens);
+  const n = t.total_tokens;
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return String(n);
 }
 
 function lineRef(c: ReviewComment): string {
