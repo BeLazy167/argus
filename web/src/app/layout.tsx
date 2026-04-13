@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { JetBrains_Mono } from "next/font/google";
+import { JetBrains_Mono, Black_Ops_One } from "next/font/google";
 import { GeistSans } from "geist/font/sans";
 import { ClerkProvider } from "@clerk/nextjs";
 import { dark } from "@clerk/themes";
@@ -8,6 +8,7 @@ import { cn } from "@/lib/utils";
 import { Analytics } from "@vercel/analytics/next";
 
 const jetbrainsMono = JetBrains_Mono({subsets:['latin'],variable:'--font-jetbrains-mono'});
+const blackOpsOne = Black_Ops_One({weight:'400',subsets:['latin'],variable:'--font-black-ops-one'});
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://argus.reviews"),
@@ -59,7 +60,7 @@ export default function RootLayout({
       <html
         lang="en"
         style={{ colorScheme: "dark" }}
-        className={cn("dark", GeistSans.variable, "font-mono", jetbrainsMono.variable)}
+        className={cn("dark", GeistSans.variable, "font-mono", jetbrainsMono.variable, blackOpsOne.variable)}
         suppressHydrationWarning
       >
         <body className="min-h-screen bg-background font-mono antialiased">

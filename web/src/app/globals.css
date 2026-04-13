@@ -60,7 +60,7 @@
   --color-slate-text: var(--muted-foreground);
 
   /* Fonts */
-  --font-display: "Stencil", sans-serif;
+  --font-display: var(--font-black-ops-one, "Black Ops One"), sans-serif;
   --font-sans: var(--font-geist-sans), "Geist Sans", system-ui, sans-serif;
   --font-mono: var(--font-jetbrains-mono), "JetBrains Mono", monospace;
   --font-heading: var(--font-mono);
@@ -69,14 +69,7 @@
   --radius-4xl: calc(var(--radius) * 2.6);
 }
 
-/* Stencil font — loaded via Google Fonts CDN (not available in next/font) */
-@font-face {
-  font-family: "Stencil";
-  src: url("https://fonts.gstatic.com/s/stencil/v/vcx951WfWwdyCSXvUPW4A.woff2") format("woff2");
-  font-weight: 400;
-  font-display: swap;
-  font-style: normal;
-}
+/* Display font (Black Ops One) loaded via next/font in layout.tsx */
 
 @layer base {
   * {
