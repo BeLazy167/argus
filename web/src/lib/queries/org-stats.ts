@@ -49,6 +49,30 @@ export interface AdoptionData {
   avg_files_per_review: number;
   active_repos: number;
   total_enabled_repos: number;
+  total_repos: number;
+}
+
+export interface RepoStat {
+  repo_id: number;
+  full_name: string;
+  review_count: number;
+  avg_score: number;
+  total_cost: number;
+  avg_review_secs: number;
+  total_tokens: number;
+}
+
+export interface ReviewTimesData {
+  count: number;
+  p50: number;
+  p75: number;
+  p95: number;
+}
+
+export interface StageCost {
+  stage: string;
+  total_tokens: number;
+  total_cost: number;
 }
 
 export function useStatsOverview(period: Period) {
@@ -106,6 +130,36 @@ export function useStatsAdoption(period: Period) {
   return useQuery({
     queryKey: ["stats", "adoption", api.active?.id, period],
     queryFn: () => api.get<AdoptionData>(`/api/v1/stats/adoption?period=${period}`),
+    enabled: !!api.active,
+    staleTime: 60_000,
+  });
+}
+
+export function useStatsRepos(period: Period) {
+  const api = useApi();
+  return useQuery({
+    queryKey: ["stats", "repos", api.active?.id, period],
+    queryFn: () => api.get<RepoStat[]>(`/api/v1/stats/repos?period=${period}`),
+    enabled: !!api.active,
+    staleTime: 60_000,
+  });
+}
+
+export function useStatsReviewTimes(period: Period) {
+  const api = useApi();
+  return useQuery({
+    queryKey: ["stats", "review-times", api.active?.id, period],
+    queryFn: () => api.get<ReviewTimesData>(`/api/v1/stats/review-times?period=${period}`),
+    enabled: !!api.active,
+    staleTime: 60_000,
+  });
+}
+
+export function useStatsCostPerStage(period: Period) {
+  const api = useApi();
+  return useQuery({
+    queryKey: ["stats", "cost-per-stage", api.active?.id, period],
+    queryFn: () => api.get<StageCost[]>(`/api/v1/stats/cost-per-stage?period=${period}`),
     enabled: !!api.active,
     staleTime: 60_000,
   });

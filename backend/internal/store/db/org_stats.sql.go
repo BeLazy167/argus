@@ -117,7 +117,8 @@ SELECT
     COALESCE((SELECT (COUNT(*) FILTER (WHERE is_incremental) * 100.0 / NULLIF(COUNT(*), 0))::float8 FROM scoped), 0) AS incremental_pct,
     COALESCE((SELECT AVG(file_count)::float8 FROM scoped WHERE file_count > 0), 0) AS avg_files_per_review,
     (SELECT COUNT(DISTINCT repo_id) FROM scoped)::int AS active_repos,
-    (SELECT COUNT(*) FROM repos WHERE installation_id = ANY($1::bigint[]) AND enabled = true)::int AS total_enabled_repos
+    (SELECT COUNT(*) FROM repos WHERE installation_id = ANY($1::bigint[]) AND enabled = true)::int AS total_enabled_repos,
+    (SELECT COUNT(*) FROM repos WHERE installation_id = ANY($1::bigint[]))::int AS total_repos
 `
 
 type StatsAdoptionParams struct {
@@ -131,6 +132,7 @@ type StatsAdoptionRow struct {
 	AvgFilesPerReview interface{} `json:"avg_files_per_review"`
 	ActiveRepos       int         `json:"active_repos"`
 	TotalEnabledRepos int         `json:"total_enabled_repos"`
+	TotalRepos        int         `json:"total_repos"`
 }
 
 func (q *Queries) StatsAdoption(ctx context.Context, arg StatsAdoptionParams) (StatsAdoptionRow, error) {
@@ -142,6 +144,7 @@ func (q *Queries) StatsAdoption(ctx context.Context, arg StatsAdoptionParams) (S
 		&i.AvgFilesPerReview,
 		&i.ActiveRepos,
 		&i.TotalEnabledRepos,
+		&i.TotalRepos,
 	)
 	return i, err
 }
@@ -236,7 +239,7 @@ func (q *Queries) StatsFindingsBySeverity(ctx context.Context, arg StatsFindings
 const statsFindingsNewVsPattern = `-- name: StatsFindingsNewVsPattern :one
 SELECT
     COUNT(*) FILTER (WHERE rc.is_new_finding = true)::int AS new_findings,
-    COUNT(*) FILTER (WHERE rc.matched_pattern_id IS NOT NULL)::int AS pattern_matches
+    COUNT(*) FILTER (WHERE rc.matched_pattern_score > 0)::int AS pattern_matches
 FROM review_comments rc
 JOIN reviews r ON rc.review_id = r.id
 JOIN repos rp ON r.repo_id = rp.id
@@ -344,6 +347,105 @@ func (q *Queries) StatsOverview(ctx context.Context, arg StatsOverviewParams) (S
 		&i.CatchRate,
 	)
 	return i, err
+}
+
+const statsPerRepo = `-- name: StatsPerRepo :many
+SELECT
+    rp.id AS repo_id,
+    rp.full_name,
+    COUNT(r.id)::int AS review_count,
+    COALESCE(AVG(r.score)::float8, 0) AS avg_score,
+    COALESCE(SUM((r.token_usage->'total'->>'cost')::float), 0)::float8 AS total_cost,
+    COALESCE(AVG(EXTRACT(EPOCH FROM (r.completed_at - r.created_at)))::int, 0) AS avg_review_secs,
+    COALESCE(SUM((r.token_usage->'total'->>'total_tokens')::int), 0)::int AS total_tokens
+FROM repos rp
+LEFT JOIN reviews r ON r.repo_id = rp.id
+  AND r.created_at >= NOW() - $1::interval
+  AND r.status IN ('completed','failed','cancelled')
+WHERE rp.installation_id = ANY($2::bigint[])
+  AND rp.enabled = true
+GROUP BY rp.id, rp.full_name
+ORDER BY COUNT(r.id) DESC
+`
+
+type StatsPerRepoParams struct {
+	Period          pgtype.Interval `json:"period"`
+	InstallationIds []int64         `json:"installation_ids"`
+}
+
+type StatsPerRepoRow struct {
+	RepoID        int64       `json:"repo_id"`
+	FullName      string      `json:"full_name"`
+	ReviewCount   int         `json:"review_count"`
+	AvgScore      interface{} `json:"avg_score"`
+	TotalCost     float64     `json:"total_cost"`
+	AvgReviewSecs interface{} `json:"avg_review_secs"`
+	TotalTokens   int         `json:"total_tokens"`
+}
+
+func (q *Queries) StatsPerRepo(ctx context.Context, arg StatsPerRepoParams) ([]StatsPerRepoRow, error) {
+	rows, err := q.db.Query(ctx, statsPerRepo, arg.Period, arg.InstallationIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []StatsPerRepoRow
+	for rows.Next() {
+		var i StatsPerRepoRow
+		if err := rows.Scan(
+			&i.RepoID,
+			&i.FullName,
+			&i.ReviewCount,
+			&i.AvgScore,
+			&i.TotalCost,
+			&i.AvgReviewSecs,
+			&i.TotalTokens,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const statsReviewTimes = `-- name: StatsReviewTimes :many
+SELECT EXTRACT(EPOCH FROM (r.completed_at - r.created_at))::int AS duration_secs
+FROM reviews r
+JOIN repos rp ON r.repo_id = rp.id
+WHERE rp.installation_id = ANY($1::bigint[])
+  AND r.created_at >= NOW() - $2::interval
+  AND r.completed_at IS NOT NULL
+  AND r.status = 'completed'
+ORDER BY duration_secs
+`
+
+type StatsReviewTimesParams struct {
+	InstallationIds []int64         `json:"installation_ids"`
+	Period          pgtype.Interval `json:"period"`
+}
+
+// Returns individual review durations for percentile calculation in Go.
+func (q *Queries) StatsReviewTimes(ctx context.Context, arg StatsReviewTimesParams) ([]int, error) {
+	rows, err := q.db.Query(ctx, statsReviewTimes, arg.InstallationIds, arg.Period)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int
+	for rows.Next() {
+		var duration_secs int
+		if err := rows.Scan(&duration_secs); err != nil {
+			return nil, err
+		}
+		items = append(items, duration_secs)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const statsTimeseries = `-- name: StatsTimeseries :many

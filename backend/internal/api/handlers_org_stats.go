@@ -291,7 +291,132 @@ func (s *Server) statsAdoption(w http.ResponseWriter, r *http.Request) {
 		"avg_files_per_review": toFloat64(row.AvgFilesPerReview),
 		"active_repos":         row.ActiveRepos,
 		"total_enabled_repos":  row.TotalEnabledRepos,
+		"total_repos":          row.TotalRepos,
 	})
+}
+
+func (s *Server) statsRepos(w http.ResponseWriter, r *http.Request) {
+	q := db.New(s.store.Pool)
+	rows, err := q.StatsPerRepo(r.Context(), db.StatsPerRepoParams{
+		InstallationIds: getInstallationIDs(r.Context()),
+		Period:          parsePeriodInterval(r),
+	})
+	if err != nil {
+		s.logger.Error("stats per repo", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
+		return
+	}
+	type repoStat struct {
+		RepoID        int64   `json:"repo_id"`
+		FullName      string  `json:"full_name"`
+		ReviewCount   int     `json:"review_count"`
+		AvgScore      float64 `json:"avg_score"`
+		TotalCost     float64 `json:"total_cost"`
+		AvgReviewSecs int     `json:"avg_review_secs"`
+		TotalTokens   int     `json:"total_tokens"`
+	}
+	out := make([]repoStat, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, repoStat{
+			RepoID:        r.RepoID,
+			FullName:      r.FullName,
+			ReviewCount:   r.ReviewCount,
+			AvgScore:      toFloat64(r.AvgScore),
+			TotalCost:     r.TotalCost,
+			AvgReviewSecs: int(toFloat64(r.AvgReviewSecs)),
+			TotalTokens:   r.TotalTokens,
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) statsReviewTimes(w http.ResponseWriter, r *http.Request) {
+	q := db.New(s.store.Pool)
+	rows, err := q.StatsReviewTimes(r.Context(), db.StatsReviewTimesParams{
+		InstallationIds: getInstallationIDs(r.Context()),
+		Period:          parsePeriodInterval(r),
+	})
+	if err != nil {
+		s.logger.Error("stats review times", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
+		return
+	}
+	// Calculate percentiles
+	n := len(rows)
+	p50, p75, p95 := 0, 0, 0
+	if n > 0 {
+		p50 = rows[n*50/100]
+		p75 = rows[n*75/100]
+		if n*95/100 < n {
+			p95 = rows[n*95/100]
+		} else {
+			p95 = rows[n-1]
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count": n,
+		"p50":   p50,
+		"p75":   p75,
+		"p95":   p95,
+	})
+}
+
+func (s *Server) statsCostPerStage(w http.ResponseWriter, r *http.Request) {
+	q := db.New(s.store.Pool)
+	rawRows, err := q.StatsModelsRaw(r.Context(), db.StatsModelsRawParams{
+		InstallationIds: getInstallationIDs(r.Context()),
+		Period:          parsePeriodInterval(r),
+	})
+	if err != nil {
+		s.logger.Error("stats cost per stage", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
+		return
+	}
+
+	type stageAgg struct {
+		Stage       string  `json:"stage"`
+		TotalTokens int     `json:"total_tokens"`
+		TotalCost   float64 `json:"total_cost"`
+	}
+	agg := map[string]*stageAgg{}
+	addStage := func(name string, st pipeline.StageTokens) {
+		if st.TotalTokens == 0 {
+			return
+		}
+		a, ok := agg[name]
+		if !ok {
+			a = &stageAgg{Stage: name}
+			agg[name] = a
+		}
+		a.TotalTokens += st.TotalTokens
+		a.TotalCost += st.Cost
+	}
+
+	for _, raw := range rawRows {
+		var usage pipeline.RunTokenUsage
+		if err := json.Unmarshal(raw, &usage); err != nil {
+			continue
+		}
+		addStage("triage", usage.Triage)
+		addStage("scoring", usage.Scoring)
+		addStage("synthesis", usage.Synthesis)
+		addStage("enrichment", usage.Enrichment)
+		addStage("conventions", usage.Conventions)
+		addStage("patterns", usage.Patterns)
+		addStage("graph", usage.Graph)
+		for _, st := range usage.Review {
+			addStage("review", st)
+		}
+		for _, st := range usage.FileSynthesis {
+			addStage("file_synthesis", st)
+		}
+	}
+
+	out := make([]stageAgg, 0, len(agg))
+	for _, a := range agg {
+		out = append(out, *a)
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // toFloat64 safely converts interface{} values from sqlc (COALESCE expressions) to float64.
