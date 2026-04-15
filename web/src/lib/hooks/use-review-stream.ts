@@ -18,7 +18,8 @@ export type PipelineStage =
   | "synthesizing"
   | "posting"
   | "completed"
-  | "failed";
+  | "failed"
+  | "cancelled";
 
 type TriageFile = {
   file: string;
@@ -159,6 +160,13 @@ export function useReviewStream(reviewId: string, enabled: boolean) {
           addEntry({ type: "done", message: "Posted to GitHub", icon: "done" });
           break;
 
+        case "cancelled":
+          qc.invalidateQueries({ queryKey: ["review", reviewId] });
+          qc.invalidateQueries({ queryKey: ["reviews"] });
+          setStage("cancelled");
+          addEntry({ type: "stage", message: `Cancelled at ${evt.data.stage}`, icon: "error" });
+          break;
+
         case "error":
           qc.invalidateQueries({ queryKey: ["review", reviewId] });
           qc.invalidateQueries({ queryKey: ["reviews"] });
@@ -223,6 +231,7 @@ export function useReviewStream(reviewId: string, enabled: boolean) {
 function mapStageToStatus(stage: string): Review["status"] {
   if (stage === "completed") return "completed";
   if (stage === "failed") return "failed";
+  if (stage === "cancelled") return "cancelled";
   return "in_progress";
 }
 

@@ -150,18 +150,19 @@ func PersonaSpecialistHintCustom(customPrompt string) string {
 
 // repoSettings is the JSON structure stored in repos.settings_json.
 type repoSettings struct {
-	Persona             string `json:"persona,omitempty"`
-	CustomPersonaPrompt string `json:"custom_persona_prompt,omitempty"`
-	DeepReview          bool   `json:"deep_review,omitempty"`
-	CrossFileContext    *bool  `json:"cross_file_context,omitempty"`
-	BlastRadius         *bool  `json:"blast_radius,omitempty"`
-	ScenarioMemory      *bool  `json:"scenario_memory,omitempty"`
-	CodeSimulation      *bool  `json:"code_simulation,omitempty"`
-	PREnrichment      *bool `json:"pr_enrichment,omitempty"`
-	LearnPatterns     *bool `json:"learn_patterns,omitempty"`
-	LearnConventions  *bool `json:"learn_conventions,omitempty"`
-	FileSynthesis     *bool `json:"file_synthesis,omitempty"`
-	ArchitectureGraph *bool `json:"architecture_graph,omitempty"`
+	Persona             string   `json:"persona,omitempty"`
+	CustomPersonaPrompt string   `json:"custom_persona_prompt,omitempty"`
+	DeepReview          bool     `json:"deep_review,omitempty"`
+	CrossFileContext    *bool    `json:"cross_file_context,omitempty"`
+	BlastRadius         *bool    `json:"blast_radius,omitempty"`
+	ScenarioMemory      *bool    `json:"scenario_memory,omitempty"`
+	CodeSimulation      *bool    `json:"code_simulation,omitempty"`
+	PREnrichment        *bool    `json:"pr_enrichment,omitempty"`
+	LearnPatterns       *bool    `json:"learn_patterns,omitempty"`
+	LearnConventions    *bool    `json:"learn_conventions,omitempty"`
+	FileSynthesis       *bool    `json:"file_synthesis,omitempty"`
+	ArchitectureGraph   *bool    `json:"architecture_graph,omitempty"`
+	SkipBaseBranches    []string `json:"skip_base_branches,omitempty"`
 }
 
 func parseRepoSettings(settingsJSON json.RawMessage) (repoSettings, bool) {

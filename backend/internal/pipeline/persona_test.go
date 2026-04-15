@@ -331,3 +331,41 @@ func TestValidPersonas(t *testing.T) {
 	}
 }
 
+func TestParseRepoSettings_SkipBaseBranches(t *testing.T) {
+	tests := []struct {
+		name     string
+		jsonStr  string
+		wantOK   bool
+		wantSkip []string
+	}{
+		{"with branches", `{"skip_base_branches":["main","release/*"]}`, true, []string{"main", "release/*"}},
+		{"empty array", `{"skip_base_branches":[]}`, true, []string{}},
+		{"field absent", `{"persona":"default"}`, true, nil},
+		{"empty json", `{}`, true, nil},
+		{"empty bytes", "", false, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var raw json.RawMessage
+			if tt.jsonStr != "" {
+				raw = json.RawMessage(tt.jsonStr)
+			}
+			s, ok := parseRepoSettings(raw)
+			if ok != tt.wantOK {
+				t.Fatalf("ok=%v, want %v", ok, tt.wantOK)
+			}
+			if !ok {
+				return
+			}
+			if len(s.SkipBaseBranches) != len(tt.wantSkip) {
+				t.Fatalf("SkipBaseBranches len=%d, want %d", len(s.SkipBaseBranches), len(tt.wantSkip))
+			}
+			for i, v := range s.SkipBaseBranches {
+				if v != tt.wantSkip[i] {
+					t.Errorf("[%d]=%q, want %q", i, v, tt.wantSkip[i])
+				}
+			}
+		})
+	}
+}
+

@@ -6,6 +6,7 @@ const styles: Record<Review["status"], string> = {
   in_progress: "bg-amber/10 text-amber border-amber/30",
   pending: "bg-blue-400/10 text-blue-400 border-blue-400/30",
   failed: "bg-red-400/10 text-red-400 border-red-400/30",
+  cancelled: "bg-orange-400/10 text-orange-400 border-orange-400/30",
 };
 
 const labels: Record<Review["status"], string> = {
@@ -13,6 +14,7 @@ const labels: Record<Review["status"], string> = {
   in_progress: "IN PROGRESS",
   pending: "PENDING",
   failed: "FAILED",
+  cancelled: "CANCELLED",
 };
 
 const titles: Record<Review["status"], string> = {
@@ -20,6 +22,7 @@ const titles: Record<Review["status"], string> = {
   in_progress: "Review pipeline running",
   completed: "Review posted to GitHub",
   failed: "Review failed — check error details",
+  cancelled: "Review was cancelled by user",
 };
 
 export function StatusBadge({ status }: { status: Review["status"] }) {

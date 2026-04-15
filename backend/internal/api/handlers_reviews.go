@@ -337,8 +337,13 @@ func (s *Server) retryReview(w http.ResponseWriter, r *http.Request) {
 		s.handleDBError(w, err, "review not found")
 		return
 	}
-	if review.Status != "failed" {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "only failed reviews can be retried"})
+	// Verify caller owns this review's repo
+	if _, err := s.store.GetRepoScoped(r.Context(), review.RepoID, getInstallationIDs(r.Context())); err != nil {
+		s.handleDBError(w, err, "review not found")
+		return
+	}
+	if review.Status != "failed" && review.Status != "cancelled" {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "only failed or cancelled reviews can be retried"})
 		return
 	}
 	if err := s.store.UpdateReviewStatus(r.Context(), id, "pending", "", nil); err != nil {
@@ -361,6 +366,40 @@ func (s *Server) retryReview(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "retrying", "review_id": id.String()})
+}
+
+func (s *Server) cancelReview(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "reviewID"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid review id"})
+		return
+	}
+	review, err := s.store.GetReview(r.Context(), id)
+	if err != nil {
+		s.handleDBError(w, err, "review not found")
+		return
+	}
+
+	// Scoped repo check first — avoids leaking status of reviews caller doesn't own
+	repo, err := s.store.GetRepoScoped(r.Context(), review.RepoID, getInstallationIDs(r.Context()))
+	if err != nil {
+		s.handleDBError(w, err, "review not found")
+		return
+	}
+
+	if review.Status != "in_progress" && review.Status != "pending" {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "only pending or in-progress reviews can be cancelled"})
+		return
+	}
+
+	fn, ok := s.loadCancel(repo.FullName, review.PRNumber)
+	if !ok {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "review not in-flight (may have already finished)"})
+		return
+	}
+	fn()
+	s.logger.Info("cancel requested", "review_id", id, "repo", repo.FullName, "pr", review.PRNumber)
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "cancelling", "review_id": id.String()})
 }
 
 // --- WebSocket Stream ---

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -38,6 +39,21 @@ func splitRepoFullName(fullName string) (owner, repo string, err error) {
 		return "", "", fmt.Errorf("invalid repo name: %s", fullName)
 	}
 	return parts[0], parts[1], nil
+}
+
+// matchesSkipBranches returns true if branch matches any of the glob patterns.
+func matchesSkipBranches(branch string, patterns []string) bool {
+	for _, p := range patterns {
+		matched, err := filepath.Match(p, branch)
+		if err != nil {
+			slog.Warn("invalid skip_base_branches pattern", "pattern", p, "error", err)
+			continue
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
 }
 
 // isDiffTooLarge checks if a GitHub API error is a 406 (diff exceeded max lines).
@@ -192,6 +208,14 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 	if !dbRepo.Enabled {
 		o.logger.Info("skipping disabled repo", "repo", event.RepoFullName)
 		return nil
+	}
+
+	// Branch filtering: skip if base branch matches skip_base_branches patterns
+	if settings, ok := parseRepoSettings(dbRepo.SettingsJSON); ok && len(settings.SkipBaseBranches) > 0 {
+		if matchesSkipBranches(event.BaseRef, settings.SkipBaseBranches) {
+			o.logger.Info("skipping review: base branch filtered", "repo", event.RepoFullName, "base", event.BaseRef)
+			return nil
+		}
 	}
 
 	// Check if repo has a model config + API key for the review stage
