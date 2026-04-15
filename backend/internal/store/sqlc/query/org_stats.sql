@@ -88,7 +88,7 @@ LIMIT 10;
 -- name: StatsFindingsNewVsPattern :one
 SELECT
     COUNT(*) FILTER (WHERE rc.is_new_finding = true)::int AS new_findings,
-    COUNT(*) FILTER (WHERE rc.matched_pattern_id IS NOT NULL)::int AS pattern_matches
+    COUNT(*) FILTER (WHERE rc.matched_pattern_score > 0)::int AS pattern_matches
 FROM review_comments rc
 JOIN reviews r ON rc.review_id = r.id
 JOIN repos rp ON r.repo_id = rp.id
@@ -108,7 +108,8 @@ SELECT
     COALESCE((SELECT (COUNT(*) FILTER (WHERE is_incremental) * 100.0 / NULLIF(COUNT(*), 0))::float8 FROM scoped), 0) AS incremental_pct,
     COALESCE((SELECT AVG(file_count)::float8 FROM scoped WHERE file_count > 0), 0) AS avg_files_per_review,
     (SELECT COUNT(DISTINCT repo_id) FROM scoped)::int AS active_repos,
-    (SELECT COUNT(*) FROM repos WHERE installation_id = ANY(@installation_ids::bigint[]) AND enabled = true)::int AS total_enabled_repos;
+    (SELECT COUNT(*) FROM repos WHERE installation_id = ANY(@installation_ids::bigint[]) AND enabled = true)::int AS total_enabled_repos,
+    (SELECT COUNT(*) FROM repos WHERE installation_id = ANY(@installation_ids::bigint[]))::int AS total_repos;
 
 -- name: StatsModelsRaw :many
 -- Returns token_usage JSONB for all reviews in period.
@@ -120,6 +121,35 @@ WHERE rp.installation_id = ANY(@installation_ids::bigint[])
   AND r.created_at >= NOW() - @period::interval
   AND r.status IN ('completed','failed','cancelled')
   AND r.token_usage IS NOT NULL;
+
+-- name: StatsPerRepo :many
+SELECT
+    rp.id AS repo_id,
+    rp.full_name,
+    COUNT(r.id)::int AS review_count,
+    COALESCE(AVG(r.score)::float8, 0) AS avg_score,
+    COALESCE(SUM((r.token_usage->'total'->>'cost')::float), 0)::float8 AS total_cost,
+    COALESCE(AVG(EXTRACT(EPOCH FROM (r.completed_at - r.created_at)))::int, 0) AS avg_review_secs,
+    COALESCE(SUM((r.token_usage->'total'->>'total_tokens')::int), 0)::int AS total_tokens
+FROM repos rp
+LEFT JOIN reviews r ON r.repo_id = rp.id
+  AND r.created_at >= NOW() - @period::interval
+  AND r.status IN ('completed','failed','cancelled')
+WHERE rp.installation_id = ANY(@installation_ids::bigint[])
+  AND rp.enabled = true
+GROUP BY rp.id, rp.full_name
+ORDER BY COUNT(r.id) DESC;
+
+-- name: StatsReviewTimes :many
+-- Returns individual review durations for percentile calculation in Go.
+SELECT EXTRACT(EPOCH FROM (r.completed_at - r.created_at))::int AS duration_secs
+FROM reviews r
+JOIN repos rp ON r.repo_id = rp.id
+WHERE rp.installation_id = ANY(@installation_ids::bigint[])
+  AND r.created_at >= NOW() - @period::interval
+  AND r.completed_at IS NOT NULL
+  AND r.status = 'completed'
+ORDER BY duration_secs;
 
 -- name: ListAllReviewsScopedByAuthor :many
 SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, COALESCE(rv.head_ref,'') as head_ref, rv.github_review_id,
