@@ -23,7 +23,7 @@ export function RepoSelect({
         className="w-full appearance-none border border-iron bg-charcoal px-3 py-2 pr-8 text-xs font-mono text-foreground focus:border-amber focus:outline-none truncate"
       >
         {showAll && <option value={0}>All repos</option>}
-        {repos.map((r) => (
+        {repos.filter(r => r.enabled).map((r) => (
           <option key={r.id} value={r.id}>
             {r.full_name.split("/").pop()}
           </option>

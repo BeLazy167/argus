@@ -11,6 +11,8 @@ import {
   Play,
   RefreshCw,
   AlertTriangle,
+  X,
+  Info,
 } from "lucide-react";
 import { useRepos, useUpdateRepo, useSyncRepos } from "@/lib/queries/repos";
 import { useReviews, useTriggerReview } from "@/lib/queries/reviews";
@@ -20,6 +22,41 @@ import { useOrganization } from "@clerk/nextjs";
 import { formatDistanceToNow } from "@/lib/time";
 import { scoreColor } from "@/lib/score";
 import type { Repo } from "@/lib/types";
+
+function SetupBanner() {
+  const [dismissed, setDismissed] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return localStorage.getItem("argus_setup_banner_dismissed") === "1";
+  });
+
+  if (dismissed) return null;
+
+  return (
+    <div className="border border-primary/20 bg-primary/5 px-4 py-3 mb-6 flex items-start gap-3">
+      <Info className="h-4 w-4 text-primary mt-0.5 shrink-0" />
+      <div className="flex-1 text-[11px] font-mono text-primary/80 space-y-1.5">
+        <p className="font-bold text-primary text-xs">Quick Setup</p>
+        <ol className="list-decimal list-inside space-y-1">
+          <li>Click <strong>Add repos</strong> to install the Argus GitHub App on your org</li>
+          <li>Select which repos Argus can access, then click <strong>Sync from GitHub</strong></li>
+          <li>Go to <strong>Settings → Org Defaults</strong> to configure your LLM provider + API key</li>
+          <li>Enable repos with the toggle — Argus will auto-review new PRs</li>
+        </ol>
+        <p className="text-primary/60">Org-level model config applies to all repos. Override per-repo in Settings → Repo Overrides.</p>
+      </div>
+      <button
+        type="button"
+        onClick={() => {
+          setDismissed(true);
+          localStorage.setItem("argus_setup_banner_dismissed", "1");
+        }}
+        className="text-primary/40 hover:text-primary transition-colors shrink-0 cursor-pointer"
+      >
+        <X className="h-3.5 w-3.5" />
+      </button>
+    </div>
+  );
+}
 
 function AddReposButton() {
   const api = useApi();
@@ -229,6 +266,8 @@ export default function ReposPage() {
           <AddReposButton />
         </div>
       </div>
+
+      <SetupBanner />
 
       {isLoading ? (
         <div className="flex items-center justify-center py-20">
