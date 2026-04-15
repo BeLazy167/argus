@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,6 +35,7 @@ type Server struct {
 	logger           *slog.Logger
 	rateLimiter      *RateLimiter
 	inFlightReviews  sync.Map     // "{repo}:{prNumber}" → struct{}
+	inFlightCancels  sync.Map     // "{repo}:{prNumber}" → context.CancelFunc
 	webhookSem       chan struct{} // bounded concurrency for webhook goroutines
 	audit            *auditLogger
 	memRegistry      *memory.Registry
@@ -159,6 +161,7 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 				r.Get("/reviews/{reviewID}", s.getReview)
 				// export also accessible via signed URL at public route above
 				r.Post("/reviews/{reviewID}/retry", s.retryReview)
+				r.Post("/reviews/{reviewID}/cancel", s.cancelReview)
 
 				// Rules
 				r.Get("/rules", s.listRules)
@@ -166,9 +169,17 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 				r.Put("/rules/{ruleID}", s.updateRule)
 				r.Delete("/rules/{ruleID}", s.deleteRule)
 
-				// Stats
+				// Stats (legacy)
 				r.Get("/stats", s.getStats)
 				r.Get("/activity", s.getActivity)
+
+				// Org Stats (detailed analytics)
+				r.Get("/stats/overview", s.statsOverview)
+				r.Get("/stats/timeseries", s.statsTimeseries)
+				r.Get("/stats/users", s.statsUsers)
+				r.Get("/stats/models", s.statsModels)
+				r.Get("/stats/findings", s.statsFindings)
+				r.Get("/stats/adoption", s.statsAdoption)
 
 				// Patterns
 				r.Get("/patterns", s.listPatterns)
@@ -233,6 +244,26 @@ func (s *Server) tryAcquireReview(repo string, pr int) bool {
 func (s *Server) releaseReview(repo string, pr int) {
 	key := fmt.Sprintf("%s:%d", repo, pr)
 	s.inFlightReviews.Delete(key)
+}
+
+func (s *Server) storeCancel(repo string, pr int, cancel context.CancelFunc) {
+	key := fmt.Sprintf("%s:%d", repo, pr)
+	s.inFlightCancels.Store(key, cancel)
+}
+
+func (s *Server) removeCancel(repo string, pr int) {
+	key := fmt.Sprintf("%s:%d", repo, pr)
+	s.inFlightCancels.Delete(key)
+}
+
+func (s *Server) loadCancel(repo string, pr int) (context.CancelFunc, bool) {
+	key := fmt.Sprintf("%s:%d", repo, pr)
+	v, ok := s.inFlightCancels.Load(key)
+	if !ok {
+		return nil, false
+	}
+	fn, ok := v.(context.CancelFunc)
+	return fn, ok
 }
 
 func (s *Server) acquireSem() bool {

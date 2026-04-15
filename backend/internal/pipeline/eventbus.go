@@ -21,6 +21,7 @@ const (
 	EventPatternLearned EventType = "pattern_learned"
 	EventCompleted      EventType = "completed"
 	EventError              EventType = "error"
+	EventCancelled          EventType = "cancelled"
 	EventFileReviewStarted  EventType = "file_review_started"
 	EventTokenUpdate        EventType = "token_update"
 )

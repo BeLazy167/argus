@@ -52,7 +52,7 @@ WHERE rp.installation_id = $1
 AND r.created_at >= date_trunc('month', NOW());
 
 -- name: UpdateReviewStatus :exec
-UPDATE reviews SET status = $2, error = $3, completed_at = CASE WHEN $2 IN ('completed','failed') THEN NOW() ELSE NULL END
+UPDATE reviews SET status = $2, error = $3, completed_at = CASE WHEN $2 IN ('completed','failed','cancelled') THEN NOW() ELSE NULL END
 WHERE id = $1;
 
 -- name: ListReviewsScoped :many

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 type ActivityLog struct {
@@ -72,15 +73,16 @@ type DecisionTrace struct {
 }
 
 type Installation struct {
-	ID              int64           `json:"id"`
-	InstallationID  int64           `json:"installation_id"`
-	OrgLogin        string          `json:"org_login"`
-	CreatedAt       time.Time       `json:"created_at"`
-	SuspendedAt     *time.Time      `json:"suspended_at"`
-	ClerkOrgID      *string         `json:"clerk_org_id"`
-	PlanTier        string          `json:"plan_tier"`
-	DefaultSettings []byte          `json:"default_settings"`
-	FeatureFlags    json.RawMessage `json:"feature_flags"`
+	ID                int64           `json:"id"`
+	InstallationID    int64           `json:"installation_id"`
+	OrgLogin          string          `json:"org_login"`
+	CreatedAt         time.Time       `json:"created_at"`
+	SuspendedAt       *time.Time      `json:"suspended_at"`
+	ClerkOrgID        *string         `json:"clerk_org_id"`
+	PlanTier          string          `json:"plan_tier"`
+	DefaultSettings   []byte          `json:"default_settings"`
+	FeatureFlags      json.RawMessage `json:"feature_flags"`
+	SupermemoryKeyEnc *string         `json:"supermemory_key_enc"`
 }
 
 type ModelConfig struct {
@@ -95,6 +97,15 @@ type ModelConfig struct {
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 	InstallationID *int64    `json:"installation_id"`
+}
+
+type ModelPricing struct {
+	ID               int64          `json:"id"`
+	ModelPattern     string         `json:"model_pattern"`
+	InputPerMillion  pgtype.Numeric `json:"input_per_million"`
+	OutputPerMillion pgtype.Numeric `json:"output_per_million"`
+	CreatedAt        time.Time      `json:"created_at"`
+	UpdatedAt        time.Time      `json:"updated_at"`
 }
 
 type Pattern struct {
@@ -201,6 +212,7 @@ type Review struct {
 	Diagrams           []byte     `json:"diagrams"`
 	TruncatedFiles     []byte     `json:"truncated_files"`
 	Brief              *string    `json:"brief"`
+	MemoryEnabled      bool       `json:"memory_enabled"`
 }
 
 type ReviewComment struct {

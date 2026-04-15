@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -64,10 +65,14 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "server busy"})
 			return
 		}
+		ctx, cancel := context.WithCancel(context.Background())
+		s.storeCancel(prEvent.RepoFullName, prEvent.PRNumber, cancel)
 		go func() {
 			defer s.releaseSem()
 			defer s.releaseReview(prEvent.RepoFullName, prEvent.PRNumber)
-			if err := s.orchestrator.HandlePREvent(context.Background(), *prEvent); err != nil {
+			defer s.removeCancel(prEvent.RepoFullName, prEvent.PRNumber)
+			defer cancel()
+			if err := s.orchestrator.HandlePREvent(ctx, *prEvent); err != nil && !errors.Is(err, context.Canceled) {
 				s.logger.Error("review pipeline failed", "error", err, "pr", prEvent.PRNumber)
 			}
 		}()

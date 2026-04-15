@@ -560,7 +560,7 @@ func (q *Queries) ListReviewsScoped(ctx context.Context, arg ListReviewsScopedPa
 }
 
 const updateReviewStatus = `-- name: UpdateReviewStatus :exec
-UPDATE reviews SET status = $2, error = $3, completed_at = CASE WHEN $2 IN ('completed','failed') THEN NOW() ELSE NULL END
+UPDATE reviews SET status = $2, error = $3, completed_at = CASE WHEN $2 IN ('completed','failed','cancelled') THEN NOW() ELSE NULL END
 WHERE id = $1
 `
 

@@ -52,7 +52,7 @@ export type Review = {
   base_sha: string;
   head_ref: string;
   github_review_id?: number;
-  status: "pending" | "in_progress" | "completed" | "failed";
+  status: "pending" | "in_progress" | "completed" | "failed" | "cancelled";
   summary?: string;
   score?: number;
   trigger: string;

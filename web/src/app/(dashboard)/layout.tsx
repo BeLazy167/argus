@@ -18,6 +18,7 @@ import {
   CreditCard,
   Menu,
   X,
+  BarChart3,
 } from "lucide-react";
 import { Suspense, useState } from "react";
 import { QueryProvider } from "@/providers/query-provider";
@@ -40,6 +41,7 @@ function SidebarRepoSelector() {
 const orgNavItems = [
   { href: "/dashboard", label: "Overview", icon: LayoutDashboard },
   { href: "/repos", label: "Repos", icon: GitFork },
+  { href: "/stats", label: "Stats", icon: BarChart3 },
 ];
 
 const repoNavItems = [

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -116,15 +117,19 @@ func (s *Server) triggerReview(w http.ResponseWriter, r *http.Request) {
 		s.logger.Error("failed to log activity", "error", err, "action", "manual_review_triggered")
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+	s.storeCancel(repo.FullName, body.PRNumber, cancel)
 	go func() {
 		defer s.releaseReview(repo.FullName, body.PRNumber)
-		if err := s.orchestrator.HandlePREvent(context.Background(), ghpkg.PREvent{
+		defer s.removeCancel(repo.FullName, body.PRNumber)
+		defer cancel()
+		if err := s.orchestrator.HandlePREvent(ctx, ghpkg.PREvent{
 			Action:         "manual",
 			InstallationID: inst.InstallationID,
 			RepoFullName:   repo.FullName,
 			RepoID:         repo.GithubID,
 			PRNumber:       body.PRNumber,
-		}); err != nil {
+		}); err != nil && !errors.Is(err, context.Canceled) {
 			s.logger.Error("manual review failed", "error", err, "repo", repo.FullName, "pr", body.PRNumber)
 		}
 	}()

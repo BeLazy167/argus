@@ -16,6 +16,7 @@ const (
 	StatePosting       PipelineState = "posting"
 	StateCompleted     PipelineState = "completed"
 	StateFailed        PipelineState = "failed"
+	StateCancelled     PipelineState = "cancelled"
 
 	// Deprecated: kept for in-flight migration
 	StateEnriching     PipelineState = "enriching"
@@ -45,5 +46,5 @@ func transitions() map[PipelineState]PipelineState {
 
 // IsTerminal returns true if the state is a final state.
 func (s PipelineState) IsTerminal() bool {
-	return s == StateCompleted || s == StateFailed
+	return s == StateCompleted || s == StateFailed || s == StateCancelled
 }

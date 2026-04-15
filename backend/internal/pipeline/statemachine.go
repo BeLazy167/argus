@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -49,7 +50,7 @@ func (sm *StateMachine) Run(ctx context.Context, run *PipelineRun) error {
 	for !run.State.IsTerminal() {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return sm.handleCancelled(ctx, run)
 		default:
 		}
 
@@ -75,19 +76,24 @@ func (sm *StateMachine) Run(ctx context.Context, run *PipelineRun) error {
 		stageStart := time.Now()
 
 		if err := stage(ctx, run); err != nil {
+			// Context cancelled mid-stage → treat as cancellation, not failure
+			if errors.Is(err, context.Canceled) {
+				return sm.handleCancelled(ctx, run)
+			}
+
 			failedState := run.State
 			run.State = StateFailed
 			run.Error = err.Error()
 			run.UpdatedAt = time.Now()
 			publishError(run, failedState, err)
-			if persistErr := sm.persistState(ctx, run); persistErr != nil {
+			if persistErr := sm.persistState(context.WithoutCancel(ctx), run); persistErr != nil {
 				sm.logger.Error("failed to persist failure state", "error", persistErr, "review_id", run.ReviewID)
 			}
 			var tokenUsage []byte
 			if run.Tokens.Total.TotalTokens > 0 {
 				tokenUsage, _ = json.Marshal(run.Tokens)
 			}
-			if persistErr := sm.st.UpdateReviewStatus(ctx, run.ReviewID, string(StateFailed), run.Error, tokenUsage); persistErr != nil {
+			if persistErr := sm.st.UpdateReviewStatus(context.WithoutCancel(ctx), run.ReviewID, string(StateFailed), run.Error, tokenUsage); persistErr != nil {
 				sm.logger.Error("failed to update review status on failure", "error", persistErr, "review_id", run.ReviewID)
 			}
 			return fmt.Errorf("stage %s failed: %w", failedState, err)
@@ -134,11 +140,41 @@ func publishError(run *PipelineRun, failedStage PipelineState, err error) {
 	})
 }
 
+// handleCancelled transitions a run to the cancelled state, persists it, and publishes the event.
+// Uses context.WithoutCancel so DB writes succeed even after parent context is cancelled.
+func (sm *StateMachine) handleCancelled(ctx context.Context, run *PipelineRun) error {
+	cancelledAtStage := run.State
+	run.State = StateCancelled
+	run.Error = "cancelled by user"
+	run.UpdatedAt = time.Now()
+
+	dbCtx := context.WithoutCancel(ctx)
+
+	if run.EventBus != nil {
+		run.EventBus.Publish(run.ReviewID, EventCancelled, map[string]string{
+			"stage": string(cancelledAtStage),
+		})
+	}
+
+	if persistErr := sm.persistState(dbCtx, run); persistErr != nil {
+		sm.logger.Error("failed to persist cancelled state", "error", persistErr, "review_id", run.ReviewID)
+	}
+	var tokenUsage []byte
+	if run.Tokens.Total.TotalTokens > 0 {
+		tokenUsage, _ = json.Marshal(run.Tokens)
+	}
+	if persistErr := sm.st.UpdateReviewStatus(dbCtx, run.ReviewID, "cancelled", run.Error, tokenUsage); persistErr != nil {
+		sm.logger.Error("failed to update review status on cancel", "error", persistErr, "review_id", run.ReviewID)
+	}
+	sm.logger.Info("review cancelled", "review_id", run.ReviewID, "stage", cancelledAtStage)
+	return context.Canceled
+}
+
 // shouldPersist returns true for states worth persisting to DB.
 // Triage is fast -- just re-run on recovery. Everything after review is persisted.
 func shouldPersist(state PipelineState) bool {
 	switch state {
-	case StateReviewing, StateBriefing, StateDeduping, StateValidating, StateScoring, StateBroadcasting, StateCrossChecking, StatePass2, StateSynthesizing, StatePosting, StateCompleted, StateFailed:
+	case StateReviewing, StateBriefing, StateDeduping, StateValidating, StateScoring, StateBroadcasting, StateCrossChecking, StatePass2, StateSynthesizing, StatePosting, StateCompleted, StateFailed, StateCancelled:
 		return true
 	}
 	return false
@@ -207,8 +243,8 @@ func (sm *StateMachine) loadState(ctx context.Context, runID uuid.UUID) (*Pipeli
 // RecoverIncomplete finds all non-terminal pipeline runs and resumes them.
 func (sm *StateMachine) RecoverIncomplete(ctx context.Context) error {
 	rows, err := sm.db.Query(ctx,
-		`SELECT id FROM pipeline_states WHERE state NOT IN ($1, $2) ORDER BY updated_at`,
-		StateCompleted, StateFailed,
+		`SELECT id FROM pipeline_states WHERE state NOT IN ($1, $2, $3) ORDER BY updated_at`,
+		StateCompleted, StateFailed, StateCancelled,
 	)
 	if err != nil {
 		return fmt.Errorf("querying incomplete runs: %w", err)

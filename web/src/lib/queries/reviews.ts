@@ -67,3 +67,20 @@ export function useRetryReview() {
     },
   });
 }
+
+export function useCancelReview() {
+  const api = useApi();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (reviewId: string) =>
+      api.post(`/api/v1/reviews/${reviewId}/cancel`, {}),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["reviews"] });
+      qc.invalidateQueries({ queryKey: ["review"] });
+      qc.invalidateQueries({ queryKey: ["stats"] });
+    },
+    onError: (err: Error) => {
+      console.error("[cancel-review] failed:", err.message);
+    },
+  });
+}
