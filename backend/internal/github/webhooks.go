@@ -137,6 +137,15 @@ type IssueCommentEvent struct {
 	CommentID      int64
 	CommentBody    string
 	CommentAuthor  string
+	// CommentBodyBefore is populated only on action="edited". It holds the
+	// pre-edit body from payload.changes.body.from so handlers can detect
+	// transitions (e.g., task-list checkbox toggles on trigger comments).
+	// Empty on created/deleted actions.
+	CommentBodyBefore string
+	// EditorLogin is the user who performed the edit, set only on
+	// action="edited". Typically differs from CommentAuthor when a viewer
+	// toggles a task-list checkbox in a bot-authored comment.
+	EditorLogin string
 }
 
 // ToIssueCommentEvent converts an issue_comment webhook payload to an IssueCommentEvent.
@@ -149,7 +158,7 @@ func ToIssueCommentEvent(event *WebhookEvent) (*IssueCommentEvent, error) {
 	if !e.GetIssue().IsPullRequest() {
 		return nil, nil
 	}
-	return &IssueCommentEvent{
+	ice := &IssueCommentEvent{
 		Action:         event.Action,
 		InstallationID: e.GetInstallation().GetID(),
 		RepoFullName:   e.GetRepo().GetFullName(),
@@ -158,7 +167,16 @@ func ToIssueCommentEvent(event *WebhookEvent) (*IssueCommentEvent, error) {
 		CommentID:      e.GetComment().GetID(),
 		CommentBody:    e.GetComment().GetBody(),
 		CommentAuthor:  e.GetComment().GetUser().GetLogin(),
-	}, nil
+	}
+	if event.Action == "edited" {
+		if changes := e.GetChanges(); changes != nil {
+			if body := changes.GetBody(); body != nil {
+				ice.CommentBodyBefore = body.GetFrom()
+			}
+		}
+		ice.EditorLogin = e.GetSender().GetLogin()
+	}
+	return ice, nil
 }
 
 

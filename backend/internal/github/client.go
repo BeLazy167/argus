@@ -491,6 +491,21 @@ func (c *Client) CreateIssueComment(ctx context.Context, installationID int64, o
 	return err
 }
 
+// UpdateIssueComment edits the body of an existing issue comment by its REST
+// comment ID. Used e.g., to swap the "Trigger" checkbox line for a "Running"
+// marker once a checkbox-triggered review has been dispatched.
+func (c *Client) UpdateIssueComment(ctx context.Context, installationID int64, owner, repo string, commentID int64, body string) error {
+	client, err := c.app.ClientForInstallation(installationID)
+	if err != nil {
+		return err
+	}
+	if err := c.restLimiter.Wait(ctx); err != nil {
+		return fmt.Errorf("rate limit wait: %w", err)
+	}
+	_, _, err = client.Issues.EditComment(ctx, owner, repo, commentID, &gh.IssueComment{Body: gh.Ptr(body)})
+	return err
+}
+
 // CreateIssueCommentWithNodeID posts a comment and returns its GraphQL node ID (for minimizing later).
 func (c *Client) CreateIssueCommentWithNodeID(ctx context.Context, installationID int64, owner, repo string, number int, body string) (string, error) {
 	client, err := c.app.ClientForInstallation(installationID)

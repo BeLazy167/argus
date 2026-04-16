@@ -264,6 +264,38 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		}
 	}
 
+	// Auto-run gate: webhook-driven events (opened/synchronize/reopened) honor
+	// the repo/org auto_run flag. Manual actions — the @argus-eye review text
+	// command and checkbox-triggered runs — set event.Action="manual" and bypass
+	// this gate because they represent explicit user intent.
+	//
+	// When auto-run is disabled:
+	//   - action=opened  -> post the one-shot "Trigger Argus review" checkbox
+	//     comment so users can kick off a review on demand (with cost preview).
+	//   - action=synchronize/reopened -> silent skip. The opened-event already
+	//     posted a trigger comment for this PR's lifetime; we don't re-post on
+	//     every new commit (noise) and we don't auto-run.
+	if event.Action != "manual" {
+		// Log DB errors explicitly: on a transient failure here, GetOrgDefaults
+		// returns empty JSON and IsAutoRunEnabled falls through to the repo
+		// setting (then default=false). An org configured with auto_run=true
+		// would silently have reviews skipped with no trace otherwise.
+		orgDefaults, orgErr := o.st.GetOrgDefaults(ctx, inst.ID)
+		if orgErr != nil {
+			o.logger.Warn("loading org defaults for auto_run gate", "error", orgErr, "installation", inst.ID)
+		}
+		if !IsAutoRunEnabled(dbRepo.SettingsJSON, orgDefaults) {
+			if event.Action == "opened" {
+				if err := o.postTriggerComment(ctx, event, owner, repo, dbRepo); err != nil {
+					o.logger.Error("posting trigger comment", "error", err, "repo", event.RepoFullName, "pr", event.PRNumber)
+				}
+			} else {
+				o.logger.Info("auto-run disabled; skipping event", "repo", event.RepoFullName, "pr", event.PRNumber, "action", event.Action)
+			}
+			return nil
+		}
+	}
+
 	// On synchronize (new push), GitHub computes the diff asynchronously.
 	// A brief delay avoids fetching stale/incomplete diff data and prevents
 	// "submitted too quickly" 422 errors when posting the review later.
@@ -652,6 +684,26 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		o.tracker.TrackReviewCompleted(inst.ID, event.RepoFullName, event.PRNumber, run.ReviewID.String(), score, commentCount, durationMs)
 	}
 	return err
+}
+
+// postTriggerComment renders the cost estimate + one-shot task-list checkbox
+// ("Trigger Argus review") and posts it as an issue comment on the PR.
+//
+// Called once per PR lifetime — only on action=opened — when the auto_run flag
+// is off for the repo/org. On subsequent pushes (synchronize) we silent-skip;
+// users re-trigger via @argus-eye review or by clicking the existing checkbox.
+//
+// Estimate construction is best-effort (see BuildEstimate). A comment is
+// always posted even if both historical + live lookups fail — in that case the
+// body degrades to checkbox-only.
+func (o *Orchestrator) postTriggerComment(ctx context.Context, event ghpkg.PREvent, owner, repo string, dbRepo *store.Repo) error {
+	est := BuildEstimate(ctx, o.st, o.ghClient, event.InstallationID, dbRepo.ID, owner, repo, event.PRNumber, 0, o.logger)
+	body := BuildTriggerComment(est)
+	if err := o.ghClient.CreateIssueComment(ctx, event.InstallationID, owner, repo, event.PRNumber, body); err != nil {
+		return err
+	}
+	o.logger.Info("trigger comment posted", "repo", event.RepoFullName, "pr", event.PRNumber, "files", est.Files, "diff_lines", est.DiffLines, "sample_size", est.SampleSize)
+	return nil
 }
 
 func (o *Orchestrator) handlePRClosed(ctx context.Context, event ghpkg.PREvent) error {

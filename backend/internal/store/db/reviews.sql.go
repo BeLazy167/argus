@@ -235,6 +235,48 @@ func (q *Queries) GetLatestReviewBySHA(ctx context.Context, arg GetLatestReviewB
 	return i, err
 }
 
+const getRepoReviewStats = `-- name: GetRepoReviewStats :one
+WITH recent AS (
+  SELECT token_usage FROM reviews
+  WHERE repo_id = $1 AND status = 'completed' AND token_usage IS NOT NULL
+  ORDER BY created_at DESC
+  LIMIT $2
+)
+SELECT
+  COUNT(*)::int AS sample_size,
+  COALESCE(AVG((token_usage->'total'->>'total_tokens')::bigint), 0)::bigint AS avg_tokens,
+  COALESCE(AVG(NULLIF((token_usage->'total'->>'cost')::float8, 0)), 0)::float8 AS avg_cost,
+  COALESCE(BOOL_OR((token_usage->'total'->>'cost') IS NOT NULL AND (token_usage->'total'->>'cost')::float8 > 0), false) AS cost_available
+FROM recent
+`
+
+type GetRepoReviewStatsParams struct {
+	RepoID int64 `json:"repo_id"`
+	Limit  int32 `json:"limit"`
+}
+
+type GetRepoReviewStatsRow struct {
+	SampleSize    int         `json:"sample_size"`
+	AvgTokens     int64       `json:"avg_tokens"`
+	AvgCost       float64     `json:"avg_cost"`
+	CostAvailable interface{} `json:"cost_available"`
+}
+
+// Returns averaged token + cost stats over the last N completed reviews for a repo,
+// used to estimate cost for the "Trigger review" checkbox comment. `cost_available`
+// is true only when at least one review in the sample has token_usage.total.cost.
+func (q *Queries) GetRepoReviewStats(ctx context.Context, arg GetRepoReviewStatsParams) (GetRepoReviewStatsRow, error) {
+	row := q.db.QueryRow(ctx, getRepoReviewStats, arg.RepoID, arg.Limit)
+	var i GetRepoReviewStatsRow
+	err := row.Scan(
+		&i.SampleSize,
+		&i.AvgTokens,
+		&i.AvgCost,
+		&i.CostAvailable,
+	)
+	return i, err
+}
+
 const getReview = `-- name: GetReview :one
 SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, COALESCE(head_ref,'') as head_ref, github_review_id,
        status, summary, score, token_usage, trigger, triggered_by, duration_ms, error,

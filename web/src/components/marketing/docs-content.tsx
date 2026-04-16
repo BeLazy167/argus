@@ -44,6 +44,7 @@ import {
   Compass,
   Scan,
   Flag,
+  Info,
 } from "lucide-react";
 
 /* ── Section data ── */
@@ -66,6 +67,7 @@ const SECTIONS = [
   { id: "api-keys", label: "API Keys (BYOK)" },
   { id: "supermemory", label: "BYOT Supermemory" },
   { id: "personas", label: "Review Personas" },
+  { id: "auto-review", label: "Auto-review & Triggers" },
   { id: "commands", label: "Bot Commands" },
   { id: "test-generation", label: "Test Generation" },
   { id: "memory", label: "Memory & Learning" },
@@ -1428,6 +1430,176 @@ export function DocsContent() {
             </div>
           </div>
 
+          {/* ── Auto-review & Triggers ── */}
+          <div>
+            <SectionHeader id="auto-review" title="Auto-review & Triggers" />
+            <p className="text-xs font-mono text-slate-text mb-3 leading-relaxed">
+              Argus supports two trigger modes. Pick per-org, override per-repo.
+            </p>
+            <p className="text-xs font-mono text-slate-text mb-6 leading-relaxed">
+              <span className="text-foreground">Auto-review off (default).</span>{" "}
+              When a PR opens, Argus posts a{" "}
+              <span className="text-amber">Trigger Argus review</span>{" "}
+              checkbox comment with an estimated token + cost preview. Reviewers
+              tick the box to run a review on demand. Pushes to an open PR do
+              not post additional comments.
+              <br />
+              <br />
+              <span className="text-foreground">Auto-review on.</span>{" "}
+              Every PR opened, pushed, or reopened is reviewed automatically —
+              no checkbox, no preview.
+            </p>
+
+            <div className="grid gap-3 md:grid-cols-2">
+              <div className="border border-iron bg-charcoal p-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <ToggleRight className="h-4 w-4 text-amber" />
+                  <span className="text-xs font-mono font-bold text-foreground">
+                    Precedence
+                  </span>
+                </div>
+                <p className="text-[11px] font-mono text-slate-text leading-relaxed">
+                  Repo override beats org default. If the repo setting is
+                  unset, the org default applies. If both are unset, auto-run
+                  is off.
+                </p>
+              </div>
+
+              <div className="border border-iron bg-charcoal p-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <Gauge className="h-4 w-4 text-amber" />
+                  <span className="text-xs font-mono font-bold text-foreground">
+                    Rate limits
+                  </span>
+                </div>
+                <p className="text-[11px] font-mono text-slate-text leading-relaxed">
+                  Every review draws from a 10/hour per-repo bucket and a
+                  50/day per-org bucket. Checkbox clicks and{" "}
+                  <code className="text-amber bg-iron/40 rounded px-1 py-0.5">
+                    --force
+                  </code>{" "}
+                  additionally draw from a tighter 3/hour per-repo force bucket
+                  — effectively capping on-demand triggers at 3/hour.
+                </p>
+              </div>
+
+              <div className="border border-iron bg-charcoal p-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <Sparkles className="h-4 w-4 text-amber" />
+                  <span className="text-xs font-mono font-bold text-foreground">
+                    Cost preview
+                  </span>
+                </div>
+                <p className="text-[11px] font-mono text-slate-text leading-relaxed">
+                  The trigger comment shows changed-file count, diff lines, and
+                  a historical average of tokens + USD cost across your last
+                  20 reviews for this repo. USD is omitted when pricing data
+                  is unavailable (token-only fallback).
+                </p>
+              </div>
+
+              <div className="border border-iron bg-charcoal p-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <MessageSquare className="h-4 w-4 text-amber" />
+                  <span className="text-xs font-mono font-bold text-foreground">
+                    Fallback command
+                  </span>
+                </div>
+                <p className="text-[11px] font-mono text-slate-text leading-relaxed">
+                  You can always trigger a review by commenting{" "}
+                  <code className="text-amber bg-iron/40 rounded px-1 py-0.5">
+                    @argus-eye review
+                  </code>
+                  , regardless of the auto-run setting. Useful if the checkbox
+                  comment is missing (webhook redelivery, PR opened before
+                  Argus install).
+                </p>
+              </div>
+            </div>
+
+            <h3 className="font-mono text-sm font-semibold text-foreground mt-8 mb-3">
+              How the checkbox works
+            </h3>
+            <ol className="space-y-2 text-xs font-mono text-slate-text leading-relaxed list-decimal pl-5 mb-6">
+              <li>
+                PR opens → Argus posts a single comment with cost preview and{" "}
+                <code className="text-amber bg-iron/40 rounded px-0.5">
+                  - [ ] Trigger Argus review
+                </code>
+                .
+              </li>
+              <li>
+                A user with triage-level access ticks the box. GitHub fires an{" "}
+                <code className="text-amber bg-iron/40 rounded px-1 py-0.5">
+                  issue_comment.edited
+                </code>{" "}
+                webhook.
+              </li>
+              <li>
+                Argus verifies the comment author is{" "}
+                <code className="text-amber bg-iron/40 rounded px-1 py-0.5">
+                  argus-eye[bot]
+                </code>{" "}
+                (anti-hijack), rate-limits the click, swaps the checkbox for{" "}
+                <code className="text-amber bg-iron/40 rounded px-1 py-0.5">
+                  Running Argus review…
+                </code>
+                , and dispatches the review.
+              </li>
+              <li>
+                If the pipeline errors, the checkbox is restored with a retry
+                hint. Tick again to run.
+              </li>
+            </ol>
+
+            <h3 className="font-mono text-sm font-semibold text-foreground mb-3">
+              Where to toggle
+            </h3>
+            <p className="text-xs font-mono text-slate-text mb-3 leading-relaxed">
+              Dashboard →{" "}
+              <span className="text-amber">Settings</span>:
+            </p>
+            <ul className="space-y-1.5 text-xs font-mono text-slate-text leading-relaxed list-disc pl-5 mb-6">
+              <li>
+                <span className="text-foreground">Org Defaults</span> tab →{" "}
+                <span className="text-amber">Auto-review</span> card for the
+                org-wide default.
+              </li>
+              <li>
+                <span className="text-foreground">Repo Overrides</span> tab →{" "}
+                <span className="text-amber">Auto-review</span> card for a
+                per-repo override.
+              </li>
+            </ul>
+
+            <div className="border border-iron bg-charcoal p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <Info className="h-3.5 w-3.5 text-amber" />
+                <span className="text-[11px] font-mono font-bold text-foreground uppercase tracking-wider">
+                  Gotchas
+                </span>
+              </div>
+              <ul className="space-y-1.5 text-[11px] font-mono text-slate-text leading-relaxed list-disc pl-4">
+                <li>
+                  Trigger comments are posted only on <code className="text-amber">opened</code>. Pushes to an open PR (<code className="text-amber">synchronize</code>) do not repost — use the existing checkbox or{" "}
+                  <code className="text-amber">@argus-eye review</code>.
+                </li>
+                <li>
+                  Ticking the box on <em>anyone else&apos;s</em> comment that
+                  mimics our format is ignored — only comments authored by
+                  Argus trigger reviews.
+                </li>
+                <li>
+                  Only the{" "}
+                  <code className="text-amber">[ ]→[x]</code>{" "}
+                  transition triggers a review. Unticking (<code className="text-amber">[x]→[ ]</code>)
+                  does nothing, and a running review cannot be cancelled from
+                  the checkbox.
+                </li>
+              </ul>
+            </div>
+          </div>
+
           {/* ── Bot Commands ── */}
           <div>
             <SectionHeader id="commands" title="Bot Commands" />
@@ -1881,6 +2053,11 @@ export function DocsContent() {
 
             <div className="space-y-3">
               {[
+                {
+                  label: "Auto-review",
+                  desc: "Review every PR automatically. When off, Argus posts a Trigger checkbox on opened PRs with a token/cost preview — reviewers tick to run on demand.",
+                  status: "off",
+                },
                 {
                   label: "Deep Review",
                   desc: "Enables the 4-specialist parallel review (bug_hunter, security, architecture, regression) per file.",

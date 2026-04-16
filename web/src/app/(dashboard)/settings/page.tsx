@@ -607,6 +607,25 @@ function PromptCard({
   );
 }
 
+/* ── Auto-review Toggle ─────────────────────────────────────────────
+ *
+ * Controls whether PR open/push events automatically kick off a review.
+ * Off by default at both org and repo level (nil in settings JSON => false).
+ * When off, the backend posts a one-shot "Trigger Argus review" checkbox
+ * comment on opened PRs, with a token/cost estimate from history + live
+ * diff. Clicking the checkbox fires an edited webhook and runs the review
+ * under the 3/hr force-cap path.
+ *
+ * Not under ProGate: this is a cost/behavior control, not a premium feature.
+ */
+const AUTO_RUN_TOGGLE = {
+  key: "auto_run",
+  label: "Auto-review every PR",
+  hint: "Run a review automatically on PR open and on every new commit",
+  description: "When off, Argus posts a task-list checkbox on opened PRs with an estimated token / cost preview. Ticking the box runs the review on demand.",
+  defaultValue: false,
+} as const;
+
 /* ── Pipeline Feature Toggles ── */
 
 const PIPELINE_FEATURES = [
@@ -676,6 +695,15 @@ const PIPELINE_FEATURES = [
   },
 ] as const;
 
+type ToggleDef = {
+  key: string;
+  label: string;
+  hint: string;
+  description: string;
+  defaultValue: boolean;
+  requiresDeepReview?: boolean;
+};
+
 function PipelineFeatureCard({
   toggle,
   enabled,
@@ -683,7 +711,7 @@ function PipelineFeatureCard({
   pending,
   disabled,
 }: {
-  toggle: (typeof PIPELINE_FEATURES)[number];
+  toggle: ToggleDef;
   enabled: boolean;
   onToggle: () => void;
   pending: boolean;
@@ -1022,6 +1050,30 @@ export default function SettingsPage() {
                 )}
               </section>
 
+              {/* Org: Auto-review (not pro-gated — cost control) */}
+              <section>
+                <div className="flex items-center gap-3 mb-4">
+                  <div className="flex items-center gap-2">
+                    <Zap className="h-4 w-4 text-amber" />
+                    <h2 className="font-mono text-lg font-semibold text-foreground">
+                      Auto-review
+                    </h2>
+                  </div>
+                </div>
+                <p className="text-xs font-mono text-slate-text mb-4">
+                  Default for all repos in {active?.org_login}. Turn off to require opt-in per PR via a checkbox comment with cost preview.
+                </p>
+                <PipelineFeatureCard
+                  toggle={AUTO_RUN_TOGGLE}
+                  enabled={typeof orgDefaults?.auto_run === "boolean" ? orgDefaults.auto_run : AUTO_RUN_TOGGLE.defaultValue}
+                  pending={saveOrgDefaults.isPending}
+                  onToggle={() => {
+                    const current = typeof orgDefaults?.auto_run === "boolean" ? orgDefaults.auto_run : AUTO_RUN_TOGGLE.defaultValue;
+                    saveOrgDefaults.mutate({ ...orgDefaults, auto_run: !current });
+                  }}
+                />
+              </section>
+
               {/* Org: Pipeline Features */}
               <ProGate feature="Pipeline features">
                 <section>
@@ -1351,6 +1403,49 @@ export default function SettingsPage() {
                   <p className="text-[10px] font-mono text-red-400 mt-2">{personaError}</p>
                 )}
               </>
+            )}
+          </section>
+
+          {/* Section 3b: Auto-review (not pro-gated — cost control) */}
+          <section>
+            <div className="flex items-center gap-3 mb-4">
+              <div className="flex items-center gap-2">
+                <Zap className="h-4 w-4 text-amber" />
+                <h2 className="font-mono text-lg font-semibold text-foreground">
+                  Auto-review
+                </h2>
+              </div>
+            </div>
+            <p className="text-[11px] font-mono text-slate-text mb-4">
+              Repo override for{" "}
+              <span className="text-foreground">{activeRepo?.full_name ?? "selected repo"}</span>.
+              When off, Argus posts a trigger checkbox on opened PRs instead of running automatically.
+            </p>
+
+            {activeId === 0 ? (
+              <div className="border border-iron bg-charcoal p-10 text-center">
+                <Zap className="h-8 w-8 text-slate-text mx-auto mb-3" />
+                <p className="text-xs font-mono text-slate-text">
+                  Select a repo to configure auto-review.
+                </p>
+              </div>
+            ) : (
+              <PipelineFeatureCard
+                toggle={AUTO_RUN_TOGGLE}
+                enabled={typeof activeRepo?.settings_json?.auto_run === "boolean"
+                  ? (activeRepo.settings_json.auto_run as boolean)
+                  : (typeof orgDefaults?.auto_run === "boolean" ? orgDefaults.auto_run : AUTO_RUN_TOGGLE.defaultValue)}
+                pending={updateRepo.isPending}
+                onToggle={() => {
+                  const repoVal = typeof activeRepo?.settings_json?.auto_run === "boolean"
+                    ? (activeRepo.settings_json.auto_run as boolean)
+                    : (typeof orgDefaults?.auto_run === "boolean" ? orgDefaults.auto_run : AUTO_RUN_TOGGLE.defaultValue);
+                  updateRepo.mutate({
+                    id: activeId,
+                    settings_json: { ...activeRepo?.settings_json, auto_run: !repoVal },
+                  });
+                }}
+              />
             )}
           </section>
 

@@ -148,7 +148,8 @@ func PersonaSpecialistHintCustom(customPrompt string) string {
 	return "\nPersona lens (custom): " + hint
 }
 
-// repoSettings is the JSON structure stored in repos.settings_json.
+// repoSettings is the JSON structure stored in repos.settings_json and
+// installations.default_settings (org-wide defaults).
 type repoSettings struct {
 	Persona             string   `json:"persona,omitempty"`
 	CustomPersonaPrompt string   `json:"custom_persona_prompt,omitempty"`
@@ -163,6 +164,7 @@ type repoSettings struct {
 	FileSynthesis       *bool    `json:"file_synthesis,omitempty"`
 	ArchitectureGraph   *bool    `json:"architecture_graph,omitempty"`
 	SkipBaseBranches    []string `json:"skip_base_branches,omitempty"`
+	AutoRun             *bool    `json:"auto_run,omitempty"`
 }
 
 func parseRepoSettings(settingsJSON json.RawMessage) (repoSettings, bool) {
@@ -234,6 +236,24 @@ func isFileSynthesisEnabled(settingsJSON json.RawMessage) bool {
 func isArchitectureGraphEnabled(settingsJSON json.RawMessage) bool {
 	s, ok := parseRepoSettings(settingsJSON)
 	return !ok || s.ArchitectureGraph == nil || *s.ArchitectureGraph
+}
+
+// IsAutoRunEnabled resolves the auto_run flag for a repo.
+//
+// Precedence: repo overrides org; nil at both levels defaults to OFF.
+// Returns true only when the nearest explicitly set value is true.
+//
+// When the flag is OFF, PR webhook events (opened/synchronize/reopened) are
+// NOT auto-dispatched to the review pipeline; instead the webhook layer posts
+// a task-list "Trigger review" comment for on-demand execution.
+func IsAutoRunEnabled(repoSettingsJSON, orgDefaultsJSON json.RawMessage) bool {
+	if rs, ok := parseRepoSettings(repoSettingsJSON); ok && rs.AutoRun != nil {
+		return *rs.AutoRun
+	}
+	if os, ok := parseRepoSettings(orgDefaultsJSON); ok && os.AutoRun != nil {
+		return *os.AutoRun
+	}
+	return false
 }
 
 // PersonaSpecialistHint returns a short directive for appending to specialist prompts.

@@ -685,6 +685,41 @@ func (s *Store) GetCommentByGithubID(ctx context.Context, githubCommentID int64)
 	return &c, nil
 }
 
+// RepoReviewStats holds averaged token / cost figures used to estimate the
+// cost of a pending review when rendering the "Trigger review" checkbox.
+type RepoReviewStats struct {
+	SampleSize    int
+	AvgTokens     int64
+	AvgCost       float64
+	CostAvailable bool
+}
+
+// GetRepoReviewStats averages tokens + cost across the last `limit` completed
+// reviews for a repo. CostAvailable is false when no sampled review recorded a
+// positive USD cost (e.g., OSS provider, missing pricing metadata) — callers
+// should render tokens only in that case.
+//
+// Non-fatal: returns a zero-value RepoReviewStats on error with no sample_size
+// so the caller can fall through to generic messaging.
+func (s *Store) GetRepoReviewStats(ctx context.Context, repoID int64, limit int) (RepoReviewStats, error) {
+	var stats RepoReviewStats
+	err := s.Pool.QueryRow(ctx, `
+		WITH recent AS (
+			SELECT token_usage FROM reviews
+			WHERE repo_id = $1 AND status = 'completed' AND token_usage IS NOT NULL
+			ORDER BY created_at DESC
+			LIMIT $2
+		)
+		SELECT
+			COUNT(*)::int,
+			COALESCE(AVG((token_usage->'total'->>'total_tokens')::bigint), 0)::bigint,
+			COALESCE(AVG(NULLIF((token_usage->'total'->>'cost')::float8, 0)), 0)::float8,
+			COALESCE(BOOL_OR((token_usage->'total'->>'cost') IS NOT NULL AND (token_usage->'total'->>'cost')::float8 > 0), false)
+		FROM recent
+	`, repoID, limit).Scan(&stats.SampleSize, &stats.AvgTokens, &stats.AvgCost, &stats.CostAvailable)
+	return stats, err
+}
+
 // GetLastCompletedReview returns the most recent completed review for a repo+PR.
 func (s *Store) GetLastCompletedReview(ctx context.Context, repoID int64, prNumber int) (*Review, error) {
 	var r Review

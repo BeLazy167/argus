@@ -63,3 +63,20 @@ FROM reviews rv
 JOIN repos r ON rv.repo_id = r.id
 WHERE rv.repo_id = $1 AND r.installation_id = ANY($2::bigint[])
 ORDER BY rv.created_at DESC LIMIT $3 OFFSET $4;
+
+-- name: GetRepoReviewStats :one
+-- Returns averaged token + cost stats over the last N completed reviews for a repo,
+-- used to estimate cost for the "Trigger review" checkbox comment. `cost_available`
+-- is true only when at least one review in the sample has token_usage.total.cost.
+WITH recent AS (
+  SELECT token_usage FROM reviews
+  WHERE repo_id = $1 AND status = 'completed' AND token_usage IS NOT NULL
+  ORDER BY created_at DESC
+  LIMIT $2
+)
+SELECT
+  COUNT(*)::int AS sample_size,
+  COALESCE(AVG((token_usage->'total'->>'total_tokens')::bigint), 0)::bigint AS avg_tokens,
+  COALESCE(AVG(NULLIF((token_usage->'total'->>'cost')::float8, 0)), 0)::float8 AS avg_cost,
+  COALESCE(BOOL_OR((token_usage->'total'->>'cost') IS NOT NULL AND (token_usage->'total'->>'cost')::float8 > 0), false) AS cost_available
+FROM recent;
