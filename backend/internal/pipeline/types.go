@@ -52,6 +52,8 @@ type RunTokenUsage struct {
 }
 
 // StageTokens holds token counts and cost for a single LLM call or stage aggregate.
+// For review-stage units, Specialist names the reviewer (correctness, security,
+// architecture, regression) or is empty for skim/single-pass reviews.
 type StageTokens struct {
 	PromptTokens     int     `json:"prompt_tokens"`
 	CompletionTokens int     `json:"completion_tokens"`
@@ -60,6 +62,7 @@ type StageTokens struct {
 	Model            string  `json:"model,omitempty"`
 	Provider         string  `json:"provider,omitempty"`
 	File             string  `json:"file,omitempty"`
+	Specialist       string  `json:"specialist,omitempty"`
 }
 
 // PipelineRun tracks the state and intermediate results of a single review.

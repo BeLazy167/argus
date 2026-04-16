@@ -631,6 +631,42 @@ func (s *Store) CreateReviewComment(ctx context.Context, reviewID uuid.UUID, fil
 }
 
 // GetCommentByGithubID looks up a review comment by its GitHub comment ID.
+// ListPRGithubCommentIDs returns the GitHub comment IDs of every Argus-posted
+// review comment on the given PR, across all completed reviews. Used by the
+// reaction sweep to know which comments to fetch reactions for. Deduped by
+// github_comment_id in case we somehow posted the same comment twice.
+//
+// Filters to completed reviews only — a pending or failed review may have
+// written comment rows but not yet posted them to GitHub, so their IDs would
+// be stale or absent. Belt-and-suspenders since we also require the ID to
+// be non-NULL.
+func (s *Store) ListPRGithubCommentIDs(ctx context.Context, repoFullName string, prNumber int) ([]int64, error) {
+	rows, err := s.Pool.Query(ctx, `
+		SELECT DISTINCT rc.github_comment_id
+		FROM review_comments rc
+		JOIN reviews rv ON rc.review_id = rv.id
+		JOIN repos r ON rv.repo_id = r.id
+		WHERE r.full_name = $1 AND rv.pr_number = $2
+		  AND rv.status = 'completed'
+		  AND rc.github_comment_id IS NOT NULL
+	`, repoFullName, prNumber)
+	if err != nil {
+		return nil, fmt.Errorf("listing PR comment ids: %w", err)
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id *int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scanning comment id: %w", err)
+		}
+		if id != nil {
+			ids = append(ids, *id)
+		}
+	}
+	return ids, rows.Err()
+}
+
 func (s *Store) GetCommentByGithubID(ctx context.Context, githubCommentID int64) (*ReviewComment, error) {
 	var c ReviewComment
 	err := s.Pool.QueryRow(ctx, `

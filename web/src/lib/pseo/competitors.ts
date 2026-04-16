@@ -23,7 +23,7 @@ export interface Competitor {
 
 export const featureLabels: Record<keyof Competitor["features"], string> = {
   memory: "Institutional memory across reviews",
-  multiPass: "Multi-pass specialist pipeline",
+  multiPass: "Multi-pass review pipeline",
   diagramGeneration: "PR diagram generation (sequence + data flow)",
   codeSimulation: "Failure scenario simulation",
   architectureAnalysis: "Architecture & dependency tracing",
@@ -60,12 +60,12 @@ export const competitors: Competitor[] = [
       "No institutional memory — reviews don't improve from past incidents",
       "No failure scenario simulation or code simulation",
       "No cross-PR dependency tracking between related changes",
-      "Architecture diagrams limited compared to multi-specialist analysis",
+      "Architecture diagrams limited compared to multi-angle analysis",
     ],
     argusAdvantage:
-      "CodeRabbit is fast and broadly integrated. Argus goes deeper — multi-pass specialist pipeline (bug hunter, security, architecture, regression), institutional memory that learns from every review, and failure simulation that predicts what breaks before it ships.",
+      "CodeRabbit is fast and broadly integrated. Argus goes deeper — multi-stage review pipeline (correctness, security, architecture, regression), institutional memory that learns from every review, and failure simulation that predicts what breaks before it ships.",
     summary:
-      "CodeRabbit is the most widely adopted AI code review tool, processing 13M+ PRs across GitHub, GitLab, Azure DevOps, and Bitbucket. It offers agentic workflows, integrated static analysis, and an Issue Planner for pre-coding specs. Strong for breadth and speed, but lacks the multi-specialist depth, institutional memory, and failure simulation of purpose-built review tools.",
+      "CodeRabbit is the most widely adopted AI code review tool, processing 13M+ PRs across GitHub, GitLab, Azure DevOps, and Bitbucket. It offers agentic workflows, integrated static analysis, and an Issue Planner for pre-coding specs. Strong for breadth and speed, but lacks the multi-angle depth, institutional memory, and failure simulation of purpose-built review tools.",
     stat: {
       claim: "CodeRabbit has processed over 13 million pull requests across 2 million repositories",
       source: "CodeRabbit official website, 2026",
@@ -98,12 +98,12 @@ export const competitors: Competitor[] = [
       "Primarily rule-based foundation — AI features are recent additions",
       "No institutional memory or cross-review learning",
       "No failure scenario simulation",
-      "No multi-pass specialist pipeline",
+      "No multi-stage review pipeline",
     ],
     argusAdvantage:
-      "Codacy applies static rules augmented with recent AI features. Argus is AI-native — multi-pass specialist review, institutional memory that learns your codebase's unique patterns, and failure simulation. Rules can't ask 'why did this change break that module?' Argus can.",
+      "Codacy applies static rules augmented with recent AI features. Argus is AI-native — multi-stage review, institutional memory that learns your codebase's unique patterns, and failure simulation. Rules can't ask 'why did this change break that module?' Argus can.",
     summary:
-      "Codacy is a mature code quality platform that has pivoted toward AI code governance in 2026. It now offers AI Guardrails (IDE scanning), AI Reviewer (hybrid static + AI PR review), and an AI Risk Hub for organizational oversight. Strong for teams managing AI-generated code quality at scale, but lacks the multi-specialist depth and institutional memory of purpose-built AI review tools.",
+      "Codacy is a mature code quality platform that has pivoted toward AI code governance in 2026. It now offers AI Guardrails (IDE scanning), AI Reviewer (hybrid static + AI PR review), and an AI Risk Hub for organizational oversight. Strong for teams managing AI-generated code quality at scale, but lacks the multi-angle depth and institutional memory of purpose-built AI review tools.",
     stat: {
       claim: "Development teams now generate 30-70% of code through AI assistants, driving Codacy's pivot to AI governance",
       source: "Codacy product announcement, 2026",
@@ -177,9 +177,9 @@ export const competitors: Competitor[] = [
       "Review depth limited by premium request credits",
     ],
     argusAdvantage:
-      "Copilot now includes code review, but it's one feature among many. Argus is purpose-built for review depth — multi-pass specialist pipeline, institutional memory, failure simulation, and cross-PR dependency tracking. Copilot reviews at breadth; Argus reviews at depth. Use both together.",
+      "Copilot now includes code review, but it's one feature among many. Argus is purpose-built for review depth — multi-stage review pipeline, institutional memory, failure simulation, and cross-PR dependency tracking. Copilot reviews at breadth; Argus reviews at depth. Use both together.",
     summary:
-      "GitHub Copilot expanded from AI code completion to include code review in 2025-2026, processing 60M+ reviews with its agentic architecture. In 71% of reviews it surfaces actionable feedback. However, code review is one feature in a broader tool — it lacks the multi-specialist depth, institutional memory, and failure simulation of dedicated review tools.",
+      "GitHub Copilot expanded from AI code completion to include code review in 2025-2026, processing 60M+ reviews with its agentic architecture. In 71% of reviews it surfaces actionable feedback. However, code review is one feature in a broader tool — it lacks the multi-angle depth, institutional memory, and failure simulation of dedicated review tools.",
     stat: {
       claim: "Copilot code review reached 60M reviews by March 2026, with actionable feedback in 71% of cases",
       source: "GitHub Copilot official stats, March 2026",
@@ -210,14 +210,14 @@ export const competitors: Competitor[] = [
     ],
     weaknesses: [
       "No institutional memory — reviews don't learn from past incidents",
-      "Single-pass review without specialist agents",
+      "Single-pass review without focused analysis stages",
       "No failure scenario simulation or architecture tracing",
       "No cross-PR dependency tracking",
     ],
     argusAdvantage:
-      "Sourcery provides fast summaries and diagrams. Argus provides depth — multi-pass specialist review (bug hunter, security, architecture, regression), institutional memory that learns your patterns, and failure simulation. Sourcery cleans up code; Argus catches systemic risks.",
+      "Sourcery provides fast summaries and diagrams. Argus provides depth — multi-stage review (correctness, security, architecture, regression), institutional memory that learns your patterns, and failure simulation. Sourcery cleans up code; Argus catches systemic risks.",
     summary:
-      "Sourcery is an AI review tool used by 300,000+ developers, offering instant PR summaries, sequence diagrams, and inline feedback. It includes real-time IDE scanning and security scanning for Team plans. Strong for speed and code quality improvements, but lacks the multi-specialist depth, institutional memory, and failure simulation of purpose-built review tools.",
+      "Sourcery is an AI review tool used by 300,000+ developers, offering instant PR summaries, sequence diagrams, and inline feedback. It includes real-time IDE scanning and security scanning for Team plans. Strong for speed and code quality improvements, but lacks the multi-angle depth, institutional memory, and failure simulation of purpose-built review tools.",
     stat: {
       claim: "Sourcery is used by over 300,000 developers at companies including HelloFresh, Cisco, and Red Hat",
       source: "Sourcery official website, 2026",
@@ -253,7 +253,7 @@ export const competitors: Competitor[] = [
       "Testing focus may dilute review depth",
     ],
     argusAdvantage:
-      "Qodo combines testing and review. Argus is purpose-built for review depth — 4-specialist pipeline, institutional memory that improves every review, and failure simulation. Qodo's multi-agent review is strong (60.1% F1), but Argus adds memory, simulation, and cross-PR tracking on top.",
+      "Qodo combines testing and review. Argus is purpose-built for review depth — 4-review pipeline, institutional memory that improves every review, and failure simulation. Qodo's multi-agent review is strong (60.1% F1), but Argus adds memory, simulation, and cross-PR tracking on top.",
     summary:
       "Qodo (CodiumAI) is a multi-product AI code quality platform combining PR review (Merge), test generation (Gen), and CLI agents (Command). Its 2026 multi-agent architecture achieved the highest F1 score in benchmark testing. Strong for teams wanting an all-in-one code quality tool, but lacks institutional memory, failure simulation, and the cross-PR tracking of specialized review tools.",
     stat: {
@@ -324,15 +324,15 @@ export const competitors: Competitor[] = [
     ],
     weaknesses: [
       "No institutional memory — reviews don't learn from past incidents",
-      "Single-agent review without specialist pipeline",
+      "Single-agent review without review pipeline",
       "No failure scenario simulation or architecture tracing",
       "Usage-based pricing adds up ($1/review beyond 50/seat)",
       "No BYOK — can't bring your own LLM provider",
     ],
     argusAdvantage:
-      "Greptile reviews with full codebase context, which is strong. Argus adds depth on top — 4-specialist multi-pass pipeline, institutional memory that improves every review, failure simulation, and cross-PR dependency tracking. Greptile sees the codebase; Argus remembers its history.",
+      "Greptile reviews with full codebase context, which is strong. Argus adds depth on top — multi-stage analysis, institutional memory that improves every review, failure simulation, and cross-PR dependency tracking. Greptile sees the codebase; Argus remembers its history.",
     summary:
-      "Greptile is a fast-growing AI code review tool that analyzes the entire codebase (not just the diff) for context-aware reviews. Its Agent v4 significantly improved actionable feedback rates. Also offers Slack integration for codebase Q&A. Strong on breadth and context, but lacks multi-specialist depth, institutional memory, failure simulation, and BYOK flexibility.",
+      "Greptile is a fast-growing AI code review tool that analyzes the entire codebase (not just the diff) for context-aware reviews. Its Agent v4 significantly improved actionable feedback rates. Also offers Slack integration for codebase Q&A. Strong on breadth and context, but lacks multi-angle depth, institutional memory, failure simulation, and BYOK flexibility.",
     stat: {
       claim: "Greptile Agent v4 increased actionable comments per PR from 0.92 to 1.60, a 74% improvement",
       source: "Greptile v4 blog post, 2026",
@@ -363,15 +363,15 @@ export const competitors: Competitor[] = [
     ],
     weaknesses: [
       "No institutional memory — reviews don't learn from past incidents",
-      "No multi-specialist pipeline (single-pass review)",
+      "No multi-angle pipeline (single-pass review)",
       "No failure scenario simulation or scenario testing",
       "No BYOK — can't bring your own LLM provider",
       "No cross-PR dependency tracking between related changes",
     ],
     argusAdvantage:
-      "Cubic generates architecture diagrams and verifies tickets. Argus goes deeper — 4-specialist multi-pass review, institutional memory, failure simulation, cross-PR tracking, and BYOK flexibility. Cubic shows structure; Argus catches risks.",
+      "Cubic generates architecture diagrams and verifies tickets. Argus goes deeper — multi-stage review, institutional memory, failure simulation, cross-PR tracking, and BYOK flexibility. Cubic shows structure; Argus catches risks.",
     summary:
-      "Cubic is an AI code review tool that combines PR analysis with auto-generated Mermaid architecture diagrams and project management integration (Jira, Linear, Asana). It verifies PRs fulfill ticket requirements and tracks team productivity metrics. Strong for visibility and project alignment, but lacks multi-specialist depth, institutional memory, failure simulation, and BYOK support.",
+      "Cubic is an AI code review tool that combines PR analysis with auto-generated Mermaid architecture diagrams and project management integration (Jira, Linear, Asana). It verifies PRs fulfill ticket requirements and tracks team productivity metrics. Strong for visibility and project alignment, but lacks multi-angle depth, institutional memory, failure simulation, and BYOK support.",
     stat: {
       claim: "Cubic reports fewer false positives than the industry average and proposes concrete code changes via background agents",
       source: "Cubic official website, 2026",

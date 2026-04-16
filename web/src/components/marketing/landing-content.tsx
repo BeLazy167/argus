@@ -105,9 +105,14 @@ export function LandingContent() {
 
     const interval = setInterval(() => {
       setActiveStage((prev) => {
-        if (prev >= 6) {
+        // Stop on the last stage so the final frame shows that stage active.
+        // Using PIPELINE_STAGES.length - 1 keeps the terminal in range if the
+        // array shrinks or grows — a hardcoded ceiling here previously went
+        // out of bounds when the pipeline was trimmed from 7 stages to 6.
+        const last = PIPELINE_STAGES.length - 1;
+        if (prev >= last) {
           clearInterval(interval);
-          return 6;
+          return last;
         }
         return prev + 1;
       });
@@ -120,100 +125,32 @@ export function LandingContent() {
     {
       step: "01",
       label: "TRIAGE",
-      desc: "Fast LLM classifies every file: skip, skim, or deep. No time wasted on generated code or lock files.",
+      desc: "Classifies each changed file by risk. Generated files, lock files, and vendored deps are skipped before any tokens are spent.",
     },
     {
       step: "02",
-      label: "LEAD BRIEF",
-      desc: "Gathers cross-file context \u2014 callers, imports, dependency graph, past bugs, decision traces. Shared with all specialists.",
+      label: "CONTEXT",
+      desc: "Gathers cross-file context, blast radius, and relevant memory so the review understands how your change affects the rest of the system.",
     },
     {
       step: "03",
-      label: "DEEP REVIEW",
-      desc: "4 specialists review in parallel: Bug Hunter, Security, Architecture, Regression & Edge Case. Full codebase awareness.",
+      label: "REVIEW",
+      desc: "Focused analysis from multiple angles in parallel — correctness, security, architecture, and regression risk.",
     },
     {
       step: "04",
-      label: "DEDUP & VALIDATE",
-      desc: "Removes duplicate findings across specialists. Validates against the diff. Runs blast radius analysis and code simulations.",
+      label: "REFINE",
+      desc: "Deduplicates and validates findings. Noise and low-signal comments are dropped so only high-confidence issues survive.",
     },
     {
       step: "05",
-      label: "SCORING",
-      desc: "Each finding scored 0\u2013100. Below 65 dropped. Severity calibrated so blockers mean something.",
+      label: "SYNTHESIZE",
+      desc: "Produces a scannable verdict with fix ordering, severity tiers, and diagrams for complex PRs — actionable, not a wall of text.",
     },
     {
       step: "06",
-      label: "SYNTHESIS",
-      desc: "Generates a compact summary with severity counts, fix ordering, root-cause analysis, and Mermaid diagrams for complex PRs.",
-    },
-    {
-      step: "07",
       label: "POST & LEARN",
-      desc: "One atomic review with \uD83D\uDD34 blockers, \uD83D\uDFE1 should-fix, \uD83D\uDCA1 suggestions. React \uD83D\uDC4D to confirm, \uD83D\uDC4E to dismiss. Every review makes Argus smarter.",
-    },
-  ];
-
-  const FEATURES = [
-    {
-      icon: (
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-5 w-5">
-          <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 21L3 16.5m0 0L7.5 12M3 16.5h13.5m0-13.5L21 7.5m0 0L16.5 12M21 7.5H7.5" />
-        </svg>
-      ),
-      title: "Cross-file context",
-      description:
-        "No file is an island. Argus traces callers, imports, tests, and shared types to understand how changes ripple through your entire codebase.",
-    },
-    {
-      icon: (
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-5 w-5">
-          <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 3.75v4.5m0-4.5h4.5m-4.5 0L9 9M3.75 20.25v-4.5m0 4.5h4.5m-4.5 0L9 15M20.25 3.75h-4.5m4.5 0v4.5m0-4.5L15 9m5.25 11.25h-4.5m4.5 0v-4.5m0 4.5L15 15" />
-        </svg>
-      ),
-      title: "Blast radius analysis",
-      description:
-        "Persistent dependency graph maps every function, class, and import. When you push, Argus shows which downstream code is affected.",
-    },
-    {
-      icon: (
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-5 w-5">
-          <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 00-2.455 2.456z" />
-        </svg>
-      ),
-      title: "Scenario memory",
-      description:
-        "Institutional knowledge that persists. Past bugs, incidents, and edge cases are remembered. \"Last time this module changed, EU FX rounding broke.\"",
-    },
-    {
-      icon: (
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-5 w-5">
-          <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6zM13.5 15.75a2.25 2.25 0 012.25-2.25H18a2.25 2.25 0 012.25 2.25V18A2.25 2.25 0 0118 20.25h-2.25A2.25 2.25 0 0113.5 18v-2.25z" />
-        </svg>
-      ),
-      title: "Decision traces",
-      description:
-        "Every review, every developer reply, every fix builds a living knowledge graph. Argus gets smarter with every PR your team merges.",
-    },
-    {
-      icon: (
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-5 w-5">
-          <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" />
-        </svg>
-      ),
-      title: "Code simulation",
-      description:
-        "Given a scenario and your diff, Argus simulates execution paths and predicts what breaks before you merge. With confidence scores.",
-    },
-    {
-      icon: (
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-5 w-5">
-          <path strokeLinecap="round" strokeLinejoin="round" d="M20.25 8.511c.884.284 1.5 1.128 1.5 2.097v4.286c0 1.136-.847 2.1-1.98 2.193-.34.027-.68.052-1.02.072v3.091l-3-3c-1.354 0-2.694-.055-4.02-.163a2.115 2.115 0 01-.825-.242m9.345-8.334a2.126 2.126 0 00-.476-.095 48.64 48.64 0 00-8.048 0c-1.131.094-1.976 1.057-1.976 2.192v4.286c0 .837.46 1.58 1.155 1.951m9.345-8.334V6.637c0-1.621-1.152-3.026-2.76-3.235A48.455 48.455 0 0011.25 3c-2.115 0-4.198.137-6.24.402-1.608.209-2.76 1.614-2.76 3.235v6.226c0 1.621 1.152 3.026 2.76 3.235.577.075 1.157.14 1.74.194V21l4.155-4.155" />
-        </svg>
-      ),
-      title: "Conversational reviews",
-      description:
-        "No robotic issue lists. Argus writes like a senior dev giving feedback &mdash; structured What/Why sections on every inline comment.",
+      desc: "Posts inline comments to GitHub. Learns from your \uD83D\uDC4D / \uD83D\uDC4E and replies — so future reviews get sharper.",
     },
   ];
 
@@ -428,7 +365,7 @@ export function LandingContent() {
                 How it works
               </p>
               <h2 className="font-mono text-3xl font-bold text-foreground mb-3">
-                7 stages. Under 2 minutes.
+                Six stages. Under two minutes.
               </h2>
               <p className="max-w-lg mx-auto text-sm text-ash/70">
                 Every PR gets the same rigorous pipeline. No shortcuts.

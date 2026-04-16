@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -143,4 +144,64 @@ func (ra *ReactionAnalyzer) HandleCommentReactions(ctx context.Context, event gh
 	}
 
 	return nil
+}
+
+// SweepPRReactions enumerates every Argus-posted comment on a PR and runs the
+// reaction-handling pipeline on each. Used to work around GitHub's lack of
+// webhook events for reactions on PR review comments — on each pull_request
+// event (synchronize/reopened/etc.) we best-effort re-check reactions.
+//
+// One bad comment shouldn't abort the sweep, but a systemic failure (auth,
+// permissions, rate-limit) will produce the same error for every remaining
+// comment, so we classify and short-circuit on fatal errors to avoid an
+// N-retry storm. Returns the terminating error (fatal) or nil on clean sweep.
+func (ra *ReactionAnalyzer) SweepPRReactions(ctx context.Context, installationID int64, repoFullName string, prNumber int) error {
+	if ra == nil || ra.store == nil {
+		return nil
+	}
+	ids, err := ra.store.ListPRGithubCommentIDs(ctx, repoFullName, prNumber)
+	if err != nil {
+		return fmt.Errorf("listing PR comment ids: %w", err)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	ra.logger.Debug("reaction sweep", "pr", prNumber, "comment_count", len(ids))
+	for _, id := range ids {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		evt := ghpkg.CommentEvent{
+			InstallationID: installationID,
+			RepoFullName:   repoFullName,
+			PRNumber:       prNumber,
+			CommentID:      id,
+		}
+		if err := ra.HandleCommentReactions(ctx, evt); err != nil {
+			ra.logger.Warn("reaction sweep: comment failed", "error", err, "comment_id", id)
+			if isSystemicSweepError(err) {
+				// Same error will repeat for every remaining comment. Stop.
+				return fmt.Errorf("reaction sweep aborted (systemic): %w", err)
+			}
+		}
+	}
+	return nil
+}
+
+// isSystemicSweepError returns true when err is an auth/permission/rate-limit
+// failure that will repeat for every remaining comment in a sweep. Used to
+// short-circuit the sweep instead of retrying the same wall N times.
+func isSystemicSweepError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "401") ||
+		strings.Contains(msg, "unauthorized") ||
+		strings.Contains(msg, "403") ||
+		strings.Contains(msg, "forbidden") ||
+		strings.Contains(msg, "permission") ||
+		strings.Contains(msg, "rate limit")
 }
