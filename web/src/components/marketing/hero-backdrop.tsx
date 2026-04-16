@@ -35,7 +35,6 @@ export function HeroBackdrop() {
   const glowY = useTransform(scrollYProgress, [0, 1], [0, reduce ? 0 : -140]);
   const glowScale = useTransform(scrollYProgress, [0, 1], [1, reduce ? 1 : 1.15]);
   const emberY = useTransform(scrollYProgress, [0, 1], [0, reduce ? 0 : -90]);
-  const horizonY = useTransform(scrollYProgress, [0, 1], [0, reduce ? 0 : -60]);
   const dotsY = useTransform(scrollYProgress, [0, 1], [0, reduce ? 0 : -30]);
   const dotsOpacity = useTransform(scrollYProgress, [0, 0.6, 1], [0.28, 0.18, 0.1]);
 
@@ -69,20 +68,6 @@ export function HeroBackdrop() {
           style={{
             background:
               "radial-gradient(circle at center, color-mix(in oklch, var(--color-amber-glow) 60%, transparent) 0%, transparent 70%)",
-          }}
-        />
-      </motion.div>
-
-      {/* Thin amber horizon rule */}
-      <motion.div
-        style={{ y: horizonY }}
-        className="absolute left-0 right-0 top-[420px] h-px will-change-transform"
-      >
-        <div
-          className="h-full w-full"
-          style={{
-            background:
-              "linear-gradient(90deg, transparent 0%, color-mix(in oklch, var(--color-amber-glow) 28%, transparent) 18%, color-mix(in oklch, var(--color-amber-glow) 40%, transparent) 50%, color-mix(in oklch, var(--color-amber-glow) 28%, transparent) 82%, transparent 100%)",
           }}
         />
       </motion.div>
