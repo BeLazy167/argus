@@ -69,7 +69,13 @@ func TestClassifyResolveError(t *testing.T) {
 		{
 			name:       "403 forbidden",
 			err:        errors.New("403 Forbidden: requires write access"),
-			wantPhrase: "missing permission — check the Argus GitHub App has write access to this repo",
+			wantPhrase: "missing permission — grant the Argus GitHub App `Pull requests: write` access (https://github.com/settings/installations)",
+			wantFatal:  true,
+		},
+		{
+			name:       "graphql resource not accessible by integration",
+			err:        errors.New("graphql errors: Resource not accessible by integration"),
+			wantPhrase: "missing permission — grant the Argus GitHub App `Pull requests: write` access (https://github.com/settings/installations)",
 			wantFatal:  true,
 		},
 		{
@@ -93,7 +99,7 @@ func TestClassifyResolveError(t *testing.T) {
 		{
 			name:       "permission keyword without status code",
 			err:        errors.New("resource not accessible: permission denied"),
-			wantPhrase: "missing permission — check the Argus GitHub App has write access to this repo",
+			wantPhrase: "missing permission — grant the Argus GitHub App `Pull requests: write` access (https://github.com/settings/installations)",
 			wantFatal:  true,
 		},
 	}

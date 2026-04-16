@@ -523,6 +523,10 @@ func (s *Server) setOrgDefaults(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not authorized"})
 		return
 	}
+	// Whitelisted settings the org default endpoint accepts. Fields not listed
+	// here are silently dropped — keep this in sync with pipeline.repoSettings
+	// or toggles will no-op like auto_run did after it was introduced but before
+	// this struct was updated.
 	var body struct {
 		Persona             string `json:"persona,omitempty"`
 		CustomPersonaPrompt string `json:"custom_persona_prompt,omitempty"`
@@ -536,6 +540,7 @@ func (s *Server) setOrgDefaults(w http.ResponseWriter, r *http.Request) {
 		LearnConventions    *bool  `json:"learn_conventions,omitempty"`
 		FileSynthesis       *bool  `json:"file_synthesis,omitempty"`
 		ArchitectureGraph   *bool  `json:"architecture_graph,omitempty"`
+		AutoRun             *bool  `json:"auto_run,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
