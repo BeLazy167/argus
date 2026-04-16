@@ -521,6 +521,51 @@
   animation-delay: 1.5s;
 }
 
+/* ── Scroll-driven animations ───────────────────────────────────────
+ *
+ * Progressive enhancement: when the browser supports
+ * `animation-timeline: view()` (Chromium 115+, Safari 18+), the compositor
+ * drives entry animations directly off scroll position — zero main-thread
+ * cost, no IntersectionObserver overhead. Browsers without support skip
+ * the @supports block entirely, leaving content fully visible.
+ *
+ * The reveal is fade + rise + blur-clear — the blur step adds a premium
+ * depth-of-field feel as content comes into focus. Kept short (6px) so
+ * it reads as a camera-like rack focus, not a page-wide smear.
+ *
+ * `.scroll-reveal-snap` is a crisper variant for dense grids where the
+ * floaty range feels laggy.
+ *
+ * The scroll-progress bar itself is Motion-driven (see scroll-progress.tsx)
+ * for spring-damped feel on all browsers, not just scroll-driven supporters.
+ */
+
+@keyframes scrollFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(24px);
+    filter: blur(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
+}
+
+@supports (animation-timeline: view()) {
+  .scroll-reveal {
+    animation: scrollFadeIn both;
+    animation-timeline: view();
+    animation-range: entry 0% cover 35%;
+  }
+  .scroll-reveal-snap {
+    animation: scrollFadeIn both;
+    animation-timeline: view();
+    animation-range: entry 10% cover 15%;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
@@ -532,7 +577,9 @@
   .animate-ping {
     animation: none !important;
   }
-  .hero-reveal {
+  .hero-reveal,
+  .scroll-reveal,
+  .scroll-reveal-snap {
     opacity: 1 !important;
     transform: none !important;
     filter: none !important;

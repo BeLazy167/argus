@@ -3,10 +3,19 @@
 import { useEffect, useRef, useState } from "react";
 
 /**
- * Fade-in on scroll via IntersectionObserver.
+ * Fade + rise reveal as content enters the viewport.
  *
- * SSR: renders content fully visible (opacity-1) so crawlers see all text.
- * Client: after hydration, hides content then fades in when scrolled into view.
+ * Progressive enhancement:
+ *   1. SSR renders fully opaque (crawlers + no-JS readers see everything).
+ *   2. Modern browsers (`animation-timeline: view()` supported) let the
+ *      compositor drive the entry animation off scroll position via the
+ *      `.scroll-reveal` class in globals.css — zero main-thread work.
+ *   3. Browsers without support fall back to an IntersectionObserver
+ *      that toggles a tailwind transition once on first intersection.
+ *
+ * `delay` is only meaningful on the JS fallback path. Browsers running the
+ * CSS scroll-timeline path ignore it — the view-range itself encodes the
+ * perceived stagger since items enter at different scroll positions.
  */
 export function FadeIn({
   children,
@@ -19,13 +28,18 @@ export function FadeIn({
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [mounted, setMounted] = useState(false);
+  const [supportsScrollTimeline, setSupportsScrollTimeline] = useState(false);
   const [visible, setVisible] = useState(false);
 
-  // Mark as mounted after hydration
-  useEffect(() => setMounted(true), []);
+  useEffect(() => {
+    setMounted(true);
+    if (typeof CSS !== "undefined" && CSS.supports?.("animation-timeline: view()")) {
+      setSupportsScrollTimeline(true);
+    }
+  }, []);
 
   useEffect(() => {
-    if (!mounted) return;
+    if (!mounted || supportsScrollTimeline) return;
     const el = ref.current;
     if (!el) return;
     const observer = new IntersectionObserver(
@@ -36,21 +50,38 @@ export function FadeIn({
           observer.disconnect();
         }
       },
-      { threshold: 0.05 }
+      { threshold: 0.05 },
     );
     observer.observe(el);
     const fallback = setTimeout(() => setVisible(true), 2000 + delay);
-    return () => { observer.disconnect(); clearTimeout(fallback); };
-  }, [mounted, delay]);
+    return () => {
+      observer.disconnect();
+      clearTimeout(fallback);
+    };
+  }, [mounted, supportsScrollTimeline, delay]);
 
-  // SSR: no classes (content visible at opacity 1)
-  // Client mounted but not yet visible: opacity-0
-  // Client visible: opacity-1 with animation
-  const animClass = mounted
-    ? `transition-[opacity,transform] duration-700 ease-[cubic-bezier(0.23,1,0.32,1)] ${
-        visible ? "opacity-100 translate-y-0" : "opacity-0 translate-y-4"
-      }`
-    : "";
+  // SSR / pre-hydration: visible by default.
+  if (!mounted) {
+    return (
+      <div ref={ref} className={className}>
+        {children}
+      </div>
+    );
+  }
+
+  // Modern path: let CSS drive the reveal.
+  if (supportsScrollTimeline) {
+    return (
+      <div ref={ref} className={`scroll-reveal ${className}`}>
+        {children}
+      </div>
+    );
+  }
+
+  // Fallback: JS toggle + tailwind transition.
+  const animClass = `transition-[opacity,transform] duration-700 ease-[cubic-bezier(0.23,1,0.32,1)] ${
+    visible ? "opacity-100 translate-y-0" : "opacity-0 translate-y-4"
+  }`;
 
   return (
     <div ref={ref} className={`${animClass} ${className}`}>
