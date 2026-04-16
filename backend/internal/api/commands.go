@@ -249,6 +249,12 @@ func isArgusCommentAuthor(authorLogin string) bool {
 // caller will fall back to a generic "GraphQL error" message). The `fatal`
 // return is true when the error is systemic (auth, permissions) — the caller
 // should abort the loop rather than retry N times.
+//
+// The `not accessible` case covers GitHub's GraphQL-level scope error
+// "Resource not accessible by integration", which is what the App returns
+// when it lacks `pull_requests: write` on the installation. This is the same
+// class of failure as 403, but doesn't carry an HTTP status string because
+// GraphQL mutations return 200 + a structured error payload.
 func classifyResolveError(err error) (phrase string, fatal bool) {
 	if err == nil {
 		return "", false
@@ -257,11 +263,14 @@ func classifyResolveError(err error) (phrase string, fatal bool) {
 	switch {
 	case strings.Contains(msg, "401") || strings.Contains(msg, "unauthorized"):
 		return "authentication failed — Argus may need to be reinstalled on this repo", true
-	case strings.Contains(msg, "403") || strings.Contains(msg, "forbidden") || strings.Contains(msg, "permission"):
-		return "missing permission — check the Argus GitHub App has write access to this repo", true
+	case strings.Contains(msg, "not accessible by integration"),
+		strings.Contains(msg, "403"),
+		strings.Contains(msg, "forbidden"),
+		strings.Contains(msg, "permission"):
+		return "missing permission — grant the Argus GitHub App `Pull requests: write` access (https://github.com/settings/installations)", true
 	case strings.Contains(msg, "404") || strings.Contains(msg, "not found"):
 		return "thread already resolved or deleted upstream", false
-	case strings.Contains(msg, "rate limit"):
+	case strings.Contains(msg, "rate limit") || strings.Contains(msg, "secondary rate limit"):
 		return "GitHub API rate limit hit — retry in a few minutes", true
 	}
 	return "", false
