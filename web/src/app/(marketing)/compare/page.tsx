@@ -52,10 +52,16 @@ export default function CompareHubPage() {
       <h1 className="font-display text-4xl md:text-5xl font-bold text-foreground mb-4">
         Argus vs Alternatives
       </h1>
-      <p className="text-sm font-sans text-slate-text leading-relaxed mb-10 max-w-2xl">
+      <p className="text-sm font-sans text-slate-text leading-relaxed mb-4 max-w-2xl">
         How Argus compares to other AI code review tools, at a glance. Click any
         competitor for a detailed breakdown of strengths, weaknesses, and when to
         pick which tool.
+      </p>
+      <p className="text-[11px] font-mono text-slate-text/70 mb-10 max-w-2xl">
+        Features verified against each vendor&rsquo;s public docs. Many tools have closed
+        gaps on memory, architecture, and multi-agent review recently — the matrix
+        reflects that. Argus&rsquo;s distinct bets today: failure scenario simulation and
+        BYOK in the managed tier.
       </p>
 
       {/* Main comparison table — sticky first column + horizontal scroll on mobile */}
