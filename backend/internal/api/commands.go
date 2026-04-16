@@ -235,6 +235,15 @@ func isArgusThread(authorLogin string) bool {
 	return authorLogin == "argus-eye" || authorLogin == "argus-eye[bot]"
 }
 
+// isArgusCommentAuthor reports whether an issue_comment was authored by Argus.
+// Used by the checkbox-trigger path to reject hijack attempts where a
+// collaborator pastes the trigger-marker + checkbox into their own comment and
+// toggles it: without this guard, any repo member could spin up reviews by
+// impersonating our comment format.
+func isArgusCommentAuthor(authorLogin string) bool {
+	return isArgusThread(authorLogin)
+}
+
 // classifyResolveError summarizes an error from ResolveReviewThread into a
 // short, user-facing phrase. Returns "" for errors we don't recognize (the
 // caller will fall back to a generic "GraphQL error" message). The `fatal`

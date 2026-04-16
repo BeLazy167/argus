@@ -8,6 +8,63 @@ export default function FAQPage() {
 
       <section>
         <h2 className="text-base font-mono text-slate-100 mb-2">
+          Why doesn&apos;t Argus review my PR automatically?
+        </h2>
+        <p className="text-slate-400">
+          Auto-review is off by default. When a PR opens, Argus posts a{" "}
+          <strong className="text-slate-200">Trigger Argus review</strong> checkbox
+          comment with an estimated token + cost preview. Tick the box to run a
+          review on demand. The default is off because large PRs (50+ files) can
+          cost several dollars per review on paid providers, and we want
+          reviewers to see the estimate first.
+        </p>
+        <p className="text-slate-400 mt-2">
+          To flip the default: <strong className="text-slate-200">Settings →
+          Org Defaults → Auto-review</strong> (org-wide) or{" "}
+          <strong className="text-slate-200">Repo Overrides → Auto-review</strong>{" "}
+          (per-repo). Repo setting beats org default.
+        </p>
+      </section>
+
+      <section>
+        <h2 className="text-base font-mono text-slate-100 mb-2">
+          The trigger checkbox doesn&apos;t appear on a PR — what now?
+        </h2>
+        <p className="text-slate-400">
+          A few reasons the one-shot trigger comment may not be present:
+        </p>
+        <ul className="list-disc pl-5 mt-2 space-y-1 text-slate-400">
+          <li>The PR opened before Argus was installed on the repo.</li>
+          <li>A webhook delivery failed and wasn&apos;t redelivered.</li>
+          <li>Auto-review is <em>on</em> — in that case no checkbox is needed.</li>
+          <li>The base branch matches a skip pattern in Branch Filters.</li>
+          <li>No API key is configured — you&apos;ll see an onboarding comment instead.</li>
+        </ul>
+        <p className="text-slate-400 mt-2">
+          You can always trigger manually by commenting{" "}
+          <code className="bg-slate-900 px-1 text-amber">@argus-eye review</code>{" "}
+          on the PR.
+        </p>
+      </section>
+
+      <section>
+        <h2 className="text-base font-mono text-slate-100 mb-2">
+          Who can click the trigger checkbox?
+        </h2>
+        <p className="text-slate-400">
+          Anyone GitHub allows to toggle task-list checkboxes on the repo
+          (typically triage+ access). The review runs under a tighter{" "}
+          <strong className="text-slate-200">3/hour per-repo</strong> cap for
+          checkbox-triggered reviews (same as the{" "}
+          <code className="bg-slate-900 px-1 text-amber">--force</code> command flag).
+          Clicks on pasted or forged trigger comments are ignored — only
+          comments authored by <code className="bg-slate-900 px-1 text-amber">argus-eye[bot]</code>{" "}
+          count.
+        </p>
+      </section>
+
+      <section>
+        <h2 className="text-base font-mono text-slate-100 mb-2">
           How many LLM tokens does the issue acceptance check cost?
         </h2>
         <p className="text-slate-400">
@@ -52,6 +109,7 @@ export default function FAQPage() {
           Yes. Go to <strong className="text-slate-200">Settings → Features</strong>:
         </p>
         <ul className="list-disc pl-5 mt-2 space-y-1 text-slate-400">
+          <li><strong className="text-slate-200">Auto-review</strong> — when off, opened PRs get a trigger checkbox instead of running automatically (default: off).</li>
           <li><strong className="text-slate-200">Issue acceptance check</strong> — toggles the issue verification worker (default: on).</li>
           <li><strong className="text-slate-200">Cross-repo PR checks</strong> — toggles the cross-PR worker (default: off).</li>
           <li><strong className="text-slate-200">Max linked PRs per review</strong> — caps how many PRs the cross-PR worker fetches (default: 5).</li>

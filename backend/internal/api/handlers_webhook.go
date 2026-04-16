@@ -10,6 +10,7 @@ import (
 	gh "github.com/google/go-github/v68/github"
 
 	ghpkg "github.com/BeLazy167/argus/backend/internal/github"
+	"github.com/BeLazy167/argus/backend/internal/pipeline"
 )
 
 // issueLabelsForScenario are labels that trigger auto-scenario creation from issues.
@@ -141,7 +142,8 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 
 	case "issue_comment":
-		if event.Action == "created" {
+		switch event.Action {
+		case "created":
 			issueEvent, err := ghpkg.ToIssueCommentEvent(event)
 			if err != nil {
 				s.logger.Error("parsing issue comment event", "error", err)
@@ -157,6 +159,39 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			go func() {
 				defer s.releaseSem()
 				s.dispatchCommand(context.Background(), *issueEvent)
+			}()
+		case "edited":
+			// Detect "Trigger Argus review" checkbox toggles on Argus-authored
+			// trigger comments. Guards, in order:
+			//   - editor is not a bot (drops Argus's own swap-to-Running edits)
+			//   - comment AUTHOR is Argus (prevents hijack: a collaborator
+			//     pasting the marker+checkbox into their own comment and
+			//     toggling it should NOT trigger a review)
+			//   - checkbox transitioned [ ] -> [x]
+			issueEvent, err := ghpkg.ToIssueCommentEvent(event)
+			if err != nil {
+				s.logger.Error("parsing issue comment edited event", "error", err)
+				break
+			}
+			if issueEvent == nil {
+				break
+			}
+			if strings.HasSuffix(issueEvent.EditorLogin, "[bot]") {
+				break
+			}
+			if !isArgusCommentAuthor(issueEvent.CommentAuthor) {
+				break
+			}
+			if !pipeline.CheckboxToggled(issueEvent.CommentBodyBefore, issueEvent.CommentBody) {
+				break
+			}
+			if !s.acquireSem() {
+				s.logger.Warn("webhook semaphore full for checkbox trigger")
+				break
+			}
+			go func() {
+				defer s.releaseSem()
+				s.handleCheckboxTrigger(context.Background(), *issueEvent)
 			}()
 		}
 
@@ -236,4 +271,85 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "accepted"})
+}
+
+// handleCheckboxTrigger dispatches a review when a user toggles the "Trigger
+// Argus review" task-list checkbox on an Argus-posted trigger comment.
+//
+// This path runs when auto_run is disabled. It mirrors handleReviewCommand's
+// dispatch flow but uses the tighter `force=true` rate-limit path (3/hr/repo)
+// because a checkbox click is effectively a one-gesture trigger — easier to
+// spam than typing `@argus-eye review` — and we want a tighter cap.
+//
+// force=true in AllowReview has two effects we want here: (1) tighter 3/hr
+// cap, (2) bypass of the "already reviewed at this SHA" guard. The second is
+// intentional: the user explicitly clicked the checkbox after seeing the cost
+// estimate, so we honor that intent.
+//
+// Ordering notes:
+//   - tryAcquireReview runs BEFORE AllowReview: a losing double-click would
+//     otherwise burn a force-hourly token without running a review.
+//   - The "Running..." body swap happens only after the PR lock is acquired
+//     so a lost race doesn't leave the checkbox stuck.
+//   - Pipeline-failure path restores the checkbox to unchecked with an error
+//     suffix so the user can click again to retry.
+func (s *Server) handleCheckboxTrigger(ctx context.Context, evt ghpkg.IssueCommentEvent) {
+	parts := strings.SplitN(evt.RepoFullName, "/", 2)
+	if len(parts) != 2 {
+		return
+	}
+	owner, repoName := parts[0], parts[1]
+	ghClient := ghpkg.NewClient(s.ghApp)
+
+	// Acknowledge the click with a reaction before doing any heavy work.
+	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repoName, evt.CommentID, "eyes")
+
+	prCtx, cancelPR := context.WithTimeout(ctx, 10*time.Second)
+	prEvent, err := ghClient.GetPullRequest(prCtx, evt.InstallationID, owner, repoName, evt.PRNumber)
+	cancelPR()
+	if err != nil {
+		s.logger.Error("checkbox trigger: fetch PR failed", "error", err, "pr", evt.PRNumber)
+		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repoName, evt.CommentID, "confused")
+		return
+	}
+
+	if !s.tryAcquireReview(evt.RepoFullName, evt.PRNumber) {
+		s.logger.Info("checkbox trigger: review already in progress", "repo", evt.RepoFullName, "pr", evt.PRNumber)
+		return
+	}
+	defer s.releaseReview(evt.RepoFullName, evt.PRNumber)
+
+	if !s.rateLimiter.AllowReview(evt.RepoFullName, owner, true) {
+		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repoName, evt.PRNumber,
+			"Rate limit exceeded for on-demand reviews (3/hour). Try again later.")
+		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repoName, evt.CommentID, "confused")
+		return
+	}
+
+	// Swap the checkbox line for a "Running..." marker so the user sees
+	// immediate feedback. Failure here is non-fatal.
+	updated := pipeline.ReplaceTriggerWithRunning(evt.CommentBody)
+	if updated != evt.CommentBody {
+		if err := ghClient.UpdateIssueComment(ctx, evt.InstallationID, owner, repoName, evt.CommentID, updated); err != nil {
+			s.logger.Warn("checkbox trigger: update comment body", "error", err, "comment_id", evt.CommentID)
+		}
+	}
+
+	prEvent.Action = "manual"
+	prEvent.RepoID = evt.RepoID
+	s.logger.Info("checkbox-triggered review", "repo", evt.RepoFullName, "pr", evt.PRNumber, "by", evt.EditorLogin)
+
+	if err := s.orchestrator.HandlePREvent(ctx, *prEvent); err != nil {
+		s.logger.Error("checkbox trigger: pipeline failed", "error", err, "pr", evt.PRNumber)
+		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repoName, evt.CommentID, "confused")
+		// Restore the checkbox so the user can click again to retry; rollback
+		// is best-effort (failure here is worse than leaving the Running marker).
+		if restored := pipeline.RestoreTriggerAfterFailure(updated); restored != updated {
+			if uerr := ghClient.UpdateIssueComment(ctx, evt.InstallationID, owner, repoName, evt.CommentID, restored); uerr != nil {
+				s.logger.Warn("checkbox trigger: restore comment body", "error", uerr, "comment_id", evt.CommentID)
+			}
+		}
+		return
+	}
+	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repoName, evt.CommentID, "rocket")
 }

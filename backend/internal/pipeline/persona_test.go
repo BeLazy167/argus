@@ -6,6 +6,88 @@ import (
 	"testing"
 )
 
+func TestIsAutoRunEnabled(t *testing.T) {
+	t.Parallel()
+	boolPtr := func(b bool) *bool { return &b }
+	mustMarshal := func(s repoSettings) json.RawMessage {
+		b, err := json.Marshal(s)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		return b
+	}
+
+	cases := []struct {
+		name string
+		repo json.RawMessage
+		org  json.RawMessage
+		want bool
+	}{
+		{
+			name: "both nil => off (default)",
+			repo: nil,
+			org:  nil,
+			want: false,
+		},
+		{
+			name: "repo unset, org off => off",
+			repo: nil,
+			org:  mustMarshal(repoSettings{AutoRun: boolPtr(false)}),
+			want: false,
+		},
+		{
+			name: "repo unset, org on => on",
+			repo: nil,
+			org:  mustMarshal(repoSettings{AutoRun: boolPtr(true)}),
+			want: true,
+		},
+		{
+			name: "repo off, org on => off (repo overrides)",
+			repo: mustMarshal(repoSettings{AutoRun: boolPtr(false)}),
+			org:  mustMarshal(repoSettings{AutoRun: boolPtr(true)}),
+			want: false,
+		},
+		{
+			name: "repo on, org off => on (repo overrides)",
+			repo: mustMarshal(repoSettings{AutoRun: boolPtr(true)}),
+			org:  mustMarshal(repoSettings{AutoRun: boolPtr(false)}),
+			want: true,
+		},
+		{
+			name: "repo on, org nil => on",
+			repo: mustMarshal(repoSettings{AutoRun: boolPtr(true)}),
+			org:  nil,
+			want: true,
+		},
+		{
+			name: "repo JSON present but AutoRun unset => falls through to org",
+			repo: mustMarshal(repoSettings{Persona: "default"}),
+			org:  mustMarshal(repoSettings{AutoRun: boolPtr(true)}),
+			want: true,
+		},
+		{
+			name: "corrupt repo JSON => falls through",
+			repo: json.RawMessage(`{"auto_run": not-json`),
+			org:  mustMarshal(repoSettings{AutoRun: boolPtr(true)}),
+			want: true,
+		},
+		{
+			name: "corrupt both => default off",
+			repo: json.RawMessage(`{{{`),
+			org:  json.RawMessage(`}}}`),
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := IsAutoRunEnabled(tc.repo, tc.org); got != tc.want {
+				t.Fatalf("IsAutoRunEnabled = %v, want %v (repo=%s, org=%s)", got, tc.want, string(tc.repo), string(tc.org))
+			}
+		})
+	}
+}
+
 func TestPersonaPromptOverlay(t *testing.T) {
 	tests := []struct {
 		name      string
