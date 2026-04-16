@@ -11,6 +11,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -1549,10 +1550,14 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		inlineComments[i] = rc.comment
 	}
 
-	// Build summary: header + brief + affected-file findings + score
+	// Build summary: header + brief + scope warning + affected-file findings + score
 	var summaryBody strings.Builder
 	summaryBody.WriteString(reviewHeader)
 	summaryBody.WriteString(run.Synthesis.Brief)
+	if scopeNote := assessPRScope(run); scopeNote != "" {
+		summaryBody.WriteString("\n\n")
+		summaryBody.WriteString(scopeNote)
+	}
 	if len(run.TruncatedFiles) > 0 {
 		summaryBody.WriteString("\n\n> ⚠️ Review for ")
 		for i, f := range run.TruncatedFiles {
@@ -1595,6 +1600,16 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		summaryBody.WriteString("\n\n</details>")
 	}
 	summaryBody.WriteString(fmt.Sprintf("\n\nScore: **%d/10** · [Full review →](https://argus.reviews/reviews/%s)", run.Synthesis.Score, run.ReviewID.String()))
+
+	// Token/cost breakdown per stage and per specialist (collapsible)
+	if breakdown := renderTokenBreakdown(&run.Tokens); breakdown != "" {
+		summaryBody.WriteString("\n\n")
+		summaryBody.WriteString(breakdown)
+	}
+
+	// How to engage with Argus (reduces "where do I reply?" confusion)
+	summaryBody.WriteString("\n\n---\n<sub>💬 **Engaging with Argus:** reply to any inline comment on GitHub to discuss — Argus responds and learns from your feedback. " +
+		"React 👎 to dismiss a finding. Use `@argus-eye resolve` to close all threads, `@argus-eye fix` to apply suggestions, `@argus-eye help` for more.</sub>")
 
 	// Links to structured exports for AI agents (signed URLs, 90-day expiry)
 	dashURL := "https://argus.reviews"
@@ -3180,9 +3195,78 @@ func (o *Orchestrator) dedupStage(ctx context.Context, run *PipelineRun) error {
 	copy(run.AllFileReviews, run.FileReviews)
 
 	run.FileReviews = SmartDedup(run.FileReviews, 10, 0.7)
+
+	// Incremental reviews: drop findings that are near-duplicates of comments
+	// already posted on a prior review of this PR. The review prompt asks the
+	// LLM to respect prior comments but it re-rediscovers the same bug with
+	// different wording; this is the enforcement layer.
+	if run.IsIncremental && len(run.PriorComments) > 0 {
+		droppedPrior := dropPriorDuplicates(run)
+		if droppedPrior > 0 {
+			o.logger.Info("[dedup] dropped prior-duplicates", "count", droppedPrior, "pr", run.PREvent.PRNumber)
+		}
+	}
+
 	after := countComments(run)
 	o.logger.Info("[dedup] OK", "before", before, "after", after, "removed", before-after, "pr", run.PREvent.PRNumber)
 	return nil
+}
+
+// dropPriorDuplicates mutates run.FileReviews in place, removing FileComments
+// that match a previously-posted comment on the same file within ±10 lines
+// and same category. Returns the number of dropped comments.
+//
+// Matching rule (must satisfy all):
+//   - Same file path
+//   - Same Category (case-insensitive)
+//   - Comment line within ±proximity of prior line
+//
+// Rationale: the LLM reliably rewords findings across reviews, so string
+// similarity is unreliable; structural match (file + line + category) is the
+// only dedup we can trust. Proximity=10 is intentionally wide because the
+// developer's push may have shifted line numbers.
+func dropPriorDuplicates(run *PipelineRun) int {
+	const proximity = 10
+	if run == nil {
+		return 0
+	}
+	var dropped int
+	for i := range run.FileReviews {
+		fr := &run.FileReviews[i]
+		priors, ok := run.PriorComments[fr.Path]
+		if !ok || len(priors) == 0 {
+			continue
+		}
+		kept := fr.Comments[:0]
+		for _, c := range fr.Comments {
+			if hasPriorMatch(c, priors, proximity) {
+				dropped++
+				continue
+			}
+			kept = append(kept, c)
+		}
+		fr.Comments = kept
+	}
+	return dropped
+}
+
+// hasPriorMatch reports whether any prior comment on the same file is a
+// structural duplicate of c (same category, line within ±proximity).
+func hasPriorMatch(c FileComment, priors []PriorComment, proximity int) bool {
+	newCat := strings.ToLower(string(c.Category))
+	for _, p := range priors {
+		if !strings.EqualFold(p.Category, newCat) {
+			continue
+		}
+		diff := c.Line - p.Line
+		if diff < 0 {
+			diff = -diff
+		}
+		if diff <= proximity {
+			return true
+		}
+	}
+	return false
 }
 
 // validateStage enriches deduplicated findings with blast radius and simulation data.
@@ -3901,6 +3985,113 @@ func (o *Orchestrator) resolveReviewProvider(ctx context.Context, run *PipelineR
 	return cfg, provider, nil
 }
 
+// renderTokenBreakdown returns a collapsible markdown block showing token and
+// cost consumption per pipeline stage, with the review stage broken down by
+// specialist (correctness, security, architecture, regression). Returns ""
+// when no tokens were consumed (e.g., skipped review, cancelled early).
+//
+// Format: `<details>` block so it doesn't dominate the review summary unless
+// the reader wants to inspect costs.
+func renderTokenBreakdown(tu *RunTokenUsage) string {
+	if tu == nil || tu.Total.TotalTokens == 0 {
+		return ""
+	}
+
+	// Aggregate review-stage tokens per specialist. Empty specialist means a
+	// skim single-pass (no deep review); we bucket those under "review".
+	type agg struct {
+		tokens int
+		cost   float64
+	}
+	bySpecialist := make(map[string]*agg)
+	for _, t := range tu.Review {
+		key := t.Specialist
+		if key == "" {
+			key = "review"
+		}
+		a, ok := bySpecialist[key]
+		if !ok {
+			a = &agg{}
+			bySpecialist[key] = a
+		}
+		a.tokens += t.TotalTokens
+		a.cost += t.Cost
+	}
+
+	// Stable ordering for deterministic output.
+	specialistOrder := []string{"correctness", "bug_hunter", "security", "architecture", "regression", "review"}
+	seen := make(map[string]bool, len(bySpecialist))
+
+	var rows []string
+	addRow := func(label string, tokens int, cost float64) {
+		if tokens == 0 {
+			return
+		}
+		rows = append(rows, fmt.Sprintf("| %s | %s | $%.4f |", label, formatTokens(tokens), cost))
+	}
+
+	// Non-review stages first, in pipeline order.
+	addRow("Triage", tu.Triage.TotalTokens, tu.Triage.Cost)
+	addRow("Enrichment", tu.Enrichment.TotalTokens, tu.Enrichment.Cost)
+	addRow("Conventions", tu.Conventions.TotalTokens, tu.Conventions.Cost)
+	addRow("Patterns", tu.Patterns.TotalTokens, tu.Patterns.Cost)
+
+	// File synthesis (aggregate across files).
+	var fsTokens int
+	var fsCost float64
+	for _, t := range tu.FileSynthesis {
+		fsTokens += t.TotalTokens
+		fsCost += t.Cost
+	}
+	addRow("File synthesis", fsTokens, fsCost)
+
+	// Review stage — show per-specialist sub-rows.
+	for _, key := range specialistOrder {
+		if a, ok := bySpecialist[key]; ok {
+			seen[key] = true
+			addRow("Review · "+key, a.tokens, a.cost)
+		}
+	}
+	// Any specialists we didn't enumerate (future-proof for new names).
+	for key, a := range bySpecialist {
+		if !seen[key] {
+			addRow("Review · "+key, a.tokens, a.cost)
+		}
+	}
+
+	addRow("Scoring", tu.Scoring.TotalTokens, tu.Scoring.Cost)
+	addRow("Synthesis", tu.Synthesis.TotalTokens, tu.Synthesis.Cost)
+	addRow("Graph", tu.Graph.TotalTokens, tu.Graph.Cost)
+
+	if len(rows) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("<details><summary><sub>🔢 %s tokens · $%.4f total</sub></summary>\n\n",
+		formatTokens(tu.Total.TotalTokens), tu.Total.Cost))
+	sb.WriteString("| Stage | Tokens | Cost |\n")
+	sb.WriteString("|---|---:|---:|\n")
+	for _, r := range rows {
+		sb.WriteString(r)
+		sb.WriteString("\n")
+	}
+	sb.WriteString("\n</details>")
+	return sb.String()
+}
+
+// formatTokens renders a token count with a k/M suffix for readability.
+func formatTokens(n int) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fk", float64(n)/1_000)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
+}
+
 func getDiffContext(run *PipelineRun, path string) string {
 	if run.Diff == nil {
 		return ""
@@ -3911,6 +4102,66 @@ func getDiffContext(run *PipelineRun, path string) string {
 		}
 	}
 	return ""
+}
+
+// assessPRScope flags PRs that bundle too many features or touch too many
+// unrelated areas. Returns a markdown warning block to include in the review
+// summary, or "" when scope looks reasonable.
+//
+// Heuristics (intentionally simple):
+//   - >= 25 files changed  → "large PR"
+//   - >= 5 distinct top-level directories → "multi-area PR"
+//
+// Both trigger a soft warning — the review still proceeds. The goal is to
+// nudge authors toward focused PRs without blocking legitimate large changes
+// (e.g., generated code, repo-wide refactors). If we need per-repo overrides
+// later, surface these as `repoSettings` fields.
+func assessPRScope(run *PipelineRun) string {
+	if run == nil || run.Diff == nil {
+		return ""
+	}
+	if len(run.Diff.Files) == 0 {
+		return ""
+	}
+	const (
+		largeFileThreshold = 25
+		multiAreaThreshold = 5
+	)
+	fileCount := len(run.Diff.Files)
+
+	topDirs := make(map[string]struct{})
+	for _, f := range run.Diff.Files {
+		// Local name `p` to avoid shadowing the imported "path" package.
+		p := f.NewName
+		if p == "" {
+			p = f.OldName
+		}
+		if i := strings.Index(p, "/"); i > 0 {
+			topDirs[p[:i]] = struct{}{}
+		}
+	}
+
+	tooManyFiles := fileCount >= largeFileThreshold
+	multiArea := len(topDirs) >= multiAreaThreshold
+	if !tooManyFiles && !multiArea {
+		return ""
+	}
+
+	dirs := make([]string, 0, len(topDirs))
+	for d := range topDirs {
+		dirs = append(dirs, d)
+	}
+	sort.Strings(dirs)
+
+	var reasons []string
+	if tooManyFiles {
+		reasons = append(reasons, fmt.Sprintf("changes **%d files**", fileCount))
+	}
+	if multiArea {
+		reasons = append(reasons, fmt.Sprintf("touches **%d top-level areas** (`%s`)", len(topDirs), strings.Join(dirs, "`, `")))
+	}
+	return "> ⚠️ **Scope concern:** This PR " + strings.Join(reasons, " and ") +
+		". Consider splitting into focused PRs — bundled changes are harder to review, harder to revert, and can mask regressions in unrelated areas."
 }
 
 // formatCommentBody builds the GitHub review comment body.
@@ -4021,18 +4272,28 @@ func capitalizeCategory(cat string) string {
 	return strings.ToUpper(cat[:1]) + cat[1:]
 }
 
-// commentTitle extracts a short title from the comment for the header line.
+// commentTitleSentenceRe matches sentence boundaries: a period, exclamation,
+// or question mark followed by whitespace and an uppercase letter. This dodges
+// the common mid-word period false positives (e.g., "v1.2", "e.g.", URL dots,
+// abbreviations like "Dr.", "i.e.") that plain `. ` split tripped on.
+var commentTitleSentenceRe = regexp.MustCompile(`[.!?]\s+[A-Z]`)
+
+// commentTitle returns the one-line headline for the comment.
+// The LLM is prompted to produce `what` as a single short sentence, but when
+// it emits multiple we take only the first. The sentence boundary is detected
+// via a regex that requires an uppercase letter after whitespace, which avoids
+// breaking on mid-word periods. Falls back to a 300-char rune-boundary-safe
+// truncation (via util.Truncate) when no sentence boundary is found.
 func commentTitle(c FileComment) string {
 	src := c.What
 	if src == "" {
 		src = c.Body
 	}
-	// Use first sentence if it ends within 200 chars, otherwise truncate.
-	// Skip periods inside backticks, numbers (e.g., "v1.2"), and common abbreviations.
-	if idx := strings.Index(src, ". "); idx > 0 && idx < 200 {
-		return src[:idx+1] // include the period
+	if idx := commentTitleSentenceRe.FindStringIndex(src); idx != nil && idx[0] > 0 && idx[0] < 280 {
+		// idx[0] points at the terminal punctuation; include it.
+		return src[:idx[0]+1]
 	}
-	return util.Truncate(src, 200, true)
+	return util.Truncate(src, 300, true)
 }
 
 // mergeAdjacentComments combines same-file comments within 5 lines into range comments.

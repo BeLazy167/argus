@@ -164,63 +164,42 @@ const PIPELINE_STAGES = [
     label: "Triage",
     icon: FileSearch,
     description:
-      "Classifies every changed file as skip, skim, or deep review. Generated files, lockfiles, and vendored dependencies are discarded before a single token is spent.",
+      "Classifies each changed file by risk before any tokens are spent. Generated files, lockfiles, and vendored dependencies are skipped.",
   },
   {
     step: "02",
-    label: "Briefing",
+    label: "Context",
     icon: BookOpen,
     description:
-      "Lead agent produces a brief for each file, identifying cross-cutting concerns, blast radius, and relevant context from memory before specialists begin.",
+      "Gathers cross-file context, blast radius, and relevant memory — so the review understands how your change affects the rest of the system.",
   },
   {
     step: "03",
-    label: "Deep Review",
+    label: "Review",
     icon: MessageSquare,
     description:
-      "4 specialists per file run in parallel — bug_hunter, security, architecture, regression — each reviewing with full codebase context and the briefing document.",
+      "Performs focused analysis across multiple angles in parallel — correctness, security, architecture, and regression risk.",
   },
   {
     step: "04",
-    label: "Dedup",
+    label: "Refine",
     icon: Layers,
     description:
-      "Union-find deduplication removes duplicate findings across specialists. Same issue caught by multiple specialists is merged into a single finding.",
+      "Deduplicates and validates findings. Noise and low-signal comments are dropped so only high-confidence issues survive.",
   },
   {
     step: "05",
-    label: "Validate",
-    icon: Search,
+    label: "Synthesize",
+    icon: Sparkles,
     description:
-      "Validates all findings have correct line ranges, file paths, and comment structure. Malformed findings are repaired or dropped before scoring.",
+      "Produces a scannable verdict with fix ordering, severity tiers, and diagrams — actionable, not a wall of text.",
   },
   {
     step: "06",
-    label: "Scoring",
-    icon: SlidersHorizontal,
-    description:
-      "A separate model scores each finding 0\u2013100 independently. Threshold at 65 drops noise. Only high-signal findings survive to the next stage.",
-  },
-  {
-    step: "07",
-    label: "Pass2",
-    icon: RefreshCw,
-    description:
-      "Re-reviews hot files (3+ high-scoring comments) with the architecture specialist. Catches systemic issues that only emerge after seeing the full finding set.",
-  },
-  {
-    step: "08",
-    label: "Synthesis",
-    icon: Sparkles,
-    description:
-      "Generates a structured verdict with critical issues, warnings, and a top findings summary. Not a paragraph — a scannable, actionable review.",
-  },
-  {
-    step: "09",
     label: "Post & Learn",
     icon: Send,
     description:
-      "Posts to GitHub as inline comments. Learns reusable patterns, extracts codebase conventions, enriches the PR description with missing context and mermaid diagrams, and builds the architecture graph.",
+      "Posts inline comments to GitHub and updates memory from your feedback — so future reviews get sharper.",
   },
 ];
 
@@ -408,9 +387,9 @@ export function DocsContent() {
           <div>
             <SectionHeader id="pipeline" title="The Review Pipeline" />
             <p className="text-xs font-mono text-slate-text mb-6 leading-relaxed">
-              Every PR triggers a nine-stage pipeline. Each stage runs a
-              different model, configurable per-repo. The entire sequence
-              completes in under 60 seconds.
+              Every PR runs through a multi-stage pipeline. Each stage can
+              use a different model, configurable per-repo. The sequence
+              typically completes in a couple of minutes.
             </p>
             <div className="space-y-1">
               {PIPELINE_STAGES.map((stage, i) => {
@@ -1315,11 +1294,10 @@ export function DocsContent() {
             <div className="border border-amber/20 bg-amber/5 p-4 mt-4">
               <span className="text-xs font-mono font-bold text-amber">Security</span>
               <ul className="mt-2 space-y-1.5 text-xs font-mono text-slate-text leading-relaxed">
-                <li><span className="text-foreground">AES-256-GCM</span> &mdash; bank-grade encryption at rest. Plaintext never persists.</li>
-                <li><span className="text-foreground">Unique nonce</span> &mdash; every key produces different ciphertext, even if identical.</li>
+                <li><span className="text-foreground">Strong encryption at rest</span> &mdash; keys never persist in plaintext.</li>
                 <li><span className="text-foreground">In-memory only</span> &mdash; decrypted for API calls, then discarded. Never logged or cached.</li>
-                <li><span className="text-foreground">Scoped</span> &mdash; isolated per installation. No other workspace can access your keys.</li>
-                <li><span className="text-foreground">Masked</span> &mdash; dashboard shows <code className="text-amber">sk-...****</code> only. Full key never sent to frontend.</li>
+                <li><span className="text-foreground">Workspace-isolated</span> &mdash; no other workspace can access your keys.</li>
+                <li><span className="text-foreground">Masked</span> &mdash; dashboard shows <code className="text-amber">sk-...****</code> only. Full key never sent to the frontend.</li>
               </ul>
             </div>
             <p className="text-[11px] font-mono text-iron mt-3">

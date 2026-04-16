@@ -4,7 +4,7 @@
 
 Argus is an AI code reviewer that catches real bugs — not lint warnings. It understands your system across files, remembers what broke before, and gets smarter with every review.
 
-**80% recall on planted bugs. 95% precision. Zero configuration.**
+**Zero configuration. Works with your existing GitHub flow.**
 
 ---
 
@@ -94,21 +94,9 @@ Collapsed by default — click to expand. Max 2 per review.
 
 ## How It Works
 
-Every PR goes through 9 stages. You don't need to understand these — but if you're curious:
+Argus runs a multi-stage review pipeline: it gathers cross-file context, performs focused analysis from multiple angles, deduplicates findings, validates them against the diff, and synthesizes a summary with fix ordering and diagrams.
 
-| Stage | What happens |
-|---|---|
-| **Triage** | Classifies files by risk: skip, skim, security_skim, or deep |
-| **Lead Brief** | Gathers cross-file context — callers, imports, dependency graph, past bugs |
-| **Deep Review** | 4 specialists review in parallel: Bug Hunter, Security, Architecture, Regression & Edge Case |
-| **Dedup** | 3-layer deterministic dedup: groups by vulnerability type, clusters by text similarity, merges by line proximity. Reduces 150+ findings to ~50 unique. |
-| **Validation** | Validates against diff, checks blast radius, runs code simulations |
-| **Scoring** | LLM judge catches remaining duplicates and scores each finding 0–100. Below 65 dropped. Minimum 3 kept. |
-| **Pass 2** | Hot files (3+ findings scored 70+) get a second Architecture review |
-| **Synthesis** | Generates summary, fix ordering, root-cause analysis, diagrams |
-| **Post & Learn** | Posts review. Indexes patterns. Learns from your feedback. |
-
-The whole pipeline runs in under 2 minutes for most PRs.
+Most PRs complete in a couple of minutes.
 
 ---
 
@@ -117,35 +105,19 @@ The whole pipeline runs in under 2 minutes for most PRs.
 Argus doesn't start from zero on every review. It remembers.
 
 ### Patterns
-Conventions auto-learned from reviews: "use `errors.Is()` not `==`", "always handle `context.Canceled`". Matched semantically on future PRs — no config needed.
+Conventions your team cares about, automatically picked up from past reviews and developer feedback. Matched semantically on future PRs — no config needed.
 
 ### Scenarios
-What can go wrong, remembered forever. Three sources:
-- **Auto-extracted** from critical review findings
-- **Auto-generated** from GitHub Issues labeled `argus` or `bug`
-- **Manual** — create via the dashboard
-
-When someone touches a file with known scenarios, Argus tests them via code simulation.
-
-### Decision Traces
-Every finding, every developer reply, every fix — accumulated as institutional memory. Files that get flagged repeatedly get extra scrutiny automatically.
+Known failure modes and edge cases for your codebase. Created from reviews, from GitHub Issues, or manually from the dashboard. When someone touches a file with known scenarios, Argus checks whether the change is safe against them.
 
 ### The Flywheel
-Reviews generate traces → traces inform future reviews → better reviews generate better traces. No retraining. The model stays fixed. Your codebase knowledge grows.
+Every review, reply, and fix becomes institutional memory. Reviews get sharper over time as Argus learns what your team cares about — without any model retraining.
 
 ---
 
 ## Code Simulation
 
-Before you merge, Argus imagines what happens.
-
-Given a PR diff and known scenarios, Argus simulates execution paths. Each simulation reports:
-- **Confidence** — how certain the prediction is
-- **Root cause** — what specifically breaks
-- **Impact** — who and what is affected
-- **Suggestion** — how to fix it
-
-Only findings above the confidence threshold are surfaced. No noise.
+For enabled scenarios, Argus reasons about whether your change is safe: what could break, who's affected, and how to fix it. Low-confidence predictions are filtered out to keep noise down.
 
 ---
 
@@ -182,7 +154,7 @@ Comment on any PR:
 | `@argus-eye test --code` | Draft executable test code |
 | `@argus-eye remember <pattern>` | Teach a pattern for this repo |
 | `@argus-eye remember --org <pattern>` | Teach an org-wide pattern |
-| `@argus-eye resolve` | Resolve threads on files changed since review |
+| `@argus-eye resolve` | Resolve all open Argus threads on this PR |
 | `@argus-eye fix` | Apply suggestion blocks as a commit |
 | `@argus-eye help` | Show available commands |
 
@@ -203,7 +175,7 @@ Example: *"All API endpoints must validate authentication tokens before processi
 ## Security
 
 ### Your API Keys
-Encrypted at rest with **AES-256-GCM**. Decrypted in-memory only during LLM calls, then discarded. Never logged, never cached, never sent anywhere except your configured provider. The dashboard shows only masked placeholders.
+Encrypted at rest with industry-standard symmetric encryption. Decrypted in-memory only during LLM calls, then discarded. Never logged, never cached, never sent anywhere except your configured provider. The dashboard shows only masked placeholders.
 
 ### Your Code
 Argus reads diffs and file content to review. Your code is never stored, never used for training, never shared. Each workspace is fully isolated.
@@ -226,7 +198,7 @@ BYOK — bring your own key. 7 providers supported:
 | **AWS Bedrock** | Bedrock runtime endpoint |
 | **Zhipu AI** | GLM models |
 
-Configure different models per stage — triage, review, scoring, synthesis. Type any model name.
+Configure different models per review stage to tune cost/quality. Type any model name.
 
 ---
 
@@ -250,8 +222,8 @@ Toggle per repo:
 | **Price** | $0 | **$19/mo** per workspace |
 | Repos | 3 | Unlimited |
 | Reviews/mo | 50 | 500 |
-| Deep review | Basic | 4 specialists + Pass 2 |
-| Memory | Patterns only | Full — scenarios, traces, simulation |
+| Deep review | Basic | Full multi-angle analysis |
+| Memory | Patterns only | Full — scenarios, simulation, decision history |
 | Diagrams | — | Sequence + data flow |
 
 BYOK — you bring your own LLM API key. We charge for the platform, not the AI.

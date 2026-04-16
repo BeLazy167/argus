@@ -289,11 +289,8 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p revie
 	var tokens StageTokens
 	tokens.Model = cfg.Model
 	tokens.Provider = cfg.Provider
-	if p.specialist != "" {
-		tokens.File = fmt.Sprintf("%s[%s]", p.file.NewName, p.specialist)
-	} else {
-		tokens.File = p.file.NewName
-	}
+	tokens.File = p.file.NewName
+	tokens.Specialist = string(p.specialist) // empty for skim/single-pass; populated for deep-review units
 
 	// Gather cross-file context for richer reviews
 	var relatedContext string
@@ -550,13 +547,20 @@ func buildFileReviewPrompt(run *PipelineRun, file diff.FileDiff, fileContent str
 
 	// Inject prior review comments for incremental reviews so the LLM can
 	// check if issues were fixed and avoid re-flagging addressed items.
+	// We give the LLM a strict "no re-flag" rule because producing slightly
+	// reworded duplicates is a common failure mode — in prod we saw 4 variants
+	// of the same "DB commit before K8s create" bug on adjacent lines because
+	// the LLM re-discovered it under different wording.
 	if run.IsIncremental && len(run.PriorComments) > 0 {
 		if priors, ok := run.PriorComments[file.NewName]; ok && len(priors) > 0 {
 			sb.WriteString("\n<prior_review_comments>\n")
-			sb.WriteString("These comments were filed in the PREVIOUS review of this file. ")
-			sb.WriteString("For each prior comment: if the new diff clearly fixes the issue, do NOT re-flag it. ")
-			sb.WriteString("If the issue persists or the fix is incomplete, re-flag it with updated context. ")
-			sb.WriteString("Do NOT duplicate prior comments that are already addressed.\n\n")
+			sb.WriteString("These issues were ALREADY flagged in a previous review of this file.\n\n")
+			sb.WriteString("STRICT RULES:\n")
+			sb.WriteString("1. If a prior comment describes the same underlying issue, you MUST NOT re-flag it — even if your wording would differ.\n")
+			sb.WriteString("2. Two findings are \"the same issue\" when they refer to the same bug, security flaw, or pattern — regardless of line shift, phrasing, or framing.\n")
+			sb.WriteString("3. Only re-flag when: (a) the issue was partially fixed and still present, OR (b) a new instance appears in a different location in the file.\n")
+			sb.WriteString("4. When re-flagging a persistent issue, explicitly acknowledge: \"(prior review already flagged this)\".\n")
+			sb.WriteString("5. If the new diff clearly fixes a prior issue, do not comment on it at all.\n\n")
 			for _, pc := range priors {
 				sb.WriteString(fmt.Sprintf("- [%s|%s] L%d: %s\n", pc.Severity, pc.Category, pc.Line, util.Truncate(pc.Body, 200, true)))
 			}

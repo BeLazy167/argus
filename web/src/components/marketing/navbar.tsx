@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import Image from "next/image";
 import Link from "next/link";
 import { SignedIn, SignedOut } from "@clerk/nextjs";
 import { Menu, X } from "lucide-react";
@@ -82,28 +83,21 @@ export function Navbar() {
       />
 
       <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-6 relative">
-        {/* Logo */}
+        {/* Logo — Next/Image auto-optimizes (webp/avif, responsive srcset) */}
         <Link
           href="/"
-          className="group flex items-center gap-2.5"
+          aria-label="Argus home"
+          className="group flex items-center transition-[filter] duration-200 group-hover:drop-shadow-[0_0_12px_color-mix(in_oklch,var(--color-amber-glow)_40%,transparent)]"
         >
-          {/* Mini eye icon */}
-          <svg
-            viewBox="0 0 24 12"
-            fill="none"
-            className="h-3 w-6 text-amber transition-[filter] duration-200 group-hover:drop-shadow-[0_0_6px_color-mix(in_oklch,var(--color-amber-glow)_50%,transparent)]"
-          >
-            <path
-              d="M2 6C2 6 6 1.5 12 1.5C18 1.5 22 6 22 6C22 6 18 10.5 12 10.5C6 10.5 2 6 2 6Z"
-              stroke="currentColor"
-              strokeWidth="1.2"
-              fill="none"
-            />
-            <circle cx="12" cy="6" r="2.5" fill="currentColor" />
-          </svg>
-          <span className="wordmark text-sm text-amber tracking-[0.2em] transition-[text-shadow] duration-200 group-hover:text-shadow-[0_0_12px_color-mix(in_oklch,var(--color-amber-glow)_40%,transparent)]">
-            ARGUS
-          </span>
+          <Image
+            src="/logo-text.png"
+            alt="Argus"
+            width={138}
+            height={100}
+            priority
+            sizes="45px"
+            className="h-8 w-auto"
+          />
         </Link>
 
         {/* Center nav links with sliding pill */}

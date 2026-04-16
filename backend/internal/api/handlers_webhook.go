@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	gh "github.com/google/go-github/v68/github"
 
@@ -76,6 +77,27 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 				s.logger.Error("review pipeline failed", "error", err, "pr", prEvent.PRNumber)
 			}
 		}()
+
+		// Fire-and-forget reaction sweep. GitHub doesn't webhook reactions on
+		// PR review comments, so we opportunistically re-check reactions on
+		// every pull_request event. Decoupled from the review goroutine so a
+		// slow sweep doesn't delay the review pipeline. Guarded by the same
+		// webhook semaphore as every other handler goroutine so a burst of
+		// PR events can't spawn unbounded sweepers.
+		if s.reactionAnalyzer != nil {
+			if s.acquireSem() {
+				go func(installationID int64, fullName string, pr int) {
+					defer s.releaseSem()
+					sweepCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+					defer cancel()
+					if err := s.reactionAnalyzer.SweepPRReactions(sweepCtx, installationID, fullName, pr); err != nil {
+						s.logger.Warn("reaction sweep failed", "error", err, "pr", pr)
+					}
+				}(prEvent.InstallationID, prEvent.RepoFullName, prEvent.PRNumber)
+			} else {
+				s.logger.Warn("webhook semaphore full for reaction sweep", "pr", prEvent.PRNumber)
+			}
+		}
 
 	case "pull_request_review_comment":
 		if event.Action == "created" {

@@ -1,6 +1,7 @@
 "use client";
 
 import { UserButton, OrganizationSwitcher } from "@clerk/nextjs";
+import Image from "next/image";
 import Link from "next/link";
 import { OnboardingChecklist } from "@/components/dashboard/onboarding-checklist";
 import { usePathname } from "next/navigation";
@@ -99,8 +100,16 @@ export default function DashboardLayout({
   const sidebarContent = (
     <>
       <div className="flex h-14 items-center justify-between border-b border-sidebar-border px-5">
-        <Link href="/dashboard" className="wordmark text-xs text-amber tracking-[0.2em]">
-          ARGUS
+        <Link href="/dashboard" aria-label="Argus dashboard" className="flex items-center">
+          <Image
+            src="/logo-text.png"
+            alt="Argus"
+            width={138}
+            height={100}
+            priority
+            sizes="34px"
+            className="h-6 w-auto"
+          />
         </Link>
         <span className="h-1.5 w-1.5 rounded-full bg-amber animate-pulse" />
       </div>

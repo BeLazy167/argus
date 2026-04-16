@@ -14,8 +14,6 @@ import (
 	"github.com/BeLazy167/argus/backend/internal/memory"
 	"github.com/BeLazy167/argus/backend/internal/pipeline"
 	"github.com/BeLazy167/argus/backend/internal/store"
-	"github.com/BeLazy167/argus/backend/internal/util"
-	"github.com/BeLazy167/argus/backend/pkg/diff"
 )
 
 // --- Command Dispatch ---
@@ -129,7 +127,7 @@ func (s *Server) handleHelpCommand(ctx context.Context, evt ghpkg.IssueCommentEv
 | ` + "`@argus-eye remember <pattern>`" + ` | Teach Argus a pattern for this repo |
 | ` + "`@argus-eye remember --org <pattern>`" + ` | Teach Argus an org-wide pattern |
 | ` + "`@argus-eye fix`" + ` | Apply all suggestion blocks from review comments as a commit |
-| ` + "`@argus-eye resolve`" + ` | Resolve review threads on files changed since the review |
+| ` + "`@argus-eye resolve`" + ` | Resolve all open Argus review threads on this PR |
 | ` + "`@argus-eye test`" + ` | Generate a test plan for review findings |
 | ` + "`@argus-eye test --code`" + ` | Draft test code for review findings |
 | ` + "`@argus-eye help`" + ` | Show this message |`
@@ -228,12 +226,46 @@ func (s *Server) handleRememberCommand(ctx context.Context, evt ghpkg.IssueComme
 	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "rocket")
 }
 
-// handleResolveCommand lists all bot review threads on a PR, checks if their
-// referenced files appear in the latest diff, and resolves those that appear addressed.
+// isArgusThread reports whether a GitHub review thread was authored by Argus.
+// Matches only Argus's own login variants — crucially, it does NOT treat every
+// "*[bot]" login as Argus. Without this tightness, `@argus-eye resolve` would
+// also close threads from Dependabot, Codecov, Renovate, etc. sharing the PR.
+// Extracted as a testable helper for shared use across resolve/fix/triage flows.
+func isArgusThread(authorLogin string) bool {
+	return authorLogin == "argus-eye" || authorLogin == "argus-eye[bot]"
+}
+
+// classifyResolveError summarizes an error from ResolveReviewThread into a
+// short, user-facing phrase. Returns "" for errors we don't recognize (the
+// caller will fall back to a generic "GraphQL error" message). The `fatal`
+// return is true when the error is systemic (auth, permissions) — the caller
+// should abort the loop rather than retry N times.
+func classifyResolveError(err error) (phrase string, fatal bool) {
+	if err == nil {
+		return "", false
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "401") || strings.Contains(msg, "unauthorized"):
+		return "authentication failed — Argus may need to be reinstalled on this repo", true
+	case strings.Contains(msg, "403") || strings.Contains(msg, "forbidden") || strings.Contains(msg, "permission"):
+		return "missing permission — check the Argus GitHub App has write access to this repo", true
+	case strings.Contains(msg, "404") || strings.Contains(msg, "not found"):
+		return "thread already resolved or deleted upstream", false
+	case strings.Contains(msg, "rate limit"):
+		return "GitHub API rate limit hit — retry in a few minutes", true
+	}
+	return "", false
+}
+
+// handleResolveCommand resolves every open Argus review thread on the PR.
+// The command is an explicit user signal ("I've handled these, close them"),
+// so we trust the caller rather than second-guess with diff heuristics.
+// Auto-resolve on incremental re-push (orchestrator.autoResolveStaleComments)
+// stays the cautious path; manual invocation is the trust-the-operator path.
 func (s *Server) handleResolveCommand(ctx context.Context, evt ghpkg.IssueCommentEvent, owner, repo string, ghClient *ghpkg.Client) {
 	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "eyes")
 
-	// Fetch review threads via GraphQL
 	threads, err := ghClient.ListReviewThreads(ctx, evt.InstallationID, owner, repo, evt.PRNumber)
 	if err != nil {
 		s.logger.Error("resolve: list threads", "error", err)
@@ -241,86 +273,54 @@ func (s *Server) handleResolveCommand(ctx context.Context, evt ghpkg.IssueCommen
 		return
 	}
 
-	// Filter to unresolved bot threads
-	var botThreads []ghpkg.ReviewThread
+	var unresolvedBot []ghpkg.ReviewThread
 	for _, t := range threads {
-		isBotComment := strings.HasSuffix(t.AuthorLogin, "[bot]") || t.AuthorLogin == "argus-eye"
-		if !t.IsResolved && isBotComment {
-			botThreads = append(botThreads, t)
+		if !t.IsResolved && isArgusThread(t.AuthorLogin) {
+			unresolvedBot = append(unresolvedBot, t)
 		}
 	}
 
-	if len(botThreads) == 0 {
+	if len(unresolvedBot) == 0 {
 		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
-			"No open review comments to resolve.")
+			"No open Argus review threads to resolve.")
 		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "rocket")
 		return
 	}
 
-	// Fetch latest diff and parse it for line-level resolution
-	rawDiff, err := ghClient.GetPRDiff(ctx, evt.InstallationID, owner, repo, evt.PRNumber)
-	if err != nil {
-		s.logger.Error("resolve: fetch diff", "error", err)
-		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
-		return
-	}
-
-	// Parse diff for line-level checking; fall back to file-level on parse failure
-	patchSet, parseErr := diff.Parse(rawDiff)
-	if parseErr != nil {
-		s.logger.Warn("resolve: failed to parse diff, using file-level heuristic", "error", parseErr)
-	}
-
-	// Build per-file changed line sets for line-level resolution
-	fileChangedLines := make(map[string]map[int]bool)
-	if patchSet != nil {
-		for _, f := range patchSet.Files {
-			fileChangedLines[f.NewName] = f.ChangedLines()
+	var resolved, failed int
+	var firstErrPhrase string // classified reason to surface to the user
+	for _, t := range unresolvedBot {
+		resolveErr := ghClient.ResolveReviewThread(ctx, evt.InstallationID, t.ID)
+		if resolveErr == nil {
+			resolved++
+			continue
+		}
+		s.logger.Error("resolve: resolve thread", "error", resolveErr, "thread_id", t.ID)
+		failed++
+		phrase, fatal := classifyResolveError(resolveErr)
+		if firstErrPhrase == "" && phrase != "" {
+			firstErrPhrase = phrase
+		}
+		if fatal {
+			// Systemic failure: abort early rather than loop N times hitting the same wall.
+			break
 		}
 	}
 
-	// Resolve threads whose file (and ideally specific lines) appear in the current diff
-	const lineProximity = 5 // manual resolve uses wider proximity than auto-resolve
-	var resolved, stillOpen int
-	for _, t := range botThreads {
-		bc := botComment{Path: t.Path, Body: t.Body, Line: t.Line}
-		addressed := false
-
-		if changedLines, ok := fileChangedLines[bc.Path]; ok && bc.Line > 0 && len(changedLines) > 0 {
-			// Line-level: check if any changed line is within proximity of the comment
-			for changedLine := range changedLines {
-				if util.IntAbs(changedLine-bc.Line) <= lineProximity {
-					addressed = true
-					break
-				}
-			}
+	suffix := "s"
+	if resolved == 1 {
+		suffix = ""
+	}
+	msg := fmt.Sprintf("Resolved **%d** Argus review thread%s.", resolved, suffix)
+	if failed > 0 {
+		if firstErrPhrase != "" {
+			msg += fmt.Sprintf(" %d failed: %s.", failed, firstErrPhrase)
 		} else {
-			// Fall back to file-level heuristic (file-level comments or unparsed diff)
-			addressed = isCommentAddressedInDiff(bc, rawDiff)
-		}
-
-		if addressed {
-			if err := ghClient.ResolveReviewThread(ctx, evt.InstallationID, t.ID); err != nil {
-				s.logger.Error("resolve: resolve thread", "error", err, "thread_id", t.ID)
-				stillOpen++
-			} else {
-				resolved++
-			}
-		} else {
-			stillOpen++
+			msg += fmt.Sprintf(" %d failed to resolve (check dashboard logs for details).", failed)
 		}
 	}
-
-	_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
-		fmt.Sprintf("Resolve complete: **%d resolved**, **%d still open**.", resolved, stillOpen))
+	_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber, msg)
 	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "rocket")
-}
-
-type botComment struct {
-	NodeID string
-	Body   string
-	Path   string
-	Line   int
 }
 
 // fileFix represents a single suggestion block extracted from a bot review comment.
@@ -329,17 +329,6 @@ type fileFix struct {
 	line       int
 	startLine  int
 	suggestion string
-}
-
-// isCommentAddressedInDiff checks if the file referenced by the comment
-// has changes in the current diff (heuristic: if the file appears in the diff, consider it addressed).
-// Used as a fallback when line-level checking is not possible.
-func isCommentAddressedInDiff(bc botComment, rawDiff string) bool {
-	if bc.Path == "" {
-		return false
-	}
-	return strings.Contains(rawDiff, "diff --git a/"+bc.Path+" b/"+bc.Path) ||
-		strings.Contains(rawDiff, "+++ b/"+bc.Path)
 }
 
 // handleFixCommand applies suggestion blocks from bot review comments as a commit.
