@@ -5,12 +5,15 @@ import Image from "next/image";
 import Link from "next/link";
 import { SignedIn, SignedOut } from "@clerk/nextjs";
 import { Menu, X } from "lucide-react";
+import { ThemeToggle } from "@/components/dashboard/theme-toggle";
 
 const navLinks = [
+  { href: "/#features", label: "Features" },
+  { href: "/#memory", label: "Memory" },
   { href: "/pricing", label: "Pricing" },
   { href: "/compare", label: "Compare" },
+  { href: "/changelog", label: "Changelog" },
   { href: "/docs", label: "Docs" },
-  { href: "/blog", label: "Blog" },
 ];
 
 export function Navbar() {
@@ -138,8 +141,9 @@ export function Navbar() {
           {menuOpen ? <X className="h-5 w-5 text-zinc-400" /> : <Menu className="h-5 w-5 text-zinc-400" />}
         </button>
 
-        {/* Right side: auth */}
+        {/* Right side: theme toggle + auth */}
         <div className="hidden md:flex items-center gap-3">
+          <ThemeToggle />
           <SignedOut>
             <Link
               href="/sign-in"
@@ -180,6 +184,13 @@ export function Navbar() {
               </Link>
             ))}
             <div className="my-2 border-t border-zinc-800" />
+            <div className="flex items-center justify-between py-2">
+              <span className="text-[11px] font-mono uppercase tracking-[0.15em] text-slate-text">
+                Theme
+              </span>
+              <ThemeToggle />
+            </div>
+            <div className="my-1 border-t border-zinc-800" />
             <SignedOut>
               <Link
                 href="/sign-in"
