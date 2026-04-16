@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { FadeIn } from "@/components/marketing/fade-in";
+import { HeroBackdrop } from "@/components/marketing/hero-backdrop";
 
 /**
  * Hero — v3 landing (polish + bolder pass, v2)
@@ -34,53 +35,8 @@ export function Hero() {
   );
 }
 
-/* ─────────────────────────────────────────────────────────────── */
-/* Backdrop — single off-axis glow + thin amber horizon rule       */
-/* ─────────────────────────────────────────────────────────────── */
-
-function HeroBackdrop() {
-  return (
-    <div aria-hidden="true" className="pointer-events-none absolute inset-0">
-      {/* One anchored amber glow, off-axis — not centered */}
-      <div
-        className="absolute left-[12%] top-[-4%] h-[560px] w-[560px] opacity-[0.24] blur-[140px]"
-        style={{
-          background:
-            "radial-gradient(circle at center, color-mix(in oklch, var(--color-amber-glow) 75%, transparent) 0%, transparent 68%)",
-        }}
-      />
-      {/* Far-right cooler ember hint, very subtle */}
-      <div
-        className="absolute right-[-6%] top-[340px] h-[360px] w-[360px] opacity-[0.10] blur-[160px]"
-        style={{
-          background:
-            "radial-gradient(circle at center, color-mix(in oklch, var(--color-amber-glow) 60%, transparent) 0%, transparent 70%)",
-        }}
-      />
-      {/* Thin amber horizon rule — crosses the composition at headline baseline */}
-      <div
-        className="absolute left-0 right-0 top-[420px] h-px"
-        style={{
-          background:
-            "linear-gradient(90deg, transparent 0%, color-mix(in oklch, var(--color-amber-glow) 28%, transparent) 18%, color-mix(in oklch, var(--color-amber-glow) 40%, transparent) 50%, color-mix(in oklch, var(--color-amber-glow) 28%, transparent) 82%, transparent 100%)",
-        }}
-      />
-      {/* Dot matrix — sparser than before, fades off the headline */}
-      <div
-        className="absolute inset-0 opacity-[0.28]"
-        style={{
-          backgroundImage:
-            "radial-gradient(circle at 1px 1px, color-mix(in oklch, var(--color-iron) 55%, transparent) 1px, transparent 0)",
-          backgroundSize: "36px 36px",
-          maskImage:
-            "linear-gradient(180deg, transparent 0%, black 18%, black 80%, transparent 100%)",
-          WebkitMaskImage:
-            "linear-gradient(180deg, transparent 0%, black 18%, black 80%, transparent 100%)",
-        }}
-      />
-    </div>
-  );
-}
+/* Backdrop is now a client component with scroll-linked parallax —
+ * see `src/components/marketing/hero-backdrop.tsx`. */
 
 /* ─────────────────────────────────────────────────────────────── */
 /* Headline — left-aligned, asymmetric, italic phrases star        */
