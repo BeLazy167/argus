@@ -726,6 +726,21 @@ func (s *Store) GetLatestReviewBySHA(ctx context.Context, repoFullName string, p
 	return &r, nil
 }
 
+// HasFailedReviewWithError returns true if a review with status='failed' and the
+// given error code already exists for this PR. Used by the readiness gate to
+// suppress duplicate "welcome to Argus" comments when users retry
+// `@argus-eye review` while the API key is still missing.
+func (s *Store) HasFailedReviewWithError(ctx context.Context, repoID int64, prNumber int, errorCode string) (bool, error) {
+	var exists bool
+	err := s.Pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM reviews
+			WHERE repo_id = $1 AND pr_number = $2 AND status = 'failed' AND error = $3
+		)
+	`, repoID, prNumber, errorCode).Scan(&exists)
+	return exists, err
+}
+
 // GetLatestReviewByPR returns the most recent completed review for a repo+PR by full name.
 func (s *Store) GetLatestReviewByPR(ctx context.Context, repoFullName string, prNumber int) (*Review, error) {
 	var r Review

@@ -544,8 +544,14 @@ func (s *Server) handleTestCommand(ctx context.Context, evt ghpkg.IssueCommentEv
 	lister := pipeline.StoreConfigListerFor(s.store, inst.ID)
 	provider, cfg, err := s.registry.ResolveProvider(ctx, lister, inst.ID, 0, llm.StageReview)
 	if err != nil {
+		// Deep-link the Settings URL to this specific repo so the user lands on
+		// the right row instead of whatever was last selected in localStorage.
+		settingsURL := "https://argus.reviews/settings"
+		if dbRepo, rerr := s.store.GetRepoByFullName(ctx, evt.RepoFullName); rerr == nil && dbRepo != nil {
+			settingsURL = fmt.Sprintf("https://argus.reviews/settings?repo=%d", dbRepo.ID)
+		}
 		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
-			"No LLM provider configured. Add an API key in Settings.")
+			fmt.Sprintf("No LLM provider configured. Add an API key at your [Argus Settings](%s).", settingsURL))
 		return
 	}
 
