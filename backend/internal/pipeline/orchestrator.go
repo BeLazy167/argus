@@ -219,10 +219,14 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		}
 	}
 
-	// Check if repo has a model config + API key for the review stage
+	// Check if repo has a model config + API key for the review stage.
+	// Use the fallback-aware query so that org-level model configs (repo_id=NULL)
+	// satisfy the readiness gate when per-repo overrides aren't set. Without the
+	// fallback, repos relying on org defaults fail the gate and re-post the
+	// "welcome to Argus" comment on every PR.
 	var dbConfigs []store.ModelConfig
 	if o.registry != nil {
-		dbConfigs, err = o.st.ListModelConfigs(ctx, dbRepo.ID)
+		dbConfigs, err = o.st.ListModelConfigsWithFallback(ctx, inst.ID, dbRepo.ID)
 		if err != nil {
 			o.logger.Error("loading model configs for readiness check", "error", err, "repo", event.RepoFullName)
 		}
@@ -235,9 +239,19 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		}
 		if reviewProvider == "" || !o.registry.HasKeyForRepo(ctx, inst.ID, &dbRepo.ID, reviewProvider) {
 			o.logger.Info("no API key or model config, posting onboarding comment", "repo", event.RepoFullName, "provider", reviewProvider)
-			if err := o.ghClient.CreateIssueComment(ctx, event.InstallationID, owner, repo, event.PRNumber,
-				"Welcome to **Argus**! To enable AI code reviews, configure your API key and model at your [Argus Settings](https://argus.reviews/settings)."); err != nil {
-				o.logger.Error("posting onboarding comment", "error", err, "repo", event.RepoFullName)
+			// Suppress duplicate welcome comments on the same PR. Users retrying
+			// `@argus-eye review` while the config is still missing shouldn't
+			// generate a stack of identical onboarding comments.
+			alreadyWelcomed, hwErr := o.st.HasFailedReviewWithError(ctx, dbRepo.ID, event.PRNumber, "no_api_key")
+			if hwErr != nil {
+				o.logger.Error("checking prior no_api_key failure", "error", hwErr, "repo", event.RepoFullName)
+			}
+			if !alreadyWelcomed {
+				settingsURL := fmt.Sprintf("https://argus.reviews/settings?repo=%d", dbRepo.ID)
+				body := fmt.Sprintf("Welcome to **Argus**! To enable AI code reviews, configure your API key and model at your [Argus Settings](%s).", settingsURL)
+				if err := o.ghClient.CreateIssueComment(ctx, event.InstallationID, owner, repo, event.PRNumber, body); err != nil {
+					o.logger.Error("posting onboarding comment", "error", err, "repo", event.RepoFullName)
+				}
 			}
 			reviewID := uuid.New()
 			if _, err := o.db.Exec(ctx, `

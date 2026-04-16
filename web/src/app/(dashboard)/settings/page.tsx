@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Settings, Loader2, Save, Key, Cpu, ChevronDown, Zap, Check, X, ArrowUp, Info, UserCog, Lock, FileText, RotateCw, Search, Sliders } from "lucide-react";
 import {
   useModelConfigs,
@@ -794,6 +795,33 @@ function VerificationToggle({
 export default function SettingsPage() {
   const { repos, activeId, setSelectedId, isLoading: reposLoading } = useActiveRepo();
   const { active } = useInstallation();
+
+  // Honor `?repo=<id>` deep links so the onboarding comment posted on a PR lands
+  // the user on the right repo row. Falls through to the localStorage-backed
+  // `useActiveRepo()` default when the param is absent or invalid.
+  //
+  // Apply exactly once per mount via a ref guard: `setSelectedId` from the
+  // provider is not memoized, so including it in deps would re-fire the effect
+  // on every render and override manual dropdown selections. After applying,
+  // strip the `repo` param from the URL so refreshes and later dropdown picks
+  // don't get reverted back to the deep-linked id.
+  const searchParams = useSearchParams();
+  const router = useRouter();
+  const pathname = usePathname();
+  const deepLinkApplied = useRef(false);
+  useEffect(() => {
+    if (deepLinkApplied.current) return;
+    const raw = searchParams.get("repo");
+    if (!raw) return;
+    const id = Number(raw);
+    if (!Number.isFinite(id) || id <= 0) return;
+    deepLinkApplied.current = true;
+    setSelectedId(id);
+    const next = new URLSearchParams(searchParams.toString());
+    next.delete("repo");
+    const qs = next.toString();
+    router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+  }, [searchParams, setSelectedId, router, pathname]);
 
   const { data: configs, isLoading: configsLoading } = useModelConfigs(activeId);
   const { data: providerKeys, isLoading: keysLoading } = useProviderKeys();
