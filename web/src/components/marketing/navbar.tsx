@@ -7,10 +7,11 @@ import { SignedIn, SignedOut } from "@clerk/nextjs";
 import { Menu, X } from "lucide-react";
 
 const navLinks = [
+  { href: "/#features", label: "Features" },
+  { href: "/#memory", label: "Memory" },
   { href: "/pricing", label: "Pricing" },
-  { href: "/compare", label: "Compare" },
+  { href: "/changelog", label: "Changelog" },
   { href: "/docs", label: "Docs" },
-  { href: "/blog", label: "Blog" },
 ];
 
 export function Navbar() {
