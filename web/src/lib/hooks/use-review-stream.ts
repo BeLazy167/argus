@@ -30,7 +30,11 @@ type TriageFile = {
 type ScoringUpdate = {
   kept: number;
   dropped: number;
-  threshold: number;
+  /** Severity-tiered cutoffs the scorer applied. Backend emits this as
+   *  `thresholds: { critical, warning, suggestion }` — the older `threshold`
+   *  singular field was never populated, so activity feeds rendered
+   *  "threshold: undefined". */
+  thresholds?: { critical?: number; warning?: number; suggestion?: number };
 };
 
 export type TimelineEntry = {
@@ -132,14 +136,25 @@ export function useReviewStream(reviewId: string, enabled: boolean) {
           addEntry({ type: "comment", message: truncate(evt.data.body as string, 60), detail: `${evt.data.severity} \u00b7 ${shortPath(evt.data.file_path as string)}:${evt.data.line}`, icon: "comment" });
           break;
 
-        case "scoring_update":
+        case "scoring_update": {
+          const thresholds = evt.data.thresholds as ScoringUpdate["thresholds"];
           setScoringUpdate({
             kept: evt.data.kept as number,
             dropped: evt.data.dropped as number,
-            threshold: evt.data.threshold as number,
+            thresholds,
           });
-          addEntry({ type: "scoring", message: `Kept ${evt.data.kept}, dropped ${evt.data.dropped}`, detail: `threshold: ${evt.data.threshold}`, icon: "scoring" });
+          const detail =
+            thresholds && (thresholds.critical != null || thresholds.warning != null || thresholds.suggestion != null)
+              ? `cutoff c:${thresholds.critical ?? "\u2014"} \u00b7 w:${thresholds.warning ?? "\u2014"} \u00b7 s:${thresholds.suggestion ?? "\u2014"}`
+              : undefined;
+          addEntry({
+            type: "scoring",
+            message: `Kept ${evt.data.kept}, dropped ${evt.data.dropped}`,
+            detail,
+            icon: "scoring",
+          });
           break;
+        }
 
         case "token_update":
           setLiveTokens({ total_tokens: evt.data.total_tokens as number, cost: evt.data.cost as number });
