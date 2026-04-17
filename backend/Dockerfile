@@ -5,6 +5,8 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -o /argus ./cmd/argus
+# Migrator embeds the migration files — same binary everywhere, no external files needed.
+RUN CGO_ENABLED=0 GOOS=linux go build -o /migrate ./cmd/migrate
 
 # Install staticcheck (Go SAST tool)
 RUN go install honnef.co/go/tools/cmd/staticcheck@2025.1.1
@@ -30,8 +32,9 @@ RUN apk --no-cache add python3 py3-pip && \
 # Copy staticcheck from builder
 COPY --from=builder /go/bin/staticcheck /usr/local/bin/staticcheck
 
-# Copy the main binary
+# Copy the main binary + the migrator (used by fly.toml's release_command).
 COPY --from=builder /argus /argus
+COPY --from=builder /migrate /migrate
 
 EXPOSE 8080
 ENTRYPOINT ["/argus"]
