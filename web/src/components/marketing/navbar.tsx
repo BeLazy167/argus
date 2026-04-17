@@ -9,20 +9,25 @@ import { Menu, X } from "lucide-react";
 import { ThemeToggle } from "@/components/dashboard/theme-toggle";
 
 /**
- * Navbar — floating pill variant.
+ * Navbar — floating pill with shared-layout hover indicator.
  *
- * A centered, rounded-full bar over an amber-glass surface (no full-width
- * banner). Logo sits at 56px so it reads at arm's length; links in the
- * middle; auth + theme toggle on the right. Motion handles the mount-in
- * stagger and the mobile sheet spring.
+ * The hover pill uses Motion's `layoutId` so moving between links animates
+ * a single element through the layout tree rather than mutating width/left
+ * on a position-absolute box. This is the Linear / Vercel / Emil pattern:
+ *   - compositor-thread transforms only (no layout on hover)
+ *   - spring-based interpolation between link positions — no jank, no
+ *     manual getBoundingClientRect, no derived state
+ *   - the same element "morphs" between links so clicks never land on a
+ *     mid-transition phantom
  *
- * Scroll behaviour is preserved from the prior navbar:
- *   - fades its glass background in after 20px of scroll
- *   - slides up out of view when scrolling down past 100px, slides back on
- *     upward scroll (lastYRef diff)
+ * Press feedback via `whileTap={{ scale: 0.97 }}` on interactive elements
+ * gives a physical click response without hurting perceived latency.
  *
- * Stays dark-only — the Argus palette has no light variant, so the "white
- * pill" from the donor is swapped for charcoal-with-amber-ring glass.
+ * Stays dark-only — Argus has no light palette, so the donor "white pill"
+ * is swapped for amber-ringed charcoal glass.
+ *
+ * Scroll behaviour preserved: fades the glass background in after 20px of
+ * scroll, slides up out of view when scrolling down past 100px.
  */
 const navLinks = [
   { href: "/#features", label: "Features" },
@@ -36,13 +41,8 @@ const navLinks = [
 export function Navbar() {
   const [scrolled, setScrolled] = useState(false);
   const [hidden, setHidden] = useState(false);
+  const [hoveredHref, setHoveredHref] = useState<string | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
-  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
-  const [pillStyle, setPillStyle] = useState<{
-    left: number;
-    width: number;
-    opacity: number;
-  }>({ left: 0, width: 0, opacity: 0 });
   const lastYRef = useRef(0);
 
   useEffect(() => {
@@ -62,25 +62,6 @@ export function Navbar() {
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
 
-  const handleLinkEnter = useCallback(
-    (e: React.MouseEvent<HTMLAnchorElement>, idx: number) => {
-      const rect = e.currentTarget.getBoundingClientRect();
-      const parent = e.currentTarget.parentElement!.getBoundingClientRect();
-      setPillStyle({
-        left: rect.left - parent.left - 10,
-        width: rect.width + 20,
-        opacity: 1,
-      });
-      setHoverIdx(idx);
-    },
-    [],
-  );
-  const handleLinkLeave = useCallback(() => {
-    setPillStyle((p) => ({ ...p, opacity: 0 }));
-    setHoverIdx(null);
-  }, []);
-
-  const toggleMenu = useCallback(() => setMenuOpen((v) => !v), []);
   const closeMenu = useCallback(() => setMenuOpen(false), []);
 
   return (
@@ -97,7 +78,7 @@ export function Navbar() {
             : "border-iron/60 bg-charcoal/40 shadow-[inset_0_1px_0_color-mix(in_oklch,var(--color-amber-glow)_8%,transparent)]"
         }`}
       >
-        {/* Logo — bumped to h-14 (56px) so it reads as the brand anchor */}
+        {/* Logo — 56px reads as the brand anchor, drop-shadow on hover */}
         <Link
           href="/"
           aria-label="Argus home"
@@ -114,39 +95,38 @@ export function Navbar() {
           />
         </Link>
 
-        {/* Center links with animated hover pill */}
-        <div
-          className="relative hidden items-center md:flex"
-          onMouseLeave={handleLinkLeave}
+        {/* Center links with shared-layout hover pill */}
+        <ul
+          className="hidden items-center md:flex"
+          onMouseLeave={() => setHoveredHref(null)}
         >
-          <div
-            aria-hidden
-            className="pointer-events-none absolute top-1/2 h-8 -translate-y-1/2 rounded-full bg-iron/50 transition-all duration-200 ease-out"
-            style={{
-              left: pillStyle.left,
-              width: pillStyle.width,
-              opacity: pillStyle.opacity,
-            }}
-          />
-          {navLinks.map((link, idx) => (
-            <motion.div
-              key={link.href}
-              initial={{ opacity: 0, y: -6 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.25, delay: idx * 0.03 }}
-            >
-              <Link
-                href={link.href}
-                onMouseEnter={(e) => handleLinkEnter(e, idx)}
-                className={`relative z-10 block px-3 py-1.5 font-mono text-[12px] tracking-[0.02em] transition-colors duration-200 ${
-                  hoverIdx === idx ? "text-foreground" : "text-slate-text hover:text-ash"
-                }`}
-              >
-                {link.label}
-              </Link>
-            </motion.div>
-          ))}
-        </div>
+          {navLinks.map((link) => {
+            const active = hoveredHref === link.href;
+            return (
+              <li key={link.href} className="relative">
+                <Link
+                  href={link.href}
+                  onMouseEnter={() => setHoveredHref(link.href)}
+                  onFocus={() => setHoveredHref(link.href)}
+                  onBlur={() => setHoveredHref((h) => (h === link.href ? null : h))}
+                  className={`relative block rounded-full px-3.5 py-1.5 font-mono text-[12px] tracking-[0.02em] transition-colors duration-150 focus:outline-none focus-visible:ring-1 focus-visible:ring-amber/50 ${
+                    active ? "text-foreground" : "text-slate-text hover:text-ash"
+                  }`}
+                >
+                  {active && (
+                    <motion.span
+                      layoutId="nav-pill"
+                      aria-hidden="true"
+                      className="absolute inset-0 -z-10 rounded-full bg-iron/60"
+                      transition={{ type: "spring", stiffness: 420, damping: 32, mass: 0.6 }}
+                    />
+                  )}
+                  <span className="relative">{link.label}</span>
+                </Link>
+              </li>
+            );
+          })}
+        </ul>
 
         {/* Right cluster */}
         <div className="hidden items-center gap-3 pr-1 md:flex">
@@ -158,33 +138,38 @@ export function Navbar() {
             >
               Sign in
             </Link>
-            <Link
-              href="/sign-up"
-              className="inline-flex items-center rounded-full bg-amber px-5 py-2 font-mono text-[12px] font-semibold text-primary-foreground transition-[transform,background-color] duration-150 hover:scale-[1.03] hover:bg-amber-glow"
-            >
-              Get started
-            </Link>
+            <motion.div whileTap={{ scale: 0.96 }}>
+              <Link
+                href="/sign-up"
+                className="inline-flex items-center rounded-full bg-amber px-5 py-2 font-mono text-[12px] font-semibold text-primary-foreground transition-colors duration-150 hover:bg-amber-glow"
+              >
+                Get started
+              </Link>
+            </motion.div>
           </SignedOut>
           <SignedIn>
-            <Link
-              href="/dashboard"
-              className="inline-flex items-center rounded-full bg-amber px-5 py-2 font-mono text-[12px] font-semibold text-primary-foreground transition-[transform,background-color] duration-150 hover:scale-[1.03] hover:bg-amber-glow"
-            >
-              Dashboard
-            </Link>
+            <motion.div whileTap={{ scale: 0.96 }}>
+              <Link
+                href="/dashboard"
+                className="inline-flex items-center rounded-full bg-amber px-5 py-2 font-mono text-[12px] font-semibold text-primary-foreground transition-colors duration-150 hover:bg-amber-glow"
+              >
+                Dashboard
+              </Link>
+            </motion.div>
           </SignedIn>
         </div>
 
         {/* Mobile hamburger */}
-        <button
+        <motion.button
           type="button"
-          onClick={toggleMenu}
+          onClick={() => setMenuOpen((v) => !v)}
+          whileTap={{ scale: 0.92 }}
           aria-label={menuOpen ? "Close menu" : "Open menu"}
           aria-expanded={menuOpen}
           className="inline-flex items-center justify-center rounded-full border border-iron/70 p-2 text-slate-text transition-colors hover:border-amber/40 hover:text-amber md:hidden"
         >
           {menuOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
-        </button>
+        </motion.button>
       </nav>
 
       {/* Mobile sheet — slides from the right, spring damped */}
