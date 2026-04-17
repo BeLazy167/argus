@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { LastUpdated } from "@/components/seo/last-updated";
 
 export const metadata: Metadata = {
   title: "Issue acceptance check — Argus docs",
@@ -9,6 +10,7 @@ export default function IssueAcceptancePage() {
   return (
     <article className="space-y-6">
       <h1 className="text-2xl font-mono text-slate-100">Issue acceptance check</h1>
+      <LastUpdated date="2026-04-17" />
 
       <p>
         When a pull request closes an issue, Argus verifies that the diff actually addresses
