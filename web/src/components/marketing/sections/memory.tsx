@@ -327,25 +327,11 @@ function TimelineRow({
                   }
             }
           />
-          {/* NOW callout ticks bracketing the active node */}
-          {active && (
-            <>
-              <span
-                aria-hidden
-                className="absolute left-[calc(50%+10px)] top-3 h-px w-4"
-                style={{
-                  background:
-                    "linear-gradient(to right, var(--color-amber-glow) 0%, transparent 100%)",
-                }}
-              />
-              <span
-                className="absolute left-[calc(50%+28px)] -top-px font-mono text-[9px] tracking-[0.24em] uppercase text-amber-glow whitespace-nowrap"
-                aria-label="Current match"
-              >
-                NOW
-              </span>
-            </>
-          )}
+          {/* NOW tick removed: at narrow viewports the text absolute-positioned
+           * at left-[calc(50%+28px)] bled out of the 28px spine column and
+           * overlapped the PR label in the content column. The pulsing amber
+           * dot plus the "↻ pattern re-matched" badge in the content row
+           * already communicate "currently matching" — the tick was redundant. */}
         </div>
 
         {/* Content */}

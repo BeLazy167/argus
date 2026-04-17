@@ -13,7 +13,7 @@ export default function MarketingLayout({
       <header>
         <Navbar />
       </header>
-      <main className="pt-14">{children}</main>
+      <main className="pt-24">{children}</main>
       <SoftwareAppJsonLd />
     </>
   );
