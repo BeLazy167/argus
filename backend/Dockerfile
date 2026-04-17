@@ -36,4 +36,7 @@ COPY --from=builder /argus /argus
 COPY --from=builder /migrate /migrate
 
 EXPOSE 8080
-ENTRYPOINT ["/argus"]
+# CMD, not ENTRYPOINT: Fly's release_command replaces CMD on the ephemeral release machine.
+# With ENTRYPOINT, release_command would append to it (/argus /migrate) — the app would ignore
+# the arg and run the HTTP server until Fly's release timeout.
+CMD ["/argus"]
