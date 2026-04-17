@@ -4,9 +4,8 @@ primary_region = 'iad'
 [build]
   dockerfile = 'Dockerfile'
 
-# release_command runs once per deploy BEFORE new machines receive traffic. If migrations
-# fail, the deploy aborts — which is exactly what we want (better than shipping a binary that
-# expects columns that don't exist yet, as happened with migration 036).
+# release_command runs once per deploy before new machines receive traffic. A non-zero exit
+# from the migrator aborts the deploy — keeps the binary and the DB schema in lock-step.
 [deploy]
   release_command = '/migrate'
 
