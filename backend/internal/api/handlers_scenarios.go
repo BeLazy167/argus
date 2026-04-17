@@ -96,6 +96,72 @@ func (s *Server) deactivateScenario(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deactivated"})
 }
 
+// getScenarioKPIs returns the 4-card summary counts for a repo's /scenarios page.
+// Scoped to the user's installations — repo_id is validated before counting.
+func (s *Server) getScenarioKPIs(w http.ResponseWriter, r *http.Request) {
+	repoID, err := strconv.ParseInt(chi.URLParam(r, "repoID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo id"})
+		return
+	}
+	if _, err := s.store.GetRepoScoped(r.Context(), repoID, getInstallationIDs(r.Context())); err != nil {
+		s.handleDBError(w, err, "repo not found")
+		return
+	}
+	kpis, err := s.store.GetScenarioKPIs(r.Context(), repoID)
+	if err != nil {
+		s.logger.Error("scenario kpis", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, kpis)
+}
+
+// listScenarioRuns returns the per-scenario simulation history (newest first).
+// Limit defaults to 20 and is capped at 100 to protect the API from abuse.
+func (s *Server) listScenarioRuns(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "scenarioID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid scenario id"})
+		return
+	}
+	// Scope check — load scenario, verify installation ownership, then fetch runs.
+	scenario, err := s.store.GetScenario(r.Context(), id)
+	if err != nil {
+		s.handleDBError(w, err, "scenario not found")
+		return
+	}
+	if !containsID(getInstallationIDs(r.Context()), scenario.InstallationID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "access denied"})
+		return
+	}
+	limit := parseLimitParam(r.URL.Query().Get("limit"), 20, 100)
+	runs, err := s.store.GetScenarioRuns(r.Context(), id, limit)
+	if err != nil {
+		s.logger.Error("scenario runs", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, runs)
+}
+
+// parseLimitParam extracts a pagination limit from a query string. Missing, non-numeric, or
+// non-positive values fall through to defaultVal. Values above maxLimit are clamped to it.
+// Keeps the handler tidy and makes the clamp logic easy to test without HTTP scaffolding.
+func parseLimitParam(raw string, defaultVal, maxLimit int) int {
+	if raw == "" {
+		return defaultVal
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return defaultVal
+	}
+	if n > maxLimit {
+		return maxLimit
+	}
+	return n
+}
+
 func (s *Server) getScenario(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(chi.URLParam(r, "scenarioID"), 10, 64)
 	if err != nil {

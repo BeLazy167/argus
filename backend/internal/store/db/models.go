@@ -248,23 +248,43 @@ type Rule struct {
 }
 
 type Scenario struct {
-	ID              int64      `json:"id"`
-	InstallationID  int64      `json:"installation_id"`
-	RepoID          *int64     `json:"repo_id"`
-	Description     string     `json:"description"`
-	Source          string     `json:"source"`
-	SourceRef       *string    `json:"source_ref"`
-	Files           []string   `json:"files"`
-	Modules         []string   `json:"modules"`
-	Severity        *string    `json:"severity"`
-	Active          *bool      `json:"active"`
-	CreatedAt       *time.Time `json:"created_at"`
-	Steps           []byte     `json:"steps"`
-	InitialState    *string    `json:"initial_state"`
-	ExpectedOutcome *string    `json:"expected_outcome"`
-	IsOutdated      *bool      `json:"is_outdated"`
-	LastRunAt       *time.Time `json:"last_run_at"`
-	TriggerCount    int        `json:"trigger_count"`
+	ID              int64          `json:"id"`
+	InstallationID  int64          `json:"installation_id"`
+	RepoID          *int64         `json:"repo_id"`
+	Description     string         `json:"description"`
+	Source          string         `json:"source"`
+	SourceRef       *string        `json:"source_ref"`
+	Files           []string       `json:"files"`
+	Modules         []string       `json:"modules"`
+	Severity        *string        `json:"severity"`
+	Active          *bool          `json:"active"`
+	CreatedAt       *time.Time     `json:"created_at"`
+	Steps           []byte         `json:"steps"`
+	InitialState    *string        `json:"initial_state"`
+	ExpectedOutcome *string        `json:"expected_outcome"`
+	IsOutdated      *bool          `json:"is_outdated"`
+	LastRunAt       *time.Time     `json:"last_run_at"`
+	TriggerCount    int            `json:"trigger_count"`
+	LastVerdict     *string        `json:"last_verdict"`
+	LastConfidence  pgtype.Numeric `json:"last_confidence"`
+	LastWhy         *string        `json:"last_why"`
+	LastFix         *string        `json:"last_fix"`
+	LastPrNumber    *int           `json:"last_pr_number"`
+	LastReviewID    *uuid.UUID     `json:"last_review_id"`
+}
+
+type ScenarioRun struct {
+	ID         int64          `json:"id"`
+	ScenarioID int64          `json:"scenario_id"`
+	ReviewID   uuid.UUID      `json:"review_id"`
+	PRNumber   int            `json:"pr_number"`
+	Verdict    string         `json:"verdict"`
+	Confidence pgtype.Numeric `json:"confidence"`
+	Why        *string        `json:"why"`
+	Fix        *string        `json:"fix"`
+	RootCause  *string        `json:"root_cause"`
+	Impact     *string        `json:"impact"`
+	CreatedAt  time.Time      `json:"created_at"`
 }
 
 type UserInstallation struct {
