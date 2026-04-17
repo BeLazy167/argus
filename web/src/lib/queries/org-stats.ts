@@ -1,5 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
-import { useApi } from "@/lib/hooks/use-api";
+import { createAuthQuery, getApi } from "@/lib/query-kit";
 
 export type Period = "7d" | "30d" | "90d";
 
@@ -75,92 +74,59 @@ export interface StageCost {
   total_cost: number;
 }
 
-export function useStatsOverview(period: Period) {
-  const api = useApi();
-  return useQuery({
-    queryKey: ["stats", "overview", api.active?.id, period],
-    queryFn: () => api.get<StatsOverview>(`/api/v1/stats/overview?period=${period}`),
-    enabled: !!api.active,
-    staleTime: 60_000,
-  });
-}
+type PeriodVars = { period: Period };
+const STATS_STALE = 60_000;
 
-export function useStatsTimeseries(period: Period) {
-  const api = useApi();
-  return useQuery({
-    queryKey: ["stats", "timeseries", api.active?.id, period],
-    queryFn: () => api.get<TimeseriesPoint[]>(`/api/v1/stats/timeseries?period=${period}`),
-    enabled: !!api.active,
-    staleTime: 60_000,
-  });
-}
+export const useStatsOverview = createAuthQuery<StatsOverview, PeriodVars>({
+  queryKey: ["stats", "overview"],
+  fetcher: ({ period }, ctx) => getApi(ctx).get<StatsOverview>(`/api/v1/stats/overview?period=${period}`),
+  staleTime: STATS_STALE,
+});
 
-export function useStatsUsers(period: Period) {
-  const api = useApi();
-  return useQuery({
-    queryKey: ["stats", "users", api.active?.id, period],
-    queryFn: () => api.get<UserStat[]>(`/api/v1/stats/users?period=${period}`),
-    enabled: !!api.active,
-    staleTime: 60_000,
-  });
-}
+export const useStatsTimeseries = createAuthQuery<TimeseriesPoint[], PeriodVars>({
+  queryKey: ["stats", "timeseries"],
+  fetcher: ({ period }, ctx) => getApi(ctx).get<TimeseriesPoint[]>(`/api/v1/stats/timeseries?period=${period}`),
+  staleTime: STATS_STALE,
+});
 
-export function useStatsModels(period: Period) {
-  const api = useApi();
-  return useQuery({
-    queryKey: ["stats", "models", api.active?.id, period],
-    queryFn: () => api.get<ModelStat[]>(`/api/v1/stats/models?period=${period}`),
-    enabled: !!api.active,
-    staleTime: 60_000,
-  });
-}
+export const useStatsUsers = createAuthQuery<UserStat[], PeriodVars>({
+  queryKey: ["stats", "users"],
+  fetcher: ({ period }, ctx) => getApi(ctx).get<UserStat[]>(`/api/v1/stats/users?period=${period}`),
+  staleTime: STATS_STALE,
+});
 
-export function useStatsFindings(period: Period) {
-  const api = useApi();
-  return useQuery({
-    queryKey: ["stats", "findings", api.active?.id, period],
-    queryFn: () => api.get<FindingsData>(`/api/v1/stats/findings?period=${period}`),
-    enabled: !!api.active,
-    staleTime: 60_000,
-  });
-}
+export const useStatsModels = createAuthQuery<ModelStat[], PeriodVars>({
+  queryKey: ["stats", "models"],
+  fetcher: ({ period }, ctx) => getApi(ctx).get<ModelStat[]>(`/api/v1/stats/models?period=${period}`),
+  staleTime: STATS_STALE,
+});
 
-export function useStatsAdoption(period: Period) {
-  const api = useApi();
-  return useQuery({
-    queryKey: ["stats", "adoption", api.active?.id, period],
-    queryFn: () => api.get<AdoptionData>(`/api/v1/stats/adoption?period=${period}`),
-    enabled: !!api.active,
-    staleTime: 60_000,
-  });
-}
+export const useStatsFindings = createAuthQuery<FindingsData, PeriodVars>({
+  queryKey: ["stats", "findings"],
+  fetcher: ({ period }, ctx) => getApi(ctx).get<FindingsData>(`/api/v1/stats/findings?period=${period}`),
+  staleTime: STATS_STALE,
+});
 
-export function useStatsRepos(period: Period) {
-  const api = useApi();
-  return useQuery({
-    queryKey: ["stats", "repos", api.active?.id, period],
-    queryFn: () => api.get<RepoStat[]>(`/api/v1/stats/repos?period=${period}`),
-    enabled: !!api.active,
-    staleTime: 60_000,
-  });
-}
+export const useStatsAdoption = createAuthQuery<AdoptionData, PeriodVars>({
+  queryKey: ["stats", "adoption"],
+  fetcher: ({ period }, ctx) => getApi(ctx).get<AdoptionData>(`/api/v1/stats/adoption?period=${period}`),
+  staleTime: STATS_STALE,
+});
 
-export function useStatsReviewTimes(period: Period) {
-  const api = useApi();
-  return useQuery({
-    queryKey: ["stats", "review-times", api.active?.id, period],
-    queryFn: () => api.get<ReviewTimesData>(`/api/v1/stats/review-times?period=${period}`),
-    enabled: !!api.active,
-    staleTime: 60_000,
-  });
-}
+export const useStatsRepos = createAuthQuery<RepoStat[], PeriodVars>({
+  queryKey: ["stats", "repos"],
+  fetcher: ({ period }, ctx) => getApi(ctx).get<RepoStat[]>(`/api/v1/stats/repos?period=${period}`),
+  staleTime: STATS_STALE,
+});
 
-export function useStatsCostPerStage(period: Period) {
-  const api = useApi();
-  return useQuery({
-    queryKey: ["stats", "cost-per-stage", api.active?.id, period],
-    queryFn: () => api.get<StageCost[]>(`/api/v1/stats/cost-per-stage?period=${period}`),
-    enabled: !!api.active,
-    staleTime: 60_000,
-  });
-}
+export const useStatsReviewTimes = createAuthQuery<ReviewTimesData, PeriodVars>({
+  queryKey: ["stats", "review-times"],
+  fetcher: ({ period }, ctx) => getApi(ctx).get<ReviewTimesData>(`/api/v1/stats/review-times?period=${period}`),
+  staleTime: STATS_STALE,
+});
+
+export const useStatsCostPerStage = createAuthQuery<StageCost[], PeriodVars>({
+  queryKey: ["stats", "cost-per-stage"],
+  fetcher: ({ period }, ctx) => getApi(ctx).get<StageCost[]>(`/api/v1/stats/cost-per-stage?period=${period}`),
+  staleTime: STATS_STALE,
+});

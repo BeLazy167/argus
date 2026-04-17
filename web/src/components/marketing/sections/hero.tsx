@@ -623,8 +623,8 @@ function StatsFooter() {
   return (
     <div className="flex flex-wrap items-center gap-x-6 gap-y-2 border-t border-iron/60 bg-[color-mix(in_oklch,var(--color-charcoal)_85%,black_15%)] px-5 py-3">
       <div className="flex flex-wrap items-center gap-x-5 gap-y-2 font-mono text-[11px] text-slate-text">
-        {items.map((item, i) => (
-          <span key={i} className="flex items-center gap-2">
+        {items.map((item) => (
+          <span key={item.text} className="flex items-center gap-2">
             <span className="text-amber/80" aria-hidden="true">
               {item.icon}
             </span>

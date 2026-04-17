@@ -337,7 +337,7 @@ function TokenPill({ usage }: { usage: TokenUsage }) {
   };
 
   // Group model name — show once if all stages use the same model
-  const models = stages.map(([, s]) => s.model).filter(Boolean);
+  const models = stages.flatMap(([, s]) => (s.model ? [s.model] : []));
   const uniqueModels = [...new Set(models)];
   const singleModel = uniqueModels.length === 1 ? uniqueModels[0] : null;
 
@@ -436,7 +436,7 @@ function CopyFixButton({
 }
 
 function PatternDetail({ patternId }: { patternId: number }) {
-  const { data: pattern, isLoading } = usePattern(patternId);
+  const { data: pattern, isLoading } = usePattern({ variables: { id: patternId } });
   if (isLoading) return <div className="mt-2 text-[11px] font-mono text-slate-text">Loading pattern...</div>;
   if (!pattern) return <div className="mt-2 text-[11px] font-mono text-slate-text">Pattern not found</div>;
   return (
@@ -725,7 +725,7 @@ function FileTOC({
 
 export default function ReviewDetailPage() {
   const { id } = useParams<{ id: string }>();
-  const { data, isLoading } = useReview(id);
+  const { data, isLoading } = useReview({ variables: { id } });
   const { data: repos } = useRepos();
   const retryReview = useRetryReview();
   const cancelReview = useCancelReview();
@@ -1163,7 +1163,7 @@ export default function ReviewDetailPage() {
           return (
             <div className="mt-4 pt-4 border-t border-iron/40 space-y-3">
               {diagrams.map((d, i) => (
-                <details key={i} open={i === 0}>
+                <details key={`${d.type ?? "diag"}-${d.title ?? i}`} open={i === 0}>
                   <summary className="text-[11px] font-mono text-slate-text cursor-pointer hover:text-foreground transition-colors">
                     {d.title || capitalize(d.type || "Architecture")} diagram
                   </summary>

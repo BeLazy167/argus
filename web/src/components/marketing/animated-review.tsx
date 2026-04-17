@@ -157,7 +157,7 @@ export function AnimatedReview() {
             : -1;
 
           return (
-            <div key={i}>
+            <div key={`${line.type}-${line.num}-${i}`}>
               <div
                 className={`flex items-center text-[12px] font-mono leading-6 ${
                   line.type === "added"

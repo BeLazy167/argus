@@ -203,10 +203,9 @@ export default function ReviewsPage() {
 
   const repoMap = useMemo(() => new Map(repos?.map((r) => [r.id, r]) ?? []), [repos]);
 
-  const { data: reviews, isLoading: reviewsLoading } = useReviews(
-    activeId,
-    FETCH_LIMIT,
-  );
+  const { data: reviews, isLoading: reviewsLoading } = useReviews({
+    variables: { repoId: activeId, limit: FETCH_LIMIT },
+  });
   const retryReview = useRetryReview();
 
   const filtered = statusFilter === "all"

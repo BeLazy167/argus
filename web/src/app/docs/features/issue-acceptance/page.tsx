@@ -1,7 +1,10 @@
-/**
- * Docs page: Issue acceptance check feature overview.
- * Plain TSX — no MDX dependency for v1.
- */
+import type { Metadata } from "next";
+
+export const metadata: Metadata = {
+  title: "Issue acceptance check — Argus docs",
+  description: "Argus verifies PRs actually address linked issues. Uses GitHub's native issue-linking — no manual setup.",
+};
+
 export default function IssueAcceptancePage() {
   return (
     <article className="space-y-6">

@@ -90,7 +90,7 @@ function AddReposButton() {
 }
 
 function RepoCard({ repo, isPro }: { repo: Repo; isPro: boolean }) {
-  const { data: reviews } = useReviews(repo.id, 1);
+  const { data: reviews } = useReviews({ variables: { repoId: repo.id, limit: 1 } });
   const updateRepo = useUpdateRepo();
   const triggerReview = useTriggerReview();
   const [showTrigger, setShowTrigger] = useState(false);

@@ -260,7 +260,7 @@ export function Open() {
               <div className="border-b border-iron/70 bg-void/70">
                 {DIFF_LINES.map((l, i) => (
                   <div
-                    key={i}
+                    key={`${l.kind}-${l.oldLine ?? l.newLine ?? i}`}
                     className={`flex font-mono text-[12px] leading-[1.75] ${
                       l.kind === "add"
                         ? "bg-emerald-500/[0.06]"
@@ -407,7 +407,7 @@ await retryWithBackoff(() => handler(event), {
                     <ul className="mt-4 divide-y divide-iron/50 border border-iron/60">
                       {SUGGESTIONS.map((s, i) => (
                         <li
-                          key={i}
+                          key={s}
                           className="flex items-center gap-3 bg-void/30 px-3 py-2 font-mono text-[11.5px] text-ash/80"
                         >
                           <span className="font-mono text-[10px] tabular-nums text-amber/80">

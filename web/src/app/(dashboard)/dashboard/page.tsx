@@ -91,10 +91,10 @@ function formatReviewTime(ms: number): string {
 export default function DashboardPage() {
   const router = useRouter();
   const { repos, activeId, isLoading: reposLoading } = useActiveRepo();
-  const { data: stats, isLoading: statsLoading } = useStats(activeId || undefined);
+  const { data: stats, isLoading: statsLoading } = useStats({ variables: { repoId: activeId || undefined } });
 
   const repoMap = useMemo(() => new Map(repos?.map((r) => [r.id, r]) ?? []), [repos]);
-  const { data: reviews, isLoading: reviewsLoading } = useReviews(activeId, 200);
+  const { data: reviews, isLoading: reviewsLoading } = useReviews({ variables: { repoId: activeId, limit: 200 } });
   const { page, setPage, totalPages, paginated, pageSize, total, hasNext, hasPrev } = usePagination(reviews ?? []);
 
   const feedLoading = reposLoading || reviewsLoading;

@@ -269,8 +269,8 @@ function TerminalDiff() {
             </span>
           </div>
           <ul className="flex flex-col gap-px px-3 pb-4">
-            {SCENARIOS.map((s, i) => (
-              <ScenarioRow key={i} scenario={s} />
+            {SCENARIOS.map((s) => (
+              <ScenarioRow key={s.label} scenario={s} />
             ))}
           </ul>
         </div>
@@ -538,7 +538,7 @@ function EdgeSurfaceGauge() {
               const y2 = size / 2 + outer * Math.sin(angle);
               return (
                 <line
-                  key={i}
+                  key={`tick-${i}`}
                   x1={x1}
                   y1={y1}
                   x2={x2}

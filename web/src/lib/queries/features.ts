@@ -1,5 +1,5 @@
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useApi } from "@/lib/hooks/use-api";
+import { useQueryClient } from "@tanstack/react-query";
+import { createAuthQuery, createAuthMutation, getApi } from "@/lib/query-kit";
 
 export type FeatureFlags = {
   issue_acceptance: boolean;
@@ -7,31 +7,26 @@ export type FeatureFlags = {
   max_linked_prs: number;
 };
 
-export function useFeatureFlags() {
-  const api = useApi();
-  return useQuery({
-    queryKey: ["feature-flags", api.active?.id],
-    queryFn: () =>
-      api.get<FeatureFlags>(
-        `/api/v1/installations/${api.active?.id}/features`,
-      ),
-    enabled: !!api.active,
-    staleTime: 5 * 60 * 1000,
-  });
-}
+export const useFeatureFlags = createAuthQuery<FeatureFlags>({
+  queryKey: ["feature-flags"],
+  fetcher: (_vars, ctx) => {
+    const api = getApi(ctx);
+    return api.get<FeatureFlags>(`/api/v1/installations/${api.active?.id}/features`);
+  },
+  staleTime: 5 * 60 * 1000,
+});
 
-export function useSaveFeatureFlags() {
-  const api = useApi();
+const useSaveFeatureFlagsMutation = createAuthMutation<FeatureFlags, FeatureFlags>({
+  mutationFn: (flags, ctx) => {
+    const api = getApi(ctx);
+    return api.put<FeatureFlags>(`/api/v1/installations/${api.active?.id}/features`, flags);
+  },
+});
+
+export const useSaveFeatureFlags = () => {
   const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (flags: FeatureFlags) =>
-      api.put<FeatureFlags>(
-        `/api/v1/installations/${api.active?.id}/features`,
-        flags,
-      ),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["feature-flags"] }),
-    onError: (err: Error) => {
-      console.error("[save-feature-flags] failed:", err.message);
-    },
+  return useSaveFeatureFlagsMutation({
+    onSuccess: () => qc.invalidateQueries({ queryKey: useFeatureFlags.getKey() }),
+    onError: (err) => console.error("[save-feature-flags] failed:", err.message),
   });
-}
+};
