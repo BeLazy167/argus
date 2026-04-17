@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { LastUpdated } from "@/components/seo/last-updated";
 
 export const metadata: Metadata = {
   title: "Cross-repo PR compatibility — Argus docs",
@@ -9,6 +10,7 @@ export default function CrossPRChecksPage() {
   return (
     <article className="space-y-6">
       <h1 className="text-2xl font-mono text-slate-100">Cross-repo PR compatibility</h1>
+      <LastUpdated date="2026-04-17" />
 
       <p>
         Cross-repo dependencies are a known GitHub gap — there&apos;s no native way to say &quot;my

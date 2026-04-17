@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { LastUpdated } from "@/components/seo/last-updated";
 
 export const metadata: Metadata = {
   title: "FAQ — Argus docs",
@@ -9,6 +10,7 @@ export default function FAQPage() {
   return (
     <article className="space-y-8">
       <h1 className="text-2xl font-mono text-slate-100">FAQ</h1>
+      <LastUpdated date="2026-04-17" />
 
       <section>
         <h2 className="text-base font-mono text-slate-100 mb-2">

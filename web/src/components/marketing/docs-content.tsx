@@ -309,6 +309,12 @@ export function DocsContent() {
       <h1 className="font-display text-4xl font-bold text-foreground mb-3">
         Argus Documentation
       </h1>
+      <p className="mb-3 text-[11px] font-mono uppercase tracking-[0.18em] text-slate-text/70">
+        Last updated{" "}
+        <time dateTime="2026-04-17" className="text-foreground">
+          April 17, 2026
+        </time>
+      </p>
       <p className="text-sm font-mono text-slate-text mb-16 max-w-xl">
         Find the bugs your team missed. Setup, pipeline, memory, commands
         &mdash; everything you need to get started.
