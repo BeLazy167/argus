@@ -1,13 +1,12 @@
 import type { Metadata } from "next";
 import { JetBrains_Mono, Black_Ops_One } from "next/font/google";
 import { GeistSans } from "geist/font/sans";
-import { ClerkProvider } from "@clerk/nextjs";
-import { dark } from "@clerk/themes";
 import "./globals.css";
 import { cn } from "@/lib/utils";
 import { Analytics } from "@vercel/analytics/next";
 import { ThemeScript } from "@/components/dashboard/theme-script";
 import { PostHogProvider } from "@/providers/posthog-provider";
+import { ClerkThemedProvider } from "@/providers/clerk-themed-provider";
 
 const jetbrainsMono = JetBrains_Mono({subsets:['latin'],variable:'--font-jetbrains-mono'});
 const blackOpsOne = Black_Ops_One({weight:'400',subsets:['latin'],variable:'--font-black-ops-one'});
@@ -46,33 +45,19 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <ClerkProvider
-      appearance={{
-        baseTheme: dark,
-        variables: {
-          colorPrimary: "#F5A623",
-          colorBackground: "#1A1A1A",
-          colorText: "#F5F5F5",
-          colorInputBackground: "#2C2C2C",
-          colorInputText: "#F5F5F5",
-          fontFamily: '"JetBrains Mono", monospace',
-        },
-      }}
+    <html
+      lang="en"
+      style={{ colorScheme: "dark" }}
+      className={cn("dark", GeistSans.variable, "font-mono", jetbrainsMono.variable, blackOpsOne.variable)}
+      suppressHydrationWarning
     >
-      <html
-        lang="en"
-        style={{ colorScheme: "dark" }}
-        className={cn("dark", GeistSans.variable, "font-mono", jetbrainsMono.variable, blackOpsOne.variable)}
-        suppressHydrationWarning
-      >
-        <body className="min-h-screen bg-background font-mono antialiased">
-          <ThemeScript />
-          <PostHogProvider>
-            {children}
-          </PostHogProvider>
-          <Analytics />
-        </body>
-      </html>
-    </ClerkProvider>
+      <body className="min-h-screen bg-background font-mono antialiased">
+        <ThemeScript />
+        <ClerkThemedProvider>
+          <PostHogProvider>{children}</PostHogProvider>
+        </ClerkThemedProvider>
+        <Analytics />
+      </body>
+    </html>
   );
 }
