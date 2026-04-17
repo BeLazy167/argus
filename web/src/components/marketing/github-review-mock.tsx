@@ -161,7 +161,7 @@ export function GitHubReviewMock() {
 
           return (
             <div
-              key={i}
+              key={`${review.file}-${review.lineRange}`}
               className="transition-[opacity,transform] duration-400 ease-out"
               style={{
                 opacity: isVisible ? 1 : 0,

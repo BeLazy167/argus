@@ -1,6 +1,10 @@
-/**
- * Docs page: Cross-repo PR compatibility feature.
- */
+import type { Metadata } from "next";
+
+export const metadata: Metadata = {
+  title: "Cross-repo PR compatibility — Argus docs",
+  description: "Detect linked PRs across repositories and run compatibility checks. No manifest, no YAML.",
+};
+
 export default function CrossPRChecksPage() {
   return (
     <article className="space-y-6">

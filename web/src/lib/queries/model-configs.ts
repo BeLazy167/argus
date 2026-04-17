@@ -1,6 +1,6 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import type { ModelConfig } from "../types";
-import { useApi } from "@/lib/hooks/use-api";
+import { createAuthQuery, createAuthMutation, getApi } from "@/lib/query-kit";
 
 export type TestResult = {
   success: boolean;
@@ -10,133 +10,105 @@ export type TestResult = {
   tokens?: number;
 };
 
-export function useTestConfig() {
-  const api = useApi();
-  return useMutation({
-    mutationFn: ({ provider, model }: { provider: string; model: string }) =>
-      api.post<TestResult>(
-        `/api/v1/installations/${api.active?.id}/test-config`,
-        { provider, model },
-      ),
-    onError: (err: Error) => {
-      console.error("[test-config] failed:", err.message);
-    },
-  });
-}
+type TestConfigVars = { provider: string; model: string };
 
-export function useModelConfigs(repoId: number) {
-  const api = useApi();
-  return useQuery({
-    queryKey: ["model-configs", repoId, api.active?.id],
-    queryFn: () =>
-      api.get<ModelConfig[]>(`/api/v1/repos/${repoId}/config`),
-    enabled: repoId > 0 && !!api.active,
-    staleTime: 5 * 60 * 1000,
-  });
-}
+export const useTestConfig = createAuthMutation<TestResult, TestConfigVars>({
+  mutationFn: (body, ctx) => {
+    const api = getApi(ctx);
+    return api.post<TestResult>(`/api/v1/installations/${api.active?.id}/test-config`, body);
+  },
+  onError: (err) => console.error("[test-config] failed:", err.message),
+});
 
-export function useUpsertModelConfig() {
-  const api = useApi();
+export const useModelConfigs = createAuthQuery<ModelConfig[], { repoId: number }>({
+  queryKey: ["model-configs"],
+  fetcher: ({ repoId }, ctx) => getApi(ctx).get<ModelConfig[]>(`/api/v1/repos/${repoId}/config`),
+  staleTime: 5 * 60 * 1000,
+});
+
+type UpsertModelConfigVars = {
+  repoId: number;
+  stage: string;
+  provider: string;
+  model: string;
+  base_url?: string;
+  max_tokens: number;
+  temperature: number;
+};
+
+const useUpsertModelConfigMutation = createAuthMutation<ModelConfig, UpsertModelConfigVars>({
+  mutationFn: ({ repoId, stage, ...body }, ctx) =>
+    getApi(ctx).put<ModelConfig>(`/api/v1/repos/${repoId}/config/${stage}`, body),
+});
+
+export const useUpsertModelConfig = () => {
   const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({
-      repoId,
-      stage,
-      ...body
-    }: {
-      repoId: number;
-      stage: string;
-      provider: string;
-      model: string;
-      base_url?: string;
-      max_tokens: number;
-      temperature: number;
-    }) =>
-      api.put<ModelConfig>(
-        `/api/v1/repos/${repoId}/config/${stage}`,
-        body,
-      ),
-    onSuccess: (_data, vars) => {
-      qc.invalidateQueries({ queryKey: ["model-configs", vars.repoId] });
-    },
-    onError: (err: Error) => {
-      console.error("[upsert-model-config] failed:", err.message);
-    },
+  return useUpsertModelConfigMutation({
+    onSuccess: (_data, vars) =>
+      qc.invalidateQueries({ queryKey: useModelConfigs.getKey({ repoId: vars.repoId }) }),
+    onError: (err) => console.error("[upsert-model-config] failed:", err.message),
   });
-}
+};
 
-export function useDeleteModelConfig() {
-  const api = useApi();
+type DeleteModelConfigVars = { repoId: number; stage: string };
+
+const useDeleteModelConfigMutation = createAuthMutation<unknown, DeleteModelConfigVars>({
+  mutationFn: ({ repoId, stage }, ctx) => getApi(ctx).delete(`/api/v1/repos/${repoId}/config/${stage}`),
+});
+
+export const useDeleteModelConfig = () => {
   const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({
-      repoId,
-      stage,
-    }: { repoId: number; stage: string }) =>
-      api.delete(`/api/v1/repos/${repoId}/config/${stage}`),
-    onSuccess: (_data, vars) => {
-      qc.invalidateQueries({ queryKey: ["model-configs", vars.repoId] });
-    },
-    onError: (err: Error) => {
-      console.error("[delete-model-config] failed:", err.message);
-    },
+  return useDeleteModelConfigMutation({
+    onSuccess: (_data, vars) =>
+      qc.invalidateQueries({ queryKey: useModelConfigs.getKey({ repoId: vars.repoId }) }),
+    onError: (err) => console.error("[delete-model-config] failed:", err.message),
   });
-}
+};
 
-export function useOrgModelConfigs() {
-  const api = useApi();
-  return useQuery({
-    queryKey: ["org-model-configs", api.active?.id],
-    queryFn: () =>
-      api.get<ModelConfig[]>(
-        `/api/v1/installations/${api.active?.id}/config`,
-      ),
-    enabled: !!api.active,
-    staleTime: 5 * 60 * 1000,
-  });
-}
+export const useOrgModelConfigs = createAuthQuery<ModelConfig[]>({
+  queryKey: ["org-model-configs"],
+  fetcher: (_vars, ctx) => {
+    const api = getApi(ctx);
+    return api.get<ModelConfig[]>(`/api/v1/installations/${api.active?.id}/config`);
+  },
+  staleTime: 5 * 60 * 1000,
+});
 
-export function useUpsertOrgModelConfig() {
-  const api = useApi();
+type UpsertOrgModelConfigVars = {
+  stage: string;
+  provider: string;
+  model: string;
+  base_url?: string;
+  max_tokens: number;
+  temperature: number;
+};
+
+const useUpsertOrgModelConfigMutation = createAuthMutation<ModelConfig, UpsertOrgModelConfigVars>({
+  mutationFn: ({ stage, ...body }, ctx) => {
+    const api = getApi(ctx);
+    return api.put<ModelConfig>(`/api/v1/installations/${api.active?.id}/config/${stage}`, body);
+  },
+});
+
+export const useUpsertOrgModelConfig = () => {
   const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({
-      stage,
-      ...body
-    }: {
-      stage: string;
-      provider: string;
-      model: string;
-      base_url?: string;
-      max_tokens: number;
-      temperature: number;
-    }) =>
-      api.put<ModelConfig>(
-        `/api/v1/installations/${api.active?.id}/config/${stage}`,
-        body,
-      ),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["org-model-configs"] });
-    },
-    onError: (err: Error) => {
-      console.error("[upsert-org-model-config] failed:", err.message);
-    },
+  return useUpsertOrgModelConfigMutation({
+    onSuccess: () => qc.invalidateQueries({ queryKey: useOrgModelConfigs.getKey() }),
+    onError: (err) => console.error("[upsert-org-model-config] failed:", err.message),
   });
-}
+};
 
-export function useDeleteOrgModelConfig() {
-  const api = useApi();
+const useDeleteOrgModelConfigMutation = createAuthMutation<unknown, { stage: string }>({
+  mutationFn: ({ stage }, ctx) => {
+    const api = getApi(ctx);
+    return api.delete(`/api/v1/installations/${api.active?.id}/config/${stage}`);
+  },
+});
+
+export const useDeleteOrgModelConfig = () => {
   const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ stage }: { stage: string }) =>
-      api.delete(
-        `/api/v1/installations/${api.active?.id}/config/${stage}`,
-      ),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["org-model-configs"] });
-    },
-    onError: (err: Error) => {
-      console.error("[delete-org-model-config] failed:", err.message);
-    },
+  return useDeleteOrgModelConfigMutation({
+    onSuccess: () => qc.invalidateQueries({ queryKey: useOrgModelConfigs.getKey() }),
+    onError: (err) => console.error("[delete-org-model-config] failed:", err.message),
   });
-}
+};

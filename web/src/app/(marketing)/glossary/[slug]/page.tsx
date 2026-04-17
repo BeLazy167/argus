@@ -37,9 +37,10 @@ export default async function GlossaryTermPage({
   const t = getGlossaryTerm(slug);
   if (!t) return <div className="py-20 text-center">Not found</div>;
 
-  const related = t.relatedTerms
-    .map((r) => glossaryTerms.find((g) => g.slug === r))
-    .filter(Boolean);
+  const related = t.relatedTerms.flatMap((r) => {
+    const match = glossaryTerms.find((g) => g.slug === r);
+    return match ? [match] : [];
+  });
 
   return (
     <section className="mx-auto max-w-3xl px-6 py-28">

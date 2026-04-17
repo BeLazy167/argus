@@ -1,86 +1,74 @@
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import type { Review, ReviewComment } from "../types";
-import { useApi } from "@/lib/hooks/use-api";
+import { createAuthQuery, createAuthMutation, getApi } from "@/lib/query-kit";
 
-export function useReviews(repoId: number, limit = 20, offset = 0) {
-  const api = useApi();
-  return useQuery({
-    queryKey: ["reviews", repoId, limit, offset, api.active?.id],
-    queryFn: () => {
-      const path = repoId > 0
-        ? `/api/v1/repos/${repoId}/reviews?limit=${limit}&offset=${offset}`
-        : `/api/v1/reviews?limit=${limit}&offset=${offset}`;
-      return api.get<Review[]>(path);
-    },
-    enabled: !!api.active,
-    refetchOnWindowFocus: true,
-  });
-}
+type ReviewsVars = { repoId: number; limit?: number; offset?: number };
 
-export function useReview(id: string) {
-  const api = useApi();
-  return useQuery({
-    queryKey: ["review", id, api.active?.id],
-    queryFn: () =>
-      api.get<{ review: Review; comments: ReviewComment[] }>(
-        `/api/v1/reviews/${id}`,
-      ),
-    enabled: !!id && !!api.active,
-    refetchOnWindowFocus: true,
-  });
-}
+export const useReviews = createAuthQuery<Review[], ReviewsVars>({
+  queryKey: ["reviews"],
+  fetcher: ({ repoId, limit = 20, offset = 0 }, ctx) => {
+    const path = repoId > 0
+      ? `/api/v1/repos/${repoId}/reviews?limit=${limit}&offset=${offset}`
+      : `/api/v1/reviews?limit=${limit}&offset=${offset}`;
+    return getApi(ctx).get<Review[]>(path);
+  },
+  refetchOnWindowFocus: true,
+});
 
-export function useTriggerReview() {
-  const api = useApi();
+type ReviewVars = { id: string };
+
+export const useReview = createAuthQuery<{ review: Review; comments: ReviewComment[] }, ReviewVars>({
+  queryKey: ["review"],
+  fetcher: ({ id }, ctx) =>
+    getApi(ctx).get<{ review: Review; comments: ReviewComment[] }>(`/api/v1/reviews/${id}`),
+  refetchOnWindowFocus: true,
+});
+
+type TriggerReviewVars = { repoId: number; prNumber: number };
+
+const useTriggerReviewMutation = createAuthMutation<unknown, TriggerReviewVars>({
+  mutationFn: ({ repoId, prNumber }, ctx) =>
+    getApi(ctx).post(`/api/v1/repos/${repoId}/reviews`, { pr_number: prNumber }),
+});
+
+export const useTriggerReview = () => {
   const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({
-      repoId,
-      prNumber,
-    }: { repoId: number; prNumber: number }) =>
-      api.post(
-        `/api/v1/repos/${repoId}/reviews`,
-        { pr_number: prNumber },
-      ),
+  return useTriggerReviewMutation({
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["reviews"] });
+      qc.invalidateQueries({ queryKey: useReviews.getKey() });
       qc.invalidateQueries({ queryKey: ["stats"] });
     },
-    onError: (err: Error) => {
-      console.error("[trigger-review] failed:", err.message);
-    },
+    onError: (err) => console.error("[trigger-review] failed:", err.message),
   });
-}
+};
 
-export function useRetryReview() {
-  const api = useApi();
+const useRetryReviewMutation = createAuthMutation<unknown, string>({
+  mutationFn: (reviewId, ctx) => getApi(ctx).post(`/api/v1/reviews/${reviewId}/retry`, {}),
+});
+
+export const useRetryReview = () => {
   const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (reviewId: string) =>
-      api.post(`/api/v1/reviews/${reviewId}/retry`, {}),
+  return useRetryReviewMutation({
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["reviews"] });
+      qc.invalidateQueries({ queryKey: useReviews.getKey() });
       qc.invalidateQueries({ queryKey: ["stats"] });
     },
-    onError: (err: Error) => {
-      console.error("[retry-review] failed:", err.message);
-    },
+    onError: (err) => console.error("[retry-review] failed:", err.message),
   });
-}
+};
 
-export function useCancelReview() {
-  const api = useApi();
+const useCancelReviewMutation = createAuthMutation<unknown, string>({
+  mutationFn: (reviewId, ctx) => getApi(ctx).post(`/api/v1/reviews/${reviewId}/cancel`, {}),
+});
+
+export const useCancelReview = () => {
   const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (reviewId: string) =>
-      api.post(`/api/v1/reviews/${reviewId}/cancel`, {}),
+  return useCancelReviewMutation({
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["reviews"] });
-      qc.invalidateQueries({ queryKey: ["review"] });
+      qc.invalidateQueries({ queryKey: useReviews.getKey() });
+      qc.invalidateQueries({ queryKey: useReview.getKey() });
       qc.invalidateQueries({ queryKey: ["stats"] });
     },
-    onError: (err: Error) => {
-      console.error("[cancel-review] failed:", err.message);
-    },
+    onError: (err) => console.error("[cancel-review] failed:", err.message),
   });
-}
+};

@@ -1,69 +1,44 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import type { PromptTemplate } from "../types";
-import { useApi } from "@/lib/hooks/use-api";
+import { createAuthQuery, createAuthMutation, getApi } from "@/lib/query-kit";
 
-export function usePrompts(repoId: number) {
-  const api = useApi();
-  return useQuery({
-    queryKey: ["prompts", repoId, api.active?.id],
-    queryFn: () =>
-      api.get<PromptTemplate[]>(`/api/v1/repos/${repoId}/prompts`),
-    enabled: repoId > 0 && !!api.active,
-    staleTime: 2 * 60 * 1000,
-  });
-}
+export const usePrompts = createAuthQuery<PromptTemplate[], { repoId: number }>({
+  queryKey: ["prompts"],
+  fetcher: ({ repoId }, ctx) => getApi(ctx).get<PromptTemplate[]>(`/api/v1/repos/${repoId}/prompts`),
+  staleTime: 2 * 60 * 1000,
+});
 
-export function useDefaultPrompts() {
-  const api = useApi();
-  return useQuery({
-    queryKey: ["prompts-defaults", api.active?.id],
-    queryFn: () =>
-      api.get<PromptTemplate[]>("/api/v1/prompts/defaults"),
-    enabled: !!api.active,
-    staleTime: 2 * 60 * 1000,
-  });
-}
+export const useDefaultPrompts = createAuthQuery<PromptTemplate[]>({
+  queryKey: ["prompts-defaults"],
+  fetcher: (_vars, ctx) => getApi(ctx).get<PromptTemplate[]>("/api/v1/prompts/defaults"),
+  staleTime: 2 * 60 * 1000,
+});
 
-export function useUpsertPrompt() {
-  const api = useApi();
+type UpsertPromptVars = { repoId: number; stage: string; prompt_text: string };
+
+const useUpsertPromptMutation = createAuthMutation<PromptTemplate, UpsertPromptVars>({
+  mutationFn: ({ repoId, stage, prompt_text }, ctx) =>
+    getApi(ctx).put<PromptTemplate>(`/api/v1/repos/${repoId}/prompts/${stage}`, { prompt_text }),
+});
+
+export const useUpsertPrompt = () => {
   const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({
-      repoId,
-      stage,
-      prompt_text,
-    }: {
-      repoId: number;
-      stage: string;
-      prompt_text: string;
-    }) =>
-      api.put<PromptTemplate>(
-        `/api/v1/repos/${repoId}/prompts/${stage}`,
-        { prompt_text },
-      ),
-    onSuccess: (_data, vars) => {
-      qc.invalidateQueries({ queryKey: ["prompts", vars.repoId] });
-    },
-    onError: (err: Error) => {
-      console.error("[upsert-prompt] failed:", err.message);
-    },
+  return useUpsertPromptMutation({
+    onSuccess: (_data, vars) => qc.invalidateQueries({ queryKey: usePrompts.getKey({ repoId: vars.repoId }) }),
+    onError: (err) => console.error("[upsert-prompt] failed:", err.message),
   });
-}
+};
 
-export function useDeletePrompt() {
-  const api = useApi();
+type DeletePromptVars = { repoId: number; stage: string };
+
+const useDeletePromptMutation = createAuthMutation<unknown, DeletePromptVars>({
+  mutationFn: ({ repoId, stage }, ctx) => getApi(ctx).delete(`/api/v1/repos/${repoId}/prompts/${stage}`),
+});
+
+export const useDeletePrompt = () => {
   const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({
-      repoId,
-      stage,
-    }: { repoId: number; stage: string }) =>
-      api.delete(`/api/v1/repos/${repoId}/prompts/${stage}`),
-    onSuccess: (_data, vars) => {
-      qc.invalidateQueries({ queryKey: ["prompts", vars.repoId] });
-    },
-    onError: (err: Error) => {
-      console.error("[delete-prompt] failed:", err.message);
-    },
+  return useDeletePromptMutation({
+    onSuccess: (_data, vars) => qc.invalidateQueries({ queryKey: usePrompts.getKey({ repoId: vars.repoId }) }),
+    onError: (err) => console.error("[delete-prompt] failed:", err.message),
   });
-}
+};

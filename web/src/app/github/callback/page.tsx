@@ -2,7 +2,7 @@
 import { Suspense, useEffect, useRef, useState } from "react";
 import { Loader2, AlertCircle, CheckCircle2 } from "lucide-react";
 import { useSearchParams, useRouter } from "next/navigation";
-import { useAuth, useOrganization } from "@clerk/nextjs";
+import { useAuth, useOrganization, RedirectToSignIn } from "@clerk/nextjs";
 import { QueryProvider } from "@/providers/query-provider";
 import { useLinkInstallation } from "@/lib/queries/installations";
 
@@ -52,18 +52,16 @@ function CallbackInner() {
   };
 
   useEffect(() => {
-    if (!isLoaded || hasLinked.current) return;
-
-    if (!isSignedIn) {
-      const installationId = params.get("installation_id");
-      router.push(`/sign-in?redirect_url=/github/callback?installation_id=${installationId}`);
-      return;
-    }
-
+    if (!isLoaded || hasLinked.current || !isSignedIn) return;
     hasLinked.current = true;
     doLink();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isLoaded, isSignedIn]);
+
+  if (isLoaded && !isSignedIn) {
+    const installationId = params.get("installation_id");
+    return <RedirectToSignIn redirectUrl={`/github/callback?installation_id=${installationId}`} />;
+  }
 
   return (
     <div className="flex h-screen items-center justify-center bg-background">

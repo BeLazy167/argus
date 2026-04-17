@@ -1,6 +1,5 @@
-import { useQuery } from "@tanstack/react-query";
-import { useApi } from "@/lib/hooks/use-api";
 import { useActiveRepo } from "@/lib/hooks/use-active-repo";
+import { createAuthQuery, getApi } from "@/lib/query-kit";
 
 export type Language =
   | "go"
@@ -62,16 +61,16 @@ export type ArchResponse = {
   summary: ArchSummary;
 };
 
-export function useArchitectureData() {
-  const api = useApi();
+const useArchitectureQuery = createAuthQuery<ArchResponse, { repoId: number }>({
+  queryKey: ["architecture"],
+  fetcher: ({ repoId }, ctx) => getApi(ctx).get<ArchResponse>(`/api/v1/repos/${repoId}/architecture`),
+  staleTime: 5 * 60 * 1000,
+});
+
+export const useArchitectureData = () => {
   const { activeId } = useActiveRepo();
-  return useQuery({
-    queryKey: ["architecture", api.active?.id, activeId],
-    queryFn: () =>
-      api.get<ArchResponse>(
-        `/api/v1/repos/${activeId}/architecture`
-      ),
-    enabled: !!activeId && !!api.active,
-    staleTime: 5 * 60 * 1000,
+  return useArchitectureQuery({
+    variables: { repoId: activeId ?? 0 },
+    enabled: !!activeId,
   });
-}
+};

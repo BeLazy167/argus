@@ -92,6 +92,9 @@ importers:
       react-markdown:
         specifier: ^10.1.0
         version: 10.1.0(@types/react@19.2.14)(react@19.2.4)
+      react-query-kit:
+        specifier: ^3.3.2
+        version: 3.3.2(@tanstack/react-query@5.90.21(react@19.2.4))
       react-syntax-highlighter:
         specifier: ^16.1.1
         version: 16.1.1(react@19.2.4)
@@ -3629,6 +3632,14 @@ packages:
     peerDependencies:
       '@types/react': '>=18'
       react: '>=18'
+
+  react-query-kit@3.3.2:
+    resolution: {integrity: sha512-2dKF2kKNshfyOcEs7JG3VXCoh8SHmg8VtDb7LMgAKDrV3fFdcOh3efuEOkmD8IZ6PD+DjX9As2pL3uXKsMv2VQ==}
+    peerDependencies:
+      '@tanstack/react-query': ^4 || ^5
+    peerDependenciesMeta:
+      '@tanstack/react-query':
+        optional: true
 
   react-redux@9.2.0:
     resolution: {integrity: sha512-ROY9fvHhwOD9ySfrF0wmvu//bKCQ6AeZZq1nJNtbDC+kk5DuSuNX/n6YWYF/SYy7bSba4D4FSz8DJeKY/S/r+g==}
@@ -8075,6 +8086,10 @@ snapshots:
       vfile: 6.0.3
     transitivePeerDependencies:
       - supports-color
+
+  react-query-kit@3.3.2(@tanstack/react-query@5.90.21(react@19.2.4)):
+    optionalDependencies:
+      '@tanstack/react-query': 5.90.21(react@19.2.4)
 
   react-redux@9.2.0(@types/react@19.2.14)(react@19.2.4)(redux@5.0.1):
     dependencies:

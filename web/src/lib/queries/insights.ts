@@ -1,27 +1,34 @@
-import { useQuery } from "@tanstack/react-query";
 import type { FileRisk, DecisionTrace } from "../types";
-import { useApi } from "@/lib/hooks/use-api";
 import { useActiveRepo } from "@/lib/hooks/use-active-repo";
+import { createAuthQuery, getApi } from "@/lib/query-kit";
 
-export function useRepoRisk() {
-  const api = useApi();
-  const { activeId } = useActiveRepo();
-  return useQuery({
-    queryKey: ["repo-risk", api.active?.id, activeId],
-    queryFn: () => api.get<FileRisk[]>(`/api/v1/repos/${activeId}/risk`),
-    enabled: !!activeId,
-    staleTime: 2 * 60 * 1000,
-  });
-}
+const useRepoRiskQuery = createAuthQuery<FileRisk[], { repoId: number }>({
+  queryKey: ["repo-risk"],
+  fetcher: ({ repoId }, ctx) => getApi(ctx).get<FileRisk[]>(`/api/v1/repos/${repoId}/risk`),
+  staleTime: 2 * 60 * 1000,
+});
 
-export function useTraces(file?: string) {
-  const api = useApi();
+export const useRepoRisk = () => {
   const { activeId } = useActiveRepo();
-  const params = file ? `?file=${encodeURIComponent(file)}` : "";
-  return useQuery({
-    queryKey: ["traces", api.active?.id, activeId, file],
-    queryFn: () => api.get<DecisionTrace[]>(`/api/v1/repos/${activeId}/traces${params}`),
+  return useRepoRiskQuery({
+    variables: { repoId: activeId ?? 0 },
     enabled: !!activeId,
-    staleTime: 2 * 60 * 1000,
   });
-}
+};
+
+const useTracesQuery = createAuthQuery<DecisionTrace[], { repoId: number; file?: string }>({
+  queryKey: ["traces"],
+  fetcher: ({ repoId, file }, ctx) => {
+    const params = file ? `?file=${encodeURIComponent(file)}` : "";
+    return getApi(ctx).get<DecisionTrace[]>(`/api/v1/repos/${repoId}/traces${params}`);
+  },
+  staleTime: 2 * 60 * 1000,
+});
+
+export const useTraces = (file?: string) => {
+  const { activeId } = useActiveRepo();
+  return useTracesQuery({
+    variables: { repoId: activeId ?? 0, file },
+    enabled: !!activeId,
+  });
+};

@@ -258,9 +258,9 @@ export default function FileMemorySidebar({ filePath, onClose, archFile, allFile
                     <p className="text-[9px] font-mono text-[var(--graph-text-muted)] uppercase tracking-wider">
                       Coupled files (co-change)
                     </p>
-                    {archFile.coupling.map((c, i) => (
+                    {archFile.coupling.map((c) => (
                       <div
-                        key={i}
+                        key={c.path}
                         className="flex items-center justify-between text-[10px] font-mono rounded border border-[var(--graph-border)] bg-[var(--graph-bg)]/30 px-2 py-1.5"
                       >
                         <span className="text-[var(--graph-text-dim)] truncate" title={c.path}>
@@ -282,9 +282,9 @@ export default function FileMemorySidebar({ filePath, onClose, archFile, allFile
                       Symbols ({archFile.symbols.length})
                     </p>
                     <div className="flex flex-wrap gap-1">
-                      {archFile.symbols.slice(0, 10).map((s, i) => (
+                      {archFile.symbols.slice(0, 10).map((s) => (
                         <span
-                          key={i}
+                          key={s}
                           className="text-[9px] font-mono text-[var(--graph-text-muted)] bg-[var(--graph-control-bg)] rounded px-1.5 py-0.5"
                         >
                           {s}
@@ -344,7 +344,7 @@ export default function FileMemorySidebar({ filePath, onClose, archFile, allFile
                 <div className="space-y-2">
                   {data.patterns.map((p, i) => (
                     <div
-                      key={i}
+                      key={`${p.source}-${p.content.slice(0, 32)}-${i}`}
                       className="rounded border border-[var(--graph-border)] bg-[var(--graph-bg)]/30 px-3 py-2"
                     >
                       <p className="text-[10px] font-mono text-[var(--graph-text)] leading-relaxed">
@@ -382,7 +382,7 @@ export default function FileMemorySidebar({ filePath, onClose, archFile, allFile
                 <div className="space-y-2">
                   {data.recent_comments.slice(0, 5).map((c, i) => (
                     <div
-                      key={i}
+                      key={`${c.severity}-${c.body.slice(0, 32)}-${i}`}
                       className="rounded border border-[var(--graph-border)] bg-[var(--graph-bg)]/30 px-3 py-2"
                     >
                       <div className="flex items-center gap-2 mb-1">
@@ -421,7 +421,7 @@ export default function FileMemorySidebar({ filePath, onClose, archFile, allFile
                 <div className="space-y-2">
                   {data.traces.map((t, i) => (
                     <div
-                      key={i}
+                      key={`${t.created_at}-${i}`}
                       className="rounded border border-[var(--graph-border)] bg-[var(--graph-bg)]/30 px-3 py-2"
                     >
                       <div className="flex items-center gap-2 mb-1">

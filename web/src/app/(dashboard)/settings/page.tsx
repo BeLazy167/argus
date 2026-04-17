@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Settings, Loader2, Save, Key, Cpu, ChevronDown, Zap, Check, X, ArrowUp, Info, UserCog, Lock, FileText, RotateCw, Search, Sliders } from "lucide-react";
 import {
@@ -194,7 +195,10 @@ function ConfigCard({
   const [testResult, setTestResult] = useState<TestResult | null>(null);
 
   const isOpenRouter = provider === "openrouter";
-  const { data: orModels } = useOpenRouterModels(isOpenRouter ? installationId : undefined);
+  const { data: orModels } = useOpenRouterModels({
+    variables: { installationId: isOpenRouter ? installationId : undefined },
+    enabled: isOpenRouter && !!installationId,
+  });
 
   const effectiveProvider = provider as Provider;
   const picks = MODEL_PICKS[effectiveProvider] ?? [];
@@ -851,9 +855,15 @@ export default function SettingsPage() {
     router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
   }, [searchParams, setSelectedId, router, pathname]);
 
-  const { data: configs, isLoading: configsLoading } = useModelConfigs(activeId);
+  const { data: configs, isLoading: configsLoading } = useModelConfigs({
+    variables: { repoId: activeId },
+    enabled: activeId > 0,
+  });
   const { data: providerKeys, isLoading: keysLoading } = useProviderKeys();
-  const { data: customPrompts } = usePrompts(activeId);
+  const { data: customPrompts } = usePrompts({
+    variables: { repoId: activeId },
+    enabled: activeId > 0,
+  });
   const { data: defaultPrompts } = useDefaultPrompts();
   const updateRepo = useUpdateRepo();
 
@@ -1027,7 +1037,7 @@ export default function SettingsPage() {
                   <div className="border border-iron/50 bg-iron/10 px-4 py-3 flex items-start gap-2.5">
                     <Info className="h-3.5 w-3.5 text-slate-text mt-0.5 shrink-0" />
                     <p className="text-[11px] font-mono text-slate-text">
-                      No API keys configured yet. <a href="/providers" className="text-amber underline underline-offset-2 hover:text-foreground transition-colors">Add an API key</a> to unlock provider selection.
+                      No API keys configured yet. <Link href="/providers" className="text-amber underline underline-offset-2 hover:text-foreground transition-colors">Add an API key</Link> to unlock provider selection.
                     </p>
                   </div>
                 ) : (
@@ -1245,7 +1255,7 @@ export default function SettingsPage() {
               </span>
             </div>
             <p className="text-[11px] font-mono text-slate-text">
-              Manage API keys in <a href="/providers" className="text-amber underline underline-offset-2 hover:text-foreground transition-colors">Providers</a>.
+              Manage API keys in <Link href="/providers" className="text-amber underline underline-offset-2 hover:text-foreground transition-colors">Providers</Link>.
             </p>
           </section>
 
@@ -1602,7 +1612,7 @@ export default function SettingsPage() {
                   <div className="flex flex-wrap gap-1.5 items-center">
                     {skipBranches.map((branch, i) => (
                       <span
-                        key={i}
+                        key={branch}
                         className="inline-flex items-center gap-1 bg-charcoal border border-iron px-2 py-0.5 text-[11px] font-mono text-slate-text"
                       >
                         {branch}

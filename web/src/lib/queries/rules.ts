@@ -1,62 +1,55 @@
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import type { Rule } from "../types";
-import { useApi } from "@/lib/hooks/use-api";
+import { createAuthQuery, createAuthMutation, getApi } from "@/lib/query-kit";
 
-export function useRules() {
-  const api = useApi();
-  return useQuery({
-    queryKey: ["rules", api.active?.id],
-    queryFn: () => api.get<Rule[]>("/api/v1/rules"),
-    enabled: !!api.active,
-    staleTime: 2 * 60 * 1000,
-  });
-}
+export const useRules = createAuthQuery<Rule[]>({
+  queryKey: ["rules"],
+  fetcher: (_vars, ctx) => getApi(ctx).get<Rule[]>("/api/v1/rules"),
+  staleTime: 2 * 60 * 1000,
+});
 
-export function useCreateRule() {
-  const api = useApi();
+type CreateRuleVars = Pick<Rule, "category" | "content" | "priority"> & { enabled?: boolean };
+
+const useCreateRuleMutation = createAuthMutation<Rule, CreateRuleVars>({
+  mutationFn: (body, ctx) => getApi(ctx).post<Rule>("/api/v1/rules", body),
+});
+
+export const useCreateRule = () => {
   const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (
-      body: Pick<Rule, "category" | "content" | "priority"> & {
-        enabled?: boolean;
-      },
-    ) => api.post<Rule>("/api/v1/rules", body),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["rules"] }),
-    onError: (err: Error) => {
-      console.error("[create-rule] failed:", err.message);
-    },
+  return useCreateRuleMutation({
+    onSuccess: () => qc.invalidateQueries({ queryKey: useRules.getKey() }),
+    onError: (err) => console.error("[create-rule] failed:", err.message),
   });
-}
+};
 
-export function useUpdateRule() {
-  const api = useApi();
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({
-      id,
-      ...body
-    }: {
-      id: number;
-      category?: string;
-      content?: string;
-      priority?: number;
-      enabled?: boolean;
-    }) => api.put<Rule>(`/api/v1/rules/${id}`, body),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["rules"] }),
-    onError: (err: Error) => {
-      console.error("[update-rule] failed:", err.message);
-    },
-  });
-}
+type UpdateRuleVars = {
+  id: number;
+  category?: string;
+  content?: string;
+  priority?: number;
+  enabled?: boolean;
+};
 
-export function useDeleteRule() {
-  const api = useApi();
+const useUpdateRuleMutation = createAuthMutation<Rule, UpdateRuleVars>({
+  mutationFn: ({ id, ...body }, ctx) => getApi(ctx).put<Rule>(`/api/v1/rules/${id}`, body),
+});
+
+export const useUpdateRule = () => {
   const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (id: number) => api.delete(`/api/v1/rules/${id}`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["rules"] }),
-    onError: (err: Error) => {
-      console.error("[delete-rule] failed:", err.message);
-    },
+  return useUpdateRuleMutation({
+    onSuccess: () => qc.invalidateQueries({ queryKey: useRules.getKey() }),
+    onError: (err) => console.error("[update-rule] failed:", err.message),
   });
-}
+};
+
+const useDeleteRuleMutation = createAuthMutation<unknown, number>({
+  mutationFn: (id, ctx) => getApi(ctx).delete(`/api/v1/rules/${id}`),
+});
+
+export const useDeleteRule = () => {
+  const qc = useQueryClient();
+  return useDeleteRuleMutation({
+    onSuccess: () => qc.invalidateQueries({ queryKey: useRules.getKey() }),
+    onError: (err) => console.error("[delete-rule] failed:", err.message),
+  });
+};

@@ -103,8 +103,10 @@ export default function ScenariosPage() {
     if (!description.trim()) return;
     const files = filesInput
       .split(",")
-      .map((f) => f.trim())
-      .filter(Boolean);
+      .flatMap((f) => {
+        const trimmed = f.trim();
+        return trimmed ? [trimmed] : [];
+      });
     createScenario.mutate(
       { description: description.trim(), severity, files },
       {
@@ -406,7 +408,7 @@ export default function ScenariosPage() {
                       {scenario.steps?.length > 0 && (
                         <ol className="mt-2.5 ml-4 list-decimal space-y-0.5">
                           {scenario.steps.map((step, i) => (
-                            <li key={i} className="text-[11px] font-mono text-slate-text">
+                            <li key={`${step.action}-${i}`} className="text-[11px] font-mono text-slate-text">
                               <span className="text-foreground">{step.action}</span>
                               {step.hint && (
                                 <span className="text-iron ml-1">({step.hint})</span>

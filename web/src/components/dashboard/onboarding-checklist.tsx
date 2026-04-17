@@ -1,9 +1,10 @@
 "use client";
-import { useState, useEffect } from "react";
+import { useSyncExternalStore, useState } from "react";
 import { CheckCircle2, Circle, X, ExternalLink } from "lucide-react";
 import Link from "next/link";
 import { useInstallation } from "@/providers/installation-provider";
-import { useApi } from "@/lib/hooks/use-api";
+import { useRepos } from "@/lib/queries/repos";
+import { useReviews } from "@/lib/queries/reviews";
 
 interface ChecklistStep {
   label: string;
@@ -11,38 +12,31 @@ interface ChecklistStep {
   cta?: { label: string; href: string; external?: boolean };
 }
 
+const DISMISS_KEY = "onboarding_dismissed";
+
+function subscribeStorage(cb: () => void) {
+  window.addEventListener("storage", cb);
+  return () => window.removeEventListener("storage", cb);
+}
+const readDismissed = () => localStorage.getItem(DISMISS_KEY) === "true";
+const readDismissedSSR = () => true;
+
 export function OnboardingChecklist() {
-  const { installations, active, isLoading } = useInstallation();
-  const [dismissed, setDismissed] = useState(true); // default hidden until loaded
-  const [repos, setRepos] = useState<{ enabled: boolean }[]>([]);
-  const [hasReviews, setHasReviews] = useState(false);
-  const api = useApi();
+  const { active, isLoading } = useInstallation();
+  // useSyncExternalStore replaces a mount-time useEffect + state — SSR-safe, storage-synced.
+  const [dismissed, setDismissed] = useState(() => {
+    try { return readDismissed(); } catch { return true; }
+  });
+  const storageDismissed = useSyncExternalStore(subscribeStorage, readDismissed, readDismissedSSR);
+  const isDismissed = dismissed || storageDismissed;
 
-  useEffect(() => {
-    const stored = localStorage.getItem("onboarding_dismissed");
-    setDismissed(stored === "true");
-  }, []);
+  const reposQuery = useRepos();
+  const repos = reposQuery.data ?? [];
+  const enabledRepo = repos.find((r) => r.enabled);
+  const reviewsQuery = useReviews({ variables: { repoId: enabledRepo?.id ?? 0, limit: 1, offset: 0 } });
+  const hasReviews = (reviewsQuery.data ?? []).length > 0;
 
-  useEffect(() => {
-    if (!active) return;
-    api.get<any[]>("/api/v1/repos").then((data) => {
-      if (Array.isArray(data)) {
-        setRepos(data);
-        const enabledRepo = data.find((r: any) => r.enabled);
-        if (enabledRepo) {
-          api
-            .get<any[]>(`/api/v1/repos/${enabledRepo.id}/reviews?limit=1&offset=0`)
-            .then((reviews) => {
-              setHasReviews(Array.isArray(reviews) && reviews.length > 0);
-            })
-            .catch(() => {});
-        }
-      }
-    }).catch(() => {});
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active?.id]);
-
-  if (isLoading || dismissed) return null;
+  if (isLoading || isDismissed) return null;
 
   const hasInstallation = active !== null;
   const enabledCount = repos.filter((r) => r.enabled).length;
@@ -53,9 +47,7 @@ export function OnboardingChecklist() {
     {
       label: "Install GitHub App",
       done: hasInstallation,
-      cta: hasInstallation
-        ? undefined
-        : { label: "Add repos", href: "/repos" },
+      cta: hasInstallation ? undefined : { label: "Add repos", href: "/repos" },
     },
     {
       label: hasEnabledRepo ? `${enabledCount} repo${enabledCount > 1 ? "s" : ""} enabled` : "Enable a repo",
@@ -71,11 +63,10 @@ export function OnboardingChecklist() {
 
   const completedCount = steps.filter((s) => s.done).length;
   const allDone = completedCount === steps.length;
-
   if (allDone) return null;
 
   const handleDismiss = () => {
-    localStorage.setItem("onboarding_dismissed", "true");
+    localStorage.setItem(DISMISS_KEY, "true");
     setDismissed(true);
   };
 
@@ -90,14 +81,15 @@ export function OnboardingChecklist() {
         </div>
         <button
           onClick={handleDismiss}
+          aria-label="Dismiss onboarding checklist"
           className="text-zinc-500 hover:text-zinc-300 transition-colors"
         >
           <X className="h-4 w-4" />
         </button>
       </div>
       <div className="space-y-2">
-        {steps.map((step, i) => (
-          <div key={i} className="flex items-center justify-between">
+        {steps.map((step) => (
+          <div key={step.label} className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               {step.done ? (
                 <CheckCircle2 className="h-4 w-4 text-green-500" />

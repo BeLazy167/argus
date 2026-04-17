@@ -1,6 +1,10 @@
-/**
- * Docs FAQ page.
- */
+import type { Metadata } from "next";
+
+export const metadata: Metadata = {
+  title: "FAQ — Argus docs",
+  description: "Frequently asked questions about Argus: triggering reviews, cost estimates, auto-review behavior, and memory.",
+};
+
 export default function FAQPage() {
   return (
     <article className="space-y-8">

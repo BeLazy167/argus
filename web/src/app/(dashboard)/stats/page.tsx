@@ -109,15 +109,15 @@ const tooltipStyle = { background: "hsl(var(--card))", border: "1px solid hsl(va
 
 export default function StatsPage() {
   const { period, setPeriod } = useStatsStore();
-  const overview = useStatsOverview(period);
-  const timeseries = useStatsTimeseries(period);
-  const users = useStatsUsers(period);
-  const models = useStatsModels(period);
-  const findings = useStatsFindings(period);
-  const adoption = useStatsAdoption(period);
-  const repos = useStatsRepos(period);
-  const reviewTimes = useStatsReviewTimes(period);
-  const costPerStage = useStatsCostPerStage(period);
+  const overview = useStatsOverview({ variables: { period } });
+  const timeseries = useStatsTimeseries({ variables: { period } });
+  const users = useStatsUsers({ variables: { period } });
+  const models = useStatsModels({ variables: { period } });
+  const findings = useStatsFindings({ variables: { period } });
+  const adoption = useStatsAdoption({ variables: { period } });
+  const repos = useStatsRepos({ variables: { period } });
+  const reviewTimes = useStatsReviewTimes({ variables: { period } });
+  const costPerStage = useStatsCostPerStage({ variables: { period } });
 
   const chartData = useMemo(() => (timeseries.data ?? []).map(d => ({ ...d, day: d.day.slice(5) })), [timeseries.data]);
   const allModels = useMemo(() => [...(models.data ?? [])].sort((a, b) => b.total_cost - a.total_cost), [models.data]);
@@ -363,7 +363,7 @@ export default function StatsPage() {
                     <ResponsiveContainer width="100%" height="100%">
                       <PieChart>
                         <Pie data={modelPieData} dataKey="total_cost" nameKey="model" cx="50%" cy="50%" innerRadius={45} outerRadius={80} paddingAngle={2} strokeWidth={0}>
-                          {modelPieData.map((_, i) => <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />)}
+                          {modelPieData.map((entry, i) => <Cell key={entry.model} fill={PIE_COLORS[i % PIE_COLORS.length]} />)}
                         </Pie>
                         <Tooltip contentStyle={tooltipStyle} formatter={(v) => [fmt$(Number(v)), "Cost"]} />
                       </PieChart>

@@ -51,7 +51,7 @@ const getSource = (p: { source?: string }) => p.source || "manual";
 export default function PatternsPage() {
   const { repos: activeRepos, activeId, setSelectedId } = useActiveRepo();
   const activeRepoId = activeId || undefined;
-  const { data: patterns, isLoading } = usePatterns(activeRepoId);
+  const { data: patterns, isLoading } = usePatterns({ variables: { repoId: activeRepoId } });
   const { data: repos } = useRepos();
   const { data: stats } = usePatternStats();
   const createPattern = useCreatePattern();

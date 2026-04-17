@@ -1,50 +1,41 @@
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useApi } from "@/lib/hooks/use-api";
+import { useQueryClient } from "@tanstack/react-query";
+import { createAuthQuery, createAuthMutation, getApi } from "@/lib/query-kit";
 
-export function useSupermemoryKeyStatus() {
-  const api = useApi();
-  return useQuery({
-    queryKey: ["supermemory-key", api.active?.id],
-    queryFn: () =>
-      api.get<{ configured: boolean }>(
-        `/api/v1/installations/${api.active!.id}/supermemory-key`,
-      ),
-    enabled: !!api.active,
-    staleTime: 5 * 60 * 1000,
-  });
-}
+export const useSupermemoryKeyStatus = createAuthQuery<{ configured: boolean }>({
+  queryKey: ["supermemory-key"],
+  fetcher: (_vars, ctx) => {
+    const api = getApi(ctx);
+    return api.get<{ configured: boolean }>(`/api/v1/installations/${api.active!.id}/supermemory-key`);
+  },
+  staleTime: 5 * 60 * 1000,
+});
 
-export function useSetSupermemoryKey() {
-  const api = useApi();
+const useSetSupermemoryKeyMutation = createAuthMutation<unknown, string>({
+  mutationFn: (apiKey, ctx) => {
+    const api = getApi(ctx);
+    return api.put(`/api/v1/installations/${api.active!.id}/supermemory-key`, { api_key: apiKey });
+  },
+});
+
+export const useSetSupermemoryKey = () => {
   const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (apiKey: string) =>
-      api.put(
-        `/api/v1/installations/${api.active!.id}/supermemory-key`,
-        { api_key: apiKey },
-      ),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["supermemory-key", api.active?.id] });
-    },
-    onError: (err: Error) => {
-      console.error("[set-supermemory-key] failed:", err.message);
-    },
+  return useSetSupermemoryKeyMutation({
+    onSuccess: () => qc.invalidateQueries({ queryKey: useSupermemoryKeyStatus.getKey() }),
+    onError: (err) => console.error("[set-supermemory-key] failed:", err.message),
   });
-}
+};
 
-export function useDeleteSupermemoryKey() {
-  const api = useApi();
+const useDeleteSupermemoryKeyMutation = createAuthMutation<unknown, void>({
+  mutationFn: (_vars, ctx) => {
+    const api = getApi(ctx);
+    return api.delete(`/api/v1/installations/${api.active!.id}/supermemory-key`);
+  },
+});
+
+export const useDeleteSupermemoryKey = () => {
   const qc = useQueryClient();
-  return useMutation({
-    mutationFn: () =>
-      api.delete(
-        `/api/v1/installations/${api.active!.id}/supermemory-key`,
-      ),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["supermemory-key", api.active?.id] });
-    },
-    onError: (err: Error) => {
-      console.error("[delete-supermemory-key] failed:", err.message);
-    },
+  return useDeleteSupermemoryKeyMutation({
+    onSuccess: () => qc.invalidateQueries({ queryKey: useSupermemoryKeyStatus.getKey() }),
+    onError: (err) => console.error("[delete-supermemory-key] failed:", err.message),
   });
-}
+};
