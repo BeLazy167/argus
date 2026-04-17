@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { FadeIn } from "@/components/marketing/fade-in";
+import { AiHeroBackground } from "@/components/ui/ai-hero-background";
 
 /* ────────────────────────────────────────────────────────────
    Chip row — engraved plaques, not pills. Mono text, amber dots.
@@ -136,6 +137,13 @@ function FooterNav() {
 export function InstallCta() {
   return (
     <section id="install" className="relative isolate overflow-hidden">
+      {/* Ambient backdrop — THREE.js instanced dot-mesh with pulse ripples,
+       * bloom and a tiny RGB shift. Parked at -z-10 under every other layer
+       * in the section, pointer-events:none so it never blocks the CTAs.
+       * Constrained opacity keeps the letters readable on top. */}
+      <div className="pointer-events-none absolute inset-0 -z-10 opacity-50">
+        <AiHeroBackground />
+      </div>
       {/* Local keyframes — SSR-safe. transform + opacity + filter only. */}
       <style>{`
         @keyframes argusBannerScan {
