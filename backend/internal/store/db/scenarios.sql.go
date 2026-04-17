@@ -9,6 +9,9 @@ import (
 	"context"
 	"encoding/json"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const activateScenario = `-- name: ActivateScenario :exec
@@ -86,6 +89,63 @@ func (q *Queries) CreateScenario(ctx context.Context, arg CreateScenarioParams) 
 	return id, err
 }
 
+const createScenarioRun = `-- name: CreateScenarioRun :one
+INSERT INTO scenario_runs (
+    scenario_id, review_id, pr_number, verdict, confidence, why, fix, root_cause, impact
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+ON CONFLICT (scenario_id, review_id) DO UPDATE SET
+    verdict    = EXCLUDED.verdict,
+    confidence = EXCLUDED.confidence,
+    why        = EXCLUDED.why,
+    fix        = EXCLUDED.fix,
+    root_cause = EXCLUDED.root_cause,
+    impact     = EXCLUDED.impact,
+    created_at = NOW()
+RETURNING id, scenario_id, review_id, pr_number, verdict, confidence, why, fix, root_cause, impact, created_at
+`
+
+type CreateScenarioRunParams struct {
+	ScenarioID int64          `json:"scenario_id"`
+	ReviewID   uuid.UUID      `json:"review_id"`
+	PRNumber   int            `json:"pr_number"`
+	Verdict    string         `json:"verdict"`
+	Confidence pgtype.Numeric `json:"confidence"`
+	Why        *string        `json:"why"`
+	Fix        *string        `json:"fix"`
+	RootCause  *string        `json:"root_cause"`
+	Impact     *string        `json:"impact"`
+}
+
+func (q *Queries) CreateScenarioRun(ctx context.Context, arg CreateScenarioRunParams) (ScenarioRun, error) {
+	row := q.db.QueryRow(ctx, createScenarioRun,
+		arg.ScenarioID,
+		arg.ReviewID,
+		arg.PRNumber,
+		arg.Verdict,
+		arg.Confidence,
+		arg.Why,
+		arg.Fix,
+		arg.RootCause,
+		arg.Impact,
+	)
+	var i ScenarioRun
+	err := row.Scan(
+		&i.ID,
+		&i.ScenarioID,
+		&i.ReviewID,
+		&i.PRNumber,
+		&i.Verdict,
+		&i.Confidence,
+		&i.Why,
+		&i.Fix,
+		&i.RootCause,
+		&i.Impact,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const deactivateScenario = `-- name: DeactivateScenario :exec
 UPDATE scenarios SET active = FALSE WHERE id = $1
 `
@@ -112,6 +172,82 @@ func (q *Queries) DeactivateScenarioScoped(ctx context.Context, arg DeactivateSc
 	return result.RowsAffected(), nil
 }
 
+const getScenarioKPIs = `-- name: GetScenarioKPIs :one
+SELECT
+    COUNT(*) FILTER (WHERE active)                                                                           AS active,
+    COUNT(*) FILTER (WHERE active AND last_verdict = 'broken' AND last_run_at > NOW() - INTERVAL '7 days') AS broken_this_week,
+    COUNT(*) FILTER (WHERE active AND last_verdict = 'fixed'  AND last_run_at > NOW() - INTERVAL '7 days') AS fixed_this_week,
+    COUNT(*) FILTER (WHERE active AND is_outdated)                                                         AS outdated
+FROM scenarios
+WHERE repo_id = $1
+`
+
+type GetScenarioKPIsRow struct {
+	Active         int64 `json:"active"`
+	BrokenThisWeek int64 `json:"broken_this_week"`
+	FixedThisWeek  int64 `json:"fixed_this_week"`
+	Outdated       int64 `json:"outdated"`
+}
+
+// All four counts are scoped to active scenarios — an inactive-but-broken row would inflate
+// "Broken this week" without being visible in the list, so we exclude them everywhere.
+func (q *Queries) GetScenarioKPIs(ctx context.Context, repoID *int64) (GetScenarioKPIsRow, error) {
+	row := q.db.QueryRow(ctx, getScenarioKPIs, repoID)
+	var i GetScenarioKPIsRow
+	err := row.Scan(
+		&i.Active,
+		&i.BrokenThisWeek,
+		&i.FixedThisWeek,
+		&i.Outdated,
+	)
+	return i, err
+}
+
+const getScenarioRuns = `-- name: GetScenarioRuns :many
+SELECT id, scenario_id, review_id, pr_number, verdict, confidence, why, fix, root_cause, impact, created_at
+FROM scenario_runs
+WHERE scenario_id = $1
+ORDER BY created_at DESC
+LIMIT $2
+`
+
+type GetScenarioRunsParams struct {
+	ScenarioID int64 `json:"scenario_id"`
+	Limit      int32 `json:"limit"`
+}
+
+func (q *Queries) GetScenarioRuns(ctx context.Context, arg GetScenarioRunsParams) ([]ScenarioRun, error) {
+	rows, err := q.db.Query(ctx, getScenarioRuns, arg.ScenarioID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ScenarioRun
+	for rows.Next() {
+		var i ScenarioRun
+		if err := rows.Scan(
+			&i.ID,
+			&i.ScenarioID,
+			&i.ReviewID,
+			&i.PRNumber,
+			&i.Verdict,
+			&i.Confidence,
+			&i.Why,
+			&i.Fix,
+			&i.RootCause,
+			&i.Impact,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const incrementScenarioTriggerCount = `-- name: IncrementScenarioTriggerCount :exec
 UPDATE scenarios SET trigger_count = trigger_count + 1 WHERE id = $1
 `
@@ -122,7 +258,17 @@ func (q *Queries) IncrementScenarioTriggerCount(ctx context.Context, id int64) e
 }
 
 const listScenariosForFiles = `-- name: ListScenariosForFiles :many
-SELECT id, installation_id, repo_id, description, source, COALESCE(source_ref,'') as source_ref, files, modules, COALESCE(severity,'medium') as severity, active, created_at, COALESCE(steps,'[]') as steps, COALESCE(initial_state,'') as initial_state, COALESCE(expected_outcome,'') as expected_outcome, COALESCE(is_outdated,FALSE) as is_outdated, last_run_at
+SELECT
+    id, installation_id, repo_id, description, source,
+    COALESCE(source_ref,'') AS source_ref, files, modules,
+    COALESCE(severity,'medium') AS severity, active, created_at,
+    COALESCE(steps,'[]') AS steps,
+    COALESCE(initial_state,'') AS initial_state,
+    COALESCE(expected_outcome,'') AS expected_outcome,
+    COALESCE(is_outdated,FALSE) AS is_outdated,
+    last_run_at,
+    last_verdict, last_confidence, last_why, last_fix, last_pr_number, last_review_id,
+    trigger_count
 FROM scenarios
 WHERE repo_id = $1 AND active = TRUE AND files && $2::text[]
 ORDER BY trigger_count DESC, created_at DESC
@@ -151,6 +297,13 @@ type ListScenariosForFilesRow struct {
 	ExpectedOutcome string          `json:"expected_outcome"`
 	IsOutdated      bool            `json:"is_outdated"`
 	LastRunAt       *time.Time      `json:"last_run_at"`
+	LastVerdict     *string         `json:"last_verdict"`
+	LastConfidence  pgtype.Numeric  `json:"last_confidence"`
+	LastWhy         *string         `json:"last_why"`
+	LastFix         *string         `json:"last_fix"`
+	LastPrNumber    *int            `json:"last_pr_number"`
+	LastReviewID    *uuid.UUID      `json:"last_review_id"`
+	TriggerCount    int             `json:"trigger_count"`
 }
 
 func (q *Queries) ListScenariosForFiles(ctx context.Context, arg ListScenariosForFilesParams) ([]ListScenariosForFilesRow, error) {
@@ -179,6 +332,13 @@ func (q *Queries) ListScenariosForFiles(ctx context.Context, arg ListScenariosFo
 			&i.ExpectedOutcome,
 			&i.IsOutdated,
 			&i.LastRunAt,
+			&i.LastVerdict,
+			&i.LastConfidence,
+			&i.LastWhy,
+			&i.LastFix,
+			&i.LastPrNumber,
+			&i.LastReviewID,
+			&i.TriggerCount,
 		); err != nil {
 			return nil, err
 		}
@@ -191,7 +351,17 @@ func (q *Queries) ListScenariosForFiles(ctx context.Context, arg ListScenariosFo
 }
 
 const listScenariosForRepo = `-- name: ListScenariosForRepo :many
-SELECT id, installation_id, repo_id, description, source, COALESCE(source_ref,'') as source_ref, files, modules, COALESCE(severity,'medium') as severity, active, created_at, COALESCE(steps,'[]') as steps, COALESCE(initial_state,'') as initial_state, COALESCE(expected_outcome,'') as expected_outcome, COALESCE(is_outdated,FALSE) as is_outdated, last_run_at
+SELECT
+    id, installation_id, repo_id, description, source,
+    COALESCE(source_ref,'') AS source_ref, files, modules,
+    COALESCE(severity,'medium') AS severity, active, created_at,
+    COALESCE(steps,'[]') AS steps,
+    COALESCE(initial_state,'') AS initial_state,
+    COALESCE(expected_outcome,'') AS expected_outcome,
+    COALESCE(is_outdated,FALSE) AS is_outdated,
+    last_run_at,
+    last_verdict, last_confidence, last_why, last_fix, last_pr_number, last_review_id,
+    trigger_count
 FROM scenarios
 WHERE repo_id = $1
 ORDER BY active DESC, created_at DESC
@@ -220,6 +390,13 @@ type ListScenariosForRepoRow struct {
 	ExpectedOutcome string          `json:"expected_outcome"`
 	IsOutdated      bool            `json:"is_outdated"`
 	LastRunAt       *time.Time      `json:"last_run_at"`
+	LastVerdict     *string         `json:"last_verdict"`
+	LastConfidence  pgtype.Numeric  `json:"last_confidence"`
+	LastWhy         *string         `json:"last_why"`
+	LastFix         *string         `json:"last_fix"`
+	LastPrNumber    *int            `json:"last_pr_number"`
+	LastReviewID    *uuid.UUID      `json:"last_review_id"`
+	TriggerCount    int             `json:"trigger_count"`
 }
 
 func (q *Queries) ListScenariosForRepo(ctx context.Context, arg ListScenariosForRepoParams) ([]ListScenariosForRepoRow, error) {
@@ -248,6 +425,13 @@ func (q *Queries) ListScenariosForRepo(ctx context.Context, arg ListScenariosFor
 			&i.ExpectedOutcome,
 			&i.IsOutdated,
 			&i.LastRunAt,
+			&i.LastVerdict,
+			&i.LastConfidence,
+			&i.LastWhy,
+			&i.LastFix,
+			&i.LastPrNumber,
+			&i.LastReviewID,
+			&i.TriggerCount,
 		); err != nil {
 			return nil, err
 		}
@@ -275,10 +459,37 @@ func (q *Queries) MarkScenarioOutdated(ctx context.Context, arg MarkScenarioOutd
 }
 
 const updateScenarioLastRun = `-- name: UpdateScenarioLastRun :exec
-UPDATE scenarios SET last_run_at = NOW(), is_outdated = FALSE WHERE id = $1
+UPDATE scenarios
+SET last_run_at     = NOW(),
+    is_outdated     = FALSE,
+    last_verdict    = $2,
+    last_confidence = $3,
+    last_why        = $4,
+    last_fix        = $5,
+    last_pr_number  = $6,
+    last_review_id  = $7
+WHERE id = $1
 `
 
-func (q *Queries) UpdateScenarioLastRun(ctx context.Context, id int64) error {
-	_, err := q.db.Exec(ctx, updateScenarioLastRun, id)
+type UpdateScenarioLastRunParams struct {
+	ID             int64          `json:"id"`
+	LastVerdict    *string        `json:"last_verdict"`
+	LastConfidence pgtype.Numeric `json:"last_confidence"`
+	LastWhy        *string        `json:"last_why"`
+	LastFix        *string        `json:"last_fix"`
+	LastPrNumber   *int           `json:"last_pr_number"`
+	LastReviewID   *uuid.UUID     `json:"last_review_id"`
+}
+
+func (q *Queries) UpdateScenarioLastRun(ctx context.Context, arg UpdateScenarioLastRunParams) error {
+	_, err := q.db.Exec(ctx, updateScenarioLastRun,
+		arg.ID,
+		arg.LastVerdict,
+		arg.LastConfidence,
+		arg.LastWhy,
+		arg.LastFix,
+		arg.LastPrNumber,
+		arg.LastReviewID,
+	)
 	return err
 }

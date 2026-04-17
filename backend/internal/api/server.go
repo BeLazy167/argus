@@ -200,8 +200,10 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 				// Scenarios
 				r.Get("/repos/{repoID}/scenarios", s.listScenarios)
 				r.Post("/repos/{repoID}/scenarios", s.createScenario)
+				r.Get("/repos/{repoID}/scenarios/kpis", s.getScenarioKPIs)
 				r.Delete("/scenarios/{scenarioID}", s.deactivateScenario)
 				r.Get("/scenarios/{scenarioID}", s.getScenario)
+				r.Get("/scenarios/{scenarioID}/runs", s.listScenarioRuns)
 
 				// Traces
 				r.Get("/repos/{repoID}/traces", s.listTraces)

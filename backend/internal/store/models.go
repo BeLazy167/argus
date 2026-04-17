@@ -156,6 +156,28 @@ type ScenarioStep struct {
 	Hint   string `json:"hint,omitempty"`
 }
 
+// ScenarioVerdict is the four-value simulation outcome. Mirror of the TypeScript union so the
+// API boundary stays consistent; the compiler guards us against typos that would otherwise slip
+// through an untyped string.
+type ScenarioVerdict string
+
+const (
+	VerdictBroken  ScenarioVerdict = "broken"
+	VerdictFixed   ScenarioVerdict = "fixed"
+	VerdictPartial ScenarioVerdict = "partial"
+	VerdictUnclear ScenarioVerdict = "unclear"
+)
+
+// IsValid reports whether v is one of the four allowed verdict strings. The empty string is
+// NOT valid — a persisted verdict should always have a concrete bucket.
+func (v ScenarioVerdict) IsValid() bool {
+	switch v {
+	case VerdictBroken, VerdictFixed, VerdictPartial, VerdictUnclear:
+		return true
+	}
+	return false
+}
+
 type Scenario struct {
 	ID              int64          `json:"id"`
 	InstallationID  int64          `json:"installation_id"`
@@ -173,6 +195,39 @@ type Scenario struct {
 	ExpectedOutcome string         `json:"expected_outcome"`
 	IsOutdated      bool           `json:"is_outdated"`
 	LastRunAt       *time.Time     `json:"last_run_at,omitempty"`
+	// Last-run denormalized summary — populated after the simulation stage persists a run.
+	// Drives the scenario list row without joining scenario_runs on every page load.
+	LastVerdict    ScenarioVerdict `json:"last_verdict,omitempty"`
+	LastConfidence *float64        `json:"last_confidence,omitempty"` // 0.000–1.000 when present
+	LastWhy        string          `json:"last_why,omitempty"`
+	LastFix        string          `json:"last_fix,omitempty"`
+	LastPRNumber   *int            `json:"last_pr_number,omitempty"`
+	LastReviewID   *uuid.UUID      `json:"last_review_id,omitempty"`
+	TriggerCount   int             `json:"trigger_count"`
+}
+
+// ScenarioRun is a single simulation outcome — the per-PR verdict Argus posts on GitHub and
+// also persists so the dashboard can show a drift timeline.
+type ScenarioRun struct {
+	ID         int64           `json:"id"`
+	ScenarioID int64           `json:"scenario_id"`
+	ReviewID   uuid.UUID       `json:"review_id"`
+	PRNumber   int             `json:"pr_number"`
+	Verdict    ScenarioVerdict `json:"verdict"`
+	Confidence float64         `json:"confidence"` // 0.000–1.000
+	Why        string          `json:"why,omitempty"`
+	Fix        string          `json:"fix,omitempty"`
+	RootCause  string          `json:"root_cause,omitempty"`
+	Impact     string          `json:"impact,omitempty"`
+	CreatedAt  time.Time       `json:"created_at"`
+}
+
+// ScenarioKPIs powers the 4-card summary row at the top of /scenarios.
+type ScenarioKPIs struct {
+	Active          int `json:"active"`
+	BrokenThisWeek  int `json:"broken_this_week"`
+	FixedThisWeek   int `json:"fixed_this_week"`
+	Outdated        int `json:"outdated"`
 }
 
 type Stats struct {

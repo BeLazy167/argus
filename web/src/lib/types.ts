@@ -203,6 +203,8 @@ export type OpenRouterModel = {
   };
 };
 
+export type ScenarioVerdict = "broken" | "fixed" | "partial" | "unclear";
+
 export type Scenario = {
   id: number;
   installation_id: number;
@@ -220,7 +222,34 @@ export type Scenario = {
   expected_outcome: string;
   is_outdated: boolean;
   last_run_at?: string;
+  last_verdict?: ScenarioVerdict;
+  last_confidence?: number;
+  last_why?: string;
+  last_fix?: string;
+  last_pr_number?: number;
+  last_review_id?: string;
   trigger_count?: number;
+};
+
+export type ScenarioRun = {
+  id: number;
+  scenario_id: number;
+  review_id: string;
+  pr_number: number;
+  verdict: ScenarioVerdict;
+  confidence: number;
+  why?: string;
+  fix?: string;
+  root_cause?: string;
+  impact?: string;
+  created_at: string;
+};
+
+export type ScenarioKPIs = {
+  active: number;
+  broken_this_week: number;
+  fixed_this_week: number;
+  outdated: number;
 };
 
 export type FileRisk = {

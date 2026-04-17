@@ -1024,7 +1024,7 @@ func (o *Orchestrator) synthesize(ctx context.Context, run *PipelineRun) error {
 		} else if len(scenarios) > 0 {
 			simScenarios := make([]SimScenario, len(scenarios))
 			for i, s := range scenarios {
-				simScenarios[i] = SimScenario{Description: s.Description}
+				simScenarios[i] = SimScenario{ID: s.ID, Description: s.Description, Severity: s.Severity, Source: s.Source, Files: s.Files}
 			}
 			req := SimulationRequest{Run: run, Scenarios: simScenarios}
 			results, simErr := o.simEngine.RunSimulations(ctx, req)
@@ -3206,7 +3206,7 @@ func (o *Orchestrator) runSimulationAgent(ctx context.Context, run *PipelineRun,
 	}
 	simScenarios := make([]SimScenario, len(scenarios))
 	for i, s := range scenarios {
-		simScenarios[i] = SimScenario{Description: s.Description}
+		simScenarios[i] = SimScenario{ID: s.ID, Description: s.Description, Severity: s.Severity, Source: s.Source, Files: s.Files}
 	}
 	results, err := o.simEngine.RunSimulations(ctx, SimulationRequest{Run: run, Scenarios: simScenarios})
 	if err != nil {
@@ -3469,7 +3469,7 @@ func (o *Orchestrator) validateStage(ctx context.Context, run *PipelineRun) erro
 			}
 			simScenarios := make([]SimScenario, len(scenarios))
 			for i, s := range scenarios {
-				simScenarios[i] = SimScenario{Description: s.Description, Severity: s.Severity, Files: s.Files}
+				simScenarios[i] = SimScenario{ID: s.ID, Description: s.Description, Severity: s.Severity, Source: s.Source, Files: s.Files}
 			}
 			req := SimulationRequest{Run: run, Scenarios: simScenarios}
 			results, simErr := o.simEngine.RunSimulations(ctx, req)

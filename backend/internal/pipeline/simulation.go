@@ -24,6 +24,7 @@ type SimulationRequest struct {
 
 // SimScenario describes a single scenario to simulate against the PR change.
 type SimScenario struct {
+	ID          int64 // matches store.Scenario.ID so results can be written back
 	Description string
 	Severity    string
 	Source      string
@@ -47,13 +48,22 @@ type DecisionTraceContext struct {
 }
 
 // SimulationResult holds the outcome of simulating one scenario against the PR.
+//
+// Verdict + Why + Fix are the user-facing triplet rendered in the PR body and dashboard.
+// RootCause + Impact + Suggestion stay populated for the export API and for future analytics;
+// the plainer Why/Fix are short, single-sentence renditions derived by the LLM from the longer
+// fields.
 type SimulationResult struct {
-	Scenario   string  // the scenario being tested
-	Passes     bool    // does the change break this scenario?
-	Confidence float64 // 0-1 confidence in the prediction
-	RootCause  string  // if broken: what specifically breaks
-	Impact     string  // who/what is affected
-	Suggestion string  // suggested fix or investigation
+	ScenarioID int64   // back-ref to store.Scenario; zero when scenario is unseeded
+	Scenario   string  // the scenario description being tested
+	Passes     bool    // does the PR preserve the scenario?
+	Verdict    string  // broken | fixed | partial | unclear — derived from Passes + Confidence when missing
+	Confidence float64 // 0–1 confidence in the prediction
+	Why        string  // one-sentence plain-English explanation rendered on GitHub + dashboard
+	Fix        string  // one-sentence suggested fix
+	RootCause  string  // long-form root-cause paragraph (kept for exports / debugging)
+	Impact     string  // long-form impact paragraph (kept for exports / debugging)
+	Suggestion string  // long-form fix suggestion (kept for exports / debugging)
 }
 
 // SimulationEngine runs LLM-based code path simulations for PR changes.
@@ -102,7 +112,41 @@ func (e *SimulationEngine) RunSimulations(ctx context.Context, req SimulationReq
 		results = append(results, result)
 	}
 
+	// Persist each outcome to scenario_runs + denormalized last_* on scenarios. Non-fatal —
+	// the PR review body is the user-visible contract; DB persistence is for the dashboard
+	// and can be skipped without breaking the review.
+	e.persistScenarioRuns(ctx, req, results)
+
 	return results, nil
+}
+
+// persistScenarioRuns writes each simulation outcome to the DB. Any failure is logged at Warn
+// and the loop continues — same non-fatal pattern used for Supermemory indexing.
+func (e *SimulationEngine) persistScenarioRuns(ctx context.Context, req SimulationRequest, results []SimulationResult) {
+	if e.store == nil || req.Run == nil {
+		return
+	}
+	for _, r := range results {
+		if r.ScenarioID == 0 {
+			continue // unseeded scenario (e.g. ad-hoc sim without a DB row)
+		}
+		if _, err := e.store.CreateScenarioRun(ctx, r.ScenarioID, req.Run.ReviewID, req.Run.PREvent.PRNumber,
+			r.Verdict, r.Confidence, r.Why, r.Fix, r.RootCause, r.Impact); err != nil {
+			e.logger.Warn("persist scenario run failed", "scenario_id", r.ScenarioID, "error", err)
+			continue
+		}
+		// Skip the trigger-count bump when the last-run denorm update fails — otherwise the
+		// counter drifts above the actual run history (one trigger recorded in scenario_runs
+		// but no corresponding last_* summary refresh).
+		if err := e.store.UpdateScenarioLastRun(ctx, r.ScenarioID, r.Verdict, r.Confidence, r.Why, r.Fix,
+			req.Run.PREvent.PRNumber, req.Run.ReviewID); err != nil {
+			e.logger.Warn("update scenario last-run failed", "scenario_id", r.ScenarioID, "error", err)
+			continue
+		}
+		if err := e.store.IncrementScenarioTriggerCount(ctx, r.ScenarioID); err != nil {
+			e.logger.Warn("increment scenario trigger count failed", "scenario_id", r.ScenarioID, "error", err)
+		}
+	}
 }
 
 const simulationSystemPrompt = `You are a code simulation engine. Given a scenario (expected behavior), a code change (PR diff), and context about the codebase (dependency graph, past issues, file contents), predict whether the change breaks the scenario.
@@ -118,12 +162,18 @@ Respond with JSON:
 {
   "passes": true/false,
   "confidence": 0.85,
-  "root_cause": "The change to X causes Y which breaks Z",
-  "impact": "Affects all EU customers during billing cycle",
-  "suggestion": "Add a null check before accessing the converted amount"
+  "verdict": "broken" | "fixed" | "partial" | "unclear",
+  "why": "One short sentence, ≤20 words, plain English, no jargon.",
+  "fix": "One short sentence with the concrete action, ≤20 words.",
+  "root_cause": "Full paragraph for the export/debug API — same information as 'why' but expanded with mechanics.",
+  "impact": "Full paragraph describing who/what is affected.",
+  "suggestion": "Full paragraph with a concrete fix — same information as 'fix' but with code example if relevant."
 }
 
-If you're unsure, set confidence < 0.5 and explain why in root_cause. It's better to flag uncertainty than to miss a real issue or raise a false alarm.`
+Rules:
+- 'why' and 'fix' MUST each be a single sentence. No lists, no multi-sentence prose. If you don't have a fix, set 'fix' to "" (empty string).
+- 'verdict' MUST be one of the four literal strings. Pick 'fixed' when passes is true, 'broken' when passes is false and confidence ≥ 0.8, 'partial' when passes is false and confidence ≥ 0.5, 'unclear' otherwise.
+- If you're unsure, set confidence < 0.5 and use 'unclear'. It's better to flag uncertainty than to miss a real issue or raise a false alarm.`
 
 func (e *SimulationEngine) simulateScenario(ctx context.Context, req SimulationRequest, scenario SimScenario, cfg llm.ModelConfig, provider llm.Provider) (SimulationResult, error) {
 	prompt := buildSimulationPrompt(req, scenario)
@@ -139,7 +189,12 @@ func (e *SimulationEngine) simulateScenario(ctx context.Context, req SimulationR
 		return SimulationResult{}, err
 	}
 
-	return parseSimulationResponse(resp.Content, scenario.Description)
+	result, err := parseSimulationResponse(resp.Content, scenario.Description)
+	if err != nil {
+		return SimulationResult{}, err
+	}
+	result.ScenarioID = scenario.ID
+	return result, nil
 }
 
 // buildSimulationPrompt assembles the full prompt for a single scenario simulation.
@@ -199,6 +254,9 @@ func parseSimulationResponse(content string, scenario string) (SimulationResult,
 	var parsed struct {
 		Passes     bool    `json:"passes"`
 		Confidence float64 `json:"confidence"`
+		Verdict    string  `json:"verdict"`
+		Why        string  `json:"why"`
+		Fix        string  `json:"fix"`
 		RootCause  string  `json:"root_cause"`
 		Impact     string  `json:"impact"`
 		Suggestion string  `json:"suggestion"`
@@ -211,10 +269,75 @@ func parseSimulationResponse(content string, scenario string) (SimulationResult,
 
 	result.Passes = parsed.Passes
 	result.Confidence = max(0, min(1, parsed.Confidence))
+	result.Verdict = normalizeVerdict(parsed.Verdict, parsed.Passes, result.Confidence)
+	result.Why = parsed.Why
+	result.Fix = parsed.Fix
 	result.RootCause = parsed.RootCause
 	result.Impact = parsed.Impact
 	result.Suggestion = parsed.Suggestion
+	// Backfill plain-English fields when the LLM forgot to populate them. Keeps the UI
+	// from rendering empty "Why:" lines when we still have the longer root_cause / suggestion.
+	if result.Why == "" {
+		result.Why = firstSentence(parsed.RootCause)
+	}
+	if result.Fix == "" {
+		result.Fix = firstSentence(parsed.Suggestion)
+	}
 	return result, nil
+}
+
+// normalizeVerdict enforces the four-value taxonomy. When the LLM supplies a verdict that's
+// consistent with `passes` we trust it; otherwise (missing, invalid, or contradictory) we
+// derive from (passes, confidence). Contradictions matter — `passes=false` with `verdict=fixed`
+// would silently hide a broken scenario from the PR body and persist as "fixed" forever.
+func normalizeVerdict(raw string, passes bool, confidence float64) string {
+	v := strings.ToLower(strings.TrimSpace(raw))
+	valid := v == "broken" || v == "fixed" || v == "partial" || v == "unclear"
+	// Reject contradictions between passes and verdict — trust `passes` (the structured boolean
+	// is harder for the LLM to get wrong than a free-form label).
+	contradictsPasses := (passes && v == "broken") || (passes && v == "partial") || (!passes && v == "fixed")
+	if valid && !contradictsPasses {
+		return v
+	}
+	switch {
+	case passes:
+		return "fixed"
+	case confidence >= 0.8:
+		return "broken"
+	case confidence >= 0.5:
+		return "partial"
+	default:
+		return "unclear"
+	}
+}
+
+// firstSentence returns the first sentence of s (split on '. '). Used as a fallback renderer
+// when the LLM emitted the long-form paragraphs but skipped the one-line why/fix.
+func firstSentence(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	if i := strings.Index(s, ". "); i > 0 && i < 200 {
+		return s[:i+1]
+	}
+	return util.Truncate(s, 200, true)
+}
+
+// verdictLabel maps an internal verdict to the human-facing label used in GitHub comments.
+func verdictLabel(verdict string) string {
+	switch verdict {
+	case "broken":
+		return "Broken"
+	case "fixed":
+		return "Fixed"
+	case "partial":
+		return "Partial fix"
+	case "unclear":
+		return "Unclear"
+	default:
+		return "Unclear"
+	}
 }
 
 // extractJSON finds the first JSON object in a string (handles LLM preamble).
@@ -253,6 +376,16 @@ func extractJSON(s string) string {
 }
 
 // FormatSimulationResults formats simulation results for the PR review body.
+//
+// Emits a scannable 4-line block per scenario:
+//
+//	**Scenario:** <one-liner>
+//	**Verdict:** <Broken|Partial fix|Unclear> (<N>% sure)
+//	**Why:** <one sentence>
+//	**Fix:** <one sentence>
+//
+// Filtering: only scenarios with verdict ∈ {broken, partial, unclear} AND confidence ≥ 0.5 are
+// rendered — "fixed" and low-confidence results clutter the review without adding signal.
 func FormatSimulationResults(results []SimulationResult) string {
 	if len(results) == 0 {
 		return ""
@@ -260,9 +393,13 @@ func FormatSimulationResults(results []SimulationResult) string {
 
 	var failures []SimulationResult
 	for _, r := range results {
-		if !r.Passes && r.Confidence >= 0.5 {
-			failures = append(failures, r)
+		if r.Verdict == "fixed" {
+			continue
 		}
+		if r.Confidence < 0.5 {
+			continue
+		}
+		failures = append(failures, r)
 	}
 
 	if len(failures) == 0 {
@@ -273,13 +410,12 @@ func FormatSimulationResults(results []SimulationResult) string {
 	sb.WriteString(fmt.Sprintf("\n\n---\n### Simulation Results\nTested %d scenarios, **%d potential issues found:**\n\n", len(results), len(failures)))
 	for _, f := range failures {
 		sb.WriteString(fmt.Sprintf("**Scenario:** %s\n", util.Truncate(f.Scenario, 200, true)))
-		sb.WriteString(fmt.Sprintf("**Confidence:** %.0f%%\n", f.Confidence*100))
-		sb.WriteString(fmt.Sprintf("**Root cause:** %s\n", f.RootCause))
-		if f.Impact != "" {
-			sb.WriteString(fmt.Sprintf("**Impact:** %s\n", f.Impact))
+		sb.WriteString(fmt.Sprintf("**Verdict:** %s (%.0f%% sure)\n", verdictLabel(f.Verdict), f.Confidence*100))
+		if f.Why != "" {
+			sb.WriteString(fmt.Sprintf("**Why:** %s\n", f.Why))
 		}
-		if f.Suggestion != "" {
-			sb.WriteString(fmt.Sprintf("**Suggestion:** %s\n", f.Suggestion))
+		if f.Fix != "" {
+			sb.WriteString(fmt.Sprintf("**Fix:** %s\n", f.Fix))
 		}
 		sb.WriteString("\n")
 	}
