@@ -367,6 +367,79 @@ func firstSentence(s string) string {
 	return util.Truncate(s, 200, true)
 }
 
+// splitHeadlineAndBody parses a conversational-brief response produced by the
+// synthesis prompt and separates the explicit `**Headline:** …` line from the
+// rest of the body. The synthesis system prompt requires a ≤100-char Headline
+// line; this helper is how we extract it. Returns ("", brief) when no headline
+// is found — the caller's fallback path (extractHeadline) then derives one
+// from the brief's first sentence.
+//
+// The returned body has the Headline line stripped so the posted comment
+// doesn't show both the H2 one-liner and the Headline prefix again.
+func splitHeadlineAndBody(brief string) (headline, body string) {
+	s := strings.TrimSpace(brief)
+	// Look for "**Headline:**" at the start, case-insensitive on the word
+	// itself (tolerant of slight drift like "**headline:**" from the LLM).
+	lower := strings.ToLower(s)
+	const marker = "**headline:**"
+	if !strings.HasPrefix(lower, marker) {
+		return "", s
+	}
+	after := strings.TrimSpace(s[len(marker):])
+	// The headline is the first line / up to the first blank line.
+	eol := strings.Index(after, "\n")
+	if eol < 0 {
+		return strings.TrimSpace(after), ""
+	}
+	headline = strings.TrimSpace(after[:eol])
+	body = strings.TrimSpace(after[eol:])
+	return headline, body
+}
+
+// extractHeadline is the FALLBACK when the synthesis LLM didn't produce the
+// required `**Headline:** …` line. It turns a plain conversational brief body
+// into the one-liner that fits after `## 🔎 Argus · N/10 — ` in the H2.
+//
+// Two rough edges on the naive firstSentence-plus-truncate path — both
+// surfaced in the acmeorg-account#331 review:
+//
+//  1. The brief nearly always starts with "**Verdict:**" (per the synthesis
+//     system prompt), so the raw first sentence puts bold markdown inside
+//     the H2 — which renders awkwardly as nested bold.
+//  2. Rune-count truncation cuts mid-word ("dependency/…"). We look for the
+//     last word boundary below maxRunes and trim there instead.
+//
+// If maxRunes ≤ 0, returns the stripped first sentence uncut.
+func extractHeadline(brief string, maxRunes int) string {
+	s := strings.TrimSpace(brief)
+	// Strip a leading "**Label:**" or "**Label**" bold prefix. We specifically
+	// target the opening ** pair; anything after that ** is treated as prose.
+	if strings.HasPrefix(s, "**") {
+		if close := strings.Index(s[2:], "**"); close >= 0 {
+			s = strings.TrimSpace(s[close+4:])
+		}
+	}
+	s = firstSentence(s)
+	if maxRunes <= 0 {
+		return s
+	}
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
+		return s
+	}
+	// Walk back to the last space within the limit so we don't break mid-word.
+	cut := maxRunes
+	for cut > 0 && runes[cut-1] != ' ' {
+		cut--
+	}
+	if cut < maxRunes/2 {
+		// No word boundary in the back half — fall through to a hard cut
+		// rather than return a near-empty fragment.
+		cut = maxRunes
+	}
+	return strings.TrimRight(string(runes[:cut]), " ,;:") + "…"
+}
+
 // verdictLabel maps an internal verdict to the human-facing label used in GitHub comments.
 func verdictLabel(verdict string) string {
 	switch verdict {

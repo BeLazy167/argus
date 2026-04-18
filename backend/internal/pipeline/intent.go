@@ -657,7 +657,13 @@ func FormatIntentHeader(run *PipelineRun, verdict *IntentVerdict) string {
 	sb.WriteString("_Argus read the diff against the stated intent. This is not an execution log — reviewer still needs to test behavior._\n\n")
 	sb.WriteString("**Goal:** " + p.Goal + "\n")
 	if len(p.NonGoals) > 0 {
-		sb.WriteString("**Not in scope:** " + strings.Join(p.NonGoals, "; ") + "\n")
+		// Bulleted list — joining full sentences with "; " was hard to read on
+		// the acmeorg-account#331 review where each entry was itself a full
+		// sentence with its own punctuation.
+		sb.WriteString("**Not in scope:**\n")
+		for _, g := range p.NonGoals {
+			sb.WriteString("- " + g + "\n")
+		}
 	}
 	if len(p.AcceptanceCriteria) > 0 {
 		sb.WriteString("**Stated acceptance criteria** _(from PR/issue — not independently verified):_\n")
@@ -669,8 +675,15 @@ func FormatIntentHeader(run *PipelineRun, verdict *IntentVerdict) string {
 		sb.WriteString("_(Argus inferred this goal from the diff — no PR description was provided.)_\n")
 	}
 
+	// "Intent delivered / not delivered" rather than the older "Verdict"
+	// wording — the synthesis brief already uses "**Verdict:**" as its prefix,
+	// and having two ### Verdict headings caused reader confusion
+	// (✅ Verdict: delivers stated goal vs "not ready to merge yet" body).
+	// This heading answers a narrower question: does the diff match what the
+	// author said they were doing? The synthesis brief covers ready-to-merge
+	// separately.
 	if verdict != nil && !verdict.Delivers {
-		sb.WriteString("\n### ⚠️ Verdict: does not deliver\n")
+		sb.WriteString("\n### ⚠️ Intent not delivered\n")
 		if verdict.Rationale != "" {
 			sb.WriteString(verdict.Rationale + "\n")
 		}
@@ -681,7 +694,7 @@ func FormatIntentHeader(run *PipelineRun, verdict *IntentVerdict) string {
 			}
 		}
 	} else if verdict != nil && verdict.Delivers {
-		sb.WriteString("\n### ✅ Verdict: delivers stated goal\n")
+		sb.WriteString("\n### ✅ Intent delivered\n")
 	}
 	return sb.String()
 }

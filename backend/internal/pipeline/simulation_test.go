@@ -61,6 +61,95 @@ func TestFirstSentence(t *testing.T) {
 	}
 }
 
+// TestSplitHeadlineAndBody pins the parse of the synthesis LLM response that
+// encodes the H2 one-liner as a `**Headline:** …` line. Any drift in how the
+// prompt asks for this field (or how the LLM emits it) should surface here.
+func TestSplitHeadlineAndBody(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name         string
+		in           string
+		wantHeadline string
+		wantBody     string
+	}{
+		{
+			name: "happy_path",
+			in: "**Headline:** Ships the partner auth flow cleanly\n\n" +
+				"**Verdict:** Looks good.",
+			wantHeadline: "Ships the partner auth flow cleanly",
+			wantBody:     "**Verdict:** Looks good.",
+		},
+		{
+			name: "lowercase_label_tolerated",
+			in: "**headline:** drifted casing still parsed\n" +
+				"**Verdict:** rest.",
+			wantHeadline: "drifted casing still parsed",
+			wantBody:     "**Verdict:** rest.",
+		},
+		{
+			name:         "no_headline_returns_empty_headline",
+			in:           "**Verdict:** no headline line at all.",
+			wantHeadline: "",
+			wantBody:     "**Verdict:** no headline line at all.",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h, b := splitHeadlineAndBody(tc.in)
+			if h != tc.wantHeadline {
+				t.Errorf("headline = %q, want %q", h, tc.wantHeadline)
+			}
+			if b != tc.wantBody {
+				t.Errorf("body = %q, want %q", b, tc.wantBody)
+			}
+		})
+	}
+}
+
+// TestExtractHeadline_Fallback covers the path we hit when the LLM drops the
+// required **Headline:** line. Checks: leading bold prefix stripped, result
+// truncated at a word boundary, never mid-word.
+func TestExtractHeadline_Fallback(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   string
+		max  int
+		want string
+	}{
+		{
+			name: "strips_verdict_prefix",
+			in:   "**Verdict:** The code looks good to ship.",
+			max:  100,
+			want: "The code looks good to ship.",
+		},
+		{
+			// The literal acmeorg-account#331 failure. With 80-char truncation
+			// it cut as "dependency/"; the new 100-char + word-boundary path
+			// should end on a whole word and append an ellipsis.
+			name: "word_boundary_truncation",
+			in: "**Verdict:** This PR moves the partner auth flow, prerender fix, " +
+				"and dependency/security updates forward.",
+			max:  60,
+			want: "This PR moves the partner auth flow, prerender fix, and…",
+		},
+		{
+			name: "short_enough_no_truncation",
+			in:   "All good.",
+			max:  100,
+			want: "All good.",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := extractHeadline(tc.in, tc.max)
+			if got != tc.want {
+				t.Errorf("extractHeadline(...) =\n  got: %q\n want: %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestFormatSimulationResults_Format ensures the new 4-line block renders with plain labels
 // and filters out low-confidence + fixed verdicts.
 func TestFormatSimulationResults_Format(t *testing.T) {

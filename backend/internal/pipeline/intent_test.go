@@ -749,8 +749,14 @@ func TestFormatIntentHeader(t *testing.T) {
 		t.Parallel()
 		run := &PipelineRun{PRIntent: &PRIntent{Source: IntentSourceAuthor, Goal: "Fix race"}}
 		got := FormatIntentHeader(run, &IntentVerdict{Delivers: true})
-		if !strings.Contains(got, "✅ Verdict: delivers stated goal") {
+		if !strings.Contains(got, "✅ Intent delivered") {
 			t.Errorf("missing delivers line:\n%s", got)
+		}
+		// Regression guard: must NOT reuse the word "Verdict" in the heading —
+		// the synthesis brief already uses "**Verdict:**" as its prose prefix
+		// and two competing Verdict labels confused readers on PR #331.
+		if strings.Contains(got, "### ✅ Verdict") {
+			t.Errorf("intent heading must not use the word 'Verdict' — synthesis brief owns that:\n%s", got)
 		}
 	})
 
@@ -763,7 +769,7 @@ func TestFormatIntentHeader(t *testing.T) {
 			UnmetCriteria: []string{"dedup concurrent refreshes"},
 		}
 		got := FormatIntentHeader(run, verdict)
-		if !strings.Contains(got, "⚠️ Verdict: does not deliver") {
+		if !strings.Contains(got, "⚠️ Intent not delivered") {
 			t.Errorf("missing does-not-deliver header:\n%s", got)
 		}
 		if !strings.Contains(got, "only adds logging") {
@@ -780,6 +786,29 @@ func TestFormatIntentHeader(t *testing.T) {
 		got := FormatIntentHeader(run, nil)
 		if !strings.Contains(got, "Argus inferred this goal") {
 			t.Errorf("missing inferred annotation:\n%s", got)
+		}
+	})
+
+	// Multi-entry non-goals must render as a bulleted list, not a "; "-joined
+	// run-on. The acmeorg-account#331 review had three non-goals each a full
+	// sentence; "; " joined sentences with their own punctuation looked like
+	// broken prose.
+	t.Run("non_goals_bulleted", func(t *testing.T) {
+		t.Parallel()
+		run := &PipelineRun{PRIntent: &PRIntent{
+			Source: IntentSourceAuthor,
+			Goal:   "ship feature",
+			NonGoals: []string{
+				"Token storage refactor is tracked separately in #334.",
+				"picomatch upgrade is deferred until upstream Next ships a fix.",
+			},
+		}}
+		got := FormatIntentHeader(run, nil)
+		if !strings.Contains(got, "**Not in scope:**\n- Token storage refactor") {
+			t.Errorf("non-goals must render as bulleted list under **Not in scope:** header:\n%s", got)
+		}
+		if strings.Contains(got, "**Not in scope:** Token storage") {
+			t.Errorf("non-goals must not render inline after **Not in scope:** — use a list:\n%s", got)
 		}
 	})
 }
