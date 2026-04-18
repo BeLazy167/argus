@@ -87,11 +87,25 @@ export function useReviewStream(reviewId: string, enabled: boolean) {
   const [liveTokens, setLiveTokens] = useState<LiveTokens | null>(null);
   const seenStagesRef = useRef<Set<PipelineStage>>(new Set());
   const backoffRef = useRef(1000);
+  // terminalRef captures "the review reached a terminal state during this session"
+  // so the reconnect loop stops even when outer state (e.g. `active` from
+  // useInstallation) produces a new reference and re-runs the effect. Without
+  // this, each re-run spins up a fresh WebSocket that the server immediately
+  // closes with 1000 ("review already completed"), flooding the console.
+  const terminalRef = useRef(false);
   const getTokenRef = useRef(getToken);
   useEffect(() => { getTokenRef.current = getToken; }, [getToken]);
 
+  // Reset terminalRef when the target review changes — a fresh reviewId means
+  // a new session that needs its own WebSocket, even if the previous session
+  // completed on the same component instance.
+  useEffect(() => {
+    terminalRef.current = false;
+  }, [reviewId]);
+
   useEffect(() => {
     if (!enabled || !reviewId || !active) return;
+    if (terminalRef.current) return;
 
     let ws: WebSocket | null = null;
     let unmounted = false;
@@ -184,6 +198,7 @@ export function useReviewStream(reviewId: string, enabled: boolean) {
           qc.invalidateQueries({ queryKey: ["reviews"] });
           setStage("completed");
           addEntry({ type: "done", message: "Posted to GitHub", icon: "done" });
+          terminalRef.current = true;
           break;
 
         case "cancelled":
@@ -191,6 +206,7 @@ export function useReviewStream(reviewId: string, enabled: boolean) {
           qc.invalidateQueries({ queryKey: ["reviews"] });
           setStage("cancelled");
           addEntry({ type: "stage", message: `Cancelled at ${evt.data.stage}`, icon: "error" });
+          terminalRef.current = true;
           break;
 
         case "error":
@@ -199,6 +215,7 @@ export function useReviewStream(reviewId: string, enabled: boolean) {
           setFailedStage(evt.data.stage as string);
           setStage("failed");
           addEntry({ type: "error", message: `Failed at ${evt.data.stage}: ${evt.data.error}`, icon: "error" });
+          terminalRef.current = true;
           break;
 
         // Per-sub-step events — backend emits one per distinct LLM call / memory
