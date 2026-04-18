@@ -98,12 +98,21 @@ func (s *Server) handleReviewCommand(ctx context.Context, evt ghpkg.IssueComment
 	}
 	defer s.releaseReview(evt.RepoFullName, evt.PRNumber)
 
+	// Register a cancel function so the dashboard's Stop button can abort this
+	// review. The webhook and manual-API paths already do this; the slash-
+	// command path was missing it — clicking Stop returned HTTP 409 ("review
+	// not in-flight") because loadCancel found nothing in inFlightCancels.
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	s.storeCancel(evt.RepoFullName, evt.PRNumber, cancel)
+	defer s.removeCancel(evt.RepoFullName, evt.PRNumber)
+
 	prEvent.Action = "manual"
 	prEvent.RepoID = evt.RepoID
 	prEvent.PersonaOverride = personaOverride
 	s.logger.Info("review command triggered", "repo", evt.RepoFullName, "pr", evt.PRNumber, "force", force, "by", evt.CommentAuthor)
 
-	if err := s.orchestrator.HandlePREvent(ctx, *prEvent); err != nil {
+	if err := s.orchestrator.HandlePREvent(runCtx, *prEvent); err != nil {
 		s.logger.Error("review command: pipeline failed", "error", err, "pr", evt.PRNumber)
 		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
 		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
