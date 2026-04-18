@@ -731,8 +731,11 @@ func TestFormatIntentHeader(t *testing.T) {
 			AcceptanceCriteria: []string{"dedup"},
 		}}
 		got := FormatIntentHeader(run, nil)
-		if !strings.Contains(got, "📐 What Argus thinks this PR does") {
+		if !strings.Contains(got, "🔍 PR intent vs diff (LLM analysis)") {
 			t.Errorf("missing header:\n%s", got)
+		}
+		if !strings.Contains(got, "not an execution log") {
+			t.Errorf("missing disclaimer line — this guards against silent reversion to the pre-fix framing:\n%s", got)
 		}
 		if !strings.Contains(got, "**Goal:** Fix race") {
 			t.Errorf("missing goal line:\n%s", got)
@@ -960,7 +963,7 @@ func TestIntentCompositionWithBrief(t *testing.T) {
 			t.Fatalf("expected header to render")
 		}
 		composed := header + "\n" + brief
-		headerIdx := strings.Index(composed, "What Argus thinks this PR does")
+		headerIdx := strings.Index(composed, "PR intent vs diff (LLM analysis)")
 		briefIdx := strings.Index(composed, "ships as-is")
 		if headerIdx < 0 || briefIdx < 0 || headerIdx > briefIdx {
 			t.Errorf("header must precede brief; header=%d brief=%d\n%s", headerIdx, briefIdx, composed)

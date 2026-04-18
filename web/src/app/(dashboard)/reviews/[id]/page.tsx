@@ -131,8 +131,19 @@ function stripMarkdownForPreview(s: string): string {
     .trim();
 }
 
-const ARGUS_HEADING_RE = /^#+\s*Argus Review\s*(\(Incremental\))?\s*\n*/i;
-const REVIEWED_LINE_RE = /^Reviewed \d+ files with \d+ comments\.\s*\n*/i;
+// Dashboard strips the boilerplate heading + "Reviewed N files" preamble before
+// displaying synthesis.Summary. Both regexes must stay in lockstep with the
+// backend's formatters in orchestrator.go — if the header format changes, this
+// match falls through and the user sees duplicated structure on the dashboard.
+//
+// Covers both the legacy header ("## Argus Review") and the new emoji/score
+// variant ("## 🔎 Argus · 8/10 — <verdict>"). Optional "(Incremental)" tag.
+const ARGUS_HEADING_RE = /^#+\s*(?:🔎\s*)?Argus(?:\s+Review)?\s*(?:\(Incremental\))?(?:\s*·.*)?\s*\n*/iu;
+
+// Handles "Reviewed" + "Re-reviewed"; singular + plural ("1 file with 1 comment"
+// vs "2 files with 3 comments") — the pluralize() helper on the backend emits
+// both. Drops trailing newlines so downstream .replace() chain is idempotent.
+const REVIEWED_LINE_RE = /^Re-?reviewed \d+ files? with \d+ comments?\.\s*\n*/i;
 const TRIM_NEWLINES_RE = /^\n+|\n+$/g;
 const FILE_HEADING_RE = /^#{3}\s+`[^`]+`/m;
 const COVERAGE_RE = /\n## (Issue Coverage|Cross-Repo PR Coverage)/;

@@ -644,13 +644,20 @@ func FormatIntentHeader(run *PipelineRun, verdict *IntentVerdict) string {
 	}
 	p := run.PRIntent
 	var sb strings.Builder
-	sb.WriteString("### 📐 What Argus thinks this PR does\n")
+	// Section title framed as LLM analysis, not an execution log. The prior
+	// label ("What Argus thinks this PR does") + "Criteria checked" bullets
+	// misled readers into thinking runtime flows were actually exercised — see
+	// the acmeorg-account#335 review where OAuth/cold-start criteria rendered
+	// with ✅ framing. Argus reads diff text; it cannot click buttons or clone
+	// repos. The disclaimer line makes the static-analysis boundary explicit.
+	sb.WriteString("### 🔍 PR intent vs diff (LLM analysis)\n")
+	sb.WriteString("_Argus read the diff against the stated intent. This is not an execution log — reviewer still needs to test behavior._\n\n")
 	sb.WriteString("**Goal:** " + p.Goal + "\n")
 	if len(p.NonGoals) > 0 {
 		sb.WriteString("**Not in scope:** " + strings.Join(p.NonGoals, "; ") + "\n")
 	}
 	if len(p.AcceptanceCriteria) > 0 {
-		sb.WriteString("**Criteria checked:**\n")
+		sb.WriteString("**Stated acceptance criteria** _(from PR/issue — not independently verified):_\n")
 		for _, c := range p.AcceptanceCriteria {
 			sb.WriteString("- " + c + "\n")
 		}
@@ -760,7 +767,7 @@ Input is a concatenation of: PR title, PR body, linked GitHub issue(s), commit m
 Produce a single JSON object with exactly these fields:
   - "goal":                string. The single-sentence goal the author claims this PR achieves. Use the author's own framing. If the author's intent is unclear, infer the most likely goal from commits + diff — but set "source" to "inferred".
   - "non_goals":           array of strings. Things the author explicitly marked out of scope, deferred, or "will be done in a follow-up". Leave empty if nothing is called out.
-  - "acceptance_criteria": array of strings. Concrete, testable outcomes the PR must satisfy to be considered done. Pull from issue acceptance lists, checklists in the PR body, or "this PR must…" phrasing. Do not invent criteria the author never stated.
+  - "acceptance_criteria": array of strings. Concrete, testable outcomes the PR must satisfy to be considered done. Pull from issue acceptance lists, checklists in the PR body, or "this PR must…" phrasing. Prefer diff-verifiable criteria (file paths, symbol names, API contracts, conditional branches) — they can be statically checked from the diff. Criteria describing runtime flows (browser sessions, OAuth, cold-start, cache warm-up, login UI) are acceptable when the author wrote them verbatim; they give reviewers useful context even though Argus cannot execute them. Do not invent criteria the author never stated.
   - "expected_files":      array of strings. File paths the author explicitly mentioned as being touched. Do not guess from the diff.
   - "risk_flags":          array of short tags naming risk areas the author called out or that are obvious from the context (e.g. "concurrency", "auth", "migration", "data-loss"). Keep under 6.
   - "source":              one of "author" (pulled from human-written text), "inferred" (no author text, synthesized from commits/diff), or "empty" (no usable signal).

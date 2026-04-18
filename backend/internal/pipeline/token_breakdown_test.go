@@ -28,7 +28,11 @@ func TestRenderTokenBreakdown(t *testing.T) {
 			wantEmpty: true,
 		},
 		{
-			name: "single skim review — bucketed as 'review'",
+			// Skim pass leaves Specialist="", so the internal bucket key is
+			// "review" — the row label MUST collapse to plain "Review" (no
+			// "Review · review" duplication). Guards against reverting the
+			// renderer fix from PR #335's cleanup pass.
+			name: "single skim review — bucketed as 'review', rendered as plain 'Review'",
 			tu: &RunTokenUsage{
 				Total:  StageTokens{TotalTokens: 500, Cost: 0.01},
 				Triage: StageTokens{TotalTokens: 100, Cost: 0.002},
@@ -36,8 +40,8 @@ func TestRenderTokenBreakdown(t *testing.T) {
 					{TotalTokens: 400, Cost: 0.008, File: "a.go"},
 				},
 			},
-			wantLabels: []string{"Triage", "Review · review"},
-			wantAbsent: []string{"Review · correctness", "Review · security"},
+			wantLabels: []string{"Triage", "| Review |"},
+			wantAbsent: []string{"Review · review", "Review · correctness", "Review · security"},
 		},
 		{
 			name: "deep review with 4 specialists — each shown separately",

@@ -93,14 +93,20 @@ export function useReviewStream(reviewId: string, enabled: boolean) {
   // this, each re-run spins up a fresh WebSocket that the server immediately
   // closes with 1000 ("review already completed"), flooding the console.
   const terminalRef = useRef(false);
+  // synthesisSeenRef dedupes the `synthesis` timeline row. `synthesis` fires
+  // mid-pipeline (before `completed`), so `terminalRef` doesn't cover it. If
+  // the socket drops between synthesis and completed and the reconnect replays
+  // history, synthesis would otherwise add a second "Review complete" row.
+  const synthesisSeenRef = useRef(false);
   const getTokenRef = useRef(getToken);
   useEffect(() => { getTokenRef.current = getToken; }, [getToken]);
 
-  // Reset terminalRef when the target review changes — a fresh reviewId means
+  // Reset refs when the target review changes — a fresh reviewId means
   // a new session that needs its own WebSocket, even if the previous session
   // completed on the same component instance.
   useEffect(() => {
     terminalRef.current = false;
+    synthesisSeenRef.current = false;
   }, [reviewId]);
 
   useEffect(() => {
@@ -186,16 +192,25 @@ export function useReviewStream(reviewId: string, enabled: boolean) {
           break;
 
         case "synthesis":
+          // patchReview is idempotent on re-delivery (it merges fields); the
+          // guard only dedupes the visible timeline row.
           patchReview({
             summary: evt.data.summary as string,
             score: evt.data.score as number,
           });
+          if (synthesisSeenRef.current) break;
           addEntry({ type: "done", message: `Review complete \u2014 score ${evt.data.score}/10`, icon: "done" });
+          synthesisSeenRef.current = true;
           break;
 
+        // Terminal handlers: invalidation runs BEFORE the dedupe guard so
+        // a replayed terminal event still refreshes caches (e.g. replica-lag
+        // left stale data on the first delivery). Only the visible row add
+        // and the stage mutation are gated behind terminalRef.
         case "completed":
           qc.invalidateQueries({ queryKey: ["review", reviewId] });
           qc.invalidateQueries({ queryKey: ["reviews"] });
+          if (terminalRef.current) break;
           setStage("completed");
           addEntry({ type: "done", message: "Posted to GitHub", icon: "done" });
           terminalRef.current = true;
@@ -204,6 +219,7 @@ export function useReviewStream(reviewId: string, enabled: boolean) {
         case "cancelled":
           qc.invalidateQueries({ queryKey: ["review", reviewId] });
           qc.invalidateQueries({ queryKey: ["reviews"] });
+          if (terminalRef.current) break;
           setStage("cancelled");
           addEntry({ type: "stage", message: `Cancelled at ${evt.data.stage}`, icon: "error" });
           terminalRef.current = true;
@@ -212,6 +228,7 @@ export function useReviewStream(reviewId: string, enabled: boolean) {
         case "error":
           qc.invalidateQueries({ queryKey: ["review", reviewId] });
           qc.invalidateQueries({ queryKey: ["reviews"] });
+          if (terminalRef.current) break;
           setFailedStage(evt.data.stage as string);
           setStage("failed");
           addEntry({ type: "error", message: `Failed at ${evt.data.stage}: ${evt.data.error}`, icon: "error" });
@@ -404,6 +421,13 @@ export function useReviewStream(reviewId: string, enabled: boolean) {
 
     const connect = async () => {
       if (unmounted) return;
+      // Terminal-state short-circuit. The effect-setup guard only fires on
+      // effect re-runs; this path reaches `connect` via `ws.onclose →
+      // setTimeout(connect, …)` which bypasses the effect, so we must
+      // re-check here. Otherwise a rewritten close code (Fly proxy flips
+      // 1000 → 1006) opens a fresh socket on a completed review and the
+      // server replays terminal events forever.
+      if (terminalRef.current) return;
       const token = await getTokenRef.current();
       if (unmounted || !token) return;
 
@@ -429,6 +453,11 @@ export function useReviewStream(reviewId: string, enabled: boolean) {
       ws.onclose = (e) => {
         setConnected(false);
         if (unmounted) return;
+        // Terminal-state short-circuit. Required because the Fly WS proxy
+        // can rewrite `StatusNormalClosure` (1000) to 1006, making the
+        // 1000-check below unreliable in production. Without this, a
+        // completed review keeps reopening sockets in a tight loop.
+        if (terminalRef.current) return;
         // Don't reconnect on clean close (server sent terminal event)
         if (e.code === 1000) return;
         // Exponential backoff: 1s → 2s → 4s → 8s → 16s max
