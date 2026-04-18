@@ -44,10 +44,6 @@ const (
 	intentMaxCommits        = 20
 	intentMaxLinkedPRs      = 5
 	intentGlobalCapChars    = 32000
-	// 800 was too tight for gpt-5.x — reasoning tokens count against
-	// max_completion_tokens, so the JSON output was getting 0 tokens left.
-	// 4000 leaves room for both reasoning and the structured intent payload.
-	intentExtractionMaxToks  = 4000
 	intentCommitFetchTimeout = 10 * time.Second
 
 	// Post-parse caps on LLM output fields. The extraction system prompt asks
@@ -126,7 +122,7 @@ func (ie *IntentExtractionStage) Execute(ctx context.Context, run *PipelineRun) 
 		Model:       cfg.Model,
 		System:      intentExtractionSystemPrompt,
 		Messages:    []llm.Message{{Role: "user", Content: raw}},
-		MaxTokens:   intentExtractionMaxToks,
+		MaxTokens:   intentMaxTokens,
 		Temperature: 0.2,
 		JSONMode:    true,
 	})

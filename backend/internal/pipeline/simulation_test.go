@@ -195,9 +195,9 @@ func TestFormatSimulationResults_Format(t *testing.T) {
 	mustOmit := []string{
 		"passes — should NOT render",
 		"low confidence — should NOT render",
-		"**Root cause:**",  // old-format label; should be gone
-		"**Impact:**",      // old-format label; should be gone
-		"**Suggestion:**",  // old-format label; should be gone
+		"**Root cause:**", // old-format label; should be gone
+		"**Impact:**",     // old-format label; should be gone
+		"**Suggestion:**", // old-format label; should be gone
 	}
 	for _, needle := range mustOmit {
 		if strings.Contains(out, needle) {

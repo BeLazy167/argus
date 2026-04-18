@@ -200,13 +200,20 @@ func normalizeBody(body string) string {
 // FindingFingerprint produces a stable customId for a review finding.
 // Format: {owner}/{repo}/{sanitized-file}/{hash12} (max 100 chars).
 // Returns empty string if owner, repo, or filePath is empty.
+//
+// customID builders (here + SynthesisCustomID / PRSummaryCustomID /
+// PatternCustomID / FeedbackCustomID) route through CustomIDSanitize — it
+// strips parens, brackets, slashes, dots, etc. that Supermemory rejects on
+// customId but not on container tags. The older tagSanitizer is still used
+// by Owner/Repo/NegativePattern tag helpers where the full char set
+// (especially `.` and `:`) is retained for tag-human-readability.
 func FindingFingerprint(owner, repo, filePath, category, body string) string {
 	if owner == "" || repo == "" || filePath == "" {
 		return ""
 	}
 	h := sha256.Sum256([]byte(filePath + "|" + category + "|" + normalizeBody(body)))
 	hash := hex.EncodeToString(h[:6]) // 12 hex chars
-	prefix := fmt.Sprintf("%s--%s--%s", owner, repo, tagSanitizer.Replace(filePath))
+	prefix := fmt.Sprintf("%s--%s--%s", CustomIDSanitize(owner), CustomIDSanitize(repo), CustomIDSanitize(filePath))
 	return truncateIDWithSuffix(prefix, hash)
 }
 
@@ -214,7 +221,7 @@ func FindingFingerprint(owner, repo, filePath, category, body string) string {
 // Uses a path hash when the path is too long, to avoid collisions from truncation.
 func SynthesisCustomID(owner, repo, filePath string) string {
 	suffix := "synthesis"
-	prefix := fmt.Sprintf("%s--%s--%s", owner, repo, tagSanitizer.Replace(filePath))
+	prefix := fmt.Sprintf("%s--%s--%s", CustomIDSanitize(owner), CustomIDSanitize(repo), CustomIDSanitize(filePath))
 	id := prefix + "--" + suffix
 	if len(id) <= 100 {
 		return id
@@ -222,13 +229,13 @@ func SynthesisCustomID(owner, repo, filePath string) string {
 	// Path too long — include a hash for uniqueness
 	h := sha256.Sum256([]byte(filePath))
 	hash := hex.EncodeToString(h[:6])
-	return truncateIDWithSuffix(fmt.Sprintf("%s--%s--%s", owner, repo, hash), suffix)
+	return truncateIDWithSuffix(fmt.Sprintf("%s--%s--%s", CustomIDSanitize(owner), CustomIDSanitize(repo), hash), suffix)
 }
 
 // PRSummaryCustomID returns a stable customId for a PR summary document.
 func PRSummaryCustomID(owner, repo string, prNumber int) string {
 	suffix := fmt.Sprintf("pr-%d-summary", prNumber)
-	prefix := fmt.Sprintf("%s--%s", owner, repo)
+	prefix := fmt.Sprintf("%s--%s", CustomIDSanitize(owner), CustomIDSanitize(repo))
 	return truncateIDWithSuffix(prefix, suffix)
 }
 
@@ -236,7 +243,7 @@ func PRSummaryCustomID(owner, repo string, prNumber int) string {
 func PatternCustomID(owner, repo, source, content string) string {
 	h := sha256.Sum256([]byte(normalizeBody(content)))
 	hash := hex.EncodeToString(h[:6])
-	prefix := fmt.Sprintf("%s--%s--%s", owner, repo, source)
+	prefix := fmt.Sprintf("%s--%s--%s", CustomIDSanitize(owner), CustomIDSanitize(repo), CustomIDSanitize(source))
 	return truncateIDWithSuffix(prefix, hash)
 }
 
@@ -459,7 +466,7 @@ func FormatPositivePattern(category, filePath string, line int, body string) str
 func FeedbackCustomID(owner, repo, filePath, category, body string) string {
 	h := sha256.Sum256([]byte(filePath + "|" + category + "|" + normalizeBody(body) + "|feedback"))
 	hash := hex.EncodeToString(h[:6])
-	prefix := fmt.Sprintf("%s--%s--feedback", owner, repo)
+	prefix := fmt.Sprintf("%s--%s--feedback", CustomIDSanitize(owner), CustomIDSanitize(repo))
 	return truncateIDWithSuffix(prefix, hash)
 }
 
