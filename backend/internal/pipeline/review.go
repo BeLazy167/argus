@@ -374,6 +374,13 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p revie
 			MaxTokens:   cfg.MaxTokens,
 			Temperature: cfg.Temperature,
 			Tools:       tools,
+			// Specialists need some chain-of-thought to catch non-obvious
+			// bugs, but the default (or high) reasoning burns our token
+			// budget on invisible thinking. "low" is the sweet spot: catches
+			// real findings without the 3-minute TTFT of xhigh/high. See
+			// artificialanalysis.ai/models/gpt-5-4 for the latency curve.
+			// No-op on non-gpt-5.x models (field ignored).
+			ReasoningEffort: "low",
 		})
 		if err != nil {
 			return review, tokens, fmt.Errorf("LLM completion %s: %w", label, err)

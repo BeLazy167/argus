@@ -1381,8 +1381,14 @@ func (o *Orchestrator) generateConversationalBrief(ctx context.Context, run *Pip
 		Model:       cfg.Model,
 		System:      synthesisBriefSystemPrompt,
 		Messages:    []llm.Message{{Role: "user", Content: prompt}},
-		MaxTokens:   800,
+		// 800 was too tight: gpt-5.x reasoning tokens share this budget; the
+		// visible brief kept coming back truncated. 4000 leaves room for both
+		// reasoning and a 2-3 sentence conversational output.
+		MaxTokens:   4000,
 		Temperature: 0.7,
+		// Brief needs a little thought to pick the right framing — "low"
+		// gives quality without the TTFT tail of "medium".
+		ReasoningEffort: "low",
 	})
 	if err != nil {
 		o.logger.Warn("synthesis brief LLM call failed, using fallback", "error", err)
@@ -2969,17 +2975,17 @@ Given review comments on a single file, produce ONE concise document:
 Reference function names and line ranges (not exact numbers — those shift).
 Max 200 words. Be concrete.`
 
-	// Timeout to avoid stalling post-pipeline
-	synthCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
+	// No wrapper timeout. The prior 30s ceiling was too tight once we moved to
+	// gpt-5.4 on Azure (per-call latency ~30-60s × up to 10 files). The caller's
+	// prePostCtx still bounds the whole pre-post block. If each file call hangs
+	// indefinitely we'll notice in logs; add a per-call bound then.
 	// Sanitize + truncate user-controlled fields
 	safeTitle := sanitizeUserInput(util.Truncate(run.PREvent.PRTitle, 200, false))
 	safeAuthor := sanitizeUserInput(util.Truncate(run.PREvent.PRAuthor, 100, false))
 
 	var succeeded, failed int
 	for _, fc := range qualifying {
-		if synthCtx.Err() != nil {
+		if ctx.Err() != nil {
 			o.logger.Warn("synthesis aborted: context cancelled", "succeeded", succeeded, "remaining", len(qualifying)-succeeded-failed)
 			return
 		}
@@ -2991,11 +2997,11 @@ Max 200 words. Be concrete.`
 				c.Severity, c.Category, c.Line, c.Specialist, c.Score, c.Body))
 		}
 
-		resp, err := provider.Complete(synthCtx, llm.CompletionRequest{
+		resp, err := provider.Complete(ctx, llm.CompletionRequest{
 			Model:       cfg.Model,
 			System:      synthesisSystem,
 			Messages:    []llm.Message{{Role: "user", Content: sb.String()}},
-			MaxTokens:   400,
+			MaxTokens:   4000,
 			Temperature: 0.3,
 		})
 		if err != nil {
@@ -3016,7 +3022,7 @@ Max 200 words. Be concrete.`
 		run.Tokens.addToTotal(fileTok)
 
 		customID := memory.SynthesisCustomID(owner, repo, fc.path)
-		_, err = run.Indexer.IndexRepoPattern(synthCtx, owner, repo, resp.Content, customID, map[string]string{
+		_, err = run.Indexer.IndexRepoPattern(ctx, owner, repo, resp.Content, customID, map[string]string{
 			"source": "synthesis",
 			"pr":     fmt.Sprintf("%d", run.PREvent.PRNumber),
 			"file":   fc.path,
@@ -3922,14 +3928,18 @@ func (o *Orchestrator) leadBrief(ctx context.Context, run *PipelineRun) (*LeadBr
 	prompt.WriteString(fmt.Sprintf("PR #%d: \"%s\" by %s\n\nChanged files:\n", run.PREvent.PRNumber, safeTitle, safeAuthor))
 	writeDiffSummary(&prompt, run.Diff.Files, 500)
 
-	briefCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
-
-	resp, err := provider.Complete(briefCtx, llm.CompletionRequest{
+	// No per-stage timeout. Azure gpt-5.4 TTFT benchmarks at ~215s
+	// (artificialanalysis.ai/models/gpt-5-4), so the previous 20s wrapper
+	// guaranteed false timeouts. The outer pipeline ctx remains the only
+	// bound. MaxTokens bumped 1500→8000 because gpt-5.x reasoning tokens
+	// count against the same budget; 1500 got fully consumed by invisible
+	// reasoning on acmeorg-account#335, leaving 5 tokens for the JSON output
+	// (observed as `completion_tokens=5, response="[]"`).
+	resp, err := provider.Complete(ctx, llm.CompletionRequest{
 		Model:       cfg.Model,
 		System:      leadBriefSystemPrompt,
 		Messages:    []llm.Message{{Role: "user", Content: prompt.String()}},
-		MaxTokens:   1500,
+		MaxTokens:   8000,
 		Temperature: 0.2,
 	})
 	if err != nil {
@@ -4003,14 +4013,12 @@ func (o *Orchestrator) leadBroadcast(ctx context.Context, run *PipelineRun, allR
 	writeAgentSummary(&prompt, allResults)
 	writeCrossCutting(&prompt, brief)
 
-	broadcastCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
-
-	resp, err := provider.Complete(broadcastCtx, llm.CompletionRequest{
+	// See leadBrief for rationale (Azure gpt-5.4 TTFT + reasoning-token budget).
+	resp, err := provider.Complete(ctx, llm.CompletionRequest{
 		Model:       cfg.Model,
 		System:      leadBroadcastSystemPrompt,
 		Messages:    []llm.Message{{Role: "user", Content: prompt.String()}},
-		MaxTokens:   800,
+		MaxTokens:   4000,
 		Temperature: 0.2,
 	})
 	if err != nil {
@@ -4064,14 +4072,12 @@ func (o *Orchestrator) agentSecondPass(ctx context.Context, run *PipelineRun, si
 		}
 	}
 
-	passCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
-
-	resp, err := provider.Complete(passCtx, llm.CompletionRequest{
+	// See leadBrief for rationale (Azure gpt-5.4 TTFT + reasoning-token budget).
+	resp, err := provider.Complete(ctx, llm.CompletionRequest{
 		Model:       cfg.Model,
 		System:      systemPrompt,
 		Messages:    []llm.Message{{Role: "user", Content: prompt.String()}},
-		MaxTokens:   600,
+		MaxTokens:   4000,
 		Temperature: 0.3,
 	})
 	if err != nil {
@@ -4164,14 +4170,12 @@ func (o *Orchestrator) analyzeBlastRadius(ctx context.Context, run *PipelineRun,
 		prompt.WriteString(fmt.Sprintf("\n--- %s ---\n%s\n", fp, util.Truncate(content, 1500, false)))
 	}
 
-	blastCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
-
-	resp, err := provider.Complete(blastCtx, llm.CompletionRequest{
+	// See leadBrief for rationale (Azure gpt-5.4 TTFT + reasoning-token budget).
+	resp, err := provider.Complete(ctx, llm.CompletionRequest{
 		Model:       cfg.Model,
 		System:      blastRadiusAgentPrompt,
 		Messages:    []llm.Message{{Role: "user", Content: prompt.String()}},
-		MaxTokens:   600,
+		MaxTokens:   4000,
 		Temperature: 0.2,
 	})
 	if err != nil {
@@ -4228,14 +4232,12 @@ func (o *Orchestrator) leadCrossCheck(ctx context.Context, run *PipelineRun, all
 	writeDetailedAgentFindings(&prompt, allResults)
 	writeCrossCutting(&prompt, brief)
 
-	crossCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
-	defer cancel()
-
-	resp, err := provider.Complete(crossCtx, llm.CompletionRequest{
+	// See leadBrief for rationale (Azure gpt-5.4 TTFT + reasoning-token budget).
+	resp, err := provider.Complete(ctx, llm.CompletionRequest{
 		Model:       cfg.Model,
 		System:      leadCrossCheckSystemPrompt,
 		Messages:    []llm.Message{{Role: "user", Content: prompt.String()}},
-		MaxTokens:   2000,
+		MaxTokens:   8000,
 		Temperature: 0.3,
 	})
 	if err != nil {

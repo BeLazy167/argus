@@ -166,6 +166,12 @@ func (p *ChatProvider) Complete(ctx context.Context, req CompletionRequest) (Com
 		body.MaxTokens = req.MaxTokens
 	}
 	body.Temperature = &req.Temperature
+	// Caller-provided ReasoningEffort flows through to both possible shapes
+	// (top-level for Azure, wrapped for OpenRouter); adjustRequestForProvider
+	// picks the right one and sets a gpt-5.x default when unset.
+	if req.ReasoningEffort != "" {
+		body.ReasoningEffort = req.ReasoningEffort
+	}
 	p.adjustRequestForProvider(&body, req.Model)
 
 	jsonBody, err := json.Marshal(body)
@@ -251,14 +257,19 @@ type chatMessage struct {
 }
 
 type chatRequest struct {
-	Model               string            `json:"model"`
-	Messages            []chatMessage     `json:"messages"`
-	MaxTokens           int               `json:"max_tokens,omitempty"`
-	MaxCompletionTokens int               `json:"max_completion_tokens,omitempty"`
-	Temperature         *float64          `json:"temperature,omitempty"`
-	Tools               []Tool            `json:"tools,omitempty"`
-	Reasoning           *reasoningConfig  `json:"reasoning,omitempty"`
-	ResponseFormat      *responseFormat   `json:"response_format,omitempty"`
+	Model               string           `json:"model"`
+	Messages            []chatMessage    `json:"messages"`
+	MaxTokens           int              `json:"max_tokens,omitempty"`
+	MaxCompletionTokens int              `json:"max_completion_tokens,omitempty"`
+	Temperature         *float64         `json:"temperature,omitempty"`
+	Tools               []Tool           `json:"tools,omitempty"`
+	// Reasoning is OpenRouter's wrapped form — {"reasoning":{"effort":"..."}}.
+	Reasoning *reasoningConfig `json:"reasoning,omitempty"`
+	// ReasoningEffort is Azure/OpenAI's top-level form for gpt-5.x reasoning
+	// models. Must not overlap with Reasoning: adjustRequestForProvider picks
+	// the right shape per provider.
+	ReasoningEffort string          `json:"reasoning_effort,omitempty"`
+	ResponseFormat  *responseFormat `json:"response_format,omitempty"`
 }
 
 type responseFormat struct {
@@ -293,9 +304,19 @@ func (p *ChatProvider) adjustRequestForProvider(body *chatRequest, model string)
 		body.Temperature = nil
 
 	case requiresMaxCompletionTokens(m):
-		// GPT-5+ and other newer models require max_completion_tokens instead of max_tokens
+		// GPT-5+ require max_completion_tokens instead of max_tokens.
 		body.MaxCompletionTokens = body.MaxTokens
 		body.MaxTokens = 0
+		// gpt-5.x is a reasoning model. Azure's implicit default reasoning
+		// level silently consumes the entire max_completion_tokens budget
+		// before emitting any visible output — the observed failure mode on
+		// acmeorg-account#335 was `completion_tokens=5, response="[]"` across
+		// every specialist. Force "minimal" unless the caller explicitly set
+		// an effort via req.ReasoningEffort. Callers that want deeper
+		// reasoning (specialists, synthesis) pass "low" or "medium".
+		if body.ReasoningEffort == "" {
+			body.ReasoningEffort = "minimal"
+		}
 
 	case p.name == "anthropic" && isAnthropicThinking(m):
 		// Anthropic extended thinking requires temperature=1.0

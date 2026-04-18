@@ -204,5 +204,53 @@ func TestAdjustRequestForProvider(t *testing.T) {
 		if body.Reasoning != nil {
 			t.Error("expected no reasoning config")
 		}
+		if body.ReasoningEffort != "" {
+			t.Errorf("expected no ReasoningEffort for non-reasoning model, got %q", body.ReasoningEffort)
+		}
+	})
+
+	// gpt-5.x is a reasoning model on Azure. Without an explicit effort, Azure's
+	// default consumes the token budget on invisible reasoning. Guard: the adapter
+	// forces "minimal" so coordination calls (leadBrief, intent, etc.) get a
+	// visible response. Callers can opt up to "low"/"medium" for quality-sensitive
+	// stages.
+	t.Run("gpt5_defaults_to_minimal_reasoning", func(t *testing.T) {
+		cp := ChatProvider{name: "azure"}
+		temp := 0.2
+		body := chatRequest{MaxTokens: 8000, Temperature: &temp}
+		cp.adjustRequestForProvider(&body, "gpt-5.4")
+
+		if body.MaxCompletionTokens != 8000 {
+			t.Errorf("expected MaxCompletionTokens=8000, got %d", body.MaxCompletionTokens)
+		}
+		if body.MaxTokens != 0 {
+			t.Errorf("expected MaxTokens=0, got %d", body.MaxTokens)
+		}
+		if body.ReasoningEffort != "minimal" {
+			t.Errorf("expected ReasoningEffort=minimal, got %q", body.ReasoningEffort)
+		}
+	})
+
+	t.Run("gpt5_explicit_effort_preserved", func(t *testing.T) {
+		cp := ChatProvider{name: "azure"}
+		temp := 0.2
+		// Caller-set effort (simulating specialists passing "low") must survive.
+		body := chatRequest{MaxTokens: 4000, Temperature: &temp, ReasoningEffort: "low"}
+		cp.adjustRequestForProvider(&body, "gpt-5.4")
+
+		if body.ReasoningEffort != "low" {
+			t.Errorf("expected ReasoningEffort=low preserved, got %q", body.ReasoningEffort)
+		}
+	})
+
+	t.Run("non_gpt5_no_reasoning_effort_default", func(t *testing.T) {
+		cp := ChatProvider{name: "azure"}
+		temp := 0.2
+		body := chatRequest{MaxTokens: 4096, Temperature: &temp}
+		cp.adjustRequestForProvider(&body, "gpt-4o-2024-08-06")
+
+		if body.ReasoningEffort != "" {
+			t.Errorf("non-gpt-5 model must not get a reasoning_effort default, got %q", body.ReasoningEffort)
+		}
 	})
 }

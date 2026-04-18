@@ -37,15 +37,17 @@ var intentTagRe = regexp.MustCompile(`(?i)</?pr_intent>`)
 // to prevent one enormous source (a novella-length PR body, a ranty issue) from
 // crowding out the others. intentGlobalCapChars is the final safety net.
 const (
-	intentMaxPRBodyChars     = 8000
-	intentMaxIssueBodyChars  = 4000
-	intentMaxIssues          = 3
-	intentMaxCommitMsgChars  = 500
-	intentMaxCommits         = 20
-	intentMaxLinkedPRs       = 5
-	intentGlobalCapChars     = 32000
-	intentExtractionMaxToks  = 800
-	intentExtractionTimeout  = 30 * time.Second
+	intentMaxPRBodyChars    = 8000
+	intentMaxIssueBodyChars = 4000
+	intentMaxIssues         = 3
+	intentMaxCommitMsgChars = 500
+	intentMaxCommits        = 20
+	intentMaxLinkedPRs      = 5
+	intentGlobalCapChars    = 32000
+	// 800 was too tight for gpt-5.x — reasoning tokens count against
+	// max_completion_tokens, so the JSON output was getting 0 tokens left.
+	// 4000 leaves room for both reasoning and the structured intent payload.
+	intentExtractionMaxToks  = 4000
 	intentCommitFetchTimeout = 10 * time.Second
 
 	// Post-parse caps on LLM output fields. The extraction system prompt asks
@@ -116,10 +118,11 @@ func (ie *IntentExtractionStage) Execute(ctx context.Context, run *PipelineRun) 
 		return nil
 	}
 
-	extractCtx, cancel := context.WithTimeout(ctx, intentExtractionTimeout)
-	defer cancel()
-
-	resp, err := provider.Complete(extractCtx, llm.CompletionRequest{
+	// No per-stage timeout. Azure gpt-5.4 TTFT alone runs ~215s on xhigh
+	// reasoning (artificialanalysis.ai/models/gpt-5-4) — the prior 30s cap
+	// silently produced intent_tokens=0 on ~25% of prod reviews. Outer
+	// pipeline ctx still bounds the call.
+	resp, err := provider.Complete(ctx, llm.CompletionRequest{
 		Model:       cfg.Model,
 		System:      intentExtractionSystemPrompt,
 		Messages:    []llm.Message{{Role: "user", Content: raw}},

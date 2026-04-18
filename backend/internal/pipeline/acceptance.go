@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/BeLazy167/argus/backend/internal/llm"
 	"github.com/BeLazy167/argus/backend/internal/store"
@@ -198,14 +197,13 @@ func judgeIssue(
 		prompt.WriteString(fmt.Sprintf("%d. %s\n", i+1, c))
 	}
 
-	callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	resp, err := provider.Complete(callCtx, llm.CompletionRequest{
+	// No per-stage timeout — see intent.go for rationale (gpt-5.4 TTFT ~215s).
+	// MaxTokens bumped 800→4000 to survive gpt-5.x reasoning-token burn.
+	resp, err := provider.Complete(ctx, llm.CompletionRequest{
 		Model:       cfg.Model,
 		System:      acceptanceJudgeSystemPrompt,
 		Messages:    []llm.Message{{Role: "user", Content: prompt.String()}},
-		MaxTokens:   800,
+		MaxTokens:   4000,
 		Temperature: 0.1,
 		JSONMode:    true,
 	})

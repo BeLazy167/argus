@@ -40,6 +40,14 @@ type CompletionRequest struct {
 	MaxTokens   int
 	Tools       []Tool `json:"tools,omitempty"`
 	JSONMode    bool   // When true, sends response_format: {"type": "json_object"}
+	// ReasoningEffort controls chain-of-thought depth for reasoning models
+	// (gpt-5.x, o-series). Valid values: "minimal", "low", "medium", "high",
+	// "xhigh". Empty means provider-default — but for gpt-5.x the adapter in
+	// chat.go forces "minimal" unless set, because Azure's default reasoning
+	// level silently consumes the entire max_completion_tokens budget before
+	// emitting visible output. Callers that want deeper reasoning (specialists,
+	// synthesis) must set this explicitly.
+	ReasoningEffort string
 }
 
 type Message struct {
