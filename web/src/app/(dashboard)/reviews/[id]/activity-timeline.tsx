@@ -1,7 +1,19 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { FileCode, MessageSquare, Zap, Check, X, Loader2, ChevronUp } from "lucide-react";
+import {
+  FileCode,
+  MessageSquare,
+  Zap,
+  Check,
+  X,
+  Loader2,
+  ChevronUp,
+  Database,
+  ShieldCheck,
+  Play,
+  FileText,
+} from "lucide-react";
 import type { TimelineEntry, LiveTokens } from "@/lib/hooks/use-review-stream";
 
 type Props = {
@@ -18,6 +30,11 @@ const dotColor: Record<string, string> = {
   scoring: "bg-purple-400",
   done: "bg-green-400",
   error: "bg-red-400",
+  memory: "bg-emerald-400",
+  validation: "bg-cyan-400",
+  simulation: "bg-indigo-400",
+  brief: "bg-teal-400",
+  reply: "bg-fuchsia-400",
 };
 
 const iconMap: Record<string, typeof FileCode> = {
@@ -27,6 +44,11 @@ const iconMap: Record<string, typeof FileCode> = {
   scoring: Zap,
   done: Check,
   error: X,
+  memory: Database,
+  validation: ShieldCheck,
+  simulation: Play,
+  brief: FileText,
+  reply: MessageSquare,
 };
 
 function formatElapsed(seconds: number): string {

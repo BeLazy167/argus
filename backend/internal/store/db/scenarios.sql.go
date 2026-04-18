@@ -258,20 +258,42 @@ func (q *Queries) IncrementScenarioTriggerCount(ctx context.Context, id int64) e
 }
 
 const listScenariosForFiles = `-- name: ListScenariosForFiles :many
+WITH recent_runs AS (
+    SELECT
+        sr.scenario_id,
+        COUNT(*)::double precision                                                    AS n,
+        COUNT(*) FILTER (WHERE sr.verdict IN ('broken','partial'))::double precision  AS wins
+    FROM scenario_runs sr
+    JOIN scenarios     s  ON s.id = sr.scenario_id
+    WHERE s.repo_id = $1
+      AND sr.created_at > NOW() - INTERVAL '90 days'
+    GROUP BY sr.scenario_id
+),
+repo_total AS (
+    -- GREATEST(..., 1) avoids ln(0) on a fresh repo with no prior runs.
+    SELECT GREATEST(COALESCE(SUM(n), 0), 1)::double precision AS t
+    FROM recent_runs
+)
 SELECT
-    id, installation_id, repo_id, description, source,
-    COALESCE(source_ref,'') AS source_ref, files, modules,
-    COALESCE(severity,'medium') AS severity, active, created_at,
-    COALESCE(steps,'[]') AS steps,
-    COALESCE(initial_state,'') AS initial_state,
-    COALESCE(expected_outcome,'') AS expected_outcome,
-    COALESCE(is_outdated,FALSE) AS is_outdated,
-    last_run_at,
-    last_verdict, last_confidence, last_why, last_fix, last_pr_number, last_review_id,
-    trigger_count
-FROM scenarios
-WHERE repo_id = $1 AND active = TRUE AND files && $2::text[]
-ORDER BY trigger_count DESC, created_at DESC
+    s.id, s.installation_id, s.repo_id, s.description, s.source,
+    COALESCE(s.source_ref,'') AS source_ref, s.files, s.modules,
+    COALESCE(s.severity,'medium') AS severity, s.active, s.created_at,
+    COALESCE(s.steps,'[]') AS steps,
+    COALESCE(s.initial_state,'') AS initial_state,
+    COALESCE(s.expected_outcome,'') AS expected_outcome,
+    COALESCE(s.is_outdated,FALSE) AS is_outdated,
+    s.last_run_at,
+    s.last_verdict, s.last_confidence, s.last_why, s.last_fix, s.last_pr_number, s.last_review_id,
+    s.trigger_count
+FROM scenarios s
+LEFT JOIN recent_runs r ON r.scenario_id = s.id
+WHERE s.repo_id = $1 AND s.active = TRUE AND s.files && $2::text[]
+ORDER BY
+    CASE
+        WHEN COALESCE(r.n, 0) = 0 THEN 1e9
+        ELSE (r.wins / r.n) + sqrt(2.0 * ln((SELECT t FROM repo_total)) / r.n)
+    END DESC,
+    s.created_at DESC
 LIMIT 20
 `
 
@@ -306,6 +328,17 @@ type ListScenariosForFilesRow struct {
 	TriggerCount    int             `json:"trigger_count"`
 }
 
+// Ranks matching scenarios by UCB1. Full write-up:
+// docs/plans/2026-04-17-ucb-scenario-selection.md
+//
+// score = mean_reward + sqrt(2 * ln(T) / n)
+//
+//	reward = 1 when scenario_runs.verdict IN ('broken','partial'), else 0
+//	n      = recent runs for this scenario (last 90 days)
+//	T      = total recent runs across scenarios in this repo
+//
+// Scenarios with n = 0 get priority 1e9 so newcomers are guaranteed their first run
+// (fixes cold-start starvation from the old `ORDER BY trigger_count DESC`).
 func (q *Queries) ListScenariosForFiles(ctx context.Context, arg ListScenariosForFilesParams) ([]ListScenariosForFilesRow, error) {
 	rows, err := q.db.Query(ctx, listScenariosForFiles, arg.RepoID, arg.Column2)
 	if err != nil {

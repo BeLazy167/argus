@@ -158,6 +158,104 @@ func TestEventBus_PubSub(t *testing.T) {
 	})
 }
 
+// TestEventBus_NewEventTypes_Registry asserts the 28 EventType constants
+// (11 existing + 16 sub-step events + 1 memory-match) are all non-empty and
+// distinct. Guards against copy-paste collisions and empty-string bugs.
+func TestEventBus_NewEventTypes_Registry(t *testing.T) {
+	all := []EventType{
+		// existing
+		EventStageChanged, EventTriageComplete, EventComment, EventScoringUpdate,
+		EventSynthesis, EventPatternLearned, EventCompleted, EventError,
+		EventCancelled, EventFileReviewStarted, EventTokenUpdate,
+		// sub-step events — names fixed by eventbus.go; rename => compile error.
+		EventIntentExtracted, EventIntentVerified, EventFindingsEnriched,
+		EventBriefGenerated, EventLeadBrief, EventLeadBroadcast,
+		EventSecondPass, EventBlastRadius, EventLeadCrossCheck,
+		EventAcceptanceChecked, EventCrossPRChecked,
+		EventSimulationsComplete, EventScenarioSimulated,
+		EventMemoryIndexed, EventPostedToGitHub, EventReplyGenerated,
+		// memory-match
+		EventMemoryMatched,
+	}
+	if len(all) != 28 {
+		t.Fatalf("expected 28 event types, listed %d", len(all))
+	}
+	seen := make(map[EventType]int, len(all))
+	for i, e := range all {
+		if e == "" {
+			t.Errorf("event[%d] is empty string", i)
+		}
+		if prev, dup := seen[e]; dup {
+			t.Errorf("duplicate event %q at index %d (first at %d)", e, i, prev)
+		}
+		seen[e] = i
+	}
+}
+
+// TestEventBus_NewEventTypes_PubSub round-trips each of the 16 new types
+// through the bus to confirm they are wired end-to-end. Data-shape is
+// covered by the existing TestEventBus_PubSub; here we only assert Type
+// propagation and payload round-trip.
+func TestEventBus_NewEventTypes_PubSub(t *testing.T) {
+	type marker struct {
+		M string `json:"m"`
+	}
+
+	cases := []struct {
+		name string
+		evt  EventType
+	}{
+		{"intent_extracted", EventIntentExtracted},
+		{"intent_verified", EventIntentVerified},
+		{"findings_enriched", EventFindingsEnriched},
+		{"brief_generated", EventBriefGenerated},
+		{"lead_brief", EventLeadBrief},
+		{"lead_broadcast", EventLeadBroadcast},
+		{"second_pass", EventSecondPass},
+		{"blast_radius", EventBlastRadius},
+		{"lead_cross_check", EventLeadCrossCheck},
+		{"acceptance_checked", EventAcceptanceChecked},
+		{"cross_pr_checked", EventCrossPRChecked},
+		{"simulations_complete", EventSimulationsComplete},
+		{"scenario_simulated", EventScenarioSimulated},
+		{"memory_indexed", EventMemoryIndexed},
+		{"posted_to_github", EventPostedToGitHub},
+		{"reply_generated", EventReplyGenerated},
+	}
+	if len(cases) != 16 {
+		t.Fatalf("expected 16 new events, have %d", len(cases))
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			eb := NewEventBus()
+			id := uuid.New()
+			eb.OpenTopic(id)
+			ch, _, unsub := eb.Subscribe(id)
+			defer unsub()
+
+			eb.Publish(id, tc.evt, marker{M: tc.name})
+
+			select {
+			case got := <-ch:
+				if got.Type != tc.evt {
+					t.Errorf("type = %q, want %q", got.Type, tc.evt)
+				}
+				var m marker
+				if err := json.Unmarshal(got.Data, &m); err != nil {
+					t.Fatalf("unmarshal: %v", err)
+				}
+				if m.M != tc.name {
+					t.Errorf("payload = %q, want %q", m.M, tc.name)
+				}
+			case <-time.After(time.Second):
+				t.Fatalf("timed out waiting for %s", tc.evt)
+			}
+		})
+	}
+}
+
 func TestEventBus_Concurrent(t *testing.T) {
 	eb := NewEventBus()
 	id := uuid.New()

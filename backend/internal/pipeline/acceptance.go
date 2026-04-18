@@ -215,6 +215,17 @@ func judgeIssue(
 		return nil
 	}
 
+	// Bucket acceptance tokens under run.Tokens.Acceptance. Lock-guarded via
+	// addAcceptance since validateStage fan-outs can run concurrently.
+	run.Tokens.addAcceptance(StageTokens{
+		PromptTokens:     resp.TokensUsed.PromptTokens,
+		CompletionTokens: resp.TokensUsed.CompletionTokens,
+		TotalTokens:      resp.TokensUsed.TotalTokens,
+		Cost:             resp.Cost,
+		Model:            cfg.Model,
+		Provider:         cfg.Provider,
+	})
+
 	type llmCriterion struct {
 		Criterion string `json:"criterion"`
 		Status    string `json:"status"`
@@ -240,12 +251,31 @@ func judgeIssue(
 		})
 	}
 
+	verdict := rollupVerdict(criteria)
+	if run.EventBus != nil {
+		accepted, rejected := 0, 0
+		for _, c := range criteria {
+			switch c.Status {
+			case "addressed":
+				accepted++
+			case "unaddressed":
+				rejected++
+			}
+		}
+		run.EventBus.Publish(run.ReviewID, EventAcceptanceChecked, map[string]any{
+			"issue":    link.Number,
+			"accepted": accepted,
+			"rejected": rejected,
+			"verdict":  verdict,
+		})
+	}
+
 	return &AcceptanceResult{
 		IssueNumber: link.Number,
 		IssueTitle:  link.Title,
 		IssueURL:    link.URL,
 		Criteria:    criteria,
-		Verdict:     rollupVerdict(criteria),
+		Verdict:     verdict,
 	}
 }
 

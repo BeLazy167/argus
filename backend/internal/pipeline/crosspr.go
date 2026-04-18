@@ -135,6 +135,16 @@ func (o *Orchestrator) runCrossPRWorker(ctx context.Context, run *PipelineRun) {
 		return
 	}
 
+	// Bucket cross-PR judge tokens. Lock-guarded via addCrossPR.
+	run.Tokens.addCrossPR(StageTokens{
+		PromptTokens:     resp.TokensUsed.PromptTokens,
+		CompletionTokens: resp.TokensUsed.CompletionTokens,
+		TotalTokens:      resp.TokensUsed.TotalTokens,
+		Cost:             resp.Cost,
+		Model:            cfg.Model,
+		Provider:         cfg.Provider,
+	})
+
 	var judged struct {
 		Compatible        bool `json:"compatible"`
 		Incompatibilities []struct {
@@ -184,6 +194,15 @@ func (o *Orchestrator) runCrossPRWorker(ctx context.Context, run *PipelineRun) {
 		"inaccessible", inaccessibleCount,
 		"incompatibilities", len(incompatibilities),
 		"compatible", judged.Compatible)
+
+	if run.EventBus != nil {
+		run.EventBus.Publish(run.ReviewID, EventCrossPRChecked, map[string]any{
+			"accessible":        accessibleCount,
+			"inaccessible":      inaccessibleCount,
+			"compatible":        judged.Compatible,
+			"incompatibilities": len(incompatibilities),
+		})
+	}
 }
 
 // hydratePRLink tries to fetch the linked PR's metadata + diff. Inaccessible

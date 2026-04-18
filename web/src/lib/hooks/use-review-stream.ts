@@ -43,7 +43,18 @@ export type TimelineEntry = {
   timestamp: Date;
   message: string;
   detail?: string;
-  icon: "stage" | "file" | "comment" | "scoring" | "done" | "error";
+  icon:
+    | "stage"
+    | "file"
+    | "comment"
+    | "scoring"
+    | "done"
+    | "error"
+    | "memory"
+    | "validation"
+    | "simulation"
+    | "brief"
+    | "reply";
 };
 
 export type LiveTokens = {
@@ -189,6 +200,188 @@ export function useReviewStream(reviewId: string, enabled: boolean) {
           setStage("failed");
           addEntry({ type: "error", message: `Failed at ${evt.data.stage}: ${evt.data.error}`, icon: "error" });
           break;
+
+        // Per-sub-step events — backend emits one per distinct LLM call / memory
+        // upsert / GitHub API action. These live on the timeline as sub-rows of
+        // the coarser stage they run inside, so the user can see progress without
+        // the stage transition being a black box.
+        case "intent_extracted": {
+          const goal = typeof evt.data.goal === "string" ? evt.data.goal : undefined;
+          addEntry({
+            type: "intent",
+            message: "Intent extracted",
+            detail: goal ? truncate(goal, 80) : undefined,
+            icon: "brief",
+          });
+          break;
+        }
+        case "intent_verified": {
+          const delivers = evt.data.delivers === true;
+          const unmet = typeof evt.data.unmet === "number" ? evt.data.unmet : 0;
+          addEntry({
+            type: "intent",
+            message: delivers ? "Intent verified: delivers" : "Intent verified: does not deliver",
+            detail: unmet > 0 ? `${unmet} unmet` : undefined,
+            icon: "brief",
+          });
+          break;
+        }
+        case "findings_enriched": {
+          const count = typeof evt.data.count === "number" ? evt.data.count : undefined;
+          addEntry({
+            type: "enrichment",
+            message: "Findings enriched",
+            detail: count != null ? `${count} matched` : undefined,
+            icon: "stage",
+          });
+          break;
+        }
+        case "brief_generated": {
+          const length = typeof evt.data.length === "number" ? evt.data.length : undefined;
+          addEntry({
+            type: "brief",
+            message: "Brief generated",
+            detail: length != null ? `${length} chars` : undefined,
+            icon: "brief",
+          });
+          break;
+        }
+        case "lead_brief":
+          addEntry({ type: "lead", message: "Lead brief drafted", icon: "brief" });
+          break;
+        case "lead_broadcast": {
+          const specialists = Array.isArray(evt.data.specialists) ? evt.data.specialists.length : undefined;
+          addEntry({
+            type: "lead",
+            message: "Lead broadcast",
+            detail: specialists != null ? `${specialists} specialists` : undefined,
+            icon: "stage",
+          });
+          break;
+        }
+        case "second_pass": {
+          const files = typeof evt.data.files === "number" ? evt.data.files : undefined;
+          addEntry({
+            type: "pass2",
+            message: "Second pass",
+            detail: files != null ? `${files} files` : undefined,
+            icon: "stage",
+          });
+          break;
+        }
+        case "blast_radius": {
+          const affected = typeof evt.data.affected === "number" ? evt.data.affected : undefined;
+          addEntry({
+            type: "blast",
+            message: "Blast radius analyzed",
+            detail: affected != null ? `${affected} affected` : undefined,
+            icon: "validation",
+          });
+          break;
+        }
+        case "lead_cross_check": {
+          const matched = typeof evt.data.matched === "number" ? evt.data.matched : undefined;
+          addEntry({
+            type: "lead",
+            message: "Lead cross-check",
+            detail: matched != null ? `${matched} matches` : undefined,
+            icon: "validation",
+          });
+          break;
+        }
+        case "acceptance_checked": {
+          const accepted = typeof evt.data.accepted === "number" ? evt.data.accepted : undefined;
+          const rejected = typeof evt.data.rejected === "number" ? evt.data.rejected : undefined;
+          const detail =
+            accepted != null || rejected != null
+              ? `accepted ${accepted ?? 0} · rejected ${rejected ?? 0}`
+              : undefined;
+          addEntry({ type: "acceptance", message: "Acceptance checked", detail, icon: "validation" });
+          break;
+        }
+        case "cross_pr_checked": {
+          const incompat =
+            typeof evt.data.incompatibilities === "number" ? evt.data.incompatibilities : undefined;
+          addEntry({
+            type: "cross_pr",
+            message: "Cross-PR checked",
+            detail: incompat != null ? `${incompat} incompatibilities` : undefined,
+            icon: "validation",
+          });
+          break;
+        }
+        case "simulations_complete": {
+          const total = typeof evt.data.total === "number" ? evt.data.total : undefined;
+          const passed = typeof evt.data.passed === "number" ? evt.data.passed : undefined;
+          const detail = total != null ? `${passed ?? 0}/${total} passed` : undefined;
+          addEntry({ type: "simulation", message: "Simulations complete", detail, icon: "simulation" });
+          break;
+        }
+        case "scenario_simulated": {
+          const verdict = typeof evt.data.verdict === "string" ? evt.data.verdict : undefined;
+          const id = typeof evt.data.scenario_id === "number" ? evt.data.scenario_id : undefined;
+          const detail = [id != null ? `#${id}` : null, verdict].filter(Boolean).join(" \u00b7 ") || undefined;
+          addEntry({ type: "simulation", message: "Scenario simulated", detail, icon: "simulation" });
+          break;
+        }
+        case "memory_indexed": {
+          const kind = typeof evt.data.kind === "string" ? evt.data.kind : undefined;
+          const success = evt.data.success !== false;
+          addEntry({
+            type: "memory",
+            message: kind ? `Memory indexed (${kind})` : "Memory indexed",
+            detail: success ? undefined : "failed",
+            icon: "memory",
+          });
+          break;
+        }
+        case "posted_to_github": {
+          // Mid-stage signal: GitHub POST succeeded. The terminal "completed"
+          // event fires later after memory indexing, backfill, and pattern
+          // learning finish, so phrase this one distinctly to avoid two
+          // indistinguishable "Posted to GitHub" rows on the timeline.
+          const inline = typeof evt.data.inline === "number" ? evt.data.inline : undefined;
+          const folded = typeof evt.data.folded === "number" ? evt.data.folded : undefined;
+          const detail =
+            inline != null || folded != null
+              ? `${inline ?? 0} inline \u00b7 ${folded ?? 0} folded`
+              : undefined;
+          addEntry({
+            type: "done",
+            message: "Posted to GitHub (post-processing continues)",
+            detail,
+            icon: "done",
+          });
+          break;
+        }
+        case "reply_generated": {
+          const length = typeof evt.data.length === "number" ? evt.data.length : undefined;
+          addEntry({
+            type: "reply",
+            message: "Reply generated",
+            detail: length != null ? `${length} chars` : undefined,
+            icon: "reply",
+          });
+          break;
+        }
+        case "memory_matched": {
+          // Fired by enrichFindings when a finding matches a Supermemory-backed
+          // pattern / convention / rule / similarity hit. Detail line carries
+          // kind + source PR so authors can trace the attribution shown on the
+          // inline comment body.
+          const kind = typeof evt.data.kind === "string" ? evt.data.kind : undefined;
+          const pr = typeof evt.data.pr === "number" && evt.data.pr > 0 ? evt.data.pr : undefined;
+          const parts: string[] = [];
+          if (kind) parts.push(kind);
+          if (pr != null) parts.push(`PR #${pr}`);
+          addEntry({
+            type: "memory",
+            message: "Memory match",
+            detail: parts.length > 0 ? parts.join(" \u00b7 ") : undefined,
+            icon: "memory",
+          });
+          break;
+        }
       }
     };
 

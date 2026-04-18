@@ -1,6 +1,9 @@
 package pipeline
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestScoringThresholdForSeverity(t *testing.T) {
 	tests := []struct {
@@ -167,6 +170,118 @@ func TestAdjustScores(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestPromoteGroupSeverity pins the severity-floor + body-merge contract that
+// guards against the LLM judge picking a warning-rep over a critical-dup and
+// silently demoting the posted severity. Verified on prod review 00000000.
+func TestPromoteGroupSeverity(t *testing.T) {
+	t.Parallel()
+
+	newRun := func() *PipelineRun {
+		return &PipelineRun{
+			FileReviews: []FileReview{
+				{Path: "a.tf", Comments: []FileComment{
+					// idx 0 — detailed warning rep
+					{Severity: SeverityWarning, Line: 318, What: "detailed warning with suggestion", Body: "long body"},
+					// idx 1 — terse critical dup
+					{Severity: SeverityCritical, Line: 292, What: "terse critical", Body: ""},
+				}},
+			},
+		}
+	}
+	all := []indexedComment{{fileIdx: 0, commentIdx: 0}, {fileIdx: 0, commentIdx: 1}}
+
+	t.Run("promotes warning rep to critical when dup outranks", func(t *testing.T) {
+		t.Parallel()
+		run := newRun()
+		g := judgeGroup{Representative: 0, Duplicates: []int{1}, Score: 60, Severity: ""}
+		p := promoteGroupSeverity(run, g, all)
+		if !p.promoted {
+			t.Fatalf("expected promoted=true")
+		}
+		if p.fromSev != SeverityWarning || p.toSev != SeverityCritical {
+			t.Errorf("promotion = %s→%s, want warning→critical", p.fromSev, p.toSev)
+		}
+		rep := run.FileReviews[0].Comments[0]
+		if rep.Severity != SeverityCritical {
+			t.Errorf("rep severity = %s, want critical", rep.Severity)
+		}
+		if !strings.Contains(rep.Why, "Also flagged:") || !strings.Contains(rep.Why, "[critical]") {
+			t.Errorf("rep Why missing cross-ref annotation: %q", rep.Why)
+		}
+		if !strings.Contains(rep.Why, "terse critical") {
+			t.Errorf("rep Why missing dup snippet: %q", rep.Why)
+		}
+	})
+
+	t.Run("no-op when rep already highest severity", func(t *testing.T) {
+		t.Parallel()
+		run := &PipelineRun{
+			FileReviews: []FileReview{
+				{Path: "a.tf", Comments: []FileComment{
+					{Severity: SeverityCritical, Line: 10, What: "critical rep"},
+					{Severity: SeverityWarning, Line: 20, What: "warning dup"},
+				}},
+			},
+		}
+		g := judgeGroup{Representative: 0, Duplicates: []int{1}, Score: 60}
+		p := promoteGroupSeverity(run, g, all)
+		if p.promoted {
+			t.Errorf("should not promote when rep already highest; got %+v", p)
+		}
+		// Annotation still happens so author sees the warning's framing.
+		if !strings.Contains(run.FileReviews[0].Comments[0].Why, "Also flagged:") {
+			t.Errorf("Why should still carry the dup cross-ref annotation")
+		}
+	})
+
+	t.Run("no duplicates is no-op", func(t *testing.T) {
+		t.Parallel()
+		run := newRun()
+		origWhy := run.FileReviews[0].Comments[0].Why
+		g := judgeGroup{Representative: 0, Duplicates: nil, Score: 60}
+		if p := promoteGroupSeverity(run, g, all); p.promoted {
+			t.Errorf("empty dups should not promote")
+		}
+		if run.FileReviews[0].Comments[0].Why != origWhy {
+			t.Errorf("empty dups should not mutate Why")
+		}
+	})
+
+	t.Run("out-of-range dup id skipped without panic", func(t *testing.T) {
+		t.Parallel()
+		run := newRun()
+		g := judgeGroup{Representative: 0, Duplicates: []int{999, -1, 1}, Score: 60}
+		p := promoteGroupSeverity(run, g, all)
+		if !p.promoted {
+			t.Errorf("valid dup should still promote despite bogus ids in list")
+		}
+	})
+
+	t.Run("out-of-range rep returns no-op", func(t *testing.T) {
+		t.Parallel()
+		run := newRun()
+		g := judgeGroup{Representative: 999, Duplicates: []int{1}, Score: 60}
+		if p := promoteGroupSeverity(run, g, all); p.promoted {
+			t.Errorf("invalid rep should not promote")
+		}
+	})
+
+	t.Run("appends to non-empty Why", func(t *testing.T) {
+		t.Parallel()
+		run := newRun()
+		run.FileReviews[0].Comments[0].Why = "existing rationale"
+		g := judgeGroup{Representative: 0, Duplicates: []int{1}, Score: 60}
+		promoteGroupSeverity(run, g, all)
+		why := run.FileReviews[0].Comments[0].Why
+		if !strings.HasPrefix(why, "existing rationale") {
+			t.Errorf("existing Why clobbered: %q", why)
+		}
+		if !strings.Contains(why, "Also flagged:") {
+			t.Errorf("annotation missing: %q", why)
+		}
+	})
 }
 
 func TestVariableThresholdFiltering(t *testing.T) {

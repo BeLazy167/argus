@@ -158,18 +158,26 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 		}
 		// Apply score to representative
 		ic := allComments[g.Representative]
-		run.FileReviews[ic.fileIdx].Comments[ic.commentIdx].Score = g.Score
+		rep := &run.FileReviews[ic.fileIdx].Comments[ic.commentIdx]
+		rep.Score = g.Score
 		// Override severity if the judge changed it
 		if sev := Severity(g.Severity); ValidSeverities[sev] {
-			run.FileReviews[ic.fileIdx].Comments[ic.commentIdx].Severity = sev
+			rep.Severity = sev
 		}
 		// Track how many were merged by judge
 		if len(g.Duplicates) > 0 {
-			existing := run.FileReviews[ic.fileIdx].Comments[ic.commentIdx].DedupCount
+			existing := rep.DedupCount
 			if existing == 0 {
 				existing = 1
 			}
-			run.FileReviews[ic.fileIdx].Comments[ic.commentIdx].DedupCount = existing + len(g.Duplicates)
+			rep.DedupCount = existing + len(g.Duplicates)
+		}
+
+		// Severity floor + body merge — see promoteGroupSeverity.
+		if promotion := promoteGroupSeverity(run, g, allComments); promotion.promoted {
+			slog.Info("[scoring] promoted rep severity to group max",
+				"rep", g.Representative, "from", promotion.fromSev, "to", promotion.toSev,
+				"pr", run.PREvent.PRNumber)
 		}
 	}
 	// Build representative set for O(1) lookup
@@ -466,6 +474,85 @@ type indexedComment struct {
 type scoredComment struct {
 	FileComment
 	FilePath string
+}
+
+// severityPromotion describes a rep-severity promotion made by promoteGroupSeverity.
+// promoted=false means nothing changed; the caller logs at Info only when true.
+type severityPromotion struct {
+	promoted bool
+	fromSev  Severity
+	toSev    Severity
+}
+
+// promoteGroupSeverity mutates the judge group's representative comment in place:
+//
+//  1. Computes the max severity across (rep + duplicates).
+//  2. If a duplicate outranks the rep, bumps the rep's Severity to that max so the
+//     posted comment carries the correct severity tag. The LLM judge prompt tells
+//     it to pick the "best/clearest" rep — nothing in the prompt guarantees it also
+//     picks the most-severe one. Severity must be enforced Go-side.
+//  3. Appends a short "Also flagged: …" cross-reference to the rep's Why so the
+//     author sees the framings of dropped duplicates rather than silently losing
+//     them. Truncated per-snippet to 200 chars to bound body growth.
+//
+// Returns severityPromotion.promoted=true only when the Severity field actually
+// changed — merge-ref annotation happens whenever duplicates exist with content,
+// regardless of severity change.
+func promoteGroupSeverity(run *PipelineRun, g judgeGroup, allComments []indexedComment) severityPromotion {
+	if len(g.Duplicates) == 0 {
+		return severityPromotion{}
+	}
+	if g.Representative < 0 || g.Representative >= len(allComments) {
+		return severityPromotion{}
+	}
+	repIC := allComments[g.Representative]
+	if repIC.fileIdx >= len(run.FileReviews) ||
+		repIC.commentIdx >= len(run.FileReviews[repIC.fileIdx].Comments) {
+		return severityPromotion{}
+	}
+	rep := &run.FileReviews[repIC.fileIdx].Comments[repIC.commentIdx]
+
+	maxSev := rep.Severity
+	var mergedRefs []string
+	for _, d := range g.Duplicates {
+		if d < 0 || d >= len(allComments) {
+			continue
+		}
+		dIC := allComments[d]
+		if dIC.fileIdx >= len(run.FileReviews) ||
+			dIC.commentIdx >= len(run.FileReviews[dIC.fileIdx].Comments) {
+			continue
+		}
+		dup := run.FileReviews[dIC.fileIdx].Comments[dIC.commentIdx]
+		if severityRank(dup.Severity) > severityRank(maxSev) {
+			maxSev = dup.Severity
+		}
+		snippet := strings.TrimSpace(dup.What)
+		if snippet == "" {
+			snippet = strings.TrimSpace(dup.Body)
+		}
+		if snippet != "" {
+			mergedRefs = append(mergedRefs, fmt.Sprintf(
+				"[%s] %s:L%d — %s", dup.Severity,
+				run.FileReviews[dIC.fileIdx].Path, dup.Line,
+				util.Truncate(snippet, 200, true)))
+		}
+	}
+
+	out := severityPromotion{}
+	if maxSev != rep.Severity {
+		out = severityPromotion{promoted: true, fromSev: rep.Severity, toSev: maxSev}
+		rep.Severity = maxSev
+	}
+	if len(mergedRefs) > 0 {
+		note := "Also flagged: " + strings.Join(mergedRefs, "; ")
+		if rep.Why == "" {
+			rep.Why = note
+		} else {
+			rep.Why = rep.Why + "\n\n" + note
+		}
+	}
+	return out
 }
 
 // adjustScores applies deterministic post-LLM caps/floors to known FP/TP patterns.

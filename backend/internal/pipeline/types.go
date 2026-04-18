@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/BeLazy167/argus/backend/internal/github"
@@ -35,10 +36,30 @@ const (
 	CategoryErrorHandling Category = "error_handling"
 	CategoryTypeDesign    Category = "type_design"
 	CategoryTesting       Category = "testing"
+	// CategoryIntent marks findings emitted by the intent-verification step
+	// when a PR's code does not deliver its stated goal.
+	CategoryIntent Category = "intent"
 )
 
 // RunTokenUsage tracks token consumption and cost across pipeline stages.
+//
+// LeadAgent aggregates 5 lead-agent sub-calls (leadBrief, leadBroadcast,
+// agentSecondPass, analyzeBlastRadius, leadCrossCheck) so the per-review
+// breakdown stays compact — per-sub-step granularity lives on the SSE stream.
+//
+// Simulation is a slice (like Review and FileSynthesis) — one StageTokens per
+// scenario run, preserving UCB1 selection order.
+//
+// Reply is declared but not yet wired. The comment-reply worker runs outside
+// the review pipeline and will be instrumented in a follow-up ship.
+//
+// Concurrency: mu guards all write paths. validateStage runs acceptance,
+// crosspr, and blast-radius workers in parallel and they all call addToTotal.
+// Reads (rendering, serialisation) happen after all writers join, so unguarded
+// reads are safe in practice — the mutex is write-only.
 type RunTokenUsage struct {
+	mu            sync.Mutex    `json:"-"`
+	Intent        StageTokens   `json:"intent,omitempty"` // extraction + verification sub-calls are summed here
 	Triage        StageTokens   `json:"triage"`
 	Review        []StageTokens `json:"review"`
 	Scoring       StageTokens   `json:"scoring,omitempty"`
@@ -48,6 +69,11 @@ type RunTokenUsage struct {
 	Patterns      StageTokens   `json:"patterns,omitempty"`
 	FileSynthesis []StageTokens `json:"file_synthesis,omitempty"`
 	Graph         StageTokens   `json:"graph,omitempty"`
+	LeadAgent     StageTokens   `json:"lead_agent,omitempty"`
+	Acceptance    StageTokens   `json:"acceptance,omitempty"`
+	CrossPR       StageTokens   `json:"cross_pr,omitempty"`
+	Simulation    []StageTokens `json:"simulation,omitempty"`
+	Reply         StageTokens   `json:"reply,omitempty"` // reserved; reply worker not yet instrumented
 	Total         StageTokens   `json:"total"`
 }
 
@@ -105,6 +131,11 @@ type PipelineRun struct {
 	// ArchContext holds per-file architecture metrics for review prompt enrichment.
 	// Populated in pre-review for high-risk files (choke points / hotspots).
 	ArchContext          map[string]ArchContextEntry `json:"-"`
+	// PRIntent holds the author's stated motivation for the PR (goal, non-goals,
+	// acceptance criteria). Populated by IntentExtractionStage in the pre-review block,
+	// consumed by specialists and Synthesis. Nil until extraction runs; after extraction
+	// Source may be "empty" when neither PR body nor linked issues provide any context.
+	PRIntent        *PRIntent          `json:"-"`
 	// LinkedIssues holds issues this PR references (closes / fixes / resolves / refs).
 	// Populated by HandlePREvent via GraphQL + regex fallback.
 	LinkedIssues    []IssueLink        `json:"-"`
@@ -210,6 +241,13 @@ type FileComment struct {
 	Score               int        `json:"score"`
 	MatchedPatternID    int64      `json:"-"`
 	MatchedPatternScore float64    `json:"-"`
+	// MatchedPatternKind classifies the kind of memory hit so the review-body
+	// renderer can produce the right phrasing: "pattern" | "convention" |
+	// "rule" | "similarity". Empty string ⇒ no memory tag rendered.
+	MatchedPatternKind   string `json:"-"`
+	MatchedPatternPR     int    `json:"-"` // source PR number (from Supermemory doc metadata)
+	MatchedPatternAuthor string `json:"-"` // source PR author login
+	MatchedPatternAgeDays int   `json:"-"` // rounded days since source indexed
 	BlastRadius         int        `json:"blast_radius,omitempty"` // number of downstream dependents affected
 	EnforcedRuleContent string     `json:"-"`
 	IsNewFinding        bool       `json:"-"`
@@ -227,6 +265,7 @@ var ValidSeverities = map[Severity]bool{
 var ValidCategories = map[Category]bool{
 	CategorySecurity: true, CategoryPerformance: true, CategoryStyle: true, CategoryBug: true,
 	CategoryReadability: true, CategoryErrorHandling: true, CategoryTypeDesign: true, CategoryTesting: true,
+	CategoryIntent: true,
 }
 
 // SynthesisResult is the combined review output.
@@ -236,6 +275,76 @@ type SynthesisResult struct {
 	Score             int // 1-10
 	TokenUsage        map[string]int
 	SimulationResults []SimulationResult
+	IntentVerdict     *IntentVerdict // populated by synthesize when PRIntent.HasIntent() is true
+}
+
+// IntentSource classifies the provenance of a PRIntent. A typed enum rather
+// than a raw string so callers can switch exhaustively and invalid values are
+// caught at parse time via ValidIntentSources.
+type IntentSource string
+
+const (
+	// IntentSourceAuthor means the goal was extracted from human-written text
+	// (PR body or linked issue). Verification is reliable — the goal is what
+	// the author actually claims.
+	IntentSourceAuthor IntentSource = "author"
+	// IntentSourceInferred means the LLM guessed the goal from the diff /
+	// commits because no author-written text was available. Verification runs
+	// but the verdict should be weighted more leniently.
+	IntentSourceInferred IntentSource = "inferred"
+	// IntentSourceEmpty means extraction produced no usable signal — no
+	// sources, or the extraction LLM / parser / provider failed. HasIntent()
+	// returns false; downstream rendering and verification are skipped.
+	IntentSourceEmpty IntentSource = "empty"
+)
+
+// ValidIntentSources is the closed set of IntentSource values. Used by
+// parseIntent to coerce unknown values emitted by a drifting LLM contract.
+var ValidIntentSources = map[IntentSource]bool{
+	IntentSourceAuthor:   true,
+	IntentSourceInferred: true,
+	IntentSourceEmpty:    true,
+}
+
+// PRIntent captures the author's stated motivation for a PR, extracted from the
+// PR body, linked GitHub issues, commit messages, and linked PR titles.
+//
+// Consumers:
+//   - Review specialists receive the structured fields as a prose <pr_intent> block
+//     for attention weighting (see buildFileReviewPrompt in review.go).
+//   - Synthesis uses goal + acceptance_criteria to judge whether the diff delivers
+//     (IntentVerdict) and non_goals to demote out-of-scope findings.
+//
+// Source uses the IntentSource typed enum so callers get compile-time coverage;
+// any unknown value from the LLM is coerced to IntentSourceAuthor by parseIntent.
+type PRIntent struct {
+	Goal               string       `json:"goal"`
+	NonGoals           []string     `json:"non_goals"`
+	AcceptanceCriteria []string     `json:"acceptance_criteria"`
+	ExpectedFiles      []string     `json:"expected_files"`
+	RiskFlags          []string     `json:"risk_flags"`
+	Source             IntentSource `json:"source"`
+	RawContext         string       `json:"-"` // concatenated sources, used to seed downstream prompts
+}
+
+// IntentVerdict is Synthesis's judgment on whether the diff delivers PRIntent.Goal.
+//
+// UnmetCriteria lists PRIntent.AcceptanceCriteria for which the reviewer found
+// no evidence. OutOfScopeFindings holds FileComment indices (positional, into
+// the flat enumeration produced by BuildIntentVerificationPrompt) whose subject
+// matches a PRIntent.NonGoals entry and should be demoted.
+//
+// BuiltAgainstCount is the total number of findings that existed at verdict
+// construction time. DemoteOutOfScopeFindings compares this to the current
+// count as a staleness guard — if FileReviews mutated between verdict
+// construction and demotion, the positional IDs are meaningless and demotion
+// must be skipped.
+type IntentVerdict struct {
+	Delivers           bool     `json:"delivers"`
+	Rationale          string   `json:"rationale"`
+	UnmetCriteria      []string `json:"unmet_criteria"`
+	OutOfScopeFindings []int    `json:"out_of_scope_finding_ids"`
+	BuiltAgainstCount  int      `json:"-"` // set by the caller after parsing
 }
 
 // StageFunc is a function that executes a single pipeline stage.
@@ -243,10 +352,82 @@ type StageFunc func(ctx context.Context, run *PipelineRun) error
 
 // addToTotal accumulates stage tokens into the total.
 func (r *RunTokenUsage) addToTotal(s StageTokens) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.Total.PromptTokens += s.PromptTokens
 	r.Total.CompletionTokens += s.CompletionTokens
 	r.Total.TotalTokens += s.TotalTokens
 	r.Total.Cost += s.Cost
+}
+
+// addLeadAgent merges tokens from one of the 5 lead-agent sub-calls into the
+// aggregate LeadAgent bucket. Model/Provider are stamped on the first write.
+// Also calls addToTotal so Total stays in sync; callers must NOT also call
+// addToTotal themselves for the same tokens.
+func (r *RunTokenUsage) addLeadAgent(s StageTokens) {
+	r.mu.Lock()
+	r.LeadAgent.PromptTokens += s.PromptTokens
+	r.LeadAgent.CompletionTokens += s.CompletionTokens
+	r.LeadAgent.TotalTokens += s.TotalTokens
+	r.LeadAgent.Cost += s.Cost
+	if r.LeadAgent.Model == "" {
+		r.LeadAgent.Model = s.Model
+		r.LeadAgent.Provider = s.Provider
+	}
+	r.Total.PromptTokens += s.PromptTokens
+	r.Total.CompletionTokens += s.CompletionTokens
+	r.Total.TotalTokens += s.TotalTokens
+	r.Total.Cost += s.Cost
+	r.mu.Unlock()
+}
+
+// addAcceptance / addCrossPR mirror addLeadAgent for the Acceptance / CrossPR
+// buckets respectively. Both paths can run concurrently from validateStage
+// workers, so the lock guards the combined bucket + total write.
+func (r *RunTokenUsage) addAcceptance(s StageTokens) {
+	r.mu.Lock()
+	r.Acceptance.PromptTokens += s.PromptTokens
+	r.Acceptance.CompletionTokens += s.CompletionTokens
+	r.Acceptance.TotalTokens += s.TotalTokens
+	r.Acceptance.Cost += s.Cost
+	if r.Acceptance.Model == "" {
+		r.Acceptance.Model = s.Model
+		r.Acceptance.Provider = s.Provider
+	}
+	r.Total.PromptTokens += s.PromptTokens
+	r.Total.CompletionTokens += s.CompletionTokens
+	r.Total.TotalTokens += s.TotalTokens
+	r.Total.Cost += s.Cost
+	r.mu.Unlock()
+}
+
+func (r *RunTokenUsage) addCrossPR(s StageTokens) {
+	r.mu.Lock()
+	r.CrossPR.PromptTokens += s.PromptTokens
+	r.CrossPR.CompletionTokens += s.CompletionTokens
+	r.CrossPR.TotalTokens += s.TotalTokens
+	r.CrossPR.Cost += s.Cost
+	if r.CrossPR.Model == "" {
+		r.CrossPR.Model = s.Model
+		r.CrossPR.Provider = s.Provider
+	}
+	r.Total.PromptTokens += s.PromptTokens
+	r.Total.CompletionTokens += s.CompletionTokens
+	r.Total.TotalTokens += s.TotalTokens
+	r.Total.Cost += s.Cost
+	r.mu.Unlock()
+}
+
+// addSimulation appends a per-scenario StageTokens and rolls into Total.
+// Order is scenario-selection order (UCB1 top-5, stable).
+func (r *RunTokenUsage) addSimulation(s StageTokens) {
+	r.mu.Lock()
+	r.Simulation = append(r.Simulation, s)
+	r.Total.PromptTokens += s.PromptTokens
+	r.Total.CompletionTokens += s.CompletionTokens
+	r.Total.TotalTokens += s.TotalTokens
+	r.Total.Cost += s.Cost
+	r.mu.Unlock()
 }
 
 // customOrDefault returns the custom prompt for key if set, otherwise the fallback.

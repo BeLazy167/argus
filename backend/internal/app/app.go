@@ -67,8 +67,9 @@ func Run() error {
 	eventBus := pipeline.NewEventBus()
 	triageStage := pipeline.NewTriageStage(registry, db, memRegistry)
 	reviewStage := pipeline.NewReviewStage(registry, db, ghClient, memRegistry, cfg.MaxConcurrentReviews)
+	intentStage := pipeline.NewIntentExtractionStage(registry, db, ghClient, logger)
 	scoringStage := pipeline.NewScoringStage(registry, db, memRegistry)
-	orchestrator := pipeline.NewOrchestrator(db.Pool, db, ghClient, reviewStage, triageStage, scoringStage, memRegistry, registry, eventBus, logger, nil)
+	orchestrator := pipeline.NewOrchestrator(db.Pool, db, ghClient, reviewStage, triageStage, intentStage, scoringStage, memRegistry, registry, eventBus, logger, nil)
 	replyAnalyzer := pipeline.NewReplyAnalyzer(registry, db, ghClient, memRegistry, logger)
 	reactionAnalyzer := pipeline.NewReactionAnalyzer(db, ghClient, memRegistry, logger)
 

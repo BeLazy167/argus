@@ -91,7 +91,7 @@ func (sm *StateMachine) Run(ctx context.Context, run *PipelineRun) error {
 			}
 			var tokenUsage []byte
 			if run.Tokens.Total.TotalTokens > 0 {
-				tokenUsage, _ = json.Marshal(run.Tokens)
+				tokenUsage, _ = json.Marshal(&run.Tokens)
 			}
 			if persistErr := sm.st.UpdateReviewStatus(context.WithoutCancel(ctx), run.ReviewID, string(StateFailed), run.Error, tokenUsage); persistErr != nil {
 				sm.logger.Error("failed to update review status on failure", "error", persistErr, "review_id", run.ReviewID)
@@ -161,7 +161,7 @@ func (sm *StateMachine) handleCancelled(ctx context.Context, run *PipelineRun) e
 	}
 	var tokenUsage []byte
 	if run.Tokens.Total.TotalTokens > 0 {
-		tokenUsage, _ = json.Marshal(run.Tokens)
+		tokenUsage, _ = json.Marshal(&run.Tokens)
 	}
 	if persistErr := sm.st.UpdateReviewStatus(dbCtx, run.ReviewID, "cancelled", run.Error, tokenUsage); persistErr != nil {
 		sm.logger.Error("failed to update review status on cancel", "error", persistErr, "review_id", run.ReviewID)

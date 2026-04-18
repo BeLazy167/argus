@@ -29,6 +29,7 @@ const (
 	VulnHeaderInjection VulnType = "header_injection"
 	VulnDOSAmplify      VulnType = "dos_amplification"
 	VulnHardcodedSecret VulnType = "hardcoded_secret"
+	VulnPublicExposure  VulnType = "public_exposure"
 	VulnNone            VulnType = ""
 )
 
@@ -66,6 +67,17 @@ var canonicalPatterns = []vulnPattern{
 	// Auth/input
 	{VulnAuthBypass, []string{"authentication bypass", "auth bypass", "missing auth", "unauthenticated access"}},
 	{VulnInputValidation, []string{"input validation", "missing validation", "unsanitized input", "unvalidated input"}},
+
+	// Public exposure (cloud infra). Keywords drawn from the AcmeOrg PR #106
+	// false-positive cluster — IAP bypass / public invoker bindings / all-users grants.
+	// Placed after auth so specific "authentication bypass" wording matches auth_bypass first.
+	{VulnPublicExposure, []string{
+		"iap-protected", "iap protection", "iap protected set",
+		"bypass iap", "bypasses iap", "bypassing iap",
+		"allusers", "all_users", "all-users invoker", "public invoker",
+		"invoker binding", "unauthenticated invoker", "public endpoint",
+		"public cloud run", "publicly accessible", "exposed to the public internet",
+	}},
 
 	// Error handling
 	{VulnErrorSwallowing, []string{"error swallow", "empty catch", "silently ignor", "error ignored", "catch block empty"}},

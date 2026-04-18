@@ -141,6 +141,71 @@ func TestRenderTokenBreakdown(t *testing.T) {
 	}
 }
 
+// TestRenderTokenBreakdown_NewBuckets verifies the renderer adds rows for
+// the new stages (LeadAgent, Acceptance, CrossPR, Simulation aggregate,
+// Reply) when populated and omits them when zero. Row labels are matched
+// case-insensitively via substring — exact casing is the backend team's
+// choice. CrossPR is tolerated as "cross-pr" OR "cross pr".
+func TestRenderTokenBreakdown_NewBuckets(t *testing.T) {
+	tests := []struct {
+		name       string
+		tu         *RunTokenUsage
+		wantSubs   []string // lowercased substrings that must appear
+		absentSubs []string
+	}{
+		{
+			name: "populated_new_buckets_render_rows",
+			tu: &RunTokenUsage{
+				Total:      StageTokens{TotalTokens: 100_000, Cost: 1.0},
+				LeadAgent:  StageTokens{TotalTokens: 11_111, Cost: 0.11},
+				Acceptance: StageTokens{TotalTokens: 22_222, Cost: 0.22},
+				CrossPR:    StageTokens{TotalTokens: 33_333, Cost: 0.33},
+				Reply:      StageTokens{TotalTokens: 66_666, Cost: 0.66},
+				Simulation: []StageTokens{
+					{TotalTokens: 44_444, Cost: 0.44},
+					{TotalTokens: 55_555, Cost: 0.55},
+				},
+			},
+			wantSubs: []string{"lead agent", "acceptance", "simulation", "reply"},
+		},
+		{
+			name: "empty_new_buckets_are_omitted",
+			tu: &RunTokenUsage{
+				Total:  StageTokens{TotalTokens: 100, Cost: 0.002},
+				Triage: StageTokens{TotalTokens: 100, Cost: 0.002},
+			},
+			absentSubs: []string{"lead agent", "acceptance", "cross-pr", "cross pr", "simulation", "reply"},
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := renderTokenBreakdown(tc.tu)
+			if got == "" && len(tc.wantSubs) > 0 {
+				t.Fatal("renderer returned empty; want rows")
+			}
+			lo := strings.ToLower(got)
+			for _, s := range tc.wantSubs {
+				if !strings.Contains(lo, s) {
+					t.Errorf("missing substring %q in output:\n%s", s, got)
+				}
+			}
+			if len(tc.wantSubs) > 0 {
+				// CrossPR tolerated as "cross-pr" OR "cross pr".
+				if !strings.Contains(lo, "cross-pr") && !strings.Contains(lo, "cross pr") {
+					t.Errorf("missing cross-PR label (expected 'cross-pr' or 'cross pr'):\n%s", got)
+				}
+			}
+			for _, s := range tc.absentSubs {
+				if strings.Contains(lo, s) {
+					t.Errorf("unexpected substring %q in output:\n%s", s, got)
+				}
+			}
+		})
+	}
+}
+
 // TestFormatTokens covers the k/M suffix thresholds used in the breakdown.
 func TestFormatTokens(t *testing.T) {
 	tests := []struct {

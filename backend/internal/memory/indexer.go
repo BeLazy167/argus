@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -85,21 +86,28 @@ func (idx *Indexer) SetRepoEntityContext(ctx context.Context, owner, repo, langu
 	}
 }
 
+// PatternMatch is the full result of SearchPatternMatch — content, similarity,
+// Supermemory document ID, and raw metadata map. Callers unmarshal Metadata to
+// read provenance fields (pr, pr_author, source, created_at) stamped at index
+// time.
+type PatternMatch struct {
+	Content  string
+	Score    float64
+	ID       string
+	Metadata map[string]string
+}
+
 // SearchPatternMatch searches for the best matching pattern across repo and owner scopes.
-// Returns the matched content and similarity score. Returns ("", 0) if no match above threshold.
-func (idx *Indexer) SearchPatternMatch(ctx context.Context, owner, repo, query string) (content string, score float64) {
+// Returns the matched content, similarity score, Supermemory doc ID, and metadata.
+// Zero PatternMatch (Score == 0) means no match above threshold.
+func (idx *Indexer) SearchPatternMatch(ctx context.Context, owner, repo, query string) PatternMatch {
 	if idx.client == nil || owner == "" || repo == "" {
-		return "", 0
+		return PatternMatch{}
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	type result struct {
-		content string
-		score   float64
-	}
-
-	var repoRes, ownerRes result
+	var repoRes, ownerRes PatternMatch
 	var wg sync.WaitGroup
 	wg.Add(2)
 
@@ -116,7 +124,7 @@ func (idx *Indexer) SearchPatternMatch(ctx context.Context, owner, repo, query s
 		if err != nil || len(resp.Results) == 0 {
 			return
 		}
-		repoRes = result{content: resp.Results[0].Content(), score: resp.Results[0].Similarity}
+		repoRes = resultToPatternMatch(resp.Results[0])
 	}()
 
 	go func() {
@@ -132,15 +140,34 @@ func (idx *Indexer) SearchPatternMatch(ctx context.Context, owner, repo, query s
 		if err != nil || len(resp.Results) == 0 {
 			return
 		}
-		ownerRes = result{content: resp.Results[0].Content(), score: resp.Results[0].Similarity}
+		ownerRes = resultToPatternMatch(resp.Results[0])
 	}()
 
 	wg.Wait()
 
-	if repoRes.score >= ownerRes.score {
-		return repoRes.content, repoRes.score
+	if repoRes.Score >= ownerRes.Score {
+		return repoRes
 	}
-	return ownerRes.content, ownerRes.score
+	return ownerRes
+}
+
+// resultToPatternMatch converts a Supermemory SearchResult into the lighter
+// PatternMatch shape. Unmarshals the raw metadata JSON into a map[string]string
+// for cheap key lookups — metadata is always flat key/string values at index
+// time (see indexer.go:228+ where metadata is stamped).
+func resultToPatternMatch(r SearchResult) PatternMatch {
+	pm := PatternMatch{
+		Content: r.Content(),
+		Score:   r.Similarity,
+		ID:      r.ID,
+	}
+	if len(r.Metadata) > 0 {
+		var md map[string]string
+		if err := json.Unmarshal(r.Metadata, &md); err == nil {
+			pm.Metadata = md
+		}
+	}
+	return pm
 }
 
 var lineNumRegex = regexp.MustCompile(`(?i)\b(?:line|L)\s*\d+`)

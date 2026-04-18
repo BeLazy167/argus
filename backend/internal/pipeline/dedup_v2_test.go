@@ -26,6 +26,15 @@ func TestClassifyVulnType(t *testing.T) {
 		{"open redirect", "unvalidated redirect to user-supplied URL", "", VulnOpenRedirect},
 		{"header injection", "CRLF injection in response header", "", VulnHeaderInjection},
 		{"hardcoded secret", "API key in source code", "", VulnHardcodedSecret},
+		// Public-exposure class — added after prod review 00000000 surfaced two
+		// false-positive findings on IAP/allUsers config that Layer 1 didn't group.
+		{"iap-protected set", "leaves acmeorg-admin out of the iap-protected set", "", VulnPublicExposure},
+		{"allusers invoker binding", "grants allUsers invoker binding to admin service", "", VulnPublicExposure},
+		{"public cloud run", "service is a public cloud run endpoint without auth", "", VulnPublicExposure},
+		{"bypass iap", "change bypasses iap load balancer for admin surface", "", VulnPublicExposure},
+		{"unauthenticated invoker", "unauthenticated invoker role grants public access", "", VulnPublicExposure},
+		{"publicly accessible", "admin dashboard is publicly accessible via cloud run url", "", VulnPublicExposure},
+
 		{"no match", "use builder pattern for composability", "", VulnNone},
 		{"no match style", "variable naming is inconsistent", "", VulnNone},
 		{"empty what", "", "some body text about nothing specific", VulnNone},

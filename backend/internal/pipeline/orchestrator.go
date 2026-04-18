@@ -121,6 +121,7 @@ type Orchestrator struct {
 	sm           *StateMachine
 	reviewStage  *ReviewStage
 	triageStage  *TriageStage
+	intentStage  *IntentExtractionStage // optional; nil disables intent extraction
 	scoringStage *ScoringStage
 	memRegistry  *memory.Registry
 	simEngine    *SimulationEngine
@@ -135,7 +136,7 @@ type LLMRegistry interface {
 	HasKeyForRepo(ctx context.Context, installationID int64, repoID *int64, providerName string) bool
 }
 
-func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, reviewStage *ReviewStage, triageStage *TriageStage, scoringStage *ScoringStage, memRegistry *memory.Registry, registry LLMRegistry, eventBus *EventBus, logger *slog.Logger, tracker EventTracker) *Orchestrator {
+func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, reviewStage *ReviewStage, triageStage *TriageStage, intentStage *IntentExtractionStage, scoringStage *ScoringStage, memRegistry *memory.Registry, registry LLMRegistry, eventBus *EventBus, logger *slog.Logger, tracker EventTracker) *Orchestrator {
 	sm := NewStateMachine(db, st, logger)
 	sm.eventBus = eventBus
 	sm.tracker = tracker
@@ -147,6 +148,7 @@ func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, 
 		sm:           sm,
 		reviewStage:  reviewStage,
 		triageStage:  triageStage,
+		intentStage:  intentStage,
 		scoringStage: scoringStage,
 		memRegistry:  memRegistry,
 		registry:     registry,
@@ -645,6 +647,20 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		run.FeatureFlags = loadFeatureFlags(linkCtx, o.st, run.DBInstallationID)
 	}
 
+	// Pre-review: extract the author's stated motivation into a structured PRIntent
+	// so specialists and Synthesis can judge findings against intent. Non-fatal —
+	// on any failure run.PRIntent is set to Source="empty" and downstream rendering
+	// gracefully skips the intent block / verification step.
+	//
+	// An unexpected non-nil error from Execute indicates a programmer error
+	// (Execute is documented to always return nil); log it loudly so a future
+	// contract change surfaces instead of silently disabling the feature.
+	if o.intentStage == nil {
+		o.logger.Warn("[pre-review] intent stage not wired; skipping extraction", "pr", event.PRNumber)
+	} else if err := o.intentStage.Execute(ctx, run); err != nil {
+		o.logger.Error("[pre-review] intent extraction returned unexpected error", "error", err, "pr", event.PRNumber)
+	}
+
 	o.logger.Info("starting review pipeline",
 		"review_id", reviewID,
 		"repo", event.RepoFullName,
@@ -921,7 +937,7 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 
 				// Build a richer query: category + file + body gives Supermemory more semantic signal
 				query := fmt.Sprintf("[%s|%s] %s:%d %s", c.Severity, c.Category, filePath, c.Line, c.Body)
-				content, score := run.Indexer.SearchPatternMatch(ctx, owner, repo, query)
+				match := run.Indexer.SearchPatternMatch(ctx, owner, repo, query)
 
 				var ruleContent string
 				if memClient != nil {
@@ -931,19 +947,51 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 					}
 				}
 
+				score := match.Score
 				if score > 0.80 {
 					// Skip self-matches: if the pattern is nearly identical to this comment,
 					// it's from a previous review of the same code (re-review noise)
-					if content != "" && wordOverlap(strings.ToLower(content), strings.ToLower(c.Body)) > 0.7 {
+					if match.Content != "" && wordOverlap(strings.ToLower(match.Content), strings.ToLower(c.Body)) > 0.7 {
 						score = 0
 					} else {
 						c.MatchedPatternScore = score
-						o.logger.Debug("pattern match found", "file", filePath, "line", c.Line, "score", fmt.Sprintf("%.3f", score), "pattern_prefix", util.Truncate(content, 80, true))
+						c.MatchedPatternKind = inferMatchKind(match.Metadata)
+						c.MatchedPatternPR = metaInt(match.Metadata, "pr")
+						c.MatchedPatternAuthor = match.Metadata["pr_author"]
+						c.MatchedPatternAgeDays = metaAgeDays(match.Metadata, "created_at")
+						o.logger.Debug("pattern match found",
+							"file", filePath, "line", c.Line,
+							"score", fmt.Sprintf("%.3f", score),
+							"kind", c.MatchedPatternKind,
+							"source_pr", c.MatchedPatternPR,
+							"pattern_prefix", util.Truncate(match.Content, 80, true))
+						if run.EventBus != nil {
+							run.EventBus.Publish(run.ReviewID, EventMemoryMatched, map[string]any{
+								"file":  filePath,
+								"line":  c.Line,
+								"kind":  c.MatchedPatternKind,
+								"pr":    c.MatchedPatternPR,
+								"score": score,
+							})
+						}
 					}
 				}
 				if ruleContent != "" {
 					c.EnforcedRuleContent = ruleContent
+					// Rule-kind trumps pattern: author intent beats past behaviour when both match.
+					if c.MatchedPatternKind == "" {
+						c.MatchedPatternKind = "rule"
+					}
 					o.logger.Debug("rule enforced", "file", filePath, "line", c.Line, "rule_prefix", util.Truncate(ruleContent, 80, true))
+					if run.EventBus != nil {
+						run.EventBus.Publish(run.ReviewID, EventMemoryMatched, map[string]any{
+							"file":  filePath,
+							"line":  c.Line,
+							"kind":  "rule",
+							"pr":    c.MatchedPatternPR,
+							"score": score,
+						})
+					}
 				}
 				if score <= 0.80 && ruleContent == "" {
 					c.IsNewFinding = true
@@ -969,13 +1017,97 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 	}
 	o.logger.Info("enriched findings", "repo", run.PREvent.RepoFullName, "pr", run.PREvent.PRNumber,
 		"total", matched+enforced+novel, "pattern_matches", matched, "rules_enforced", enforced, "new_findings", novel)
+
+	if run.EventBus != nil {
+		run.EventBus.Publish(run.ReviewID, EventFindingsEnriched, map[string]any{
+			"matched":  matched,
+			"enforced": enforced,
+			"novel":    novel,
+			"total":    matched + enforced + novel,
+		})
+	}
 	return nil
+}
+
+// inferMatchKind derives the MatchedPatternKind from Supermemory metadata. The
+// "source" key is stamped at index time and distinguishes what kind of document
+// produced the match. Falls through to "similarity" when metadata is absent —
+// e.g. older indexed docs pre-dating the metadata stamping.
+func inferMatchKind(md map[string]string) string {
+	switch md["source"] {
+	case "scoring_confirmed", "auto_learn":
+		return "pattern"
+	case "convention_extraction", "convention":
+		return "convention"
+	case "pr_summary", "synthesis", "arch_summary":
+		return "similarity"
+	}
+	return "similarity"
+}
+
+// metaInt reads an integer value stamped in Supermemory metadata. Missing /
+// malformed values return 0 so the caller renders without a PR reference.
+func metaInt(md map[string]string, key string) int {
+	if v, ok := md[key]; ok {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return 0
+}
+
+// metaAgeDays parses an ISO-8601 or RFC3339 timestamp from metadata and returns
+// its age in whole days. 0 means "unknown / fresh / unparseable" — renderer
+// silently skips the age clause rather than print "0 days ago".
+func metaAgeDays(md map[string]string, key string) int {
+	raw, ok := md[key]
+	if !ok {
+		return 0
+	}
+	for _, layout := range []string{time.RFC3339, "2006-01-02T15:04:05Z", "2006-01-02"} {
+		if t, err := time.Parse(layout, raw); err == nil {
+			days := int(time.Since(t).Hours() / 24)
+			if days < 0 {
+				return 0
+			}
+			return days
+		}
+	}
+	return 0
 }
 
 func (o *Orchestrator) synthesize(ctx context.Context, run *PipelineRun) error {
 	// Annotate findings with pattern matches and novelty flags before building summary
 	if err := o.enrichFindings(ctx, run); err != nil {
 		o.logger.Warn("enrichFindings failed, continuing", "error", err)
+	}
+
+	// Intent verification: decide whether the diff delivers the stated goal and
+	// which findings fall in explicit non-goals. Demotion mutates FileReviews so
+	// the score calculation below sees the adjusted severities.
+	verdict := o.verifyIntent(ctx, run)
+	if verdict != nil && len(verdict.OutOfScopeFindings) > 0 {
+		unmatched, stale := DemoteOutOfScopeFindings(run, verdict)
+		switch {
+		case stale:
+			// FileReviews was mutated between verdict construction and demotion —
+			// positional IDs are invalid. Skip demotion rather than damage random
+			// comments. This is a pipeline-ordering bug signal; log it loudly.
+			o.logger.Warn("intent verification: stale verdict, skipping demotion",
+				"built_against", verdict.BuiltAgainstCount,
+				"current", countFlatComments(run),
+				"pr", run.PREvent.PRNumber)
+		default:
+			o.logger.Info("intent verification demoted out-of-scope findings",
+				"count", len(verdict.OutOfScopeFindings)-len(unmatched),
+				"pr", run.PREvent.PRNumber)
+			if len(unmatched) > 0 {
+				// LLM hallucinated ids that don't map to any existing comment.
+				// Log so drift shows up in fleet logs without being fatal.
+				o.logger.Warn("intent verification: unmatched out-of-scope finding ids",
+					"ids", unmatched, "pr", run.PREvent.PRNumber)
+			}
+		}
 	}
 
 	var summary strings.Builder
@@ -1045,11 +1177,24 @@ func (o *Orchestrator) synthesize(ctx context.Context, run *PipelineRun) error {
 		brief = o.generateConversationalBrief(ctx, run, score)
 	}
 
+	// Prepend intent header + [INTENT] finding; both return "" when not applicable.
+	if header := FormatIntentHeader(run, verdict); header != "" {
+		brief = header + "\n" + brief
+	}
+	finalSummary := summary.String()
+	if intentFinding := FormatIntentFinding(verdict); intentFinding != "" {
+		finalSummary = intentFinding + finalSummary
+	}
+	if shouldShowNoIntentCallout(run) {
+		brief += NoIntentCallout
+	}
+
 	run.Synthesis = &SynthesisResult{
-		Summary:           summary.String(),
+		Summary:           finalSummary,
 		Brief:             brief,
 		Score:             score,
 		SimulationResults: simResults,
+		IntentVerdict:     verdict,
 	}
 
 	if len(simResults) > 0 {
@@ -1063,6 +1208,96 @@ func (o *Orchestrator) synthesize(ctx context.Context, run *PipelineRun) error {
 		})
 	}
 	return nil
+}
+
+// verifyIntent asks the LLM whether the diff delivers the PR's stated goal and
+// which (if any) findings fall under the author's declared non_goals. Returns
+// nil when there's no intent to verify, no provider available, or the LLM call
+// / parse fails — intent verification is best-effort and never blocks synthesis.
+func (o *Orchestrator) verifyIntent(ctx context.Context, run *PipelineRun) *IntentVerdict {
+	if !run.PRIntent.HasIntent() {
+		return nil
+	}
+
+	lister := storeConfigLister{st: o.st, installationID: run.DBInstallationID}
+	provider, cfg, err := o.reviewStage.registry.ResolveProvider(ctx, lister, run.DBInstallationID, run.DBRepoID, llm.StageSynthesis)
+	if err != nil {
+		provider, cfg, err = o.reviewStage.registry.ResolveProvider(ctx, lister, run.DBInstallationID, run.DBRepoID, llm.StageReview)
+		if err != nil {
+			o.logger.Warn("intent verification: no provider available",
+				"error", err,
+				"cancellation", errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded),
+				"pr", run.PREvent.PRNumber)
+			return nil
+		}
+	}
+
+	vctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	resp, err := provider.Complete(vctx, llm.CompletionRequest{
+		Model:       cfg.Model,
+		System:      intentVerificationSystemPrompt,
+		Messages:    []llm.Message{{Role: "user", Content: BuildIntentVerificationPrompt(run)}},
+		MaxTokens:   600,
+		Temperature: 0.2,
+		JSONMode:    true,
+	})
+	if err != nil {
+		o.logger.Warn("intent verification: LLM call failed",
+			"error", err,
+			"cancellation", errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded),
+			"pr", run.PREvent.PRNumber)
+		return nil
+	}
+
+	tokens := StageTokens{
+		PromptTokens:     resp.TokensUsed.PromptTokens,
+		CompletionTokens: resp.TokensUsed.CompletionTokens,
+		TotalTokens:      resp.TokensUsed.TotalTokens,
+		Cost:             resp.Cost,
+		Model:            cfg.Model,
+		Provider:         cfg.Provider,
+	}
+	run.Tokens.Intent.PromptTokens += tokens.PromptTokens
+	run.Tokens.Intent.CompletionTokens += tokens.CompletionTokens
+	run.Tokens.Intent.TotalTokens += tokens.TotalTokens
+	run.Tokens.Intent.Cost += tokens.Cost
+	if run.Tokens.Intent.Model == "" {
+		run.Tokens.Intent.Model = cfg.Model
+		run.Tokens.Intent.Provider = cfg.Provider
+	}
+	run.Tokens.addToTotal(tokens)
+
+	verdict, err := parseIntentVerdict(resp.Content)
+	if err != nil {
+		o.logger.Warn("intent verification: parse failed",
+			"error", err,
+			"model", cfg.Model,
+			"finish_reason", resp.FinishReason,
+			"response_prefix", util.Truncate(resp.Content, 300, true),
+			"pr", run.PREvent.PRNumber)
+		return nil
+	}
+
+	// Stamp the FileReviews count the verdict was built against so
+	// DemoteOutOfScopeFindings can guard against positional-id drift.
+	verdict.BuiltAgainstCount = countFlatComments(run)
+
+	o.logger.Info("intent verified",
+		"delivers", verdict.Delivers,
+		"unmet", len(verdict.UnmetCriteria),
+		"out_of_scope", len(verdict.OutOfScopeFindings),
+		"pr", run.PREvent.PRNumber)
+
+	if run.EventBus != nil {
+		run.EventBus.Publish(run.ReviewID, EventIntentVerified, map[string]any{
+			"delivers":     verdict.Delivers,
+			"unmet":        len(verdict.UnmetCriteria),
+			"out_of_scope": len(verdict.OutOfScopeFindings),
+		})
+	}
+	return verdict
 }
 
 const synthesisBriefSystemPrompt = `You are writing a concise verdict for a pull request review. Per-file inline comments are shown separately — do NOT repeat them.
@@ -1151,6 +1386,15 @@ func (o *Orchestrator) generateConversationalBrief(ctx context.Context, run *Pip
 			"total_tokens": run.Tokens.Total.TotalTokens,
 			"cost":         run.Tokens.Total.Cost,
 		})
+		// Mid-stage signal: brief is ready, distinct from EventSynthesis which
+		// fires at the very end of synthesize() after all sub-work completes.
+		// fallback = true when the LLM returned empty; the caller falls back
+		// to a deterministic template.
+		trimmedLen := len(strings.TrimSpace(resp.Content))
+		run.EventBus.Publish(run.ReviewID, EventBriefGenerated, map[string]any{
+			"length":   trimmedLen,
+			"fallback": trimmedLen == 0,
+		})
 	}
 
 	brief := strings.TrimSpace(resp.Content)
@@ -1206,7 +1450,12 @@ func buildSynthesisBriefPrompt(run *PipelineRun, score int) string {
 	sb.WriteString(fmt.Sprintf("PR #%d: \"%s\" by %s\n", run.PREvent.PRNumber, safeTitle, safeAuthor))
 	sb.WriteString(fmt.Sprintf("Files reviewed: %d, Score: %d/10\n\n", len(run.Diff.Files), score))
 
-	if run.PREvent.PRBody != "" {
+	// Prefer the structured intent block — it's denser than a 300-char body slice and
+	// carries non_goals / acceptance_criteria so the brief can be scope-aware. Fall
+	// back to the raw body only when intent extraction produced nothing usable.
+	if intent := run.PRIntent.RenderPrompt(); intent != "" {
+		sb.WriteString(intent + "\n\n")
+	} else if run.PREvent.PRBody != "" {
 		sb.WriteString(wrapInDelimiters("pr_description", sanitizeUserInput(util.Truncate(run.PREvent.PRBody, 300, false))) + "\n\n")
 	}
 
@@ -1695,7 +1944,7 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	// Persist review data BEFORE posting to GitHub so a 502 doesn't lose results
 	var tokenUsageJSON []byte
 	if run.Tokens.Total.TotalTokens > 0 {
-		if b, err := json.Marshal(run.Tokens); err != nil {
+		if b, err := json.Marshal(&run.Tokens); err != nil {
 			slog.Warn("failed to marshal token usage", "error", err)
 		} else {
 			tokenUsageJSON = b
@@ -1825,9 +2074,29 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		return fmt.Errorf("updating review record: %w", err)
 	}
 
+	// "comments" is the total FileReview count (post-dedup/scoring). Split it into
+	// what actually reached the author: inline posts vs folded-into-summary. A high
+	// folded count on a review with low inline can signal line-number drift in the
+	// reviewer LLM or a diff the author didn't touch the lines we flagged on.
 	o.logger.Info("[posted] review", "github_review_id", ghReviewID, "pr", run.PREvent.PRNumber,
-		"comments", countComments(run), "files", len(run.FileReviews), "score", run.Synthesis.Score,
+		"comments", countComments(run),
+		"inline", len(inlineComments),
+		"folded_important", len(importantFolded),
+		"folded_minor", len(minorFolded),
+		"files", len(run.FileReviews), "score", run.Synthesis.Score,
 		"deep_review", run.DeepReview, "duration_ms", time.Since(run.CreatedAt).Milliseconds())
+
+	// Live-stream the GitHub POST completion distinct from "completed" — the
+	// latter fires only after all post-post work (memory indexing, backfill,
+	// pattern learning). This event marks the moment the author's PR gets the
+	// inline comments visible on GitHub.
+	if run.EventBus != nil {
+		run.EventBus.Publish(run.ReviewID, EventPostedToGitHub, map[string]any{
+			"github_review_id": ghReviewID,
+			"inline":           len(inlineComments),
+			"folded":           len(importantFolded) + len(minorFolded),
+		})
+	}
 
 	// Backfill github_comment_ids now that we have the ghReviewID
 	o.backfillGitHubCommentIDs(ctx, run, ghReviewID, owner, repo)
@@ -1858,7 +2127,7 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 
 	// Persist final token usage including post-review ops
 	if run.Tokens.Total.TotalTokens > 0 {
-		if b, err := json.Marshal(run.Tokens); err == nil {
+		if b, err := json.Marshal(&run.Tokens); err == nil {
 			if _, err := o.db.Exec(ctx, `UPDATE reviews SET token_usage = $1 WHERE id = $2`, b, run.ReviewID); err != nil {
 				o.logger.Warn("failed to persist post-review tokens", "error", err)
 			}
@@ -2246,6 +2515,9 @@ func (o *Orchestrator) indexConfirmedPatterns(ctx context.Context, run *Pipeline
 		}
 	}
 	slog.Info("indexConfirmedPatterns", "indexed", indexed, "scoring_skipped", run.ScoringSkipped)
+	if indexed > 0 {
+		publishMemoryIndexed(run, "patterns", true, indexed)
+	}
 }
 
 // learnPositivePatterns indexes praise comments as positive patterns in Supermemory.
@@ -2287,6 +2559,9 @@ func (o *Orchestrator) learnPositivePatterns(ctx context.Context, run *PipelineR
 			"repo", run.PREvent.RepoFullName,
 			"pr", run.PREvent.PRNumber,
 		)
+	}
+	if indexed > 0 {
+		publishMemoryIndexed(run, "patterns_praise", true, indexed)
 	}
 	return indexed
 }
@@ -2467,6 +2742,10 @@ The "pattern" value must be the actual pattern text, NOT the word "description".
 			}
 		}
 		o.logger.Info("auto-learned patterns", "count", len(patterns), "repo", run.PREvent.RepoFullName)
+		// Kind is "patterns" (not "patterns_praise") — autoLearnPatterns extracts
+		// from reviewer findings, not praise comments. patterns_praise is the
+		// praise-derived flow in learnPositivePatterns.
+		publishMemoryIndexed(run, "patterns", true, len(patterns))
 	}
 }
 
@@ -2584,6 +2863,7 @@ Return [] if no clear conventions emerge. JSON array only.`, run.PREvent.RepoFul
 
 	if len(conventions) > 0 {
 		o.logger.Info("extracted conventions", "count", len(conventions), "repo", run.PREvent.RepoFullName)
+		publishMemoryIndexed(run, "conventions", true, len(conventions))
 	}
 }
 
@@ -2717,6 +2997,9 @@ Max 200 words. Be concrete.`
 	}
 
 	o.logger.Info("synthesized file memories", "succeeded", succeeded, "failed", failed, "repo", run.PREvent.RepoFullName)
+	if succeeded+failed > 0 {
+		publishMemoryIndexed(run, "file_synthesis", failed == 0, succeeded)
+	}
 }
 
 // indexPRSummary stores a lightweight PR summary in Supermemory for cross-PR context.
@@ -2745,6 +3028,7 @@ func (o *Orchestrator) indexPRSummary(ctx context.Context, run *PipelineRun, own
 	if err != nil {
 		o.logger.Warn("indexing PR summary", "error", err)
 	}
+	publishMemoryIndexed(run, "pr_summary", err == nil, 1)
 }
 
 // indexArchitectureSummary indexes the repo's top choke points into Supermemory so
@@ -2785,9 +3069,11 @@ func (o *Orchestrator) indexArchitectureSummary(ctx context.Context, run *Pipeli
 	})
 	if err != nil {
 		o.logger.Warn("indexing arch summary", "error", err)
+		publishMemoryIndexed(run, "arch_summary", false, 0)
 		return
 	}
 	o.logger.Info("indexed architecture summary", "owner", owner, "repo", repo, "choke_points", len(rows))
+	publishMemoryIndexed(run, "arch_summary", true, len(rows))
 }
 
 // extractArchitectureGraph uses an LLM to identify architectural components from
@@ -2939,6 +3225,7 @@ Rules:
 	}
 
 	o.logger.Info("extracted architecture graph", "nodes", len(nodeIDs), "edges", len(result.Edges), "repo", run.PREvent.RepoFullName)
+	publishMemoryIndexed(run, "arch_graph", true, len(nodeIDs))
 }
 
 // ─── Lead Agent Helpers ──────────────────────────────────────────────────────
@@ -3617,6 +3904,14 @@ func (o *Orchestrator) leadBrief(ctx context.Context, run *PipelineRun) (*LeadBr
 		o.logger.Warn("leadBrief LLM failed", "error", err)
 		return nil, nil
 	}
+	run.Tokens.addLeadAgent(StageTokens{
+		PromptTokens:     resp.TokensUsed.PromptTokens,
+		CompletionTokens: resp.TokensUsed.CompletionTokens,
+		TotalTokens:      resp.TokensUsed.TotalTokens,
+		Cost:             resp.Cost,
+		Model:            cfg.Model,
+		Provider:         cfg.Provider,
+	})
 
 	items, err := unmarshalLLMArray[BriefItem](resp.Content)
 	if err != nil {
@@ -3638,6 +3933,13 @@ func (o *Orchestrator) leadBrief(ctx context.Context, run *PipelineRun) (*LeadBr
 		}
 	}
 	o.logger.Info("lead brief produced", "files", fileCount, "cross_cutting", len(brief.CrossCuttingConcerns()))
+
+	if run.EventBus != nil {
+		run.EventBus.Publish(run.ReviewID, EventLeadBrief, map[string]any{
+			"files":         fileCount,
+			"cross_cutting": len(brief.CrossCuttingConcerns()),
+		})
+	}
 	return brief, nil
 }
 
@@ -3682,6 +3984,14 @@ func (o *Orchestrator) leadBroadcast(ctx context.Context, run *PipelineRun, allR
 		o.logger.Warn("leadBroadcast LLM failed", "error", err)
 		return nil
 	}
+	run.Tokens.addLeadAgent(StageTokens{
+		PromptTokens:     resp.TokensUsed.PromptTokens,
+		CompletionTokens: resp.TokensUsed.CompletionTokens,
+		TotalTokens:      resp.TokensUsed.TotalTokens,
+		Cost:             resp.Cost,
+		Model:            cfg.Model,
+		Provider:         cfg.Provider,
+	})
 
 	signals, err := unmarshalLLMArray[CrossAgentSignal](resp.Content)
 	if err != nil {
@@ -3690,6 +4000,11 @@ func (o *Orchestrator) leadBroadcast(ctx context.Context, run *PipelineRun, allR
 	}
 
 	o.logger.Info("lead broadcast signals", "count", len(signals))
+	if run.EventBus != nil {
+		run.EventBus.Publish(run.ReviewID, EventLeadBroadcast, map[string]any{
+			"signals": len(signals),
+		})
+	}
 	return signals
 }
 
@@ -3730,6 +4045,14 @@ func (o *Orchestrator) agentSecondPass(ctx context.Context, run *PipelineRun, si
 		o.logger.Warn("agentSecondPass LLM failed", "error", err, "agent", signal.ToAgent)
 		return nil
 	}
+	run.Tokens.addLeadAgent(StageTokens{
+		PromptTokens:     resp.TokensUsed.PromptTokens,
+		CompletionTokens: resp.TokensUsed.CompletionTokens,
+		TotalTokens:      resp.TokensUsed.TotalTokens,
+		Cost:             resp.Cost,
+		Model:            cfg.Model,
+		Provider:         cfg.Provider,
+	})
 
 	type secondPassComment struct {
 		FilePath   string   `json:"file_path"`
@@ -3763,7 +4086,15 @@ func (o *Orchestrator) agentSecondPass(ctx context.Context, run *PipelineRun, si
 			Specialist: Specialist(signal.ToAgent + "_second_pass"),
 		})
 	}
-	return groupByFile(byFile)
+	reviews := groupByFile(byFile)
+	if run.EventBus != nil {
+		run.EventBus.Publish(run.ReviewID, EventSecondPass, map[string]any{
+			"agent":    signal.ToAgent,
+			"files":    len(signal.FilesToCheck),
+			"comments": len(parsed),
+		})
+	}
+	return reviews
 }
 
 const blastRadiusAgentPrompt = `You analyze dependency impact. Given changed code and dependent file source, identify concrete breaking changes.
@@ -3814,6 +4145,14 @@ func (o *Orchestrator) analyzeBlastRadius(ctx context.Context, run *PipelineRun,
 		o.logger.Warn("analyzeBlastRadius LLM failed", "error", err)
 		return nil
 	}
+	run.Tokens.addLeadAgent(StageTokens{
+		PromptTokens:     resp.TokensUsed.PromptTokens,
+		CompletionTokens: resp.TokensUsed.CompletionTokens,
+		TotalTokens:      resp.TokensUsed.TotalTokens,
+		Cost:             resp.Cost,
+		Model:            cfg.Model,
+		Provider:         cfg.Provider,
+	})
 
 	impacts, err := unmarshalLLMArray[BlastRadiusImpact](resp.Content)
 	if err != nil {
@@ -3822,6 +4161,11 @@ func (o *Orchestrator) analyzeBlastRadius(ctx context.Context, run *PipelineRun,
 	}
 
 	o.logger.Info("blast radius analysis", "impacts", len(impacts), "repo", fmt.Sprintf("%s/%s", owner, repo))
+	if run.EventBus != nil {
+		run.EventBus.Publish(run.ReviewID, EventBlastRadius, map[string]any{
+			"impacts": len(impacts),
+		})
+	}
 	return impacts
 }
 
@@ -3865,6 +4209,14 @@ func (o *Orchestrator) leadCrossCheck(ctx context.Context, run *PipelineRun, all
 		o.logger.Warn("leadCrossCheck LLM failed", "error", err)
 		return nil
 	}
+	run.Tokens.addLeadAgent(StageTokens{
+		PromptTokens:     resp.TokensUsed.PromptTokens,
+		CompletionTokens: resp.TokensUsed.CompletionTokens,
+		TotalTokens:      resp.TokensUsed.TotalTokens,
+		Cost:             resp.Cost,
+		Model:            cfg.Model,
+		Provider:         cfg.Provider,
+	})
 
 	type crossCheckComment struct {
 		FilePath   string   `json:"file_path"`
@@ -3903,6 +4255,12 @@ func (o *Orchestrator) leadCrossCheck(ctx context.Context, run *PipelineRun, all
 
 	reviews := groupByFile(byFile)
 	o.logger.Info("lead cross-check complete", "files", len(reviews), "comments", len(comments))
+	if run.EventBus != nil {
+		run.EventBus.Publish(run.ReviewID, EventLeadCrossCheck, map[string]any{
+			"files":    len(reviews),
+			"comments": len(comments),
+		})
+	}
 	return reviews
 }
 
@@ -4058,6 +4416,22 @@ func (o *Orchestrator) resolveReviewProvider(ctx context.Context, run *PipelineR
 //
 // Format: `<details>` block so it doesn't dominate the review summary unless
 // the reader wants to inspect costs.
+// publishMemoryIndexed emits an EventMemoryIndexed for the given Supermemory
+// upsert. `kind` is one of the 7 closed values (patterns, patterns_praise,
+// conventions, file_synthesis, pr_summary, arch_summary, arch_graph). `success`
+// is false when the upsert returned an error — the UI renders failures with a
+// distinct style so operators can spot indexing outages in live streams.
+func publishMemoryIndexed(run *PipelineRun, kind string, success bool, count int) {
+	if run == nil || run.EventBus == nil {
+		return
+	}
+	run.EventBus.Publish(run.ReviewID, EventMemoryIndexed, map[string]any{
+		"kind":    kind,
+		"success": success,
+		"count":   count,
+	})
+}
+
 func renderTokenBreakdown(tu *RunTokenUsage) string {
 	if tu == nil || tu.Total.TotalTokens == 0 {
 		return ""
@@ -4097,10 +4471,12 @@ func renderTokenBreakdown(tu *RunTokenUsage) string {
 	}
 
 	// Non-review stages first, in pipeline order.
+	addRow("Intent", tu.Intent.TotalTokens, tu.Intent.Cost)
 	addRow("Triage", tu.Triage.TotalTokens, tu.Triage.Cost)
 	addRow("Enrichment", tu.Enrichment.TotalTokens, tu.Enrichment.Cost)
 	addRow("Conventions", tu.Conventions.TotalTokens, tu.Conventions.Cost)
 	addRow("Patterns", tu.Patterns.TotalTokens, tu.Patterns.Cost)
+	addRow("Lead agent", tu.LeadAgent.TotalTokens, tu.LeadAgent.Cost)
 
 	// File synthesis (aggregate across files).
 	var fsTokens int
@@ -4125,8 +4501,21 @@ func renderTokenBreakdown(tu *RunTokenUsage) string {
 		}
 	}
 
+	addRow("Acceptance", tu.Acceptance.TotalTokens, tu.Acceptance.Cost)
+	addRow("Cross-PR", tu.CrossPR.TotalTokens, tu.CrossPR.Cost)
+
+	// Simulation (aggregate across scenarios).
+	var simTokens int
+	var simCost float64
+	for _, t := range tu.Simulation {
+		simTokens += t.TotalTokens
+		simCost += t.Cost
+	}
+	addRow("Simulation", simTokens, simCost)
+
 	addRow("Scoring", tu.Scoring.TotalTokens, tu.Scoring.Cost)
 	addRow("Synthesis", tu.Synthesis.TotalTokens, tu.Synthesis.Cost)
+	addRow("Reply", tu.Reply.TotalTokens, tu.Reply.Cost)
 	addRow("Graph", tu.Graph.TotalTokens, tu.Graph.Cost)
 
 	if len(rows) == 0 {
@@ -4300,6 +4689,10 @@ func formatCommentBody(c FileComment) string {
 		body += "\n\n```suggestion\n" + strings.TrimRight(c.Suggestion, "\n") + "\n```"
 	}
 
+	if tag := renderMemoryTag(c); tag != "" {
+		body += "\n\n" + tag
+	}
+
 	if c.Severity == SeverityCritical || c.Severity == SeverityWarning {
 		body += "\n\n---\n<sub>React 👎 to dismiss · Argus learns from feedback</sub>"
 	}
@@ -4312,6 +4705,93 @@ func formatCommentBody(c FileComment) string {
 	}
 
 	return body
+}
+
+// renderMemoryTag produces a one-line italic attribution appended to the review
+// comment body when Argus matched the finding against a memory document (past
+// pattern / team convention / repo rule / prior-review similarity). Returns
+// "" when no memory match is present — callers skip appending on empty.
+//
+// Multi-match rendering collapses all hit kinds into a single sentence joined
+// with " and ". Pattern hits carry attribution (PR#, author, age); other kinds
+// are shorter because they don't have a single source PR.
+//
+// Example outputs:
+//
+//	_— Matches a repo rule._
+//	_— Matches a prior fix in PR #927 (@jordan, 2 months ago)._
+//	_— Matches a repo rule and a prior fix in PR #927._
+//	_— Matches the team's style convention._
+func renderMemoryTag(c FileComment) string {
+	var clauses []string
+
+	// Rule is authoritative — author-written, not inferred. List first when present.
+	if c.EnforcedRuleContent != "" {
+		clauses = append(clauses, "a repo rule")
+	}
+
+	switch c.MatchedPatternKind {
+	case "pattern":
+		var tail string
+		if c.MatchedPatternPR > 0 {
+			tail = fmt.Sprintf(" in PR #%d", c.MatchedPatternPR)
+			if c.MatchedPatternAuthor != "" {
+				tail += fmt.Sprintf(" (@%s", c.MatchedPatternAuthor)
+				if age := humanAge(c.MatchedPatternAgeDays); age != "" {
+					tail += ", " + age
+				}
+				tail += ")"
+			} else if age := humanAge(c.MatchedPatternAgeDays); age != "" {
+				tail += " (" + age + ")"
+			}
+		}
+		clauses = append(clauses, "a prior fix"+tail)
+	case "convention":
+		phrase := "the team's convention"
+		if cat := string(c.Category); cat != "" {
+			phrase = "the team's " + strings.ReplaceAll(cat, "_", " ") + " convention"
+		}
+		clauses = append(clauses, phrase)
+	case "similarity":
+		clauses = append(clauses, "a similar prior finding")
+	}
+
+	if len(clauses) == 0 {
+		return ""
+	}
+
+	var joined string
+	switch len(clauses) {
+	case 1:
+		joined = clauses[0]
+	case 2:
+		joined = clauses[0] + " and " + clauses[1]
+	default:
+		joined = strings.Join(clauses[:len(clauses)-1], ", ") + ", and " + clauses[len(clauses)-1]
+	}
+	return "_— Matches " + joined + "._"
+}
+
+// humanAge formats a day count as a human phrase suitable for inline prose.
+// Returns "" for 0/negative days so the renderer can drop the age clause
+// entirely rather than print "0 days ago".
+func humanAge(days int) string {
+	switch {
+	case days <= 0:
+		return ""
+	case days == 1:
+		return "1 day ago"
+	case days < 30:
+		return fmt.Sprintf("%d days ago", days)
+	case days < 60:
+		return "1 month ago"
+	case days < 365:
+		return fmt.Sprintf("%d months ago", days/30)
+	case days < 730:
+		return "1 year ago"
+	default:
+		return fmt.Sprintf("%d years ago", days/365)
+	}
 }
 
 func severityEmoji(s Severity) string {
