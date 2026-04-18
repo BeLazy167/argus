@@ -1115,7 +1115,12 @@ func (o *Orchestrator) synthesize(ctx context.Context, run *PipelineRun) error {
 	if run.IsIncremental {
 		verb = "Re-reviewed"
 	}
-	summary.WriteString(fmt.Sprintf("%s %d files with %d comments.\n\n", verb, len(run.Diff.Files), countComments(run)))
+	fileCount := len(run.Diff.Files)
+	cmtCount := countComments(run)
+	summary.WriteString(fmt.Sprintf("%s %d %s with %d %s.\n\n",
+		verb,
+		fileCount, pluralize("file", fileCount),
+		cmtCount, pluralize("comment", cmtCount)))
 
 	for _, fr := range run.FileReviews {
 		summary.WriteString(fmt.Sprintf("### `%s`\n", fr.Path))
@@ -1171,11 +1176,22 @@ func (o *Orchestrator) synthesize(ctx context.Context, run *PipelineRun) error {
 	// Build concise brief for GitHub review body
 	var brief string
 	if totalComments == 0 {
-		brief = fmt.Sprintf("Argus reviewed %d files and found no issues. Code looks good.", len(run.Diff.Files))
+		n := len(run.Diff.Files)
+		noun := "files"
+		if n == 1 {
+			noun = "file"
+		}
+		brief = fmt.Sprintf("Argus reviewed %d %s and found no issues. Code looks good.", n, noun)
 	} else {
 		// Try LLM-generated conversational brief
 		brief = o.generateConversationalBrief(ctx, run, score)
 	}
+
+	// Capture the H2 headline BEFORE the intent header is prepended to brief —
+	// otherwise the posted comment's H2 would pull the first sentence of the
+	// intent disclaimer ("### 🔍 PR intent vs diff … _Argus read the diff …_")
+	// instead of the actual synthesis verdict.
+	headline := util.Truncate(firstSentence(brief), 80, true)
 
 	// Prepend intent header + [INTENT] finding; both return "" when not applicable.
 	if header := FormatIntentHeader(run, verdict); header != "" {
@@ -1192,6 +1208,7 @@ func (o *Orchestrator) synthesize(ctx context.Context, run *PipelineRun) error {
 	run.Synthesis = &SynthesisResult{
 		Summary:           finalSummary,
 		Brief:             brief,
+		Headline:          headline,
 		Score:             score,
 		SimulationResults: simResults,
 		IntentVerdict:     verdict,
@@ -1749,10 +1766,19 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 
 	// Root-cause grouping now handled by SmartDedup Layer 1 (canonical type fingerprint)
 
-	reviewHeader := "## Argus Review\n\n"
+	// Header format: `## 🔎 Argus · 8/10 — <verdict one-liner>`. One-liner
+	// comes from Synthesis.Headline, which is captured in synthesize() before
+	// FormatIntentHeader mutates Brief — using Brief directly here would bleed
+	// the intent disclaimer text into the H2.
+	headerPrefix := "Argus"
 	if run.IsIncremental {
-		reviewHeader = "## Argus Review (Incremental)\n\n"
+		headerPrefix = "Argus (Incremental)"
 	}
+	reviewHeader := fmt.Sprintf("## 🔎 %s · %d/10", headerPrefix, run.Synthesis.Score)
+	if run.Synthesis.Headline != "" {
+		reviewHeader += " — " + run.Synthesis.Headline
+	}
+	reviewHeader += "\n\n"
 	// Build valid-line sets from diff to avoid 422 "line could not be resolved"
 	validLines := make(map[string]map[int]bool)
 	for _, f := range run.Diff.Files {
@@ -1914,26 +1940,33 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		summaryBody.WriteString(strings.Join(minorFolded, "\n"))
 		summaryBody.WriteString("\n\n</details>")
 	}
-	summaryBody.WriteString(fmt.Sprintf("\n\nScore: **%d/10** · [Full review →](https://argus.reviews/reviews/%s)", run.Synthesis.Score, run.ReviewID.String()))
+	// Findings pill: single scan-line showing totals and inline/folded split.
+	// Omitted when there are no findings at all — keeps the summary terse on
+	// clean PRs.
+	totalFindings := countComments(run)
+	if totalFindings > 0 {
+		summaryBody.WriteString(fmt.Sprintf("\n\n**%d %s** · %d inline · %d folded",
+			totalFindings, pluralize("finding", totalFindings),
+			len(inlineComments), totalFolded))
+	}
 
-	// Token/cost breakdown per stage and per specialist (collapsible)
+	// Token/cost breakdown per stage and per specialist (collapsible).
 	if breakdown := renderTokenBreakdown(&run.Tokens); breakdown != "" {
 		summaryBody.WriteString("\n\n")
 		summaryBody.WriteString(breakdown)
 	}
 
-	// How to engage with Argus (reduces "where do I reply?" confusion)
-	summaryBody.WriteString("\n\n---\n<sub>💬 **Engaging with Argus:** reply to any inline comment on GitHub to discuss — Argus responds and learns from your feedback. " +
-		"React 👎 to dismiss a finding. Use `@argus-eye resolve` to close all threads, `@argus-eye fix` to apply suggestions, `@argus-eye help` for more.</sub>")
-
-	// Links to structured exports for AI agents (signed URLs, 90-day expiry)
-	dashURL := "https://argus.reviews"
-	totalFindings := countComments(run)
-	exportURL := util.SignExportURL(run.ReviewID.String(), "md", 90*24*time.Hour)
-	summaryBody.WriteString("\n\n**For AI agents:**\n")
-	summaryBody.WriteString(fmt.Sprintf("- [Posted findings (MD)](%s) — %d inline findings\n", exportURL, len(inlineComments)))
-	summaryBody.WriteString(fmt.Sprintf("- [All findings (MD)](%s) — all %d findings\n", exportURL, totalFindings))
-	summaryBody.WriteString(fmt.Sprintf("- [Full review →](%s/reviews/%s)\n", dashURL, run.ReviewID.String()))
+	// Footer: single dashboard link + engagement tips in one <sub> block.
+	// Replaces the old layout which rendered THREE links ("Full review →"
+	// inline + "Full review →" in the AI-agents block + "Posted findings")
+	// plus an unconditional "For AI agents:" header that was visually noisy
+	// on zero-finding reviews. The dashboard page serves both humans and
+	// agents; agents can follow the link and hit /api/v1/... from there.
+	summaryBody.WriteString(fmt.Sprintf(
+		"\n\n---\n<sub>[Dashboard →](https://argus.reviews/reviews/%s) · "+
+			"React 👎 to dismiss · "+
+			"Reply to any inline comment or use `@argus-eye help` to chat</sub>",
+		run.ReviewID.String()))
 
 	submission := &ghpkg.ReviewSubmission{
 		Summary:  summaryBody.String(),
@@ -4487,17 +4520,26 @@ func renderTokenBreakdown(tu *RunTokenUsage) string {
 	}
 	addRow("File synthesis", fsTokens, fsCost)
 
-	// Review stage — show per-specialist sub-rows.
+	// Review stage — show per-specialist sub-rows. When the specialist key is
+	// the skim fallback "review" (the key assignment above in the bySpecialist
+	// loop when Specialist==""), drop the suffix so we don't render the
+	// redundant "Review · review" column.
+	reviewLabel := func(key string) string {
+		if key == "review" {
+			return "Review"
+		}
+		return "Review · " + key
+	}
 	for _, key := range specialistOrder {
 		if a, ok := bySpecialist[key]; ok {
 			seen[key] = true
-			addRow("Review · "+key, a.tokens, a.cost)
+			addRow(reviewLabel(key), a.tokens, a.cost)
 		}
 	}
 	// Any specialists we didn't enumerate (future-proof for new names).
 	for key, a := range bySpecialist {
 		if !seen[key] {
-			addRow("Review · "+key, a.tokens, a.cost)
+			addRow(reviewLabel(key), a.tokens, a.cost)
 		}
 	}
 
@@ -4533,6 +4575,16 @@ func renderTokenBreakdown(tu *RunTokenUsage) string {
 	}
 	sb.WriteString("\n</details>")
 	return sb.String()
+}
+
+// pluralize returns noun + "s" when n != 1, matching the casual-English rule
+// Argus uses for user-facing counts ("1 file", "2 files"). Irregular plurals
+// are not handled — add a switch here if one appears in a new code path.
+func pluralize(noun string, n int) string {
+	if n == 1 {
+		return noun
+	}
+	return noun + "s"
 }
 
 // formatTokens renders a token count with a k/M suffix for readability.

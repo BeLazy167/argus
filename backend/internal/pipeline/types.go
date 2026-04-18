@@ -270,8 +270,13 @@ var ValidCategories = map[Category]bool{
 
 // SynthesisResult is the combined review output.
 type SynthesisResult struct {
-	Summary           string
-	Brief             string
+	Summary string
+	Brief   string
+	// Headline is a short (≤80 char) single-sentence verdict used by the
+	// posted-comment H2. Captured in synthesize() before FormatIntentHeader
+	// is prepended to Brief, so the header shows the synthesis takeaway
+	// rather than the intent-block disclaimer that now leads Brief.
+	Headline          string
 	Score             int // 1-10
 	TokenUsage        map[string]int
 	SimulationResults []SimulationResult
