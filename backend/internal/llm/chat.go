@@ -146,6 +146,13 @@ func NewAWSBedrockProvider(apiKey, baseURL string) *ChatProvider {
 func (p *ChatProvider) Name() string { return p.name }
 
 func (p *ChatProvider) Complete(ctx context.Context, req CompletionRequest) (CompletionResponse, error) {
+	// Reject unrecognized ReasoningEffort values before the HTTP round-trip.
+	// Azure rejects the same garbage with a 400, but mid-pipeline that surfaces
+	// as a specialist failure with an opaque provider error — fail fast here
+	// so callers get a typed error at the call site instead.
+	if !req.ReasoningEffort.Valid() {
+		return CompletionResponse{}, fmt.Errorf("invalid reasoning_effort %q: must be one of minimal|low|medium|high|xhigh (or empty for provider default)", req.ReasoningEffort)
+	}
 	msgs := make([]chatMessage, 0, len(req.Messages)+1)
 	if req.System != "" {
 		msgs = append(msgs, chatMessage{Role: "system", Content: req.System})
@@ -177,9 +184,11 @@ func (p *ChatProvider) Complete(ctx context.Context, req CompletionRequest) (Com
 	body.Temperature = &req.Temperature
 	// Caller-provided ReasoningEffort flows through to both possible shapes
 	// (top-level for Azure, wrapped for OpenRouter); adjustRequestForProvider
-	// picks the right one and sets a gpt-5.x default when unset.
-	if req.ReasoningEffort != "" {
-		body.ReasoningEffort = req.ReasoningEffort
+	// picks the right one and sets a gpt-5.x default when unset. The cast to
+	// string happens here because chatRequest is the wire shape — Azure/
+	// OpenRouter don't know about our typed constants.
+	if req.ReasoningEffort != ReasoningNone {
+		body.ReasoningEffort = string(req.ReasoningEffort)
 	}
 	p.adjustRequestForProvider(&body, req.Model)
 

@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -63,5 +64,88 @@ func TestFormatPositivePattern_ShortBody(t *testing.T) {
 	got := FormatPositivePattern("style", "f.go", 1, "ok")
 	if strings.HasSuffix(got, "...") {
 		t.Errorf("short body should not be truncated: %q", got)
+	}
+}
+
+// TestCustomIDSanitize pins the character-class rule Supermemory enforces on
+// customId: alphanumeric + underscore + hyphen + colon, everything else → `-`.
+// Every case here maps to a real failure observed in acmeorg-account#331 logs.
+func TestCustomIDSanitize(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "next_route_group_parens",
+			in:   "src/app/(auth)/oauth/page.tsx",
+			want: "src-app--auth--oauth-page-tsx",
+		},
+		{
+			name: "next_dynamic_segment_brackets",
+			in:   "src/app/(dashboard)/explore/projects/[slug]/page.tsx",
+			want: "src-app--dashboard--explore-projects--slug--page-tsx",
+		},
+		{
+			name: "owner_slash_repo",
+			in:   "AcmeOrg/acmeorg-account",
+			want: "AcmeOrg-acmeorg-account",
+		},
+		{
+			name: "already_safe_idempotent",
+			in:   "already_safe:id-123",
+			want: "already_safe:id-123",
+		},
+		{
+			name: "spaces_to_hyphens",
+			in:   "with spaces in the middle",
+			want: "with-spaces-in-the-middle",
+		},
+		{
+			name: "empty_input_empty_output",
+			in:   "",
+			want: "",
+		},
+		{
+			name: "preserves_alphanumeric_and_colon",
+			in:   "review:2026-04-18:PR331",
+			want: "review:2026-04-18:PR331",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := CustomIDSanitize(tc.in); got != tc.want {
+				t.Errorf("CustomIDSanitize(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// supermemoryAllowedRe codifies Supermemory's allowed char set so test
+// assertions don't drift from production's error text.
+var supermemoryAllowedRe = regexp.MustCompile(`^[a-zA-Z0-9_:-]+$`)
+
+// TestSynthesisCustomID_NoForbiddenChars is the regression guard: every
+// customId builder must produce output that passes Supermemory's char-class
+// check. Prior bug produced IDs with `(`, `)`, `[`, `]`, `/`, `.`.
+func TestSynthesisCustomID_NoForbiddenChars(t *testing.T) {
+	cases := []struct {
+		name  string
+		owner string
+		repo  string
+		path  string
+	}{
+		{"next_auth_route", "AcmeOrg", "acmeorg-account", "src/app/(auth)/oauth/page.tsx"},
+		{"next_dynamic_slug", "AcmeOrg", "acmeorg-account", "src/app/(dashboard)/explore/projects/[slug]/page.tsx"},
+		{"deeply_nested", "org", "repo", "a/b/c/d/e/f/g/h.tsx"},
+		{"with_dots", "org", "repo", "lib/file.test.tsx"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := SynthesisCustomID(tc.owner, tc.repo, tc.path)
+			if !supermemoryAllowedRe.MatchString(got) {
+				t.Errorf("SynthesisCustomID(%q,%q,%q) = %q; contains forbidden chars", tc.owner, tc.repo, tc.path, got)
+			}
+		})
 	}
 }

@@ -34,6 +34,35 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// MaxTokens budgets for LLM calls across the pipeline. Kept together so the
+// next model-tuning pass touches one file, not ten.
+//
+// gpt-5.x reasoning tokens count against max_completion_tokens, so these are
+// sized with headroom for invisible reasoning ON TOP of the visible JSON
+// output. 4000 is the baseline (2000 output + 2000 reasoning), 8000 applies
+// to the two lead-agent stages whose JSON output naturally runs larger
+// (leadBrief + leadCrossCheck).
+const (
+	// Lead-agent coordination calls.
+	leadBriefMaxTokens       = 8000
+	leadBroadcastMaxTokens   = 4000
+	agentSecondPassMaxTokens = 4000
+	blastRadiusMaxTokens     = 4000
+	leadCrossCheckMaxTokens  = 8000
+
+	// Coordination validators — intent extract, issue acceptance, cross-PR.
+	intentMaxTokens     = 4000
+	acceptanceMaxTokens = 4000
+	crossPRMaxTokens    = 4000
+
+	// Post-pipeline memory synthesis (one call per hot file).
+	fileSynthesisMaxTokens = 4000
+
+	// Synthesis brief posted to the PR (Headline + Verdict + top-priority +
+	// fix-order + architecture lines, plus reasoning tokens).
+	synthesisBriefMaxTokens = 4000
+)
+
 // splitRepoFullName splits "owner/repo" into its components.
 func splitRepoFullName(fullName string) (owner, repo string, err error) {
 	parts := strings.SplitN(fullName, "/", 2)
@@ -1400,17 +1429,14 @@ func (o *Orchestrator) generateConversationalBrief(ctx context.Context, run *Pip
 
 	prompt := buildSynthesisBriefPrompt(run, score)
 	resp, err := provider.Complete(ctx, llm.CompletionRequest{
-		Model:    cfg.Model,
-		System:   synthesisBriefSystemPrompt,
-		Messages: []llm.Message{{Role: "user", Content: prompt}},
-		// 800 was too tight: gpt-5.x reasoning tokens share this budget; the
-		// visible brief kept coming back truncated. 4000 leaves room for both
-		// reasoning and a 2-3 sentence conversational output.
-		MaxTokens:   4000,
+		Model:       cfg.Model,
+		System:      synthesisBriefSystemPrompt,
+		Messages:    []llm.Message{{Role: "user", Content: prompt}},
+		MaxTokens:   synthesisBriefMaxTokens,
 		Temperature: 0.7,
 		// Brief needs a little thought to pick the right framing — "low"
 		// gives quality without the TTFT tail of "medium".
-		ReasoningEffort: "low",
+		ReasoningEffort: llm.ReasoningLow,
 	})
 	if err != nil {
 		o.logger.Warn("synthesis brief LLM call failed, using fallback", "error", err)
@@ -3021,7 +3047,7 @@ Max 200 words. Be concrete.`
 			Model:       cfg.Model,
 			System:      synthesisSystem,
 			Messages:    []llm.Message{{Role: "user", Content: sb.String()}},
-			MaxTokens:   4000,
+			MaxTokens:   fileSynthesisMaxTokens,
 			Temperature: 0.3,
 		})
 		if err != nil {
@@ -3121,7 +3147,11 @@ func (o *Orchestrator) indexArchitectureSummary(ctx context.Context, run *Pipeli
 	}
 	sb.WriteString("\nWhen reviewing changes to these files, apply extra scrutiny: defects propagate to all dependent modules.")
 
-	customID := fmt.Sprintf("arch-summary:%s/%s", owner, repo)
+	// Sanitize both segments individually so characters Supermemory rejects
+	// on customId (`/`, `(`, `)`, `[`, `]`, `.`, etc.) can't sneak in via
+	// unusual owner/repo names. The literal format string uses `--` between
+	// them — not `/` — so the customId stays in the allowed char set.
+	customID := fmt.Sprintf("arch-summary:%s--%s", memory.CustomIDSanitize(owner), memory.CustomIDSanitize(repo))
 	_, err = run.Indexer.IndexRepoPattern(chokeCtx, owner, repo, sb.String(), customID, map[string]string{
 		"source":       "arch_summary",
 		"choke_points": fmt.Sprintf("%d", len(rows)),
@@ -3951,15 +3981,15 @@ func (o *Orchestrator) leadBrief(ctx context.Context, run *PipelineRun) (*LeadBr
 	// No per-stage timeout. Azure gpt-5.4 TTFT benchmarks at ~215s
 	// (artificialanalysis.ai/models/gpt-5-4), so the previous 20s wrapper
 	// guaranteed false timeouts. The outer pipeline ctx remains the only
-	// bound. MaxTokens bumped 1500→8000 because gpt-5.x reasoning tokens
-	// count against the same budget; 1500 got fully consumed by invisible
-	// reasoning on acmeorg-account#335, leaving 5 tokens for the JSON output
-	// (observed as `completion_tokens=5, response="[]"`).
+	// bound. leadBriefMaxTokens (8000) leaves room for gpt-5.x reasoning
+	// tokens that count against the same budget — prior 1500 cap was fully
+	// consumed by reasoning on acmeorg-account#335, leaving 5 tokens for the
+	// JSON output (observed as `completion_tokens=5, response="[]"`).
 	resp, err := provider.Complete(ctx, llm.CompletionRequest{
 		Model:       cfg.Model,
 		System:      leadBriefSystemPrompt,
 		Messages:    []llm.Message{{Role: "user", Content: prompt.String()}},
-		MaxTokens:   8000,
+		MaxTokens:   leadBriefMaxTokens,
 		Temperature: 0.2,
 	})
 	if err != nil {
@@ -4038,7 +4068,7 @@ func (o *Orchestrator) leadBroadcast(ctx context.Context, run *PipelineRun, allR
 		Model:       cfg.Model,
 		System:      leadBroadcastSystemPrompt,
 		Messages:    []llm.Message{{Role: "user", Content: prompt.String()}},
-		MaxTokens:   4000,
+		MaxTokens:   leadBroadcastMaxTokens,
 		Temperature: 0.2,
 	})
 	if err != nil {
@@ -4097,7 +4127,7 @@ func (o *Orchestrator) agentSecondPass(ctx context.Context, run *PipelineRun, si
 		Model:       cfg.Model,
 		System:      systemPrompt,
 		Messages:    []llm.Message{{Role: "user", Content: prompt.String()}},
-		MaxTokens:   4000,
+		MaxTokens:   agentSecondPassMaxTokens,
 		Temperature: 0.3,
 	})
 	if err != nil {
@@ -4195,7 +4225,7 @@ func (o *Orchestrator) analyzeBlastRadius(ctx context.Context, run *PipelineRun,
 		Model:       cfg.Model,
 		System:      blastRadiusAgentPrompt,
 		Messages:    []llm.Message{{Role: "user", Content: prompt.String()}},
-		MaxTokens:   4000,
+		MaxTokens:   blastRadiusMaxTokens,
 		Temperature: 0.2,
 	})
 	if err != nil {
@@ -4257,7 +4287,7 @@ func (o *Orchestrator) leadCrossCheck(ctx context.Context, run *PipelineRun, all
 		Model:       cfg.Model,
 		System:      leadCrossCheckSystemPrompt,
 		Messages:    []llm.Message{{Role: "user", Content: prompt.String()}},
-		MaxTokens:   8000,
+		MaxTokens:   leadCrossCheckMaxTokens,
 		Temperature: 0.3,
 	})
 	if err != nil {

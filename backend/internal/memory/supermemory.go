@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -210,6 +211,26 @@ func (c *Client) setHeaders(req *http.Request) {
 
 // tagSanitizer replaces chars invalid in Supermemory container tags.
 var tagSanitizer = strings.NewReplacer(":", "-", "/", "-", "~", "-", ".", "-")
+
+// idSanitizerRe matches any character NOT in Supermemory's allowed set for
+// `customId` values. Per Supermemory's 400-response message the allowed set is
+// alphanumeric plus `_`, `-`, and `:`. Everything else — notably `(`, `)`,
+// `[`, `]`, `/`, `.`, `~`, and spaces — must be replaced.
+//
+// The simpler tagSanitizer above was missing parens and brackets, which broke
+// Next.js route-group paths like `src/app/(auth)/oauth/page.tsx` and dynamic
+// segments like `[slug]/page.tsx`. Reviews on acmeorg-account#331 logged 7×
+// HTTP 400 errors for this reason.
+var idSanitizerRe = regexp.MustCompile(`[^a-zA-Z0-9_:-]`)
+
+// CustomIDSanitize makes an arbitrary string safe for use as a Supermemory
+// `customId`. Replaces any disallowed character with `-`. Idempotent on
+// already-safe input. Callers assembling multi-segment IDs should join with
+// `--` AFTER per-segment sanitization — sanitizing the joined string would
+// also collapse the `--` separator (`--` is allowed, just redundant).
+func CustomIDSanitize(s string) string {
+	return idSanitizerRe.ReplaceAllString(s, "-")
+}
 
 // OwnerTag returns a container tag scoped to an owner (user or org).
 func OwnerTag(owner, kind string) string {

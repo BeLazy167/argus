@@ -49,7 +49,7 @@ func TestParseIntent(t *testing.T) {
 			},
 		},
 		{
-			name: "wrapped in fences",
+			name:    "wrapped in fences",
 			content: "```json\n" + `{"goal":"fix x","source":"author"}` + "\n```",
 			check: func(t *testing.T, p *PRIntent) {
 				if p.Goal != "fix x" {
@@ -78,7 +78,7 @@ func TestParseIntent(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "whitespace-only fields are dropped",
+			name:    "whitespace-only fields are dropped",
 			content: `{"goal":"  ","non_goals":["", "  ", "real"],"acceptance_criteria":null,"source":"author"}`,
 			check: func(t *testing.T, p *PRIntent) {
 				if p.Goal != "" {
@@ -458,7 +458,7 @@ func TestAssembleIntentContext(t *testing.T) {
 	t.Run("linked_prs_render", func(t *testing.T) {
 		t.Parallel()
 		run := &PipelineRun{
-			PREvent:  ghpkg.PREvent{PRNumber: 1, PRBody: "depends on #5"},
+			PREvent: ghpkg.PREvent{PRNumber: 1, PRBody: "depends on #5"},
 			LinkedPRs: []PRLink{
 				{Owner: "foo", Repo: "bar", Number: 5, Title: "rollout switch"},
 				{Owner: "foo", Repo: "bar", Number: 6, Title: ""}, // title fallback to owner/repo#n
@@ -480,7 +480,7 @@ func TestAssembleIntentContext(t *testing.T) {
 		t.Parallel()
 		run := &PipelineRun{PREvent: ghpkg.PREvent{PRNumber: 1, PRBody: "see commits"}}
 		commits := []ghpkg.PRCommit{
-			{SHA: "abc", Author: "bob", Message: ""}, // empty after trim
+			{SHA: "abc", Author: "bob", Message: ""},    // empty after trim
 			{SHA: "def", Author: "bob", Message: "   "}, // whitespace only
 		}
 		got := assembleIntentContext(run, commits)

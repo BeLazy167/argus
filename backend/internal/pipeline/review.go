@@ -380,7 +380,7 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p revie
 			// real findings without the 3-minute TTFT of xhigh/high. See
 			// artificialanalysis.ai/models/gpt-5-4 for the latency curve.
 			// No-op on non-gpt-5.x models (field ignored).
-			ReasoningEffort: "low",
+			ReasoningEffort: llm.ReasoningLow,
 		})
 		if err != nil {
 			return review, tokens, fmt.Errorf("LLM completion %s: %w", label, err)

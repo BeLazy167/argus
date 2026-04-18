@@ -32,6 +32,44 @@ type ToolCall struct {
 	} `json:"function"`
 }
 
+// ReasoningEffort controls chain-of-thought depth for reasoning models
+// (gpt-5.x, o-series). The empty value means "provider default" — the adapter
+// in chat.go forces "minimal" for gpt-5.x in that case, because Azure's
+// default reasoning level silently consumes the entire max_completion_tokens
+// budget before emitting visible output. Callers that want deeper reasoning
+// (specialists, synthesis) must set this explicitly.
+//
+// Callers should use the defined constants (ReasoningLow, ReasoningMedium,
+// etc.) rather than raw strings — chat.go.Complete rejects an unrecognized
+// value with a typed error before the HTTP call fires.
+type ReasoningEffort string
+
+const (
+	// ReasoningNone means "no explicit effort set"; the adapter applies its
+	// per-provider default (e.g. "minimal" for gpt-5.x direct-to-Azure).
+	ReasoningNone    ReasoningEffort = ""
+	ReasoningMinimal ReasoningEffort = "minimal"
+	ReasoningLow     ReasoningEffort = "low"
+	ReasoningMedium  ReasoningEffort = "medium"
+	ReasoningHigh    ReasoningEffort = "high"
+	// ReasoningXHigh (Azure terminology) == extended reasoning; slowest and
+	// most expensive. TTFT can exceed 200s on gpt-5.4. Use sparingly.
+	ReasoningXHigh ReasoningEffort = "xhigh"
+)
+
+// Valid reports whether r is one of the recognized reasoning levels. Empty
+// string (ReasoningNone) counts as valid — the adapter interprets it as
+// "use provider default".
+func (r ReasoningEffort) Valid() bool {
+	switch r {
+	case ReasoningNone, ReasoningMinimal, ReasoningLow,
+		ReasoningMedium, ReasoningHigh, ReasoningXHigh:
+		return true
+	default:
+		return false
+	}
+}
+
 type CompletionRequest struct {
 	Model       string
 	System      string
@@ -40,14 +78,9 @@ type CompletionRequest struct {
 	MaxTokens   int
 	Tools       []Tool `json:"tools,omitempty"`
 	JSONMode    bool   // When true, sends response_format: {"type": "json_object"}
-	// ReasoningEffort controls chain-of-thought depth for reasoning models
-	// (gpt-5.x, o-series). Valid values: "minimal", "low", "medium", "high",
-	// "xhigh". Empty means provider-default — but for gpt-5.x the adapter in
-	// chat.go forces "minimal" unless set, because Azure's default reasoning
-	// level silently consumes the entire max_completion_tokens budget before
-	// emitting visible output. Callers that want deeper reasoning (specialists,
-	// synthesis) must set this explicitly.
-	ReasoningEffort string
+	// ReasoningEffort is typed to prevent garbage values from round-tripping
+	// to Azure as HTTP 400. Complete rejects unrecognized values at entry.
+	ReasoningEffort ReasoningEffort
 }
 
 type Message struct {
