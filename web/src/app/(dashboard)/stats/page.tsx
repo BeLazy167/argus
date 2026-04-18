@@ -49,6 +49,12 @@ const STAGE_COLORS: Record<string, string> = {
   deep_review: "#06b6d4",
   graph: "#f97316",
   posting: "#84cc16",
+  lead_agent: "#eab308",
+  acceptance: "#2dd4bf",
+  cross_pr: "#d946ef",
+  simulation: "#6366f1",
+  reply: "#f472b6",
+  intent: "#fde047",
 };
 
 function fmt$(n: number) { return n < 1 ? `$${n.toFixed(3)}` : `$${n.toFixed(2)}`; }

@@ -100,6 +100,60 @@ func (c *Client) GetPRDiff(ctx context.Context, installationID int64, owner, rep
 	return diff, nil
 }
 
+// PRCommit is a trimmed view of a PR commit used by intent extraction.
+// Only the fields we actually read are exported; go-github's RepositoryCommit
+// carries many more.
+type PRCommit struct {
+	SHA     string
+	Author  string
+	Message string // full git commit message (subject + body, newline separated)
+}
+
+// ListPRCommits fetches the commits on a pull request and returns the most
+// recent maxCommits of them. GitHub's PullRequests.ListCommits paginates
+// chronologically (oldest first), so we must walk every page then take the
+// tail — breaking early would keep the oldest commits, which is precisely the
+// opposite of what intent extraction wants.
+//
+// Used by intent extraction to pull the author's per-commit narrative when
+// the PR description is thin.
+func (c *Client) ListPRCommits(ctx context.Context, installationID int64, owner, repo string, prNumber, maxCommits int) ([]PRCommit, error) {
+	if maxCommits <= 0 {
+		return nil, nil
+	}
+	client, err := c.app.ClientForInstallation(installationID)
+	if err != nil {
+		return nil, err
+	}
+
+	var all []PRCommit
+	opts := &gh.ListOptions{PerPage: 100}
+	for {
+		if err := c.restLimiter.Wait(ctx); err != nil {
+			return nil, fmt.Errorf("rate limit wait: %w", err)
+		}
+		commits, resp, err := client.PullRequests.ListCommits(ctx, owner, repo, prNumber, opts)
+		if err != nil {
+			return nil, fmt.Errorf("listing PR commits: %w", err)
+		}
+		for _, rc := range commits {
+			all = append(all, PRCommit{
+				SHA:     rc.GetSHA(),
+				Author:  rc.GetCommit().GetAuthor().GetName(),
+				Message: rc.GetCommit().GetMessage(),
+			})
+		}
+		if resp == nil || resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+	if len(all) > maxCommits {
+		all = all[len(all)-maxCommits:]
+	}
+	return all, nil
+}
+
 // GetPRFiles fetches per-file change data for a pull request with pagination.
 func (c *Client) GetPRFiles(ctx context.Context, installationID int64, owner, repo string, prNumber int) ([]*gh.CommitFile, error) {
 	client, err := c.app.ClientForInstallation(installationID)

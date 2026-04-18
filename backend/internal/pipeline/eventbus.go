@@ -24,6 +24,33 @@ const (
 	EventCancelled          EventType = "cancelled"
 	EventFileReviewStarted  EventType = "file_review_started"
 	EventTokenUpdate        EventType = "token_update"
+
+	// Per-sub-step events — each distinct LLM call, memory upsert, or GitHub API
+	// action that previously fired no event. EventMemoryIndexed payload carries
+	// a "kind" field (patterns | conventions | file_synthesis | pr_summary |
+	// arch_summary | arch_graph | patterns_praise) so one type covers all
+	// Supermemory upserts.
+	EventIntentExtracted     EventType = "intent_extracted"
+	EventIntentVerified      EventType = "intent_verified"
+	EventFindingsEnriched    EventType = "findings_enriched"
+	EventBriefGenerated      EventType = "brief_generated"
+	EventLeadBrief           EventType = "lead_brief"
+	EventLeadBroadcast       EventType = "lead_broadcast"
+	EventSecondPass          EventType = "second_pass"
+	EventBlastRadius         EventType = "blast_radius"
+	EventLeadCrossCheck      EventType = "lead_cross_check"
+	EventAcceptanceChecked   EventType = "acceptance_checked"
+	EventCrossPRChecked      EventType = "cross_pr_checked"
+	EventSimulationsComplete EventType = "simulations_complete"
+	EventScenarioSimulated   EventType = "scenario_simulated"
+	EventMemoryIndexed       EventType = "memory_indexed"
+	EventPostedToGitHub      EventType = "posted_to_github"
+	EventReplyGenerated      EventType = "reply_generated"
+	// EventMemoryMatched fires when enrichFindings tags a finding with a
+	// Supermemory-backed pattern / convention / rule / similarity hit. Payload
+	// carries {file, line, kind, pr, score} so the live stream can show per-
+	// finding memory context alongside the formatted review body tag.
+	EventMemoryMatched EventType = "memory_matched"
 )
 
 const maxHistoryEvents = 500

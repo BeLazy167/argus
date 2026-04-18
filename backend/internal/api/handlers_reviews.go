@@ -27,7 +27,13 @@ type exportFinding struct {
 	Severity   string `json:"severity,omitempty"`
 	Body       string `json:"body"`
 	Specialist string `json:"specialist,omitempty"`
-	Dropped    bool   `json:"dropped,omitempty"` // true = generated but filtered out (dedup/scoring)
+	// Dropped = generated but filtered out (dedup/scoring) before posting.
+	Dropped bool `json:"dropped,omitempty"`
+	// Folded = persisted + posted, but as a summary-body bullet rather than an
+	// inline GitHub comment (because the target line was outside the PR diff).
+	// Distinguished from Dropped: the author still sees the finding, but not
+	// as a resolvable inline thread.
+	Folded bool `json:"folded,omitempty"`
 }
 
 func (s *Server) listAllReviews(w http.ResponseWriter, r *http.Request) {
@@ -186,6 +192,14 @@ func (s *Server) exportReview(w http.ResponseWriter, r *http.Request) {
 			Severity:   sev,
 			Body:       c.Body,
 			Specialist: spec,
+			// GithubCommentID is stamped by backfillGitHubCommentIDs only for
+			// findings that actually posted as inline GitHub comments. A nil
+			// value on a row that exists in review_comments means the finding
+			// was folded into the summary body (line outside the diff) —
+			// BUT only once the review actually got posted. Nil on a failed or
+			// unposted review means the finding never had the chance to go
+			// inline, not that we chose to fold it.
+			Folded: review.Status == "completed" && review.GithubReviewID != nil && c.GithubCommentID == nil,
 		})
 	}
 
@@ -259,13 +273,18 @@ func (s *Server) exportReview(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=argus-review-%s.md", id.String()[:8]))
 
-		// Count posted vs dropped
-		posted, dropped := 0, 0
+		// Split findings into three buckets so the author can tell what reached
+		// GitHub and how: posted inline (resolvable threads), folded to summary
+		// (text only), or dropped entirely (filtered before posting).
+		postedInline, folded, dropped := 0, 0, 0
 		for _, f := range findings {
-			if f.Dropped {
+			switch {
+			case f.Dropped:
 				dropped++
-			} else {
-				posted++
+			case f.Folded:
+				folded++
+			default:
+				postedInline++
 			}
 		}
 
@@ -273,8 +292,15 @@ func (s *Server) exportReview(w http.ResponseWriter, r *http.Request) {
 		sb.WriteString("# Argus Review Export\n\n")
 		sb.WriteString(fmt.Sprintf("- **Review:** %s\n", id.String()))
 		sb.WriteString(fmt.Sprintf("- **PR:** #%d\n", review.PRNumber))
-		sb.WriteString(fmt.Sprintf("- **Score:** %d/10\n", review.Score))
-		sb.WriteString(fmt.Sprintf("- **Posted findings:** %d\n", posted))
+		score := 0
+		if review.Score != nil {
+			score = *review.Score
+		}
+		sb.WriteString(fmt.Sprintf("- **Score:** %d/10\n", score))
+		sb.WriteString(fmt.Sprintf("- **Posted inline:** %d\n", postedInline))
+		if folded > 0 {
+			sb.WriteString(fmt.Sprintf("- **Folded to summary:** %d _(line outside PR diff)_\n", folded))
+		}
 		if dropped > 0 {
 			sb.WriteString(fmt.Sprintf("- **Dropped findings:** %d _(filtered by dedup/scoring)_\n", dropped))
 		}
@@ -293,11 +319,14 @@ func (s *Server) exportReview(w http.ResponseWriter, r *http.Request) {
 		for _, file := range fileOrder {
 			sb.WriteString(fmt.Sprintf("## %s\n\n", file))
 			for _, f := range fileGroups[file] {
-				dropMark := ""
-				if f.Dropped {
-					dropMark = " _(dropped)_"
+				mark := ""
+				switch {
+				case f.Dropped:
+					mark = " _(dropped)_"
+				case f.Folded:
+					mark = " _(folded to summary)_"
 				}
-				sb.WriteString(fmt.Sprintf("### %s L%d — %s [%s]%s\n\n", f.Priority, f.Line, f.Category, f.Severity, dropMark))
+				sb.WriteString(fmt.Sprintf("### %s L%d — %s [%s]%s\n\n", f.Priority, f.Line, f.Category, f.Severity, mark))
 				sb.WriteString(f.Body)
 				sb.WriteString("\n\n---\n\n")
 			}

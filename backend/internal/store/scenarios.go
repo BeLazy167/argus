@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"math/big"
 	"time"
 
@@ -53,8 +54,13 @@ func (s *Store) ActivateScenario(ctx context.Context, id int64) error {
 	return nil
 }
 
-// ListScenariosForFiles returns active scenarios whose files array overlaps with the given paths.
-// Ordered by trigger_count DESC so the most-relevant (most-triggered) scenarios surface first.
+// ListScenariosForFiles returns active scenarios whose files array overlaps with the given
+// paths, ranked by UCB1 (exploration/exploitation trade-off). The full formula lives in the
+// SQL — see [UCBScore] for the Go reference implementation used by the unit test, and
+// docs/plans/2026-04-17-ucb-scenario-selection.md for the design rationale.
+//
+// Briefly: scenarios with zero recent runs are guaranteed the top slots; after they accumulate
+// data the score rewards scenarios whose runs surface real findings (verdict ∈ broken|partial).
 func (s *Store) ListScenariosForFiles(ctx context.Context, repoID int64, filePaths []string) ([]Scenario, error) {
 	rows, err := s.Q.ListScenariosForFiles(ctx, db.ListScenariosForFilesParams{
 		RepoID:  &repoID,
@@ -190,6 +196,32 @@ func (s *Store) IncrementScenarioTriggerCount(ctx context.Context, id int64) err
 		return fmt.Errorf("increment scenario trigger count: %w", err)
 	}
 	return nil
+}
+
+// UCBScore is the Go reference implementation of the UCB1 score used by
+// [Store.ListScenariosForFiles]. The production ranking runs in SQL (see query file);
+// this function mirrors the formula so unit tests can pin the behaviour.
+//
+// Returns [math.Inf](+1) when n == 0 so a never-run scenario is guaranteed the top slot —
+// callers that need a finite sentinel should clamp. `wins` is the count of runs whose
+// verdict was "broken" or "partial" (real findings); `n` is the total count of runs; `total`
+// is the repo-wide pull count used in the exploration term.
+//
+// Panics on n < 0, wins < 0, wins > n, or total < 0 — all indicate a caller bug.
+func UCBScore(wins, n, total float64) float64 {
+	if n < 0 || wins < 0 || wins > n || total < 0 {
+		panic(fmt.Sprintf("UCBScore: invalid input wins=%g n=%g total=%g", wins, n, total))
+	}
+	if n == 0 {
+		return math.Inf(+1)
+	}
+	mean := wins / n
+	// GREATEST(total, 1) mirrors the SQL guard: ln(0) is undefined; treat empty repos as t=1.
+	t := total
+	if t < 1 {
+		t = 1
+	}
+	return mean + math.Sqrt(2.0*math.Log(t)/n)
 }
 
 // CreateScenarioRun persists one simulation outcome. Idempotent on (scenario_id, review_id) —

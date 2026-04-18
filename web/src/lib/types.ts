@@ -29,7 +29,19 @@ export type StageTokens = {
   provider?: string;
 };
 
+// MemoryIndexedKind is the closed set of values on the `kind` payload field of
+// memory_indexed events. One per distinct Supermemory upsert kind.
+export type MemoryIndexedKind =
+  | "patterns"
+  | "patterns_praise"
+  | "conventions"
+  | "file_synthesis"
+  | "pr_summary"
+  | "arch_summary"
+  | "arch_graph";
+
 export type TokenUsage = {
+  intent?: StageTokens;
   triage: StageTokens;
   review: StageTokens[];
   scoring?: StageTokens;
@@ -39,6 +51,11 @@ export type TokenUsage = {
   patterns?: StageTokens;
   file_synthesis?: StageTokens[];
   graph?: StageTokens;
+  lead_agent?: StageTokens;
+  acceptance?: StageTokens;
+  cross_pr?: StageTokens;
+  simulation?: StageTokens[];
+  reply?: StageTokens;
   total: StageTokens;
 };
 

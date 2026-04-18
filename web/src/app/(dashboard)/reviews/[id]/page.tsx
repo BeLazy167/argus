@@ -300,10 +300,12 @@ function TokenPill({ usage }: { usage: TokenUsage }) {
   const total = usage.total;
   const label = `${formatTokens(total)} tokens${total.cost != null ? ` · $${total.cost.toFixed(3)}` : ""}`;
   const stages: [string, { total_tokens: number; cost?: number; model?: string }][] = [];
+  if (usage.intent?.total_tokens) stages.push(["intent", usage.intent]);
   if (usage.triage?.total_tokens) stages.push(["triage", usage.triage]);
   if (usage.enrichment?.total_tokens) stages.push(["enrichment", usage.enrichment]);
   if (usage.conventions?.total_tokens) stages.push(["conventions", usage.conventions]);
   if (usage.patterns?.total_tokens) stages.push(["patterns", usage.patterns]);
+  if (usage.lead_agent?.total_tokens) stages.push(["lead_agent", usage.lead_agent]);
   if (usage.review?.length) {
     const reviewTotal = usage.review.reduce((acc, r) => ({
       total_tokens: acc.total_tokens + r.total_tokens,
@@ -320,19 +322,36 @@ function TokenPill({ usage }: { usage: TokenUsage }) {
     }), { total_tokens: 0, cost: 0, model: undefined as string | undefined });
     stages.push(["file_synthesis", fsTotal]);
   }
+  if (usage.acceptance?.total_tokens) stages.push(["acceptance", usage.acceptance]);
+  if (usage.cross_pr?.total_tokens) stages.push(["cross_pr", usage.cross_pr]);
+  if (usage.simulation?.length) {
+    const simTotal = usage.simulation.reduce((acc, r) => ({
+      total_tokens: acc.total_tokens + r.total_tokens,
+      cost: (acc.cost ?? 0) + (r.cost ?? 0),
+      model: r.model,
+    }), { total_tokens: 0, cost: 0, model: undefined as string | undefined });
+    stages.push(["simulation", simTotal]);
+  }
   if (usage.scoring?.total_tokens) stages.push(["scoring", usage.scoring]);
   if (usage.synthesis?.total_tokens) stages.push(["synthesis", usage.synthesis]);
+  if (usage.reply?.total_tokens) stages.push(["reply", usage.reply]);
   if (usage.graph?.total_tokens) stages.push(["graph", usage.graph]);
 
   const stageLabels: Record<string, string> = {
+    intent: "Intent",
     triage: "Triage",
     enrichment: "Enrichment",
     conventions: "Conventions",
     patterns: "Patterns",
+    lead_agent: "Lead agent",
     review: "Review",
     file_synthesis: "File synthesis",
+    acceptance: "Acceptance",
+    cross_pr: "Cross-PR",
+    simulation: "Simulation",
     scoring: "Scoring",
     synthesis: "Synthesis",
+    reply: "Reply",
     graph: "Graph",
   };
 

@@ -99,7 +99,10 @@ func (e *SimulationEngine) RunSimulations(ctx context.Context, req SimulationReq
 	}
 
 	var results []SimulationResult
-	// Simulate up to 5 most critical scenarios
+	// Simulate up to 5 scenarios per PR. The candidate list is already ranked by UCB1 score
+	// in SQL (see docs/plans/2026-04-17-ucb-scenario-selection.md) — the first 5 are the
+	// best balance of exploitation (scenarios that find real bugs) and exploration
+	// (newcomers without runs). Do not re-sort in Go; that would defeat the SQL ordering.
 	limit := min(5, len(req.Scenarios))
 
 	for _, scenario := range req.Scenarios[:limit] {
@@ -117,7 +120,27 @@ func (e *SimulationEngine) RunSimulations(ctx context.Context, req SimulationReq
 	// and can be skipped without breaking the review.
 	e.persistScenarioRuns(ctx, req, results)
 
+	// Aggregate stream signal — silent when zero scenarios actually ran.
+	if len(results) > 0 && req.Run.EventBus != nil {
+		req.Run.EventBus.Publish(req.Run.ReviewID, EventSimulationsComplete, map[string]any{
+			"total":  len(results),
+			"passed": countPassedSimulations(results),
+		})
+	}
+
 	return results, nil
+}
+
+// countPassedSimulations counts scenarios whose verdict indicates the code
+// passed ("fixed"). "broken"/"partial"/"unclear" all count as non-passing.
+func countPassedSimulations(results []SimulationResult) int {
+	n := 0
+	for _, r := range results {
+		if r.Verdict == "fixed" {
+			n++
+		}
+	}
+	return n
 }
 
 // persistScenarioRuns writes each simulation outcome to the DB. Any failure is logged at Warn
@@ -189,11 +212,31 @@ func (e *SimulationEngine) simulateScenario(ctx context.Context, req SimulationR
 		return SimulationResult{}, err
 	}
 
+	// Track this scenario's cost under run.Tokens.Simulation[]. Order is
+	// scenario-selection order (UCB1 top-5, stable). Lock-guarded via
+	// addSimulation since multiple scenarios may run concurrently.
+	req.Run.Tokens.addSimulation(StageTokens{
+		PromptTokens:     resp.TokensUsed.PromptTokens,
+		CompletionTokens: resp.TokensUsed.CompletionTokens,
+		TotalTokens:      resp.TokensUsed.TotalTokens,
+		Cost:             resp.Cost,
+		Model:            cfg.Model,
+		Provider:         cfg.Provider,
+	})
+
 	result, err := parseSimulationResponse(resp.Content, scenario.Description)
 	if err != nil {
 		return SimulationResult{}, err
 	}
 	result.ScenarioID = scenario.ID
+
+	if req.Run.EventBus != nil {
+		req.Run.EventBus.Publish(req.Run.ReviewID, EventScenarioSimulated, map[string]any{
+			"scenario_id": scenario.ID,
+			"verdict":     result.Verdict,
+			"files":       len(scenario.Files),
+		})
+	}
 	return result, nil
 }
 
