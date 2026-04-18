@@ -16,9 +16,9 @@ import (
 type AuthStyle int
 
 const (
-	AuthBearer  AuthStyle = iota // Authorization: Bearer <key> (OpenAI, OpenRouter, Groq, etc.)
-	AuthAPIKey                   // api-key: <key> (Azure OpenAI)
-	AuthAPIM                     // Ocp-Apim-Subscription-Key: <key> (Azure API Management)
+	AuthBearer AuthStyle = iota // Authorization: Bearer <key> (OpenAI, OpenRouter, Groq, etc.)
+	AuthAPIKey                  // api-key: <key> (Azure OpenAI)
+	AuthAPIM                    // Ocp-Apim-Subscription-Key: <key> (Azure API Management)
 )
 
 // ChatProvider implements the Provider interface using the OpenAI-compatible
@@ -34,12 +34,21 @@ type ChatProvider struct {
 	client          *http.Client
 }
 
+// llmClientTimeout bounds a single HTTP request to any provider. Must exceed
+// Azure gpt-5.4's observed worst-case latency (TTFT ~215s + generation at
+// ~56 tok/s for MaxTokens 8000 ≈ 360s) with headroom. 600s is conservative
+// for fast providers (Groq/Together typically <10s) but essential for
+// reasoning-heavy Azure calls — the prior 120s ceiling was below gpt-5.4's
+// first-token latency, causing the exact failure this package was changed
+// to prevent. Operator can still cancel via storeCancel mid-flight.
+const llmClientTimeout = 600 * time.Second
+
 func NewChatProvider(name, apiKey, baseURL string) *ChatProvider {
 	return &ChatProvider{
 		name:    name,
 		apiKey:  apiKey,
 		baseURL: baseURL,
-		client:  &http.Client{Timeout: 120 * time.Second},
+		client:  &http.Client{Timeout: llmClientTimeout},
 	}
 }
 
@@ -104,7 +113,7 @@ func NewAzureProvider(apiKey, baseURL string) *ChatProvider {
 		authStyle:       authStyle,
 		pathFn:          pathFn,
 		useResponsesAPI: isCognitive,
-		client:          &http.Client{Timeout: 120 * time.Second},
+		client:          &http.Client{Timeout: llmClientTimeout},
 	}
 }
 
@@ -116,7 +125,7 @@ func NewGCPVertexProvider(apiKey, baseURL string) *ChatProvider {
 		name:    "gcp_vertex",
 		apiKey:  apiKey,
 		baseURL: baseURL,
-		client:  &http.Client{Timeout: 120 * time.Second},
+		client:  &http.Client{Timeout: llmClientTimeout},
 	}
 }
 
@@ -130,7 +139,7 @@ func NewAWSBedrockProvider(apiKey, baseURL string) *ChatProvider {
 		pathFn: func(_ string) string {
 			return "/openai/v1/chat/completions"
 		},
-		client: &http.Client{Timeout: 120 * time.Second},
+		client: &http.Client{Timeout: llmClientTimeout},
 	}
 }
 
@@ -257,12 +266,12 @@ type chatMessage struct {
 }
 
 type chatRequest struct {
-	Model               string           `json:"model"`
-	Messages            []chatMessage    `json:"messages"`
-	MaxTokens           int              `json:"max_tokens,omitempty"`
-	MaxCompletionTokens int              `json:"max_completion_tokens,omitempty"`
-	Temperature         *float64         `json:"temperature,omitempty"`
-	Tools               []Tool           `json:"tools,omitempty"`
+	Model               string        `json:"model"`
+	Messages            []chatMessage `json:"messages"`
+	MaxTokens           int           `json:"max_tokens,omitempty"`
+	MaxCompletionTokens int           `json:"max_completion_tokens,omitempty"`
+	Temperature         *float64      `json:"temperature,omitempty"`
+	Tools               []Tool        `json:"tools,omitempty"`
 	// Reasoning is OpenRouter's wrapped form — {"reasoning":{"effort":"..."}}.
 	Reasoning *reasoningConfig `json:"reasoning,omitempty"`
 	// ReasoningEffort is Azure/OpenAI's top-level form for gpt-5.x reasoning
@@ -283,6 +292,15 @@ type reasoningConfig struct {
 
 // adjustRequestForProvider modifies the chat request based on provider and model
 // capabilities. Each provider has different rules for reasoning models.
+//
+// Two reasoning shapes exist on chatRequest:
+//
+//   - body.Reasoning (wrapped {reasoning: {effort, exclude}}) — OpenRouter format.
+//   - body.ReasoningEffort (top-level reasoning_effort) — Azure/OpenAI format.
+//
+// Callers set only `CompletionRequest.ReasoningEffort` and we route it to the
+// correct wire shape per provider here. Both fields must never be populated on
+// the same marshalled body — at the end we enforce that invariant explicitly.
 func (p *ChatProvider) adjustRequestForProvider(body *chatRequest, model string) {
 	m := strings.ToLower(model)
 
@@ -294,8 +312,14 @@ func (p *ChatProvider) adjustRequestForProvider(body *chatRequest, model string)
 
 	switch {
 	case p.isOpenRouter() && isOpenAIReasoning(m):
-		// OpenRouter + o-series: also set reasoning effort
-		body.Reasoning.Effort = "medium"
+		// OpenRouter + o-series: route caller's effort to wrapped form.
+		// Default "medium" preserved for callers that didn't set one — matches
+		// pre-ReasoningEffort-field behavior so existing code doesn't regress.
+		if body.ReasoningEffort != "" {
+			body.Reasoning.Effort = body.ReasoningEffort
+		} else {
+			body.Reasoning.Effort = "medium"
+		}
 
 	case isOpenAIReasoning(m):
 		// Direct OpenAI / Azure: o-series needs max_completion_tokens, no temperature
@@ -317,11 +341,27 @@ func (p *ChatProvider) adjustRequestForProvider(body *chatRequest, model string)
 		if body.ReasoningEffort == "" {
 			body.ReasoningEffort = "minimal"
 		}
+		// On OpenRouter-routed gpt-5.x, route the effort to the wrapped form
+		// instead of the top-level field — OpenRouter doesn't accept the
+		// top-level `reasoning_effort` and forwards the wrapped one.
+		if p.isOpenRouter() {
+			body.Reasoning.Effort = body.ReasoningEffort
+			body.ReasoningEffort = ""
+		}
 
 	case p.name == "anthropic" && isAnthropicThinking(m):
 		// Anthropic extended thinking requires temperature=1.0
 		temp := 1.0
 		body.Temperature = &temp
+	}
+
+	// Invariant: never ship both wrapped AND top-level reasoning on the same
+	// body. OpenRouter gets wrapped; every other provider gets top-level.
+	// A trailing belt-and-suspenders clean-up in case a new branch sets both.
+	if p.isOpenRouter() {
+		body.ReasoningEffort = ""
+	} else if body.ReasoningEffort != "" {
+		body.Reasoning = nil
 	}
 }
 

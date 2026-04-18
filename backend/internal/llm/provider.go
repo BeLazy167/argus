@@ -51,7 +51,7 @@ type CompletionRequest struct {
 }
 
 type Message struct {
-	Role       string     // "user", "assistant", "tool"
+	Role       string // "user", "assistant", "tool"
 	Content    string
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`

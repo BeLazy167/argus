@@ -110,9 +110,9 @@ func TestIsAnthropicThinking(t *testing.T) {
 
 func TestIsOpenRouter(t *testing.T) {
 	tests := []struct {
-		name    string
-		cp      ChatProvider
-		want    bool
+		name string
+		cp   ChatProvider
+		want bool
 	}{
 		{"by_name", ChatProvider{name: "openrouter"}, true},
 		{"by_url", ChatProvider{baseURL: "https://openrouter.ai/api/v1"}, true},
@@ -251,6 +251,67 @@ func TestAdjustRequestForProvider(t *testing.T) {
 
 		if body.ReasoningEffort != "" {
 			t.Errorf("non-gpt-5 model must not get a reasoning_effort default, got %q", body.ReasoningEffort)
+		}
+	})
+
+	// OpenRouter + o-series: the caller's ReasoningEffort must route to the
+	// wrapped `Reasoning.Effort` field (OpenRouter's wire format), not the
+	// top-level `reasoning_effort` (which OpenRouter forwards only sometimes).
+	// Regression guard: the previous code hardcoded "medium" and silently
+	// dropped the caller's value.
+	t.Run("openrouter_oseries_propagates_caller_effort", func(t *testing.T) {
+		cp := ChatProvider{name: "openrouter"}
+		temp := 0.3
+		body := chatRequest{MaxTokens: 4096, Temperature: &temp, ReasoningEffort: "low"}
+		cp.adjustRequestForProvider(&body, "o1-mini")
+
+		if body.Reasoning == nil || body.Reasoning.Effort != "low" {
+			t.Errorf("expected Reasoning.Effort=low, got %+v", body.Reasoning)
+		}
+		if body.ReasoningEffort != "" {
+			t.Errorf("top-level ReasoningEffort must be cleared on OpenRouter, got %q", body.ReasoningEffort)
+		}
+	})
+
+	// OpenRouter + gpt-5.x: the adapter must route the default/caller effort
+	// to the wrapped form, not the top-level field. Previously BOTH got set —
+	// contract violation per the struct comment. Low current blast radius (no
+	// prod config routes gpt-5 via OpenRouter) but this locks the invariant.
+	t.Run("openrouter_gpt5_uses_wrapped_form_only", func(t *testing.T) {
+		cp := ChatProvider{name: "openrouter"}
+		temp := 0.2
+		body := chatRequest{MaxTokens: 8000, Temperature: &temp}
+		cp.adjustRequestForProvider(&body, "gpt-5.4")
+
+		if body.Reasoning == nil || body.Reasoning.Effort != "minimal" {
+			t.Errorf("expected wrapped Reasoning.Effort=minimal on OpenRouter+gpt-5, got %+v", body.Reasoning)
+		}
+		if body.ReasoningEffort != "" {
+			t.Errorf("top-level ReasoningEffort must be cleared on OpenRouter, got %q", body.ReasoningEffort)
+		}
+	})
+
+	// Non-OpenRouter providers must NOT carry the wrapped `reasoning` object;
+	// Azure only accepts top-level `reasoning_effort`. Locks the invariant that
+	// no future branch accidentally sets both.
+	t.Run("azure_clears_wrapped_reasoning_object", func(t *testing.T) {
+		cp := ChatProvider{name: "azure"}
+		temp := 0.2
+		// Simulate a scenario where a previous branch populated the wrapped
+		// form. The trailing invariant clean-up must clear it for non-OpenRouter
+		// providers that set the top-level field.
+		body := chatRequest{
+			MaxTokens:   8000,
+			Temperature: &temp,
+			Reasoning:   &reasoningConfig{Exclude: true, Effort: "high"},
+		}
+		cp.adjustRequestForProvider(&body, "gpt-5.4")
+
+		if body.ReasoningEffort != "minimal" {
+			t.Errorf("expected top-level ReasoningEffort=minimal, got %q", body.ReasoningEffort)
+		}
+		if body.Reasoning != nil {
+			t.Errorf("expected wrapped Reasoning to be cleared on Azure path, got %+v", body.Reasoning)
 		}
 	})
 }

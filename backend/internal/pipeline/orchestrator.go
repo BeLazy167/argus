@@ -1378,9 +1378,9 @@ func (o *Orchestrator) generateConversationalBrief(ctx context.Context, run *Pip
 
 	prompt := buildSynthesisBriefPrompt(run, score)
 	resp, err := provider.Complete(ctx, llm.CompletionRequest{
-		Model:       cfg.Model,
-		System:      synthesisBriefSystemPrompt,
-		Messages:    []llm.Message{{Role: "user", Content: prompt}},
+		Model:    cfg.Model,
+		System:   synthesisBriefSystemPrompt,
+		Messages: []llm.Message{{Role: "user", Content: prompt}},
 		// 800 was too tight: gpt-5.x reasoning tokens share this budget; the
 		// visible brief kept coming back truncated. 4000 leaves room for both
 		// reasoning and a 2-3 sentence conversational output.
@@ -2975,20 +2975,18 @@ Given review comments on a single file, produce ONE concise document:
 Reference function names and line ranges (not exact numbers — those shift).
 Max 200 words. Be concrete.`
 
-	// No wrapper timeout. The prior 30s ceiling was too tight once we moved to
-	// gpt-5.4 on Azure (per-call latency ~30-60s × up to 10 files). The caller's
-	// prePostCtx still bounds the whole pre-post block. If each file call hangs
-	// indefinitely we'll notice in logs; add a per-call bound then.
-	// Sanitize + truncate user-controlled fields
+	// No wrapper timeout. The parent `prePostCtx` at orchestrator.go:2029 is
+	// `context.WithoutCancel(ctx)` — its Done channel is nil, so a ctx.Err()
+	// loop-break here would be dead code. The real upper bound is the HTTP
+	// client timeout (llmClientTimeout in chat.go, 600s) applied once per LLM
+	// call inside provider.Complete. Worst case: a hung Azure endpoint costs
+	// 600s per file before we give up and move on. Acceptable for post-posting
+	// work; revisit if logs show this actually pegs us.
 	safeTitle := sanitizeUserInput(util.Truncate(run.PREvent.PRTitle, 200, false))
 	safeAuthor := sanitizeUserInput(util.Truncate(run.PREvent.PRAuthor, 100, false))
 
 	var succeeded, failed int
 	for _, fc := range qualifying {
-		if ctx.Err() != nil {
-			o.logger.Warn("synthesis aborted: context cancelled", "succeeded", succeeded, "remaining", len(qualifying)-succeeded-failed)
-			return
-		}
 		var sb strings.Builder
 		sb.WriteString(fmt.Sprintf("File: %s\nPR #%d: \"%s\" by %s\n\nComments:\n",
 			fc.path, run.PREvent.PRNumber, safeTitle, safeAuthor))
