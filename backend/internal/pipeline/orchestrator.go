@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	ghpkg "github.com/BeLazy167/argus/backend/internal/github"
 	"github.com/BeLazy167/argus/backend/internal/graph"
@@ -1191,7 +1192,25 @@ func (o *Orchestrator) synthesize(ctx context.Context, run *PipelineRun) error {
 	// otherwise the posted comment's H2 would pull the first sentence of the
 	// intent disclaimer ("### 🔍 PR intent vs diff … _Argus read the diff …_")
 	// instead of the actual synthesis verdict.
-	headline := util.Truncate(firstSentence(brief), 80, true)
+	//
+	// Preferred path: the synthesis LLM was prompted to emit a dedicated
+	// `**Headline:** …` line (≤100 chars, no markdown). When present we strip
+	// it from the brief body and use it verbatim — no truncation needed.
+	//
+	// Fallback: if the LLM skipped or drifted on the Headline line, derive
+	// one from the first sentence via extractHeadline (strips leading bold
+	// prefix, truncates at word boundary).
+	headline, briefBody := splitHeadlineAndBody(brief)
+	if headline == "" {
+		headline = extractHeadline(brief, 100)
+	} else if utf8.RuneCountInString(headline) > 100 {
+		// LLM ignored the 100-char constraint. Truncate at a word boundary
+		// rather than ship an over-long H2.
+		headline = extractHeadline(headline, 100)
+	} else {
+		// Headline was valid — body is the brief minus the Headline line.
+		brief = briefBody
+	}
 
 	// Prepend intent header + [INTENT] finding; both return "" when not applicable.
 	if header := FormatIntentHeader(run, verdict); header != "" {
@@ -1319,9 +1338,11 @@ func (o *Orchestrator) verifyIntent(ctx context.Context, run *PipelineRun) *Inte
 
 const synthesisBriefSystemPrompt = `You are writing a concise verdict for a pull request review. Per-file inline comments are shown separately — do NOT repeat them.
 
-Format (markdown):
+Format (markdown) — emit EXACTLY these lines in this order:
 
-**Verdict:** [1-2 sentences: what this PR does and whether it's ready to merge.]
+**Headline:** [Plain prose, MAX 100 CHARACTERS, no markdown, no trailing period. This is the one-liner shown in the posted H2; if it exceeds 100 chars it will be cut and look bad. Pick the single most important takeaway — e.g. "Ships the partner auth flow cleanly, but token storage still leaks identity into query strings".]
+
+**Verdict:** [1-2 sentences: what this PR does and whether it's ready to merge. Headline may repeat the gist; this line gives nuance.]
 
 [severity line — compact inline, only non-zero counts, e.g.:]
 🔴 4 P0 · 🟡 3 P1 · 💡 2 P2 · 64 files reviewed
@@ -1334,6 +1355,7 @@ Format (markdown):
 **Architecture:** [1 sentence — what's good, what to watch.]
 
 Rules:
+- Headline is REQUIRED. Count characters carefully — the 100-char limit is hard.
 - Severity line: only include non-zero counts. Never show "0 suggestions" or "0 clean".
 - Do NOT use a markdown table. Use the compact inline format shown above.
 - If score >= 8, keep the verdict positive and brief. Omit fix order and top priority.
