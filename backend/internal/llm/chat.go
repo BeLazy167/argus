@@ -331,6 +331,14 @@ func (p *ChatProvider) adjustRequestForProvider(body *chatRequest, model string)
 		// GPT-5+ require max_completion_tokens instead of max_tokens.
 		body.MaxCompletionTokens = body.MaxTokens
 		body.MaxTokens = 0
+		// gpt-5.x is a reasoning model and rejects any `temperature` other than
+		// the default 1. Observed failure on acmeorg-account#331:
+		//   "Unsupported value: 'temperature' does not support 0.2 with this
+		//    model. Only the default (1) value is supported." (HTTP 400)
+		// Mirror the o-series branch above: strip the temperature so Azure
+		// applies its default. Callers still set req.Temperature for non-
+		// reasoning models, so the field stays in CompletionRequest.
+		body.Temperature = nil
 		// gpt-5.x is a reasoning model. Azure's implicit default reasoning
 		// level silently consumes the entire max_completion_tokens budget
 		// before emitting any visible output — the observed failure mode on

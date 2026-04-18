@@ -229,6 +229,12 @@ func TestAdjustRequestForProvider(t *testing.T) {
 		if body.ReasoningEffort != "minimal" {
 			t.Errorf("expected ReasoningEffort=minimal, got %q", body.ReasoningEffort)
 		}
+		// gpt-5.x is a reasoning model that rejects non-default temperature
+		// (Azure 400: "Unsupported value: 'temperature' does not support 0.2").
+		// Regression guard from acmeorg-account#331 where every review 400'd.
+		if body.Temperature != nil {
+			t.Errorf("expected Temperature=nil for gpt-5.x, got %v", *body.Temperature)
+		}
 	})
 
 	t.Run("gpt5_explicit_effort_preserved", func(t *testing.T) {
