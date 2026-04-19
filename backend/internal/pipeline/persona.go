@@ -165,6 +165,13 @@ type repoSettings struct {
 	ArchitectureGraph   *bool    `json:"architecture_graph,omitempty"`
 	SkipBaseBranches    []string `json:"skip_base_branches,omitempty"`
 	AutoRun             *bool    `json:"auto_run,omitempty"`
+	// AutoResolveEnabled gates the diff-based auto-resolve of stale review
+	// threads on synchronize pushes. Default ON (see IsAutoResolveEnabled):
+	// it's pure-diff with no LLM cost, and users who deliberately disable
+	// review auto-run usually still want stale comments cleared when they
+	// push fixes. Repos that want manual-only resolve control set this to
+	// false.
+	AutoResolveEnabled *bool `json:"auto_resolve_enabled,omitempty"`
 }
 
 func parseRepoSettings(settingsJSON json.RawMessage) (repoSettings, bool) {
@@ -254,6 +261,23 @@ func IsAutoRunEnabled(repoSettingsJSON, orgDefaultsJSON json.RawMessage) bool {
 		return *os.AutoRun
 	}
 	return false
+}
+
+// IsAutoResolveEnabled resolves the auto_resolve_enabled flag for a repo.
+//
+// Precedence: repo overrides org; nil at both levels defaults to ON. This
+// is the opposite default from IsAutoRunEnabled by design — auto-resolve
+// is pure-diff (no LLM spend, no review noise) and intentionally runs on
+// every synchronize regardless of whether the review pipeline fires.
+// Users who truly want manual thread control set this explicitly to false.
+func IsAutoResolveEnabled(repoSettingsJSON, orgDefaultsJSON json.RawMessage) bool {
+	if rs, ok := parseRepoSettings(repoSettingsJSON); ok && rs.AutoResolveEnabled != nil {
+		return *rs.AutoResolveEnabled
+	}
+	if os, ok := parseRepoSettings(orgDefaultsJSON); ok && os.AutoResolveEnabled != nil {
+		return *os.AutoResolveEnabled
+	}
+	return true
 }
 
 // PersonaSpecialistHint returns a short directive for appending to specialist prompts.

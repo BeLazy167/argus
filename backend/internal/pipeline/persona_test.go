@@ -88,6 +88,94 @@ func TestIsAutoRunEnabled(t *testing.T) {
 	}
 }
 
+func TestIsAutoResolveEnabled(t *testing.T) {
+	t.Parallel()
+	boolPtr := func(b bool) *bool { return &b }
+	mustMarshal := func(s repoSettings) json.RawMessage {
+		b, err := json.Marshal(s)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		return b
+	}
+
+	cases := []struct {
+		name string
+		repo json.RawMessage
+		org  json.RawMessage
+		want bool
+	}{
+		// Default ON — this is the key difference from IsAutoRunEnabled.
+		// Auto-resolve is pure-diff (no LLM cost), so users who haven't
+		// thought about it should get the benign-and-useful behavior.
+		{
+			name: "both nil => on (default)",
+			repo: nil,
+			org:  nil,
+			want: true,
+		},
+		{
+			name: "repo unset, org off => off",
+			repo: nil,
+			org:  mustMarshal(repoSettings{AutoResolveEnabled: boolPtr(false)}),
+			want: false,
+		},
+		{
+			name: "repo unset, org on => on",
+			repo: nil,
+			org:  mustMarshal(repoSettings{AutoResolveEnabled: boolPtr(true)}),
+			want: true,
+		},
+		{
+			name: "repo off, org on => off (repo overrides)",
+			repo: mustMarshal(repoSettings{AutoResolveEnabled: boolPtr(false)}),
+			org:  mustMarshal(repoSettings{AutoResolveEnabled: boolPtr(true)}),
+			want: false,
+		},
+		{
+			name: "repo on, org off => on (repo overrides)",
+			repo: mustMarshal(repoSettings{AutoResolveEnabled: boolPtr(true)}),
+			org:  mustMarshal(repoSettings{AutoResolveEnabled: boolPtr(false)}),
+			want: true,
+		},
+		{
+			name: "repo on, org nil => on (repo wins over missing org)",
+			repo: mustMarshal(repoSettings{AutoResolveEnabled: boolPtr(true)}),
+			org:  nil,
+			want: true,
+		},
+		{
+			name: "repo JSON present but field unset => falls through to org",
+			repo: mustMarshal(repoSettings{Persona: "default"}),
+			org:  mustMarshal(repoSettings{AutoResolveEnabled: boolPtr(false)}),
+			want: false,
+		},
+		{
+			name: "both corrupt => default on",
+			repo: json.RawMessage(`{{{`),
+			org:  json.RawMessage(`}}}`),
+			want: true,
+		},
+		// Orthogonality: auto_run and auto_resolve_enabled are independent.
+		// Setting one must not leak to the other.
+		{
+			name: "auto_run off but auto_resolve default => auto_resolve still on",
+			repo: mustMarshal(repoSettings{AutoRun: boolPtr(false)}),
+			org:  nil,
+			want: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := IsAutoResolveEnabled(tc.repo, tc.org); got != tc.want {
+				t.Fatalf("IsAutoResolveEnabled = %v, want %v (repo=%s, org=%s)",
+					got, tc.want, string(tc.repo), string(tc.org))
+			}
+		})
+	}
+}
+
 func TestPersonaPromptOverlay(t *testing.T) {
 	tests := []struct {
 		name      string

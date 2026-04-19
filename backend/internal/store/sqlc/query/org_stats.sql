@@ -31,10 +31,15 @@ GROUP BY DATE(r.created_at)
 ORDER BY DATE(r.created_at);
 
 -- name: StatsUsers :many
+-- score_stddev is population stddev (STDDEV_POP) rather than sample, because
+-- we want a stable "how spread are this author's reviews" readout rather
+-- than an inferential statistic; STDDEV_POP returns 0 for a single review
+-- and NULL only for zero — both are exactly what the UI wants.
 SELECT
     r.pr_author,
     COUNT(*)::int AS review_count,
     COALESCE(AVG(r.score)::float8, 0) AS avg_score,
+    COALESCE(STDDEV_POP(r.score)::float8, 0) AS score_stddev,
     COALESCE(SUM((r.token_usage->'total'->>'cost')::float), 0)::float8 AS total_cost,
     MAX(r.created_at) AS last_review_at
 FROM reviews r

@@ -870,6 +870,128 @@ func (s *Store) LogActivity(ctx context.Context, installationID *int64, action, 
 	return err
 }
 
+// --- Auto-Resolve Events ---
+
+// InsertAutoResolveEventParams mirrors the sqlc-generated params for the
+// underlying INSERT but lives in the store package so higher layers
+// (pipeline, api handlers) don't import internal/store/db directly.
+type InsertAutoResolveEventParams struct {
+	InstallationID int64
+	RepoID         int64
+	PRNumber       int
+	SourceSHA      string
+	ResolvedCount  int
+	AttemptedCount int
+	GitHubAPICalls int
+}
+
+// InsertAutoResolveEvent records one fire of the auto-resolve goroutine
+// against a synchronize push. Called from the pipeline orchestrator
+// after it has finished resolving (or attempting) threads on a PR.
+//
+// Writes are best-effort: callers already use a short DB-only context
+// so that a slow GitHub path doesn't leak into this insert, and a lost
+// row here is a dropped stats datapoint — not a correctness issue.
+func (s *Store) InsertAutoResolveEvent(ctx context.Context, p InsertAutoResolveEventParams) error {
+	// ON CONFLICT DO NOTHING guards against GitHub's webhook-retry
+	// behavior — a retried synchronize delivery would otherwise double-
+	// count the same resolve activity against the unique (installation,
+	// repo, pr, sha) key.
+	_, err := s.Pool.Exec(ctx, `
+		INSERT INTO auto_resolve_events
+			(installation_id, repo_id, pr_number, source_sha,
+			 resolved_count, attempted_count, github_api_calls)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (installation_id, repo_id, pr_number, source_sha)
+		DO NOTHING
+	`, p.InstallationID, p.RepoID, p.PRNumber, p.SourceSHA,
+		p.ResolvedCount, p.AttemptedCount, p.GitHubAPICalls)
+	if err != nil {
+		return fmt.Errorf("insert auto_resolve_events: %w", err)
+	}
+	return nil
+}
+
+// GetAutoResolveStatsRow returns aggregated auto-resolve activity over
+// a period for one or more installations (scoped via the API layer).
+type GetAutoResolveStatsRow struct {
+	EventCount     int
+	ResolvedTotal  int
+	AttemptedTotal int
+	APICallsTotal  int
+}
+
+// GetAutoResolveStats sums auto_resolve_events for the given installations
+// over the given period (e.g. "30 days"). Used by the stats overview
+// handler.
+func (s *Store) GetAutoResolveStats(ctx context.Context, installationIDs []int64, period string) (GetAutoResolveStatsRow, error) {
+	var r GetAutoResolveStatsRow
+	err := s.Pool.QueryRow(ctx, `
+		SELECT
+		  COUNT(*)::int,
+		  COALESCE(SUM(resolved_count), 0)::int,
+		  COALESCE(SUM(attempted_count), 0)::int,
+		  COALESCE(SUM(github_api_calls), 0)::int
+		FROM auto_resolve_events
+		WHERE installation_id = ANY($1::bigint[])
+		  AND created_at >= NOW() - $2::interval
+	`, installationIDs, period).Scan(&r.EventCount, &r.ResolvedTotal, &r.AttemptedTotal, &r.APICallsTotal)
+	if err != nil {
+		return r, fmt.Errorf("get auto_resolve_events stats: %w", err)
+	}
+	return r, nil
+}
+
+// GetLearnLayerCountsRow returns counts of new rows in the learn-layer
+// tables for the stats "Learn layer" section.
+type GetLearnLayerCountsRow struct {
+	PatternsLearned int
+	ScenariosStored int
+	DecisionTraces  int
+	FeedbackIndexed int
+}
+
+// GetLearnLayerCounts returns new-rows-this-period across the four
+// learn-layer tables. Uses four correlated subqueries rather than UNION
+// ALL so the caller gets a single flat row and the planner treats each
+// count independently.
+func (s *Store) GetLearnLayerCounts(ctx context.Context, installationIDs []int64, period string) (GetLearnLayerCountsRow, error) {
+	var r GetLearnLayerCountsRow
+	err := s.Pool.QueryRow(ctx, `
+		SELECT
+		  COALESCE((
+		    SELECT COUNT(*) FROM patterns p
+		    WHERE p.installation_id = ANY($1::bigint[])
+		      AND p.created_at >= NOW() - $2::interval
+		  ), 0)::int,
+		  COALESCE((
+		    SELECT COUNT(*) FROM scenarios s
+		    WHERE s.installation_id = ANY($1::bigint[])
+		      AND s.created_at >= NOW() - $2::interval
+		  ), 0)::int,
+		  COALESCE((
+		    SELECT COUNT(*) FROM decision_traces dt
+		    JOIN repos rp ON dt.repo_id = rp.id
+		    WHERE rp.installation_id = ANY($1::bigint[])
+		      AND dt.created_at >= NOW() - $2::interval
+		  ), 0)::int,
+		  COALESCE((
+		    SELECT COUNT(*) FROM comment_outcomes co
+		    JOIN review_comments rc ON co.review_comment_id = rc.id
+		    JOIN reviews rv ON rc.review_id = rv.id
+		    JOIN repos rp ON rv.repo_id = rp.id
+		    WHERE rp.installation_id = ANY($1::bigint[])
+		      AND co.created_at >= NOW() - $2::interval
+		  ), 0)::int
+	`, installationIDs, period).Scan(
+		&r.PatternsLearned, &r.ScenariosStored, &r.DecisionTraces, &r.FeedbackIndexed,
+	)
+	if err != nil {
+		return r, fmt.Errorf("get learn-layer counts: %w", err)
+	}
+	return r, nil
+}
+
 // --- Comment Outcomes ---
 
 func (s *Store) RecordCommentOutcome(ctx context.Context, reviewCommentID uuid.UUID, outcome string) error {
