@@ -325,7 +325,7 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		o.logger.Warn("loading org defaults", "error", orgErr, "installation", inst.ID)
 	}
 	if orgErr == nil && event.Action == "synchronize" && IsAutoResolveEnabled(dbRepo.SettingsJSON, orgDefaults) {
-		go o.autoResolveOnSynchronize(ctx, event, dbRepo.ID)
+		go o.autoResolveOnSynchronize(ctx, event, inst.ID, dbRepo.ID)
 	}
 
 	if event.Action != "manual" {
@@ -880,10 +880,17 @@ func (o *Orchestrator) postStartedComment(ctx context.Context, event ghpkg.PREve
 // The only ERROR-level logs are panic recovery and diff parse failure
 // (GitHub's own output being unparseable means our parser regressed).
 //
-// Call site: `go o.autoResolveOnSynchronize(ctx, event, dbRepoID)`.
+// Call site: `go o.autoResolveOnSynchronize(ctx, event, dbInstallationID, dbRepoID)`.
+//
+// IMPORTANT: dbInstallationID is the Argus DB's `installations.id` (BIGSERIAL
+// primary key), NOT the GitHub installation ID on `event.InstallationID`.
+// The auto_resolve_events.installation_id FK points at the DB's own PK, so
+// passing event.InstallationID produces an SQLSTATE 23503 violation on every
+// insert.
 func (o *Orchestrator) autoResolveOnSynchronize(
 	parent context.Context,
 	event ghpkg.PREvent,
+	dbInstallationID int64,
 	dbRepoID int64,
 ) {
 	defer func() {
@@ -951,7 +958,7 @@ func (o *Orchestrator) autoResolveOnSynchronize(
 	defer dbCancel()
 
 	if err := o.st.InsertAutoResolveEvent(dbCtx, store.InsertAutoResolveEventParams{
-		InstallationID: event.InstallationID,
+		InstallationID: dbInstallationID,
 		RepoID:         dbRepoID,
 		PRNumber:       event.PRNumber,
 		SourceSHA:      event.HeadSHA,
