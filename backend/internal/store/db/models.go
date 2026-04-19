@@ -22,6 +22,18 @@ type ActivityLog struct {
 	InstallationID *int64    `json:"installation_id"`
 }
 
+type AutoResolveEvent struct {
+	ID             int64     `json:"id"`
+	InstallationID int64     `json:"installation_id"`
+	RepoID         int64     `json:"repo_id"`
+	PRNumber       int       `json:"pr_number"`
+	SourceSHA      string    `json:"source_sha"`
+	ResolvedCount  int       `json:"resolved_count"`
+	AttemptedCount int       `json:"attempted_count"`
+	GitHubAPICalls int       `json:"github_api_calls"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
 type CodeEdge struct {
 	ID        int64      `json:"id"`
 	RepoID    int64      `json:"repo_id"`

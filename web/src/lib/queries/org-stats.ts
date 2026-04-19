@@ -10,6 +10,16 @@ export interface StatsOverview {
   total_tokens: number;
   critical_finds: number;
   catch_rate: number;
+  // Automated hygiene — auto-resolve (diff-based, no LLM cost).
+  auto_resolve_events: number;
+  auto_resolves: number;
+  auto_resolve_attempts: number;
+  auto_resolve_api_calls: number;
+  // Learn layer — BYOK-paid side effects of the memory/learn path.
+  patterns_learned: number;
+  scenarios_stored: number;
+  decision_traces: number;
+  feedback_indexed: number;
 }
 
 export interface TimeseriesPoint {
@@ -24,6 +34,9 @@ export interface UserStat {
   pr_author: string;
   review_count: number;
   avg_score: number;
+  // Population stddev of score across this author's reviews in the period.
+  // 0 when review_count is 1 (single-value series).
+  score_stddev: number;
   total_cost: number;
   critical_count: number;
 }

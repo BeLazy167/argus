@@ -11,28 +11,59 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-func parsePeriodInterval(r *http.Request) pgtype.Interval {
+// parsePeriod resolves the ?period= query param to both the pgtype.Interval
+// form (for sqlc-generated calls) and the text form (for raw-SQL store
+// methods that take a `text::interval` parameter). Single source of truth
+// so a new period value can't drift between the two paths.
+func parsePeriod(r *http.Request) (pgtype.Interval, string) {
 	switch r.URL.Query().Get("period") {
 	case "7d":
-		return pgtype.Interval{Days: 7, Valid: true}
+		return pgtype.Interval{Days: 7, Valid: true}, "7 days"
 	case "90d":
-		return pgtype.Interval{Days: 90, Valid: true}
+		return pgtype.Interval{Days: 90, Valid: true}, "90 days"
 	default:
-		return pgtype.Interval{Days: 30, Valid: true}
+		return pgtype.Interval{Days: 30, Valid: true}, "30 days"
 	}
+}
+
+// parsePeriodInterval is a thin wrapper for callers that only need the
+// pgtype.Interval form. Kept so the other stats handlers (timeseries,
+// users, models, ...) don't need a second return value they don't use.
+func parsePeriodInterval(r *http.Request) pgtype.Interval {
+	iv, _ := parsePeriod(r)
+	return iv
 }
 
 func (s *Server) statsOverview(w http.ResponseWriter, r *http.Request) {
 	q := db.New(s.store.Pool)
+	instIDs := getInstallationIDs(r.Context())
+	period, periodStr := parsePeriod(r)
+
 	row, err := q.StatsOverview(r.Context(), db.StatsOverviewParams{
-		InstallationIds: getInstallationIDs(r.Context()),
-		Period:          parsePeriodInterval(r),
+		InstallationIds: instIDs,
+		Period:          period,
 	})
 	if err != nil {
 		s.logger.Error("stats overview", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
+
+	// Additive counters. Zero-value the row on error rather than 500 the
+	// whole overview — these are secondary signals next to the core
+	// numbers above, and a DB hiccup on one shouldn't blank the page.
+	// Logging at Error so a sustained outage (missing table, missing
+	// column, auth regression) is visible in alerting, not just swallowed
+	// as "all-zero metrics".
+	ar, arErr := s.store.GetAutoResolveStats(r.Context(), instIDs, periodStr)
+	if arErr != nil {
+		s.logger.Error("stats overview: auto-resolve stats", "error", arErr)
+	}
+	ll, llErr := s.store.GetLearnLayerCounts(r.Context(), instIDs, periodStr)
+	if llErr != nil {
+		s.logger.Error("stats overview: learn-layer counts", "error", llErr)
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"total_reviews":   row.TotalReviews,
 		"total_cost":      row.TotalCost,
@@ -41,6 +72,17 @@ func (s *Server) statsOverview(w http.ResponseWriter, r *http.Request) {
 		"total_tokens":    row.TotalTokens,
 		"critical_finds":  row.CriticalFinds,
 		"catch_rate":      toFloat64(row.CatchRate),
+		// Automated hygiene (auto-resolve).
+		"auto_resolve_events":    ar.EventCount,
+		"auto_resolves":          ar.ResolvedTotal,
+		"auto_resolve_attempts":  ar.AttemptedTotal,
+		"auto_resolve_api_calls": ar.APICallsTotal,
+		// Learn layer — rows that the memory/learn path produced
+		// this period. All BYOK-paid side-effects users can reconcile.
+		"patterns_learned": ll.PatternsLearned,
+		"scenarios_stored": ll.ScenariosStored,
+		"decision_traces":  ll.DecisionTraces,
+		"feedback_indexed": ll.FeedbackIndexed,
 	})
 }
 
@@ -112,6 +154,7 @@ func (s *Server) statsUsers(w http.ResponseWriter, r *http.Request) {
 		PRAuthor      string  `json:"pr_author"`
 		ReviewCount   int     `json:"review_count"`
 		AvgScore      float64 `json:"avg_score"`
+		ScoreStddev   float64 `json:"score_stddev"`
 		TotalCost     float64 `json:"total_cost"`
 		CriticalCount int     `json:"critical_count"`
 	}
@@ -121,6 +164,7 @@ func (s *Server) statsUsers(w http.ResponseWriter, r *http.Request) {
 			PRAuthor:      u.PRAuthor,
 			ReviewCount:   u.ReviewCount,
 			AvgScore:      toFloat64(u.AvgScore),
+			ScoreStddev:   toFloat64(u.ScoreStddev),
 			TotalCost:     u.TotalCost,
 			CriticalCount: critMap[u.PRAuthor],
 		})

@@ -630,6 +630,19 @@ const AUTO_RUN_TOGGLE = {
   defaultValue: false,
 } as const;
 
+/* AUTO_RESOLVE_TOGGLE: separate from AUTO_RUN because it's diff-only and
+ * therefore safe to run regardless of whether the review pipeline fires.
+ * Default ON — users on manual-review repos still usually want stale
+ * comments to clear when they push a fix.
+ */
+const AUTO_RESOLVE_TOGGLE = {
+  key: "auto_resolve_enabled",
+  label: "Auto-resolve stale review threads",
+  hint: "Close Argus comments when you push fixes to the flagged lines",
+  description: "On every push to an open PR, Argus checks whether the new commit changed any of the lines it previously flagged (within ±3 lines) and marks those review threads resolved. Runs regardless of auto-review — it's diff-based, with no LLM call.",
+  defaultValue: true,
+} as const;
+
 /* ── Pipeline Feature Toggles ── */
 
 const PIPELINE_FEATURES = [
@@ -1082,6 +1095,15 @@ export default function SettingsPage() {
                     saveOrgDefaults.mutate({ ...orgDefaults, auto_run: !current });
                   }}
                 />
+                <PipelineFeatureCard
+                  toggle={AUTO_RESOLVE_TOGGLE}
+                  enabled={typeof orgDefaults?.auto_resolve_enabled === "boolean" ? orgDefaults.auto_resolve_enabled : AUTO_RESOLVE_TOGGLE.defaultValue}
+                  pending={saveOrgDefaults.isPending}
+                  onToggle={() => {
+                    const current = typeof orgDefaults?.auto_resolve_enabled === "boolean" ? orgDefaults.auto_resolve_enabled : AUTO_RESOLVE_TOGGLE.defaultValue;
+                    saveOrgDefaults.mutate({ ...orgDefaults, auto_resolve_enabled: !current });
+                  }}
+                />
               </section>
 
               {/* Org: Pipeline Features */}
@@ -1440,22 +1462,40 @@ export default function SettingsPage() {
                 </p>
               </div>
             ) : (
-              <PipelineFeatureCard
-                toggle={AUTO_RUN_TOGGLE}
-                enabled={typeof activeRepo?.settings_json?.auto_run === "boolean"
-                  ? (activeRepo.settings_json.auto_run as boolean)
-                  : (typeof orgDefaults?.auto_run === "boolean" ? orgDefaults.auto_run : AUTO_RUN_TOGGLE.defaultValue)}
-                pending={updateRepo.isPending}
-                onToggle={() => {
-                  const repoVal = typeof activeRepo?.settings_json?.auto_run === "boolean"
+              <>
+                <PipelineFeatureCard
+                  toggle={AUTO_RUN_TOGGLE}
+                  enabled={typeof activeRepo?.settings_json?.auto_run === "boolean"
                     ? (activeRepo.settings_json.auto_run as boolean)
-                    : (typeof orgDefaults?.auto_run === "boolean" ? orgDefaults.auto_run : AUTO_RUN_TOGGLE.defaultValue);
-                  updateRepo.mutate({
-                    id: activeId,
-                    settings_json: { ...activeRepo?.settings_json, auto_run: !repoVal },
-                  });
-                }}
-              />
+                    : (typeof orgDefaults?.auto_run === "boolean" ? orgDefaults.auto_run : AUTO_RUN_TOGGLE.defaultValue)}
+                  pending={updateRepo.isPending}
+                  onToggle={() => {
+                    const repoVal = typeof activeRepo?.settings_json?.auto_run === "boolean"
+                      ? (activeRepo.settings_json.auto_run as boolean)
+                      : (typeof orgDefaults?.auto_run === "boolean" ? orgDefaults.auto_run : AUTO_RUN_TOGGLE.defaultValue);
+                    updateRepo.mutate({
+                      id: activeId,
+                      settings_json: { ...activeRepo?.settings_json, auto_run: !repoVal },
+                    });
+                  }}
+                />
+                <PipelineFeatureCard
+                  toggle={AUTO_RESOLVE_TOGGLE}
+                  enabled={typeof activeRepo?.settings_json?.auto_resolve_enabled === "boolean"
+                    ? (activeRepo.settings_json.auto_resolve_enabled as boolean)
+                    : (typeof orgDefaults?.auto_resolve_enabled === "boolean" ? orgDefaults.auto_resolve_enabled : AUTO_RESOLVE_TOGGLE.defaultValue)}
+                  pending={updateRepo.isPending}
+                  onToggle={() => {
+                    const repoVal = typeof activeRepo?.settings_json?.auto_resolve_enabled === "boolean"
+                      ? (activeRepo.settings_json.auto_resolve_enabled as boolean)
+                      : (typeof orgDefaults?.auto_resolve_enabled === "boolean" ? orgDefaults.auto_resolve_enabled : AUTO_RESOLVE_TOGGLE.defaultValue);
+                    updateRepo.mutate({
+                      id: activeId,
+                      settings_json: { ...activeRepo?.settings_json, auto_resolve_enabled: !repoVal },
+                    });
+                  }}
+                />
+              </>
             )}
           </section>
 

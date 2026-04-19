@@ -3,43 +3,20 @@ package api
 import (
 	"errors"
 	"testing"
+
+	ghpkg "github.com/BeLazy167/argus/backend/internal/github"
 )
 
-// TestIsArgusThread covers the bot-thread predicate. It is the gate that
-// prevents `@argus-eye resolve` from closing human-authored threads, so it
-// needs to be both inclusive (catch all Argus variants) and tight (reject
-// anything that merely looks bot-like).
-func TestIsArgusThread(t *testing.T) {
-	tests := []struct {
-		name  string
-		login string
-		want  bool
-	}{
-		{"exact argus-eye login", "argus-eye", true},
-		{"argus-eye bot suffix", "argus-eye[bot]", true},
-		// Other bots MUST NOT match — `@argus-eye resolve` should not touch
-		// dependabot/codecov/renovate threads on the same PR.
-		{"dependabot is not argus", "dependabot[bot]", false},
-		{"codecov is not argus", "codecov[bot]", false},
-		{"renovate is not argus", "renovate[bot]", false},
-		{"generic bot suffix no match", "someapp[bot]", false},
-		{"human login", "alice", false},
-		{"human with digits", "alice42", false},
-		{"human with argus in name", "argus-fan", false},
-		{"human ending in bot (no brackets)", "robot", false},
-		{"empty login", "", false},
-		{"case-sensitive — uppercase variant must fail", "Argus-Eye", false},
-		{"case-sensitive — [BOT] suffix must fail", "test[BOT]", false},
-		{"substring match is not enough", "not-argus-eye", false},
-		{"prefix match is not enough", "argus-eye-malicious", false},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := isArgusThread(tc.login); got != tc.want {
-				t.Errorf("isArgusThread(%q) = %v, want %v", tc.login, got, tc.want)
-			}
-		})
+// TestIsArgusCommentAuthor pins the api-layer alias to the canonical
+// ghpkg.IsArgusThread helper. Exhaustive truth-table lives in
+// internal/github/identity_test.go — this test only guards the aliasing.
+func TestIsArgusCommentAuthor(t *testing.T) {
+	for _, login := range []string{"argus-eye", "argus-eye[bot]", "dependabot[bot]", ""} {
+		want := ghpkg.IsArgusThread(login)
+		if got := isArgusCommentAuthor(login); got != want {
+			t.Errorf("isArgusCommentAuthor(%q) = %v, want %v (mismatch with canonical helper)",
+				login, got, want)
+		}
 	}
 }
 

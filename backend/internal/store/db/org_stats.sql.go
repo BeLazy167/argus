@@ -552,6 +552,7 @@ SELECT
     r.pr_author,
     COUNT(*)::int AS review_count,
     COALESCE(AVG(r.score)::float8, 0) AS avg_score,
+    COALESCE(STDDEV_POP(r.score)::float8, 0) AS score_stddev,
     COALESCE(SUM((r.token_usage->'total'->>'cost')::float), 0)::float8 AS total_cost,
     MAX(r.created_at) AS last_review_at
 FROM reviews r
@@ -574,10 +575,15 @@ type StatsUsersRow struct {
 	PRAuthor     string      `json:"pr_author"`
 	ReviewCount  int         `json:"review_count"`
 	AvgScore     interface{} `json:"avg_score"`
+	ScoreStddev  interface{} `json:"score_stddev"`
 	TotalCost    float64     `json:"total_cost"`
 	LastReviewAt interface{} `json:"last_review_at"`
 }
 
+// score_stddev is population stddev (STDDEV_POP) rather than sample, because
+// we want a stable "how spread are this author's reviews" readout rather
+// than an inferential statistic; STDDEV_POP returns 0 for a single review
+// and NULL only for zero — both are exactly what the UI wants.
 func (q *Queries) StatsUsers(ctx context.Context, arg StatsUsersParams) ([]StatsUsersRow, error) {
 	rows, err := q.db.Query(ctx, statsUsers, arg.InstallationIds, arg.Period)
 	if err != nil {
@@ -591,6 +597,7 @@ func (q *Queries) StatsUsers(ctx context.Context, arg StatsUsersParams) ([]Stats
 			&i.PRAuthor,
 			&i.ReviewCount,
 			&i.AvgScore,
+			&i.ScoreStddev,
 			&i.TotalCost,
 			&i.LastReviewAt,
 		); err != nil {

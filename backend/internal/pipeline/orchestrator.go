@@ -12,6 +12,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -307,15 +308,31 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 	//   - action=synchronize/reopened -> silent skip. The opened-event already
 	//     posted a trigger comment for this PR's lifetime; we don't re-post on
 	//     every new commit (noise) and we don't auto-run.
+	//
+	// AUTO-RESOLVE exception: we fire auto-resolve BEFORE this gate on
+	// every synchronize, because it's diff-only (no LLM, no BYOK cost) and
+	// users on manual-review repos still expect stale comments to close
+	// when they push a fix. See o.autoResolveOnSynchronize for the rules.
+	//
+	// Fail-closed on org-defaults load failure: if we can't read the
+	// org config, we skip auto-resolve this round. Otherwise a transient
+	// DB blip would ignore an explicit `auto_resolve_enabled=false` org
+	// setting (the default=true would win), violating admin intent.
+	// IsAutoRunEnabled's default=false makes failing-open acceptable
+	// there; our default=true inverts that calculus.
+	orgDefaults, orgErr := o.st.GetOrgDefaults(ctx, inst.ID)
+	if orgErr != nil {
+		o.logger.Warn("loading org defaults", "error", orgErr, "installation", inst.ID)
+	}
+	if orgErr == nil && event.Action == "synchronize" && IsAutoResolveEnabled(dbRepo.SettingsJSON, orgDefaults) {
+		go o.autoResolveOnSynchronize(ctx, event, dbRepo.ID)
+	}
+
 	if event.Action != "manual" {
-		// Log DB errors explicitly: on a transient failure here, GetOrgDefaults
-		// returns empty JSON and IsAutoRunEnabled falls through to the repo
-		// setting (then default=false). An org configured with auto_run=true
-		// would silently have reviews skipped with no trace otherwise.
-		orgDefaults, orgErr := o.st.GetOrgDefaults(ctx, inst.ID)
-		if orgErr != nil {
-			o.logger.Warn("loading org defaults for auto_run gate", "error", orgErr, "installation", inst.ID)
-		}
+		// Log DB errors explicitly: on a transient failure above, orgDefaults
+		// is empty and IsAutoRunEnabled falls through to the repo setting
+		// (then default=false). An org configured with auto_run=true would
+		// silently have reviews skipped with no trace otherwise.
 		if !IsAutoRunEnabled(dbRepo.SettingsJSON, orgDefaults) {
 			if event.Action == "opened" {
 				if err := o.postTriggerComment(ctx, event, owner, repo, dbRepo); err != nil {
@@ -378,19 +395,10 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		}
 	}
 
-	// Auto-resolve stale bot comments on incremental re-push (fire-and-forget)
-	if isIncremental {
-		resolveCtx, resolveCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-		go func() {
-			defer resolveCancel()
-			defer func() {
-				if r := recover(); r != nil {
-					o.logger.Error("autoResolveStaleComments panic", "recover", r, "pr", event.PRNumber)
-				}
-			}()
-			o.autoResolveStaleComments(resolveCtx, event, patchSet)
-		}()
-	}
+	// Auto-resolve stale bot comments fires once per push from
+	// autoResolveOnSynchronize above, before the auto-run gate. It runs
+	// regardless of whether the review pipeline reaches this point, so
+	// there's no review-path trigger to maintain here.
 
 	// Create review record
 	reviewID := uuid.New()
@@ -855,22 +863,139 @@ func (o *Orchestrator) postStartedComment(ctx context.Context, event ghpkg.PREve
 	run.StartedCommentNodeID = nodeID
 }
 
-// autoResolveStaleComments resolves bot review threads whose specific lines
-// were modified in the new push. Uses line-level checking: a thread is resolved
-// only if the changed lines in the inter-diff overlap with the comment's line
-// range (within a proximity window). Falls back to file-level for threads with
-// no line information (e.g., file-level comments).
-func (o *Orchestrator) autoResolveStaleComments(ctx context.Context, event ghpkg.PREvent, patchSet *diff.PatchSet) {
+// autoResolveOnSynchronize fires fire-and-forget on every synchronize
+// push where auto-resolve is enabled, independently of the review
+// pipeline's auto-run gate. Runs in its own goroutine (launched by the
+// caller) with a 30s GitHub timeout and a separate 5s DB-insert timeout
+// so a slow GitHub path can't lose the stats row.
+//
+// Uses context.WithoutCancel so the goroutine survives the parent
+// handler returning — the handler's ctx typically cancels when the
+// webhook HTTP response is sent, but auto-resolve is useful long
+// after that.
+//
+// Early-returns on: no prior review (first push), inter-diff fetch
+// failure, empty inter-diff, parse failure. None of those are bugs —
+// they're legitimate "nothing to do" or "transient GitHub" states.
+// The only ERROR-level logs are panic recovery and diff parse failure
+// (GitHub's own output being unparseable means our parser regressed).
+//
+// Call site: `go o.autoResolveOnSynchronize(ctx, event, dbRepoID)`.
+func (o *Orchestrator) autoResolveOnSynchronize(
+	parent context.Context,
+	event ghpkg.PREvent,
+	dbRepoID int64,
+) {
+	defer func() {
+		if r := recover(); r != nil {
+			o.logger.Error("autoResolveOnSynchronize panic",
+				"recover", r,
+				"stack", string(debug.Stack()),
+				"pr", event.PRNumber)
+		}
+	}()
+
+	ghCtx, ghCancel := context.WithTimeout(
+		context.WithoutCancel(parent), 30*time.Second)
+	defer ghCancel()
+
+	prev, err := o.st.GetLastCompletedReview(ghCtx, dbRepoID, event.PRNumber)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// First push; no prior review to resolve against. Quiet return.
+			return
+		}
+		o.logger.Warn("auto-resolve: load prior review",
+			"error", err, "pr", event.PRNumber)
+		return
+	}
+
 	owner, repo, err := splitRepoFullName(event.RepoFullName)
 	if err != nil {
 		o.logger.Warn("auto-resolve: bad repo name", "error", err)
 		return
 	}
 
+	interDiff, err := o.ghClient.GetCompareCommitsDiff(
+		ghCtx, event.InstallationID, owner, repo, prev.HeadSHA, event.HeadSHA)
+	if err != nil {
+		o.logger.Warn("auto-resolve: fetch inter-diff",
+			"error", err, "pr", event.PRNumber)
+		return
+	}
+	if interDiff == "" {
+		return
+	}
+
+	patchSet, err := diff.Parse(interDiff)
+	if err != nil {
+		// ERROR level: GitHub's own diff being unparseable means our
+		// parser regressed; surface it loudly.
+		o.logger.Error("auto-resolve: parse inter-diff",
+			"error", err, "pr", event.PRNumber)
+		return
+	}
+
+	resolved, attempted, apiCalls := o.autoResolveStaleComments(ghCtx, event, patchSet)
+	// Persist whenever we touched GitHub — even a list-only call (0
+	// resolved, 0 attempted, 1 apiCall) is load operators may need to
+	// see against their installation token budget.
+	if resolved+attempted+apiCalls == 0 {
+		return
+	}
+
+	// Separate short context for the DB insert so a slow GitHub path
+	// (near the 30s ceiling) can't cost us the stats row.
+	dbCtx, dbCancel := context.WithTimeout(
+		context.WithoutCancel(parent), 5*time.Second)
+	defer dbCancel()
+
+	if err := o.st.InsertAutoResolveEvent(dbCtx, store.InsertAutoResolveEventParams{
+		InstallationID: event.InstallationID,
+		RepoID:         dbRepoID,
+		PRNumber:       event.PRNumber,
+		SourceSHA:      event.HeadSHA,
+		ResolvedCount:  resolved,
+		AttemptedCount: attempted,
+		GitHubAPICalls: apiCalls,
+	}); err != nil {
+		o.logger.Warn("auto-resolve: persist event",
+			"error", err, "pr", event.PRNumber)
+	}
+}
+
+// autoResolveStaleComments resolves bot review threads whose specific lines
+// were modified in the new push. Uses line-level checking: a thread is resolved
+// only if the changed lines in the inter-diff overlap with the comment's line
+// range (within a proximity window). Falls back to file-level for threads with
+// no line information (e.g., file-level comments).
+//
+// Identifies Argus threads by login equality only (via ghpkg.IsArgusThread)
+// — the older `strings.HasSuffix(..., "[bot]")` heuristic silently closed
+// threads from sibling bots (Cubic, Codecov, Dependabot, Renovate) whose
+// comment lines happened to sit within the proximity window of a user's
+// diff. Now we only touch our own threads.
+//
+// Returns (resolvedCount, attemptedCount, apiCalls). apiCalls counts every
+// GitHub mutation we issued (ListReviewThreads + each ResolveReviewThread
+// attempt, success or failure) — persisted on auto_resolve_events so
+// operators can see rate-limit pressure.
+func (o *Orchestrator) autoResolveStaleComments(
+	ctx context.Context,
+	event ghpkg.PREvent,
+	patchSet *diff.PatchSet,
+) (resolved, attempted, apiCalls int) {
+	owner, repo, err := splitRepoFullName(event.RepoFullName)
+	if err != nil {
+		o.logger.Warn("auto-resolve: bad repo name", "error", err)
+		return 0, 0, 0
+	}
+
 	threads, err := o.ghClient.ListReviewThreads(ctx, event.InstallationID, owner, repo, event.PRNumber)
+	apiCalls++ // count the list call regardless of outcome
 	if err != nil {
 		o.logger.Warn("auto-resolve: listing threads", "error", err)
-		return
+		return 0, 0, apiCalls
 	}
 
 	// Build per-file changed line sets and a file-presence set
@@ -884,11 +1009,9 @@ func (o *Orchestrator) autoResolveStaleComments(ctx context.Context, event ghpkg
 
 	o.logger.Info("auto-resolve: found threads", "total", len(threads), "changed_files", len(changedFiles), "pr", event.PRNumber)
 
-	var resolved, attempted, botUnresolved, lineHit, fileHit int
+	var botUnresolved, lineHit, fileHit int
 	for _, t := range threads {
-		// GraphQL returns app login without "[bot]" suffix (e.g., "argus-eye" not "argus-eye[bot]")
-		isBotComment := strings.HasSuffix(t.AuthorLogin, "[bot]") || t.AuthorLogin == "argus-eye"
-		if t.IsResolved || !isBotComment {
+		if t.IsResolved || !ghpkg.IsArgusThread(t.AuthorLogin) {
 			continue
 		}
 		botUnresolved++
@@ -920,6 +1043,7 @@ func (o *Orchestrator) autoResolveStaleComments(ctx context.Context, event ghpkg
 		}
 
 		attempted++
+		apiCalls++ // one mutation per attempt
 		if err := o.ghClient.ResolveReviewThread(ctx, event.InstallationID, t.ID); err != nil {
 			o.logger.Warn("auto-resolve: resolve thread failed", "error", err, "thread_id", t.ID, "path", t.Path)
 			continue
@@ -931,7 +1055,9 @@ func (o *Orchestrator) autoResolveStaleComments(ctx context.Context, event ghpkg
 		"resolved", resolved, "attempted", attempted,
 		"bot_unresolved", botUnresolved,
 		"line_level_hits", lineHit, "file_level_fallbacks", fileHit,
+		"api_calls", apiCalls,
 		"pr", event.PRNumber)
+	return resolved, attempted, apiCalls
 }
 
 // enrichFindings annotates each comment with pattern/rule matches and novelty flags.

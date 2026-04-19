@@ -8,7 +8,7 @@ import {
 } from "recharts";
 import {
   Loader2, TrendingUp, DollarSign, Zap, Clock, AlertTriangle, Target,
-  Shield, Info, Timer,
+  Shield, Info, Timer, Check, Network, Brain, FlaskConical, History, ThumbsUp,
 } from "lucide-react";
 import { useStatsStore } from "@/lib/stores/stats-store";
 import {
@@ -203,6 +203,77 @@ export default function StatsPage() {
         </div>
       )}
 
+      {/* Automated hygiene — diff-only operations, zero LLM cost.
+          Surfacing these separately so users don't confuse them with the
+          LLM-paid review activity above. */}
+      {overview.data && (
+        <section className="pt-4 mb-10">
+          <SectionHeader title="Automated hygiene" tip="Free operations we ran on your behalf — no LLM tokens consumed" />
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+            <StatCard
+              label="Auto-resolves"
+              value={String(overview.data.auto_resolves)}
+              icon={Check}
+              tip="Stale review threads we closed automatically when your push modified the flagged lines. Diff-based, no LLM call."
+              valueColor="text-green-500"
+              iconColor="text-green-500"
+            />
+            <StatCard
+              label="Attempts"
+              value={String(overview.data.auto_resolve_attempts)}
+              icon={Target}
+              tip="Thread-close attempts, including any that GitHub rejected. Resolved ≤ Attempts because GitHub may already have marked a thread resolved."
+            />
+            <StatCard
+              label="GitHub API"
+              value={String(overview.data.auto_resolve_api_calls)}
+              icon={Network}
+              tip="GitHub API calls auto-resolve issued — visible for rate-limit accounting on your installation token."
+            />
+          </div>
+          {overview.data.auto_resolve_events === 0 && (
+            <p className="mt-3 text-[10px] font-mono text-muted-foreground">
+              No auto-resolves yet. Push a commit that changes a line Argus flagged to see this in action.
+            </p>
+          )}
+        </section>
+      )}
+
+      {/* Learn layer — BYOK-paid side effects of the memory pipeline.
+          Shown separately from the review cards because the cost lives
+          in your Supermemory bill, not the LLM bill. */}
+      {overview.data && (
+        <section className="pt-4 mb-10">
+          <SectionHeader title="Learn layer" tip="Memory activity for this period. Each counter maps to a row your BYOK Supermemory account is storing." />
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <StatCard
+              label="Patterns"
+              value={String(overview.data.patterns_learned)}
+              icon={Brain}
+              tip="New cross-repo patterns the pipeline learned this period."
+            />
+            <StatCard
+              label="Scenarios"
+              value={String(overview.data.scenarios_stored)}
+              icon={FlaskConical}
+              tip="New failure scenarios stored. Drive the code-simulation pass on future reviews."
+            />
+            <StatCard
+              label="Decisions"
+              value={String(overview.data.decision_traces)}
+              icon={History}
+              tip="Decision-trace rows — Argus findings linked to dev agrees/dismisses/fixes."
+            />
+            <StatCard
+              label="Feedback"
+              value={String(overview.data.feedback_indexed)}
+              icon={ThumbsUp}
+              tip="Reactions/outcomes captured from reviewer feedback on posted comments."
+            />
+          </div>
+        </section>
+      )}
+
       {/* Trends */}
       <section className="pt-10 mb-10">
         <SectionHeader title="Trends" tip="Daily aggregates for the selected period" />
@@ -345,6 +416,17 @@ export default function StatsPage() {
                       <td className="text-right px-4 py-3 text-muted-foreground">{u.review_count}</td>
                       <td className="text-right px-4 py-3">
                         <span className={scoreColor(u.avg_score)}>{u.avg_score.toFixed(1)}</span>
+                        {/* Only show stddev with ≥2 reviews — a single value
+                            has stddev 0 but that's misleading, it just means
+                            "we don't know the spread yet". */}
+                        {u.review_count >= 2 && (
+                          <span
+                            className="ml-1 text-muted-foreground/70"
+                            title="Standard deviation — higher = more variance across this author's review scores"
+                          >
+                            ± {u.score_stddev.toFixed(1)}
+                          </span>
+                        )}
                       </td>
                       <td className="text-right px-4 py-3 text-muted-foreground">{fmt$(u.total_cost)}</td>
                       <td className="text-right px-4 py-3">

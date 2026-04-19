@@ -235,22 +235,17 @@ func (s *Server) handleRememberCommand(ctx context.Context, evt ghpkg.IssueComme
 	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "rocket")
 }
 
-// isArgusThread reports whether a GitHub review thread was authored by Argus.
-// Matches only Argus's own login variants — crucially, it does NOT treat every
-// "*[bot]" login as Argus. Without this tightness, `@argus-eye resolve` would
-// also close threads from Dependabot, Codecov, Renovate, etc. sharing the PR.
-// Extracted as a testable helper for shared use across resolve/fix/triage flows.
-func isArgusThread(authorLogin string) bool {
-	return authorLogin == "argus-eye" || authorLogin == "argus-eye[bot]"
-}
-
 // isArgusCommentAuthor reports whether an issue_comment was authored by Argus.
 // Used by the checkbox-trigger path to reject hijack attempts where a
 // collaborator pastes the trigger-marker + checkbox into their own comment and
 // toggles it: without this guard, any repo member could spin up reviews by
 // impersonating our comment format.
+//
+// Canonical identity lives in ghpkg.IsArgusThread; this alias preserves the
+// naming intent at the call site (we're checking comment authorship, not a
+// thread) while keeping the rule in one place.
 func isArgusCommentAuthor(authorLogin string) bool {
-	return isArgusThread(authorLogin)
+	return ghpkg.IsArgusThread(authorLogin)
 }
 
 // classifyResolveError summarizes an error from ResolveReviewThread into a
@@ -288,7 +283,7 @@ func classifyResolveError(err error) (phrase string, fatal bool) {
 // handleResolveCommand resolves every open Argus review thread on the PR.
 // The command is an explicit user signal ("I've handled these, close them"),
 // so we trust the caller rather than second-guess with diff heuristics.
-// Auto-resolve on incremental re-push (orchestrator.autoResolveStaleComments)
+// Auto-resolve on push (orchestrator.autoResolveOnSynchronize)
 // stays the cautious path; manual invocation is the trust-the-operator path.
 func (s *Server) handleResolveCommand(ctx context.Context, evt ghpkg.IssueCommentEvent, owner, repo string, ghClient *ghpkg.Client) {
 	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "eyes")
@@ -302,7 +297,7 @@ func (s *Server) handleResolveCommand(ctx context.Context, evt ghpkg.IssueCommen
 
 	var unresolvedBot []ghpkg.ReviewThread
 	for _, t := range threads {
-		if !t.IsResolved && isArgusThread(t.AuthorLogin) {
+		if !t.IsResolved && ghpkg.IsArgusThread(t.AuthorLogin) {
 			unresolvedBot = append(unresolvedBot, t)
 		}
 	}
