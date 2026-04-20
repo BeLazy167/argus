@@ -4675,75 +4675,75 @@ func renderTokenBreakdown(tu *RunTokenUsage) string {
 		a.tokens += t.TotalTokens
 		a.cost += t.Cost
 	}
-
-	// Stable ordering for deterministic output.
-	specialistOrder := []string{"correctness", "bug_hunter", "security", "architecture", "regression", "review"}
+	// Build final specialist render order: canonical first (in SpecialistOrder),
+	// then any unknown keys appended (future-proof for new specialists shipped
+	// without a labels.go update). Dropping duplicates via a seen-set.
+	specialistOrder := make([]string, 0, len(bySpecialist))
 	seen := make(map[string]bool, len(bySpecialist))
+	for _, key := range SpecialistOrder {
+		if _, ok := bySpecialist[key]; ok {
+			specialistOrder = append(specialistOrder, key)
+			seen[key] = true
+		}
+	}
+	for key := range bySpecialist {
+		if !seen[key] {
+			specialistOrder = append(specialistOrder, key)
+		}
+	}
 
 	var rows []string
 	addRow := func(label string, tokens int, cost float64) {
-		if tokens == 0 {
+		// Gate on tokens AND cost: some providers (gpt-5.x reasoning path,
+		// see commit 1070dac) return cost without token counts, so a bare
+		// `tokens == 0` guard would drop real spend AND leave the header
+		// "Total" misaligned with the sum of visible rows.
+		if tokens == 0 && cost == 0 {
 			return
 		}
 		rows = append(rows, fmt.Sprintf("| %s | %s | $%.4f |", label, formatTokens(tokens), cost))
 	}
-
-	// Non-review stages first, in pipeline order.
-	addRow("Intent", tu.Intent.TotalTokens, tu.Intent.Cost)
-	addRow("Triage", tu.Triage.TotalTokens, tu.Triage.Cost)
-	addRow("Enrichment", tu.Enrichment.TotalTokens, tu.Enrichment.Cost)
-	addRow("Conventions", tu.Conventions.TotalTokens, tu.Conventions.Cost)
-	addRow("Patterns", tu.Patterns.TotalTokens, tu.Patterns.Cost)
-	addRow("Lead agent", tu.LeadAgent.TotalTokens, tu.LeadAgent.Cost)
-
-	// File synthesis (aggregate across files).
-	var fsTokens int
-	var fsCost float64
-	for _, t := range tu.FileSynthesis {
-		fsTokens += t.TotalTokens
-		fsCost += t.Cost
+	addStage := func(key string, st StageTokens) {
+		addRow(StageLabel(key), st.TotalTokens, st.Cost)
 	}
-	addRow("File synthesis", fsTokens, fsCost)
-
-	// Review stage — show per-specialist sub-rows. When the specialist key is
-	// the skim fallback "review" (the key assignment above in the bySpecialist
-	// loop when Specialist==""), drop the suffix so we don't render the
-	// redundant "Review · review" column.
-	reviewLabel := func(key string) string {
-		if key == "review" {
-			return "Review"
+	// sumArray collapses an array-valued stage (file_synthesis, simulation)
+	// into a single row — PR comment stays curated; per-entry rows live on
+	// the web dashboard's review detail page.
+	sumArray := func(key string, arr []StageTokens) {
+		var tokens int
+		var cost float64
+		for _, t := range arr {
+			tokens += t.TotalTokens
+			cost += t.Cost
 		}
-		return "Review · " + key
+		addRow(StageLabel(key), tokens, cost)
 	}
+
+	// Non-review stages rendered in StageOrder sequence so the PR comment
+	// table matches the dashboard's stage ordering. `graph` runs early in
+	// the pipeline (before review), not at the end.
+	addStage("intent", tu.Intent)
+	addStage("triage", tu.Triage)
+	addStage("enrichment", tu.Enrichment)
+	addStage("conventions", tu.Conventions)
+	addStage("patterns", tu.Patterns)
+	addStage("lead_agent", tu.LeadAgent)
+	addStage("graph", tu.Graph)
+	sumArray("file_synthesis", tu.FileSynthesis)
+
+	// Review stage — per-specialist sub-rows. StageLabel handles the
+	// "review.review" suppression (skim fallback renders as plain "Review").
 	for _, key := range specialistOrder {
-		if a, ok := bySpecialist[key]; ok {
-			seen[key] = true
-			addRow(reviewLabel(key), a.tokens, a.cost)
-		}
-	}
-	// Any specialists we didn't enumerate (future-proof for new names).
-	for key, a := range bySpecialist {
-		if !seen[key] {
-			addRow(reviewLabel(key), a.tokens, a.cost)
-		}
+		a := bySpecialist[key]
+		addRow(StageLabel("review."+key), a.tokens, a.cost)
 	}
 
-	addRow("Acceptance", tu.Acceptance.TotalTokens, tu.Acceptance.Cost)
-	addRow("Cross-PR", tu.CrossPR.TotalTokens, tu.CrossPR.Cost)
-
-	// Simulation (aggregate across scenarios).
-	var simTokens int
-	var simCost float64
-	for _, t := range tu.Simulation {
-		simTokens += t.TotalTokens
-		simCost += t.Cost
-	}
-	addRow("Simulation", simTokens, simCost)
-
-	addRow("Scoring", tu.Scoring.TotalTokens, tu.Scoring.Cost)
-	addRow("Synthesis", tu.Synthesis.TotalTokens, tu.Synthesis.Cost)
-	addRow("Reply", tu.Reply.TotalTokens, tu.Reply.Cost)
-	addRow("Graph", tu.Graph.TotalTokens, tu.Graph.Cost)
+	addStage("acceptance", tu.Acceptance)
+	addStage("cross_pr", tu.CrossPR)
+	sumArray("simulation", tu.Simulation)
+	addStage("scoring", tu.Scoring)
+	addStage("synthesis", tu.Synthesis)
+	addStage("reply", tu.Reply)
 
 	if len(rows) == 0 {
 		return ""

@@ -27,6 +27,13 @@ export type StageTokens = {
   cost?: number;
   model?: string;
   provider?: string;
+  /** Set on entries inside the `review[]` array — the specialist that
+   *  produced this review pass (bug_hunter | security | architecture |
+   *  regression). Empty for skim single-pass reviews. */
+  specialist?: string;
+  /** Set on entries inside the `file_synthesis[]` and `simulation[]`
+   *  arrays — the file path or scenario descriptor the entry refers to. */
+  file?: string;
 };
 
 // MemoryIndexedKind is the closed set of values on the `kind` payload field of

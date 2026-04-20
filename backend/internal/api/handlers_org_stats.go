@@ -405,6 +405,88 @@ func (s *Server) statsReviewTimes(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// stageCostAgg is the per-stage row returned by statsCostPerStage.
+type stageCostAgg struct {
+	Stage       string  `json:"stage"`
+	TotalTokens int     `json:"total_tokens"`
+	TotalCost   float64 `json:"total_cost"`
+}
+
+// aggregateStageCosts decodes each raw token_usage JSONB row and returns a
+// per-stage summation. Pure function extracted from the handler so the
+// composite-key and missing-stage behavior can be unit-tested without a DB.
+// Returns (rows, unmarshalFailures) — callers decide how to log failures.
+func aggregateStageCosts(rawRows [][]byte) ([]stageCostAgg, int) {
+	agg := map[string]*stageCostAgg{}
+	addStage := func(name string, st pipeline.StageTokens) {
+		// Gate on tokens AND cost. A provider can return cost without usage
+		// counts (gpt-5.x reasoning path, see commit 1070dac); gating on
+		// tokens alone would hide real spend from the chart.
+		if st.TotalTokens == 0 && st.Cost == 0 {
+			return
+		}
+		a, ok := agg[name]
+		if !ok {
+			a = &stageCostAgg{Stage: name}
+			agg[name] = a
+		}
+		a.TotalTokens += st.TotalTokens
+		a.TotalCost += st.Cost
+	}
+
+	var unmarshalErrs int
+	for _, raw := range rawRows {
+		var usage pipeline.RunTokenUsage
+		if err := json.Unmarshal(raw, &usage); err != nil {
+			unmarshalErrs++
+			continue
+		}
+		// Scalar stages — every non-array field of RunTokenUsage. The
+		// TestStatsCostPerStageCoversAllStages reflection guard catches
+		// any future struct-field drift.
+		addStage("intent", usage.Intent)
+		addStage("triage", usage.Triage)
+		addStage("enrichment", usage.Enrichment)
+		addStage("conventions", usage.Conventions)
+		addStage("patterns", usage.Patterns)
+		addStage("lead_agent", usage.LeadAgent)
+		addStage("graph", usage.Graph)
+		addStage("acceptance", usage.Acceptance)
+		addStage("cross_pr", usage.CrossPR)
+		addStage("scoring", usage.Scoring)
+		addStage("synthesis", usage.Synthesis)
+		addStage("reply", usage.Reply)
+		// review[] — split by specialist into composite keys like
+		// "review.bug_hunter". Bounded at 4-5 values, high signal. An entry
+		// with empty Specialist (skim single-pass review) falls into the
+		// plain "review" bucket.
+		for _, st := range usage.Review {
+			key := "review"
+			if st.Specialist != "" {
+				key = "review." + st.Specialist
+			}
+			addStage(key, st)
+		}
+		// file_synthesis[] and simulation[] — intentionally lumped at org
+		// scope. Per-file/per-scenario rows are unbounded (hundreds in a
+		// busy month) and the signal isn't actionable at aggregate scale.
+		// The per-review detail page (web/src/app/(dashboard)/reviews/[id]/page.tsx
+		// TokenPill) expands these fully.
+		for _, st := range usage.FileSynthesis {
+			addStage("file_synthesis", st)
+		}
+		for _, st := range usage.Simulation {
+			addStage("simulation", st)
+		}
+	}
+
+	out := make([]stageCostAgg, 0, len(agg))
+	for _, a := range agg {
+		out = append(out, *a)
+	}
+	return out, unmarshalErrs
+}
+
 func (s *Server) statsCostPerStage(w http.ResponseWriter, r *http.Request) {
 	q := db.New(s.store.Pool)
 	rawRows, err := q.StatsModelsRaw(r.Context(), db.StatsModelsRawParams{
@@ -417,48 +499,12 @@ func (s *Server) statsCostPerStage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	type stageAgg struct {
-		Stage       string  `json:"stage"`
-		TotalTokens int     `json:"total_tokens"`
-		TotalCost   float64 `json:"total_cost"`
-	}
-	agg := map[string]*stageAgg{}
-	addStage := func(name string, st pipeline.StageTokens) {
-		if st.TotalTokens == 0 {
-			return
-		}
-		a, ok := agg[name]
-		if !ok {
-			a = &stageAgg{Stage: name}
-			agg[name] = a
-		}
-		a.TotalTokens += st.TotalTokens
-		a.TotalCost += st.Cost
-	}
-
-	for _, raw := range rawRows {
-		var usage pipeline.RunTokenUsage
-		if err := json.Unmarshal(raw, &usage); err != nil {
-			continue
-		}
-		addStage("triage", usage.Triage)
-		addStage("scoring", usage.Scoring)
-		addStage("synthesis", usage.Synthesis)
-		addStage("enrichment", usage.Enrichment)
-		addStage("conventions", usage.Conventions)
-		addStage("patterns", usage.Patterns)
-		addStage("graph", usage.Graph)
-		for _, st := range usage.Review {
-			addStage("review", st)
-		}
-		for _, st := range usage.FileSynthesis {
-			addStage("file_synthesis", st)
-		}
-	}
-
-	out := make([]stageAgg, 0, len(agg))
-	for _, a := range agg {
-		out = append(out, *a)
+	out, unmarshalErrs := aggregateStageCosts(rawRows)
+	if unmarshalErrs > 0 {
+		// Billing-sensitive silent drop. Log so operators can spot schema
+		// drift or DB corruption before it hides meaningful spend.
+		s.logger.Warn("stats cost per stage: token_usage unmarshal failures",
+			"failures", unmarshalErrs, "rows_total", len(rawRows))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
