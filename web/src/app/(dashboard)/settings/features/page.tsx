@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { Loader2, Save, Sliders } from "lucide-react";
 import { useFeatureFlags, useSaveFeatureFlags, type FeatureFlags } from "@/lib/queries/features";
+import { track } from "@/lib/analytics";
 
 const defaultFlags: FeatureFlags = {
   issue_acceptance: true,
@@ -58,7 +59,13 @@ export default function FeaturesPage() {
               description="Verify PRs against linked issue acceptance criteria. Argus uses GitHub's closingIssuesReferences to find linked issues (works with both Closes #N in the PR body and the Development UI panel), extracts criteria from the issue body, and judges the diff per-criterion."
               cost="~1 extra LLM call per linked issue"
               enabled={draft.issue_acceptance}
-              onChange={v => update({ issue_acceptance: v })}
+              onChange={v => {
+                track("settings.toggle_changed", {
+                  setting_key: "issue_acceptance",
+                  new_value: v,
+                });
+                update({ issue_acceptance: v });
+              }}
             />
 
             <FeatureToggle
@@ -66,7 +73,13 @@ export default function FeaturesPage() {
               description="Runs asynchronously after review completion. Probes 9 combination-failure categories (schema race, serialization drift, deploy ordering, security posture, enum exhaustiveness, and more) against each linked PR's diff + prior findings. Splits into: (a) cross-PR risk judge, (b) joint issue coverage when 2+ linked PRs share an issue. Sibling completion triggers a debounced refresh so late-arriving PRs update earlier ones. Inaccessible repos are noted as 'partial coverage' — severity unaffected."
               cost="1–5 LLM calls per review depending on linked-PR + shared-issue count. Bounded by per-install rate limit (30/hour) and per-PR refresh cap (2 per 10 min)."
               enabled={draft.cross_pr_checks}
-              onChange={v => update({ cross_pr_checks: v })}
+              onChange={v => {
+                track("settings.toggle_changed", {
+                  setting_key: "cross_pr_checks",
+                  new_value: v,
+                });
+                update({ cross_pr_checks: v });
+              }}
             />
 
             <div className="border border-iron bg-charcoal/60 p-4">

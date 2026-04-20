@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/BeLazy167/argus/backend/internal/obs"
 )
 
 type contextKey string
@@ -261,6 +263,12 @@ func (s *Server) jwtAuth(next http.Handler) http.Handler {
 		}
 		if claims.OrgRole != "" {
 			ctx = context.WithValue(ctx, orgRoleKey, claims.OrgRole)
+		}
+		// Attribute PostHog events on this request to the Clerk user so the
+		// Handler's resolveDistinctID falls through to ClerkUser(ctx) instead
+		// of the "unattributed" bucket.
+		if claims.Sub != "" {
+			ctx = obs.SetClerkUser(ctx, claims.Sub)
 		}
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})

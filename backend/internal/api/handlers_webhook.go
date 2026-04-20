@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"runtime/debug"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	ghpkg "github.com/BeLazy167/argus/backend/internal/github"
+	"github.com/BeLazy167/argus/backend/internal/obs"
 	"github.com/BeLazy167/argus/backend/internal/pipeline"
 )
 
@@ -27,6 +29,8 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	deliveryID := r.Header.Get("X-GitHub-Delivery")
+
 	switch event.Type {
 	case "pull_request":
 		prEvent, err := ghpkg.ToPREvent(event)
@@ -35,6 +39,18 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
+		// webhook.received: one event per inbound PR webhook. Fired before any
+		// other logging so the trace_id ↔ delivery_id mapping is the first
+		// breadcrumb in the trace. Attribution lands via obs.TraceID(ctx)
+		// (set by traceIDMiddleware upstream).
+		s.logger.InfoContext(r.Context(), "webhook received",
+			slog.String("event", "webhook.received"),
+			slog.String("action", event.Action),
+			slog.String("repo", prEvent.RepoFullName),
+			slog.Int("pr_number", prEvent.PRNumber),
+			slog.String("delivery_id", deliveryID),
+			slog.String("trace_id", obs.TraceID(r.Context())),
+		)
 		// pull_request.edited: the author tweaked the PR body (or title/base).
 		// We don't want to re-review on body edits, but we DO want to refresh
 		// the cross-PR section when the set of linked-PR refs changes — a
@@ -79,7 +95,10 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "server busy"})
 			return
 		}
-		ctx, cancel := context.WithCancel(context.Background())
+		// Async goroutine detaches from the request ctx (which ends on response
+		// flush), but we preserve trace_id so the pipeline can tag every stage
+		// event with the same id the FE/webhook-ingress saw.
+		ctx, cancel := context.WithCancel(obs.SetTraceID(context.Background(), obs.TraceID(r.Context())))
 		s.storeCancel(prEvent.RepoFullName, prEvent.PRNumber, cancel)
 		go func() {
 			defer s.releaseSem()
@@ -99,9 +118,20 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		// PR events can't spawn unbounded sweepers.
 		if s.reactionAnalyzer != nil {
 			if s.acquireSem() {
+				traceID := obs.TraceID(r.Context())
 				go func(installationID int64, fullName string, pr int) {
 					defer s.releaseSem()
-					sweepCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+					// Propagate installation_id onto the detached ctx so slog
+					// records fired before the analyzer resolves the DB inst
+					// still carry attribution. Downstream resolve overwrites
+					// this with the DB id (inner-ctx wins).
+					sweepCtx, cancel := context.WithTimeout(
+						obs.SetInstallationID(
+							obs.SetTraceID(context.Background(), traceID),
+							installationID,
+						),
+						60*time.Second,
+					)
 					defer cancel()
 					if err := s.reactionAnalyzer.SweepPRReactions(sweepCtx, installationID, fullName, pr); err != nil {
 						s.logger.Warn("reaction sweep failed", "error", err, "pr", pr)
@@ -123,12 +153,19 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			if strings.HasSuffix(commentEvent.CommentAuthor, "[bot]") {
 				break
 			}
-			// Reply analysis (existing)
+			// Reply analysis (existing). Hoist trace_id before the goroutine
+			// so the detached bg context carries the same id the webhook saw.
+			traceID := obs.TraceID(r.Context())
 			if commentEvent.InReplyToID > 0 && s.replyAnalyzer != nil {
 				if s.acquireSem() {
+					installationID := commentEvent.InstallationID
 					go func() {
 						defer s.releaseSem()
-						if err := s.replyAnalyzer.Analyze(context.Background(), *commentEvent); err != nil {
+						ctx := obs.SetInstallationID(
+							obs.SetTraceID(context.Background(), traceID),
+							installationID,
+						)
+						if err := s.replyAnalyzer.Analyze(ctx, *commentEvent); err != nil {
 							s.logger.Error("reply analysis failed", "error", err, "comment_id", commentEvent.CommentID)
 						}
 					}()
@@ -141,9 +178,14 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 				parentEvent := *commentEvent
 				parentEvent.CommentID = commentEvent.InReplyToID
 				if s.acquireSem() {
+					installationID := parentEvent.InstallationID
 					go func() {
 						defer s.releaseSem()
-						if err := s.reactionAnalyzer.HandleCommentReactions(context.Background(), parentEvent); err != nil {
+						ctx := obs.SetInstallationID(
+							obs.SetTraceID(context.Background(), traceID),
+							installationID,
+						)
+						if err := s.reactionAnalyzer.HandleCommentReactions(ctx, parentEvent); err != nil {
 							s.logger.Error("reaction analysis failed", "error", err, "comment_id", parentEvent.CommentID)
 						}
 					}()
@@ -168,9 +210,15 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 				s.logger.Warn("webhook semaphore full for command dispatch")
 				break
 			}
+			traceID := obs.TraceID(r.Context())
+			installationID := issueEvent.InstallationID
 			go func() {
 				defer s.releaseSem()
-				s.dispatchCommand(context.Background(), *issueEvent)
+				ctx := obs.SetInstallationID(
+					obs.SetTraceID(context.Background(), traceID),
+					installationID,
+				)
+				s.dispatchCommand(ctx, *issueEvent)
 			}()
 		case "edited":
 			// Detect "Trigger Argus review" checkbox toggles on Argus-authored
@@ -201,9 +249,15 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 				s.logger.Warn("webhook semaphore full for checkbox trigger")
 				break
 			}
+			traceID := obs.TraceID(r.Context())
+			installationID := issueEvent.InstallationID
 			go func() {
 				defer s.releaseSem()
-				s.handleCheckboxTrigger(context.Background(), *issueEvent)
+				ctx := obs.SetInstallationID(
+					obs.SetTraceID(context.Background(), traceID),
+					installationID,
+				)
+				s.handleCheckboxTrigger(ctx, *issueEvent)
 			}()
 		}
 
@@ -448,6 +502,8 @@ func (s *Server) handlePREdited(ctx context.Context, prEvent *ghpkg.PREvent) {
 	// section reflects the new sibling set; the bus-driven event path
 	// doesn't fire here because we're reacting to an edit, not a review
 	// completion.
+	traceID := obs.TraceID(ctx)
+	installationID := prEvent.InstallationID
 	go func(reviewID uuid.UUID) {
 		defer func() {
 			if r := recover(); r != nil {
@@ -455,11 +511,18 @@ func (s *Server) handlePREdited(ctx context.Context, prEvent *ghpkg.PREvent) {
 					"review_id", reviewID,
 					"recover", r,
 					"stack", string(debug.Stack()))
+				pipeline.EmitPipelinePanicEvent(context.Background(), s.logger, "webhook_handler", r, traceID)
 			}
 		}()
 		// Refresh both stages — findings via the debounced OnReviewCompleted,
 		// and joint acceptance via the explicit stage runner. The bus-driven
 		// dispatch doesn't fire here (this is an edit, not a completion).
-		s.orchestrator.RefreshCrossPR(context.Background(), reviewID)
+		s.orchestrator.RefreshCrossPR(
+			obs.SetInstallationID(
+				obs.SetTraceID(context.Background(), traceID),
+				installationID,
+			),
+			reviewID,
+		)
 	}(review.ID)
 }

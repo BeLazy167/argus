@@ -147,6 +147,7 @@ func (ts *TriageStage) llmTriage(ctx context.Context, run *PipelineRun) (map[str
 		Messages:    []llm.Message{{Role: "user", Content: prompt}},
 		MaxTokens:   cfg.MaxTokens,
 		Temperature: cfg.Temperature,
+		Stage:       "triage",
 	})
 	if err != nil {
 		return nil, fmt.Errorf("triage LLM: %w", err)

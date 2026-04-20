@@ -27,6 +27,7 @@ import {
 import { useReview, useRetryReview, useCancelReview } from "@/lib/queries/reviews";
 import { useRepos } from "@/lib/queries/repos";
 import { usePattern } from "@/lib/queries/patterns";
+import { track } from "@/lib/analytics";
 import { githubPrUrl } from "@/lib/github";
 import { ScoreBox } from "@/components/dashboard/score-badge";
 import { StatusBadge } from "@/components/dashboard/status-badge";
@@ -553,7 +554,9 @@ function CommentCard({
           )}
         </div>
       )}
-      <Markdown filePath={filePath}>{comment.body}</Markdown>
+      <div className="ph-mask">
+        <Markdown filePath={filePath}>{comment.body}</Markdown>
+      </div>
     </div>
   );
 }
@@ -752,6 +755,13 @@ export default function ReviewDetailPage() {
   const { data: repos } = useRepos();
   const retryReview = useRetryReview();
   const cancelReview = useCancelReview();
+  const handleRetry = useCallback(
+    (reviewId: string) => {
+      track("review.retry_clicked", { review_id: reviewId });
+      retryReview.mutate(reviewId);
+    },
+    [retryReview],
+  );
   const [showCancelModal, setShowCancelModal] = useState(false);
   const [activeSeverity, setActiveSeverity] = useState<string | null>(null);
   const [allExpanded, setAllExpanded] = useState(true);
@@ -966,7 +976,7 @@ export default function ReviewDetailPage() {
             {(review.status === "failed" || review.status === "cancelled") && (
               <button
                 type="button"
-                onClick={() => retryReview.mutate(review.id)}
+                onClick={() => handleRetry(review.id)}
                 disabled={retryReview.isPending}
                 className="inline-flex items-center gap-1.5 border border-amber/30 bg-amber/10 px-3 py-2 text-xs font-mono text-amber hover:bg-amber/20 transition-colors cursor-pointer"
               >
@@ -1056,7 +1066,7 @@ export default function ReviewDetailPage() {
             <div className="flex items-center gap-3">
               <button
                 type="button"
-                onClick={() => retryReview.mutate(review.id)}
+                onClick={() => handleRetry(review.id)}
                 disabled={retryReview.isPending}
                 className="inline-flex items-center gap-1.5 border border-red-400/30 px-3 py-1.5 text-xs font-mono text-red-400 hover:bg-red-400/10 transition-colors cursor-pointer"
               >
@@ -1091,17 +1101,17 @@ export default function ReviewDetailPage() {
             so users see something instead of blank space. */}
         {(() => {
           if (review.brief && review.brief.trim()) {
-            return <div className="mb-4"><Markdown>{review.brief}</Markdown></div>;
+            return <div className="mb-4 ph-mask"><Markdown>{review.brief}</Markdown></div>;
           }
           if (review.summary && review.summary.trim()) {
             const extracted = extractSynthesis(review.summary).trim();
             if (extracted) {
-              return <div className="mb-4"><Markdown>{extracted}</Markdown></div>;
+              return <div className="mb-4 ph-mask"><Markdown>{extracted}</Markdown></div>;
             }
             // Legacy review: brief column is NULL and the summary is pure file-dump.
             // Fall back to rendering the raw summary so users see the per-file findings
             // instead of an empty card.
-            return <div className="mb-4"><Markdown>{review.summary}</Markdown></div>;
+            return <div className="mb-4 ph-mask"><Markdown>{review.summary}</Markdown></div>;
           }
           return <p className="text-sm text-foreground/50 mb-4">No summary generated.</p>;
         })()}

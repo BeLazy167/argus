@@ -101,6 +101,10 @@ type PipelineRun struct {
 	PREvent             github.PREvent
 	DBInstallationID    int64 // DB serial ID (for provider_keys, model_configs lookups)
 	DBRepoID            int64 // DB serial ID (for model_configs, reviews lookups)
+	// TraceID carries the X-Argus-Trace-Id header from the initiating HTTP request. Empty
+	// when the event entered outside the middleware (e.g. sweeper recovery). Persisted via
+	// reviews.trace_id so async stages can continue the same trace from a fresh ctx.
+	TraceID string
 	Diff                *diff.PatchSet
 	RawDiff             string
 	TriageResults       []TriageResult

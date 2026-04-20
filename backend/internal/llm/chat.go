@@ -4,12 +4,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/BeLazy167/argus/backend/internal/obs"
 )
 
 // AuthStyle controls how the API key is sent in HTTP requests.
@@ -145,13 +149,59 @@ func NewAWSBedrockProvider(apiKey, baseURL string) *ChatProvider {
 
 func (p *ChatProvider) Name() string { return p.name }
 
+// Complete wraps the underlying HTTP call with structured telemetry. Every
+// invocation emits exactly one slog record — `llm.call.completed` on success
+// (Info), `llm.call.failed` on error (Error) — both carrying stage, model,
+// provider, and a numeric status_code so PostHog can slice cost/latency by
+// stage without crossing the log-stream boundary. Forwarding is driven by
+// the `event=` attr, so adding new record attrs does not require new
+// handler logic; it does require the attr key to appear in obs.AllowedKeys.
 func (p *ChatProvider) Complete(ctx context.Context, req CompletionRequest) (CompletionResponse, error) {
+	start := time.Now()
+	resp, statusCode, err := p.complete(ctx, req)
+	durationMs := time.Since(start).Milliseconds()
+
+	if err != nil {
+		slog.ErrorContext(ctx, "llm call failed",
+			slog.String("event", "llm.call.failed"),
+			slog.String("provider", p.name),
+			slog.String("model", req.Model),
+			slog.String("stage", req.Stage),
+			slog.String("error_class", classifyLLMError(err)),
+			slog.Int("status_code", statusCode),
+			slog.Int64("duration_ms", durationMs),
+			slog.String("trace_id", obs.TraceID(ctx)),
+		)
+		return resp, err
+	}
+
+	slog.InfoContext(ctx, "llm call completed",
+		slog.String("event", "llm.call.completed"),
+		slog.String("provider", p.name),
+		slog.String("model", req.Model),
+		slog.String("stage", req.Stage),
+		slog.Int("prompt_tokens", resp.TokensUsed.PromptTokens),
+		slog.Int("completion_tokens", resp.TokensUsed.CompletionTokens),
+		slog.Float64("cost_usd", resp.Cost),
+		slog.Int64("duration_ms", durationMs),
+		slog.String("trace_id", obs.TraceID(ctx)),
+	)
+	return resp, nil
+}
+
+// complete is the untyped inner implementation of Complete. Split out solely
+// so the public method can emit telemetry without every return path needing
+// duplicated defer/log code. statusCode is 0 for non-HTTP errors (marshal
+// failures, transport errors before a response was received) and the
+// upstream status code otherwise — feeds directly into the `status_code`
+// telemetry attr.
+func (p *ChatProvider) complete(ctx context.Context, req CompletionRequest) (CompletionResponse, int, error) {
 	// Reject unrecognized ReasoningEffort values before the HTTP round-trip.
 	// Azure rejects the same garbage with a 400, but mid-pipeline that surfaces
 	// as a specialist failure with an opaque provider error — fail fast here
 	// so callers get a typed error at the call site instead.
 	if !req.ReasoningEffort.Valid() {
-		return CompletionResponse{}, fmt.Errorf("invalid reasoning_effort %q: must be one of minimal|low|medium|high|xhigh (or empty for provider default)", req.ReasoningEffort)
+		return CompletionResponse{}, 0, fmt.Errorf("invalid reasoning_effort %q: must be one of minimal|low|medium|high|xhigh (or empty for provider default)", req.ReasoningEffort)
 	}
 	msgs := make([]chatMessage, 0, len(req.Messages)+1)
 	if req.System != "" {
@@ -194,7 +244,7 @@ func (p *ChatProvider) Complete(ctx context.Context, req CompletionRequest) (Com
 
 	jsonBody, err := json.Marshal(body)
 	if err != nil {
-		return CompletionResponse{}, fmt.Errorf("marshaling request: %w", err)
+		return CompletionResponse{}, 0, fmt.Errorf("marshaling request: %w", err)
 	}
 
 	path := "/chat/completions"
@@ -204,7 +254,7 @@ func (p *ChatProvider) Complete(ctx context.Context, req CompletionRequest) (Com
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.baseURL+path, bytes.NewReader(jsonBody))
 	if err != nil {
-		return CompletionResponse{}, fmt.Errorf("creating request: %w", err)
+		return CompletionResponse{}, 0, fmt.Errorf("creating request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	switch p.authStyle {
@@ -222,31 +272,32 @@ func (p *ChatProvider) Complete(ctx context.Context, req CompletionRequest) (Com
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
-		return CompletionResponse{}, fmt.Errorf("sending request: %w", err)
+		return CompletionResponse{}, 0, fmt.Errorf("sending request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return CompletionResponse{}, fmt.Errorf("reading response: %w", err)
+		return CompletionResponse{}, resp.StatusCode, fmt.Errorf("reading response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return CompletionResponse{}, fmt.Errorf("LLM API error (status %d): %s", resp.StatusCode, string(respBody))
+		return CompletionResponse{}, resp.StatusCode, fmt.Errorf("LLM API error (status %d): %s", resp.StatusCode, string(respBody))
 	}
 
 	// Azure Responses API has a different response structure
 	if p.useResponsesAPI {
-		return p.parseResponsesAPI(respBody, req.Model)
+		cr, err := p.parseResponsesAPI(respBody, req.Model)
+		return cr, resp.StatusCode, err
 	}
 
 	var result chatResponse
 	if err := json.Unmarshal(respBody, &result); err != nil {
-		return CompletionResponse{}, fmt.Errorf("unmarshaling response: %w", err)
+		return CompletionResponse{}, resp.StatusCode, fmt.Errorf("unmarshaling response: %w", err)
 	}
 
 	if len(result.Choices) == 0 {
-		return CompletionResponse{}, fmt.Errorf("no choices in response")
+		return CompletionResponse{}, resp.StatusCode, fmt.Errorf("no choices in response")
 	}
 
 	usage := TokenUsage{
@@ -264,7 +315,38 @@ func (p *ChatProvider) Complete(ctx context.Context, req CompletionRequest) (Com
 		Cost:         cost,
 		ToolCalls:    result.Choices[0].Message.ToolCalls,
 		FinishReason: result.Choices[0].FinishReason,
-	}, nil
+	}, resp.StatusCode, nil
+}
+
+// classifyLLMError buckets errors into a short vocabulary consumable by
+// PostHog funnels. Bucket assignment is status-code first (HTTP 429 / 401 /
+// 4xx / 5xx) with context-cancellation fallbacks at the top. Keeping the
+// vocabulary small is deliberate — a PostHog breakdown splits by every
+// unique value, so `server_error` aggregates far better than a raw `502`.
+// Callers supply the statusCode from the HTTP round-trip separately when
+// they want the raw number.
+func classifyLLMError(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	// The chatProvider wraps every non-2xx response as "LLM API error (status N)".
+	// Parse the status out of the error message so we can bucket without a
+	// typed error shape — refactoring to one would churn every call site.
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "status 429"):
+		return "rate_limit"
+	case strings.Contains(msg, "status 401") || strings.Contains(msg, "status 403"):
+		return "unauthorized"
+	case strings.Contains(msg, "status 400") || strings.Contains(msg, "status 404") || strings.Contains(msg, "status 422"):
+		return "bad_request"
+	case strings.Contains(msg, "status 5"):
+		return "server_error"
+	}
+	return "other"
 }
 
 type chatMessage struct {

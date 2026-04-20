@@ -366,6 +366,10 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p revie
 	systemPrompt += p.promptExtra
 
 	label := string(p.specialist) // empty for normal pass
+	stageName := "review"
+	if label != "" {
+		stageName = "review." + label
+	}
 	for i := 0; i < rs.maxToolIter; i++ {
 		resp, err := provider.Complete(ctx, llm.CompletionRequest{
 			Model:       cfg.Model,
@@ -381,6 +385,7 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p revie
 			// artificialanalysis.ai/models/gpt-5-4 for the latency curve.
 			// No-op on non-gpt-5.x models (field ignored).
 			ReasoningEffort: llm.ReasoningLow,
+			Stage:           stageName,
 		})
 		if err != nil {
 			return review, tokens, fmt.Errorf("LLM completion %s: %w", label, err)

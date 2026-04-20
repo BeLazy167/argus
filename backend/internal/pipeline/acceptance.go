@@ -206,6 +206,7 @@ func judgeIssue(
 		MaxTokens:   acceptanceMaxTokens,
 		Temperature: 0.1,
 		JSONMode:    true,
+		Stage:       "acceptance",
 	})
 	if err != nil {
 		o.logger.Warn("[validate] acceptance: LLM call failed",

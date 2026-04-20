@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -26,6 +27,7 @@ import (
 
 	ghpkg "github.com/BeLazy167/argus/backend/internal/github"
 	"github.com/BeLazy167/argus/backend/internal/llm"
+	"github.com/BeLazy167/argus/backend/internal/obs"
 	"github.com/BeLazy167/argus/backend/internal/store"
 	"github.com/BeLazy167/argus/backend/internal/store/db"
 	"github.com/BeLazy167/argus/backend/internal/util"
@@ -467,6 +469,7 @@ func (o *Orchestrator) startCrossPRSweeper(ctx context.Context) {
 							o.logger.Error("[crosspr-sweeper] panic — ticker continues",
 								"recover", r,
 								"stack", string(debug.Stack()))
+							emitPipelinePanicEvent(ctx, o.logger, "crosspr_sweeper", r, obs.TraceID(ctx))
 						}
 					}()
 					now := time.Now()
@@ -535,6 +538,7 @@ func (o *Orchestrator) OnReviewCompleted(ctx context.Context, reviewID uuid.UUID
 					"review_id", reviewID,
 					"recover", r,
 					"stack", string(debug.Stack()))
+				emitPipelinePanicEvent(ctx, o.logger, "sibling_fanout", r, obs.TraceID(ctx))
 			}
 		}()
 		o.enqueueSiblingRefreshes(context.WithoutCancel(ctx), reviewID)
@@ -559,6 +563,7 @@ func (o *Orchestrator) RefreshCrossPR(ctx context.Context, reviewID uuid.UUID) {
 					"review_id", reviewID,
 					"recover", r,
 					"stack", string(debug.Stack()))
+				emitPipelinePanicEvent(ctx, o.logger, "refresh_joint_accept", r, obs.TraceID(ctx))
 			}
 		}()
 		o.runCrossPRAcceptanceStage(context.WithoutCancel(ctx), reviewID)
@@ -628,6 +633,7 @@ func (o *Orchestrator) enqueueSiblingRefreshes(ctx context.Context, reviewID uui
 						"sibling_id", sibID,
 						"recover", r,
 						"stack", string(debug.Stack()))
+					emitPipelinePanicEvent(ctx, o.logger, "sibling_refresh", r, obs.TraceID(ctx))
 				}
 			}()
 			// Re-enter OnReviewCompleted so the sibling's debounce,
@@ -674,8 +680,12 @@ func (o *Orchestrator) runCrossPRStage(ctx context.Context, reviewID uuid.UUID) 
 		// surface here, just log and drop. Per-install limit has its own
 		// footer path below.
 		o.logger.Info("[crosspr-stage] refresh cap hit, skipping", "review_id", reviewID)
+		o.emitCrossPRSkipped(ctx, reviewID, "rate_limited_per_review", "")
+		o.emitRateLimitHit(ctx, "crosspr_per_pr", reviewID.String(), 0)
 		return
 	}
+
+	crossPRStageStart := time.Now()
 
 	// 1. Load the review + its latest pipeline run.
 	review, err := st.GetReview(ctx, reviewID)
@@ -713,6 +723,9 @@ func (o *Orchestrator) runCrossPRStage(ctx context.Context, reviewID uuid.UUID) 
 			"review_id", reviewID,
 			"reset_at", resetAt)
 		o.surfaceCrossPRRateLimitFooter(ctx, reviewID, review, run, resetAt)
+		o.emitCrossPRSkipped(ctx, reviewID, "rate_limited", run.TraceID)
+		retryAfterMs := max(int64(time.Until(resetAt).Milliseconds()), 0)
+		o.emitRateLimitHit(ctx, "crosspr_global", reviewID.String(), retryAfterMs)
 		return
 	}
 
@@ -721,6 +734,7 @@ func (o *Orchestrator) runCrossPRStage(ctx context.Context, reviewID uuid.UUID) 
 	flags := st.LoadFeatureFlags(ctx, run.DBInstallationID)
 	if !flags.CrossPRChecks {
 		o.logger.Info("[crosspr-stage] feature flag off, skipping", "review_id", reviewID)
+		o.emitCrossPRSkipped(ctx, reviewID, "feature_flag_off", run.TraceID)
 		return
 	}
 	run.FeatureFlags = flags
@@ -734,6 +748,7 @@ func (o *Orchestrator) runCrossPRStage(ctx context.Context, reviewID uuid.UUID) 
 	run.LinkedPRs = ExtractLinkedPRs(run.PREvent.PRBody, run.PREvent.RepoFullName, run.PREvent.PRNumber, maxLinks)
 	if len(run.LinkedPRs) == 0 {
 		o.logger.Info("[crosspr-stage] no linked PRs, nothing to do", "review_id", reviewID)
+		o.emitCrossPRSkipped(ctx, reviewID, "no_linked_prs", run.TraceID)
 		return
 	}
 
@@ -786,6 +801,7 @@ func (o *Orchestrator) runCrossPRStage(ctx context.Context, reviewID uuid.UUID) 
 	}
 	if review.CrossPRHash != nil && *review.CrossPRHash == hash {
 		o.logger.Info("[crosspr-stage] unchanged bundle, skipping LLM", "review_id", reviewID)
+		o.emitCrossPRSkipped(ctx, reviewID, "idempotent_hash", run.TraceID)
 		return
 	}
 
@@ -854,6 +870,9 @@ func (o *Orchestrator) runCrossPRStage(ctx context.Context, reviewID uuid.UUID) 
 			"review_id", reviewID,
 			"reset_at", resetAt)
 		o.surfaceCrossPRRateLimitFooter(ctx, reviewID, review, run, resetAt)
+		o.emitCrossPRSkipped(ctx, reviewID, "rate_limited", run.TraceID)
+		retryAfterMs := max(int64(time.Until(resetAt).Milliseconds()), 0)
+		o.emitRateLimitHit(ctx, "crosspr_global", reviewID.String(), retryAfterMs)
 		return
 	}
 
@@ -864,6 +883,7 @@ func (o *Orchestrator) runCrossPRStage(ctx context.Context, reviewID uuid.UUID) 
 		MaxTokens:   crossPRMaxTokens,
 		Temperature: 0.1,
 		JSONMode:    true,
+		Stage:       "crosspr",
 	})
 	if err != nil {
 		// Include error_type / model / provider so a single log line is
@@ -1024,6 +1044,19 @@ func (o *Orchestrator) runCrossPRStage(ctx context.Context, reviewID uuid.UUID) 
 	// here means the sticky is fresh but the hash lags — the next refresh
 	// recomputes, finds the bundle unchanged, and skips. Safe.
 	o.persistCrossPRHash(ctx, reviewID, hash)
+
+	// cross_pr.stage.completed fires only on the happy path — every early
+	// return above emits a `cross_pr.stage.skipped` with a reason so the
+	// funnel lines up (every invocation ends in either .completed or
+	// .skipped; no silent "dropped" state).
+	o.logger.InfoContext(ctx, "cross-PR stage completed",
+		slog.String("event", "cross_pr.stage.completed"),
+		slog.String("primary_review_id", reviewID.String()),
+		slog.Int("linked_count", accessibleCount),
+		slog.Int("risks_found", len(risks)),
+		slog.Int64("duration_ms", time.Since(crossPRStageStart).Milliseconds()),
+		slog.String("trace_id", run.TraceID),
+	)
 }
 
 // upsertCrossPRSticky edits the "argus:crosspr" section of the primary
@@ -1608,6 +1641,17 @@ func (o *Orchestrator) runCrossPRAcceptanceStage(ctx context.Context, reviewID u
 		"shared_issues", len(shared),
 		"judged", len(results))
 
+	// cross_pr.acceptance.completed is the joint (multi-PR) variant — the
+	// per-PR acceptance event is emitted under stage.completed for
+	// StateValidating. issues_evaluated counts the LLM-judged rows, not the
+	// full shared-issue candidate set (capped via jointMaxSharedIssues).
+	o.logger.InfoContext(ctx, "cross-PR joint acceptance completed",
+		slog.String("event", "cross_pr.acceptance.completed"),
+		slog.String("primary_review_id", reviewID.String()),
+		slog.Int("issues_evaluated", len(results)),
+		slog.String("trace_id", run.TraceID),
+	)
+
 	if pub := o.crossPRPublisherDep(); pub != nil {
 		pub.Publish(reviewID, EventAcceptanceChecked, map[string]any{
 			"joint":  true,
@@ -1694,6 +1738,7 @@ func (o *Orchestrator) judgeSharedIssue(
 		MaxTokens:   acceptanceMaxTokens,
 		Temperature: 0.1,
 		JSONMode:    true,
+		Stage:       "crosspr_acceptance",
 	})
 	if err != nil {
 		o.logger.Warn("[joint-accept] LLM call failed",
@@ -2093,3 +2138,39 @@ func (o *Orchestrator) persistAsyncStageTokens(
 			"provider", entry.Provider)
 	}
 }
+
+// emitCrossPRSkipped fires a structured `cross_pr.stage.skipped` event at
+// every early-return path of runCrossPRStage. Keeping the emission centralised
+// means `reason` values stay disciplined (see PostHog funnel: any new reason
+// appears as a new bucket, so ad-hoc strings at the call site would fragment
+// the dashboard). The trace_id arg falls back to obs.TraceID(ctx) when empty —
+// async recovery paths that never saw the original trace still carry the
+// pipeline-run-local trace.
+func (o *Orchestrator) emitCrossPRSkipped(ctx context.Context, reviewID uuid.UUID, reason, traceID string) {
+	if traceID == "" {
+		traceID = obs.TraceID(ctx)
+	}
+	o.logger.InfoContext(ctx, "cross-PR stage skipped",
+		slog.String("event", "cross_pr.stage.skipped"),
+		slog.String("review_id", reviewID.String()),
+		slog.String("reason", reason),
+		slog.String("trace_id", traceID),
+	)
+}
+
+// emitRateLimitHit fires the `rate_limit.hit` event for any rate-limit trip
+// inside the pipeline. `kind` is a narrow vocabulary — "crosspr_per_pr",
+// "crosspr_global", "github_secondary" — keeping the PostHog breakdown
+// actionable. retryAfterMs=0 is legal (no precise window, e.g. per-review
+// caps); the retry_after_ms attr is still emitted so the breakdown can show
+// "0 = none" vs "5000 = 5s".
+func (o *Orchestrator) emitRateLimitHit(ctx context.Context, kind, scope string, retryAfterMs int64) {
+	o.logger.WarnContext(ctx, "rate limit hit",
+		slog.String("event", "rate_limit.hit"),
+		slog.String("kind", kind),
+		slog.String("scope", scope),
+		slog.Int64("retry_after_ms", retryAfterMs),
+		slog.String("trace_id", obs.TraceID(ctx)),
+	)
+}
+

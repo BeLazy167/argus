@@ -590,6 +590,7 @@ func (s *Server) handleTestCommand(ctx context.Context, evt ghpkg.IssueCommentEv
 		Messages:    []llm.Message{{Role: "user", Content: prompt}},
 		MaxTokens:   2000,
 		Temperature: 0.3,
+		Stage:       "test_gen",
 	})
 	if err != nil {
 		s.logger.Error("test generation failed", "error", err)

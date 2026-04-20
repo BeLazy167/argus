@@ -24,6 +24,7 @@ import (
 	"github.com/BeLazy167/argus/backend/internal/graph"
 	"github.com/BeLazy167/argus/backend/internal/llm"
 	"github.com/BeLazy167/argus/backend/internal/memory"
+	"github.com/BeLazy167/argus/backend/internal/obs"
 	"github.com/BeLazy167/argus/backend/internal/sast"
 	"github.com/BeLazy167/argus/backend/internal/store"
 	"github.com/BeLazy167/argus/backend/internal/store/db"
@@ -158,7 +159,6 @@ type Orchestrator struct {
 	simEngine    *SimulationEngine
 	registry     LLMRegistry
 	eventBus     *EventBus
-	tracker      EventTracker
 	logger       *slog.Logger
 	// crossPRHooks is the test-only injection point for the async cross-PR
 	// stage. nil in production — the stage falls back to the concrete
@@ -173,10 +173,9 @@ type LLMRegistry interface {
 	HasKeyForRepo(ctx context.Context, installationID int64, repoID *int64, providerName string) bool
 }
 
-func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, reviewStage *ReviewStage, triageStage *TriageStage, intentStage *IntentExtractionStage, scoringStage *ScoringStage, memRegistry *memory.Registry, registry LLMRegistry, eventBus *EventBus, logger *slog.Logger, tracker EventTracker) *Orchestrator {
+func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, reviewStage *ReviewStage, triageStage *TriageStage, intentStage *IntentExtractionStage, scoringStage *ScoringStage, memRegistry *memory.Registry, registry LLMRegistry, eventBus *EventBus, logger *slog.Logger) *Orchestrator {
 	sm := NewStateMachine(db, st, logger)
 	sm.eventBus = eventBus
-	sm.tracker = tracker
 
 	o := &Orchestrator{
 		db:           db,
@@ -190,11 +189,7 @@ func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, 
 		memRegistry:  memRegistry,
 		registry:     registry,
 		eventBus:     eventBus,
-		tracker:      tracker,
 		logger:       logger,
-	}
-	if o.tracker == nil {
-		o.tracker = noopTracker{}
 	}
 	o.simEngine = NewSimulationEngine(o.reviewStage.registry, st, ghClient, logger)
 
@@ -234,6 +229,7 @@ func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, 
 							"recover", r,
 							"review_id", p.ReviewID,
 							"stack", string(debug.Stack()))
+						emitPipelinePanicEvent(context.Background(), logger, "crosspr_dispatch", r, "")
 					}
 				}()
 				// Detach from request context at the call site — the bus
@@ -254,6 +250,7 @@ func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, 
 							"recover", r,
 							"review_id", p.ReviewID,
 							"stack", string(debug.Stack()))
+						emitPipelinePanicEvent(context.Background(), logger, "joint_accept_dispatch", r, "")
 					}
 				}()
 				o.runCrossPRAcceptanceStage(context.Background(), p.ReviewID)
@@ -267,12 +264,6 @@ func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, 
 	o.startCrossPRSweeper(context.Background())
 
 	return o
-}
-
-// SetTracker injects an EventTracker for pipeline observability.
-func (o *Orchestrator) SetTracker(t EventTracker) {
-	o.tracker = t
-	o.sm.tracker = t
 }
 
 // HandlePREvent processes a pull request webhook event.
@@ -297,6 +288,15 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 	inst, err := o.st.CreateInstallation(ctx, event.InstallationID, owner)
 	if err != nil {
 		return fmt.Errorf("upserting installation: %w", err)
+	}
+	// Attribute every slog event fired downstream to this installation + PR
+	// author so the PostHog handler's fallback chain resolves a real
+	// distinct_id instead of the droppedUnattributed bucket. Must run BEFORE
+	// any subsequent log call (including PipelineRun construction) in this
+	// handler's stack so the whole trace carries attribution.
+	ctx = obs.SetInstallationID(ctx, inst.ID)
+	if event.PRAuthor != "" {
+		ctx = obs.SetGithubLogin(ctx, event.PRAuthor)
 	}
 	dbRepo, err := o.st.UpsertRepo(ctx, inst.ID, event.RepoID, event.RepoFullName, event.BaseRef)
 	if err != nil {
@@ -351,9 +351,11 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 				}
 			}
 			reviewID := uuid.New()
+			// trace_id stays NULL here — no PipelineRun exists and the ctx-based
+			// trace lift lands in Wave 2 (middleware writes it, orchestrator reads).
 			if _, err := o.db.Exec(ctx, `
-				INSERT INTO reviews (id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, head_ref, status, trigger, error)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'failed', 'webhook', 'no_api_key')
+				INSERT INTO reviews (id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, head_ref, status, trigger, error, trace_id)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'failed', 'webhook', 'no_api_key', NULL)
 			`, reviewID, dbRepo.ID, event.PRNumber, event.PRTitle, event.PRAuthor, event.HeadSHA, event.BaseSHA, event.HeadRef); err != nil {
 				o.logger.Error("recording skipped review", "error", err, "repo", event.RepoFullName)
 			}
@@ -473,10 +475,14 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		defer o.eventBus.CloseTopic(reviewID)
 	}
 
+	// X-Argus-Trace-Id is lifted onto ctx by api.traceIDMiddleware (and the
+	// webhook handler's SetTraceID on the detached ctx). Empty on direct
+	// internal callers → SQL NULL via strPtrOrNil.
+	traceID := obs.TraceID(ctx)
 	_, err = o.db.Exec(ctx, `
-		INSERT INTO reviews (id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, head_ref, status, trigger, resolved_stale_count)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', 'webhook', 0)
-	`, reviewID, dbRepo.ID, event.PRNumber, event.PRTitle, event.PRAuthor, event.HeadSHA, event.BaseSHA, event.HeadRef)
+		INSERT INTO reviews (id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, head_ref, status, trigger, resolved_stale_count, trace_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', 'webhook', 0, $9)
+	`, reviewID, dbRepo.ID, event.PRNumber, event.PRTitle, event.PRAuthor, event.HeadSHA, event.BaseSHA, event.HeadRef, strPtrOrNil(traceID))
 	if err != nil {
 		return fmt.Errorf("creating review record: %w", err)
 	}
@@ -503,6 +509,7 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		PREvent:             event,
 		DBInstallationID:    inst.ID,
 		DBRepoID:            dbRepo.ID,
+		TraceID:             traceID,
 		Diff:                patchSet,
 		RawDiff:             rawDiff,
 		Persona:             loadPersona(mergedSettings),
@@ -597,6 +604,7 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		defer func() {
 			if r := recover(); r != nil {
 				o.logger.Error("[graph] incremental index panic", "recover", r, "pr", event.PRNumber)
+				emitPipelinePanicEvent(graphCtx, o.logger, "graph_incremental_index", r, obs.TraceID(graphCtx))
 			}
 		}()
 		changedFiles := diffFilePaths(patchSet)
@@ -782,14 +790,34 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 	}
 	o.postStartedComment(ctx, event, run, reviewModel)
 
-	o.tracker.TrackReviewStarted(inst.ID, event.RepoFullName, event.PRNumber, run.ReviewID.String(), isIncremental, run.DeepReview)
+	trigger := deriveTrigger(event.Action, isIncremental)
+	o.logger.InfoContext(ctx, "review started",
+		slog.String("event", "review.started"),
+		slog.String("review_id", run.ReviewID.String()),
+		slog.Int64("installation_id", inst.ID),
+		slog.String("repo", event.RepoFullName),
+		slog.Int("pr_number", event.PRNumber),
+		slog.Bool("deep_review", run.DeepReview),
+		slog.String("trigger", trigger),
+		slog.String("trace_id", run.TraceID),
+	)
 
 	startTime := time.Now()
 	err = o.sm.Run(ctx, run)
 	durationMs := time.Since(startTime).Milliseconds()
 
 	if err != nil {
-		o.tracker.TrackReviewFailed(inst.ID, event.RepoFullName, event.PRNumber, run.ReviewID.String(), string(run.State), err.Error())
+		o.logger.ErrorContext(ctx, "review failed",
+			slog.String("event", "review.failed"),
+			slog.String("review_id", run.ReviewID.String()),
+			slog.Int64("installation_id", inst.ID),
+			slog.String("repo", event.RepoFullName),
+			slog.Int("pr_number", event.PRNumber),
+			slog.String("stage", string(run.State)),
+			slog.String("error_class", classifyPipelineError(err)),
+			slog.Int64("duration_ms", durationMs),
+			slog.String("trace_id", run.TraceID),
+		)
 	} else {
 		score := 0
 		if run.Synthesis != nil && run.Synthesis.Score > 0 {
@@ -799,9 +827,53 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		for _, fr := range run.FileReviews {
 			commentCount += len(fr.Comments)
 		}
-		o.tracker.TrackReviewCompleted(inst.ID, event.RepoFullName, event.PRNumber, run.ReviewID.String(), score, commentCount, durationMs)
+		o.logger.InfoContext(ctx, "review completed",
+			slog.String("event", "review.completed"),
+			slog.String("review_id", run.ReviewID.String()),
+			slog.Int64("installation_id", inst.ID),
+			slog.String("repo", event.RepoFullName),
+			slog.Int("pr_number", event.PRNumber),
+			slog.Int("score", score),
+			slog.Int("comment_count", commentCount),
+			slog.Int64("duration_ms", durationMs),
+			slog.String("trace_id", run.TraceID),
+		)
 	}
 	return err
+}
+
+// deriveTrigger maps a webhook action + incremental flag onto a short label
+// used in the `trigger` slog attr. The mapping is the product's view, not
+// GitHub's: every automatic run from a push/open/reopen is "webhook"; explicit
+// manual runs ("manual" action from the trigger comment / slash command) are
+// "manual"; and a follow-up diff on the same PR is "incremental".
+func deriveTrigger(action string, isIncremental bool) string {
+	if isIncremental {
+		return "incremental"
+	}
+	if action == "manual" {
+		return "manual"
+	}
+	return "webhook"
+}
+
+// classifyPipelineError maps a pipeline error returned from StateMachine.Run
+// onto the same bucket vocabulary llm.classifyLLMError uses so PostHog
+// dashboards can aggregate review.failed and llm.call.failed by error_class.
+// Context-cancellation errors from user-initiated cancels surface as
+// "cancelled" — distinct from timeouts because the user intentionally stopped
+// the run rather than the pipeline blowing a budget.
+func classifyPipelineError(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, context.Canceled) {
+		return "cancelled"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	return "other"
 }
 
 // postTriggerComment renders the cost estimate + one-shot task-list checkbox
@@ -852,6 +924,7 @@ func (o *Orchestrator) handlePRClosed(ctx context.Context, event ghpkg.PREvent) 
 				defer func() {
 					if r := recover(); r != nil {
 						o.logger.Error("[graph] re-index on merge panic", "recover", r, "repo", event.RepoFullName)
+						emitPipelinePanicEvent(ctx, o.logger, "graph_reindex_merge", r, obs.TraceID(ctx))
 					}
 				}()
 				reindexCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -963,6 +1036,7 @@ func (o *Orchestrator) autoResolveOnSynchronize(
 				"recover", r,
 				"stack", string(debug.Stack()),
 				"pr", event.PRNumber)
+			emitPipelinePanicEvent(parent, o.logger, "auto_resolve", r, obs.TraceID(parent))
 		}
 	}()
 
@@ -1034,6 +1108,22 @@ func (o *Orchestrator) autoResolveOnSynchronize(
 		o.logger.Warn("auto-resolve: persist event",
 			"error", err, "pr", event.PRNumber)
 	}
+
+	// auto_resolve.evaluated fires on every sync where we actually touched
+	// GitHub — the `threads_checked` counter feeds PostHog funnels about
+	// stale-comment pressure, and the attempted/resolved split is the main
+	// signal for "is auto-resolve effective on real PRs". trace_id comes
+	// from the detached parent ctx: handleWebhook set it via SetTraceID
+	// before detaching, so the trace survives past the webhook response.
+	o.logger.InfoContext(parent, "auto-resolve evaluated",
+		slog.String("event", "auto_resolve.evaluated"),
+		slog.Int64("installation_id", dbInstallationID),
+		slog.String("repo", event.RepoFullName),
+		slog.Int("pr_number", event.PRNumber),
+		slog.Int("threads_checked", attempted),
+		slog.Int("threads_resolved", resolved),
+		slog.String("trace_id", obs.TraceID(parent)),
+	)
 }
 
 // autoResolveDecisionKind classifies the outcome of decideAutoResolveThread.
@@ -1168,6 +1258,17 @@ func (o *Orchestrator) autoResolveStaleComments(
 		if decision.joinKey != "" {
 			resolvedKeys = append(resolvedKeys, decision.joinKey)
 		}
+		// comment.thread_resolved fires per successful thread close — volume
+		// here can be high on a big push (tens per synchronize). We still
+		// emit at Info so PostHog's funnel sees individual resolutions, but
+		// the attrs deliberately exclude Path/body text (PII + size) — only
+		// thread_id survives.
+		o.logger.InfoContext(ctx, "comment thread resolved",
+			slog.String("event", "comment.thread_resolved"),
+			slog.Int("pr_number", event.PRNumber),
+			slog.String("thread_id", t.ID),
+			slog.String("trace_id", obs.TraceID(ctx)),
+		)
 	}
 
 	o.logger.Info("auto-resolve complete",
@@ -1206,6 +1307,7 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 				defer func() {
 					if r := recover(); r != nil {
 						o.logger.Error("enrichFindings goroutine panic", "recover", r, "file", filePath)
+						emitPipelinePanicEvent(ctx, o.logger, "enrich_findings", r, run.TraceID)
 					}
 				}()
 				defer wg.Done()
@@ -1553,6 +1655,7 @@ func (o *Orchestrator) verifyIntent(ctx context.Context, run *PipelineRun) *Inte
 		MaxTokens:   600,
 		Temperature: 0.2,
 		JSONMode:    true,
+		Stage:       "intent_verify",
 	})
 	if err != nil {
 		o.logger.Warn("intent verification: LLM call failed",
@@ -1683,6 +1786,7 @@ func (o *Orchestrator) generateConversationalBrief(ctx context.Context, run *Pip
 		// Brief needs a little thought to pick the right framing — "low"
 		// gives quality without the TTFT tail of "medium".
 		ReasoningEffort: llm.ReasoningLow,
+		Stage:           "synthesis_brief",
 	})
 	if err != nil {
 		o.logger.Warn("synthesis brief LLM call failed, using fallback", "error", err)
@@ -2326,6 +2430,7 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 			defer func() {
 				if r := recover(); r != nil {
 					o.logger.Error("pre-post panic", "recover", r, "op", "autoLearnPatterns", "pr", run.PREvent.PRNumber)
+					emitPipelinePanicEvent(prePostCtx, o.logger, "pre_post", r, run.TraceID)
 				}
 			}()
 			o.autoLearnPatterns(prePostCtx, run, owner, repo)
@@ -2334,6 +2439,7 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 			defer func() {
 				if r := recover(); r != nil {
 					o.logger.Error("pre-post panic", "recover", r, "op", "learnPositivePatterns", "pr", run.PREvent.PRNumber)
+					emitPipelinePanicEvent(prePostCtx, o.logger, "pre_post", r, run.TraceID)
 				}
 			}()
 			o.learnPositivePatterns(prePostCtx, run, owner, repo)
@@ -2344,6 +2450,7 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 			defer func() {
 				if r := recover(); r != nil {
 					o.logger.Error("pre-post panic", "recover", r, "op", "extractConventions", "pr", run.PREvent.PRNumber)
+					emitPipelinePanicEvent(prePostCtx, o.logger, "pre_post", r, run.TraceID)
 				}
 			}()
 			o.extractConventions(prePostCtx, run, owner, repo)
@@ -2354,6 +2461,7 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 			defer func() {
 				if r := recover(); r != nil {
 					o.logger.Error("pre-post panic", "recover", r, "op", "synthesizeFileMemories", "pr", run.PREvent.PRNumber)
+					emitPipelinePanicEvent(prePostCtx, o.logger, "pre_post", r, run.TraceID)
 				}
 			}()
 			o.synthesizeFileMemories(prePostCtx, run, owner, repo)
@@ -2363,6 +2471,7 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		defer func() {
 			if r := recover(); r != nil {
 				o.logger.Error("pre-post panic", "recover", r, "op", "indexPRSummary", "pr", run.PREvent.PRNumber)
+				emitPipelinePanicEvent(prePostCtx, o.logger, "pre_post", r, run.TraceID)
 			}
 		}()
 		o.indexPRSummary(prePostCtx, run, owner, repo)
@@ -2371,6 +2480,7 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		defer func() {
 			if r := recover(); r != nil {
 				o.logger.Error("pre-post panic", "recover", r, "op", "indexArchitectureSummary", "pr", run.PREvent.PRNumber)
+				emitPipelinePanicEvent(prePostCtx, o.logger, "pre_post", r, run.TraceID)
 			}
 		}()
 		o.indexArchitectureSummary(prePostCtx, run, owner, repo)
@@ -2386,6 +2496,20 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	if err != nil {
 		return fmt.Errorf("posting review: %w", err)
 	}
+
+	// comment.posted is fired after the atomic PostReview landed so failures
+	// above produce review.failed instead. comment_count reflects what the
+	// author will actually see on GitHub: inline comments posted via the
+	// review submission. Folded-into-summary comments don't count — they're
+	// rendered as part of a single "summary" comment, not per-thread.
+	o.logger.InfoContext(ctx, "comment posted",
+		slog.String("event", "comment.posted"),
+		slog.String("review_id", run.ReviewID.String()),
+		slog.String("repo", run.PREvent.RepoFullName),
+		slog.Int("pr_number", run.PREvent.PRNumber),
+		slog.Int("comment_count", len(inlineComments)),
+		slog.String("trace_id", run.TraceID),
+	)
 
 	// Minimize the "review started" comment now that the full review is posted
 	if run.StartedCommentNodeID != "" {
@@ -2465,6 +2589,7 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 			defer func() {
 				if r := recover(); r != nil {
 					o.logger.Error("post-review panic", "recover", r, "op", "extractArchitectureGraph", "pr", run.PREvent.PRNumber)
+					emitPipelinePanicEvent(postCtx, o.logger, "post_review", r, run.TraceID)
 				}
 			}()
 			o.extractArchitectureGraph(postCtx, run, owner, repo)
@@ -2475,6 +2600,7 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 			defer func() {
 				if r := recover(); r != nil {
 					o.logger.Error("enrichPRDescription panic", "recover", r, "pr", run.PREvent.PRNumber)
+					emitPipelinePanicEvent(postCtx, o.logger, "post_review", r, run.TraceID)
 				}
 			}()
 			o.enrichPRDescription(postCtx, run, owner, repo)
@@ -2604,6 +2730,7 @@ func (o *Orchestrator) enrichPRDescription(ctx context.Context, run *PipelineRun
 		MaxTokens:   1500,
 		Temperature: 0.3,
 		JSONMode:    true,
+		Stage:       "pr_enrichment",
 	})
 	if err != nil {
 		o.logger.Warn("enrichPRDescription: LLM call failed", "error", err)
@@ -3014,6 +3141,7 @@ The "pattern" value must be the actual pattern text, NOT the word "description".
 		MaxTokens:   500,
 		Temperature: 0.3,
 		JSONMode:    true,
+		Stage:       "pattern_learning",
 	})
 	if err != nil {
 		o.logger.Warn("auto-learn LLM call failed", "error", err)
@@ -3163,6 +3291,7 @@ Return [] if no clear conventions emerge. JSON array only.`, run.PREvent.RepoFul
 		Messages:    []llm.Message{{Role: "user", Content: prompt}},
 		MaxTokens:   400,
 		Temperature: 0.3,
+		Stage:       "conventions",
 	})
 	if err != nil {
 		o.logger.Warn("convention extraction LLM failed", "error", err)
@@ -3318,6 +3447,7 @@ Max 200 words. Be concrete.`
 			Messages:    []llm.Message{{Role: "user", Content: sb.String()}},
 			MaxTokens:   fileSynthesisMaxTokens,
 			Temperature: 0.3,
+			Stage:       "file_synthesis",
 		})
 		if err != nil {
 			o.logger.Warn("synthesis LLM failed", "error", err, "file", fc.path)
@@ -3489,6 +3619,7 @@ Rules:
 		},
 		MaxTokens:   600,
 		Temperature: 0.2,
+		Stage:       "arch_graph",
 	}
 
 	resp, err := provider.Complete(graphCtx, req)
@@ -4010,6 +4141,7 @@ func (o *Orchestrator) validateStage(ctx context.Context, run *PipelineRun) erro
 			defer func() {
 				if r := recover(); r != nil {
 					o.logger.Error("[validate] SAST goroutine panic", "recover", r, "pr", run.PREvent.PRNumber)
+					emitPipelinePanicEvent(ctx, o.logger, "validate_sast", r, run.TraceID)
 				}
 			}()
 			if len(changedPaths) > 50 {
@@ -4056,6 +4188,7 @@ func (o *Orchestrator) validateStage(ctx context.Context, run *PipelineRun) erro
 			defer func() {
 				if r := recover(); r != nil {
 					o.logger.Error("[validate] blast radius goroutine panic", "recover", r, "pr", run.PREvent.PRNumber)
+					emitPipelinePanicEvent(ctx, o.logger, "blast_radius", r, run.TraceID)
 				}
 			}()
 			defer wg.Done()
@@ -4099,6 +4232,7 @@ func (o *Orchestrator) validateStage(ctx context.Context, run *PipelineRun) erro
 			defer func() {
 				if r := recover(); r != nil {
 					o.logger.Error("[validate] simulation goroutine panic", "recover", r, "pr", run.PREvent.PRNumber)
+					emitPipelinePanicEvent(ctx, o.logger, "simulation", r, run.TraceID)
 				}
 			}()
 			if !run.CodeSimulation || o.simEngine == nil {
@@ -4138,6 +4272,7 @@ func (o *Orchestrator) validateStage(ctx context.Context, run *PipelineRun) erro
 		defer func() {
 			if r := recover(); r != nil {
 				o.logger.Error("[validate] issue acceptance goroutine panic", "recover", r, "pr", run.PREvent.PRNumber)
+				emitPipelinePanicEvent(ctx, o.logger, "issue_acceptance", r, run.TraceID)
 			}
 		}()
 		o.runIssueAcceptanceWorker(ctx, run)
@@ -4254,6 +4389,7 @@ func (o *Orchestrator) leadBrief(ctx context.Context, run *PipelineRun) (*LeadBr
 		Messages:    []llm.Message{{Role: "user", Content: prompt.String()}},
 		MaxTokens:   leadBriefMaxTokens,
 		Temperature: 0.2,
+		Stage:       "lead_brief",
 	})
 	if err != nil {
 		run.LeadAgentError = fmt.Sprintf("leadBrief LLM failed: %s", err)
@@ -4333,6 +4469,7 @@ func (o *Orchestrator) leadBroadcast(ctx context.Context, run *PipelineRun, allR
 		Messages:    []llm.Message{{Role: "user", Content: prompt.String()}},
 		MaxTokens:   leadBroadcastMaxTokens,
 		Temperature: 0.2,
+		Stage:       "lead_broadcast",
 	})
 	if err != nil {
 		o.logger.Warn("leadBroadcast LLM failed", "error", err)
@@ -4392,6 +4529,7 @@ func (o *Orchestrator) agentSecondPass(ctx context.Context, run *PipelineRun, si
 		Messages:    []llm.Message{{Role: "user", Content: prompt.String()}},
 		MaxTokens:   agentSecondPassMaxTokens,
 		Temperature: 0.3,
+		Stage:       "agent_second_pass",
 	})
 	if err != nil {
 		o.logger.Warn("agentSecondPass LLM failed", "error", err, "agent", signal.ToAgent)
@@ -4490,6 +4628,7 @@ func (o *Orchestrator) analyzeBlastRadius(ctx context.Context, run *PipelineRun,
 		Messages:    []llm.Message{{Role: "user", Content: prompt.String()}},
 		MaxTokens:   blastRadiusMaxTokens,
 		Temperature: 0.2,
+		Stage:       "blast_radius",
 	})
 	if err != nil {
 		o.logger.Warn("analyzeBlastRadius LLM failed", "error", err)
@@ -4552,6 +4691,7 @@ func (o *Orchestrator) leadCrossCheck(ctx context.Context, run *PipelineRun, all
 		Messages:    []llm.Message{{Role: "user", Content: prompt.String()}},
 		MaxTokens:   leadCrossCheckMaxTokens,
 		Temperature: 0.3,
+		Stage:       "lead_crosscheck",
 	})
 	if err != nil {
 		o.logger.Warn("leadCrossCheck LLM failed", "error", err)

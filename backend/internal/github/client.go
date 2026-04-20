@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/BeLazy167/argus/backend/internal/obs"
 	gh "github.com/google/go-github/v68/github"
 	"golang.org/x/time/rate"
 )
@@ -278,6 +279,16 @@ func (c *Client) PostReview(ctx context.Context, installationID int64, owner, re
 			}
 			slog.Warn("review post hit secondary rate limit, waiting",
 				"retry_after", wait, "comments", len(comments), "error", err)
+			// github.api.rate_limited captures every abuse-limit trip so
+			// PostHog funnels can bucket by endpoint+reset time without
+			// regex-parsing log lines. reset_at is ISO-8601 RFC3339 so the
+			// dashboard can plot it on a time axis directly.
+			slog.WarnContext(ctx, "github api rate limited",
+				slog.String("event", "github.api.rate_limited"),
+				slog.String("endpoint", "pulls.CreateReview"),
+				slog.String("reset_at", time.Now().Add(wait).UTC().Format(time.RFC3339)),
+				slog.String("trace_id", obs.TraceID(ctx)),
+			)
 			select {
 			case <-time.After(wait):
 			case <-ctx.Done():

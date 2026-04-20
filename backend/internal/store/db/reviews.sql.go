@@ -159,7 +159,7 @@ func (q *Queries) FindSharedLinkedIssues(ctx context.Context, reviewID uuid.UUID
 const getLastCompletedReview = `-- name: GetLastCompletedReview :one
 SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, COALESCE(head_ref,'') as head_ref, github_review_id,
        status, summary, score, token_usage, trigger, triggered_by, duration_ms, error,
-       deep_review, persona, is_incremental, created_at, completed_at
+       deep_review, persona, is_incremental, created_at, completed_at, trace_id
 FROM reviews WHERE repo_id = $1 AND pr_number = $2 AND status = 'completed'
 ORDER BY completed_at DESC LIMIT 1
 `
@@ -192,6 +192,7 @@ type GetLastCompletedReviewRow struct {
 	IsIncremental  bool       `json:"is_incremental"`
 	CreatedAt      time.Time  `json:"created_at"`
 	CompletedAt    *time.Time `json:"completed_at"`
+	TraceID        *string    `json:"trace_id"`
 }
 
 func (q *Queries) GetLastCompletedReview(ctx context.Context, arg GetLastCompletedReviewParams) (GetLastCompletedReviewRow, error) {
@@ -220,6 +221,7 @@ func (q *Queries) GetLastCompletedReview(ctx context.Context, arg GetLastComplet
 		&i.IsIncremental,
 		&i.CreatedAt,
 		&i.CompletedAt,
+		&i.TraceID,
 	)
 	return i, err
 }
@@ -313,7 +315,7 @@ func (q *Queries) GetLatestCompletedReviewByPR(ctx context.Context, arg GetLates
 const getLatestReviewByPR = `-- name: GetLatestReviewByPR :one
 SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, COALESCE(rv.head_ref,'') as head_ref, rv.github_review_id,
        rv.status, rv.summary, rv.score, rv.token_usage, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error,
-       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at
+       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at, rv.trace_id
 FROM reviews rv JOIN repos r ON rv.repo_id = r.id
 WHERE r.full_name = $1 AND rv.pr_number = $2
   AND rv.status = 'completed'
@@ -348,6 +350,7 @@ type GetLatestReviewByPRRow struct {
 	IsIncremental  bool       `json:"is_incremental"`
 	CreatedAt      time.Time  `json:"created_at"`
 	CompletedAt    *time.Time `json:"completed_at"`
+	TraceID        *string    `json:"trace_id"`
 }
 
 func (q *Queries) GetLatestReviewByPR(ctx context.Context, arg GetLatestReviewByPRParams) (GetLatestReviewByPRRow, error) {
@@ -376,6 +379,7 @@ func (q *Queries) GetLatestReviewByPR(ctx context.Context, arg GetLatestReviewBy
 		&i.IsIncremental,
 		&i.CreatedAt,
 		&i.CompletedAt,
+		&i.TraceID,
 	)
 	return i, err
 }
@@ -383,7 +387,7 @@ func (q *Queries) GetLatestReviewByPR(ctx context.Context, arg GetLatestReviewBy
 const getLatestReviewBySHA = `-- name: GetLatestReviewBySHA :one
 SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, COALESCE(rv.head_ref,'') as head_ref, rv.github_review_id,
        rv.status, rv.summary, rv.score, rv.token_usage, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error,
-       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at
+       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at, rv.trace_id
 FROM reviews rv JOIN repos r ON rv.repo_id = r.id
 WHERE r.full_name = $1 AND rv.pr_number = $2 AND rv.head_sha = $3
   AND rv.status = 'completed'
@@ -419,6 +423,7 @@ type GetLatestReviewBySHARow struct {
 	IsIncremental  bool       `json:"is_incremental"`
 	CreatedAt      time.Time  `json:"created_at"`
 	CompletedAt    *time.Time `json:"completed_at"`
+	TraceID        *string    `json:"trace_id"`
 }
 
 func (q *Queries) GetLatestReviewBySHA(ctx context.Context, arg GetLatestReviewBySHAParams) (GetLatestReviewBySHARow, error) {
@@ -447,6 +452,7 @@ func (q *Queries) GetLatestReviewBySHA(ctx context.Context, arg GetLatestReviewB
 		&i.IsIncremental,
 		&i.CreatedAt,
 		&i.CompletedAt,
+		&i.TraceID,
 	)
 	return i, err
 }
@@ -496,7 +502,7 @@ func (q *Queries) GetRepoReviewStats(ctx context.Context, arg GetRepoReviewStats
 const getReview = `-- name: GetReview :one
 SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, COALESCE(head_ref,'') as head_ref, github_review_id,
        status, summary, score, token_usage, trigger, triggered_by, duration_ms, error,
-       deep_review, persona, is_incremental, created_at, completed_at, simulation_results, diagram, diagram_title
+       deep_review, persona, is_incremental, created_at, completed_at, simulation_results, diagram, diagram_title, trace_id
 FROM reviews WHERE id = $1
 `
 
@@ -526,6 +532,7 @@ type GetReviewRow struct {
 	SimulationResults []byte     `json:"simulation_results"`
 	Diagram           *string    `json:"diagram"`
 	DiagramTitle      *string    `json:"diagram_title"`
+	TraceID           *string    `json:"trace_id"`
 }
 
 func (q *Queries) GetReview(ctx context.Context, id uuid.UUID) (GetReviewRow, error) {
@@ -557,6 +564,7 @@ func (q *Queries) GetReview(ctx context.Context, id uuid.UUID) (GetReviewRow, er
 		&i.SimulationResults,
 		&i.Diagram,
 		&i.DiagramTitle,
+		&i.TraceID,
 	)
 	return i, err
 }
@@ -564,7 +572,7 @@ func (q *Queries) GetReview(ctx context.Context, id uuid.UUID) (GetReviewRow, er
 const listAllReviewsScoped = `-- name: ListAllReviewsScoped :many
 SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, COALESCE(rv.head_ref,'') as head_ref, rv.github_review_id,
        rv.status, rv.summary, rv.score, rv.token_usage, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error,
-       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at
+       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at, rv.trace_id
 FROM reviews rv
 JOIN repos r ON rv.repo_id = r.id
 WHERE r.installation_id = ANY($1::bigint[])
@@ -600,6 +608,7 @@ type ListAllReviewsScopedRow struct {
 	IsIncremental  bool       `json:"is_incremental"`
 	CreatedAt      time.Time  `json:"created_at"`
 	CompletedAt    *time.Time `json:"completed_at"`
+	TraceID        *string    `json:"trace_id"`
 }
 
 func (q *Queries) ListAllReviewsScoped(ctx context.Context, arg ListAllReviewsScopedParams) ([]ListAllReviewsScopedRow, error) {
@@ -634,6 +643,7 @@ func (q *Queries) ListAllReviewsScoped(ctx context.Context, arg ListAllReviewsSc
 			&i.IsIncremental,
 			&i.CreatedAt,
 			&i.CompletedAt,
+			&i.TraceID,
 		); err != nil {
 			return nil, err
 		}
@@ -648,7 +658,7 @@ func (q *Queries) ListAllReviewsScoped(ctx context.Context, arg ListAllReviewsSc
 const listReviews = `-- name: ListReviews :many
 SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, COALESCE(head_ref,'') as head_ref, github_review_id,
        status, summary, score, token_usage, trigger, triggered_by, duration_ms, error,
-       deep_review, persona, is_incremental, created_at, completed_at
+       deep_review, persona, is_incremental, created_at, completed_at, trace_id
 FROM reviews WHERE repo_id = $1
 ORDER BY created_at DESC LIMIT $2 OFFSET $3
 `
@@ -682,6 +692,7 @@ type ListReviewsRow struct {
 	IsIncremental  bool       `json:"is_incremental"`
 	CreatedAt      time.Time  `json:"created_at"`
 	CompletedAt    *time.Time `json:"completed_at"`
+	TraceID        *string    `json:"trace_id"`
 }
 
 func (q *Queries) ListReviews(ctx context.Context, arg ListReviewsParams) ([]ListReviewsRow, error) {
@@ -716,6 +727,7 @@ func (q *Queries) ListReviews(ctx context.Context, arg ListReviewsParams) ([]Lis
 			&i.IsIncremental,
 			&i.CreatedAt,
 			&i.CompletedAt,
+			&i.TraceID,
 		); err != nil {
 			return nil, err
 		}
@@ -730,7 +742,7 @@ func (q *Queries) ListReviews(ctx context.Context, arg ListReviewsParams) ([]Lis
 const listReviewsScoped = `-- name: ListReviewsScoped :many
 SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, COALESCE(rv.head_ref,'') as head_ref, rv.github_review_id,
        rv.status, rv.summary, rv.score, rv.token_usage, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error,
-       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at
+       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at, rv.trace_id
 FROM reviews rv
 JOIN repos r ON rv.repo_id = r.id
 WHERE rv.repo_id = $1 AND r.installation_id = ANY($2::bigint[])
@@ -767,6 +779,7 @@ type ListReviewsScopedRow struct {
 	IsIncremental  bool       `json:"is_incremental"`
 	CreatedAt      time.Time  `json:"created_at"`
 	CompletedAt    *time.Time `json:"completed_at"`
+	TraceID        *string    `json:"trace_id"`
 }
 
 func (q *Queries) ListReviewsScoped(ctx context.Context, arg ListReviewsScopedParams) ([]ListReviewsScopedRow, error) {
@@ -806,6 +819,7 @@ func (q *Queries) ListReviewsScoped(ctx context.Context, arg ListReviewsScopedPa
 			&i.IsIncremental,
 			&i.CreatedAt,
 			&i.CompletedAt,
+			&i.TraceID,
 		); err != nil {
 			return nil, err
 		}

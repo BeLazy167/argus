@@ -351,37 +351,18 @@ func (s *Store) GetRepoScoped(ctx context.Context, id int64, installationIDs []i
 
 // --- Reviews ---
 
-func (s *Store) ListReviews(ctx context.Context, repoID int64, limit, offset int) ([]Review, error) {
-	if limit <= 0 {
-		limit = 20
-	}
-	rows, err := s.Pool.Query(ctx, `
-		SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, COALESCE(head_ref,''), github_review_id,
-		       status, summary, score, token_usage, trigger, triggered_by, duration_ms, error,
-		       deep_review, persona, is_incremental, created_at, completed_at,
-		       diagram, diagram_title
-		FROM reviews WHERE repo_id = $1
-		ORDER BY created_at DESC LIMIT $2 OFFSET $3
-	`, repoID, limit, offset)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[Review])
-}
-
 func (s *Store) GetReview(ctx context.Context, id uuid.UUID) (*Review, error) {
 	var r Review
 	err := s.Pool.QueryRow(ctx, `
 		SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, COALESCE(head_ref,''), github_review_id,
 		       status, summary, score, token_usage, trigger, triggered_by, duration_ms, error,
 		       deep_review, persona, is_incremental, created_at, completed_at,
-		       diagram, diagram_title, diagrams, truncated_files, brief, cross_pr_hash
+		       diagram, diagram_title, diagrams, truncated_files, brief, cross_pr_hash, trace_id
 		FROM reviews WHERE id = $1
 	`, id).Scan(&r.ID, &r.RepoID, &r.PRNumber, &r.PRTitle, &r.PRAuthor, &r.HeadSHA, &r.BaseSHA, &r.HeadRef, &r.GithubReviewID,
 		&r.Status, &r.Summary, &r.Score, &r.TokenUsage, &r.Trigger, &r.TriggeredBy, &r.DurationMs, &r.Error,
 		&r.DeepReview, &r.Persona, &r.IsIncremental, &r.CreatedAt, &r.CompletedAt,
-		&r.Diagram, &r.DiagramTitle, &r.Diagrams, &r.TruncatedFiles, &r.Brief, &r.CrossPRHash)
+		&r.Diagram, &r.DiagramTitle, &r.Diagrams, &r.TruncatedFiles, &r.Brief, &r.CrossPRHash, &r.TraceID)
 	if err != nil {
 		return nil, err
 	}
@@ -425,7 +406,7 @@ func (s *Store) ListReviewsScoped(ctx context.Context, repoID int64, installatio
 		       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at,
 		       rv.diagram, rv.diagram_title,
 		       COALESCE(rv.diagrams, '[]'::jsonb), COALESCE(rv.truncated_files, '[]'::jsonb),
-		       rv.brief, rv.cross_pr_hash
+		       rv.brief, rv.cross_pr_hash, rv.trace_id
 		FROM reviews rv
 		JOIN repos r ON rv.repo_id = r.id
 		WHERE rv.repo_id = $1 AND r.installation_id = ANY($2)
@@ -448,7 +429,7 @@ func (s *Store) ListAllReviewsScoped(ctx context.Context, installationIDs []int6
 		       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at,
 		       rv.diagram, rv.diagram_title,
 		       COALESCE(rv.diagrams, '[]'::jsonb), COALESCE(rv.truncated_files, '[]'::jsonb),
-		       rv.brief, rv.cross_pr_hash
+		       rv.brief, rv.cross_pr_hash, rv.trace_id
 		FROM reviews rv
 		JOIN repos r ON rv.repo_id = r.id
 		WHERE r.installation_id = ANY($1)
