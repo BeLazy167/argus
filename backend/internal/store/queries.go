@@ -425,7 +425,7 @@ func (s *Store) ListReviewsScoped(ctx context.Context, repoID int64, installatio
 		       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at,
 		       rv.diagram, rv.diagram_title,
 		       COALESCE(rv.diagrams, '[]'::jsonb), COALESCE(rv.truncated_files, '[]'::jsonb),
-		       rv.brief
+		       rv.brief, rv.cross_pr_hash
 		FROM reviews rv
 		JOIN repos r ON rv.repo_id = r.id
 		WHERE rv.repo_id = $1 AND r.installation_id = ANY($2)
@@ -448,7 +448,7 @@ func (s *Store) ListAllReviewsScoped(ctx context.Context, installationIDs []int6
 		       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at,
 		       rv.diagram, rv.diagram_title,
 		       COALESCE(rv.diagrams, '[]'::jsonb), COALESCE(rv.truncated_files, '[]'::jsonb),
-		       rv.brief
+		       rv.brief, rv.cross_pr_hash
 		FROM reviews rv
 		JOIN repos r ON rv.repo_id = r.id
 		WHERE r.installation_id = ANY($1)
@@ -905,6 +905,14 @@ func (s *Store) InsertAutoResolveEvent(ctx context.Context, p InsertAutoResolveE
 	// behavior — a retried synchronize delivery would otherwise double-
 	// count the same resolve activity against the unique (installation,
 	// repo, pr, sha) key.
+	// Coerce nil slice to empty: pgx serializes nil []string as SQL NULL,
+	// but migration 041 declared resolved_thread_keys NOT NULL DEFAULT '{}'.
+	// The DEFAULT only applies when the column is omitted from the INSERT;
+	// an explicit NULL (from a nil slice) violates the constraint.
+	keys := p.ResolvedThreadKeys
+	if keys == nil {
+		keys = []string{}
+	}
 	_, err := s.Pool.Exec(ctx, `
 		INSERT INTO auto_resolve_events
 			(installation_id, repo_id, pr_number, source_sha,
@@ -915,7 +923,7 @@ func (s *Store) InsertAutoResolveEvent(ctx context.Context, p InsertAutoResolveE
 		DO NOTHING
 	`, p.InstallationID, p.RepoID, p.PRNumber, p.SourceSHA,
 		p.ResolvedCount, p.AttemptedCount, p.GitHubAPICalls,
-		p.ResolvedThreadKeys)
+		keys)
 	if err != nil {
 		return fmt.Errorf("insert auto_resolve_events: %w", err)
 	}
