@@ -88,6 +88,7 @@ func (ra *ReplyAnalyzer) Analyze(ctx context.Context, event ghpkg.CommentEvent) 
 		Messages:    []llm.Message{{Role: "user", Content: prompt}},
 		MaxTokens:   1024,
 		Temperature: 0.3,
+		Stage:       "reply",
 	})
 	if err != nil {
 		return fmt.Errorf("reply LLM: %w", err)

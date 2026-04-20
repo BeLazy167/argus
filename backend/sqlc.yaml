@@ -52,6 +52,7 @@ overrides:
       last_run_at: "LastRunAt"
       trigger_count: "TriggerCount"
       cross_pr_hash: "CrossPRHash"
+      trace_id: "TraceID"
       linked_pr_refs: "LinkedPRRefs"
       line_start: "LineStart"
       line_end: "LineEnd"

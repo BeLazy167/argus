@@ -59,6 +59,10 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 	}
 
 	r := chi.NewRouter()
+	// traceIDMiddleware must be outermost — every downstream middleware,
+	// logger, and handler (including unauthenticated webhook + healthz) reads
+	// obs.TraceID(ctx). Response header lets the FE propagate the id back.
+	r.Use(traceIDMiddleware)
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Logger)
@@ -87,6 +91,7 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 		// Unscoped (user-level) — with timeout
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.Timeout(60 * time.Second))
+			r.Get("/me", s.handleMe)
 			r.Get("/me/installations", s.listMyInstallations)
 			r.Post("/installations/link", s.linkInstallation)
 			r.Get("/installations/install-url", s.getInstallURL)
@@ -307,11 +312,6 @@ func maskKey(encHint string) string {
 // Close flushes audit events. Call on shutdown.
 func (s *Server) Close() {
 	s.audit.close()
-}
-
-// EventTracker returns a pipeline.EventTracker backed by PostHog.
-func (s *Server) EventTracker() pipeline.EventTracker {
-	return newEventTracker(s.audit)
 }
 
 func writeJSON(w http.ResponseWriter, status int, data any) {

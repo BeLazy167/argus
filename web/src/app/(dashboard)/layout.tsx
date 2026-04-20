@@ -23,13 +23,36 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
 } from "lucide-react";
-import { Suspense, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 import { QueryProvider } from "@/providers/query-provider";
 import { InstallationProvider, useInstallation } from "@/providers/installation-provider";
 import { ActiveRepoProvider, useActiveRepo } from "@/providers/active-repo-provider";
 import { RepoSelect } from "@/components/dashboard/repo-select";
 import { ThemeToggle } from "@/components/dashboard/theme-toggle";
 import { useSidebarCollapsed } from "@/components/dashboard/sidebar-collapse";
+import { PostHogGroupAssociation } from "@/providers/posthog-provider";
+import { useReviews } from "@/lib/queries/reviews";
+import { track } from "@/lib/analytics";
+
+/**
+ * Fires `onboarding.first_review_seen` exactly once per Clerk session once
+ * the workspace has accumulated its very first review. Used to measure the
+ * install -> first-value funnel.
+ */
+function FirstReviewProbe() {
+  const { data: reviews } = useReviews({ variables: { repoId: 0, limit: 2 } });
+  const fired = useRef(false);
+
+  useEffect(() => {
+    if (fired.current) return;
+    if (reviews && reviews.length === 1) {
+      fired.current = true;
+      track("onboarding.first_review_seen");
+    }
+  }, [reviews]);
+
+  return null;
+}
 
 function SidebarRepoSelector({ collapsed }: { collapsed: boolean }) {
   const { repos, activeId, setSelectedId } = useActiveRepo();
@@ -282,6 +305,8 @@ export default function DashboardLayout({
   return (
     <QueryProvider>
       <InstallationProvider>
+        <PostHogGroupAssociation />
+        <FirstReviewProbe />
         <ActiveRepoProvider>
         <div className="flex h-screen overflow-hidden">
           <a href="#main-content" className="sr-only focus:not-sr-only focus:absolute focus:top-4 focus:left-4 focus:z-[60] focus:px-4 focus:py-2 focus:bg-amber focus:text-void focus:font-mono focus:text-xs">

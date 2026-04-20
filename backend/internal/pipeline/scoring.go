@@ -89,6 +89,7 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 		Messages:    []llm.Message{{Role: "user", Content: prompt}},
 		MaxTokens:   cfg.MaxTokens,
 		Temperature: cfg.Temperature,
+		Stage:       "scoring",
 	})
 	if err != nil {
 		slog.Error("scoring LLM call failed, keeping all comments", "error", err)

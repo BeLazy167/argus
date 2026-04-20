@@ -229,6 +229,7 @@ type Review struct {
 	CrossPRHash        *string         `json:"cross_pr_hash"`
 	LinkedPRRefs       json.RawMessage `json:"linked_pr_refs"`
 	LinkedIssueRefs    json.RawMessage `json:"linked_issue_refs"`
+	TraceID            *string         `json:"trace_id"`
 }
 
 type ReviewComment struct {

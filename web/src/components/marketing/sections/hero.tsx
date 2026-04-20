@@ -1,6 +1,9 @@
+"use client";
+
 import Link from "next/link";
 import { FadeIn } from "@/components/marketing/fade-in";
 import { HeroBackdrop } from "@/components/marketing/hero-backdrop";
+import { track } from "@/lib/analytics";
 
 /**
  * Hero — v3 landing (polish + bolder pass, v2)
@@ -99,6 +102,7 @@ function HeroHeadline() {
           <div className="mt-10 flex flex-col items-start gap-5 sm:flex-row sm:items-center sm:gap-6">
             <Link
               href="/sign-up"
+              onClick={() => track("onboarding.install_clicked", { source: "hero" })}
               className="group relative inline-flex h-12 items-center gap-2.5 bg-amber px-6 font-mono text-[13px] font-semibold uppercase tracking-[0.12em] text-primary-foreground transition-[transform,background-color] duration-150 ease-[cubic-bezier(0.23,1,0.32,1)] hover:bg-amber-glow"
             >
               <GithubMark />

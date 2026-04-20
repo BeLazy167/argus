@@ -1,5 +1,6 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
+import { DocsPageViewedProbe } from "./page-viewed-probe";
 
 /**
  * Minimal docs shell. Sidebar nav + prose content area.
@@ -8,6 +9,7 @@ import type { ReactNode } from "react";
 export default function DocsLayout({ children }: { children: ReactNode }) {
   return (
     <div className="flex min-h-screen bg-[#0a0a12] text-slate-200">
+      <DocsPageViewedProbe />
       <aside className="w-64 border-r border-slate-800 shrink-0">
         <div className="sticky top-20 p-6 max-h-[calc(100vh-5rem)] overflow-y-auto">
           <Link href="/" className="block text-sm font-mono text-slate-300 hover:text-slate-100 mb-6">

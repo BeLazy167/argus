@@ -125,6 +125,7 @@ func (ie *IntentExtractionStage) Execute(ctx context.Context, run *PipelineRun) 
 		MaxTokens:   intentMaxTokens,
 		Temperature: 0.2,
 		JSONMode:    true,
+		Stage:       "intent",
 	})
 	if err != nil {
 		ie.logger.Warn("intent extraction: LLM call failed, Source=empty",

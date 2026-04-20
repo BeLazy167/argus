@@ -1,5 +1,8 @@
+"use client";
+
 import Link from "next/link";
 import { FadeIn } from "@/components/marketing/fade-in";
+import { track } from "@/lib/analytics";
 
 /* ────────────────────────────────────────────────────────────
    Chip row — engraved plaques, not pills. Mono text, amber dots.
@@ -206,6 +209,7 @@ export function InstallCta() {
               <div className="mt-10 flex flex-col items-center justify-center gap-3 sm:flex-row sm:gap-4">
                 <Link
                   href="/sign-up"
+                  onClick={() => track("onboarding.install_clicked", { source: "install_cta" })}
                   className="group relative inline-flex items-center justify-center gap-2 overflow-hidden bg-amber px-8 py-4 font-mono text-sm font-semibold uppercase tracking-[0.1em] text-primary-foreground shadow-[0_0_48px_color-mix(in_oklch,var(--color-amber-glow)_34%,transparent)] transition-colors hover:bg-amber-glow"
                 >
                   <span aria-hidden className="relative">{"\u25B8"}</span>

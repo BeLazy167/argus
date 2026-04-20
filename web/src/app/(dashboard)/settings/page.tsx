@@ -30,6 +30,7 @@ import { ProGate } from "@/components/dashboard/pro-gate";
 import type { PromptTemplate } from "@/lib/types";
 import { useOrgDefaults, useSaveOrgDefaults } from "@/lib/queries/org-defaults";
 import { useFeatureFlags, useSaveFeatureFlags, type FeatureFlags } from "@/lib/queries/features";
+import { track } from "@/lib/analytics";
 
 /* ── Providers & model quick-picks ── */
 
@@ -1092,6 +1093,7 @@ export default function SettingsPage() {
                   pending={saveOrgDefaults.isPending}
                   onToggle={() => {
                     const current = typeof orgDefaults?.auto_run === "boolean" ? orgDefaults.auto_run : AUTO_RUN_TOGGLE.defaultValue;
+                    track("settings.toggle_changed", { setting_key: "auto_run", new_value: !current });
                     saveOrgDefaults.mutate({ ...orgDefaults, auto_run: !current });
                   }}
                 />
@@ -1101,6 +1103,7 @@ export default function SettingsPage() {
                   pending={saveOrgDefaults.isPending}
                   onToggle={() => {
                     const current = typeof orgDefaults?.auto_resolve_enabled === "boolean" ? orgDefaults.auto_resolve_enabled : AUTO_RESOLVE_TOGGLE.defaultValue;
+                    track("settings.toggle_changed", { setting_key: "auto_resolve_enabled", new_value: !current });
                     saveOrgDefaults.mutate({ ...orgDefaults, auto_resolve_enabled: !current });
                   }}
                 />
@@ -1155,6 +1158,10 @@ export default function SettingsPage() {
                               updates.scenario_memory = false;
                               updates.code_simulation = false;
                             }
+                            track("settings.toggle_changed", {
+                              setting_key: toggle.key,
+                              new_value: !enabled,
+                            });
                             saveOrgDefaults.mutate(updates);
                           }}
                         />
@@ -1192,6 +1199,10 @@ export default function SettingsPage() {
                           cross_pr_checks: featureFlags?.cross_pr_checks ?? false,
                           max_linked_prs: featureFlags?.max_linked_prs ?? 5,
                         };
+                        track("settings.toggle_changed", {
+                          setting_key: "issue_acceptance",
+                          new_value: next.issue_acceptance,
+                        });
                         saveFeatureFlags.mutate(next);
                       }}
                     />
@@ -1208,6 +1219,10 @@ export default function SettingsPage() {
                           cross_pr_checks: !(featureFlags?.cross_pr_checks ?? false),
                           max_linked_prs: featureFlags?.max_linked_prs ?? 5,
                         };
+                        track("settings.toggle_changed", {
+                          setting_key: "cross_pr_checks",
+                          new_value: next.cross_pr_checks,
+                        });
                         saveFeatureFlags.mutate(next);
                       }}
                     />

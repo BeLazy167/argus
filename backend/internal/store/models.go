@@ -60,7 +60,11 @@ type Review struct {
 	// CrossPRHash is written by the async cross-PR stage (crosspr_stage.go)
 	// to short-circuit repeated LLM calls when the linked-PR findings bundle
 	// hasn't changed. nil means "never run".
-	CrossPRHash    *string          `json:"cross_pr_hash,omitempty"`
+	CrossPRHash *string `json:"cross_pr_hash,omitempty"`
+	// TraceID carries the X-Argus-Trace-Id that initiated this review. Persisted so async
+	// stages (cross-PR, sweeper) can continue the same trace even when their goroutine ctx
+	// is a fresh context.Background(). NULL for pre-migration reviews.
+	TraceID *string `json:"trace_id,omitempty"`
 }
 
 type ReviewComment struct {

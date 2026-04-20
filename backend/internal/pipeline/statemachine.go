@@ -19,7 +19,6 @@ type StateMachine struct {
 	st       *store.Store
 	stages   map[PipelineState]StageFunc
 	eventBus *EventBus
-	tracker  EventTracker
 	logger   *slog.Logger
 }
 
@@ -99,9 +98,23 @@ func (sm *StateMachine) Run(ctx context.Context, run *PipelineRun) error {
 			return fmt.Errorf("stage %s failed: %w", failedState, err)
 		}
 
-		if sm.tracker != nil {
-			sm.tracker.TrackStageCompleted(run.DBInstallationID, run.PREvent.RepoFullName, run.PREvent.PRNumber, run.ReviewID.String(), string(run.State), time.Since(stageStart).Milliseconds())
-		}
+		stageDurationMs := time.Since(stageStart).Milliseconds()
+		// stage.completed fires for every successful stage transition. The
+		// attrs are a deliberate subset of the tracker-era signature — token
+		// totals are aggregated per-stage on run.Tokens and are emitted via
+		// LLM call events (one per Complete() call), so re-serializing them
+		// here would both double-count in PostHog dashboards and bloat each
+		// record past the slog.Handler buffer's record size budget.
+		sm.logger.InfoContext(ctx, "stage completed",
+			slog.String("event", "stage.completed"),
+			slog.String("review_id", run.ReviewID.String()),
+			slog.String("stage", string(run.State)),
+			slog.Int64("duration_ms", stageDurationMs),
+			slog.Int64("installation_id", run.DBInstallationID),
+			slog.String("repo", run.PREvent.RepoFullName),
+			slog.Int("pr_number", run.PREvent.PRNumber),
+			slog.String("trace_id", run.TraceID),
+		)
 
 		next, exists := trans[run.State]
 		if !exists {

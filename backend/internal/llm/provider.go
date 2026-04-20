@@ -81,6 +81,13 @@ type CompletionRequest struct {
 	// ReasoningEffort is typed to prevent garbage values from round-tripping
 	// to Azure as HTTP 400. Complete rejects unrecognized values at entry.
 	ReasoningEffort ReasoningEffort
+	// Stage names the pipeline step that owns this LLM call ("triage",
+	// "review", "scoring", "synthesis", "acceptance", "crosspr", ...). Used
+	// purely for telemetry — propagated onto `llm.call.completed` / `failed`
+	// slog events so PostHog can group cost and latency by stage without a
+	// join back against the pipeline state. Never sent on the wire to the
+	// provider.
+	Stage string
 }
 
 type Message struct {

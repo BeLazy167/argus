@@ -207,6 +207,7 @@ func (e *SimulationEngine) simulateScenario(ctx context.Context, req SimulationR
 		Messages:    []llm.Message{{Role: "user", Content: prompt}},
 		MaxTokens:   600,
 		Temperature: 0.3, // low temp for more deterministic reasoning
+		Stage:       "simulation",
 	})
 	if err != nil {
 		return SimulationResult{}, err

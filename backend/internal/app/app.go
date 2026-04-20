@@ -10,19 +10,61 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/posthog/posthog-go"
+
 	"github.com/BeLazy167/argus/backend/internal/api"
 	"github.com/BeLazy167/argus/backend/internal/config"
 	"github.com/BeLazy167/argus/backend/internal/crypto"
 	ghpkg "github.com/BeLazy167/argus/backend/internal/github"
 	"github.com/BeLazy167/argus/backend/internal/llm"
 	"github.com/BeLazy167/argus/backend/internal/memory"
+	"github.com/BeLazy167/argus/backend/internal/obs"
 	"github.com/BeLazy167/argus/backend/internal/pipeline"
 	"github.com/BeLazy167/argus/backend/internal/store"
 )
 
 // Run initializes all components and starts the server.
 func Run() error {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	// Base handler stays JSON-on-stdout for Fly log shipping. We wrap it with
+	// obs.Handler when POSTHOG_API_KEY is set so every structured slog call
+	// that declares an `event=` attr also lands in PostHog. Missing key =
+	// kill-switch: text logs continue, PostHog forwarding is a no-op.
+	var baseHandler slog.Handler = slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})
+	var phClient posthog.Client
+	var phHandler *obs.Handler
+	if apiKey := os.Getenv("POSTHOG_API_KEY"); apiKey != "" {
+		client, err := posthog.NewWithConfig(apiKey, posthog.Config{
+			Endpoint:  "https://us.i.posthog.com",
+			BatchSize: 100,
+			Interval:  10 * time.Second,
+		})
+		if err != nil {
+			slog.New(baseHandler).Error("posthog init failed", "error", err)
+		} else {
+			phClient = client
+			phHandler = obs.NewPostHogHandler(baseHandler, client)
+			baseHandler = phHandler
+		}
+	}
+	logger := slog.New(baseHandler)
+	// Ordering: phHandler.Close() must run BEFORE phClient.Close() so the
+	// drain goroutine finishes enqueuing into posthog-go before we ask
+	// posthog-go to flush its wire queue. defer runs LIFO, so declare the
+	// client close first (outer) then the handler close (inner).
+	if phClient != nil {
+		defer func() {
+			if err := phClient.Close(); err != nil {
+				logger.Warn("posthog client close", "error", err)
+			}
+		}()
+	}
+	if phHandler != nil {
+		defer func() {
+			if err := phHandler.Close(); err != nil {
+				logger.Warn("posthog handler close", "error", err)
+			}
+		}()
+	}
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -69,7 +111,7 @@ func Run() error {
 	reviewStage := pipeline.NewReviewStage(registry, db, ghClient, memRegistry, cfg.MaxConcurrentReviews)
 	intentStage := pipeline.NewIntentExtractionStage(registry, db, ghClient, logger)
 	scoringStage := pipeline.NewScoringStage(registry, db, memRegistry)
-	orchestrator := pipeline.NewOrchestrator(db.Pool, db, ghClient, reviewStage, triageStage, intentStage, scoringStage, memRegistry, registry, eventBus, logger, nil)
+	orchestrator := pipeline.NewOrchestrator(db.Pool, db, ghClient, reviewStage, triageStage, intentStage, scoringStage, memRegistry, registry, eventBus, logger)
 	replyAnalyzer := pipeline.NewReplyAnalyzer(registry, db, ghClient, memRegistry, logger)
 	reactionAnalyzer := pipeline.NewReactionAnalyzer(db, ghClient, memRegistry, logger)
 
@@ -131,7 +173,6 @@ func Run() error {
 	// API Server
 	server := api.NewServer(db, ghApp, orchestrator, replyAnalyzer, reactionAnalyzer, registry, eventBus, cfg.GitHubWebhookSecret, cfg.CORSAllowOrigin, logger, memRegistry)
 	defer server.Close()
-	orchestrator.SetTracker(server.EventTracker())
 
 	httpServer := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Port),
@@ -153,7 +194,15 @@ func Run() error {
 
 	select {
 	case sig := <-sigCh:
-		logger.Info("received signal, shutting down", "signal", sig)
+		// TODO(agent5): pendingCount = # in-flight reviews. No easy accessor
+		// exposed on Server today, so we emit 0. Agent 5 can wire this from
+		// the orchestrator's run registry when they add pipeline.panic_recovered
+		// & sweeper.recovered_orphan in the same pass.
+		logger.Info("shutdown signal received",
+			slog.String("event", "fly.shutdown_signal_received"),
+			slog.String("signal", sig.String()),
+			slog.Int("pending_reviews", 0),
+		)
 	case err := <-errCh:
 		if err != http.ErrServerClosed {
 			return fmt.Errorf("server error: %w", err)

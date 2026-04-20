@@ -138,6 +138,7 @@ func (s *Server) testConfig(w http.ResponseWriter, r *http.Request) {
 		Messages:    []llm.Message{{Role: "user", Content: "ping"}},
 		MaxTokens:   32,
 		Temperature: 0,
+		Stage:       "config_test",
 	})
 	latency := time.Since(start).Milliseconds()
 
