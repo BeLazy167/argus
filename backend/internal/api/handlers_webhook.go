@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"runtime/debug"
 	"strings"
 	"time"
 
 	gh "github.com/google/go-github/v68/github"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	ghpkg "github.com/BeLazy167/argus/backend/internal/github"
 	"github.com/BeLazy167/argus/backend/internal/pipeline"
@@ -31,6 +34,15 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			s.logger.Error("parsing PR event", "error", err)
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
+		}
+		// pull_request.edited: the author tweaked the PR body (or title/base).
+		// We don't want to re-review on body edits, but we DO want to refresh
+		// the cross-PR section when the set of linked-PR refs changes — a
+		// user adding or removing "fixes owner/repo#N" should update coverage
+		// without needing a new push. Short-circuits the review-pipeline path.
+		if event.Action == "edited" {
+			s.handlePREdited(r.Context(), prEvent)
+			break
 		}
 		orgLogin := strings.SplitN(prEvent.RepoFullName, "/", 2)[0]
 		if !s.rateLimiter.AllowReview(prEvent.RepoFullName, orgLogin, false) {
@@ -352,4 +364,102 @@ func (s *Server) handleCheckboxTrigger(ctx context.Context, evt ghpkg.IssueComme
 		return
 	}
 	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repoName, evt.CommentID, "rocket")
+}
+
+// handlePREdited refreshes the cross-PR section when a PR body edit changes
+// the set of linked-PR refs. Short-circuits in three common cases:
+//   - no changes.body payload (edit touched title/base/owner, not body);
+//   - linked-PR ref set is identical pre/post edit;
+//   - no completed review exists for this PR yet (first-time PRs are
+//     handled by the normal review pipeline path).
+//
+// On delta hit, calls orchestrator.OnReviewCompleted synchronously in a
+// goroutine so the HTTP response returns promptly; the event handler's
+// own debounce + rate-limits guarantee no runaway work.
+//
+// No retry on failure — the cross-PR refresh cap (2/10min/review) and
+// per-installation cap (30/hr) are the backstop. A dropped edit-triggered
+// refresh self-heals on the next push.
+func (s *Server) handlePREdited(ctx context.Context, prEvent *ghpkg.PREvent) {
+	if prEvent.PRBodyBefore == "" && prEvent.PRBody == "" {
+		return
+	}
+	// ExtractLinkedPRs returns a normalized []PRLink so set-diff here is
+	// just a map lookup by (owner, repo, number).
+	type key struct {
+		Owner  string
+		Repo   string
+		Number int
+	}
+	toSet := func(body string) map[key]struct{} {
+		links := pipeline.ExtractLinkedPRs(body, prEvent.RepoFullName, prEvent.PRNumber, 20)
+		out := make(map[key]struct{}, len(links))
+		for _, l := range links {
+			out[key{l.Owner, l.Repo, l.Number}] = struct{}{}
+		}
+		return out
+	}
+	before := toSet(prEvent.PRBodyBefore)
+	after := toSet(prEvent.PRBody)
+	changed := false
+	for k := range after {
+		if _, ok := before[k]; !ok {
+			changed = true
+			break
+		}
+	}
+	if !changed {
+		for k := range before {
+			if _, ok := after[k]; !ok {
+				changed = true
+				break
+			}
+		}
+	}
+	if !changed {
+		return
+	}
+
+	review, err := s.store.GetLatestReviewByPR(ctx, prEvent.RepoFullName, prEvent.PRNumber)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// No completed review yet — first-time PRs are handled by the
+			// normal review pipeline on opened/synchronize, not by an edit.
+			s.logger.Info("pr.edited: no review for cross-PR refresh",
+				"repo", prEvent.RepoFullName, "pr", prEvent.PRNumber)
+			return
+		}
+		// Anything else (DB outage, connection error) is a real failure.
+		// Logging Info would hide it in the noise of routine pr.edited
+		// events; log Error with full context so on-call notices.
+		s.logger.Error("pr.edited: GetLatestReviewByPR failed",
+			"repo", prEvent.RepoFullName,
+			"pr", prEvent.PRNumber,
+			"error", err)
+		return
+	}
+	s.logger.Info("pr.edited: linked-PR delta detected, refreshing",
+		"repo", prEvent.RepoFullName, "pr", prEvent.PRNumber, "review_id", review.ID,
+		"added", len(after)-len(before), "removed", len(before)-len(after))
+	// Fire-and-forget. OnReviewCompleted internally debounces + re-enters
+	// the cap checks, so we don't need any additional guard here.
+	//
+	// Also trigger joint acceptance so the "## Joint Issue Coverage"
+	// section reflects the new sibling set; the bus-driven event path
+	// doesn't fire here because we're reacting to an edit, not a review
+	// completion.
+	go func(reviewID uuid.UUID) {
+		defer func() {
+			if r := recover(); r != nil {
+				s.logger.Error("pr.edited: cross-PR refresh panic",
+					"review_id", reviewID,
+					"recover", r,
+					"stack", string(debug.Stack()))
+			}
+		}()
+		// Refresh both stages — findings via the debounced OnReviewCompleted,
+		// and joint acceptance via the explicit stage runner. The bus-driven
+		// dispatch doesn't fire here (this is an edit, not a completion).
+		s.orchestrator.RefreshCrossPR(context.Background(), reviewID)
+	}(review.ID)
 }

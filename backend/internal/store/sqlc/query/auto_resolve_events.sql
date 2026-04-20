@@ -3,8 +3,9 @@
 -- name: InsertAutoResolveEvent :exec
 INSERT INTO auto_resolve_events
     (installation_id, repo_id, pr_number, source_sha,
-     resolved_count, attempted_count, github_api_calls)
-VALUES ($1, $2, $3, $4, $5, $6, $7);
+     resolved_count, attempted_count, github_api_calls,
+     resolved_thread_keys)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8);
 
 -- name: GetAutoResolveStats :one
 -- Aggregate auto-resolve activity for an installation over a period.

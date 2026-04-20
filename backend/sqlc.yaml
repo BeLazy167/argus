@@ -51,6 +51,8 @@ overrides:
       is_outdated: "IsOutdated"
       last_run_at: "LastRunAt"
       trigger_count: "TriggerCount"
+      cross_pr_hash: "CrossPRHash"
+      linked_pr_refs: "LinkedPRRefs"
       line_start: "LineStart"
       line_end: "LineEnd"
       source_id: "SourceID"

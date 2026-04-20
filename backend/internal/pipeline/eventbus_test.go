@@ -158,9 +158,10 @@ func TestEventBus_PubSub(t *testing.T) {
 	})
 }
 
-// TestEventBus_NewEventTypes_Registry asserts the 28 EventType constants
-// (11 existing + 16 sub-step events + 1 memory-match) are all non-empty and
-// distinct. Guards against copy-paste collisions and empty-string bugs.
+// TestEventBus_NewEventTypes_Registry asserts the 29 EventType constants
+// (11 existing + 16 sub-step events + 1 memory-match + 1 review-completed)
+// are all non-empty and distinct. Guards against copy-paste collisions
+// and empty-string bugs.
 func TestEventBus_NewEventTypes_Registry(t *testing.T) {
 	all := []EventType{
 		// existing
@@ -176,9 +177,11 @@ func TestEventBus_NewEventTypes_Registry(t *testing.T) {
 		EventMemoryIndexed, EventPostedToGitHub, EventReplyGenerated,
 		// memory-match
 		EventMemoryMatched,
+		// cross-review lifecycle
+		EventReviewCompleted,
 	}
-	if len(all) != 28 {
-		t.Fatalf("expected 28 event types, listed %d", len(all))
+	if len(all) != 29 {
+		t.Fatalf("expected 29 event types, listed %d", len(all))
 	}
 	seen := make(map[EventType]int, len(all))
 	for i, e := range all {

@@ -376,12 +376,12 @@ func (s *Store) GetReview(ctx context.Context, id uuid.UUID) (*Review, error) {
 		SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, COALESCE(head_ref,''), github_review_id,
 		       status, summary, score, token_usage, trigger, triggered_by, duration_ms, error,
 		       deep_review, persona, is_incremental, created_at, completed_at,
-		       diagram, diagram_title, diagrams, truncated_files, brief
+		       diagram, diagram_title, diagrams, truncated_files, brief, cross_pr_hash
 		FROM reviews WHERE id = $1
 	`, id).Scan(&r.ID, &r.RepoID, &r.PRNumber, &r.PRTitle, &r.PRAuthor, &r.HeadSHA, &r.BaseSHA, &r.HeadRef, &r.GithubReviewID,
 		&r.Status, &r.Summary, &r.Score, &r.TokenUsage, &r.Trigger, &r.TriggeredBy, &r.DurationMs, &r.Error,
 		&r.DeepReview, &r.Persona, &r.IsIncremental, &r.CreatedAt, &r.CompletedAt,
-		&r.Diagram, &r.DiagramTitle, &r.Diagrams, &r.TruncatedFiles, &r.Brief)
+		&r.Diagram, &r.DiagramTitle, &r.Diagrams, &r.TruncatedFiles, &r.Brief, &r.CrossPRHash)
 	if err != nil {
 		return nil, err
 	}
@@ -875,14 +875,22 @@ func (s *Store) LogActivity(ctx context.Context, installationID *int64, action, 
 // InsertAutoResolveEventParams mirrors the sqlc-generated params for the
 // underlying INSERT but lives in the store package so higher layers
 // (pipeline, api handlers) don't import internal/store/db directly.
+//
+// ResolvedThreadKeys is the flat list of "<path>:<line>" keys for each
+// thread the goroutine actually resolved on this push. Added in migration
+// 041 so the async cross-PR stage can filter prior findings on the same
+// key shape (Finding.Path + Finding.Line). Empty slice is legal — means
+// "no thread-level detail captured", indistinguishable from the pre-041
+// aggregate-only rows.
 type InsertAutoResolveEventParams struct {
-	InstallationID int64
-	RepoID         int64
-	PRNumber       int
-	SourceSHA      string
-	ResolvedCount  int
-	AttemptedCount int
-	GitHubAPICalls int
+	InstallationID     int64
+	RepoID             int64
+	PRNumber           int
+	SourceSHA          string
+	ResolvedCount      int
+	AttemptedCount     int
+	GitHubAPICalls     int
+	ResolvedThreadKeys []string
 }
 
 // InsertAutoResolveEvent records one fire of the auto-resolve goroutine
@@ -900,12 +908,14 @@ func (s *Store) InsertAutoResolveEvent(ctx context.Context, p InsertAutoResolveE
 	_, err := s.Pool.Exec(ctx, `
 		INSERT INTO auto_resolve_events
 			(installation_id, repo_id, pr_number, source_sha,
-			 resolved_count, attempted_count, github_api_calls)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+			 resolved_count, attempted_count, github_api_calls,
+			 resolved_thread_keys)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (installation_id, repo_id, pr_number, source_sha)
 		DO NOTHING
 	`, p.InstallationID, p.RepoID, p.PRNumber, p.SourceSHA,
-		p.ResolvedCount, p.AttemptedCount, p.GitHubAPICalls)
+		p.ResolvedCount, p.AttemptedCount, p.GitHubAPICalls,
+		p.ResolvedThreadKeys)
 	if err != nil {
 		return fmt.Errorf("insert auto_resolve_events: %w", err)
 	}

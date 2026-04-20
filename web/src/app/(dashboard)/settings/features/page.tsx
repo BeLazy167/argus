@@ -63,8 +63,8 @@ export default function FeaturesPage() {
 
             <FeatureToggle
               label="Cross-repo PR checks"
-              description="Auto-detect linked PRs (from URLs in the PR body) and verify compatibility across repos. Inaccessible repos are noted as 'partial coverage' — severity is not bumped."
-              cost="~1 extra LLM call per review (skipped if no linked PRs)"
+              description="Runs asynchronously after review completion. Probes 9 combination-failure categories (schema race, serialization drift, deploy ordering, security posture, enum exhaustiveness, and more) against each linked PR's diff + prior findings. Splits into: (a) cross-PR risk judge, (b) joint issue coverage when 2+ linked PRs share an issue. Sibling completion triggers a debounced refresh so late-arriving PRs update earlier ones. Inaccessible repos are noted as 'partial coverage' — severity unaffected."
+              cost="1–5 LLM calls per review depending on linked-PR + shared-issue count. Bounded by per-install rate limit (30/hour) and per-PR refresh cap (2 per 10 min)."
               enabled={draft.cross_pr_checks}
               onChange={v => update({ cross_pr_checks: v })}
             />

@@ -110,18 +110,20 @@ const insertAutoResolveEvent = `-- name: InsertAutoResolveEvent :exec
 
 INSERT INTO auto_resolve_events
     (installation_id, repo_id, pr_number, source_sha,
-     resolved_count, attempted_count, github_api_calls)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
+     resolved_count, attempted_count, github_api_calls,
+     resolved_thread_keys)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 `
 
 type InsertAutoResolveEventParams struct {
-	InstallationID int64  `json:"installation_id"`
-	RepoID         int64  `json:"repo_id"`
-	PRNumber       int    `json:"pr_number"`
-	SourceSHA      string `json:"source_sha"`
-	ResolvedCount  int    `json:"resolved_count"`
-	AttemptedCount int    `json:"attempted_count"`
-	GitHubAPICalls int    `json:"github_api_calls"`
+	InstallationID     int64    `json:"installation_id"`
+	RepoID             int64    `json:"repo_id"`
+	PRNumber           int      `json:"pr_number"`
+	SourceSHA          string   `json:"source_sha"`
+	ResolvedCount      int      `json:"resolved_count"`
+	AttemptedCount     int      `json:"attempted_count"`
+	GitHubAPICalls     int      `json:"github_api_calls"`
+	ResolvedThreadKeys []string `json:"resolved_thread_keys"`
 }
 
 // Queries for auto_resolve_events — see migration 037.
@@ -134,6 +136,7 @@ func (q *Queries) InsertAutoResolveEvent(ctx context.Context, arg InsertAutoReso
 		arg.ResolvedCount,
 		arg.AttemptedCount,
 		arg.GitHubAPICalls,
+		arg.ResolvedThreadKeys,
 	)
 	return err
 }

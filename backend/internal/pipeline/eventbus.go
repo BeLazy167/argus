@@ -51,7 +51,24 @@ const (
 	// carries {file, line, kind, pr, score} so the live stream can show per-
 	// finding memory context alongside the formatted review body tag.
 	EventMemoryMatched EventType = "memory_matched"
+	// EventReviewCompleted fires after the DB commit that sets
+	// reviews.status='completed' returns nil. Distinct from EventCompleted
+	// (which is per-review SSE UI signal) — this one is the in-process
+	// lifecycle hook used by cross-review stages (e.g. async cross-PR
+	// analysis; see crosspr_stage.go:OnReviewCompleted).
+	EventReviewCompleted EventType = "review_completed"
 )
+
+// ReviewCompletedPayload is the data carried by EventReviewCompleted.
+// Minimal by design — subscribers should re-hydrate from the store rather
+// than rely on snapshot data here. The review row is guaranteed durable
+// at publish time.
+type ReviewCompletedPayload struct {
+	ReviewID       uuid.UUID `json:"review_id"`
+	RepoID         int64     `json:"repo_id"`
+	PRNumber       int       `json:"pr_number"`
+	InstallationID int64     `json:"installation_id"`
+}
 
 const maxHistoryEvents = 500
 
@@ -63,11 +80,28 @@ type Event struct {
 }
 
 // EventBus provides per-review pub/sub for streaming pipeline events.
+//
+// Two subscription modes:
+//   - Subscribe(reviewID) — per-review SSE-style; one topic per review,
+//     used by the live-stream UI. History retained 60s post-close.
+//   - SubscribeGlobal(fn) — bus-level listener; fires for every Publish
+//     regardless of reviewID. Used for in-process lifecycle hooks that
+//     need to observe all reviews (e.g. async cross-PR stage watching
+//     EventReviewCompleted). Callers MUST not block — handler runs
+//     synchronously under t.mu; spawn a goroutine if work is non-trivial.
 type EventBus struct {
 	mu     sync.RWMutex
 	topics map[uuid.UUID]*topic
 	logger *slog.Logger
+
+	// globalMu guards globalSubs. Separate from mu so global-listener
+	// registration doesn't contend with topic open/close.
+	globalMu   sync.RWMutex
+	globalSubs []GlobalHandler
 }
+
+// GlobalHandler receives every published event. Must not block.
+type GlobalHandler func(reviewID uuid.UUID, evt Event)
 
 type topic struct {
 	mu          sync.Mutex
@@ -122,16 +156,16 @@ func (eb *EventBus) CloseTopic(reviewID uuid.UUID) {
 	}()
 }
 
-// Publish sends an event to all subscribers of a review topic.
-// Non-blocking: drops events for slow clients.
+// Publish sends an event to all subscribers of a review topic AND to any
+// registered global handlers. Non-blocking for per-review subscribers:
+// drops events for slow clients. Global handlers MUST return promptly
+// (see GlobalHandler docs) or they will serialize Publish throughput.
+//
+// When no topic is open for reviewID, per-review delivery is skipped but
+// global handlers still fire — this lets in-process lifecycle hooks
+// observe events (e.g. EventReviewCompleted) even after the UI topic has
+// already been closed.
 func (eb *EventBus) Publish(reviewID uuid.UUID, evtType EventType, data any) {
-	eb.mu.RLock()
-	t, ok := eb.topics[reviewID]
-	eb.mu.RUnlock()
-	if !ok {
-		return
-	}
-
 	raw, err := json.Marshal(data)
 	if err != nil {
 		eb.logger.Error("eventbus: marshal failed", "type", evtType, "review_id", reviewID, "error", err)
@@ -144,23 +178,50 @@ func (eb *EventBus) Publish(reviewID uuid.UUID, evtType EventType, data any) {
 		Data:      raw,
 	}
 
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.closed {
+	// Per-review delivery (topic may not exist — e.g. CLI replay, or a
+	// late-fire lifecycle event published after CloseTopic).
+	eb.mu.RLock()
+	t, ok := eb.topics[reviewID]
+	eb.mu.RUnlock()
+	if ok {
+		t.mu.Lock()
+		if !t.closed {
+			if len(t.history) < maxHistoryEvents {
+				t.history = append(t.history, evt)
+			}
+			for id, ch := range t.subscribers {
+				select {
+				case ch <- evt:
+				default:
+					eb.logger.Warn("eventbus: dropped event for slow client", "subscriber", id, "type", evtType, "review_id", reviewID)
+				}
+			}
+		}
+		t.mu.Unlock()
+	}
+
+	// Global delivery. Snapshot under RLock so a concurrent SubscribeGlobal
+	// can't race with invocation. Handlers are invoked outside the lock.
+	eb.globalMu.RLock()
+	handlers := eb.globalSubs
+	eb.globalMu.RUnlock()
+	for _, h := range handlers {
+		h(reviewID, evt)
+	}
+}
+
+// SubscribeGlobal registers a bus-level handler invoked for every Publish.
+// Intended for in-process lifecycle hooks (e.g. cross-review workflows);
+// not part of the per-review SSE stream. Handlers run synchronously in the
+// publisher's goroutine — spawn a goroutine inside the handler if work is
+// non-trivial.
+func (eb *EventBus) SubscribeGlobal(h GlobalHandler) {
+	if h == nil {
 		return
 	}
-
-	if len(t.history) < maxHistoryEvents {
-		t.history = append(t.history, evt)
-	}
-
-	for id, ch := range t.subscribers {
-		select {
-		case ch <- evt:
-		default:
-			eb.logger.Warn("eventbus: dropped event for slow client", "subscriber", id, "type", evtType, "review_id", reviewID)
-		}
-	}
+	eb.globalMu.Lock()
+	eb.globalSubs = append(eb.globalSubs, h)
+	eb.globalMu.Unlock()
 }
 
 // Subscribe returns a channel of events, the history so far, and an unsubscribe function.
