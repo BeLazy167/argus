@@ -246,6 +246,17 @@ function friendlyError(raw: string): {
       action: "Click Retry to re-run the review.",
     };
   }
+  // Server-restart recovery: backend writes this exact phrase when marking
+  // stale in-progress/pending reviews as failed at startup. Nothing the user
+  // can fix by checking provider keys.
+  if (raw.includes("server restarted") || raw.includes("timed out")) {
+    return {
+      title: "Review interrupted by server restart",
+      detail:
+        "A backend restart ended this review mid-pipeline. No charge — nothing ran to completion.",
+      action: "Click Retry to start fresh.",
+    };
+  }
   return {
     title: "Review failed to post",
     detail: raw.length > 200 ? raw.slice(0, 200) + "\u2026" : raw,
