@@ -36,37 +36,45 @@ feature flag.`}
       <h2 className="text-lg font-mono text-slate-100 pt-4">What Argus does</h2>
       <ol className="list-decimal pl-5 space-y-1 text-slate-400">
         <li>Finds all GitHub PR URLs and <code className="bg-slate-900 px-1 text-amber">owner/repo#N</code> references in the PR body (up to 5 by default).</li>
-        <li>Tries to fetch each linked PR&apos;s diff via its installation.</li>
-        <li>Sends the primary diff + each accessible linked diff to a compatibility-judge LLM.</li>
-        <li>Adds a <strong className="text-slate-200">Cross-Repo PR Coverage</strong> section to the review summary.</li>
+        <li>After the primary review completes, runs two async stages in parallel:
+          <ul className="list-disc pl-5 pt-1 space-y-1">
+            <li><strong className="text-slate-200">Combination-risk judge</strong> — hydrates each linked PR&apos;s diff + prior findings from their Argus review (if any), asks the LLM to probe 9 categories: schema/migration race, serialization contract drift, type/interface drift, config contradiction, deployment ordering, security posture, enum exhaustiveness, locale/temporal, and propagated findings.</li>
+            <li><strong className="text-slate-200">Joint issue coverage</strong> — when 2+ linked PRs share a referenced issue, judges whether the <em>combined</em> change addresses each acceptance criterion with per-criterion evidence (file:line).</li>
+          </ul>
+        </li>
+        <li>Edits the sticky review comment in place, adding <strong className="text-slate-200">Cross-Repo PR Coverage</strong> and, if applicable, <strong className="text-slate-200">Joint Issue Coverage</strong> sections.</li>
+        <li>When a linked PR&apos;s review completes later, re-runs only the cross-PR stage on already-reviewed PRs so late-arriving siblings refresh earlier PRs&apos; sections.</li>
       </ol>
 
       <h2 className="text-lg font-mono text-slate-100 pt-4">Inaccessible repos</h2>
       <p>
         If a linked repo doesn&apos;t have Argus installed, the compatibility check skips it and
-        notes <em>&quot;no access — partial coverage&quot;</em>. The review still completes. The
-        rest of the chain (accessible repos) still gets verified.
+        notes <em>&quot;not reviewed by Argus — diff context only&quot;</em>. The review still completes.
+        Install Argus on the linked repo to enable full finding propagation.
       </p>
 
       <h2 className="text-lg font-mono text-slate-100 pt-4">Concurrent reviews</h2>
       <p>
-        When both linked PRs are being reviewed at the same time (webhooks fire in parallel),
-        each review reads the other&apos;s <em>current head snapshot</em> independently. The two
-        reviews may see slightly different snapshots if one is mid-flight, but pushes re-trigger
-        both reviews, so the final state is always consistent.
+        When linked PRs are reviewed at the same time, each initial cross-PR pass may run with
+        partial data (siblings still reviewing). The event-driven refresh catches this: as each
+        sibling completes, Argus re-runs the cross-PR stage on every already-reviewed PR that
+        links to it, so the final state converges to full coverage across the family.
       </p>
 
-      <h2 className="text-lg font-mono text-slate-100 pt-4">Opt-in</h2>
+      <h2 className="text-lg font-mono text-slate-100 pt-4">Default on</h2>
       <p>
-        Cross-repo PR checks cost one extra LLM call per review. They&apos;re disabled by default —
-        enable them in <strong className="text-slate-200">Settings → Features</strong>.
+        Cross-repo PR checks are enabled by default for new installations. Cost is 1–5 LLM calls
+        per review depending on how many linked PRs and shared issues are involved; bounded by a
+        per-install rate limit (30/hour) and a per-PR refresh cap (2 per 10 minutes). Disable in{" "}
+        <strong className="text-slate-200">Settings → Features</strong>. Existing installations
+        keep whatever toggle value was stored before the default flip.
       </p>
 
       <h2 className="text-lg font-mono text-slate-100 pt-4">Severity policy</h2>
       <p>
-        Incompatibilities are reported <strong className="text-slate-200">informationally</strong>{" "}
-        in the review summary. They don&apos;t bump finding severity or block a merge — the
-        reviewer has full context to decide.
+        Combination risks and joint-coverage gaps are reported{" "}
+        <strong className="text-slate-200">informationally</strong> in the sticky comment. They
+        don&apos;t bump finding severity or block a merge — the reviewer has full context to decide.
       </p>
     </article>
   );

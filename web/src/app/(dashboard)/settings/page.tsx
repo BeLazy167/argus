@@ -1197,9 +1197,9 @@ export default function SettingsPage() {
                     />
                     <VerificationToggle
                       label="Cross-repo PR checks"
-                      hint="Check compatibility with linked PRs from other repos"
-                      description="Auto-detects GitHub PR URLs in your PR body (up to max_linked_prs). Fetches accessible peer PR diffs and uses an LLM to check for API contract / shared type incompatibilities. Inaccessible repos are noted as 'partial coverage' without severity impact."
-                      cost="+1 LLM call per review (skipped if no linked PRs)"
+                      hint="Cross-PR risk judge + joint issue coverage, run async after review"
+                      description="Auto-detects GitHub PR URLs in your PR body (up to max_linked_prs). Runs asynchronously after review completion. Two stages: (1) combination-risk judge probing 9 categories (schema race, serialization, deploy ordering, security posture, enum exhaustiveness, and more) against each linked PR's diff + prior findings; (2) joint issue coverage when 2+ linked PRs share an issue. Sibling completion triggers a debounced refresh so late-arriving PRs update earlier ones. Inaccessible repos show 'partial coverage' — severity unaffected."
+                      cost="1–5 LLM calls per review depending on linked-PR + shared-issue count. Bounded: per-install 30/hour, per-PR 2 refreshes/10 min."
                       enabled={featureFlags?.cross_pr_checks ?? false}
                       pending={saveFeatureFlags.isPending}
                       onToggle={() => {

@@ -57,6 +57,10 @@ type Review struct {
 	Diagrams       json.RawMessage  `json:"diagrams,omitempty"`
 	TruncatedFiles json.RawMessage  `json:"truncated_files,omitempty"`
 	Brief          *string          `json:"brief,omitempty"`
+	// CrossPRHash is written by the async cross-PR stage (crosspr_stage.go)
+	// to short-circuit repeated LLM calls when the linked-PR findings bundle
+	// hasn't changed. nil means "never run".
+	CrossPRHash    *string          `json:"cross_pr_hash,omitempty"`
 }
 
 type ReviewComment struct {

@@ -23,15 +23,16 @@ type ActivityLog struct {
 }
 
 type AutoResolveEvent struct {
-	ID             int64     `json:"id"`
-	InstallationID int64     `json:"installation_id"`
-	RepoID         int64     `json:"repo_id"`
-	PRNumber       int       `json:"pr_number"`
-	SourceSHA      string    `json:"source_sha"`
-	ResolvedCount  int       `json:"resolved_count"`
-	AttemptedCount int       `json:"attempted_count"`
-	GitHubAPICalls int       `json:"github_api_calls"`
-	CreatedAt      time.Time `json:"created_at"`
+	ID                 int64     `json:"id"`
+	InstallationID     int64     `json:"installation_id"`
+	RepoID             int64     `json:"repo_id"`
+	PRNumber           int       `json:"pr_number"`
+	SourceSHA          string    `json:"source_sha"`
+	ResolvedCount      int       `json:"resolved_count"`
+	AttemptedCount     int       `json:"attempted_count"`
+	GitHubAPICalls     int       `json:"github_api_calls"`
+	CreatedAt          time.Time `json:"created_at"`
+	ResolvedThreadKeys []string  `json:"resolved_thread_keys"`
 }
 
 type CodeEdge struct {
@@ -194,37 +195,40 @@ type Repo struct {
 }
 
 type Review struct {
-	ID                 uuid.UUID  `json:"id"`
-	RepoID             int64      `json:"repo_id"`
-	PRNumber           int        `json:"pr_number"`
-	PRTitle            string     `json:"pr_title"`
-	PRAuthor           string     `json:"pr_author"`
-	HeadSHA            string     `json:"head_sha"`
-	BaseSHA            string     `json:"base_sha"`
-	GithubReviewID     *int64     `json:"github_review_id"`
-	Status             string     `json:"status"`
-	Summary            *string    `json:"summary"`
-	Score              *int       `json:"score"`
-	TokenUsage         []byte     `json:"token_usage"`
-	Trigger            string     `json:"trigger"`
-	TriggeredBy        *string    `json:"triggered_by"`
-	DurationMs         *int       `json:"duration_ms"`
-	Error              *string    `json:"error"`
-	CreatedAt          time.Time  `json:"created_at"`
-	CompletedAt        *time.Time `json:"completed_at"`
-	FileCount          *int       `json:"file_count"`
-	DeepReview         bool       `json:"deep_review"`
-	Persona            *string    `json:"persona"`
-	IsIncremental      bool       `json:"is_incremental"`
-	ResolvedStaleCount *int       `json:"resolved_stale_count"`
-	HeadRef            *string    `json:"head_ref"`
-	SimulationResults  []byte     `json:"simulation_results"`
-	Diagram            *string    `json:"diagram"`
-	DiagramTitle       *string    `json:"diagram_title"`
-	Diagrams           []byte     `json:"diagrams"`
-	TruncatedFiles     []byte     `json:"truncated_files"`
-	Brief              *string    `json:"brief"`
-	MemoryEnabled      bool       `json:"memory_enabled"`
+	ID                 uuid.UUID       `json:"id"`
+	RepoID             int64           `json:"repo_id"`
+	PRNumber           int             `json:"pr_number"`
+	PRTitle            string          `json:"pr_title"`
+	PRAuthor           string          `json:"pr_author"`
+	HeadSHA            string          `json:"head_sha"`
+	BaseSHA            string          `json:"base_sha"`
+	GithubReviewID     *int64          `json:"github_review_id"`
+	Status             string          `json:"status"`
+	Summary            *string         `json:"summary"`
+	Score              *int            `json:"score"`
+	TokenUsage         []byte          `json:"token_usage"`
+	Trigger            string          `json:"trigger"`
+	TriggeredBy        *string         `json:"triggered_by"`
+	DurationMs         *int            `json:"duration_ms"`
+	Error              *string         `json:"error"`
+	CreatedAt          time.Time       `json:"created_at"`
+	CompletedAt        *time.Time      `json:"completed_at"`
+	FileCount          *int            `json:"file_count"`
+	DeepReview         bool            `json:"deep_review"`
+	Persona            *string         `json:"persona"`
+	IsIncremental      bool            `json:"is_incremental"`
+	ResolvedStaleCount *int            `json:"resolved_stale_count"`
+	HeadRef            *string         `json:"head_ref"`
+	SimulationResults  []byte          `json:"simulation_results"`
+	Diagram            *string         `json:"diagram"`
+	DiagramTitle       *string         `json:"diagram_title"`
+	Diagrams           []byte          `json:"diagrams"`
+	TruncatedFiles     []byte          `json:"truncated_files"`
+	Brief              *string         `json:"brief"`
+	MemoryEnabled      bool            `json:"memory_enabled"`
+	CrossPRHash        *string         `json:"cross_pr_hash"`
+	LinkedPRRefs       json.RawMessage `json:"linked_pr_refs"`
+	LinkedIssueRefs    json.RawMessage `json:"linked_issue_refs"`
 }
 
 type ReviewComment struct {

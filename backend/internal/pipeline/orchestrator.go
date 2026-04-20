@@ -160,6 +160,12 @@ type Orchestrator struct {
 	eventBus     *EventBus
 	tracker      EventTracker
 	logger       *slog.Logger
+	// crossPRHooks is the test-only injection point for the async cross-PR
+	// stage. nil in production — the stage falls back to the concrete
+	// st/ghClient/sm fields. Tests assign a non-nil *crossPRHooks to swap
+	// those boundaries with in-memory fakes (see crosspr_stage_deps.go and
+	// crosspr_stage_integration_test.go).
+	crossPRHooks *crossPRHooks
 }
 
 // LLMRegistry is the subset of llm.Registry used by Orchestrator.
@@ -201,6 +207,64 @@ func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, 
 	sm.RegisterStage(StatePass2, o.pass2)
 	sm.RegisterStage(StateSynthesizing, o.synthesize)
 	sm.RegisterStage(StatePosting, o.post)
+
+	// Async cross-PR stage: runs when any review completes. See
+	// crosspr_stage.go:OnReviewCompleted. Subscription is global (bus-level)
+	// because the per-review SSE topic is torn down once the UI disconnects;
+	// EventReviewCompleted is a lifecycle signal, not a UI stream.
+	//
+	// The handler spawns a goroutine so it never blocks Publish. Panic
+	// recovery mirrors the same defer-recover pattern used by the other
+	// async handlers spawned from this constructor.
+	if eventBus != nil {
+		eventBus.SubscribeGlobal(func(reviewID uuid.UUID, evt Event) {
+			if evt.Type != EventReviewCompleted {
+				return
+			}
+			var p ReviewCompletedPayload
+			if err := json.Unmarshal(evt.Data, &p); err != nil {
+				logger.Error("EventReviewCompleted bad payload",
+					"review_id", reviewID, "error", err)
+				return
+			}
+			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						logger.Error("crosspr-stage dispatch panic",
+							"recover", r,
+							"review_id", p.ReviewID,
+							"stack", string(debug.Stack()))
+					}
+				}()
+				// Detach from request context at the call site — the bus
+				// publisher's ctx is not meaningful for a long-running
+				// async stage. OnReviewCompleted further detaches internally.
+				o.OnReviewCompleted(context.Background(), p.ReviewID)
+			}()
+			// Joint acceptance runs in parallel to the findings
+			// stage. Separate mutex + no debounce — findings stage owns
+			// the 30s debounce, joint acceptance piggybacks on it by
+			// virtue of running from the same event; if multiple events
+			// fire for a review, the per-review mutex in
+			// runCrossPRAcceptanceStage serializes work.
+			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						logger.Error("joint-accept dispatch panic",
+							"recover", r,
+							"review_id", p.ReviewID,
+							"stack", string(debug.Stack()))
+					}
+				}()
+				o.runCrossPRAcceptanceStage(context.Background(), p.ReviewID)
+			}()
+		})
+	}
+
+	// Start the cross-PR map sweeper so per-reviewID mutexes and
+	// per-key sliding-window counters don't accumulate over process
+	// lifetime. See startCrossPRSweeper for interval + maxAge.
+	o.startCrossPRSweeper(context.Background())
 
 	return o
 }
@@ -943,7 +1007,7 @@ func (o *Orchestrator) autoResolveOnSynchronize(
 		return
 	}
 
-	resolved, attempted, apiCalls := o.autoResolveStaleComments(ghCtx, event, patchSet)
+	resolved, attempted, apiCalls, resolvedKeys := o.autoResolveStaleComments(ghCtx, event, patchSet)
 	// Persist whenever we touched GitHub — even a list-only call (0
 	// resolved, 0 attempted, 1 apiCall) is load operators may need to
 	// see against their installation token budget.
@@ -958,17 +1022,69 @@ func (o *Orchestrator) autoResolveOnSynchronize(
 	defer dbCancel()
 
 	if err := o.st.InsertAutoResolveEvent(dbCtx, store.InsertAutoResolveEventParams{
-		InstallationID: dbInstallationID,
-		RepoID:         dbRepoID,
-		PRNumber:       event.PRNumber,
-		SourceSHA:      event.HeadSHA,
-		ResolvedCount:  resolved,
-		AttemptedCount: attempted,
-		GitHubAPICalls: apiCalls,
+		InstallationID:     dbInstallationID,
+		RepoID:             dbRepoID,
+		PRNumber:           event.PRNumber,
+		SourceSHA:          event.HeadSHA,
+		ResolvedCount:      resolved,
+		AttemptedCount:     attempted,
+		GitHubAPICalls:     apiCalls,
+		ResolvedThreadKeys: resolvedKeys,
 	}); err != nil {
 		o.logger.Warn("auto-resolve: persist event",
 			"error", err, "pr", event.PRNumber)
 	}
+}
+
+// autoResolveDecisionKind classifies the outcome of decideAutoResolveThread.
+type autoResolveDecisionKind int
+
+const (
+	autoResolveSkip    autoResolveDecisionKind = iota // leave thread alone
+	autoResolveLineHit                                // changed line within ±lineProximity
+	autoResolveFileHit                                // file-level fallback (no line info)
+)
+
+// autoResolveDecision is the pure output of the thread-level resolution
+// rule. joinKey is non-empty only for line-addressed resolutions (file-level
+// fallbacks contribute nothing to the migration-041 join array because a
+// "path:0" key can never match any Finding).
+type autoResolveDecision struct {
+	kind    autoResolveDecisionKind
+	joinKey string // "<path>:<line>" or ""
+}
+
+// decideAutoResolveThread is the pure decision rule: given a review thread
+// and the set of files+lines changed in the new push, should the thread be
+// auto-resolved, and under what classification?
+//
+// Extracted from autoResolveStaleComments so the decision can be exercised
+// without a GitHub fake. The caller still owns the actual ResolveReviewThread
+// call, counter bookkeeping, and Argus-author gating.
+func decideAutoResolveThread(
+	t ghpkg.ReviewThread,
+	changedFiles map[string]bool,
+	fileChangedLines map[string]map[int]bool,
+	lineProximity int,
+) autoResolveDecision {
+	if !changedFiles[t.Path] {
+		return autoResolveDecision{kind: autoResolveSkip}
+	}
+	changedLineSet := fileChangedLines[t.Path]
+	if t.Line > 0 && len(changedLineSet) > 0 {
+		for changedLine := range changedLineSet {
+			if util.IntAbs(changedLine-t.Line) <= lineProximity {
+				return autoResolveDecision{
+					kind:    autoResolveLineHit,
+					joinKey: fmt.Sprintf("%s:%d", t.Path, t.Line),
+				}
+			}
+		}
+		return autoResolveDecision{kind: autoResolveSkip}
+	}
+	// No line info (file-level thread) or no parsed hunks — fall back to
+	// file-level. No joinKey: Finding is always line-addressed.
+	return autoResolveDecision{kind: autoResolveFileHit}
 }
 
 // autoResolveStaleComments resolves bot review threads whose specific lines
@@ -987,22 +1103,31 @@ func (o *Orchestrator) autoResolveOnSynchronize(
 // GitHub mutation we issued (ListReviewThreads + each ResolveReviewThread
 // attempt, success or failure) — persisted on auto_resolve_events so
 // operators can see rate-limit pressure.
+// autoResolveStaleComments returns:
+//   - resolved / attempted / apiCalls: aggregate counters for auto_resolve_events.
+//   - resolvedKeys: "<path>:<line>" keys for each thread actually resolved.
+//     Consumed by hydratePriorFindings via the migration-041 join column so
+//     the async cross-PR stage can drop prior findings whose threads are
+//     already closed. Keys use the resolved thread's Path + Line so the same
+//     shape produced by Finding.Path + Finding.Line on the reader side
+//     matches. Empty means nothing was resolved (legal: the push may have
+//     just fired the goroutine against an already-clean PR).
 func (o *Orchestrator) autoResolveStaleComments(
 	ctx context.Context,
 	event ghpkg.PREvent,
 	patchSet *diff.PatchSet,
-) (resolved, attempted, apiCalls int) {
+) (resolved, attempted, apiCalls int, resolvedKeys []string) {
 	owner, repo, err := splitRepoFullName(event.RepoFullName)
 	if err != nil {
 		o.logger.Warn("auto-resolve: bad repo name", "error", err)
-		return 0, 0, 0
+		return 0, 0, 0, nil
 	}
 
 	threads, err := o.ghClient.ListReviewThreads(ctx, event.InstallationID, owner, repo, event.PRNumber)
 	apiCalls++ // count the list call regardless of outcome
 	if err != nil {
 		o.logger.Warn("auto-resolve: listing threads", "error", err)
-		return 0, 0, apiCalls
+		return 0, 0, apiCalls, nil
 	}
 
 	// Build per-file changed line sets and a file-presence set
@@ -1023,30 +1148,14 @@ func (o *Orchestrator) autoResolveStaleComments(
 		}
 		botUnresolved++
 
-		if !changedFiles[t.Path] {
+		decision := decideAutoResolveThread(t, changedFiles, fileChangedLines, lineProximity)
+		switch decision.kind {
+		case autoResolveSkip:
 			continue
-		}
-
-		// Line-level check: did the specific lines this comment refers to get modified?
-		shouldResolve := false
-		changedLineSet := fileChangedLines[t.Path]
-		if t.Line > 0 && len(changedLineSet) > 0 {
-			// Check if any changed line falls within proximity of the comment's line
-			for changedLine := range changedLineSet {
-				if util.IntAbs(changedLine-t.Line) <= lineProximity {
-					shouldResolve = true
-					lineHit++
-					break
-				}
-			}
-		} else {
-			// No line info (file-level comment) or no parsed hunks — fall back to file-level
-			shouldResolve = true
+		case autoResolveLineHit:
+			lineHit++
+		case autoResolveFileHit:
 			fileHit++
-		}
-
-		if !shouldResolve {
-			continue
 		}
 
 		attempted++
@@ -1056,6 +1165,9 @@ func (o *Orchestrator) autoResolveStaleComments(
 			continue
 		}
 		resolved++
+		if decision.joinKey != "" {
+			resolvedKeys = append(resolvedKeys, decision.joinKey)
+		}
 	}
 
 	o.logger.Info("auto-resolve complete",
@@ -1063,8 +1175,9 @@ func (o *Orchestrator) autoResolveStaleComments(
 		"bot_unresolved", botUnresolved,
 		"line_level_hits", lineHit, "file_level_fallbacks", fileHit,
 		"api_calls", apiCalls,
+		"resolved_keys", len(resolvedKeys),
 		"pr", event.PRNumber)
-	return resolved, attempted, apiCalls
+	return resolved, attempted, apiCalls, resolvedKeys
 }
 
 // enrichFindings annotates each comment with pattern/rule matches and novelty flags.
@@ -2292,6 +2405,29 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	`, ghReviewID, run.ReviewID)
 	if err != nil {
 		return fmt.Errorf("updating review record: %w", err)
+	}
+
+	// Persist linked_pr_refs BEFORE the EventReviewCompleted publish so the
+	// sibling reverse-lookup in crosspr_stage.OnReviewCompleted sees this
+	// review's refs the instant a sibling fires. Non-fatal — an indexing
+	// miss here just means a linked sibling won't be refreshed on its next
+	// completion; the next push to either PR re-triggers.
+	o.persistReviewLinkedPRRefs(ctx, run)
+	// Persist linked_issue_refs alongside linked_pr_refs. Same
+	// ordering contract (BEFORE publish) so FindSharedLinkedIssues sees
+	// up-to-date data the instant a sibling's EventReviewCompleted fires.
+	o.persistReviewLinkedIssueRefs(ctx, run)
+
+	// Published only after the DB commit for status='completed' returned nil.
+	// Moving this inside the transaction would leak events on rollback —
+	// see cross-PR stage handler in crosspr_stage.go.
+	if run.EventBus != nil {
+		run.EventBus.Publish(run.ReviewID, EventReviewCompleted, ReviewCompletedPayload{
+			ReviewID:       run.ReviewID,
+			RepoID:         run.DBRepoID,
+			PRNumber:       run.PREvent.PRNumber,
+			InstallationID: run.PREvent.InstallationID,
+		})
 	}
 
 	// "comments" is the total FileReview count (post-dedup/scoring). Split it into
@@ -4007,17 +4143,11 @@ func (o *Orchestrator) validateStage(ctx context.Context, run *PipelineRun) erro
 		o.runIssueAcceptanceWorker(ctx, run)
 	}()
 
-	// Cross-repo PR compatibility — fetches linked PRs and judges coherence.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		defer func() {
-			if r := recover(); r != nil {
-				o.logger.Error("[validate] crosspr goroutine panic", "recover", r, "pr", run.PREvent.PRNumber)
-			}
-		}()
-		o.runCrossPRWorker(ctx, run)
-	}()
+	// Cross-repo PR compatibility moved to runCrossPRStage (crosspr_stage.go):
+	// it fires asynchronously after the primary review commits, so the primary
+	// review's latency stays minimal and late-arriving sibling PRs can
+	// trigger a refresh without re-running the full pipeline. Handler
+	// subscription to EventReviewCompleted is wired in NewOrchestrator.
 
 	wg.Wait()
 

@@ -30,6 +30,10 @@ type PREvent struct {
 	BaseRef        string
 	HeadRef         string
 	PRBody          string // first ~8000 chars of PR description (feeds intent extraction)
+	// PRBodyBefore is populated only on action="edited" from payload.changes.body.from.
+	// Used by the cross-PR webhook handler to diff linked-PR refs between pre-
+	// and post-edit bodies and trigger a refresh when the set changes.
+	PRBodyBefore    string
 	Merged          bool
 	PersonaOverride string `json:"-"` // set by @argus-eye review --persona X
 }
@@ -68,7 +72,7 @@ func ToPREvent(event *WebhookEvent) (*PREvent, error) {
 		return nil, fmt.Errorf("expected PullRequestEvent, got %T", event.Payload)
 	}
 
-	return &PREvent{
+	pe := &PREvent{
 		Action:         event.Action,
 		InstallationID: prEvent.GetInstallation().GetID(),
 		RepoFullName:   prEvent.GetRepo().GetFullName(),
@@ -82,7 +86,18 @@ func ToPREvent(event *WebhookEvent) (*PREvent, error) {
 		HeadRef:        prEvent.GetPullRequest().GetHead().GetRef(),
 		PRBody:         util.Truncate(prEvent.GetPullRequest().GetBody(), 8000, false),
 		Merged:         prEvent.GetPullRequest().GetMerged(),
-	}, nil
+	}
+	// payload.changes.body.from is only populated on action="edited". We
+	// truncate to the same budget as PRBody so the diff uses comparable
+	// input (and so a 10MB body can't blow up memory on the edit path).
+	if event.Action == "edited" {
+		if changes := prEvent.GetChanges(); changes != nil {
+			if body := changes.GetBody(); body != nil {
+				pe.PRBodyBefore = util.Truncate(body.GetFrom(), 8000, false)
+			}
+		}
+	}
+	return pe, nil
 }
 
 // CommentEvent holds parsed data from a pull_request_review_comment webhook event.

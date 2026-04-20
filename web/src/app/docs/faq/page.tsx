@@ -117,7 +117,7 @@ export default function FAQPage() {
         <ul className="list-disc pl-5 mt-2 space-y-1 text-slate-400">
           <li><strong className="text-slate-200">Auto-review</strong> — when off, opened PRs get a trigger checkbox instead of running automatically (default: off).</li>
           <li><strong className="text-slate-200">Issue acceptance check</strong> — toggles the issue verification worker (default: on).</li>
-          <li><strong className="text-slate-200">Cross-repo PR checks</strong> — toggles the cross-PR worker (default: off).</li>
+          <li><strong className="text-slate-200">Cross-repo PR checks</strong> — toggles the cross-PR worker (default: on for new installations).</li>
           <li><strong className="text-slate-200">Max linked PRs per review</strong> — caps how many PRs the cross-PR worker fetches (default: 5).</li>
         </ul>
       </section>

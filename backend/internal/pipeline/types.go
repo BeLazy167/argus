@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/BeLazy167/argus/backend/internal/github"
 	"github.com/BeLazy167/argus/backend/internal/memory"
+	"github.com/BeLazy167/argus/backend/internal/util"
 	"github.com/BeLazy167/argus/backend/pkg/diff"
 	"github.com/google/uuid"
 )
@@ -130,26 +132,33 @@ type PipelineRun struct {
 	SastFindings map[string][]SastFinding `json:"-"`
 	// ArchContext holds per-file architecture metrics for review prompt enrichment.
 	// Populated in pre-review for high-risk files (choke points / hotspots).
-	ArchContext          map[string]ArchContextEntry `json:"-"`
+	ArchContext map[string]ArchContextEntry `json:"-"`
 	// PRIntent holds the author's stated motivation for the PR (goal, non-goals,
 	// acceptance criteria). Populated by IntentExtractionStage in the pre-review block,
 	// consumed by specialists and Synthesis. Nil until extraction runs; after extraction
 	// Source may be "empty" when neither PR body nor linked issues provide any context.
-	PRIntent        *PRIntent          `json:"-"`
+	PRIntent *PRIntent `json:"-"`
 	// LinkedIssues holds issues this PR references (closes / fixes / resolves / refs).
 	// Populated by HandlePREvent via GraphQL + regex fallback.
-	LinkedIssues    []IssueLink        `json:"-"`
+	LinkedIssues []IssueLink `json:"-"`
 	// IssueAcceptance holds per-issue criterion verdicts from the acceptance worker.
 	IssueAcceptance []AcceptanceResult `json:"-"`
 	// LinkedPRs holds cross-repo PRs referenced from the primary PR body.
-	LinkedPRs       []PRLink           `json:"-"`
+	LinkedPRs []PRLink `json:"-"`
 	// CrossPRCoverage holds the aggregate compatibility judgment from the crosspr worker.
-	CrossPRCoverage *CrossPRCoverage   `json:"-"`
+	CrossPRCoverage *CrossPRCoverage `json:"-"`
+	// JointAcceptance holds per-shared-issue verdicts from the joint
+	// acceptance stage (crosspr_stage.runCrossPRAcceptanceStage).
+	// Additive to IssueAcceptance — per-PR rollup stays on the original
+	// field; this one only populates when >=2 linked reviews reference the
+	// same issue, and renders into a separate "## Joint Issue Coverage"
+	// sticky section alongside the existing "## Issue Coverage".
+	JointAcceptance []JointAcceptanceResult `json:"-"`
 	// FeatureFlags holds per-installation toggles loaded once per run.
-	FeatureFlags    FeatureFlags       `json:"-"`
-	StartedCommentNodeID string                       `json:"-"` // node ID of the "review started" GH comment, for minimizing later
-	Indexer              *memory.Indexer              `json:"-"` // per-org indexer resolved from Registry
-	EventBus             *EventBus                    `json:"-"` // not persisted
+	FeatureFlags         FeatureFlags    `json:"-"`
+	StartedCommentNodeID string          `json:"-"` // node ID of the "review started" GH comment, for minimizing later
+	Indexer              *memory.Indexer `json:"-"` // per-org indexer resolved from Registry
+	EventBus             *EventBus       `json:"-"` // not persisted
 	Error                string
 	CreatedAt            time.Time
 	UpdatedAt            time.Time
@@ -244,16 +253,16 @@ type FileComment struct {
 	// MatchedPatternKind classifies the kind of memory hit so the review-body
 	// renderer can produce the right phrasing: "pattern" | "convention" |
 	// "rule" | "similarity". Empty string ⇒ no memory tag rendered.
-	MatchedPatternKind   string `json:"-"`
-	MatchedPatternPR     int    `json:"-"` // source PR number (from Supermemory doc metadata)
-	MatchedPatternAuthor string `json:"-"` // source PR author login
-	MatchedPatternAgeDays int   `json:"-"` // rounded days since source indexed
-	BlastRadius         int        `json:"blast_radius,omitempty"` // number of downstream dependents affected
-	EnforcedRuleContent string     `json:"-"`
-	IsNewFinding        bool       `json:"-"`
-	DedupCount          int        `json:"dedup_count,omitempty"` // how many duplicate findings were merged into this one
-	SastCorroborated    bool       `json:"sast_corroborated,omitempty"`
-	Confidence          string     `json:"confidence,omitempty"`
+	MatchedPatternKind    string `json:"-"`
+	MatchedPatternPR      int    `json:"-"`                      // source PR number (from Supermemory doc metadata)
+	MatchedPatternAuthor  string `json:"-"`                      // source PR author login
+	MatchedPatternAgeDays int    `json:"-"`                      // rounded days since source indexed
+	BlastRadius           int    `json:"blast_radius,omitempty"` // number of downstream dependents affected
+	EnforcedRuleContent   string `json:"-"`
+	IsNewFinding          bool   `json:"-"`
+	DedupCount            int    `json:"dedup_count,omitempty"` // how many duplicate findings were merged into this one
+	SastCorroborated      bool   `json:"sast_corroborated,omitempty"`
+	Confidence            string `json:"confidence,omitempty"`
 }
 
 // ValidSeverities is the set of valid severity values.
@@ -587,44 +596,346 @@ type IssueLink struct {
 	FetchError string
 }
 
+// AcceptanceStatus classifies a single criterion's verdict. Shared by
+// per-PR AcceptanceCriterion and joint JointAcceptanceCriterion so both
+// paths use the same closed vocabulary. JointVerdict below is a strictly
+// narrower rollup (no "ambiguous") that mirrors the joint judge's spec.
+type AcceptanceStatus string
+
+const (
+	AcceptanceStatusAddressed   AcceptanceStatus = "addressed"
+	AcceptanceStatusPartial     AcceptanceStatus = "partial"
+	AcceptanceStatusUnaddressed AcceptanceStatus = "unaddressed"
+	AcceptanceStatusAmbiguous   AcceptanceStatus = "ambiguous"
+)
+
+// ValidAcceptanceStatuses is the closed set of AcceptanceStatus values.
+var ValidAcceptanceStatuses = map[AcceptanceStatus]struct{}{
+	AcceptanceStatusAddressed:   {},
+	AcceptanceStatusPartial:     {},
+	AcceptanceStatusUnaddressed: {},
+	AcceptanceStatusAmbiguous:   {},
+}
+
+// Valid reports whether s is in the ValidAcceptanceStatuses set.
+func (s AcceptanceStatus) Valid() bool {
+	_, ok := ValidAcceptanceStatuses[s]
+	return ok
+}
+
+// JointVerdict is the rollup verdict for the joint acceptance judge.
+// Narrower than AcceptanceStatus: the prompt disallows "ambiguous" so the
+// rollup always lands on one of three buckets.
+type JointVerdict string
+
+const (
+	JointVerdictAddressed   JointVerdict = "addressed"
+	JointVerdictPartial     JointVerdict = "partial"
+	JointVerdictUnaddressed JointVerdict = "unaddressed"
+)
+
+// ValidJointVerdicts is the closed set of JointVerdict values.
+var ValidJointVerdicts = map[JointVerdict]struct{}{
+	JointVerdictAddressed:   {},
+	JointVerdictPartial:     {},
+	JointVerdictUnaddressed: {},
+}
+
+// Valid reports whether v is in the ValidJointVerdicts set.
+func (v JointVerdict) Valid() bool {
+	_, ok := ValidJointVerdicts[v]
+	return ok
+}
+
 // AcceptanceCriterion is one judged criterion from a linked issue.
 type AcceptanceCriterion struct {
 	Text     string
-	Status   string // "addressed" | "partial" | "unaddressed" | "ambiguous"
+	Status   AcceptanceStatus
 	Reason   string
 	Evidence string // e.g. "internal/auth/login.go:42"
 }
 
 // AcceptanceResult is the per-issue judgment rolled up from its criteria.
+// Verdict reuses AcceptanceStatus (not JointVerdict) because the per-PR
+// rollup can legitimately land on "ambiguous" when the LLM has insufficient
+// signal — that's a valid terminal state for the single-PR path.
 type AcceptanceResult struct {
 	IssueNumber int
 	IssueTitle  string
 	IssueURL    string
 	Criteria    []AcceptanceCriterion
-	Verdict     string // rollup: addressed | partial | unaddressed | ambiguous
+	Verdict     AcceptanceStatus // rollup over Criteria
+}
+
+// JointAcceptanceCriterion is one criterion judged against the COMBINED
+// change across 2+ linked PRs sharing the same issue. AddressedBy points
+// at whichever sibling most directly satisfies it; empty string means no
+// sibling addresses the criterion.
+type JointAcceptanceCriterion struct {
+	Text        string           `json:"text"`
+	AddressedBy string           `json:"addressed_by"` // "owner/repo#N" or "" if unaddressed
+	Evidence    string           `json:"evidence"`     // "path:line" or "" if unaddressed
+	Status      AcceptanceStatus `json:"status"`
+}
+
+// JointAcceptanceResult is the joint-judge output for one shared issue.
+// Unknown SchemaVersion is treated as an empty result + Warn by the
+// parser, never a panic.
+type JointAcceptanceResult struct {
+	SchemaVersion int                        `json:"schema_version"`
+	IssueOwner    string                     `json:"issue_owner"`
+	IssueRepo     string                     `json:"issue_repo"`
+	IssueNumber   int                        `json:"issue_number"`
+	IssueTitle    string                     `json:"issue_title"`
+	IssueURL      string                     `json:"issue_url,omitempty"`
+	Criteria      []JointAcceptanceCriterion `json:"criteria"`
+	Verdict       JointVerdict               `json:"verdict"`
+}
+
+// Async stage schema version constants. Envelopes whose schema_version
+// doesn't match are treated as empty output + Warn log by the parser
+// (never a panic) — see runCrossPRStage and judgeSharedIssue.
+const (
+	// CrossPRJudgeSchemaV1 is the current crossPRJudgeResponse envelope.
+	CrossPRJudgeSchemaV1 = 1
+	// JointAcceptanceSchemaV1 is the current JointAcceptanceResult envelope.
+	JointAcceptanceSchemaV1 = 1
+)
+
+// PriorReviewSnapshot carries prior-review context for one linked PR.
+// Nil on PRLink.PriorReview means Argus never produced a completed review
+// for the linked PR — callers must fall back to diff-only context. A
+// non-nil snapshot with empty Findings means "reviewed, no open findings".
+// HeadSHA lets the caller compare against PRLink.HeadSHA to detect
+// force-push drift ("reviewed at abc123, now at def456").
+//
+// ReviewedAt is the completion timestamp from reviews.completed_at. Storing
+// the instant (not a pre-computed duration) keeps this struct a pure source-
+// of-truth carrier: age drifts while the snapshot sits in memory between
+// hydration and rendering, so consumers compute `time.Since(ReviewedAt)` at
+// format time.
+type PriorReviewSnapshot struct {
+	Findings   []Finding `json:"findings,omitempty"`
+	ReviewedAt time.Time `json:"reviewed_at,omitempty"`
+	HeadSHA    string    `json:"head_sha,omitempty"`
 }
 
 // PRLink describes a cross-repo pull request auto-detected from the primary
 // PR body. The Diff field is only populated when Accessible is true.
+//
+// PriorReview collapses the former {Reviewed, PriorFindings, PriorReviewAge,
+// PriorReviewHeadSHA} product-type into a single nil-checked snapshot. Nil =
+// not reviewed by Argus; non-nil = reviewed (with possibly empty findings).
+// Eliminates the class of bugs where callers set Age/HeadSHA without flipping
+// Reviewed=true.
 type PRLink struct {
-	Owner      string
-	Repo       string
-	Number     int
-	URL        string
-	Title      string
-	HeadSHA    string
-	Diff       string
-	Accessible bool
-	FetchError string
+	Owner       string
+	Repo        string
+	Number      int
+	URL         string
+	Title       string
+	HeadSHA     string
+	Diff        string
+	Accessible  bool
+	FetchError  string
+	PriorReview *PriorReviewSnapshot `json:"prior_review,omitempty"`
 }
 
-// CrossPRCoverage aggregates the compatibility judgment across all linked PRs.
+// Finding is the cross-PR stage's view of a prior-review finding, built by
+// flattening (FileReview.Path + FileComment) from the AllFileReviews JSONB
+// payload returned by GetLatestCompletedReviewByPR.
+//
+// Why a distinct struct, not a type alias for FileComment: FileComment does
+// not carry its file path (Path lives on the enclosing FileReview), and the
+// cross-PR judge prompt needs path+line per finding. Materializing Finding
+// during unmarshal lets the stage carry a flat list and keeps the LLM prompt
+// simple.
+//
+// Field naming is tuned to the on-disk JSONB shape:
+//   - FileReview serializes with no json tags, so Path/Comments are capitalized.
+//   - FileComment has explicit json tags: line, body, severity, category,
+//     specialist, what, confidence.
+//
+// SourceReviewID is stamped by the cross-PR stage during hydration, not by
+// the FileReview unmarshal, so prompts can attribute findings to a specific
+// reviewed snapshot.
+type Finding struct {
+	// Path is lifted from the containing FileReview during unmarshal.
+	Path string `json:"path"`
+	// Line is the 1-based end-line of the reviewed range (FileComment.Line).
+	Line int `json:"line"`
+	// Severity carries the FileComment.Severity typed enum. Since Severity is
+	// `type Severity string`, the JSON wire shape is identical to an untyped
+	// string field — but call sites now get compile-time coverage of the
+	// SeverityCritical/Warning/Suggestion/Praise set.
+	Severity Severity `json:"severity"`
+	// Category carries the FileComment.Category typed enum (security|bug|...).
+	Category Category `json:"category"`
+	// Specialist names the reviewer (bug_hunter|security|architecture|regression).
+	// Empty string when the finding came from a non-specialist single-pass review.
+	Specialist Specialist `json:"specialist,omitempty"`
+	// Summary is a short description. Populated from FileComment.What when set,
+	// otherwise from the first ~240 chars of FileComment.Body.
+	Summary string `json:"summary,omitempty"`
+	// Detail is the long-form review body (FileComment.Body).
+	Detail string `json:"detail,omitempty"`
+	// Confidence mirrors FileComment.Confidence when present.
+	Confidence string `json:"confidence,omitempty"`
+	// SourceReviewID is the reviewID the finding was lifted from. Stamped by
+	// the cross-PR stage during hydration; empty when projected from a raw
+	// FileReview payload.
+	SourceReviewID string `json:"source_review_id,omitempty"`
+}
+
+// findingsFromFileReviews flattens [{Path, Comments:[...]}] into []Finding.
+// Used by the async cross-PR stage to project the AllFileReviews jsonb
+// payload returned by GetLatestCompletedReviewByPR into a prompt-ready shape.
+//
+// Does NOT filter by auto-resolved source SHAs — the caller layers that
+// filter on top, since auto_resolve_events tracks push SHAs not thread IDs
+// and per-thread reconciliation requires additional context.
+func findingsFromFileReviews(fr []FileReview, sourceReviewID string) []Finding {
+	if len(fr) == 0 {
+		return nil
+	}
+	out := make([]Finding, 0, len(fr))
+	for _, f := range fr {
+		for _, c := range f.Comments {
+			summary := c.What
+			if summary == "" {
+				summary = c.Body
+			}
+			// UTF-8 safe truncate: byte-slicing a multi-byte rune mid-sequence
+			// produces invalid UTF-8 and breaks downstream JSON encoders.
+			summary = util.Truncate(summary, 240, false)
+			out = append(out, Finding{
+				Path:           f.Path,
+				Line:           c.Line,
+				Severity:       c.Severity,
+				Category:       c.Category,
+				Specialist:     c.Specialist,
+				Summary:        summary,
+				Detail:         c.Body,
+				Confidence:     c.Confidence,
+				SourceReviewID: sourceReviewID,
+			})
+		}
+	}
+	return out
+}
+
+// CrossPRCoverage aggregates the combination-risk judgment across all linked
+// PRs. IsCompatible derives from CombinationRisks so writer sites cannot drift
+// out of sync with the risk list. Incompatibilities is the pre-rendered
+// projection of CombinationRisks (description + " (" + linked_pr + ")") used
+// by formatCrossPRCoverageSection.
 type CrossPRCoverage struct {
 	LinkedPRs         []PRLink
-	Compatible        bool
 	Incompatibilities []string
+	CombinationRisks  []CombinationRisk
 	AccessibleCount   int
 	InaccessibleCount int
+}
+
+// IsCompatible returns true when no combination risks were surfaced.
+// Derived from CombinationRisks so a writer cannot produce an inconsistent
+// state where the flag and the risk list disagree.
+func (c *CrossPRCoverage) IsCompatible() bool {
+	return c != nil && len(c.CombinationRisks) == 0
+}
+
+// RiskCategory classifies a cross-PR combination risk. The nine buckets
+// mirror crossPRCombinationRiskPrompt — any LLM output outside this set
+// is dropped (with Warn) rather than passed through, so a drifting judge
+// can't smuggle an unmappable category into downstream renderers.
+type RiskCategory string
+
+const (
+	RiskCategorySchemaRace            RiskCategory = "schema_race"
+	RiskCategorySerializationContract RiskCategory = "serialization_contract"
+	RiskCategoryTypeDrift             RiskCategory = "type_drift"
+	RiskCategoryConfigContradiction   RiskCategory = "config_contradiction"
+	RiskCategoryDeployOrdering        RiskCategory = "deploy_ordering"
+	RiskCategorySecurityPosture       RiskCategory = "security_posture"
+	RiskCategoryEnumExhaustiveness    RiskCategory = "enum_exhaustiveness"
+	RiskCategoryLocaleTemporal        RiskCategory = "locale_temporal"
+	RiskCategoryPropagatedFinding     RiskCategory = "propagated_finding"
+)
+
+// ValidRiskCategories is the closed set of RiskCategory values.
+var ValidRiskCategories = map[RiskCategory]struct{}{
+	RiskCategorySchemaRace:            {},
+	RiskCategorySerializationContract: {},
+	RiskCategoryTypeDrift:             {},
+	RiskCategoryConfigContradiction:   {},
+	RiskCategoryDeployOrdering:        {},
+	RiskCategorySecurityPosture:       {},
+	RiskCategoryEnumExhaustiveness:    {},
+	RiskCategoryLocaleTemporal:        {},
+	RiskCategoryPropagatedFinding:     {},
+}
+
+// Valid reports whether c is in the ValidRiskCategories set.
+func (c RiskCategory) Valid() bool {
+	_, ok := ValidRiskCategories[c]
+	return ok
+}
+
+// RiskSeverity is the severity bucket a cross-PR combination risk lands in.
+// Unknown values from the LLM normalize to Medium (see normalizeRiskSeverity)
+// — a safe default that keeps the risk visible without over-weighting it.
+type RiskSeverity string
+
+const (
+	RiskSeverityLow    RiskSeverity = "low"
+	RiskSeverityMedium RiskSeverity = "medium"
+	RiskSeverityHigh   RiskSeverity = "high"
+)
+
+// ValidRiskSeverities is the closed set of RiskSeverity values.
+var ValidRiskSeverities = map[RiskSeverity]struct{}{
+	RiskSeverityLow:    {},
+	RiskSeverityMedium: {},
+	RiskSeverityHigh:   {},
+}
+
+// Valid reports whether s is in the ValidRiskSeverities set.
+func (s RiskSeverity) Valid() bool {
+	_, ok := ValidRiskSeverities[s]
+	return ok
+}
+
+// normalizeRiskSeverity lowercases + trims raw and maps it to a RiskSeverity.
+// Unknown values fall through to RiskSeverityMedium so a drifted LLM contract
+// keeps the risk visible at a middle-of-the-road severity (same safe-default
+// pattern as normalizeJointVerdict's fallback).
+//
+// A non-empty, non-canonical input (e.g. "CRITICAL" / "blocker") is logged at
+// Warn so a silent severity downgrade can't hide a regression in the judge
+// prompt or provider. An empty input is the documented "absent" shape and is
+// intentionally silent.
+func normalizeRiskSeverity(raw string, logger *slog.Logger) RiskSeverity {
+	s := strings.ToLower(strings.TrimSpace(raw))
+	switch RiskSeverity(s) {
+	case RiskSeverityLow, RiskSeverityMedium, RiskSeverityHigh:
+		return RiskSeverity(s)
+	}
+	if raw != "" && logger != nil {
+		logger.Warn("[crosspr] unknown risk severity — defaulting to medium", "raw", raw)
+	}
+	return RiskSeverityMedium
+}
+
+// CombinationRisk is one entry in the cross-PR judge output. Category is one
+// of the nine enumerated buckets (see crossPRCombinationRiskPrompt); severity
+// is low|medium|high. LinkedPR is the "owner/repo#N" key of the sibling PR
+// implicated in the risk.
+type CombinationRisk struct {
+	Category     RiskCategory `json:"category"`
+	Description  string       `json:"description"`
+	LinkedPR     string       `json:"linked_pr"`     // owner/repo#N
+	PrimaryFiles []string     `json:"primary_files"` // path:line entries
+	Severity     RiskSeverity `json:"severity"`
 }
 
 // FeatureFlags captures per-installation feature gates loaded once per run.
@@ -635,10 +946,15 @@ type FeatureFlags struct {
 }
 
 // DefaultFeatureFlags returns the backfill defaults for new installations:
-// issue acceptance on, cross-PR off, 5 linked PR cap.
+// issue acceptance on, cross-PR on, 5 linked PR cap.
+//
+// CrossPRChecks default true (was false pre-039); existing installations
+// whose feature_flags JSON explicitly records false are preserved by the
+// loader (see loadFeatureFlags in acceptance.go). Only installations with
+// an empty feature_flags blob or a missing cross_pr_checks key flip to on.
 func DefaultFeatureFlags() FeatureFlags {
 	return FeatureFlags{
-		CrossPRChecks:   false,
+		CrossPRChecks:   true,
 		IssueAcceptance: true,
 		MaxLinkedPRs:    5,
 	}

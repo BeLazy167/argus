@@ -177,10 +177,10 @@ func judgeIssue(
 			IssueNumber: link.Number,
 			IssueTitle:  link.Title,
 			IssueURL:    link.URL,
-			Verdict:     "ambiguous",
+			Verdict:     AcceptanceStatusAmbiguous,
 			Criteria: []AcceptanceCriterion{{
 				Text:   "(no structured criteria in issue body)",
-				Status: "ambiguous",
+				Status: AcceptanceStatusAmbiguous,
 				Reason: "issue has no acceptance criteria section and no bulleted list",
 			}},
 		}
@@ -240,10 +240,9 @@ func judgeIssue(
 
 	criteria := make([]AcceptanceCriterion, 0, len(judged))
 	for _, j := range judged {
-		status := normalizeStatus(j.Status)
 		criteria = append(criteria, AcceptanceCriterion{
 			Text:     j.Criterion,
-			Status:   status,
+			Status:   normalizeStatus(j.Status),
 			Reason:   j.Reason,
 			Evidence: j.Evidence,
 		})
@@ -254,9 +253,9 @@ func judgeIssue(
 		accepted, rejected := 0, 0
 		for _, c := range criteria {
 			switch c.Status {
-			case "addressed":
+			case AcceptanceStatusAddressed:
 				accepted++
-			case "unaddressed":
+			case AcceptanceStatusUnaddressed:
 				rejected++
 			}
 		}
@@ -351,40 +350,43 @@ func normalizeWhitespace(s string) string {
 	return strings.TrimSpace(b.String())
 }
 
-// normalizeStatus coerces LLM output into one of the four known statuses.
-// Anything unrecognized becomes "ambiguous".
-func normalizeStatus(s string) string {
+// normalizeStatus coerces raw LLM output into one of the four canonical
+// AcceptanceStatus values. Accepts loose variants like "partially_addressed"
+// and "not addressed"; anything unrecognized falls through to Ambiguous.
+// Takes a raw string (the upstream JSON payload hasn't been unmarshalled to
+// the typed alias at this point) and returns the typed value.
+func normalizeStatus(s string) AcceptanceStatus {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "addressed":
-		return "addressed"
+		return AcceptanceStatusAddressed
 	case "partial", "partially_addressed", "partially addressed":
-		return "partial"
+		return AcceptanceStatusPartial
 	case "unaddressed", "not_addressed", "not addressed":
-		return "unaddressed"
+		return AcceptanceStatusUnaddressed
 	default:
-		return "ambiguous"
+		return AcceptanceStatusAmbiguous
 	}
 }
 
 // rollupVerdict reduces per-criterion statuses to a single verdict for an issue.
 // Rules (in order):
-//   - all addressed → "addressed"
-//   - any unaddressed + nothing addressed → "unaddressed"
-//   - mix of addressed + any other → "partial"
-//   - all ambiguous → "ambiguous"
-//   - fallback → "partial"
-func rollupVerdict(criteria []AcceptanceCriterion) string {
+//   - all addressed → Addressed
+//   - any unaddressed + nothing addressed → Unaddressed
+//   - mix of addressed + any other → Partial
+//   - all ambiguous → Ambiguous
+//   - fallback → Partial
+func rollupVerdict(criteria []AcceptanceCriterion) AcceptanceStatus {
 	if len(criteria) == 0 {
-		return "ambiguous"
+		return AcceptanceStatusAmbiguous
 	}
 	var addr, part, unaddr, amb int
 	for _, c := range criteria {
 		switch c.Status {
-		case "addressed":
+		case AcceptanceStatusAddressed:
 			addr++
-		case "partial":
+		case AcceptanceStatusPartial:
 			part++
-		case "unaddressed":
+		case AcceptanceStatusUnaddressed:
 			unaddr++
 		default:
 			amb++
@@ -392,17 +394,17 @@ func rollupVerdict(criteria []AcceptanceCriterion) string {
 	}
 	switch {
 	case addr == len(criteria):
-		return "addressed"
+		return AcceptanceStatusAddressed
 	case addr == 0 && part == 0 && unaddr > 0:
-		return "unaddressed"
+		return AcceptanceStatusUnaddressed
 	case addr == 0 && part == 0 && unaddr == 0:
-		return "ambiguous"
+		return AcceptanceStatusAmbiguous
 	case addr > 0 && (part > 0 || unaddr > 0 || amb > 0):
-		return "partial"
+		return AcceptanceStatusPartial
 	case part > 0:
-		return "partial"
+		return AcceptanceStatusPartial
 	default:
-		return "partial"
+		return AcceptanceStatusPartial
 	}
 }
 
@@ -417,20 +419,20 @@ func formatIssueCoverageSection(results []AcceptanceResult) string {
 	for _, r := range results {
 		addressed := 0
 		for _, c := range r.Criteria {
-			if c.Status == "addressed" {
+			if c.Status == AcceptanceStatusAddressed {
 				addressed++
 			}
 		}
-		icon := verdictIcon(r.Verdict)
+		icon := verdictIcon(string(r.Verdict))
 		sb.WriteString(fmt.Sprintf("- **[#%d](%s)** — *%s* — %s %s (%d/%d)\n",
 			r.IssueNumber, r.IssueURL,
 			util.Truncate(r.IssueTitle, 80, true),
 			icon, r.Verdict, addressed, len(r.Criteria)))
 		for _, c := range r.Criteria {
 			sb.WriteString(fmt.Sprintf("  - %s %s",
-				verdictIcon(c.Status),
+				verdictIcon(string(c.Status)),
 				util.Truncate(c.Text, 200, true)))
-			if c.Status != "addressed" && c.Reason != "" {
+			if c.Status != AcceptanceStatusAddressed && c.Reason != "" {
 				sb.WriteString(fmt.Sprintf(" — _%s_",
 					util.Truncate(c.Reason, 200, true)))
 			}
@@ -440,6 +442,10 @@ func formatIssueCoverageSection(results []AcceptanceResult) string {
 	return sb.String()
 }
 
+// verdictIcon takes the string form of an AcceptanceStatus / JointVerdict so
+// it can render both enums without requiring parallel typed overloads.
+// The canonical call site passes string(status) so typos in the callers
+// fail at the typed-enum boundary, not here.
 func verdictIcon(status string) string {
 	switch status {
 	case "addressed":
