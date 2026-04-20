@@ -23,6 +23,7 @@ import {
   useStatsCostPerStage,
   type Period,
 } from "@/lib/queries/org-stats";
+import { stageColor, stageLabel } from "@/lib/stage-labels";
 
 const PERIODS: { value: Period; label: string }[] = [
   { value: "7d", label: "7d" },
@@ -32,30 +33,6 @@ const PERIODS: { value: Period; label: string }[] = [
 
 const PIE_COLORS = ["#f59e0b", "#3b82f6", "#10b981", "#ef4444", "#8b5cf6", "#ec4899", "#06b6d4", "#84cc16"];
 const SEV_COLORS: Record<string, string> = { critical: "#ef4444", warning: "#f59e0b", suggestion: "#3b82f6", praise: "#10b981" };
-// STAGE_COLORS keys match backend RunTokenUsage JSON keys (see
-// pipeline/types.go). Stages that can appear in production but aren't mapped
-// here fall back to `hsl(var(--primary))` — add new ones as the backend
-// emits them.
-const STAGE_COLORS: Record<string, string> = {
-  triage: "#10b981",
-  enrichment: "#22d3ee",
-  conventions: "#14b8a6",
-  patterns: "#a855f7",
-  file_synthesis: "#0ea5e9",
-  review: "#3b82f6",
-  scoring: "#f59e0b",
-  synthesis: "#8b5cf6",
-  pass2: "#ec4899",
-  deep_review: "#06b6d4",
-  graph: "#f97316",
-  posting: "#84cc16",
-  lead_agent: "#eab308",
-  acceptance: "#2dd4bf",
-  cross_pr: "#d946ef",
-  simulation: "#6366f1",
-  reply: "#f472b6",
-  intent: "#fde047",
-};
 
 function fmt$(n: number) { return n < 1 ? `$${n.toFixed(3)}` : `$${n.toFixed(2)}`; }
 function fmtTok(n: number) { return n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n); }
@@ -488,9 +465,9 @@ export default function StatsPage() {
                     const stageMax = Math.max(...stageCostData.map(x => x.total_cost), 0.01);
                     return stageCostData.map(s => (
                       <div key={s.stage} className="flex items-center gap-2 text-[10px] font-mono">
-                        <span className="w-20 text-muted-foreground shrink-0">{s.stage}</span>
+                        <span className="w-28 text-muted-foreground shrink-0 truncate" title={stageLabel(s.stage)}>{stageLabel(s.stage)}</span>
                         <div className="flex-1 h-4 bg-border/30 overflow-hidden" style={{ borderRadius: 2 }}>
-                          <div className="h-full" style={{ width: `${(s.total_cost / stageMax) * 100}%`, background: STAGE_COLORS[s.stage] ?? "hsl(var(--primary))", borderRadius: 2 }} />
+                          <div className="h-full" style={{ width: `${(s.total_cost / stageMax) * 100}%`, background: stageColor(s.stage), borderRadius: 2 }} />
                         </div>
                         <span className="w-14 text-right text-muted-foreground shrink-0">{fmt$(s.total_cost)}</span>
                       </div>

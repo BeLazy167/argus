@@ -34,7 +34,8 @@ import { formatDistanceToNow } from "@/lib/time";
 import { useReviewStream } from "@/lib/hooks/use-review-stream";
 import { PipelineProgress } from "./progress-bar";
 import { ActivityTimeline } from "./activity-timeline";
-import type { Repo, ReviewComment, TokenUsage } from "@/lib/types";
+import type { Repo, ReviewComment, StageTokens, TokenUsage } from "@/lib/types";
+import { STAGE_ORDER, stageLabel } from "@/lib/stage-labels";
 
 const Markdown = dynamic(() => import("./markdown").then(m => ({ default: m.Markdown })), { ssr: false });
 const CodeSnippet = dynamic(() => import("./markdown").then(m => ({ default: m.CodeSnippet })), { ssr: false });
@@ -310,64 +311,45 @@ const MermaidChart = memo(function MermaidChart({ chart }: { chart: string }) {
 function TokenPill({ usage }: { usage: TokenUsage }) {
   const total = usage.total;
   const label = `${formatTokens(total)} tokens${total.cost != null ? ` · $${total.cost.toFixed(3)}` : ""}`;
-  const stages: [string, { total_tokens: number; cost?: number; model?: string }][] = [];
-  if (usage.intent?.total_tokens) stages.push(["intent", usage.intent]);
-  if (usage.triage?.total_tokens) stages.push(["triage", usage.triage]);
-  if (usage.enrichment?.total_tokens) stages.push(["enrichment", usage.enrichment]);
-  if (usage.conventions?.total_tokens) stages.push(["conventions", usage.conventions]);
-  if (usage.patterns?.total_tokens) stages.push(["patterns", usage.patterns]);
-  if (usage.lead_agent?.total_tokens) stages.push(["lead_agent", usage.lead_agent]);
-  if (usage.review?.length) {
-    const reviewTotal = usage.review.reduce((acc, r) => ({
-      total_tokens: acc.total_tokens + r.total_tokens,
-      cost: (acc.cost ?? 0) + (r.cost ?? 0),
-      model: r.model,
-    }), { total_tokens: 0, cost: 0, model: undefined as string | undefined });
-    stages.push(["review", reviewTotal]);
-  }
-  if (usage.file_synthesis?.length) {
-    const fsTotal = usage.file_synthesis.reduce((acc, r) => ({
-      total_tokens: acc.total_tokens + r.total_tokens,
-      cost: (acc.cost ?? 0) + (r.cost ?? 0),
-      model: r.model,
-    }), { total_tokens: 0, cost: 0, model: undefined as string | undefined });
-    stages.push(["file_synthesis", fsTotal]);
-  }
-  if (usage.acceptance?.total_tokens) stages.push(["acceptance", usage.acceptance]);
-  if (usage.cross_pr?.total_tokens) stages.push(["cross_pr", usage.cross_pr]);
-  if (usage.simulation?.length) {
-    const simTotal = usage.simulation.reduce((acc, r) => ({
-      total_tokens: acc.total_tokens + r.total_tokens,
-      cost: (acc.cost ?? 0) + (r.cost ?? 0),
-      model: r.model,
-    }), { total_tokens: 0, cost: 0, model: undefined as string | undefined });
-    stages.push(["simulation", simTotal]);
-  }
-  if (usage.scoring?.total_tokens) stages.push(["scoring", usage.scoring]);
-  if (usage.synthesis?.total_tokens) stages.push(["synthesis", usage.synthesis]);
-  if (usage.reply?.total_tokens) stages.push(["reply", usage.reply]);
-  if (usage.graph?.total_tokens) stages.push(["graph", usage.graph]);
 
-  const stageLabels: Record<string, string> = {
-    intent: "Intent",
-    triage: "Triage",
-    enrichment: "Enrichment",
-    conventions: "Conventions",
-    patterns: "Patterns",
-    lead_agent: "Lead agent",
-    review: "Review",
-    file_synthesis: "File synthesis",
-    acceptance: "Acceptance",
-    cross_pr: "Cross-PR",
-    simulation: "Simulation",
-    scoring: "Scoring",
-    synthesis: "Synthesis",
-    reply: "Reply",
-    graph: "Graph",
-  };
+  // Build the stage list dynamically from STAGE_ORDER. Array-valued stages
+  // (review, file_synthesis, simulation) expand into per-specialist /
+  // per-file / per-scenario rows via the entry's `specialist` or `file`
+  // field. The detail-page scope is one review, so cardinality stays
+  // bounded; rows visible = rows useful.
+  //
+  // STAGE_ORDER lists every renderable key of TokenUsage; `total` and `mu`
+  // are intentionally excluded. The `keyof` cast is narrow and safe — a
+  // new stage added to TokenUsage but missing from STAGE_ORDER simply won't
+  // render, same as before.
+  // Include every stage that consumed tokens OR cost. Gating on tokens alone
+  // would hide the gpt-5.x reasoning case where the provider returns cost but
+  // elides token counts (see commit 1070dac) — the pill's header total would
+  // still include that spend, producing a visible delta between the header
+  // "$X" and the sum of tooltip rows.
+  const hasWork = (s: StageTokens) => s.total_tokens > 0 || (s.cost ?? 0) > 0;
+  const rows: { key: string; label: string; tokens: StageTokens }[] = [];
+  for (const stage of STAGE_ORDER) {
+    const v = usage[stage as keyof TokenUsage];
+    if (Array.isArray(v)) {
+      v.forEach((st, i) => {
+        if (!hasWork(st)) return;
+        const sub = st.specialist ?? st.file ?? "";
+        // React-key uniqueness: multiple array entries may share the same
+        // sub (skim reviews set Specialist="" on every file; simulation
+        // entries never populate File). Suffix with the array index so
+        // every row has a stable, collision-free key. The displayed label
+        // still uses stageLabel(composite) — the index is key-only.
+        const composite = sub ? `${stage}.${sub}` : stage;
+        rows.push({ key: `${composite}#${i}`, label: stageLabel(composite), tokens: st });
+      });
+    } else if (v && hasWork(v)) {
+      rows.push({ key: stage, label: stageLabel(stage), tokens: v });
+    }
+  }
 
-  // Group model name — show once if all stages use the same model
-  const models = stages.flatMap(([, s]) => (s.model ? [s.model] : []));
+  // Group model name — show once if all rows use the same model.
+  const models = rows.flatMap(r => (r.tokens.model ? [r.tokens.model] : []));
   const uniqueModels = [...new Set(models)];
   const singleModel = uniqueModels.length === 1 ? uniqueModels[0] : null;
 
@@ -376,35 +358,35 @@ function TokenPill({ usage }: { usage: TokenUsage }) {
       <span className="inline-flex items-center border border-iron bg-iron/30 px-2.5 py-1 text-[11px] font-mono text-slate-text cursor-default">
         {label}
       </span>
-      {stages.length > 0 && (
+      {rows.length > 0 && (
         <div className="absolute left-0 top-full mt-1.5 z-10 hidden group-hover:block">
-          <div className="border border-iron bg-charcoal p-3 shadow-xl w-[240px]">
+          <div className="border border-iron bg-charcoal p-3 shadow-xl w-[280px] max-h-[60vh] overflow-y-auto">
             {singleModel && (
               <p className="text-[10px] font-mono text-slate-text/60 mb-2 truncate">
                 {singleModel}
               </p>
             )}
             <div className="space-y-1">
-              {stages.map(([stage, s]) => (
-                <div key={stage}>
-                  <div className="flex items-center justify-between">
-                    <span className="text-[11px] font-mono text-ash">
-                      {stageLabels[stage] ?? stage}
+              {rows.map(r => (
+                <div key={r.key}>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[11px] font-mono text-ash truncate min-w-0" title={r.label}>
+                      {r.label}
                     </span>
-                    <span className="text-[11px] font-mono text-foreground tabular-nums">
-                      {formatTokens(s)}
-                      {s.cost != null && s.cost > 0 && (
-                        <span className="text-slate-text ml-1.5">${s.cost.toFixed(3)}</span>
+                    <span className="text-[11px] font-mono text-foreground tabular-nums shrink-0">
+                      {formatTokens(r.tokens)}
+                      {r.tokens.cost != null && r.tokens.cost > 0 && (
+                        <span className="text-slate-text ml-1.5">${r.tokens.cost.toFixed(3)}</span>
                       )}
                     </span>
                   </div>
-                  {!singleModel && s.model && (
-                    <p className="text-[9px] font-mono text-slate-text/50 truncate">{s.model}</p>
+                  {!singleModel && r.tokens.model && (
+                    <p className="text-[9px] font-mono text-slate-text/50 truncate">{r.tokens.model}</p>
                   )}
                 </div>
               ))}
             </div>
-            <div className="mt-2 pt-2 border-t border-iron flex items-center justify-between">
+            <div className="mt-2 pt-2 border-t border-iron flex items-center justify-between sticky bottom-0 bg-charcoal">
               <span className="text-[11px] font-mono text-amber">Total</span>
               <span className="text-[11px] font-mono text-foreground tabular-nums">
                 {formatTokens(total)}
