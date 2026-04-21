@@ -5,6 +5,84 @@ import (
 	"testing"
 )
 
+// TestComputeSymbolHashStable pins the contract that a given Symbol value
+// always hashes to the same string. A regression here (e.g. the function
+// accidentally depending on map iteration or a clock) would defeat the
+// whole no-op-upsert optimization silently — every run would look like a
+// "changed" symbol.
+func TestComputeSymbolHashStable(t *testing.T) {
+	sym := Symbol{
+		Kind: KindFunction, Name: "HandleRequest", FilePath: "api/handler.go",
+		LineStart: 42, LineEnd: 77,
+		ReturnType: "(error)", Params: "(ctx context.Context, r *Request)",
+		Visibility: "exported", IsAsync: false, Receiver: "", Scope: "package",
+	}
+	want := computeSymbolHash(sym)
+	for i := 0; i < 5; i++ {
+		got := computeSymbolHash(sym)
+		if got != want {
+			t.Fatalf("iteration %d: hash drifted\n  want %s\n  got  %s", i, want, got)
+		}
+	}
+}
+
+// TestComputeSymbolHashFieldChangesFlipHash asserts that every column the
+// indexer persists on code_nodes is mixed into the hash. If an attribute
+// changes in the DB but not in the hash input, the diff pass would read
+// "unchanged" and never upsert — leaving stale data around. The table
+// drives one mutation per hashed field plus a cross-check that the Symbol
+// columns NOT persisted (FilePath — implicit in the per-file SELECT;
+// ParamCount — derived, not stored) deliberately do NOT affect the hash.
+func TestComputeSymbolHashFieldChangesFlipHash(t *testing.T) {
+	base := Symbol{
+		Kind: KindMethod, Name: "Save", FilePath: "store/user.go",
+		LineStart: 10, LineEnd: 20,
+		ReturnType: "error", Params: "(ctx context.Context)",
+		Visibility: "exported", IsAsync: false, Receiver: "*User", Scope: "method",
+	}
+	baseHash := computeSymbolHash(base)
+
+	mutations := []struct {
+		name    string
+		mutate  func(*Symbol)
+		mustFlip bool
+	}{
+		{"kind", func(s *Symbol) { s.Kind = KindFunction }, true},
+		{"name", func(s *Symbol) { s.Name = "Save2" }, true},
+		{"line_start", func(s *Symbol) { s.LineStart = 11 }, true},
+		{"line_end", func(s *Symbol) { s.LineEnd = 21 }, true},
+		{"return_type", func(s *Symbol) { s.ReturnType = "(int, error)" }, true},
+		{"params", func(s *Symbol) { s.Params = "(ctx context.Context, id int64)" }, true},
+		{"visibility", func(s *Symbol) { s.Visibility = "unexported" }, true},
+		{"is_async", func(s *Symbol) { s.IsAsync = true }, true},
+		{"receiver", func(s *Symbol) { s.Receiver = "User" }, true},
+		{"scope", func(s *Symbol) { s.Scope = "nested" }, true},
+
+		// FilePath is intentionally NOT part of the hash — the per-file
+		// diff loop already scopes everything to a single file via the
+		// SELECT. Including it would just make hashes gratuitously fatter.
+		{"file_path (must NOT flip)", func(s *Symbol) { s.FilePath = "store/other.go" }, false},
+		// ParamCount is derived from Params at parse time, not stored,
+		// so it must not influence the hash or renaming a formal param
+		// would spuriously mark the symbol changed.
+		{"param_count (must NOT flip)", func(s *Symbol) { s.ParamCount = 99 }, false},
+	}
+
+	for _, m := range mutations {
+		t.Run(m.name, func(t *testing.T) {
+			mutated := base
+			m.mutate(&mutated)
+			got := computeSymbolHash(mutated)
+			if m.mustFlip && got == baseHash {
+				t.Fatalf("mutating %q did not change the hash — persisted column missed in computeSymbolHash", m.name)
+			}
+			if !m.mustFlip && got != baseHash {
+				t.Fatalf("mutating %q flipped the hash but that field isn't persisted — remove from computeSymbolHash", m.name)
+			}
+		})
+	}
+}
+
 func TestExtractTypeNames(t *testing.T) {
 	tests := []struct {
 		name  string

@@ -52,6 +52,75 @@ func (s *Store) UpsertCodeNodeFull(ctx context.Context, repoID int64, kind, name
 	return id, err
 }
 
+// NodeHashRow carries the minimum a hash-gated diff needs: the primary key
+// (for batched orphan DELETEs), the identity pair (kind, name) used as the
+// diff key, and the stored content hash. Kept intentionally narrow so the
+// per-file SELECT stays cheap even on large files.
+type NodeHashRow struct {
+	ID          int64
+	Kind        string
+	Name        string
+	ContentHash string
+}
+
+// GetNodesHashesForFile returns one NodeHashRow per existing code_node for the
+// given (repoID, filePath). Used by the indexer's diff pass to decide which
+// symbols are unchanged (skip), changed (upsert), or gone (orphan sweep).
+//
+// ContentHash will be empty string for rows predating migration 043 — those
+// get an unconditional upsert on the next index run, which backfills the hash.
+func (s *Store) GetNodesHashesForFile(ctx context.Context, repoID int64, filePath string) ([]NodeHashRow, error) {
+	rows, err := s.Pool.Query(ctx, `
+		SELECT id, kind, name, COALESCE(content_hash, '')
+		FROM code_nodes WHERE repo_id = $1 AND file_path = $2
+	`, repoID, filePath)
+	if err != nil {
+		return nil, fmt.Errorf("get node hashes for file: %w", err)
+	}
+	defer rows.Close()
+	return collectOrEmpty(rows, func(row pgx.CollectableRow) (NodeHashRow, error) {
+		var n NodeHashRow
+		err := row.Scan(&n.ID, &n.Kind, &n.Name, &n.ContentHash)
+		return n, err
+	})
+}
+
+// UpsertCodeNodeFullWithHash is UpsertCodeNodeFull plus a content_hash write.
+// The hash is written on both INSERT and UPDATE paths so the next diff pass
+// can compare against it. Calling code is expected to have already verified
+// the hash does NOT match an existing row — skipping unchanged rows entirely
+// is the whole point of the diff.
+func (s *Store) UpsertCodeNodeFullWithHash(ctx context.Context, repoID int64, kind, name, filePath string, lineStart, lineEnd int, language string, prNumber int, returnType, params, visibility string, isAsync bool, receiverType, scope, contentHash string) (int64, error) {
+	var id int64
+	err := s.Pool.QueryRow(ctx, `
+		INSERT INTO code_nodes (repo_id, kind, name, file_path, line_start, line_end, language, pr_number, return_type, params, visibility, is_async, receiver_type, scope, content_hash, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8, 0), $9, $10, $11, $12, $13, $14, $15, NOW())
+		ON CONFLICT (repo_id, file_path, kind, name)
+		DO UPDATE SET line_start = $5, line_end = $6, language = $7,
+		             pr_number = COALESCE(NULLIF($8, 0), code_nodes.pr_number),
+		             return_type = $9, params = $10, visibility = $11,
+		             is_async = $12, receiver_type = $13, scope = $14,
+		             content_hash = $15,
+		             updated_at = NOW()
+		RETURNING id
+	`, repoID, kind, name, filePath, lineStart, lineEnd, language, prNumber, returnType, params, visibility, isAsync, receiverType, scope, contentHash).Scan(&id)
+	return id, err
+}
+
+// DeleteNodesByIDs batches the orphan sweep at the end of an incremental
+// index pass. The single DELETE replaces per-symbol deletes and typically
+// hits 0 rows (symbols only sweep on rename/removal). Restricted to the
+// given repoID so a stray ID from another repo can't cross-delete.
+func (s *Store) DeleteNodesByIDs(ctx context.Context, repoID int64, ids []int64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	_, err := s.Pool.Exec(ctx,
+		`DELETE FROM code_nodes WHERE repo_id = $1 AND id = ANY($2::bigint[])`,
+		repoID, ids)
+	return err
+}
+
 // UpsertCodeEdge inserts a code edge, ignoring duplicates.
 func (s *Store) UpsertCodeEdge(ctx context.Context, repoID, sourceID, targetID int64, kind string) error {
 	_, err := s.Pool.Exec(ctx, `
