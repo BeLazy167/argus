@@ -122,6 +122,14 @@ func (s *Store) DeleteNodesByIDs(ctx context.Context, repoID int64, ids []int64)
 }
 
 // UpsertCodeEdge inserts a code edge, ignoring duplicates.
+//
+// code_edges hash-gating is intentionally deferred. The ON CONFLICT DO
+// NOTHING clause already makes re-upserts of unchanged edges a cheap
+// no-op on the write path (no row rewrite, no WAL volume). Introducing a
+// per-file edge diff mirrors the node-side machinery (see indexer.go
+// planSymbolDiff) and has a real implementation cost — we only take that
+// cost once Neon's Rows chart shows code_edges churn materially
+// exceeding code_nodes. Until then the no-op on conflict is sufficient.
 func (s *Store) UpsertCodeEdge(ctx context.Context, repoID, sourceID, targetID int64, kind string) error {
 	_, err := s.Pool.Exec(ctx, `
 		INSERT INTO code_edges (repo_id, source_id, target_id, kind, updated_at)
