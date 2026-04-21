@@ -14,7 +14,7 @@ var AllowedKeys = map[string]struct{}{
 	// lifecycle
 	"stage": {}, "status": {}, "action": {}, "trigger": {}, "deep_review": {},
 	"score": {}, "comment_count": {}, "thread_id": {}, "threads_checked": {},
-	"threads_resolved": {}, "risks_found": {}, "linked_count": {},
+	"threads_attempted": {}, "threads_resolved": {}, "risks_found": {}, "linked_count": {},
 	"issues_evaluated": {}, "reason": {}, "primary_review_id": {},
 
 	// performance
