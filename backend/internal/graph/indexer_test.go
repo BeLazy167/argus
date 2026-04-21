@@ -3,7 +3,164 @@ package graph
 import (
 	"sort"
 	"testing"
+
+	"github.com/BeLazy167/argus/backend/internal/store"
 )
+
+// BenchmarkComputeSymbolHash guards the zero-allocation contract of the
+// hot-path hash function. A regression in allocations (e.g. someone
+// replacing the append buffer with a strings.Builder or per-field
+// []byte(s) conversions) will surface as >1 alloc/op. Run with:
+//
+//	go test -bench=BenchmarkComputeSymbolHash -benchmem ./internal/graph/
+func BenchmarkComputeSymbolHash(b *testing.B) {
+	sym := Symbol{
+		Kind: KindMethod, Name: "HandleUpdate", FilePath: "internal/api/server.go",
+		LineStart: 128, LineEnd: 176,
+		ReturnType: "(*Response, error)", Params: "(ctx context.Context, req *UpdateRequest)",
+		Visibility: "exported", IsAsync: false, Receiver: "*Server", Scope: "method",
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = computeSymbolHash(sym)
+	}
+}
+
+// TestPlanSymbolDiff exercises the pure decision core of the hash-gated
+// diff. Five scenarios cover the 4 meaningful state transitions plus the
+// pre-migration (empty hash) case that must NEVER short-circuit to
+// "unchanged" — an empty stored hash is a legacy row, not proof the
+// content matches.
+func TestPlanSymbolDiff(t *testing.T) {
+	// Stable pair of symbols across subtests. Using distinct (kind, name)
+	// keeps diff keys unambiguous; each subtest mutates inputs locally.
+	mkSym := func(name string, line int) Symbol {
+		return Symbol{
+			Kind: KindFunction, Name: name, FilePath: "a.go",
+			LineStart: line, LineEnd: line + 10,
+			ReturnType: "error", Visibility: "exported", Scope: "package",
+		}
+	}
+	hashOf := func(s Symbol) string { return computeSymbolHash(s) }
+
+	foo := mkSym("Foo", 10)
+	bar := mkSym("Bar", 30)
+	fooMoved := foo
+	fooMoved.LineStart = 11
+	fooMoved.LineEnd = 21
+
+	tests := []struct {
+		name            string
+		parsed          []Symbol
+		existing        []store.NodeHashRow
+		wantUnchanged   int
+		wantChangedNames []string
+		wantOrphanIDs   []int64
+	}{
+		{
+			name:            "empty DB → everything changed, no orphans",
+			parsed:          []Symbol{foo, bar},
+			existing:        nil,
+			wantUnchanged:   0,
+			wantChangedNames: []string{"Foo", "Bar"},
+			wantOrphanIDs:   nil,
+		},
+		{
+			name:   "all hashes match → all unchanged, zero writes",
+			parsed: []Symbol{foo, bar},
+			existing: []store.NodeHashRow{
+				{ID: 1, Kind: KindFunction, Name: "Foo", ContentHash: hashOf(foo)},
+				{ID: 2, Kind: KindFunction, Name: "Bar", ContentHash: hashOf(bar)},
+			},
+			wantUnchanged:   2,
+			wantChangedNames: []string{},
+			wantOrphanIDs:   nil,
+		},
+		{
+			name:   "one hash drifted → that symbol upserts, other stays",
+			parsed: []Symbol{fooMoved, bar},
+			existing: []store.NodeHashRow{
+				{ID: 1, Kind: KindFunction, Name: "Foo", ContentHash: hashOf(foo)},
+				{ID: 2, Kind: KindFunction, Name: "Bar", ContentHash: hashOf(bar)},
+			},
+			wantUnchanged:   1,
+			wantChangedNames: []string{"Foo"},
+			wantOrphanIDs:   nil,
+		},
+		{
+			name:   "symbol removed from parse → listed as orphan",
+			parsed: []Symbol{foo},
+			existing: []store.NodeHashRow{
+				{ID: 1, Kind: KindFunction, Name: "Foo", ContentHash: hashOf(foo)},
+				{ID: 2, Kind: KindFunction, Name: "Bar", ContentHash: hashOf(bar)},
+			},
+			wantUnchanged:   1,
+			wantChangedNames: []string{},
+			wantOrphanIDs:   []int64{2},
+		},
+		{
+			name:   "empty stored hash forces re-upsert (pre-migration row)",
+			parsed: []Symbol{foo},
+			existing: []store.NodeHashRow{
+				{ID: 1, Kind: KindFunction, Name: "Foo", ContentHash: ""},
+			},
+			wantUnchanged:   0,
+			wantChangedNames: []string{"Foo"},
+			wantOrphanIDs:   nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			plan := planSymbolDiff(tt.parsed, tt.existing)
+			if len(plan.Unchanged) != tt.wantUnchanged {
+				t.Errorf("Unchanged: got %d, want %d", len(plan.Unchanged), tt.wantUnchanged)
+			}
+			gotNames := make([]string, len(plan.Changed))
+			for i, s := range plan.Changed {
+				gotNames[i] = s.Name
+			}
+			sort.Strings(gotNames)
+			wantNames := append([]string(nil), tt.wantChangedNames...)
+			sort.Strings(wantNames)
+			if !stringSliceEqual(gotNames, wantNames) {
+				t.Errorf("Changed names: got %v, want %v", gotNames, wantNames)
+			}
+			gotOrphans := append([]int64(nil), plan.Orphans...)
+			sort.Slice(gotOrphans, func(i, j int) bool { return gotOrphans[i] < gotOrphans[j] })
+			wantOrphans := append([]int64(nil), tt.wantOrphanIDs...)
+			sort.Slice(wantOrphans, func(i, j int) bool { return wantOrphans[i] < wantOrphans[j] })
+			if !int64SliceEqual(gotOrphans, wantOrphans) {
+				t.Errorf("Orphans: got %v, want %v", gotOrphans, wantOrphans)
+			}
+		})
+	}
+}
+
+func stringSliceEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func int64SliceEqual(a, b []int64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
 
 // TestComputeSymbolHashStable pins the contract that a given Symbol value
 // always hashes to the same string. A regression here (e.g. the function

@@ -22,45 +22,124 @@ import (
 // to untangle the two purposes.
 func symbolDiffKey(kind, name string) string { return kind + "\x1f" + name }
 
+// unchangedSymbol pairs a parsed Symbol with the existing DB row ID that
+// already holds an identical content_hash. The indexer reuses the ID for
+// edge resolution and skips the upsert entirely.
+type unchangedSymbol struct {
+	Symbol Symbol
+	NodeID int64
+}
+
+// symbolDiffPlan is the minimum set of writes needed to bring the DB state
+// for a file in line with the newly-parsed symbols. It is a pure decision
+// over hashes — no IO — so the diff logic is testable without a store.
+type symbolDiffPlan struct {
+	Unchanged []unchangedSymbol
+	Changed   []Symbol
+	Orphans   []int64
+}
+
+// planSymbolDiff partitions the parsed set against the DB state into three
+// disjoint buckets:
+//
+//   - Unchanged: parsed.hash matches existing.ContentHash. Skip the upsert,
+//     reuse the existing node ID for edge resolution.
+//   - Changed: parsed symbol is either new or has a mismatched hash. Upsert.
+//   - Orphans: DB rows whose (kind, name) is absent from the parse. Sweep.
+//
+// An empty existing.ContentHash (pre-migration-043 row, or a synthetic
+// "module" node created by edge resolution before the hash column landed)
+// always forces the Changed path — never trust an empty string to mean
+// "unchanged", because the current parse cannot possibly have hashed to
+// the empty string.
+func planSymbolDiff(parsed []Symbol, existing []store.NodeHashRow) symbolDiffPlan {
+	plan := symbolDiffPlan{
+		Unchanged: make([]unchangedSymbol, 0, len(parsed)),
+		Changed:   make([]Symbol, 0, len(parsed)),
+	}
+	type existingRow struct {
+		id   int64
+		hash string
+	}
+	existingByKey := make(map[string]existingRow, len(existing))
+	for _, e := range existing {
+		existingByKey[symbolDiffKey(e.Kind, e.Name)] = existingRow{id: e.ID, hash: e.ContentHash}
+	}
+	seenKeys := make(map[string]struct{}, len(parsed))
+	for _, sym := range parsed {
+		diffKey := symbolDiffKey(sym.Kind, sym.Name)
+		seenKeys[diffKey] = struct{}{}
+		prev, ok := existingByKey[diffKey]
+		if ok && prev.hash != "" && prev.hash == computeSymbolHash(sym) {
+			plan.Unchanged = append(plan.Unchanged, unchangedSymbol{Symbol: sym, NodeID: prev.id})
+			continue
+		}
+		plan.Changed = append(plan.Changed, sym)
+	}
+	for key, prev := range existingByKey {
+		if _, ok := seenKeys[key]; !ok {
+			plan.Orphans = append(plan.Orphans, prev.id)
+		}
+	}
+	return plan
+}
+
+// symbolHashSeparator is the unit-separator byte (\x1f, ASCII US) written
+// between fields in the content-hash buffer. Picked because no realistic
+// symbol identifier or type fragment contains it — so shuffling adjacent
+// field boundaries can't produce a collision (e.g. name="foo" + params="bar"
+// must not hash the same as name="fooba" + params="r"). Separate from
+// nodeKey's NUL separator, which is for in-memory maps only and never
+// hashed.
+const symbolHashSeparator = 0x1f
+
 // computeSymbolHash fingerprints every attribute the indexer persists on a
 // code_node row. The hash is compared against the stored content_hash to
 // short-circuit the upsert when a symbol hasn't structurally changed — the
 // 95% case for any given file in a PR diff.
+//
+// Minimal-allocation on the steady-state path: one append buffer plus the
+// two allocations inside hex.EncodeToString (a 64-byte make + string cast).
+// The previous implementation did 10+ per-field []byte(string) conversions;
+// this is ~3 allocs / ~200 ns on an M3 Pro. BenchmarkComputeSymbolHash pins
+// the number so a regression (e.g. reverting to per-field Write calls) shows
+// up as a jump in allocs/op in CI benchmark runs.
 //
 // IMPORTANT: extending the persisted column set on code_nodes MUST also
 // extend the fields mixed in here. Otherwise a column change would leave
 // stale row data around because the hash wouldn't flip. Keep this list in
 // lockstep with UpsertCodeNodeFullWithHash.
 func computeSymbolHash(sym Symbol) string {
-	h := sha256.New()
-	// \x1f (unit separator) between fields keeps concatenation unambiguous
-	// — no real symbol name or type fragment contains it, so two rows can't
-	// collide just by having adjacent fields swap boundaries.
-	sep := "\x1f"
-	h.Write([]byte(sym.Kind))
-	h.Write([]byte(sep))
-	h.Write([]byte(sym.Name))
-	h.Write([]byte(sep))
-	h.Write([]byte(strconv.Itoa(sym.LineStart)))
-	h.Write([]byte(sep))
-	h.Write([]byte(strconv.Itoa(sym.LineEnd)))
-	h.Write([]byte(sep))
-	h.Write([]byte(sym.ReturnType))
-	h.Write([]byte(sep))
-	h.Write([]byte(sym.Params))
-	h.Write([]byte(sep))
-	h.Write([]byte(sym.Visibility))
-	h.Write([]byte(sep))
+	// Rough upper bound: 10 fields + 10 separators + 2 int fields (≤10 chars).
+	// Oversizing slightly avoids regrowth for typical symbols.
+	buf := make([]byte, 0, len(sym.Kind)+len(sym.Name)+len(sym.ReturnType)+
+		len(sym.Params)+len(sym.Visibility)+len(sym.Receiver)+len(sym.Scope)+32)
+	buf = append(buf, sym.Kind...)
+	buf = append(buf, symbolHashSeparator)
+	buf = append(buf, sym.Name...)
+	buf = append(buf, symbolHashSeparator)
+	buf = strconv.AppendInt(buf, int64(sym.LineStart), 10)
+	buf = append(buf, symbolHashSeparator)
+	buf = strconv.AppendInt(buf, int64(sym.LineEnd), 10)
+	buf = append(buf, symbolHashSeparator)
+	buf = append(buf, sym.ReturnType...)
+	buf = append(buf, symbolHashSeparator)
+	buf = append(buf, sym.Params...)
+	buf = append(buf, symbolHashSeparator)
+	buf = append(buf, sym.Visibility...)
+	buf = append(buf, symbolHashSeparator)
 	if sym.IsAsync {
-		h.Write([]byte{1})
+		buf = append(buf, 1)
 	} else {
-		h.Write([]byte{0})
+		buf = append(buf, 0)
 	}
-	h.Write([]byte(sep))
-	h.Write([]byte(sym.Receiver))
-	h.Write([]byte(sep))
-	h.Write([]byte(sym.Scope))
-	return hex.EncodeToString(h.Sum(nil))
+	buf = append(buf, symbolHashSeparator)
+	buf = append(buf, sym.Receiver...)
+	buf = append(buf, symbolHashSeparator)
+	buf = append(buf, sym.Scope...)
+
+	sum := sha256.Sum256(buf)
+	return hex.EncodeToString(sum[:])
 }
 
 // sourceExts lists file extensions we parse for the code graph.
@@ -143,50 +222,29 @@ func indexFileSet(ctx context.Context, st *store.Store, ghClient *ghpkg.Client, 
 	nameToIDs := make(map[string][]int64) // symbol name -> all node IDs with that name
 	lang := func(path string) string { return langForFile(path) }
 
-	// Hash-gated diff pass. For each file:
-	//   1. Load existing nodes (id, kind, name, stored hash).
-	//   2. For each parsed symbol: skip if hash matches, upsert otherwise.
-	//   3. Collect DB rows whose (kind,name) vanished from the parse as
-	//      orphans; batch-delete at the end of the file.
-	//
-	// Replaces the previous wipe-and-reinsert loop: writes collapse from
+	// Hash-gated diff per file, executed in three phases: plan (pure),
+	// apply (IO), sweep (IO). The plan function is unit-tested on its own;
+	// this loop is just the execution shell. Writes collapse from
 	// O(symbols-per-file) to O(changed-symbols-per-file), usually near 0.
 	for filePath, res := range results {
 		existing, err := st.GetNodesHashesForFile(ctx, repoDBID, filePath)
 		if err != nil {
 			slog.Warn("graph: load existing node hashes failed", "file", filePath, "error", err)
-			// Fall back to behavior equivalent to the old path: upsert
-			// everything unconditionally, no orphan sweep. Losing the skip
-			// optimization for this file is fine; losing correctness is not.
+			// Fall back equivalent to the old path: treat every parsed symbol
+			// as Changed, do not sweep orphans. Losing the skip optimization
+			// for this file is fine; losing correctness is not.
 			existing = nil
 		}
+		plan := planSymbolDiff(res.symbols, existing)
 
-		type existingRow struct {
-			id   int64
-			hash string
+		// Phase 1: reuse IDs of unchanged rows for edge resolution.
+		for _, u := range plan.Unchanged {
+			keyToID[nodeKey(u.Symbol.FilePath, u.Symbol.Name)] = u.NodeID
+			nameToIDs[u.Symbol.Name] = append(nameToIDs[u.Symbol.Name], u.NodeID)
 		}
-		existingByKey := make(map[string]existingRow, len(existing))
-		for _, e := range existing {
-			existingByKey[symbolDiffKey(e.Kind, e.Name)] = existingRow{id: e.ID, hash: e.ContentHash}
-		}
-		// seenKeys tracks which DB rows the new parse covered. Anything in
-		// existingByKey but not seenKeys at the end of the loop is an orphan.
-		seenKeys := make(map[string]struct{}, len(res.symbols))
-
-		for _, sym := range res.symbols {
-			diffKey := symbolDiffKey(sym.Kind, sym.Name)
-			seenKeys[diffKey] = struct{}{}
-			newHash := computeSymbolHash(sym)
-
-			if prev, ok := existingByKey[diffKey]; ok && prev.hash == newHash && prev.hash != "" {
-				// Unchanged symbol: reuse the existing row ID for edge
-				// resolution, skip the upsert entirely.
-				keyToID[nodeKey(sym.FilePath, sym.Name)] = prev.id
-				nameToIDs[sym.Name] = append(nameToIDs[sym.Name], prev.id)
-				continue
-			}
-
-			id, err := st.UpsertCodeNodeFullWithHash(ctx, repoDBID, sym.Kind, sym.Name, sym.FilePath, sym.LineStart, sym.LineEnd, lang(sym.FilePath), 0, sym.ReturnType, sym.Params, sym.Visibility, sym.IsAsync, sym.Receiver, sym.Scope, newHash)
+		// Phase 2: upsert the subset that actually changed (or is new).
+		for _, sym := range plan.Changed {
+			id, err := st.UpsertCodeNodeFullWithHash(ctx, repoDBID, sym.Kind, sym.Name, sym.FilePath, sym.LineStart, sym.LineEnd, lang(sym.FilePath), 0, sym.ReturnType, sym.Params, sym.Visibility, sym.IsAsync, sym.Receiver, sym.Scope, computeSymbolHash(sym))
 			if err != nil {
 				slog.Warn("graph: upsert node failed", "name", sym.Name, "file", sym.FilePath, "error", err)
 				continue
@@ -194,17 +252,8 @@ func indexFileSet(ctx context.Context, st *store.Store, ghClient *ghpkg.Client, 
 			keyToID[nodeKey(sym.FilePath, sym.Name)] = id
 			nameToIDs[sym.Name] = append(nameToIDs[sym.Name], id)
 		}
-
-		// Orphan sweep: any existing row whose (kind,name) disappeared from
-		// the new parse. Empty slice = no DELETE issued (GetNodesHashesForFile
-		// may return empty, and DeleteNodesByIDs no-ops on len==0).
-		var orphanIDs []int64
-		for key, prev := range existingByKey {
-			if _, ok := seenKeys[key]; !ok {
-				orphanIDs = append(orphanIDs, prev.id)
-			}
-		}
-		if err := st.DeleteNodesByIDs(ctx, repoDBID, orphanIDs); err != nil {
+		// Phase 3: batch-delete orphans (no-ops on len == 0).
+		if err := st.DeleteNodesByIDs(ctx, repoDBID, plan.Orphans); err != nil {
 			slog.Warn("graph: orphan sweep failed", "file", filePath, "error", err)
 		}
 	}
