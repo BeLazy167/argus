@@ -396,17 +396,24 @@ func (s *Store) UpdateReviewStatus(ctx context.Context, id uuid.UUID, status, er
 	return nil
 }
 
+// List queries drop the heavy fields (token_usage, diagram*, diagrams,
+// truncated_files, brief) to keep response size manageable. 1 row of those
+// columns averages ~5 KB of JSONB; at limit=200 the list payload was 1.22 MB
+// (measured via Fly logs on the dashboard route) — ~95% of which was data the
+// list view never renders. The detail endpoint (GET /reviews/{id}) still
+// returns the full Review struct via getReview. Scan shape stays identical
+// so pgx.RowToStructByPos[Review] keeps working without a new type.
 func (s *Store) ListReviewsScoped(ctx context.Context, repoID int64, installationIDs []int64, limit, offset int) ([]Review, error) {
 	if limit <= 0 {
 		limit = 20
 	}
 	rows, err := s.Pool.Query(ctx, `
 		SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, COALESCE(rv.head_ref,''), rv.github_review_id,
-		       rv.status, rv.summary, rv.score, rv.token_usage, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error,
+		       rv.status, rv.summary, rv.score, NULL::jsonb, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error,
 		       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at,
-		       rv.diagram, rv.diagram_title,
-		       COALESCE(rv.diagrams, '[]'::jsonb), COALESCE(rv.truncated_files, '[]'::jsonb),
-		       rv.brief, rv.cross_pr_hash, rv.trace_id
+		       NULL::text, NULL::text,
+		       '[]'::jsonb, '[]'::jsonb,
+		       NULL::text, rv.cross_pr_hash, rv.trace_id
 		FROM reviews rv
 		JOIN repos r ON rv.repo_id = r.id
 		WHERE rv.repo_id = $1 AND r.installation_id = ANY($2)
@@ -425,11 +432,11 @@ func (s *Store) ListAllReviewsScoped(ctx context.Context, installationIDs []int6
 	}
 	rows, err := s.Pool.Query(ctx, `
 		SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, COALESCE(rv.head_ref,''), rv.github_review_id,
-		       rv.status, rv.summary, rv.score, rv.token_usage, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error,
+		       rv.status, rv.summary, rv.score, NULL::jsonb, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error,
 		       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at,
-		       rv.diagram, rv.diagram_title,
-		       COALESCE(rv.diagrams, '[]'::jsonb), COALESCE(rv.truncated_files, '[]'::jsonb),
-		       rv.brief, rv.cross_pr_hash, rv.trace_id
+		       NULL::text, NULL::text,
+		       '[]'::jsonb, '[]'::jsonb,
+		       NULL::text, rv.cross_pr_hash, rv.trace_id
 		FROM reviews rv
 		JOIN repos r ON rv.repo_id = r.id
 		WHERE r.installation_id = ANY($1)
