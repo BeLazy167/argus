@@ -47,6 +47,11 @@ func Run() error {
 		}
 	}
 	logger := slog.New(baseHandler)
+	// Route package-level `slog.*` calls (chat.go llm.call.* and 70+ other
+	// sites across internal/) through the PostHog-wrapped handler. Without
+	// this, slog.Default() stays on Go's stdlib text handler and those
+	// structured events never reach the forwarder.
+	slog.SetDefault(logger)
 	// Ordering: phHandler.Close() must run BEFORE phClient.Close() so the
 	// drain goroutine finishes enqueuing into posthog-go before we ask
 	// posthog-go to flush its wire queue. defer runs LIFO, so declare the

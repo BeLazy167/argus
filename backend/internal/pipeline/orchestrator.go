@@ -1081,7 +1081,7 @@ func (o *Orchestrator) autoResolveOnSynchronize(
 		return
 	}
 
-	resolved, attempted, apiCalls, resolvedKeys := o.autoResolveStaleComments(ghCtx, event, patchSet)
+	resolved, attempted, botUnresolved, apiCalls, resolvedKeys := o.autoResolveStaleComments(ghCtx, event, patchSet)
 	// Persist whenever we touched GitHub — even a list-only call (0
 	// resolved, 0 attempted, 1 apiCall) is load operators may need to
 	// see against their installation token budget.
@@ -1110,17 +1110,20 @@ func (o *Orchestrator) autoResolveOnSynchronize(
 	}
 
 	// auto_resolve.evaluated fires on every sync where we actually touched
-	// GitHub — the `threads_checked` counter feeds PostHog funnels about
-	// stale-comment pressure, and the attempted/resolved split is the main
-	// signal for "is auto-resolve effective on real PRs". trace_id comes
-	// from the detached parent ctx: handleWebhook set it via SetTraceID
-	// before detaching, so the trace survives past the webhook response.
+	// GitHub — threads_checked is stale-comment pressure (every open Argus
+	// thread we considered), threads_attempted is how many we tried to
+	// close, threads_resolved is the subset that actually closed on the GH
+	// API. Keeping all three lets the PostHog funnel distinguish "nothing
+	// to do" from "tried and failed". trace_id comes from the detached
+	// parent ctx: handleWebhook set it via SetTraceID before detaching, so
+	// the trace survives past the webhook response.
 	o.logger.InfoContext(parent, "auto-resolve evaluated",
 		slog.String("event", "auto_resolve.evaluated"),
 		slog.Int64("installation_id", dbInstallationID),
 		slog.String("repo", event.RepoFullName),
 		slog.Int("pr_number", event.PRNumber),
-		slog.Int("threads_checked", attempted),
+		slog.Int("threads_checked", botUnresolved),
+		slog.Int("threads_attempted", attempted),
 		slog.Int("threads_resolved", resolved),
 		slog.String("trace_id", obs.TraceID(parent)),
 	)
@@ -1195,6 +1198,9 @@ func decideAutoResolveThread(
 // operators can see rate-limit pressure.
 // autoResolveStaleComments returns:
 //   - resolved / attempted / apiCalls: aggregate counters for auto_resolve_events.
+//   - botUnresolved: Argus threads found open on the PR before we decided which
+//     to touch. Distinct from attempted (which only counts decisions in favour
+//     of resolving) — feeds the PostHog "stale-comment pressure" funnel.
 //   - resolvedKeys: "<path>:<line>" keys for each thread actually resolved.
 //     Consumed by hydratePriorFindings via the migration-041 join column so
 //     the async cross-PR stage can drop prior findings whose threads are
@@ -1206,18 +1212,18 @@ func (o *Orchestrator) autoResolveStaleComments(
 	ctx context.Context,
 	event ghpkg.PREvent,
 	patchSet *diff.PatchSet,
-) (resolved, attempted, apiCalls int, resolvedKeys []string) {
+) (resolved, attempted, botUnresolved, apiCalls int, resolvedKeys []string) {
 	owner, repo, err := splitRepoFullName(event.RepoFullName)
 	if err != nil {
 		o.logger.Warn("auto-resolve: bad repo name", "error", err)
-		return 0, 0, 0, nil
+		return 0, 0, 0, 0, nil
 	}
 
 	threads, err := o.ghClient.ListReviewThreads(ctx, event.InstallationID, owner, repo, event.PRNumber)
 	apiCalls++ // count the list call regardless of outcome
 	if err != nil {
 		o.logger.Warn("auto-resolve: listing threads", "error", err)
-		return 0, 0, apiCalls, nil
+		return 0, 0, 0, apiCalls, nil
 	}
 
 	// Build per-file changed line sets and a file-presence set
@@ -1231,7 +1237,7 @@ func (o *Orchestrator) autoResolveStaleComments(
 
 	o.logger.Info("auto-resolve: found threads", "total", len(threads), "changed_files", len(changedFiles), "pr", event.PRNumber)
 
-	var botUnresolved, lineHit, fileHit int
+	var lineHit, fileHit int
 	for _, t := range threads {
 		if t.IsResolved || !ghpkg.IsArgusThread(t.AuthorLogin) {
 			continue
@@ -1278,7 +1284,7 @@ func (o *Orchestrator) autoResolveStaleComments(
 		"api_calls", apiCalls,
 		"resolved_keys", len(resolvedKeys),
 		"pr", event.PRNumber)
-	return resolved, attempted, apiCalls, resolvedKeys
+	return resolved, attempted, botUnresolved, apiCalls, resolvedKeys
 }
 
 // enrichFindings annotates each comment with pattern/rule matches and novelty flags.
