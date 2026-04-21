@@ -712,6 +712,20 @@ func (o *Orchestrator) runCrossPRStage(ctx context.Context, reviewID uuid.UUID) 
 		return
 	}
 
+	// Rehydrate attribution onto the detached ctx. The bus dispatched us
+	// from context.Background() (orchestrator.go:238), so every downstream
+	// structured event — cross_pr.stage.*, llm.call.completed with
+	// stage=crosspr — would otherwise resolve to empty DistinctId and be
+	// dropped by the PostHog handler as unattributed. Sourced from the
+	// persisted run which survives the async boundary.
+	ctx = obs.SetInstallationID(ctx, run.DBInstallationID)
+	if run.PREvent.PRAuthor != "" {
+		ctx = obs.SetGithubLogin(ctx, run.PREvent.PRAuthor)
+	}
+	if run.TraceID != "" {
+		ctx = obs.SetTraceID(ctx, run.TraceID)
+	}
+
 	// 2a. Per-installation rate limit (orthogonal to the per-review cap
 	// above). This is a PEEK only — quota is not consumed until we've
 	// committed to LLM work below (via crossPRInstallTryAcquire). Over-
@@ -1550,6 +1564,18 @@ func (o *Orchestrator) runCrossPRAcceptanceStage(ctx context.Context, reviewID u
 	if err != nil {
 		o.logger.Warn("[joint-accept] load pipeline state failed", "run_id", runID, "review_id", reviewID, "error", err)
 		return
+	}
+
+	// Rehydrate attribution — same rationale as runCrossPRStage. Bus
+	// dispatch path gave us context.Background(); PostHog handler would
+	// drop cross_pr.acceptance.completed + llm.call.completed
+	// (stage=joint_accept) without this.
+	ctx = obs.SetInstallationID(ctx, run.DBInstallationID)
+	if run.PREvent.PRAuthor != "" {
+		ctx = obs.SetGithubLogin(ctx, run.PREvent.PRAuthor)
+	}
+	if run.TraceID != "" {
+		ctx = obs.SetTraceID(ctx, run.TraceID)
 	}
 
 	// Per-install rate limit: shared counter with findings stage so an
