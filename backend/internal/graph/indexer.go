@@ -22,6 +22,33 @@ import (
 // to untangle the two purposes.
 func symbolDiffKey(kind, name string) string { return kind + "\x1f" + name }
 
+// indexerStore is the narrow persistence surface indexFileSet + its
+// phase-1/2/3 diff helper require. Declaring it here (instead of taking
+// *store.Store concretely) lets the integration test in
+// indexer_integration_test.go drop in a recording fake that asserts call
+// counts and arguments — without standing up Postgres. *store.Store
+// satisfies this interface implicitly; no wrapper type is needed.
+//
+// Method set MUST stay minimal. Adding a method here means the fake has
+// to track one more call site, which dilutes the test's focus on the
+// diff loop.
+type indexerStore interface {
+	GetNodesHashesForFile(ctx context.Context, repoID int64, filePath string) ([]store.NodeHashRow, error)
+	UpsertCodeNodeFullWithHash(ctx context.Context, repoID int64, kind, name, filePath string, lineStart, lineEnd int, language string, prNumber int, returnType, params, visibility string, isAsync bool, receiverType, scope, contentHash string) (int64, error)
+	UpsertCodeNode(ctx context.Context, repoID int64, kind, name, filePath string, lineStart, lineEnd int, language string, prNumber int) (int64, error)
+	UpsertCodeEdge(ctx context.Context, repoID, sourceID, targetID int64, kind string) error
+	DeleteNodesByIDs(ctx context.Context, repoID int64, ids []int64) error
+}
+
+// fileResult bundles the parser output for a single file so indexFileSet
+// can hand pre-parsed data to indexParsedSymbols without the test also
+// needing a fake GitHub client. Exported field names are intentional —
+// the struct is package-internal but the names flow into the test helper.
+type fileResult struct {
+	symbols []Symbol
+	edges   []Edge
+}
+
 // unchangedSymbol pairs a parsed Symbol with the existing DB row ID that
 // already holds an identical content_hash. The indexer reuses the ID for
 // edge resolution and skips the upsert entirely.
@@ -193,12 +220,11 @@ func IndexFiles(ctx context.Context, st *store.Store, ghClient *ghpkg.Client, in
 }
 
 // indexFileSet fetches content for each file, parses symbols/edges, and upserts them.
-func indexFileSet(ctx context.Context, st *store.Store, ghClient *ghpkg.Client, installationID int64, owner, repo, ref string, repoDBID int64, files []string) error {
+// The store dependency is the narrow indexerStore interface so the IO loop
+// below can be exercised by an in-memory fake in indexer_integration_test.go.
+// *store.Store implicitly satisfies indexerStore, so callers pass it through.
+func indexFileSet(ctx context.Context, st indexerStore, ghClient *ghpkg.Client, installationID int64, owner, repo, ref string, repoDBID int64, files []string) error {
 	// Collect all symbols and edges across files, then resolve edges by name
-	type fileResult struct {
-		symbols []Symbol
-		edges   []Edge
-	}
 	results := make(map[string]fileResult, len(files))
 
 	for _, f := range files {
@@ -214,6 +240,16 @@ func indexFileSet(ctx context.Context, st *store.Store, ghClient *ghpkg.Client, 
 		results[f] = fileResult{symbols: syms, edges: edges}
 	}
 
+	return indexParsedSymbols(ctx, st, repoDBID, results)
+}
+
+// indexParsedSymbols runs the hash-gated diff + edge upsert loop against
+// an already-populated parser result map. Split out of indexFileSet so the
+// integration test can drive the exact three-phase loop (plan, apply,
+// sweep) and the two edge-resolution passes without standing up a GitHub
+// client. indexFileSet uses this after its fetch+parse phase; the behavior
+// is identical — no extra retries, no extra logging.
+func indexParsedSymbols(ctx context.Context, st indexerStore, repoDBID int64, results map[string]fileResult) error {
 	// Upsert all nodes, building composite-key -> ID and name -> []ID lookups.
 	// The composite key (filePath+name) avoids collisions when multiple files
 	// define symbols with the same name. The name-only index supports
