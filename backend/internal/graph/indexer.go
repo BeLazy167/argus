@@ -2,14 +2,66 @@ package graph
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"log/slog"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	ghpkg "github.com/BeLazy167/argus/backend/internal/github"
 	"github.com/BeLazy167/argus/backend/internal/store"
 )
+
+// symbolDiffKey is the identity used to match a parsed Symbol against a DB
+// code_nodes row. It mirrors the row's unique-index subset that we diff on
+// (kind, name). File path is implicit in the per-file scope of the diff
+// loop. Kept separate from nodeKey (which joins file_path+name for edge
+// resolution) so future migrations that change either mapping don't have
+// to untangle the two purposes.
+func symbolDiffKey(kind, name string) string { return kind + "\x1f" + name }
+
+// computeSymbolHash fingerprints every attribute the indexer persists on a
+// code_node row. The hash is compared against the stored content_hash to
+// short-circuit the upsert when a symbol hasn't structurally changed — the
+// 95% case for any given file in a PR diff.
+//
+// IMPORTANT: extending the persisted column set on code_nodes MUST also
+// extend the fields mixed in here. Otherwise a column change would leave
+// stale row data around because the hash wouldn't flip. Keep this list in
+// lockstep with UpsertCodeNodeFullWithHash.
+func computeSymbolHash(sym Symbol) string {
+	h := sha256.New()
+	// \x1f (unit separator) between fields keeps concatenation unambiguous
+	// — no real symbol name or type fragment contains it, so two rows can't
+	// collide just by having adjacent fields swap boundaries.
+	sep := "\x1f"
+	h.Write([]byte(sym.Kind))
+	h.Write([]byte(sep))
+	h.Write([]byte(sym.Name))
+	h.Write([]byte(sep))
+	h.Write([]byte(strconv.Itoa(sym.LineStart)))
+	h.Write([]byte(sep))
+	h.Write([]byte(strconv.Itoa(sym.LineEnd)))
+	h.Write([]byte(sep))
+	h.Write([]byte(sym.ReturnType))
+	h.Write([]byte(sep))
+	h.Write([]byte(sym.Params))
+	h.Write([]byte(sep))
+	h.Write([]byte(sym.Visibility))
+	h.Write([]byte(sep))
+	if sym.IsAsync {
+		h.Write([]byte{1})
+	} else {
+		h.Write([]byte{0})
+	}
+	h.Write([]byte(sep))
+	h.Write([]byte(sym.Receiver))
+	h.Write([]byte(sep))
+	h.Write([]byte(sym.Scope))
+	return hex.EncodeToString(h.Sum(nil))
+}
 
 // sourceExts lists file extensions we parse for the code graph.
 var sourceExts = map[string]bool{
@@ -53,12 +105,9 @@ func IndexFiles(ctx context.Context, st *store.Store, ghClient *ghpkg.Client, in
 		return nil
 	}
 
-	// Delete old nodes for these files (edges cascade)
-	for _, f := range sourceFiles {
-		if err := st.DeleteNodesByFile(ctx, repoDBID, f); err != nil {
-			slog.Warn("graph: delete nodes failed", "file", f, "error", err)
-		}
-	}
+	// Per-file DELETE loop removed — indexFileSet now runs a hash-gated
+	// diff that touches only changed/new/removed symbols. See
+	// computeSymbolHash + the orphan sweep at the end of indexFileSet.
 
 	slog.Info("graph: incremental index", "repo", owner+"/"+repo, "files", len(sourceFiles))
 	return indexFileSet(ctx, st, ghClient, installationID, owner, repo, ref, repoDBID, sourceFiles)
@@ -94,16 +143,69 @@ func indexFileSet(ctx context.Context, st *store.Store, ghClient *ghpkg.Client, 
 	nameToIDs := make(map[string][]int64) // symbol name -> all node IDs with that name
 	lang := func(path string) string { return langForFile(path) }
 
-	for _, res := range results {
+	// Hash-gated diff pass. For each file:
+	//   1. Load existing nodes (id, kind, name, stored hash).
+	//   2. For each parsed symbol: skip if hash matches, upsert otherwise.
+	//   3. Collect DB rows whose (kind,name) vanished from the parse as
+	//      orphans; batch-delete at the end of the file.
+	//
+	// Replaces the previous wipe-and-reinsert loop: writes collapse from
+	// O(symbols-per-file) to O(changed-symbols-per-file), usually near 0.
+	for filePath, res := range results {
+		existing, err := st.GetNodesHashesForFile(ctx, repoDBID, filePath)
+		if err != nil {
+			slog.Warn("graph: load existing node hashes failed", "file", filePath, "error", err)
+			// Fall back to behavior equivalent to the old path: upsert
+			// everything unconditionally, no orphan sweep. Losing the skip
+			// optimization for this file is fine; losing correctness is not.
+			existing = nil
+		}
+
+		type existingRow struct {
+			id   int64
+			hash string
+		}
+		existingByKey := make(map[string]existingRow, len(existing))
+		for _, e := range existing {
+			existingByKey[symbolDiffKey(e.Kind, e.Name)] = existingRow{id: e.ID, hash: e.ContentHash}
+		}
+		// seenKeys tracks which DB rows the new parse covered. Anything in
+		// existingByKey but not seenKeys at the end of the loop is an orphan.
+		seenKeys := make(map[string]struct{}, len(res.symbols))
+
 		for _, sym := range res.symbols {
-			id, err := st.UpsertCodeNodeFull(ctx, repoDBID, sym.Kind, sym.Name, sym.FilePath, sym.LineStart, sym.LineEnd, lang(sym.FilePath), 0, sym.ReturnType, sym.Params, sym.Visibility, sym.IsAsync, sym.Receiver, sym.Scope)
+			diffKey := symbolDiffKey(sym.Kind, sym.Name)
+			seenKeys[diffKey] = struct{}{}
+			newHash := computeSymbolHash(sym)
+
+			if prev, ok := existingByKey[diffKey]; ok && prev.hash == newHash && prev.hash != "" {
+				// Unchanged symbol: reuse the existing row ID for edge
+				// resolution, skip the upsert entirely.
+				keyToID[nodeKey(sym.FilePath, sym.Name)] = prev.id
+				nameToIDs[sym.Name] = append(nameToIDs[sym.Name], prev.id)
+				continue
+			}
+
+			id, err := st.UpsertCodeNodeFullWithHash(ctx, repoDBID, sym.Kind, sym.Name, sym.FilePath, sym.LineStart, sym.LineEnd, lang(sym.FilePath), 0, sym.ReturnType, sym.Params, sym.Visibility, sym.IsAsync, sym.Receiver, sym.Scope, newHash)
 			if err != nil {
 				slog.Warn("graph: upsert node failed", "name", sym.Name, "file", sym.FilePath, "error", err)
 				continue
 			}
-			key := nodeKey(sym.FilePath, sym.Name)
-			keyToID[key] = id
+			keyToID[nodeKey(sym.FilePath, sym.Name)] = id
 			nameToIDs[sym.Name] = append(nameToIDs[sym.Name], id)
+		}
+
+		// Orphan sweep: any existing row whose (kind,name) disappeared from
+		// the new parse. Empty slice = no DELETE issued (GetNodesHashesForFile
+		// may return empty, and DeleteNodesByIDs no-ops on len==0).
+		var orphanIDs []int64
+		for key, prev := range existingByKey {
+			if _, ok := seenKeys[key]; !ok {
+				orphanIDs = append(orphanIDs, prev.id)
+			}
+		}
+		if err := st.DeleteNodesByIDs(ctx, repoDBID, orphanIDs); err != nil {
+			slog.Warn("graph: orphan sweep failed", "file", filePath, "error", err)
 		}
 	}
 
