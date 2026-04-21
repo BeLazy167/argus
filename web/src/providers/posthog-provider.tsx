@@ -32,9 +32,9 @@ if (typeof window !== "undefined" && POSTHOG_KEY) {
       maskAllInputs: false,
       maskTextSelector: ".ph-mask, pre, code, [data-phx-mask]",
       blockSelector: ".ph-block",
-      // 10% sample rate for the first 2 weeks while the mask coverage is
-      // verified — flip to 1.0 after the mask audit window.
-      sampleRate: 0.1,
+      // Temporarily 1.0 to verify recording end-to-end. Revert to 0.1 after
+      // mask audit window.
+      sampleRate: 1,
     },
     // Start with recording on; the per-route effect below stops it on
     // marketing/auth routes.
