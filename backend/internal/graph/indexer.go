@@ -223,9 +223,20 @@ func IndexFiles(ctx context.Context, st *store.Store, ghClient *ghpkg.Client, in
 // The store dependency is the narrow indexerStore interface so the IO loop
 // below can be exercised by an in-memory fake in indexer_integration_test.go.
 // *store.Store implicitly satisfies indexerStore, so callers pass it through.
+//
+// Streams per file: fetch → parse → upsert nodes → next file. Only
+// symbols + edges (small structs) accumulate for the cross-file edge-resolution
+// pass. The memory win vs. the older version comes from NOT buffering a
+// `map[string]fileResult{content, symbols, edges}` across files — content
+// goes out of scope when each iteration ends. Symbol strings carved from
+// `content` by the parser still share backing bytes with the file body,
+// so peak memory scales with parsed-text-retained-per-file, not raw file
+// size. An earlier version OOM'd a 512 MB VM on an 890-file full re-index.
 func indexFileSet(ctx context.Context, st indexerStore, ghClient *ghpkg.Client, installationID int64, owner, repo, ref string, repoDBID int64, files []string) error {
-	// Collect all symbols and edges across files, then resolve edges by name
-	results := make(map[string]fileResult, len(files))
+	keyToID := make(map[string]int64)
+	nameToIDs := make(map[string][]int64)
+	edgesByFile := make(map[string][]Edge, len(files))
+	symbolsByFile := make(map[string][]Symbol, len(files))
 
 	for _, f := range files {
 		if ctx.Err() != nil {
@@ -237,10 +248,12 @@ func indexFileSet(ctx context.Context, st indexerStore, ghClient *ghpkg.Client, 
 			continue
 		}
 		syms, edges := ParseFileSymbols(f, content)
-		results[f] = fileResult{symbols: syms, edges: edges}
+		upsertFileSymbols(ctx, st, repoDBID, f, syms, keyToID, nameToIDs)
+		edgesByFile[f] = edges
+		symbolsByFile[f] = syms
 	}
 
-	return indexParsedSymbols(ctx, st, repoDBID, results)
+	return resolveAndUpsertEdges(ctx, st, repoDBID, edgesByFile, symbolsByFile, keyToID, nameToIDs)
 }
 
 // indexParsedSymbols runs the hash-gated diff + edge upsert loop against
@@ -250,59 +263,76 @@ func indexFileSet(ctx context.Context, st indexerStore, ghClient *ghpkg.Client, 
 // client. indexFileSet uses this after its fetch+parse phase; the behavior
 // is identical — no extra retries, no extra logging.
 func indexParsedSymbols(ctx context.Context, st indexerStore, repoDBID int64, results map[string]fileResult) error {
-	// Upsert all nodes, building composite-key -> ID and name -> []ID lookups.
-	// The composite key (filePath+name) avoids collisions when multiple files
-	// define symbols with the same name. The name-only index supports
-	// resolving edges that reference symbols by name alone.
-	keyToID := make(map[string]int64)     // composite key -> node ID
-	nameToIDs := make(map[string][]int64) // symbol name -> all node IDs with that name
-	lang := func(path string) string { return langForFile(path) }
-
-	// Hash-gated diff per file, executed in three phases: plan (pure),
-	// apply (IO), sweep (IO). The plan function is unit-tested on its own;
-	// this loop is just the execution shell. Writes collapse from
-	// O(symbols-per-file) to O(changed-symbols-per-file), usually near 0.
+	// Thin wrapper over the two streaming helpers. Fans results out so the
+	// edge-resolution pass can see all files. indexFileSet prefers calling
+	// upsertFileSymbols directly per file to bound memory; this entry point
+	// exists for the integration test's pre-populated results map.
+	keyToID := make(map[string]int64)
+	nameToIDs := make(map[string][]int64)
+	edgesByFile := make(map[string][]Edge, len(results))
+	symbolsByFile := make(map[string][]Symbol, len(results))
 	for filePath, res := range results {
-		existing, err := st.GetNodesHashesForFile(ctx, repoDBID, filePath)
-		if err != nil {
-			slog.Warn("graph: load existing node hashes failed", "file", filePath, "error", err)
-			// Fall back equivalent to the old path: treat every parsed symbol
-			// as Changed, do not sweep orphans. Losing the skip optimization
-			// for this file is fine; losing correctness is not.
-			existing = nil
-		}
-		plan := planSymbolDiff(res.symbols, existing)
-
-		// Phase 1: reuse IDs of unchanged rows for edge resolution.
-		for _, u := range plan.Unchanged {
-			keyToID[nodeKey(u.Symbol.FilePath, u.Symbol.Name)] = u.NodeID
-			nameToIDs[u.Symbol.Name] = append(nameToIDs[u.Symbol.Name], u.NodeID)
-		}
-		// Phase 2: upsert the subset that actually changed (or is new).
-		for _, sym := range plan.Changed {
-			id, err := st.UpsertCodeNodeFullWithHash(ctx, repoDBID, sym.Kind, sym.Name, sym.FilePath, sym.LineStart, sym.LineEnd, lang(sym.FilePath), 0, sym.ReturnType, sym.Params, sym.Visibility, sym.IsAsync, sym.Receiver, sym.Scope, computeSymbolHash(sym))
-			if err != nil {
-				slog.Warn("graph: upsert node failed", "name", sym.Name, "file", sym.FilePath, "error", err)
-				continue
-			}
-			keyToID[nodeKey(sym.FilePath, sym.Name)] = id
-			nameToIDs[sym.Name] = append(nameToIDs[sym.Name], id)
-		}
-		// Phase 3: batch-delete orphans (no-ops on len == 0).
-		if err := st.DeleteNodesByIDs(ctx, repoDBID, plan.Orphans); err != nil {
-			slog.Warn("graph: orphan sweep failed", "file", filePath, "error", err)
-		}
+		upsertFileSymbols(ctx, st, repoDBID, filePath, res.symbols, keyToID, nameToIDs)
+		edgesByFile[filePath] = res.edges
+		symbolsByFile[filePath] = res.symbols
 	}
+	return resolveAndUpsertEdges(ctx, st, repoDBID, edgesByFile, symbolsByFile, keyToID, nameToIDs)
+}
 
+// upsertFileSymbols runs the hash-gated plan/apply/sweep for one file and
+// extends keyToID + nameToIDs in place for cross-file edge resolution. Errors
+// on individual symbols are logged and skipped; the loop never returns an
+// error so one bad file doesn't halt a 900-file index.
+//
+// Call exactly once per filePath per run. A second call for the same file
+// would re-append that file's node IDs to nameToIDs[name], producing
+// duplicates. Edge resolution picks the first match so behavior is benign
+// in practice, but the invariant is "one entry per symbol per run."
+func upsertFileSymbols(ctx context.Context, st indexerStore, repoDBID int64, filePath string, symbols []Symbol, keyToID map[string]int64, nameToIDs map[string][]int64) {
+	existing, err := st.GetNodesHashesForFile(ctx, repoDBID, filePath)
+	if err != nil {
+		slog.Warn("graph: load existing node hashes failed", "file", filePath, "error", err)
+		// Fall back equivalent to the old path: treat every parsed symbol
+		// as Changed, do not sweep orphans. Losing the skip optimization
+		// for this file is fine; losing correctness is not.
+		existing = nil
+	}
+	plan := planSymbolDiff(symbols, existing)
+	lang := langForFile(filePath)
+
+	// Phase 1: reuse IDs of unchanged rows for edge resolution.
+	for _, u := range plan.Unchanged {
+		keyToID[nodeKey(u.Symbol.FilePath, u.Symbol.Name)] = u.NodeID
+		nameToIDs[u.Symbol.Name] = append(nameToIDs[u.Symbol.Name], u.NodeID)
+	}
+	// Phase 2: upsert the subset that actually changed (or is new).
+	for _, sym := range plan.Changed {
+		id, err := st.UpsertCodeNodeFullWithHash(ctx, repoDBID, sym.Kind, sym.Name, sym.FilePath, sym.LineStart, sym.LineEnd, lang, 0, sym.ReturnType, sym.Params, sym.Visibility, sym.IsAsync, sym.Receiver, sym.Scope, computeSymbolHash(sym))
+		if err != nil {
+			slog.Warn("graph: upsert node failed", "name", sym.Name, "file", sym.FilePath, "error", err)
+			continue
+		}
+		keyToID[nodeKey(sym.FilePath, sym.Name)] = id
+		nameToIDs[sym.Name] = append(nameToIDs[sym.Name], id)
+	}
+	// Phase 3: batch-delete orphans (no-ops on len == 0).
+	if err := st.DeleteNodesByIDs(ctx, repoDBID, plan.Orphans); err != nil {
+		slog.Warn("graph: orphan sweep failed", "file", filePath, "error", err)
+	}
+}
+
+// resolveAndUpsertEdges runs the edge-resolution + upsert pass after every
+// file's nodes have been committed and keyToID/nameToIDs are fully populated.
+// Edges and symbol slices are kept separate from the fileResult map so the
+// caller can free file bodies eagerly during the fetch/parse phase.
+func resolveAndUpsertEdges(ctx context.Context, st indexerStore, repoDBID int64, edgesByFile map[string][]Edge, symbolsByFile map[string][]Symbol, keyToID map[string]int64, nameToIDs map[string][]int64) error {
 	// resolveEdgeTarget finds the best node ID for an edge target name.
 	// For same-file references, prefer the node in the source file.
 	// Otherwise, pick the first (most common) match.
 	resolveEdgeTarget := func(sourceFile, targetName string) (int64, bool) {
-		// Try same-file first (most precise)
 		if id, ok := keyToID[nodeKey(sourceFile, targetName)]; ok {
 			return id, true
 		}
-		// Fall back to any file
 		ids := nameToIDs[targetName]
 		if len(ids) > 0 {
 			return ids[0], true
@@ -313,8 +343,8 @@ func indexParsedSymbols(ctx context.Context, st indexerStore, repoDBID int64, re
 	// Upsert edges where both source and target exist in the graph.
 	// Iterate with filePath so we resolve edge source in its own file (composite key),
 	// avoiding cross-file name collisions (e.g. multiple `init`, `New`, `Handle`).
-	for filePath, res := range results {
-		for _, edge := range res.edges {
+	for filePath, edges := range edgesByFile {
+		for _, edge := range edges {
 			// Import edges: SourceName is a file path, not a symbol name.
 			// These represent file-level dependencies and are resolved differently.
 			if edge.Kind == "imports" {
@@ -322,7 +352,7 @@ func indexParsedSymbols(ctx context.Context, st indexerStore, repoDBID int64, re
 				// The import edge semantically means "this file depends on that module".
 				var sourceID int64
 				var found bool
-				for _, sym := range res.symbols {
+				for _, sym := range symbolsByFile[filePath] {
 					if sym.FilePath != filePath {
 						continue
 					}
@@ -342,14 +372,12 @@ func indexParsedSymbols(ctx context.Context, st indexerStore, repoDBID int64, re
 				// use "module" for external package references.
 				targetID, tok := resolveEdgeTarget(filePath, edge.TargetName)
 				if !tok {
-					// Create a placeholder node for the external import target
 					var err error
 					targetID, err = st.UpsertCodeNode(ctx, repoDBID, "module", edge.TargetName, filePath, 0, 0, "", 0)
 					if err != nil {
 						slog.Warn("graph: upsert import node failed", "target", edge.TargetName, "error", err)
 						continue
 					}
-					// Cache for future lookups
 					keyToID[nodeKey(filePath, edge.TargetName)] = targetID
 					nameToIDs[edge.TargetName] = append(nameToIDs[edge.TargetName], targetID)
 				}
@@ -364,7 +392,6 @@ func indexParsedSymbols(ctx context.Context, st indexerStore, repoDBID int64, re
 			// (e.g. `init`, `New`) don't have their call edges collapsed.
 			sourceID, ok := keyToID[nodeKey(filePath, edge.SourceName)]
 			if !ok {
-				// Fallback: edge synthesized across files — pick first match.
 				sourceIDs := nameToIDs[edge.SourceName]
 				if len(sourceIDs) == 0 {
 					continue
@@ -386,10 +413,10 @@ func indexParsedSymbols(ctx context.Context, st indexerStore, repoDBID int64, re
 		}
 	}
 
-	// Second pass: resolve uses_type edges from return types and parameter types
+	// Second pass: resolve uses_type edges from return types and parameter types.
 	var allSyms []Symbol
-	for _, res := range results {
-		allSyms = append(allSyms, res.symbols...)
+	for _, syms := range symbolsByFile {
+		allSyms = append(allSyms, syms...)
 	}
 	for _, edge := range resolveTypeEdges(allSyms, keyToID) {
 		sourceID := keyToID[edge.SourceName]

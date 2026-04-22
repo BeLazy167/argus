@@ -915,27 +915,12 @@ func (o *Orchestrator) handlePRClosed(ctx context.Context, event ghpkg.PREvent) 
 			return nil // non-fatal for webhook response
 		}
 		o.logger.Info("[closed] PR merged — nodes marked permanent", "pr", event.PRNumber, "repo", event.RepoFullName)
-		// Full graph re-index on merge (fire-and-forget)
-		owner, repo, splitErr := splitRepoFullName(event.RepoFullName)
-		if splitErr != nil {
-			o.logger.Warn("[closed] bad repo name, skipping re-index", "error", splitErr, "repo", event.RepoFullName)
-		} else {
-			go func() {
-				defer func() {
-					if r := recover(); r != nil {
-						o.logger.Error("[graph] re-index on merge panic", "recover", r, "repo", event.RepoFullName)
-						emitPipelinePanicEvent(ctx, o.logger, "graph_reindex_merge", r, obs.TraceID(ctx))
-					}
-				}()
-				reindexCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-				defer cancel()
-				if err := graph.IndexRepo(reindexCtx, o.st, o.ghClient, event.InstallationID, owner, repo, event.BaseRef, dbRepo.ID); err != nil {
-					o.logger.Warn("[graph] full re-index on merge failed", "error", err, "repo", event.RepoFullName)
-				} else {
-					o.logger.Info("[graph] full re-index on merge done", "repo", event.RepoFullName)
-				}
-			}()
-		}
+		// No full re-index on merge. MarkNodesMerged above flips node
+		// permanence in place; the files changed in this PR were already
+		// indexed incrementally during review. A full 890-file re-parse
+		// here OOM'd a 512 MB VM (~400 MB RSS peak) every time a large
+		// repo merged. If drift repair is ever needed, run it as an
+		// explicit admin/scheduled job, not a per-webhook goroutine.
 	} else {
 		if err := o.st.DeleteUnmergedNodesByPR(ctx, dbRepo.ID, event.PRNumber); err != nil {
 			o.logger.Error("[closed] failed to delete unmerged nodes", "error", err, "pr", event.PRNumber, "repo", event.RepoFullName)
