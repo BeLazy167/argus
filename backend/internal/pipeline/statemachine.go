@@ -253,11 +253,29 @@ func (sm *StateMachine) loadState(ctx context.Context, runID uuid.UUID) (*Pipeli
 	return &run, nil
 }
 
-// RecoverIncomplete finds all non-terminal pipeline runs and resumes them.
+// recoverStaleAfter is the minimum updated_at age before RecoverIncomplete
+// will claim a non-terminal run. Shorter = faster crash recovery but higher
+// risk of picking up a run another machine is actively processing. Longer =
+// safer against duplicate execution (see AcmeOrg PR #510 on 2026-04-23: a
+// Fly standby auto-started to serve a dashboard burst, called
+// RecoverIncomplete, claimed a live review, and posted a second GitHub
+// review 32 s after the first). Observed longest legitimate stage
+// turnaround is ~2 min; 10 min gives a ~5× margin while still recovering
+// truly-crashed runs within the fly health-check deploy-rollback window.
+const recoverStaleAfter = 10 * time.Minute
+
+// RecoverIncomplete resumes non-terminal pipeline runs whose updated_at is
+// older than recoverStaleAfter. Rows updated more recently are assumed to
+// be owned by another live process; taking them over would double-execute
+// the pipeline and post a duplicate GitHub review.
 func (sm *StateMachine) RecoverIncomplete(ctx context.Context) error {
 	rows, err := sm.db.Query(ctx,
-		`SELECT id FROM pipeline_states WHERE state NOT IN ($1, $2, $3) ORDER BY updated_at`,
+		`SELECT id FROM pipeline_states
+		 WHERE state NOT IN ($1, $2, $3)
+		   AND updated_at < NOW() - make_interval(secs => $4)
+		 ORDER BY updated_at`,
 		StateCompleted, StateFailed, StateCancelled,
+		recoverStaleAfter.Seconds(),
 	)
 	if err != nil {
 		return fmt.Errorf("querying incomplete runs: %w", err)
