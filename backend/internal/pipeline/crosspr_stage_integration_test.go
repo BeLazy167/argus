@@ -1114,3 +1114,37 @@ func waitSiblingFanoutSettled(t *testing.T, h *harness) {
 	// fan-out path.
 	t.Fatalf("sibling-fanout goroutine did not increment lookup counter within 2s")
 }
+
+// TestEnqueueSiblingRefreshes_HopGuardBreaksCycle asserts the hop guard
+// short-circuits a second-hop entry BEFORE the store is touched. Without
+// the guard, this test would see `siblingLookups` increment and a debounce
+// timer get created — reproducing the prod ping-pong between two PRs that
+// list each other as linked_pr_refs.
+func TestEnqueueSiblingRefreshes_HopGuardBreaksCycle(t *testing.T) {
+	t.Cleanup(resetCrossPRGlobals)
+	h := newHarness(t)
+
+	// Seed siblings so the hop=0 path WOULD fan out. The guard check must
+	// fire before the store lookup, so this non-empty siblingRows is never
+	// actually read when we enter at hop>=fanoutHopLimit.
+	h.store.siblingRows = []db.FindReviewsLinkingToPRRow{
+		{ID: uuid.New(), RepoID: h.repo.ID, PRNumber: 99, HeadSHA: "sha"},
+	}
+
+	// Enter at the limit — this simulates the re-entry that fires when a
+	// direct sibling is processing its own refresh and would otherwise
+	// bounce back into the original review.
+	ctx := withFanoutHop(context.Background(), fanoutHopLimit)
+	h.o.enqueueSiblingRefreshes(ctx, h.reviewID)
+
+	if got := atomic.LoadInt32(&h.store.siblingLookups); got != 0 {
+		t.Fatalf("hop guard failed: store saw %d sibling lookups, want 0", got)
+	}
+
+	crossPRDebounceMu.Lock()
+	count := len(crossPRDebounceTimers)
+	crossPRDebounceMu.Unlock()
+	if count != 0 {
+		t.Fatalf("hop guard failed: %d debounce timers created, want 0", count)
+	}
+}
