@@ -7,6 +7,7 @@
 package pipeline
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"sync"
@@ -781,6 +782,53 @@ func TestSweepTimestampCounter_KeepsActive(t *testing.T) {
 		}
 		if _, ok := m[99]; ok {
 			t.Fatalf("stale key 99 retained")
+		}
+	})
+}
+
+// TestFanoutHop pins the pure accessor semantics of the hop-counter
+// ctx helpers so subtle ctx-value bugs (e.g. a switch to a typed
+// string key that silently misses the lookup) can't drift without
+// failing a unit test. The guard firing at the re-entry boundary is
+// covered by TestEnqueueSiblingRefreshes_HopGuardBreaksCycle in
+// crosspr_stage_integration_test.go.
+func TestFanoutHop(t *testing.T) {
+	t.Run("unstamped ctx reads as hop 0", func(t *testing.T) {
+		if got := fanoutHop(context.Background()); got != 0 {
+			t.Fatalf("unstamped ctx: got hop %d, want 0", got)
+		}
+	})
+	t.Run("withFanoutHop round-trips", func(t *testing.T) {
+		ctx := withFanoutHop(context.Background(), 1)
+		if got := fanoutHop(ctx); got != 1 {
+			t.Fatalf("round-trip: got hop %d, want 1", got)
+		}
+	})
+	t.Run("hop survives WithoutCancel", func(t *testing.T) {
+		// The production call site wraps the re-entered ctx with
+		// context.WithoutCancel so cancellation of the outer event-bus
+		// handler doesn't orphan in-flight LLM calls. Values MUST be
+		// preserved across that wrap or the guard silently breaks.
+		ctx := withFanoutHop(context.Background(), 1)
+		ctx = context.WithoutCancel(ctx)
+		if got := fanoutHop(ctx); got != 1 {
+			t.Fatalf("hop lost across WithoutCancel: got %d, want 1", got)
+		}
+	})
+	t.Run("nested stamp takes the latest value", func(t *testing.T) {
+		ctx := withFanoutHop(context.Background(), 1)
+		ctx = withFanoutHop(ctx, 2)
+		if got := fanoutHop(ctx); got != 2 {
+			t.Fatalf("nested stamp: got %d, want 2", got)
+		}
+	})
+	t.Run("wrong-type ctx value reads as 0", func(t *testing.T) {
+		// Defense against a hypothetical future refactor that puts a
+		// non-int behind the same key. The type assertion in fanoutHop
+		// must fall back to 0 rather than panic.
+		ctx := context.WithValue(context.Background(), fanoutHopKey{}, "not-an-int")
+		if got := fanoutHop(ctx); got != 0 {
+			t.Fatalf("wrong-type value: got %d, want 0", got)
 		}
 	})
 }

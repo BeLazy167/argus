@@ -213,6 +213,25 @@ const (
 // cap by racing with another.
 var crossPRSiblingSem = make(chan struct{}, crossPRSiblingFanoutConcurrency)
 
+// fanoutHopKey is the ctx key for the sibling-fanout hop counter.
+// Unstamped ctx reads as hop=0. enqueueSiblingRefreshes stamps hop+1 on
+// re-entry and refuses to fan out at hop>=fanoutHopLimit, breaking
+// mutual-link ping-pong between two PRs that reference each other.
+// Limit=1: direct-sibling refresh is the feature; grandchild cascades
+// aren't — they'll refresh via their own hop-0 completion.
+type fanoutHopKey struct{}
+
+const fanoutHopLimit = 1
+
+func fanoutHop(ctx context.Context) int {
+	n, _ := ctx.Value(fanoutHopKey{}).(int)
+	return n
+}
+
+func withFanoutHop(ctx context.Context, n int) context.Context {
+	return context.WithValue(ctx, fanoutHopKey{}, n)
+}
+
 // mutexEntry is the value stored in mutexMap: a mutex plus a
 // last-accessed timestamp (unix nano, atomic.Int64) so the sweeper can
 // evict stale entries without touching the hot-path acquire lock.
@@ -577,6 +596,15 @@ func (o *Orchestrator) RefreshCrossPR(ctx context.Context, reviewID uuid.UUID) {
 // make a dropped sibling bounded, not silent (the next push webhook
 // will re-trigger).
 func (o *Orchestrator) enqueueSiblingRefreshes(ctx context.Context, reviewID uuid.UUID) {
+	// See fanoutHopKey doc for the ping-pong rationale. Debug-log the
+	// suppression so ops can grep-verify the guard is firing in prod;
+	// without it, a suppressed cascade is indistinguishable from a
+	// legitimate "no siblings found" result (both silent).
+	if hop := fanoutHop(ctx); hop >= fanoutHopLimit {
+		o.logger.Debug("[crosspr] sibling fanout suppressed",
+			"review_id", reviewID, "hop", hop)
+		return
+	}
 	st := o.crossPRStoreDep()
 	review, err := st.GetReview(ctx, reviewID)
 	if err != nil {
@@ -636,10 +664,15 @@ func (o *Orchestrator) enqueueSiblingRefreshes(ctx context.Context, reviewID uui
 					emitPipelinePanicEvent(ctx, o.logger, "sibling_refresh", r, obs.TraceID(ctx))
 				}
 			}()
+			// Stamp the hop so the sibling's own re-entry into
+			// enqueueSiblingRefreshes short-circuits at the guard above.
+			// context.WithoutCancel preserves values, so the hop rides
+			// through the debounce timer and reverse-lookup goroutine.
+			nextCtx := withFanoutHop(context.WithoutCancel(ctx), fanoutHop(ctx)+1)
 			// Re-enter OnReviewCompleted so the sibling's debounce,
 			// per-review cap, and per-installation cap all apply for the
 			// findings (runCrossPRStage) path.
-			o.OnReviewCompleted(ctx, sibID)
+			o.OnReviewCompleted(nextCtx, sibID)
 			// Joint acceptance does not piggyback on OnReviewCompleted (the
 			// bus subscriber is what dispatches both), so a sibling event
 			// that arrives via reverse-lookup would otherwise never refresh
@@ -648,7 +681,7 @@ func (o *Orchestrator) enqueueSiblingRefreshes(ctx context.Context, reviewID uui
 			// can't orphan it mid-LLM call. The per-review mutex inside
 			// runCrossPRAcceptanceStage serializes against any parallel
 			// bus-driven dispatch.
-			o.runCrossPRAcceptanceStage(context.WithoutCancel(ctx), sibID)
+			o.runCrossPRAcceptanceStage(nextCtx, sibID)
 		}()
 	}
 }
