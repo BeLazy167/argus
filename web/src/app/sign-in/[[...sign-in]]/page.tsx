@@ -37,6 +37,22 @@ const VALUE_PROPS = [
  * Sign-in is single-step for password auth — email + password → setActive → redirect.
  * GitHub OAuth redirects through /sign-in/sso-callback.
  */
+// EmailCodeFactor narrows the Clerk SignInFirstFactor union to the
+// email_code strategy. emailAddressId + safeIdentifier are present only
+// on this variant; narrowing here keeps the lookup below type-safe.
+type EmailCodeFactor = {
+  strategy: "email_code";
+  emailAddressId: string;
+  safeIdentifier: string;
+};
+
+// needs_client_trust is a newer Clerk sign-in status that the currently
+// installed @clerk/nextjs types don't list in the SignInStatus union.
+// Comparing status (narrowly typed) directly to the literal trips TS2367.
+// isStatus() widens to string so the comparison type-checks without
+// weakening the rest of the type-checked status handling.
+const isStatus = (status: unknown, want: string): boolean => status === want;
+
 export default function SignInPage() {
   const router = useRouter();
   const { isLoaded, signIn, setActive } = useSignIn();
@@ -47,6 +63,13 @@ export default function SignInPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  // When Clerk returns needs_client_trust after password auth, we prepare
+  // an email_code first factor and switch the form to code entry. Null
+  // here means the password form is visible; non-null means the code
+  // form is. codeSent tracks the transient "we just resent" confirmation.
+  const [codeFlow, setCodeFlow] = useState<{ emailAddressId: string } | null>(null);
+  const [code, setCode] = useState("");
+  const [codeSent, setCodeSent] = useState(false);
 
   // If the browser already has a Clerk session (e.g. a colleague left
   // their session on a shared machine, or the user navigated back to
@@ -71,30 +94,39 @@ export default function SignInPage() {
   };
 
   // Maps a non-"complete" Clerk sign-in status to copy that tells the user
-  // what to actually DO. Default copy ("Try again or reset your password")
-  // was misleading for needs_client_trust (password reset won't fix device
-  // trust) and pointed at a /sign-in/forgot-password route that doesn't
-  // exist. Known statuses get a specific message; unknown ones fall
-  // through to a generic "contact support" so we don't invent actions.
+  // what to actually DO. needs_client_trust is handled separately — we
+  // prepare an email_code factor instead of surfacing text. The remaining
+  // statuses either have a dedicated page (needs_new_password → reset
+  // flow) or no in-app UI yet (needs_second_factor).
   const describeIncompleteStatus = (status: string | null): string => {
     switch (status) {
-      case "needs_client_trust":
-        // Clerk gates a sign-in when the device/browser hasn't been seen
-        // or is flagged as risky. GitHub OAuth bootstraps the trust in one
-        // redirect; password auth on the same browser would need an email
-        // verification code flow we haven't built yet.
-        return "Your browser needs to be verified. Sign in with GitHub above — it completes the verification in one step.";
       case "needs_first_factor":
         return "Password didn't match. Check it and try again.";
       case "needs_second_factor":
-        return "Two-factor authentication is required on this account. We don't have a 2FA entry form yet — sign in with GitHub above.";
+        return "Two-factor authentication is required. We don't have a 2FA entry form yet — sign in with GitHub above.";
       case "needs_new_password":
-        return "Your password has expired. Sign in with GitHub above to recover your account.";
+        return "Your password has expired. Use the forgot-password link below to set a new one.";
       case "needs_identifier":
         return "Email is missing. Fill in your email and try again.";
       default:
         return `Sign-in didn't complete (${status ?? "unknown"}). Sign in with GitHub above, or contact support.`;
     }
+  };
+
+  // Looks up the email_code first factor on the current SignIn resource
+  // and asks Clerk to send the one-time code. Returns the emailAddressId
+  // so the caller can transition the UI into code-entry state.
+  const sendEmailCode = async (): Promise<string | null> => {
+    if (!signIn) return null;
+    const factor = signIn.supportedFirstFactors?.find(
+      (f): f is EmailCodeFactor => f.strategy === "email_code",
+    );
+    if (!factor) {
+      setError("Email verification isn't available for this account. Sign in with GitHub above.");
+      return null;
+    }
+    await signIn.prepareFirstFactor({ strategy: "email_code", emailAddressId: factor.emailAddressId });
+    return factor.emailAddressId;
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -109,12 +141,60 @@ export default function SignInPage() {
         router.push("/dashboard");
         return;
       }
+      if (isStatus(attempt.status, "needs_client_trust")) {
+        // Clerk's device-trust gate. Resolve in-app by sending a code to
+        // the account email; the user types it in the next step.
+        const emailAddressId = await sendEmailCode();
+        if (emailAddressId) {
+          setCodeFlow({ emailAddressId });
+        }
+        return;
+      }
       setError(describeIncompleteStatus(attempt.status));
     } catch (err) {
       setError(surfaceClerkError(err));
     } finally {
       setSubmitting(false);
     }
+  };
+
+  const handleVerifyCode = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!isLoaded || !codeFlow) return;
+    setError(null);
+    setSubmitting(true);
+    try {
+      const result = await signIn.attemptFirstFactor({ strategy: "email_code", code });
+      if (result.status === "complete") {
+        await setActive({ session: result.createdSessionId });
+        router.push("/dashboard");
+        return;
+      }
+      setError(describeIncompleteStatus(result.status));
+    } catch (err) {
+      setError(surfaceClerkError(err));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleResendCode = async () => {
+    if (!isLoaded || !codeFlow) return;
+    setError(null);
+    setCodeSent(false);
+    try {
+      await signIn.prepareFirstFactor({ strategy: "email_code", emailAddressId: codeFlow.emailAddressId });
+      setCodeSent(true);
+    } catch (err) {
+      setError(surfaceClerkError(err));
+    }
+  };
+
+  const handleCancelCode = () => {
+    setCodeFlow(null);
+    setCode("");
+    setCodeSent(false);
+    setError(null);
   };
 
   const handleGitHub = async () => {
@@ -192,86 +272,165 @@ export default function SignInPage() {
 
         <div className="flex flex-1 flex-col items-center justify-center">
           <div className="w-full max-w-sm">
-            <form onSubmit={handleSubmit} className="flex flex-col gap-5">
-              <header className="space-y-1 text-center">
-                <h2 className="font-mono text-xl font-bold text-foreground">Sign in to Argus</h2>
-                <p className="text-[12px] font-mono text-slate-text">
-                  Welcome back. Pick up where you left off.
-                </p>
-              </header>
+            {codeFlow ? (
+              <form onSubmit={handleVerifyCode} className="flex flex-col gap-5">
+                <header className="space-y-1 text-center">
+                  <h2 className="font-mono text-xl font-bold text-foreground">Check your email</h2>
+                  <p className="text-[12px] font-mono text-slate-text">
+                    We sent a 6-digit code to <span className="text-foreground">{email}</span>. Enter it below to finish signing in.
+                  </p>
+                </header>
 
-              <button
-                type="button"
-                onClick={handleGitHub}
-                disabled={submitting}
-                className="group relative inline-flex h-10 items-center justify-center gap-2 rounded-md border border-iron bg-charcoal font-mono text-[13px] text-foreground transition-colors hover:border-amber/50 hover:bg-iron/30 disabled:opacity-50 active:scale-[0.98]"
-                style={{ transition: "transform 160ms cubic-bezier(0.23,1,0.32,1), background-color 150ms, border-color 150ms" }}
-              >
-                <Github className="h-4 w-4" />
-                Continue with GitHub
-              </button>
+                <label className="flex flex-col gap-1.5" htmlFor="code">
+                  <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-slate-text">Verification code</span>
+                  <input
+                    id="code"
+                    type="text"
+                    required
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    maxLength={6}
+                    value={code}
+                    onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))}
+                    placeholder="123456"
+                    className="h-10 w-full rounded-md border border-iron bg-charcoal px-3 font-mono text-[15px] tracking-[0.3em] text-foreground placeholder:text-iron focus:border-amber focus:outline-none focus:ring-1 focus:ring-amber/40"
+                  />
+                </label>
 
-              <div className="relative my-1 flex items-center gap-3">
-                <span className="h-px flex-1 bg-iron/60" />
-                <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-slate-text">or</span>
-                <span className="h-px flex-1 bg-iron/60" />
-              </div>
-
-              <label className="flex flex-col gap-1.5" htmlFor="email">
-                <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-slate-text">Email</span>
-                <input
-                  id="email"
-                  type="email"
-                  required
-                  autoComplete="email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  placeholder="you@example.com"
-                  className="h-10 w-full rounded-md border border-iron bg-charcoal px-3 font-mono text-[13px] text-foreground placeholder:text-iron focus:border-amber focus:outline-none focus:ring-1 focus:ring-amber/40"
-                />
-              </label>
-
-              <label className="flex flex-col gap-1.5" htmlFor="password">
-                <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-slate-text">Password</span>
-                <input
-                  id="password"
-                  type="password"
-                  required
-                  autoComplete="current-password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  className="h-10 w-full rounded-md border border-iron bg-charcoal px-3 font-mono text-[13px] text-foreground placeholder:text-iron focus:border-amber focus:outline-none focus:ring-1 focus:ring-amber/40"
-                />
-              </label>
-
-              <div id="clerk-captcha" className="min-h-0" />
-
-              {error && (
-                <div
-                  role="alert"
-                  className="flex items-start gap-2 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 font-mono text-[12px] text-red-400"
-                >
-                  <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                  <span className="flex-1">{error}</span>
-                </div>
-              )}
-
-              <button
-                type="submit"
-                disabled={submitting || !email || !password}
-                className="inline-flex h-10 items-center justify-center rounded-md bg-amber px-4 font-mono text-[13px] font-semibold text-primary-foreground transition-colors hover:bg-amber-glow disabled:opacity-50 active:scale-[0.98]"
-                style={{ transition: "transform 160ms cubic-bezier(0.23,1,0.32,1), background-color 150ms" }}
-              >
-                {submitting ? (
-                  <>
-                    <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
-                    Signing in…
-                  </>
-                ) : (
-                  "Sign in"
+                {codeSent && !error && (
+                  <p className="text-[11px] font-mono text-emerald-400">New code sent. Check your inbox.</p>
                 )}
-              </button>
-            </form>
+
+                {error && (
+                  <div
+                    role="alert"
+                    className="flex items-start gap-2 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 font-mono text-[12px] text-red-400"
+                  >
+                    <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                    <span className="flex-1">{error}</span>
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={submitting || code.length < 6}
+                  className="inline-flex h-10 items-center justify-center rounded-md bg-amber px-4 font-mono text-[13px] font-semibold text-primary-foreground transition-colors hover:bg-amber-glow disabled:opacity-50 active:scale-[0.98]"
+                  style={{ transition: "transform 160ms cubic-bezier(0.23,1,0.32,1), background-color 150ms" }}
+                >
+                  {submitting ? (
+                    <>
+                      <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
+                      Verifying…
+                    </>
+                  ) : (
+                    "Verify and sign in"
+                  )}
+                </button>
+
+                <div className="flex items-center justify-between">
+                  <button
+                    type="button"
+                    onClick={handleCancelCode}
+                    className="font-mono text-[11px] text-slate-text/80 transition-colors hover:text-amber"
+                  >
+                    &larr; Back
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleResendCode}
+                    className="font-mono text-[11px] text-slate-text/80 transition-colors hover:text-amber"
+                  >
+                    Resend code
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <form onSubmit={handleSubmit} className="flex flex-col gap-5">
+                <header className="space-y-1 text-center">
+                  <h2 className="font-mono text-xl font-bold text-foreground">Sign in to Argus</h2>
+                  <p className="text-[12px] font-mono text-slate-text">
+                    Welcome back. Pick up where you left off.
+                  </p>
+                </header>
+
+                <button
+                  type="button"
+                  onClick={handleGitHub}
+                  disabled={submitting}
+                  className="group relative inline-flex h-10 items-center justify-center gap-2 rounded-md border border-iron bg-charcoal font-mono text-[13px] text-foreground transition-colors hover:border-amber/50 hover:bg-iron/30 disabled:opacity-50 active:scale-[0.98]"
+                  style={{ transition: "transform 160ms cubic-bezier(0.23,1,0.32,1), background-color 150ms, border-color 150ms" }}
+                >
+                  <Github className="h-4 w-4" />
+                  Continue with GitHub
+                </button>
+
+                <div className="relative my-1 flex items-center gap-3">
+                  <span className="h-px flex-1 bg-iron/60" />
+                  <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-slate-text">or</span>
+                  <span className="h-px flex-1 bg-iron/60" />
+                </div>
+
+                <label className="flex flex-col gap-1.5" htmlFor="email">
+                  <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-slate-text">Email</span>
+                  <input
+                    id="email"
+                    type="email"
+                    required
+                    autoComplete="email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    placeholder="you@example.com"
+                    className="h-10 w-full rounded-md border border-iron bg-charcoal px-3 font-mono text-[13px] text-foreground placeholder:text-iron focus:border-amber focus:outline-none focus:ring-1 focus:ring-amber/40"
+                  />
+                </label>
+
+                <label className="flex flex-col gap-1.5" htmlFor="password">
+                  <span className="flex items-baseline justify-between">
+                    <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-slate-text">Password</span>
+                    <Link href="/sign-in/forgot-password" className="font-mono text-[10px] text-slate-text/80 hover:text-amber">
+                      Forgot?
+                    </Link>
+                  </span>
+                  <input
+                    id="password"
+                    type="password"
+                    required
+                    autoComplete="current-password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    className="h-10 w-full rounded-md border border-iron bg-charcoal px-3 font-mono text-[13px] text-foreground placeholder:text-iron focus:border-amber focus:outline-none focus:ring-1 focus:ring-amber/40"
+                  />
+                </label>
+
+                <div id="clerk-captcha" className="min-h-0" />
+
+                {error && (
+                  <div
+                    role="alert"
+                    className="flex items-start gap-2 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 font-mono text-[12px] text-red-400"
+                  >
+                    <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                    <span className="flex-1">{error}</span>
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={submitting || !email || !password}
+                  className="inline-flex h-10 items-center justify-center rounded-md bg-amber px-4 font-mono text-[13px] font-semibold text-primary-foreground transition-colors hover:bg-amber-glow disabled:opacity-50 active:scale-[0.98]"
+                  style={{ transition: "transform 160ms cubic-bezier(0.23,1,0.32,1), background-color 150ms" }}
+                >
+                  {submitting ? (
+                    <>
+                      <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
+                      Signing in…
+                    </>
+                  ) : (
+                    "Sign in"
+                  )}
+                </button>
+              </form>
+            )}
 
             <p className="mt-6 text-center text-[12px] font-mono text-slate-text">
               Don&apos;t have an account?{" "}
