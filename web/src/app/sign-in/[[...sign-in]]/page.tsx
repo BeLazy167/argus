@@ -1,10 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useSignIn } from "@clerk/nextjs";
+import { useAuth, useSignIn } from "@clerk/nextjs";
 import { Brain, GitPullRequest, Key, Sparkles, Loader2, AlertCircle, Github } from "lucide-react";
 import { ShaderAnimation } from "@/components/ui/shader-lines";
 import { useMediaQuery } from "@/lib/hooks/use-media-query";
@@ -40,12 +40,26 @@ const VALUE_PROPS = [
 export default function SignInPage() {
   const router = useRouter();
   const { isLoaded, signIn, setActive } = useSignIn();
+  const { isLoaded: authLoaded, isSignedIn } = useAuth();
   const isLg = useMediaQuery("(min-width: 1024px)");
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+
+  // If the browser already has a Clerk session (e.g. a colleague left
+  // their session on a shared machine, or the user navigated back to
+  // /sign-in after signing in elsewhere in the tab), skip the form and
+  // send them to the dashboard. Without this, clicking "Continue with
+  // GitHub" throws Clerk's "You're already signed in" and strands the
+  // user on a page that can't progress. We use router.replace so the
+  // back button doesn't trap them in a redirect loop.
+  useEffect(() => {
+    if (authLoaded && isSignedIn) {
+      router.replace("/dashboard");
+    }
+  }, [authLoaded, isSignedIn, router]);
 
   const surfaceClerkError = (err: unknown): string => {
     if (err && typeof err === "object" && "errors" in err && Array.isArray((err as { errors: unknown[] }).errors)) {
@@ -54,6 +68,33 @@ export default function SignInPage() {
     }
     if (err instanceof Error) return err.message;
     return "Something went wrong.";
+  };
+
+  // Maps a non-"complete" Clerk sign-in status to copy that tells the user
+  // what to actually DO. Default copy ("Try again or reset your password")
+  // was misleading for needs_client_trust (password reset won't fix device
+  // trust) and pointed at a /sign-in/forgot-password route that doesn't
+  // exist. Known statuses get a specific message; unknown ones fall
+  // through to a generic "contact support" so we don't invent actions.
+  const describeIncompleteStatus = (status: string | null): string => {
+    switch (status) {
+      case "needs_client_trust":
+        // Clerk gates a sign-in when the device/browser hasn't been seen
+        // or is flagged as risky. GitHub OAuth bootstraps the trust in one
+        // redirect; password auth on the same browser would need an email
+        // verification code flow we haven't built yet.
+        return "Your browser needs to be verified. Sign in with GitHub above — it completes the verification in one step.";
+      case "needs_first_factor":
+        return "Password didn't match. Check it and try again.";
+      case "needs_second_factor":
+        return "Two-factor authentication is required on this account. We don't have a 2FA entry form yet — sign in with GitHub above.";
+      case "needs_new_password":
+        return "Your password has expired. Sign in with GitHub above to recover your account.";
+      case "needs_identifier":
+        return "Email is missing. Fill in your email and try again.";
+      default:
+        return `Sign-in didn't complete (${status ?? "unknown"}). Sign in with GitHub above, or contact support.`;
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -68,7 +109,7 @@ export default function SignInPage() {
         router.push("/dashboard");
         return;
       }
-      setError(`Sign-in incomplete (${attempt.status}). Try again or reset your password.`);
+      setError(describeIncompleteStatus(attempt.status));
     } catch (err) {
       setError(surfaceClerkError(err));
     } finally {
@@ -191,12 +232,7 @@ export default function SignInPage() {
               </label>
 
               <label className="flex flex-col gap-1.5" htmlFor="password">
-                <span className="flex items-baseline justify-between">
-                  <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-slate-text">Password</span>
-                  <Link href="/sign-in/forgot-password" className="font-mono text-[10px] text-slate-text/80 hover:text-amber">
-                    Forgot?
-                  </Link>
-                </span>
+                <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-slate-text">Password</span>
                 <input
                   id="password"
                   type="password"
