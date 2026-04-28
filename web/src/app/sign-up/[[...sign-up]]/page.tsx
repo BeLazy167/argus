@@ -1,13 +1,14 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useSignUp } from "@clerk/nextjs";
+import { useAuth, useSignUp } from "@clerk/nextjs";
 import { Brain, GitPullRequest, Key, Sparkles, Loader2, AlertCircle, Github } from "lucide-react";
 import { ShaderAnimation } from "@/components/ui/shader-lines";
 import { useMediaQuery } from "@/lib/hooks/use-media-query";
+import { describeClerkError, type ClerkErrorInfo } from "@/lib/clerk-errors";
 
 const VALUE_PROPS = [
   {
@@ -42,10 +43,21 @@ const VALUE_PROPS = [
 export default function SignUpPage() {
   const router = useRouter();
   const { isLoaded, signUp, setActive } = useSignUp();
+  const { isLoaded: authLoaded, isSignedIn } = useAuth();
   // Only mount the WebGL shader on lg+ — on narrow viewports the aside is display:none
   // anyway, but the component would still initialize and tick an rAF loop off-screen,
   // draining battery. Gate the mount to avoid that.
   const isLg = useMediaQuery("(min-width: 1024px)");
+
+  // Bounce already-signed-in users to the dashboard. Same reason as the
+  // sign-in page: Clerk enforces one session per browser, so landing here
+  // with a live session means clicking "Continue with GitHub" would throw
+  // "You're already signed in" with no recovery path.
+  useEffect(() => {
+    if (authLoaded && isSignedIn) {
+      router.replace("/dashboard");
+    }
+  }, [authLoaded, isSignedIn, router]);
 
   const [step, setStep] = useState<"form" | "verify">("form");
   const [firstName, setFirstName] = useState("");
@@ -54,17 +66,8 @@ export default function SignUpPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ClerkErrorInfo | null>(null);
   const [submitting, setSubmitting] = useState(false);
-
-  const surfaceClerkError = (err: unknown): string => {
-    if (err && typeof err === "object" && "errors" in err && Array.isArray((err as { errors: unknown[] }).errors)) {
-      const first = (err as { errors: { longMessage?: string; message?: string }[] }).errors[0];
-      if (first) return first.longMessage ?? first.message ?? "Something went wrong.";
-    }
-    if (err instanceof Error) return err.message;
-    return "Something went wrong.";
-  };
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -82,7 +85,7 @@ export default function SignUpPage() {
       await signUp.prepareEmailAddressVerification({ strategy: "email_code" });
       setStep("verify");
     } catch (err) {
-      setError(surfaceClerkError(err));
+      setError(describeClerkError(err));
     } finally {
       setSubmitting(false);
     }
@@ -100,9 +103,9 @@ export default function SignUpPage() {
         router.push("/dashboard");
         return;
       }
-      setError(`Verification incomplete (${attempt.status}). Please check the code.`);
+      setError({ message: `Verification incomplete (${attempt.status}). Please check the code.` });
     } catch (err) {
-      setError(surfaceClerkError(err));
+      setError(describeClerkError(err));
     } finally {
       setSubmitting(false);
     }
@@ -118,7 +121,7 @@ export default function SignUpPage() {
         redirectUrlComplete: "/dashboard",
       });
     } catch (err) {
-      setError(surfaceClerkError(err));
+      setError(describeClerkError(err));
     }
   };
 
@@ -248,7 +251,7 @@ function CreateForm({
   username: string;
   email: string;
   password: string;
-  error: string | null;
+  error: ClerkErrorInfo | null;
   submitting: boolean;
   onFirstName: (v: string) => void;
   onLastName: (v: string) => void;
@@ -355,7 +358,7 @@ function CreateForm({
       {/* Clerk's bot-detection element — required by the SDK. Keep it mounted. */}
       <div id="clerk-captcha" className="min-h-0" />
 
-      {error && <ErrorBanner message={error} />}
+      {error && <ErrorBanner info={error} />}
 
       <button
         type="submit"
@@ -399,7 +402,7 @@ function VerifyForm({
 }: {
   email: string;
   code: string;
-  error: string | null;
+  error: ClerkErrorInfo | null;
   submitting: boolean;
   onCode: (v: string) => void;
   onSubmit: (e: React.FormEvent) => void;
@@ -431,7 +434,7 @@ function VerifyForm({
         />
       </Field>
 
-      {error && <ErrorBanner message={error} />}
+      {error && <ErrorBanner info={error} />}
 
       <button
         type="submit"
@@ -488,14 +491,25 @@ function Field({
   );
 }
 
-function ErrorBanner({ message }: { message: string }) {
+function ErrorBanner({ info }: { info: ClerkErrorInfo }) {
   return (
     <div
       role="alert"
       className="flex items-start gap-2 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 font-mono text-[12px] text-red-400"
     >
       <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-      <span className="flex-1">{message}</span>
+      <span className="flex-1">
+        {info.message}
+        {info.action && (
+          <>
+            {" "}
+            <Link href={info.action.href} className="underline underline-offset-2 hover:text-red-300">
+              {info.action.label}
+            </Link>
+            .
+          </>
+        )}
+      </span>
     </div>
   );
 }
