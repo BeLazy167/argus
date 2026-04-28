@@ -1,13 +1,24 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useAuth, useSignIn } from "@clerk/nextjs";
-import { Brain, GitPullRequest, Key, Sparkles, Loader2, AlertCircle, Github } from "lucide-react";
+import { useAuth, useSignIn, useUser, useClerk } from "@clerk/nextjs";
+import {
+  Brain,
+  GitPullRequest,
+  Key,
+  Sparkles,
+  Loader2,
+  AlertCircle,
+  Github,
+  ArrowRight,
+  LogOut,
+} from "lucide-react";
 import { ShaderAnimation } from "@/components/ui/shader-lines";
 import { useMediaQuery } from "@/lib/hooks/use-media-query";
+import { describeClerkError, type ClerkErrorInfo } from "@/lib/clerk-errors";
 
 const VALUE_PROPS = [
   {
@@ -57,11 +68,13 @@ export default function SignInPage() {
   const router = useRouter();
   const { isLoaded, signIn, setActive } = useSignIn();
   const { isLoaded: authLoaded, isSignedIn } = useAuth();
+  const { user } = useUser();
+  const { signOut } = useClerk();
   const isLg = useMediaQuery("(min-width: 1024px)");
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ClerkErrorInfo | null>(null);
   const [submitting, setSubmitting] = useState(false);
   // When Clerk returns needs_client_trust after password auth, we prepare
   // an email_code first factor and switch the form to code entry. Null
@@ -70,46 +83,50 @@ export default function SignInPage() {
   const [codeFlow, setCodeFlow] = useState<{ emailAddressId: string } | null>(null);
   const [code, setCode] = useState("");
   const [codeSent, setCodeSent] = useState(false);
+  const [switchingAccount, setSwitchingAccount] = useState(false);
 
-  // If the browser already has a Clerk session (e.g. a colleague left
-  // their session on a shared machine, or the user navigated back to
-  // /sign-in after signing in elsewhere in the tab), skip the form and
-  // send them to the dashboard. Without this, clicking "Continue with
-  // GitHub" throws Clerk's "You're already signed in" and strands the
-  // user on a page that can't progress. We use router.replace so the
-  // back button doesn't trap them in a redirect loop.
-  useEffect(() => {
-    if (authLoaded && isSignedIn) {
-      router.replace("/dashboard");
-    }
-  }, [authLoaded, isSignedIn, router]);
-
-  const surfaceClerkError = (err: unknown): string => {
-    if (err && typeof err === "object" && "errors" in err && Array.isArray((err as { errors: unknown[] }).errors)) {
-      const first = (err as { errors: { longMessage?: string; message?: string }[] }).errors[0];
-      if (first) return first.longMessage ?? first.message ?? "Something went wrong.";
-    }
-    if (err instanceof Error) return err.message;
-    return "Something went wrong.";
+  // A session already in the browser (own tab left open, shared machine,
+  // stale dev/prod switch) used to silently router.replace() to /dashboard.
+  // That dropped a colleague onto someone else's account with no signal
+  // of what happened. Clerk is single-session by default, so calling
+  // signIn.create() or authenticateWithRedirect() with a live session
+  // also throws code "session_exists" with longMessage "You're already
+  // signed in." — stranding the user. The SignedInCard branch below
+  // replaces both failure modes with an explicit choice.
+  const handleContinue = () => router.replace("/dashboard");
+  const handleSwitchAccount = async () => {
+    setSwitchingAccount(true);
+    // signOut with no args clears the current (only) session in a
+    // single-session app. Once it resolves, isSignedIn flips false and
+    // this branch unmounts — the password/OAuth form re-renders, giving
+    // the natural state separation Clerk's docs require between signOut
+    // and the next signIn.
+    await signOut();
   };
 
-  // Maps a non-"complete" Clerk sign-in status to copy that tells the user
-  // what to actually DO. needs_client_trust is handled separately — we
-  // prepare an email_code factor instead of surfacing text. The remaining
-  // statuses either have a dedicated page (needs_new_password → reset
-  // flow) or no in-app UI yet (needs_second_factor).
-  const describeIncompleteStatus = (status: string | null): string => {
+  // describeIncompleteStatus maps a non-"complete" Clerk sign-in status to
+  // a ClerkErrorInfo. needs_client_trust is handled separately (kicks off
+  // the email_code flow). Remaining statuses either have a dedicated page
+  // (needs_new_password → reset flow) or no in-app UI yet.
+  const describeIncompleteStatus = (status: string | null): ClerkErrorInfo => {
     switch (status) {
       case "needs_first_factor":
-        return "Password didn't match. Check it and try again.";
+        return { message: "Password didn't match. Check it and try again." };
       case "needs_second_factor":
-        return "Two-factor authentication is required. We don't have a 2FA entry form yet — sign in with GitHub above.";
+        return {
+          message: "Two-factor authentication is required. We don't have a 2FA entry form yet — sign in with GitHub above.",
+        };
       case "needs_new_password":
-        return "Your password has expired. Use the forgot-password link below to set a new one.";
+        return {
+          message: "Your password has expired.",
+          action: { label: "Set a new one", href: "/sign-in/forgot-password" },
+        };
       case "needs_identifier":
-        return "Email is missing. Fill in your email and try again.";
+        return { message: "Email is missing. Fill in your email and try again." };
       default:
-        return `Sign-in didn't complete (${status ?? "unknown"}). Sign in with GitHub above, or contact support.`;
+        return {
+          message: `Sign-in didn't complete (${status ?? "unknown"}). Sign in with GitHub above, or contact support.`,
+        };
     }
   };
 
@@ -122,7 +139,9 @@ export default function SignInPage() {
       (f): f is EmailCodeFactor => f.strategy === "email_code",
     );
     if (!factor) {
-      setError("Email verification isn't available for this account. Sign in with GitHub above.");
+      setError({
+        message: "Email verification isn't available for this account. Sign in with GitHub above.",
+      });
       return null;
     }
     await signIn.prepareFirstFactor({ strategy: "email_code", emailAddressId: factor.emailAddressId });
@@ -152,7 +171,7 @@ export default function SignInPage() {
       }
       setError(describeIncompleteStatus(attempt.status));
     } catch (err) {
-      setError(surfaceClerkError(err));
+      setError(describeClerkError(err));
     } finally {
       setSubmitting(false);
     }
@@ -172,7 +191,7 @@ export default function SignInPage() {
       }
       setError(describeIncompleteStatus(result.status));
     } catch (err) {
-      setError(surfaceClerkError(err));
+      setError(describeClerkError(err));
     } finally {
       setSubmitting(false);
     }
@@ -186,7 +205,7 @@ export default function SignInPage() {
       await signIn.prepareFirstFactor({ strategy: "email_code", emailAddressId: codeFlow.emailAddressId });
       setCodeSent(true);
     } catch (err) {
-      setError(surfaceClerkError(err));
+      setError(describeClerkError(err));
     }
   };
 
@@ -207,7 +226,7 @@ export default function SignInPage() {
         redirectUrlComplete: "/dashboard",
       });
     } catch (err) {
-      setError(surfaceClerkError(err));
+      setError(describeClerkError(err));
     }
   };
 
@@ -272,7 +291,78 @@ export default function SignInPage() {
 
         <div className="flex flex-1 flex-col items-center justify-center">
           <div className="w-full max-w-sm">
-            {codeFlow ? (
+            {!authLoaded ? (
+              <div className="flex min-h-[360px] flex-col items-center justify-center gap-3">
+                <Loader2 className="h-5 w-5 animate-spin text-amber" />
+                <p className="font-mono text-[11px] text-slate-text">Loading…</p>
+              </div>
+            ) : isSignedIn && user ? (
+              <div className="flex flex-col gap-5">
+                <header className="space-y-1 text-center">
+                  <h2 className="font-mono text-xl font-bold text-foreground">You&apos;re already signed in</h2>
+                  <p className="text-[12px] font-mono text-slate-text">
+                    Continue to your dashboard, or sign out to use a different account.
+                  </p>
+                </header>
+
+                <div className="flex items-center gap-3 rounded-md border border-iron bg-charcoal px-3 py-3">
+                  {user.imageUrl ? (
+                    <Image
+                      src={user.imageUrl}
+                      alt=""
+                      width={40}
+                      height={40}
+                      className="h-10 w-10 shrink-0 rounded-full border border-iron/60"
+                    />
+                  ) : (
+                    <span
+                      aria-hidden
+                      className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-iron/60 bg-void font-mono text-[13px] text-amber"
+                    >
+                      {(user.fullName ?? user.primaryEmailAddress?.emailAddress ?? "?").charAt(0).toUpperCase()}
+                    </span>
+                  )}
+                  <div className="min-w-0 flex-1">
+                    {user.fullName && (
+                      <p className="truncate font-mono text-[13px] text-foreground">{user.fullName}</p>
+                    )}
+                    <p className="truncate font-mono text-[11px] text-slate-text">
+                      {user.primaryEmailAddress?.emailAddress ?? "No primary email"}
+                    </p>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleContinue}
+                  className="inline-flex h-10 items-center justify-center gap-2 rounded-md bg-amber px-4 font-mono text-[13px] font-semibold text-primary-foreground transition-colors hover:bg-amber-glow active:scale-[0.98]"
+                  style={{ transition: "transform 160ms cubic-bezier(0.23,1,0.32,1), background-color 150ms" }}
+                >
+                  Continue to dashboard
+                  <ArrowRight className="h-3.5 w-3.5" />
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleSwitchAccount}
+                  disabled={switchingAccount}
+                  className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-iron bg-charcoal font-mono text-[12px] text-slate-text transition-colors hover:border-amber/40 hover:text-foreground disabled:opacity-50 active:scale-[0.98]"
+                  style={{ transition: "transform 160ms cubic-bezier(0.23,1,0.32,1), background-color 150ms, border-color 150ms, color 150ms" }}
+                >
+                  {switchingAccount ? (
+                    <>
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      Signing out…
+                    </>
+                  ) : (
+                    <>
+                      <LogOut className="h-3.5 w-3.5" />
+                      Sign out and use a different account
+                    </>
+                  )}
+                </button>
+              </div>
+            ) : codeFlow ? (
               <form onSubmit={handleVerifyCode} className="flex flex-col gap-5">
                 <header className="space-y-1 text-center">
                   <h2 className="font-mono text-xl font-bold text-foreground">Check your email</h2>
@@ -307,7 +397,18 @@ export default function SignInPage() {
                     className="flex items-start gap-2 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 font-mono text-[12px] text-red-400"
                   >
                     <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                    <span className="flex-1">{error}</span>
+                    <span className="flex-1">
+                      {error.message}
+                      {error.action && (
+                        <>
+                          {" "}
+                          <Link href={error.action.href} className="underline underline-offset-2 hover:text-red-300">
+                            {error.action.label}
+                          </Link>
+                          .
+                        </>
+                      )}
+                    </span>
                   </div>
                 )}
 
@@ -410,7 +511,18 @@ export default function SignInPage() {
                     className="flex items-start gap-2 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 font-mono text-[12px] text-red-400"
                   >
                     <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                    <span className="flex-1">{error}</span>
+                    <span className="flex-1">
+                      {error.message}
+                      {error.action && (
+                        <>
+                          {" "}
+                          <Link href={error.action.href} className="underline underline-offset-2 hover:text-red-300">
+                            {error.action.label}
+                          </Link>
+                          .
+                        </>
+                      )}
+                    </span>
                   </div>
                 )}
 
@@ -432,12 +544,14 @@ export default function SignInPage() {
               </form>
             )}
 
-            <p className="mt-6 text-center text-[12px] font-mono text-slate-text">
-              Don&apos;t have an account?{" "}
-              <Link href="/sign-up" className="text-amber transition-colors hover:text-amber-glow">
-                Sign up
-              </Link>
-            </p>
+            {authLoaded && !isSignedIn && (
+              <p className="mt-6 text-center text-[12px] font-mono text-slate-text">
+                Don&apos;t have an account?{" "}
+                <Link href="/sign-up" className="text-amber transition-colors hover:text-amber-glow">
+                  Sign up
+                </Link>
+              </p>
+            )}
           </div>
         </div>
       </div>

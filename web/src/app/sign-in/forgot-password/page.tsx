@@ -6,6 +6,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useAuth, useSignIn } from "@clerk/nextjs";
 import { Loader2, AlertCircle } from "lucide-react";
+import { describeClerkError, type ClerkErrorInfo } from "@/lib/clerk-errors";
 
 /**
  * Two-step password reset via Clerk's reset_password_email_code strategy.
@@ -32,7 +33,7 @@ export default function ForgotPasswordPage() {
   const [code, setCode] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [stage, setStage] = useState<"request" | "reset">("request");
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ClerkErrorInfo | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
@@ -40,15 +41,6 @@ export default function ForgotPasswordPage() {
       router.replace("/dashboard");
     }
   }, [authLoaded, isSignedIn, router]);
-
-  const surfaceClerkError = (err: unknown): string => {
-    if (err && typeof err === "object" && "errors" in err && Array.isArray((err as { errors: unknown[] }).errors)) {
-      const first = (err as { errors: { longMessage?: string; message?: string }[] }).errors[0];
-      if (first) return first.longMessage ?? first.message ?? "Something went wrong.";
-    }
-    if (err instanceof Error) return err.message;
-    return "Something went wrong.";
-  };
 
   const handleRequestCode = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -59,7 +51,7 @@ export default function ForgotPasswordPage() {
       await signIn.create({ strategy: "reset_password_email_code", identifier: email });
       setStage("reset");
     } catch (err) {
-      setError(surfaceClerkError(err));
+      setError(describeClerkError(err));
     } finally {
       setSubmitting(false);
     }
@@ -76,7 +68,7 @@ export default function ForgotPasswordPage() {
       // Handling just the happy-path transition here; other statuses are rare
       // for this strategy and get surfaced to the user via the default message.
       if (verify.status !== "needs_new_password") {
-        setError(`Couldn't verify the code (${verify.status ?? "unknown"}). Try requesting a new one.`);
+        setError({ message: `Couldn't verify the code (${verify.status ?? "unknown"}). Try requesting a new one.` });
         return;
       }
       const done = await signIn.resetPassword({ password: newPassword });
@@ -85,9 +77,9 @@ export default function ForgotPasswordPage() {
         router.push("/dashboard");
         return;
       }
-      setError(`Password reset didn't complete (${done.status ?? "unknown"}). Contact support.`);
+      setError({ message: `Password reset didn't complete (${done.status ?? "unknown"}). Contact support.` });
     } catch (err) {
-      setError(surfaceClerkError(err));
+      setError(describeClerkError(err));
     } finally {
       setSubmitting(false);
     }
@@ -99,7 +91,7 @@ export default function ForgotPasswordPage() {
     try {
       await signIn.create({ strategy: "reset_password_email_code", identifier: email });
     } catch (err) {
-      setError(surfaceClerkError(err));
+      setError(describeClerkError(err));
     }
   };
 
@@ -142,7 +134,18 @@ export default function ForgotPasswordPage() {
                   className="flex items-start gap-2 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 font-mono text-[12px] text-red-400"
                 >
                   <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                  <span className="flex-1">{error}</span>
+                  <span className="flex-1">
+                    {error.message}
+                    {error.action && (
+                      <>
+                        {" "}
+                        <Link href={error.action.href} className="underline underline-offset-2 hover:text-red-300">
+                          {error.action.label}
+                        </Link>
+                        .
+                      </>
+                    )}
+                  </span>
                 </div>
               )}
 
@@ -213,7 +216,18 @@ export default function ForgotPasswordPage() {
                   className="flex items-start gap-2 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 font-mono text-[12px] text-red-400"
                 >
                   <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                  <span className="flex-1">{error}</span>
+                  <span className="flex-1">
+                    {error.message}
+                    {error.action && (
+                      <>
+                        {" "}
+                        <Link href={error.action.href} className="underline underline-offset-2 hover:text-red-300">
+                          {error.action.label}
+                        </Link>
+                        .
+                      </>
+                    )}
+                  </span>
                 </div>
               )}
 
