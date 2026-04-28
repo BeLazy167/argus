@@ -187,6 +187,11 @@ func Run() error {
 		IdleTimeout:  120 * time.Second,
 	}
 
+	// Memory profiler — periodic RSS/heap samples + threshold-triggered
+	// gzipped pprof heap dump. Tied to appCtx so it shuts down with the
+	// pattern-decay goroutine.
+	StartMemoryProfiler(appCtx, logger)
+
 	// Graceful shutdown
 	errCh := make(chan error, 1)
 	go func() {

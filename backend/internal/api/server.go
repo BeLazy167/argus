@@ -75,6 +75,9 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 	r.Get("/healthz", s.healthz)
 	r.Get("/readyz", s.readyz)
 
+	// Admin-gated pprof (no-op if ADMIN_DEBUG_TOKEN is unset → 404).
+	registerPprofRoutes(r)
+
 	// Webhooks (unauthenticated, signature-verified)
 	r.Post("/webhooks/github", s.handleWebhook)
 
