@@ -273,11 +273,21 @@ const MermaidChart = memo(function MermaidChart({ chart }: { chart: string }) {
 
   useEffect(() => {
     let cancelled = false;
+    // Stable id per render so the cleanup pass can locate any orphan node
+    // Mermaid leaves on document.body on a failure path (belt-and-suspenders
+    // on top of suppressErrorRendering).
+    const renderId = "mermaid-" + Math.random().toString(36).slice(2);
+    setError(false);
+
     import("mermaid")
-      .then((m) => {
-        if (cancelled) return;
+      .then(async (m) => {
+        if (cancelled) return undefined;
         m.default.initialize({
           startOnLoad: false,
+          // Mermaid 11+ otherwise injects a bomb-icon "Syntax error in text"
+          // SVG into document.body on parse failure — outside our ref — and
+          // it sticks around even after our promise rejects. Kills it.
+          suppressErrorRendering: true,
           theme: "dark",
           themeVariables: {
             primaryColor: "#44403c",
@@ -296,9 +306,18 @@ const MermaidChart = memo(function MermaidChart({ chart }: { chart: string }) {
             textColor: "#f5f0eb",
           },
         });
-        if (!ref.current) return;
+        // Preflight: parse() returns false on invalid syntax with no DOM
+        // side effects. Catches LLM-emitted diagrams that pass the
+        // backend's coarse bracket-balance check but still fail Mermaid's
+        // grammar (reserved words, edge-label chars, unsupported nodes).
+        const parsed = await m.default.parse(chart, { suppressErrors: true });
+        if (cancelled || !ref.current) return undefined;
+        if (!parsed) {
+          setError(true);
+          return undefined;
+        }
         ref.current.textContent = "";
-        return m.default.render("mermaid-" + Math.random().toString(36).slice(2), chart);
+        return m.default.render(renderId, chart);
       })
       .then((result) => {
         if (cancelled || !ref.current || !result) return;
@@ -310,6 +329,13 @@ const MermaidChart = memo(function MermaidChart({ chart }: { chart: string }) {
       })
       .catch(() => {
         if (!cancelled) setError(true);
+      })
+      .finally(() => {
+        // Mermaid's temp render container lives at #${renderId}; some
+        // versions also create a `d${renderId}` measurement node.
+        // Remove either if it outlived the render. Cheap, runs once.
+        document.getElementById(renderId)?.remove();
+        document.getElementById("d" + renderId)?.remove();
       });
     return () => { cancelled = true; };
   }, [chart]);

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"runtime/debug"
@@ -387,7 +388,7 @@ func (s *Server) handleCheckboxTrigger(ctx context.Context, evt ghpkg.IssueComme
 
 	if !s.rateLimiter.AllowReview(evt.RepoFullName, owner, true) {
 		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repoName, evt.PRNumber,
-			"Rate limit exceeded for on-demand reviews (3/hour). Try again later.")
+			fmt.Sprintf("Rate limit exceeded for on-demand reviews (%d/hour). Try again later.", forceHourlyLimit))
 		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repoName, evt.CommentID, "confused")
 		return
 	}
