@@ -75,19 +75,28 @@ func TestRateLimitForceExhaustion(t *testing.T) {
 	repo := "owner/repo-force"
 	org := "owner-force"
 
-	// Exhaust the force hourly burst (3 requests)
+	// Exhaust the force hourly burst.
 	for i := 0; i < forceHourlyLimit; i++ {
 		if !rl.AllowReview(repo, org, true) {
 			t.Fatalf("force request %d should be allowed", i+1)
 		}
 	}
 
-	// Force request should be blocked, but non-force should still work
+	// Force request should be blocked once the bucket is empty.
 	if rl.AllowReview(repo, org, true) {
 		t.Fatal("force request beyond limit should be blocked")
 	}
-	if !rl.AllowReview(repo, org, false) {
-		t.Fatal("non-force request should still be allowed after force exhaustion")
+
+	// When forceHourlyLimit < repoHourlyLimit the per-repo bucket still has
+	// headroom, so non-force requests must continue to succeed. When the two
+	// limits are equal the force bucket becomes a no-op and exhausting it
+	// also exhausts the per-repo bucket — both must be blocked together.
+	allow := rl.AllowReview(repo, org, false)
+	if forceHourlyLimit < repoHourlyLimit && !allow {
+		t.Fatal("non-force request should still be allowed after force exhaustion (force < repo)")
+	}
+	if forceHourlyLimit >= repoHourlyLimit && allow {
+		t.Fatal("non-force request should be blocked when force exhaustion drained the repo bucket")
 	}
 }
 

@@ -10,7 +10,7 @@ import (
 const (
 	repoHourlyLimit  = 10
 	orgDailyLimit    = 50
-	forceHourlyLimit = 3
+	forceHourlyLimit = 10
 )
 
 // RateLimiter manages per-repo and per-org rate limits using token buckets.
