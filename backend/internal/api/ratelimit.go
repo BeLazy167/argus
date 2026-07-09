@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -8,8 +9,8 @@ import (
 )
 
 const (
-	repoHourlyLimit  = 10
-	orgDailyLimit    = 50
+	repoHourlyLimit  = 30
+	orgDailyLimit    = 200
 	forceHourlyLimit = 10
 )
 
@@ -95,4 +96,30 @@ func (rl *RateLimiter) clearMap(m *sync.Map) {
 
 func (rl *RateLimiter) Stop() {
 	rl.stopOnce.Do(func() { close(rl.done) })
+}
+
+// allowReview applies plan-aware rate limiting. Pro-tier installations bypass
+// the per-repo/per-org/force buckets entirely; Free-tier falls through to the
+// underlying token-bucket limiter.
+//
+// A failed plan lookup is treated as Free-tier (fail-safe), and only logged at
+// Warn level — we never want a DB blip to silently uncap a Free install.
+//
+// Args:
+//
+//	ctx: request context; lookup is bounded by the caller's deadline.
+//	repoFullName: "owner/repo" used as the per-repo bucket key.
+//	orgLogin: GitHub org/user login used as the per-org bucket key.
+//	force: passes through to the underlying limiter's force-bucket logic.
+//	ghInstallationID: GitHub installation ID (not the internal store row ID).
+//
+// Returns true if the review is allowed to proceed.
+func (s *Server) allowReview(ctx context.Context, repoFullName, orgLogin string, force bool, ghInstallationID int64) bool {
+	inst, err := s.store.GetInstallationByGitHubID(ctx, ghInstallationID)
+	if err != nil {
+		s.logger.Warn("rate limit: plan lookup failed, applying free-tier caps", "error", err, "ghInstallationID", ghInstallationID)
+	} else if inst.PlanTier == "pro" {
+		return true
+	}
+	return s.rateLimiter.AllowReview(repoFullName, orgLogin, force)
 }

@@ -62,7 +62,7 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		orgLogin := strings.SplitN(prEvent.RepoFullName, "/", 2)[0]
-		if !s.rateLimiter.AllowReview(prEvent.RepoFullName, orgLogin, false) {
+		if !s.allowReview(r.Context(), prEvent.RepoFullName, orgLogin, false, prEvent.InstallationID) {
 			s.logger.Warn("rate limited", "repo", prEvent.RepoFullName)
 			break
 		}
@@ -386,7 +386,7 @@ func (s *Server) handleCheckboxTrigger(ctx context.Context, evt ghpkg.IssueComme
 	}
 	defer s.releaseReview(evt.RepoFullName, evt.PRNumber)
 
-	if !s.rateLimiter.AllowReview(evt.RepoFullName, owner, true) {
+	if !s.allowReview(ctx, evt.RepoFullName, owner, true, evt.InstallationID) {
 		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repoName, evt.PRNumber,
 			fmt.Sprintf("Rate limit exceeded for on-demand reviews (%d/hour). Try again later.", forceHourlyLimit))
 		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repoName, evt.CommentID, "confused")

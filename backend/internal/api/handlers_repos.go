@@ -104,7 +104,7 @@ func (s *Server) triggerReview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	orgLogin := strings.SplitN(repo.FullName, "/", 2)[0]
-	if !s.rateLimiter.AllowReview(repo.FullName, orgLogin, false) {
+	if inst.PlanTier != "pro" && !s.rateLimiter.AllowReview(repo.FullName, orgLogin, false) {
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate limit exceeded"})
 		return
 	}

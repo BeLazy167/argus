@@ -85,7 +85,7 @@ func (s *Server) handleReviewCommand(ctx context.Context, evt ghpkg.IssueComment
 		}
 	}
 
-	if !s.rateLimiter.AllowReview(evt.RepoFullName, owner, force) {
+	if !s.allowReview(ctx, evt.RepoFullName, owner, force, evt.InstallationID) {
 		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
 			"Rate limit exceeded. Try again later.")
 		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
