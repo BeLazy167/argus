@@ -7,6 +7,10 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -o /argus ./cmd/argus
 # Embeds SQL files — no runtime volume needed.
 RUN CGO_ENABLED=0 GOOS=linux go build -o /migrate ./cmd/migrate
+# Ops binaries: nightly memory reconciler + one-off Supermemory backfill,
+# both run as Fly machines against this same image.
+RUN CGO_ENABLED=0 GOOS=linux go build -o /reconcile-memory ./cmd/reconcile-memory
+RUN CGO_ENABLED=0 GOOS=linux go build -o /migrate-memory ./cmd/migrate-memory
 
 # Install staticcheck (Go SAST tool)
 RUN go install honnef.co/go/tools/cmd/staticcheck@2025.1.1
@@ -34,6 +38,8 @@ COPY --from=builder /go/bin/staticcheck /usr/local/bin/staticcheck
 
 COPY --from=builder /argus /argus
 COPY --from=builder /migrate /migrate
+COPY --from=builder /reconcile-memory /reconcile-memory
+COPY --from=builder /migrate-memory /migrate-memory
 
 EXPOSE 8080
 # CMD, not ENTRYPOINT: Fly's release_command replaces CMD on the ephemeral release machine.

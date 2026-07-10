@@ -844,7 +844,7 @@ func (idx *indexerImpl) IndexScenario(ctx context.Context, owner, repo string, s
 	}
 	_, err = idx.client.AddMemory(ctx, AddRequest{
 		Content:       content,
-		CustomID:      fmt.Sprintf("%s--scenario--%d", repoIDSegment(repo), scenarioID),
+		CustomID:      ScenarioCustomID(repo, scenarioID),
 		ContainerTags: []string{RepoTagNew(repo)},
 		Metadata:      meta,
 	})

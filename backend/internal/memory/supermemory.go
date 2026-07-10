@@ -179,9 +179,40 @@ type BatchAddRequest struct {
 	Documents    []BatchDocument   `json:"documents"`
 }
 
-// BatchAddResponse is the response from POST /v3/documents/batch.
+// BatchResult is a single per-document result in a batch-add response.
+// The server returns one entry per input document, in the same order, with an
+// empty `id` when that document failed (see `error`/`details`).
+type BatchResult struct {
+	ID      string `json:"id"`
+	Status  string `json:"status"`
+	Error   string `json:"error,omitempty"`
+	Details string `json:"details,omitempty"`
+}
+
+// BatchAddResponse is the response from POST /v3/documents/batch. The live API
+// returns `{results:[{id,status,error}], success, failed}`; `IDs` is retained
+// only for backward compatibility with any older `{ids:[…]}` shape. Callers that
+// need the created document ids should use DocIDs(), which prefers Results.
 type BatchAddResponse struct {
-	IDs []string `json:"ids"`
+	Results []BatchResult `json:"results"`
+	Success int           `json:"success"`
+	Failed  int           `json:"failed"`
+	IDs     []string      `json:"ids"`
+}
+
+// DocIDs returns the created document ids aligned to the input document order.
+// Prefers the documented `results[].id` shape; falls back to the legacy `ids`
+// array. A failed document contributes an empty string at its position so the
+// slice stays index-aligned with the request for write-back.
+func (r *BatchAddResponse) DocIDs() []string {
+	if len(r.Results) > 0 {
+		ids := make([]string, len(r.Results))
+		for i, res := range r.Results {
+			ids[i] = res.ID
+		}
+		return ids
+	}
+	return r.IDs
 }
 
 // AddMemoryBatch stores multiple documents in a single API call via v3/documents/batch.
@@ -503,10 +534,25 @@ type ListRequest struct {
 	Filters string `json:"filters,omitempty"`
 	Sort    string `json:"sort,omitempty"`
 	Order   string `json:"order,omitempty"`
+	// IncludeContent asks the API to return the full `content` field per doc.
+	// Off by default — content bloats list responses; the migration count-verify
+	// only needs pagination.totalItems, so it leaves this false.
+	IncludeContent bool `json:"includeContent,omitempty"`
+}
+
+// ListPagination is the pagination envelope on POST /v3/documents/list. Limit is
+// capped at 200 server-side. TotalItems is the count the migration count-verify
+// gate compares between legacy and unified containers.
+type ListPagination struct {
+	CurrentPage int `json:"currentPage"`
+	TotalItems  int `json:"totalItems"`
+	TotalPages  int `json:"totalPages"`
+	Limit       int `json:"limit"`
 }
 
 type ListResponse struct {
-	Memories []Document `json:"memories"`
+	Memories   []Document      `json:"memories"`
+	Pagination *ListPagination `json:"pagination,omitempty"`
 }
 
 // Document is the /v3/documents/{id} response shape. Metadata + timestamps
