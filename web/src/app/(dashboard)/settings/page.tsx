@@ -22,6 +22,7 @@ import {
   useDeletePrompt,
 } from "@/lib/queries/prompts";
 import { useOpenRouterModels } from "@/lib/queries/openrouter-models";
+import { MemorySettingsSection } from "./memory/form";
 import { useActiveRepo } from "@/lib/hooks/use-active-repo";
 import { useInstallation } from "@/providers/installation-provider";
 import { useUpdateRepo } from "@/lib/queries/repos";
@@ -882,7 +883,11 @@ export default function SettingsPage() {
   const updateRepo = useUpdateRepo();
 
   const [personaError, setPersonaError] = useState("");
-  const [settingsScope, setSettingsScope] = useState<"org" | "repo" | "branches">("repo");
+  // Initialized from ?tab= so the old /settings/memory route (docs links,
+  // bookmarks) can deep-link straight to the Memory tab via redirect.
+  const [settingsScope, setSettingsScope] = useState<"org" | "repo" | "branches" | "memory">(
+    () => (searchParams.get("tab") === "memory" ? "memory" : "repo"),
+  );
 
   // Org defaults
   const { data: orgDefaults, isLoading: orgDefaultsLoading } = useOrgDefaults({
@@ -966,6 +971,17 @@ export default function SettingsPage() {
           }`}
         >
           Branch Filters
+        </button>
+        <button
+          type="button"
+          onClick={() => setSettingsScope("memory")}
+          className={`px-4 py-3 text-xs font-mono transition-colors border-b-2 -mb-px cursor-pointer ${
+            settingsScope === "memory"
+              ? "border-amber text-amber"
+              : "border-transparent text-slate-text hover:text-foreground"
+          }`}
+        >
+          Memory
         </button>
       </div>
 
@@ -1719,6 +1735,9 @@ export default function SettingsPage() {
           )}
         </div>
       )}
+
+      {/* Memory Tab */}
+      {settingsScope === "memory" && <MemorySettingsSection />}
     </>
   );
 }

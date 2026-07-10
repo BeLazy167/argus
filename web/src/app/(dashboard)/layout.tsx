@@ -18,7 +18,6 @@ import {
   Puzzle,
   CreditCard,
   Settings,
-  Brain,
   Menu,
   X,
   PanelLeftClose,
@@ -93,7 +92,6 @@ const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
       { href: "/providers", label: "Integrations", icon: Puzzle },
       { href: "/billing", label: "Billing", icon: CreditCard },
       { href: "/settings", label: "Settings", icon: Settings },
-      { href: "/settings/memory", label: "Memory", icon: Brain },
     ],
   },
 ];
@@ -218,8 +216,11 @@ export default function DashboardLayout({
   const [mobileOpen, setMobileOpen] = useState(false);
   const [collapsed, setCollapsed] = useSidebarCollapsed();
 
+  // Exact match, or a true sub-route (href + "/"). The separator guard keeps
+  // sibling prefixes ("/settings" vs "/settings-x") and two nav items on the
+  // same subtree from highlighting together.
   const isActive = (href: string) =>
-    pathname === href || (href !== "/dashboard" && pathname.startsWith(href));
+    pathname === href || (href !== "/dashboard" && pathname.startsWith(`${href}/`));
 
   const sidebarContent = (collapsedMode: boolean) => (
     <>
