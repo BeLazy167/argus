@@ -305,7 +305,10 @@ function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQu
   // Smart default zoom: focus on top-risk cluster instead of fitting all nodes.
   const initialZoomDone = useMemo(() => ({ current: false }), []);
   useEffect(() => {
-    if (initialZoomDone.current) return;
+    // Don't consume the one-shot fit while data is still loading — under the
+    // Memory hub the canvas mounts before the files query resolves, and a
+    // fit-on-nothing left the viewport stranded in empty space.
+    if (initialZoomDone.current || files.length === 0) return;
     initialZoomDone.current = true;
     const sorted = [...files].sort((a, b) => b.risk_score - a.risk_score);
     const topN = sorted.slice(0, Math.min(15, files.length));
