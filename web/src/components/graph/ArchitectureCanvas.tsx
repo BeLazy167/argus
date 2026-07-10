@@ -9,7 +9,7 @@ import {
   useEdgesState,
   useNodesInitialized,
   useReactFlow,
-  useStore,
+  useStoreApi,
   ReactFlowProvider,
   MarkerType,
   Position,
@@ -22,7 +22,14 @@ import dagre from "dagre";
 
 import FileNode from "./FileNode";
 import GroupNode from "./GroupNode";
-import { boundsOfNodes, viewportForBounds, type PlacedNode } from "./viewport";
+import {
+  boundsOfNodes,
+  isFiniteViewport,
+  isIdentityViewport,
+  usablePane,
+  viewportForBounds,
+  type PlacedNode,
+} from "./viewport";
 import type { ArchFile, ArchEdge } from "@/lib/queries/architecture";
 import type { ColorMode } from "@xyflow/react";
 
@@ -163,11 +170,11 @@ type InnerProps = Props & {
 };
 
 function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQuery, onSelectFile }: InnerProps) {
-  const { fitView, setViewport } = useReactFlow();
-  // Pane dimensions from the store — the deterministic initial view needs them
-  // to place the focus cluster centered at a readable zoom.
-  const paneWidth = useStore((s) => s.width);
-  const paneHeight = useStore((s) => s.height);
+  const { fitView, setViewport, getViewport } = useReactFlow();
+  // Imperative store handle — the initial view reads live pane size + viewport
+  // from getState()/getViewport() so it can VERIFY a write took effect instead
+  // of trusting a fire-and-forget setViewport.
+  const storeApi = useStoreApi();
   const colorMode = useColorMode();
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const maxDensity = useMemo(() => Math.max(...files.map((f) => f.bug_density), 0.01), [files]);
@@ -311,61 +318,122 @@ function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQu
 
   // Smart default view: frame the top-risk cluster instead of fitting all nodes.
   const nodesInitialized = useNodesInitialized();
-  const initialZoomDone = useMemo(() => ({ current: false }), []);
+  const initialViewDone = useMemo(() => ({ current: false }), []);
   useEffect(() => {
-    // Gate on measurement + data + a sized pane: the one-shot view must not fire
-    // before React Flow has measured the laid out nodes and the pane has a size.
-    if (
-      initialZoomDone.current ||
-      files.length === 0 ||
-      !nodesInitialized ||
-      paneWidth === 0 ||
-      paneHeight === 0
-    )
-      return;
-    initialZoomDone.current = true;
+    const debug =
+      typeof window !== "undefined" && window.location.search.includes("debugfit=1");
+    const dbg = (stage: string, extra: Record<string, unknown>) => {
+      if (debug) console.debug("[fit]", stage, extra);
+    };
 
-    if (files.length <= 15) {
-      // Small repo — fitView is reliable at this scale.
-      fitView({ padding: 0.15, duration: 400 });
+    if (initialViewDone.current || files.length === 0 || !nodesInitialized) {
+      dbg("gate", {
+        done: initialViewDone.current,
+        files: files.length,
+        nodesInitialized,
+      });
       return;
     }
 
-    // Frame the top-risk files. We deliberately DON'T expand to their graph
-    // neighbors: on a real repo that closure pulls in ~90% of nodes across a
-    // ~35k-px-wide dagre layout, so the "focus" degenerates to fit-all and the
-    // old fitView({nodes}) path stranded the viewport on empty canvas near the
-    // origin. Instead compute the cluster's bounding box from OUR layout
-    // positions (deterministic, not read back from the RF store) and set the
-    // viewport centered at a clamped, readable zoom. ⊞ still offers fit-all.
-    const topPaths = new Set(
-      [...files]
-        .sort((a, b) => b.risk_score - a.risk_score)
-        .slice(0, 12)
-        .map((f) => f.path),
-    );
-    const placed: PlacedNode[] = [];
-    for (const n of layout.nodes) {
-      if (!topPaths.has(n.id)) continue;
-      const w = Number(n.style?.width) || 0;
-      const h = Number(n.style?.height) || 0;
-      placed.push({ x: n.position.x, y: n.position.y, width: w, height: h });
-    }
-    const bounds = boundsOfNodes(placed);
-    if (!bounds) {
-      fitView({ padding: 0.2, minZoom: 0.45, maxZoom: 1, duration: 400 });
-      return;
-    }
-    setViewport(
-      viewportForBounds(
-        bounds,
-        { width: paneWidth, height: paneHeight },
-        { padding: 0.2, minZoom: 0.45, maxZoom: 1 },
-      ),
-      { duration: 400 },
-    );
+    // One-shot initial view, hardened so it can never strand the canvas at the
+    // identity transform. It self-drives via requestAnimationFrame and only
+    // marks itself done once getViewport() confirms the write actually landed —
+    // a setViewport() issued before panZoom is ready silently no-ops, and the
+    // previous code burned the one-shot flag before verifying, so a single
+    // no-op left the viewport at translate(0,0)/scale(1) forever. Nothing here
+    // burns the flag on an unverified, non-finite, or still-identity write.
+    let cancelled = false;
+    let attempts = 0;
+    const MAX_ATTEMPTS = 90; // ~1.5s at 60fps — ample for panZoom to initialize
+
+    /**
+     * Deterministic target viewport for the top-risk cluster, computed from OUR
+     * layout output (positions + assigned sizes), never read back from the RF
+     * store. Returns null for the small-repo / degenerate-bounds fallback.
+     */
+    const computeTarget = (pane: { width: number; height: number }) => {
+      if (files.length <= 15) return null; // small repo → fitView fallback
+      // Frame the top-risk files only. We deliberately DON'T expand to their
+      // graph neighbors: on a real repo that closure pulls in ~90% of nodes
+      // across a ~35k-px-wide dagre layout, degenerating "focus" into fit-all.
+      const topPaths = new Set(
+        [...files]
+          .sort((a, b) => b.risk_score - a.risk_score)
+          .slice(0, 12)
+          .map((f) => f.path),
+      );
+      const placed: PlacedNode[] = [];
+      for (const n of layout.nodes) {
+        if (!topPaths.has(n.id)) continue;
+        const w = Number(n.style?.width);
+        const h = Number(n.style?.height);
+        placed.push({
+          x: n.position.x,
+          y: n.position.y,
+          width: Number.isFinite(w) ? w : 0,
+          height: Number.isFinite(h) ? h : 0,
+        });
+      }
+      const bounds = boundsOfNodes(placed);
+      if (!bounds || !Number.isFinite(bounds.width) || !Number.isFinite(bounds.height)) {
+        dbg("bad-bounds", { bounds, placed: placed.length });
+        return null;
+      }
+      const vp = viewportForBounds(bounds, pane, { padding: 0.2, minZoom: 0.45, maxZoom: 1 });
+      dbg("computed", { bounds, pane, vp });
+      return isFiniteViewport(vp) ? vp : null;
+    };
+
+    const tick = () => {
+      if (cancelled || initialViewDone.current) return;
+      if (attempts++ > MAX_ATTEMPTS) {
+        dbg("give-up", { attempts });
+        return; // leave flag unburned — a later dep change may still succeed
+      }
+
+      // Read live pane size imperatively; fall back to the pane DOM rect if the
+      // store dims aren't populated yet. Validate finite>0 (never `=== 0`, which
+      // is false for undefined/NaN and would let a bad value slip through).
+      const { width, height, domNode } = storeApi.getState();
+      let pane = usablePane(width, height);
+      if (!pane && domNode) {
+        const r = domNode.getBoundingClientRect();
+        pane = usablePane(r.width, r.height);
+      }
+      if (!pane) {
+        dbg("pane-not-ready", { attempts, width, height });
+        requestAnimationFrame(tick);
+        return;
+      }
+
+      const target = computeTarget(pane);
+      // duration:0 — a hard set is synchronous and unambiguously verifiable next
+      // frame; an animated set can read as still-identity on the first frame.
+      if (target) {
+        setViewport(target, { duration: 0 });
+      } else {
+        fitView({ padding: 0.2, minZoom: 0.45, maxZoom: 1, duration: 0 });
+      }
+
+      requestAnimationFrame(() => {
+        if (cancelled || initialViewDone.current) return;
+        const vp = getViewport();
+        const applied = isFiniteViewport(vp) && !isIdentityViewport(vp);
+        dbg("verify", { attempts, applied, target, vp });
+        if (applied) {
+          initialViewDone.current = true;
+        } else {
+          requestAnimationFrame(tick); // write didn't land yet — retry
+        }
+      });
+    };
+
+    tick();
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [files, nodesInitialized, paneWidth, paneHeight, layout, fitView, setViewport]);
+  }, [files, nodesInitialized, layout, storeApi, fitView, setViewport, getViewport]);
 
   // Highlight connected nodes on selection, search, or lens change.
   //

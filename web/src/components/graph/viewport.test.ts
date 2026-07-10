@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { boundsOfNodes, viewportForBounds } from "./viewport.ts";
+import {
+	boundsOfNodes,
+	isFiniteViewport,
+	isIdentityViewport,
+	usablePane,
+	viewportForBounds,
+} from "./viewport.ts";
 
 test("boundsOfNodes returns null for an empty set", () => {
 	assert.equal(boundsOfNodes([]), null);
@@ -54,4 +60,40 @@ test("viewportForBounds clamps to minZoom AND centers on a wide span (the regres
 	// Must center on the far-right centroid — translate is strongly negative,
 	// NOT the near-origin (+small) translate the old fitView path produced.
 	assert.ok(vp.x < -6000, `expected strongly negative translate, got ${vp.x}`);
+});
+
+test("isFiniteViewport accepts finite, positive-zoom transforms only", () => {
+	assert.equal(isFiniteViewport({ x: 10, y: -20, zoom: 0.5 }), true);
+	assert.equal(isFiniteViewport({ x: Number.NaN, y: 0, zoom: 1 }), false);
+	assert.equal(isFiniteViewport({ x: 0, y: Number.POSITIVE_INFINITY, zoom: 1 }), false);
+	assert.equal(isFiniteViewport({ x: 0, y: 0, zoom: 0 }), false);
+	assert.equal(isFiniteViewport({ x: 0, y: 0, zoom: -1 }), false);
+});
+
+test("viewportForBounds yields a NON-finite viewport on a NaN pane (guarded by caller)", () => {
+	// The exact suspect: an undefined/NaN pane dimension slips past a `=== 0`
+	// guard and produces NaN — isFiniteViewport must reject it so the one-shot
+	// is never burned on this path.
+	const vp = viewportForBounds(
+		{ x: 0, y: 0, width: 1000, height: 500 },
+		{ width: Number.NaN, height: 780 },
+		{ padding: 0.2, minZoom: 0.45, maxZoom: 1 },
+	);
+	assert.equal(isFiniteViewport(vp), false);
+});
+
+test("isIdentityViewport detects the untouched default transform", () => {
+	assert.equal(isIdentityViewport({ x: 0, y: 0, zoom: 1 }), true);
+	assert.equal(isIdentityViewport({ x: 0.0004, y: -0.0002, zoom: 1.0003 }), true);
+	assert.equal(isIdentityViewport({ x: 200, y: 0, zoom: 1 }), false);
+	assert.equal(isIdentityViewport({ x: 0, y: 0, zoom: 0.45 }), false);
+});
+
+test("usablePane requires finite, positive dimensions", () => {
+	assert.deepEqual(usablePane(1400, 780), { width: 1400, height: 780 });
+	assert.equal(usablePane(0, 780), null);
+	assert.equal(usablePane(1400, 0), null);
+	assert.equal(usablePane(undefined, 780), null);
+	assert.equal(usablePane(Number.NaN, 780), null);
+	assert.equal(usablePane(-10, 780), null);
 });
