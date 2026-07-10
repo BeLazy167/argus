@@ -1,13 +1,36 @@
 "use client";
 
-import { Brain } from "lucide-react";
+import { Brain, Loader2 } from "lucide-react";
+import dynamic from "next/dynamic";
 import { useSearchParams } from "next/navigation";
 import { useState } from "react";
 import { useUpdateSearchParams } from "@/components/dashboard/pagination";
-import { ArchitectureSection } from "../architecture/section";
-import { InsightsSection } from "../insights/section";
-import { PatternsSection } from "../patterns/section";
-import { ScenariosSection } from "../scenarios/section";
+
+// Each tab is its own chunk so opening the hub doesn't pull the heaviest
+// former page bundle (react-flow + dagre live behind Architecture; recharts
+// behind Patterns). Dynamic imports are deliberate here — user-approved
+// exception to the no-dynamic-imports rule, per cubic review of #103.
+const sectionLoading = () => (
+	<div className="flex items-center justify-center py-20">
+		<Loader2 className="h-6 w-6 animate-spin text-slate-text" aria-hidden />
+	</div>
+);
+const PatternsSection = dynamic(
+	() => import("../patterns/section").then((m) => m.PatternsSection),
+	{ loading: sectionLoading },
+);
+const ScenariosSection = dynamic(
+	() => import("../scenarios/section").then((m) => m.ScenariosSection),
+	{ loading: sectionLoading },
+);
+const ArchitectureSection = dynamic(
+	() => import("../architecture/section").then((m) => m.ArchitectureSection),
+	{ loading: sectionLoading },
+);
+const InsightsSection = dynamic(
+	() => import("../insights/section").then((m) => m.InsightsSection),
+	{ loading: sectionLoading },
+);
 
 type MemoryTab = "patterns" | "scenarios" | "architecture" | "insights";
 

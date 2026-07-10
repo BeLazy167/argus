@@ -124,8 +124,16 @@ export function InsightsSection() {
 										return (
 											<tr
 												key={risk.file_path}
-												className="border-b border-iron/30 last:border-0 hover:bg-iron/10 transition-colors cursor-pointer"
+												className="border-b border-iron/30 last:border-0 hover:bg-iron/10 focus-visible:bg-iron/10 focus-visible:outline focus-visible:outline-1 focus-visible:outline-amber/60 transition-colors cursor-pointer"
 												onClick={() => setFileFilter(risk.file_path)}
+												onKeyDown={(e) => {
+													if (e.key === "Enter" || e.key === " ") {
+														e.preventDefault();
+														setFileFilter(risk.file_path);
+													}
+												}}
+												tabIndex={0}
+												aria-label={`Filter traces to ${risk.file_path}`}
 											>
 												<td className="px-5 py-3 max-w-xs">
 													<span className="text-xs font-mono text-foreground truncate block">
