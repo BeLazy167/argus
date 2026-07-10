@@ -181,15 +181,16 @@ func (s *Server) handleRememberCommand(ctx context.Context, evt ghpkg.IssueComme
 	if s.memRegistry != nil {
 		indexer := s.memRegistry.GetIndexer(ctx, inst.ID)
 		if indexer != nil {
-			metadata := map[string]string{
-				"source":     "remember_command",
-				"created_by": evt.CommentAuthor,
+			pattern := memory.PatternMemory{
+				Content: content,
+				Source:  "remember_command",
+				Extra:   map[string]string{"created_by": evt.CommentAuthor},
 			}
 			var resp *memory.AddResponse
 			if isOrg {
-				resp, err = indexer.IndexOwnerPattern(ctx, owner, content, "", metadata)
+				resp, err = indexer.IndexSharedPattern(ctx, pattern)
 			} else {
-				resp, err = indexer.IndexRepoPattern(ctx, owner, repo, content, "", metadata)
+				resp, err = indexer.IndexPattern(ctx, repo, pattern)
 			}
 			if err != nil {
 				s.logger.Error("remember: index in supermemory", "error", err)

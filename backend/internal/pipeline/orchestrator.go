@@ -2613,7 +2613,7 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		}
 	}
 
-	// Collect changed file paths once for simulation indexing + scenario outdating
+	// Collect changed file paths once for scenario outdating
 	changedPaths := make([]string, 0, len(run.Diff.Files))
 	for _, f := range run.Diff.Files {
 		changedPaths = append(changedPaths, f.NewName)
@@ -2621,10 +2621,6 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 
 	if len(run.Synthesis.SimulationResults) > 0 && run.Indexer != nil {
 		for _, result := range run.Synthesis.SimulationResults {
-			if err := run.Indexer.IndexSimulationResult(ctx, owner, repo, run.PREvent.PRNumber, changedPaths,
-				result.Passes, result.Scenario, result.Confidence, result.RootCause, result.Impact); err != nil {
-				o.logger.Warn("indexing simulation result", "error", err)
-			}
 			if !result.Passes && result.Confidence >= 0.5 {
 				matches := run.Indexer.SearchScenariosWithIDs(ctx, owner, repo, result.Scenario, "", 1)
 				if len(matches) > 0 {
@@ -2649,26 +2645,14 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		o.logger.Warn("marking scenarios outdated", "error", err, "pr", run.PREvent.PRNumber)
 	}
 
-	// Collect decision traces (auto-indexed — observational, not actionable)
+	// Collect decision traces — persisted to Postgres only. Postgres
+	// decision_traces is the source of truth; Supermemory trace writes were
+	// retired (observational, never read back into reviews, pure write noise).
 	traceSeeds := CollectReviewTraces(run)
 	var traceFails int
 	for _, seed := range traceSeeds {
-		traceID, err := o.st.CreateTraceReturningID(ctx, run.DBRepoID, seed.FilePath, seed.SymbolName, seed.TraceType, seed.Content, seed.Severity, seed.ReviewID, seed.PRNumber, seed.Metadata)
-		if err != nil {
+		if err := o.st.CreateTrace(ctx, run.DBRepoID, seed.FilePath, seed.SymbolName, seed.TraceType, seed.Content, seed.Severity, seed.ReviewID, seed.PRNumber, seed.Metadata); err != nil {
 			traceFails++
-		}
-		if run.Indexer != nil {
-			if err := run.Indexer.IndexDecisionTrace(ctx, owner, repo, seed.FilePath, seed.TraceType, seed.Content, seed.Severity); err != nil {
-				o.logger.Warn("indexing decision trace", "error", err, "file", seed.FilePath)
-			} else if traceID > 0 {
-				// Record the deterministic customID (matches memory.TraceCustomID
-				// and reconcile-memory) into 045's mirror column so a NULL
-				// supermemory_id means the write failed, not that it was skipped.
-				customID := memory.TraceCustomID(repo, seed.FilePath, seed.TraceType, seed.Content)
-				if err := o.st.SetTraceSupermemoryID(ctx, traceID, customID); err != nil {
-					o.logger.Warn("write-back trace SM id", "error", err, "trace_id", traceID)
-				}
-			}
 		}
 	}
 	if traceFails > 0 {
@@ -2989,11 +2973,13 @@ func (o *Orchestrator) indexConfirmedPatterns(ctx context.Context, run *Pipeline
 			indexed++
 			content := fmt.Sprintf("Confirmed pattern [%s]: %s (file: %s)", c.Category, c.Body, fr.Path)
 			customID := memory.PatternCustomID(owner, repo, "confirmed", content)
-			resp, err := run.Indexer.IndexRepoPattern(ctx, owner, repo, content, customID, map[string]string{
-				"source":   "scoring_confirmed",
-				"score":    fmt.Sprintf("%d", c.Score),
-				"pr":       fmt.Sprintf("%d", run.PREvent.PRNumber),
-				"category": string(c.Category),
+			resp, err := run.Indexer.IndexPattern(ctx, repo, memory.PatternMemory{
+				Content:  content,
+				CustomID: customID,
+				Source:   "scoring_confirmed",
+				Score:    c.Score,
+				PRNumber: run.PREvent.PRNumber,
+				Category: string(c.Category),
 			})
 			if err != nil {
 				o.logger.Warn("indexing confirmed pattern", "error", err, "file", fr.Path)
@@ -3192,10 +3178,12 @@ The "pattern" value must be the actual pattern text, NOT the word "description".
 			continue
 		}
 		customID := memory.PatternCustomID(owner, repo, "learned", p.Pattern)
-		smResp, err := run.Indexer.IndexRepoPattern(ctx, owner, repo, p.Pattern, customID, map[string]string{
-			"source":   "auto_learn",
-			"pr":       fmt.Sprintf("%d", run.PREvent.PRNumber),
-			"category": p.Category,
+		smResp, err := run.Indexer.IndexPattern(ctx, repo, memory.PatternMemory{
+			Content:  p.Pattern,
+			CustomID: customID,
+			Source:   "auto_learn",
+			PRNumber: run.PREvent.PRNumber,
+			Category: p.Category,
 		})
 		if err != nil {
 			o.logger.Warn("indexing auto-learned pattern", "error", err)
@@ -3215,11 +3203,13 @@ The "pattern" value must be the actual pattern text, NOT the word "description".
 		if isGenericPattern(p.Pattern, run.Diff) {
 			orgCustomID := memory.PatternCustomID(owner, "", "org_learned", p.Pattern)
 			var orgSmID *string
-			orgResp, orgErr := run.Indexer.IndexOwnerPattern(ctx, owner, p.Pattern, orgCustomID, map[string]string{
-				"source":   "auto_learn",
-				"pr":       fmt.Sprintf("%d", run.PREvent.PRNumber),
-				"category": p.Category,
-				"repo":     run.PREvent.RepoFullName,
+			orgResp, orgErr := run.Indexer.IndexSharedPattern(ctx, memory.PatternMemory{
+				Content:  p.Pattern,
+				CustomID: orgCustomID,
+				Source:   "auto_learn",
+				PRNumber: run.PREvent.PRNumber,
+				Category: p.Category,
+				Extra:    map[string]string{"repo": run.PREvent.RepoFullName},
 			})
 			if orgErr != nil {
 				o.logger.Warn("indexing org pattern", "error", orgErr)
@@ -3343,10 +3333,12 @@ Return [] if no clear conventions emerge. JSON array only.`, run.PREvent.RepoFul
 		}
 		content := fmt.Sprintf("Convention [%s]: %s", c.Category, c.Convention)
 		customID := memory.PatternCustomID(owner, repo, "convention", c.Convention)
-		smResp, err := run.Indexer.IndexRepoPattern(ctx, owner, repo, content, customID, map[string]string{
-			"source":   "convention_extraction",
-			"pr":       fmt.Sprintf("%d", run.PREvent.PRNumber),
-			"category": c.Category,
+		smResp, err := run.Indexer.IndexPattern(ctx, repo, memory.PatternMemory{
+			Content:  content,
+			CustomID: customID,
+			Source:   "convention_extraction",
+			PRNumber: run.PREvent.PRNumber,
+			Category: c.Category,
 		})
 		if err != nil {
 			o.logger.Warn("indexing convention", "error", err)
@@ -3484,10 +3476,12 @@ Max 200 words. Be concrete.`
 		run.Tokens.addToTotal(fileTok)
 
 		customID := memory.SynthesisCustomID(owner, repo, fc.path)
-		_, err = run.Indexer.IndexRepoPattern(ctx, owner, repo, resp.Content, customID, map[string]string{
-			"source": "synthesis",
-			"pr":     fmt.Sprintf("%d", run.PREvent.PRNumber),
-			"file":   fc.path,
+		_, err = run.Indexer.IndexPattern(ctx, repo, memory.PatternMemory{
+			Content:  resp.Content,
+			CustomID: customID,
+			Source:   "synthesis",
+			PRNumber: run.PREvent.PRNumber,
+			FilePath: fc.path,
 		})
 		if err != nil {
 			o.logger.Warn("indexing file synthesis", "error", err, "file", fc.path)
@@ -3521,10 +3515,12 @@ func (o *Orchestrator) indexPRSummary(ctx context.Context, run *PipelineRun, own
 		util.Truncate(run.Synthesis.Summary, 800, false))
 
 	customID := memory.PRSummaryCustomID(owner, repo, run.PREvent.PRNumber)
-	_, err := run.Indexer.IndexRepoPattern(ctx, owner, repo, content, customID, map[string]string{
-		"source":    "pr_summary",
-		"pr":        fmt.Sprintf("%d", run.PREvent.PRNumber),
-		"pr_author": run.PREvent.PRAuthor,
+	_, err := run.Indexer.IndexPattern(ctx, repo, memory.PatternMemory{
+		Content:  content,
+		CustomID: customID,
+		Source:   "pr_summary",
+		PRNumber: run.PREvent.PRNumber,
+		PRAuthor: run.PREvent.PRAuthor,
 	})
 	if err != nil {
 		o.logger.Warn("indexing PR summary", "error", err)
@@ -3568,9 +3564,11 @@ func (o *Orchestrator) indexArchitectureSummary(ctx context.Context, run *Pipeli
 	// unusual owner/repo names. The literal format string uses `--` between
 	// them — not `/` — so the customId stays in the allowed char set.
 	customID := fmt.Sprintf("arch-summary:%s--%s", memory.CustomIDSanitize(owner), memory.CustomIDSanitize(repo))
-	_, err = run.Indexer.IndexRepoPattern(chokeCtx, owner, repo, sb.String(), customID, map[string]string{
-		"source":       "arch_summary",
-		"choke_points": fmt.Sprintf("%d", len(rows)),
+	_, err = run.Indexer.IndexPattern(chokeCtx, repo, memory.PatternMemory{
+		Content:  sb.String(),
+		CustomID: customID,
+		Source:   "arch_summary",
+		Extra:    map[string]string{"choke_points": fmt.Sprintf("%d", len(rows))},
 	})
 	if err != nil {
 		o.logger.Warn("indexing arch summary", "error", err)
@@ -4835,19 +4833,25 @@ func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghRe
 		}
 	}
 
-	// Batch index all comments to Supermemory in a single API call
+	// Batch index all comments to Supermemory in a single API call. The write
+	// floor keeps low-signal findings out of the reviews container: critical/
+	// warning always, suggestions only when scored >= reviewSuggestionScoreFloor,
+	// praise never. (DB persistence above is unfiltered — the dashboard shows
+	// everything; only memory retrieval is gated.)
 	if run.Indexer != nil {
 		var batch []memory.ReviewMemory
 		for _, fr := range run.FileReviews {
 			for _, c := range fr.Comments {
+				if !shouldIndexReviewMemory(c.Severity, c.Score, run.ScoringSkipped) {
+					continue
+				}
 				batch = append(batch, memory.ReviewMemory{
-					ReviewID:    run.ReviewID.String(),
-					PRNumber:    run.PREvent.PRNumber,
-					FilePath:    fr.Path,
-					Body:        c.Body,
-					Severity:    string(c.Severity),
-					Category:    string(c.Category),
-					DiffContext: getDiffContext(run, fr.Path),
+					ReviewID: run.ReviewID.String(),
+					PRNumber: run.PREvent.PRNumber,
+					FilePath: fr.Path,
+					Body:     c.Body,
+					Severity: string(c.Severity),
+					Category: string(c.Category),
 				})
 			}
 		}
@@ -5069,18 +5073,6 @@ func formatTokens(n int) string {
 	default:
 		return fmt.Sprintf("%d", n)
 	}
-}
-
-func getDiffContext(run *PipelineRun, path string) string {
-	if run.Diff == nil {
-		return ""
-	}
-	for _, f := range run.Diff.Files {
-		if f.NewName == path {
-			return util.Truncate(f.RawDiff, 1000, false)
-		}
-	}
-	return ""
 }
 
 // assessPRScope flags PRs that bundle too many features or touch too many

@@ -88,28 +88,24 @@ func (s *Server) createPattern(w http.ResponseWriter, r *http.Request) {
 	if s.memRegistry != nil {
 		indexer := s.memRegistry.GetIndexer(r.Context(), body.InstallationID)
 		if indexer != nil {
-			inst, err := s.store.GetInstallation(r.Context(), body.InstallationID)
-			if err != nil {
-				s.logger.Error("create pattern: lookup installation", "error", err)
-			} else {
-				metadata := map[string]string{"source": "dashboard"}
-				var resp *memory.AddResponse
-				if body.RepoID != nil {
-					dbRepo, err := s.store.GetRepo(r.Context(), *body.RepoID)
-					if err == nil {
-						parts := strings.SplitN(dbRepo.FullName, "/", 2)
-						if len(parts) == 2 {
-							resp, err = indexer.IndexRepoPattern(r.Context(), parts[0], parts[1], body.Content, "", metadata)
-						}
+			pattern := memory.PatternMemory{Content: body.Content, Source: "dashboard"}
+			var resp *memory.AddResponse
+			var err error
+			if body.RepoID != nil {
+				dbRepo, repoErr := s.store.GetRepo(r.Context(), *body.RepoID)
+				if repoErr == nil {
+					parts := strings.SplitN(dbRepo.FullName, "/", 2)
+					if len(parts) == 2 {
+						resp, err = indexer.IndexPattern(r.Context(), parts[1], pattern)
 					}
-				} else {
-					resp, err = indexer.IndexOwnerPattern(r.Context(), inst.OrgLogin, body.Content, "", metadata)
 				}
-				if err != nil {
-					s.logger.Error("index pattern in supermemory", "error", err)
-				} else if resp != nil {
-					smID = &resp.ID
-				}
+			} else {
+				resp, err = indexer.IndexSharedPattern(r.Context(), pattern)
+			}
+			if err != nil {
+				s.logger.Error("index pattern in supermemory", "error", err)
+			} else if resp != nil {
+				smID = &resp.ID
 			}
 		}
 	}

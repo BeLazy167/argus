@@ -417,24 +417,11 @@ func backfillInstallation(ctx context.Context, logger *slog.Logger, st *store.St
 		},
 		nil) // byte-exact
 
-	// decision_traces → type=trace (+ supermemory_id write-back)
-	sweepType(s, "trace", int64(0),
-		func(cur int64, limit int32) ([]db.ListTracesForBackfillRow, error) {
-			return st.Q.ListTracesForBackfill(ctx, db.ListTracesForBackfillParams{InstallationID: installID, ID: cur, Limit: limit})
-		},
-		func(r db.ListTracesForBackfillRow) int64 { return r.ID },
-		func(r db.ListTracesForBackfillRow) (mappedDoc, writeBackFn, error) {
-			md, err := mapTrace(r)
-			if err != nil {
-				return mappedDoc{}, nil, err
-			}
-			id := r.ID
-			wb := func(ctx context.Context, newID string) error {
-				return st.Q.UpdateTraceSupermemoryID(ctx, db.UpdateTraceSupermemoryIDParams{SupermemoryID: &newID, ID: id})
-			}
-			return md, wb, nil
-		},
-		nil) // byte-exact
+	// decision_traces backfill retired: Supermemory trace writes were removed
+	// (Postgres decision_traces is the source of truth), so mirroring traces into
+	// Supermemory is pointless. mapTrace is kept for reference/tests; the sweep is
+	// a no-op.
+	s.logger.Info("skipping trace backfill", "reason", "supermemory trace writes retired")
 
 	// rules → type=rule (_shared). No supermemory_id column on rules → no write-back.
 	sweepType(s, "rule", int64(0),

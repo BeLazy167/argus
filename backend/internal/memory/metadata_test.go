@@ -66,6 +66,17 @@ func TestMetadataToMap_HappyPaths(t *testing.T) {
 			},
 		},
 		{
+			name: "feedback_ignored_weak_negative",
+			m: Metadata{
+				Type: TypeFeedback, Polarity: PolarityNegative, Action: "ignored",
+				FilePath: "a.go", Category: "style",
+			},
+			want: map[string]string{
+				"type": "feedback", "polarity": "negative", "action": "ignored",
+				"file_path": "a.go", "category": "style",
+			},
+		},
+		{
 			name: "pr_summary_valid",
 			m:    Metadata{Type: TypePRSummary, PRNumber: 331, PRAuthor: "bob"},
 			want: map[string]string{"type": "pr_summary", "pr_number": "331", "pr_author": "bob"},

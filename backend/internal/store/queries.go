@@ -1026,30 +1026,6 @@ func (s *Store) SetScenarioSupermemoryID(ctx context.Context, id int64, supermem
 	})
 }
 
-// SetTraceSupermemoryID mirrors SetScenarioSupermemoryID for decision_traces.
-func (s *Store) SetTraceSupermemoryID(ctx context.Context, id int64, supermemoryID string) error {
-	return s.Q.UpdateTraceSupermemoryID(ctx, db.UpdateTraceSupermemoryIDParams{
-		SupermemoryID: &supermemoryID,
-		ID:            id,
-	})
-}
-
-// CreateTraceReturningID inserts a decision trace and returns its new id so the
-// pipeline can write back the Supermemory customID via SetTraceSupermemoryID.
-// Mirrors CreateTrace (traces.go) but with RETURNING id.
-func (s *Store) CreateTraceReturningID(ctx context.Context, repoID int64, filePath, symbolName, traceType, content, severity string, reviewID *uuid.UUID, prNumber int, metadata map[string]any) (int64, error) {
-	metaJSON, err := json.Marshal(metadata)
-	if err != nil {
-		metaJSON = []byte("{}")
-	}
-	var id int64
-	err = s.Pool.QueryRow(ctx,
-		`INSERT INTO decision_traces (repo_id, file_path, symbol_name, trace_type, content, severity, review_id, pr_number, metadata)
-		 VALUES ($1, $2, NULLIF($3, ''), $4, $5, NULLIF($6, ''), $7, $8, $9) RETURNING id`,
-		repoID, filePath, symbolName, traceType, content, severity, reviewID, prNumber, metaJSON).Scan(&id)
-	return id, err
-}
-
 func (s *Store) GetCommentOutcomes(ctx context.Context, reviewCommentID uuid.UUID) ([]CommentOutcome, error) {
 	rows, err := s.Pool.Query(ctx, `
 		SELECT id, review_comment_id, outcome, created_at

@@ -124,12 +124,17 @@ func (ra *ReplyAnalyzer) Analyze(ctx context.Context, event ghpkg.CommentEvent) 
 		}
 	}
 
-	// Index learning in Supermemory
+	// Index learning in Supermemory. Derive a deterministic customID from the
+	// normalized Learning text (SharedPatternCustomID idiom) so re-stating the
+	// same insight upserts one doc instead of accreting a new _shared doc per
+	// reply forever.
 	if decision.Learning != "" && indexer != nil {
-		_, err := indexer.IndexOwnerPattern(ctx, owner, decision.Learning, "", map[string]string{
-			"source": "reply_feedback",
-			"repo":   repo,
-			"file":   event.FilePath,
+		_, err := indexer.IndexSharedPattern(ctx, memory.PatternMemory{
+			Content:  decision.Learning,
+			CustomID: memory.SharedPatternCustomID("reply_feedback", decision.Learning),
+			Source:   "reply_feedback",
+			FilePath: event.FilePath,
+			Extra:    map[string]string{"repo": repo},
 		})
 		if err != nil {
 			ra.logger.Error("indexing learning from reply", "error", err)
@@ -156,7 +161,10 @@ func (ra *ReplyAnalyzer) Analyze(ctx context.Context, event ghpkg.CommentEvent) 
 		}
 	}
 
-	// Index feedback signal for pattern reinforcement/suppression
+	// Index feedback signal for pattern reinforcement/suppression. "clarify"
+	// (outcome=ignored) is recorded as a WEAK negative signal: the developer
+	// engaged but neither confirmed nor dismissed. FeedbackCustomID hashes the
+	// action, so ignored coexists with confirmed/dismissed on the same finding.
 	if indexer != nil && original.Category != nil {
 		var feedbackAction string
 		switch decision.Action {
@@ -168,6 +176,8 @@ func (ra *ReplyAnalyzer) Analyze(ctx context.Context, event ghpkg.CommentEvent) 
 			}
 		case "stand_firm":
 			feedbackAction = "confirmed"
+		case "clarify":
+			feedbackAction = "ignored"
 		}
 
 		if feedbackAction != "" {
