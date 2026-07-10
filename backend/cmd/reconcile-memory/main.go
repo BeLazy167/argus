@@ -247,10 +247,9 @@ func reconcileInstallation(ctx context.Context, logger *slog.Logger, st *store.S
 	if err != nil {
 		ilog.Warn("scenario reconcile error", "error", err)
 	}
-	repairTraces, err := reconcileTraces(ctx, ilog, st, indexer, installID, cfg)
-	if err != nil {
-		ilog.Warn("trace reconcile error", "error", err)
-	}
+	// Decision-trace drift repair retired: Supermemory trace writes were removed
+	// (Postgres decision_traces is the source of truth), so there is nothing to
+	// reconcile into Supermemory.
 
 	// Phase 2 — `_shared` decay + retirement. Skipped when the org opts out,
 	// and skipped entirely in --full mode: a seed run must never delete docs.
@@ -267,7 +266,6 @@ func reconcileInstallation(ctx context.Context, logger *slog.Logger, st *store.S
 		"duration_ms", time.Since(start).Milliseconds(),
 		"patterns_repaired", repairPatterns,
 		"scenarios_repaired", repairScenarios,
-		"traces_repaired", repairTraces,
 		"shared_decayed", decayed,
 		"shared_retired", retired,
 	)
@@ -671,12 +669,12 @@ func reconcilePatterns(ctx context.Context, logger *slog.Logger, st *store.Store
 // means the row failed and the caller should count it toward the circuit
 // breaker. Shared by the drift sweep and the --full re-push.
 func reindexPattern(ctx context.Context, logger *slog.Logger, st *store.Store, indexer memory.Indexer, cfg runConfig, id int, repoID *int64, content, source string, category *string, prNumber *int) error {
-	meta := map[string]string{"source": source}
+	pattern := memory.PatternMemory{Content: content, Source: source}
 	if category != nil {
-		meta["category"] = *category
+		pattern.Category = *category
 	}
 	if prNumber != nil {
-		meta["pr"] = strconv.FormatInt(int64(*prNumber), 10)
+		pattern.PRNumber = *prNumber
 	}
 	if cfg.plan {
 		logger.Info("plan: would reindex pattern", "id", id, "source", source, "scope", patternScopeName(repoID))
@@ -687,8 +685,8 @@ func reindexPattern(ctx context.Context, logger *slog.Logger, st *store.Store, i
 		// Shared / org-wide pattern. Reconstruct the pipeline's customID so a
 		// --full re-push upserts the existing _shared doc instead of duplicating
 		// it under a reconciler-specific ID.
-		customID := pipelinePatternCustomID("", source, content, category, true)
-		resp, err := indexer.IndexOwnerPattern(ctx, "", content, customID, meta)
+		pattern.CustomID = pipelinePatternCustomID("", source, content, category, true)
+		resp, err := indexer.IndexSharedPattern(ctx, pattern)
 		if err != nil {
 			return fmt.Errorf("index owner pattern: %w", err)
 		}
@@ -700,8 +698,8 @@ func reindexPattern(ctx context.Context, logger *slog.Logger, st *store.Store, i
 		if err != nil {
 			return fmt.Errorf("resolve repo: %w", err)
 		}
-		customID := pipelinePatternCustomID(repoName, source, content, category, false)
-		resp, err := indexer.IndexRepoPattern(ctx, "", repoName, content, customID, meta)
+		pattern.CustomID = pipelinePatternCustomID(repoName, source, content, category, false)
+		resp, err := indexer.IndexPattern(ctx, repoName, pattern)
 		if err != nil {
 			return fmt.Errorf("index repo pattern: %w", err)
 		}
@@ -857,113 +855,19 @@ func reindexScenario(ctx context.Context, logger *slog.Logger, st *store.Store, 
 		return fmt.Errorf("index scenario: %w", err)
 	}
 	// IndexScenario's customID is deterministic from (repo, scenarioID) — we
-	// reconstruct it here and record it as supermemory_id. This is a
-	// sync-complete marker, not the actual SM document ID from the server
-	// response. Acceptable: the column stores what the next
+	// reconstruct it here via memory.ScenarioCustomID (the single source, same
+	// repoIDSegment collision-hash the real write uses) and record it as
+	// supermemory_id. This is a sync-complete marker, not the actual SM document
+	// ID from the server response. Acceptable: the column stores what the next
 	// SearchScenariosWithIDs call would target, which is exactly the customID
 	// space. A future iteration may expose the server ID via IndexScenario's
 	// return; tracked as follow-up.
-	customID := fmt.Sprintf("%s--scenario--%d", memory.CustomIDSanitize(repoName), id)
+	customID := memory.ScenarioCustomID(repoName, id)
 	if err := st.Q.UpdateScenarioSupermemoryID(ctx, db.UpdateScenarioSupermemoryIDParams{
 		SupermemoryID: &customID,
 		ID:            id,
 	}); err != nil {
 		return fmt.Errorf("write-back scenario SM id: %w", err)
-	}
-	return nil
-}
-
-// reconcileTraces is the decision_traces mirror of reconcilePatterns. Same
-// circuit-breaker semantics. decision_traces.repo_id is NOT NULL at the
-// schema level so we pass &row.RepoID.
-func reconcileTraces(ctx context.Context, logger *slog.Logger, st *store.Store, indexer memory.Indexer, installID int64, cfg runConfig) (int, error) {
-	if cfg.full {
-		rows, err := st.Q.ListAllTracesForRepush(ctx, db.ListAllTracesForRepushParams{
-			InstallationID: installID,
-			Limit:          int32(cfg.maxRows),
-		})
-		if err != nil {
-			return 0, fmt.Errorf("listing all traces: %w", err)
-		}
-		var total, consecutiveFailures int
-		for _, row := range rows {
-			if ctx.Err() != nil {
-				return total, ctx.Err()
-			}
-			if consecutiveFailures >= maxConsecutiveFailures {
-				return total, fmt.Errorf("trace repush: %d consecutive failures, aborting", consecutiveFailures)
-			}
-			if err := reindexTrace(ctx, logger, st, indexer, cfg, row.ID, row.RepoID, row.FilePath, row.TraceType, row.Content, row.Severity); err != nil {
-				consecutiveFailures = handleRowErr(logger, "repush trace failed", "trace_id", row.ID, err, consecutiveFailures)
-				continue
-			}
-			total++
-			consecutiveFailures = 0
-		}
-		return total, nil
-	}
-
-	var total, consecutiveFailures int
-	for total < cfg.maxRows {
-		if ctx.Err() != nil {
-			return total, ctx.Err()
-		}
-		rows, err := st.Q.ListTracesPendingSM(ctx, db.ListTracesPendingSMParams{
-			InstallationID: installID,
-			Limit:          cfg.batchSize,
-		})
-		if err != nil {
-			return total, fmt.Errorf("listing traces: %w", err)
-		}
-		if len(rows) == 0 {
-			return total, nil
-		}
-		for _, row := range rows {
-			if consecutiveFailures >= maxConsecutiveFailures {
-				return total, fmt.Errorf("trace reconcile: %d consecutive failures, aborting", consecutiveFailures)
-			}
-			if err := reindexTrace(ctx, logger, st, indexer, cfg, row.ID, row.RepoID, row.FilePath, row.TraceType, row.Content, row.Severity); err != nil {
-				consecutiveFailures = handleRowErr(logger, "reindex trace failed", "trace_id", row.ID, err, consecutiveFailures)
-				continue
-			}
-			total++
-			consecutiveFailures = 0
-		}
-		// Plan mode: see the note on reconcilePatterns — same loop hazard.
-		if cfg.plan {
-			return total, nil
-		}
-		if len(rows) < int(cfg.batchSize) {
-			return total, nil
-		}
-	}
-	return total, nil
-}
-
-// reindexTrace indexes one decision trace into the {repo} container and
-// records the deterministic customID as the sync marker. Returns nil on
-// success or in --plan mode. Shared by the drift sweep and the --full
-// re-push. decision_traces.repo_id is NOT NULL at the schema level.
-func reindexTrace(ctx context.Context, logger *slog.Logger, st *store.Store, indexer memory.Indexer, cfg runConfig, id, repoID int64, filePath, traceType, content, severity string) error {
-	if cfg.plan {
-		logger.Info("plan: would reindex trace", "id", id, "type", traceType)
-		return nil
-	}
-	repoName, err := repoNameFor(ctx, st, &repoID)
-	if err != nil {
-		return fmt.Errorf("resolve repo: %w", err)
-	}
-	if err := indexer.IndexDecisionTrace(ctx, "", repoName, filePath, traceType, content, severity); err != nil {
-		return fmt.Errorf("index trace: %w", err)
-	}
-	// Deterministic customID as sync-complete marker — same rationale as the
-	// scenario case.
-	customID := memory.TraceCustomID(repoName, filePath, traceType, content)
-	if err := st.Q.UpdateTraceSupermemoryID(ctx, db.UpdateTraceSupermemoryIDParams{
-		SupermemoryID: &customID,
-		ID:            id,
-	}); err != nil {
-		return fmt.Errorf("write-back trace SM id: %w", err)
 	}
 	return nil
 }

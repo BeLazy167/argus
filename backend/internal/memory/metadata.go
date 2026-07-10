@@ -156,8 +156,8 @@ func (m Metadata) ToMap() (map[string]string, error) {
 		if m.Polarity != PolarityPositive && m.Polarity != PolarityNegative {
 			return nil, fmt.Errorf("metadata: invalid Polarity %q", m.Polarity)
 		}
-		if m.Action != "confirmed" && m.Action != "dismissed" {
-			return nil, fmt.Errorf("metadata: type=feedback requires Action in {confirmed,dismissed}, got %q", m.Action)
+		if m.Action != "confirmed" && m.Action != "dismissed" && m.Action != "ignored" {
+			return nil, fmt.Errorf("metadata: type=feedback requires Action in {confirmed,dismissed,ignored}, got %q", m.Action)
 		}
 	case TypeScenario:
 		if m.ScenarioID <= 0 {

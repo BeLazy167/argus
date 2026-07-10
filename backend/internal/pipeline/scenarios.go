@@ -68,16 +68,19 @@ func scenarioSeverity(s Severity) string {
 //
 //	seeds := pipeline.ExtractScenariosFromReview(run)
 //	pipeline.StoreScenarioSeeds(ctx, st, run.DBInstallationID, &run.DBRepoID, seeds)
+//
 // StoreScenarioSeeds persists seeds, deduping via Supermemory similarity. A new
 // seed is skipped only when the top existing scenario matches it at or above
-// dedupeThreshold (memory.Thresholds.ScenarioDedupe, default 0.85). This mirrors
-// the scenario_trigger gate in the orchestrator: an ungated top-1 hit no longer
-// suppresses distinct seeds, so the operator-tunable threshold actually applies.
+// the dedupe threshold (memory.Thresholds.ScenarioDedupe, default 0.85). This
+// mirrors the scenario_trigger gate in the orchestrator: an ungated top-1 hit no
+// longer suppresses distinct seeds, so the operator-tunable threshold actually
+// applies. A non-positive threshold is clamped to the default so a misconfigured
+// 0 can never collapse every distinct seed into "duplicate".
 func StoreScenarioSeeds(ctx context.Context, st *store.Store, indexer memory.Indexer, owner, repo string, installationID int64, repoID *int64, dedupeThreshold float64, seeds []ScenarioSeed) {
 	for _, seed := range seeds {
 		if indexer != nil {
 			existing := indexer.SearchScenariosWithIDs(ctx, owner, repo, seed.Description, "", 1)
-			if len(existing) > 0 && existing[0].Similarity >= dedupeThreshold {
+			if isDuplicateScenario(existing, dedupeThreshold) {
 				continue // semantically similar scenario already exists
 			}
 		}
@@ -90,17 +93,45 @@ func StoreScenarioSeeds(ctx context.Context, st *store.Store, indexer memory.Ind
 			if err := indexer.IndexScenario(ctx, owner, repo, id, seed.Description, seed.Severity, seed.Files); err != nil {
 				slog.Warn("failed to index scenario", "error", err, "id", id)
 			} else {
-				// Record the deterministic customID (matches memory.IndexScenario
-				// and reconcile-memory's reconstruction) into 045's mirror column
-				// so a NULL supermemory_id means the write failed, not that the
-				// pipeline never attempted it.
-				customID := fmt.Sprintf("%s--scenario--%d", memory.CustomIDSanitize(repo), id)
+				// Record the deterministic customID (single-sourced via
+				// memory.ScenarioCustomID — same repoIDSegment collision-hash the
+				// real SM write uses) into 045's mirror column so a NULL
+				// supermemory_id means the write failed, not that the pipeline
+				// never attempted it. A bare CustomIDSanitize here would drift from
+				// the actual doc ID for lossy repo names (e.g. "a.b", "_shared").
+				customID := memory.ScenarioCustomID(repo, id)
 				if err := st.SetScenarioSupermemoryID(ctx, id, customID); err != nil {
 					slog.Warn("write-back scenario SM id", "error", err, "id", id)
 				}
 			}
 		}
 	}
+}
+
+// scenarioDedupeThreshold clamps the configured dedupe threshold to a positive
+// value, falling back to the default. A zero (or negative) threshold makes the
+// nearest neighbor count as a duplicate for EVERY seed (Similarity >= 0 is
+// always true), silently suppressing all new scenarios — so a misconfigured or
+// unset value must never reach the comparison. Unlike other thresholds, an
+// explicit 0 here cannot mean "disable": dedupe is a suppression filter, and
+// 0 would suppress everything rather than nothing.
+func scenarioDedupeThreshold(threshold float64) float64 {
+	if threshold <= 0 {
+		// Surface the coercion so an operator who configured 0 can discover it.
+		slog.Debug("scenario dedupe threshold coerced to default", "configured", threshold, "default", memory.DefaultThresholdScenarioDedupe)
+		return memory.DefaultThresholdScenarioDedupe
+	}
+	return threshold
+}
+
+// isDuplicateScenario reports whether the top existing scenario match is close
+// enough to treat a candidate seed as a duplicate. Uses the guarded threshold
+// so a misconfigured 0 can never collapse distinct scenarios into one.
+func isDuplicateScenario(existing []memory.ScenarioSearchResult, dedupeThreshold float64) bool {
+	if len(existing) == 0 {
+		return false
+	}
+	return existing[0].Similarity >= scenarioDedupeThreshold(dedupeThreshold)
 }
 
 // StorePendingScenarioSeeds stores scenarios as inactive (pending dev approval via reaction).
