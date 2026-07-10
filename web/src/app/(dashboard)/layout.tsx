@@ -10,10 +10,7 @@ import {
   GitBranch,
   BarChart3,
   MessageSquare,
-  Layers,
-  CirclePlay,
-  Zap,
-  Box,
+  Brain,
   Users,
   Puzzle,
   CreditCard,
@@ -78,11 +75,8 @@ const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
   {
     label: "Analysis",
     items: [
-      { href: "/architecture", label: "Architecture", icon: Box },
+      { href: "/memory", label: "Memory", icon: Brain },
       { href: "/reviews", label: "Reviews", icon: MessageSquare },
-      { href: "/patterns", label: "Patterns", icon: Layers },
-      { href: "/scenarios", label: "Scenarios", icon: CirclePlay },
-      { href: "/insights", label: "Insights", icon: Zap },
     ],
   },
   {

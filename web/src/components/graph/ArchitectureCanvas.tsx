@@ -116,10 +116,27 @@ function groupLabel(dir: string): string {
   return parts.slice(-2).join("/");
 }
 
-/** Compute node size from risk score (0-10) */
-function nodeSize(riskScore: number): { width: number; height: number } {
-  const w = 160 + riskScore * 10;
-  const h = 48 + riskScore * 3;
+/**
+ * Approximate rendered width (px) of a monospace label at 12px, so a node box
+ * can be sized to fit its filename. Keeping the box wide enough for the text is
+ * what lets names stay readable at the default zoom without hovering.
+ */
+const LABEL_CHAR_PX = 7.4;
+function labelBoxWidth(label: string): number {
+  const shown = Math.min(label.length, 30); // FileNode middle-truncates beyond this
+  // h-padding(28) + lang dot & gap(18) + text + gap(10) + risk badge(34)
+  return 28 + 18 + shown * LABEL_CHAR_PX + 10 + 34;
+}
+
+/**
+ * Node box size. Width fits the label first (so filenames never truncate at
+ * default zoom) but still grows with risk; height scales with risk too, so
+ * riskier files read as larger without sacrificing legibility.
+ */
+function nodeDims(riskScore: number, label: string): { width: number; height: number } {
+  const riskW = 150 + riskScore * 8;
+  const w = Math.max(labelBoxWidth(label), riskW, 160);
+  const h = 54 + riskScore * 3;
   return { width: Math.round(w), height: Math.round(h) };
 }
 
@@ -151,12 +168,15 @@ function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQu
   const layout = useMemo(() => {
     const g = new dagre.graphlib.Graph().setDefaultEdgeLabel(() => ({}));
     const isHorizontal = direction === "LR";
-    g.setGraph({ rankdir: direction, nodesep: 80, ranksep: 130, marginx: 60, marginy: 60 });
+    // Wider node/rank separation so boxes read as a spaced map, not a dense grid.
+    g.setGraph({ rankdir: direction, nodesep: 110, ranksep: 175, marginx: 60, marginy: 60 });
+
+    const dimsFor = (f: ArchFile) => nodeDims(f.risk_score, f.path.split("/").pop() ?? f.path);
 
     // Create file nodes
     const rfNodes: Node[] = files.map((f) => {
-      const size = nodeSize(f.risk_score);
       const fileName = f.path.split("/").pop() ?? f.path;
+      const size = dimsFor(f);
       const lensStyle = lensHighlightStyle(f, lens);
       g.setNode(f.path, { width: size.width, height: size.height });
       return {
@@ -222,7 +242,8 @@ function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQu
     const positionedNodes = rfNodes.map((node) => {
       const pos = g.node(node.id);
       if (!pos) return node;
-      const size = nodeSize(files.find((f) => f.path === node.id)?.risk_score ?? 0);
+      const nf = files.find((f) => f.path === node.id);
+      const size = nf ? dimsFor(nf) : { width: 160, height: 54 };
       return {
         ...node,
         targetPosition: isHorizontal ? Position.Left : Position.Top,
@@ -240,15 +261,16 @@ function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQu
     });
 
     const groupNodes: Node[] = [];
-    const PAD_X = 30;
-    const PAD_Y = 50;
+    const PAD_X = 40;
+    const PAD_Y = 66;
     groups.forEach((memberPaths, dir) => {
       if (memberPaths.length < 2) return;
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
       for (const fp of memberPaths) {
         const node = positionedNodes.find((n) => n.id === fp);
         if (!node) continue;
-        const size = nodeSize(files.find((f) => f.path === fp)?.risk_score ?? 0);
+        const nf = files.find((f) => f.path === fp);
+        const size = nf ? dimsFor(nf) : { width: 160, height: 54 };
         minX = Math.min(minX, node.position.x);
         minY = Math.min(minY, node.position.y);
         maxX = Math.max(maxX, node.position.x + size.width);
@@ -262,8 +284,10 @@ function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQu
         style: {
           width: maxX - minX + PAD_X * 2,
           height: maxY - minY + PAD_Y + PAD_X,
-          backgroundColor: "var(--graph-group-bg)",
-          borderRadius: 0,
+          // Quiet outline instead of a filled box — keeps the grouping legible
+          // without making the canvas read as a grid of nested tiles.
+          backgroundColor: "transparent",
+          borderRadius: 12,
           border: "1px solid var(--graph-border)",
           pointerEvents: "none" as const,
         },
