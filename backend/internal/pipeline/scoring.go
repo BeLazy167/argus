@@ -81,6 +81,7 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 		memClient = ss.memRegistry.GetClient(ctx, run.DBInstallationID)
 	}
 	memContext := fetchScoringContext(ctx, memClient, owner, repo, run.FileReviews)
+	memContext += buildPatternTrustCalibration(ctx, ss.store, run.DBInstallationID)
 
 	prompt := buildScoringPrompt(run, memContext)
 	resp, err := provider.Complete(ctx, llm.CompletionRequest{
@@ -408,6 +409,26 @@ Rules:
 
 Respond ONLY with a JSON array. No other text.
 [{"representative": 0, "score": 85, "severity": "critical", "duplicates": [3], "reason": "real SQL injection"}]`
+
+// patternTrustFloor is the empirical-quality cutoff below which a learned
+// pattern is treated as distrusted (its matching findings were dismissed
+// repeatedly). Mirrors the low-quality band used for pattern decay.
+const patternTrustFloor = 0.4
+
+// buildPatternTrustCalibration returns a one-line scoring hint when the
+// installation has learned patterns whose quality decayed below
+// patternTrustFloor — telling the judge to score findings matching them lower.
+// Empty when there are none. One cheap Postgres query, no LLM call.
+func buildPatternTrustCalibration(ctx context.Context, st *store.Store, installationID int64) string {
+	if st == nil || installationID == 0 {
+		return ""
+	}
+	low, err := st.GetLowQualityPatterns(ctx, installationID, patternTrustFloor, 5)
+	if err != nil || len(low) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("\n\n## Pattern Trust\n%d learned pattern(s) have quality <%.1f — developers dismissed matching findings repeatedly. Score findings that match them lower.", len(low), patternTrustFloor)
+}
 
 // fetchScoringContext retrieves repo patterns + per-file synthesis from Supermemory to calibrate scoring.
 // Non-fatal: returns empty string on any error.

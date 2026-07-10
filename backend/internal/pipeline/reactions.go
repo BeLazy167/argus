@@ -118,8 +118,16 @@ func (ra *ReactionAnalyzer) HandleCommentReactions(ctx context.Context, event gh
 	)
 
 	// Record outcome in DB
-	if err := ra.store.RecordCommentOutcome(ctx, comment.ID, action); err != nil {
+	inserted, err := ra.store.RecordCommentOutcome(ctx, comment.ID, action)
+	if err != nil {
 		ra.logger.Error("reaction: recording outcome", "error", err, "outcome", action)
+	}
+
+	// Feed the outcome back into the matched pattern's empirical quality — but
+	// ONLY on first record. The sweep replays every PR event; RecordCommentOutcome
+	// is idempotent, so bumping stats unconditionally would inflate the counts.
+	if inserted {
+		recordPatternOutcome(ctx, ra.store, ra.logger, comment.MatchedPatternID, action)
 	}
 
 	// Index feedback signal for pattern reinforcement/suppression
@@ -188,6 +196,31 @@ func (ra *ReactionAnalyzer) SweepPRReactions(ctx context.Context, installationID
 		}
 	}
 	return nil
+}
+
+// recordPatternOutcome feeds a confirmed/dismissed outcome on a matched comment
+// back into the pattern's empirical quality (pattern_stats) and emits the
+// memory.pattern_feedback telemetry event with the quality AFTER the update.
+// No-op when the comment matched no pattern (patternID nil) or the signal is
+// soft ("ignored"). Shared by the reaction and reply outcome paths. Every
+// failure is non-fatal Warn — outcome learning must never break the webhook.
+func recordPatternOutcome(ctx context.Context, st *store.Store, logger *slog.Logger, patternID *int64, action string) {
+	if patternID == nil || (action != "confirmed" && action != "dismissed") {
+		return
+	}
+	quality, ok, err := st.RecordPatternOutcome(ctx, *patternID, action == "confirmed")
+	if err != nil {
+		logger.Warn("pattern outcome", "error", err, "pattern_id", *patternID, "action", action)
+		return
+	}
+	if !ok {
+		return // no stats row yet (match predates stats wiring) — nothing to update
+	}
+	logger.InfoContext(ctx, "pattern feedback",
+		slog.String("event", "memory.pattern_feedback"),
+		slog.Int64("pattern_id", *patternID),
+		slog.String("action", action),
+		slog.Float64("quality", quality))
 }
 
 // isSystemicSweepError returns true when err is an auth/permission/rate-limit

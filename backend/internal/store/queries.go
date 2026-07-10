@@ -611,11 +611,11 @@ func (s *Store) ListModelConfigsWithFallback(ctx context.Context, installationID
 
 // --- Review Comments ---
 
-func (s *Store) CreateReviewComment(ctx context.Context, reviewID uuid.UUID, filePath string, startLine, endLine *int, side *string, body string, severity, category, specialist, codeSnippet *string, confidenceScore *int, githubCommentID *int64, matchedPatternID *int64, matchedPatternScore *float32, enforcedRuleContent *string, isNewFinding bool) error {
+func (s *Store) CreateReviewComment(ctx context.Context, reviewID uuid.UUID, filePath string, startLine, endLine *int, side *string, body string, severity, category, specialist, codeSnippet *string, confidenceScore *int, githubCommentID *int64, matchedPatternID *int64, matchedPatternScore *float32, enforcedRuleContent *string, isNewFinding bool, suppressedReason *string) error {
 	_, err := s.Pool.Exec(ctx, `
-		INSERT INTO review_comments (review_id, file_path, start_line, end_line, side, body, severity, category, specialist, confidence_score, code_snippet, github_comment_id, matched_pattern_id, matched_pattern_score, enforced_rule_content, is_new_finding)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
-	`, reviewID, filePath, startLine, endLine, side, body, severity, category, specialist, confidenceScore, codeSnippet, githubCommentID, matchedPatternID, matchedPatternScore, enforcedRuleContent, isNewFinding)
+		INSERT INTO review_comments (review_id, file_path, start_line, end_line, side, body, severity, category, specialist, confidence_score, code_snippet, github_comment_id, matched_pattern_id, matched_pattern_score, enforced_rule_content, is_new_finding, suppressed_reason)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+	`, reviewID, filePath, startLine, endLine, side, body, severity, category, specialist, confidenceScore, codeSnippet, githubCommentID, matchedPatternID, matchedPatternScore, enforcedRuleContent, isNewFinding, suppressedReason)
 	return err
 }
 
@@ -1001,17 +1001,25 @@ func (s *Store) GetLearnLayerCounts(ctx context.Context, installationIDs []int64
 
 // --- Comment Outcomes ---
 
-func (s *Store) RecordCommentOutcome(ctx context.Context, reviewCommentID uuid.UUID, outcome string) error {
+// RecordCommentOutcome records a (comment, outcome) signal idempotently and
+// reports whether this call actually inserted a new row. inserted=false means
+// the outcome was already recorded — the reaction sweep replays on every PR
+// event, so callers must gate side effects (e.g. bumping pattern quality) on
+// inserted to avoid double-counting a single 👍/👎.
+func (s *Store) RecordCommentOutcome(ctx context.Context, reviewCommentID uuid.UUID, outcome string) (inserted bool, err error) {
 	// ON CONFLICT matches migration 044's comment_outcomes_unique_per_comment
 	// UNIQUE (review_comment_id, outcome). GitHub redelivers reaction.created
 	// and a removed/re-added reaction replays the same (comment, outcome), so
 	// the write must be idempotent instead of erroring on unique_violation.
-	_, err := s.Pool.Exec(ctx, `
+	tag, err := s.Pool.Exec(ctx, `
 		INSERT INTO comment_outcomes (review_comment_id, outcome)
 		VALUES ($1, $2)
 		ON CONFLICT (review_comment_id, outcome) DO NOTHING
 	`, reviewCommentID, outcome)
-	return err
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 // SetScenarioSupermemoryID records the Supermemory customID for a scenario in

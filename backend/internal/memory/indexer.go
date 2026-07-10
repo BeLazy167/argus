@@ -57,6 +57,11 @@ type Indexer interface {
 
 	// Readers.
 	SearchPatternMatch(ctx context.Context, owner, repo, query string, thresholds Thresholds) PatternMatch
+	// SearchDismissedMatch finds the closest previously-dismissed finding
+	// (type=feedback + action=dismissed) in the repo container. The
+	// post-generation suppression pass uses the returned Score to drop or
+	// downgrade a finding a developer already thumbed-down.
+	SearchDismissedMatch(ctx context.Context, owner, repo, query string, thresholds Thresholds) PatternMatch
 	SearchScenariosWithIDs(ctx context.Context, owner, repo, query, severity string, limit int) []ScenarioSearchResult
 
 	// Specialist retrieval — single call replaces the legacy 5-parallel-query
@@ -154,6 +159,30 @@ func (idx *indexerImpl) SearchPatternMatch(ctx context.Context, owner, repo, que
 
 	wg.Wait()
 	return bestMatch(repoRes, sharedRes)
+}
+
+// SearchDismissedMatch returns the top dismissed-feedback doc semantically
+// matching query, scoped to the repo container (dismissals are never shared
+// across repos). The doc content embeds the dismissed finding text, so a
+// finding-body query surfaces prior thumbs-down on the same issue. Retrieval
+// uses the FindingEnrich floor (0.50) — at/above it the caller applies the
+// drop/downgrade policy; below it there is nothing worth retrieving. Empty
+// PatternMatch on nil client / empty repo / empty query / no hit. owner is
+// accepted for interface symmetry but unused under BYOK container scoping.
+func (idx *indexerImpl) SearchDismissedMatch(ctx context.Context, owner, repo, query string, thresholds Thresholds) PatternMatch {
+	_ = owner
+	if idx.client == nil || repo == "" || query == "" {
+		return PatternMatch{}
+	}
+	thresholds = thresholds.WithDefaults()
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	filter := &SearchFilters{AND: []FilterCondition{
+		{Key: "type", Value: string(TypeFeedback)},
+		{Key: "action", Value: "dismissed"},
+	}}
+	return idx.topMatch(ctx, query, RepoTagNew(repo), filter, thresholds.FindingEnrich)
 }
 
 // topMatch runs a one-result hybrid search on the given container + filter.
