@@ -35,7 +35,23 @@ func (s *Server) listPatterns(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getPatternStats(w http.ResponseWriter, r *http.Request) {
-	stats, err := s.store.GetPatternStats(r.Context(), getInstallationIDs(r.Context()))
+	// Default is every installation the caller belongs to; an explicit
+	// installation_id narrows to one workspace so org-scoped pages don't mix
+	// another installation's history into the timeline.
+	ids := getInstallationIDs(r.Context())
+	if iid := r.URL.Query().Get("installation_id"); iid != "" {
+		id, parseErr := strconv.ParseInt(iid, 10, 64)
+		if parseErr != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid installation_id"})
+			return
+		}
+		if !containsID(ids, id) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "access denied"})
+			return
+		}
+		ids = []int64{id}
+	}
+	stats, err := s.store.GetPatternStats(r.Context(), ids)
 	if err != nil {
 		s.logger.Error("get pattern stats", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})

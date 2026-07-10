@@ -30,9 +30,14 @@ export const useCreatePattern = () => {
   });
 };
 
-export const usePatternStats = createAuthQuery<PatternStat[]>({
+type PatternStatsVars = { installationId?: number };
+
+export const usePatternStats = createAuthQuery<PatternStat[], PatternStatsVars>({
   queryKey: ["pattern-stats"],
-  fetcher: (_vars, ctx) => getApi(ctx).get<PatternStat[]>("/api/v1/patterns/stats"),
+  fetcher: (vars, ctx) => {
+    const param = vars?.installationId ? `?installation_id=${vars.installationId}` : "";
+    return getApi(ctx).get<PatternStat[]>(`/api/v1/patterns/stats${param}`);
+  },
   staleTime: 2 * 60 * 1000,
 });
 
