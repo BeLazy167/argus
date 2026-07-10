@@ -1,6 +1,6 @@
 "use client";
 
-import { Brain, Loader2, RotateCw, Save, Undo2 } from "lucide-react";
+import { Hourglass, Info, Loader2, Radar, RotateCw, Save, Sliders, Undo2 } from "lucide-react";
 import { useMemo, useState } from "react";
 import {
 	MEMORY_DEFAULTS,
@@ -42,8 +42,9 @@ function resolveDraft(data: Record<string, unknown>): Draft {
 
 /**
  * MemorySettingsSection renders the memory tuning controls inside the
- * Settings page's Memory tab. It owns its own fetch so the tab stays
- * self-contained; the surrounding page provides the header and container.
+ * Settings page's Memory tab, styled to match the sibling tabs (amber info
+ * strip, icon section headers, charcoal cards). It owns its own fetch so the
+ * tab stays self-contained.
  */
 export function MemorySettingsSection() {
 	const { active } = useInstallation();
@@ -72,35 +73,41 @@ export function MemorySettingsSection() {
 		await save.mutateAsync(payload);
 	};
 
+	if (isLoading || !active) {
+		return (
+			<div className="flex items-center justify-center py-20">
+				<Loader2 className="h-6 w-6 animate-spin text-slate-text" />
+			</div>
+		);
+	}
+
+	if (!data) {
+		return (
+			<p className="text-xs font-mono text-red-400">
+				Settings failed to load. Check your connection, then reload the page.
+			</p>
+		);
+	}
+
 	return (
-		<div className="max-w-3xl space-y-10">
-			<div className="flex items-start gap-2.5 border border-iron bg-charcoal/40 px-4 py-3">
-				<Brain className="h-3.5 w-3.5 text-slate-500 mt-0.5 shrink-0" aria-hidden />
-				<p className="text-[11px] font-mono text-slate-500 leading-relaxed">
-					How strictly Argus matches past knowledge to new code, and how long org-wide
-					patterns keep their influence. Changes apply from the next review.
+		<div className="space-y-10">
+			<div className="border border-amber/20 bg-amber/5 px-4 py-3 flex items-start gap-2.5">
+				<Info className="h-3.5 w-3.5 text-amber mt-0.5 shrink-0" />
+				<p className="text-[11px] font-mono text-amber/80">
+					How strictly Argus matches past knowledge to new code, and how long org-wide patterns keep
+					their influence. Changes apply to the next review in{" "}
+					<span className="text-amber font-medium">{active.org_login}</span>.
 				</p>
 			</div>
 
-			{isLoading ? (
-				<div className="flex items-center gap-2 text-slate-500 font-mono text-sm">
-					<Loader2 className="h-4 w-4 animate-spin" aria-hidden />
-					Loading settings...
-				</div>
-			) : data ? (
-				<MemoryForm
-					key={installationId}
-					initialValues={seed}
-					onSave={onSave}
-					isSaving={save.isPending}
-					isError={save.isError}
-					isSuccess={save.isSuccess}
-				/>
-			) : (
-				<p className="text-xs font-mono text-red-400">
-					Settings failed to load. Check your connection, then reload the page.
-				</p>
-			)}
+			<MemoryForm
+				key={installationId}
+				initialValues={seed}
+				onSave={onSave}
+				isSaving={save.isPending}
+				isError={save.isError}
+				isSuccess={save.isSuccess}
+			/>
 		</div>
 	);
 }
@@ -140,71 +147,81 @@ function MemoryForm({
 
 	return (
 		<>
-			<Section
-				title="Pattern matching"
-				subtitle="How similar a remembered pattern must be to new code before Argus uses it. Slide right for fewer, more-certain matches; left for more context."
-			>
-				<ThresholdField
-					title="Comment enrichment"
-					keyChip="finding_enrich"
-					description="A saved pattern is attached to a review comment only when it matches this closely."
-					lowLabel="more context"
-					highLabel="stricter"
-					value={draft.finding_enrich}
-					defaultValue={MEMORY_DEFAULTS.threshold_finding_enrich}
-					onChange={(v) => setDraft((d) => ({ ...d, finding_enrich: v }))}
+			<section className="mb-10">
+				<SectionHeader
+					icon={<Sliders className="h-4 w-4 text-amber" aria-hidden />}
+					title="Pattern Matching"
+					subtitle="How similar a remembered pattern must be to new code before Argus uses it. Right for fewer, more-certain matches; left for more context."
 				/>
-				<ThresholdField
-					title="Reviewer briefing"
-					keyChip="specialist_min"
-					description="Repo and org memory must be at least this relevant to appear in a reviewer's per-file briefing."
-					lowLabel="more context"
-					highLabel="stricter"
-					value={draft.specialist_min}
-					defaultValue={MEMORY_DEFAULTS.threshold_specialist_min}
-					onChange={(v) => setDraft((d) => ({ ...d, specialist_min: v }))}
-				/>
-			</Section>
+				<div className="grid gap-3 grid-cols-1 lg:grid-cols-2">
+					<ThresholdField
+						title="Comment enrichment"
+						keyChip="finding_enrich"
+						description="A saved pattern is attached to a review comment only when it matches this closely."
+						lowLabel="more context"
+						highLabel="stricter"
+						value={draft.finding_enrich}
+						defaultValue={MEMORY_DEFAULTS.threshold_finding_enrich}
+						onChange={(v) => setDraft((d) => ({ ...d, finding_enrich: v }))}
+					/>
+					<ThresholdField
+						title="Reviewer briefing"
+						keyChip="specialist_min"
+						description="Repo and org memory must be at least this relevant to appear in a reviewer's per-file briefing."
+						lowLabel="more context"
+						highLabel="stricter"
+						value={draft.specialist_min}
+						defaultValue={MEMORY_DEFAULTS.threshold_specialist_min}
+						onChange={(v) => setDraft((d) => ({ ...d, specialist_min: v }))}
+					/>
+				</div>
+			</section>
 
-			<Section
-				title="Scenario engine"
-				subtitle="Scenarios are failure risks Argus watches for on every PR. These two gates control how they're counted and created."
-			>
-				<ThresholdField
-					title="Failure recognition"
-					keyChip="scenario_trigger"
-					description="A simulation failure counts toward an existing scenario only when it matches this closely."
-					lowLabel="count loosely"
-					highLabel="count strictly"
-					value={draft.scenario_trigger}
-					defaultValue={MEMORY_DEFAULTS.threshold_scenario_trigger}
-					onChange={(v) => setDraft((d) => ({ ...d, scenario_trigger: v }))}
+			<section className="mb-10">
+				<SectionHeader
+					icon={<Radar className="h-4 w-4 text-amber" aria-hidden />}
+					title="Scenario Engine"
+					subtitle="Scenarios are failure risks Argus watches for on every PR. These two gates control how they're counted and created."
 				/>
-				<ThresholdField
-					title="Duplicate detection"
-					keyChip="scenario_dedupe"
-					description="A proposed scenario this similar to an existing one is treated as a duplicate and skipped."
-					lowLabel="merge more"
-					highLabel="keep more"
-					value={draft.scenario_dedupe}
-					defaultValue={MEMORY_DEFAULTS.threshold_scenario_dedupe}
-					onChange={(v) => setDraft((d) => ({ ...d, scenario_dedupe: v }))}
-				/>
-			</Section>
+				<div className="grid gap-3 grid-cols-1 lg:grid-cols-2">
+					<ThresholdField
+						title="Failure recognition"
+						keyChip="scenario_trigger"
+						description="A simulation failure counts toward an existing scenario only when it matches this closely."
+						lowLabel="count loosely"
+						highLabel="count strictly"
+						value={draft.scenario_trigger}
+						defaultValue={MEMORY_DEFAULTS.threshold_scenario_trigger}
+						onChange={(v) => setDraft((d) => ({ ...d, scenario_trigger: v }))}
+					/>
+					<ThresholdField
+						title="Duplicate detection"
+						keyChip="scenario_dedupe"
+						description="A proposed scenario this similar to an existing one is treated as a duplicate and skipped."
+						lowLabel="merge more"
+						highLabel="keep more"
+						value={draft.scenario_dedupe}
+						defaultValue={MEMORY_DEFAULTS.threshold_scenario_dedupe}
+						onChange={(v) => setDraft((d) => ({ ...d, scenario_dedupe: v }))}
+					/>
+				</div>
+			</section>
 
-			<Section
-				title="Org-wide pattern lifetime"
-				subtitle="Org-wide patterns start at full confidence. Left dormant, they fade on a nightly schedule; re-confirming one restores it to full strength."
-			>
-				<div className="border border-iron bg-charcoal/60 p-4 space-y-4">
+			<section className="mb-10">
+				<SectionHeader
+					icon={<Hourglass className="h-4 w-4 text-amber" aria-hidden />}
+					title="Org-Wide Pattern Lifetime"
+					subtitle="Org-wide patterns start at full confidence. Left dormant, they fade on a nightly schedule; re-confirming one restores full strength."
+				/>
+				<div className="border border-iron bg-charcoal p-4 space-y-4">
 					<div className="flex items-start justify-between gap-4">
 						<div className="flex-1 min-w-0">
-							<div className="flex items-baseline gap-3 mb-1">
-								<span className="text-sm font-mono text-slate-100">Confidence decay</span>
+							<div className="flex items-baseline gap-3 mb-1 flex-wrap">
+								<span className="text-sm font-mono text-foreground">Confidence decay</span>
 								<KeyChip name="disable_shared_decay" />
 								{draft.disable_decay !== null && <OverrideChip />}
 							</div>
-							<p className="text-xs font-mono text-slate-500 leading-relaxed">
+							<p className="text-xs font-mono text-slate-text leading-relaxed">
 								{decayOn
 									? "Dormant patterns fade after 30 days, stop influencing reviews below 0.30, and retire at 0.20 — about 5 months without a re-confirmation."
 									: "Decay is off. Patterns keep full influence forever until deleted by hand."}
@@ -241,7 +258,7 @@ function MemoryForm({
 								disabled={draft.disable_decay === null}
 								aria-label="Reset confidence decay to default"
 								title="Reset to default (decay on)"
-								className="p-1 text-slate-600 hover:text-slate-300 disabled:opacity-30 disabled:hover:text-slate-600 transition-colors"
+								className="p-1 text-slate-text hover:text-foreground disabled:opacity-30 transition-colors"
 							>
 								<RotateCw className="h-3.5 w-3.5" aria-hidden />
 							</button>
@@ -250,18 +267,18 @@ function MemoryForm({
 
 					<DecayTimeline active={decayOn} />
 				</div>
-			</Section>
+			</section>
 
 			<footer className="flex items-center justify-between border-t border-iron pt-6">
-				<p className="text-xs font-mono text-slate-600" aria-live="polite">
-					{dirty ? "Unsaved changes" : isSuccess ? "Saved" : " "}
+				<p className="text-xs font-mono text-slate-text" aria-live="polite">
+					{dirty ? "Unsaved changes" : isSuccess ? "Saved" : " "}
 				</p>
 				<div className="flex items-center gap-2">
 					{dirty && (
 						<button
 							type="button"
 							onClick={() => setDraft(initial)}
-							className="flex items-center gap-2 px-3 py-2 text-xs font-mono text-slate-500 hover:text-slate-200 transition-colors"
+							className="flex items-center gap-2 px-3 py-2 text-xs font-mono text-slate-text hover:text-foreground transition-colors"
 						>
 							<Undo2 className="h-3.5 w-3.5" aria-hidden />
 							Discard
@@ -271,7 +288,7 @@ function MemoryForm({
 						type="button"
 						onClick={handleSave}
 						disabled={!dirty || isSaving}
-						className="flex items-center gap-2 px-4 py-2 bg-slate-800 border border-iron text-sm font-mono text-slate-200 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+						className="flex items-center gap-2 px-4 py-2 bg-slate-800 border border-iron text-sm font-mono text-foreground hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
 					>
 						{isSaving ? (
 							<Loader2 className="h-4 w-4 animate-spin" aria-hidden />
@@ -284,7 +301,7 @@ function MemoryForm({
 			</footer>
 
 			{isError && (
-				<p className="text-xs font-mono text-red-400" role="alert">
+				<p className="text-xs font-mono text-red-400 mt-3" role="alert">
 					Save failed. Your edits are still here — check your connection and save again.
 				</p>
 			)}
@@ -302,30 +319,32 @@ function draftEquals(a: Draft, b: Draft): boolean {
 	);
 }
 
-function Section({
+/** Section header matching the sibling settings tabs: amber icon + bold
+ * mono title, with a one-line mono subtitle underneath. */
+function SectionHeader({
+	icon,
 	title,
 	subtitle,
-	children,
 }: {
+	icon: React.ReactNode;
 	title: string;
 	subtitle: string;
-	children: React.ReactNode;
 }) {
 	return (
-		<section className="space-y-4">
-			<div className="space-y-1">
-				<h2 className="text-sm font-mono text-slate-300 uppercase tracking-wider">{title}</h2>
-				<p className="text-xs font-mono text-slate-500 leading-relaxed max-w-xl">{subtitle}</p>
+		<div className="mb-4">
+			<div className="flex items-center gap-2 mb-1">
+				{icon}
+				<h2 className="font-mono text-lg font-semibold text-foreground">{title}</h2>
 			</div>
-			<div className="space-y-3">{children}</div>
-		</section>
+			<p className="text-[11px] font-mono text-slate-text leading-relaxed max-w-2xl">{subtitle}</p>
+		</div>
 	);
 }
 
 /** The backend config key, kept visible so settings map 1:1 to the docs. */
 function KeyChip({ name }: { name: string }) {
 	return (
-		<code className="text-[10px] font-mono text-slate-600 border border-iron/60 px-1.5 py-0.5 tracking-tight">
+		<code className="text-[10px] font-mono text-slate-text/70 border border-iron px-1.5 py-0.5 tracking-tight">
 			{name}
 		</code>
 	);
@@ -403,18 +422,18 @@ function ThresholdField({
 
 	return (
 		<div
-			className={`border bg-charcoal/60 p-4 space-y-3 transition-colors ${
+			className={`border bg-charcoal p-4 space-y-3 transition-colors ${
 				overridden ? "border-amber/40" : "border-iron"
 			}`}
 		>
 			<div className="flex items-start justify-between gap-4">
 				<div className="flex-1 min-w-0">
 					<div className="flex items-baseline gap-3 mb-1 flex-wrap">
-						<span className="text-sm font-mono text-slate-100">{title}</span>
+						<span className="text-sm font-mono text-foreground">{title}</span>
 						<KeyChip name={keyChip} />
 						{overridden && <OverrideChip delta={delta} />}
 					</div>
-					<p className="text-xs font-mono text-slate-500 leading-relaxed">{description}</p>
+					<p className="text-xs font-mono text-slate-text leading-relaxed">{description}</p>
 				</div>
 				<div className="flex items-center gap-2 shrink-0">
 					<input
@@ -431,7 +450,7 @@ function ThresholdField({
 							if (e.key === "Enter") e.currentTarget.blur();
 						}}
 						aria-label={`${title} value`}
-						className="w-20 bg-[#0a0a12] border border-iron px-2 py-1 text-sm font-mono text-slate-200 text-right focus:border-amber focus:outline-none tabular-nums"
+						className="w-20 bg-void border border-iron px-2 py-1 text-sm font-mono text-foreground text-right focus:border-amber/50 focus:outline-none tabular-nums transition-colors"
 					/>
 					<button
 						type="button"
@@ -439,7 +458,7 @@ function ThresholdField({
 						disabled={!overridden}
 						aria-label={`Reset ${title} to default`}
 						title={`Reset to default (${defaultValue.toFixed(2)})`}
-						className="p-1 text-slate-600 hover:text-slate-300 disabled:opacity-30 disabled:hover:text-slate-600 transition-colors"
+						className="p-1 text-slate-text hover:text-foreground disabled:opacity-30 transition-colors"
 					>
 						<RotateCw className="h-3.5 w-3.5" aria-hidden />
 					</button>
@@ -471,7 +490,7 @@ function ThresholdField({
 						style={{ left: `${defaultValue * 100}%` }}
 					/>
 				</div>
-				<div className="flex justify-between text-[10px] font-mono text-slate-600 tabular-nums">
+				<div className="flex justify-between text-[10px] font-mono text-slate-text/70 tabular-nums">
 					<span>&larr; {lowLabel}</span>
 					<span>default {defaultValue.toFixed(2)}</span>
 					<span>{highLabel} &rarr;</span>
@@ -532,29 +551,55 @@ function ThresholdField({
 	);
 }
 
+// Decay policy constants mirrored from the backend reconciler: 30 days of
+// grace, then -0.05/week from a 1.00 base; retrieval floor 0.30 (~4.2 mo);
+// retirement at 0.20 (~4.7 mo).
+const GRACE_MONTHS = 1;
+const FLOOR_MONTHS = GRACE_MONTHS + 14 / 4.345;
+const RETIRE_MONTHS = GRACE_MONTHS + 16 / 4.345;
+const SPAN_MONTHS = 5.5;
+
 /**
- * DecayTimeline draws the actual retirement policy as a confidence-over-time
- * curve: full strength through the 30-day grace window, a weekly fade, the
- * 0.30 line where a pattern stops influencing reviews, and retirement at
- * 0.20 (~5 months dormant). With decay off it flattens to a constant line.
- * Pure SVG derived from the real policy constants — no animation, so it is
- * identical under prefers-reduced-motion.
+ * DecayTimeline draws the retirement policy as a confidence-over-time chart:
+ * an area-filled curve holding 1.00 through the grace window, fading weekly
+ * past it, crossing the 0.30 influence floor, and ending at 0.20 retirement.
+ * Pure SVG derived from the policy constants — no animation, so it is
+ * identical under prefers-reduced-motion. With decay off it flattens to a
+ * full-strength line.
  */
 function DecayTimeline({ active }: { active: boolean }) {
-	// Policy constants mirrored from the backend reconciler: 30d grace, then
-	// -0.05/week from 1.00; influence floor 0.30 (~4.2 mo); retire 0.20 (~4.7 mo).
-	const W = 600;
-	const H = 96;
-	const PAD_X = 8;
-	const MONTHS = 5.5;
-	const x = (months: number) => PAD_X + (months / MONTHS) * (W - 2 * PAD_X);
-	const y = (conf: number) => 10 + (1 - conf) * (H - 34);
-	const graceEnd = 1; // ~30 days
-	const floorAt = graceEnd + 14 / 4.345; // 14 weekly steps to 0.30
-	const retireAt = graceEnd + 16 / 4.345; // 16 weekly steps to 0.20
+	const W = 720;
+	const H = 150;
+	const L = 44; // left gutter for confidence labels
+	const R = 12;
+	const TOP = 14;
+	const BOTTOM = 26;
+	const x = (months: number) => L + (months / SPAN_MONTHS) * (W - L - R);
+	const y = (conf: number) => TOP + (1 - conf) * (H - TOP - BOTTOM);
+
+	const curve = `M ${x(0)} ${y(1)} L ${x(GRACE_MONTHS)} ${y(1)} L ${x(FLOOR_MONTHS)} ${y(0.3)} L ${x(RETIRE_MONTHS)} ${y(0.2)}`;
+	const area = `${curve} L ${x(RETIRE_MONTHS)} ${y(0)} L ${x(0)} ${y(0)} Z`;
+	const flat = `M ${x(0)} ${y(1)} L ${x(SPAN_MONTHS)} ${y(1)}`;
+	const flatArea = `${flat} L ${x(SPAN_MONTHS)} ${y(0)} L ${x(0)} ${y(0)} Z`;
+
+	const refLine = (conf: number, color: string, dash?: string) => (
+		<>
+			<line x1={L} x2={W - R} y1={y(conf)} y2={y(conf)} stroke={color} strokeDasharray={dash} />
+			<text
+				x={L - 6}
+				y={y(conf) + 3}
+				textAnchor="end"
+				fontSize="9"
+				fontFamily="monospace"
+				className="fill-slate-500"
+			>
+				{conf.toFixed(2)}
+			</text>
+		</>
+	);
 
 	return (
-		<figure className="m-0">
+		<figure className="m-0 space-y-2">
 			<svg
 				viewBox={`0 0 ${W} ${H}`}
 				className="w-full h-auto"
@@ -565,103 +610,94 @@ function DecayTimeline({ active }: { active: boolean }) {
 						: "Decay disabled: confidence stays at full strength indefinitely."
 				}
 			>
-				{/* influence floor */}
-				<line
-					x1={PAD_X}
-					x2={W - PAD_X}
-					y1={y(0.3)}
-					y2={y(0.3)}
-					stroke="oklch(1 0 0 / 12%)"
-					strokeDasharray="3 4"
-				/>
+				<defs>
+					<linearGradient id="decay-fill" x1="0" y1="0" x2="0" y2="1">
+						<stop offset="0%" stopColor="oklch(0.47 0.157 37.304)" stopOpacity="0.35" />
+						<stop offset="100%" stopColor="oklch(0.47 0.157 37.304)" stopOpacity="0.02" />
+					</linearGradient>
+				</defs>
+
+				{refLine(1.0, "oklch(1 0 0 / 8%)")}
+				{refLine(0.3, "oklch(1 0 0 / 18%)", "4 4")}
+				{refLine(0.2, "oklch(0.637 0.237 25.331 / 45%)", "4 4")}
+
 				{active ? (
 					<>
-						{/* grace + fade curve */}
+						<path d={area} fill="url(#decay-fill)" />
 						<path
-							d={`M ${x(0)} ${y(1)} L ${x(graceEnd)} ${y(1)} L ${x(floorAt)} ${y(0.3)} L ${x(retireAt)} ${y(0.2)}`}
+							d={curve}
 							fill="none"
 							stroke="var(--color-amber, oklch(0.47 0.157 37.304))"
 							strokeWidth="2"
 						/>
-						{/* retirement mark */}
+						{/* grace boundary */}
 						<line
-							x1={x(retireAt)}
-							x2={x(retireAt)}
-							y1={y(0.2) - 6}
-							y2={y(0.2) + 6}
-							stroke="oklch(0.637 0.237 25.331)"
-							strokeWidth="2"
+							x1={x(GRACE_MONTHS)}
+							x2={x(GRACE_MONTHS)}
+							y1={TOP}
+							y2={H - BOTTOM}
+							stroke="oklch(1 0 0 / 10%)"
+							strokeDasharray="2 4"
 						/>
-						<text
-							x={x(graceEnd / 2)}
-							y={y(1) - 6}
-							textAnchor="middle"
-							className="fill-slate-500"
-							fontSize="9"
-							fontFamily="monospace"
-						>
-							30d grace
-						</text>
-						<text
-							x={x(floorAt)}
-							y={y(0.3) + 14}
-							textAnchor="middle"
-							className="fill-slate-500"
-							fontSize="9"
-							fontFamily="monospace"
-						>
-							0.30 stops influencing
-						</text>
-						<text
-							x={x(retireAt)}
-							y={y(0.2) - 10}
-							textAnchor="end"
-							className="fill-slate-500"
-							fontSize="9"
-							fontFamily="monospace"
-						>
-							0.20 retired ~5mo
-						</text>
+						{/* retirement endpoint */}
+						<rect
+							x={x(RETIRE_MONTHS) - 3}
+							y={y(0.2) - 3}
+							width="6"
+							height="6"
+							fill="oklch(0.637 0.237 25.331)"
+						/>
 					</>
 				) : (
 					<>
-						<line
-							x1={x(0)}
-							x2={W - PAD_X}
-							y1={y(1)}
-							y2={y(1)}
-							stroke="oklch(1 0 0 / 25%)"
-							strokeWidth="2"
-						/>
-						<text
-							x={W / 2}
-							y={y(1) + 16}
-							textAnchor="middle"
-							className="fill-slate-600"
-							fontSize="9"
-							fontFamily="monospace"
-						>
-							decay off — full strength forever
-						</text>
+						<path d={flatArea} fill="url(#decay-fill)" />
+						<path d={flat} fill="none" stroke="oklch(1 0 0 / 30%)" strokeWidth="2" />
 					</>
 				)}
-				{/* x-axis month ticks */}
+
+				{/* month axis */}
 				{[0, 1, 2, 3, 4, 5].map((m) => (
-					<text
-						key={m}
-						x={x(m)}
-						y={H - 4}
-						textAnchor="middle"
-						className="fill-slate-700"
-						fontSize="8"
-						fontFamily="monospace"
-					>
-						{m}mo
-					</text>
+					<g key={m}>
+						<line
+							x1={x(m)}
+							x2={x(m)}
+							y1={H - BOTTOM}
+							y2={H - BOTTOM + 4}
+							stroke="oklch(1 0 0 / 20%)"
+						/>
+						<text
+							x={x(m)}
+							y={H - BOTTOM + 15}
+							textAnchor="middle"
+							fontSize="9"
+							fontFamily="monospace"
+							className="fill-slate-600"
+						>
+							{m}mo
+						</text>
+					</g>
 				))}
 			</svg>
-			<figcaption className="sr-only">
-				Org-wide pattern confidence over months of dormancy.
+
+			<figcaption className="flex flex-wrap gap-x-5 gap-y-1 text-[10px] font-mono text-slate-text/80">
+				{active ? (
+					<>
+						<span className="flex items-center gap-1.5">
+							<span className="h-2 w-2 bg-amber/70" aria-hidden />
+							30d grace, then &minus;0.05/week
+						</span>
+						<span className="flex items-center gap-1.5">
+							<span className="h-px w-3 border-t border-dashed border-slate-400" aria-hidden />
+							&lt;0.30 stops influencing reviews
+						</span>
+						<span className="flex items-center gap-1.5">
+							<span className="h-2 w-2 bg-red-400" aria-hidden />
+							&le;0.20 retired (~5 months)
+						</span>
+					</>
+				) : (
+					<span>Decay off — patterns hold full strength until deleted manually.</span>
+				)}
 			</figcaption>
 		</figure>
 	);
