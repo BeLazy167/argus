@@ -23,18 +23,20 @@ import {
   ResponsiveContainer,
 } from "recharts";
 
-type SourceFilter = "all" | "manual" | "auto_learn" | "convention";
+type SourceFilter = "all" | "manual" | "auto_learn" | "convention" | "scoring_confirmed";
 
 const SOURCE_LABELS: Record<string, string> = {
   manual: "Manual",
   auto_learn: "AI-Learned",
   convention: "Convention",
+  scoring_confirmed: "Confirmed",
 };
 
 const SOURCE_BADGE_STYLES: Record<string, string> = {
   manual: "border-slate-500/30 bg-slate-500/10 text-slate-400",
   auto_learn: "border-amber/30 bg-amber/10 text-amber",
   convention: "border-blue-500/30 bg-blue-500/10 text-blue-400",
+  scoring_confirmed: "border-emerald-500/30 bg-emerald-500/10 text-emerald-400",
 };
 
 const SOURCE_TAB_ACTIVE_STYLES: Record<SourceFilter, string> = {
@@ -42,9 +44,10 @@ const SOURCE_TAB_ACTIVE_STYLES: Record<SourceFilter, string> = {
   manual: "border-slate-500/40 bg-slate-500/10 text-slate-300",
   auto_learn: "border-amber/40 bg-amber/10 text-amber",
   convention: "border-blue-500/40 bg-blue-500/10 text-blue-400",
+  scoring_confirmed: "border-emerald-500/40 bg-emerald-500/10 text-emerald-400",
 };
 
-const SOURCE_TABS = ["all", "manual", "auto_learn", "convention"] as const;
+const SOURCE_TABS = ["all", "scoring_confirmed", "auto_learn", "convention", "manual"] as const;
 
 const getSource = (p: { source?: string }) => p.source || "manual";
 
@@ -87,7 +90,7 @@ export default function PatternsPage() {
 
   // Single-pass counts: source counts + per-repo pattern counts.
   const { sourceCounts, repoCounts } = useMemo(() => {
-    const source = { all: 0, manual: 0, auto_learn: 0, convention: 0 };
+    const source = { all: 0, manual: 0, auto_learn: 0, convention: 0, scoring_confirmed: 0 };
     const repo = new Map<number, number>();
     if (!patterns) return { sourceCounts: source, repoCounts: repo };
     source.all = patterns.length;
@@ -96,6 +99,7 @@ export default function PatternsPage() {
       if (src === "manual") source.manual++;
       else if (src === "auto_learn") source.auto_learn++;
       else if (src === "convention") source.convention++;
+      else if (src === "scoring_confirmed") source.scoring_confirmed++;
       if (p.repo_id) repo.set(p.repo_id, (repo.get(p.repo_id) ?? 0) + 1);
     }
     return { sourceCounts: source, repoCounts: repo };
@@ -104,14 +108,18 @@ export default function PatternsPage() {
   // Transform stats for stacked area chart
   const chartData = useMemo(() => {
     if (!stats || stats.length === 0) return [];
-    const weekMap = new Map<string, { week: string; manual: number; auto_learn: number; convention: number }>();
+    const weekMap = new Map<string, { week: string; manual: number; auto_learn: number; convention: number; scoring_confirmed: number }>();
     for (const s of stats) {
       const weekLabel = new Date(s.week).toLocaleDateString("en-US", { month: "short", day: "numeric" });
       if (!weekMap.has(weekLabel)) {
-        weekMap.set(weekLabel, { week: weekLabel, manual: 0, auto_learn: 0, convention: 0 });
+        weekMap.set(weekLabel, { week: weekLabel, manual: 0, auto_learn: 0, convention: 0, scoring_confirmed: 0 });
       }
       const entry = weekMap.get(weekLabel)!;
-      const src = s.source === "auto_learn" ? "auto_learn" : s.source === "convention" ? "convention" : "manual";
+      const src =
+        s.source === "auto_learn" ? "auto_learn"
+        : s.source === "convention" ? "convention"
+        : s.source === "scoring_confirmed" ? "scoring_confirmed"
+        : "manual";
       entry[src] += s.count;
     }
     return Array.from(weekMap.values());
@@ -151,6 +159,9 @@ export default function PatternsPage() {
             </h2>
             <div className="flex gap-3 ml-auto">
               <span className="flex items-center gap-1.5 text-[10px] font-mono text-slate-text">
+                <span className="h-2 w-2 rounded-full bg-[var(--chart-4)]" />Confirmed
+              </span>
+              <span className="flex items-center gap-1.5 text-[10px] font-mono text-slate-text">
                 <span className="h-2 w-2 rounded-full bg-[var(--chart-3)]" />Manual
               </span>
               <span className="flex items-center gap-1.5 text-[10px] font-mono text-slate-text">
@@ -176,9 +187,10 @@ export default function PatternsPage() {
                 }}
                 labelStyle={{ color: "var(--foreground)" }}
               />
-              <Area type="monotone" dataKey="manual" stackId="1" stroke="var(--chart-3)" fill="var(--chart-3)" fillOpacity={0.4} />
-              <Area type="monotone" dataKey="auto_learn" stackId="1" stroke="var(--chart-1)" fill="var(--chart-1)" fillOpacity={0.4} />
-              <Area type="monotone" dataKey="convention" stackId="1" stroke="var(--chart-2)" fill="var(--chart-2)" fillOpacity={0.4} />
+              <Area type="monotone" dataKey="scoring_confirmed" name="Confirmed" stackId="1" stroke="var(--chart-4)" fill="var(--chart-4)" fillOpacity={0.4} />
+              <Area type="monotone" dataKey="manual" name="Manual" stackId="1" stroke="var(--chart-3)" fill="var(--chart-3)" fillOpacity={0.4} />
+              <Area type="monotone" dataKey="auto_learn" name="AI-Learned" stackId="1" stroke="var(--chart-1)" fill="var(--chart-1)" fillOpacity={0.4} />
+              <Area type="monotone" dataKey="convention" name="Convention" stackId="1" stroke="var(--chart-2)" fill="var(--chart-2)" fillOpacity={0.4} />
             </AreaChart>
           </ResponsiveContainer>
         </div>
