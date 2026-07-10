@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -55,24 +56,58 @@ func (s *Store) UpsertPatternStats(ctx context.Context, stats PatternQualityStat
 	return err
 }
 
-func (s *Store) IncrementPatternMatch(ctx context.Context, supermemoryID string, confirmed bool) error {
+// IncrementPatternMatch records that a learned pattern was matched during a
+// review. It self-seeds the pattern_stats row from the patterns table on first
+// match (keyed by supermemory_id, seeded quality 0.5 = the Bayesian prior) and
+// bumps times_matched thereafter. No outcome is applied — confirmed/dismissed
+// land later via RecordPatternOutcome. A patterns row without a supermemory_id
+// (not yet mirrored) is skipped by the WHERE clause; the ON CONFLICT keeps
+// concurrent matches within one review atomic.
+func (s *Store) IncrementPatternMatch(ctx context.Context, patternID int64) error {
+	_, err := s.Pool.Exec(ctx, `
+		INSERT INTO pattern_stats (installation_id, repo_id, supermemory_id, content_hash, category, times_matched, quality_score, last_matched_at)
+		SELECT p.installation_id, p.repo_id, p.supermemory_id, md5(p.content), COALESCE(p.category, ''), 1, 0.5, NOW()
+		FROM patterns p
+		WHERE p.id = $1 AND p.supermemory_id IS NOT NULL
+		ON CONFLICT (supermemory_id) DO UPDATE SET
+			times_matched   = pattern_stats.times_matched + 1,
+			last_matched_at = NOW(),
+			updated_at      = NOW()
+	`, patternID)
+	return err
+}
+
+// RecordPatternOutcome applies a developer outcome (confirmed/dismissed) to the
+// pattern_stats row behind a matched comment and recomputes quality with the
+// same Bayesian formula as RecalculateQuality (prior=0.5, weight=5), atomically.
+// patternID is review_comments.matched_pattern_id (a patterns-table id); the
+// join maps it to pattern_stats via the shared supermemory_id. Returns the
+// quality AFTER the update and updated=false when no stats row exists yet (a
+// match that predates stats wiring, or a pattern never seeded) — non-fatal.
+func (s *Store) RecordPatternOutcome(ctx context.Context, patternID int64, confirmed bool) (quality float64, updated bool, err error) {
 	var confirmInc, dismissInc int
 	if confirmed {
 		confirmInc = 1
 	} else {
 		dismissInc = 1
 	}
-	_, err := s.Pool.Exec(ctx, `
-		UPDATE pattern_stats SET
-			times_matched   = times_matched + 1,
-			times_confirmed = times_confirmed + $2,
-			times_dismissed = times_dismissed + $3,
-			quality_score   = (times_confirmed + $2 + 2.5) / (times_confirmed + $2 + times_dismissed + $3 + 5.0),
-			last_matched_at = NOW(),
+	err = s.Pool.QueryRow(ctx, `
+		UPDATE pattern_stats ps SET
+			times_confirmed = ps.times_confirmed + $2,
+			times_dismissed = ps.times_dismissed + $3,
+			quality_score   = (ps.times_confirmed + $2 + 2.5) / (ps.times_confirmed + $2 + ps.times_dismissed + $3 + 5.0),
 			updated_at      = NOW()
-		WHERE supermemory_id = $1
-	`, supermemoryID, confirmInc, dismissInc)
-	return err
+		FROM patterns p
+		WHERE p.id = $1 AND ps.supermemory_id = p.supermemory_id
+		RETURNING ps.quality_score
+	`, patternID, confirmInc, dismissInc).Scan(&quality)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return quality, true, nil
 }
 
 func (s *Store) GetPatternHealthStats(ctx context.Context, installationID int64, since time.Time) (PatternHealthStats, error) {

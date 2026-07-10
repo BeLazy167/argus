@@ -17,6 +17,10 @@ var AllowedKeys = map[string]struct{}{
 	"threads_attempted": {}, "threads_resolved": {}, "risks_found": {}, "linked_count": {},
 	"issues_evaluated": {}, "reason": {}, "primary_review_id": {},
 
+	// memory outcome loop — enrichment counts, suppression, pattern feedback
+	"matched": {}, "enforced": {}, "novel": {}, "suppressed": {}, "downgraded": {},
+	"total": {}, "line": {}, "pattern_id": {}, "quality": {},
+
 	// performance
 	"duration_ms": {}, "tokens": {}, "prompt_tokens": {}, "completion_tokens": {},
 	"cost_usd": {}, "rss_mb": {}, "age_minutes": {},

@@ -253,6 +253,7 @@ type ReviewComment struct {
 	MatchedPatternScore *float32  `json:"matched_pattern_score"`
 	EnforcedRuleContent *string   `json:"enforced_rule_content"`
 	IsNewFinding        *bool     `json:"is_new_finding"`
+	SuppressedReason    *string   `json:"suppressed_reason"`
 }
 
 type Rule struct {

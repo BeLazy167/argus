@@ -1320,35 +1320,58 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 					}
 				}
 
+				// Self-match guard: a near-identical hit is this code's own prior
+				// review comment (re-review noise), not a learned pattern. Zero it
+				// so it neither persists, attributes, nor bumps stats.
 				score := match.Score
-				if score > 0.80 {
-					// Skip self-matches: if the pattern is nearly identical to this comment,
-					// it's from a previous review of the same code (re-review noise)
-					if match.Content != "" && wordOverlap(strings.ToLower(match.Content), strings.ToLower(c.Body)) > 0.7 {
-						score = 0
-					} else {
-						c.MatchedPatternScore = score
-						c.MatchedPatternKind = inferMatchKind(match.Metadata)
-						// New-shape docs flatten via Metadata.ToMap, which emits the
-						// PR number under "pr_number".
-						c.MatchedPatternPR = metaInt(match.Metadata, "pr_number")
-						c.MatchedPatternAuthor = match.Metadata["pr_author"]
-						c.MatchedPatternAgeDays = metaAgeDays(match.Metadata, "created_at")
-						o.logger.Debug("pattern match found",
-							"file", filePath, "line", c.Line,
-							"score", fmt.Sprintf("%.3f", score),
-							"kind", c.MatchedPatternKind,
-							"source_pr", c.MatchedPatternPR,
-							"pattern_prefix", util.Truncate(match.Content, 80, true))
-						if run.EventBus != nil {
-							run.EventBus.Publish(run.ReviewID, EventMemoryMatched, map[string]any{
-								"file":  filePath,
-								"line":  c.Line,
-								"kind":  c.MatchedPatternKind,
-								"pr":    c.MatchedPatternPR,
-								"score": score,
-							})
+				if score > 0 && match.Content != "" &&
+					wordOverlap(strings.ToLower(match.Content), strings.ToLower(c.Body)) > 0.7 {
+					score = 0
+				}
+
+				// Persist best-match pattern id + score for every hit at/above the
+				// FindingEnrich floor (0.50 — the server-side search cutoff, so any
+				// non-zero score already clears it). Public footer attribution stays
+				// gated at >0.80 below. The doc→pattern-id lookup can miss (synthesis
+				// docs never mirror to the patterns table); a miss skips the FK and
+				// pattern-stats without failing enrichment.
+				if score > 0 {
+					var patternID int64
+					var found bool
+					if pid, lerr := o.st.GetPatternIDBySupermemoryID(ctx, match.ID); lerr == nil {
+						patternID, found = pid, true
+					} else if !errors.Is(lerr, pgx.ErrNoRows) {
+						o.logger.Warn("pattern id lookup", "error", lerr, "supermemory_id", match.ID)
+					}
+					linkMatchedPattern(c, patternID, found, score)
+					if found {
+						if serr := o.st.IncrementPatternMatch(ctx, patternID); serr != nil {
+							o.logger.Warn("increment pattern match", "error", serr, "pattern_id", patternID)
 						}
+					}
+				}
+
+				if score > 0.80 {
+					c.MatchedPatternKind = inferMatchKind(match.Metadata)
+					// New-shape docs flatten via Metadata.ToMap, which emits the
+					// PR number under "pr_number".
+					c.MatchedPatternPR = metaInt(match.Metadata, "pr_number")
+					c.MatchedPatternAuthor = match.Metadata["pr_author"]
+					c.MatchedPatternAgeDays = metaAgeDays(match.Metadata, "created_at")
+					o.logger.Debug("pattern match found",
+						"file", filePath, "line", c.Line,
+						"score", fmt.Sprintf("%.3f", score),
+						"kind", c.MatchedPatternKind,
+						"source_pr", c.MatchedPatternPR,
+						"pattern_prefix", util.Truncate(match.Content, 80, true))
+					if run.EventBus != nil {
+						run.EventBus.Publish(run.ReviewID, EventMemoryMatched, map[string]any{
+							"file":  filePath,
+							"line":  c.Line,
+							"kind":  c.MatchedPatternKind,
+							"pr":    c.MatchedPatternPR,
+							"score": score,
+						})
 					}
 				}
 				if ruleContent != "" {
@@ -1368,15 +1391,42 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 						})
 					}
 				}
-				if score <= 0.80 && ruleContent == "" {
+				// Novel = no persisted pattern match (score cleared to 0) and no
+				// rule. score>0 now means a match at/above the FindingEnrich floor,
+				// so a 0.50–0.80 hit is a match, not a new finding.
+				if score == 0 && ruleContent == "" {
 					c.IsNewFinding = true
+				}
+
+				// Dismissal-match suppression: a finding a developer already
+				// 👎-dismissed in this repo is dropped (≥0.85) or downgraded one
+				// severity (≥0.60). The dismissed-feedback doc content is the
+				// finding body, so query by body. Non-fatal; memory-gated.
+				dismissed := run.Indexer.SearchDismissedMatch(ctx, owner, repo, c.Body, run.Thresholds)
+				if dismissed.Score >= DismissalDowngradeThreshold {
+					pr := metaInt(dismissed.Metadata, "pr_number")
+					switch applyDismissalMatch(c, dismissed.Score, pr) {
+					case dismissalDrop:
+						o.logger.InfoContext(ctx, "memory suppressed finding",
+							slog.String("event", "memory.suppressed"),
+							slog.String("review_id", run.ReviewID.String()),
+							slog.String("repo", run.PREvent.RepoFullName),
+							slog.Int("pr_number", run.PREvent.PRNumber),
+							slog.Int("line", c.Line),
+							slog.Float64("score", dismissed.Score))
+					case dismissalDowngrade:
+						o.logger.Debug("memory downgraded finding",
+							"file", filePath, "line", c.Line,
+							"score", fmt.Sprintf("%.3f", dismissed.Score),
+							"new_severity", c.Severity)
+					}
 				}
 			}(c, fr.Path)
 		}
 	}
 	wg.Wait()
 
-	var matched, enforced, novel int
+	var matched, enforced, novel, suppressed, downgraded int
 	for _, fr := range run.FileReviews {
 		for _, c := range fr.Comments {
 			if c.MatchedPatternScore > 0 {
@@ -1388,17 +1438,41 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 			if c.IsNewFinding {
 				novel++
 			}
+			if c.Suppressed {
+				suppressed++
+				// Record a snapshot-stable key so pattern-learning (which reads the
+				// pre-enrich AllFileReviews copy, without the Suppressed flag) can
+				// skip this dropped finding and never re-learn it as a pattern.
+				if run.SuppressedKeys == nil {
+					run.SuppressedKeys = make(map[string]struct{})
+				}
+				run.SuppressedKeys[suppressionKey(fr.Path, c.Line, c.Body)] = struct{}{}
+			}
+			if c.DismissedDowngrade {
+				downgraded++
+			}
 		}
 	}
-	o.logger.Info("enriched findings", "repo", run.PREvent.RepoFullName, "pr", run.PREvent.PRNumber,
-		"total", matched+enforced+novel, "pattern_matches", matched, "rules_enforced", enforced, "new_findings", novel)
+	o.logger.InfoContext(ctx, "enriched findings",
+		slog.String("event", "memory.enriched"),
+		slog.String("review_id", run.ReviewID.String()),
+		slog.String("repo", run.PREvent.RepoFullName),
+		slog.Int("pr_number", run.PREvent.PRNumber),
+		slog.Int("matched", matched),
+		slog.Int("enforced", enforced),
+		slog.Int("novel", novel),
+		slog.Int("suppressed", suppressed),
+		slog.Int("downgraded", downgraded),
+		slog.Int("total", matched+enforced+novel))
 
 	if run.EventBus != nil {
 		run.EventBus.Publish(run.ReviewID, EventFindingsEnriched, map[string]any{
-			"matched":  matched,
-			"enforced": enforced,
-			"novel":    novel,
-			"total":    matched + enforced + novel,
+			"matched":    matched,
+			"enforced":   enforced,
+			"novel":      novel,
+			"suppressed": suppressed,
+			"downgraded": downgraded,
+			"total":      matched + enforced + novel,
 		})
 	}
 	return nil
@@ -1500,6 +1574,9 @@ func (o *Orchestrator) synthesize(ctx context.Context, run *PipelineRun) error {
 	for _, fr := range run.FileReviews {
 		summary.WriteString(fmt.Sprintf("### `%s`\n", fr.Path))
 		for _, c := range fr.Comments {
+			if c.Suppressed {
+				continue // dropped by dismissal-match: never listed in the summary
+			}
 			desc := c.What
 			if desc == "" {
 				desc = c.Body
@@ -1745,10 +1822,14 @@ Rules:
 // generateConversationalBrief calls the LLM to produce a natural-language summary of the review.
 // Falls back to a deterministic brief on failure.
 func (o *Orchestrator) generateConversationalBrief(ctx context.Context, run *PipelineRun, score int) string {
-	// Build deterministic fallback
+	// Build deterministic fallback (suppressed findings are never shown, so they
+	// must not inflate the brief's counts)
 	var criticals, warnings int
 	for _, fr := range run.FileReviews {
 		for _, c := range fr.Comments {
+			if c.Suppressed {
+				continue
+			}
 			switch c.Severity {
 			case SeverityCritical:
 				criticals++
@@ -1891,6 +1972,9 @@ func buildSynthesisBriefPrompt(run *PipelineRun, score int) string {
 			allFiles = append(allFiles, fr.Path)
 		}
 		for _, c := range fr.Comments {
+			if c.Suppressed {
+				continue // dropped findings never reach the PR body brief/heatmap
+			}
 			switch c.Severity {
 			case SeverityCritical:
 				fs.critical++
@@ -1934,6 +2018,9 @@ func topCategories(run *PipelineRun, n int) []string {
 	counts := make(map[Category]int)
 	for _, fr := range run.FileReviews {
 		for _, c := range fr.Comments {
+			if c.Suppressed {
+				continue // dropped findings don't count toward the brief's key concerns
+			}
 			counts[c.Category]++
 		}
 	}
@@ -2195,6 +2282,9 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	for _, fr := range run.FileReviews {
 		fileValid := validLines[fr.Path]
 		for _, c := range fr.Comments {
+			if c.Suppressed {
+				continue // dismissal-match drop: never posted inline or folded into the summary
+			}
 			if fileValid == nil || !fileValid[c.Line] {
 				title := c.What
 				if title == "" {
@@ -2961,6 +3051,12 @@ func (o *Orchestrator) indexConfirmedPatterns(ctx context.Context, run *Pipeline
 	var indexed int
 	for _, fr := range reviews {
 		for _, c := range fr.Comments {
+			// Never re-learn a finding the developer already dismissed. reviews is
+			// the pre-enrich AllFileReviews snapshot, so check the key map rather
+			// than c.Suppressed (which the snapshot's copy lacks).
+			if run.isSuppressed(fr.Path, c.Line, c.Body) {
+				continue
+			}
 			var qualifies bool
 			if run.ScoringSkipped {
 				qualifies = c.Severity == SeverityCritical || c.Severity == SeverityWarning
@@ -3018,6 +3114,11 @@ func (o *Orchestrator) learnPositivePatterns(ctx context.Context, run *PipelineR
 	var indexed int
 	for _, fr := range reviews {
 		for _, c := range fr.Comments {
+			// Praise is never a dismissal target in practice, but gate anyway for
+			// consistency with the other learning paths (reads pre-enrich snapshot).
+			if run.isSuppressed(fr.Path, c.Line, c.Body) {
+				continue
+			}
 			if c.Severity != SeverityPraise {
 				continue
 			}
@@ -3091,6 +3192,11 @@ func (o *Orchestrator) autoLearnPatterns(ctx context.Context, run *PipelineRun, 
 	var highConf []string
 	for _, fr := range reviews {
 		for _, c := range fr.Comments {
+			// Skip dismissal-dropped findings (key map, since reviews is the
+			// pre-enrich snapshot without the Suppressed flag).
+			if run.isSuppressed(fr.Path, c.Line, c.Body) {
+				continue
+			}
 			var qualifies bool
 			if run.ScoringSkipped {
 				qualifies = c.Severity == SeverityCritical || c.Severity == SeverityWarning
@@ -3380,16 +3486,26 @@ func (o *Orchestrator) synthesizeFileMemories(ctx context.Context, run *Pipeline
 	}
 	var qualifying []fileComments
 	for _, fr := range reviews {
+		// Drop dismissal-suppressed findings before they can seed a file-synthesis
+		// memory (pre-enrich snapshot ⇒ key map, not the in-place Suppressed flag).
+		kept := make([]FileComment, 0, len(fr.Comments))
+		for _, c := range fr.Comments {
+			if run.isSuppressed(fr.Path, c.Line, c.Body) {
+				continue
+			}
+			kept = append(kept, c)
+		}
+		if len(kept) == 0 {
+			continue
+		}
 		if run.ScoringSkipped {
 			// Scoring unavailable — qualify any file with 1+ comments
-			if len(fr.Comments) >= 1 {
-				qualifying = append(qualifying, fileComments{path: fr.Path, comments: fr.Comments})
-			}
+			qualifying = append(qualifying, fileComments{path: fr.Path, comments: kept})
 			continue
 		}
 		count60 := 0
 		has80 := false
-		for _, c := range fr.Comments {
+		for _, c := range kept {
 			if c.Score >= 60 {
 				count60++
 			}
@@ -3398,7 +3514,7 @@ func (o *Orchestrator) synthesizeFileMemories(ctx context.Context, run *Pipeline
 			}
 		}
 		if count60 >= 1 || has80 {
-			qualifying = append(qualifying, fileComments{path: fr.Path, comments: fr.Comments})
+			qualifying = append(qualifying, fileComments{path: fr.Path, comments: kept})
 		}
 	}
 	if len(qualifying) == 0 {
@@ -4823,10 +4939,19 @@ func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghRe
 				s := float32(c.MatchedPatternScore)
 				matchedPatternScore = &s
 			}
+			var matchedPatternID *int64
+			if c.MatchedPatternID > 0 {
+				id := c.MatchedPatternID
+				matchedPatternID = &id
+			}
 			enforcedRule := strPtrOrNil(c.EnforcedRuleContent)
+			suppressedReason := strPtrOrNil(c.SuppressedReason)
 
 			formattedBody := formatCommentBody(c)
-			if err := o.st.CreateReviewComment(ctx, run.ReviewID, fr.Path, startLine, &line, &side, formattedBody, &sev, &cat, specialist, snippet, confidenceScore, ghCommentID, nil, matchedPatternScore, enforcedRule, c.IsNewFinding); err != nil {
+			// Suppressed (dropped) comments are still persisted — flagged via
+			// suppressed_reason and with github_comment_id nil (never posted) — so
+			// the dashboard keeps the full record while the PR stays clean.
+			if err := o.st.CreateReviewComment(ctx, run.ReviewID, fr.Path, startLine, &line, &side, formattedBody, &sev, &cat, specialist, snippet, confidenceScore, ghCommentID, matchedPatternID, matchedPatternScore, enforcedRule, c.IsNewFinding, suppressedReason); err != nil {
 				o.logger.Error("persisting review comment", "error", err, "file", fr.Path)
 			}
 
@@ -4842,6 +4967,9 @@ func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghRe
 		var batch []memory.ReviewMemory
 		for _, fr := range run.FileReviews {
 			for _, c := range fr.Comments {
+				if c.Suppressed {
+					continue // never re-index a finding we just suppressed as dismissed
+				}
 				if !shouldIndexReviewMemory(c.Severity, c.Score, run.ScoringSkipped) {
 					continue
 				}
@@ -5209,6 +5337,18 @@ func formatCommentBody(c FileComment) string {
 		body += "\n\n" + tag
 	}
 
+	// Dismissal-downgrade attribution: the finding matched a previously-dismissed
+	// similar finding (0.60–0.85) so its severity was lowered. Idiom-matched to
+	// renderMemoryTag (italic, em-dash lead-in).
+	if c.DismissedDowngrade {
+		note := "_— Previously dismissed a similar finding"
+		if c.DismissedMatchPR > 0 {
+			note += fmt.Sprintf(" (PR #%d)", c.DismissedMatchPR)
+		}
+		note += "._"
+		body += "\n\n" + note
+	}
+
 	if c.Severity == SeverityCritical || c.Severity == SeverityWarning {
 		body += "\n\n---\n<sub>React 👎 to dismiss · Argus learns from feedback</sub>"
 	}
@@ -5532,6 +5672,9 @@ func rebalanceSeverity(reviews []FileReview) {
 	var criticals []commentRef
 	for fi, fr := range reviews {
 		for ci, c := range fr.Comments {
+			if c.Suppressed {
+				continue // dropped findings aren't shown, so they can't skew the critical ratio or consume slots
+			}
 			total++
 			if c.Severity == SeverityCritical {
 				criticals = append(criticals, commentRef{fi, ci, c.Score})
@@ -5560,10 +5703,18 @@ func strPtrOrNil(s string) *string {
 	return &s
 }
 
+// countComments counts postable findings. Dismissal-suppressed (dropped)
+// comments are excluded so they never inflate the summary pill, the synthesis
+// count line, or any post-enrichment log — they are persisted but never shown.
 func countComments(run *PipelineRun) int {
 	total := 0
 	for _, fr := range run.FileReviews {
-		total += len(fr.Comments)
+		for _, c := range fr.Comments {
+			if c.Suppressed {
+				continue
+			}
+			total++
+		}
 	}
 	return total
 }
@@ -5572,6 +5723,9 @@ func calculateScore(run *PipelineRun) int {
 	var criticals, warnings, suggestions int
 	for _, fr := range run.FileReviews {
 		for _, c := range fr.Comments {
+			if c.Suppressed {
+				continue // dropped findings are not shown, so they don't move the score
+			}
 			switch c.Severity {
 			case SeverityCritical:
 				criticals++

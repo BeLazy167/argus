@@ -156,8 +156,15 @@ func (ra *ReplyAnalyzer) Analyze(ctx context.Context, event ghpkg.CommentEvent) 
 		outcome = "ignored"
 	}
 	if outcome != "" {
-		if err := ra.store.RecordCommentOutcome(ctx, original.ID, outcome); err != nil {
+		inserted, err := ra.store.RecordCommentOutcome(ctx, original.ID, outcome)
+		if err != nil {
 			ra.logger.Error("recording comment outcome", "error", err, "outcome", outcome)
+		}
+		// Feed hard outcomes (confirmed/dismissed; "ignored" is filtered inside)
+		// back into pattern quality, but only on first record to avoid
+		// double-counting replayed outcomes.
+		if inserted {
+			recordPatternOutcome(ctx, ra.store, ra.logger, original.MatchedPatternID, outcome)
 		}
 	}
 

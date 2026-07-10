@@ -89,6 +89,22 @@ func (s *Store) GetPattern(ctx context.Context, id int64) (*Pattern, error) {
 	return &p, nil
 }
 
+// GetPatternIDBySupermemoryID maps a Supermemory pattern doc id back to its
+// patterns-table row id. SearchPatternMatch returns Supermemory docs; callers
+// use this to persist review_comments.matched_pattern_id and to bump
+// pattern_stats. Returns (0, pgx.ErrNoRows) when no patterns row carries that
+// supermemory_id (e.g. a synthesis/convention doc that was never mirrored to
+// the patterns table) — a miss, not a failure.
+func (s *Store) GetPatternIDBySupermemoryID(ctx context.Context, supermemoryID string) (int64, error) {
+	var id int64
+	err := s.Pool.QueryRow(ctx,
+		`SELECT id FROM patterns WHERE supermemory_id = $1 LIMIT 1`, supermemoryID).Scan(&id)
+	if err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
 func (s *Store) GetPatternStats(ctx context.Context, installationIDs []int64) ([]PatternStat, error) {
 	rows, err := s.Pool.Query(ctx,
 		`SELECT DATE_TRUNC('week', created_at) as week, COALESCE(source, 'manual') as source, COUNT(*)::int as count

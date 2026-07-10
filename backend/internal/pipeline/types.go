@@ -109,7 +109,8 @@ type PipelineRun struct {
 	RawDiff             string
 	TriageResults       []TriageResult
 	FileReviews         []FileReview
-	AllFileReviews      []FileReview // pre-scoring snapshot: all comments with scores, before threshold drop
+	AllFileReviews      []FileReview        // pre-scoring snapshot: all comments with scores, before threshold drop
+	SuppressedKeys      map[string]struct{} // path\x00line\x00body of dismissal-dropped findings; gates pattern-learning that reads the pre-enrich AllFileReviews snapshot
 	Synthesis           *SynthesisResult
 	Tokens              RunTokenUsage
 	Persona             Persona
@@ -265,6 +266,10 @@ type FileComment struct {
 	BlastRadius           int    `json:"blast_radius,omitempty"` // number of downstream dependents affected
 	EnforcedRuleContent   string `json:"-"`
 	IsNewFinding          bool   `json:"-"`
+	Suppressed            bool   `json:"-"` // dismissal-match drop: persisted flagged, never posted/counted
+	SuppressedReason      string `json:"-"` // e.g. "dismissed_match:0.91"; → review_comments.suppressed_reason
+	DismissedDowngrade    bool   `json:"-"` // dismissal-match downgrade: severity lowered one level + note
+	DismissedMatchPR      int    `json:"-"` // source PR of the dismissed finding (0 = unknown), for the note
 	DedupCount            int    `json:"dedup_count,omitempty"` // how many duplicate findings were merged into this one
 	SastCorroborated      bool   `json:"sast_corroborated,omitempty"`
 	Confidence            string `json:"confidence,omitempty"`
