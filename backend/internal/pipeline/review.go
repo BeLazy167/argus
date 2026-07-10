@@ -143,15 +143,20 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 					return
 				}
 				p := reviewParams{file: u.file, action: u.action, specialist: u.specialist, deepReview: run.DeepReview}
+				// Memory briefing is kept separate from systemBase so the agentic
+				// path can append it too (buildAgenticSystemPrompt replaces the
+				// base prompt but must NOT drop the deterministic briefing).
 				if u.specialist != "" {
-					p.systemBase = specialistPrompt(u.specialist, run.Prompts) + specialistMemoryBlock(ctx, indexer, owner, repo, u.specialist, u.file.NewName, run.Thresholds)
+					p.systemBase = specialistPrompt(u.specialist, run.Prompts)
+					p.memoryBriefing = specialistMemoryBlock(ctx, indexer, owner, repo, u.specialist, u.file.NewName, run.Thresholds)
 					if run.Persona == PersonaCustom {
 						p.promptExtra = PersonaSpecialistHintCustom(run.CustomPersonaPrompt)
 					} else {
 						p.promptExtra = PersonaSpecialistHint(run.Persona)
 					}
 				} else {
-					p.systemBase = customOrDefault(run.Prompts, "review_system", baseSystemPrompt) + reviewMemoryBlock(ctx, indexer, owner, repo, u.file.NewName, run.Thresholds)
+					p.systemBase = customOrDefault(run.Prompts, "review_system", baseSystemPrompt)
+					p.memoryBriefing = reviewMemoryBlock(ctx, indexer, owner, repo, u.file.NewName, run.Thresholds)
 					if run.Persona == PersonaCustom {
 						p.promptExtra = PersonaPromptOverlayCustom(run.CustomPersonaPrompt)
 					} else {
@@ -271,12 +276,13 @@ func truncateDiff(f diff.FileDiff, maxLines int) diff.FileDiff {
 
 // reviewParams configures a single LLM review call (normal or specialist).
 type reviewParams struct {
-	file        diff.FileDiff
-	action      TriageAction
-	specialist  Specialist // empty for normal single-pass
-	systemBase  string     // base system prompt before memory/tools
-	promptExtra string     // appended to system prompt (persona or language guidance)
-	deepReview  bool       // controls agentic memory access for deep files
+	file           diff.FileDiff
+	action         TriageAction
+	specialist     Specialist // empty for normal single-pass
+	systemBase     string     // base system prompt before memory/tools
+	memoryBriefing string     // deterministic memory block; appended on BOTH agentic and non-agentic paths
+	promptExtra    string     // appended to system prompt (persona or language guidance)
+	deepReview     bool       // controls agentic memory access for deep files
 }
 
 func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p reviewParams, fileContents map[string]string, owner, repo string, cfg llm.ModelConfig, provider llm.Provider) (FileReview, StageTokens, error) {
@@ -352,18 +358,12 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p revie
 
 	var tools []llm.Tool
 	var toolHandler *ToolHandler
-	systemPrompt := p.systemBase
-	if memClient != nil && p.action == TriageDeep && p.deepReview {
+	agentic := memClient != nil && p.action == TriageDeep && p.deepReview
+	if agentic {
 		tools = memoryTools(repo)
 		toolHandler = NewToolHandler(memClient, rs.store, repo)
-		// Prepend agentic base; keep specialist overlay via systemBase
-		if p.specialist != "" {
-			systemPrompt = buildAgenticSystemPrompt(owner, repo) + specialistOverlay(p.specialist)
-		} else {
-			systemPrompt = buildAgenticSystemPrompt(owner, repo)
-		}
 	}
-	systemPrompt += p.promptExtra
+	systemPrompt := composeReviewSystemPrompt(p.systemBase, owner, repo, p.specialist, agentic, p.memoryBriefing, p.promptExtra)
 
 	label := string(p.specialist) // empty for normal pass
 	stageName := "review"
@@ -453,6 +453,26 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p revie
 	}
 
 	return review, tokens, fmt.Errorf("exceeded max tool iterations (%d) for %s %s", rs.maxToolIter, p.file.NewName, label)
+}
+
+// composeReviewSystemPrompt assembles the final system prompt for one review
+// call. When agentic is true the deep-review base + search_memory instructions
+// (buildAgenticSystemPrompt) replace systemBase, but memoryBriefing — the
+// deterministic memory block the non-agentic path also receives — is ALWAYS
+// appended. Previously the agentic branch discarded the briefing, so deep
+// reviews went out with no false-positive/approved context and a voluntary,
+// best-effort search_memory tool as the only memory. memoryBriefing is already
+// char-capped by specialistMemoryBlock/reviewMemoryBlock, so appending it here
+// does not blow the prompt budget.
+func composeReviewSystemPrompt(systemBase, owner, repo string, specialist Specialist, agentic bool, memoryBriefing, promptExtra string) string {
+	sys := systemBase
+	if agentic {
+		sys = buildAgenticSystemPrompt(owner, repo)
+		if specialist != "" {
+			sys += specialistOverlay(specialist)
+		}
+	}
+	return sys + memoryBriefing + promptExtra
 }
 
 func buildFileReviewPrompt(run *PipelineRun, file diff.FileDiff, fileContent string, relatedContext string, scenarioContext string, blastContext string, typeContext string) string {
@@ -898,35 +918,36 @@ Bad comment (do NOT file):
 
 func buildAgenticSystemPrompt(owner, repo string) string {
 	_ = owner // kept for call-site compat; new shape is repo-scoped
-	// Advertise exactly the tags the tool handler validates against so the two
-	// can never drift; tags[0]=repo container, tags[1]=shared container.
+	// Advertise exactly the containers the tool handler validates against
+	// (agenticMemoryTags: tags[0]=repo container, tags[1]=shared container) and
+	// exactly the metadata types search_memory accepts as a filter
+	// (agenticMemoryTypes). Both are sourced from the tools.go helpers so the
+	// prompt, the tool schema, and the access checks can never drift.
 	tags := agenticMemoryTags(repo)
+	var filters strings.Builder
+	for _, t := range agenticMemoryTypes() {
+		fmt.Fprintf(&filters, "- type=%s — %s\n", t.Value, t.Desc)
+	}
 	return baseSystemPrompt + fmt.Sprintf(`
 
 ## Memory Access
 
-You have access to Argus memory via tools. Use them to find relevant context before reviewing.
+You have access to Argus memory via the search_memory tool. Use it to find relevant context before reviewing.
 
 **Container shape (post-refactor, unified):**
 - %q — all memories for this repo (patterns, scenarios, feedback, syntheses, PR summaries, review comments)
 - %q — cross-repo patterns and org-wide rules under this installation
 
-**Metadata filters (apply to either container):**
-- type=pattern — learned conventions / best practices
-- type=scenario — known issues and past incidents
-- type=feedback — developer confirmations (polarity=positive) / dismissals (polarity=negative)
-- type=synthesis — file-scoped review history summary (filter also by file_path for exact match)
-- type=pr_summary — prior PR summaries in this repo
-- type=review — past review comments on this repo
-- type=rule — org-wide review rules (only in shared container)
-
+**Optional type filter (search_memory "type" argument, applies to either container):**
+%s
 **Guidelines:**
 - Search for relevant patterns/rules BEFORE writing review comments
 - Prefer the repo container over shared when both match (most-specific wins)
-- Use metadata filters to narrow the kind instead of guessing from content
+- Pass the type argument to narrow to one kind (e.g. type=feedback surfaces prior dismissals so you don't re-flag a known false positive) instead of guessing from content
 - If no relevant matches are found, proceed with the base review only. Do NOT hallucinate patterns from the code itself
 `,
 		tags[0],
 		tags[1],
+		filters.String(),
 	)
 }
