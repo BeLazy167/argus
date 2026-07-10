@@ -1330,14 +1330,8 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 						c.MatchedPatternScore = score
 						c.MatchedPatternKind = inferMatchKind(match.Metadata)
 						// New-shape docs flatten via Metadata.ToMap, which emits the
-						// PR number under "pr_number"; only pre-migration legacy docs
-						// used the bare "pr" key. Read the canonical key first and
-						// fall back to legacy during the dual-read window, else PR
-						// provenance reads 0 for every post-refactor pattern match.
+						// PR number under "pr_number".
 						c.MatchedPatternPR = metaInt(match.Metadata, "pr_number")
-						if c.MatchedPatternPR == 0 {
-							c.MatchedPatternPR = metaInt(match.Metadata, "pr")
-						}
 						c.MatchedPatternAuthor = match.Metadata["pr_author"]
 						c.MatchedPatternAgeDays = metaAgeDays(match.Metadata, "created_at")
 						o.logger.Debug("pattern match found",

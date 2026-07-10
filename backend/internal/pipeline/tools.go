@@ -60,31 +60,29 @@ func memoryTools(repo string) []llm.Tool {
 }
 
 // ToolHandler executes tool calls from the review LLM, scoped to a specific
-// owner/repo. repo scopes new-shape container access to this review's repo so a
+// repo. repo scopes new-shape container access to this review's repo so a
 // prompt-injected PR cannot steer search_memory into another repo's container.
 type ToolHandler struct {
 	memClient *memory.Client
 	store     *store.Store
-	owner     string
 	repo      string
 }
 
-func NewToolHandler(memClient *memory.Client, st *store.Store, owner, repo string) *ToolHandler {
-	return &ToolHandler{memClient: memClient, store: st, owner: owner, repo: repo}
+func NewToolHandler(memClient *memory.Client, st *store.Store, repo string) *ToolHandler {
+	return &ToolHandler{memClient: memClient, store: st, repo: repo}
 }
 
-// tagAllowed reports whether the review may search container tag. It accepts the
-// new-shape tags for THIS repo (agenticMemoryTags: RepoTagNew(repo) + SharedTag)
-// plus, during the dual-read window, legacy owner-prefixed tags that still hold
-// pre-migration data. The new-shape check is an exact match on this repo's
-// container, so a review for repo X can never reach repo Y's container.
+// tagAllowed reports whether the review may search container tag. It accepts
+// exactly the new-shape tags for THIS repo (agenticMemoryTags: RepoTagNew(repo)
+// + SharedTag) — an exact match on this repo's container, so a review for repo
+// X can never reach repo Y's container.
 func (th *ToolHandler) tagAllowed(tag string) bool {
 	for _, allowed := range agenticMemoryTags(th.repo) {
 		if tag == allowed {
 			return true
 		}
 	}
-	return memory.ValidateTagScope(tag, th.owner)
+	return false
 }
 
 // Handle dispatches a tool call and returns the result as a string.

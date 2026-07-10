@@ -8,22 +8,19 @@ import (
 )
 
 // TestToolHandlerTagAllowed pins the agentic search_memory access check. The
-// deep-review system prompt advertises the new-shape repo + shared containers,
-// so the handler MUST accept exactly those (plus legacy owner-prefixed tags
-// during the dual-read window) and MUST reject another repo's bare container —
-// otherwise a prompt-injected PR could pivot search_memory into repo Y's memory.
-// Regression guard for the ValidateTagScope lockout that denied every new-shape
-// search (findings idx 4/10/18).
+// deep-review system prompt advertises exactly the new-shape repo + shared
+// containers, so the handler MUST accept those and reject everything else —
+// including the now-deleted legacy owner-prefixed containers and any other
+// repo's container — otherwise a prompt-injected PR could pivot search_memory
+// into repo Y's memory.
 func TestToolHandlerTagAllowed(t *testing.T) {
 	t.Parallel()
-	const owner, repo = "acme", "myrepo"
-	th := NewToolHandler(nil, nil, owner, repo)
+	const repo = "myrepo"
+	th := NewToolHandler(nil, nil, repo)
 
 	allowed := []string{
 		memory.RepoTagNew(repo), // this repo's unified container
 		memory.SharedTag,        // cross-repo patterns + org rules
-		"acme--patterns",        // legacy owner-scoped (dual-read window)
-		"acme--myrepo--reviews", // legacy repo-scoped (dual-read window)
 	}
 	for _, tag := range allowed {
 		if !th.tagAllowed(tag) {
@@ -33,6 +30,8 @@ func TestToolHandlerTagAllowed(t *testing.T) {
 
 	denied := []string{
 		memory.RepoTagNew("otherrepo"), // another repo's new-shape container
+		"acme--patterns",               // legacy owner-scoped (deleted; no longer reachable)
+		"acme--myrepo--reviews",        // legacy repo-scoped (deleted; no longer reachable)
 		"evilorg--patterns",            // another owner's legacy container
 		"",                             // empty tag
 	}
@@ -50,7 +49,7 @@ func TestToolHandlerTagAllowed(t *testing.T) {
 func TestAgenticMemoryTagsMatchPrompt(t *testing.T) {
 	t.Parallel()
 	const owner, repo = "acme", "myrepo"
-	th := NewToolHandler(nil, nil, owner, repo)
+	th := NewToolHandler(nil, nil, repo)
 
 	tags := agenticMemoryTags(repo)
 	if len(tags) == 0 {
