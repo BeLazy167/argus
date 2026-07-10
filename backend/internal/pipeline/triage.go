@@ -378,9 +378,13 @@ func triageMemoryHints(ctx context.Context, memClient *memory.Client, owner, rep
 		fileNames = append(fileNames, f.NewName)
 	}
 	query := filePathsQuery("file synthesis review history ", fileNames)
-	repoTag := memory.RepoTag(owner, repo, "patterns")
-	ownerTag := memory.OwnerTag(owner, "patterns")
-	rulesTag := memory.OwnerTag(owner, "rules")
+	// Post-refactor unified shape: repo container holds all repo memories
+	// (filter by type at read time); shared container holds org-wide
+	// patterns AND rules, so each shared read must pin type explicitly —
+	// an untyped search mixes patterns and rules and degrades hint quality.
+	repoTag := memory.RepoTagNew(repo)
+	ownerTag := memory.SharedTag
+	rulesTag := memory.SharedTag
 
 	// Parallel searches for repo patterns, owner patterns, and rules
 	var repoResults, ownerResults, ruleResults []string
@@ -388,15 +392,19 @@ func triageMemoryHints(ctx context.Context, memClient *memory.Client, owner, rep
 	wg.Add(3)
 	go func() {
 		defer wg.Done()
-		repoResults = searchMemoryRich(searchCtx, memClient, query, repoTag, 5)
+		// type=synthesis: "File History (from past reviews)" is the file-scoped
+		// review-history summary. The unified repo container also holds patterns,
+		// scenarios, feedback, traces and review comments; an untyped search
+		// (contradicting the comment above) mixes them into the history hints.
+		repoResults = searchMemoryRichTyped(searchCtx, memClient, query, repoTag, 5, string(memory.TypeSynthesis))
 	}()
 	go func() {
 		defer wg.Done()
-		ownerResults = searchMemoryRich(searchCtx, memClient, query, ownerTag, 3)
+		ownerResults = searchMemoryRichTyped(searchCtx, memClient, query, ownerTag, 3, string(memory.TypePattern))
 	}()
 	go func() {
 		defer wg.Done()
-		ruleResults = searchMemoryRich(searchCtx, memClient, "review rules conventions", rulesTag, 3)
+		ruleResults = searchMemoryRichTyped(searchCtx, memClient, "review rules conventions", rulesTag, 3, string(memory.TypeRule))
 	}()
 	wg.Wait()
 

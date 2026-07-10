@@ -17,8 +17,12 @@ SELECT id, review_id, file_path, start_line, end_line, side, body, severity, cat
 FROM review_comments WHERE github_comment_id = $1;
 
 -- name: RecordCommentOutcome :exec
+-- Idempotent: webhook retries delivering the same reaction event produce no-op
+-- second inserts instead of duplicate rows. Paired with the UNIQUE constraint
+-- added in migration 037.
 INSERT INTO comment_outcomes (review_comment_id, outcome)
-VALUES ($1, $2);
+VALUES ($1, $2)
+ON CONFLICT (review_comment_id, outcome) DO NOTHING;
 
 -- name: GetCommentOutcomes :many
 SELECT id, review_comment_id, outcome, created_at

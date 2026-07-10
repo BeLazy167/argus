@@ -18,6 +18,7 @@ import {
   Puzzle,
   CreditCard,
   Settings,
+  Brain,
   Menu,
   X,
   PanelLeftClose,
@@ -92,6 +93,7 @@ const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
       { href: "/providers", label: "Integrations", icon: Puzzle },
       { href: "/billing", label: "Billing", icon: CreditCard },
       { href: "/settings", label: "Settings", icon: Settings },
+      { href: "/settings/memory", label: "Memory", icon: Brain },
     ],
   },
 ];

@@ -488,7 +488,7 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 	}
 
 	// Resolve per-org memory indexer
-	var indexer *memory.Indexer
+	var indexer memory.Indexer
 	if o.memRegistry != nil {
 		indexer = o.memRegistry.GetIndexer(ctx, inst.ID)
 	}
@@ -531,6 +531,7 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		IsIncremental:     isIncremental,
 		PreviousReviewID:  previousReviewID,
 		Indexer:           indexer,
+		Thresholds:        parseThresholds(mergedSettings),
 		EventBus:          o.eventBus,
 		CreatedAt:         time.Now(),
 		UpdatedAt:         time.Now(),
@@ -1306,11 +1307,14 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 
 				// Build a richer query: category + file + body gives Supermemory more semantic signal
 				query := fmt.Sprintf("[%s|%s] %s:%d %s", c.Severity, c.Category, filePath, c.Line, c.Body)
-				match := run.Indexer.SearchPatternMatch(ctx, owner, repo, query)
+				match := run.Indexer.SearchPatternMatch(ctx, owner, repo, query, run.Thresholds)
 
 				var ruleContent string
 				if memClient != nil {
-					results := searchMemoryContent(ctx, memClient, query, memory.OwnerTag(owner, "rules"), 1)
+					// Rules now live in the shared container under type=rule metadata
+					// (post-refactor unified shape). Filter pulls only rule docs.
+					results := searchMemoryContentFiltered(ctx, memClient, query, memory.SharedTag,
+						&memory.SearchFilters{AND: []memory.FilterCondition{{Key: "type", Value: string(memory.TypeRule)}}}, 1)
 					if len(results) > 0 {
 						ruleContent = results[0]
 					}
@@ -1325,7 +1329,15 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 					} else {
 						c.MatchedPatternScore = score
 						c.MatchedPatternKind = inferMatchKind(match.Metadata)
-						c.MatchedPatternPR = metaInt(match.Metadata, "pr")
+						// New-shape docs flatten via Metadata.ToMap, which emits the
+						// PR number under "pr_number"; only pre-migration legacy docs
+						// used the bare "pr" key. Read the canonical key first and
+						// fall back to legacy during the dual-read window, else PR
+						// provenance reads 0 for every post-refactor pattern match.
+						c.MatchedPatternPR = metaInt(match.Metadata, "pr_number")
+						if c.MatchedPatternPR == 0 {
+							c.MatchedPatternPR = metaInt(match.Metadata, "pr")
+						}
 						c.MatchedPatternAuthor = match.Metadata["pr_author"]
 						c.MatchedPatternAgeDays = metaAgeDays(match.Metadata, "created_at")
 						o.logger.Debug("pattern match found",
@@ -2621,9 +2633,17 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 			}
 			if !result.Passes && result.Confidence >= 0.5 {
 				matches := run.Indexer.SearchScenariosWithIDs(ctx, owner, repo, result.Scenario, "", 1)
-				if len(matches) > 0 && matches[0].Similarity >= 0.75 {
-					if err := o.st.Q.IncrementScenarioTriggerCount(ctx, matches[0].ID); err != nil {
-						o.logger.Warn("incrementing scenario trigger count", "error", err)
+				if len(matches) > 0 {
+					passed := matches[0].Similarity >= run.Thresholds.ScenarioTrigger
+					o.logger.Info("threshold_check",
+						"name", "scenario_trigger",
+						"value", matches[0].Similarity,
+						"threshold", run.Thresholds.ScenarioTrigger,
+						"passed", passed)
+					if passed {
+						if err := o.st.Q.IncrementScenarioTriggerCount(ctx, matches[0].ID); err != nil {
+							o.logger.Warn("incrementing scenario trigger count", "error", err)
+						}
 					}
 				}
 			}
@@ -2639,12 +2659,21 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	traceSeeds := CollectReviewTraces(run)
 	var traceFails int
 	for _, seed := range traceSeeds {
-		if err := o.st.CreateTrace(ctx, run.DBRepoID, seed.FilePath, seed.SymbolName, seed.TraceType, seed.Content, seed.Severity, seed.ReviewID, seed.PRNumber, seed.Metadata); err != nil {
+		traceID, err := o.st.CreateTraceReturningID(ctx, run.DBRepoID, seed.FilePath, seed.SymbolName, seed.TraceType, seed.Content, seed.Severity, seed.ReviewID, seed.PRNumber, seed.Metadata)
+		if err != nil {
 			traceFails++
 		}
 		if run.Indexer != nil {
 			if err := run.Indexer.IndexDecisionTrace(ctx, owner, repo, seed.FilePath, seed.TraceType, seed.Content, seed.Severity); err != nil {
 				o.logger.Warn("indexing decision trace", "error", err, "file", seed.FilePath)
+			} else if traceID > 0 {
+				// Record the deterministic customID (matches memory.TraceCustomID
+				// and reconcile-memory) into 045's mirror column so a NULL
+				// supermemory_id means the write failed, not that it was skipped.
+				customID := memory.TraceCustomID(repo, seed.FilePath, seed.TraceType, seed.Content)
+				if err := o.st.SetTraceSupermemoryID(ctx, traceID, customID); err != nil {
+					o.logger.Warn("write-back trace SM id", "error", err, "trace_id", traceID)
+				}
 			}
 		}
 	}
@@ -2655,7 +2684,7 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	// Auto-learn scenarios from critical/warning findings (gated by feature flag).
 	if run.ScenarioMemory {
 		scenarioSeeds := ExtractScenariosFromReview(run)
-		StoreScenarioSeeds(ctx, o.st, run.Indexer, owner, repo, run.DBInstallationID, &run.DBRepoID, scenarioSeeds)
+		StoreScenarioSeeds(ctx, o.st, run.Indexer, owner, repo, run.DBInstallationID, &run.DBRepoID, run.Thresholds.ScenarioDedupe, scenarioSeeds)
 	}
 
 	if run.EventBus != nil {
@@ -3012,12 +3041,15 @@ func (o *Orchestrator) learnPositivePatterns(ctx context.Context, run *PipelineR
 			if c.Severity != SeverityPraise {
 				continue
 			}
-			content := memory.FormatPositivePattern(string(c.Category), fr.Path, c.Line, c.Body)
-			customID := memory.PatternCustomID(owner, repo, "positive", content)
-			if err := run.Indexer.IndexPositivePattern(ctx, owner, repo, content, customID, map[string]string{
-				"source":   "praise_comment",
-				"category": string(c.Category),
-				"pr":       fmt.Sprintf("%d", run.PREvent.PRNumber),
+			// Route praise through IndexFeedbackSignal so the doc lands with
+			// type=feedback, polarity=positive, action=confirmed metadata —
+			// pure-prose content (c.Body), structured fields in metadata.
+			if err := run.Indexer.IndexFeedbackSignal(ctx, owner, repo, memory.FeedbackMemory{
+				FilePath:     fr.Path,
+				Category:     string(c.Category),
+				OriginalBody: c.Body,
+				Action:       "confirmed",
+				PRNumber:     run.PREvent.PRNumber,
 			}); err != nil {
 				o.logger.Warn("positive pattern indexing failed", "error", err)
 			} else {

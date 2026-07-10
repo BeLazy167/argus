@@ -214,6 +214,7 @@ func (q *Queries) GetReviewComments(ctx context.Context, reviewID uuid.UUID) ([]
 const recordCommentOutcome = `-- name: RecordCommentOutcome :exec
 INSERT INTO comment_outcomes (review_comment_id, outcome)
 VALUES ($1, $2)
+ON CONFLICT (review_comment_id, outcome) DO NOTHING
 `
 
 type RecordCommentOutcomeParams struct {
@@ -221,6 +222,9 @@ type RecordCommentOutcomeParams struct {
 	Outcome         string    `json:"outcome"`
 }
 
+// Idempotent: webhook retries delivering the same reaction event produce no-op
+// second inserts instead of duplicate rows. Paired with the UNIQUE constraint
+// added in migration 037.
 func (q *Queries) RecordCommentOutcome(ctx context.Context, arg RecordCommentOutcomeParams) error {
 	_, err := q.db.Exec(ctx, recordCommentOutcome, arg.ReviewCommentID, arg.Outcome)
 	return err

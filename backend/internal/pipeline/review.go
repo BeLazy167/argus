@@ -117,9 +117,9 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 		return fmt.Errorf("resolve review provider: %w", err)
 	}
 
-	var memClient *memory.Client
+	var indexer memory.Indexer
 	if rs.memRegistry != nil {
-		memClient = rs.memRegistry.GetClient(ctx, run.DBInstallationID)
+		indexer = rs.memRegistry.GetIndexer(ctx, run.DBInstallationID)
 	}
 
 	unitCh := make(chan workUnit, len(units))
@@ -144,14 +144,14 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 				}
 				p := reviewParams{file: u.file, action: u.action, specialist: u.specialist, deepReview: run.DeepReview}
 				if u.specialist != "" {
-					p.systemBase = specialistPrompt(u.specialist, run.Prompts) + specialistMemoryBlock(ctx, memClient, owner, repo, u.specialist, u.file.NewName)
+					p.systemBase = specialistPrompt(u.specialist, run.Prompts) + specialistMemoryBlock(ctx, indexer, owner, repo, u.specialist, u.file.NewName, run.Thresholds)
 					if run.Persona == PersonaCustom {
 						p.promptExtra = PersonaSpecialistHintCustom(run.CustomPersonaPrompt)
 					} else {
 						p.promptExtra = PersonaSpecialistHint(run.Persona)
 					}
 				} else {
-					p.systemBase = customOrDefault(run.Prompts, "review_system", baseSystemPrompt) + reviewMemoryBlock(ctx, memClient, owner, repo, u.file.NewName)
+					p.systemBase = customOrDefault(run.Prompts, "review_system", baseSystemPrompt) + reviewMemoryBlock(ctx, indexer, owner, repo, u.file.NewName, run.Thresholds)
 					if run.Persona == PersonaCustom {
 						p.promptExtra = PersonaPromptOverlayCustom(run.CustomPersonaPrompt)
 					} else {
@@ -354,8 +354,8 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p revie
 	var toolHandler *ToolHandler
 	systemPrompt := p.systemBase
 	if memClient != nil && p.action == TriageDeep && p.deepReview {
-		tools = memoryTools()
-		toolHandler = NewToolHandler(memClient, rs.store, owner)
+		tools = memoryTools(repo)
+		toolHandler = NewToolHandler(memClient, rs.store, owner, repo)
 		// Prepend agentic base; keep specialist overlay via systemBase
 		if p.specialist != "" {
 			systemPrompt = buildAgenticSystemPrompt(owner, repo) + specialistOverlay(p.specialist)
@@ -897,29 +897,36 @@ Bad comment (do NOT file):
 → Too vague. No concrete failure scenario tied to THIS code. Skip it.`
 
 func buildAgenticSystemPrompt(owner, repo string) string {
+	_ = owner // kept for call-site compat; new shape is repo-scoped
+	// Advertise exactly the tags the tool handler validates against so the two
+	// can never drift; tags[0]=repo container, tags[1]=shared container.
+	tags := agenticMemoryTags(repo)
 	return baseSystemPrompt + fmt.Sprintf(`
 
 ## Memory Access
 
 You have access to Argus memory via tools. Use them to find relevant context before reviewing.
 
-**Container tag convention:**
-- %s — owner-wide learned patterns
-- %s — owner-wide review rules
-- %s — repo-specific patterns
-- %s — repo-specific rules
-- %s — past review comments for this repo
+**Container shape (post-refactor, unified):**
+- %q — all memories for this repo (patterns, scenarios, feedback, syntheses, PR summaries, review comments)
+- %q — cross-repo patterns and org-wide rules under this installation
+
+**Metadata filters (apply to either container):**
+- type=pattern — learned conventions / best practices
+- type=scenario — known issues and past incidents
+- type=feedback — developer confirmations (polarity=positive) / dismissals (polarity=negative)
+- type=synthesis — file-scoped review history summary (filter also by file_path for exact match)
+- type=pr_summary — prior PR summaries in this repo
+- type=review — past review comments on this repo
+- type=rule — org-wide review rules (only in shared container)
 
 **Guidelines:**
 - Search for relevant patterns/rules BEFORE writing review comments
-- For changes that might affect other repos, use list_repos to discover related repos, then search their memory
-- Prefer repo-specific memory over owner-wide when both exist (most specific wins)
-- If no relevant patterns or rules are found, proceed with the base review only. Do NOT infer or hallucinate patterns from the code itself
+- Prefer the repo container over shared when both match (most-specific wins)
+- Use metadata filters to narrow the kind instead of guessing from content
+- If no relevant matches are found, proceed with the base review only. Do NOT hallucinate patterns from the code itself
 `,
-		memory.OwnerTag(owner, "patterns"),
-		memory.OwnerTag(owner, "rules"),
-		memory.RepoTag(owner, repo, "patterns"),
-		memory.RepoTag(owner, repo, "rules"),
-		memory.RepoTag(owner, repo, "reviews"),
+		tags[0],
+		tags[1],
 	)
 }

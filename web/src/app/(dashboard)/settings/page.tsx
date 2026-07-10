@@ -885,7 +885,9 @@ export default function SettingsPage() {
   const [settingsScope, setSettingsScope] = useState<"org" | "repo" | "branches">("repo");
 
   // Org defaults
-  const { data: orgDefaults, isLoading: orgDefaultsLoading } = useOrgDefaults();
+  const { data: orgDefaults, isLoading: orgDefaultsLoading } = useOrgDefaults({
+    variables: { installationId: active?.id },
+  });
   const saveOrgDefaults = useSaveOrgDefaults();
   const { data: featureFlags } = useFeatureFlags();
   const saveFeatureFlags = useSaveFeatureFlags();

@@ -149,3 +149,40 @@ func TestSynthesisCustomID_NoForbiddenChars(t *testing.T) {
 		})
 	}
 }
+
+// TestSynthesisCustomID_HashDisambiguates pins idx 24: distinct file paths that
+// sanitize to the same string (`/` and `.` both -> `-`) must NOT collapse to the
+// same customID, because SynthesisCustomID's short path previously had no hash.
+func TestSynthesisCustomID_HashDisambiguates(t *testing.T) {
+	a := SynthesisCustomID("org", "repo", "pkg/api-v1/client.go")
+	b := SynthesisCustomID("org", "repo", "pkg/api/v1/client.go")
+	if a == b {
+		t.Errorf("distinct paths collide: both -> %q", a)
+	}
+	if len(a) > 100 || len(b) > 100 {
+		t.Errorf("customID exceeds 100 chars: %d / %d", len(a), len(b))
+	}
+	// Deterministic.
+	if a != SynthesisCustomID("org", "repo", "pkg/api-v1/client.go") {
+		t.Error("SynthesisCustomID not deterministic")
+	}
+}
+
+// TestSynthesisCustomID_LongRepoKeepsHash pins idx 23: when the ID exceeds 100
+// chars the readable prefix is truncated but the disambiguating hash (living in
+// the protected suffix) must survive, so two files under a long-named repo don't
+// truncate to the same customID.
+func TestSynthesisCustomID_LongRepoKeepsHash(t *testing.T) {
+	longRepo := strings.Repeat("r", 88) // GitHub allows up to 100-char repo names
+	a := SynthesisCustomID("o", longRepo, "src/aaaaaaaaaaaaaaaaaaaa/one.go")
+	b := SynthesisCustomID("o", longRepo, "src/bbbbbbbbbbbbbbbbbbbb/two.go")
+	if len(a) > 100 || len(b) > 100 {
+		t.Fatalf("customID exceeds 100 chars: %d / %d", len(a), len(b))
+	}
+	if a == b {
+		t.Errorf("long-repo distinct files collide after truncation: both -> %q", a)
+	}
+	if !strings.HasSuffix(a, "--synthesis") || !strings.HasSuffix(b, "--synthesis") {
+		t.Errorf("synthesis suffix lost: %q / %q", a, b)
+	}
+}

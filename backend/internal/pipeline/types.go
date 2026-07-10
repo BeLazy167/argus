@@ -159,10 +159,11 @@ type PipelineRun struct {
 	// sticky section alongside the existing "## Issue Coverage".
 	JointAcceptance []JointAcceptanceResult `json:"-"`
 	// FeatureFlags holds per-installation toggles loaded once per run.
-	FeatureFlags         FeatureFlags    `json:"-"`
-	StartedCommentNodeID string          `json:"-"` // node ID of the "review started" GH comment, for minimizing later
-	Indexer              *memory.Indexer `json:"-"` // per-org indexer resolved from Registry
-	EventBus             *EventBus       `json:"-"` // not persisted
+	FeatureFlags         FeatureFlags      `json:"-"`
+	StartedCommentNodeID string            `json:"-"` // node ID of the "review started" GH comment, for minimizing later
+	Indexer              memory.Indexer    `json:"-"` // per-org indexer resolved from Registry
+	Thresholds           memory.Thresholds `json:"-"` // per-run similarity gates (merged org→repo settings, Bundle 3)
+	EventBus             *EventBus         `json:"-"` // not persisted
 	Error                string
 	CreatedAt            time.Time
 	UpdatedAt            time.Time

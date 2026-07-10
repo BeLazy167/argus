@@ -64,7 +64,7 @@ func (ra *ReplyAnalyzer) Analyze(ctx context.Context, event ghpkg.CommentEvent) 
 		return fmt.Errorf("resolving installation: %w", err)
 	}
 
-	var indexer *memory.Indexer
+	var indexer memory.Indexer
 	if ra.memRegistry != nil {
 		indexer = ra.memRegistry.GetIndexer(ctx, inst.ID)
 	}

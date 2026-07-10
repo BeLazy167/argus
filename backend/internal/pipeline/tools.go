@@ -11,8 +11,21 @@ import (
 	"github.com/BeLazy167/argus/backend/internal/store"
 )
 
-// memoryTools returns the tool definitions for agentic RAG.
-func memoryTools() []llm.Tool {
+// agenticMemoryTags returns the container tags a deep review of repo may
+// search, most-specific first: the repo's unified container and the shared
+// cross-repo container. buildAgenticSystemPrompt advertises exactly this list,
+// memoryTools embeds it in the tool schema, and ToolHandler.searchMemory
+// validates against it — one source of truth so the prompt and the access
+// check cannot drift. Routed through memory.RepoTagNew so repo-name
+// sanitization/collision handling lives in the memory package only.
+func agenticMemoryTags(repo string) []string {
+	return []string{memory.RepoTagNew(repo), memory.SharedTag}
+}
+
+// memoryTools returns the tool definitions for agentic RAG. repo scopes the
+// container_tag description to the concrete tags this review may search.
+func memoryTools(repo string) []llm.Tool {
+	tags := agenticMemoryTags(repo)
 	return []llm.Tool{
 		{
 			Type: "function",
@@ -23,7 +36,7 @@ func memoryTools() []llm.Tool {
 					"type": "object",
 					"properties": map[string]any{
 						"query":         map[string]any{"type": "string", "description": "Semantic search query"},
-						"container_tag": map[string]any{"type": "string", "description": "Container tag to scope the search, e.g. '{owner}-patterns', '{owner}-{repo}-reviews'"},
+						"container_tag": map[string]any{"type": "string", "description": fmt.Sprintf("Container tag to scope the search: %q (this repo) or %q (cross-repo patterns and org rules)", tags[0], tags[1])},
 					},
 					"required": []string{"query", "container_tag"},
 				},
@@ -46,15 +59,32 @@ func memoryTools() []llm.Tool {
 	}
 }
 
-// ToolHandler executes tool calls from the review LLM, scoped to a specific owner.
+// ToolHandler executes tool calls from the review LLM, scoped to a specific
+// owner/repo. repo scopes new-shape container access to this review's repo so a
+// prompt-injected PR cannot steer search_memory into another repo's container.
 type ToolHandler struct {
 	memClient *memory.Client
 	store     *store.Store
 	owner     string
+	repo      string
 }
 
-func NewToolHandler(memClient *memory.Client, st *store.Store, owner string) *ToolHandler {
-	return &ToolHandler{memClient: memClient, store: st, owner: owner}
+func NewToolHandler(memClient *memory.Client, st *store.Store, owner, repo string) *ToolHandler {
+	return &ToolHandler{memClient: memClient, store: st, owner: owner, repo: repo}
+}
+
+// tagAllowed reports whether the review may search container tag. It accepts the
+// new-shape tags for THIS repo (agenticMemoryTags: RepoTagNew(repo) + SharedTag)
+// plus, during the dual-read window, legacy owner-prefixed tags that still hold
+// pre-migration data. The new-shape check is an exact match on this repo's
+// container, so a review for repo X can never reach repo Y's container.
+func (th *ToolHandler) tagAllowed(tag string) bool {
+	for _, allowed := range agenticMemoryTags(th.repo) {
+		if tag == allowed {
+			return true
+		}
+	}
+	return memory.ValidateTagScope(tag, th.owner)
 }
 
 // Handle dispatches a tool call and returns the result as a string.
@@ -78,8 +108,8 @@ func (th *ToolHandler) searchMemory(ctx context.Context, argsJSON string) (strin
 		return "", fmt.Errorf("parsing args: %w", err)
 	}
 
-	if !memory.ValidateTagScope(args.ContainerTag, th.owner) {
-		return fmt.Sprintf("Access denied: tag must be scoped to owner %q", th.owner), nil
+	if !th.tagAllowed(args.ContainerTag) {
+		return fmt.Sprintf("Access denied: tag must be one of the containers for this review (%v)", agenticMemoryTags(th.repo)), nil
 	}
 
 	resp, err := th.memClient.Search(ctx, memory.SearchRequest{

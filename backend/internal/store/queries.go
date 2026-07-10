@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/BeLazy167/argus/backend/internal/store/db"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -1001,11 +1002,52 @@ func (s *Store) GetLearnLayerCounts(ctx context.Context, installationIDs []int64
 // --- Comment Outcomes ---
 
 func (s *Store) RecordCommentOutcome(ctx context.Context, reviewCommentID uuid.UUID, outcome string) error {
+	// ON CONFLICT matches migration 044's comment_outcomes_unique_per_comment
+	// UNIQUE (review_comment_id, outcome). GitHub redelivers reaction.created
+	// and a removed/re-added reaction replays the same (comment, outcome), so
+	// the write must be idempotent instead of erroring on unique_violation.
 	_, err := s.Pool.Exec(ctx, `
 		INSERT INTO comment_outcomes (review_comment_id, outcome)
 		VALUES ($1, $2)
+		ON CONFLICT (review_comment_id, outcome) DO NOTHING
 	`, reviewCommentID, outcome)
 	return err
+}
+
+// SetScenarioSupermemoryID records the Supermemory customID for a scenario in
+// migration 045's mirror column. The pipeline calls this after a successful
+// IndexScenario so a NULL supermemory_id genuinely means "write failed / pending
+// reconciliation" instead of "never attempted" — otherwise the reconciler treats
+// every freshly-created scenario as drift forever.
+func (s *Store) SetScenarioSupermemoryID(ctx context.Context, id int64, supermemoryID string) error {
+	return s.Q.UpdateScenarioSupermemoryID(ctx, db.UpdateScenarioSupermemoryIDParams{
+		SupermemoryID: &supermemoryID,
+		ID:            id,
+	})
+}
+
+// SetTraceSupermemoryID mirrors SetScenarioSupermemoryID for decision_traces.
+func (s *Store) SetTraceSupermemoryID(ctx context.Context, id int64, supermemoryID string) error {
+	return s.Q.UpdateTraceSupermemoryID(ctx, db.UpdateTraceSupermemoryIDParams{
+		SupermemoryID: &supermemoryID,
+		ID:            id,
+	})
+}
+
+// CreateTraceReturningID inserts a decision trace and returns its new id so the
+// pipeline can write back the Supermemory customID via SetTraceSupermemoryID.
+// Mirrors CreateTrace (traces.go) but with RETURNING id.
+func (s *Store) CreateTraceReturningID(ctx context.Context, repoID int64, filePath, symbolName, traceType, content, severity string, reviewID *uuid.UUID, prNumber int, metadata map[string]any) (int64, error) {
+	metaJSON, err := json.Marshal(metadata)
+	if err != nil {
+		metaJSON = []byte("{}")
+	}
+	var id int64
+	err = s.Pool.QueryRow(ctx,
+		`INSERT INTO decision_traces (repo_id, file_path, symbol_name, trace_type, content, severity, review_id, pr_number, metadata)
+		 VALUES ($1, $2, NULLIF($3, ''), $4, $5, NULLIF($6, ''), $7, $8, $9) RETURNING id`,
+		repoID, filePath, symbolName, traceType, content, severity, reviewID, prNumber, metaJSON).Scan(&id)
+	return id, err
 }
 
 func (s *Store) GetCommentOutcomes(ctx context.Context, reviewCommentID uuid.UUID) ([]CommentOutcome, error) {

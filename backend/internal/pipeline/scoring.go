@@ -416,7 +416,7 @@ func fetchScoringContext(ctx context.Context, memClient *memory.Client, owner, r
 		return ""
 	}
 
-	repoTag := memory.RepoTag(owner, repo, "patterns")
+	repoTag := memory.RepoTagNew(repo)
 
 	// Parallel with timeout to avoid stalling the scoring pipeline
 	searchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -428,7 +428,11 @@ func fetchScoringContext(ctx context.Context, memClient *memory.Client, owner, r
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		repoResults = searchMemoryRich(searchCtx, memClient, "confirmed review patterns conventions common issues", repoTag, 5)
+		// type=pattern: the unified repo container also holds scenarios,
+		// feedback, syntheses, traces and review comments. Scoring calibration
+		// ("matching confirmed patterns should score higher") wants learned
+		// patterns only — an untyped search dilutes it with unrelated doc types.
+		repoResults = searchMemoryRichTyped(searchCtx, memClient, "confirmed review patterns conventions common issues", repoTag, 5, string(memory.TypePattern))
 	}()
 	go func() {
 		defer wg.Done()
@@ -437,7 +441,9 @@ func fetchScoringContext(ctx context.Context, memClient *memory.Client, owner, r
 			for _, fr := range files {
 				paths = append(paths, fr.Path)
 			}
-			fileResults = searchMemoryRich(searchCtx, memClient, filePathsQuery("file synthesis ", paths), repoTag, 3)
+			// type=synthesis: "Known File Context" is the file-scoped review
+			// history summary; pin the type so scenarios/patterns don't leak in.
+			fileResults = searchMemoryRichTyped(searchCtx, memClient, filePathsQuery("file synthesis ", paths), repoTag, 3, string(memory.TypeSynthesis))
 		}
 	}()
 	wg.Wait()

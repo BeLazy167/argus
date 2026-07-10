@@ -62,6 +62,7 @@ type CodeNode struct {
 	IsAsync      *bool      `json:"is_async"`
 	ReceiverType *string    `json:"receiver_type"`
 	Scope        *string    `json:"scope"`
+	ContentHash  *string    `json:"content_hash"`
 }
 
 type CommentOutcome struct {
@@ -72,17 +73,18 @@ type CommentOutcome struct {
 }
 
 type DecisionTrace struct {
-	ID         int64      `json:"id"`
-	RepoID     int64      `json:"repo_id"`
-	FilePath   string     `json:"file_path"`
-	SymbolName *string    `json:"symbol_name"`
-	TraceType  string     `json:"trace_type"`
-	Content    string     `json:"content"`
-	Severity   *string    `json:"severity"`
-	ReviewID   *uuid.UUID `json:"review_id"`
-	PRNumber   *int       `json:"pr_number"`
-	Metadata   []byte     `json:"metadata"`
-	CreatedAt  *time.Time `json:"created_at"`
+	ID            int64      `json:"id"`
+	RepoID        int64      `json:"repo_id"`
+	FilePath      string     `json:"file_path"`
+	SymbolName    *string    `json:"symbol_name"`
+	TraceType     string     `json:"trace_type"`
+	Content       string     `json:"content"`
+	Severity      *string    `json:"severity"`
+	ReviewID      *uuid.UUID `json:"review_id"`
+	PRNumber      *int       `json:"pr_number"`
+	Metadata      []byte     `json:"metadata"`
+	CreatedAt     *time.Time `json:"created_at"`
+	SupermemoryID *string    `json:"supermemory_id"`
 }
 
 type Installation struct {
@@ -288,6 +290,7 @@ type Scenario struct {
 	LastFix         *string        `json:"last_fix"`
 	LastPrNumber    *int           `json:"last_pr_number"`
 	LastReviewID    *uuid.UUID     `json:"last_review_id"`
+	SupermemoryID   *string        `json:"supermemory_id"`
 }
 
 type ScenarioRun struct {

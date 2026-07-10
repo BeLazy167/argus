@@ -3,6 +3,8 @@ package pipeline
 import (
 	"encoding/json"
 	"log/slog"
+
+	"github.com/BeLazy167/argus/backend/internal/memory"
 )
 
 // Persona identifies a review style.
@@ -172,6 +174,27 @@ type repoSettings struct {
 	// push fixes. Repos that want manual-only resolve control set this to
 	// false.
 	AutoResolveEnabled *bool `json:"auto_resolve_enabled,omitempty"`
+
+	// Memory thresholds (Bundle 3). Nil (absent from JSON) means "inherit
+	// the hardcoded default." An explicit number — including 0 and 1 — is
+	// a real override: 0 disables the server-side similarity filter, 1
+	// filters out everything. parseThresholds normalizes out-of-range
+	// values (< 0 or > 1) and logs a Warn when an operator override is
+	// rejected.
+	ThresholdFindingEnrich   *float64 `json:"threshold_finding_enrich,omitempty"`
+	ThresholdSpecialistMin   *float64 `json:"threshold_specialist_min,omitempty"`
+	ThresholdScenarioTrigger *float64 `json:"threshold_scenario_trigger,omitempty"`
+	ThresholdScenarioDedupe  *float64 `json:"threshold_scenario_dedupe,omitempty"`
+
+	// DisableSharedDecay opts an installation OUT of the nightly _shared
+	// retirement job (Bundle 5). Nil or false means decay is on.
+	DisableSharedDecay *bool `json:"disable_shared_decay,omitempty"`
+
+	// supermemory_qps / supermemory_burst intentionally omitted. Earlier
+	// iterations added these fields but the Registry.GetClient path never
+	// read them, making them dead code that misled operators. Tracked as
+	// follow-up: plumb per-installation QPS through GetClient then re-add
+	// here.
 }
 
 func parseRepoSettings(settingsJSON json.RawMessage) (repoSettings, bool) {
@@ -243,6 +266,36 @@ func isFileSynthesisEnabled(settingsJSON json.RawMessage) bool {
 func isArchitectureGraphEnabled(settingsJSON json.RawMessage) bool {
 	s, ok := parseRepoSettings(settingsJSON)
 	return !ok || s.ArchitectureGraph == nil || *s.ArchitectureGraph
+}
+
+// parseThresholds resolves memory.Thresholds from merged settings JSON.
+// Any field missing or outside [0, 1] falls back to the hardcoded default so
+// a partial or corrupt settings blob can never produce nonsense thresholds.
+// Out-of-range overrides log a Warn so operators discover the rejection
+// instead of debugging for hours why their tuning "doesn't apply."
+func parseThresholds(settingsJSON json.RawMessage) memory.Thresholds {
+	t := memory.NewThresholds()
+	s, ok := parseRepoSettings(settingsJSON)
+	if !ok {
+		return t
+	}
+	applyIfValid := func(name string, dst *float64, override *float64) {
+		if override == nil {
+			return
+		}
+		v := *override
+		if v < 0 || v > 1 {
+			slog.Warn("threshold override out of range, using default",
+				"name", name, "value", v, "default", *dst, "valid_range", "[0,1]")
+			return
+		}
+		*dst = v
+	}
+	applyIfValid("finding_enrich", &t.FindingEnrich, s.ThresholdFindingEnrich)
+	applyIfValid("specialist_min", &t.SpecialistMin, s.ThresholdSpecialistMin)
+	applyIfValid("scenario_trigger", &t.ScenarioTrigger, s.ThresholdScenarioTrigger)
+	applyIfValid("scenario_dedupe", &t.ScenarioDedupe, s.ThresholdScenarioDedupe)
+	return t
 }
 
 // IsAutoRunEnabled resolves the auto_run flag for a repo.
