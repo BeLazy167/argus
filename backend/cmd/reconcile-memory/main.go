@@ -50,6 +50,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/BeLazy167/argus/backend/internal/crypto"
 	"github.com/BeLazy167/argus/backend/internal/memory"
 	"github.com/BeLazy167/argus/backend/internal/store"
 	"github.com/BeLazy167/argus/backend/internal/store/db"
@@ -103,6 +104,14 @@ func main() {
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
 		logger.Error("DATABASE_URL not set")
+		os.Exit(1)
+	}
+
+	// The BYOK Supermemory keys in installations.supermemory_key_enc are
+	// AES-encrypted; the app initializes the key at startup (app.go) and this
+	// binary must too, or every per-installation decrypt fails.
+	if err := crypto.InitFromEnv(); err != nil {
+		logger.Error("initializing encryption key", "error", err)
 		os.Exit(1)
 	}
 
