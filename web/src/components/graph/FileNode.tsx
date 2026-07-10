@@ -26,10 +26,21 @@ function densityGlow(d: number): string {
   return "shadow-red-500/20";
 }
 
-/** Border width proportional to fan_in: 1px base + 0.5px per fan_in, max 4px. */
+/** Border width proportional to fan_in: 1px base + 0.35px per fan_in, max 2.5px.
+ *  Capped low so heavy fan-in files don't read as chunky bordered boxes. */
 function fanInBorder(fanIn: number): string {
-  const px = Math.min(1 + fanIn * 0.5, 4);
+  const px = Math.min(1 + fanIn * 0.35, 2.5);
   return `${px}px`;
+}
+
+/** Middle-truncate a long filename ("useVeryLongName.tsx" -> "useVery…me.tsx")
+ *  so the box stays compact while the extension and prefix stay recognizable.
+ *  The node carries the full path in its title attribute for the exact name. */
+function middleTruncate(s: string, max = 30): string {
+  if (s.length <= max) return s;
+  const head = Math.ceil((max - 1) / 2);
+  const tail = Math.floor((max - 1) / 2);
+  return `${s.slice(0, head)}…${s.slice(s.length - tail)}`;
 }
 
 interface FileNodeData {
@@ -68,12 +79,12 @@ function FileNode({ data }: NodeProps) {
 
   return (
     <div
-      className={`group relative bg-[var(--graph-surface)] backdrop-blur-md
+      className={`group relative rounded-[4px] bg-[var(--graph-surface)] backdrop-blur-md
         shadow-md ${densityGlow(bugDensity)}
         ${selected ? "border-amber-500/80 shadow-[0_0_12px_rgba(245,158,11,0.15)]" : densityBorderColor(bugDensity)}
         transition-[box-shadow,filter,border-color,transform] duration-200
-        [@media(hover:hover)]:hover:border-amber-500/60 [@media(hover:hover)]:hover:shadow-xl [@media(hover:hover)]:hover:scale-[1.03]
-        px-3 py-2 min-w-[120px] cursor-pointer
+        [@media(hover:hover)]:hover:border-amber-500/70 [@media(hover:hover)]:hover:shadow-xl [@media(hover:hover)]:hover:scale-[1.02]
+        px-3.5 py-2.5 min-w-[150px] cursor-pointer
         ${shouldPulse ? "animate-pulse-subtle" : ""}`}
       style={{ borderWidth: fanInBorder(fanIn), borderStyle: "solid" }}
       title={`${fullPath}\nRisk: ${riskScore.toFixed(1)} · Fan-in: ${fanIn} · Bugs: ${bugDensity.toFixed(2)}`}
@@ -84,17 +95,17 @@ function FileNode({ data }: NodeProps) {
         className="!bg-transparent !w-3 !h-1.5 !rounded-full !border-0 !-top-[3px]"
       />
 
-      <div className="flex items-center gap-1.5">
-        <span className={`w-1.5 h-1.5 rounded-full ${lang.dot} shrink-0`} />
-        <span className={`font-mono font-medium text-[11px] truncate leading-tight ${lang.text}`}>
-          {label}
+      <div className="flex items-center gap-2">
+        <span className={`w-2 h-2 rounded-full ${lang.dot} shrink-0`} />
+        <span className="font-mono font-medium text-[12px] whitespace-nowrap leading-tight text-[var(--graph-text)]">
+          {middleTruncate(label)}
         </span>
         <span className="ml-auto font-mono text-[9px] font-semibold text-[var(--graph-text-dim)] bg-[var(--graph-control-bg)] px-1 py-0.5 shrink-0">
           {riskScore.toFixed(1)}
         </span>
       </div>
 
-      <div className="text-[8px] font-mono text-[var(--graph-text-muted)] mt-0.5">
+      <div className="text-[9px] font-mono text-[var(--graph-text-muted)] mt-1">
         fan_in: {fanIn} · bugs: {bugDensity.toFixed(2)}
       </div>
 

@@ -3,8 +3,8 @@ import { Position, type Node, type Edge } from "@xyflow/react";
 
 const NODE_WIDTH = 160;
 const NODE_HEIGHT = 44;
-const GROUP_PAD_X = 30;
-const GROUP_PAD_Y = 50; // extra top for label
+const GROUP_PAD_X = 40;
+const GROUP_PAD_Y = 66; // extra top for label
 
 /** Extract directory group from file path */
 function dirGroup(filePath: string): string {
@@ -38,8 +38,8 @@ export function getLayoutedElements(
   const g = new dagre.graphlib.Graph().setDefaultEdgeLabel(() => ({}));
   g.setGraph({
     rankdir: direction,
-    nodesep: 70,
-    ranksep: 120,
+    nodesep: 110,
+    ranksep: 175,
     marginx: 50,
     marginy: 50,
   });
