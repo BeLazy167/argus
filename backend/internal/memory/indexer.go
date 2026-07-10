@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -60,7 +59,6 @@ type Indexer interface {
 	IndexRule(ctx context.Context, owner string, rule RuleMemory) error
 	IndexRepoPattern(ctx context.Context, owner, repo, content, customID string, metadata map[string]string) (*AddResponse, error)
 	IndexOwnerPattern(ctx context.Context, owner, content, customID string, metadata map[string]string) (*AddResponse, error)
-	IndexPositivePattern(ctx context.Context, owner, repo, content, customID string, metadata map[string]string) error
 	IndexFeedbackSignal(ctx context.Context, owner, repo string, feedback FeedbackMemory) error
 	IndexScenario(ctx context.Context, owner, repo string, scenarioID int64, description, severity string, files []string) error
 	IndexDecisionTrace(ctx context.Context, owner, repo, filePath, traceType, content, severity string) error
@@ -159,11 +157,12 @@ type PatternMatch struct {
 }
 
 // SearchPatternMatch searches for the best matching pattern across the repo
-// container and the shared container. Returns the higher-scoring match.
-// Dual-reads include a fallback against the legacy `{owner}--{repo}--patterns`
-// container so live reviews continue to see pre-migration data; remove the
-// legacy branch once migration completes.
+// container and the shared container, returning the higher-scoring match. owner
+// is accepted for interface compatibility but unused — under BYOK the
+// installation key is the tenant and all data lives in the unified `{repo}` /
+// `_shared` containers.
 func (idx *indexerImpl) SearchPatternMatch(ctx context.Context, owner, repo, query string, thresholds Thresholds) PatternMatch {
+	_ = owner
 	if idx.client == nil || repo == "" {
 		return PatternMatch{}
 	}
@@ -171,9 +170,9 @@ func (idx *indexerImpl) SearchPatternMatch(ctx context.Context, owner, repo, que
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	var repoRes, sharedRes, legacyRepoRes, legacyOwnerRes PatternMatch
+	var repoRes, sharedRes PatternMatch
 	var wg sync.WaitGroup
-	wg.Add(4)
+	wg.Add(2)
 
 	patternFilter := &SearchFilters{AND: []FilterCondition{{Key: "type", Value: string(TypePattern)}}}
 
@@ -185,64 +184,9 @@ func (idx *indexerImpl) SearchPatternMatch(ctx context.Context, owner, repo, que
 		defer wg.Done()
 		sharedRes = idx.topMatch(ctx, query, SharedTag, patternFilter, thresholds.FindingEnrich)
 	}()
-	// Legacy dual-read — removed in post-migration cleanup PR. Legacy
-	// `{owner}--{repo}--patterns` held mixed writes (synthesis, pr_summary,
-	// arch_summary, feedback) so a non-pattern doc could silently outrank a
-	// real pattern. Post-filter by metadata.source to exclude known non-pattern
-	// writes; if the top-1 legacy hit is a non-pattern, treat as zero match.
-	go func() {
-		defer wg.Done()
-		if owner == "" {
-			return
-		}
-		legacyRepoRes = idx.topMatchExcludingSources(ctx, query, RepoTag(owner, repo, "patterns"), legacyNonPatternSources, thresholds.FindingEnrich)
-	}()
-	go func() {
-		defer wg.Done()
-		if owner == "" {
-			return
-		}
-		legacyOwnerRes = idx.topMatchExcludingSources(ctx, query, OwnerTag(owner, "patterns"), legacyNonPatternSources, thresholds.FindingEnrich)
-	}()
 
 	wg.Wait()
-	return bestMatch(repoRes, sharedRes, legacyRepoRes, legacyOwnerRes)
-}
-
-// legacyNonPatternSources enumerates metadata.source values that legacy writes
-// stored in `--patterns` containers without being actual patterns. Used to
-// exclude them from legacy pattern-match results during migration.
-var legacyNonPatternSources = map[string]struct{}{
-	"synthesis":          {},
-	"pr_summary":         {},
-	"arch_summary":       {},
-	"feedback_confirmed": {},
-	"feedback_dismissed": {},
-}
-
-// topMatchExcludingSources fetches up to 3 hybrid results, filters out any
-// whose metadata.source is in `excluded`, and returns the best remaining.
-// Returns zero PatternMatch if everything in the top slice was excluded.
-func (idx *indexerImpl) topMatchExcludingSources(ctx context.Context, query, containerTag string, excluded map[string]struct{}, threshold float64) PatternMatch {
-	resp, err := idx.client.Search(ctx, SearchRequest{
-		Query:        query,
-		ContainerTag: containerTag,
-		SearchMode:   "hybrid",
-		Limit:        3, // take top-3 so we still have candidates after filtering
-		Threshold:    threshold,
-		Rerank:       true,
-	})
-	if err != nil || resp == nil {
-		return PatternMatch{}
-	}
-	for _, r := range resp.Results {
-		pm := resultToPatternMatch(r)
-		if _, skip := excluded[pm.Metadata["source"]]; skip {
-			continue
-		}
-		return pm
-	}
-	return PatternMatch{}
+	return bestMatch(repoRes, sharedRes)
 }
 
 // topMatch runs a one-result hybrid search on the given container + filter.
@@ -730,37 +674,6 @@ func patternMetadataFromLegacy(legacy map[string]string, logger *slog.Logger) Me
 	return m
 }
 
-// IndexPositivePattern is a compatibility shim around IndexFeedbackSignal —
-// positive patterns are feedback with action=confirmed, polarity=positive.
-// New code should call IndexFeedbackSignal directly.
-//
-// Deprecated: construct a FeedbackMemory with Action="confirmed" and call
-// IndexFeedbackSignal.
-func (idx *indexerImpl) IndexPositivePattern(ctx context.Context, owner, repo, content, customID string, metadata map[string]string) error {
-	_ = customID
-	if idx.client == nil {
-		return nil
-	}
-	return idx.IndexFeedbackSignal(ctx, owner, repo, FeedbackMemory{
-		FilePath:       metadata["file_path"],
-		Category:       metadata["category"],
-		OriginalBody:   content,
-		Action:         "confirmed",
-		DeveloperReply: "",
-		PRNumber:       parseIntOr(metadata["pr"], parseIntOr(metadata["pr_number"], 0)),
-	})
-}
-
-func parseIntOr(s string, fallback int) int {
-	if s == "" {
-		return fallback
-	}
-	if n, err := strconv.Atoi(s); err == nil {
-		return n
-	}
-	return fallback
-}
-
 // IndexFeedbackSignal stores a single feedback event with action + polarity
 // metadata. Confirmed vs dismissed share the same customID space via distinct
 // `action` hashing, so both coexist per-finding.
@@ -886,7 +799,7 @@ func (idx *indexerImpl) IndexDecisionTrace(ctx context.Context, owner, repo, fil
 }
 
 // SearchScenarios performs semantic search over scenarios with reranking.
-// Returns content strings. Dual-reads legacy container for transition.
+// Returns content strings.
 func (idx *indexerImpl) SearchScenarios(ctx context.Context, owner, repo, query, severity string, limit int) []string {
 	results := idx.SearchScenariosWithIDs(ctx, owner, repo, query, severity, limit)
 	out := make([]string, 0, len(results))
@@ -897,9 +810,10 @@ func (idx *indexerImpl) SearchScenarios(ctx context.Context, owner, repo, query,
 }
 
 // SearchScenariosWithIDs performs semantic search over scenarios and returns
-// results with scenario IDs pulled from `metadata.scenario_id` (falling back
-// to the legacy `[scenario_id:N]` content prefix for pre-migration docs).
+// results with scenario IDs pulled from `metadata.scenario_id`. owner is
+// accepted for interface compatibility but unused.
 func (idx *indexerImpl) SearchScenariosWithIDs(ctx context.Context, owner, repo, query, severity string, limit int) []ScenarioSearchResult {
+	_ = owner
 	if idx.client == nil {
 		return nil
 	}
@@ -911,7 +825,7 @@ func (idx *indexerImpl) SearchScenariosWithIDs(ctx context.Context, owner, repo,
 		filters.AND = append(filters.AND, FilterCondition{Key: "severity", Value: severity})
 	}
 
-	newResp, err := idx.client.Search(ctx, SearchRequest{
+	resp, err := idx.client.Search(ctx, SearchRequest{
 		Query:        query,
 		ContainerTag: RepoTagNew(repo),
 		SearchMode:   "hybrid",
@@ -923,88 +837,53 @@ func (idx *indexerImpl) SearchScenariosWithIDs(ctx context.Context, owner, repo,
 		idx.logger.Warn("searching scenarios in supermemory", "error", err)
 	}
 
-	var legacyResp *SearchResponse
-	if owner != "" {
-		legacyReq := SearchRequest{
-			Query:        query,
-			ContainerTag: RepoTag(owner, repo, "scenarios"),
-			SearchMode:   "hybrid",
-			Rerank:       true,
-			Limit:        limit,
-		}
-		if severity != "" {
-			legacyReq.Filters = &SearchFilters{AND: []FilterCondition{{Key: "severity", Value: severity}}}
-		}
-		lResp, lerr := idx.client.Search(ctx, legacyReq)
-		if lerr != nil {
-			idx.logger.Debug("legacy scenarios search failed", "error", lerr, "tag", legacyReq.ContainerTag)
-		}
-		legacyResp = lResp
-	}
-
-	return idx.mergeScenarioResults(newResp, legacyResp, limit)
+	return idx.scenarioResults(resp, limit)
 }
 
-var scenarioIDContentRegex = regexp.MustCompile(`\[scenario_id:(\d+)\]`)
-
-// mergeScenarioResults unions results from the new and legacy containers,
-// dedupes by scenario_id (NOT Supermemory doc ID — same scenario across
-// containers has different doc IDs), prefers metadata.scenario_id over the
-// legacy content-prefix parse, and returns up to `limit` sorted by similarity
-// descending so the rerank budget isn't wasted on lower-scoring duplicates.
-func (idx *indexerImpl) mergeScenarioResults(newResp, legacyResp *SearchResponse, limit int) []ScenarioSearchResult {
-	seenScenarioIDs := map[int64]struct{}{}
+// scenarioResults extracts ScenarioSearchResult from a search response,
+// reading the scenario id from `metadata.scenario_id`, deduping by id, and
+// capping at limit. Results arrive already sorted by similarity descending.
+func (idx *indexerImpl) scenarioResults(resp *SearchResponse, limit int) []ScenarioSearchResult {
+	if resp == nil {
+		return nil
+	}
+	seen := map[int64]struct{}{}
 	var out []ScenarioSearchResult
-
-	add := func(r SearchResult, preferMeta bool) {
+	for _, r := range resp.Results {
 		content := r.Content()
-		var id int64
-		if preferMeta && len(r.Metadata) > 0 {
-			var md map[string]string
-			if err := json.Unmarshal(r.Metadata, &md); err == nil {
-				if v, ok := md["scenario_id"]; ok {
-					if parsed, perr := strconv.ParseInt(v, 10, 64); perr == nil {
-						id = parsed
-					}
-				}
-			}
-		}
-		if id == 0 {
-			if m := scenarioIDContentRegex.FindStringSubmatch(content); len(m) == 2 {
-				if parsed, perr := strconv.ParseInt(m[1], 10, 64); perr == nil {
-					id = parsed
-				}
-			}
-		}
+		id := scenarioIDFromMetadata(r.Metadata)
 		if id == 0 {
 			idx.logger.Warn("scenario missing id", "doc_id", r.ID, "content_head", util.Truncate(content, 80, false))
-			return
+			continue
 		}
-		if _, dup := seenScenarioIDs[id]; dup {
-			return
+		if _, dup := seen[id]; dup {
+			continue
 		}
-		seenScenarioIDs[id] = struct{}{}
+		seen[id] = struct{}{}
 		out = append(out, ScenarioSearchResult{ID: id, Content: content, Similarity: r.Similarity})
-	}
-
-	if newResp != nil {
-		for _, r := range newResp.Results {
-			add(r, true)
+		if limit > 0 && len(out) >= limit {
+			break
 		}
-	}
-	if legacyResp != nil {
-		for _, r := range legacyResp.Results {
-			add(r, false)
-		}
-	}
-
-	// Sort merged by similarity desc so the cap keeps the best hits across both sources.
-	sort.SliceStable(out, func(i, j int) bool { return out[i].Similarity > out[j].Similarity })
-
-	if limit > 0 && len(out) > limit {
-		out = out[:limit]
 	}
 	return out
+}
+
+// scenarioIDFromMetadata parses the scenario_id key out of a raw metadata JSON
+// blob. Returns 0 when absent or unparseable.
+func scenarioIDFromMetadata(raw json.RawMessage) int64 {
+	if len(raw) == 0 {
+		return 0
+	}
+	var md map[string]string
+	if err := json.Unmarshal(raw, &md); err != nil {
+		return 0
+	}
+	if v, ok := md["scenario_id"]; ok {
+		if parsed, err := strconv.ParseInt(v, 10, 64); err == nil {
+			return parsed
+		}
+	}
+	return 0
 }
 
 // IndexSimulationResult indexes a simulation result as a trace with a stable
@@ -1064,9 +943,10 @@ func (idx *indexerImpl) IndexSimulationResult(ctx context.Context, owner, repo s
 }
 
 // SearchTraces performs semantic search over decision traces. Trace type
-// filter narrows results (e.g., only "review_finding"). Dual-reads legacy
-// `{owner}--{repo}--traces` container for transition.
+// filter narrows results (e.g., only "review_finding"). owner is accepted for
+// interface compatibility but unused.
 func (idx *indexerImpl) SearchTraces(ctx context.Context, owner, repo, query, traceType string, limit int) []string {
+	_ = owner
 	if idx.client == nil {
 		return nil
 	}
@@ -1078,7 +958,7 @@ func (idx *indexerImpl) SearchTraces(ctx context.Context, owner, repo, query, tr
 		filters.AND = append(filters.AND, FilterCondition{Key: "subtype", Value: traceType})
 	}
 
-	newResp, err := idx.client.Search(ctx, SearchRequest{
+	resp, err := idx.client.Search(ctx, SearchRequest{
 		Query:        query,
 		ContainerTag: RepoTagNew(repo),
 		SearchMode:   "hybrid",
@@ -1090,31 +970,14 @@ func (idx *indexerImpl) SearchTraces(ctx context.Context, owner, repo, query, tr
 		idx.logger.Warn("searching traces in supermemory", "error", err)
 	}
 
-	var legacyResp *SearchResponse
-	if owner != "" {
-		legacyReq := SearchRequest{
-			Query:        query,
-			ContainerTag: RepoTag(owner, repo, "traces"),
-			SearchMode:   "hybrid",
-			Rerank:       true,
-			Limit:        limit,
-		}
-		if traceType != "" {
-			legacyReq.Filters = &SearchFilters{AND: []FilterCondition{{Key: "trace_type", Value: traceType}}}
-		}
-		lResp, lerr := idx.client.Search(ctx, legacyReq)
-		if lerr != nil {
-			idx.logger.Debug("legacy traces search failed", "error", lerr, "tag", legacyReq.ContainerTag)
-		}
-		legacyResp = lResp
-	}
-
-	return contentsFromResponses(newResp, legacyResp, limit)
+	return contentsFrom(resp, limit)
 }
 
 // SearchPatternsFiltered performs semantic search over patterns with metadata
-// filtering. category narrows results.
+// filtering. category narrows results. owner is accepted for interface
+// compatibility but unused.
 func (idx *indexerImpl) SearchPatternsFiltered(ctx context.Context, owner, repo, query, category string, limit int) []string {
+	_ = owner
 	if idx.client == nil {
 		return nil
 	}
@@ -1126,7 +989,7 @@ func (idx *indexerImpl) SearchPatternsFiltered(ctx context.Context, owner, repo,
 		filters.AND = append(filters.AND, FilterCondition{Key: "category", Value: category})
 	}
 
-	newResp, err := idx.client.Search(ctx, SearchRequest{
+	resp, err := idx.client.Search(ctx, SearchRequest{
 		Query:        query,
 		ContainerTag: RepoTagNew(repo),
 		SearchMode:   "hybrid",
@@ -1138,79 +1001,22 @@ func (idx *indexerImpl) SearchPatternsFiltered(ctx context.Context, owner, repo,
 		idx.logger.Warn("searching patterns filtered", "error", err)
 	}
 
-	var legacyResp *SearchResponse
-	if owner != "" {
-		legacyReq := SearchRequest{
-			Query:        query,
-			ContainerTag: RepoTag(owner, repo, "patterns"),
-			SearchMode:   "hybrid",
-			Rerank:       true,
-			Limit:        limit,
-		}
-		if category != "" {
-			legacyReq.Filters = &SearchFilters{AND: []FilterCondition{{Key: "category", Value: category}}}
-		}
-		lResp, lerr := idx.client.Search(ctx, legacyReq)
-		if lerr != nil {
-			idx.logger.Debug("legacy patterns search failed", "error", lerr, "tag", legacyReq.ContainerTag)
-		}
-		legacyResp = lResp
-	}
-
-	return contentsFromResponses(newResp, legacyResp, limit)
+	return contentsFrom(resp, limit)
 }
 
-// contentsFromResponses merges results from new + legacy containers, dedupes
-// by Supermemory doc ID AND normalized content, sorts by similarity descending,
-// then caps at limit and returns content strings. Sorting matters during the
-// dual-read window: if we truncated in insertion order instead, a high-scoring
-// legacy hit would be dropped in favor of a low-scoring new-container hit once
-// the merged set exceeded `limit` — silently degrading retrieval for any
-// installation not yet migrated. Mirrors mergeScenarioResults.
-//
-// Content dedup (not just doc ID) is required during the dual-read window: the
-// same logical doc re-indexed into the new container while its legacy copy
-// still exists has a DIFFERENT Supermemory doc ID (and a different customID —
-// the legacy owner segment was dropped), so ID-only dedup would surface it
-// twice and push a distinct hit out of the capped result. The search API does
-// not return customID, so normalized content is the available join key.
-func contentsFromResponses(newResp, legacyResp *SearchResponse, limit int) []string {
-	type scored struct {
-		content    string
-		similarity float64
+// contentsFrom returns up to limit content strings from a search response.
+// Results arrive already sorted by similarity descending and, with stable
+// customID upserts, carry no duplicates within a single container.
+func contentsFrom(resp *SearchResponse, limit int) []string {
+	if resp == nil {
+		return nil
 	}
-	seen := map[string]struct{}{}
-	seenContent := map[string]struct{}{}
-	var merged []scored
-	consume := func(resp *SearchResponse) {
-		if resp == nil {
-			return
+	out := make([]string, 0, len(resp.Results))
+	for _, r := range resp.Results {
+		out = append(out, r.Content())
+		if limit > 0 && len(out) >= limit {
+			break
 		}
-		for _, r := range resp.Results {
-			if _, dup := seen[r.ID]; dup {
-				continue
-			}
-			seen[r.ID] = struct{}{}
-			content := r.Content()
-			key := normalizeBody(content)
-			if _, dup := seenContent[key]; dup {
-				continue
-			}
-			seenContent[key] = struct{}{}
-			merged = append(merged, scored{content: content, similarity: r.Similarity})
-		}
-	}
-	consume(newResp)
-	consume(legacyResp)
-	sort.SliceStable(merged, func(i, j int) bool {
-		return merged[i].similarity > merged[j].similarity
-	})
-	if limit > 0 && len(merged) > limit {
-		merged = merged[:limit]
-	}
-	out := make([]string, len(merged))
-	for i, m := range merged {
-		out[i] = m.content
 	}
 	return out
 }
@@ -1220,6 +1026,7 @@ func contentsFromResponses(newResp, legacyResp *SearchResponse, limit int) []str
 // shared semantic hits over patterns. Replaces the legacy 5-parallel-query
 // block — cuts 5×N searches per PR to 2×N plus one list call.
 func (idx *indexerImpl) SpecialistBlock(ctx context.Context, owner, repo, filePath, specialistQuery string, thresholds Thresholds) MemoryBlock {
+	_ = owner
 	if idx.client == nil || repo == "" {
 		return MemoryBlock{}
 	}
@@ -1302,108 +1109,7 @@ func (idx *indexerImpl) SpecialistBlock(ctx context.Context, owner, repo, filePa
 	}()
 
 	wg.Wait()
-
-	// Legacy dual-read fallback — removed in the post-migration cleanup PR
-	// alongside SearchPatternMatch's legacy branch. Fires ONLY when a new-shape
-	// leg came back empty and we still know the owner: pre-migration data lives
-	// in the owner-prefixed `{owner}--{repo}--patterns` / `{owner}--patterns`
-	// containers, which are empty for freshly-migrated installs but hold months
-	// of history for existing ones. A fully-migrated install pays nothing (the
-	// new legs are non-empty). Mirrors SearchPatternMatch's machinery so cleanup
-	// strips both at once.
-	if owner != "" {
-		idx.specialistLegacyFallback(ctx, owner, repo, filePath, specialistQuery, thresholds, &block)
-	}
 	return block
-}
-
-// specialistLegacyFallback backfills empty MemoryBlock legs from the
-// pre-migration owner-prefixed containers. Dual-read-window code: delete with
-// the other legacy branches in the cleanup PR. Each leg runs only when its
-// new-shape counterpart returned nothing, and each writes a distinct MemoryBlock
-// field, preserving the write-partition invariant documented on MemoryBlock.
-func (idx *indexerImpl) specialistLegacyFallback(ctx context.Context, owner, repo, filePath, specialistQuery string, thresholds Thresholds, block *MemoryBlock) {
-	legacyRepoTag := RepoTag(owner, repo, "patterns")
-	var wg sync.WaitGroup
-
-	// Synthesis — legacy synthesis docs were written to `{owner}--{repo}--patterns`
-	// with source=synthesis and the file path under the `file` metadata key
-	// (see origin/main synthesizeFileMemories). Exact-match both to pin this
-	// file's synthesis.
-	if block.Synthesis == "" && filePath != "" {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			resp, err := idx.client.Search(ctx, SearchRequest{
-				Query:        "file synthesis " + filePath,
-				ContainerTag: legacyRepoTag,
-				SearchMode:   "hybrid",
-				Limit:        1,
-				Threshold:    0,
-				Rerank:       false,
-				Filters: &SearchFilters{AND: []FilterCondition{
-					{Key: "source", Value: "synthesis"},
-					{Key: "file", Value: filePath},
-				}},
-			})
-			if err == nil && resp != nil && len(resp.Results) > 0 {
-				block.Synthesis = resp.Results[0].Content()
-			}
-		}()
-	}
-
-	// Repo signal — legacy repo patterns / feedback lived in
-	// `{owner}--{repo}--patterns` mixed with non-pattern writes (synthesis,
-	// pr_summary, feedback), so post-filter by metadata.source.
-	if len(block.Repo) == 0 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			block.Repo = idx.matchesExcludingSources(ctx, specialistQuery, legacyRepoTag, legacyNonPatternSources, thresholds.SpecialistMin, 5)
-		}()
-	}
-
-	// Shared / org signal — legacy org-wide patterns lived in the
-	// `{owner}--patterns` container (SharedTag's pre-migration equivalent).
-	if len(block.Shared) == 0 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			block.Shared = idx.matchesExcludingSources(ctx, specialistQuery, OwnerTag(owner, "patterns"), legacyNonPatternSources, thresholds.SpecialistMin, 3)
-		}()
-	}
-
-	wg.Wait()
-}
-
-// matchesExcludingSources fetches hybrid results from a legacy container, drops
-// any whose metadata.source is a known non-pattern write, and returns up to
-// `limit` PatternMatch. List-returning sibling of topMatchExcludingSources;
-// dual-read-window helper removed in the cleanup PR.
-func (idx *indexerImpl) matchesExcludingSources(ctx context.Context, query, containerTag string, excluded map[string]struct{}, threshold float64, limit int) []PatternMatch {
-	resp, err := idx.client.Search(ctx, SearchRequest{
-		Query:        query,
-		ContainerTag: containerTag,
-		SearchMode:   "hybrid",
-		Limit:        limit + len(excluded), // headroom so filtering doesn't starve the cap
-		Threshold:    threshold,
-		Rerank:       true,
-	})
-	if err != nil || resp == nil {
-		return nil
-	}
-	out := make([]PatternMatch, 0, limit)
-	for _, r := range resp.Results {
-		pm := resultToPatternMatch(r)
-		if _, skip := excluded[pm.Metadata["source"]]; skip {
-			continue
-		}
-		out = append(out, pm)
-		if len(out) >= limit {
-			break
-		}
-	}
-	return out
 }
 
 // searchMatches runs a search and translates the result list into

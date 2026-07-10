@@ -45,6 +45,14 @@
 //	--verify-legacy      read-only: list the legacy containers per installation and
 //	                     print each container's totalItems (count-verify gate); no
 //	                     backfill is performed in this mode
+//	--delete-legacy      destructive: BulkDelete the deprecated legacy containers
+//	                     (the exact set --verify-legacy lists) per installation.
+//	                     Mutually exclusive with --plan and --verify-legacy and
+//	                     never runs a backfill. Dry-run by default — it prints what
+//	                     it WOULD delete and exits 1 unless --yes-delete-legacy is
+//	                     also passed.
+//	--yes-delete-legacy  arm --delete-legacy to actually delete (no-op without
+//	                     --delete-legacy)
 package main
 
 import (
@@ -57,6 +65,7 @@ import (
 	"os"
 	"os/signal"
 	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -89,6 +98,12 @@ type runConfig struct {
 	batchSize    int32
 	maxRows      int
 	verifyLegacy bool
+	// deleteLegacy runs the destructive legacy-container deletion mode; it is
+	// mutually exclusive with plan/verifyLegacy and never backfills.
+	deleteLegacy bool
+	// yesDeleteLegacy arms deleteLegacy to actually delete. Without it,
+	// deleteLegacy is a dry-run that prints what it would delete and exits 1.
+	yesDeleteLegacy bool
 	// cutoff is the --new-shape-since created_at boundary. Rows created at/after
 	// it are skipped by the three drift-prone sweeps (review, feedback,
 	// pr_summary) — the live pipeline already wrote those into the new shape and
@@ -108,6 +123,8 @@ func main() {
 	flag.IntVar(&batchSize, "batch-size", 100, "rows per SQL page and max docs per batch add (clamped to [1,600])")
 	flag.IntVar(&cfg.maxRows, "max-rows", 10000, "safety cap on rows processed per table per installation per run")
 	flag.BoolVar(&cfg.verifyLegacy, "verify-legacy", false, "read-only: list legacy containers per installation and print each container's totalItems")
+	flag.BoolVar(&cfg.deleteLegacy, "delete-legacy", false, "destructive: delete the deprecated legacy containers per installation. Dry-run (lists what it would delete, exits 1) unless --yes-delete-legacy is also set. Mutually exclusive with --plan and --verify-legacy")
+	flag.BoolVar(&cfg.yesDeleteLegacy, "yes-delete-legacy", false, "arm --delete-legacy to actually delete (no-op without --delete-legacy)")
 	var newShapeSince string
 	flag.StringVar(&newShapeSince, "new-shape-since", "", "RFC3339 created_at cutoff (the post-#66 deploy time); rows at/after are skipped by the drift-prone sweeps (review/feedback/pr_summary) so the backfill can't merge-corrupt docs the live pipeline already wrote. REQUIRED unless --verify-legacy.")
 	flag.Parse()
@@ -121,7 +138,21 @@ func main() {
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	cutoff, err := resolveCutoff(newShapeSince, cfg.verifyLegacy)
+	// --delete-legacy is a standalone destructive mode: it must not share a run
+	// with the read-only verify gate, a dry-run --plan backfill, or a real
+	// backfill.
+	if cfg.deleteLegacy && (cfg.plan || cfg.verifyLegacy) {
+		logger.Error("--delete-legacy is mutually exclusive with --plan and --verify-legacy")
+		os.Exit(1)
+	}
+	if cfg.yesDeleteLegacy && !cfg.deleteLegacy {
+		logger.Error("--yes-delete-legacy requires --delete-legacy")
+		os.Exit(1)
+	}
+
+	// --new-shape-since gates only the backfill sweeps; verify and delete modes
+	// touch legacy containers directly and need no cutoff.
+	cutoff, err := resolveCutoff(newShapeSince, cfg.verifyLegacy || cfg.deleteLegacy)
 	if err != nil {
 		logger.Error("invalid --new-shape-since", "value", newShapeSince, "error", err)
 		os.Exit(1)
@@ -155,8 +186,16 @@ func main() {
 
 	registry := memory.NewRegistry(st, logger)
 
-	if err := run(ctx, logger, st, registry, cfg); err != nil {
-		logger.Error("migrate-memory run failed", "error", err)
+	runErr := run(ctx, logger, st, registry, cfg)
+	if errors.Is(runErr, errDeleteDryRun) {
+		// Dry-run safety gate: exit non-zero WITHOUT an error banner so the
+		// operator sees it as "nothing deleted, rerun with --yes-delete-legacy",
+		// not a failure.
+		logger.Warn("delete-legacy dry-run complete; no deletions performed — rerun with --yes-delete-legacy to execute")
+		os.Exit(1)
+	}
+	if runErr != nil {
+		logger.Error("migrate-memory run failed", "error", runErr)
 		os.Exit(1)
 	}
 	logger.Info("migrate-memory run complete")
@@ -169,7 +208,11 @@ func run(ctx context.Context, logger *slog.Logger, st *store.Store, registry *me
 	if err != nil {
 		return fmt.Errorf("resolving installations: %w", err)
 	}
-	logger.Info("migrate-memory starting", "installations", len(installs), "plan", cfg.plan, "verify_legacy", cfg.verifyLegacy)
+	logger.Info("migrate-memory starting", "installations", len(installs), "plan", cfg.plan, "verify_legacy", cfg.verifyLegacy, "delete_legacy", cfg.deleteLegacy)
+
+	if cfg.deleteLegacy {
+		return runDeleteLegacy(ctx, logger, st, registry, installs, cfg)
+	}
 
 	if cfg.verifyLegacy {
 		for _, id := range installs {
@@ -771,16 +814,69 @@ func (r *runReport) emit(logger *slog.Logger, cutoff time.Time) {
 
 // ---- legacy count verification (read-only) -------------------------------
 
-// legacyRepoKinds are the per-repo legacy container suffixes (RepoTag).
+// legacyRepoKinds are the per-repo legacy container suffixes (legacyRepoTag).
 var legacyRepoKinds = []string{"reviews", "patterns", "scenarios", "traces", "negative_patterns", "positive_patterns"}
 
-// legacyOwnerKinds are the per-owner legacy container suffixes (OwnerTag).
+// legacyOwnerKinds are the per-owner legacy container suffixes (legacyOwnerTag).
 var legacyOwnerKinds = []string{"patterns", "rules", "reviews"}
+
+// legacyTagSanitizer mirrors the memory package's tag sanitizer. Inlined here so
+// this binary can reconstruct the deprecated {owner}--{repo}--{kind} /
+// {owner}--{kind} container names after the exported memory.RepoTag/OwnerTag
+// helpers are deleted — enumerating legacy containers is only this tool's job.
+var legacyTagSanitizer = strings.NewReplacer(":", "-", "/", "-", "~", "-", ".", "-")
+
+// legacyRepoTag reconstructs a deprecated per-repo legacy container tag
+// (former memory.RepoTag).
+func legacyRepoTag(owner, repo, kind string) string {
+	return legacyTagSanitizer.Replace(owner) + "--" + legacyTagSanitizer.Replace(repo) + "--" + kind
+}
+
+// legacyOwnerTag reconstructs a deprecated per-owner legacy container tag
+// (former memory.OwnerTag).
+func legacyOwnerTag(owner, kind string) string {
+	return legacyTagSanitizer.Replace(owner) + "--" + kind
+}
+
+// legacyContainerTags returns the deduped, sorted set of deprecated legacy
+// container tags for one installation — the exact set --verify-legacy counts
+// and --delete-legacy removes. Malformed full_names are logged and skipped.
+func legacyContainerTags(ctx context.Context, ilog *slog.Logger, st *store.Store, installID int64) ([]string, error) {
+	fullNames, err := st.Q.ListRepoFullNamesForInstallation(ctx, installID)
+	if err != nil {
+		return nil, err
+	}
+	tags := map[string]struct{}{}
+	owners := map[string]struct{}{}
+	for _, fn := range fullNames {
+		owner, repo, err := splitFullName(fn)
+		if err != nil {
+			ilog.Warn("legacy: bad full_name; skipping", "full_name", fn, "error", err)
+			continue
+		}
+		owners[owner] = struct{}{}
+		for _, kind := range legacyRepoKinds {
+			tags[legacyRepoTag(owner, repo, kind)] = struct{}{}
+		}
+	}
+	for owner := range owners {
+		for _, kind := range legacyOwnerKinds {
+			tags[legacyOwnerTag(owner, kind)] = struct{}{}
+		}
+	}
+	ordered := make([]string, 0, len(tags))
+	for t := range tags {
+		ordered = append(ordered, t)
+	}
+	sort.Strings(ordered)
+	return ordered, nil
+}
 
 // verifyLegacyInstallation lists every legacy container for one installation and
 // prints each container's totalItems. Strictly read-only — it only issues
 // /v3/documents/list with limit=1 and reads pagination.totalItems.
 func verifyLegacyInstallation(ctx context.Context, logger *slog.Logger, st *store.Store, registry *memory.Registry, installID int64, cfg runConfig) {
+	_ = cfg
 	client, status := resolveClient(ctx, logger, st, registry, installID, true) // read-only build
 	if client == nil {
 		logger.Debug("verify-legacy: no client", "installation_id", installID, "status", status)
@@ -788,37 +884,11 @@ func verifyLegacyInstallation(ctx context.Context, logger *slog.Logger, st *stor
 	}
 	ilog := logger.With("installation_id", installID)
 
-	fullNames, err := st.Q.ListRepoFullNamesForInstallation(ctx, installID)
+	ordered, err := legacyContainerTags(ctx, ilog, st, installID)
 	if err != nil {
 		ilog.Error("verify-legacy: listing repos", "error", err)
 		return
 	}
-
-	// Build the deduped set of legacy container tags: per-repo + per-owner.
-	tags := map[string]struct{}{}
-	owners := map[string]struct{}{}
-	for _, fn := range fullNames {
-		owner, repo, err := splitFullName(fn)
-		if err != nil {
-			ilog.Warn("verify-legacy: bad full_name", "full_name", fn, "error", err)
-			continue
-		}
-		owners[owner] = struct{}{}
-		for _, kind := range legacyRepoKinds {
-			tags[memory.RepoTag(owner, repo, kind)] = struct{}{} //nolint:staticcheck // auditing legacy containers is this flag's purpose
-		}
-	}
-	for owner := range owners {
-		for _, kind := range legacyOwnerKinds {
-			tags[memory.OwnerTag(owner, kind)] = struct{}{} //nolint:staticcheck // auditing legacy containers is this flag's purpose
-		}
-	}
-
-	ordered := make([]string, 0, len(tags))
-	for t := range tags {
-		ordered = append(ordered, t)
-	}
-	sort.Strings(ordered)
 
 	var total int
 	for _, tag := range ordered {
@@ -855,4 +925,135 @@ func legacyContainerCount(ctx context.Context, client *memory.Client, tag string
 		return resp.Pagination.TotalItems, nil
 	}
 	return len(resp.Memories), nil
+}
+
+// ---- legacy container deletion (destructive) -----------------------------
+
+// errDeleteDryRun is returned by runDeleteLegacy when --delete-legacy runs
+// without --yes-delete-legacy: nothing was deleted and the process must exit
+// non-zero so the safety gate is visible in scripts/CI.
+var errDeleteDryRun = errors.New("delete-legacy dry-run: no deletions performed")
+
+// deleteRecord is the machine-readable per-(installation, container) result of a
+// delete-legacy run: how many docs were deleted (execute) or would be deleted
+// (dry-run), plus any per-container error.
+type deleteRecord struct {
+	Installation     int64  `json:"installation"`
+	Container        string `json:"container"`
+	DeletedCount     int    `json:"deleted_count,omitempty"`
+	WouldDeleteItems int    `json:"would_delete_items,omitempty"`
+	Error            string `json:"error,omitempty"`
+}
+
+// runDeleteLegacy deletes (or, without --yes-delete-legacy, previews) every
+// legacy container for each installation, emits a machine-readable summary, and
+// returns errDeleteDryRun when nothing was executed so main() exits 1.
+func runDeleteLegacy(ctx context.Context, logger *slog.Logger, st *store.Store, registry *memory.Registry, installs []int64, cfg runConfig) error {
+	execute := cfg.yesDeleteLegacy
+	logger.Info("delete-legacy starting", "installations", len(installs), "execute", execute)
+
+	var all []deleteRecord
+	for _, id := range installs {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		all = append(all, deleteLegacyInstallation(ctx, logger, st, registry, id, execute)...)
+	}
+	emitDeleteReport(logger, all, execute)
+	if !execute {
+		return errDeleteDryRun
+	}
+	return nil
+}
+
+// deleteLegacyInstallation removes every deprecated legacy container for one
+// installation via BulkDelete, logging the API's deletedCount per container. In
+// dry-run (execute=false) it lists each container's current item count and
+// deletes nothing. The client is always built read-only (like verify): deletion
+// goes through BulkDelete directly and must not trigger the settings PATCH that
+// GetIndexer would perform. Returns the per-container records for the summary.
+func deleteLegacyInstallation(ctx context.Context, logger *slog.Logger, st *store.Store, registry *memory.Registry, installID int64, execute bool) []deleteRecord {
+	client, status := resolveClient(ctx, logger, st, registry, installID, true) // read-only build (no settings PATCH)
+	if client == nil {
+		logger.Debug("delete-legacy: no client", "installation_id", installID, "status", status)
+		return nil
+	}
+	ilog := logger.With("installation_id", installID)
+
+	ordered, err := legacyContainerTags(ctx, ilog, st, installID)
+	if err != nil {
+		ilog.Error("delete-legacy: listing repos", "error", err)
+		return nil
+	}
+
+	records := make([]deleteRecord, 0, len(ordered))
+	for _, tag := range ordered {
+		if ctx.Err() != nil {
+			return records
+		}
+		if !execute {
+			count, cerr := legacyContainerCount(ctx, client, tag)
+			if cerr != nil {
+				ilog.Warn("delete-legacy dry-run: list container", "container", tag, "error", cerr)
+				records = append(records, deleteRecord{Installation: installID, Container: tag, Error: cerr.Error()})
+				continue
+			}
+			ilog.Info("legacy_container_would_delete", "container", tag, "total_items", count)
+			records = append(records, deleteRecord{Installation: installID, Container: tag, WouldDeleteItems: count})
+			continue
+		}
+		resp, derr := client.BulkDelete(ctx, memory.BulkDeleteRequest{ContainerTags: []string{tag}})
+		if derr != nil {
+			ilog.Error("delete-legacy: bulk delete", "container", tag, "error", derr)
+			records = append(records, deleteRecord{Installation: installID, Container: tag, Error: derr.Error()})
+			continue
+		}
+		ilog.Info("legacy_container_deleted", "container", tag, "deleted_count", resp.DeletedCount)
+		records = append(records, deleteRecord{Installation: installID, Container: tag, DeletedCount: resp.DeletedCount})
+	}
+	return records
+}
+
+// emitDeleteReport prints one structured JSON line per container result, the
+// consolidated report blob, and a run-total summary. Deterministic ordering so
+// runs diff cleanly.
+func emitDeleteReport(logger *slog.Logger, records []deleteRecord, execute bool) {
+	sort.Slice(records, func(i, j int) bool {
+		if records[i].Installation != records[j].Installation {
+			return records[i].Installation < records[j].Installation
+		}
+		return records[i].Container < records[j].Container
+	})
+
+	var totalDeleted, totalWould, errCount int
+	for _, r := range records {
+		totalDeleted += r.DeletedCount
+		totalWould += r.WouldDeleteItems
+		if r.Error != "" {
+			errCount++
+		}
+	}
+
+	blob := struct {
+		Mode    string         `json:"mode"`
+		Records []deleteRecord `json:"records"`
+	}{Mode: deleteModeLabel(execute), Records: records}
+	if b, err := json.Marshal(blob); err == nil {
+		logger.Info("legacy_delete_report", "report", string(b))
+	}
+	logger.Info("legacy_delete_totals",
+		"mode", deleteModeLabel(execute),
+		"containers", len(records),
+		"deleted_count", totalDeleted,
+		"would_delete_items", totalWould,
+		"errors", errCount,
+	)
+}
+
+// deleteModeLabel returns a short label for the delete run mode.
+func deleteModeLabel(execute bool) string {
+	if execute {
+		return "execute"
+	}
+	return "dry_run"
 }

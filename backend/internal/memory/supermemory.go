@@ -269,13 +269,18 @@ func (c *Client) ListDocuments(ctx context.Context, req ListRequest) (*ListRespo
 	return &result, nil
 }
 
-// BulkDelete removes multiple documents by IDs or containerTags.
-// At least one of IDs or ContainerTags must be non-empty.
-func (c *Client) BulkDelete(ctx context.Context, req BulkDeleteRequest) error {
+// BulkDelete removes multiple documents by IDs or containerTags. At least one
+// of IDs or ContainerTags must be non-empty. Returns the API's deletedCount so
+// callers can report how many docs each call removed.
+func (c *Client) BulkDelete(ctx context.Context, req BulkDeleteRequest) (*BulkDeleteResponse, error) {
 	if len(req.IDs) == 0 && len(req.ContainerTags) == 0 {
-		return fmt.Errorf("BulkDelete: at least one of IDs or ContainerTags required")
+		return nil, fmt.Errorf("BulkDelete: at least one of IDs or ContainerTags required")
 	}
-	return c.doRequest(ctx, "DELETE", "/v3/documents/bulk", req, &struct{}{})
+	var result BulkDeleteResponse
+	if err := c.doRequest(ctx, "DELETE", "/v3/documents/bulk", req, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
 }
 
 // GetDocument retrieves a single document by ID.
@@ -313,22 +318,6 @@ var idSanitizerRe = regexp.MustCompile(`[^a-zA-Z0-9_:-]`)
 // also collapse the `--` separator (`--` is allowed, just redundant).
 func CustomIDSanitize(s string) string {
 	return idSanitizerRe.ReplaceAllString(s, "-")
-}
-
-// OwnerTag returns a container tag scoped to an owner (user or org).
-//
-// Deprecated: under BYOK the Supermemory API key is per-installation, so owner
-// is implicit. New code should target SharedTag for cross-repo data.
-func OwnerTag(owner, kind string) string {
-	return tagSanitizer.Replace(owner) + "--" + kind
-}
-
-// RepoTag returns a container tag scoped to a specific repo under an owner.
-//
-// Deprecated: kind-suffixed containers fragment Supermemory's graph. New code
-// should use RepoTagNew and move the kind into metadata.type.
-func RepoTag(owner, repo, kind string) string {
-	return tagSanitizer.Replace(owner) + "--" + tagSanitizer.Replace(repo) + "--" + kind
 }
 
 // SharedTag is the container tag for cross-repo patterns under one installation.
@@ -384,21 +373,6 @@ func repoIDSegment(repo string) string {
 		return seg + "-" + repoNameHash(repo)
 	}
 	return seg
-}
-
-// NegativePatternTag returns a Supermemory tag for false-positive patterns that should be suppressed.
-func NegativePatternTag(owner, repo string) string {
-	return RepoTag(owner, repo, "negative_patterns")
-}
-
-// PositivePatternTag returns a Supermemory tag for confirmed good patterns.
-func PositivePatternTag(owner, repo string) string {
-	return RepoTag(owner, repo, "positive_patterns")
-}
-
-// ValidateTagScope checks that a container tag belongs to the given owner.
-func ValidateTagScope(tag, owner string) bool {
-	return strings.HasPrefix(tag, tagSanitizer.Replace(owner)+"--")
 }
 
 type AddRequest struct {
@@ -572,5 +546,13 @@ type Document struct {
 
 type BulkDeleteRequest struct {
 	IDs           []string `json:"ids,omitempty"`
+	ContainerTags []string `json:"containerTags,omitempty"`
+}
+
+// BulkDeleteResponse is the response from DELETE /v3/documents/bulk. deletedCount
+// is the total number of memories removed across the requested containerTags.
+type BulkDeleteResponse struct {
+	Success       bool     `json:"success"`
+	DeletedCount  int      `json:"deletedCount"`
 	ContainerTags []string `json:"containerTags,omitempty"`
 }

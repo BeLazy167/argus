@@ -355,7 +355,7 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p revie
 	systemPrompt := p.systemBase
 	if memClient != nil && p.action == TriageDeep && p.deepReview {
 		tools = memoryTools(repo)
-		toolHandler = NewToolHandler(memClient, rs.store, owner, repo)
+		toolHandler = NewToolHandler(memClient, rs.store, repo)
 		// Prepend agentic base; keep specialist overlay via systemBase
 		if p.specialist != "" {
 			systemPrompt = buildAgenticSystemPrompt(owner, repo) + specialistOverlay(p.specialist)

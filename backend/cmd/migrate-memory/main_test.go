@@ -474,6 +474,51 @@ func TestSweepType_CutoffSkip(t *testing.T) {
 	}
 }
 
+// TestLegacyTagFormatters pins the private legacy container-name reconstruction
+// that --verify-legacy counts and --delete-legacy deletes. These must reproduce
+// the deprecated memory.RepoTag/OwnerTag output EXACTLY — the sanitized names
+// are the real Supermemory containers, so a drift here would delete the wrong
+// container (or miss the target). Cases mirror the deleted memory tag tests.
+func TestLegacyTagFormatters(t *testing.T) {
+	repoCases := []struct {
+		owner, repo, kind, want string
+	}{
+		{"acme", "widget", "negative_patterns", "acme--widget--negative_patterns"},
+		{"acme", "widget", "positive_patterns", "acme--widget--positive_patterns"},
+		{"acme/org", "my.repo", "reviews", "acme-org--my-repo--reviews"},
+		{"org:team", "repo~v2", "traces", "org-team--repo-v2--traces"},
+	}
+	for _, c := range repoCases {
+		if got := legacyRepoTag(c.owner, c.repo, c.kind); got != c.want {
+			t.Errorf("legacyRepoTag(%q,%q,%q) = %q, want %q", c.owner, c.repo, c.kind, got, c.want)
+		}
+	}
+
+	ownerCases := []struct {
+		owner, kind, want string
+	}{
+		{"acme", "patterns", "acme--patterns"},
+		{"acme", "rules", "acme--rules"},
+		{"org:team", "reviews", "org-team--reviews"},
+	}
+	for _, c := range ownerCases {
+		if got := legacyOwnerTag(c.owner, c.kind); got != c.want {
+			t.Errorf("legacyOwnerTag(%q,%q) = %q, want %q", c.owner, c.kind, got, c.want)
+		}
+	}
+}
+
+// TestDeleteModeLabel pins the machine-readable mode labels emitted in the
+// delete-legacy summary blob.
+func TestDeleteModeLabel(t *testing.T) {
+	if got := deleteModeLabel(true); got != "execute" {
+		t.Errorf("deleteModeLabel(true) = %q, want execute", got)
+	}
+	if got := deleteModeLabel(false); got != "dry_run" {
+		t.Errorf("deleteModeLabel(false) = %q, want dry_run", got)
+	}
+}
+
 type nopWriter struct{}
 
 func (nopWriter) Write(p []byte) (int, error) { return len(p), nil }
