@@ -1,6 +1,6 @@
 "use client";
 
-import { Brain, Loader2, RotateCw, Save } from "lucide-react";
+import { Brain, Loader2, RotateCw, Save, Undo2 } from "lucide-react";
 import { useMemo, useState } from "react";
 import {
 	MEMORY_DEFAULTS,
@@ -75,9 +75,9 @@ export default function MemorySettingsPage() {
 						<Brain className="h-5 w-5 text-slate-500" aria-hidden />
 						<h1 className="text-2xl font-mono text-slate-100">Memory</h1>
 					</div>
-					<p className="text-sm text-slate-500 font-mono leading-relaxed">
-						Tune the similarity gates and retirement policy for this installation's memory system.
-						Changes apply to the next review.
+					<p className="text-sm font-mono text-slate-500 leading-relaxed">
+						How strictly Argus matches past knowledge to new code, and how long org-wide patterns
+						keep their influence. Changes apply from the next review.
 					</p>
 				</header>
 
@@ -97,7 +97,7 @@ export default function MemorySettingsPage() {
 					/>
 				) : (
 					<p className="text-xs font-mono text-red-400">
-						{"// Failed to load settings — check connection and retry."}
+						Settings failed to load. Check your connection, then reload the page.
 					</p>
 				)}
 			</div>
@@ -136,36 +136,56 @@ function MemoryForm({
 		setInitial(draft);
 	};
 
+	const decayOn = !(draft.disable_decay ?? MEMORY_DEFAULTS.disable_shared_decay);
+
 	return (
 		<>
 			<Section
-				title="Similarity thresholds"
-				subtitle="How confident the memory system must be before a match influences a review. Raise to reduce false matches; lower to surface more context."
+				title="Pattern matching"
+				subtitle="How similar a remembered pattern must be to new code before Argus uses it. Slide right for fewer, more-certain matches; left for more context."
 			>
 				<ThresholdField
-					label="finding_enrich"
-					description="Threshold below which a pattern match will not enrich a review comment."
+					title="Comment enrichment"
+					keyChip="finding_enrich"
+					description="A saved pattern is attached to a review comment only when it matches this closely."
+					lowLabel="more context"
+					highLabel="stricter"
 					value={draft.finding_enrich}
 					defaultValue={MEMORY_DEFAULTS.threshold_finding_enrich}
 					onChange={(v) => setDraft((d) => ({ ...d, finding_enrich: v }))}
 				/>
 				<ThresholdField
-					label="specialist_min"
-					description="Server-side similarity cutoff for repo + shared reads in the specialist memory block."
+					title="Reviewer briefing"
+					keyChip="specialist_min"
+					description="Repo and org memory must be at least this relevant to appear in a reviewer's per-file briefing."
+					lowLabel="more context"
+					highLabel="stricter"
 					value={draft.specialist_min}
 					defaultValue={MEMORY_DEFAULTS.threshold_specialist_min}
 					onChange={(v) => setDraft((d) => ({ ...d, specialist_min: v }))}
 				/>
+			</Section>
+
+			<Section
+				title="Scenario engine"
+				subtitle="Scenarios are failure risks Argus watches for on every PR. These two gates control how they're counted and created."
+			>
 				<ThresholdField
-					label="scenario_trigger"
-					description="Minimum similarity for a simulation failure to increment an existing scenario's trigger count."
+					title="Failure recognition"
+					keyChip="scenario_trigger"
+					description="A simulation failure counts toward an existing scenario only when it matches this closely."
+					lowLabel="count loosely"
+					highLabel="count strictly"
 					value={draft.scenario_trigger}
 					defaultValue={MEMORY_DEFAULTS.threshold_scenario_trigger}
 					onChange={(v) => setDraft((d) => ({ ...d, scenario_trigger: v }))}
 				/>
 				<ThresholdField
-					label="scenario_dedupe"
-					description="Above this similarity, a candidate scenario is treated as a duplicate of an existing one and skipped."
+					title="Duplicate detection"
+					keyChip="scenario_dedupe"
+					description="A proposed scenario this similar to an existing one is treated as a duplicate and skipped."
+					lowLabel="merge more"
+					highLabel="keep more"
 					value={draft.scenario_dedupe}
 					defaultValue={MEMORY_DEFAULTS.threshold_scenario_dedupe}
 					onChange={(v) => setDraft((d) => ({ ...d, scenario_dedupe: v }))}
@@ -173,42 +193,99 @@ function MemoryForm({
 			</Section>
 
 			<Section
-				title="Shared container retirement"
-				subtitle="Org-wide patterns decay and retire over ~6 months of dormancy. Disable to keep everything forever."
+				title="Org-wide pattern lifetime"
+				subtitle="Org-wide patterns start at full confidence. Left dormant, they fade on a nightly schedule; re-confirming one restores it to full strength."
 			>
-				<ToggleField
-					label="disable_shared_decay"
-					description="When ON, the nightly reconciler skips the _shared container decay phase. Patterns remain until manually deleted."
-					value={draft.disable_decay ?? MEMORY_DEFAULTS.disable_shared_decay}
-					defaultValue={MEMORY_DEFAULTS.disable_shared_decay}
-					overridden={draft.disable_decay !== null}
-					onChange={(v) => setDraft((d) => ({ ...d, disable_decay: v }))}
-					onReset={() => setDraft((d) => ({ ...d, disable_decay: null }))}
-				/>
+				<div className="border border-iron bg-charcoal/60 p-4 space-y-4">
+					<div className="flex items-start justify-between gap-4">
+						<div className="flex-1 min-w-0">
+							<div className="flex items-baseline gap-3 mb-1">
+								<span className="text-sm font-mono text-slate-100">Confidence decay</span>
+								<KeyChip name="disable_shared_decay" />
+								{draft.disable_decay !== null && <OverrideChip />}
+							</div>
+							<p className="text-xs font-mono text-slate-500 leading-relaxed">
+								{decayOn
+									? "Dormant patterns fade after 30 days, stop influencing reviews below 0.30, and retire at 0.20 — about 5 months without a re-confirmation."
+									: "Decay is off. Patterns keep full influence forever until deleted by hand."}
+							</p>
+						</div>
+						<div className="flex items-center gap-3 shrink-0">
+							<button
+								type="button"
+								onClick={() =>
+									setDraft((d) => ({
+										...d,
+										// UI is framed positively (decay ON/OFF); storage keeps the
+										// backend's disable_shared_decay flag, so toggling decay off
+										// stores disable=true and vice versa.
+										disable_decay: decayOn,
+									}))
+								}
+								aria-checked={decayOn}
+								role="switch"
+								aria-label="Confidence decay"
+								className={`relative h-6 w-11 shrink-0 transition-colors ${
+									decayOn ? "bg-amber" : "bg-iron"
+								}`}
+							>
+								<span
+									className={`absolute top-0.5 h-5 w-5 bg-slate-100 transition-transform ${
+										decayOn ? "translate-x-5" : "translate-x-0.5"
+									}`}
+								/>
+							</button>
+							<button
+								type="button"
+								onClick={() => setDraft((d) => ({ ...d, disable_decay: null }))}
+								disabled={draft.disable_decay === null}
+								aria-label="Reset confidence decay to default"
+								title="Reset to default (decay on)"
+								className="p-1 text-slate-600 hover:text-slate-300 disabled:opacity-30 disabled:hover:text-slate-600 transition-colors"
+							>
+								<RotateCw className="h-3.5 w-3.5" aria-hidden />
+							</button>
+						</div>
+					</div>
+
+					<DecayTimeline active={decayOn} />
+				</div>
 			</Section>
 
 			<footer className="flex items-center justify-between border-t border-iron pt-6">
-				<p className="text-xs font-mono text-slate-600">
-					{dirty ? "// Unsaved changes" : isSuccess ? "// Saved" : "// Clean"}
+				<p className="text-xs font-mono text-slate-600" aria-live="polite">
+					{dirty ? "Unsaved changes" : isSuccess ? "Saved" : " "}
 				</p>
-				<button
-					type="button"
-					onClick={handleSave}
-					disabled={!dirty || isSaving}
-					className="flex items-center gap-2 px-4 py-2 bg-slate-800 border border-iron text-sm font-mono text-slate-200 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-				>
-					{isSaving ? (
-						<Loader2 className="h-4 w-4 animate-spin" aria-hidden />
-					) : (
-						<Save className="h-4 w-4" aria-hidden />
+				<div className="flex items-center gap-2">
+					{dirty && (
+						<button
+							type="button"
+							onClick={() => setDraft(initial)}
+							className="flex items-center gap-2 px-3 py-2 text-xs font-mono text-slate-500 hover:text-slate-200 transition-colors"
+						>
+							<Undo2 className="h-3.5 w-3.5" aria-hidden />
+							Discard
+						</button>
 					)}
-					Save
-				</button>
+					<button
+						type="button"
+						onClick={handleSave}
+						disabled={!dirty || isSaving}
+						className="flex items-center gap-2 px-4 py-2 bg-slate-800 border border-iron text-sm font-mono text-slate-200 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+					>
+						{isSaving ? (
+							<Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+						) : (
+							<Save className="h-4 w-4" aria-hidden />
+						)}
+						Save changes
+					</button>
+				</div>
 			</footer>
 
 			{isError && (
-				<p className="text-xs font-mono text-red-400">
-					{"// Failed to save — check connection and retry."}
+				<p className="text-xs font-mono text-red-400" role="alert">
+					Save failed. Your edits are still here — check your connection and save again.
 				</p>
 			)}
 		</>
@@ -238,40 +315,64 @@ function Section({
 		<section className="space-y-4">
 			<div className="space-y-1">
 				<h2 className="text-sm font-mono text-slate-300 uppercase tracking-wider">{title}</h2>
-				<p className="text-xs font-mono text-slate-500 leading-relaxed">{subtitle}</p>
+				<p className="text-xs font-mono text-slate-500 leading-relaxed max-w-xl">{subtitle}</p>
 			</div>
 			<div className="space-y-3">{children}</div>
 		</section>
 	);
 }
 
+/** The backend config key, kept visible so settings map 1:1 to the docs. */
+function KeyChip({ name }: { name: string }) {
+	return (
+		<code className="text-[10px] font-mono text-slate-600 border border-iron/60 px-1.5 py-0.5 tracking-tight">
+			{name}
+		</code>
+	);
+}
+
+function OverrideChip({ delta }: { delta?: number }) {
+	return (
+		<span className="text-[10px] font-mono text-amber border border-amber/40 bg-amber/10 px-1.5 py-0.5 tabular-nums">
+			{delta === undefined || delta === 0
+				? "override"
+				: `${delta > 0 ? "+" : "−"}${Math.abs(delta).toFixed(2)}`}
+		</span>
+	);
+}
+
 /**
- * ThresholdField renders one [0, 1] similarity control as:
- *   label  [0.75]  (default: 0.75)  [reset]
- *   [░░░░░░░░░░░░░░░░░░▓▓▓▓▓▓▓▓▓▓▓▓] 0.00 — 1.00
- *
- * The numeric input is primary; the slider is a live scrub. While the field
- * is focused it holds the raw typed string so intermediate states like "0."
- * or "" survive keystrokes; the value is parsed/clamped/rounded on blur or
- * Enter. Empty commits to null (inherit default); an explicit 0 is a valid
- * override, not coerced away. Stepping the slider writes an explicit override
- * (not null) even if the user lands on the default. Reset re-inherits (null).
+ * ThresholdField renders one [0, 1] similarity control. The numeric input is
+ * primary; the slider is a live scrub with the default marked by a notch on
+ * the track. While the field is focused it holds the raw typed string so
+ * intermediate states like "0." or "" survive keystrokes; the value is
+ * parsed/clamped/rounded on blur or Enter. Empty commits to null (inherit
+ * default); an explicit 0 is a valid override, not coerced away. Stepping the
+ * slider writes an explicit override (not null) even if the user lands on the
+ * default. Reset re-inherits (null).
  */
 function ThresholdField({
-	label,
+	title,
+	keyChip,
 	description,
+	lowLabel,
+	highLabel,
 	value,
 	defaultValue,
 	onChange,
 }: {
-	label: string;
+	title: string;
+	keyChip: string;
 	description: string;
+	lowLabel: string;
+	highLabel: string;
 	value: number | null;
 	defaultValue: number;
 	onChange: (v: number | null) => void;
 }) {
 	const effective = value ?? defaultValue;
 	const overridden = value !== null;
+	const delta = overridden ? Number((effective - defaultValue).toFixed(2)) : 0;
 	const [editing, setEditing] = useState(false);
 	const [text, setText] = useState("");
 
@@ -301,17 +402,17 @@ function ThresholdField({
 	const display = editing ? text : effective.toFixed(2);
 
 	return (
-		<div className="border border-iron bg-charcoal/60 p-4 space-y-3">
+		<div
+			className={`border bg-charcoal/60 p-4 space-y-3 transition-colors ${
+				overridden ? "border-amber/40" : "border-iron"
+			}`}
+		>
 			<div className="flex items-start justify-between gap-4">
 				<div className="flex-1 min-w-0">
-					<div className="flex items-baseline gap-3 mb-1">
-						<span className="text-sm font-mono text-slate-200">{label}</span>
-						<span
-							className={`text-xs font-mono ${overridden ? "text-amber" : "text-slate-600"}`}
-							title={overridden ? "overridden" : "using default"}
-						>
-							{overridden ? "// overridden" : "// default"}
-						</span>
+					<div className="flex items-baseline gap-3 mb-1 flex-wrap">
+						<span className="text-sm font-mono text-slate-100">{title}</span>
+						<KeyChip name={keyChip} />
+						{overridden && <OverrideChip delta={delta} />}
 					</div>
 					<p className="text-xs font-mono text-slate-500 leading-relaxed">{description}</p>
 				</div>
@@ -329,15 +430,15 @@ function ThresholdField({
 						onKeyDown={(e) => {
 							if (e.key === "Enter") e.currentTarget.blur();
 						}}
-						aria-label={`${label} value`}
+						aria-label={`${title} value`}
 						className="w-20 bg-[#0a0a12] border border-iron px-2 py-1 text-sm font-mono text-slate-200 text-right focus:border-amber focus:outline-none tabular-nums"
 					/>
 					<button
 						type="button"
 						onClick={() => onChange(null)}
 						disabled={!overridden}
-						aria-label={`Reset ${label} to default`}
-						title={`Reset to ${defaultValue}`}
+						aria-label={`Reset ${title} to default`}
+						title={`Reset to default (${defaultValue.toFixed(2)})`}
 						className="p-1 text-slate-600 hover:text-slate-300 disabled:opacity-30 disabled:hover:text-slate-600 transition-colors"
 					>
 						<RotateCw className="h-3.5 w-3.5" aria-hidden />
@@ -346,25 +447,34 @@ function ThresholdField({
 			</div>
 
 			<div className="space-y-1">
-				<input
-					type="range"
-					min={0}
-					max={1}
-					step={0.01}
-					value={effective}
-					onChange={(e) => scrub(e.target.value)}
-					aria-label={`${label} slider`}
-					className="threshold-range w-full"
-					style={
-						{
-							"--fill": `${effective * 100}%`,
-						} as React.CSSProperties
-					}
-				/>
+				<div className="relative">
+					<input
+						type="range"
+						min={0}
+						max={1}
+						step={0.01}
+						value={effective}
+						onChange={(e) => scrub(e.target.value)}
+						aria-label={`${title} slider`}
+						className="threshold-range w-full"
+						style={
+							{
+								"--fill": `${effective * 100}%`,
+							} as React.CSSProperties
+						}
+					/>
+					{/* Default notch: a fixed tick on the track so the factory value
+					 * stays visible while scrubbing away from it. */}
+					<span
+						aria-hidden
+						className="absolute top-1/2 -translate-y-1/2 h-3 w-px bg-slate-500 pointer-events-none"
+						style={{ left: `${defaultValue * 100}%` }}
+					/>
+				</div>
 				<div className="flex justify-between text-[10px] font-mono text-slate-600 tabular-nums">
-					<span>0.00</span>
-					<span>default: {defaultValue.toFixed(2)}</span>
-					<span>1.00</span>
+					<span>&larr; {lowLabel}</span>
+					<span>default {defaultValue.toFixed(2)}</span>
+					<span>{highLabel} &rarr;</span>
 				</div>
 			</div>
 
@@ -385,6 +495,7 @@ function ThresholdField({
           );
           outline: none;
           cursor: pointer;
+          display: block;
         }
         .threshold-range::-webkit-slider-thumb {
           -webkit-appearance: none;
@@ -399,6 +510,11 @@ function ThresholdField({
         .threshold-range::-webkit-slider-thumb:active {
           cursor: grabbing;
           transform: scale(1.15);
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .threshold-range::-webkit-slider-thumb {
+            transition: none;
+          }
         }
         .threshold-range::-moz-range-thumb {
           width: 12px;
@@ -416,69 +532,137 @@ function ThresholdField({
 	);
 }
 
-/** ToggleField is the boolean analog of ThresholdField. Same overridden
- * indicator + reset control. Styled identically to the feature-flag toggles
- * already in use at /settings/features for visual consistency. */
-function ToggleField({
-	label,
-	description,
-	value,
-	defaultValue,
-	overridden,
-	onChange,
-	onReset,
-}: {
-	label: string;
-	description: string;
-	value: boolean;
-	defaultValue: boolean;
-	overridden: boolean;
-	onChange: (v: boolean) => void;
-	onReset: () => void;
-}) {
+/**
+ * DecayTimeline draws the actual retirement policy as a confidence-over-time
+ * curve: full strength through the 30-day grace window, a weekly fade, the
+ * 0.30 line where a pattern stops influencing reviews, and retirement at
+ * 0.20 (~5 months dormant). With decay off it flattens to a constant line.
+ * Pure SVG derived from the real policy constants — no animation, so it is
+ * identical under prefers-reduced-motion.
+ */
+function DecayTimeline({ active }: { active: boolean }) {
+	// Policy constants mirrored from the backend reconciler: 30d grace, then
+	// -0.05/week from 1.00; influence floor 0.30 (~4.2 mo); retire 0.20 (~4.7 mo).
+	const W = 600;
+	const H = 96;
+	const PAD_X = 8;
+	const MONTHS = 5.5;
+	const x = (months: number) => PAD_X + (months / MONTHS) * (W - 2 * PAD_X);
+	const y = (conf: number) => 10 + (1 - conf) * (H - 34);
+	const graceEnd = 1; // ~30 days
+	const floorAt = graceEnd + 14 / 4.345; // 14 weekly steps to 0.30
+	const retireAt = graceEnd + 16 / 4.345; // 16 weekly steps to 0.20
+
 	return (
-		<div className="border border-iron bg-charcoal/60 p-4">
-			<div className="flex items-start justify-between gap-4">
-				<div className="flex-1 min-w-0">
-					<div className="flex items-baseline gap-3 mb-1">
-						<span className="text-sm font-mono text-slate-200">{label}</span>
-						<span className={`text-xs font-mono ${overridden ? "text-amber" : "text-slate-600"}`}>
-							{overridden ? "// overridden" : "// default"}
-						</span>
-					</div>
-					<p className="text-xs font-mono text-slate-500 leading-relaxed mb-2">{description}</p>
-					<p className="text-[10px] font-mono text-slate-600 uppercase tracking-wide">
-						default: {String(defaultValue)}
-					</p>
-				</div>
-				<div className="flex items-center gap-3 shrink-0">
-					<button
-						type="button"
-						onClick={() => onChange(!value)}
-						aria-checked={value}
-						role="switch"
-						className={`relative h-6 w-11 shrink-0 transition-colors ${
-							value ? "bg-amber" : "bg-iron"
-						}`}
-					>
-						<span
-							className={`absolute top-0.5 h-5 w-5 bg-slate-100 transition-transform ${
-								value ? "translate-x-5" : "translate-x-0.5"
-							}`}
+		<figure className="m-0">
+			<svg
+				viewBox={`0 0 ${W} ${H}`}
+				className="w-full h-auto"
+				role="img"
+				aria-label={
+					active
+						? "Confidence timeline: full strength for 30 days, fading weekly, below 0.30 a pattern stops influencing reviews at about four months, retired at 0.20 after about five months dormant."
+						: "Decay disabled: confidence stays at full strength indefinitely."
+				}
+			>
+				{/* influence floor */}
+				<line
+					x1={PAD_X}
+					x2={W - PAD_X}
+					y1={y(0.3)}
+					y2={y(0.3)}
+					stroke="oklch(1 0 0 / 12%)"
+					strokeDasharray="3 4"
+				/>
+				{active ? (
+					<>
+						{/* grace + fade curve */}
+						<path
+							d={`M ${x(0)} ${y(1)} L ${x(graceEnd)} ${y(1)} L ${x(floorAt)} ${y(0.3)} L ${x(retireAt)} ${y(0.2)}`}
+							fill="none"
+							stroke="var(--color-amber, oklch(0.47 0.157 37.304))"
+							strokeWidth="2"
 						/>
-					</button>
-					<button
-						type="button"
-						onClick={onReset}
-						disabled={!overridden}
-						aria-label={`Reset ${label} to default`}
-						title={`Reset to ${String(defaultValue)}`}
-						className="p-1 text-slate-600 hover:text-slate-300 disabled:opacity-30 disabled:hover:text-slate-600 transition-colors"
+						{/* retirement mark */}
+						<line
+							x1={x(retireAt)}
+							x2={x(retireAt)}
+							y1={y(0.2) - 6}
+							y2={y(0.2) + 6}
+							stroke="oklch(0.637 0.237 25.331)"
+							strokeWidth="2"
+						/>
+						<text
+							x={x(graceEnd / 2)}
+							y={y(1) - 6}
+							textAnchor="middle"
+							className="fill-slate-500"
+							fontSize="9"
+							fontFamily="monospace"
+						>
+							30d grace
+						</text>
+						<text
+							x={x(floorAt)}
+							y={y(0.3) + 14}
+							textAnchor="middle"
+							className="fill-slate-500"
+							fontSize="9"
+							fontFamily="monospace"
+						>
+							0.30 stops influencing
+						</text>
+						<text
+							x={x(retireAt)}
+							y={y(0.2) - 10}
+							textAnchor="end"
+							className="fill-slate-500"
+							fontSize="9"
+							fontFamily="monospace"
+						>
+							0.20 retired ~5mo
+						</text>
+					</>
+				) : (
+					<>
+						<line
+							x1={x(0)}
+							x2={W - PAD_X}
+							y1={y(1)}
+							y2={y(1)}
+							stroke="oklch(1 0 0 / 25%)"
+							strokeWidth="2"
+						/>
+						<text
+							x={W / 2}
+							y={y(1) + 16}
+							textAnchor="middle"
+							className="fill-slate-600"
+							fontSize="9"
+							fontFamily="monospace"
+						>
+							decay off — full strength forever
+						</text>
+					</>
+				)}
+				{/* x-axis month ticks */}
+				{[0, 1, 2, 3, 4, 5].map((m) => (
+					<text
+						key={m}
+						x={x(m)}
+						y={H - 4}
+						textAnchor="middle"
+						className="fill-slate-700"
+						fontSize="8"
+						fontFamily="monospace"
 					>
-						<RotateCw className="h-3.5 w-3.5" aria-hidden />
-					</button>
-				</div>
-			</div>
-		</div>
+						{m}mo
+					</text>
+				))}
+			</svg>
+			<figcaption className="sr-only">
+				Org-wide pattern confidence over months of dormancy.
+			</figcaption>
+		</figure>
 	);
 }
