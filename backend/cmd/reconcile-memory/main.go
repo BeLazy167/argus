@@ -724,52 +724,18 @@ func reindexPattern(ctx context.Context, logger *slog.Logger, st *store.Store, i
 	return nil
 }
 
-// pipelinePatternCustomID reconstructs the deterministic customID the pipeline
-// (or a prior reconciler run) assigned when it first indexed this pattern, so a
-// re-push upserts the SAME Supermemory doc instead of creating a duplicate
-// under a reconciler-specific ID. The DB `source` column diverges from the
-// "segment" the pipeline hashes into the customID (orchestrator.go):
-//
-//	DB source          scope    pipeline write
-//	scoring_confirmed  repo     PatternCustomID(repo,"confirmed",content)   :2980
-//	auto_learn         repo     PatternCustomID(repo,"learned",content)     :3183
-//	auto_learn         shared   PatternCustomID("","org_learned",content)   :3205 (IndexOwnerPattern)
-//	convention         repo     PatternCustomID(repo,"convention",rawConv)  :3334 (hashes the RAW
-//	                                                                          convention, NOT the
-//	                                                                          "Convention [cat]: …" content)
-//
-// Returns "" for any other source (manual/dashboard/…): those rows are created
-// with supermemory_id already set (so they only surface under --full) and their
-// SM-side source can differ from the DB source, so we fall back to the indexer's
-// own default derivation rather than guess a wrong customID.
+// pipelinePatternCustomID delegates to memory.PipelinePatternCustomID — the
+// single source of truth for reconstructing the deterministic customID the
+// pipeline assigned when it first indexed a pattern, shared with
+// cmd/migrate-memory so both tools upsert the SAME Supermemory doc instead of
+// duplicating it.
 func pipelinePatternCustomID(repoName, source, content string, category *string, shared bool) string {
-	switch source {
-	case "scoring_confirmed":
-		return memory.PatternCustomID("", repoName, "confirmed", content)
-	case "auto_learn":
-		if shared {
-			return memory.PatternCustomID("", "", "org_learned", content)
-		}
-		return memory.PatternCustomID("", repoName, "learned", content)
-	case "convention":
-		return memory.PatternCustomID("", repoName, "convention", rawConvention(content, category))
-	default:
-		return ""
-	}
+	return memory.PipelinePatternCustomID(repoName, source, content, category, shared)
 }
 
-// rawConvention recovers the un-wrapped convention text the pipeline hashed into
-// the convention customID. The pipeline stores content as
-// fmt.Sprintf("Convention [%s]: %s", category, convention) (orchestrator.go
-// :3333) but hashes only `convention` into PatternCustomID (:3334). Stripping
-// the exact wrapper prefix reconstructs it; if the wrapper is absent
-// (unexpected), TrimPrefix returns content unchanged so we stay deterministic.
+// rawConvention delegates to memory.RawConvention (single source of truth).
 func rawConvention(content string, category *string) string {
-	cat := ""
-	if category != nil {
-		cat = *category
-	}
-	return strings.TrimPrefix(content, fmt.Sprintf("Convention [%s]: ", cat))
+	return memory.RawConvention(content, category)
 }
 
 // reconcileMode returns a short label describing the run mode for summary logs:
