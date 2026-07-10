@@ -1,7 +1,11 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { createAuthQuery, createAuthMutation, getApi } from "@/lib/query-kit";
 
-export const useOrgDefaults = createAuthQuery<Record<string, unknown>>({
+/** Scoped by installation so an org switch can't serve stale cross-org
+ * defaults from cache. Callers pass `active?.id`. */
+type OrgDefaultsVars = { installationId?: number };
+
+export const useOrgDefaults = createAuthQuery<Record<string, unknown>, OrgDefaultsVars>({
   queryKey: ["org-defaults"],
   fetcher: (_vars, ctx) => {
     const api = getApi(ctx);

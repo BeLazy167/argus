@@ -68,14 +68,17 @@ func scenarioSeverity(s Severity) string {
 //
 //	seeds := pipeline.ExtractScenariosFromReview(run)
 //	pipeline.StoreScenarioSeeds(ctx, st, run.DBInstallationID, &run.DBRepoID, seeds)
-// StoreScenarioSeeds persists seeds, deduping via Supermemory similarity.
-// If a semantically similar scenario already exists (>0.85), skip the new one.
-func StoreScenarioSeeds(ctx context.Context, st *store.Store, indexer *memory.Indexer, owner, repo string, installationID int64, repoID *int64, seeds []ScenarioSeed) {
+// StoreScenarioSeeds persists seeds, deduping via Supermemory similarity. A new
+// seed is skipped only when the top existing scenario matches it at or above
+// dedupeThreshold (memory.Thresholds.ScenarioDedupe, default 0.85). This mirrors
+// the scenario_trigger gate in the orchestrator: an ungated top-1 hit no longer
+// suppresses distinct seeds, so the operator-tunable threshold actually applies.
+func StoreScenarioSeeds(ctx context.Context, st *store.Store, indexer memory.Indexer, owner, repo string, installationID int64, repoID *int64, dedupeThreshold float64, seeds []ScenarioSeed) {
 	for _, seed := range seeds {
 		if indexer != nil {
-			existing := indexer.SearchScenarios(ctx, owner, repo, seed.Description, "", 1)
-			if len(existing) > 0 {
-				continue // similar scenario already exists
+			existing := indexer.SearchScenariosWithIDs(ctx, owner, repo, seed.Description, "", 1)
+			if len(existing) > 0 && existing[0].Similarity >= dedupeThreshold {
+				continue // semantically similar scenario already exists
 			}
 		}
 		id, err := st.CreateScenario(ctx, installationID, repoID, seed.Description, seed.Source, seed.SourceRef, seed.Files, nil, seed.Severity)
@@ -86,6 +89,15 @@ func StoreScenarioSeeds(ctx context.Context, st *store.Store, indexer *memory.In
 		if indexer != nil && id > 0 {
 			if err := indexer.IndexScenario(ctx, owner, repo, id, seed.Description, seed.Severity, seed.Files); err != nil {
 				slog.Warn("failed to index scenario", "error", err, "id", id)
+			} else {
+				// Record the deterministic customID (matches memory.IndexScenario
+				// and reconcile-memory's reconstruction) into 045's mirror column
+				// so a NULL supermemory_id means the write failed, not that the
+				// pipeline never attempted it.
+				customID := fmt.Sprintf("%s--scenario--%d", memory.CustomIDSanitize(repo), id)
+				if err := st.SetScenarioSupermemoryID(ctx, id, customID); err != nil {
+					slog.Warn("write-back scenario SM id", "error", err, "id", id)
+				}
 			}
 		}
 	}

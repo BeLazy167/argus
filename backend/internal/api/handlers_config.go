@@ -514,6 +514,61 @@ func (s *Server) getOrgDefaults(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(settings)
 }
 
+// orgDefaultsBody is the whitelist of settings the org-default endpoint accepts
+// and re-marshals into installations.default_settings. Fields NOT listed here
+// are silently dropped on write — keep this struct's JSON tags in sync with
+// pipeline.repoSettings (persona.go) or a toggle will no-op the way auto_run and
+// the memory thresholds did after they were added to repoSettings but before
+// this whitelist was updated. Pointer fields distinguish "absent (inherit
+// default)" from an explicit value; for thresholds an explicit 0 is a real
+// override (disables the similarity filter), so validateThresholds only rejects
+// values outside [0,1], never 0 itself.
+type orgDefaultsBody struct {
+	Persona             string `json:"persona,omitempty"`
+	CustomPersonaPrompt string `json:"custom_persona_prompt,omitempty"`
+	DeepReview          *bool  `json:"deep_review,omitempty"`
+	CrossFileContext    *bool  `json:"cross_file_context,omitempty"`
+	BlastRadius         *bool  `json:"blast_radius,omitempty"`
+	ScenarioMemory      *bool  `json:"scenario_memory,omitempty"`
+	CodeSimulation      *bool  `json:"code_simulation,omitempty"`
+	PREnrichment        *bool  `json:"pr_enrichment,omitempty"`
+	LearnPatterns       *bool  `json:"learn_patterns,omitempty"`
+	LearnConventions    *bool  `json:"learn_conventions,omitempty"`
+	FileSynthesis       *bool  `json:"file_synthesis,omitempty"`
+	ArchitectureGraph   *bool  `json:"architecture_graph,omitempty"`
+	AutoRun             *bool  `json:"auto_run,omitempty"`
+
+	// Memory thresholds + decay opt-out (Bundle 3/5). Mirror repoSettings.
+	ThresholdFindingEnrich   *float64 `json:"threshold_finding_enrich,omitempty"`
+	ThresholdSpecialistMin   *float64 `json:"threshold_specialist_min,omitempty"`
+	ThresholdScenarioTrigger *float64 `json:"threshold_scenario_trigger,omitempty"`
+	ThresholdScenarioDedupe  *float64 `json:"threshold_scenario_dedupe,omitempty"`
+	DisableSharedDecay       *bool    `json:"disable_shared_decay,omitempty"`
+}
+
+// validate returns a field-specific error message and false when the body is
+// invalid. Threshold overrides are rejected only when out of [0,1] — an explicit
+// 0 is valid and means "filter disabled".
+func (b orgDefaultsBody) validate() (string, bool) {
+	if b.Persona != "" && !pipeline.ValidPersonas[pipeline.Persona(b.Persona)] {
+		return "invalid persona", false
+	}
+	for _, tf := range []struct {
+		name string
+		v    *float64
+	}{
+		{"threshold_finding_enrich", b.ThresholdFindingEnrich},
+		{"threshold_specialist_min", b.ThresholdSpecialistMin},
+		{"threshold_scenario_trigger", b.ThresholdScenarioTrigger},
+		{"threshold_scenario_dedupe", b.ThresholdScenarioDedupe},
+	} {
+		if tf.v != nil && (*tf.v < 0 || *tf.v > 1) {
+			return fmt.Sprintf("%s must be between 0 and 1", tf.name), false
+		}
+	}
+	return "", true
+}
+
 func (s *Server) setOrgDefaults(w http.ResponseWriter, r *http.Request) {
 	installationID, err := strconv.ParseInt(chi.URLParam(r, "installationID"), 10, 64)
 	if err != nil {
@@ -524,35 +579,14 @@ func (s *Server) setOrgDefaults(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not authorized"})
 		return
 	}
-	// Whitelisted settings the org default endpoint accepts. Fields not listed
-	// here are silently dropped — keep this in sync with pipeline.repoSettings
-	// or toggles will no-op like auto_run did after it was introduced but before
-	// this struct was updated.
-	var body struct {
-		Persona             string `json:"persona,omitempty"`
-		CustomPersonaPrompt string `json:"custom_persona_prompt,omitempty"`
-		DeepReview          *bool  `json:"deep_review,omitempty"`
-		CrossFileContext    *bool  `json:"cross_file_context,omitempty"`
-		BlastRadius         *bool  `json:"blast_radius,omitempty"`
-		ScenarioMemory      *bool  `json:"scenario_memory,omitempty"`
-		CodeSimulation      *bool  `json:"code_simulation,omitempty"`
-		PREnrichment        *bool  `json:"pr_enrichment,omitempty"`
-		LearnPatterns       *bool  `json:"learn_patterns,omitempty"`
-		LearnConventions    *bool  `json:"learn_conventions,omitempty"`
-		FileSynthesis       *bool  `json:"file_synthesis,omitempty"`
-		ArchitectureGraph   *bool  `json:"architecture_graph,omitempty"`
-		AutoRun             *bool  `json:"auto_run,omitempty"`
-	}
+	var body orgDefaultsBody
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 		return
 	}
-	if body.Persona != "" {
-		p := pipeline.Persona(body.Persona)
-		if !pipeline.ValidPersonas[p] {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid persona"})
-			return
-		}
+	if msg, ok := body.validate(); !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": msg})
+		return
 	}
 	settings, err := json.Marshal(body)
 	if err != nil {

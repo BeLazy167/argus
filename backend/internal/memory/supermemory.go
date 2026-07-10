@@ -3,6 +3,8 @@ package memory
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,6 +12,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"golang.org/x/time/rate"
 )
 
 // SearchInclude controls which extra fields the v4 search API returns.
@@ -36,20 +40,71 @@ type DocumentLink struct {
 const baseURL = "https://api.supermemory.ai"
 
 // Client wraps the Supermemory REST API for memory storage and retrieval.
+// Holds an optional rate limiter (per-installation token bucket) and an
+// optional backoff policy. Nil limiter or policy disables that feature —
+// NewClient wires sensible defaults for production; tests can pass no-op
+// values without ceremony.
 type Client struct {
-	apiKey string
-	client *http.Client
+	apiKey  string
+	client  *http.Client
+	limiter *rate.Limiter
+	backoff BackoffPolicy
 }
 
-func NewClient(apiKey string) *Client {
-	return &Client{
-		apiKey: apiKey,
-		client: &http.Client{Timeout: 30 * time.Second},
+// ClientOption is a functional option for NewClient. Kept minimal — the only
+// tunables today are rate limits (per-installation QPS/burst) and the retry
+// policy used by doRequest.
+type ClientOption func(*Client)
+
+// WithLimiter attaches a rate limiter. Calls block on Wait before every HTTP
+// call, bounded by MaxWaitForToken so a saturated bucket fails fast rather
+// than stalling the pipeline.
+func WithLimiter(l *rate.Limiter) ClientOption {
+	return func(c *Client) { c.limiter = l }
+}
+
+// WithBackoff overrides the default retry policy. Use for tests that want
+// no retries (pass BackoffPolicy{MaxAttempts: 1}) or non-default timing.
+func WithBackoff(p BackoffPolicy) ClientOption {
+	return func(c *Client) { c.backoff = p }
+}
+
+// NewClient constructs a Supermemory client with the given API key. Applies
+// DefaultBackoff; caller attaches a rate limiter via WithLimiter when BYOK
+// usage requires it (the Registry does this in production).
+func NewClient(apiKey string, opts ...ClientOption) *Client {
+	c := &Client{
+		apiKey:  apiKey,
+		client:  &http.Client{Timeout: 30 * time.Second},
+		backoff: DefaultBackoff,
 	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
 }
 
 // doRequest sends a request with the given method/path and decodes the response.
+// Wraps the actual HTTP call in a retry loop that honors Retry-After for 429s,
+// falls back to exponential backoff with jitter for 502/503/504, and short-
+// circuits all other non-2xx responses. Every call blocks on the rate limiter
+// (if configured) before the first attempt AND before each retry — a 429 that
+// triggers a retry also consumes a token.
 func (c *Client) doRequest(ctx context.Context, method, path string, reqBody, result any) error {
+	return retryWithBackoff(ctx, c.backoff, func(attemptCtx context.Context) error {
+		if err := waitForToken(attemptCtx, c.limiter); err != nil {
+			return err
+		}
+		return c.doOnce(attemptCtx, method, path, reqBody, result)
+	})
+}
+
+// doOnce performs a single HTTP round-trip. Returns *retryableError for status
+// codes the backoff policy retries (429/502/503/504); other non-2xx become
+// plain errors that short-circuit retry. Body marshaling is redone on every
+// attempt — bodyReader cannot be rewound safely across retries, and doJSON is
+// usually called with small bodies.
+func (c *Client) doOnce(ctx context.Context, method, path string, reqBody, result any) error {
 	var bodyReader io.Reader
 	if reqBody != nil {
 		body, err := json.Marshal(reqBody)
@@ -77,6 +132,13 @@ func (c *Client) doRequest(ctx context.Context, method, path string, reqBody, re
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		if isRetryableStatus(resp.StatusCode) {
+			return &retryableError{
+				StatusCode: resp.StatusCode,
+				Body:       respBody,
+				RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
+			}
+		}
 		return fmt.Errorf("supermemory %s %s error (status %d): %s", method, path, resp.StatusCode, string(respBody))
 	}
 
@@ -127,16 +189,6 @@ type BatchAddResponse struct {
 func (c *Client) AddMemoryBatch(ctx context.Context, req BatchAddRequest) (*BatchAddResponse, error) {
 	var result BatchAddResponse
 	if err := c.doJSON(ctx, "/v3/documents/batch", req, &result); err != nil {
-		return nil, err
-	}
-	return &result, nil
-}
-
-// AddMemoryImmediate stores memories via v4/memories. Immediately searchable (embeddings
-// generated on creation) but does NOT support customId upserts.
-func (c *Client) AddMemoryImmediate(ctx context.Context, req AddImmediateRequest) (*AddImmediateResponse, error) {
-	var result AddImmediateResponse
-	if err := c.doJSON(ctx, "/v4/memories", req, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
@@ -233,13 +285,74 @@ func CustomIDSanitize(s string) string {
 }
 
 // OwnerTag returns a container tag scoped to an owner (user or org).
+//
+// Deprecated: under BYOK the Supermemory API key is per-installation, so owner
+// is implicit. New code should target SharedTag for cross-repo data.
 func OwnerTag(owner, kind string) string {
 	return tagSanitizer.Replace(owner) + "--" + kind
 }
 
 // RepoTag returns a container tag scoped to a specific repo under an owner.
+//
+// Deprecated: kind-suffixed containers fragment Supermemory's graph. New code
+// should use RepoTagNew and move the kind into metadata.type.
 func RepoTag(owner, repo, kind string) string {
 	return tagSanitizer.Replace(owner) + "--" + tagSanitizer.Replace(repo) + "--" + kind
+}
+
+// SharedTag is the container tag for cross-repo patterns under one installation.
+// BYOK makes the Supermemory API key the tenant, so there is no owner segment.
+const SharedTag = "_shared"
+
+// repoNameHash returns the first 6 hex chars of sha256(raw repo name). Used as
+// a deterministic disambiguator so two repo names that sanitize to the same
+// string never share a container or a customID.
+func repoNameHash(repo string) string {
+	sum := sha256.Sum256([]byte(repo))
+	return hex.EncodeToString(sum[:3])
+}
+
+// repoNameIsLossy reports whether the repo name cannot be represented safely as
+// a bare container tag / customID segment without risking a collision: either
+// sanitization changes it (so "sdk.js" and "sdk-js" would map to the same
+// token) or the sanitized tag form equals the reserved SharedTag (so a repo
+// literally named "_shared" would land in the cross-repo container). When true,
+// callers append repoNameHash to keep distinct repos distinct.
+func repoNameIsLossy(repo string) bool {
+	tag := tagSanitizer.Replace(repo)
+	return tag != repo || CustomIDSanitize(repo) != repo || tag == SharedTag
+}
+
+// RepoTagNew returns a container tag for a single repo under the installation.
+// Under BYOK each installation has its own Supermemory key, so owner is
+// implicit; the repo name alone identifies the container.
+//
+// Collision guard: tagSanitizer maps '.', '/', ':', '~' to '-', so "sdk.js"
+// and "sdk-js" would otherwise share one container, and a repo named "_shared"
+// would collide with SharedTag. When the raw name is lossy under sanitization
+// (or collides with SharedTag) a short deterministic hash of the RAW name is
+// appended so distinct repos never merge. Safe names are returned unchanged so
+// the common case keeps stable, human-readable tags. Nothing new-shape is
+// deployed yet, so this scheme is free to change.
+func RepoTagNew(repo string) string {
+	tag := tagSanitizer.Replace(repo)
+	if repoNameIsLossy(repo) {
+		return tag + "-" + repoNameHash(repo)
+	}
+	return tag
+}
+
+// repoIDSegment returns the collision-safe {repo} segment used inside customID
+// builders. It mirrors RepoTagNew's disambiguation so a repo's container tag
+// and its customIDs stay consistent: both append the same raw-name hash when
+// the name is lossy under sanitization. Without this, "sdk.js" and "sdk-js"
+// would produce identical customIDs and clobber each other's docs.
+func repoIDSegment(repo string) string {
+	seg := CustomIDSanitize(repo)
+	if repoNameIsLossy(repo) {
+		return seg + "-" + repoNameHash(repo)
+	}
+	return seg
 }
 
 // NegativePatternTag returns a Supermemory tag for false-positive patterns that should be suppressed.
@@ -295,6 +408,44 @@ type FilterCondition struct {
 	Negate          bool   `json:"negate,omitempty"`
 }
 
+// FilterNumeric returns a FilterCondition configured for numeric comparison.
+// Supermemory metadata values are always strings in the API; without filterType
+// "numeric" the server does lexicographic string comparison, which is wrong for
+// fields like pr_number ("99" > "100" lexicographically but 99 < 100 numerically).
+//
+// op is the numericOperator: ">=", "<=", ">", "<", "=".
+func FilterNumeric(key, op, value string) FilterCondition {
+	return FilterCondition{
+		Key:             key,
+		Value:           value,
+		FilterType:      "numeric",
+		NumericOperator: op,
+	}
+}
+
+// BuildFiltersJSON marshals SearchFilters to the JSON-string envelope that
+// POST /v3/documents/list requires. v4/search accepts *SearchFilters nested
+// directly in the request body; this helper is ONLY for ListRequest.
+//
+// Nil input (or filters with no AND/OR conditions) returns empty string and
+// nil error — the caller should treat that as "no filter applied".
+//
+// Rejects AND+OR both populated — Supermemory docs don't define precedence
+// and real behavior would be non-deterministic across calls.
+func BuildFiltersJSON(f *SearchFilters) (string, error) {
+	if f == nil || (len(f.AND) == 0 && len(f.OR) == 0) {
+		return "", nil
+	}
+	if len(f.AND) > 0 && len(f.OR) > 0 {
+		return "", fmt.Errorf("filters: AND and OR are mutually exclusive")
+	}
+	b, err := json.Marshal(f)
+	if err != nil {
+		return "", fmt.Errorf("marshaling filters: %w", err)
+	}
+	return string(b), nil
+}
+
 type SearchResponse struct {
 	Results []SearchResult `json:"results"`
 	Timing  int            `json:"timing"`
@@ -346,39 +497,31 @@ type ListRequest struct {
 	Limit         int      `json:"limit,omitempty"`
 	Page          int      `json:"page,omitempty"`
 	ContainerTags []string `json:"containerTags,omitempty"`
-	Sort          string   `json:"sort,omitempty"`
-	Order         string   `json:"order,omitempty"`
+	// Filters is a JSON-encoded string per Supermemory v3 docs — NOT a nested
+	// object. v4/search accepts nested SearchFilters directly; v3/documents/list
+	// requires the stringified envelope. Use BuildFiltersJSON to construct.
+	Filters string `json:"filters,omitempty"`
+	Sort    string `json:"sort,omitempty"`
+	Order   string `json:"order,omitempty"`
 }
 
 type ListResponse struct {
 	Memories []Document `json:"memories"`
 }
 
+// Document is the /v3/documents/{id} response shape. Metadata + timestamps
+// are needed by the reconciler's `_shared` decay phase (Bundle 5): it reads
+// confidence from metadata and age from UpdatedAt to decide whether to
+// decay, retire, or skip each doc.
 type Document struct {
-	ID     string `json:"id"`
-	Title  string `json:"title,omitempty"`
-	Status string `json:"status,omitempty"`
-}
-
-type AddImmediateRequest struct {
-	ContainerTag string             `json:"containerTag"`
-	Memories     []ImmediateMemory  `json:"memories"`
-}
-
-type ImmediateMemory struct {
-	Content  string            `json:"content"`
-	IsStatic bool              `json:"isStatic,omitempty"`
-	Metadata map[string]string `json:"metadata,omitempty"`
-}
-
-type AddImmediateResponse struct {
-	DocumentID string `json:"documentId"`
-	Memories   []struct {
-		ID        string `json:"id"`
-		Memory    string `json:"memory"`
-		IsStatic  bool   `json:"isStatic"`
-		CreatedAt string `json:"createdAt"`
-	} `json:"memories"`
+	ID        string            `json:"id"`
+	CustomID  string            `json:"customId,omitempty"`
+	Title     string            `json:"title,omitempty"`
+	Status    string            `json:"status,omitempty"`
+	Content   string            `json:"content,omitempty"`
+	Metadata  map[string]string `json:"metadata,omitempty"`
+	CreatedAt string            `json:"createdAt,omitempty"`
+	UpdatedAt string            `json:"updatedAt,omitempty"`
 }
 
 type BulkDeleteRequest struct {

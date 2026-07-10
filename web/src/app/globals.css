@@ -14,10 +14,16 @@
 /* Clip any decorative layer (backdrop glows, parallax-scaled elements)
  * that drifts past the viewport edge. Sections already use overflow-hidden
  * locally, but a global x-clip is cheap insurance against any future bg
- * or motion layer reintroducing a sideways scrollbar. */
+ * or motion layer reintroducing a sideways scrollbar.
+ *
+ * Use `overflow-x: clip` (not `hidden`) — `hidden` creates a scroll
+ * container on html/body which breaks `position: sticky` inside pages
+ * (the sticky element's scroll ancestor becomes the body, not the
+ * viewport). `clip` has the same visual effect without creating a
+ * scroll context. Supported in Chrome/Edge/Firefox/Safari 16+. */
 html,
 body {
-  overflow-x: hidden;
+  overflow-x: clip;
 }
 
 /* ── Tailwind v4 theme bridge ── */

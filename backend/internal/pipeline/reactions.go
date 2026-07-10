@@ -123,7 +123,7 @@ func (ra *ReactionAnalyzer) HandleCommentReactions(ctx context.Context, event gh
 	}
 
 	// Index feedback signal for pattern reinforcement/suppression
-	var indexer *memory.Indexer
+	var indexer memory.Indexer
 	if ra.memRegistry != nil {
 		if inst, instErr := ra.store.GetInstallationByGitHubID(ctx, event.InstallationID); instErr == nil {
 			indexer = ra.memRegistry.GetIndexer(ctx, inst.ID)

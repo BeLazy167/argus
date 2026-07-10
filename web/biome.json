@@ -1,6 +1,13 @@
 {
   "$schema": "https://biomejs.dev/schemas/2.0.0/schema.json",
-  "organizeImports": { "enabled": true },
+  "assist": {
+    "enabled": true,
+    "actions": {
+      "source": {
+        "organizeImports": "on"
+      }
+    }
+  },
   "linter": {
     "enabled": true,
     "rules": {
@@ -32,6 +39,6 @@
     }
   },
   "files": {
-    "ignore": [".next", "node_modules", "*.css"]
+    "includes": ["**", "!.next", "!node_modules", "!**/*.css"]
   }
 }

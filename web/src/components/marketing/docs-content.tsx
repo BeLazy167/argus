@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   GitPullRequest,
   Zap,
@@ -52,12 +52,12 @@ import {
 const SECTIONS = [
   { id: "getting-started", label: "Getting Started" },
   { id: "pipeline", label: "The Review Pipeline" },
-  { id: "deep-review", label: "Deep Review" },
+  { id: "deep-review", label: "Deep Review", pro: true },
   { id: "incremental-reviews", label: "Incremental Reviews" },
   { id: "what-argus-sees", label: "What Argus Sees" },
-  { id: "architecture-viz", label: "Architecture Visualization" },
-  { id: "code-simulation", label: "Code Simulation" },
-  { id: "pr-enrichment", label: "PR Enrichment & Diagrams" },
+  { id: "architecture-viz", label: "Architecture Visualization", pro: true },
+  { id: "code-simulation", label: "Code Simulation", pro: true },
+  { id: "pr-enrichment", label: "PR Enrichment & Diagrams", pro: true },
   { id: "conversational-review", label: "Conversational Review" },
   { id: "live-timeline", label: "Live Activity Timeline" },
   { id: "severities", label: "Severities" },
@@ -70,7 +70,7 @@ const SECTIONS = [
   { id: "auto-review", label: "Auto-review & Triggers" },
   { id: "commands", label: "Bot Commands" },
   { id: "test-generation", label: "Test Generation" },
-  { id: "memory", label: "Memory & Learning" },
+  { id: "memory", label: "Memory & Learning", pro: true },
   { id: "insights", label: "Insights & Risk" },
   { id: "token-tracking", label: "Token & Cost Tracking" },
   { id: "light-mode", label: "Light Mode" },
@@ -211,33 +211,72 @@ function SidebarLink({
   id,
   label,
   active,
+  pro,
 }: {
   id: string;
   label: string;
   active: boolean;
+  /** Renders a compact "Pro" dot after the label — small enough not to
+   * compete with the link itself but visible enough to communicate the
+   * plan gate before the user clicks through. */
+  pro?: boolean;
 }) {
   return (
     <a
       href={`#${id}`}
-      className={`block py-1.5 text-xs font-mono transition-[color,border-color] duration-150 pl-3 ${
+      className={`flex items-center justify-between gap-2 py-1.5 text-xs font-mono transition-[color,border-color] duration-150 pl-3 ${
         active
           ? "text-amber border-l-2 border-amber"
           : "text-slate-text hover:text-foreground border-l-2 border-transparent hover:border-iron"
       }`}
     >
-      {label}
+      <span className="truncate">{label}</span>
+      {pro ? (
+        <span
+          className="shrink-0 text-[8px] font-mono font-semibold uppercase tracking-[0.14em] text-amber/80"
+          aria-label="Pro plan only"
+          title="Pro plan only"
+        >
+          PRO
+        </span>
+      ) : null}
     </a>
   );
 }
 
-function SectionHeader({ id, title }: { id: string; title: string }) {
+function SectionHeader({
+  id,
+  title,
+  pro,
+}: {
+  id: string;
+  title: string;
+  /** When true, inline a PRO tag next to the title so readers on Free see
+   * upfront that the section describes a paid-plan feature. */
+  pro?: boolean;
+}) {
   return (
     <div id={id} className="scroll-mt-24">
-      <h2 className="font-mono text-xl font-bold text-foreground mb-1">
-        {title}
+      <h2 className="font-mono text-xl font-bold text-foreground mb-1 inline-flex items-baseline gap-2.5 flex-wrap">
+        <span>{title}</span>
+        {pro ? <ProTag /> : null}
       </h2>
       <div className="h-px bg-iron mb-6" />
     </div>
+  );
+}
+
+/** Inline PRO tag. Shares aesthetic with the one in docs/features/memory-tuning:
+ * amber-on-dark, mono, uppercase, tight tracking. Marked as aria-label so
+ * screen readers say "Pro plan only" instead of just reading "Pro". */
+function ProTag() {
+  return (
+    <span
+      className="relative -top-0.5 inline-flex items-center border border-amber/50 bg-amber/10 px-1.5 py-0.5 text-[9px] font-mono font-semibold uppercase tracking-[0.16em] text-amber"
+      aria-label="Pro plan only"
+    >
+      Pro
+    </span>
   );
 }
 
@@ -279,8 +318,14 @@ function TerminalBlock({
 
 export function DocsContent() {
   const [activeSection, setActiveSection] = useState<string>(SECTIONS[0].id);
+  const sidebarScrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    // Scroll-spy: flag a section as active once its top crosses 20% into
+    // the viewport, and until its bottom passes the 40% mark. The middle
+    // band is wide enough that fast scrolling still registers every
+    // section — prior version used -60% on the bottom which created
+    // dead zones on short sections.
     const observer = new IntersectionObserver(
       (entries) => {
         for (const entry of entries) {
@@ -289,7 +334,7 @@ export function DocsContent() {
           }
         }
       },
-      { rootMargin: "-20% 0px -60% 0px" },
+      { rootMargin: "-20% 0px -40% 0px" },
     );
 
     for (const s of SECTIONS) {
@@ -299,6 +344,31 @@ export function DocsContent() {
 
     return () => observer.disconnect();
   }, []);
+
+  // Keep the active link visible inside the sidebar's own scroll region
+  // WITHOUT touching the page/window scroll. Element.scrollIntoView()
+  // scrolls every ancestor scroll container including the window — a
+  // prior version used it here and caused the page to auto-scroll back
+  // up whenever the user scrolled down enough to change the active
+  // section. We now compute the offset manually and mutate only
+  // container.scrollTop, which the browser guarantees doesn't affect
+  // any other scroll context.
+  useEffect(() => {
+    const container = sidebarScrollRef.current;
+    if (!container) return;
+    const link = container.querySelector<HTMLElement>(
+      `a[href="#${activeSection}"]`,
+    );
+    if (!link) return;
+    const cRect = container.getBoundingClientRect();
+    const lRect = link.getBoundingClientRect();
+    const margin = 12;
+    if (lRect.top < cRect.top + margin) {
+      container.scrollTop += lRect.top - cRect.top - margin;
+    } else if (lRect.bottom > cRect.bottom - margin) {
+      container.scrollTop += lRect.bottom - cRect.bottom + margin;
+    }
+  }, [activeSection]);
 
   return (
     <section className="mx-auto max-w-5xl px-6 py-28">
@@ -323,7 +393,10 @@ export function DocsContent() {
       <div className="flex gap-12">
         {/* Sidebar */}
         <nav aria-label="Documentation navigation" className="hidden lg:block w-48 shrink-0">
-          <div className="sticky top-20 max-h-[calc(100vh-6rem)] overflow-y-auto space-y-0.5 pb-8">
+          <div
+            ref={sidebarScrollRef}
+            className="sticky top-20 max-h-[calc(100vh-6rem)] overflow-y-auto space-y-0.5 pb-8"
+          >
             <p className="text-[10px] font-mono uppercase tracking-[0.15em] text-iron mb-3">
               On this page
             </p>
@@ -333,6 +406,7 @@ export function DocsContent() {
                 id={s.id}
                 label={s.label}
                 active={activeSection === s.id}
+                pro={"pro" in s ? s.pro : false}
               />
             ))}
           </div>
@@ -436,7 +510,7 @@ export function DocsContent() {
 
           {/* ── Deep Review ── */}
           <div>
-            <SectionHeader id="deep-review" title="Deep Review" />
+            <SectionHeader id="deep-review" title="Deep Review" pro />
             <p className="text-xs font-mono text-slate-text mb-3 leading-relaxed">
               Four specialist agents review every file in parallel.
             </p>
@@ -626,7 +700,7 @@ export function DocsContent() {
 
           {/* ── Architecture Visualization ── */}
           <div>
-            <SectionHeader id="architecture-viz" title="Architecture Visualization" />
+            <SectionHeader id="architecture-viz" title="Architecture Visualization" pro />
             <p className="text-xs font-mono text-slate-text mb-3 leading-relaxed">
               See your codebase as a dependency graph.
             </p>
@@ -729,7 +803,7 @@ export function DocsContent() {
 
           {/* ── Code Simulation ── */}
           <div>
-            <SectionHeader id="code-simulation" title="Code Simulation" />
+            <SectionHeader id="code-simulation" title="Code Simulation" pro />
             <p className="text-xs font-mono text-slate-text mb-3 leading-relaxed">
               Before you merge, Argus imagines what happens.
             </p>
@@ -834,7 +908,7 @@ export function DocsContent() {
 
           {/* ── PR Enrichment & Diagrams ── */}
           <div>
-            <SectionHeader id="pr-enrichment" title="PR Enrichment & Mermaid Diagrams" />
+            <SectionHeader id="pr-enrichment" title="PR Enrichment & Mermaid Diagrams" pro />
             <p className="text-xs font-mono text-slate-text mb-3 leading-relaxed">
               Argus writes the context your PR description forgot.
             </p>
@@ -1739,7 +1813,7 @@ export function DocsContent() {
 
           {/* ── Memory & Learning ── */}
           <div>
-            <SectionHeader id="memory" title="Memory & Learning" />
+            <SectionHeader id="memory" title="Memory & Learning" pro />
             <p className="text-xs font-mono text-slate-text mb-3 leading-relaxed">
               Most tools forget between PRs. Argus remembers everything.
             </p>

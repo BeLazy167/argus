@@ -403,9 +403,9 @@ function PayPerReviewCard() {
   const max = Math.max(...USAGE.map((u) => u.weight));
   return (
     <CardShell
-      eyebrow="Usage, not seats"
-      title="Pay per review. Not per seat."
-      description="Seat licenses punish growing teams. Argus bills only tokens your reviews burn."
+      eyebrow="No per-seat tax"
+      title="Flat org pricing. LLM cost is your own."
+      description="Seat licenses punish growing teams. Argus is a flat org fee — your LLM provider bills you for tokens directly, and we never see the invoice."
     >
       <div className="flex flex-col divide-y divide-iron/30">
         {USAGE.map((bar) => (
@@ -415,7 +415,7 @@ function PayPerReviewCard() {
       <div className="flex items-center gap-2 pt-3 border-t border-amber-glow/15">
         <KeyGlyph className="h-3 w-3 text-amber-glow/80" />
         <span className="font-mono text-[11px] text-slate-text">
-          Your OpenAI, Anthropic, or Bedrock key. We never see the bill.
+          Spend shown is what your provider charges you — OpenAI, Anthropic, Bedrock. Argus takes zero cut.
         </span>
       </div>
     </CardShell>

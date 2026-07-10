@@ -19,6 +19,7 @@ export default function DocsLayout({ children }: { children: ReactNode }) {
           <nav className="space-y-1">
             <DocLink href="/docs/features/issue-acceptance">Issue acceptance</DocLink>
             <DocLink href="/docs/features/cross-pr-checks">Cross-repo PR checks</DocLink>
+            <DocLink href="/docs/features/memory-tuning">Memory tuning</DocLink>
             <DocLink href="/docs/faq">FAQ</DocLink>
           </nav>
         </div>
@@ -31,12 +32,12 @@ export default function DocsLayout({ children }: { children: ReactNode }) {
 }
 
 function DocLink({ href, children }: { href: string; children: ReactNode }) {
-  return (
-    <Link
-      href={href}
-      className="block text-sm text-slate-400 hover:text-slate-200 py-1 transition-colors"
-    >
-      {children}
-    </Link>
-  );
+	return (
+		<Link
+			href={href}
+			className="block text-sm text-slate-400 hover:text-slate-200 py-1 transition-colors"
+		>
+			{children}
+		</Link>
+	);
 }

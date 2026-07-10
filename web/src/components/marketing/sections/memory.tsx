@@ -184,6 +184,25 @@ export function Memory() {
             </FadeIn>
           </div>
         </div>
+
+        {/* BYOK fine-print — the memory store is Supermemory, customer's own
+            account. Same as LLM BYOK. Sets correct expectation before anyone
+            assumes Argus warehouses their code patterns server-side. */}
+        <FadeIn delay={320}>
+          <p className="mt-12 max-w-[80ch] font-mono text-[11px] leading-[1.6] text-slate-text/70">
+            <span className="text-amber-glow/85">/</span> Memory runs on your own{" "}
+            <a
+              href="https://supermemory.ai"
+              target="_blank"
+              rel="noreferrer"
+              className="border-b border-iron underline-offset-4 hover:border-amber-glow hover:text-amber-glow transition-colors"
+            >
+              Supermemory
+            </a>{" "}
+            account. We never store your patterns — you do. Same model as the
+            LLM: your keys, your data, your bill.
+          </p>
+        </FadeIn>
       </div>
     </section>
   );
@@ -613,8 +632,8 @@ function TeamSignalCard() {
         </p>
 
         <p className="mt-3 max-w-[44ch] font-sans text-[13px] leading-[1.6] text-slate-text">
-          Reactions, replies, and who tends to be right compound into a ranking
-          Argus uses on every review.
+          Every 👍 confirms a pattern. Every 👎 teaches Argus what to stop
+          flagging. Thread replies turn into context future reviews reach for.
         </p>
 
         <Link

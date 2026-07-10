@@ -217,15 +217,18 @@ func filePathsQuery(prefix string, paths []string) string {
 	return q
 }
 
-// searchMemoryContent searches Supermemory and returns extracted content strings.
-// Non-fatal: returns nil on any error.
-func searchMemoryContent(ctx context.Context, memClient *memory.Client, query, containerTag string, limit int) []string {
+// searchMemoryContentFiltered performs a hybrid search and returns result
+// content strings. Used by call-sites that need to narrow by metadata (e.g.
+// type=rule within the shared container post-refactor). Non-fatal: returns
+// nil on any error.
+func searchMemoryContentFiltered(ctx context.Context, memClient *memory.Client, query, containerTag string, filters *memory.SearchFilters, limit int) []string {
 	resp, err := memClient.Search(ctx, memory.SearchRequest{
 		Query:        query,
 		ContainerTag: containerTag,
 		SearchMode:   "hybrid",
 		Limit:        limit,
 		Threshold:    0.5,
+		Filters:      filters,
 	})
 	if err != nil {
 		if ctx.Err() != nil {
@@ -244,10 +247,14 @@ func searchMemoryContent(ctx context.Context, memClient *memory.Client, query, c
 	return results
 }
 
-// searchMemoryRich searches Supermemory with rerank + includes and returns enriched content.
-// Non-fatal: returns nil on any error.
-func searchMemoryRich(ctx context.Context, memClient *memory.Client, query, containerTag string, limit int) []string {
-	resp, err := memClient.Search(ctx, memory.SearchRequest{
+// searchMemoryRichTyped searches Supermemory with rerank + includes and
+// returns enriched content pinned to a specific metadata.type. Non-fatal:
+// returns nil on any error. The unified shape keeps multiple types in one
+// container (e.g. `_shared` holds both rules and org patterns); an untyped
+// search mixes them and degrades hint quality — callers should specify the
+// type they want. Pass typeFilter="" for the legacy untyped behavior.
+func searchMemoryRichTyped(ctx context.Context, memClient *memory.Client, query, containerTag string, limit int, typeFilter string) []string {
+	req := memory.SearchRequest{
 		Query:        query,
 		ContainerTag: containerTag,
 		SearchMode:   "hybrid",
@@ -258,7 +265,13 @@ func searchMemoryRich(ctx context.Context, memClient *memory.Client, query, cont
 			RelatedMemories: true,
 			Summaries:       true,
 		},
-	})
+	}
+	if typeFilter != "" {
+		req.Filters = &memory.SearchFilters{AND: []memory.FilterCondition{
+			{Key: "type", Value: typeFilter},
+		}}
+	}
+	resp, err := memClient.Search(ctx, req)
 	if err != nil {
 		if ctx.Err() == nil {
 			slog.Warn("memory search failed", "error", err, "tag", containerTag)
@@ -290,79 +303,74 @@ func formatMemoryBlock(header, footer string, results []string) string {
 	return sb.String()
 }
 
-// specialistMemoryBlock fetches file synthesis + repo/org patterns from Supermemory
-// and returns a prioritized briefing for the specialist's system prompt.
-// Priority: file synthesis > repo patterns > org patterns. Budget: ~600 tokens.
-// Non-fatal: returns empty string on any error.
-func specialistMemoryBlock(ctx context.Context, memClient *memory.Client, owner, repo string, s Specialist, filePath string) string {
-	if memClient == nil {
+// specialistMemoryBlock returns a briefing assembled from the unified memory
+// container: one list lookup for the file synthesis, one semantic search each
+// over the repo and shared containers (filtered by metadata.type). Returns
+// empty string when indexer is nil or nothing matched.
+//
+// Non-fatal: partial results render; context-cancelled or failed searches
+// simply contribute nothing.
+func specialistMemoryBlock(ctx context.Context, indexer memory.Indexer, owner, repo string, s Specialist, filePath string, thresholds memory.Thresholds) string {
+	if indexer == nil {
 		return ""
 	}
+	block := indexer.SpecialistBlock(ctx, owner, repo, filePath, specialistSearchQuery(s), thresholds)
+	return formatSpecialistBlock(block, filePath, true)
+}
 
-	query := specialistSearchQuery(s)
-	repoTag := memory.RepoTag(owner, repo, "patterns")
-
-	// Parallel searches with timeout to avoid stalling the review pipeline
-	searchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	var synthResults, repoResults, orgResults, negResults, posResults []string
-	var wg sync.WaitGroup
-	wg.Add(5)
-	go func() {
-		defer wg.Done()
-		if filePath != "" {
-			synthResults = searchMemoryRich(searchCtx, memClient, "file synthesis "+filePath, repoTag, 2)
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		repoResults = searchMemoryRich(searchCtx, memClient, query, repoTag, 3)
-	}()
-	go func() {
-		defer wg.Done()
-		orgResults = searchMemoryRich(searchCtx, memClient, query, memory.OwnerTag(owner, "patterns"), 3)
-	}()
-	go func() {
-		defer wg.Done()
-		negResults = searchMemoryRich(searchCtx, memClient, query, memory.NegativePatternTag(owner, repo), 3)
-	}()
-	go func() {
-		defer wg.Done()
-		posResults = searchMemoryRich(searchCtx, memClient, query, memory.PositivePatternTag(owner, repo), 3)
-	}()
-	wg.Wait()
-
+// formatSpecialistBlock renders a MemoryBlock into the prompt-ready markdown
+// string. `emphasizeFalsePositives` splits type=feedback with polarity=negative
+// into its own call-out so the LLM explicitly avoids re-flagging dismissed
+// findings. Cap output at ~2400 chars (≈600 tokens) BEFORE footer.
+func formatSpecialistBlock(block memory.MemoryBlock, filePath string, emphasizeFalsePositives bool) string {
 	var sb strings.Builder
-	hasSynth := len(synthResults) > 0
 
-	if hasSynth {
+	if block.Synthesis != "" {
 		sb.WriteString("\n\n## Memory Briefing: " + filePath + "\n\n")
 		sb.WriteString("### File History\n")
-		for _, r := range synthResults {
-			sb.WriteString(r + "\n")
-		}
+		sb.WriteString(util.Truncate(block.Synthesis, 500, true) + "\n")
 	}
 
-	// Combine repo + org patterns
-	patterns := append(repoResults, orgResults...)
+	var patterns, negatives, positives []memory.PatternMatch
+	for _, m := range block.Repo {
+		mt := m.Metadata["type"]
+		if mt == string(memory.TypeFeedback) {
+			switch memory.Polarity(m.Metadata["polarity"]) {
+			case memory.PolarityNegative:
+				negatives = append(negatives, m)
+				continue
+			case memory.PolarityPositive:
+				positives = append(positives, m)
+				continue
+			}
+		}
+		patterns = append(patterns, m)
+	}
+	patterns = append(patterns, block.Shared...)
+
 	if len(patterns) > 0 {
-		if !hasSynth {
+		if block.Synthesis == "" {
 			sb.WriteString("\n\n## Repo Memory (patterns from past reviews)\n\n")
 		} else {
 			sb.WriteString("\n### Repo Patterns\n")
 		}
-		for i, r := range patterns {
-			sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, r))
+		for i, m := range patterns {
+			sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, util.Truncate(m.Content, 500, true)))
 		}
 	}
 
-	if block := formatMemoryBlock("\n## Known False Positives (DO NOT re-flag these patterns)\n", "", negResults); block != "" {
-		sb.WriteString(block)
+	if emphasizeFalsePositives && len(negatives) > 0 {
+		sb.WriteString("\n## Known False Positives (DO NOT re-flag these patterns)\n")
+		for i, m := range negatives {
+			sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, util.Truncate(m.Content, 500, true)))
+		}
 	}
 
-	if block := formatMemoryBlock("\n## Approved Patterns (do not flag code following these)\n", "", posResults); block != "" {
-		sb.WriteString(block)
+	if len(positives) > 0 {
+		sb.WriteString("\n## Approved Patterns (do not flag code following these)\n")
+		for i, m := range positives {
+			sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, util.Truncate(m.Content, 500, true)))
+		}
 	}
 
 	if sb.Len() == 0 {
@@ -370,7 +378,6 @@ func specialistMemoryBlock(ctx context.Context, memClient *memory.Client, owner,
 	}
 	footer := "\nUse this context to inform your review — issues matching known patterns are higher priority.\nWhen a finding matches a known pattern above, add a tag at the end of your comment: *[Matches pattern: <pattern description>]*. Only tag when there is a clear match — do not fabricate references."
 
-	// Cap memory content to ~600 tokens (~2400 chars) BEFORE appending footer to avoid truncating instructions
 	result := sb.String()
 	if len(result) > 2400 {
 		result = util.Truncate(result, 2400, true)
@@ -379,12 +386,16 @@ func specialistMemoryBlock(ctx context.Context, memClient *memory.Client, owner,
 }
 
 
-// reviewMemoryBlock fetches repo/org patterns, rules, and past reviews from Supermemory
-// for non-specialist, non-agentic review passes. This ensures every review — not just
-// deep/specialist ones — benefits from institutional memory.
-// Budget: ~800 tokens. Non-fatal: returns empty string on any error.
-func reviewMemoryBlock(ctx context.Context, memClient *memory.Client, owner, repo, filePath string) string {
-	if memClient == nil || owner == "" || repo == "" {
+// reviewMemoryBlock assembles institutional memory for the non-specialist
+// review pass. Combines SpecialistBlock (synthesis + patterns/scenarios/feedback)
+// with two supplementary searches — rules on `_shared` and past-review context
+// on `{repo}` — that specialists intentionally skip. The main reviewer needs
+// both: rules guide what to flag, and past reviews prevent re-raising the same
+// finding against a line that already has an argus thread.
+//
+// Budget: ~800 tokens. Non-fatal: empty string if indexer nil or repo empty.
+func reviewMemoryBlock(ctx context.Context, indexer memory.Indexer, owner, repo, filePath string, thresholds memory.Thresholds) string {
+	if indexer == nil || repo == "" {
 		return ""
 	}
 
@@ -392,45 +403,50 @@ func reviewMemoryBlock(ctx context.Context, memClient *memory.Client, owner, rep
 	defer cancel()
 
 	query := "code review patterns conventions " + filePath
-	repoPatternTag := memory.RepoTag(owner, repo, "patterns")
-	repoReviewTag := memory.RepoTag(owner, repo, "reviews")
-	ownerPatternTag := memory.OwnerTag(owner, "patterns")
-	ownerRuleTag := memory.OwnerTag(owner, "rules")
+	block := indexer.SpecialistBlock(searchCtx, owner, repo, filePath, query, thresholds)
 
-	var synthResults, repoPatterns, repoReviews, orgPatterns, orgRules, negResults, posResults []string
-	var wg sync.WaitGroup
-	wg.Add(7)
-	go func() {
-		defer wg.Done()
-		if filePath != "" {
-			synthResults = searchMemoryRich(searchCtx, memClient, "file synthesis "+filePath, repoPatternTag, 2)
+	// Rule + past-review context run in parallel with each other — they're
+	// independent of SpecialistBlock's result and of each other. Both are
+	// non-fatal: failures or empty results just omit the respective section.
+	var rules, pastReviews []string
+	memClient := indexer.Client()
+	if memClient != nil {
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			rules = searchMemoryRichTyped(searchCtx, memClient, "review rules conventions", memory.SharedTag, 3, string(memory.TypeRule))
+		}()
+		go func() {
+			defer wg.Done()
+			pastReviews = searchMemoryRichTyped(searchCtx, memClient, query, memory.RepoTagNew(repo), 2, string(memory.TypeReview))
+		}()
+		wg.Wait()
+	}
+
+	var synthResults []string
+	if block.Synthesis != "" {
+		synthResults = []string{util.Truncate(block.Synthesis, 500, true)}
+	}
+	var repoPatterns, orgPatterns, negResults, posResults []string
+	for _, m := range block.Repo {
+		mt := m.Metadata["type"]
+		content := util.Truncate(m.Content, 500, true)
+		if mt == string(memory.TypeFeedback) {
+			switch memory.Polarity(m.Metadata["polarity"]) {
+			case memory.PolarityNegative:
+				negResults = append(negResults, content)
+				continue
+			case memory.PolarityPositive:
+				posResults = append(posResults, content)
+				continue
+			}
 		}
-	}()
-	go func() {
-		defer wg.Done()
-		repoPatterns = searchMemoryRich(searchCtx, memClient, query, repoPatternTag, 3)
-	}()
-	go func() {
-		defer wg.Done()
-		repoReviews = searchMemoryRich(searchCtx, memClient, query, repoReviewTag, 2)
-	}()
-	go func() {
-		defer wg.Done()
-		orgPatterns = searchMemoryRich(searchCtx, memClient, query, ownerPatternTag, 2)
-	}()
-	go func() {
-		defer wg.Done()
-		orgRules = searchMemoryRich(searchCtx, memClient, query, ownerRuleTag, 2)
-	}()
-	go func() {
-		defer wg.Done()
-		negResults = searchMemoryRich(searchCtx, memClient, query, memory.NegativePatternTag(owner, repo), 3)
-	}()
-	go func() {
-		defer wg.Done()
-		posResults = searchMemoryRich(searchCtx, memClient, query, memory.PositivePatternTag(owner, repo), 3)
-	}()
-	wg.Wait()
+		repoPatterns = append(repoPatterns, content)
+	}
+	for _, m := range block.Shared {
+		orgPatterns = append(orgPatterns, util.Truncate(m.Content, 500, true))
+	}
 
 	var sb strings.Builder
 
@@ -438,6 +454,13 @@ func reviewMemoryBlock(ctx context.Context, memClient *memory.Client, owner, rep
 		sb.WriteString("\n\n## File History\n")
 		for _, r := range synthResults {
 			sb.WriteString("- " + r + "\n")
+		}
+	}
+
+	if len(rules) > 0 {
+		sb.WriteString("\n## Review Rules\n")
+		for i, r := range rules {
+			sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, r))
 		}
 	}
 
@@ -449,17 +472,10 @@ func reviewMemoryBlock(ctx context.Context, memClient *memory.Client, owner, rep
 		}
 	}
 
-	if len(orgRules) > 0 {
-		sb.WriteString("\n## Review Rules\n")
-		for _, r := range orgRules {
-			sb.WriteString("- " + r + "\n")
-		}
-	}
-
-	if len(repoReviews) > 0 {
-		sb.WriteString("\n## Past Review Findings (this repo)\n")
-		for _, r := range repoReviews {
-			sb.WriteString("- " + r + "\n")
+	if len(pastReviews) > 0 {
+		sb.WriteString("\n## Past Review Findings (avoid re-raising the same issue)\n")
+		for i, r := range pastReviews {
+			sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, r))
 		}
 	}
 
