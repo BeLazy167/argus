@@ -9,6 +9,7 @@ import {
   useEdgesState,
   useNodesInitialized,
   useReactFlow,
+  useStore,
   ReactFlowProvider,
   MarkerType,
   Position,
@@ -21,6 +22,7 @@ import dagre from "dagre";
 
 import FileNode from "./FileNode";
 import GroupNode from "./GroupNode";
+import { boundsOfNodes, viewportForBounds, type PlacedNode } from "./viewport";
 import type { ArchFile, ArchEdge } from "@/lib/queries/architecture";
 import type { ColorMode } from "@xyflow/react";
 
@@ -161,7 +163,11 @@ type InnerProps = Props & {
 };
 
 function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQuery, onSelectFile }: InnerProps) {
-  const { fitView } = useReactFlow();
+  const { fitView, setViewport } = useReactFlow();
+  // Pane dimensions from the store — the deterministic initial view needs them
+  // to place the focus cluster centered at a readable zoom.
+  const paneWidth = useStore((s) => s.width);
+  const paneHeight = useStore((s) => s.height);
   const colorMode = useColorMode();
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const maxDensity = useMemo(() => Math.max(...files.map((f) => f.bug_density), 0.01), [files]);
@@ -303,44 +309,63 @@ function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQu
   const [nodes, setNodes, onNodesChange] = useNodesState(layout.nodes);
   const [rfEdges, setEdges, onEdgesChange] = useEdgesState(layout.edges);
 
-  // Smart default zoom: focus on top-risk cluster instead of fitting all nodes.
+  // Smart default view: frame the top-risk cluster instead of fitting all nodes.
   const nodesInitialized = useNodesInitialized();
   const initialZoomDone = useMemo(() => ({ current: false }), []);
   useEffect(() => {
-    // Don't consume the one-shot fit before React Flow has measured the laid
-    // out nodes: under the Memory hub the canvas mounts before the files
-    // query resolves, and firing fitView({nodes}) against an unpopulated
-    // store is a silent no-op that left the viewport stranded at origin.
-    if (initialZoomDone.current || files.length === 0 || !nodesInitialized) return;
+    // Gate on measurement + data + a sized pane: the one-shot view must not fire
+    // before React Flow has measured the laid out nodes and the pane has a size.
+    if (
+      initialZoomDone.current ||
+      files.length === 0 ||
+      !nodesInitialized ||
+      paneWidth === 0 ||
+      paneHeight === 0
+    )
+      return;
     initialZoomDone.current = true;
-    const sorted = [...files].sort((a, b) => b.risk_score - a.risk_score);
-    const topN = sorted.slice(0, Math.min(15, files.length));
-    if (topN.length < 15 || files.length <= 15) {
-      // Small repo — fit everything
+
+    if (files.length <= 15) {
+      // Small repo — fitView is reliable at this scale.
       fitView({ padding: 0.15, duration: 400 });
       return;
     }
-    const focusSet = new Set(topN.map((f) => f.path));
-    for (const e of edges) {
-      if (focusSet.has(e.source) || focusSet.has(e.target)) {
-        focusSet.add(e.source);
-        focusSet.add(e.target);
-      }
+
+    // Frame the top-risk files. We deliberately DON'T expand to their graph
+    // neighbors: on a real repo that closure pulls in ~90% of nodes across a
+    // ~35k-px-wide dagre layout, so the "focus" degenerates to fit-all and the
+    // old fitView({nodes}) path stranded the viewport on empty canvas near the
+    // origin. Instead compute the cluster's bounding box from OUR layout
+    // positions (deterministic, not read back from the RF store) and set the
+    // viewport centered at a clamped, readable zoom. ⊞ still offers fit-all.
+    const topPaths = new Set(
+      [...files]
+        .sort((a, b) => b.risk_score - a.risk_score)
+        .slice(0, 12)
+        .map((f) => f.path),
+    );
+    const placed: PlacedNode[] = [];
+    for (const n of layout.nodes) {
+      if (!topPaths.has(n.id)) continue;
+      const w = Number(n.style?.width) || 0;
+      const h = Number(n.style?.height) || 0;
+      placed.push({ x: n.position.x, y: n.position.y, width: w, height: h });
     }
-    // Clamp the initial zoom to a readable scale: on large repos the top-risk
-    // cluster can span the whole layout, and an unclamped fit lands near the
-    // 0.1 floor where labels vanish and the canvas reads as empty. Starting
-    // legible-and-centered beats starting complete-but-invisible; the ⊞
-    // control still offers the true fit-all.
-    fitView({
-      nodes: Array.from(focusSet).map((id) => ({ id })),
-      padding: 0.2,
-      minZoom: 0.45,
-      maxZoom: 1,
-      duration: 400,
-    });
+    const bounds = boundsOfNodes(placed);
+    if (!bounds) {
+      fitView({ padding: 0.2, minZoom: 0.45, maxZoom: 1, duration: 400 });
+      return;
+    }
+    setViewport(
+      viewportForBounds(
+        bounds,
+        { width: paneWidth, height: paneHeight },
+        { padding: 0.2, minZoom: 0.45, maxZoom: 1 },
+      ),
+      { duration: 400 },
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [files, edges, nodesInitialized]);
+  }, [files, nodesInitialized, paneWidth, paneHeight, layout, fitView, setViewport]);
 
   // Highlight connected nodes on selection, search, or lens change.
   //
