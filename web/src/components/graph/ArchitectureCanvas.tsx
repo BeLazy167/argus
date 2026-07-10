@@ -7,6 +7,7 @@ import {
   MiniMap,
   useNodesState,
   useEdgesState,
+  useNodesInitialized,
   useReactFlow,
   ReactFlowProvider,
   MarkerType,
@@ -303,12 +304,14 @@ function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQu
   const [rfEdges, setEdges, onEdgesChange] = useEdgesState(layout.edges);
 
   // Smart default zoom: focus on top-risk cluster instead of fitting all nodes.
+  const nodesInitialized = useNodesInitialized();
   const initialZoomDone = useMemo(() => ({ current: false }), []);
   useEffect(() => {
-    // Don't consume the one-shot fit while data is still loading — under the
-    // Memory hub the canvas mounts before the files query resolves, and a
-    // fit-on-nothing left the viewport stranded in empty space.
-    if (initialZoomDone.current || files.length === 0) return;
+    // Don't consume the one-shot fit before React Flow has measured the laid
+    // out nodes: under the Memory hub the canvas mounts before the files
+    // query resolves, and firing fitView({nodes}) against an unpopulated
+    // store is a silent no-op that left the viewport stranded at origin.
+    if (initialZoomDone.current || files.length === 0 || !nodesInitialized) return;
     initialZoomDone.current = true;
     const sorted = [...files].sort((a, b) => b.risk_score - a.risk_score);
     const topN = sorted.slice(0, Math.min(15, files.length));
@@ -337,7 +340,7 @@ function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQu
       duration: 400,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [files, edges]);
+  }, [files, edges, nodesInitialized]);
 
   // Highlight connected nodes on selection, search, or lens change.
   //
