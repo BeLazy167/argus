@@ -11,6 +11,7 @@ import {
 } from "@/lib/queries/patterns";
 import { useRepos } from "@/lib/queries/repos";
 import { useActiveRepo } from "@/lib/hooks/use-active-repo";
+import { useInstallation } from "@/providers/installation-provider";
 import { RepoSelect } from "@/components/dashboard/repo-select";
 import { formatDistanceToNow } from "@/lib/time";
 import {
@@ -53,10 +54,11 @@ const getSource = (p: { source?: string }) => p.source || "manual";
 
 export default function PatternsPage() {
   const { repos: activeRepos, activeId, setSelectedId } = useActiveRepo();
+  const { active } = useInstallation();
   const activeRepoId = activeId || undefined;
   const { data: patterns, isLoading } = usePatterns({ variables: { repoId: activeRepoId } });
   const { data: repos } = useRepos();
-  const { data: stats } = usePatternStats();
+  const { data: stats } = usePatternStats({ variables: { installationId: active?.id } });
   const createPattern = useCreatePattern();
   const deletePattern = useDeletePattern();
   const [content, setContent] = useState("");
