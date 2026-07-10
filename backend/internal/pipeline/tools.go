@@ -22,6 +22,53 @@ func agenticMemoryTags(repo string) []string {
 	return []string{memory.RepoTagNew(repo), memory.SharedTag}
 }
 
+// agenticMemoryType pairs a queryable metadata.type value with the prose the
+// agentic system prompt shows for it. It is the single source of truth for the
+// optional `type` filter: buildAgenticSystemPrompt advertises exactly these,
+// memoryTools embeds the values as the tool-schema enum, and
+// ToolHandler.searchMemory validates against them — so the prompt, the schema,
+// and the access check cannot drift. Values mirror the memory.Type* constants
+// the indexer actually writes; TypeTrace/TypeTopology are intentionally omitted
+// as they carry no review-time signal.
+type agenticMemoryType struct {
+	Value string
+	Desc  string
+}
+
+func agenticMemoryTypes() []agenticMemoryType {
+	return []agenticMemoryType{
+		{string(memory.TypePattern), "learned conventions / best practices"},
+		{string(memory.TypeScenario), "known issues and past incidents"},
+		{string(memory.TypeFeedback), "developer confirmations (polarity=positive) / dismissals (polarity=negative) — prior false positives to avoid re-flagging"},
+		{string(memory.TypeSynthesis), "file-scoped review-history summary"},
+		{string(memory.TypePRSummary), "prior PR summaries in this repo"},
+		{string(memory.TypeReview), "past review comments on this repo"},
+		{string(memory.TypeRule), "org-wide review rules (shared container only)"},
+	}
+}
+
+// agenticMemoryTypeValues returns just the type strings, for the tool-schema
+// enum and the drift-guard test.
+func agenticMemoryTypeValues() []string {
+	types := agenticMemoryTypes()
+	vals := make([]string, len(types))
+	for i, t := range types {
+		vals[i] = t.Value
+	}
+	return vals
+}
+
+// memoryTypeAllowed reports whether t is a metadata.type the search_memory tool
+// accepts as a filter. Empty t means "no filter" and is allowed by the caller.
+func memoryTypeAllowed(t string) bool {
+	for _, at := range agenticMemoryTypes() {
+		if t == at.Value {
+			return true
+		}
+	}
+	return false
+}
+
 // memoryTools returns the tool definitions for agentic RAG. repo scopes the
 // container_tag description to the concrete tags this review may search.
 func memoryTools(repo string) []llm.Tool {
@@ -31,12 +78,13 @@ func memoryTools(repo string) []llm.Tool {
 			Type: "function",
 			Function: llm.ToolFunction{
 				Name:        "search_memory",
-				Description: "Search Argus memory (past reviews, patterns, rules) by semantic query within a specific container tag scope.",
+				Description: "Search Argus memory (patterns, scenarios, feedback, syntheses, PR summaries, past reviews, rules) by semantic query within a container tag, optionally narrowed to one metadata type.",
 				Parameters: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
 						"query":         map[string]any{"type": "string", "description": "Semantic search query"},
 						"container_tag": map[string]any{"type": "string", "description": fmt.Sprintf("Container tag to scope the search: %q (this repo) or %q (cross-repo patterns and org rules)", tags[0], tags[1])},
+						"type":          map[string]any{"type": "string", "description": "Optional metadata.type filter to narrow results to one kind of memory. Omit to search all kinds.", "enum": agenticMemoryTypeValues()},
 					},
 					"required": []string{"query", "container_tag"},
 				},
@@ -101,6 +149,7 @@ func (th *ToolHandler) searchMemory(ctx context.Context, argsJSON string) (strin
 	var args struct {
 		Query        string `json:"query"`
 		ContainerTag string `json:"container_tag"`
+		Type         string `json:"type"`
 	}
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return "", fmt.Errorf("parsing args: %w", err)
@@ -110,13 +159,21 @@ func (th *ToolHandler) searchMemory(ctx context.Context, argsJSON string) (strin
 		return fmt.Sprintf("Access denied: tag must be one of the containers for this review (%v)", agenticMemoryTags(th.repo)), nil
 	}
 
-	resp, err := th.memClient.Search(ctx, memory.SearchRequest{
+	req := memory.SearchRequest{
 		Query:        args.Query,
 		ContainerTag: args.ContainerTag,
 		SearchMode:   "hybrid",
 		Limit:        5,
 		Threshold:    0.5,
-	})
+	}
+	if args.Type != "" {
+		if !memoryTypeAllowed(args.Type) {
+			return fmt.Sprintf("Invalid type filter %q: must be one of %v (or omit to search all kinds)", args.Type, agenticMemoryTypeValues()), nil
+		}
+		req.Filters = &memory.SearchFilters{AND: []memory.FilterCondition{{Key: "type", Value: args.Type}}}
+	}
+
+	resp, err := th.memClient.Search(ctx, req)
 	if err != nil {
 		return fmt.Sprintf("search failed: %s", err), nil
 	}
