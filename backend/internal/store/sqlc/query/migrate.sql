@@ -83,17 +83,6 @@ WHERE s.installation_id = $1 AND s.repo_id IS NOT NULL AND s.active = TRUE
 ORDER BY s.id ASC
 LIMIT $3;
 
--- name: ListTracesForBackfill :many
--- (e) decision_traces → type=trace docs. repo_id is NOT NULL at the schema
--- level; joined to repos for installation scoping + full_name.
-SELECT dt.id, dt.repo_id, dt.file_path, dt.trace_type, dt.content,
-       COALESCE(dt.severity, '') AS severity, r.full_name
-FROM decision_traces dt
-JOIN repos r ON r.id = dt.repo_id
-WHERE r.installation_id = $1 AND dt.id > $2
-ORDER BY dt.id ASC
-LIMIT $3;
-
 -- name: ListRulesForBackfill :many
 -- (f) rules → type=rule docs in _shared. Prod has 0 rules today; implemented
 -- for completeness.

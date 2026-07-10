@@ -218,20 +218,6 @@ func TestMapScenario(t *testing.T) {
 	}
 }
 
-func TestMapTrace(t *testing.T) {
-	row := db.ListTracesForBackfillRow{ID: 3, RepoID: 9, FilePath: "auth.go", TraceType: "developer_dismissed", Content: "handled upstream", Severity: "warning", FullName: "acme/webapp"}
-	got, err := mapTrace(row)
-	if err != nil {
-		t.Fatalf("mapTrace: %v", err)
-	}
-	if got.Doc.CustomID != memory.TraceCustomID("webapp", "auth.go", "developer_dismissed", "handled upstream") {
-		t.Errorf("customID = %q", got.Doc.CustomID)
-	}
-	if got.Doc.Metadata["subtype"] != "developer_dismissed" || got.Doc.Metadata["type"] != string(memory.TypeTrace) {
-		t.Errorf("metadata = %v", got.Doc.Metadata)
-	}
-}
-
 func TestMapRule(t *testing.T) {
 	row := db.ListRulesForBackfillRow{ID: 12, Category: "security", Content: "no eval()", Priority: 5}
 	got, err := mapRule(row)

@@ -111,13 +111,13 @@ func memoryTools(repo string) []llm.Tool {
 // repo. repo scopes new-shape container access to this review's repo so a
 // prompt-injected PR cannot steer search_memory into another repo's container.
 type ToolHandler struct {
-	memClient *memory.Client
-	store     *store.Store
-	repo      string
+	indexer memory.Indexer
+	store   *store.Store
+	repo    string
 }
 
-func NewToolHandler(memClient *memory.Client, st *store.Store, repo string) *ToolHandler {
-	return &ToolHandler{memClient: memClient, store: st, repo: repo}
+func NewToolHandler(indexer memory.Indexer, st *store.Store, repo string) *ToolHandler {
+	return &ToolHandler{indexer: indexer, store: st, repo: repo}
 }
 
 // tagAllowed reports whether the review may search container tag. It accepts
@@ -159,32 +159,22 @@ func (th *ToolHandler) searchMemory(ctx context.Context, argsJSON string) (strin
 		return fmt.Sprintf("Access denied: tag must be one of the containers for this review (%v)", agenticMemoryTags(th.repo)), nil
 	}
 
-	req := memory.SearchRequest{
-		Query:        args.Query,
-		ContainerTag: args.ContainerTag,
-		SearchMode:   "hybrid",
-		Limit:        5,
-		Threshold:    0.5,
-	}
-	if args.Type != "" {
-		if !memoryTypeAllowed(args.Type) {
-			return fmt.Sprintf("Invalid type filter %q: must be one of %v (or omit to search all kinds)", args.Type, agenticMemoryTypeValues()), nil
-		}
-		req.Filters = &memory.SearchFilters{AND: []memory.FilterCondition{{Key: "type", Value: args.Type}}}
+	if args.Type != "" && !memoryTypeAllowed(args.Type) {
+		return fmt.Sprintf("Invalid type filter %q: must be one of %v (or omit to search all kinds)", args.Type, agenticMemoryTypeValues()), nil
 	}
 
-	resp, err := th.memClient.Search(ctx, req)
+	results, err := th.indexer.SearchScored(ctx, args.Query, args.ContainerTag, memory.MemoryType(args.Type), 5)
 	if err != nil {
 		return fmt.Sprintf("search failed: %s", err), nil
 	}
 
-	if len(resp.Results) == 0 {
+	if len(results) == 0 {
 		return "No results found.", nil
 	}
 
 	var sb strings.Builder
-	for i, r := range resp.Results {
-		sb.WriteString(fmt.Sprintf("--- Result %d (score: %.2f) ---\n%s\n\n", i+1, r.Similarity, r.Content()))
+	for i, r := range results {
+		sb.WriteString(fmt.Sprintf("--- Result %d (score: %.2f) ---\n%s\n\n", i+1, r.Score, r.Content))
 	}
 	return sb.String(), nil
 }

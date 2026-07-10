@@ -428,62 +428,6 @@ func (q *Queries) ListScenariosForBackfill(ctx context.Context, arg ListScenario
 	return items, nil
 }
 
-const listTracesForBackfill = `-- name: ListTracesForBackfill :many
-SELECT dt.id, dt.repo_id, dt.file_path, dt.trace_type, dt.content,
-       COALESCE(dt.severity, '') AS severity, r.full_name
-FROM decision_traces dt
-JOIN repos r ON r.id = dt.repo_id
-WHERE r.installation_id = $1 AND dt.id > $2
-ORDER BY dt.id ASC
-LIMIT $3
-`
-
-type ListTracesForBackfillParams struct {
-	InstallationID int64 `json:"installation_id"`
-	ID             int64 `json:"id"`
-	Limit          int32 `json:"limit"`
-}
-
-type ListTracesForBackfillRow struct {
-	ID        int64  `json:"id"`
-	RepoID    int64  `json:"repo_id"`
-	FilePath  string `json:"file_path"`
-	TraceType string `json:"trace_type"`
-	Content   string `json:"content"`
-	Severity  string `json:"severity"`
-	FullName  string `json:"full_name"`
-}
-
-// (e) decision_traces → type=trace docs. repo_id is NOT NULL at the schema
-// level; joined to repos for installation scoping + full_name.
-func (q *Queries) ListTracesForBackfill(ctx context.Context, arg ListTracesForBackfillParams) ([]ListTracesForBackfillRow, error) {
-	rows, err := q.db.Query(ctx, listTracesForBackfill, arg.InstallationID, arg.ID, arg.Limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []ListTracesForBackfillRow
-	for rows.Next() {
-		var i ListTracesForBackfillRow
-		if err := rows.Scan(
-			&i.ID,
-			&i.RepoID,
-			&i.FilePath,
-			&i.TraceType,
-			&i.Content,
-			&i.Severity,
-			&i.FullName,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const remapPatternStatsSupermemoryID = `-- name: RemapPatternStatsSupermemoryID :execrows
 UPDATE pattern_stats SET supermemory_id = $1, updated_at = NOW()
 WHERE supermemory_id = $2

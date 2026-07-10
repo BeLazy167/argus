@@ -23,12 +23,12 @@ type ScenarioSearchResult struct {
 	Similarity float64
 }
 
-// MemoryBlock is the structured result of SpecialistBlock: one synthesis hit
+// MemoryBlock is the structured result of specialistBlock: one synthesis hit
 // (exact metadata match) plus a list of semantic matches from repo + shared
-// containers. The caller formats these into a specialist prompt.
+// containers. Briefing (assembleBriefing) dispatches these into typed sections.
 //
 // Concurrency invariant: MemoryBlock MUST remain write-partitioned. The three
-// SpecialistBlock goroutines each write to a distinct field (Synthesis / Repo
+// specialistBlock goroutines each write to a distinct field (Synthesis / Repo
 // / Shared) — no shared slice, no shared map. Do not introduce any shared
 // mutable state without synchronization; the happens-before edge is wg.Wait().
 type MemoryBlock struct {
@@ -40,10 +40,10 @@ type MemoryBlock struct {
 // Indexer is the domain-facing memory API. Callers build typed requests and
 // the implementation handles container selection, metadata validation, and
 // customID derivation. Every write lands in the unified `{repo}` / `_shared`
-// container shape with typed metadata.
+// container shape with typed metadata. The interface exposes typed reads only —
+// no raw *Client escape hatch — so the retrieval + prompt-render seam lives
+// entirely inside this module (see Briefing).
 type Indexer interface {
-	Client() *Client
-
 	// Settings / lifecycle.
 	DisableLLMFilter(ctx context.Context) error
 
@@ -64,11 +64,20 @@ type Indexer interface {
 	SearchDismissedMatch(ctx context.Context, owner, repo, query string, thresholds Thresholds) PatternMatch
 	SearchScenariosWithIDs(ctx context.Context, owner, repo, query, severity string, limit int) []ScenarioSearchResult
 
-	// Specialist retrieval — single call replaces the legacy 5-parallel-query
-	// block. See plan doc for shape: 1 synthesis list + 1 repo semantic + 1
-	// shared semantic. Thresholds controls the server-side similarity cutoff
-	// used by the repo and shared semantic reads.
-	SpecialistBlock(ctx context.Context, owner, repo, filePath, specialistQuery string, thresholds Thresholds) MemoryBlock
+	// Briefing assembles + renders the institutional-memory block for a review
+	// prompt (specialist or single-pass, per opts.Profile), owning query
+	// build, typed retrieval, polarity/type dispatch, per-section truncation,
+	// and the per-call-site character cap. Callers embed the returned markdown
+	// verbatim. Defined in briefing.go.
+	Briefing(ctx context.Context, owner, repo, filePath, query string, opts BriefingOptions) string
+	// SearchHints is the rerank+enriched typed read behind triage/scoring hints.
+	SearchHints(ctx context.Context, query, containerTag string, limit int, typ MemoryType) []string
+	// SearchRuleContent returns the top matching org rule content (used at
+	// finding enrichment) or "".
+	SearchRuleContent(ctx context.Context, query string) string
+	// SearchScored is the scored, error-surfacing read behind the agentic
+	// search_memory tool.
+	SearchScored(ctx context.Context, query, containerTag string, typ MemoryType, limit int) ([]PatternMatch, error)
 
 	// Maintenance.
 	DeleteDocument(ctx context.Context, documentID string) error
@@ -86,9 +95,6 @@ type indexerImpl struct {
 func NewIndexer(client *Client, logger *slog.Logger) Indexer {
 	return &indexerImpl{client: client, logger: logger}
 }
-
-// Client returns the underlying Supermemory client.
-func (idx *indexerImpl) Client() *Client { return idx.client }
 
 // DisableLLMFilter turns off Supermemory's server-side LLM filter. Argus
 // pre-filters all content at the application layer, so the server-side filter
@@ -762,11 +768,12 @@ func scenarioIDFromMetadata(raw json.RawMessage) int64 {
 	return 0
 }
 
-// SpecialistBlock fetches (1) file-scoped synthesis via exact metadata lookup,
+// specialistBlock fetches (1) file-scoped synthesis via exact metadata lookup,
 // (2) repo-scoped semantic hits across patterns/scenarios/feedback, (3)
 // shared semantic hits over patterns. Replaces the legacy 5-parallel-query
-// block — cuts 5×N searches per PR to 2×N plus one list call.
-func (idx *indexerImpl) SpecialistBlock(ctx context.Context, owner, repo, filePath, specialistQuery string, thresholds Thresholds) MemoryBlock {
+// block — cuts 5×N searches per PR to 2×N plus one list call. Owns its own 5s
+// timeout; consumed only by Briefing (assembleBriefing) inside this module.
+func (idx *indexerImpl) specialistBlock(ctx context.Context, owner, repo, filePath, specialistQuery string, thresholds Thresholds) MemoryBlock {
 	_ = owner
 	if idx.client == nil || repo == "" {
 		return MemoryBlock{}

@@ -148,7 +148,7 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 				// base prompt but must NOT drop the deterministic briefing).
 				if u.specialist != "" {
 					p.systemBase = specialistPrompt(u.specialist, run.Prompts)
-					p.memoryBriefing = specialistMemoryBlock(ctx, indexer, owner, repo, u.specialist, u.file.NewName, run.Thresholds)
+					p.memoryBriefing = specialistBriefing(ctx, indexer, owner, repo, u.specialist, u.file.NewName, run.Thresholds)
 					if run.Persona == PersonaCustom {
 						p.promptExtra = PersonaSpecialistHintCustom(run.CustomPersonaPrompt)
 					} else {
@@ -156,7 +156,7 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 					}
 				} else {
 					p.systemBase = customOrDefault(run.Prompts, "review_system", baseSystemPrompt)
-					p.memoryBriefing = reviewMemoryBlock(ctx, indexer, owner, repo, u.file.NewName, run.Thresholds)
+					p.memoryBriefing = reviewBriefing(ctx, indexer, owner, repo, u.file.NewName, run.Thresholds)
 					if run.Persona == PersonaCustom {
 						p.promptExtra = PersonaPromptOverlayCustom(run.CustomPersonaPrompt)
 					} else {
@@ -286,9 +286,9 @@ type reviewParams struct {
 }
 
 func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p reviewParams, fileContents map[string]string, owner, repo string, cfg llm.ModelConfig, provider llm.Provider) (FileReview, StageTokens, error) {
-	var memClient *memory.Client
+	var indexer memory.Indexer
 	if rs.memRegistry != nil {
-		memClient = rs.memRegistry.GetClient(ctx, run.DBInstallationID)
+		indexer = rs.memRegistry.GetIndexer(ctx, run.DBInstallationID)
 	}
 
 	review := FileReview{Path: p.file.NewName}
@@ -358,10 +358,10 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p revie
 
 	var tools []llm.Tool
 	var toolHandler *ToolHandler
-	agentic := memClient != nil && p.action == TriageDeep && p.deepReview
+	agentic := indexer != nil && p.action == TriageDeep && p.deepReview
 	if agentic {
 		tools = memoryTools(repo)
-		toolHandler = NewToolHandler(memClient, rs.store, repo)
+		toolHandler = NewToolHandler(indexer, rs.store, repo)
 	}
 	systemPrompt := composeReviewSystemPrompt(p.systemBase, owner, repo, p.specialist, agentic, p.memoryBriefing, p.promptExtra)
 
@@ -462,8 +462,8 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p revie
 // appended. Previously the agentic branch discarded the briefing, so deep
 // reviews went out with no false-positive/approved context and a voluntary,
 // best-effort search_memory tool as the only memory. memoryBriefing is already
-// char-capped by specialistMemoryBlock/reviewMemoryBlock, so appending it here
-// does not blow the prompt budget.
+// char-capped by the memory module's Briefing (specialistBriefing/reviewBriefing),
+// so appending it here does not blow the prompt budget.
 func composeReviewSystemPrompt(systemBase, owner, repo string, specialist Specialist, agentic bool, memoryBriefing, promptExtra string) string {
 	sys := systemBase
 	if agentic {

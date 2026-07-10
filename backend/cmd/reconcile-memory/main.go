@@ -255,7 +255,7 @@ func reconcileInstallation(ctx context.Context, logger *slog.Logger, st *store.S
 	// and skipped entirely in --full mode: a seed run must never delete docs.
 	var decayed, retired int
 	if !cfg.full {
-		decayed, retired, err = decayShared(ctx, ilog, st, indexer, installID, cfg)
+		decayed, retired, err = decayShared(ctx, ilog, st, registry.GetClient(ctx, installID), installID, cfg)
 		if err != nil {
 			ilog.Warn("shared decay error", "error", err)
 		}
@@ -324,7 +324,7 @@ const maxConsecutiveFailures = 5
 // All-fail detection: if every GetDocument attempted on a page errors (outage),
 // surface an error instead of returning silently, which would be
 // indistinguishable from "no work to do."
-func decayShared(ctx context.Context, logger *slog.Logger, st *store.Store, indexer memory.Indexer, installID int64, cfg runConfig) (int, int, error) {
+func decayShared(ctx context.Context, logger *slog.Logger, st *store.Store, client *memory.Client, installID int64, cfg runConfig) (int, int, error) {
 	disabled, err := sharedDecayDisabled(ctx, st, installID)
 	if err != nil {
 		// Fail closed — an org that configured disable_shared_decay must not
@@ -337,7 +337,6 @@ func decayShared(ctx context.Context, logger *slog.Logger, st *store.Store, inde
 		return 0, 0, nil
 	}
 
-	client := indexer.Client()
 	if client == nil {
 		return 0, 0, nil
 	}

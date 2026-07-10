@@ -80,30 +80,6 @@ WHERE installation_id = $1 AND active = TRUE
 ORDER BY created_at ASC
 LIMIT $2;
 
--- name: ListTracesPendingSM :many
--- Joined against repos to surface installation_id since decision_traces is
--- repo-scoped only in the base schema. The reconciler uses installation_id to
--- resolve the per-installation Supermemory key.
-SELECT dt.id, dt.repo_id, dt.file_path, dt.trace_type, dt.content, COALESCE(dt.severity, '') as severity, r.installation_id
-FROM decision_traces dt
-JOIN repos r ON r.id = dt.repo_id
-WHERE r.installation_id = $1 AND dt.supermemory_id IS NULL
-ORDER BY dt.created_at ASC
-LIMIT $2;
-
--- name: UpdateTraceSupermemoryID :exec
-UPDATE decision_traces SET supermemory_id = $1 WHERE id = $2;
-
--- name: ListAllTracesForRepush :many
--- Full re-push sibling of ListAllPatternsForRepush. Joined against repos for
--- installation_id, same as the pending sweep. Single bounded pass.
-SELECT dt.id, dt.repo_id, dt.file_path, dt.trace_type, dt.content, COALESCE(dt.severity, '') as severity, r.installation_id
-FROM decision_traces dt
-JOIN repos r ON r.id = dt.repo_id
-WHERE r.installation_id = $1
-ORDER BY dt.created_at ASC
-LIMIT $2;
-
 -- name: ListInstallationsWithSMKey :many
 -- Every installation that has a configured Supermemory key. The reconciler
 -- iterates over these and runs the drift-repair sweep for each.
