@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/BeLazy167/argus/backend/internal/llm"
 	"github.com/BeLazy167/argus/backend/internal/memory"
@@ -33,15 +32,16 @@ type TriageResult struct {
 	Reason string       `json:"reason"`
 }
 
-// TriageStage classifies files as skip/skim/deep using a fast LLM.
+// TriageStage classifies files as skip/skim/deep using a fast LLM. Memory
+// hints resolve from run.Indexer (the per-run indexer), so the stage needs no
+// memory.Registry of its own.
 type TriageStage struct {
-	registry    *llm.Registry
-	store       *store.Store
-	memRegistry *memory.Registry
+	registry *llm.Registry
+	store    *store.Store
 }
 
-func NewTriageStage(registry *llm.Registry, st *store.Store, memRegistry *memory.Registry) *TriageStage {
-	return &TriageStage{registry: registry, store: st, memRegistry: memRegistry}
+func NewTriageStage(registry *llm.Registry, st *store.Store) *TriageStage {
+	return &TriageStage{registry: registry, store: st}
 }
 
 func (ts *TriageStage) Execute(ctx context.Context, run *PipelineRun) error {
@@ -133,11 +133,7 @@ func (ts *TriageStage) llmTriage(ctx context.Context, run *PipelineRun) (map[str
 		slog.Warn("triage: invalid repo name, skipping memory hints", "error", splitErr)
 	}
 	prompt := buildTriagePrompt(run.Diff.Files)
-	var memClient *memory.Client
-	if ts.memRegistry != nil {
-		memClient = ts.memRegistry.GetClient(ctx, run.DBInstallationID)
-	}
-	if hints := triageMemoryHints(ctx, memClient, owner, repo, run.Diff.Files); hints != "" {
+	if hints := triageMemoryHints(ctx, run.Indexer, owner, repo, run.Diff.Files); hints != "" {
 		prompt += "\n" + hints
 	}
 
@@ -366,13 +362,11 @@ func (s storeConfigLister) ListLLMConfigs(ctx context.Context, repoID int64) ([]
 // triageMemoryHints searches Supermemory for file synthesis docs, repo patterns,
 // owner patterns, and rules matching changed files.
 // Returns a hint block for the triage prompt, or empty string if no history found.
-func triageMemoryHints(ctx context.Context, memClient *memory.Client, owner, repo string, files []diff.FileDiff) string {
-	if memClient == nil || owner == "" || repo == "" || len(files) == 0 {
+func triageMemoryHints(ctx context.Context, indexer memory.Indexer, owner, repo string, files []diff.FileDiff) string {
+	if indexer == nil || owner == "" || repo == "" || len(files) == 0 {
 		return ""
 	}
 
-	searchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
 	var fileNames []string
 	for _, f := range files {
 		fileNames = append(fileNames, f.NewName)
@@ -386,7 +380,8 @@ func triageMemoryHints(ctx context.Context, memClient *memory.Client, owner, rep
 	ownerTag := memory.SharedTag
 	rulesTag := memory.SharedTag
 
-	// Parallel searches for repo patterns, owner patterns, and rules
+	// Parallel searches for repo patterns, owner patterns, and rules. Each
+	// SearchHints owns its own 5s timeout + non-fatal Warn (module policy).
 	var repoResults, ownerResults, ruleResults []string
 	var wg sync.WaitGroup
 	wg.Add(3)
@@ -396,15 +391,15 @@ func triageMemoryHints(ctx context.Context, memClient *memory.Client, owner, rep
 		// review-history summary. The unified repo container also holds patterns,
 		// scenarios, feedback, traces and review comments; an untyped search
 		// (contradicting the comment above) mixes them into the history hints.
-		repoResults = searchMemoryRichTyped(searchCtx, memClient, query, repoTag, 5, string(memory.TypeSynthesis))
+		repoResults = indexer.SearchHints(ctx, query, repoTag, 5, memory.TypeSynthesis)
 	}()
 	go func() {
 		defer wg.Done()
-		ownerResults = searchMemoryRichTyped(searchCtx, memClient, query, ownerTag, 3, string(memory.TypePattern))
+		ownerResults = indexer.SearchHints(ctx, query, ownerTag, 3, memory.TypePattern)
 	}()
 	go func() {
 		defer wg.Done()
-		ruleResults = searchMemoryRichTyped(searchCtx, memClient, "review rules conventions", rulesTag, 3, string(memory.TypeRule))
+		ruleResults = indexer.SearchHints(ctx, "review rules conventions", rulesTag, 3, memory.TypeRule)
 	}()
 	wg.Wait()
 

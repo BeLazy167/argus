@@ -225,32 +225,6 @@ func mapScenario(row db.ListScenariosForBackfillRow) (mappedDoc, error) {
 	}, nil
 }
 
-// mapTrace renders a decision_traces row into a type=trace doc (mirrors
-// IndexDecisionTrace): trace_type in subtype metadata, content-hash customID.
-func mapTrace(row db.ListTracesForBackfillRow) (mappedDoc, error) {
-	repo, err := repoToken(row.FullName)
-	if err != nil {
-		return mappedDoc{}, err
-	}
-	md, err := memory.Metadata{
-		Type:     memory.TypeTrace,
-		Subtype:  row.TraceType,
-		FilePath: row.FilePath,
-		Severity: row.Severity,
-	}.ToMap()
-	if err != nil {
-		return mappedDoc{}, err
-	}
-	return mappedDoc{
-		Container: memory.RepoTagNew(repo),
-		Doc: memory.BatchDocument{
-			Content:  row.Content,
-			CustomID: memory.TraceCustomID(repo, row.FilePath, row.TraceType, row.Content),
-			Metadata: md,
-		},
-	}, nil
-}
-
 // mapRule renders a rules row into a type=rule doc in _shared (mirrors
 // IndexRule): rule_id + priority in Extra, RuleCustomID by DB id.
 func mapRule(row db.ListRulesForBackfillRow) (mappedDoc, error) {

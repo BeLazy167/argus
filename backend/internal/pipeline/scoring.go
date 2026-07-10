@@ -7,7 +7,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/BeLazy167/argus/backend/internal/llm"
 	"github.com/BeLazy167/argus/backend/internal/memory"
@@ -17,14 +16,15 @@ import (
 
 // ScoringStage validates review comments using a separate scoring model.
 // If no scoring model is configured, it's a no-op (all comments pass through).
+// Scoring memory context resolves from run.Indexer, so the stage needs no
+// memory.Registry of its own.
 type ScoringStage struct {
-	registry    *llm.Registry
-	store       *store.Store
-	memRegistry *memory.Registry
+	registry *llm.Registry
+	store    *store.Store
 }
 
-func NewScoringStage(registry *llm.Registry, st *store.Store, memRegistry *memory.Registry) *ScoringStage {
-	return &ScoringStage{registry: registry, store: st, memRegistry: memRegistry}
+func NewScoringStage(registry *llm.Registry, st *store.Store) *ScoringStage {
+	return &ScoringStage{registry: registry, store: st}
 }
 
 // scoringThresholdForSeverity returns the minimum score for a comment to survive
@@ -76,11 +76,7 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 	if err != nil {
 		slog.Warn("scoring: invalid repo name, skipping memory context", "error", err)
 	}
-	var memClient *memory.Client
-	if ss.memRegistry != nil {
-		memClient = ss.memRegistry.GetClient(ctx, run.DBInstallationID)
-	}
-	memContext := fetchScoringContext(ctx, memClient, owner, repo, run.FileReviews)
+	memContext := fetchScoringContext(ctx, run.Indexer, owner, repo, run.FileReviews)
 	memContext += buildPatternTrustCalibration(ctx, ss.store, run.DBInstallationID)
 
 	prompt := buildScoringPrompt(run, memContext)
@@ -432,17 +428,15 @@ func buildPatternTrustCalibration(ctx context.Context, st *store.Store, installa
 
 // fetchScoringContext retrieves repo patterns + per-file synthesis from Supermemory to calibrate scoring.
 // Non-fatal: returns empty string on any error.
-func fetchScoringContext(ctx context.Context, memClient *memory.Client, owner, repo string, files []FileReview) string {
-	if memClient == nil || owner == "" || repo == "" {
+func fetchScoringContext(ctx context.Context, indexer memory.Indexer, owner, repo string, files []FileReview) string {
+	if indexer == nil || owner == "" || repo == "" {
 		return ""
 	}
 
 	repoTag := memory.RepoTagNew(repo)
 
-	// Parallel with timeout to avoid stalling the scoring pipeline
-	searchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
+	// Parallel reads; each SearchHints owns its own 5s timeout + non-fatal Warn
+	// (module policy) so a slow search can't stall the scoring pipeline.
 	var repoResults []string
 	var fileResults []string
 	var wg sync.WaitGroup
@@ -453,7 +447,7 @@ func fetchScoringContext(ctx context.Context, memClient *memory.Client, owner, r
 		// feedback, syntheses, traces and review comments. Scoring calibration
 		// ("matching confirmed patterns should score higher") wants learned
 		// patterns only — an untyped search dilutes it with unrelated doc types.
-		repoResults = searchMemoryRichTyped(searchCtx, memClient, "confirmed review patterns conventions common issues", repoTag, 5, string(memory.TypePattern))
+		repoResults = indexer.SearchHints(ctx, "confirmed review patterns conventions common issues", repoTag, 5, memory.TypePattern)
 	}()
 	go func() {
 		defer wg.Done()
@@ -464,7 +458,7 @@ func fetchScoringContext(ctx context.Context, memClient *memory.Client, owner, r
 			}
 			// type=synthesis: "Known File Context" is the file-scoped review
 			// history summary; pin the type so scenarios/patterns don't leak in.
-			fileResults = searchMemoryRichTyped(searchCtx, memClient, filePathsQuery("file synthesis ", paths), repoTag, 3, string(memory.TypeSynthesis))
+			fileResults = indexer.SearchHints(ctx, filePathsQuery("file synthesis ", paths), repoTag, 3, memory.TypeSynthesis)
 		}
 	}()
 	wg.Wait()

@@ -303,8 +303,11 @@ func resolveClient(ctx context.Context, logger *slog.Logger, st *store.Store, re
 	var client *memory.Client
 	if plan {
 		client = registry.GetClient(ctx, installID)
-	} else if indexer := registry.GetIndexer(ctx, installID); indexer != nil {
-		client = indexer.Client()
+	} else if registry.GetIndexer(ctx, installID) != nil {
+		// Route through GetIndexer first so the account is configured exactly as
+		// the live pipeline configures it (one-time DisableLLMFilter PATCH), then
+		// take the shared rate-limited client (cached, same instance) for writes.
+		client = registry.GetClient(ctx, installID)
 	}
 	if client != nil {
 		return client, statusProcessed
@@ -419,8 +422,7 @@ func backfillInstallation(ctx context.Context, logger *slog.Logger, st *store.St
 
 	// decision_traces backfill retired: Supermemory trace writes were removed
 	// (Postgres decision_traces is the source of truth), so mirroring traces into
-	// Supermemory is pointless. mapTrace is kept for reference/tests; the sweep is
-	// a no-op.
+	// Supermemory is pointless. The mapper + ListTracesForBackfill query are gone.
 	s.logger.Info("skipping trace backfill", "reason", "supermemory trace writes retired")
 
 	// rules → type=rule (_shared). No supermemory_id column on rules → no write-back.

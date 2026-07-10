@@ -1285,7 +1285,6 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 		return nil // non-fatal
 	}
 
-	memClient := run.Indexer.Client()
 	sem := make(chan struct{}, 5)
 	var wg sync.WaitGroup
 
@@ -1309,16 +1308,10 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 				query := fmt.Sprintf("[%s|%s] %s:%d %s", c.Severity, c.Category, filePath, c.Line, c.Body)
 				match := run.Indexer.SearchPatternMatch(ctx, owner, repo, query, run.Thresholds)
 
-				var ruleContent string
-				if memClient != nil {
-					// Rules now live in the shared container under type=rule metadata
-					// (post-refactor unified shape). Filter pulls only rule docs.
-					results := searchMemoryContentFiltered(ctx, memClient, query, memory.SharedTag,
-						&memory.SearchFilters{AND: []memory.FilterCondition{{Key: "type", Value: string(memory.TypeRule)}}}, 1)
-					if len(results) > 0 {
-						ruleContent = results[0]
-					}
-				}
+				// Rules live in the shared container under type=rule metadata
+				// (post-refactor unified shape). SearchRuleContent owns the typed
+				// filter + its own 5s timeout and returns "" on nil client / no hit.
+				ruleContent := run.Indexer.SearchRuleContent(ctx, query)
 
 				// Self-match guard: a near-identical hit is this code's own prior
 				// review comment (re-review noise), not a learned pattern. Zero it

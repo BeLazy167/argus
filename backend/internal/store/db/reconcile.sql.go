@@ -156,60 +156,6 @@ func (q *Queries) ListAllScenariosForRepush(ctx context.Context, arg ListAllScen
 	return items, nil
 }
 
-const listAllTracesForRepush = `-- name: ListAllTracesForRepush :many
-SELECT dt.id, dt.repo_id, dt.file_path, dt.trace_type, dt.content, COALESCE(dt.severity, '') as severity, r.installation_id
-FROM decision_traces dt
-JOIN repos r ON r.id = dt.repo_id
-WHERE r.installation_id = $1
-ORDER BY dt.created_at ASC
-LIMIT $2
-`
-
-type ListAllTracesForRepushParams struct {
-	InstallationID int64 `json:"installation_id"`
-	Limit          int32 `json:"limit"`
-}
-
-type ListAllTracesForRepushRow struct {
-	ID             int64  `json:"id"`
-	RepoID         int64  `json:"repo_id"`
-	FilePath       string `json:"file_path"`
-	TraceType      string `json:"trace_type"`
-	Content        string `json:"content"`
-	Severity       string `json:"severity"`
-	InstallationID int64  `json:"installation_id"`
-}
-
-// Full re-push sibling of ListAllPatternsForRepush. Joined against repos for
-// installation_id, same as the pending sweep. Single bounded pass.
-func (q *Queries) ListAllTracesForRepush(ctx context.Context, arg ListAllTracesForRepushParams) ([]ListAllTracesForRepushRow, error) {
-	rows, err := q.db.Query(ctx, listAllTracesForRepush, arg.InstallationID, arg.Limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []ListAllTracesForRepushRow
-	for rows.Next() {
-		var i ListAllTracesForRepushRow
-		if err := rows.Scan(
-			&i.ID,
-			&i.RepoID,
-			&i.FilePath,
-			&i.TraceType,
-			&i.Content,
-			&i.Severity,
-			&i.InstallationID,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const listInstallationsWithSMKey = `-- name: ListInstallationsWithSMKey :many
 SELECT id FROM installations
 WHERE supermemory_key_enc IS NOT NULL AND supermemory_key_enc <> ''
@@ -356,61 +302,6 @@ func (q *Queries) ListScenariosPendingSM(ctx context.Context, arg ListScenariosP
 	return items, nil
 }
 
-const listTracesPendingSM = `-- name: ListTracesPendingSM :many
-SELECT dt.id, dt.repo_id, dt.file_path, dt.trace_type, dt.content, COALESCE(dt.severity, '') as severity, r.installation_id
-FROM decision_traces dt
-JOIN repos r ON r.id = dt.repo_id
-WHERE r.installation_id = $1 AND dt.supermemory_id IS NULL
-ORDER BY dt.created_at ASC
-LIMIT $2
-`
-
-type ListTracesPendingSMParams struct {
-	InstallationID int64 `json:"installation_id"`
-	Limit          int32 `json:"limit"`
-}
-
-type ListTracesPendingSMRow struct {
-	ID             int64  `json:"id"`
-	RepoID         int64  `json:"repo_id"`
-	FilePath       string `json:"file_path"`
-	TraceType      string `json:"trace_type"`
-	Content        string `json:"content"`
-	Severity       string `json:"severity"`
-	InstallationID int64  `json:"installation_id"`
-}
-
-// Joined against repos to surface installation_id since decision_traces is
-// repo-scoped only in the base schema. The reconciler uses installation_id to
-// resolve the per-installation Supermemory key.
-func (q *Queries) ListTracesPendingSM(ctx context.Context, arg ListTracesPendingSMParams) ([]ListTracesPendingSMRow, error) {
-	rows, err := q.db.Query(ctx, listTracesPendingSM, arg.InstallationID, arg.Limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []ListTracesPendingSMRow
-	for rows.Next() {
-		var i ListTracesPendingSMRow
-		if err := rows.Scan(
-			&i.ID,
-			&i.RepoID,
-			&i.FilePath,
-			&i.TraceType,
-			&i.Content,
-			&i.Severity,
-			&i.InstallationID,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const updatePatternSupermemoryID = `-- name: UpdatePatternSupermemoryID :execrows
 UPDATE patterns SET supermemory_id = $1, updated_at = NOW() WHERE id = $2
 `
@@ -443,19 +334,5 @@ type UpdateScenarioSupermemoryIDParams struct {
 
 func (q *Queries) UpdateScenarioSupermemoryID(ctx context.Context, arg UpdateScenarioSupermemoryIDParams) error {
 	_, err := q.db.Exec(ctx, updateScenarioSupermemoryID, arg.SupermemoryID, arg.ID)
-	return err
-}
-
-const updateTraceSupermemoryID = `-- name: UpdateTraceSupermemoryID :exec
-UPDATE decision_traces SET supermemory_id = $1 WHERE id = $2
-`
-
-type UpdateTraceSupermemoryIDParams struct {
-	SupermemoryID *string `json:"supermemory_id"`
-	ID            int64   `json:"id"`
-}
-
-func (q *Queries) UpdateTraceSupermemoryID(ctx context.Context, arg UpdateTraceSupermemoryIDParams) error {
-	_, err := q.db.Exec(ctx, updateTraceSupermemoryID, arg.SupermemoryID, arg.ID)
 	return err
 }
