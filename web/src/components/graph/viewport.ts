@@ -66,3 +66,31 @@ export function viewportForBounds(
 		zoom,
 	};
 }
+
+/** A viewport transform is usable only if every field is finite and zoom > 0. */
+export function isFiniteViewport(vp: { x: number; y: number; zoom: number }): boolean {
+	return Number.isFinite(vp.x) && Number.isFinite(vp.y) && Number.isFinite(vp.zoom) && vp.zoom > 0;
+}
+
+/**
+ * True when the transform is the untouched React Flow default (translate 0,0 /
+ * scale 1). Used to confirm an imperative viewport write actually took effect —
+ * a write that no-ops (e.g. panZoom not yet ready) leaves the identity transform
+ * behind, so we must NOT treat the one-shot initial view as done.
+ */
+export function isIdentityViewport(
+	vp: { x: number; y: number; zoom: number },
+	eps = 1e-3,
+): boolean {
+	return Math.abs(vp.x) < eps && Math.abs(vp.y) < eps && Math.abs(vp.zoom - 1) < eps;
+}
+
+/** A finite, positive pane size, or null if either dimension is unusable. */
+export function usablePane(
+	width: number | undefined,
+	height: number | undefined,
+): { width: number; height: number } | null {
+	if (typeof width !== "number" || !Number.isFinite(width) || width <= 0) return null;
+	if (typeof height !== "number" || !Number.isFinite(height) || height <= 0) return null;
+	return { width, height };
+}
