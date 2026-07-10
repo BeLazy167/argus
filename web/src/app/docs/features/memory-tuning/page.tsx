@@ -42,12 +42,10 @@ export default function MemoryTuningPage() {
 
 			<h2 className="text-lg font-mono text-slate-100 pt-4">Where to tune</h2>
 			<p>
-				Open <strong className="text-slate-200">Memory</strong> from the dashboard sidebar (under
-				the <strong className="text-slate-200">Workspace</strong> section). Changes apply to the
-				next review. Each field shows{" "}
-				<code className="bg-slate-900 px-1 text-amber">{"// overridden"}</code> (amber) when
-				you&apos;ve set a custom value; reset to default via the circular-arrow icon next to each
-				control.
+				Open <strong className="text-slate-200">Settings</strong> from the dashboard sidebar and
+				switch to the <strong className="text-slate-200">Memory</strong> tab. Changes apply to the
+				next review. An overridden field shows an amber border and a delta chip; reset to default
+				via the circular-arrow icon next to each control.
 			</p>
 
 			<h2 className="text-lg font-mono text-slate-100 pt-4">Thresholds</h2>
