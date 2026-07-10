@@ -324,9 +324,16 @@ function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQu
         focusSet.add(e.target);
       }
     }
+    // Clamp the initial zoom to a readable scale: on large repos the top-risk
+    // cluster can span the whole layout, and an unclamped fit lands near the
+    // 0.1 floor where labels vanish and the canvas reads as empty. Starting
+    // legible-and-centered beats starting complete-but-invisible; the ⊞
+    // control still offers the true fit-all.
     fitView({
       nodes: Array.from(focusSet).map((id) => ({ id })),
       padding: 0.2,
+      minZoom: 0.45,
+      maxZoom: 1,
       duration: 400,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
