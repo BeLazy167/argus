@@ -421,6 +421,46 @@ func (c *Client) GetCompareCommitsDiff(ctx context.Context, installationID int64
 	return sb.String(), nil
 }
 
+// CommitTouch is a commit that modified a specific file: its SHA and the
+// author's GitHub login (empty when the commit isn't linked to a GH account).
+type CommitTouch struct {
+	SHA   string
+	Login string
+}
+
+// ListCommitsTouchingFile returns commits reachable from ref that modified
+// path since the given time, oldest first. One page (100 commits) is plenty
+// for the address-detection window between a review comment and the merge.
+func (c *Client) ListCommitsTouchingFile(ctx context.Context, installationID int64, owner, repo, path, ref string, since time.Time) ([]CommitTouch, error) {
+	client, err := c.app.ClientForInstallation(installationID)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.restLimiter.Wait(ctx); err != nil {
+		return nil, fmt.Errorf("rate limit wait: %w", err)
+	}
+	commits, _, err := client.Repositories.ListCommits(ctx, owner, repo, &gh.CommitsListOptions{
+		SHA:         ref,
+		Path:        path,
+		Since:       since,
+		ListOptions: gh.ListOptions{PerPage: 100},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing commits for %s: %w", path, err)
+	}
+	out := make([]CommitTouch, 0, len(commits))
+	// GitHub returns newest first; reverse to oldest-first.
+	for i := len(commits) - 1; i >= 0; i-- {
+		rc := commits[i]
+		login := rc.GetAuthor().GetLogin()
+		if login == "" {
+			login = rc.GetCommitter().GetLogin()
+		}
+		out = append(out, CommitTouch{SHA: rc.GetSHA(), Login: login})
+	}
+	return out, nil
+}
+
 // ListReviewComments returns all comments for a specific review, used to capture github_comment_ids after posting.
 func (c *Client) ListReviewComments(ctx context.Context, installationID int64, owner, repo string, prNumber int, reviewID int64) ([]*gh.PullRequestComment, error) {
 	client, err := c.app.ClientForInstallation(installationID)

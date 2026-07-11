@@ -925,6 +925,21 @@ func (o *Orchestrator) handlePRClosed(ctx context.Context, event ghpkg.PREvent) 
 		return nil
 	}
 
+	// Gauge: mark posted findings addressed/ignored/deferred. Async because it
+	// makes GitHub compare/commit calls; detached from ctx because the webhook
+	// goroutine cancels it as soon as HandlePREvent returns. Non-fatal always.
+	gaugeCtx, gaugeCancel := context.WithTimeout(
+		obs.SetTraceID(context.Background(), obs.TraceID(ctx)), 2*time.Minute)
+	go func() {
+		defer gaugeCancel()
+		defer func() {
+			if r := recover(); r != nil {
+				o.logger.Error("[gauge] detection panic", "recover", r, "pr", event.PRNumber)
+			}
+		}()
+		o.detectFindingOutcomes(gaugeCtx, event, dbRepo.ID)
+	}()
+
 	if event.Merged {
 		if err := o.st.MarkNodesMerged(ctx, dbRepo.ID, event.PRNumber); err != nil {
 			o.logger.Error("[closed] failed to mark nodes merged", "error", err, "pr", event.PRNumber, "repo", event.RepoFullName)
@@ -1825,6 +1840,7 @@ Rules:
 - Fix order: dependency order. If fixing file A changes the API file B uses, list A first.
 - Do NOT list individual findings — those are inline.
 - Use "we" not "you". Collaborative tone.
+- Argus advises, it never gates merges. When the PR is not ready, say it "needs work" and name what would change the verdict — never "blocked", "rejected", "do not merge", or similar denial language.
 - No greetings, no score, no link, no comment count — those are shown separately.`
 
 // generateConversationalBrief calls the LLM to produce a natural-language summary of the review.
@@ -2384,9 +2400,11 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	var summaryBody strings.Builder
 	summaryBody.WriteString(reviewHeader)
 	summaryBody.WriteString(run.Synthesis.Brief)
-	if contractLine := run.Contract.SummaryLine(); contractLine != "" {
+	// The full contract line moved into the Glass Box footer below; only the
+	// unreviewable-size warning stays up top where it can't be missed.
+	if note := run.Contract.UnreviewableNote(); note != "" {
 		summaryBody.WriteString("\n\n")
-		summaryBody.WriteString(contractLine)
+		summaryBody.WriteString(note)
 	}
 	if scopeNote := assessPRScope(run); scopeNote != "" {
 		summaryBody.WriteString("\n\n")
@@ -2469,14 +2487,15 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		summaryBody.WriteString(breakdown)
 	}
 
-	// Footer: single dashboard link + engagement tips in one <sub> block.
-	// Replaces the old layout which rendered THREE links ("Full review →"
-	// inline + "Full review →" in the AI-agents block + "Posted findings")
-	// plus an unconditional "For AI agents:" header that was visually noisy
-	// on zero-finding reviews. The dashboard page serves both humans and
-	// agents; agents can follow the link and hit /api/v1/... from there.
+	// Footer: Glass Box line (contract/depth, reviewers, suppression count,
+	// duration) + single dashboard link + engagement tips in <sub> blocks.
+	// The dashboard page serves both humans and agents; agents can follow the
+	// link and hit /api/v1/... from there.
+	summaryBody.WriteString("\n\n---\n<sub>")
+	summaryBody.WriteString(BuildGlassBoxLine(run.Contract, checkedReviewers(run), countSuppressed(run), time.Since(run.CreatedAt)))
+	summaryBody.WriteString("</sub><br>\n")
 	summaryBody.WriteString(fmt.Sprintf(
-		"\n\n---\n<sub>[Dashboard →](https://argus.reviews/reviews/%s) · "+
+		"<sub>[Dashboard →](https://argus.reviews/reviews/%s) · "+
 			"React 👎 to dismiss · "+
 			"Reply to any inline comment or use `@argus-eye help` to chat</sub>",
 		run.ReviewID.String()))

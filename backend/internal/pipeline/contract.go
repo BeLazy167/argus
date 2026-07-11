@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"path"
 	"strings"
+	"time"
 
 	ghpkg "github.com/BeLazy167/argus/backend/internal/github"
 	"github.com/BeLazy167/argus/backend/pkg/diff"
@@ -147,6 +148,79 @@ func (c *ReviewContract) SummaryLine() string {
 		line += "\n\n> ⚠️ This PR exceeds reviewable size — findings carry reduced confidence. Consider splitting it into smaller PRs."
 	}
 	return line
+}
+
+// UnreviewableNote returns the reduced-confidence/split-suggestion blockquote
+// for unreviewably large PRs, or "" when the PR is a reviewable size.
+func (c *ReviewContract) UnreviewableNote() string {
+	if c == nil || !c.Unreviewable {
+		return ""
+	}
+	return "> ⚠️ This PR exceeds reviewable size — findings carry reduced confidence. Consider splitting it into smaller PRs."
+}
+
+// BuildGlassBoxLine renders the Glass Box footer line for the posted review
+// summary: what contract the review ran under, which reviewers checked the
+// code, how many findings team feedback suppressed, and how long the review
+// took. Nil contract renders as production/full (the nil-contract default
+// behavior everywhere else). Zero-value parts are omitted.
+//
+// Example: "Contract: production/full · checked: bug_hunter, security,
+// architecture, regression · 2 suppressed by team feedback · review took 1m42s"
+func BuildGlassBoxLine(c *ReviewContract, checked []string, suppressed int, took time.Duration) string {
+	class, depth := ChangeClassProduction, DepthFull
+	if c != nil {
+		if c.ChangeClass != "" {
+			class = c.ChangeClass
+		}
+		if c.Depth != "" {
+			depth = c.Depth
+		}
+	}
+	line := fmt.Sprintf("Contract: %s/%s", class, depth)
+	if len(checked) > 0 {
+		line += " · checked: " + strings.Join(checked, ", ")
+	}
+	if suppressed > 0 {
+		line += fmt.Sprintf(" · %d suppressed by team feedback", suppressed)
+	}
+	if took > 0 {
+		line += " · review took " + took.Truncate(time.Second).String()
+	}
+	return line
+}
+
+// checkedReviewers reports which reviewer passes the run dispatched, for the
+// Glass Box footer. Mirrors ReviewStage.Execute's fan-out: deep review runs
+// the 4-specialist squad (one balanced script reviewer for one-time scripts);
+// everything else is a single-pass review.
+func checkedReviewers(run *PipelineRun) []string {
+	switch {
+	case run.DeepReview && run.Contract.Is(ChangeClassOneTimeScript):
+		return []string{string(SpecialistScript)}
+	case run.DeepReview:
+		names := make([]string, 0, 4)
+		for _, s := range AllSpecialists() {
+			names = append(names, string(s))
+		}
+		return names
+	default:
+		return []string{"single-pass review"}
+	}
+}
+
+// countSuppressed tallies findings dropped by dismissal-match suppression
+// (team 👎 feedback) — persisted for the dashboard but never posted.
+func countSuppressed(run *PipelineRun) int {
+	n := 0
+	for _, fr := range run.FileReviews {
+		for _, c := range fr.Comments {
+			if c.Suppressed {
+				n++
+			}
+		}
+	}
+	return n
 }
 
 // raiseBar raises the evidence bar to at least the given level (never lowers).
