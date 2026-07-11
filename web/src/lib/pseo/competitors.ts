@@ -17,6 +17,7 @@ export interface Competitor {
     architectureAnalysis: boolean;
     byok: boolean;
     patternLearning: boolean;
+    reviewContract: boolean;
     selfHosted: boolean;
   };
 }
@@ -29,6 +30,7 @@ export const featureLabels: Record<keyof Competitor["features"], string> = {
   architectureAnalysis: "Architecture & dependency tracing",
   byok: "Bring your own LLM key",
   patternLearning: "Pattern learning from codebase history",
+  reviewContract: "Computed per-PR review contract (automatic depth routing)",
   selfHosted: "Self-hosted deployment",
 };
 
@@ -40,6 +42,7 @@ export const argusFeatures: Competitor["features"] = {
   architectureAnalysis: true,
   byok: true,
   patternLearning: true,
+  reviewContract: true,
   selfHosted: false,
 };
 
@@ -64,14 +67,14 @@ export const competitors: Competitor[] = [
       "Architecture tracing is partial (diagrams exist; no first-class dependency graph)",
     ],
     argusAdvantage:
-      "CodeRabbit is broadly integrated with a large install base and its Learnings engine learns from team feedback — similar in spirit to Argus's memory. Argus's distinct bet is failure scenario simulation (predicting what breaks against known scenarios before merge) plus BYOK so you control cost and data path. Argus is newer; CodeRabbit wins on scale and polish today.",
+      "CodeRabbit is broadly integrated with a large install base and its Learnings engine learns from team feedback — similar in spirit to Argus's memory. Argus's distinct bets: a computed per-PR review contract that routes review depth automatically (no hand-written config), judge-scored findings with a hard 10-comment cap on every tier, failure scenario simulation, and BYOK so you control cost and data path. On re-review Argus resolves its own fixed comments instead of re-flagging them. Argus is newer; CodeRabbit wins on scale and polish today.",
     summary:
       "CodeRabbit is the most widely adopted AI code review tool, processing 13M+ PRs across GitHub, GitLab, Azure DevOps, and Bitbucket. Its Learnings engine gives it genuine memory across reviews — when you correct or dismiss a finding, that preference persists. Strong on breadth, speed, and ecosystem integrations; doesn't offer BYOK, scenario simulation, or self-hosting.",
     stat: {
       claim: "CodeRabbit has processed over 13 million pull requests across 2 million repositories",
       source: "CodeRabbit official website, 2026",
     },
-    updatedAt: "2026-04-16",
+    updatedAt: "2026-07-11",
     features: {
       memory: true,
       multiPass: false,
@@ -80,6 +83,7 @@ export const competitors: Competitor[] = [
       architectureAnalysis: false,
       byok: false,
       patternLearning: true,
+      reviewContract: false,
       selfHosted: false,
     },
   },
@@ -104,14 +108,14 @@ export const competitors: Competitor[] = [
       "Usage-based pricing adds up ($1/review beyond 50/seat)",
     ],
     argusAdvantage:
-      "Greptile is the closest peer on architecture + memory + diagrams — genuine, well-executed features. Argus's remaining differentiators: failure scenario simulation, BYOK so you control the LLM path, and an open pipeline model configurable per stage. Greptile is more mature; Argus gives you more control over cost and model choice.",
+      "Greptile is the closest peer on architecture + memory + diagrams — genuine, well-executed features. Argus's remaining differentiators: failure scenario simulation, BYOK so you control the LLM path, a computed per-PR review contract that routes depth automatically (no hand-written rules), and a Glass Box footer on every review showing the contract, what was checked, and what team feedback suppressed. Greptile is more mature; Argus gives you more control over cost and model choice.",
     summary:
       "Greptile delivers one of the strongest context-aware code reviews on the market — full-codebase graph index, auto-sequence diagrams, Memory & Learning from team feedback, and self-hosted deployment via Docker/Kubernetes. Agent v4 raised actionable comments per PR by 74%. Doesn't offer BYOK or failure scenario simulation.",
     stat: {
       claim: "Greptile Agent v4 increased actionable comments per PR from 0.92 to 1.60, a 74% improvement",
       source: "Greptile v4 blog post, 2026",
     },
-    updatedAt: "2026-04-16",
+    updatedAt: "2026-07-11",
     features: {
       memory: true,
       multiPass: false,
@@ -120,6 +124,7 @@ export const competitors: Competitor[] = [
       architectureAnalysis: true,
       byok: false,
       patternLearning: true,
+      reviewContract: false,
       selfHosted: true,
     },
   },
@@ -144,14 +149,14 @@ export const competitors: Competitor[] = [
       "No self-hosted option",
     ],
     argusAdvantage:
-      "Cubic is a genuinely deep peer — micro-agent pipeline, continuous scanning, self-learning, architecture diagrams. Argus's remaining edges: failure scenario simulation (scenario-against-diff reasoning is a distinct bet), BYOK, and a free tier for private repos (Cubic is free only for public). Both are strong choices; pick based on deployment constraints and whether scenario simulation matters to your workflow.",
+      "Cubic is a genuinely deep peer — micro-agent pipeline, continuous scanning, self-learning, architecture diagrams. Argus's remaining edges: failure scenario simulation (scenario-against-diff reasoning is a distinct bet), BYOK, a computed review contract that routes depth per PR instead of hand-written policies, and a free tier for private repos (Cubic is free only for public). Both are strong choices; pick based on deployment constraints and whether scenario simulation matters to your workflow.",
     summary:
       "Cubic is one of the most feature-complete AI reviewers in 2026 — micro-agent architecture (Planner, Security, Duplication, Editorial) with 51% FP reduction, continuous codebase scanning beyond PR diffs, self-learning from maintainer feedback, and auto Mermaid architecture diagrams. Free for public repos. Doesn't offer BYOK, self-hosting, or scenario simulation.",
     stat: {
       claim: "Cubic's micro-agent architecture achieved a 51% reduction in false positives without sacrificing recall",
       source: "Cubic architecture refinement case study, 2026",
     },
-    updatedAt: "2026-04-16",
+    updatedAt: "2026-07-11",
     features: {
       memory: true,
       multiPass: true,
@@ -160,6 +165,7 @@ export const competitors: Competitor[] = [
       architectureAnalysis: true,
       byok: false,
       patternLearning: true,
+      reviewContract: false,
       selfHosted: false,
     },
   },
@@ -184,14 +190,14 @@ export const competitors: Competitor[] = [
       "No self-hosted option",
     ],
     argusAdvantage:
-      "Sourcery is the closest match on several features — multi-angle review, diagrams, BYOK. Argus differentiates on institutional memory that actually learns from your team's 👍/👎 and replies, failure scenario simulation, and first-class pattern learning. Sourcery is faster today; Argus gets sharper the more your team uses it.",
+      "Sourcery is the closest match on several features — multi-angle review, diagrams, BYOK. Argus differentiates on institutional memory that actually learns from your team's 👍/👎 and replies — dismissed patterns are suppressed semantically, security findings never — plus failure scenario simulation and first-class pattern learning. Sourcery is faster today; Argus gets sharper the more your team uses it, and resolves its own fixed comments on re-review instead of re-flagging.",
     summary:
       "Sourcery delivers instant PR summaries, diagrams, and multi-angle review with bring-your-own-LLM support. Used by 300k+ developers at HelloFresh, Cisco, Red Hat. Competitive on review depth and BYOK; doesn't yet learn from review history or run failure scenario simulations.",
     stat: {
       claim: "Sourcery is used by over 300,000 developers at companies including HelloFresh, Cisco, and Red Hat",
       source: "Sourcery official website, 2026",
     },
-    updatedAt: "2026-04-16",
+    updatedAt: "2026-07-11",
     features: {
       memory: false,
       multiPass: true,
@@ -200,6 +206,7 @@ export const competitors: Competitor[] = [
       architectureAnalysis: false,
       byok: true,
       patternLearning: false,
+      reviewContract: false,
       selfHosted: false,
     },
   },
@@ -224,14 +231,14 @@ export const competitors: Competitor[] = [
       "No diagrams or failure scenario simulation",
     ],
     argusAdvantage:
-      "Qodo is one of the strongest AI review tools today — multi-agent, architecture-aware, open-source core. Argus's distinct bets: first-class memory system (learns from every 👍/👎 and reply, not just codebase context), failure scenario simulation, and BYOK in the managed tier (Qodo requires self-hosting PR-Agent for BYOK).",
+      "Qodo is one of the strongest AI review tools today — multi-agent, architecture-aware, open-source core. Argus's distinct bets: first-class memory system (learns from every 👍/👎 and reply, not just codebase context), failure scenario simulation, a computed per-PR review contract that routes depth automatically, and BYOK in the managed tier (Qodo requires self-hosting PR-Agent for BYOK).",
     summary:
       "Qodo (CodiumAI) is a multi-product AI code quality platform combining PR review (Merge), test generation (Gen), and CLI agents (Command). Its 2026 multi-agent architecture led benchmarks at 60.1% F1. PR-Agent is open-source with full self-hosted + BYOK support. Strong all-rounder; doesn't yet do scenario simulation or persistent review memory.",
     stat: {
       claim: "Qodo 2.0's multi-agent review achieved the highest F1 score (60.1%) benchmarked against 7 leading tools",
       source: "Qodo 2.0 release announcement, February 2026",
     },
-    updatedAt: "2026-04-16",
+    updatedAt: "2026-07-11",
     features: {
       memory: false,
       multiPass: true,
@@ -240,6 +247,7 @@ export const competitors: Competitor[] = [
       architectureAnalysis: true,
       byok: true,
       patternLearning: false,
+      reviewContract: false,
       selfHosted: true,
     },
   },
@@ -265,14 +273,14 @@ export const competitors: Competitor[] = [
       "Fully self-hosted (AI + dashboard) requires Enterprise custom pricing",
     ],
     argusAdvantage:
-      "Semgrep is a best-in-class SAST platform with genuine organizational memory that learns from triage. Argus's edge: failure scenario simulation, BYOK, and review-native workflow (inline PR comments with replies, reactions, diagrams) versus Semgrep's scan/finding-triage model. Use Semgrep for SAST gates, Argus for reviewer-style depth.",
+      "Semgrep is a best-in-class SAST platform with genuine organizational memory that learns from triage. Argus's edge: failure scenario simulation, BYOK, and review-native workflow (inline PR comments with replies, reactions, diagrams, judge-scored with a hard comment cap) versus Semgrep's scan/finding-triage model. Use Semgrep for SAST gates, Argus for reviewer-style depth.",
     summary:
       "Semgrep is a SAST, SCA, and secrets detection platform with 20k+ rules, an open-source engine, Organizational Memory that learns from triage, and Custom Workflows for multi-step pipelines. Strong on compliance scanning and on-prem deployment. The AI features (Multimodal/Assistant) run only in the managed cloud, and there's no BYOK.",
     stat: {
       claim: "Semgrep's Team plan is free for up to 10 contributors, with 20,000+ Pro rules and cross-file analysis",
       source: "Semgrep pricing page, 2026",
     },
-    updatedAt: "2026-04-16",
+    updatedAt: "2026-07-11",
     features: {
       memory: true,
       multiPass: false,
@@ -281,6 +289,7 @@ export const competitors: Competitor[] = [
       architectureAnalysis: false,
       byok: false,
       patternLearning: true,
+      reviewContract: false,
       selfHosted: true,
     },
   },
@@ -303,14 +312,14 @@ export const competitors: Competitor[] = [
       "No multi-stage review pipeline",
     ],
     argusAdvantage:
-      "Codacy applies static rules augmented with recent AI features. Argus is AI-native — multi-stage review, institutional memory that learns your codebase's unique patterns, and failure simulation. Rules can't ask 'why did this change break that module?' Argus can.",
+      "Codacy applies static rules augmented with recent AI features. Argus is AI-native — multi-stage review, institutional memory that learns your codebase's unique patterns, failure simulation, and a computed review contract that adapts depth per PR with no minimum-comment behavior. Rules can't ask 'why did this change break that module?' Argus can.",
     summary:
       "Codacy is a mature code quality platform that has pivoted toward AI code governance in 2026. It now offers AI Guardrails (IDE scanning), AI Reviewer (hybrid static + AI PR review), and an AI Risk Hub for organizational oversight. Strong for teams managing AI-generated code quality at scale, but lacks the multi-angle depth and institutional memory of purpose-built AI review tools.",
     stat: {
       claim: "Development teams now generate 30-70% of code through AI assistants, driving Codacy's pivot to AI governance",
       source: "Codacy product announcement, 2026",
     },
-    updatedAt: "2026-04-16",
+    updatedAt: "2026-07-11",
     features: {
       memory: false,
       multiPass: false,
@@ -319,6 +328,7 @@ export const competitors: Competitor[] = [
       architectureAnalysis: false,
       byok: false,
       patternLearning: false,
+      reviewContract: false,
       selfHosted: true,
     },
   },
@@ -342,14 +352,14 @@ export const competitors: Competitor[] = [
       "No BYOK — AI features use Sonar's managed Anthropic/OpenAI access",
     ],
     argusAdvantage:
-      "SonarQube is a compliance-grade SAST platform with real Architecture-as-Code visualization in 2026. Argus is AI-native: it learns from your team's review feedback, runs failure scenario simulations, and lets you bring your own LLM key. Best used together — SonarQube for deterministic gates, Argus for contextual intelligent review.",
+      "SonarQube is a compliance-grade SAST platform with real Architecture-as-Code visualization in 2026. Argus is AI-native: it learns from your team's review feedback, runs failure scenario simulations, routes review depth through a computed per-PR contract, and lets you bring your own LLM key. Best used together — SonarQube for deterministic gates, Argus for contextual intelligent review.",
     summary:
       "SonarQube is the industry standard for static application security testing (SAST) and code quality gates. In 2026, it added AI Code Assurance, AI CodeFix, and Architecture-as-Code visualization. Strong on compliance and on-prem deployment; doesn't learn from review history or offer BYOK.",
     stat: {
       claim: "SonarQube Cloud now includes AI-generated code detection, AI CodeFix, and Architecture-as-Code blueprint visualization",
       source: "Sonar product page, 2026",
     },
-    updatedAt: "2026-04-16",
+    updatedAt: "2026-07-11",
     features: {
       memory: false,
       multiPass: false,
@@ -358,6 +368,7 @@ export const competitors: Competitor[] = [
       architectureAnalysis: true,
       byok: false,
       patternLearning: false,
+      reviewContract: false,
       selfHosted: true,
     },
   },
@@ -383,14 +394,14 @@ export const competitors: Competitor[] = [
       "Review depth throttled by premium request credits on lower tiers",
     ],
     argusAdvantage:
-      "Copilot is deeply integrated into GitHub and genuinely improved in 2026 — agentic cross-file analysis, memory, diagrams. Argus's remaining edges: failure scenario simulation, BYOK so you control model and cost, and first-class scenario memory (not just static repo knowledge). Worth using together — Copilot for its GitHub-native surface, Argus when you need deeper review on critical paths.",
+      "Copilot is deeply integrated into GitHub and genuinely improved in 2026 — agentic cross-file analysis, memory, diagrams. Argus's remaining edges: failure scenario simulation, BYOK so you control model and cost, first-class scenario memory (not just static repo knowledge), and a Glass Box footer that shows the review contract, what was checked, and what was suppressed. Worth using together — Copilot for its GitHub-native surface, Argus when you need deeper review on critical paths.",
     summary:
       "GitHub Copilot expanded from code completion to code review, then to an agentic multi-angle reviewer (March 2026) with cross-file dependency tracing and persistent memory. 60M+ reviews processed, actionable feedback in 71% of cases. Strong on integration and context; lacks BYOK, self-hosting, and failure scenario simulation.",
     stat: {
       claim: "Copilot code review reached 60M reviews by March 2026, with actionable feedback in 71% of cases",
       source: "GitHub Copilot official stats, March 2026",
     },
-    updatedAt: "2026-04-16",
+    updatedAt: "2026-07-11",
     features: {
       memory: true,
       multiPass: false,
@@ -399,6 +410,7 @@ export const competitors: Competitor[] = [
       architectureAnalysis: true,
       byok: false,
       patternLearning: false,
+      reviewContract: false,
       selfHosted: false,
     },
   },

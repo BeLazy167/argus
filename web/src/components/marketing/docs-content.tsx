@@ -52,6 +52,8 @@ import {
 const SECTIONS = [
   { id: "getting-started", label: "Getting Started" },
   { id: "pipeline", label: "The Review Pipeline" },
+  { id: "review-contract", label: "The Review Contract" },
+  { id: "review-laws", label: "Review Laws" },
   { id: "deep-review", label: "Deep Review", pro: true },
   { id: "incremental-reviews", label: "Incremental Reviews" },
   { id: "what-argus-sees", label: "What Argus Sees" },
@@ -71,6 +73,7 @@ const SECTIONS = [
   { id: "commands", label: "Bot Commands" },
   { id: "test-generation", label: "Test Generation" },
   { id: "memory", label: "Memory & Learning", pro: true },
+  { id: "glass-box", label: "Glass Box & Gauge" },
   { id: "insights", label: "Insights & Risk" },
   { id: "token-tracking", label: "Token & Cost Tracking" },
   { id: "light-mode", label: "Light Mode" },
@@ -105,7 +108,7 @@ const SEVERITIES = [
     dot: "bg-green-400",
     text: "text-green-400",
     description:
-      "Well-written code, good patterns, clever solutions, or thorough test coverage worth highlighting.",
+      "Genuinely notable code — at most one sentence in the review summary. Never posted as inline filler comments.",
   },
 ];
 
@@ -144,7 +147,7 @@ const CATEGORIES = [
     name: "style",
     icon: Paintbrush,
     description:
-      "Formatting inconsistencies, convention violations, import ordering, naming patterns.",
+      "Formatting inconsistencies, convention violations, import ordering. Under the Review Laws these are never posted — that's the linter's job.",
   },
   {
     name: "type_design",
@@ -166,7 +169,7 @@ const PIPELINE_STAGES = [
     label: "Triage",
     icon: FileSearch,
     description:
-      "Classifies each changed file by risk before any tokens are spent. Generated files, lockfiles, and vendored dependencies are skipped.",
+      "Computes the review contract and classifies each changed file by risk before any tokens are spent. Generated files, lockfiles, and vendored dependencies are skipped.",
   },
   {
     step: "02",
@@ -187,7 +190,7 @@ const PIPELINE_STAGES = [
     label: "Refine",
     icon: Layers,
     description:
-      "Deduplicates and validates findings. Noise and low-signal comments are dropped so only high-confidence issues survive.",
+      "Deduplicates findings, then an LLM judge scores each one against class-aware thresholds — on every review, every plan. Low-signal comments are dropped or folded into a collapsed Minor notes section.",
   },
   {
     step: "05",
@@ -381,8 +384,8 @@ export function DocsContent() {
       </h1>
       <p className="mb-3 text-[11px] font-mono uppercase tracking-[0.18em] text-slate-text/70">
         Last updated{" "}
-        <time dateTime="2026-04-17" className="text-foreground">
-          April 17, 2026
+        <time dateTime="2026-07-11" className="text-foreground">
+          July 11, 2026
         </time>
       </p>
       <p className="text-sm font-mono text-slate-text mb-16 max-w-xl">
@@ -508,6 +511,227 @@ export function DocsContent() {
             </div>
           </div>
 
+          {/* ── The Review Contract ── */}
+          <div>
+            <SectionHeader id="review-contract" title="The Review Contract" />
+            <p className="text-xs font-mono text-slate-text mb-3 leading-relaxed">
+              Not every PR deserves the same review.
+            </p>
+            <p className="text-xs font-mono text-slate-text mb-8 leading-relaxed">
+              Before reviewing, Argus computes a contract for the PR: what
+              kind of change it is, and how deeply it should be reviewed.
+              Classification is deterministic-first &mdash; labels, branch
+              prefixes, and path patterns decide the class, while draft
+              status, title framing, and size adjust depth and evidence
+              bar. The LLM fills in intent only when the metadata is
+              silent. The contract is visible on every review.
+            </p>
+
+            <h3 className="text-sm font-bold text-foreground mb-3">
+              Change classes
+            </h3>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-8">
+              {[
+                {
+                  name: "production",
+                  desc: "The default. Full pipeline, full depth — exactly the review Argus has always done.",
+                },
+                {
+                  name: "migration",
+                  desc: "Schema and data migrations. The safety floor is raised and never relaxes — destructive SQL gets maximum scrutiny.",
+                },
+                {
+                  name: "one_time_script",
+                  desc: "Backfills, one-off jobs. Reviewed by a single balanced reviewer focused on correctness and data safety — not the full specialist squad.",
+                },
+                {
+                  name: "test",
+                  desc: "Test-only changes. Full-depth review — the class travels with every finding so the judge reads them in context.",
+                },
+                {
+                  name: "config",
+                  desc: "Config and infra changes. Full-depth review with the class on record for the judge and the footer.",
+                },
+                {
+                  name: "docs",
+                  desc: "Documentation. Raised posting bar for nitpicks; skips the second pass entirely.",
+                },
+                {
+                  name: "generated",
+                  desc: "Lockfiles, codegen output. Raised posting bar for nitpicks; skips the second pass entirely.",
+                },
+                {
+                  name: "revert",
+                  desc: "Reverts, detected from revert/ branch prefixes (other revert forms are classified from intent). Full-depth review with the class on record.",
+                },
+              ].map((cls) => (
+                <div key={cls.name} className="border border-iron bg-charcoal p-4">
+                  <span className="text-xs font-mono font-bold text-amber">
+                    {cls.name}
+                  </span>
+                  <p className="text-[11px] font-mono text-slate-text leading-relaxed mt-1">
+                    {cls.desc}
+                  </p>
+                </div>
+              ))}
+            </div>
+
+            <h3 className="text-sm font-bold text-foreground mb-3">
+              Depth follows the contract
+            </h3>
+            <div className="space-y-3">
+              {[
+                {
+                  icon: SlidersHorizontal,
+                  title: "Routing",
+                  desc: "One-off scripts get a single balanced reviewer (correctness + data safety) instead of the full specialist squad. Docs and generated changes skip the second pass. Production PRs get full depth.",
+                },
+                {
+                  icon: Shield,
+                  title: "Floors never relax",
+                  desc: "Security-relevant and migration changes keep maximum scrutiny regardless of class, labels, or past dismissals. No signal can lower this floor.",
+                },
+                {
+                  icon: AlertTriangle,
+                  title: "Oversized PRs",
+                  desc: "Beyond reviewable size (~1,500 changed lines or 60 files), Argus still reviews — but posts an honest reduced-confidence note and recommends splitting the PR.",
+                },
+              ].map((item) => {
+                const Icon = item.icon;
+                return (
+                  <div key={item.title} className="border border-iron bg-charcoal p-4">
+                    <div className="flex items-center gap-3 mb-2">
+                      <Icon className="h-4 w-4 text-amber" />
+                      <span className="text-xs font-mono font-bold text-foreground">
+                        {item.title}
+                      </span>
+                    </div>
+                    <p className="text-[11px] font-mono text-slate-text leading-relaxed">
+                      {item.desc}
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+
+            <p className="text-[11px] font-mono text-iron mt-4">
+              The contract appears in the Glass Box footer of every posted
+              review, e.g.{" "}
+              <code className="text-amber bg-iron/40 rounded px-1.5 py-0.5">
+                Contract: production/full
+              </code>
+              . See{" "}
+              <a href="#glass-box" className="text-amber hover:text-foreground transition-colors">
+                Glass Box &amp; Gauge
+              </a>
+              .
+            </p>
+          </div>
+
+          {/* ── Review Laws ── */}
+          <div>
+            <SectionHeader id="review-laws" title="Review Laws" />
+            <p className="text-xs font-mono text-slate-text mb-3 leading-relaxed">
+              The rules every Argus review follows. Non-negotiable, on every
+              plan.
+            </p>
+            <p className="text-xs font-mono text-slate-text mb-8 leading-relaxed">
+              Findings are earned, never guaranteed. There is no
+              minimum-comment behavior &mdash; a clean PR gets a short
+              approval, not manufactured nitpicks.
+            </p>
+
+            <div className="space-y-3 mb-8">
+              {[
+                {
+                  title: "One severity rubric",
+                  desc: "The same critical/warning/suggestion bar applies everywhere — every reviewer, every persona, every change class.",
+                },
+                {
+                  title: "Silence is a valid review",
+                  desc: "Zero findings is a complete review. Argus never manufactures comments to look thorough.",
+                },
+                {
+                  title: "No praise filler",
+                  desc: "At most one genuine sentence in the summary. Never inline praise comments.",
+                },
+                {
+                  title: "Style is the linter's job",
+                  desc: "Formatting, import ordering, naming conventions — never flagged. If a machine can auto-fix it, Argus doesn't comment on it.",
+                },
+                {
+                  title: "Every finding carries proof",
+                  desc: "A concrete failure scenario, file:line evidence, and a suggested fix. No vague “consider improving” comments.",
+                },
+                {
+                  title: "Permanent safety checks",
+                  desc: "Never suppressed by class, persona, or memory: destructive SQL with a missing WHERE, secrets or PII entering logs, unit-ambiguous numeric constants, refactors that silently change behavior, unchecked errors.",
+                },
+              ].map((law, i) => (
+                <div
+                  key={law.title}
+                  className="border border-iron bg-charcoal p-4 flex gap-4"
+                >
+                  <span className="text-[10px] font-mono text-amber tracking-wider pt-0.5 shrink-0">
+                    {String(i + 1).padStart(2, "0")}
+                  </span>
+                  <div className="flex-1 min-w-0">
+                    <span className="text-xs font-mono font-bold text-foreground">
+                      {law.title}
+                    </span>
+                    <p className="text-[11px] font-mono text-slate-text leading-relaxed mt-1">
+                      {law.desc}
+                    </p>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <h3 className="text-sm font-bold text-foreground mb-3">
+              Judge scoring — every review, every plan
+            </h3>
+            <p className="text-xs font-mono text-slate-text mb-4 leading-relaxed">
+              An LLM judge scores every finding against thresholds
+              conditioned on the change class. Score filtering is not a paid
+              feature &mdash; Pro adds depth (the specialist squad and Pass
+              2), not filtering.
+            </p>
+            <div className="space-y-3">
+              {[
+                {
+                  icon: SlidersHorizontal,
+                  title: "Class-aware thresholds",
+                  desc: "A suggestion on a one-off script needs a higher score to post than a critical on a migration. Thresholds are caps, not floors — nothing is resurrected to fill space.",
+                },
+                {
+                  icon: MessageSquare,
+                  title: "Hard cap: 10 inline comments",
+                  desc: "At most 10 inline comments per review. Near-threshold findings fold into a collapsed “Minor notes” section in the summary instead of cluttering the diff.",
+                },
+              ].map((item) => {
+                const Icon = item.icon;
+                return (
+                  <div key={item.title} className="border border-iron bg-charcoal p-4">
+                    <div className="flex items-center gap-3 mb-2">
+                      <Icon className="h-4 w-4 text-amber" />
+                      <span className="text-xs font-mono font-bold text-foreground">
+                        {item.title}
+                      </span>
+                    </div>
+                    <p className="text-[11px] font-mono text-slate-text leading-relaxed">
+                      {item.desc}
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+
+            <p className="text-[11px] font-mono text-iron mt-4">
+              Verdicts use &ldquo;needs work&rdquo; language — Argus reviews,
+              it doesn&apos;t gatekeep. Merging remains your call.
+            </p>
+          </div>
+
           {/* ── Deep Review ── */}
           <div>
             <SectionHeader id="deep-review" title="Deep Review" pro />
@@ -566,8 +790,10 @@ export function DocsContent() {
             </div>
 
             <p className="text-[11px] font-mono text-iron mt-4">
-              Deep Review triggers automatically for complex PRs. Enable it
-              globally in{" "}
+              Depth follows the review contract: one-off scripts get a single
+              balanced reviewer (correctness + data safety) instead of the
+              full squad, and docs/generated changes skip the second pass.
+              Enable Deep Review globally in{" "}
               <span className="text-amber">Settings &rarr; Features</span>.
               Findings from all four specialists are deduplicated before
               scoring.
@@ -597,7 +823,7 @@ export function DocsContent() {
                 {
                   icon: RefreshCw,
                   title: "Finding lifecycle",
-                  desc: "Findings from the previous review are carried forward if the relevant code is unchanged. Updated code triggers a fresh review of that file only.",
+                  desc: "Findings from the previous review are carried forward if the relevant code is unchanged. When a push fixes flagged lines, Argus resolves its own comment with a “Resolved by <sha>” reply — and only posts what's new.",
                 },
                 {
                   icon: Gauge,
@@ -1101,8 +1327,10 @@ export function DocsContent() {
                       </span>
                     </div>
                     <p className="text-[11px] font-mono text-slate-text leading-relaxed">
-                      Suppresses the pattern. Argus stores a &ldquo;dismissed&rdquo;
-                      signal and avoids similar false positives going forward.
+                      Becomes a semantic memory with the reason and the change
+                      kind. Repeated dismissed patterns are auto-suppressed
+                      &mdash; security findings never are, and dismissals on
+                      one-off scripts don&apos;t silence production reviews.
                     </p>
                   </div>
                 </div>
@@ -1271,9 +1499,9 @@ export function DocsContent() {
 - Flag N+1 queries in ORM code
 - Warn about unbounded list fetches without pagination
 
-## style
-- Enforce camelCase for variables, PascalCase for types
-- Require JSDoc on exported functions`}</CodeBlock>
+## testing
+- Require tests for new exported functions
+- Flag test-only helpers imported from production code`}</CodeBlock>
           </div>
 
           {/* ── Model Configuration ── */}
@@ -1473,7 +1701,7 @@ export function DocsContent() {
                 },
                 {
                   name: "strict",
-                  desc: "No free passes. Comments on everything. Maximum coverage, minimum mercy.",
+                  desc: "Exhaustive analysis depth — traces every path and error branch. The severity bar never changes; it doesn't manufacture comments.",
                 },
                 {
                   name: "custom",
@@ -1883,6 +2111,66 @@ export function DocsContent() {
                 knowledge that usually lives only in senior engineers&apos;
                 heads.
               </p>
+            </div>
+          </div>
+
+          {/* ── Glass Box & Gauge ── */}
+          <div>
+            <SectionHeader id="glass-box" title="Glass Box & Gauge" />
+            <p className="text-xs font-mono text-slate-text mb-3 leading-relaxed">
+              Every review shows its work.
+            </p>
+            <p className="text-xs font-mono text-slate-text mb-8 leading-relaxed">
+              The Glass Box footer on every posted review states what
+              contract the review ran under, which reviewers checked the
+              code, how many findings team feedback suppressed, and how long
+              it took. No silent filtering — if something was suppressed,
+              the count says so.
+            </p>
+
+            <TerminalBlock title="argus — glass box footer">
+              <p className="text-[11px] font-mono text-slate-text leading-relaxed">
+                Contract: production/full &middot; checked: bug_hunter,
+                security, architecture, regression &middot; 2 suppressed by
+                team feedback &middot; review took 1m42s
+              </p>
+            </TerminalBlock>
+
+            <h3 className="text-sm font-bold text-foreground mt-8 mb-3">
+              Gauge — address-rate telemetry
+            </h3>
+            <p className="text-xs font-mono text-slate-text mb-4 leading-relaxed">
+              Comment volume is a vanity metric. Gauge tracks whether Argus
+              comments actually led to code changes.
+            </p>
+            <div className="space-y-3">
+              {[
+                {
+                  icon: Target,
+                  title: "Address rate",
+                  desc: "For each comment, Gauge records whether the flagged code changed before merge. Findings fixed by a human commit weigh more than ones Argus auto-fixed.",
+                },
+                {
+                  icon: BarChart3,
+                  title: "Per category, per change class",
+                  desc: "Address rate is broken down by finding category and contract class — so you can see, e.g., that security findings on migrations get fixed and readability nits on scripts get ignored.",
+                },
+              ].map((item) => {
+                const Icon = item.icon;
+                return (
+                  <div key={item.title} className="border border-iron bg-charcoal p-4">
+                    <div className="flex items-center gap-3 mb-2">
+                      <Icon className="h-4 w-4 text-amber" />
+                      <span className="text-xs font-mono font-bold text-foreground">
+                        {item.title}
+                      </span>
+                    </div>
+                    <p className="text-[11px] font-mono text-slate-text leading-relaxed">
+                      {item.desc}
+                    </p>
+                  </div>
+                );
+              })}
             </div>
           </div>
 
