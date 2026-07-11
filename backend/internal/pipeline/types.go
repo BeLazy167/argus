@@ -110,6 +110,10 @@ type PipelineRun struct {
 	TriageResults       []TriageResult
 	FileReviews         []FileReview
 	AllFileReviews      []FileReview        // pre-scoring snapshot: all comments with scores, before threshold drop
+	// MinorNotes collects near-miss findings (scored within the near-miss band
+	// below their severity threshold) plus nits demoted from files that carry a
+	// blocking finding. Rendered collapsed in the summary, never inline.
+	MinorNotes          []MinorNote         `json:"minor_notes,omitempty"`
 	SuppressedKeys      map[string]struct{} // path\x00line\x00body of dismissal-dropped findings; gates pattern-learning that reads the pre-enrich AllFileReviews snapshot
 	Synthesis           *SynthesisResult
 	Tokens              RunTokenUsage
@@ -249,13 +253,21 @@ type FileReview struct {
 
 // FileComment is a single review comment on a file.
 type FileComment struct {
-	Line                int        `json:"line"`
-	StartLine           int        `json:"start_line"`
-	Body                string     `json:"body"`
-	What                string     `json:"what,omitempty"`
-	Why                 string     `json:"why,omitempty"`
-	Severity            Severity   `json:"severity"`
-	Category            Category   `json:"category"`
+	Line      int    `json:"line"`
+	StartLine int    `json:"start_line"`
+	Body      string `json:"body"`
+	What      string `json:"what,omitempty"`
+	Why       string `json:"why,omitempty"`
+	// Reasoning is the LLM's evidence chain, emitted FIRST in the response
+	// schema so the model commits to a concrete failure scenario before it
+	// picks a severity (evidence law).
+	Reasoning string   `json:"reasoning,omitempty"`
+	Severity  Severity `json:"severity"`
+	Category  Category `json:"category"`
+	// LLMConfidence is the reviewer model's own 0-1 confidence in the finding,
+	// parsed from the "confidence" field of the review JSON. Distinct from
+	// Confidence (the post-scoring high/medium/low level).
+	LLMConfidence       float64    `json:"confidence,omitempty"`
 	CodeSnippet         string     `json:"code_snippet,omitempty"`
 	Suggestion          string     `json:"suggestion,omitempty"`
 	Specialist          Specialist `json:"specialist,omitempty"`
@@ -277,8 +289,12 @@ type FileComment struct {
 	DismissedDowngrade    bool   `json:"-"` // dismissal-match downgrade: severity lowered one level + note
 	DismissedMatchPR      int    `json:"-"` // source PR of the dismissed finding (0 = unknown), for the note
 	DedupCount            int    `json:"dedup_count,omitempty"` // how many duplicate findings were merged into this one
-	SastCorroborated      bool   `json:"sast_corroborated,omitempty"`
-	Confidence            string `json:"confidence,omitempty"`
+	// Corroboration is the number of DISTINCT specialists that independently
+	// produced this finding, recorded when dedup merges a cluster. Scoring
+	// grants a small bounded boost for Corroboration >= 2 — never a gate.
+	Corroboration    int    `json:"corroboration,omitempty"`
+	SastCorroborated bool   `json:"sast_corroborated,omitempty"`
+	Confidence       string `json:"confidence_level,omitempty"` // post-scoring high/medium/low
 }
 
 // ValidSeverities is the set of valid severity values.
@@ -286,11 +302,26 @@ var ValidSeverities = map[Severity]bool{
 	SeverityCritical: true, SeverityWarning: true, SeveritySuggestion: true, SeverityPraise: true,
 }
 
-// ValidCategories is the set of valid category values.
+// ValidCategories is the set of valid category values. Style and readability
+// are intentionally NOT valid emit categories (Review Laws: style/formatting
+// are never findings) — LLM output using them falls back to
+// CategoryReadability in validateComments, which the deterministic scoring cap
+// then pins at 30 so it can never post as an earned finding.
 var ValidCategories = map[Category]bool{
-	CategorySecurity: true, CategoryPerformance: true, CategoryStyle: true, CategoryBug: true,
-	CategoryReadability: true, CategoryErrorHandling: true, CategoryTypeDesign: true, CategoryTesting: true,
+	CategorySecurity: true, CategoryPerformance: true, CategoryBug: true,
+	CategoryErrorHandling: true, CategoryTypeDesign: true, CategoryTesting: true,
 	CategoryIntent: true,
+}
+
+// MinorNote is a finding that was demoted out of the inline comment set —
+// either it scored within the near-miss band below its severity threshold, or
+// it is a nit on a file that also carries a blocking finding. Minor notes are
+// rendered as a collapsed section in the review summary, never inline.
+type MinorNote struct {
+	Path     string   `json:"path"`
+	Line     int      `json:"line"`
+	Severity Severity `json:"severity"`
+	Title    string   `json:"title"`
 }
 
 // SynthesisResult is the combined review output.

@@ -95,6 +95,21 @@ func (c *ReviewContract) SkipsPass2() bool {
 	return c.Is(ChangeClassOneTimeScript) || c.Is(ChangeClassDocs) || c.Is(ChangeClassGenerated)
 }
 
+// HasSecurityFloor reports whether the contract carries the security floor
+// signal (security-relevant files changed). Scoring uses it to lower the
+// critical threshold — security PRs get MORE sensitive review, never less.
+func (c *ReviewContract) HasSecurityFloor() bool {
+	if c == nil {
+		return false
+	}
+	for _, s := range c.Signals {
+		if s == "floor:security" {
+			return true
+		}
+	}
+	return false
+}
+
 // ResolveFromLLM fills ChangeClass on an llm-pending contract from the intent
 // extraction output. Unknown classes or confidence below the floor default to
 // production. No-op unless Source == "llm-pending".
