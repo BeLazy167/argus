@@ -21,7 +21,11 @@ const FAQ_ITEMS = [
 	},
 	{
 		q: "What if Argus flags something incorrectly?",
-		a: "Dismiss it. Every comment explains its reasoning — disagree and move on. Over time, Argus learns your codebase patterns and false positives decrease.",
+		a: "Dismiss it. Each dismissal is stored as a memory with the reason and the kind of change it came from — repeated dismissed patterns stop being posted (security findings are never suppressed). Every comment explains its reasoning, so you can disagree and move on.",
+	},
+	{
+		q: "Is finding filtering a paid feature?",
+		a: "No. The LLM judge scores every finding on every review, on every plan — low-signal comments are dropped or folded into a collapsed Minor notes section. Pro adds depth (the 4-specialist deep review and Pass 2), not filtering.",
 	},
 	{
 		q: "Is there a free trial?",
@@ -80,7 +84,8 @@ export default function PricingPage() {
 						{[
 							"3 repos",
 							"50 reviews / month",
-							"Basic single-pass review",
+							"Single-pass review, judge-scored findings",
+							"Per-PR review contract",
 							"Pattern memory",
 							"BYOK — bring your own LLM key",
 						].map((f) => (

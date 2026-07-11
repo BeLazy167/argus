@@ -76,7 +76,7 @@ const CORE_STAGES = ["triage", "review", "scoring", "synthesis"] as const;
 const STAGE_DESCRIPTIONS: Record<string, string> = {
   triage: "Decides which files need detailed review vs. can be skimmed",
   review: "Analyzes code changes and writes review comments",
-  scoring: "Cross-model validation — scores and deduplicates specialist comments",
+  scoring: "LLM judge scores every finding against class-aware thresholds — runs on every review",
   synthesis: "Combines per-file reviews into a unified summary",
 };
 
@@ -88,7 +88,7 @@ const PERSONAS = [
   { value: "performance_engineer", label: "Performance Engineer", description: "Focuses on N+1 queries, allocations, caching, and complexity" },
   { value: "mentor", label: "Mentor", description: "Educational tone — explains why, suggests learning paths" },
   { value: "architect", label: "Architect", description: "Design patterns, coupling, API contracts, and module boundaries" },
-  { value: "strict", label: "Strict", description: "Comments on everything — no issue too small" },
+  { value: "strict", label: "Strict", description: "Exhaustive analysis depth — traces every path and error branch; severity bar unchanged" },
   { value: "custom", label: "Custom", description: "Write your own persona prompt — define exactly how Argus reviews" },
 ] as const;
 

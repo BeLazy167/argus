@@ -20,6 +20,7 @@ type FeatureKey = keyof Competitor["features"];
 const featureOrder: FeatureKey[] = [
   "memory",
   "patternLearning",
+  "reviewContract",
   "multiPass",
   "architectureAnalysis",
   "diagramGeneration",
@@ -60,8 +61,11 @@ export default function CompareHubPage() {
       <p className="text-[11px] font-mono text-slate-text/70 mb-10 max-w-2xl">
         Features verified against each vendor&rsquo;s public docs. Many tools have closed
         gaps on memory, architecture, and multi-agent review recently — the matrix
-        reflects that. Argus&rsquo;s distinct bets today: failure scenario simulation and
-        BYOK in the managed tier.
+        reflects that. Argus&rsquo;s distinct bets today: a computed per-PR review
+        contract (depth routing without hand-written config), failure scenario
+        simulation, BYOK in the managed tier, and judge-filtered findings on every
+        plan — no minimum-comment behavior, and a Glass Box footer that shows what
+        was checked and what was suppressed.
       </p>
 
       {/* Main comparison table — sticky first column + horizontal scroll on mobile */}
