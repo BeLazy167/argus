@@ -23,6 +23,9 @@ CREATE INDEX IF NOT EXISTS idx_review_comments_state
 
 -- Outcome taxonomy gains not_applicable_change_kind: valid finding, wrong
 -- change kind (e.g. flagged production rigor on a one-off script).
+-- Union with the Gauge outcomes added in 049 — this migration runs after it
+-- and must not drop addressed_human/addressed_agent/deferred.
 ALTER TABLE comment_outcomes DROP CONSTRAINT IF EXISTS comment_outcomes_outcome_check;
 ALTER TABLE comment_outcomes ADD CONSTRAINT comment_outcomes_outcome_check
-    CHECK (outcome IN ('confirmed','dismissed','ignored','not_applicable_change_kind'));
+    CHECK (outcome IN ('confirmed','dismissed','ignored','not_applicable_change_kind',
+                       'addressed_human','addressed_agent','deferred'));
