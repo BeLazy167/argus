@@ -10,7 +10,7 @@
 --   deferred        — PR closed without merging
 -- ('ignored' is reused for merged-without-addressing.)
 --
--- Anchor (file_path + end_line), category, and posted_at already live on
+-- Anchor (file_path + end_line), category, and created_at already live on
 -- review_comments; change_class lives in reviews.review_contract — no
 -- duplication here, the vw_review_gauge view (migration 050) joins them.
 
