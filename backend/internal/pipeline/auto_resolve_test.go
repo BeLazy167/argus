@@ -136,3 +136,24 @@ func TestAutoResolveDecision_FileLevelFallbackHasNoJoinKey(t *testing.T) {
 		t.Fatalf("file-level fallback leaked a joinKey (%q); migration 041 would bloat with unmatchable entries", got.joinKey)
 	}
 }
+
+// TestResolvedByReplyBody pins the convergence breadcrumb posted on a thread
+// before auto-resolving it: short-sha rendering plus the empty-SHA fallback.
+func TestResolvedByReplyBody(t *testing.T) {
+	tests := []struct {
+		name string
+		sha  string
+		want string
+	}{
+		{"full sha shortened to 7", "abcdef0123456789", "✅ Resolved by `abcdef0` — the flagged lines were modified in this push."},
+		{"short sha kept verbatim", "abc12", "✅ Resolved by `abc12` — the flagged lines were modified in this push."},
+		{"empty sha degrades gracefully", "", "✅ Resolved by a newer push — the flagged lines were modified."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := resolvedByReplyBody(tt.sha); got != tt.want {
+				t.Errorf("resolvedByReplyBody(%q) = %q, want %q", tt.sha, got, tt.want)
+			}
+		})
+	}
+}

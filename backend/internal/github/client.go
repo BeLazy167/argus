@@ -662,6 +662,10 @@ type ReviewThread struct {
 	Body        string
 	Path        string
 	Line        int
+	// FirstCommentID is the REST database ID of the thread's first comment
+	// (0 when GraphQL omitted it). Lets callers reply on the thread via
+	// ReplyToComment before resolving it.
+	FirstCommentID int64
 }
 
 // ListReviewThreads fetches unresolved review threads via GraphQL.
@@ -682,6 +686,7 @@ func (c *Client) ListReviewThreads(ctx context.Context, installationID int64, ow
 							comments(first: 1) {
 								nodes {
 									author { login }
+									databaseId
 									body
 									path
 									line
@@ -712,9 +717,10 @@ func (c *Client) ListReviewThreads(ctx context.Context, installationID int64, ow
 									Author struct {
 										Login string `json:"login"`
 									} `json:"author"`
-									Body string `json:"body"`
-									Path string `json:"path"`
-									Line int    `json:"line"`
+									DatabaseID int64  `json:"databaseId"`
+									Body       string `json:"body"`
+									Path       string `json:"path"`
+									Line       int    `json:"line"`
 								} `json:"nodes"`
 							} `json:"comments"`
 						} `json:"nodes"`
@@ -737,6 +743,7 @@ func (c *Client) ListReviewThreads(ctx context.Context, installationID int64, ow
 		if len(n.Comments.Nodes) > 0 {
 			c0 := n.Comments.Nodes[0]
 			t.AuthorLogin = c0.Author.Login
+			t.FirstCommentID = c0.DatabaseID
 			t.Body = c0.Body
 			t.Path = c0.Path
 			t.Line = c0.Line

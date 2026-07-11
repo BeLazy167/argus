@@ -57,11 +57,12 @@ type Indexer interface {
 
 	// Readers.
 	SearchPatternMatch(ctx context.Context, owner, repo, query string, thresholds Thresholds) PatternMatch
-	// SearchDismissedMatch finds the closest previously-dismissed finding
-	// (type=feedback + action=dismissed) in the repo container. The
-	// post-generation suppression pass uses the returned Score to drop or
-	// downgrade a finding a developer already thumbed-down.
-	SearchDismissedMatch(ctx context.Context, owner, repo, query string, thresholds Thresholds) PatternMatch
+	// SearchDismissedMatches finds the top previously-dismissed findings
+	// (type=feedback + action=dismissed) in the repo container, best first.
+	// The post-generation suppression pass uses the scores to drop or
+	// downgrade findings a developer already thumbed-down, and the match
+	// COUNT to suppress findings the team has repeatedly rejected.
+	SearchDismissedMatches(ctx context.Context, owner, repo, query string, thresholds Thresholds, limit int) []PatternMatch
 	SearchScenariosWithIDs(ctx context.Context, owner, repo, query, severity string, limit int) []ScenarioSearchResult
 
 	// Briefing assembles + renders the institutional-memory block for a review
@@ -167,28 +168,35 @@ func (idx *indexerImpl) SearchPatternMatch(ctx context.Context, owner, repo, que
 	return bestMatch(repoRes, sharedRes)
 }
 
-// SearchDismissedMatch returns the top dismissed-feedback doc semantically
+// SearchDismissedMatches returns the top dismissed-feedback docs semantically
 // matching query, scoped to the repo container (dismissals are never shared
-// across repos). The doc content embeds the dismissed finding text, so a
+// across repos). Doc content embeds the dismissed finding text, so a
 // finding-body query surfaces prior thumbs-down on the same issue. Retrieval
 // uses the FindingEnrich floor (0.50) — at/above it the caller applies the
-// drop/downgrade policy; below it there is nothing worth retrieving. Empty
-// PatternMatch on nil client / empty repo / empty query / no hit. owner is
+// drop/downgrade/team-feedback policy; below it there is nothing worth
+// retrieving. Nil on nil client / empty repo / empty query / no hit. owner is
 // accepted for interface symmetry but unused under BYOK container scoping.
-func (idx *indexerImpl) SearchDismissedMatch(ctx context.Context, owner, repo, query string, thresholds Thresholds) PatternMatch {
+func (idx *indexerImpl) SearchDismissedMatches(ctx context.Context, owner, repo, query string, thresholds Thresholds, limit int) []PatternMatch {
 	_ = owner
-	if idx.client == nil || repo == "" || query == "" {
-		return PatternMatch{}
+	if idx.client == nil || repo == "" || query == "" || limit <= 0 {
+		return nil
 	}
 	thresholds = thresholds.WithDefaults()
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	filter := &SearchFilters{AND: []FilterCondition{
-		{Key: "type", Value: string(TypeFeedback)},
-		{Key: "action", Value: "dismissed"},
-	}}
-	return idx.topMatch(ctx, query, RepoTagNew(repo), filter, thresholds.FindingEnrich)
+	return idx.searchMatches(ctx, SearchRequest{
+		Query:        query,
+		ContainerTag: RepoTagNew(repo),
+		SearchMode:   "hybrid",
+		Limit:        limit,
+		Threshold:    thresholds.FindingEnrich,
+		Rerank:       true,
+		Filters: &SearchFilters{AND: []FilterCondition{
+			{Key: "type", Value: string(TypeFeedback)},
+			{Key: "action", Value: "dismissed"},
+		}},
+	})
 }
 
 // topMatch runs a one-result hybrid search on the given container + filter.
@@ -341,6 +349,17 @@ func RuleCustomID(ruleID int64) string {
 	return fmt.Sprintf("rule--%d", ruleID)
 }
 
+// DismissalCustomID returns a stable customId for a DISMISSED feedback signal.
+// Keyed by category + semantic content only — deliberately file-path-free so
+// the same dismissed finding recurring across files/PRs upserts one doc whose
+// recurrence (not row count) is the suppression signal.
+func DismissalCustomID(repo, category, body string) string {
+	h := sha256.Sum256([]byte(category + "|" + normalizeBody(body)))
+	hash := hex.EncodeToString(h[:6])
+	prefix := fmt.Sprintf("%s--dismissal", repoIDSegment(repo))
+	return truncateIDWithSuffix(prefix, hash)
+}
+
 // FeedbackCustomID returns a stable customId for a feedback signal on a finding.
 // Includes `action` in the hash so confirmed and dismissed signals for the
 // same finding coexist instead of silently overwriting each other.
@@ -375,9 +394,18 @@ type FeedbackMemory struct {
 	FilePath       string
 	Category       string
 	OriginalBody   string
-	Action         string // "confirmed" or "dismissed"
+	Action         string // "confirmed" | "dismissed" | "ignored"
 	DeveloperReply string
 	PRNumber       int
+	// ChangeKind is the ReviewContract change class of the review that produced
+	// the finding ("" = unknown/pre-contract). Stamped on dismissal metadata so
+	// retrieval can ignore prototype-era dismissals during production review.
+	ChangeKind string
+	// Reason is the analyzer's distilled explanation for a dismissal ("" = none).
+	Reason string
+	// Repo is the repo short name, mirrored into dismissal metadata for
+	// post-hoc audits (the container tag already scopes retrieval).
+	Repo string
 }
 
 // IndexReviewCommentsBatch stores multiple review comments in one API call.
@@ -604,20 +632,35 @@ func (idx *indexerImpl) IndexFeedbackSignal(ctx context.Context, owner, repo str
 		return fmt.Errorf("indexing feedback signal: unsupported action %q (want confirmed|dismissed|ignored)", fb.Action)
 	}
 
-	meta, err := Metadata{
+	m := Metadata{
 		Type:     TypeFeedback,
 		FilePath: fb.FilePath,
 		Category: fb.Category,
 		Polarity: polarity,
 		Action:   fb.Action,
 		PRNumber: fb.PRNumber,
-	}.ToMap()
+	}
+	customID := FeedbackCustomID(owner, repo, fb.FilePath, fb.Category, fb.OriginalBody, fb.Action)
+	// Dismissals are keyed by category + semantic content (file-path-free) and
+	// carry change-kind provenance so retrieval can lifecycle-filter them.
+	if fb.Action == "dismissed" {
+		customID = DismissalCustomID(repo, fb.Category, fb.OriginalBody)
+		extra := map[string]string{"repo": repo}
+		if fb.ChangeKind != "" {
+			extra["change_kind"] = fb.ChangeKind
+		}
+		if fb.Reason != "" {
+			extra["reason"] = util.Truncate(fb.Reason, 300, false)
+		}
+		m.Extra = extra
+	}
+	meta, err := m.ToMap()
 	if err != nil {
 		return fmt.Errorf("feedback metadata: %w", err)
 	}
 	_, err = idx.client.AddMemory(ctx, AddRequest{
 		Content:       content,
-		CustomID:      FeedbackCustomID(owner, repo, fb.FilePath, fb.Category, fb.OriginalBody, fb.Action),
+		CustomID:      customID,
 		ContainerTags: []string{RepoTagNew(repo)},
 		Metadata:      meta,
 	})

@@ -1196,6 +1196,21 @@ func decideAutoResolveThread(
 	return autoResolveDecision{kind: autoResolveFileHit}
 }
 
+// resolvedByReplyBody renders the one-line convergence breadcrumb posted on a
+// thread before auto-resolving it. Pure — headSHA is shortened to 7 chars; an
+// empty SHA (defensive: PREvent built from a partial payload) degrades to a
+// sha-less line rather than rendering an empty code span.
+func resolvedByReplyBody(headSHA string) string {
+	short := headSHA
+	if len(short) > 7 {
+		short = short[:7]
+	}
+	if short == "" {
+		return "✅ Resolved by a newer push — the flagged lines were modified."
+	}
+	return fmt.Sprintf("✅ Resolved by `%s` — the flagged lines were modified in this push.", short)
+}
+
 // autoResolveStaleComments resolves bot review threads whose specific lines
 // were modified in the new push. Uses line-level checking: a thread is resolved
 // only if the changed lines in the inter-diff overlap with the comment's line
@@ -1271,6 +1286,15 @@ func (o *Orchestrator) autoResolveStaleComments(
 		}
 
 		attempted++
+		// Convergence breadcrumb: a brief "resolved by <short-sha>" reply on
+		// the thread BEFORE resolving it, so the author sees why the thread
+		// closed. Best-effort — a failed reply never blocks the resolution.
+		if t.FirstCommentID != 0 {
+			apiCalls++
+			if _, err := o.ghClient.ReplyToComment(ctx, event.InstallationID, owner, repo, event.PRNumber, t.FirstCommentID, resolvedByReplyBody(event.HeadSHA)); err != nil {
+				o.logger.Warn("auto-resolve: resolved-by reply failed", "error", err, "thread_id", t.ID, "path", t.Path)
+			}
+		}
 		apiCalls++ // one mutation per attempt
 		if err := o.ghClient.ResolveReviewThread(ctx, event.InstallationID, t.ID); err != nil {
 			o.logger.Warn("auto-resolve: resolve thread failed", "error", err, "thread_id", t.ID, "path", t.Path)
@@ -1313,6 +1337,22 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 	owner, repo, err := splitRepoFullName(run.PREvent.RepoFullName)
 	if err != nil {
 		return nil // non-fatal
+	}
+
+	// Suppression-v2 inputs shared by every enrichment goroutine (read-only):
+	// the contract change class for the dismissal lifecycle filter, and the
+	// categories this repo auto-suppressed via consecutive-ignore streaks.
+	changeClass := ""
+	if run.Contract != nil {
+		changeClass = run.Contract.ChangeClass
+	}
+	autoSuppressed := map[string]bool{}
+	if run.DBRepoID != 0 {
+		if m, asErr := o.st.GetAutoSuppressedCategories(ctx, run.DBRepoID); asErr != nil {
+			o.logger.Warn("auto-suppressed categories lookup", "error", asErr, "repo_id", run.DBRepoID)
+		} else {
+			autoSuppressed = m
+		}
 	}
 
 	sem := make(chan struct{}, 5)
@@ -1421,28 +1461,34 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 					c.IsNewFinding = true
 				}
 
-				// Dismissal-match suppression: a finding a developer already
-				// 👎-dismissed in this repo is dropped (≥0.85) or downgraded one
-				// severity (≥0.60). The dismissed-feedback doc content is the
-				// finding body, so query by body. Non-fatal; memory-gated.
-				dismissed := run.Indexer.SearchDismissedMatch(ctx, owner, repo, c.Body, run.Thresholds)
-				if dismissed.Score >= DismissalDowngradeThreshold {
-					pr := metaInt(dismissed.Metadata, "pr_number")
-					switch applyDismissalMatch(c, dismissed.Score, pr) {
-					case dismissalDrop:
-						o.logger.InfoContext(ctx, "memory suppressed finding",
-							slog.String("event", "memory.suppressed"),
-							slog.String("review_id", run.ReviewID.String()),
-							slog.String("repo", run.PREvent.RepoFullName),
-							slog.Int("pr_number", run.PREvent.PRNumber),
-							slog.Int("line", c.Line),
-							slog.Float64("score", dismissed.Score))
-					case dismissalDowngrade:
-						o.logger.Debug("memory downgraded finding",
-							"file", filePath, "line", c.Line,
-							"score", fmt.Sprintf("%.3f", dismissed.Score),
-							"new_severity", c.Severity)
-					}
+				// Dismissal suppression v2: retrieve the top dismissed-feedback
+				// matches (query by body — the dismissal doc content IS the
+				// finding text), lifecycle-filter by change kind, then decide
+				// drop (single exact match ≥0.85, a team-feedback streak of
+				// similar dismissals, or a category the repo auto-suppressed)
+				// vs downgrade (≥0.60). Security and Law-12 permanent checks
+				// are exempt from drops — memory may downgrade, never silence
+				// them. Non-fatal; memory-gated.
+				dismissals := run.Indexer.SearchDismissedMatches(ctx, owner, repo, c.Body, run.Thresholds, dismissalSearchLimit)
+				eval := evaluateDismissals(dismissals, changeClass,
+					suppressionExempt(c.Category, c.Body), autoSuppressed[string(c.Category)])
+				switch applyDismissalEvaluation(c, eval) {
+				case dismissalDrop:
+					o.logger.InfoContext(ctx, "memory suppressed finding",
+						slog.String("event", "memory.suppressed"),
+						slog.String("review_id", run.ReviewID.String()),
+						slog.String("repo", run.PREvent.RepoFullName),
+						slog.Int("pr_number", run.PREvent.PRNumber),
+						slog.Int("line", c.Line),
+						slog.String("reason", eval.reason),
+						slog.Int("similar_dismissals", eval.similarCount),
+						slog.Float64("score", eval.bestScore))
+				case dismissalDowngrade:
+					o.logger.Debug("memory downgraded finding",
+						"file", filePath, "line", c.Line,
+						"score", fmt.Sprintf("%.3f", eval.bestScore),
+						"similar_dismissals", eval.similarCount,
+						"new_severity", c.Severity)
 				}
 			}(c, fr.Path)
 		}
@@ -2405,6 +2451,14 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	if note := run.Contract.UnreviewableNote(); note != "" {
 		summaryBody.WriteString("\n\n")
 		summaryBody.WriteString(note)
+	}
+	// Team-feedback suppression audit line: one line, never per-finding noise.
+	// The dashboard review page is the audit surface until a dedicated
+	// suppression-audit view exists.
+	if n := countSuppressedFindings(run.FileReviews); n > 0 {
+		summaryBody.WriteString(fmt.Sprintf(
+			"\n\n_%d %s suppressed by team feedback ([audit](https://argus.reviews/reviews/%s))_",
+			n, pluralize("finding", n), run.ReviewID.String()))
 	}
 	if scopeNote := assessPRScope(run); scopeNote != "" {
 		summaryBody.WriteString("\n\n")
@@ -4995,12 +5049,17 @@ func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghRe
 			}
 			enforcedRule := strPtrOrNil(c.EnforcedRuleContent)
 			suppressedReason := strPtrOrNil(c.SuppressedReason)
+			state := store.FindingStatePosted
+			if c.Suppressed {
+				state = store.FindingStateSuppressed
+			}
 
 			formattedBody := formatCommentBody(c)
 			// Suppressed (dropped) comments are still persisted — flagged via
-			// suppressed_reason and with github_comment_id nil (never posted) — so
-			// the dashboard keeps the full record while the PR stays clean.
-			if err := o.st.CreateReviewComment(ctx, run.ReviewID, fr.Path, startLine, &line, &side, formattedBody, &sev, &cat, specialist, snippet, confidenceScore, ghCommentID, matchedPatternID, matchedPatternScore, enforcedRule, c.IsNewFinding, suppressedReason); err != nil {
+			// suppressed_reason + state='suppressed' and with github_comment_id
+			// nil (never posted) — so the dashboard keeps the full record while
+			// the PR stays clean.
+			if err := o.st.CreateReviewComment(ctx, run.ReviewID, fr.Path, startLine, &line, &side, formattedBody, &sev, &cat, specialist, snippet, confidenceScore, ghCommentID, matchedPatternID, matchedPatternScore, enforcedRule, c.IsNewFinding, suppressedReason, state); err != nil {
 				o.logger.Error("persisting review comment", "error", err, "file", fr.Path)
 			}
 

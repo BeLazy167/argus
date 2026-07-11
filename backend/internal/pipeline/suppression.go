@@ -3,6 +3,9 @@ package pipeline
 import (
 	"fmt"
 	"strconv"
+	"strings"
+
+	"github.com/BeLazy167/argus/backend/internal/memory"
 )
 
 // Dismissal-match suppression policy (locked). A generated finding that
@@ -18,6 +21,21 @@ import (
 const (
 	DismissalDropThreshold      = 0.85
 	DismissalDowngradeThreshold = 0.60
+)
+
+// Suppression v2 (team-feedback) knobs.
+const (
+	// dismissalSearchLimit is how many dismissed-feedback docs the enrichment
+	// pass retrieves per finding — enough to count a SuppressSimilarCount
+	// streak with headroom for lifecycle-filtered entries.
+	dismissalSearchLimit = 5
+	// SuppressSimilarCount is the number of sufficiently-similar dismissed
+	// memories at/above SuppressSimilarMin that suppresses a finding outright
+	// even when no single match clears the drop threshold.
+	SuppressSimilarCount = 3
+	// SuppressSimilarMin reuses the downgrade floor as the "sufficiently
+	// similar" bar: matches below it are coincidental, not team feedback.
+	SuppressSimilarMin = DismissalDowngradeThreshold
 )
 
 // dismissalAction is the outcome of classifying a finding against the closest
@@ -65,17 +83,165 @@ func downgradeSeverity(s Severity) Severity {
 // comment in place for the posting seams to exclude; a downgrade lowers the
 // severity and flags the comment so formatCommentBody appends the note.
 func applyDismissalMatch(c *FileComment, score float64, pr int) dismissalAction {
-	action := classifyDismissal(score)
-	switch action {
+	return applyDismissalEvaluation(c, dismissalEvaluation{
+		action:    classifyDismissal(score),
+		reason:    fmt.Sprintf("dismissed_match:%.2f", score),
+		bestScore: score,
+		bestPR:    pr,
+	})
+}
+
+// dismissalEvaluation is the pure verdict of evaluateDismissals: what the
+// suppression pass should do to a finding given its dismissed-feedback
+// matches, change-kind lifecycle, exemptions, and category streaks.
+type dismissalEvaluation struct {
+	action       dismissalAction
+	reason       string  // SuppressedReason when action == dismissalDrop
+	bestScore    float64 // highest lifecycle-surviving match score
+	bestPR       int     // source PR of the best match (0 = unknown)
+	similarCount int     // matches at/above SuppressSimilarMin after lifecycle filter
+}
+
+// evaluateDismissals is the whole suppression-v2 decision matrix, pure so the
+// policy is table-testable:
+//
+//  1. Lifecycle: dismissals recorded on throwaway change kinds
+//     (one_time_script/prototype) are ignored when the current PR is
+//     production-grade — prototype-era feedback must not silence production
+//     review.
+//  2. Exempt findings (security / Law-12 permanent checks) may be DOWNGRADED
+//     by memory but never dropped.
+//  3. A single match >= DismissalDropThreshold drops (v1 behavior).
+//  4. >= SuppressSimilarCount matches >= SuppressSimilarMin drops — the team
+//     has repeatedly rejected this finding even if no single match is exact.
+//  5. A category the repo auto-suppressed (consecutive-ignore streak) drops.
+//  6. Otherwise the best match downgrades or does nothing per v1 thresholds.
+func evaluateDismissals(matches []memory.PatternMatch, currentClass string, exempt, categoryAutoSuppressed bool) dismissalEvaluation {
+	var ev dismissalEvaluation
+	for _, m := range filterDismissalsForClass(matches, currentClass) {
+		if m.Score >= SuppressSimilarMin {
+			ev.similarCount++
+		}
+		if m.Score > ev.bestScore {
+			ev.bestScore = m.Score
+			ev.bestPR = metaInt(m.Metadata, "pr_number")
+		}
+	}
+
+	switch {
+	case exempt:
+		// Memory may lower the volume on an exempt finding, never mute it.
+		if classifyDismissal(ev.bestScore) != dismissalNone {
+			ev.action = dismissalDowngrade
+		}
+	case classifyDismissal(ev.bestScore) == dismissalDrop:
+		ev.action = dismissalDrop
+		ev.reason = fmt.Sprintf("dismissed_match:%.2f", ev.bestScore)
+	case ev.similarCount >= SuppressSimilarCount:
+		ev.action = dismissalDrop
+		ev.reason = fmt.Sprintf("team_feedback:%d", ev.similarCount)
+	case categoryAutoSuppressed:
+		ev.action = dismissalDrop
+		ev.reason = "category_auto_suppressed"
+	default:
+		ev.action = classifyDismissal(ev.bestScore)
+	}
+	return ev
+}
+
+// applyDismissalEvaluation mutates c per an evaluateDismissals verdict and
+// returns the action for enrichment counters. Shared by the v1 single-match
+// path (applyDismissalMatch) and the v2 pass.
+func applyDismissalEvaluation(c *FileComment, ev dismissalEvaluation) dismissalAction {
+	switch ev.action {
 	case dismissalDrop:
 		c.Suppressed = true
-		c.SuppressedReason = fmt.Sprintf("dismissed_match:%.2f", score)
+		c.SuppressedReason = ev.reason
 	case dismissalDowngrade:
 		c.Severity = downgradeSeverity(c.Severity)
 		c.DismissedDowngrade = true
-		c.DismissedMatchPR = pr
+		c.DismissedMatchPR = ev.bestPR
 	}
-	return action
+	return ev.action
+}
+
+// filterDismissalsForClass drops dismissal matches whose recorded change_kind
+// is a throwaway kind (one_time_script / prototype) when the current contract
+// class is production-grade (production, migration, or unknown — a nil/empty
+// contract behaves as production everywhere else in the pipeline). Dismissals
+// without a change_kind stamp (pre-contract docs) always survive.
+func filterDismissalsForClass(matches []memory.PatternMatch, currentClass string) []memory.PatternMatch {
+	if !productionGradeClass(currentClass) {
+		return matches
+	}
+	kept := make([]memory.PatternMatch, 0, len(matches))
+	for _, m := range matches {
+		if throwawayChangeKind(m.Metadata["change_kind"]) {
+			continue
+		}
+		kept = append(kept, m)
+	}
+	return kept
+}
+
+// productionGradeClass reports whether a contract change class demands the
+// full production bar. Empty class = no contract / undecided = production.
+func productionGradeClass(class string) bool {
+	return class == "" || class == ChangeClassProduction || class == ChangeClassMigration
+}
+
+// throwawayChangeKind reports whether a dismissal's recorded change kind marks
+// it as prototype-era feedback. "prototype" is accepted alongside the catalog
+// class because branch prefixes (prototype/, spike/, poc/) may be echoed
+// verbatim by older writers.
+func throwawayChangeKind(kind string) bool {
+	return kind == ChangeClassOneTimeScript || kind == "prototype"
+}
+
+// permanentCheckMarkers are lowercase substrings anchored on the Review Laws
+// Law-12 permanent checks (destructive SQL, secrets/PII in logs, unit-ambiguous
+// constants, silent behavior change, swallowed errors) plus data-safety
+// vocabulary. A marker hit EXEMPTS the finding from suppression — over-matching
+// fails open (the finding posts), never closed.
+var permanentCheckMarkers = []string{
+	// destructive SQL / data safety
+	"drop table", "truncate", "delete from", "missing where", "without a where",
+	"data loss", "irreversibl", "destructive",
+	// secrets / PII entering logs or telemetry
+	"secret", "credential", "api key", "password", "pii", "personally identifiable", "leak",
+	// swallowed errors / silent behavior change
+	"unchecked error", "swallow", "silently chang",
+}
+
+// suppressionExempt reports whether a finding is exempt from suppression:
+// security category always; otherwise a Law-12 permanent-check / data-safety
+// marker in the finding text. There is no dedicated data-safety category in
+// the taxonomy, so the marker scan stands in for it.
+func suppressionExempt(category Category, body string) bool {
+	if category == CategorySecurity {
+		return true
+	}
+	lower := strings.ToLower(body)
+	for _, marker := range permanentCheckMarkers {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// countSuppressedFindings counts findings dropped by the suppression pass —
+// feeds the "N findings suppressed by team feedback" summary line.
+func countSuppressedFindings(reviews []FileReview) int {
+	n := 0
+	for _, fr := range reviews {
+		for _, c := range fr.Comments {
+			if c.Suppressed {
+				n++
+			}
+		}
+	}
+	return n
 }
 
 // suppressionKey identifies a finding across the FileReviews and AllFileReviews

@@ -23,7 +23,7 @@ type Fake struct {
 	RuleContentFn func(query string) string
 	ScoredFn      func(query, containerTag string, typ memory.MemoryType, limit int) ([]memory.PatternMatch, error)
 	PatternFn     func(owner, repo, query string) memory.PatternMatch
-	DismissedFn   func(owner, repo, query string) memory.PatternMatch
+	DismissedFn   func(owner, repo, query string, limit int) []memory.PatternMatch
 	ScenariosFn   func(owner, repo, query, severity string, limit int) []memory.ScenarioSearchResult
 
 	mu          sync.Mutex
@@ -97,11 +97,11 @@ func (f *Fake) SearchPatternMatch(_ context.Context, owner, repo, query string, 
 	return memory.PatternMatch{}
 }
 
-func (f *Fake) SearchDismissedMatch(_ context.Context, owner, repo, query string, _ memory.Thresholds) memory.PatternMatch {
+func (f *Fake) SearchDismissedMatches(_ context.Context, owner, repo, query string, _ memory.Thresholds, limit int) []memory.PatternMatch {
 	if f.DismissedFn != nil {
-		return f.DismissedFn(owner, repo, query)
+		return f.DismissedFn(owner, repo, query, limit)
 	}
-	return memory.PatternMatch{}
+	return nil
 }
 
 func (f *Fake) SearchScenariosWithIDs(_ context.Context, owner, repo, query, severity string, limit int) []memory.ScenarioSearchResult {
