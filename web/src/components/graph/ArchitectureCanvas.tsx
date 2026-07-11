@@ -167,19 +167,14 @@ function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQu
   const maxDensity = useMemo(() => Math.max(...files.map((f) => f.bug_density), 0.01), [files]);
 
   const layout = useMemo(() => {
-    const g = new dagre.graphlib.Graph().setDefaultEdgeLabel(() => ({}));
     const isHorizontal = direction === "LR";
-    // Wider node/rank separation so boxes read as a spaced map, not a dense grid.
-    g.setGraph({ rankdir: direction, nodesep: 110, ranksep: 175, marginx: 60, marginy: 60 });
-
     const dimsFor = (f: ArchFile) => nodeDims(f.risk_score, f.path.split("/").pop() ?? f.path);
 
-    // Create file nodes
+    // Node data/styling (positions are assigned by the two-pass layout below).
     const rfNodes: Node[] = files.map((f) => {
       const fileName = f.path.split("/").pop() ?? f.path;
       const size = dimsFor(f);
       const lensStyle = lensHighlightStyle(f, lens);
-      g.setNode(f.path, { width: size.width, height: size.height });
       return {
         id: f.path,
         type: "archFile",
@@ -214,7 +209,6 @@ function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQu
       };
     });
 
-    // Create edges
     const rfEdges: Edge[] = edges.map((e, i) => {
       const primaryKind = e.kinds[0] ?? "imports";
       const colors = edgeColorsFor(primaryKind);
@@ -230,61 +224,191 @@ function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQu
       };
     });
 
-    // Set edges in dagre
-    rfEdges.forEach((e) => {
-      if (g.hasNode(e.source) && g.hasNode(e.target)) {
-        g.setEdge(e.source, e.target);
+    // ---------------------------------------------------------------------
+    // Two-pass clustered layout. A single flat dagre over 200+ files produced
+    // a ~35k-px-wide map because dagre knows nothing about directories: rank
+    // width grows with every node it places side by side. Instead:
+    //   Pass A lays each directory out on its own (compact dagre over the
+    //          intra-directory edges, or a grid when a directory has no
+    //          internal structure), yielding a tight cluster per directory.
+    //   Pass B lays the CLUSTERS out as super-nodes sized by their bounding
+    //          boxes, connected by aggregated cross-directory edges.
+    // Total canvas size is then bounded by the group-level layout, not by the
+    // widest file rank.
+    // ---------------------------------------------------------------------
+    const PAD_X = 40;
+    const PAD_Y = 66; // extra headroom for the group caption
+    const fileDims = new Map(files.map((f) => [f.path, dimsFor(f)]));
+
+    const groupsMap = new Map<string, string[]>();
+    for (const f of files) {
+      const dir = dirGroup(f.path);
+      const bucket = groupsMap.get(dir);
+      if (bucket) bucket.push(f.path);
+      else groupsMap.set(dir, [f.path]);
+    }
+    const dirOf = (p: string) => dirGroup(p);
+
+    // Pass A: local layout per directory → positions relative to the cluster
+    // origin plus the cluster's content bounding box.
+    type LocalLayout = { local: Map<string, { x: number; y: number }>; w: number; h: number };
+    const gridLayout = (members: string[]): LocalLayout => {
+      // Row-major grid, hottest files first; column count keeps clusters
+      // roughly square-ish rather than one long rank.
+      const byRisk = [...members].sort(
+        (a, b) =>
+          (files.find((f) => f.path === b)?.risk_score ?? 0) -
+          (files.find((f) => f.path === a)?.risk_score ?? 0),
+      );
+      const cols = Math.max(1, Math.min(isHorizontal ? 2 : 3, Math.ceil(Math.sqrt(byRisk.length))));
+      const GX = 36;
+      const GY = 26;
+      const local = new Map<string, { x: number; y: number }>();
+      const colW: number[] = new Array(cols).fill(0);
+      const rowH: number[] = [];
+      byRisk.forEach((p, i) => {
+        const d = fileDims.get(p) ?? { width: 160, height: 54 };
+        const c = i % cols;
+        const r = Math.floor(i / cols);
+        colW[c] = Math.max(colW[c] ?? 0, d.width);
+        rowH[r] = Math.max(rowH[r] ?? 0, d.height);
+      });
+      const colX: number[] = [];
+      let acc = 0;
+      for (let c = 0; c < cols; c++) {
+        colX[c] = acc;
+        acc += (colW[c] ?? 0) + GX;
       }
+      const rowY: number[] = [];
+      acc = 0;
+      for (let r = 0; r < rowH.length; r++) {
+        rowY[r] = acc;
+        acc += (rowH[r] ?? 0) + GY;
+      }
+      byRisk.forEach((p, i) => {
+        local.set(p, { x: colX[i % cols] ?? 0, y: rowY[Math.floor(i / cols)] ?? 0 });
+      });
+      const usedCols = Math.min(cols, byRisk.length);
+      return {
+        local,
+        w: (colX[usedCols - 1] ?? 0) + (colW[usedCols - 1] ?? 0),
+        h: Math.max(acc - GY, 0),
+      };
+    };
+
+    const dagreLocal = (members: string[], intra: { s: string; t: string }[]): LocalLayout => {
+      const lg = new dagre.graphlib.Graph().setDefaultEdgeLabel(() => ({}));
+      lg.setGraph({ rankdir: direction, nodesep: 40, ranksep: 70, marginx: 0, marginy: 0 });
+      for (const p of members) {
+        const d = fileDims.get(p) ?? { width: 160, height: 54 };
+        lg.setNode(p, { width: d.width, height: d.height });
+      }
+      for (const e of intra) lg.setEdge(e.s, e.t);
+      dagre.layout(lg);
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      const centers = new Map<string, { x: number; y: number }>();
+      for (const p of members) {
+        const n = lg.node(p);
+        const d = fileDims.get(p) ?? { width: 160, height: 54 };
+        centers.set(p, { x: n.x, y: n.y });
+        minX = Math.min(minX, n.x - d.width / 2);
+        minY = Math.min(minY, n.y - d.height / 2);
+        maxX = Math.max(maxX, n.x + d.width / 2);
+        maxY = Math.max(maxY, n.y + d.height / 2);
+      }
+      const local = new Map<string, { x: number; y: number }>();
+      for (const p of members) {
+        const c = centers.get(p);
+        if (!c) continue;
+        const d = fileDims.get(p) ?? { width: 160, height: 54 };
+        local.set(p, { x: c.x - d.width / 2 - minX, y: c.y - d.height / 2 - minY });
+      }
+      return { local, w: maxX - minX, h: maxY - minY };
+    };
+
+    const localLayouts = new Map<string, LocalLayout>();
+    groupsMap.forEach((members, dir) => {
+      const intra = edges
+        .filter((e) => dirOf(e.source) === dir && dirOf(e.target) === dir)
+        .map((e) => ({ s: e.source, t: e.target }));
+      let ll = intra.length > 0 ? dagreLocal(members, intra) : gridLayout(members);
+      // Even a connected cluster can go wide when dagre puts many files on one
+      // rank; past a sane width the grid reads better and keeps Pass B bounded.
+      if (ll.w > 2400) ll = gridLayout(members);
+      localLayouts.set(dir, ll);
     });
 
-    dagre.layout(g);
+    // Pass B: arrange clusters. Super-node size = content bbox + group chrome.
+    const sg = new dagre.graphlib.Graph().setDefaultEdgeLabel(() => ({}));
+    sg.setGraph({ rankdir: direction, nodesep: 70, ranksep: 130, marginx: 60, marginy: 60 });
+    groupsMap.forEach((members, dir) => {
+      const ll = localLayouts.get(dir);
+      if (!ll) return;
+      const multi = members.length >= 2;
+      sg.setNode(dir, {
+        width: ll.w + (multi ? PAD_X * 2 : 0),
+        height: ll.h + (multi ? PAD_Y + PAD_X : 0),
+      });
+    });
+    const crossSeen = new Set<string>();
+    for (const e of edges) {
+      const a = dirOf(e.source);
+      const b = dirOf(e.target);
+      if (a === b) continue;
+      const k = `${a}→${b}`;
+      if (crossSeen.has(k)) continue;
+      crossSeen.add(k);
+      sg.setEdge(a, b);
+    }
+    dagre.layout(sg);
 
-    // Apply positions
+    // Compose: absolute file position = cluster origin + chrome pad + local.
+    const groupOrigin = new Map<string, { x: number; y: number }>();
+    groupsMap.forEach((members, dir) => {
+      const n = sg.node(dir);
+      const ll = localLayouts.get(dir);
+      if (!n || !ll) return;
+      const multi = members.length >= 2;
+      const w = ll.w + (multi ? PAD_X * 2 : 0);
+      const h = ll.h + (multi ? PAD_Y + PAD_X : 0);
+      groupOrigin.set(dir, { x: n.x - w / 2, y: n.y - h / 2 });
+    });
+
     const positionedNodes = rfNodes.map((node) => {
-      const pos = g.node(node.id);
-      if (!pos) return node;
-      const nf = files.find((f) => f.path === node.id);
-      const size = nf ? dimsFor(nf) : { width: 160, height: 54 };
+      const dir = dirOf(node.id);
+      const origin = groupOrigin.get(dir);
+      const ll = localLayouts.get(dir);
+      const loc = ll?.local.get(node.id);
+      if (!origin || !loc) return node;
+      const multi = (groupsMap.get(dir)?.length ?? 0) >= 2;
       return {
         ...node,
         targetPosition: isHorizontal ? Position.Left : Position.Top,
         sourcePosition: isHorizontal ? Position.Right : Position.Bottom,
-        position: { x: pos.x - size.width / 2, y: pos.y - size.height / 2 },
+        position: {
+          x: origin.x + (multi ? PAD_X : 0) + loc.x,
+          y: origin.y + (multi ? PAD_Y : 0) + loc.y,
+        },
       };
     });
 
-    // Compute directory groups
-    const groups = new Map<string, string[]>();
-    files.forEach((f) => {
-      const group = dirGroup(f.path);
-      if (!groups.has(group)) groups.set(group, []);
-      groups.get(group)!.push(f.path);
-    });
-
     const groupNodes: Node[] = [];
-    const PAD_X = 40;
-    const PAD_Y = 66;
-    groups.forEach((memberPaths, dir) => {
-      if (memberPaths.length < 2) return;
-      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-      for (const fp of memberPaths) {
-        const node = positionedNodes.find((n) => n.id === fp);
-        if (!node) continue;
-        const nf = files.find((f) => f.path === fp);
-        const size = nf ? dimsFor(nf) : { width: 160, height: 54 };
-        minX = Math.min(minX, node.position.x);
-        minY = Math.min(minY, node.position.y);
-        maxX = Math.max(maxX, node.position.x + size.width);
-        maxY = Math.max(maxY, node.position.y + size.height);
-      }
+    groupsMap.forEach((members, dir) => {
+      if (members.length < 2) return;
+      const origin = groupOrigin.get(dir);
+      const ll = localLayouts.get(dir);
+      if (!origin || !ll) return;
       groupNodes.push({
         id: `group:${dir}`,
         type: "group",
-        position: { x: minX - PAD_X, y: minY - PAD_Y },
+        position: { x: origin.x, y: origin.y },
         data: { label: groupLabel(dir) },
         style: {
-          width: maxX - minX + PAD_X * 2,
-          height: maxY - minY + PAD_Y + PAD_X,
+          width: ll.w + PAD_X * 2,
+          height: ll.h + PAD_Y + PAD_X,
           // Quiet outline instead of a filled box — keeps the grouping legible
           // without making the canvas read as a grid of nested tiles.
           backgroundColor: "transparent",
