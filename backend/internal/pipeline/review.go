@@ -71,6 +71,10 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 		case action == TriageSecuritySkim:
 			// Security-only specialist pass — saves tokens vs full deep
 			units = append(units, workUnit{file: f, action: action, specialist: SpecialistSecurity})
+		case run.DeepReview && action == TriageDeep && run.Contract.Is(ChangeClassOneTimeScript):
+			// Throwaway scripts get one balanced reviewer (correctness +
+			// data-safety) instead of the 4-specialist squad.
+			units = append(units, workUnit{file: f, action: action, specialist: SpecialistScript})
 		case run.DeepReview && action == TriageDeep:
 			// Deep files get all specialist passes
 			for _, s := range AllSpecialists() {

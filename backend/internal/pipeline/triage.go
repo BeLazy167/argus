@@ -79,6 +79,16 @@ func (ts *TriageStage) Execute(ctx context.Context, run *PipelineRun) error {
 			"deep_files", deepCount, "pr", run.PREvent.PRNumber)
 	}
 
+	// Review contract overrides: class-level routing wins over per-file
+	// heuristics/LLM for non-production classes. Production class (or a nil
+	// contract) changes nothing.
+	if overridden := applyContractOverrides(run.Contract, results); overridden > 0 {
+		slog.Info("triage contract overrides",
+			"change_class", run.Contract.ChangeClass,
+			"files_overridden", overridden,
+			"pr", run.PREvent.PRNumber)
+	}
+
 	// Convert map to slice for PipelineRun
 	triageSlice := make([]TriageResult, 0, len(results))
 	for _, r := range results {
@@ -177,6 +187,44 @@ func (ts *TriageStage) llmTriage(ctx context.Context, run *PipelineRun) (map[str
 		m[r.File] = r
 	}
 	return m, nil
+}
+
+// applyContractOverrides mutates triage results per the review contract:
+//   - one_time_script/docs/generated/test classes downgrade their deep files
+//     to skim — except security-relevant paths, which keep their depth.
+//   - migration class forces deep review on every SQL file (destructive DDL
+//     must never be skimmed).
+//
+// Returns the number of files whose action changed. Nil contract or any other
+// class (production, config, revert, empty/llm-pending) is a no-op.
+func applyContractOverrides(c *ReviewContract, results map[string]TriageResult) int {
+	if c == nil {
+		return 0
+	}
+	overridden := 0
+	switch c.ChangeClass {
+	case ChangeClassOneTimeScript, ChangeClassDocs, ChangeClassGenerated, ChangeClassTest:
+		for file, r := range results {
+			if r.Action != TriageDeep || isSecurityRelevant(strings.ToLower(file)) {
+				continue
+			}
+			r.Action = TriageSkim
+			r.Reason = "contract: " + c.ChangeClass + " class"
+			results[file] = r
+			overridden++
+		}
+	case ChangeClassMigration:
+		for file, r := range results {
+			if !strings.HasSuffix(strings.ToLower(file), ".sql") || r.Action == TriageDeep {
+				continue
+			}
+			r.Action = TriageDeep
+			r.Reason = "contract: migration SQL forces deep"
+			results[file] = r
+			overridden++
+		}
+	}
+	return overridden
 }
 
 // heuristicTriage classifies files using deterministic rules (file extension,

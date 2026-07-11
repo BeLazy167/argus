@@ -537,6 +537,21 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		UpdatedAt:         time.Now(),
 	}
 
+	// Compute the review contract from deterministic metadata (draft flag,
+	// labels, branch prefix, changed paths, title, size). When metadata is
+	// silent the contract stays "llm-pending" and the intent stage fills the
+	// change class. Consumers (triage, review fan-out, pass2, posting) read it.
+	run.Contract = ComputeContract(&run.PREvent, patchSet.Files)
+	o.logger.Info("review contract computed",
+		"change_class", run.Contract.ChangeClass,
+		"evidence_bar", run.Contract.EvidenceBar,
+		"depth", run.Contract.Depth,
+		"scrutiny_bump", run.Contract.ScrutinyBump,
+		"unreviewable", run.Contract.Unreviewable,
+		"signals", strings.Join(run.Contract.Signals, ","),
+		"source", run.Contract.Source,
+		"pr", event.PRNumber)
+
 	// Load prior review comments for incremental reviews so the LLM can
 	// avoid duplicating previously-flagged issues and verify fixes.
 	if isIncremental && previousReviewID != nil {
@@ -2041,6 +2056,14 @@ func (o *Orchestrator) pass2(ctx context.Context, run *PipelineRun) error {
 		return nil
 	}
 
+	// Review contract gate: a second architecture pass earns nothing on
+	// throwaway scripts, docs, or generated code.
+	if run.Contract.SkipsPass2() {
+		o.logger.Info("pass2 skipped by review contract",
+			"change_class", run.Contract.ChangeClass, "pr", run.PREvent.PRNumber)
+		return nil
+	}
+
 	const minCommentsForPass2 = 3
 	const minScoreForHot = 70
 
@@ -2379,6 +2402,10 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	var summaryBody strings.Builder
 	summaryBody.WriteString(reviewHeader)
 	summaryBody.WriteString(run.Synthesis.Brief)
+	if contractLine := run.Contract.SummaryLine(); contractLine != "" {
+		summaryBody.WriteString("\n\n")
+		summaryBody.WriteString(contractLine)
+	}
 	if scopeNote := assessPRScope(run); scopeNote != "" {
 		summaryBody.WriteString("\n\n")
 		summaryBody.WriteString(scopeNote)
@@ -2477,14 +2504,22 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	if len(run.TruncatedFiles) > 0 {
 		truncatedFilesJSON, _ = json.Marshal(run.TruncatedFiles)
 	}
+	var contractJSON []byte
+	if run.Contract != nil {
+		if b, err := json.Marshal(run.Contract); err != nil {
+			o.logger.Warn("failed to marshal review contract", "error", err)
+		} else {
+			contractJSON = b
+		}
+	}
 	_, dbErr := o.db.Exec(ctx, `
 		UPDATE reviews SET summary = $1, score = $2, token_usage = $3, file_count = $4,
 		       deep_review = $5, persona = $6, is_incremental = $7, simulation_results = $8,
-		       truncated_files = $9, brief = $10
-		WHERE id = $11
+		       truncated_files = $9, brief = $10, review_contract = $11
+		WHERE id = $12
 	`, run.Synthesis.Summary, run.Synthesis.Score, tokenUsageJSON, len(run.FileReviews),
 		run.DeepReview, persona, run.IsIncremental, simResultsJSON, truncatedFilesJSON,
-		run.Synthesis.Brief, run.ReviewID)
+		run.Synthesis.Brief, contractJSON, run.ReviewID)
 	if dbErr != nil {
 		o.logger.Error("pre-post DB update failed — review data at risk if PostReview also fails",
 			"error", dbErr, "review_id", run.ReviewID)

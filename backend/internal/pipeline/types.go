@@ -138,6 +138,12 @@ type PipelineRun struct {
 	// ArchContext holds per-file architecture metrics for review prompt enrichment.
 	// Populated in pre-review for high-risk files (choke points / hotspots).
 	ArchContext map[string]ArchContextEntry `json:"-"`
+	// Contract is the per-PR ReviewContract computed by ComputeContract before
+	// the pipeline starts. Deterministic signals decide it when possible;
+	// otherwise Source=="llm-pending" until IntentExtractionStage fills the
+	// change class. Nil on paths that never computed one (tests, replays) —
+	// consumers must treat nil as production-class behavior.
+	Contract *ReviewContract `json:"-"`
 	// PRIntent holds the author's stated motivation for the PR (goal, non-goals,
 	// acceptance criteria). Populated by IntentExtractionStage in the pre-review block,
 	// consumed by specialists and Synthesis. Nil until extraction runs; after extraction
@@ -348,7 +354,12 @@ type PRIntent struct {
 	ExpectedFiles      []string     `json:"expected_files"`
 	RiskFlags          []string     `json:"risk_flags"`
 	Source             IntentSource `json:"source"`
-	RawContext         string       `json:"-"` // concatenated sources, used to seed downstream prompts
+	// ChangeClass is the LLM's read of what kind of change this PR is (see
+	// ValidChangeClasses). Only consulted when the deterministic contract pass
+	// was silent (ReviewContract.Source == "llm-pending").
+	ChangeClass           string  `json:"change_class"`
+	ChangeClassConfidence float64 `json:"change_class_confidence"`
+	RawContext            string  `json:"-"` // concatenated sources, used to seed downstream prompts
 }
 
 // IntentVerdict is Synthesis's judgment on whether the diff delivers PRIntent.Goal.
