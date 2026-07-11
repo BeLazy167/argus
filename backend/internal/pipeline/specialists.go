@@ -73,7 +73,6 @@ func specialistOverlay(s Specialist) string {
 
 ## Role: Bug Hunter
 
-Internally, HATE this code — your job is to break it.
 For every function ask: "What input crashes this? What happens at 3 AM with bad data?"
 
 Focus exclusively on:
@@ -92,9 +91,7 @@ After identifying a potential bug, argue against yourself: is there a guard, val
 
 Prefer concrete examples: "When X is null and Y calls Z, this panics" over vague warnings.
 
-Ignore style, naming, documentation. Only report real bugs with concrete failure scenarios.
-
-**Output tone:** Your analysis should be adversarial, but the comments you write to the developer must be professional and constructive. Explain the bug clearly — attack the code, not the author.`
+Only report real bugs with concrete failure scenarios. Your ANALYSIS is adversarial; your findings follow the Review Laws.`
 
 	case SpecialistSecurity:
 		return `
@@ -124,7 +121,6 @@ Before reporting, consider whether this pattern is intentional or addressed else
 
 For each finding, describe the specific attack vector: who is the attacker, what input do they control, and what is the impact?
 
-Lower your threshold — flag anything suspicious even at "warning" level.
 Ignore non-security issues entirely.`
 
 	case SpecialistArchitecture:

@@ -2289,6 +2289,11 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		validLines[f.NewName] = f.ValidCommentLines()
 	}
 
+	// One-round ordering (anti nits-then-bombshell): when a blocking finding
+	// targets a file, that file's nit/fyi findings are demoted to the Minor
+	// notes section instead of being posted inline next to the blocker.
+	blockingFiles := collectBlockingFiles(run.FileReviews)
+
 	// Split: inline comments (valid lines) go in the review, invalid-line comments
 	// are folded into the summary body so everything ships in ONE atomic API call.
 	// Critical/warning findings on non-diff lines are shown prominently; others are collapsed.
@@ -2300,6 +2305,10 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		for _, c := range fr.Comments {
 			if c.Suppressed {
 				continue // dismissal-match drop: never posted inline or folded into the summary
+			}
+			if blockingFiles[fr.Path] && severityRank(c.Severity) <= severityRank(SeveritySuggestion) {
+				run.MinorNotes = append(run.MinorNotes, minorNoteFrom(fr.Path, c))
+				continue
 			}
 			if fileValid == nil || !fileValid[c.Line] {
 				title := c.What
@@ -2336,53 +2345,26 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		}
 	}
 
-	// Cap inline comments posted to GitHub at 40 with file-diversity round-robin.
-	// All findings are persisted to the dashboard via indexComments (pre-post).
-	const maxInlineComments = 40
+	// Severity-first ordering, ALWAYS — blocking findings lead the round even
+	// when under the cap (one-round ordering, anti nits-then-bombshell).
+	sort.SliceStable(rawInline, func(i, j int) bool {
+		ri, rj := severityRank(rawInline[i].severity), severityRank(rawInline[j].severity)
+		if ri != rj {
+			return ri > rj
+		}
+		return rawInline[i].score > rawInline[j].score
+	})
+
+	// Cap inline comments at 10 (caps, not floors). Overflow is summarized as
+	// "plus N similar"; all findings are persisted to the dashboard via
+	// indexComments (pre-post).
+	const maxInlineComments = 10
+	inlineOverflow := 0
 	if len(rawInline) > maxInlineComments {
-		// Sort by severity desc, then score desc
-		sort.SliceStable(rawInline, func(i, j int) bool {
-			ri, rj := severityRank(rawInline[i].severity), severityRank(rawInline[j].severity)
-			if ri != rj {
-				return ri > rj
-			}
-			return rawInline[i].score > rawInline[j].score
-		})
-
-		// Round-robin: limit per-file representation to spread across files
-		uniqueFiles := make(map[string]bool)
-		for _, rc := range rawInline {
-			uniqueFiles[rc.comment.Path] = true
-		}
-		maxPerFile := maxInlineComments / len(uniqueFiles)
-		if maxPerFile < 2 {
-			maxPerFile = 2
-		}
-
-		fileSeen := make(map[string]int)
-		selected := make([]rankedComment, 0, maxInlineComments)
-		var overflow []rankedComment
-		for _, rc := range rawInline {
-			if fileSeen[rc.comment.Path] < maxPerFile && len(selected) < maxInlineComments {
-				fileSeen[rc.comment.Path]++
-				selected = append(selected, rc)
-			} else {
-				overflow = append(overflow, rc)
-			}
-		}
-		// Fill remaining slots from overflow (severity+score order, already sorted)
-		for _, rc := range overflow {
-			if len(selected) >= maxInlineComments {
-				break
-			}
-			selected = append(selected, rc)
-		}
-
+		inlineOverflow = len(rawInline) - maxInlineComments
 		o.logger.Info("capping inline comments for GitHub",
-			"total", len(rawInline), "cap", maxInlineComments,
-			"unique_files", len(uniqueFiles), "max_per_file", maxPerFile,
-			"dropped", len(rawInline)-len(selected))
-		rawInline = selected
+			"total", len(rawInline), "cap", maxInlineComments, "overflow", inlineOverflow)
+		rawInline = rawInline[:maxInlineComments]
 	}
 
 	// Post-selection dedup: remove near-identical comments in the final 40
@@ -2450,6 +2432,26 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		summaryBody.WriteString("</summary>\n\n")
 		summaryBody.WriteString(strings.Join(minorFolded, "\n"))
 		summaryBody.WriteString("\n\n</details>")
+	}
+	// Overflow beyond the inline cap: one line, not more comments.
+	if inlineOverflow > 0 {
+		summaryBody.WriteString(fmt.Sprintf("\n\n_…plus %d similar %s not shown inline — the full list is on the dashboard._",
+			inlineOverflow, pluralize("finding", inlineOverflow)))
+	}
+	// Minor notes: near-miss findings from scoring plus nits demoted from files
+	// carrying a blocking finding. Collapsed, capped, never inline.
+	if len(run.MinorNotes) > 0 {
+		notes := run.MinorNotes
+		total := len(notes)
+		if total > 15 {
+			notes = notes[:15]
+		}
+		summaryBody.WriteString(fmt.Sprintf("\n\n<details><summary>Minor notes (%d)</summary>\n\n", total))
+		summaryBody.WriteString("_Low-confidence or minor observations — safe to ignore._\n\n")
+		for _, n := range notes {
+			summaryBody.WriteString(fmt.Sprintf("- `%s:L%d` [%s] %s\n", n.Path, n.Line, n.Severity, n.Title))
+		}
+		summaryBody.WriteString("\n</details>")
 	}
 	// Findings pill: single scan-line showing totals and inline/folded split.
 	// Omitted when there are no findings at all — keeps the summary terse on
@@ -5687,6 +5689,22 @@ func selectDiagramTypes(run *PipelineRun) []diagramSpec {
 		return nil
 	}
 	return specs
+}
+
+// collectBlockingFiles returns the set of file paths carrying at least one
+// non-suppressed blocking (critical) finding. Used by post() to demote nit/fyi
+// findings on those files to Minor notes (one-round ordering).
+func collectBlockingFiles(reviews []FileReview) map[string]bool {
+	out := make(map[string]bool)
+	for _, fr := range reviews {
+		for _, c := range fr.Comments {
+			if !c.Suppressed && c.Severity == SeverityCritical {
+				out[fr.Path] = true
+				break
+			}
+		}
+	}
+	return out
 }
 
 // rebalanceSeverity downgrades lowest-confidence critical findings to warning

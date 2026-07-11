@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"sort"
 	"strings"
 	"sync"
 
@@ -27,31 +26,82 @@ func NewScoringStage(registry *llm.Registry, st *store.Store) *ScoringStage {
 	return &ScoringStage{registry: registry, store: st}
 }
 
-// scoringThresholdForSeverity returns the minimum score for a comment to survive
-// scoring, varying by severity. Critical findings use a lower bar; suggestions/info
-// require higher confidence.
-func scoringThresholdForSeverity(severity string) int {
-	switch strings.ToLower(severity) {
+// scoringThresholdForSeverity returns the minimum score for a comment to
+// survive scoring, varying by severity and conditioned on the ReviewContract
+// class (depth follows blast radius):
+//   - one_time_script / docs / generated: suggestion +15, warning +10 — only
+//     near-certain findings survive on throwaway/low-stakes changes
+//   - migration or security floor: critical -5 — MORE sensitive where the
+//     blast radius is data loss or auth
+func scoringThresholdForSeverity(severity string, c *ReviewContract) int {
+	sev := strings.ToLower(severity)
+	var t int
+	switch sev {
 	case "critical":
-		return 35
+		t = 35
 	case "warning":
-		return 45
+		t = 45
 	case "suggestion", "info":
-		return 55
+		t = 55
 	default:
-		return 45
+		t = 45
+	}
+	if c.Is(ChangeClassOneTimeScript) || c.Is(ChangeClassDocs) || c.Is(ChangeClassGenerated) {
+		switch sev {
+		case "suggestion", "info":
+			t += 15
+		case "warning":
+			t += 10
+		}
+	}
+	if (c.Is(ChangeClassMigration) || c.HasSecurityFloor()) && sev == "critical" {
+		t -= 5
+	}
+	return t
+}
+
+// minorNoteBand is the near-miss window below the severity threshold: findings
+// scoring within it are demoted to the summary's collapsed "Minor notes"
+// section instead of being dropped outright (caps, not floors — nothing is
+// resurrected inline).
+const minorNoteBand = 10
+
+// thresholdDisposition classifies where a scored finding lands.
+type thresholdDisposition int
+
+const (
+	dispositionInline thresholdDisposition = iota
+	dispositionMinorNote
+	dispositionDrop
+)
+
+// thresholdDispositionFor returns the disposition for a score against its
+// class-conditioned severity threshold.
+func thresholdDispositionFor(score int, severity Severity, c *ReviewContract) thresholdDisposition {
+	th := scoringThresholdForSeverity(string(severity), c)
+	switch {
+	case score >= th:
+		return dispositionInline
+	case score >= th-minorNoteBand:
+		return dispositionMinorNote
+	default:
+		return dispositionDrop
 	}
 }
 
-// minSurvivors is the minimum number of comments to keep even if all fall below threshold.
-const minSurvivors = 3
-
-func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
-	// No-op if deep review is off
-	if !run.DeepReview {
-		return nil
+// minorNoteFrom projects a demoted comment into its summary-rendered form.
+func minorNoteFrom(path string, c FileComment) MinorNote {
+	title := c.What
+	if title == "" {
+		title = util.Truncate(c.Body, 120, true)
 	}
+	return MinorNote{Path: path, Line: c.Line, Severity: c.Severity, Title: title}
+}
 
+// Execute runs the judge + deterministic caps + threshold filter for EVERY
+// review (a single cheap LLM call). Pass2/validate/multi-pass remain gated
+// behind deep review elsewhere — only the earned-findings gate is always on.
+func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 	// Check if scoring model is configured — if not, pass through
 	provider, cfg, err := ss.registry.ResolveProvider(ctx, storeConfigLister{st: ss.store, installationID: run.DBInstallationID}, run.DBInstallationID, run.DBRepoID, llm.StageScoring)
 	if err != nil {
@@ -183,17 +233,20 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 	for _, g := range groups {
 		repSet[g.Representative] = true
 	}
-	// Score unmentioned findings at 100 (pass through)
+	// Judge-omitted findings default to their severity threshold (borderline):
+	// they survive inline but earn no headroom. The old default of 100 let the
+	// judge accidentally bless findings by ignoring them.
 	var defaultScored int
 	for i, ic := range allComments {
 		if dupSet[i] || repSet[i] {
 			continue
 		}
-		run.FileReviews[ic.fileIdx].Comments[ic.commentIdx].Score = 100
+		c := &run.FileReviews[ic.fileIdx].Comments[ic.commentIdx]
+		c.Score = scoringThresholdForSeverity(string(c.Severity), run.Contract)
 		defaultScored++
 	}
 	if defaultScored > 0 {
-		slog.Warn("scoring: findings not mentioned by judge assigned default score 100",
+		slog.Warn("scoring: findings not mentioned by judge scored at severity threshold",
 			"count", defaultScored, "total", len(allComments))
 	}
 
@@ -222,20 +275,59 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 		}
 	}
 
-	// Filter: remove duplicates and comments below threshold
-	var kept, dropped, duped int
+	// Filter: remove duplicates; below-threshold comments in the near-miss band
+	// become collapsed Minor notes in the summary, the rest are dropped. No
+	// survivor floor — findings are earned, never guaranteed (zero inline
+	// findings is a valid review).
+	var duped int
+	kept, minor, dropped := applyThresholdFilter(run, func(fi, ci int) bool {
+		if skipSet[commentKey{fi, ci}] {
+			duped++
+			return true
+		}
+		return false
+	})
+
+	if run.EventBus != nil {
+		run.EventBus.Publish(run.ReviewID, EventScoringUpdate, map[string]any{
+			"kept":        kept,
+			"dropped":     dropped,
+			"minor_notes": minor,
+			"thresholds": map[string]int{
+				"critical":   scoringThresholdForSeverity("critical", run.Contract),
+				"warning":    scoringThresholdForSeverity("warning", run.Contract),
+				"suggestion": scoringThresholdForSeverity("suggestion", run.Contract),
+			},
+		})
+	}
+
+	slog.Info("scoring complete", "kept", kept, "minor_notes", minor, "dropped", dropped, "duped_by_judge", duped,
+		"threshold_critical", scoringThresholdForSeverity("critical", run.Contract),
+		"threshold_warning", scoringThresholdForSeverity("warning", run.Contract),
+		"threshold_suggestion", scoringThresholdForSeverity("suggestion", run.Contract))
+	return nil
+}
+
+// applyThresholdFilter partitions run.FileReviews by class-conditioned severity
+// thresholds: inline survivors stay, near-miss findings (within minorNoteBand
+// below threshold) move to run.MinorNotes, the rest are dropped. skip reports
+// judge-marked duplicates to exclude entirely. Returns (kept, minor, dropped).
+func applyThresholdFilter(run *PipelineRun, skip func(fi, ci int) bool) (kept, minor, dropped int) {
 	filtered := run.FileReviews[:0]
 	for fi, fr := range run.FileReviews {
 		var passing []FileComment
 		for ci, c := range fr.Comments {
-			if skipSet[commentKey{fi, ci}] {
-				duped++
+			if skip != nil && skip(fi, ci) {
 				continue
 			}
-			if c.Score >= scoringThresholdForSeverity(string(c.Severity)) {
+			switch thresholdDispositionFor(c.Score, c.Severity, run.Contract) {
+			case dispositionInline:
 				passing = append(passing, c)
 				kept++
-			} else {
+			case dispositionMinorNote:
+				run.MinorNotes = append(run.MinorNotes, minorNoteFrom(fr.Path, c))
+				minor++
+			default:
 				dropped++
 			}
 		}
@@ -243,62 +335,8 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 			filtered = append(filtered, FileReview{Path: fr.Path, Comments: passing})
 		}
 	}
-
-	// MinSurvivors fallback: if all comments were dropped, keep the top-N by score
-	if kept == 0 && len(allComments) > 0 {
-		// Sort allComments indices by score descending
-		type scoredIdx struct {
-			fileIdx    int
-			commentIdx int
-			score      int
-		}
-		var all []scoredIdx
-		for i, ic := range allComments {
-			if dupSet[i] {
-				continue // don't resurrect judge-marked duplicates
-			}
-			c := run.AllFileReviews[ic.fileIdx].Comments[ic.commentIdx]
-			all = append(all, scoredIdx{fileIdx: ic.fileIdx, commentIdx: ic.commentIdx, score: c.Score})
-		}
-		sort.Slice(all, func(i, j int) bool { return all[i].score > all[j].score })
-		n := minSurvivors
-		if n > len(all) {
-			n = len(all)
-		}
-		// Rebuild filtered from top-N using AllFileReviews snapshot
-		survivors := make(map[string][]FileComment)
-		for _, s := range all[:n] {
-			fr := run.AllFileReviews[s.fileIdx]
-			survivors[fr.Path] = append(survivors[fr.Path], fr.Comments[s.commentIdx])
-		}
-		filtered = filtered[:0]
-		for path, comments := range survivors {
-			filtered = append(filtered, FileReview{Path: path, Comments: comments})
-		}
-		kept = n
-		dropped = len(allComments) - n
-		slog.Info("scoring: all comments below threshold, keeping top survivors", "minSurvivors", n)
-	}
-
 	run.FileReviews = filtered
-
-	if run.EventBus != nil {
-		run.EventBus.Publish(run.ReviewID, EventScoringUpdate, map[string]any{
-			"kept":    kept,
-			"dropped": dropped,
-			"thresholds": map[string]int{
-				"critical":   scoringThresholdForSeverity("critical"),
-				"warning":    scoringThresholdForSeverity("warning"),
-				"suggestion": scoringThresholdForSeverity("suggestion"),
-			},
-		})
-	}
-
-	slog.Info("scoring complete", "kept", kept, "dropped", dropped, "duped_by_judge", duped,
-		"threshold_critical", scoringThresholdForSeverity("critical"),
-		"threshold_warning", scoringThresholdForSeverity("warning"),
-		"threshold_suggestion", scoringThresholdForSeverity("suggestion"))
-	return nil
+	return kept, minor, dropped
 }
 
 func buildScoringPrompt(run *PipelineRun, memContext string) string {
@@ -310,7 +348,15 @@ func buildScoringPrompt(run *PipelineRun, memContext string) string {
 	// Sanitize + truncate user-controlled fields
 	safeTitle := sanitizeUserInput(util.Truncate(run.PREvent.PRTitle, 200, false))
 	safeAuthor := sanitizeUserInput(util.Truncate(run.PREvent.PRAuthor, 100, false))
-	sb.WriteString(fmt.Sprintf("PR #%d: \"%s\" by %s\n\nScore each comment 0-100:\n\n", run.PREvent.PRNumber, safeTitle, safeAuthor))
+	sb.WriteString(fmt.Sprintf("PR #%d: \"%s\" by %s\n", run.PREvent.PRNumber, safeTitle, safeAuthor))
+	if run.PREvent.PRBody != "" {
+		sb.WriteString("\n" + wrapInDelimiters("pr_description", sanitizeUserInput(util.Truncate(run.PREvent.PRBody, 1500, false))) + "\n")
+	}
+	if run.Contract != nil {
+		sb.WriteString("\n" + run.Contract.SummaryLine() + "\n")
+		sb.WriteString("Survival thresholds are class-aware: throwaway/docs/generated changes need near-certain findings; migration/security changes are judged MORE sensitively for critical findings. Weigh plausibility against this contract.\n")
+	}
+	sb.WriteString("\nScore each comment 0-100:\n\n")
 	idx := 0
 	for _, fr := range run.FileReviews {
 		for _, c := range fr.Comments {
@@ -328,6 +374,9 @@ func buildScoringPrompt(run *PipelineRun, memContext string) string {
 			}
 			if c.BlastRadius > 0 {
 				sb.WriteString(fmt.Sprintf("    blast_radius: This finding affects %d downstream dependents\n", c.BlastRadius))
+			}
+			if c.Corroboration >= 2 {
+				sb.WriteString(fmt.Sprintf("    corroboration: %d specialists independently flagged this (positive signal, context only)\n", c.Corroboration))
 			}
 			idx++
 		}
@@ -402,6 +451,8 @@ Rules:
 - Security with concrete exploit: min 70
 - blast_radius > 0: min 70
 - Linter-catchable: max 35
+- "corroboration: N specialists" is a positive validity signal — lean toward valid, but never score above what the evidence supports
+- Survival thresholds are class-aware (see the review contract in the prompt): low-stakes classes need near-certain findings; migration/security classes keep critical findings more readily
 
 Respond ONLY with a JSON array. No other text.
 [{"representative": 0, "score": 85, "severity": "critical", "duplicates": [3], "reason": "real SQL injection"}]`
@@ -578,11 +629,18 @@ func promoteGroupSeverity(run *PipelineRun, g judgeGroup, allComments []indexedC
 }
 
 // adjustScores applies deterministic post-LLM caps/floors to known FP/TP patterns.
-// Runs after LLM judge scoring, before threshold filtering.
+// Runs after LLM judge scoring, before threshold filtering. Boosts apply first,
+// caps last — caps bind regardless of judge score or boost.
 func adjustScores(run *PipelineRun, groups []judgeGroup, allComments []indexedComment) {
 	for i := range groups {
 		g := &groups[i]
 		c := getCommentFromIndex(allComments, g.Representative, run)
+
+		// 0. Cross-specialist corroboration: small bounded boost, never a gate.
+		if c.Corroboration >= 2 {
+			g.Score = min(100, g.Score+10)
+			g.Reason += fmt.Sprintf(" [corroborated x%d: +10]", c.Corroboration)
+		}
 
 		// 1. Type confusion: "missing await" on non-async function
 		if isAwaitFinding(c) && !isAsyncFunction(c) {
@@ -613,7 +671,42 @@ func adjustScores(run *PipelineRun, groups []judgeGroup, allComments []indexedCo
 			g.Score = max(g.Score, 75)
 			g.Reason += " [SAST-corroborated]"
 		}
+
+		// 6. Style-ish findings capped at 30 — below every severity threshold,
+		// so a style finding can never post no matter what the judge scored it
+		// (Review Laws: style is never a finding).
+		if isStyleFinding(c) {
+			g.Score = min(g.Score, 30)
+			g.Reason += " [cap: style]"
+		}
+
+		// 7. Generic error_handling capped at 45 unless the file is
+		// security-relevant — "add error handling" is the most-dismissed
+		// finding class; on auth/token/crypto paths it stays uncapped.
+		if c.Category == CategoryErrorHandling && !isSecurityRelevant(strings.ToLower(c.FilePath)) {
+			g.Score = min(g.Score, 45)
+			g.Reason += " [cap: error-handling]"
+		}
 	}
+}
+
+// isStyleFinding reports whether a finding is style-ish by category or text —
+// naming/formatting/import-order commentary that the Review Laws forbid.
+func isStyleFinding(c scoredComment) bool {
+	if c.Category == CategoryStyle || c.Category == CategoryReadability {
+		return true
+	}
+	lower := strings.ToLower(c.What + " " + c.Body)
+	for _, kw := range []string{
+		"naming convention", "consider renaming", "code style", "stylistic",
+		"formatting", "import order", "import ordering", "indentation",
+		"whitespace", "typo",
+	} {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
 }
 
 // getCommentFromIndex resolves a flattened comment index to its scoredComment.

@@ -158,8 +158,10 @@ func layer1CanonicalGroup(all []taggedComment) (grouped, ungrouped []taggedComme
 			}
 			otherLocs = append(otherLocs, fmt.Sprintf("%s:L%d", m.filePath, m.comment.Line))
 		}
+		corr := corroborationOf(g.members)
 		for i := range reps {
 			reps[i].comment.DedupCount = len(g.members)
+			reps[i].comment.Corroboration = corr
 			if len(otherLocs) > 0 {
 				reps[i].comment.Why += fmt.Sprintf(" (same pattern also at %s)", strings.Join(otherLocs, ", "))
 			}
@@ -197,6 +199,28 @@ func pickBestCrossFile(members []taggedComment, maxReps int) []taggedComment {
 		}
 	}
 	return reps
+}
+
+// corroborationOf returns the number of DISTINCT non-empty specialists that
+// produced findings in a cluster, floored at any Corroboration a member
+// already carries from an earlier dedup layer (layers chain: a layer-1 merge
+// result can be merged again in layer 3 and must not lose its count).
+func corroborationOf(cluster []taggedComment) int {
+	seen := make(map[Specialist]bool)
+	prior := 0
+	for _, tc := range cluster {
+		if tc.comment.Specialist != "" {
+			seen[tc.comment.Specialist] = true
+		}
+		if tc.comment.Corroboration > prior {
+			prior = tc.comment.Corroboration
+		}
+	}
+	n := len(seen)
+	if prior > n {
+		n = prior
+	}
+	return n
 }
 
 func severityRank(s Severity) int {
@@ -369,6 +393,7 @@ func layer2TFIDFCluster(ungrouped []taggedComment, threshold float64) []taggedCo
 		}
 		best := pickBest(cluster)
 		best.comment.DedupCount = len(cluster)
+		best.comment.Corroboration = corroborationOf(cluster)
 		result = append(result, best)
 	}
 	return result
@@ -436,6 +461,9 @@ func layer3LineProximity(findings []taggedComment, lineThreshold int) []taggedCo
 		best := pickBest(cluster)
 		if best.comment.DedupCount < len(cluster) {
 			best.comment.DedupCount = len(cluster)
+		}
+		if corr := corroborationOf(cluster); corr > best.comment.Corroboration {
+			best.comment.Corroboration = corr
 		}
 		result = append(result, best)
 	}

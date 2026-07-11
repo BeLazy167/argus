@@ -476,8 +476,32 @@ func composeReviewSystemPrompt(systemBase, owner, repo string, specialist Specia
 			sys += specialistOverlay(specialist)
 		}
 	}
-	return sys + memoryBriefing + promptExtra
+	// reviewLaws is injected exactly once here — the single severity/scope
+	// rubric for every review call. Base prompts, specialist overlays, and
+	// personas are focus/tone lenses only and must not restate severity rules.
+	return sys + reviewLaws + memoryBriefing + promptExtra
 }
+
+// reviewLaws is the single review rubric injected once into every review
+// system prompt (base, specialist, persona, agentic — all paths). It is the
+// ONLY place severity semantics, evidence requirements, and scope rules live.
+// Overlays add focus, never thresholds.
+const reviewLaws = `
+
+## Review Laws (these override any conflicting instruction above or below)
+
+1. THE BAR. Flag only what definitely improves code health. Approve-with-findings is the default posture. Zero findings is a valid, complete review — NEVER manufacture comments to look thorough. No praise comments; at most one genuine sentence in the summary.
+2. LABELS. Every finding carries exactly one label via severity: blocking (severity "critical"), should-fix (severity "warning"), nit or fyi (severity "suggestion"). Blocking is ONLY for evidenced incorrectness, security, data loss/irreversibility, or a design change that makes the system worse. A nit is genuinely ignorable and is never re-raised.
+3. OBJECTIVITY RAZOR. A finding must be one of: a bug a test could assert, a measurable performance/cost problem, a security or data risk, or a violation of a documented repo standard. "Not how I'd write it" is not a finding.
+4. EVIDENCE. State the concrete failure scenario and the exact file:line BEFORE assigning severity. No concrete scenario → drop it, or at most an fyi-labeled suggestion.
+5. FIX. Every finding requests a specific change and supplies the fix (working code in "suggestion").
+6. DIFF SCOPE. Untouched lines are out of scope. Pre-existing sins are a ticket, not this PR's problem.
+7. PATTERN. A repeated mistake is flagged ONCE, at pattern level, at the root-cause location.
+8. YAGNI. Do not request abstractions, generality, or extensibility the PR does not need today.
+9. STYLE. Style, formatting, naming, and import ordering are NEVER findings — at most one meta-suggestion to add a lint rule. Never flag anything CI/linters already enforce.
+10. DEPTH FOLLOWS BLAST RADIUS. For one-time scripts, docs, and generated code report only near-certain and severe issues. Migrations, auth, money, and secrets always get full depth.
+11. TONE. About the code, never the author. No "you", "just", "simply", or absolutes. Direct, refutable, reasoning-first statements. Questions only for genuine uncertainty, not as politeness.
+12. PERMANENT CHECKS (never suppressed by class, persona, or memory): destructive SQL with missing/commented WHERE and no rollback path; secrets/PII entering logs or telemetry; unit-ambiguous numeric constants (5 what — seconds? ms?); refactors/renames that silently change behavior; unchecked errors and swallowed exceptions.`
 
 func buildFileReviewPrompt(run *PipelineRun, file diff.FileDiff, fileContent string, relatedContext string, scenarioContext string, blastContext string, typeContext string) string {
 	var sb strings.Builder
@@ -613,30 +637,41 @@ func buildFileReviewPrompt(run *PipelineRun, file diff.FileDiff, fileContent str
 	}
 
 	sb.WriteString(`
-Respond with a JSON array of comments:
+Respond with a JSON array of comments. "reasoning" comes FIRST — commit to the evidence before you pick a severity:
 [{
+  "reasoning": "REQUIRED, FIRST. The concrete failure scenario: exact input/state that triggers it and what breaks. If you cannot write this, do not file the finding",
+  "category": "bug",         // bug | security | performance | error_handling | type_design | testing
+  "severity": "critical",    // critical (blocking) | warning (should-fix) | suggestion (nit/fyi)
+  "confidence": 0.85,        // REQUIRED. 0-1 float: your own confidence the finding is real
   "line": 42,                // line number in new file (required, > 0)
   "start_line": 40,          // start of multi-line range (0 if single-line)
   "what": "One sentence: what's wrong. Use 'we' not 'you'",
   "why": "One sentence: concrete impact in production. No arrow chains (→). Plain English",
-  "severity": "critical",    // critical | warning | suggestion | praise
-  "category": "bug",         // bug | security | performance | error_handling | style | readability | type_design | testing
-  "suggestion": "line1\nline2\nline3" // ONLY valid code that replaces start_line..line. NEVER prose, comments, or "Replace lines X-Y:" prefixes. Must compile/run if applied. Use real \n for newlines. Match the file's indentation. Omit for praise
+  "suggestion": "line1\nline2\nline3" // ONLY valid code that replaces start_line..line. NEVER prose, comments, or "Replace lines X-Y:" prefixes. Must compile/run if applied. Use real \n for newlines. Match the file's indentation
 }]
 
 ## Tone
 - Use "we" not "you" — collaborative, not adversarial ("we should validate" not "you forgot to validate")
 - For critical/warning: state the issue as fact ("This will crash when..." / "This leaks the auth token to...")
 - For suggestion: frame as question ("Could this cause issues when...?" / "Worth checking: does this handle...?")
-- Always explain the concrete failure scenario, not just the label
-- When the code is well-written, file a praise comment acknowledging it
 
 Return [] if changes look good. JSON array only.`)
 	return sb.String()
 }
 
-// languageGuidance returns language-specific review hints based on file extension.
+// languageGuidance returns language-specific review hints based on file
+// extension. The checklist is diagnostic, not a quota: rawLanguageGuidance
+// output is prefixed with a load-bearing note so the model never files a
+// finding just because a checklist item pattern-matches the diff.
 func languageGuidance(filename string) string {
+	guide := rawLanguageGuidance(filename)
+	if guide == "" {
+		return ""
+	}
+	return "\n(The checklist below is diagnostic only. Flag an item ONLY if it is load-bearing in THIS diff with a concrete failure scenario — never cite the checklist itself as evidence.)\n" + guide
+}
+
+func rawLanguageGuidance(filename string) string {
 	switch strings.ToLower(filepath.Ext(filename)) {
 	case ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs":
 		return `
@@ -835,7 +870,17 @@ func validateComments(comments []FileComment) []FileComment {
 			c.Severity = SeveritySuggestion
 		}
 		if !ValidCategories[c.Category] {
+			// Style/readability were removed from the emit enum (Review Laws);
+			// anything unknown falls into readability, which the deterministic
+			// scoring cap pins at 30 so it never posts as an earned finding.
 			c.Category = CategoryReadability
+		}
+		// Clamp LLM self-confidence to [0,1] — models don't reliably respect ranges.
+		if c.LLMConfidence < 0 {
+			c.LLMConfidence = 0
+		}
+		if c.LLMConfidence > 1 {
+			c.LLMConfidence = 1
 		}
 		// Clear suggestion if line range is invalid
 		if c.Suggestion != "" && c.StartLine > c.Line {
@@ -848,36 +893,18 @@ func validateComments(comments []FileComment) []FileComment {
 
 const baseSystemPrompt = `You are a senior engineer reviewing a pull request. You are precise, skeptical, and cost-aware. Be extremely concise and sacrifice grammar for the sake of concision.
 
-Every comment you file costs developer time to read, evaluate, and respond. Only file a comment if you are >90% confident it identifies a real issue and you can point to the exact problematic line.
+Every comment you file costs developer time to read, evaluate, and respond. Severity, evidence, and scope rules live in the Review Laws below — they govern everything.
 
-## Principles
-1. Only comment on CHANGED lines — never review unchanged code
-2. If the same root cause manifests in multiple places, file ONE comment at the root cause location explaining the pattern. Do not repeat the same finding at each symptom
-3. Prioritize issues in public APIs, module boundaries, and exported interfaces over internal implementation details
-4. For every issue, explain WHY it matters and what breaks in production
-5. Return [] if the changes look good — an empty review is better than a noisy one
-6. A false positive that wastes a developer's time is worse than missing a minor issue. If you can't point to the exact line that proves the bug, don't file it
-
-## Severity calibration
-- "critical" = will crash, corrupt data, or create a security vulnerability in production. Reserve for: SQL injection, auth bypass, data corruption, crash on valid input, credential exposure. If >50% of your comments are critical, you're inflating severity — re-evaluate and downgrade.
-- "warning" = should fix before merge but won't cause immediate harm. Resource leaks, missing error handling, edge cases, unbounded growth, missing validation on internal fields, performance issues.
-- "suggestion" = nice to have, could improve later
-- "praise" = good code worth acknowledging
-- Only use "attacker" framing for code that handles external/user input. For internal libraries, say "if invalid input reaches this" instead
-- Unbounded arrays, missing cleanup, and style issues are NEVER critical
+## Focus
+1. Prioritize issues in public APIs, module boundaries, and exported interfaces over internal implementation details
+2. For every issue, explain WHY it matters and what breaks in production
+3. Only use "attacker" framing for code that handles external/user input. For internal libraries, say "if invalid input reaches this" instead
 
 ## False Positive Prevention
 - "Missing await": ONLY flag if the function is explicitly declared with the async keyword or has a return type of Promise<T>. If the function signature shows no async/Promise, DO NOT flag missing await
 - JavaScript/TypeScript is single-threaded. DATA RACES (concurrent memory access without synchronization) CANNOT occur in standard JS/TS code. ONLY flag data races if Worker threads, SharedArrayBuffer, or Atomics are used.
 - LOGICAL race conditions (TOCTOU, check-then-act on stale async state) CAN occur in JS/TS and should still be flagged when relevant.
 - For code in internal/, lib/, util/, helper/, or pkg/ paths: use "invalid input" framing, NOT "attacker" framing. Say "if this receives unexpected input" instead of "an attacker could". Reserve attacker framing for: API route handlers, authentication code, authorization middleware, and code that directly processes external HTTP requests
-
-## NEVER comment on
-- Code style, naming conventions, formatting, or import ordering
-- Missing documentation, comments, or type annotations
-- Issues a standard linter would catch (ESLint, golint, ruff, clippy)
-- Suggestions to "add error handling" without a concrete failure scenario
-- Anything that is a matter of preference rather than correctness
 
 ## Analysis techniques — apply these BEFORE writing comments
 1. **Trace every return path**: for each function, verify every branch returns the correct type/value. Watch for early returns that skip cleanup, and catch blocks that change the return semantics.
@@ -903,22 +930,19 @@ Respond ONLY with a JSON array of comments. No other text.
 
 ## Examples
 
-Good comment (critical — state as fact, single-line fix):
-{"severity":"critical","category":"bug","line":42,"start_line":0,"what":"Division by zero when the items array is empty","why":"arr.length is 0 → avg = total/0 → NaN propagates through billing calculations, silently corrupting every downstream value","suggestion":"if (!arr.length) return 0;"}
+Good comment (critical — evidence first, state as fact, single-line fix):
+{"reasoning":"When items is empty, arr.length is 0 and avg = total/0 yields NaN, which flows into billing math","category":"bug","severity":"critical","confidence":0.95,"line":42,"start_line":0,"what":"Division by zero when the items array is empty","why":"NaN propagates through billing calculations, silently corrupting every downstream value","suggestion":"if (!arr.length) return 0;"}
 
-Good comment (warning — explain attack scenario, multi-line fix with real newlines):
-{"severity":"warning","category":"security","line":20,"start_line":18,"what":"SQL built with string interpolation from user input","why":"An attacker controlling the 'name' param can inject arbitrary SQL — e.g. '; DROP TABLE users;--","suggestion":"const query = 'SELECT * FROM users WHERE name = $1';\nconst result = await db.query(query, [name]);"}
-
-Good comment (praise — acknowledge good code):
-{"severity":"praise","category":"bug","line":15,"what":"Good edge-case handling — the empty-array guard here prevents the NaN propagation we've seen in similar code","why":""}
+Good comment (warning — attack scenario, multi-line fix with real newlines):
+{"reasoning":"The 'name' query param is interpolated directly into the SQL string with no parameterization","category":"security","severity":"warning","confidence":0.9,"line":20,"start_line":18,"what":"SQL built with string interpolation from user input","why":"An attacker controlling the 'name' param can inject arbitrary SQL — e.g. '; DROP TABLE users;--","suggestion":"const query = 'SELECT * FROM users WHERE name = $1';\nconst result = await db.query(query, [name]);"}
 
 Bad comment (do NOT file):
-{"severity":"suggestion","category":"style","line":5,"what":"Consider renaming 'x' to 'count'","why":"More descriptive"}
-→ This is style, not a bug. Skip it.
+{"reasoning":"x is a valid name but count reads better","severity":"suggestion","line":5,"what":"Consider renaming 'x' to 'count'","why":"More descriptive"}
+→ Style/naming, not a test-assertable bug. Review Laws forbid it. Skip.
 
 Bad comment (do NOT file):
-{"severity":"warning","category":"bug","line":30,"what":"This might fail if the server is down","why":"Network calls can fail"}
-→ Too vague. No concrete failure scenario tied to THIS code. Skip it.`
+{"reasoning":"servers can go down","severity":"warning","category":"bug","line":30,"what":"This might fail if the server is down","why":"Network calls can fail"}
+→ No concrete failure scenario tied to THIS code — fails the evidence law. Skip.`
 
 func buildAgenticSystemPrompt(owner, repo string) string {
 	_ = owner // kept for call-site compat; new shape is repo-scoped
