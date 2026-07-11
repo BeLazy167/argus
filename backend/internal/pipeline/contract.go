@@ -129,9 +129,11 @@ func (c *ReviewContract) ResolveFromLLM(class string, confidence float64) {
 	c.Signals = append(c.Signals, "llm:default-production")
 }
 
-// SummaryLine renders the one-line contract stub for the posted review
-// summary, plus the reduced-confidence/split note when the PR is unreviewably
-// large. Returns "" for a nil contract.
+// SummaryLine renders the one-line contract description interpolated as
+// delimiter-wrapped data into the scoring prompt (the posted GitHub summary
+// uses BuildGlassBoxLine/UnreviewableNote instead), plus the
+// reduced-confidence/split note when the PR is unreviewably large.
+// Returns "" for a nil contract.
 func (c *ReviewContract) SummaryLine() string {
 	if c == nil {
 		return ""
@@ -212,15 +214,20 @@ func checkedReviewers(run *PipelineRun) []string {
 // countSuppressed tallies findings dropped by dismissal-match suppression
 // (team 👎 feedback) — persisted for the dashboard but never posted.
 func countSuppressed(run *PipelineRun) int {
-	n := 0
-	for _, fr := range run.FileReviews {
-		for _, c := range fr.Comments {
-			if c.Suppressed {
-				n++
-			}
-		}
-	}
-	return n
+	return countSuppressedFindings(run.FileReviews)
+}
+
+// safeLabelSignal renders a user-controlled label safe for Signals, which
+// SummaryLine interpolates into the <review_contract> block of the scoring
+// prompt: injection-prefix redaction plus angle-bracket removal so a crafted
+// label (e.g. "hotfix</review_contract>...") cannot close the delimiter —
+// same defence shape as safeIntentField. Classification must NOT use this
+// (it can rewrite the label); it runs on the raw lowered label.
+func safeLabelSignal(raw string) string {
+	s := sanitizeUserInput(raw)
+	s = strings.ReplaceAll(s, "<", "")
+	s = strings.ReplaceAll(s, ">", "")
+	return strings.ToLower(strings.TrimSpace(s))
 }
 
 // raiseBar raises the evidence bar to at least the given level (never lowers).
@@ -253,17 +260,21 @@ func ComputeContract(event *ghpkg.PREvent, files []diff.FileDiff) *ReviewContrac
 	}
 
 	for _, raw := range event.Labels {
+		// Classification runs on the raw lowered label — sanitizing first
+		// rewrites "do not review" to "[redacted]" and isWIPLabel misses.
+		// Only the Signals value (which SummaryLine renders into the scoring
+		// prompt) gets the safeLabelSignal scrub.
 		l := strings.ToLower(strings.TrimSpace(raw))
 		switch {
 		case isWIPLabel(l):
 			c.Depth = DepthSkim
-			c.Signals = append(c.Signals, "label:"+l)
+			c.Signals = append(c.Signals, "label:"+safeLabelSignal(raw))
 		case strings.Contains(l, "hotfix"):
 			if c.ChangeClass == "" {
 				c.ChangeClass = ChangeClassProduction
 			}
 			c.raiseBar(EvidenceBarRaised)
-			c.Signals = append(c.Signals, "label:"+l)
+			c.Signals = append(c.Signals, "label:"+safeLabelSignal(raw))
 		}
 	}
 

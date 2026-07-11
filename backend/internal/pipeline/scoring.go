@@ -353,7 +353,7 @@ func buildScoringPrompt(run *PipelineRun, memContext string) string {
 		sb.WriteString("\n" + wrapInDelimiters("pr_description", sanitizeUserInput(util.Truncate(run.PREvent.PRBody, 1500, false))) + "\n")
 	}
 	if run.Contract != nil {
-		sb.WriteString("\n" + run.Contract.SummaryLine() + "\n")
+		sb.WriteString("\n" + wrapInDelimiters("review_contract", run.Contract.SummaryLine()) + "\n")
 		sb.WriteString("Survival thresholds are class-aware: throwaway/docs/generated changes need near-certain findings; migration/security changes are judged MORE sensitively for critical findings. Weigh plausibility against this contract.\n")
 	}
 	sb.WriteString("\nScore each comment 0-100:\n\n")
