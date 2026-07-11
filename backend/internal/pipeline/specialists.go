@@ -16,6 +16,11 @@ const (
 	SpecialistSecurity     Specialist = "security"
 	SpecialistArchitecture Specialist = "architecture"
 	SpecialistRegression   Specialist = "regression"
+	// SpecialistScript is the single balanced reviewer used instead of the
+	// 4-specialist squad when the ReviewContract classifies the PR as a
+	// one-time script (spike/prototype/tooling). Not part of AllSpecialists —
+	// it is only dispatched via the contract path in ReviewStage.Execute.
+	SpecialistScript Specialist = "script_review"
 )
 
 // ValidSpecialists is the set of valid specialist values.
@@ -178,6 +183,27 @@ For edge cases, explain the INPUT that triggers the bug and the CONSEQUENCE.
 - Cross-file consistency: if two files implement the same concept (e.g. hashing, serialization), flag mismatched implementations
 - Do NOT report style, naming, or formatting issues`
 
+	case SpecialistScript:
+		return `
+
+## Role: Script Reviewer
+
+This PR is classified as a one-time script (spike, prototype, migration helper, tooling). It will likely run a handful of times, by its author, then be deleted. Review it accordingly.
+
+Focus exclusively on:
+- Correctness: does the script do what its name/comments claim? Wrong flags, inverted conditions, off-by-one in batch loops
+- Data safety: anything that mutates or deletes data (DB writes, DELETE/UPDATE without WHERE, file removal, S3/bucket operations, force-push). Flag missing dry-run modes, missing backups, and irreversible operations without confirmation
+- Blast radius: credentials or production endpoints hardcoded; operations that could touch prod when the author intends staging
+- Idempotency: what happens if the script is run twice, or dies halfway through?
+
+Explicitly IGNORE:
+- Style, naming, structure, DRY violations
+- Missing tests, missing docs
+- Performance (unless it would make the script effectively never finish)
+- Architectural concerns — this code is not a long-lived module
+
+Only report findings that would corrupt data, target the wrong environment, or silently do the wrong thing.`
+
 	default:
 		return ""
 	}
@@ -194,6 +220,8 @@ func specialistSearchQuery(s Specialist) string {
 		return "architecture patterns error handling conventions coupling"
 	case SpecialistRegression:
 		return "edge cases boundary conditions missing validation error handling regressions breaking changes"
+	case SpecialistScript:
+		return "script correctness data safety destructive operations idempotency"
 	default:
 		return "code review patterns"
 	}

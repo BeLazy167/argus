@@ -35,8 +35,17 @@ type PREvent struct {
 	// and post-edit bodies and trigger a refresh when the set changes.
 	PRBodyBefore    string
 	Merged          bool
-	PersonaOverride string `json:"-"` // set by @argus-eye review --persona X
+	Draft           bool     // pr.draft — feeds ReviewContract depth gating
+	Labels          []string // label names (truncated, capped) — feeds ReviewContract signals
+	PersonaOverride string   `json:"-"` // set by @argus-eye review --persona X
 }
+
+// Caps on label data captured from the webhook payload. Labels are
+// user-controlled strings that end up in LLM prompts and log lines.
+const (
+	maxLabels   = 20
+	maxLabelLen = 100
+)
 
 // ParseWebhook validates the webhook signature and parses the event.
 func ParseWebhook(r *http.Request, secret []byte) (*WebhookEvent, error) {
@@ -86,6 +95,15 @@ func ToPREvent(event *WebhookEvent) (*PREvent, error) {
 		HeadRef:        prEvent.GetPullRequest().GetHead().GetRef(),
 		PRBody:         util.Truncate(prEvent.GetPullRequest().GetBody(), 8000, false),
 		Merged:         prEvent.GetPullRequest().GetMerged(),
+		Draft:          prEvent.GetPullRequest().GetDraft(),
+	}
+	for _, l := range prEvent.GetPullRequest().Labels {
+		if len(pe.Labels) >= maxLabels {
+			break
+		}
+		if name := util.Truncate(l.GetName(), maxLabelLen, false); name != "" {
+			pe.Labels = append(pe.Labels, name)
+		}
 	}
 	// payload.changes.body.from is only populated on action="edited". We
 	// truncate to the same budget as PRBody so the diff uses comparable
