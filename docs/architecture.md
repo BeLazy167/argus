@@ -2,7 +2,7 @@
 
 ## System Overview
 
-Argus is an AI-powered code review bot that installs as a GitHub App. When a pull request is opened or updated, Argus fetches the diff, triages files by risk, reviews each file with an LLM, scores and filters comments, synthesizes a summary, posts the review to GitHub, and indexes everything it learned into a semantic memory store (Supermemory) for future reviews.
+Argus is an AI-powered code review bot that installs as a GitHub App. When a pull request is opened or updated, Argus computes a per-PR **ReviewContract** (change class, evidence bar, depth), fetches the diff, triages files by risk under that contract, reviews each file with an LLM, scores and filters comments, synthesizes a summary, posts the review to GitHub with a Glass Box footer, and indexes everything it learned into a semantic memory store (Supermemory) for future reviews. When the PR closes, a gauge detector measures which comments were actually addressed.
 
 ```
 ┌─────────────┐     webhook      ┌──────────────┐     orchestrate    ┌──────────────────┐
@@ -30,14 +30,66 @@ Argus is an AI-powered code review bot that installs as a GitHub App. When a pul
 |-----------|------|---------|
 | **API Server** | `internal/api/` | HTTP server (Chi router). Handles GitHub webhooks, REST API for dashboard, Clerk JWT auth, rate limiting, semaphore-based concurrency control |
 | **GitHub App** | `internal/github/` | GitHub App authentication (JWT + installation tokens), PR diff fetching, review posting, GraphQL thread resolution, Git data API for `@argus-eye fix` |
-| **Pipeline** | `internal/pipeline/` | State machine orchestrator with 9 stages: Triage → Briefing → Review → Dedup → Validate → Scoring → Pass2 → Synthesis → Post (memory indexing is part of Post) |
+| **Pipeline** | `internal/pipeline/` | State machine orchestrator with 9 stages: Triage → Briefing → Review → Dedup → Validate → Scoring → Pass2 → Synthesis → Post (memory indexing is part of Post). ReviewContract computation and intent extraction run pre-pipeline in `HandlePREvent`. Gauge detector runs on PR close |
 | **LLM Registry** | `internal/llm/` | Multi-provider LLM abstraction (OpenRouter, OpenAI, Anthropic, Groq, etc.). BYOK key resolution, per-repo model configs, tool-use support |
 | **Memory** | `internal/memory/` | Supermemory REST client for semantic storage/retrieval. Indexer with deduplication (content-hashed `customId`). Container tag hierarchy for scoping |
-| **Store** | `internal/store/` | PostgreSQL via pgx. Models: Installation, Repo, Review, ReviewComment, Rule, ProviderKey, ModelConfig, Pattern |
+| **Store** | `internal/store/` | PostgreSQL via pgx. Models: Installation, Repo, Review (incl. `review_contract` jsonb), ReviewComment (incl. `state` ledger), Rule, ProviderKey, ModelConfig, Pattern. Views: `vw_review_gauge` |
 | **Crypto** | `internal/crypto/` | AES-256-GCM encryption for BYOK API keys at rest |
 | **Config** | `internal/config/` | Environment variable loader for all service configuration |
 | **Web Dashboard** | `web/` | Next.js 14 app with Clerk auth. Pages: Dashboard, Reviews, Repos, Patterns, Settings, Rules |
 | **Diff Parser** | `pkg/diff/` | Unified diff parser producing `FileDiff` structs with line-level change tracking. `ValidCommentLines()` returns valid RIGHT-side line numbers for GitHub review comment validation |
+
+---
+
+## Review Contract
+
+Every PR gets a computed `ReviewContract{change_class, evidence_bar, depth, signals}` (`internal/pipeline/contract.go`) before the pipeline starts. `ComputeContract()` runs in `HandlePREvent` on the webhook event + parsed diff, and the contract is persisted to `reviews.review_contract` (migration 048). Downstream stages consume it to decide reviewer routing, Pass 2 eligibility, judge thresholds, and the Glass Box footer.
+
+### Resolution Order: Deterministic Signals First
+
+The contract is derived from cheap, deterministic PR metadata before any LLM sees the PR:
+
+| Signal | Effect |
+|--------|--------|
+| Draft PR | `depth: skim` + evidence bar raised |
+| `wip` / `hotfix` labels | `wip` → depth skim; `hotfix` → production class + raised evidence bar |
+| Branch prefix `cutover\|migrate\|migration` | `change_class: migration` |
+| Branch prefix `spike\|prototype\|poc` | `change_class: one_time_script` |
+| Branch prefix `revert` | `change_class: revert` |
+| Path-glob majority: `migrations/**` + `*.sql` | `change_class: migration` |
+| Path-glob majority: `scripts/` `tools/` `bin/` | `change_class: one_time_script` |
+| Path-glob majority: tests / docs / generated+lockfiles | `change_class: test` / `docs` / `generated` |
+| Title contains `refactor\|rename\|cleanup` | Scrutiny bump (never lowers depth) |
+| >1500 changed LOC or >60 files | `unreviewable: true` — still reviewed, posts a reduced-confidence note + split recommendation |
+
+Only when metadata is silent does the LLM fill `change_class`: the pre-review intent stage (`IntentExtractionStage`) calls `ResolveFromLLM()`, accepted at confidence ≥ 0.6, otherwise the class defaults to `production`. Every contributing signal is recorded in `signals` — persisted on `reviews.review_contract` and rendered into the scoring prompt (the posted footer shows class/depth, not the signal list).
+
+### The Floor Never Relaxes
+
+Security-relevant files and `change_class: migration` max the evidence bar and pin depth at `single` or above. No label, branch name, or LLM classification can lower this floor.
+
+### Contract Consumers
+
+| Consumer | Behavior |
+|----------|----------|
+| `ReviewStage` | `one_time_script` gets a single balanced reviewer (correctness + data safety) instead of the 4-specialist squad |
+| `TriageStage` | Depth-gates file triage: non-security files of throwaway/docs/generated/test classes downgrade to skim; migration forces deep on SQL |
+| `Pass2` | `one_time_script` / `docs` / `generated` skip Pass 2 (`SkipsPass2()`) |
+| `ScoringStage` | Class-aware judge thresholds: throwaway/docs/generated need near-certain findings (suggestion +15, warning +10); migration/security judged more sensitively on critical (−5) |
+| `post()` | Glass Box footer renders contract class/depth, checked reviewers, suppressed count, duration (`BuildGlassBoxLine()`); unreviewable note when flagged |
+
+---
+
+## Review Laws
+
+A single severity rubric is injected once into every prompt — specialists and personas are focus lenses on top of it, not competing rubrics:
+
+- **Approve-with-findings is the default.** Silence is a valid review; there is no minimum comment count.
+- **No praise comments.** Style/formatting is never flagged — that is the linter's job.
+- **Evidence law:** every finding needs a concrete failure scenario and a `file:line` reference.
+- **Fix law:** every finding supplies the fix.
+- **Scope laws:** stay on the diff, on established repo patterns, and YAGNI — no speculative architecture asks.
+- **Permanent checks:** destructive SQL missing `WHERE`/rollback, secrets/PII in log diffs, unit-ambiguous constants, refactor behavior-equivalence, unchecked errors. Memory suppression exempts the `security` category and findings matching the data-safety/secrets/error marker scan (`suppression.go` `permanentCheckMarkers`) — marker coverage for unit-ambiguity and behavior-equivalence is a known gap tracked as a follow-up.
 
 ---
 
@@ -47,32 +99,35 @@ The pipeline is a linear state machine defined in `internal/pipeline/states.go` 
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Pending: HandlePREvent creates PipelineRun
+    [*] --> Pending: HandlePREvent\ncomputes ReviewContract\n(deterministic signals →\nintent LLM fill),\ncreates PipelineRun
 
     Pending --> Triaging: transitions()
 
-    Triaging --> Reviewing: TriageStage.Execute\nclassifies files by risk\n(skip/skim/security_skim/deep),\nqueries memory hints
+    Triaging --> Briefing: TriageStage.Execute\ncontract-gated classification\n(skip/skim/security_skim/deep),\nqueries memory hints
     Triaging --> Failed: stage error
 
-    Reviewing --> Deduping: ReviewStage.Execute\nparallel file reviews,\nspecialist + agentic passes,\nmemory context injected
+    Briefing --> Reviewing: leadBriefStage\nlead agent produces\ncross-cutting brief
+    Briefing --> Failed: stage error
+
+    Reviewing --> Deduping: ReviewStage.Execute\n4 specialists in parallel |\nsingle balanced reviewer\nfor one_time_script,\nmemory context injected
     Reviewing --> Failed: stage error
 
-    Deduping --> Validating: SmartDedup\n3-layer deterministic dedup:\ncanonical type fingerprint,\nTF-IDF cosine similarity,\nline proximity
+    Deduping --> Validating: SmartDedup\n3-layer deterministic dedup,\nrecords cross-specialist\ncorroboration
     Deduping --> Failed: stage error
 
     Validating --> Scoring: validateStage\nblast radius analysis,\ncode simulation
     Validating --> Failed: stage error
 
-    Scoring --> Pass2: ScoringStage.Execute\nLLM judge: groups + scores (0-100),\ndrops below 65, min 3 kept
+    Scoring --> Pass2: ScoringStage.Execute\nalways-on LLM judge,\nclass-aware thresholds,\ndeterministic category caps
     Scoring --> Failed: stage error
 
-    Pass2 --> Synthesizing: pass2()\nre-reviews hot files\nwith Architecture specialist\n(deep review only)
+    Pass2 --> Synthesizing: pass2()\nre-reviews hot files\n(pro + deep only, skipped for\none_time_script/docs/generated)
     Pass2 --> Failed: stage error
 
-    Synthesizing --> Posting: synthesize()\nbuilds markdown summary,\ncalculates overall score (1-10)
+    Synthesizing --> Posting: synthesize()\nseverity-first summary,\n"needs work" language,\noverall score (1-10)
     Synthesizing --> Failed: stage error
 
-    Posting --> Completed: post()\nposts review to GitHub,\nfires memory indexing\n(6 functions, fire-and-forget)
+    Posting --> Completed: post()\nmax 10 inline findings,\nMinor notes section,\nGlass Box footer,\nfires memory indexing
     Posting --> Failed: stage error
 
     Failed --> Reviewing: RetryReview / RecoverIncomplete\nresumes from persisted state
@@ -90,14 +145,15 @@ stateDiagram-v2
 
 | State | Handler | Key Operations |
 |-------|---------|----------------|
-| `Triaging` | `TriageStage.Execute` | Classifies files into `skip`/`skim`/`security_skim`/`deep`. Queries `triageMemoryHints()` for file history + org patterns + rules |
-| `Reviewing` | `ReviewStage.Execute` | Assigns specialists (BugHunter, Security, Architecture, Regression) based on triage action + `DeepReview` flag. Fan-out: N worker goroutines review files in parallel. Three review modes: (1) base prompt + `reviewMemoryBlock`, (2) specialist prompt + `specialistMemoryBlock`, (3) agentic tool-use loop with `search_memory`/`list_repos` tools. `security_skim` files get a single Security specialist pass. Publishes `EventComment` per file |
-| `Deduping` | `Orchestrator.dedupStage` | 3-layer deterministic dedup via `SmartDedup()`: **Layer 1** canonical vuln type fingerprint (15 types — sql_injection, xss, path_traversal, etc.) groups findings by (file, vuln_type). **Layer 2** TF-IDF cosine similarity clusters ungrouped findings (>0.7 threshold). **Layer 3** line proximity merges same-file/same-category within 5 lines. Saves pre-dedup snapshot to `AllFileReviews` for pattern learning |
+| `Triaging` | `TriageStage.Execute` | Classifies files into `skip`/`skim`/`security_skim`/`deep`, gated by the ReviewContract's depth. Queries `triageMemoryHints()` for file history + org patterns + rules |
+| `Briefing` | `Orchestrator.leadBriefStage` | Lead agent produces a cross-cutting brief consumed by specialist prompts |
+| `Reviewing` | `ReviewStage.Execute` | Assigns specialists (BugHunter, Security, Architecture, Regression) based on triage action + `DeepReview` flag. `one_time_script` PRs get a single balanced reviewer (correctness + data safety) instead of the 4-specialist squad. Fan-out: N worker goroutines review files in parallel. Three review modes: (1) base prompt + `reviewMemoryBlock`, (2) specialist prompt + `specialistMemoryBlock`, (3) agentic tool-use loop with `search_memory`/`list_repos` tools. `security_skim` files get a single Security specialist pass. Every prompt carries the Review Laws rubric. Publishes `EventComment` per file |
+| `Deduping` | `Orchestrator.dedupStage` | 3-layer deterministic dedup via `SmartDedup()`: **Layer 1** canonical vuln type fingerprint (15 types — sql_injection, xss, path_traversal, etc.) groups findings by (file, vuln_type). **Layer 2** TF-IDF cosine similarity clusters ungrouped findings (>0.7 threshold). **Layer 3** line proximity merges same-file/same-category within 5 lines. Records cross-specialist corroboration (same finding from independent specialists) for scoring. Saves pre-dedup snapshot to `AllFileReviews` for pattern learning |
 | `Validating` | `Orchestrator.validateStage` | Blast radius analysis (dependency graph impact) and code simulation on deduplicated findings |
-| `Scoring` | `ScoringStage.Execute` | LLM judge scores findings 0-100 AND groups remaining duplicates (Layer 4 sweeper). Output: `judgeGroup` with representative, score, severity override, duplicates. Drops below threshold (65/100), min 3 kept. Fallback: if LLM fails, deterministic dedup stands (`ScoringSkipped=true`). Score clamped to [0,100]. Fetches repo memory for calibration |
-| `Pass2` | `Orchestrator.pass2` | Deep review only. Identifies "hot" files (3+ comments scored 70+). Re-reviews with Architecture specialist. Merges pass2 comments, re-runs `SmartDedup` |
-| `Synthesizing` | `Orchestrator.synthesize` | Builds markdown summary from all file reviews. Calculates overall score (1-10). Publishes `EventSynthesis`. Incremental reviews use "Re-reviewed" header |
-| `Posting` | `Orchestrator.post` | Runs `rebalanceSeverity()` (caps criticals at 50% of total). Validates comment line numbers against diff via `ValidCommentLines()` — drops comments targeting lines outside diff hunks. Posts review to GitHub via `ghClient.PostReview()`. Minimizes "review started" comment. Updates review record in DB. Fires 6 memory indexing functions (fire-and-forget) |
+| `Scoring` | `ScoringStage.Execute` | LLM judge runs for **every** review (deep enrichments stay pro+deep) and sees the PR body + ReviewContract. Scores findings 0-100 AND groups remaining duplicates (Layer 4 sweeper). Per-severity thresholds (critical 35 / warning 45 / suggestion 55) adjusted by contract class: throwaway/docs/generated raise the bar (suggestion +15, warning +10); migration/security lower it on critical (−5). No minimum-survivor floor — silence is a valid review. Deterministic category caps bind over the judge: style capped at 30, error_handling at 45 unless the file is security-relevant. Judge-omitted findings default to the threshold, not auto-pass. Cross-specialist corroboration adds a bounded +10 boost. Fallback: if LLM fails, deterministic dedup stands (`ScoringSkipped=true`). Score clamped to [0,100]. Fetches repo memory for calibration |
+| `Pass2` | `Orchestrator.pass2` | Pro + deep review only; skipped entirely for `one_time_script`/`docs`/`generated` contracts. Identifies "hot" files (3+ comments scored 70+). Re-reviews with Architecture specialist. Merges pass2 comments, re-runs `SmartDedup` |
+| `Synthesizing` | `Orchestrator.synthesize` | Builds markdown summary from all file reviews, severity-first, using "needs work" language (never "blocked"/"rejected"). Calculates overall score (1-10). Publishes `EventSynthesis`. Incremental reviews use "Re-reviewed" header |
+| `Posting` | `Orchestrator.post` | Runs `rebalanceSeverity()` (caps criticals at 50% of total). Validates comment line numbers against diff via `ValidCommentLines()` — drops comments targeting lines outside diff hunks. Posts at most 10 inline findings severity-first; overflow folded into "plus N similar"; near-threshold findings go to a collapsed "Minor notes" section; nits are demoted off files that carry a critical. Appends the Glass Box footer (contract class/depth, what was checked, findings suppressed by team feedback, review duration). Posts review to GitHub via `ghClient.PostReview()`. Minimizes "review started" comment. Updates review record in DB. Fires 6 memory indexing functions (fire-and-forget) |
 
 ### "Review Started" Comment
 
@@ -150,7 +206,7 @@ stateDiagram-v2
     state "Feedback Loop" as Feedback {
         reply: ReplyAnalyzer.Analyze()\nprocesses developer replies
         confirmed: IndexFeedbackSignal\n(action=confirmed)\nreinforces pattern
-        dismissed: IndexFeedbackSignal\n(action=dismissed)\nsuppresses pattern
+        dismissed: IndexFeedbackSignal\n(action=dismissed)\nstored by category+content\nwith change_kind + reason
     }
 
     Extract --> Store: AddMemory\n(/v3/documents)\nwith customId\ndeduplication
@@ -187,9 +243,41 @@ stateDiagram-v2
 | Developer Action | Argus Response | Signal Stored | Effect on Future Reviews |
 |-----------------|----------------|---------------|--------------------------|
 | Fixes the issue | `resolve` (no learning) | `CONFIRMED pattern [category] in file: body` | Pattern reinforced — higher priority in future. GitHub thread resolved via `FindThreadForComment()` + `ResolveReviewThread()` |
-| Explains Argus was wrong | `resolve` + learning extracted | `DISMISSED finding [category] in file: body. Future reviews should NOT flag similar patterns` | Pattern suppressed — avoided in future. GitHub thread resolved |
+| Explains Argus was wrong | `resolve` + learning extracted | Dismissal keyed by category+content (semantic, file-path-free) with `change_kind` + reason | Pattern suppressed per the rules below. GitHub thread resolved |
 | Disagrees but Argus is right | `stand_firm` | `CONFIRMED pattern [category] in file: body` | Pattern reinforced |
 | Asks for clarification | `clarify` | No signal | No memory effect |
+| Finding doesn't apply to this kind of change | `not_applicable_change_kind` | Dismissal scoped to the change kind | Suppression does not cross change kinds |
+
+### Suppression v2
+
+Dismissals are stored by category+content — semantic and file-path-free — carrying the `change_kind` of the PR they came from and the developer's reason. A future finding is suppressed when any of:
+
+- a single dismissal matches at ≥ 0.85 similarity, or
+- ≥ 3 similar dismissals match at ≥ 0.60, or
+- the category is auto-suppressed after 3 consecutive negative outcomes.
+
+Exemptions and scoping:
+
+- **Security findings and permanent checks are exempt** — feedback can downgrade them, never mute them.
+- **Change-kind scoping:** dismissals from prototype/one-off-era PRs do not silence production or migration reviews.
+- **Re-review resolution:** when new commits fix a previously posted finding, Argus replies "Resolved by `<sha>`" and resolves the thread.
+
+---
+
+## Review Gauge
+
+The gauge (`internal/pipeline/gauge.go`) measures whether posted comments actually changed the code — the ground-truth signal behind suppression and calibration.
+
+On PR close, a detector diffs the commits pushed after each posted comment, matching within ±3 lines of the comment's location, and records an outcome:
+
+| Outcome | Meaning |
+|---------|---------|
+| `addressed_human` | A human commit changed the flagged lines |
+| `addressed_agent` | A bot-pattern author changed the flagged lines (weighted 0.5) |
+| `ignored` | PR merged with the flagged lines untouched |
+| `deferred` | PR closed without merging (all findings on an unmerged close, regardless of line changes) |
+
+Outcomes land in the comment outcome vocabulary (`comment_outcomes`, migration 049, with `addressed_at`). The per-comment state ledger `review_comments.state` (`posted`/`addressed`/`dismissed`/`deferred`/`suppressed`, migration 051) is currently written by reply/reaction dismissals and insert-time suppression; detector-driven state updates are a tracked follow-up. The `vw_review_gauge` view (migration 050) aggregates address-rate per category per change_class, dismiss rate, and median time-to-merge. Exposed at the authenticated, installation-scoped `GET /api/v1/stats/gauge` (`internal/api/handlers_gauge.go`).
 
 ---
 
@@ -266,11 +354,13 @@ flowchart LR
 
     subgraph "Pipeline · internal/pipeline"
         ORCH["Orchestrator"]
+        CONTRACT["ComputeContract()\n+ intent LLM fill"]
         SM["StateMachine"]
         TRIAGE["TriageStage"]
         REVIEW["ReviewStage"]
         SCORING["ScoringStage"]
-        POST["post() + memory indexing"]
+        POST["post() + Glass Box\n+ memory indexing"]
+        GAUGE["Gauge detector\n(PR close)"]
         EVENTS["EventBus · per-review pub/sub"]
     end
 
@@ -300,10 +390,11 @@ flowchart LR
     WH_REPLY --> WEBHOOK
 
     WEBHOOK --> |"pull_request"| SEM --> INFLIGHT --> ORCH
+    WEBHOOK --> |"pull_request closed"| GAUGE
     WEBHOOK --> |"issue_comment"| DISPATCH
     WEBHOOK --> |"review_comment reply"| REPLY_H
 
-    ORCH --> SM --> TRIAGE --> REVIEW --> SCORING --> POST
+    ORCH --> CONTRACT --> SM --> TRIAGE --> REVIEW --> SCORING --> POST
 
     TRIAGE -.-> |"triageMemoryHints"| SM_CLIENT
     REVIEW -.-> |"reviewMemoryBlock\nspecialistMemoryBlock\nToolHandler"| SM_CLIENT
@@ -318,8 +409,9 @@ flowchart LR
     POST --> |"6 indexing fns"| IDX --> SM_CLIENT --> SM_API
     POST --> |"CreateReviewComment"| PG
 
-    REPLY_H --> |"IndexFeedbackSignal"| IDX
+    REPLY_H --> |"replies/reactions →\nsuppression memory"| IDX
     REPLY_H --> |"ReplyToComment"| GH_API
+    GAUGE --> |"comment outcomes\n→ vw_review_gauge"| PG
     DISPATCH --> |"remember"| IDX
     DISPATCH --> |"fix / resolve"| GH_API
 
@@ -333,10 +425,11 @@ flowchart LR
 
 | Path | Flow |
 |------|------|
-| **PR Review** | GitHub webhook → `handleWebhook` → semaphore → `Orchestrator.HandlePREvent` → `StateMachine.Run` → Triage → Review → Scoring → Pass2 → Synthesis → Post → GitHub `PostReview` + memory indexing |
+| **PR Review** | GitHub webhook → `handleWebhook` → semaphore → `Orchestrator.HandlePREvent` → `ComputeContract` + intent fill → `StateMachine.Run` → Triage → Briefing → Review → Dedup → Validate → Scoring → Pass2 → Synthesis → Post → GitHub `PostReview` (Glass Box footer) + memory indexing |
 | **Memory Write** | `post()` → `indexComments` / `indexConfirmedPatterns` / `autoLearnPatterns` / `extractConventions` / `synthesizeFileMemories` / `indexPRSummary` → `Indexer` → Supermemory `/v3/documents` |
 | **Memory Read** | `TriageStage` / `ReviewStage` → `triageMemoryHints` / `reviewMemoryBlock` / `specialistMemoryBlock` / `ToolHandler` → Supermemory `/v4/search` → injected into LLM system prompt |
-| **Feedback Loop** | Developer reply → `review_comment` webhook (includes `NodeID` for thread lookup) → `ReplyAnalyzer.Analyze` → LLM decides action → `IndexFeedbackSignal` → Supermemory (confirmed/dismissed) + `ReplyToComment` on GitHub. On `resolve`: also calls `FindThreadForComment()` + `ResolveReviewThread()` |
+| **Feedback Loop** | Developer reply → `review_comment` webhook (includes `NodeID` for thread lookup) → `ReplyAnalyzer.Analyze` → LLM decides action → `IndexFeedbackSignal` → Supermemory (confirmed / dismissal keyed by category+content with change_kind) + `ReplyToComment` on GitHub. On `resolve`: also calls `FindThreadForComment()` + `ResolveReviewThread()` |
+| **Gauge** | PR close → detector diffs commits after each comment (±3-line proximity) → outcomes `addressed_human`/`addressed_agent`/`ignored` (merged, untouched)/`deferred` (closed unmerged) → `vw_review_gauge` → `GET /api/v1/stats/gauge` |
 | **Dashboard SSE** | `StateMachine` publishes events → `EventBus` → SSE endpoint `/reviews/{id}/stream` → Next.js dashboard real-time updates |
 
 ---
@@ -391,6 +484,7 @@ All IDs are truncated to 100 characters max via `truncateIDWithSuffix()` to resp
 |----------|--------|---------|
 | `/api/v1/installations/{id}/test-config` | POST | Sends a ping/ok round-trip to verify API key + model work. Returns `{success, response, latency_ms, tokens}` |
 | `/api/v1/activity` | GET | Returns logged activity events (`manual_review_triggered`, `rule_created`, `rule_deleted`) via `store.LogActivity()` |
+| `/api/v1/stats/gauge` | GET | Internal gauge telemetry from `vw_review_gauge`: address-rate per category per change_class, dismiss rate, median time-to-merge |
 
 ### Unwired Functions
 
