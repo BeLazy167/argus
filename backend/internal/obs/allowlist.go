@@ -19,7 +19,7 @@ var AllowedKeys = map[string]struct{}{
 
 	// memory outcome loop — enrichment counts, suppression, pattern feedback
 	"matched": {}, "enforced": {}, "novel": {}, "suppressed": {}, "downgraded": {},
-	"total": {}, "line": {}, "pattern_id": {}, "quality": {},
+	"total": {}, "line": {}, "pattern_id": {}, "quality": {}, "similar_dismissals": {},
 
 	// performance
 	"duration_ms": {}, "tokens": {}, "prompt_tokens": {}, "completion_tokens": {},

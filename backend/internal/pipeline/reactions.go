@@ -130,6 +130,14 @@ func (ra *ReactionAnalyzer) HandleCommentReactions(ctx context.Context, event gh
 		recordPatternOutcome(ctx, ra.store, ra.logger, comment.MatchedPatternID, action)
 	}
 
+	// Follow-up ledger: a 👎-dominant comment is dismissed. Transition-guarded
+	// and idempotent in the store; non-fatal.
+	if action == "dismissed" {
+		if _, err := ra.store.UpdateFindingState(ctx, comment.ID, store.FindingStateDismissed); err != nil {
+			ra.logger.Warn("reaction: updating finding state", "error", err, "comment_id", comment.ID)
+		}
+	}
+
 	// Index feedback signal for pattern reinforcement/suppression
 	var indexer memory.Indexer
 	if ra.memRegistry != nil {
@@ -138,15 +146,23 @@ func (ra *ReactionAnalyzer) HandleCommentReactions(ctx context.Context, event gh
 		}
 	}
 	if indexer != nil && comment.Category != nil {
-		err := indexer.IndexFeedbackSignal(ctx, owner, repo, memory.FeedbackMemory{
+		fb := memory.FeedbackMemory{
 			FilePath:       comment.FilePath,
 			Category:       *comment.Category,
 			OriginalBody:   comment.Body,
 			Action:         action,
 			DeveloperReply: "", // no text reply, just a reaction
 			PRNumber:       event.PRNumber,
-		})
-		if err != nil {
+		}
+		if action == "dismissed" {
+			fb.Repo = repo
+			if kind, kerr := ra.store.GetCommentChangeClass(ctx, comment.ID); kerr != nil {
+				ra.logger.Warn("reaction: comment change class lookup", "error", kerr, "comment_id", comment.ID)
+			} else {
+				fb.ChangeKind = kind
+			}
+		}
+		if err := indexer.IndexFeedbackSignal(ctx, owner, repo, fb); err != nil {
 			ra.logger.Error("reaction: indexing feedback signal", "error", err, "action", action)
 		}
 	}

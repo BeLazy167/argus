@@ -114,8 +114,9 @@ func (ra *ReplyAnalyzer) Analyze(ctx context.Context, event ghpkg.CommentEvent) 
 		}
 	}
 
-	// Resolve the thread when the developer addressed the concern
-	if decision.Action == "resolve" && event.NodeID != "" {
+	// Resolve the thread when the developer addressed the concern, or when the
+	// finding is valid but simply doesn't apply to this kind of change.
+	if (decision.Action == "resolve" || decision.Action == "not_applicable_change_kind") && event.NodeID != "" {
 		threadID, err := ra.ghClient.FindThreadForComment(ctx, event.InstallationID, owner, repo, event.PRNumber, event.NodeID)
 		if err != nil {
 			ra.logger.Warn("resolve: find thread", "error", err)
@@ -154,6 +155,10 @@ func (ra *ReplyAnalyzer) Analyze(ctx context.Context, event ghpkg.CommentEvent) 
 		outcome = "confirmed"
 	case "clarify":
 		outcome = "ignored"
+	case "not_applicable_change_kind":
+		// Valid finding, wrong change kind — pattern quality is untouched
+		// (recordPatternOutcome only reacts to confirmed/dismissed).
+		outcome = "not_applicable_change_kind"
 	}
 	if outcome != "" {
 		inserted, err := ra.store.RecordCommentOutcome(ctx, original.ID, outcome)
@@ -165,6 +170,13 @@ func (ra *ReplyAnalyzer) Analyze(ctx context.Context, event ghpkg.CommentEvent) 
 		// double-counting replayed outcomes.
 		if inserted {
 			recordPatternOutcome(ctx, ra.store, ra.logger, original.MatchedPatternID, outcome)
+		}
+	}
+	// Follow-up ledger: both rejection shapes land the finding in 'dismissed'.
+	// Idempotent + transition-guarded in the store; failures are non-fatal.
+	if outcome == "dismissed" || outcome == "not_applicable_change_kind" {
+		if _, err := ra.store.UpdateFindingState(ctx, original.ID, store.FindingStateDismissed); err != nil {
+			ra.logger.Warn("updating finding state", "error", err, "comment_id", original.ID)
 		}
 	}
 
@@ -185,18 +197,31 @@ func (ra *ReplyAnalyzer) Analyze(ctx context.Context, event ghpkg.CommentEvent) 
 			feedbackAction = "confirmed"
 		case "clarify":
 			feedbackAction = "ignored"
+		case "not_applicable_change_kind":
+			// Change-kind-scoped dismissal: the change_kind stamp below lets
+			// retrieval ignore it when reviewing production-grade PRs.
+			feedbackAction = "dismissed"
 		}
 
 		if feedbackAction != "" {
-			err := indexer.IndexFeedbackSignal(ctx, owner, repo, memory.FeedbackMemory{
+			fb := memory.FeedbackMemory{
 				FilePath:       original.FilePath,
 				Category:       *original.Category,
 				OriginalBody:   original.Body,
 				Action:         feedbackAction,
 				DeveloperReply: event.CommentBody,
 				PRNumber:       event.PRNumber,
-			})
-			if err != nil {
+			}
+			if feedbackAction == "dismissed" {
+				fb.Repo = repo
+				fb.Reason = decision.Learning
+				if kind, kerr := ra.store.GetCommentChangeClass(ctx, original.ID); kerr != nil {
+					ra.logger.Warn("comment change class lookup", "error", kerr, "comment_id", original.ID)
+				} else {
+					fb.ChangeKind = kind
+				}
+			}
+			if err := indexer.IndexFeedbackSignal(ctx, owner, repo, fb); err != nil {
 				ra.logger.Error("indexing feedback signal", "error", err, "action", feedbackAction)
 			}
 		}
@@ -229,7 +254,7 @@ func buildReplyPrompt(original *store.ReviewComment, event ghpkg.CommentEvent) s
 	}
 
 	sb.WriteString(`Respond with JSON only:
-{"action": "resolve|clarify|stand_firm", "reply": "your response", "learning": "optional pattern to remember"}`)
+{"action": "resolve|clarify|stand_firm|not_applicable_change_kind", "reply": "your response", "learning": "optional pattern to remember"}`)
 	return sb.String()
 }
 
@@ -252,7 +277,7 @@ func parseReplyDecision(content string, decision *replyDecision) error {
 
 func validateReplyDecision(d *replyDecision) error {
 	switch d.Action {
-	case "resolve", "clarify", "stand_firm":
+	case "resolve", "clarify", "stand_firm", "not_applicable_change_kind":
 	default:
 		d.Action = "clarify"
 	}
@@ -266,6 +291,7 @@ Analyze their reply and choose one action:
 - "resolve": The developer's explanation is valid, they've addressed the concern, or you were wrong. Thank them briefly.
 - "clarify": The developer seems confused or partially addressed the issue. Clarify your point with more detail.
 - "stand_firm": The issue is real and the developer hasn't addressed it. Politely but firmly explain why the concern stands.
+- "not_applicable_change_kind": The finding is technically VALID but does not apply to this kind of change — e.g. the developer explains this is a one-off script, prototype, or throwaway tooling where the flagged rigor is intentionally skipped. Acknowledge briefly and step back.
 
 Guidelines:
 - Be concise and professional
@@ -274,9 +300,11 @@ Guidelines:
   - "resolve" WITHOUT learning = your finding was correct and developer fixed it (reinforces pattern)
   - "resolve" WITH learning = you were wrong and learned something (suppresses this pattern)
   - "stand_firm" = finding is valid, developer hasn't addressed it (reinforces pattern)
+  - "not_applicable_change_kind" = valid finding, wrong change kind (records a change-kind-scoped dismissal — it will NOT silence the same finding on production code)
 - Include "learning" if and only if the developer revealed something about how THIS SPECIFIC REPO works that you couldn't have known from the diff alone. Examples: "this project intentionally uses X pattern", "Y is handled upstream by Z service", "team convention is to do A instead of B"
-- Do NOT include general programming knowledge as learning
+- Change-kind learnings ARE welcome: "team treats missing retries as acceptable in one-off scripts", "prototypes under spike/ skip test coverage by convention"
+- Do NOT include general programming knowledge or generic non-convention lessons as learning
 - If no repo-specific insight was revealed, omit the field
 
-Respond ONLY with JSON: {"action": "resolve|clarify|stand_firm", "reply": "your response", "learning": "optional"}
+Respond ONLY with JSON: {"action": "resolve|clarify|stand_firm|not_applicable_change_kind", "reply": "your response", "learning": "optional"}
 No other text.`

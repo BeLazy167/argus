@@ -1,6 +1,10 @@
 package pipeline
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/BeLazy167/argus/backend/internal/memory"
+)
 
 // TestSuppressedKeyGate proves the dismissal-drop signal bridges the two
 // snapshots: enrichFindings sets Suppressed + records a key on the post-enrich
@@ -232,5 +236,200 @@ func TestLinkMatchedPattern(t *testing.T) {
 				t.Errorf("MatchedPatternScore = %v, want %v", c.MatchedPatternScore, tt.wantScore)
 			}
 		})
+	}
+}
+
+// mkDismissal builds a dismissed-feedback PatternMatch for suppression tests.
+func mkDismissal(score float64, changeKind string, pr string) memory.PatternMatch {
+	md := map[string]string{}
+	if changeKind != "" {
+		md["change_kind"] = changeKind
+	}
+	if pr != "" {
+		md["pr_number"] = pr
+	}
+	return memory.PatternMatch{Content: "dismissed finding", Score: score, Metadata: md}
+}
+
+func TestFilterDismissalsForClass(t *testing.T) {
+	proto := mkDismissal(0.7, ChangeClassOneTimeScript, "")
+	protoLegacy := mkDismissal(0.7, "prototype", "")
+	prod := mkDismissal(0.7, ChangeClassProduction, "")
+	unstamped := mkDismissal(0.7, "", "")
+
+	tests := []struct {
+		name         string
+		matches      []memory.PatternMatch
+		currentClass string
+		wantKept     int
+	}{
+		{"prototype dismissal filtered for production PR", []memory.PatternMatch{proto}, ChangeClassProduction, 0},
+		{"legacy 'prototype' kind filtered for migration PR", []memory.PatternMatch{protoLegacy}, ChangeClassMigration, 0},
+		{"prototype dismissal filtered when class unknown (nil-contract = production)", []memory.PatternMatch{proto}, "", 0},
+		{"prototype dismissal kept for one-off script PR", []memory.PatternMatch{proto}, ChangeClassOneTimeScript, 1},
+		{"production dismissal kept for production PR", []memory.PatternMatch{prod}, ChangeClassProduction, 1},
+		{"pre-contract dismissal (no stamp) always kept", []memory.PatternMatch{unstamped}, ChangeClassProduction, 1},
+		{"mixed set keeps only non-throwaway", []memory.PatternMatch{proto, prod, unstamped}, ChangeClassProduction, 2},
+		{"docs PR keeps everything", []memory.PatternMatch{proto, prod}, ChangeClassDocs, 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := len(filterDismissalsForClass(tt.matches, tt.currentClass)); got != tt.wantKept {
+				t.Errorf("kept %d matches, want %d", got, tt.wantKept)
+			}
+		})
+	}
+}
+
+func TestEvaluateDismissals(t *testing.T) {
+	similar := func(n int) []memory.PatternMatch {
+		out := make([]memory.PatternMatch, n)
+		for i := range out {
+			out[i] = mkDismissal(0.65, "", "")
+		}
+		return out
+	}
+
+	tests := []struct {
+		name             string
+		matches          []memory.PatternMatch
+		currentClass     string
+		exempt           bool
+		categoryAuto     bool
+		wantAction       dismissalAction
+		wantReasonPrefix string
+		wantSimilar      int
+	}{
+		{
+			name: "no matches, nothing suppressed",
+			wantAction: dismissalNone,
+		},
+		{
+			name:       "single exact match drops (v1 behavior preserved)",
+			matches:    []memory.PatternMatch{mkDismissal(0.91, "", "7")},
+			wantAction: dismissalDrop, wantReasonPrefix: "dismissed_match:0.91", wantSimilar: 1,
+		},
+		{
+			name:       "single mid match only downgrades",
+			matches:    []memory.PatternMatch{mkDismissal(0.70, "", "")},
+			wantAction: dismissalDowngrade, wantSimilar: 1,
+		},
+		{
+			name:       "three similar dismissals drop even below the exact threshold",
+			matches:    similar(3),
+			wantAction: dismissalDrop, wantReasonPrefix: "team_feedback:3", wantSimilar: 3,
+		},
+		{
+			name:       "two similar dismissals are not enough",
+			matches:    similar(2),
+			wantAction: dismissalDowngrade, wantSimilar: 2,
+		},
+		{
+			name:         "prototype-era dismissals do not count against a production PR",
+			matches:      []memory.PatternMatch{mkDismissal(0.9, ChangeClassOneTimeScript, ""), mkDismissal(0.65, ChangeClassOneTimeScript, ""), mkDismissal(0.65, ChangeClassOneTimeScript, "")},
+			currentClass: ChangeClassProduction,
+			wantAction:   dismissalNone, wantSimilar: 0,
+		},
+		{
+			name:         "prototype-era dismissals still suppress on a one-off script PR",
+			matches:      []memory.PatternMatch{mkDismissal(0.65, ChangeClassOneTimeScript, ""), mkDismissal(0.65, ChangeClassOneTimeScript, ""), mkDismissal(0.65, ChangeClassOneTimeScript, "")},
+			currentClass: ChangeClassOneTimeScript,
+			wantAction:   dismissalDrop, wantReasonPrefix: "team_feedback:3", wantSimilar: 3,
+		},
+		{
+			name:         "auto-suppressed category drops with zero matches",
+			categoryAuto: true,
+			wantAction:   dismissalDrop, wantReasonPrefix: "category_auto_suppressed",
+		},
+		{
+			name:       "exempt finding is never dropped by an exact match — capped at downgrade",
+			matches:    []memory.PatternMatch{mkDismissal(0.95, "", "")},
+			exempt:     true,
+			wantAction: dismissalDowngrade, wantSimilar: 1,
+		},
+		{
+			name:       "exempt finding is never dropped by a team-feedback streak",
+			matches:    similar(4),
+			exempt:     true,
+			wantAction: dismissalDowngrade, wantSimilar: 4,
+		},
+		{
+			name:         "exempt finding ignores category auto-suppression entirely",
+			exempt:       true,
+			categoryAuto: true,
+			wantAction:   dismissalNone,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ev := evaluateDismissals(tt.matches, tt.currentClass, tt.exempt, tt.categoryAuto)
+			if ev.action != tt.wantAction {
+				t.Errorf("action = %v, want %v", ev.action, tt.wantAction)
+			}
+			if tt.wantReasonPrefix != "" && ev.reason != tt.wantReasonPrefix {
+				t.Errorf("reason = %q, want %q", ev.reason, tt.wantReasonPrefix)
+			}
+			if ev.action != dismissalDrop && ev.reason != "" {
+				t.Errorf("reason must be empty unless dropping, got %q", ev.reason)
+			}
+			if ev.similarCount != tt.wantSimilar {
+				t.Errorf("similarCount = %d, want %d", ev.similarCount, tt.wantSimilar)
+			}
+		})
+	}
+}
+
+func TestEvaluateDismissals_BestPRAttribution(t *testing.T) {
+	ev := evaluateDismissals([]memory.PatternMatch{
+		mkDismissal(0.62, "", "3"),
+		mkDismissal(0.78, "", "42"), // best
+	}, "", false, false)
+	if ev.action != dismissalDowngrade {
+		t.Fatalf("action = %v, want downgrade", ev.action)
+	}
+	if ev.bestPR != 42 {
+		t.Errorf("bestPR = %d, want 42 (the highest-scoring match)", ev.bestPR)
+	}
+	c := &FileComment{Severity: SeverityCritical}
+	applyDismissalEvaluation(c, ev)
+	if c.Severity != SeverityWarning || !c.DismissedDowngrade || c.DismissedMatchPR != 42 {
+		t.Errorf("downgrade application wrong: severity=%v downgrade=%v pr=%d", c.Severity, c.DismissedDowngrade, c.DismissedMatchPR)
+	}
+}
+
+func TestSuppressionExempt(t *testing.T) {
+	tests := []struct {
+		name     string
+		category Category
+		body     string
+		want     bool
+	}{
+		{"security category always exempt", CategorySecurity, "anything", true},
+		{"destructive SQL body exempt", CategoryBug, "DELETE FROM users runs with a missing WHERE clause", true},
+		{"secrets-in-logs body exempt", CategoryBug, "the API key is written to the request log", true},
+		{"data-loss body exempt", CategoryBug, "this causes irreversible data loss on rollback", true},
+		{"swallowed error body exempt", CategoryErrorHandling, "the error is swallowed and never surfaced", true},
+		{"plain perf finding not exempt", CategoryPerformance, "N+1 query in the loop", false},
+		{"plain testing finding not exempt", CategoryTesting, "missing test for the new branch", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := suppressionExempt(tt.category, tt.body); got != tt.want {
+				t.Errorf("suppressionExempt(%s, %q) = %v, want %v", tt.category, tt.body, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCountSuppressedFindings(t *testing.T) {
+	reviews := []FileReview{
+		{Path: "a.go", Comments: []FileComment{{Suppressed: true}, {Suppressed: false}}},
+		{Path: "b.go", Comments: []FileComment{{Suppressed: true}}},
+	}
+	if got := countSuppressedFindings(reviews); got != 2 {
+		t.Errorf("countSuppressedFindings = %d, want 2", got)
+	}
+	if got := countSuppressedFindings(nil); got != 0 {
+		t.Errorf("countSuppressedFindings(nil) = %d, want 0", got)
 	}
 }

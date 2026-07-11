@@ -110,6 +110,48 @@ func (s *Store) RecordPatternOutcome(ctx context.Context, patternID int64, confi
 	return quality, true, nil
 }
 
+// CategoryIgnoreStreak is the number of most-recent consecutive negative
+// outcomes (dismissed/ignored) after which a whole category is auto-suppressed
+// for the repo. Complements the per-pattern Bayesian quality loop above:
+// pattern_stats tracks aggregate counters per pattern, while a streak needs
+// event ordering — comment_outcomes provides it.
+const CategoryIgnoreStreak = 3
+
+// GetAutoSuppressedCategories returns the finding categories whose last
+// CategoryIgnoreStreak outcomes in this repo were ALL negative (dismissed or
+// ignored) — i.e. the team has consistently rejected the category's findings.
+// A category with fewer than CategoryIgnoreStreak recorded outcomes never
+// qualifies; a single confirmed outcome resets the streak by construction.
+func (s *Store) GetAutoSuppressedCategories(ctx context.Context, repoID int64) (map[string]bool, error) {
+	rows, err := s.Pool.Query(ctx, `
+		SELECT category FROM (
+			SELECT rc.category, co.outcome,
+			       ROW_NUMBER() OVER (PARTITION BY rc.category ORDER BY co.created_at DESC) AS rn
+			FROM comment_outcomes co
+			JOIN review_comments rc ON co.review_comment_id = rc.id
+			JOIN reviews rv ON rc.review_id = rv.id
+			WHERE rv.repo_id = $1 AND rc.category IS NOT NULL AND rc.category <> ''
+		) recent
+		WHERE rn <= $2
+		GROUP BY category
+		HAVING COUNT(*) = $2
+		   AND COUNT(*) FILTER (WHERE outcome IN ('dismissed','ignored')) = $2
+	`, repoID, CategoryIgnoreStreak)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]bool)
+	for rows.Next() {
+		var cat string
+		if err := rows.Scan(&cat); err != nil {
+			return nil, err
+		}
+		out[cat] = true
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) GetPatternHealthStats(ctx context.Context, installationID int64, since time.Time) (PatternHealthStats, error) {
 	var stats PatternHealthStats
 
