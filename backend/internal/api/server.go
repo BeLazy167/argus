@@ -191,6 +191,7 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 				r.Get("/stats/repos", s.statsRepos)
 				r.Get("/stats/review-times", s.statsReviewTimes)
 				r.Get("/stats/cost-per-stage", s.statsCostPerStage)
+				r.Get("/stats/gauge", s.statsGauge)
 
 				// Patterns
 				r.Get("/patterns", s.listPatterns)
