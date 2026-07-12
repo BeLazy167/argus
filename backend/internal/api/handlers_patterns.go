@@ -127,7 +127,10 @@ func (s *Server) createPattern(w http.ResponseWriter, r *http.Request) {
 	}
 
 	createdBy := getUserID(r.Context())
-	pattern, err := s.store.CreatePattern(r.Context(), body.InstallationID, body.RepoID, body.Content, smID, &createdBy, nil, nil, nil)
+	// supermemory_custom_id is nil here: dashboard-created patterns rely on the
+	// supermemory_id match at read time. The per-finding enrich customId path is
+	// populated by the pipeline write paths (confirmed/auto_learn/convention).
+	pattern, err := s.store.CreatePattern(r.Context(), body.InstallationID, body.RepoID, body.Content, smID, &createdBy, nil, nil, nil, nil)
 	if err != nil {
 		s.logger.Error("create pattern", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create pattern"})

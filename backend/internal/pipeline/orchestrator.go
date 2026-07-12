@@ -309,6 +309,11 @@ type Orchestrator struct {
 	// those boundaries with in-memory fakes (see crosspr_stage_deps.go and
 	// crosspr_stage_integration_test.go).
 	crossPRHooks *crossPRHooks
+	// enrichStoreOverride is the test-only store seam for enrichFindings. nil in
+	// production — enrichStoreDep() falls back to a default adapter over o.st.
+	// Tests assign an in-memory fake to exercise the DB-less enrich read path
+	// (see enrich_deps.go and enrich_read_test.go).
+	enrichStoreOverride enrichStore
 }
 
 // LLMRegistry is the subset of llm.Registry used by Orchestrator.
@@ -1686,7 +1691,7 @@ func (o *Orchestrator) autoResolveStaleComments(
 }
 
 // enrichFindings annotates each comment with pattern/rule matches and novelty flags.
-// Non-fatal: defaults to is_new_finding=true on any search failure.
+// Non-fatal: on search failure novelty is left UNSET — only a successful empty search marks a finding novel.
 func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) error {
 	if run.Indexer == nil {
 		return nil
@@ -1706,7 +1711,7 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 	}
 	autoSuppressed := map[string]bool{}
 	if run.DBRepoID != 0 {
-		if m, asErr := o.st.GetAutoSuppressedCategories(ctx, run.DBRepoID); asErr != nil {
+		if m, asErr := o.enrichStoreDep().GetAutoSuppressedCategories(ctx, run.DBRepoID); asErr != nil {
 			o.logger.Warn("auto-suppressed categories lookup", "error", asErr, "repo_id", run.DBRepoID)
 		} else {
 			autoSuppressed = m
@@ -1734,7 +1739,10 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 
 				// Build a richer query: category + file + body gives Supermemory more semantic signal
 				query := fmt.Sprintf("[%s|%s] %s:%d %s", c.Severity, c.Category, filePath, c.Line, c.Body)
-				match := run.Indexer.SearchPatternMatch(ctx, owner, repo, query, run.Thresholds)
+				// searchOK distinguishes a genuine "no match" (ok=true, zero score)
+				// from a broken/timed-out search (ok=false) so the novel branch below
+				// never marks a finding new just because memory search errored.
+				match, searchOK := run.Indexer.SearchPatternMatch(ctx, owner, repo, query, run.Thresholds)
 
 				// Rules live in the shared container under type=rule metadata
 				// (post-refactor unified shape). SearchRuleContent owns the typed
@@ -1757,16 +1765,10 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 				// docs never mirror to the patterns table); a miss skips the FK and
 				// pattern-stats without failing enrichment.
 				if score > 0 {
-					var patternID int64
-					var found bool
-					if pid, lerr := o.st.GetPatternIDBySupermemoryID(ctx, match.ID); lerr == nil {
-						patternID, found = pid, true
-					} else if !errors.Is(lerr, pgx.ErrNoRows) {
-						o.logger.Warn("pattern id lookup", "error", lerr, "supermemory_id", match.ID)
-					}
+					patternID, found := o.resolvePatternID(ctx, match)
 					linkMatchedPattern(c, patternID, found, score)
 					if found {
-						if serr := o.st.IncrementPatternMatch(ctx, patternID); serr != nil {
+						if serr := o.enrichStoreDep().IncrementPatternMatch(ctx, patternID); serr != nil {
 							o.logger.Warn("increment pattern match", "error", serr, "pattern_id", patternID)
 						}
 					}
@@ -1812,10 +1814,12 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 						})
 					}
 				}
-				// Novel = no persisted pattern match (score cleared to 0) and no
-				// rule. score>0 now means a match at/above the FindingEnrich floor,
-				// so a 0.50–0.80 hit is a match, not a new finding.
-				if score == 0 && ruleContent == "" {
+				// Novel = SUCCESSFUL empty pattern search (score cleared to 0) and no
+				// rule. score>0 means a match at/above the FindingEnrich floor, so a
+				// 0.50–0.80 hit is a match, not a new finding. searchOK gates the
+				// branch: a failed/timed-out search leaves IsNewFinding unset rather
+				// than conflating "search broke" with "no prior match".
+				if searchOK && score == 0 && ruleContent == "" {
 					c.IsNewFinding = true
 				}
 
@@ -1903,6 +1907,33 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 		})
 	}
 	return nil
+}
+
+// resolvePatternID maps a Supermemory pattern search hit back to its
+// patterns-table row id. It PREFERS the deterministic customId (round-tripped
+// through result metadata under "custom_id") because a hybrid-search hit's own
+// ID may be a chunk id that never equals the stored supermemory_id; it falls
+// back to matching match.ID against patterns.supermemory_id for legacy rows
+// written before the customId mirror existed. Returns found=false (a non-fatal
+// miss — e.g. a synthesis/convention doc never mirrored to the patterns table)
+// when neither key resolves.
+func (o *Orchestrator) resolvePatternID(ctx context.Context, match memory.PatternMatch) (int64, bool) {
+	st := o.enrichStoreDep()
+	if customID := match.Metadata["custom_id"]; customID != "" {
+		if pid, err := st.GetPatternIDByCustomID(ctx, customID); err == nil {
+			return pid, true
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			o.logger.Warn("pattern id lookup by custom_id", "error", err, "custom_id", customID)
+		}
+		// customId miss (legacy row / not mirrored) — fall through to the
+		// supermemory_id match on the result's own id.
+	}
+	if pid, err := st.GetPatternIDBySupermemoryID(ctx, match.ID); err == nil {
+		return pid, true
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		o.logger.Warn("pattern id lookup", "error", err, "supermemory_id", match.ID)
+	}
+	return 0, false
 }
 
 // inferMatchKind derives the MatchedPatternKind from Supermemory metadata. The
@@ -3592,7 +3623,11 @@ func (o *Orchestrator) indexConfirmedPatterns(ctx context.Context, run *Pipeline
 				Category: string(c.Category),
 			})
 			if err != nil {
-				o.logger.Warn("indexing confirmed pattern", "error", err, "file", fr.Path)
+				// Non-fatal, but the DB row below lands with a NULL supermemory_id —
+				// log the deterministic customID (never model-generated content,
+				// which can quote secrets) so silent write-failures are visible.
+				o.logger.Warn("indexing confirmed pattern", "error", err, "file", fr.Path,
+					"custom_id", customID)
 			}
 			// Also persist to local DB so the patterns dashboard stays current
 			var smID *string
@@ -3602,7 +3637,7 @@ func (o *Orchestrator) indexConfirmedPatterns(ctx context.Context, run *Pipeline
 			src := "scoring_confirmed"
 			cat := string(c.Category)
 			prNum := run.PREvent.PRNumber
-			if _, dbErr := o.st.CreatePattern(ctx, run.DBInstallationID, &run.DBRepoID, content, smID, strPtrOrNil("argus:confirmed"), &src, &cat, &prNum); dbErr != nil {
+			if _, dbErr := o.st.CreatePattern(ctx, run.DBInstallationID, &run.DBRepoID, content, smID, strPtrOrNil("argus:confirmed"), &src, &cat, &prNum, strPtrOrNil(customID)); dbErr != nil {
 				o.logger.Warn("persisting confirmed pattern to DB", "error", dbErr, "file", fr.Path)
 			}
 		}
@@ -3815,7 +3850,7 @@ The "pattern" value must be the actual pattern text, NOT the word "description".
 		src := "auto_learn"
 		cat := strPtrOrNil(p.Category)
 		prNum := run.PREvent.PRNumber
-		if _, dbErr := o.st.CreatePattern(ctx, run.DBInstallationID, &run.DBRepoID, p.Pattern, smID, strPtrOrNil("argus:auto_learn"), &src, cat, &prNum); dbErr != nil {
+		if _, dbErr := o.st.CreatePattern(ctx, run.DBInstallationID, &run.DBRepoID, p.Pattern, smID, strPtrOrNil("argus:auto_learn"), &src, cat, &prNum, strPtrOrNil(customID)); dbErr != nil {
 			o.logger.Warn("persisting auto-learned pattern", "error", dbErr)
 		}
 
@@ -3836,7 +3871,7 @@ The "pattern" value must be the actual pattern text, NOT the word "description".
 			} else if orgResp != nil {
 				orgSmID = &orgResp.ID
 			}
-			if _, dbErr := o.st.CreatePattern(ctx, run.DBInstallationID, nil, p.Pattern, orgSmID, strPtrOrNil("argus:auto_learn"), &src, cat, &prNum); dbErr != nil {
+			if _, dbErr := o.st.CreatePattern(ctx, run.DBInstallationID, nil, p.Pattern, orgSmID, strPtrOrNil("argus:auto_learn"), &src, cat, &prNum, strPtrOrNil(orgCustomID)); dbErr != nil {
 				o.logger.Warn("persisting org-level pattern", "error", dbErr)
 			}
 			o.logger.Info("promoted pattern to org level", "pattern", util.Truncate(p.Pattern, 80, true))
@@ -3970,7 +4005,7 @@ Return [] if no clear conventions emerge. JSON array only.`, run.PREvent.RepoFul
 		src := "convention"
 		cat := strPtrOrNil(c.Category)
 		prNum := run.PREvent.PRNumber
-		if _, dbErr := o.st.CreatePattern(ctx, run.DBInstallationID, &run.DBRepoID, content, smID, strPtrOrNil("argus:convention"), &src, cat, &prNum); dbErr != nil {
+		if _, dbErr := o.st.CreatePattern(ctx, run.DBInstallationID, &run.DBRepoID, content, smID, strPtrOrNil("argus:convention"), &src, cat, &prNum, strPtrOrNil(customID)); dbErr != nil {
 			o.logger.Warn("persisting convention pattern", "error", dbErr)
 		}
 	}
