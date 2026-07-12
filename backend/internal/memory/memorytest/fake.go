@@ -22,25 +22,28 @@ type Fake struct {
 	HintsFn       func(query, containerTag string, limit int, typ memory.MemoryType) []string
 	RuleContentFn func(query string) string
 	ScoredFn      func(query, containerTag string, typ memory.MemoryType, limit int) ([]memory.PatternMatch, error)
-	PatternFn     func(owner, repo, query string) memory.PatternMatch
-	DismissedFn   func(owner, repo, query string, limit int) []memory.PatternMatch
-	ScenariosFn   func(owner, repo, query, severity string, limit int) []memory.ScenarioSearchResult
+	// PatternFn stubs SearchPatternMatch. The bool return is the search-ok flag
+	// (true = search completed, even if empty; false = search errored). Nil ⇒
+	// (zero match, true) — a successful empty search.
+	PatternFn   func(owner, repo, query string) (memory.PatternMatch, bool)
+	DismissedFn func(owner, repo, query string, limit int) []memory.PatternMatch
+	ScenariosFn func(owner, repo, query, severity string, limit int) []memory.ScenarioSearchResult
 
 	mu          sync.Mutex
-	Feedback    []memory.FeedbackMemory  // IndexFeedbackSignal
-	Patterns    []memory.PatternMemory   // IndexPattern
-	SharedPats  []memory.PatternMemory   // IndexSharedPattern
-	Rules       []memory.RuleMemory      // IndexRule
-	ReviewBatch [][]memory.ReviewMemory  // IndexReviewCommentsBatch
-	Scenarios   []FakeScenario           // IndexScenario
-	Deleted     []string                 // DeleteDocument
+	Feedback    []memory.FeedbackMemory // IndexFeedbackSignal
+	Patterns    []memory.PatternMemory  // IndexPattern
+	SharedPats  []memory.PatternMemory  // IndexSharedPattern
+	Rules       []memory.RuleMemory     // IndexRule
+	ReviewBatch [][]memory.ReviewMemory // IndexReviewCommentsBatch
+	Scenarios   []FakeScenario          // IndexScenario
+	Deleted     []string                // DeleteDocument
 }
 
 // FakeScenario records one IndexScenario call.
 type FakeScenario struct {
 	Owner, Repo, Description, Severity string
-	ScenarioID                        int64
-	Files                             []string
+	ScenarioID                         int64
+	Files                              []string
 }
 
 // Ensure Fake satisfies the interface at compile time.
@@ -90,11 +93,11 @@ func (f *Fake) IndexScenario(_ context.Context, owner, repo string, scenarioID i
 	return nil
 }
 
-func (f *Fake) SearchPatternMatch(_ context.Context, owner, repo, query string, _ memory.Thresholds) memory.PatternMatch {
+func (f *Fake) SearchPatternMatch(_ context.Context, owner, repo, query string, _ memory.Thresholds) (memory.PatternMatch, bool) {
 	if f.PatternFn != nil {
 		return f.PatternFn(owner, repo, query)
 	}
-	return memory.PatternMatch{}
+	return memory.PatternMatch{}, true
 }
 
 func (f *Fake) SearchDismissedMatches(_ context.Context, owner, repo, query string, _ memory.Thresholds, limit int) []memory.PatternMatch {

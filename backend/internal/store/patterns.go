@@ -51,13 +51,17 @@ func (s *Store) ListPatternsForRepo(ctx context.Context, installationIDs []int64
 	return collectOrEmpty(rows, pgx.RowToStructByPos[Pattern])
 }
 
-func (s *Store) CreatePattern(ctx context.Context, installationID int64, repoID *int64, content string, supermemoryID *string, createdBy *string, source *string, category *string, prNumber *int) (*Pattern, error) {
+// CreatePattern inserts a pattern row. supermemoryCustomID is the deterministic
+// customId mirrored from the Supermemory write (nil when unknown); it durably
+// keys the row so the per-finding enrich read can resolve a search hit back to
+// this pattern by customId even when the hit's own id is a chunk id.
+func (s *Store) CreatePattern(ctx context.Context, installationID int64, repoID *int64, content string, supermemoryID *string, createdBy *string, source *string, category *string, prNumber *int, supermemoryCustomID *string) (*Pattern, error) {
 	var p Pattern
 	err := s.Pool.QueryRow(ctx,
-		`INSERT INTO patterns (installation_id, repo_id, content, supermemory_id, created_by, source, category, pr_number)
-		 VALUES ($1, $2, $3, $4, $5, COALESCE($6, 'manual'), $7, $8)
+		`INSERT INTO patterns (installation_id, repo_id, content, supermemory_id, created_by, source, category, pr_number, supermemory_custom_id)
+		 VALUES ($1, $2, $3, $4, $5, COALESCE($6, 'manual'), $7, $8, $9)
 		 RETURNING id, installation_id, repo_id, content, supermemory_id, created_by, COALESCE(source, 'manual'), category, pr_number, created_at, updated_at`,
-		installationID, repoID, content, supermemoryID, createdBy, source, category, prNumber).
+		installationID, repoID, content, supermemoryID, createdBy, source, category, prNumber, supermemoryCustomID).
 		Scan(&p.ID, &p.InstallationID, &p.RepoID, &p.Content, &p.SupermemoryID, &p.CreatedBy, &p.Source, &p.Category, &p.PRNumber, &p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
 		return nil, err
@@ -99,6 +103,23 @@ func (s *Store) GetPatternIDBySupermemoryID(ctx context.Context, supermemoryID s
 	var id int64
 	err := s.Pool.QueryRow(ctx,
 		`SELECT id FROM patterns WHERE supermemory_id = $1 LIMIT 1`, supermemoryID).Scan(&id)
+	if err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
+// GetPatternIDByCustomID maps a Supermemory pattern doc's deterministic customId
+// back to its patterns-table row id. The per-finding enrich read prefers this
+// over GetPatternIDBySupermemoryID because a hybrid-search hit's own ID may be a
+// chunk id that never matches the stored supermemory_id, whereas the customId is
+// mirrored into result metadata at write time. Returns (0, pgx.ErrNoRows) when
+// no row carries that customId (legacy rows written before the mirror column, or
+// docs never mirrored to the patterns table) — a miss, not a failure.
+func (s *Store) GetPatternIDByCustomID(ctx context.Context, customID string) (int64, error) {
+	var id int64
+	err := s.Pool.QueryRow(ctx,
+		`SELECT id FROM patterns WHERE supermemory_custom_id = $1 LIMIT 1`, customID).Scan(&id)
 	if err != nil {
 		return 0, err
 	}

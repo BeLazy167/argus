@@ -216,7 +216,9 @@ func (s *Server) handleRememberCommand(ctx context.Context, evt ghpkg.IssueComme
 	}
 
 	createdBy := evt.CommentAuthor
-	_, err = s.store.CreatePattern(ctx, inst.ID, repoID, content, smID, &createdBy, nil, nil, nil)
+	// supermemory_custom_id is nil here (see handlers_patterns.go): `remember`
+	// patterns rely on the supermemory_id match at read time.
+	_, err = s.store.CreatePattern(ctx, inst.ID, repoID, content, smID, &createdBy, nil, nil, nil, nil)
 	if err != nil {
 		s.logger.Error("remember: save to db", "error", err)
 		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")

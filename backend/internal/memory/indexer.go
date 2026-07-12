@@ -56,7 +56,12 @@ type Indexer interface {
 	IndexScenario(ctx context.Context, owner, repo string, scenarioID int64, description, severity string, files []string) error
 
 	// Readers.
-	SearchPatternMatch(ctx context.Context, owner, repo, query string, thresholds Thresholds) PatternMatch
+	// SearchPatternMatch returns the best pattern match across the repo + shared
+	// containers plus an ok flag: true when BOTH underlying searches completed
+	// (even if they matched nothing), false when either errored. Callers
+	// distinguish a genuine no-match (ok=true, zero score) from a broken search
+	// (ok=false) so a failed lookup is never miscounted as a novel finding.
+	SearchPatternMatch(ctx context.Context, owner, repo, query string, thresholds Thresholds) (PatternMatch, bool)
 	// SearchDismissedMatches finds the top previously-dismissed findings
 	// (type=feedback + action=dismissed) in the repo container, best first.
 	// The post-generation suppression pass uses the scores to drop or
@@ -140,16 +145,20 @@ type PatternMatch struct {
 // is accepted for interface compatibility but unused — under BYOK the
 // installation key is the tenant and all data lives in the unified `{repo}` /
 // `_shared` containers.
-func (idx *indexerImpl) SearchPatternMatch(ctx context.Context, owner, repo, query string, thresholds Thresholds) PatternMatch {
+func (idx *indexerImpl) SearchPatternMatch(ctx context.Context, owner, repo, query string, thresholds Thresholds) (PatternMatch, bool) {
 	_ = owner
+	// No client / no repo means memory is disabled — there is nothing to search,
+	// so report ok=true (a successful empty result): callers keep their existing
+	// "everything is novel when memory is off" behavior.
 	if idx.client == nil || repo == "" {
-		return PatternMatch{}
+		return PatternMatch{}, true
 	}
 	thresholds = thresholds.WithDefaults()
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	var repoRes, sharedRes PatternMatch
+	var repoOK, sharedOK bool
 	var wg sync.WaitGroup
 	wg.Add(2)
 
@@ -157,15 +166,17 @@ func (idx *indexerImpl) SearchPatternMatch(ctx context.Context, owner, repo, que
 
 	go func() {
 		defer wg.Done()
-		repoRes = idx.topMatch(ctx, query, RepoTagNew(repo), patternFilter, thresholds.FindingEnrich)
+		repoRes, repoOK = idx.topMatch(ctx, query, RepoTagNew(repo), patternFilter, thresholds.FindingEnrich, "pattern-enrich")
 	}()
 	go func() {
 		defer wg.Done()
-		sharedRes = idx.topMatch(ctx, query, SharedTag, patternFilter, thresholds.FindingEnrich)
+		sharedRes, sharedOK = idx.topMatch(ctx, query, SharedTag, patternFilter, thresholds.FindingEnrich, "pattern-enrich")
 	}()
 
 	wg.Wait()
-	return bestMatch(repoRes, sharedRes)
+	// ok only when BOTH legs succeeded — if either errored we cannot claim a
+	// genuine "no match", so the caller must leave novelty undecided.
+	return bestMatch(repoRes, sharedRes), repoOK && sharedOK
 }
 
 // SearchDismissedMatches returns the top dismissed-feedback docs semantically
@@ -196,13 +207,19 @@ func (idx *indexerImpl) SearchDismissedMatches(ctx context.Context, owner, repo,
 			{Key: "type", Value: string(TypeFeedback)},
 			{Key: "action", Value: "dismissed"},
 		}},
-	})
+	}, "dismissal")
 }
 
-// topMatch runs a one-result hybrid search on the given container + filter.
-// Returns zero PatternMatch if no hit, error, or empty query. threshold is
-// the server-side similarity cutoff (callers pass thresholds.FindingEnrich).
-func (idx *indexerImpl) topMatch(ctx context.Context, query, containerTag string, filters *SearchFilters, threshold float64) PatternMatch {
+// topMatch runs a one-result hybrid search on the given container + filter and
+// reports whether the search itself SUCCEEDED (ok) separately from whether it
+// matched anything. threshold is the server-side similarity cutoff (callers
+// pass thresholds.FindingEnrich); caller tags every log line so prod logs
+// reveal empty-vs-error-vs-hit per call site — this is the observability hole
+// that hid the dead per-finding enrichment read path.
+//
+// ok semantics: false ONLY when the Search call errored (network, timeout,
+// non-2xx). A successful search with zero results returns (zero, true).
+func (idx *indexerImpl) topMatch(ctx context.Context, query, containerTag string, filters *SearchFilters, threshold float64, caller string) (PatternMatch, bool) {
 	resp, err := idx.client.Search(ctx, SearchRequest{
 		Query:        query,
 		ContainerTag: containerTag,
@@ -212,10 +229,21 @@ func (idx *indexerImpl) topMatch(ctx context.Context, query, containerTag string
 		Rerank:       true,
 		Filters:      filters,
 	})
-	if err != nil || resp == nil || len(resp.Results) == 0 {
-		return PatternMatch{}
+	if err != nil {
+		idx.logger.Warn("memory search failed",
+			"caller", caller, "container", containerTag, "query_len", len(query), "error", err)
+		return PatternMatch{}, false
 	}
-	return resultToPatternMatch(resp.Results[0])
+	if resp == nil || len(resp.Results) == 0 {
+		idx.logger.Debug("memory search empty",
+			"caller", caller, "container", containerTag, "query_len", len(query), "count", 0)
+		return PatternMatch{}, true
+	}
+	pm := resultToPatternMatch(resp.Results[0])
+	idx.logger.Debug("memory search hit",
+		"caller", caller, "container", containerTag, "query_len", len(query),
+		"count", len(resp.Results), "top_similarity", fmt.Sprintf("%.3f", pm.Score))
+	return pm, true
 }
 
 // bestMatch returns the PatternMatch with the highest Score from the given candidates.
@@ -561,6 +589,12 @@ func (idx *indexerImpl) IndexPattern(ctx context.Context, repo string, p Pattern
 	if err != nil {
 		return nil, fmt.Errorf("pattern metadata: %w", err)
 	}
+	// Mirror the deterministic customId into searchable metadata under
+	// "custom_id" so the per-finding enrich read can resolve a search hit back
+	// to its patterns row by customId — /v4/search results carry metadata but no
+	// top-level customId, and the result's own ID may be a chunk id that never
+	// matches the stored supermemory_id.
+	flat["custom_id"] = p.CustomID
 	resp, err := idx.client.AddMemory(ctx, AddRequest{
 		Content:       p.Content,
 		CustomID:      p.CustomID,
@@ -603,6 +637,9 @@ func (idx *indexerImpl) IndexSharedPattern(ctx context.Context, p PatternMemory)
 	if err != nil {
 		return nil, fmt.Errorf("shared pattern metadata: %w", err)
 	}
+	// Mirror the customId into metadata (see IndexPattern) so shared-pattern
+	// search hits are resolvable back to their patterns row by customId.
+	flat["custom_id"] = p.CustomID
 	resp, err := idx.client.AddMemory(ctx, AddRequest{
 		Content:       p.Content,
 		CustomID:      p.CustomID,
@@ -875,7 +912,7 @@ func (idx *indexerImpl) specialistBlock(ctx context.Context, owner, repo, filePa
 				{Key: "type", Value: string(TypeScenario)},
 				{Key: "type", Value: string(TypeFeedback)},
 			}},
-		})
+		}, "briefing")
 	}()
 
 	// 3. Shared patterns — semantic against `_shared`. The AND filter excludes
@@ -896,7 +933,7 @@ func (idx *indexerImpl) specialistBlock(ctx context.Context, owner, repo, filePa
 				{Key: "type", Value: string(TypePattern)},
 				FilterNumeric("confidence", ">=", SharedConfidenceFloorStr),
 			}},
-		})
+		}, "briefing")
 	}()
 
 	wg.Wait()
@@ -904,10 +941,17 @@ func (idx *indexerImpl) specialistBlock(ctx context.Context, owner, repo, filePa
 }
 
 // searchMatches runs a search and translates the result list into
-// []PatternMatch with metadata already unmarshaled. Returns nil on error.
-func (idx *indexerImpl) searchMatches(ctx context.Context, req SearchRequest) []PatternMatch {
+// []PatternMatch with metadata already unmarshaled. Returns nil on error,
+// logging it at Warn (tagged with caller) so a broken dismissal/briefing
+// search is no longer indistinguishable from an empty one in prod logs.
+func (idx *indexerImpl) searchMatches(ctx context.Context, req SearchRequest, caller string) []PatternMatch {
 	resp, err := idx.client.Search(ctx, req)
-	if err != nil || resp == nil {
+	if err != nil {
+		idx.logger.Warn("memory search failed",
+			"caller", caller, "container", req.ContainerTag, "query_len", len(req.Query), "error", err)
+		return nil
+	}
+	if resp == nil {
 		return nil
 	}
 	out := make([]PatternMatch, 0, len(resp.Results))
