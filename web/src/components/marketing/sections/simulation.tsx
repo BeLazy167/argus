@@ -1,8 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-
 import { FadeIn } from "@/components/marketing/fade-in";
+import { useInView } from "@/lib/hooks/use-in-view";
 
 /**
  * Simulation section — "failure scenarios against your actual diff".
@@ -48,15 +47,15 @@ export function Simulation() {
 
         <FadeIn delay={80}>
           <h2 className="mt-7 max-w-[20ch] font-mono text-[44px] font-bold leading-[1.05] tracking-[-0.02em] text-foreground sm:text-[56px]">
-            Simulates failure scenarios against your actual diff
+            AI code review that simulates failures against your actual diff
           </h2>
         </FadeIn>
 
         <FadeIn delay={160}>
           <p className="mt-6 max-w-[68ch] font-sans text-[15px] leading-[1.7] text-slate-text sm:text-base">
-            Most reviewers pattern-match. Argus stress-tests: null inputs, PVC
-            adoption edge cases, race conditions. It tells you exactly where
-            prod could break &mdash; before merge.
+            Most pull request reviews pattern-match the diff. Argus stress-tests
+            it: null inputs, PVC adoption edge cases, race conditions. It tells
+            you exactly where prod could break &mdash; before merge.
           </p>
         </FadeIn>
 
@@ -121,35 +120,6 @@ export function Simulation() {
       `}</style>
     </section>
   );
-}
-
-/* ─────────────────────────────────────────────────────────────── */
-/* useInView — shared IntersectionObserver hook                    */
-/* ─────────────────────────────────────────────────────────────── */
-
-/**
- * Lightweight intersection hook. Sets a `data-in-view` attribute on the
- * returned ref's element once it enters the viewport so descendant
- * animations can pause/resume via CSS selectors.
- */
-function useInView<T extends HTMLElement>(rootMargin = "0px") {
-  const ref = useRef<T>(null);
-  const [inView, setInView] = useState(false);
-
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const obs = new IntersectionObserver(
-      ([entry]) => {
-        setInView(!!entry?.isIntersecting);
-      },
-      { threshold: 0.15, rootMargin }
-    );
-    obs.observe(el);
-    return () => obs.disconnect();
-  }, [rootMargin]);
-
-  return { ref, inView };
 }
 
 /* ─────────────────────────────────────────────────────────────── */

@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { FadeIn } from "@/components/marketing/fade-in";
+import { focusRing } from "@/components/marketing/focus-ring";
 
 /**
  * Memory section of the Argus v3 landing page — polish + bolder pass (v2).
@@ -638,7 +639,7 @@ function TeamSignalCard() {
 
         <Link
           href="/compare"
-          className="mt-6 inline-flex items-center gap-2 font-mono text-[11px] tracking-[0.16em] uppercase text-amber-glow border-b border-[color-mix(in_oklch,var(--color-amber-glow)_45%,transparent)] pb-0.5 hover:border-amber-glow focus-visible:outline-none"
+          className={`mt-6 inline-flex items-center gap-2 font-mono text-[11px] tracking-[0.16em] uppercase text-amber-glow border-b border-[color-mix(in_oklch,var(--color-amber-glow)_45%,transparent)] pb-0.5 hover:border-amber-glow ${focusRing}`}
         >
           See how Argus ranks
           <span

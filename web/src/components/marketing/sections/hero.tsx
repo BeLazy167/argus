@@ -2,7 +2,9 @@
 
 import Link from "next/link";
 import { FadeIn } from "@/components/marketing/fade-in";
+import { focusRingAmber } from "@/components/marketing/focus-ring";
 import { HeroBackdrop } from "@/components/marketing/hero-backdrop";
+import { InViewSection } from "@/components/marketing/in-view-section";
 import { track } from "@/lib/analytics";
 
 /**
@@ -23,7 +25,7 @@ import { track } from "@/lib/analytics";
  */
 export function Hero() {
   return (
-    <section
+    <InViewSection
       id="hero"
       aria-labelledby="hero-title"
       className="relative overflow-hidden bg-background pb-24 pt-14 sm:pt-20 lg:pb-32 lg:pt-28"
@@ -34,7 +36,7 @@ export function Hero() {
         <HeroHeadline />
         <HeroMockup />
       </div>
-    </section>
+    </InViewSection>
   );
 }
 
@@ -90,7 +92,8 @@ function HeroHeadline() {
 
         {/* Sub-headline — tight 52ch measure, flush-left */}
         <FadeIn delay={180}>
-          <p className="mt-8 max-w-[52ch] font-mono text-[14px] leading-[1.7] text-slate-text sm:text-[15px]">
+          <p className="mt-8 max-w-[52ch] font-mono text-[15px] leading-[1.7] text-slate-text">
+            <span className="text-amber-glow">AI code review that remembers.</span>{" "}
             <span className="text-foreground">Learns</span> from your team&rsquo;s review feedback.{" "}
             <span className="text-foreground">Simulates</span> real failure scenarios against your diff.{" "}
             <span className="text-foreground">Runs on your own keys</span> — zero hidden costs.
@@ -103,7 +106,7 @@ function HeroHeadline() {
             <Link
               href="/sign-up"
               onClick={() => track("onboarding.install_clicked", { source: "hero" })}
-              className="group relative inline-flex h-12 items-center gap-2.5 bg-amber px-6 font-mono text-[13px] font-semibold uppercase tracking-[0.12em] text-primary-foreground transition-[transform,background-color] duration-150 ease-[cubic-bezier(0.23,1,0.32,1)] hover:bg-amber-glow"
+              className={`group relative inline-flex h-12 items-center gap-2.5 bg-amber px-6 font-mono text-[13px] font-semibold uppercase tracking-[0.12em] text-primary-foreground transition-[transform,background-color] duration-150 ease-[cubic-bezier(0.23,1,0.32,1)] hover:bg-amber-glow active:scale-[0.98] ${focusRingAmber}`}
             >
               <GithubMark />
               Install GitHub App

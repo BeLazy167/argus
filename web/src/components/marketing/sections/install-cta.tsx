@@ -2,6 +2,8 @@
 
 import Link from "next/link";
 import { FadeIn } from "@/components/marketing/fade-in";
+import { focusRing, focusRingAmber } from "@/components/marketing/focus-ring";
+import { InViewSection } from "@/components/marketing/in-view-section";
 import { track } from "@/lib/analytics";
 
 /* ────────────────────────────────────────────────────────────
@@ -45,7 +47,7 @@ function SocialIcon({
     <a
       href={href}
       aria-label={label}
-      className="flex h-8 w-8 items-center justify-center border border-iron text-slate-text transition-colors hover:border-amber hover:text-amber"
+      className={`flex h-11 w-11 items-center justify-center border border-iron text-slate-text transition-colors hover:border-amber hover:text-amber ${focusRing}`}
     >
       {children}
     </a>
@@ -120,7 +122,7 @@ function FooterNav() {
         <span key={it.href} className="flex items-center">
           <Link
             href={it.href}
-            className="px-3 text-slate-text transition-colors hover:text-amber"
+            className={`px-3 py-2 text-slate-text transition-colors hover:text-amber ${focusRing}`}
           >
             {it.label}
           </Link>
@@ -138,7 +140,7 @@ function FooterNav() {
 
 export function InstallCta() {
   return (
-    <section id="install" className="relative isolate overflow-hidden">
+    <InViewSection id="install" className="relative isolate overflow-hidden">
       {/* Local keyframes — SSR-safe. transform + opacity + filter only. */}
       <style>{`
         @keyframes argusBannerScan {
@@ -156,6 +158,9 @@ export function InstallCta() {
         .argus-banner-scan { animation: argusBannerScan 6s cubic-bezier(0.77, 0, 0.175, 1) infinite; }
         .argus-glow-breath { animation: argusGlowBreath 5s cubic-bezier(0.77, 0, 0.175, 1) infinite; }
         .argus-ops-dot { animation: argusOpsDot 2.4s cubic-bezier(0.77, 0, 0.175, 1) infinite; }
+        [data-in-view="false"] .argus-banner-scan,
+        [data-in-view="false"] .argus-glow-breath,
+        [data-in-view="false"] .argus-ops-dot { animation-play-state: paused !important; }
         @media (prefers-reduced-motion: reduce) {
           .argus-banner-scan,
           .argus-glow-breath,
@@ -210,7 +215,7 @@ export function InstallCta() {
                 <Link
                   href="/sign-up"
                   onClick={() => track("onboarding.install_clicked", { source: "install_cta" })}
-                  className="group relative inline-flex items-center justify-center gap-2 overflow-hidden bg-amber px-8 py-4 font-mono text-sm font-semibold uppercase tracking-[0.1em] text-primary-foreground shadow-[0_0_48px_color-mix(in_oklch,var(--color-amber-glow)_34%,transparent)] transition-colors hover:bg-amber-glow"
+                  className={`group relative inline-flex items-center justify-center gap-2 overflow-hidden bg-amber px-8 py-4 font-mono text-sm font-semibold uppercase tracking-[0.1em] text-primary-foreground shadow-[0_0_48px_color-mix(in_oklch,var(--color-amber-glow)_34%,transparent)] transition-[transform,background-color] hover:bg-amber-glow active:scale-[0.98] ${focusRingAmber}`}
                 >
                   <span aria-hidden className="relative">{"\u25B8"}</span>
                   <span className="relative">Install GitHub App — Free</span>
@@ -222,7 +227,7 @@ export function InstallCta() {
                 </Link>
                 <Link
                   href="/compare"
-                  className="inline-flex items-center justify-center gap-2 border border-iron px-8 py-4 font-mono text-sm font-semibold uppercase tracking-[0.1em] text-foreground hover:border-amber hover:text-amber"
+                  className={`inline-flex items-center justify-center gap-2 border border-iron px-8 py-4 font-mono text-sm font-semibold uppercase tracking-[0.1em] text-foreground hover:border-amber hover:text-amber ${focusRing}`}
                 >
                   <span>See Argus vs CodeRabbit &amp; Greptile</span>
                   <span aria-hidden>{"\u2192"}</span>
@@ -408,7 +413,7 @@ export function InstallCta() {
           </div>
         </FadeIn>
       </div>
-    </section>
+    </InViewSection>
   );
 }
 

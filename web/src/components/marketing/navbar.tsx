@@ -166,7 +166,7 @@ export function Navbar() {
           whileTap={{ scale: 0.92 }}
           aria-label={menuOpen ? "Close menu" : "Open menu"}
           aria-expanded={menuOpen}
-          className="inline-flex items-center justify-center rounded-full border border-iron/70 p-2 text-slate-text transition-colors hover:border-amber/40 hover:text-amber md:hidden"
+          className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-full border border-iron/70 p-2 text-slate-text transition-colors hover:border-amber/40 hover:text-amber md:hidden"
         >
           {menuOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
         </motion.button>

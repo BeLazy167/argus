@@ -1,6 +1,6 @@
 import { Navbar } from "@/components/marketing/navbar";
 import { ScrollProgress } from "@/components/marketing/scroll-progress";
-import { SoftwareAppJsonLd } from "@/components/seo/json-ld";
+import { OrganizationJsonLd, SoftwareAppJsonLd } from "@/components/seo/json-ld";
 
 export default function MarketingLayout({
   children,
@@ -15,6 +15,7 @@ export default function MarketingLayout({
       </header>
       <main className="pt-24">{children}</main>
       <SoftwareAppJsonLd />
+      <OrganizationJsonLd />
     </>
   );
 }
