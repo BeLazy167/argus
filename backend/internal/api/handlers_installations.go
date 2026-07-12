@@ -277,5 +277,5 @@ func (s *Server) syncRepos(w http.ResponseWriter, r *http.Request) {
 		count++
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"synced": count})
+	writeJSON(w, http.StatusOK, SyncReposResponse{Synced: count})
 }

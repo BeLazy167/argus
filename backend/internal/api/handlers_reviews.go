@@ -20,24 +20,6 @@ import (
 	"github.com/BeLazy167/argus/backend/internal/pipeline"
 )
 
-type exportFinding struct {
-	File       string `json:"file"`
-	Line       int    `json:"line,omitempty"`
-	Priority   string `json:"priority"`
-	Confidence int    `json:"confidence,omitempty"`
-	Category   string `json:"category,omitempty"`
-	Severity   string `json:"severity,omitempty"`
-	Body       string `json:"body"`
-	Specialist string `json:"specialist,omitempty"`
-	// Dropped = generated but filtered out (dedup/scoring) before posting.
-	Dropped bool `json:"dropped,omitempty"`
-	// Folded = persisted + posted, but as a summary-body bullet rather than an
-	// inline GitHub comment (because the target line was outside the PR diff).
-	// Distinguished from Dropped: the author still sees the finding, but not
-	// as a resolvable inline thread.
-	Folded bool `json:"folded,omitempty"`
-}
-
 func (s *Server) listAllReviews(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
@@ -91,10 +73,7 @@ func (s *Server) getReview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"review":   review,
-		"comments": comments,
-	})
+	writeJSON(w, http.StatusOK, ReviewDetailResponse{Review: review, Comments: comments})
 }
 
 // exportReviewPublic handles the public export endpoint with HMAC signature verification.
@@ -154,7 +133,7 @@ func (s *Server) exportReview(w http.ResponseWriter, r *http.Request) {
 		postedKeys[postedKey(c.FilePath, line, spec)] = true
 	}
 
-	findings := make([]exportFinding, 0, len(comments))
+	findings := make([]ExportFinding, 0, len(comments))
 	for _, c := range comments {
 		sev := "suggestion"
 		if c.Severity != nil {
@@ -185,7 +164,7 @@ func (s *Server) exportReview(w http.ResponseWriter, r *http.Request) {
 			prio = "P1"
 		}
 
-		findings = append(findings, exportFinding{
+		findings = append(findings, ExportFinding{
 			File:       c.FilePath,
 			Line:       line,
 			Priority:   prio,
@@ -253,7 +232,7 @@ func (s *Server) exportReview(w http.ResponseWriter, r *http.Request) {
 						case "warning":
 							prio = "P1"
 						}
-						findings = append(findings, exportFinding{
+						findings = append(findings, ExportFinding{
 							File:       fr.Path,
 							Line:       line,
 							Priority:   prio,
@@ -309,7 +288,7 @@ func (s *Server) exportReview(w http.ResponseWriter, r *http.Request) {
 		sb.WriteString(fmt.Sprintf("- **Total findings:** %d\n\n", len(findings)))
 
 		// Group by file
-		fileGroups := make(map[string][]exportFinding)
+		fileGroups := make(map[string][]ExportFinding)
 		var fileOrder []string
 		for _, f := range findings {
 			if _, exists := fileGroups[f.File]; !exists {
@@ -342,14 +321,14 @@ func (s *Server) exportReview(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=argus-review-%s.json", id.String()[:8]))
 
-		export := map[string]any{
-			"review_id":      id.String(),
-			"pr_number":      review.PRNumber,
-			"pr_title":       review.PRTitle,
-			"score":          review.Score,
-			"status":         review.Status,
-			"total_findings": len(findings),
-			"findings":       findings,
+		export := ReviewExportResponse{
+			ReviewID:      id.String(),
+			PRNumber:      review.PRNumber,
+			PRTitle:       review.PRTitle,
+			Score:         review.Score,
+			Status:        review.Status,
+			TotalFindings: len(findings),
+			Findings:      findings,
 		}
 		if err := json.NewEncoder(w).Encode(export); err != nil {
 			s.logger.Warn("export encode failed", "error", err)

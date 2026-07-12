@@ -1,0 +1,58 @@
+# tygo — generates web/src/lib/generated/*.ts from the Go structs that define
+# the dashboard wire format. Run `make tygo` after changing any wire struct;
+# CI (`make tygo-check`) fails if the committed output drifts.
+#
+# tygo emits one file per package, so the store models and the pipeline review
+# contract land in two files. Both are re-exported from web/src/lib/types.ts.
+packages:
+  # Store models — the structs handlers serialize straight onto the wire
+  # (Installation, Repo, Review, ReviewComment, Scenario*, GaugeRow, Stats, …).
+  - path: "github.com/BeLazy167/argus/backend/internal/store"
+    output_path: "../web/src/lib/generated/api-types.ts"
+    include_files:
+      - "models.go"
+      - "patterns.go"
+      - "finding_state.go"
+    fallback_type: "unknown"
+    enum_style: "union"
+    frontmatter: |
+      // biome-ignore-all lint: generated file
+    type_mappings:
+      time.Time: "string"
+      uuid.UUID: "string"
+      uuid.NullUUID: "string | null"
+      json.RawMessage: "unknown"
+
+  # Review routing contract read by every pipeline stage; persisted as JSONB on
+  # reviews.review_contract and surfaced on the dashboard.
+  - path: "github.com/BeLazy167/argus/backend/internal/pipeline"
+    output_path: "../web/src/lib/generated/contract-types.ts"
+    include_files:
+      - "contract.go"
+    fallback_type: "unknown"
+    enum_style: "union"
+    frontmatter: |
+      // biome-ignore-all lint: generated file
+    type_mappings:
+      time.Time: "string"
+
+  # API response envelopes (responses.go). Generated so the wire shape is drift-
+  # checked; the embedded store/db types are mapped to their generated or
+  # hand-written counterparts. Frontend consumers keep their inline envelope
+  # types for now — this layer only needs to exist under the CI check.
+  - path: "github.com/BeLazy167/argus/backend/internal/api"
+    output_path: "../web/src/lib/generated/envelope-types.ts"
+    include_files:
+      - "responses.go"
+    fallback_type: "unknown"
+    frontmatter: |
+      // biome-ignore-all lint: generated file
+      import type { GaugeRow, Review, ReviewComment } from "./api-types";
+      import type { GraphNode, GraphEdge } from "../types";
+    type_mappings:
+      time.Time: "string"
+      store.GaugeRow: "GaugeRow"
+      store.Review: "Review"
+      store.ReviewComment: "ReviewComment"
+      db.ListGraphNodesRow: "GraphNode"
+      db.ListGraphEdgesRow: "GraphEdge"

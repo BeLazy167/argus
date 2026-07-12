@@ -16,5 +16,5 @@ func (s *Server) statsGauge(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"gauge": rows})
+	writeJSON(w, http.StatusOK, GaugeResponse{Gauge: rows})
 }

@@ -43,10 +43,7 @@ func (s *Server) getGraph(w http.ResponseWriter, r *http.Request) {
 		edges = []db.ListGraphEdgesRow{}
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"nodes": nodes,
-		"edges": edges,
-	})
+	writeJSON(w, http.StatusOK, GraphResponse{Nodes: nodes, Edges: edges})
 }
 
 func (s *Server) getFileMemory(w http.ResponseWriter, r *http.Request) {
