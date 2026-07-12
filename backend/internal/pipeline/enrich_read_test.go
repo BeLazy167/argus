@@ -7,7 +7,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/BeLazy167/argus/backend/internal/github"
 	"github.com/BeLazy167/argus/backend/internal/memory"
 	"github.com/BeLazy167/argus/backend/internal/memory/memorytest"
 	"github.com/jackc/pgx/v5"
@@ -29,9 +28,9 @@ func patternLeg(matches []memory.PatternMatch, err error) func(memory.MemoryQuer
 	}
 }
 
-// fakeEnrichStore is an in-memory enrichStore for the DB-less enrich read tests.
-// Lookups miss with pgx.ErrNoRows (the non-fatal "no such row" the read path
-// treats as a benign miss); IncrementPatternMatch records its calls.
+// fakeEnrichStore is an in-memory PatternLinker for the DB-less enrich read
+// tests. Lookups miss with pgx.ErrNoRows (the non-fatal "no such row" the read
+// path treats as a benign miss); IncrementPatternMatch records its calls.
 type fakeEnrichStore struct {
 	byCustomID      map[string]int64
 	bySupermemoryID map[string]int64
@@ -65,28 +64,37 @@ func (f *fakeEnrichStore) IncrementPatternMatch(_ context.Context, id int64) err
 	return nil
 }
 
-// enrichOneComment drives enrichFindings over a single warning-severity comment
-// and returns the enriched comment. DBRepoID is left 0 so the auto-suppressed
-// lookup is skipped; EventBus is nil so no events publish.
-func enrichOneComment(t *testing.T, fake *memorytest.Fake, store enrichStore) FileComment {
+// newTestEnricher builds an Enricher over the memory Fake + PatternLinker with
+// the repo coordinates the DB-less tests share. repoID is left 0 so the
+// auto-suppressed lookup is skipped; publish is nil so no events fire unless a
+// test wires one.
+func newTestEnricher(fake *memorytest.Fake, linker PatternLinker) *Enricher {
+	return &Enricher{
+		reader:       fake,
+		linker:       linker,
+		logger:       slog.Default(),
+		thresholds:   memory.Thresholds{}.WithDefaults(),
+		repo:         "widget",
+		repoFullName: "acme/widget",
+		prNumber:     1,
+	}
+}
+
+// enrichOneComment drives the Enricher over a single warning-severity comment
+// and returns the enriched comment — the DB-less positive/error/novelty paths
+// exercised end-to-end through Enricher.Run.
+func enrichOneComment(t *testing.T, fake *memorytest.Fake, linker PatternLinker) FileComment {
 	t.Helper()
-	o := &Orchestrator{logger: slog.Default(), enrichStoreOverride: store}
-	run := &PipelineRun{
-		Indexer: fake,
-		PREvent: github.PREvent{PRNumber: 1, RepoFullName: "acme/widget"},
-		FileReviews: []FileReview{
-			{
-				Path: "handler.go",
-				Comments: []FileComment{
-					{Severity: SeverityWarning, Category: CategoryBug, Line: 10, Body: "possible nil deref"},
-				},
+	reviews := []FileReview{
+		{
+			Path: "handler.go",
+			Comments: []FileComment{
+				{Severity: SeverityWarning, Category: CategoryBug, Line: 10, Body: "possible nil deref"},
 			},
 		},
 	}
-	if err := o.enrichFindings(context.Background(), run); err != nil {
-		t.Fatalf("enrichFindings: %v", err)
-	}
-	return run.FileReviews[0].Comments[0]
+	newTestEnricher(fake, linker).Run(context.Background(), reviews)
+	return reviews[0].Comments[0]
 }
 
 // (a) A successful pattern hit resolvable to a patterns row: not novel, score +
