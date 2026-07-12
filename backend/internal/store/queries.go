@@ -358,12 +358,12 @@ func (s *Store) GetReview(ctx context.Context, id uuid.UUID) (*Review, error) {
 		SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, COALESCE(head_ref,''), github_review_id,
 		       status, summary, score, token_usage, trigger, triggered_by, duration_ms, error,
 		       deep_review, persona, is_incremental, created_at, completed_at,
-		       diagram, diagram_title, diagrams, truncated_files, brief, cross_pr_hash, trace_id
+		       diagram, diagram_title, diagrams, truncated_files, brief, cross_pr_hash, trace_id, review_contract
 		FROM reviews WHERE id = $1
 	`, id).Scan(&r.ID, &r.RepoID, &r.PRNumber, &r.PRTitle, &r.PRAuthor, &r.HeadSHA, &r.BaseSHA, &r.HeadRef, &r.GithubReviewID,
 		&r.Status, &r.Summary, &r.Score, &r.TokenUsage, &r.Trigger, &r.TriggeredBy, &r.DurationMs, &r.Error,
 		&r.DeepReview, &r.Persona, &r.IsIncremental, &r.CreatedAt, &r.CompletedAt,
-		&r.Diagram, &r.DiagramTitle, &r.Diagrams, &r.TruncatedFiles, &r.Brief, &r.CrossPRHash, &r.TraceID)
+		&r.Diagram, &r.DiagramTitle, &r.Diagrams, &r.TruncatedFiles, &r.Brief, &r.CrossPRHash, &r.TraceID, &r.ReviewContract)
 	if err != nil {
 		return nil, err
 	}
@@ -375,7 +375,7 @@ func (s *Store) GetReviewComments(ctx context.Context, reviewID uuid.UUID) ([]Re
 		SELECT id, review_id, file_path, start_line, end_line, side, body, severity, category,
 		       specialist, confidence_score, code_snippet, github_comment_id,
 		       matched_pattern_id, matched_pattern_score, enforced_rule_content, is_new_finding,
-		       created_at
+		       created_at, state, suppressed_reason
 		FROM review_comments WHERE review_id = $1 ORDER BY file_path, start_line
 	`, reviewID)
 	if err != nil {
@@ -414,7 +414,7 @@ func (s *Store) ListReviewsScoped(ctx context.Context, repoID int64, installatio
 		       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at,
 		       NULL::text, NULL::text,
 		       '[]'::jsonb, '[]'::jsonb,
-		       NULL::text, rv.cross_pr_hash, rv.trace_id
+		       NULL::text, rv.cross_pr_hash, rv.trace_id, NULL::jsonb
 		FROM reviews rv
 		JOIN repos r ON rv.repo_id = r.id
 		WHERE rv.repo_id = $1 AND r.installation_id = ANY($2)
@@ -437,7 +437,7 @@ func (s *Store) ListAllReviewsScoped(ctx context.Context, installationIDs []int6
 		       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at,
 		       NULL::text, NULL::text,
 		       '[]'::jsonb, '[]'::jsonb,
-		       NULL::text, rv.cross_pr_hash, rv.trace_id
+		       NULL::text, rv.cross_pr_hash, rv.trace_id, NULL::jsonb
 		FROM reviews rv
 		JOIN repos r ON rv.repo_id = r.id
 		WHERE r.installation_id = ANY($1)

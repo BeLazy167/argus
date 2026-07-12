@@ -65,6 +65,11 @@ type Review struct {
 	// stages (cross-PR, sweeper) can continue the same trace even when their goroutine ctx
 	// is a fresh context.Background(). NULL for pre-migration reviews.
 	TraceID *string `json:"trace_id,omitempty"`
+	// ReviewContract is the per-PR routing contract (change class, evidence bar,
+	// depth, signals, unreviewable flag) the pipeline ran under — raw JSONB from
+	// reviews.review_contract. NULL for reviews predating the contract (dashboard
+	// hides the contract strip). Only populated by GetReview; list queries omit it.
+	ReviewContract *json.RawMessage `json:"review_contract,omitempty"`
 }
 
 type ReviewComment struct {
@@ -86,6 +91,14 @@ type ReviewComment struct {
 	EnforcedRuleContent *string   `json:"enforced_rule_content,omitempty"`
 	IsNewFinding        bool      `json:"is_new_finding"`
 	CreatedAt           time.Time `json:"created_at"`
+	// State is the follow-up-ledger lifecycle state: posted | addressed |
+	// dismissed | deferred | suppressed. 'suppressed' findings were never posted
+	// to the PR (dropped by dismissal/team-feedback suppression) but are kept for
+	// the dashboard audit surface.
+	State string `json:"state"`
+	// SuppressedReason records why a finding was suppressed (e.g.
+	// "team_feedback:3", "dismissed_match:0.91"). NULL for posted findings.
+	SuppressedReason *string `json:"suppressed_reason,omitempty"`
 }
 
 type Rule struct {

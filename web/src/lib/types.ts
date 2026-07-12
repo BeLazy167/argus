@@ -66,6 +66,36 @@ export type TokenUsage = {
   total: StageTokens;
 };
 
+/**
+ * Per-PR routing contract the pipeline ran under (reviews.review_contract).
+ * Deterministic + intent-LLM signals decide how deeply the PR is reviewed and
+ * how much proof a finding needs. Null/absent on reviews predating the contract.
+ */
+export type ReviewContract = {
+  /** production | migration | one_time_script | test | config | docs | generated | revert */
+  change_class: string;
+  /** normal | raised | max — how much evidence a finding needs before posting. */
+  evidence_bar: string;
+  /** full | single | skim — how deeply the pipeline reviewed the PR. */
+  depth: string;
+  /** refactor/cleanup title: forced behavior-equivalence attention. */
+  scrutiny_bump?: boolean;
+  /** too large for confident review; still reviewed, posted with reduced confidence. */
+  unreviewable?: boolean;
+  /** raw signal tokens (e.g. "floor:security", "llm:docs@0.92"). */
+  signals?: string[];
+  /** deterministic | llm-pending | llm | llm-default */
+  source?: string;
+};
+
+/** Follow-up-ledger lifecycle state of a finding (review_comments.state). */
+export type FindingState =
+  | "posted"
+  | "addressed"
+  | "dismissed"
+  | "deferred"
+  | "suppressed";
+
 export type Review = {
   id: string;
   repo_id: number;
@@ -99,6 +129,8 @@ export type Review = {
    * primary readout (preferred over the raw per-file `summary`).
    */
   brief?: string;
+  /** Routing contract the pipeline ran under. Absent on pre-contract reviews. */
+  review_contract?: ReviewContract | null;
   created_at: string;
   completed_at?: string;
 };
@@ -130,6 +162,10 @@ export type ReviewComment = {
   matched_pattern_score?: number;
   enforced_rule_content?: string;
   is_new_finding?: boolean;
+  /** Lifecycle state; "suppressed" findings were never posted to the PR. */
+  state?: FindingState;
+  /** Why the finding was suppressed (e.g. "team_feedback:3", "dismissed_match:0.91"). */
+  suppressed_reason?: string;
   created_at: string;
 };
 
