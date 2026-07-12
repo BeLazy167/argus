@@ -1757,6 +1757,14 @@ func (o *Orchestrator) synthesize(ctx context.Context, run *PipelineRun) error {
 		run.Synthesis.Brief += FormatSimulationResults(simResults)
 	}
 
+	// Unconfigured-scoring notice — SINGLE append point. Summary is what gets
+	// persisted to reviews.summary (dashboard); Brief opens the GitHub review
+	// comment in post(). post() must NOT append again.
+	if notice := scoringSkippedNotice(run); notice != "" {
+		run.Synthesis.Summary += "\n\n" + notice
+		run.Synthesis.Brief += "\n\n" + notice
+	}
+
 	if run.EventBus != nil {
 		run.EventBus.Publish(run.ReviewID, EventSynthesis, map[string]any{
 			"summary": run.Synthesis.Summary,
@@ -2474,6 +2482,8 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		}
 		summaryBody.WriteString(" was truncated — additional findings may exist.\n")
 	}
+	// Unconfigured-scoring notice: appended once at synthesis (it rides in on
+	// run.Synthesis.Brief above) — do NOT append again here.
 	totalFolded := len(importantFolded) + len(minorFolded)
 	if totalFolded > 0 {
 		o.logger.Info("folded non-inline comments into summary", "important", len(importantFolded), "minor", len(minorFolded))

@@ -3,7 +3,8 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { Settings, Loader2, Save, Key, Cpu, ChevronDown, Zap, Check, X, ArrowUp, Info, UserCog, Lock, FileText, RotateCw, Search, Sliders } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
+import { Settings, Loader2, Save, Key, Cpu, ChevronDown, Zap, Check, X, ArrowUp, Info, UserCog, Lock, FileText, RotateCw, Search, Sliders, AlertTriangle } from "lucide-react";
 import {
   useModelConfigs,
   useUpsertModelConfig,
@@ -11,6 +12,7 @@ import {
   useTestConfig,
   useOrgModelConfigs,
   useUpsertOrgModelConfig,
+  useUpsertOrgModelConfigMutation,
   useDeleteOrgModelConfig,
   type TestResult,
 } from "@/lib/queries/model-configs";
@@ -520,6 +522,146 @@ function ConfigCard({
   );
 }
 
+/* ── Org stage gap: warning strip + apply-to-all affordance ── */
+
+/**
+ * Warning strip shown when core stages lack an org-default model row, with an
+ * inline "Apply to all stages" setup form.
+ *
+ * Unconfigured stages are explicit and guided — there is no platform default
+ * tier, so a repo without its own config cannot run a stage the org never
+ * configured. The form writes one org row per core stage through the existing
+ * org upsert mutation (four PUTs, no new endpoints).
+ */
+function OrgStageGapCard({
+  missingStages,
+  savedProviders,
+}: {
+  missingStages: string[];
+  savedProviders: string[];
+}) {
+  const qc = useQueryClient();
+  const upsertOrgConfig = useUpsertOrgModelConfigMutation();
+  const [provider, setProvider] = useState("");
+  const [model, setModel] = useState("");
+  const [applying, setApplying] = useState(false);
+  const [error, setError] = useState("");
+
+  const picks = MODEL_PICKS[provider as Provider] ?? [];
+
+  /**
+   * Writes org rows for all four core stages. mutateAsync + allSettled so
+   * every per-stage failure is surfaced (looped .mutate() on one useMutation
+   * only reports the last call's onError in TanStack v5) and the button stays
+   * pending until all four settle. Org config list refreshes once at the end.
+   */
+  const handleApplyAll = async () => {
+    if (!provider || !model) {
+      setError(!provider ? "Select a provider" : "Enter a model");
+      return;
+    }
+    setError("");
+    setApplying(true);
+    const results = await Promise.allSettled(
+      CORE_STAGES.map((stage) =>
+        upsertOrgConfig.mutateAsync({ stage, provider, model, max_tokens: 4096, temperature: 0.2 }),
+      ),
+    );
+    setApplying(false);
+    qc.invalidateQueries({ queryKey: useOrgModelConfigs.getKey() });
+    const failed = CORE_STAGES.filter((_, i) => results[i]?.status === "rejected");
+    if (failed.length > 0) {
+      setError(`failed: ${failed.join(", ")}`);
+    }
+  };
+
+  return (
+    <div className="border border-amber/30 bg-amber/5 px-4 py-3">
+      <div className="flex items-start gap-2.5">
+        <AlertTriangle className="h-3.5 w-3.5 text-amber mt-0.5 shrink-0" />
+        <p className="text-[11px] font-mono text-amber/80">
+          Org defaults missing for <span className="text-amber font-medium">{missingStages.join(", ")}</span> — repos without their own config can&apos;t run these stages.
+        </p>
+      </div>
+      <div className="mt-3 flex flex-wrap items-end gap-3 pl-6">
+        <div>
+          <label htmlFor="org-gap-provider" className="block text-[10px] font-mono text-slate-text mb-1">
+            Provider
+          </label>
+          <div className="relative">
+            <select
+              id="org-gap-provider"
+              value={provider}
+              onChange={(e) => {
+                setProvider(e.target.value);
+                setModel("");
+              }}
+              style={{ backgroundColor: 'var(--background)', color: 'var(--foreground)' }}
+              className="w-44 appearance-none border border-iron bg-background px-2 py-1.5 pr-7 text-xs font-mono text-foreground focus:border-amber focus:outline-none"
+            >
+              <option value="">Select provider</option>
+              {PROVIDERS.map((p) => {
+                const hasKey = savedProviders.includes(p);
+                return (
+                  <option key={p} value={p} disabled={!hasKey}>
+                    {PROVIDER_LABELS[p]}{hasKey ? "" : " — no API key"}
+                  </option>
+                );
+              })}
+            </select>
+            <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-3 w-3 -translate-y-1/2 text-slate-text" />
+          </div>
+        </div>
+        <div>
+          <label htmlFor="org-gap-model" className="block text-[10px] font-mono text-slate-text mb-1">
+            Model
+          </label>
+          <input
+            id="org-gap-model"
+            type="text"
+            value={model}
+            onChange={(e) => setModel(e.target.value)}
+            placeholder="Type or pick a model…"
+            autoComplete="off"
+            className="w-56 border border-iron bg-background px-2 py-1.5 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none"
+          />
+        </div>
+        <button
+          type="button"
+          onClick={handleApplyAll}
+          disabled={applying || !provider || !model}
+          className="flex items-center gap-2 rounded border border-amber/30 bg-amber/10 px-3 py-1.5 text-[11px] font-mono text-amber hover:bg-amber/20 transition-colors disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
+        >
+          <Save className="h-3 w-3" />
+          {applying ? "Applying..." : "Apply to all stages"}
+        </button>
+      </div>
+      {picks.length > 0 && (
+        <div className="mt-2 flex flex-wrap items-center gap-1.5 pl-6">
+          <span className="text-[9px] font-mono text-slate-text/60">Picks:</span>
+          {picks.map((m) => (
+            <button
+              key={m}
+              type="button"
+              onClick={() => setModel(m)}
+              className={`border px-2 py-0.5 text-[10px] font-mono transition-colors cursor-pointer ${
+                model === m
+                  ? "border-amber/50 bg-amber/10 text-amber"
+                  : "border-iron text-slate-text hover:text-foreground hover:border-foreground/30"
+              }`}
+            >
+              {m}
+            </button>
+          ))}
+        </div>
+      )}
+      {error && (
+        <p className="mt-2 pl-6 text-[10px] font-mono text-red-400">{error}</p>
+      )}
+    </div>
+  );
+}
+
 /* ── Prompt Editor Card ── */
 
 function PromptCard({
@@ -902,6 +1044,8 @@ export default function SettingsPage() {
   const upsertOrgConfig = useUpsertOrgModelConfig();
   const deleteOrgConfig = useDeleteOrgModelConfig();
   const orgConfigMap = new Map(orgConfigs?.map((c) => [c.stage, c]));
+  // Only meaningful once org configs have loaded — no flash of false warnings.
+  const missingOrgStages = orgConfigs ? CORE_STAGES.filter((s) => !orgConfigMap.has(s)) : [];
 
   const promptMap = new Map(customPrompts?.map((p) => [p.stage, p]));
   const defaultPromptMap = new Map(defaultPrompts?.map((p) => [p.stage, p]));
@@ -1074,6 +1218,12 @@ export default function SettingsPage() {
                   </div>
                 ) : (
                   <div className="space-y-4">
+                    {missingOrgStages.length > 0 && (
+                      <OrgStageGapCard
+                        missingStages={missingOrgStages}
+                        savedProviders={savedProviders}
+                      />
+                    )}
                     <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
                       {CORE_STAGES.map((stage) => (
                         <ConfigCard
