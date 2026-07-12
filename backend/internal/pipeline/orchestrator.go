@@ -2731,8 +2731,10 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	// inline comment list (severity-then-score ordering, 10-cap + overflow,
 	// out-of-diff folding, blocking-file nit demotion, post-selection dedup,
 	// token breakdown, glass-box footer). All rendering lives in composer.go;
-	// post() only persists the result and ships it to GitHub.
-	submission := Compose(run)
+	// post() only persists the result and ships it to GitHub. Duration is injected
+	// (Compose reads no clock) so its glass-box footer is deterministic under test.
+	submission := Compose(run, time.Since(run.CreatedAt))
+	counts := submission.Counts
 
 	// Rendering observability: one line replacing the three Info logs that lived
 	// in the old inline block (inline cap, post-selection dedup, folded split).
@@ -2740,14 +2742,25 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	// mirror the old logs (total/cap/overflow, folded_important/folded_minor) so
 	// existing grep habits still work.
 	o.logger.Info("composed review submission",
-		"total", submission.InlineCandidates,
+		"total", counts.InlineCandidates,
 		"cap", maxInlineComments,
-		"overflow", submission.CapOverflow,
-		"dedup_removed", submission.DedupRemoved,
+		"overflow", counts.CapOverflow,
+		"dedup_removed", counts.DedupRemoved,
 		"inline", len(submission.GitHub.Comments),
-		"folded_important", submission.FoldedImportant,
-		"folded_minor", submission.FoldedMinor,
+		"folded_important", counts.FoldedImportant,
+		"folded_minor", counts.FoldedMinor,
 	)
+	// Predecessor-compat: restore the historical "capping inline comments for
+	// GitHub" alert string (retired when the three logs consolidated above) for
+	// the one operationally-significant case operators grep — inline overflow.
+	// Fires only when the cap actually dropped comments, matching the old
+	// conditional log; a legacy-message *key* on the line above would smuggle a
+	// message string into a data field and still not read as a message-level
+	// grep, so we re-emit the real line instead.
+	if counts.CapOverflow > 0 {
+		o.logger.Info("capping inline comments for GitHub",
+			"total", counts.InlineCandidates, "cap", maxInlineComments, "overflow", counts.CapOverflow)
+	}
 
 	// Persist review data BEFORE posting to GitHub so a 502 doesn't lose results
 	var tokenUsageJSON []byte
@@ -2801,69 +2814,22 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	}
 	o.indexConfirmedPatterns(ctx, run, owner, repo)
 
-	// Run pattern learning BEFORE posting — if PostReview fails (403/502),
-	// patterns are still learned and the dashboard patterns page updates.
+	// Pre-post memory sinks: pattern learning, convention extraction, file-memory
+	// synthesis, and PR/architecture summary indexing. Run BEFORE PostReview so a
+	// 403/502 there doesn't lose them. Detached from ctx so a post-review cancel
+	// doesn't skip indexing; each sink is panic-isolated by RunAll (one exploding
+	// indexer must not abort the others or the completion write).
 	prePostCtx := context.WithoutCancel(ctx)
-	if run.LearnPatterns {
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					o.logger.Error("pre-post panic", "recover", r, "op", "autoLearnPatterns", "pr", run.PREvent.PRNumber)
-					emitPipelinePanicEvent(prePostCtx, o.logger, "pre_post", r, run.TraceID)
-				}
-			}()
-			o.autoLearnPatterns(prePostCtx, run, owner, repo)
-		}()
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					o.logger.Error("pre-post panic", "recover", r, "op", "learnPositivePatterns", "pr", run.PREvent.PRNumber)
-					emitPipelinePanicEvent(prePostCtx, o.logger, "pre_post", r, run.TraceID)
-				}
-			}()
-			o.learnPositivePatterns(prePostCtx, run, owner, repo)
-		}()
-	}
-	if run.LearnConventions {
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					o.logger.Error("pre-post panic", "recover", r, "op", "extractConventions", "pr", run.PREvent.PRNumber)
-					emitPipelinePanicEvent(prePostCtx, o.logger, "pre_post", r, run.TraceID)
-				}
-			}()
-			o.extractConventions(prePostCtx, run, owner, repo)
-		}()
-	}
-	if run.FileSynthesis {
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					o.logger.Error("pre-post panic", "recover", r, "op", "synthesizeFileMemories", "pr", run.PREvent.PRNumber)
-					emitPipelinePanicEvent(prePostCtx, o.logger, "pre_post", r, run.TraceID)
-				}
-			}()
-			o.synthesizeFileMemories(prePostCtx, run, owner, repo)
-		}()
-	}
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				o.logger.Error("pre-post panic", "recover", r, "op", "indexPRSummary", "pr", run.PREvent.PRNumber)
-				emitPipelinePanicEvent(prePostCtx, o.logger, "pre_post", r, run.TraceID)
-			}
-		}()
-		o.indexPRSummary(prePostCtx, run, owner, repo)
-	}()
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				o.logger.Error("pre-post panic", "recover", r, "op", "indexArchitectureSummary", "pr", run.PREvent.PRNumber)
-				emitPipelinePanicEvent(prePostCtx, o.logger, "pre_post", r, run.TraceID)
-			}
-		}()
-		o.indexArchitectureSummary(prePostCtx, run, owner, repo)
-	}()
+	o.indexer().RunAll(prePostCtx, run, owner, repo, "pre_post", []memorySink{
+		{name: "autoLearnPatterns", enabled: func(r *PipelineRun) bool { return r.LearnPatterns }, run: o.autoLearnPatterns},
+		{name: "learnPositivePatterns", enabled: func(r *PipelineRun) bool { return r.LearnPatterns }, run: func(ctx context.Context, r *PipelineRun, owner, repo string) {
+			o.learnPositivePatterns(ctx, r, owner, repo)
+		}},
+		{name: "extractConventions", enabled: func(r *PipelineRun) bool { return r.LearnConventions }, run: o.extractConventions},
+		{name: "synthesizeFileMemories", enabled: func(r *PipelineRun) bool { return r.FileSynthesis }, run: o.synthesizeFileMemories},
+		{name: "indexPRSummary", run: o.indexPRSummary},
+		{name: "indexArchitectureSummary", run: o.indexArchitectureSummary},
+	})
 
 	// Final cancel guard, immediately before the GitHub post: the pre-post
 	// enrichment block above runs for seconds, and a cross-machine Stop landing
@@ -2972,8 +2938,8 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	o.logger.Info("[posted] review", "github_review_id", ghReviewID, "pr", run.PREvent.PRNumber,
 		"comments", countComments(run),
 		"inline", len(submission.GitHub.Comments),
-		"folded_important", submission.FoldedImportant,
-		"folded_minor", submission.FoldedMinor,
+		"folded_important", counts.FoldedImportant,
+		"folded_minor", counts.FoldedMinor,
 		"files", len(run.FileReviews), "score", run.Synthesis.Score,
 		"deep_review", run.DeepReview, "duration_ms", time.Since(run.CreatedAt).Milliseconds())
 
@@ -2985,38 +2951,21 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		run.EventBus.Publish(run.ReviewID, EventPostedToGitHub, map[string]any{
 			"github_review_id": ghReviewID,
 			"inline":           len(submission.GitHub.Comments),
-			"folded":           submission.FoldedImportant + submission.FoldedMinor,
+			"folded":           counts.FoldedImportant + counts.FoldedMinor,
 		})
 	}
 
 	// Backfill github_comment_ids now that we have the ghReviewID
 	o.backfillGitHubCommentIDs(ctx, run, ghReviewID, owner, repo)
 
-	// Pattern learning, conventions, file synthesis, and PR summary
-	// now run BEFORE PostReview (see above). Only architecture graph + PR enrichment remain post-review.
+	// Pattern learning, conventions, file synthesis, and PR summary now run
+	// BEFORE PostReview (see above). Only architecture graph + PR enrichment
+	// remain post-review; same panic-isolated RunAll loop.
 	postCtx := context.WithoutCancel(ctx)
-	if run.ArchitectureGraph {
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					o.logger.Error("post-review panic", "recover", r, "op", "extractArchitectureGraph", "pr", run.PREvent.PRNumber)
-					emitPipelinePanicEvent(postCtx, o.logger, "post_review", r, run.TraceID)
-				}
-			}()
-			o.extractArchitectureGraph(postCtx, run, owner, repo)
-		}()
-	}
-	if run.PREnrichment {
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					o.logger.Error("enrichPRDescription panic", "recover", r, "pr", run.PREvent.PRNumber)
-					emitPipelinePanicEvent(postCtx, o.logger, "post_review", r, run.TraceID)
-				}
-			}()
-			o.enrichPRDescription(postCtx, run, owner, repo)
-		}()
-	}
+	o.indexer().RunAll(postCtx, run, owner, repo, "post_review", []memorySink{
+		{name: "extractArchitectureGraph", enabled: func(r *PipelineRun) bool { return r.ArchitectureGraph }, run: o.extractArchitectureGraph},
+		{name: "enrichPRDescription", enabled: func(r *PipelineRun) bool { return r.PREnrichment }, run: o.enrichPRDescription},
+	})
 
 	// Persist final token usage including post-review ops
 	if run.Tokens.Total.TotalTokens > 0 {
@@ -4527,6 +4476,13 @@ func (o *Orchestrator) validateStage(ctx context.Context, run *PipelineRun) erro
 
 	o.logger.Info("[validate] OK", "blast_impacts", len(blastImpacts), "sim_results", len(simResults), "duration_ms", time.Since(start).Milliseconds(), "pr", run.PREvent.PRNumber)
 	return nil
+}
+
+// indexer returns the PostReviewIndexer bound to this orchestrator, used by
+// post() to run its pre-post and post-review memory sink clusters under one
+// panic-isolation loop.
+func (o *Orchestrator) indexer() *PostReviewIndexer {
+	return &PostReviewIndexer{o: o}
 }
 
 func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghReviewID int64, owner, repo string) {

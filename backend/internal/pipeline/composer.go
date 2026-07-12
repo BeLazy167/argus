@@ -10,16 +10,26 @@ import (
 	"github.com/BeLazy167/argus/backend/internal/util"
 )
 
-// ReviewSubmission is the pure output of Compose: the GitHub-ready review payload
-// plus the derived fold counts that post() logs and publishes. Every field is a
-// deterministic function of the PipelineRun — Compose performs no I/O, holds no
-// DB/GitHub/logger handle, and reads no clock beyond the review's own elapsed
-// time (run.CreatedAt). It does mutate run exactly as the old inline renderer
-// did: rebalanceSeverity may downgrade the lowest-confidence criticals, and nits
-// on blocking files are appended to run.MinorNotes.
-type ReviewSubmission struct {
+// ComposedReview is the pure output of Compose: the GitHub-ready review payload
+// plus the derived render counts that post() logs and publishes. Every field is
+// a deterministic function of the PipelineRun and the injected elapsed duration
+// — Compose performs no I/O, holds no DB/GitHub/logger handle, and reads NO
+// clock (the caller passes the duration; see Compose). It does mutate run
+// exactly as the old inline renderer did: rebalanceSeverity may downgrade the
+// lowest-confidence criticals, and nits on blocking files are appended to
+// run.MinorNotes.
+type ComposedReview struct {
 	// GitHub is the payload handed verbatim to ghClient.PostReview.
 	GitHub ghpkg.ReviewSubmission
+	// Counts are the derived fold/cap/dedup tallies post() logs and publishes.
+	Counts RenderCounts
+}
+
+// RenderCounts are the derived comment tallies Compose surfaces for post()'s
+// observability log and the posted-to-GitHub event. The log keys post() emits
+// are unchanged: FoldedImportant→folded_important, FoldedMinor→folded_minor,
+// InlineCandidates→total, CapOverflow→overflow, DedupRemoved→dedup_removed.
+type RenderCounts struct {
 	// FoldedImportant counts critical/warning findings folded into the summary
 	// (rendered prominently, not inline), post-cap. Logged as folded_important.
 	FoldedImportant int
@@ -47,13 +57,15 @@ const maxInlineComments = 10
 // line, folded out-of-diff findings, minor notes, findings pill, token
 // breakdown, glass-box footer) and the inline comment list (severity-then-score
 // ordering, 10-cap with "plus N similar" overflow, out-of-diff folding,
-// blocking-file nit demotion, post-selection dedup). It is pure apart from the
-// two run mutations noted on ReviewSubmission. Callers must have verified
+// blocking-file nit demotion, post-selection dedup). took is the review's
+// elapsed time, injected by the caller (post() passes time.Since(run.CreatedAt))
+// so Compose reads no clock and stays deterministic under test. It is pure apart
+// from the two run mutations noted on ComposedReview. Callers must have verified
 // run.Synthesis is non-nil.
 //
 // The unconfigured-scoring notice rides in on run.Synthesis.Brief (appended once
 // at synthesis); Compose writes Brief verbatim and MUST NOT re-append it.
-func Compose(run *PipelineRun) ReviewSubmission {
+func Compose(run *PipelineRun, took time.Duration) ComposedReview {
 	// Rebalance severity: if >50% critical, downgrade lowest-confidence criticals.
 	rebalanceSeverity(run.FileReviews)
 
@@ -262,7 +274,7 @@ func Compose(run *PipelineRun) ReviewSubmission {
 	// Footer: Glass Box line (contract/depth, reviewers, suppression count,
 	// duration) + single dashboard link + engagement tips in <sub> blocks.
 	summaryBody.WriteString("\n\n---\n<sub>")
-	summaryBody.WriteString(BuildGlassBoxLine(run.Contract, checkedReviewers(run), countSuppressed(run), time.Since(run.CreatedAt)))
+	summaryBody.WriteString(BuildGlassBoxLine(run.Contract, checkedReviewers(run), countSuppressed(run), took))
 	summaryBody.WriteString("</sub><br>\n")
 	summaryBody.WriteString(fmt.Sprintf(
 		"<sub>[Dashboard →](https://argus.reviews/reviews/%s) · "+
@@ -270,17 +282,19 @@ func Compose(run *PipelineRun) ReviewSubmission {
 			"Reply to any inline comment or use `@argus-eye help` to chat</sub>",
 		run.ReviewID.String()))
 
-	return ReviewSubmission{
+	return ComposedReview{
 		GitHub: ghpkg.ReviewSubmission{
 			Summary:  summaryBody.String(),
 			HeadSHA:  run.PREvent.HeadSHA,
 			Comments: inlineComments,
 		},
-		FoldedImportant:  len(importantFolded),
-		FoldedMinor:      len(minorFolded),
-		InlineCandidates: inlineCandidates,
-		CapOverflow:      inlineOverflow,
-		DedupRemoved:     dedupRemoved,
+		Counts: RenderCounts{
+			FoldedImportant:  len(importantFolded),
+			FoldedMinor:      len(minorFolded),
+			InlineCandidates: inlineCandidates,
+			CapOverflow:      inlineOverflow,
+			DedupRemoved:     dedupRemoved,
+		},
 	}
 }
 
