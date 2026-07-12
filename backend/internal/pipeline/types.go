@@ -45,9 +45,9 @@ const (
 
 // RunTokenUsage tracks token consumption and cost across pipeline stages.
 //
-// LeadAgent aggregates 5 lead-agent sub-calls (leadBrief, leadBroadcast,
-// agentSecondPass, analyzeBlastRadius, leadCrossCheck) so the per-review
-// breakdown stays compact — per-sub-step granularity lives on the SSE stream.
+// LeadAgent aggregates the live lead-agent sub-calls (leadBrief and
+// analyzeBlastRadius) so the per-review breakdown stays compact —
+// per-sub-step granularity lives on the SSE stream.
 //
 // Simulation is a slice (like Review and FileSynthesis) — one StageTokens per
 // scenario run, preserving UCB1 selection order.
