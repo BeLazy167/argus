@@ -23,6 +23,12 @@ import (
 type memorySink struct {
 	// name labels the sink as the "op" in the panic log and telemetry event.
 	name string
+	// panicMsg overrides the recover log's message string for this sink. Empty
+	// falls back to the cluster-derived "<stage> panic". Set it only to preserve
+	// a sink's historical, grep-load-bearing message: enrichPRDescription logged
+	// "enrichPRDescription panic" before the sink consolidation (#146 review
+	// flagged the normalization to "post-review panic" as a grep regression).
+	panicMsg string
 	// enabled gates the sink on a per-run feature flag. nil means always-on.
 	enabled func(run *PipelineRun) bool
 	// run performs the indexing work. A panic here is recovered by RunAll and
@@ -57,10 +63,16 @@ func (p *PostReviewIndexer) RunAll(ctx context.Context, run *PipelineRun, owner,
 func (p *PostReviewIndexer) runSink(ctx context.Context, run *PipelineRun, owner, repo, stage string, sink memorySink) {
 	defer func() {
 		if r := recover(); r != nil {
-			// Message mirrors the historical per-sink logs ("pre-post panic" /
-			// "post-review panic") so log greps still match; the emit-event stage
-			// keeps its underscore telemetry spelling ("pre_post"/"post_review").
-			p.o.logger.Error(strings.ReplaceAll(stage, "_", "-")+" panic",
+			// Default message mirrors the historical per-cluster logs ("pre-post
+			// panic" / "post-review panic") so log greps still match; a sink may
+			// override it (sink.panicMsg) to keep its own historical message. The
+			// emit-event stage keeps its underscore telemetry spelling
+			// ("pre_post"/"post_review") regardless.
+			msg := sink.panicMsg
+			if msg == "" {
+				msg = strings.ReplaceAll(stage, "_", "-") + " panic"
+			}
+			p.o.logger.Error(msg,
 				"recover", r, "op", sink.name, "pr", run.PREvent.PRNumber)
 			emitPipelinePanicEvent(ctx, p.o.logger, stage, r, run.TraceID)
 		}

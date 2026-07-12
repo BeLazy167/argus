@@ -2,13 +2,10 @@ package api
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -16,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/BeLazy167/argus/backend/internal/crypto"
 	ghpkg "github.com/BeLazy167/argus/backend/internal/github"
+	"github.com/BeLazy167/argus/backend/internal/inflight"
 	"github.com/BeLazy167/argus/backend/internal/llm"
 	"github.com/BeLazy167/argus/backend/internal/memory"
 	"github.com/BeLazy167/argus/backend/internal/pipeline"
@@ -34,9 +32,9 @@ type Server struct {
 	webhookSecret    []byte
 	logger           *slog.Logger
 	rateLimiter      *RateLimiter
-	inFlightReviews  sync.Map     // "{repo}:{prNumber}" → struct{}
-	inFlightCancels  sync.Map     // "{repo}:{prNumber}" → context.CancelFunc
-	webhookSem       chan struct{} // bounded concurrency for webhook goroutines
+	inflight         *inflight.Registry // per-PR in-flight slots + paired cancel fns
+	launcher         *pipeline.Launcher // shared slot/cancel/topic/spawn/rollback lifecycle
+	webhookSem       chan struct{}      // bounded concurrency for webhook goroutines
 	audit            *auditLogger
 	memRegistry      *memory.Registry
 }
@@ -57,6 +55,10 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 		audit:            newAuditLogger(logger),
 		memRegistry:      memRegistry,
 	}
+	// The registry is shared: the launcher registers slots + cancels on it; the
+	// cancel handler (cancelReview) consults the same instance via registry.Cancel.
+	s.inflight = inflight.NewRegistry()
+	s.launcher = pipeline.NewLauncher(s.inflight, eventBus, st, logger)
 
 	r := chi.NewRouter()
 	// traceIDMiddleware must be outermost — every downstream middleware,
@@ -248,37 +250,12 @@ func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 }
 
 // --- Concurrency Guards ---
-
-func (s *Server) tryAcquireReview(repo string, pr int) bool {
-	key := fmt.Sprintf("%s:%d", repo, pr)
-	_, loaded := s.inFlightReviews.LoadOrStore(key, struct{}{})
-	return !loaded
-}
-
-func (s *Server) releaseReview(repo string, pr int) {
-	key := fmt.Sprintf("%s:%d", repo, pr)
-	s.inFlightReviews.Delete(key)
-}
-
-func (s *Server) storeCancel(repo string, pr int, cancel context.CancelFunc) {
-	key := fmt.Sprintf("%s:%d", repo, pr)
-	s.inFlightCancels.Store(key, cancel)
-}
-
-func (s *Server) removeCancel(repo string, pr int) {
-	key := fmt.Sprintf("%s:%d", repo, pr)
-	s.inFlightCancels.Delete(key)
-}
-
-func (s *Server) loadCancel(repo string, pr int) (context.CancelFunc, bool) {
-	key := fmt.Sprintf("%s:%d", repo, pr)
-	v, ok := s.inFlightCancels.Load(key)
-	if !ok {
-		return nil, false
-	}
-	fn, ok := v.(context.CancelFunc)
-	return fn, ok
-}
+//
+// Per-PR in-flight slots + their paired cancel funcs live in s.inflight
+// (internal/inflight). The launcher (s.launcher) takes the slot and binds the
+// cancel; the cancel handler invokes it via s.inflight.Cancel. The webhook
+// semaphore below stays here — it bounds webhook-handler goroutines, a separate
+// concern from the per-PR review slot.
 
 func (s *Server) acquireSem() bool {
 	select {

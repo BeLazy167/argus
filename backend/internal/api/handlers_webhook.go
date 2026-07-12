@@ -22,6 +22,14 @@ import (
 // issueLabelsForScenario are labels that trigger auto-scenario creation from issues.
 var issueLabelsForScenario = map[string]bool{"argus": true, "bug": true}
 
+// Launch pre-check sentinels returned from a LaunchSpec.BeforeSpawn so the
+// calling handler can map them to its path-specific response (503 / comment)
+// after the launcher has already released the slot.
+var (
+	errServerBusy  = errors.New("webhook semaphore full")
+	errRateLimited = errors.New("review rate limit exceeded")
+)
+
 func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	event, err := ghpkg.ParseWebhook(r, s.webhookSecret)
 	if err != nil {
@@ -86,30 +94,40 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		if !s.tryAcquireReview(prEvent.RepoFullName, prEvent.PRNumber) {
-			s.logger.Info("review already in-flight", "repo", prEvent.RepoFullName, "pr", prEvent.PRNumber)
+		// The launcher owns slot + cancel + spawn. The webhook semaphore (a
+		// separate webhook-goroutine bound) is acquired in BeforeSpawn — post-slot
+		// so a losing double-webhook doesn't burn a sem token — and released in
+		// Cleanup at goroutine exit, preserving sem-held-during-pipeline. Trace_id
+		// is preserved onto the detached BaseCtx so every stage event carries the
+		// id the FE/webhook-ingress saw.
+		prEvt := *prEvent
+		launchErr := s.launcher.Launch(pipeline.LaunchSpec{
+			Repo:    prEvt.RepoFullName,
+			PR:      prEvt.PRNumber,
+			BaseCtx: obs.SetTraceID(context.Background(), obs.TraceID(r.Context())),
+			BeforeSpawn: func(context.Context) error {
+				if !s.acquireSem() {
+					return errServerBusy
+				}
+				return nil
+			},
+			Cleanup: s.releaseSem,
+			Run:     func(ctx context.Context) error { return s.orchestrator.HandlePREvent(ctx, prEvt) },
+			OnDone: func(err error) {
+				if err != nil && !errors.Is(err, context.Canceled) {
+					s.logger.Error("review pipeline failed", "error", err, "pr", prEvt.PRNumber)
+				}
+			},
+		})
+		if errors.Is(launchErr, pipeline.ErrInFlight) {
+			s.logger.Info("review already in-flight", "repo", prEvt.RepoFullName, "pr", prEvt.PRNumber)
 			break
 		}
-		if !s.acquireSem() {
-			s.releaseReview(prEvent.RepoFullName, prEvent.PRNumber)
+		if errors.Is(launchErr, errServerBusy) {
 			s.logger.Warn("webhook semaphore full")
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "server busy"})
 			return
 		}
-		// Async goroutine detaches from the request ctx (which ends on response
-		// flush), but we preserve trace_id so the pipeline can tag every stage
-		// event with the same id the FE/webhook-ingress saw.
-		ctx, cancel := context.WithCancel(obs.SetTraceID(context.Background(), obs.TraceID(r.Context())))
-		s.storeCancel(prEvent.RepoFullName, prEvent.PRNumber, cancel)
-		go func() {
-			defer s.releaseSem()
-			defer s.releaseReview(prEvent.RepoFullName, prEvent.PRNumber)
-			defer s.removeCancel(prEvent.RepoFullName, prEvent.PRNumber)
-			defer cancel()
-			if err := s.orchestrator.HandlePREvent(ctx, *prEvent); err != nil && !errors.Is(err, context.Canceled) {
-				s.logger.Error("review pipeline failed", "error", err, "pr", prEvent.PRNumber)
-			}
-		}()
 
 		// Fire-and-forget reaction sweep. GitHub doesn't webhook reactions on
 		// PR review comments, so we opportunistically re-check reactions on
@@ -353,12 +371,13 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 // intentional: the user explicitly clicked the checkbox after seeing the cost
 // estimate, so we honor that intent.
 //
-// Ordering notes:
-//   - tryAcquireReview runs BEFORE AllowReview: a losing double-click would
+// Ordering notes (preserved via the launcher's BeforeSpawn, which runs
+// AFTER the in-flight slot is won but BEFORE the pipeline spawns):
+//   - AllowReview runs AFTER the slot is acquired: a losing double-click would
 //     otherwise burn a force-hourly token without running a review.
-//   - The "Running..." body swap happens only after the PR lock is acquired
-//     so a lost race doesn't leave the checkbox stuck.
-//   - Pipeline-failure path restores the checkbox to unchecked with an error
+//   - The "Running..." body swap happens only after the slot is won so a lost
+//     race doesn't leave the checkbox stuck.
+//   - The OnDone failure path restores the checkbox to unchecked with an error
 //     suffix so the user can click again to retry.
 func (s *Server) handleCheckboxTrigger(ctx context.Context, evt ghpkg.IssueCommentEvent) {
 	parts := strings.SplitN(evt.RepoFullName, "/", 2)
@@ -380,45 +399,78 @@ func (s *Server) handleCheckboxTrigger(ctx context.Context, evt ghpkg.IssueComme
 		return
 	}
 
-	if !s.tryAcquireReview(evt.RepoFullName, evt.PRNumber) {
-		s.logger.Info("checkbox trigger: review already in progress", "repo", evt.RepoFullName, "pr", evt.PRNumber)
-		return
-	}
-	defer s.releaseReview(evt.RepoFullName, evt.PRNumber)
+	prEvent.Action = "manual"
+	prEvent.RepoID = evt.RepoID
 
-	if !s.allowReview(ctx, evt.RepoFullName, owner, true, evt.InstallationID) {
+	// The launcher owns slot + cancel + spawn (the checkbox path previously took
+	// a slot without ever binding a cancel — its reviews were un-stoppable; that
+	// invariant is now enforced by construction). The checkbox's own ordering is
+	// preserved via BeforeSpawn, which runs AFTER the slot is won: allowReview
+	// stays post-acquire (a losing double-click must not burn a force-hourly
+	// token) and the "Running…" swap follows it. `runningBody` is written by
+	// BeforeSpawn before the goroutine spawns, so OnDone reads it safely.
+	var runningBody string
+	launchErr := s.launcher.Launch(pipeline.LaunchSpec{
+		Repo:    evt.RepoFullName,
+		PR:      evt.PRNumber,
+		BaseCtx: ctx,
+		BeforeSpawn: func(context.Context) error {
+			// The dispatch goroutine's sem token is released when dispatch
+			// returns — before the pipeline finishes — so the pipeline holds its
+			// own token: acquired here, released by Cleanup at goroutine exit.
+			// Sem (refundable) comes BEFORE allowReview (its token reservations
+			// are kept on allow) so a busy decline never burns the force-hourly
+			// budget; the launcher does not run Cleanup on a BeforeSpawn error,
+			// so the rate-limited path releases the sem itself.
+			if !s.acquireSem() {
+				return errServerBusy
+			}
+			if !s.allowReview(ctx, evt.RepoFullName, owner, true, evt.InstallationID) {
+				s.releaseSem()
+				return errRateLimited
+			}
+			// Swap the checkbox line for a "Running..." marker so the user sees
+			// immediate feedback. Failure here is non-fatal.
+			runningBody = pipeline.ReplaceTriggerWithRunning(evt.CommentBody)
+			if runningBody != evt.CommentBody {
+				if err := ghClient.UpdateIssueComment(ctx, evt.InstallationID, owner, repoName, evt.CommentID, runningBody); err != nil {
+					s.logger.Warn("checkbox trigger: update comment body", "error", err, "comment_id", evt.CommentID)
+				}
+			}
+			s.logger.Info("checkbox-triggered review", "repo", evt.RepoFullName, "pr", evt.PRNumber, "by", evt.EditorLogin)
+			return nil
+		},
+		Cleanup: s.releaseSem,
+		Run:     func(runCtx context.Context) error { return s.orchestrator.HandlePREvent(runCtx, *prEvent) },
+		OnDone: func(err error) {
+			if err != nil {
+				s.logger.Error("checkbox trigger: pipeline failed", "error", err, "pr", evt.PRNumber)
+				_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repoName, evt.CommentID, "confused")
+				// Restore the checkbox so the user can click again to retry;
+				// best-effort (failure here is worse than leaving the marker).
+				if restored := pipeline.RestoreTriggerAfterFailure(runningBody); restored != runningBody {
+					if uerr := ghClient.UpdateIssueComment(ctx, evt.InstallationID, owner, repoName, evt.CommentID, restored); uerr != nil {
+						s.logger.Warn("checkbox trigger: restore comment body", "error", uerr, "comment_id", evt.CommentID)
+					}
+				}
+				return
+			}
+			_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repoName, evt.CommentID, "rocket")
+		},
+	})
+	switch {
+	case errors.Is(launchErr, pipeline.ErrInFlight):
+		s.logger.Info("checkbox trigger: review already in progress", "repo", evt.RepoFullName, "pr", evt.PRNumber)
+	case errors.Is(launchErr, errRateLimited):
 		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repoName, evt.PRNumber,
 			fmt.Sprintf("Rate limit exceeded for on-demand reviews (%d/hour). Try again later.", forceHourlyLimit))
 		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repoName, evt.CommentID, "confused")
-		return
-	}
-
-	// Swap the checkbox line for a "Running..." marker so the user sees
-	// immediate feedback. Failure here is non-fatal.
-	updated := pipeline.ReplaceTriggerWithRunning(evt.CommentBody)
-	if updated != evt.CommentBody {
-		if err := ghClient.UpdateIssueComment(ctx, evt.InstallationID, owner, repoName, evt.CommentID, updated); err != nil {
-			s.logger.Warn("checkbox trigger: update comment body", "error", err, "comment_id", evt.CommentID)
-		}
-	}
-
-	prEvent.Action = "manual"
-	prEvent.RepoID = evt.RepoID
-	s.logger.Info("checkbox-triggered review", "repo", evt.RepoFullName, "pr", evt.PRNumber, "by", evt.EditorLogin)
-
-	if err := s.orchestrator.HandlePREvent(ctx, *prEvent); err != nil {
-		s.logger.Error("checkbox trigger: pipeline failed", "error", err, "pr", evt.PRNumber)
+	case errors.Is(launchErr, errServerBusy):
+		s.logger.Warn("checkbox trigger: webhook semaphore full", "repo", evt.RepoFullName, "pr", evt.PRNumber)
+		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repoName, evt.PRNumber,
+			"Argus is at capacity right now. Try again in a few minutes.")
 		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repoName, evt.CommentID, "confused")
-		// Restore the checkbox so the user can click again to retry; rollback
-		// is best-effort (failure here is worse than leaving the Running marker).
-		if restored := pipeline.RestoreTriggerAfterFailure(updated); restored != updated {
-			if uerr := ghClient.UpdateIssueComment(ctx, evt.InstallationID, owner, repoName, evt.CommentID, restored); uerr != nil {
-				s.logger.Warn("checkbox trigger: restore comment body", "error", uerr, "comment_id", evt.CommentID)
-			}
-		}
-		return
 	}
-	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repoName, evt.CommentID, "rocket")
 }
 
 // handlePREdited refreshes the cross-PR section when a PR body edit changes

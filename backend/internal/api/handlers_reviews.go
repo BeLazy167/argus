@@ -369,56 +369,42 @@ func (s *Server) retryReview(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "retry failed"})
 		return
 	}
-	// Acquire the per-PR slot (same guard as the webhook path) BEFORE flipping
-	// status and storing the cancel fn: the cancel fn is keyed on the shared
-	// repo:PR key, so retrying while a webhook review is live would clobber its
-	// cancel fn and let both run concurrently on the same PR.
-	if !s.tryAcquireReview(repo.FullName, review.PRNumber) {
+	// The launcher owns the per-PR slot (same guard as the webhook path — the
+	// shared repo:PR key means retrying while another review is live would
+	// otherwise let both run concurrently), the paired cancel fn, the event-bus
+	// topic, and — because this is a retry of an existing review row (ReviewID
+	// set) — the pending→failed rollback + EventError publish when the pipeline
+	// errors. BeforeSpawn flips the review to pending BEFORE spawn so the UI
+	// shows "retrying"; its failure releases the slot and surfaces 500 (no
+	// goroutine spawned). Trace_id is preserved onto the detached BaseCtx.
+	launchErr := s.launcher.Launch(pipeline.LaunchSpec{
+		Repo:     repo.FullName,
+		PR:       review.PRNumber,
+		BaseCtx:  obs.SetTraceID(context.Background(), obs.TraceID(r.Context())),
+		ReviewID: &id,
+		BeforeSpawn: func(bsCtx context.Context) error {
+			return s.store.UpdateReviewStatus(bsCtx, id, "pending", "", nil)
+		},
+		Run: func(ctx context.Context) error { return s.orchestrator.RetryReview(ctx, id) },
+		OnDone: func(err error) {
+			// context.Canceled means a Stop halted the retry — the state machine
+			// already marked it cancelled, so it isn't a failure to log. The
+			// rollback + EventError for real failures are owned by the launcher.
+			if err != nil && !errors.Is(err, context.Canceled) {
+				s.logger.Error("retry review failed", "error", err, "review_id", id)
+			}
+		},
+	})
+	if errors.Is(launchErr, pipeline.ErrInFlight) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "another review for this PR is in flight"})
 		return
 	}
-	if err := s.store.UpdateReviewStatus(r.Context(), id, "pending", "", nil); err != nil {
-		s.releaseReview(repo.FullName, review.PRNumber)
+	if launchErr != nil {
+		// BeforeSpawn (mark-pending) failed — slot already released by the launcher.
+		s.logger.Error("retry: mark pending failed", "error", launchErr, "review_id", id)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "update failed"})
 		return
 	}
-
-	// Open event bus topic before goroutine so WebSocket can subscribe immediately.
-	if s.eventBus != nil {
-		s.eventBus.OpenTopic(id)
-	}
-
-	// Register an in-memory cancel fn (as the webhook/manual paths do) and drive
-	// the retry with a cancellable context, so a same-machine Stop halts it
-	// instantly; the state machine's cooperative DB check covers cross-machine.
-	// Preserve trace_id so retried-run stage events share the request's trace.
-	ctx, cancel := context.WithCancel(obs.SetTraceID(context.Background(), obs.TraceID(r.Context())))
-	s.storeCancel(repo.FullName, review.PRNumber, cancel)
-
-	go func() {
-		defer cancel()
-		defer s.releaseReview(repo.FullName, review.PRNumber)
-		defer s.removeCancel(repo.FullName, review.PRNumber)
-		if s.eventBus != nil {
-			defer s.eventBus.CloseTopic(id)
-		}
-		// context.Canceled means a Stop halted the retry — the state machine
-		// already marked it cancelled, so don't roll it back to failed.
-		if err := s.orchestrator.RetryReview(ctx, id); err != nil && !errors.Is(err, context.Canceled) {
-			s.logger.Error("retry review failed", "error", err, "review_id", id)
-			// Roll the review out of the "pending" limbo set above back to
-			// "failed" — otherwise the UI polls a review that never leaves
-			// pending (infinite loading). Conditional so a Stop that raced this
-			// failure isn't flipped from "cancelled" back to "failed". Detached
-			// context: the request is long gone.
-			if _, uerr := s.store.UpdateReviewStatusIf(context.Background(), id, "failed", err.Error(), nil, []string{"pending", "in_progress"}); uerr != nil {
-				s.logger.Error("failed to roll back review status after retry error", "error", uerr, "review_id", id)
-			}
-			if s.eventBus != nil {
-				s.eventBus.Publish(id, pipeline.EventError, map[string]string{"error": err.Error()})
-			}
-		}
-	}()
 
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "retrying", "review_id": id.String()})
 }
@@ -447,25 +433,22 @@ func (s *Server) cancelReview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fn, ok := s.loadCancel(repo.FullName, review.PRNumber)
-	if !ok {
-		// No in-flight cancel function: the process restarted, or this request
-		// landed on a different Fly machine than the one running the review.
-		// Mark the review (and its latest run) cancelled directly so the UI
-		// leaves pending/in_progress limbo and the recovery sweeper won't
-		// resurrect the orphaned run.
-		if err := s.orchestrator.CancelStranded(r.Context(), id); err != nil {
-			s.logger.Error("stranded cancel failed", "error", err, "review_id", id)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "cancel failed"})
-			return
-		}
-		s.logger.Info("stranded cancel: marked review cancelled", "review_id", id, "repo", repo.FullName, "pr", review.PRNumber)
-		writeJSON(w, http.StatusOK, map[string]string{"status": "cancelled", "review_id": id.String()})
+	if s.inflight.Cancel(repo.FullName, review.PRNumber) {
+		s.logger.Info("cancel requested", "review_id", id, "repo", repo.FullName, "pr", review.PRNumber)
+		writeJSON(w, http.StatusAccepted, map[string]string{"status": "cancelling", "review_id": id.String()})
 		return
 	}
-	fn()
-	s.logger.Info("cancel requested", "review_id", id, "repo", repo.FullName, "pr", review.PRNumber)
-	writeJSON(w, http.StatusAccepted, map[string]string{"status": "cancelling", "review_id": id.String()})
+	// No in-flight cancel function: the process restarted, or this request landed
+	// on a different Fly machine than the one running the review. Mark the review
+	// (and its latest run) cancelled directly so the UI leaves pending/in_progress
+	// limbo and the recovery sweeper won't resurrect the orphaned run.
+	if err := s.orchestrator.CancelStranded(r.Context(), id); err != nil {
+		s.logger.Error("stranded cancel failed", "error", err, "review_id", id)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "cancel failed"})
+		return
+	}
+	s.logger.Info("stranded cancel: marked review cancelled", "review_id", id, "repo", repo.FullName, "pr", review.PRNumber)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "cancelled", "review_id": id.String()})
 }
 
 // --- WebSocket Stream ---

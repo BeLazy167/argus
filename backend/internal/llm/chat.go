@@ -44,7 +44,8 @@ type ChatProvider struct {
 // for fast providers (Groq/Together typically <10s) but essential for
 // reasoning-heavy Azure calls — the prior 120s ceiling was below gpt-5.4's
 // first-token latency, causing the exact failure this package was changed
-// to prevent. Operator can still cancel via storeCancel mid-flight.
+// to prevent. Operator can still cancel mid-flight via the run's bound
+// cancel (inflight.Slot.BindCancel, wired by pipeline.Launcher).
 const llmClientTimeout = 600 * time.Second
 
 func NewChatProvider(name, apiKey, baseURL string) *ChatProvider {

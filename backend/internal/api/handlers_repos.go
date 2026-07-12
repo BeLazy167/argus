@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	ghpkg "github.com/BeLazy167/argus/backend/internal/github"
+	"github.com/BeLazy167/argus/backend/internal/pipeline"
 )
 
 func (s *Server) listRepos(w http.ResponseWriter, r *http.Request) {
@@ -108,7 +109,27 @@ func (s *Server) triggerReview(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate limit exceeded"})
 		return
 	}
-	if !s.tryAcquireReview(repo.FullName, body.PRNumber) {
+	// The launcher owns slot + cancel + spawn. Detached BaseCtx mirrors the
+	// original (background, no request trace).
+	prEvent := ghpkg.PREvent{
+		Action:         "manual",
+		InstallationID: inst.InstallationID,
+		RepoFullName:   repo.FullName,
+		RepoID:         repo.GithubID,
+		PRNumber:       body.PRNumber,
+	}
+	launchErr := s.launcher.Launch(pipeline.LaunchSpec{
+		Repo:    repo.FullName,
+		PR:      body.PRNumber,
+		BaseCtx: context.Background(),
+		Run:     func(ctx context.Context) error { return s.orchestrator.HandlePREvent(ctx, prEvent) },
+		OnDone: func(err error) {
+			if err != nil && !errors.Is(err, context.Canceled) {
+				s.logger.Error("manual review failed", "error", err, "repo", repo.FullName, "pr", body.PRNumber)
+			}
+		},
+	})
+	if errors.Is(launchErr, pipeline.ErrInFlight) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "review already in-flight"})
 		return
 	}
@@ -116,23 +137,6 @@ func (s *Server) triggerReview(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.LogActivity(r.Context(), nil, "manual_review_triggered", "", repo.FullName, nil); err != nil {
 		s.logger.Error("failed to log activity", "error", err, "action", "manual_review_triggered")
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	s.storeCancel(repo.FullName, body.PRNumber, cancel)
-	go func() {
-		defer s.releaseReview(repo.FullName, body.PRNumber)
-		defer s.removeCancel(repo.FullName, body.PRNumber)
-		defer cancel()
-		if err := s.orchestrator.HandlePREvent(ctx, ghpkg.PREvent{
-			Action:         "manual",
-			InstallationID: inst.InstallationID,
-			RepoFullName:   repo.FullName,
-			RepoID:         repo.GithubID,
-			PRNumber:       body.PRNumber,
-		}); err != nil && !errors.Is(err, context.Canceled) {
-			s.logger.Error("manual review failed", "error", err, "repo", repo.FullName, "pr", body.PRNumber)
-		}
-	}()
 
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "triggered", "repo": repo.FullName, "pr_number": fmt.Sprintf("%d", body.PRNumber)})
 }

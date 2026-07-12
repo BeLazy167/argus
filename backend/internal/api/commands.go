@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -85,42 +86,64 @@ func (s *Server) handleReviewCommand(ctx context.Context, evt ghpkg.IssueComment
 		}
 	}
 
-	if !s.allowReview(ctx, evt.RepoFullName, owner, force, evt.InstallationID) {
-		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
-			"Rate limit exceeded. Try again later.")
-		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
-		return
-	}
-	if !s.tryAcquireReview(evt.RepoFullName, evt.PRNumber) {
-		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
-			"A review is already in progress for this PR.")
-		return
-	}
-	defer s.releaseReview(evt.RepoFullName, evt.PRNumber)
-
-	// Register a cancel function so the dashboard's Stop button can abort this
-	// review. The webhook and manual-API paths already do this; the slash-
-	// command path was missing it — clicking Stop returned HTTP 409 ("review
-	// not in-flight") because loadCancel found nothing in inFlightCancels.
-	runCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	s.storeCancel(evt.RepoFullName, evt.PRNumber, cancel)
-	defer s.removeCancel(evt.RepoFullName, evt.PRNumber)
-
 	prEvent.Action = "manual"
 	prEvent.RepoID = evt.RepoID
 	prEvent.PersonaOverride = personaOverride
-	s.logger.Info("review command triggered", "repo", evt.RepoFullName, "pr", evt.PRNumber, "force", force, "by", evt.CommentAuthor)
 
-	if err := s.orchestrator.HandlePREvent(runCtx, *prEvent); err != nil {
-		s.logger.Error("review command: pipeline failed", "error", err, "pr", evt.PRNumber)
-		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
+	// The launcher owns slot + cancel + spawn. The cancel binding it registers is
+	// what lets the dashboard Stop button abort a slash-command review (this path
+	// used to be the one missing it). BaseCtx is the dispatch ctx (trace +
+	// installation already tagged).
+	launchErr := s.launcher.Launch(pipeline.LaunchSpec{
+		Repo:    evt.RepoFullName,
+		PR:      evt.PRNumber,
+		BaseCtx: ctx,
+		BeforeSpawn: func(context.Context) error {
+			// The dispatch goroutine's sem token is released when dispatch
+			// returns — before the pipeline finishes — so the pipeline holds
+			// its own token: acquired here, released by Cleanup at goroutine
+			// exit (sem-held-during-pipeline, matching the webhook auto path).
+			// allowReview runs post-slot (a losing double-command must not burn
+			// a rate token) and post-sem (sem is refundable, allowReview's
+			// reservations are not); the launcher does not run Cleanup on a
+			// BeforeSpawn error, so the rate-limited path releases the sem itself.
+			if !s.acquireSem() {
+				return errServerBusy
+			}
+			if !s.allowReview(ctx, evt.RepoFullName, owner, force, evt.InstallationID) {
+				s.releaseSem()
+				return errRateLimited
+			}
+			s.logger.Info("review command triggered", "repo", evt.RepoFullName, "pr", evt.PRNumber, "force", force, "by", evt.CommentAuthor)
+			return nil
+		},
+		Cleanup: s.releaseSem,
+		Run:     func(runCtx context.Context) error { return s.orchestrator.HandlePREvent(runCtx, *prEvent) },
+		OnDone: func(err error) {
+			if err != nil {
+				s.logger.Error("review command: pipeline failed", "error", err, "pr", evt.PRNumber)
+				_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
+				_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
+					"Review failed. Check the Argus dashboard for details.")
+				return
+			}
+			_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "rocket")
+		},
+	})
+	switch {
+	case errors.Is(launchErr, pipeline.ErrInFlight):
 		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
-			"Review failed. Check the Argus dashboard for details.")
-		return
+			"A review is already in progress for this PR.")
+	case errors.Is(launchErr, errRateLimited):
+		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
+			"Rate limit exceeded. Try again later.")
+		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
+	case errors.Is(launchErr, errServerBusy):
+		s.logger.Warn("review command: webhook semaphore full", "repo", evt.RepoFullName, "pr", evt.PRNumber)
+		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
+			"Argus is at capacity right now. Try again in a few minutes.")
+		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
 	}
-
-	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "rocket")
 }
 
 // handleHelpCommand posts available commands and usage.
