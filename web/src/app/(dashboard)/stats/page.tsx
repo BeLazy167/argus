@@ -9,6 +9,7 @@ import {
 import {
   Loader2, TrendingUp, DollarSign, Zap, Clock, AlertTriangle, Target,
   Shield, Info, Timer, Check, Network, Brain, FlaskConical, History, ThumbsUp,
+  Gauge,
 } from "lucide-react";
 import { useStatsStore } from "@/lib/stores/stats-store";
 import {
@@ -23,6 +24,7 @@ import {
   useStatsCostPerStage,
   type Period,
 } from "@/lib/queries/org-stats";
+import { useReviewGauge } from "@/lib/queries/gauge";
 import { stageColor, stageLabel } from "@/lib/stage-labels";
 
 const PERIODS: { value: Period; label: string }[] = [
@@ -37,6 +39,19 @@ const SEV_COLORS: Record<string, string> = { critical: "#ef4444", warning: "#f59
 function fmt$(n: number) { return n < 1 ? `$${n.toFixed(3)}` : `$${n.toFixed(2)}`; }
 function fmtTok(n: number) { return n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n); }
 function fmtSecs(s: number) { return s >= 60 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${s}s`; }
+/** Coarse duration for time-to-merge (seconds → d/h/m). Longer horizon than fmtSecs. */
+function fmtDur(s: number): string {
+  if (s >= 86400) return `${(s / 86400).toFixed(1)}d`;
+  if (s >= 3600) return `${(s / 3600).toFixed(1)}h`;
+  if (s >= 60) return `${Math.round(s / 60)}m`;
+  return `${Math.round(s)}s`;
+}
+/** Tailwind class for an address rate (0..1). Green ≥0.6, red <0.3, amber between. */
+function addressRateColor(r: number): string {
+  if (r >= 0.6) return "text-green-500";
+  if (r < 0.3) return "text-destructive";
+  return "text-primary";
+}
 /** Tailwind class for a review score (1-10 scale). Red <=4, green >=7, amber otherwise. */
 function scoreColor(n: number): string {
   if (n <= 4) return "text-destructive";
@@ -101,6 +116,9 @@ export default function StatsPage() {
   const repos = useStatsRepos({ variables: { period } });
   const reviewTimes = useStatsReviewTimes({ variables: { period } });
   const costPerStage = useStatsCostPerStage({ variables: { period } });
+  // Review Gauge is installation-scoped and all-time (outcomes accrue as PRs
+  // close), so it takes no period — unlike the panels above.
+  const gauge = useReviewGauge();
 
   const chartData = useMemo(() => (timeseries.data ?? []).map(d => ({ ...d, day: d.day.slice(5) })), [timeseries.data]);
   const allModels = useMemo(() => [...(models.data ?? [])].sort((a, b) => b.total_cost - a.total_cost), [models.data]);
@@ -117,6 +135,12 @@ export default function StatsPage() {
   // the legend's "%" column would sum to 100% of the visible slice instead of
   // 100% of the true spend, misrepresenting tail-model cost.
   const totalModelCost = useMemo(() => allModels.reduce((s, m) => s + m.total_cost, 0), [allModels]);
+  // Busiest cells first — a (category, change_class) pair with more posted
+  // findings has a more trustworthy address/dismiss rate.
+  const gaugeRows = useMemo(
+    () => [...(gauge.data ?? [])].sort((a, b) => b.posted_findings - a.posted_findings),
+    [gauge.data],
+  );
 
   return (
     <>
@@ -529,6 +553,59 @@ export default function StatsPage() {
                 <span className="text-2xl font-mono font-bold text-foreground">{adoption.data.avg_files_per_review.toFixed(1)}</span>
               </div>
             </div>
+          </div>
+        )}
+      </section>
+
+      {/* Review Gauge — outcome telemetry per finding category × change class.
+          Installation-scoped, all-time; accrues as PRs close. Doctrine's
+          feedback loop: which findings devs actually address vs dismiss. */}
+      <section className="pt-10 mb-10">
+        <div className="flex items-center gap-1.5 mb-4">
+          <Gauge className="h-3.5 w-3.5 text-primary" />
+          <h2 className="text-xs font-mono font-bold text-foreground uppercase" style={{ letterSpacing: "1.5px" }}>Review Gauge</h2>
+          <Tip text="Per category × change-class: how often posted findings get addressed vs dismissed, and how long until merge. Outcomes are detected when PRs close." />
+        </div>
+        {gauge.isLoading ? <Loading /> : gauge.isError ? <Err label="gauge" /> : gaugeRows.length === 0 ? (
+          <div className="border border-border bg-card p-8 text-center text-xs font-mono text-muted-foreground">
+            No gauge data yet — outcomes accrue as PRs close.
+          </div>
+        ) : (
+          <div className="border border-border bg-card overflow-x-auto">
+            <table className="w-full text-[11px] font-mono">
+              <thead>
+                <tr className="border-b border-border">
+                  <th className="text-left px-4 py-3 text-muted-foreground font-medium">Category</th>
+                  <th className="text-left px-4 py-3 text-muted-foreground font-medium">Class</th>
+                  <th className="text-right px-4 py-3 text-muted-foreground font-medium">Posted</th>
+                  <th className="text-right px-4 py-3 text-muted-foreground font-medium">Address rate</th>
+                  <th className="text-right px-4 py-3 text-muted-foreground font-medium">Dismiss rate</th>
+                  <th className="text-right px-4 py-3 text-muted-foreground font-medium">Median TTM</th>
+                </tr>
+              </thead>
+              <tbody>
+                {gaugeRows.map((g) => (
+                  <tr key={`${g.category}:${g.change_class}`} className="border-b border-border/30 hover:bg-accent/50 transition-colors">
+                    <td className="px-4 py-3 text-foreground">{g.category || "—"}</td>
+                    <td className="px-4 py-3 text-muted-foreground">{g.change_class || "—"}</td>
+                    <td className="text-right px-4 py-3 text-muted-foreground">{g.posted_findings}</td>
+                    <td className="text-right px-4 py-3">
+                      {g.address_rate != null
+                        ? <span className={addressRateColor(g.address_rate)}>{Math.round(g.address_rate * 100)}%</span>
+                        : <span className="text-muted-foreground/50">—</span>}
+                    </td>
+                    <td className="text-right px-4 py-3">
+                      {g.dismiss_rate != null
+                        ? <span className="text-muted-foreground">{Math.round(g.dismiss_rate * 100)}%</span>
+                        : <span className="text-muted-foreground/50">—</span>}
+                    </td>
+                    <td className="text-right px-4 py-3 text-muted-foreground">
+                      {g.median_seconds_to_merge != null ? fmtDur(g.median_seconds_to_merge) : "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         )}
       </section>

@@ -23,6 +23,9 @@ import {
   Filter,
   Zap,
   Square,
+  Gauge,
+  EyeOff,
+  Users,
 } from "lucide-react";
 import { useReview, useRetryReview, useCancelReview } from "@/lib/queries/reviews";
 import { useRepos } from "@/lib/queries/repos";
@@ -35,7 +38,7 @@ import { formatDistanceToNow } from "@/lib/time";
 import { useReviewStream } from "@/lib/hooks/use-review-stream";
 import { PipelineProgress } from "./progress-bar";
 import { ActivityTimeline } from "./activity-timeline";
-import type { Repo, ReviewComment, StageTokens, TokenUsage } from "@/lib/types";
+import type { Repo, ReviewComment, ReviewContract, StageTokens, TokenUsage } from "@/lib/types";
 import { STAGE_ORDER, stageLabel } from "@/lib/stage-labels";
 
 const Markdown = dynamic(() => import("./markdown").then(m => ({ default: m.Markdown })), { ssr: false });
@@ -773,6 +776,145 @@ function FileTOC({
   );
 }
 
+/* ── Review Doctrine surfaces ─────────────────── */
+
+/**
+ * Reviewers that ran for this review, mirroring the backend's checkedReviewers:
+ * deep review runs the 4-specialist squad (one balanced script reviewer for
+ * one-time scripts); everything else is a single-pass review.
+ */
+function checkedReviewers(deep: boolean, changeClass?: string): string[] {
+  if (deep && changeClass === "one_time_script") return ["script_review"];
+  if (deep) return ["bug_hunter", "security", "architecture", "regression"];
+  return ["single-pass review"];
+}
+
+/** Label + value pair used across the doctrine strips. */
+function ContractField({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="flex flex-col gap-1">
+      <span className="text-[9px] font-mono uppercase tracking-wider text-slate-text">{label}</span>
+      <span className="text-xs font-mono text-foreground">{children}</span>
+    </div>
+  );
+}
+
+const DoctrineChip = ({ children, tone = "muted" }: { children: React.ReactNode; tone?: "muted" | "amber" | "red" }) => {
+  const cls =
+    tone === "amber"
+      ? "bg-amber/10 text-amber border-amber/30"
+      : tone === "red"
+        ? "bg-red-400/10 text-red-400 border-red-400/30"
+        : "bg-iron/30 text-slate-text border-iron/60";
+  return <span className={`inline-flex items-center rounded-sm border px-2 py-0.5 text-[11px] font-mono ${cls}`}>{children}</span>;
+};
+
+/**
+ * Contract strip (1a) + Glass Box (1b) — the routing contract the pipeline ran
+ * under and how it reviewed. Hidden entirely for reviews predating the contract.
+ */
+function ContractStrip({
+  contract,
+  deepReview,
+  suppressedCount,
+  durationMs,
+}: {
+  contract: ReviewContract;
+  deepReview: boolean;
+  suppressedCount: number;
+  durationMs?: number;
+}) {
+  const reviewers = checkedReviewers(deepReview, contract.change_class);
+  const duration = durationMs ? `${(durationMs / 1000).toFixed(1)}s` : null;
+  const signals = contract.signals ?? [];
+  return (
+    <div className="border border-iron bg-charcoal/80 mb-6">
+      {/* Contract row */}
+      <div className="p-4">
+        <div className="flex items-center gap-2 mb-3">
+          <Gauge className="h-3.5 w-3.5 text-amber" />
+          <span className="text-[11px] font-mono uppercase tracking-wider text-slate-text">Review Contract</span>
+        </div>
+        <div className="flex flex-wrap items-start gap-x-8 gap-y-3">
+          <ContractField label="Class"><span className="text-amber">{contract.change_class || "—"}</span></ContractField>
+          <ContractField label="Depth">{contract.depth || "—"}</ContractField>
+          <ContractField label="Evidence bar">{contract.evidence_bar || "—"}</ContractField>
+          {(contract.unreviewable || contract.scrutiny_bump) && (
+            <ContractField label="Flags">
+              <span className="inline-flex gap-1.5">
+                {contract.unreviewable && <DoctrineChip tone="red"><EyeOff className="h-3 w-3 mr-1" />Unreviewable</DoctrineChip>}
+                {contract.scrutiny_bump && <DoctrineChip tone="amber">Scrutiny+</DoctrineChip>}
+              </span>
+            </ContractField>
+          )}
+          {signals.length > 0 && (
+            <ContractField label="Signals">
+              <span className="inline-flex flex-wrap gap-1.5">
+                {signals.map((s) => <DoctrineChip key={s}>{s}</DoctrineChip>)}
+              </span>
+            </ContractField>
+          )}
+        </div>
+      </div>
+      {/* Glass Box row */}
+      <div className="p-4 border-t border-iron/50">
+        <div className="flex items-center gap-2 mb-3">
+          <Users className="h-3.5 w-3.5 text-slate-text" />
+          <span className="text-[11px] font-mono uppercase tracking-wider text-slate-text">Glass Box</span>
+        </div>
+        <div className="flex flex-wrap items-start gap-x-8 gap-y-3">
+          <ContractField label="Checked">
+            <span className="inline-flex flex-wrap gap-1.5">
+              {reviewers.map((r) => <DoctrineChip key={r}>{r}</DoctrineChip>)}
+            </span>
+          </ContractField>
+          {suppressedCount > 0 && (
+            <ContractField label="Suppressed">
+              <span className="inline-flex items-center gap-1 text-slate-text" title="Findings dropped by dismissal / team-feedback suppression — never posted to the PR (listed below)">
+                <EyeOff className="h-3 w-3" />
+                {suppressedCount} suppressed
+              </span>
+            </ContractField>
+          )}
+          {duration && <ContractField label="Duration">{duration}</ContractField>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Suppressed-by-team-feedback audit section (1c) — findings the suppression
+ * pass dropped before posting. Collapsed and visually muted; the record exists
+ * for transparency, not to nag the author.
+ */
+function SuppressedFindings({ comments }: { comments: ReviewComment[] }) {
+  if (comments.length === 0) return null;
+  return (
+    <details className="border border-iron/60 bg-charcoal/40 mb-8 group">
+      <summary className="flex items-center gap-2 p-4 cursor-pointer text-slate-text hover:text-foreground/80 transition-colors list-none">
+        <ChevronRight className="h-3.5 w-3.5 shrink-0 transition-transform group-open:rotate-90" />
+        <EyeOff className="h-3.5 w-3.5 shrink-0" />
+        <span className="text-[11px] font-mono uppercase tracking-wider">
+          Suppressed findings ({comments.length})
+        </span>
+      </summary>
+      <div className="px-4 pb-4 space-y-2 opacity-60">
+        {comments.map((c) => (
+          <div key={c.id} className="border border-iron/40 bg-void/30 p-3">
+            <div className="flex items-center gap-2 mb-1 text-[11px] font-mono">
+              {c.severity && <span className={`h-2 w-2 rounded-full shrink-0 ${severityDot[c.severity]}`} />}
+              <span className="text-amber truncate">{c.file_path}{lineRef(c) ? `:${lineRef(c)}` : ""}</span>
+              {c.suppressed_reason && <DoctrineChip>{c.suppressed_reason}</DoctrineChip>}
+            </div>
+            <p className="text-xs text-foreground/70">{stripMarkdownForPreview(c.body).slice(0, 240)}</p>
+          </div>
+        ))}
+      </div>
+    </details>
+  );
+}
+
 /* ── Main Page ───────────────────────────────── */
 
 export default function ReviewDetailPage() {
@@ -794,7 +936,16 @@ export default function ReviewDetailPage() {
   const [expandToggle, setExpandToggle] = useState(0);
 
   const review = data?.review;
-  const comments = data?.comments ?? [];
+  // Suppressed findings (dismissal / team-feedback) were never posted to the PR.
+  // Keep them out of the main findings list; surface them in the audit section.
+  const comments = useMemo(
+    () => (data?.comments ?? []).filter((c) => c.state !== "suppressed"),
+    [data?.comments],
+  );
+  const suppressedComments = useMemo(
+    () => (data?.comments ?? []).filter((c) => c.state === "suppressed"),
+    [data?.comments],
+  );
 
   const isLive = review?.status === "pending" || review?.status === "in_progress";
   const { stage, triageResults, failedStage, timeline, liveTokens, seenStages } = useReviewStream(id, isLive);
@@ -1026,6 +1177,16 @@ export default function ReviewDetailPage() {
           </div>
         </div>
       </header>
+
+      {/* Review Contract + Glass Box — hidden for reviews predating the contract. */}
+      {review.review_contract && (
+        <ContractStrip
+          contract={review.review_contract}
+          deepReview={!!review.deep_review}
+          suppressedCount={suppressedComments.length}
+          durationMs={review.duration_ms}
+        />
+      )}
 
       {/* Pipeline progress (live reviews) */}
       {isLive && <PipelineProgress stage={stage} failedStage={failedStage} filesReviewed={filesReviewed} totalFiles={totalFiles} seenStages={seenStages} />}
@@ -1323,6 +1484,9 @@ export default function ReviewDetailPage() {
         </div>
       )}
 
+
+      {/* Suppressed-by-team-feedback audit surface (never posted to the PR). */}
+      <SuppressedFindings comments={suppressedComments} />
 
       {/* Main content: sidebar + file groups */}
       <div className={showSidebar ? "grid grid-cols-1 gap-6 lg:grid-cols-[200px_1fr]" : ""}>
