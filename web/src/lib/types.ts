@@ -1,27 +1,89 @@
-import type { FindingState } from "./generated/api-types";
+import type {
+  FindingState,
+  Repo as WireRepo,
+  Review as WireReview,
+  ReviewComment as WireReviewComment,
+  Scenario as WireScenario,
+} from "./generated/api-types";
 import type { ReviewContract } from "./generated/contract-types";
 
-// Wire types generated from Go structs by tygo (see backend/tygo.yaml).
-// Re-exported here so consumers keep importing everything from "@/lib/types".
-// Regenerate after changing a Go wire struct: `cd backend && make tygo`.
-// FindingState and ReviewContract are also used internally below.
-export type { FindingState, ReviewContract };
-export type { GaugeRow, Installation, ModelConfig, Stats } from "./generated/api-types";
+// ─────────────────────────────────────────────────────────────────────────────
+// Wire types generated from Go structs by tygo (see backend/tygo.yaml). The
+// generated file is the single source of truth for every shape below, so a Go
+// wire change breaks `tsc` here. Regenerate with `cd backend && make tygo`.
+//
+// Three dispositions:
+//   • re-export    — generated shape is exactly the wire the frontend reads.
+//   • extension    — generated wire + frontend refinements (typed JSONB,
+//                    narrowed unions); the `Omit<Wire…>` base still tracks drift
+//                    on every un-overridden field.
+//   • hand-written — genuinely frontend-only, or a different endpoint's computed
+//                    shape not backed by a single generated struct.
+// ─────────────────────────────────────────────────────────────────────────────
 
-// The types below stay hand-written: the wire transforms them (masked/derived
-// fields) or the frontend refines them (JSONB shapes, unions the Go side leaves
-// as plain strings).
-export type Repo = {
-  id: number;
-  installation_id: number;
-  github_id: number;
-  full_name: string;
-  default_branch: string;
-  enabled: boolean;
+// Re-exports — generated shape consumed as-is.
+export type {
+  ActivityLog,
+  GaugeRow,
+  Installation,
+  ModelConfig,
+  Pattern,
+  PatternStat,
+  Rule,
+  ScenarioKPIs,
+  ScenarioRun,
+  ScenarioVerdict,
+  Stats,
+} from "./generated/api-types";
+// FindingState and ReviewContract are re-exported and also used in extensions below.
+export type { FindingState, ReviewContract };
+
+// ── Extensions: generated wire + frontend refinements ────────────────────────
+
+/** Wire Repo, but settings_json is typed as an indexable object (the dashboard
+ *  spreads and indexes it) rather than the generated `unknown`. */
+export type Repo = Omit<WireRepo, "settings_json"> & {
   settings_json: Record<string, unknown>;
-  created_at: string;
-  updated_at: string;
 };
+
+/**
+ * Wire Review, with the JSONB columns typed richly and the status narrowed to
+ * its union. `file_count`/`simulation_results` are dashboard-only fields the
+ * detail view derives client-side (not part of the serialized Review row).
+ */
+export type Review = Omit<
+  WireReview,
+  "status" | "token_usage" | "diagrams" | "truncated_files" | "review_contract"
+> & {
+  status: "pending" | "in_progress" | "completed" | "failed" | "cancelled";
+  token_usage?: TokenUsage;
+  diagrams?: { type?: string; title?: string; mermaid: string }[];
+  truncated_files?: string[];
+  /** Routing contract the pipeline ran under. Absent on pre-contract reviews. */
+  review_contract?: ReviewContract | null;
+  file_count?: number;
+  simulation_results?: SimulationResult[];
+};
+
+/**
+ * Wire ReviewComment, with severity narrowed to its union and state/is_new_finding
+ * relaxed to optional so the live-stream reducer can build a partial comment.
+ */
+export type ReviewComment = Omit<WireReviewComment, "severity" | "state" | "is_new_finding"> & {
+  severity?: "critical" | "warning" | "suggestion" | "praise";
+  /** Lifecycle state; "suppressed" findings were never posted to the PR. */
+  state?: FindingState;
+  is_new_finding?: boolean;
+};
+
+/** Wire Scenario, but files/modules stay required — the scenarios UI maps over
+ *  them directly. last_verdict keeps the generated ScenarioVerdict union. */
+export type Scenario = Omit<WireScenario, "files" | "modules"> & {
+  files: string[];
+  modules: string[];
+};
+
+// ── Hand-written: frontend-only or non-generated wire ────────────────────────
 
 export type StageTokens = {
   prompt_tokens: number;
@@ -69,45 +131,6 @@ export type TokenUsage = {
   total: StageTokens;
 };
 
-export type Review = {
-  id: string;
-  repo_id: number;
-  pr_number: number;
-  pr_title: string;
-  pr_author: string;
-  head_sha: string;
-  base_sha: string;
-  head_ref: string;
-  github_review_id?: number;
-  status: "pending" | "in_progress" | "completed" | "failed" | "cancelled";
-  summary?: string;
-  score?: number;
-  trigger: string;
-  triggered_by?: string;
-  duration_ms?: number;
-  token_usage?: TokenUsage;
-  error?: string;
-  file_count?: number;
-  deep_review?: boolean;
-  persona?: string;
-  is_incremental?: boolean;
-  simulation_results?: SimulationResult[];
-  diagram?: string;
-  diagram_title?: string;
-  diagrams?: { type?: string; title?: string; mermaid: string }[];
-  truncated_files?: string[];
-  /**
-   * LLM-generated conversational verdict from synthesis. Posted to the GitHub
-   * PR comment body; also surfaced on the dashboard Summary card as the
-   * primary readout (preferred over the raw per-file `summary`).
-   */
-  brief?: string;
-  /** Routing contract the pipeline ran under. Absent on pre-contract reviews. */
-  review_contract?: ReviewContract | null;
-  created_at: string;
-  completed_at?: string;
-};
-
 export type SimulationResult = {
   scenario: string;
   passes: boolean;
@@ -115,31 +138,6 @@ export type SimulationResult = {
   root_cause: string;
   impact?: string;
   suggestion?: string;
-};
-
-export type ReviewComment = {
-  id: string;
-  review_id: string;
-  file_path: string;
-  start_line?: number;
-  end_line?: number;
-  side?: string;
-  body: string;
-  severity?: "critical" | "warning" | "suggestion" | "praise";
-  category?: string;
-  specialist?: string;
-  confidence_score?: number;
-  code_snippet?: string;
-  github_comment_id?: number;
-  matched_pattern_id?: number;
-  matched_pattern_score?: number;
-  enforced_rule_content?: string;
-  is_new_finding?: boolean;
-  /** Lifecycle state; "suppressed" findings were never posted to the PR. */
-  state?: FindingState;
-  /** Why the finding was suppressed (e.g. "team_feedback:3", "dismissed_match:0.91"). */
-  suppressed_reason?: string;
-  created_at: string;
 };
 
 export type ProviderKey = {
@@ -153,45 +151,8 @@ export type ProviderKey = {
   updated_at: string;
 };
 
-export type Rule = {
-  id: number;
-  category: string;
-  content: string;
-  priority: number;
-  enabled: boolean;
-  created_at: string;
-  updated_at: string;
-};
-
-export type ActivityLog = {
-  id: number;
-  action: string;
-  actor?: string;
-  resource?: string;
-  metadata?: Record<string, unknown>;
-  created_at: string;
-};
-
-export type Pattern = {
-  id: number;
-  installation_id: number;
-  repo_id?: number;
-  content: string;
-  supermemory_id?: string;
-  created_by?: string;
-  source?: string;
-  category?: string;
-  pr_number?: number;
-  created_at: string;
-  updated_at: string;
-};
-
-export type PatternStat = {
-  week: string;
-  source: string;
-  count: number;
-};
-
+// PromptTemplate is the /prompts endpoint's computed shape (default-vs-custom
+// resolved server-side), not the store prompt_templates row — hence hand-written.
 export type PromptTemplate = {
   stage: string;
   prompt_text: string;
@@ -206,55 +167,6 @@ export type OpenRouterModel = {
     prompt: string;
     completion: string;
   };
-};
-
-export type ScenarioVerdict = "broken" | "fixed" | "partial" | "unclear";
-
-export type Scenario = {
-  id: number;
-  installation_id: number;
-  repo_id: number;
-  description: string;
-  source: string;
-  source_ref: string;
-  files: string[];
-  modules: string[];
-  severity: string;
-  active: boolean;
-  created_at: string;
-  steps: { action: string; hint?: string }[];
-  initial_state: string;
-  expected_outcome: string;
-  is_outdated: boolean;
-  last_run_at?: string;
-  last_verdict?: ScenarioVerdict;
-  last_confidence?: number;
-  last_why?: string;
-  last_fix?: string;
-  last_pr_number?: number;
-  last_review_id?: string;
-  trigger_count?: number;
-};
-
-export type ScenarioRun = {
-  id: number;
-  scenario_id: number;
-  review_id: string;
-  pr_number: number;
-  verdict: ScenarioVerdict;
-  confidence: number;
-  why?: string;
-  fix?: string;
-  root_cause?: string;
-  impact?: string;
-  created_at: string;
-};
-
-export type ScenarioKPIs = {
-  active: number;
-  broken_this_week: number;
-  fixed_this_week: number;
-  outdated: number;
 };
 
 export type FileRisk = {

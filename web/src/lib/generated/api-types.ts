@@ -208,11 +208,15 @@ export interface ScenarioStep {
  * API boundary stays consistent; the compiler guards us against typos that would otherwise slip
  * through an untyped string.
  */
-export type ScenarioVerdict = string;
-export const VerdictBroken: ScenarioVerdict = "broken";
-export const VerdictFixed: ScenarioVerdict = "fixed";
-export const VerdictPartial: ScenarioVerdict = "partial";
-export const VerdictUnclear: ScenarioVerdict = "unclear";
+export const ScenarioVerdictBroken = "broken";
+export const ScenarioVerdictFixed = "fixed";
+export const ScenarioVerdictPartial = "partial";
+export const ScenarioVerdictUnclear = "unclear";
+/**
+ * Const names are prefixed with the type name so tygo emits ScenarioVerdict as
+ * a TS string-literal union rather than a bare `string`.
+ */
+export type ScenarioVerdict = typeof ScenarioVerdictBroken | typeof ScenarioVerdictFixed | typeof ScenarioVerdictPartial | typeof ScenarioVerdictUnclear;
 export interface Scenario {
   id: number /* int64 */;
   installation_id: number /* int64 */;

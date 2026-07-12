@@ -182,22 +182,14 @@ type ScenarioStep struct {
 // through an untyped string.
 type ScenarioVerdict string
 
+// Const names are prefixed with the type name so tygo emits ScenarioVerdict as
+// a TS string-literal union rather than a bare `string`.
 const (
-	VerdictBroken  ScenarioVerdict = "broken"
-	VerdictFixed   ScenarioVerdict = "fixed"
-	VerdictPartial ScenarioVerdict = "partial"
-	VerdictUnclear ScenarioVerdict = "unclear"
+	ScenarioVerdictBroken  ScenarioVerdict = "broken"
+	ScenarioVerdictFixed   ScenarioVerdict = "fixed"
+	ScenarioVerdictPartial ScenarioVerdict = "partial"
+	ScenarioVerdictUnclear ScenarioVerdict = "unclear"
 )
-
-// IsValid reports whether v is one of the four allowed verdict strings. The empty string is
-// NOT valid — a persisted verdict should always have a concrete bucket.
-func (v ScenarioVerdict) IsValid() bool {
-	switch v {
-	case VerdictBroken, VerdictFixed, VerdictPartial, VerdictUnclear:
-		return true
-	}
-	return false
-}
 
 type Scenario struct {
 	ID              int64          `json:"id"`

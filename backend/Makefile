@@ -9,9 +9,16 @@ build:
 tygo:
 	go run github.com/gzuidhof/tygo@$(TYGO_VERSION) generate
 
-# tygo-check regenerates and fails if the committed output drifts (CI gate).
+# tygo-check regenerates and fails if the committed output drifts — either a
+# tracked file changed (git diff) or a new generated file is untracked
+# (git status --porcelain, which git diff alone would miss). CI gate.
 tygo-check: tygo
 	git diff --exit-code -- ../web/src/lib/generated
+	@if [ -n "$$(git status --porcelain -- ../web/src/lib/generated)" ]; then \
+		echo "error: untracked/modified generated files — commit them:"; \
+		git status --porcelain -- ../web/src/lib/generated; \
+		exit 1; \
+	fi
 
 run: build
 	./bin/argus
