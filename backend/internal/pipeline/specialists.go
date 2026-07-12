@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/BeLazy167/argus/backend/internal/memory"
@@ -223,7 +224,6 @@ func specialistSearchQuery(s Specialist) string {
 	}
 }
 
-
 // filePathsQuery builds a capped search query from a prefix and file paths (rune-safe truncation).
 func filePathsQuery(prefix string, paths []string) string {
 	q := prefix + strings.Join(paths, " ")
@@ -260,12 +260,24 @@ func specialistBriefing(ctx context.Context, indexer memory.Indexer, owner, repo
 	if indexer == nil {
 		return ""
 	}
-	return indexer.Briefing(ctx, owner, repo, filePath, specialistSearchQuery(s), memory.BriefingOptions{
-		Profile:                 memory.ProfileSpecialist,
-		Thresholds:              thresholds,
-		CharCap:                 2400,
-		EmphasizeFalsePositives: true,
-	})
+	query := specialistSearchQuery(s)
+	// Briefing is error-honest; a failed retrieval degrades the whole block to
+	// empty (a partial briefing would be worse than none) via the one BestEffort.
+	return memory.BestEffort(slog.Default(), "briefing-specialist", memory.RepoTagNew(repo), len(query),
+		func() (string, error) {
+			return indexer.Briefing(ctx, memory.BriefingQuery{
+				Owner:    owner,
+				Repo:     repo,
+				FilePath: filePath,
+				Query:    query,
+				Options: memory.BriefingOptions{
+					Profile:                 memory.ProfileSpecialist,
+					Thresholds:              thresholds,
+					CharCap:                 2400,
+					EmphasizeFalsePositives: true,
+				},
+			})
+		})
 }
 
 // reviewBriefing returns the single-pass reviewer memory block for a file, or
@@ -276,9 +288,19 @@ func reviewBriefing(ctx context.Context, indexer memory.Indexer, owner, repo, fi
 	if indexer == nil || repo == "" {
 		return ""
 	}
-	return indexer.Briefing(ctx, owner, repo, filePath, "code review patterns conventions "+filePath, memory.BriefingOptions{
-		Profile:    memory.ProfileReview,
-		Thresholds: thresholds,
-		CharCap:    3200,
-	})
+	query := "code review patterns conventions " + filePath
+	return memory.BestEffort(slog.Default(), "briefing-review", memory.RepoTagNew(repo), len(query),
+		func() (string, error) {
+			return indexer.Briefing(ctx, memory.BriefingQuery{
+				Owner:    owner,
+				Repo:     repo,
+				FilePath: filePath,
+				Query:    query,
+				Options: memory.BriefingOptions{
+					Profile:    memory.ProfileReview,
+					Thresholds: thresholds,
+					CharCap:    3200,
+				},
+			})
+		})
 }

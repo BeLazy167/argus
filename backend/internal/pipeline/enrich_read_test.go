@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"testing"
@@ -11,6 +12,22 @@ import (
 	"github.com/BeLazy167/argus/backend/internal/memory/memorytest"
 	"github.com/jackc/pgx/v5"
 )
+
+// errFakeSearch is the injected search failure for the enrich error-path tests.
+var errFakeSearch = errors.New("supermemory search failed")
+
+// patternLeg answers only the pattern leg (Scope=both, Type=pattern) with
+// (matches, err); the rule + dismissal legs return a successful empty result.
+// The reader seam collapsed to one Search method, so a per-finding enrich runs
+// three Search calls (pattern, rule, dismissed) distinguished by q.Type.
+func patternLeg(matches []memory.PatternMatch, err error) func(memory.MemoryQuery) ([]memory.PatternMatch, error) {
+	return func(q memory.MemoryQuery) ([]memory.PatternMatch, error) {
+		if q.Type == memory.TypePattern {
+			return matches, err
+		}
+		return nil, nil
+	}
+}
 
 // fakeEnrichStore is an in-memory enrichStore for the DB-less enrich read tests.
 // Lookups miss with pgx.ErrNoRows (the non-fatal "no such row" the read path
@@ -77,9 +94,7 @@ func enrichOneComment(t *testing.T, fake *memorytest.Fake, store enrichStore) Fi
 // positive read path that never matched anything in prod.
 func TestEnrichFindings_PositiveMatch(t *testing.T) {
 	fake := &memorytest.Fake{
-		PatternFn: func(_, _, _ string) (memory.PatternMatch, bool) {
-			return memory.PatternMatch{Score: 0.7, ID: "doc1"}, true
-		},
+		SearchFn: patternLeg([]memory.PatternMatch{{Score: 0.7, ID: "doc1"}}, nil),
 	}
 	store := &fakeEnrichStore{bySupermemoryID: map[string]int64{"doc1": 99}}
 	c := enrichOneComment(t, fake, store)
@@ -102,9 +117,7 @@ func TestEnrichFindings_PositiveMatch(t *testing.T) {
 // novel-on-error conflation this change removes.
 func TestEnrichFindings_SearchError_NotNovel(t *testing.T) {
 	fake := &memorytest.Fake{
-		PatternFn: func(_, _, _ string) (memory.PatternMatch, bool) {
-			return memory.PatternMatch{}, false // search errored
-		},
+		SearchFn: patternLeg(nil, errFakeSearch), // pattern search errored
 	}
 	c := enrichOneComment(t, fake, &fakeEnrichStore{})
 
@@ -119,9 +132,7 @@ func TestEnrichFindings_SearchError_NotNovel(t *testing.T) {
 // (c) A SUCCESSFUL empty search is the only thing that marks a finding novel.
 func TestEnrichFindings_EmptyMatch_Novel(t *testing.T) {
 	fake := &memorytest.Fake{
-		PatternFn: func(_, _, _ string) (memory.PatternMatch, bool) {
-			return memory.PatternMatch{}, true // successful, no hit
-		},
+		SearchFn: patternLeg(nil, nil), // successful, no hit on every leg
 	}
 	c := enrichOneComment(t, fake, &fakeEnrichStore{})
 
@@ -130,17 +141,35 @@ func TestEnrichFindings_EmptyMatch_Novel(t *testing.T) {
 	}
 }
 
+// (b2) A rule-search error (pattern search successfully empty) must NOT mark the
+// finding novel either — this closes the #128 gate gap where the rule leg
+// swallowed errors and returned "", conflating a broken rule lookup with "no
+// rule matched" and letting a finding be miscounted as novel.
+func TestEnrichFindings_RuleSearchError_NotNovel(t *testing.T) {
+	fake := &memorytest.Fake{
+		SearchFn: func(q memory.MemoryQuery) ([]memory.PatternMatch, error) {
+			if q.Type == memory.TypeRule {
+				return nil, errFakeSearch // rule search errored
+			}
+			return nil, nil // pattern search: successful empty
+		},
+	}
+	c := enrichOneComment(t, fake, &fakeEnrichStore{})
+
+	if c.IsNewFinding {
+		t.Errorf("a finding must NOT be marked novel when the rule search errored")
+	}
+}
+
 // (d) customId-preferred resolution: the hit's own ID is a chunk id that matches
 // no supermemory_id, but the mirrored custom_id resolves the patterns row.
 func TestEnrichFindings_ResolveByCustomID(t *testing.T) {
 	fake := &memorytest.Fake{
-		PatternFn: func(_, _, _ string) (memory.PatternMatch, bool) {
-			return memory.PatternMatch{
-				Score:    0.7,
-				ID:       "chunk_zzz", // not present in bySupermemoryID
-				Metadata: map[string]string{"custom_id": "cid-1"},
-			}, true
-		},
+		SearchFn: patternLeg([]memory.PatternMatch{{
+			Score:    0.7,
+			ID:       "chunk_zzz", // not present in bySupermemoryID
+			Metadata: map[string]string{"custom_id": "cid-1"},
+		}}, nil),
 	}
 	store := &fakeEnrichStore{byCustomID: map[string]int64{"cid-1": 42}}
 	c := enrichOneComment(t, fake, store)
@@ -157,13 +186,11 @@ func TestEnrichFindings_ResolveByCustomID(t *testing.T) {
 // back to matching the hit's own ID against supermemory_id.
 func TestEnrichFindings_ResolveFallbackToSupermemoryID(t *testing.T) {
 	fake := &memorytest.Fake{
-		PatternFn: func(_, _, _ string) (memory.PatternMatch, bool) {
-			return memory.PatternMatch{
-				Score:    0.7,
-				ID:       "mem_1",
-				Metadata: map[string]string{"custom_id": "cid-unknown"},
-			}, true
-		},
+		SearchFn: patternLeg([]memory.PatternMatch{{
+			Score:    0.7,
+			ID:       "mem_1",
+			Metadata: map[string]string{"custom_id": "cid-unknown"},
+		}}, nil),
 	}
 	store := &fakeEnrichStore{bySupermemoryID: map[string]int64{"mem_1": 7}}
 	c := enrichOneComment(t, fake, store)

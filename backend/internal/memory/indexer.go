@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -55,35 +56,27 @@ type Indexer interface {
 	IndexFeedbackSignal(ctx context.Context, owner, repo string, feedback FeedbackMemory) error
 	IndexScenario(ctx context.Context, owner, repo string, scenarioID int64, description, severity string, files []string) error
 
-	// Readers.
-	// SearchPatternMatch returns the best pattern match across the repo + shared
-	// containers plus an ok flag: true when BOTH underlying searches completed
-	// (even if they matched nothing), false when either errored. Callers
-	// distinguish a genuine no-match (ok=true, zero score) from a broken search
-	// (ok=false) so a failed lookup is never miscounted as a novel finding.
-	SearchPatternMatch(ctx context.Context, owner, repo, query string, thresholds Thresholds) (PatternMatch, bool)
-	// SearchDismissedMatches finds the top previously-dismissed findings
-	// (type=feedback + action=dismissed) in the repo container, best first.
-	// The post-generation suppression pass uses the scores to drop or
-	// downgrade findings a developer already thumbed-down, and the match
-	// COUNT to suppress findings the team has repeatedly rejected.
-	SearchDismissedMatches(ctx context.Context, owner, repo, query string, thresholds Thresholds, limit int) []PatternMatch
-	SearchScenariosWithIDs(ctx context.Context, owner, repo, query, severity string, limit int) []ScenarioSearchResult
+	// Readers. The reader seam is two deep, error-honest methods: Search (typed
+	// retrieval) + Briefing (assembled review-prompt block). Every value-level
+	// read (pattern enrich, dismissal suppression, scenario dedup, triage/scoring
+	// hints, rule lookup, agentic search) is a thin pure adapter over Search, so a
+	// failed search is never silently indistinguishable from a genuine no-match.
 
+	// Search runs a typed hybrid retrieval over the requested container scope and
+	// returns the raw matches plus any search error verbatim. Callers choose the
+	// failure policy: propagate (enrich novelty gating) or degrade via BestEffort
+	// (briefing / hints / suppression). Owns its own 5s timeout; returns (nil,
+	// nil) on a disabled indexer or an empty-repo repo scope. Per-call shaping
+	// (top-1, truncation, id parsing) stays in the caller-side adapters. Defined
+	// in reader.go.
+	Search(ctx context.Context, q MemoryQuery) ([]PatternMatch, error)
 	// Briefing assembles + renders the institutional-memory block for a review
-	// prompt (specialist or single-pass, per opts.Profile), owning query
-	// build, typed retrieval, polarity/type dispatch, per-section truncation,
-	// and the per-call-site character cap. Callers embed the returned markdown
+	// prompt (specialist or single-pass, per q.Options.Profile), owning query
+	// build, typed retrieval, polarity/type dispatch, per-section truncation, and
+	// the per-call-site character cap, and returning any retrieval error so a
+	// caller can degrade the block to empty. Callers embed the returned markdown
 	// verbatim. Defined in briefing.go.
-	Briefing(ctx context.Context, owner, repo, filePath, query string, opts BriefingOptions) string
-	// SearchHints is the rerank+enriched typed read behind triage/scoring hints.
-	SearchHints(ctx context.Context, query, containerTag string, limit int, typ MemoryType) []string
-	// SearchRuleContent returns the top matching org rule content (used at
-	// finding enrichment) or "".
-	SearchRuleContent(ctx context.Context, query string) string
-	// SearchScored is the scored, error-surfacing read behind the agentic
-	// search_memory tool.
-	SearchScored(ctx context.Context, query, containerTag string, typ MemoryType, limit int) ([]PatternMatch, error)
+	Briefing(ctx context.Context, q BriefingQuery) (string, error)
 
 	// Maintenance.
 	DeleteDocument(ctx context.Context, documentID string) error
@@ -129,132 +122,17 @@ func (idx *indexerImpl) DisableLLMFilter(ctx context.Context) error {
 	return nil
 }
 
-// PatternMatch is the full result of SearchPatternMatch — content, similarity,
-// Supermemory document ID, and raw metadata map. Callers unmarshal Metadata to
-// read provenance fields (pr, pr_author, source, created_at) stamped at index
-// time.
+// PatternMatch is one search hit — content, similarity, Supermemory document
+// ID, and raw metadata map. Callers read provenance fields (pr, pr_author,
+// source, created_at) off Metadata, stamped at index time. RichContent carries
+// summary + related-memory context and is populated only when the query set
+// MemoryQuery.Enrich (the hint-render path); it is "" otherwise.
 type PatternMatch struct {
-	Content  string
-	Score    float64
-	ID       string
-	Metadata map[string]string
-}
-
-// SearchPatternMatch searches for the best matching pattern across the repo
-// container and the shared container, returning the higher-scoring match. owner
-// is accepted for interface compatibility but unused — under BYOK the
-// installation key is the tenant and all data lives in the unified `{repo}` /
-// `_shared` containers.
-func (idx *indexerImpl) SearchPatternMatch(ctx context.Context, owner, repo, query string, thresholds Thresholds) (PatternMatch, bool) {
-	_ = owner
-	// No client / no repo means memory is disabled — there is nothing to search,
-	// so report ok=true (a successful empty result): callers keep their existing
-	// "everything is novel when memory is off" behavior.
-	if idx.client == nil || repo == "" {
-		return PatternMatch{}, true
-	}
-	thresholds = thresholds.WithDefaults()
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	var repoRes, sharedRes PatternMatch
-	var repoOK, sharedOK bool
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	patternFilter := &SearchFilters{AND: []FilterCondition{{Key: "type", Value: string(TypePattern)}}}
-
-	go func() {
-		defer wg.Done()
-		repoRes, repoOK = idx.topMatch(ctx, query, RepoTagNew(repo), patternFilter, thresholds.FindingEnrich, "pattern-enrich")
-	}()
-	go func() {
-		defer wg.Done()
-		sharedRes, sharedOK = idx.topMatch(ctx, query, SharedTag, patternFilter, thresholds.FindingEnrich, "pattern-enrich")
-	}()
-
-	wg.Wait()
-	// ok only when BOTH legs succeeded — if either errored we cannot claim a
-	// genuine "no match", so the caller must leave novelty undecided.
-	return bestMatch(repoRes, sharedRes), repoOK && sharedOK
-}
-
-// SearchDismissedMatches returns the top dismissed-feedback docs semantically
-// matching query, scoped to the repo container (dismissals are never shared
-// across repos). Doc content embeds the dismissed finding text, so a
-// finding-body query surfaces prior thumbs-down on the same issue. Retrieval
-// uses the FindingEnrich floor (0.50) — at/above it the caller applies the
-// drop/downgrade/team-feedback policy; below it there is nothing worth
-// retrieving. Nil on nil client / empty repo / empty query / no hit. owner is
-// accepted for interface symmetry but unused under BYOK container scoping.
-func (idx *indexerImpl) SearchDismissedMatches(ctx context.Context, owner, repo, query string, thresholds Thresholds, limit int) []PatternMatch {
-	_ = owner
-	if idx.client == nil || repo == "" || query == "" || limit <= 0 {
-		return nil
-	}
-	thresholds = thresholds.WithDefaults()
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	return idx.searchMatches(ctx, SearchRequest{
-		Query:        query,
-		ContainerTag: RepoTagNew(repo),
-		SearchMode:   "hybrid",
-		Limit:        limit,
-		Threshold:    thresholds.FindingEnrich,
-		Rerank:       true,
-		Filters: &SearchFilters{AND: []FilterCondition{
-			{Key: "type", Value: string(TypeFeedback)},
-			{Key: "action", Value: "dismissed"},
-		}},
-	}, "dismissal")
-}
-
-// topMatch runs a one-result hybrid search on the given container + filter and
-// reports whether the search itself SUCCEEDED (ok) separately from whether it
-// matched anything. threshold is the server-side similarity cutoff (callers
-// pass thresholds.FindingEnrich); caller tags every log line so prod logs
-// reveal empty-vs-error-vs-hit per call site — this is the observability hole
-// that hid the dead per-finding enrichment read path.
-//
-// ok semantics: false ONLY when the Search call errored (network, timeout,
-// non-2xx). A successful search with zero results returns (zero, true).
-func (idx *indexerImpl) topMatch(ctx context.Context, query, containerTag string, filters *SearchFilters, threshold float64, caller string) (PatternMatch, bool) {
-	resp, err := idx.client.Search(ctx, SearchRequest{
-		Query:        query,
-		ContainerTag: containerTag,
-		SearchMode:   "hybrid",
-		Limit:        1,
-		Threshold:    threshold,
-		Rerank:       true,
-		Filters:      filters,
-	})
-	if err != nil {
-		idx.logger.Warn("memory search failed",
-			"caller", caller, "container", containerTag, "query_len", len(query), "error", err)
-		return PatternMatch{}, false
-	}
-	if resp == nil || len(resp.Results) == 0 {
-		idx.logger.Debug("memory search empty",
-			"caller", caller, "container", containerTag, "query_len", len(query), "count", 0)
-		return PatternMatch{}, true
-	}
-	pm := resultToPatternMatch(resp.Results[0])
-	idx.logger.Debug("memory search hit",
-		"caller", caller, "container", containerTag, "query_len", len(query),
-		"count", len(resp.Results), "top_similarity", fmt.Sprintf("%.3f", pm.Score))
-	return pm, true
-}
-
-// bestMatch returns the PatternMatch with the highest Score from the given candidates.
-func bestMatch(candidates ...PatternMatch) PatternMatch {
-	var best PatternMatch
-	for _, c := range candidates {
-		if c.Score > best.Score {
-			best = c
-		}
-	}
-	return best
+	Content     string
+	Score       float64
+	ID          string
+	Metadata    map[string]string
+	RichContent string
 }
 
 // resultToPatternMatch converts a Supermemory SearchResult into the lighter
@@ -771,98 +649,25 @@ func (idx *indexerImpl) IndexScenario(ctx context.Context, owner, repo string, s
 	return nil
 }
 
-// SearchScenariosWithIDs performs semantic search over scenarios and returns
-// results with scenario IDs pulled from `metadata.scenario_id`. owner is
-// accepted for interface compatibility but unused.
-func (idx *indexerImpl) SearchScenariosWithIDs(ctx context.Context, owner, repo, query, severity string, limit int) []ScenarioSearchResult {
-	_ = owner
-	if idx.client == nil {
-		return nil
-	}
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	filters := &SearchFilters{AND: []FilterCondition{{Key: "type", Value: string(TypeScenario)}}}
-	if severity != "" {
-		filters.AND = append(filters.AND, FilterCondition{Key: "severity", Value: severity})
-	}
-
-	resp, err := idx.client.Search(ctx, SearchRequest{
-		Query:        query,
-		ContainerTag: RepoTagNew(repo),
-		SearchMode:   "hybrid",
-		Rerank:       true,
-		Limit:        limit,
-		Filters:      filters,
-	})
-	if err != nil {
-		idx.logger.Warn("searching scenarios in supermemory", "error", err)
-	}
-
-	return idx.scenarioResults(resp, limit)
-}
-
-// scenarioResults extracts ScenarioSearchResult from a search response,
-// reading the scenario id from `metadata.scenario_id`, deduping by id, and
-// capping at limit. Results arrive already sorted by similarity descending.
-func (idx *indexerImpl) scenarioResults(resp *SearchResponse, limit int) []ScenarioSearchResult {
-	if resp == nil {
-		return nil
-	}
-	seen := map[int64]struct{}{}
-	var out []ScenarioSearchResult
-	for _, r := range resp.Results {
-		content := r.Content()
-		id := scenarioIDFromMetadata(r.Metadata)
-		if id == 0 {
-			idx.logger.Warn("scenario missing id", "doc_id", r.ID, "content_head", util.Truncate(content, 80, false))
-			continue
-		}
-		if _, dup := seen[id]; dup {
-			continue
-		}
-		seen[id] = struct{}{}
-		out = append(out, ScenarioSearchResult{ID: id, Content: content, Similarity: r.Similarity})
-		if limit > 0 && len(out) >= limit {
-			break
-		}
-	}
-	return out
-}
-
-// scenarioIDFromMetadata parses the scenario_id key out of a raw metadata JSON
-// blob. Returns 0 when absent or unparseable.
-func scenarioIDFromMetadata(raw json.RawMessage) int64 {
-	if len(raw) == 0 {
-		return 0
-	}
-	var md map[string]string
-	if err := json.Unmarshal(raw, &md); err != nil {
-		return 0
-	}
-	if v, ok := md["scenario_id"]; ok {
-		if parsed, err := strconv.ParseInt(v, 10, 64); err == nil {
-			return parsed
-		}
-	}
-	return 0
-}
-
 // specialistBlock fetches (1) file-scoped synthesis via exact metadata lookup,
-// (2) repo-scoped semantic hits across patterns/scenarios/feedback, (3)
-// shared semantic hits over patterns. Replaces the legacy 5-parallel-query
-// block — cuts 5×N searches per PR to 2×N plus one list call. Owns its own 5s
-// timeout; consumed only by Briefing (assembleBriefing) inside this module.
-func (idx *indexerImpl) specialistBlock(ctx context.Context, owner, repo, filePath, specialistQuery string, thresholds Thresholds) MemoryBlock {
-	_ = owner
+// (2) repo-scoped semantic hits across patterns/scenarios/feedback, (3) shared
+// semantic hits over patterns. Replaces the legacy 5-parallel-query block — cuts
+// 5×N searches per PR to 2×N plus one list call. Owns its own 5s timeout;
+// consumed only by Briefing (assembleBriefing) inside this module. Returns the
+// first leg error so Briefing can surface a broken retrieval instead of silently
+// serving a partial block; the repo (OR-of-types) and shared (numeric
+// confidence) legs keep bespoke SearchRequests the single-type MemoryQuery does
+// not model, but route through the shared error-honest runSearch core.
+func (idx *indexerImpl) specialistBlock(ctx context.Context, repo, filePath, specialistQuery string, thresholds Thresholds) (MemoryBlock, error) {
 	if idx.client == nil || repo == "" {
-		return MemoryBlock{}
+		return MemoryBlock{}, nil
 	}
 	thresholds = thresholds.WithDefaults()
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	var block MemoryBlock
+	var synthErr, repoErr, sharedErr error
 	var wg sync.WaitGroup
 	wg.Add(3)
 
@@ -875,7 +680,8 @@ func (idx *indexerImpl) specialistBlock(ctx context.Context, owner, repo, filePa
 		if filePath == "" {
 			return
 		}
-		resp, err := idx.client.Search(ctx, SearchRequest{
+		var matches []PatternMatch
+		matches, synthErr = idx.runSearch(ctx, SearchRequest{
 			Query:        "file synthesis",
 			ContainerTag: RepoTagNew(repo),
 			SearchMode:   "hybrid",
@@ -886,21 +692,16 @@ func (idx *indexerImpl) specialistBlock(ctx context.Context, owner, repo, filePa
 				{Key: "type", Value: string(TypeSynthesis)},
 				{Key: "file_path", Value: filePath},
 			}},
-		})
-		if err != nil {
-			idx.logger.Debug("specialist synthesis search failed", "error", err, "repo", repo, "file", filePath)
-			return
+		}, false)
+		if len(matches) > 0 {
+			block.Synthesis = matches[0].Content
 		}
-		if resp == nil || len(resp.Results) == 0 {
-			return
-		}
-		block.Synthesis = resp.Results[0].Content()
 	}()
 
 	// 2. Repo signal — semantic, type IN {pattern, scenario, feedback}.
 	go func() {
 		defer wg.Done()
-		block.Repo = idx.searchMatches(ctx, SearchRequest{
+		block.Repo, repoErr = idx.runSearch(ctx, SearchRequest{
 			Query:        specialistQuery,
 			ContainerTag: RepoTagNew(repo),
 			SearchMode:   "hybrid",
@@ -912,7 +713,7 @@ func (idx *indexerImpl) specialistBlock(ctx context.Context, owner, repo, filePa
 				{Key: "type", Value: string(TypeScenario)},
 				{Key: "type", Value: string(TypeFeedback)},
 			}},
-		}, "briefing")
+		}, false)
 	}()
 
 	// 3. Shared patterns — semantic against `_shared`. The AND filter excludes
@@ -922,7 +723,7 @@ func (idx *indexerImpl) specialistBlock(ctx context.Context, owner, repo, filePa
 	// the threshold as a float, not a lexicographic string.
 	go func() {
 		defer wg.Done()
-		block.Shared = idx.searchMatches(ctx, SearchRequest{
+		block.Shared, sharedErr = idx.runSearch(ctx, SearchRequest{
 			Query:        specialistQuery,
 			ContainerTag: SharedTag,
 			SearchMode:   "hybrid",
@@ -933,32 +734,27 @@ func (idx *indexerImpl) specialistBlock(ctx context.Context, owner, repo, filePa
 				{Key: "type", Value: string(TypePattern)},
 				FilterNumeric("confidence", ">=", SharedConfidenceFloorStr),
 			}},
-		}, "briefing")
+		}, false)
 	}()
 
 	wg.Wait()
-	return block
-}
-
-// searchMatches runs a search and translates the result list into
-// []PatternMatch with metadata already unmarshaled. Returns nil on error,
-// logging it at Warn (tagged with caller) so a broken dismissal/briefing
-// search is no longer indistinguishable from an empty one in prod logs.
-func (idx *indexerImpl) searchMatches(ctx context.Context, req SearchRequest, caller string) []PatternMatch {
-	resp, err := idx.client.Search(ctx, req)
-	if err != nil {
-		idx.logger.Warn("memory search failed",
-			"caller", caller, "container", req.ContainerTag, "query_len", len(req.Query), "error", err)
-		return nil
+	// Per-leg degradation: keep whatever legs succeeded, Warn the failures,
+	// and error only when ALL legs failed (nothing usable). Callers treat the
+	// returned error as "no institutional memory available at all".
+	failures := 0
+	for _, l := range []struct {
+		name string
+		err  error
+	}{{"specialist.synthesis", synthErr}, {"specialist.repo_patterns", repoErr}, {"specialist.shared_patterns", sharedErr}} {
+		if l.err != nil {
+			failures++
+			idx.warnLeg(l.name, RepoTagNew(repo), 0, l.err)
+		}
 	}
-	if resp == nil {
-		return nil
+	if failures == 3 {
+		return MemoryBlock{}, cmp.Or(synthErr, repoErr, sharedErr)
 	}
-	out := make([]PatternMatch, 0, len(resp.Results))
-	for _, r := range resp.Results {
-		out = append(out, resultToPatternMatch(r))
-	}
-	return out
+	return block, nil
 }
 
 // DeleteDocument removes a document from Supermemory by ID.

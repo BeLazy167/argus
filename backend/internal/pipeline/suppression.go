@@ -1,12 +1,35 @@
 package pipeline
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
 
 	"github.com/BeLazy167/argus/backend/internal/memory"
 )
+
+// dismissalSearch retrieves the top dismissed-feedback matches (type=feedback,
+// action=dismissed) semantically matching the finding body in the repo container
+// — the read half of dismissal suppression. An empty body has nothing to query,
+// so it short-circuits to no matches. Retrieval uses the FindingEnrich floor;
+// the caller degrades a search error via memory.BestEffort (suppression is
+// non-fatal). Result shaping (drop/downgrade policy) lives in evaluateDismissals.
+func dismissalSearch(ctx context.Context, indexer memory.Indexer, repo, body string, threshold float64) ([]memory.PatternMatch, error) {
+	if body == "" {
+		return nil, nil
+	}
+	return indexer.Search(ctx, memory.MemoryQuery{
+		Query:     body,
+		Repo:      repo,
+		Scope:     memory.ScopeRepo,
+		Type:      memory.TypeFeedback,
+		Filters:   []memory.FilterCondition{{Key: "action", Value: "dismissed"}},
+		Limit:     dismissalSearchLimit,
+		Threshold: threshold,
+		Rerank:    true,
+	})
+}
 
 // Dismissal-match suppression policy (locked). A generated finding that
 // semantically matches a finding a developer previously 👎-dismissed in this

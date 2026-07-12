@@ -17,17 +17,13 @@ import (
 // zero value and every write is a no-op — except it also RECORDS writes. Set a
 // *Fn field to stub the corresponding read.
 type Fake struct {
-	// Read stubs. Nil → zero-value return (the no-op default).
-	BriefingFn    func(owner, repo, filePath, query string, opts memory.BriefingOptions) string
-	HintsFn       func(query, containerTag string, limit int, typ memory.MemoryType) []string
-	RuleContentFn func(query string) string
-	ScoredFn      func(query, containerTag string, typ memory.MemoryType, limit int) ([]memory.PatternMatch, error)
-	// PatternFn stubs SearchPatternMatch. The bool return is the search-ok flag
-	// (true = search completed, even if empty; false = search errored). Nil ⇒
-	// (zero match, true) — a successful empty search.
-	PatternFn   func(owner, repo, query string) (memory.PatternMatch, bool)
-	DismissedFn func(owner, repo, query string, limit int) []memory.PatternMatch
-	ScenariosFn func(owner, repo, query, severity string, limit int) []memory.ScenarioSearchResult
+	// Read stubs. Nil → the no-op default: (nil, nil) / ("", nil). The reader
+	// seam collapsed to two deep methods (Search + Briefing), so these two stubs
+	// drive every value-level read the pipeline performs; both carry an error
+	// return so a test can inject a failed search (propagate vs degrade coverage)
+	// and switch behavior on the query (q.Type / q.Scope) per call site.
+	SearchFn   func(q memory.MemoryQuery) ([]memory.PatternMatch, error)
+	BriefingFn func(q memory.BriefingQuery) (string, error)
 
 	mu          sync.Mutex
 	Feedback    []memory.FeedbackMemory // IndexFeedbackSignal
@@ -93,53 +89,18 @@ func (f *Fake) IndexScenario(_ context.Context, owner, repo string, scenarioID i
 	return nil
 }
 
-func (f *Fake) SearchPatternMatch(_ context.Context, owner, repo, query string, _ memory.Thresholds) (memory.PatternMatch, bool) {
-	if f.PatternFn != nil {
-		return f.PatternFn(owner, repo, query)
-	}
-	return memory.PatternMatch{}, true
-}
-
-func (f *Fake) SearchDismissedMatches(_ context.Context, owner, repo, query string, _ memory.Thresholds, limit int) []memory.PatternMatch {
-	if f.DismissedFn != nil {
-		return f.DismissedFn(owner, repo, query, limit)
-	}
-	return nil
-}
-
-func (f *Fake) SearchScenariosWithIDs(_ context.Context, owner, repo, query, severity string, limit int) []memory.ScenarioSearchResult {
-	if f.ScenariosFn != nil {
-		return f.ScenariosFn(owner, repo, query, severity, limit)
-	}
-	return nil
-}
-
-func (f *Fake) Briefing(_ context.Context, owner, repo, filePath, query string, opts memory.BriefingOptions) string {
-	if f.BriefingFn != nil {
-		return f.BriefingFn(owner, repo, filePath, query, opts)
-	}
-	return ""
-}
-
-func (f *Fake) SearchHints(_ context.Context, query, containerTag string, limit int, typ memory.MemoryType) []string {
-	if f.HintsFn != nil {
-		return f.HintsFn(query, containerTag, limit, typ)
-	}
-	return nil
-}
-
-func (f *Fake) SearchRuleContent(_ context.Context, query string) string {
-	if f.RuleContentFn != nil {
-		return f.RuleContentFn(query)
-	}
-	return ""
-}
-
-func (f *Fake) SearchScored(_ context.Context, query, containerTag string, typ memory.MemoryType, limit int) ([]memory.PatternMatch, error) {
-	if f.ScoredFn != nil {
-		return f.ScoredFn(query, containerTag, typ, limit)
+func (f *Fake) Search(_ context.Context, q memory.MemoryQuery) ([]memory.PatternMatch, error) {
+	if f.SearchFn != nil {
+		return f.SearchFn(q)
 	}
 	return nil, nil
+}
+
+func (f *Fake) Briefing(_ context.Context, q memory.BriefingQuery) (string, error) {
+	if f.BriefingFn != nil {
+		return f.BriefingFn(q)
+	}
+	return "", nil
 }
 
 func (f *Fake) DeleteDocument(_ context.Context, documentID string) error {

@@ -163,7 +163,22 @@ func (th *ToolHandler) searchMemory(ctx context.Context, argsJSON string) (strin
 		return fmt.Sprintf("Invalid type filter %q: must be one of %v (or omit to search all kinds)", args.Type, agenticMemoryTypeValues()), nil
 	}
 
-	results, err := th.indexer.SearchScored(ctx, args.Query, args.ContainerTag, memory.MemoryType(args.Type), 5)
+	// Map the (already-allowlisted) raw container tag to a scope: SharedTag →
+	// shared, otherwise the review's repo container. The search error PROPAGATES
+	// to the LLM (distinct from an empty result) — the agentic tool must not
+	// present a broken search as "no results".
+	scope, repo := memory.ScopeRepo, th.repo
+	if args.ContainerTag == memory.SharedTag {
+		scope, repo = memory.ScopeShared, ""
+	}
+	results, err := th.indexer.Search(ctx, memory.MemoryQuery{
+		Query:     args.Query,
+		Repo:      repo,
+		Scope:     scope,
+		Type:      memory.MemoryType(args.Type),
+		Limit:     5,
+		Threshold: 0.5,
+	})
 	if err != nil {
 		return fmt.Sprintf("search failed: %s", err), nil
 	}

@@ -522,8 +522,9 @@ func fetchScoringContext(ctx context.Context, indexer memory.Indexer, owner, rep
 
 	repoTag := memory.RepoTagNew(repo)
 
-	// Parallel reads; each SearchHints owns its own 5s timeout + non-fatal Warn
-	// (module policy) so a slow search can't stall the scoring pipeline.
+	// Parallel reads; each searchHints degrades to nil on error via the single
+	// BestEffort decorator and the deep Search owns the 5s timeout, so a
+	// slow/broken search can't stall or fail the scoring pipeline.
 	var repoResults []string
 	var fileResults []string
 	var wg sync.WaitGroup
@@ -534,7 +535,10 @@ func fetchScoringContext(ctx context.Context, indexer memory.Indexer, owner, rep
 		// feedback, syntheses, traces and review comments. Scoring calibration
 		// ("matching confirmed patterns should score higher") wants learned
 		// patterns only — an untyped search dilutes it with unrelated doc types.
-		repoResults = indexer.SearchHints(ctx, "confirmed review patterns conventions common issues", repoTag, 5, memory.TypePattern)
+		repoResults = searchHints(ctx, indexer, "scoring-pattern", repoTag, memory.MemoryQuery{
+			Query: "confirmed review patterns conventions common issues",
+			Repo:  repo, Scope: memory.ScopeRepo, Type: memory.TypePattern, Limit: 5,
+		})
 	}()
 	go func() {
 		defer wg.Done()
@@ -545,7 +549,10 @@ func fetchScoringContext(ctx context.Context, indexer memory.Indexer, owner, rep
 			}
 			// type=synthesis: "Known File Context" is the file-scoped review
 			// history summary; pin the type so scenarios/patterns don't leak in.
-			fileResults = indexer.SearchHints(ctx, filePathsQuery("file synthesis ", paths), repoTag, 3, memory.TypeSynthesis)
+			fileResults = searchHints(ctx, indexer, "scoring-synthesis", repoTag, memory.MemoryQuery{
+				Query: filePathsQuery("file synthesis ", paths),
+				Repo:  repo, Scope: memory.ScopeRepo, Type: memory.TypeSynthesis, Limit: 3,
+			})
 		}
 	}()
 	wg.Wait()
