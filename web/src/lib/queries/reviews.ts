@@ -51,6 +51,9 @@ export const useRetryReview = () => {
   return useRetryReviewMutation({
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: useReviews.getKey() });
+      // Also refresh the detail query so the retried review leaves its
+      // terminal state and the live stream reconnects (was stranded before).
+      qc.invalidateQueries({ queryKey: useReview.getKey() });
       qc.invalidateQueries({ queryKey: ["stats"] });
     },
     onError: (err) => console.error("[retry-review] failed:", err.message),
