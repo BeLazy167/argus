@@ -22,9 +22,6 @@ issues:
     - path: internal/pipeline/dedup
       linters: [gosimple]
       text: "S1021"
-    # Pre-existing unused functions in orchestrator (agent framework, broadcast)
-    - path: internal/pipeline/orchestrator\.go
-      linters: [unused]
     # Pre-existing unused functions in old dedup
     - path: internal/pipeline/dedup\.go
       linters: [unused]

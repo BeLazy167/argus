@@ -37,18 +37,13 @@ import (
 )
 
 // MaxTokens budgets for LLM calls across the pipeline. Kept together so the
-// next model-tuning pass touches one file, not ten.
+// next model-tuning pass touches one file, not ten. (Lead-agent coordination
+// budgets live beside their sole callers in coordination.go.)
 //
 // gpt-5.x reasoning tokens count against max_completion_tokens, so these are
 // sized with headroom for invisible reasoning ON TOP of the visible JSON
-// output. 4000 is the baseline (2000 output + 2000 reasoning), 8000 applies
-// to the lead-agent briefing stage whose JSON output naturally runs larger
-// (leadBrief).
+// output: 4000 is the baseline (2000 output + 2000 reasoning).
 const (
-	// Lead-agent coordination calls.
-	leadBriefMaxTokens   = 8000
-	blastRadiusMaxTokens = 4000
-
 	// Coordination validators — intent extract, issue acceptance, cross-PR.
 	intentMaxTokens     = 4000
 	acceptanceMaxTokens = 4000
@@ -4915,63 +4910,6 @@ func commentTitle(c FileComment) string {
 		return src[:idx[0]+1]
 	}
 	return util.Truncate(src, 300, true)
-}
-
-// mergeAdjacentComments combines same-file comments within 5 lines into range comments.
-// Two comments on client.ts:39 and client.ts:41 become one comment spanning lines 39-41.
-func mergeAdjacentComments(comments []ghpkg.ReviewComment, validLines map[string]map[int]bool) []ghpkg.ReviewComment {
-	if len(comments) <= 1 {
-		return comments
-	}
-
-	// Group by path
-	byPath := make(map[string][]ghpkg.ReviewComment)
-	for _, c := range comments {
-		byPath[c.Path] = append(byPath[c.Path], c)
-	}
-
-	// Sort paths for deterministic comment ordering
-	paths := make([]string, 0, len(byPath))
-	for p := range byPath {
-		paths = append(paths, p)
-	}
-	sort.Strings(paths)
-
-	var result []ghpkg.ReviewComment
-	for _, p := range paths {
-		group := byPath[p]
-		// Sort by line number
-		sort.Slice(group, func(i, j int) bool { return group[i].Line < group[j].Line })
-
-		i := 0
-		for i < len(group) {
-			merged := group[i]
-			anchorLine := merged.Line // fixed anchor to prevent unbounded chaining
-			j := i + 1
-			// Merge adjacent comments within 5 lines of the anchor
-			for j < len(group) && group[j].Line-anchorLine <= 5 {
-				// Set start_line to span the range, validate it
-				startLine := anchorLine
-				if merged.StartLine > 0 && merged.StartLine < startLine {
-					startLine = merged.StartLine
-				}
-				fileValid := validLines[merged.Path]
-				if fileValid != nil && fileValid[startLine] {
-					merged.StartLine = startLine
-				}
-				merged.Line = group[j].Line
-				merged.Body += "\n\n---\n\n" + group[j].Body
-				j++
-			}
-			// Guard: StartLine must be strictly less than Line
-			if merged.StartLine > 0 && merged.StartLine >= merged.Line {
-				merged.StartLine = 0
-			}
-			result = append(result, merged)
-			i = j
-		}
-	}
-	return result
 }
 
 type diagramSpec struct {

@@ -13,17 +13,17 @@ import (
 type EventType string
 
 const (
-	EventStageChanged   EventType = "stage_changed"
-	EventTriageComplete EventType = "triage_complete"
-	EventComment        EventType = "comment"
-	EventScoringUpdate  EventType = "scoring_update"
-	EventSynthesis      EventType = "synthesis"
-	EventPatternLearned EventType = "pattern_learned"
-	EventCompleted      EventType = "completed"
-	EventError              EventType = "error"
-	EventCancelled          EventType = "cancelled"
-	EventFileReviewStarted  EventType = "file_review_started"
-	EventTokenUpdate        EventType = "token_update"
+	EventStageChanged      EventType = "stage_changed"
+	EventTriageComplete    EventType = "triage_complete"
+	EventComment           EventType = "comment"
+	EventScoringUpdate     EventType = "scoring_update"
+	EventSynthesis         EventType = "synthesis"
+	EventPatternLearned    EventType = "pattern_learned"
+	EventCompleted         EventType = "completed"
+	EventError             EventType = "error"
+	EventCancelled         EventType = "cancelled"
+	EventFileReviewStarted EventType = "file_review_started"
+	EventTokenUpdate       EventType = "token_update"
 
 	// Per-sub-step events — each distinct LLM call, memory upsert, or GitHub API
 	// action that previously fired no event. EventMemoryIndexed payload carries
@@ -35,10 +35,7 @@ const (
 	EventFindingsEnriched    EventType = "findings_enriched"
 	EventBriefGenerated      EventType = "brief_generated"
 	EventLeadBrief           EventType = "lead_brief"
-	EventLeadBroadcast       EventType = "lead_broadcast"
-	EventSecondPass          EventType = "second_pass"
 	EventBlastRadius         EventType = "blast_radius"
-	EventLeadCrossCheck      EventType = "lead_cross_check"
 	EventAcceptanceChecked   EventType = "acceptance_checked"
 	EventCrossPRChecked      EventType = "cross_pr_checked"
 	EventSimulationsComplete EventType = "simulations_complete"

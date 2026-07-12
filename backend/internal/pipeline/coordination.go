@@ -17,6 +17,18 @@ import (
 // The broadcast/cross-check stages and their helpers were dormant (no callers,
 // never registered) and were deleted after the relocation exposed them.
 
+// Lead-agent LLM token budgets. Pinned together so the next model-tuning pass
+// touches one place, not two.
+//
+// gpt-5.x reasoning tokens count against max_completion_tokens, so these are
+// sized with headroom for invisible reasoning ON TOP of the visible JSON
+// output: 4000 is the baseline (2000 output + 2000 reasoning); 8000 applies to
+// the briefing stage whose JSON output naturally runs larger (leadBrief).
+const (
+	leadBriefMaxTokens   = 8000
+	blastRadiusMaxTokens = 4000
+)
+
 // ─── Lead Agent Stage Wrappers ───────────────────────────────────────────────
 
 // leadBriefStage runs the Lead Agent's briefing phase (Phase 1).

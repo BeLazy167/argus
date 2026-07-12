@@ -228,7 +228,7 @@ func (sm *StateMachine) handleCancelled(ctx context.Context, run *PipelineRun) e
 // Triage is fast -- just re-run on recovery. Everything after review is persisted.
 func shouldPersist(state PipelineState) bool {
 	switch state {
-	case StateReviewing, StateBriefing, StateDeduping, StateValidating, StateScoring, StateBroadcasting, StateCrossChecking, StatePass2, StateSynthesizing, StatePosting, StateCompleted, StateFailed, StateCancelled:
+	case StateReviewing, StateBriefing, StateDeduping, StateValidating, StateScoring, StatePass2, StateSynthesizing, StatePosting, StateCompleted, StateFailed, StateCancelled:
 		return true
 	}
 	return false
