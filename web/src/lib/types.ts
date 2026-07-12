@@ -1,13 +1,16 @@
-export type Installation = {
-  id: number;
-  installation_id: number;
-  org_login: string;
-  clerk_org_id?: string;
-  plan_tier: string;
-  created_at: string;
-  suspended_at?: string;
-};
+import type { FindingState } from "./generated/api-types";
+import type { ReviewContract } from "./generated/contract-types";
 
+// Wire types generated from Go structs by tygo (see backend/tygo.yaml).
+// Re-exported here so consumers keep importing everything from "@/lib/types".
+// Regenerate after changing a Go wire struct: `cd backend && make tygo`.
+// FindingState and ReviewContract are also used internally below.
+export type { FindingState, ReviewContract };
+export type { GaugeRow, Installation, ModelConfig, Stats } from "./generated/api-types";
+
+// The types below stay hand-written: the wire transforms them (masked/derived
+// fields) or the frontend refines them (JSONB shapes, unions the Go side leaves
+// as plain strings).
 export type Repo = {
   id: number;
   installation_id: number;
@@ -65,36 +68,6 @@ export type TokenUsage = {
   reply?: StageTokens;
   total: StageTokens;
 };
-
-/**
- * Per-PR routing contract the pipeline ran under (reviews.review_contract).
- * Deterministic + intent-LLM signals decide how deeply the PR is reviewed and
- * how much proof a finding needs. Null/absent on reviews predating the contract.
- */
-export type ReviewContract = {
-  /** production | migration | one_time_script | test | config | docs | generated | revert */
-  change_class: string;
-  /** normal | raised | max — how much evidence a finding needs before posting. */
-  evidence_bar: string;
-  /** full | single | skim — how deeply the pipeline reviewed the PR. */
-  depth: string;
-  /** refactor/cleanup title: forced behavior-equivalence attention. */
-  scrutiny_bump?: boolean;
-  /** too large for confident review; still reviewed, posted with reduced confidence. */
-  unreviewable?: boolean;
-  /** raw signal tokens (e.g. "floor:security", "llm:docs@0.92"). */
-  signals?: string[];
-  /** deterministic | llm-pending | llm | llm-default */
-  source?: string;
-};
-
-/** Follow-up-ledger lifecycle state of a finding (review_comments.state). */
-export type FindingState =
-  | "posted"
-  | "addressed"
-  | "dismissed"
-  | "deferred"
-  | "suppressed";
 
 export type Review = {
   id: string;
@@ -188,34 +161,6 @@ export type Rule = {
   enabled: boolean;
   created_at: string;
   updated_at: string;
-};
-
-export type ModelConfig = {
-  id: number;
-  repo_id?: number;
-  installation_id?: number;
-  stage: string;
-  provider: string;
-  model: string;
-  base_url?: string;
-  max_tokens: number;
-  temperature: number;
-  created_at: string;
-  updated_at: string;
-};
-
-export type Stats = {
-  total_reviews: number;
-  completed_today: number;
-  avg_score: number;
-  active_repos: number;
-  critical_finds: number;
-  pending_reviews: number;
-  catch_rate: number;
-  prs_this_week: number;
-  high_risk_count: number;
-  avg_review_time_ms: number;
-  deep_review_count: number;
 };
 
 export type ActivityLog = {

@@ -39,6 +39,6 @@
     }
   },
   "files": {
-    "includes": ["**", "!.next", "!node_modules", "!**/*.css"]
+    "includes": ["**", "!.next", "!node_modules", "!**/*.css", "!src/lib/generated"]
   }
 }

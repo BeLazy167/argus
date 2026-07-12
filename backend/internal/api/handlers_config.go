@@ -143,19 +143,19 @@ func (s *Server) testConfig(w http.ResponseWriter, r *http.Request) {
 	latency := time.Since(start).Milliseconds()
 
 	if err != nil {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"success":    false,
-			"error":      err.Error(),
-			"latency_ms": latency,
+		writeJSON(w, http.StatusOK, ConfigTestResponse{
+			Success:   false,
+			Error:     err.Error(),
+			LatencyMs: latency,
 		})
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"success":    true,
-		"response":   resp.Content,
-		"latency_ms": latency,
-		"tokens":     resp.TokensUsed.TotalTokens,
+	writeJSON(w, http.StatusOK, ConfigTestResponse{
+		Success:   true,
+		Response:  resp.Content,
+		LatencyMs: latency,
+		Tokens:    resp.TokensUsed.TotalTokens,
 	})
 }
 
@@ -376,29 +376,10 @@ func (s *Server) listProviderKeys(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
-	// Mask keys — show only last 4 chars
-	type maskedKey struct {
-		ID             int64   `json:"id"`
-		InstallationID int64   `json:"installation_id"`
-		RepoID         *int64  `json:"repo_id,omitempty"`
-		Provider       string  `json:"provider"`
-		APIKeyMasked   string  `json:"api_key_masked"`
-		BaseURL        *string `json:"base_url,omitempty"`
-		CreatedAt      string  `json:"created_at"`
-		UpdatedAt      string  `json:"updated_at"`
-	}
-	result := make([]maskedKey, len(keys))
+	// Mask keys — show only last 4 chars.
+	result := make([]ProviderKeyResponse, len(keys))
 	for i, k := range keys {
-		result[i] = maskedKey{
-			ID:             k.ID,
-			InstallationID: k.InstallationID,
-			RepoID:         k.RepoID,
-			Provider:       k.Provider,
-			APIKeyMasked:   maskKey(k.KeyHint),
-			BaseURL:        k.BaseURL,
-			CreatedAt:      k.CreatedAt.Format("2006-01-02T15:04:05Z"),
-			UpdatedAt:      k.UpdatedAt.Format("2006-01-02T15:04:05Z"),
-		}
+		result[i] = newProviderKeyResponse(k)
 	}
 	writeJSON(w, http.StatusOK, result)
 }
@@ -458,14 +439,7 @@ func (s *Server) upsertProviderKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.auditSettings(r, installationID, "provider_key.upsert", map[string]interface{}{"provider": body.Provider})
-	writeJSON(w, http.StatusOK, map[string]any{
-		"id":              pk.ID,
-		"installation_id": pk.InstallationID,
-		"repo_id":         pk.RepoID,
-		"provider":        pk.Provider,
-		"api_key_masked":  maskKey(pk.KeyHint),
-		"base_url":        pk.BaseURL,
-	})
+	writeJSON(w, http.StatusOK, newProviderKeyResponse(*pk))
 }
 
 func (s *Server) deleteProviderKey(w http.ResponseWriter, r *http.Request) {

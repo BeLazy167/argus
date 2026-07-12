@@ -1,7 +1,17 @@
-.PHONY: build run dev test lint migrate-up migrate-down docker-up docker-down deploy secrets
+.PHONY: build run dev test lint tygo tygo-check migrate-up migrate-down docker-up docker-down deploy secrets
+
+TYGO_VERSION := v0.2.21
 
 build:
 	go build -o ./bin/argus ./cmd/argus
+
+# tygo regenerates web/src/lib/generated/*.ts from the Go wire structs.
+tygo:
+	go run github.com/gzuidhof/tygo@$(TYGO_VERSION) generate
+
+# tygo-check regenerates and fails if the committed output drifts (CI gate).
+tygo-check: tygo
+	git diff --exit-code -- ../web/src/lib/generated
 
 run: build
 	./bin/argus

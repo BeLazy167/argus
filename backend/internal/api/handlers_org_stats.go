@@ -64,25 +64,25 @@ func (s *Server) statsOverview(w http.ResponseWriter, r *http.Request) {
 		s.logger.Error("stats overview: learn-layer counts", "error", llErr)
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"total_reviews":   row.TotalReviews,
-		"total_cost":      row.TotalCost,
-		"avg_score":       row.AvgScore,
-		"avg_review_secs": row.AvgReviewSecs,
-		"total_tokens":    row.TotalTokens,
-		"critical_finds":  row.CriticalFinds,
-		"catch_rate":      toFloat64(row.CatchRate),
+	writeJSON(w, http.StatusOK, StatsOverviewResponse{
+		TotalReviews:  row.TotalReviews,
+		TotalCost:     row.TotalCost,
+		AvgScore:      row.AvgScore,
+		AvgReviewSecs: row.AvgReviewSecs,
+		TotalTokens:   row.TotalTokens,
+		CriticalFinds: row.CriticalFinds,
+		CatchRate:     toFloat64(row.CatchRate),
 		// Automated hygiene (auto-resolve).
-		"auto_resolve_events":    ar.EventCount,
-		"auto_resolves":          ar.ResolvedTotal,
-		"auto_resolve_attempts":  ar.AttemptedTotal,
-		"auto_resolve_api_calls": ar.APICallsTotal,
-		// Learn layer — rows that the memory/learn path produced
-		// this period. All BYOK-paid side-effects users can reconcile.
-		"patterns_learned": ll.PatternsLearned,
-		"scenarios_stored": ll.ScenariosStored,
-		"decision_traces":  ll.DecisionTraces,
-		"feedback_indexed": ll.FeedbackIndexed,
+		AutoResolveEvents:   ar.EventCount,
+		AutoResolves:        ar.ResolvedTotal,
+		AutoResolveAttempts: ar.AttemptedTotal,
+		AutoResolveAPICalls: ar.APICallsTotal,
+		// Learn layer — rows that the memory/learn path produced this period.
+		// All BYOK-paid side-effects users can reconcile.
+		PatternsLearned: ll.PatternsLearned,
+		ScenariosStored: ll.ScenariosStored,
+		DecisionTraces:  ll.DecisionTraces,
+		FeedbackIndexed: ll.FeedbackIndexed,
 	})
 }
 
@@ -285,36 +285,28 @@ func (s *Server) statsFindings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	type sevEntry struct {
-		Severity string `json:"severity"`
-		Count    int    `json:"count"`
-	}
-	type catEntry struct {
-		Category string `json:"category"`
-		Count    int    `json:"count"`
-	}
-	sevOut := make([]sevEntry, 0, len(sevRows))
+	sevOut := make([]SeverityCount, 0, len(sevRows))
 	for _, r := range sevRows {
 		sev := ""
 		if r.Severity != nil {
 			sev = *r.Severity
 		}
-		sevOut = append(sevOut, sevEntry{Severity: sev, Count: r.Count})
+		sevOut = append(sevOut, SeverityCount{Severity: sev, Count: r.Count})
 	}
-	catOut := make([]catEntry, 0, len(catRows))
+	catOut := make([]CategoryCount, 0, len(catRows))
 	for _, r := range catRows {
 		cat := ""
 		if r.Category != nil {
 			cat = *r.Category
 		}
-		catOut = append(catOut, catEntry{Category: cat, Count: r.Count})
+		catOut = append(catOut, CategoryCount{Category: cat, Count: r.Count})
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"by_severity":    sevOut,
-		"by_category":    catOut,
-		"new_findings":   newVsPattern.NewFindings,
-		"pattern_matches": newVsPattern.PatternMatches,
+	writeJSON(w, http.StatusOK, FindingsBreakdownResponse{
+		BySeverity:     sevOut,
+		ByCategory:     catOut,
+		NewFindings:    newVsPattern.NewFindings,
+		PatternMatches: newVsPattern.PatternMatches,
 	})
 }
 
@@ -329,13 +321,13 @@ func (s *Server) statsAdoption(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"deep_review_pct":      toFloat64(row.DeepReviewPct),
-		"incremental_pct":      toFloat64(row.IncrementalPct),
-		"avg_files_per_review": toFloat64(row.AvgFilesPerReview),
-		"active_repos":         row.ActiveRepos,
-		"total_enabled_repos":  row.TotalEnabledRepos,
-		"total_repos":          row.TotalRepos,
+	writeJSON(w, http.StatusOK, AdoptionResponse{
+		DeepReviewPct:     toFloat64(row.DeepReviewPct),
+		IncrementalPct:    toFloat64(row.IncrementalPct),
+		AvgFilesPerReview: toFloat64(row.AvgFilesPerReview),
+		ActiveRepos:       row.ActiveRepos,
+		TotalEnabledRepos: row.TotalEnabledRepos,
+		TotalRepos:        row.TotalRepos,
 	})
 }
 
@@ -397,11 +389,11 @@ func (s *Server) statsReviewTimes(w http.ResponseWriter, r *http.Request) {
 			p95 = rows[n-1]
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"count": n,
-		"p50":   p50,
-		"p75":   p75,
-		"p95":   p95,
+	writeJSON(w, http.StatusOK, LatencyPercentilesResponse{
+		Count: n,
+		P50:   p50,
+		P75:   p75,
+		P95:   p95,
 	})
 }
 

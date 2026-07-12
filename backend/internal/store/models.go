@@ -245,10 +245,10 @@ type ScenarioRun struct {
 
 // ScenarioKPIs powers the 4-card summary row at the top of /scenarios.
 type ScenarioKPIs struct {
-	Active          int `json:"active"`
-	BrokenThisWeek  int `json:"broken_this_week"`
-	FixedThisWeek   int `json:"fixed_this_week"`
-	Outdated        int `json:"outdated"`
+	Active         int `json:"active"`
+	BrokenThisWeek int `json:"broken_this_week"`
+	FixedThisWeek  int `json:"fixed_this_week"`
+	Outdated       int `json:"outdated"`
 }
 
 type Stats struct {
@@ -263,6 +263,24 @@ type Stats struct {
 	HighRiskCount   int `json:"high_risk_count"`
 	AvgReviewTimeMs int `json:"avg_review_time_ms"`
 	DeepReviewCount int `json:"deep_review_count"`
+}
+
+// GaugeRow is one vw_review_gauge row: address-rate telemetry for a
+// (category, change_class) cell within an installation. Read by
+// ListReviewGauge and returned by GET /api/v1/stats/gauge.
+type GaugeRow struct {
+	InstallationID       int64    `json:"installation_id"`
+	Category             string   `json:"category"`
+	ChangeClass          string   `json:"change_class"`
+	PostedFindings       int64    `json:"posted_findings"`
+	AddressedHuman       int64    `json:"addressed_human"`
+	AddressedAgent       int64    `json:"addressed_agent"`
+	Dismissed            int64    `json:"dismissed"`
+	Ignored              int64    `json:"ignored"`
+	Deferred             int64    `json:"deferred"`
+	AddressRate          *float64 `json:"address_rate" tstype:"number | null"`
+	DismissRate          *float64 `json:"dismiss_rate" tstype:"number | null"`
+	MedianSecondsToMerge *float64 `json:"median_seconds_to_merge" tstype:"number | null"`
 }
 
 type CodeNode struct {

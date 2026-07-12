@@ -74,13 +74,15 @@ const (
 
 // ReviewContract is the per-PR routing contract read by all pipeline stages.
 type ReviewContract struct {
-	ChangeClass  string   `json:"change_class"` // empty while Source == "llm-pending"
-	EvidenceBar  string   `json:"evidence_bar"`
-	Depth        string   `json:"depth"`
-	ScrutinyBump bool     `json:"scrutiny_bump"` // refactor/rename/cleanup title: force behavior-equivalence attention
-	Unreviewable bool     `json:"unreviewable"`  // too large for confident review; still reviewed
-	Signals      []string `json:"signals"`
-	Source       string   `json:"source"`
+	ChangeClass string `json:"change_class"` // empty while Source == "llm-pending"
+	EvidenceBar string `json:"evidence_bar"`
+	Depth       string `json:"depth"`
+	// The fields below are absent from contracts persisted before they existed,
+	// so they carry omitempty and generate as optional on the wire.
+	ScrutinyBump bool     `json:"scrutiny_bump,omitempty"` // refactor/rename/cleanup title: force behavior-equivalence attention
+	Unreviewable bool     `json:"unreviewable,omitempty"`  // too large for confident review; still reviewed
+	Signals      []string `json:"signals,omitempty"`
+	Source       string   `json:"source,omitempty"`
 }
 
 // Is reports whether the contract exists and resolved to the given class.
