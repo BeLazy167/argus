@@ -1,3 +1,9 @@
+> **Historical (2026-07-12).** The broadcast, second-pass, and lead cross-check
+> stages described below were never wired into the pipeline and their dormant
+> code (states, events, stage helpers) was removed in PR #142 + its follow-up
+> cleanup PR. Only the lead briefing (`leadBriefStage`) and blast-radius
+> (`analyzeBlastRadius`) paths remain live. Kept for design context.
+
 # Quick Wins — Ship Now
 
 Commit and deploy the already-coded changes:

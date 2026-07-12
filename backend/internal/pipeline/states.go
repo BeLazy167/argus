@@ -4,24 +4,22 @@ package pipeline
 type PipelineState string
 
 const (
-	StatePending       PipelineState = "pending"
-	StateTriaging      PipelineState = "triaging"
-	StateBriefing      PipelineState = "briefing"
-	StateReviewing     PipelineState = "reviewing"
-	StateDeduping      PipelineState = "deduping"
-	StateValidating    PipelineState = "validating"
-	StateScoring       PipelineState = "scoring"
-	StatePass2         PipelineState = "pass2"
-	StateSynthesizing  PipelineState = "synthesizing"
-	StatePosting       PipelineState = "posting"
-	StateCompleted     PipelineState = "completed"
-	StateFailed        PipelineState = "failed"
-	StateCancelled     PipelineState = "cancelled"
+	StatePending      PipelineState = "pending"
+	StateTriaging     PipelineState = "triaging"
+	StateBriefing     PipelineState = "briefing"
+	StateReviewing    PipelineState = "reviewing"
+	StateDeduping     PipelineState = "deduping"
+	StateValidating   PipelineState = "validating"
+	StateScoring      PipelineState = "scoring"
+	StatePass2        PipelineState = "pass2"
+	StateSynthesizing PipelineState = "synthesizing"
+	StatePosting      PipelineState = "posting"
+	StateCompleted    PipelineState = "completed"
+	StateFailed       PipelineState = "failed"
+	StateCancelled    PipelineState = "cancelled"
 
 	// Deprecated: kept for in-flight migration
-	StateEnriching     PipelineState = "enriching"
-	StateBroadcasting  PipelineState = "broadcasting"
-	StateCrossChecking PipelineState = "cross_checking"
+	StateEnriching PipelineState = "enriching"
 )
 
 // transitions defines the valid next state after each stage succeeds.
@@ -38,9 +36,7 @@ func transitions() map[PipelineState]PipelineState {
 		StateSynthesizing: StatePosting,
 		StatePosting:      StateCompleted,
 		// Migration from old pipeline
-		StateEnriching:     StateValidating,
-		StateBroadcasting:  StateDeduping,
-		StateCrossChecking: StateScoring,
+		StateEnriching: StateValidating,
 	}
 }
 

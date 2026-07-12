@@ -158,8 +158,8 @@ func TestEventBus_PubSub(t *testing.T) {
 	})
 }
 
-// TestEventBus_NewEventTypes_Registry asserts the 29 EventType constants
-// (11 existing + 16 sub-step events + 1 memory-match + 1 review-completed)
+// TestEventBus_NewEventTypes_Registry asserts the 26 EventType constants
+// (11 existing + 13 sub-step events + 1 memory-match + 1 review-completed)
 // are all non-empty and distinct. Guards against copy-paste collisions
 // and empty-string bugs.
 func TestEventBus_NewEventTypes_Registry(t *testing.T) {
@@ -170,8 +170,7 @@ func TestEventBus_NewEventTypes_Registry(t *testing.T) {
 		EventCancelled, EventFileReviewStarted, EventTokenUpdate,
 		// sub-step events — names fixed by eventbus.go; rename => compile error.
 		EventIntentExtracted, EventIntentVerified, EventFindingsEnriched,
-		EventBriefGenerated, EventLeadBrief, EventLeadBroadcast,
-		EventSecondPass, EventBlastRadius, EventLeadCrossCheck,
+		EventBriefGenerated, EventLeadBrief, EventBlastRadius,
 		EventAcceptanceChecked, EventCrossPRChecked,
 		EventSimulationsComplete, EventScenarioSimulated,
 		EventMemoryIndexed, EventPostedToGitHub, EventReplyGenerated,
@@ -180,8 +179,8 @@ func TestEventBus_NewEventTypes_Registry(t *testing.T) {
 		// cross-review lifecycle
 		EventReviewCompleted,
 	}
-	if len(all) != 29 {
-		t.Fatalf("expected 29 event types, listed %d", len(all))
+	if len(all) != 26 {
+		t.Fatalf("expected 26 event types, listed %d", len(all))
 	}
 	seen := make(map[EventType]int, len(all))
 	for i, e := range all {
@@ -195,7 +194,7 @@ func TestEventBus_NewEventTypes_Registry(t *testing.T) {
 	}
 }
 
-// TestEventBus_NewEventTypes_PubSub round-trips each of the 16 new types
+// TestEventBus_NewEventTypes_PubSub round-trips each of the 13 new types
 // through the bus to confirm they are wired end-to-end. Data-shape is
 // covered by the existing TestEventBus_PubSub; here we only assert Type
 // propagation and payload round-trip.
@@ -213,10 +212,7 @@ func TestEventBus_NewEventTypes_PubSub(t *testing.T) {
 		{"findings_enriched", EventFindingsEnriched},
 		{"brief_generated", EventBriefGenerated},
 		{"lead_brief", EventLeadBrief},
-		{"lead_broadcast", EventLeadBroadcast},
-		{"second_pass", EventSecondPass},
 		{"blast_radius", EventBlastRadius},
-		{"lead_cross_check", EventLeadCrossCheck},
 		{"acceptance_checked", EventAcceptanceChecked},
 		{"cross_pr_checked", EventCrossPRChecked},
 		{"simulations_complete", EventSimulationsComplete},
@@ -225,8 +221,8 @@ func TestEventBus_NewEventTypes_PubSub(t *testing.T) {
 		{"posted_to_github", EventPostedToGitHub},
 		{"reply_generated", EventReplyGenerated},
 	}
-	if len(cases) != 16 {
-		t.Fatalf("expected 16 new events, have %d", len(cases))
+	if len(cases) != 13 {
+		t.Fatalf("expected 13 new events, have %d", len(cases))
 	}
 
 	for _, tc := range cases {
