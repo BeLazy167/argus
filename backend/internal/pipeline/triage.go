@@ -407,6 +407,22 @@ func (s storeConfigLister) ListLLMConfigs(ctx context.Context, repoID int64) ([]
 	return storeToLLMConfigs(dbConfigs), nil
 }
 
+// searchHints runs a hint-style read (reranked, related+summary enriched, 0.5
+// floor) and shapes the hits into render-ready strings, degrading to nil on a
+// search error via the single BestEffort decorator. The shared adapter behind
+// the triage and scoring memory blocks: the caller supplies the query
+// scope/type/limit, searchHints stamps the hint retrieval knobs.
+func searchHints(ctx context.Context, indexer memory.Indexer, caller, container string, q memory.MemoryQuery) []string {
+	q.Threshold = 0.5
+	q.Rerank = true
+	q.Enrich = true
+	return memory.BestEffort(slog.Default(), caller, container, len(q.Query),
+		func() ([]string, error) {
+			m, err := indexer.Search(ctx, q)
+			return memory.HintStrings(m), err
+		})
+}
+
 // triageMemoryHints searches Supermemory for file synthesis docs, repo patterns,
 // owner patterns, and rules matching changed files.
 // Returns a hint block for the triage prompt, or empty string if no history found.
@@ -429,7 +445,8 @@ func triageMemoryHints(ctx context.Context, indexer memory.Indexer, owner, repo 
 	rulesTag := memory.SharedTag
 
 	// Parallel searches for repo patterns, owner patterns, and rules. Each
-	// SearchHints owns its own 5s timeout + non-fatal Warn (module policy).
+	// searchHints degrades to nil on error via the single BestEffort decorator;
+	// the deep Search owns the 5s timeout.
 	var repoResults, ownerResults, ruleResults []string
 	var wg sync.WaitGroup
 	wg.Add(3)
@@ -439,15 +456,21 @@ func triageMemoryHints(ctx context.Context, indexer memory.Indexer, owner, repo 
 		// review-history summary. The unified repo container also holds patterns,
 		// scenarios, feedback, traces and review comments; an untyped search
 		// (contradicting the comment above) mixes them into the history hints.
-		repoResults = indexer.SearchHints(ctx, query, repoTag, 5, memory.TypeSynthesis)
+		repoResults = searchHints(ctx, indexer, "triage-synthesis", repoTag, memory.MemoryQuery{
+			Query: query, Repo: repo, Scope: memory.ScopeRepo, Type: memory.TypeSynthesis, Limit: 5,
+		})
 	}()
 	go func() {
 		defer wg.Done()
-		ownerResults = indexer.SearchHints(ctx, query, ownerTag, 3, memory.TypePattern)
+		ownerResults = searchHints(ctx, indexer, "triage-pattern", ownerTag, memory.MemoryQuery{
+			Query: query, Scope: memory.ScopeShared, Type: memory.TypePattern, Limit: 3,
+		})
 	}()
 	go func() {
 		defer wg.Done()
-		ruleResults = indexer.SearchHints(ctx, "review rules conventions", rulesTag, 3, memory.TypeRule)
+		ruleResults = searchHints(ctx, indexer, "triage-rule", rulesTag, memory.MemoryQuery{
+			Query: "review rules conventions", Scope: memory.ScopeShared, Type: memory.TypeRule, Limit: 3,
+		})
 	}()
 	wg.Wait()
 

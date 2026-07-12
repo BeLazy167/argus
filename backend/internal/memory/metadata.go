@@ -31,13 +31,17 @@ const (
 	PolarityNegative Polarity = "negative"
 )
 
-// PatternScope selects the container a pattern is written to.
-// ScopeRepo → {repo}; ScopeShared → "_shared" (cross-repo under this installation).
-type PatternScope string
+// ContainerScope selects which unified container(s) a read or write targets:
+// ScopeRepo → {repo}; ScopeShared → "_shared" (cross-repo under this
+// installation); ScopeBoth → both, merged best-first (reads only). It is the
+// single container-selection enum shared by the write path and the deep Search
+// reader (MemoryQuery.Scope).
+type ContainerScope string
 
 const (
-	ScopeRepo   PatternScope = "repo"
-	ScopeShared PatternScope = "shared"
+	ScopeRepo   ContainerScope = "repo"
+	ScopeShared ContainerScope = "shared"
+	ScopeBoth   ContainerScope = "both"
 )
 
 // Metadata models the typed metadata that accompanies every Supermemory write.

@@ -1689,10 +1689,13 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 		return nil
 	}
 
-	owner, repo, err := splitRepoFullName(run.PREvent.RepoFullName)
+	_, repo, err := splitRepoFullName(run.PREvent.RepoFullName)
 	if err != nil {
 		return nil // non-fatal
 	}
+	// Default thresholds once for the whole pass — the deep Search reads take a
+	// concrete float floor now that the reader seam no longer defaults internally.
+	thr := run.Thresholds.WithDefaults()
 
 	// Suppression-v2 inputs shared by every enrichment goroutine (read-only):
 	// the contract change class for the dismissal lifecycle filter, and the
@@ -1731,15 +1734,41 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 
 				// Build a richer query: category + file + body gives Supermemory more semantic signal
 				query := fmt.Sprintf("[%s|%s] %s:%d %s", c.Severity, c.Category, filePath, c.Line, c.Body)
-				// searchOK distinguishes a genuine "no match" (ok=true, zero score)
-				// from a broken/timed-out search (ok=false) so the novel branch below
-				// never marks a finding new just because memory search errored.
-				match, searchOK := run.Indexer.SearchPatternMatch(ctx, owner, repo, query, run.Thresholds)
 
-				// Rules live in the shared container under type=rule metadata
-				// (post-refactor unified shape). SearchRuleContent owns the typed
-				// filter + its own 5s timeout and returns "" on nil client / no hit.
-				ruleContent := run.Indexer.SearchRuleContent(ctx, query)
+				// Pattern enrichment: best type=pattern match across repo + shared.
+				// Errors PROPAGATE — a broken/timed-out search must never mark a
+				// finding novel, so patErr gates the novel branch below rather than
+				// degrading to a zero match. Top-1 shaping across the two containers
+				// is the pure BestMatch adapter.
+				patternMatches, patErr := run.Indexer.Search(ctx, memory.MemoryQuery{
+					Query: query, Repo: repo, Scope: memory.ScopeBoth, Type: memory.TypePattern,
+					Limit: 1, Threshold: thr.FindingEnrich, Rerank: true,
+				})
+				match := memory.BestMatch(patternMatches...)
+
+				// Rules live in the shared container under type=rule metadata. A
+				// rule-search error must NOT be conflated with "no rule matched"
+				// (the #128 gate gap where SearchRuleContent returned "" on error);
+				// ruleErr joins the novelty gate below. TopContent shapes the top-1
+				// rule body to 300 chars.
+				ruleMatches, ruleErr := run.Indexer.Search(ctx, memory.MemoryQuery{
+					Query: query, Scope: memory.ScopeShared, Type: memory.TypeRule,
+					Limit: 1, Threshold: 0.5,
+				})
+				ruleContent := memory.TopContent(ruleMatches, 300)
+
+				// Novelty is decidable only when BOTH reads SUCCEEDED — a genuine
+				// no-match. Either error leaves IsNewFinding unset. Log each failure
+				// at Warn so prod still distinguishes empty-vs-error per call site.
+				searchOK := patErr == nil && ruleErr == nil
+				if patErr != nil {
+					o.logger.Warn("memory search failed",
+						"caller", "pattern-enrich", "file", filePath, "line", c.Line, "query_len", len(query), "error", patErr)
+				}
+				if ruleErr != nil {
+					o.logger.Warn("memory search failed",
+						"caller", "rule-enrich", "file", filePath, "line", c.Line, "query_len", len(query), "error", ruleErr)
+				}
 
 				// Self-match guard: a near-identical hit is this code's own prior
 				// review comment (re-review noise), not a learned pattern. Zero it
@@ -1823,7 +1852,10 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 				// vs downgrade (≥0.60). Security and Law-12 permanent checks
 				// are exempt from drops — memory may downgrade, never silence
 				// them. Non-fatal; memory-gated.
-				dismissals := run.Indexer.SearchDismissedMatches(ctx, owner, repo, c.Body, run.Thresholds, dismissalSearchLimit)
+				dismissals := memory.BestEffort(o.logger, "dismissal", memory.RepoTagNew(repo), len(c.Body),
+					func() ([]memory.PatternMatch, error) {
+						return dismissalSearch(ctx, run.Indexer, repo, c.Body, thr.FindingEnrich)
+					})
 				eval := evaluateDismissals(dismissals, changeClass,
 					suppressionExempt(c.Category, c.Body), autoSuppressed[string(c.Category)])
 				switch applyDismissalEvaluation(c, eval) {
@@ -2985,7 +3017,7 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	if len(run.Synthesis.SimulationResults) > 0 && run.Indexer != nil {
 		for _, result := range run.Synthesis.SimulationResults {
 			if !result.Passes && result.Confidence >= 0.5 {
-				matches := run.Indexer.SearchScenariosWithIDs(ctx, owner, repo, result.Scenario, "", 1)
+				matches := scenarioSearch(ctx, run.Indexer, o.logger, repo, result.Scenario, "", 1)
 				if len(matches) > 0 {
 					passed := matches[0].Similarity >= run.Thresholds.ScenarioTrigger
 					o.logger.Info("threshold_check",

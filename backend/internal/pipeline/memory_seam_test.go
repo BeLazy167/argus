@@ -8,11 +8,11 @@ import (
 )
 
 // TestPipelineHasNoDirectMemoryClient is the grep-of-record enforcing the
-// memory-briefing refactor's core invariant: the pipeline talks to memory ONLY
-// through the memory.Indexer interface (Briefing / SearchHints / SearchRuleContent
-// / SearchScored / the writers), never a raw *memory.Client. The retrieval +
-// prompt-render seam lives inside internal/memory; a new `*memory.Client` field,
-// `.Client()` escape hatch, or direct `.Search(` here would re-open it.
+// memory-seam invariant: the pipeline talks to memory ONLY through the
+// memory.Indexer interface (the two deep readers Search / Briefing plus the
+// writers), never a raw *memory.Client. The retrieval + prompt-render seam lives
+// inside internal/memory; a new `*memory.Client` field or `.Client()` escape
+// hatch here would re-open it.
 func TestPipelineHasNoDirectMemoryClient(t *testing.T) {
 	entries, err := os.ReadDir(".")
 	if err != nil {

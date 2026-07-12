@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/BeLazy167/argus/backend/internal/util"
 )
@@ -57,64 +56,122 @@ type Briefing struct {
 	PastReviews []string
 }
 
+// BriefingQuery bundles the inputs for a Briefing assembly + render: the repo
+// coordinates, the file under review, the semantic query driving the
+// repo/shared/past-review reads, and the profile/threshold/cap options.
+type BriefingQuery struct {
+	Owner    string
+	Repo     string
+	FilePath string
+	Query    string
+	Options  BriefingOptions
+}
+
 // Briefing assembles the institutional-memory block for a review prompt and
 // renders it to markdown, returning the string the caller embeds verbatim. It
-// owns the whole retrieval → dispatch → truncation → render path: query is the
-// semantic query for the repo/shared/past-review reads; opts.Profile selects
-// the render shape and which side-searches run. Returns "" on nil client or
-// empty repo. Each underlying read owns its own 5s timeout + non-fatal Warn.
-func (idx *indexerImpl) Briefing(ctx context.Context, owner, repo, filePath, query string, opts BriefingOptions) string {
-	if idx.client == nil || repo == "" {
-		return ""
+// owns the whole retrieval → dispatch → truncation → render path: q.Query is the
+// semantic query for the repo/shared/past-review reads; q.Options.Profile
+// selects the render shape and which side-searches run. Returns ("", nil) on nil
+// client or empty repo, and ("", err) when any underlying retrieval failed so a
+// caller can degrade the block (via BestEffort) instead of embedding a silently
+// partial one. Each underlying read owns its own 5s timeout.
+func (idx *indexerImpl) Briefing(ctx context.Context, q BriefingQuery) (string, error) {
+	if idx.client == nil || q.Repo == "" {
+		return "", nil
 	}
-	b := idx.assembleBriefing(ctx, owner, repo, filePath, query, opts)
-	if opts.Profile == ProfileReview {
-		return b.renderReview(opts.CharCap)
+	b, err := idx.assembleBriefing(ctx, q)
+	if err != nil {
+		return "", err
 	}
-	return b.renderSpecialist(filePath, opts.CharCap, opts.EmphasizeFalsePositives)
+	if q.Options.Profile == ProfileReview {
+		return b.renderReview(q.Options.CharCap), nil
+	}
+	return b.renderSpecialist(q.FilePath, q.Options.CharCap, q.Options.EmphasizeFalsePositives), nil
 }
 
 // assembleBriefing runs the typed reads and dispatches results into sections.
 // The specialistBlock legs (synthesis + repo + shared) serve both profiles; the
 // review profile adds the rules + past-review side-searches specialists skip.
 // All per-item content is truncated to 500 chars here so the render stays pure.
-func (idx *indexerImpl) assembleBriefing(ctx context.Context, owner, repo, filePath, query string, opts BriefingOptions) Briefing {
-	if opts.Profile != ProfileReview {
+// Any leg error is returned so Briefing degrades the whole block rather than
+// serving a partial one.
+func (idx *indexerImpl) assembleBriefing(ctx context.Context, q BriefingQuery) (Briefing, error) {
+	if q.Options.Profile != ProfileReview {
 		// Specialist profile has no side-searches — one specialistBlock (own 5s).
-		return briefingSections(idx.specialistBlock(ctx, owner, repo, filePath, query, opts.Thresholds))
+		block, err := idx.specialistBlock(ctx, q.Repo, q.FilePath, q.Query, q.Options.Thresholds)
+		if err != nil {
+			return Briefing{}, err
+		}
+		return briefingSections(block), nil
 	}
 
 	// Review profile: the three legs — specialistBlock (synthesis/repo/shared),
 	// the rules side-search, and the past-review side-search — are mutually
 	// independent, so run ALL THREE concurrently. Each owns its own 5s timeout,
 	// so the worst-case ceiling is ~5s, not specialistBlock(~5s) THEN
-	// side-searches(~5s) in series (~10s). Both side-searches are non-fatal: a
-	// failure or empty result just omits the respective section.
+	// side-searches(~5s) in series (~10s).
 	//
 	// Write-partitioned: each goroutine writes a distinct variable; wg.Wait() is
 	// the happens-before edge before they are read.
 	var block MemoryBlock
 	var rules, pastReviews []string
+	var blockErr, rulesErr, pastErr error
 	var wg sync.WaitGroup
 	wg.Add(3)
 	go func() {
 		defer wg.Done()
-		block = idx.specialistBlock(ctx, owner, repo, filePath, query, opts.Thresholds)
+		block, blockErr = idx.specialistBlock(ctx, q.Repo, q.FilePath, q.Query, q.Options.Thresholds)
 	}()
 	go func() {
 		defer wg.Done()
-		rules = idx.SearchHints(ctx, "review rules conventions", SharedTag, 3, TypeRule)
+		var m []PatternMatch
+		m, rulesErr = idx.Search(ctx, MemoryQuery{
+			Query: "review rules conventions", Scope: ScopeShared, Type: TypeRule,
+			Limit: 3, Threshold: 0.5, Rerank: true, Enrich: true,
+		})
+		rules = HintStrings(m)
 	}()
 	go func() {
 		defer wg.Done()
-		pastReviews = idx.SearchHints(ctx, query, RepoTagNew(repo), 2, TypeReview)
+		var m []PatternMatch
+		m, pastErr = idx.Search(ctx, MemoryQuery{
+			Query: q.Query, Repo: q.Repo, Scope: ScopeRepo, Type: TypeReview,
+			Limit: 2, Threshold: 0.5, Rerank: true, Enrich: true,
+		})
+		pastReviews = HintStrings(m)
 	}()
 	wg.Wait()
+	// Per-leg degradation: the specialist block (file history + patterns) is
+	// the CORE — if it failed there is nothing usable and the error propagates.
+	// The rules and past-review side-searches are OPTIONAL: a failed leg is
+	// Warn-logged and its section omitted, so a transient single-leg error
+	// never blanks the whole briefing (the #147 gate's resilience finding).
+	if blockErr != nil {
+		return Briefing{}, blockErr
+	}
+	if rulesErr != nil {
+		idx.warnLeg("briefing.rules", SharedTag, len(q.Query), rulesErr)
+		rules = nil
+	}
+	if pastErr != nil {
+		idx.warnLeg("briefing.past_reviews", RepoTagNew(q.Repo), len(q.Query), pastErr)
+		pastReviews = nil
+	}
 
 	b := briefingSections(block)
 	b.Rules = rules
 	b.PastReviews = pastReviews
-	return b
+	return b, nil
+}
+
+// warnLeg is the per-leg sibling of BestEffort: same "memory read degraded"
+// Warn shape, used where a multi-leg assembly keeps its successful legs
+// instead of zeroing the whole result.
+func (idx *indexerImpl) warnLeg(caller, container string, queryLen int, err error) {
+	if idx.logger != nil {
+		idx.logger.Warn("memory read degraded",
+			"caller", caller, "container", container, "query_len", queryLen, "error", err)
+	}
 }
 
 // briefingSections splits a MemoryBlock into the typed prose sections shared by
@@ -260,114 +317,4 @@ func numberedBlock(header string, items []string) string {
 		sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, r))
 	}
 	return sb.String()
-}
-
-// SearchHints runs a rerank + related/summary-enriched hybrid search pinned to a
-// metadata type and returns the RichContent(2) of each hit truncated to 500
-// chars. Non-fatal: returns nil on nil client or any search error. Owns its own
-// 5s timeout. typ="" leaves the search untyped. This is the workhorse read for
-// triage/scoring hints and the review-profile rules/past-review side-searches.
-func (idx *indexerImpl) SearchHints(ctx context.Context, query, containerTag string, limit int, typ MemoryType) []string {
-	if idx.client == nil {
-		return nil
-	}
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	req := SearchRequest{
-		Query:        query,
-		ContainerTag: containerTag,
-		SearchMode:   "hybrid",
-		Limit:        limit,
-		Threshold:    0.5,
-		Rerank:       true,
-		Include: &SearchInclude{
-			RelatedMemories: true,
-			Summaries:       true,
-		},
-	}
-	if typ != "" {
-		req.Filters = &SearchFilters{AND: []FilterCondition{{Key: "type", Value: string(typ)}}}
-	}
-	resp, err := idx.client.Search(ctx, req)
-	if err != nil {
-		if ctx.Err() == nil {
-			idx.logger.Warn("memory search failed", "error", err, "tag", containerTag)
-		}
-		return nil
-	}
-	results := make([]string, 0, len(resp.Results))
-	for _, r := range resp.Results {
-		content := r.RichContent(2)
-		if content != "" {
-			results = append(results, util.Truncate(content, 500, true))
-		}
-	}
-	return results
-}
-
-// SearchRuleContent returns the top org-rule (_shared, type=rule) semantically
-// matching query, truncated to 300 chars, or "" on nil client / no hit / error.
-// Owns its own 5s timeout. Distinct from the review-profile rules leg
-// (SearchHints): this is a single un-reranked lookup used at finding enrichment.
-func (idx *indexerImpl) SearchRuleContent(ctx context.Context, query string) string {
-	if idx.client == nil {
-		return ""
-	}
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	resp, err := idx.client.Search(ctx, SearchRequest{
-		Query:        query,
-		ContainerTag: SharedTag,
-		SearchMode:   "hybrid",
-		Limit:        1,
-		Threshold:    0.5,
-		Filters:      &SearchFilters{AND: []FilterCondition{{Key: "type", Value: string(TypeRule)}}},
-	})
-	if err != nil {
-		if ctx.Err() == nil {
-			idx.logger.Warn("memory search failed", "error", err, "tag", SharedTag)
-		}
-		return ""
-	}
-	for _, r := range resp.Results {
-		if c := r.Content(); c != "" {
-			return util.Truncate(c, 300, true)
-		}
-	}
-	return ""
-}
-
-// SearchScored runs a plain hybrid search (no rerank, no includes) and returns
-// the raw score + content of each hit. Powers the agentic search_memory tool,
-// which needs per-result scores and the untruncated body, and must distinguish a
-// search error (surfaced to the LLM) from an empty result set — hence the error
-// return. Returns (nil, nil) on nil client. typ="" leaves the search untyped.
-func (idx *indexerImpl) SearchScored(ctx context.Context, query, containerTag string, typ MemoryType, limit int) ([]PatternMatch, error) {
-	if idx.client == nil {
-		return nil, nil
-	}
-	req := SearchRequest{
-		Query:        query,
-		ContainerTag: containerTag,
-		SearchMode:   "hybrid",
-		Limit:        limit,
-		Threshold:    0.5,
-	}
-	if typ != "" {
-		req.Filters = &SearchFilters{AND: []FilterCondition{{Key: "type", Value: string(typ)}}}
-	}
-	resp, err := idx.client.Search(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-	if resp == nil {
-		return nil, nil
-	}
-	out := make([]PatternMatch, 0, len(resp.Results))
-	for _, r := range resp.Results {
-		out = append(out, resultToPatternMatch(r))
-	}
-	return out, nil
 }

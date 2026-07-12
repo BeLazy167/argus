@@ -11,6 +11,32 @@ import (
 	"github.com/BeLazy167/argus/backend/internal/util"
 )
 
+// scenarioSearch retrieves scenario matches (type=scenario) for query in the
+// repo container and shapes them into []ScenarioSearchResult (scenario-id parse
+// + dedup). Non-fatal: a search error degrades to nil via memory.BestEffort so
+// scenario dedup/trigger just proceed as if nothing matched. severity="" leaves
+// the search severity-agnostic. Retrieval is threshold-free (the caller applies
+// the dedupe/trigger threshold to the returned similarities).
+func scenarioSearch(ctx context.Context, indexer memory.Indexer, logger *slog.Logger, repo, query, severity string, limit int) []memory.ScenarioSearchResult {
+	var filters []memory.FilterCondition
+	if severity != "" {
+		filters = append(filters, memory.FilterCondition{Key: "severity", Value: severity})
+	}
+	matches := memory.BestEffort(logger, "scenario", memory.RepoTagNew(repo), len(query),
+		func() ([]memory.PatternMatch, error) {
+			return indexer.Search(ctx, memory.MemoryQuery{
+				Query:   query,
+				Repo:    repo,
+				Scope:   memory.ScopeRepo,
+				Type:    memory.TypeScenario,
+				Filters: filters,
+				Limit:   limit,
+				Rerank:  true,
+			})
+		})
+	return memory.ScenarioResults(matches, limit)
+}
+
 // ScenarioSeed is an extracted scenario candidate from a completed review.
 type ScenarioSeed struct {
 	Description string
@@ -79,7 +105,7 @@ func scenarioSeverity(s Severity) string {
 func StoreScenarioSeeds(ctx context.Context, st *store.Store, indexer memory.Indexer, owner, repo string, installationID int64, repoID *int64, dedupeThreshold float64, seeds []ScenarioSeed) {
 	for _, seed := range seeds {
 		if indexer != nil {
-			existing := indexer.SearchScenariosWithIDs(ctx, owner, repo, seed.Description, "", 1)
+			existing := scenarioSearch(ctx, indexer, slog.Default(), repo, seed.Description, "", 1)
 			if isDuplicateScenario(existing, dedupeThreshold) {
 				continue // semantically similar scenario already exists
 			}
