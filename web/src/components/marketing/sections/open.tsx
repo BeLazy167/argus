@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { FadeIn } from "@/components/marketing/fade-in";
+import { focusRing } from "@/components/marketing/focus-ring";
 import {
   argusFeatures,
   competitors,
@@ -167,10 +168,10 @@ export function Open() {
               <br />
               <span className="text-foreground">Here are ours in the open.</span>
             </h2>
-            <p className="mt-5 max-w-xl font-mono text-[13px] leading-relaxed text-slate-text">
-              We built Argus because the bots shipping today forget what broke
-              yesterday. This isn&apos;t a benchmark — it&apos;s a feature matrix
-              you can audit.
+            <p className="mt-5 max-w-xl font-mono text-[15px] leading-relaxed text-slate-text">
+              We built Argus because the code review bots shipping today forget
+              what broke yesterday. This isn&apos;t a benchmark — it&apos;s a
+              feature matrix you can audit.
             </p>
           </div>
         </FadeIn>
@@ -444,7 +445,7 @@ await retryWithBackoff(() => handler(event), {
               </div>
               <Link
                 href="/compare"
-                className="group inline-flex items-center gap-2 font-mono text-[12px] text-slate-text hover:text-amber"
+                className={`group inline-flex items-center gap-2 font-mono text-[12px] text-slate-text hover:text-amber ${focusRing}`}
               >
                 <span>See all 9 alternatives</span>
                 <svg viewBox="0 0 16 16" className="h-3 w-3 transition-transform group-hover:translate-x-0.5" fill="none" stroke="currentColor" strokeWidth="1.5">
@@ -567,7 +568,7 @@ await retryWithBackoff(() => handler(event), {
                 <span className="text-iron">·</span>
                 <a
                   href="/compare"
-                  className="underline-offset-4 hover:text-amber hover:underline"
+                  className={`underline-offset-4 hover:text-amber hover:underline ${focusRing}`}
                 >
                   sources
                 </a>

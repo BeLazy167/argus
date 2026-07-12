@@ -1,4 +1,5 @@
 import { FadeIn } from "@/components/marketing/fade-in";
+import { InViewSection } from "@/components/marketing/in-view-section";
 
 type Provider = {
   id: string;
@@ -527,7 +528,7 @@ const PROVIDER_LOGOS: Record<string, LogoComponent> = {
  */
 export function Byok() {
   return (
-    <section id="byok" className="relative">
+    <InViewSection id="byok" className="relative">
       {/* subtle top/bottom section hairlines to match editorial feel */}
       <div aria-hidden className="absolute inset-x-0 top-0 h-px bg-iron/40" />
       <div aria-hidden className="absolute inset-x-0 bottom-0 h-px bg-iron/40" />
@@ -550,6 +551,6 @@ export function Byok() {
           </FadeIn>
         </div>
       </div>
-    </section>
+    </InViewSection>
   );
 }

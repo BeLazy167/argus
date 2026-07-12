@@ -40,7 +40,7 @@ export default function BlogPage() {
           />
           <button
             type="submit"
-            className="bg-amber px-5 py-2 text-xs font-mono font-medium text-void hover:brightness-110 transition-all shrink-0"
+            className="bg-amber px-5 py-2 text-xs font-mono font-medium text-void hover:brightness-110 transition-[filter] shrink-0"
           >
             Subscribe
           </button>

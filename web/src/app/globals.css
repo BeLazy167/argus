@@ -567,15 +567,20 @@ body {
 }
 
 @supports (animation-timeline: view()) {
+  /* Reveal completes within the first slice of `cover` so the fade tracks a
+   * roughly constant scroll distance regardless of section height. Anything
+   * fully inside the viewport is already at opacity 1 — tall sections no
+   * longer render whole blank viewports mid-scroll (the `entry`-based range
+   * scaled with element height and left tall content faded far too long). */
   .scroll-reveal {
     animation: scrollFadeIn both;
     animation-timeline: view();
-    animation-range: entry 0% cover 35%;
+    animation-range: entry 0% cover 12%;
   }
   .scroll-reveal-snap {
     animation: scrollFadeIn both;
     animation-timeline: view();
-    animation-range: entry 10% cover 15%;
+    animation-range: entry 0% cover 8%;
   }
 }
 
@@ -600,6 +605,17 @@ body {
   .hero-title-stencil {
     -webkit-text-stroke: 0 !important;
   }
+}
+
+/* ── Off-screen animation gating ─────────────────────────────────────
+ *
+ * Sections wrapped in `InViewSection` (or that set `data-in-view`
+ * themselves) pause their decorative loop animations while scrolled out of
+ * view, keeping the compositor/main thread idle when nothing is visible.
+ * Scoped to the specific loop classes so only intended animations pause. */
+[data-in-view="false"] .hero-status-pulse,
+[data-in-view="false"] .animate-ping {
+  animation-play-state: paused !important;
 }
 
 /* Marker class for PostHog session-recording masking. No visual effect. */
