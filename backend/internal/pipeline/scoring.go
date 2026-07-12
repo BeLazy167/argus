@@ -144,7 +144,7 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 	if err != nil {
 		slog.Warn("scoring: invalid repo name, skipping memory context", "error", err)
 	}
-	memContext := fetchScoringContext(ctx, run.Indexer, owner, repo, run.FileReviews)
+	memContext := fetchScoringContext(ctx, run.Indexer, run.Thresholds, owner, repo, run.FileReviews)
 	memContext += buildPatternTrustCalibration(ctx, ss.store, run.DBInstallationID)
 
 	prompt := buildScoringPrompt(run, memContext)
@@ -515,7 +515,7 @@ func buildPatternTrustCalibration(ctx context.Context, st *store.Store, installa
 
 // fetchScoringContext retrieves repo patterns + per-file synthesis from Supermemory to calibrate scoring.
 // Non-fatal: returns empty string on any error.
-func fetchScoringContext(ctx context.Context, indexer memory.Indexer, owner, repo string, files []FileReview) string {
+func fetchScoringContext(ctx context.Context, indexer memory.Indexer, thresholds memory.Thresholds, owner, repo string, files []FileReview) string {
 	if indexer == nil || owner == "" || repo == "" {
 		return ""
 	}
@@ -535,7 +535,7 @@ func fetchScoringContext(ctx context.Context, indexer memory.Indexer, owner, rep
 		// feedback, syntheses, traces and review comments. Scoring calibration
 		// ("matching confirmed patterns should score higher") wants learned
 		// patterns only — an untyped search dilutes it with unrelated doc types.
-		repoResults = searchHints(ctx, indexer, "scoring-pattern", repoTag, memory.MemoryQuery{
+		repoResults = searchHints(ctx, indexer, "scoring-pattern", repoTag, thresholds, memory.MemoryQuery{
 			Query: "confirmed review patterns conventions common issues",
 			Repo:  repo, Scope: memory.ScopeRepo, Type: memory.TypePattern, Limit: 5,
 		})
@@ -549,7 +549,7 @@ func fetchScoringContext(ctx context.Context, indexer memory.Indexer, owner, rep
 			}
 			// type=synthesis: "Known File Context" is the file-scoped review
 			// history summary; pin the type so scenarios/patterns don't leak in.
-			fileResults = searchHints(ctx, indexer, "scoring-synthesis", repoTag, memory.MemoryQuery{
+			fileResults = searchHints(ctx, indexer, "scoring-synthesis", repoTag, thresholds, memory.MemoryQuery{
 				Query: filePathsQuery("file synthesis ", paths),
 				Repo:  repo, Scope: memory.ScopeRepo, Type: memory.TypeSynthesis, Limit: 3,
 			})

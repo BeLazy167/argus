@@ -880,7 +880,7 @@ func reindexScenario(ctx context.Context, logger *slog.Logger, st *store.Store, 
 //
 // It then splits owner/repo with EXACTLY pipeline.splitRepoFullName's semantics
 // (strings.SplitN(full_name, "/", 2), require two parts, return parts[1]) —
-// RepoTagNew(repo) and every PatternCustomID/TraceCustomID derive from that
+// RepoTagNew(repo) and every PatternCustomID/ScenarioCustomID derive from that
 // token, so any other derivation (full_name, split_part edge cases) writes to a
 // different container and duplicates docs.
 //

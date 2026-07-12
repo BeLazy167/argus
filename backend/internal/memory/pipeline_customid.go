@@ -10,6 +10,10 @@ import (
 // `{repoIDSegment}--scenario--{id}`) so a backfill / re-index upserts the same
 // doc instead of duplicating it. repoIDSegment (not bare CustomIDSanitize) so a
 // repo's scenario IDs match its container tag disambiguation for lossy names.
+//
+// Exported deliberately — a cross-package contract, not a test affordance:
+// reconstructed by the pipeline (scenarios.go), cmd/migrate-memory, and
+// cmd/reconcile-memory to sync the SAME doc id.
 func ScenarioCustomID(repo string, scenarioID int64) string {
 	return fmt.Sprintf("%s--scenario--%d", repoIDSegment(repo), scenarioID)
 }
@@ -32,6 +36,9 @@ func ScenarioCustomID(repo string, scenarioID int64) string {
 // with supermemory_id already set and their SM-side source can differ from the
 // DB source, so the caller falls back to the indexer's own default derivation
 // (PatternCustomID / SharedPatternCustomID) rather than guessing a wrong ID.
+//
+// Exported deliberately — reconstructed cross-package by cmd/migrate-memory and
+// cmd/reconcile-memory to back-fill legacy patterns onto the same doc id.
 func PipelinePatternCustomID(repoName, source, content string, category *string, shared bool) string {
 	switch source {
 	case "scoring_confirmed":

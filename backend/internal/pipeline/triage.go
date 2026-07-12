@@ -143,7 +143,7 @@ func (ts *TriageStage) llmTriage(ctx context.Context, run *PipelineRun) (map[str
 		slog.Warn("triage: invalid repo name, skipping memory hints", "error", splitErr)
 	}
 	prompt := buildTriagePrompt(run.Diff.Files)
-	if hints := triageMemoryHints(ctx, run.Indexer, owner, repo, run.Diff.Files); hints != "" {
+	if hints := triageMemoryHints(ctx, run.Indexer, run.Thresholds, owner, repo, run.Diff.Files); hints != "" {
 		prompt += "\n" + hints
 	}
 
@@ -407,13 +407,15 @@ func (s storeConfigLister) ListLLMConfigs(ctx context.Context, repoID int64) ([]
 	return storeToLLMConfigs(dbConfigs), nil
 }
 
-// searchHints runs a hint-style read (reranked, related+summary enriched, 0.5
-// floor) and shapes the hits into render-ready strings, degrading to nil on a
-// search error via the single BestEffort decorator. The shared adapter behind
-// the triage and scoring memory blocks: the caller supplies the query
-// scope/type/limit, searchHints stamps the hint retrieval knobs.
-func searchHints(ctx context.Context, indexer memory.Indexer, caller, container string, q memory.MemoryQuery) []string {
-	q.Threshold = 0.5
+// searchHints runs a hint-style read (reranked, related+summary enriched,
+// floored at the resolved FindingEnrich retrieval gate) and shapes the hits into
+// render-ready strings, degrading to nil on a search error via the single
+// BestEffort decorator. The shared adapter behind the triage and scoring memory
+// blocks: the caller supplies the query scope/type/limit, searchHints stamps the
+// hint retrieval knobs. thresholds is normalized here so a retried/resumed run's
+// zero struct still floors at the default instead of 0.
+func searchHints(ctx context.Context, indexer memory.Indexer, caller, container string, thresholds memory.Thresholds, q memory.MemoryQuery) []string {
+	q.Threshold = thresholds.WithDefaults().FindingEnrich
 	q.Rerank = true
 	q.Enrich = true
 	return memory.BestEffort(slog.Default(), caller, container, len(q.Query),
@@ -426,7 +428,7 @@ func searchHints(ctx context.Context, indexer memory.Indexer, caller, container 
 // triageMemoryHints searches Supermemory for file synthesis docs, repo patterns,
 // owner patterns, and rules matching changed files.
 // Returns a hint block for the triage prompt, or empty string if no history found.
-func triageMemoryHints(ctx context.Context, indexer memory.Indexer, owner, repo string, files []diff.FileDiff) string {
+func triageMemoryHints(ctx context.Context, indexer memory.Indexer, thresholds memory.Thresholds, owner, repo string, files []diff.FileDiff) string {
 	if indexer == nil || owner == "" || repo == "" || len(files) == 0 {
 		return ""
 	}
@@ -456,19 +458,19 @@ func triageMemoryHints(ctx context.Context, indexer memory.Indexer, owner, repo 
 		// review-history summary. The unified repo container also holds patterns,
 		// scenarios, feedback, traces and review comments; an untyped search
 		// (contradicting the comment above) mixes them into the history hints.
-		repoResults = searchHints(ctx, indexer, "triage-synthesis", repoTag, memory.MemoryQuery{
+		repoResults = searchHints(ctx, indexer, "triage-synthesis", repoTag, thresholds, memory.MemoryQuery{
 			Query: query, Repo: repo, Scope: memory.ScopeRepo, Type: memory.TypeSynthesis, Limit: 5,
 		})
 	}()
 	go func() {
 		defer wg.Done()
-		ownerResults = searchHints(ctx, indexer, "triage-pattern", ownerTag, memory.MemoryQuery{
+		ownerResults = searchHints(ctx, indexer, "triage-pattern", ownerTag, thresholds, memory.MemoryQuery{
 			Query: query, Scope: memory.ScopeShared, Type: memory.TypePattern, Limit: 3,
 		})
 	}()
 	go func() {
 		defer wg.Done()
-		ruleResults = searchHints(ctx, indexer, "triage-rule", rulesTag, memory.MemoryQuery{
+		ruleResults = searchHints(ctx, indexer, "triage-rule", rulesTag, thresholds, memory.MemoryQuery{
 			Query: "review rules conventions", Scope: memory.ScopeShared, Type: memory.TypeRule, Limit: 3,
 		})
 	}()

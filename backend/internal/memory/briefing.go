@@ -96,6 +96,12 @@ func (idx *indexerImpl) Briefing(ctx context.Context, q BriefingQuery) (string, 
 // Any leg error is returned so Briefing degrades the whole block rather than
 // serving a partial one.
 func (idx *indexerImpl) assembleBriefing(ctx context.Context, q BriefingQuery) (Briefing, error) {
+	// Normalize once so EVERY leg reads resolved floors — the specialistBlock
+	// legs AND the review-profile rules / past-review side-searches below. A
+	// retried/resumed run delivers a zero Thresholds (PipelineRun.Thresholds is
+	// json:"-" and buildRetryRun re-derives neither), which would otherwise floor
+	// the side-searches at 0 and flood the briefing with low-similarity noise.
+	q.Options.Thresholds = q.Options.Thresholds.WithDefaults()
 	if q.Options.Profile != ProfileReview {
 		// Specialist profile has no side-searches — one specialistBlock (own 5s).
 		block, err := idx.specialistBlock(ctx, q.Repo, q.FilePath, q.Query, q.Options.Thresholds)
@@ -127,7 +133,7 @@ func (idx *indexerImpl) assembleBriefing(ctx context.Context, q BriefingQuery) (
 		var m []PatternMatch
 		m, rulesErr = idx.Search(ctx, MemoryQuery{
 			Query: "review rules conventions", Scope: ScopeShared, Type: TypeRule,
-			Limit: 3, Threshold: 0.5, Rerank: true, Enrich: true,
+			Limit: 3, Threshold: q.Options.Thresholds.FindingEnrich, Rerank: true, Enrich: true,
 		})
 		rules = HintStrings(m)
 	}()
@@ -136,7 +142,7 @@ func (idx *indexerImpl) assembleBriefing(ctx context.Context, q BriefingQuery) (
 		var m []PatternMatch
 		m, pastErr = idx.Search(ctx, MemoryQuery{
 			Query: q.Query, Repo: q.Repo, Scope: ScopeRepo, Type: TypeReview,
-			Limit: 2, Threshold: 0.5, Rerank: true, Enrich: true,
+			Limit: 2, Threshold: q.Options.Thresholds.FindingEnrich, Rerank: true, Enrich: true,
 		})
 		pastReviews = HintStrings(m)
 	}()
@@ -165,13 +171,10 @@ func (idx *indexerImpl) assembleBriefing(ctx context.Context, q BriefingQuery) (
 }
 
 // warnLeg is the per-leg sibling of BestEffort: same "memory read degraded"
-// Warn shape, used where a multi-leg assembly keeps its successful legs
-// instead of zeroing the whole result.
+// Warn shape (via the shared logDegrade helper), used where a multi-leg
+// assembly keeps its successful legs instead of zeroing the whole result.
 func (idx *indexerImpl) warnLeg(caller, container string, queryLen int, err error) {
-	if idx.logger != nil {
-		idx.logger.Warn("memory read degraded",
-			"caller", caller, "container", container, "query_len", queryLen, "error", err)
-	}
+	logDegrade(idx.logger, caller, container, queryLen, err)
 }
 
 // briefingSections splits a MemoryBlock into the typed prose sections shared by

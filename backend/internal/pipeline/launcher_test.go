@@ -31,6 +31,21 @@ func waitFor(t *testing.T, done <-chan struct{}) {
 	}
 }
 
+// waitForSlotFree polls until repo/pr's slot frees. slot.Release runs in the
+// launch goroutine's deferred cleanup AFTER OnDone, so a test that synced on
+// OnDone must poll — a one-shot Begin races the deferred Release.
+func waitForSlotFree(t *testing.T, reg *inflight.Registry, repo string, pr int) {
+	t.Helper()
+	for i := 0; i < 400; i++ {
+		if slot, ok := reg.Begin(repo, pr); ok {
+			slot.Release()
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Errorf("slot for %s#%d not released", repo, pr)
+}
+
 // TestLaunch_RetryRollbackOnError proves a failing retry launch (ReviewID set)
 // is rolled out of pending → failed (no stranded pending) and publishes
 // EventError — the machinery the retry handler used to own inline.
@@ -208,11 +223,7 @@ func TestLaunch_RunPanicRollsBackAndReleases(t *testing.T) {
 	if got := store.get(id); got != "failed" {
 		t.Errorf("status = %q, want failed (panic must roll back the retry)", got)
 	}
-	if slot, ok := reg.Begin("o/r", 6); !ok {
-		t.Error("slot not released after Run panic")
-	} else {
-		slot.Release()
-	}
+	waitForSlotFree(t, reg, "o/r", 6)
 }
 
 // TestLaunch_OnDonePanicDoesNotLeakSlot proves a panic in OnDone (path feedback)
@@ -235,19 +246,7 @@ func TestLaunch_OnDonePanicDoesNotLeakSlot(t *testing.T) {
 		t.Fatalf("Launch: %v", err)
 	}
 	<-panicked
-	// Poll until the slot frees (deferred Release runs after the recovered panic).
-	freed := false
-	for i := 0; i < 200; i++ {
-		if slot, ok := reg.Begin("o/r", 7); ok {
-			slot.Release()
-			freed = true
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	if !freed {
-		t.Error("slot leaked after OnDone panic — cleanup backstop did not run")
-	}
+	waitForSlotFree(t, reg, "o/r", 7)
 }
 
 // TestLaunch_CancelPropagatesToRun proves the launcher binds the slot's cancel so

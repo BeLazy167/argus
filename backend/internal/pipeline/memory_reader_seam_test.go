@@ -71,7 +71,7 @@ func TestSearchHints_DegradesOnError(t *testing.T) {
 	fake := &memorytest.Fake{
 		SearchFn: func(memory.MemoryQuery) ([]memory.PatternMatch, error) { return nil, errFakeSearch },
 	}
-	got := searchHints(context.Background(), fake, "triage-pattern", "widget", memory.MemoryQuery{
+	got := searchHints(context.Background(), fake, "triage-pattern", "widget", memory.NewThresholds(), memory.MemoryQuery{
 		Query: "q", Repo: "widget", Scope: memory.ScopeRepo, Type: memory.TypePattern, Limit: 5,
 	})
 	if got != nil {
@@ -87,7 +87,7 @@ func TestSearchHints_ShapesOnSuccess(t *testing.T) {
 			return []memory.PatternMatch{{RichContent: "hit one"}, {RichContent: ""}, {RichContent: "hit two"}}, nil
 		},
 	}
-	got := searchHints(context.Background(), fake, "scoring-pattern", "widget", memory.MemoryQuery{
+	got := searchHints(context.Background(), fake, "scoring-pattern", "widget", memory.NewThresholds(), memory.MemoryQuery{
 		Query: "q", Repo: "widget", Scope: memory.ScopeRepo, Type: memory.TypePattern, Limit: 5,
 	})
 	want := []string{"hit one", "hit two"}

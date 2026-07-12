@@ -33,32 +33,28 @@ func dismissalSearch(ctx context.Context, indexer memory.Indexer, repo, body str
 
 // Dismissal-match suppression policy (locked). A generated finding that
 // semantically matches a finding a developer previously 👎-dismissed in this
-// repo is gated by the match similarity:
+// repo is gated by the match similarity, against the memory.Thresholds floors:
 //
-//	>= DismissalDropThreshold      → DROP (never posted, persisted flagged suppressed)
-//	>= DismissalDowngradeThreshold → DOWNGRADE severity one level + attribution note
-//	below                          → untouched
+//	>= SuppressionDrop      → DROP (never posted, persisted flagged suppressed)
+//	>= SuppressionDowngrade → DOWNGRADE severity one level + attribution note
+//	below                   → untouched
 //
-// The floor sits above the FindingEnrich retrieval threshold (0.50) so a weak
-// coincidental match doesn't silently mute a real finding.
-const (
-	DismissalDropThreshold      = 0.85
-	DismissalDowngradeThreshold = 0.60
-)
+// The floors sit above the FindingEnrich retrieval threshold so a weak
+// coincidental match doesn't silently mute a real finding. Every floor is now
+// read from the resolved memory.Thresholds (single source, no bare literals);
+// SuppressionDowngrade doubles as the "sufficiently similar" streak bar.
 
-// Suppression v2 (team-feedback) knobs.
+// Suppression v2 (team-feedback) count knobs (non-similarity; the similarity
+// floors live in memory.Thresholds).
 const (
 	// dismissalSearchLimit is how many dismissed-feedback docs the enrichment
 	// pass retrieves per finding — enough to count a SuppressSimilarCount
 	// streak with headroom for lifecycle-filtered entries.
 	dismissalSearchLimit = 5
 	// SuppressSimilarCount is the number of sufficiently-similar dismissed
-	// memories at/above SuppressSimilarMin that suppresses a finding outright
-	// even when no single match clears the drop threshold.
+	// memories at/above the SuppressionDowngrade floor that suppresses a finding
+	// outright even when no single match clears the drop threshold.
 	SuppressSimilarCount = 3
-	// SuppressSimilarMin reuses the downgrade floor as the "sufficiently
-	// similar" bar: matches below it are coincidental, not team feedback.
-	SuppressSimilarMin = DismissalDowngradeThreshold
 )
 
 // dismissalAction is the outcome of classifying a finding against the closest
@@ -72,13 +68,13 @@ const (
 )
 
 // classifyDismissal maps a dismissed-feedback similarity score onto the
-// suppression action. Pure — the whole policy lives here so the score→action
-// matrix is table-testable in isolation.
-func classifyDismissal(score float64) dismissalAction {
+// suppression action against the resolved thresholds. Pure — the whole policy
+// lives here so the score→action matrix is table-testable in isolation.
+func classifyDismissal(score float64, t memory.Thresholds) dismissalAction {
 	switch {
-	case score >= DismissalDropThreshold:
+	case score >= t.SuppressionDrop:
 		return dismissalDrop
-	case score >= DismissalDowngradeThreshold:
+	case score >= t.SuppressionDowngrade:
 		return dismissalDowngrade
 	default:
 		return dismissalNone
@@ -105,9 +101,9 @@ func downgradeSeverity(s Severity) Severity {
 // the downgrade note. A drop sets Suppressed + SuppressedReason and leaves the
 // comment in place for the posting seams to exclude; a downgrade lowers the
 // severity and flags the comment so formatCommentBody appends the note.
-func applyDismissalMatch(c *FileComment, score float64, pr int) dismissalAction {
+func applyDismissalMatch(c *FileComment, score float64, pr int, t memory.Thresholds) dismissalAction {
 	return applyDismissalEvaluation(c, dismissalEvaluation{
-		action:    classifyDismissal(score),
+		action:    classifyDismissal(score, t),
 		reason:    fmt.Sprintf("dismissed_match:%.2f", score),
 		bestScore: score,
 		bestPR:    pr,
@@ -122,7 +118,7 @@ type dismissalEvaluation struct {
 	reason       string  // SuppressedReason when action == dismissalDrop
 	bestScore    float64 // highest lifecycle-surviving match score
 	bestPR       int     // source PR of the best match (0 = unknown)
-	similarCount int     // matches at/above SuppressSimilarMin after lifecycle filter
+	similarCount int     // matches at/above the SuppressionDowngrade floor after lifecycle filter
 }
 
 // evaluateDismissals is the whole suppression-v2 decision matrix, pure so the
@@ -134,15 +130,15 @@ type dismissalEvaluation struct {
 //     review.
 //  2. Exempt findings (security / Law-12 permanent checks) may be DOWNGRADED
 //     by memory but never dropped.
-//  3. A single match >= DismissalDropThreshold drops (v1 behavior).
-//  4. >= SuppressSimilarCount matches >= SuppressSimilarMin drops — the team
+//  3. A single match >= SuppressionDrop drops (v1 behavior).
+//  4. >= SuppressSimilarCount matches >= SuppressionDowngrade drops — the team
 //     has repeatedly rejected this finding even if no single match is exact.
 //  5. A category the repo auto-suppressed (consecutive-ignore streak) drops.
-//  6. Otherwise the best match downgrades or does nothing per v1 thresholds.
-func evaluateDismissals(matches []memory.PatternMatch, currentClass string, exempt, categoryAutoSuppressed bool) dismissalEvaluation {
+//  6. Otherwise the best match downgrades or does nothing per the thresholds.
+func evaluateDismissals(matches []memory.PatternMatch, currentClass string, exempt, categoryAutoSuppressed bool, t memory.Thresholds) dismissalEvaluation {
 	var ev dismissalEvaluation
 	for _, m := range filterDismissalsForClass(matches, currentClass) {
-		if m.Score >= SuppressSimilarMin {
+		if m.Score >= t.SuppressionDowngrade {
 			ev.similarCount++
 		}
 		if m.Score > ev.bestScore {
@@ -154,10 +150,10 @@ func evaluateDismissals(matches []memory.PatternMatch, currentClass string, exem
 	switch {
 	case exempt:
 		// Memory may lower the volume on an exempt finding, never mute it.
-		if classifyDismissal(ev.bestScore) != dismissalNone {
+		if classifyDismissal(ev.bestScore, t) != dismissalNone {
 			ev.action = dismissalDowngrade
 		}
-	case classifyDismissal(ev.bestScore) == dismissalDrop:
+	case classifyDismissal(ev.bestScore, t) == dismissalDrop:
 		ev.action = dismissalDrop
 		ev.reason = fmt.Sprintf("dismissed_match:%.2f", ev.bestScore)
 	case ev.similarCount >= SuppressSimilarCount:
@@ -167,7 +163,7 @@ func evaluateDismissals(matches []memory.PatternMatch, currentClass string, exem
 		ev.action = dismissalDrop
 		ev.reason = "category_auto_suppressed"
 	default:
-		ev.action = classifyDismissal(ev.bestScore)
+		ev.action = classifyDismissal(ev.bestScore, t)
 	}
 	return ev
 }
