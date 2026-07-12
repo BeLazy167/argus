@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	ghpkg "github.com/BeLazy167/argus/backend/internal/github"
 	"github.com/BeLazy167/argus/backend/pkg/diff"
@@ -47,7 +48,7 @@ func composeRun(reviews []FileReview, diffFiles []diff.FileDiff) *PipelineRun {
 	}
 }
 
-func inlineLines(sub ReviewSubmission) []int {
+func inlineLines(sub ComposedReview) []int {
 	out := make([]int, len(sub.GitHub.Comments))
 	for i, c := range sub.GitHub.Comments {
 		out[i] = c.Line
@@ -78,16 +79,16 @@ func TestComposeSeverityOrdering(t *testing.T) {
 	sub := Compose(composeRun(reviews, []diff.FileDiff{
 		mkDiffFile("a.go", 20, 30, 40),
 		mkDiffFile("b.go", 10, 50),
-	}))
+	}), 0)
 
 	got := inlineLines(sub)
 	want := []int{40, 20, 30, 10, 50}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("inline order by line = %v, want %v", got, want)
 	}
-	if sub.FoldedImportant != 0 || sub.FoldedMinor != 0 {
+	if sub.Counts.FoldedImportant != 0 || sub.Counts.FoldedMinor != 0 {
 		t.Errorf("folded counts = (%d,%d), want (0,0) — all comments are on valid lines",
-			sub.FoldedImportant, sub.FoldedMinor)
+			sub.Counts.FoldedImportant, sub.Counts.FoldedMinor)
 	}
 }
 
@@ -108,7 +109,7 @@ func TestComposeCapAndOverflow(t *testing.T) {
 			fmt.Sprintf("alpha%d bravo%d charlie%d delta%d echo%d foxtrot%d", i, i, i, i, i, i))
 	}
 	sub := Compose(composeRun([]FileReview{{Path: "big.go", Comments: comments}},
-		[]diff.FileDiff{mkDiffFile("big.go", validLines...)}))
+		[]diff.FileDiff{mkDiffFile("big.go", validLines...)}), 0)
 
 	if n := len(sub.GitHub.Comments); n != 10 {
 		t.Fatalf("inline comment count = %d, want 10 (cap)", n)
@@ -117,14 +118,14 @@ func TestComposeCapAndOverflow(t *testing.T) {
 		t.Errorf("summary missing overflow line for 5 hidden findings:\n%s", sub.GitHub.Summary)
 	}
 	// Observability counts surfaced for post()'s consolidated log line.
-	if sub.InlineCandidates != total {
-		t.Errorf("InlineCandidates = %d, want %d (pre-cap)", sub.InlineCandidates, total)
+	if sub.Counts.InlineCandidates != total {
+		t.Errorf("InlineCandidates = %d, want %d (pre-cap)", sub.Counts.InlineCandidates, total)
 	}
-	if sub.CapOverflow != 5 {
-		t.Errorf("CapOverflow = %d, want 5", sub.CapOverflow)
+	if sub.Counts.CapOverflow != 5 {
+		t.Errorf("CapOverflow = %d, want 5", sub.Counts.CapOverflow)
 	}
-	if sub.DedupRemoved != 0 {
-		t.Errorf("DedupRemoved = %d, want 0 (all bodies distinct)", sub.DedupRemoved)
+	if sub.Counts.DedupRemoved != 0 {
+		t.Errorf("DedupRemoved = %d, want 0 (all bodies distinct)", sub.Counts.DedupRemoved)
 	}
 }
 
@@ -137,19 +138,19 @@ func TestComposeDedupRemovedCount(t *testing.T) {
 		mkComment(1, SeverityWarning, 80, dup),
 		mkComment(2, SeverityWarning, 70, dup),
 	}}}
-	sub := Compose(composeRun(reviews, []diff.FileDiff{mkDiffFile("a.go", 1, 2)}))
+	sub := Compose(composeRun(reviews, []diff.FileDiff{mkDiffFile("a.go", 1, 2)}), 0)
 
 	if len(sub.GitHub.Comments) != 1 {
 		t.Fatalf("inline count = %d, want 1 (near-identical deduped)", len(sub.GitHub.Comments))
 	}
-	if sub.InlineCandidates != 2 {
-		t.Errorf("InlineCandidates = %d, want 2", sub.InlineCandidates)
+	if sub.Counts.InlineCandidates != 2 {
+		t.Errorf("InlineCandidates = %d, want 2", sub.Counts.InlineCandidates)
 	}
-	if sub.DedupRemoved != 1 {
-		t.Errorf("DedupRemoved = %d, want 1", sub.DedupRemoved)
+	if sub.Counts.DedupRemoved != 1 {
+		t.Errorf("DedupRemoved = %d, want 1", sub.Counts.DedupRemoved)
 	}
-	if sub.CapOverflow != 0 {
-		t.Errorf("CapOverflow = %d, want 0 (under cap)", sub.CapOverflow)
+	if sub.Counts.CapOverflow != 0 {
+		t.Errorf("CapOverflow = %d, want 0 (under cap)", sub.Counts.CapOverflow)
 	}
 }
 
@@ -163,7 +164,7 @@ func TestComposeNitDemotionOnBlockingFile(t *testing.T) {
 		mkComment(7, SeverityPraise, 30, "praise demoted off hot file"),
 		mkComment(8, SeverityWarning, 60, "warning stays inline on hot file"),
 	}}}
-	sub := Compose(composeRun(reviews, []diff.FileDiff{mkDiffFile("hot.go", 5, 6, 7, 8)}))
+	sub := Compose(composeRun(reviews, []diff.FileDiff{mkDiffFile("hot.go", 5, 6, 7, 8)}), 0)
 
 	got := inlineLines(sub)
 	want := []int{5, 8} // critical then warning; suggestion + praise demoted
@@ -187,7 +188,7 @@ func TestComposeMinorNotesRendering(t *testing.T) {
 			Title:    fmt.Sprintf("minornote-%02d", i),
 		})
 	}
-	sub := Compose(run)
+	sub := Compose(run, 0)
 	s := sub.GitHub.Summary
 
 	if !strings.Contains(s, "<details><summary>Minor notes (20)</summary>") {
@@ -220,7 +221,7 @@ func TestComposeSuppressedCountLine(t *testing.T) {
 			return c
 		}(),
 	}}}
-	sub := Compose(composeRun(reviews, []diff.FileDiff{mkDiffFile("a.go", 1, 2, 3)}))
+	sub := Compose(composeRun(reviews, []diff.FileDiff{mkDiffFile("a.go", 1, 2, 3)}), 0)
 	s := sub.GitHub.Summary
 
 	if !strings.Contains(s, "2 findings suppressed by team feedback") {
@@ -249,7 +250,7 @@ func TestComposeScoringNoticeNotDuplicated(t *testing.T) {
 	run.ScoringSkipped = true
 	run.ScoringUnconfigured = true
 
-	sub := Compose(run)
+	sub := Compose(run, 0)
 	if n := strings.Count(sub.GitHub.Summary, "were not score-filtered"); n != 1 {
 		t.Errorf("scoring notice appears %d times, want exactly 1 (no re-append in Compose)", n)
 	}
@@ -258,7 +259,7 @@ func TestComposeScoringNoticeNotDuplicated(t *testing.T) {
 // TestComposeGlassBoxFooter locks the glass-box footer + dashboard link, present
 // on every posted review regardless of findings.
 func TestComposeGlassBoxFooter(t *testing.T) {
-	sub := Compose(composeRun(nil, nil))
+	sub := Compose(composeRun(nil, nil), 0)
 	s := sub.GitHub.Summary
 	for _, want := range []string{
 		"Contract: production/full", // nil-contract default
@@ -272,17 +273,31 @@ func TestComposeGlassBoxFooter(t *testing.T) {
 	}
 }
 
+// TestComposeGlassBoxFooterDuration locks the injected-duration contract: Compose
+// reads no clock, so a FIXED took renders deterministically in the footer, and
+// took==0 omits the "review took" clause entirely.
+func TestComposeGlassBoxFooterDuration(t *testing.T) {
+	withDur := Compose(composeRun(nil, nil), 90*time.Second).GitHub.Summary
+	if !strings.Contains(withDur, "review took 1m30s") {
+		t.Errorf("footer missing injected duration 'review took 1m30s':\n%s", withDur)
+	}
+	zeroDur := Compose(composeRun(nil, nil), 0).GitHub.Summary
+	if strings.Contains(zeroDur, "review took") {
+		t.Errorf("took==0 should omit the duration clause:\n%s", zeroDur)
+	}
+}
+
 // TestComposeEmptyFindings locks the clean-PR shape: header + brief + footer,
 // no inline comments, no findings pill, no folded sections.
 func TestComposeEmptyFindings(t *testing.T) {
-	sub := Compose(composeRun(nil, nil))
+	sub := Compose(composeRun(nil, nil), 0)
 	s := sub.GitHub.Summary
 
 	if len(sub.GitHub.Comments) != 0 {
 		t.Errorf("inline count = %d, want 0", len(sub.GitHub.Comments))
 	}
-	if sub.FoldedImportant != 0 || sub.FoldedMinor != 0 {
-		t.Errorf("folded = (%d,%d), want (0,0)", sub.FoldedImportant, sub.FoldedMinor)
+	if sub.Counts.FoldedImportant != 0 || sub.Counts.FoldedMinor != 0 {
+		t.Errorf("folded = (%d,%d), want (0,0)", sub.Counts.FoldedImportant, sub.Counts.FoldedMinor)
 	}
 	if !strings.Contains(s, "8/10") || !strings.Contains(s, "looks solid") {
 		t.Errorf("summary missing header verdict:\n%s", s)
