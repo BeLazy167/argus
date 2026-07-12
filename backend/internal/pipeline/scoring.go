@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -14,12 +15,16 @@ import (
 )
 
 // ScoringStage validates review comments using a separate scoring model.
-// If no scoring model is configured, it's a no-op (all comments pass through).
-// Scoring memory context resolves from run.Indexer, so the stage needs no
-// memory.Registry of its own.
+// If no scoring model resolves (no repo/org config or no provider key), all
+// comments pass through and the posted summary carries an explicit notice —
+// unfiltered findings are never silent. Scoring memory context resolves from
+// run.Indexer, so the stage needs no memory.Registry of its own.
 type ScoringStage struct {
 	registry *llm.Registry
 	store    *store.Store
+	// cfgLister, when non-nil, overrides the store-backed model-config lister
+	// (test seam). Production resolution builds a per-run storeConfigLister.
+	cfgLister llm.ModelConfigLister
 }
 
 func NewScoringStage(registry *llm.Registry, st *store.Store) *ScoringStage {
@@ -102,11 +107,24 @@ func minorNoteFrom(path string, c FileComment) MinorNote {
 // review (a single cheap LLM call). Pass2/validate/multi-pass remain gated
 // behind deep review elsewhere — only the earned-findings gate is always on.
 func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
-	// Check if scoring model is configured — if not, pass through
-	provider, cfg, err := ss.registry.ResolveProvider(ctx, storeConfigLister{st: ss.store, installationID: run.DBInstallationID}, run.DBInstallationID, run.DBRepoID, llm.StageScoring)
+	// Resolve the judge model: repo row → org row, else scoring is skipped.
+	// Configuration-gap skips are never silent — ScoringUnconfigured surfaces
+	// a setup notice in the posted summary (scoringSkippedNotice).
+	lister := ss.cfgLister
+	if lister == nil {
+		lister = storeConfigLister{st: ss.store, installationID: run.DBInstallationID}
+	}
+	provider, cfg, err := ss.registry.ResolveProvider(ctx, lister, run.DBInstallationID, run.DBRepoID, llm.StageScoring)
 	if err != nil {
 		slog.Info("scoring provider unavailable, passing all comments through", "repo_id", run.DBRepoID, "error", err)
 		run.ScoringSkipped = true
+		// Setup notice ONLY for configuration gaps (sentinel match). A
+		// transient lister/key-resolver failure on a fully-configured org
+		// must never post a public "configure your models" nudge.
+		if errors.Is(err, llm.ErrNoModelConfig) || errors.Is(err, llm.ErrNoAPIKey) {
+			run.ScoringUnconfigured = true
+			run.ScoringMissingKey = errors.Is(err, llm.ErrNoAPIKey)
+		}
 		return nil
 	}
 
@@ -306,6 +324,24 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 		"threshold_warning", scoringThresholdForSeverity("warning", run.Contract),
 		"threshold_suggestion", scoringThresholdForSeverity("suggestion", run.Contract))
 	return nil
+}
+
+// scoringSkippedNotice returns the user-visible summary line when the judge
+// never ran because scoring is unconfigured (no repo/org config row or no
+// provider key — sentinel-matched in Execute). Empty when scoring ran, when
+// the skip was transient (judge call/output failure — a setup nudge would
+// mislead), or when the review has zero findings (nothing went unfiltered).
+func scoringSkippedNotice(run *PipelineRun) string {
+	if !run.ScoringSkipped || !run.ScoringUnconfigured {
+		return ""
+	}
+	if countComments(run) == 0 {
+		return ""
+	}
+	if run.ScoringMissingKey {
+		return "> ⚠️ Findings were not score-filtered — the scoring model is configured but no API key resolves for its provider. Add one in Settings → API Keys."
+	}
+	return "> ⚠️ Findings were not score-filtered — set org default models in Settings → Org Defaults."
 }
 
 // applyThresholdFilter partitions run.FileReviews by class-conditioned severity

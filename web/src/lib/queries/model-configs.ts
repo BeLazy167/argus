@@ -83,7 +83,13 @@ type UpsertOrgModelConfigVars = {
   temperature: number;
 };
 
-const useUpsertOrgModelConfigMutation = createAuthMutation<ModelConfig, UpsertOrgModelConfigVars>({
+/**
+ * Base org upsert WITHOUT per-call cache invalidation. Batch flows (e.g.
+ * "Apply to all stages") await several of these via mutateAsync and refresh
+ * the org config list once at the end; single-stage saves should use
+ * useUpsertOrgModelConfig.
+ */
+export const useUpsertOrgModelConfigMutation = createAuthMutation<ModelConfig, UpsertOrgModelConfigVars>({
   mutationFn: ({ stage, ...body }, ctx) => {
     const api = getApi(ctx);
     return api.put<ModelConfig>(`/api/v1/installations/${api.active?.id}/config/${stage}`, body);

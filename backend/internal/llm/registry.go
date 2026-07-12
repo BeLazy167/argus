@@ -2,9 +2,21 @@ package llm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
+)
+
+// Configuration-gap sentinels: callers use errors.Is to distinguish "the user
+// never configured this" (guided-setup surfaces) from transient resolution
+// failures (DB/network), which must never trigger setup nudges.
+var (
+	// ErrNoModelConfig — neither a repo- nor an org-level model_configs row
+	// exists for the requested stage.
+	ErrNoModelConfig = errors.New("no model config")
+	// ErrNoAPIKey — no BYOK provider key stored for the installation.
+	ErrNoAPIKey = errors.New("no API key")
 )
 
 // PipelineStage identifies which stage of the review pipeline a model config applies to.
@@ -84,7 +96,7 @@ func (r *Registry) GetProviderForRepo(ctx context.Context, installationID int64,
 	}
 
 	if !found {
-		return nil, fmt.Errorf("no API key for provider %q — add one at the dashboard settings page", providerName)
+		return nil, fmt.Errorf("%w for provider %q — add one at the dashboard settings page", ErrNoAPIKey, providerName)
 	}
 
 	if baseURL == "" {
@@ -98,7 +110,11 @@ func (r *Registry) GetProviderForRepo(ctx context.Context, installationID int64,
 }
 
 // GetConfig returns the model config for a repo + stage.
-// Prefers repo-specific config; falls back to org-level (RepoID == 0) if present.
+// Prefers repo-specific config; falls back to org-level (RepoID == 0) if
+// present. There is deliberately NO platform default tier: org defaults ARE
+// the user-selected defaults, so an unconfigured stage errors and surfaces as
+// an explicit, guided setup step instead of silently running a model the user
+// never chose.
 func (r *Registry) GetConfig(repoID int64, stage PipelineStage, repoConfigs []ModelConfig) (ModelConfig, error) {
 	var orgFallback *ModelConfig
 	for _, cfg := range repoConfigs {
@@ -115,7 +131,7 @@ func (r *Registry) GetConfig(repoID int64, stage PipelineStage, repoConfigs []Mo
 	if orgFallback != nil {
 		return *orgFallback, nil
 	}
-	return ModelConfig{}, fmt.Errorf("no model config for repo %d stage %s — configure one in the dashboard", repoID, stage)
+	return ModelConfig{}, fmt.Errorf("%w for repo %d stage %s — configure one in the dashboard", ErrNoModelConfig, repoID, stage)
 }
 
 // ResolveProvider resolves the LLM provider and model config for a pipeline stage.

@@ -133,6 +133,11 @@ type PipelineRun struct {
 	LeadBrief           *LeadBrief        `json:"lead_brief,omitempty"`
 	LeadAgentError      string            `json:"lead_agent_error,omitempty"`
 	ScoringSkipped      bool              // true when scoring provider unavailable — synthesis uses all comments
+	ScoringUnconfigured bool
+	// ScoringMissingKey narrows the unconfigured cause: the scoring model row
+	// exists but no API key resolves for its provider — the remedy is a key,
+	// not a model config.
+	ScoringMissingKey bool              // true when the skip was resolution failure (no model config/key) — posts a setup notice
 	Prompts             map[string]string // custom prompt overrides per stage
 	IsIncremental       bool
 	PreviousReviewID    *uuid.UUID
