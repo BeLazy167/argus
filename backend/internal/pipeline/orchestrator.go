@@ -145,6 +145,149 @@ func (o *Orchestrator) fetchDiffViaFiles(ctx context.Context, event *ghpkg.PREve
 	return patchSet, sb.String(), nil
 }
 
+// fetchPRDiff fetches and parses a PR's unified diff, falling back to the
+// per-file API when GitHub returns 406 (diff too large). Shared by
+// HandlePREvent and the no-run retry path so both construct the diff the same
+// way.
+func (o *Orchestrator) fetchPRDiff(ctx context.Context, event *ghpkg.PREvent, owner, repo string) (*diff.PatchSet, string, error) {
+	rawDiff, err := o.ghClient.GetPRDiff(ctx, event.InstallationID, owner, repo, event.PRNumber)
+	if err != nil && isDiffTooLarge(err) {
+		o.logger.Warn("diff too large, falling back to files API", "pr", event.PRNumber, "error", err)
+		patchSet, rawDiff, ferr := o.fetchDiffViaFiles(ctx, event, owner, repo)
+		if ferr != nil {
+			return nil, "", fmt.Errorf("fallback files API: %w", ferr)
+		}
+		return patchSet, rawDiff, nil
+	}
+	if err != nil {
+		return nil, "", fmt.Errorf("fetching diff: %w", err)
+	}
+	patchSet, err := diff.Parse(rawDiff)
+	if err != nil {
+		return nil, "", fmt.Errorf("parsing diff: %w", err)
+	}
+	return patchSet, rawDiff, nil
+}
+
+// buildRunInput carries the per-review inputs buildRun needs. Grouped into a
+// struct because they come from several sources (PR event, fetched diff,
+// resolved installation/repo ids, incremental context) — a positional
+// signature with this many args is error-prone.
+type buildRunInput struct {
+	reviewID         uuid.UUID
+	event            ghpkg.PREvent
+	patchSet         *diff.PatchSet
+	rawDiff          string
+	dbInstallationID int64
+	dbRepoID         int64
+	traceID          string
+	isIncremental    bool
+	previousReviewID *uuid.UUID
+	indexer          memory.Indexer
+}
+
+// buildRun constructs a fresh PipelineRun from a PR event, its fetched diff, and
+// the repo's merged settings + prompts, then computes the review contract.
+// Shared by HandlePREvent (new reviews) and the no-run retry path (existing
+// review id) so feature-flag resolution and contract computation live in one
+// place.
+func (o *Orchestrator) buildRun(ctx context.Context, in buildRunInput) *PipelineRun {
+	// Merge org defaults with repo overrides (repo wins)
+	mergedSettings, mergedErr := o.st.GetMergedSettings(ctx, in.dbInstallationID, in.dbRepoID)
+	if mergedErr != nil {
+		o.logger.Error("failed to load merged settings, using defaults", "error", mergedErr, "installation", in.dbInstallationID, "repo", in.dbRepoID)
+	}
+
+	run := &PipelineRun{
+		ID:                  uuid.New(),
+		ReviewID:            in.reviewID,
+		State:               StatePending,
+		PREvent:             in.event,
+		DBInstallationID:    in.dbInstallationID,
+		DBRepoID:            in.dbRepoID,
+		TraceID:             in.traceID,
+		Diff:                in.patchSet,
+		RawDiff:             in.rawDiff,
+		Persona:             loadPersona(mergedSettings),
+		CustomPersonaPrompt: loadCustomPersonaPrompt(mergedSettings),
+		DeepReview: isDeepReviewEnabled(mergedSettings) && func() bool {
+			tier, _ := o.st.GetPlanTier(ctx, in.dbInstallationID)
+			return tier == "pro"
+		}(),
+		CrossFileContext:  isCrossFileContextEnabled(mergedSettings),
+		BlastRadius:       isBlastRadiusEnabled(mergedSettings),
+		ScenarioMemory:    isScenarioMemoryEnabled(mergedSettings),
+		CodeSimulation:    isCodeSimulationEnabled(mergedSettings),
+		PREnrichment:      isPREnrichmentEnabled(mergedSettings),
+		LearnPatterns:     isLearnPatternsEnabled(mergedSettings),
+		LearnConventions:  isLearnConventionsEnabled(mergedSettings),
+		FileSynthesis:     isFileSynthesisEnabled(mergedSettings),
+		ArchitectureGraph: isArchitectureGraphEnabled(mergedSettings),
+		Prompts:           o.loadPrompts(ctx, in.dbRepoID),
+		IsIncremental:     in.isIncremental,
+		PreviousReviewID:  in.previousReviewID,
+		Indexer:           in.indexer,
+		Thresholds:        parseThresholds(mergedSettings),
+		EventBus:          o.eventBus,
+		CreatedAt:         time.Now(),
+		UpdatedAt:         time.Now(),
+	}
+	run.Contract = ComputeContract(&run.PREvent, in.patchSet.Files)
+	return run
+}
+
+// resolveIndexer returns the per-org memory indexer, or nil when memory is not
+// configured for the installation.
+func (o *Orchestrator) resolveIndexer(ctx context.Context, dbInstallationID int64) memory.Indexer {
+	if o.memRegistry == nil {
+		return nil
+	}
+	return o.memRegistry.GetIndexer(ctx, dbInstallationID)
+}
+
+// buildPriorComments maps persisted review comments into the per-file
+// PriorComment map the review stage uses to dedup against / verify prior
+// findings on an incremental (or no-run retry) re-review. Returns nil for an
+// empty input. Pure — shared by HandlePREvent and retryFromReviewRow.
+func buildPriorComments(comments []store.ReviewComment) map[string][]PriorComment {
+	if len(comments) == 0 {
+		return nil
+	}
+	out := make(map[string][]PriorComment)
+	for _, c := range comments {
+		// DB stores StartLine (range start) and EndLine (range end / single line).
+		// Map directly: Line = start of range, EndLine = end of range.
+		line, endLine := 0, 0
+		if c.StartLine != nil {
+			line = *c.StartLine
+		}
+		if c.EndLine != nil {
+			endLine = *c.EndLine
+		}
+		// If only EndLine is set (single-line comment), use it as both.
+		if line == 0 && endLine > 0 {
+			line = endLine
+		}
+		sev := "suggestion"
+		if c.Severity != nil {
+			sev = *c.Severity
+		}
+		cat := ""
+		if c.Category != nil {
+			cat = *c.Category
+		}
+		out[c.FilePath] = append(out[c.FilePath], PriorComment{
+			FilePath: c.FilePath,
+			Line:     line,
+			EndLine:  endLine,
+			Body:     c.Body,
+			Severity: sev,
+			Category: cat,
+		})
+	}
+	return out
+}
+
 // Orchestrator receives PR events and drives them through the review pipeline.
 type Orchestrator struct {
 	db           *pgxpool.Pool
@@ -419,21 +562,9 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 	}
 
 	// Fetch diff — fall back to per-file API if GitHub returns 406 (diff too large)
-	rawDiff, err := o.ghClient.GetPRDiff(ctx, event.InstallationID, owner, repo, event.PRNumber)
-	var patchSet *diff.PatchSet
-	if err != nil && isDiffTooLarge(err) {
-		o.logger.Warn("diff too large, falling back to files API", "pr", event.PRNumber, "error", err)
-		patchSet, rawDiff, err = o.fetchDiffViaFiles(ctx, &event, owner, repo)
-		if err != nil {
-			return fmt.Errorf("fallback files API: %w", err)
-		}
-	} else if err != nil {
-		return fmt.Errorf("fetching diff: %w", err)
-	} else {
-		patchSet, err = diff.Parse(rawDiff)
-		if err != nil {
-			return fmt.Errorf("parsing diff: %w", err)
-		}
+	patchSet, rawDiff, err := o.fetchPRDiff(ctx, &event, owner, repo)
+	if err != nil {
+		return err
 	}
 
 	// Check for incremental re-review on synchronize
@@ -488,60 +619,29 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 	}
 
 	// Resolve per-org memory indexer
-	var indexer memory.Indexer
-	if o.memRegistry != nil {
-		indexer = o.memRegistry.GetIndexer(ctx, inst.ID)
-	}
+	indexer := o.resolveIndexer(ctx, inst.ID)
 	if indexer != nil {
 		_, _ = o.db.Exec(ctx, `UPDATE reviews SET memory_enabled = true WHERE id = $1`, reviewID)
 	}
 
-	// Merge org defaults with repo overrides (repo wins)
-	mergedSettings, mergedErr := o.st.GetMergedSettings(ctx, inst.ID, dbRepo.ID)
-	if mergedErr != nil {
-		o.logger.Error("failed to load merged settings, using defaults", "error", mergedErr, "installation", inst.ID, "repo", dbRepo.ID)
-	}
+	// Build the run (merged settings + prompts + feature flags + contract).
+	run := o.buildRun(ctx, buildRunInput{
+		reviewID:         reviewID,
+		event:            event,
+		patchSet:         patchSet,
+		rawDiff:          rawDiff,
+		dbInstallationID: inst.ID,
+		dbRepoID:         dbRepo.ID,
+		traceID:          traceID,
+		isIncremental:    isIncremental,
+		previousReviewID: previousReviewID,
+		indexer:          indexer,
+	})
 
-	run := &PipelineRun{
-		ID:                  uuid.New(),
-		ReviewID:            reviewID,
-		State:               StatePending,
-		PREvent:             event,
-		DBInstallationID:    inst.ID,
-		DBRepoID:            dbRepo.ID,
-		TraceID:             traceID,
-		Diff:                patchSet,
-		RawDiff:             rawDiff,
-		Persona:             loadPersona(mergedSettings),
-		CustomPersonaPrompt: loadCustomPersonaPrompt(mergedSettings),
-		DeepReview: isDeepReviewEnabled(mergedSettings) && func() bool {
-			tier, _ := o.st.GetPlanTier(ctx, inst.ID)
-			return tier == "pro"
-		}(),
-		CrossFileContext:  isCrossFileContextEnabled(mergedSettings),
-		BlastRadius:       isBlastRadiusEnabled(mergedSettings),
-		ScenarioMemory:    isScenarioMemoryEnabled(mergedSettings),
-		CodeSimulation:    isCodeSimulationEnabled(mergedSettings),
-		PREnrichment:      isPREnrichmentEnabled(mergedSettings),
-		LearnPatterns:     isLearnPatternsEnabled(mergedSettings),
-		LearnConventions:  isLearnConventionsEnabled(mergedSettings),
-		FileSynthesis:     isFileSynthesisEnabled(mergedSettings),
-		ArchitectureGraph: isArchitectureGraphEnabled(mergedSettings),
-		Prompts:           o.loadPrompts(ctx, dbRepo.ID),
-		IsIncremental:     isIncremental,
-		PreviousReviewID:  previousReviewID,
-		Indexer:           indexer,
-		Thresholds:        parseThresholds(mergedSettings),
-		EventBus:          o.eventBus,
-		CreatedAt:         time.Now(),
-		UpdatedAt:         time.Now(),
-	}
-
-	// Compute the review contract from deterministic metadata (draft flag,
-	// labels, branch prefix, changed paths, title, size). When metadata is
-	// silent the contract stays "llm-pending" and the intent stage fills the
-	// change class. Consumers (triage, review fan-out, pass2, posting) read it.
-	run.Contract = ComputeContract(&run.PREvent, patchSet.Files)
+	// Contract was computed inside buildRun from deterministic metadata (draft
+	// flag, labels, branch prefix, changed paths, title, size). When metadata is
+	// silent it stays "llm-pending" and the intent stage fills the change class.
+	// Consumers (triage, review fan-out, pass2, posting) read it.
 	o.logger.Info("review contract computed",
 		"change_class", run.Contract.ChangeClass,
 		"evidence_bar", run.Contract.EvidenceBar,
@@ -558,40 +658,8 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		priorComments, err := o.st.GetReviewComments(ctx, *previousReviewID)
 		if err != nil {
 			o.logger.Warn("failed to load prior review comments", "error", err, "previous_review_id", *previousReviewID)
-		} else if len(priorComments) > 0 {
-			run.PriorComments = make(map[string][]PriorComment)
-			for _, c := range priorComments {
-				// DB stores StartLine (range start) and EndLine (range end / single line).
-				// Map directly: Line = start of range, EndLine = end of range.
-				line := 0
-				endLine := 0
-				if c.StartLine != nil {
-					line = *c.StartLine
-				}
-				if c.EndLine != nil {
-					endLine = *c.EndLine
-				}
-				// If only EndLine is set (single-line comment), use it as both
-				if line == 0 && endLine > 0 {
-					line = endLine
-				}
-				sev := "suggestion"
-				if c.Severity != nil {
-					sev = *c.Severity
-				}
-				cat := ""
-				if c.Category != nil {
-					cat = *c.Category
-				}
-				run.PriorComments[c.FilePath] = append(run.PriorComments[c.FilePath], PriorComment{
-					FilePath: c.FilePath,
-					Line:     line,
-					EndLine:  endLine,
-					Body:     c.Body,
-					Severity: sev,
-					Category: cat,
-				})
-			}
+		} else if pc := buildPriorComments(priorComments); len(pc) > 0 {
+			run.PriorComments = pc
 			o.logger.Info("loaded prior review comments for incremental review",
 				"previous_review_id", *previousReviewID,
 				"total_comments", len(priorComments),
@@ -971,19 +1039,26 @@ func (o *Orchestrator) handlePRClosed(ctx context.Context, event ghpkg.PREvent) 
 // on "pending" forever. For those we rebuild a fresh run for the SAME review
 // and drive it from the initial state.
 func (o *Orchestrator) RetryReview(ctx context.Context, reviewID uuid.UUID) error {
+	// Topic may already be opened by the caller (retry handler opens it
+	// before spawning the goroutine so the WebSocket can subscribe immediately).
+	if o.eventBus != nil {
+		o.eventBus.OpenTopic(reviewID)
+	}
+
 	var runID uuid.UUID
 	err := o.db.QueryRow(ctx,
 		`SELECT id FROM pipeline_states WHERE review_id = $1 ORDER BY updated_at DESC LIMIT 1`,
 		reviewID,
 	).Scan(&runID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// No persisted run: the review died before its first pipeline_states
+		// persist (e.g. a restart during an early, non-persisted stage). There's
+		// nothing to rebuild from, so reconstruct a fresh run from the review +
+		// repo rows and fetch the diff fresh from GitHub.
+		return o.retryFromReviewRow(ctx, reviewID)
+	}
 	if err != nil {
 		return fmt.Errorf("finding pipeline run for review %s: %w", reviewID, err)
-	}
-
-	// Topic may already be opened by the caller (retry handler opens it
-	// before spawning the goroutine so the WebSocket can subscribe immediately).
-	if o.eventBus != nil {
-		o.eventBus.OpenTopic(reviewID)
 	}
 
 	prev, err := o.sm.loadState(ctx, runID)
@@ -1005,6 +1080,108 @@ func (o *Orchestrator) RetryReview(ctx context.Context, reviewID uuid.UUID) erro
 	}
 	fresh.EventBus = o.eventBus
 	return o.sm.Run(ctx, fresh)
+}
+
+// retryPREvent stamps a live-fetched PR event with the fields that come from our
+// own records — the manual-trigger action and the GitHub repo id — for retrying
+// a review that has no persisted run. SHAs, title, author, and refs come from
+// the live PR fetch (livePR), NOT the stored review row, so the commit
+// PostReview pins always matches the freshly-fetched diff even if the PR
+// advanced (push/force-push) since the review row was written.
+func retryPREvent(livePR *ghpkg.PREvent, repo *store.Repo) ghpkg.PREvent {
+	event := *livePR
+	event.Action = "manual"
+	event.RepoID = repo.GithubID
+	event.RepoFullName = repo.FullName
+	return event
+}
+
+// retryFromReviewRow rebuilds and runs a fresh pipeline for a review that has no
+// persisted pipeline_states run to rebuild from — it died before the first state
+// persist (e.g. a restart during an early, non-persisted stage). It fetches the
+// PR's CURRENT metadata + diff fresh from GitHub (the manual-trigger
+// construction path) and runs a fresh run for the SAME review id.
+//
+// Current (not stored) SHAs are essential: the PR may have advanced since the
+// review row was written, and pinning PostReview to a stale head while the diff
+// is computed at the new head yields GitHub 422s / misplaced comments and
+// degrades LLM file-content context. Stored SHAs are informational only.
+//
+// All RetryReview guards still hold: EnsureNotRunning trivially passed (no
+// rows), the retry handler holds the per-PR slot + registered the cancel fn, and
+// the run uses the same cooperative-cancel / conditional-write machinery. On any
+// failure (including the metadata/diff fetch) the handler goroutine rolls the
+// review back to "failed" — we never proceed with mismatched SHAs.
+func (o *Orchestrator) retryFromReviewRow(ctx context.Context, reviewID uuid.UUID) error {
+	review, err := o.st.GetReview(ctx, reviewID)
+	if err != nil {
+		return fmt.Errorf("loading review %s for no-run retry: %w", reviewID, err)
+	}
+	repo, err := o.st.GetRepo(ctx, review.RepoID)
+	if err != nil {
+		return fmt.Errorf("loading repo %d for no-run retry: %w", review.RepoID, err)
+	}
+	inst, err := o.st.GetInstallation(ctx, repo.InstallationID)
+	if err != nil {
+		return fmt.Errorf("loading installation %d for no-run retry: %w", repo.InstallationID, err)
+	}
+
+	owner, repoName, err := splitRepoFullName(repo.FullName)
+	if err != nil {
+		return err
+	}
+
+	// Fetch CURRENT PR metadata so event.HeadSHA/BaseSHA/refs match the diff
+	// fetched below. Fail (→ rollback) rather than proceed with stale SHAs.
+	livePR, err := o.ghClient.GetPullRequest(ctx, inst.InstallationID, owner, repoName, review.PRNumber)
+	if err != nil {
+		return fmt.Errorf("no-run retry %s: fetching current PR metadata: %w", reviewID, err)
+	}
+	event := retryPREvent(livePR, repo)
+
+	patchSet, rawDiff, err := o.fetchPRDiff(ctx, &event, owner, repoName)
+	if err != nil {
+		return fmt.Errorf("no-run retry %s: %w", reviewID, err)
+	}
+
+	// Carry prior completed-review comments so this full re-review dedups
+	// against / verifies findings already posted to the PR instead of
+	// re-posting duplicates. Mirrors HandlePREvent's incremental path. The
+	// review being retried isn't completed, so it can't be its own prior; the
+	// id guard is belt-and-suspenders.
+	var priorComments map[string][]PriorComment
+	isIncremental := false
+	var previousReviewID *uuid.UUID
+	if prev, perr := o.st.GetLastCompletedReview(ctx, review.RepoID, review.PRNumber); perr == nil && prev != nil && prev.ID != reviewID {
+		comments, cerr := o.st.GetReviewComments(ctx, prev.ID)
+		if cerr != nil {
+			o.logger.Warn("no-run retry: failed to load prior review comments", "error", cerr, "previous_review_id", prev.ID)
+		} else if pc := buildPriorComments(comments); len(pc) > 0 {
+			priorComments = pc
+			isIncremental = true
+			previousReviewID = &prev.ID
+			o.logger.Info("no-run retry: carried prior review comments",
+				"previous_review_id", prev.ID, "files_with_comments", len(pc))
+		}
+	}
+
+	// Settings/feature flags come from the repo's current merged settings via
+	// buildRun. We fetched the whole PR diff, so this is a full re-review unless
+	// a prior completed review's comments engage the incremental dedup guards.
+	run := o.buildRun(ctx, buildRunInput{
+		reviewID:         reviewID,
+		event:            event,
+		patchSet:         patchSet,
+		rawDiff:          rawDiff,
+		dbInstallationID: repo.InstallationID,
+		dbRepoID:         review.RepoID,
+		traceID:          obs.TraceID(ctx),
+		isIncremental:    isIncremental,
+		previousReviewID: previousReviewID,
+		indexer:          o.resolveIndexer(ctx, repo.InstallationID),
+	})
+	run.PriorComments = priorComments
+	return o.sm.Run(ctx, run)
 }
 
 // buildRetryRun constructs a fresh PipelineRun for retrying a review whose
