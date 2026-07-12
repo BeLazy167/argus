@@ -37,7 +37,7 @@ type DocumentLink struct {
 	Type  string `json:"type"`
 }
 
-const baseURL = "https://api.supermemory.ai"
+const defaultBaseURL = "https://api.supermemory.ai"
 
 // Client wraps the Supermemory REST API for memory storage and retrieval.
 // Holds an optional rate limiter (per-installation token bucket) and an
@@ -46,6 +46,7 @@ const baseURL = "https://api.supermemory.ai"
 // values without ceremony.
 type Client struct {
 	apiKey  string
+	baseURL string
 	client  *http.Client
 	limiter *rate.Limiter
 	backoff BackoffPolicy
@@ -69,12 +70,20 @@ func WithBackoff(p BackoffPolicy) ClientOption {
 	return func(c *Client) { c.backoff = p }
 }
 
+// WithBaseURL overrides the Supermemory API base URL. Test-only seam: point the
+// client at an httptest server to capture the request the indexer emits (e.g.
+// the customId a write path stamps) without a live API.
+func WithBaseURL(url string) ClientOption {
+	return func(c *Client) { c.baseURL = url }
+}
+
 // NewClient constructs a Supermemory client with the given API key. Applies
 // DefaultBackoff; caller attaches a rate limiter via WithLimiter when BYOK
 // usage requires it (the Registry does this in production).
 func NewClient(apiKey string, opts ...ClientOption) *Client {
 	c := &Client{
 		apiKey:  apiKey,
+		baseURL: defaultBaseURL,
 		client:  &http.Client{Timeout: 30 * time.Second},
 		backoff: DefaultBackoff,
 	}
@@ -114,7 +123,7 @@ func (c *Client) doOnce(ctx context.Context, method, path string, reqBody, resul
 		bodyReader = bytes.NewReader(body)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, method, baseURL+path, bodyReader)
+	httpReq, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bodyReader)
 	if err != nil {
 		return fmt.Errorf("creating request: %w", err)
 	}
@@ -316,6 +325,9 @@ var idSanitizerRe = regexp.MustCompile(`[^a-zA-Z0-9_:-]`)
 // already-safe input. Callers assembling multi-segment IDs should join with
 // `--` AFTER per-segment sanitization — sanitizing the joined string would
 // also collapse the `--` separator (`--` is allowed, just redundant).
+//
+// Exported deliberately — the pipeline uses it to assemble its own customIDs
+// (e.g. the arch-summary doc id in orchestrator.go) against the same char set.
 func CustomIDSanitize(s string) string {
 	return idSanitizerRe.ReplaceAllString(s, "-")
 }

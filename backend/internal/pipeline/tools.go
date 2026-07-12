@@ -111,13 +111,14 @@ func memoryTools(repo string) []llm.Tool {
 // repo. repo scopes new-shape container access to this review's repo so a
 // prompt-injected PR cannot steer search_memory into another repo's container.
 type ToolHandler struct {
-	indexer memory.Indexer
-	store   *store.Store
-	repo    string
+	indexer    memory.Indexer
+	store      *store.Store
+	repo       string
+	thresholds memory.Thresholds
 }
 
-func NewToolHandler(indexer memory.Indexer, st *store.Store, repo string) *ToolHandler {
-	return &ToolHandler{indexer: indexer, store: st, repo: repo}
+func NewToolHandler(indexer memory.Indexer, st *store.Store, repo string, thresholds memory.Thresholds) *ToolHandler {
+	return &ToolHandler{indexer: indexer, store: st, repo: repo, thresholds: thresholds.WithDefaults()}
 }
 
 // tagAllowed reports whether the review may search container tag. It accepts
@@ -177,7 +178,7 @@ func (th *ToolHandler) searchMemory(ctx context.Context, argsJSON string) (strin
 		Scope:     scope,
 		Type:      memory.MemoryType(args.Type),
 		Limit:     5,
-		Threshold: 0.5,
+		Threshold: th.thresholds.FindingEnrich,
 	})
 	if err != nil {
 		return fmt.Sprintf("search failed: %s", err), nil

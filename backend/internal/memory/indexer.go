@@ -196,6 +196,17 @@ func FindingFingerprint(owner, repo, filePath, category, body string) string {
 	return truncateIDWithSuffix(prefix, hash)
 }
 
+// The customID builders below stay EXPORTED deliberately: the deterministic
+// customId is a cross-package contract, not a test affordance. The pipeline
+// computes it to mirror supermemory_id into the patterns/scenarios tables and to
+// resolve a search hit back to its row; cmd/migrate-memory and
+// cmd/reconcile-memory reconstruct the SAME id to back-fill / sync legacy docs;
+// internal/api derives it to delete a rule's doc. Un-exporting any of these
+// would break those callers, so their ID invariants are pinned by write→read
+// round-trip tests through the Indexer (see dismissal_id_test.go) rather than by
+// keeping a builder package-visible for a unit test. Builders with NO
+// cross-package caller (dismissalCustomID) are unexported.
+
 // SynthesisCustomID returns a stable customId for a file synthesis document.
 // owner accepted for back-compat; ignored.
 //
@@ -240,26 +251,18 @@ func SharedPatternCustomID(source, content string) string {
 	return truncateIDWithSuffix(prefix, hash)
 }
 
-// TraceCustomID returns a stable customId for a decision trace. Hashes
-// (file, trace_type, normalized_content) so identical traces dedupe across
-// reruns, while semantically-different traces on the same file coexist.
-func TraceCustomID(repo, filePath, traceType, content string) string {
-	h := sha256.Sum256([]byte(filePath + "|" + traceType + "|" + normalizeBody(content)))
-	hash := hex.EncodeToString(h[:6])
-	prefix := fmt.Sprintf("%s--trace", repoIDSegment(repo))
-	return truncateIDWithSuffix(prefix, hash)
-}
-
 // RuleCustomID returns a stable customId for a rule identified by its DB id.
 func RuleCustomID(ruleID int64) string {
 	return fmt.Sprintf("rule--%d", ruleID)
 }
 
-// DismissalCustomID returns a stable customId for a DISMISSED feedback signal.
+// dismissalCustomID returns a stable customId for a DISMISSED feedback signal.
 // Keyed by category + semantic content only — deliberately file-path-free so
 // the same dismissed finding recurring across files/PRs upserts one doc whose
-// recurrence (not row count) is the suppression signal.
-func DismissalCustomID(repo, category, body string) string {
+// recurrence (not row count) is the suppression signal. Unexported: the only
+// writer is IndexFeedbackSignal below; its invariants are round-tripped in
+// dismissal_id_test.go through that write path.
+func dismissalCustomID(repo, category, body string) string {
 	h := sha256.Sum256([]byte(category + "|" + normalizeBody(body)))
 	hash := hex.EncodeToString(h[:6])
 	prefix := fmt.Sprintf("%s--dismissal", repoIDSegment(repo))
@@ -559,7 +562,7 @@ func (idx *indexerImpl) IndexFeedbackSignal(ctx context.Context, owner, repo str
 	// Dismissals are keyed by category + semantic content (file-path-free) and
 	// carry change-kind provenance so retrieval can lifecycle-filter them.
 	if fb.Action == "dismissed" {
-		customID = DismissalCustomID(repo, fb.Category, fb.OriginalBody)
+		customID = dismissalCustomID(repo, fb.Category, fb.OriginalBody)
 		extra := map[string]string{"repo": repo}
 		if fb.ChangeKind != "" {
 			extra["change_kind"] = fb.ChangeKind

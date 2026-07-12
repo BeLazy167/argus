@@ -34,12 +34,16 @@ func patternLeg(matches []memory.PatternMatch, err error) func(memory.MemoryQuer
 type fakeEnrichStore struct {
 	byCustomID      map[string]int64
 	bySupermemoryID map[string]int64
+	autoSuppressed  map[string]bool // categories the repo auto-suppressed; nil = none
 
 	mu          sync.Mutex
 	incremented []int64
 }
 
 func (f *fakeEnrichStore) GetAutoSuppressedCategories(context.Context, int64) (map[string]bool, error) {
+	if f.autoSuppressed != nil {
+		return f.autoSuppressed, nil
+	}
 	return map[string]bool{}, nil
 }
 

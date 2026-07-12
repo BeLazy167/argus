@@ -145,7 +145,7 @@ func (e *Enricher) enrichComment(ctx context.Context, c *FileComment, filePath s
 	// body to 300 chars.
 	ruleMatches, ruleErr := e.reader.Search(ctx, memory.MemoryQuery{
 		Query: query, Scope: memory.ScopeShared, Type: memory.TypeRule,
-		Limit: 1, Threshold: 0.5,
+		Limit: 1, Threshold: e.thresholds.FindingEnrich,
 	})
 	ruleContent := memory.TopContent(ruleMatches, 300)
 
@@ -172,9 +172,10 @@ func (e *Enricher) enrichComment(ctx context.Context, c *FileComment, filePath s
 	}
 
 	// Persist best-match pattern id + score for every hit at/above the
-	// FindingEnrich floor. Public footer attribution stays gated at >0.80 below.
-	// The doc→pattern-id lookup can miss (synthesis docs never mirror to the
-	// patterns table); a miss skips the FK and pattern-stats without failing.
+	// FindingEnrich floor. Public footer attribution stays gated at the
+	// Attribution threshold below. The doc→pattern-id lookup can miss (synthesis
+	// docs never mirror to the patterns table); a miss skips the FK and
+	// pattern-stats without failing.
 	if score > 0 {
 		patternID, found := e.resolvePatternID(ctx, match)
 		linkMatchedPattern(c, patternID, found, score)
@@ -185,7 +186,7 @@ func (e *Enricher) enrichComment(ctx context.Context, c *FileComment, filePath s
 		}
 	}
 
-	if score > 0.80 {
+	if score > e.thresholds.Attribution {
 		c.MatchedPatternKind = inferMatchKind(match.Metadata)
 		// New-shape docs flatten via Metadata.ToMap, which emits the PR number
 		// under "pr_number".
@@ -232,16 +233,17 @@ func (e *Enricher) enrichComment(ctx context.Context, c *FileComment, filePath s
 
 	// Dismissal suppression v2: retrieve the top dismissed-feedback matches (query
 	// by body — the dismissal doc content IS the finding text), lifecycle-filter
-	// by change kind, then decide drop (single exact match ≥0.85, a team-feedback
-	// streak of similar dismissals, or a category the repo auto-suppressed) vs
-	// downgrade (≥0.60). Security and Law-12 permanent checks are exempt from
-	// drops — memory may downgrade, never silence them. Non-fatal; memory-gated.
+	// by change kind, then decide drop (single exact match ≥ SuppressionDrop, a
+	// team-feedback streak of similar dismissals, or a category the repo
+	// auto-suppressed) vs downgrade (≥ SuppressionDowngrade). Security and Law-12
+	// permanent checks are exempt from drops — memory may downgrade, never silence
+	// them. Non-fatal; memory-gated.
 	dismissals := memory.BestEffort(e.logger, "dismissal", memory.RepoTagNew(e.repo), len(c.Body),
 		func() ([]memory.PatternMatch, error) {
 			return dismissalSearch(ctx, e.reader, e.repo, c.Body, e.thresholds.FindingEnrich)
 		})
 	eval := evaluateDismissals(dismissals, e.changeClass,
-		suppressionExempt(c.Category, c.Body), autoSuppressed[string(c.Category)])
+		suppressionExempt(c.Category, c.Body), autoSuppressed[string(c.Category)], e.thresholds)
 	switch applyDismissalEvaluation(c, eval) {
 	case dismissalDrop:
 		e.logger.InfoContext(ctx, "memory suppressed finding",

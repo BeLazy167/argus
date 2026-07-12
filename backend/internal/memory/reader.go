@@ -175,20 +175,28 @@ func (idx *indexerImpl) runSearch(ctx context.Context, req SearchRequest, enrich
 	return out, nil
 }
 
+// logDegrade emits the single canonical "memory read degraded" Warn shared by
+// BestEffort (whole-read degradation) and warnLeg (per-leg degradation), so the
+// two paths can never drift in field shape. A nil logger is a no-op, keeping
+// bus-less/test paths silent.
+func logDegrade(logger *slog.Logger, caller, container string, queryLen int, err error) {
+	if logger != nil {
+		logger.Warn("memory read degraded",
+			"caller", caller, "container", container, "query_len", queryLen, "error", err)
+	}
+}
+
 // BestEffort degrades a memory read to its zero value on error, logging the
 // failure once at Warn with the standard read-failure fields (caller, container,
-// query_len). It is the SINGLE owner of the log-and-degrade policy: callers for
-// whom a failed read is a non-fatal omission (briefing blocks, triage/scoring
-// hints, dismissal suppression, scenario dedup) wrap the read here, while callers
-// that must distinguish failure from empty (enrich novelty gating) call the read
-// directly and inspect the error.
+// query_len) via logDegrade. It is the SINGLE owner of the log-and-degrade
+// policy: callers for whom a failed read is a non-fatal omission (briefing
+// blocks, triage/scoring hints, dismissal suppression, scenario dedup) wrap the
+// read here, while callers that must distinguish failure from empty (enrich
+// novelty gating) call the read directly and inspect the error.
 func BestEffort[T any](logger *slog.Logger, caller, container string, queryLen int, read func() (T, error)) T {
 	v, err := read()
 	if err != nil {
-		if logger != nil {
-			logger.Warn("memory read degraded",
-				"caller", caller, "container", container, "query_len", queryLen, "error", err)
-		}
+		logDegrade(logger, caller, container, queryLen, err)
 		var zero T
 		return zero
 	}

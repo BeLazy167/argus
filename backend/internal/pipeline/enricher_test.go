@@ -194,6 +194,54 @@ func TestEnricher_SecurityExemptionDowngradesInsteadOfDrops(t *testing.T) {
 	}
 }
 
+// A team-feedback streak drops through the Enricher: three mid-band dismissals
+// (each >= SuppressionDowngrade but below the SuppressionDrop floor) suppress a
+// finding even though NO single match is exact — the SuppressSimilarCount path.
+// Wires dismissalSearch -> evaluateDismissals -> similarCount end-to-end via Run.
+func TestEnricher_TeamFeedbackStreakDrops(t *testing.T) {
+	fake := &memorytest.Fake{
+		SearchFn: feedbackLeg([]memory.PatternMatch{
+			{Score: 0.65, ID: "fb1"}, {Score: 0.66, ID: "fb2"}, {Score: 0.67, ID: "fb3"},
+		}, nil),
+	}
+	store := &fakeEnrichStore{}
+	got, res := enrichComments(newTestEnricher(fake, store), []FileComment{
+		{Severity: SeverityWarning, Category: CategoryBug, Line: 10, Body: "repeatedly rejected finding"},
+	})
+	c := got[0]
+
+	if !c.Suppressed || c.SuppressedReason != "team_feedback:3" {
+		t.Errorf("a 3-dismissal streak must drop: Suppressed=%v reason=%q, want true/team_feedback:3", c.Suppressed, c.SuppressedReason)
+	}
+	if res.Suppressed != 1 || len(res.SuppressedKeys) != 1 {
+		t.Errorf("result = %+v, want Suppressed=1 with one key", res)
+	}
+}
+
+// A category the repo auto-suppressed (consecutive-ignore streak) drops a
+// finding through the Enricher with NO dismissal match at all — wiring the
+// GetAutoSuppressedCategories lookup (repoID != 0) into the drop decision.
+func TestEnricher_AutoSuppressedCategoryDrops(t *testing.T) {
+	fake := &memorytest.Fake{
+		SearchFn: feedbackLeg(nil, nil), // no dismissal matches
+	}
+	store := &fakeEnrichStore{autoSuppressed: map[string]bool{string(CategoryStyle): true}}
+	e := newTestEnricher(fake, store)
+	e.repoID = 7 // non-zero => GetAutoSuppressedCategories runs
+
+	got, res := enrichComments(e, []FileComment{
+		{Severity: SeverityWarning, Category: CategoryStyle, Line: 10, Body: "nit the team keeps ignoring"},
+	})
+	c := got[0]
+
+	if !c.Suppressed || c.SuppressedReason != "category_auto_suppressed" {
+		t.Errorf("an auto-suppressed category must drop: Suppressed=%v reason=%q", c.Suppressed, c.SuppressedReason)
+	}
+	if res.Suppressed != 1 {
+		t.Errorf("result = %+v, want Suppressed=1", res)
+	}
+}
+
 // Concurrency safety: enriching many findings fans out under the bound; a
 // resolvable pattern hit increments + publishes per finding. Run under -race to
 // prove the shared linker + publish sink + per-comment mutation are race-clean.

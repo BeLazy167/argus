@@ -115,7 +115,7 @@ func TestClassifyDismissal(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := classifyDismissal(tt.score); got != tt.want {
+			if got := classifyDismissal(tt.score, memory.NewThresholds()); got != tt.want {
 				t.Errorf("classifyDismissal(%v) = %v, want %v", tt.score, got, tt.want)
 			}
 		})
@@ -184,7 +184,7 @@ func TestApplyDismissalMatch(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			c := &FileComment{Severity: tt.startSeverity}
-			got := applyDismissalMatch(c, tt.score, tt.pr)
+			got := applyDismissalMatch(c, tt.score, tt.pr, memory.NewThresholds())
 			if got != tt.wantAction {
 				t.Errorf("action = %v, want %v", got, tt.wantAction)
 			}
@@ -362,7 +362,7 @@ func TestEvaluateDismissals(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ev := evaluateDismissals(tt.matches, tt.currentClass, tt.exempt, tt.categoryAuto)
+			ev := evaluateDismissals(tt.matches, tt.currentClass, tt.exempt, tt.categoryAuto, memory.NewThresholds())
 			if ev.action != tt.wantAction {
 				t.Errorf("action = %v, want %v", ev.action, tt.wantAction)
 			}
@@ -383,7 +383,7 @@ func TestEvaluateDismissals_BestPRAttribution(t *testing.T) {
 	ev := evaluateDismissals([]memory.PatternMatch{
 		mkDismissal(0.62, "", "3"),
 		mkDismissal(0.78, "", "42"), // best
-	}, "", false, false)
+	}, "", false, false, memory.NewThresholds())
 	if ev.action != dismissalDowngrade {
 		t.Fatalf("action = %v, want downgrade", ev.action)
 	}

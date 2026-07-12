@@ -18,7 +18,7 @@ import (
 func TestToolHandlerTagAllowed(t *testing.T) {
 	t.Parallel()
 	const repo = "myrepo"
-	th := NewToolHandler(nil, nil, repo)
+	th := NewToolHandler(nil, nil, repo, memory.NewThresholds())
 
 	allowed := []string{
 		memory.RepoTagNew(repo), // this repo's unified container
@@ -51,7 +51,7 @@ func TestToolHandlerTagAllowed(t *testing.T) {
 func TestAgenticMemoryTagsMatchPrompt(t *testing.T) {
 	t.Parallel()
 	const owner, repo = "acme", "myrepo"
-	th := NewToolHandler(nil, nil, repo)
+	th := NewToolHandler(nil, nil, repo, memory.NewThresholds())
 
 	tags := agenticMemoryTags(repo)
 	if len(tags) == 0 {

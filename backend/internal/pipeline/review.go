@@ -365,7 +365,7 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p revie
 	agentic := indexer != nil && p.action == TriageDeep && p.deepReview
 	if agentic {
 		tools = memoryTools(repo)
-		toolHandler = NewToolHandler(indexer, rs.store, repo)
+		toolHandler = NewToolHandler(indexer, rs.store, repo, run.Thresholds)
 	}
 	systemPrompt := composeReviewSystemPrompt(p.systemBase, owner, repo, p.specialist, agentic, p.memoryBriefing, p.promptExtra)
 
