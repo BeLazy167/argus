@@ -962,7 +962,14 @@ func (o *Orchestrator) handlePRClosed(ctx context.Context, event ghpkg.PREvent) 
 	return nil
 }
 
-// RetryReview resumes a pipeline run for a given review ID.
+// RetryReview re-runs a review's pipeline.
+//
+// A run still mid-flight is resumed from where it stopped (mirrors crash
+// recovery). A run that already reached a terminal state (failed/cancelled)
+// cannot be resumed — StateMachine.Run's loop returns immediately on a
+// terminal state, so Resume would be a silent no-op and the review would sit
+// on "pending" forever. For those we rebuild a fresh run for the SAME review
+// and drive it from the initial state.
 func (o *Orchestrator) RetryReview(ctx context.Context, reviewID uuid.UUID) error {
 	var runID uuid.UUID
 	err := o.db.QueryRow(ctx,
@@ -979,8 +986,182 @@ func (o *Orchestrator) RetryReview(ctx context.Context, reviewID uuid.UUID) erro
 		o.eventBus.OpenTopic(reviewID)
 	}
 
-	_, err = o.sm.Resume(ctx, runID)
-	return err
+	prev, err := o.sm.loadState(ctx, runID)
+	if err != nil {
+		return fmt.Errorf("loading pipeline run %s: %w", runID, err)
+	}
+
+	// Non-terminal run: resume in place.
+	if !prev.State.IsTerminal() {
+		_, err = o.sm.Resume(ctx, runID)
+		return err
+	}
+
+	// Terminal run: rebuild and run from the initial state. Resume/OpenTopic
+	// bookkeeping stays with the caller (retry handler owns CloseTopic).
+	fresh, err := buildRetryRun(prev)
+	if err != nil {
+		return err
+	}
+	fresh.EventBus = o.eventBus
+	return o.sm.Run(ctx, fresh)
+}
+
+// buildRetryRun constructs a fresh PipelineRun for retrying a review whose
+// prior run reached a terminal state. It carries the immutable review inputs
+// (PR event, diff, resolved feature settings, prompts) onto a brand-new run
+// with a new run ID and the initial state, dropping every intermediate stage
+// result and the terminal error so the pipeline starts clean.
+//
+// The review ID is preserved — this is a retry of the SAME review, not a new
+// one. Contract is recomputed from the carried PR event + diff because it is
+// marked json:"-" and never survived persistence.
+//
+// Returns a descriptive error when the persisted PR event is unusable (empty
+// repo full name or zero PR number): without it triage/review/posting have
+// nothing to act on and the run would fail deeper in the pipeline.
+func buildRetryRun(prev *PipelineRun) (*PipelineRun, error) {
+	if prev.PREvent.RepoFullName == "" || prev.PREvent.PRNumber == 0 {
+		return nil, fmt.Errorf(
+			"cannot retry review %s: persisted run has no usable PR event (repo=%q, pr=%d)",
+			prev.ReviewID, prev.PREvent.RepoFullName, prev.PREvent.PRNumber)
+	}
+
+	var files []diff.FileDiff
+	if prev.Diff != nil {
+		files = prev.Diff.Files
+	}
+
+	now := time.Now()
+	fresh := &PipelineRun{
+		ID:       uuid.New(),
+		ReviewID: prev.ReviewID,
+		State:    StatePending,
+		PREvent:  prev.PREvent,
+
+		DBInstallationID: prev.DBInstallationID,
+		DBRepoID:         prev.DBRepoID,
+		TraceID:          prev.TraceID,
+
+		Diff:    prev.Diff,
+		RawDiff: prev.RawDiff,
+
+		Persona:             prev.Persona,
+		CustomPersonaPrompt: prev.CustomPersonaPrompt,
+		DeepReview:          prev.DeepReview,
+		CrossFileContext:    prev.CrossFileContext,
+		BlastRadius:         prev.BlastRadius,
+		ScenarioMemory:      prev.ScenarioMemory,
+		CodeSimulation:      prev.CodeSimulation,
+		PREnrichment:        prev.PREnrichment,
+		LearnPatterns:       prev.LearnPatterns,
+		LearnConventions:    prev.LearnConventions,
+		FileSynthesis:       prev.FileSynthesis,
+		ArchitectureGraph:   prev.ArchitectureGraph,
+
+		Prompts:          prev.Prompts,
+		IsIncremental:    prev.IsIncremental,
+		PreviousReviewID: prev.PreviousReviewID,
+		// Carry prior-review comments so an incremental retry keeps dedup/verify
+		// context and doesn't re-post every previously-flagged finding.
+		PriorComments: prev.PriorComments,
+
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	fresh.Contract = ComputeContract(&fresh.PREvent, files)
+	return fresh, nil
+}
+
+// ErrReviewRunning is returned by EnsureNotRunning when a review's pipeline is
+// still executing, so a retry would double-run it. Handlers surface it as 409.
+var ErrReviewRunning = errors.New("review appears to be running; stop it first or wait")
+
+// shouldRefuseRetry decides whether retrying is unsafe: the latest run is
+// non-terminal AND was updated recently enough that a process is likely still
+// driving it (possibly on another machine). A stale non-terminal run is treated
+// as crashed and is retryable — RecoverIncomplete uses the same window.
+func shouldRefuseRetry(state PipelineState, fresh bool) bool {
+	return !state.IsTerminal() && fresh
+}
+
+// EnsureNotRunning returns ErrReviewRunning when the review's latest pipeline
+// run looks live (non-terminal and recently updated). Callers use it to refuse
+// a retry that would run concurrently with an in-flight run — notably a
+// cancelled-but-not-yet-halted review whose run is still executing/posting.
+func (o *Orchestrator) EnsureNotRunning(ctx context.Context, reviewID uuid.UUID) error {
+	var stateStr string
+	var fresh bool
+	err := o.db.QueryRow(ctx,
+		`SELECT state, updated_at > NOW() - make_interval(secs => $2)
+		 FROM pipeline_states WHERE review_id = $1 ORDER BY updated_at DESC LIMIT 1`,
+		reviewID, recoverStaleAfter.Seconds(),
+	).Scan(&stateStr, &fresh)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil // no run persisted — nothing to collide with
+	}
+	if err != nil {
+		return fmt.Errorf("checking live run for review %s: %w", reviewID, err)
+	}
+	if shouldRefuseRetry(PipelineState(stateStr), fresh) {
+		return ErrReviewRunning
+	}
+	return nil
+}
+
+// CancelStranded marks a review — and its latest pipeline run, if one was
+// persisted — cancelled when no in-memory cancel function is available. That
+// happens after a process restart, or when the cancel request lands on a
+// different Fly machine than the one running the review. Without this the
+// review stays pending/in_progress forever and RecoverIncomplete may later
+// resurrect the orphaned run.
+func (o *Orchestrator) CancelStranded(ctx context.Context, reviewID uuid.UUID) error {
+	const note = "stopped by user"
+
+	var runID uuid.UUID
+	err := o.db.QueryRow(ctx,
+		`SELECT id FROM pipeline_states WHERE review_id = $1 ORDER BY updated_at DESC LIMIT 1`,
+		reviewID,
+	).Scan(&runID)
+	switch {
+	case err == nil:
+		run, loadErr := o.sm.loadState(ctx, runID)
+		if loadErr != nil {
+			return fmt.Errorf("loading run for stranded cancel %s: %w", reviewID, loadErr)
+		}
+		// Skip entirely when the run already reached a terminal state: it kept
+		// its real outcome and a completed review must never flip to cancelled.
+		if run.State.IsTerminal() {
+			return nil
+		}
+		run.State = StateCancelled
+		run.Error = note
+		run.UpdatedAt = time.Now()
+		if perr := o.sm.persistState(ctx, run); perr != nil {
+			return fmt.Errorf("persisting cancelled run %s: %w", reviewID, perr)
+		}
+	case errors.Is(err, pgx.ErrNoRows):
+		// No persisted run (review failed before the first state write). Only
+		// the review row needs flipping — handled below.
+	default:
+		return fmt.Errorf("finding pipeline run for stranded cancel %s: %w", reviewID, err)
+	}
+
+	// Conditional: only cancel a review still pending/in_progress, so we never
+	// clobber a completed/failed outcome another writer set. Reporting 200
+	// {"cancelled"} to the caller is honest because the running pipeline (this
+	// or another machine) consults reviews.status at each stage boundary
+	// (StateMachine cooperative cancel) and post() re-checks before posting — so
+	// it will actually halt and never post a cancelled review.
+	if _, err := o.st.UpdateReviewStatusIf(ctx, reviewID, "cancelled", note, nil, []string{"pending", "in_progress"}); err != nil {
+		return fmt.Errorf("updating review status for stranded cancel %s: %w", reviewID, err)
+	}
+
+	// Nudge any connected live-stream clients into the stopped state.
+	if o.eventBus != nil {
+		o.eventBus.Publish(reviewID, EventCancelled, map[string]string{"stage": string(StateCancelled)})
+	}
+	return nil
 }
 
 func (o *Orchestrator) postStartedComment(ctx context.Context, event ghpkg.PREvent, run *PipelineRun, reviewModel string) {
@@ -2318,6 +2499,17 @@ func (o *Orchestrator) pass2(ctx context.Context, run *PipelineRun) error {
 }
 
 func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
+	// Final cancel guard: a Stop that landed after the last stage-boundary
+	// cooperative check must still keep us from posting. Never post a review the
+	// user cancelled. Returning context.Canceled routes Run through
+	// handleCancelled (state → cancelled, no completion write).
+	if status, err := o.st.GetReviewStatus(ctx, run.ReviewID); err != nil {
+		o.logger.Warn("post: review status check failed", "error", err, "review_id", run.ReviewID)
+	} else if status == "cancelled" {
+		o.logger.Info("post: review cancelled, skipping GitHub post", "review_id", run.ReviewID)
+		return context.Canceled
+	}
+
 	// Guard: don't re-post if this review was already posted (stale recovery)
 	var existingReviewID *int64
 	_ = o.db.QueryRow(ctx, `SELECT github_review_id FROM reviews WHERE id = $1`, run.ReviewID).Scan(&existingReviewID)
@@ -2686,6 +2878,17 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		o.indexArchitectureSummary(prePostCtx, run, owner, repo)
 	}()
 
+	// Final cancel guard, immediately before the GitHub post: the pre-post
+	// enrichment block above runs for seconds, and a cross-machine Stop landing
+	// in that window must still prevent the post. (The check at the top of
+	// post() only covers a cancel that arrived before enrichment ran.)
+	if status, err := o.st.GetReviewStatus(ctx, run.ReviewID); err != nil {
+		o.logger.Warn("post: pre-PostReview status check failed", "error", err, "review_id", run.ReviewID)
+	} else if status == "cancelled" {
+		o.logger.Info("post: review cancelled before GitHub post, skipping", "review_id", run.ReviewID)
+		return context.Canceled
+	}
+
 	ghReviewID, err := o.ghClient.PostReview(
 		ctx,
 		run.PREvent.InstallationID,
@@ -2695,6 +2898,20 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	)
 	if err != nil {
 		return fmt.Errorf("posting review: %w", err)
+	}
+
+	// Persist github_review_id UNCONDITIONALLY and immediately, separate from
+	// the status compare-and-set below. If a cross-machine Stop lands between
+	// here and the status write, that CAS no-ops (status already cancelled) and
+	// would leave github_review_id NULL — then a later retry's already-posted
+	// guard (keyed on github_review_id) wouldn't fire and we'd double-post to
+	// GitHub. Recording the id right after the post closes that window. Best
+	// effort: don't fail the review (it IS posted) if this write blips.
+	if _, idErr := o.db.Exec(ctx,
+		`UPDATE reviews SET github_review_id = $1 WHERE id = $2`,
+		ghReviewID, run.ReviewID,
+	); idErr != nil {
+		o.logger.Error("post: failed to persist github_review_id after PostReview", "error", idErr, "review_id", run.ReviewID, "github_review_id", ghReviewID)
 	}
 
 	// comment.posted is fired after the atomic PostReview landed so failures
@@ -2722,13 +2939,20 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	// The error column gets set by RecoverStaleReviews ("review timed out —
 	// server restarted") if the recovery job ran before we finished posting.
 	// Clearing it prevents completed reviews from showing a ghost timeout error.
-	_, err = o.db.Exec(ctx, `
+	// Conditional on status='in_progress': a Stop that raced past the pre-post
+	// guards (marking the review cancelled) must not be clobbered back to
+	// completed. The GitHub review is already posted, so we don't roll it back;
+	// we just don't overwrite a terminal status another writer set.
+	tag, err := o.db.Exec(ctx, `
 		UPDATE reviews
 		SET status = 'completed', github_review_id = $1, completed_at = NOW(), error = NULL
-		WHERE id = $2
+		WHERE id = $2 AND status = 'in_progress'
 	`, ghReviewID, run.ReviewID)
 	if err != nil {
 		return fmt.Errorf("updating review record: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		o.logger.Warn("post: completion write skipped — review no longer in_progress", "review_id", run.ReviewID)
 	}
 
 	// Persist linked_pr_refs BEFORE the EventReviewCompleted publish so the

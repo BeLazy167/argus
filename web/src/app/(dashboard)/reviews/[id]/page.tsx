@@ -1178,6 +1178,19 @@ export default function ReviewDetailPage() {
         </div>
       </header>
 
+      {/* Retry / Stop action errors — surfaced inline so a failed mutation
+          isn't swallowed by console.error alone. */}
+      {(retryReview.isError || cancelReview.isError) && (
+        <div className="border border-red-400/30 bg-red-400/5 px-4 py-2.5 mb-6 flex items-center gap-2">
+          <AlertTriangle className="h-4 w-4 text-red-400 shrink-0" />
+          <p className="text-xs font-mono text-red-400">
+            {retryReview.isError ? "Retry failed" : "Stop failed"}
+            {" — "}
+            {(retryReview.error ?? cancelReview.error)?.message ?? "please try again."}
+          </p>
+        </div>
+      )}
+
       {/* Review Contract + Glass Box — hidden for reviews predating the contract. */}
       {review.review_contract && (
         <ContractStrip
@@ -1274,6 +1287,22 @@ export default function ReviewDetailPage() {
           </div>
         );
       })()}
+
+      {/* Cancelled notice — a stopped review has no error card, so surface the
+          stopped state distinctly in the body (the StatusBadge shows it too). */}
+      {review.status === "cancelled" && (
+        <div className="border border-orange-400/30 bg-orange-400/5 p-5 mb-6">
+          <div className="flex items-center gap-2 mb-1">
+            <Square className="h-3.5 w-3.5 fill-current text-orange-400" />
+            <h2 className="font-mono text-sm font-bold text-orange-400">
+              Review stopped
+            </h2>
+          </div>
+          <p className="text-sm text-foreground/70">
+            This review was cancelled{review.error ? ` — ${review.error}` : ""}. Click Retry to run it again.
+          </p>
+        </div>
+      )}
 
       {/* Summary card */}
       <div className="border border-iron bg-charcoal/80 p-6 mb-8">

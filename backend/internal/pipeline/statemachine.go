@@ -16,19 +16,45 @@ import (
 // StateMachine drives a PipelineRun through stages, persisting state to Postgres.
 type StateMachine struct {
 	db       *pgxpool.Pool
-	st       *store.Store
 	stages   map[PipelineState]StageFunc
 	eventBus *EventBus
 	logger   *slog.Logger
+
+	// isCancelled reports whether the review was flagged cancelled in the DB —
+	// by a Stop request on this or another machine, or after a restart. It is
+	// consulted at every stage boundary (see Run) so a DB-only cancel halts the
+	// pipeline instead of running to completion and posting to GitHub. Wired to
+	// a reviews.status lookup in NewStateMachine; overridable in tests.
+	isCancelled func(ctx context.Context, reviewID uuid.UUID) (bool, error)
+	// persist and setStatus wrap the two Postgres mutations the stage loop
+	// performs, so Run can be exercised without a live DB. Defaults wired in
+	// NewStateMachine. setStatus is a compare-and-set: an empty allowedCurrent
+	// means an unconditional write.
+	persist   func(ctx context.Context, run *PipelineRun) error
+	setStatus func(ctx context.Context, reviewID uuid.UUID, status, errMsg string, tokenUsage []byte, allowedCurrent []string) (bool, error)
 }
 
 func NewStateMachine(db *pgxpool.Pool, st *store.Store, logger *slog.Logger) *StateMachine {
-	return &StateMachine{
+	sm := &StateMachine{
 		db:     db,
-		st:     st,
 		stages: make(map[PipelineState]StageFunc),
 		logger: logger,
 	}
+	sm.isCancelled = func(ctx context.Context, reviewID uuid.UUID) (bool, error) {
+		status, err := st.GetReviewStatus(ctx, reviewID)
+		if err != nil {
+			return false, err
+		}
+		return status == "cancelled", nil
+	}
+	sm.persist = sm.persistState
+	sm.setStatus = func(ctx context.Context, reviewID uuid.UUID, status, errMsg string, tokenUsage []byte, allowedCurrent []string) (bool, error) {
+		if len(allowedCurrent) == 0 {
+			return true, st.UpdateReviewStatus(ctx, reviewID, status, errMsg, tokenUsage)
+		}
+		return st.UpdateReviewStatusIf(ctx, reviewID, status, errMsg, tokenUsage, allowedCurrent)
+	}
+	return sm
 }
 
 func (sm *StateMachine) RegisterStage(state PipelineState, fn StageFunc) {
@@ -41,7 +67,7 @@ func (sm *StateMachine) Run(ctx context.Context, run *PipelineRun) error {
 	// Historically nothing did this, so every review looked stuck on "pending"
 	// until it completed/failed, which broke the dashboard's `isLive` check
 	// and stream handshake timing. Non-fatal: log Warn if the DB is down.
-	if updErr := sm.st.UpdateReviewStatus(ctx, run.ReviewID, "in_progress", "", nil); updErr != nil {
+	if _, updErr := sm.setStatus(ctx, run.ReviewID, "in_progress", "", nil, nil); updErr != nil {
 		sm.logger.Warn("failed to mark review in_progress", "error", updErr, "review_id", run.ReviewID)
 	}
 
@@ -51,6 +77,18 @@ func (sm *StateMachine) Run(ctx context.Context, run *PipelineRun) error {
 		case <-ctx.Done():
 			return sm.handleCancelled(ctx, run)
 		default:
+		}
+
+		// Cooperative cancellation: a Stop handled on another machine (or after
+		// this process restarted, or for a retried run whose context this
+		// process doesn't hold) can only set the DB cancel flag — it can't
+		// cancel our ctx. Check it at each stage boundary so those cancels halt
+		// the pipeline before it posts to GitHub.
+		if cancelled, err := sm.isCancelled(ctx, run.ReviewID); err != nil {
+			sm.logger.Warn("cooperative cancel check failed", "error", err, "review_id", run.ReviewID)
+		} else if cancelled {
+			sm.logger.Info("cooperative cancel: review flagged cancelled, halting", "review_id", run.ReviewID, "stage", run.State)
+			return sm.handleCancelled(ctx, run)
 		}
 
 		stage, ok := sm.stages[run.State]
@@ -64,7 +102,7 @@ func (sm *StateMachine) Run(ctx context.Context, run *PipelineRun) error {
 			run.UpdatedAt = time.Now()
 			publishStageChanged(run)
 			if shouldPersist(run.State) {
-				if err := sm.persistState(ctx, run); err != nil {
+				if err := sm.persist(ctx, run); err != nil {
 					return fmt.Errorf("persisting state: %w", err)
 				}
 			}
@@ -85,14 +123,16 @@ func (sm *StateMachine) Run(ctx context.Context, run *PipelineRun) error {
 			run.Error = err.Error()
 			run.UpdatedAt = time.Now()
 			publishError(run, failedState, err)
-			if persistErr := sm.persistState(context.WithoutCancel(ctx), run); persistErr != nil {
+			if persistErr := sm.persist(context.WithoutCancel(ctx), run); persistErr != nil {
 				sm.logger.Error("failed to persist failure state", "error", persistErr, "review_id", run.ReviewID)
 			}
 			var tokenUsage []byte
 			if run.Tokens.Total.TotalTokens > 0 {
 				tokenUsage, _ = json.Marshal(&run.Tokens)
 			}
-			if persistErr := sm.st.UpdateReviewStatus(context.WithoutCancel(ctx), run.ReviewID, string(StateFailed), run.Error, tokenUsage); persistErr != nil {
+			// Conditional: don't overwrite a review another writer already moved
+			// to a terminal state — e.g. a cancel that raced this failure.
+			if _, persistErr := sm.setStatus(context.WithoutCancel(ctx), run.ReviewID, string(StateFailed), run.Error, tokenUsage, []string{"pending", "in_progress"}); persistErr != nil {
 				sm.logger.Error("failed to update review status on failure", "error", persistErr, "review_id", run.ReviewID)
 			}
 			return fmt.Errorf("stage %s failed: %w", failedState, err)
@@ -124,7 +164,7 @@ func (sm *StateMachine) Run(ctx context.Context, run *PipelineRun) error {
 		run.UpdatedAt = time.Now()
 		publishStageChanged(run)
 		if shouldPersist(run.State) {
-			if err := sm.persistState(ctx, run); err != nil {
+			if err := sm.persist(ctx, run); err != nil {
 				return fmt.Errorf("persisting state: %w", err)
 			}
 		}
@@ -169,14 +209,15 @@ func (sm *StateMachine) handleCancelled(ctx context.Context, run *PipelineRun) e
 		})
 	}
 
-	if persistErr := sm.persistState(dbCtx, run); persistErr != nil {
+	if persistErr := sm.persist(dbCtx, run); persistErr != nil {
 		sm.logger.Error("failed to persist cancelled state", "error", persistErr, "review_id", run.ReviewID)
 	}
 	var tokenUsage []byte
 	if run.Tokens.Total.TotalTokens > 0 {
 		tokenUsage, _ = json.Marshal(&run.Tokens)
 	}
-	if persistErr := sm.st.UpdateReviewStatus(dbCtx, run.ReviewID, "cancelled", run.Error, tokenUsage); persistErr != nil {
+	// Conditional: never flip a review that already reached completed/failed.
+	if _, persistErr := sm.setStatus(dbCtx, run.ReviewID, "cancelled", run.Error, tokenUsage, []string{"pending", "in_progress"}); persistErr != nil {
 		sm.logger.Error("failed to update review status on cancel", "error", persistErr, "review_id", run.ReviewID)
 	}
 	sm.logger.Info("review cancelled", "review_id", run.ReviewID, "stage", cancelledAtStage)

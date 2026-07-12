@@ -397,6 +397,34 @@ func (s *Store) UpdateReviewStatus(ctx context.Context, id uuid.UUID, status, er
 	return nil
 }
 
+// GetReviewStatus returns just the status column for a review — a cheap PK
+// lookup used by the state machine's cooperative-cancellation check, which runs
+// at every stage boundary and must stay light.
+func (s *Store) GetReviewStatus(ctx context.Context, id uuid.UUID) (string, error) {
+	var status string
+	if err := s.Pool.QueryRow(ctx, `SELECT status FROM reviews WHERE id = $1`, id).Scan(&status); err != nil {
+		return "", fmt.Errorf("querying review status: %w", err)
+	}
+	return status, nil
+}
+
+// UpdateReviewStatusIf writes a review's status only when its current status is
+// one of allowedCurrent — a compare-and-set that keeps terminal writes from
+// racing. A completion write (allowed: in_progress) must not clobber a cancel,
+// and a cancel write (allowed: pending/in_progress) must not flip an already
+// completed/failed review. Returns whether a row was actually updated.
+func (s *Store) UpdateReviewStatusIf(ctx context.Context, id uuid.UUID, status, errMsg string, tokenUsage []byte, allowedCurrent []string) (bool, error) {
+	tag, err := s.Pool.Exec(ctx, `
+		UPDATE reviews SET status = $2, error = $3, token_usage = COALESCE($4, token_usage),
+		       completed_at = CASE WHEN $2 IN ('completed','failed') THEN NOW() ELSE completed_at END
+		WHERE id = $1 AND status = ANY($5)
+	`, id, status, nilIfEmpty(errMsg), tokenUsage, allowedCurrent)
+	if err != nil {
+		return false, fmt.Errorf("updating review status: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
 // List queries drop the heavy fields (token_usage, diagram*, diagrams,
 // truncated_files, brief) to keep response size manageable. 1 row of those
 // columns averages ~5 KB of JSONB; at limit=200 the list payload was 1.22 MB
