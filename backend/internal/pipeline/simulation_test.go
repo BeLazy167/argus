@@ -124,7 +124,7 @@ func TestExtractHeadline_Fallback(t *testing.T) {
 			want: "The code looks good to ship.",
 		},
 		{
-			// The literal acmeorg-account#331 failure. With 80-char truncation
+			// A literal production failure. With 80-char truncation
 			// it cut as "dependency/"; the new 100-char + word-boundary path
 			// should end on a whole word and append an ellipsis.
 			name: "word_boundary_truncation",

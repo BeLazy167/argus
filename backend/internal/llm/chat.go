@@ -32,6 +32,7 @@ type ChatProvider struct {
 	name            string
 	apiKey          string
 	baseURL         string
+	referer         string // HTTP-Referer for OpenRouter attribution; set by Registry
 	authStyle       AuthStyle
 	pathFn          func(model string) string // custom path builder (nil = default /chat/completions)
 	useResponsesAPI bool                      // Azure Foundry Responses API format
@@ -267,7 +268,9 @@ func (p *ChatProvider) complete(ctx context.Context, req CompletionRequest) (Com
 		httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
 	}
 	if p.isOpenRouter() {
-		httpReq.Header.Set("HTTP-Referer", "https://argus.reviews")
+		if p.referer != "" {
+			httpReq.Header.Set("HTTP-Referer", p.referer)
+		}
 		httpReq.Header.Set("X-Title", "Argus")
 	}
 
@@ -424,7 +427,7 @@ func (p *ChatProvider) adjustRequestForProvider(body *chatRequest, model string)
 		body.MaxCompletionTokens = body.MaxTokens
 		body.MaxTokens = 0
 		// gpt-5.x is a reasoning model and rejects any `temperature` other than
-		// the default 1. Observed failure on acmeorg-account#331:
+		// the default 1. Observed production failure:
 		//   "Unsupported value: 'temperature' does not support 0.2 with this
 		//    model. Only the default (1) value is supported." (HTTP 400)
 		// Mirror the o-series branch above: strip the temperature so Azure
@@ -434,7 +437,7 @@ func (p *ChatProvider) adjustRequestForProvider(body *chatRequest, model string)
 		// gpt-5.x is a reasoning model. Azure's implicit default reasoning
 		// level silently consumes the entire max_completion_tokens budget
 		// before emitting any visible output — the observed failure mode on
-		// acmeorg-account#335 was `completion_tokens=5, response="[]"` across
+		// a production review was `completion_tokens=5, response="[]"` across
 		// every specialist. Force "minimal" unless the caller explicitly set
 		// an effort via req.ReasoningEffort. Callers that want deeper
 		// reasoning (specialists, synthesis) pass "low" or "medium".

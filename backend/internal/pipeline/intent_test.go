@@ -790,7 +790,7 @@ func TestFormatIntentHeader(t *testing.T) {
 	})
 
 	// Multi-entry non-goals must render as a bulleted list, not a "; "-joined
-	// run-on. The acmeorg-account#331 review had three non-goals each a full
+	// run-on. A production review had three non-goals each a full
 	// sentence; "; " joined sentences with their own punctuation looked like
 	// broken prose.
 	t.Run("non_goals_bulleted", func(t *testing.T) {

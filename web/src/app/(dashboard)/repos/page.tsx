@@ -71,7 +71,7 @@ function AddReposButton() {
       window.open(data.url, "_blank");
     } catch {
       // Fallback to generic URL
-      window.open("https://github.com/apps/argus-eye/installations/new", "_blank");
+      window.open(`https://github.com/apps/${process.env.NEXT_PUBLIC_GITHUB_APP_SLUG || "argus-eye"}/installations/new`, "_blank");
     } finally {
       setLoading(false);
     }

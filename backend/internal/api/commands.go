@@ -19,10 +19,15 @@ import (
 
 // --- Command Dispatch ---
 
-var commandRe = regexp.MustCompile(`(?i)@argus-eye\s+(review|remember|resolve|fix|test|help)(.*)`)
+// commandRe matches "@<app-slug> <command> <args>" mentions. The mention name
+// is the configured GitHub App slug (GITHUB_APP_SLUG), so self-hosts that
+// rename the App keep working commands.
+func commandRe(appSlug string) *regexp.Regexp {
+	return regexp.MustCompile(`(?i)@` + regexp.QuoteMeta(appSlug) + `\s+(review|remember|resolve|fix|test|help)(.*)`)
+}
 
 func (s *Server) dispatchCommand(ctx context.Context, evt ghpkg.IssueCommentEvent) {
-	match := commandRe.FindStringSubmatch(strings.TrimSpace(evt.CommentBody))
+	match := s.commandRe.FindStringSubmatch(strings.TrimSpace(evt.CommentBody))
 	if match == nil {
 		return
 	}
@@ -32,7 +37,7 @@ func (s *Server) dispatchCommand(ctx context.Context, evt ghpkg.IssueCommentEven
 		return
 	}
 	owner, repo := parts[0], parts[1]
-	ghClient := ghpkg.NewClient(s.ghApp)
+	ghClient := ghpkg.NewClient(s.ghApp, s.cfg.GitHubAppSlug)
 
 	cmd := strings.ToLower(match[1])
 	args := strings.TrimSpace(match[2])
@@ -79,7 +84,7 @@ func (s *Server) handleReviewCommand(ctx context.Context, evt ghpkg.IssueComment
 			if len(short) > 7 {
 				short = short[:7]
 			}
-			body := fmt.Sprintf("Already reviewed at `%s`. Use `@argus-eye review --force` to re-review.", short)
+			body := fmt.Sprintf("Already reviewed at `%s`. Use `@%s review --force` to re-review.", short, s.cfg.GitHubAppSlug)
 			_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber, body)
 			_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "rocket")
 			return
@@ -164,6 +169,10 @@ func (s *Server) handleHelpCommand(ctx context.Context, evt ghpkg.IssueCommentEv
 | ` + "`@argus-eye test --code`" + ` | Draft test code for review findings |
 | ` + "`@argus-eye help`" + ` | Show this message |`
 
+	// The help table is written against the default slug; rewrite the mention
+	// for self-hosts running under a different App slug.
+	help = strings.ReplaceAll(help, "@argus-eye", "@"+s.cfg.GitHubAppSlug)
+
 	_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber, help)
 	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "rocket")
 }
@@ -186,7 +195,7 @@ func (s *Server) handleRememberCommand(ctx context.Context, evt ghpkg.IssueComme
 	content := strings.TrimSpace(strings.Join(contentParts, " "))
 	if content == "" {
 		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
-			"Usage: `@argus-eye remember <pattern>` or `@argus-eye remember --org <pattern>`")
+			fmt.Sprintf("Usage: `@%s remember <pattern>` or `@%s remember --org <pattern>`", s.cfg.GitHubAppSlug, s.cfg.GitHubAppSlug))
 		return
 	}
 
@@ -270,8 +279,8 @@ func (s *Server) handleRememberCommand(ctx context.Context, evt ghpkg.IssueComme
 // Canonical identity lives in ghpkg.IsArgusThread; this alias preserves the
 // naming intent at the call site (we're checking comment authorship, not a
 // thread) while keeping the rule in one place.
-func isArgusCommentAuthor(authorLogin string) bool {
-	return ghpkg.IsArgusThread(authorLogin)
+func (s *Server) isArgusCommentAuthor(authorLogin string) bool {
+	return ghpkg.IsArgusThread(authorLogin, s.cfg.GitHubAppSlug)
 }
 
 // classifyResolveError summarizes an error from ResolveReviewThread into a
@@ -323,7 +332,7 @@ func (s *Server) handleResolveCommand(ctx context.Context, evt ghpkg.IssueCommen
 
 	var unresolvedBot []ghpkg.ReviewThread
 	for _, t := range threads {
-		if !t.IsResolved && ghpkg.IsArgusThread(t.AuthorLogin) {
+		if !t.IsResolved && ghpkg.IsArgusThread(t.AuthorLogin, s.cfg.GitHubAppSlug) {
 			unresolvedBot = append(unresolvedBot, t)
 		}
 	}
@@ -565,7 +574,7 @@ func (s *Server) handleTestCommand(ctx context.Context, evt ghpkg.IssueCommentEv
 	review, err := s.store.GetLatestReviewByPR(ctx, fmt.Sprintf("%s/%s", owner, repo), evt.PRNumber)
 	if err != nil || review == nil {
 		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
-			"No review found for this PR. Run `@argus-eye review` first.")
+			fmt.Sprintf("No review found for this PR. Run `@%s review` first.", s.cfg.GitHubAppSlug))
 		return
 	}
 
@@ -594,9 +603,9 @@ func (s *Server) handleTestCommand(ctx context.Context, evt ghpkg.IssueCommentEv
 	if err != nil {
 		// Deep-link the Settings URL to this specific repo so the user lands on
 		// the right row instead of whatever was last selected in localStorage.
-		settingsURL := "https://argus.reviews/settings"
+		settingsURL := s.cfg.DashboardBaseURL + "/settings"
 		if dbRepo, rerr := s.store.GetRepoByFullName(ctx, evt.RepoFullName); rerr == nil && dbRepo != nil {
-			settingsURL = fmt.Sprintf("https://argus.reviews/settings?repo=%d", dbRepo.ID)
+			settingsURL = fmt.Sprintf("%s/settings?repo=%d", s.cfg.DashboardBaseURL, dbRepo.ID)
 		}
 		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
 			fmt.Sprintf("No LLM provider configured. Add an API key at your [Argus Settings](%s).", settingsURL))

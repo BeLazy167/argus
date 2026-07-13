@@ -65,7 +65,7 @@ func (s *Store) LinkUserInstallation(ctx context.Context, clerkUserID string, in
 
 // IsUserLinkedToInstallation checks if a user is already linked to an installation.
 // Returns (linked, error). DB errors are surfaced to the caller so they cannot
-// silently degrade authorization decisions (cubic P1 — a query failure used to
+// silently degrade authorization decisions (a query failure used to
 // return false and fall through as a first-owner claim).
 // A pgx.ErrNoRows result is treated as "not linked" with a nil error.
 func (s *Store) IsUserLinkedToInstallation(ctx context.Context, clerkUserID string, installationID int64) (bool, error) {

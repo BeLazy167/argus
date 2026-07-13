@@ -65,7 +65,11 @@ const maxInlineComments = 10
 //
 // The unconfigured-scoring notice rides in on run.Synthesis.Brief (appended once
 // at synthesis); Compose writes Brief verbatim and MUST NOT re-append it.
-func Compose(run *PipelineRun, took time.Duration) ComposedReview {
+//
+// dashboardBaseURL is the web dashboard origin (cfg.DashboardBaseURL) used for
+// the audit and dashboard links in the summary body. appSlug is the GitHub App
+// slug (cfg.GitHubAppSlug) used for the @mention in the footer.
+func Compose(run *PipelineRun, took time.Duration, dashboardBaseURL, appSlug string) ComposedReview {
 	// Rebalance severity: if >50% critical, downgrade lowest-confidence criticals.
 	rebalanceSeverity(run.FileReviews)
 
@@ -188,8 +192,8 @@ func Compose(run *PipelineRun, took time.Duration) ComposedReview {
 	// Team-feedback suppression audit line: one line, never per-finding noise.
 	if n := countSuppressedFindings(run.FileReviews); n > 0 {
 		summaryBody.WriteString(fmt.Sprintf(
-			"\n\n_%d %s suppressed by team feedback ([audit](https://argus.reviews/reviews/%s))_",
-			n, pluralize("finding", n), run.ReviewID.String()))
+			"\n\n_%d %s suppressed by team feedback ([audit](%s/reviews/%s))_",
+			n, pluralize("finding", n), dashboardBaseURL, run.ReviewID.String()))
 	}
 	if scopeNote := assessPRScope(run); scopeNote != "" {
 		summaryBody.WriteString("\n\n")
@@ -277,10 +281,10 @@ func Compose(run *PipelineRun, took time.Duration) ComposedReview {
 	summaryBody.WriteString(BuildGlassBoxLine(run.Contract, checkedReviewers(run), countSuppressed(run), took))
 	summaryBody.WriteString("</sub><br>\n")
 	summaryBody.WriteString(fmt.Sprintf(
-		"<sub>[Dashboard →](https://argus.reviews/reviews/%s) · "+
+		"<sub>[Dashboard →](%s/reviews/%s) · "+
 			"React 👎 to dismiss · "+
-			"Reply to any inline comment or use `@argus-eye help` to chat</sub>",
-		run.ReviewID.String()))
+			"Reply to any inline comment or use `@%s help` to chat</sub>",
+		dashboardBaseURL, run.ReviewID.String(), appSlug))
 
 	return ComposedReview{
 		GitHub: ghpkg.ReviewSubmission{

@@ -68,7 +68,7 @@ var canonicalPatterns = []vulnPattern{
 	{VulnAuthBypass, []string{"authentication bypass", "auth bypass", "missing auth", "unauthenticated access"}},
 	{VulnInputValidation, []string{"input validation", "missing validation", "unsanitized input", "unvalidated input"}},
 
-	// Public exposure (cloud infra). Keywords drawn from the AcmeOrg PR #106
+	// Public exposure (cloud infra). Keywords drawn from a production
 	// false-positive cluster — IAP bypass / public invoker bindings / all-users grants.
 	// Placed after auth so specific "authentication bypass" wording matches auth_bypass first.
 	{VulnPublicExposure, []string{

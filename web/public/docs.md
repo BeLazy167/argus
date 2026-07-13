@@ -49,7 +49,7 @@ Every review starts with a quick take — like a senior dev glancing at your PR:
 >
 > **Fix order:** auth.ts → middleware.ts → session.ts
 >
-> Score: **4/10** · [Full review →](https://argusai.vercel.app/reviews/...)
+> Score: **4/10** · [Full review →](https://argus.reviews/reviews/...)
 
 Severity counts. Fix ordering. Root cause. One glance tells you where to start.
 
@@ -230,4 +230,4 @@ BYOK — you bring your own LLM API key. We charge for the platform, not the AI.
 
 ---
 
-*Built by [Argus](https://argusai.vercel.app). Stop shipping bugs.*
+*Built by [Argus](https://argus.reviews). Stop shipping bugs.*

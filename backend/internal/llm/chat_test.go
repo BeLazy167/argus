@@ -231,7 +231,7 @@ func TestAdjustRequestForProvider(t *testing.T) {
 		}
 		// gpt-5.x is a reasoning model that rejects non-default temperature
 		// (Azure 400: "Unsupported value: 'temperature' does not support 0.2").
-		// Regression guard from acmeorg-account#331 where every review 400'd.
+		// Regression guard from a production incident where every review 400'd.
 		if body.Temperature != nil {
 			t.Errorf("expected Temperature=nil for gpt-5.x, got %v", *body.Temperature)
 		}

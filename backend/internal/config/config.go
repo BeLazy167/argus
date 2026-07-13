@@ -32,6 +32,18 @@ type Config struct {
 
 	// Worker
 	MaxConcurrentReviews int
+
+	// Deployment identity (self-hosting)
+	DashboardBaseURL string // web dashboard base URL, linked from GitHub comments
+	APIBaseURL       string // public API base URL, used for signed export links
+	GitHubAppSlug    string // GitHub App slug, used to build install URLs
+	SelfHosted       bool   // true disables plan gating (no billing on self-hosts)
+}
+
+// IsPro reports whether a plan tier unlocks pro-gated features. Self-hosted
+// deployments have no billing, so every installation passes plan gates.
+func (c *Config) IsPro(tier string) bool {
+	return c.SelfHosted || tier == "pro"
 }
 
 func Load() (*Config, error) {
@@ -80,6 +92,11 @@ func Load() (*Config, error) {
 		SupermemoryAPIKey: os.Getenv("SUPERMEMORY_API_KEY"),
 
 		MaxConcurrentReviews: maxWorkers,
+
+		DashboardBaseURL: getEnv("DASHBOARD_BASE_URL", "https://argus.reviews"),
+		APIBaseURL:       getEnv("API_BASE_URL", "https://api.argus.reviews"),
+		GitHubAppSlug:    getEnv("GITHUB_APP_SLUG", "argus-eye"),
+		SelfHosted:       getEnv("SELF_HOSTED", "false") == "true",
 	}
 
 	return cfg, nil

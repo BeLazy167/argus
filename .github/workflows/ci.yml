@@ -58,3 +58,37 @@ jobs:
           sqlc-version: '1.30.0'
       - name: sqlc gen drift check
         run: make sqlc-check
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      # No explicit version — pnpm/action-setup reads the packageManager
+      # field from web/package.json.
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: web/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      # Non-blocking until the pre-existing biome debt (~300 diagnostics on
+      # main) is paid down — flip to blocking once `pnpm lint` is clean.
+      - name: Lint
+        run: pnpm lint
+        continue-on-error: true
+      - name: Typecheck
+        run: pnpm typecheck
+      - name: Build
+        env:
+          NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: pk_test_Y2xlcmsuZXhhbXBsZS5jb20k
+          NEXT_PUBLIC_API_URL: http://localhost:8080
+          NEXT_PUBLIC_CLERK_SIGN_IN_URL: /sign-in
+          NEXT_PUBLIC_CLERK_SIGN_UP_URL: /sign-up
+        run: pnpm build

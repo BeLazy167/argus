@@ -694,7 +694,7 @@ func FormatIntentHeader(run *PipelineRun, verdict *IntentVerdict) string {
 	// Section title framed as LLM analysis, not an execution log. The prior
 	// label ("What Argus thinks this PR does") + "Criteria checked" bullets
 	// misled readers into thinking runtime flows were actually exercised — see
-	// the acmeorg-account#335 review where OAuth/cold-start criteria rendered
+	// a production review where OAuth/cold-start criteria rendered
 	// with ✅ framing. Argus reads diff text; it cannot click buttons or clone
 	// repos. The disclaimer line makes the static-analysis boundary explicit.
 	sb.WriteString("### 🔍 PR intent vs diff (LLM analysis)\n")
@@ -702,7 +702,7 @@ func FormatIntentHeader(run *PipelineRun, verdict *IntentVerdict) string {
 	sb.WriteString("**Goal:** " + p.Goal + "\n")
 	if len(p.NonGoals) > 0 {
 		// Bulleted list — joining full sentences with "; " was hard to read on
-		// the acmeorg-account#331 review where each entry was itself a full
+		// a production review where each entry was itself a full
 		// sentence with its own punctuation.
 		sb.WriteString("**Not in scope:**\n")
 		for _, g := range p.NonGoals {

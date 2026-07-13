@@ -349,7 +349,7 @@ func TestAdjustScores(t *testing.T) {
 
 // TestPromoteGroupSeverity pins the severity-floor + body-merge contract that
 // guards against the LLM judge picking a warning-rep over a critical-dup and
-// silently demoting the posted severity. Verified on prod review 00000000.
+// silently demoting the posted severity. Verified on a prod review.
 func TestPromoteGroupSeverity(t *testing.T) {
 	t.Parallel()
 

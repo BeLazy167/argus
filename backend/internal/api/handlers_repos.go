@@ -61,7 +61,7 @@ func (s *Server) updateRepo(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Enabled != nil && *body.Enabled {
 		tier, _ := s.store.GetPlanTier(r.Context(), scopedRepo.InstallationID)
-		if tier != "pro" {
+		if !s.cfg.IsPro(tier) {
 			count, _ := s.store.CountEnabledRepos(r.Context(), scopedRepo.InstallationID)
 			if count >= 3 {
 				writeJSON(w, http.StatusForbidden, map[string]string{"error": "Free plan limited to 3 repos. Upgrade to Pro for unlimited."})
@@ -105,7 +105,7 @@ func (s *Server) triggerReview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	orgLogin := strings.SplitN(repo.FullName, "/", 2)[0]
-	if inst.PlanTier != "pro" && !s.rateLimiter.AllowReview(repo.FullName, orgLogin, false) {
+	if !s.cfg.IsPro(inst.PlanTier) && !s.rateLimiter.AllowReview(repo.FullName, orgLogin, false) {
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate limit exceeded"})
 		return
 	}

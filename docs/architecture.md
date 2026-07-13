@@ -157,7 +157,7 @@ stateDiagram-v2
 
 ### "Review Started" Comment
 
-Before the pipeline runs, `postStartedComment()` posts a rich markdown issue comment containing the model name, persona, review mode (deep/incremental), and a live-watch link to the dashboard (`https://argusai.vercel.app/reviews/{id}`). The comment's GraphQL node ID is captured into `run.StartedCommentNodeID`. After the full review is posted, `post()` calls `MinimizeComment()` with classifier `"RESOLVED"` to collapse the started comment.
+Before the pipeline runs, `postStartedComment()` posts a rich markdown issue comment containing the model name, persona, review mode (deep/incremental), and a live-watch link to the dashboard (`https://argus.reviews/reviews/{id}`). The comment's GraphQL node ID is captured into `run.StartedCommentNodeID`. After the full review is posted, `post()` calls `MinimizeComment()` with classifier `"RESOLVED"` to collapse the started comment.
 
 ### Incremental Re-Review
 
@@ -508,6 +508,6 @@ Argus follows the **Sustainable Use License** model (similar to n8n):
 - Cannot offer Argus as a competing hosted/SaaS service
 - Cannot remove licensing notices
 
-The hosted SaaS at argusai.vercel.app includes both core and enterprise features. Revenue comes from managed hosting and enterprise subscriptions.
+The hosted service at [argus.reviews](https://argus.reviews) offers managed hosting with both core and enterprise features, which funds ongoing development.
 
 Examples of this model: n8n, Cal.com

@@ -1,15 +1,56 @@
 services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: argus
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d argus"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  # One-shot: runs schema migrations, then exits. argus waits for it.
+  migrate:
+    build: ./backend
+    entrypoint: ["/migrate"]
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@db:5432/argus?sslmode=disable
+    depends_on:
+      db:
+        condition: service_healthy
+
   argus:
-    build: .
+    build: ./backend
     ports:
       - "${PORT:-8080}:8080"
-    env_file: .env
+    env_file: backend/.env
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@db:5432/argus?sslmode=disable
+      # The container cannot see host-relative paths from backend/.env —
+      # the PEM is mounted read-only below.
+      GITHUB_PRIVATE_KEY_PATH: /secrets/github-app.pem
+    volumes:
+      - ./backend/secrets:/secrets:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
 
+  # Webhook relay for local dev. SMEE_URL has no default — create a channel
+  # at https://smee.io and export SMEE_URL before using the dev profile;
+  # smee-client exits immediately when it is unset.
   smee:
     image: node:22-alpine
-    command: npx smee-client --url ${SMEE_URL:-https://smee.io/your-channel} --target http://argus:8080/webhooks/github
+    command: npx smee-client --url ${SMEE_URL} --target http://argus:8080/webhooks/github
     depends_on:
       - argus
     profiles:
       - dev
+
+volumes:
+  db-data:

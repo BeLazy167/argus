@@ -54,7 +54,7 @@ type TriggerEstimate struct {
 //
 // The output is deterministic for a given TriggerEstimate so tests can assert
 // on exact bodies.
-func BuildTriggerComment(est TriggerEstimate) string {
+func BuildTriggerComment(est TriggerEstimate, appSlug string) string {
 	var b strings.Builder
 	b.WriteString(TriggerMarker)
 	b.WriteString("\n\n")
@@ -89,7 +89,7 @@ func BuildTriggerComment(est TriggerEstimate) string {
 		b.WriteString("\n")
 	}
 
-	b.WriteString("_Tip: you can also comment `@argus-eye review` at any time._\n")
+	fmt.Fprintf(&b, "_Tip: you can also comment `@%s review` at any time._\n", appSlug)
 	return b.String()
 }
 

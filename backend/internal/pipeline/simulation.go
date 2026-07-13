@@ -402,7 +402,7 @@ func splitHeadlineAndBody(brief string) (headline, body string) {
 // into the one-liner that fits after `## 🔎 Argus · N/10 — ` in the H2.
 //
 // Two rough edges on the naive firstSentence-plus-truncate path — both
-// surfaced in the acmeorg-account#331 review:
+// surfaced in a production review:
 //
 //  1. The brief nearly always starts with "**Verdict:**" (per the synthesis
 //     system prompt), so the raw first sentence puts bold markdown inside

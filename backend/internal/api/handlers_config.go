@@ -315,7 +315,7 @@ func (s *Server) upsertPromptTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tier, _ := s.store.GetPlanTier(r.Context(), repo.InstallationID)
-	if tier != "pro" {
+	if !s.cfg.IsPro(tier) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "Custom prompts require Pro plan."})
 		return
 	}

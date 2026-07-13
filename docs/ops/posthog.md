@@ -33,7 +33,7 @@ Full trace correlation: every request gets `X-Argus-Trace-Id` at the middleware 
 ### 2. Backend secrets
 
 ```bash
-fly secrets set -a argus-ai POSTHOG_API_KEY=phx_...
+fly secrets set -a <your-app> POSTHOG_API_KEY=phx_...
 ```
 
 `POSTHOG_API_KEY` unset = kill switch. The obs handler falls through to plain `slog.TextHandler` and nothing is forwarded.
@@ -81,9 +81,6 @@ Filter: `$groups.installation` != `null` (only installed users count).
 
 ## Alerts
 
-### PostHog-native billing alert
-Settings → Billing → Usage alerts. Set at **$50/month**. Email trigger.
-
 ### `log.error` spike
 Insights → new trend → `log.error` count, last 1h. Save as alert: **notify when > 20 in 1h**, email channel.
 
@@ -123,7 +120,7 @@ Merge via `posthog.alias("github:<login>", user.id)` — fired on dashboard load
 
 ## Event taxonomy (v1, 30 events)
 
-See `/home/user/.claude/plans/nah-investigate-the-memory-scalable-meteor.md` "Event taxonomy (all 30, v1)" section. Allowlist of attribute keys is enforced by `backend/internal/obs/allowlist_test.go#TestSlogAttrsOnAllowlist` — a new slog call with an unlisted key fails CI.
+The allowlist of attribute keys is enforced by `backend/internal/obs/allowlist_test.go#TestSlogAttrsOnAllowlist` — a new slog call with an unlisted key fails CI.
 
 ## Handler failure modes
 
@@ -137,7 +134,7 @@ See `/home/user/.claude/plans/nah-investigate-the-memory-scalable-meteor.md` "Ev
 ## Troubleshooting
 
 **"My event isn't showing up in PostHog Live Events"**
-1. Confirm `POSTHOG_API_KEY` is set on Fly: `fly secrets list -a argus-ai | grep POSTHOG`
+1. Confirm `POSTHOG_API_KEY` is set on Fly: `fly secrets list -a <your-app> | grep POSTHOG`
 2. Confirm the event has an `event=` slog attr: `grep -n 'event=".event_name"' backend/`
 3. Check `/healthz` — `dropped_unattributed > 0` means ctx is missing user/installation attribution
 4. Check for allowlist drop: run `go test -run TestSlogAttrsOnAllowlist -v ./internal/obs/...`
@@ -148,9 +145,6 @@ Expected for settings pages, review comment bodies, diff viewers. If an unmasked
 **"PostHog Live Events shows events but dashboards are empty"**
 Dashboards use `$groups` for org-level queries. Confirm `posthog.group("installation", ...)` fires by filtering a single event — the properties panel should show `$groups.installation = <id>`.
 
-## Cost expectations (current scale)
+## Cost expectations
 
-- ~3.5k events/day from pipeline + frontend combined = **~105k/month** → 10% of the 1M free tier
-- 0.1 sample × 5 sessions/day × 1 active user = **~15 recordings/month** → 0.3% of 5k free tier
-
-Scaling projection: a 10× bump in active users (10 devs using the dashboard daily + 10× review volume) remains under PostHog free tier for events. Recording minutes are the first line item to blow through once flipped to 1.0 sample — budget `~150 recordings/month/active user` at 1.0.
+Event volume scales with review volume plus dashboard sessions; recordings are sampled at 0.1. Recording minutes are the first line item to grow once the sample rate is raised toward 1.0 — watch that before events.

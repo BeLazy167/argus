@@ -76,13 +76,12 @@ smee:
 deploy:
 	fly deploy
 
+# LLM provider keys are BYOK — added via the dashboard Providers page and
+# stored encrypted in the DB, never pushed as deploy secrets.
 secrets:
 	fly secrets set \
 		DATABASE_URL="$(DATABASE_URL)" \
 		GITHUB_APP_ID="$(GITHUB_APP_ID)" \
 		GITHUB_PRIVATE_KEY="$$(cat $(GITHUB_PRIVATE_KEY_PATH))" \
 		GITHUB_WEBHOOK_SECRET="$(GITHUB_WEBHOOK_SECRET)" \
-		LLM_API_KEY="$(LLM_API_KEY)" \
-		LLM_BASE_URL="$(LLM_BASE_URL)" \
-		DEFAULT_REVIEW_MODEL="$(DEFAULT_REVIEW_MODEL)" \
-		DEFAULT_TRIAGE_MODEL="$(DEFAULT_TRIAGE_MODEL)"
+		ENCRYPTION_KEY="$(ENCRYPTION_KEY)"

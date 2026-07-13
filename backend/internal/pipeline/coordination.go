@@ -98,7 +98,7 @@ func (o *Orchestrator) leadBrief(ctx context.Context, run *PipelineRun) (*LeadBr
 	// guaranteed false timeouts. The outer pipeline ctx remains the only
 	// bound. leadBriefMaxTokens (8000) leaves room for gpt-5.x reasoning
 	// tokens that count against the same budget — prior 1500 cap was fully
-	// consumed by reasoning on acmeorg-account#335, leaving 5 tokens for the
+	// consumed by reasoning on a production review, leaving 5 tokens for the
 	// JSON output (observed as `completion_tokens=5, response="[]"`).
 	resp, err := provider.Complete(ctx, llm.CompletionRequest{
 		Model:       cfg.Model,

@@ -88,7 +88,7 @@ func Run() error {
 
 	// GitHub App
 	ghApp := ghpkg.NewApp(cfg.GitHubAppID, cfg.GitHubPrivateKey)
-	ghClient := ghpkg.NewClient(ghApp)
+	ghClient := ghpkg.NewClient(ghApp, cfg.GitHubAppSlug)
 
 	// Encryption (optional — only required if BYOK keys are used)
 	if cfg.EncryptionKey != "" {
@@ -100,6 +100,7 @@ func Run() error {
 	// LLM (BYOK only — keys resolved from DB)
 	registry := llm.NewRegistry()
 	registry.SetResolver(db)
+	registry.SetReferer(cfg.DashboardBaseURL)
 
 	// Pricing (DB-backed, cached 10min)
 	pricingCache := store.NewPricingCache(db)
@@ -116,7 +117,7 @@ func Run() error {
 	reviewStage := pipeline.NewReviewStage(registry, db, ghClient, memRegistry, cfg.MaxConcurrentReviews)
 	intentStage := pipeline.NewIntentExtractionStage(registry, db, ghClient, logger)
 	scoringStage := pipeline.NewScoringStage(registry, db)
-	orchestrator := pipeline.NewOrchestrator(db.Pool, db, ghClient, reviewStage, triageStage, intentStage, scoringStage, memRegistry, registry, eventBus, logger)
+	orchestrator := pipeline.NewOrchestrator(db.Pool, db, ghClient, reviewStage, triageStage, intentStage, scoringStage, memRegistry, registry, eventBus, logger, cfg)
 	replyAnalyzer := pipeline.NewReplyAnalyzer(registry, db, ghClient, memRegistry, logger)
 	reactionAnalyzer := pipeline.NewReactionAnalyzer(db, ghClient, memRegistry, logger)
 
@@ -176,7 +177,7 @@ func Run() error {
 	}
 
 	// API Server
-	server := api.NewServer(db, ghApp, orchestrator, replyAnalyzer, reactionAnalyzer, registry, eventBus, cfg.GitHubWebhookSecret, cfg.CORSAllowOrigin, logger, memRegistry)
+	server := api.NewServer(db, ghApp, orchestrator, replyAnalyzer, reactionAnalyzer, registry, eventBus, cfg, logger, memRegistry)
 	defer server.Close()
 
 	httpServer := &http.Server{
@@ -204,9 +205,9 @@ func Run() error {
 
 	select {
 	case sig := <-sigCh:
-		// TODO(agent5): pendingCount = # in-flight reviews. No easy accessor
-		// exposed on Server today, so we emit 0. Agent 5 can wire this from
-		// the orchestrator's run registry when they add pipeline.panic_recovered
+		// TODO: pendingCount = # in-flight reviews. No easy accessor
+		// exposed on Server today, so we emit 0. Wire this from
+		// the orchestrator's run registry when adding pipeline.panic_recovered
 		// & sweeper.recovered_orphan in the same pass.
 		logger.Info("shutdown signal received",
 			slog.String("event", "fly.shutdown_signal_received"),

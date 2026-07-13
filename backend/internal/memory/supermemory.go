@@ -316,7 +316,7 @@ var tagSanitizer = strings.NewReplacer(":", "-", "/", "-", "~", "-", ".", "-")
 //
 // The simpler tagSanitizer above was missing parens and brackets, which broke
 // Next.js route-group paths like `src/app/(auth)/oauth/page.tsx` and dynamic
-// segments like `[slug]/page.tsx`. Reviews on acmeorg-account#331 logged 7×
+// segments like `[slug]/page.tsx`. Production reviews logged 7×
 // HTTP 400 errors for this reason.
 var idSanitizerRe = regexp.MustCompile(`[^a-zA-Z0-9_:-]`)
 

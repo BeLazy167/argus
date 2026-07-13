@@ -84,7 +84,7 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 				s.logger.Warn("review count check failed", "error", countErr)
 			} else {
 				limit := 50 // free tier
-				if inst.PlanTier == "pro" {
+				if s.cfg.IsPro(inst.PlanTier) {
 					limit = 500
 				}
 				if reviewCount >= limit {
@@ -258,7 +258,7 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			if strings.HasSuffix(issueEvent.EditorLogin, "[bot]") {
 				break
 			}
-			if !isArgusCommentAuthor(issueEvent.CommentAuthor) {
+			if !s.isArgusCommentAuthor(issueEvent.CommentAuthor) {
 				break
 			}
 			if !pipeline.CheckboxToggled(issueEvent.CommentBodyBefore, issueEvent.CommentBody) {
@@ -385,7 +385,7 @@ func (s *Server) handleCheckboxTrigger(ctx context.Context, evt ghpkg.IssueComme
 		return
 	}
 	owner, repoName := parts[0], parts[1]
-	ghClient := ghpkg.NewClient(s.ghApp)
+	ghClient := ghpkg.NewClient(s.ghApp, s.cfg.GitHubAppSlug)
 
 	// Acknowledge the click with a reaction before doing any heavy work.
 	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repoName, evt.CommentID, "eyes")

@@ -297,7 +297,7 @@ func (sm *StateMachine) loadState(ctx context.Context, runID uuid.UUID) (*Pipeli
 // recoverStaleAfter is the minimum updated_at age before RecoverIncomplete
 // will claim a non-terminal run. Shorter = faster crash recovery but higher
 // risk of picking up a run another machine is actively processing. Longer =
-// safer against duplicate execution (see AcmeOrg PR #510 on 2026-04-23: a
+// safer against duplicate execution (observed in production: a
 // Fly standby auto-started to serve a dashboard burst, called
 // RecoverIncomplete, claimed a live review, and posted a second GitHub
 // review 32 s after the first). Observed longest legitimate stage
