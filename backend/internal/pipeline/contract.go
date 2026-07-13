@@ -113,6 +113,14 @@ func (c *ReviewContract) HasSecurityFloor() bool {
 	return false
 }
 
+// ContractSignalIntentUnresolved marks a contract that Finalize defaulted to
+// production because the intent stage never resolved it (fast-exit on a
+// provider blip, LLM/parse failure, or unreviewable PR). It lets prod
+// diagnosis distinguish a defaulted contract from an llm-resolved one at a
+// glance — both carry Source "llm-default", but only the LLM-default path
+// tags "llm:default-production".
+const ContractSignalIntentUnresolved = "intent:unresolved"
+
 // ResolveFromLLM fills ChangeClass on an llm-pending contract from the intent
 // extraction output. Unknown classes or confidence below the floor default to
 // production. No-op unless Source == "llm-pending".
@@ -129,6 +137,25 @@ func (c *ReviewContract) ResolveFromLLM(class string, confidence float64) {
 	c.ChangeClass = ChangeClassProduction
 	c.Source = ContractSourceLLMDefault
 	c.Signals = append(c.Signals, "llm:default-production")
+}
+
+// Finalize resolves a contract still awaiting the intent LLM (Source ==
+// "llm-pending") to the documented production default at persist time. The
+// intent stage fast-exits (provider blip, LLM/parse failure, unreviewable PR)
+// leave the contract pending with an empty ChangeClass; every consumer already
+// treats empty as production, so this makes the persisted value and the
+// dashboard reflect that instead of rendering class "-". It reuses the visible
+// "llm-default" fallback source (as ResolveFromLLM does for unusable LLM
+// output) and appends ContractSignalIntentUnresolved so a defaulted contract is
+// distinguishable from an llm-resolved one. No-op unless Source ==
+// "llm-pending", so an already-resolved contract is untouched.
+func (c *ReviewContract) Finalize() {
+	if c == nil || c.Source != ContractSourceLLMPending {
+		return
+	}
+	c.ChangeClass = ChangeClassProduction
+	c.Source = ContractSourceLLMDefault
+	c.Signals = append(c.Signals, ContractSignalIntentUnresolved)
 }
 
 // SummaryLine renders the one-line contract description interpolated as

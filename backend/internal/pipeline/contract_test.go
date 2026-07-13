@@ -392,6 +392,68 @@ func TestResolveFromLLM(t *testing.T) {
 	nilContract.ResolveFromLLM(ChangeClassDocs, 0.9) // must not panic
 }
 
+func TestFinalize(t *testing.T) {
+	tests := []struct {
+		name         string
+		contract     *ReviewContract
+		wantClass    string
+		wantSource   string
+		wantUnresSig bool // expect ContractSignalIntentUnresolved appended
+	}{
+		{
+			name:         "pending finalizes to production with unresolved signal",
+			contract:     &ReviewContract{Source: ContractSourceLLMPending},
+			wantClass:    ChangeClassProduction,
+			wantSource:   ContractSourceLLMDefault,
+			wantUnresSig: true,
+		},
+		{
+			name:         "llm-resolved contract is untouched",
+			contract:     &ReviewContract{ChangeClass: ChangeClassDocs, Source: ContractSourceLLM},
+			wantClass:    ChangeClassDocs,
+			wantSource:   ContractSourceLLM,
+			wantUnresSig: false,
+		},
+		{
+			name:         "deterministic contract is untouched",
+			contract:     &ReviewContract{ChangeClass: ChangeClassMigration, Source: ContractSourceDeterministic},
+			wantClass:    ChangeClassMigration,
+			wantSource:   ContractSourceDeterministic,
+			wantUnresSig: false,
+		},
+		{
+			name:         "already-defaulted contract is untouched (no duplicate signal)",
+			contract:     &ReviewContract{ChangeClass: ChangeClassProduction, Source: ContractSourceLLMDefault},
+			wantClass:    ChangeClassProduction,
+			wantSource:   ContractSourceLLMDefault,
+			wantUnresSig: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.contract.Finalize()
+			if tt.contract.ChangeClass != tt.wantClass {
+				t.Errorf("ChangeClass = %q, want %q", tt.contract.ChangeClass, tt.wantClass)
+			}
+			if tt.contract.Source != tt.wantSource {
+				t.Errorf("Source = %q, want %q", tt.contract.Source, tt.wantSource)
+			}
+			gotSig := false
+			for _, s := range tt.contract.Signals {
+				if s == ContractSignalIntentUnresolved {
+					gotSig = true
+				}
+			}
+			if gotSig != tt.wantUnresSig {
+				t.Errorf("intent:unresolved signal present = %v, want %v (signals=%v)", gotSig, tt.wantUnresSig, tt.contract.Signals)
+			}
+		})
+	}
+
+	var nilContract *ReviewContract
+	nilContract.Finalize() // must not panic
+}
+
 func TestContractHelpers(t *testing.T) {
 	var nilContract *ReviewContract
 	if nilContract.Is(ChangeClassProduction) {

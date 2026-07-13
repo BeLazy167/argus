@@ -65,3 +65,12 @@ export interface ReviewContract {
   signals?: string[];
   source?: string;
 }
+/**
+ * ContractSignalIntentUnresolved marks a contract that Finalize defaulted to
+ * production because the intent stage never resolved it (fast-exit on a
+ * provider blip, LLM/parse failure, or unreviewable PR). It lets prod
+ * diagnosis distinguish a defaulted contract from an llm-resolved one at a
+ * glance — both carry Source "llm-default", but only the LLM-default path
+ * tags "llm:default-production".
+ */
+export const ContractSignalIntentUnresolved = "intent:unresolved";

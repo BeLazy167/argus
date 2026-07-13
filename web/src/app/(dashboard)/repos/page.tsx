@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { usePagination, PaginationBar } from "@/components/dashboard/pagination";
 import {
   GitFork,
@@ -241,7 +241,21 @@ export default function ReposPage() {
   const syncRepos = useSyncRepos();
   const { active } = useInstallation();
   const isPro = active?.plan_tier === "pro";
-  const { page, setPage, totalPages, paginated, pageSize, total, hasNext, hasPrev } = usePagination(repos ?? []);
+  // Enabled repos first, each block alphabetical — otherwise the handful of
+  // enabled repos gets buried pages deep behind hundreds of disabled ones and
+  // the first pages read as "everything is disabled". Sort BEFORE pagination.
+  const sortedRepos = useMemo(
+    () =>
+      [...(repos ?? [])].sort((a, b) =>
+        a.enabled !== b.enabled
+          ? a.enabled
+            ? -1
+            : 1
+          : a.full_name.localeCompare(b.full_name),
+      ),
+    [repos],
+  );
+  const { page, setPage, totalPages, paginated, pageSize, total, hasNext, hasPrev } = usePagination(sortedRepos);
 
   return (
     <>
