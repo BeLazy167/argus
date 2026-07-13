@@ -1225,3 +1225,82 @@ func nilIfEmpty(s string) *string {
 	}
 	return &s
 }
+
+// --- Consumer-facing sqlc pass-throughs (issue #137) ---
+//
+// These thin wrappers absorb the direct *db.Queries (`.Q`) accesses that used
+// to leak out of the store package into orchestrator stages and API handlers.
+// Routing them through *store.Store keeps callers (and the consumer-declared
+// narrow interfaces over the store) off the generated query layer. Pure
+// delegation — no business logic. SetScenarioSupermemoryID above is the same
+// idiom; grouped here so the former leaks are reviewable in one place.
+
+// GetInstallationFeatureFlags returns the raw feature_flags JSONB for an
+// installation. Callers parse it (pipeline.loadFeatureFlags, the features
+// handler); an empty or "{}" payload means "all defaults".
+func (s *Store) GetInstallationFeatureFlags(ctx context.Context, installationID int64) (json.RawMessage, error) {
+	return s.Q.GetInstallationFeatureFlags(ctx, installationID)
+}
+
+// UpdateInstallationFeatureFlags overwrites the feature_flags JSONB for an
+// installation with an already-marshaled+clamped payload.
+func (s *Store) UpdateInstallationFeatureFlags(ctx context.Context, installationID int64, flags json.RawMessage) error {
+	return s.Q.UpdateInstallationFeatureFlags(ctx, db.UpdateInstallationFeatureFlagsParams{
+		ID:           installationID,
+		FeatureFlags: flags,
+	})
+}
+
+// GetAllFileReviewsForReview returns the unfiltered per-file review payload
+// (pre dedup/scoring) recorded for a review's latest run, as raw JSONB. The
+// export path uses it to surface dropped findings.
+func (s *Store) GetAllFileReviewsForReview(ctx context.Context, reviewID uuid.UUID) (json.RawMessage, error) {
+	return s.Q.GetAllFileReviewsForReview(ctx, reviewID)
+}
+
+// GetTopChokePoints returns the highest fan-in files for a repo (up to limit) —
+// the architecture-summary input.
+func (s *Store) GetTopChokePoints(ctx context.Context, repoID int64, limit int32) ([]db.GetTopChokePointsRow, error) {
+	return s.Q.GetTopChokePoints(ctx, db.GetTopChokePointsParams{RepoID: repoID, Limit: limit})
+}
+
+// ListArchNodes returns the per-symbol architecture rows (file, name, language,
+// line span) for a repo.
+func (s *Store) ListArchNodes(ctx context.Context, repoID int64) ([]db.ListArchNodesRow, error) {
+	return s.Q.ListArchNodes(ctx, repoID)
+}
+
+// ListArchFileEdges returns the file→file dependency edges for a repo.
+func (s *Store) ListArchFileEdges(ctx context.Context, repoID int64) ([]db.ListArchFileEdgesRow, error) {
+	return s.Q.ListArchFileEdges(ctx, repoID)
+}
+
+// ListArchBugDensity returns per-file bug counts and PR-change frequency for a repo.
+func (s *Store) ListArchBugDensity(ctx context.Context, repoID int64) ([]db.ListArchBugDensityRow, error) {
+	return s.Q.ListArchBugDensity(ctx, repoID)
+}
+
+// ListArchCoupling returns per-PR file sets used to derive temporal coupling.
+func (s *Store) ListArchCoupling(ctx context.Context, repoID int64) ([]db.ListArchCouplingRow, error) {
+	return s.Q.ListArchCoupling(ctx, repoID)
+}
+
+// ListGraphNodes returns the code-graph nodes for the repo UI, normalizing a nil
+// result to an empty slice so the JSON response is [] rather than null.
+func (s *Store) ListGraphNodes(ctx context.Context, repoID int64) ([]db.ListGraphNodesRow, error) {
+	rows, err := s.Q.ListGraphNodes(ctx, repoID)
+	if rows == nil {
+		rows = []db.ListGraphNodesRow{}
+	}
+	return rows, err
+}
+
+// ListGraphEdges returns the code-graph edges for the repo UI, normalizing a nil
+// result to an empty slice so the JSON response is [] rather than null.
+func (s *Store) ListGraphEdges(ctx context.Context, repoID int64) ([]db.ListGraphEdgesRow, error) {
+	rows, err := s.Q.ListGraphEdges(ctx, repoID)
+	if rows == nil {
+		rows = []db.ListGraphEdgesRow{}
+	}
+	return rows, err
+}

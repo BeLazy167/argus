@@ -11,7 +11,6 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/BeLazy167/argus/backend/internal/pipeline"
-	"github.com/BeLazy167/argus/backend/internal/store/db"
 )
 
 // featureFlagsResponse is what the settings page consumes. Includes the
@@ -67,7 +66,7 @@ func (s *Server) getFeatureFlags(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not authorized"})
 		return
 	}
-	raw, err := s.store.Q.GetInstallationFeatureFlags(r.Context(), installationID)
+	raw, err := s.store.GetInstallationFeatureFlags(r.Context(), installationID)
 	if err != nil {
 		s.logger.Error("fetching feature flags", "error", err, "installation_id", installationID)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
@@ -103,10 +102,7 @@ func (s *Server) setFeatureFlags(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "marshal failed"})
 		return
 	}
-	if err := s.store.Q.UpdateInstallationFeatureFlags(r.Context(), db.UpdateInstallationFeatureFlagsParams{
-		ID:           installationID,
-		FeatureFlags: raw,
-	}); err != nil {
+	if err := s.store.UpdateInstallationFeatureFlags(r.Context(), installationID, raw); err != nil {
 		s.logger.Error("updating feature flags", "error", err, "installation_id", installationID)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "save failed"})
 		return

@@ -518,7 +518,7 @@ type archPRFiles struct {
 }
 
 func (s *Server) fetchArchNodes(ctx context.Context, repoID int64, fileMap map[string]*archFileInfo, mu *sync.Mutex) error {
-	rows, err := s.store.Q.ListArchNodes(ctx, repoID)
+	rows, err := s.store.ListArchNodes(ctx, repoID)
 	if err != nil {
 		return err
 	}
@@ -539,7 +539,7 @@ func (s *Server) fetchArchNodes(ctx context.Context, repoID int64, fileMap map[s
 }
 
 func (s *Server) fetchArchEdges(ctx context.Context, repoID int64, fanIn, fanOut map[string]int, fileEdges map[string]*archEdgeAgg, edgeKey func(string, string) string, mu *sync.Mutex) error {
-	rows, err := s.store.Q.ListArchFileEdges(ctx, repoID)
+	rows, err := s.store.ListArchFileEdges(ctx, repoID)
 	if err != nil {
 		return err
 	}
@@ -561,7 +561,7 @@ func (s *Server) fetchArchEdges(ctx context.Context, repoID int64, fanIn, fanOut
 }
 
 func (s *Server) fetchArchBugs(ctx context.Context, repoID int64, bugCount, changeFreq map[string]int, mu *sync.Mutex) error {
-	rows, err := s.store.Q.ListArchBugDensity(ctx, repoID)
+	rows, err := s.store.ListArchBugDensity(ctx, repoID)
 	if err != nil {
 		return err
 	}
@@ -575,7 +575,7 @@ func (s *Server) fetchArchBugs(ctx context.Context, repoID int64, bugCount, chan
 }
 
 func (s *Server) fetchArchCoupling(ctx context.Context, repoID int64) ([]archPRFiles, error) {
-	rows, err := s.store.Q.ListArchCoupling(ctx, repoID)
+	rows, err := s.store.ListArchCoupling(ctx, repoID)
 	if err != nil {
 		return nil, err
 	}

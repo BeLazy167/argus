@@ -16,16 +16,36 @@ import (
 	"github.com/BeLazy167/argus/backend/internal/util"
 )
 
+// featureFlagReader is the one-method store surface loadFeatureFlags consumes:
+// the raw feature_flags JSONB for an installation. *store.Store satisfies it
+// (callers convert via featureFlagReaderFor); tests substitute a fake (see
+// acceptance_test.go).
+type featureFlagReader interface {
+	GetInstallationFeatureFlags(ctx context.Context, installationID int64) (json.RawMessage, error)
+}
+
+// featureFlagReaderFor maps a possibly-nil *store.Store to a featureFlagReader.
+// A nil pointer must become a nil INTERFACE so loadFeatureFlags' nil guard
+// fires — wrapping it directly would produce a typed nil (non-nil interface
+// holding a nil pointer) that defuses the guard and panics inside the method
+// call, breaking the never-hard-fails contract below.
+func featureFlagReaderFor(st *store.Store) featureFlagReader {
+	if st == nil {
+		return nil
+	}
+	return st
+}
+
 // loadFeatureFlags fetches per-installation toggles from the DB. On any error
 // (missing row, DB down, malformed JSON) it falls back to DefaultFeatureFlags
 // so the pipeline never hard-fails on flag loading. Not-present fields in the
 // JSON are filled from defaults.
-func loadFeatureFlags(ctx context.Context, st *store.Store, installationDBID int64) FeatureFlags {
+func loadFeatureFlags(ctx context.Context, st featureFlagReader, installationDBID int64) FeatureFlags {
 	defaults := DefaultFeatureFlags()
 	if st == nil || installationDBID == 0 {
 		return defaults
 	}
-	raw, err := st.Q.GetInstallationFeatureFlags(ctx, installationDBID)
+	raw, err := st.GetInstallationFeatureFlags(ctx, installationDBID)
 	if err != nil {
 		slog.Debug("feature flag load failed, using defaults", "error", err, "install_id", installationDBID)
 		return defaults
