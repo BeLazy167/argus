@@ -1307,47 +1307,56 @@ func hydratePriorFindings(ctx context.Context, o *Orchestrator, link PRLink) PRL
 	return link
 }
 
-// filterAutoResolvedFindings drops any Finding whose "<path>:<line>" key
-// appears in resolvedKeys — the set of thread locations that auto_resolve
-// closed on pushes AFTER the linked PR's review completed. Returns the
-// surviving Findings; the caller computes the filtered count via len-diff.
+// filterAutoResolvedFindings drops any Finding whose location matches a thread
+// that auto_resolve closed on pushes AFTER the linked PR's review completed.
+// Returns the surviving Findings; the caller computes the filtered count via
+// len-diff.
 //
-// Join-key shape: auto_resolve_events.resolved_thread_keys (migration 041)
-// stores the resolved GitHub thread's Path+Line in the same format used
-// below via findingKey, so the match is exact and O(1) per finding after
-// the set is built.
+// resolvedKeys are "<path>:<line>" join keys from
+// auto_resolve_events.resolved_thread_keys (migration 041, produced in
+// findingKey's format). Each is parsed back into an Anchor (parseAnchorKey) and
+// matched through the shared exact Matcher {Proximity: 0, UseCategory: false}
+// so the "same location" rule can no longer drift from the incremental-dedup
+// and auto-resolve sites. Proximity 0 with no category reproduces the prior
+// exact "<path>:<line>" identity precisely.
 //
-// Semantics:
+// Semantics (unchanged):
 //   - Empty findings or empty resolvedKeys: pass-through (no allocation).
-//   - Empty-string entries in resolvedKeys: ignored (defensive guard against
-//     sqlc array scanning quirks).
+//   - Empty / unparseable entries in resolvedKeys: ignored (defensive guard
+//     against sqlc array scanning quirks) — such keys could never match.
 //   - A zero-line Finding (Line == 0) can never match a migration-041 key
-//     because the writer skips Line == 0 threads — so line-0 findings
-//     always pass through, which is the right answer.
+//     because the writer skips Line == 0 threads — so line-0 findings always
+//     pass through, which is the right answer.
 //
-// The returned slice is a freshly allocated copy even when nothing is
-// dropped, so callers cannot accidentally mutate the caller's backing
-// array.
+// The returned slice is a freshly allocated copy whenever any filtering runs,
+// so callers cannot accidentally mutate the caller's backing array.
 func filterAutoResolvedFindings(findings []Finding, resolvedKeys []string) []Finding {
 	if len(findings) == 0 || len(resolvedKeys) == 0 {
 		return findings
 	}
-	resolved := make(map[string]struct{}, len(resolvedKeys))
+	priors := make([]Anchor, 0, len(resolvedKeys))
 	for _, k := range resolvedKeys {
-		if k == "" {
-			continue
+		if a, ok := parseAnchorKey(k); ok {
+			priors = append(priors, a)
 		}
-		resolved[k] = struct{}{}
 	}
-	if len(resolved) == 0 {
+	if len(priors) == 0 {
 		return findings
 	}
+	matcher := Matcher{Proximity: 0, UseCategory: false}
 	kept := make([]Finding, 0, len(findings))
 	for _, f := range findings {
-		if _, drop := resolved[findingKey(f)]; drop {
-			continue
+		anchor := Anchor{Path: f.Path, Line: f.Line}
+		drop := false
+		for _, p := range priors {
+			if matcher.Matches(anchor, p) {
+				drop = true
+				break
+			}
 		}
-		kept = append(kept, f)
+		if !drop {
+			kept = append(kept, f)
+		}
 	}
 	return kept
 }

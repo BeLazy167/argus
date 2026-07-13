@@ -1367,8 +1367,14 @@ func decideAutoResolveThread(
 	}
 	changedLineSet := fileChangedLines[t.Path]
 	if t.Line > 0 && len(changedLineSet) > 0 {
+		// Shared Matcher with the auto-resolve policy {Proximity: lineProximity,
+		// UseCategory: false}: a changed line within the window resolves the
+		// thread regardless of category (threads carry none). Path is equal on
+		// both anchors (changedLineSet is fileChangedLines[t.Path]).
+		matcher := Matcher{Proximity: lineProximity, UseCategory: false}
+		threadAnchor := Anchor{Path: t.Path, Line: t.Line}
 		for changedLine := range changedLineSet {
-			if util.IntAbs(changedLine-t.Line) <= lineProximity {
+			if matcher.Matches(threadAnchor, Anchor{Path: t.Path, Line: changedLine}) {
 				return autoResolveDecision{
 					kind:    autoResolveLineHit,
 					joinKey: fmt.Sprintf("%s:%d", t.Path, t.Line),
@@ -3858,6 +3864,18 @@ func writeDiffSummary(sb *strings.Builder, files []diff.FileDiff, maxPerFile int
 
 func (o *Orchestrator) dedupStage(ctx context.Context, run *PipelineRun) error {
 	if !run.DeepReview {
+		// Free-tier / non-deep incremental re-reviews still get structural
+		// prior-duplicate suppression — ungated from DeepReview so every
+		// re-review, not just Pro deep ones, stops re-posting reworded
+		// duplicates of prior comments. SmartDedup (cross-specialist) and the
+		// pre-scoring AllFileReviews snapshot remain deep-only: single-pass
+		// reviews have no cross-specialist duplicates, and scoring takes the
+		// AllFileReviews snapshot for these tiers.
+		if run.IsIncremental && len(run.PriorComments) > 0 {
+			if dropped := dropPriorDuplicates(run); dropped > 0 {
+				o.logger.Info("[dedup] dropped prior-duplicates (non-deep)", "count", dropped, "pr", run.PREvent.PRNumber)
+			}
+		}
 		return nil
 	}
 	before := countComments(run)
@@ -3883,23 +3901,23 @@ func (o *Orchestrator) dedupStage(ctx context.Context, run *PipelineRun) error {
 }
 
 // dropPriorDuplicates mutates run.FileReviews in place, removing FileComments
-// that match a previously-posted comment on the same file within ±10 lines
-// and same category. Returns the number of dropped comments.
+// that structurally match a comment already posted on a prior review of this
+// PR — same file, same Category (case-insensitive), line within ±10. Returns
+// the number of dropped comments.
 //
-// Matching rule (must satisfy all):
-//   - Same file path
-//   - Same Category (case-insensitive)
-//   - Comment line within ±proximity of prior line
+// The match uses the shared Matcher (see finding_match.go) with the
+// prior-dedup policy {Proximity: 10, UseCategory: true} so the rule can no
+// longer drift from the auto-resolve / cross-PR sites.
 //
 // Rationale: the LLM reliably rewords findings across reviews, so string
 // similarity is unreliable; structural match (file + line + category) is the
 // only dedup we can trust. Proximity=10 is intentionally wide because the
 // developer's push may have shifted line numbers.
 func dropPriorDuplicates(run *PipelineRun) int {
-	const proximity = 10
 	if run == nil {
 		return 0
 	}
+	matcher := Matcher{Proximity: 10, UseCategory: true}
 	var dropped int
 	for i := range run.FileReviews {
 		fr := &run.FileReviews[i]
@@ -3909,7 +3927,7 @@ func dropPriorDuplicates(run *PipelineRun) int {
 		}
 		kept := fr.Comments[:0]
 		for _, c := range fr.Comments {
-			if hasPriorMatch(c, priors, proximity) {
+			if hasPriorMatch(matcher, fr.Path, c, priors) {
 				dropped++
 				continue
 			}
@@ -3920,19 +3938,15 @@ func dropPriorDuplicates(run *PipelineRun) int {
 	return dropped
 }
 
-// hasPriorMatch reports whether any prior comment on the same file is a
-// structural duplicate of c (same category, line within ±proximity).
-func hasPriorMatch(c FileComment, priors []PriorComment, proximity int) bool {
-	newCat := strings.ToLower(string(c.Category))
+// hasPriorMatch reports whether any prior comment on path is a structural
+// duplicate of c under matcher. path is the FileReview path both anchors sit on
+// (run.PriorComments is keyed by it), so the Matcher's path check is a
+// trivially-true guard here — the load-bearing predicate is line proximity +
+// category.
+func hasPriorMatch(matcher Matcher, path string, c FileComment, priors []PriorComment) bool {
+	newAnchor := Anchor{Path: path, Line: c.Line, Category: string(c.Category)}
 	for _, p := range priors {
-		if !strings.EqualFold(p.Category, newCat) {
-			continue
-		}
-		diff := c.Line - p.Line
-		if diff < 0 {
-			diff = -diff
-		}
-		if diff <= proximity {
+		if matcher.Matches(newAnchor, Anchor{Path: path, Line: p.Line, Category: p.Category}) {
 			return true
 		}
 	}
