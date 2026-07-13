@@ -234,7 +234,7 @@ func TestBuildTriggerComment(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := BuildTriggerComment(tc.est)
+			got := BuildTriggerComment(tc.est, "argus-eye")
 			for _, s := range tc.must {
 				if !strings.Contains(got, s) {
 					t.Errorf("body missing %q\n----\n%s\n----", s, got)

@@ -34,9 +34,23 @@ func TestIsArgusThread(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := IsArgusThread(tc.login); got != tc.want {
-				t.Errorf("IsArgusThread(%q) = %v, want %v", tc.login, got, tc.want)
+			if got := IsArgusThread(tc.login, "argus-eye"); got != tc.want {
+				t.Errorf("IsArgusThread(%q, %q) = %v, want %v", tc.login, "argus-eye", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestIsArgusThreadCustomSlug pins that identity follows the configured App
+// slug, not a hardcoded name — self-hosts rename the App freely.
+func TestIsArgusThreadCustomSlug(t *testing.T) {
+	if !IsArgusThread("my-review-bot", "my-review-bot") {
+		t.Error("bare custom slug should match")
+	}
+	if !IsArgusThread("my-review-bot[bot]", "my-review-bot") {
+		t.Error("[bot]-suffixed custom slug should match")
+	}
+	if IsArgusThread("argus-eye", "my-review-bot") {
+		t.Error("default slug must not match when a custom slug is configured")
 	}
 }

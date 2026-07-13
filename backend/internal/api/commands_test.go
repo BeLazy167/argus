@@ -4,6 +4,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/BeLazy167/argus/backend/internal/config"
 	ghpkg "github.com/BeLazy167/argus/backend/internal/github"
 )
 
@@ -11,9 +12,10 @@ import (
 // ghpkg.IsArgusThread helper. Exhaustive truth-table lives in
 // internal/github/identity_test.go — this test only guards the aliasing.
 func TestIsArgusCommentAuthor(t *testing.T) {
+	s := &Server{cfg: &config.Config{GitHubAppSlug: "argus-eye"}}
 	for _, login := range []string{"argus-eye", "argus-eye[bot]", "dependabot[bot]", ""} {
-		want := ghpkg.IsArgusThread(login)
-		if got := isArgusCommentAuthor(login); got != want {
+		want := ghpkg.IsArgusThread(login, "argus-eye")
+		if got := s.isArgusCommentAuthor(login); got != want {
 			t.Errorf("isArgusCommentAuthor(%q) = %v, want %v (mismatch with canonical helper)",
 				login, got, want)
 		}

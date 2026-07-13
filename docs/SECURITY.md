@@ -6,10 +6,7 @@ If you discover a security vulnerability in Argus, please report it responsibly.
 
 **Do NOT open a public GitHub issue for security vulnerabilities.**
 
-Instead, use one of these methods:
-
-1. **GitHub Security Advisory**: Go to the [Security tab](https://github.com/BeLazy167/argus/security/advisories) and create a new advisory
-2. **Email**: Contact the maintainers directly (see GitHub profile)
+Instead, report it privately via [GitHub Security Advisories](https://github.com/BeLazy167/argus/security/advisories/new) — this is the only supported reporting channel.
 
 ## What Qualifies
 

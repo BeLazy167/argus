@@ -11,7 +11,7 @@ func TestSignAndVerifyExportURL(t *testing.T) {
 	defer os.Unsetenv("WEBHOOK_SECRET")
 
 	reviewID := "abc-123-def"
-	url := SignExportURL(reviewID, "md", 1*time.Hour)
+	url := SignExportURL("https://api.example.com", reviewID, "md", 1*time.Hour)
 
 	if url == "" {
 		t.Fatal("SignExportURL returned empty string")
@@ -58,7 +58,7 @@ func TestSignAndVerifyExportURL(t *testing.T) {
 	})
 
 	t.Run("expired signature fails", func(t *testing.T) {
-		expiredURL := SignExportURL(reviewID, "md", -1*time.Second)
+		expiredURL := SignExportURL("https://api.example.com", reviewID, "md", -1*time.Second)
 		ep := splitQuery(expiredURL)
 		if VerifyExportSig(reviewID, ep["sig"], ep["exp"]) {
 			t.Error("expected expired signature to fail")

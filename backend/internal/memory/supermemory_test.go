@@ -37,7 +37,7 @@ func TestFormatPositivePattern_ShortBody(t *testing.T) {
 
 // TestCustomIDSanitize pins the character-class rule Supermemory enforces on
 // customId: alphanumeric + underscore + hyphen + colon, everything else → `-`.
-// Every case here maps to a real failure observed in qbraid-account#331 logs.
+// Every case here maps to a real failure observed in production logs.
 func TestCustomIDSanitize(t *testing.T) {
 	cases := []struct {
 		name string
@@ -56,8 +56,8 @@ func TestCustomIDSanitize(t *testing.T) {
 		},
 		{
 			name: "owner_slash_repo",
-			in:   "qBraid/qbraid-account",
-			want: "qBraid-qbraid-account",
+			in:   "acme/webapp",
+			want: "acme-webapp",
 		},
 		{
 			name: "already_safe_idempotent",
@@ -103,8 +103,8 @@ func TestSynthesisCustomID_NoForbiddenChars(t *testing.T) {
 		repo  string
 		path  string
 	}{
-		{"next_auth_route", "qBraid", "qbraid-account", "src/app/(auth)/oauth/page.tsx"},
-		{"next_dynamic_slug", "qBraid", "qbraid-account", "src/app/(dashboard)/explore/projects/[slug]/page.tsx"},
+		{"next_auth_route", "acme", "webapp", "src/app/(auth)/oauth/page.tsx"},
+		{"next_dynamic_slug", "acme", "webapp", "src/app/(dashboard)/explore/projects/[slug]/page.tsx"},
 		{"deeply_nested", "org", "repo", "a/b/c/d/e/f/g/h.tsx"},
 		{"with_dots", "org", "repo", "lib/file.test.tsx"},
 	}

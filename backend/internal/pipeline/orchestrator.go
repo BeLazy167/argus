@@ -19,6 +19,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/BeLazy167/argus/backend/internal/config"
 	ghpkg "github.com/BeLazy167/argus/backend/internal/github"
 	"github.com/BeLazy167/argus/backend/internal/graph"
 	"github.com/BeLazy167/argus/backend/internal/llm"
@@ -202,7 +203,7 @@ func (o *Orchestrator) buildRun(ctx context.Context, in buildRunInput) *Pipeline
 		CustomPersonaPrompt: loadCustomPersonaPrompt(mergedSettings),
 		DeepReview: isDeepReviewEnabled(mergedSettings) && func() bool {
 			tier, _ := o.st.GetPlanTier(ctx, in.dbInstallationID)
-			return tier == "pro"
+			return o.cfg.IsPro(tier)
 		}(),
 		CrossFileContext:  isCrossFileContextEnabled(mergedSettings),
 		BlastRadius:       isBlastRadiusEnabled(mergedSettings),
@@ -293,6 +294,7 @@ type Orchestrator struct {
 	registry     LLMRegistry
 	eventBus     *EventBus
 	logger       *slog.Logger
+	cfg          *config.Config
 	// lifecycle is the single home for the review-lifecycle DB guards
 	// (EnsureNotRunning / CancelStranded / ShouldAbortPost). See lifecycle.go.
 	lifecycle *ReviewLifecycle
@@ -314,7 +316,7 @@ type LLMRegistry interface {
 	HasKeyForRepo(ctx context.Context, installationID int64, repoID *int64, providerName string) bool
 }
 
-func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, reviewStage *ReviewStage, triageStage *TriageStage, intentStage *IntentExtractionStage, scoringStage *ScoringStage, memRegistry *memory.Registry, registry LLMRegistry, eventBus *EventBus, logger *slog.Logger) *Orchestrator {
+func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, reviewStage *ReviewStage, triageStage *TriageStage, intentStage *IntentExtractionStage, scoringStage *ScoringStage, memRegistry *memory.Registry, registry LLMRegistry, eventBus *EventBus, logger *slog.Logger, cfg *config.Config) *Orchestrator {
 	sm := NewStateMachine(db, st, logger)
 	sm.eventBus = eventBus
 
@@ -331,6 +333,7 @@ func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, 
 		registry:     registry,
 		eventBus:     eventBus,
 		logger:       logger,
+		cfg:          cfg,
 	}
 	o.lifecycle = NewReviewLifecycle(db, st, sm, eventBus, logger)
 	o.simEngine = NewSimulationEngine(o.reviewStage.registry, st, ghClient, logger)
@@ -486,7 +489,7 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 				o.logger.Error("checking prior no_api_key failure", "error", hwErr, "repo", event.RepoFullName)
 			}
 			if !alreadyWelcomed {
-				settingsURL := fmt.Sprintf("https://argus.reviews/settings?repo=%d", dbRepo.ID)
+				settingsURL := fmt.Sprintf("%s/settings?repo=%d", o.cfg.DashboardBaseURL, dbRepo.ID)
 				body := fmt.Sprintf("Welcome to **Argus**! To enable AI code reviews, configure your API key and model at your [Argus Settings](%s).", settingsURL)
 				if err := o.ghClient.CreateIssueComment(ctx, event.InstallationID, owner, repo, event.PRNumber, body); err != nil {
 					o.logger.Error("posting onboarding comment", "error", err, "repo", event.RepoFullName)
@@ -825,7 +828,7 @@ func classifyPipelineError(err error) string {
 // body degrades to checkbox-only.
 func (o *Orchestrator) postTriggerComment(ctx context.Context, event ghpkg.PREvent, owner, repo string, dbRepo *store.Repo) error {
 	est := BuildEstimate(ctx, o.st, o.ghClient, event.InstallationID, dbRepo.ID, owner, repo, event.PRNumber, 0, o.logger)
-	body := BuildTriggerComment(est)
+	body := BuildTriggerComment(est, o.cfg.GitHubAppSlug)
 	if err := o.ghClient.CreateIssueComment(ctx, event.InstallationID, owner, repo, event.PRNumber, body); err != nil {
 		return err
 	}
@@ -1171,8 +1174,8 @@ func (o *Orchestrator) postStartedComment(ctx context.Context, event ghpkg.PREve
 	rows = append(rows, fmt.Sprintf("| **Scope** | %d files, ~%d lines |",
 		len(run.Diff.Files), run.Diff.TotalLinesChanged()))
 
-	body := fmt.Sprintf("> **Argus** is reviewing this PR — [watch live](https://argus.reviews/reviews/%s)\n\n| | |\n|---|---|\n%s",
-		run.ReviewID, strings.Join(rows, "\n"))
+	body := fmt.Sprintf("> **Argus** is reviewing this PR — [watch live](%s/reviews/%s)\n\n| | |\n|---|---|\n%s",
+		o.cfg.DashboardBaseURL, run.ReviewID, strings.Join(rows, "\n"))
 
 	nodeID, err := o.ghClient.CreateIssueCommentWithNodeID(ctx, event.InstallationID, owner, repo, event.PRNumber, body)
 	if err != nil {
@@ -1436,7 +1439,7 @@ func (o *Orchestrator) autoResolveStaleComments(
 
 	var lineHit, fileHit int
 	for _, t := range threads {
-		if t.IsResolved || !ghpkg.IsArgusThread(t.AuthorLogin) {
+		if t.IsResolved || !ghpkg.IsArgusThread(t.AuthorLogin, o.cfg.GitHubAppSlug) {
 			continue
 		}
 		botUnresolved++
@@ -2380,7 +2383,7 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	// token breakdown, glass-box footer). All rendering lives in composer.go;
 	// post() only persists the result and ships it to GitHub. Duration is injected
 	// (Compose reads no clock) so its glass-box footer is deterministic under test.
-	submission := Compose(run, time.Since(run.CreatedAt))
+	submission := Compose(run, time.Since(run.CreatedAt), o.cfg.DashboardBaseURL, o.cfg.GitHubAppSlug)
 	counts := submission.Counts
 
 	// Rendering observability: one line replacing the three Info logs that lived
@@ -2839,7 +2842,7 @@ func (o *Orchestrator) enrichPRDescription(ctx context.Context, run *PipelineRun
 		section.WriteString("```mermaid\n" + d.Mermaid + "\n```\n")
 		section.WriteString("</details>\n\n")
 	}
-	section.WriteString("<sub>Auto-enriched by [Argus](https://argus.reviews)</sub>\n")
+	section.WriteString(fmt.Sprintf("<sub>Auto-enriched by [Argus](%s)</sub>\n", o.cfg.DashboardBaseURL))
 	section.WriteString(enrichmentEndMarker)
 
 	// Fetch current PR body (may have been edited since webhook)

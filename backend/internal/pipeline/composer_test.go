@@ -79,7 +79,7 @@ func TestComposeSeverityOrdering(t *testing.T) {
 	sub := Compose(composeRun(reviews, []diff.FileDiff{
 		mkDiffFile("a.go", 20, 30, 40),
 		mkDiffFile("b.go", 10, 50),
-	}), 0)
+	}), 0, "https://argus.reviews", "argus-eye")
 
 	got := inlineLines(sub)
 	want := []int{40, 20, 30, 10, 50}
@@ -109,7 +109,7 @@ func TestComposeCapAndOverflow(t *testing.T) {
 			fmt.Sprintf("alpha%d bravo%d charlie%d delta%d echo%d foxtrot%d", i, i, i, i, i, i))
 	}
 	sub := Compose(composeRun([]FileReview{{Path: "big.go", Comments: comments}},
-		[]diff.FileDiff{mkDiffFile("big.go", validLines...)}), 0)
+		[]diff.FileDiff{mkDiffFile("big.go", validLines...)}), 0, "https://argus.reviews", "argus-eye")
 
 	if n := len(sub.GitHub.Comments); n != 10 {
 		t.Fatalf("inline comment count = %d, want 10 (cap)", n)
@@ -138,7 +138,7 @@ func TestComposeDedupRemovedCount(t *testing.T) {
 		mkComment(1, SeverityWarning, 80, dup),
 		mkComment(2, SeverityWarning, 70, dup),
 	}}}
-	sub := Compose(composeRun(reviews, []diff.FileDiff{mkDiffFile("a.go", 1, 2)}), 0)
+	sub := Compose(composeRun(reviews, []diff.FileDiff{mkDiffFile("a.go", 1, 2)}), 0, "https://argus.reviews", "argus-eye")
 
 	if len(sub.GitHub.Comments) != 1 {
 		t.Fatalf("inline count = %d, want 1 (near-identical deduped)", len(sub.GitHub.Comments))
@@ -164,7 +164,7 @@ func TestComposeNitDemotionOnBlockingFile(t *testing.T) {
 		mkComment(7, SeverityPraise, 30, "praise demoted off hot file"),
 		mkComment(8, SeverityWarning, 60, "warning stays inline on hot file"),
 	}}}
-	sub := Compose(composeRun(reviews, []diff.FileDiff{mkDiffFile("hot.go", 5, 6, 7, 8)}), 0)
+	sub := Compose(composeRun(reviews, []diff.FileDiff{mkDiffFile("hot.go", 5, 6, 7, 8)}), 0, "https://argus.reviews", "argus-eye")
 
 	got := inlineLines(sub)
 	want := []int{5, 8} // critical then warning; suggestion + praise demoted
@@ -188,7 +188,7 @@ func TestComposeMinorNotesRendering(t *testing.T) {
 			Title:    fmt.Sprintf("minornote-%02d", i),
 		})
 	}
-	sub := Compose(run, 0)
+	sub := Compose(run, 0, "https://argus.reviews", "argus-eye")
 	s := sub.GitHub.Summary
 
 	if !strings.Contains(s, "<details><summary>Minor notes (20)</summary>") {
@@ -221,7 +221,7 @@ func TestComposeSuppressedCountLine(t *testing.T) {
 			return c
 		}(),
 	}}}
-	sub := Compose(composeRun(reviews, []diff.FileDiff{mkDiffFile("a.go", 1, 2, 3)}), 0)
+	sub := Compose(composeRun(reviews, []diff.FileDiff{mkDiffFile("a.go", 1, 2, 3)}), 0, "https://argus.reviews", "argus-eye")
 	s := sub.GitHub.Summary
 
 	if !strings.Contains(s, "2 findings suppressed by team feedback") {
@@ -250,7 +250,7 @@ func TestComposeScoringNoticeNotDuplicated(t *testing.T) {
 	run.ScoringSkipped = true
 	run.ScoringUnconfigured = true
 
-	sub := Compose(run, 0)
+	sub := Compose(run, 0, "https://argus.reviews", "argus-eye")
 	if n := strings.Count(sub.GitHub.Summary, "were not score-filtered"); n != 1 {
 		t.Errorf("scoring notice appears %d times, want exactly 1 (no re-append in Compose)", n)
 	}
@@ -259,7 +259,7 @@ func TestComposeScoringNoticeNotDuplicated(t *testing.T) {
 // TestComposeGlassBoxFooter locks the glass-box footer + dashboard link, present
 // on every posted review regardless of findings.
 func TestComposeGlassBoxFooter(t *testing.T) {
-	sub := Compose(composeRun(nil, nil), 0)
+	sub := Compose(composeRun(nil, nil), 0, "https://argus.reviews", "argus-eye")
 	s := sub.GitHub.Summary
 	for _, want := range []string{
 		"Contract: production/full", // nil-contract default
@@ -277,11 +277,11 @@ func TestComposeGlassBoxFooter(t *testing.T) {
 // reads no clock, so a FIXED took renders deterministically in the footer, and
 // took==0 omits the "review took" clause entirely.
 func TestComposeGlassBoxFooterDuration(t *testing.T) {
-	withDur := Compose(composeRun(nil, nil), 90*time.Second).GitHub.Summary
+	withDur := Compose(composeRun(nil, nil), 90*time.Second, "https://argus.reviews", "argus-eye").GitHub.Summary
 	if !strings.Contains(withDur, "review took 1m30s") {
 		t.Errorf("footer missing injected duration 'review took 1m30s':\n%s", withDur)
 	}
-	zeroDur := Compose(composeRun(nil, nil), 0).GitHub.Summary
+	zeroDur := Compose(composeRun(nil, nil), 0, "https://argus.reviews", "argus-eye").GitHub.Summary
 	if strings.Contains(zeroDur, "review took") {
 		t.Errorf("took==0 should omit the duration clause:\n%s", zeroDur)
 	}
@@ -290,7 +290,7 @@ func TestComposeGlassBoxFooterDuration(t *testing.T) {
 // TestComposeEmptyFindings locks the clean-PR shape: header + brief + footer,
 // no inline comments, no findings pill, no folded sections.
 func TestComposeEmptyFindings(t *testing.T) {
-	sub := Compose(composeRun(nil, nil), 0)
+	sub := Compose(composeRun(nil, nil), 0, "https://argus.reviews", "argus-eye")
 	s := sub.GitHub.Summary
 
 	if len(sub.GitHub.Comments) != 0 {

@@ -12,6 +12,16 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
+// effectiveTier maps a stored plan tier to the tier the dashboard should see.
+// Self-hosts have no billing, so every installation is surfaced as "pro" —
+// this keeps the API the single source of truth and needs zero web changes.
+func (s *Server) effectiveTier(tier string) string {
+	if s.cfg.SelfHosted {
+		return "pro"
+	}
+	return tier
+}
+
 func (s *Server) listMyInstallations(w http.ResponseWriter, r *http.Request) {
 	userID := getUserID(r.Context())
 	list, err := s.store.ListUserInstallations(r.Context(), userID)
@@ -19,6 +29,9 @@ func (s *Server) listMyInstallations(w http.ResponseWriter, r *http.Request) {
 		s.logger.Error("list user installations", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
+	}
+	for i := range list {
+		list[i].PlanTier = s.effectiveTier(list[i].PlanTier)
 	}
 	writeJSON(w, http.StatusOK, list)
 }
@@ -126,6 +139,7 @@ func (s *Server) getCurrentInstallation(w http.ResponseWriter, r *http.Request) 
 		s.handleDBError(w, err, "installation not found")
 		return
 	}
+	inst.PlanTier = s.effectiveTier(inst.PlanTier)
 	writeJSON(w, http.StatusOK, inst)
 }
 
@@ -195,7 +209,7 @@ func (s *Server) autoLinkInstallation(w http.ResponseWriter, r *http.Request) {
 // getInstallURL returns a GitHub App install URL with suggested_target_id pre-selecting the org.
 func (s *Server) getInstallURL(w http.ResponseWriter, r *http.Request) {
 	orgName := r.URL.Query().Get("org")
-	baseURL := "https://github.com/apps/argus-eye/installations/new"
+	baseURL := fmt.Sprintf("https://github.com/apps/%s/installations/new", s.cfg.GitHubAppSlug)
 
 	if orgName == "" {
 		writeJSON(w, http.StatusOK, map[string]string{"url": baseURL})

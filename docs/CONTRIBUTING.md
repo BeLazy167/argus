@@ -6,21 +6,52 @@
 2. Clone the repo and copy the env file:
    ```bash
    git clone https://github.com/BeLazy167/argus.git
-   cd argus
+   cd argus/backend
    cp .env.example .env
    ```
-3. Edit `.env` with your database URL and credentials
-4. Run migrations: `make migrate-up`
+3. Edit `backend/.env` with your database URL and credentials
+4. Run migrations: `go run ./cmd/migrate` (or `make migrate-up` with the golang-migrate CLI)
 5. Start the server: `make dev`
+
+### Tooling prerequisites
+
+Only needed for the code paths you touch:
+
+- [golang-migrate](https://github.com/golang-migrate/migrate) CLI — `make migrate-up` / `make migrate-down` (the `go run ./cmd/migrate` path needs nothing extra)
+- [sqlc](https://sqlc.dev) **v1.30.0** (version-pinned) — regenerating the store layer after editing SQL queries/migrations: `make sqlc`
+- [tygo](https://github.com/gzuidhof/tygo) — regenerating `web/src/lib/generated/*.ts` from Go wire structs: `make tygo` (pinned version fetched via `go run`)
+
+### Generated-code drift gates
+
+CI fails if generated output drifts from source. Run these locally after touching SQL queries or wire structs, and commit the regenerated files:
+
+```bash
+make sqlc-check    # internal/store/db must match the SQL
+make tygo-check    # web/src/lib/generated must match the Go structs
+```
 
 ## Running Tests
 
+All backend commands run from `backend/`:
+
 ```bash
-make test    # go test -race -count=1 ./...
+make test    # go test ./... -v -count=1 (no -race locally; CI runs with -race)
 make lint    # golangci-lint run
 ```
 
-All tests must pass with the race detector enabled before submitting a PR.
+All tests must pass before submitting a PR. CI runs the same suite with the race detector, so a locally-green PR can still fail on races.
+
+## Frontend
+
+```bash
+cd web
+pnpm install
+pnpm dev          # local dev server
+pnpm lint         # biome check src/
+pnpm typecheck    # tsc --noEmit
+```
+
+Run `pnpm lint` and `pnpm typecheck` before submitting PRs that touch `web/`.
 
 ## Code Style
 

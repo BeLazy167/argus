@@ -20,6 +20,10 @@ import (
 type Client struct {
 	app *App
 
+	// appSlug is the GitHub App slug this deployment runs as; the App's bot
+	// login is "<slug>[bot]". Used to recognize our own reviews/comments.
+	appSlug string
+
 	// restLimiter throttles REST API calls (Contents, PullRequests, Issues, etc.).
 	// GitHub's secondary rate limit triggers at ~100 requests in a short window.
 	// 20 req/s with burst 5 keeps us well under the threshold.
@@ -30,9 +34,10 @@ type Client struct {
 	searchLimiter *rate.Limiter
 }
 
-func NewClient(app *App) *Client {
+func NewClient(app *App, appSlug string) *Client {
 	return &Client{
 		app:           app,
+		appSlug:       appSlug,
 		restLimiter:   rate.NewLimiter(rate.Limit(20), 5),  // 20 req/s, burst 5
 		searchLimiter: rate.NewLimiter(rate.Every(2*time.Second), 2), // 1 req/2s, burst 2
 	}
@@ -306,7 +311,7 @@ func (c *Client) PostReview(ctx context.Context, installationID int64, owner, re
 
 		// GitHub 502s are phantom failures — the review may have been created
 		// despite the error response. Check before retrying to avoid duplicates.
-		existingID, checkErr := findBotReview(ctx, client, owner, repo, prNumber)
+		existingID, checkErr := findBotReview(ctx, client, owner, repo, prNumber, c.appSlug)
 		if checkErr == nil && existingID > 0 {
 			slog.Info("review was created despite 5xx, skipping retry",
 				"github_review_id", existingID)
@@ -374,10 +379,10 @@ func is422(err error) bool {
 	return false
 }
 
-// findBotReview checks if argus-eye[bot] already has a review on this PR
-// created in the last 5 minutes. Handles GitHub phantom 502s where the review
-// was created server-side but the response was lost.
-func findBotReview(ctx context.Context, client *gh.Client, owner, repo string, prNumber int) (int64, error) {
+// findBotReview checks if the App's bot login (<appSlug>[bot]) already has a
+// review on this PR created in the last 5 minutes. Handles GitHub phantom
+// 502s where the review was created server-side but the response was lost.
+func findBotReview(ctx context.Context, client *gh.Client, owner, repo string, prNumber int, appSlug string) (int64, error) {
 	reviews, _, err := client.PullRequests.ListReviews(ctx, owner, repo, prNumber, &gh.ListOptions{PerPage: 30})
 	if err != nil {
 		return 0, fmt.Errorf("listing reviews: %w", err)
@@ -385,8 +390,7 @@ func findBotReview(ctx context.Context, client *gh.Client, owner, repo string, p
 	cutoff := time.Now().Add(-5 * time.Minute)
 	for i := len(reviews) - 1; i >= 0; i-- {
 		r := reviews[i]
-		login := r.GetUser().GetLogin()
-		if (login == "argus-eye[bot]" || login == "argus-eye") && r.GetSubmittedAt().Time.After(cutoff) {
+		if IsArgusThread(r.GetUser().GetLogin(), appSlug) && r.GetSubmittedAt().Time.After(cutoff) {
 			return r.GetID(), nil
 		}
 	}

@@ -58,6 +58,7 @@ type cachedProvider struct {
 // Registry manages LLM providers via BYOK keys resolved from the database.
 type Registry struct {
 	resolver      KeyResolver
+	referer       string // HTTP-Referer sent to OpenRouter for attribution
 	cacheMu       sync.RWMutex
 	providerCache map[string]cachedProvider
 	cacheTTL      time.Duration
@@ -73,6 +74,11 @@ func NewRegistry() *Registry {
 // SetResolver configures the DB-backed key resolver for dynamic provider creation.
 func (r *Registry) SetResolver(resolver KeyResolver) {
 	r.resolver = resolver
+}
+
+// SetReferer configures the HTTP-Referer header sent on OpenRouter requests.
+func (r *Registry) SetReferer(referer string) {
+	r.referer = referer
 }
 
 // GetProviderForRepo resolves a provider from BYOK keys in the database.
@@ -103,6 +109,7 @@ func (r *Registry) GetProviderForRepo(ctx context.Context, installationID int64,
 		baseURL = defaultBaseURLForProvider(providerName)
 	}
 	p := newProviderForName(providerName, apiKey, baseURL)
+	p.referer = r.referer
 	r.cacheMu.Lock()
 	r.providerCache[cacheKey] = cachedProvider{provider: p, expiresAt: time.Now().Add(r.cacheTTL)}
 	r.cacheMu.Unlock()

@@ -2,9 +2,9 @@
 
 AI-powered code review that posts inline comments on GitHub pull requests.
 
+[![CI](https://github.com/BeLazy167/argus/actions/workflows/ci.yml/badge.svg)](https://github.com/BeLazy167/argus/actions/workflows/ci.yml)
 ![Go](https://img.shields.io/badge/Go-1.24-blue)
 ![License](https://img.shields.io/badge/License-AGPL--3.0-green)
-![Tests](https://img.shields.io/badge/Tests-12%20packages-brightgreen)
 
 ## What is Argus?
 
@@ -37,21 +37,44 @@ Argus reviews pull requests using a multi-pass AI pipeline with 4 specialist age
 
 ## Quick Start
 
+Self-hosting? Follow the full guide in [docs/self-hosting.md](docs/self-hosting.md) — GitHub App creation, webhook relay, Clerk setup, and `SELF_HOSTED=true`.
+
 ### Prerequisites
 
 - Go 1.24+
 - PostgreSQL (or [Neon](https://neon.tech) serverless)
-- A [GitHub App](https://docs.github.com/en/apps/creating-github-apps)
+- A [GitHub App](https://docs.github.com/en/apps/creating-github-apps) — see [docs/self-hosting.md](docs/self-hosting.md) for a step-by-step guide
+
+### External services
+
+| Service | Required? | Purpose |
+|---------|-----------|---------|
+| GitHub App | Required | Receives PR webhooks, posts reviews |
+| Clerk | Required for the dashboard | Web dashboard auth + backend JWT verification |
+| LLM provider (BYOK) | Required for reviews | OpenRouter or any OpenAI-compatible API, added via the dashboard |
+| Supermemory | Optional | RAG memory for patterns and rules |
+| PostHog | Optional | Analytics; disabled when unset |
 
 ### Setup
 
 ```bash
 git clone https://github.com/BeLazy167/argus.git
-cd argus
+cd argus/backend
 cp .env.example .env
-# Edit .env with your database URL, GitHub App credentials, and LLM API key
-make run
+# Edit .env with your database URL and GitHub App credentials.
+# NOTE: make targets read your shell environment, not .env — export the vars
+# (e.g. `set -a; source .env; set +a`) or use docker compose, which loads it.
+
+# Apply database migrations — no extra tooling needed, the migrator ships in the repo
+go run ./cmd/migrate
+
+# Start the server
+go run ./cmd/argus
 ```
+
+### Configure an LLM provider
+
+Argus is BYOK — LLM keys live encrypted in the database, not in env vars. Set `ENCRYPTION_KEY` first (see `backend/.env.example`; generate with `openssl rand -hex 32`), start the frontend, and add your key on the dashboard **Providers** page. OpenRouter and any OpenAI-compatible endpoint are supported.
 
 ### Frontend (optional)
 
@@ -86,28 +109,31 @@ See [docs/architecture.md](docs/architecture.md) for the full architecture docum
 
 ## Configuration
 
-Key environment variables (see `.env.example`):
+Key environment variables (see `backend/.env.example` for the full annotated list):
 
 | Variable | Description |
 |----------|-------------|
 | `DATABASE_URL` | PostgreSQL connection string |
 | `GITHUB_APP_ID` | GitHub App ID |
-| `GITHUB_PRIVATE_KEY` | GitHub App private key (PEM) |
+| `GITHUB_PRIVATE_KEY_PATH` | GitHub App private key path (or `GITHUB_PRIVATE_KEY` inline PEM) |
 | `GITHUB_WEBHOOK_SECRET` | Webhook signature secret |
-| `LLM_API_KEY` | OpenAI-compatible API key |
-| `LLM_BASE_URL` | LLM API base URL |
+| `ENCRYPTION_KEY` | AES key encrypting BYOK provider keys at rest |
 | `CLERK_JWKS_URL` | Clerk auth JWKS endpoint |
-| `SUPERMEMORY_API_KEY` | Supermemory API key (pattern learning) |
-| `ENCRYPTION_KEY` | AES key for encrypting stored API keys |
+| `SUPERMEMORY_API_KEY` | Supermemory API key (pattern learning, optional) |
+| `DASHBOARD_BASE_URL` | Dashboard URL linked from GitHub comments |
+| `GITHUB_APP_SLUG` | Your GitHub App slug (install URLs) |
+| `SELF_HOSTED` | `true` disables plan gating |
 
 ## Development
 
+All backend commands run from `backend/`:
+
 ```bash
-make dev          # Run with hot reload
-make test         # Run all tests with race detector
+make dev          # Run the server
+make test         # Run all tests (CI runs the same suite with -race)
 make lint         # Run golangci-lint
 make build        # Build binary
-make migrate-up   # Run database migrations
+make migrate-up   # Run database migrations (requires golang-migrate CLI)
 ```
 
 ## Deployment
@@ -115,6 +141,7 @@ make migrate-up   # Run database migrations
 ### Backend (Fly.io)
 
 ```bash
+cd backend
 fly deploy
 ```
 
@@ -128,27 +155,30 @@ vercel --prod
 ## Project Structure
 
 ```
-cmd/argus/          # Entry point
-internal/
-  api/              # HTTP handlers, routes, middleware
-  app/              # Application bootstrap
-  config/           # Configuration loading
-  crypto/           # AES encryption for stored keys
-  github/           # GitHub API client
-  graph/            # Code graph (AST parser, ctags, regex, indexer)
-  llm/              # LLM provider abstraction
-  memory/           # Supermemory integration (patterns, rules)
-  pipeline/         # Review pipeline (orchestrator, stages, dedup, scoring)
-  sast/             # SAST runners (staticcheck, eslint, semgrep)
-  store/            # Database layer (pgx, sqlc)
-  util/             # String utilities
-pkg/diff/           # Diff parser
+backend/
+  cmd/argus/        # Entry point
+  cmd/migrate/      # Standalone DB migrator
+  internal/
+    api/            # HTTP handlers, routes, middleware
+    app/            # Application bootstrap
+    config/         # Configuration loading
+    crypto/         # AES encryption for stored keys
+    github/         # GitHub API client
+    graph/          # Code graph (AST parser, ctags, regex, indexer)
+    llm/            # LLM provider abstraction
+    memory/         # Supermemory integration (patterns, rules)
+    pipeline/       # Review pipeline (orchestrator, stages, dedup, scoring)
+    sast/           # SAST runners (staticcheck, eslint, semgrep)
+    store/          # Database layer (pgx, sqlc)
+    util/           # String utilities
+  pkg/diff/         # Diff parser
 web/                # Next.js frontend
+docs/               # Architecture, self-hosting, contributing
 ```
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, code style, and PR process.
+See [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) for development setup, code style, and PR process.
 
 ## License
 

@@ -27,19 +27,19 @@ graph-indexing load, which orphans in-flight reviews. This module provides:
 
 ```bash
 # Attach to the running Fly machine.
-fly ssh console -a argus-ai
+fly ssh console -a <your-app>
 
 # Inside the machine:
 ls /tmp/argus-heap-*.pprof.gz
 # Copy one out — use sftp from your laptop:
-fly sftp get -a argus-ai /tmp/argus-heap-YYYYMMDDTHHMMSS.pprof.gz
+fly sftp get -a <your-app> /tmp/argus-heap-YYYYMMDDTHHMMSS.pprof.gz
 ```
 
 If the machine has already restarted, `/tmp` is gone. Grep the log stream for
 `[memprof] heap_b64` (requires `MEMPROF_LOG_BASE64=1`) and reassemble:
 
 ```bash
-fly logs -a argus-ai | grep heap_b64 | jq -r .data | base64 -d > heap.pprof.gz
+fly logs -a <your-app> | grep heap_b64 | jq -r .data | base64 -d > heap.pprof.gz
 ```
 
 ## Analyzing a dump
@@ -62,15 +62,15 @@ Requires `ADMIN_DEBUG_TOKEN` to be set on the running machine:
 
 ```bash
 curl -H "X-Admin-Token: $ADMIN_DEBUG_TOKEN" \
-  https://argus-ai.fly.dev/debug/pprof/heap > heap.pprof
+  https://<your-app>.fly.dev/debug/pprof/heap > heap.pprof
 
 # 30-second CPU profile
 curl -H "X-Admin-Token: $ADMIN_DEBUG_TOKEN" \
-  'https://argus-ai.fly.dev/debug/pprof/profile?seconds=30' > cpu.pprof
+  'https://<your-app>.fly.dev/debug/pprof/profile?seconds=30' > cpu.pprof
 
 # Goroutines
 curl -H "X-Admin-Token: $ADMIN_DEBUG_TOKEN" \
-  'https://argus-ai.fly.dev/debug/pprof/goroutine?debug=2'
+  'https://<your-app>.fly.dev/debug/pprof/goroutine?debug=2'
 ```
 
 Available endpoints: `/debug/pprof/` (index), `heap`, `goroutine`, `allocs`,
@@ -78,7 +78,7 @@ Available endpoints: `/debug/pprof/` (index), `heap`, `goroutine`, `allocs`,
 
 ## What to look for after an OOM
 
-1. `fly logs -a argus-ai | grep memprof` — trace RSS trajectory. Look for
+1. `fly logs -a <your-app> | grep memprof` — trace RSS trajectory. Look for
    `[memprof] heap snapshot written` lines with path + size.
 2. If `MEMPROF_LOG_BASE64=1` was on, grep `heap_b64` chunks.
 3. Correlate sample timestamps with the last triage/review/specialist stage

@@ -27,3 +27,12 @@ dogfood-output/
 .soulforge/
 .forge/
 .serena/
+
+# Agent workspaces (keep the tracked merge-gate workflow)
+.claude/*
+!.claude/workflows/
+web/.claude/
+
+# Design / report scratch
+*.pen
+web/posthog-setup-report.md

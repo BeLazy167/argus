@@ -12,8 +12,8 @@ import (
 //
 // omitempty on GithubLogin lets the FE distinguish "user has no linked GitHub
 // account" (field absent or null) from "user is logged in via GitHub" (field
-// populated). For now the backend always returns null until Agent X wires the
-// Clerk SDK lookup; the FE treats that as the fallback path.
+// populated). For now the backend always returns null until a server-side
+// Clerk SDK lookup is wired; the FE treats that as the fallback path.
 type meResponse struct {
 	ClerkUserID string  `json:"clerk_user_id"`
 	Email       string  `json:"email,omitempty"`
@@ -35,8 +35,8 @@ type meResponse struct {
 // signup users (who lack externalAccounts) still get a stable identity merge
 // once the Clerk SDK lookup is wired.
 //
-// TODO: integrate github.com/clerkinc/clerk-sdk-go and call
-// client.Users().Read(userID).ExternalAccounts to populate github_login +
+// TODO: integrate github.com/clerk/clerk-sdk-go/v2 and call
+// user.Get(ctx, userID).ExternalAccounts to populate github_login +
 // email without a round-trip to the FE.
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	userID := getUserID(r.Context())

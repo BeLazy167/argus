@@ -118,7 +118,7 @@ func (s *Server) allowReview(ctx context.Context, repoFullName, orgLogin string,
 	inst, err := s.store.GetInstallationByGitHubID(ctx, ghInstallationID)
 	if err != nil {
 		s.logger.Warn("rate limit: plan lookup failed, applying free-tier caps", "error", err, "ghInstallationID", ghInstallationID)
-	} else if inst.PlanTier == "pro" {
+	} else if s.cfg.IsPro(inst.PlanTier) {
 		return true
 	}
 	return s.rateLimiter.AllowReview(repoFullName, orgLogin, force)

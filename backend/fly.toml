@@ -1,3 +1,4 @@
+# Self-hosts: change `app` to your own Fly app name before `fly deploy`.
 app = 'argus-ai'
 primary_region = 'iad'
 

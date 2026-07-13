@@ -6,11 +6,13 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5"
+	"github.com/BeLazy167/argus/backend/internal/config"
 	"github.com/BeLazy167/argus/backend/internal/crypto"
 	ghpkg "github.com/BeLazy167/argus/backend/internal/github"
 	"github.com/BeLazy167/argus/backend/internal/inflight"
@@ -37,9 +39,11 @@ type Server struct {
 	webhookSem       chan struct{}      // bounded concurrency for webhook goroutines
 	audit            *auditLogger
 	memRegistry      *memory.Registry
+	cfg              *config.Config
+	commandRe        *regexp.Regexp // "@<app-slug> <command>" matcher, built from cfg.GitHubAppSlug
 }
 
-func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchestrator, replyAnalyzer *pipeline.ReplyAnalyzer, reactionAnalyzer *pipeline.ReactionAnalyzer, registry *llm.Registry, eventBus *pipeline.EventBus, webhookSecret string, corsOrigin string, logger *slog.Logger, memRegistry *memory.Registry) *Server {
+func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchestrator, replyAnalyzer *pipeline.ReplyAnalyzer, reactionAnalyzer *pipeline.ReactionAnalyzer, registry *llm.Registry, eventBus *pipeline.EventBus, cfg *config.Config, logger *slog.Logger, memRegistry *memory.Registry) *Server {
 	s := &Server{
 		store:            st,
 		ghApp:            ghApp,
@@ -48,12 +52,14 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 		reactionAnalyzer: reactionAnalyzer,
 		registry:         registry,
 		eventBus:         eventBus,
-		webhookSecret:    []byte(webhookSecret),
+		webhookSecret:    []byte(cfg.GitHubWebhookSecret),
 		logger:           logger,
 		rateLimiter:      NewRateLimiter(),
 		webhookSem:       make(chan struct{}, 50),
 		audit:            newAuditLogger(logger),
 		memRegistry:      memRegistry,
+		cfg:              cfg,
+		commandRe:        commandRe(cfg.GitHubAppSlug),
 	}
 	// The registry is shared: the launcher registers slots + cancels on it; the
 	// cancel handler (cancelReview) consults the same instance via registry.Cancel.
@@ -69,8 +75,8 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
-	if corsOrigin != "" {
-		r.Use(cors(corsOrigin))
+	if cfg.CORSAllowOrigin != "" {
+		r.Use(cors(cfg.CORSAllowOrigin))
 	}
 
 	// Health
