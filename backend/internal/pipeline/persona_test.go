@@ -24,10 +24,10 @@ func TestIsAutoRunEnabled(t *testing.T) {
 		want bool
 	}{
 		{
-			name: "both nil => off (default)",
+			name: "both nil => on (default #161)",
 			repo: nil,
 			org:  nil,
-			want: false,
+			want: true,
 		},
 		{
 			name: "repo unset, org off => off",
@@ -72,10 +72,10 @@ func TestIsAutoRunEnabled(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "corrupt both => default off",
+			name: "corrupt both => default on",
 			repo: json.RawMessage(`{{{`),
 			org:  json.RawMessage(`}}}`),
-			want: false,
+			want: true,
 		},
 	}
 	for _, tc := range cases {
@@ -83,6 +83,65 @@ func TestIsAutoRunEnabled(t *testing.T) {
 			t.Parallel()
 			if got := IsAutoRunEnabled(tc.repo, tc.org); got != tc.want {
 				t.Fatalf("IsAutoRunEnabled = %v, want %v (repo=%s, org=%s)", got, tc.want, string(tc.repo), string(tc.org))
+			}
+		})
+	}
+}
+
+func TestDecideAutoRun(t *testing.T) {
+	t.Parallel()
+	boolPtr := func(b bool) *bool { return &b }
+	mustMarshal := func(s repoSettings) json.RawMessage {
+		b, err := json.Marshal(s)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		return b
+	}
+	off := mustMarshal(repoSettings{AutoRun: boolPtr(false)})
+	on := mustMarshal(repoSettings{AutoRun: boolPtr(true)})
+
+	cases := []struct {
+		name       string
+		selfHosted bool
+		repo       json.RawMessage
+		org        json.RawMessage
+		orgFailed  bool
+		action     string
+		want       autoRunAction
+	}{
+		// Auto-run on -> review runs.
+		{name: "default on, synchronize => review", action: "synchronize", want: autoRunReview},
+		{name: "repo on, synchronize => review", repo: on, action: "synchronize", want: autoRunReview},
+
+		// Self-hosted -> runs regardless of settings (even explicit repo false).
+		{name: "self-hosted overrides repo off, synchronize => review", selfHosted: true, repo: off, action: "synchronize", want: autoRunReview},
+		{name: "self-hosted overrides repo off, opened => review", selfHosted: true, repo: off, action: "opened", want: autoRunReview},
+		{name: "self-hosted ignores org-load failure", selfHosted: true, orgFailed: true, action: "synchronize", want: autoRunReview},
+
+		// Explicitly disabled -> no review; every honored action emits the signal.
+		{name: "repo off, synchronize => signal", repo: off, action: "synchronize", want: autoRunSignal},
+		{name: "repo off, reopened => signal", repo: off, action: "reopened", want: autoRunSignal},
+		{name: "repo off, opened => signal", repo: off, action: "opened", want: autoRunSignal},
+		{name: "org off (repo unset), synchronize => signal", org: off, action: "synchronize", want: autoRunSignal},
+
+		// Fail CLOSED on org-load error when the repo has no explicit auto_run:
+		// can't prove the org didn't opt out, so don't apply the on-by-default.
+		{name: "repo unset + org load failed => signal (fail closed)", orgFailed: true, action: "synchronize", want: autoRunSignal},
+		{name: "repo unset + org load failed, opened => signal", orgFailed: true, action: "opened", want: autoRunSignal},
+		// Repo-explicit value still wins over a failed org load.
+		{name: "repo on + org load failed => review", repo: on, orgFailed: true, action: "synchronize", want: autoRunReview},
+		{name: "repo off + org load failed => signal", repo: off, orgFailed: true, action: "synchronize", want: autoRunSignal},
+
+		// Manual always reviews, even when disabled or org load failed.
+		{name: "repo off, manual => review", repo: off, action: "manual", want: autoRunReview},
+		{name: "org load failed, manual => review", orgFailed: true, action: "manual", want: autoRunReview},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := decideAutoRun(tc.selfHosted, tc.repo, tc.org, tc.orgFailed, tc.action); got != tc.want {
+				t.Fatalf("decideAutoRun = %v, want %v", got, tc.want)
 			}
 		})
 	}

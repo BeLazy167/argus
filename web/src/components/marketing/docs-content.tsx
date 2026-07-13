@@ -1745,17 +1745,17 @@ export function DocsContent() {
               Argus supports two trigger modes. Pick per-org, override per-repo.
             </p>
             <p className="text-xs font-mono text-slate-text mb-6 leading-relaxed">
-              <span className="text-foreground">Auto-review off (default).</span>{" "}
-              When a PR opens, Argus posts a{" "}
-              <span className="text-amber">Trigger Argus review</span>{" "}
-              checkbox comment with an estimated token + cost preview. Reviewers
-              tick the box to run a review on demand. Pushes to an open PR do
-              not post additional comments.
-              <br />
-              <br />
-              <span className="text-foreground">Auto-review on.</span>{" "}
+              <span className="text-foreground">Auto-review on (default).</span>{" "}
               Every PR opened, pushed, or reopened is reviewed automatically —
-              no checkbox, no preview.
+              no checkbox, no preview. A push to an open PR re-reviews the new
+              commits.
+              <br />
+              <br />
+              <span className="text-foreground">Auto-review off.</span>{" "}
+              When a PR opens — or is pushed while off — Argus posts a{" "}
+              <span className="text-amber">Trigger Argus review</span>{" "}
+              checkbox comment (once per PR) with an estimated token + cost
+              preview. Reviewers tick the box to run a review on demand.
             </p>
 
             <div className="grid gap-3 md:grid-cols-2">
@@ -1769,7 +1769,7 @@ export function DocsContent() {
                 <p className="text-[11px] font-mono text-slate-text leading-relaxed">
                   Repo override beats org default. If the repo setting is
                   unset, the org default applies. If both are unset, auto-run
-                  is off.
+                  is on.
                 </p>
               </div>
 

@@ -425,6 +425,16 @@ func (s *Store) UpdateReviewStatusIf(ctx context.Context, id uuid.UUID, status, 
 	return tag.RowsAffected() > 0, nil
 }
 
+// markerReviewFilter is the SQL predicate (bare, unambiguous columns) matching
+// synthetic "marker" review rows — idempotency-key inserts that were never real
+// review attempts. signalAutoRunDisabled writes auto_run_disabled (push-signal
+// dedup) and the readiness gate writes no_api_key (onboarding dedup); both carry
+// status='failed' with github_review_id IS NULL. The rows stay in the table so
+// HasFailedReviewWithError dedup keeps working, but dashboard list/stats reads
+// exclude them via `NOT (`+markerReviewFilter+`)` so they don't render as failed
+// reviews or inflate TotalReviews.
+const markerReviewFilter = `github_review_id IS NULL AND status = 'failed' AND error IN ('auto_run_disabled', 'no_api_key')`
+
 // List queries drop the heavy fields (token_usage, diagram*, diagrams,
 // truncated_files, brief) to keep response size manageable. 1 row of those
 // columns averages ~5 KB of JSONB; at limit=200 the list payload was 1.22 MB
@@ -446,6 +456,7 @@ func (s *Store) ListReviewsScoped(ctx context.Context, repoID int64, installatio
 		FROM reviews rv
 		JOIN repos r ON rv.repo_id = r.id
 		WHERE rv.repo_id = $1 AND r.installation_id = ANY($2)
+		  AND NOT (`+markerReviewFilter+`)
 		ORDER BY rv.created_at DESC LIMIT $3 OFFSET $4
 	`, repoID, installationIDs, limit, offset)
 	if err != nil {
@@ -469,6 +480,7 @@ func (s *Store) ListAllReviewsScoped(ctx context.Context, installationIDs []int6
 		FROM reviews rv
 		JOIN repos r ON rv.repo_id = r.id
 		WHERE r.installation_id = ANY($1)
+		  AND NOT (`+markerReviewFilter+`)
 		ORDER BY rv.created_at DESC LIMIT $2 OFFSET $3
 	`, installationIDs, limit, offset)
 	if err != nil {
@@ -824,7 +836,7 @@ func (s *Store) GetStats(ctx context.Context) (*Stats, error) {
 	var st Stats
 	err := s.Pool.QueryRow(ctx, `
 		SELECT
-			(SELECT COUNT(*) FROM reviews)::int,
+			(SELECT COUNT(*) FROM reviews WHERE NOT (`+markerReviewFilter+`))::int,
 			(SELECT COUNT(*) FROM reviews WHERE created_at >= CURRENT_DATE AND status = 'completed')::int,
 			COALESCE((SELECT AVG(score)::int FROM reviews WHERE score IS NOT NULL), 0),
 			(SELECT COUNT(*) FROM repos WHERE enabled = true)::int,
@@ -847,7 +859,7 @@ func (s *Store) GetStatsScoped(ctx context.Context, installationIDs []int64) (*S
 			SELECT * FROM reviews WHERE repo_id IN (SELECT id FROM repos WHERE installation_id = ANY($1))
 		)
 		SELECT
-			(SELECT COUNT(*) FROM scoped_reviews)::int,
+			(SELECT COUNT(*) FROM scoped_reviews WHERE NOT (`+markerReviewFilter+`))::int,
 			(SELECT COUNT(*) FROM scoped_reviews WHERE created_at >= CURRENT_DATE AND status = 'completed')::int,
 			COALESCE((SELECT AVG(score)::int FROM scoped_reviews WHERE score IS NOT NULL), 0),
 			(SELECT COUNT(*) FROM repos WHERE installation_id = ANY($1) AND enabled = true)::int,
