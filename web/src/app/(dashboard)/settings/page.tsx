@@ -770,8 +770,8 @@ const AUTO_RUN_TOGGLE = {
   key: "auto_run",
   label: "Auto-review every PR",
   hint: "Run a review automatically on PR open and on every new commit",
-  description: "When off, Argus posts a task-list checkbox on opened PRs with an estimated token / cost preview. Ticking the box runs the review on demand.",
-  defaultValue: false,
+  description: "On by default. When off, Argus posts a task-list checkbox on opened PRs (and on new pushes) with an estimated token / cost preview. Ticking the box runs the review on demand.",
+  defaultValue: true,
 } as const;
 
 /* AUTO_RESOLVE_TOGGLE: separate from AUTO_RUN because it's diff-only and

@@ -509,16 +509,16 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 	}
 
 	// Auto-run gate: webhook-driven events (opened/synchronize/reopened) honor
-	// the repo/org auto_run flag. Manual actions — the @argus-eye review text
-	// command and checkbox-triggered runs — set event.Action="manual" and bypass
-	// this gate because they represent explicit user intent.
+	// the repo/org auto_run flag (default ON, #161). Manual actions — the
+	// @argus-eye review text command and checkbox-triggered runs — set
+	// event.Action="manual" and bypass the gate as explicit user intent.
+	// Self-hosted deployments always auto-run regardless of stored settings.
 	//
-	// When auto-run is disabled:
-	//   - action=opened  -> post the one-shot "Trigger Argus review" checkbox
-	//     comment so users can kick off a review on demand (with cost preview).
-	//   - action=synchronize/reopened -> silent skip. The opened-event already
-	//     posted a trigger comment for this PR's lifetime; we don't re-post on
-	//     every new commit (noise) and we don't auto-run.
+	// When auto-run is disabled, every honored action (opened/synchronize/
+	// reopened) emits the one-shot "Trigger Argus review" checkbox comment via
+	// signalAutoRunDisabled — so a push is a visible signal, not a silent
+	// no-op. Deduped to ONCE per PR (opened records the marker, later pushes
+	// dedup against it), so repeated pushes don't spam.
 	//
 	// AUTO-RESOLVE exception: we fire auto-resolve BEFORE this gate on
 	// every synchronize, because it's diff-only (no LLM, no BYOK cost) and
@@ -529,8 +529,6 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 	// org config, we skip auto-resolve this round. Otherwise a transient
 	// DB blip would ignore an explicit `auto_resolve_enabled=false` org
 	// setting (the default=true would win), violating admin intent.
-	// IsAutoRunEnabled's default=false makes failing-open acceptable
-	// there; our default=true inverts that calculus.
 	orgDefaults, orgErr := o.st.GetOrgDefaults(ctx, inst.ID)
 	if orgErr != nil {
 		o.logger.Warn("loading org defaults", "error", orgErr, "installation", inst.ID)
@@ -539,21 +537,17 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		go o.autoResolveOnSynchronize(ctx, event, inst.ID, dbRepo.ID)
 	}
 
-	if event.Action != "manual" {
-		// Log DB errors explicitly: on a transient failure above, orgDefaults
-		// is empty and IsAutoRunEnabled falls through to the repo setting
-		// (then default=false). An org configured with auto_run=true would
-		// silently have reviews skipped with no trace otherwise.
-		if !IsAutoRunEnabled(dbRepo.SettingsJSON, orgDefaults) {
-			if event.Action == "opened" {
-				if err := o.postTriggerComment(ctx, event, owner, repo, dbRepo); err != nil {
-					o.logger.Error("posting trigger comment", "error", err, "repo", event.RepoFullName, "pr", event.PRNumber)
-				}
-			} else {
-				o.logger.Info("auto-run disabled; skipping event", "repo", event.RepoFullName, "pr", event.PRNumber, "action", event.Action)
-			}
-			return nil
-		}
+	// Pass the org-load state into the gate: on a transient GetOrgDefaults
+	// failure a repo with no explicit auto_run must NOT apply the on-by-default
+	// (we can't prove the org didn't opt out), so decideAutoRun fails CLOSED —
+	// mirroring the auto-resolve gate above. A repo-explicit value still wins,
+	// and self-hosted still short-circuits ON.
+	switch decideAutoRun(o.cfg.SelfHosted, dbRepo.SettingsJSON, orgDefaults, orgErr != nil, event.Action) {
+	case autoRunSignal:
+		o.signalAutoRunDisabled(ctx, event, owner, repo, dbRepo)
+		return nil
+	case autoRunReview:
+		// fall through to run the review pipeline
 	}
 
 	// On synchronize (new push), GitHub computes the diff asynchronously.
@@ -834,6 +828,44 @@ func (o *Orchestrator) postTriggerComment(ctx context.Context, event ghpkg.PREve
 	}
 	o.logger.Info("trigger comment posted", "repo", event.RepoFullName, "pr", event.PRNumber, "files", est.Files, "diff_lines", est.DiffLines, "sample_size", est.SampleSize)
 	return nil
+}
+
+// autoRunDisabledMarker is the reviews.error code recorded once per PR the
+// first time the trigger affordance is posted for an auto-run-disabled repo.
+// It is the dedup key (mirroring the no_api_key onboarding marker) that keeps
+// later events from re-posting the trigger comment. Marker rows are excluded
+// from dashboard list/stats reads — see isMarkerReview in the store.
+const autoRunDisabledMarker = "auto_run_disabled"
+
+// signalAutoRunDisabled emits the on-demand "Trigger review" affordance when
+// auto-run is off (#161), so a honored event (opened/synchronize/reopened) is a
+// visible signal rather than a silent no-op. It is idempotent: the comment is
+// posted at most once per PR, deduped on a recorded marker review row, so
+// opened + later pushes yield a single comment. Everything here is best-effort
+// — a GitHub or DB failure logs and returns without failing the webhook.
+func (o *Orchestrator) signalAutoRunDisabled(ctx context.Context, event ghpkg.PREvent, owner, repo string, dbRepo *store.Repo) {
+	already, err := o.st.HasFailedReviewWithError(ctx, dbRepo.ID, event.PRNumber, autoRunDisabledMarker)
+	if err != nil {
+		o.logger.Error("checking prior auto-run-disabled signal", "error", err, "repo", event.RepoFullName, "pr", event.PRNumber)
+	}
+	if already {
+		o.logger.Info("auto-run disabled; trigger affordance already posted, skipping", "repo", event.RepoFullName, "pr", event.PRNumber, "action", event.Action)
+		return
+	}
+	if err := o.postTriggerComment(ctx, event, owner, repo, dbRepo); err != nil {
+		o.logger.Error("posting auto-run-disabled trigger affordance", "error", err, "repo", event.RepoFullName, "pr", event.PRNumber)
+		return
+	}
+	// Record the marker only after the comment posts so a failed post retries
+	// on the next event instead of being permanently suppressed.
+	reviewID := uuid.New()
+	if _, err := o.db.Exec(ctx, `
+		INSERT INTO reviews (id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, head_ref, status, trigger, error, trace_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'failed', 'webhook', $9, NULL)
+	`, reviewID, dbRepo.ID, event.PRNumber, event.PRTitle, event.PRAuthor, event.HeadSHA, event.BaseSHA, event.HeadRef, autoRunDisabledMarker); err != nil {
+		o.logger.Error("recording auto-run-disabled signal", "error", err, "repo", event.RepoFullName)
+	}
+	o.logger.Info("auto-run disabled; posted trigger affordance", "repo", event.RepoFullName, "pr", event.PRNumber, "action", event.Action)
 }
 
 func (o *Orchestrator) handlePRClosed(ctx context.Context, event ghpkg.PREvent) error {

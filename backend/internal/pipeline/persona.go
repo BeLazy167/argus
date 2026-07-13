@@ -293,22 +293,63 @@ func parseThresholds(settingsJSON json.RawMessage) memory.Thresholds {
 	return t
 }
 
-// IsAutoRunEnabled resolves the auto_run flag for a repo.
+// autoRunEnabled resolves the stored auto_run flag with load-failure awareness.
 //
-// Precedence: repo overrides org; nil at both levels defaults to OFF.
-// Returns true only when the nearest explicitly set value is true.
-//
-// When the flag is OFF, PR webhook events (opened/synchronize/reopened) are
-// NOT auto-dispatched to the review pipeline; instead the webhook layer posts
-// a task-list "Trigger review" comment for on-demand execution.
-func IsAutoRunEnabled(repoSettingsJSON, orgDefaultsJSON json.RawMessage) bool {
+// Precedence: a repo-explicit value wins. When the repo is unset the org
+// default decides — but only when we actually loaded it. orgLoadFailed=true
+// means GetOrgDefaults errored, so we cannot prove the org didn't set
+// auto_run=false; we fail CLOSED (return false) instead of applying the
+// on-by-default, mirroring the adjacent auto-resolve gate. When both levels are
+// genuinely unset and the loads succeeded, the default is ON (#161).
+func autoRunEnabled(repoSettingsJSON, orgDefaultsJSON json.RawMessage, orgLoadFailed bool) bool {
 	if rs, ok := parseRepoSettings(repoSettingsJSON); ok && rs.AutoRun != nil {
 		return *rs.AutoRun
+	}
+	if orgLoadFailed {
+		return false
 	}
 	if os, ok := parseRepoSettings(orgDefaultsJSON); ok && os.AutoRun != nil {
 		return *os.AutoRun
 	}
-	return false
+	return true
+}
+
+// IsAutoRunEnabled resolves the stored auto_run flag assuming both settings
+// blobs loaded cleanly. Deployment policy (self-hosted runs unconditionally)
+// and load-failure handling are layered on top in decideAutoRun.
+func IsAutoRunEnabled(repoSettingsJSON, orgDefaultsJSON json.RawMessage) bool {
+	return autoRunEnabled(repoSettingsJSON, orgDefaultsJSON, false)
+}
+
+// autoRunAction is the gate outcome for a webhook-driven PR event.
+type autoRunAction int
+
+const (
+	// autoRunReview dispatches the review pipeline.
+	autoRunReview autoRunAction = iota
+	// autoRunSignal surfaces the on-demand "Trigger review" affordance because
+	// auto-run is off, so the event is a visible signal rather than a silent
+	// no-op. Posted idempotently — once per PR across opened + pushes (see
+	// signalAutoRunDisabled).
+	autoRunSignal
+)
+
+// decideAutoRun maps deployment config, stored repo/org settings, the
+// org-defaults load state, and the webhook action to the auto-run gate outcome.
+// Pure and side-effect free so the branch logic is unit-testable without a DB
+// or GitHub client.
+//
+// Rules:
+//   - manual (slash command / checkbox) always reviews — explicit user intent.
+//   - self-hosted always reviews, UNCONDITIONALLY: there is no billing to gate,
+//     so a self-host reviews on push regardless of stored settings.
+//   - otherwise the stored flag decides (default ON; fail CLOSED when the org
+//     load errored). When off, emit the trigger affordance.
+func decideAutoRun(selfHosted bool, repoSettingsJSON, orgDefaultsJSON json.RawMessage, orgLoadFailed bool, action string) autoRunAction {
+	if action == "manual" || selfHosted || autoRunEnabled(repoSettingsJSON, orgDefaultsJSON, orgLoadFailed) {
+		return autoRunReview
+	}
+	return autoRunSignal
 }
 
 // IsAutoResolveEnabled resolves the auto_resolve_enabled flag for a repo.
