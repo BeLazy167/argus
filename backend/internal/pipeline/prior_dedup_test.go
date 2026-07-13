@@ -1,8 +1,71 @@
 package pipeline
 
 import (
+	"context"
+	"io"
+	"log/slog"
 	"testing"
 )
+
+// discardOrchestrator builds a minimal Orchestrator whose only wired dependency
+// is a no-op logger — enough to exercise dedupStage's pure control flow without
+// the full pipeline harness.
+func discardOrchestrator() *Orchestrator {
+	return &Orchestrator{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+}
+
+// TestDedupStage_NonDeepIncrementalDropsPriorDuplicate proves the ungate: a
+// free-tier (DeepReview=false) incremental re-review still structurally drops a
+// finding that duplicates a prior comment. Before the ungate, dedupStage
+// early-returned for non-deep runs and re-posted the reworded duplicate.
+func TestDedupStage_NonDeepIncrementalDropsPriorDuplicate(t *testing.T) {
+	o := discardOrchestrator()
+	run := &PipelineRun{
+		DeepReview:    false, // free tier — the ungated path
+		IsIncremental: true,
+		PriorComments: map[string][]PriorComment{
+			"a.go": {{Line: 10, Category: "bug"}},
+		},
+		FileReviews: []FileReview{
+			{Path: "a.go", Comments: []FileComment{
+				{Line: 12, Category: "bug"},  // reworded prior duplicate (within ±10) → dropped
+				{Line: 200, Category: "bug"}, // novel finding → kept
+			}},
+		},
+	}
+
+	if err := o.dedupStage(context.Background(), run); err != nil {
+		t.Fatalf("dedupStage: %v", err)
+	}
+
+	got := run.FileReviews[0].Comments
+	if len(got) != 1 {
+		t.Fatalf("non-deep incremental: expected 1 surviving comment after prior-dup drop, got %d: %+v", len(got), got)
+	}
+	if got[0].Line != 200 {
+		t.Fatalf("wrong comment survived: line %d, want 200", got[0].Line)
+	}
+}
+
+// TestDedupStage_NonDeepNonIncrementalIsNoop guards the ungate's scope: a
+// non-deep, NON-incremental run (e.g. a first review) must not touch findings —
+// there are no priors to dedup against.
+func TestDedupStage_NonDeepNonIncrementalIsNoop(t *testing.T) {
+	o := discardOrchestrator()
+	run := &PipelineRun{
+		DeepReview:    false,
+		IsIncremental: false,
+		FileReviews: []FileReview{
+			{Path: "a.go", Comments: []FileComment{{Line: 10, Category: "bug"}}},
+		},
+	}
+	if err := o.dedupStage(context.Background(), run); err != nil {
+		t.Fatalf("dedupStage: %v", err)
+	}
+	if n := len(run.FileReviews[0].Comments); n != 1 {
+		t.Fatalf("first review must not drop findings: got %d comments, want 1", n)
+	}
+}
 
 // TestDropPriorDuplicates verifies the structural dedup against prior reviews.
 // The matching rule is: same file + same Category (case-insensitive) + line
