@@ -70,6 +70,7 @@ type CommentOutcome struct {
 	ReviewCommentID uuid.UUID  `json:"review_comment_id"`
 	Outcome         string     `json:"outcome"`
 	CreatedAt       *time.Time `json:"created_at"`
+	AddressedAt     *time.Time `json:"addressed_at"`
 }
 
 type DecisionTrace struct {
@@ -124,17 +125,18 @@ type ModelPricing struct {
 }
 
 type Pattern struct {
-	ID             int        `json:"id"`
-	InstallationID int64      `json:"installation_id"`
-	RepoID         *int64     `json:"repo_id"`
-	Content        string     `json:"content"`
-	SupermemoryID  *string    `json:"supermemory_id"`
-	CreatedBy      *string    `json:"created_by"`
-	CreatedAt      *time.Time `json:"created_at"`
-	UpdatedAt      *time.Time `json:"updated_at"`
-	Source         *string    `json:"source"`
-	Category       *string    `json:"category"`
-	PRNumber       *int       `json:"pr_number"`
+	ID                  int        `json:"id"`
+	InstallationID      int64      `json:"installation_id"`
+	RepoID              *int64     `json:"repo_id"`
+	Content             string     `json:"content"`
+	SupermemoryID       *string    `json:"supermemory_id"`
+	CreatedBy           *string    `json:"created_by"`
+	CreatedAt           *time.Time `json:"created_at"`
+	UpdatedAt           *time.Time `json:"updated_at"`
+	Source              *string    `json:"source"`
+	Category            *string    `json:"category"`
+	PRNumber            *int       `json:"pr_number"`
+	SupermemoryCustomID *string    `json:"supermemory_custom_id"`
 }
 
 type PatternStat struct {
@@ -232,6 +234,7 @@ type Review struct {
 	LinkedPRRefs       json.RawMessage `json:"linked_pr_refs"`
 	LinkedIssueRefs    json.RawMessage `json:"linked_issue_refs"`
 	TraceID            *string         `json:"trace_id"`
+	ReviewContract     []byte          `json:"review_contract"`
 }
 
 type ReviewComment struct {
@@ -254,6 +257,7 @@ type ReviewComment struct {
 	EnforcedRuleContent *string   `json:"enforced_rule_content"`
 	IsNewFinding        *bool     `json:"is_new_finding"`
 	SuppressedReason    *string   `json:"suppressed_reason"`
+	State               string    `json:"state"`
 }
 
 type Rule struct {
@@ -314,4 +318,29 @@ type UserInstallation struct {
 	InstallationID int64     `json:"installation_id"`
 	Role           string    `json:"role"`
 	CreatedAt      time.Time `json:"created_at"`
+}
+
+type VwMemoryAb struct {
+	MemoryEnabled      bool           `json:"memory_enabled"`
+	Reviews            int64          `json:"reviews"`
+	PostedComments     int64          `json:"posted_comments"`
+	SuppressedComments int64          `json:"suppressed_comments"`
+	Confirmed          int64          `json:"confirmed"`
+	Dismissed          int64          `json:"dismissed"`
+	AcceptanceRate     pgtype.Numeric `json:"acceptance_rate"`
+}
+
+type VwReviewGauge struct {
+	InstallationID       int64          `json:"installation_id"`
+	Category             string         `json:"category"`
+	ChangeClass          interface{}    `json:"change_class"`
+	PostedFindings       int64          `json:"posted_findings"`
+	AddressedHuman       int64          `json:"addressed_human"`
+	AddressedAgent       int64          `json:"addressed_agent"`
+	Dismissed            int64          `json:"dismissed"`
+	Ignored              int64          `json:"ignored"`
+	Deferred             int64          `json:"deferred"`
+	AddressRate          pgtype.Numeric `json:"address_rate"`
+	DismissRate          pgtype.Numeric `json:"dismiss_rate"`
+	MedianSecondsToMerge float64        `json:"median_seconds_to_merge"`
 }

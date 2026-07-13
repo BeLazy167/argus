@@ -60,7 +60,7 @@ func (q *Queries) GetStats(ctx context.Context) (GetStatsRow, error) {
 
 const getStatsScoped = `-- name: GetStatsScoped :one
 WITH scoped_reviews AS (
-    SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, github_review_id, status, summary, score, token_usage, trigger, triggered_by, duration_ms, error, created_at, completed_at, file_count, deep_review, persona, is_incremental, resolved_stale_count, head_ref, simulation_results, diagram, diagram_title, diagrams, truncated_files, brief, memory_enabled, cross_pr_hash, linked_pr_refs, linked_issue_refs, trace_id FROM reviews WHERE repo_id IN (SELECT id FROM repos WHERE installation_id = ANY($1::bigint[]))
+    SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, github_review_id, status, summary, score, token_usage, trigger, triggered_by, duration_ms, error, created_at, completed_at, file_count, deep_review, persona, is_incremental, resolved_stale_count, head_ref, simulation_results, diagram, diagram_title, diagrams, truncated_files, brief, memory_enabled, cross_pr_hash, linked_pr_refs, linked_issue_refs, trace_id, review_contract FROM reviews WHERE repo_id IN (SELECT id FROM repos WHERE installation_id = ANY($1::bigint[]))
 )
 SELECT
     (SELECT COUNT(*) FROM scoped_reviews)::int as total_reviews,

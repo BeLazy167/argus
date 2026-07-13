@@ -118,15 +118,22 @@ SELECT id, review_comment_id, outcome, created_at
 FROM comment_outcomes WHERE review_comment_id = $1 ORDER BY created_at DESC
 `
 
-func (q *Queries) GetCommentOutcomes(ctx context.Context, reviewCommentID uuid.UUID) ([]CommentOutcome, error) {
+type GetCommentOutcomesRow struct {
+	ID              int        `json:"id"`
+	ReviewCommentID uuid.UUID  `json:"review_comment_id"`
+	Outcome         string     `json:"outcome"`
+	CreatedAt       *time.Time `json:"created_at"`
+}
+
+func (q *Queries) GetCommentOutcomes(ctx context.Context, reviewCommentID uuid.UUID) ([]GetCommentOutcomesRow, error) {
 	rows, err := q.db.Query(ctx, getCommentOutcomes, reviewCommentID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []CommentOutcome
+	var items []GetCommentOutcomesRow
 	for rows.Next() {
-		var i CommentOutcome
+		var i GetCommentOutcomesRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.ReviewCommentID,

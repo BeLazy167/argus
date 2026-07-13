@@ -1,6 +1,7 @@
-.PHONY: build run dev test lint tygo tygo-check migrate-up migrate-down docker-up docker-down deploy secrets
+.PHONY: build run dev test lint tygo tygo-check sqlc sqlc-check migrate-up migrate-down docker-up docker-down deploy secrets
 
 TYGO_VERSION := v0.2.21
+SQLC_VERSION := 1.30.0
 
 build:
 	go build -o ./bin/argus ./cmd/argus
@@ -17,6 +18,28 @@ tygo-check: tygo
 	@if [ -n "$$(git status --porcelain -- ../web/src/lib/generated)" ]; then \
 		echo "error: untracked/modified generated files — commit them:"; \
 		git status --porcelain -- ../web/src/lib/generated; \
+		exit 1; \
+	fi
+
+# sqlc regenerates internal/store/db/*.go from the SQL queries + migrations.
+# Requires sqlc $(SQLC_VERSION) on PATH; a mismatched version drifts the
+# output, so the target enforces the pin instead of trusting the comment.
+# Keep SQLC_VERSION in lockstep with .github/workflows/ci.yml's setup-sqlc pin.
+sqlc:
+	@sqlc version | grep -q "v$(SQLC_VERSION)" || { \
+		echo "error: sqlc v$(SQLC_VERSION) required, found: $$(sqlc version)"; \
+		exit 1; \
+	}
+	sqlc generate
+
+# sqlc-check regenerates and fails if the committed output drifts — either a
+# tracked file changed (git diff) or a new generated file is untracked
+# (git status --porcelain, which git diff alone would miss). CI gate.
+sqlc-check: sqlc
+	git diff --exit-code -- internal/store/db
+	@if [ -n "$$(git status --porcelain -- internal/store/db)" ]; then \
+		echo "error: untracked/modified generated files — run 'make sqlc' and commit:"; \
+		git status --porcelain -- internal/store/db; \
 		exit 1; \
 	fi
 
