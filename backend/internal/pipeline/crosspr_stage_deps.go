@@ -126,13 +126,13 @@ func (d defaultCrossPRStore) FindSharedLinkedIssues(ctx context.Context, reviewI
 	return d.st.Q.FindSharedLinkedIssues(ctx, reviewID)
 }
 func (d defaultCrossPRStore) GetAllFileReviewsForReview(ctx context.Context, reviewID uuid.UUID) (json.RawMessage, error) {
-	return d.st.Q.GetAllFileReviewsForReview(ctx, reviewID)
+	return d.st.GetAllFileReviewsForReview(ctx, reviewID)
 }
 func (d defaultCrossPRStore) MergeStageTokenEntry(ctx context.Context, arg db.MergeStageTokenEntryParams) (int64, error) {
 	return d.st.Q.MergeStageTokenEntry(ctx, arg)
 }
 func (d defaultCrossPRStore) LoadFeatureFlags(ctx context.Context, installationDBID int64) FeatureFlags {
-	return loadFeatureFlags(ctx, d.st, installationDBID)
+	return loadFeatureFlags(ctx, featureFlagReaderFor(d.st), installationDBID)
 }
 
 // defaultCrossPRState wraps *StateMachine's loadState. Lives in the

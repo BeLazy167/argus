@@ -6,8 +6,6 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
-
-	"github.com/BeLazy167/argus/backend/internal/store/db"
 )
 
 func (s *Server) getGraph(w http.ResponseWriter, r *http.Request) {
@@ -21,26 +19,20 @@ func (s *Server) getGraph(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	nodes, err := s.store.Q.ListGraphNodes(r.Context(), repoID)
+	// The store methods normalize a nil result to an empty slice so the JSON
+	// arrays serialize as [] rather than null.
+	nodes, err := s.store.ListGraphNodes(r.Context(), repoID)
 	if err != nil {
 		s.logger.Error("get graph nodes", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load graph nodes"})
 		return
 	}
 
-	edges, err := s.store.Q.ListGraphEdges(r.Context(), repoID)
+	edges, err := s.store.ListGraphEdges(r.Context(), repoID)
 	if err != nil {
 		s.logger.Error("get graph edges", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load graph edges"})
 		return
-	}
-
-	// Ensure non-null JSON arrays (nil slices serialize as null)
-	if nodes == nil {
-		nodes = []db.ListGraphNodesRow{}
-	}
-	if edges == nil {
-		edges = []db.ListGraphEdgesRow{}
 	}
 
 	writeJSON(w, http.StatusOK, GraphResponse{Nodes: nodes, Edges: edges})

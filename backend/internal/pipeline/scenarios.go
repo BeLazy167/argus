@@ -11,6 +11,17 @@ import (
 	"github.com/BeLazy167/argus/backend/internal/util"
 )
 
+// scenarioStore is the narrow store surface the scenario persistence helpers
+// consume: create an active/pending scenario, mirror its Supermemory id, and
+// list active scenarios matching a file set. *store.Store satisfies it, so
+// callers pass their concrete store through; tests substitute a fake.
+type scenarioStore interface {
+	CreateScenario(ctx context.Context, installationID int64, repoID *int64, description, source, sourceRef string, files, modules []string, severity string) (int64, error)
+	CreatePendingScenario(ctx context.Context, installationID int64, repoID *int64, description, source, sourceRef string, files, modules []string, severity string) (int64, error)
+	SetScenarioSupermemoryID(ctx context.Context, id int64, supermemoryID string) error
+	ListScenariosForFiles(ctx context.Context, repoID int64, filePaths []string) ([]store.Scenario, error)
+}
+
 // scenarioSearch retrieves scenario matches (type=scenario) for query in the
 // repo container and shapes them into []ScenarioSearchResult (scenario-id parse
 // + dedup). Non-fatal: a search error degrades to nil via memory.BestEffort so
@@ -102,7 +113,7 @@ func scenarioSeverity(s Severity) string {
 // longer suppresses distinct seeds, so the operator-tunable threshold actually
 // applies. A non-positive threshold is clamped to the default so a misconfigured
 // 0 can never collapse every distinct seed into "duplicate".
-func StoreScenarioSeeds(ctx context.Context, st *store.Store, indexer memory.Indexer, owner, repo string, installationID int64, repoID *int64, dedupeThreshold float64, seeds []ScenarioSeed) {
+func StoreScenarioSeeds(ctx context.Context, st scenarioStore, indexer memory.Indexer, owner, repo string, installationID int64, repoID *int64, dedupeThreshold float64, seeds []ScenarioSeed) {
 	for _, seed := range seeds {
 		if indexer != nil {
 			existing := scenarioSearch(ctx, indexer, slog.Default(), repo, seed.Description, "", 1)
@@ -161,14 +172,14 @@ func isDuplicateScenario(existing []memory.ScenarioSearchResult, dedupeThreshold
 }
 
 // StorePendingScenarioSeeds stores scenarios as inactive (pending dev approval via reaction).
-func StorePendingScenarioSeeds(ctx context.Context, st *store.Store, installationID int64, repoID *int64, seeds []ScenarioSeed) {
+func StorePendingScenarioSeeds(ctx context.Context, st scenarioStore, installationID int64, repoID *int64, seeds []ScenarioSeed) {
 	for _, seed := range seeds {
 		_, _ = st.CreatePendingScenario(ctx, installationID, repoID, seed.Description, seed.Source, seed.SourceRef, seed.Files, nil, seed.Severity)
 	}
 }
 
 // FindRelevantScenarios searches for active scenarios matching the changed files.
-func FindRelevantScenarios(ctx context.Context, st *store.Store, repoID int64, changedFiles []string) ([]store.Scenario, error) {
+func FindRelevantScenarios(ctx context.Context, st scenarioStore, repoID int64, changedFiles []string) ([]store.Scenario, error) {
 	return st.ListScenariosForFiles(ctx, repoID, changedFiles)
 }
 

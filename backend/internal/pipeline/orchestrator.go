@@ -27,7 +27,6 @@ import (
 	"github.com/BeLazy167/argus/backend/internal/obs"
 	"github.com/BeLazy167/argus/backend/internal/sast"
 	"github.com/BeLazy167/argus/backend/internal/store"
-	"github.com/BeLazy167/argus/backend/internal/store/db"
 	"github.com/BeLazy167/argus/backend/internal/util"
 	"github.com/BeLazy167/argus/backend/pkg/diff"
 	gh "github.com/google/go-github/v68/github"
@@ -750,11 +749,11 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		archCtx, archCancel := context.WithTimeout(ctx, 5*time.Second)
 		archMap := make(map[string]ArchContextEntry, len(patchSet.Files))
 
-		edges, edgeErr := o.st.Q.ListArchFileEdges(archCtx, dbRepo.ID)
+		edges, edgeErr := o.st.ListArchFileEdges(archCtx, dbRepo.ID)
 		if edgeErr != nil {
 			o.logger.Warn("[pre-review] arch edges query failed", "error", edgeErr, "pr", event.PRNumber)
 		}
-		density, densErr := o.st.Q.ListArchBugDensity(archCtx, dbRepo.ID)
+		density, densErr := o.st.ListArchBugDensity(archCtx, dbRepo.ID)
 		if densErr != nil {
 			o.logger.Warn("[pre-review] arch bug density query failed", "error", densErr, "pr", event.PRNumber)
 		}
@@ -839,7 +838,7 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 
 		// Load per-installation feature flags (issue acceptance + cross-PR toggles).
 		// Defaults: issue_acceptance on, cross_pr_checks off, max_linked_prs=5.
-		run.FeatureFlags = loadFeatureFlags(linkCtx, o.st, run.DBInstallationID)
+		run.FeatureFlags = loadFeatureFlags(linkCtx, featureFlagReaderFor(o.st), run.DBInstallationID)
 	}
 
 	// Pre-review: extract the author's stated motivation into a structured PRIntent
@@ -2763,7 +2762,7 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 						"threshold", run.Thresholds.ScenarioTrigger,
 						"passed", passed)
 					if passed {
-						if err := o.st.Q.IncrementScenarioTriggerCount(ctx, matches[0].ID); err != nil {
+						if err := o.st.IncrementScenarioTriggerCount(ctx, matches[0].ID); err != nil {
 							o.logger.Warn("incrementing scenario trigger count", "error", err)
 						}
 					}
@@ -3701,10 +3700,7 @@ func (o *Orchestrator) indexArchitectureSummary(ctx context.Context, run *Pipeli
 	chokeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	rows, err := o.st.Q.GetTopChokePoints(chokeCtx, db.GetTopChokePointsParams{
-		RepoID: run.DBRepoID,
-		Limit:  10,
-	})
+	rows, err := o.st.GetTopChokePoints(chokeCtx, run.DBRepoID, 10)
 	if err != nil {
 		o.logger.Warn("indexing arch summary: query", "error", err)
 		return
