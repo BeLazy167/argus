@@ -125,6 +125,24 @@ func TestBuildRetryRun_CarriesSettings(t *testing.T) {
 	}
 }
 
+func TestBuildRetryRun_NormalizesThresholds(t *testing.T) {
+	prev := terminalRun()
+	// PipelineRun.Thresholds is json:"-", so a run loaded from a persisted
+	// terminal state carries the zero value. buildRetryRun must normalize it at
+	// this single ingress so downstream value-level readers never see a zero
+	// Thresholds (which would zero every similarity gate).
+	fresh, err := buildRetryRun(prev)
+	if err != nil {
+		t.Fatalf("buildRetryRun: %v", err)
+	}
+	if fresh.Thresholds.IsZero() {
+		t.Error("Thresholds left zero — retry hands zeroed similarity gates to readers")
+	}
+	if fresh.Thresholds.FindingEnrich == 0 {
+		t.Errorf("FindingEnrich = 0, want a resolved default; Thresholds=%+v", fresh.Thresholds)
+	}
+}
+
 func TestBuildRetryRun_DropsIntermediateResults(t *testing.T) {
 	prev := terminalRun()
 
