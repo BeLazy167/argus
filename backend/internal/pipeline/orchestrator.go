@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
-	"os"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -702,158 +701,12 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		}
 	}()
 
-	// Pre-run SAST so review stage can use findings as hints (30s timeout)
-	if len(patchSet.Files) <= 50 {
-		sastCtx, sastCancel := context.WithTimeout(ctx, 30*time.Second)
-		lang := dominantLanguage(diffFilePaths(patchSet))
-		if lang != "" {
-			files := make(map[string]string)
-			for _, f := range patchSet.Files {
-				if f.FullContent != "" {
-					files[f.NewName] = f.FullContent
-				} else if f.NewName != "" {
-					content, fetchErr := o.ghClient.GetFileContent(sastCtx, event.InstallationID, owner, repo, f.NewName, event.HeadSHA)
-					if fetchErr != nil {
-						o.logger.Warn("[pre-review] SAST: failed to fetch file", "file", f.NewName, "error", fetchErr, "pr", event.PRNumber)
-					} else if content != "" {
-						files[f.NewName] = content
-					}
-				}
-			}
-			if len(files) > 0 {
-				runners := sast.DefaultRunners()
-				findings, sastErr := sast.RunAll(sastCtx, runners, lang, files)
-				if sastErr != nil {
-					o.logger.Warn("[pre-review] SAST failed", "error", sastErr, "pr", event.PRNumber)
-				} else if len(findings) > 0 {
-					run.SastFindings = make(map[string][]SastFinding)
-					for _, f := range findings {
-						run.SastFindings[f.File] = append(run.SastFindings[f.File], SastFinding{
-							File: f.File, Line: f.Line, Rule: f.Rule, Message: f.Message, Severity: f.Severity,
-						})
-					}
-					o.logger.Info("[pre-review] SAST hints ready", "findings", len(findings), "lang", lang, "pr", event.PRNumber)
-				}
-			}
-		}
-		sastCancel()
-	}
-
-	// Pre-review: fetch architecture context for changed files (choke points, hotspots).
-	// This makes the LLM aware of which files are high-risk before reviewing.
-	// Non-fatal — if it fails, review proceeds without architecture hints.
-	//
-	// Two bulk queries (edges + bug density) beat the previous N+1 per-file
-	// pattern which serialized 2*N round-trips inside a 5s budget.
-	{
-		archCtx, archCancel := context.WithTimeout(ctx, 5*time.Second)
-		archMap := make(map[string]ArchContextEntry, len(patchSet.Files))
-
-		edges, edgeErr := o.st.ListArchFileEdges(archCtx, dbRepo.ID)
-		if edgeErr != nil {
-			o.logger.Warn("[pre-review] arch edges query failed", "error", edgeErr, "pr", event.PRNumber)
-		}
-		density, densErr := o.st.ListArchBugDensity(archCtx, dbRepo.ID)
-		if densErr != nil {
-			o.logger.Warn("[pre-review] arch bug density query failed", "error", densErr, "pr", event.PRNumber)
-		}
-
-		if edgeErr == nil || densErr == nil {
-			fanInByFile := make(map[string]int, len(edges))
-			for _, e := range edges {
-				fanInByFile[e.TargetPath]++
-			}
-			bugsByFile := make(map[string]int, len(density))
-			for _, d := range density {
-				bugsByFile[d.FilePath] = int(d.Bugs)
-			}
-
-			processed := 0
-			for _, f := range patchSet.Files {
-				if archCtx.Err() != nil {
-					o.logger.Warn("[pre-review] arch context budget exceeded, partial data", "processed", processed, "total", len(patchSet.Files), "pr", event.PRNumber)
-					break
-				}
-				if f.NewName == "" {
-					continue
-				}
-				processed++
-				fanIn := fanInByFile[f.NewName]
-				bugs := bugsByFile[f.NewName]
-				if fanIn >= ArchChokePointFanIn || bugs >= ArchHotspotBugCount {
-					archMap[f.NewName] = ArchContextEntry{FanIn: fanIn, BugCount: bugs}
-				}
-			}
-		}
-
-		if len(archMap) > 0 {
-			run.ArchContext = archMap
-			o.logger.Info("[pre-review] arch context ready", "high_risk_files", len(archMap), "pr", event.PRNumber)
-		}
-		archCancel()
-	}
-
-	// Pre-review: detect linked issues + cross-PRs from PR body and GitHub's
-	// closingIssuesReferences. Primary source is GraphQL (covers UI panel,
-	// branch-name patterns); regex fallback catches non-closing mentions.
-	// Non-fatal — review proceeds without link context if anything fails.
-	{
-		linkCtx, linkCancel := context.WithTimeout(ctx, 10*time.Second)
-		var primary []IssueLink
-		if owner, repo, splitErr := splitRepoFullName(run.PREvent.RepoFullName); splitErr == nil {
-			closing, err := o.ghClient.GetClosingIssues(linkCtx, event.InstallationID, owner, repo, event.PRNumber)
-			if err != nil {
-				o.logger.Warn("[pre-review] closing issues fetch failed", "pr", event.PRNumber, "error", err)
-			} else {
-				primary = make([]IssueLink, 0, len(closing))
-				for _, c := range closing {
-					primary = append(primary, IssueLink{
-						Owner:      c.Owner,
-						Repo:       c.Repo,
-						Number:     c.Number,
-						URL:        c.URL,
-						Title:      c.Title,
-						Body:       c.Body,
-						Accessible: true,
-					})
-				}
-			}
-		}
-		linkCancel()
-
-		fallback := ExtractLinkedIssues(run.PREvent.PRBody, run.PREvent.RepoFullName)
-		run.LinkedIssues = MergeIssueLinks(primary, fallback)
-
-		maxLinkedPRs := 5
-		if v := os.Getenv("ARGUS_MAX_LINKED_PRS"); v != "" {
-			if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 20 {
-				maxLinkedPRs = n
-			}
-		}
-		run.LinkedPRs = ExtractLinkedPRs(run.PREvent.PRBody, run.PREvent.RepoFullName, event.PRNumber, maxLinkedPRs)
-
-		if len(run.LinkedIssues) > 0 || len(run.LinkedPRs) > 0 {
-			o.logger.Info("[pre-review] links detected", "issues", len(run.LinkedIssues), "prs", len(run.LinkedPRs), "pr", event.PRNumber)
-		}
-
-		// Load per-installation feature flags (issue acceptance + cross-PR toggles).
-		// Defaults: issue_acceptance on, cross_pr_checks off, max_linked_prs=5.
-		run.FeatureFlags = loadFeatureFlags(linkCtx, featureFlagReaderFor(o.st), run.DBInstallationID)
-	}
-
-	// Pre-review: extract the author's stated motivation into a structured PRIntent
-	// so specialists and Synthesis can judge findings against intent. Non-fatal —
-	// on any failure run.PRIntent is set to Source="empty" and downstream rendering
-	// gracefully skips the intent block / verification step.
-	//
-	// An unexpected non-nil error from Execute indicates a programmer error
-	// (Execute is documented to always return nil); log it loudly so a future
-	// contract change surfaces instead of silently disabling the feature.
-	if o.intentStage == nil {
-		o.logger.Warn("[pre-review] intent stage not wired; skipping extraction", "pr", event.PRNumber)
-	} else if err := o.intentStage.Execute(ctx, run); err != nil {
-		o.logger.Error("[pre-review] intent extraction returned unexpected error", "error", err, "pr", event.PRNumber)
-	}
+	// Pre-review context enrichers: SAST hints, architecture context, linked
+	// issues/PRs + feature flags, and author intent. Each is best-effort and
+	// writes onto run (see prereview.go). This is the SAME sequence the
+	// retry-rebuild paths run, so a retried review assembles identical
+	// intent-aware context instead of skipping these islands.
+	o.enrichPreReview(ctx, run)
 
 	o.logger.Info("starting review pipeline",
 		"review_id", reviewID,
@@ -1066,7 +919,10 @@ func (o *Orchestrator) RetryReview(ctx context.Context, reviewID uuid.UUID) erro
 		return fmt.Errorf("loading pipeline run %s: %w", runID, err)
 	}
 
-	// Non-terminal run: resume in place.
+	// Non-terminal run: resume in place. KNOWN GAP: a resumed run still loses
+	// every json:"-" context field (intent/contract/SAST/arch/links/flags/
+	// thresholds) — enriching mid-flight risks double-charging the intent LLM
+	// call, so the resume ingress needs its own design (tracked follow-up).
 	if !prev.State.IsTerminal() {
 		_, err = o.sm.Resume(ctx, runID)
 		return err
@@ -1079,6 +935,23 @@ func (o *Orchestrator) RetryReview(ctx context.Context, reviewID uuid.UUID) erro
 		return err
 	}
 	fresh.EventBus = o.eventBus
+	// Resolve the live-only dependencies the sibling no-run retry path gets from
+	// buildRun: the memory indexer never survives persistence (without it the
+	// retry silently runs memory-less), and buildRetryRun's WithDefaults
+	// fallback carries fixed-policy floors, not the org's settings-tuned ones —
+	// re-resolve from merged settings, keeping the fallback on error.
+	fresh.Indexer = o.resolveIndexer(ctx, fresh.DBInstallationID)
+	if mergedSettings, msErr := o.st.GetMergedSettings(ctx, fresh.DBInstallationID, fresh.DBRepoID); msErr == nil {
+		fresh.Thresholds = parseThresholds(mergedSettings)
+	} else {
+		o.logger.Error("retry: failed to load merged settings, using default thresholds",
+			"error", msErr, "installation", fresh.DBInstallationID, "repo", fresh.DBRepoID)
+	}
+	// Re-run the pre-review enrichers so the retry resolves intent (and its
+	// change class) and re-attaches SAST/arch/link context — none of which
+	// survive persistence (all json:"-"). Without this a retried review posts
+	// against an empty contract and loses intent-aware review context.
+	o.enrichPreReview(ctx, fresh)
 	return o.sm.Run(ctx, fresh)
 }
 
@@ -1181,6 +1054,10 @@ func (o *Orchestrator) retryFromReviewRow(ctx context.Context, reviewID uuid.UUI
 		indexer:          o.resolveIndexer(ctx, repo.InstallationID),
 	})
 	run.PriorComments = priorComments
+	// Same pre-review enrichment the fresh webhook path runs, so a no-run retry
+	// resolves intent (+ change class) and re-attaches SAST/arch/link context
+	// instead of driving the pipeline off an empty contract.
+	o.enrichPreReview(ctx, run)
 	return o.sm.Run(ctx, run)
 }
 
@@ -1236,7 +1113,13 @@ func buildRetryRun(prev *PipelineRun) (*PipelineRun, error) {
 		FileSynthesis:       prev.FileSynthesis,
 		ArchitectureGraph:   prev.ArchitectureGraph,
 
-		Prompts:          prev.Prompts,
+		Prompts: prev.Prompts,
+		// Normalize the similarity gates at this single retry-construction ingress
+		// so value-level readers never see a zero Thresholds. prev.Thresholds is
+		// json:"-" (never persisted), so a terminal run loaded from the DB carries
+		// the zero value; WithDefaults resolves it to the fixed-policy defaults —
+		// the same numbers the scattered per-reader WithDefaults calls would yield.
+		Thresholds:       prev.Thresholds.WithDefaults(),
 		IsIncremental:    prev.IsIncremental,
 		PreviousReviewID: prev.PreviousReviewID,
 		// Carry prior-review comments so an incremental retry keeps dedup/verify

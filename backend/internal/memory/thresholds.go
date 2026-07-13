@@ -104,7 +104,10 @@ const (
 // struct was never resolved from settings (a caller passed `Thresholds{}`), as
 // opposed to a resolved struct in which an operator set some field to an
 // explicit 0. The suppression/attribution fields are always seeded non-zero by
-// NewThresholds, so a struct off the normal resolve path is never all-zero.
+// NewThresholds, so any struct that went through the normal resolve path is
+// non-zero; an all-zero struct therefore uniquely identifies the unresolved
+// retry/resume case (PipelineRun.Thresholds is json:"-", re-derived by neither),
+// which is exactly what WithDefaults normalizes.
 func (t Thresholds) IsZero() bool {
 	return t.FindingEnrich == 0 && t.SpecialistMin == 0 &&
 		t.ScenarioTrigger == 0 && t.ScenarioDedupe == 0 &&
