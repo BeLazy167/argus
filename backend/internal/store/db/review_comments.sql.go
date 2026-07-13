@@ -218,6 +218,108 @@ func (q *Queries) GetReviewComments(ctx context.Context, reviewID uuid.UUID) ([]
 	return items, nil
 }
 
+const getThreadLinkForComment = `-- name: GetThreadLinkForComment :one
+SELECT id, review_id, file_path, end_line, github_comment_id, graphql_thread_node_id
+FROM review_comments WHERE id = $1
+`
+
+type GetThreadLinkForCommentRow struct {
+	ID                  uuid.UUID `json:"id"`
+	ReviewID            uuid.UUID `json:"review_id"`
+	FilePath            string    `json:"file_path"`
+	EndLine             *int      `json:"end_line"`
+	GithubCommentID     *int64    `json:"github_comment_id"`
+	GraphqlThreadNodeID *string   `json:"graphql_thread_node_id"`
+}
+
+// ThreadRegistry lookup: the full thread identity for one finding. Powers
+// "dismissing finding X targets exactly X's thread" — the node id returned is
+// X's own, not a neighbour's picked by line proximity.
+func (q *Queries) GetThreadLinkForComment(ctx context.Context, id uuid.UUID) (GetThreadLinkForCommentRow, error) {
+	row := q.db.QueryRow(ctx, getThreadLinkForComment, id)
+	var i GetThreadLinkForCommentRow
+	err := row.Scan(
+		&i.ID,
+		&i.ReviewID,
+		&i.FilePath,
+		&i.EndLine,
+		&i.GithubCommentID,
+		&i.GraphqlThreadNodeID,
+	)
+	return i, err
+}
+
+const hydrateThreadNodeID = `-- name: HydrateThreadNodeID :execrows
+UPDATE review_comments
+SET graphql_thread_node_id = $1
+WHERE review_id = $2 AND github_comment_id = $3 AND graphql_thread_node_id IS NULL
+`
+
+type HydrateThreadNodeIDParams struct {
+	GraphqlThreadNodeID *string   `json:"graphql_thread_node_id"`
+	ReviewID            uuid.UUID `json:"review_id"`
+	GithubCommentID     *int64    `json:"github_comment_id"`
+}
+
+// ThreadRegistry (#162): authoritatively bind a posted finding to its GraphQL
+// review-thread node id. Joined on github_comment_id (the REST comment id) — an
+// exact id match, never a proximity guess. Only fills NULL rows so a webhook
+// retry or re-post can't overwrite an already-hydrated link. Returns rows
+// affected so the caller can log hydration coverage.
+func (q *Queries) HydrateThreadNodeID(ctx context.Context, arg HydrateThreadNodeIDParams) (int64, error) {
+	result, err := q.db.Exec(ctx, hydrateThreadNodeID, arg.GraphqlThreadNodeID, arg.ReviewID, arg.GithubCommentID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const listThreadLinksForReview = `-- name: ListThreadLinksForReview :many
+SELECT id, review_id, file_path, end_line, github_comment_id, graphql_thread_node_id
+FROM review_comments
+WHERE review_id = $1 AND graphql_thread_node_id IS NOT NULL
+ORDER BY file_path, end_line
+`
+
+type ListThreadLinksForReviewRow struct {
+	ID                  uuid.UUID `json:"id"`
+	ReviewID            uuid.UUID `json:"review_id"`
+	FilePath            string    `json:"file_path"`
+	EndLine             *int      `json:"end_line"`
+	GithubCommentID     *int64    `json:"github_comment_id"`
+	GraphqlThreadNodeID *string   `json:"graphql_thread_node_id"`
+}
+
+// All hydrated thread links for a review — the "threads for review R" lookup
+// consumers use instead of re-listing every GitHub thread and re-matching by
+// proximity.
+func (q *Queries) ListThreadLinksForReview(ctx context.Context, reviewID uuid.UUID) ([]ListThreadLinksForReviewRow, error) {
+	rows, err := q.db.Query(ctx, listThreadLinksForReview, reviewID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListThreadLinksForReviewRow
+	for rows.Next() {
+		var i ListThreadLinksForReviewRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ReviewID,
+			&i.FilePath,
+			&i.EndLine,
+			&i.GithubCommentID,
+			&i.GraphqlThreadNodeID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const recordCommentOutcome = `-- name: RecordCommentOutcome :exec
 INSERT INTO comment_outcomes (review_comment_id, outcome)
 VALUES ($1, $2)

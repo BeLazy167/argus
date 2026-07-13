@@ -27,3 +27,29 @@ ON CONFLICT (review_comment_id, outcome) DO NOTHING;
 -- name: GetCommentOutcomes :many
 SELECT id, review_comment_id, outcome, created_at
 FROM comment_outcomes WHERE review_comment_id = $1 ORDER BY created_at DESC;
+
+-- name: HydrateThreadNodeID :execrows
+-- ThreadRegistry (#162): authoritatively bind a posted finding to its GraphQL
+-- review-thread node id. Joined on github_comment_id (the REST comment id) — an
+-- exact id match, never a proximity guess. Only fills NULL rows so a webhook
+-- retry or re-post can't overwrite an already-hydrated link. Returns rows
+-- affected so the caller can log hydration coverage.
+UPDATE review_comments
+SET graphql_thread_node_id = $1
+WHERE review_id = $2 AND github_comment_id = $3 AND graphql_thread_node_id IS NULL;
+
+-- name: GetThreadLinkForComment :one
+-- ThreadRegistry lookup: the full thread identity for one finding. Powers
+-- "dismissing finding X targets exactly X's thread" — the node id returned is
+-- X's own, not a neighbour's picked by line proximity.
+SELECT id, review_id, file_path, end_line, github_comment_id, graphql_thread_node_id
+FROM review_comments WHERE id = $1;
+
+-- name: ListThreadLinksForReview :many
+-- All hydrated thread links for a review — the "threads for review R" lookup
+-- consumers use instead of re-listing every GitHub thread and re-matching by
+-- proximity.
+SELECT id, review_id, file_path, end_line, github_comment_id, graphql_thread_node_id
+FROM review_comments
+WHERE review_id = $1 AND graphql_thread_node_id IS NOT NULL
+ORDER BY file_path, end_line;

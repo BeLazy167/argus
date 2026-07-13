@@ -258,6 +258,7 @@ type ReviewComment struct {
 	IsNewFinding        *bool     `json:"is_new_finding"`
 	SuppressedReason    *string   `json:"suppressed_reason"`
 	State               string    `json:"state"`
+	GraphqlThreadNodeID *string   `json:"graphql_thread_node_id"`
 }
 
 type Rule struct {

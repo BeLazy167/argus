@@ -1266,7 +1266,11 @@ func (o *Orchestrator) autoResolveOnSynchronize(
 		return
 	}
 
-	resolved, attempted, botUnresolved, apiCalls, resolvedKeys := o.autoResolveStaleComments(ghCtx, event, patchSet)
+	// ThreadRegistry (#162): the prior review's hydrated thread links let
+	// auto-resolve prefer the stored (authoritative) node id over the live
+	// list's, falling back to proximity for rows predating the registry.
+	storedThreadIDs := o.storedThreadIDsForReview(ghCtx, prev.ID)
+	resolved, attempted, botUnresolved, apiCalls, resolvedKeys := o.autoResolveStaleComments(ghCtx, event, patchSet, storedThreadIDs)
 	// Persist whenever we touched GitHub — even a list-only call (0
 	// resolved, 0 attempted, 1 apiCall) is load operators may need to
 	// see against their installation token budget.
@@ -1408,10 +1412,17 @@ func resolvedByReplyBody(headSHA string) string {
 //     shape produced by Finding.Path + Finding.Line on the reader side
 //     matches. Empty means nothing was resolved (legal: the push may have
 //     just fired the goroutine against an already-clean PR).
+//
+// storedThreadIDs maps a finding's REST comment id → its GraphQL thread node id
+// as hydrated at post time (ThreadRegistry, #162). When a thread we're about to
+// resolve has a stored node id we prefer it (authoritative); threads without one
+// (rows predating the registry, sibling bots) fall back to the live node id from
+// ListReviewThreads. A nil/empty map preserves the pre-registry behaviour.
 func (o *Orchestrator) autoResolveStaleComments(
 	ctx context.Context,
 	event ghpkg.PREvent,
 	patchSet *diff.PatchSet,
+	storedThreadIDs map[int64]string,
 ) (resolved, attempted, botUnresolved, apiCalls int, resolvedKeys []string) {
 	owner, repo, err := splitRepoFullName(event.RepoFullName)
 	if err != nil {
@@ -1464,9 +1475,18 @@ func (o *Orchestrator) autoResolveStaleComments(
 				o.logger.Warn("auto-resolve: resolved-by reply failed", "error", err, "thread_id", t.ID, "path", t.Path)
 			}
 		}
+		// Prefer the ThreadRegistry-hydrated node id (keyed on the thread's
+		// first-comment REST id) when present; else use the live list's node id.
+		// The two are the same stable GraphQL node for our own threads, so this
+		// is behaviour-preserving — it just routes resolution through the stored
+		// link where one exists.
+		threadID := t.ID
+		if stored, ok := storedThreadIDs[t.FirstCommentID]; ok {
+			threadID = stored
+		}
 		apiCalls++ // one mutation per attempt
-		if err := o.ghClient.ResolveReviewThread(ctx, event.InstallationID, t.ID); err != nil {
-			o.logger.Warn("auto-resolve: resolve thread failed", "error", err, "thread_id", t.ID, "path", t.Path)
+		if err := o.ghClient.ResolveReviewThread(ctx, event.InstallationID, threadID); err != nil {
+			o.logger.Warn("auto-resolve: resolve thread failed", "error", err, "thread_id", threadID, "path", t.Path)
 			continue
 		}
 		resolved++
@@ -2615,6 +2635,11 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 
 	// Backfill github_comment_ids now that we have the ghReviewID
 	o.backfillGitHubCommentIDs(ctx, run, ghReviewID, owner, repo)
+
+	// ThreadRegistry (#162): bind each just-posted finding to its GraphQL
+	// review-thread node id. Runs AFTER the backfill above so the github_comment_id
+	// join key is present; authoritative one-shot hydrate off the fresh review.
+	o.hydrateThreadNodeIDs(ctx, run, owner, repo)
 
 	// Pattern learning, conventions, file synthesis, and PR summary now run
 	// BEFORE PostReview (see above). Only architecture graph + PR enrichment
