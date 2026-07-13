@@ -16,6 +16,9 @@ var AllowedKeys = map[string]struct{}{
 	"score": {}, "comment_count": {}, "thread_id": {}, "threads_checked": {},
 	"threads_attempted": {}, "threads_resolved": {}, "risks_found": {}, "linked_count": {},
 	"issues_evaluated": {}, "reason": {}, "primary_review_id": {},
+	// incremental re-review fallback signal (incremental.fallback event) — commit
+	// SHAs are non-PII and pin which push turned an incremental into a full run.
+	"previous_head": {}, "new_head": {},
 
 	// memory outcome loop — enrichment counts, suppression, pattern feedback
 	"matched": {}, "enforced": {}, "novel": {}, "suppressed": {}, "downgraded": {},

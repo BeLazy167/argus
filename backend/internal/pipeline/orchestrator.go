@@ -298,6 +298,10 @@ type Orchestrator struct {
 	// lifecycle is the single home for the review-lifecycle DB guards
 	// (EnsureNotRunning / CancelStranded / ShouldAbortPost). See lifecycle.go.
 	lifecycle *ReviewLifecycle
+	// incremental resolves the one re-review decision (is-incremental + priors +
+	// inter-diff) shared by HandlePREvent, the retry paths, and auto-resolve, so
+	// the inter-diff GitHub round-trip fires once per push. See incremental.go.
+	incremental *IncrementalResolver
 	// crossPRHooks is the test-only injection point for the async cross-PR
 	// stage. nil in production — the stage falls back to the concrete
 	// st/ghClient/sm fields. Tests assign a non-nil *crossPRHooks to swap
@@ -336,6 +340,7 @@ func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, 
 		cfg:          cfg,
 	}
 	o.lifecycle = NewReviewLifecycle(db, st, sm, eventBus, logger)
+	o.incremental = NewIncrementalResolver(st, ghClient, logger)
 	o.simEngine = NewSimulationEngine(o.reviewStage.registry, st, ghClient, logger)
 
 	sm.RegisterStage(StateTriaging, triageStage.Execute)
@@ -533,8 +538,22 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 	if orgErr != nil {
 		o.logger.Warn("loading org defaults", "error", orgErr, "installation", inst.ID)
 	}
-	if orgErr == nil && event.Action == "synchronize" && IsAutoResolveEnabled(dbRepo.SettingsJSON, orgDefaults) {
-		go o.autoResolveOnSynchronize(ctx, event, inst.ID, dbRepo.ID)
+	// Resolve the incremental re-review plan ONCE per push. Both the
+	// auto-resolve goroutine and the review path below need the inter-diff;
+	// sharing one plan keeps the GetCompareCommitsDiff round-trip to a single
+	// call per synchronize (previously each fetched it independently). Compute
+	// only on synchronize, and only when a consumer will actually use it —
+	// auto-resolve (enabled) or the review path (auto-run enabled) — so a
+	// manual-review repo with auto-resolve off pays nothing.
+	var incPlan *IncrementalPlan
+	if event.Action == "synchronize" {
+		autoResolveOn := orgErr == nil && IsAutoResolveEnabled(dbRepo.SettingsJSON, orgDefaults)
+		if autoResolveOn || IsAutoRunEnabled(dbRepo.SettingsJSON, orgDefaults) {
+			incPlan = o.incremental.Resolve(ctx, dbRepo.ID, event)
+		}
+		if autoResolveOn {
+			go o.autoResolveOnSynchronize(ctx, event, inst.ID, dbRepo.ID, incPlan)
+		}
 	}
 
 	// Pass the org-load state into the gate: on a transient GetOrgDefaults
@@ -563,29 +582,18 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		return err
 	}
 
-	// Check for incremental re-review on synchronize
+	// Apply the shared incremental plan (resolved once above). A usable
+	// inter-diff narrows the review to changes since the last completed review;
+	// a fallback (fetch failure / empty compare / parse failure) was already
+	// surfaced by the resolver as an "incremental.fallback" event, and we
+	// proceed with the full diff fetched above.
 	var isIncremental bool
 	var previousReviewID *uuid.UUID
-	if event.Action == "synchronize" {
-		prev, err := o.st.GetLastCompletedReview(ctx, dbRepo.ID, event.PRNumber)
-		if err == nil && prev != nil {
-			// Fetch inter-diff: changes since last reviewed commit
-			interDiff, err := o.ghClient.GetCompareCommitsDiff(ctx, event.InstallationID, owner, repo, prev.HeadSHA, event.HeadSHA)
-			if err != nil {
-				o.logger.Warn("failed to get inter-diff, falling back to full diff", "error", err)
-			} else if interDiff != "" {
-				interPatch, err := diff.Parse(interDiff)
-				if err != nil {
-					o.logger.Warn("failed to parse inter-diff, falling back to full diff", "error", err)
-				} else {
-					patchSet = interPatch
-					rawDiff = interDiff
-					isIncremental = true
-					previousReviewID = &prev.ID
-					o.logger.Info("incremental re-review", "previous_head", prev.HeadSHA, "new_head", event.HeadSHA)
-				}
-			}
-		}
+	if incPlan != nil && incPlan.IsIncremental {
+		patchSet = incPlan.InterDiffPatch
+		rawDiff = incPlan.InterDiffRaw
+		isIncremental = true
+		previousReviewID = incPlan.PreviousReviewID
 	}
 
 	// Auto-resolve stale bot comments fires once per push from
@@ -648,18 +656,16 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		"source", run.Contract.Source,
 		"pr", event.PRNumber)
 
-	// Load prior review comments for incremental reviews so the LLM can
-	// avoid duplicating previously-flagged issues and verify fixes.
-	if isIncremental && previousReviewID != nil {
-		priorComments, err := o.st.GetReviewComments(ctx, *previousReviewID)
-		if err != nil {
-			o.logger.Warn("failed to load prior review comments", "error", err, "previous_review_id", *previousReviewID)
-		} else if pc := buildPriorComments(priorComments); len(pc) > 0 {
+	// Attach prior review comments for incremental reviews so the LLM can avoid
+	// duplicating previously-flagged issues and verify fixes. The resolver
+	// already aggregated (and deduped) them across ALL completed reviews on the
+	// PR — not just the most-recent — as part of the shared plan.
+	if isIncremental && incPlan != nil {
+		if pc := incPlan.PriorComments; len(pc) > 0 {
 			run.PriorComments = pc
 			o.logger.Info("loaded prior review comments for incremental review",
-				"previous_review_id", *previousReviewID,
-				"total_comments", len(priorComments),
-				"files_with_comments", len(run.PriorComments))
+				"previous_review_id", previousReviewID,
+				"files_with_comments", len(pc))
 		}
 	}
 
@@ -1054,23 +1060,21 @@ func (o *Orchestrator) retryFromReviewRow(ctx context.Context, reviewID uuid.UUI
 
 	// Carry prior completed-review comments so this full re-review dedups
 	// against / verifies findings already posted to the PR instead of
-	// re-posting duplicates. Mirrors HandlePREvent's incremental path. The
-	// review being retried isn't completed, so it can't be its own prior; the
-	// id guard is belt-and-suspenders.
+	// re-posting duplicates. Uses ResolvePriors (not Resolve): priors aggregate
+	// across ALL completed reviews on the PR, but a retry is not a push, so it
+	// must NOT fetch an inter-diff it would discard nor emit an
+	// "incremental.fallback" signal. The review being retried isn't completed,
+	// so it can't be its own prior; the id guard is belt-and-suspenders.
+	plan := o.incremental.ResolvePriors(ctx, review.RepoID, review.PRNumber)
 	var priorComments map[string][]PriorComment
 	isIncremental := false
 	var previousReviewID *uuid.UUID
-	if prev, perr := o.st.GetLastCompletedReview(ctx, review.RepoID, review.PRNumber); perr == nil && prev != nil && prev.ID != reviewID {
-		comments, cerr := o.st.GetReviewComments(ctx, prev.ID)
-		if cerr != nil {
-			o.logger.Warn("no-run retry: failed to load prior review comments", "error", cerr, "previous_review_id", prev.ID)
-		} else if pc := buildPriorComments(comments); len(pc) > 0 {
-			priorComments = pc
-			isIncremental = true
-			previousReviewID = &prev.ID
-			o.logger.Info("no-run retry: carried prior review comments",
-				"previous_review_id", prev.ID, "files_with_comments", len(pc))
-		}
+	if len(plan.PriorComments) > 0 && (plan.PreviousReviewID == nil || *plan.PreviousReviewID != reviewID) {
+		priorComments = plan.PriorComments
+		isIncremental = true
+		previousReviewID = plan.PreviousReviewID
+		o.logger.Info("no-run retry: carried prior review comments",
+			"previous_review_id", previousReviewID, "files_with_comments", len(priorComments))
 	}
 
 	// Settings/feature flags come from the repo's current merged settings via
@@ -1228,13 +1232,15 @@ func (o *Orchestrator) postStartedComment(ctx context.Context, event ghpkg.PREve
 // webhook HTTP response is sent, but auto-resolve is useful long
 // after that.
 //
-// Early-returns on: no prior review (first push), inter-diff fetch
-// failure, empty inter-diff, parse failure. None of those are bugs —
-// they're legitimate "nothing to do" or "transient GitHub" states.
-// The only ERROR-level logs are panic recovery and diff parse failure
-// (GitHub's own output being unparseable means our parser regressed).
+// Early-returns when the shared plan carries no usable inter-diff: no prior
+// review (first push), a fallback (fetch failure / empty compare / parse
+// failure — already surfaced by the resolver as an "incremental.fallback"
+// event), or an unchanged head. None of those are bugs here; they mean no
+// lines could have moved, so there's nothing to resolve.
 //
-// Call site: `go o.autoResolveOnSynchronize(ctx, event, dbInstallationID, dbRepoID)`.
+// Call site: `go o.autoResolveOnSynchronize(ctx, event, dbInstallationID, dbRepoID, plan)`.
+// The plan is resolved ONCE per push by IncrementalResolver and shared with the
+// review path, so the inter-diff GitHub round-trip fires once, not twice.
 //
 // IMPORTANT: dbInstallationID is the Argus DB's `installations.id` (BIGSERIAL
 // primary key), NOT the GitHub installation ID on `event.InstallationID`.
@@ -1246,6 +1252,7 @@ func (o *Orchestrator) autoResolveOnSynchronize(
 	event ghpkg.PREvent,
 	dbInstallationID int64,
 	dbRepoID int64,
+	plan *IncrementalPlan,
 ) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -1257,51 +1264,25 @@ func (o *Orchestrator) autoResolveOnSynchronize(
 		}
 	}()
 
+	// Reuse the inter-diff the resolver already fetched + parsed for the review
+	// path. No usable patch (no prior review, fallback, or unchanged head) means
+	// nothing whose lines could have moved — quiet return.
+	if plan == nil || plan.InterDiffPatch == nil {
+		return
+	}
+	patchSet := plan.InterDiffPatch
+
 	ghCtx, ghCancel := context.WithTimeout(
 		context.WithoutCancel(parent), 30*time.Second)
 	defer ghCancel()
 
-	prev, err := o.st.GetLastCompletedReview(ghCtx, dbRepoID, event.PRNumber)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			// First push; no prior review to resolve against. Quiet return.
-			return
-		}
-		o.logger.Warn("auto-resolve: load prior review",
-			"error", err, "pr", event.PRNumber)
-		return
-	}
-
-	owner, repo, err := splitRepoFullName(event.RepoFullName)
-	if err != nil {
-		o.logger.Warn("auto-resolve: bad repo name", "error", err)
-		return
-	}
-
-	interDiff, err := o.ghClient.GetCompareCommitsDiff(
-		ghCtx, event.InstallationID, owner, repo, prev.HeadSHA, event.HeadSHA)
-	if err != nil {
-		o.logger.Warn("auto-resolve: fetch inter-diff",
-			"error", err, "pr", event.PRNumber)
-		return
-	}
-	if interDiff == "" {
-		return
-	}
-
-	patchSet, err := diff.Parse(interDiff)
-	if err != nil {
-		// ERROR level: GitHub's own diff being unparseable means our
-		// parser regressed; surface it loudly.
-		o.logger.Error("auto-resolve: parse inter-diff",
-			"error", err, "pr", event.PRNumber)
-		return
-	}
-
 	// ThreadRegistry (#162): the prior review's hydrated thread links let
 	// auto-resolve prefer the stored (authoritative) node id over the live
-	// list's, falling back to proximity for rows predating the registry.
-	storedThreadIDs := o.storedThreadIDsForReview(ghCtx, prev.ID)
+	// list's, falling back to proximity for rows predating the registry. The
+	// previous-review id comes from the shared plan — a non-nil InterDiffPatch
+	// guarantees Resolve set PreviousReviewID (they're set together), so the
+	// deref is safe and we avoid re-fetching the prior review here.
+	storedThreadIDs := o.storedThreadIDsForReview(ghCtx, *plan.PreviousReviewID)
 	resolved, attempted, botUnresolved, apiCalls, resolvedKeys := o.autoResolveStaleComments(ghCtx, event, patchSet, storedThreadIDs)
 	// Persist whenever we touched GitHub — even a list-only call (0
 	// resolved, 0 attempted, 1 apiCall) is load operators may need to

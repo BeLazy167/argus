@@ -385,6 +385,29 @@ func (s *Store) GetReviewComments(ctx context.Context, reviewID uuid.UUID) ([]Re
 	return collectOrEmpty(rows, pgx.RowToStructByPos[ReviewComment])
 }
 
+// GetPRCompletedReviewComments returns review comments across ALL completed
+// reviews for a repo+PR, not just the single most-recent one. Incremental
+// re-reviews dedup against every prior finding on the PR, so a comment posted
+// two pushes ago is still visible to the current run. Ordered by file+line to
+// keep buildPriorComments' per-file grouping deterministic; caller dedupes.
+func (s *Store) GetPRCompletedReviewComments(ctx context.Context, repoID int64, prNumber int) ([]ReviewComment, error) {
+	rows, err := s.Pool.Query(ctx, `
+		SELECT rc.id, rc.review_id, rc.file_path, rc.start_line, rc.end_line, rc.side, rc.body, rc.severity, rc.category,
+		       rc.specialist, rc.confidence_score, rc.code_snippet, rc.github_comment_id,
+		       rc.matched_pattern_id, rc.matched_pattern_score, rc.enforced_rule_content, rc.is_new_finding,
+		       rc.created_at, rc.state, rc.suppressed_reason
+		FROM review_comments rc
+		JOIN reviews r ON rc.review_id = r.id
+		WHERE r.repo_id = $1 AND r.pr_number = $2 AND r.status = 'completed'
+		ORDER BY rc.file_path, rc.start_line, rc.created_at
+	`, repoID, prNumber)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return collectOrEmpty(rows, pgx.RowToStructByPos[ReviewComment])
+}
+
 func (s *Store) UpdateReviewStatus(ctx context.Context, id uuid.UUID, status, errMsg string, tokenUsage []byte) error {
 	_, err := s.Pool.Exec(ctx, `
 		UPDATE reviews SET status = $2, error = $3, token_usage = COALESCE($4, token_usage),
