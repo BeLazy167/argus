@@ -2552,6 +2552,10 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	}
 	var contractJSON []byte
 	if run.Contract != nil {
+		// Resolve a still-pending contract (intent stage fast-exited) to the
+		// production default before persisting, so the stored value matches the
+		// treat-empty-as-production behavior consumers already assume.
+		run.Contract.Finalize()
 		if b, err := json.Marshal(run.Contract); err != nil {
 			o.logger.Warn("failed to marshal review contract", "error", err)
 		} else {
