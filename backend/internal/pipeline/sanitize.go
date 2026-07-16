@@ -32,6 +32,31 @@ func wrapInDelimiters(tag, content string) string {
 	return "<" + tag + ">\n" + content + "\n</" + tag + ">"
 }
 
+// wrapSafeDelimiters wraps content in <tag>…</tag> after neutralising any literal
+// `tag` delimiter tokens inside content, so the content cannot close its own
+// delimiter (the wrap + tag-scrub halves of the prompt-safety idiom in one call).
+// The tag is a fixed literal chosen by the caller — never user input.
+func wrapSafeDelimiters(tag, content string) string {
+	return wrapInDelimiters(tag, scrubDelimiterToken(tag, content))
+}
+
+// scrubDelimiterToken breaks any <tag> / </tag> occurrences (case-insensitive)
+// inside content by swapping just the delimiter's ASCII angle brackets for
+// unicode look-alikes, so the LLM reads them as data rather than a closing tag.
+// Only the exact delimiter shape is touched: arbitrary '<' / '>' in code or diffs
+// (generics, comparisons, HTML) are preserved, so it is safe on source text that
+// wrapSafeDelimiters must not corrupt.
+func scrubDelimiterToken(tag, content string) string {
+	if content == "" {
+		return content
+	}
+	re := regexp.MustCompile(`(?i)<\s*/?\s*` + regexp.QuoteMeta(tag) + `\s*>`)
+	return re.ReplaceAllStringFunc(content, func(m string) string {
+		m = strings.ReplaceAll(m, "<", "‹")
+		return strings.ReplaceAll(m, ">", "›")
+	})
+}
+
 // ValidateCustomPrompt checks a user-written custom prompt for manipulation attempts.
 // Returns the prompt if valid, or an error message if blocked.
 func ValidateCustomPrompt(prompt string) (string, string) {
