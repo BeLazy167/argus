@@ -15,6 +15,9 @@ var AllowedKeys = map[string]struct{}{
 	"stage": {}, "status": {}, "action": {}, "trigger": {}, "deep_review": {},
 	"score": {}, "comment_count": {}, "thread_id": {}, "threads_checked": {},
 	"threads_attempted": {}, "threads_resolved": {}, "risks_found": {}, "linked_count": {},
+	// addressed-verification (#166): proximity candidates sent to the judge, and
+	// the subset it did not confirm (stayed open). Non-PII aggregate counts.
+	"threads_judged": {}, "threads_kept_open": {},
 	"issues_evaluated": {}, "reason": {}, "primary_review_id": {},
 	// incremental re-review fallback signal (incremental.fallback event) — commit
 	// SHAs are non-PII and pin which push turned an incremental into a full run.

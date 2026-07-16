@@ -307,6 +307,11 @@ type Orchestrator struct {
 	// route through it so the ledger stops disagreeing with GitHub. See
 	// finding_lifecycle.go.
 	findingLifecycle *FindingLifecycle
+	// addressedJudge verifies whether a push actually ADDRESSED a finding before
+	// auto-resolve fires EventAddressed (#166): proximity narrows the candidates,
+	// the judge confirms the fix. Prod = LLM-as-judge; tests inject a fake. A nil
+	// judge degrades safe (auto-resolve resolves nothing). See addressed_judge.go.
+	addressedJudge AddressedJudge
 	// crossPRHooks is the test-only injection point for the async cross-PR
 	// stage. nil in production — the stage falls back to the concrete
 	// st/ghClient/sm fields. Tests assign a non-nil *crossPRHooks to swap
@@ -347,6 +352,7 @@ func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, 
 	o.lifecycle = NewReviewLifecycle(db, st, sm, eventBus, logger)
 	o.incremental = NewIncrementalResolver(st, ghClient, logger)
 	o.findingLifecycle = NewFindingLifecycle(st, ghClient, logger)
+	o.addressedJudge = NewLLMAddressedJudge(o.reviewStage.registry, st, logger)
 	o.simEngine = NewSimulationEngine(o.reviewStage.registry, st, ghClient, logger)
 
 	sm.RegisterStage(StateTriaging, triageStage.Execute)
@@ -1289,7 +1295,8 @@ func (o *Orchestrator) autoResolveOnSynchronize(
 	// guarantees Resolve set PreviousReviewID (they're set together), so the
 	// deref is safe and we avoid re-fetching the prior review here.
 	storedThreadIDs := o.storedThreadIDsForReview(ghCtx, *plan.PreviousReviewID)
-	resolved, attempted, botUnresolved, apiCalls, resolvedKeys := o.autoResolveStaleComments(ghCtx, event, patchSet, storedThreadIDs)
+	stats := o.autoResolveStaleComments(ghCtx, event, patchSet, storedThreadIDs, dbInstallationID, dbRepoID)
+	resolved, attempted, botUnresolved, apiCalls, resolvedKeys := stats.resolved, stats.attempted, stats.botUnresolved, stats.apiCalls, stats.resolvedKeys
 	// Persist whenever we touched GitHub — even a list-only call (0
 	// resolved, 0 attempted, 1 apiCall) is load operators may need to
 	// see against their installation token budget.
@@ -1331,6 +1338,13 @@ func (o *Orchestrator) autoResolveOnSynchronize(
 		slog.String("repo", event.RepoFullName),
 		slog.Int("pr_number", event.PRNumber),
 		slog.Int("threads_checked", botUnresolved),
+		// threads_judged: proximity candidates sent to the AddressedJudge (#166);
+		// threads_kept_open: candidates the judge did NOT confirm (or judge
+		// failed) so they stay open — judged == attempted + kept_open. This lets
+		// the funnel separate "proximity matched but not actually fixed" from
+		// "confirmed and resolved".
+		slog.Int("threads_judged", stats.judged),
+		slog.Int("threads_kept_open", stats.keptOpen),
 		slog.Int("threads_attempted", attempted),
 		slog.Int("threads_resolved", resolved),
 		slog.String("trace_id", obs.TraceID(parent)),
@@ -1409,6 +1423,144 @@ func resolvedByReplyBody(headSHA string) string {
 	return fmt.Sprintf("✅ Resolved by `%s` — the flagged lines were modified in this push.", short)
 }
 
+// autoResolveStats is the outcome of one autoResolveStaleComments pass. resolved
+// / attempted / apiCalls / resolvedKeys drive the persisted auto_resolve_events
+// row (unchanged shape); botUnresolved / judged / keptOpen are telemetry-only
+// (#166): judged == attempted + keptOpen, so the funnel can split "proximity
+// matched but the judge said it was not actually fixed" (keptOpen) from
+// "confirmed and resolved" (resolved).
+type autoResolveStats struct {
+	resolved      int
+	attempted     int
+	botUnresolved int
+	apiCalls      int
+	judged        int
+	keptOpen      int
+	lineHits      int // proximity line-hit candidates (log-only)
+	fileHits      int // file-level fallback candidates (log-only)
+	resolvedKeys  []string
+}
+
+// addressedVerdictKind is the outcome of verifyThreadAddressed for one proximity
+// candidate.
+type addressedVerdictKind int
+
+const (
+	// verdictKeepOpen — the judge did NOT confirm a fix (or errored/was absent):
+	// leave the thread OPEN, resolve nothing. The degrade-safe outcome.
+	verdictKeepOpen addressedVerdictKind = iota
+	// verdictResolved — judge confirmed AND FindingLifecycle resolved the thread.
+	verdictResolved
+	// verdictResolveFailed — judge confirmed but the GitHub resolve failed; no
+	// breadcrumb, but the attempt still counts against the API budget.
+	verdictResolveFailed
+)
+
+const (
+	// judgeCallTimeout bounds each AddressedJudge (LLM) call on its OWN context,
+	// independent of the 30s GitHub-mutation ctx, so a slow judge can neither
+	// starve the resolves/replies sharing that budget nor run unbounded.
+	judgeCallTimeout = 12 * time.Second
+	// maxJudgeCallsPerPush caps how many proximity candidates we judge per push so
+	// a huge push (100s of stale threads) can't blow LLM spend. Candidates past
+	// the cap stay OPEN (degrade-safe) and are re-evaluated on the next push.
+	maxJudgeCallsPerPush = 20
+)
+
+// interDiffForFile returns the raw unified inter-diff for path (the file the
+// finding sits in) — the evidence the judge sees. Empty when the file is not in
+// the patch set (the judge then has no fix to point to and reports not-addressed,
+// which is degrade-safe).
+func interDiffForFile(patchSet *diff.PatchSet, path string) string {
+	for i := range patchSet.Files {
+		if patchSet.Files[i].NewName == path {
+			return patchSet.Files[i].RawDiff
+		}
+	}
+	return ""
+}
+
+// verifyThreadAddressed is the judge-gated resolution step for ONE proximity
+// candidate: it asks the AddressedJudge whether interDiff actually fixed the
+// finding and, only on a judge-confirmed fix, routes EventAddressed through
+// FindingLifecycle (ledger=addressed + thread resolved). It NEVER resolves on a
+// judge error/timeout or a not-addressed verdict — proximity alone must not
+// close a finding (#166) — so a judge failure degrades safe to keep-open. A nil
+// judge (misconfiguration) is treated the same way rather than silently
+// regressing to proximity-only resolving.
+//
+// GitHub-reply-free by design: the caller posts the convergence breadcrumb after
+// a verdictResolved, which keeps this method testable through the fakeable
+// FindingLifecycle + AddressedJudge seams alone.
+func (o *Orchestrator) verifyThreadAddressed(
+	ctx context.Context,
+	event ghpkg.PREvent,
+	owner, repo string,
+	t ghpkg.ReviewThread,
+	threadID string,
+	interDiff string,
+	dbInstallationID, dbRepoID int64,
+) (addressedVerdictKind, string) {
+	if o.addressedJudge == nil {
+		o.logger.Warn("auto-resolve: no addressed judge configured — leaving thread open (degrade-safe)",
+			"thread_id", threadID, "path", t.Path, "pr", event.PRNumber)
+		return verdictKeepOpen, "judge_unavailable"
+	}
+
+	// Bound each judge call on its OWN timeout, derived WithoutCancel so a
+	// near-exhausted GitHub-mutation deadline can't pre-empt the verdict and a
+	// slow judge can't eat that 30s budget. The per-push cap bounds how many of
+	// these we make (see the caller).
+	judgeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), judgeCallTimeout)
+	defer cancel()
+	addressed, reason, jerr := o.addressedJudge.Judge(judgeCtx, JudgeFinding{
+		Body:             t.Body,
+		Path:             t.Path,
+		Line:             t.Line,
+		DBInstallationID: dbInstallationID,
+		DBRepoID:         dbRepoID,
+	}, interDiff)
+	if jerr != nil {
+		// DEGRADE SAFE: never false-resolve on a judge failure/timeout.
+		o.logger.Warn("auto-resolve: judge error — leaving thread open (degrade-safe)",
+			"error", jerr, "thread_id", threadID, "path", t.Path, "pr", event.PRNumber)
+		return verdictKeepOpen, "judge_error"
+	}
+	if !addressed {
+		// Touched-but-not-fixed: stays OPEN. The judge-kept-open ANALYTICS event
+		// carries only non-PII counts/ids — the reason is an LLM paraphrase of the
+		// private finding + code diff, so it is logged Debug-only (no `event=`, so
+		// the PostHog handler never forwards it) and never egressed to analytics.
+		// No GitHub reply either — posting on every push would spam the thread.
+		o.logger.Info("auto-resolve: judge kept thread open",
+			slog.String("event", "auto_resolve.judge_kept_open"),
+			slog.Int("pr_number", event.PRNumber),
+			slog.String("thread_id", threadID),
+			slog.String("trace_id", obs.TraceID(ctx)))
+		o.logger.Debug("auto-resolve: judge kept-open reason", "thread_id", threadID, "reason", reason)
+		return verdictKeepOpen, reason
+	}
+
+	// Judge-confirmed fix: route through FindingLifecycle so the thread resolves
+	// AND the ledger moves to state=addressed. We already filtered to unresolved
+	// threads, so it resolves this (open) thread even if the ledger is already
+	// terminal; an untracked thread (pre-DB) is resolved directly inside.
+	res, _ := o.findingLifecycle.TransitionThread(ctx, ThreadTransition{
+		Event:          EventAddressed,
+		ThreadNodeID:   threadID,
+		RestCommentID:  t.FirstCommentID,
+		InstallationID: event.InstallationID,
+		Owner:          owner,
+		Repo:           repo,
+		PRNumber:       event.PRNumber,
+	})
+	if !res.ThreadResolved {
+		o.logger.Warn("auto-resolve: thread not resolved", "error", res.ThreadErr, "thread_id", threadID, "path", t.Path)
+		return verdictResolveFailed, reason
+	}
+	return verdictResolved, reason
+}
+
 // autoResolveStaleComments resolves bot review threads whose specific lines
 // were modified in the new push. Uses line-level checking: a thread is resolved
 // only if the changed lines in the inter-diff overlap with the comment's line
@@ -1421,15 +1573,26 @@ func resolvedByReplyBody(headSHA string) string {
 // comment lines happened to sit within the proximity window of a user's
 // diff. Now we only touch our own threads.
 //
-// Returns (resolvedCount, attemptedCount, apiCalls). apiCalls counts every
-// GitHub mutation we issued (ListReviewThreads + each ResolveReviewThread
-// attempt, success or failure) — persisted on auto_resolve_events so
-// operators can see rate-limit pressure.
-// autoResolveStaleComments returns:
+// Proximity is only the cheap PREFILTER now (#166): decideAutoResolveThread
+// narrows the candidate set, then verifyThreadAddressed asks the AddressedJudge
+// whether the inter-diff actually FIXED the finding before EventAddressed fires.
+// A candidate the judge does not confirm (or a judge error) stays OPEN — proximity
+// alone no longer resolves anything. This bounds judge cost to the proximity
+// candidate set and keeps a judge failure from ever false-resolving.
+//
+// apiCalls counts every GitHub mutation we issued (ListReviewThreads + each
+// ResolveReviewThread attempt, success or failure) — persisted on
+// auto_resolve_events so operators can see rate-limit pressure. The judge is an
+// LLM call, not a GitHub call, so it does NOT count against apiCalls; only a
+// judge-confirmed resolve attempt does.
+//
+// autoResolveStaleComments returns an autoResolveStats:
 //   - resolved / attempted / apiCalls: aggregate counters for auto_resolve_events.
 //   - botUnresolved: Argus threads found open on the PR before we decided which
-//     to touch. Distinct from attempted (which only counts decisions in favour
-//     of resolving) — feeds the PostHog "stale-comment pressure" funnel.
+//     to touch. Distinct from attempted (which only counts judge-confirmed
+//     resolve attempts) — feeds the PostHog "stale-comment pressure" funnel.
+//   - judged / keptOpen: proximity candidates sent to the judge, and the subset
+//     it did NOT confirm (stayed open). judged == attempted + keptOpen.
 //   - resolvedKeys: "<path>:<line>" keys for each thread actually resolved.
 //     Consumed by hydratePriorFindings via the migration-041 join column so
 //     the async cross-PR stage can drop prior findings whose threads are
@@ -1448,49 +1611,101 @@ func (o *Orchestrator) autoResolveStaleComments(
 	event ghpkg.PREvent,
 	patchSet *diff.PatchSet,
 	storedThreadIDs map[int64]string,
-) (resolved, attempted, botUnresolved, apiCalls int, resolvedKeys []string) {
+	dbInstallationID, dbRepoID int64,
+) autoResolveStats {
 	owner, repo, err := splitRepoFullName(event.RepoFullName)
 	if err != nil {
 		o.logger.Warn("auto-resolve: bad repo name", "error", err)
-		return 0, 0, 0, 0, nil
+		return autoResolveStats{}
 	}
 
 	threads, err := o.ghClient.ListReviewThreads(ctx, event.InstallationID, owner, repo, event.PRNumber)
-	apiCalls++ // count the list call regardless of outcome
 	if err != nil {
 		o.logger.Warn("auto-resolve: listing threads", "error", err)
-		return 0, 0, 0, apiCalls, nil
+		return autoResolveStats{apiCalls: 1} // the list call still counts
 	}
 
-	// Build per-file changed line sets and a file-presence set
+	o.logger.Info("auto-resolve: found threads", "total", len(threads), "changed_files", len(patchSet.Files), "pr", event.PRNumber)
+
+	// The judge-gated candidate loop is extracted so it's testable without a
+	// GitHub client — it uses only the fakeable FindingLifecycle + AddressedJudge
+	// seams and returns the REST comment ids to reply to.
+	stats, replyTo := o.resolveCandidates(ctx, event, owner, repo, threads, storedThreadIDs, patchSet, dbInstallationID, dbRepoID)
+	stats.apiCalls++ // the ListReviewThreads call
+
+	// Convergence breadcrumbs: a brief "resolved by <short-sha>" reply per
+	// resolved thread, posted AFTER the resolve succeeded so we never claim
+	// "resolved" on a thread we failed to close. Best-effort — a failed reply is
+	// cosmetic.
+	for _, restID := range replyTo {
+		stats.apiCalls++
+		if _, err := o.ghClient.ReplyToComment(ctx, event.InstallationID, owner, repo, event.PRNumber, restID, resolvedByReplyBody(event.HeadSHA)); err != nil {
+			o.logger.Warn("auto-resolve: resolved-by reply failed", "error", err, "rest_id", restID)
+		}
+	}
+
+	o.logger.Info("auto-resolve complete",
+		"resolved", stats.resolved, "attempted", stats.attempted,
+		"bot_unresolved", stats.botUnresolved,
+		"judged", stats.judged, "kept_open", stats.keptOpen,
+		"line_level_hits", stats.lineHits, "file_level_fallbacks", stats.fileHits,
+		"api_calls", stats.apiCalls,
+		"resolved_keys", len(stats.resolvedKeys),
+		"pr", event.PRNumber)
+	return stats
+}
+
+// resolveCandidates runs the judge-gated resolution over the already-listed
+// threads: proximity (decideAutoResolveThread) narrows candidates, the per-push
+// cap bounds judge spend, and verifyThreadAddressed resolves only judge-confirmed
+// fixes through FindingLifecycle. Returns the stats plus the REST comment ids of
+// resolved threads for the caller's best-effort convergence replies. Extracted
+// from autoResolveStaleComments so the cap + judge gate are unit-testable through
+// the fakeable seams alone (no GitHub client).
+func (o *Orchestrator) resolveCandidates(
+	ctx context.Context,
+	event ghpkg.PREvent,
+	owner, repo string,
+	threads []ghpkg.ReviewThread,
+	storedThreadIDs map[int64]string,
+	patchSet *diff.PatchSet,
+	dbInstallationID, dbRepoID int64,
+) (autoResolveStats, []int64) {
+	// Build per-file changed line sets and a file-presence set.
 	changedFiles := make(map[string]bool)
 	fileChangedLines := make(map[string]map[int]bool)
-	const lineProximity = 3 // resolve if changed line is within 3 lines of comment
+	const lineProximity = 3 // candidate if changed line is within 3 lines of comment
 	for _, f := range patchSet.Files {
 		changedFiles[f.NewName] = true
 		fileChangedLines[f.NewName] = f.ChangedLines()
 	}
 
-	o.logger.Info("auto-resolve: found threads", "total", len(threads), "changed_files", len(changedFiles), "pr", event.PRNumber)
-
-	var lineHit, fileHit int
+	stats := autoResolveStats{}
+	var replyTo []int64
 	for _, t := range threads {
 		if t.IsResolved || !ghpkg.IsArgusThread(t.AuthorLogin, o.cfg.GitHubAppSlug) {
 			continue
 		}
-		botUnresolved++
+		stats.botUnresolved++
 
 		decision := decideAutoResolveThread(t, changedFiles, fileChangedLines, lineProximity)
 		switch decision.kind {
 		case autoResolveSkip:
 			continue
 		case autoResolveLineHit:
-			lineHit++
+			stats.lineHits++
 		case autoResolveFileHit:
-			fileHit++
+			stats.fileHits++
 		}
 
-		attempted++
+		// Per-push spend ceiling: once we've judged the cap, remaining candidates
+		// stay OPEN (degrade-safe) — never proximity-resolved — and are picked up
+		// on the next push. This bounds LLM calls even on a huge stale-thread push.
+		if stats.judged >= maxJudgeCallsPerPush {
+			stats.keptOpen++
+			continue
+		}
+
 		// Prefer the ThreadRegistry-hydrated node id (keyed on the thread's
 		// first-comment REST id) when present; else use the live list's node id.
 		// The two are the same stable GraphQL node for our own threads.
@@ -1498,38 +1713,29 @@ func (o *Orchestrator) autoResolveStaleComments(
 		if stored, ok := storedThreadIDs[t.FirstCommentID]; ok {
 			threadID = stored
 		}
-		apiCalls++ // one mutation per attempt (TransitionThread issues one ResolveReviewThread)
-		// Route through FindingLifecycle so an auto-resolved thread ALSO moves the
-		// DB ledger to state=addressed — the ledger used to silently disagree with
-		// GitHub here. We already filtered to unresolved threads, so it resolves
-		// this (open) thread even if the ledger is already terminal (a reopened
-		// thread gets re-closed). A thread with no tracked finding row (pre-DB /
-		// unmapped) is resolved directly inside TransitionThread — no ledger.
-		res, _ := o.findingLifecycle.TransitionThread(ctx, ThreadTransition{
-			Event:          EventAddressed,
-			ThreadNodeID:   threadID,
-			RestCommentID:  t.FirstCommentID,
-			InstallationID: event.InstallationID,
-			Owner:          owner,
-			Repo:           repo,
-			PRNumber:       event.PRNumber,
-		})
-		if !res.ThreadResolved {
-			o.logger.Warn("auto-resolve: thread not resolved", "error", res.ThreadErr, "thread_id", threadID, "path", t.Path)
+
+		// Verify the fix before resolving: proximity got us here, the judge decides.
+		stats.judged++
+		verdict, _ := o.verifyThreadAddressed(ctx, event, owner, repo, t, threadID,
+			interDiffForFile(patchSet, t.Path), dbInstallationID, dbRepoID)
+		if verdict == verdictKeepOpen {
+			stats.keptOpen++
 			continue
 		}
-		// Convergence breadcrumb: a brief "resolved by <short-sha>" reply, posted
-		// AFTER the resolve actually succeeded so we never claim "resolved" on a
-		// thread we failed to close. Best-effort — a failed reply is cosmetic.
-		if t.FirstCommentID != 0 {
-			apiCalls++
-			if _, err := o.ghClient.ReplyToComment(ctx, event.InstallationID, owner, repo, event.PRNumber, t.FirstCommentID, resolvedByReplyBody(event.HeadSHA)); err != nil {
-				o.logger.Warn("auto-resolve: resolved-by reply failed", "error", err, "thread_id", t.ID, "path", t.Path)
-			}
+
+		// verdictResolved / verdictResolveFailed both issued one ResolveReviewThread.
+		stats.attempted++
+		stats.apiCalls++
+		if verdict == verdictResolveFailed {
+			continue
 		}
-		resolved++
+
+		stats.resolved++
 		if decision.joinKey != "" {
-			resolvedKeys = append(resolvedKeys, decision.joinKey)
+			stats.resolvedKeys = append(stats.resolvedKeys, decision.joinKey)
+		}
+		if t.FirstCommentID != 0 {
+			replyTo = append(replyTo, t.FirstCommentID)
 		}
 		// comment.thread_resolved fires per successful thread close — volume
 		// here can be high on a big push (tens per synchronize). We still
@@ -1543,15 +1749,7 @@ func (o *Orchestrator) autoResolveStaleComments(
 			slog.String("trace_id", obs.TraceID(ctx)),
 		)
 	}
-
-	o.logger.Info("auto-resolve complete",
-		"resolved", resolved, "attempted", attempted,
-		"bot_unresolved", botUnresolved,
-		"line_level_hits", lineHit, "file_level_fallbacks", fileHit,
-		"api_calls", apiCalls,
-		"resolved_keys", len(resolvedKeys),
-		"pr", event.PRNumber)
-	return resolved, attempted, botUnresolved, apiCalls, resolvedKeys
+	return stats, replyTo
 }
 
 // enrichFindings runs the per-finding memory-enrichment pass over
