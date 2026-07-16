@@ -41,6 +41,35 @@ func TestIsArgusThread(t *testing.T) {
 	}
 }
 
+// TestIsPrivilegedAssociation is the canonical truth-table for the
+// maintainer-trust gate used by `@argus resolve` and the reply-path shortcut:
+// only owner/member/collaborator; everyone else (and unknown/empty) is denied
+// fail-closed. Case-insensitive + whitespace-trimmed.
+func TestIsPrivilegedAssociation(t *testing.T) {
+	tests := []struct {
+		assoc string
+		want  bool
+	}{
+		{"OWNER", true},
+		{"MEMBER", true},
+		{"COLLABORATOR", true},
+		{"collaborator", true}, // case-insensitive
+		{"  member  ", true},   // trimmed
+		{"CONTRIBUTOR", false}, // has contributed but is not a maintainer
+		{"FIRST_TIME_CONTRIBUTOR", false},
+		{"FIRST_TIMER", false},
+		{"NONE", false}, // fork contributor on someone else's repo
+		{"MANNEQUIN", false},
+		{"", false}, // fail-closed on missing association
+		{"garbage", false},
+	}
+	for _, tt := range tests {
+		if got := IsPrivilegedAssociation(tt.assoc); got != tt.want {
+			t.Errorf("IsPrivilegedAssociation(%q) = %v, want %v", tt.assoc, got, tt.want)
+		}
+	}
+}
+
 // TestIsArgusThreadCustomSlug pins that identity follows the configured App
 // slug, not a hardcoded name — self-hosts rename the App freely.
 func TestIsArgusThreadCustomSlug(t *testing.T) {

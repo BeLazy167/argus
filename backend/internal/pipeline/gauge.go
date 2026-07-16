@@ -157,8 +157,15 @@ func (o *Orchestrator) detectFindingOutcomes(ctx context.Context, event ghpkg.PR
 
 	if !event.Merged {
 		for _, f := range findings {
+			// comment_outcomes carries the gauge's 'deferred' signal; the ledger
+			// carries the terminal state. Both are written so they never disagree.
 			if err := o.st.RecordFindingOutcome(ctx, f.ID, OutcomeDeferred, nil); err != nil {
 				o.logger.Warn("[gauge] recording deferred outcome", "error", err, "comment_id", f.ID)
+			}
+			// Revive the previously-dead 'deferred' ledger state (ledger-only; no
+			// live thread worth resolving on a closed-unmerged PR).
+			if _, err := o.findingLifecycle.Transition(ctx, FindingTransition{FindingID: f.ID, Event: EventDeferred}); err != nil {
+				o.logger.Warn("[gauge] deferred lifecycle transition", "error", err, "comment_id", f.ID)
 			}
 		}
 		o.logger.Info("[gauge] PR closed unmerged — findings deferred", "pr", event.PRNumber, "repo", event.RepoFullName, "findings", len(findings))
@@ -212,6 +219,19 @@ func (o *Orchestrator) detectFindingOutcomes(ctx context.Context, event ghpkg.PR
 		if err := o.st.RecordFindingOutcome(ctx, f.ID, outcome, &now); err != nil {
 			o.logger.Warn("[gauge] recording addressed outcome", "error", err, "comment_id", f.ID)
 			continue
+		}
+		// Reconcile the ledger with the gauge's addressed_* signal: move the
+		// finding to state=addressed so review_comments.state and comment_outcomes
+		// agree. comment_outcomes keeps the human/agent axis the single ledger
+		// state can't express. LEDGER-ONLY (EventAddressedAtMerge): the gauge runs
+		// post-close and does not check thread openness, and thread resolution
+		// during the PR's life was auto-resolve's job — the PR is now closed, the
+		// thread moot. Usually a no-op (auto-resolve already set addressed).
+		if _, err := o.findingLifecycle.Transition(ctx, FindingTransition{
+			FindingID: f.ID,
+			Event:     EventAddressedAtMerge,
+		}); err != nil {
+			o.logger.Warn("[gauge] addressed lifecycle transition", "error", err, "comment_id", f.ID)
 		}
 		if outcome == OutcomeAddressedHuman {
 			addressedHuman++

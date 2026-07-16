@@ -302,6 +302,11 @@ type Orchestrator struct {
 	// inter-diff) shared by HandlePREvent, the retry paths, and auto-resolve, so
 	// the inter-diff GitHub round-trip fires once per push. See incremental.go.
 	incremental *IncrementalResolver
+	// findingLifecycle is the single Transition surface over the finding ledger
+	// (review_comments.state) and the GitHub thread. Auto-resolve and the gauge
+	// route through it so the ledger stops disagreeing with GitHub. See
+	// finding_lifecycle.go.
+	findingLifecycle *FindingLifecycle
 	// crossPRHooks is the test-only injection point for the async cross-PR
 	// stage. nil in production — the stage falls back to the concrete
 	// st/ghClient/sm fields. Tests assign a non-nil *crossPRHooks to swap
@@ -341,6 +346,7 @@ func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, 
 	}
 	o.lifecycle = NewReviewLifecycle(db, st, sm, eventBus, logger)
 	o.incremental = NewIncrementalResolver(st, ghClient, logger)
+	o.findingLifecycle = NewFindingLifecycle(st, ghClient, logger)
 	o.simEngine = NewSimulationEngine(o.reviewStage.registry, st, ghClient, logger)
 
 	sm.RegisterStage(StateTriaging, triageStage.Execute)
@@ -1485,28 +1491,41 @@ func (o *Orchestrator) autoResolveStaleComments(
 		}
 
 		attempted++
-		// Convergence breadcrumb: a brief "resolved by <short-sha>" reply on
-		// the thread BEFORE resolving it, so the author sees why the thread
-		// closed. Best-effort — a failed reply never blocks the resolution.
+		// Prefer the ThreadRegistry-hydrated node id (keyed on the thread's
+		// first-comment REST id) when present; else use the live list's node id.
+		// The two are the same stable GraphQL node for our own threads.
+		threadID := t.ID
+		if stored, ok := storedThreadIDs[t.FirstCommentID]; ok {
+			threadID = stored
+		}
+		apiCalls++ // one mutation per attempt (TransitionThread issues one ResolveReviewThread)
+		// Route through FindingLifecycle so an auto-resolved thread ALSO moves the
+		// DB ledger to state=addressed — the ledger used to silently disagree with
+		// GitHub here. We already filtered to unresolved threads, so it resolves
+		// this (open) thread even if the ledger is already terminal (a reopened
+		// thread gets re-closed). A thread with no tracked finding row (pre-DB /
+		// unmapped) is resolved directly inside TransitionThread — no ledger.
+		res, _ := o.findingLifecycle.TransitionThread(ctx, ThreadTransition{
+			Event:          EventAddressed,
+			ThreadNodeID:   threadID,
+			RestCommentID:  t.FirstCommentID,
+			InstallationID: event.InstallationID,
+			Owner:          owner,
+			Repo:           repo,
+			PRNumber:       event.PRNumber,
+		})
+		if !res.ThreadResolved {
+			o.logger.Warn("auto-resolve: thread not resolved", "error", res.ThreadErr, "thread_id", threadID, "path", t.Path)
+			continue
+		}
+		// Convergence breadcrumb: a brief "resolved by <short-sha>" reply, posted
+		// AFTER the resolve actually succeeded so we never claim "resolved" on a
+		// thread we failed to close. Best-effort — a failed reply is cosmetic.
 		if t.FirstCommentID != 0 {
 			apiCalls++
 			if _, err := o.ghClient.ReplyToComment(ctx, event.InstallationID, owner, repo, event.PRNumber, t.FirstCommentID, resolvedByReplyBody(event.HeadSHA)); err != nil {
 				o.logger.Warn("auto-resolve: resolved-by reply failed", "error", err, "thread_id", t.ID, "path", t.Path)
 			}
-		}
-		// Prefer the ThreadRegistry-hydrated node id (keyed on the thread's
-		// first-comment REST id) when present; else use the live list's node id.
-		// The two are the same stable GraphQL node for our own threads, so this
-		// is behaviour-preserving — it just routes resolution through the stored
-		// link where one exists.
-		threadID := t.ID
-		if stored, ok := storedThreadIDs[t.FirstCommentID]; ok {
-			threadID = stored
-		}
-		apiCalls++ // one mutation per attempt
-		if err := o.ghClient.ResolveReviewThread(ctx, event.InstallationID, threadID); err != nil {
-			o.logger.Warn("auto-resolve: resolve thread failed", "error", err, "thread_id", threadID, "path", t.Path)
-			continue
 		}
 		resolved++
 		if decision.joinKey != "" {
@@ -4303,8 +4322,16 @@ func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghRe
 	}
 }
 
-// backfillGitHubCommentIDs fetches the actual GitHub comment IDs from the
-// posted review and updates the pre-persisted review_comments rows.
+// backfillGitHubCommentIDs binds each just-posted GitHub review comment to its
+// pre-persisted review_comments row, 1:1. The old implementation matched on
+// (review_id, file_path, end_line) with no LIMIT, so two findings on the SAME
+// line collapsed onto one github_comment_id — and the ThreadRegistry hydration
+// join (keyed on github_comment_id) then gave both rows the SAME thread node id,
+// so dismissing finding B would resolve finding A's thread (#171 fold-forward).
+//
+// Now the pairing runs in Go (pairCommentsToRows): each posted comment claims
+// exactly one row on its (path, line), preferring an exact body match, so
+// same-line findings bind to distinct rows and distinct threads.
 func (o *Orchestrator) backfillGitHubCommentIDs(ctx context.Context, run *PipelineRun, ghReviewID int64, owner, repo string) {
 	if ghReviewID == 0 {
 		return
@@ -4314,21 +4341,30 @@ func (o *Orchestrator) backfillGitHubCommentIDs(ctx context.Context, run *Pipeli
 		o.logger.Error("listing review comments for backfill", "error", err)
 		return
 	}
-	updated := 0
+	rows, err := o.st.ListUnboundReviewComments(ctx, run.ReviewID)
+	if err != nil {
+		o.logger.Error("loading unbound review comments for backfill", "error", err, "review_id", run.ReviewID)
+		return
+	}
+	unbound := make([]unboundCommentRow, 0, len(rows))
+	for _, r := range rows {
+		unbound = append(unbound, unboundCommentRow{ID: r.ID, Path: r.FilePath, Line: r.Line, Body: r.Body})
+	}
+	posted := make([]postedComment, 0, len(ghComments))
 	for _, gc := range ghComments {
 		line := gc.GetLine()
 		if line == 0 {
 			line = gc.GetPosition()
 		}
-		ghID := gc.GetID()
-		_, err := o.db.Exec(ctx, `
-			UPDATE review_comments
-			SET github_comment_id = $1
-			WHERE review_id = $2 AND file_path = $3 AND end_line = $4 AND github_comment_id IS NULL
-		`, ghID, run.ReviewID, gc.GetPath(), line)
+		posted = append(posted, postedComment{GithubID: gc.GetID(), Path: gc.GetPath(), Line: line, Body: gc.GetBody()})
+	}
+
+	updated := 0
+	for commentID, ghID := range pairCommentsToRows(unbound, posted) {
+		ok, err := o.st.BindGitHubCommentID(ctx, commentID, ghID)
 		if err != nil {
-			o.logger.Error("backfilling github_comment_id", "error", err, "file", gc.GetPath(), "line", line)
-		} else {
+			o.logger.Error("backfilling github_comment_id", "error", err, "comment_id", commentID)
+		} else if ok {
 			updated++
 		}
 	}

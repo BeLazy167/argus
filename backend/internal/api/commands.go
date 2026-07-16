@@ -321,6 +321,18 @@ func classifyResolveError(err error) (phrase string, fatal bool) {
 // Auto-resolve on push (orchestrator.autoResolveOnSynchronize)
 // stays the cautious path; manual invocation is the trust-the-operator path.
 func (s *Server) handleResolveCommand(ctx context.Context, evt ghpkg.IssueCommentEvent, owner, repo string, ghClient *ghpkg.Client) {
+	// Authorization: `@argus resolve` writes the terminal 'resolved' ledger state
+	// and closes threads (clearing them from the merge-gate view), so it is
+	// maintainer-only. Issue comments come from the same untrusted population as
+	// reactions — a drive-by fork contributor must not resolve findings.
+	if !ghpkg.IsPrivilegedAssociation(evt.AuthorAssociation) {
+		s.logger.Info("resolve: unauthorized commenter", "author", evt.CommentAuthor, "association", evt.AuthorAssociation, "pr", evt.PRNumber)
+		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
+		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
+			"Only repository maintainers (owner, member, or collaborator) can resolve Argus threads.")
+		return
+	}
+
 	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "eyes")
 
 	threads, err := ghClient.ListReviewThreads(ctx, evt.InstallationID, owner, repo, evt.PRNumber)
@@ -344,13 +356,32 @@ func (s *Server) handleResolveCommand(ctx context.Context, evt ghpkg.IssueCommen
 		return
 	}
 
+	// Route every close through FindingLifecycle.TransitionThread so the manual
+	// resolve ALSO records the ledger state (state=resolved) — the map
+	// thread→finding + route/direct-resolve glue lives (and is tested) in the
+	// module. We already filtered to unresolved threads, so it resolves each open
+	// thread; a tracked finding also moves the ledger, an untracked (legacy)
+	// thread is resolved directly.
+	lifecycle := pipeline.NewFindingLifecycle(s.store, ghClient, s.logger)
 	var resolved, failed int
 	var firstErrPhrase string // classified reason to surface to the user
 	for _, t := range unresolvedBot {
-		resolveErr := ghClient.ResolveReviewThread(ctx, evt.InstallationID, t.ID)
-		if resolveErr == nil {
+		res, _ := lifecycle.TransitionThread(ctx, pipeline.ThreadTransition{
+			Event:          pipeline.EventResolvedManually,
+			ThreadNodeID:   t.ID,
+			RestCommentID:  t.FirstCommentID,
+			InstallationID: evt.InstallationID,
+			Owner:          owner,
+			Repo:           repo,
+			PRNumber:       evt.PRNumber,
+		})
+		if res.ThreadResolved {
 			resolved++
 			continue
+		}
+		resolveErr := res.ThreadErr
+		if resolveErr == nil {
+			resolveErr = errors.New("thread not resolved")
 		}
 		s.logger.Error("resolve: resolve thread", "error", resolveErr, "thread_id", t.ID)
 		failed++

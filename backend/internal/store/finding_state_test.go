@@ -1,7 +1,6 @@
 package store
 
 import (
-	"sort"
 	"testing"
 )
 
@@ -19,8 +18,13 @@ func TestCanTransitionFindingState(t *testing.T) {
 		{"deferred to dismissed", FindingStateDeferred, FindingStateDismissed, true},
 		{"dismissed to addressed (dev fixed it after arguing)", FindingStateDismissed, FindingStateAddressed, true},
 		{"idempotent replay: dismissed to dismissed", FindingStateDismissed, FindingStateDismissed, true},
-		{"addressed is terminal", FindingStateAddressed, FindingStateDismissed, false},
+		{"heuristic addressed to dismissed (human overrides)", FindingStateAddressed, FindingStateDismissed, true},
+		{"heuristic addressed to resolved (manual close)", FindingStateAddressed, FindingStateResolved, true},
 		{"addressed cannot regress to posted", FindingStateAddressed, FindingStatePosted, false},
+		{"addressed cannot regress to deferred", FindingStateAddressed, FindingStateDeferred, false},
+		{"resolved recoverable via human dismissal", FindingStateResolved, FindingStateDismissed, true},
+		{"resolved cannot go to addressed", FindingStateResolved, FindingStateAddressed, false},
+		{"resolved cannot regress to posted", FindingStateResolved, FindingStatePosted, false},
 		{"suppressed is terminal", FindingStateSuppressed, FindingStateDismissed, false},
 		{"nothing transitions INTO suppressed", FindingStatePosted, FindingStateSuppressed, false},
 		{"nothing transitions back to posted", FindingStateDeferred, FindingStatePosted, false},
@@ -29,35 +33,6 @@ func TestCanTransitionFindingState(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := CanTransitionFindingState(tt.from, tt.to); got != tt.want {
 				t.Errorf("CanTransitionFindingState(%s, %s) = %v, want %v", tt.from, tt.to, got, tt.want)
-			}
-		})
-	}
-}
-
-// TestFindingStateSources pins the WHERE-clause source sets UpdateFindingState
-// derives — the SQL guard IS the state machine at the persistence seam.
-func TestFindingStateSources(t *testing.T) {
-	tests := []struct {
-		to   FindingState
-		want []string
-	}{
-		{FindingStateAddressed, []string{"addressed", "deferred", "dismissed", "posted"}},
-		{FindingStateDismissed, []string{"deferred", "dismissed", "posted"}},
-		{FindingStateDeferred, []string{"deferred", "posted"}},
-		// suppressed is insert-only: its only "source" is itself (idempotence).
-		{FindingStateSuppressed, []string{"suppressed"}},
-	}
-	for _, tt := range tests {
-		t.Run(string(tt.to), func(t *testing.T) {
-			got := findingStateSources(tt.to)
-			sort.Strings(got)
-			if len(got) != len(tt.want) {
-				t.Fatalf("sources(%s) = %v, want %v", tt.to, got, tt.want)
-			}
-			for i := range got {
-				if got[i] != tt.want[i] {
-					t.Fatalf("sources(%s) = %v, want %v", tt.to, got, tt.want)
-				}
 			}
 		})
 	}

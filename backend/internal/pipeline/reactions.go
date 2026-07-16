@@ -21,6 +21,7 @@ type ReactionAnalyzer struct {
 	ghClient    *ghpkg.Client
 	memRegistry *memory.Registry
 	logger      *slog.Logger
+	lifecycle   *FindingLifecycle
 }
 
 func NewReactionAnalyzer(st *store.Store, ghClient *ghpkg.Client, memRegistry *memory.Registry, logger *slog.Logger) *ReactionAnalyzer {
@@ -29,6 +30,7 @@ func NewReactionAnalyzer(st *store.Store, ghClient *ghpkg.Client, memRegistry *m
 		ghClient:    ghClient,
 		memRegistry: memRegistry,
 		logger:      logger,
+		lifecycle:   NewFindingLifecycle(st, ghClient, logger),
 	}
 }
 
@@ -130,11 +132,18 @@ func (ra *ReactionAnalyzer) HandleCommentReactions(ctx context.Context, event gh
 		recordPatternOutcome(ctx, ra.store, ra.logger, comment.MatchedPatternID, action)
 	}
 
-	// Follow-up ledger: a 👎-dominant comment is dismissed. Transition-guarded
-	// and idempotent in the store; non-fatal.
+	// Finding lifecycle: a 👎-dominant comment is dismissed in the LEDGER ONLY
+	// (EventReactionDismissed → no thread resolution). A reaction is an untrusted,
+	// low-effort signal swept from any user on every PR event; letting it drive
+	// ResolveReviewThread would let a fork contributor clear a finding from the
+	// merge-gate view via the app's write token. state=dismissed still feeds
+	// suppression memory — the pre-#165 behavior. Non-fatal.
 	if action == "dismissed" {
-		if _, err := ra.store.UpdateFindingState(ctx, comment.ID, store.FindingStateDismissed); err != nil {
-			ra.logger.Warn("reaction: updating finding state", "error", err, "comment_id", comment.ID)
+		if _, err := ra.lifecycle.Transition(ctx, FindingTransition{
+			FindingID: comment.ID,
+			Event:     EventReactionDismissed,
+		}); err != nil {
+			ra.logger.Warn("reaction: finding lifecycle transition", "error", err, "comment_id", comment.ID)
 		}
 	}
 
