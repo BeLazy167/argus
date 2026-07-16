@@ -159,9 +159,27 @@ stateDiagram-v2
 
 Before the pipeline runs, `postStartedComment()` posts a rich markdown issue comment containing the model name, persona, review mode (deep/incremental), and a live-watch link to the dashboard (`https://argus.reviews/reviews/{id}`). The comment's GraphQL node ID is captured into `run.StartedCommentNodeID`. After the full review is posted, `post()` calls `MinimizeComment()` with classifier `"RESOLVED"` to collapse the started comment.
 
+### Auto-Run Gate
+
+Before the pipeline runs, `decideAutoRun()` (`internal/pipeline/persona.go`) decides whether a webhook PR event reviews automatically:
+
+- **Manual** triggers (`@argus-eye review`, the Trigger checkbox — `event.Action == "manual"`) always review — explicit user intent.
+- **Self-hosted** deploys (`SELF_HOSTED=true`) always review, unconditionally — there is no billing to gate, so stored settings are ignored.
+- Otherwise the stored `auto_run` flag decides, **default ON**: `IsAutoRunEnabled` resolves a repo-explicit value first, else the org default, else on (a nil flag at both levels → on). A repo or org that sets `auto_run: false` opts out. The gate **fails closed** — when `GetOrgDefaults` errors, a repo with no explicit flag does NOT apply the on-by-default (we cannot prove the org did not opt out), mirroring the auto-resolve gate.
+
+When auto-run is off, an honored event (opened/synchronize/reopened) is not a silent no-op: `signalAutoRunDisabled()` posts the one-shot "Trigger Argus review" checkbox comment (token/cost preview from `BuildEstimate`) once per PR, deduped on an `auto_run_disabled` marker review row so later pushes don't re-post.
+
+Auto-resolve is gated separately (`IsAutoResolveEnabled`, also default ON) and runs on **every** synchronize regardless of auto-run — it is pure-diff and costs no LLM review spend, so a manual-review repo still gets stale threads cleared when a push fixes them.
+
 ### Incremental Re-Review
 
-On `synchronize` events (new commits pushed to PR), `HandlePREvent()` fetches the last completed review's `HeadSHA` and calls `GetCompareCommitsDiff()` for the inter-commit diff. The `PipelineRun` gains `IsIncremental` and `PreviousReviewID` fields. `synthesize()` uses "Argus Review (Incremental)" header and "Re-reviewed" verb.
+On `synchronize` (new commits pushed to an open PR), `IncrementalResolver.Resolve()` (`internal/pipeline/incremental.go`) computes the re-review plan **once per push** as an `IncrementalPlan`, shared by the review path and the auto-resolve goroutine:
+
+- **Inter-diff.** It fetches the diff between the last *completed* review's `HeadSHA` and the new head via `GetCompareCommitsDiff()` — only what changed since the last review, not the whole PR. Exactly one compare round-trip per push (previously the review and auto-resolve paths each fetched it). When usable, this inter-diff replaces the full diff so the review is scoped to the new commits.
+- **Priors across all reviews.** `PriorComments` aggregates and dedupes unresolved findings across **every** completed review on the PR — not just the most recent — so incremental dedup sees every previously-flagged issue and can avoid re-posting or verify fixes.
+- **Full-review fallback.** When a prior review exists but a usable inter-diff cannot be produced — fetch error, empty compare (force-push or base change rewrote history), or a diff parse failure — the plan sets `Fallback` and the pipeline reviews the full diff instead. The resolver surfaces this as an `incremental.fallback` observability event (parse failures at Error level, the rest at Warn), so a silent, costly full run leaves a trace. A first push with no prior completed review is the ordinary full-review case, not a fallback.
+
+The `PipelineRun` carries `IsIncremental` and `PreviousReviewID`; `synthesize()` uses the "Argus Review (Incremental)" header and "Re-reviewed" verb.
 
 ### Recovery
 
@@ -260,7 +278,46 @@ Exemptions and scoping:
 
 - **Security findings and permanent checks are exempt** — feedback can downgrade them, never mute them.
 - **Change-kind scoping:** dismissals from prototype/one-off-era PRs do not silence production or migration reviews.
-- **Re-review resolution:** when new commits fix a previously posted finding, Argus replies "Resolved by `<sha>`" and resolves the thread.
+- **Re-review resolution:** when a push modifies a previously flagged finding's lines, auto-resolve resolves the thread — but only after the addressed-judge confirms the change actually fixed it (see [Comment Lifecycle](#comment-lifecycle)).
+
+---
+
+## Comment Lifecycle
+
+Every posted finding has exactly one terminal lifecycle state, reconciled across the GitHub review thread and the DB ledger by the **FindingLifecycle** module (`internal/pipeline/finding_lifecycle.go`). `Transition()` is the ONLY writer of `review_comments.state` and the ONLY caller of GitHub thread resolution for a finding's lifecycle — every writer (reply, reaction, auto-resolve, `@argus resolve`, the PR-closed gauge) routes through it, so the thread state and the ledger cannot drift.
+
+### States (`review_comments.state`)
+
+| State | Meaning | Set by |
+|-------|---------|--------|
+| `posted` | Shipped to the PR, no outcome yet (column default) | insert |
+| `addressed` | The flagged problem was fixed — **judge-verified** (below) | auto-resolve on synchronize; a privileged reply confirming the fix; the gauge at merge |
+| `dismissed` | The developer rejected the finding | a privileged reply, or a 👎-dominant reaction (ledger-only) |
+| `deferred` | Acknowledged but not fixed — PR closed without merging | the gauge on an unmerged close |
+| `resolved` | A maintainer explicitly closed the threads via `@argus resolve` | the resolve command (maintainer-only) |
+| `suppressed` | Never posted — dropped by the suppression pass | insert only |
+
+### Transitions & the authorization boundary
+
+FindingLifecycle splits events into DECISIONS (record the ledger first, then best-effort resolve the thread) and ASSERTIONS (resolve the thread first, assert the closed state only on success), so neither over-claims when a GitHub call fails. A provenance rule keeps a *heuristic* `addressed` (auto-resolve / gauge proximity) from ever overwriting an explicit human `dismissed`; only a reply's human evidence can.
+
+Resolving a thread clears the finding from GitHub's require-conversation-resolution merge gate, so it is privileged — the authorization boundary is enforced at each call site so **untrusted commenters cannot clear findings from the merge gate**:
+
+- **Reactions are ledger-only.** A 👎 sets `state=dismissed` for suppression memory but NEVER resolves the thread — a reaction is an untrusted, low-effort signal swept from any user, including fork contributors with no write access.
+- **Replies are gated on `author_association`.** Only an owner/member/collaborator reply resolves the thread and writes terminal state; a non-privileged reply keeps its learning signal (pattern/feedback) but does not clear the finding.
+- **`@argus resolve` is maintainer-only.** A non-privileged commenter gets a "confused" reaction and a refusal message; only owner/member/collaborator pass `IsPrivilegedAssociation` (`internal/github/identity.go`).
+
+Accepted, intentional corner: a 👎-dismissed finding's thread stays open (ledger-only), so a later push modifying its lines can resolve the *thread* while the provenance rule keeps the *ledger* at `dismissed`.
+
+### Auto-resolve + the addressed-judge
+
+On a synchronize push, `autoResolveOnSynchronize()` closes stale finding threads whose anchored lines the push touched — but proximity (`decideAutoResolveThread`) is only a cheap **prefilter**, never proof a finding was fixed. Each proximity candidate goes to the **AddressedJudge** (`addressed_judge.go`), an LLM-as-judge over the review-stage model that reads the finding and the file's inter-diff and decides whether the change *actually addresses* the finding versus merely moving or reformatting nearby lines. Only on a confirmed fix does FindingLifecycle fire `EventAddressed` (thread resolved + `state=addressed`) and stamp the resolving commit SHA (`resolved_sha`) as the resolved-by-commit breadcrumb.
+
+The judge **degrades safe**: on any error, timeout, not-addressed verdict, or a missing judge, the thread stays OPEN — a judge failure never false-resolves. Cost is bounded to the proximity candidate set and capped per push (`maxJudgeCallsPerPush`).
+
+### Review viewer
+
+The dashboard review-detail page (`web/src/app/(dashboard)/reviews/[id]/page.tsx`) surfaces the lifecycle: each finding shows a state pill (`FindingStateBadge`), a resolved-by-commit breadcrumb (from `resolved_sha`), and an **Incremental history** timeline merging every per-SHA review pass (with `+N new` findings) and every auto-resolve push (`Auto-resolved N threads`).
 
 ---
 
@@ -277,7 +334,7 @@ On PR close, a detector diffs the commits pushed after each posted comment, matc
 | `ignored` | PR merged with the flagged lines untouched |
 | `deferred` | PR closed without merging (all findings on an unmerged close, regardless of line changes) |
 
-Outcomes land in the comment outcome vocabulary (`comment_outcomes`, migration 049, with `addressed_at`). The per-comment state ledger `review_comments.state` (`posted`/`addressed`/`dismissed`/`deferred`/`suppressed`, migration 051) is currently written by reply/reaction dismissals and insert-time suppression; detector-driven state updates are a tracked follow-up. The `vw_review_gauge` view (migration 050) aggregates address-rate per category per change_class, dismiss rate, and median time-to-merge. Exposed at the authenticated, installation-scoped `GET /api/v1/stats/gauge` (`internal/api/handlers_gauge.go`).
+Outcomes land in the comment outcome vocabulary (`comment_outcomes`, migration 049, with `addressed_at`). Each terminal outcome ALSO drives the matching `review_comments.state` through FindingLifecycle (see [Comment Lifecycle](#comment-lifecycle)) — the gauge writes `addressed_*` + `state=addressed` and `deferred` + `state=deferred` — so the finer multi-signal `comment_outcomes` ledger and the terminal state ledger cannot silently disagree. (`review_comments.state` spans `posted`/`addressed`/`dismissed`/`deferred`/`resolved`/`suppressed`; the gauge is one of its writers, alongside reply/reaction dismissals, auto-resolve, `@argus resolve`, and insert-time suppression.) The `vw_review_gauge` view (migration 050) aggregates address-rate per category per change_class, dismiss rate, and median time-to-merge. Exposed at the authenticated, installation-scoped `GET /api/v1/stats/gauge` (`internal/api/handlers_gauge.go`).
 
 ---
 
@@ -327,7 +384,7 @@ flowchart TD
 |---------|--------|--------|
 | `review` | `@argus-eye review [--force] [--persona <name>]` | Triggers manual review. `--force` bypasses duplicate SHA check. `--persona` overrides review personality |
 | `remember` | `@argus-eye remember [--org] <pattern>` | Stores a pattern in Supermemory. `--org` scopes to owner level, otherwise repo level. Also persists to Postgres |
-| `resolve` | `@argus-eye resolve` | Resolves all unresolved Argus review threads on the PR via GraphQL |
+| `resolve` | `@argus-eye resolve` | Resolves all unresolved Argus review threads on the PR via GraphQL and marks each finding `state=resolved`. Maintainer-only — a non-privileged commenter (not owner/member/collaborator) is refused |
 | `fix` | `@argus-eye fix` | Auto-applies suggested fixes from unresolved Argus comments. Creates a commit on the PR branch via Git Data API |
 | `help` | `@argus-eye help` | Posts a help table listing all available commands |
 

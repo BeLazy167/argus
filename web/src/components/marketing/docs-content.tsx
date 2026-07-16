@@ -1933,7 +1933,7 @@ export function DocsContent() {
                 },
                 {
                   cmd: "@argus-eye resolve",
-                  desc: "Scans all unresolved review threads and resolves ones where the referenced file has been updated in the latest push.",
+                  desc: "Resolves every open Argus review thread on the PR and marks each finding resolved. Maintainer-only (owner, member, or collaborator).",
                   example: "@argus-eye resolve",
                 },
                 {
@@ -2423,8 +2423,8 @@ export function DocsContent() {
               {[
                 {
                   label: "Auto-review",
-                  desc: "Review every PR automatically. When off, Argus posts a Trigger checkbox on opened PRs with a token/cost preview — reviewers tick to run on demand.",
-                  status: "off",
+                  desc: "Review every PR automatically — opened, pushed, or reopened; a push re-reviews the new commits. When off, Argus posts a Trigger checkbox (once per PR) with a token/cost preview — reviewers tick to run on demand.",
+                  status: "on by default",
                 },
                 {
                   label: "Deep Review",
