@@ -185,6 +185,9 @@ type findingLedger interface {
 	// UpdateFindingStateFrom moves a finding to `to` only from one of allowedFrom,
 	// transition-guarded + idempotent in the store. Returns whether the row moved.
 	UpdateFindingStateFrom(ctx context.Context, commentID uuid.UUID, to store.FindingState, allowedFrom []store.FindingState) (bool, error)
+	// SetFindingResolvedSHA stamps the resolving push commit onto a finding
+	// (stamp-once). Best-effort — additive to the ledger move, never a transition.
+	SetFindingResolvedSHA(ctx context.Context, commentID uuid.UUID, sha string) error
 	// GetThreadLinkForComment returns the finding's stored GitHub thread identity
 	// (ThreadRegistry, #162): the authoritative node id for exactly this finding.
 	GetThreadLinkForComment(ctx context.Context, commentID uuid.UUID) (*store.ThreadLink, error)
@@ -237,6 +240,13 @@ type FindingTransition struct {
 	// as a last-resort thread lookup (the reply path) for rows that predate the
 	// ThreadRegistry and so have no stored link.
 	CommentNodeID string
+
+	// ResolvedSHA, when set, is the push commit that closed this finding. It is
+	// stamped onto review_comments.resolved_sha (stamp-once) ONLY when this event
+	// actually moves the ledger to addressed/resolved — the resolved-by-commit
+	// breadcrumb (#167). Empty for events with no known SHA (@argus resolve, gauge
+	// at-merge), which leave the breadcrumb absent.
+	ResolvedSHA string
 }
 
 // TransitionResult reports what Transition did, for callers that count or
@@ -321,6 +331,18 @@ func (l *FindingLifecycle) writeLedger(ctx context.Context, req FindingTransitio
 		return
 	}
 	res.LedgerChanged = changed
+
+	// Resolved-by-commit breadcrumb (#167): stamp the resolving SHA ONLY when this
+	// event actually moved the finding to a resolved-ish terminal — so we never
+	// misattribute a SHA to a finding a human dismissal kept at 'dismissed' (the
+	// provenance guard returns changed=false there), and never to a decision event
+	// (dismissed/deferred). Best-effort; stamp-once is enforced in the store.
+	if changed && req.ResolvedSHA != "" &&
+		(pol.state == store.FindingStateAddressed || pol.state == store.FindingStateResolved) {
+		if err := l.ledger.SetFindingResolvedSHA(ctx, req.FindingID, req.ResolvedSHA); err != nil {
+			l.logger.Warn("finding-lifecycle: stamp resolved sha", "error", err, "finding", req.FindingID)
+		}
+	}
 }
 
 // resolveThread best-effort resolves the finding's thread (no-op for ledger-only
@@ -356,6 +378,10 @@ type ThreadTransition struct {
 	Owner          string
 	Repo           string
 	PRNumber       int
+
+	// ResolvedSHA, when set, is the push commit that closed the thread — forwarded
+	// to Transition to stamp the finding's resolved-by-commit breadcrumb (#167).
+	ResolvedSHA string
 }
 
 // TransitionThread is the single entry point the bulk resolvers (auto-resolve,
@@ -374,6 +400,7 @@ func (l *FindingLifecycle) TransitionThread(ctx context.Context, req ThreadTrans
 			Owner:          req.Owner,
 			Repo:           req.Repo,
 			PRNumber:       req.PRNumber,
+			ResolvedSHA:    req.ResolvedSHA,
 		})
 	}
 

@@ -259,6 +259,7 @@ type ReviewComment struct {
 	SuppressedReason    *string   `json:"suppressed_reason"`
 	State               string    `json:"state"`
 	GraphqlThreadNodeID *string   `json:"graphql_thread_node_id"`
+	ResolvedSHA         *string   `json:"resolved_sha"`
 }
 
 type Rule struct {

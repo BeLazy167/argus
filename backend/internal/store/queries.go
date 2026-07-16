@@ -375,7 +375,7 @@ func (s *Store) GetReviewComments(ctx context.Context, reviewID uuid.UUID) ([]Re
 		SELECT id, review_id, file_path, start_line, end_line, side, body, severity, category,
 		       specialist, confidence_score, code_snippet, github_comment_id,
 		       matched_pattern_id, matched_pattern_score, enforced_rule_content, is_new_finding,
-		       created_at, state, suppressed_reason
+		       created_at, state, suppressed_reason, resolved_sha
 		FROM review_comments WHERE review_id = $1 ORDER BY file_path, start_line
 	`, reviewID)
 	if err != nil {
@@ -395,7 +395,7 @@ func (s *Store) GetPRCompletedReviewComments(ctx context.Context, repoID int64, 
 		SELECT rc.id, rc.review_id, rc.file_path, rc.start_line, rc.end_line, rc.side, rc.body, rc.severity, rc.category,
 		       rc.specialist, rc.confidence_score, rc.code_snippet, rc.github_comment_id,
 		       rc.matched_pattern_id, rc.matched_pattern_score, rc.enforced_rule_content, rc.is_new_finding,
-		       rc.created_at, rc.state, rc.suppressed_reason
+		       rc.created_at, rc.state, rc.suppressed_reason, rc.resolved_sha
 		FROM review_comments rc
 		JOIN reviews r ON rc.review_id = r.id
 		WHERE r.repo_id = $1 AND r.pr_number = $2 AND r.status = 'completed'
@@ -406,6 +406,71 @@ func (s *Store) GetPRCompletedReviewComments(ctx context.Context, repoID int64, 
 	}
 	defer rows.Close()
 	return collectOrEmpty(rows, pgx.RowToStructByPos[ReviewComment])
+}
+
+// ListPRReviewSummaries returns every review pass for a repo+PR (one row per
+// push, since reviews are per-SHA), oldest first, with each pass's non-suppressed
+// finding counts. Powers the review-detail viewer's incremental history. Marker
+// reviews (auto_run_disabled / no_api_key stubs) are excluded so they don't
+// render as failed passes — same predicate the list endpoints use.
+func (s *Store) ListPRReviewSummaries(ctx context.Context, repoID int64, prNumber int) ([]PRReviewSummary, error) {
+	rows, err := s.Pool.Query(ctx, `
+		SELECT rv.id, rv.head_sha, rv.status, rv.score, rv.is_incremental, rv.deep_review,
+		       rv.created_at, rv.completed_at,
+		       (SELECT COUNT(*) FROM review_comments rc
+		          WHERE rc.review_id = rv.id AND rc.state <> 'suppressed')::int AS comment_count,
+		       (SELECT COUNT(*) FROM review_comments rc
+		          WHERE rc.review_id = rv.id AND rc.state <> 'suppressed' AND rc.is_new_finding)::int AS new_count
+		FROM reviews rv
+		WHERE rv.repo_id = $1 AND rv.pr_number = $2
+		  AND NOT (`+markerReviewFilter+`)
+		ORDER BY rv.created_at ASC
+	`, repoID, prNumber)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return collectOrEmpty(rows, pgx.RowToStructByPos[PRReviewSummary])
+}
+
+// ListPRAutoResolveEvents returns the auto-resolve events for a repo+PR, oldest
+// first — one row per synchronize push that ACTUALLY closed a stale thread. The
+// `resolved_count > 0` filter is load-bearing: auto_resolve_events persists a row
+// on every synchronize that touched GitHub, INCLUDING list-only calls that
+// resolved nothing (resolved_count = 0). Without the filter those surface as
+// "Auto-resolved 0 threads" noise and defeat the viewer's single-pass hide gate.
+// The counts feed the incremental-history timeline.
+func (s *Store) ListPRAutoResolveEvents(ctx context.Context, repoID int64, prNumber int) ([]AutoResolveSummary, error) {
+	rows, err := s.Pool.Query(ctx, `
+		SELECT source_sha, resolved_count, attempted_count, created_at
+		FROM auto_resolve_events
+		WHERE repo_id = $1 AND pr_number = $2 AND resolved_count > 0
+		ORDER BY created_at ASC
+	`, repoID, prNumber)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return collectOrEmpty(rows, pgx.RowToStructByPos[AutoResolveSummary])
+}
+
+// SetFindingResolvedSHA stamps the resolving push commit onto a finding
+// (migration 056), stamp-once: the `resolved_sha IS NULL` guard means the FIRST
+// commit that closed the finding wins and later re-resolves are silent no-ops.
+// Called best-effort by FindingLifecycle when a finding is marked
+// addressed/resolved on a known SHA; a missing row or empty SHA is a no-op.
+func (s *Store) SetFindingResolvedSHA(ctx context.Context, commentID uuid.UUID, sha string) error {
+	if sha == "" {
+		return nil
+	}
+	_, err := s.Pool.Exec(ctx, `
+		UPDATE review_comments SET resolved_sha = $2
+		WHERE id = $1 AND resolved_sha IS NULL
+	`, commentID, sha)
+	if err != nil {
+		return fmt.Errorf("setting finding resolved sha: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) UpdateReviewStatus(ctx context.Context, id uuid.UUID, status, errMsg string, tokenUsage []byte) error {

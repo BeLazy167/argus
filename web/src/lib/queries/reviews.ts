@@ -1,6 +1,16 @@
 import { useQueryClient } from "@tanstack/react-query";
-import type { Review, ReviewComment } from "../types";
+import type { AutoResolveSummary, PRReviewSummary, Review, ReviewComment } from "../types";
 import { createAuthQuery, createAuthMutation, getApi } from "@/lib/query-kit";
+
+/** Wire shape of GET /api/v1/reviews/{id} (see api.ReviewDetailResponse). */
+export type ReviewDetail = {
+  review: Review;
+  comments: ReviewComment[];
+  /** Per-SHA review passes for the PR (incremental history); [] when single-pass. */
+  history: PRReviewSummary[];
+  /** Auto-resolve pushes for the PR; [] when none fired. */
+  auto_resolve_events: AutoResolveSummary[];
+};
 
 type ReviewsVars = { repoId: number; limit?: number; offset?: number };
 
@@ -17,10 +27,9 @@ export const useReviews = createAuthQuery<Review[], ReviewsVars>({
 
 type ReviewVars = { id: string };
 
-export const useReview = createAuthQuery<{ review: Review; comments: ReviewComment[] }, ReviewVars>({
+export const useReview = createAuthQuery<ReviewDetail, ReviewVars>({
   queryKey: ["review"],
-  fetcher: ({ id }, ctx) =>
-    getApi(ctx).get<{ review: Review; comments: ReviewComment[] }>(`/api/v1/reviews/${id}`),
+  fetcher: ({ id }, ctx) => getApi(ctx).get<ReviewDetail>(`/api/v1/reviews/${id}`),
   refetchOnWindowFocus: true,
 });
 

@@ -25,10 +25,27 @@ func lifecycleTestLogger() *slog.Logger {
 // the per-event allowedFrom set exactly as the store's SQL WHERE clause does, so
 // (from, event) → (changed?, new state) is realistic.
 type fakeFindingLedger struct {
-	state     map[uuid.UUID]store.FindingState
-	links     map[uuid.UUID]*store.ThreadLink
-	comments  map[int64]*store.ReviewComment // github_comment_id → finding (TransitionThread)
-	updateErr error
+	state       map[uuid.UUID]store.FindingState
+	links       map[uuid.UUID]*store.ThreadLink
+	comments    map[int64]*store.ReviewComment // github_comment_id → finding (TransitionThread)
+	resolvedSHA map[uuid.UUID]string           // stamp-once resolved_sha (#167)
+	updateErr   error
+}
+
+// SetFindingResolvedSHA mimics the store's stamp-once UPDATE: the first SHA wins,
+// later stamps are silent no-ops (WHERE resolved_sha IS NULL).
+func (f *fakeFindingLedger) SetFindingResolvedSHA(_ context.Context, id uuid.UUID, sha string) error {
+	if f.resolvedSHA == nil {
+		f.resolvedSHA = map[uuid.UUID]string{}
+	}
+	if sha == "" {
+		return nil
+	}
+	if _, ok := f.resolvedSHA[id]; ok {
+		return nil // stamp-once
+	}
+	f.resolvedSHA[id] = sha
+	return nil
 }
 
 func (f *fakeFindingLedger) UpdateFindingStateFrom(_ context.Context, id uuid.UUID, to store.FindingState, allowedFrom []store.FindingState) (bool, error) {
@@ -369,6 +386,96 @@ func TestFindingLifecycle_Transition(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestFindingLifecycle_ResolvedSHAStamp pins the resolved-by-commit breadcrumb
+// write (#167): the SHA is stamped ONLY when the event actually moves the finding
+// to addressed/resolved, never when a provenance guard blocks the move or on a
+// decision event — so the breadcrumb can never misattribute a commit.
+func TestFindingLifecycle_ResolvedSHAStamp(t *testing.T) {
+	const sha = "deadbeefcafef00d"
+	cases := []struct {
+		name    string
+		from    store.FindingState
+		req     FindingTransition
+		wantSHA string // "" = expect NO stamp
+	}{
+		{
+			name:    "auto-resolve addresses an open finding → stamped",
+			from:    store.FindingStatePosted,
+			req:     FindingTransition{Event: EventAddressed, ResolvedSHA: sha, ThreadNodeID: "PRRT_1", Owner: "o", Repo: "r", PRNumber: 1},
+			wantSHA: sha,
+		},
+		{
+			name:    "manual resolve of an open finding with a SHA → stamped (resolved is resolved-ish)",
+			from:    store.FindingStatePosted,
+			req:     FindingTransition{Event: EventResolvedManually, ResolvedSHA: sha, ThreadNodeID: "PRRT_2", Owner: "o", Repo: "r", PRNumber: 1},
+			wantSHA: sha,
+		},
+		{
+			name:    "heuristic addressed BLOCKED by prior human dismissal → NOT stamped (no misattribution)",
+			from:    store.FindingStateDismissed,
+			req:     FindingTransition{Event: EventAddressed, ResolvedSHA: sha, ThreadNodeID: "PRRT_3", Owner: "o", Repo: "r", PRNumber: 1},
+			wantSHA: "", // ledger stayed dismissed → no stamp
+		},
+		{
+			name:    "addressed with empty SHA (no known commit) → NOT stamped",
+			from:    store.FindingStatePosted,
+			req:     FindingTransition{Event: EventAddressed, ResolvedSHA: "", ThreadNodeID: "PRRT_4", Owner: "o", Repo: "r", PRNumber: 1},
+			wantSHA: "",
+		},
+		{
+			name:    "dismissed decision carrying a SHA → NOT stamped (dismissed is not resolved-ish)",
+			from:    store.FindingStatePosted,
+			req:     FindingTransition{Event: EventDismissed, ResolvedSHA: sha, ThreadNodeID: "PRRT_5", Owner: "o", Repo: "r", PRNumber: 1},
+			wantSHA: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fid := uuid.New()
+			ledger := &fakeFindingLedger{
+				state:       map[uuid.UUID]store.FindingState{fid: tc.from},
+				links:       map[uuid.UUID]*store.ThreadLink{},
+				resolvedSHA: map[uuid.UUID]string{},
+			}
+			lc := NewFindingLifecycle(ledger, &fakeThreadGH{}, lifecycleTestLogger())
+			req := tc.req
+			req.FindingID = fid
+			if _, err := lc.Transition(context.Background(), req); err != nil {
+				t.Fatalf("Transition: %v", err)
+			}
+			if got := ledger.resolvedSHA[fid]; got != tc.wantSHA {
+				t.Errorf("resolved_sha = %q, want %q", got, tc.wantSHA)
+			}
+		})
+	}
+
+	t.Run("stamp-once: a second resolving push does not overwrite the first commit", func(t *testing.T) {
+		fid := uuid.New()
+		ledger := &fakeFindingLedger{
+			state:       map[uuid.UUID]store.FindingState{fid: store.FindingStatePosted},
+			links:       map[uuid.UUID]*store.ThreadLink{},
+			resolvedSHA: map[uuid.UUID]string{},
+		}
+		lc := NewFindingLifecycle(ledger, &fakeThreadGH{}, lifecycleTestLogger())
+		base := FindingTransition{FindingID: fid, Event: EventAddressed, ThreadNodeID: "PRRT_x", Owner: "o", Repo: "r", PRNumber: 1}
+		first := base
+		first.ResolvedSHA = "sha_first"
+		if _, err := lc.Transition(context.Background(), first); err != nil {
+			t.Fatalf("Transition first: %v", err)
+		}
+		// Second push: finding already addressed → ledger no-op (changed=false), so
+		// even though the store guards stamp-once, the lifecycle also skips the call.
+		second := base
+		second.ResolvedSHA = "sha_second"
+		if _, err := lc.Transition(context.Background(), second); err != nil {
+			t.Fatalf("Transition second: %v", err)
+		}
+		if got := ledger.resolvedSHA[fid]; got != "sha_first" {
+			t.Errorf("resolved_sha = %q, want the first commit %q", got, "sha_first")
+		}
+	})
 }
 
 // TestFindingLifecycle_SameLineDismissalTargetsOwnThread is the #171 fold-forward

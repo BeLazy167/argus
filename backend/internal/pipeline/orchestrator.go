@@ -1553,6 +1553,9 @@ func (o *Orchestrator) verifyThreadAddressed(
 		Owner:          owner,
 		Repo:           repo,
 		PRNumber:       event.PRNumber,
+		// The push that modified the flagged lines — stamped as this finding's
+		// resolved-by-commit breadcrumb (#167) when it moves posted → addressed.
+		ResolvedSHA: event.HeadSHA,
 	})
 	if !res.ThreadResolved {
 		o.logger.Warn("auto-resolve: thread not resolved", "error", res.ThreadErr, "thread_id", threadID, "path", t.Path)
@@ -1713,7 +1716,6 @@ func (o *Orchestrator) resolveCandidates(
 		if stored, ok := storedThreadIDs[t.FirstCommentID]; ok {
 			threadID = stored
 		}
-
 		// Verify the fix before resolving: proximity got us here, the judge decides.
 		stats.judged++
 		verdict, _ := o.verifyThreadAddressed(ctx, event, owner, repo, t, threadID,

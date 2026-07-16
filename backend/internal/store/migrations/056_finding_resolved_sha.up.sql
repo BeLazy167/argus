@@ -1,0 +1,19 @@
+-- Per-finding resolved-by-commit breadcrumb (#167).
+--
+-- resolved_sha records the EXACT push SHA that closed a finding, stamped by the
+-- FindingLifecycle module when a finding is marked addressed/resolved on a known
+-- SHA (today: the auto-resolve synchronize path, where event.HeadSHA is in hand).
+--
+-- This is the LOSSLESS join the review viewer reads directly. It replaces the
+-- lossy path:line match against auto_resolve_events.resolved_thread_keys, whose
+-- key was written with the LIVE GitHub thread line at resolve time — a line
+-- GitHub repositions as later pushes shift the file, so the breadcrumb missed
+-- exactly when a fix rewrote the flagged hunk (the paradigmatic resolution) and
+-- could misattribute a re-flagged finding to an earlier commit. Stamped against
+-- the finding's own review_comments row, it is correct under line-shift.
+--
+-- Nullable + additive: a finding resolved without a known SHA (@argus resolve,
+-- gauge addressed-at-merge) leaves it NULL, and the viewer shows the state pill
+-- with no breadcrumb (the documented fallback). Written stamp-once (first
+-- resolving commit wins) by SetFindingResolvedSHA; never a transition trigger.
+ALTER TABLE review_comments ADD COLUMN resolved_sha TEXT;
