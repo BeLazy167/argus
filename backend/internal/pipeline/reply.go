@@ -20,6 +20,7 @@ type ReplyAnalyzer struct {
 	ghClient    *ghpkg.Client
 	memRegistry *memory.Registry
 	logger      *slog.Logger
+	lifecycle   *FindingLifecycle
 }
 
 func NewReplyAnalyzer(registry *llm.Registry, st *store.Store, ghClient *ghpkg.Client, memRegistry *memory.Registry, logger *slog.Logger) *ReplyAnalyzer {
@@ -29,6 +30,7 @@ func NewReplyAnalyzer(registry *llm.Registry, st *store.Store, ghClient *ghpkg.C
 		ghClient:    ghClient,
 		memRegistry: memRegistry,
 		logger:      logger,
+		lifecycle:   NewFindingLifecycle(st, ghClient, logger),
 	}
 }
 
@@ -114,17 +116,6 @@ func (ra *ReplyAnalyzer) Analyze(ctx context.Context, event ghpkg.CommentEvent) 
 		}
 	}
 
-	// Resolve the thread when the developer addressed the concern, or when the
-	// finding is valid but simply doesn't apply to this kind of change.
-	if (decision.Action == "resolve" || decision.Action == "not_applicable_change_kind") && event.NodeID != "" {
-		threadID, err := ra.ghClient.FindThreadForComment(ctx, event.InstallationID, owner, repo, event.PRNumber, event.NodeID)
-		if err != nil {
-			ra.logger.Warn("resolve: find thread", "error", err)
-		} else if err := ra.ghClient.ResolveReviewThread(ctx, event.InstallationID, threadID); err != nil {
-			ra.logger.Warn("resolve: resolve thread", "error", err)
-		}
-	}
-
 	// Index learning in Supermemory. Derive a deterministic customID from the
 	// normalized Learning text (SharedPatternCustomID idiom) so re-stating the
 	// same insight upserts one doc instead of accreting a new _shared doc per
@@ -172,11 +163,39 @@ func (ra *ReplyAnalyzer) Analyze(ctx context.Context, event ghpkg.CommentEvent) 
 			recordPatternOutcome(ctx, ra.store, ra.logger, original.MatchedPatternID, outcome)
 		}
 	}
-	// Follow-up ledger: both rejection shapes land the finding in 'dismissed'.
-	// Idempotent + transition-guarded in the store; failures are non-fatal.
-	if outcome == "dismissed" || outcome == "not_applicable_change_kind" {
-		if _, err := ra.store.UpdateFindingState(ctx, original.ID, store.FindingStateDismissed); err != nil {
-			ra.logger.Warn("updating finding state", "error", err, "comment_id", original.ID)
+	// Finding lifecycle: one Transition owns BOTH the ledger state and the thread
+	// resolution. A rejection (Argus was wrong, or N/A for this change kind) →
+	// dismissed; a plain resolve where the developer confirmed and fixed it →
+	// addressed-by-reply (human evidence that may override a prior dismissal).
+	//
+	// AUTHORIZATION: resolving the thread + writing terminal ledger state is a
+	// privileged shortcut — a review-comment replier is the same untrusted
+	// population as a reactor, and EventAddressedByReply could otherwise let a
+	// fork contributor's "good catch, fixed it" flip a maintainer's dismissal to
+	// addressed and clear the finding from the require-resolution merge gate. So
+	// only a trusted replier (owner/member/collaborator) drives the transition;
+	// an untrusted reply keeps its non-terminal learning (comment_outcomes +
+	// pattern/feedback signals, above and below) but does NOT resolve the thread
+	// or write terminal state. The push→auto-resolve path (judge-verified, #166)
+	// remains the resolution mechanism for everyone, including fork PRs.
+	lcEvent, authorized := replyLifecycleEvent(decision.Action, outcome, event.AuthorAssociation)
+	switch {
+	case lcEvent == "":
+		// stand_firm / clarify — no lifecycle transition.
+	case !authorized:
+		ra.logger.Info("reply: non-privileged replier — recording learning only, skipping thread resolution + terminal state",
+			"would_be_event", lcEvent, "association", event.AuthorAssociation, "author", event.CommentAuthor, "comment_id", original.ID)
+	default:
+		if _, err := ra.lifecycle.Transition(ctx, FindingTransition{
+			FindingID:      original.ID,
+			Event:          lcEvent,
+			InstallationID: event.InstallationID,
+			Owner:          owner,
+			Repo:           repo,
+			PRNumber:       event.PRNumber,
+			CommentNodeID:  event.NodeID,
+		}); err != nil {
+			ra.logger.Warn("reply: finding lifecycle transition", "error", err, "comment_id", original.ID)
 		}
 	}
 
@@ -228,6 +247,27 @@ func (ra *ReplyAnalyzer) Analyze(ctx context.Context, event ghpkg.CommentEvent) 
 	}
 
 	return nil
+}
+
+// replyLifecycleEvent maps a reply decision to the FindingLifecycle event it
+// should raise, and whether the replier is AUTHORIZED to raise it. A rejection
+// (outcome dismissed / not-applicable) → EventDismissed; a plain confirm-and-fix
+// resolve → EventAddressedByReply; stand_firm / clarify raise nothing (event="").
+//
+// Both events resolve the thread and write terminal ledger state, so they are
+// gated on the replier's privilege: for a non-privileged replier authorized is
+// false and the caller MUST skip the transition (keeping only non-terminal
+// learning). Pure — unit-tested without the LLM/DB path.
+func replyLifecycleEvent(action, outcome, authorAssociation string) (event LifecycleEvent, authorized bool) {
+	switch {
+	case outcome == "dismissed" || outcome == "not_applicable_change_kind":
+		event = EventDismissed
+	case action == "resolve": // confirmed finding, developer fixed it
+		event = EventAddressedByReply
+	default:
+		return "", false
+	}
+	return event, ghpkg.IsPrivilegedAssociation(authorAssociation)
 }
 
 func buildReplyPrompt(original *store.ReviewComment, event ghpkg.CommentEvent) string {

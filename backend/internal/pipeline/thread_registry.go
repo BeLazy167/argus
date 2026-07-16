@@ -73,6 +73,80 @@ func (o *Orchestrator) hydrateThreadNodeIDs(ctx context.Context, run *PipelineRu
 	}
 }
 
+// unboundCommentRow is a persisted review_comments row awaiting its GitHub REST
+// comment id, projected for 1:1 binding: its PK, (path, line) anchor, and stored
+// body.
+type unboundCommentRow struct {
+	ID   uuid.UUID
+	Path string
+	Line int
+	Body string
+}
+
+// postedComment is one GitHub review comment ListReviewComments returned, to be
+// bound to exactly one unboundCommentRow.
+type postedComment struct {
+	GithubID int64
+	Path     string
+	Line     int
+	Body     string
+}
+
+// pairCommentsToRows binds each posted GitHub review comment to EXACTLY ONE
+// review_comments row on the same (path, line). This is the #171 fold-forward
+// fix: the old backfill matched on (review_id, file_path, end_line) with no
+// LIMIT, so two findings on the SAME line collapsed onto a single
+// github_comment_id — and thus a single hydrated thread node id, so dismissing
+// finding B would resolve finding A's thread. Binding 1:1 keeps the
+// finding↔comment↔thread chain distinct even for same-line findings.
+//
+// Within a (path, line) group the preference is: an unclaimed EXACT body match
+// first (the posted body IS the stored body — formatCommentBody renders both),
+// then stable input order for the degenerate identical-body case. Each comment
+// claims its row, so the next same-line comment necessarily picks a different
+// row. Returns rowID → githubCommentID; a comment with no unclaimed row on its
+// (path, line) is skipped (leaves the row unbound, as before).
+func pairCommentsToRows(rows []unboundCommentRow, comments []postedComment) map[uuid.UUID]int64 {
+	type loc struct {
+		path string
+		line int
+	}
+	byLoc := make(map[loc][]unboundCommentRow, len(rows))
+	for _, r := range rows {
+		k := loc{r.Path, r.Line}
+		byLoc[k] = append(byLoc[k], r)
+	}
+	claimed := make(map[uuid.UUID]bool, len(comments))
+	out := make(map[uuid.UUID]int64, len(comments))
+	for _, c := range comments {
+		group := byLoc[loc{c.Path, c.Line}]
+		picked := uuid.Nil
+		// Prefer an unclaimed exact body match — the authoritative 1:1 signal.
+		for _, r := range group {
+			if !claimed[r.ID] && r.Body == c.Body {
+				picked = r.ID
+				break
+			}
+		}
+		// Degenerate fallback (identical bodies, or GitHub normalised the body):
+		// first unclaimed row in insertion order.
+		if picked == uuid.Nil {
+			for _, r := range group {
+				if !claimed[r.ID] {
+					picked = r.ID
+					break
+				}
+			}
+		}
+		if picked == uuid.Nil {
+			continue // no row left for this comment
+		}
+		claimed[picked] = true
+		out[picked] = c.GithubID
+	}
+	return out
+}
+
 // storedThreadIDsForReview loads the ThreadRegistry links hydrated at post time
 // for a review and returns a REST-comment-id → GraphQL-node-id map. Empty when
 // the review predates ThreadRegistry or nothing was hydrated — auto-resolve then

@@ -28,8 +28,8 @@ type PREvent struct {
 	HeadSHA        string
 	BaseSHA        string
 	BaseRef        string
-	HeadRef         string
-	PRBody          string // first ~8000 chars of PR description (feeds intent extraction)
+	HeadRef        string
+	PRBody         string // first ~8000 chars of PR description (feeds intent extraction)
 	// PRBodyBefore is populated only on action="edited" from payload.changes.body.from.
 	// Used by the cross-PR webhook handler to diff linked-PR refs between pre-
 	// and post-edit bodies and trigger a refresh when the set changes.
@@ -130,9 +130,14 @@ type CommentEvent struct {
 	InReplyToID    int64
 	CommentBody    string
 	CommentAuthor  string
-	FilePath       string
-	DiffHunk       string
-	CommitID       string
+	// AuthorAssociation is the replier's relationship to the repo (GitHub's
+	// author_association). Gates the reply path's privileged shortcut (resolving
+	// the thread / writing terminal ledger state) — a review-comment replier is
+	// the same untrusted population as a reactor.
+	AuthorAssociation string
+	FilePath          string
+	DiffHunk          string
+	CommitID          string
 }
 
 // ToCommentEvent converts a pull_request_review_comment webhook payload to a CommentEvent.
@@ -144,19 +149,20 @@ func ToCommentEvent(event *WebhookEvent) (*CommentEvent, error) {
 
 	c := e.GetComment()
 	return &CommentEvent{
-		Action:         event.Action,
-		InstallationID: e.GetInstallation().GetID(),
-		RepoFullName:   e.GetRepo().GetFullName(),
-		RepoID:         e.GetRepo().GetID(),
-		PRNumber:       e.GetPullRequest().GetNumber(),
-		CommentID:      c.GetID(),
-		NodeID:         c.GetNodeID(),
-		InReplyToID:    c.GetInReplyTo(),
-		CommentBody:    c.GetBody(),
-		CommentAuthor:  c.GetUser().GetLogin(),
-		FilePath:       c.GetPath(),
-		DiffHunk:       c.GetDiffHunk(),
-		CommitID:       c.GetCommitID(),
+		Action:            event.Action,
+		InstallationID:    e.GetInstallation().GetID(),
+		RepoFullName:      e.GetRepo().GetFullName(),
+		RepoID:            e.GetRepo().GetID(),
+		PRNumber:          e.GetPullRequest().GetNumber(),
+		CommentID:         c.GetID(),
+		NodeID:            c.GetNodeID(),
+		InReplyToID:       c.GetInReplyTo(),
+		CommentBody:       c.GetBody(),
+		CommentAuthor:     c.GetUser().GetLogin(),
+		AuthorAssociation: c.GetAuthorAssociation(),
+		FilePath:          c.GetPath(),
+		DiffHunk:          c.GetDiffHunk(),
+		CommitID:          c.GetCommitID(),
 	}, nil
 }
 
@@ -170,6 +176,11 @@ type IssueCommentEvent struct {
 	CommentID      int64
 	CommentBody    string
 	CommentAuthor  string
+	// AuthorAssociation is the commenter's relationship to the repo (GitHub's
+	// author_association: OWNER / MEMBER / COLLABORATOR / CONTRIBUTOR / NONE / …).
+	// Used to authorize privileged commands (`@argus resolve`) — issue comments
+	// come from the same untrusted population as reactions.
+	AuthorAssociation string
 	// CommentBodyBefore is populated only on action="edited". It holds the
 	// pre-edit body from payload.changes.body.from so handlers can detect
 	// transitions (e.g., task-list checkbox toggles on trigger comments).
@@ -192,14 +203,15 @@ func ToIssueCommentEvent(event *WebhookEvent) (*IssueCommentEvent, error) {
 		return nil, nil
 	}
 	ice := &IssueCommentEvent{
-		Action:         event.Action,
-		InstallationID: e.GetInstallation().GetID(),
-		RepoFullName:   e.GetRepo().GetFullName(),
-		RepoID:         e.GetRepo().GetID(),
-		PRNumber:       e.GetIssue().GetNumber(),
-		CommentID:      e.GetComment().GetID(),
-		CommentBody:    e.GetComment().GetBody(),
-		CommentAuthor:  e.GetComment().GetUser().GetLogin(),
+		Action:            event.Action,
+		InstallationID:    e.GetInstallation().GetID(),
+		RepoFullName:      e.GetRepo().GetFullName(),
+		RepoID:            e.GetRepo().GetID(),
+		PRNumber:          e.GetIssue().GetNumber(),
+		CommentID:         e.GetComment().GetID(),
+		CommentBody:       e.GetComment().GetBody(),
+		CommentAuthor:     e.GetComment().GetUser().GetLogin(),
+		AuthorAssociation: e.GetComment().GetAuthorAssociation(),
 	}
 	if event.Action == "edited" {
 		if changes := e.GetChanges(); changes != nil {
@@ -211,7 +223,6 @@ func ToIssueCommentEvent(event *WebhookEvent) (*IssueCommentEvent, error) {
 	}
 	return ice, nil
 }
-
 
 func extractAction(event interface{}) string {
 	switch e := event.(type) {

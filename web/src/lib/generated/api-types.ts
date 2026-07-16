@@ -13,8 +13,10 @@
  */
 export const FindingStatePosted = "posted";
 /**
- * FindingStateAddressed — the flagged code was fixed (set by the
- * addressed-detector, PR4; the state exists now so the ledger is complete).
+ * FindingStateAddressed — the flagged code was fixed. PROVISIONAL: today it is
+ * set heuristically (auto-resolve / gauge proximity) until #166's real judge,
+ * so it is NOT terminal — an explicit human action (dismissal, manual resolve)
+ * must still win over a heuristic addressed.
  */
 export const FindingStateAddressed = "addressed";
 /**
@@ -27,11 +29,20 @@ export const FindingStateDismissed = "dismissed";
  */
 export const FindingStateDeferred = "deferred";
 /**
+ * FindingStateResolved — a maintainer closed the thread via `@argus resolve`
+ * (migration 055): an explicit operator "these are handled" signal, distinct
+ * from an addressed fix or a dismissal so it never poisons the gauge's
+ * address/dismiss rates. Recoverable: an explicit human reply-dismissal can
+ * supersede a mistaken resolve (resolved → dismissed) so it is not an
+ * irreversible trap; nothing else leaves it.
+ */
+export const FindingStateResolved = "resolved";
+/**
  * FindingStateSuppressed — never posted; dropped by the suppression pass.
  * Set at insert time, never transitioned into or out of.
  */
 export const FindingStateSuppressed = "suppressed";
-export type FindingState = typeof FindingStatePosted | typeof FindingStateAddressed | typeof FindingStateDismissed | typeof FindingStateDeferred | typeof FindingStateSuppressed;
+export type FindingState = typeof FindingStatePosted | typeof FindingStateAddressed | typeof FindingStateDismissed | typeof FindingStateDeferred | typeof FindingStateResolved | typeof FindingStateSuppressed;
 
 //////////
 // source: models.go

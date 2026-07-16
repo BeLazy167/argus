@@ -740,6 +740,64 @@ func (s *Store) GetCommentByGithubID(ctx context.Context, githubCommentID int64)
 	return &c, nil
 }
 
+// UnboundComment is one posted review_comments row still awaiting its GitHub
+// REST comment id (github_comment_id backfill). Line is end_line (the posted
+// anchor); Body is the exact stored comment body used to disambiguate two
+// findings that share a (path, line).
+type UnboundComment struct {
+	ID       uuid.UUID
+	FilePath string
+	Line     int
+	Body     string
+}
+
+// ListUnboundReviewComments returns the review's posted, line-anchored comments
+// that don't yet have a github_comment_id. File-level rows (NULL end_line) are
+// excluded — they carry no line to bind on, matching the historical backfill
+// key (review_id, file_path, end_line). Suppressed rows (suppressed_reason set)
+// are excluded too: they were never posted to GitHub, so binding a posted
+// comment's id to one via the order-fallback would be wrong. Ordered by
+// created_at so same-line ties bind in insertion order (the submission order).
+func (s *Store) ListUnboundReviewComments(ctx context.Context, reviewID uuid.UUID) ([]UnboundComment, error) {
+	rows, err := s.Pool.Query(ctx, `
+		SELECT id, file_path, end_line, body
+		FROM review_comments
+		WHERE review_id = $1 AND github_comment_id IS NULL AND end_line IS NOT NULL
+		  AND suppressed_reason IS NULL
+		ORDER BY created_at, id
+	`, reviewID)
+	if err != nil {
+		return nil, fmt.Errorf("listing unbound review comments: %w", err)
+	}
+	defer rows.Close()
+	var out []UnboundComment
+	for rows.Next() {
+		var c UnboundComment
+		if err := rows.Scan(&c.ID, &c.FilePath, &c.Line, &c.Body); err != nil {
+			return nil, fmt.Errorf("scanning unbound review comment: %w", err)
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// BindGitHubCommentID binds exactly one review_comments row to its GitHub REST
+// comment id. Scoped to id (the finding's PK) and guarded by
+// github_comment_id IS NULL so a replayed backfill can't re-point an already
+// bound row. Returns whether the row was updated. This replaces the old fuzzy
+// (review_id, file_path, end_line) UPDATE that collapsed two same-line findings
+// onto a single id (see FindingLifecycle #165 same-line binding fix).
+func (s *Store) BindGitHubCommentID(ctx context.Context, commentID uuid.UUID, githubCommentID int64) (bool, error) {
+	tag, err := s.Pool.Exec(ctx, `
+		UPDATE review_comments SET github_comment_id = $2
+		WHERE id = $1 AND github_comment_id IS NULL
+	`, commentID, githubCommentID)
+	if err != nil {
+		return false, fmt.Errorf("binding github comment id: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
 // RepoReviewStats holds averaged token / cost figures used to estimate the
 // cost of a pending review when rendering the "Trigger review" checkbox.
 type RepoReviewStats struct {
