@@ -24,11 +24,13 @@ import type { ReviewContract } from "./generated/contract-types";
 // Re-exports — generated shape consumed as-is.
 export type {
   ActivityLog,
+  AutoResolveSummary,
   GaugeRow,
   Installation,
   ModelConfig,
   Pattern,
   PatternStat,
+  PRReviewSummary,
   Rule,
   ScenarioKPIs,
   ScenarioRun,

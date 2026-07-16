@@ -99,6 +99,44 @@ type ReviewComment struct {
 	// SuppressedReason records why a finding was suppressed (e.g.
 	// "team_feedback:3", "dismissed_match:0.91"). NULL for posted findings.
 	SuppressedReason *string `json:"suppressed_reason,omitempty"`
+	// ResolvedSHA is the push commit that closed this finding (migration 056),
+	// stamped by FindingLifecycle when the finding is marked addressed/resolved on
+	// a known SHA. NULL when resolved without a known SHA (@argus resolve, gauge
+	// at-merge) or still open — the viewer then shows the state pill with no
+	// resolved-by-commit breadcrumb.
+	ResolvedSHA *string `json:"resolved_sha,omitempty"`
+}
+
+// PRReviewSummary is one review pass in a PR's incremental history. Reviews are
+// per-SHA, so a re-reviewed PR has one row per push. CommentCount/NewCount count
+// the pass's non-suppressed findings (NewCount = the subset flagged
+// is_new_finding). Surfaced on the review-detail viewer so a re-reviewed PR shows
+// what each push added.
+type PRReviewSummary struct {
+	ID            uuid.UUID  `json:"id"`
+	HeadSHA       string     `json:"head_sha"`
+	Status        string     `json:"status"`
+	Score         *int       `json:"score,omitempty"`
+	IsIncremental bool       `json:"is_incremental"`
+	DeepReview    bool       `json:"deep_review"`
+	CreatedAt     time.Time  `json:"created_at"`
+	CompletedAt   *time.Time `json:"completed_at,omitempty"`
+	CommentCount  int        `json:"comment_count"`
+	NewCount      int        `json:"new_count"`
+}
+
+// AutoResolveSummary is one auto-resolve event for a PR — one synchronize push
+// that actually closed at least one stale thread (ListPRAutoResolveEvents filters
+// resolved_count > 0, so list-only 0-thread syncs never surface). SourceSHA is
+// that push; the counts feed the viewer's incremental-history timeline. The
+// resolved-by-commit breadcrumb is NOT derived from here — it reads the per-finding
+// review_comments.resolved_sha (migration 056), a lossless join immune to line
+// shift, so this summary carries no thread keys.
+type AutoResolveSummary struct {
+	SourceSHA      string    `json:"source_sha"`
+	ResolvedCount  int       `json:"resolved_count"`
+	AttemptedCount int       `json:"attempted_count"`
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 type Rule struct {

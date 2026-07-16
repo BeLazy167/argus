@@ -27,6 +27,7 @@ overrides:
       file_count: "FileCount"
       resolved_stale_count: "ResolvedStaleCount"
       source_sha: "SourceSHA"
+      resolved_sha: "ResolvedSHA"
       github_api_calls: "GitHubAPICalls"
       api_calls_total: "APICallsTotal"
       simulation_results: "SimulationResults"

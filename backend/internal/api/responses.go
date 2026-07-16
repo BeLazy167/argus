@@ -25,10 +25,15 @@ type SyncReposResponse struct {
 	Synced int `json:"synced"`
 }
 
-// ReviewDetailResponse wraps GET /api/v1/reviews/{reviewID}.
+// ReviewDetailResponse wraps GET /api/v1/reviews/{reviewID}. History and
+// AutoResolveEvents describe the PR's incremental re-review story (every per-SHA
+// pass and every auto-resolve push); both are empty for a single-pass PR, so the
+// viewer degrades cleanly.
 type ReviewDetailResponse struct {
-	Review   *store.Review         `json:"review"`
-	Comments []store.ReviewComment `json:"comments"`
+	Review            *store.Review              `json:"review"`
+	Comments          []store.ReviewComment      `json:"comments"`
+	History           []store.PRReviewSummary    `json:"history"`
+	AutoResolveEvents []store.AutoResolveSummary `json:"auto_resolve_events"`
 }
 
 // ReviewExportResponse is the JSON body of the review export download.

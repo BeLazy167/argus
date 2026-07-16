@@ -73,7 +73,24 @@ func (s *Server) getReview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, ReviewDetailResponse{Review: review, Comments: comments})
+	// Incremental-history sidecars: the PR's per-SHA review passes and its
+	// auto-resolve pushes. Auxiliary to the review itself, so a failure degrades
+	// to an empty timeline rather than failing the whole detail view.
+	history, err := s.store.ListPRReviewSummaries(r.Context(), review.RepoID, review.PRNumber)
+	if err != nil {
+		s.logger.Warn("fetching PR review history", "error", err, "review_id", id)
+	}
+	autoResolves, err := s.store.ListPRAutoResolveEvents(r.Context(), review.RepoID, review.PRNumber)
+	if err != nil {
+		s.logger.Warn("fetching PR auto-resolve events", "error", err, "review_id", id)
+	}
+
+	writeJSON(w, http.StatusOK, ReviewDetailResponse{
+		Review:            review,
+		Comments:          comments,
+		History:           history,
+		AutoResolveEvents: autoResolves,
+	})
 }
 
 // exportReviewPublic handles the public export endpoint with HMAC signature verification.

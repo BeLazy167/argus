@@ -26,19 +26,21 @@ import {
   Gauge,
   EyeOff,
   Users,
+  GitCommit,
+  History,
 } from "lucide-react";
 import { useReview, useRetryReview, useCancelReview } from "@/lib/queries/reviews";
 import { useRepos } from "@/lib/queries/repos";
 import { usePattern } from "@/lib/queries/patterns";
 import { track } from "@/lib/analytics";
-import { githubPrUrl } from "@/lib/github";
+import { githubPrUrl, githubCommitUrl } from "@/lib/github";
 import { ScoreBox } from "@/components/dashboard/score-badge";
 import { StatusBadge } from "@/components/dashboard/status-badge";
 import { formatDistanceToNow } from "@/lib/time";
 import { useReviewStream } from "@/lib/hooks/use-review-stream";
 import { PipelineProgress } from "./progress-bar";
 import { ActivityTimeline } from "./activity-timeline";
-import type { Repo, ReviewComment, ReviewContract, StageTokens, TokenUsage } from "@/lib/types";
+import type { AutoResolveSummary, FindingState, PRReviewSummary, Repo, ReviewComment, ReviewContract, StageTokens, TokenUsage } from "@/lib/types";
 import { STAGE_ORDER, stageLabel } from "@/lib/stage-labels";
 
 const Markdown = dynamic(() => import("./markdown").then(m => ({ default: m.Markdown })), { ssr: false });
@@ -195,6 +197,34 @@ const severityDot: Record<string, string> = {
   suggestion: "bg-blue-400",
   praise: "bg-green-400",
 };
+
+/* ── Finding lifecycle state (review_comments.state) ──────────
+   The reconciled ledger from the backend (#165): each posted finding carries a
+   lifecycle state the viewer surfaces as a pill. 'suppressed' never reaches the
+   main list (filtered upstream), so it is intentionally absent here. */
+const findingStateStyles: Record<
+  Exclude<FindingState, "suppressed">,
+  { label: string; cls: string }
+> = {
+  posted: { label: "Open", cls: "border-slate-400/30 bg-slate-400/10 text-slate-300" },
+  addressed: { label: "Addressed", cls: "border-emerald-500/30 bg-emerald-500/10 text-emerald-400" },
+  resolved: { label: "Resolved", cls: "border-cyan-400/30 bg-cyan-400/10 text-cyan-400" },
+  dismissed: { label: "Dismissed", cls: "border-iron/60 bg-iron/30 text-slate-text" },
+  deferred: { label: "Deferred", cls: "border-amber/30 bg-amber/10 text-amber" },
+};
+
+function FindingStateBadge({ state }: { state?: FindingState }) {
+  const cfg = findingStateStyles[(state ?? "posted") as Exclude<FindingState, "suppressed">];
+  if (!cfg) return null;
+  return (
+    <span
+      title={`Lifecycle: ${cfg.label}`}
+      className={`inline-flex items-center rounded-sm border px-2 py-0.5 text-[11px] font-mono uppercase tracking-wider ${cfg.cls}`}
+    >
+      {cfg.label}
+    </span>
+  );
+}
 
 
 
@@ -507,9 +537,13 @@ function PatternDetail({ patternId }: { patternId: number }) {
 function CommentCard({
   comment,
   filePath,
+  resolvedCommit,
 }: {
   comment: ReviewComment;
   filePath: string;
+  /** Set when an auto-resolve push closed this finding's thread — drives the
+   *  resolved-by-commit breadcrumb. */
+  resolvedCommit?: { sha: string; url?: string };
 }) {
   const severityClass = comment.severity
     ? severityStyles[comment.severity] ?? "border-iron"
@@ -538,6 +572,7 @@ function CommentCard({
             {comment.specialist}
           </span>
         )}
+        <FindingStateBadge state={comment.state} />
         {comment.confidence_score != null && (
           <span className="text-[11px] font-mono text-slate-text" title="Confidence score">
             {comment.confidence_score}%
@@ -583,6 +618,25 @@ function CommentCard({
           )}
         </div>
       )}
+      {resolvedCommit && (
+        <div className="flex items-center gap-1.5 mb-3 -mt-1 text-[11px] font-mono text-emerald-400/80">
+          <GitCommit className="h-3 w-3 shrink-0" />
+          <span>Resolved by</span>
+          {resolvedCommit.url ? (
+            <a
+              href={resolvedCommit.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-emerald-300 underline decoration-emerald-400/40 hover:decoration-emerald-300"
+            >
+              {resolvedCommit.sha.slice(0, 7)}
+            </a>
+          ) : (
+            <code className="text-emerald-300">{resolvedCommit.sha.slice(0, 7)}</code>
+          )}
+          <span className="text-slate-text">— flagged lines changed in this push</span>
+        </div>
+      )}
       <div className="ph-mask">
         <Markdown filePath={filePath}>{comment.body}</Markdown>
       </div>
@@ -596,12 +650,15 @@ function FileGroup({
   id,
   hidden,
   forceExpanded,
+  resolvedCommits,
 }: {
   filePath: string;
   fileComments: readonly ReviewComment[];
   id: string;
   hidden: boolean;
   forceExpanded?: boolean;
+  /** comment.id → resolving commit, for the resolved-by-commit breadcrumb. */
+  resolvedCommits?: Map<string, { sha: string; url?: string }>;
 }) {
   const [expanded, setExpanded] = useState(true);
 
@@ -660,7 +717,7 @@ function FileGroup({
                   language={language}
                 />
               )}
-              <CommentCard comment={comment} filePath={filePath} />
+              <CommentCard comment={comment} filePath={filePath} resolvedCommit={resolvedCommits?.get(comment.id)} />
               {i < fileComments.length - 1 && (
                 <div className="mx-4 border-b border-iron/30 my-1" />
               )}
@@ -915,6 +972,148 @@ function SuppressedFindings({ comments }: { comments: ReviewComment[] }) {
   );
 }
 
+/* ── Incremental history ─────────────────────── */
+
+type HistoryItem =
+  | { kind: "review"; time: string; pass: PRReviewSummary; passNo: number }
+  | { kind: "resolve"; time: string; ev: AutoResolveSummary };
+
+/**
+ * Compact per-push timeline of a re-reviewed PR: every per-SHA review pass and
+ * every auto-resolve push, merged chronologically. Renders nothing for a
+ * single-pass PR with no auto-resolves (the common case) so single-pass reviews
+ * are unaffected.
+ */
+function IncrementalHistory({
+  history,
+  events,
+  currentReviewId,
+  repoFullName,
+}: {
+  history: PRReviewSummary[];
+  events: AutoResolveSummary[];
+  currentReviewId: string;
+  repoFullName?: string;
+}) {
+  const items = useMemo<HistoryItem[]>(() => {
+    let passNo = 0;
+    const reviews: HistoryItem[] = history.map((pass) => ({
+      kind: "review",
+      time: pass.created_at,
+      pass,
+      passNo: ++passNo,
+    }));
+    const resolves: HistoryItem[] = events.map((ev) => ({ kind: "resolve", time: ev.created_at, ev }));
+    return [...reviews, ...resolves].sort(
+      (a, b) => new Date(a.time).getTime() - new Date(b.time).getTime(),
+    );
+  }, [history, events]);
+
+  // Meaningful only once the PR was re-reviewed or something was auto-resolved.
+  if (history.length <= 1 && events.length === 0) return null;
+
+  return (
+    <section className="border border-iron bg-charcoal/80 p-5 mb-8" aria-label="Incremental review history">
+      <div className="flex items-center gap-2 mb-4">
+        <History className="h-3.5 w-3.5 text-slate-text" />
+        <span className="text-[11px] font-mono uppercase tracking-wider text-slate-text">
+          Incremental history
+        </span>
+        <span className="text-[11px] font-mono text-slate-text">
+          · {history.length} pass{history.length !== 1 ? "es" : ""}
+        </span>
+      </div>
+      <ol className="space-y-3">
+        {items.map((item) => {
+          if (item.kind === "review") {
+            const { pass, passNo } = item;
+            const isCurrent = pass.id === currentReviewId;
+            const sha = pass.head_sha ? pass.head_sha.slice(0, 7) : "—";
+            return (
+              <li key={`r-${pass.id}`} className="flex items-start gap-3">
+                <div
+                  className={`mt-1 h-2 w-2 rounded-full shrink-0 ${isCurrent ? "bg-amber" : "bg-blue-400/60"}`}
+                />
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 flex-wrap text-[11px] font-mono">
+                    <span className="text-foreground">Pass {passNo}</span>
+                    {repoFullName && pass.head_sha ? (
+                      <a
+                        href={githubCommitUrl(repoFullName, pass.head_sha)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 text-slate-text hover:text-amber transition-colors"
+                      >
+                        <GitCommit className="h-3 w-3" />
+                        {sha}
+                      </a>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 text-slate-text">
+                        <GitCommit className="h-3 w-3" />
+                        {sha}
+                      </span>
+                    )}
+                    {pass.is_incremental && <span className="text-cyan-400">incremental</span>}
+                    {pass.deep_review && <span className="text-purple-400">deep</span>}
+                    {isCurrent && (
+                      <span className="rounded-sm border border-amber/30 bg-amber/10 text-amber px-1.5 py-0.5">
+                        viewing
+                      </span>
+                    )}
+                    {pass.status !== "completed" && (
+                      <span className="text-slate-text">({pass.status})</span>
+                    )}
+                    <span className="ml-auto text-slate-text">{formatDistanceToNow(pass.created_at)}</span>
+                  </div>
+                  <div className="flex items-center gap-3 mt-1 text-[11px] font-mono text-slate-text">
+                    <span>
+                      {pass.comment_count} finding{pass.comment_count !== 1 ? "s" : ""}
+                    </span>
+                    {pass.new_count > 0 && <span className="text-emerald-400">+{pass.new_count} new</span>}
+                    {pass.score != null && <span>score {pass.score}/10</span>}
+                  </div>
+                </div>
+              </li>
+            );
+          }
+          const { ev } = item;
+          const sha = ev.source_sha ? ev.source_sha.slice(0, 7) : "—";
+          return (
+            <li key={`a-${ev.source_sha}-${ev.created_at}`} className="flex items-start gap-3">
+              <div className="mt-1 h-2 w-2 rounded-full shrink-0 bg-emerald-500/70" />
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2 flex-wrap text-[11px] font-mono">
+                  <Check className="h-3 w-3 text-emerald-400 shrink-0" />
+                  <span className="text-emerald-400">
+                    Auto-resolved {ev.resolved_count} thread{ev.resolved_count !== 1 ? "s" : ""}
+                  </span>
+                  {repoFullName && ev.source_sha ? (
+                    <a
+                      href={githubCommitUrl(repoFullName, ev.source_sha)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1 text-slate-text hover:text-amber transition-colors"
+                    >
+                      <GitCommit className="h-3 w-3" />
+                      {sha}
+                    </a>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 text-slate-text">
+                      <GitCommit className="h-3 w-3" />
+                      {sha}
+                    </span>
+                  )}
+                  <span className="ml-auto text-slate-text">{formatDistanceToNow(ev.created_at)}</span>
+                </div>
+              </div>
+            </li>
+          );
+        })}
+      </ol>
+    </section>
+  );
+}
+
 /* ── Main Page ───────────────────────────────── */
 
 export default function ReviewDetailPage() {
@@ -960,6 +1159,29 @@ export default function ReviewDetailPage() {
     () => new Map<number, Repo>((repos ?? []).map((r) => [r.id, r])),
     [repos],
   );
+
+  const repoFullName = useMemo(
+    () => (review ? repoMap.get(review.repo_id)?.full_name : undefined),
+    [repoMap, review],
+  );
+
+  // Map each finding → the commit that closed it, keyed by comment.id. Source:
+  // review_comments.resolved_sha (migration 056) — a lossless per-finding stamp set
+  // when the lifecycle marks it addressed/resolved on a known SHA. Its presence
+  // already implies a resolved-ish state, so no state gate is needed. Drives the
+  // per-finding resolved-by-commit breadcrumb; immune to line-shift (unlike the old
+  // path:line match against auto-resolve thread keys).
+  const resolvedCommits = useMemo(() => {
+    const out = new Map<string, { sha: string; url?: string }>();
+    for (const c of data?.comments ?? []) {
+      if (!c.resolved_sha) continue;
+      out.set(c.id, {
+        sha: c.resolved_sha,
+        url: repoFullName ? githubCommitUrl(repoFullName, c.resolved_sha) : undefined,
+      });
+    }
+    return out;
+  }, [data?.comments, repoFullName]);
 
   const grouped = useMemo(() => {
     const map = new Map<string, ReviewComment[]>();
@@ -1426,6 +1648,16 @@ export default function ReviewDetailPage() {
         })()}
       </div>
 
+      {/* Incremental history — per-push passes + auto-resolves (re-reviewed PRs) */}
+      {!isLive && (
+        <IncrementalHistory
+          history={data?.history ?? []}
+          events={data?.auto_resolve_events ?? []}
+          currentReviewId={review.id}
+          repoFullName={repoFullName}
+        />
+      )}
+
       {/* Intelligence card */}
       {review.status === "completed" && comments.length > 0 && (() => {
         const coverage = memoryStats.total > 0 ? memoryStats.memoryUsed / memoryStats.total : 0;
@@ -1567,6 +1799,7 @@ export default function ReviewDetailPage() {
                   fileComments={filtered}
                   hidden={!visibleFiles.has(filePath)}
                   forceExpanded={expandToggle > 0 ? allExpanded : undefined}
+                  resolvedCommits={resolvedCommits}
                 />
               );
             })}

@@ -146,6 +146,48 @@ export interface ReviewComment {
    * "team_feedback:3", "dismissed_match:0.91"). NULL for posted findings.
    */
   suppressed_reason?: string;
+  /**
+   * ResolvedSHA is the push commit that closed this finding (migration 056),
+   * stamped by FindingLifecycle when the finding is marked addressed/resolved on
+   * a known SHA. NULL when resolved without a known SHA (@argus resolve, gauge
+   * at-merge) or still open — the viewer then shows the state pill with no
+   * resolved-by-commit breadcrumb.
+   */
+  resolved_sha?: string;
+}
+/**
+ * PRReviewSummary is one review pass in a PR's incremental history. Reviews are
+ * per-SHA, so a re-reviewed PR has one row per push. CommentCount/NewCount count
+ * the pass's non-suppressed findings (NewCount = the subset flagged
+ * is_new_finding). Surfaced on the review-detail viewer so a re-reviewed PR shows
+ * what each push added.
+ */
+export interface PRReviewSummary {
+  id: string;
+  head_sha: string;
+  status: string;
+  score?: number /* int */;
+  is_incremental: boolean;
+  deep_review: boolean;
+  created_at: string;
+  completed_at?: string;
+  comment_count: number /* int */;
+  new_count: number /* int */;
+}
+/**
+ * AutoResolveSummary is one auto-resolve event for a PR — one synchronize push
+ * that actually closed at least one stale thread (ListPRAutoResolveEvents filters
+ * resolved_count > 0, so list-only 0-thread syncs never surface). SourceSHA is
+ * that push; the counts feed the viewer's incremental-history timeline. The
+ * resolved-by-commit breadcrumb is NOT derived from here — it reads the per-finding
+ * review_comments.resolved_sha (migration 056), a lossless join immune to line
+ * shift, so this summary carries no thread keys.
+ */
+export interface AutoResolveSummary {
+  source_sha: string;
+  resolved_count: number /* int */;
+  attempted_count: number /* int */;
+  created_at: string;
 }
 export interface Rule {
   id: number /* int64 */;

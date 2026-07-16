@@ -7,3 +7,8 @@ export function githubPrUrl(
   const base = `https://github.com/${repoFullName}/pull/${prNumber}`;
   return reviewId ? `${base}#pullrequestreview-${reviewId}` : base;
 }
+
+/** Builds a GitHub commit URL for a repo + full SHA. */
+export function githubCommitUrl(repoFullName: string, sha: string): string {
+  return `https://github.com/${repoFullName}/commit/${sha}`;
+}
