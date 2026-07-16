@@ -116,10 +116,15 @@ Webhook → Contract → Triage → Briefing → Review → Dedup → Validate �
 - Glass Box footer on every review, with an optional token/cost breakdown
 - PR-description enrichment with Mermaid diagrams (sequence, dataflow, dependency)
 
+**Re-review & resolution**
+- Auto-review on by default — every opened / pushed / reopened PR reviews itself; a push re-reviews only the new commits since the last review (the inter-diff), carrying prior findings forward. When off, a push posts a one-click Trigger checkbox instead of nothing
+- Verified addressed-resolution — stale finding threads auto-resolve when a push fixes them, but only after an LLM judge confirms the change actually addressed the finding (line proximity alone never resolves; degrades safe on any judge failure)
+- Coherent comment states — each finding carries one lifecycle state (posted / addressed / dismissed / deferred / resolved) reconciled across the GitHub thread and the DB, with a resolved-by-commit breadcrumb and per-push history in the dashboard
+- Maintainer-gated clearing — reactions, non-privileged replies, and `@argus resolve` from non-maintainers can't clear a finding from the merge gate
+
 **Memory & feedback**
 - Suppression memory — semantic dismissal matching per category (security and permanent checks are never muted)
 - Pattern learning from reactions and reply analysis; prior fixes and repo rules surface inline
-- Incremental re-review on push, with a 1–10 score
 - Review gauge — post-close telemetry on which comments actually got addressed, per category per change class (`GET /api/v1/stats/gauge`)
 - Custom rules in natural language
 

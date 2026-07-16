@@ -2,7 +2,7 @@
 
 Everything needed to run your own Argus: a GitHub App, Postgres, the Go backend, the Next.js dashboard, and a Clerk instance for dashboard auth. LLM keys are BYOK — added at runtime via the dashboard, never via env.
 
-Set `SELF_HOSTED=true` on the backend to disable plan gating (self-hosts have no billing; every installation gets pro features). The API reports the effective tier, so the dashboard reflects pro automatically — no web-side configuration needed.
+Set `SELF_HOSTED=true` on the backend to disable plan gating (self-hosts have no billing; every installation gets pro features). The API reports the effective tier, so the dashboard reflects pro automatically — no web-side configuration needed. `SELF_HOSTED=true` also makes reviews **auto-run unconditionally**: with no billing to gate, a self-host reviews on every opened/pushed/reopened PR regardless of the stored `auto_run` setting (see [Auto-run & re-review](#auto-run--re-review)).
 
 ## 1. Create the GitHub App
 
@@ -94,6 +94,30 @@ pnpm dev
 ```
 
 Point `NEXT_PUBLIC_API_URL` at your backend and set `CORS_ALLOW_ORIGIN` on the backend to the dashboard origin.
+
+## Auto-run & re-review
+
+**Auto-run is on by default.** Every PR that opens, gets pushed to, or is
+reopened is reviewed automatically — no checkbox, no manual trigger. A push to an
+open PR re-reviews only the commits added since the last completed review (the
+inter-diff), carrying prior findings forward.
+
+Precedence: an explicit per-repo setting wins, else the org default, else on. To
+turn auto-run **off**, set `auto_run: false` — per repo on the dashboard
+**Settings** page, or org-wide as an org default. When off, a push does not review
+silently: Argus posts a one-shot "Trigger Argus review" checkbox comment (with a
+token/cost estimate) once per PR; reviewers tick it to run on demand, or use
+`@<your-slug> review`.
+
+`SELF_HOSTED=true` overrides all of this: a self-host always auto-runs, regardless
+of the stored `auto_run` flag (there is no billing to gate).
+
+**Auto-resolve** is a separate toggle (`auto_resolve_enabled`, also on by default).
+On every push it closes stale finding threads whose flagged lines the push
+modified — but only after an LLM judge confirms the change actually fixed the
+finding (proximity alone never resolves). It runs independently of auto-run, so a
+manual-review repo still gets stale comments cleared when a fix lands. Set
+`auto_resolve_enabled: false` for manual-only thread control.
 
 ## Reference
 
