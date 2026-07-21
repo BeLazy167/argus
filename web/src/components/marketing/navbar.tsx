@@ -6,7 +6,6 @@ import Link from "next/link";
 import { SignedIn, SignedOut } from "@clerk/nextjs";
 import { AnimatePresence, motion } from "motion/react";
 import { Github, Menu, X } from "lucide-react";
-import { ThemeToggle } from "@/components/dashboard/theme-toggle";
 
 /**
  * Navbar — floating pill with shared-layout hover indicator.
@@ -140,7 +139,6 @@ export function Navbar() {
           >
             <Github className="h-[18px] w-[18px]" />
           </a>
-          <ThemeToggle />
           <SignedOut>
             <Link
               href="/sign-in"
@@ -210,13 +208,6 @@ export function Navbar() {
                   </Link>
                 </motion.div>
               ))}
-            </div>
-
-            <div className="flex items-center justify-between pt-2">
-              <span className="font-mono text-[11px] uppercase tracking-[0.18em] text-slate-text">
-                Theme
-              </span>
-              <ThemeToggle />
             </div>
 
             <div className="mt-auto flex flex-col gap-3 pt-4">

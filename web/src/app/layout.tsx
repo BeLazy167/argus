@@ -4,7 +4,6 @@ import { GeistSans } from "geist/font/sans";
 import "./globals.css";
 import { cn } from "@/lib/utils";
 import { Analytics } from "@vercel/analytics/next";
-import { ThemeScript } from "@/components/dashboard/theme-script";
 import { PostHogProvider } from "@/providers/posthog-provider";
 import { ClerkThemedProvider } from "@/providers/clerk-themed-provider";
 
@@ -52,7 +51,6 @@ export default function RootLayout({
       suppressHydrationWarning
     >
       <body className="min-h-screen bg-background font-mono antialiased">
-        <ThemeScript />
         <ClerkThemedProvider>
           <PostHogProvider>{children}</PostHogProvider>
         </ClerkThemedProvider>

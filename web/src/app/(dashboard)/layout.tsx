@@ -26,6 +26,7 @@ import { InstallationProvider, useInstallation } from "@/providers/installation-
 import { ActiveRepoProvider, useActiveRepo } from "@/providers/active-repo-provider";
 import { RepoSelect } from "@/components/dashboard/repo-select";
 import { ThemeToggle } from "@/components/dashboard/theme-toggle";
+import { DashboardTheme } from "@/components/dashboard/dashboard-theme";
 import { useSidebarCollapsed } from "@/components/dashboard/sidebar-collapse";
 import { PostHogGroupAssociation } from "@/providers/posthog-provider";
 import { useReviews } from "@/lib/queries/reviews";
@@ -302,6 +303,7 @@ export default function DashboardLayout({
   return (
     <QueryProvider>
       <InstallationProvider>
+        <DashboardTheme />
         <PostHogGroupAssociation />
         <FirstReviewProbe />
         <ActiveRepoProvider>
