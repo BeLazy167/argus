@@ -5,7 +5,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { SignedIn, SignedOut } from "@clerk/nextjs";
 import { AnimatePresence, motion } from "motion/react";
-import { Menu, X } from "lucide-react";
+import { Github, Menu, X } from "lucide-react";
 import { ThemeToggle } from "@/components/dashboard/theme-toggle";
 
 /**
@@ -130,6 +130,16 @@ export function Navbar() {
 
         {/* Right cluster */}
         <div className="hidden items-center gap-3 pr-1 md:flex">
+          <a
+            href="https://github.com/BeLazy167/argus"
+            target="_blank"
+            rel="noreferrer"
+            aria-label="Argus on GitHub — open source (opens in a new tab)"
+            title="Open source on GitHub"
+            className="inline-flex items-center justify-center rounded-full p-1.5 text-slate-text transition-colors duration-150 hover:text-amber focus:outline-none focus-visible:ring-1 focus-visible:ring-amber/50"
+          >
+            <Github className="h-[18px] w-[18px]" />
+          </a>
           <ThemeToggle />
           <SignedOut>
             <Link
@@ -210,6 +220,16 @@ export function Navbar() {
             </div>
 
             <div className="mt-auto flex flex-col gap-3 pt-4">
+              <a
+                href="https://github.com/BeLazy167/argus"
+                target="_blank"
+                rel="noreferrer"
+                onClick={closeMenu}
+                className="inline-flex items-center justify-center gap-2 rounded-full border border-iron py-3 font-mono text-[13px] text-foreground transition-colors hover:border-amber/50 hover:text-amber"
+              >
+                <Github className="h-4 w-4" />
+                <span>Open source on GitHub</span>
+              </a>
               <SignedOut>
                 <Link
                   href="/sign-in"
