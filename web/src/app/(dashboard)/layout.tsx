@@ -19,7 +19,6 @@ import { ActiveRepoProvider, useActiveRepo } from "@/providers/active-repo-provi
 import { RepoSelect } from "@/components/dashboard/repo-select";
 import { ThemeToggle } from "@/components/dashboard/theme-toggle";
 import { DashboardTheme } from "@/components/dashboard/dashboard-theme";
-import { CommandMenu } from "@/components/dashboard/command-menu";
 import { ThemeHotkey } from "@/components/dashboard/theme-hotkey";
 import { NAV_PRIMARY, NAV_GROUPS } from "@/components/dashboard/nav-items";
 import { useSidebarCollapsed } from "@/components/dashboard/sidebar-collapse";
@@ -272,7 +271,6 @@ export default function DashboardLayout({
       <InstallationProvider>
         <DashboardTheme />
         <ThemeHotkey />
-        <CommandMenu />
         <PostHogGroupAssociation />
         <FirstReviewProbe />
         <ActiveRepoProvider>

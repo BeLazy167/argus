@@ -48,7 +48,7 @@ export default function FeaturesPage() {
         </header>
 
         {isLoading ? (
-          <div className="flex items-center gap-2 text-slate-500 font-mono text-sm">
+          <div role="status" aria-live="polite" className="flex items-center gap-2 text-slate-500 font-mono text-sm">
             <Loader2 className="h-4 w-4 animate-spin" />
             Loading features...
           </div>
@@ -83,13 +83,14 @@ export default function FeaturesPage() {
             />
 
             <div className="border border-iron bg-charcoal/60 p-4">
-              <label className="block text-sm font-mono text-slate-200 mb-1">
+              <label htmlFor="max-linked-prs" className="block text-sm font-mono text-slate-200 mb-1">
                 Max linked PRs per review
               </label>
               <p className="text-xs font-mono text-slate-500 mb-3">
                 How many linked PRs the cross-repo worker will fetch and consider. Bounded 1–20.
               </p>
               <input
+                id="max-linked-prs"
                 type="number"
                 min={1}
                 max={20}

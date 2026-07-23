@@ -158,7 +158,7 @@ export function PostHogProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <PHProvider client={posthog}>
-      <Suspense fallback={null}>
+      <Suspense fallback={<span aria-hidden className="sr-only" />}>
         <PostHogPageView />
       </Suspense>
       <SessionRecordingGate />

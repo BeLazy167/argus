@@ -98,8 +98,8 @@ function SectionHeader({ title, tip }: { title: string; tip?: string }) {
   );
 }
 
-function Loading() { return <div className="flex items-center justify-center py-12"><Loader2 className="h-5 w-5 animate-spin text-muted-foreground" /></div>; }
-function Err({ label }: { label: string }) { return <div className="flex items-center justify-center py-12 text-xs font-mono text-destructive">Failed to load {label}</div>; }
+function Loading() { return <div role="status" aria-live="polite" className="flex items-center justify-center py-12"><Loader2 className="h-5 w-5 animate-spin text-muted-foreground" /></div>; }
+function Err({ label }: { label: string }) { return <div role="alert" aria-live="assertive" className="flex items-center justify-center py-12 text-xs font-mono text-destructive">Failed to load {label}</div>; }
 
 const tooltipStyle = { background: "hsl(var(--card))", border: "1px solid hsl(var(--border))", fontSize: 11, fontFamily: "monospace", color: "hsl(var(--foreground))" };
 

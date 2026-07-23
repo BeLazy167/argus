@@ -70,6 +70,7 @@ export function PatternsSection() {
 	const createPattern = useCreatePattern();
 	const deletePattern = useDeletePattern();
 	const [content, setContent] = useState("");
+	const [errors, setErrors] = useState<{ content?: string }>({});
 	const [selectedRepoId, setSelectedRepoId] = useState<number | undefined>();
 	const [filterRepo] = useSearchParamState("repo", "all");
 	const [sourceFilter] = useSearchParamState("source", "all");
@@ -161,8 +162,13 @@ export function PatternsSection() {
 
 	const handleSubmit = (e: React.FormEvent) => {
 		e.preventDefault();
-		if (!content.trim()) return;
-		createPattern.mutate({ content: content.trim(), repo_id: selectedRepoId });
+		const trimmed = content.trim();
+		if (trimmed.length < 8) {
+			setErrors({ content: "Pattern must be at least 8 characters." });
+			return;
+		}
+		setErrors({});
+		createPattern.mutate({ content: trimmed, repo_id: selectedRepoId });
 		setContent("");
 	};
 
@@ -266,8 +272,14 @@ export function PatternsSection() {
 					<input
 						type="text"
 						value={content}
-						onChange={(e) => setContent(e.target.value)}
+						onChange={(e) => {
+							setContent(e.target.value);
+							if (errors.content) setErrors({});
+						}}
 						required
+						minLength={8}
+						aria-invalid={errors.content ? true : undefined}
+						aria-describedby={errors.content ? "pattern-content-error" : undefined}
 						placeholder="e.g. Always use guard clauses instead of nested if statements"
 						aria-label="Pattern content"
 						className="flex-1 border border-iron bg-charcoal px-4 py-2.5 text-xs font-mono text-foreground placeholder:text-slate-text/50 focus:outline-none focus:border-amber/50 transition-colors"
@@ -291,14 +303,24 @@ export function PatternsSection() {
 						disabled={!content.trim() || createPattern.isPending}
 						className="flex items-center gap-2 border border-amber/30 bg-amber/10 px-4 py-2.5 text-xs font-mono font-medium text-amber hover:bg-amber/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
 					>
-						{createPattern.isPending ? (
-							<Loader2 className="h-3.5 w-3.5 animate-spin" />
-						) : (
-							<Plus className="h-3.5 w-3.5" />
-						)}
+						<span role="status" aria-live="polite" className="inline-flex items-center">
+							{createPattern.isPending ? (
+								<>
+									<Loader2 className="h-3.5 w-3.5 animate-spin" />
+									<span className="sr-only">Adding pattern</span>
+								</>
+							) : (
+								<Plus className="h-3.5 w-3.5" />
+							)}
+						</span>
 						Add
 					</button>
 				</div>
+				{errors.content && (
+					<p id="pattern-content-error" role="alert" className="mt-2 text-[11px] font-mono text-red-400">
+						{errors.content}
+					</p>
+				)}
 			</form>
 
 			{/* Source Tabs */}
@@ -386,11 +408,16 @@ export function PatternsSection() {
 				</div>
 
 				{isLoading ? (
-					<div className="flex items-center justify-center py-10">
+					<div
+						role="status"
+						aria-live="polite"
+						className="flex items-center justify-center py-10"
+					>
 						<Loader2 className="h-5 w-5 animate-spin text-slate-text" />
+						<span className="sr-only">Loading patterns</span>
 					</div>
 				) : patternsError ? (
-					<div className="py-10 text-center text-xs font-mono text-red-400">
+					<div role="alert" className="py-10 text-center text-xs font-mono text-red-400">
 						Failed to load patterns — check your connection and retry.
 					</div>
 				) : filtered.length === 0 ? (

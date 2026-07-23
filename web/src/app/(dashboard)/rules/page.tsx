@@ -113,6 +113,7 @@ export default function RulesPage() {
               <select
                 value={category}
                 onChange={(e) => setCategory(e.target.value)}
+                aria-label="Category"
                 className="w-full border border-iron bg-background px-3 py-2 text-xs font-mono text-foreground focus:border-amber focus:outline-none"
               >
                 {CATEGORIES.map((c) => (
@@ -150,6 +151,7 @@ export default function RulesPage() {
               value={content}
               onChange={(e) => setContent(e.target.value)}
               rows={3}
+              aria-label="Rule content"
               placeholder="Describe what Argus should check for…"
               className="w-full border border-iron bg-background px-3 py-2 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none resize-none"
             />
@@ -168,7 +170,9 @@ export default function RulesPage() {
               disabled={createRule.isPending || !category || !content}
               className="border border-amber bg-amber/10 px-4 py-1.5 text-xs font-mono text-amber hover:bg-amber/20 transition-colors disabled:opacity-50"
             >
-              {createRule.isPending ? "Creating..." : "Create rule"}
+              <span role="status" aria-live="polite">
+                {createRule.isPending ? "Creating..." : "Create rule"}
+              </span>
             </button>
           </div>
         </div>
@@ -192,12 +196,21 @@ export default function RulesPage() {
           {paginated.map((rule) => (
             <div
               key={rule.id}
+              role="button"
+              tabIndex={0}
               className={`border border-iron bg-charcoal px-5 py-4 cursor-pointer ${
                 !rule.enabled ? "opacity-50" : ""
               }`}
               onClick={(e) => {
                 const target = e.target as HTMLElement;
                 if (target.closest("button")) return;
+                if (editingId === rule.id) return;
+                startEdit(rule);
+              }}
+              onKeyDown={(e) => {
+                if (e.target !== e.currentTarget) return;
+                if (e.key !== "Enter" && e.key !== " ") return;
+                e.preventDefault();
                 if (editingId === rule.id) return;
                 startEdit(rule);
               }}
@@ -224,6 +237,7 @@ export default function RulesPage() {
                         enabled: !rule.enabled,
                       })
                     }
+                    aria-label={rule.enabled ? "Disable rule" : "Enable rule"}
                     className="text-slate-text hover:text-foreground transition-colors"
                   >
                     {rule.enabled ? (
@@ -235,6 +249,7 @@ export default function RulesPage() {
                   <button
                     type="button"
                     onClick={() => deleteRule.mutate(rule.id)}
+                    aria-label="Delete rule"
                     className="text-slate-text hover:text-red-400 transition-colors"
                   >
                     <Trash2 className="h-3.5 w-3.5" />
@@ -252,6 +267,7 @@ export default function RulesPage() {
                       <select
                         value={editCategory}
                         onChange={(e) => setEditCategory(e.target.value)}
+                        aria-label="Category"
                         className="w-full border border-iron bg-background px-3 py-2 text-xs font-mono text-foreground focus:border-amber focus:outline-none"
                       >
                         {CATEGORIES.map((c) => (
@@ -289,6 +305,7 @@ export default function RulesPage() {
                       value={editContent}
                       onChange={(e) => setEditContent(e.target.value)}
                       rows={3}
+                      aria-label="Rule content"
                       className="w-full border border-iron bg-background px-3 py-2 text-xs font-mono text-foreground focus:border-amber focus:outline-none resize-none"
                     />
                   </div>
@@ -306,7 +323,9 @@ export default function RulesPage() {
                       disabled={updateRule.isPending || !editCategory || !editContent}
                       className="border border-amber bg-amber/10 px-4 py-1.5 text-xs font-mono text-amber hover:bg-amber/20 transition-colors disabled:opacity-50"
                     >
-                      {updateRule.isPending ? "Saving..." : "Save"}
+                      <span role="status" aria-live="polite">
+                        {updateRule.isPending ? "Saving..." : "Save"}
+                      </span>
                     </button>
                   </div>
                 </div>

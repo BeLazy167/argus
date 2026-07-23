@@ -1,11 +1,11 @@
 "use client";
 
-import { Command } from "cmdk";
+import { Command, CommandDialog } from "cmdk";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Search, SunMoon, CornerDownLeft } from "lucide-react";
+import { useAuth } from "@clerk/nextjs";
+import { Search, CornerDownLeft } from "lucide-react";
 import { NAV_PRIMARY, NAV_GROUPS } from "./nav-items";
-import { toggleTheme } from "./theme-toggle";
 
 const ITEM_CLASS =
   "flex cursor-pointer items-center gap-2.5 rounded-sm px-2 py-2 font-mono text-sm text-slate-text transition-colors data-[selected=true]:bg-amber/10 data-[selected=true]:text-foreground";
@@ -15,12 +15,18 @@ const ITEM_CLASS =
  * every dashboard route plus quick actions. cmdk supplies the accessible
  * combobox semantics (roving focus, aria-activedescendant, type-ahead filtering);
  * this component supplies the item set and the Argus styling.
+ *
+ * Mounted from the root layout (so it is reachable in the render graph) but only
+ * active for signed-in app users — the Cmd+K listener and dialog stay inert on
+ * marketing and auth surfaces.
  */
 export function CommandMenu() {
+  const { isSignedIn } = useAuth();
   const [open, setOpen] = useState(false);
   const router = useRouter();
 
   useEffect(() => {
+    if (!isSignedIn) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "k" && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
@@ -29,7 +35,7 @@ export function CommandMenu() {
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, []);
+  }, [isSignedIn]);
 
   const go = (href: string) => {
     setOpen(false);
@@ -38,8 +44,10 @@ export function CommandMenu() {
 
   const groups = [{ label: "Menu", items: NAV_PRIMARY }, ...NAV_GROUPS];
 
+  if (!isSignedIn) return null;
+
   return (
-    <Command.Dialog
+    <CommandDialog
       open={open}
       onOpenChange={setOpen}
       label="Command menu"
@@ -50,7 +58,7 @@ export function CommandMenu() {
         <Search className="h-4 w-4 shrink-0 text-slate-text/60" aria-hidden />
         <Command.Input
           placeholder="Search commands..."
-          className="w-full bg-transparent py-3.5 font-mono text-sm text-foreground outline-none placeholder:text-slate-text/50"
+          className="w-full rounded-sm bg-transparent py-3.5 font-mono text-sm text-foreground outline-none placeholder:text-slate-text/50 focus-visible:ring-1 focus-visible:ring-amber/40"
         />
       </div>
 
@@ -74,20 +82,6 @@ export function CommandMenu() {
             ))}
           </Command.Group>
         ))}
-
-        <Command.Group heading="Actions">
-          <Command.Item
-            value="Toggle theme dark light mode"
-            onSelect={() => {
-              toggleTheme();
-              setOpen(false);
-            }}
-            className={ITEM_CLASS}
-          >
-            <SunMoon className="h-3.5 w-3.5 shrink-0" />
-            Toggle theme
-          </Command.Item>
-        </Command.Group>
       </Command.List>
 
       <div className="flex items-center justify-between border-t border-iron px-3.5 py-2 font-mono text-[10px] text-slate-text/50">
@@ -96,6 +90,6 @@ export function CommandMenu() {
         </span>
         <span>esc to close</span>
       </div>
-    </Command.Dialog>
+    </CommandDialog>
   );
 }

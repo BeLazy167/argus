@@ -35,7 +35,8 @@ export default function TeamPage() {
 
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<string>("org:member");
-  const [inviting, setInviting] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [pendingId, setPendingId] = useState<string | null>(null);
   const [inviteError, setInviteError] = useState("");
 
   if (!isLoaded) {
@@ -60,7 +61,7 @@ export default function TeamPage() {
   const handleInvite = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!email.trim()) return;
-    setInviting(true);
+    setIsSubmitting(true);
     setInviteError("");
     try {
       await organization.inviteMember({
@@ -72,7 +73,7 @@ export default function TeamPage() {
     } catch (err: unknown) {
       setInviteError(err instanceof Error ? err.message : "Failed to send invite");
     } finally {
-      setInviting(false);
+      setIsSubmitting(false);
     }
   };
 
@@ -94,10 +95,11 @@ export default function TeamPage() {
         </h2>
         <form onSubmit={handleInvite} className="flex items-end gap-3 flex-wrap">
           <div className="flex-1 min-w-[200px]">
-            <label className="block text-[10px] font-mono text-slate-text uppercase tracking-wider mb-1">
+            <label htmlFor="invite-email" className="block text-[10px] font-mono text-slate-text uppercase tracking-wider mb-1">
               Email
             </label>
             <input
+              id="invite-email"
               type="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
@@ -107,11 +109,12 @@ export default function TeamPage() {
             />
           </div>
           <div className="w-36">
-            <label className="block text-[10px] font-mono text-slate-text uppercase tracking-wider mb-1">
+            <label htmlFor="invite-role" className="block text-[10px] font-mono text-slate-text uppercase tracking-wider mb-1">
               Role
             </label>
             <div className="relative">
               <select
+                id="invite-role"
                 value={role}
                 onChange={(e) => setRole(e.target.value)}
                 className="w-full appearance-none px-3 py-2 text-xs font-mono bg-background border border-iron text-foreground focus:border-amber/50 focus:outline-none transition-colors pr-8"
@@ -125,14 +128,15 @@ export default function TeamPage() {
           </div>
           <button
             type="submit"
-            disabled={inviting || !email.trim()}
+            aria-label="Send invite"
+            disabled={isSubmitting || !email.trim()}
             className="px-4 py-2 text-xs font-mono bg-amber text-background font-medium hover:bg-amber/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           >
-            {inviting ? <Loader2 className="h-3 w-3 animate-spin" /> : "Send invite"}
+            {isSubmitting ? <Loader2 className="h-3 w-3 animate-spin" /> : "Send invite"}
           </button>
         </form>
         {inviteError && (
-          <p className="text-[10px] font-mono text-red-400 mt-2">{inviteError}</p>
+          <p role="alert" className="text-[10px] font-mono text-red-400 mt-2">{inviteError}</p>
         )}
       </div>
 
@@ -158,6 +162,13 @@ export default function TeamPage() {
             </tr>
           </thead>
           <tbody>
+            {memberships?.data?.length === 0 && (
+              <tr>
+                <td colSpan={4} className="px-5 py-8 text-center text-[10px] font-mono text-slate-text">
+                  No members yet.
+                </td>
+              </tr>
+            )}
             {memberships?.data?.map((mem) => {
               const isCurrentUser = mem.publicUserData?.userId === user?.id;
               return (
@@ -197,6 +208,7 @@ export default function TeamPage() {
                       </span>
                     ) : (
                       <select
+                        aria-label="Change member role"
                         value={mem.role}
                         onChange={async (e) => {
                           await mem.update({ role: e.target.value as OrgRole });
@@ -218,14 +230,25 @@ export default function TeamPage() {
                   <td className="px-5 py-3 text-right">
                     {!isCurrentUser && (
                       <button
+                        aria-label="Remove member"
                         onClick={async () => {
-                          await mem.destroy();
-                          await memberships?.revalidate();
+                          setPendingId(mem.id);
+                          try {
+                            await mem.destroy();
+                            await memberships?.revalidate();
+                          } finally {
+                            setPendingId(null);
+                          }
                         }}
-                        className="text-[10px] font-mono text-red-400 hover:text-red-300 transition-colors"
+                        disabled={pendingId === mem.id}
+                        className="text-[10px] font-mono text-red-400 hover:text-red-300 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                         title="Remove member"
                       >
-                        <UserMinus className="h-3.5 w-3.5" />
+                        {pendingId === mem.id ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <UserMinus className="h-3.5 w-3.5" />
+                        )}
                       </button>
                     )}
                   </td>
@@ -278,6 +301,13 @@ export default function TeamPage() {
               </tr>
             </thead>
             <tbody>
+              {invitations.data.length === 0 && (
+                <tr>
+                  <td colSpan={4} className="px-5 py-8 text-center text-[10px] font-mono text-slate-text">
+                    No pending invitations.
+                  </td>
+                </tr>
+              )}
               {invitations.data.map((inv) => (
                 <tr key={inv.id} className="border-b border-iron/30 last:border-0">
                   <td className="px-5 py-3">
@@ -296,12 +326,18 @@ export default function TeamPage() {
                   <td className="px-5 py-3 text-right">
                     <button
                       onClick={async () => {
-                        await inv.revoke();
-                        await invitations?.revalidate?.();
+                        setPendingId(inv.id);
+                        try {
+                          await inv.revoke();
+                          await invitations?.revalidate?.();
+                        } finally {
+                          setPendingId(null);
+                        }
                       }}
-                      className="text-[10px] font-mono text-red-400 hover:text-red-300 transition-colors"
+                      disabled={pendingId === inv.id}
+                      className="text-[10px] font-mono text-red-400 hover:text-red-300 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                     >
-                      Revoke
+                      {pendingId === inv.id ? "Revoking..." : "Revoke"}
                     </button>
                   </td>
                 </tr>

@@ -306,6 +306,7 @@ function ConfigCard({
           </label>
           <div className="relative">
             <select
+              aria-label="Provider"
               value={provider}
               onChange={(e) => {
                 setProvider(e.target.value);
@@ -342,6 +343,7 @@ function ConfigCard({
               <div className="relative">
                 <Search className="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-slate-text" />
                 <input
+                  aria-label="Model"
                   type="text"
                   value={modelSearch || model}
                   onChange={(e) => {
@@ -390,6 +392,7 @@ function ConfigCard({
             /* Combo input: type any model name OR click a suggestion */
             <div className="relative">
               <input
+                aria-label="Model"
                 type="text"
                 value={isCustom ? customModel : model}
                 onChange={(e) => {
@@ -436,6 +439,7 @@ function ConfigCard({
               Endpoint URL <span className="text-amber">*</span>
             </label>
             <input
+              aria-label="Endpoint URL"
               type="text"
               value={baseURL}
               onChange={(e) => setBaseURL(e.target.value)}
@@ -460,6 +464,7 @@ function ConfigCard({
             Temperature: {temperature.toFixed(1)}
           </label>
           <input
+            aria-label="Temperature"
             type="range"
             min="0"
             max="2"
@@ -476,6 +481,7 @@ function ConfigCard({
             Max tokens
           </label>
           <input
+            aria-label="Max tokens"
             type="number"
             value={maxTokens}
             onChange={(e) => setMaxTokens(Number(e.target.value))}
@@ -485,11 +491,11 @@ function ConfigCard({
       </div>
 
       {error && (
-        <p className="text-[10px] font-mono text-red-400 mb-2">{error}</p>
+        <p role="alert" className="text-[10px] font-mono text-red-400 mb-2">{error}</p>
       )}
 
       {testResult && (
-        <div className={`rounded border px-3 py-2 mb-2 text-[10px] font-mono ${testResult.success ? "border-green-400/30 bg-green-400/5 text-green-400" : "border-red-400/30 bg-red-400/5 text-red-400"}`}>
+        <div role="status" aria-live="polite" className={`rounded border px-3 py-2 mb-2 text-[10px] font-mono ${testResult.success ? "border-green-400/30 bg-green-400/5 text-green-400" : "border-red-400/30 bg-red-400/5 text-red-400"}`}>
           <div className="flex items-center gap-1.5">
             {testResult.success ? <Check className="h-3 w-3" /> : <X className="h-3 w-3" />}
             <span className="font-medium">{testResult.success ? "Connection OK" : "Connection failed"}</span>
@@ -510,7 +516,7 @@ function ConfigCard({
           className="flex items-center gap-2 rounded border border-amber/30 bg-amber/10 px-3 py-1 text-[11px] font-mono text-amber hover:bg-amber/20 transition-colors disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
         >
           <Save className="h-3 w-3" />
-          {upsert.isPending ? "Saving..." : "Save"}
+          <span role="status" aria-live="polite">{upsert.isPending ? "Saving..." : "Save"}</span>
         </button>
         <button
           type="button"
@@ -519,7 +525,7 @@ function ConfigCard({
           className="flex items-center gap-2 bg-charcoal border border-iron px-3 py-1 text-[11px] font-mono text-slate-text hover:text-foreground hover:border-foreground/30 transition-colors disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
         >
           {test.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Zap className="h-3 w-3" />}
-          {test.isPending ? "Testing..." : "Test"}
+          <span role="status" aria-live="polite">{test.isPending ? "Testing..." : "Test"}</span>
         </button>
       </div>
     </div>
@@ -548,7 +554,7 @@ function OrgStageGapCard({
   const upsertOrgConfig = useUpsertOrgModelConfigMutation();
   const [provider, setProvider] = useState("");
   const [model, setModel] = useState("");
-  const [applying, setApplying] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState("");
 
   const picks = MODEL_PICKS[provider as Provider] ?? [];
@@ -565,13 +571,13 @@ function OrgStageGapCard({
       return;
     }
     setError("");
-    setApplying(true);
+    setIsSubmitting(true);
     const results = await Promise.allSettled(
       CORE_STAGES.map((stage) =>
         upsertOrgConfig.mutateAsync({ stage, provider, model, max_tokens: 4096, temperature: 0.2 }),
       ),
     );
-    setApplying(false);
+    setIsSubmitting(false);
     qc.invalidateQueries({ queryKey: useOrgModelConfigs.getKey() });
     const failed = CORE_STAGES.filter((_, i) => results[i]?.status === "rejected");
     if (failed.length > 0) {
@@ -635,11 +641,11 @@ function OrgStageGapCard({
         <button
           type="button"
           onClick={handleApplyAll}
-          disabled={applying || !provider || !model}
+          disabled={isSubmitting || !provider || !model}
           className="flex items-center gap-2 rounded border border-amber/30 bg-amber/10 px-3 py-1.5 text-[11px] font-mono text-amber hover:bg-amber/20 transition-colors disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
         >
           <Save className="h-3 w-3" />
-          {applying ? "Applying..." : "Apply to all stages"}
+          <span role="status" aria-live="polite">{isSubmitting ? "Applying..." : "Apply to all stages"}</span>
         </button>
       </div>
       {picks.length > 0 && (
@@ -662,7 +668,7 @@ function OrgStageGapCard({
         </div>
       )}
       {error && (
-        <p className="mt-2 pl-6 text-[10px] font-mono text-red-400">{error}</p>
+        <p role="alert" className="mt-2 pl-6 text-[10px] font-mono text-red-400">{error}</p>
       )}
     </div>
   );
@@ -727,6 +733,7 @@ function PromptCard({
       {open && (
         <div className="border-t border-iron px-4 pb-4 pt-3 space-y-3">
           <textarea
+            aria-label="Prompt template"
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             placeholder={defaultText}
@@ -741,7 +748,7 @@ function PromptCard({
               className="flex items-center gap-2 rounded border border-amber/30 bg-amber/10 px-3 py-1 text-[11px] font-mono text-amber hover:bg-amber/20 transition-colors disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
             >
               <Save className="h-3 w-3" />
-              {upsert.isPending ? "Saving..." : "Save"}
+              <span role="status" aria-live="polite">{upsert.isPending ? "Saving..." : "Save"}</span>
             </button>
             {isCustom && (
               <button
@@ -751,7 +758,7 @@ function PromptCard({
                 className="flex items-center gap-2 bg-charcoal border border-iron px-3 py-1 text-[11px] font-mono text-slate-text hover:text-foreground hover:border-foreground/30 transition-colors disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
               >
                 <RotateCw className="h-3 w-3" />
-                {del.isPending ? "Resetting..." : "Reset to default"}
+                <span role="status" aria-live="polite">{del.isPending ? "Resetting..." : "Reset to default"}</span>
               </button>
             )}
           </div>
@@ -1139,7 +1146,7 @@ export default function SettingsPage() {
       {settingsScope === "org" && (
         <>
           {!active || orgDefaultsLoading ? (
-            <div className="flex items-center justify-center py-20">
+            <div role="status" aria-live="polite" className="flex items-center justify-center py-20">
               <Loader2 className="h-6 w-6 animate-spin text-slate-text" />
             </div>
           ) : (
@@ -1181,6 +1188,7 @@ export default function SettingsPage() {
                       Custom persona prompt (org default)
                     </label>
                     <textarea
+                      aria-label="Custom persona prompt (org default)"
                       value={orgCustomPromptDraft}
                       onChange={(e) => setOrgCustomPromptDraft(e.target.value)}
                       placeholder="e.g. You are a reviewer focused on accessibility and i18n…"
@@ -1195,7 +1203,7 @@ export default function SettingsPage() {
                       }}
                       className="mt-2 rounded border border-amber/30 bg-amber/10 px-3 py-1.5 text-[11px] font-mono font-medium text-amber hover:bg-amber/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors cursor-pointer"
                     >
-                      {saveOrgDefaults.isPending ? "Saving..." : "Save Custom Persona"}
+                      <span role="status" aria-live="polite">{saveOrgDefaults.isPending ? "Saving..." : "Save Custom Persona"}</span>
                     </button>
                   </div>
                 )}
@@ -1435,7 +1443,7 @@ export default function SettingsPage() {
 
       {/* Repo Overrides Tab */}
       {settingsScope === "repo" && (loading ? (
-        <div className="flex items-center justify-center py-20">
+        <div role="status" aria-live="polite" className="flex items-center justify-center py-20">
           <Loader2 className="h-6 w-6 animate-spin text-slate-text" />
         </div>
       ) : !active ? (
@@ -1595,6 +1603,7 @@ export default function SettingsPage() {
                         Custom persona prompt — define how Argus should review code
                       </label>
                       <textarea
+                        aria-label="Custom persona prompt"
                         value={customPromptDraft}
                         onChange={(e) => setCustomPromptDraft(e.target.value)}
                         placeholder="e.g. You are a reviewer focused on accessibility and i18n. Flag any hardcoded strings, missing aria labels, or RTL layout issues…"
@@ -1619,13 +1628,13 @@ export default function SettingsPage() {
                         }}
                         className="mt-2 rounded border border-amber/30 bg-amber/10 px-3 py-1.5 text-[11px] font-mono font-medium text-amber hover:bg-amber/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors cursor-pointer"
                       >
-                        {updateRepo.isPending ? "Saving..." : "Save Custom Persona"}
+                        <span role="status" aria-live="polite">{updateRepo.isPending ? "Saving..." : "Save Custom Persona"}</span>
                       </button>
                     </div>
                   </ProGate>
                 )}
                 {personaError && (
-                  <p className="text-[10px] font-mono text-red-400 mt-2">{personaError}</p>
+                  <p role="alert" className="text-[10px] font-mono text-red-400 mt-2">{personaError}</p>
                 )}
               </>
             )}
@@ -1880,6 +1889,7 @@ export default function SettingsPage() {
                       }}
                     >
                       <input
+                        aria-label="Add branch to skip"
                         type="text"
                         placeholder="+ add branch"
                         className="bg-transparent border border-dashed border-iron/50 px-2 py-0.5 text-[11px] font-mono text-foreground placeholder:text-slate-text/30 w-28 focus:border-amber focus:outline-none"

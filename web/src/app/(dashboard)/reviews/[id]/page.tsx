@@ -520,7 +520,7 @@ function CopyFixButton({
 
 function PatternDetail({ patternId }: { patternId: number }) {
   const { data: pattern, isLoading } = usePattern({ variables: { id: patternId } });
-  if (isLoading) return <div className="mt-2 text-[11px] font-mono text-slate-text">Loading pattern...</div>;
+  if (isLoading) return <div role="status" aria-live="polite" className="mt-2 text-[11px] font-mono text-slate-text">Loading pattern...</div>;
   if (!pattern) return <div className="mt-2 text-[11px] font-mono text-slate-text">Pattern not found</div>;
   return (
     <div className="mt-2 border border-iron bg-iron/10 p-3">
@@ -1382,7 +1382,7 @@ export default function ReviewDetailPage() {
                 <RotateCcw
                   className={`h-3.5 w-3.5 ${retryReview.isPending ? "animate-spin" : ""}`}
                 />
-                {retryReview.isPending ? "Retrying\u2026" : "Retry"}
+                <span role="status" aria-live="polite">{retryReview.isPending ? "Retrying\u2026" : "Retry"}</span>
               </button>
             )}
             {isLive && (
@@ -1393,7 +1393,7 @@ export default function ReviewDetailPage() {
                 className="inline-flex items-center gap-1.5 border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs font-mono text-red-400 hover:bg-red-500/20 transition-colors cursor-pointer"
               >
                 <Square className="h-3 w-3 fill-current" />
-                {cancelReview.isPending ? "Cancelling\u2026" : "Stop Review"}
+                <span role="status" aria-live="polite">{cancelReview.isPending ? "Cancelling\u2026" : "Stop Review"}</span>
               </button>
             )}
           </div>
@@ -1403,7 +1403,7 @@ export default function ReviewDetailPage() {
       {/* Retry / Stop action errors — surfaced inline so a failed mutation
           isn't swallowed by console.error alone. */}
       {(retryReview.isError || cancelReview.isError) && (
-        <div className="border border-red-400/30 bg-red-400/5 px-4 py-2.5 mb-6 flex items-center gap-2">
+        <div className="border border-red-400/30 bg-red-400/5 px-4 py-2.5 mb-6 flex items-center gap-2" role="alert">
           <AlertTriangle className="h-4 w-4 text-red-400 shrink-0" />
           <p className="text-xs font-mono text-red-400">
             {retryReview.isError ? "Retry failed" : "Stop failed"}
@@ -1462,7 +1462,7 @@ export default function ReviewDetailPage() {
               </div>
             )) : (
               <p className="text-xs font-mono text-slate-text">
-                // No files to classify.
+                Nothing here yet.
               </p>
             )}
           </div>
@@ -1499,7 +1499,7 @@ export default function ReviewDetailPage() {
                 <RotateCcw
                   className={`h-3.5 w-3.5 ${retryReview.isPending ? "animate-spin" : ""}`}
                 />
-                {retryReview.isPending ? "Retrying\u2026" : "Retry"}
+                <span role="status" aria-live="polite">{retryReview.isPending ? "Retrying\u2026" : "Retry"}</span>
               </button>
             </div>
             <details className="mt-3">
@@ -1851,7 +1851,7 @@ export default function ReviewDetailPage() {
                 }}
                 className="px-3 py-1.5 text-xs font-mono text-red-400 border border-red-500/30 bg-red-500/10 hover:bg-red-500/20 transition-colors disabled:opacity-50"
               >
-                {cancelReview.isPending ? "Cancelling\u2026" : "Stop Review"}
+                <span role="status" aria-live="polite">{cancelReview.isPending ? "Cancelling\u2026" : "Stop Review"}</span>
               </button>
             </div>
           </div>

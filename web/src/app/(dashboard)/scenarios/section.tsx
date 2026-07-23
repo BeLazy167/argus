@@ -170,12 +170,12 @@ function ScenarioDrawer({ scenario }: { scenario: Scenario }) {
 					Run history
 				</h3>
 				{isLoading ? (
-					<div className="flex items-center gap-2 text-[11px] font-mono text-slate-text">
+					<div role="status" aria-live="polite" className="flex items-center gap-2 text-[11px] font-mono text-slate-text">
 						<Loader className="h-3 w-3 animate-spin" />
 						Loading runs…
 					</div>
 				) : runsError ? (
-					<p className="flex items-center gap-1.5 text-[11px] font-mono text-red-400">
+					<p role="alert" className="flex items-center gap-1.5 text-[11px] font-mono text-red-400">
 						<AlertCircle className="h-3 w-3" />
 						Could not load run history.
 					</p>
@@ -421,6 +421,7 @@ export function ScenariosSection() {
 							</label>
 							<textarea
 								id="scenario-description"
+								minLength={8}
 								value={description}
 								onChange={(e) => setDescription(e.target.value)}
 								onKeyDown={(e) => {
@@ -486,7 +487,9 @@ export function ScenariosSection() {
 								disabled={createScenario.isPending || !description.trim()}
 								className="border border-amber bg-amber/10 px-4 py-1.5 text-xs font-mono text-amber hover:bg-amber/20 transition-colors disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
 							>
-								{createScenario.isPending ? "Creating..." : "Create scenario"}
+								<span role="status" aria-live="polite">
+									{createScenario.isPending ? "Creating..." : "Create scenario"}
+								</span>
 							</button>
 						</div>
 					</form>

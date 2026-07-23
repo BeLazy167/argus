@@ -73,11 +73,12 @@ export function InstallationProvider({ children }: { children: ReactNode }) {
   }, [organization, orgId, orgSlug, installations, current, getToken, qc]);
 
   const isLoading = listLoading || currentLoading;
+  const items = installations ?? [];
 
   return (
     <InstallationContext.Provider
       value={{
-        installations: installations ?? [],
+        installations: items,
         active: current ?? null,
         setActive: () => {},
         isLoading,

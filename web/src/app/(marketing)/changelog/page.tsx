@@ -54,17 +54,23 @@ export default function ChangelogPage() {
             <h2 className="font-display text-2xl font-bold text-foreground mt-1 mb-4">
               {entry.title}
             </h2>
-            <ul className="space-y-2.5">
-              {entry.items.map((item) => (
-                <li
-                  key={item}
-                  className="flex gap-2.5 text-xs font-mono text-slate-text leading-relaxed"
-                >
-                  <span className="text-amber shrink-0 select-none">+</span>
-                  {item}
-                </li>
-              ))}
-            </ul>
+            {entry.items.length === 0 ? (
+              <p className="text-xs font-mono text-slate-text">
+                Nothing here yet.
+              </p>
+            ) : (
+              <ul className="space-y-2.5">
+                {entry.items.map((item) => (
+                  <li
+                    key={item}
+                    className="flex gap-2.5 text-xs font-mono text-slate-text leading-relaxed"
+                  >
+                    <span className="text-amber shrink-0 select-none">+</span>
+                    {item}
+                  </li>
+                ))}
+              </ul>
+            )}
           </article>
         ))}
       </div>
@@ -82,6 +88,7 @@ export default function ChangelogPage() {
           <input
             type="email"
             name="email"
+            aria-label="Email address"
             placeholder="you@company.com"
             required
             className="flex-1 border border-iron bg-background px-3 py-2 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none"

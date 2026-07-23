@@ -164,6 +164,7 @@ export default function FileMemorySidebar({ filePath, onClose, archFile, allFile
         </div>
         <button
           onClick={onClose}
+          aria-label="Close file memory"
           className="p-1 rounded hover:bg-[var(--graph-control-bg)] text-[var(--graph-text-muted)] hover:text-[var(--graph-text-dim)] transition-colors shrink-0"
         >
           <X className="h-3.5 w-3.5" />
@@ -173,7 +174,12 @@ export default function FileMemorySidebar({ filePath, onClose, archFile, allFile
       {/* Content */}
       <div className="flex-1 overflow-y-auto">
         {isLoading ? (
-          <div className="flex items-center justify-center py-12">
+          <div
+            className="flex items-center justify-center py-12"
+            role="status"
+            aria-live="polite"
+            aria-label="Loading file memory"
+          >
             <Loader2 className="h-4 w-4 animate-spin text-[var(--graph-text-muted)]" />
           </div>
         ) : !data ? (

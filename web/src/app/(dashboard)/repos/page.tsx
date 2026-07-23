@@ -46,6 +46,7 @@ function SetupBanner() {
       </div>
       <button
         type="button"
+        aria-label="Dismiss setup guide"
         onClick={() => {
           setDismissed(true);
           localStorage.setItem("argus_setup_banner_dismissed", "1");
@@ -164,7 +165,11 @@ function RepoCard({ repo, isPro }: { repo: Repo; isPro: boolean }) {
 
       {/* Repo limit error */}
       {repoError && (
-        <div className="flex items-center gap-2 rounded border border-red-400/30 bg-red-400/5 px-3 py-2 mb-3">
+        <div
+          role="alert"
+          aria-live="assertive"
+          className="flex items-center gap-2 rounded border border-red-400/30 bg-red-400/5 px-3 py-2 mb-3"
+        >
           <AlertTriangle className="h-3 w-3 text-red-400 shrink-0" />
           <p className="text-[10px] font-mono text-red-400">{repoError}</p>
         </div>
@@ -193,6 +198,7 @@ function RepoCard({ repo, isPro }: { repo: Repo; isPro: boolean }) {
         <div className="flex items-center gap-2">
           <input
             type="number"
+            aria-label="PR number"
             placeholder="PR #"
             value={prNumber}
             onChange={(e) => setPrNumber(e.target.value)}
@@ -284,7 +290,12 @@ export default function ReposPage() {
       <SetupBanner />
 
       {isLoading ? (
-        <div className="flex items-center justify-center py-20">
+        <div
+          role="status"
+          aria-live="polite"
+          aria-label="Loading repositories"
+          className="flex items-center justify-center py-20"
+        >
           <Loader2 className="h-6 w-6 animate-spin text-slate-text" />
         </div>
       ) : repos?.length === 0 ? (

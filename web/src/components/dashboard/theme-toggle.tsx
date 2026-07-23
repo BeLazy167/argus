@@ -34,8 +34,10 @@ export function applyTheme(theme: Theme) {
  * Shared by the toggle button, the Cmd+Shift+D hotkey, and the command menu.
  */
 export function toggleTheme(): Theme {
-  const current: Theme = document.documentElement.classList.contains("light") ? "light" : "dark";
-  const next: Theme = current === "dark" ? "light" : "dark";
+  // classList.toggle("dark") flips the class and returns the resulting state;
+  // applyTheme then normalizes the paired "light" class, colorScheme, storage,
+  // and the same-tab change event.
+  const next: Theme = document.documentElement.classList.toggle("dark") ? "dark" : "light";
   applyTheme(next);
   return next;
 }

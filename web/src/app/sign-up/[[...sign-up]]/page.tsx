@@ -292,6 +292,7 @@ function CreateForm({
         <Field label="First name" htmlFor="firstName">
           <input
             id="firstName"
+            aria-label="First name"
             type="text"
             required
             autoComplete="given-name"
@@ -304,6 +305,7 @@ function CreateForm({
         <Field label="Last name" htmlFor="lastName">
           <input
             id="lastName"
+            aria-label="Last name"
             type="text"
             required
             autoComplete="family-name"
@@ -318,6 +320,7 @@ function CreateForm({
       <Field label="Username" htmlFor="username">
         <input
           id="username"
+          aria-label="Username"
           type="text"
           required
           minLength={3}
@@ -332,6 +335,7 @@ function CreateForm({
       <Field label="Email" htmlFor="email">
         <input
           id="email"
+          aria-label="Email"
           type="email"
           required
           autoComplete="email"
@@ -345,6 +349,7 @@ function CreateForm({
       <Field label="Password" htmlFor="password" hint="8+ characters">
         <input
           id="password"
+          aria-label="Password"
           type="password"
           required
           minLength={8}
@@ -420,6 +425,7 @@ function VerifyForm({
       <Field label="Verification code" htmlFor="code">
         <input
           id="code"
+          aria-label="Verification code"
           type="text"
           inputMode="numeric"
           pattern="[0-9]*"

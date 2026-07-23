@@ -119,10 +119,11 @@ const ProviderKeyCard = memo(function ProviderKeyCard({
           />
         </div>
         <div>
-          <label className="block text-[10px] font-mono text-slate-text mb-1">
+          <label htmlFor={`provider-baseurl-${provider}`} className="block text-[10px] font-mono text-slate-text mb-1">
             Base URL {CLOUD_PROVIDERS.has(provider) ? "(required)" : "(optional)"}
           </label>
           <input
+            id={`provider-baseurl-${provider}`}
             type="text"
             value={baseUrl}
             onChange={(e) => setBaseUrl(e.target.value)}
@@ -157,7 +158,9 @@ const ProviderKeyCard = memo(function ProviderKeyCard({
           className="flex items-center gap-2 rounded border border-amber/30 bg-amber/10 px-3 py-1 text-[11px] font-mono text-amber hover:bg-amber/20 transition-colors disabled:opacity-50"
         >
           <Save className="h-3 w-3" />
-          {upsert.isPending ? "Saving..." : "Save"}
+          <span role="status" aria-live="polite">
+            {upsert.isPending ? "Saving..." : "Save"}
+          </span>
         </button>
         {existing && (
           <button
@@ -167,7 +170,9 @@ const ProviderKeyCard = memo(function ProviderKeyCard({
             className="flex items-center gap-2 rounded border border-red-400/30 px-3 py-1 text-[11px] font-mono text-red-400 hover:bg-red-400/10 transition-colors disabled:opacity-50"
           >
             <Trash2 className="h-3 w-3" />
-            {del.isPending ? "Deleting..." : "Delete"}
+            <span role="status" aria-live="polite">
+              {del.isPending ? "Deleting..." : "Delete"}
+            </span>
           </button>
         )}
       </div>
@@ -213,10 +218,11 @@ function SupermemoryCard() {
 
       <div className="space-y-2 mb-3">
         <div>
-          <label className="block text-[10px] font-mono text-slate-text mb-1">
+          <label htmlFor="supermemory-api-key" className="block text-[10px] font-mono text-slate-text mb-1">
             {configured ? "Replace API key" : "API key"}
           </label>
           <input
+            id="supermemory-api-key"
             type="password"
             value={apiKey}
             onChange={(e) => setApiKey(e.target.value)}
@@ -234,7 +240,9 @@ function SupermemoryCard() {
           className="flex items-center gap-2 border border-amber/30 bg-amber/10 px-3 py-1 text-[11px] font-mono text-amber hover:bg-amber/20 transition-colors disabled:opacity-50"
         >
           <Save className="h-3 w-3" />
-          {setKey.isPending ? "Saving..." : "Save"}
+          <span role="status" aria-live="polite">
+            {setKey.isPending ? "Saving..." : "Save"}
+          </span>
         </button>
         {configured && (
           <button
@@ -244,7 +252,9 @@ function SupermemoryCard() {
             className="flex items-center gap-2 border border-red-400/30 px-3 py-1 text-[11px] font-mono text-red-400 hover:bg-red-400/10 transition-colors disabled:opacity-50"
           >
             <Trash2 className="h-3 w-3" />
-            {delKey.isPending ? "Deleting..." : "Delete"}
+            <span role="status" aria-live="polite">
+              {delKey.isPending ? "Deleting..." : "Delete"}
+            </span>
           </button>
         )}
       </div>
