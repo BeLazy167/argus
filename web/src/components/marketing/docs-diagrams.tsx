@@ -14,6 +14,7 @@ import {
   RefreshCw,
   Check,
   Plus,
+  Database,
   type LucideIcon,
 } from "lucide-react";
 
@@ -138,7 +139,7 @@ const SPECIALISTS = [
   { icon: Bug, name: "bug_hunter", desc: "logic errors, nil derefs, broken invariants" },
   { icon: Shield, name: "security", desc: "injection, auth bypass, leaked secrets" },
   { icon: Network, name: "architecture", desc: "dependency direction, blast radius" },
-  { icon: History, name: "regression", desc: "re-introduced bugs, broken invariants" },
+  { icon: History, name: "regression", desc: "bugs that came back from past reviews" },
 ] as const;
 
 export function DeepReviewDiagram() {
@@ -261,6 +262,122 @@ export function LifecycleDiagram() {
             );
           })}
         </div>
+      </div>
+    </DiagramFrame>
+  );
+}
+
+/* ── Memory architecture — store, update, retrieve ── */
+
+const MEMORY_LOOP = [
+  {
+    icon: MessageSquare,
+    title: "Each review emits",
+    body: "findings · 👍 / 👎 reactions · replies · fixes · dismissals",
+    accent: false,
+  },
+  {
+    icon: Database,
+    title: "Supermemory (RAG)",
+    body: "{repo} + _shared containers · your key or ours (BYOT)",
+    accent: true,
+  },
+  {
+    icon: Sparkles,
+    title: "Next review retrieves",
+    body: "ranked, relevant memory. Sharper each time.",
+    accent: false,
+  },
+] as const;
+
+const MEMORY_TYPES = [
+  { name: "Patterns", desc: "auto-learned code conventions" },
+  { name: "Scenarios", desc: "failure cases from reviews + issues" },
+  { name: "Decision traces", desc: "comments, replies, approvals, dismissals" },
+  { name: "Context graph", desc: "the codebase's living event clock" },
+] as const;
+
+const MEMORY_RULES = [
+  { glyph: "↑", tone: "text-emerald-400/90", text: "Confirmed → reinforced" },
+  { glyph: "↓", tone: "text-amber", text: "Dismissed → suppressed" },
+  { glyph: "↻", tone: "text-slate-text", text: "Files change → scenario outdated" },
+] as const;
+
+export function MemoryDiagram() {
+  return (
+    <DiagramFrame
+      label="Memory architecture · store · update · retrieve"
+      caption="Every review, reaction, fix, and dismissal is written to Supermemory (RAG). Confirmed patterns are reinforced; dismissed ones are suppressed semantically — security findings are never silenced; scenarios go stale when their files change. Each review retrieves what's relevant and builds on the last."
+    >
+      <div className="flex flex-col gap-2 lg:flex-row lg:items-stretch">
+        {MEMORY_LOOP.map((n, i) => {
+          const Icon = n.icon;
+          return (
+            <div key={n.title} className="flex flex-1 items-stretch gap-2">
+              <div
+                className={`flex-1 border p-3 ${
+                  n.accent ? "border-amber/30 bg-amber/[0.05]" : "border-iron bg-void/60"
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <span className="flex h-7 w-7 shrink-0 items-center justify-center border border-amber/40 bg-amber/[0.07]">
+                    <Icon className="h-3.5 w-3.5 text-amber" />
+                  </span>
+                  <span className="font-mono text-[11px] font-bold uppercase tracking-wide text-foreground">
+                    {n.title}
+                  </span>
+                </div>
+                <p className="mt-2 font-mono text-[10px] leading-snug text-slate-text">
+                  {n.body}
+                </p>
+              </div>
+              {i < MEMORY_LOOP.length - 1 ? (
+                <span
+                  aria-hidden
+                  className="hidden shrink-0 self-center font-mono text-sm text-amber/50 lg:inline"
+                >
+                  {"→"}
+                </span>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="mt-4">
+        <div className="mb-2 font-mono text-[9px] uppercase tracking-[0.2em] text-amber-glow/60">
+          stored as
+        </div>
+        <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
+          {MEMORY_TYPES.map((m) => (
+            <div key={m.name} className="border border-iron bg-charcoal/60 px-2.5 py-2">
+              <div className="font-mono text-[10.5px] font-bold text-foreground">
+                {m.name}
+              </div>
+              <div className="font-mono text-[9.5px] leading-snug text-slate-text">
+                {m.desc}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="mt-3 flex flex-wrap gap-2">
+        {MEMORY_RULES.map((r) => (
+          <span
+            key={r.text}
+            className="inline-flex items-center gap-1.5 border border-iron bg-void/60 px-2 py-1 font-mono text-[10px] text-slate-text"
+          >
+            <span aria-hidden className={`font-bold ${r.tone}`}>
+              {r.glyph}
+            </span>
+            {r.text}
+          </span>
+        ))}
+      </div>
+
+      <div className="mt-4 border-t border-iron/50 pt-3 text-center font-mono text-[10px] uppercase tracking-[0.2em] text-amber-glow/70">
+        {"↺ memory compounds — every review builds on the last"}
       </div>
     </DiagramFrame>
   );

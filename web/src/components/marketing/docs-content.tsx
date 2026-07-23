@@ -50,6 +50,7 @@ import {
   PipelineDiagram,
   DeepReviewDiagram,
   LifecycleDiagram,
+  MemoryDiagram,
 } from "@/components/marketing/docs-diagrams";
 
 /* ── Section data ── */
@@ -2061,6 +2062,8 @@ export function DocsContent() {
               review code — it accumulates institutional memory that survives
               team turnover.
             </p>
+
+            <MemoryDiagram />
 
             <div className="space-y-4">
               {[
