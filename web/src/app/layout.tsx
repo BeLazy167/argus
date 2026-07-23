@@ -6,6 +6,7 @@ import { cn } from "@/lib/utils";
 import { Analytics } from "@vercel/analytics/next";
 import { PostHogProvider } from "@/providers/posthog-provider";
 import { ClerkThemedProvider } from "@/providers/clerk-themed-provider";
+import { AppToaster } from "@/components/toaster";
 
 const jetbrainsMono = JetBrains_Mono({subsets:['latin'],variable:'--font-jetbrains-mono'});
 const blackOpsOne = Black_Ops_One({weight:'400',subsets:['latin'],variable:'--font-black-ops-one'});
@@ -54,6 +55,7 @@ export default function RootLayout({
         <ClerkThemedProvider>
           <PostHogProvider>{children}</PostHogProvider>
         </ClerkThemedProvider>
+        <AppToaster />
         <Analytics />
       </body>
     </html>

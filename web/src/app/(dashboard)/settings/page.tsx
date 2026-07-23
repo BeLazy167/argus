@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { Settings, Loader2, Save, Key, Cpu, ChevronDown, Zap, Check, X, ArrowUp, Info, UserCog, Lock, FileText, RotateCw, Search, Sliders, AlertTriangle } from "lucide-react";
 import {
   useModelConfigs,
@@ -228,7 +229,10 @@ function ConfigCard({
     } else {
       upsert.mutate(
         { repoId, stage, provider, model: finalModel, max_tokens: maxTokens, temperature },
-        { onError: (err) => setError(err instanceof Error ? err.message : "Save failed") },
+        {
+          onSuccess: () => toast.success(`Saved ${stage} model`),
+          onError: (err) => setError(err instanceof Error ? err.message : "Save failed"),
+        },
       );
     }
   };
@@ -572,6 +576,8 @@ function OrgStageGapCard({
     const failed = CORE_STAGES.filter((_, i) => results[i]?.status === "rejected");
     if (failed.length > 0) {
       setError(`failed: ${failed.join(", ")}`);
+    } else {
+      toast.success(`Applied ${model} to all stages`);
     }
   };
 
@@ -1233,7 +1239,11 @@ export default function SettingsPage() {
                           existing={orgConfigMap.get(stage)}
                           savedProviders={savedProviders}
                           installationId={active?.id}
-                          onSave={(data) => upsertOrgConfig.mutate(data)}
+                          onSave={(data) =>
+                            upsertOrgConfig.mutate(data, {
+                              onSuccess: () => toast.success(`Saved ${data.stage} model`),
+                            })
+                          }
                           onDelete={(s) => deleteOrgConfig.mutate({ stage: s })}
                         />
                       ))}

@@ -6,15 +6,6 @@ import Link from "next/link";
 import { OnboardingChecklist } from "@/components/dashboard/onboarding-checklist";
 import { usePathname } from "next/navigation";
 import {
-  LayoutGrid,
-  GitBranch,
-  BarChart3,
-  MessageSquare,
-  Brain,
-  Users,
-  Puzzle,
-  CreditCard,
-  Settings,
   Menu,
   X,
   PanelLeftClose,
@@ -28,6 +19,9 @@ import { ActiveRepoProvider, useActiveRepo } from "@/providers/active-repo-provi
 import { RepoSelect } from "@/components/dashboard/repo-select";
 import { ThemeToggle } from "@/components/dashboard/theme-toggle";
 import { DashboardTheme } from "@/components/dashboard/dashboard-theme";
+import { CommandMenu } from "@/components/dashboard/command-menu";
+import { ThemeHotkey } from "@/components/dashboard/theme-hotkey";
+import { NAV_PRIMARY, NAV_GROUPS } from "@/components/dashboard/nav-items";
 import { useSidebarCollapsed } from "@/components/dashboard/sidebar-collapse";
 import { PostHogGroupAssociation } from "@/providers/posthog-provider";
 import { useReviews } from "@/lib/queries/reviews";
@@ -63,34 +57,6 @@ function SidebarRepoSelector({ collapsed }: { collapsed: boolean }) {
     </div>
   );
 }
-
-type NavItem = { href: string; label: string; icon: React.ComponentType<{ className?: string }> };
-
-// Design dashboardv3.pen#C1rzA — icon choices match the design spec.
-const NAV_PRIMARY: NavItem[] = [
-  { href: "/dashboard", label: "Overview", icon: LayoutGrid },
-  { href: "/repos", label: "Repos", icon: GitBranch },
-  { href: "/stats", label: "Stats", icon: BarChart3 },
-];
-
-const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
-  {
-    label: "Analysis",
-    items: [
-      { href: "/memory", label: "Memory", icon: Brain },
-      { href: "/reviews", label: "Reviews", icon: MessageSquare },
-    ],
-  },
-  {
-    label: "Workspace",
-    items: [
-      { href: "/team", label: "Team", icon: Users },
-      { href: "/providers", label: "Integrations", icon: Puzzle },
-      { href: "/billing", label: "Billing", icon: CreditCard },
-      { href: "/settings", label: "Settings", icon: Settings },
-    ],
-  },
-];
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
@@ -305,6 +271,8 @@ export default function DashboardLayout({
     <QueryProvider>
       <InstallationProvider>
         <DashboardTheme />
+        <ThemeHotkey />
+        <CommandMenu />
         <PostHogGroupAssociation />
         <FirstReviewProbe />
         <ActiveRepoProvider>
