@@ -1,5 +1,6 @@
 import { FadeIn } from "@/components/marketing/fade-in";
 import { InViewSection } from "@/components/marketing/in-view-section";
+import { ByokEstimator } from "@/components/marketing/byok-estimator";
 
 type Provider = {
   id: string;
@@ -34,20 +35,6 @@ const AGENT_ROWS: AgentRow[] = [
   { name: "security", model: "haiku-4.5", tokens: "3,012", cost: "0.005" },
   { name: "memory", model: "sonnet-4.5", tokens: "4,128", cost: "0.006" },
   { name: "synthesis", model: "sonnet-4.5", tokens: "5,190", cost: "0.030" },
-];
-
-type ModelOption = {
-  name: string;
-  input: string;
-  output: string;
-  hint: string;
-  selected?: boolean;
-};
-
-const MODELS: ModelOption[] = [
-  { name: "haiku-4.5", input: "0.80", output: "4.00", hint: "fast / cheap", selected: true },
-  { name: "sonnet-4.5", input: "3.00", output: "15.00", hint: "balanced" },
-  { name: "opus-4.1", input: "15.00", output: "75.00", hint: "deep analysis" },
 ];
 
 type UsageRow = {
@@ -256,105 +243,6 @@ function CostCard() {
   );
 }
 
-/* ── Model picker — interactive dropdown look ── */
-
-function ModelRow({ model }: { model: ModelOption }) {
-  const { name, input, output, hint, selected } = model;
-  return (
-    <div
-      className={`grid grid-cols-[auto_1fr_auto] items-center gap-3 px-3 py-2.5 border transition-colors ${
-        selected
-          ? "border-amber-glow/50 bg-amber-glow/[0.06]"
-          : "border-transparent hover:border-iron/60 hover:bg-charcoal/30"
-      }`}
-    >
-      <span
-        aria-hidden
-        className={`h-1.5 w-1.5 rounded-full ${
-          selected ? "bg-amber-glow" : "bg-iron/70"
-        }`}
-      />
-      <div className="flex items-baseline gap-3 min-w-0">
-        <span
-          className={`font-mono text-[13px] truncate ${
-            selected ? "text-foreground" : "text-foreground/70"
-          }`}
-        >
-          {name}
-        </span>
-        <span
-          className={`font-mono text-[10px] tracking-[0.14em] uppercase truncate ${
-            selected ? "text-amber-glow/80" : "text-slate-text/50"
-          }`}
-        >
-          {hint}
-        </span>
-      </div>
-      <div className="flex items-baseline gap-3 font-mono text-[11px] tabular-nums text-slate-text/70">
-        <span>
-          <span className="text-slate-text/40">in </span>
-          {input}
-        </span>
-        <span className="text-iron">·</span>
-        <span>
-          <span className="text-slate-text/40">out </span>
-          {output}
-        </span>
-      </div>
-    </div>
-  );
-}
-
-function ModelPickerCard() {
-  const selected: ModelOption =
-    MODELS.find((m) => m.selected) ??
-    ({ name: "haiku-4.5", input: "0.80", output: "4.00", hint: "fast / cheap", selected: true } as const);
-  return (
-    <CardShell
-      eyebrow="Per-agent tuning"
-      title="Match model to task."
-      description="Cheap models for triage. Powerful models for depth. Switch per agent."
-    >
-      {/* Dropdown-style trigger */}
-      <div className="flex items-stretch border border-iron/70 bg-charcoal/50">
-        <div className="flex-1 flex items-center gap-3 px-3 py-2.5">
-          <span className="font-mono text-[10px] tracking-[0.24em] uppercase text-slate-text/60 w-[72px]">
-            Triage
-          </span>
-          <span className="font-mono text-sm text-foreground">
-            {selected.name}
-          </span>
-          <span className="font-mono text-[10px] tracking-[0.14em] uppercase text-amber-glow/80 hidden sm:inline">
-            {selected.hint}
-          </span>
-        </div>
-        <div className="flex items-center gap-1 px-2 border-l border-iron/70 text-slate-text/60">
-          <kbd className="font-mono text-[10px] px-1.5 py-0.5 border border-iron/60 text-slate-text/70">
-            ↓
-          </kbd>
-          <kbd className="font-mono text-[10px] px-1.5 py-0.5 border border-iron/60 text-slate-text/70 hidden sm:inline">
-            ⏎
-          </kbd>
-        </div>
-      </div>
-
-      {/* Column header */}
-      <div className="grid grid-cols-[auto_1fr_auto] items-center gap-3 px-3 font-mono text-[10px] tracking-[0.2em] uppercase text-slate-text/50">
-        <span className="h-1.5 w-1.5" />
-        <span>Model · role</span>
-        <span>USD / 1M tok</span>
-      </div>
-
-      {/* Options */}
-      <div className="flex flex-col">
-        {MODELS.map((m) => (
-          <ModelRow key={m.name} model={m} />
-        ))}
-      </div>
-    </CardShell>
-  );
-}
-
 /* ── Pay-per-review — editorial horizontal rules ── */
 
 function UsageBarRow({ bar, max }: { bar: UsageRow; max: number }) {
@@ -542,7 +430,7 @@ export function Byok() {
             <CostCard />
           </FadeIn>
           <FadeIn delay={240} className="lg:col-span-7">
-            <ModelPickerCard />
+            <ByokEstimator />
           </FadeIn>
           <FadeIn delay={320} className="lg:col-span-5">
             <PayPerReviewCard />
