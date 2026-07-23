@@ -70,8 +70,6 @@ function SectionHeader() {
   return (
     <div className="flex flex-col gap-6">
       <div className="font-mono text-[11px] tracking-[0.24em] uppercase text-amber-glow">
-        <span className="text-amber-glow/60">03</span>
-        <span className="mx-2 text-iron">/</span>
         <span>BYOK &amp; Transparency</span>
       </div>
       <h2 className="font-mono text-4xl md:text-5xl lg:text-[56px] leading-[1.05] tracking-tight text-foreground max-w-[26ch]">

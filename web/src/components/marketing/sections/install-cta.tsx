@@ -55,10 +55,9 @@ function SocialIcon({
 }
 
 /* ────────────────────────────────────────────────────────────
-   ARGUS cascading wordmark — "remembering" metaphor.
-   Three stacked lines at decreasing opacity (past, present,
-   future). Baseline tick row below reads as a build receipt.
-   Fluid via text-[18vw] — scales from phone to ultrawide.
+   ARGUS wordmark — a single solid stencil line over a build-
+   receipt baseline row. Fluid via text-[15.5vw] — scales from
+   phone to ultrawide.
    ──────────────────────────────────────────────────────────── */
 function ArgusEchoWordmark() {
   return (
@@ -69,12 +68,6 @@ function ArgusEchoWordmark() {
     >
       <div className="select-none px-4" aria-hidden>
         <div className="font-display uppercase tracking-[0.04em] text-center block text-[15.5vw] leading-[0.85] text-amber">
-          ARGUS
-        </div>
-        <div className="font-display uppercase tracking-[0.04em] text-center -mt-[1.8vw] block text-[15.5vw] leading-[0.85] text-amber/30">
-          ARGUS
-        </div>
-        <div className="font-display uppercase tracking-[0.04em] text-center -mt-[1.8vw] block text-[15.5vw] leading-[0.85] text-amber/10">
           ARGUS
         </div>
       </div>
@@ -195,13 +188,7 @@ export function InstallCta() {
 
               <h2 className="mx-auto mt-10 max-w-[980px] text-center font-mono font-bold leading-[0.98] tracking-[-0.02em] text-[40px] sm:text-[64px] md:text-[72px]">
                 <span className="block text-foreground">Install Argus.</span>
-                <span
-                  className="block bg-clip-text text-transparent"
-                  style={{
-                    backgroundImage:
-                      "linear-gradient(180deg, oklch(0.98 0.02 80) 0%, oklch(0.88 0.18 78) 45%, oklch(0.65 0.18 50) 100%)",
-                  }}
-                >
+                <span className="block text-amber">
                   Your next bad merge gets caught.
                 </span>
               </h2>
@@ -234,7 +221,11 @@ export function InstallCta() {
                 </Link>
               </div>
 
-              <div className="mt-10 flex flex-wrap items-center justify-center gap-x-6 gap-y-2 text-[11px] font-mono uppercase tracking-[0.14em] text-slate-text">
+              <p className="mt-8 text-center font-mono text-[11px] uppercase tracking-[0.14em] text-slate-text">
+                Self-host on your own infra {"\u00b7"} open source (AGPL) {"\u00b7"} every review shows its work
+              </p>
+
+              <div className="mt-8 flex flex-wrap items-center justify-center gap-x-6 gap-y-2 text-[11px] font-mono uppercase tracking-[0.14em] text-slate-text">
                 <span className="flex items-center gap-1.5">
                   <span aria-hidden className="text-amber">
                     {"\u2192"}
@@ -260,7 +251,7 @@ export function InstallCta() {
                   <span aria-hidden className="text-amber">
                     {"\u2192"}
                   </span>
-                  $19/mo on Pro · less than one coffee per workday
+                  $19/mo on Pro
                 </span>
               </div>
             </div>

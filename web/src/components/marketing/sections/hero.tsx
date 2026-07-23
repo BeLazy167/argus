@@ -142,14 +142,6 @@ function HeroHeadline() {
               <span>Open on GitHub</span>
             </a>
             <span aria-hidden className="hidden h-[10px] w-px bg-iron sm:inline-block" />
-            <span className="inline-flex items-center gap-2">
-              <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-amber hero-status-pulse" />
-              <span>
-                Beta · first 100 teams get{" "}
-                <span className="text-amber">50%</span> off launch
-              </span>
-            </span>
-            <span aria-hidden className="hidden h-[10px] w-px bg-iron sm:inline-block" />
             <span>Built in the open</span>
           </div>
         </FadeIn>
