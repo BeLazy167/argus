@@ -19,6 +19,7 @@ import {
   X,
   PanelLeftClose,
   PanelLeftOpen,
+  Loader2,
 } from "lucide-react";
 import { Suspense, useEffect, useRef, useState } from "react";
 import { QueryProvider } from "@/providers/query-provider";
@@ -323,7 +324,12 @@ export default function DashboardLayout({
           {/* Mobile overlay + drawer — always expanded on mobile */}
           {mobileOpen && (
             <>
-              <div className="fixed inset-0 z-40 bg-black/60 md:hidden" onClick={() => setMobileOpen(false)} />
+              <button
+                type="button"
+                aria-label="Close navigation"
+                className="fixed inset-0 z-40 bg-black/60 md:hidden"
+                onClick={() => setMobileOpen(false)}
+              />
               <aside className="fixed inset-y-0 left-0 z-50 flex w-64 flex-col border-r border-sidebar-border bg-sidebar md:hidden">
                 <button
                   onClick={() => setMobileOpen(false)}
@@ -350,7 +356,13 @@ export default function DashboardLayout({
           {/* Main content */}
           <main id="main-content" className="flex-1 overflow-y-auto scroll-smooth bg-background bg-noise">
             <OnboardingChecklist />
-            <Suspense>
+            <Suspense
+              fallback={
+                <div className="flex items-center justify-center py-20">
+                  <Loader2 className="h-6 w-6 animate-spin text-slate-text" aria-hidden />
+                </div>
+              }
+            >
               <div className="px-4 py-8 pt-16 md:px-8 md:pt-8">{children}</div>
             </Suspense>
           </main>

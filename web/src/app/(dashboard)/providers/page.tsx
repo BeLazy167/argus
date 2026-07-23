@@ -105,11 +105,13 @@ const ProviderKeyCard = memo(function ProviderKeyCard({
 
       <div className="space-y-2 mb-3">
         <div>
-          <label className="block text-[10px] font-mono text-slate-text mb-1">
+          <label htmlFor={`provider-key-${provider}`} className="block text-[10px] font-mono text-slate-text mb-1">
             {provider === "gcp_vertex" ? "Access token" : (existing ? "Replace API key" : "API key")}
           </label>
           <input
+            id={`provider-key-${provider}`}
             type="password"
+            autoComplete="off"
             value={apiKey}
             onChange={(e) => setApiKey(e.target.value)}
             placeholder={existing ? "Enter new key to replace" : "sk-..."}

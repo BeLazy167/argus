@@ -1443,7 +1443,7 @@ export default function ReviewDetailPage() {
             File Classification
           </h3>
           <div className="space-y-1">
-            {triageResults.map((t) => (
+            {triageResults.length > 0 ? triageResults.map((t) => (
               <div key={t.file} className="flex items-center gap-2 text-xs font-mono">
                 <span
                   className={`inline-flex items-center rounded-sm border px-2 py-0.5 text-[11px] ${
@@ -1460,7 +1460,11 @@ export default function ReviewDetailPage() {
                 </span>
                 <span className="text-foreground/70 truncate">{t.file}</span>
               </div>
-            ))}
+            )) : (
+              <p className="text-xs font-mono text-slate-text">
+                // No files to classify.
+              </p>
+            )}
           </div>
         </div>
       )}

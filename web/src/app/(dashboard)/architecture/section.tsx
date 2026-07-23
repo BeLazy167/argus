@@ -61,6 +61,7 @@ function ArchitectureView({ activeId }: { activeId: number }) {
 						type="text"
 						value={searchQuery}
 						onChange={(e) => setSearchQuery(e.target.value)}
+						aria-label="Find file"
 						placeholder="Find file..."
 						className="pl-7 pr-2 py-1.5 w-44 text-[11px] font-mono bg-card border border-iron text-foreground placeholder:text-slate-text focus:border-amber-500/50 focus:outline-none transition-colors"
 					/>
@@ -139,6 +140,7 @@ function ArchitectureView({ activeId }: { activeId: number }) {
 							setShowGuide(false);
 							localStorage.setItem("argus-arch-guide-dismissed", "1");
 						}}
+						aria-label="Dismiss guide"
 						className="text-slate-600 hover:text-slate-400 shrink-0 ml-auto"
 					>
 						<X className="h-3 w-3" />
@@ -159,7 +161,7 @@ function ArchitectureView({ activeId }: { activeId: number }) {
 						</div>
 					) : isLoading ? (
 						<div className="flex items-center justify-center h-full">
-							<div className="flex flex-col items-center gap-3">
+							<div role="status" aria-live="polite" className="flex flex-col items-center gap-3">
 								<Loader2 className="h-4 w-4 animate-spin text-slate-600" />
 								<p className="text-[11px] font-mono text-slate-500">
 									Computing architecture metrics...

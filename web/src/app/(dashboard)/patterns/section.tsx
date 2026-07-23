@@ -267,12 +267,15 @@ export function PatternsSection() {
 						type="text"
 						value={content}
 						onChange={(e) => setContent(e.target.value)}
+						required
 						placeholder="e.g. Always use guard clauses instead of nested if statements"
+						aria-label="Pattern content"
 						className="flex-1 border border-iron bg-charcoal px-4 py-2.5 text-xs font-mono text-foreground placeholder:text-slate-text/50 focus:outline-none focus:border-amber/50 transition-colors"
 					/>
 					<select
 						value={selectedRepoId ?? ""}
 						onChange={(e) => setSelectedRepoId(e.target.value ? Number(e.target.value) : undefined)}
+						aria-label="Pattern repository scope"
 						style={{ backgroundColor: "var(--card)", color: "var(--foreground)" }}
 						className="border border-iron bg-charcoal px-3 py-2.5 text-xs font-mono text-foreground focus:outline-none focus:border-amber/50 transition-[border-color] duration-150"
 					>

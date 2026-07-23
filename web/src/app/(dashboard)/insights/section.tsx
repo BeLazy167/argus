@@ -68,6 +68,7 @@ export function InsightsSection() {
 						type="text"
 						value={fileFilter}
 						onChange={(e) => setFileFilter(e.target.value)}
+						aria-label="Filter by file path"
 						placeholder="Filter by file path…"
 						className="w-full border border-iron bg-charcoal pl-9 pr-4 py-2.5 text-xs font-mono text-foreground placeholder:text-slate-text/50 focus:outline-none focus:border-amber/50 transition-colors"
 					/>
