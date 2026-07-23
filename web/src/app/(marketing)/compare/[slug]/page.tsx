@@ -6,6 +6,7 @@ import {
   competitorSlugs,
   getCompetitor,
   featureLabels,
+  featureShortLabels,
   argusFeatures,
 } from "@/lib/pseo/competitors";
 
@@ -149,11 +150,20 @@ export default async function ComparePage({
               </li>
             ))}
           </ul>
-          {c.features.selfHosted && (
-            <p className="text-xs font-sans text-slate-text mt-3">
-              Honest caveat: {c.name} offers self-hosted deployment, which Argus doesn&apos;t currently support. If compliance requires on-prem infrastructure, {c.name} may be the better fit for that requirement.
-            </p>
-          )}
+          {(() => {
+            const leads = featureKeys
+              .filter((k) => c.features[k] && !argusFeatures[k])
+              .map((k) => featureShortLabels[k] ?? featureLabels[k]);
+            const leadsText =
+              leads.length > 2
+                ? `${leads.slice(0, -1).join(", ")}, and ${leads[leads.length - 1]}`
+                : leads.join(" and ");
+            return leads.length > 0 ? (
+              <p className="text-xs font-sans text-slate-text mt-3">
+                Honest caveat: {c.name} currently leads Argus on {leadsText}. If those matter more to your team than depth-routed review, {c.name} may be the better fit there.
+              </p>
+            ) : null;
+          })()}
         </div>
       </div>
 

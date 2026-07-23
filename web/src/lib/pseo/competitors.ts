@@ -46,6 +46,19 @@ export const featureLabels: Record<keyof Competitor["features"], string> = {
   complianceCert: "SOC 2 / ISO 27001 certified",
 };
 
+// Short noun-phrase labels for inline prose. The featureLabels above are table
+// row headers and read awkwardly in a sentence; these are used by the detail
+// page's "where the competitor leads" caveat. Only the six gap features (the
+// ones Argus lacks) ever appear there.
+export const featureShortLabels: Partial<Record<keyof Competitor["features"], string>> = {
+  multiPlatform: "multi-platform support beyond GitHub",
+  staticAnalysis: "bundled static analysis",
+  testGeneration: "test generation",
+  ideIntegration: "an IDE extension",
+  ticketing: "issue-tracker ticket integration",
+  complianceCert: "SOC 2 compliance",
+};
+
 // Argus's own row. The last six are honest gaps today: GitHub-only, no bundled
 // SAST engine, no test generation, no IDE extension, no ticket creation, and no
 // SOC 2 certification yet (young, open-source project).
@@ -219,15 +232,15 @@ export const competitors: Competitor[] = [
       "Jira ticket integration with PR-addresses-ticket checks; SOC 2 Type I",
     ],
     weaknesses: [
-      "No institutional memory or pattern learning — doesn't learn from past review feedback",
+      "No pattern learning — custom rules are hand-written, not learned from review history",
       "Single-pass review; no multi-agent pipeline",
       "No architecture / dependency-graph analysis beyond the diff",
       "No failure-scenario simulation, no test generation, no per-PR review contract",
     ],
     argusAdvantage:
-      "Sourcery is fast and IDE-native, with diagrams, BYOK, GitLab support, bundled security scanning, and an IDE extension Argus lacks. But it's largely stateless: no memory, no pattern learning, no architecture graph, no scenario simulation. Argus's differentiators are exactly those — memory that learns from your team's 👍/👎 and replies (dismissed patterns suppressed semantically, security findings never), architecture tracing, failure-scenario simulation, and a computed per-PR review contract. Sourcery is quicker to feel useful; Argus gets sharper the more your team uses it and resolves its own fixed comments on re-review instead of re-flagging.",
+      "Sourcery is fast and IDE-native, with diagrams, BYOK, GitLab support, bundled security scanning, and an IDE extension Argus lacks. It tailors comments from your reactions, but stays lighter on depth: no multi-pass pipeline, pattern learning, architecture graph, or scenario simulation. Argus's differentiators are those — pattern learning, architecture tracing, failure-scenario simulation, and a computed per-PR review contract, plus memory that goes deeper: it learns from your team's 👍/👎 and replies, suppressing dismissed patterns semantically while never silencing security findings. Sourcery is quicker to feel useful; Argus gets sharper the more your team uses it and resolves its own fixed comments on re-review instead of re-flagging.",
     summary:
-      "Sourcery delivers instant PR summaries, diagrams, and inline feedback with strong IDE extensions, GitLab support, bundled security scanning, and BYOK. It's a capable, fast reviewer — but a largely stateless one: no institutional memory, pattern learning, architecture graph, or scenario simulation.",
+      "Sourcery delivers instant PR summaries, diagrams, and inline feedback with strong IDE extensions, GitLab support, bundled security scanning, and BYOK. It's a capable, fast reviewer, though lighter on depth: no multi-pass pipeline, pattern learning, architecture graph, or scenario simulation.",
     stat: {
       claim: "Sourcery ships first-class IDE extensions (VS Code, JetBrains, Cursor) alongside PR review, from $12/seat/mo",
       source: "sourcery.ai, 2026",
@@ -311,14 +324,14 @@ export const competitors: Competitor[] = [
     ],
     weaknesses: [
       "Not a general LLM code reviewer — no multi-pass review pipeline, diagrams, or architecture graph",
-      "No institutional memory of team review decisions, no failure-scenario simulation",
+      "No failure-scenario simulation — the AI layer triages and autofixes findings rather than reasoning about a change end-to-end",
       "No BYOK — the Assistant layer uses Semgrep-hosted models",
       "No test generation, no per-PR review contract",
     ],
     argusAdvantage:
-      "Semgrep and Argus solve adjacent problems: Semgrep is a best-in-class static-analysis/security platform with an AI triage layer; Argus is a general senior-engineer reviewer. Semgrep wins decisively on SAST/SCA/secrets, platform breadth, IDE, ticketing, and compliance — none of which Argus does. Argus wins on the review itself: institutional memory, multi-pass reasoning, architecture tracing, failure-scenario simulation, diagrams, BYOK, and the computed review contract. Many teams run both — Semgrep for deterministic security scanning, Argus for judgment-heavy review.",
+      "Semgrep and Argus solve adjacent problems: Semgrep is a best-in-class static-analysis/security platform with an AI triage layer; Argus is a general senior-engineer reviewer. Semgrep wins decisively on SAST/SCA/secrets, platform breadth, IDE, ticketing, and compliance — none of which Argus does. Argus wins on the review itself: multi-pass reasoning, architecture tracing, failure-scenario simulation, diagrams, BYOK, and the computed review contract. Many teams run both — Semgrep for deterministic security scanning, Argus for judgment-heavy review.",
     summary:
-      "Semgrep is fundamentally a SAST/SCA/secrets platform — bundled scanners across four Git platforms with an AI Assistant that triages findings, autofixes, and flags business-logic flaws. It's the security-scanning leader here, but it isn't a general reasoning-based reviewer: no memory, multi-pass pipeline, architecture graph, simulation, or BYOK.",
+      "Semgrep is fundamentally a SAST/SCA/secrets platform — bundled scanners across four Git platforms with an AI Assistant that triages findings, autofixes, and flags business-logic flaws. It's the security-scanning leader here, but it isn't a general reasoning-based reviewer: no multi-pass pipeline, architecture graph, simulation, or BYOK.",
     stat: {
       claim: "Semgrep Assistant cuts findings needing manual triage by ~20% on day one, up to ~40% after a week",
       source: "docs.semgrep.dev, 2026",
