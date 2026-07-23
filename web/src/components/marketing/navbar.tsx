@@ -61,12 +61,42 @@ export function Navbar() {
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
 
+  // Lock body scroll while the mobile menu is open so the page can't scroll
+  // behind the full-screen sheet — which would otherwise slide the nav (and its
+  // only close button) out of view.
+  useEffect(() => {
+    if (menuOpen) {
+      // globals.css sets `html { overflow-x: clip }`, which makes <html> (not
+      // <body>) the scroll container — so the lock must target the document
+      // element's overflow-y, leaving the horizontal clip intact.
+      const el = document.documentElement;
+      const prev = el.style.overflowY;
+      el.style.overflowY = "hidden";
+      return () => {
+        el.style.overflowY = prev;
+      };
+    }
+  }, [menuOpen]);
+
+  // Close the menu when the viewport grows past the md breakpoint: the sheet and
+  // hamburger are md:hidden, so a still-open menuOpen would strand the scroll
+  // lock (overflow:hidden) with no visible control to release it.
+  useEffect(() => {
+    const mq = window.matchMedia("(min-width: 768px)");
+    const onChange = () => {
+      if (mq.matches) setMenuOpen(false);
+    };
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+
   const closeMenu = useCallback(() => setMenuOpen(false), []);
 
   return (
+    <>
     <div
       className={`pointer-events-none fixed inset-x-0 top-0 z-50 flex w-full justify-center px-4 transition-transform duration-300 ease-[cubic-bezier(0.23,1,0.32,1)] sm:px-6 ${
-        hidden ? "-translate-y-[120%]" : "translate-y-0"
+        hidden && !menuOpen ? "-translate-y-[120%]" : "translate-y-0"
       }`}
     >
       <nav
@@ -179,8 +209,14 @@ export function Navbar() {
           {menuOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
         </motion.button>
       </nav>
+    </div>
 
-      {/* Mobile sheet — slides from the right, spring damped */}
+      {/* Mobile sheet — rendered OUTSIDE the transformed nav wrapper. A non-none
+          transform on an ancestor (here translate-y-0) becomes the containing
+          block for fixed descendants, which clipped this fixed inset-0 sheet to
+          the ~80px nav box: its background filled only the top strip while the
+          links overflowed onto the page. As a top-level sibling it is
+          viewport-fixed. Slides from the right, spring damped. */}
       <AnimatePresence>
         {menuOpen && (
           <motion.div
@@ -250,6 +286,6 @@ export function Navbar() {
           </motion.div>
         )}
       </AnimatePresence>
-    </div>
+    </>
   );
 }
