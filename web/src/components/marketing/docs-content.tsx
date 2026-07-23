@@ -46,6 +46,11 @@ import {
   Flag,
   Info,
 } from "lucide-react";
+import {
+  PipelineDiagram,
+  DeepReviewDiagram,
+  LifecycleDiagram,
+} from "@/components/marketing/docs-diagrams";
 
 /* ── Section data ── */
 
@@ -476,6 +481,7 @@ export function DocsContent() {
               use a different model, configurable per-repo. The sequence
               typically completes in a couple of minutes.
             </p>
+            <PipelineDiagram />
             <div className="space-y-1">
               {PIPELINE_STAGES.map((stage, i) => {
                 const Icon = stage.icon;
@@ -744,6 +750,8 @@ export function DocsContent() {
               concurrently, so it doesn&apos;t slow you down.
             </p>
 
+            <DeepReviewDiagram />
+
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               {[
                 {
@@ -812,6 +820,8 @@ export function DocsContent() {
               delta. Previous findings that are still relevant are preserved.
               Resolved findings are dropped.
             </p>
+
+            <LifecycleDiagram />
 
             <div className="space-y-3">
               {[
