@@ -40,6 +40,19 @@ const featureOrderGaps: FeatureKey[] = [
   "complianceCert",
 ];
 
+/**
+ * A short "starting price" for the compact comparison cards. The full pricing
+ * strings are long (e.g. "Free (public repos); Pro $24/mo/user; …") and would
+ * overflow the card header, so collapse to the entry tier: "Free" when the
+ * first listed tier is free, else "from $<first listed price>".
+ */
+function startingPrice(pricing: string): string {
+  const entry = pricing.split(";")[0] ?? pricing;
+  if (/\bfree\b/i.test(entry)) return "Free";
+  const dollar = pricing.match(/\$[\d.]+(?:\/[a-z]+)*/i);
+  return dollar ? `from ${dollar[0]}` : entry.trim();
+}
+
 function Mark({ on }: { on: boolean }) {
   const Icon = on ? Check : Minus;
   return (
@@ -181,8 +194,8 @@ export default function CompareHubPage() {
                 <h3 className="font-mono text-sm font-bold text-foreground">
                   Argus vs {c.name}
                 </h3>
-                <span className="text-[11px] font-mono text-iron whitespace-nowrap">
-                  {(c.pricing.split("–")[0] ?? c.pricing).trim()}
+                <span className="shrink-0 text-[11px] font-mono text-iron whitespace-nowrap">
+                  {startingPrice(c.pricing)}
                 </span>
               </div>
               <p className="text-xs font-sans text-slate-text line-clamp-2">
