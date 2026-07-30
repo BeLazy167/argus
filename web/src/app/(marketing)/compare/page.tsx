@@ -11,7 +11,7 @@ import {
 export const metadata: Metadata = {
   title: "Argus vs Alternatives — AI Code Review Comparison",
   description:
-    "Side-by-side feature comparison of Argus and other AI code review tools: CodeRabbit, SonarQube, GitHub Copilot, Codacy, Sourcery, Qodo, Semgrep, Greptile, Cubic.",
+    "Side-by-side feature comparison of Argus and other AI code review tools: CodeRabbit, SonarQube, GitHub Copilot, Codacy, Sourcery, Qodo, Semgrep, Greptile, Cubic, Macroscope.",
   alternates: { canonical: "https://argus.reviews/compare" },
 };
 
