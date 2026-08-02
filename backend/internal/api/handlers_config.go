@@ -421,44 +421,59 @@ func (s *Server) upsertProviderKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if body.Provider == memory.EmbeddingsProvider {
-		// Embeddings are installation-wide by design: one embedding space per
-		// installation (memories.embedding_model + similarity floors are
-		// calibrated per space); repo-scoped keys would fragment retrieval.
-		if body.RepoID != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "embeddings keys are installation-wide (one embedding space per installation); omit repo_id"})
-			return
-		}
-		// Store base_url trimmed (like the azure/gcp/bedrock branch): padded
-		// URLs break request construction and dodge hosted-base matching.
-		hasBase := false
+		// Normalize inputs (trimmed base_url is stored; padded URLs break
+		// request construction and dodge hosted-base matching), resolve the
+		// stored row, and delegate to the single validation authority shared
+		// with the catalog contract tests. Lookup errors fail closed.
+		req := memory.EmbedKeyRequest{RepoScoped: body.RepoID != nil, APIKey: body.APIKey}
 		if body.BaseURL != nil {
-			trimmed := strings.TrimSpace(*body.BaseURL)
-			if trimmed == "" {
+			// Persist the same canonical form validation compares (case/slash
+			// variants otherwise drift into storage and the card misrenders
+			// them as custom endpoints).
+			norm := memory.NormalizeBaseURL(strings.TrimSpace(*body.BaseURL))
+			if norm == "" {
 				body.BaseURL = nil
 			} else {
-				body.BaseURL = &trimmed
-				hasBase = true
+				body.BaseURL = &norm
+				req.BaseURL = norm
 			}
 		}
-		// A custom endpoint (TEI/Ollama serve whatever model they were launched
-		// with regardless of the request's model field) must declare its true
-		// model, or memories.embedding_model would be stamped wrong and every
-		// similarity floor silently miscalibrates.
-		if hasBase && (body.Model == nil || strings.TrimSpace(*body.Model) == "") {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "model is required when base_url is set for embeddings (custom endpoints must declare the model they serve)"})
-			return
+		if body.Model != nil {
+			// Persist trimmed, like base_url: embedding spaces are keyed by the
+			// model STRING, so a stored "bge-m3 " vs a later "bge-m3" would read
+			// as a model change and trigger a spurious corpus re-embed.
+			req.Model = strings.TrimSpace(*body.Model)
+			if req.Model == "" {
+				body.Model = nil
+			} else {
+				body.Model = &req.Model
+			}
 		}
-		// ...and a model override is only meaningful WITH a custom endpoint:
-		// against the platform base it would post foreign model names there.
-		if !hasBase && body.Model != nil && strings.TrimSpace(*body.Model) != "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "model override requires base_url (to use a different hosted model, set base_url to that provider's endpoint)"})
-			return
+		var stored memory.StoredEmbedKey
+		// Validation needs the stored row whenever a base travels: blank-key
+		// saves for the same-endpoint rotation check, keyed saves for the
+		// grandfathered-model check (a pre-catalog model stays saveable on its
+		// own endpoint). Blank-key saves fail CLOSED on lookup errors (a
+		// guessed-empty row could wave a blank-key save to the wrong endpoint)
+		// and as a server fault, not a 400; keyed saves proceed without the
+		// row — re-entering a key the request already carries cannot fix a
+		// lookup failure, and without grandfathering the validator only gets
+		// stricter.
+		if req.BaseURL != "" {
+			storedKey, storedBase, storedModel, found, kerr := s.store.ResolveEmbeddingsKey(r.Context(), installationID)
+			switch {
+			case kerr != nil && req.APIKey == "":
+				s.logger.Error("resolve stored embeddings key", "error", kerr)
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not verify the stored embeddings key; try again"})
+				return
+			case kerr != nil:
+				s.logger.Warn("resolve stored embeddings key failed; validating keyed save without stored row", "error", kerr)
+			default:
+				stored = memory.StoredEmbedKey{Found: found, HasKey: storedKey != "", BaseURL: storedBase, Model: storedModel}
+			}
 		}
-		// Keyless rows are only valid against endpoints that can actually work
-		// keyless; the hosted bases require a key, and accepting a keyless row
-		// there would silently disable embeddings for the installation.
-		if body.APIKey == "" && hasBase && memory.HostedKeyedBase(*body.BaseURL) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "this endpoint requires an api_key (keyless rows are only valid for self-hosted endpoints)"})
+		if msg := memory.ValidateEmbedKeyRequest(req, stored); msg != "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": msg})
 			return
 		}
 	}
@@ -730,4 +745,11 @@ func (s *Server) deleteSupermemoryKey(w http.ResponseWriter, r *http.Request) {
 	}
 	s.auditSettings(r, installationID, "supermemory_key.delete", nil)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// getEmbeddingsCatalog serves the curated embeddings provider/model menu the
+// settings UI renders. Static content, but served (not baked into the web
+// bundle) so self-hosted deployments always match their backend's catalog.
+func (s *Server) getEmbeddingsCatalog(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]interface{}{"providers": memory.EmbedCatalog()})
 }

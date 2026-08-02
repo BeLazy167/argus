@@ -129,6 +129,7 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 
 				// Provider Keys
 				r.Get("/installations/{installationID}/provider-keys", s.listProviderKeys)
+				r.Get("/embeddings/catalog", s.getEmbeddingsCatalog)
 				r.Put("/installations/{installationID}/provider-keys", s.upsertProviderKey)
 				r.Delete("/installations/{installationID}/provider-keys/{keyID}", s.deleteProviderKey)
 

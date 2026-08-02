@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"log/slog"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -19,17 +20,39 @@ const EmbeddingsProvider = "embeddings"
 // Hosted endpoints that REQUIRE an API key; any other base URL
 // (Ollama/TEI/self-hosted gateways) may legitimately be keyless.
 const (
-	defaultVoyageBaseURL = "https://api.voyageai.com/v1"
-	defaultOpenAIBaseURL = "https://api.openai.com/v1"
+	defaultVoyageBaseURL     = "https://api.voyageai.com/v1"
+	defaultOpenAIBaseURL     = "https://api.openai.com/v1"
+	defaultOpenRouterBaseURL = "https://openrouter.ai/api/v1"
 )
 
 // HostedKeyedBase reports whether base is a known hosted endpoint that cannot
-// work without an API key (trailing-slash tolerant). Exported so the
-// provider-key API can reject keyless rows that point at these bases at save
-// time instead of silently disabling embeddings at resolve time.
+// work without an API key (trailing-slash and host-case tolerant). Exported so
+// the provider-key API can reject keyless rows that point at these bases at
+// save time instead of silently disabling embeddings at resolve time.
 func HostedKeyedBase(base string) bool {
+	b := NormalizeBaseURL(base)
+	return b == defaultVoyageBaseURL || b == defaultOpenAIBaseURL || b == defaultOpenRouterBaseURL
+}
+
+// NormalizeBaseURL canonicalizes a base URL: trailing slash trimmed, scheme
+// and host lowercased. DNS is case-insensitive, so
+// "https://API.voyageai.com/v1" IS the Voyage endpoint — without this, a
+// case-variant base slips past both the hosted-key requirement and the
+// catalog check and saves a row that 401s at request time. Path case is
+// preserved (paths are case-sensitive); unparseable input falls back to the
+// trimmed string so comparisons stay exact-match rather than panicking.
+// Exported so the save handler persists the SAME canonical form it validates
+// — a stored variant would render as "Custom endpoint" in the card, whose
+// provider inference exact-matches catalog bases.
+func NormalizeBaseURL(base string) string {
 	b := strings.TrimRight(base, "/")
-	return b == defaultVoyageBaseURL || b == defaultOpenAIBaseURL
+	u, err := url.Parse(b)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return b
+	}
+	u.Scheme = strings.ToLower(u.Scheme)
+	u.Host = strings.ToLower(u.Host)
+	return u.String()
 }
 
 // embedderCacheTTL bounds staleness after a key/model change, mirroring

@@ -148,6 +148,7 @@ export type ProviderKey = {
   provider: string;
   api_key_masked: string;
   base_url?: string;
+  model?: string;
   repo_id?: number;
   created_at: string;
   updated_at: string;
