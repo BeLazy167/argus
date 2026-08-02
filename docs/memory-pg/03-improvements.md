@@ -55,6 +55,18 @@
 | 7 | **Atomic write path** | Medium | Small-medium | Memory writes transactional with review persistence; ON CONFLICT replaces batch collision-merge; no queued-processing lag; kills the split-brain class. |
 | 8 | **Per-class thresholds fed by pattern_stats precision** | Medium | Small | Floors keyed (memory type, finding category); settings plumbing exists, only keying is missing. Sequence after #4 so tuning is evidence-based. |
 
+## 2b. Temporal invalidation (SOTA adjustment, 2026-08)
+
+Memory that becomes WRONG — a dismissal later confirmed as a real bug, a rule
+reversed, a pattern whose outcomes collapse — is **invalidated**, not merely
+decayed: `invalidated_at` excludes it from every live predicate (both partial
+indexes, including HNSW) while history is preserved, and `superseded_by` links
+the replacement row. Invalidation is a policy judgment, so a mechanical
+re-upsert of the same customId must NOT clear it (un-invalidation is an
+explicit operation); `deleted_at`, by contrast, resets on re-index — recreate
+is deliberate. Source: SOTA validation sweep (temporal-invalidation columns
+verdict), migration 060.
+
 ## 3. Sequencing note
 
 #1 is the migration itself (01/02 docs). #2, #5, #7 are near-free riders on the

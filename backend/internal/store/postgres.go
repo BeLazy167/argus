@@ -6,8 +6,11 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/BeLazy167/argus/backend/internal/store/db"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	pgxvector "github.com/pgvector/pgvector-go/pgx"
+
+	"github.com/BeLazy167/argus/backend/internal/store/db"
 )
 
 // Store wraps a PostgreSQL connection pool and sqlc-generated queries.
@@ -24,6 +27,18 @@ func New(ctx context.Context, databaseURL string) (*Store, error) {
 	config.MaxConns = 20
 	config.MinConns = 2
 	config.HealthCheckPeriod = 30 * time.Second
+	// pgvector types (memories.embedding) — registered per-connection so pgx
+	// encodes/decodes pgvector.Vector natively instead of text literals.
+	// Deliberate blast radius: registration fails when the vector extension is
+	// absent, which fails EVERY connection — the app won't boot against a
+	// Postgres without pgvector. That's consistent by design: migration 057
+	// hard-requires the extension and runs before the app (release_command),
+	// and the self-host compose image ships it. A pgvector-less database is a
+	// misconfigured deployment, better failed loudly at startup than degraded
+	// quietly at review time.
+	config.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
+		return pgxvector.RegisterTypes(ctx, conn)
+	}
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to database: %w", err)
