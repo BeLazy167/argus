@@ -12,11 +12,42 @@ jobs:
     defaults:
       run:
         working-directory: backend
+    env:
+      # DATABASE_URL drives the Migrate step; tests gate on the dedicated
+      # TEST_DATABASE_URL so `go test` can never touch a developer's real DB.
+      DATABASE_URL: postgres://postgres:ci@localhost:5432/argus_test?sslmode=disable
+      TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/argus_test?sslmode=disable
     steps:
       - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      # PG 19beta2 + pgvector (pinned master build). GHA layer cache makes this
+      # ~seconds after the first run. See .github/docker/ci-postgres/Dockerfile
+      # and docs/memory-pg/01 "Postgres version policy".
+      - name: Build CI Postgres image
+        uses: docker/build-push-action@v6
+        with:
+          context: .github/docker/ci-postgres
+          load: true
+          tags: argus-ci-postgres:local
+          cache-from: type=gha,scope=ci-postgres
+          cache-to: type=gha,scope=ci-postgres,mode=max
+      - name: Start Postgres
+        run: |
+          docker run -d --name ci-pg \
+            -e POSTGRES_PASSWORD=ci -e POSTGRES_DB=argus_test \
+            -p 5432:5432 argus-ci-postgres:local
+          for i in $(seq 1 30); do
+            if docker exec ci-pg pg_isready -h 127.0.0.1 -U postgres -d argus_test; then exit 0; fi
+            sleep 1
+          done
+          echo "postgres failed to become ready" >&2
+          docker logs ci-pg >&2
+          exit 1
       - uses: actions/setup-go@v5
         with:
           go-version: '1.24'
+      - name: Migrate
+        run: go run ./cmd/migrate
       - name: Vet
         run: go vet ./...
       - name: Test

@@ -77,8 +77,11 @@ Two-track "try for 19":
   pgvector-on-19 is unreleased master code. Fallback is a custom
   `flyio/postgres-flex:18` + pgvector 0.8.6 image; the 18→19 bump post-GA is
   its own small step.
-- **Self-host default stays `pgvector/pgvector:pg18`** until official pg19
-  images exist; managed-PG self-hosters (RDS/Supabase/Neon) get 18 today.
+- **Self-host compose default is `pgvector/pgvector:pg16` today** (same major
+  as before — existing `db-data` volumes keep working; extension ready for
+  migration 057). The major bump to 18/19 ships with the prod-cutover step,
+  with documented dump/restore upgrade notes. Managed-PG self-hosters
+  (RDS/Supabase/Neon) already have pgvector on their current version.
 - Known trade: on PG 19 the pgContext hedge stays closed until it adds 19
   support (17/18-only today).
 

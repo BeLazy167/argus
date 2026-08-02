@@ -1,6 +1,6 @@
 services:
   db:
-    image: postgres:16
+    image: pgvector/pgvector:pg16 # postgres:16 + pgvector; same major, existing volumes unaffected
     environment:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: argus
