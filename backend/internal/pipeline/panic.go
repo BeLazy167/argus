@@ -69,4 +69,3 @@ func emitPipelinePanicEvent(ctx context.Context, logger *slog.Logger, stage stri
 func EmitPipelinePanicEvent(ctx context.Context, logger *slog.Logger, stage string, r any, traceID string) {
 	emitPipelinePanicEvent(ctx, logger, stage, r, traceID)
 }
-

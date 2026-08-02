@@ -9,9 +9,6 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
-	"github.com/jackc/pgx/v5"
 	"github.com/BeLazy167/argus/backend/internal/config"
 	"github.com/BeLazy167/argus/backend/internal/crypto"
 	ghpkg "github.com/BeLazy167/argus/backend/internal/github"
@@ -20,6 +17,9 @@ import (
 	"github.com/BeLazy167/argus/backend/internal/memory"
 	"github.com/BeLazy167/argus/backend/internal/pipeline"
 	"github.com/BeLazy167/argus/backend/internal/store"
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+	"github.com/jackc/pgx/v5"
 )
 
 type Server struct {

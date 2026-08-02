@@ -192,15 +192,15 @@ func briefingParityCases() map[string]struct {
 	block             MemoryBlock
 	rules, pastReview []string
 } {
-	long := strings.Repeat("alpha beta gamma delta ", 40)   // ~920 chars, forces per-item 500 trunc
+	long := strings.Repeat("alpha beta gamma delta ", 40)      // ~920 chars, forces per-item 500 trunc
 	huge := strings.Repeat("lorem ipsum dolor sit amet ", 300) // forces the block-level cap
 	multibyte := strings.Repeat("héllo wörld café ", 40)       // multibyte near the 500 boundary
 	return map[string]struct {
 		block             MemoryBlock
 		rules, pastReview []string
 	}{
-		"empty": {block: MemoryBlock{}},
-		"synthesis only": {block: MemoryBlock{Synthesis: "This file handles auth token refresh."}},
+		"empty":                 {block: MemoryBlock{}},
+		"synthesis only":        {block: MemoryBlock{Synthesis: "This file handles auth token refresh."}},
 		"patterns no synthesis": {block: MemoryBlock{Repo: []PatternMatch{pat("always validate JWT exp"), pat("rate-limit login")}}},
 		"synthesis and patterns": {block: MemoryBlock{
 			Synthesis: "Auth module.",

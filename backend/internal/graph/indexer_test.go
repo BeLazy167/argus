@@ -51,20 +51,20 @@ func TestPlanSymbolDiff(t *testing.T) {
 	fooMoved.LineEnd = 21
 
 	tests := []struct {
-		name            string
-		parsed          []Symbol
-		existing        []store.NodeHashRow
-		wantUnchanged   int
+		name             string
+		parsed           []Symbol
+		existing         []store.NodeHashRow
+		wantUnchanged    int
 		wantChangedNames []string
-		wantOrphanIDs   []int64
+		wantOrphanIDs    []int64
 	}{
 		{
-			name:            "empty DB → everything changed, no orphans",
-			parsed:          []Symbol{foo, bar},
-			existing:        nil,
-			wantUnchanged:   0,
+			name:             "empty DB → everything changed, no orphans",
+			parsed:           []Symbol{foo, bar},
+			existing:         nil,
+			wantUnchanged:    0,
 			wantChangedNames: []string{"Foo", "Bar"},
-			wantOrphanIDs:   nil,
+			wantOrphanIDs:    nil,
 		},
 		{
 			name:   "all hashes match → all unchanged, zero writes",
@@ -73,9 +73,9 @@ func TestPlanSymbolDiff(t *testing.T) {
 				{ID: 1, Kind: KindFunction, Name: "Foo", ContentHash: hashOf(foo)},
 				{ID: 2, Kind: KindFunction, Name: "Bar", ContentHash: hashOf(bar)},
 			},
-			wantUnchanged:   2,
+			wantUnchanged:    2,
 			wantChangedNames: []string{},
-			wantOrphanIDs:   nil,
+			wantOrphanIDs:    nil,
 		},
 		{
 			name:   "one hash drifted → that symbol upserts, other stays",
@@ -84,9 +84,9 @@ func TestPlanSymbolDiff(t *testing.T) {
 				{ID: 1, Kind: KindFunction, Name: "Foo", ContentHash: hashOf(foo)},
 				{ID: 2, Kind: KindFunction, Name: "Bar", ContentHash: hashOf(bar)},
 			},
-			wantUnchanged:   1,
+			wantUnchanged:    1,
 			wantChangedNames: []string{"Foo"},
-			wantOrphanIDs:   nil,
+			wantOrphanIDs:    nil,
 		},
 		{
 			name:   "symbol removed from parse → listed as orphan",
@@ -95,9 +95,9 @@ func TestPlanSymbolDiff(t *testing.T) {
 				{ID: 1, Kind: KindFunction, Name: "Foo", ContentHash: hashOf(foo)},
 				{ID: 2, Kind: KindFunction, Name: "Bar", ContentHash: hashOf(bar)},
 			},
-			wantUnchanged:   1,
+			wantUnchanged:    1,
 			wantChangedNames: []string{},
-			wantOrphanIDs:   []int64{2},
+			wantOrphanIDs:    []int64{2},
 		},
 		{
 			name:   "empty stored hash forces re-upsert (pre-migration row)",
@@ -105,9 +105,9 @@ func TestPlanSymbolDiff(t *testing.T) {
 			existing: []store.NodeHashRow{
 				{ID: 1, Kind: KindFunction, Name: "Foo", ContentHash: ""},
 			},
-			wantUnchanged:   0,
+			wantUnchanged:    0,
 			wantChangedNames: []string{"Foo"},
-			wantOrphanIDs:   nil,
+			wantOrphanIDs:    nil,
 		},
 	}
 
@@ -200,8 +200,8 @@ func TestComputeSymbolHashFieldChangesFlipHash(t *testing.T) {
 	baseHash := computeSymbolHash(base)
 
 	mutations := []struct {
-		name    string
-		mutate  func(*Symbol)
+		name     string
+		mutate   func(*Symbol)
 		mustFlip bool
 	}{
 		{"kind", func(s *Symbol) { s.Kind = KindFunction }, true},

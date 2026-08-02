@@ -301,7 +301,7 @@ func TestEvaluateDismissals(t *testing.T) {
 		wantSimilar      int
 	}{
 		{
-			name: "no matches, nothing suppressed",
+			name:       "no matches, nothing suppressed",
 			wantAction: dismissalNone,
 		},
 		{

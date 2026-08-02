@@ -30,17 +30,17 @@ const (
 // ── Response types ──────────────────────────────────────────────────────
 
 type archFile struct {
-	Path            string        `json:"path"`
-	Language        string        `json:"language"`
-	Symbols         []string      `json:"symbols"`
-	FanIn           int           `json:"fan_in"`
-	FanOut          int           `json:"fan_out"`
-	BugDensity      float64       `json:"bug_density"`
-	ChangeFrequency int           `json:"change_frequency"`
+	Path            string         `json:"path"`
+	Language        string         `json:"language"`
+	Symbols         []string       `json:"symbols"`
+	FanIn           int            `json:"fan_in"`
+	FanOut          int            `json:"fan_out"`
+	BugDensity      float64        `json:"bug_density"`
+	ChangeFrequency int            `json:"change_frequency"`
 	Coupling        []fileCoupling `json:"coupling"`
-	RiskScore       float64       `json:"risk_score"`
-	Percentiles     archPct       `json:"percentiles"`
-	Insight         string        `json:"insight,omitempty"`
+	RiskScore       float64        `json:"risk_score"`
+	Percentiles     archPct        `json:"percentiles"`
+	Insight         string         `json:"insight,omitempty"`
 }
 
 type fileCoupling struct {
@@ -63,10 +63,10 @@ type archEdge struct {
 }
 
 type archSummary struct {
-	TotalFiles  int              `json:"total_files"`
-	ChokePoints []string         `json:"choke_points"`
-	Hotspots    []string         `json:"hotspots"`
-	MostCoupled []coupledPair    `json:"most_coupled"`
+	TotalFiles  int           `json:"total_files"`
+	ChokePoints []string      `json:"choke_points"`
+	Hotspots    []string      `json:"hotspots"`
+	MostCoupled []coupledPair `json:"most_coupled"`
 }
 
 type coupledPair struct {
@@ -184,7 +184,7 @@ func (s *Server) getArchitecture(w http.ResponseWriter, r *http.Request) {
 
 	// Compute Jaccard: for each file pair, |intersection| / |union| of PRs
 	coChange := make(map[string]map[string]int) // file -> file -> co-occurrence count
-	fileOccurrence := make(map[string]int)       // file -> total PR count
+	fileOccurrence := make(map[string]int)      // file -> total PR count
 	for _, pf := range prFilesList {
 		for _, f := range pf.files {
 			fileOccurrence[f]++

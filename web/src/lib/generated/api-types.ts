@@ -228,6 +228,7 @@ export interface ProviderKey {
   provider: string;
   key_hint?: string;
   base_url?: string;
+  model?: string;
   created_at: string;
   updated_at: string;
 }

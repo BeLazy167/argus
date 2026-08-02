@@ -9,10 +9,10 @@ import (
 )
 
 // TestTraceIDMiddleware pins three invariants:
-//   1. Supplied X-Argus-Trace-Id flows through to ctx and back out on response.
-//   2. Missing header mints a fresh (non-empty) UUID.
-//   3. The echoed response header matches the ctx value exactly — this is the
-//      contract FE fetch-with-trace.ts depends on for propagation.
+//  1. Supplied X-Argus-Trace-Id flows through to ctx and back out on response.
+//  2. Missing header mints a fresh (non-empty) UUID.
+//  3. The echoed response header matches the ctx value exactly — this is the
+//     contract FE fetch-with-trace.ts depends on for propagation.
 func TestTraceIDMiddleware(t *testing.T) {
 	t.Run("echoes supplied trace id into ctx and response", func(t *testing.T) {
 		const want = "11111111-2222-3333-4444-555555555555"

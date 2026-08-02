@@ -95,21 +95,21 @@ type StageTokens struct {
 
 // PipelineRun tracks the state and intermediate results of a single review.
 type PipelineRun struct {
-	ID                  uuid.UUID
-	ReviewID            uuid.UUID
-	State               PipelineState
-	PREvent             github.PREvent
-	DBInstallationID    int64 // DB serial ID (for provider_keys, model_configs lookups)
-	DBRepoID            int64 // DB serial ID (for model_configs, reviews lookups)
+	ID               uuid.UUID
+	ReviewID         uuid.UUID
+	State            PipelineState
+	PREvent          github.PREvent
+	DBInstallationID int64 // DB serial ID (for provider_keys, model_configs lookups)
+	DBRepoID         int64 // DB serial ID (for model_configs, reviews lookups)
 	// TraceID carries the X-Argus-Trace-Id header from the initiating HTTP request. Empty
 	// when the event entered outside the middleware (e.g. sweeper recovery). Persisted via
 	// reviews.trace_id so async stages can continue the same trace from a fresh ctx.
-	TraceID string
-	Diff                *diff.PatchSet
-	RawDiff             string
-	TriageResults       []TriageResult
-	FileReviews         []FileReview
-	AllFileReviews      []FileReview        // pre-scoring snapshot: all comments with scores, before threshold drop
+	TraceID        string
+	Diff           *diff.PatchSet
+	RawDiff        string
+	TriageResults  []TriageResult
+	FileReviews    []FileReview
+	AllFileReviews []FileReview // pre-scoring snapshot: all comments with scores, before threshold drop
 	// MinorNotes collects near-miss findings (scored within the near-miss band
 	// below their severity threshold) plus nits demoted from files that carry a
 	// blocking finding. Rendered collapsed in the summary, never inline.
@@ -130,18 +130,18 @@ type PipelineRun struct {
 	FileSynthesis       bool
 	ArchitectureGraph   bool
 	TruncatedFiles      []string
-	LeadBrief           *LeadBrief        `json:"lead_brief,omitempty"`
-	LeadAgentError      string            `json:"lead_agent_error,omitempty"`
-	ScoringSkipped      bool              // true when scoring provider unavailable — synthesis uses all comments
+	LeadBrief           *LeadBrief `json:"lead_brief,omitempty"`
+	LeadAgentError      string     `json:"lead_agent_error,omitempty"`
+	ScoringSkipped      bool       // true when scoring provider unavailable — synthesis uses all comments
 	ScoringUnconfigured bool
 	// ScoringMissingKey narrows the unconfigured cause: the scoring model row
 	// exists but no API key resolves for its provider — the remedy is a key,
 	// not a model config.
 	ScoringMissingKey bool              // true when the skip was resolution failure (no model config/key) — posts a setup notice
-	Prompts             map[string]string // custom prompt overrides per stage
-	IsIncremental       bool
-	PreviousReviewID    *uuid.UUID
-	PriorComments       map[string][]PriorComment // file path -> prior unresolved comments from previous review
+	Prompts           map[string]string // custom prompt overrides per stage
+	IsIncremental     bool
+	PreviousReviewID  *uuid.UUID
+	PriorComments     map[string][]PriorComment // file path -> prior unresolved comments from previous review
 	// SastFindings holds SAST tool results keyed by file path.
 	SastFindings map[string][]SastFinding `json:"-"`
 	// ArchContext holds per-file architecture metrics for review prompt enrichment.
@@ -289,10 +289,10 @@ type FileComment struct {
 	BlastRadius           int    `json:"blast_radius,omitempty"` // number of downstream dependents affected
 	EnforcedRuleContent   string `json:"-"`
 	IsNewFinding          bool   `json:"-"`
-	Suppressed            bool   `json:"-"` // dismissal-match drop: persisted flagged, never posted/counted
-	SuppressedReason      string `json:"-"` // e.g. "dismissed_match:0.91"; → review_comments.suppressed_reason
-	DismissedDowngrade    bool   `json:"-"` // dismissal-match downgrade: severity lowered one level + note
-	DismissedMatchPR      int    `json:"-"` // source PR of the dismissed finding (0 = unknown), for the note
+	Suppressed            bool   `json:"-"`                     // dismissal-match drop: persisted flagged, never posted/counted
+	SuppressedReason      string `json:"-"`                     // e.g. "dismissed_match:0.91"; → review_comments.suppressed_reason
+	DismissedDowngrade    bool   `json:"-"`                     // dismissal-match downgrade: severity lowered one level + note
+	DismissedMatchPR      int    `json:"-"`                     // source PR of the dismissed finding (0 = unknown), for the note
 	DedupCount            int    `json:"dedup_count,omitempty"` // how many duplicate findings were merged into this one
 	// Corroboration is the number of DISTINCT specialists that independently
 	// produced this finding, recorded when dedup merges a cluster. Scoring

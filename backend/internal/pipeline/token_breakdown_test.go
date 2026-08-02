@@ -11,11 +11,11 @@ import (
 // stage labels rather than exact string layout.
 func TestRenderTokenBreakdown(t *testing.T) {
 	tests := []struct {
-		name        string
-		tu          *RunTokenUsage
-		wantEmpty   bool
-		wantLabels  []string // rows that must be present
-		wantAbsent  []string // rows that must NOT be present
+		name       string
+		tu         *RunTokenUsage
+		wantEmpty  bool
+		wantLabels []string // rows that must be present
+		wantAbsent []string // rows that must NOT be present
 	}{
 		{
 			name:      "nil usage",

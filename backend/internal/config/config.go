@@ -30,6 +30,20 @@ type Config struct {
 	// Supermemory
 	SupermemoryAPIKey string
 
+	// Embeddings (memory-in-Postgres program). The platform key makes memory
+	// work for every managed-tier installation; BYOK "embeddings" provider
+	// keys override per installation. Self-hosters may set only the base URL
+	// for a keyless local endpoint (Ollama/TEI).
+	//
+	// Default model: voyage-4 (native 1024 dims — the memories storage dim).
+	// OpenAI text-embedding-3-* BYOK models Matryoshka-truncate to
+	// EmbeddingsDimensions via their `dimensions` param; custom endpoints must
+	// serve 1024-dim models.
+	EmbeddingsAPIKey     string
+	EmbeddingsBaseURL    string
+	EmbeddingsModel      string
+	EmbeddingsDimensions int
+
 	// Worker
 	MaxConcurrentReviews int
 
@@ -58,6 +72,10 @@ func Load() (*Config, error) {
 	maxWorkers, err := strconv.Atoi(getEnv("MAX_CONCURRENT_REVIEWS", "10"))
 	if err != nil {
 		return nil, fmt.Errorf("invalid MAX_CONCURRENT_REVIEWS: %w", err)
+	}
+	embedDims, err := strconv.Atoi(getEnv("EMBEDDINGS_DIMENSIONS", "1024"))
+	if err != nil {
+		return nil, fmt.Errorf("invalid EMBEDDINGS_DIMENSIONS: %w", err)
 	}
 
 	privateKey, err := loadPrivateKey()
@@ -90,6 +108,11 @@ func Load() (*Config, error) {
 		EncryptionKey: os.Getenv("ENCRYPTION_KEY"),
 
 		SupermemoryAPIKey: os.Getenv("SUPERMEMORY_API_KEY"),
+
+		EmbeddingsAPIKey:     os.Getenv("EMBEDDINGS_API_KEY"),
+		EmbeddingsBaseURL:    getEnv("EMBEDDINGS_BASE_URL", "https://api.voyageai.com/v1"),
+		EmbeddingsModel:      getEnv("EMBEDDINGS_MODEL", "voyage-4"),
+		EmbeddingsDimensions: embedDims,
 
 		MaxConcurrentReviews: maxWorkers,
 

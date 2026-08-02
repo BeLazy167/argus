@@ -84,6 +84,7 @@ export interface ProviderKeyResponse {
   provider: string;
   api_key_masked: string;
   base_url?: string;
+  model?: string;
   created_at: string;
   updated_at: string;
 }

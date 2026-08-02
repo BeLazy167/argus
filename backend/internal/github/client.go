@@ -38,7 +38,7 @@ func NewClient(app *App, appSlug string) *Client {
 	return &Client{
 		app:           app,
 		appSlug:       appSlug,
-		restLimiter:   rate.NewLimiter(rate.Limit(20), 5),  // 20 req/s, burst 5
+		restLimiter:   rate.NewLimiter(rate.Limit(20), 5),            // 20 req/s, burst 5
 		searchLimiter: rate.NewLimiter(rate.Every(2*time.Second), 2), // 1 req/2s, burst 2
 	}
 }

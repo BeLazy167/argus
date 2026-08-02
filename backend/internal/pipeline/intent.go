@@ -37,13 +37,13 @@ var intentTagRe = regexp.MustCompile(`(?i)</?pr_intent>`)
 // to prevent one enormous source (a novella-length PR body, a ranty issue) from
 // crowding out the others. intentGlobalCapChars is the final safety net.
 const (
-	intentMaxPRBodyChars    = 8000
-	intentMaxIssueBodyChars = 4000
-	intentMaxIssues         = 3
-	intentMaxCommitMsgChars = 500
-	intentMaxCommits        = 20
-	intentMaxLinkedPRs      = 5
-	intentGlobalCapChars    = 32000
+	intentMaxPRBodyChars     = 8000
+	intentMaxIssueBodyChars  = 4000
+	intentMaxIssues          = 3
+	intentMaxCommitMsgChars  = 500
+	intentMaxCommits         = 20
+	intentMaxLinkedPRs       = 5
+	intentGlobalCapChars     = 32000
 	intentCommitFetchTimeout = 10 * time.Second
 
 	// Post-parse caps on LLM output fields. The extraction system prompt asks

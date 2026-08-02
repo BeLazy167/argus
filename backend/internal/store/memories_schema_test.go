@@ -69,7 +69,7 @@ func TestMemoriesSchema(t *testing.T) {
 		    embedding = EXCLUDED.embedding, embedding_model = EXCLUDED.embedding_model,
 		    container_tag = EXCLUDED.container_tag, updated_at = now(), deleted_at = NULL`
 
-	vec := make([]float32, 1536)
+	vec := make([]float32, 1024)
 	vec[0] = 1 // unit vector along the first axis
 	vecLit := float32SliceToVectorLiteral(vec)
 

@@ -88,7 +88,7 @@ func TestThreadNodeIDForFinding_FallsBackWhenUnhydrated(t *testing.T) {
 	}}
 
 	for name, id := range map[string]uuid.UUID{
-		"unhydrated row": posted,
+		"unhydrated row":  posted,
 		"unknown finding": unknown,
 		"empty node id":   empty,
 	} {

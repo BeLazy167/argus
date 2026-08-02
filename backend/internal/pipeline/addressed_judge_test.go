@@ -84,8 +84,8 @@ func TestVerifyThreadAddressed(t *testing.T) {
 		name        string
 		judge       *fakeAddressedJudge
 		wantVerdict addressedVerdictKind
-		wantResolve bool                // a ResolveReviewThread issued?
-		wantState   store.FindingState  // ledger state after
+		wantResolve bool               // a ResolveReviewThread issued?
+		wantState   store.FindingState // ledger state after
 	}{
 		{
 			name:        "judge=yes → EventAddressed fires (resolve + ledger addressed)",

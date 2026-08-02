@@ -201,6 +201,7 @@ type ProviderKey struct {
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 	KeyHint        *string   `json:"key_hint"`
+	Model          *string   `json:"model"`
 }
 
 type Repo struct {

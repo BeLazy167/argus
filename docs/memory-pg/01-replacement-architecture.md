@@ -72,11 +72,12 @@ Two-track "try for 19":
   `hnsw.iterative_scan=relaxed_order`, ScopeBoth + metadata filters + cosine
   score contract, hybrid RRF CTE). Every program PR is proven against 19 from
   day one.
-- **Prod cutover targets 19-GA-if-released, else 18** (GA expected Sept/Oct
-  2026). Betas never touch prod: no supported beta→GA upgrade path, and
-  pgvector-on-19 is unreleased master code. Fallback is a custom
-  `flyio/postgres-flex:18` + pgvector 0.8.6 image; the 18→19 bump post-GA is
-  its own small step.
+- **Prod is ALREADY capable (2026-08-02):** Fly app `argus-db`, PostgreSQL
+  17.7 + pgvector 0.8.5 via custom image `registry.fly.io/argus-db:pgvector-17.7-0.8.5`
+  — and note well: **the application data lives in the `postgres` database**
+  (not an app-named one). No major upgrade is required by this program; a
+  deliberate 18/19 bump is optional later (an `argus-db-18` cluster + image
+  exist if wanted).
 - **Self-host compose default is `pgvector/pgvector:pg16` today** (same major
   as before — existing `db-data` volumes keep working; extension ready for
   migration 057). The major bump to 18/19 ships with the prod-cutover step,
@@ -98,7 +99,7 @@ CREATE TABLE memories (
   type            text   NOT NULL,                -- pattern|scenario|feedback|synthesis|pr_summary|review|topology|rule
   content         text   NOT NULL,
   metadata        jsonb  NOT NULL DEFAULT '{}',   -- the same flat string map Metadata.ToMap emits
-  embedding       vector(1536),                   -- NULL = embed pending (fail-open write path)
+  embedding       vector(1024),                   -- NULL = embed pending (fail-open write path)
   embedding_model text,
   content_tsv     tsvector GENERATED ALWAYS AS (to_tsvector('english', left(content, 8000))) STORED,
   created_at      timestamptz NOT NULL DEFAULT now(),
@@ -166,11 +167,12 @@ Leg notes:
 
 ## 4. Embedding pipeline
 
-- **Default model: OpenAI `text-embedding-3-small`** (1536 dims, $0.02/1M tok,
-  fits pgvector's 2000-dim index cap). Cost reality: a heavy review writes
-  ~20-60 docs ≈ $0.0004; full 1M-doc re-embed ≈ $6. Cost is a non-argument.
-  Voyage (`voyage-3.5-lite`) is a same-price alternative; code-tuned models buy
-  little because memory content is deliberately prose (diffs are stripped).
+- **Default model: `voyage-4`** (SOTA-validated 2026-08-02: RTEB 70.1 vs 55.21
+  for text-embedding-3-small on short English prose; native 1024 dims = the
+  storage dimensionality). OpenAI `text-embedding-3-*` BYOK models
+  Matryoshka-truncate to 1024 via their `dimensions` param; custom endpoints
+  must serve 1024-dim models (write path validates). Cost identical order:
+  a heavy review ≈ $0.001; full re-embed of the corpus ≈ dollars.
 - **BYOK alignment:** resolve keys via the existing
   `store.ResolveAPIKey(installation, repo, provider)` chain (repo → org → env),
   with `base_url` override — so self-hosters point at Ollama/TEI with one env

@@ -37,10 +37,10 @@ func TestComplete_WireFormat(t *testing.T) {
 		effort        ReasoningEffort
 		temperature   float64
 		// assertions on the parsed request body
-		wantKey      map[string]any  // exact-equal required
-		wantAbsent   []string        // these top-level keys must NOT be present
-		wantNested   map[string]any  // body["reasoning"].(map) field asserts
-		wantNoNested []string        // body["reasoning"] must NOT have these keys
+		wantKey      map[string]any // exact-equal required
+		wantAbsent   []string       // these top-level keys must NOT be present
+		wantNested   map[string]any // body["reasoning"].(map) field asserts
+		wantNoNested []string       // body["reasoning"] must NOT have these keys
 	}
 
 	cases := []wireCase{

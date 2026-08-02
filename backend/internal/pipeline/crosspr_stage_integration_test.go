@@ -48,8 +48,8 @@ type fakeCrossPRStore struct {
 	latestRun map[uuid.UUID]uuid.UUID
 	// priorByPR maps (repoID, prNumber) to a canned row for
 	// GetLatestCompletedReviewByPR. errNoRows[key]=true triggers pgx.ErrNoRows.
-	priorByPR  map[priorKey]db.GetLatestCompletedReviewByPRRow
-	priorErr   map[priorKey]error
+	priorByPR   map[priorKey]db.GetLatestCompletedReviewByPRRow
+	priorErr    map[priorKey]error
 	siblingRows []db.FindReviewsLinkingToPRRow
 	sharedRows  []db.FindSharedLinkedIssuesRow
 	// allFileReviews returns the JSONB projection for GetAllFileReviewsForReview.
@@ -60,11 +60,11 @@ type fakeCrossPRStore struct {
 	flagsDefault FeatureFlags
 
 	// Call capture. Each slice holds arg snapshots in invocation order.
-	hashWrites   []db.UpdateReviewCrossPRHashParams
-	tokenWrites  []db.MergeStageTokenEntryParams
-	linkedPRSets []db.SetReviewLinkedPRRefsParams
+	hashWrites      []db.UpdateReviewCrossPRHashParams
+	tokenWrites     []db.MergeStageTokenEntryParams
+	linkedPRSets    []db.SetReviewLinkedPRRefsParams
 	linkedIssueSets []db.SetReviewLinkedIssueRefsParams
-	flagCalls    []int64
+	flagCalls       []int64
 
 	// Error overrides — if non-nil, the matching call returns this error
 	// instead of the canned row. Cleared after the call so a single test
@@ -362,7 +362,7 @@ func ghKey(owner, repo string, n int) string {
 // yield pgx.ErrNoRows so the stage's early-exit path is exercised
 // verbatim against the production behaviour.
 type fakeStateLoader struct {
-	m   sync.Mutex
+	m    sync.Mutex
 	runs map[uuid.UUID]*PipelineRun
 }
 
@@ -492,10 +492,10 @@ type harness struct {
 	llm       *fakeLLMProvider
 	publisher *fakeEventPublisher
 	reviewID  uuid.UUID
-	runID  uuid.UUID
-	repo   *store.Repo
-	review *store.Review
-	run    *PipelineRun
+	runID     uuid.UUID
+	repo      *store.Repo
+	review    *store.Review
+	run       *PipelineRun
 	// now is a mutable clock; Advance to step time in deterministic tests.
 	now int64 // unix nanos
 }
@@ -503,14 +503,14 @@ type harness struct {
 func newHarness(t *testing.T) *harness {
 	t.Helper()
 	h := &harness{
-		t:         t,
-		store:     newFakeCrossPRStore(),
-		gh:        newFakeGithubClient(),
-		state:     newFakeStateLoader(),
-		llm:       newFakeLLMProvider(),
-		reviewID:  uuid.New(),
-		runID:     uuid.New(),
-		now:       time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC).UnixNano(),
+		t:        t,
+		store:    newFakeCrossPRStore(),
+		gh:       newFakeGithubClient(),
+		state:    newFakeStateLoader(),
+		llm:      newFakeLLMProvider(),
+		reviewID: uuid.New(),
+		runID:    uuid.New(),
+		now:      time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC).UnixNano(),
 	}
 	h.publisher = newFakeEventPublisher(h.Now)
 
@@ -557,9 +557,9 @@ func newHarness(t *testing.T) *harness {
 	// on a fully-accessible sibling with a canned prior review.
 	linkedKey := ghKey("acme", "api", 7)
 	h.gh.pullRequests[linkedKey] = &ghpkg.PREvent{
-		PRNumber: 7,
-		PRTitle:  "Linked API PR",
-		HeadSHA:  "linkedhead5678",
+		PRNumber:     7,
+		PRTitle:      "Linked API PR",
+		HeadSHA:      "linkedhead5678",
 		RepoFullName: "acme/api",
 	}
 	h.gh.prDiffs[linkedKey] = "--- linked-a\n+++ linked-b\n@@ -1 +1 @@\n-foo\n+bar\n"

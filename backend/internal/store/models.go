@@ -182,6 +182,7 @@ type ProviderKey struct {
 	APIKeyEnc      string    `json:"-"`
 	KeyHint        string    `json:"key_hint,omitempty"`
 	BaseURL        *string   `json:"base_url,omitempty"`
+	Model          *string   `json:"model,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 }

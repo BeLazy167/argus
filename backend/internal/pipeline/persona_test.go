@@ -597,4 +597,3 @@ func TestParseRepoSettings_SkipBaseBranches(t *testing.T) {
 		})
 	}
 }
-

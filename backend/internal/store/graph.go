@@ -11,11 +11,11 @@ import (
 
 // FileMemory holds all memory data for a specific file path.
 type FileMemory struct {
-	FilePath       string           `json:"file_path"`
-	RiskScore      FileRisk         `json:"risk_score"`
-	Patterns       []Pattern        `json:"patterns"`
-	RecentComments []ReviewComment  `json:"recent_comments"`
-	Traces         []DecisionTrace  `json:"traces"`
+	FilePath       string          `json:"file_path"`
+	RiskScore      FileRisk        `json:"risk_score"`
+	Patterns       []Pattern       `json:"patterns"`
+	RecentComments []ReviewComment `json:"recent_comments"`
+	Traces         []DecisionTrace `json:"traces"`
 }
 
 // UpsertCodeNode inserts or updates a code node, returning its ID.

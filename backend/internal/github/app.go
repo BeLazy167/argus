@@ -16,7 +16,7 @@ type App struct {
 	appID      int64
 	privateKey []byte
 
-	mu     sync.RWMutex
+	mu      sync.RWMutex
 	clients map[int64]*gh.Client // installation_id → client
 }
 

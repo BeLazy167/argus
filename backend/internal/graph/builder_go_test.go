@@ -7,10 +7,10 @@ import (
 
 func TestParseGoAST(t *testing.T) {
 	tests := []struct {
-		name       string
-		src        string
-		wantSyms   []Symbol
-		wantEdges  []Edge
+		name      string
+		src       string
+		wantSyms  []Symbol
+		wantEdges []Edge
 	}{
 		{
 			name: "simple function",

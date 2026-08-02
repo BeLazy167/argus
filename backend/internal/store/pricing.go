@@ -8,9 +8,9 @@ import (
 
 // ModelPricing holds per-1M-token pricing for a model pattern.
 type ModelPricing struct {
-	Pattern        string  `json:"model_pattern"`
-	InputPerMil    float64 `json:"input_per_million"`
-	OutputPerMil   float64 `json:"output_per_million"`
+	Pattern      string  `json:"model_pattern"`
+	InputPerMil  float64 `json:"input_per_million"`
+	OutputPerMil float64 `json:"output_per_million"`
 }
 
 // PricingCache loads model pricing from DB and caches it with a TTL.

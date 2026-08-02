@@ -75,6 +75,7 @@ type ProviderKeyResponse struct {
 	Provider       string  `json:"provider"`
 	APIKeyMasked   string  `json:"api_key_masked"`
 	BaseURL        *string `json:"base_url,omitempty"`
+	Model          *string `json:"model,omitempty"`
 	CreatedAt      string  `json:"created_at"`
 	UpdatedAt      string  `json:"updated_at"`
 }
@@ -88,6 +89,7 @@ func newProviderKeyResponse(k store.ProviderKey) ProviderKeyResponse {
 		Provider:       k.Provider,
 		APIKeyMasked:   maskKey(k.KeyHint),
 		BaseURL:        k.BaseURL,
+		Model:          k.Model,
 		CreatedAt:      k.CreatedAt.Format("2006-01-02T15:04:05Z"),
 		UpdatedAt:      k.UpdatedAt.Format("2006-01-02T15:04:05Z"),
 	}

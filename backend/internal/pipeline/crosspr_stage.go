@@ -2241,4 +2241,3 @@ func (o *Orchestrator) emitRateLimitHit(ctx context.Context, kind, scope string,
 		slog.String("trace_id", obs.TraceID(ctx)),
 	)
 }
-

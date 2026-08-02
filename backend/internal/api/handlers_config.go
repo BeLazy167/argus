@@ -13,6 +13,7 @@ import (
 
 	"github.com/BeLazy167/argus/backend/internal/crypto"
 	"github.com/BeLazy167/argus/backend/internal/llm"
+	"github.com/BeLazy167/argus/backend/internal/memory"
 	"github.com/BeLazy167/argus/backend/internal/pipeline"
 )
 
@@ -400,14 +401,66 @@ func (s *Server) upsertProviderKey(w http.ResponseWriter, r *http.Request) {
 		Provider string  `json:"provider"`
 		APIKey   string  `json:"api_key"`
 		BaseURL  *string `json:"base_url"`
+		Model    *string `json:"model"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
 		return
 	}
-	if body.Provider == "" || body.APIKey == "" {
+	if body.Provider == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "provider required"})
+		return
+	}
+	// Keyless rows are allowed ONLY for embeddings custom endpoints (a private
+	// TEI/Ollama server without auth is legitimate; the registry proceeds
+	// keyless off the hosted-base list). Every other provider requires a key.
+	keylessEmbeddings := body.Provider == memory.EmbeddingsProvider &&
+		body.BaseURL != nil && strings.TrimSpace(*body.BaseURL) != ""
+	if body.APIKey == "" && !keylessEmbeddings {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "provider and api_key required"})
 		return
+	}
+	if body.Provider == memory.EmbeddingsProvider {
+		// Embeddings are installation-wide by design: one embedding space per
+		// installation (memories.embedding_model + similarity floors are
+		// calibrated per space); repo-scoped keys would fragment retrieval.
+		if body.RepoID != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "embeddings keys are installation-wide (one embedding space per installation); omit repo_id"})
+			return
+		}
+		// Store base_url trimmed (like the azure/gcp/bedrock branch): padded
+		// URLs break request construction and dodge hosted-base matching.
+		hasBase := false
+		if body.BaseURL != nil {
+			trimmed := strings.TrimSpace(*body.BaseURL)
+			if trimmed == "" {
+				body.BaseURL = nil
+			} else {
+				body.BaseURL = &trimmed
+				hasBase = true
+			}
+		}
+		// A custom endpoint (TEI/Ollama serve whatever model they were launched
+		// with regardless of the request's model field) must declare its true
+		// model, or memories.embedding_model would be stamped wrong and every
+		// similarity floor silently miscalibrates.
+		if hasBase && (body.Model == nil || strings.TrimSpace(*body.Model) == "") {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "model is required when base_url is set for embeddings (custom endpoints must declare the model they serve)"})
+			return
+		}
+		// ...and a model override is only meaningful WITH a custom endpoint:
+		// against the platform base it would post foreign model names there.
+		if !hasBase && body.Model != nil && strings.TrimSpace(*body.Model) != "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "model override requires base_url (to use a different hosted model, set base_url to that provider's endpoint)"})
+			return
+		}
+		// Keyless rows are only valid against endpoints that can actually work
+		// keyless; the hosted bases require a key, and accepting a keyless row
+		// there would silently disable embeddings for the installation.
+		if body.APIKey == "" && hasBase && memory.HostedKeyedBase(*body.BaseURL) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "this endpoint requires an api_key (keyless rows are only valid for self-hosted endpoints)"})
+			return
+		}
 	}
 	if body.Provider == "azure" || body.Provider == "gcp_vertex" || body.Provider == "aws_bedrock" {
 		if body.BaseURL != nil {
@@ -432,7 +485,7 @@ func (s *Server) upsertProviderKey(w http.ResponseWriter, r *http.Request) {
 		}
 		body.BaseURL = &u
 	}
-	pk, err := s.store.UpsertProviderKey(r.Context(), installationID, body.RepoID, body.Provider, body.APIKey, body.BaseURL)
+	pk, err := s.store.UpsertProviderKey(r.Context(), installationID, body.RepoID, body.Provider, body.APIKey, body.BaseURL, body.Model)
 	if err != nil {
 		s.logger.Error("upsert provider key", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save key"})

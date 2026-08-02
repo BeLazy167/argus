@@ -12,8 +12,8 @@ func TestIsArgusThread(t *testing.T) {
 		login string
 		want  bool
 	}{
-		{"exact argus-eye login", "argus-eye", true},                  // GraphQL
-		{"argus-eye bot suffix", "argus-eye[bot]", true},              // REST
+		{"exact argus-eye login", "argus-eye", true},     // GraphQL
+		{"argus-eye bot suffix", "argus-eye[bot]", true}, // REST
 		{"dependabot is not argus", "dependabot[bot]", false},
 		{"codecov is not argus", "codecov[bot]", false},
 		{"renovate is not argus", "renovate[bot]", false},

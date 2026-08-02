@@ -24,10 +24,10 @@ func TestReasoningEffort_Valid(t *testing.T) {
 		{ReasoningHigh, true},
 		{ReasoningXHigh, true},
 		{ReasoningEffort("ultra-maximum"), false},
-		{ReasoningEffort("Minimal"), false},         // case-sensitive
-		{ReasoningEffort("  low  "), false},         // whitespace not trimmed
-		{ReasoningEffort("low,medium"), false},      // no multi-value
-		{ReasoningEffort("reasoning_low"), false},   // no prefixes
+		{ReasoningEffort("Minimal"), false},       // case-sensitive
+		{ReasoningEffort("  low  "), false},       // whitespace not trimmed
+		{ReasoningEffort("low,medium"), false},    // no multi-value
+		{ReasoningEffort("reasoning_low"), false}, // no prefixes
 		{ReasoningEffort("0"), false},
 	}
 	for _, tc := range cases {
