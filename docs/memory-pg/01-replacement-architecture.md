@@ -11,11 +11,19 @@ hybrid). pgGraph = FK-projected graph traversal (BFS expand, shortest path,
 openCypher read subset). The managed cloud + Python SDK are irrelevant to us
 (no Go SDK; SQL is the integration surface either way).
 
-Why not now — each of these is disqualifying on its own:
+Why not now — 2 through 5 are each disqualifying on their own for pgContext (1
+has since been retracted; see below). 6 is a separate judgment about pgGraph:
+not a disqualifier, just no reason to adopt it.
 
-1. **Postgres version wall.** pgContext supports PG 17/18 only. We run
+1. ~~**Postgres version wall.** pgContext supports PG 17/18 only. We run
    `postgres:16` (docker-compose) and Fly Postgres in prod — adoption requires a
-   fleet major-version migration *plus* a custom DB image.
+   fleet major-version migration *plus* a custom DB image.~~
+   **RETRACTED 2026-08-02.** Prod is `argus-db` on PostgreSQL 17.7, already
+   served from a custom image (`argus-db:pgvector-17.7-0.8.5`) — inside
+   pgContext's 17/18 support, with the custom-image cost already paid. What
+   survives is the self-host compose default (`pgvector/pgvector:pg16`), and
+   that is not a version wall but disqualifier 2: managed self-hosters cannot
+   run the extension on *any* version. This one no longer stands alone.
 2. **Self-hoster exclusion.** `superuser=true` + a custom index access method
    means RDS, Aurora, Supabase, Cloud SQL, and Neon can *never* run it until
    vendors allow-list it (none do). pgvector is in every default catalog. For an
@@ -40,12 +48,57 @@ Why not now — each of these is disqualifying on its own:
    maintenance is ops weight for zero current feature. Relational wins we do
    want (03-improvements.md) are plain SQL joins.
 
-**The hedge that keeps the door open:** one `memories` table with a vector
+**Update 2026-08-02 — evaluated in depth and DECLINED. The hedge below was
+wrong on its central claim; it is kept only as a record of what we believed.**
+
+~~The hedge that keeps the door open: one `memories` table with a vector
 column, jsonb metadata, and a `container_tag` column is structurally identical
-to a pgContext collection registration (`create_collection` + `register_vector`
-+ `register_filter_column`). If pgContext matures (PG-version reach, managed-PG
-allow-listing, Stable ANN), it can be layered on top of this schema without a
-data migration. Re-evaluate in 6-12 months.
+to a pgContext collection registration (`create_collection`,
+`register_vector`, `register_filter_column`). If pgContext matures
+(PG-version reach, managed-PG allow-listing, Stable ANN), it can be layered on
+top of this schema without a data migration.~~
+
+**Why that was wrong.** `resolve_vector_column` (`catalog.rs:437-448`) gates
+registration on `atttypid = 'pgcontext.vector'::regtype`. Our column is
+`public.vector(1024)` (migration 059). Adopting the collection API therefore
+requires retyping the column — a data migration, and one that sits *below* the
+`memory.Indexer` seam in `store/postgres.go`'s app-wide `AfterConnect`, whose
+own comment notes that a failure there fails every connection. The schema is
+not "structurally identical"; it is one type-identity check away from
+incompatible.
+
+**Four findings, any one of which is disqualifying** (executed against the
+source, 2026-08-02):
+
+1. `pgcontext.query()` — the only fused dense+FTS entry point — takes **no
+   filter parameter**. No `installation_id`, no `container_tag`, no tombstone
+   predicate on the hybrid path. On a multi-tenant deployment that is a
+   cross-tenant read, not a performance trade.
+2. Its fused RRF **discards cosine** (the value caps at 2/61 ≈ 0.033), so our
+   absolute floors match nothing and dismissal suppression **fails
+   silent-open** — verbatim risk #1 in `02-migration-plan.md`.
+3. The filtered-candidate mask has a **compile-time 10,000-row ceiling** with
+   silent physical-prefix truncation: the same silent-recall-dip class
+   migration 060's partial-index predicate exists to prevent.
+4. It needs superuser `CREATE EXTENSION` plus a custom index access method,
+   which excludes Neon/RDS/Supabase — the managed providers this document and
+   `README.md` name as supported self-host targets.
+
+**And the upside was not there.** Our score is recomputed from the live heap
+row *after* fusion (`pgsearch.go`: `FROM fused u JOIN memories m ON m.id =
+u.id`); the ANN index supplies rank only. So swapping engines provably cannot
+change any suppression, attribution, or dedupe decision — it is a latency
+experiment, on reads that are already sub-millisecond inside a 30-120s LLM
+pipeline. The only capability we lack and could not cheaply build is ColBERT
+late-interaction reranking, and it is unreachable anyway (no multi-vector
+provider in `embed_catalog.go`; MaxSim has no calibration path to an absolute
+[0,1] floor). Sparse vectors are ~8 lines on pgvector 0.8.5's existing
+`sparsevec`; grouped search is a `PARTITION BY` in our own CTE.
+
+Fair credit: pgContext's own benchmark docs are unusually honest — they
+volunteer the 5-100x filtered-latency losses and a 42.9s compaction stall —
+and its supply-chain hygiene is strong. Worth re-checking in a year; not worth
+a pilot now. Same superuser/managed-PG objection applies to pgGraph.
 
 ### pgvector + core FTS — selected
 
@@ -83,34 +136,44 @@ Two-track "try for 19":
   migration 057). The major bump to 18/19 ships with the prod-cutover step,
   with documented dump/restore upgrade notes. Managed-PG self-hosters
   (RDS/Supabase/Neon) already have pgvector on their current version.
-- Known trade: on PG 19 the pgContext hedge stays closed until it adds 19
-  support (17/18-only today).
+- (Historical) the PG-19 note about the pgContext hedge is moot: pgContext was
+  evaluated and declined on 2026-08-02 — see the section above.
 
-## 2. Schema (migration 057)
+## 2. Schema (cumulative: migrations 057, 059, 060)
+
+Current shape, not any single migration. 057 created the table, 059 retyped the
+embedding to 1024 dims, 060 added the invalidation tombstone and rebuilt both
+partial indexes around it. Per-migration attribution is called out inline below.
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS vector;
 
 CREATE TABLE memories (
   id              bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  installation_id bigint NOT NULL,                -- tenant (today implicit in "BYOK key = tenant")
+  installation_id bigint NOT NULL REFERENCES installations(id),  -- tenant; FK so a writer bug filing memories under a bogus id fails loudly instead of leaking scope
   container_tag   text   NOT NULL,                -- RepoTagNew(repo) or '_shared' (builders reused verbatim)
   custom_id       text   NOT NULL,                -- existing deterministic IDs, unchanged
   type            text   NOT NULL,                -- pattern|scenario|feedback|synthesis|pr_summary|review|topology|rule
   content         text   NOT NULL,
   metadata        jsonb  NOT NULL DEFAULT '{}',   -- the same flat string map Metadata.ToMap emits
-  embedding       vector(1024),                   -- NULL = embed pending (fail-open write path)
+  embedding       vector(1024),                   -- 057 shipped vector(1536); 059 retyped to 1024. NULL = embed pending (fail-open write path)
   embedding_model text,
   content_tsv     tsvector GENERATED ALWAYS AS (to_tsvector('english', left(content, 8000))) STORED,
   created_at      timestamptz NOT NULL DEFAULT now(),
   updated_at      timestamptz NOT NULL DEFAULT now(),
   deleted_at      timestamptz,
+  invalidated_at  timestamptz,                    -- 060: memory that became WRONG, excluded like deleted_at
+  superseded_by   bigint REFERENCES memories(id), -- 060: links the replacement, history preserved
   CONSTRAINT memories_custom_uniq UNIQUE (installation_id, custom_id)
 );
 
+-- Both partial indexes carry the 060 predicate: an ANN index still holding
+-- invalidated rows returns neighbours that post-filter away — a silent recall
+-- dip on the suppression path.
 CREATE INDEX memories_embedding_hnsw ON memories USING hnsw (embedding vector_cosine_ops)
-  WHERE deleted_at IS NULL AND embedding IS NOT NULL;
-CREATE INDEX memories_scope_idx ON memories (installation_id, container_tag, type) WHERE deleted_at IS NULL;
+  WHERE deleted_at IS NULL AND invalidated_at IS NULL AND embedding IS NOT NULL;
+CREATE INDEX memories_scope_idx ON memories (installation_id, container_tag, type)
+  WHERE deleted_at IS NULL AND invalidated_at IS NULL;
 CREATE INDEX memories_tsv_gin  ON memories USING gin (content_tsv);
 CREATE INDEX memories_meta_gin ON memories USING gin (metadata jsonb_path_ops);
 ```
@@ -122,9 +185,15 @@ around it):
 ```sql
 INSERT INTO memories (...) VALUES (...)
 ON CONFLICT (installation_id, custom_id) DO UPDATE
-SET content=EXCLUDED.content, metadata=EXCLUDED.metadata, embedding=EXCLUDED.embedding,
+SET type=EXCLUDED.type, content=EXCLUDED.content, metadata=EXCLUDED.metadata,
+    embedding=EXCLUDED.embedding, embedding_model=EXCLUDED.embedding_model,
     container_tag=EXCLUDED.container_tag, updated_at=now(), deleted_at=NULL;
 ```
+
+`invalidated_at`/`superseded_by` are deliberately absent from the SET list:
+invalidation is a policy judgment ("this knowledge is wrong") that a mechanical
+re-write of the same content must not silently overturn. `deleted_at` does
+reset — a re-index of the same customId is a deliberate recreate.
 
 `UNIQUE (installation_id, custom_id)` mirrors Supermemory's account-scoped
 customId exactly (the BYOK key *was* the tenant); container prefixes inside the

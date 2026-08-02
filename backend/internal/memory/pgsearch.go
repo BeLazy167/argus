@@ -401,9 +401,17 @@ func (idx *PGIndexer) searchPredicates(req SearchRequest) (string, []any) {
 	return strings.Join(conds, " AND "), args
 }
 
+// numericLiteralPattern is the SINGLE source for both ::numeric guards: the
+// Go-side check on the argument and the SQL-side check on the stored value.
+// They were separately-maintained string literals that happened to agree; one
+// being loosened (or "simplified" to something like `^[0-9.-]+$`, which
+// accepts "1.2.3") re-admits the 22P02 that fails the whole leg. Valid in both
+// Go's regexp and POSIX ERE, and contains no single quote to escape.
+const numericLiteralPattern = `^-?[0-9]+(\.[0-9]+)?$`
+
 // numericLiteral matches what Postgres will accept for the ::numeric casts
 // filterSQL emits — the Go-side twin of the SQL regex guard.
-var numericLiteral = regexp.MustCompile(`^-?[0-9]+(\.[0-9]+)?$`)
+var numericLiteral = regexp.MustCompile(numericLiteralPattern)
 
 // filterSQL renders one FilterCondition against the metadata map (or the
 // type column), returning the fragment and its ordered args. base is the
@@ -445,8 +453,8 @@ func filterSQL(f FilterCondition, base int) (string, []any) {
 			return "false", nil
 		}
 		frag = fmt.Sprintf(
-			`CASE WHEN metadata->>$%d ~ '^-?[0-9]+(\.[0-9]+)?$' THEN (metadata->>$%d)::numeric END %s $%d::numeric`,
-			base+1, base+1, op, base+2)
+			`CASE WHEN metadata->>$%d ~ '%s' THEN (metadata->>$%d)::numeric END %s $%d::numeric`,
+			base+1, numericLiteralPattern, base+1, op, base+2)
 		args = []any{f.Key, f.Value}
 	case f.FilterType == "array_contains":
 		// The PG store's metadata is the flat string map Metadata.ToMap
