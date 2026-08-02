@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/pgvector/pgvector-go"
 )
 
 type ActivityLog struct {
@@ -99,6 +100,22 @@ type Installation struct {
 	DefaultSettings   []byte          `json:"default_settings"`
 	FeatureFlags      json.RawMessage `json:"feature_flags"`
 	SupermemoryKeyEnc *string         `json:"supermemory_key_enc"`
+}
+
+type Memory struct {
+	ID             int64            `json:"id"`
+	InstallationID int64            `json:"installation_id"`
+	ContainerTag   string           `json:"container_tag"`
+	CustomID       string           `json:"custom_id"`
+	Type           string           `json:"type"`
+	Content        string           `json:"content"`
+	Metadata       json.RawMessage  `json:"metadata"`
+	Embedding      *pgvector.Vector `json:"embedding"`
+	EmbeddingModel *string          `json:"embedding_model"`
+	ContentTsv     interface{}      `json:"content_tsv"`
+	CreatedAt      time.Time        `json:"created_at"`
+	UpdatedAt      time.Time        `json:"updated_at"`
+	DeletedAt      *time.Time       `json:"deleted_at"`
 }
 
 type ModelConfig struct {
