@@ -55,7 +55,7 @@ func TestAssembleBriefingOptionalLegFailureKeepsCore(t *testing.T) {
 	idx := degradeTestIndexer(func(body string) bool {
 		return strings.Contains(body, `"value":"rule"`)
 	})
-	b, err := idx.assembleBriefing(context.Background(), BriefingQuery{
+	b, err := assembleBriefingWith(context.Background(), idx.runSearch, idx.logger, BriefingQuery{
 		Repo: "acme/widgets", FilePath: "a.go", Query: "invoice rounding",
 	})
 	if err != nil {
@@ -72,7 +72,7 @@ func TestAssembleBriefingOptionalLegFailureKeepsCore(t *testing.T) {
 // When EVERY leg fails there is nothing usable — the briefing errors.
 func TestAssembleBriefingAllLegsFailErrors(t *testing.T) {
 	idx := degradeTestIndexer(func(string) bool { return true })
-	_, err := idx.assembleBriefing(context.Background(), BriefingQuery{
+	_, err := assembleBriefingWith(context.Background(), idx.runSearch, idx.logger, BriefingQuery{
 		Repo: "acme/widgets", FilePath: "a.go", Query: "q",
 	})
 	if err == nil {
@@ -85,7 +85,7 @@ func TestSpecialistBlockPartialLegFailureKeepsRest(t *testing.T) {
 	idx := degradeTestIndexer(func(body string) bool {
 		return strings.Contains(body, `"value":"synthesis"`)
 	})
-	block, err := idx.specialistBlock(context.Background(), "acme/widgets", "a.go", "q", NewThresholds())
+	block, err := specialistBlockWith(context.Background(), idx.runSearch, idx.logger, "acme/widgets", "a.go", "q", NewThresholds())
 	if err != nil {
 		t.Fatalf("partial specialist-leg failure must not error: %v", err)
 	}

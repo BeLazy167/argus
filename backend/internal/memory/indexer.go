@@ -539,17 +539,23 @@ func (idx *indexerImpl) IndexScenario(ctx context.Context, owner, repo string, s
 	return nil
 }
 
-// specialistBlock fetches (1) file-scoped synthesis via exact metadata lookup,
-// (2) repo-scoped semantic hits across patterns/scenarios/feedback, (3) shared
-// semantic hits over patterns. Replaces the legacy 5-parallel-query block — cuts
-// 5×N searches per PR to 2×N plus one list call. Owns its own 5s timeout;
-// consumed only by Briefing (assembleBriefing) inside this module. Returns the
-// first leg error so Briefing can surface a broken retrieval instead of silently
-// serving a partial block; the repo (OR-of-types) and shared (numeric
-// confidence) legs keep bespoke SearchRequests the single-type MemoryQuery does
-// not model, but route through the shared error-honest runSearch core.
-func (idx *indexerImpl) specialistBlock(ctx context.Context, repo, filePath, specialistQuery string, thresholds Thresholds) (MemoryBlock, error) {
-	if idx.client == nil || repo == "" {
+// specialistBlockWith is the shared specialist-block orchestration over a
+// transport core: three concurrent legs whose REQUESTS are identical across
+// backends by construction (same filters, floors, limits), with the shared
+// keep-what-succeeded degradation policy. The legs fetch (1) file-scoped
+// synthesis via exact metadata lookup, (2) repo-scoped semantic hits across
+// patterns/scenarios/feedback, (3) shared semantic hits over patterns —
+// replacing the legacy 5-parallel-query block (5xN searches per PR down to
+// 2xN plus one list call). Owns its own 5s timeout; consumed only by
+// assembleBriefingWith. The repo (OR-of-types) and shared (numeric
+// confidence) legs keep bespoke SearchRequests the single-type MemoryQuery
+// does not model.
+func specialistBlockWith(ctx context.Context, run runSearchFn, logger *slog.Logger, repo, filePath, specialistQuery string, thresholds Thresholds) (MemoryBlock, error) {
+	if repo == "" {
+		// Every leg is repo-scoped. briefingWith already guards this for the
+		// briefing path; keeping it here too means a direct caller cannot
+		// issue three searches against RepoTagNew("") and then read the
+		// all-legs-failed error as "no institutional memory available".
 		return MemoryBlock{}, nil
 	}
 	thresholds = thresholds.WithDefaults()
@@ -571,18 +577,19 @@ func (idx *indexerImpl) specialistBlock(ctx context.Context, repo, filePath, spe
 			return
 		}
 		var matches []PatternMatch
-		matches, synthErr = idx.runSearch(ctx, SearchRequest{
+		matches, synthErr = run(ctx, SearchRequest{
 			Query:        "file synthesis",
 			ContainerTag: RepoTagNew(repo),
 			SearchMode:   "hybrid",
 			Limit:        1,
 			Threshold:    0, // accept any hit — the metadata filter already pins it.
 			Rerank:       false,
+			PointLookup:  true, // (type, file_path) pins at most one synthesis doc
 			Filters: &SearchFilters{AND: []FilterCondition{
 				{Key: "type", Value: string(TypeSynthesis)},
 				{Key: "file_path", Value: filePath},
 			}},
-		}, false)
+		})
 		if len(matches) > 0 {
 			block.Synthesis = matches[0].Content
 		}
@@ -591,7 +598,7 @@ func (idx *indexerImpl) specialistBlock(ctx context.Context, repo, filePath, spe
 	// 2. Repo signal — semantic, type IN {pattern, scenario, feedback}.
 	go func() {
 		defer wg.Done()
-		block.Repo, repoErr = idx.runSearch(ctx, SearchRequest{
+		block.Repo, repoErr = run(ctx, SearchRequest{
 			Query:        specialistQuery,
 			ContainerTag: RepoTagNew(repo),
 			SearchMode:   "hybrid",
@@ -603,7 +610,7 @@ func (idx *indexerImpl) specialistBlock(ctx context.Context, repo, filePath, spe
 				{Key: "type", Value: string(TypeScenario)},
 				{Key: "type", Value: string(TypeFeedback)},
 			}},
-		}, false)
+		})
 	}()
 
 	// 3. Shared patterns — semantic against `_shared`. The AND filter excludes
@@ -613,7 +620,7 @@ func (idx *indexerImpl) specialistBlock(ctx context.Context, repo, filePath, spe
 	// the threshold as a float, not a lexicographic string.
 	go func() {
 		defer wg.Done()
-		block.Shared, sharedErr = idx.runSearch(ctx, SearchRequest{
+		block.Shared, sharedErr = run(ctx, SearchRequest{
 			Query:        specialistQuery,
 			ContainerTag: SharedTag,
 			SearchMode:   "hybrid",
@@ -624,7 +631,7 @@ func (idx *indexerImpl) specialistBlock(ctx context.Context, repo, filePath, spe
 				{Key: "type", Value: string(TypePattern)},
 				FilterNumeric("confidence", ">=", SharedConfidenceFloorStr),
 			}},
-		}, false)
+		})
 	}()
 
 	wg.Wait()
@@ -638,7 +645,7 @@ func (idx *indexerImpl) specialistBlock(ctx context.Context, repo, filePath, spe
 	}{{"specialist.synthesis", synthErr}, {"specialist.repo_patterns", repoErr}, {"specialist.shared_patterns", sharedErr}} {
 		if l.err != nil {
 			failures++
-			idx.warnLeg(l.name, RepoTagNew(repo), 0, l.err)
+			logDegrade(logger, l.name, RepoTagNew(repo), 0, l.err)
 		}
 	}
 	if failures == 3 {

@@ -3,7 +3,6 @@ package memory
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -80,8 +79,30 @@ func (idx *PGIndexer) embedForDocs(ctx context.Context, docs []Doc) ([][]float32
 				"want_dims", idx.dims, "got_dims", len(v), "doc", docs[i].CustomID)
 			return nil, ""
 		}
+		// An all-zero vector has no direction, so cosine distance against it
+		// is NaN — and NaN outranks every real score in Postgres, so such a
+		// row would clear every similarity floor and poison briefings. A
+		// stubbed or degenerate custom embedding endpoint can return one
+		// (migration 059 explicitly supports self-hosted endpoints), and
+		// dimensionality alone does not catch it. Treat it as a contract
+		// violation and fail open to NULL, like the other two checks.
+		if allZero(v) {
+			idx.logger.Warn("memory embed returned a zero vector; rows land unembedded for backfill",
+				"doc", docs[i].CustomID)
+			return nil, ""
+		}
 	}
 	return vecs, idx.embedder.Model()
+}
+
+// allZero reports whether a vector has no direction (cosine-undefined).
+func allZero(v []float32) bool {
+	for _, f := range v {
+		if f != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // upsertDocs embeds and writes a batch of documents.
@@ -280,17 +301,6 @@ func (idx *PGIndexer) IndexScenario(ctx context.Context, owner, repo string, sce
 		return err
 	}
 	return idx.upsertOne(ctx, "indexing scenario", doc)
-}
-
-// Search lands in PR 4. Explicit error (never silent-empty) so a premature
-// wiring mistake surfaces loudly instead of degrading memory quality.
-func (idx *PGIndexer) Search(context.Context, MemoryQuery) ([]PatternMatch, error) {
-	return nil, errors.New("pg indexer: Search not yet implemented (program PR 4)")
-}
-
-// Briefing lands in PR 4.
-func (idx *PGIndexer) Briefing(context.Context, BriefingQuery) (string, error) {
-	return "", errors.New("pg indexer: Briefing not yet implemented (program PR 4)")
 }
 
 // DeleteDocument soft-deletes by customId. In the PG store doc id == customId

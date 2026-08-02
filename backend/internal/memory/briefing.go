@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 
@@ -76,10 +77,23 @@ type BriefingQuery struct {
 // caller can degrade the block (via BestEffort) instead of embedding a silently
 // partial one. Each underlying read owns its own 5s timeout.
 func (idx *indexerImpl) Briefing(ctx context.Context, q BriefingQuery) (string, error) {
-	if idx.client == nil || q.Repo == "" {
+	if idx.client == nil {
 		return "", nil
 	}
-	b, err := idx.assembleBriefing(ctx, q)
+	return briefingWith(ctx, idx.runSearch, idx.logger, q)
+}
+
+// briefingWith is the shared Briefing pipeline over a transport core:
+// assemble (shared orchestration, shared floors) then render (already pure).
+// The empty-repo no-op lives here, not in the adapters — it is orchestration
+// policy (every leg is repo-scoped), and duplicating it per backend is the
+// drift class this seam exists to remove. Adapters keep only their own
+// disabled-state check.
+func briefingWith(ctx context.Context, run runSearchFn, logger *slog.Logger, q BriefingQuery) (string, error) {
+	if q.Repo == "" {
+		return "", nil
+	}
+	b, err := assembleBriefingWith(ctx, run, logger, q)
 	if err != nil {
 		return "", err
 	}
@@ -95,7 +109,7 @@ func (idx *indexerImpl) Briefing(ctx context.Context, q BriefingQuery) (string, 
 // All per-item content is truncated to 500 chars here so the render stays pure.
 // Any leg error is returned so Briefing degrades the whole block rather than
 // serving a partial one.
-func (idx *indexerImpl) assembleBriefing(ctx context.Context, q BriefingQuery) (Briefing, error) {
+func assembleBriefingWith(ctx context.Context, run runSearchFn, logger *slog.Logger, q BriefingQuery) (Briefing, error) {
 	// Normalize once so EVERY leg reads resolved floors — the specialistBlock
 	// legs AND the review-profile rules / past-review side-searches below. A
 	// retried/resumed run delivers a zero Thresholds (PipelineRun.Thresholds is
@@ -104,7 +118,7 @@ func (idx *indexerImpl) assembleBriefing(ctx context.Context, q BriefingQuery) (
 	q.Options.Thresholds = q.Options.Thresholds.WithDefaults()
 	if q.Options.Profile != ProfileReview {
 		// Specialist profile has no side-searches — one specialistBlock (own 5s).
-		block, err := idx.specialistBlock(ctx, q.Repo, q.FilePath, q.Query, q.Options.Thresholds)
+		block, err := specialistBlockWith(ctx, run, logger, q.Repo, q.FilePath, q.Query, q.Options.Thresholds)
 		if err != nil {
 			return Briefing{}, err
 		}
@@ -126,12 +140,12 @@ func (idx *indexerImpl) assembleBriefing(ctx context.Context, q BriefingQuery) (
 	wg.Add(3)
 	go func() {
 		defer wg.Done()
-		block, blockErr = idx.specialistBlock(ctx, q.Repo, q.FilePath, q.Query, q.Options.Thresholds)
+		block, blockErr = specialistBlockWith(ctx, run, logger, q.Repo, q.FilePath, q.Query, q.Options.Thresholds)
 	}()
 	go func() {
 		defer wg.Done()
 		var m []PatternMatch
-		m, rulesErr = idx.Search(ctx, MemoryQuery{
+		m, rulesErr = searchWith(ctx, run, MemoryQuery{
 			Query: "review rules conventions", Scope: ScopeShared, Type: TypeRule,
 			Limit: 3, Threshold: q.Options.Thresholds.FindingEnrich, Rerank: true, Enrich: true,
 		})
@@ -140,7 +154,7 @@ func (idx *indexerImpl) assembleBriefing(ctx context.Context, q BriefingQuery) (
 	go func() {
 		defer wg.Done()
 		var m []PatternMatch
-		m, pastErr = idx.Search(ctx, MemoryQuery{
+		m, pastErr = searchWith(ctx, run, MemoryQuery{
 			Query: q.Query, Repo: q.Repo, Scope: ScopeRepo, Type: TypeReview,
 			Limit: 2, Threshold: q.Options.Thresholds.FindingEnrich, Rerank: true, Enrich: true,
 		})
@@ -156,11 +170,11 @@ func (idx *indexerImpl) assembleBriefing(ctx context.Context, q BriefingQuery) (
 		return Briefing{}, blockErr
 	}
 	if rulesErr != nil {
-		idx.warnLeg("briefing.rules", SharedTag, len(q.Query), rulesErr)
+		logDegrade(logger, "briefing.rules", SharedTag, len(q.Query), rulesErr)
 		rules = nil
 	}
 	if pastErr != nil {
-		idx.warnLeg("briefing.past_reviews", RepoTagNew(q.Repo), len(q.Query), pastErr)
+		logDegrade(logger, "briefing.past_reviews", RepoTagNew(q.Repo), len(q.Query), pastErr)
 		pastReviews = nil
 	}
 
@@ -168,13 +182,6 @@ func (idx *indexerImpl) assembleBriefing(ctx context.Context, q BriefingQuery) (
 	b.Rules = rules
 	b.PastReviews = pastReviews
 	return b, nil
-}
-
-// warnLeg is the per-leg sibling of BestEffort: same "memory read degraded"
-// Warn shape (via the shared logDegrade helper), used where a multi-leg
-// assembly keeps its successful legs instead of zeroing the whole result.
-func (idx *indexerImpl) warnLeg(caller, container string, queryLen int, err error) {
-	logDegrade(idx.logger, caller, container, queryLen, err)
 }
 
 // briefingSections splits a MemoryBlock into the typed prose sections shared by

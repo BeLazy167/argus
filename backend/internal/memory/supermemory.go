@@ -409,6 +409,16 @@ type SearchRequest struct {
 	RewriteQuery bool           `json:"rewriteQuery,omitempty"`
 	Filters      *SearchFilters `json:"filters,omitempty"`
 	Include      *SearchInclude `json:"include,omitempty"`
+	// PointLookup marks a read whose AND filters UNIQUELY PIN a row, so
+	// retrieval is a lookup rather than a ranking problem — the PG backend
+	// may then fall back to a predicate scan when both retrieval legs miss.
+	// Never inferred from filter shape: "threshold 0 with some AND filter"
+	// also describes ordinary type-filtered ranking reads (scenario search,
+	// a shared-patterns leg with specialist_min 0), and a fallback there
+	// returns arbitrary rows that briefing rendering copies verbatim into a
+	// review prompt with no score gate. Local to this process; Supermemory
+	// never sees it.
+	PointLookup bool `json:"-"`
 }
 
 // SearchFilters supports AND/OR metadata filtering per Supermemory docs.

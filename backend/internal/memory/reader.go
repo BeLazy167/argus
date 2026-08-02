@@ -36,6 +36,11 @@ type MemoryQuery struct {
 	// Enrich requests related memories + summaries so each Match carries
 	// RichContent (the hint-render path); off keeps the response lean.
 	Enrich bool
+	// PointLookup declares that Filters UNIQUELY PIN a row, making this a
+	// lookup rather than a ranking read — see SearchRequest.PointLookup. Set
+	// it only when that is true: it licenses a predicate-scan fallback, and
+	// on a ranking read that returns arbitrary rows.
+	PointLookup bool
 }
 
 // containerTags resolves the query scope to concrete container tags. Returns
@@ -65,11 +70,12 @@ func (q MemoryQuery) containerTags() ([]string, error) {
 // stamps ContainerTag per leg. Type + Filters combine as a single AND group.
 func (q MemoryQuery) request() SearchRequest {
 	req := SearchRequest{
-		Query:      q.Query,
-		SearchMode: "hybrid",
-		Limit:      q.Limit,
-		Threshold:  q.Threshold,
-		Rerank:     q.Rerank,
+		Query:       q.Query,
+		SearchMode:  "hybrid",
+		Limit:       q.Limit,
+		Threshold:   q.Threshold,
+		Rerank:      q.Rerank,
+		PointLookup: q.PointLookup,
 	}
 	and := make([]FilterCondition, 0, len(q.Filters)+1)
 	if q.Type != "" {
@@ -85,6 +91,19 @@ func (q MemoryQuery) request() SearchRequest {
 	return req
 }
 
+// runSearchFn is the one transport-shaped hole in the shared read
+// orchestration: execute a single-container SearchRequest and convert to
+// matches. Supermemory satisfies it with runSearch (HTTP /v4/search), the
+// Postgres backend with memoRunSearch (hybrid SQL) — so container resolution,
+// timeouts, fan-out merge, and leg-degradation policy are shared by
+// construction, exactly like the write path's Doc builders.
+//
+// Whether the read wants enriched content is carried by the request itself
+// (Include != nil), never as a second argument: a caller that set one and
+// forgot the other produced empty RichContent, which HintStrings then
+// filters out — a silently blank briefing section with no error anywhere.
+type runSearchFn func(ctx context.Context, req SearchRequest) ([]PatternMatch, error)
+
 // Search is the deep, error-honest read behind the memory reader seam. It owns
 // container-tag resolution, its own 5s timeout, and the retrieval → convert
 // path, returning the raw matches and any search error verbatim so each caller
@@ -95,6 +114,11 @@ func (idx *indexerImpl) Search(ctx context.Context, q MemoryQuery) ([]PatternMat
 	if idx.client == nil {
 		return nil, nil
 	}
+	return searchWith(ctx, idx.runSearch, q)
+}
+
+// searchWith is the shared Search orchestration over a transport core.
+func searchWith(ctx context.Context, run runSearchFn, q MemoryQuery) ([]PatternMatch, error) {
 	tags, err := q.containerTags()
 	if err != nil {
 		return nil, err
@@ -108,16 +132,16 @@ func (idx *indexerImpl) Search(ctx context.Context, q MemoryQuery) ([]PatternMat
 	req := q.request()
 	if len(tags) == 1 {
 		req.ContainerTag = tags[0]
-		return idx.runSearch(ctx, req, q.Enrich)
+		return run(ctx, req)
 	}
-	return idx.searchFanOut(ctx, req, tags, q.Enrich)
+	return searchFanOut(ctx, run, req, tags)
 }
 
 // searchFanOut runs one search per container concurrently (write-partitioned
 // slots; wg.Wait is the happens-before edge) and merges the hits best-first. A
 // single leg error fails the whole call — a partial merge would let a broken
 // container masquerade as a genuine no-match on the enrich novelty path.
-func (idx *indexerImpl) searchFanOut(ctx context.Context, base SearchRequest, tags []string, enrich bool) ([]PatternMatch, error) {
+func searchFanOut(ctx context.Context, run runSearchFn, base SearchRequest, tags []string) ([]PatternMatch, error) {
 	type legResult struct {
 		matches []PatternMatch
 		err     error
@@ -130,7 +154,7 @@ func (idx *indexerImpl) searchFanOut(ctx context.Context, base SearchRequest, ta
 			defer wg.Done()
 			req := base
 			req.ContainerTag = tag
-			m, err := idx.runSearch(ctx, req, enrich)
+			m, err := run(ctx, req)
 			legs[i] = legResult{m, err}
 		}(i, tag)
 	}
@@ -154,7 +178,7 @@ func (idx *indexerImpl) searchFanOut(ctx context.Context, base SearchRequest, ta
 // path. Result counts log at Debug (empty-vs-hit visibility, tagged by
 // container); the error path is the caller's to log (BestEffort on degrade, or
 // the enrich Warn on propagate) so the log-and-degrade policy stays single-owned.
-func (idx *indexerImpl) runSearch(ctx context.Context, req SearchRequest, enrich bool) ([]PatternMatch, error) {
+func (idx *indexerImpl) runSearch(ctx context.Context, req SearchRequest) ([]PatternMatch, error) {
 	resp, err := idx.client.Search(ctx, req)
 	if err != nil {
 		return nil, err
@@ -165,19 +189,29 @@ func (idx *indexerImpl) runSearch(ctx context.Context, req SearchRequest, enrich
 	out := make([]PatternMatch, 0, len(resp.Results))
 	for _, r := range resp.Results {
 		pm := resultToPatternMatch(r)
-		if enrich {
+		if req.Include != nil {
 			pm.RichContent = r.RichContent(2)
 		}
 		out = append(out, pm)
 	}
-	idx.logger.Debug("memory search",
-		"container", req.ContainerTag, "query_len", len(req.Query), "count", len(out))
+	logSearchResult(idx.logger, req, len(out))
 	return out, nil
 }
 
+// logSearchResult is the shared per-search Debug line both transport cores
+// emit (empty-vs-hit visibility, tagged by container) — one shape, like
+// logDegrade below on the degrade path.
+func logSearchResult(logger *slog.Logger, req SearchRequest, count int) {
+	if logger == nil {
+		return
+	}
+	logger.Debug("memory search",
+		"container", req.ContainerTag, "query_len", len(req.Query), "count", count)
+}
+
 // logDegrade emits the single canonical "memory read degraded" Warn shared by
-// BestEffort (whole-read degradation) and warnLeg (per-leg degradation), so the
-// two paths can never drift in field shape. A nil logger is a no-op, keeping
+// BestEffort (whole-read degradation) and the per-leg degradation sites in the
+// shared briefing orchestration, so the paths can never drift in field shape. A nil logger is a no-op, keeping
 // bus-less/test paths silent.
 func logDegrade(logger *slog.Logger, caller, container string, queryLen int, err error) {
 	if logger != nil {
