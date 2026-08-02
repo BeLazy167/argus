@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -323,38 +322,24 @@ func (idx *indexerImpl) IndexReviewCommentsBatch(ctx context.Context, owner, rep
 	if idx.client == nil || len(comments) == 0 {
 		return nil
 	}
-	docs := make([]BatchDocument, 0, len(comments))
-	skipped := 0
-	for _, c := range comments {
-		meta, err := Metadata{
-			Type:     TypeReview,
-			FilePath: c.FilePath,
-			Severity: c.Severity,
-			Category: c.Category,
-			PRNumber: c.PRNumber,
-			Extra:    map[string]string{"review_id": c.ReviewID},
-		}.ToMap()
-		if err != nil {
-			idx.logger.Warn("skipping review comment with invalid metadata", "error", err, "file", c.FilePath)
-			skipped++
-			continue
-		}
-		docs = append(docs, BatchDocument{
-			Content:  buildReviewContent(c),
-			CustomID: FindingFingerprint(owner, repo, c.FilePath, c.Category, c.Body),
-			Metadata: meta,
-		})
-	}
+	shaped, skipped := buildReviewDocs(owner, repo, comments, idx.logger)
 	// Surface all-dropped as an error so the caller can retry / alert. Silent
 	// success on a fully-skipped batch masked reconcile-job data loss.
-	if len(docs) == 0 {
+	if len(shaped) == 0 {
 		if skipped > 0 {
 			return fmt.Errorf("batch indexing review comments: all %d docs dropped (invalid metadata)", skipped)
 		}
 		return nil
 	}
+	docs := make([]BatchDocument, 0, len(shaped))
+	for _, d := range shaped {
+		docs = append(docs, batchDocumentFor(d))
+	}
+	// The batch API takes one container tag; read it from the builder output
+	// (shaped is non-empty here) so the SM path can never silently diverge
+	// from the per-doc tag the PG path persists.
 	_, err := idx.client.AddMemoryBatch(ctx, BatchAddRequest{
-		ContainerTag: RepoTagNew(repo),
+		ContainerTag: shaped[0].ContainerTag,
 		Documents:    docs,
 	})
 	if err != nil {
@@ -383,21 +368,11 @@ func (idx *indexerImpl) IndexRule(ctx context.Context, owner string, rule RuleMe
 	if idx.client == nil {
 		return nil
 	}
-	meta, err := Metadata{
-		Type:     TypeRule,
-		Category: rule.Category,
-		Extra:    map[string]string{"rule_id": strconv.FormatInt(rule.RuleID, 10), "priority": strconv.Itoa(rule.Priority)},
-	}.ToMap()
+	doc, err := buildRuleDoc(rule)
 	if err != nil {
-		return fmt.Errorf("rule metadata: %w", err)
+		return err
 	}
-	_, err = idx.client.AddMemory(ctx, AddRequest{
-		Content:       rule.Content,
-		CustomID:      RuleCustomID(rule.RuleID),
-		ContainerTags: []string{SharedTag},
-		Metadata:      meta,
-	})
-	if err != nil {
+	if _, err := idx.client.AddMemory(ctx, addRequestFor(doc)); err != nil {
 		return fmt.Errorf("indexing rule: %w", err)
 	}
 	return nil
@@ -459,29 +434,11 @@ func (idx *indexerImpl) IndexPattern(ctx context.Context, repo string, p Pattern
 	if idx.client == nil {
 		return nil, nil
 	}
-	if p.CustomID == "" {
-		source := p.Source
-		if source == "" {
-			source = "pattern"
-		}
-		p.CustomID = PatternCustomID("", repo, source, p.Content)
-	}
-	flat, err := p.metadata().ToMap()
+	doc, err := buildPatternDoc(repo, p)
 	if err != nil {
-		return nil, fmt.Errorf("pattern metadata: %w", err)
+		return nil, err
 	}
-	// Mirror the deterministic customId into searchable metadata under
-	// "custom_id" so the per-finding enrich read can resolve a search hit back
-	// to its patterns row by customId — /v4/search results carry metadata but no
-	// top-level customId, and the result's own ID may be a chunk id that never
-	// matches the stored supermemory_id.
-	flat["custom_id"] = p.CustomID
-	resp, err := idx.client.AddMemory(ctx, AddRequest{
-		Content:       p.Content,
-		CustomID:      p.CustomID,
-		ContainerTags: []string{RepoTagNew(repo)},
-		Metadata:      flat,
-	})
+	resp, err := idx.client.AddMemory(ctx, addRequestFor(doc))
 	if err != nil {
 		return nil, fmt.Errorf("indexing repo pattern: %w", err)
 	}
@@ -499,34 +456,11 @@ func (idx *indexerImpl) IndexSharedPattern(ctx context.Context, p PatternMemory)
 	if idx.client == nil {
 		return nil, nil
 	}
-	if p.CustomID == "" {
-		source := p.Source
-		if source == "" {
-			source = "pattern"
-		}
-		p.CustomID = SharedPatternCustomID(source, p.Content)
-	}
-	m := p.metadata()
-	// Copy Extra before pinning confidence so we never mutate the caller's map.
-	extra := make(map[string]string, len(m.Extra)+1)
-	for k, v := range m.Extra {
-		extra[k] = v
-	}
-	extra["confidence"] = "1.00"
-	m.Extra = extra
-	flat, err := m.ToMap()
+	doc, err := buildSharedPatternDoc(p)
 	if err != nil {
-		return nil, fmt.Errorf("shared pattern metadata: %w", err)
+		return nil, err
 	}
-	// Mirror the customId into metadata (see IndexPattern) so shared-pattern
-	// search hits are resolvable back to their patterns row by customId.
-	flat["custom_id"] = p.CustomID
-	resp, err := idx.client.AddMemory(ctx, AddRequest{
-		Content:       p.Content,
-		CustomID:      p.CustomID,
-		ContainerTags: []string{SharedTag},
-		Metadata:      flat,
-	})
+	resp, err := idx.client.AddMemory(ctx, addRequestFor(doc))
 	if err != nil {
 		return nil, fmt.Errorf("indexing shared pattern: %w", err)
 	}
@@ -545,44 +479,11 @@ func (idx *indexerImpl) IndexFeedbackSignal(ctx context.Context, owner, repo str
 	if idx.client == nil {
 		return nil
 	}
-	polarity, content, ok := feedbackShape(fb)
-	if !ok {
-		return fmt.Errorf("indexing feedback signal: unsupported action %q (want confirmed|dismissed|ignored)", fb.Action)
-	}
-
-	m := Metadata{
-		Type:     TypeFeedback,
-		FilePath: fb.FilePath,
-		Category: fb.Category,
-		Polarity: polarity,
-		Action:   fb.Action,
-		PRNumber: fb.PRNumber,
-	}
-	customID := FeedbackCustomID(owner, repo, fb.FilePath, fb.Category, fb.OriginalBody, fb.Action)
-	// Dismissals are keyed by category + semantic content (file-path-free) and
-	// carry change-kind provenance so retrieval can lifecycle-filter them.
-	if fb.Action == "dismissed" {
-		customID = dismissalCustomID(repo, fb.Category, fb.OriginalBody)
-		extra := map[string]string{"repo": repo}
-		if fb.ChangeKind != "" {
-			extra["change_kind"] = fb.ChangeKind
-		}
-		if fb.Reason != "" {
-			extra["reason"] = util.Truncate(fb.Reason, 300, false)
-		}
-		m.Extra = extra
-	}
-	meta, err := m.ToMap()
+	doc, err := buildFeedbackDoc(owner, repo, fb)
 	if err != nil {
-		return fmt.Errorf("feedback metadata: %w", err)
+		return err
 	}
-	_, err = idx.client.AddMemory(ctx, AddRequest{
-		Content:       content,
-		CustomID:      customID,
-		ContainerTags: []string{RepoTagNew(repo)},
-		Metadata:      meta,
-	})
-	if err != nil {
+	if _, err := idx.client.AddMemory(ctx, addRequestFor(doc)); err != nil {
 		return fmt.Errorf("indexing feedback signal: %w", err)
 	}
 	idx.logger.Info("indexed feedback signal", "action", fb.Action, "repo", repo, "file", fb.FilePath)
@@ -627,25 +528,11 @@ func (idx *indexerImpl) IndexScenario(ctx context.Context, owner, repo string, s
 	if idx.client == nil {
 		return nil
 	}
-	content := description
-	if len(files) > 0 {
-		content += "\n\nRelated files: " + strings.Join(files, ", ")
-	}
-	meta, err := Metadata{
-		Type:       TypeScenario,
-		ScenarioID: scenarioID,
-		Severity:   severity,
-	}.ToMap()
+	doc, err := buildScenarioDoc(repo, scenarioID, description, severity, files)
 	if err != nil {
-		return fmt.Errorf("scenario metadata: %w", err)
+		return err
 	}
-	_, err = idx.client.AddMemory(ctx, AddRequest{
-		Content:       content,
-		CustomID:      ScenarioCustomID(repo, scenarioID),
-		ContainerTags: []string{RepoTagNew(repo)},
-		Metadata:      meta,
-	})
-	if err != nil {
+	if _, err := idx.client.AddMemory(ctx, addRequestFor(doc)); err != nil {
 		idx.logger.Warn("indexing scenario in supermemory", "error", err)
 		return fmt.Errorf("indexing scenario: %w", err)
 	}

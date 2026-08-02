@@ -7,14 +7,11 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgvector/pgvector-go"
-
-	"github.com/BeLazy167/argus/backend/internal/util"
 )
 
 // PGIndexer is the Postgres-native Indexer implementation (program PR 3/4).
@@ -48,18 +45,6 @@ func NewPGIndexer(pool *pgxpool.Pool, embedder Embedder, installationID int64, d
 
 var _ Indexer = (*PGIndexer)(nil)
 
-// memDoc is one document headed for the memories table. docType carries the
-// typed Metadata.Type explicitly (post source-re-typing) rather than being
-// re-read from the flattened map, so the type column can never silently land
-// empty if a future writer bypasses Metadata.ToMap.
-type memDoc struct {
-	containerTag string
-	customID     string
-	docType      string
-	content      string
-	metadata     map[string]string
-}
-
 // DisableLLMFilter is a Supermemory account-level concern; Postgres has no
 // equivalent. No-op by design.
 func (idx *PGIndexer) DisableLLMFilter(context.Context) error { return nil }
@@ -70,13 +55,13 @@ func (idx *PGIndexer) DisableLLMFilter(context.Context) error { return nil }
 // wrong-dims vector MUST NOT reach the INSERT — pgvector rejects it with a
 // hard error that would fail the whole batch closed, the opposite of the
 // documented degrade-to-NULL behavior.
-func (idx *PGIndexer) embedForDocs(ctx context.Context, docs []memDoc) ([][]float32, string) {
+func (idx *PGIndexer) embedForDocs(ctx context.Context, docs []Doc) ([][]float32, string) {
 	if idx.embedder == nil {
 		return nil, ""
 	}
 	texts := make([]string, len(docs))
 	for i, d := range docs {
-		texts[i] = d.content
+		texts[i] = d.Content
 	}
 	vecs, err := idx.embedder.Embed(ctx, texts)
 	if err != nil {
@@ -92,7 +77,7 @@ func (idx *PGIndexer) embedForDocs(ctx context.Context, docs []memDoc) ([][]floa
 	for i, v := range vecs {
 		if len(v) != idx.dims {
 			idx.logger.Warn("memory embed returned wrong dimensionality; rows land unembedded for backfill",
-				"want_dims", idx.dims, "got_dims", len(v), "doc", docs[i].customID)
+				"want_dims", idx.dims, "got_dims", len(v), "doc", docs[i].CustomID)
 			return nil, ""
 		}
 	}
@@ -114,20 +99,20 @@ func (idx *PGIndexer) embedForDocs(ctx context.Context, docs []memDoc) ([][]floa
 // pgx runs the whole SendBatch in one implicit transaction: a failed
 // statement rolls back every row, and the deterministic upserts make a
 // retry re-converge.
-func (idx *PGIndexer) upsertDocs(ctx context.Context, docs []memDoc) error {
-	kept := make([]memDoc, 0, len(docs))
+func (idx *PGIndexer) upsertDocs(ctx context.Context, docs []Doc) error {
+	kept := make([]Doc, 0, len(docs))
 	seen := make(map[string]int, len(docs))
 	skippedEmpty := 0
 	for _, d := range docs {
-		if d.customID == "" {
+		if d.CustomID == "" {
 			skippedEmpty++
 			continue
 		}
-		if i, ok := seen[d.customID]; ok {
+		if i, ok := seen[d.CustomID]; ok {
 			kept[i] = d
 			continue
 		}
-		seen[d.customID] = len(kept)
+		seen[d.CustomID] = len(kept)
 		kept = append(kept, d)
 	}
 	if skippedEmpty > 0 {
@@ -139,7 +124,7 @@ func (idx *PGIndexer) upsertDocs(ctx context.Context, docs []memDoc) error {
 		}
 		return nil
 	}
-	sort.Slice(kept, func(i, j int) bool { return kept[i].customID < kept[j].customID })
+	sort.Slice(kept, func(i, j int) bool { return kept[i].CustomID < kept[j].CustomID })
 
 	vecs, model := idx.embedForDocs(ctx, kept)
 
@@ -163,9 +148,9 @@ func (idx *PGIndexer) upsertDocs(ctx context.Context, docs []memDoc) error {
 		    container_tag = EXCLUDED.container_tag, updated_at = now(),
 		    deleted_at = NULL`
 	for i, d := range kept {
-		metaJSON, err := json.Marshal(d.metadata)
+		metaJSON, err := json.Marshal(d.Metadata)
 		if err != nil {
-			return fmt.Errorf("marshal metadata for %s: %w", d.customID, err)
+			return fmt.Errorf("marshal metadata for %s: %w", d.CustomID, err)
 		}
 		var embedding *pgvector.Vector
 		var embeddingModel *string
@@ -177,9 +162,9 @@ func (idx *PGIndexer) upsertDocs(ctx context.Context, docs []memDoc) error {
 		// Postgres TEXT rejects NUL (22021) where Supermemory accepted it, and
 		// one poisoned doc would abort the whole implicit transaction — strip
 		// rather than lose the batch.
-		content := strings.ReplaceAll(d.content, "\x00", "")
+		content := strings.ReplaceAll(d.Content, "\x00", "")
 		batch.Queue(q,
-			idx.installationID, d.containerTag, d.customID, d.docType,
+			idx.installationID, d.ContainerTag, d.CustomID, d.Type,
 			content, metaJSON, embedding, embeddingModel)
 	}
 	br := idx.pool.SendBatch(ctx, batch)
@@ -201,8 +186,8 @@ func (idx *PGIndexer) upsertDocs(ctx context.Context, docs []memDoc) error {
 }
 
 // upsertOne writes a single document, wrapping any error with op.
-func (idx *PGIndexer) upsertOne(ctx context.Context, op string, d memDoc) error {
-	if err := idx.upsertDocs(ctx, []memDoc{d}); err != nil {
+func (idx *PGIndexer) upsertOne(ctx context.Context, op string, d Doc) error {
+	if err := idx.upsertDocs(ctx, []Doc{d}); err != nil {
 		return fmt.Errorf("%s: %w", op, err)
 	}
 	return nil
@@ -214,30 +199,7 @@ func (idx *PGIndexer) IndexReviewCommentsBatch(ctx context.Context, owner, repo 
 	if len(comments) == 0 {
 		return nil
 	}
-	docs := make([]memDoc, 0, len(comments))
-	skipped := 0
-	for _, c := range comments {
-		meta, err := Metadata{
-			Type:     TypeReview,
-			FilePath: c.FilePath,
-			Severity: c.Severity,
-			Category: c.Category,
-			PRNumber: c.PRNumber,
-			Extra:    map[string]string{"review_id": c.ReviewID},
-		}.ToMap()
-		if err != nil {
-			idx.logger.Warn("skipping review comment with invalid metadata", "error", err, "file", c.FilePath)
-			skipped++
-			continue
-		}
-		docs = append(docs, memDoc{
-			containerTag: RepoTagNew(repo),
-			customID:     FindingFingerprint(owner, repo, c.FilePath, c.Category, c.Body),
-			docType:      string(TypeReview),
-			content:      buildReviewContent(c),
-			metadata:     meta,
-		})
-	}
+	docs, skipped := buildReviewDocs(owner, repo, comments, idx.logger)
 	if len(docs) == 0 {
 		if skipped > 0 {
 			return fmt.Errorf("batch indexing review comments: all %d docs dropped (invalid metadata)", skipped)
@@ -259,129 +221,51 @@ func (idx *PGIndexer) IndexReviewCommentsBatch(ctx context.Context, owner, repo 
 // back-compat, `_shared` container, type=rule).
 func (idx *PGIndexer) IndexRule(ctx context.Context, owner string, rule RuleMemory) error {
 	_ = owner
-	meta, err := Metadata{
-		Type:     TypeRule,
-		Category: rule.Category,
-		Extra:    map[string]string{"rule_id": strconv.FormatInt(rule.RuleID, 10), "priority": strconv.Itoa(rule.Priority)},
-	}.ToMap()
+	doc, err := buildRuleDoc(rule)
 	if err != nil {
-		return fmt.Errorf("rule metadata: %w", err)
+		return err
 	}
-	return idx.upsertOne(ctx, "indexing rule", memDoc{
-		containerTag: SharedTag,
-		customID:     RuleCustomID(rule.RuleID),
-		docType:      string(TypeRule),
-		content:      rule.Content,
-		metadata:     meta,
-	})
+	return idx.upsertOne(ctx, "indexing rule", doc)
 }
 
 // IndexPattern mirrors the Supermemory implementation; the returned
 // AddResponse.ID is the deterministic customId (doc id == customId in the PG
 // store — this collapses the chunk-id/custom-id resolution dance).
 func (idx *PGIndexer) IndexPattern(ctx context.Context, repo string, p PatternMemory) (*AddResponse, error) {
-	if p.CustomID == "" {
-		source := p.Source
-		if source == "" {
-			source = "pattern"
-		}
-		p.CustomID = PatternCustomID("", repo, source, p.Content)
-	}
-	m := p.metadata()
-	flat, err := m.ToMap()
-	if err != nil {
-		return nil, fmt.Errorf("pattern metadata: %w", err)
-	}
-	flat["custom_id"] = p.CustomID
-	err = idx.upsertOne(ctx, "indexing repo pattern", memDoc{
-		containerTag: RepoTagNew(repo),
-		customID:     p.CustomID,
-		docType:      string(m.Type),
-		content:      p.Content,
-		metadata:     flat,
-	})
+	doc, err := buildPatternDoc(repo, p)
 	if err != nil {
 		return nil, err
 	}
+	if err := idx.upsertOne(ctx, "indexing repo pattern", doc); err != nil {
+		return nil, err
+	}
 	idx.logger.Info("indexed repo pattern", "repo", repo, "source", p.Source)
-	return &AddResponse{ID: p.CustomID}, nil
+	return &AddResponse{ID: doc.CustomID}, nil
 }
 
 // IndexSharedPattern mirrors the Supermemory implementation, including the
 // confidence=1.00 pin (re-learning is the liveness signal for shared decay).
 func (idx *PGIndexer) IndexSharedPattern(ctx context.Context, p PatternMemory) (*AddResponse, error) {
-	if p.CustomID == "" {
-		source := p.Source
-		if source == "" {
-			source = "pattern"
-		}
-		p.CustomID = SharedPatternCustomID(source, p.Content)
-	}
-	m := p.metadata()
-	extra := make(map[string]string, len(m.Extra)+1)
-	for k, v := range m.Extra {
-		extra[k] = v
-	}
-	extra["confidence"] = "1.00"
-	m.Extra = extra
-	flat, err := m.ToMap()
-	if err != nil {
-		return nil, fmt.Errorf("shared pattern metadata: %w", err)
-	}
-	flat["custom_id"] = p.CustomID
-	err = idx.upsertOne(ctx, "indexing shared pattern", memDoc{
-		containerTag: SharedTag,
-		customID:     p.CustomID,
-		docType:      string(m.Type),
-		content:      p.Content,
-		metadata:     flat,
-	})
+	doc, err := buildSharedPatternDoc(p)
 	if err != nil {
 		return nil, err
 	}
+	if err := idx.upsertOne(ctx, "indexing shared pattern", doc); err != nil {
+		return nil, err
+	}
 	idx.logger.Info("indexed shared pattern", "source", p.Source)
-	return &AddResponse{ID: p.CustomID}, nil
+	return &AddResponse{ID: doc.CustomID}, nil
 }
 
 // IndexFeedbackSignal mirrors the Supermemory implementation: same shape
 // derivation, same dismissal keying and provenance extras, same
 // unsupported-action error.
 func (idx *PGIndexer) IndexFeedbackSignal(ctx context.Context, owner, repo string, fb FeedbackMemory) error {
-	polarity, content, ok := feedbackShape(fb)
-	if !ok {
-		return fmt.Errorf("indexing feedback signal: unsupported action %q (want confirmed|dismissed|ignored)", fb.Action)
-	}
-	m := Metadata{
-		Type:     TypeFeedback,
-		FilePath: fb.FilePath,
-		Category: fb.Category,
-		Polarity: polarity,
-		Action:   fb.Action,
-		PRNumber: fb.PRNumber,
-	}
-	customID := FeedbackCustomID(owner, repo, fb.FilePath, fb.Category, fb.OriginalBody, fb.Action)
-	if fb.Action == "dismissed" {
-		customID = dismissalCustomID(repo, fb.Category, fb.OriginalBody)
-		extra := map[string]string{"repo": repo}
-		if fb.ChangeKind != "" {
-			extra["change_kind"] = fb.ChangeKind
-		}
-		if fb.Reason != "" {
-			extra["reason"] = util.Truncate(fb.Reason, 300, false)
-		}
-		m.Extra = extra
-	}
-	meta, err := m.ToMap()
+	doc, err := buildFeedbackDoc(owner, repo, fb)
 	if err != nil {
-		return fmt.Errorf("feedback metadata: %w", err)
+		return err
 	}
-	if err := idx.upsertOne(ctx, "indexing feedback signal", memDoc{
-		containerTag: RepoTagNew(repo),
-		customID:     customID,
-		docType:      string(TypeFeedback),
-		content:      content,
-		metadata:     meta,
-	}); err != nil {
+	if err := idx.upsertOne(ctx, "indexing feedback signal", doc); err != nil {
 		return err
 	}
 	idx.logger.Info("indexed feedback signal", "action", fb.Action, "repo", repo, "file", fb.FilePath)
@@ -391,25 +275,11 @@ func (idx *PGIndexer) IndexFeedbackSignal(ctx context.Context, owner, repo strin
 // IndexScenario mirrors the Supermemory implementation.
 func (idx *PGIndexer) IndexScenario(ctx context.Context, owner, repo string, scenarioID int64, description, severity string, files []string) error {
 	_ = owner
-	content := description
-	if len(files) > 0 {
-		content += "\n\nRelated files: " + strings.Join(files, ", ")
-	}
-	meta, err := Metadata{
-		Type:       TypeScenario,
-		ScenarioID: scenarioID,
-		Severity:   severity,
-	}.ToMap()
+	doc, err := buildScenarioDoc(repo, scenarioID, description, severity, files)
 	if err != nil {
-		return fmt.Errorf("scenario metadata: %w", err)
+		return err
 	}
-	return idx.upsertOne(ctx, "indexing scenario", memDoc{
-		containerTag: RepoTagNew(repo),
-		customID:     ScenarioCustomID(repo, scenarioID),
-		docType:      string(TypeScenario),
-		content:      content,
-		metadata:     meta,
-	})
+	return idx.upsertOne(ctx, "indexing scenario", doc)
 }
 
 // Search lands in PR 4. Explicit error (never silent-empty) so a premature
