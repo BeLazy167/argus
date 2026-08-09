@@ -77,7 +77,10 @@ type CompletionRequest struct {
 	Temperature float64
 	MaxTokens   int
 	Tools       []Tool `json:"tools,omitempty"`
-	JSONMode    bool   // When true, sends response_format: {"type": "json_object"}
+	// JSONMode requests a JSON-only response. The wire spelling is
+	// provider-specific — "json_object" for OpenAI-style endpoints, "json" for
+	// Vercel AI Gateway; adjustRequestForProvider in chat.go picks it.
+	JSONMode bool
 	// ReasoningEffort is typed to prevent garbage values from round-tripping
 	// to Azure as HTTP 400. Complete rejects unrecognized values at entry.
 	ReasoningEffort ReasoningEffort

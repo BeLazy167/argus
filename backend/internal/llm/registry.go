@@ -177,6 +177,8 @@ func newProviderForName(name, apiKey, baseURL string) *ChatProvider {
 		return NewGCPVertexProvider(apiKey, baseURL)
 	case "aws_bedrock":
 		return NewAWSBedrockProvider(apiKey, baseURL)
+	case "vercel":
+		return NewVercelGatewayProvider(apiKey, baseURL)
 	default:
 		return NewChatProvider(name, apiKey, baseURL)
 	}
@@ -198,6 +200,8 @@ func defaultBaseURLForProvider(provider string) string {
 		return "https://api.together.xyz/v1"
 	case "deepseek":
 		return "https://api.deepseek.com/v1"
+	case "vercel":
+		return "https://ai-gateway.vercel.sh/v1"
 	case "azure":
 		return "" // Azure requires user-provided endpoint (https://{resource}.openai.azure.com/openai)
 	case "gcp_vertex":

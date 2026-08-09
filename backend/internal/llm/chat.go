@@ -36,7 +36,11 @@ type ChatProvider struct {
 	authStyle       AuthStyle
 	pathFn          func(model string) string // custom path builder (nil = default /chat/completions)
 	useResponsesAPI bool                      // Azure Foundry Responses API format
-	client          *http.Client
+	// gatewayOnly pins Vercel AI Gateway routing to these upstream provider
+	// slugs. Empty means "let the gateway choose", which permits fallback
+	// across providers mid-request.
+	gatewayOnly []string
+	client      *http.Client
 }
 
 // llmClientTimeout bounds a single HTTP request to any provider. Must exceed
@@ -120,6 +124,38 @@ func NewAzureProvider(apiKey, baseURL string) *ChatProvider {
 		pathFn:          pathFn,
 		useResponsesAPI: isCognitive,
 		client:          &http.Client{Timeout: llmClientTimeout},
+	}
+}
+
+// NewVercelGatewayProvider creates a provider for Vercel AI Gateway — a single
+// OpenAI-compatible endpoint fronting many upstream providers, with model IDs
+// in "creator/model" form (e.g. "openai/gpt-5.4", "anthropic/claude-sonnet-4.6").
+//
+// Append ?only=azure to baseURL (comma-separated for several) to pin routing to
+// specific upstream providers. Without it the gateway picks a provider and may
+// fall back to another mid-request — which silently moves spend between the
+// account's BYOK credentials and Vercel-billed system credentials.
+func NewVercelGatewayProvider(apiKey, baseURL string) *ChatProvider {
+	var only []string
+	if u, err := url.Parse(baseURL); err == nil {
+		if v := u.Query().Get("only"); v != "" {
+			for _, slug := range strings.Split(v, ",") {
+				if slug = strings.TrimSpace(slug); slug != "" {
+					only = append(only, slug)
+				}
+			}
+			q := u.Query()
+			q.Del("only")
+			u.RawQuery = q.Encode()
+			baseURL = strings.TrimSuffix(u.String(), "?")
+		}
+	}
+	return &ChatProvider{
+		name:        "vercel",
+		apiKey:      apiKey,
+		baseURL:     baseURL,
+		gatewayOnly: only,
+		client:      &http.Client{Timeout: llmClientTimeout},
 	}
 }
 
@@ -374,6 +410,18 @@ type chatRequest struct {
 	// the right shape per provider.
 	ReasoningEffort string          `json:"reasoning_effort,omitempty"`
 	ResponseFormat  *responseFormat `json:"response_format,omitempty"`
+	// ProviderOptions carries Vercel AI Gateway routing directives. The
+	// gateway ignores a top-level `gateway` key without erroring, so the
+	// nested providerOptions form is the only one that actually binds.
+	ProviderOptions *providerOptions `json:"providerOptions,omitempty"`
+}
+
+type providerOptions struct {
+	Gateway *gatewayRouting `json:"gateway,omitempty"`
+}
+
+type gatewayRouting struct {
+	Only []string `json:"only,omitempty"`
 }
 
 type responseFormat struct {
@@ -403,6 +451,19 @@ func (p *ChatProvider) adjustRequestForProvider(body *chatRequest, model string)
 	// This prevents thinking tokens from leaking into the response for ALL models.
 	if p.isOpenRouter() {
 		body.Reasoning = &reasoningConfig{Exclude: true}
+	}
+
+	// Layer 2: Vercel AI Gateway — its structured-output layer accepts only
+	// response_format types "json" and "json_schema". The OpenAI spelling
+	// "json_object" that complete() writes for JSONMode is rejected with
+	// HTTP 400 "Invalid input" for every upstream model (verified against
+	// anthropic/*, openai/*, zai/*). Rewrite the type so JSONMode callers keep
+	// the guardrail instead of losing the whole call.
+	if p.isVercelGateway() && body.ResponseFormat != nil && body.ResponseFormat.Type == "json_object" {
+		body.ResponseFormat.Type = "json"
+	}
+	if len(p.gatewayOnly) > 0 {
+		body.ProviderOptions = &providerOptions{Gateway: &gatewayRouting{Only: p.gatewayOnly}}
 	}
 
 	switch {
@@ -458,6 +519,19 @@ func (p *ChatProvider) adjustRequestForProvider(body *chatRequest, model string)
 		body.Temperature = &temp
 	}
 
+	// Vercel AI Gateway: "minimal" is not portable across the upstream OpenAI
+	// snapshots it fronts. gpt-5.4 and the gpt-5.6-luna/sol/terra family reject
+	// it with HTTP 400 ("Supported values are: none, low, medium, high, xhigh"),
+	// while gpt-5, gpt-5-mini and gpt-5.5 accept it. Rather than track which
+	// snapshot allows what, clamp to the nearest supported step. "low" — not
+	// "none" — because the gpt-5.x default above exists to stop reasoning from
+	// eating the whole token budget, not to disable reasoning outright.
+	//
+	// Only the gateway needs this. Direct Azure accepts "minimal" and keeps it.
+	if p.isVercelGateway() && body.ReasoningEffort == string(ReasoningMinimal) {
+		body.ReasoningEffort = string(ReasoningLow)
+	}
+
 	// Invariant: never ship both wrapped AND top-level reasoning on the same
 	// body. OpenRouter gets wrapped; every other provider gets top-level.
 	// A trailing belt-and-suspenders clean-up in case a new branch sets both.
@@ -470,6 +544,14 @@ func (p *ChatProvider) adjustRequestForProvider(body *chatRequest, model string)
 
 func (p *ChatProvider) isOpenRouter() bool {
 	return p.name == "openrouter" || strings.Contains(p.baseURL, "openrouter.ai")
+}
+
+// isVercelGateway reports whether requests route through Vercel AI Gateway,
+// which fronts many upstream providers behind one OpenAI-compatible endpoint.
+// Matches on baseURL as well as name so a custom-base-URL key still gets the
+// gateway's wire quirks applied.
+func (p *ChatProvider) isVercelGateway() bool {
+	return p.name == "vercel" || strings.Contains(p.baseURL, "ai-gateway.vercel.sh")
 }
 
 func isOpenAIReasoning(m string) bool {
