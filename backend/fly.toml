@@ -17,9 +17,21 @@ primary_region = 'iad'
   auto_start_machines = true
   min_machines_running = 1
 
+# Deep review fans out to 4 concurrent specialists, each holding an ~8k-token
+# prompt plus a multi-thousand-token completion. On 512mb that combination
+# OOM-killed the machine (exit_code=137, 2026-08-04); idle RSS is only ~22MB, so
+# the spike is entirely review-driven, not a leak.
+#
+# GOMEMLIMIT and MEMPROF_RSS_THRESHOLD_MB are deliberately NOT set here. They are
+# Fly secrets (currently 460MiB and 500), and a secret shadows an [env] entry of
+# the same name — declaring them here would create a second source of truth that
+# looks authoritative and isn't. Change them with `fly secrets set`, and keep the
+# ratios: heap limit ~45% of VM, snapshot threshold below the ~57% kernel kill
+# line. Resizing the VM here without moving those two leaves the heap ceiling
+# above the kill line, which is worse than either setting alone.
 [[vm]]
   size = 'shared-cpu-1x'
-  memory = '512mb'
+  memory = '1024mb'
 
 [checks]
   [checks.health]
