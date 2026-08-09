@@ -62,13 +62,21 @@ func enrichComments(e *Enricher, comments []FileComment) ([]FileComment, EnrichR
 	return reviews[0].Comments, res
 }
 
-// A pattern match ABOVE the attribution gate (>0.80) links + increments the
+// A pattern match ABOVE the attribution gate links + increments the
 // pattern, publishes EventMemoryMatched, stamps provenance, and is NOT novel —
 // the positive path end-to-end through the Enricher.
+// Scores expressed against the tuned gates rather than as literals, so these
+// cases keep testing the band their names describe after a recalibration.
+var (
+	aboveAttribution = memory.DefaultThresholdAttribution + (1.0-memory.DefaultThresholdAttribution)/2
+	atOrAboveDrop    = memory.DefaultThresholdSuppressionDrop
+	midDowngradeBand = (memory.DefaultThresholdSuppressionDowngrade + memory.DefaultThresholdSuppressionDrop) / 2
+)
+
 func TestEnricher_PatternMatchAboveGate(t *testing.T) {
 	fake := &memorytest.Fake{
 		SearchFn: patternLeg([]memory.PatternMatch{{
-			Score: 0.9, ID: "doc1",
+			Score: aboveAttribution, ID: "doc1",
 			Metadata: map[string]string{"source": "auto_learn", "pr_number": "77", "pr_author": "alice"},
 		}}, nil),
 	}
@@ -85,8 +93,8 @@ func TestEnricher_PatternMatchAboveGate(t *testing.T) {
 	if c.IsNewFinding {
 		t.Error("an above-gate pattern match must not be marked novel")
 	}
-	if c.MatchedPatternScore != 0.9 || c.MatchedPatternID != 99 {
-		t.Errorf("link wrong: score=%v id=%d, want 0.9/99", c.MatchedPatternScore, c.MatchedPatternID)
+	if c.MatchedPatternScore != aboveAttribution || c.MatchedPatternID != 99 {
+		t.Errorf("link wrong: score=%v id=%d, want %v/99", c.MatchedPatternScore, c.MatchedPatternID, aboveAttribution)
 	}
 	if c.MatchedPatternKind != "pattern" || c.MatchedPatternPR != 77 || c.MatchedPatternAuthor != "alice" {
 		t.Errorf("provenance wrong: kind=%q pr=%d author=%q", c.MatchedPatternKind, c.MatchedPatternPR, c.MatchedPatternAuthor)
@@ -135,7 +143,7 @@ func TestEnricher_SelfMatchGuardZeroesScore(t *testing.T) {
 // non-exempt finding: Suppressed + reason set, and a suppression key recorded.
 func TestEnricher_DismissalDrops(t *testing.T) {
 	fake := &memorytest.Fake{
-		SearchFn: feedbackLeg([]memory.PatternMatch{{Score: 0.9, ID: "fb1"}}, nil),
+		SearchFn: feedbackLeg([]memory.PatternMatch{{Score: atOrAboveDrop, ID: "fb1"}}, nil),
 	}
 	store := &fakeEnrichStore{}
 	got, res := enrichComments(newTestEnricher(fake, store), []FileComment{
@@ -144,18 +152,18 @@ func TestEnricher_DismissalDrops(t *testing.T) {
 	c := got[0]
 
 	if !c.Suppressed || c.SuppressedReason == "" {
-		t.Errorf("a >=0.85 dismissal must drop the finding: Suppressed=%v reason=%q", c.Suppressed, c.SuppressedReason)
+		t.Errorf("a dismissal at/above the drop floor must drop the finding: Suppressed=%v reason=%q", c.Suppressed, c.SuppressedReason)
 	}
 	if res.Suppressed != 1 || len(res.SuppressedKeys) != 1 {
 		t.Errorf("result = %+v, want Suppressed=1 with one key", res)
 	}
 }
 
-// A mid-band dismissal (>=0.60, <0.85) downgrades severity one level and flags
+// A mid-band dismissal (>= downgrade floor, < drop floor) downgrades severity one level and flags
 // the comment without suppressing it.
 func TestEnricher_DismissalDowngrades(t *testing.T) {
 	fake := &memorytest.Fake{
-		SearchFn: feedbackLeg([]memory.PatternMatch{{Score: 0.7, ID: "fb1", Metadata: map[string]string{"pr_number": "12"}}}, nil),
+		SearchFn: feedbackLeg([]memory.PatternMatch{{Score: midDowngradeBand, ID: "fb1", Metadata: map[string]string{"pr_number": "12"}}}, nil),
 	}
 	store := &fakeEnrichStore{}
 	got, res := enrichComments(newTestEnricher(fake, store), []FileComment{
@@ -178,7 +186,7 @@ func TestEnricher_DismissalDowngrades(t *testing.T) {
 // DOWNGRADES it — memory may lower the volume but never silence a security check.
 func TestEnricher_SecurityExemptionDowngradesInsteadOfDrops(t *testing.T) {
 	fake := &memorytest.Fake{
-		SearchFn: feedbackLeg([]memory.PatternMatch{{Score: 0.95, ID: "fb1"}}, nil),
+		SearchFn: feedbackLeg([]memory.PatternMatch{{Score: atOrAboveDrop, ID: "fb1"}}, nil),
 	}
 	store := &fakeEnrichStore{}
 	got, _ := enrichComments(newTestEnricher(fake, store), []FileComment{
@@ -201,7 +209,7 @@ func TestEnricher_SecurityExemptionDowngradesInsteadOfDrops(t *testing.T) {
 func TestEnricher_TeamFeedbackStreakDrops(t *testing.T) {
 	fake := &memorytest.Fake{
 		SearchFn: feedbackLeg([]memory.PatternMatch{
-			{Score: 0.65, ID: "fb1"}, {Score: 0.66, ID: "fb2"}, {Score: 0.67, ID: "fb3"},
+			{Score: midDowngradeBand, ID: "fb1"}, {Score: midDowngradeBand + 0.005, ID: "fb2"}, {Score: midDowngradeBand + 0.01, ID: "fb3"},
 		}, nil),
 	}
 	store := &fakeEnrichStore{}
@@ -250,7 +258,7 @@ func TestEnricher_ConcurrencySafe(t *testing.T) {
 	total := files * perFile
 
 	fake := &memorytest.Fake{
-		SearchFn: patternLeg([]memory.PatternMatch{{Score: 0.9, ID: "doc1"}}, nil),
+		SearchFn: patternLeg([]memory.PatternMatch{{Score: aboveAttribution, ID: "doc1"}}, nil),
 	}
 	store := &fakeEnrichStore{bySupermemoryID: map[string]int64{"doc1": 1}}
 	rec := &eventRecorder{}

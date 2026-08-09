@@ -6,45 +6,79 @@ package memory
 // Bundle 3's rationale: different orgs have different code styles and
 // embedding-space distributions, so one-size-fits-all guarantees wrong for
 // someone. Lifting to org/repo settings lets operators tune without a deploy.
+//
+// RECALIBRATED for the Postgres backend. These numbers were tuned against
+// Supermemory, which returned a RERANKED HYBRID score. PGIndexer returns raw
+// cosine similarity, and raw cosine over voyage-4-large sits far higher for the
+// same semantic distance. Measured against the live 3,896-document corpus
+// (installation 285):
+//
+//	top-1 neighbour   p10 0.696   p50 0.866   p90 1.000   mean 0.851
+//	dismissed feedback vs review/trace   p50 1.000   mean 0.958
+//
+// The old 0.85 drop floor therefore sat on the MEDIAN of the top-1
+// distribution, and 33 of 40 sampled dismissals cleared it. Left alone it
+// would not have failed silent-open as the migration plan predicted — it would
+// have over-suppressed, muting findings that merely RESEMBLE something a
+// developer once dismissed. Same loss of trust, opposite direction.
+//
+// The floors below preserve each gate's INTENT (how selective it is meant to
+// be) against the measured distribution, rather than preserving its literal
+// number. They are not a percentile match to Supermemory's distribution, which
+// was never captured and no longer exists to sample.
+//
+// Re-derive these after any embedding-model change: the model string is the
+// space id, and a different space has a different distribution.
 const (
 	// DefaultThresholdFindingEnrich gates the pattern-match lookup that
-	// enriches a review comment with "we've seen this before" context. Low
-	// (0.5) = broad match; tuning up reduces false-positive enrichments.
-	DefaultThresholdFindingEnrich = 0.50
+	// enriches a review comment with "we've seen this before" context. The
+	// most recall-oriented gate: a miss costs context, a false hit costs one
+	// noisy line. Set near p10 of the measured top-1 distribution.
+	DefaultThresholdFindingEnrich = 0.70
 
 	// DefaultThresholdSpecialistMin gates the semantic reads inside
 	// SpecialistBlock. Higher than enrichment because specialists care
 	// about high-confidence patterns only — irrelevant noise dilutes the
-	// prompt budget.
-	DefaultThresholdSpecialistMin = 0.60
+	// prompt budget. Sits between p10 and the median.
+	DefaultThresholdSpecialistMin = 0.80
 
 	// DefaultThresholdScenarioTrigger gates whether a simulation-failure
 	// match counts as "this scenario triggered." Trigger count feeds into
 	// scenario priority; false triggers inflate priority for stale issues.
-	DefaultThresholdScenarioTrigger = 0.75
+	// Just above the median, so a merely-related failure does not count.
+	DefaultThresholdScenarioTrigger = 0.90
 
 	// DefaultThresholdScenarioDedupe gates scenario-creation dedup. If a
 	// candidate scenario matches an existing one above this threshold, we
 	// skip creation. Too low = duplicate scenarios; too high = false merges.
-	DefaultThresholdScenarioDedupe = 0.85
+	// Near-duplicate detection: genuine duplicates score ~1.0, so this must
+	// sit in the top decile or distinct scenarios get silently merged away.
+	DefaultThresholdScenarioDedupe = 0.95
 
 	// DefaultThresholdAttribution gates public footer attribution of a pattern
 	// match: below it a hit still enriches internally (links + stats) but is
 	// NOT surfaced as "we've seen this before" provenance on the comment. Sits
-	// above FindingEnrich so only strong matches earn a public callout.
-	DefaultThresholdAttribution = 0.80
+	// above FindingEnrich so only strong matches earn a public callout. This
+	// one is publicly visible and wrong attribution is embarrassing, so it is
+	// deliberately stricter than the internal enrich gate.
+	DefaultThresholdAttribution = 0.92
 
 	// DefaultThresholdSuppressionDrop gates dismissal-driven DROP: a finding
 	// that semantically matches a previously 👎-dismissed finding at/above this
 	// score is muted outright (never posted, persisted flagged suppressed).
-	DefaultThresholdSuppressionDrop = 0.85
+	// The most consequential floor in the file: muting a real finding is
+	// invisible to the developer, so it must fire only on near-identical
+	// content. True re-posts of a dismissed finding score ~1.0; the 0.85-0.95
+	// band is "similar but not the same" and must NOT be dropped.
+	DefaultThresholdSuppressionDrop = 0.95
 
 	// DefaultThresholdSuppressionDowngrade gates dismissal-driven DOWNGRADE and
 	// doubles as the "sufficiently similar" bar for a team-feedback streak: a
 	// dismissal match in [downgrade, drop) lowers severity one level rather than
 	// muting. Sits above FindingEnrich so a weak coincidental match can't mute
-	// a real finding.
-	DefaultThresholdSuppressionDowngrade = 0.60
+	// a real finding. Raised with the drop floor so the downgrade band stays a
+	// band rather than swallowing the whole distribution below it.
+	DefaultThresholdSuppressionDowngrade = 0.85
 )
 
 // Thresholds carries the resolved per-run similarity gates. The four retrieval

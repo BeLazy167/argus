@@ -97,19 +97,30 @@ func TestRebalanceSeverityStillRebalancesVisible(t *testing.T) {
 	}
 }
 
+// Band edges for the suppression tests, read from the tuned defaults so the
+// cases keep meaning what their names say when the floors are recalibrated.
+const (
+	downgradeFloor = memory.DefaultThresholdSuppressionDowngrade
+	dropFloor      = memory.DefaultThresholdSuppressionDrop
+)
+
 func TestClassifyDismissal(t *testing.T) {
 	tests := []struct {
 		name  string
 		score float64
 		want  dismissalAction
 	}{
+		// Derived from the floors, not hard-coded: these cases assert the
+		// SHAPE of the bands (below / downgrade / drop), which must hold
+		// after any recalibration. Literals here silently became wrong
+		// assertions when the floors moved for the Postgres backend.
 		{"far_below_floor", 0.10, dismissalNone},
-		{"just_below_downgrade", 0.59, dismissalNone},
-		{"at_downgrade_floor", 0.60, dismissalDowngrade},
-		{"mid_downgrade_band", 0.72, dismissalDowngrade},
-		{"just_below_drop", 0.849, dismissalDowngrade},
-		{"at_drop_floor", 0.85, dismissalDrop},
-		{"above_drop", 0.97, dismissalDrop},
+		{"just_below_downgrade", downgradeFloor - 0.01, dismissalNone},
+		{"at_downgrade_floor", downgradeFloor, dismissalDowngrade},
+		{"mid_downgrade_band", (downgradeFloor + dropFloor) / 2, dismissalDowngrade},
+		{"just_below_drop", dropFloor - 0.001, dismissalDowngrade},
+		{"at_drop_floor", dropFloor, dismissalDrop},
+		{"above_drop", dropFloor + (1.0-dropFloor)/2, dismissalDrop},
 		{"perfect", 1.0, dismissalDrop},
 		{"zero", 0.0, dismissalNone},
 	}
@@ -161,23 +172,23 @@ func TestApplyDismissalMatch(t *testing.T) {
 			wantSeverity: SeverityCritical, wantDowngrade: false, wantPR: 0,
 		},
 		{
-			name: "downgrade_critical", score: 0.72, pr: 88, startSeverity: SeverityCritical,
+			name: "downgrade_critical", score: (downgradeFloor + dropFloor) / 2, pr: 88, startSeverity: SeverityCritical,
 			wantAction: dismissalDowngrade, wantSuppressed: false, wantReason: "",
 			wantSeverity: SeverityWarning, wantDowngrade: true, wantPR: 88,
 		},
 		{
-			name: "downgrade_warning", score: 0.60, pr: 0, startSeverity: SeverityWarning,
+			name: "downgrade_warning", score: downgradeFloor, pr: 0, startSeverity: SeverityWarning,
 			wantAction: dismissalDowngrade, wantSuppressed: false, wantReason: "",
 			wantSeverity: SeveritySuggestion, wantDowngrade: true, wantPR: 0,
 		},
 		{
-			name: "downgrade_suggestion_stays", score: 0.80, pr: 5, startSeverity: SeveritySuggestion,
+			name: "downgrade_suggestion_stays", score: dropFloor - 0.01, pr: 5, startSeverity: SeveritySuggestion,
 			wantAction: dismissalDowngrade, wantSuppressed: false, wantReason: "",
 			wantSeverity: SeveritySuggestion, wantDowngrade: true, wantPR: 5,
 		},
 		{
-			name: "drop_sets_reason", score: 0.91, pr: 7, startSeverity: SeverityCritical,
-			wantAction: dismissalDrop, wantSuppressed: true, wantReason: "dismissed_match:0.91",
+			name: "drop_sets_reason", score: 0.96, pr: 7, startSeverity: SeverityCritical,
+			wantAction: dismissalDrop, wantSuppressed: true, wantReason: "dismissed_match:0.96",
 			wantSeverity: SeverityCritical, wantDowngrade: false, wantPR: 0,
 		},
 	}
@@ -252,10 +263,10 @@ func mkDismissal(score float64, changeKind string, pr string) memory.PatternMatc
 }
 
 func TestFilterDismissalsForClass(t *testing.T) {
-	proto := mkDismissal(0.7, ChangeClassOneTimeScript, "")
-	protoLegacy := mkDismissal(0.7, "prototype", "")
-	prod := mkDismissal(0.7, ChangeClassProduction, "")
-	unstamped := mkDismissal(0.7, "", "")
+	proto := mkDismissal(midDowngradeBand, ChangeClassOneTimeScript, "")
+	protoLegacy := mkDismissal(midDowngradeBand, "prototype", "")
+	prod := mkDismissal(midDowngradeBand, ChangeClassProduction, "")
+	unstamped := mkDismissal(midDowngradeBand, "", "")
 
 	tests := []struct {
 		name         string
@@ -285,7 +296,7 @@ func TestEvaluateDismissals(t *testing.T) {
 	similar := func(n int) []memory.PatternMatch {
 		out := make([]memory.PatternMatch, n)
 		for i := range out {
-			out[i] = mkDismissal(0.65, "", "")
+			out[i] = mkDismissal(midDowngradeBand, "", "")
 		}
 		return out
 	}
@@ -306,12 +317,12 @@ func TestEvaluateDismissals(t *testing.T) {
 		},
 		{
 			name:       "single exact match drops (v1 behavior preserved)",
-			matches:    []memory.PatternMatch{mkDismissal(0.91, "", "7")},
-			wantAction: dismissalDrop, wantReasonPrefix: "dismissed_match:0.91", wantSimilar: 1,
+			matches:    []memory.PatternMatch{mkDismissal(dropFloor+0.01, "", "7")},
+			wantAction: dismissalDrop, wantReasonPrefix: "dismissed_match:0.96", wantSimilar: 1,
 		},
 		{
 			name:       "single mid match only downgrades",
-			matches:    []memory.PatternMatch{mkDismissal(0.70, "", "")},
+			matches:    []memory.PatternMatch{mkDismissal(midDowngradeBand, "", "")},
 			wantAction: dismissalDowngrade, wantSimilar: 1,
 		},
 		{
@@ -326,13 +337,13 @@ func TestEvaluateDismissals(t *testing.T) {
 		},
 		{
 			name:         "prototype-era dismissals do not count against a production PR",
-			matches:      []memory.PatternMatch{mkDismissal(0.9, ChangeClassOneTimeScript, ""), mkDismissal(0.65, ChangeClassOneTimeScript, ""), mkDismissal(0.65, ChangeClassOneTimeScript, "")},
+			matches:      []memory.PatternMatch{mkDismissal(dropFloor-0.01, ChangeClassOneTimeScript, ""), mkDismissal(midDowngradeBand, ChangeClassOneTimeScript, ""), mkDismissal(midDowngradeBand, ChangeClassOneTimeScript, "")},
 			currentClass: ChangeClassProduction,
 			wantAction:   dismissalNone, wantSimilar: 0,
 		},
 		{
 			name:         "prototype-era dismissals still suppress on a one-off script PR",
-			matches:      []memory.PatternMatch{mkDismissal(0.65, ChangeClassOneTimeScript, ""), mkDismissal(0.65, ChangeClassOneTimeScript, ""), mkDismissal(0.65, ChangeClassOneTimeScript, "")},
+			matches:      []memory.PatternMatch{mkDismissal(midDowngradeBand, ChangeClassOneTimeScript, ""), mkDismissal(midDowngradeBand, ChangeClassOneTimeScript, ""), mkDismissal(midDowngradeBand, ChangeClassOneTimeScript, "")},
 			currentClass: ChangeClassOneTimeScript,
 			wantAction:   dismissalDrop, wantReasonPrefix: "team_feedback:3", wantSimilar: 3,
 		},
@@ -343,7 +354,7 @@ func TestEvaluateDismissals(t *testing.T) {
 		},
 		{
 			name:       "exempt finding is never dropped by an exact match — capped at downgrade",
-			matches:    []memory.PatternMatch{mkDismissal(0.95, "", "")},
+			matches:    []memory.PatternMatch{mkDismissal(dropFloor, "", "")},
 			exempt:     true,
 			wantAction: dismissalDowngrade, wantSimilar: 1,
 		},
@@ -381,8 +392,8 @@ func TestEvaluateDismissals(t *testing.T) {
 
 func TestEvaluateDismissals_BestPRAttribution(t *testing.T) {
 	ev := evaluateDismissals([]memory.PatternMatch{
-		mkDismissal(0.62, "", "3"),
-		mkDismissal(0.78, "", "42"), // best
+		mkDismissal(downgradeFloor+0.01, "", "3"),
+		mkDismissal(dropFloor-0.01, "", "42"), // best
 	}, "", false, false, memory.NewThresholds())
 	if ev.action != dismissalDowngrade {
 		t.Fatalf("action = %v, want downgrade", ev.action)
