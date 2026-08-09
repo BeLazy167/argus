@@ -5,7 +5,7 @@
 //
 // Two jobs per run, in order:
 //
-//  1. Drift repair — find Postgres rows whose supermemory_id is NULL (write
+//  1. Drift repair — find Postgres rows whose memory_doc_id is NULL (write
 //     to SM failed at creation time) and retry the index call. The new SM
 //     doc ID is written back to the PG row. Empty rowset = no drift = no-op.
 //
@@ -29,7 +29,7 @@
 //	                     writes (no index/delete, and no DisableLLMFilter settings
 //	                     PATCH — the indexer is built read-only), but still issues
 //	                     reads (list/get) to plan the sweep
-//	--full               re-push ALL rows (not just NULL supermemory_id); skips decay
+//	--full               re-push ALL rows (not just NULL memory_doc_id); skips decay
 //	--batch-size=N       rows per SQL page (default 100)
 //	--max-rows=N         safety cap per table per run (default 10000)
 package main
@@ -92,7 +92,7 @@ func main() {
 	cfg := runConfig{}
 	flag.Int64Var(&cfg.installation, "installation", 0, "restrict to one installation ID (0 = all)")
 	flag.BoolVar(&cfg.plan, "plan", false, "dry-run: log intended writes; performs NO remote writes (no index/delete/settings PATCH), but still issues reads (list/get) to plan the sweep")
-	flag.BoolVar(&cfg.full, "full", false, "re-push ALL memories (not just supermemory_id IS NULL) so Supermemory rebuilds the relationship graph; skips _shared decay")
+	flag.BoolVar(&cfg.full, "full", false, "re-push ALL memories (not just memory_doc_id IS NULL) so Supermemory rebuilds the relationship graph; skips _shared decay")
 	var batchSize int
 	flag.IntVar(&batchSize, "batch-size", 100, "rows per SQL page")
 	flag.IntVar(&cfg.maxRows, "max-rows", 10000, "safety cap on rows processed per table per installation per run")
@@ -210,7 +210,7 @@ func backendSkip(ctx context.Context, logger *slog.Logger, flags memory.FeatureF
 	}
 	// For an install already moved to Postgres, proceeding is not a safe
 	// default but a corrupting one: reindexing writes a Supermemory doc id over
-	// patterns.supermemory_id, which for that install holds a PGIndexer
+	// patterns.memory_doc_id, which for that install holds a PGIndexer
 	// custom_id, after which dashboard deletion matches zero rows and silently
 	// stops tombstoning the memory while returning 200.
 	if backend == memory.BackendPostgres {
@@ -628,7 +628,7 @@ func computeDecay(doc *memory.Document) (float64, decayAction) {
 	return newConf, decayActionDecay
 }
 
-// reconcilePatterns pages through patterns rows lacking supermemory_id, calls
+// reconcilePatterns pages through patterns rows lacking memory_doc_id, calls
 // IndexRepoPattern / IndexOwnerPattern (upsert via customID, so retries are
 // idempotent), and writes the returned SM ID back to the row. Stops on
 // context cancel, empty page, max-rows cap, OR maxConsecutiveFailures — the
@@ -696,7 +696,7 @@ func reconcilePatterns(ctx context.Context, logger *slog.Logger, st *store.Store
 			total++
 			consecutiveFailures = 0
 		}
-		// Plan mode never writes supermemory_id back, so the next query
+		// Plan mode never writes memory_doc_id back, so the next query
 		// returns the same pending rows forever. Cap at one batch and
 		// surface the true pending count.
 		if cfg.plan {
@@ -757,8 +757,8 @@ func reindexPattern(ctx context.Context, logger *slog.Logger, st *store.Store, i
 		return fmt.Errorf("indexer returned empty supermemory id")
 	}
 	rows, err := st.Q.UpdatePatternSupermemoryID(ctx, db.UpdatePatternSupermemoryIDParams{
-		SupermemoryID: &smID,
-		ID:            id,
+		MemoryDocID: &smID,
+		ID:          id,
 	})
 	if err != nil {
 		return fmt.Errorf("write-back pattern SM id: %w", err)
@@ -766,7 +766,7 @@ func reindexPattern(ctx context.Context, logger *slog.Logger, st *store.Store, i
 	if rows == 0 {
 		// The PG row vanished between the pending/repush snapshot and now (e.g.
 		// an admin deleted the pattern from the dashboard mid-run). The UI delete
-		// path only removes the SM doc when patterns.supermemory_id was non-NULL,
+		// path only removes the SM doc when patterns.memory_doc_id was non-NULL,
 		// so the doc we just created would be an undeletable orphan surfacing in
 		// specialist retrieval forever. Best-effort delete it by server id.
 		logger.Warn("pattern row vanished mid-run; deleting orphaned SM doc", "pattern_id", id, "sm_id", smID)
@@ -903,15 +903,15 @@ func reindexScenario(ctx context.Context, logger *slog.Logger, st *store.Store, 
 	// IndexScenario's customID is deterministic from (repo, scenarioID) — we
 	// reconstruct it here via memory.ScenarioCustomID (the single source, same
 	// repoIDSegment collision-hash the real write uses) and record it as
-	// supermemory_id. This is a sync-complete marker, not the actual SM document
+	// memory_doc_id. This is a sync-complete marker, not the actual SM document
 	// ID from the server response. Acceptable: the column stores what the next
 	// SearchScenariosWithIDs call would target, which is exactly the customID
 	// space. A future iteration may expose the server ID via IndexScenario's
 	// return; tracked as follow-up.
 	customID := memory.ScenarioCustomID(repoName, id)
 	if err := st.Q.UpdateScenarioSupermemoryID(ctx, db.UpdateScenarioSupermemoryIDParams{
-		SupermemoryID: &customID,
-		ID:            id,
+		MemoryDocID: &customID,
+		ID:          id,
 	}); err != nil {
 		return fmt.Errorf("write-back scenario SM id: %w", err)
 	}

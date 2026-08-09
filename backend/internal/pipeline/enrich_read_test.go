@@ -71,7 +71,7 @@ func (f *fakeEnrichStore) GetPatternIDByCustomID(_ context.Context, installID in
 	return 0, pgx.ErrNoRows
 }
 
-func (f *fakeEnrichStore) GetPatternIDBySupermemoryID(_ context.Context, installID int64, smID string) (int64, error) {
+func (f *fakeEnrichStore) GetPatternIDByMemoryDocID(_ context.Context, installID int64, smID string) (int64, error) {
 	f.recordScope(installID)
 	if id, ok := f.bySupermemoryID[smID]; ok {
 		return id, nil
@@ -126,7 +126,7 @@ func TestResolvePatternIDIsTenantScoped(t *testing.T) {
 		t.Errorf("lookup scoped to installation %d, want 77 — an unscoped query can resolve to another tenant's pattern row", store.scope())
 	}
 
-	// The supermemory_id fallback must carry the scope too.
+	// The memory_doc_id fallback must carry the scope too.
 	store2 := &fakeEnrichStore{bySupermemoryID: map[string]int64{"sm-1": 9}}
 	e2 := newTestEnricher(&memorytest.Fake{}, store2)
 	if _, ok := e2.resolvePatternID(context.Background(), memory.PatternMatch{ID: "sm-1"}); !ok {
@@ -227,7 +227,7 @@ func TestEnrichFindings_RuleSearchError_NotNovel(t *testing.T) {
 }
 
 // (d) customId-preferred resolution: the hit's own ID is a chunk id that matches
-// no supermemory_id, but the mirrored custom_id resolves the patterns row.
+// no memory_doc_id, but the mirrored custom_id resolves the patterns row.
 func TestEnrichFindings_ResolveByCustomID(t *testing.T) {
 	fake := &memorytest.Fake{
 		SearchFn: patternLeg([]memory.PatternMatch{{
@@ -248,7 +248,7 @@ func TestEnrichFindings_ResolveByCustomID(t *testing.T) {
 }
 
 // (d, fallback) custom_id present but not stored (legacy row) → resolution falls
-// back to matching the hit's own ID against supermemory_id.
+// back to matching the hit's own ID against memory_doc_id.
 func TestEnrichFindings_ResolveFallbackToSupermemoryID(t *testing.T) {
 	fake := &memorytest.Fake{
 		SearchFn: patternLeg([]memory.PatternMatch{{
@@ -261,7 +261,7 @@ func TestEnrichFindings_ResolveFallbackToSupermemoryID(t *testing.T) {
 	c := enrichOneComment(t, fake, store)
 
 	if c.MatchedPatternID != 7 {
-		t.Errorf("MatchedPatternID = %d, want 7 (fallback to supermemory_id)", c.MatchedPatternID)
+		t.Errorf("MatchedPatternID = %d, want 7 (fallback to memory_doc_id)", c.MatchedPatternID)
 	}
 	if len(store.incremented) != 1 || store.incremented[0] != 7 {
 		t.Errorf("IncrementPatternMatch = %v, want [7]", store.incremented)

@@ -248,8 +248,8 @@ func (s *Server) handleRememberCommand(ctx context.Context, evt ghpkg.IssueComme
 	}
 
 	createdBy := evt.CommentAuthor
-	// supermemory_custom_id is nil here (see handlers_patterns.go): `remember`
-	// patterns rely on the supermemory_id match at read time.
+	// memory_custom_id is nil here (see handlers_patterns.go): `remember`
+	// patterns rely on the memory_doc_id match at read time.
 	_, err = s.store.CreatePattern(ctx, inst.ID, repoID, content, smID, &createdBy, nil, nil, nil, nil)
 	if err != nil {
 		s.logger.Error("remember: save to db", "error", err)

@@ -23,7 +23,7 @@ func (f fakeFlags) GetInstallationFeatureFlags(context.Context, int64) (json.Raw
 
 // TestBackendSkipPolarity pins both refusals. This tool writes Supermemory
 // only, so proceeding against a Postgres-flipped install writes a Supermemory
-// doc id over patterns.supermemory_id — which for that install holds a
+// doc id over patterns.memory_doc_id — which for that install holds a
 // PGIndexer custom_id — after which dashboard pattern deletion matches zero
 // rows and returns 200 while never tombstoning the memory.
 //

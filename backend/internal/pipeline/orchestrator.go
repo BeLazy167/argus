@@ -3270,7 +3270,7 @@ func (o *Orchestrator) indexConfirmedPatterns(ctx context.Context, run *Pipeline
 				Category: string(c.Category),
 			})
 			if err != nil {
-				// Non-fatal, but the DB row below lands with a NULL supermemory_id —
+				// Non-fatal, but the DB row below lands with a NULL memory_doc_id —
 				// log the deterministic customID (never model-generated content,
 				// which can quote secrets) so silent write-failures are visible.
 				o.logger.Warn("indexing confirmed pattern", "error", err, "file", fr.Path,

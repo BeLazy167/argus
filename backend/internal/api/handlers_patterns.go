@@ -127,8 +127,8 @@ func (s *Server) createPattern(w http.ResponseWriter, r *http.Request) {
 	}
 
 	createdBy := getUserID(r.Context())
-	// supermemory_custom_id is nil here: dashboard-created patterns rely on the
-	// supermemory_id match at read time. The per-finding enrich customId path is
+	// memory_custom_id is nil here: dashboard-created patterns rely on the
+	// memory_doc_id match at read time. The per-finding enrich customId path is
 	// populated by the pipeline write paths (confirmed/auto_learn/convention).
 	pattern, err := s.store.CreatePattern(r.Context(), body.InstallationID, body.RepoID, body.Content, smID, &createdBy, nil, nil, nil, nil)
 	if err != nil {
@@ -156,10 +156,10 @@ func (s *Server) deletePattern(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Only delete from Supermemory after DB deletion succeeds (confirms authorization)
-	if getErr == nil && pattern.SupermemoryID != nil && s.memRegistry != nil {
+	if getErr == nil && pattern.MemoryDocID != nil && s.memRegistry != nil {
 		indexer := s.memRegistry.GetIndexer(r.Context(), pattern.InstallationID)
 		if indexer != nil {
-			if err := indexer.DeleteDocument(r.Context(), *pattern.SupermemoryID); err != nil {
+			if err := indexer.DeleteDocument(r.Context(), *pattern.MemoryDocID); err != nil {
 				s.logger.Error("delete pattern from supermemory", "error", err)
 			}
 		}

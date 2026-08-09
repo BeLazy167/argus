@@ -31,10 +31,10 @@ LIMIT $3;
 -- name: ListPatternsForBackfill :many
 -- (b) patterns → type=pattern docs. LEFT JOIN repos: NULL repo_id is an
 -- org-wide/shared pattern (→ _shared); non-NULL routes to {repo}. old_sm_id is
--- the current (legacy) supermemory_id, captured so the caller can remap
+-- the current (legacy) memory_doc_id, captured so the caller can remap
 -- pattern_stats from the legacy id to the new one before overwriting the column.
 SELECT p.id, p.repo_id, p.content, COALESCE(p.source, 'manual') AS source,
-       p.category, p.pr_number, p.supermemory_id AS old_sm_id, r.full_name
+       p.category, p.pr_number, p.memory_doc_id AS old_sm_id, r.full_name
 FROM patterns p
 LEFT JOIN repos r ON r.id = p.repo_id
 WHERE p.installation_id = $1 AND p.id > $2
@@ -114,14 +114,14 @@ LIMIT $3;
 
 -- name: RemapPatternStatsSupermemoryID :execrows
 -- Repoint a pattern_stats row from its legacy Supermemory id to the new backfill
--- id. pattern_stats.supermemory_id is UNIQUE and previously pointed at the
--- legacy doc; the migration overwrites patterns.supermemory_id, so this keeps
+-- id. pattern_stats.memory_doc_id is UNIQUE and previously pointed at the
+-- legacy doc; the migration overwrites patterns.memory_doc_id, so this keeps
 -- the stats row joined to the live doc. Keyed on the legacy id (exact) rather
 -- than content_hash — pattern_stats has no writer in the codebase (empty in
 -- prod) and patterns has no content_hash column, so the legacy id is the only
 -- exact join key.
-UPDATE pattern_stats SET supermemory_id = @new_id, updated_at = NOW()
-WHERE supermemory_id = @old_id;
+UPDATE pattern_stats SET memory_doc_id = @new_id, updated_at = NOW()
+WHERE memory_doc_id = @old_id;
 
 -- name: ListRepoFullNamesForInstallation :many
 -- Owner/repo full_names for one installation, used by --verify-legacy to build

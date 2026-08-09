@@ -306,8 +306,8 @@ func (e *Enricher) publishEvent(evt EventType, data map[string]any) {
 // resolvePatternID maps a Supermemory pattern search hit back to its
 // patterns-table row id. It PREFERS the deterministic customId (round-tripped
 // through result metadata under "custom_id") because a hybrid-search hit's own
-// ID may be a chunk id that never equals the stored supermemory_id; it falls
-// back to matching match.ID against patterns.supermemory_id for legacy rows
+// ID may be a chunk id that never equals the stored memory_doc_id; it falls
+// back to matching match.ID against patterns.memory_doc_id for legacy rows
 // written before the customId mirror existed. Returns found=false (a non-fatal
 // miss — e.g. a synthesis/convention doc never mirrored to the patterns table)
 // when neither key resolves.
@@ -319,12 +319,12 @@ func (e *Enricher) resolvePatternID(ctx context.Context, match memory.PatternMat
 			e.logger.Warn("pattern id lookup by custom_id", "error", err, "custom_id", customID)
 		}
 		// customId miss (legacy row / not mirrored) — fall through to the
-		// supermemory_id match on the result's own id.
+		// memory_doc_id match on the result's own id.
 	}
-	if pid, err := e.linker.GetPatternIDBySupermemoryID(ctx, e.installID, match.ID); err == nil {
+	if pid, err := e.linker.GetPatternIDByMemoryDocID(ctx, e.installID, match.ID); err == nil {
 		return pid, true
 	} else if !errors.Is(err, pgx.ErrNoRows) {
-		e.logger.Warn("pattern id lookup", "error", err, "supermemory_id", match.ID)
+		e.logger.Warn("pattern id lookup", "error", err, "memory_doc_id", match.ID)
 	}
 	return 0, false
 }

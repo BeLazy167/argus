@@ -238,7 +238,7 @@ func (s *Store) GetFileMemory(ctx context.Context, repoID int64, filePath string
 
 	// Patterns linked via review comments on this file
 	pRows, err := s.Pool.Query(ctx, `
-		SELECT DISTINCT p.id, p.installation_id, p.repo_id, p.content, p.supermemory_id,
+		SELECT DISTINCT p.id, p.installation_id, p.repo_id, p.content, p.memory_doc_id,
 		       p.created_by, COALESCE(p.source, 'manual'), p.category, p.pr_number, p.created_at, p.updated_at
 		FROM patterns p
 		JOIN review_comments rc ON rc.matched_pattern_id = p.id

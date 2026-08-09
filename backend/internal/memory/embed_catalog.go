@@ -87,6 +87,30 @@ func EmbedCatalog() []EmbedProviderOption {
 			},
 		},
 		{
+			Key:         "vercel",
+			Label:       "Vercel AI Gateway",
+			BaseURL:     defaultVercelGatewayBase,
+			RequiresKey: true,
+			// Every model listed here was checked against the live gateway and
+			// returns 1024-dim vectors WITHOUT a dimensions parameter — which
+			// matters because embedBatch only sends `dimensions` for
+			// text-embedding-3-*, so anything else must be natively 1024 or the
+			// vector(1024) INSERT fails. Do not extend this list from the
+			// gateway's catalogue without measuring the width first.
+			//
+			// Model ids keep the gateway's creator/model form, so these are
+			// DIFFERENT space ids from the direct-provider entries above even
+			// where the vectors are identical — switching re-embeds the corpus.
+			Notes: "One key for many models, routed through Vercel. Ids are creator/model-prefixed: switching an existing space to its direct-provider twin (or back) re-embeds the corpus.",
+			Models: []EmbedModelOption{
+				{Model: "voyage/voyage-4-large", Notes: "highest quality Voyage tier — native 1024-dim"},
+				{Model: "voyage/voyage-4", Notes: "balanced quality/price"},
+				{Model: "voyage/voyage-4-lite", Notes: "cheapest, near-4 quality"},
+				{Model: "openai/text-embedding-3-large", Notes: "higher quality tier, 6.5x price"},
+				{Model: "google/gemini-embedding-001"},
+			},
+		},
+		{
 			Key:         "custom",
 			Label:       "Custom endpoint (OpenAI-compatible)",
 			RequiresKey: false,

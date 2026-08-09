@@ -1211,15 +1211,15 @@ func (s *Store) RecordCommentOutcome(ctx context.Context, reviewCommentID uuid.U
 	return tag.RowsAffected() > 0, nil
 }
 
-// SetScenarioSupermemoryID records the Supermemory customID for a scenario in
+// SetScenarioMemoryDocID records the Supermemory customID for a scenario in
 // migration 045's mirror column. The pipeline calls this after a successful
-// IndexScenario so a NULL supermemory_id genuinely means "write failed / pending
+// IndexScenario so a NULL memory_doc_id genuinely means "write failed / pending
 // reconciliation" instead of "never attempted" — otherwise the reconciler treats
 // every freshly-created scenario as drift forever.
-func (s *Store) SetScenarioSupermemoryID(ctx context.Context, id int64, supermemoryID string) error {
+func (s *Store) SetScenarioMemoryDocID(ctx context.Context, id int64, supermemoryID string) error {
 	return s.Q.UpdateScenarioSupermemoryID(ctx, db.UpdateScenarioSupermemoryIDParams{
-		SupermemoryID: &supermemoryID,
-		ID:            id,
+		MemoryDocID: &supermemoryID,
+		ID:          id,
 	})
 }
 
@@ -1390,7 +1390,7 @@ func nilIfEmpty(s string) *string {
 // to leak out of the store package into orchestrator stages and API handlers.
 // Routing them through *store.Store keeps callers (and the consumer-declared
 // narrow interfaces over the store) off the generated query layer. Pure
-// delegation — no business logic. SetScenarioSupermemoryID above is the same
+// delegation — no business logic. SetScenarioMemoryDocID above is the same
 // idiom; grouped here so the former leaks are reviewable in one place.
 
 // GetInstallationFeatureFlags returns the raw feature_flags JSONB for an

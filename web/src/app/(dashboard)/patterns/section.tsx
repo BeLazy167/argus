@@ -523,10 +523,10 @@ export function PatternsSection() {
 																<span className="text-foreground">{pattern.created_by}</span>
 															</div>
 														)}
-														{pattern.supermemory_id && (
+														{pattern.memory_doc_id && (
 															<div>
 																<span className="text-slate-text">Indexed: </span>
-																<span className="text-green-400">✓ Supermemory</span>
+																<span className="text-green-400">✓</span>
 															</div>
 														)}
 														<div>

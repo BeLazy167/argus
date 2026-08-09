@@ -197,7 +197,7 @@ func FindingFingerprint(owner, repo, filePath, category, body string) string {
 
 // The customID builders below stay EXPORTED deliberately: the deterministic
 // customId is a cross-package contract, not a test affordance. The pipeline
-// computes it to mirror supermemory_id into the patterns/scenarios tables and to
+// computes it to mirror memory_doc_id into the patterns/scenarios tables and to
 // resolve a search hit back to its row; cmd/migrate-memory and
 // cmd/reconcile-memory reconstruct the SAME id to back-fill / sync legacy docs;
 // internal/api derives it to delete a rule's doc. Un-exporting any of these

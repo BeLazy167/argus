@@ -27,7 +27,7 @@ type BackoffPolicy struct {
 
 // DefaultBackoff is applied uniformly to reads and writes. Writes that fail
 // after exhausting retries are recovered by the reconciler (cmd/reconcile-memory),
-// which re-indexes PG rows whose supermemory_id is NULL.
+// which re-indexes PG rows whose memory_doc_id is NULL.
 var DefaultBackoff = BackoffPolicy{
 	MaxAttempts:  3,
 	InitialDelay: 250 * time.Millisecond,

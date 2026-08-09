@@ -12,7 +12,7 @@ type PatternQualityStats struct {
 	ID             int64      `json:"id"`
 	InstallationID int64      `json:"installation_id"`
 	RepoID         *int64     `json:"repo_id,omitempty"`
-	SupermemoryID  string     `json:"supermemory_id"`
+	MemoryDocID    string     `json:"memory_doc_id"`
 	ContentHash    string     `json:"content_hash"`
 	Category       string     `json:"category"`
 	TimesMatched   int        `json:"times_matched"`
@@ -39,9 +39,9 @@ func RecalculateQuality(confirmed, dismissed int) float64 {
 
 func (s *Store) UpsertPatternStats(ctx context.Context, stats PatternQualityStats) error {
 	_, err := s.Pool.Exec(ctx, `
-		INSERT INTO pattern_stats (installation_id, repo_id, supermemory_id, content_hash, category, times_matched, times_confirmed, times_dismissed, quality_score, last_matched_at)
+		INSERT INTO pattern_stats (installation_id, repo_id, memory_doc_id, content_hash, category, times_matched, times_confirmed, times_dismissed, quality_score, last_matched_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-		ON CONFLICT (supermemory_id) DO UPDATE SET
+		ON CONFLICT (installation_id, memory_doc_id) DO UPDATE SET
 			repo_id         = EXCLUDED.repo_id,
 			content_hash    = EXCLUDED.content_hash,
 			category        = EXCLUDED.category,
@@ -51,25 +51,26 @@ func (s *Store) UpsertPatternStats(ctx context.Context, stats PatternQualityStat
 			quality_score   = EXCLUDED.quality_score,
 			last_matched_at = EXCLUDED.last_matched_at,
 			updated_at      = NOW()
-	`, stats.InstallationID, stats.RepoID, stats.SupermemoryID, stats.ContentHash, stats.Category,
+	`, stats.InstallationID, stats.RepoID, stats.MemoryDocID, stats.ContentHash, stats.Category,
 		stats.TimesMatched, stats.TimesConfirmed, stats.TimesDismissed, stats.QualityScore, stats.LastMatchedAt)
 	return err
 }
 
 // IncrementPatternMatch records that a learned pattern was matched during a
 // review. It self-seeds the pattern_stats row from the patterns table on first
-// match (keyed by supermemory_id, seeded quality 0.5 = the Bayesian prior) and
+// match (keyed by installation_id + memory_doc_id, seeded quality 0.5 = the
+// Bayesian prior) and
 // bumps times_matched thereafter. No outcome is applied — confirmed/dismissed
-// land later via RecordPatternOutcome. A patterns row without a supermemory_id
+// land later via RecordPatternOutcome. A patterns row without a memory_doc_id
 // (not yet mirrored) is skipped by the WHERE clause; the ON CONFLICT keeps
 // concurrent matches within one review atomic.
 func (s *Store) IncrementPatternMatch(ctx context.Context, patternID int64) error {
 	_, err := s.Pool.Exec(ctx, `
-		INSERT INTO pattern_stats (installation_id, repo_id, supermemory_id, content_hash, category, times_matched, quality_score, last_matched_at)
-		SELECT p.installation_id, p.repo_id, p.supermemory_id, md5(p.content), COALESCE(p.category, ''), 1, 0.5, NOW()
+		INSERT INTO pattern_stats (installation_id, repo_id, memory_doc_id, content_hash, category, times_matched, quality_score, last_matched_at)
+		SELECT p.installation_id, p.repo_id, p.memory_doc_id, md5(p.content), COALESCE(p.category, ''), 1, 0.5, NOW()
 		FROM patterns p
-		WHERE p.id = $1 AND p.supermemory_id IS NOT NULL
-		ON CONFLICT (supermemory_id) DO UPDATE SET
+		WHERE p.id = $1 AND p.memory_doc_id IS NOT NULL
+		ON CONFLICT (installation_id, memory_doc_id) DO UPDATE SET
 			times_matched   = pattern_stats.times_matched + 1,
 			last_matched_at = NOW(),
 			updated_at      = NOW()
@@ -81,7 +82,7 @@ func (s *Store) IncrementPatternMatch(ctx context.Context, patternID int64) erro
 // pattern_stats row behind a matched comment and recomputes quality with the
 // same Bayesian formula as RecalculateQuality (prior=0.5, weight=5), atomically.
 // patternID is review_comments.matched_pattern_id (a patterns-table id); the
-// join maps it to pattern_stats via the shared supermemory_id. Returns the
+// join maps it to pattern_stats via the shared memory_doc_id. Returns the
 // quality AFTER the update and updated=false when no stats row exists yet (a
 // match that predates stats wiring, or a pattern never seeded) — non-fatal.
 func (s *Store) RecordPatternOutcome(ctx context.Context, patternID int64, confirmed bool) (quality float64, updated bool, err error) {
@@ -98,7 +99,15 @@ func (s *Store) RecordPatternOutcome(ctx context.Context, patternID int64, confi
 			quality_score   = (ps.times_confirmed + $2 + 2.5) / (ps.times_confirmed + $2 + ps.times_dismissed + $3 + 5.0),
 			updated_at      = NOW()
 		FROM patterns p
-		WHERE p.id = $1 AND ps.supermemory_id = p.supermemory_id
+		-- installation_id is part of the join, not decoration: memory_doc_id is
+		-- a DETERMINISTIC customId under Postgres and PatternCustomID discards
+		-- owner, so two installs sharing a repo name hold the SAME id. Joining
+		-- on the id alone would apply one tenant's outcome to another's
+		-- counters -- the exact leak migration 062's composite UNIQUE closes on
+		-- the write path. Both halves must be scoped or neither is.
+		WHERE p.id = $1
+		  AND ps.memory_doc_id = p.memory_doc_id
+		  AND ps.installation_id = p.installation_id
 		RETURNING ps.quality_score
 	`, patternID, confirmInc, dismissInc).Scan(&quality)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -216,7 +225,7 @@ func (s *Store) DecayStalePatterns(ctx context.Context, installationID int64, st
 
 func (s *Store) GetLowQualityPatterns(ctx context.Context, installationID int64, maxQuality float64, limit int) ([]PatternQualityStats, error) {
 	rows, err := s.Pool.Query(ctx, `
-		SELECT id, installation_id, repo_id, supermemory_id, content_hash, category,
+		SELECT id, installation_id, repo_id, memory_doc_id, content_hash, category,
 		       times_matched, times_confirmed, times_dismissed, quality_score,
 		       last_matched_at, created_at, updated_at
 		FROM pattern_stats

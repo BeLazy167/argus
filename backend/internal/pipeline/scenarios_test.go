@@ -83,7 +83,7 @@ func (f *fakeScenarioStore) CreatePendingScenario(_ context.Context, _ int64, _ 
 	return int64(len(f.pending)), nil
 }
 
-func (f *fakeScenarioStore) SetScenarioSupermemoryID(_ context.Context, _ int64, _ string) error {
+func (f *fakeScenarioStore) SetScenarioMemoryDocID(_ context.Context, _ int64, _ string) error {
 	return nil
 }
 

@@ -203,7 +203,7 @@ func (b *backendCache) resolve(ctx context.Context, installationID int64) (Backe
 // The error is returned rather than folded into a Supermemory answer, because
 // these callers need the opposite polarity from the app: the app treats an
 // unreadable flag as "carry on with Supermemory", while a tool that rewrites
-// patterns.supermemory_id must treat it as "do nothing". Swallowing it here
+// patterns.memory_doc_id must treat it as "do nothing". Swallowing it here
 // would make the CLI guards fail OPEN on a single pool timeout and perform
 // exactly the corruption they exist to prevent.
 func InstallationBackend(ctx context.Context, reader FeatureFlagReader, installationID int64, logger *slog.Logger) (Backend, error) {

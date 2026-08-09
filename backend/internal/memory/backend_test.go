@@ -250,7 +250,7 @@ func TestInstallationBackendUncached(t *testing.T) {
 // could not find out"; folding the second into the first made the guards fail
 // OPEN, so one pool timeout during a sweep would let reconcile-memory reindex
 // a flipped install through Supermemory and write SM doc ids over
-// patterns.supermemory_id — after which dashboard deletion matches zero rows
+// patterns.memory_doc_id — after which dashboard deletion matches zero rows
 // and returns 200 while the memory stays live.
 //
 // The app deliberately wants the opposite polarity, which is why the decision

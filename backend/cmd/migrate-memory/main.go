@@ -7,8 +7,7 @@
 // It is safe to re-run: every doc carries a deterministic customID identical to
 // the pipeline's own writer, so a second pass upserts in place rather than
 // duplicating. Batch responses return the created document ids, which are
-// mirrored back into patterns.supermemory_id / scenarios.supermemory_id /
-// decision_traces.supermemory_id (overwriting the legacy ids is the point of the
+// mirrored back into patterns.memory_doc_id / scenarios.memory_doc_id /
 // migration), and pattern_stats rows are repointed from the legacy id to the new
 // one.
 //
@@ -18,7 +17,6 @@
 //	patterns          → type=pattern    {repo} | _shared (NULL repo_id)
 //	comment_outcomes  → type=feedback   {repo}
 //	scenarios         → type=scenario   {repo}
-//	decision_traces   → type=trace      {repo}
 //	rules             → type=rule       _shared
 //	reviews (summary) → type=pr_summary {repo}
 //
@@ -306,7 +304,7 @@ func backendSkip(ctx context.Context, logger *slog.Logger, flags memory.FeatureF
 	}
 	// For an install already moved to Postgres, proceeding is not a safe
 	// default but a corrupting one: reindexing writes a Supermemory doc id over
-	// patterns.supermemory_id, which for that install holds a PGIndexer
+	// patterns.memory_doc_id, which for that install holds a PGIndexer
 	// custom_id, after which dashboard deletion matches zero rows and silently
 	// stops tombstoning the memory while returning 200.
 	if backend == memory.BackendPostgres {
@@ -404,7 +402,7 @@ func backfillInstallation(ctx context.Context, logger *slog.Logger, st *store.St
 		},
 		func(r db.ListReviewCommentsForBackfillRow) bool { return afterCutoff(r.CreatedAt, cfg.cutoff) })
 
-	// patterns → type=pattern (+ supermemory_id + pattern_stats remap write-back)
+	// patterns → type=pattern (+ memory_doc_id + pattern_stats remap write-back)
 	sweepType(s, "pattern", 0,
 		func(cur int, limit int32) ([]db.ListPatternsForBackfillRow, error) {
 			return st.Q.ListPatternsForBackfill(ctx, db.ListPatternsForBackfillParams{InstallationID: installID, ID: cur, Limit: limit})
@@ -417,12 +415,12 @@ func backfillInstallation(ctx context.Context, logger *slog.Logger, st *store.St
 			}
 			id, oldSM := r.ID, r.OldSmID
 			wb := func(ctx context.Context, newID string) error {
-				if _, err := st.Q.UpdatePatternSupermemoryID(ctx, db.UpdatePatternSupermemoryIDParams{SupermemoryID: &newID, ID: id}); err != nil {
+				if _, err := st.Q.UpdatePatternSupermemoryID(ctx, db.UpdatePatternSupermemoryIDParams{MemoryDocID: &newID, ID: id}); err != nil {
 					return err
 				}
 				if oldSM != nil && *oldSM != "" && *oldSM != newID {
 					if _, rerr := st.Q.RemapPatternStatsSupermemoryID(ctx, db.RemapPatternStatsSupermemoryIDParams{NewID: newID, OldID: *oldSM}); rerr != nil {
-						s.logger.Warn("remap pattern_stats supermemory_id", "old", *oldSM, "new", newID, "error", rerr)
+						s.logger.Warn("remap pattern_stats memory_doc_id", "old", *oldSM, "new", newID, "error", rerr)
 					}
 				}
 				return nil
@@ -448,7 +446,7 @@ func backfillInstallation(ctx context.Context, logger *slog.Logger, st *store.St
 			return r.CreatedAt != nil && afterCutoff(*r.CreatedAt, cfg.cutoff)
 		})
 
-	// scenarios → type=scenario (+ supermemory_id write-back)
+	// scenarios → type=scenario (+ memory_doc_id write-back)
 	sweepType(s, "scenario", int64(0),
 		func(cur int64, limit int32) ([]db.ListScenariosForBackfillRow, error) {
 			return st.Q.ListScenariosForBackfill(ctx, db.ListScenariosForBackfillParams{InstallationID: installID, ID: cur, Limit: limit})
@@ -461,18 +459,16 @@ func backfillInstallation(ctx context.Context, logger *slog.Logger, st *store.St
 			}
 			id := r.ID
 			wb := func(ctx context.Context, newID string) error {
-				return st.Q.UpdateScenarioSupermemoryID(ctx, db.UpdateScenarioSupermemoryIDParams{SupermemoryID: &newID, ID: id})
+				return st.Q.UpdateScenarioSupermemoryID(ctx, db.UpdateScenarioSupermemoryIDParams{MemoryDocID: &newID, ID: id})
 			}
 			return md, wb, nil
 		},
 		nil) // byte-exact
 
-	// decision_traces backfill retired: Supermemory trace writes were removed
-	// (Postgres decision_traces is the source of truth), so mirroring traces into
 	// Supermemory is pointless. The mapper + ListTracesForBackfill query are gone.
 	s.logger.Info("skipping trace backfill", "reason", "supermemory trace writes retired")
 
-	// rules → type=rule (_shared). No supermemory_id column on rules → no write-back.
+	// rules → type=rule (_shared). No memory_doc_id column on rules → no write-back.
 	sweepType(s, "rule", int64(0),
 		func(cur int64, limit int32) ([]db.ListRulesForBackfillRow, error) {
 			return st.Q.ListRulesForBackfill(ctx, db.ListRulesForBackfillParams{InstallationID: &installID, ID: cur, Limit: limit})
@@ -484,7 +480,7 @@ func backfillInstallation(ctx context.Context, logger *slog.Logger, st *store.St
 		},
 		nil) // byte-exact
 
-	// reviews (summary present) → type=pr_summary. No supermemory_id column → no
+	// reviews (summary present) → type=pr_summary. No memory_doc_id column → no
 	// write-back. Drift-prone: the pipeline's summary content (score/title/files/
 	// truncated summary) isn't reproducible byte-exact, so skip post-deploy rows.
 	sweepType(s, "pr_summary", uuid.Nil,
@@ -519,7 +515,7 @@ func afterCutoff(createdAt, cutoff time.Time) bool {
 }
 
 // writeBackFn persists the batch-returned document id to Postgres for one row.
-// Nil for doc types with no supermemory_id mirror column.
+// Nil for doc types with no memory_doc_id mirror column.
 type writeBackFn func(ctx context.Context, newID string) error
 
 // pendingBatch accumulates docs (and their per-doc write-backs) destined for one

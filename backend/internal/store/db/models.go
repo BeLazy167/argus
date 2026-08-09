@@ -75,18 +75,17 @@ type CommentOutcome struct {
 }
 
 type DecisionTrace struct {
-	ID            int64      `json:"id"`
-	RepoID        int64      `json:"repo_id"`
-	FilePath      string     `json:"file_path"`
-	SymbolName    *string    `json:"symbol_name"`
-	TraceType     string     `json:"trace_type"`
-	Content       string     `json:"content"`
-	Severity      *string    `json:"severity"`
-	ReviewID      *uuid.UUID `json:"review_id"`
-	PRNumber      *int       `json:"pr_number"`
-	Metadata      []byte     `json:"metadata"`
-	CreatedAt     *time.Time `json:"created_at"`
-	SupermemoryID *string    `json:"supermemory_id"`
+	ID         int64      `json:"id"`
+	RepoID     int64      `json:"repo_id"`
+	FilePath   string     `json:"file_path"`
+	SymbolName *string    `json:"symbol_name"`
+	TraceType  string     `json:"trace_type"`
+	Content    string     `json:"content"`
+	Severity   *string    `json:"severity"`
+	ReviewID   *uuid.UUID `json:"review_id"`
+	PRNumber   *int       `json:"pr_number"`
+	Metadata   []byte     `json:"metadata"`
+	CreatedAt  *time.Time `json:"created_at"`
 }
 
 type Installation struct {
@@ -154,25 +153,25 @@ type ModelPricing struct {
 }
 
 type Pattern struct {
-	ID                  int        `json:"id"`
-	InstallationID      int64      `json:"installation_id"`
-	RepoID              *int64     `json:"repo_id"`
-	Content             string     `json:"content"`
-	SupermemoryID       *string    `json:"supermemory_id"`
-	CreatedBy           *string    `json:"created_by"`
-	CreatedAt           *time.Time `json:"created_at"`
-	UpdatedAt           *time.Time `json:"updated_at"`
-	Source              *string    `json:"source"`
-	Category            *string    `json:"category"`
-	PRNumber            *int       `json:"pr_number"`
-	SupermemoryCustomID *string    `json:"supermemory_custom_id"`
+	ID             int        `json:"id"`
+	InstallationID int64      `json:"installation_id"`
+	RepoID         *int64     `json:"repo_id"`
+	Content        string     `json:"content"`
+	MemoryDocID    *string    `json:"memory_doc_id"`
+	CreatedBy      *string    `json:"created_by"`
+	CreatedAt      *time.Time `json:"created_at"`
+	UpdatedAt      *time.Time `json:"updated_at"`
+	Source         *string    `json:"source"`
+	Category       *string    `json:"category"`
+	PRNumber       *int       `json:"pr_number"`
+	MemoryCustomID *string    `json:"memory_custom_id"`
 }
 
 type PatternStat struct {
 	ID             int64      `json:"id"`
 	InstallationID int64      `json:"installation_id"`
 	RepoID         *int64     `json:"repo_id"`
-	SupermemoryID  string     `json:"supermemory_id"`
+	MemoryDocID    string     `json:"memory_doc_id"`
 	ContentHash    string     `json:"content_hash"`
 	Category       string     `json:"category"`
 	TimesMatched   int        `json:"times_matched"`
@@ -327,7 +326,7 @@ type Scenario struct {
 	LastFix         *string        `json:"last_fix"`
 	LastPrNumber    *int           `json:"last_pr_number"`
 	LastReviewID    *uuid.UUID     `json:"last_review_id"`
-	SupermemoryID   *string        `json:"supermemory_id"`
+	MemoryDocID     *string        `json:"memory_doc_id"`
 }
 
 type ScenarioRun struct {

@@ -180,7 +180,7 @@ func TestPatternIDLookupsExcludeOtherTenants(t *testing.T) {
 		out     *int64
 	}{{a, &idA}, {b, &idB}} {
 		err := pool.QueryRow(ctx, `
-			INSERT INTO patterns (installation_id, content, source, supermemory_id, supermemory_custom_id)
+			INSERT INTO patterns (installation_id, content, source, memory_doc_id, memory_custom_id)
 			VALUES ($1, 'shared content', 'confirmed', $2, $2)
 			RETURNING id`, seed.install, shared).Scan(seed.out)
 		if err != nil {
@@ -190,8 +190,8 @@ func TestPatternIDLookupsExcludeOtherTenants(t *testing.T) {
 	}
 
 	for name, lookup := range map[string]func(context.Context, int64, string) (int64, error){
-		"by supermemory_id": st.GetPatternIDBySupermemoryID,
-		"by custom_id":      st.GetPatternIDByCustomID,
+		"by memory_doc_id": st.GetPatternIDByMemoryDocID,
+		"by custom_id":     st.GetPatternIDByCustomID,
 	} {
 		t.Run(name, func(t *testing.T) {
 			got, err := lookup(ctx, a, shared)

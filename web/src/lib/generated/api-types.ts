@@ -384,7 +384,7 @@ export interface Pattern {
   installation_id: number /* int64 */;
   repo_id?: number /* int64 */;
   content: string;
-  supermemory_id?: string;
+  memory_doc_id?: string;
   created_by?: string;
   source: string;
   category?: string;

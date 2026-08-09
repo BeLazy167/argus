@@ -23,6 +23,7 @@ const (
 	defaultVoyageBaseURL     = "https://api.voyageai.com/v1"
 	defaultOpenAIBaseURL     = "https://api.openai.com/v1"
 	defaultOpenRouterBaseURL = "https://openrouter.ai/api/v1"
+	defaultVercelGatewayBase = "https://ai-gateway.vercel.sh/v1"
 )
 
 // HostedKeyedBase reports whether base is a known hosted endpoint that cannot
@@ -31,7 +32,8 @@ const (
 // save time instead of silently disabling embeddings at resolve time.
 func HostedKeyedBase(base string) bool {
 	b := NormalizeBaseURL(base)
-	return b == defaultVoyageBaseURL || b == defaultOpenAIBaseURL || b == defaultOpenRouterBaseURL
+	return b == defaultVoyageBaseURL || b == defaultOpenAIBaseURL ||
+		b == defaultOpenRouterBaseURL || b == defaultVercelGatewayBase
 }
 
 // NormalizeBaseURL canonicalizes a base URL: trailing slash trimmed, scheme

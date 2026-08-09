@@ -68,7 +68,7 @@ type ListAllPatternsForRepushRow struct {
 }
 
 // Full re-push (reconcile-memory --full): every pattern for one installation
-// regardless of supermemory_id, so the unified {repo}/_shared containers get
+// regardless of memory_doc_id, so the unified {repo}/_shared containers get
 // seeded and Supermemory rebuilds the relationship graph. The result set does
 // NOT shrink as rows are processed (unlike the pending sweep), so the caller
 // must do a single bounded pass — LIMIT caps the run, no loop-requery.
@@ -188,7 +188,7 @@ const listPatternsPendingSM = `-- name: ListPatternsPendingSM :many
 
 SELECT id, installation_id, repo_id, content, COALESCE(source, 'manual') as source, category, pr_number, created_at
 FROM patterns
-WHERE installation_id = $1 AND supermemory_id IS NULL
+WHERE installation_id = $1 AND memory_doc_id IS NULL
 ORDER BY created_at ASC
 LIMIT $2
 `
@@ -210,10 +210,14 @@ type ListPatternsPendingSMRow struct {
 }
 
 // Reconciler queries for cmd/reconcile-memory.
-// Find rows whose Supermemory write failed at creation time (supermemory_id
-// IS NULL) and update them once the retry succeeds. Partial indexes on
-// supermemory_id IS NULL (migration 039) keep these scans cheap.
-// Returns patterns with NULL supermemory_id for one installation, oldest
+// Find rows whose index write failed at creation time (memory_doc_id IS NULL)
+// and update them once the retry succeeds.
+//
+// Index coverage is uneven and worth knowing before optimising: scenarios has
+// a partial index for this scan (idx_scenarios_pending_index, migration 045,
+// renamed in 062), patterns has NONE -- its sweep is a plain filtered scan.
+// Migration 039 is unrelated to either.
+// Returns patterns with NULL memory_doc_id for one installation, oldest
 // first so backfill progresses in insertion order and small incidents don't
 // starve the queue.
 func (q *Queries) ListPatternsPendingSM(ctx context.Context, arg ListPatternsPendingSMParams) ([]ListPatternsPendingSMRow, error) {
@@ -248,7 +252,7 @@ func (q *Queries) ListPatternsPendingSM(ctx context.Context, arg ListPatternsPen
 const listScenariosPendingSM = `-- name: ListScenariosPendingSM :many
 SELECT id, installation_id, repo_id, description, severity, files
 FROM scenarios
-WHERE installation_id = $1 AND supermemory_id IS NULL AND active = TRUE
+WHERE installation_id = $1 AND memory_doc_id IS NULL AND active = TRUE
   AND repo_id IS NOT NULL
 ORDER BY created_at ASC
 LIMIT $2
@@ -303,12 +307,12 @@ func (q *Queries) ListScenariosPendingSM(ctx context.Context, arg ListScenariosP
 }
 
 const updatePatternSupermemoryID = `-- name: UpdatePatternSupermemoryID :execrows
-UPDATE patterns SET supermemory_id = $1, updated_at = NOW() WHERE id = $2
+UPDATE patterns SET memory_doc_id = $1, updated_at = NOW() WHERE id = $2
 `
 
 type UpdatePatternSupermemoryIDParams struct {
-	SupermemoryID *string `json:"supermemory_id"`
-	ID            int     `json:"id"`
+	MemoryDocID *string `json:"memory_doc_id"`
+	ID          int     `json:"id"`
 }
 
 // :execrows (not :exec) so the reconciler can detect the row vanishing mid-run:
@@ -316,7 +320,7 @@ type UpdatePatternSupermemoryIDParams struct {
 // the index call, this UPDATE matches 0 rows and the caller deletes the just-
 // created (otherwise orphaned, undeletable) Supermemory doc.
 func (q *Queries) UpdatePatternSupermemoryID(ctx context.Context, arg UpdatePatternSupermemoryIDParams) (int64, error) {
-	result, err := q.db.Exec(ctx, updatePatternSupermemoryID, arg.SupermemoryID, arg.ID)
+	result, err := q.db.Exec(ctx, updatePatternSupermemoryID, arg.MemoryDocID, arg.ID)
 	if err != nil {
 		return 0, err
 	}
@@ -324,15 +328,15 @@ func (q *Queries) UpdatePatternSupermemoryID(ctx context.Context, arg UpdatePatt
 }
 
 const updateScenarioSupermemoryID = `-- name: UpdateScenarioSupermemoryID :exec
-UPDATE scenarios SET supermemory_id = $1 WHERE id = $2
+UPDATE scenarios SET memory_doc_id = $1 WHERE id = $2
 `
 
 type UpdateScenarioSupermemoryIDParams struct {
-	SupermemoryID *string `json:"supermemory_id"`
-	ID            int64   `json:"id"`
+	MemoryDocID *string `json:"memory_doc_id"`
+	ID          int64   `json:"id"`
 }
 
 func (q *Queries) UpdateScenarioSupermemoryID(ctx context.Context, arg UpdateScenarioSupermemoryIDParams) error {
-	_, err := q.db.Exec(ctx, updateScenarioSupermemoryID, arg.SupermemoryID, arg.ID)
+	_, err := q.db.Exec(ctx, updateScenarioSupermemoryID, arg.MemoryDocID, arg.ID)
 	return err
 }

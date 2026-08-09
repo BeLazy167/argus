@@ -13,16 +13,16 @@ import (
 )
 
 const createPattern = `-- name: CreatePattern :one
-INSERT INTO patterns (installation_id, repo_id, content, supermemory_id, created_by, source, category, pr_number)
+INSERT INTO patterns (installation_id, repo_id, content, memory_doc_id, created_by, source, category, pr_number)
 VALUES ($1, $2, $3, $4, $5, COALESCE($6, 'manual'), $7, $8)
-RETURNING id, installation_id, repo_id, content, supermemory_id, created_by, COALESCE(source, 'manual') as source, category, pr_number, created_at, updated_at
+RETURNING id, installation_id, repo_id, content, memory_doc_id, created_by, COALESCE(source, 'manual') as source, category, pr_number, created_at, updated_at
 `
 
 type CreatePatternParams struct {
 	InstallationID int64       `json:"installation_id"`
 	RepoID         *int64      `json:"repo_id"`
 	Content        string      `json:"content"`
-	SupermemoryID  *string     `json:"supermemory_id"`
+	MemoryDocID    *string     `json:"memory_doc_id"`
 	CreatedBy      *string     `json:"created_by"`
 	Column6        interface{} `json:"column_6"`
 	Category       *string     `json:"category"`
@@ -34,7 +34,7 @@ type CreatePatternRow struct {
 	InstallationID int64      `json:"installation_id"`
 	RepoID         *int64     `json:"repo_id"`
 	Content        string     `json:"content"`
-	SupermemoryID  *string    `json:"supermemory_id"`
+	MemoryDocID    *string    `json:"memory_doc_id"`
 	CreatedBy      *string    `json:"created_by"`
 	Source         string     `json:"source"`
 	Category       *string    `json:"category"`
@@ -48,7 +48,7 @@ func (q *Queries) CreatePattern(ctx context.Context, arg CreatePatternParams) (C
 		arg.InstallationID,
 		arg.RepoID,
 		arg.Content,
-		arg.SupermemoryID,
+		arg.MemoryDocID,
 		arg.CreatedBy,
 		arg.Column6,
 		arg.Category,
@@ -60,7 +60,7 @@ func (q *Queries) CreatePattern(ctx context.Context, arg CreatePatternParams) (C
 		&i.InstallationID,
 		&i.RepoID,
 		&i.Content,
-		&i.SupermemoryID,
+		&i.MemoryDocID,
 		&i.CreatedBy,
 		&i.Source,
 		&i.Category,
@@ -89,7 +89,7 @@ func (q *Queries) DeletePattern(ctx context.Context, arg DeletePatternParams) (i
 }
 
 const getPattern = `-- name: GetPattern :one
-SELECT id, installation_id, repo_id, content, supermemory_id, created_by, COALESCE(source, 'manual') as source, category, pr_number, created_at, updated_at
+SELECT id, installation_id, repo_id, content, memory_doc_id, created_by, COALESCE(source, 'manual') as source, category, pr_number, created_at, updated_at
 FROM patterns WHERE id = $1
 `
 
@@ -98,7 +98,7 @@ type GetPatternRow struct {
 	InstallationID int64      `json:"installation_id"`
 	RepoID         *int64     `json:"repo_id"`
 	Content        string     `json:"content"`
-	SupermemoryID  *string    `json:"supermemory_id"`
+	MemoryDocID    *string    `json:"memory_doc_id"`
 	CreatedBy      *string    `json:"created_by"`
 	Source         string     `json:"source"`
 	Category       *string    `json:"category"`
@@ -115,7 +115,7 @@ func (q *Queries) GetPattern(ctx context.Context, id int) (GetPatternRow, error)
 		&i.InstallationID,
 		&i.RepoID,
 		&i.Content,
-		&i.SupermemoryID,
+		&i.MemoryDocID,
 		&i.CreatedBy,
 		&i.Source,
 		&i.Category,
@@ -159,7 +159,7 @@ func (q *Queries) GetPatternStats(ctx context.Context, dollar_1 []int64) ([]GetP
 }
 
 const listPatterns = `-- name: ListPatterns :many
-SELECT id, installation_id, repo_id, content, supermemory_id, created_by, COALESCE(source, 'manual') as source, category, pr_number, created_at, updated_at
+SELECT id, installation_id, repo_id, content, memory_doc_id, created_by, COALESCE(source, 'manual') as source, category, pr_number, created_at, updated_at
 FROM patterns WHERE installation_id = ANY($1::bigint[]) ORDER BY created_at DESC
 `
 
@@ -168,7 +168,7 @@ type ListPatternsRow struct {
 	InstallationID int64      `json:"installation_id"`
 	RepoID         *int64     `json:"repo_id"`
 	Content        string     `json:"content"`
-	SupermemoryID  *string    `json:"supermemory_id"`
+	MemoryDocID    *string    `json:"memory_doc_id"`
 	CreatedBy      *string    `json:"created_by"`
 	Source         string     `json:"source"`
 	Category       *string    `json:"category"`
@@ -191,7 +191,7 @@ func (q *Queries) ListPatterns(ctx context.Context, dollar_1 []int64) ([]ListPat
 			&i.InstallationID,
 			&i.RepoID,
 			&i.Content,
-			&i.SupermemoryID,
+			&i.MemoryDocID,
 			&i.CreatedBy,
 			&i.Source,
 			&i.Category,
@@ -210,7 +210,7 @@ func (q *Queries) ListPatterns(ctx context.Context, dollar_1 []int64) ([]ListPat
 }
 
 const listPatternsForRepo = `-- name: ListPatternsForRepo :many
-SELECT id, installation_id, repo_id, content, supermemory_id, created_by, COALESCE(source, 'manual') as source, category, pr_number, created_at, updated_at
+SELECT id, installation_id, repo_id, content, memory_doc_id, created_by, COALESCE(source, 'manual') as source, category, pr_number, created_at, updated_at
 FROM patterns WHERE installation_id = ANY($1::bigint[]) AND (repo_id IS NULL OR repo_id = $2) ORDER BY created_at DESC
 `
 
@@ -224,7 +224,7 @@ type ListPatternsForRepoRow struct {
 	InstallationID int64      `json:"installation_id"`
 	RepoID         *int64     `json:"repo_id"`
 	Content        string     `json:"content"`
-	SupermemoryID  *string    `json:"supermemory_id"`
+	MemoryDocID    *string    `json:"memory_doc_id"`
 	CreatedBy      *string    `json:"created_by"`
 	Source         string     `json:"source"`
 	Category       *string    `json:"category"`
@@ -247,7 +247,7 @@ func (q *Queries) ListPatternsForRepo(ctx context.Context, arg ListPatternsForRe
 			&i.InstallationID,
 			&i.RepoID,
 			&i.Content,
-			&i.SupermemoryID,
+			&i.MemoryDocID,
 			&i.CreatedBy,
 			&i.Source,
 			&i.Category,

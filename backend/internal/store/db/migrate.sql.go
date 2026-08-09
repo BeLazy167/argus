@@ -92,7 +92,7 @@ func (q *Queries) ListCommentOutcomesForBackfill(ctx context.Context, arg ListCo
 
 const listPatternsForBackfill = `-- name: ListPatternsForBackfill :many
 SELECT p.id, p.repo_id, p.content, COALESCE(p.source, 'manual') AS source,
-       p.category, p.pr_number, p.supermemory_id AS old_sm_id, r.full_name
+       p.category, p.pr_number, p.memory_doc_id AS old_sm_id, r.full_name
 FROM patterns p
 LEFT JOIN repos r ON r.id = p.repo_id
 WHERE p.installation_id = $1 AND p.id > $2
@@ -119,7 +119,7 @@ type ListPatternsForBackfillRow struct {
 
 // (b) patterns → type=pattern docs. LEFT JOIN repos: NULL repo_id is an
 // org-wide/shared pattern (→ _shared); non-NULL routes to {repo}. old_sm_id is
-// the current (legacy) supermemory_id, captured so the caller can remap
+// the current (legacy) memory_doc_id, captured so the caller can remap
 // pattern_stats from the legacy id to the new one before overwriting the column.
 func (q *Queries) ListPatternsForBackfill(ctx context.Context, arg ListPatternsForBackfillParams) ([]ListPatternsForBackfillRow, error) {
 	rows, err := q.db.Query(ctx, listPatternsForBackfill, arg.InstallationID, arg.ID, arg.Limit)
@@ -429,8 +429,8 @@ func (q *Queries) ListScenariosForBackfill(ctx context.Context, arg ListScenario
 }
 
 const remapPatternStatsSupermemoryID = `-- name: RemapPatternStatsSupermemoryID :execrows
-UPDATE pattern_stats SET supermemory_id = $1, updated_at = NOW()
-WHERE supermemory_id = $2
+UPDATE pattern_stats SET memory_doc_id = $1, updated_at = NOW()
+WHERE memory_doc_id = $2
 `
 
 type RemapPatternStatsSupermemoryIDParams struct {
@@ -439,8 +439,8 @@ type RemapPatternStatsSupermemoryIDParams struct {
 }
 
 // Repoint a pattern_stats row from its legacy Supermemory id to the new backfill
-// id. pattern_stats.supermemory_id is UNIQUE and previously pointed at the
-// legacy doc; the migration overwrites patterns.supermemory_id, so this keeps
+// id. pattern_stats.memory_doc_id is UNIQUE and previously pointed at the
+// legacy doc; the migration overwrites patterns.memory_doc_id, so this keeps
 // the stats row joined to the live doc. Keyed on the legacy id (exact) rather
 // than content_hash — pattern_stats has no writer in the codebase (empty in
 // prod) and patterns has no content_hash column, so the legacy id is the only

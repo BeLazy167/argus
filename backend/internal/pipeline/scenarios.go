@@ -18,7 +18,7 @@ import (
 type scenarioStore interface {
 	CreateScenario(ctx context.Context, installationID int64, repoID *int64, description, source, sourceRef string, files, modules []string, severity string) (int64, error)
 	CreatePendingScenario(ctx context.Context, installationID int64, repoID *int64, description, source, sourceRef string, files, modules []string, severity string) (int64, error)
-	SetScenarioSupermemoryID(ctx context.Context, id int64, supermemoryID string) error
+	SetScenarioMemoryDocID(ctx context.Context, id int64, supermemoryID string) error
 	ListScenariosForFiles(ctx context.Context, repoID int64, filePaths []string) ([]store.Scenario, error)
 }
 
@@ -133,11 +133,11 @@ func StoreScenarioSeeds(ctx context.Context, st scenarioStore, indexer memory.In
 				// Record the deterministic customID (single-sourced via
 				// memory.ScenarioCustomID — same repoIDSegment collision-hash the
 				// real SM write uses) into 045's mirror column so a NULL
-				// supermemory_id means the write failed, not that the pipeline
+				// memory_doc_id means the write failed, not that the pipeline
 				// never attempted it. A bare CustomIDSanitize here would drift from
 				// the actual doc ID for lossy repo names (e.g. "a.b", "_shared").
 				customID := memory.ScenarioCustomID(repo, id)
-				if err := st.SetScenarioSupermemoryID(ctx, id, customID); err != nil {
+				if err := st.SetScenarioMemoryDocID(ctx, id, customID); err != nil {
 					slog.Warn("write-back scenario SM id", "error", err, "id", id)
 				}
 			}
