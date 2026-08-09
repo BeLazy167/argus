@@ -69,6 +69,7 @@ const PROVIDERS = [
 	"gcp_vertex",
 	"aws_bedrock",
 	"zhipu",
+	"vercel",
 ] as const;
 type Provider = (typeof PROVIDERS)[number];
 
@@ -84,6 +85,7 @@ const PROVIDER_LABELS: Record<Provider, string> = {
 	gcp_vertex: "GCP Vertex AI",
 	aws_bedrock: "AWS Bedrock",
 	zhipu: "Zhipu AI (GLM)",
+	vercel: "Vercel AI Gateway",
 };
 
 const MODEL_PICKS: Record<Provider, string[]> = {
@@ -106,6 +108,12 @@ const MODEL_PICKS: Record<Provider, string[]> = {
 	gcp_vertex: ["gemini-2.5-pro", "gemini-2.5-flash"],
 	aws_bedrock: ["anthropic.claude-sonnet-4", "anthropic.claude-haiku"],
 	zhipu: ["glm-5", "glm-4-plus", "glm-4"],
+	vercel: [
+		"openai/gpt-5.6-sol",
+		"openai/gpt-5.6-luna",
+		"openai/gpt-5.6-terra",
+		"anthropic/claude-sonnet-4.6",
+	],
 };
 
 const CORE_STAGES = ["triage", "review", "scoring", "synthesis"] as const;

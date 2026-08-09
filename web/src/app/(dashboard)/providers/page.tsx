@@ -29,6 +29,7 @@ const PROVIDERS = [
 	"gcp_vertex",
 	"aws_bedrock",
 	"zhipu",
+	"vercel",
 ] as const;
 type Provider = (typeof PROVIDERS)[number];
 
@@ -44,6 +45,7 @@ const PROVIDER_LABELS: Record<Provider, string> = {
 	gcp_vertex: "GCP Vertex AI",
 	aws_bedrock: "AWS Bedrock",
 	zhipu: "Zhipu AI (GLM)",
+	vercel: "Vercel AI Gateway",
 };
 
 const PROVIDER_BASE_URLS: Record<Provider, string> = {
@@ -58,6 +60,7 @@ const PROVIDER_BASE_URLS: Record<Provider, string> = {
 	gcp_vertex: "",
 	aws_bedrock: "",
 	zhipu: "https://api.z.ai/api/paas/v4",
+	vercel: "https://ai-gateway.vercel.sh/v1?only=azure",
 };
 
 const CLOUD_PROVIDERS: Set<Provider> = new Set(["azure", "gcp_vertex", "aws_bedrock"]);
@@ -154,6 +157,14 @@ const ProviderKeyCard = memo(function ProviderKeyCard({
 				{provider === "aws_bedrock" && (
 					<p className="text-[9px] font-mono text-slate-text/70 mt-1 leading-relaxed">
 						{"Requires IAM credentials. API key = AWS session token. Limited support."}
+					</p>
+				)}
+				{provider === "vercel" && (
+					<p className="text-[9px] font-mono text-slate-text/70 mt-1 leading-relaxed">
+						{"Models use creator/model form, e.g. openai/gpt-5.6-sol"}<br/>
+						{"Leave base URL blank and the gateway picks the upstream, and may"}<br/>
+						{"fall back off your own credentials. Pin it with ?only=<provider>,"}<br/>
+						{"comma-separated for several: .../v1?only=azure"}
 					</p>
 				)}
 			</div>
