@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -323,6 +324,69 @@ func TestComplete_WireFormat(t *testing.T) {
 					if _, has := nested[absent]; has {
 						t.Errorf("wire[reasoning] must NOT include key %q", absent)
 					}
+				}
+			}
+		})
+	}
+}
+
+// TestNewVercelGatewayProvider_OnlyParam covers base-URL parsing for the
+// routing pin. The empty-value case is the one that bit: the request path is
+// appended to baseURL by concatenation, so leaving "?only=" attached produced
+// ".../v1?only=/chat/completions" — every call hit /v1 with the endpoint
+// swallowed into the query string.
+func TestNewVercelGatewayProvider_OnlyParam(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		suffix   string
+		wantOnly []string
+	}{
+		{"pinned_single", "?only=azure", []string{"azure"}},
+		{"pinned_multiple", "?only=azure,openai", []string{"azure", "openai"}},
+		{"empty_value_degrades_to_unpinned", "?only=", nil},
+		{"whitespace_only_degrades_to_unpinned", "?only=%20", nil},
+		{"absent_is_unpinned", "", nil},
+	}
+
+	const stub = `{"choices":[{"message":{"content":"ok","role":"assistant"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var gotPath string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.Path
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(stub))
+			}))
+			defer srv.Close()
+
+			p := NewVercelGatewayProvider("test-key", srv.URL+tc.suffix)
+			if _, err := p.Complete(context.Background(), CompletionRequest{
+				Model:     "openai/gpt-5.6-sol",
+				Messages:  []Message{{Role: "user", Content: "hi"}},
+				MaxTokens: 100,
+			}); err != nil {
+				t.Fatalf("Complete: %v", err)
+			}
+
+			// The endpoint must always be reached, whatever the param looked like.
+			if gotPath != "/chat/completions" {
+				t.Errorf("request path = %q, want %q (baseURL=%q)", gotPath, "/chat/completions", p.baseURL)
+			}
+			if strings.Contains(p.baseURL, "only") {
+				t.Errorf("baseURL still carries the routing param: %q", p.baseURL)
+			}
+			if len(p.gatewayOnly) != len(tc.wantOnly) {
+				t.Fatalf("gatewayOnly = %v, want %v", p.gatewayOnly, tc.wantOnly)
+			}
+			for i, want := range tc.wantOnly {
+				if p.gatewayOnly[i] != want {
+					t.Errorf("gatewayOnly[%d] = %q, want %q", i, p.gatewayOnly[i], want)
 				}
 			}
 		})

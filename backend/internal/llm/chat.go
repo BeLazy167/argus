@@ -138,13 +138,20 @@ func NewAzureProvider(apiKey, baseURL string) *ChatProvider {
 func NewVercelGatewayProvider(apiKey, baseURL string) *ChatProvider {
 	var only []string
 	if u, err := url.Parse(baseURL); err == nil {
-		if v := u.Query().Get("only"); v != "" {
-			for _, slug := range strings.Split(v, ",") {
+		q := u.Query()
+		// Branch on the parameter being PRESENT, not on it having a value.
+		// Keying on a non-empty value left "?only=" attached to baseURL, and
+		// since the request path is appended by string concatenation the result
+		// was ".../v1?only=/chat/completions" — path collapses to /v1 and the
+		// endpoint is swallowed by the query. Stripping on presence means a
+		// valueless param degrades to unpinned routing instead of breaking
+		// every request.
+		if _, present := q["only"]; present {
+			for _, slug := range strings.Split(q.Get("only"), ",") {
 				if slug = strings.TrimSpace(slug); slug != "" {
 					only = append(only, slug)
 				}
 			}
-			q := u.Query()
 			q.Del("only")
 			u.RawQuery = q.Encode()
 			baseURL = strings.TrimSuffix(u.String(), "?")
