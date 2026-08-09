@@ -1,0 +1,20 @@
+-- Install pgContext alongside pgvector.
+--
+-- This migration installs the EXTENSION ONLY. It deliberately does not convert
+-- the memories.embedding column and does not register the collection.
+--
+-- Why the split: the conversion functions take explicit safety gates
+-- (application_dependencies_reviewed, sessions_drained). This file runs from
+-- release_command during a ROLLING deploy, where sessions are by definition not
+-- drained. Asserting a gate that is false is how a "safe" migration becomes an
+-- incident. The conversion is an operator step — scripts/adopt-pgcontext.sh.
+--
+-- pgvector is NOT removed. The two coexist by design: pgvector owns public.*
+-- types, pgContext owns pgcontext.* types. pgvector must stay installed for the
+-- ownership conversion to hand the column over, and it is the rollback path.
+--
+-- ORDERING: this fails if the database image does not carry the extension
+-- files. That failure is intentional and is the gate — a non-zero release
+-- command aborts the deploy, so the app binary can never reach production
+-- expecting a pgContext that is not there. Swap the argus-db image first.
+CREATE EXTENSION IF NOT EXISTS pgcontext;
