@@ -14,6 +14,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o /migrate ./cmd/migrate
 RUN CGO_ENABLED=0 GOOS=linux go build -o /reconcile-memory ./cmd/reconcile-memory
 RUN CGO_ENABLED=0 GOOS=linux go build -o /migrate-memory ./cmd/migrate-memory
 RUN CGO_ENABLED=0 GOOS=linux go build -o /export-memory ./cmd/export-memory
+RUN CGO_ENABLED=0 GOOS=linux go build -o /backfill-memory ./cmd/backfill-memory
 
 # Install staticcheck (Go SAST tool)
 RUN go install honnef.co/go/tools/cmd/staticcheck@2025.1.1
@@ -44,6 +45,7 @@ COPY --from=builder /migrate /migrate
 COPY --from=builder /reconcile-memory /reconcile-memory
 COPY --from=builder /migrate-memory /migrate-memory
 COPY --from=builder /export-memory /export-memory
+COPY --from=builder /backfill-memory /backfill-memory
 
 EXPOSE 8080
 # CMD, not ENTRYPOINT: Fly's release_command replaces CMD on the ephemeral release machine.

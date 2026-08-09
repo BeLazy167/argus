@@ -105,6 +105,19 @@ func allZero(v []float32) bool {
 	return true
 }
 
+// ImportDocs writes pre-built documents through the SAME path live writes use.
+//
+// Exported solely for the phase-0 archive backfill (cmd/backfill-memory). It
+// deliberately adds no logic of its own: the imported corpus has to be
+// indistinguishable from what the pipeline would have written, which means
+// inheriting upsertDocs' dedupe, NUL stripping, embedding, dimensionality and
+// zero-vector guards rather than reimplementing a second, subtly different
+// writer. A divergence here would surface as rows that read back fine but
+// never clear a similarity floor.
+func (idx *PGIndexer) ImportDocs(ctx context.Context, docs []Doc) error {
+	return idx.upsertDocs(ctx, docs)
+}
+
 // upsertDocs embeds and writes a batch of documents.
 //
 // Dedupe (last-write-wins on customId) keeps the batch deterministic: each
