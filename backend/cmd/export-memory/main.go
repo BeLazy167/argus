@@ -23,6 +23,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/BeLazy167/argus/backend/internal/crypto"
 	"github.com/BeLazy167/argus/backend/internal/memory"
 	"github.com/BeLazy167/argus/backend/internal/store"
 )
@@ -56,6 +57,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Without this every installation's Supermemory key fails to decrypt, the
+	// registry hands back a nil client, and the sweep reports each install as
+	// an ordinary "no key" skip — exiting 0 with archived=0 and
+	// failed_installations=0. A snapshot tool that reports success having
+	// copied nothing is the worst outcome available, so refuse to start.
+	if err := crypto.InitFromEnv(); err != nil {
+		logger.Error("ENCRYPTION_KEY is required to decrypt per-installation Supermemory keys", "error", err)
+		os.Exit(1)
+	}
+
 	// Signal-aware: a snapshot interrupted mid-container is fine (idempotent
 	// re-run resumes), but it must stop promptly rather than finish the sweep.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -83,14 +94,17 @@ func run(ctx context.Context, logger *slog.Logger, st *store.Store, cfg runConfi
 	}
 	logger.Info("export starting", "installations", len(installs), "plan", cfg.plan)
 
-	var archived, skipped, failed int
+	var archived, skipped, failed, skippedNoClient int
 	for _, id := range installs {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		a, s, err := exportInstallation(ctx, logger, st, registry, id, cfg)
+		a, s, noClient, err := exportInstallation(ctx, logger, st, registry, id, cfg)
 		archived += a
 		skipped += s
+		if noClient {
+			skippedNoClient++
+		}
 		if err != nil {
 			// One installation's failure must not abandon the rest: a revoked
 			// key or a container that 500s is expected at this scale, and the
@@ -104,8 +118,14 @@ func run(ctx context.Context, logger *slog.Logger, st *store.Store, cfg runConfi
 		"installations", len(installs),
 		"archived", archived,
 		"skipped_no_doc_id", skipped,
+		"skipped_no_client", skippedNoClient,
 		"failed_installations", failed,
 	)
+	if skippedNoClient == len(installs) && len(installs) > 0 {
+		// Every install unreachable is a configuration fault, not an empty
+		// corpus. Returning nil here would exit 0 on a snapshot of nothing.
+		return fmt.Errorf("no installation yielded a supermemory client (%d/%d); nothing was archived", skippedNoClient, len(installs))
+	}
 	if skipped > 0 {
 		// Loud: these are documents the archive does NOT hold, and the archive
 		// is the only copy of the SM-only classes once containers are deleted.
@@ -125,8 +145,11 @@ func resolveInstallations(ctx context.Context, st *store.Store, one int64) ([]in
 }
 
 // exportInstallation archives every container this installation owns. Returns
-// (archived, skipped).
-func exportInstallation(ctx context.Context, logger *slog.Logger, st *store.Store, registry *memory.Registry, installID int64, cfg runConfig) (int, int, error) {
+// (archived, skipped, noClient). noClient reports that the installation was
+// passed over for want of a usable Supermemory client, which the caller
+// aggregates — a sweep where every install is skipped that way is a
+// misconfiguration, not an empty corpus.
+func exportInstallation(ctx context.Context, logger *slog.Logger, st *store.Store, registry *memory.Registry, installID int64, cfg runConfig) (archivedN, skippedN int, noClient bool, err error) {
 	// GetClient, never GetIndexer: GetIndexer issues the one-time
 	// DisableLLMFilter settings PATCH, and a read-only snapshot must not mutate
 	// the customer's Supermemory account.
@@ -136,18 +159,20 @@ func exportInstallation(ctx context.Context, logger *slog.Logger, st *store.Stor
 	// would exit 0 on a partial snapshot, and this archive is the last copy of
 	// the SM-only classes.
 	if err := ctx.Err(); err != nil {
-		return 0, 0, err
+		return 0, 0, false, err
 	}
 	if client == nil {
 		// No key, or a decrypt failure. Per the migration plan these installs
-		// are re-derive-only and their SM-only classes are accepted losses.
+		// are re-derive-only and their SM-only classes are accepted losses —
+		// but the caller counts them, because a run where EVERY install lands
+		// here is indistinguishable from a clean empty sweep otherwise.
 		logger.Info("no supermemory client; skipping installation", "installation_id", installID)
-		return 0, 0, nil
+		return 0, 0, true, nil
 	}
 
 	tags, err := containerTags(ctx, st, installID)
 	if err != nil {
-		return 0, 0, fmt.Errorf("resolving container tags: %w", err)
+		return 0, 0, false, fmt.Errorf("resolving container tags: %w", err)
 	}
 
 	var archived, skipped int
@@ -156,7 +181,7 @@ func exportInstallation(ctx context.Context, logger *slog.Logger, st *store.Stor
 		archived += a
 		skipped += s
 		if err != nil {
-			return archived, skipped, fmt.Errorf("container %q: %w", tag, err)
+			return archived, skipped, false, fmt.Errorf("container %q: %w", tag, err)
 		}
 	}
 
@@ -169,7 +194,7 @@ func exportInstallation(ctx context.Context, logger *slog.Logger, st *store.Stor
 				"containers", len(tags), "archived_this_run", archived, "archive_total", total)
 		}
 	}
-	return archived, skipped, nil
+	return archived, skipped, false, nil
 }
 
 // containerTags lists every container an installation writes to: one per repo
