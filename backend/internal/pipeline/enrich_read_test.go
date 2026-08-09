@@ -36,8 +36,24 @@ type fakeEnrichStore struct {
 	bySupermemoryID map[string]int64
 	autoSuppressed  map[string]bool // categories the repo auto-suppressed; nil = none
 
-	mu          sync.Mutex
-	incremented []int64
+	mu            sync.Mutex
+	incremented   []int64
+	lastInstallID int64 // tenant scope the enricher passed to the lookups
+}
+
+// recordScope/scope go through the mutex the fake already holds for
+// incremented — Enricher.Run enriches comments concurrently, so an unguarded
+// write here is a real race, not a test artifact.
+func (f *fakeEnrichStore) recordScope(installID int64) {
+	f.mu.Lock()
+	f.lastInstallID = installID
+	f.mu.Unlock()
+}
+
+func (f *fakeEnrichStore) scope() int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastInstallID
 }
 
 func (f *fakeEnrichStore) GetAutoSuppressedCategories(context.Context, int64) (map[string]bool, error) {
@@ -47,14 +63,16 @@ func (f *fakeEnrichStore) GetAutoSuppressedCategories(context.Context, int64) (m
 	return map[string]bool{}, nil
 }
 
-func (f *fakeEnrichStore) GetPatternIDByCustomID(_ context.Context, customID string) (int64, error) {
+func (f *fakeEnrichStore) GetPatternIDByCustomID(_ context.Context, installID int64, customID string) (int64, error) {
+	f.recordScope(installID)
 	if id, ok := f.byCustomID[customID]; ok {
 		return id, nil
 	}
 	return 0, pgx.ErrNoRows
 }
 
-func (f *fakeEnrichStore) GetPatternIDBySupermemoryID(_ context.Context, smID string) (int64, error) {
+func (f *fakeEnrichStore) GetPatternIDBySupermemoryID(_ context.Context, installID int64, smID string) (int64, error) {
+	f.recordScope(installID)
 	if id, ok := f.bySupermemoryID[smID]; ok {
 		return id, nil
 	}
@@ -81,6 +99,41 @@ func newTestEnricher(fake *memorytest.Fake, linker PatternLinker) *Enricher {
 		repo:         "widget",
 		repoFullName: "acme/widget",
 		prNumber:     1,
+		installID:    77,
+	}
+}
+
+// TestResolvePatternIDIsTenantScoped: the doc-id -> pattern-row lookups were
+// unscoped, which was safe only while the id came from Supermemory's server and
+// was globally unique. PGIndexer returns the DETERMINISTIC customId instead, so
+// two installations that learned the same pattern in same-named repos hold the
+// identical string — and an unscoped `LIMIT 1` with no ORDER BY can resolve one
+// tenant's search hit to another tenant's patterns row, persisting a foreign
+// matched_pattern_id and bumping its stats.
+//
+// Retrieval itself is tenant-scoped; this is the post-retrieval resolution.
+func TestResolvePatternIDIsTenantScoped(t *testing.T) {
+	store := &fakeEnrichStore{byCustomID: map[string]int64{"api--confirmed--abc": 5}}
+	e := newTestEnricher(&memorytest.Fake{}, store)
+
+	if _, ok := e.resolvePatternID(context.Background(), memory.PatternMatch{
+		ID:       "api--confirmed--abc",
+		Metadata: map[string]string{"custom_id": "api--confirmed--abc"},
+	}); !ok {
+		t.Fatal("lookup missed")
+	}
+	if store.scope() != 77 {
+		t.Errorf("lookup scoped to installation %d, want 77 — an unscoped query can resolve to another tenant's pattern row", store.scope())
+	}
+
+	// The supermemory_id fallback must carry the scope too.
+	store2 := &fakeEnrichStore{bySupermemoryID: map[string]int64{"sm-1": 9}}
+	e2 := newTestEnricher(&memorytest.Fake{}, store2)
+	if _, ok := e2.resolvePatternID(context.Background(), memory.PatternMatch{ID: "sm-1"}); !ok {
+		t.Fatal("fallback lookup missed")
+	}
+	if store2.scope() != 77 {
+		t.Errorf("fallback lookup scoped to installation %d, want 77", store2.scope())
 	}
 }
 

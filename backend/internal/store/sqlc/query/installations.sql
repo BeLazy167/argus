@@ -37,5 +37,11 @@ UPDATE installations SET default_settings = $1 WHERE id = $2;
 -- name: GetInstallationFeatureFlags :one
 SELECT COALESCE(feature_flags, '{}')::jsonb FROM installations WHERE id = $1;
 
--- name: UpdateInstallationFeatureFlags :exec
-UPDATE installations SET feature_flags = $2 WHERE id = $1;
+-- name: MergeInstallationFeatureFlags :exec
+-- Merge the given keys into feature_flags, leaving every other key intact.
+-- jsonb || jsonb is a right-biased top-level merge applied inside the UPDATE,
+-- so there is no read-modify-write window: an operator flipping memory_backend
+-- by hand cannot be silently reverted by a concurrent settings save. The
+-- column is NOT NULL (migration 030) with a jsonb_typeof = 'object' CHECK
+-- (032), so both operands are always objects.
+UPDATE installations SET feature_flags = feature_flags || @patch::jsonb WHERE id = @id;

@@ -99,10 +99,17 @@ func (s *Store) GetPattern(ctx context.Context, id int64) (*Pattern, error) {
 // pattern_stats. Returns (0, pgx.ErrNoRows) when no patterns row carries that
 // supermemory_id (e.g. a synthesis/convention doc that was never mirrored to
 // the patterns table) — a miss, not a failure.
-func (s *Store) GetPatternIDBySupermemoryID(ctx context.Context, supermemoryID string) (int64, error) {
+// Scoped by installation: the id was globally unique only while it came from
+// Supermemory's server. PGIndexer returns the deterministic customId instead,
+// so two installations that learned the same pattern in same-named repos hold
+// the SAME string here, and an unscoped LIMIT 1 with no ORDER BY can resolve
+// one tenant's hit to another tenant's row — persisting a foreign
+// matched_pattern_id and bumping its stats.
+func (s *Store) GetPatternIDBySupermemoryID(ctx context.Context, installationID int64, supermemoryID string) (int64, error) {
 	var id int64
 	err := s.Pool.QueryRow(ctx,
-		`SELECT id FROM patterns WHERE supermemory_id = $1 LIMIT 1`, supermemoryID).Scan(&id)
+		`SELECT id FROM patterns WHERE installation_id = $1 AND supermemory_id = $2 LIMIT 1`,
+		installationID, supermemoryID).Scan(&id)
 	if err != nil {
 		return 0, err
 	}
@@ -116,10 +123,13 @@ func (s *Store) GetPatternIDBySupermemoryID(ctx context.Context, supermemoryID s
 // mirrored into result metadata at write time. Returns (0, pgx.ErrNoRows) when
 // no row carries that customId (legacy rows written before the mirror column, or
 // docs never mirrored to the patterns table) — a miss, not a failure.
-func (s *Store) GetPatternIDByCustomID(ctx context.Context, customID string) (int64, error) {
+// Scoped by installation for the same reason as the sibling above: customIds
+// are deterministic per repo+content, so they were never globally unique.
+func (s *Store) GetPatternIDByCustomID(ctx context.Context, installationID int64, customID string) (int64, error) {
 	var id int64
 	err := s.Pool.QueryRow(ctx,
-		`SELECT id FROM patterns WHERE supermemory_custom_id = $1 LIMIT 1`, customID).Scan(&id)
+		`SELECT id FROM patterns WHERE installation_id = $1 AND supermemory_custom_id = $2 LIMIT 1`,
+		installationID, customID).Scan(&id)
 	if err != nil {
 		return 0, err
 	}

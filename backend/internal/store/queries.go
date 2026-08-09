@@ -1400,12 +1400,15 @@ func (s *Store) GetInstallationFeatureFlags(ctx context.Context, installationID 
 	return s.Q.GetInstallationFeatureFlags(ctx, installationID)
 }
 
-// UpdateInstallationFeatureFlags overwrites the feature_flags JSONB for an
-// installation with an already-marshaled+clamped payload.
-func (s *Store) UpdateInstallationFeatureFlags(ctx context.Context, installationID int64, flags json.RawMessage) error {
-	return s.Q.UpdateInstallationFeatureFlags(ctx, db.UpdateInstallationFeatureFlagsParams{
-		ID:           installationID,
-		FeatureFlags: flags,
+// MergeInstallationFeatureFlags merges the given keys into the feature_flags
+// JSONB, leaving every other key intact. Merging in SQL rather than
+// read-modify-writing in Go keeps it atomic: the settings form owns three
+// keys while operators set others (memory_backend) by direct UPDATE, and a
+// lost update between those two writers reverts a backend flip silently.
+func (s *Store) MergeInstallationFeatureFlags(ctx context.Context, installationID int64, patch json.RawMessage) error {
+	return s.Q.MergeInstallationFeatureFlags(ctx, db.MergeInstallationFeatureFlagsParams{
+		ID:    installationID,
+		Patch: patch,
 	})
 }
 

@@ -171,6 +171,26 @@ func (q *Queries) GetPlanTier(ctx context.Context, id int64) (string, error) {
 	return plan_tier, err
 }
 
+const mergeInstallationFeatureFlags = `-- name: MergeInstallationFeatureFlags :exec
+UPDATE installations SET feature_flags = feature_flags || $1::jsonb WHERE id = $2
+`
+
+type MergeInstallationFeatureFlagsParams struct {
+	Patch json.RawMessage `json:"patch"`
+	ID    int64           `json:"id"`
+}
+
+// Merge the given keys into feature_flags, leaving every other key intact.
+// jsonb || jsonb is a right-biased top-level merge applied inside the UPDATE,
+// so there is no read-modify-write window: an operator flipping memory_backend
+// by hand cannot be silently reverted by a concurrent settings save. The
+// column is NOT NULL (migration 030) with a jsonb_typeof = 'object' CHECK
+// (032), so both operands are always objects.
+func (q *Queries) MergeInstallationFeatureFlags(ctx context.Context, arg MergeInstallationFeatureFlagsParams) error {
+	_, err := q.db.Exec(ctx, mergeInstallationFeatureFlags, arg.Patch, arg.ID)
+	return err
+}
+
 const setInstallationClerkOrgID = `-- name: SetInstallationClerkOrgID :exec
 UPDATE installations SET clerk_org_id = $1 WHERE id = $2
 `
@@ -219,19 +239,5 @@ UPDATE installations SET suspended_at = NOW() WHERE installation_id = $1
 
 func (q *Queries) SuspendInstallation(ctx context.Context, installationID int64) error {
 	_, err := q.db.Exec(ctx, suspendInstallation, installationID)
-	return err
-}
-
-const updateInstallationFeatureFlags = `-- name: UpdateInstallationFeatureFlags :exec
-UPDATE installations SET feature_flags = $2 WHERE id = $1
-`
-
-type UpdateInstallationFeatureFlagsParams struct {
-	ID           int64           `json:"id"`
-	FeatureFlags json.RawMessage `json:"feature_flags"`
-}
-
-func (q *Queries) UpdateInstallationFeatureFlags(ctx context.Context, arg UpdateInstallationFeatureFlagsParams) error {
-	_, err := q.db.Exec(ctx, updateInstallationFeatureFlags, arg.ID, arg.FeatureFlags)
 	return err
 }

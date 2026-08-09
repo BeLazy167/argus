@@ -108,8 +108,19 @@ func Run() error {
 		return pricingCache.Lookup(ctx, model)
 	})
 
-	// Memory / RAG (per-org via registry)
-	memRegistry := memory.NewRegistry(db, logger)
+	// Memory / RAG (per-org via registry). The Postgres backend is reachable
+	// only for installations whose memory_backend feature flag selects it;
+	// every other install keeps reading and writing Supermemory. Wiring it
+	// here — rather than leaving the constructors referenced only by tests —
+	// is what makes the flag load-bearing at all.
+	embedRegistry := memory.NewEmbedderRegistry(db, memory.PlatformEmbeddings{
+		APIKey:     cfg.EmbeddingsAPIKey,
+		BaseURL:    cfg.EmbeddingsBaseURL,
+		Model:      cfg.EmbeddingsModel,
+		Dimensions: cfg.EmbeddingsDimensions,
+	}, logger)
+	memRegistry := memory.NewRegistry(db, logger).
+		WithPostgresBackend(db.Pool, embedRegistry, db)
 
 	// Pipeline
 	eventBus := pipeline.NewEventBus()

@@ -45,6 +45,7 @@ type Enricher struct {
 	prNumber     int       // for the suppression log
 	reviewID     uuid.UUID // for the suppression log
 	repoID       int64     // DB repo id for auto-suppressed categories; 0 => skip
+	installID    int64     // tenant scope for doc-id -> pattern-row resolution
 	changeClass  string    // contract change class for the dismissal lifecycle filter
 	traceID      string    // for the goroutine-panic event
 
@@ -312,7 +313,7 @@ func (e *Enricher) publishEvent(evt EventType, data map[string]any) {
 // when neither key resolves.
 func (e *Enricher) resolvePatternID(ctx context.Context, match memory.PatternMatch) (int64, bool) {
 	if customID := match.Metadata["custom_id"]; customID != "" {
-		if pid, err := e.linker.GetPatternIDByCustomID(ctx, customID); err == nil {
+		if pid, err := e.linker.GetPatternIDByCustomID(ctx, e.installID, customID); err == nil {
 			return pid, true
 		} else if !errors.Is(err, pgx.ErrNoRows) {
 			e.logger.Warn("pattern id lookup by custom_id", "error", err, "custom_id", customID)
@@ -320,7 +321,7 @@ func (e *Enricher) resolvePatternID(ctx context.Context, match memory.PatternMat
 		// customId miss (legacy row / not mirrored) — fall through to the
 		// supermemory_id match on the result's own id.
 	}
-	if pid, err := e.linker.GetPatternIDBySupermemoryID(ctx, match.ID); err == nil {
+	if pid, err := e.linker.GetPatternIDBySupermemoryID(ctx, e.installID, match.ID); err == nil {
 		return pid, true
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		e.logger.Warn("pattern id lookup", "error", err, "supermemory_id", match.ID)

@@ -1790,6 +1790,7 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 		prNumber:     run.PREvent.PRNumber,
 		reviewID:     run.ReviewID,
 		repoID:       run.DBRepoID,
+		installID:    run.DBInstallationID,
 		changeClass:  changeClass,
 		traceID:      run.TraceID,
 		concurrency:  enrichConcurrency,

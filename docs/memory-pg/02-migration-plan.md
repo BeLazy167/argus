@@ -64,6 +64,75 @@ scheduled machine whose image does NOT update on `fly deploy`. Through phases
 mid-migration. End state: fold decay into the main app or delete outright
 (query-time decay removes the need).
 
+**Phase-1 wiring landed (PR #203) — read these before flipping ANY install.** The backend is now selectable per installation via a
+`memory_backend` key in `feature_flags`, defaulting to Supermemory. Nothing is
+flipped yet, and these must be closed first:
+
+1. **The CLIs skip flagged installs — so their maintenance work stops too.**
+   *(Implemented in PR #203; this is now a consequence to plan for, not an open
+   item.)* `cmd/reconcile-memory` and `cmd/migrate-memory` build their own
+   `memory.Registry` without `WithPostgresBackend`, so `GetIndexer` there can
+   only return the Supermemory indexer. Both now refuse an install whose
+   `memory_backend` is `postgres`, and — since they mutate — they also refuse
+   when the flag cannot be READ at all, rather than assuming Supermemory. They
+   count these as `skipped_postgres_backend` in the run summary.
+
+   What that buys: `reconcile-memory --full` can no longer reindex a flipped
+   install through Supermemory and write a Supermemory doc id over
+   `patterns.supermemory_id` (which for that install holds a PGIndexer
+   `custom_id`), after which dashboard pattern deletion matches zero rows and
+   silently stops tombstoning while returning 200.
+
+   What it costs, and what phase 5 must therefore replace: once an install is
+   flipped it gets **no** `_shared` decay or retirement, no pattern-drift
+   repair, and no scenario reconcile, because the only tool that performs them
+   now skips it. `migrate-memory --full` seeding is likewise a no-op for it.
+   The guard sits on migrate-memory's WRITE path only, so the read-only
+   `--verify-legacy` and the `--delete-legacy` cleanup still work on flipped
+   installs — those are exactly the modes needed after a flip.
+
+   **Before flipping anything, port decay/retirement to the Postgres corpus**
+   (query-time decay removes the need entirely — see the end-state note above).
+
+2. **Flag flips are TTL-bound and per-machine.** Backend choice is cached for
+   `backendCacheTTL` (5m) per process. Nothing writes `memory_backend` through
+   the API — every flip is a direct SQL `UPDATE`, which invalidates no
+   process. Prod runs 2 machines, so after a flip expect up to 5 minutes in
+   which *some* reviews for that install run on Postgres and some on
+   Supermemory. Use the merge form, so the flip cannot clobber the UI-owned
+   keys:
+   `UPDATE installations SET feature_flags = feature_flags || '{"memory_backend":"postgres"}'::jsonb WHERE id = N;`
+
+3. **A flipped install without an embeddings key is FTS-only.** `GetEmbedder`
+   returns nil when there is no BYOK key and no `EMBEDDINGS_API_KEY`, and
+   PGIndexer then writes NULL embeddings by design (fail-open, backfilled
+   later). That degrade is right for a self-hoster and wrong for a phase-5
+   flip, where it means vector search is simply absent. Verify the install
+   resolves an embedder before flipping it.
+4. **ANY flip strands rows: `patterns.supermemory_id` has no namespace.**
+   The column stores whatever id the backend active AT WRITE TIME returned — a
+   Supermemory server id, or a PGIndexer `custom_id` — but `deletePattern`
+   resolves its indexer from the CURRENT flag. **Both directions break, and the
+   forward one bites on the very first flip:** any install with existing
+   dashboard patterns holds Supermemory server ids, so after flipping to
+   postgres a deletion hands those to `PGIndexer.DeleteDocument`, which matches
+   zero rows, logs a Warn and returns nil — 200 to the user, Supermemory doc
+   never deleted, and the `patterns` row that held the only pointer is gone.
+   The rollback direction is the mirror: flip to postgres, a user creates a
+   pattern (PG `custom_id` lands in the column), roll back, the user deletes it. The delete
+   resolves the Supermemory indexer, sends it a PG `custom_id`, finds nothing,
+   logs at Error and returns 200. The `memories` row keeps `deleted_at IS
+   NULL`, and its `patterns` row is now gone — so nothing can ever repoint or
+   tombstone it. Re-flipping forward resurfaces a pattern the user deleted.
+
+   `PGIndexer.DeleteDocument` documents the forward version of this gap; the
+   rollback direction is the one that bites, because rollback is exactly what
+   phase 5 promises as the safety net. **Fix before flipping: record which
+   backend wrote the id (a column, or namespaced ids), and have deletion
+   resolve by THAT rather than by the current flag.** Until then a rollback is
+   only safe for installs with no dashboard pattern deletions in between.
+
+
 ## 4. Data-loss / regression risk register
 
 1. **Threshold recalibration is the one semantically risky step.** Suppression

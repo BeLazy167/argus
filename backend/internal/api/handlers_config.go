@@ -506,6 +506,13 @@ func (s *Server) upsertProviderKey(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save key"})
 		return
 	}
+	// An "embeddings" upsert changes which vector space this install writes
+	// into; without dropping the cache, up to embedderCacheTTL of writes would
+	// use the superseded key/model and land in a space the reader never
+	// searches (search filters on embedding_model).
+	if s.memRegistry != nil {
+		s.memRegistry.InvalidateEmbedder(installationID)
+	}
 	s.auditSettings(r, installationID, "provider_key.upsert", map[string]interface{}{"provider": body.Provider})
 	writeJSON(w, http.StatusOK, newProviderKeyResponse(*pk))
 }
@@ -529,6 +536,12 @@ func (s *Server) deleteProviderKey(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.DeleteProviderKey(r.Context(), keyID, installationID); err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "key not found"})
 		return
+	}
+	// Deletion identifies the key by id, so we cannot tell whether it was the
+	// embeddings slot — invalidate unconditionally. A needless drop costs one
+	// cache miss; a missed one keeps embedding with a revoked key.
+	if s.memRegistry != nil {
+		s.memRegistry.InvalidateEmbedder(installationID)
 	}
 	s.auditSettings(r, installationID, "provider_key.delete", map[string]interface{}{"key_id": keyID})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})

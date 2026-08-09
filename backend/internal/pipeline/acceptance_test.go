@@ -52,6 +52,35 @@ func TestLoadFeatureFlags(t *testing.T) {
 			42,
 			FeatureFlags{CrossPRChecks: true, IssueAcceptance: false, MaxLinkedPRs: defaults.MaxLinkedPRs},
 		},
+		// A blob carrying ONLY a key this loader does not know. Decoding
+		// straight into FeatureFlags leaves both bools at Go's zero value, so
+		// cross-PR checks and issue acceptance silently switch off for every
+		// subsequent review — while the settings API, which defaults by
+		// pointer, keeps rendering both toggles ON, so nothing reveals the
+		// divergence. The column now carries operator-written keys
+		// (memory_backend), making this shape reachable the moment the first
+		// installation is migrated.
+		{
+			"foreign key only -> every default preserved",
+			fakeFlagReader{raw: json.RawMessage(`{"memory_backend":"postgres"}`)},
+			42,
+			defaults,
+		},
+		{
+			"foreign key alongside a partial save",
+			fakeFlagReader{raw: json.RawMessage(`{"memory_backend":"postgres","max_linked_prs":9}`)},
+			42,
+			FeatureFlags{CrossPRChecks: defaults.CrossPRChecks, IssueAcceptance: defaults.IssueAcceptance, MaxLinkedPRs: 9},
+		},
+		// Explicitly-stored false must still beat the default (migration 039
+		// depends on that distinction), which is why the loader defaults by
+		// pointer rather than by testing for zero values.
+		{
+			"explicit false preserved next to a foreign key",
+			fakeFlagReader{raw: json.RawMessage(`{"memory_backend":"postgres","cross_pr_checks":false}`)},
+			42,
+			FeatureFlags{CrossPRChecks: false, IssueAcceptance: defaults.IssueAcceptance, MaxLinkedPRs: defaults.MaxLinkedPRs},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

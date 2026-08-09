@@ -146,7 +146,7 @@ func run(ctx context.Context, logger *slog.Logger, st *store.Store, registry *me
 	}
 	logger.Info("reconciler starting", "installations", len(installs), "plan", cfg.plan)
 
-	var processed, skippedNoKey, skippedKeyErr int
+	var processed, skippedNoKey, skippedKeyErr, skippedPGBackend, skippedBackendUnknown int
 	for _, id := range installs {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -158,6 +158,10 @@ func run(ctx context.Context, logger *slog.Logger, st *store.Store, registry *me
 			skippedNoKey++
 		case statusKeyError:
 			skippedKeyErr++
+		case statusNotSupermemory:
+			skippedPGBackend++
+		case statusBackendUnknown:
+			skippedBackendUnknown++
 		}
 	}
 	logger.Info("reconciler run summary",
@@ -165,6 +169,8 @@ func run(ctx context.Context, logger *slog.Logger, st *store.Store, registry *me
 		"processed", processed,
 		"skipped_no_key", skippedNoKey,
 		"skipped_key_error", skippedKeyErr,
+		"skipped_postgres_backend", skippedPGBackend,
+		"skipped_backend_unknown", skippedBackendUnknown,
 	)
 	// A present-but-unusable key (decrypt/load failure) is an operational
 	// problem — e.g. the encryption key was rotated without re-encrypting stored
@@ -173,18 +179,56 @@ func run(ctx context.Context, logger *slog.Logger, st *store.Store, registry *me
 	if skippedKeyErr > 0 {
 		logger.Warn("installations skipped due to unavailable supermemory key (decrypt/load failure)", "count", skippedKeyErr)
 	}
+	if skippedBackendUnknown > 0 {
+		// Distinct from a genuine postgres skip: this means the sweep could not
+		// READ the flag. Pool saturation during a nightly run can skip every
+		// install while the job still exits 0, so without an aggregate line the
+		// summary would report migration progress that did not happen.
+		logger.Warn("installations skipped because their memory backend could not be determined", "count", skippedBackendUnknown)
+	}
 	return nil
 }
 
 // installStatus classifies the outcome of one installation's sweep so run() can
 // summarize and distinguish a benign "no key configured" skip from a
 // key-present-but-unusable skip worth alerting on.
+// backendSkip decides whether this Supermemory-only tool may touch an
+// installation. Split out of the caller so the POLARITY is testable without a
+// database: the guard's whole value is that it says no in two distinct cases,
+// and deleting it left every test green.
+//
+// Fail CLOSED: this binary mutates memory, so "I could not determine the
+// backend" must mean "do nothing", not "assume Supermemory". The app wants the
+// opposite polarity — carry on with Supermemory — which is why
+// InstallationBackend surfaces the read error instead of folding it in.
+func backendSkip(ctx context.Context, logger *slog.Logger, flags memory.FeatureFlagReader, installID int64) (installStatus, bool) {
+	backend, err := memory.InstallationBackend(ctx, flags, installID, logger)
+	if err != nil {
+		logger.Warn("cannot determine memory backend; skipping (this tool writes supermemory only)",
+			"installation_id", installID, "error", err)
+		return statusBackendUnknown, true
+	}
+	// For an install already moved to Postgres, proceeding is not a safe
+	// default but a corrupting one: reindexing writes a Supermemory doc id over
+	// patterns.supermemory_id, which for that install holds a PGIndexer
+	// custom_id, after which dashboard deletion matches zero rows and silently
+	// stops tombstoning the memory while returning 200.
+	if backend == memory.BackendPostgres {
+		logger.Warn("installation uses the postgres memory backend; skipping (this tool writes supermemory only)",
+			"installation_id", installID)
+		return statusNotSupermemory, true
+	}
+	return statusProcessed, false
+}
+
 type installStatus int
 
 const (
 	statusProcessed installStatus = iota
 	statusNoKey
 	statusKeyError
+	statusNotSupermemory
+	statusBackendUnknown
 )
 
 // resolveIndexer returns an Indexer for the installation and classifies a nil
@@ -195,6 +239,9 @@ const (
 // (decrypt/load failure) — worth a Warn + count; a nil indexer with no key is
 // the expected BYOK-optional case and stays at Debug.
 func resolveIndexer(ctx context.Context, logger *slog.Logger, st *store.Store, registry *memory.Registry, installID int64, plan bool) (memory.Indexer, installStatus) {
+	if status, skip := backendSkip(ctx, logger, st, installID); skip {
+		return nil, status
+	}
 	var indexer memory.Indexer
 	if plan {
 		if client := registry.GetClient(ctx, installID); client != nil {

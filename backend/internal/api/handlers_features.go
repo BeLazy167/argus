@@ -97,15 +97,32 @@ func (s *Server) setFeatureFlags(w http.ResponseWriter, r *http.Request) {
 	if body.MaxLinkedPRs > 20 {
 		body.MaxLinkedPRs = 20
 	}
+	// Merge, do not overwrite. This endpoint owns exactly the three keys in
+	// featureFlagsResponse, but feature_flags also carries operator-set keys
+	// the UI never sends — memory_backend among them. Marshalling the request
+	// body straight over the column would drop those: toggling cross-PR checks
+	// in settings would silently revert an install from the Postgres memory
+	// backend to Supermemory, with no audit trail naming the backend.
+	//
+	// The merge is a single UPDATE rather than a read-modify-write in Go,
+	// because the two writers race: operators flip memory_backend by direct
+	// SQL, and a hand-written flip landing between a Go-side read and its
+	// write-back would be reverted just as silently.
 	raw, err := json.Marshal(body)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "marshal failed"})
 		return
 	}
-	if err := s.store.UpdateInstallationFeatureFlags(r.Context(), installationID, raw); err != nil {
+	if err := s.store.MergeInstallationFeatureFlags(r.Context(), installationID, raw); err != nil {
 		s.logger.Error("updating feature flags", "error", err, "installation_id", installationID)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "save failed"})
 		return
+	}
+	// feature_flags just changed, so this process's cached derivation of it is
+	// stale by construction — drop it. Note this only invalidates the machine
+	// that served the request; see the phase-5 note in 02-migration-plan.md.
+	if s.memRegistry != nil {
+		s.memRegistry.InvalidateBackend(installationID)
 	}
 	s.auditSettings(r, installationID, "feature_flags.update", map[string]interface{}{
 		"issue_acceptance": body.IssueAcceptance, "cross_pr_checks": body.CrossPRChecks, "max_linked_prs": body.MaxLinkedPRs,

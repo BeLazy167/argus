@@ -50,17 +50,37 @@ func loadFeatureFlags(ctx context.Context, st featureFlagReader, installationDBI
 		slog.Debug("feature flag load failed, using defaults", "error", err, "install_id", installationDBID)
 		return defaults
 	}
-	var flags FeatureFlags
-	if len(raw) == 0 || string(raw) == "{}" {
-		return defaults
+	// Pointer fields so an ABSENT key keeps its default while an explicitly
+	// stored false is preserved (migration 039 depends on that distinction).
+	//
+	// Decoding into FeatureFlags directly cannot tell those apart: a blob that
+	// omits the bools leaves them at Go's zero value — silently OFF. That was
+	// unreachable while feature_flags was either empty/"{}" or written by
+	// setFeatureFlags, which always emits all three keys. The column now also
+	// carries operator-written keys, so `{"memory_backend":"postgres"}` is
+	// non-empty and not "{}": it would turn cross-PR checks and issue
+	// acceptance off for every subsequent review of the first installation
+	// migrated. The settings API reads the same column via parseFeatureFlags,
+	// which already defaults by pointer, so it would keep rendering both
+	// toggles ON and nothing would reveal the divergence.
+	var partial struct {
+		CrossPRChecks   *bool `json:"cross_pr_checks"`
+		IssueAcceptance *bool `json:"issue_acceptance"`
+		MaxLinkedPRs    *int  `json:"max_linked_prs"`
 	}
-	if err := json.Unmarshal(raw, &flags); err != nil {
+	if err := json.Unmarshal(raw, &partial); err != nil {
 		slog.Warn("feature flag unmarshal failed, using defaults", "error", err, "install_id", installationDBID)
 		return defaults
 	}
-	// Fill missing fields from defaults.
-	if flags.MaxLinkedPRs <= 0 {
-		flags.MaxLinkedPRs = defaults.MaxLinkedPRs
+	flags := defaults
+	if partial.CrossPRChecks != nil {
+		flags.CrossPRChecks = *partial.CrossPRChecks
+	}
+	if partial.IssueAcceptance != nil {
+		flags.IssueAcceptance = *partial.IssueAcceptance
+	}
+	if partial.MaxLinkedPRs != nil && *partial.MaxLinkedPRs > 0 {
+		flags.MaxLinkedPRs = *partial.MaxLinkedPRs
 	}
 	return flags
 }

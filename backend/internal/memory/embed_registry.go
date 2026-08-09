@@ -56,10 +56,18 @@ func NormalizeBaseURL(base string) string {
 }
 
 // embedderCacheTTL bounds staleness after a key/model change, mirroring
-// llm.Registry's 5-minute provider cache. Invalidate gives immediate refresh
-// once the key-management handlers are wired to it (registry construction
-// lands with the app wiring PR); until then TTL alone bounds staleness.
+// llm.Registry's 5-minute provider cache. The provider-key handlers call
+// Invalidate on upsert and delete, so a key change refreshes immediately in
+// the process that served the request; the TTL bounds staleness on every OTHER
+// machine, which is what a rotation actually has to wait out.
 const embedderCacheTTL = 5 * time.Minute
+
+// errorEmbedderTTL bounds how long a FAILED resolve's platform fallback is
+// published. Deliberately its own constant rather than borrowing the flag
+// cache's: the two govern independent policies, and tuning the flag-read retry
+// window to damp log volume during an outage must not silently retune how long
+// rows are stamped with an unreadable embedding_model.
+const errorEmbedderTTL = 10 * time.Second
 
 // EmbedKeyResolver is the narrow store seam the registry needs — satisfied by
 // *store.Store.ResolveEmbeddingsKey (installation-wide row; model "" when the
@@ -96,6 +104,12 @@ type EmbedderRegistry struct {
 
 	mu    sync.Mutex
 	cache map[int64]cachedEmbedder
+	// gen counts invalidations per installation, discarding any resolve that
+	// was already in flight when a key changed. Without it, a rotation racing
+	// a GetEmbedder leaves the OLD key/model cached for the full TTL — writes
+	// then land in a vector space the reader never searches, which is exactly
+	// what invalidating on key change is supposed to prevent.
+	gen map[int64]uint64
 }
 
 // NewEmbedderRegistry wires the registry. platform may be zero-valued (no
@@ -115,8 +129,16 @@ func NewEmbedderRegistry(resolver EmbedKeyResolver, platform PlatformEmbeddings,
 		platform: platform,
 		logger:   logger,
 		cache:    make(map[int64]cachedEmbedder),
+		gen:      make(map[int64]uint64),
 	}
 }
+
+// Dimensions is the storage dimensionality every embedder from this registry
+// produces, after defaulting. It is the single source for PGIndexer's contract
+// check: taking the raw config value separately would let an explicit
+// EMBEDDINGS_DIMENSIONS=0 default to 1024 here while PGIndexer compared
+// against 0, rejecting every vector onto the fail-open NULL path.
+func (r *EmbedderRegistry) Dimensions() int { return r.platform.Dimensions }
 
 // GetEmbedder resolves the embedder for an installation: BYOK "embeddings"
 // key (with its base_url/model overrides) when configured, else the platform
@@ -130,6 +152,7 @@ func (r *EmbedderRegistry) GetEmbedder(ctx context.Context, installationID int64
 		r.mu.Unlock()
 		return c.embedder, nil
 	}
+	gen := r.gen[installationID]
 	r.mu.Unlock()
 
 	apiKey, baseURL, model := r.platform.APIKey, r.platform.BaseURL, r.platform.Model
@@ -161,8 +184,29 @@ func (r *EmbedderRegistry) GetEmbedder(ctx context.Context, installationID int64
 		e = NewEmbedder(apiKey, baseURL, model, r.platform.Dimensions)
 	}
 
+	// A dead CALLER context says nothing about the installation's key, so
+	// publishing this fallback to every other caller would be wrong.
+	if ctx.Err() != nil {
+		return e, nil
+	}
+
+	// A failed resolve substitutes the PLATFORM key and model. Caching that
+	// for the full TTL stamps up to five minutes of rows with
+	// embedding_model='voyage-4' while every read gates the score on the
+	// install's real BYOK model — those rows score 0 forever, and because
+	// their embedding is NOT NULL the backfill sweep (which targets NULLs)
+	// never repairs them. A short TTL bounds the damage to one retry window.
+	ttl := embedderCacheTTL
+	if err != nil {
+		ttl = errorEmbedderTTL
+	}
+
 	r.mu.Lock()
-	r.cache[installationID] = cachedEmbedder{embedder: e, expiresAt: time.Now().Add(embedderCacheTTL)}
+	// Discard the result if a key change invalidated this installation while
+	// the resolve was in flight; the next caller re-resolves.
+	if r.gen[installationID] == gen {
+		r.cache[installationID] = cachedEmbedder{embedder: e, expiresAt: time.Now().Add(ttl)}
+	}
 	r.mu.Unlock()
 	return e, nil
 }
@@ -173,5 +217,6 @@ func (r *EmbedderRegistry) GetEmbedder(ctx context.Context, installationID int64
 func (r *EmbedderRegistry) Invalidate(installationID int64) {
 	r.mu.Lock()
 	delete(r.cache, installationID)
+	r.gen[installationID]++
 	r.mu.Unlock()
 }
