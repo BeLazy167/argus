@@ -120,6 +120,16 @@ type Memory struct {
 	SupersededBy   *int64           `json:"superseded_by"`
 }
 
+type MemoryExportArchive struct {
+	ID             int64           `json:"id"`
+	InstallationID int64           `json:"installation_id"`
+	ContainerTag   string          `json:"container_tag"`
+	DocID          string          `json:"doc_id"`
+	CustomID       *string         `json:"custom_id"`
+	Payload        json.RawMessage `json:"payload"`
+	ExportedAt     time.Time       `json:"exported_at"`
+}
+
 type ModelConfig struct {
 	ID             int64     `json:"id"`
 	RepoID         *int64    `json:"repo_id"`

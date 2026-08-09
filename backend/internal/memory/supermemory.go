@@ -564,6 +564,29 @@ type Document struct {
 	Metadata  map[string]string `json:"metadata,omitempty"`
 	CreatedAt string            `json:"createdAt,omitempty"`
 	UpdatedAt string            `json:"updatedAt,omitempty"`
+
+	// Raw is the exact JSON this document was decoded from, kept so callers
+	// that must not lose fields we don't model can persist the original bytes.
+	// The struct above is a lossy view of Supermemory's response — notably
+	// Metadata is typed map[string]string, so richer metadata values are
+	// dropped. The phase-0 export archive exists precisely to preserve what
+	// re-derivation cannot reconstruct, so it must write Raw, not a re-marshal.
+	//
+	// Empty on documents we construct ourselves rather than decode.
+	Raw json.RawMessage `json:"-"`
+}
+
+// UnmarshalJSON decodes normally and additionally retains the original bytes in
+// Raw. The alias type avoids recursing into this method.
+func (d *Document) UnmarshalJSON(b []byte) error {
+	type alias Document
+	var a alias
+	if err := json.Unmarshal(b, &a); err != nil {
+		return err
+	}
+	*d = Document(a)
+	d.Raw = append(json.RawMessage(nil), b...)
+	return nil
 }
 
 type BulkDeleteRequest struct {
