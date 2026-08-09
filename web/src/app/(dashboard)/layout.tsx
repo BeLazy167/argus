@@ -110,8 +110,6 @@ function UserFooter({ collapsed }: { collapsed: boolean }) {
   const { user } = useUser();
   const { active: installation } = useInstallation();
   const displayName = user?.fullName ?? user?.primaryEmailAddress?.emailAddress ?? "Account";
-  const planTier = installation?.plan_tier ?? "Free";
-  const planLabel = planTier.charAt(0).toUpperCase() + planTier.slice(1) + " Plan";
 
   return (
     <div className={`border-t border-sidebar-border ${collapsed ? "px-2 py-3" : "px-4 py-3"}`}>
@@ -136,7 +134,6 @@ function UserFooter({ collapsed }: { collapsed: boolean }) {
           <>
             <div className="min-w-0 flex-1">
               <p className="truncate text-[13px] font-medium text-foreground">{displayName}</p>
-              <p className="truncate text-[11px] text-slate-text">{planLabel}</p>
             </div>
             <ThemeToggle />
           </>

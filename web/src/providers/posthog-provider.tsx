@@ -117,7 +117,6 @@ export function PostHogGroupAssociation() {
     if (!POSTHOG_KEY || !active) return;
     posthog.group("installation", String(active.id), {
       org_login: active.org_login,
-      plan_tier: active.plan_tier,
     });
   }, [active]);
 

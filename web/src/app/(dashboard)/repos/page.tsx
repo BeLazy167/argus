@@ -90,7 +90,7 @@ function AddReposButton() {
   );
 }
 
-function RepoCard({ repo, isPro }: { repo: Repo; isPro: boolean }) {
+function RepoCard({ repo }: { repo: Repo }) {
   const { data: reviews } = useReviews({ variables: { repoId: repo.id, limit: 1 } });
   const updateRepo = useUpdateRepo();
   const triggerReview = useTriggerReview();
@@ -175,11 +175,6 @@ function RepoCard({ repo, isPro }: { repo: Repo; isPro: boolean }) {
         </div>
       )}
 
-      {/* Free plan note */}
-      {!isPro && !repo.enabled && (
-        <p className="text-[10px] font-mono text-slate-text/60 mb-2">Free plan: 3 repos max</p>
-      )}
-
       {/* Middle: last review */}
       {lastReview && (
         <div className="text-[11px] font-mono text-slate-text mb-3">
@@ -246,7 +241,6 @@ export default function ReposPage() {
   const { data: repos, isLoading } = useRepos();
   const syncRepos = useSyncRepos();
   const { active } = useInstallation();
-  const isPro = active?.plan_tier === "pro";
   // Enabled repos first, each block alphabetical — otherwise the handful of
   // enabled repos gets buried pages deep behind hundreds of disabled ones and
   // the first pages read as "everything is disabled". Sort BEFORE pagination.
@@ -310,7 +304,7 @@ export default function ReposPage() {
         <>
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             {paginated.map((repo) => (
-              <RepoCard key={repo.id} repo={repo} isPro={isPro} />
+              <RepoCard key={repo.id} repo={repo} />
             ))}
           </div>
           <PaginationBar

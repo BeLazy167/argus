@@ -45,8 +45,10 @@ func (s *Server) updateRepo(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo id"})
 		return
 	}
-	scopedRepo, err := s.store.GetRepoScoped(r.Context(), id, getInstallationIDs(r.Context()))
-	if err != nil {
+	// Authorization: errors unless the repo belongs to one of the caller's
+	// installations. The row itself is no longer needed now that the per-plan
+	// repo cap is gone, but the check must stay.
+	if _, err := s.store.GetRepoScoped(r.Context(), id, getInstallationIDs(r.Context())); err != nil {
 		s.handleDBError(w, err, "repo not found")
 		return
 	}
@@ -58,16 +60,6 @@ func (s *Server) updateRepo(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
 		return
-	}
-	if body.Enabled != nil && *body.Enabled {
-		tier, _ := s.store.GetPlanTier(r.Context(), scopedRepo.InstallationID)
-		if !s.cfg.IsPro(tier) {
-			count, _ := s.store.CountEnabledRepos(r.Context(), scopedRepo.InstallationID)
-			if count >= 3 {
-				writeJSON(w, http.StatusForbidden, map[string]string{"error": "Free plan limited to 3 repos. Upgrade to Pro for unlimited."})
-				return
-			}
-		}
 	}
 	repo, err := s.store.UpdateRepo(r.Context(), id, body.Enabled, body.DefaultBranch, body.SettingsJSON)
 	if err != nil {
@@ -105,7 +97,7 @@ func (s *Server) triggerReview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	orgLogin := strings.SplitN(repo.FullName, "/", 2)[0]
-	if !s.cfg.IsPro(inst.PlanTier) && !s.rateLimiter.AllowReview(repo.FullName, orgLogin, false) {
+	if !s.rateLimiter.AllowReview(repo.FullName, orgLogin, false) {
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate limit exceeded"})
 		return
 	}

@@ -51,13 +51,7 @@ type Config struct {
 	DashboardBaseURL string // web dashboard base URL, linked from GitHub comments
 	APIBaseURL       string // public API base URL, used for signed export links
 	GitHubAppSlug    string // GitHub App slug, used to build install URLs
-	SelfHosted       bool   // true disables plan gating (no billing on self-hosts)
-}
-
-// IsPro reports whether a plan tier unlocks pro-gated features. Self-hosted
-// deployments have no billing, so every installation passes plan gates.
-func (c *Config) IsPro(tier string) bool {
-	return c.SelfHosted || tier == "pro"
+	SelfHosted       bool   // self-hosted deployment; affects auto-run defaults and install listing
 }
 
 func Load() (*Config, error) {

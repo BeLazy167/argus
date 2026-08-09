@@ -60,12 +60,12 @@ const SECTIONS = [
   { id: "pipeline", label: "The Review Pipeline" },
   { id: "review-contract", label: "The Review Contract" },
   { id: "review-laws", label: "Review Laws" },
-  { id: "deep-review", label: "Deep Review", pro: true },
+  { id: "deep-review", label: "Deep Review" },
   { id: "incremental-reviews", label: "Incremental Reviews" },
   { id: "what-argus-sees", label: "What Argus Sees" },
-  { id: "architecture-viz", label: "Architecture Visualization", pro: true },
-  { id: "code-simulation", label: "Code Simulation", pro: true },
-  { id: "pr-enrichment", label: "PR Enrichment & Diagrams", pro: true },
+  { id: "architecture-viz", label: "Architecture Visualization" },
+  { id: "code-simulation", label: "Code Simulation" },
+  { id: "pr-enrichment", label: "PR Enrichment & Diagrams" },
   { id: "conversational-review", label: "Conversational Review" },
   { id: "live-timeline", label: "Live Activity Timeline" },
   { id: "severities", label: "Severities" },
@@ -78,7 +78,7 @@ const SECTIONS = [
   { id: "auto-review", label: "Auto-review & Triggers" },
   { id: "commands", label: "Bot Commands" },
   { id: "test-generation", label: "Test Generation" },
-  { id: "memory", label: "Memory & Learning", pro: true },
+  { id: "memory", label: "Memory & Learning" },
   { id: "glass-box", label: "Glass Box & Gauge" },
   { id: "insights", label: "Insights & Risk" },
   { id: "token-tracking", label: "Token & Cost Tracking" },
@@ -220,15 +220,10 @@ function SidebarLink({
   id,
   label,
   active,
-  pro,
 }: {
   id: string;
   label: string;
   active: boolean;
-  /** Renders a compact "Pro" dot after the label — small enough not to
-   * compete with the link itself but visible enough to communicate the
-   * plan gate before the user clicks through. */
-  pro?: boolean;
 }) {
   return (
     <a
@@ -240,15 +235,6 @@ function SidebarLink({
       }`}
     >
       <span className="truncate">{label}</span>
-      {pro ? (
-        <span
-          className="shrink-0 text-[8px] font-mono font-semibold uppercase tracking-[0.14em] text-amber/80"
-          aria-label="Pro plan only"
-          title="Pro plan only"
-        >
-          PRO
-        </span>
-      ) : null}
     </a>
   );
 }
@@ -256,36 +242,17 @@ function SidebarLink({
 function SectionHeader({
   id,
   title,
-  pro,
 }: {
   id: string;
   title: string;
-  /** When true, inline a PRO tag next to the title so readers on Free see
-   * upfront that the section describes a paid-plan feature. */
-  pro?: boolean;
 }) {
   return (
     <div id={id} className="scroll-mt-24">
       <h2 className="font-mono text-xl font-bold text-foreground mb-1 inline-flex items-baseline gap-2.5 flex-wrap">
         <span>{title}</span>
-        {pro ? <ProTag /> : null}
       </h2>
       <div className="h-px bg-iron mb-6" />
     </div>
-  );
-}
-
-/** Inline PRO tag. Shares aesthetic with the one in docs/features/memory-tuning:
- * amber-on-dark, mono, uppercase, tight tracking. Marked as aria-label so
- * screen readers say "Pro plan only" instead of just reading "Pro". */
-function ProTag() {
-  return (
-    <span
-      className="relative -top-0.5 inline-flex items-center border border-amber/50 bg-amber/10 px-1.5 py-0.5 text-[9px] font-mono font-semibold uppercase tracking-[0.16em] text-amber"
-      aria-label="Pro plan only"
-    >
-      Pro
-    </span>
   );
 }
 
@@ -415,7 +382,6 @@ export function DocsContent() {
                 id={s.id}
                 label={s.label}
                 active={activeSection === s.id}
-                pro={"pro" in s ? s.pro : false}
               />
             ))}
           </div>
@@ -741,7 +707,7 @@ export function DocsContent() {
 
           {/* ── Deep Review ── */}
           <div>
-            <SectionHeader id="deep-review" title="Deep Review" pro />
+            <SectionHeader id="deep-review" title="Deep Review" />
             <p className="text-xs font-mono text-slate-text mb-3 leading-relaxed">
               Four specialist agents review every file in parallel.
             </p>
@@ -937,7 +903,7 @@ export function DocsContent() {
 
           {/* ── Architecture Visualization ── */}
           <div>
-            <SectionHeader id="architecture-viz" title="Architecture Visualization" pro />
+            <SectionHeader id="architecture-viz" title="Architecture Visualization" />
             <p className="text-xs font-mono text-slate-text mb-3 leading-relaxed">
               See your codebase as a dependency graph.
             </p>
@@ -1040,7 +1006,7 @@ export function DocsContent() {
 
           {/* ── Code Simulation ── */}
           <div>
-            <SectionHeader id="code-simulation" title="Code Simulation" pro />
+            <SectionHeader id="code-simulation" title="Code Simulation" />
             <p className="text-xs font-mono text-slate-text mb-3 leading-relaxed">
               Before you merge, Argus imagines what happens.
             </p>
@@ -1145,7 +1111,7 @@ export function DocsContent() {
 
           {/* ── PR Enrichment & Diagrams ── */}
           <div>
-            <SectionHeader id="pr-enrichment" title="PR Enrichment & Mermaid Diagrams" pro />
+            <SectionHeader id="pr-enrichment" title="PR Enrichment & Mermaid Diagrams" />
             <p className="text-xs font-mono text-slate-text mb-3 leading-relaxed">
               Argus writes the context your PR description forgot.
             </p>
@@ -1574,8 +1540,9 @@ export function DocsContent() {
 
             <p className="text-[11px] font-mono text-iron mt-3">
               Supported providers: OpenRouter, OpenAI, Anthropic, Azure OpenAI,
-              GCP Vertex AI, AWS Bedrock, and Zhipu AI. Custom model names are
-              supported &mdash; enter any model identifier your provider accepts.
+              GCP Vertex AI, AWS Bedrock, Zhipu AI, and Vercel AI Gateway.
+              Custom model names are supported &mdash; enter any model
+              identifier your provider accepts.
             </p>
           </div>
 
@@ -2052,7 +2019,7 @@ export function DocsContent() {
 
           {/* ── Memory & Learning ── */}
           <div>
-            <SectionHeader id="memory" title="Memory & Learning" pro />
+            <SectionHeader id="memory" title="Memory & Learning" />
             <p className="text-xs font-mono text-slate-text mb-3 leading-relaxed">
               Most tools forget between PRs. Argus remembers everything.
             </p>

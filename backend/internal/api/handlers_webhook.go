@@ -75,24 +75,6 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		// Check review limit for this installation
-		inst, instErr := s.store.GetInstallationByGitHubID(r.Context(), prEvent.InstallationID)
-		if instErr != nil {
-			s.logger.Warn("installation lookup for plan check", "error", instErr)
-		} else {
-			reviewCount, countErr := s.store.CountReviewsThisMonth(r.Context(), inst.ID)
-			if countErr != nil {
-				s.logger.Warn("review count check failed", "error", countErr)
-			} else {
-				limit := 50 // free tier
-				if s.cfg.IsPro(inst.PlanTier) {
-					limit = 500
-				}
-				if reviewCount >= limit {
-					s.logger.Info("review limit reached", "installation", inst.ID, "count", reviewCount, "limit", limit)
-					break
-				}
-			}
-		}
 
 		// The launcher owns slot + cancel + spawn. The webhook semaphore (a
 		// separate webhook-goroutine bound) is acquired in BeforeSpawn — post-slot

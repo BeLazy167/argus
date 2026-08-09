@@ -7,7 +7,6 @@ import {
   Brain,
   Users,
   Puzzle,
-  CreditCard,
   Settings,
 } from "lucide-react";
 
@@ -41,7 +40,6 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { href: "/team", label: "Team", icon: Users },
       { href: "/providers", label: "Integrations", icon: Puzzle },
-      { href: "/billing", label: "Billing", icon: CreditCard },
       { href: "/settings", label: "Settings", icon: Settings },
     ],
   },

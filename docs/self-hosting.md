@@ -2,7 +2,9 @@
 
 Everything needed to run your own Argus: a GitHub App, Postgres, the Go backend, the Next.js dashboard, and a Clerk instance for dashboard auth. LLM keys are BYOK — added at runtime via the dashboard, never via env.
 
-Set `SELF_HOSTED=true` on the backend to disable plan gating (self-hosts have no billing; every installation gets pro features). The API reports the effective tier, so the dashboard reflects pro automatically — no web-side configuration needed. `SELF_HOSTED=true` also makes reviews **auto-run unconditionally**: with no billing to gate, a self-host reviews on every opened/pushed/reopened PR regardless of the stored `auto_run` setting (see [Auto-run & re-review](#auto-run--re-review)).
+Argus has no paid tier and no feature gating — every capability is available to every installation, hosted or self-hosted. Deep review, simulation, memory and diagrams are per-repo settings you turn on, not upsells.
+
+`SELF_HOSTED=true` remains meaningful for one behavioural default: a self-host reviews **unconditionally**, on every opened/pushed/reopened PR, regardless of the stored `auto_run` setting (see [Auto-run & re-review](#auto-run--re-review)).
 
 ## 1. Create the GitHub App
 
@@ -79,7 +81,9 @@ When `CLERK_JWKS_URL` is unset the backend cannot verify JWTs and every authenti
 ## 5. LLM provider (BYOK)
 
 1. Set `ENCRYPTION_KEY` on the backend (`openssl rand -hex 32`) — provider keys are encrypted at rest with it.
-2. Open the dashboard **Providers** page and add your key: OpenRouter or any OpenAI-compatible endpoint (OpenAI, Azure, Groq, Together, Ollama, vLLM, ...).
+2. Open the dashboard **Providers** page and add your key: OpenRouter, Vercel AI Gateway, or any OpenAI-compatible endpoint (OpenAI, Azure, Groq, Together, Ollama, vLLM, ...).
+
+   For Vercel AI Gateway, model IDs use `creator/model` form (e.g. `openai/gpt-5.6-sol`). Append `?only=<provider>` to the base URL — comma-separated for several — to pin which upstream serves the request, e.g. `https://ai-gateway.vercel.sh/v1?only=azure`. Without it the gateway chooses, and may fall back between your own BYOK credentials and Vercel-billed ones.
 3. Pick models per pipeline stage on the **Settings** page.
 
 Reviews fail with an onboarding comment ("configure your API key") until a provider key and model config exist.

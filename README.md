@@ -132,7 +132,7 @@ Webhook → Contract → Triage → Briefing → Review → Dedup → Validate �
 
 ## Quick Start
 
-Running Argus against your own repos means creating a GitHub App and pointing a self-hosted backend at it. The [self-hosting guide](docs/self-hosting.md) walks through all of it — GitHub App creation, webhook relay, Clerk auth, and `SELF_HOSTED=true` to unlock every feature.
+Running Argus against your own repos means creating a GitHub App and pointing a self-hosted backend at it. The [self-hosting guide](docs/self-hosting.md) walks through all of it — GitHub App creation, webhook relay, Clerk auth, and `SELF_HOSTED=true` for self-host defaults. There is no paid tier and nothing is feature-gated.
 
 ### Prerequisites
 
@@ -146,7 +146,7 @@ Running Argus against your own repos means creating a GitHub App and pointing a 
 |---------|-----------|---------|
 | GitHub App | **Required** | Receives PR webhooks, posts reviews |
 | Clerk | **Required for the dashboard** | Dashboard auth + backend JWT verification |
-| LLM provider (BYOK) | **Required for reviews** | OpenRouter or any OpenAI-compatible API, added via the dashboard |
+| LLM provider (BYOK) | **Required for reviews** | OpenRouter, Vercel AI Gateway, or any OpenAI-compatible API, added via the dashboard |
 | Supermemory | Optional | RAG memory for patterns and rules |
 | PostHog | Optional | Analytics; disabled when unset |
 
@@ -172,7 +172,7 @@ docker compose up
 
 ### Configure an LLM provider
 
-Argus is bring-your-own-key: LLM keys live **encrypted in your database**, not in env vars. Set `ENCRYPTION_KEY` first (`openssl rand -hex 32`), start the dashboard, and add your key on the **Providers** page. OpenRouter and any OpenAI-compatible endpoint work.
+Argus is bring-your-own-key: LLM keys live **encrypted in your database**, not in env vars. Set `ENCRYPTION_KEY` first (`openssl rand -hex 32`), start the dashboard, and add your key on the **Providers** page. OpenRouter, Vercel AI Gateway, and any OpenAI-compatible endpoint work.
 
 ### Run the dashboard
 
@@ -198,7 +198,7 @@ Key environment variables — see [`backend/.env.example`](backend/.env.example)
 | `ENCRYPTION_KEY` | AES key encrypting BYOK provider keys at rest (required for reviews) |
 | `CLERK_JWKS_URL` | Clerk JWKS endpoint; when unset, authed API routes fail closed (503) |
 | `DASHBOARD_BASE_URL` | Dashboard URL linked from GitHub comments |
-| `SELF_HOSTED` | `true` unlocks all features (disables plan gating) |
+| `SELF_HOSTED` | `true` applies self-host defaults (reviews auto-run unconditionally) |
 | `SUPERMEMORY_API_KEY` | Supermemory key for pattern learning (optional) |
 
 ---

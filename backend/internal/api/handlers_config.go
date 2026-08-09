@@ -315,11 +315,6 @@ func (s *Server) upsertPromptTemplate(w http.ResponseWriter, r *http.Request) {
 		s.handleDBError(w, repoErr, "repo not found")
 		return
 	}
-	tier, _ := s.store.GetPlanTier(r.Context(), repo.InstallationID)
-	if !s.cfg.IsPro(tier) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "Custom prompts require Pro plan."})
-		return
-	}
 	pt, err := s.store.UpsertPromptTemplate(r.Context(), repoID, stage, validated)
 	if err != nil {
 		s.logger.Error("upsert prompt template", "error", err)

@@ -25,7 +25,6 @@ import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { ProGate } from "@/components/dashboard/pro-gate";
 import { RepoSelect } from "@/components/dashboard/repo-select";
 import { track } from "@/lib/analytics";
 import { useActiveRepo } from "@/lib/hooks/use-active-repo";
@@ -911,7 +910,7 @@ function PromptCard({
  * diff. Clicking the checkbox fires an edited webhook and runs the review
  * under the 3/hr force-cap path.
  *
- * Not under ProGate: this is a cost/behavior control, not a premium feature.
+ * A cost/behavior control, not a capability toggle.
  */
 const AUTO_RUN_TOGGLE = {
 	key: "auto_run",
@@ -1484,7 +1483,7 @@ export default function SettingsPage() {
 							</section>
 
 							{/* Org: Pipeline Features */}
-							<ProGate feature="Pipeline features">
+							<>
 								<section>
 									<div className="flex items-center gap-3 mb-4">
 										<div className="flex items-center gap-2">
@@ -1552,10 +1551,10 @@ export default function SettingsPage() {
 										})}
 									</div>
 								</section>
-							</ProGate>
+							</>
 
 							{/* Org: Verification Features (issue acceptance + cross-repo PR) */}
-							<ProGate feature="Verification features">
+							<>
 								<section>
 									<div className="flex items-center gap-3 mb-4">
 										<div className="flex items-center gap-2">
@@ -1632,7 +1631,7 @@ export default function SettingsPage() {
 										<span className="text-slate-text/70">bounded 1–20</span>
 									</div>
 								</section>
-							</ProGate>
+							</>
 						</div>
 					)}
 				</>
@@ -1812,7 +1811,7 @@ export default function SettingsPage() {
 										))}
 									</div>
 									{currentPersona === "custom" && (
-										<ProGate feature="Custom persona">
+										<>
 											<div className="mt-4 border border-iron bg-charcoal p-4">
 												<label className="block text-[11px] font-mono text-slate-text mb-2">
 													Custom persona prompt — define how Argus should review code
@@ -1856,7 +1855,7 @@ export default function SettingsPage() {
 													</span>
 												</button>
 											</div>
-										</ProGate>
+										</>
 									)}
 									{personaError && (
 										<p role="alert" className="text-[10px] font-mono text-red-400 mt-2">
@@ -1945,7 +1944,7 @@ export default function SettingsPage() {
 						</section>
 
 						{/* Section 4: Review Prompts (Pro only) */}
-						<ProGate feature="Custom prompts">
+						<>
 							<section>
 								<div className="flex items-center gap-3 mb-4">
 									<span className="inline-flex items-center justify-center h-6 w-6 rounded-full border border-amber/30 bg-amber/10 text-[11px] font-mono font-bold text-amber">
@@ -1987,10 +1986,10 @@ export default function SettingsPage() {
 									</div>
 								)}
 							</section>
-						</ProGate>
+						</>
 
 						{/* Section 5: Pipeline Features (Pro only) */}
-						<ProGate feature="Pipeline features (deep review, cross-file, blast radius, simulation)">
+						<>
 							<section>
 								<div className="flex items-center gap-3 mb-4">
 									<span className="inline-flex items-center justify-center h-6 w-6 rounded-full border border-amber/30 bg-amber/10 text-[11px] font-mono font-bold text-amber">
@@ -2076,7 +2075,7 @@ export default function SettingsPage() {
 									</div>
 								)}
 							</section>
-						</ProGate>
+						</>
 					</div>
 				))}
 

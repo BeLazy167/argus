@@ -13,7 +13,6 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { PaginationBar, usePagination } from "@/components/dashboard/pagination";
-import { ProGate } from "@/components/dashboard/pro-gate";
 import { useActiveRepo } from "@/lib/hooks/use-active-repo";
 import {
 	useCreateScenario,
@@ -346,7 +345,7 @@ export function ScenariosSection() {
 	};
 
 	return (
-		<ProGate feature="Scenario memory">
+		<>
 			<div className="mb-6 flex items-center justify-end">
 				<button
 					type="button"
@@ -695,6 +694,6 @@ export function ScenariosSection() {
 					onPrev={() => setPage(page - 1)}
 				/>
 			</div>
-		</ProGate>
+		</>
 	);
 }

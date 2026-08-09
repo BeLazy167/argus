@@ -98,28 +98,26 @@ func (rl *RateLimiter) Stop() {
 	rl.stopOnce.Do(func() { close(rl.done) })
 }
 
-// allowReview applies plan-aware rate limiting. Pro-tier installations bypass
-// the per-repo/per-org/force buckets entirely; Free-tier falls through to the
-// underlying token-bucket limiter.
+// allowReview applies the per-repo / per-org review rate limits.
 //
-// A failed plan lookup is treated as Free-tier (fail-safe), and only logged at
-// Warn level — we never want a DB blip to silently uncap a Free install.
+// These buckets used to be a Free-tier monetization cap that Pro installations
+// bypassed. With the paid tier gone the distinction has no meaning, and both
+// installations that have ever run a review were already Pro — so the limiter
+// is now uniform and no one's effective behavior changes.
+//
+// Note this is deliberately NOT the abuse control for public repositories: an
+// unauthorized contributor triggering a review is an authorization problem, and
+// rate limits are a poor substitute for authz. See the checkbox-trigger issue.
 //
 // Args:
 //
-//	ctx: request context; lookup is bounded by the caller's deadline.
+//	ctx: request context; retained for call-site symmetry and future lookups.
 //	repoFullName: "owner/repo" used as the per-repo bucket key.
 //	orgLogin: GitHub org/user login used as the per-org bucket key.
 //	force: passes through to the underlying limiter's force-bucket logic.
-//	ghInstallationID: GitHub installation ID (not the internal store row ID).
+//	ghInstallationID: GitHub installation ID; retained for call-site symmetry.
 //
 // Returns true if the review is allowed to proceed.
-func (s *Server) allowReview(ctx context.Context, repoFullName, orgLogin string, force bool, ghInstallationID int64) bool {
-	inst, err := s.store.GetInstallationByGitHubID(ctx, ghInstallationID)
-	if err != nil {
-		s.logger.Warn("rate limit: plan lookup failed, applying free-tier caps", "error", err, "ghInstallationID", ghInstallationID)
-	} else if s.cfg.IsPro(inst.PlanTier) {
-		return true
-	}
+func (s *Server) allowReview(_ context.Context, repoFullName, orgLogin string, force bool, _ int64) bool {
 	return s.rateLimiter.AllowReview(repoFullName, orgLogin, force)
 }
