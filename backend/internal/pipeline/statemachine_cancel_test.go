@@ -35,6 +35,11 @@ func newTestSM() (*StateMachine, *[]statusWrite) {
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 	sm.persist = func(_ context.Context, _ *PipelineRun) error { return nil }
+	// An explicit failure, not a nil func: a Resume test that forgets to stub
+	// the load seam should read as an unwired seam, not as a nil-call panic.
+	sm.load = func(_ context.Context, _ uuid.UUID) (*PipelineRun, error) {
+		return nil, errors.New("test: load seam not wired")
+	}
 	sm.setStatus = func(_ context.Context, _ uuid.UUID, status, _ string, _ []byte, allowed []string) (bool, error) {
 		*writes = append(*writes, statusWrite{status: status, allowed: allowed})
 		return true, nil

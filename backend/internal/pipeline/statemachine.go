@@ -34,11 +34,19 @@ type StateMachine struct {
 	// where it still holds the node id.
 	onTerminal func(ctx context.Context, reviewID uuid.UUID, outcome StartedOutcome, detail string)
 	// persist and setStatus wrap the two Postgres mutations the stage loop
-	// performs, so Run can be exercised without a live DB. Defaults wired in
-	// NewStateMachine. setStatus is a compare-and-set: an empty allowedCurrent
-	// means an unconditional write.
+	// performs, and load wraps the one read Resume performs, so Run and Resume
+	// can be exercised without a live DB. Defaults wired in NewStateMachine.
+	// setStatus is a compare-and-set: an empty allowedCurrent means an
+	// unconditional write.
 	persist   func(ctx context.Context, run *PipelineRun) error
 	setStatus func(ctx context.Context, reviewID uuid.UUID, status, errMsg string, tokenUsage []byte, allowedCurrent []string) (bool, error)
+	load      func(ctx context.Context, runID uuid.UUID) (*PipelineRun, error)
+	// hydrate re-resolves the context a persisted run loses to json:"-" (feature
+	// flags, similarity thresholds, memory indexer, review contract) before the
+	// loaded run re-enters the stage loop. Nil is a no-op, which is what tests
+	// and any embedder without a store want; NewOrchestrator wires it to
+	// Orchestrator.hydrateResumedRun. See resume_context.go.
+	hydrate func(ctx context.Context, run *PipelineRun)
 }
 
 func NewStateMachine(db *pgxpool.Pool, st *store.Store, logger *slog.Logger) *StateMachine {
@@ -55,6 +63,7 @@ func NewStateMachine(db *pgxpool.Pool, st *store.Store, logger *slog.Logger) *St
 		return status == "cancelled", nil
 	}
 	sm.persist = sm.persistState
+	sm.load = sm.loadState
 	sm.setStatus = func(ctx context.Context, reviewID uuid.UUID, status, errMsg string, tokenUsage []byte, allowedCurrent []string) (bool, error) {
 		if len(allowedCurrent) == 0 {
 			return true, st.UpdateReviewStatus(ctx, reviewID, status, errMsg, tokenUsage)
@@ -264,8 +273,14 @@ func shouldPersist(state PipelineState) bool {
 // calling Run, otherwise Publish/Subscribe no-op and WebSocket clients
 // reconnect-loop. HandlePREvent opens the topic for new reviews; Resume
 // must mirror that for recovered reviews (e.g. after fly deploy restarts).
+//
+// It must also re-resolve the run context json:"-" dropped on the way into
+// pipeline_states — otherwise the resumed run continues with feature flags,
+// similarity gates and the memory indexer all at their zero values, which is
+// not "the same review, continued" but a differently-configured one. That is
+// what hydrate does; see resume_context.go for what it deliberately leaves out.
 func (sm *StateMachine) Resume(ctx context.Context, runID uuid.UUID) (*PipelineRun, error) {
-	run, err := sm.loadState(ctx, runID)
+	run, err := sm.load(ctx, runID)
 	if err != nil {
 		return nil, fmt.Errorf("loading state: %w", err)
 	}
@@ -276,6 +291,11 @@ func (sm *StateMachine) Resume(ctx context.Context, runID uuid.UUID) (*PipelineR
 	if sm.eventBus != nil {
 		sm.eventBus.OpenTopic(run.ReviewID)
 		defer sm.eventBus.CloseTopic(run.ReviewID)
+	}
+	// Before Run, never inside it: the first stage this loop executes is
+	// already a consumer of the flags/thresholds/indexer it restores.
+	if sm.hydrate != nil {
+		sm.hydrate(ctx, run)
 	}
 	sm.logger.Info("resuming pipeline", "run_id", runID, "state", run.State)
 	return run, sm.Run(ctx, run)

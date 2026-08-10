@@ -353,6 +353,11 @@ func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, 
 		cfg:          cfg,
 	}
 	sm.onTerminal = o.FinalizeStartedComment
+	// Same reason as onTerminal: the hook closes over the orchestrator (store +
+	// memory registry), so it can only be attached after construction. Without
+	// it every resumed and crash-recovered run continues with zero-valued
+	// feature flags, similarity thresholds and no indexer.
+	sm.hydrate = o.hydrateResumedRun
 	o.lifecycle = NewReviewLifecycle(db, st, sm, eventBus, logger)
 	o.incremental = NewIncrementalResolver(st, ghClient, logger)
 	o.findingLifecycle = NewFindingLifecycle(st, ghClient, logger)
@@ -987,10 +992,11 @@ func (o *Orchestrator) RetryReview(ctx context.Context, reviewID uuid.UUID) erro
 		return fmt.Errorf("loading pipeline run %s: %w", runID, err)
 	}
 
-	// Non-terminal run: resume in place. KNOWN GAP: a resumed run still loses
-	// every json:"-" context field (intent/contract/SAST/arch/links/flags/
-	// thresholds) — enriching mid-flight risks double-charging the intent LLM
-	// call, so the resume ingress needs its own design (tracked follow-up).
+	// Non-terminal run: resume in place. Resume re-resolves the value-safe
+	// json:"-" context it lost (flags, thresholds, indexer, contract) via the
+	// hydrate hook — see resume_context.go. The enricher-backed fields
+	// (intent/SAST/arch/links) stay unresolved by design: re-running them
+	// mid-flight would re-charge the intent LLM call on every resume.
 	if !prev.State.IsTerminal() {
 		_, err = o.sm.Resume(ctx, runID)
 		return err
