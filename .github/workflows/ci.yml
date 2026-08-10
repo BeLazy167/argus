@@ -118,6 +118,18 @@ jobs:
         run: pnpm typecheck
       - name: Test
         run: pnpm test
+      # Blocking: `tsc` and `next build` both compile files nobody imports, so
+      # dead modules survive every other gate here. See #232 and #240 -- two
+      # unreferenced "extracted components" directories that drifted from the
+      # live inline copies they shadowed.
+      - name: Unreferenced module check
+        run: pnpm check:unreferenced
+      # The check above is the only gate that can report dead code, so a hole
+      # in it is silent by construction. These pin the two holes that made it
+      # miss a dead _components dir: a route-convention filename inside a
+      # private folder, and a commented-out import.
+      - name: Unreferenced module check — self-tests
+        run: pnpm test:scripts
       - name: Build
         env:
           NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: pk_test_Y2xlcmsuZXhhbXBsZS5jb20k
