@@ -96,6 +96,7 @@ SELECT COUNT(*)::int as bugs
 FROM review_comments rc
 JOIN reviews r ON r.id = rc.review_id
 WHERE r.repo_id = $1 AND rc.file_path = $2 AND rc.severity IN ('critical','warning')
+  AND rc.state <> 'suppressed'
 `
 
 type GetFileBugCountParams struct {
@@ -103,7 +104,10 @@ type GetFileBugCountParams struct {
 	FilePath string `json:"file_path"`
 }
 
-// Single-file bug count for review prompt enrichment.
+// Single-file bug count for review prompt enrichment. Same predicate as
+// ListArchBugDensity's bugs FILTER: a suppressed finding never reached the PR,
+// so counting it would tell the review LLM "N bugs have been found in this
+// file" about defects nobody was ever shown.
 func (q *Queries) GetFileBugCount(ctx context.Context, arg GetFileBugCountParams) (int, error) {
 	row := q.db.QueryRow(ctx, getFileBugCount, arg.RepoID, arg.FilePath)
 	var bugs int
@@ -177,7 +181,7 @@ func (q *Queries) GetTopChokePoints(ctx context.Context, arg GetTopChokePointsPa
 const listArchBugDensity = `-- name: ListArchBugDensity :many
 SELECT rc.file_path,
        COUNT(DISTINCT CONCAT(r.pr_number::text, ':', COALESCE(rc.end_line::text, '0')))
-           FILTER (WHERE rc.severity IN ('critical','warning'))::int AS bugs,
+           FILTER (WHERE rc.severity IN ('critical','warning') AND rc.state <> 'suppressed')::int AS bugs,
        COUNT(DISTINCT r.pr_number)::int AS prs
 FROM review_comments rc
 JOIN reviews r ON r.id = rc.review_id
@@ -194,6 +198,20 @@ type ListArchBugDensityRow struct {
 // Returns bug count + PR count per file for bug density and change frequency metrics.
 // Bugs are deduped by (pr_number, end_line) so a single defect reported many
 // times in one PR counts once — a noisy PR no longer inflates density.
+//
+// `state <> 'suppressed'` sits in the bugs FILTER, not in the WHERE, and the
+// placement is the whole point:
+//   - bugs is a defect claim. A suppressed finding was generated and then
+//     withheld — the PR author never saw it. Counting it produced nonzero
+//     bug_density, a raised risk score and the "Bug hotspot. High defect rate
+//     per line." label for files whose findings were ALL suppressed (#239).
+//   - prs is change frequency, not a defect claim. A PR whose only findings on
+//     a file were suppressed still changed that file, so it must keep counting;
+//     moving the predicate to the WHERE would undercount churn and drop
+//     all-suppressed files from the result set entirely.
+//
+// Predicate matches ListPRReviewSummaries (queries.go) exactly — one spelling
+// of "was this finding actually delivered" across the codebase.
 func (q *Queries) ListArchBugDensity(ctx context.Context, repoID int64) ([]ListArchBugDensityRow, error) {
 	rows, err := q.db.Query(ctx, listArchBugDensity, repoID)
 	if err != nil {

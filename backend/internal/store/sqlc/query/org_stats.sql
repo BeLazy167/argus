@@ -12,7 +12,10 @@ SELECT
     COALESCE((SELECT AVG(score) FROM scoped WHERE score IS NOT NULL), 0)::float8 AS avg_score,
     COALESCE((SELECT AVG(EXTRACT(EPOCH FROM (completed_at - created_at)))::int FROM scoped WHERE completed_at IS NOT NULL), 0)::int AS avg_review_secs,
     COALESCE((SELECT SUM((token_usage->'total'->>'total_tokens')::int) FROM scoped WHERE token_usage IS NOT NULL), 0)::int AS total_tokens,
-    (SELECT COUNT(*) FROM review_comments rc JOIN scoped s ON rc.review_id = s.id WHERE rc.severity = 'critical')::int AS critical_finds,
+    -- state <> 'suppressed': a suppressed finding was generated then withheld,
+    -- so the PR author never received it. Counting it inflates the org's
+    -- critical-finding headline with defects nobody was ever told about.
+    (SELECT COUNT(*) FROM review_comments rc JOIN scoped s ON rc.review_id = s.id WHERE rc.severity = 'critical' AND rc.state <> 'suppressed')::int AS critical_finds,
     COALESCE((SELECT (COUNT(*) FILTER (WHERE score < 10) * 100 / NULLIF(COUNT(*) FILTER (WHERE score IS NOT NULL), 0))::int FROM scoped), 0) AS catch_rate;
 
 -- name: StatsTimeseries :many
@@ -53,6 +56,9 @@ ORDER BY COUNT(*) DESC
 LIMIT 50;
 
 -- name: StatsUserCriticals :many
+-- Per-author critical count. state <> 'suppressed' keeps this a claim about
+-- what the author was actually shown — attributing a withheld finding to a
+-- developer charges them for a defect report they never saw.
 SELECT
     r.pr_author,
     COUNT(*)::int AS critical_count
@@ -62,10 +68,14 @@ JOIN repos rp ON r.repo_id = rp.id
 WHERE rp.installation_id = ANY(@installation_ids::bigint[])
   AND r.created_at >= NOW() - @period::interval
   AND rc.severity = 'critical'
+  AND rc.state <> 'suppressed'
   AND r.pr_author IS NOT NULL AND r.pr_author != ''
 GROUP BY r.pr_author;
 
 -- name: StatsFindingsBySeverity :many
+-- The stats page renders this as "findings Argus reported". state <>
+-- 'suppressed' keeps withheld findings out of that breakdown — they were never
+-- reported to anyone.
 SELECT
     rc.severity,
     COUNT(*)::int AS count
@@ -74,10 +84,13 @@ JOIN reviews r ON rc.review_id = r.id
 JOIN repos rp ON r.repo_id = rp.id
 WHERE rp.installation_id = ANY(@installation_ids::bigint[])
   AND r.created_at >= NOW() - @period::interval
+  AND rc.state <> 'suppressed'
 GROUP BY rc.severity
 ORDER BY COUNT(*) DESC;
 
 -- name: StatsFindingsByCategory :many
+-- Same claim as StatsFindingsBySeverity, sliced by category: suppressed rows
+-- stay out so the two breakdowns can never disagree on the same total.
 SELECT
     rc.category,
     COUNT(*)::int AS count
@@ -86,11 +99,16 @@ JOIN reviews r ON rc.review_id = r.id
 JOIN repos rp ON r.repo_id = rp.id
 WHERE rp.installation_id = ANY(@installation_ids::bigint[])
   AND r.created_at >= NOW() - @period::interval
+  AND rc.state <> 'suppressed'
 GROUP BY rc.category
 ORDER BY COUNT(*) DESC
 LIMIT 10;
 
 -- name: StatsFindingsNewVsPattern :one
+-- Memory-effectiveness split over delivered findings only. A suppressed row
+-- carries is_new_finding / matched_pattern_score like any other, so without
+-- state <> 'suppressed' the "memory caught this" ratio counts findings the
+-- suppression pass had already thrown away.
 SELECT
     COUNT(*) FILTER (WHERE rc.is_new_finding = true)::int AS new_findings,
     COUNT(*) FILTER (WHERE rc.matched_pattern_score > 0)::int AS pattern_matches
@@ -98,7 +116,8 @@ FROM review_comments rc
 JOIN reviews r ON rc.review_id = r.id
 JOIN repos rp ON r.repo_id = rp.id
 WHERE rp.installation_id = ANY(@installation_ids::bigint[])
-  AND r.created_at >= NOW() - @period::interval;
+  AND r.created_at >= NOW() - @period::interval
+  AND rc.state <> 'suppressed';
 
 -- name: StatsAdoption :one
 WITH scoped AS (

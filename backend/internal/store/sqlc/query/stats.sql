@@ -1,10 +1,15 @@
 -- name: GetStats :one
+-- critical_finds excludes state='suppressed': those findings were generated and
+-- then withheld, so no PR author ever received them. Counting them advertises
+-- review coverage that was never delivered. Kept in lockstep with the live
+-- raw-SQL Store.GetStats — the sqlc migration swaps one for the other, and a
+-- predicate on only one half is how #239 happened.
 SELECT
     (SELECT COUNT(*) FROM reviews)::int as total_reviews,
     (SELECT COUNT(*) FROM reviews WHERE created_at >= CURRENT_DATE AND status = 'completed')::int as completed_today,
     COALESCE((SELECT AVG(score)::int FROM reviews WHERE score IS NOT NULL), 0) as avg_score,
     (SELECT COUNT(*) FROM repos WHERE enabled = true)::int as active_repos,
-    (SELECT COUNT(*) FROM review_comments WHERE severity = 'critical')::int as critical_finds,
+    (SELECT COUNT(*) FROM review_comments WHERE severity = 'critical' AND state <> 'suppressed')::int as critical_finds,
     (SELECT COUNT(*) FROM reviews WHERE status IN ('pending','in_progress'))::int as pending_reviews,
     COALESCE((SELECT (COUNT(*) FILTER (WHERE score < 10) * 100 / NULLIF(COUNT(*) FILTER (WHERE status = 'completed'), 0))::int FROM reviews), 0) as catch_rate,
     (SELECT COUNT(*) FROM reviews WHERE created_at >= NOW() - INTERVAL '7 days')::int as prs_this_week,
@@ -21,7 +26,7 @@ SELECT
     (SELECT COUNT(*) FROM scoped_reviews WHERE created_at >= CURRENT_DATE AND status = 'completed')::int as completed_today,
     COALESCE((SELECT AVG(score)::int FROM scoped_reviews WHERE score IS NOT NULL), 0) as avg_score,
     (SELECT COUNT(*) FROM repos WHERE installation_id = ANY($1::bigint[]) AND enabled = true)::int as active_repos,
-    (SELECT COUNT(*) FROM review_comments WHERE review_id IN (SELECT id FROM scoped_reviews) AND severity = 'critical')::int as critical_finds,
+    (SELECT COUNT(*) FROM review_comments WHERE review_id IN (SELECT id FROM scoped_reviews) AND severity = 'critical' AND state <> 'suppressed')::int as critical_finds,
     (SELECT COUNT(*) FROM scoped_reviews WHERE status IN ('pending','in_progress'))::int as pending_reviews,
     COALESCE((SELECT (COUNT(*) FILTER (WHERE score < 10) * 100 / NULLIF(COUNT(*) FILTER (WHERE status = 'completed'), 0))::int FROM scoped_reviews), 0) as catch_rate,
     (SELECT COUNT(*) FROM scoped_reviews WHERE created_at >= NOW() - INTERVAL '7 days')::int as prs_this_week,

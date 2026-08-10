@@ -1021,6 +1021,13 @@ func (s *Store) GetLatestReviewByPR(ctx context.Context, repoFullName string, pr
 
 // --- Stats ---
 
+// CriticalFinds in both GetStats and GetStatsScoped excludes state='suppressed'.
+// Those findings were generated and then withheld by the suppression pass, so no
+// PR author ever received them; counting them made the dashboard advertise
+// review coverage that was never delivered (#239). The same predicate must stay
+// on the sqlc mirrors in sqlc/query/stats.sql — the sqlc migration swaps one
+// implementation for the other, and a fix on only one half is the exact failure
+// this issue is a follow-up to.
 func (s *Store) GetStats(ctx context.Context) (*Stats, error) {
 	var st Stats
 	err := s.Pool.QueryRow(ctx, `
@@ -1029,7 +1036,7 @@ func (s *Store) GetStats(ctx context.Context) (*Stats, error) {
 			(SELECT COUNT(*) FROM reviews WHERE created_at >= CURRENT_DATE AND status = 'completed')::int,
 			COALESCE((SELECT AVG(score)::int FROM reviews WHERE score IS NOT NULL), 0),
 			(SELECT COUNT(*) FROM repos WHERE enabled = true)::int,
-			(SELECT COUNT(*) FROM review_comments WHERE severity = 'critical')::int,
+			(SELECT COUNT(*) FROM review_comments WHERE severity = 'critical' AND state <> 'suppressed')::int,
 			(SELECT COUNT(*) FROM reviews WHERE status IN ('pending','in_progress'))::int,
 			COALESCE((SELECT (COUNT(*) FILTER (WHERE score < 10) * 100 / NULLIF(COUNT(*) FILTER (WHERE status = 'completed'), 0))::int FROM reviews), 0),
 			(SELECT COUNT(*) FROM reviews WHERE created_at >= NOW() - INTERVAL '7 days')::int,
@@ -1052,7 +1059,7 @@ func (s *Store) GetStatsScoped(ctx context.Context, installationIDs []int64) (*S
 			(SELECT COUNT(*) FROM scoped_reviews WHERE created_at >= CURRENT_DATE AND status = 'completed')::int,
 			COALESCE((SELECT AVG(score)::int FROM scoped_reviews WHERE score IS NOT NULL), 0),
 			(SELECT COUNT(*) FROM repos WHERE installation_id = ANY($1) AND enabled = true)::int,
-			(SELECT COUNT(*) FROM review_comments WHERE review_id IN (SELECT id FROM scoped_reviews) AND severity = 'critical')::int,
+			(SELECT COUNT(*) FROM review_comments WHERE review_id IN (SELECT id FROM scoped_reviews) AND severity = 'critical' AND state <> 'suppressed')::int,
 			(SELECT COUNT(*) FROM scoped_reviews WHERE status IN ('pending','in_progress'))::int,
 			COALESCE((SELECT (COUNT(*) FILTER (WHERE score < 10) * 100 / NULLIF(COUNT(*) FILTER (WHERE status = 'completed'), 0))::int FROM scoped_reviews), 0),
 			(SELECT COUNT(*) FROM scoped_reviews WHERE created_at >= NOW() - INTERVAL '7 days')::int,
