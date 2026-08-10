@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -43,6 +44,68 @@ func NewPGIndexer(pool *pgxpool.Pool, embedder Embedder, installationID int64, d
 }
 
 var _ Indexer = (*PGIndexer)(nil)
+
+// vectorTypeOnce guards a single probe of memories.embedding's actual type.
+// Both are supported deliberately: pgContext cannot be installed on ANY managed
+// Postgres (RDS, Supabase, Cloud SQL, Neon), so a self-hosted install will
+// always be on pgvector, while our production image carries pgContext. Assuming
+// either one breaks the other half of the fleet.
+var (
+	vectorTypeOnce sync.Once
+	vectorIsPGCtx  bool
+)
+
+// usesPGContextVector reports whether memories.embedding is a pgcontext.vector.
+//
+// Probed once per process from the catalog rather than inferred from
+// "is the extension installed": the extension can be present while the
+// ownership conversion has not run, and the operator that resolves depends on
+// the COLUMN's type, not the extension's presence. Defaults to pgvector on any
+// probe error — that is the portable path, and a wrong guess there produces a
+// loud operator error rather than silent empty results.
+func usesPGContextVector(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) bool {
+	vectorTypeOnce.Do(func() {
+		var typeName string
+		err := pool.QueryRow(ctx, `
+			SELECT atttypid::regtype::text
+			FROM pg_attribute
+			WHERE attrelid = 'public.memories'::regclass AND attname = 'embedding'`).Scan(&typeName)
+		if err != nil {
+			logger.Warn("could not probe memories.embedding type; assuming pgvector", "error", err)
+			return
+		}
+		vectorIsPGCtx = strings.HasPrefix(typeName, "pgcontext.")
+		logger.Info("memory vector column type probed", "type", typeName, "pgcontext", vectorIsPGCtx)
+	})
+	return vectorIsPGCtx
+}
+
+// vectorParam renders the placeholder for a bound query vector. pgvector-go
+// encodes as public.vector; when the column has been converted, the parameter
+// needs an explicit cast because pgcontext.vector is a DIFFERENT oid with no
+// cross-type operator. The dense layouts are byte-identical, so the cast is
+// free.
+func vectorParam(placeholder string, pgctx bool) string {
+	return placeholder + vecCast(pgctx)
+}
+
+// vecCast is the cast suffix a bound query vector needs, or "" on pgvector.
+func vecCast(pgctx bool) string {
+	if pgctx {
+		return "::pgcontext.vector"
+	}
+	return ""
+}
+
+// cosineOp renders the cosine-distance operator. pgContext ships its own <=>
+// in the pgcontext schema, which is NOT on the default search_path, so it must
+// be schema-qualified at the call site.
+func cosineOp(pgctx bool) string {
+	if pgctx {
+		return "OPERATOR(pgcontext.<=>)"
+	}
+	return "<=>"
+}
 
 // DisableLLMFilter is a Supermemory account-level concern; Postgres has no
 // equivalent. No-op by design.
@@ -172,15 +235,21 @@ func (idx *PGIndexer) upsertDocs(ctx context.Context, docs []Doc) error {
 	// embed failure: content may have changed, and a stale vector for new
 	// content is worse than a backfill-recoverable NULL.
 	batch := &pgx.Batch{}
-	const q = `
+	// $7 is cast only where the column has been converted: the driver binds a
+	// pgvector.Vector (public.vector) and pgcontext.vector is a different oid
+	// with no implicit coercion, so an unqualified bind fails at write time
+	// there. On an unconverted database the cast would fail instead, which is
+	// why the placeholder is probed rather than hard-coded.
+	q := fmt.Sprintf(`
 		INSERT INTO memories (installation_id, container_tag, custom_id, type, content, metadata, embedding, embedding_model)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		VALUES ($1, $2, $3, $4, $5, $6, %s, $8)
 		ON CONFLICT (installation_id, custom_id) DO UPDATE
 		SET type = EXCLUDED.type, content = EXCLUDED.content,
 		    metadata = EXCLUDED.metadata,
 		    embedding = EXCLUDED.embedding, embedding_model = EXCLUDED.embedding_model,
 		    container_tag = EXCLUDED.container_tag, updated_at = now(),
-		    deleted_at = NULL`
+		    deleted_at = NULL`,
+		vectorParam("$7", usesPGContextVector(ctx, idx.pool, idx.logger)))
 	for i, d := range kept {
 		metaJSON, err := json.Marshal(d.Metadata)
 		if err != nil {

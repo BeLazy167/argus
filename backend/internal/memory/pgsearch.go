@@ -200,24 +200,37 @@ func (idx *PGIndexer) runSearchVec(ctx context.Context, req SearchRequest, qv *p
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// Which vector type the column actually holds decides the operator, the
+	// parameter cast, and whether ANN tuning applies. Probed once per process.
+	pgctx := usesPGContextVector(ctx, idx.pool, idx.logger)
+
 	if qv != nil {
-		// ef_search=80 (SOTA-validated over the 40 default) and relaxed
-		// iterative scan so a filtered HNSW walk keeps yielding candidates
-		// instead of stopping short of the pool size.
-		if _, err := tx.Exec(ctx, "SET LOCAL hnsw.ef_search = 80"); err != nil {
-			return nil, fmt.Errorf("memory search tuning: %w", err)
+		if !pgctx {
+			// pgvector path: ef_search=80 (SOTA-validated over the 40 default)
+			// and relaxed iterative scan so a filtered HNSW walk keeps yielding
+			// candidates instead of stopping short of the pool size.
+			if _, err := tx.Exec(ctx, "SET LOCAL hnsw.ef_search = 80"); err != nil {
+				return nil, fmt.Errorf("memory search tuning: %w", err)
+			}
+			if _, err := tx.Exec(ctx, "SET LOCAL hnsw.iterative_scan = 'relaxed_order'"); err != nil {
+				return nil, fmt.Errorf("memory search tuning: %w", err)
+			}
 		}
-		if _, err := tx.Exec(ctx, "SET LOCAL hnsw.iterative_scan = 'relaxed_order'"); err != nil {
-			return nil, fmt.Errorf("memory search tuning: %w", err)
-		}
+		// pgcontext path sets nothing: the ownership conversion required
+		// dropping the PARTIAL memories_embedding_hnsw (pgContext rejects
+		// partial indexes), and pgcontext_hnsw was declined deliberately --
+		// experimental, with an on-page format not backward compatible across
+		// upgrades. Without an attached index pgContext searches EXACTLY, which
+		// is what makes a 0.95 suppression floor trustworthy. Measured ~225ms
+		// over 3,896 rows. Revisit when the corpus outgrows a sequential scan.
 		args = append(args, qv, idx.embedder.Model(), req.Query, pool, req.Threshold, limit)
 		n := len(args)
 		q := fmt.Sprintf(`
 WITH vec AS (
-  SELECT id, row_number() OVER (ORDER BY embedding <=> $%[1]d) AS rnk
+  SELECT id, row_number() OVER (ORDER BY embedding %[8]s $%[1]d%[9]s) AS rnk
   FROM memories
   WHERE %[7]s AND embedding IS NOT NULL AND embedding_model = $%[2]d
-  ORDER BY embedding <=> $%[1]d
+  ORDER BY embedding %[8]s $%[1]d%[9]s
   LIMIT $%[4]d
 ), fts AS (
   SELECT id, row_number() OVER (ORDER BY ts_rank_cd(content_tsv, websearch_to_tsquery('english', $%[3]d)) DESC, id) AS rnk
@@ -232,8 +245,8 @@ WITH vec AS (
 ), scored AS (
   SELECT m.custom_id, m.content, m.metadata, u.rrf,
          CASE WHEN m.embedding IS NOT NULL AND m.embedding_model = $%[2]d
-                   AND NOT ((m.embedding <=> $%[1]d) = 'NaN'::float8)
-              THEN LEAST(GREATEST(1 - (m.embedding <=> $%[1]d), 0::float8), 1::float8) ELSE 0 END AS score
+                   AND NOT ((m.embedding %[8]s $%[1]d%[9]s)::float8 = 'NaN'::float8)
+              THEN LEAST(GREATEST(1 - (m.embedding %[8]s $%[1]d%[9]s)::float8, 0::float8), 1::float8) ELSE 0 END AS score
   FROM fused u JOIN memories m ON m.id = u.id
 )
 SELECT custom_id, content, metadata, score
@@ -241,7 +254,7 @@ FROM scored
 WHERE score >= $%[5]d::float8
 ORDER BY score DESC, rrf DESC, custom_id
 LIMIT $%[6]d`,
-			n-5, n-4, n-3, n-2, n-1, n, where)
+			n-5, n-4, n-3, n-2, n-1, n, where, cosineOp(pgctx), vecCast(pgctx))
 		rows, err = tx.Query(ctx, q, args...)
 	} else {
 		// Score contract: without a query vector every row scores 0, so a

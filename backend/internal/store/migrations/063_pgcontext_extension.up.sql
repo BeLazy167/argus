@@ -1,20 +1,28 @@
--- Install pgContext alongside pgvector.
+-- Install pgContext IF THE SERVER HAS IT. Optional by design.
 --
--- This migration installs the EXTENSION ONLY. It deliberately does not convert
--- the memories.embedding column and does not register the collection.
+-- The first version of this migration ran a bare CREATE EXTENSION and hard
+-- failed everywhere the extension is not installed:
+--   migrate up failed: extension "pgcontext" is not available (0A000)
 --
--- Why the split: the conversion functions take explicit safety gates
--- (application_dependencies_reviewed, sessions_drained). This file runs from
--- release_command during a ROLLING deploy, where sessions are by definition not
--- drained. Asserting a gate that is false is how a "safe" migration becomes an
--- incident. The conversion is an operator step — scripts/adopt-pgcontext.sh.
+-- That is not a CI inconvenience. pgContext needs a custom index access method
+-- and cannot be installed on ANY managed Postgres -- RDS, Aurora, Supabase,
+-- Cloud SQL, Neon. A hard requirement here bricks every self-hosted install of
+-- an open-source, self-deployable product. pgvector is in every default
+-- catalog; pgContext is in none.
 --
--- pgvector is NOT removed. The two coexist by design: pgvector owns public.*
--- types, pgContext owns pgcontext.* types. pgvector must stay installed for the
--- ownership conversion to hand the column over, and it is the rollback path.
+-- So: best effort. Where pgContext exists (our production image) the column is
+-- converted by the operator step and retrieval uses pgcontext operators. Where
+-- it does not, everything stays on pgvector and works exactly as before. The
+-- reader probes the actual column type at runtime rather than assuming either.
 --
--- ORDERING: this fails if the database image does not carry the extension
--- files. That failure is intentional and is the gate — a non-zero release
--- command aborts the deploy, so the app binary can never reach production
--- expecting a pgContext that is not there. Swap the argus-db image first.
-CREATE EXTENSION IF NOT EXISTS pgcontext;
+-- This migration still installs NOTHING beyond the extension. The ownership
+-- conversion takes explicit safety gates (application_dependencies_reviewed,
+-- sessions_drained) that a rolling release_command cannot honestly assert.
+DO $$
+BEGIN
+  CREATE EXTENSION IF NOT EXISTS pgcontext;
+EXCEPTION
+  WHEN undefined_file OR feature_not_supported OR insufficient_privilege THEN
+    RAISE NOTICE 'pgcontext not available; continuing on pgvector (expected on managed Postgres and CI)';
+END
+$$;
