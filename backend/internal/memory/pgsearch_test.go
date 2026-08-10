@@ -67,7 +67,7 @@ func TestFilterSQLOperatorWhitelist(t *testing.T) {
 	for _, op := range append(hostile, ">=", "<=", ">", "<", "=", "") {
 		t.Run("op="+op, func(t *testing.T) {
 			frag, args := filterSQL(FilterCondition{
-				Key: "confidence", Value: "0.5", FilterType: "numeric", NumericOperator: op,
+				Key: "score", Value: "0.5", FilterType: "numeric", NumericOperator: op,
 			}, 0)
 			accepted := frag != "false"
 			if accepted != allowed[op] {
@@ -219,8 +219,11 @@ func TestFilterSQLNumericValueGuard(t *testing.T) {
 // developer machine. Asserted as an invariant, not a golden string: the key's
 // ordinal must appear inside a CASE guard before it is cast.
 func TestFilterSQLNumericGuardsStoredValue(t *testing.T) {
+	// A stored-value numeric key. NOT confidence: that one is computed from
+	// age now (see TestFilterSQLConfidenceIsComputed) and never reads its
+	// stored value, so it cannot exercise the guard this test protects.
 	frag, args := filterSQL(FilterCondition{
-		Key: "confidence", Value: "0.5", FilterType: "numeric", NumericOperator: ">=",
+		Key: "score", Value: "0.5", FilterType: "numeric", NumericOperator: ">=",
 	}, 0)
 	if len(args) != 2 {
 		t.Fatalf("numeric filter bound %d args, want key+value", len(args))
@@ -551,5 +554,49 @@ func stripParens(s string) string {
 			return s
 		}
 		s = next
+	}
+}
+
+// TestFilterSQLConfidenceIsComputed pins the decay contract. metadata.confidence
+// is written as "1.00" on EVERY shared write and the nightly sweep that moved it
+// is gone, so a filter that reads the stored value compares against a constant
+// and can exclude nothing. The fragment must therefore compute confidence from
+// age instead of reading it.
+//
+// It must also bind exactly one argument: the computed expression references no
+// metadata key, and an argument bound but never referenced shifts every later
+// placeholder and silently mis-binds the rest of the WHERE clause.
+func TestFilterSQLConfidenceIsComputed(t *testing.T) {
+	frag, args := filterSQL(FilterCondition{
+		Key: "confidence", Value: "0.30", FilterType: "numeric", NumericOperator: ">=",
+	}, 0)
+
+	// The distinction is which value is COMPARED, not whether metadata is
+	// touched at all. metadata->>'confidence' must still appear as a presence
+	// and regex GUARD -- dropping it let rows with no confidence, and rows
+	// with a malformed one, pass a floor meant for `_shared` (caught by the
+	// PG-backed suite). What must not appear is the stored value cast as the
+	// comparand.
+	if strings.Contains(frag, "(metadata->>'confidence')::numeric") {
+		t.Errorf("confidence must be computed from age, not compared as its stored value: %q", frag)
+	}
+	if !strings.Contains(frag, "metadata->>'confidence' ~") {
+		t.Errorf("the presence/regex guard on the stored value must survive: %q", frag)
+	}
+	if !strings.Contains(frag, "EXTRACT(EPOCH") {
+		t.Errorf("confidence must be derived from elapsed time: %q", frag)
+	}
+	if !strings.Contains(frag, "decay_anchor") || !strings.Contains(frag, "updated_at") {
+		t.Errorf("confidence must anchor on decay_anchor then updated_at: %q", frag)
+	}
+	if len(args) != 1 {
+		t.Errorf("computed confidence binds only the threshold; got %d args", len(args))
+	}
+	// A generic numeric key keeps the stored-value path.
+	other, otherArgs := filterSQL(FilterCondition{
+		Key: "score", Value: "0.5", FilterType: "numeric", NumericOperator: ">=",
+	}, 0)
+	if !strings.Contains(other, "metadata->>") || len(otherArgs) != 2 {
+		t.Errorf("non-confidence numeric keys must still read stored metadata: %q (%d args)", other, len(otherArgs))
 	}
 }

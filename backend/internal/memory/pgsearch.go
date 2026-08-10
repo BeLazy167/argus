@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -465,6 +466,30 @@ func filterSQL(f FilterCondition, base int) (string, []any) {
 		if !numericLiteral.MatchString(f.Value) {
 			return "false", nil
 		}
+		// confidence is computed, not read: the stored value is pinned at 1.00
+		// on every shared write and the sweep that moved it is gone. Any other
+		// numeric key still reads its stored value, guarded as before.
+		if f.Key == "confidence" {
+			// Decay REPLACES the stored value, but must not widen what
+			// matches. Both original guards survive, and the PG-backed suite
+			// caught their loss when an earlier version applied the computed
+			// expression unconditionally:
+			//
+			//   - a row with no confidence key produced NULL and did not
+			//     match. Computing one for it let repo-scoped documents pass
+			//     a floor meant for `_shared`.
+			//   - a row with a malformed value ("high" from a legacy
+			//     backfill) produced NULL and did not match, rather than
+			//     erroring the leg with 22P02.
+			//
+			// So: keep the presence and regex guards, and swap only the
+			// VALUE they gate for the age-derived one.
+			frag = fmt.Sprintf(
+				`CASE WHEN metadata->>'confidence' ~ '%s' THEN %s END %s $%d::numeric`,
+				numericLiteralPattern, effectiveConfidenceSQL(), op, base+1)
+			args = []any{f.Value}
+			break
+		}
 		frag = fmt.Sprintf(
 			`CASE WHEN metadata->>$%d ~ '%s' THEN (metadata->>$%d)::numeric END %s $%d::numeric`,
 			base+1, numericLiteralPattern, base+1, op, base+2)
@@ -504,6 +529,35 @@ func lenFirst(vecs [][]float32) int {
 // Search implements the reader seam over the hybrid SQL core; the shared
 // orchestration owns container resolution, timeout, and fan-out merge, so
 // retrieval requests are identical across backends by construction.
+// effectiveConfidenceSQL renders the DECAYED confidence of a `_shared` document
+// as a SQL expression, replacing the nightly reconcile-memory sweep.
+//
+// Every shared write pins metadata.confidence to "1.00" (buildSharedPatternDoc)
+// because successful re-learning is the liveness signal. The stored value was
+// only ever moved by the cron, so reading it directly — as this filter used to —
+// compares against a constant and can exclude nothing.
+//
+// Computing it here is EXACTLY equivalent, not an approximation: computeDecay
+// derived `1.0 - weeksPastGrace*rate` from 1.0 on every run and never compounded
+// the stored value, so decay was always a pure function of age. That makes it
+// expressible in SQL, which removes the job, the write amplification, and the
+// window where a value is stale until the next nightly pass.
+//
+// Retirement changes shape deliberately. The cron DELETED documents at or below
+// the floor; this makes them merely unreachable through a confidence-floored
+// read. Unreachable is recoverable and delete is not, and nothing else depended
+// on the row being gone.
+//
+// Age anchors on metadata.decay_anchor when present, else updated_at — the same
+// precedence computeDecay used.
+func effectiveConfidenceSQL() string {
+	return fmt.Sprintf(
+		`GREATEST(0::numeric, 1.0 - (GREATEST(0::numeric, `+
+			`(EXTRACT(EPOCH FROM (now() - COALESCE(NULLIF(metadata->>'decay_anchor','')::timestamptz, updated_at)))/86400)::numeric - %d`+
+			`) / 7) * %s)`,
+		SharedGraceDays, strconv.FormatFloat(SharedDecayPerWeek, 'f', -1, 64))
+}
+
 func (idx *PGIndexer) Search(ctx context.Context, q MemoryQuery) ([]PatternMatch, error) {
 	return searchWith(ctx, idx.memoRunSearch(), q)
 }
