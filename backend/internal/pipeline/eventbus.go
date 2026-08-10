@@ -13,14 +13,17 @@ import (
 type EventType string
 
 const (
-	EventStageChanged      EventType = "stage_changed"
-	EventTriageComplete    EventType = "triage_complete"
-	EventComment           EventType = "comment"
-	EventScoringUpdate     EventType = "scoring_update"
-	EventSynthesis         EventType = "synthesis"
-	EventPatternLearned    EventType = "pattern_learned"
-	EventCompleted         EventType = "completed"
-	EventError             EventType = "error"
+	EventStageChanged   EventType = "stage_changed"
+	EventTriageComplete EventType = "triage_complete"
+	EventComment        EventType = "comment"
+	EventScoringUpdate  EventType = "scoring_update"
+	EventSynthesis      EventType = "synthesis"
+	EventPatternLearned EventType = "pattern_learned"
+	EventCompleted      EventType = "completed"
+	EventError          EventType = "error"
+	// EventBudgetReduced reports that the Budget narrowed this review, so the
+	// live view can say why fewer files appear than the pull request changed.
+	EventBudgetReduced     EventType = "budget_reduced"
 	EventCancelled         EventType = "cancelled"
 	EventFileReviewStarted EventType = "file_review_started"
 	EventTokenUpdate       EventType = "token_update"

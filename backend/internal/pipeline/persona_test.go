@@ -24,10 +24,13 @@ func TestIsAutoRunEnabled(t *testing.T) {
 		want bool
 	}{
 		{
-			name: "both nil => on (default #161)",
+			// A review costs money and, on a public repo, can be triggered by
+			// people the maintainers have not vetted. Nothing stored means
+			// offer the trigger checkbox, not spend on every push.
+			name: "both nil => OFF (safe default)",
 			repo: nil,
 			org:  nil,
-			want: true,
+			want: false,
 		},
 		{
 			name: "repo unset, org off => off",
@@ -72,10 +75,10 @@ func TestIsAutoRunEnabled(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "corrupt both => default on",
+			name: "corrupt both => OFF (safe default)",
 			repo: json.RawMessage(`{{{`),
 			org:  json.RawMessage(`}}}`),
-			want: true,
+			want: false,
 		},
 	}
 	for _, tc := range cases {
@@ -111,13 +114,20 @@ func TestDecideAutoRun(t *testing.T) {
 		want       autoRunAction
 	}{
 		// Auto-run on -> review runs.
-		{name: "default on, synchronize => review", action: "synchronize", want: autoRunReview},
+		{name: "nothing stored, synchronize => signal (safe default)", action: "synchronize", want: autoRunSignal},
 		{name: "repo on, synchronize => review", repo: on, action: "synchronize", want: autoRunReview},
 
 		// Self-hosted -> runs regardless of settings (even explicit repo false).
-		{name: "self-hosted overrides repo off, synchronize => review", selfHosted: true, repo: off, action: "synchronize", want: autoRunReview},
-		{name: "self-hosted overrides repo off, opened => review", selfHosted: true, repo: off, action: "opened", want: autoRunReview},
-		{name: "self-hosted ignores org-load failure", selfHosted: true, orgFailed: true, action: "synchronize", want: autoRunReview},
+		// Self-hosted sets the DEFAULT, it does not override a decision. These
+		// three used to assert the opposite, which meant a self-hoster who
+		// turned auto-review off still got reviews on every push.
+		{name: "self-hosted, nothing stored => review (works out of the box)", selfHosted: true, action: "synchronize", want: autoRunReview},
+		{name: "self-hosted respects an explicit repo off, synchronize => signal", selfHosted: true, repo: off, action: "synchronize", want: autoRunSignal},
+		{name: "self-hosted respects an explicit repo off, opened => signal", selfHosted: true, repo: off, action: "opened", want: autoRunSignal},
+		// Fail closed applies to self-hosted too: a database problem must not
+		// read as permission to spend.
+		{name: "self-hosted, org load failed => signal (fail closed)", selfHosted: true, orgFailed: true, action: "synchronize", want: autoRunSignal},
+		{name: "self-hosted, explicit repo on => review", selfHosted: true, repo: on, action: "synchronize", want: autoRunReview},
 
 		// Explicitly disabled -> no review; every honored action emits the signal.
 		{name: "repo off, synchronize => signal", repo: off, action: "synchronize", want: autoRunSignal},

@@ -82,6 +82,12 @@ export interface Review {
   token_usage?: unknown;
   trigger: string;
   triggered_by?: string;
+  /**
+   * BudgetNote explains why a review was narrowed by the cost limits. Nil on
+   * an ordinary review; set means fewer files were read than the pull request
+   * changed, and the dashboard says so rather than looking merely quiet.
+   */
+  budget_note?: string;
   duration_ms?: number /* int */;
   error?: string;
   deep_review: boolean;

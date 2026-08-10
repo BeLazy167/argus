@@ -159,6 +159,41 @@ stateDiagram-v2
 
 Before the pipeline runs, `postStartedComment()` posts a rich markdown issue comment containing the model name, persona, review mode (deep/incremental), and a live-watch link to the dashboard (`https://argus.reviews/reviews/{id}`). The comment's GraphQL node ID is captured into `run.StartedCommentNodeID`. After the full review is posted, `post()` calls `MinimizeComment()` with classifier `"RESOLVED"` to collapse the started comment.
 
+### Review admission
+
+Five paths can start a review, and all five reach the pipeline through `Launcher.Launch` (`internal/pipeline/launcher.go`):
+
+| Entry point | Handler |
+|-------------|---------|
+| `pull_request` webhook (opened/synchronize/reopened) | `handleWebhook` (`internal/api/handlers_webhook.go`) |
+| `@argus-eye review` slash command | `handleReviewCommand` (`internal/api/commands.go`) |
+| "Trigger review" checkbox | `handleCheckboxTrigger` (`internal/api/handlers_webhook.go`) |
+| Dashboard manual trigger | `triggerReview` (`internal/api/handlers_repos.go`) |
+| Dashboard retry | `retryReview` (`internal/api/handlers_reviews.go`) |
+
+**One seam.** **Admission** is the single decision "may this review run". It owns four gates — the actor's permission, the rate limit, the **Budget**, and the `auto_run` setting — and returns a **Verdict**. It holds no locks and no state, and it does not know GitHub or Clerk exist. Each entry point resolves an **Actor** through one of two adapters (GitHub webhook, dashboard JWT) and hands Admission plain values.
+
+**The actor is not always the authority.** On the PR-webhook path the actor is the PR author, recorded for attribution only — `auto_run` decides there. Consulting the actor's permission on that path would let a fork pull request authorize its own review. The checkbox path is the opposite case: the actor is the *ticker* (`evt.EditorLogin`), not the comment author, and a `HasRepoWriteAccess` lookup on them is the gate (see [Auto-Run Gate](#auto-run-gate) below and `handleCheckboxTrigger`).
+
+**Budget** limits what one review may cost. It measures PR size (files, then changed lines) and estimated tokens (averaged over the repo's last 20 completed reviews — `historicalReviewSampleLimit`, `internal/pipeline/cost_estimator.go`). Each measure carries a soft and a hard limit; the most severe answer across the measures wins.
+
+**Three verdicts**, each carrying a reason:
+
+| Verdict | Effect |
+|---------|--------|
+| `allow` | The review runs at the depth the ReviewContract set |
+| `reduce` | The review runs reduced: depth drops to one call per file **and** the file set is capped to the highest-risk files |
+| `refuse` | No review runs; the reason surfaces to the caller (PR comment, reaction, or HTTP status) |
+
+**Two locks stay OUTSIDE Admission.** Admission is a pure decision; these are resources with a lifetime, so they keep their own acquire/release ordering:
+
+| Lock | Scope | Owner |
+|------|-------|-------|
+| In-flight slot | one per `repo:PR` | `inflight.Registry`, claimed by `Launcher.Launch`, released on goroutine exit |
+| Concurrency token | 50 webhook goroutines process-wide | `webhookSem` (`internal/api/server.go`), taken in `BeforeSpawn`, released by `Cleanup` |
+
+Ordering is deliberate and differs by path. The manual paths (slash command, checkbox) take the slot first, then the semaphore token, then the rate limit — a losing double-trigger must not burn a rate token, and the refundable token is acquired before the non-refundable reservation. The auto-webhook path checks its non-force limit before the slot.
+
 ### Auto-Run Gate
 
 Before the pipeline runs, `decideAutoRun()` (`internal/pipeline/persona.go`) decides whether a webhook PR event reviews automatically:

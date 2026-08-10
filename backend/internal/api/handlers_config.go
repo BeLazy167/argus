@@ -587,12 +587,28 @@ type orgDefaultsBody struct {
 	ArchitectureGraph   *bool  `json:"architecture_graph,omitempty"`
 	AutoRun             *bool  `json:"auto_run,omitempty"`
 
+	// Both were defined in repoSettings and missing here, so saving org
+	// defaults silently dropped them — the exact failure the drift guard now
+	// prevents. Found by TestOrgDefaultsBodyMatchesSettingKeys.
+	AutoResolveEnabled *bool    `json:"auto_resolve_enabled,omitempty"`
+	SkipBaseBranches   []string `json:"skip_base_branches,omitempty"`
+
 	// Memory thresholds + decay opt-out (Bundle 3/5). Mirror repoSettings.
 	ThresholdFindingEnrich   *float64 `json:"threshold_finding_enrich,omitempty"`
 	ThresholdSpecialistMin   *float64 `json:"threshold_specialist_min,omitempty"`
 	ThresholdScenarioTrigger *float64 `json:"threshold_scenario_trigger,omitempty"`
 	ThresholdScenarioDedupe  *float64 `json:"threshold_scenario_dedupe,omitempty"`
 	DisableSharedDecay       *bool    `json:"disable_shared_decay,omitempty"`
+
+	// Review budget limits. Mirror repoSettings; TestOrgDefaultsBodyMatchesSettingKeys
+	// fails if this struct falls behind it.
+	BudgetSoftFiles       *int   `json:"budget_soft_files,omitempty"`
+	BudgetHardFiles       *int   `json:"budget_hard_files,omitempty"`
+	BudgetSoftLines       *int   `json:"budget_soft_lines,omitempty"`
+	BudgetHardLines       *int   `json:"budget_hard_lines,omitempty"`
+	BudgetSoftTokens      *int64 `json:"budget_soft_tokens,omitempty"`
+	BudgetHardTokens      *int64 `json:"budget_hard_tokens,omitempty"`
+	BudgetReducedMaxFiles *int   `json:"budget_reduced_max_files,omitempty"`
 }
 
 // validate returns a field-specific error message and false when the body is
@@ -657,13 +673,11 @@ func (s *Server) deleteRepoSettingKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	key := chi.URLParam(r, "key")
-	validKeys := map[string]bool{
-		"persona": true, "custom_persona_prompt": true, "deep_review": true,
-		"cross_file_context": true, "blast_radius": true, "scenario_memory": true,
-		"code_simulation": true, "pr_enrichment": true, "learn_patterns": true,
-		"learn_conventions": true, "file_synthesis": true, "architecture_graph": true,
-	}
-	if !validKeys[key] {
+	// Derived from repoSettings, not written out again. This list used to be a
+	// fourth hand-maintained copy and had already fallen behind: auto_run and
+	// every memory threshold were missing from it, so a repo could set them and
+	// never clear them.
+	if !pipeline.SettingKeys()[key] {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown setting key"})
 		return
 	}

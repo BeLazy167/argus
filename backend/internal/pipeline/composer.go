@@ -275,6 +275,14 @@ func Compose(run *PipelineRun, took time.Duration, dashboardBaseURL, appSlug str
 		summaryBody.WriteString(breakdown)
 	}
 
+	// Budget note. A reduced review returns fewer findings over fewer files, and
+	// without this the reader cannot tell a quiet review from a narrowed one —
+	// which is the same "silent outcome" the refusal path exists to prevent.
+	if run.BudgetNote != "" {
+		summaryBody.WriteString("\n\n> [!NOTE]\n> ")
+		summaryBody.WriteString(strings.ReplaceAll(run.BudgetNote, "\n", " "))
+	}
+
 	// Footer: Glass Box line (contract/depth, reviewers, suppression count,
 	// duration) + single dashboard link + engagement tips in <sub> blocks.
 	summaryBody.WriteString("\n\n---\n<sub>")

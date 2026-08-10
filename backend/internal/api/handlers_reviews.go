@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/BeLazy167/argus/backend/internal/admission"
 	"net/http"
 	"strconv"
 	"strings"
@@ -394,6 +395,37 @@ func (s *Server) retryReview(w http.ResponseWriter, r *http.Request) {
 	// errors. BeforeSpawn flips the review to pending BEFORE spawn so the UI
 	// shows "retrying"; its failure releases the slot and surfaces 500 (no
 	// goroutine spawned). Trace_id is preserved onto the detached BaseCtx.
+	// Retry was the least protected path: no rate limit, no concurrency token,
+	// no check beyond installation scope — while re-running the whole pipeline
+	// at the cost of a fresh review. It goes through Admission like everything
+
+	// repo.InstallationID is the DB serial, not GitHub's installation id. The
+	// dashboard actor is authorized on its organisation role and never reaches
+	// GitHub, but passing the wrong id anyway would sit there waiting for the
+	// day someone widens the actor kinds.
+	inst, instErr := s.store.GetInstallation(r.Context(), repo.InstallationID)
+	if instErr != nil {
+		s.handleDBError(w, instErr, "installation not found")
+		return
+	}
+	orgLogin, _, ok := strings.Cut(repo.FullName, "/")
+	if !ok {
+		// Without this the whole name becomes the org rate-limit bucket key,
+		// silently mixing one repo's budget with an org that does not exist.
+		s.logger.Error("retry: malformed repo full name", "repo", repo.FullName, "review_id", id)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "retry failed"})
+		return
+	}
+	if verdict := s.admissionFor(inst.InstallationID).Decide(r.Context(), admission.Request{
+		Actor:        actorFromRequestContext(r.Context()),
+		RepoFullName: repo.FullName,
+		OrgLogin:     orgLogin,
+	}); !verdict.Allowed() {
+		s.logger.Info("retry refused", "review_id", id, "repo", repo.FullName, "reason", verdict.Reason)
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": verdict.Reason})
+		return
+	}
+
 	launchErr := s.launcher.Launch(pipeline.LaunchSpec{
 		Repo:     repo.FullName,
 		PR:       review.PRNumber,

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/BeLazy167/argus/backend/internal/admission"
 	"net/http"
 	"strconv"
 	"strings"
@@ -96,9 +97,23 @@ func (s *Server) triggerReview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	orgLogin := strings.SplitN(repo.FullName, "/", 2)[0]
-	if !s.rateLimiter.AllowReview(repo.FullName, orgLogin, false) {
-		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate limit exceeded"})
+	// Through Admission, like every other launch site. This path previously
+	// applied a bare rate limit and no authorization at all — so a dashboard
+	// user who could not RETRY a failed review could still start a fresh one,
+	// which is the asymmetry the seam exists to remove.
+	orgLogin, _, ok := strings.Cut(repo.FullName, "/")
+	if !ok {
+		s.logger.Error("manual review: malformed repo full name", "repo", repo.FullName)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "review failed"})
+		return
+	}
+	if verdict := s.admissionFor(inst.InstallationID).Decide(r.Context(), admission.Request{
+		Actor:        actorFromRequestContext(r.Context()),
+		RepoFullName: repo.FullName,
+		OrgLogin:     orgLogin,
+	}); !verdict.Allowed() {
+		s.logger.Info("manual review refused", "repo", repo.FullName, "pr", body.PRNumber, "reason", verdict.Reason)
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": verdict.Reason})
 		return
 	}
 	// The launcher owns slot + cancel + spawn. Detached BaseCtx mirrors the

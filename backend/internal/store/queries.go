@@ -347,12 +347,14 @@ func (s *Store) GetReview(ctx context.Context, id uuid.UUID) (*Review, error) {
 		SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, COALESCE(head_ref,''), github_review_id,
 		       status, summary, score, token_usage, trigger, triggered_by, duration_ms, error,
 		       deep_review, persona, is_incremental, created_at, completed_at,
-		       diagram, diagram_title, diagrams, truncated_files, brief, cross_pr_hash, trace_id, review_contract
+		       diagram, diagram_title, diagrams, truncated_files, brief, cross_pr_hash, trace_id, review_contract,
+		       budget_note
 		FROM reviews WHERE id = $1
 	`, id).Scan(&r.ID, &r.RepoID, &r.PRNumber, &r.PRTitle, &r.PRAuthor, &r.HeadSHA, &r.BaseSHA, &r.HeadRef, &r.GithubReviewID,
 		&r.Status, &r.Summary, &r.Score, &r.TokenUsage, &r.Trigger, &r.TriggeredBy, &r.DurationMs, &r.Error,
 		&r.DeepReview, &r.Persona, &r.IsIncremental, &r.CreatedAt, &r.CompletedAt,
-		&r.Diagram, &r.DiagramTitle, &r.Diagrams, &r.TruncatedFiles, &r.Brief, &r.CrossPRHash, &r.TraceID, &r.ReviewContract)
+		&r.Diagram, &r.DiagramTitle, &r.Diagrams, &r.TruncatedFiles, &r.Brief, &r.CrossPRHash, &r.TraceID, &r.ReviewContract,
+		&r.BudgetNote)
 	if err != nil {
 		return nil, err
 	}

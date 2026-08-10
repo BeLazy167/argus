@@ -44,18 +44,22 @@ type Review struct {
 	TokenUsage     *json.RawMessage `json:"token_usage,omitempty"`
 	Trigger        string           `json:"trigger"`
 	TriggeredBy    *string          `json:"triggered_by,omitempty"`
-	DurationMs     *int             `json:"duration_ms,omitempty"`
-	Error          *string          `json:"error,omitempty"`
-	DeepReview     bool             `json:"deep_review"`
-	Persona        *string          `json:"persona,omitempty"`
-	IsIncremental  bool             `json:"is_incremental"`
-	CreatedAt      time.Time        `json:"created_at"`
-	CompletedAt    *time.Time       `json:"completed_at,omitempty"`
-	Diagram        *string          `json:"diagram,omitempty"`
-	DiagramTitle   *string          `json:"diagram_title,omitempty"`
-	Diagrams       json.RawMessage  `json:"diagrams,omitempty"`
-	TruncatedFiles json.RawMessage  `json:"truncated_files,omitempty"`
-	Brief          *string          `json:"brief,omitempty"`
+	// BudgetNote explains why a review was narrowed by the cost limits. Nil on
+	// an ordinary review; set means fewer files were read than the pull request
+	// changed, and the dashboard says so rather than looking merely quiet.
+	BudgetNote     *string         `json:"budget_note,omitempty"`
+	DurationMs     *int            `json:"duration_ms,omitempty"`
+	Error          *string         `json:"error,omitempty"`
+	DeepReview     bool            `json:"deep_review"`
+	Persona        *string         `json:"persona,omitempty"`
+	IsIncremental  bool            `json:"is_incremental"`
+	CreatedAt      time.Time       `json:"created_at"`
+	CompletedAt    *time.Time      `json:"completed_at,omitempty"`
+	Diagram        *string         `json:"diagram,omitempty"`
+	DiagramTitle   *string         `json:"diagram_title,omitempty"`
+	Diagrams       json.RawMessage `json:"diagrams,omitempty"`
+	TruncatedFiles json.RawMessage `json:"truncated_files,omitempty"`
+	Brief          *string         `json:"brief,omitempty"`
 	// CrossPRHash is written by the async cross-PR stage (crosspr_stage.go)
 	// to short-circuit repeated LLM calls when the linked-PR findings bundle
 	// hasn't changed. nil means "never run".

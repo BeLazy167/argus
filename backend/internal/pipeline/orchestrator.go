@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/BeLazy167/argus/backend/internal/admission"
 	"log/slog"
 	"math"
 	"net/http"
@@ -199,6 +200,7 @@ func (o *Orchestrator) buildRun(ctx context.Context, in buildRunInput) *Pipeline
 		TraceID:             in.traceID,
 		Diff:                in.patchSet,
 		RawDiff:             in.rawDiff,
+		BudgetLimits:        BudgetLimits(mergedSettings),
 		Persona:             loadPersona(mergedSettings),
 		CustomPersonaPrompt: loadCustomPersonaPrompt(mergedSettings),
 		DeepReview:          isDeepReviewEnabled(mergedSettings),
@@ -654,6 +656,21 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		indexer:          indexer,
 	})
 
+	// Budget. The review row exists, so a refusal is recorded, shows in the
+	// dashboard, and can be retried — and the diff is fetched, so the size is
+	// exact rather than a guess from the webhook payload.
+	//
+	// Applied here rather than at the launch sites because this is the first
+	// point where what the review will actually cost is known. Rate limits count
+	// launches, not spend: one launch is one token whether the pull request
+	// touches three files or three thousand.
+	if v := o.checkBudget(ctx, run, dbRepo); !v.Allowed() {
+		o.refuseForBudget(ctx, run, event, v)
+		return nil
+	} else if v.Outcome == admission.OutcomeReduce {
+		o.applyReduce(ctx, run, v)
+	}
+
 	// Contract was computed inside buildRun from deterministic metadata (draft
 	// flag, labels, branch prefix, changed paths, title, size). When metadata is
 	// silent it stays "llm-pending" and the intent stage fills the change class.
@@ -992,9 +1009,30 @@ func (o *Orchestrator) RetryReview(ctx context.Context, reviewID uuid.UUID) erro
 	fresh.Indexer = o.resolveIndexer(ctx, fresh.DBInstallationID)
 	if mergedSettings, msErr := o.st.GetMergedSettings(ctx, fresh.DBInstallationID, fresh.DBRepoID); msErr == nil {
 		fresh.Thresholds = parseThresholds(mergedSettings)
+		// CURRENT limits, not the ones the original run carried. buildRetryRun
+		// copies the previous run's BudgetLimits so a reduced review stays
+		// reduced, but on retry the operator may have lowered them since — and
+		// re-using the historical values would let a review that is now over
+		// the limit run anyway, indefinitely, by retrying.
+		fresh.BudgetLimits = BudgetLimits(mergedSettings)
 	} else {
 		o.logger.Error("retry: failed to load merged settings, using default thresholds",
 			"error", msErr, "installation", fresh.DBInstallationID, "repo", fresh.DBRepoID)
+	}
+
+	// Re-decide the Budget. Retry re-runs the whole pipeline at the cost of a
+	// fresh review, so skipping this made retry the documented bypass for the
+	// gate this package exists to add: a hard-limit refusal could simply be
+	// retried into running.
+	//
+	// Reset the previous verdict's caps first, or a re-allowed run would keep
+	// a stale reduction it no longer earns.
+	fresh.BudgetMaxFiles, fresh.BudgetNote = 0, ""
+	if v := o.checkBudget(ctx, fresh, &store.Repo{ID: fresh.DBRepoID}); !v.Allowed() {
+		o.refuseForBudget(ctx, fresh, fresh.PREvent, v)
+		return nil
+	} else if v.Outcome == admission.OutcomeReduce {
+		o.applyReduce(ctx, fresh, v)
 	}
 	// Re-run the pre-review enrichers so the retry resolves intent (and its
 	// change class) and re-attaches SAST/arch/link context — none of which
@@ -1159,6 +1197,14 @@ func buildRetryRun(prev *PipelineRun) (*PipelineRun, error) {
 		LearnConventions:    prev.LearnConventions,
 		FileSynthesis:       prev.FileSynthesis,
 		ArchitectureGraph:   prev.ArchitectureGraph,
+
+		// Carried, or a reduced review runs unreduced on retry. The
+		// crash-recovery path was fixed by persisting these through JSON; this
+		// path rebuilds field by field, so it needs the same fix separately.
+		// Same defect, two call sites — one of them was easy to miss.
+		BudgetLimits:   prev.BudgetLimits,
+		BudgetMaxFiles: prev.BudgetMaxFiles,
+		BudgetNote:     prev.BudgetNote,
 
 		Prompts: prev.Prompts,
 		// Normalize the similarity gates at this single retry-construction ingress

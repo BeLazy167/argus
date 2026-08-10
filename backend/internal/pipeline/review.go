@@ -57,9 +57,15 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 		triageLookup[t.File] = t.Action
 	}
 
+	// Budget cap. Reducing depth alone does not bound a large pull request:
+	// six hundred files at one call each is still six hundred calls. Files are
+	// kept in triage-risk order so the cap drops the least interesting work,
+	// not an arbitrary tail of the diff.
+	files := budgetCapFiles(run, triageLookup)
+
 	// Filter files and build work units
 	var units []workUnit
-	for _, f := range run.Diff.Files {
+	for _, f := range files {
 		action := triageLookup[f.NewName]
 		if action == TriageSkip {
 			continue

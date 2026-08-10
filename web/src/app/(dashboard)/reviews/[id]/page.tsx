@@ -240,6 +240,23 @@ function friendlyError(raw: string): {
   detail: string;
   action: string;
 } {
+  // A budget refusal is not a fault, so it must not read like one. Retry is
+  // also the wrong advice: the limits are what refused it, and they live in
+  // settings.
+  if (raw.includes("over the limit of")) {
+    return {
+      title: "Too large to review",
+      detail: raw,
+      action: "Split the pull request, or raise the limits in Settings \u2192 Limits.",
+    };
+  }
+  if (raw.includes("does not have write access")) {
+    return {
+      title: "Not permitted",
+      detail: raw,
+      action: "Only users with write access to the repository can trigger a review.",
+    };
+  }
   if (raw.includes("secondary rate limit")) {
     return {
       title: "GitHub rate limit reached",
@@ -1465,6 +1482,19 @@ export default function ReviewDetailPage() {
                 Nothing here yet.
               </p>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Budget note. A reduced review reads fewer files than the pull request
+          changed, so without this it looks merely quiet rather than narrowed
+          on purpose — the same silent outcome the refusal path avoids. */}
+      {review.budget_note && (
+        <div className="border border-amber/30 bg-amber/5 px-4 py-3 flex items-start gap-2.5">
+          <Gauge className="h-3.5 w-3.5 text-amber mt-0.5 shrink-0" />
+          <div className="space-y-0.5">
+            <p className="text-[11px] font-mono font-medium text-amber">Review was reduced</p>
+            <p className="text-[11px] font-mono text-amber/80">{review.budget_note}</p>
           </div>
         </div>
       )}

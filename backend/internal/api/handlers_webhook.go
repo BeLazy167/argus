@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/BeLazy167/argus/backend/internal/admission"
 	"log/slog"
 	"net/http"
 	"runtime/debug"
@@ -28,6 +29,10 @@ var issueLabelsForScenario = map[string]bool{"argus": true, "bug": true}
 var (
 	errServerBusy  = errors.New("webhook semaphore full")
 	errRateLimited = errors.New("review rate limit exceeded")
+	// errReviewRefused is a verdict refusal — permission, rate or budget. It is
+	// distinct from errRateLimited so a caller can tell "not allowed" from
+	// "not now"; the reason itself travels on the Verdict, not the error.
+	errReviewRefused = errors.New("review refused by admission")
 )
 
 func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
@@ -69,12 +74,20 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			s.handlePREdited(r.Context(), prEvent)
 			break
 		}
-		orgLogin := strings.SplitN(prEvent.RepoFullName, "/", 2)[0]
-		if !s.allowReview(r.Context(), prEvent.RepoFullName, orgLogin, false, prEvent.InstallationID) {
-			s.logger.Warn("rate limited", "repo", prEvent.RepoFullName)
+		// Through Admission, like every other launch site. The actor is
+		// ActorSystem: nobody asked, and auto_run — decided later, inside
+		// HandlePREvent, where the repo settings are loaded — is the authority.
+		// The PR author rides along for attribution and is never authorized,
+		// or a fork pull request would authorize its own review.
+		orgLogin, _, _ := strings.Cut(prEvent.RepoFullName, "/")
+		if verdict := s.admissionFor(prEvent.InstallationID).Decide(r.Context(), admission.Request{
+			Actor:        admission.SystemActor(prEvent.PRAuthor),
+			RepoFullName: prEvent.RepoFullName,
+			OrgLogin:     orgLogin,
+		}); !verdict.Allowed() {
+			s.logger.Warn("webhook review refused", "repo", prEvent.RepoFullName, "reason", verdict.Reason)
 			break
 		}
-		// Check review limit for this installation
 
 		// The launcher owns slot + cancel + spawn. The webhook semaphore (a
 		// separate webhook-goroutine bound) is acquired in BeforeSpawn — post-slot
@@ -371,36 +384,38 @@ func (s *Server) handleCheckboxTrigger(ctx context.Context, evt ghpkg.IssueComme
 
 	// AUTHORIZE THE TICKER, NOT THE COMMENT AUTHOR.
 	//
-	// On a public repo anyone can toggle a task-list checkbox in someone
-	// else's comment, so without this an outside contributor could open a
-	// large PR and tick the box to spend the maintainer's review budget with
-	// no sign-off. evt.AuthorAssociation cannot gate it: on an issue_comment
-	// edit that field describes the COMMENT's author — Argus — and would read
-	// as privileged for every click. The actor is evt.EditorLogin, and only a
-	// permission lookup on them answers the question.
+	// Through Admission. On a public repo anyone can toggle a task-list
+	// checkbox in someone else's comment, so without a check on the TICKER an
+	// outside contributor could open a large pull request and spend the
+	// maintainer's budget with no sign-off.
 	//
-	// Fails CLOSED. A GitHub outage denying a maintainer costs one re-tick;
-	// allowing on error hands the budget to anyone for as long as the outage
-	// lasts, which is the exact failure this guard exists to prevent.
+	// The actor is evt.EditorLogin. evt.AuthorAssociation cannot gate this: on
+	// an issue_comment edit it describes the COMMENT's author — Argus — and
+	// reads as privileged for every click.
+	//
+	// The rate limit rides along, from the tighter force bucket, so this path
+	// no longer reserves separately below.
 	permCtx, cancelPerm := context.WithTimeout(ctx, 10*time.Second)
-	allowed, permErr := ghClient.HasRepoWriteAccess(permCtx, evt.InstallationID, owner, repoName, evt.EditorLogin)
+	verdict := s.admissionFor(evt.InstallationID).Decide(permCtx, admission.Request{
+		Actor:        admission.GitHubActor(evt.EditorLogin),
+		RepoFullName: evt.RepoFullName,
+		OrgLogin:     owner,
+		Force:        true,
+	})
 	cancelPerm()
-	if permErr != nil {
-		s.logger.Error("checkbox trigger: permission check failed; denying",
-			"error", permErr, "repo", evt.RepoFullName, "pr", evt.PRNumber, "actor", evt.EditorLogin)
-	}
-	if !allowed {
-		s.logger.Warn("checkbox trigger denied: actor lacks write access",
-			"repo", evt.RepoFullName, "pr", evt.PRNumber, "actor", evt.EditorLogin)
+	if !verdict.Allowed() {
+		s.logger.Warn("checkbox trigger refused",
+			"repo", evt.RepoFullName, "pr", evt.PRNumber, "actor", evt.EditorLogin, "reason", verdict.Reason)
 		// Reset the box so the state on screen matches reality — a box left
 		// ticked reads as "queued" and invites a wait for a review that will
 		// never start.
 		if reset := pipeline.ResetTriggerCheckbox(evt.CommentBody); reset != evt.CommentBody {
 			if err := ghClient.UpdateIssueComment(ctx, evt.InstallationID, owner, repoName, evt.CommentID, reset); err != nil {
-				s.logger.Warn("checkbox trigger: reset after denial", "error", err, "comment_id", evt.CommentID)
+				s.logger.Warn("checkbox trigger: reset after refusal", "error", err, "comment_id", evt.CommentID)
 			}
 		}
 		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repoName, evt.CommentID, "-1")
+		s.replyRefused(ctx, evt, verdict)
 		return
 	}
 
@@ -442,10 +457,8 @@ func (s *Server) handleCheckboxTrigger(ctx context.Context, evt ghpkg.IssueComme
 			if !s.acquireSem() {
 				return errServerBusy
 			}
-			if !s.allowReview(ctx, evt.RepoFullName, owner, true, evt.InstallationID) {
-				s.releaseSem()
-				return errRateLimited
-			}
+			// No allowReview here: Admission already reserved from the force
+			// bucket above. Reserving twice would charge one click two tokens.
 			// Swap the checkbox line for a "Running..." marker so the user sees
 			// immediate feedback. Failure here is non-fatal.
 			runningBody = pipeline.ReplaceTriggerWithRunning(evt.CommentBody)

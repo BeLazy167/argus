@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/BeLazy167/argus/backend/internal/admission"
 	"regexp"
 	"sort"
 	"strings"
@@ -115,9 +116,26 @@ func (s *Server) handleReviewCommand(ctx context.Context, evt ghpkg.IssueComment
 			if !s.acquireSem() {
 				return errServerBusy
 			}
-			if !s.allowReview(ctx, evt.RepoFullName, owner, force, evt.InstallationID) {
+			// Admission owns permission and the rate limit. This path had
+			// NEITHER: anyone who could comment on the pull request could spend
+			// the repo's review budget, including the author of a fork pull
+			// request. `@argus-eye resolve`, four functions away in this same
+			// file, has been permission-gated the whole time.
+			verdict := s.admissionFor(evt.InstallationID).Decide(ctx, admission.Request{
+				Actor:        admission.GitHubActor(evt.CommentAuthor),
+				RepoFullName: evt.RepoFullName,
+				OrgLogin:     owner,
+				Force:        force,
+				// Size and Limits are zero here: the diff is not fetched yet, so
+				// the Budget arm abstains and re-runs inside the pipeline where
+				// the real size is known.
+			})
+			if !verdict.Allowed() {
 				s.releaseSem()
-				return errRateLimited
+				s.logger.Info("review command refused", "repo", evt.RepoFullName, "pr", evt.PRNumber,
+					"by", evt.CommentAuthor, "reason", verdict.Reason)
+				s.replyRefused(ctx, evt, verdict)
+				return errReviewRefused
 			}
 			s.logger.Info("review command triggered", "repo", evt.RepoFullName, "pr", evt.PRNumber, "force", force, "by", evt.CommentAuthor)
 			return nil

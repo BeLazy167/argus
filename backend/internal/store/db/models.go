@@ -263,6 +263,7 @@ type Review struct {
 	TraceID            *string         `json:"trace_id"`
 	ReviewContract     []byte          `json:"review_contract"`
 	StartedCommentID   *int64          `json:"started_comment_id"`
+	BudgetNote         *string         `json:"budget_note"`
 }
 
 type ReviewComment struct {

@@ -52,6 +52,7 @@ import { useProviderKeys } from "@/lib/queries/provider-keys";
 import { useUpdateRepo } from "@/lib/queries/repos";
 import type { PromptTemplate } from "@/lib/types";
 import { useInstallation } from "@/providers/installation-provider";
+import { BudgetSettingsSection } from "./budget/form";
 import { MemorySettingsSection } from "./memory/form";
 
 /* ── Providers & model quick-picks ── */
@@ -1185,9 +1186,14 @@ export default function SettingsPage() {
 	const [personaError, setPersonaError] = useState("");
 	// Initialized from ?tab= so the old /settings/memory route (docs links,
 	// bookmarks) can deep-link straight to the Memory tab via redirect.
-	const [settingsScope, setSettingsScope] = useState<"org" | "repo" | "branches" | "memory">(() =>
-		searchParams.get("tab") === "memory" ? "memory" : "repo",
-	);
+	const [settingsScope, setSettingsScope] = useState<
+		"org" | "repo" | "branches" | "memory" | "budget"
+	>(() => {
+		const tab = searchParams.get("tab");
+		if (tab === "memory") return "memory";
+		if (tab === "budget") return "budget";
+		return "repo";
+	});
 
 	// Org defaults
 	const { data: orgDefaults, isLoading: orgDefaultsLoading } = useOrgDefaults({
@@ -1286,6 +1292,17 @@ export default function SettingsPage() {
 					}`}
 				>
 					Memory
+				</button>
+				<button
+					type="button"
+					onClick={() => setSettingsScope("budget")}
+					className={`px-4 py-3 text-xs font-mono transition-colors border-b-2 -mb-px cursor-pointer ${
+						settingsScope === "budget"
+							? "border-amber text-amber"
+							: "border-transparent text-slate-text hover:text-foreground"
+					}`}
+				>
+					Limits
 				</button>
 			</div>
 
@@ -2174,6 +2191,9 @@ export default function SettingsPage() {
 
 			{/* Memory Tab */}
 			{settingsScope === "memory" && <MemorySettingsSection />}
+
+			{/* Review cost limits */}
+			{settingsScope === "budget" && <BudgetSettingsSection />}
 		</>
 	);
 }

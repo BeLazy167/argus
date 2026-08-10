@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/BeLazy167/argus/backend/internal/admission"
 	"log/slog"
 	"strings"
 	"sync"
@@ -179,10 +180,27 @@ type PipelineRun struct {
 	StartedCommentNodeID string            `json:"-"` // node ID of the "review started" GH comment, for minimizing later
 	Indexer              memory.Indexer    `json:"-"` // per-org indexer resolved from Registry
 	Thresholds           memory.Thresholds `json:"-"` // per-run similarity gates (merged org→repo settings, Bundle 3)
-	EventBus             *EventBus         `json:"-"` // not persisted
-	Error                string
-	CreatedAt            time.Time
-	UpdatedAt            time.Time
+
+	// BudgetLimits is resolved from merged settings at build time, like every
+	// other setting on this struct. Persisted, so a recovered or retried run
+	// keeps the repo's configured caps instead of silently falling back to the
+	// defaults.
+	BudgetLimits admission.Limits `json:"budget_limits,omitempty"`
+	// BudgetMaxFiles caps how many files a reduced review looks at. Zero means
+	// no cap. Set only when the Budget returned reduce.
+	//
+	// PERSISTED, unlike the derived config above. PipelineRun is marshalled to
+	// pipeline_states and unmarshalled back by crash recovery, and the Budget
+	// runs once at entry — not on recovery. Excluded, a recovered reduced
+	// review would restore with a zero cap, which budgetCapFiles reads as
+	// "uncapped", and would process the entire diff it was reduced away from.
+	BudgetMaxFiles int `json:"budget_max_files,omitempty"`
+	// BudgetNote is why the review was reduced, for the posted summary.
+	BudgetNote string    `json:"budget_note,omitempty"`
+	EventBus   *EventBus `json:"-"` // not persisted
+	Error      string
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
 }
 
 // LeadBrief is the output of the Lead Agent's briefing phase.
