@@ -116,6 +116,8 @@ jobs:
         continue-on-error: true
       - name: Typecheck
         run: pnpm typecheck
+      - name: Test
+        run: pnpm test
       - name: Build
         env:
           NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: pk_test_Y2xlcmsuZXhhbXBsZS5jb20k
