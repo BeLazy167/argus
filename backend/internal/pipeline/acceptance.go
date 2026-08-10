@@ -450,6 +450,12 @@ func rollupVerdict(criteria []AcceptanceCriterion) AcceptanceStatus {
 
 // formatIssueCoverageSection builds the Markdown block inserted into the
 // synthesis summary when run.IssueAcceptance is non-empty.
+//
+// Title, criterion text and reason all quote a linked issue, which anyone can
+// open. They go through safeMarkdownField, not util.Truncate: truncation keeps
+// newlines, so "Fix parser\n## Verdict: approved" would forge a heading inside
+// Argus's own comment. Same defect and same treatment as
+// formatJointAcceptanceSection — the two render into the same comment.
 func formatIssueCoverageSection(results []AcceptanceResult) string {
 	if len(results) == 0 {
 		return ""
@@ -466,15 +472,15 @@ func formatIssueCoverageSection(results []AcceptanceResult) string {
 		icon := verdictIcon(string(r.Verdict))
 		sb.WriteString(fmt.Sprintf("- **[#%d](%s)** — *%s* — %s %s (%d/%d)\n",
 			r.IssueNumber, r.IssueURL,
-			util.Truncate(r.IssueTitle, 80, true),
+			safeMarkdownField(r.IssueTitle, 80),
 			icon, r.Verdict, addressed, len(r.Criteria)))
 		for _, c := range r.Criteria {
 			sb.WriteString(fmt.Sprintf("  - %s %s",
 				verdictIcon(string(c.Status)),
-				util.Truncate(c.Text, 200, true)))
+				safeMarkdownField(c.Text, 200)))
 			if c.Status != AcceptanceStatusAddressed && c.Reason != "" {
 				sb.WriteString(fmt.Sprintf(" — _%s_",
-					util.Truncate(c.Reason, 200, true)))
+					safeMarkdownField(c.Reason, 200)))
 			}
 			sb.WriteString("\n")
 		}

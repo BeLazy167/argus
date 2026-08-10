@@ -67,6 +67,14 @@ func summarizeErr(err error) string {
 
 // formatCrossPRCoverageSection builds the Markdown block inserted into the
 // synthesis summary when run.CrossPRCoverage is non-nil.
+//
+// A linked PR lives in a repository the reviewed PR merely references, so its
+// title and fetch error are attacker-controlled here. The incompatibility
+// lines are judge-authored but describe that same untrusted material. All
+// three go through safeMarkdownField: truncation alone keeps newlines, so one
+// title could forge a heading in Argus's own comment. Same defect and same
+// treatment as formatJointAcceptanceSection — the two render into the same
+// comment.
 func formatCrossPRCoverageSection(cov *CrossPRCoverage) string {
 	if cov == nil || len(cov.LinkedPRs) == 0 {
 		return ""
@@ -77,17 +85,18 @@ func formatCrossPRCoverageSection(cov *CrossPRCoverage) string {
 		if link.Accessible {
 			sb.WriteString(fmt.Sprintf("- ✅ **[%s/%s#%d](%s)** — *%s* — compatible\n",
 				link.Owner, link.Repo, link.Number, link.URL,
-				util.Truncate(link.Title, 100, true)))
+				safeMarkdownField(link.Title, 100)))
 		} else {
 			sb.WriteString(fmt.Sprintf("- ⚠️ **[%s/%s#%d](%s)** — %s\n",
-				link.Owner, link.Repo, link.Number, link.URL, link.FetchError))
+				link.Owner, link.Repo, link.Number, link.URL,
+				safeMarkdownField(link.FetchError, 200)))
 			sb.WriteString("  _Partial coverage: this change cannot be verified — reviewer should inspect manually._\n")
 		}
 	}
 	if len(cov.Incompatibilities) > 0 {
 		sb.WriteString("\n**Potential incompatibilities:**\n")
 		for _, inc := range cov.Incompatibilities {
-			sb.WriteString(fmt.Sprintf("- %s\n", inc))
+			sb.WriteString(fmt.Sprintf("- %s\n", safeMarkdownField(inc, 500)))
 		}
 	}
 	return sb.String()

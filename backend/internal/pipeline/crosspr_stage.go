@@ -2126,6 +2126,14 @@ func (o *Orchestrator) upsertJointAcceptanceSticky(ctx context.Context, review *
 //   - One bullet per criterion, tagged with status icon; addressed /
 //     partial bullets link to the sibling PR and evidence path; entries
 //     missing an `addressed_by` fall back to "unaddressed" rendering.
+//
+// The issue title and the criteria are quoted from an issue in a repository
+// the reviewed PR merely links to, so their author needs no access here. They
+// go through safeMarkdownField (or safeMarkdownCode inside the code span), not
+// util.Truncate: truncation keeps newlines, and a criterion of
+// "works\n## Verdict: ✅ addressed" would forge a heading in Argus's own
+// comment. Not safeCrossPRField — that is the prompt path and redacts
+// injection prefixes that are harmless once rendered.
 func formatJointAcceptanceSection(results []JointAcceptanceResult) string {
 	if len(results) == 0 {
 		return ""
@@ -2134,7 +2142,7 @@ func formatJointAcceptanceSection(results []JointAcceptanceResult) string {
 	sb.WriteString("\n## Joint Issue Coverage\n\n")
 	for _, r := range results {
 		issueRef := fmt.Sprintf("%s/%s#%d", r.IssueOwner, r.IssueRepo, r.IssueNumber)
-		title := util.Truncate(r.IssueTitle, 120, true)
+		title := safeMarkdownField(r.IssueTitle, 120)
 		if r.IssueURL != "" {
 			sb.WriteString(fmt.Sprintf("### [%s](%s) — %s\n\n", issueRef, r.IssueURL, title))
 		} else {
@@ -2143,16 +2151,18 @@ func formatJointAcceptanceSection(results []JointAcceptanceResult) string {
 		sb.WriteString(fmt.Sprintf("**Verdict:** %s %s\n\n", verdictIcon(string(r.Verdict)), r.Verdict))
 		for _, c := range r.Criteria {
 			icon := verdictIcon(string(c.Status))
-			line := fmt.Sprintf("- %s %s", icon, util.Truncate(c.Text, 200, true))
+			line := fmt.Sprintf("- %s %s", icon, safeMarkdownField(c.Text, 200))
 			switch c.Status {
 			case AcceptanceStatusAddressed, AcceptanceStatusPartial:
 				if c.AddressedBy != "" {
-					line += fmt.Sprintf(" — %s in %s", c.Status, c.AddressedBy)
+					// Judge-authored, but it echoes "owner/repo#N" parsed out
+					// of the issue, so it is untrusted text like the rest.
+					line += fmt.Sprintf(" — %s in %s", c.Status, safeMarkdownField(c.AddressedBy, 120))
 				} else {
 					line += fmt.Sprintf(" — %s", c.Status)
 				}
 				if c.Evidence != "" {
-					line += fmt.Sprintf(" at `%s`", c.Evidence)
+					line += fmt.Sprintf(" at `%s`", safeMarkdownCode(c.Evidence, 160))
 				}
 			default:
 				line += fmt.Sprintf(" — %s", c.Status)
