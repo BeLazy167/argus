@@ -1,6 +1,8 @@
 package pipeline
 
 import (
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/BeLazy167/argus/backend/internal/memory"
@@ -422,11 +424,167 @@ func TestSuppressionExempt(t *testing.T) {
 		{"swallowed error body exempt", CategoryErrorHandling, "the error is swallowed and never surfaced", true},
 		{"plain perf finding not exempt", CategoryPerformance, "N+1 query in the loop", false},
 		{"plain testing finding not exempt", CategoryTesting, "missing test for the new branch", false},
+
+		// Law-12 unit-ambiguous numeric constants. Before this table gained a
+		// unit_ambiguity group these all scored false, so a dismissal match could
+		// mute a finding the rubric declares never-suppressed.
+		{"unit-ambiguous constant exempt", CategoryBug, "The retry delay `300` is unit-ambiguous — name it retryDelaySeconds.", true},
+		{"unitless constant exempt", CategoryReadability, "MaxWait is unitless; callers cannot tell what 5 means", true},
+		{"missing-unit wording exempt", CategoryBug, "sleep(5) has no unit in its name", true},
+		{"body naming both candidate units exempt", CategoryBug, "Is the 5000 in backoff() seconds or milliseconds?", true},
+		{"rubric-style unit question exempt", CategoryBug, "timeout = 5 — 5 what? seconds? ms?", true},
+		// The pair phrases must need BOTH units: "seconds" is a substring of
+		// "milliseconds", so a sloppy conjunction would exempt every finding that
+		// happens to measure something.
+		{"finding naming one unit stays suppressible", CategoryPerformance, "The poller sleeps 50 milliseconds between batches, which starves the worker", false},
+		// The trap the unit marker must not spring: "unit test" is the most common
+		// review phrase containing the word, and matching it would exempt the whole
+		// testing category from team feedback.
+		{"missing unit tests finding stays suppressible", CategoryTesting, "Missing unit tests for the new retry branch", false},
+		{"unit-testing wording stays suppressible", CategoryTesting, "Add unit-testing for the parser", false},
+		{"word merely containing 'unit' stays suppressible", CategoryStyle, "This is an opportunity to simplify the community feed loop", false},
+
+		// Law-12 refactor behavior-equivalence. "silently chang" alone caught only
+		// findings that used the word "silently".
+		{"refactor that changes behavior exempt", CategoryBug, "This refactor changes the behaviour of empty input: it now returns nil", true},
+		{"rename that is not behavior-preserving exempt", CategoryTypeDesign, "The rename is no longer behavior-preserving for callers of Foo", true},
+		{"non-equivalent rewrite exempt", CategoryBug, "The rewritten loop is not equivalent for nil slices", true},
+		{"behavior-differs wording exempt", CategoryBug, "Extracting the helper makes behavior differ on the error path", true},
+		{"semantics change exempt", CategoryBug, "Swapping the join changes the semantics for unmatched rows", true},
+		// Law 5 makes every finding request a change, so "change" on its own must
+		// not exempt — otherwise nothing is ever suppressible.
+		{"plain change request stays suppressible", CategoryPerformance, "Change the batch size to 100; the current value triples the query count", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := suppressionExempt(tt.category, tt.body); got != tt.want {
 				t.Errorf("suppressionExempt(%s, %q) = %v, want %v", tt.category, tt.body, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestPermanentCheckMarkersCoverRubric pins the marker table to the rubric it
+// implements. Law 12 promises five classes are never suppressed; if a class is
+// listed there but has no markers here, dismissal memory can drop findings of
+// that class silently — exactly how unit ambiguity and behavior equivalence went
+// unprotected. The clause count is parsed from reviewLaws so adding a sixth
+// permanent check to the prompt fails here instead of shipping unenforced.
+func TestPermanentCheckMarkersCoverRubric(t *testing.T) {
+	const header = "12. PERMANENT CHECKS"
+	law := reviewLaws[strings.Index(reviewLaws, header):]
+	if end := strings.IndexByte(law, '\n'); end >= 0 {
+		law = law[:end]
+	}
+	colon := strings.IndexByte(law, ':')
+	if colon < 0 {
+		t.Fatalf("Law 12 lost its %q clause list — the marker table can no longer be checked against the rubric", header)
+	}
+	if got, want := len(strings.Split(law[colon+1:], ";")), len(permanentChecks); got != want {
+		t.Errorf("Law 12 lists %d permanent checks but permanentChecks has %d — every rubric clause needs a markers group, or memory can mute findings of that class", got, want)
+	}
+
+	for _, check := range permanentChecks {
+		phrases, ok := permanentCheckMarkers[check]
+		if !ok || len(phrases) == 0 {
+			t.Errorf("permanent check %q has no markers — findings of that class are exempt in the rubric but suppressible in code", check)
+			continue
+		}
+		for _, phrase := range phrases {
+			if len(phrase) == 0 {
+				t.Errorf("permanent check %q has an empty marker phrase — it matches every finding and switches suppression off wholesale", check)
+			}
+			for _, part := range phrase {
+				if part != strings.ToLower(part) {
+					t.Errorf("marker %q for %q is not lowercase — it can never match the normalized body", part, check)
+				}
+			}
+		}
+	}
+	for check := range permanentCheckMarkers {
+		if !slices.Contains(permanentChecks, check) {
+			t.Errorf("markers exist for %q, which is not in permanentChecks — the closed Law-12 set and the table disagree", check)
+		}
+	}
+}
+
+// TestNormalizeForMarkers proves the token normalization the whole-word markers
+// depend on: punctuation and case must not decide whether a Law-12 finding is
+// exempt.
+func TestNormalizeForMarkers(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"punctuation becomes a single space", "DELETE  FROM\tusers;", " delete from users "},
+		{"hyphens split words", "behaviour-preserving", " behaviour preserving "},
+		{"backticks and underscores split", "`api_key`", " api key "},
+		{"empty body is a bare pad", "", "  "},
+		{"digits stay attached to their token", "sleep(300ms)", " sleep 300ms "},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := normalizeForMarkers(tt.body); got != tt.want {
+				t.Errorf("normalizeForMarkers(%q) = %q, want %q", tt.body, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestStripUnitTestNoise covers the one collision the unit-ambiguity marker has:
+// the word "unit" in "unit test". Repeat occurrences matter because the naive
+// string-replacement version misses every second hit (neighbouring matches share
+// a delimiter space), which would re-expose the testing category.
+func TestStripUnitTestNoise(t *testing.T) {
+	tests := []struct {
+		name string
+		norm string
+		want string
+	}{
+		{"singular", " add a unit test here ", " add a test here "},
+		{"plural", " missing unit tests ", " missing tests "},
+		{"gerund", " unit testing is absent ", " testing is absent "},
+		{"repeat occurrences all stripped", " unit test and unit test ", " test and test "},
+		{"measurement sense survives", " the unit is ambiguous ", " the unit is ambiguous "},
+		{"trailing unit survives", " name the unit ", " name the unit "},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := stripUnitTestNoise(tt.norm); got != tt.want {
+				t.Errorf("stripUnitTestNoise(%q) = %q, want %q", tt.norm, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestPermanentCheckSurvivesDismissalDrop is the end-to-end consequence of the
+// marker gap: run a finding of each newly covered class through the same
+// exempt→evaluate path the enricher uses, with a dismissal match well above the
+// drop floor. The verdict must be a downgrade — memory may lower the volume on a
+// Law-12 finding, never mute it.
+func TestPermanentCheckSurvivesDismissalDrop(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       string
+		wantAction dismissalAction
+	}{
+		{"unit-ambiguous constant", "The 300 in retry() is unit-ambiguous: seconds or milliseconds?", dismissalDowngrade},
+		{"refactor changes behavior", "This refactor changes the behavior of empty input", dismissalDowngrade},
+		{"control: ordinary finding is still dropped", "N+1 query in the loop", dismissalDrop},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			exempt := suppressionExempt(CategoryBug, tt.body)
+			matches := []memory.PatternMatch{mkDismissal(dropFloor+0.01, "", "9")}
+			ev := evaluateDismissals(matches, ChangeClassProduction, exempt, false, memory.NewThresholds())
+			if ev.action != tt.wantAction {
+				t.Errorf("action = %v, want %v — a Law-12 finding was dropped by dismissal memory", ev.action, tt.wantAction)
+			}
+			c := &FileComment{Severity: SeverityCritical, Category: CategoryBug, Body: tt.body}
+			applyDismissalEvaluation(c, ev)
+			if tt.wantAction == dismissalDowngrade && c.Suppressed {
+				t.Errorf("exempt finding was marked suppressed (reason %q) — it will never be posted", c.SuppressedReason)
 			}
 		})
 	}
