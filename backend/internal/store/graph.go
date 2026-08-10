@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -161,12 +162,111 @@ func (s *Store) DeleteNodesByFile(ctx context.Context, repoID int64, filePath st
 	return err
 }
 
+// pgGraphOnce guards a single probe for a usable pgGraph projection.
+var (
+	pgGraphOnce  sync.Once
+	pgGraphReady bool
+)
+
+// pgGraphAvailable reports whether the graph extension is installed AND a
+// projection has been built.
+//
+// Both halves matter and neither implies the other: the extension can be
+// present with no build (traverse then errors), and a build can go stale.
+// Probed once per process; any error answers false, which falls back to the
+// recursive CTE.
+//
+// The fallback is not a nicety. pgGraph needs a custom build step and is absent
+// from every managed Postgres, so a self-hosted install will never have it.
+// Hard-requiring it would brick those deployments -- the same defect a
+// mandatory CREATE EXTENSION introduced for pgcontext earlier.
+func (s *Store) pgGraphAvailable(ctx context.Context) bool {
+	pgGraphOnce.Do(func() {
+		var built bool
+		if err := s.Pool.QueryRow(ctx, `
+			SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'graph')
+			   AND EXISTS (SELECT 1 FROM graph.status() WHERE built)`).Scan(&built); err != nil {
+			return // stays false: the CTE needs no extension
+		}
+		pgGraphReady = built
+	})
+	return pgGraphReady
+}
+
 // GetBlastRadius finds all nodes transitively depending on the given file paths
-// up to maxDepth hops via a recursive CTE.
+// up to maxDepth hops.
+//
+// Two implementations, selected by what the database actually has. pgGraph
+// walks a CSR projection; the recursive CTE walks code_edges directly. They
+// return the same shape.
+//
+// MEASURED, so the choice is not folklore: on this fleet (13.6k nodes, 13.4k
+// edges) the CTE answers in 0.9ms and pgGraph in 9-11ms warm, because pgGraph
+// allocates visited/depth/parent metadata proportional to the WHOLE graph per
+// call while the CTE touches ~6 rows through an index. That inverts once the
+// graph is large enough for the setup to amortise -- their own published
+// figure is 107ms for a depth-2 walk over 2M nodes, where a CTE would be far
+// worse.
 func (s *Store) GetBlastRadius(ctx context.Context, repoID int64, filePaths []string, maxDepth int) ([]CodeNode, error) {
 	if len(filePaths) == 0 {
 		return []CodeNode{}, nil
 	}
+	if s.pgGraphAvailable(ctx) {
+		if nodes, err := s.blastRadiusPGGraph(ctx, repoID, filePaths, maxDepth); err == nil {
+			return nodes, nil
+		}
+		// A traverse failure must not lose the feature: fall through to the
+		// CTE, which needs no extension and no build.
+	}
+	return s.blastRadiusCTE(ctx, repoID, filePaths, maxDepth)
+}
+
+// blastRadiusPGGraph resolves the seed file paths to node ids, then multi-start
+// traverses the projection. Direction "in" walks edges backwards -- from a
+// changed node to the nodes that DEPEND on it, which is what blast radius
+// means. Seeds are resolved from code_nodes rather than graph.search() because
+// the source table is authoritative and already indexed on (repo_id, file_path).
+//
+// repo_id is pushed INTO the traversal as a registered filter column, not
+// applied to its output. max_rows is enforced inside traverse, so a post-filter
+// lets nodes from other repos consume the budget and then be discarded --
+// returning fewer rows than the CTE, or none. code_edges is registered without
+// a repo boundary, so a walk can otherwise cross repos and, through them,
+// installations. The CTE never had this exposure: its repo_id predicate sits
+// inside the recursion.
+func (s *Store) blastRadiusPGGraph(ctx context.Context, repoID int64, filePaths []string, maxDepth int) ([]CodeNode, error) {
+	rows, err := s.Pool.Query(ctx, `
+		WITH seeds AS (
+		  SELECT array_agg(id::text) AS ids
+		  FROM code_nodes WHERE repo_id = $1 AND file_path = ANY($2)
+		)
+		SELECT DISTINCT cn.id, cn.name, cn.file_path, cn.kind, t.depth
+		FROM seeds s
+		CROSS JOIN LATERAL graph.traverse(
+		    (SELECT array_agg('public.code_nodes'::regclass) FROM generate_series(1, array_length(s.ids, 1))),
+		    s.ids,
+		    max_depth := $3,
+		    direction := 'in',
+		    hydrate := false,
+		    filter := graph.eq('repo_id', to_jsonb($1::bigint)),
+		    max_rows := 50
+		) t
+		JOIN code_nodes cn ON cn.id = t.node_id::bigint
+		WHERE cn.repo_id = $1
+		ORDER BY t.depth, cn.file_path
+		LIMIT 50`, repoID, filePaths, maxDepth)
+	if err != nil {
+		return nil, fmt.Errorf("pggraph blast radius: %w", err)
+	}
+	defer rows.Close()
+	return collectOrEmpty(rows, func(row pgx.CollectableRow) (CodeNode, error) {
+		var n CodeNode
+		err := row.Scan(&n.ID, &n.Name, &n.FilePath, &n.Kind, &n.Depth)
+		return n, err
+	})
+}
+
+func (s *Store) blastRadiusCTE(ctx context.Context, repoID int64, filePaths []string, maxDepth int) ([]CodeNode, error) {
 	rows, err := s.Pool.Query(ctx, `
 		WITH RECURSIVE affected AS (
 			SELECT id, name, file_path, kind, 0 as depth
