@@ -27,7 +27,6 @@ func dismissalSearch(ctx context.Context, indexer memory.Indexer, repo, body str
 		Filters:   []memory.FilterCondition{{Key: "action", Value: "dismissed"}},
 		Limit:     dismissalSearchLimit,
 		Threshold: threshold,
-		Rerank:    true,
 	})
 }
 

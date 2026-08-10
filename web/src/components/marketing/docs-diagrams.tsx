@@ -278,8 +278,8 @@ const MEMORY_LOOP = [
   },
   {
     icon: Database,
-    title: "Supermemory (RAG)",
-    body: "{repo} + _shared containers · your key or ours (BYOT)",
+    title: "Postgres (RAG)",
+    body: "{repo} + _shared containers · vector + full-text hybrid",
     accent: true,
   },
   {
@@ -307,7 +307,7 @@ export function MemoryDiagram() {
   return (
     <DiagramFrame
       label="Memory architecture · store · update · retrieve"
-      caption="Every review, reaction, fix, and dismissal is written to Supermemory (RAG). Confirmed patterns are reinforced; dismissed ones are suppressed semantically — security findings are never silenced; scenarios go stale when their files change. Each review retrieves what's relevant and builds on the last."
+      caption="Every review, reaction, fix, and dismissal is written to memory (RAG). Confirmed patterns are reinforced; dismissed ones are suppressed semantically — security findings are never silenced; scenarios go stale when their files change. Each review retrieves what's relevant and builds on the last."
     >
       <div className="flex flex-col gap-2 lg:flex-row lg:items-stretch">
         {MEMORY_LOOP.map((n, i) => {

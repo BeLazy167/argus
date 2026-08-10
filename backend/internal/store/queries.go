@@ -1211,14 +1211,14 @@ func (s *Store) RecordCommentOutcome(ctx context.Context, reviewCommentID uuid.U
 	return tag.RowsAffected() > 0, nil
 }
 
-// SetScenarioMemoryDocID records the Supermemory customID for a scenario in
+// SetScenarioMemoryDocID records the memory customID for a scenario in
 // migration 045's mirror column. The pipeline calls this after a successful
 // IndexScenario so a NULL memory_doc_id genuinely means "write failed / pending
 // reconciliation" instead of "never attempted" — otherwise the reconciler treats
 // every freshly-created scenario as drift forever.
-func (s *Store) SetScenarioMemoryDocID(ctx context.Context, id int64, supermemoryID string) error {
-	return s.Q.UpdateScenarioSupermemoryID(ctx, db.UpdateScenarioSupermemoryIDParams{
-		MemoryDocID: &supermemoryID,
+func (s *Store) SetScenarioMemoryDocID(ctx context.Context, id int64, memoryDocID string) error {
+	return s.Q.UpdateScenarioMemoryDocID(ctx, db.UpdateScenarioMemoryDocIDParams{
+		MemoryDocID: &memoryDocID,
 		ID:          id,
 	})
 }
@@ -1359,24 +1359,6 @@ func (s *Store) RecoverStaleReviews(ctx context.Context, maxAge time.Duration) (
 	return tag.RowsAffected(), nil
 }
 
-// --- Supermemory Key ---
-
-func (s *Store) GetSupermemoryKey(ctx context.Context, installationID int64) (string, error) {
-	var enc string
-	err := s.Pool.QueryRow(ctx, `SELECT COALESCE(supermemory_key_enc, '') FROM installations WHERE id = $1`, installationID).Scan(&enc)
-	return enc, err
-}
-
-func (s *Store) SetSupermemoryKey(ctx context.Context, installationID int64, encKey string) error {
-	_, err := s.Pool.Exec(ctx, `UPDATE installations SET supermemory_key_enc = $2 WHERE id = $1`, installationID, encKey)
-	return err
-}
-
-func (s *Store) ClearSupermemoryKey(ctx context.Context, installationID int64) error {
-	_, err := s.Pool.Exec(ctx, `UPDATE installations SET supermemory_key_enc = '' WHERE id = $1`, installationID)
-	return err
-}
-
 func nilIfEmpty(s string) *string {
 	if s == "" {
 		return nil
@@ -1403,7 +1385,7 @@ func (s *Store) GetInstallationFeatureFlags(ctx context.Context, installationID 
 // MergeInstallationFeatureFlags merges the given keys into the feature_flags
 // JSONB, leaving every other key intact. Merging in SQL rather than
 // read-modify-writing in Go keeps it atomic: the settings form owns three
-// keys while operators set others (memory_backend) by direct UPDATE, and a
+// keys while operators set others by direct UPDATE, and a
 // lost update between those two writers reverts a backend flip silently.
 func (s *Store) MergeInstallationFeatureFlags(ctx context.Context, installationID int64, patch json.RawMessage) error {
 	return s.Q.MergeInstallationFeatureFlags(ctx, db.MergeInstallationFeatureFlagsParams{

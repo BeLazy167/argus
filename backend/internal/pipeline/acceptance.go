@@ -57,10 +57,9 @@ func loadFeatureFlags(ctx context.Context, st featureFlagReader, installationDBI
 	// omits the bools leaves them at Go's zero value — silently OFF. That was
 	// unreachable while feature_flags was either empty/"{}" or written by
 	// setFeatureFlags, which always emits all three keys. The column now also
-	// carries operator-written keys, so `{"memory_backend":"postgres"}` is
+	// carries operator-written keys, so a blob like `{"some_flag":"x"}` is
 	// non-empty and not "{}": it would turn cross-PR checks and issue
-	// acceptance off for every subsequent review of the first installation
-	// migrated. The settings API reads the same column via parseFeatureFlags,
+	// acceptance off for every subsequent review of that installation. The settings API reads the same column via parseFeatureFlags,
 	// which already defaults by pointer, so it would keep rendering both
 	// toggles ON and nothing would reveal the divergence.
 	var partial struct {

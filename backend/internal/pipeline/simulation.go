@@ -144,7 +144,7 @@ func countPassedSimulations(results []SimulationResult) int {
 }
 
 // persistScenarioRuns writes each simulation outcome to the DB. Any failure is logged at Warn
-// and the loop continues — same non-fatal pattern used for Supermemory indexing.
+// and the loop continues — same non-fatal pattern used for memory indexing.
 func (e *SimulationEngine) persistScenarioRuns(ctx context.Context, req SimulationRequest, results []SimulationResult) {
 	if e.store == nil || req.Run == nil {
 		return

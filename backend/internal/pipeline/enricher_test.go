@@ -80,7 +80,7 @@ func TestEnricher_PatternMatchAboveGate(t *testing.T) {
 			Metadata: map[string]string{"source": "auto_learn", "pr_number": "77", "pr_author": "alice"},
 		}}, nil),
 	}
-	store := &fakeEnrichStore{bySupermemoryID: map[string]int64{"doc1": 99}}
+	store := &fakeEnrichStore{byMemoryDocID: map[string]int64{"doc1": 99}}
 	rec := &eventRecorder{}
 	e := newTestEnricher(fake, store)
 	e.publish = rec.publish
@@ -119,7 +119,7 @@ func TestEnricher_SelfMatchGuardZeroesScore(t *testing.T) {
 		// Same text as the finding body ⇒ wordOverlap > 0.7 ⇒ score zeroed.
 		SearchFn: patternLeg([]memory.PatternMatch{{Score: 0.95, ID: "doc1", Content: body}}, nil),
 	}
-	store := &fakeEnrichStore{bySupermemoryID: map[string]int64{"doc1": 99}}
+	store := &fakeEnrichStore{byMemoryDocID: map[string]int64{"doc1": 99}}
 	got, res := enrichComments(newTestEnricher(fake, store), []FileComment{
 		{Severity: SeverityWarning, Category: CategoryBug, Line: 10, Body: body},
 	})
@@ -260,7 +260,7 @@ func TestEnricher_ConcurrencySafe(t *testing.T) {
 	fake := &memorytest.Fake{
 		SearchFn: patternLeg([]memory.PatternMatch{{Score: aboveAttribution, ID: "doc1"}}, nil),
 	}
-	store := &fakeEnrichStore{bySupermemoryID: map[string]int64{"doc1": 1}}
+	store := &fakeEnrichStore{byMemoryDocID: map[string]int64{"doc1": 1}}
 	rec := &eventRecorder{}
 	e := newTestEnricher(fake, store)
 	e.publish = rec.publish

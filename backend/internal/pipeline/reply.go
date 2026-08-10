@@ -116,7 +116,7 @@ func (ra *ReplyAnalyzer) Analyze(ctx context.Context, event ghpkg.CommentEvent) 
 		}
 	}
 
-	// Index learning in Supermemory. Derive a deterministic customID from the
+	// Index the learning in memory. Derive a deterministic customID from the
 	// normalized Learning text (SharedPatternCustomID idiom) so re-stating the
 	// same insight upserts one doc instead of accreting a new _shared doc per
 	// reply forever.

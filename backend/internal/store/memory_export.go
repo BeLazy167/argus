@@ -8,7 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// ExportedDoc is one archived Supermemory document, ready to insert.
+// ExportedDoc is one archived document, ready to insert.
 type ExportedDoc struct {
 	ContainerTag string
 	DocID        string

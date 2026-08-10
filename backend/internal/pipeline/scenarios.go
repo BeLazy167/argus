@@ -12,13 +12,13 @@ import (
 )
 
 // scenarioStore is the narrow store surface the scenario persistence helpers
-// consume: create an active/pending scenario, mirror its Supermemory id, and
+// consume: create an active/pending scenario, mirror its memory doc id, and
 // list active scenarios matching a file set. *store.Store satisfies it, so
 // callers pass their concrete store through; tests substitute a fake.
 type scenarioStore interface {
 	CreateScenario(ctx context.Context, installationID int64, repoID *int64, description, source, sourceRef string, files, modules []string, severity string) (int64, error)
 	CreatePendingScenario(ctx context.Context, installationID int64, repoID *int64, description, source, sourceRef string, files, modules []string, severity string) (int64, error)
-	SetScenarioMemoryDocID(ctx context.Context, id int64, supermemoryID string) error
+	SetScenarioMemoryDocID(ctx context.Context, id int64, memoryDocID string) error
 	ListScenariosForFiles(ctx context.Context, repoID int64, filePaths []string) ([]store.Scenario, error)
 }
 
@@ -42,7 +42,6 @@ func scenarioSearch(ctx context.Context, indexer memory.Indexer, logger *slog.Lo
 				Type:    memory.TypeScenario,
 				Filters: filters,
 				Limit:   limit,
-				Rerank:  true,
 			})
 		})
 	return memory.ScenarioResults(matches, limit)
@@ -106,7 +105,7 @@ func scenarioSeverity(s Severity) string {
 //	seeds := pipeline.ExtractScenariosFromReview(run)
 //	pipeline.StoreScenarioSeeds(ctx, st, run.DBInstallationID, &run.DBRepoID, seeds)
 //
-// StoreScenarioSeeds persists seeds, deduping via Supermemory similarity. A new
+// StoreScenarioSeeds persists seeds, deduping via memory similarity. A new
 // seed is skipped only when the top existing scenario matches it at or above
 // the dedupe threshold (memory.Thresholds.ScenarioDedupe, default 0.85). This
 // mirrors the scenario_trigger gate in the orchestrator: an ungated top-1 hit no

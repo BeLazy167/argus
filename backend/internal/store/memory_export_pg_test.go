@@ -135,7 +135,7 @@ func TestArchiveExportedDocsSkipsEmptyDocID(t *testing.T) {
 }
 
 // TestArchiveExportedDocsScopesByInstallation: two installations can hold the
-// same Supermemory doc id only in principle, but the archive is read back per
+// same doc id only in principle, but the archive is read back per
 // installation during import, so the scope must be part of the key rather than
 // assumed unique globally.
 func TestArchiveExportedDocsScopesByInstallation(t *testing.T) {

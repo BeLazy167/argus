@@ -94,7 +94,7 @@ func TestMemoriesSchema(t *testing.T) {
 	}
 
 	// Soft-delete then upsert the same customId: REPLACE semantics must win —
-	// content replaced wholesale (no Supermemory-style merge) and deleted_at
+	// content replaced wholesale (no server-side merge) and deleted_at
 	// reset to NULL.
 	if _, err := pool.Exec(ctx,
 		"UPDATE memories SET deleted_at = now() WHERE installation_id = $1 AND custom_id = $2",

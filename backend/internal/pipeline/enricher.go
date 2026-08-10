@@ -22,7 +22,7 @@ import (
 )
 
 // enrichConcurrency bounds the per-finding fan-out: at most this many
-// Supermemory reads run at once so a large review can't stampede the API.
+// memory reads run at once so a large review can't stampede the database.
 const enrichConcurrency = 5
 
 // Enricher annotates each finding with pattern/rule matches, a novelty flag,
@@ -127,7 +127,7 @@ func (e *Enricher) Run(ctx context.Context, reviews []FileReview) EnrichResult {
 // reads, the self-match guard, pattern linking + stats, rule attribution,
 // novelty, then dismissal suppression.
 func (e *Enricher) enrichComment(ctx context.Context, c *FileComment, filePath string, autoSuppressed map[string]bool) {
-	// Build a richer query: category + file + body gives Supermemory more semantic signal.
+	// Build a richer query: category + file + body gives retrieval more semantic signal.
 	query := fmt.Sprintf("[%s|%s] %s:%d %s", c.Severity, c.Category, filePath, c.Line, c.Body)
 
 	// Pattern enrichment: best type=pattern match across repo + shared. Errors
@@ -136,8 +136,7 @@ func (e *Enricher) enrichComment(ctx context.Context, c *FileComment, filePath s
 	// Top-1 shaping across the two containers is the pure BestMatch adapter.
 	patternMatches, patErr := e.reader.Search(ctx, memory.MemoryQuery{
 		Query: query, Repo: e.repo, Scope: memory.ScopeBoth, Type: memory.TypePattern,
-		Limit: 1, Threshold: e.thresholds.FindingEnrich, Rerank: true,
-	})
+		Limit: 1, Threshold: e.thresholds.FindingEnrich})
 	match := memory.BestMatch(patternMatches...)
 
 	// Rules live in the shared container under type=rule metadata. A rule-search
@@ -303,7 +302,7 @@ func (e *Enricher) publishEvent(evt EventType, data map[string]any) {
 	}
 }
 
-// resolvePatternID maps a Supermemory pattern search hit back to its
+// resolvePatternID maps a pattern search hit back to its
 // patterns-table row id. It PREFERS the deterministic customId (round-tripped
 // through result metadata under "custom_id") because a hybrid-search hit's own
 // ID may be a chunk id that never equals the stored memory_doc_id; it falls

@@ -51,17 +51,17 @@ func (s *Store) ListPatternsForRepo(ctx context.Context, installationIDs []int64
 	return collectOrEmpty(rows, pgx.RowToStructByPos[Pattern])
 }
 
-// CreatePattern inserts a pattern row. supermemoryCustomID is the deterministic
-// customId mirrored from the Supermemory write (nil when unknown); it durably
+// CreatePattern inserts a pattern row. memoryCustomID is the deterministic
+// customId mirrored from the memory write (nil when unknown); it durably
 // keys the row so the per-finding enrich read can resolve a search hit back to
 // this pattern by customId even when the hit's own id is a chunk id.
-func (s *Store) CreatePattern(ctx context.Context, installationID int64, repoID *int64, content string, supermemoryID *string, createdBy *string, source *string, category *string, prNumber *int, supermemoryCustomID *string) (*Pattern, error) {
+func (s *Store) CreatePattern(ctx context.Context, installationID int64, repoID *int64, content string, memoryDocID *string, createdBy *string, source *string, category *string, prNumber *int, memoryCustomID *string) (*Pattern, error) {
 	var p Pattern
 	err := s.Pool.QueryRow(ctx,
 		`INSERT INTO patterns (installation_id, repo_id, content, memory_doc_id, created_by, source, category, pr_number, memory_custom_id)
 		 VALUES ($1, $2, $3, $4, $5, COALESCE($6, 'manual'), $7, $8, $9)
 		 RETURNING id, installation_id, repo_id, content, memory_doc_id, created_by, COALESCE(source, 'manual'), category, pr_number, created_at, updated_at`,
-		installationID, repoID, content, supermemoryID, createdBy, source, category, prNumber, supermemoryCustomID).
+		installationID, repoID, content, memoryDocID, createdBy, source, category, prNumber, memoryCustomID).
 		Scan(&p.ID, &p.InstallationID, &p.RepoID, &p.Content, &p.MemoryDocID, &p.CreatedBy, &p.Source, &p.Category, &p.PRNumber, &p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
 		return nil, err
@@ -93,30 +93,30 @@ func (s *Store) GetPattern(ctx context.Context, id int64) (*Pattern, error) {
 	return &p, nil
 }
 
-// GetPatternIDByMemoryDocID maps a Supermemory pattern doc id back to its
-// patterns-table row id. SearchPatternMatch returns Supermemory docs; callers
+// GetPatternIDByMemoryDocID maps a memory pattern doc id back to its
+// patterns-table row id. SearchPatternMatch returns memory docs; callers
 // use this to persist review_comments.matched_pattern_id and to bump
 // pattern_stats. Returns (0, pgx.ErrNoRows) when no patterns row carries that
 // memory_doc_id (e.g. a synthesis/convention doc that was never mirrored to
 // the patterns table) — a miss, not a failure.
-// Scoped by installation: the id was globally unique only while it came from
-// Supermemory's server. PGIndexer returns the deterministic customId instead,
-// so two installations that learned the same pattern in same-named repos hold
+// Scoped by installation: the id is a deterministic customId, not a globally
+// unique server id, so two installations that learned the same pattern in
+// same-named repos hold
 // the SAME string here, and an unscoped LIMIT 1 with no ORDER BY can resolve
 // one tenant's hit to another tenant's row — persisting a foreign
 // matched_pattern_id and bumping its stats.
-func (s *Store) GetPatternIDByMemoryDocID(ctx context.Context, installationID int64, supermemoryID string) (int64, error) {
+func (s *Store) GetPatternIDByMemoryDocID(ctx context.Context, installationID int64, memoryDocID string) (int64, error) {
 	var id int64
 	err := s.Pool.QueryRow(ctx,
 		`SELECT id FROM patterns WHERE installation_id = $1 AND memory_doc_id = $2 LIMIT 1`,
-		installationID, supermemoryID).Scan(&id)
+		installationID, memoryDocID).Scan(&id)
 	if err != nil {
 		return 0, err
 	}
 	return id, nil
 }
 
-// GetPatternIDByCustomID maps a Supermemory pattern doc's deterministic customId
+// GetPatternIDByCustomID maps a pattern doc's deterministic customId
 // back to its patterns-table row id. The per-finding enrich read prefers this
 // over GetPatternIDByMemoryDocID because a hybrid-search hit's own ID may be a
 // chunk id that never matches the stored memory_doc_id, whereas the customId is

@@ -513,7 +513,7 @@ func buildPatternTrustCalibration(ctx context.Context, st *store.Store, installa
 	return fmt.Sprintf("\n\n## Pattern Trust\n%d learned pattern(s) have quality <%.1f — developers dismissed matching findings repeatedly. Score findings that match them lower.", len(low), patternTrustFloor)
 }
 
-// fetchScoringContext retrieves repo patterns + per-file synthesis from Supermemory to calibrate scoring.
+// fetchScoringContext retrieves repo patterns + per-file synthesis from memory to calibrate scoring.
 // Non-fatal: returns empty string on any error.
 func fetchScoringContext(ctx context.Context, indexer memory.Indexer, thresholds memory.Thresholds, owner, repo string, files []FileReview) string {
 	if indexer == nil || owner == "" || repo == "" {

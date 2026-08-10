@@ -251,9 +251,9 @@ func (e *HTTPEmbedder) embedBatch(ctx context.Context, texts []string) ([][]floa
 		if err != nil {
 			return fmt.Errorf("read embeddings response: %w", err)
 		}
-		// Unlike Supermemory (which uses 500 for caller errors), embedding
-		// providers' 500s are genuinely transient (matches the official
-		// OpenAI SDK retry policy: 408/429/5xx).
+		// Embedding providers' 500s are genuinely transient, so they are
+		// retried here even though isRetryableStatus excludes 500 for the
+		// general case (matches the official OpenAI SDK policy: 408/429/5xx).
 		if isRetryableStatus(resp.StatusCode) || resp.StatusCode == 500 || resp.StatusCode == 408 {
 			return &retryableError{
 				StatusCode: resp.StatusCode,

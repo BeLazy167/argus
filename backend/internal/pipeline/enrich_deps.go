@@ -22,7 +22,7 @@ import (
 // *store.Store verbatim so defaultEnrichStore is one-line pass-throughs.
 type PatternLinker interface {
 	GetPatternIDByCustomID(ctx context.Context, installationID int64, customID string) (int64, error)
-	GetPatternIDByMemoryDocID(ctx context.Context, installationID int64, supermemoryID string) (int64, error)
+	GetPatternIDByMemoryDocID(ctx context.Context, installationID int64, memoryDocID string) (int64, error)
 	IncrementPatternMatch(ctx context.Context, patternID int64) error
 	GetAutoSuppressedCategories(ctx context.Context, repoID int64) (map[string]bool, error)
 }
@@ -34,8 +34,8 @@ type defaultEnrichStore struct{ st *store.Store }
 func (d defaultEnrichStore) GetAutoSuppressedCategories(ctx context.Context, repoID int64) (map[string]bool, error) {
 	return d.st.GetAutoSuppressedCategories(ctx, repoID)
 }
-func (d defaultEnrichStore) GetPatternIDByMemoryDocID(ctx context.Context, installationID int64, supermemoryID string) (int64, error) {
-	return d.st.GetPatternIDByMemoryDocID(ctx, installationID, supermemoryID)
+func (d defaultEnrichStore) GetPatternIDByMemoryDocID(ctx context.Context, installationID int64, memoryDocID string) (int64, error) {
+	return d.st.GetPatternIDByMemoryDocID(ctx, installationID, memoryDocID)
 }
 func (d defaultEnrichStore) GetPatternIDByCustomID(ctx context.Context, installationID int64, customID string) (int64, error) {
 	return d.st.GetPatternIDByCustomID(ctx, installationID, customID)

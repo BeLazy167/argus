@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -44,14 +43,11 @@ type MemoryBlock struct {
 // no raw *Client escape hatch — so the retrieval + prompt-render seam lives
 // entirely inside this module (see Briefing).
 type Indexer interface {
-	// Settings / lifecycle.
-	DisableLLMFilter(ctx context.Context) error
-
 	// Writers.
 	IndexReviewCommentsBatch(ctx context.Context, owner, repo string, comments []ReviewMemory) error
 	IndexRule(ctx context.Context, owner string, rule RuleMemory) error
-	IndexPattern(ctx context.Context, repo string, pattern PatternMemory) (*AddResponse, error)
-	IndexSharedPattern(ctx context.Context, pattern PatternMemory) (*AddResponse, error)
+	IndexPattern(ctx context.Context, repo string, pattern PatternMemory) (*IndexResult, error)
+	IndexSharedPattern(ctx context.Context, pattern PatternMemory) (*IndexResult, error)
 	IndexFeedbackSignal(ctx context.Context, owner, repo string, feedback FeedbackMemory) error
 	IndexScenario(ctx context.Context, owner, repo string, scenarioID int64, description, severity string, files []string) error
 
@@ -81,47 +77,15 @@ type Indexer interface {
 	DeleteDocument(ctx context.Context, documentID string) error
 }
 
-// indexerImpl is the concrete Indexer backed by a Supermemory Client.
-type indexerImpl struct {
-	client *Client
-	logger *slog.Logger
+// IndexResult identifies the row a write landed on. ID is the deterministic
+// customID: in the Postgres store the document id and the customID are the
+// same value by construction, so a caller can mirror it into patterns.
+// memory_doc_id and later resolve a search hit straight back to its row.
+type IndexResult struct {
+	ID string
 }
 
-// NewIndexer returns an Indexer writing to the unified container shape. A nil
-// client produces an Indexer that silently no-ops every operation — used when
-// an installation has no Supermemory key configured.
-func NewIndexer(client *Client, logger *slog.Logger) Indexer {
-	return &indexerImpl{client: client, logger: logger}
-}
-
-// DisableLLMFilter turns off Supermemory's server-side LLM filter. Argus
-// pre-filters all content at the application layer, so the server-side filter
-// only adds latency and non-determinism. Safe to call repeatedly; idempotent.
-// Returns the underlying UpdateSettings error so the caller (Registry) can
-// decide whether to retry on the next GetIndexer.
-func (idx *indexerImpl) DisableLLMFilter(ctx context.Context) error {
-	if idx.client == nil {
-		return nil
-	}
-	// The LLM filter is an ACCOUNT-level setting on the customer's BYOK
-	// Supermemory org, not container-scoped — PATCHing it mutates behavior for
-	// every other tool sharing that key. Read the current value first and skip
-	// the write when it's already disabled: makes repeated calls idempotent-cheap
-	// and avoids re-mutating an account that's already configured. A read failure
-	// is non-fatal — fall through to the PATCH so a genuinely-enabled filter still
-	// gets disabled.
-	if current, err := idx.client.GetSettings(ctx); err == nil {
-		if filtering, ok := current["shouldLLMFilter"].(bool); ok && !filtering {
-			return nil
-		}
-	}
-	if err := idx.client.UpdateSettings(ctx, map[string]any{"shouldLLMFilter": false}); err != nil {
-		return fmt.Errorf("disabling supermemory LLM filter: %w", err)
-	}
-	return nil
-}
-
-// PatternMatch is one search hit — content, similarity, Supermemory document
+// PatternMatch is one search hit — content, similarity, memory document
 // ID, and raw metadata map. Callers read provenance fields (pr, pr_author,
 // source, created_at) off Metadata, stamped at index time. RichContent carries
 // summary + related-memory context and is populated only when the query set
@@ -132,25 +96,6 @@ type PatternMatch struct {
 	ID          string
 	Metadata    map[string]string
 	RichContent string
-}
-
-// resultToPatternMatch converts a Supermemory SearchResult into the lighter
-// PatternMatch shape. Unmarshals the raw metadata JSON into a map[string]string
-// for cheap key lookups — metadata is always flat key/string values at index
-// time (see Metadata.ToMap).
-func resultToPatternMatch(r SearchResult) PatternMatch {
-	pm := PatternMatch{
-		Content: r.Content(),
-		Score:   r.Similarity,
-		ID:      r.ID,
-	}
-	if len(r.Metadata) > 0 {
-		var md map[string]string
-		if err := json.Unmarshal(r.Metadata, &md); err == nil {
-			pm.Metadata = md
-		}
-	}
-	return pm
 }
 
 var lineNumRegex = regexp.MustCompile(`(?i)\b(?:line|L)\s*\d+`)
@@ -279,7 +224,7 @@ func FeedbackCustomID(owner, repo, filePath, category, body, action string) stri
 	return truncateIDWithSuffix(prefix, hash)
 }
 
-// ReviewMemory represents a review comment to be stored in Supermemory.
+// ReviewMemory represents a review comment to be stored in memory.
 type ReviewMemory struct {
 	ReviewID string
 	PRNumber int
@@ -289,7 +234,7 @@ type ReviewMemory struct {
 	Category string
 }
 
-// RuleMemory represents a rule to be stored in Supermemory.
+// RuleMemory represents a rule to be stored in memory.
 type RuleMemory struct {
 	RuleID   int64
 	Category string
@@ -316,66 +261,12 @@ type FeedbackMemory struct {
 	Repo string
 }
 
-// IndexReviewCommentsBatch stores multiple review comments in one API call.
-// Uses v3/documents/batch (max 600 per call, counts as 1 request for rate limiting).
-func (idx *indexerImpl) IndexReviewCommentsBatch(ctx context.Context, owner, repo string, comments []ReviewMemory) error {
-	if idx.client == nil || len(comments) == 0 {
-		return nil
-	}
-	shaped, skipped := buildReviewDocs(owner, repo, comments, idx.logger)
-	// Surface all-dropped as an error so the caller can retry / alert. Silent
-	// success on a fully-skipped batch masked reconcile-job data loss.
-	if len(shaped) == 0 {
-		if skipped > 0 {
-			return fmt.Errorf("batch indexing review comments: all %d docs dropped (invalid metadata)", skipped)
-		}
-		return nil
-	}
-	docs := make([]BatchDocument, 0, len(shaped))
-	for _, d := range shaped {
-		docs = append(docs, batchDocumentFor(d))
-	}
-	// The batch API takes one container tag; read it from the builder output
-	// (shaped is non-empty here) so the SM path can never silently diverge
-	// from the per-doc tag the PG path persists.
-	_, err := idx.client.AddMemoryBatch(ctx, BatchAddRequest{
-		ContainerTag: shaped[0].ContainerTag,
-		Documents:    docs,
-	})
-	if err != nil {
-		return fmt.Errorf("batch indexing review comments: %w", err)
-	}
-	if skipped > 0 {
-		idx.logger.Error("batch indexed review comments with drops", "repo", repo, "indexed", len(docs), "skipped", skipped)
-	} else {
-		idx.logger.Info("batch indexed review comments", "repo", repo, "count", len(docs))
-	}
-	return nil
-}
-
 // buildReviewContent keeps content pure-prose: the finding body only. No
 // File:/Severity:/Category: prefix headers (those are metadata now) and no
 // raw-diff Context suffix — retrieval matches on prose, and the diff only
 // bloated the document.
 func buildReviewContent(c ReviewMemory) string {
 	return c.Body
-}
-
-// IndexRule stores an owner-scoped rule for semantic matching during review.
-// Writes to `_shared` with type=rule. owner is accepted for back-compat.
-func (idx *indexerImpl) IndexRule(ctx context.Context, owner string, rule RuleMemory) error {
-	_ = owner
-	if idx.client == nil {
-		return nil
-	}
-	doc, err := buildRuleDoc(rule)
-	if err != nil {
-		return err
-	}
-	if _, err := idx.client.AddMemory(ctx, addRequestFor(doc)); err != nil {
-		return fmt.Errorf("indexing rule: %w", err)
-	}
-	return nil
 }
 
 // PatternMemory is the typed input for IndexPattern / IndexSharedPattern. The
@@ -427,69 +318,6 @@ func (p PatternMemory) metadata() Metadata {
 	return m
 }
 
-// IndexPattern stores a pattern scoped to a specific repo. Writes to `{repo}`
-// with the Source-derived type; a deterministic PatternCustomID is derived from
-// source+content when CustomID is empty (upsert-dedup).
-func (idx *indexerImpl) IndexPattern(ctx context.Context, repo string, p PatternMemory) (*AddResponse, error) {
-	if idx.client == nil {
-		return nil, nil
-	}
-	doc, err := buildPatternDoc(repo, p)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := idx.client.AddMemory(ctx, addRequestFor(doc))
-	if err != nil {
-		return nil, fmt.Errorf("indexing repo pattern: %w", err)
-	}
-	idx.logger.Info("indexed repo pattern", "repo", repo, "source", p.Source)
-	return resp, nil
-}
-
-// IndexSharedPattern stores a pattern in the cross-repo `_shared` container.
-// Every write pins confidence=1.00 — successful re-learning is the signal that
-// the pattern is still live; the reconciler decays dormant docs and deletes
-// below the retirement floor. A deterministic SharedPatternCustomID is derived
-// from source+content when CustomID is empty. Source-trace provenance
-// (origin_pr / origin_author) flows through Extra for post-hoc auditability.
-func (idx *indexerImpl) IndexSharedPattern(ctx context.Context, p PatternMemory) (*AddResponse, error) {
-	if idx.client == nil {
-		return nil, nil
-	}
-	doc, err := buildSharedPatternDoc(p)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := idx.client.AddMemory(ctx, addRequestFor(doc))
-	if err != nil {
-		return nil, fmt.Errorf("indexing shared pattern: %w", err)
-	}
-	idx.logger.Info("indexed shared pattern", "source", p.Source)
-	return resp, nil
-}
-
-// IndexFeedbackSignal stores a single feedback event with action + polarity
-// metadata. Confirmed, dismissed, and ignored share the same customID space via
-// distinct `action` hashing, so all coexist per-finding.
-//
-// Returns an error on unrecognized Action — the valid set ("confirmed",
-// "dismissed", "ignored") is small and stable; anything else is a caller bug
-// that should surface, not silently drop.
-func (idx *indexerImpl) IndexFeedbackSignal(ctx context.Context, owner, repo string, fb FeedbackMemory) error {
-	if idx.client == nil {
-		return nil
-	}
-	doc, err := buildFeedbackDoc(owner, repo, fb)
-	if err != nil {
-		return err
-	}
-	if _, err := idx.client.AddMemory(ctx, addRequestFor(doc)); err != nil {
-		return fmt.Errorf("indexing feedback signal: %w", err)
-	}
-	idx.logger.Info("indexed feedback signal", "action", fb.Action, "repo", repo, "file", fb.FilePath)
-	return nil
-}
-
 // feedbackShape derives polarity + content from a FeedbackMemory. Returns
 // ok=false for unrecognized actions.
 func feedbackShape(fb FeedbackMemory) (Polarity, string, bool) {
@@ -518,25 +346,6 @@ func feedbackShape(fb FeedbackMemory) (Polarity, string, bool) {
 	default:
 		return "", "", false
 	}
-}
-
-// IndexScenario stores a scenario in the unified `{repo}` container with
-// type=scenario and scenario_id in metadata (no more [scenario_id:N] prefix
-// in content).
-func (idx *indexerImpl) IndexScenario(ctx context.Context, owner, repo string, scenarioID int64, description, severity string, files []string) error {
-	_ = owner
-	if idx.client == nil {
-		return nil
-	}
-	doc, err := buildScenarioDoc(repo, scenarioID, description, severity, files)
-	if err != nil {
-		return err
-	}
-	if _, err := idx.client.AddMemory(ctx, addRequestFor(doc)); err != nil {
-		idx.logger.Warn("indexing scenario in supermemory", "error", err)
-		return fmt.Errorf("indexing scenario: %w", err)
-	}
-	return nil
 }
 
 // specialistBlockWith is the shared specialist-block orchestration over a
@@ -580,10 +389,8 @@ func specialistBlockWith(ctx context.Context, run runSearchFn, logger *slog.Logg
 		matches, synthErr = run(ctx, SearchRequest{
 			Query:        "file synthesis",
 			ContainerTag: RepoTagNew(repo),
-			SearchMode:   "hybrid",
 			Limit:        1,
-			Threshold:    0, // accept any hit — the metadata filter already pins it.
-			Rerank:       false,
+			Threshold:    0,    // accept any hit — the metadata filter already pins it.
 			PointLookup:  true, // (type, file_path) pins at most one synthesis doc
 			Filters: &SearchFilters{AND: []FilterCondition{
 				{Key: "type", Value: string(TypeSynthesis)},
@@ -601,10 +408,8 @@ func specialistBlockWith(ctx context.Context, run runSearchFn, logger *slog.Logg
 		block.Repo, repoErr = run(ctx, SearchRequest{
 			Query:        specialistQuery,
 			ContainerTag: RepoTagNew(repo),
-			SearchMode:   "hybrid",
 			Limit:        5,
 			Threshold:    thresholds.SpecialistMin,
-			Rerank:       true,
 			Filters: &SearchFilters{OR: []FilterCondition{
 				{Key: "type", Value: string(TypePattern)},
 				{Key: "type", Value: string(TypeScenario)},
@@ -616,17 +421,15 @@ func specialistBlockWith(ctx context.Context, run runSearchFn, logger *slog.Logg
 	// 3. Shared patterns — semantic against `_shared`. The AND filter excludes
 	// already-fading docs (confidence < SharedConfidenceFloor) so decayed
 	// patterns stop influencing reviews before the reconciler deletes them.
-	// numeric compare required: FilterNumeric ensures supermemory interprets
+	// numeric compare required: FilterNumeric ensures the reader interprets
 	// the threshold as a float, not a lexicographic string.
 	go func() {
 		defer wg.Done()
 		block.Shared, sharedErr = run(ctx, SearchRequest{
 			Query:        specialistQuery,
 			ContainerTag: SharedTag,
-			SearchMode:   "hybrid",
 			Limit:        3,
 			Threshold:    thresholds.SpecialistMin,
-			Rerank:       true,
 			Filters: &SearchFilters{AND: []FilterCondition{
 				{Key: "type", Value: string(TypePattern)},
 				FilterNumeric("confidence", ">=", SharedConfidenceFloorStr),
@@ -652,18 +455,6 @@ func specialistBlockWith(ctx context.Context, run runSearchFn, logger *slog.Logg
 		return MemoryBlock{}, cmp.Or(synthErr, repoErr, sharedErr)
 	}
 	return block, nil
-}
-
-// DeleteDocument removes a document from Supermemory by ID.
-func (idx *indexerImpl) DeleteDocument(ctx context.Context, documentID string) error {
-	if idx.client == nil {
-		return nil
-	}
-	if err := idx.client.DeleteMemory(ctx, documentID); err != nil {
-		return fmt.Errorf("deleting document: %w", err)
-	}
-	idx.logger.Debug("deleted document", "id", documentID)
-	return nil
 }
 
 // FormatPositivePattern builds a structured positive pattern string from review data.

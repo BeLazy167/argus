@@ -99,13 +99,13 @@ func (s *Server) createPattern(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Index in Supermemory (respect repo scope)
+	// Index in memory (respect repo scope)
 	var smID *string
 	if s.memRegistry != nil {
 		indexer := s.memRegistry.GetIndexer(r.Context(), body.InstallationID)
 		if indexer != nil {
 			pattern := memory.PatternMemory{Content: body.Content, Source: "dashboard"}
-			var resp *memory.AddResponse
+			var resp *memory.IndexResult
 			var err error
 			if body.RepoID != nil {
 				dbRepo, repoErr := s.store.GetRepo(r.Context(), *body.RepoID)
@@ -119,7 +119,7 @@ func (s *Server) createPattern(w http.ResponseWriter, r *http.Request) {
 				resp, err = indexer.IndexSharedPattern(r.Context(), pattern)
 			}
 			if err != nil {
-				s.logger.Error("index pattern in supermemory", "error", err)
+				s.logger.Error("index pattern in memory", "error", err)
 			} else if resp != nil {
 				smID = &resp.ID
 			}
@@ -146,7 +146,7 @@ func (s *Server) deletePattern(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fetch pattern for Supermemory cleanup (scoped to user's installations)
+	// Fetch pattern for memory cleanup (scoped to user's installations)
 	pattern, getErr := s.store.GetPattern(r.Context(), id)
 
 	// Delete from DB first (scoped auth check)
@@ -155,12 +155,12 @@ func (s *Server) deletePattern(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Only delete from Supermemory after DB deletion succeeds (confirms authorization)
+	// Only delete from memory after DB deletion succeeds (confirms authorization)
 	if getErr == nil && pattern.MemoryDocID != nil && s.memRegistry != nil {
 		indexer := s.memRegistry.GetIndexer(r.Context(), pattern.InstallationID)
 		if indexer != nil {
 			if err := indexer.DeleteDocument(r.Context(), *pattern.MemoryDocID); err != nil {
-				s.logger.Error("delete pattern from supermemory", "error", err)
+				s.logger.Error("delete pattern from memory", "error", err)
 			}
 		}
 	}

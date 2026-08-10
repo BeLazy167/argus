@@ -283,7 +283,7 @@ type FileComment struct {
 	// renderer can produce the right phrasing: "pattern" | "convention" |
 	// "rule" | "similarity". Empty string ⇒ no memory tag rendered.
 	MatchedPatternKind    string `json:"-"`
-	MatchedPatternPR      int    `json:"-"`                      // source PR number (from Supermemory doc metadata)
+	MatchedPatternPR      int    `json:"-"`                      // source PR number (from memory doc metadata)
 	MatchedPatternAuthor  string `json:"-"`                      // source PR author login
 	MatchedPatternAgeDays int    `json:"-"`                      // rounded days since source indexed
 	BlastRadius           int    `json:"blast_radius,omitempty"` // number of downstream dependents affected

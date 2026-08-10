@@ -164,7 +164,7 @@ func TestPGIndexerWriters(t *testing.T) {
 			t.Fatalf("pattern: %v", err)
 		}
 		if resp == nil || resp.ID == "" {
-			t.Fatal("want customId as AddResponse.ID")
+			t.Fatal("want customId as IndexResult.ID")
 		}
 		r := readRow(t, pool, install, resp.ID)
 		if r.docType != "synthesis" {
@@ -371,7 +371,7 @@ func TestPGIndexerTypeFollowsRewrite(t *testing.T) {
 }
 
 // TestPGIndexerNULContentStripped: Postgres TEXT rejects NUL (22021) where
-// Supermemory accepted it, and one poisoned doc aborts the whole batch
+// and one poisoned doc aborts the whole batch
 // transaction — the writer strips NUL instead of losing the batch.
 func TestPGIndexerNULContentStripped(t *testing.T) {
 	pool, install := pgTestPool(t)

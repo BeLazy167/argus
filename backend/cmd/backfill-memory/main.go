@@ -1,7 +1,7 @@
 // Command backfill-memory populates the Postgres memories table from the
 // phase-0 archive (memory_export_archive) and repoints the pattern id mirrors.
 //
-// The archive is a complete, unparsed snapshot of every Supermemory document,
+// The archive is a complete, unparsed snapshot of every exported document,
 // so it is the PRIMARY source rather than re-derivation from Postgres source
 // rows. That matters for fidelity: it preserves the real customIds the
 // deterministic id builders assume, the dismissal `reason` extras, the decayed
@@ -44,7 +44,7 @@ func main() {
 	var cfg runConfig
 	flag.Int64Var(&cfg.installation, "installation", 0, "restrict to one installation id (0 = every installation present in the archive)")
 	flag.BoolVar(&cfg.plan, "plan", false, "dry-run: report what would be written, touch nothing")
-	flag.BoolVar(&cfg.repoint, "repoint", false, "also rewrite patterns.memory_doc_id from Supermemory doc ids to the archived customIds")
+	flag.BoolVar(&cfg.repoint, "repoint", false, "also rewrite patterns.memory_doc_id from archived server doc ids to the archived customIds")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -109,7 +109,7 @@ func run(ctx context.Context, logger *slog.Logger, st *store.Store, cfg runConfi
 			if err != nil {
 				return fmt.Errorf("repointing installation %d: %w", id, err)
 			}
-			// Orphans are patterns whose Supermemory doc no longer exists —
+			// Orphans are patterns whose archived doc no longer exists —
 			// decay retired it, or its container was unreachable at export.
 			// Their id is cleared rather than left dangling: a dangling id
 			// makes deletion a silent no-op, while NULL marks the row as
@@ -294,9 +294,9 @@ func customIDCollisions(ctx context.Context, st *store.Store, installID int64) (
 	return out, rows.Err()
 }
 
-// repointPatterns rewrites patterns.memory_doc_id from the Supermemory server
+// repointPatterns rewrites patterns.memory_doc_id from the archived server
 // id it was written with to the archived customId, which is what PGIndexer
-// matches on. Rows whose Supermemory doc is absent from the archive have their
+// matches on. Rows whose doc is absent from the archive have their
 // id cleared instead.
 //
 // Both statements run in ONE transaction: a partial rewrite would leave the

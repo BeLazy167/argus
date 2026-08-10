@@ -1,61 +1,57 @@
 package memory
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"io"
-	"log/slog"
-	"net/http"
-	"strings"
+	"errors"
 	"testing"
 )
 
-// legStubTransport fails /v4/search requests whose JSON body matches failWhen
-// and answers everything else with one high-score pattern result. It stubs the
-// wire so the per-leg degradation in assembleBriefing/specialistBlock is
-// exercised through the real Client → runSearch path, DB-less.
-type legStubTransport struct {
-	failWhen func(body string) bool
+// degradeRun returns a runSearchFn that fails the legs matching failWhen and
+// answers every other leg with one high-score pattern hit.
+//
+// The seam under test IS runSearchFn: assembleBriefingWith and
+// specialistBlockWith take it as a parameter precisely so per-leg degradation
+// can be exercised without a backend. An earlier version of this file stubbed
+// HTTP responses instead, which only tested the same logic through an extra
+// layer of transport fiction.
+func degradeRun(failWhen func(SearchRequest) bool) runSearchFn {
+	return func(_ context.Context, req SearchRequest) ([]PatternMatch, error) {
+		if failWhen != nil && failWhen(req) {
+			return nil, errors.New("boom")
+		}
+		return []PatternMatch{{
+			ID:       "doc1",
+			Score:    0.9,
+			Content:  "pattern: check WHERE clauses",
+			Metadata: map[string]string{"type": "pattern"},
+		}}, nil
+	}
 }
 
-func (t *legStubTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	body := ""
-	if req.Body != nil {
-		b, _ := io.ReadAll(req.Body)
-		body = string(b)
+// filtersOn reports whether any AND/OR condition on the request carries value
+// v — the leg selector, since each leg is distinguished by its type filter.
+func filtersOn(req SearchRequest, v string) bool {
+	if req.Filters == nil {
+		return false
 	}
-	if strings.Contains(req.URL.Path, "/v4/search") && t.failWhen != nil && t.failWhen(body) {
-		return &http.Response{
-			StatusCode: http.StatusInternalServerError,
-			Body:       io.NopCloser(bytes.NewBufferString(`{"error":"boom"}`)),
-			Header:     http.Header{"Content-Type": []string{"application/json"}},
-		}, nil
+	for _, c := range req.Filters.AND {
+		if c.Value == v {
+			return true
+		}
 	}
-	resp := SearchResponse{Results: []SearchResult{{
-		ID: "doc1", Similarity: 0.9, Memory: "pattern: check WHERE clauses",
-		Metadata: json.RawMessage(`{"type":"pattern"}`),
-	}}}
-	out, _ := json.Marshal(resp)
-	return &http.Response{
-		StatusCode: http.StatusOK,
-		Body:       io.NopCloser(bytes.NewBuffer(out)),
-		Header:     http.Header{"Content-Type": []string{"application/json"}},
-	}, nil
-}
-
-func degradeTestIndexer(failWhen func(string) bool) *indexerImpl {
-	c := &Client{apiKey: "test", client: &http.Client{Transport: &legStubTransport{failWhen: failWhen}}}
-	return &indexerImpl{client: c, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	for _, c := range req.Filters.OR {
+		if c.Value == v {
+			return true
+		}
+	}
+	return false
 }
 
 // An OPTIONAL leg failure (rules side-search) must not blank the briefing:
 // the core block renders, the failed section is omitted, no error returned.
 func TestAssembleBriefingOptionalLegFailureKeepsCore(t *testing.T) {
-	idx := degradeTestIndexer(func(body string) bool {
-		return strings.Contains(body, `"value":"rule"`)
-	})
-	b, err := assembleBriefingWith(context.Background(), idx.runSearch, idx.logger, BriefingQuery{
+	run := degradeRun(func(req SearchRequest) bool { return filtersOn(req, "rule") })
+	b, err := assembleBriefingWith(context.Background(), run, discardLogger(), BriefingQuery{
 		Repo: "acme/widgets", FilePath: "a.go", Query: "invoice rounding",
 	})
 	if err != nil {
@@ -71,8 +67,8 @@ func TestAssembleBriefingOptionalLegFailureKeepsCore(t *testing.T) {
 
 // When EVERY leg fails there is nothing usable — the briefing errors.
 func TestAssembleBriefingAllLegsFailErrors(t *testing.T) {
-	idx := degradeTestIndexer(func(string) bool { return true })
-	_, err := assembleBriefingWith(context.Background(), idx.runSearch, idx.logger, BriefingQuery{
+	run := degradeRun(func(SearchRequest) bool { return true })
+	_, err := assembleBriefingWith(context.Background(), run, discardLogger(), BriefingQuery{
 		Repo: "acme/widgets", FilePath: "a.go", Query: "q",
 	})
 	if err == nil {
@@ -82,10 +78,8 @@ func TestAssembleBriefingAllLegsFailErrors(t *testing.T) {
 
 // specialistBlock keeps surviving legs when one of its three legs fails.
 func TestSpecialistBlockPartialLegFailureKeepsRest(t *testing.T) {
-	idx := degradeTestIndexer(func(body string) bool {
-		return strings.Contains(body, `"value":"synthesis"`)
-	})
-	block, err := specialistBlockWith(context.Background(), idx.runSearch, idx.logger, "acme/widgets", "a.go", "q", NewThresholds())
+	run := degradeRun(func(req SearchRequest) bool { return filtersOn(req, "synthesis") })
+	block, err := specialistBlockWith(context.Background(), run, discardLogger(), "acme/widgets", "a.go", "q", NewThresholds())
 	if err != nil {
 		t.Fatalf("partial specialist-leg failure must not error: %v", err)
 	}

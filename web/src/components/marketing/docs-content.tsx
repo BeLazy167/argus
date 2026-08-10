@@ -73,7 +73,7 @@ const SECTIONS = [
   { id: "rules", label: "Review Rules" },
   { id: "models", label: "Model Config" },
   { id: "api-keys", label: "API Keys (BYOK)" },
-  { id: "supermemory", label: "BYOT Supermemory" },
+  { id: "memory-storage", label: "Memory storage" },
   { id: "personas", label: "Review Personas" },
   { id: "auto-review", label: "Auto-review & Triggers" },
   { id: "commands", label: "Bot Commands" },
@@ -1595,55 +1595,51 @@ export function DocsContent() {
             </p>
           </div>
 
-          {/* ── BYOT Supermemory ── */}
+          {/* ── Memory storage ── */}
           <div>
-            <SectionHeader id="supermemory" title="BYOT Supermemory" />
+            <SectionHeader id="memory-storage" title="Memory storage" />
             <p className="text-xs font-mono text-slate-text mb-3 leading-relaxed">
-              Bring Your Own Token for Supermemory.
+              Where review patterns, conventions and scenario history live.
             </p>
             <p className="text-xs font-mono text-slate-text mb-8 leading-relaxed">
-              Argus uses{" "}
-              <a
-                href="https://supermemory.com"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-amber hover:text-foreground transition-colors"
-              >
-                Supermemory
-              </a>{" "}
-              for RAG-powered memory &mdash; storing review patterns,
-              codebase conventions, and scenario history. You can bring your
-              own Supermemory API key for full control over your data.
+              Memory is stored in Argus&apos;s own Postgres database as
+              ordinary rows, each with an embedding alongside it. Retrieval
+              is a hybrid of vector similarity and full-text search, fused and
+              scoped to your installation. Self-host Argus and none of it
+              leaves your infrastructure.
             </p>
 
             <div className="border border-iron bg-charcoal p-4 mb-4">
               <div className="flex items-center gap-3 mb-3">
                 <Database className="h-4 w-4 text-amber" />
                 <span className="text-xs font-mono font-bold text-foreground">
-                  Setup
+                  What you configure
                 </span>
               </div>
               <ol className="list-decimal list-inside space-y-1.5 text-xs font-mono text-slate-text leading-relaxed">
                 <li>
                   Go to{" "}
                   <span className="text-amber">
-                    Integrations
+                    Providers
                   </span>{" "}
                   in the dashboard
                 </li>
                 <li>
-                  Enter your Supermemory API key under the Supermemory section
+                  Pick an embeddings provider and model under{" "}
+                  <span className="text-amber">Memory</span> &mdash; Voyage by
+                  default, OpenAI, or any OpenAI-compatible endpoint
                 </li>
                 <li>
-                  Key is scoped per-org &mdash; all repos in the org share
-                  the same memory backend
+                  Settings are scoped per-org &mdash; all repos in the org
+                  share one memory space
                 </li>
               </ol>
             </div>
 
             <p className="text-[11px] font-mono text-iron">
-              Without a custom key, Argus uses its shared Supermemory
-              instance. Your data is isolated per-installation regardless.
+              Changing the embedding model changes the vector space. Existing
+              rows keep the model they were written with, and are only
+              retrieved by a query embedded in the same space.
             </p>
           </div>
 

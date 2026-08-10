@@ -27,9 +27,6 @@ type Config struct {
 	// Encryption
 	EncryptionKey string
 
-	// Supermemory
-	SupermemoryAPIKey string
-
 	// Embeddings (memory-in-Postgres program). The platform key makes memory
 	// work for every managed-tier installation; BYOK "embeddings" provider
 	// keys override per installation. Self-hosters may set only the base URL
@@ -100,8 +97,6 @@ func Load() (*Config, error) {
 		CORSAllowOrigin: getEnv("CORS_ALLOW_ORIGIN", "http://localhost:3000"),
 
 		EncryptionKey: os.Getenv("ENCRYPTION_KEY"),
-
-		SupermemoryAPIKey: os.Getenv("SUPERMEMORY_API_KEY"),
 
 		EmbeddingsAPIKey:     os.Getenv("EMBEDDINGS_API_KEY"),
 		EmbeddingsBaseURL:    getEnv("EMBEDDINGS_BASE_URL", "https://api.voyageai.com/v1"),

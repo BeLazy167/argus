@@ -139,11 +139,6 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 				r.Delete("/repos/{repoID}/prompts/{stage}", s.deletePromptTemplate)
 				r.Get("/prompts/defaults", s.listDefaultPrompts)
 
-				// Supermemory Key
-				r.Get("/installations/{installationID}/supermemory-key", s.getSupermemoryKeyStatus)
-				r.Put("/installations/{installationID}/supermemory-key", s.setSupermemoryKey)
-				r.Delete("/installations/{installationID}/supermemory-key", s.deleteSupermemoryKey)
-
 				// Model Pricing (global)
 				r.Get("/pricing", s.listPricing)
 				r.Put("/pricing", s.upsertPricing)

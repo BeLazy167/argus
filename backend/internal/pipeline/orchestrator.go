@@ -1835,7 +1835,7 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 	return nil
 }
 
-// inferMatchKind derives the MatchedPatternKind from Supermemory metadata. The
+// inferMatchKind derives the MatchedPatternKind from memory metadata. The
 // "source" key is stamped at index time and distinguishes what kind of document
 // produced the match. Falls through to "similarity" when metadata is absent —
 // e.g. older indexed docs pre-dating the metadata stamping.
@@ -1851,7 +1851,7 @@ func inferMatchKind(md map[string]string) string {
 	return "similarity"
 }
 
-// metaInt reads an integer value stamped in Supermemory metadata. Missing /
+// metaInt reads an integer value stamped in memory metadata. Missing /
 // malformed values return 0 so the caller renders without a PR reference.
 func metaInt(md map[string]string, key string) int {
 	if v, ok := md[key]; ok {
@@ -2928,7 +2928,7 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	}
 
 	// Collect decision traces — persisted to Postgres only. Postgres
-	// decision_traces is the source of truth; Supermemory trace writes were
+	// decision_traces is the source of truth; memory trace writes were
 	// retired (observational, never read back into reviews, pure write noise).
 	traceSeeds := CollectReviewTraces(run)
 	var traceFails int
@@ -3222,7 +3222,7 @@ func buildEnrichmentPrompt(run *PipelineRun) string {
 	return sb.String()
 }
 
-// indexConfirmedPatterns saves high-confidence comments as confirmed repo patterns in Supermemory.
+// indexConfirmedPatterns saves high-confidence comments as confirmed repo patterns in memory.
 // When scoring is available, uses score ≥80 (deep) or ≥90 (non-deep). When skipped, falls back to critical+warning severity.
 func (o *Orchestrator) indexConfirmedPatterns(ctx context.Context, run *PipelineRun, owner, repo string) {
 	if run.Indexer == nil {
@@ -3295,7 +3295,7 @@ func (o *Orchestrator) indexConfirmedPatterns(ctx context.Context, run *Pipeline
 	}
 }
 
-// learnPositivePatterns indexes praise comments as positive patterns in Supermemory.
+// learnPositivePatterns indexes praise comments as positive patterns in memory.
 // These patterns suppress future false positives on similar good code.
 func (o *Orchestrator) learnPositivePatterns(ctx context.Context, run *PipelineRun, owner, repo string) int {
 	if run.Indexer == nil || !run.LearnPatterns {
@@ -3809,7 +3809,7 @@ Max 200 words. Be concrete.`
 	}
 }
 
-// indexPRSummary stores a lightweight PR summary in Supermemory for cross-PR context.
+// indexPRSummary stores a lightweight PR summary in memory for cross-PR context.
 // No LLM call — built from existing synthesis output.
 func (o *Orchestrator) indexPRSummary(ctx context.Context, run *PipelineRun, owner, repo string) {
 	if run.Indexer == nil || run.Synthesis == nil {
@@ -3840,7 +3840,7 @@ func (o *Orchestrator) indexPRSummary(ctx context.Context, run *PipelineRun, own
 	publishMemoryIndexed(run, "pr_summary", err == nil, 1)
 }
 
-// indexArchitectureSummary indexes the repo's top choke points into Supermemory so
+// indexArchitectureSummary indexes the repo's top choke points into memory so
 // future reviews can surface architectural risk context. Idempotent (uses customID per repo).
 // Skips repos with fewer than 3 choke points.
 func (o *Orchestrator) indexArchitectureSummary(ctx context.Context, run *PipelineRun, owner, repo string) {
@@ -3868,7 +3868,7 @@ func (o *Orchestrator) indexArchitectureSummary(ctx context.Context, run *Pipeli
 	}
 	sb.WriteString("\nWhen reviewing changes to these files, apply extra scrutiny: defects propagate to all dependent modules.")
 
-	// Sanitize both segments individually so characters Supermemory rejects
+	// Sanitize both segments individually so characters the customID charset rejects
 	// on customId (`/`, `(`, `)`, `[`, `]`, `.`, etc.) can't sneak in via
 	// unusual owner/repo names. The literal format string uses `--` between
 	// them — not `/` — so the customId stays in the allowed char set.
@@ -4489,7 +4489,7 @@ func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghRe
 		}
 	}
 
-	// Batch index all comments to Supermemory in a single API call. The write
+	// Batch index all comments to memory in a single call. The write
 	// floor keeps low-signal findings out of the reviews container: critical/
 	// warning always, suggestions only when scored >= reviewSuggestionScoreFloor,
 	// praise never. (DB persistence above is unfiltered — the dashboard shows
@@ -4594,7 +4594,7 @@ func (o *Orchestrator) resolveReviewProvider(ctx context.Context, run *PipelineR
 	return cfg, provider, nil
 }
 
-// publishMemoryIndexed emits an EventMemoryIndexed for the given Supermemory
+// publishMemoryIndexed emits an EventMemoryIndexed for the given memory
 // upsert. `kind` is one of the 7 closed values (patterns, patterns_praise,
 // conventions, file_synthesis, pr_summary, arch_summary, arch_graph). `success`
 // is false when the upsert returned an error — the UI renders failures with a

@@ -186,22 +186,25 @@ export function Memory() {
           </div>
         </div>
 
-        {/* BYOK fine-print — the memory store is Supermemory, customer's own
-            account. Same as LLM BYOK. Sets correct expectation before anyone
-            assumes Argus warehouses their code patterns server-side. */}
+        {/* Storage fine-print. Sets the correct expectation about where
+            patterns live: Argus is open source and self-deployable, so the
+            honest answer is "the Postgres behind whichever install you use",
+            not a third-party account. */}
         <FadeIn delay={320}>
           <p className="mt-12 max-w-[80ch] font-mono text-[11px] leading-[1.6] text-slate-text/70">
-            <span className="text-amber-glow/85">/</span> Memory runs on your own{" "}
+            <span className="text-amber-glow/85">/</span> Memory lives in
+            Postgres — patterns, conventions and dismissals as ordinary rows
+            with embeddings alongside them.{" "}
             <a
-              href="https://supermemory.ai"
+              href="https://github.com/BeLazy167/argus"
               target="_blank"
               rel="noreferrer"
               className="border-b border-iron underline-offset-4 hover:border-amber-glow hover:text-amber-glow transition-colors"
             >
-              Supermemory
+              Self-host
             </a>{" "}
-            account. We never store your patterns — you do. Same model as the
-            LLM: your keys, your data, your bill.
+            and it never leaves your infrastructure. Bring your own LLM and
+            embedding keys either way.
           </p>
         </FadeIn>
       </div>

@@ -30,7 +30,7 @@ func (s *Server) indexRule(ctx context.Context, installationID int64, rule memor
 	smCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	if err := indexer.IndexRule(smCtx, "", rule); err != nil {
-		s.logger.Warn("index rule in supermemory", "error", err, "rule_id", rule.RuleID)
+		s.logger.Warn("index rule in memory", "error", err, "rule_id", rule.RuleID)
 	}
 }
 
@@ -47,7 +47,7 @@ func (s *Server) deleteRuleDoc(ctx context.Context, installationID, ruleID int64
 	smCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	if err := indexer.DeleteDocument(smCtx, memory.RuleCustomID(ruleID)); err != nil {
-		s.logger.Warn("delete rule from supermemory", "error", err, "rule_id", ruleID)
+		s.logger.Warn("delete rule from memory", "error", err, "rule_id", ruleID)
 	}
 }
 

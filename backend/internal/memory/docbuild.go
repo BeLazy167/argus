@@ -10,7 +10,7 @@ import (
 )
 
 // Doc is the backend-neutral memory document: exactly the bytes both stores
-// persist. One builder per writer produces it, and the Supermemory and
+// persist. One builder per writer produces it, and the
 // Postgres indexers are transport adapters over the result — byte-identity
 // between backends holds by construction, so the dual-write shadow
 // comparison (program PR 6) measures retrieval, not formatting.
@@ -18,7 +18,7 @@ type Doc struct {
 	ContainerTag string
 	CustomID     string
 	// Type duplicates Metadata["type"]: the PG store persists it as a
-	// filterable column while Supermemory reads it from the metadata map.
+	// filterable column and from the metadata map.
 	Type     string
 	Content  string
 	Metadata map[string]string
@@ -76,7 +76,7 @@ func buildRuleDoc(rule RuleMemory) (Doc, error) {
 
 // buildPatternDoc derives the deterministic customId when p.CustomID is empty
 // and mirrors it into metadata["custom_id"] so search hits resolve back to
-// their patterns row (Supermemory /v4/search results carry metadata but no
+// their patterns row (search results carry metadata but no
 // top-level customId, and the result's own ID may be a chunk id).
 func buildPatternDoc(repo string, p PatternMemory) (Doc, error) {
 	if p.CustomID == "" {
@@ -199,20 +199,4 @@ func patternSource(p PatternMemory) string {
 		return "pattern"
 	}
 	return p.Source
-}
-
-// addRequestFor adapts a Doc to the Supermemory write shape.
-func addRequestFor(d Doc) AddRequest {
-	return AddRequest{
-		Content:       d.Content,
-		CustomID:      d.CustomID,
-		ContainerTags: []string{d.ContainerTag},
-		Metadata:      d.Metadata,
-	}
-}
-
-// batchDocumentFor adapts a Doc to the Supermemory batch-write shape
-// (container tag rides on the batch request, not the document).
-func batchDocumentFor(d Doc) BatchDocument {
-	return BatchDocument{Content: d.Content, CustomID: d.CustomID, Metadata: d.Metadata}
 }

@@ -15,9 +15,8 @@ import { StatusBadge } from "./status-badge";
 /**
  * Memory-embeddings configuration: pick a provider + model from the
  * backend-served catalog (Voyage default, OpenAI, or a custom
- * OpenAI-compatible endpoint), installation-wide. Succeeds the Supermemory
- * card as the memory backend's settings surface; both render during the
- * migration (Supermemory is removed in program PR 7).
+ * OpenAI-compatible endpoint), installation-wide. This is the memory
+ * backend's settings surface.
  */
 export function EmbeddingsCard() {
 	const {

@@ -69,13 +69,13 @@ func readFlags(t *testing.T, ctx context.Context, pool *pgxpool.Pool, id int64) 
 // TestMergeInstallationFeatureFlagsPreservesForeignKeys: the settings form owns
 // three keys; every other key in the column belongs to an operator and must
 // survive a save. Before the merge, saving the form wrote its three-field
-// struct over the whole column, so toggling cross-PR checks would revert an
-// install from the Postgres memory backend to Supermemory.
+// struct over the whole column, so toggling cross-PR checks silently cleared
+// every operator-set flag.
 func TestMergeInstallationFeatureFlagsPreservesForeignKeys(t *testing.T) {
 	pool, ctx := mergeTestPool(t)
 	st := &Store{Pool: pool, Q: db.New(pool)}
 	id := seedInstallation(t, ctx, pool,
-		`{"memory_backend":"postgres","cross_pr_checks":false,"some_future_flag":{"nested":1}}`)
+		`{"operator_only_flag":"set","cross_pr_checks":false,"some_future_flag":{"nested":1}}`)
 
 	patch := json.RawMessage(`{"issue_acceptance":true,"cross_pr_checks":true,"max_linked_prs":12}`)
 	if err := st.MergeInstallationFeatureFlags(ctx, id, patch); err != nil {
@@ -83,8 +83,8 @@ func TestMergeInstallationFeatureFlagsPreservesForeignKeys(t *testing.T) {
 	}
 
 	got := readFlags(t, ctx, pool, id)
-	if got["memory_backend"] != "postgres" {
-		t.Errorf("memory_backend = %v; a settings save moved this install's memory backend", got["memory_backend"])
+	if got["operator_only_flag"] != "set" {
+		t.Errorf("operator_only_flag = %v; a settings save cleared an operator-set flag", got["operator_only_flag"])
 	}
 	if _, ok := got["some_future_flag"]; !ok {
 		t.Errorf("unknown operator key dropped by a settings save: %v", got)
@@ -102,7 +102,7 @@ func TestMergeInstallationFeatureFlagsPreservesForeignKeys(t *testing.T) {
 func TestMergeInstallationFeatureFlagsWritesFalse(t *testing.T) {
 	pool, ctx := mergeTestPool(t)
 	st := &Store{Pool: pool, Q: db.New(pool)}
-	id := seedInstallation(t, ctx, pool, `{"issue_acceptance":true,"cross_pr_checks":true,"memory_backend":"postgres"}`)
+	id := seedInstallation(t, ctx, pool, `{"issue_acceptance":true,"cross_pr_checks":true,"operator_only_flag":"set"}`)
 
 	patch := json.RawMessage(`{"issue_acceptance":false,"cross_pr_checks":false,"max_linked_prs":5}`)
 	if err := st.MergeInstallationFeatureFlags(ctx, id, patch); err != nil {
@@ -112,16 +112,16 @@ func TestMergeInstallationFeatureFlagsWritesFalse(t *testing.T) {
 	if got["issue_acceptance"] != false || got["cross_pr_checks"] != false {
 		t.Errorf("toggles did not clear: %v", got)
 	}
-	if got["memory_backend"] != "postgres" {
-		t.Errorf("memory_backend = %v, want preserved", got["memory_backend"])
+	if got["operator_only_flag"] != "set" {
+		t.Errorf("operator_only_flag = %v, want preserved", got["operator_only_flag"])
 	}
 }
 
 // TestMergeInstallationFeatureFlagsIsAtomic is the reason the merge is SQL
 // rather than Go. A read-modify-write loses one of two concurrent writers:
-// phase 5 flips memory_backend by direct UPDATE while users may be saving
-// settings, and a lost update reverts the flip silently, with an audit entry
-// naming only the three toggles.
+// an operator sets a flag by direct UPDATE while users may be saving settings,
+// and a lost update reverts that change silently, with an audit entry naming
+// only the three toggles.
 //
 // Interleaves N settings-style merges against N operator flips and asserts
 // both survive: the operator's key is present, and the last toggle write took.
@@ -143,14 +143,14 @@ func TestMergeInstallationFeatureFlagsIsAtomic(t *testing.T) {
 			defer wg.Done()
 			// The operator's flip, exactly as the phase-5 runbook writes it.
 			_, _ = pool.Exec(ctx,
-				`UPDATE installations SET feature_flags = feature_flags || '{"memory_backend":"postgres"}'::jsonb WHERE id = $1`, id)
+				`UPDATE installations SET feature_flags = feature_flags || '{"operator_only_flag":"set"}'::jsonb WHERE id = $1`, id)
 		}()
 	}
 	wg.Wait()
 
 	got := readFlags(t, ctx, pool, id)
-	if got["memory_backend"] != "postgres" {
-		t.Errorf("memory_backend = %v after %d interleaved writers; the flip was lost", got["memory_backend"], n)
+	if got["operator_only_flag"] != "set" {
+		t.Errorf("operator_only_flag = %v after %d interleaved writers; the write was lost", got["operator_only_flag"], n)
 	}
 	if got["issue_acceptance"] != true || got["max_linked_prs"] != float64(7) {
 		t.Errorf("settings keys lost to interleaving: %v", got)
@@ -171,8 +171,8 @@ func TestPatternIDLookupsExcludeOtherTenants(t *testing.T) {
 	a := seedInstallation(t, ctx, pool, `{}`)
 	b := seedInstallation(t, ctx, pool, `{}`)
 
-	// The same deterministic id under two installations — the state PGIndexer
-	// makes ordinary and Supermemory's server ids made impossible.
+	// The same deterministic id under two installations — ordinary, because
+	// the id is derived from content rather than assigned globally.
 	const shared = "api--confirmed--92d0d4e51341"
 	var idA, idB int64
 	for _, seed := range []struct {

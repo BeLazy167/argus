@@ -104,7 +104,7 @@ export type StageTokens = {
 };
 
 // MemoryIndexedKind is the closed set of values on the `kind` payload field of
-// memory_indexed events. One per distinct Supermemory upsert kind.
+// memory_indexed events. One per distinct memory upsert kind.
 export type MemoryIndexedKind =
   | "patterns"
   | "patterns_praise"

@@ -416,7 +416,6 @@ func (s storeConfigLister) ListLLMConfigs(ctx context.Context, repoID int64) ([]
 // zero struct still floors at the default instead of 0.
 func searchHints(ctx context.Context, indexer memory.Indexer, caller, container string, thresholds memory.Thresholds, q memory.MemoryQuery) []string {
 	q.Threshold = thresholds.WithDefaults().FindingEnrich
-	q.Rerank = true
 	q.Enrich = true
 	return memory.BestEffort(slog.Default(), caller, container, len(q.Query),
 		func() ([]string, error) {
@@ -425,7 +424,7 @@ func searchHints(ctx context.Context, indexer memory.Indexer, caller, container 
 		})
 }
 
-// triageMemoryHints searches Supermemory for file synthesis docs, repo patterns,
+// triageMemoryHints searches memory for file synthesis docs, repo patterns,
 // owner patterns, and rules matching changed files.
 // Returns a hint block for the triage prompt, or empty string if no history found.
 func triageMemoryHints(ctx context.Context, indexer memory.Indexer, thresholds memory.Thresholds, owner, repo string, files []diff.FileDiff) string {

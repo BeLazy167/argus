@@ -1,8 +1,8 @@
 // Package memorytest provides an in-memory memory.Indexer for pipeline tests.
 // It is the second adapter behind the memory.Indexer interface (the first being
-// the Supermemory-backed indexerImpl): read methods return configurable stub
-// values and write methods record their arguments, so a test can assert what
-// the pipeline persisted instead of driving a live Supermemory client.
+// PGIndexer): read methods return configurable stub values and write methods
+// record their arguments, so a test can assert what the pipeline persisted
+// instead of driving a live database.
 package memorytest
 
 import (
@@ -45,8 +45,6 @@ type FakeScenario struct {
 // Ensure Fake satisfies the interface at compile time.
 var _ memory.Indexer = (*Fake)(nil)
 
-func (f *Fake) DisableLLMFilter(context.Context) error { return nil }
-
 func (f *Fake) IndexReviewCommentsBatch(_ context.Context, _, _ string, comments []memory.ReviewMemory) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -61,14 +59,14 @@ func (f *Fake) IndexRule(_ context.Context, _ string, rule memory.RuleMemory) er
 	return nil
 }
 
-func (f *Fake) IndexPattern(_ context.Context, _ string, pattern memory.PatternMemory) (*memory.AddResponse, error) {
+func (f *Fake) IndexPattern(_ context.Context, _ string, pattern memory.PatternMemory) (*memory.IndexResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.Patterns = append(f.Patterns, pattern)
 	return nil, nil
 }
 
-func (f *Fake) IndexSharedPattern(_ context.Context, pattern memory.PatternMemory) (*memory.AddResponse, error) {
+func (f *Fake) IndexSharedPattern(_ context.Context, pattern memory.PatternMemory) (*memory.IndexResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.SharedPats = append(f.SharedPats, pattern)

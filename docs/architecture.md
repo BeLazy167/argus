@@ -2,7 +2,7 @@
 
 ## System Overview
 
-Argus is an AI-powered code review bot that installs as a GitHub App. When a pull request is opened or updated, Argus computes a per-PR **ReviewContract** (change class, evidence bar, depth), fetches the diff, triages files by risk under that contract, reviews each file with an LLM, scores and filters comments, synthesizes a summary, posts the review to GitHub with a Glass Box footer, and indexes everything it learned into a semantic memory store (Supermemory) for future reviews. When the PR closes, a gauge detector measures which comments were actually addressed.
+Argus is an AI-powered code review bot that installs as a GitHub App. When a pull request is opened or updated, Argus computes a per-PR **ReviewContract** (change class, evidence bar, depth), fetches the diff, triages files by risk under that contract, reviews each file with an LLM, scores and filters comments, synthesizes a summary, posts the review to GitHub with a Glass Box footer, and indexes everything it learned into a Postgres-backed semantic memory store for future reviews. When the PR closes, a gauge detector measures which comments were actually addressed.
 
 ```
 ┌─────────────┐     webhook      ┌──────────────┐     orchestrate    ┌──────────────────┐
@@ -32,7 +32,7 @@ Argus is an AI-powered code review bot that installs as a GitHub App. When a pul
 | **GitHub App** | `internal/github/` | GitHub App authentication (JWT + installation tokens), PR diff fetching, review posting, GraphQL thread resolution, Git data API for `@argus-eye fix` |
 | **Pipeline** | `internal/pipeline/` | State machine orchestrator with 9 stages: Triage → Briefing → Review → Dedup → Validate → Scoring → Pass2 → Synthesis → Post (memory indexing is part of Post). ReviewContract computation and intent extraction run pre-pipeline in `HandlePREvent`. Gauge detector runs on PR close |
 | **LLM Registry** | `internal/llm/` | Multi-provider LLM abstraction (OpenRouter, OpenAI, Anthropic, Groq, etc.). BYOK key resolution, per-repo model configs, tool-use support |
-| **Memory** | `internal/memory/` | Supermemory REST client for semantic storage/retrieval. Indexer with deduplication (content-hashed `customId`). Container tag hierarchy for scoping |
+| **Memory** | `internal/memory/` | Postgres-backed semantic storage/retrieval (`PGIndexer`): hybrid vector + full-text search over the `memories` table. Indexer with deduplication (content-hashed `customId`). Container tags for scoping |
 | **Store** | `internal/store/` | PostgreSQL via pgx. Models: Installation, Repo, Review (incl. `review_contract` jsonb), ReviewComment (incl. `state` ledger), Rule, ProviderKey, ModelConfig, Pattern. Views: `vw_review_gauge` |
 | **Crypto** | `internal/crypto/` | AES-256-GCM encryption for BYOK API keys at rest |
 | **Config** | `internal/config/` | Environment variable loader for all service configuration |
@@ -191,14 +191,14 @@ The `PipelineRun` carries `IsIncremental` and `PreviousReviewID`; `synthesize()`
 
 ## Memory Pipeline State Machine
 
-This diagram shows how patterns flow through the memory system — from extraction after reviews, through Supermemory storage, to retrieval during future reviews, and the feedback loop that reinforces or suppresses patterns.
+This diagram shows how patterns flow through the memory system — from extraction after reviews, through storage, to retrieval during future reviews, and the feedback loop that reinforces or suppresses patterns.
 
 ```mermaid
 stateDiagram-v2
     direction LR
 
     state "Pattern Extraction\n(post-review)" as Extract {
-        [*] --> indexComments: persist review\ncomments to DB +\nSupermemory
+        [*] --> indexComments: persist review\ncomments to DB +\nmemory
         [*] --> indexConfirmedPatterns: high-score comments\n(≥90 DeepReview, ≥95 non-deep)\nstored as repo patterns
         [*] --> autoLearnPatterns: LLM extracts 0-3\nreusable patterns\nfrom review comments
         [*] --> extractConventions: LLM identifies\ncode style conventions\nfrom diff additions
@@ -206,12 +206,9 @@ stateDiagram-v2
         [*] --> indexPRSummary: lightweight PR\nsummary (no LLM call)
     }
 
-    state "Supermemory Storage" as Store {
-        owner_patterns: {owner}--patterns\n(org-wide patterns)
-        owner_rules: {owner}--rules\n(org-wide rules)
-        repo_patterns: {owner}--{repo}--patterns\n(repo patterns, conventions,\nfeedback signals, synthesis)
-        repo_rules: {owner}--{repo}--rules\n(repo-specific rules)
-        repo_reviews: {owner}--{repo}--reviews\n(individual review comments)
+    state "Postgres Storage\n(memories table)" as Store {
+        shared: _shared\n(installation-wide patterns\nand rules)
+        repo: {repo}\n(patterns, conventions, rules,\nreviews, synthesis, feedback)
     }
 
     state "Memory Retrieval\n(during review)" as Retrieve {
@@ -227,8 +224,8 @@ stateDiagram-v2
         dismissed: IndexFeedbackSignal\n(action=dismissed)\nstored by category+content\nwith change_kind + reason
     }
 
-    Extract --> Store: AddMemory\n(/v3/documents)\nwith customId\ndeduplication
-    Store --> Retrieve: Search\n(/v4/search)\nhybrid mode
+    Extract --> Store: upsert on\n(installation_id, custom_id)
+    Store --> Retrieve: hybrid search\n(vector + full-text,\nRRF-fused)
     Retrieve --> LLMPrompt: injected into\nsystem prompt
     Feedback --> Store: upsert feedback\nsignal as pattern
 
@@ -383,7 +380,7 @@ flowchart TD
 | Command | Syntax | Effect |
 |---------|--------|--------|
 | `review` | `@argus-eye review [--force] [--persona <name>]` | Triggers manual review. `--force` bypasses duplicate SHA check. `--persona` overrides review personality |
-| `remember` | `@argus-eye remember [--org] <pattern>` | Stores a pattern in Supermemory. `--org` scopes to owner level, otherwise repo level. Also persists to Postgres |
+| `remember` | `@argus-eye remember [--org] <pattern>` | Stores a pattern in memory. `--org` scopes to the installation-wide `_shared` container, otherwise the repo container. Also persists to the `patterns` table |
 | `resolve` | `@argus-eye resolve` | Resolves all unresolved Argus review threads on the PR via GraphQL and marks each finding `state=resolved`. Maintainer-only — a non-privileged commenter (not owner/member/collaborator) is refused |
 | `fix` | `@argus-eye fix` | Auto-applies suggested fixes from unresolved Argus comments. Creates a commit on the PR branch via Git Data API |
 | `help` | `@argus-eye help` | Posts a help table listing all available commands |
@@ -429,8 +426,8 @@ flowchart LR
 
     subgraph "Memory · internal/memory"
         IDX["Indexer"]
-        SM_CLIENT["Supermemory Client"]
-        SM_API["Supermemory API"]
+        PGIDX["PGIndexer"]
+        EMB["Embedder (voyage-4-large)"]
     end
 
     subgraph "Store · internal/store"
@@ -483,9 +480,9 @@ flowchart LR
 | Path | Flow |
 |------|------|
 | **PR Review** | GitHub webhook → `handleWebhook` → semaphore → `Orchestrator.HandlePREvent` → `ComputeContract` + intent fill → `StateMachine.Run` → Triage → Briefing → Review → Dedup → Validate → Scoring → Pass2 → Synthesis → Post → GitHub `PostReview` (Glass Box footer) + memory indexing |
-| **Memory Write** | `post()` → `indexComments` / `indexConfirmedPatterns` / `autoLearnPatterns` / `extractConventions` / `synthesizeFileMemories` / `indexPRSummary` → `Indexer` → Supermemory `/v3/documents` |
-| **Memory Read** | `TriageStage` / `ReviewStage` → `triageMemoryHints` / `reviewMemoryBlock` / `specialistMemoryBlock` / `ToolHandler` → Supermemory `/v4/search` → injected into LLM system prompt |
-| **Feedback Loop** | Developer reply → `review_comment` webhook (includes `NodeID` for thread lookup) → `ReplyAnalyzer.Analyze` → LLM decides action → `IndexFeedbackSignal` → Supermemory (confirmed / dismissal keyed by category+content with change_kind) + `ReplyToComment` on GitHub. On `resolve`: also calls `FindThreadForComment()` + `ResolveReviewThread()` |
+| **Memory Write** | `post()` → `indexComments` / `indexConfirmedPatterns` / `autoLearnPatterns` / `extractConventions` / `synthesizeFileMemories` / `indexPRSummary` → `Indexer` → `memories` upsert |
+| **Memory Read** | `TriageStage` / `ReviewStage` → `triageMemoryHints` / `reviewMemoryBlock` / `specialistMemoryBlock` / `ToolHandler` → hybrid search → injected into LLM system prompt |
+| **Feedback Loop** | Developer reply → `review_comment` webhook (includes `NodeID` for thread lookup) → `ReplyAnalyzer.Analyze` → LLM decides action → `IndexFeedbackSignal` → memory (confirmed / dismissal keyed by category+content with change_kind) + `ReplyToComment` on GitHub. On `resolve`: also calls `FindThreadForComment()` + `ResolveReviewThread()` |
 | **Gauge** | PR close → detector diffs commits after each comment (±3-line proximity) → outcomes `addressed_human`/`addressed_agent`/`ignored` (merged, untouched)/`deferred` (closed unmerged) → `vw_review_gauge` → `GET /api/v1/stats/gauge` |
 | **Dashboard SSE** | `StateMachine` publishes events → `EventBus` → SSE endpoint `/reviews/{id}/stream` → Next.js dashboard real-time updates |
 
@@ -493,45 +490,42 @@ flowchart LR
 
 ## Container Tag Hierarchy
 
-Supermemory organizes memories using container tags that follow a hierarchical scoping model. Components within a tag are joined with `--` (double-dash) as separator. The `tagSanitizer` in `internal/memory/supermemory.go` replaces `/`, `:`, `~` with `-` (single-dash) within individual components to keep tags clean.
+Every row carries an `installation_id` (the tenant boundary) and a `container_tag` (the scope within it). There are exactly two tag shapes; the memory *type* is a separate typed column, not part of the tag.
 
 ```
-{owner}--patterns          ← org-wide learned patterns
-{owner}--rules             ← org-wide review rules (from @argus-eye remember --org)
-{owner}--{repo}--patterns  ← repo patterns, conventions, synthesis docs, feedback signals
-{owner}--{repo}--rules     ← repo-specific rules (from @argus-eye remember)
-{owner}--{repo}--reviews   ← individual review comments from past reviews
+{repo}    ← one container per repo: patterns, conventions, rules,
+            past review comments, file synthesis, feedback signals
+_shared   ← installation-wide: cross-repo patterns and org rules
 ```
 
-### Tag Construction Functions (`internal/memory/supermemory.go`)
+### Tag Construction Functions (`internal/memory/tags.go`)
 
-- **`OwnerTag(owner, kind)`** → `{sanitized_owner}--{kind}` (e.g., `acme--patterns`)
-- **`RepoTag(owner, repo, kind)`** → `{sanitized_owner}--{sanitized_repo}--{kind}` (e.g., `acme--api-server--reviews`)
-- **`ValidateTagScope(tag, owner)`** → ensures tag starts with `{owner}--` (prevents cross-tenant access in agentic tool-use)
+- **`RepoTagNew(repo)`** → sanitized repo name, with a short hash of the raw name appended when sanitization would be lossy (so `sdk.js` and `sdk-js` never share a container)
+- **`SharedTag`** → the constant `_shared`
+- **`CustomIDSanitize(s)`** → replaces any character outside `[a-zA-Z0-9_:-]` with `-`
+
+Cross-tenant reads are prevented by the `installation_id` predicate on every query, not by tag-prefix validation.
 
 ### Read/Write Matrix
 
 | Container | Written By | Read By |
 |-----------|-----------|---------|
-| `{owner}--patterns` | `handleRememberCommand (--org)`, `ReplyAnalyzer (learning)` | `triageMemoryHints`, `reviewMemoryBlock`, `specialistMemoryBlock`, `ToolHandler` |
-| `{owner}--rules` | `handleRememberCommand (--org)` | `triageMemoryHints`, `reviewMemoryBlock` |
-| `{owner}--{repo}--patterns` | `indexConfirmedPatterns`, `autoLearnPatterns`, `extractConventions`, `synthesizeFileMemories`, `indexPRSummary`, `handleRememberCommand`, `IndexFeedbackSignal` | `triageMemoryHints`, `reviewMemoryBlock`, `specialistMemoryBlock`, `ScoringStage`, `ToolHandler` |
-| `{owner}--{repo}--rules` | `handleRememberCommand` | `reviewMemoryBlock` |
-| `{owner}--{repo}--reviews` | `indexComments` | `reviewMemoryBlock`, `ToolHandler` |
+| `_shared` | `handleRememberCommand (--org)`, `ReplyAnalyzer (learning)`, `IndexSharedPattern` | `triageMemoryHints`, `reviewMemoryBlock`, `specialistMemoryBlock`, `ToolHandler` |
+| `{repo}` | `indexComments`, `indexConfirmedPatterns`, `autoLearnPatterns`, `extractConventions`, `synthesizeFileMemories`, `indexPRSummary`, `handleRememberCommand`, `IndexFeedbackSignal`, `IndexRule` | `triageMemoryHints`, `reviewMemoryBlock`, `specialistMemoryBlock`, `ScoringStage`, `ToolHandler` |
 
 ### Deduplication Strategy
 
-All memory writes use content-hashed `customId` fields to enable upsert semantics (Supermemory deduplicates on `customId`, max 100 chars per Supermemory API):
+All memory writes use content-hashed `customId` fields to enable upsert semantics; the store deduplicates on `(installation_id, custom_id)`, max 100 chars:
 
 | CustomID Function | Format | Used By |
 |-------------------|--------|---------|
-| `FindingFingerprint` | `{owner}--{repo}--{sanitized_file}--{hash12}` | `indexComments` |
-| `PatternCustomID` | `{owner}--{repo}--{source}--{hash12}` | `indexConfirmedPatterns`, `autoLearnPatterns`, `extractConventions` |
-| `SynthesisCustomID` | `{owner}--{repo}--{sanitized_file}--synthesis` (hash fallback if >100 chars) | `synthesizeFileMemories` |
-| `PRSummaryCustomID` | `{owner}--{repo}--pr-{N}-summary` (no hash) | `indexPRSummary` |
-| `FeedbackCustomID` | `{owner}--{repo}--feedback--{hash12}` | `IndexFeedbackSignal` |
+| `FindingFingerprint` | `{repo}--{sanitized_file}--{hash12}` | `indexComments` |
+| `PatternCustomID` | `{repo}--{source}--{hash12}` | `indexConfirmedPatterns`, `autoLearnPatterns`, `extractConventions` |
+| `SynthesisCustomID` | `{repo}--{sanitized_file}--{hash12}--synthesis` | `synthesizeFileMemories` |
+| `PRSummaryCustomID` | `{repo}--pr-{N}-summary` (no hash) | `indexPRSummary` |
+| `FeedbackCustomID` | `{repo}--feedback--{hash12}` | `IndexFeedbackSignal` |
 
-All IDs are truncated to 100 characters max via `truncateIDWithSuffix()` to respect Supermemory's `customId` limit. Hashes are 12 hex chars (6 bytes of SHA-256). `normalizeBody()` strips line numbers and collapses whitespace before hashing for stable fingerprints.
+All IDs are truncated to 100 characters max via `truncateIDWithSuffix()`. Hashes are 12 hex chars (6 bytes of SHA-256). `normalizeBody()` strips line numbers and collapses whitespace before hashing for stable fingerprints.
 
 ---
 

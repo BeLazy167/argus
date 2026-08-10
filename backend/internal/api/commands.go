@@ -178,7 +178,7 @@ func (s *Server) handleHelpCommand(ctx context.Context, evt ghpkg.IssueCommentEv
 }
 
 // handleRememberCommand parses @argus-eye remember, stores the pattern in DB
-// (and optionally Supermemory), and posts confirmation.
+// (and optionally memory), and posts confirmation.
 func (s *Server) handleRememberCommand(ctx context.Context, evt ghpkg.IssueCommentEvent, owner, repo string, ghClient *ghpkg.Client, args string) {
 	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "eyes")
 
@@ -207,7 +207,7 @@ func (s *Server) handleRememberCommand(ctx context.Context, evt ghpkg.IssueComme
 		return
 	}
 
-	// Index in Supermemory
+	// Index in memory
 	var smID *string
 	var smWarning string
 	if s.memRegistry != nil {
@@ -218,14 +218,14 @@ func (s *Server) handleRememberCommand(ctx context.Context, evt ghpkg.IssueComme
 				Source:  "remember_command",
 				Extra:   map[string]string{"created_by": evt.CommentAuthor},
 			}
-			var resp *memory.AddResponse
+			var resp *memory.IndexResult
 			if isOrg {
 				resp, err = indexer.IndexSharedPattern(ctx, pattern)
 			} else {
 				resp, err = indexer.IndexPattern(ctx, repo, pattern)
 			}
 			if err != nil {
-				s.logger.Error("remember: index in supermemory", "error", err)
+				s.logger.Error("remember: index in memory", "error", err)
 				smWarning = "\n\n_Warning: semantic search indexing failed. Pattern saved to DB only._"
 			} else if resp != nil {
 				smID = &resp.ID

@@ -44,7 +44,7 @@ const (
 	ScopeBoth   ContainerScope = "both"
 )
 
-// Metadata models the typed metadata that accompanies every Supermemory write.
+// Metadata models the typed metadata that accompanies every memory write.
 // Callers construct Metadata, then ToMap() validates the type-specific required
 // fields and emits the flat map[string]string that the REST API expects.
 //
@@ -112,7 +112,7 @@ var validMemoryTypes = map[MemoryType]struct{}{
 }
 
 // ToMap validates Metadata's type-specific required fields and flattens every
-// non-zero field into the string-keyed map the Supermemory API consumes.
+// non-zero field into the string-keyed map stored alongside the row.
 //
 // Returns an error when:
 //   - Type is empty or not a known MemoryType

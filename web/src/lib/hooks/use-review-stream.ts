@@ -399,7 +399,7 @@ export function useReviewStream(reviewId: string, enabled: boolean) {
           break;
         }
         case "memory_matched": {
-          // Fired by enrichFindings when a finding matches a Supermemory-backed
+          // Fired by enrichFindings when a finding matches a memory-backed
           // pattern / convention / rule / similarity hit. Detail line carries
           // kind + source PR so authors can trace the attribution shown on the
           // inline comment body.

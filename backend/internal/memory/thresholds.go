@@ -7,25 +7,21 @@ package memory
 // embedding-space distributions, so one-size-fits-all guarantees wrong for
 // someone. Lifting to org/repo settings lets operators tune without a deploy.
 //
-// RECALIBRATED for the Postgres backend. These numbers were tuned against
-// Supermemory, which returned a RERANKED HYBRID score. PGIndexer returns raw
-// cosine similarity, and raw cosine over voyage-4-large sits far higher for the
-// same semantic distance. Measured against the live 3,896-document corpus
-// (installation 285):
+// CALIBRATED against raw cosine similarity. PGIndexer scores are raw cosine
+// over voyage-4-large, which sits high for the same semantic distance — a
+// floor that looks selective as a fraction is not. Measured against the live
+// 3,896-document corpus (installation 285):
 //
 //	top-1 neighbour   p10 0.696   p50 0.866   p90 1.000   mean 0.851
 //	dismissed feedback vs review/trace   p50 1.000   mean 0.958
 //
-// The old 0.85 drop floor therefore sat on the MEDIAN of the top-1
-// distribution, and 33 of 40 sampled dismissals cleared it. Left alone it
-// would not have failed silent-open as the migration plan predicted — it would
-// have over-suppressed, muting findings that merely RESEMBLE something a
-// developer once dismissed. Same loss of trust, opposite direction.
+// A 0.85 drop floor sits on the MEDIAN of that top-1 distribution, and 33 of
+// 40 sampled dismissals clear it — it would over-suppress, muting findings
+// that merely RESEMBLE something a developer once dismissed.
 //
-// The floors below preserve each gate's INTENT (how selective it is meant to
-// be) against the measured distribution, rather than preserving its literal
-// number. They are not a percentile match to Supermemory's distribution, which
-// was never captured and no longer exists to sample.
+// The floors below encode each gate's INTENT (how selective it is meant to be)
+// against the measured distribution, not a literal number carried over from
+// anywhere else.
 //
 // Re-derive these after any embedding-model change: the model string is the
 // space id, and a different space has a different distribution.

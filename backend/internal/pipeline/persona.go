@@ -184,12 +184,6 @@ type repoSettings struct {
 	// DisableSharedDecay opts an installation OUT of the nightly _shared
 	// retirement job (Bundle 5). Nil or false means decay is on.
 	DisableSharedDecay *bool `json:"disable_shared_decay,omitempty"`
-
-	// supermemory_qps / supermemory_burst intentionally omitted. Earlier
-	// iterations added these fields but the Registry.GetClient path never
-	// read them, making them dead code that misled operators. Tracked as
-	// follow-up: plumb per-installation QPS through GetClient then re-add
-	// here.
 }
 
 func parseRepoSettings(settingsJSON json.RawMessage) (repoSettings, bool) {

@@ -89,16 +89,15 @@ type DecisionTrace struct {
 }
 
 type Installation struct {
-	ID                int64           `json:"id"`
-	InstallationID    int64           `json:"installation_id"`
-	OrgLogin          string          `json:"org_login"`
-	CreatedAt         time.Time       `json:"created_at"`
-	SuspendedAt       *time.Time      `json:"suspended_at"`
-	ClerkOrgID        *string         `json:"clerk_org_id"`
-	PlanTier          string          `json:"plan_tier"`
-	DefaultSettings   []byte          `json:"default_settings"`
-	FeatureFlags      json.RawMessage `json:"feature_flags"`
-	SupermemoryKeyEnc *string         `json:"supermemory_key_enc"`
+	ID              int64           `json:"id"`
+	InstallationID  int64           `json:"installation_id"`
+	OrgLogin        string          `json:"org_login"`
+	CreatedAt       time.Time       `json:"created_at"`
+	SuspendedAt     *time.Time      `json:"suspended_at"`
+	ClerkOrgID      *string         `json:"clerk_org_id"`
+	PlanTier        string          `json:"plan_tier"`
+	DefaultSettings []byte          `json:"default_settings"`
+	FeatureFlags    json.RawMessage `json:"feature_flags"`
 }
 
 type Memory struct {

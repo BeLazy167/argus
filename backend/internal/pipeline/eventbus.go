@@ -29,7 +29,7 @@ const (
 	// action that previously fired no event. EventMemoryIndexed payload carries
 	// a "kind" field (patterns | conventions | file_synthesis | pr_summary |
 	// arch_summary | arch_graph | patterns_praise) so one type covers all
-	// Supermemory upserts.
+	// memory upserts.
 	EventIntentExtracted     EventType = "intent_extracted"
 	EventIntentVerified      EventType = "intent_verified"
 	EventFindingsEnriched    EventType = "findings_enriched"
@@ -44,7 +44,7 @@ const (
 	EventPostedToGitHub      EventType = "posted_to_github"
 	EventReplyGenerated      EventType = "reply_generated"
 	// EventMemoryMatched fires when enrichFindings tags a finding with a
-	// Supermemory-backed pattern / convention / rule / similarity hit. Payload
+	// pattern / convention / rule / similarity hit. Payload
 	// carries {file, line, kind, pr, score} so the live stream can show per-
 	// finding memory context alongside the formatted review body tag.
 	EventMemoryMatched EventType = "memory_matched"

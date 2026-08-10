@@ -6,7 +6,7 @@ package pipeline
 const reviewSuggestionScoreFloor = 70
 
 // shouldIndexReviewMemory reports whether a review finding is written to the
-// reviews-container in Supermemory. The write floor:
+// reviews container. The write floor:
 //
 //   - critical / warning     → always indexed
 //   - suggestion             → only when scored >= reviewSuggestionScoreFloor

@@ -68,21 +68,6 @@ type BriefingQuery struct {
 	Options  BriefingOptions
 }
 
-// Briefing assembles the institutional-memory block for a review prompt and
-// renders it to markdown, returning the string the caller embeds verbatim. It
-// owns the whole retrieval → dispatch → truncation → render path: q.Query is the
-// semantic query for the repo/shared/past-review reads; q.Options.Profile
-// selects the render shape and which side-searches run. Returns ("", nil) on nil
-// client or empty repo, and ("", err) when any underlying retrieval failed so a
-// caller can degrade the block (via BestEffort) instead of embedding a silently
-// partial one. Each underlying read owns its own 5s timeout.
-func (idx *indexerImpl) Briefing(ctx context.Context, q BriefingQuery) (string, error) {
-	if idx.client == nil {
-		return "", nil
-	}
-	return briefingWith(ctx, idx.runSearch, idx.logger, q)
-}
-
 // briefingWith is the shared Briefing pipeline over a transport core:
 // assemble (shared orchestration, shared floors) then render (already pure).
 // The empty-repo no-op lives here, not in the adapters — it is orchestration
@@ -147,7 +132,7 @@ func assembleBriefingWith(ctx context.Context, run runSearchFn, logger *slog.Log
 		var m []PatternMatch
 		m, rulesErr = searchWith(ctx, run, MemoryQuery{
 			Query: "review rules conventions", Scope: ScopeShared, Type: TypeRule,
-			Limit: 3, Threshold: q.Options.Thresholds.FindingEnrich, Rerank: true, Enrich: true,
+			Limit: 3, Threshold: q.Options.Thresholds.FindingEnrich, Enrich: true,
 		})
 		rules = HintStrings(m)
 	}()
@@ -156,7 +141,7 @@ func assembleBriefingWith(ctx context.Context, run runSearchFn, logger *slog.Log
 		var m []PatternMatch
 		m, pastErr = searchWith(ctx, run, MemoryQuery{
 			Query: q.Query, Repo: q.Repo, Scope: ScopeRepo, Type: TypeReview,
-			Limit: 2, Threshold: q.Options.Thresholds.FindingEnrich, Rerank: true, Enrich: true,
+			Limit: 2, Threshold: q.Options.Thresholds.FindingEnrich, Enrich: true,
 		})
 		pastReviews = HintStrings(m)
 	}()

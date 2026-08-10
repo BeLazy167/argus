@@ -10,9 +10,10 @@ import (
 	"time"
 )
 
-// BackoffPolicy controls exponential-backoff retry behavior for the Supermemory
-// HTTP client. Delays grow by Multiplier each attempt, capped at MaxDelay,
-// with ±Jitter uniform randomness per sleep to avoid thundering herds.
+// BackoffPolicy controls exponential-backoff retry behavior for the outbound
+// HTTP clients in this package — today the embeddings client. Delays grow by
+// Multiplier each attempt, capped at MaxDelay, with ±Jitter uniform randomness
+// per sleep to avoid thundering herds.
 //
 // DefaultBackoff is tuned so the total retry budget fits inside the 5-second
 // search context used by SpecialistBlock / SearchPatternMatch: 250ms + 500ms +
@@ -25,9 +26,9 @@ type BackoffPolicy struct {
 	Jitter       time.Duration // max absolute jitter each way (±Jitter)
 }
 
-// DefaultBackoff is applied uniformly to reads and writes. Writes that fail
-// after exhausting retries are recovered by the reconciler (cmd/reconcile-memory),
-// which re-indexes PG rows whose memory_doc_id is NULL.
+// DefaultBackoff is applied uniformly to reads and writes. An embedding call
+// that fails after exhausting retries is not fatal: the row is written with a
+// NULL embedding and stays full-text-searchable until it is backfilled.
 var DefaultBackoff = BackoffPolicy{
 	MaxAttempts:  3,
 	InitialDelay: 250 * time.Millisecond,
@@ -54,14 +55,14 @@ func (e *retryableError) Error() string {
 	if len(body) > 256 {
 		body = body[:256]
 	}
-	return fmt.Sprintf("supermemory retryable (status %d): %s", e.StatusCode, string(body))
+	return fmt.Sprintf("retryable (status %d): %s", e.StatusCode, string(body))
 }
 
 // isRetryableStatus returns true for HTTP status codes the policy should retry:
 // rate-limit (429), bad-gateway (502), unavailable (503), and gateway-timeout
 // (504). Application errors (4xx other than 429) short-circuit immediately.
-// 500 is treated as non-retryable because Supermemory uses it for caller-side
-// errors (e.g. malformed filter JSON) where retry just wastes the quota.
+// 500 is treated as non-retryable because servers commonly use it for
+// caller-side errors (a malformed request body), where retry only burns quota.
 func isRetryableStatus(code int) bool {
 	switch code {
 	case 429, 502, 503, 504:
@@ -88,8 +89,9 @@ const MaxRetryAfter = 30 * time.Second
 // A var (not const) so tests can shrink it without real multi-minute sleeps.
 var MaxCumulativeRetryWait = 2 * time.Minute
 
-// parseRetryAfter reads the Retry-After header per RFC 7231. Supermemory docs
-// specify seconds-integer format; we also accept HTTP-date as a fallback.
+// parseRetryAfter reads the Retry-After header per RFC 7231. The
+// seconds-integer format is the common case; HTTP-date is accepted as a
+// fallback.
 // Result is capped at MaxRetryAfter so a misconfigured server cannot stall
 // the retry loop indefinitely.
 //

@@ -147,7 +147,7 @@ Running Argus against your own repos means creating a GitHub App and pointing a 
 | GitHub App | **Required** | Receives PR webhooks, posts reviews |
 | Clerk | **Required for the dashboard** | Dashboard auth + backend JWT verification |
 | LLM provider (BYOK) | **Required for reviews** | OpenRouter, Vercel AI Gateway, or any OpenAI-compatible API, added via the dashboard |
-| Supermemory | Optional | RAG memory for patterns and rules |
+| Embeddings provider | Optional | Vector memory for patterns and rules; without it memory falls back to full-text only |
 | PostHog | Optional | Analytics; disabled when unset |
 
 ### Run the backend
@@ -199,7 +199,9 @@ Key environment variables — see [`backend/.env.example`](backend/.env.example)
 | `CLERK_JWKS_URL` | Clerk JWKS endpoint; when unset, authed API routes fail closed (503) |
 | `DASHBOARD_BASE_URL` | Dashboard URL linked from GitHub comments |
 | `SELF_HOSTED` | `true` applies self-host defaults (reviews auto-run unconditionally) |
-| `SUPERMEMORY_API_KEY` | Supermemory key for pattern learning (optional) |
+| `EMBEDDINGS_API_KEY` | Embeddings key for memory (optional; without it rows are full-text-searchable only) |
+| `EMBEDDINGS_BASE_URL` | Embeddings endpoint (OpenAI-compatible), default Voyage via the AI gateway |
+| `EMBEDDINGS_MODEL` | Embedding model, default `voyage/voyage-4-large` (1024 dims) |
 
 ---
 
@@ -247,7 +249,7 @@ backend/
     github/         # GitHub API client
     graph/          # code graph (AST, tree-sitter, regex, indexer)
     llm/            # LLM provider abstraction (OpenAI-compatible)
-    memory/         # Supermemory integration (patterns, rules)
+    memory/         # Postgres-backed memory (patterns, rules, hybrid search)
     pipeline/       # review pipeline (orchestrator, stages, dedup, scoring)
     sast/           # SAST runners (staticcheck, eslint, semgrep)
     store/          # database layer (pgx, sqlc)

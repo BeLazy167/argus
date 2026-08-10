@@ -120,7 +120,7 @@ func (idx *PGIndexer) embedQuery(ctx context.Context, query string) (*pgvector.V
 // embed FAILURE, by contrast, returns the error: the reader seam is
 // error-honest and callers own the degrade policy (BestEffort or propagate).
 //
-// Rerank is a no-op here (Supermemory's server-side reranker; the SQL
+// There is no rerank stage here (the SQL
 // ordering is already exact over the candidate pool). Enrich has no
 // related-memories graph to pull, so RichContent carries Content — the
 // downstream shaping (HintStrings' 500-char truncation) is unchanged.
@@ -384,7 +384,7 @@ func scanMatches(rows pgx.Rows, req SearchRequest, op string) ([]PatternMatch, e
 
 // searchPredicates renders the shared WHERE prefix both legs use: tenant,
 // container, live-row tombstones, and the request's filter groups. Filter
-// semantics mirror the Supermemory server: the AND group must all hold, the
+// semantics: the AND group must all hold, the
 // OR group needs at least one, both ANDed together when present. The `type`
 // key reads the indexed column (Doc.Type == metadata["type"] by
 // construction); every other key reads the metadata map.
@@ -457,7 +457,7 @@ func filterSQL(f FilterCondition, base int) (string, []any) {
 		}
 		// Guarded cast: a malformed value (e.g. a legacy backfilled doc with
 		// confidence "high") must fail to MATCH, not error the whole leg with
-		// 22P02 — Supermemory's semantics, and one bad _shared row must never
+		// 22P02, and one bad _shared row must never
 		// brick every confidence-floored briefing read.
 		// Both sides must be guarded, not just the stored value: an
 		// unparseable ARGUMENT would raise 22P02 and fail the whole leg (and

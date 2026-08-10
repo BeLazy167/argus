@@ -1,53 +1,34 @@
 package memory
 
 import (
-	"context"
-	"encoding/json"
-	"io"
-	"log/slog"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 )
 
-// indexDismissalCapture drives IndexFeedbackSignal for a dismissed finding
-// through the real indexer against a stub Supermemory server, returning the
-// customId the write path stamped on the /v3/documents request. It exercises
-// the dismissal keying as a write→read round-trip THROUGH the Indexer interface
-// — the dismissalCustomID builder is unexported, so its invariants are pinned by
-// the value that actually reaches the store, not by poking the builder.
+// indexDismissalCapture returns the customID the write path stamps for a
+// dismissed finding.
+//
+// buildFeedbackDoc is the capture point because it is what
+// PGIndexer.IndexFeedbackSignal calls to derive the row identity — asserting
+// here pins the value that actually reaches the store, one layer above the
+// unexported dismissalCustomID builder. (It replaces an HTTP stub that read the
+// customId off a request body; the identity is derived in exactly one place
+// either way, and that place is this function.)
 func indexDismissalCapture(t *testing.T, repo, category, body string) string {
 	t.Helper()
-	var gotCustomID string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		raw, _ := io.ReadAll(r.Body)
-		var req AddRequest
-		if err := json.Unmarshal(raw, &req); err != nil {
-			t.Errorf("decode add request: %v", err)
-		}
-		gotCustomID = req.CustomID
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"id":"doc-1","status":"queued"}`))
-	}))
-	defer srv.Close()
-
-	idx := NewIndexer(
-		NewClient("test-key", WithBaseURL(srv.URL), WithBackoff(BackoffPolicy{MaxAttempts: 1})),
-		slog.Default(),
-	)
-	if err := idx.IndexFeedbackSignal(context.Background(), "acme", repo, FeedbackMemory{
+	doc, err := buildFeedbackDoc("acme", repo, FeedbackMemory{
 		Action:       "dismissed",
 		Category:     category,
 		OriginalBody: body,
 		Repo:         repo,
-	}); err != nil {
-		t.Fatalf("IndexFeedbackSignal: %v", err)
+	})
+	if err != nil {
+		t.Fatalf("buildFeedbackDoc: %v", err)
 	}
-	if gotCustomID == "" {
+	if doc.CustomID == "" {
 		t.Fatal("write path stamped no customId")
 	}
-	return gotCustomID
+	return doc.CustomID
 }
 
 // TestDismissalCustomID_WriteRoundTrip pins the v2 dismissal keying — category +

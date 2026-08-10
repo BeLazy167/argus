@@ -17,11 +17,18 @@ import (
 // PGIndexer is the Postgres-native Indexer implementation (program PR 3/4).
 // Writers land documents in the memories table via deterministic
 // upsert-REPLACE; readers (Search/Briefing) arrive in PR 4. It reuses the
-// exact content builders, customId derivations, and Metadata validation the
-// Supermemory implementation uses — the two backends must write
-// byte-identical documents so the shadow comparison (PR 6) measures retrieval,
-// not formatting drift.
+// exact content builders, customId derivations, and Metadata validation every
+// other writer uses, so document shape is decided in one place.
 //
+// StorageDimensions is the fixed width of the memories.embedding column
+// (migration 059). It, not EMBEDDINGS_DIMENSIONS, is the authority on
+// dimensionality: pgvector rejects any other width at INSERT, and pgx runs a
+// whole batch in one implicit transaction, so one mismatched vector rolls back
+// every row in it. Memory indexing failures are non-fatal and log at Warn, so
+// the visible symptom is that writes simply stop. Reads fail the same way — a
+// query vector of the wrong width errors on every `<=>` comparison.
+const StorageDimensions = 1024
+
 // Embedding is synchronous and fail-open: on embedder absence, failure, or a
 // contract violation (wrong count or wrong dimensionality — a misconfigured
 // custom endpoint) rows land with a NULL embedding (immediately FTS/metadata-
@@ -106,10 +113,6 @@ func cosineOp(pgctx bool) string {
 	}
 	return "<=>"
 }
-
-// DisableLLMFilter is a Supermemory account-level concern; Postgres has no
-// equivalent. No-op by design.
-func (idx *PGIndexer) DisableLLMFilter(context.Context) error { return nil }
 
 // embedForDocs returns one vector per doc plus the model id, or (nil, "") on
 // the fail-open path: embedder absent, embed error, or embedder output
@@ -262,7 +265,7 @@ func (idx *PGIndexer) upsertDocs(ctx context.Context, docs []Doc) error {
 			embedding = &v
 			embeddingModel = &model
 		}
-		// Postgres TEXT rejects NUL (22021) where Supermemory accepted it, and
+		// Postgres TEXT rejects NUL (22021), and
 		// one poisoned doc would abort the whole implicit transaction — strip
 		// rather than lose the batch.
 		content := strings.ReplaceAll(d.Content, "\x00", "")
@@ -296,7 +299,7 @@ func (idx *PGIndexer) upsertOne(ctx context.Context, op string, d Doc) error {
 	return nil
 }
 
-// IndexReviewCommentsBatch mirrors the Supermemory implementation: same
+// IndexReviewCommentsBatch writes one row per comment: same
 // metadata validation, same skip semantics, same all-dropped error.
 func (idx *PGIndexer) IndexReviewCommentsBatch(ctx context.Context, owner, repo string, comments []ReviewMemory) error {
 	if len(comments) == 0 {
@@ -320,7 +323,7 @@ func (idx *PGIndexer) IndexReviewCommentsBatch(ctx context.Context, owner, repo 
 	return nil
 }
 
-// IndexRule mirrors the Supermemory implementation (owner accepted for
+// IndexRule writes the rule to the installation-wide container (owner accepted for
 // back-compat, `_shared` container, type=rule).
 func (idx *PGIndexer) IndexRule(ctx context.Context, owner string, rule RuleMemory) error {
 	_ = owner
@@ -331,10 +334,10 @@ func (idx *PGIndexer) IndexRule(ctx context.Context, owner string, rule RuleMemo
 	return idx.upsertOne(ctx, "indexing rule", doc)
 }
 
-// IndexPattern mirrors the Supermemory implementation; the returned
-// AddResponse.ID is the deterministic customId (doc id == customId in the PG
-// store — this collapses the chunk-id/custom-id resolution dance).
-func (idx *PGIndexer) IndexPattern(ctx context.Context, repo string, p PatternMemory) (*AddResponse, error) {
+// IndexPattern writes a repo-scoped pattern. The returned IndexResult.ID is
+// the deterministic customId: doc id == customId in this store, which collapses
+// the chunk-id/custom-id resolution dance.
+func (idx *PGIndexer) IndexPattern(ctx context.Context, repo string, p PatternMemory) (*IndexResult, error) {
 	doc, err := buildPatternDoc(repo, p)
 	if err != nil {
 		return nil, err
@@ -343,12 +346,12 @@ func (idx *PGIndexer) IndexPattern(ctx context.Context, repo string, p PatternMe
 		return nil, err
 	}
 	idx.logger.Info("indexed repo pattern", "repo", repo, "source", p.Source)
-	return &AddResponse{ID: doc.CustomID}, nil
+	return &IndexResult{ID: doc.CustomID}, nil
 }
 
-// IndexSharedPattern mirrors the Supermemory implementation, including the
+// IndexSharedPattern writes an installation-wide pattern, including the
 // confidence=1.00 pin (re-learning is the liveness signal for shared decay).
-func (idx *PGIndexer) IndexSharedPattern(ctx context.Context, p PatternMemory) (*AddResponse, error) {
+func (idx *PGIndexer) IndexSharedPattern(ctx context.Context, p PatternMemory) (*IndexResult, error) {
 	doc, err := buildSharedPatternDoc(p)
 	if err != nil {
 		return nil, err
@@ -357,10 +360,10 @@ func (idx *PGIndexer) IndexSharedPattern(ctx context.Context, p PatternMemory) (
 		return nil, err
 	}
 	idx.logger.Info("indexed shared pattern", "source", p.Source)
-	return &AddResponse{ID: doc.CustomID}, nil
+	return &IndexResult{ID: doc.CustomID}, nil
 }
 
-// IndexFeedbackSignal mirrors the Supermemory implementation: same shape
+// IndexFeedbackSignal records an accept/dismiss signal: same shape
 // derivation, same dismissal keying and provenance extras, same
 // unsupported-action error.
 func (idx *PGIndexer) IndexFeedbackSignal(ctx context.Context, owner, repo string, fb FeedbackMemory) error {
@@ -375,7 +378,7 @@ func (idx *PGIndexer) IndexFeedbackSignal(ctx context.Context, owner, repo strin
 	return nil
 }
 
-// IndexScenario mirrors the Supermemory implementation.
+// IndexScenario writes a scenario seed to the repo container.
 func (idx *PGIndexer) IndexScenario(ctx context.Context, owner, repo string, scenarioID int64, description, severity string, files []string) error {
 	_ = owner
 	doc, err := buildScenarioDoc(repo, scenarioID, description, severity, files)
@@ -386,12 +389,11 @@ func (idx *PGIndexer) IndexScenario(ctx context.Context, owner, repo string, sce
 }
 
 // DeleteDocument soft-deletes by customId. In the PG store doc id == customId
-// by construction (IndexPattern returns it as AddResponse.ID), which unifies
-// the two id kinds in circulation under the Supermemory backend. A no-match
-// delete is logged, not silent: rows written under the Supermemory backend
-// carry SM server doc-ids in their mirror columns, and those can never match
-// a PG custom_id — the log is how such transition gaps surface (PR 5/6
-// backfill repoints them).
+// by construction (IndexPattern returns it as IndexResult.ID), which unifies
+// doc id and customId into one value. A no-match delete is logged, not silent:
+// a row whose mirror column still holds a non-derived id can never match a
+// custom_id, and the log is how it surfaces (backfill-memory --repoint fixes
+// them).
 func (idx *PGIndexer) DeleteDocument(ctx context.Context, documentID string) error {
 	tag, err := idx.pool.Exec(ctx,
 		"UPDATE memories SET deleted_at = now(), updated_at = now() WHERE installation_id = $1 AND custom_id = $2 AND deleted_at IS NULL",

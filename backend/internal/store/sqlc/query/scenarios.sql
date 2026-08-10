@@ -133,3 +133,8 @@ SELECT
     COUNT(*) FILTER (WHERE active AND is_outdated)                                                         AS outdated
 FROM scenarios
 WHERE repo_id = $1;
+
+-- name: UpdateScenarioMemoryDocID :exec
+-- Mirrors the memory row's deterministic customID onto the scenario so a
+-- search hit resolves back to this row.
+UPDATE scenarios SET memory_doc_id = $1 WHERE id = $2;

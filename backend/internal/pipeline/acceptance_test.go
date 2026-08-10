@@ -57,18 +57,17 @@ func TestLoadFeatureFlags(t *testing.T) {
 		// cross-PR checks and issue acceptance silently switch off for every
 		// subsequent review — while the settings API, which defaults by
 		// pointer, keeps rendering both toggles ON, so nothing reveals the
-		// divergence. The column now carries operator-written keys
-		// (memory_backend), making this shape reachable the moment the first
-		// installation is migrated.
+		// divergence. The column carries operator-written keys, which makes
+		// this shape reachable for any installation an operator has touched.
 		{
 			"foreign key only -> every default preserved",
-			fakeFlagReader{raw: json.RawMessage(`{"memory_backend":"postgres"}`)},
+			fakeFlagReader{raw: json.RawMessage(`{"operator_only_flag":"set"}`)},
 			42,
 			defaults,
 		},
 		{
 			"foreign key alongside a partial save",
-			fakeFlagReader{raw: json.RawMessage(`{"memory_backend":"postgres","max_linked_prs":9}`)},
+			fakeFlagReader{raw: json.RawMessage(`{"operator_only_flag":"set","max_linked_prs":9}`)},
 			42,
 			FeatureFlags{CrossPRChecks: defaults.CrossPRChecks, IssueAcceptance: defaults.IssueAcceptance, MaxLinkedPRs: 9},
 		},
@@ -77,7 +76,7 @@ func TestLoadFeatureFlags(t *testing.T) {
 		// pointer rather than by testing for zero values.
 		{
 			"explicit false preserved next to a foreign key",
-			fakeFlagReader{raw: json.RawMessage(`{"memory_backend":"postgres","cross_pr_checks":false}`)},
+			fakeFlagReader{raw: json.RawMessage(`{"operator_only_flag":"set","cross_pr_checks":false}`)},
 			42,
 			FeatureFlags{CrossPRChecks: false, IssueAcceptance: defaults.IssueAcceptance, MaxLinkedPRs: defaults.MaxLinkedPRs},
 		},

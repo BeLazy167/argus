@@ -240,12 +240,11 @@ export default function StatsPage() {
         </section>
       )}
 
-      {/* Learn layer — BYOK-paid side effects of the memory pipeline.
-          Shown separately from the review cards because the cost lives
-          in your Supermemory bill, not the LLM bill. */}
+      {/* Learn layer — side effects of the memory pipeline. Shown separately
+          from the review cards because the cost is embeddings, not the LLM. */}
       {overview.data && (
         <section className="pt-4 mb-10">
-          <SectionHeader title="Learn layer" tip="Memory activity for this period. Each counter maps to a row your BYOK Supermemory account is storing." />
+          <SectionHeader title="Learn layer" tip="Memory activity for this period. Each counter maps to a row stored in the memory database." />
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <StatCard
               label="Patterns"

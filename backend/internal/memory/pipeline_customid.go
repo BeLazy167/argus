@@ -20,7 +20,7 @@ func ScenarioCustomID(repo string, scenarioID int64) string {
 
 // PipelinePatternCustomID reconstructs the deterministic customID the pipeline
 // assigned when it first indexed a pattern, so a backfill / re-push upserts the
-// SAME Supermemory doc instead of creating a duplicate. The DB `source` column
+// SAME memory row instead of creating a duplicate. The DB `source` column
 // diverges from the "segment" the pipeline hashes into the customID
 // (orchestrator.go):
 //

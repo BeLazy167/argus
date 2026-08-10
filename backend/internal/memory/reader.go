@@ -32,7 +32,6 @@ type MemoryQuery struct {
 	Filters   []FilterCondition
 	Limit     int
 	Threshold float64
-	Rerank    bool
 	// Enrich requests related memories + summaries so each Match carries
 	// RichContent (the hint-render path); off keeps the response lean.
 	Enrich bool
@@ -71,10 +70,8 @@ func (q MemoryQuery) containerTags() ([]string, error) {
 func (q MemoryQuery) request() SearchRequest {
 	req := SearchRequest{
 		Query:       q.Query,
-		SearchMode:  "hybrid",
 		Limit:       q.Limit,
 		Threshold:   q.Threshold,
-		Rerank:      q.Rerank,
 		PointLookup: q.PointLookup,
 	}
 	and := make([]FilterCondition, 0, len(q.Filters)+1)
@@ -93,29 +90,16 @@ func (q MemoryQuery) request() SearchRequest {
 
 // runSearchFn is the one transport-shaped hole in the shared read
 // orchestration: execute a single-container SearchRequest and convert to
-// matches. Supermemory satisfies it with runSearch (HTTP /v4/search), the
-// Postgres backend with memoRunSearch (hybrid SQL) — so container resolution,
-// timeouts, fan-out merge, and leg-degradation policy are shared by
-// construction, exactly like the write path's Doc builders.
+// matches. The Postgres backend satisfies it with memoRunSearch (hybrid SQL),
+// and tests satisfy it directly — so container resolution, timeouts, fan-out
+// merge, and leg-degradation policy are shared by construction, exactly like
+// the write path's Doc builders.
 //
 // Whether the read wants enriched content is carried by the request itself
 // (Include != nil), never as a second argument: a caller that set one and
 // forgot the other produced empty RichContent, which HintStrings then
 // filters out — a silently blank briefing section with no error anywhere.
 type runSearchFn func(ctx context.Context, req SearchRequest) ([]PatternMatch, error)
-
-// Search is the deep, error-honest read behind the memory reader seam. It owns
-// container-tag resolution, its own 5s timeout, and the retrieval → convert
-// path, returning the raw matches and any search error verbatim so each caller
-// decides the policy: propagate (enrich novelty gating must not confuse a broken
-// search with a genuine no-match) or degrade via BestEffort (briefing, hints,
-// suppression, scenario dedup). Returns (nil, nil) on a disabled indexer.
-func (idx *indexerImpl) Search(ctx context.Context, q MemoryQuery) ([]PatternMatch, error) {
-	if idx.client == nil {
-		return nil, nil
-	}
-	return searchWith(ctx, idx.runSearch, q)
-}
 
 // searchWith is the shared Search orchestration over a transport core.
 func searchWith(ctx context.Context, run runSearchFn, q MemoryQuery) ([]PatternMatch, error) {
@@ -168,33 +152,6 @@ func searchFanOut(ctx context.Context, run runSearchFn, base SearchRequest, tags
 		out = append(out, leg.matches...)
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Score > out[j].Score })
-	return out, nil
-}
-
-// runSearch executes one SearchRequest and converts the results to
-// []PatternMatch, RETURNING the client error instead of swallowing it — the ONE
-// place a reader-path search error originates. When enrich is set each match
-// also carries RichContent(2) (summary + related memories) for the hint render
-// path. Result counts log at Debug (empty-vs-hit visibility, tagged by
-// container); the error path is the caller's to log (BestEffort on degrade, or
-// the enrich Warn on propagate) so the log-and-degrade policy stays single-owned.
-func (idx *indexerImpl) runSearch(ctx context.Context, req SearchRequest) ([]PatternMatch, error) {
-	resp, err := idx.client.Search(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-	if resp == nil {
-		return nil, nil
-	}
-	out := make([]PatternMatch, 0, len(resp.Results))
-	for _, r := range resp.Results {
-		pm := resultToPatternMatch(r)
-		if req.Include != nil {
-			pm.RichContent = r.RichContent(2)
-		}
-		out = append(out, pm)
-	}
-	logSearchResult(idx.logger, req, len(out))
 	return out, nil
 }
 
