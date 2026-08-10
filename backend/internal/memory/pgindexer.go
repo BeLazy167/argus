@@ -184,6 +184,106 @@ func (idx *PGIndexer) ImportDocs(ctx context.Context, docs []Doc) error {
 	return idx.upsertDocs(ctx, docs)
 }
 
+// ReembedMissing embeds rows that carry no vector, returning how many it
+// repaired. Scoped to this indexer's installation.
+//
+// The write path fails OPEN: when the embedder is absent or breaks its
+// contract, embedForDocs returns nil and the row is written with a NULL
+// embedding, reachable through the full-text leg only. Nothing used to repair
+// those rows once the nightly drift sweep was removed, so a transient
+// embeddings outage silently and permanently halved retrieval for whatever was
+// written during it. This is that repair.
+//
+// Content is deliberately NOT rewritten — only embedding and embedding_model.
+// A re-embed must not resurrect the content of a row that has since been
+// edited, and it must not touch updated_at, which query-time decay reads as
+// the liveness signal for `_shared` patterns.
+//
+// Progress is guaranteed by the predicate itself: every repaired row stops
+// matching `embedding IS NULL`. A batch that repairs nothing therefore means
+// embedding is failing, and returning an error there is what stops this from
+// spinning forever on the same page.
+func (idx *PGIndexer) ReembedMissing(ctx context.Context, batchSize int) (int, error) {
+	if idx.embedder == nil {
+		return 0, fmt.Errorf("reembed: no embedder configured for installation %d", idx.installationID)
+	}
+	if batchSize <= 0 {
+		batchSize = 100
+	}
+	cast := vectorParam("$1", usesPGContextVector(ctx, idx.pool, idx.logger))
+	update := fmt.Sprintf(
+		`UPDATE memories SET embedding = %s, embedding_model = $2
+		 WHERE installation_id = $3 AND custom_id = $4 AND embedding IS NULL`, cast)
+
+	total := 0
+	for {
+		rows, err := idx.pool.Query(ctx, `
+			SELECT custom_id, content FROM memories
+			WHERE installation_id = $1 AND deleted_at IS NULL AND embedding IS NULL
+			ORDER BY id
+			LIMIT $2`, idx.installationID, batchSize)
+		if err != nil {
+			return total, fmt.Errorf("reembed: selecting unembedded rows: %w", err)
+		}
+		var docs []Doc
+		for rows.Next() {
+			var d Doc
+			if err := rows.Scan(&d.CustomID, &d.Content); err != nil {
+				rows.Close()
+				return total, fmt.Errorf("reembed: scanning row: %w", err)
+			}
+			docs = append(docs, d)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return total, fmt.Errorf("reembed: reading rows: %w", err)
+		}
+		if len(docs) == 0 {
+			return total, nil
+		}
+
+		vecs, model := idx.embedForDocs(ctx, docs)
+		if vecs == nil {
+			// embedForDocs already logged the specific contract violation.
+			return total, fmt.Errorf("reembed: embedding failed for a batch of %d; %d rows repaired before this point", len(docs), total)
+		}
+
+		batch := &pgx.Batch{}
+		for i, d := range docs {
+			v := pgvector.NewVector(vecs[i])
+			batch.Queue(update, v, model, idx.installationID, d.CustomID)
+		}
+		br := idx.pool.SendBatch(ctx, batch)
+		repaired := 0
+		var execErr error
+		for range docs {
+			tag, err := br.Exec()
+			if err != nil {
+				execErr = fmt.Errorf("reembed: updating batch: %w", err)
+				break
+			}
+			repaired += int(tag.RowsAffected())
+		}
+		closeErr := br.Close()
+		if execErr != nil {
+			return total, execErr
+		}
+		if closeErr != nil {
+			return total, fmt.Errorf("reembed: closing batch: %w", closeErr)
+		}
+		total += repaired
+		idx.logger.Info("reembedded memory rows", "installation_id", idx.installationID, "repaired", repaired, "total", total)
+
+		// Zero repaired with a non-empty page means the rows are no longer
+		// matching the UPDATE's predicate (concurrently embedded or deleted)
+		// while still matching the SELECT's. Re-running would fetch the same
+		// page forever.
+		if repaired == 0 {
+			return total, nil
+		}
+	}
+}
+
 // upsertDocs embeds and writes a batch of documents.
 //
 // Dedupe (last-write-wins on customId) keeps the batch deterministic: each

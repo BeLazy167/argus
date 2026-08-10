@@ -38,6 +38,7 @@ type runConfig struct {
 	installation int64
 	plan         bool
 	repoint      bool
+	reembed      bool
 }
 
 func main() {
@@ -45,6 +46,7 @@ func main() {
 	flag.Int64Var(&cfg.installation, "installation", 0, "restrict to one installation id (0 = every installation present in the archive)")
 	flag.BoolVar(&cfg.plan, "plan", false, "dry-run: report what would be written, touch nothing")
 	flag.BoolVar(&cfg.repoint, "repoint", false, "also rewrite patterns.memory_doc_id from archived server doc ids to the archived customIds")
+	flag.BoolVar(&cfg.reembed, "reembed", false, "repair mode: embed live memories rows that have a NULL embedding, then exit (ignores the archive)")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -87,6 +89,10 @@ func run(ctx context.Context, logger *slog.Logger, st *store.Store, cfg runConfi
 		Dimensions: 1024,
 	}, logger)
 
+	if cfg.reembed {
+		return runReembed(ctx, logger, st, embedRegistry, cfg)
+	}
+
 	installs, err := archivedInstallations(ctx, st, cfg.installation)
 	if err != nil {
 		return fmt.Errorf("listing archived installations: %w", err)
@@ -123,6 +129,85 @@ func run(ctx context.Context, logger *slog.Logger, st *store.Store, cfg runConfi
 	if totalImported == 0 && !cfg.plan {
 		return fmt.Errorf("nothing was imported; refusing to report success on an empty corpus")
 	}
+	return nil
+}
+
+// runReembed repairs rows the write path left unembedded. It is independent of
+// the archive: PGIndexer fails open, so any embeddings outage since the
+// migration can have left NULL vectors behind, and those rows are reachable
+// through the full-text leg only until something re-embeds them.
+//
+// Installations are resolved from the damage itself rather than from a
+// registry, so a clean fleet is a no-op that reports zero instead of an error.
+func runReembed(ctx context.Context, logger *slog.Logger, st *store.Store, embeds *memory.EmbedderRegistry, cfg runConfig) error {
+	rows, err := st.Pool.Query(ctx, `
+		SELECT installation_id, count(*)
+		FROM memories
+		WHERE deleted_at IS NULL AND embedding IS NULL
+		  AND ($1 = 0 OR installation_id = $1)
+		GROUP BY installation_id
+		ORDER BY installation_id`, cfg.installation)
+	if err != nil {
+		return fmt.Errorf("listing installations with unembedded rows: %w", err)
+	}
+	type target struct {
+		id      int64
+		pending int64
+	}
+	var targets []target
+	for rows.Next() {
+		var t target
+		if err := rows.Scan(&t.id, &t.pending); err != nil {
+			rows.Close()
+			return fmt.Errorf("scanning installation: %w", err)
+		}
+		targets = append(targets, t)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("reading installations: %w", err)
+	}
+
+	if len(targets) == 0 {
+		logger.Info("reembed: nothing to do; every live memory row carries a vector")
+		return nil
+	}
+
+	total := int64(0)
+	for _, t := range targets {
+		total += t.pending
+	}
+	logger.Info("reembed starting", "installations", len(targets), "unembedded_rows", total, "plan", cfg.plan)
+	if cfg.plan {
+		for _, t := range targets {
+			logger.Info("reembed planned", "installation_id", t.id, "unembedded_rows", t.pending)
+		}
+		return nil
+	}
+
+	repairedTotal := 0
+	for _, t := range targets {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		embedder, _ := embeds.GetEmbedder(ctx, t.id)
+		if embedder == nil {
+			// Skipping is right, not fatal: one installation without an
+			// embeddings provider must not stop the rest of the fleet being
+			// repaired. It is logged at Warn because those rows stay
+			// half-retrievable until a provider is configured.
+			logger.Warn("reembed: no embedder resolved; skipping installation",
+				"installation_id", t.id, "unembedded_rows", t.pending)
+			continue
+		}
+		idx := memory.NewPGIndexer(st.Pool, embedder, t.id, embeds.Dimensions(), logger)
+		repaired, err := idx.ReembedMissing(ctx, pageSize)
+		repairedTotal += repaired
+		if err != nil {
+			return fmt.Errorf("installation %d: %w", t.id, err)
+		}
+	}
+	logger.Info("reembed complete", "repaired", repairedTotal)
 	return nil
 }
 

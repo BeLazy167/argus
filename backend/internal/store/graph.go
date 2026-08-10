@@ -168,13 +168,21 @@ var (
 	pgGraphReady bool
 )
 
-// pgGraphAvailable reports whether the graph extension is installed AND a
-// projection has been built.
+// pgGraphAvailable reports whether the graph extension is installed and its
+// projection is usable. Probed once per process; any error answers false,
+// which falls back to the recursive CTE.
 //
-// Both halves matter and neither implies the other: the extension can be
-// present with no build (traverse then errors), and a build can go stale.
-// Probed once per process; any error answers false, which falls back to the
-// recursive CTE.
+// The columns are checked by name against graph.status() deliberately. An
+// earlier version tested `WHERE built`, and graph.status() has no such column
+// -- so the query errored on EVERY call, the probe answered false, and the
+// pgGraph path never ran once in production. It failed to the CTE, so nothing
+// looked broken; the feature was simply dead. Any predicate here must name a
+// column that exists, because the failure is invisible.
+//
+// schema_status = 'current' means the projection matches the registered
+// tables; read_only means it cannot serve. node_count is NOT checked: a graph
+// answers traversals from its base tables and overlay, so a zero count is a
+// cold CSR rather than an unusable graph.
 //
 // The fallback is not a nicety. pgGraph needs a custom build step and is absent
 // from every managed Postgres, so a self-hosted install will never have it.
@@ -182,13 +190,16 @@ var (
 // mandatory CREATE EXTENSION introduced for pgcontext earlier.
 func (s *Store) pgGraphAvailable(ctx context.Context) bool {
 	pgGraphOnce.Do(func() {
-		var built bool
+		var ready bool
 		if err := s.Pool.QueryRow(ctx, `
 			SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'graph')
-			   AND EXISTS (SELECT 1 FROM graph.status() WHERE built)`).Scan(&built); err != nil {
+			   AND EXISTS (
+			         SELECT 1 FROM graph.status()
+			         WHERE schema_status = 'current' AND NOT read_only
+			       )`).Scan(&ready); err != nil {
 			return // stays false: the CTE needs no extension
 		}
-		pgGraphReady = built
+		pgGraphReady = ready
 	})
 	return pgGraphReady
 }
@@ -212,11 +223,14 @@ func (s *Store) GetBlastRadius(ctx context.Context, repoID int64, filePaths []st
 		return []CodeNode{}, nil
 	}
 	if s.pgGraphAvailable(ctx) {
-		if nodes, err := s.blastRadiusPGGraph(ctx, repoID, filePaths, maxDepth); err == nil {
+		// An EMPTY result falls through too, not just an error. A projection
+		// that is stale or not yet built answers a traversal with zero rows
+		// rather than failing, and an empty blast radius is indistinguishable
+		// from "nothing depends on this file" at every call site. Re-running
+		// the CTE costs ~1ms and is the only way to tell the two apart.
+		if nodes, err := s.blastRadiusPGGraph(ctx, repoID, filePaths, maxDepth); err == nil && len(nodes) > 0 {
 			return nodes, nil
 		}
-		// A traverse failure must not lose the feature: fall through to the
-		// CTE, which needs no extension and no build.
 	}
 	return s.blastRadiusCTE(ctx, repoID, filePaths, maxDepth)
 }
