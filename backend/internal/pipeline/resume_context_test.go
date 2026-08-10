@@ -130,20 +130,28 @@ func TestPersistedRunLosesPipelineContext(t *testing.T) {
 func TestHydrateResumeContext_RoundTrippedRunRegainsContext(t *testing.T) {
 	loaded := roundTrip(t, midFlightRun())
 	fake := &fakeResumeDeps{
-		// cross_pr_checks is OFF by default, so reading it back as true proves
-		// the stored blob was applied rather than DefaultFeatureFlags returned.
-		flags:    json.RawMessage(`{"issue_acceptance":true,"cross_pr_checks":true,"max_linked_prs":3}`),
+		// Every field is deliberately the OPPOSITE of DefaultFeatureFlags()
+		// (on/on/5). An earlier version of this fixture stored the defaults'
+		// own values and asserted them back, so it held whether the blob was
+		// applied or loadFeatureFlags fell back — see #238.
+		flags:    json.RawMessage(`{"issue_acceptance":false,"cross_pr_checks":false,"max_linked_prs":3}`),
 		settings: json.RawMessage(`{"threshold_scenario_trigger":0.42}`),
 		indexer:  &memorytest.Fake{},
+	}
+	storedFlags := FeatureFlags{CrossPRChecks: false, IssueAcceptance: false, MaxLinkedPRs: 3}
+	if storedFlags == DefaultFeatureFlags() {
+		t.Fatalf("the stored-flags fixture now equals DefaultFeatureFlags() (%+v) — the assertion below can no longer tell an applied blob from a fallback; pick differing values",
+			DefaultFeatureFlags())
 	}
 
 	hydrateResumeContext(context.Background(), loaded, fake, discardLogger())
 
-	if !loaded.FeatureFlags.IssueAcceptance {
-		t.Error("IssueAcceptance false after hydration — the resumed review skips issue acceptance the settings UI shows as on")
-	}
-	if !loaded.FeatureFlags.CrossPRChecks {
-		t.Error("CrossPRChecks false after hydration — flags fell back to defaults instead of the installation's stored blob")
+	// Whole-struct compare, not field probes: the resumed run must carry what
+	// the installation stored. A fallback to defaults here re-enables, on every
+	// crash-recovered run, the checks an installation explicitly turned off.
+	if loaded.FeatureFlags != storedFlags {
+		t.Errorf("FeatureFlags = %+v, want %+v — the stored blob was not applied, flags fell back to defaults",
+			loaded.FeatureFlags, storedFlags)
 	}
 	if loaded.Thresholds.IsZero() {
 		t.Fatal("Thresholds still zero — every similarity gate would accept any match")
@@ -154,8 +162,11 @@ func TestHydrateResumeContext_RoundTrippedRunRegainsContext(t *testing.T) {
 	if loaded.Thresholds.SuppressionDrop == 0 {
 		t.Error("SuppressionDrop = 0 — fixed-policy gates must be seeded too, or dismissal suppression mutes everything")
 	}
-	if loaded.Indexer == nil {
-		t.Error("Indexer nil after hydration — the resumed review would write nothing back to memory")
+	// Identity, not non-nil: the run must carry the indexer the registry
+	// resolved for ITS installation, so a hydration that fabricates some other
+	// writer (or resolves against a different install) fails here.
+	if loaded.Indexer != fake.indexer {
+		t.Errorf("Indexer = %#v, want the resolved one — the resumed review would write nothing back to its own memory", loaded.Indexer)
 	}
 	if loaded.Contract == nil {
 		t.Fatal("Contract nil after hydration — depth, evidence bar and the security floor all collapse to defaults")
@@ -182,8 +193,12 @@ func TestHydrateResumeContext_ReadFailuresLeaveResolvedDefaults(t *testing.T) {
 
 	hydrateResumeContext(context.Background(), loaded, fake, discardLogger())
 
-	if !loaded.FeatureFlags.IssueAcceptance {
-		t.Error("IssueAcceptance false after a failed flag read — must degrade to the documented default (on), not to off")
+	// Whole struct, so a half-populated fallback (the bools set, MaxLinkedPRs
+	// left at 0) is caught too — the contract is a RESOLVED default, not a
+	// partially-zero one.
+	if loaded.FeatureFlags != DefaultFeatureFlags() {
+		t.Errorf("FeatureFlags = %+v after a failed flag read, want the documented defaults %+v",
+			loaded.FeatureFlags, DefaultFeatureFlags())
 	}
 	if loaded.Thresholds.IsZero() {
 		t.Fatal("Thresholds zero after a failed settings read — ScenarioTrigger 0 makes every scenario match a hit")
@@ -243,7 +258,9 @@ func TestResume_HydratesBeforeTheFirstStage(t *testing.T) {
 	persisted := roundTrip(t, midFlightRun())
 	sm.load = func(_ context.Context, _ uuid.UUID) (*PipelineRun, error) { return persisted, nil }
 	fake := &fakeResumeDeps{
-		flags:    json.RawMessage(`{"issue_acceptance":true,"cross_pr_checks":true}`),
+		// max_linked_prs 3 ≠ the default 5, so the stage below sees a value that
+		// only a hydration honoring the stored blob can produce (#238).
+		flags:    json.RawMessage(`{"issue_acceptance":true,"cross_pr_checks":true,"max_linked_prs":3}`),
 		settings: json.RawMessage(`{"threshold_scenario_trigger":0.42}`),
 		indexer:  &memorytest.Fake{},
 	}
@@ -252,18 +269,20 @@ func TestResume_HydratesBeforeTheFirstStage(t *testing.T) {
 	}
 
 	type seen struct {
-		acceptance bool
-		trigger    float64
-		hasIndexer bool
+		acceptance   bool
+		maxLinkedPRs int
+		trigger      float64
+		hasIndexer   bool
 	}
 	var first *seen
 	for _, st := range pipelineStages {
 		sm.RegisterStage(st, func(_ context.Context, run *PipelineRun) error {
 			if first == nil {
 				first = &seen{
-					acceptance: run.FeatureFlags.IssueAcceptance,
-					trigger:    run.Thresholds.ScenarioTrigger,
-					hasIndexer: run.Indexer != nil,
+					acceptance:   run.FeatureFlags.IssueAcceptance,
+					maxLinkedPRs: run.FeatureFlags.MaxLinkedPRs,
+					trigger:      run.Thresholds.ScenarioTrigger,
+					hasIndexer:   run.Indexer != nil,
 				}
 			}
 			return nil
@@ -282,6 +301,9 @@ func TestResume_HydratesBeforeTheFirstStage(t *testing.T) {
 	}
 	if !first.acceptance {
 		t.Error("first resumed stage saw IssueAcceptance=false — hydration ran too late")
+	}
+	if first.maxLinkedPRs != 3 {
+		t.Errorf("first resumed stage saw MaxLinkedPRs=%d, want 3 — hydration ran too late, or it ignored the installation's stored flags", first.maxLinkedPRs)
 	}
 	if first.trigger != 0.42 {
 		t.Errorf("first resumed stage saw ScenarioTrigger=%v, want 0.42 — hydration ran too late", first.trigger)
@@ -319,8 +341,9 @@ func TestDefaultResumeDeps_UnwiredStoreDegrades(t *testing.T) {
 
 	hydrateResumeContext(context.Background(), loaded, deps, discardLogger())
 
-	if !loaded.FeatureFlags.IssueAcceptance {
-		t.Error("IssueAcceptance false with an unwired store — must fall back to the documented default")
+	if loaded.FeatureFlags != DefaultFeatureFlags() {
+		t.Errorf("FeatureFlags = %+v with an unwired store, want the documented defaults %+v",
+			loaded.FeatureFlags, DefaultFeatureFlags())
 	}
 	if loaded.Thresholds.IsZero() {
 		t.Error("Thresholds zero with an unwired store — must fall back to the fixed-policy defaults")

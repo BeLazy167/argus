@@ -75,6 +75,11 @@ type fakeCrossPRStore struct {
 	// tests that schedule OnReviewCompleted can block until the background
 	// enqueueSiblingRefreshes goroutine has completed its one store read.
 	siblingLookups int32
+
+	// sharedIssueLookups counts FindSharedLinkedIssues calls. The joint
+	// acceptance stage reads shared issues only AFTER its CrossPRChecks
+	// gate, so a zero here is the precise witness that the gate skipped.
+	sharedIssueLookups int
 }
 
 type priorKey struct {
@@ -198,6 +203,7 @@ func (f *fakeCrossPRStore) GetLatestCompletedReviewByPR(ctx context.Context, arg
 func (f *fakeCrossPRStore) FindSharedLinkedIssues(ctx context.Context, reviewID uuid.UUID) ([]db.FindSharedLinkedIssuesRow, error) {
 	f.m.Lock()
 	defer f.m.Unlock()
+	f.sharedIssueLookups++
 	out := make([]db.FindSharedLinkedIssuesRow, len(f.sharedRows))
 	copy(out, f.sharedRows)
 	return out, nil
@@ -925,6 +931,104 @@ func TestRunCrossPRAcceptanceStage_NoSharedIssuesSilentReturn(t *testing.T) {
 		if c.Section == "joint_acceptance" {
 			t.Fatalf("joint_acceptance sticky touched despite no shared issues: %+v", c)
 		}
+	}
+}
+
+// TestRunCrossPRStage_FeatureFlagOffSkips seeds the installation's stored
+// flags with cross_pr_checks OFF and asserts the stage stops at the gate
+// (crosspr_stage.go:781). Every other test in this file runs on the fake's
+// default flag set, which has CrossPRChecks ON — so removing the gate
+// entirely left the suite green while every installation that had turned
+// cross-PR checks off got them silently re-enabled and billed for the LLM.
+func TestRunCrossPRStage_FeatureFlagOffSkips(t *testing.T) {
+	t.Cleanup(resetCrossPRGlobals)
+	h := newHarness(t)
+	h.store.featureFlags[h.run.DBInstallationID] = FeatureFlags{
+		CrossPRChecks: false, IssueAcceptance: true, MaxLinkedPRs: 5,
+	}
+
+	h.o.runCrossPRStage(context.Background(), h.reviewID)
+
+	// The stage must have READ the flags — otherwise the assertions below
+	// would also pass for a stage that bailed out earlier for some
+	// unrelated reason, proving nothing about the gate.
+	if len(h.store.flagCalls) == 0 {
+		t.Fatalf("stage never called LoadFeatureFlags; the gate was not reached")
+	}
+	if h.llm.CallCount() != 0 {
+		t.Fatalf("LLM called with cross_pr_checks off: %d calls", h.llm.CallCount())
+	}
+	if len(h.gh.prDiffCalls) != 0 {
+		t.Fatalf("linked PRs hydrated with cross_pr_checks off: %v", h.gh.prDiffCalls)
+	}
+	if len(h.gh.stickyCalls) != 0 {
+		t.Fatalf("sticky written with cross_pr_checks off: %+v", h.gh.stickyCalls)
+	}
+	if len(h.store.hashWrites) != 0 {
+		t.Fatalf("cross-PR hash persisted with cross_pr_checks off: %+v", h.store.hashWrites)
+	}
+}
+
+// TestRunCrossPRStage_MaxLinkedPRsCapsHydration pins crosspr_stage.go:791 —
+// the fan-out width comes from the installation's stored max_linked_prs, not
+// from the hardcoded 5 that is only the fallback for an unset value. Three
+// links in the body, a stored cap of 1: exactly one hydration.
+func TestRunCrossPRStage_MaxLinkedPRsCapsHydration(t *testing.T) {
+	t.Cleanup(resetCrossPRGlobals)
+	h := newHarness(t)
+	h.store.featureFlags[h.run.DBInstallationID] = FeatureFlags{
+		CrossPRChecks: true, IssueAcceptance: true, MaxLinkedPRs: 1,
+	}
+	h.run.PREvent.PRBody = "depends on https://github.com/acme/api/pull/7, " +
+		"https://github.com/acme/api/pull/8 and https://github.com/acme/api/pull/9"
+	// Seed the two extra links so a stage that ignored the cap would hydrate
+	// them successfully rather than fail on a 404 for an unrelated reason.
+	for _, n := range []int{8, 9} {
+		key := ghKey("acme", "api", n)
+		h.gh.pullRequests[key] = &ghpkg.PREvent{
+			PRNumber: n, PRTitle: "Linked API PR", HeadSHA: "linkedhead", RepoFullName: "acme/api",
+		}
+		h.gh.prDiffs[key] = "--- linked-a\n+++ linked-b\n@@ -1 +1 @@\n-foo\n+bar\n"
+	}
+
+	h.o.runCrossPRStage(context.Background(), h.reviewID)
+
+	if len(h.gh.prDiffCalls) != 1 {
+		t.Fatalf("hydrated %d linked PRs (%v), want 1 — max_linked_prs=1 was ignored",
+			len(h.gh.prDiffCalls), h.gh.prDiffCalls)
+	}
+	if h.gh.prDiffCalls[0] != ghKey("acme", "api", 7) {
+		t.Fatalf("hydrated %q, want the first link acme/api#7", h.gh.prDiffCalls[0])
+	}
+}
+
+// TestRunCrossPRAcceptanceStage_FeatureFlagOffSkips is the sibling of
+// TestRunCrossPRStage_FeatureFlagOffSkips for the second live gate,
+// crosspr_stage.go:1682. Both gates read the same flag through the same
+// store method; a fix or a regression on one half is invisible on the other.
+func TestRunCrossPRAcceptanceStage_FeatureFlagOffSkips(t *testing.T) {
+	t.Cleanup(resetCrossPRGlobals)
+	h := newHarness(t)
+	h.store.featureFlags[h.run.DBInstallationID] = FeatureFlags{
+		CrossPRChecks: false, IssueAcceptance: true, MaxLinkedPRs: 5,
+	}
+	// A shared issue exists, so without the gate the stage would proceed to
+	// the shared-issue lookup and the judge.
+	h.store.sharedRows = []db.FindSharedLinkedIssuesRow{
+		{Owner: "acme", Repo: "api", Number: 99, ReviewIds: []uuid.UUID{h.reviewID, uuid.New()}},
+	}
+
+	h.o.runCrossPRAcceptanceStage(context.Background(), h.reviewID)
+
+	if len(h.store.flagCalls) == 0 {
+		t.Fatalf("acceptance stage never called LoadFeatureFlags; the gate was not reached")
+	}
+	if h.store.sharedIssueLookups != 0 {
+		t.Fatalf("shared issues looked up %d times with cross_pr_checks off, want 0",
+			h.store.sharedIssueLookups)
+	}
+	if h.llm.CallCount() != 0 {
+		t.Fatalf("joint-acceptance LLM called with cross_pr_checks off: %d calls", h.llm.CallCount())
 	}
 }
 
