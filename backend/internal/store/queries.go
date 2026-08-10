@@ -567,13 +567,19 @@ const markerReviewFilter = `github_review_id IS NULL AND status = 'failed' AND e
 // list view never renders. The detail endpoint (GET /reviews/{id}) still
 // returns the full Review struct via getReview. Scan shape stays identical
 // so pgx.RowToStructByPos[Review] keeps working without a new type.
+//
+// POSITIONAL mapping: this SELECT must list exactly as many columns as Review
+// has fields, in the same order. Adding budget_note to the struct without
+// adding it here 500'd every reviews list in production with "number of field
+// descriptions must equal number of destinations, got 30 and 31". A column
+// that a list view does not need is selected as NULL rather than omitted.
 func (s *Store) ListReviewsScoped(ctx context.Context, repoID int64, installationIDs []int64, limit, offset int) ([]Review, error) {
 	if limit <= 0 {
 		limit = 20
 	}
 	rows, err := s.Pool.Query(ctx, `
 		SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, COALESCE(rv.head_ref,''), rv.github_review_id,
-		       rv.status, rv.summary, rv.score, NULL::jsonb, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error,
+		       rv.status, rv.summary, rv.score, NULL::jsonb, rv.trigger, rv.triggered_by, rv.budget_note, rv.duration_ms, rv.error,
 		       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at,
 		       NULL::text, NULL::text,
 		       '[]'::jsonb, '[]'::jsonb,
@@ -597,7 +603,7 @@ func (s *Store) ListAllReviewsScoped(ctx context.Context, installationIDs []int6
 	}
 	rows, err := s.Pool.Query(ctx, `
 		SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, COALESCE(rv.head_ref,''), rv.github_review_id,
-		       rv.status, rv.summary, rv.score, NULL::jsonb, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error,
+		       rv.status, rv.summary, rv.score, NULL::jsonb, rv.trigger, rv.triggered_by, rv.budget_note, rv.duration_ms, rv.error,
 		       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at,
 		       NULL::text, NULL::text,
 		       '[]'::jsonb, '[]'::jsonb,
