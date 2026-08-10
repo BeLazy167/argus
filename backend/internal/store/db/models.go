@@ -181,6 +181,18 @@ type PatternStat struct {
 	UpdatedAt      time.Time  `json:"updated_at"`
 }
 
+type Persona struct {
+	ID             int       `json:"id"`
+	InstallationID *int64    `json:"installation_id"`
+	Slug           string    `json:"slug"`
+	Name           string    `json:"name"`
+	PromptOverlay  string    `json:"prompt_overlay"`
+	SpecialistHint string    `json:"specialist_hint"`
+	IsBuiltin      bool      `json:"is_builtin"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
 type PipelineState struct {
 	ID        uuid.UUID `json:"id"`
 	ReviewID  uuid.UUID `json:"review_id"`

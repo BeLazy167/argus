@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"reflect"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/BeLazy167/argus/backend/internal/admission"
 	"github.com/BeLazy167/argus/backend/internal/memory"
+	"github.com/BeLazy167/argus/backend/internal/store"
 )
 
 // Persona identifies a review style.
@@ -516,4 +518,50 @@ func BudgetLimits(settingsJSON json.RawMessage) admission.Limits {
 		lim.ReducedMaxFiles = *rs.BudgetReducedMaxFiles
 	}
 	return lim
+}
+
+// ResolvedPersona is the overlay pair a run actually uses.
+//
+// Populated once per run from the personas table, falling back to the
+// compiled-in overlays. The fallback is what makes this behaviour-preserving:
+// before any row exists, and for any installation that never defines one, the
+// review reads exactly the text it read when these lived in a switch.
+type ResolvedPersona struct {
+	Overlay        string
+	SpecialistHint string
+}
+
+// personaReader is the narrow store surface persona resolution needs.
+type personaReader interface {
+	GetPersona(ctx context.Context, installationID int64, slug string) (*store.Persona, error)
+}
+
+// resolvePersona loads the overlay pair for a run.
+//
+// A stored persona wins over the compiled-in one of the same slug, which is how
+// an installation retunes a built-in without losing its name. A miss or a read
+// error falls back rather than failing: a review must not stop because somebody
+// renamed a persona, and the compiled-in text is always a valid answer.
+//
+// PersonaCustom keeps its own path — its text lives in settings, not in a row —
+// until the single custom slot is migrated into a named row of its own.
+func resolvePersona(ctx context.Context, r personaReader, installationID int64, p Persona, customPrompt string) ResolvedPersona {
+	fallback := ResolvedPersona{
+		Overlay:        PersonaPromptOverlay(p),
+		SpecialistHint: PersonaSpecialistHint(p),
+	}
+	if p == PersonaCustom {
+		return ResolvedPersona{
+			Overlay:        PersonaPromptOverlayCustom(customPrompt),
+			SpecialistHint: PersonaSpecialistHintCustom(customPrompt),
+		}
+	}
+	if r == nil || installationID == 0 {
+		return fallback
+	}
+	row, err := r.GetPersona(ctx, installationID, string(p))
+	if err != nil || row == nil {
+		return fallback
+	}
+	return ResolvedPersona{Overlay: row.PromptOverlay, SpecialistHint: row.SpecialistHint}
 }

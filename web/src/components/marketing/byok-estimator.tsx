@@ -1,6 +1,31 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
+import { QueryProvider } from "@/providers/query-provider";
+import {
+  useOpenRouterCatalog,
+  useOpenRouterEndpoints,
+} from "@/lib/queries/openrouter-public";
+
+/**
+ * ByokEstimator carries its own QueryProvider.
+ *
+ * QueryProvider is mounted in the dashboard layout only, and this renders on
+ * the marketing home page, which Next prerenders — so the query hooks inside
+ * threw "No QueryClient set" during static export and failed the build.
+ *
+ * Scoped here rather than added to the marketing layout: a provider on every
+ * marketing page would ship a QueryClient to visitors of pages that never
+ * query anything, to serve one widget. A separate cache is the right shape
+ * too — nothing on these pages shares state with the dashboard.
+ */
+export function ByokEstimator() {
+  return (
+    <QueryProvider>
+      <ByokEstimatorInner />
+    </QueryProvider>
+  );
+}
 
 /**
  * Interactive BYOK cost estimator backed by live OpenRouter data. Search the
@@ -51,71 +76,43 @@ function reviewCost(prompt: number, completion: number): number {
   return INPUT_TOKENS * prompt + OUTPUT_TOKENS * completion;
 }
 
-export function ByokEstimator() {
-  const [models, setModels] = useState<Model[]>(FALLBACK_MODELS);
-  const [modelId, setModelId] = useState<string>(FALLBACK_MODELS[0]?.id ?? "");
+function ByokEstimatorInner() {
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
-  const [providers, setProviders] = useState<Provider[]>([]);
   const [providerIdx, setProviderIdx] = useState(0);
-  const [loadingProviders, setLoadingProviders] = useState(false);
-  const [isLive, setIsLive] = useState(false);
   const [reviews, setReviews] = useState(200);
+  // Null means "no explicit choice yet", so the default follows the catalogue
+  // once it loads. Storing the resolved id instead would need an effect to
+  // re-sync when the live list replaces the fallback.
+  const [picked, setPicked] = useState<string | null>(null);
 
-  useEffect(() => {
-    let alive = true;
-    fetch("/api/openrouter/models")
-      .then((r) => r.json())
-      .then((d: { models: Model[] }) => {
-        // Keep the static fallback if the live list is empty (outage), so the
-        // estimator never degrades to a blank/$0 state.
-        if (!alive || !d.models.length) return;
-        setModels(d.models);
-        setIsLive(true);
-        const pick =
-          DEFAULT_PREFS.map((p) =>
-            d.models.find((m) => m.id.startsWith(p)),
-          ).find(Boolean) ?? d.models[0];
-        if (pick) setModelId(pick.id);
-      })
-      .catch(() => {});
-    return () => {
-      alive = false;
-    };
-  }, []);
+  const catalog = useOpenRouterCatalog();
+  // Keep the static fallback when the live list is empty (outage), so the
+  // estimator never degrades to a blank or $0 state.
+  const isLive = (catalog.data?.length ?? 0) > 0;
+  const models: Model[] = isLive ? (catalog.data as Model[]) : FALLBACK_MODELS;
 
-  useEffect(() => {
-    if (!modelId) return;
-    let alive = true;
-    setLoadingProviders(true);
-    // Clear the previous model's providers so the readout falls back to the new
-    // model's own default price during the load, rather than showing the old
-    // provider's price under the new model's name.
-    setProviders([]);
-    setProviderIdx(0);
-    fetch(`/api/openrouter/endpoints?model=${encodeURIComponent(modelId)}`)
-      .then((r) => r.json())
-      .then((d: { providers: Provider[] }) => {
-        if (!alive) return;
-        // Sort by the same input-weighted cost the estimate displays, so index 0
-        // (badged "cheapest" + the default selection) is truly cheapest here —
-        // not merely the lowest unweighted prompt+completion sum.
-        const sorted = [...d.providers].sort(
-          (a, b) =>
-            reviewCost(a.prompt, a.completion) -
-            reviewCost(b.prompt, b.completion),
-        );
-        setProviders(sorted);
-        setProviderIdx(0);
-        setLoadingProviders(false);
-      })
-      .catch(() => {
-        if (alive) setLoadingProviders(false);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [modelId]);
+  const modelId =
+    picked ??
+    DEFAULT_PREFS.map((p) => models.find((m) => m.id.startsWith(p))).find(Boolean)?.id ??
+    models[0]?.id ??
+    "";
+
+  const endpoints = useOpenRouterEndpoints({ variables: { modelId }, enabled: modelId !== "" });
+  const loadingProviders = endpoints.isPending && modelId !== "";
+  // Sort by the same input-weighted cost the estimate displays, so index 0
+  // (badged "cheapest" and selected by default) is truly cheapest here — not
+  // merely the lowest unweighted prompt+completion sum.
+  //
+  // The query is keyed by model, so switching models yields undefined here
+  // rather than the previous model's providers: the readout falls back to the
+  // new model's own default price instead of showing a stale one under it.
+  const providers: Provider[] = useMemo(() => {
+    const raw = (endpoints.data ?? []) as Provider[];
+    return [...raw].sort(
+      (a, b) => reviewCost(a.prompt, a.completion) - reviewCost(b.prompt, b.completion),
+    );
+  }, [endpoints.data]);
 
   const selectedModel = models.find((m) => m.id === modelId);
   const provider = providers[providerIdx];
@@ -138,7 +135,8 @@ export function ByokEstimator() {
   const monthly = perReview * reviews;
 
   function choose(m: Model) {
-    setModelId(m.id);
+    setPicked(m.id);
+    setProviderIdx(0);
     setQuery("");
     setOpen(false);
   }

@@ -91,8 +91,9 @@ func TestFormatStageModels_GroupsSharedModels(t *testing.T) {
 		{Stage: "scoring", Provider: "openai", Model: "gpt-5-mini"},
 	})
 
-	// triage and scoring share a model, so they collapse into one entry.
-	want := "triage, scoring `openai / gpt-5-mini` · review `anthropic / opus`"
+	// triage and scoring share a model, so they collapse into one entry. The
+	// providers differ here, so each model keeps its own prefix.
+	want := "triage, scoring `openai/gpt-5-mini` · review `anthropic/opus`"
 	if got != want {
 		t.Errorf("formatStageModels =\n  %q\nwant\n  %q", got, want)
 	}
@@ -193,5 +194,27 @@ func TestResetTriggerCheckbox(t *testing.T) {
 	foreign := "- [x] Trigger Argus review"
 	if got := ResetTriggerCheckbox(foreign); got != foreign {
 		t.Errorf("non-Argus body must be untouched, got %q", got)
+	}
+}
+
+// One provider for every stage is the common case. Repeating it on each model
+// is what made this row wrap to three lines in a real PR comment, so it is
+// named once instead.
+func TestFormatStageModels_CollapsesASharedProvider(t *testing.T) {
+	got := formatStageModels([]store.ModelConfig{
+		{Stage: "triage", Provider: "vercel", Model: "openai/gpt-5.6-luna"},
+		{Stage: "review", Provider: "vercel", Model: "openai/gpt-5.6-sol"},
+		{Stage: "scoring", Provider: "vercel", Model: "openai/gpt-5.6-terra"},
+		{Stage: "synthesis", Provider: "vercel", Model: "openai/gpt-5.6-terra"},
+	})
+
+	if strings.Count(got, "vercel") != 1 {
+		t.Errorf("shared provider should appear exactly once, got %q", got)
+	}
+	if !strings.Contains(got, "scoring, synthesis `openai/gpt-5.6-terra`") {
+		t.Errorf("stages sharing a model should collapse: %q", got)
+	}
+	if !strings.Contains(got, "_(via vercel)_") {
+		t.Errorf("the shared provider should still be named: %q", got)
 	}
 }

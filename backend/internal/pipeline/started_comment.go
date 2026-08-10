@@ -150,12 +150,30 @@ var stageModelOrder = []string{"triage", "review", "scoring", "synthesis"}
 // "everything on one model" case stays short.
 func formatStageModels(configs []store.ModelConfig) string {
 	byStage := make(map[string]string, len(configs))
+	providers := make(map[string]bool, len(configs))
 	for _, c := range configs {
 		if c.Model == "" {
 			continue
 		}
-		byStage[c.Stage] = c.Provider + " / " + c.Model
+		byStage[c.Stage] = c.Model
+		providers[c.Provider] = true
 	}
+	if len(byStage) == 0 {
+		return ""
+	}
+
+	// One provider for everything is the common case, and repeating it on every
+	// stage was what made this row wrap to three lines in a PR comment. Name it
+	// once, or per-model only when they genuinely differ.
+	shared := len(providers) == 1
+	if !shared {
+		for _, c := range configs {
+			if c.Model != "" {
+				byStage[c.Stage] = c.Provider + "/" + c.Model
+			}
+		}
+	}
+
 	var order []string
 	members := make(map[string][]string)
 	for _, st := range stageModelOrder {
@@ -172,7 +190,15 @@ func formatStageModels(configs []store.ModelConfig) string {
 	for _, name := range order {
 		parts = append(parts, fmt.Sprintf("%s `%s`", strings.Join(members[name], ", "), name))
 	}
-	return strings.Join(parts, " · ")
+	line := strings.Join(parts, " · ")
+	if shared {
+		for p := range providers {
+			if p != "" {
+				line += " _(via " + p + ")_"
+			}
+		}
+	}
+	return line
 }
 
 // formatCostEstimate renders the expected spend for a run that is starting,

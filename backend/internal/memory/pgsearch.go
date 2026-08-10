@@ -222,8 +222,20 @@ func (idx *PGIndexer) runSearchVec(ctx context.Context, req SearchRequest, qv *p
 		// partial indexes), and pgcontext_hnsw was declined deliberately --
 		// experimental, with an on-page format not backward compatible across
 		// upgrades. Without an attached index pgContext searches EXACTLY, which
-		// is what makes a 0.95 suppression floor trustworthy. Measured ~225ms
-		// over 3,896 rows. Revisit when the corpus outgrows a sequential scan.
+		// is what makes a 0.95 suppression floor trustworthy.
+		//
+		// Exact does not mean a corpus scan. searchPredicates puts
+		// installation_id and container_tag first, and the planner serves them
+		// from memories_scope_idx before any distance is computed, so the
+		// distance sort only ever sees ONE container: Index Scan using
+		// memories_scope_idx -> top-N heapsort. Measured on prod (3,908 rows,
+		// 20 containers): 1.4ms over a 122-row container, 6.6-11.8ms over the
+		// largest at 1,005 rows. The bound is container size, not corpus size,
+		// so total corpus growth does not move this number and is the wrong
+		// trigger for revisiting. Revisit if a SINGLE container grows large
+		// enough to matter -- and price the recall cost first, because every
+		// absolute floor above (0.80 attribution, 0.85 suppression) assumes
+		// exact distances.
 		args = append(args, qv, idx.embedder.Model(), req.Query, pool, req.Threshold, limit)
 		n := len(args)
 		q := fmt.Sprintf(`

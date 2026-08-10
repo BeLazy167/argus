@@ -159,19 +159,13 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 				if u.specialist != "" {
 					p.systemBase = specialistPrompt(u.specialist, run.Prompts)
 					p.memoryBriefing = specialistBriefing(ctx, indexer, owner, repo, u.specialist, u.file.NewName, run.Thresholds)
-					if run.Persona == PersonaCustom {
-						p.promptExtra = PersonaSpecialistHintCustom(run.CustomPersonaPrompt)
-					} else {
-						p.promptExtra = PersonaSpecialistHint(run.Persona)
-					}
+					// Resolved once in buildRun: a stored persona wins over the
+					// compiled-in one, and a miss falls back to it.
+					p.promptExtra = run.ResolvedPersona.SpecialistHint
 				} else {
 					p.systemBase = customOrDefault(run.Prompts, "review_system", baseSystemPrompt)
 					p.memoryBriefing = reviewBriefing(ctx, indexer, owner, repo, u.file.NewName, run.Thresholds)
-					if run.Persona == PersonaCustom {
-						p.promptExtra = PersonaPromptOverlayCustom(run.CustomPersonaPrompt)
-					} else {
-						p.promptExtra = PersonaPromptOverlay(run.Persona)
-					}
+					p.promptExtra = run.ResolvedPersona.Overlay
 				}
 				if run.EventBus != nil {
 					run.EventBus.Publish(run.ReviewID, EventFileReviewStarted, map[string]any{

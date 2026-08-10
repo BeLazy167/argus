@@ -186,6 +186,12 @@ type PipelineRun struct {
 	// keeps the repo's configured caps instead of silently falling back to the
 	// defaults.
 	BudgetLimits admission.Limits `json:"budget_limits,omitempty"`
+
+	// ResolvedPersona is the overlay pair this run uses, looked up once from
+	// the personas table with the compiled-in text as fallback. Persisted so a
+	// recovered run keeps the persona it started with, rather than silently
+	// picking up an edit made mid-review.
+	ResolvedPersona ResolvedPersona `json:"resolved_persona,omitempty"`
 	// BudgetMaxFiles caps how many files a reduced review looks at. Zero means
 	// no cap. Set only when the Budget returned reduce.
 	//

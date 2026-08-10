@@ -191,16 +191,18 @@ func (o *Orchestrator) buildRun(ctx context.Context, in buildRunInput) *Pipeline
 	}
 
 	run := &PipelineRun{
-		ID:                  uuid.New(),
-		ReviewID:            in.reviewID,
-		State:               StatePending,
-		PREvent:             in.event,
-		DBInstallationID:    in.dbInstallationID,
-		DBRepoID:            in.dbRepoID,
-		TraceID:             in.traceID,
-		Diff:                in.patchSet,
-		RawDiff:             in.rawDiff,
-		BudgetLimits:        BudgetLimits(mergedSettings),
+		ID:               uuid.New(),
+		ReviewID:         in.reviewID,
+		State:            StatePending,
+		PREvent:          in.event,
+		DBInstallationID: in.dbInstallationID,
+		DBRepoID:         in.dbRepoID,
+		TraceID:          in.traceID,
+		Diff:             in.patchSet,
+		RawDiff:          in.rawDiff,
+		BudgetLimits:     BudgetLimits(mergedSettings),
+		ResolvedPersona: resolvePersona(ctx, o.st, in.dbInstallationID,
+			loadPersona(mergedSettings), loadCustomPersonaPrompt(mergedSettings)),
 		Persona:             loadPersona(mergedSettings),
 		CustomPersonaPrompt: loadCustomPersonaPrompt(mergedSettings),
 		DeepReview:          isDeepReviewEnabled(mergedSettings),
@@ -1273,7 +1275,7 @@ func (o *Orchestrator) postStartedComment(ctx context.Context, event ghpkg.PREve
 	if statsErr != nil {
 		o.logger.Warn("repo review stats for started comment", "error", statsErr, "repo_id", run.DBRepoID)
 	} else if est := formatCostEstimate(stats); est != "" {
-		rows = append(rows, fmt.Sprintf("| **Est. cost** | %s |", est))
+		rows = append(rows, fmt.Sprintf("| **Cost** | %s |", est))
 	}
 
 	body := BuildStartedComment(o.cfg.DashboardBaseURL, run.ReviewID.String(), rows)
