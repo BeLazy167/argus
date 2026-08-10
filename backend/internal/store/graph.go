@@ -377,7 +377,12 @@ func (s *Store) GetFileMemory(ctx context.Context, repoID int64, filePath string
 		return nil, fmt.Errorf("file memory patterns scan: %w", err)
 	}
 
-	// Recent comments on this file
+	// Recent comments on this file. Suppressed findings stay in the payload —
+	// the sidebar shows them as an audit record — but sort AFTER posted ones:
+	// a burst of suppressions on one file would otherwise fill the whole LIMIT
+	// window and hide every finding Argus actually posted on that file.
+	// state is NOT NULL DEFAULT 'posted' (migration 051), so the boolean key is
+	// never NULL and false (posted) always sorts first.
 	cRows, err := s.Pool.Query(ctx, `
 		SELECT rc.id, rc.review_id, rc.file_path, rc.start_line, rc.end_line, rc.side,
 		       rc.body, rc.severity, rc.category, rc.specialist, rc.confidence_score,
@@ -387,7 +392,7 @@ func (s *Store) GetFileMemory(ctx context.Context, repoID int64, filePath string
 		FROM review_comments rc
 		JOIN reviews r ON r.id = rc.review_id
 		WHERE rc.file_path = $1 AND r.repo_id = $2
-		ORDER BY rc.created_at DESC LIMIT 5
+		ORDER BY (rc.state = 'suppressed'), rc.created_at DESC LIMIT 5
 	`, filePath, repoID)
 	if err != nil {
 		return nil, fmt.Errorf("file memory comments: %w", err)
