@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgvector/pgvector-go"
@@ -40,6 +41,10 @@ type PGIndexer struct {
 	installationID int64
 	dims           int // storage dimensionality (memories.embedding)
 	logger         *slog.Logger
+	// reviewID attributes every write this indexer makes to one review run
+	// (migration 070). nil = unattributed, which is correct for rules,
+	// reaction/reply feedback, and backfills — none of those belong to a run.
+	reviewID *uuid.UUID
 }
 
 // NewPGIndexer builds the Postgres-backed Indexer for one installation.
@@ -51,6 +56,25 @@ func NewPGIndexer(pool *pgxpool.Pool, embedder Embedder, installationID int64, d
 }
 
 var _ Indexer = (*PGIndexer)(nil)
+
+// ForReview returns a copy of this indexer that stamps memories.review_id on
+// every row it writes, so a completed review can answer "what did I learn".
+//
+// A copy, not a mutation: Registry.GetIndexer hands out a fresh PGIndexer per
+// call, but the pool and embedder inside it are shared, and mutating the
+// receiver would make attribution depend on which goroutine wrote last.
+func (idx *PGIndexer) ForReview(reviewID uuid.UUID) Indexer {
+	// The zero UUID is not an id — buildRun's callers pass one for a run with
+	// no persisted review row (tests, dry runs). Stamping it would create a
+	// bucket of rows attributed to a review that does not exist, and the FK
+	// would reject the write outright, taking the real memory content with it.
+	if reviewID == uuid.Nil {
+		return idx
+	}
+	cp := *idx
+	cp.reviewID = &reviewID
+	return &cp
+}
 
 // vectorTypeOnce guards a single probe of memories.embedding's actual type.
 // Both are supported deliberately: pgContext cannot be installed on ANY managed
@@ -369,15 +393,20 @@ func (idx *PGIndexer) upsertDocs(ctx context.Context, docs []Doc) error {
 	// with no implicit coercion, so an unqualified bind fails at write time
 	// there. On an unconverted database the cast would fail instead, which is
 	// why the placeholder is probed rather than hard-coded.
+	//
+	// review_id follows the rewrite like content/metadata (migration 070):
+	// whoever wrote the row's current text owns the attribution, and a writer
+	// with no review (a rule, a reaction, a backfill) clears it rather than
+	// leaving a stale review credited with text it never produced.
 	q := fmt.Sprintf(`
-		INSERT INTO memories (installation_id, container_tag, custom_id, type, content, metadata, embedding, embedding_model)
-		VALUES ($1, $2, $3, $4, $5, $6, %s, $8)
+		INSERT INTO memories (installation_id, container_tag, custom_id, type, content, metadata, embedding, embedding_model, review_id)
+		VALUES ($1, $2, $3, $4, $5, $6, %s, $8, $9)
 		ON CONFLICT (installation_id, custom_id) DO UPDATE
 		SET type = EXCLUDED.type, content = EXCLUDED.content,
 		    metadata = EXCLUDED.metadata,
 		    embedding = EXCLUDED.embedding, embedding_model = EXCLUDED.embedding_model,
 		    container_tag = EXCLUDED.container_tag, updated_at = now(),
-		    deleted_at = NULL`,
+		    deleted_at = NULL, review_id = EXCLUDED.review_id`,
 		vectorParam("$7", usesPGContextVector(ctx, idx.pool, idx.logger)))
 	for i, d := range kept {
 		metaJSON, err := json.Marshal(d.Metadata)
@@ -397,7 +426,7 @@ func (idx *PGIndexer) upsertDocs(ctx context.Context, docs []Doc) error {
 		content := strings.ReplaceAll(d.Content, "\x00", "")
 		batch.Queue(q,
 			idx.installationID, d.ContainerTag, d.CustomID, d.Type,
-			content, metaJSON, embedding, embeddingModel)
+			content, metaJSON, embedding, embeddingModel, idx.reviewID)
 	}
 	br := idx.pool.SendBatch(ctx, batch)
 	var execErr error

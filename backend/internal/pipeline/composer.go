@@ -7,6 +7,7 @@ import (
 	"time"
 
 	ghpkg "github.com/BeLazy167/argus/backend/internal/github"
+	"github.com/BeLazy167/argus/backend/internal/store"
 	"github.com/BeLazy167/argus/backend/internal/util"
 )
 
@@ -308,6 +309,45 @@ func Compose(run *PipelineRun, took time.Duration, dashboardBaseURL, appSlug str
 			DedupRemoved:     dedupRemoved,
 		},
 	}
+}
+
+// maxLearnedBuckets caps how many type buckets the footnote names. The sticky
+// comment is already dense — a previous fix existed purely to stop one of its
+// rows wrapping to three lines — so an unusual run that touched every memory
+// type must not be able to grow this into a paragraph.
+const maxLearnedBuckets = 4
+
+// RenderLearnedLine renders the one-line "what Argus learned" footnote for the
+// posted review, or "" when the review wrote no memory.
+//
+// It exists because memory writes were completely invisible: indexing failures
+// are non-fatal and log at Warn, so an org whose memory had silently stopped
+// working saw exactly the same review comment as one whose memory was healthy.
+// One line, appended after the footer, is the whole budget — the detail belongs
+// on the dashboard, which links from the same footer.
+//
+// counts must be the tally read back from the memories table AFTER the writes,
+// not the intent to write: reporting what was attempted would reintroduce the
+// silence this line exists to break.
+func RenderLearnedLine(counts []store.LearnedMemoryCount) string {
+	parts := make([]string, 0, maxLearnedBuckets)
+	for _, c := range counts {
+		if c.Count <= 0 {
+			continue
+		}
+		if len(parts) == maxLearnedBuckets {
+			parts = append(parts, "…")
+			break
+		}
+		// store.LearnedMemoryLabel is the single noun table, shared with the
+		// dashboard panel through the `label` field on the wire, so the comment
+		// and the page cannot describe the same review differently.
+		parts = append(parts, fmt.Sprintf("%d %s", c.Count, store.LearnedMemoryLabel(c.Type, c.Count)))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "<br>\n<sub>🧠 Learned: " + strings.Join(parts, " · ") + "</sub>"
 }
 
 type rankedComment struct {

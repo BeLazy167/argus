@@ -102,7 +102,7 @@ func hydrateResumeContext(ctx context.Context, run *PipelineRun, dep resumeConte
 	// writing nothing back. GetIndexer does not retain the context — it builds
 	// a PGIndexer over the pool — so the bounded context above does not follow
 	// the indexer into the stages that use it.
-	run.Indexer = dep.ResolveIndexer(hydrateCtx, run.DBInstallationID)
+	run.Indexer = indexerForReview(dep.ResolveIndexer(hydrateCtx, run.DBInstallationID), run.ReviewID)
 
 	// The contract is RECOMPUTED, not re-enriched: ComputeContract is a pure
 	// function of the persisted PR event + diff, so it costs nothing and cannot

@@ -27,6 +27,8 @@ export type {
   AutoResolveSummary,
   GaugeRow,
   Installation,
+  LearnedMemory,
+  LearnedMemoryCount,
   ModelConfig,
   Pattern,
   PatternStat,

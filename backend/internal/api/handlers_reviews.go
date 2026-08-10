@@ -63,7 +63,13 @@ func (s *Server) getReview(w http.ResponseWriter, r *http.Request) {
 		s.handleDBError(w, err, "review not found")
 		return
 	}
-	if _, err := s.store.GetRepoScoped(r.Context(), review.RepoID, getInstallationIDs(r.Context())); err != nil {
+	// GetRepoScoped is the authorization check for this whole handler: it fails
+	// unless the caller's JWT carries the installation that owns the repo. Its
+	// result is also the tenant for the memory reads below — read off the repo,
+	// never off the request, so the memory scope cannot drift from the scope
+	// that granted access.
+	repo, err := s.store.GetRepoScoped(r.Context(), review.RepoID, getInstallationIDs(r.Context()))
+	if err != nil {
 		s.handleDBError(w, err, "review not found")
 		return
 	}
@@ -86,11 +92,25 @@ func (s *Server) getReview(w http.ResponseWriter, r *http.Request) {
 		s.logger.Warn("fetching PR auto-resolve events", "error", err, "review_id", id)
 	}
 
+	// What the review learned. Auxiliary like the two sidecars above: a failure
+	// here degrades to an empty "learned nothing" panel rather than breaking the
+	// review view. Both reads are scoped by the repo's installation.
+	memories, err := s.store.ListReviewMemories(r.Context(), repo.InstallationID, id, 0)
+	if err != nil {
+		s.logger.Warn("fetching review memories", "error", err, "review_id", id)
+	}
+	memoryCounts, err := s.store.CountReviewMemoriesByType(r.Context(), repo.InstallationID, id)
+	if err != nil {
+		s.logger.Warn("counting review memories", "error", err, "review_id", id)
+	}
+
 	writeJSON(w, http.StatusOK, ReviewDetailResponse{
 		Review:            review,
 		Comments:          comments,
 		History:           history,
 		AutoResolveEvents: autoResolves,
+		Memories:          memories,
+		MemoryCounts:      memoryCounts,
 	})
 }
 

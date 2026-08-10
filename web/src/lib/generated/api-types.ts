@@ -194,6 +194,59 @@ export interface AutoResolveSummary {
   attempted_count: number /* int */;
   created_at: string;
 }
+/**
+ * LearnedMemory is one memory row a review wrote, shaped for display. The
+ * excerpt is truncated in SQL, not here: memory content is derived from private
+ * source code and can run to thousands of characters, and an unbounded excerpt
+ * would both bloat the response and put more of the codebase on the wire than
+ * the surface needs.
+ */
+export interface LearnedMemory {
+  /**
+   * Type is the memory.MemoryType the row was stored under (pattern,
+   * pr_summary, synthesis, scenario, topology, feedback, rule, …).
+   */
+  type: string;
+  /**
+   * Label is the human display noun for Type, from the one table in
+   * LearnedMemoryLabel. It rides on the wire so the dashboard renders the
+   * same noun the posted PR comment uses instead of keeping a second table
+   * in TypeScript that has to agree with this one.
+   */
+  label: string;
+  /**
+   * ContainerTag is the repo tag the memory was filed under, or `_shared`
+   * for installation-wide knowledge — the distinction the user cares about
+   * ("did this teach only this repo, or the whole org?").
+   */
+  container_tag: string;
+  /**
+   * Excerpt is the leading LearnedMemoryExcerptChars of the content.
+   */
+  excerpt: string;
+  /**
+   * WrittenAt is memories.updated_at, not created_at. Writes are upserts, so
+   * a review that re-learns an existing pattern rewrites a row first created
+   * weeks ago; created_at would date the panel's entries to the original
+   * review and read as "this review learned nothing new today".
+   */
+  written_at: string;
+}
+/**
+ * LearnedMemoryCount is one (type, count) bucket of what a review wrote. Kept
+ * separate from the excerpt list because the list is capped: the counts stay
+ * truthful for a review that wrote more rows than the list returns.
+ */
+export interface LearnedMemoryCount {
+  type: string;
+  count: number /* int */;
+  /**
+   * Label is the display noun for Count rows of Type, already singular or
+   * plural, from the one table in LearnedMemoryLabel. The dashboard renders
+   * it verbatim so its chips read exactly like the posted PR comment.
+   */
+  label: string;
+}
 export interface Rule {
   id: number /* int64 */;
   installation_id?: number /* int64 */;

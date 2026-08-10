@@ -1,5 +1,12 @@
 import { useQueryClient } from "@tanstack/react-query";
-import type { AutoResolveSummary, PRReviewSummary, Review, ReviewComment } from "../types";
+import type {
+  AutoResolveSummary,
+  LearnedMemory,
+  LearnedMemoryCount,
+  PRReviewSummary,
+  Review,
+  ReviewComment,
+} from "../types";
 import { createAuthQuery, createAuthMutation, getApi } from "@/lib/query-kit";
 
 /** Wire shape of GET /api/v1/reviews/{id} (see api.ReviewDetailResponse). */
@@ -10,6 +17,10 @@ export type ReviewDetail = {
   history: PRReviewSummary[];
   /** Auto-resolve pushes for the PR; [] when none fired. */
   auto_resolve_events: AutoResolveSummary[];
+  /** Memory rows this review wrote — a capped, excerpted preview. */
+  memories: LearnedMemory[];
+  /** Uncapped per-type tally, so the header is right even when `memories` is capped. */
+  memory_counts: LearnedMemoryCount[];
 };
 
 type ReviewsVars = { repoId: number; limit?: number; offset?: number };

@@ -218,7 +218,7 @@ func (o *Orchestrator) buildRun(ctx context.Context, in buildRunInput) *Pipeline
 		Prompts:             o.loadPrompts(ctx, in.dbRepoID),
 		IsIncremental:       in.isIncremental,
 		PreviousReviewID:    in.previousReviewID,
-		Indexer:             in.indexer,
+		Indexer:             indexerForReview(in.indexer, in.reviewID),
 		Thresholds:          parseThresholds(mergedSettings),
 		EventBus:            o.eventBus,
 		CreatedAt:           time.Now(),
@@ -235,6 +235,20 @@ func (o *Orchestrator) resolveIndexer(ctx context.Context, dbInstallationID int6
 		return nil
 	}
 	return o.memRegistry.GetIndexer(ctx, dbInstallationID)
+}
+
+// indexerForReview attributes a run's memory writes to its review, tolerating
+// the nil indexer that means "memory is unconfigured for this org".
+//
+// Every path that puts an Indexer on a PipelineRun must go through this — the
+// fresh run (buildRun), the terminal-run retry, and resume hydration. A path
+// that skips it writes memories that no review claims, and the review page for
+// that run reports "nothing learned" while the rows sit in the table.
+func indexerForReview(idx memory.Indexer, reviewID uuid.UUID) memory.Indexer {
+	if idx == nil {
+		return nil
+	}
+	return idx.ForReview(reviewID)
 }
 
 // buildPriorComments maps persisted review comments into the per-file
@@ -1014,7 +1028,7 @@ func (o *Orchestrator) RetryReview(ctx context.Context, reviewID uuid.UUID) erro
 	// retry silently runs memory-less), and buildRetryRun's WithDefaults
 	// fallback carries fixed-policy floors, not the org's settings-tuned ones —
 	// re-resolve from merged settings, keeping the fallback on error.
-	fresh.Indexer = o.resolveIndexer(ctx, fresh.DBInstallationID)
+	fresh.Indexer = indexerForReview(o.resolveIndexer(ctx, fresh.DBInstallationID), fresh.ReviewID)
 	if mergedSettings, msErr := o.st.GetMergedSettings(ctx, fresh.DBInstallationID, fresh.DBRepoID); msErr == nil {
 		fresh.Thresholds = parseThresholds(mergedSettings)
 		// CURRENT limits, not the ones the original run carried. buildRetryRun
@@ -2856,6 +2870,15 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		{name: "indexPRSummary", run: o.indexPRSummary},
 		{name: "indexArchitectureSummary", run: o.indexArchitectureSummary},
 	})
+
+	// "Learned: …" footnote. Appended here rather than inside Compose because
+	// the memory sinks only just finished: Compose runs before them (it must,
+	// so the posted token breakdown reports the review's own spend), and a
+	// count taken there would always read zero. The tally is read BACK from the
+	// memories table, so the line reports rows that actually landed rather than
+	// writes that were attempted — which is the whole point, since a failed
+	// index only logs at Warn.
+	appendLearnedLine(prePostCtx, o.st, run, &submission, o.logger)
 
 	// Final cancel guard, immediately before the GitHub post: the pre-post
 	// enrichment block above runs for seconds, and a cross-machine Stop landing
@@ -4703,6 +4726,35 @@ func (o *Orchestrator) resolveReviewProvider(ctx context.Context, run *PipelineR
 		return llm.ModelConfig{}, nil, err
 	}
 	return cfg, provider, nil
+}
+
+// learnedMemoryCounter reads back what a review actually wrote into memory.
+// Narrowed to the one method so the append below is testable without a
+// database — the store satisfies it.
+type learnedMemoryCounter interface {
+	CountReviewMemoriesByType(ctx context.Context, installationID int64, reviewID uuid.UUID) ([]store.LearnedMemoryCount, error)
+}
+
+// appendLearnedLine adds the one-line memory footnote to the summary body the
+// review is about to post.
+//
+// Best-effort by construction: the review itself is not at risk, so a failed or
+// slow count must never delay or fail the post — it just omits the line. The
+// 5s bound matches every other memory-path read for the same reason.
+func appendLearnedLine(ctx context.Context, counter learnedMemoryCounter, run *PipelineRun, submission *ComposedReview, logger *slog.Logger) {
+	if run.Indexer == nil {
+		return // memory unconfigured for this org: nothing to report
+	}
+	countCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	counts, err := counter.CountReviewMemoriesByType(countCtx, run.DBInstallationID, run.ReviewID)
+	if err != nil {
+		logger.Warn("counting learned memories for the review comment", "error", err, "review_id", run.ReviewID)
+		return
+	}
+	if line := RenderLearnedLine(counts); line != "" {
+		submission.GitHub.Summary += line
+	}
 }
 
 // publishMemoryIndexed emits an EventMemoryIndexed for the given memory

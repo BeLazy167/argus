@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/BeLazy167/argus/backend/internal/memory"
+	"github.com/google/uuid"
 )
 
 // Fake is a concurrency-safe, no-op-by-default memory.Indexer. With no stubs
@@ -24,6 +25,11 @@ type Fake struct {
 	// and switch behavior on the query (q.Type / q.Scope) per call site.
 	SearchFn   func(q memory.MemoryQuery) ([]memory.PatternMatch, error)
 	BriefingFn func(q memory.BriefingQuery) (string, error)
+
+	// ReviewID records the attribution ForReview was called with, so a test can
+	// assert the pipeline stamped its writes with the run's review. uuid.Nil
+	// means ForReview was never called (or was called with Nil).
+	ReviewID uuid.UUID
 
 	mu          sync.Mutex
 	Feedback    []memory.FeedbackMemory // IndexFeedbackSignal
@@ -85,6 +91,17 @@ func (f *Fake) IndexScenario(_ context.Context, owner, repo string, scenarioID i
 	defer f.mu.Unlock()
 	f.Scenarios = append(f.Scenarios, FakeScenario{Owner: owner, Repo: repo, ScenarioID: scenarioID, Description: description, Severity: severity, Files: files})
 	return nil
+}
+
+// ForReview records the attribution and returns the SAME Fake, unlike
+// PGIndexer which returns a copy. A copy would split the recorded writes across
+// two objects and every existing assertion against the original would silently
+// see an empty slice.
+func (f *Fake) ForReview(reviewID uuid.UUID) memory.Indexer {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ReviewID = reviewID
+	return f
 }
 
 func (f *Fake) Search(_ context.Context, q memory.MemoryQuery) ([]memory.PatternMatch, error) {

@@ -34,6 +34,15 @@ type ReviewDetailResponse struct {
 	Comments          []store.ReviewComment      `json:"comments"`
 	History           []store.PRReviewSummary    `json:"history"`
 	AutoResolveEvents []store.AutoResolveSummary `json:"auto_resolve_events"`
+	// Memories is what the review wrote into institutional memory — a capped,
+	// excerpted preview. Memory content is derived from private source code, so
+	// it rides ONLY on this authenticated, installation-scoped response.
+	// ReviewExportResponse below is reachable through a signed public URL and
+	// deliberately carries no memory field; keep it that way.
+	Memories []store.LearnedMemory `json:"memories"`
+	// MemoryCounts is the uncapped per-type tally, so the page reports the true
+	// total even when Memories is truncated.
+	MemoryCounts []store.LearnedMemoryCount `json:"memory_counts"`
 }
 
 // ReviewExportResponse is the JSON body of the review export download.

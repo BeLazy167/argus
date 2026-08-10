@@ -39,6 +39,7 @@ import { formatDistanceToNow } from "@/lib/time";
 import { useReviewStream } from "@/lib/hooks/use-review-stream";
 import { PipelineProgress } from "./progress-bar";
 import { ActivityTimeline } from "./activity-timeline";
+import { LearnedMemories } from "./_components/learned-memory";
 import { MermaidChart } from "./mermaid-chart";
 import type { AutoResolveSummary, FindingState, PRReviewSummary, Repo, ReviewComment, ReviewContract, StageTokens, TokenUsage } from "@/lib/types";
 import { STAGE_ORDER, stageLabel } from "@/lib/stage-labels";
@@ -1602,6 +1603,17 @@ export default function ReviewDetailPage() {
           );
         })()}
       </div>
+
+      {/* What Argus learned — the memory rows this review wrote. Hidden while
+          live: the memory sinks run at the very end of the pipeline, so an empty
+          panel mid-review would report a failure that has not happened. */}
+      {!isLive && (
+        <LearnedMemories
+          memories={data?.memories ?? []}
+          counts={data?.memory_counts ?? []}
+          status={review.status}
+        />
+      )}
 
       {/* Incremental history — per-push passes + auto-resolves (re-reviewed PRs) */}
       {!isLive && (

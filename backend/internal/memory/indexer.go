@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/BeLazy167/argus/backend/internal/util"
+	"github.com/google/uuid"
 )
 
 // ScenarioSearchResult holds a semantic search result with the parsed Postgres scenario ID.
@@ -50,6 +51,15 @@ type Indexer interface {
 	IndexSharedPattern(ctx context.Context, pattern PatternMemory) (*IndexResult, error)
 	IndexFeedbackSignal(ctx context.Context, owner, repo string, feedback FeedbackMemory) error
 	IndexScenario(ctx context.Context, owner, repo string, scenarioID int64, description, severity string, files []string) error
+
+	// ForReview returns an Indexer that attributes everything it writes to one
+	// review run (memories.review_id, migration 070). It is what lets a
+	// finished review say what it learned; without it a memory row is
+	// identifiable only down to the pull request, which every re-review of
+	// that PR overwrites. Returns the receiver unchanged for the nil UUID.
+	// Attribution is a property of the WRITER, not of each document, because
+	// one run's writes all belong to the same review.
+	ForReview(reviewID uuid.UUID) Indexer
 
 	// Readers. The reader seam is two deep, error-honest methods: Search (typed
 	// retrieval) + Briefing (assembled review-prompt block). Every value-level

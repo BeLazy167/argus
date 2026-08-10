@@ -115,6 +115,7 @@ type Memory struct {
 	DeletedAt      *time.Time       `json:"deleted_at"`
 	InvalidatedAt  *time.Time       `json:"invalidated_at"`
 	SupersededBy   *int64           `json:"superseded_by"`
+	ReviewID       *uuid.UUID       `json:"review_id"`
 }
 
 type MemoryExportArchive struct {
