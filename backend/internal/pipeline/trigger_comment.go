@@ -161,3 +161,14 @@ func humanizeTokens(n int64) string {
 		return fmt.Sprintf("%d", n)
 	}
 }
+
+// ResetTriggerCheckbox returns the body with a ticked box put back to
+// unticked, for a click that was refused. Returns the body unchanged when it
+// is not an Argus trigger comment or the box is not ticked, so a caller can
+// compare and skip a pointless API call.
+func ResetTriggerCheckbox(body string) string {
+	if !IsArgusTriggerBody(body) {
+		return body
+	}
+	return strings.Replace(body, TriggerCheckboxChecked, TriggerCheckboxUnchecked, 1)
+}

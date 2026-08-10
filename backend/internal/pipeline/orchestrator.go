@@ -329,6 +329,8 @@ type LLMRegistry interface {
 
 func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, reviewStage *ReviewStage, triageStage *TriageStage, intentStage *IntentExtractionStage, scoringStage *ScoringStage, memRegistry *memory.Registry, registry LLMRegistry, eventBus *EventBus, logger *slog.Logger, cfg *config.Config) *Orchestrator {
 	sm := NewStateMachine(db, st, logger)
+	// Wired after construction because the callback closes over the
+	// orchestrator, which is not built yet at this point.
 	sm.eventBus = eventBus
 
 	o := &Orchestrator{
@@ -346,6 +348,7 @@ func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, 
 		logger:       logger,
 		cfg:          cfg,
 	}
+	sm.onTerminal = o.FinalizeStartedComment
 	o.lifecycle = NewReviewLifecycle(db, st, sm, eventBus, logger)
 	o.incremental = NewIncrementalResolver(st, ghClient, logger)
 	o.findingLifecycle = NewFindingLifecycle(st, ghClient, logger)
@@ -729,15 +732,11 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		"incremental", isIncremental,
 	)
 
-	// Post "review started" comment to GitHub
-	var reviewModel string
-	for _, c := range dbConfigs {
-		if c.Stage == string(llm.StageReview) {
-			reviewModel = c.Provider + " / " + c.Model
-			break
-		}
-	}
-	o.postStartedComment(ctx, event, run, reviewModel)
+	// Post "review started" comment to GitHub. Every configured stage is listed,
+	// not just review: the pipeline bills triage, scoring and synthesis to
+	// their own models, and showing one name invited the reading that a single
+	// model did all the work — and that its price was the whole price.
+	o.postStartedComment(ctx, event, run, formatStageModels(dbConfigs))
 
 	trigger := deriveTrigger(event.Action, isIncremental)
 	o.logger.InfoContext(ctx, "review started",
@@ -1197,7 +1196,7 @@ func (o *Orchestrator) CancelStranded(ctx context.Context, reviewID uuid.UUID) e
 	return o.lifecycle.CancelStranded(ctx, reviewID)
 }
 
-func (o *Orchestrator) postStartedComment(ctx context.Context, event ghpkg.PREvent, run *PipelineRun, reviewModel string) {
+func (o *Orchestrator) postStartedComment(ctx context.Context, event ghpkg.PREvent, run *PipelineRun, stageModels string) {
 	owner, repo, err := splitRepoFullName(event.RepoFullName)
 	if err != nil {
 		o.logger.Warn("failed to split repo name for started comment", "error", err)
@@ -1205,8 +1204,8 @@ func (o *Orchestrator) postStartedComment(ctx context.Context, event ghpkg.PREve
 	}
 
 	var rows []string
-	if reviewModel != "" {
-		rows = append(rows, fmt.Sprintf("| **Model** | `%s` |", reviewModel))
+	if stageModels != "" {
+		rows = append(rows, fmt.Sprintf("| **Models** | %s |", stageModels))
 	}
 	if run.Persona != "" && run.Persona != PersonaDefault {
 		rows = append(rows, fmt.Sprintf("| **Persona** | %s |", strings.ReplaceAll(string(run.Persona), "|", "\\|")))
@@ -1218,16 +1217,33 @@ func (o *Orchestrator) postStartedComment(ctx context.Context, event ghpkg.PREve
 	}
 	rows = append(rows, fmt.Sprintf("| **Scope** | %d files, ~%d lines |",
 		len(run.Diff.Files), run.Diff.TotalLinesChanged()))
+	// Historical spend for THIS repo. No GitHub round-trip is needed — the
+	// scope above already comes from the fetched diff — so this costs one
+	// bounded aggregate query. A failure is not worth failing the comment
+	// over: the row is simply omitted.
+	statsCtx, cancelStats := context.WithTimeout(ctx, statsQueryTimeout)
+	stats, statsErr := o.st.GetRepoReviewStats(statsCtx, run.DBRepoID, historicalReviewSampleLimit)
+	cancelStats()
+	if statsErr != nil {
+		o.logger.Warn("repo review stats for started comment", "error", statsErr, "repo_id", run.DBRepoID)
+	} else if est := formatCostEstimate(stats); est != "" {
+		rows = append(rows, fmt.Sprintf("| **Est. cost** | %s |", est))
+	}
 
-	body := fmt.Sprintf("> **Argus** is reviewing this PR — [watch live](%s/reviews/%s)\n\n| | |\n|---|---|\n%s",
-		o.cfg.DashboardBaseURL, run.ReviewID, strings.Join(rows, "\n"))
+	body := BuildStartedComment(o.cfg.DashboardBaseURL, run.ReviewID.String(), rows)
 
-	nodeID, err := o.ghClient.CreateIssueCommentWithNodeID(ctx, event.InstallationID, owner, repo, event.PRNumber, body)
+	nodeID, commentID, err := o.ghClient.CreateIssueCommentRef(ctx, event.InstallationID, owner, repo, event.PRNumber, body)
 	if err != nil {
 		o.logger.Warn("failed to post review-started comment", "error", err)
 		return
 	}
 	run.StartedCommentNodeID = nodeID
+	// Persist the REST id so a failure or a cancel on another machine can
+	// rewrite this comment. Non-fatal: losing it costs a stale "watch live"
+	// on one PR, which is strictly better than failing the review over it.
+	if err := o.st.SetStartedCommentID(ctx, run.ReviewID, commentID); err != nil {
+		o.logger.Warn("failed to persist started-comment id", "error", err, "review_id", run.ReviewID)
+	}
 }
 
 // autoResolveOnSynchronize fires fire-and-forget on every synchronize

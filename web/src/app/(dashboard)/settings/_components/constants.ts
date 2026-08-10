@@ -87,7 +87,7 @@ export const PROMPT_STAGES = Object.keys(STAGE_LABELS);
  * diff. Clicking the checkbox fires an edited webhook and runs the review
  * under the 3/hr force-cap path.
  *
- * Not under ProGate: this is a cost/behavior control, not a premium feature.
+ * A cost/behavior control, applied to every installation.
  */
 export const AUTO_RUN_TOGGLE = {
   key: "auto_run",

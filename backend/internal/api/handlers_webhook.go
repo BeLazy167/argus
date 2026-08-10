@@ -369,6 +369,41 @@ func (s *Server) handleCheckboxTrigger(ctx context.Context, evt ghpkg.IssueComme
 	owner, repoName := parts[0], parts[1]
 	ghClient := ghpkg.NewClient(s.ghApp, s.cfg.GitHubAppSlug)
 
+	// AUTHORIZE THE TICKER, NOT THE COMMENT AUTHOR.
+	//
+	// On a public repo anyone can toggle a task-list checkbox in someone
+	// else's comment, so without this an outside contributor could open a
+	// large PR and tick the box to spend the maintainer's review budget with
+	// no sign-off. evt.AuthorAssociation cannot gate it: on an issue_comment
+	// edit that field describes the COMMENT's author — Argus — and would read
+	// as privileged for every click. The actor is evt.EditorLogin, and only a
+	// permission lookup on them answers the question.
+	//
+	// Fails CLOSED. A GitHub outage denying a maintainer costs one re-tick;
+	// allowing on error hands the budget to anyone for as long as the outage
+	// lasts, which is the exact failure this guard exists to prevent.
+	permCtx, cancelPerm := context.WithTimeout(ctx, 10*time.Second)
+	allowed, permErr := ghClient.HasRepoWriteAccess(permCtx, evt.InstallationID, owner, repoName, evt.EditorLogin)
+	cancelPerm()
+	if permErr != nil {
+		s.logger.Error("checkbox trigger: permission check failed; denying",
+			"error", permErr, "repo", evt.RepoFullName, "pr", evt.PRNumber, "actor", evt.EditorLogin)
+	}
+	if !allowed {
+		s.logger.Warn("checkbox trigger denied: actor lacks write access",
+			"repo", evt.RepoFullName, "pr", evt.PRNumber, "actor", evt.EditorLogin)
+		// Reset the box so the state on screen matches reality — a box left
+		// ticked reads as "queued" and invites a wait for a review that will
+		// never start.
+		if reset := pipeline.ResetTriggerCheckbox(evt.CommentBody); reset != evt.CommentBody {
+			if err := ghClient.UpdateIssueComment(ctx, evt.InstallationID, owner, repoName, evt.CommentID, reset); err != nil {
+				s.logger.Warn("checkbox trigger: reset after denial", "error", err, "comment_id", evt.CommentID)
+			}
+		}
+		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repoName, evt.CommentID, "-1")
+		return
+	}
+
 	// Acknowledge the click with a reaction before doing any heavy work.
 	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repoName, evt.CommentID, "eyes")
 

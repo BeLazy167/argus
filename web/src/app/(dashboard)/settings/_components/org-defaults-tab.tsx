@@ -155,7 +155,7 @@ export function OrgDefaultsTab({ savedProviders }: { savedProviders: string[] })
 				)}
 			</section>
 
-			{/* Org: Auto-review (not pro-gated — cost control) */}
+			{/* Org: Auto-review (cost control) */}
 			<section>
 				<div className="flex items-center gap-3 mb-4">
 					<div className="flex items-center gap-2">

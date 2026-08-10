@@ -30,13 +30,13 @@ func (s *Store) CreateInstallation(ctx context.Context, installationID int64, or
 		INSERT INTO installations (installation_id, org_login)
 		VALUES ($1, $2)
 		ON CONFLICT (installation_id) DO UPDATE SET org_login = $2, suspended_at = NULL
-		RETURNING id, installation_id, org_login, clerk_org_id, plan_tier, created_at, suspended_at
-	`, installationID, orgLogin).Scan(&inst.ID, &inst.InstallationID, &inst.OrgLogin, &inst.ClerkOrgID, &inst.PlanTier, &inst.CreatedAt, &inst.SuspendedAt)
+		RETURNING id, installation_id, org_login, clerk_org_id, created_at, suspended_at
+	`, installationID, orgLogin).Scan(&inst.ID, &inst.InstallationID, &inst.OrgLogin, &inst.ClerkOrgID, &inst.CreatedAt, &inst.SuspendedAt)
 	return &inst, err
 }
 
 func (s *Store) ListInstallations(ctx context.Context) ([]Installation, error) {
-	rows, err := s.Pool.Query(ctx, `SELECT id, installation_id, org_login, clerk_org_id, plan_tier, created_at, suspended_at FROM installations ORDER BY created_at DESC`)
+	rows, err := s.Pool.Query(ctx, `SELECT id, installation_id, org_login, clerk_org_id, created_at, suspended_at FROM installations ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -91,7 +91,7 @@ func (s *Store) CountInstallationUsers(ctx context.Context, installationID int64
 
 func (s *Store) ListUserInstallations(ctx context.Context, clerkUserID string) ([]Installation, error) {
 	rows, err := s.Pool.Query(ctx, `
-		SELECT i.id, i.installation_id, i.org_login, i.clerk_org_id, i.plan_tier, i.created_at, i.suspended_at
+		SELECT i.id, i.installation_id, i.org_login, i.clerk_org_id, i.created_at, i.suspended_at
 		FROM installations i
 		JOIN user_installations ui ON ui.installation_id = i.id
 		WHERE ui.clerk_user_id = $1
@@ -129,9 +129,9 @@ func (s *Store) GetUserInstallationIDs(ctx context.Context, clerkUserID string) 
 func (s *Store) GetInstallation(ctx context.Context, id int64) (*Installation, error) {
 	var inst Installation
 	err := s.Pool.QueryRow(ctx, `
-		SELECT id, installation_id, org_login, clerk_org_id, plan_tier, created_at, suspended_at
+		SELECT id, installation_id, org_login, clerk_org_id, created_at, suspended_at
 		FROM installations WHERE id = $1
-	`, id).Scan(&inst.ID, &inst.InstallationID, &inst.OrgLogin, &inst.ClerkOrgID, &inst.PlanTier, &inst.CreatedAt, &inst.SuspendedAt)
+	`, id).Scan(&inst.ID, &inst.InstallationID, &inst.OrgLogin, &inst.ClerkOrgID, &inst.CreatedAt, &inst.SuspendedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -141,9 +141,9 @@ func (s *Store) GetInstallation(ctx context.Context, id int64) (*Installation, e
 func (s *Store) GetInstallationByGitHubID(ctx context.Context, ghInstallationID int64) (*Installation, error) {
 	var inst Installation
 	err := s.Pool.QueryRow(ctx, `
-		SELECT id, installation_id, org_login, clerk_org_id, plan_tier, created_at, suspended_at
+		SELECT id, installation_id, org_login, clerk_org_id, created_at, suspended_at
 		FROM installations WHERE installation_id = $1
-	`, ghInstallationID).Scan(&inst.ID, &inst.InstallationID, &inst.OrgLogin, &inst.ClerkOrgID, &inst.PlanTier, &inst.CreatedAt, &inst.SuspendedAt)
+	`, ghInstallationID).Scan(&inst.ID, &inst.InstallationID, &inst.OrgLogin, &inst.ClerkOrgID, &inst.CreatedAt, &inst.SuspendedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -153,9 +153,9 @@ func (s *Store) GetInstallationByGitHubID(ctx context.Context, ghInstallationID 
 func (s *Store) GetInstallationByClerkOrgID(ctx context.Context, clerkOrgID string) (*Installation, error) {
 	var inst Installation
 	err := s.Pool.QueryRow(ctx, `
-		SELECT id, installation_id, org_login, clerk_org_id, plan_tier, created_at, suspended_at
+		SELECT id, installation_id, org_login, clerk_org_id, created_at, suspended_at
 		FROM installations WHERE clerk_org_id = $1
-	`, clerkOrgID).Scan(&inst.ID, &inst.InstallationID, &inst.OrgLogin, &inst.ClerkOrgID, &inst.PlanTier, &inst.CreatedAt, &inst.SuspendedAt)
+	`, clerkOrgID).Scan(&inst.ID, &inst.InstallationID, &inst.OrgLogin, &inst.ClerkOrgID, &inst.CreatedAt, &inst.SuspendedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -171,17 +171,6 @@ func (s *Store) CountReviewsThisMonth(ctx context.Context, installationID int64)
 		AND r.created_at >= date_trunc('month', NOW())
 	`, installationID).Scan(&count)
 	return count, err
-}
-
-func (s *Store) GetPlanTier(ctx context.Context, installationID int64) (string, error) {
-	var tier string
-	err := s.Pool.QueryRow(ctx, `SELECT plan_tier FROM installations WHERE id = $1`, installationID).Scan(&tier)
-	return tier, err
-}
-
-func (s *Store) SetPlanTier(ctx context.Context, installationID int64, tier string) error {
-	_, err := s.Pool.Exec(ctx, `UPDATE installations SET plan_tier = $1 WHERE id = $2`, tier, installationID)
-	return err
 }
 
 func (s *Store) CountEnabledRepos(ctx context.Context, installationID int64) (int, error) {
@@ -471,6 +460,52 @@ func (s *Store) SetFindingResolvedSHA(ctx context.Context, commentID uuid.UUID, 
 		return fmt.Errorf("setting finding resolved sha: %w", err)
 	}
 	return nil
+}
+
+// StartedCommentRef is everything needed to rewrite a review's "watch live"
+// comment from any process: which installation to authenticate as, which repo
+// and comment to edit, and who asked for the review.
+type StartedCommentRef struct {
+	CommentID      int64
+	InstallationID int64 // GitHub installation id (not the DB serial)
+	RepoFullName   string
+	PRNumber       int
+	TriggeredBy    string
+}
+
+// SetStartedCommentID records the id of the progress comment so a later
+// failure or cancel — possibly on another machine — can rewrite it.
+func (s *Store) SetStartedCommentID(ctx context.Context, reviewID uuid.UUID, commentID int64) error {
+	_, err := s.Pool.Exec(ctx,
+		`UPDATE reviews SET started_comment_id = $2 WHERE id = $1`, reviewID, commentID)
+	return err
+}
+
+// GetStartedCommentRef loads the progress-comment reference for a review.
+// Returns (nil, nil) when the review never posted one — an ordinary case
+// (auto-run off, or the create call failed), not an error.
+func (s *Store) GetStartedCommentRef(ctx context.Context, reviewID uuid.UUID) (*StartedCommentRef, error) {
+	var ref StartedCommentRef
+	var commentID *int64
+	var triggeredBy *string
+	err := s.Pool.QueryRow(ctx, `
+		SELECT rv.started_comment_id, i.installation_id, r.full_name, rv.pr_number, rv.triggered_by
+		FROM reviews rv
+		JOIN repos r ON rv.repo_id = r.id
+		JOIN installations i ON r.installation_id = i.id
+		WHERE rv.id = $1`, reviewID).
+		Scan(&commentID, &ref.InstallationID, &ref.RepoFullName, &ref.PRNumber, &triggeredBy)
+	if err != nil {
+		return nil, err
+	}
+	if commentID == nil || *commentID == 0 {
+		return nil, nil
+	}
+	ref.CommentID = *commentID
+	if triggeredBy != nil {
+		ref.TriggeredBy = *triggeredBy
+	}
+	return &ref, nil
 }
 
 func (s *Store) UpdateReviewStatus(ctx context.Context, id uuid.UUID, status, errMsg string, tokenUsage []byte) error {

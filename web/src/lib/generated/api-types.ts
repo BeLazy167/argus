@@ -52,7 +52,6 @@ export interface Installation {
   installation_id: number /* int64 */;
   org_login: string;
   clerk_org_id?: string;
-  plan_tier: string;
   created_at: string;
   suspended_at?: string;
 }

@@ -211,9 +211,27 @@ func (idx *PGIndexer) ReembedMissing(ctx context.Context, batchSize int) (int, e
 		batchSize = 100
 	}
 	cast := vectorParam("$1", usesPGContextVector(ctx, idx.pool, idx.logger))
+	// The content predicate closes a race, and is not redundant with
+	// `embedding IS NULL`. A live upsert can rewrite this row's content
+	// between the SELECT and the UPDATE and leave the embedding NULL again
+	// (the same embedder is still failing), and identity alone would then
+	// stamp a vector derived from the OLD text onto the NEW content --
+	// producing a row that retrieves for something it no longer says, which
+	// is worse than the NULL it replaced. A raced row simply does not match,
+	// stays NULL, and is repaired on a later pass.
 	update := fmt.Sprintf(
 		`UPDATE memories SET embedding = %s, embedding_model = $2
-		 WHERE installation_id = $3 AND custom_id = $4 AND embedding IS NULL`, cast)
+		 WHERE installation_id = $3 AND custom_id = $4 AND embedding IS NULL
+		   AND content = $5`, cast)
+
+	// A page can make zero progress without being done: if every row on it was
+	// rewritten between the SELECT and the UPDATE, the content predicate
+	// (correctly) refuses all of them and they are still NULL. Retrying is
+	// right — contention is transient, and rows that were concurrently
+	// embedded or deleted simply drop out of the next SELECT — but it must be
+	// bounded, or a row rewritten in a tight loop spins forever.
+	const maxZeroProgressRounds = 3
+	zeroRounds := 0
 
 	total := 0
 	for {
@@ -251,7 +269,7 @@ func (idx *PGIndexer) ReembedMissing(ctx context.Context, batchSize int) (int, e
 		batch := &pgx.Batch{}
 		for i, d := range docs {
 			v := pgvector.NewVector(vecs[i])
-			batch.Queue(update, v, model, idx.installationID, d.CustomID)
+			batch.Queue(update, v, model, idx.installationID, d.CustomID, d.Content)
 		}
 		br := idx.pool.SendBatch(ctx, batch)
 		repaired := 0
@@ -274,13 +292,21 @@ func (idx *PGIndexer) ReembedMissing(ctx context.Context, batchSize int) (int, e
 		total += repaired
 		idx.logger.Info("reembedded memory rows", "installation_id", idx.installationID, "repaired", repaired, "total", total)
 
-		// Zero repaired with a non-empty page means the rows are no longer
-		// matching the UPDATE's predicate (concurrently embedded or deleted)
-		// while still matching the SELECT's. Re-running would fetch the same
-		// page forever.
 		if repaired == 0 {
-			return total, nil
+			zeroRounds++
+			if zeroRounds < maxZeroProgressRounds {
+				continue
+			}
+			// Do NOT return nil here. These rows still have a NULL embedding,
+			// so they are reachable through the full-text leg only, and the
+			// fleet sweep would read a nil error as "this installation is
+			// repaired" and move on -- reporting success over exactly the
+			// state this command exists to eliminate.
+			return total, fmt.Errorf(
+				"reembed: %d row(s) were rewritten concurrently and remain unembedded after %d attempts; rerun to repair them",
+				len(docs), maxZeroProgressRounds)
 		}
+		zeroRounds = 0
 	}
 }
 

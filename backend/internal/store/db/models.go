@@ -95,7 +95,6 @@ type Installation struct {
 	CreatedAt       time.Time       `json:"created_at"`
 	SuspendedAt     *time.Time      `json:"suspended_at"`
 	ClerkOrgID      *string         `json:"clerk_org_id"`
-	PlanTier        string          `json:"plan_tier"`
 	DefaultSettings []byte          `json:"default_settings"`
 	FeatureFlags    json.RawMessage `json:"feature_flags"`
 }
@@ -263,6 +262,7 @@ type Review struct {
 	LinkedIssueRefs    json.RawMessage `json:"linked_issue_refs"`
 	TraceID            *string         `json:"trace_id"`
 	ReviewContract     []byte          `json:"review_contract"`
+	StartedCommentID   *int64          `json:"started_comment_id"`
 }
 
 type ReviewComment struct {

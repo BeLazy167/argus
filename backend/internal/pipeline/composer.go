@@ -492,6 +492,33 @@ func postSelectionDedup(selected []rankedComment) []rankedComment {
 	return result
 }
 
+// joinModels renders the distinct models behind an aggregated row, in first-
+// seen order. Stages fan out (four specialists, N file syntheses, N
+// simulations) and an installation can point different stages — or different
+// specialists — at different models, so collapsing to a single name would
+// misreport which model produced the spend. Blank entries are dropped rather
+// than rendered as gaps; more than two names collapse to a count, because the
+// table lives inside a PR comment.
+func joinModels(models []string) string {
+	seen := make(map[string]bool, len(models))
+	distinct := make([]string, 0, len(models))
+	for _, m := range models {
+		if m == "" || seen[m] {
+			continue
+		}
+		seen[m] = true
+		distinct = append(distinct, m)
+	}
+	switch len(distinct) {
+	case 0:
+		return ""
+	case 1, 2:
+		return strings.Join(distinct, ", ")
+	default:
+		return fmt.Sprintf("%s +%d more", distinct[0], len(distinct)-1)
+	}
+}
+
 // renderTokenBreakdown returns a collapsible markdown block showing token and
 // cost consumption per pipeline stage, with the review stage broken down by
 // specialist (correctness, security, architecture, regression). Returns ""
@@ -509,6 +536,7 @@ func renderTokenBreakdown(tu *RunTokenUsage) string {
 	type agg struct {
 		tokens int
 		cost   float64
+		models []string
 	}
 	bySpecialist := make(map[string]*agg)
 	for _, t := range tu.Review {
@@ -523,6 +551,7 @@ func renderTokenBreakdown(tu *RunTokenUsage) string {
 		}
 		a.tokens += t.TotalTokens
 		a.cost += t.Cost
+		a.models = append(a.models, t.Model)
 	}
 	// Build final specialist render order: canonical first (in SpecialistOrder),
 	// then any unknown keys appended (future-proof for new specialists shipped
@@ -542,7 +571,7 @@ func renderTokenBreakdown(tu *RunTokenUsage) string {
 	}
 
 	var rows []string
-	addRow := func(label string, tokens int, cost float64) {
+	addRow := func(label string, tokens int, cost float64, model string) {
 		// Gate on tokens AND cost: some providers (gpt-5.x reasoning path,
 		// see commit 1070dac) return cost without token counts, so a bare
 		// `tokens == 0` guard would drop real spend AND leave the header
@@ -550,10 +579,13 @@ func renderTokenBreakdown(tu *RunTokenUsage) string {
 		if tokens == 0 && cost == 0 {
 			return
 		}
-		rows = append(rows, fmt.Sprintf("| %s | %s | $%.4f |", label, formatTokens(tokens), cost))
+		if model == "" {
+			model = "—"
+		}
+		rows = append(rows, fmt.Sprintf("| %s | `%s` | %s | $%.4f |", label, model, formatTokens(tokens), cost))
 	}
 	addStage := func(key string, st StageTokens) {
-		addRow(StageLabel(key), st.TotalTokens, st.Cost)
+		addRow(StageLabel(key), st.TotalTokens, st.Cost, st.Model)
 	}
 	// sumArray collapses an array-valued stage (file_synthesis, simulation)
 	// into a single row — PR comment stays curated; per-entry rows live on
@@ -561,11 +593,13 @@ func renderTokenBreakdown(tu *RunTokenUsage) string {
 	sumArray := func(key string, arr []StageTokens) {
 		var tokens int
 		var cost float64
+		models := make([]string, 0, len(arr))
 		for _, t := range arr {
 			tokens += t.TotalTokens
 			cost += t.Cost
+			models = append(models, t.Model)
 		}
-		addRow(StageLabel(key), tokens, cost)
+		addRow(StageLabel(key), tokens, cost, joinModels(models))
 	}
 
 	// Non-review stages rendered in StageOrder sequence so the PR comment
@@ -584,7 +618,7 @@ func renderTokenBreakdown(tu *RunTokenUsage) string {
 	// "review.review" suppression (skim fallback renders as plain "Review").
 	for _, key := range specialistOrder {
 		a := bySpecialist[key]
-		addRow(StageLabel("review."+key), a.tokens, a.cost)
+		addRow(StageLabel("review."+key), a.tokens, a.cost, joinModels(a.models))
 	}
 
 	addStage("acceptance", tu.Acceptance)
@@ -601,8 +635,8 @@ func renderTokenBreakdown(tu *RunTokenUsage) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("<details><summary><sub>🔢 %s tokens · $%.4f total</sub></summary>\n\n",
 		formatTokens(tu.Total.TotalTokens), tu.Total.Cost))
-	sb.WriteString("| Stage | Tokens | Cost |\n")
-	sb.WriteString("|---|---:|---:|\n")
+	sb.WriteString("| Stage | Model | Tokens | Cost |\n")
+	sb.WriteString("|---|---|---:|---:|\n")
 	for _, r := range rows {
 		sb.WriteString(r)
 		sb.WriteString("\n")

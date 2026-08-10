@@ -21,12 +21,6 @@ export function SoftwareAppJsonLd() {
 				url: "https://argus.reviews",
 				offers: [
 					{ "@type": "Offer", price: "0", priceCurrency: "USD", name: "Free" },
-					{
-						"@type": "Offer",
-						price: "19",
-						priceCurrency: "USD",
-						name: "Pro",
-					},
 				],
 			}}
 		/>

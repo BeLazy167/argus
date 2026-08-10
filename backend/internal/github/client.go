@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"strings"
 	"time"
 
@@ -617,18 +618,66 @@ func (c *Client) UpdateIssueComment(ctx context.Context, installationID int64, o
 
 // CreateIssueCommentWithNodeID posts a comment and returns its GraphQL node ID (for minimizing later).
 func (c *Client) CreateIssueCommentWithNodeID(ctx context.Context, installationID int64, owner, repo string, number int, body string) (string, error) {
+	nodeID, _, err := c.CreateIssueCommentRef(ctx, installationID, owner, repo, number, body)
+	return nodeID, err
+}
+
+// CreateIssueCommentRef posts a comment and returns BOTH identities GitHub
+// assigns it: the GraphQL node id (minimize) and the REST id (edit). They are
+// not interchangeable — minimizeComment takes only the former and
+// Issues.EditComment only the latter — and a comment that must be rewritten
+// later from another process needs the REST id persisted.
+func (c *Client) CreateIssueCommentRef(ctx context.Context, installationID int64, owner, repo string, number int, body string) (nodeID string, commentID int64, err error) {
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	if err := c.restLimiter.Wait(ctx); err != nil {
-		return "", fmt.Errorf("rate limit wait: %w", err)
+		return "", 0, fmt.Errorf("rate limit wait: %w", err)
 	}
 	comment, _, err := client.Issues.CreateComment(ctx, owner, repo, number, &gh.IssueComment{Body: gh.Ptr(body)})
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
-	return comment.GetNodeID(), nil
+	return comment.GetNodeID(), comment.GetID(), nil
+}
+
+// HasRepoWriteAccess reports whether login can push to the repo.
+//
+// This is the authorization check for actions a webhook attributes to a user
+// who is NOT the comment author — notably ticking a task-list checkbox in a
+// bot-authored comment. author_association on such an event describes the
+// COMMENT's author (Argus), not the person who toggled the box, so it cannot
+// authorize them; only an explicit permission lookup on the actor can.
+//
+// "admin", "maintain" and "write" pass; "triage", "read" and "none" do not.
+// GitHub returns 404 for a user with no access at all, which is a denial, not
+// an error — but every other failure IS returned, so callers can fail closed
+// rather than treat an outage as permission.
+func (c *Client) HasRepoWriteAccess(ctx context.Context, installationID int64, owner, repo, login string) (bool, error) {
+	if login == "" {
+		return false, nil
+	}
+	client, err := c.app.ClientForInstallation(installationID)
+	if err != nil {
+		return false, err
+	}
+	if err := c.restLimiter.Wait(ctx); err != nil {
+		return false, fmt.Errorf("rate limit wait: %w", err)
+	}
+	perm, resp, err := client.Repositories.GetPermissionLevel(ctx, owner, repo, login)
+	if err != nil {
+		if resp != nil && resp.StatusCode == http.StatusNotFound {
+			return false, nil
+		}
+		return false, err
+	}
+	switch perm.GetPermission() {
+	case "admin", "maintain", "write":
+		return true, nil
+	default:
+		return false, nil
+	}
 }
 
 // ListPRComments returns ALL review comments on a PR (across all reviews).

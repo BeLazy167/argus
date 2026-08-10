@@ -180,9 +180,17 @@ var (
 // column that exists, because the failure is invisible.
 //
 // schema_status = 'current' means the projection matches the registered
-// tables; read_only means it cannot serve. node_count is NOT checked: a graph
-// answers traversals from its base tables and overlay, so a zero count is a
-// cold CSR rather than an unusable graph.
+// tables; read_only means it cannot serve.
+//
+// node_count is deliberately NOT checked, and this is the subtle part. pgGraph
+// keeps its Engine in THREAD-LOCAL storage, one per PostgreSQL backend, with
+// no shared Rust heap between connections; graph.status() reports that
+// backend-local engine. A pooled connection that has not yet touched the graph
+// therefore reports node_count = 0 while a traversal on the very same
+// connection succeeds, because the query path auto-loads the persisted
+// artifact on demand. Gating on node_count would disable pgGraph on precisely
+// the cold connections that were about to load it -- nondeterministically,
+// depending on which pool member served the probe.
 //
 // The fallback is not a nicety. pgGraph needs a custom build step and is absent
 // from every managed Postgres, so a self-hosted install will never have it.

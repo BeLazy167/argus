@@ -421,3 +421,115 @@ func TestPGIndexerEmptyCustomIDSkipped(t *testing.T) {
 	}
 	readRow(t, pool, install, FindingFingerprint("acme", "api", "z.go", "bug_risk", "real finding"))
 }
+
+// ReembedMissing is the repair for the write path's fail-open behaviour: a row
+// written while the embedder was broken carries a NULL vector and is reachable
+// through the full-text leg only.
+func TestPGIndexerReembedMissing(t *testing.T) {
+	pool, install := pgTestPool(t)
+	ctx := context.Background()
+
+	// Write two rows with NO embedder — the fail-open path.
+	blind := NewPGIndexer(pool, nil, install, StorageDimensions, discardLogger())
+	if err := blind.ImportDocs(ctx, []Doc{
+		{ContainerTag: "repo", CustomID: "reembed-a", Type: "pattern", Content: "alpha", Metadata: map[string]string{"type": "pattern"}},
+		{ContainerTag: "repo", CustomID: "reembed-b", Type: "pattern", Content: "beta", Metadata: map[string]string{"type": "pattern"}},
+	}); err != nil {
+		t.Fatalf("seed unembedded rows: %v", err)
+	}
+	for _, id := range []string{"reembed-a", "reembed-b"} {
+		if readRow(t, pool, install, id).hasEmbedding {
+			t.Fatalf("%s should have landed unembedded", id)
+		}
+	}
+
+	idx := NewPGIndexer(pool, &stubEmbedder{dims: StorageDimensions}, install, StorageDimensions, discardLogger())
+	repaired, err := idx.ReembedMissing(ctx, 10)
+	if err != nil {
+		t.Fatalf("ReembedMissing: %v", err)
+	}
+	if repaired != 2 {
+		t.Errorf("repaired = %d, want 2", repaired)
+	}
+	for _, id := range []string{"reembed-a", "reembed-b"} {
+		row := readRow(t, pool, install, id)
+		if !row.hasEmbedding {
+			t.Errorf("%s still has no embedding", id)
+		}
+		if row.model == nil || *row.model != "stub-1024" {
+			t.Errorf("%s embedding_model = %v, want stub-1024", id, row.model)
+		}
+		// Content must be untouched: a re-embed that rewrote content would
+		// resurrect text the row no longer holds.
+		if want := map[string]string{"reembed-a": "alpha", "reembed-b": "beta"}[id]; row.content != want {
+			t.Errorf("%s content = %q, want %q (re-embed must not rewrite content)", id, row.content, want)
+		}
+	}
+
+	// A clean corpus is a no-op, not an error.
+	again, err := idx.ReembedMissing(ctx, 10)
+	if err != nil {
+		t.Fatalf("second pass: %v", err)
+	}
+	if again != 0 {
+		t.Errorf("second pass repaired = %d, want 0", again)
+	}
+}
+
+// A row whose content changes after selection must not receive the stale
+// vector, and the sweep must NOT report success while it is still unembedded.
+func TestPGIndexerReembedSkipsRacedContentAndReportsIt(t *testing.T) {
+	pool, install := pgTestPool(t)
+	ctx := context.Background()
+
+	blind := NewPGIndexer(pool, nil, install, StorageDimensions, discardLogger())
+	if err := blind.ImportDocs(ctx, []Doc{
+		{ContainerTag: "repo", CustomID: "raced", Type: "pattern", Content: "original", Metadata: map[string]string{"type": "pattern"}},
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Simulate the race: rewrite the content (still unembedded) so the
+	// content-guarded UPDATE can never match.
+	racer := &racingEmbedder{pool: pool, install: install, dims: StorageDimensions}
+	idx := NewPGIndexer(pool, racer, install, StorageDimensions, discardLogger())
+
+	repaired, err := idx.ReembedMissing(ctx, 10)
+	if repaired != 0 {
+		t.Errorf("repaired = %d, want 0 — the raced row must not take a stale vector", repaired)
+	}
+	if err == nil {
+		t.Fatal("a page that makes zero progress while rows remain unembedded must not report success")
+	}
+	if row := readRow(t, pool, install, "raced"); row.hasEmbedding {
+		t.Error("raced row received an embedding derived from content it no longer has")
+	}
+}
+
+// racingEmbedder rewrites the row's content during Embed, reproducing an
+// upsert that lands between this sweep's SELECT and its UPDATE.
+type racingEmbedder struct {
+	pool    *pgxpool.Pool
+	install int64
+	dims    int
+	n       int
+}
+
+func (r *racingEmbedder) Embed(ctx context.Context, inputs []string) ([][]float32, error) {
+	r.n++
+	_, err := r.pool.Exec(ctx,
+		`UPDATE memories SET content = $3 WHERE installation_id = $1 AND custom_id = $2`,
+		r.install, "raced", fmt.Sprintf("rewritten-%d", r.n))
+	if err != nil {
+		return nil, err
+	}
+	out := make([][]float32, len(inputs))
+	for i := range out {
+		v := make([]float32, r.dims)
+		v[0] = 1
+		out[i] = v
+	}
+	return out, nil
+}
+
+func (r *racingEmbedder) Model() string { return "racing-1024" }

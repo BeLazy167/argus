@@ -12,7 +12,6 @@ type Installation struct {
 	InstallationID int64      `json:"installation_id"`
 	OrgLogin       string     `json:"org_login"`
 	ClerkOrgID     *string    `json:"clerk_org_id,omitempty"`
-	PlanTier       string     `json:"plan_tier"`
 	CreatedAt      time.Time  `json:"created_at"`
 	SuspendedAt    *time.Time `json:"suspended_at,omitempty"`
 }

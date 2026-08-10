@@ -185,17 +185,24 @@ func runReembed(ctx context.Context, logger *slog.Logger, st *store.Store, embed
 		return nil
 	}
 
+	// One installation's failure must not strand the others. A transient
+	// embeddings 5xx or a pool timeout on the first install would otherwise
+	// abort the sweep and leave every later installation's rows on the
+	// full-text leg until someone noticed and reran by hand -- and "someone
+	// reruns it" is exactly the assumption whose absence created this repair
+	// in the first place. Failures are collected and reported at the end, so
+	// the exit code still tells the truth.
 	repairedTotal := 0
+	var failed []int64
 	for _, t := range targets {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		embedder, _ := embeds.GetEmbedder(ctx, t.id)
 		if embedder == nil {
-			// Skipping is right, not fatal: one installation without an
-			// embeddings provider must not stop the rest of the fleet being
-			// repaired. It is logged at Warn because those rows stay
-			// half-retrievable until a provider is configured.
+			// Not fatal, and not a failure either: an installation with no
+			// embeddings provider has nothing to repair with. Logged at Warn
+			// because those rows stay half-retrievable until one is set.
 			logger.Warn("reembed: no embedder resolved; skipping installation",
 				"installation_id", t.id, "unembedded_rows", t.pending)
 			continue
@@ -204,10 +211,16 @@ func runReembed(ctx context.Context, logger *slog.Logger, st *store.Store, embed
 		repaired, err := idx.ReembedMissing(ctx, pageSize)
 		repairedTotal += repaired
 		if err != nil {
-			return fmt.Errorf("installation %d: %w", t.id, err)
+			logger.Error("reembed: installation failed; continuing with the rest",
+				"installation_id", t.id, "repaired_before_failure", repaired, "error", err)
+			failed = append(failed, t.id)
 		}
 	}
-	logger.Info("reembed complete", "repaired", repairedTotal)
+	logger.Info("reembed complete", "repaired", repairedTotal, "failed_installations", len(failed))
+	if len(failed) > 0 {
+		return fmt.Errorf("%d of %d installation(s) failed to reembed (%v); %d rows repaired",
+			len(failed), len(targets), failed, repairedTotal)
+	}
 	return nil
 }
 

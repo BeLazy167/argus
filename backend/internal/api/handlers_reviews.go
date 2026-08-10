@@ -465,6 +465,11 @@ func (s *Server) cancelReview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.logger.Info("stranded cancel: marked review cancelled", "review_id", id, "repo", repo.FullName, "pr", review.PRNumber)
+	// The pipeline's own terminal hook cannot fire here: the run is on another
+	// machine (or gone), which is why this branch exists at all. Rewrite the
+	// PR's progress comment directly, or it keeps advertising "watch live" for
+	// a review that is now cancelled.
+	s.orchestrator.FinalizeStartedComment(r.Context(), id, pipeline.StartedOutcomeCancelled, "")
 	writeJSON(w, http.StatusOK, map[string]string{"status": "cancelled", "review_id": id.String()})
 }
 

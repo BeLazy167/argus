@@ -435,10 +435,10 @@ function handleReplyGenerated(ctx: HandlerContext, evt: WSEvent): void {
 
 /**
  * Handles `memory_matched`: appends a memory row attributing a finding to a
- * Supermemory-backed pattern, with kind and source PR when present.
+ * memory-backed pattern, with kind and source PR when present.
  */
 function handleMemoryMatched(ctx: HandlerContext, evt: WSEvent): void {
-	// Fired by enrichFindings when a finding matches a Supermemory-backed
+	// Fired by enrichFindings when a finding matches a memory-backed
 	// pattern / convention / rule / similarity hit. Detail line carries
 	// kind + source PR so authors can trace the attribution shown on the
 	// inline comment body.

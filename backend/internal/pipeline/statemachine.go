@@ -26,6 +26,13 @@ type StateMachine struct {
 	// pipeline instead of running to completion and posting to GitHub. Wired to
 	// a reviews.status lookup in NewStateMachine; overridable in tests.
 	isCancelled func(ctx context.Context, reviewID uuid.UUID) (bool, error)
+	// onTerminal fires after a run is persisted as failed or cancelled, so a
+	// caller can reflect that outcome outside the database — today, rewriting
+	// the PR's "watch live" progress comment. Nil is a no-op, which is what
+	// tests and any embedder that posts nothing want. It is deliberately NOT
+	// called on success: that path minimizes the comment itself, in-process,
+	// where it still holds the node id.
+	onTerminal func(ctx context.Context, reviewID uuid.UUID, outcome StartedOutcome, detail string)
 	// persist and setStatus wrap the two Postgres mutations the stage loop
 	// performs, so Run can be exercised without a live DB. Defaults wired in
 	// NewStateMachine. setStatus is a compare-and-set: an empty allowedCurrent
@@ -132,8 +139,17 @@ func (sm *StateMachine) Run(ctx context.Context, run *PipelineRun) error {
 			}
 			// Conditional: don't overwrite a review another writer already moved
 			// to a terminal state — e.g. a cancel that raced this failure.
-			if _, persistErr := sm.setStatus(context.WithoutCancel(ctx), run.ReviewID, string(StateFailed), run.Error, tokenUsage, []string{"pending", "in_progress"}); persistErr != nil {
+			applied, persistErr := sm.setStatus(context.WithoutCancel(ctx), run.ReviewID, string(StateFailed), run.Error, tokenUsage, []string{"pending", "in_progress"})
+			if persistErr != nil {
 				sm.logger.Error("failed to update review status on failure", "error", persistErr, "review_id", run.ReviewID)
+			}
+			// Only when THIS writer won. setStatus is conditional precisely
+			// because a cancel can race a failure; the loser must not then
+			// rewrite the PR comment to its own outcome and contradict the
+			// status that was actually persisted. Detached ctx: the run's
+			// context is already dead and the rewrite must still reach GitHub.
+			if applied && sm.onTerminal != nil {
+				sm.onTerminal(context.WithoutCancel(ctx), run.ReviewID, StartedOutcomeFailed, run.Error)
 			}
 			return fmt.Errorf("stage %s failed: %w", failedState, err)
 		}
@@ -217,8 +233,16 @@ func (sm *StateMachine) handleCancelled(ctx context.Context, run *PipelineRun) e
 		tokenUsage, _ = json.Marshal(&run.Tokens)
 	}
 	// Conditional: never flip a review that already reached completed/failed.
-	if _, persistErr := sm.setStatus(dbCtx, run.ReviewID, "cancelled", run.Error, tokenUsage, []string{"pending", "in_progress"}); persistErr != nil {
+	applied, persistErr := sm.setStatus(dbCtx, run.ReviewID, "cancelled", run.Error, tokenUsage, []string{"pending", "in_progress"})
+	if persistErr != nil {
 		sm.logger.Error("failed to update review status on cancel", "error", persistErr, "review_id", run.ReviewID)
+	}
+	// Same rule as the failure path, and the reason this is not deferred: a
+	// deferred callback would fire even when the write was rejected, letting a
+	// losing canceller overwrite a comment that already reports the real
+	// outcome.
+	if applied && sm.onTerminal != nil {
+		sm.onTerminal(dbCtx, run.ReviewID, StartedOutcomeCancelled, "")
 	}
 	sm.logger.Info("review cancelled", "review_id", run.ReviewID, "stage", cancelledAtStage)
 	return context.Canceled

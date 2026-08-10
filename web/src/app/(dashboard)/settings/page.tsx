@@ -1428,7 +1428,7 @@ export default function SettingsPage() {
 								)}
 							</section>
 
-							{/* Org: Auto-review (not pro-gated — cost control) */}
+							{/* Org: Auto-review (cost control) */}
 							<section>
 								<div className="flex items-center gap-3 mb-4">
 									<div className="flex items-center gap-2">
@@ -1866,7 +1866,7 @@ export default function SettingsPage() {
 							)}
 						</section>
 
-						{/* Section 3b: Auto-review (not pro-gated — cost control) */}
+						{/* Section 3b: Auto-review (cost control) */}
 						<section>
 							<div className="flex items-center gap-3 mb-4">
 								<div className="flex items-center gap-2">
