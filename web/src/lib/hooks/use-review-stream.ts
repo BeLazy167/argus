@@ -21,13 +21,13 @@ export type PipelineStage =
   | "failed"
   | "cancelled";
 
-type TriageFile = {
+export type TriageFile = {
   file: string;
   action: string;
   reason: string;
 };
 
-type ScoringUpdate = {
+export type ScoringUpdate = {
   kept: number;
   dropped: number;
   /** Severity-tiered cutoffs the scorer applied. Backend emits this as
@@ -62,7 +62,7 @@ export type LiveTokens = {
   cost: number;
 };
 
-type WSEvent = {
+export type WSEvent = {
   type: string;
   data: Record<string, unknown>;
 };
