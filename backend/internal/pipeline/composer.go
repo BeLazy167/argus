@@ -635,6 +635,10 @@ func renderTokenBreakdown(tu *RunTokenUsage) string {
 	addStage("scoring", tu.Scoring)
 	addStage("synthesis", tu.Synthesis)
 	addStage("reply", tu.Reply)
+	// No auto_resolve row on purpose: that bucket is filled by a LATER push's
+	// judge calls, merged straight into the reviews row long after this comment
+	// was written. The live run.Tokens we render here can never hold it, so a
+	// row would be permanently blank. The dashboard reads the merged column.
 
 	if len(rows) == 0 {
 		return ""

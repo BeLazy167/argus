@@ -448,6 +448,7 @@ func aggregateStageCosts(rawRows [][]byte) ([]stageCostAgg, int) {
 		addStage("scoring", usage.Scoring)
 		addStage("synthesis", usage.Synthesis)
 		addStage("reply", usage.Reply)
+		addStage("auto_resolve", usage.AutoResolve)
 		// review[] — split by specialist into composite keys like
 		// "review.bug_hunter". Bounded at 4-5 values, high signal. An entry
 		// with empty Specialist (skim single-pass review) falls into the

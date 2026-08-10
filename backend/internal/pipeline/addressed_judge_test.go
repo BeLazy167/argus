@@ -27,21 +27,24 @@ import (
 // assert the judge was (or was not) consulted, and whether each call's ctx
 // carried a deadline (proving the per-call timeout wrapping).
 type fakeAddressedJudge struct {
-	addressed   bool
-	reason      string
-	err         error
+	addressed bool
+	reason    string
+	err       error
+	// tokens is the spend reported for EVERY call, error paths included — the
+	// prod judge bills the same way, so tests can assert accumulation.
+	tokens      StageTokens
 	calls       int
 	lastDiff    string
 	sawDeadline bool
 }
 
-func (f *fakeAddressedJudge) Judge(ctx context.Context, _ JudgeFinding, interDiff string) (bool, string, error) {
+func (f *fakeAddressedJudge) Judge(ctx context.Context, _ JudgeFinding, interDiff string) (JudgeVerdict, error) {
 	f.calls++
 	f.lastDiff = interDiff
 	if _, ok := ctx.Deadline(); ok {
 		f.sawDeadline = true
 	}
-	return f.addressed, f.reason, f.err
+	return JudgeVerdict{Addressed: f.addressed, Reason: f.reason, Tokens: f.tokens}, f.err
 }
 
 // newVerifyHarness wires an Orchestrator with a real FindingLifecycle over fakes
@@ -114,9 +117,23 @@ func TestVerifyThreadAddressed(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			o, ledger, gh := newVerifyHarness(t, tc.judge, restID, store.FindingStatePosted)
 			thread, node := verifyTestThread(restID)
+			tc.judge.tokens = StageTokens{PromptTokens: 700, CompletionTokens: 40, TotalTokens: 740, Cost: 0.0003, Model: "m", Provider: "p"}
+			var tokens RunTokenUsage
 
-			got, _ := o.verifyThreadAddressed(ctx, event, "o", "r", thread, node, "@@ -1 +1 @@\n-x\n+y\n", 1, 2)
+			got, _ := o.verifyThreadAddressed(ctx, event, "o", "r", thread, node, "@@ -1 +1 @@\n-x\n+y\n", 1, 2, &tokens)
 
+			// The caller must accumulate whatever spend the judge reports on
+			// EVERY path — a confirmed fix, a kept-open verdict, and an error
+			// carrying tokens (the prod judge's unparseable-response case).
+			// Accumulating only on resolves under-reports auto-resolve cost by
+			// exactly the keep-open rate, which is most of the calls.
+			if tokens.AutoResolve.TotalTokens != 740 || tokens.AutoResolve.Cost != 0.0003 {
+				t.Errorf("judge spend not accumulated on a %v verdict: got %+v — that cost vanishes from /stats",
+					tc.wantVerdict, tokens.AutoResolve)
+			}
+			if tokens.Total.TotalTokens != 740 {
+				t.Errorf("Total not rolled up with the auto_resolve bucket: got %d, want 740", tokens.Total.TotalTokens)
+			}
 			if got != tc.wantVerdict {
 				t.Errorf("verdict = %v, want %v", got, tc.wantVerdict)
 			}
@@ -140,9 +157,13 @@ func TestVerifyThreadAddressed_NilJudge(t *testing.T) {
 	o, ledger, gh := newVerifyHarness(t, nil, 555, store.FindingStatePosted)
 	thread, node := verifyTestThread(555)
 
+	var tokens RunTokenUsage
 	got, reason := o.verifyThreadAddressed(context.Background(),
-		ghpkg.PREvent{InstallationID: 99, PRNumber: 7}, "o", "r", thread, node, "diff", 1, 2)
+		ghpkg.PREvent{InstallationID: 99, PRNumber: 7}, "o", "r", thread, node, "diff", 1, 2, &tokens)
 
+	if tokens.AutoResolve.TotalTokens != 0 || tokens.AutoResolve.Cost != 0 {
+		t.Errorf("nil judge booked spend it never made: %+v", tokens.AutoResolve)
+	}
 	if got != verdictKeepOpen {
 		t.Fatalf("verdict = %v, want verdictKeepOpen", got)
 	}
@@ -165,8 +186,9 @@ func TestVerifyThreadAddressed_ResolveFailurePropagates(t *testing.T) {
 	gh.resolveErr = errors.New("502 from github")
 	thread, node := verifyTestThread(555)
 
+	var tokens RunTokenUsage
 	got, _ := o.verifyThreadAddressed(context.Background(),
-		ghpkg.PREvent{InstallationID: 99, PRNumber: 7}, "o", "r", thread, node, "diff", 1, 2)
+		ghpkg.PREvent{InstallationID: 99, PRNumber: 7}, "o", "r", thread, node, "diff", 1, 2, &tokens)
 
 	if got != verdictResolveFailed {
 		t.Fatalf("verdict = %v, want verdictResolveFailed", got)

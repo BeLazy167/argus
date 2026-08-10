@@ -131,6 +131,8 @@ export type TokenUsage = {
   cross_pr?: StageTokens;
   simulation?: StageTokens[];
   reply?: StageTokens;
+  /** Auto-resolve judge spend, merged onto this review by a later push. */
+  auto_resolve?: StageTokens;
   total: StageTokens;
 };
 

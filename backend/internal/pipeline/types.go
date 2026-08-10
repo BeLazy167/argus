@@ -77,7 +77,14 @@ type RunTokenUsage struct {
 	CrossPR       StageTokens   `json:"cross_pr,omitempty"`
 	Simulation    []StageTokens `json:"simulation,omitempty"`
 	Reply         StageTokens   `json:"reply,omitempty"` // reserved; reply worker not yet instrumented
-	Total         StageTokens   `json:"total"`
+	// AutoResolve is the AddressedJudge spend from auto-resolve passes. Those
+	// calls fire on a LATER push, outside any live run, and merge into this
+	// bucket on the review whose threads they judged (see
+	// persistAsyncStageTokens + stageKeyAutoResolve). Without the field the
+	// stats aggregator, which decodes token_usage into this struct, would drop
+	// the bucket and the spend would be invisible.
+	AutoResolve StageTokens `json:"auto_resolve,omitempty"`
+	Total       StageTokens `json:"total"`
 }
 
 // StageTokens holds token counts and cost for a single LLM call or stage aggregate.
@@ -505,6 +512,27 @@ func (r *RunTokenUsage) addCrossPR(s StageTokens) {
 	if r.CrossPR.Model == "" {
 		r.CrossPR.Model = s.Model
 		r.CrossPR.Provider = s.Provider
+	}
+	r.Total.PromptTokens += s.PromptTokens
+	r.Total.CompletionTokens += s.CompletionTokens
+	r.Total.TotalTokens += s.TotalTokens
+	r.Total.Cost += s.Cost
+	r.mu.Unlock()
+}
+
+// addAutoResolve mirrors addCrossPR for the AutoResolve bucket. resolveCandidates
+// calls it once per AddressedJudge call against a pass-local RunTokenUsage, then
+// merges the summed bucket into the reviews row in ONE query — per-call DB writes
+// would cost up to maxJudgeCallsPerPush UPDATEs per push for the same total.
+func (r *RunTokenUsage) addAutoResolve(s StageTokens) {
+	r.mu.Lock()
+	r.AutoResolve.PromptTokens += s.PromptTokens
+	r.AutoResolve.CompletionTokens += s.CompletionTokens
+	r.AutoResolve.TotalTokens += s.TotalTokens
+	r.AutoResolve.Cost += s.Cost
+	if r.AutoResolve.Model == "" {
+		r.AutoResolve.Model = s.Model
+		r.AutoResolve.Provider = s.Provider
 	}
 	r.Total.PromptTokens += s.PromptTokens
 	r.Total.CompletionTokens += s.CompletionTokens

@@ -18,6 +18,10 @@ var AllowedKeys = map[string]struct{}{
 	// addressed-verification (#166): proximity candidates sent to the judge, and
 	// the subset it did not confirm (stayed open). Non-PII aggregate counts.
 	"threads_judged": {}, "threads_kept_open": {},
+	// auto-resolve judge spend (#72): aggregate token count + USD cost for one
+	// push's verification calls. Non-PII scalars; they let the funnel answer
+	// "what did auto-resolve cost" without joining reviews.token_usage.
+	"judge_tokens": {}, "judge_cost": {},
 	"issues_evaluated": {}, "reason": {}, "primary_review_id": {},
 	// incremental re-review fallback signal (incremental.fallback event) — commit
 	// SHAs are non-PII and pin which push turned an incremental into a full run.

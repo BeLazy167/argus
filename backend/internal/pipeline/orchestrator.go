@@ -1391,6 +1391,16 @@ func (o *Orchestrator) autoResolveOnSynchronize(
 			"error", err, "pr", event.PRNumber)
 	}
 
+	// Bill the judge's spend to the review whose threads it judged — the only
+	// review this pass relates to, and the row the dashboard already reads. No
+	// live PipelineRun exists here (that review finished on an earlier push), so
+	// the JSONB merge is the only route to /stats; nil run skips the in-memory
+	// half. Safe under the early return above: any push that reached the judge
+	// also listed threads, so apiCalls ≥ 1 whenever judgeTokens is non-zero.
+	if stats.judgeTokens.TotalTokens > 0 || stats.judgeTokens.Cost > 0 {
+		o.persistAsyncStageTokens(dbCtx, *plan.PreviousReviewID, stageKeyAutoResolve, stats.judgeTokens, nil)
+	}
+
 	// auto_resolve.evaluated fires on every sync where we actually touched
 	// GitHub — threads_checked is stale-comment pressure (every open Argus
 	// thread we considered), threads_attempted is how many we tried to
@@ -1414,6 +1424,12 @@ func (o *Orchestrator) autoResolveOnSynchronize(
 		slog.Int("threads_kept_open", stats.keptOpen),
 		slog.Int("threads_attempted", attempted),
 		slog.Int("threads_resolved", resolved),
+		// judge_tokens / judge_cost: what this push spent verifying threads.
+		// Same numbers the auto_resolve token bucket receives, emitted here so
+		// a cost question can be answered from the funnel without joining
+		// against reviews.token_usage.
+		slog.Int("judge_tokens", stats.judgeTokens.TotalTokens),
+		slog.Float64("judge_cost", stats.judgeTokens.Cost),
 		slog.String("trace_id", obs.TraceID(parent)),
 	)
 }
@@ -1506,6 +1522,12 @@ type autoResolveStats struct {
 	lineHits      int // proximity line-hit candidates (log-only)
 	fileHits      int // file-level fallback candidates (log-only)
 	resolvedKeys  []string
+	// judgeTokens is every AddressedJudge call this pass made, summed. Merged
+	// into the judged review's token_usage under "auto_resolve" so the spend
+	// appears on /stats Cost-by-Stage instead of vanishing (#72). A plain
+	// StageTokens, not a RunTokenUsage, because autoResolveStats is copied by
+	// value and RunTokenUsage carries a mutex.
+	judgeTokens StageTokens
 }
 
 // addressedVerdictKind is the outcome of verifyThreadAddressed for one proximity
@@ -1559,6 +1581,12 @@ func interDiffForFile(patchSet *diff.PatchSet, path string) string {
 // GitHub-reply-free by design: the caller posts the convergence breadcrumb after
 // a verdictResolved, which keeps this method testable through the fakeable
 // FindingLifecycle + AddressedJudge seams alone.
+//
+// tokens is the caller's spend accumulator for the whole push (never nil). The
+// judge's cost is recorded into it immediately, BEFORE the error/not-addressed
+// early returns — the provider bills for a keep-open verdict exactly as it does
+// for a resolve, so returning early without accumulating is how auto-resolve
+// spend disappeared from the dashboard (#72).
 func (o *Orchestrator) verifyThreadAddressed(
 	ctx context.Context,
 	event ghpkg.PREvent,
@@ -1567,6 +1595,7 @@ func (o *Orchestrator) verifyThreadAddressed(
 	threadID string,
 	interDiff string,
 	dbInstallationID, dbRepoID int64,
+	tokens *RunTokenUsage,
 ) (addressedVerdictKind, string) {
 	if o.addressedJudge == nil {
 		o.logger.Warn("auto-resolve: no addressed judge configured — leaving thread open (degrade-safe)",
@@ -1580,13 +1609,17 @@ func (o *Orchestrator) verifyThreadAddressed(
 	// these we make (see the caller).
 	judgeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), judgeCallTimeout)
 	defer cancel()
-	addressed, reason, jerr := o.addressedJudge.Judge(judgeCtx, JudgeFinding{
+	verdict, jerr := o.addressedJudge.Judge(judgeCtx, JudgeFinding{
 		Body:             t.Body,
 		Path:             t.Path,
 		Line:             t.Line,
 		DBInstallationID: dbInstallationID,
 		DBRepoID:         dbRepoID,
 	}, interDiff)
+	// Bill first, branch second: a judge that answered and then failed to parse
+	// still cost money, and every path below returns.
+	tokens.addAutoResolve(verdict.Tokens)
+	addressed, reason := verdict.Addressed, verdict.Reason
 	if jerr != nil {
 		// DEGRADE SAFE: never false-resolve on a judge failure/timeout.
 		o.logger.Warn("auto-resolve: judge error — leaving thread open (degrade-safe)",
@@ -1751,6 +1784,11 @@ func (o *Orchestrator) resolveCandidates(
 	}
 
 	stats := autoResolveStats{}
+	// Pass-local accumulator: every judge call adds into tokens.AutoResolve, and
+	// the caller merges that single sum into the reviews row. Using the same
+	// RunTokenUsage adder the inline stages use keeps bucket-vs-total arithmetic
+	// in one place instead of a second hand-rolled summation here.
+	var tokens RunTokenUsage
 	var replyTo []int64
 	for _, t := range threads {
 		if t.IsResolved || !ghpkg.IsArgusThread(t.AuthorLogin, o.cfg.GitHubAppSlug) {
@@ -1786,7 +1824,7 @@ func (o *Orchestrator) resolveCandidates(
 		// Verify the fix before resolving: proximity got us here, the judge decides.
 		stats.judged++
 		verdict, _ := o.verifyThreadAddressed(ctx, event, owner, repo, t, threadID,
-			interDiffForFile(patchSet, t.Path), dbInstallationID, dbRepoID)
+			interDiffForFile(patchSet, t.Path), dbInstallationID, dbRepoID, &tokens)
 		if verdict == verdictKeepOpen {
 			stats.keptOpen++
 			continue
@@ -1818,6 +1856,9 @@ func (o *Orchestrator) resolveCandidates(
 			slog.String("trace_id", obs.TraceID(ctx)),
 		)
 	}
+	// Only the bucket, never tokens.Total: MergeStageTokenEntry increments the
+	// stored total itself, so handing it a pre-summed total would double-count.
+	stats.judgeTokens = tokens.AutoResolve
 	return stats, replyTo
 }
 

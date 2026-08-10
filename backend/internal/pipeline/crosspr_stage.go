@@ -2180,6 +2180,10 @@ func formatJointAcceptanceSection(results []JointAcceptanceResult) string {
 const (
 	stageKeyCrossPR    = "cross_pr"
 	stageKeyAcceptance = "acceptance"
+	// stageKeyAutoResolve bills the AddressedJudge calls made by a push's
+	// auto-resolve pass to the review whose threads it judged. That review
+	// finished on an earlier push, so this path always persists with a nil run.
+	stageKeyAutoResolve = "auto_resolve"
 )
 
 // persistAsyncStageTokens merges a StageTokens entry into BOTH the
@@ -2203,6 +2207,9 @@ const (
 // review mutexes in the callers (crossPRMutexes, jointAcceptanceMutexes)
 // prevent same-review overlap; different reviews hit different rows so
 // no cross-row contention.
+//
+// run may be nil: auto-resolve spends on a later push with no live run to
+// update (stageKeyAutoResolve), so the DB merge is the whole job there.
 func (o *Orchestrator) persistAsyncStageTokens(
 	ctx context.Context,
 	reviewID uuid.UUID,
@@ -2212,10 +2219,12 @@ func (o *Orchestrator) persistAsyncStageTokens(
 ) {
 	// 1. In-memory merge — preserves the addCrossPR / addAcceptance
 	// contract for callers that still read run.Tokens within the stage.
-	switch stageKey {
-	case stageKeyCrossPR:
+	switch {
+	case run == nil:
+		// Nothing in memory to keep in sync; skip straight to the DB write.
+	case stageKey == stageKeyCrossPR:
 		run.Tokens.addCrossPR(entry)
-	case stageKeyAcceptance:
+	case stageKey == stageKeyAcceptance:
 		run.Tokens.addAcceptance(entry)
 	default:
 		// Unknown key → programming error. Warn and still attempt the
