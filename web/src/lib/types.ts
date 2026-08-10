@@ -30,6 +30,7 @@ export type {
   ModelConfig,
   Pattern,
   PatternStat,
+  Persona,
   PRReviewSummary,
   Rule,
   ScenarioKPIs,

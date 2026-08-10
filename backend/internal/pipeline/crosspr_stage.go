@@ -1408,6 +1408,25 @@ func safeCrossPRField(s string, max int) string {
 	return util.Truncate(strings.Join(strings.Fields(sanitizeUserInput(s)), " "), max, true)
 }
 
+// writeAcceptanceCriteria renders the numbered criteria block for the joint
+// acceptance prompt.
+//
+// Each criterion is untrusted. They come from extractCriteria(issue.Body), and
+// an issue body is writable by anyone who can open an issue — on a public repo,
+// by anyone at all. The exposure is wider than a title: when no acceptance
+// header matches, extractCriteria falls back to returning the ENTIRE body as a
+// single criterion, so an unsanitised loop would paste an attacker-authored
+// document into the judge prompt formatted as numbered instructions.
+//
+// Collapsing newlines also keeps the numbering honest: a criterion carrying its
+// own newline would otherwise render extra lines that the numbers do not
+// account for, and the model cannot tell those apart from real criteria.
+func writeAcceptanceCriteria(sb *strings.Builder, criteria []string) {
+	for i, c := range criteria {
+		sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, safeCrossPRField(c, 300)))
+	}
+}
+
 func writeLinkedPRFindings(sb *strings.Builder, link PRLink) {
 	if link.PriorReview == nil {
 		sb.WriteString("(not reviewed by Argus — diff context only)\n")
@@ -1448,8 +1467,14 @@ func writeLinkedPRFindings(sb *strings.Builder, link PRLink) {
 				len(pr.Findings)-crossPRFindingsPerLink))
 			break
 		}
+		// safeCrossPRField, not util.Truncate. The summary quotes text from a
+		// diff written by the LINKED PR's author, who needs no access to the
+		// repo under review. Truncation shortens it and keeps every newline, so
+		// a summary can still forge what reads as a new prompt line. The joint
+		// acceptance builder already treats the same value this way; these two
+		// renderers must not disagree.
 		sb.WriteString(fmt.Sprintf("- [%s] %s:%d — %s\n",
-			f.Severity, f.Path, f.Line, util.Truncate(f.Summary, 160, true)))
+			f.Severity, f.Path, f.Line, safeCrossPRField(f.Summary, 160)))
 	}
 }
 
@@ -1796,9 +1821,7 @@ func (o *Orchestrator) judgeSharedIssue(
 	prompt.WriteString(fmt.Sprintf("Issue %s/%s#%d — %s\n",
 		row.Owner, row.Repo, row.Number, safeCrossPRField(issue.Title, 200)))
 	prompt.WriteString("Criteria:\n")
-	for i, c := range criteria {
-		prompt.WriteString(fmt.Sprintf("%d. %s\n", i+1, c))
-	}
+	writeAcceptanceCriteria(&prompt, criteria)
 
 	for _, s := range siblings {
 		prompt.WriteString(fmt.Sprintf("\nLinked PR %s — %s\n",

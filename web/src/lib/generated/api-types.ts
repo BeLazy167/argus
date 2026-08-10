@@ -402,3 +402,32 @@ export interface PatternStat {
   source: string;
   count: number /* int */;
 }
+
+//////////
+// source: personas.go
+
+/**
+ * Persona is a review style: a prompt overlay appended to the review system
+ * prompt, plus a shorter hint for the specialist path.
+ * It is not a prompt override. prompt_templates REPLACES a stage's system
+ * prompt and is unique per (repo, stage); a persona is appended, carries two
+ * strings, and is chosen by name from a set.
+ */
+export interface Persona {
+  id: number /* int64 */;
+  installation_id?: number /* int64 */;
+  slug: string;
+  name: string;
+  prompt_overlay: string;
+  specialist_hint: string;
+  is_builtin: boolean;
+  /**
+   * ShadowsBuiltin marks an installation's row that overrides a built-in of
+   * the same slug. It cannot be derived client-side: an installation row
+   * always has is_builtin FALSE, so nothing on the row itself distinguishes a
+   * brand-new persona from a retuned shipped one — and the difference matters,
+   * because deleting a shadow RESTORES the built-in rather than removing a
+   * name that repos already select.
+   */
+  shadows_builtin: boolean;
+}

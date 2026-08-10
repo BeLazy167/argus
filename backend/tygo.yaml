@@ -13,6 +13,7 @@ packages:
       - "models.go"
       - "patterns.go"
       - "finding_state.go"
+      - "personas.go"
     fallback_type: "unknown"
     enum_style: "union"
     frontmatter: |

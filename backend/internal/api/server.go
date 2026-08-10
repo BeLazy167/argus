@@ -181,6 +181,13 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 				r.Put("/rules/{ruleID}", s.updateRule)
 				r.Delete("/rules/{ruleID}", s.deleteRule)
 
+				// Personas — built-ins are read-only here; a write always lands
+				// on an installation row, which may shadow a built-in slug.
+				r.Get("/personas", s.listPersonas)
+				r.Put("/personas/{slug}", s.upsertPersona)
+				r.Post("/personas", s.upsertPersona)
+				r.Delete("/personas/{slug}", s.deletePersona)
+
 				// Stats (legacy)
 				r.Get("/stats", s.getStats)
 				r.Get("/activity", s.getActivity)

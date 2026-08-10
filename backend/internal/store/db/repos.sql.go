@@ -8,6 +8,7 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"time"
 )
 
 const countEnabledRepos = `-- name: CountEnabledRepos :one
@@ -26,9 +27,21 @@ SELECT id, installation_id, github_id, full_name, default_branch, enabled, setti
 FROM repos WHERE id = $1
 `
 
-func (q *Queries) GetRepo(ctx context.Context, id int64) (Repo, error) {
+type GetRepoRow struct {
+	ID             int64           `json:"id"`
+	InstallationID int64           `json:"installation_id"`
+	GithubID       int64           `json:"github_id"`
+	FullName       string          `json:"full_name"`
+	DefaultBranch  string          `json:"default_branch"`
+	Enabled        bool            `json:"enabled"`
+	SettingsJSON   json.RawMessage `json:"settings_json"`
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
+}
+
+func (q *Queries) GetRepo(ctx context.Context, id int64) (GetRepoRow, error) {
 	row := q.db.QueryRow(ctx, getRepo, id)
-	var i Repo
+	var i GetRepoRow
 	err := row.Scan(
 		&i.ID,
 		&i.InstallationID,
@@ -48,9 +61,21 @@ SELECT id, installation_id, github_id, full_name, default_branch, enabled, setti
 FROM repos WHERE full_name = $1
 `
 
-func (q *Queries) GetRepoByFullName(ctx context.Context, fullName string) (Repo, error) {
+type GetRepoByFullNameRow struct {
+	ID             int64           `json:"id"`
+	InstallationID int64           `json:"installation_id"`
+	GithubID       int64           `json:"github_id"`
+	FullName       string          `json:"full_name"`
+	DefaultBranch  string          `json:"default_branch"`
+	Enabled        bool            `json:"enabled"`
+	SettingsJSON   json.RawMessage `json:"settings_json"`
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
+}
+
+func (q *Queries) GetRepoByFullName(ctx context.Context, fullName string) (GetRepoByFullNameRow, error) {
 	row := q.db.QueryRow(ctx, getRepoByFullName, fullName)
-	var i Repo
+	var i GetRepoByFullNameRow
 	err := row.Scan(
 		&i.ID,
 		&i.InstallationID,
@@ -75,9 +100,21 @@ type GetRepoScopedParams struct {
 	Column2 []int64 `json:"column_2"`
 }
 
-func (q *Queries) GetRepoScoped(ctx context.Context, arg GetRepoScopedParams) (Repo, error) {
+type GetRepoScopedRow struct {
+	ID             int64           `json:"id"`
+	InstallationID int64           `json:"installation_id"`
+	GithubID       int64           `json:"github_id"`
+	FullName       string          `json:"full_name"`
+	DefaultBranch  string          `json:"default_branch"`
+	Enabled        bool            `json:"enabled"`
+	SettingsJSON   json.RawMessage `json:"settings_json"`
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
+}
+
+func (q *Queries) GetRepoScoped(ctx context.Context, arg GetRepoScopedParams) (GetRepoScopedRow, error) {
 	row := q.db.QueryRow(ctx, getRepoScoped, arg.ID, arg.Column2)
-	var i Repo
+	var i GetRepoScopedRow
 	err := row.Scan(
 		&i.ID,
 		&i.InstallationID,
@@ -97,15 +134,27 @@ SELECT id, installation_id, github_id, full_name, default_branch, enabled, setti
 FROM repos WHERE installation_id = ANY($1::bigint[]) ORDER BY full_name
 `
 
-func (q *Queries) ListReposScoped(ctx context.Context, dollar_1 []int64) ([]Repo, error) {
+type ListReposScopedRow struct {
+	ID             int64           `json:"id"`
+	InstallationID int64           `json:"installation_id"`
+	GithubID       int64           `json:"github_id"`
+	FullName       string          `json:"full_name"`
+	DefaultBranch  string          `json:"default_branch"`
+	Enabled        bool            `json:"enabled"`
+	SettingsJSON   json.RawMessage `json:"settings_json"`
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
+}
+
+func (q *Queries) ListReposScoped(ctx context.Context, dollar_1 []int64) ([]ListReposScopedRow, error) {
 	rows, err := q.db.Query(ctx, listReposScoped, dollar_1)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []Repo
+	var items []ListReposScopedRow
 	for rows.Next() {
-		var i Repo
+		var i ListReposScopedRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.InstallationID,
@@ -144,14 +193,26 @@ type UpdateRepoParams struct {
 	SettingsJSON  json.RawMessage `json:"settings_json"`
 }
 
-func (q *Queries) UpdateRepo(ctx context.Context, arg UpdateRepoParams) (Repo, error) {
+type UpdateRepoRow struct {
+	ID             int64           `json:"id"`
+	InstallationID int64           `json:"installation_id"`
+	GithubID       int64           `json:"github_id"`
+	FullName       string          `json:"full_name"`
+	DefaultBranch  string          `json:"default_branch"`
+	Enabled        bool            `json:"enabled"`
+	SettingsJSON   json.RawMessage `json:"settings_json"`
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
+}
+
+func (q *Queries) UpdateRepo(ctx context.Context, arg UpdateRepoParams) (UpdateRepoRow, error) {
 	row := q.db.QueryRow(ctx, updateRepo,
 		arg.ID,
 		arg.Enabled,
 		arg.DefaultBranch,
 		arg.SettingsJSON,
 	)
-	var i Repo
+	var i UpdateRepoRow
 	err := row.Scan(
 		&i.ID,
 		&i.InstallationID,
@@ -180,14 +241,26 @@ type UpsertRepoParams struct {
 	DefaultBranch  string `json:"default_branch"`
 }
 
-func (q *Queries) UpsertRepo(ctx context.Context, arg UpsertRepoParams) (Repo, error) {
+type UpsertRepoRow struct {
+	ID             int64           `json:"id"`
+	InstallationID int64           `json:"installation_id"`
+	GithubID       int64           `json:"github_id"`
+	FullName       string          `json:"full_name"`
+	DefaultBranch  string          `json:"default_branch"`
+	Enabled        bool            `json:"enabled"`
+	SettingsJSON   json.RawMessage `json:"settings_json"`
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
+}
+
+func (q *Queries) UpsertRepo(ctx context.Context, arg UpsertRepoParams) (UpsertRepoRow, error) {
 	row := q.db.QueryRow(ctx, upsertRepo,
 		arg.InstallationID,
 		arg.GithubID,
 		arg.FullName,
 		arg.DefaultBranch,
 	)
-	var i Repo
+	var i UpsertRepoRow
 	err := row.Scan(
 		&i.ID,
 		&i.InstallationID,

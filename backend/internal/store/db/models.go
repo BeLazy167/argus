@@ -226,15 +226,18 @@ type ProviderKey struct {
 }
 
 type Repo struct {
-	ID             int64           `json:"id"`
-	InstallationID int64           `json:"installation_id"`
-	GithubID       int64           `json:"github_id"`
-	FullName       string          `json:"full_name"`
-	DefaultBranch  string          `json:"default_branch"`
-	Enabled        bool            `json:"enabled"`
-	SettingsJSON   json.RawMessage `json:"settings_json"`
-	CreatedAt      time.Time       `json:"created_at"`
-	UpdatedAt      time.Time       `json:"updated_at"`
+	ID                    int64           `json:"id"`
+	InstallationID        int64           `json:"installation_id"`
+	GithubID              int64           `json:"github_id"`
+	FullName              string          `json:"full_name"`
+	DefaultBranch         string          `json:"default_branch"`
+	Enabled               bool            `json:"enabled"`
+	SettingsJSON          json.RawMessage `json:"settings_json"`
+	CreatedAt             time.Time       `json:"created_at"`
+	UpdatedAt             time.Time       `json:"updated_at"`
+	GraphIndexedAt        *time.Time      `json:"graph_indexed_at"`
+	GraphIndexAttemptedAt *time.Time      `json:"graph_index_attempted_at"`
+	GraphIndexCursor      int             `json:"graph_index_cursor"`
 }
 
 type Review struct {

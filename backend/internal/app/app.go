@@ -137,6 +137,19 @@ func Run() error {
 		logger.Info("recovered stale reviews", "count", count)
 	}
 
+	// Reconcile the shipped personas into rows.
+	//
+	// The compiled-in switch stays the source of truth; these rows are its
+	// projection, and they are what makes the eight built-ins visible and
+	// retunable in the dashboard. Without this a fresh deployment lists zero
+	// personas while reviews keep using all eight.
+	//
+	// Non-fatal. Resolution falls back to the compiled-in overlay on any miss,
+	// so a failed seed costs the dashboard listing, not a single review.
+	if err := db.SeedBuiltinPersonas(ctx, builtinPersonaRows()); err != nil {
+		logger.Warn("seeding built-in personas", "error", err)
+	}
+
 	// Recover incomplete pipeline runs (async — don't block server startup)
 	appCtx, appCancel := context.WithCancel(context.Background())
 	defer appCancel()
@@ -178,6 +191,20 @@ func Run() error {
 				return
 			}
 		}
+	}()
+
+	// Code-graph full-index backfill — walks whole repos, one per hour.
+	//
+	// The per-PR path (graph.IndexFiles) only ever parses a pull request's
+	// changed files, so the graph accumulated as disconnected islands and blast
+	// radius returned fragments. This is what gives it the rest of the repo.
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logger.Error("graph index backfill panic", "recover", r)
+			}
+		}()
+		runGraphIndexBackfill(appCtx, db, ghClient, logger)
 	}()
 
 	// JWT auth (Clerk or SuperTokens)
@@ -233,4 +260,26 @@ func Run() error {
 	defer shutdownCancel()
 
 	return httpServer.Shutdown(shutdownCtx)
+}
+
+// builtinPersonaRows adapts the pipeline's compiled-in personas to the store's
+// row shape.
+//
+// The adaptation lives here, in the composition root, rather than in either
+// package: store must not import pipeline (pipeline already imports store, so
+// that direction is a cycle), and pipeline must not learn the row type just to
+// describe its own prompts.
+func builtinPersonaRows() []store.Persona {
+	builtins := pipeline.BuiltinPersonas()
+	rows := make([]store.Persona, 0, len(builtins))
+	for _, b := range builtins {
+		rows = append(rows, store.Persona{
+			Slug:           string(b.Slug),
+			Name:           b.Name,
+			PromptOverlay:  b.PromptOverlay,
+			SpecialistHint: b.SpecialistHint,
+			IsBuiltin:      true,
+		})
+	}
+	return rows
 }
