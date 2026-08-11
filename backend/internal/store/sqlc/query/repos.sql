@@ -8,11 +8,11 @@ FROM repos WHERE full_name = $1;
 
 -- name: UpdateRepo :one
 UPDATE repos SET
-    enabled = COALESCE($2, enabled),
-    default_branch = COALESCE($3, default_branch),
-    settings_json = CASE WHEN $4 IS NULL THEN settings_json ELSE settings_json || $4 END,
+    enabled = COALESCE(sqlc.narg(enabled)::boolean, enabled),
+    default_branch = COALESCE(sqlc.narg(default_branch)::text, default_branch),
+    settings_json = CASE WHEN sqlc.narg(settings_json)::jsonb IS NULL THEN settings_json ELSE settings_json || sqlc.narg(settings_json)::jsonb END,
     updated_at = NOW()
-WHERE id = $1
+WHERE id = sqlc.arg(id)::bigint
 RETURNING id, installation_id, github_id, full_name, default_branch, enabled, settings_json, created_at, updated_at;
 
 -- name: UpsertRepo :one

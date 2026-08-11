@@ -275,19 +275,19 @@ func (q *Queries) ListReposScoped(ctx context.Context, dollar_1 []int64) ([]List
 
 const updateRepo = `-- name: UpdateRepo :one
 UPDATE repos SET
-    enabled = COALESCE($2, enabled),
-    default_branch = COALESCE($3, default_branch),
-    settings_json = CASE WHEN $4 IS NULL THEN settings_json ELSE settings_json || $4 END,
+    enabled = COALESCE($1::boolean, enabled),
+    default_branch = COALESCE($2::text, default_branch),
+    settings_json = CASE WHEN $3::jsonb IS NULL THEN settings_json ELSE settings_json || $3::jsonb END,
     updated_at = NOW()
-WHERE id = $1
+WHERE id = $4::bigint
 RETURNING id, installation_id, github_id, full_name, default_branch, enabled, settings_json, created_at, updated_at
 `
 
 type UpdateRepoParams struct {
-	ID            int64           `json:"id"`
-	Enabled       bool            `json:"enabled"`
-	DefaultBranch string          `json:"default_branch"`
-	SettingsJSON  json.RawMessage `json:"settings_json"`
+	Enabled       *bool   `json:"enabled"`
+	DefaultBranch *string `json:"default_branch"`
+	SettingsJSON  []byte  `json:"settings_json"`
+	ID            int64   `json:"id"`
 }
 
 type UpdateRepoRow struct {
@@ -304,10 +304,10 @@ type UpdateRepoRow struct {
 
 func (q *Queries) UpdateRepo(ctx context.Context, arg UpdateRepoParams) (UpdateRepoRow, error) {
 	row := q.db.QueryRow(ctx, updateRepo,
-		arg.ID,
 		arg.Enabled,
 		arg.DefaultBranch,
 		arg.SettingsJSON,
+		arg.ID,
 	)
 	var i UpdateRepoRow
 	err := row.Scan(

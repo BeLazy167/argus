@@ -1,7 +1,7 @@
 -- name: CreateInstallation :one
 INSERT INTO installations (installation_id, org_login)
 VALUES ($1, $2)
-ON CONFLICT (installation_id) DO UPDATE SET org_login = $2
+ON CONFLICT (installation_id) DO UPDATE SET org_login = $2, suspended_at = NULL
 RETURNING id, installation_id, org_login, clerk_org_id, created_at, suspended_at;
 
 -- name: GetInstallation :one
@@ -20,7 +20,7 @@ FROM installations WHERE clerk_org_id = $1;
 UPDATE installations SET clerk_org_id = $1 WHERE id = $2;
 
 -- name: SuspendInstallation :exec
-UPDATE installations SET suspended_at = NOW() WHERE installation_id = $1;
+UPDATE installations SET suspended_at = NOW() WHERE id = $1;
 
 
 

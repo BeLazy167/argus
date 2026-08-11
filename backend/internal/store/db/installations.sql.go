@@ -14,7 +14,7 @@ import (
 const createInstallation = `-- name: CreateInstallation :one
 INSERT INTO installations (installation_id, org_login)
 VALUES ($1, $2)
-ON CONFLICT (installation_id) DO UPDATE SET org_login = $2
+ON CONFLICT (installation_id) DO UPDATE SET org_login = $2, suspended_at = NULL
 RETURNING id, installation_id, org_login, clerk_org_id, created_at, suspended_at
 `
 
@@ -243,10 +243,10 @@ func (q *Queries) SetOrgDefaults(ctx context.Context, arg SetOrgDefaultsParams) 
 }
 
 const suspendInstallation = `-- name: SuspendInstallation :exec
-UPDATE installations SET suspended_at = NOW() WHERE installation_id = $1
+UPDATE installations SET suspended_at = NOW() WHERE id = $1
 `
 
-func (q *Queries) SuspendInstallation(ctx context.Context, installationID int64) error {
-	_, err := q.db.Exec(ctx, suspendInstallation, installationID)
+func (q *Queries) SuspendInstallation(ctx context.Context, id int64) error {
+	_, err := q.db.Exec(ctx, suspendInstallation, id)
 	return err
 }

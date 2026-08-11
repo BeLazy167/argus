@@ -25,14 +25,12 @@ func collectOrEmpty[T any](rows pgx.Rows, fn pgx.RowToFunc[T]) ([]T, error) {
 // --- Installations ---
 
 func (s *Store) CreateInstallation(ctx context.Context, installationID int64, orgLogin string) (*Installation, error) {
-	var inst Installation
-	err := s.Pool.QueryRow(ctx, `
-		INSERT INTO installations (installation_id, org_login)
-		VALUES ($1, $2)
-		ON CONFLICT (installation_id) DO UPDATE SET org_login = $2, suspended_at = NULL
-		RETURNING id, installation_id, org_login, clerk_org_id, created_at, suspended_at
-	`, installationID, orgLogin).Scan(&inst.ID, &inst.InstallationID, &inst.OrgLogin, &inst.ClerkOrgID, &inst.CreatedAt, &inst.SuspendedAt)
-	return &inst, err
+	row, err := s.q.CreateInstallation(ctx, db.CreateInstallationParams{InstallationID: installationID, OrgLogin: orgLogin})
+	if err != nil {
+		return nil, err
+	}
+	installation := installationFromSQLC(row.ID, row.InstallationID, row.OrgLogin, row.ClerkOrgID, row.CreatedAt, row.SuspendedAt)
+	return &installation, nil
 }
 
 func (s *Store) ListInstallations(ctx context.Context) ([]Installation, error) {
@@ -50,20 +48,15 @@ func (s *Store) ListInstallations(ctx context.Context) ([]Installation, error) {
 // --- User Installations ---
 
 func (s *Store) LinkUserInstallation(ctx context.Context, clerkUserID string, installationID int64, role string) (*UserInstallation, error) {
-	var ui UserInstallation
-	err := s.Pool.QueryRow(ctx, `
-		INSERT INTO user_installations (clerk_user_id, installation_id, role)
-		VALUES ($1, $2, $3)
-		ON CONFLICT (clerk_user_id, installation_id) DO NOTHING
-		RETURNING id, clerk_user_id, installation_id, role, created_at
-	`, clerkUserID, installationID, role).Scan(&ui.ID, &ui.ClerkUserID, &ui.InstallationID, &ui.Role, &ui.CreatedAt)
-	if err == pgx.ErrNoRows {
-		err = s.Pool.QueryRow(ctx, `
-			SELECT id, clerk_user_id, installation_id, role, created_at
-			FROM user_installations WHERE clerk_user_id = $1 AND installation_id = $2
-		`, clerkUserID, installationID).Scan(&ui.ID, &ui.ClerkUserID, &ui.InstallationID, &ui.Role, &ui.CreatedAt)
+	row, err := s.q.LinkUserInstallation(ctx, db.LinkUserInstallationParams{ClerkUserID: clerkUserID, InstallationID: installationID, Role: role})
+	if errors.Is(err, pgx.ErrNoRows) {
+		row, err = s.q.GetUserInstallationByUserAndInstallation(ctx, db.GetUserInstallationByUserAndInstallationParams{ClerkUserID: clerkUserID, InstallationID: installationID})
 	}
-	return &ui, err
+	if err != nil {
+		return nil, err
+	}
+	installation := UserInstallation{ID: row.ID, ClerkUserID: row.ClerkUserID, InstallationID: row.InstallationID, Role: row.Role, CreatedAt: row.CreatedAt}
+	return &installation, nil
 }
 
 // IsUserLinkedToInstallation checks if a user is already linked to an installation.
@@ -105,103 +98,66 @@ func (s *Store) ListUserInstallations(ctx context.Context, clerkUserID string) (
 }
 
 func (s *Store) GetUserInstallationIDs(ctx context.Context, clerkUserID string) ([]int64, error) {
-	rows, err := s.Pool.Query(ctx, `
-		SELECT installation_id FROM user_installations WHERE clerk_user_id = $1
-	`, clerkUserID)
+	rows, err := s.q.GetUserInstallationIDs(ctx, clerkUserID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var ids []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	if ids == nil {
-		ids = []int64{}
-	}
-	return ids, rows.Err()
+	ids := make([]int64, len(rows))
+	copy(ids, rows)
+	return ids, nil
 }
 
 func (s *Store) GetInstallation(ctx context.Context, id int64) (*Installation, error) {
-	var inst Installation
-	err := s.Pool.QueryRow(ctx, `
-		SELECT id, installation_id, org_login, clerk_org_id, created_at, suspended_at
-		FROM installations WHERE id = $1
-	`, id).Scan(&inst.ID, &inst.InstallationID, &inst.OrgLogin, &inst.ClerkOrgID, &inst.CreatedAt, &inst.SuspendedAt)
+	row, err := s.q.GetInstallation(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	return &inst, nil
+	installation := installationFromSQLC(row.ID, row.InstallationID, row.OrgLogin, row.ClerkOrgID, row.CreatedAt, row.SuspendedAt)
+	return &installation, nil
 }
 
 func (s *Store) GetInstallationByGitHubID(ctx context.Context, ghInstallationID int64) (*Installation, error) {
-	var inst Installation
-	err := s.Pool.QueryRow(ctx, `
-		SELECT id, installation_id, org_login, clerk_org_id, created_at, suspended_at
-		FROM installations WHERE installation_id = $1
-	`, ghInstallationID).Scan(&inst.ID, &inst.InstallationID, &inst.OrgLogin, &inst.ClerkOrgID, &inst.CreatedAt, &inst.SuspendedAt)
+	row, err := s.q.GetInstallationByGitHubID(ctx, ghInstallationID)
 	if err != nil {
 		return nil, err
 	}
-	return &inst, nil
+	installation := installationFromSQLC(row.ID, row.InstallationID, row.OrgLogin, row.ClerkOrgID, row.CreatedAt, row.SuspendedAt)
+	return &installation, nil
 }
 
 func (s *Store) GetInstallationByClerkOrgID(ctx context.Context, clerkOrgID string) (*Installation, error) {
-	var inst Installation
-	err := s.Pool.QueryRow(ctx, `
-		SELECT id, installation_id, org_login, clerk_org_id, created_at, suspended_at
-		FROM installations WHERE clerk_org_id = $1
-	`, clerkOrgID).Scan(&inst.ID, &inst.InstallationID, &inst.OrgLogin, &inst.ClerkOrgID, &inst.CreatedAt, &inst.SuspendedAt)
+	row, err := s.q.GetInstallationByClerkOrgID(ctx, &clerkOrgID)
 	if err != nil {
 		return nil, err
 	}
-	return &inst, nil
+	installation := installationFromSQLC(row.ID, row.InstallationID, row.OrgLogin, row.ClerkOrgID, row.CreatedAt, row.SuspendedAt)
+	return &installation, nil
 }
 
 func (s *Store) CountReviewsThisMonth(ctx context.Context, installationID int64) (int, error) {
-	var count int
-	err := s.Pool.QueryRow(ctx, `
-		SELECT COUNT(*) FROM reviews r
-		JOIN repos rp ON r.repo_id = rp.id
-		WHERE rp.installation_id = $1
-		AND r.created_at >= date_trunc('month', NOW())
-	`, installationID).Scan(&count)
-	return count, err
+	return s.q.CountReviewsThisMonth(ctx, installationID)
 }
 
 func (s *Store) CountEnabledRepos(ctx context.Context, installationID int64) (int, error) {
-	var count int
-	err := s.Pool.QueryRow(ctx, `SELECT COUNT(*) FROM repos WHERE installation_id = $1 AND enabled = TRUE`, installationID).Scan(&count)
-	return count, err
+	return s.q.CountEnabledRepos(ctx, installationID)
 }
 
 func (s *Store) SuspendInstallation(ctx context.Context, id int64) error {
-	_, err := s.Pool.Exec(ctx, `UPDATE installations SET suspended_at = NOW() WHERE id = $1`, id)
-	return err
+	return s.q.SuspendInstallation(ctx, id)
 }
 
 func (s *Store) SetInstallationClerkOrgID(ctx context.Context, installationID int64, clerkOrgID string) error {
-	_, err := s.Pool.Exec(ctx, `
-		UPDATE installations SET clerk_org_id = $1 WHERE id = $2
-	`, clerkOrgID, installationID)
-	return err
+	return s.q.SetInstallationClerkOrgID(ctx, db.SetInstallationClerkOrgIDParams{ClerkOrgID: &clerkOrgID, ID: installationID})
 }
 
 // --- Org Default Settings ---
 
 func (s *Store) GetOrgDefaults(ctx context.Context, installationID int64) (json.RawMessage, error) {
-	var settings json.RawMessage
-	err := s.Pool.QueryRow(ctx, `SELECT COALESCE(default_settings, '{}') FROM installations WHERE id = $1`, installationID).Scan(&settings)
-	return settings, err
+	return s.q.GetOrgDefaults(ctx, installationID)
 }
 
 func (s *Store) SetOrgDefaults(ctx context.Context, installationID int64, settings json.RawMessage) error {
-	_, err := s.Pool.Exec(ctx, `UPDATE installations SET default_settings = $1 WHERE id = $2`, settings, installationID)
-	return err
+	return s.q.SetOrgDefaults(ctx, db.SetOrgDefaultsParams{DefaultSettings: settings, ID: installationID})
 }
 
 // GetMergedSettings returns org defaults merged with repo overrides (repo wins).
@@ -261,58 +217,39 @@ func (s *Store) ListReposByOwner(ctx context.Context, ownerPrefix string) ([]Rep
 }
 
 func (s *Store) GetRepo(ctx context.Context, id int64) (*Repo, error) {
-	var r Repo
-	err := s.Pool.QueryRow(ctx, `
-		SELECT id, installation_id, github_id, full_name, default_branch, enabled, settings_json, created_at, updated_at
-		FROM repos WHERE id = $1
-	`, id).Scan(&r.ID, &r.InstallationID, &r.GithubID, &r.FullName, &r.DefaultBranch, &r.Enabled, &r.SettingsJSON, &r.CreatedAt, &r.UpdatedAt)
+	row, err := s.q.GetRepo(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	return &r, nil
+	repo := repoFromSQLC(row.ID, row.InstallationID, row.GithubID, row.FullName, row.DefaultBranch, row.Enabled, row.SettingsJSON, row.CreatedAt, row.UpdatedAt)
+	return &repo, nil
 }
 
 func (s *Store) GetRepoByFullName(ctx context.Context, fullName string) (*Repo, error) {
-	var r Repo
-	err := s.Pool.QueryRow(ctx, `
-		SELECT id, installation_id, github_id, full_name, default_branch, enabled, settings_json, created_at, updated_at
-		FROM repos WHERE full_name = $1
-	`, fullName).Scan(&r.ID, &r.InstallationID, &r.GithubID, &r.FullName, &r.DefaultBranch, &r.Enabled, &r.SettingsJSON, &r.CreatedAt, &r.UpdatedAt)
+	row, err := s.q.GetRepoByFullName(ctx, fullName)
 	if err != nil {
 		return nil, err
 	}
-	return &r, nil
+	repo := repoFromSQLC(row.ID, row.InstallationID, row.GithubID, row.FullName, row.DefaultBranch, row.Enabled, row.SettingsJSON, row.CreatedAt, row.UpdatedAt)
+	return &repo, nil
 }
 
 func (s *Store) UpdateRepo(ctx context.Context, id int64, enabled *bool, defaultBranch *string, settingsJSON []byte) (*Repo, error) {
-	var r Repo
-	err := s.Pool.QueryRow(ctx, `
-		UPDATE repos SET
-			enabled = COALESCE($2, enabled),
-			default_branch = COALESCE($3, default_branch),
-			settings_json = CASE WHEN $4::jsonb IS NULL THEN settings_json ELSE settings_json || $4::jsonb END,
-			updated_at = NOW()
-		WHERE id = $1
-		RETURNING id, installation_id, github_id, full_name, default_branch, enabled, settings_json, created_at, updated_at
-	`, id, enabled, defaultBranch, settingsJSON).Scan(&r.ID, &r.InstallationID, &r.GithubID, &r.FullName, &r.DefaultBranch, &r.Enabled, &r.SettingsJSON, &r.CreatedAt, &r.UpdatedAt)
+	row, err := s.q.UpdateRepo(ctx, db.UpdateRepoParams{ID: id, Enabled: enabled, DefaultBranch: defaultBranch, SettingsJSON: settingsJSON})
 	if err != nil {
 		return nil, err
 	}
-	return &r, nil
+	repo := repoFromSQLC(row.ID, row.InstallationID, row.GithubID, row.FullName, row.DefaultBranch, row.Enabled, row.SettingsJSON, row.CreatedAt, row.UpdatedAt)
+	return &repo, nil
 }
 
 func (s *Store) UpsertRepo(ctx context.Context, installationID, githubID int64, fullName, defaultBranch string) (*Repo, error) {
-	var r Repo
-	err := s.Pool.QueryRow(ctx, `
-		INSERT INTO repos (installation_id, github_id, full_name, default_branch)
-		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (github_id) DO UPDATE SET full_name = $3, default_branch = $4, updated_at = NOW()
-		RETURNING id, installation_id, github_id, full_name, default_branch, enabled, settings_json, created_at, updated_at
-	`, installationID, githubID, fullName, defaultBranch).Scan(&r.ID, &r.InstallationID, &r.GithubID, &r.FullName, &r.DefaultBranch, &r.Enabled, &r.SettingsJSON, &r.CreatedAt, &r.UpdatedAt)
+	row, err := s.q.UpsertRepo(ctx, db.UpsertRepoParams{InstallationID: installationID, GithubID: githubID, FullName: fullName, DefaultBranch: defaultBranch})
 	if err != nil {
 		return nil, err
 	}
-	return &r, nil
+	repo := repoFromSQLC(row.ID, row.InstallationID, row.GithubID, row.FullName, row.DefaultBranch, row.Enabled, row.SettingsJSON, row.CreatedAt, row.UpdatedAt)
+	return &repo, nil
 }
 
 func (s *Store) ListReposScoped(ctx context.Context, installationIDs []int64) ([]Repo, error) {
@@ -328,15 +265,12 @@ func (s *Store) ListReposScoped(ctx context.Context, installationIDs []int64) ([
 }
 
 func (s *Store) GetRepoScoped(ctx context.Context, id int64, installationIDs []int64) (*Repo, error) {
-	var r Repo
-	err := s.Pool.QueryRow(ctx, `
-		SELECT id, installation_id, github_id, full_name, default_branch, enabled, settings_json, created_at, updated_at
-		FROM repos WHERE id = $1 AND installation_id = ANY($2)
-	`, id, installationIDs).Scan(&r.ID, &r.InstallationID, &r.GithubID, &r.FullName, &r.DefaultBranch, &r.Enabled, &r.SettingsJSON, &r.CreatedAt, &r.UpdatedAt)
+	row, err := s.q.GetRepoScoped(ctx, db.GetRepoScopedParams{ID: id, Column2: installationIDs})
 	if err != nil {
 		return nil, err
 	}
-	return &r, nil
+	repo := repoFromSQLC(row.ID, row.InstallationID, row.GithubID, row.FullName, row.DefaultBranch, row.Enabled, row.SettingsJSON, row.CreatedAt, row.UpdatedAt)
+	return &repo, nil
 }
 
 // --- Reviews ---
