@@ -54,6 +54,43 @@ func seedArchitectureRepo(t *testing.T, ctx context.Context, pool *pgxpool.Pool)
 	return installationID, repoID
 }
 
+func seedLegacyArchitectureTopology(t *testing.T, ctx context.Context, pool *pgxpool.Pool, repoID int64) {
+	t.Helper()
+	var sourceID, targetID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO code_nodes (repo_id, kind, name, file_path, line_start, line_end, language)
+		VALUES ($1, 'file', 'legacy-source.go', 'legacy-source.go', 1, 8, 'go')
+		RETURNING id`, repoID).Scan(&sourceID); err != nil {
+		t.Fatalf("seed legacy source node: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO code_nodes (repo_id, kind, name, file_path, line_start, line_end, language)
+		VALUES ($1, 'file', 'legacy-target.go', 'legacy-target.go', 1, 8, 'go')
+		RETURNING id`, repoID).Scan(&targetID); err != nil {
+		t.Fatalf("seed legacy target node: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO code_edges (repo_id, source_id, target_id, kind)
+		VALUES ($1, $2, $3, 'calls')`, repoID, sourceID, targetID); err != nil {
+		t.Fatalf("seed legacy edge: %v", err)
+	}
+}
+
+func seedPublishedArchitectureGeneration(t *testing.T, ctx context.Context, pool *pgxpool.Pool, repoID int64, commitSHA string) {
+	t.Helper()
+	var generationID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO graph_index_generations
+		  (repo_id, commit_sha, status, expected_files, visited_files, published_at)
+		VALUES ($1, $2, 'published', 1, 1, NOW()) RETURNING id`, repoID, commitSHA).Scan(&generationID); err != nil {
+		t.Fatalf("seed published generation: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE repos SET graph_published_generation_id = $2 WHERE id = $1`, repoID, generationID); err != nil {
+		t.Fatalf("publish architecture generation: %v", err)
+	}
+}
+
 func requestArchitecture(t *testing.T, ctx context.Context, pool *pgxpool.Pool, installationID, repoID int64) archResponse {
 	t.Helper()
 	server := &Server{
@@ -90,6 +127,43 @@ func TestArchitectureResponseAlwaysIncludesGraphSnapshot(t *testing.T) {
 	}
 }
 
+func TestArchitectureResponseHidesLegacyTopologyWithoutPublicationAuthority(t *testing.T) {
+	pool, ctx := architectureTestPool(t)
+	installationID, repoID := seedArchitectureRepo(t, ctx, pool)
+	seedLegacyArchitectureTopology(t, ctx, pool, repoID)
+
+	response := requestArchitecture(t, ctx, pool, installationID, repoID)
+	if response.Snapshot.GenerationID != 0 || response.Snapshot.Status != "" || response.Snapshot.Complete {
+		t.Fatalf("zero-authority snapshot = %+v, want explicit zero snapshot", response.Snapshot)
+	}
+	if len(response.Files) != 0 || len(response.Edges) != 0 || response.Summary.TotalFiles != 0 {
+		t.Fatalf("zero-authority topology leaked: files=%+v edges=%+v summary=%+v", response.Files, response.Edges, response.Summary)
+	}
+}
+
+func TestArchitectureResponseHidesLegacyTopologyAfterFirstGenerationFails(t *testing.T) {
+	pool, ctx := architectureTestPool(t)
+	installationID, repoID := seedArchitectureRepo(t, ctx, pool)
+	seedLegacyArchitectureTopology(t, ctx, pool, repoID)
+	var generationID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO graph_index_generations
+		  (repo_id, commit_sha, status, expected_files, visited_files, failed_files, error)
+		VALUES ($1, 'failed-first-commit', 'failed', 7, 3, 1, 'fetch failed') RETURNING id`, repoID).Scan(&generationID); err != nil {
+		t.Fatalf("seed failed generation: %v", err)
+	}
+
+	response := requestArchitecture(t, ctx, pool, installationID, repoID)
+	if response.Snapshot.GenerationID != generationID || response.Snapshot.Status != "failed" ||
+		response.Snapshot.ExpectedFiles != 7 || response.Snapshot.VisitedFiles != 3 ||
+		response.Snapshot.FailedFiles != 1 || response.Snapshot.Complete {
+		t.Fatalf("failed-first snapshot = %+v", response.Snapshot)
+	}
+	if len(response.Files) != 0 || len(response.Edges) != 0 || response.Summary.TotalFiles != 0 {
+		t.Fatalf("failed-first topology leaked: files=%+v edges=%+v summary=%+v", response.Files, response.Edges, response.Summary)
+	}
+}
+
 func TestArchitectureResponseShowsNewestBuildingSnapshotWithPublishedTopology(t *testing.T) {
 	pool, ctx := architectureTestPool(t)
 	installationID, repoID := seedArchitectureRepo(t, ctx, pool)
@@ -98,6 +172,7 @@ func TestArchitectureResponseShowsNewestBuildingSnapshotWithPublishedTopology(t 
 		VALUES ($1, 'file', 'published.go', 'published.go', 1, 8, 'go')`, repoID); err != nil {
 		t.Fatalf("seed published topology: %v", err)
 	}
+	seedPublishedArchitectureGeneration(t, ctx, pool, repoID, "published-commit")
 	var generationID int64
 	if err := pool.QueryRow(ctx, `
 		INSERT INTO graph_index_generations
@@ -114,6 +189,32 @@ func TestArchitectureResponseShowsNewestBuildingSnapshotWithPublishedTopology(t 
 	}
 	if len(response.Files) != 1 || response.Files[0].Path != "published.go" {
 		t.Fatalf("last published topology hidden while building: %+v", response.Files)
+	}
+}
+
+func TestArchitectureResponseKeepsPublishedTopologyAfterRefreshFails(t *testing.T) {
+	pool, ctx := architectureTestPool(t)
+	installationID, repoID := seedArchitectureRepo(t, ctx, pool)
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO code_nodes (repo_id, kind, name, file_path, line_start, line_end, language)
+		VALUES ($1, 'file', 'published.go', 'published.go', 1, 8, 'go')`, repoID); err != nil {
+		t.Fatalf("seed published topology: %v", err)
+	}
+	seedPublishedArchitectureGeneration(t, ctx, pool, repoID, "published-commit")
+	var failedGenerationID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO graph_index_generations
+		  (repo_id, commit_sha, status, expected_files, visited_files, failed_files, error)
+		VALUES ($1, 'failed-refresh', 'failed', 5, 2, 1, 'fetch failed') RETURNING id`, repoID).Scan(&failedGenerationID); err != nil {
+		t.Fatalf("seed failed refresh: %v", err)
+	}
+
+	response := requestArchitecture(t, ctx, pool, installationID, repoID)
+	if response.Snapshot.GenerationID != failedGenerationID || response.Snapshot.Status != "failed" || response.Snapshot.Complete {
+		t.Fatalf("failed refresh snapshot = %+v", response.Snapshot)
+	}
+	if len(response.Files) != 1 || response.Files[0].Path != "published.go" {
+		t.Fatalf("last published topology hidden after refresh failure: %+v", response.Files)
 	}
 }
 

@@ -399,6 +399,10 @@ func (q *Queries) ListArchCoupling(ctx context.Context, repoID int64) ([]ListArc
 const listArchFileEdges = `-- name: ListArchFileEdges :many
 SELECT src.file_path as source_path, tgt.file_path as target_path, ce.kind
 FROM code_edges ce
+JOIN repos authority ON authority.id = ce.repo_id
+JOIN graph_index_generations published
+  ON published.id = authority.graph_published_generation_id
+ AND published.repo_id = authority.id
 JOIN code_nodes src ON src.id = ce.source_id
 JOIN code_nodes tgt ON tgt.id = ce.target_id
 WHERE ce.repo_id = $1 AND src.file_path != tgt.file_path AND NOT ce.inferred
@@ -437,12 +441,16 @@ func (q *Queries) ListArchFileEdges(ctx context.Context, repoID int64) ([]ListAr
 }
 
 const listArchNodes = `-- name: ListArchNodes :many
-SELECT file_path, COALESCE(language, '')::text AS language, name, kind,
-       COALESCE(line_start, 0)::int AS line_start,
-       COALESCE(line_end, 0)::int AS line_end
-FROM code_nodes
-WHERE repo_id = $1
-ORDER BY file_path, line_start
+SELECT cn.file_path, COALESCE(cn.language, '')::text AS language, cn.name, cn.kind,
+       COALESCE(cn.line_start, 0)::int AS line_start,
+       COALESCE(cn.line_end, 0)::int AS line_end
+FROM code_nodes cn
+JOIN repos authority ON authority.id = cn.repo_id
+JOIN graph_index_generations published
+  ON published.id = authority.graph_published_generation_id
+ AND published.repo_id = authority.id
+WHERE cn.repo_id = $1
+ORDER BY cn.file_path, cn.line_start
 `
 
 type ListArchNodesRow struct {
@@ -454,7 +462,10 @@ type ListArchNodesRow struct {
 	LineEnd   int    `json:"line_end"`
 }
 
-// Returns all code nodes for a repo, used to compute file-level architecture metrics.
+// Returns published code nodes for a repo, used to compute file-level architecture metrics.
+// The generation pointer is the publication authority for the physical projection.
+// Repositories predating authoritative generations may still have legacy rows; those
+// rows must not become API topology merely because they were deliberately retained.
 func (q *Queries) ListArchNodes(ctx context.Context, repoID int64) ([]ListArchNodesRow, error) {
 	rows, err := q.db.Query(ctx, listArchNodes, repoID)
 	if err != nil {
