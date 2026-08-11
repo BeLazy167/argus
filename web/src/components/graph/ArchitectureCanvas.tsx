@@ -19,6 +19,7 @@ import dagre from "dagre";
 
 import FileNode from "./FileNode";
 import GroupNode from "./GroupNode";
+import { useMountEffect } from "@/lib/hooks/use-mount-effect";
 import type { ArchFile, ArchEdge } from "@/lib/queries/architecture";
 import type { ColorMode } from "@xyflow/react";
 
@@ -74,13 +75,21 @@ function edgeColorsFor(kind: string) {
 
 export type Lens = "risk" | "choke" | "hotspot" | "coupling";
 
+export type ArchitectureSearchRequest = {
+  /** Monotonically increasing ID owned by the search input event handler. */
+  id: number;
+  query: string;
+};
+
 type Props = {
   files: ArchFile[];
   edges: ArchEdge[];
   lens: Lens;
-  searchQuery?: string;
+  searchRequest?: ArchitectureSearchRequest;
   onSelectFile?: (filePath: string | null) => void;
 };
+
+const EMPTY_SEARCH_REQUEST: ArchitectureSearchRequest = { id: 0, query: "" };
 
 /** Per-lens border/glow for highlighted nodes */
 function lensHighlightStyle(file: ArchFile, lens: Lens): { borderColor?: string; boxShadow?: string } {
@@ -173,11 +182,50 @@ export function mergeLayoutPositions(layoutNodes: Node[], currentNodes: Node[]):
   }));
 }
 
-function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQuery, onSelectFile }: InnerProps) {
+type SearchViewportCommandProps = {
+  matchIds: string[];
+  totalNodes: number;
+};
+
+/**
+ * One keyed search request owns one viewport command. Topology refreshes update
+ * the rendered graph without remounting this command, so they cannot replay it.
+ */
+function SearchViewportCommand({ matchIds, totalNodes }: SearchViewportCommandProps) {
+  const { fitView } = useReactFlow();
+
+  useMountEffect(() => {
+    if (matchIds.length === 0 || matchIds.length >= totalNodes) return;
+    const reduceMotion =
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    void fitView({
+      nodes: matchIds.map((id) => ({ id })),
+      padding: 0.3,
+      duration: reduceMotion ? 0 : 300,
+    });
+  });
+
+  return null;
+}
+
+function ArchCanvasInner({
+  files,
+  edges,
+  lens,
+  direction,
+  setDirection,
+  searchRequest = EMPTY_SEARCH_REQUEST,
+  onSelectFile,
+}: InnerProps) {
   const { fitView } = useReactFlow();
   // Imperative store handle — the initial view reads live pane size + viewport
   const colorMode = useColorMode();
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [selection, setSelection] = useState<{
+    nodeId: string;
+    searchRequestId: number;
+  } | null>(null);
   const maxDensity = useMemo(() => Math.max(...files.map((f) => f.bug_density), 0.01), [files]);
 
   const layout = useMemo(() => {
@@ -439,7 +487,7 @@ function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQu
   }, [files, edges, lens, direction, maxDensity]);
 
   const [positionedNodes, setPositionedNodes] = useState(layout.nodes);
-  const searchLower = searchQuery?.toLowerCase().trim() ?? "";
+  const searchLower = searchRequest.query.toLowerCase().trim();
   const searchMatchIds = useMemo(
     () =>
       searchLower
@@ -448,7 +496,10 @@ function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQu
     [files, searchLower],
   );
   const activeSelectedNodeId =
-    selectedNodeId && files.some((file) => file.path === selectedNodeId) ? selectedNodeId : null;
+    selection?.searchRequestId === searchRequest.id &&
+    files.some((file) => file.path === selection.nodeId)
+      ? selection.nodeId
+      : null;
   const onNodesChange = useCallback(
     (changes: Parameters<typeof applyNodeChanges>[0]) => {
       setPositionedNodes((current) =>
@@ -513,15 +564,17 @@ function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQu
   const onNodeClick: NodeMouseHandler = useCallback(
     (_event, node) => {
       if (node.type === "group") return;
-      const isDeselect = selectedNodeId === node.id;
-      setSelectedNodeId(isDeselect ? null : node.id);
+      const isDeselect = activeSelectedNodeId === node.id;
+      setSelection(
+        isDeselect ? null : { nodeId: node.id, searchRequestId: searchRequest.id },
+      );
       onSelectFile?.(isDeselect ? null : node.id);
     },
-    [selectedNodeId, onSelectFile]
+    [activeSelectedNodeId, searchRequest.id, onSelectFile]
   );
 
   const onPaneClick = useCallback(() => {
-    setSelectedNodeId(null);
+    setSelection(null);
     onSelectFile?.(null);
   }, [onSelectFile]);
 
@@ -559,6 +612,12 @@ function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQu
           zoomable
         />
       </ReactFlow>
+
+      <SearchViewportCommand
+        key={searchRequest.id}
+        matchIds={searchMatchIds}
+        totalNodes={files.length}
+      />
 
       {/* Direction toggle + fit-all */}
       <div className="absolute top-4 right-4 z-10 flex gap-1 bg-[var(--graph-surface)]/80 backdrop-blur-sm border border-[var(--graph-border)] p-0.5">
