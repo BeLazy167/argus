@@ -113,21 +113,21 @@ func TestRecoveryClaimIsAtomicAcrossMachines(t *testing.T) {
 		}(sm)
 	}
 	close(start)
-	winners := 0
+	targetClaims := 0
 	for i := 0; i < 2; i++ {
 		r := <-results
 		if r.err != nil {
 			t.Fatal(r.err)
 		}
-		if r.claimed {
-			winners++
-			if r.id != runID {
-				t.Fatalf("claimed %s want %s", r.id, runID)
-			}
+		// A shared integration database may contain another eligible run. It is
+		// correct for the other machine to claim that different run; this test
+		// asserts only that exactly one machine can own the target generation.
+		if r.claimed && r.id == runID {
+			targetClaims++
 		}
 	}
-	if winners != 1 {
-		t.Fatalf("claim winners=%d want 1", winners)
+	if targetClaims != 1 {
+		t.Fatalf("target claim winners=%d want 1", targetClaims)
 	}
 }
 

@@ -52,3 +52,27 @@ func TestHTTPMermaidValidatorRejectsOversizeWithoutRequest(t *testing.T) {
 		t.Fatalf("oversized source made %d request(s)", requests.Load())
 	}
 }
+
+func TestHTTPMermaidValidatorDoesNotForwardSecretAcrossRedirect(t *testing.T) {
+	var redirectedRequests atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirectedRequests.Add(1)
+		if r.Header.Get("X-Argus-Mermaid-Secret") != "" {
+			t.Error("validator secret reached redirect target")
+		}
+		_, _ = w.Write([]byte(`{"valid":true,"version":"11.13.0"}`))
+	}))
+	defer target.Close()
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
+	}))
+	defer source.Close()
+
+	validator := NewHTTPMermaidValidator(source.URL, "test-secret", http.DefaultClient)
+	if err := validator.Validate(context.Background(), "flowchart TD\n N1 --> N2"); err == nil {
+		t.Fatal("redirecting validator was accepted")
+	}
+	if redirectedRequests.Load() != 0 {
+		t.Fatalf("validator followed %d redirect(s)", redirectedRequests.Load())
+	}
+}

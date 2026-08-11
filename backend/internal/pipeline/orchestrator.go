@@ -369,7 +369,7 @@ func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, 
 		eventBus:         eventBus,
 		logger:           logger,
 		cfg:              cfg,
-		mermaidValidator: NewHTTPMermaidValidator(cfg.DashboardBaseURL, cfg.MermaidValidatorSecret, nil),
+		mermaidValidator: NewHTTPMermaidValidator(cfg.MermaidValidatorBaseURL, cfg.MermaidValidatorSecret, nil),
 	}
 	sm.onTerminal = o.FinalizeStartedComment
 	// Same reason as onTerminal: the hook closes over the orchestrator (store +
@@ -3445,6 +3445,7 @@ func (o *Orchestrator) learnPositivePatterns(ctx context.Context, run *PipelineR
 				OriginalBody: commentTitle(c),
 				Action:       "confirmed",
 				PRNumber:     run.PREvent.PRNumber,
+				Source:       memory.SourceAutomaticPraise,
 			}); err != nil {
 				o.logger.Warn("positive pattern indexing failed", "error", err)
 			} else {

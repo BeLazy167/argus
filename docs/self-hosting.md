@@ -99,7 +99,7 @@ pnpm dev
 
 Point `NEXT_PUBLIC_API_URL` at your backend and set `CORS_ALLOW_ORIGIN` on the backend to the dashboard origin.
 
-PR diagrams use the dashboard's server-side Mermaid parser before the backend stores a diagram or edits a PR description. Generate one shared value (`openssl rand -hex 32`) and set it as `MERMAID_VALIDATOR_SECRET` on **both** the backend and web deployment. `DASHBOARD_BASE_URL` must be reachable from the backend. Diagram generation fails closed when the parser service, shared secret, or deployed Mermaid version is unavailable; the rest of the review still completes.
+PR diagrams use the dashboard's server-side Mermaid parser before the backend stores a diagram or edits a PR description. Generate one shared value (`openssl rand -hex 32`) and set it as `MERMAID_VALIDATOR_SECRET` on **both** the backend and web deployment. Set `MERMAID_VALIDATOR_BASE_URL` on the backend to the explicit origin of that web deployment; it must be reachable from the backend. The backend has no validator-origin default and refuses an unpaired URL or secret, so it cannot send private diagram evidence or the shared secret to the vendor dashboard by accident. `DASHBOARD_BASE_URL` remains the link target for GitHub comments. Diagram generation fails closed when the parser service, shared secret, or deployed Mermaid version is unavailable; the rest of the review still completes.
 
 ## Auto-run & re-review
 

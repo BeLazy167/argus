@@ -50,8 +50,9 @@ type Indexer interface {
 	IndexPattern(ctx context.Context, repo string, pattern PatternMemory) (*IndexResult, error)
 	IndexSharedPattern(ctx context.Context, pattern PatternMemory) (*IndexResult, error)
 	IndexFeedbackSignal(ctx context.Context, owner, repo string, feedback FeedbackMemory) error
-	// ReconcileFeedbackSignal makes feedback a current state rather than an
-	// append-only history. An empty Action retracts all active signals.
+	// ReconcileFeedbackSignal makes reaction feedback a current state rather
+	// than append-only history. An empty Action retracts only reaction-owned
+	// signals; trusted replies and automatic praise have separate identities.
 	ReconcileFeedbackSignal(ctx context.Context, owner, repo string, feedback FeedbackMemory) error
 	IndexScenario(ctx context.Context, owner, repo string, scenarioID int64, description, severity string, files []string) error
 
@@ -101,6 +102,12 @@ const (
 	// SourceTrustedReplyFeedback identifies reply learnings whose author was
 	// authorized before the write.
 	SourceTrustedReplyFeedback = "trusted_reply_feedback"
+	// SourceReactionFeedback identifies reversible feedback derived from the
+	// current aggregate GitHub reaction tally.
+	SourceReactionFeedback = "reaction_feedback"
+	// SourceAutomaticPraise identifies positive feedback learned from an Argus
+	// praise finding rather than from a developer action.
+	SourceAutomaticPraise = "automatic_praise"
 )
 
 // IndexResult identifies the row a write landed on. ID is the deterministic
@@ -233,7 +240,15 @@ func RuleCustomID(ruleID int64) string {
 // writer is IndexFeedbackSignal below; its invariants are round-tripped in
 // dismissal_id_test.go through that write path.
 func dismissalCustomID(repo, category, body string) string {
-	h := sha256.Sum256([]byte(category + "|" + normalizeBody(body)))
+	return dismissalCustomIDForSource(repo, category, body, "")
+}
+
+func dismissalCustomIDForSource(repo, category, body, source string) string {
+	identity := category + "|" + normalizeBody(body)
+	if source != "" {
+		identity += "|" + source
+	}
+	h := sha256.Sum256([]byte(identity))
 	hash := hex.EncodeToString(h[:6])
 	prefix := fmt.Sprintf("%s--dismissal", repoIDSegment(repo))
 	return truncateIDWithSuffix(prefix, hash)
@@ -241,10 +256,19 @@ func dismissalCustomID(repo, category, body string) string {
 
 // FeedbackCustomID returns a stable customId for a feedback signal on a finding.
 // Includes `action` in the hash so confirmed and dismissed signals for the
-// same finding coexist instead of silently overwriting each other.
+// same finding coexist instead of silently overwriting each other. Production
+// feedback writers also add Source through feedbackCustomIDForSource.
 func FeedbackCustomID(owner, repo, filePath, category, body, action string) string {
+	return feedbackCustomIDForSource(owner, repo, filePath, category, body, action, "")
+}
+
+func feedbackCustomIDForSource(owner, repo, filePath, category, body, action, source string) string {
 	_ = owner
-	h := sha256.Sum256([]byte(filePath + "|" + category + "|" + normalizeBody(body) + "|" + action))
+	identity := filePath + "|" + category + "|" + normalizeBody(body) + "|" + action
+	if source != "" {
+		identity += "|" + source
+	}
+	h := sha256.Sum256([]byte(identity))
 	hash := hex.EncodeToString(h[:6])
 	prefix := fmt.Sprintf("%s--feedback", repoIDSegment(repo))
 	return truncateIDWithSuffix(prefix, hash)
@@ -285,6 +309,9 @@ type FeedbackMemory struct {
 	// Repo is the repo short name, mirrored into dismissal metadata for
 	// post-hoc audits (the container tag already scopes retrieval).
 	Repo string
+	// Source owns the feedback document identity. Reaction feedback is
+	// reversible without deleting trusted-reply or automatic-praise knowledge.
+	Source string
 }
 
 // buildReviewContent keeps content pure-prose: the finding body only. No

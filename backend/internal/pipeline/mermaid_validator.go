@@ -35,6 +35,14 @@ func NewHTTPMermaidValidator(dashboardBaseURL, secret string, client *http.Clien
 	}
 	if client == nil {
 		client = &http.Client{Timeout: 3 * time.Second}
+	} else {
+		clone := *client
+		client = &clone
+	}
+	// The shared secret is scoped to the explicitly configured parser origin.
+	// Never copy it to a redirect target, even when the target is same-host.
+	client.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
 	}
 	return &HTTPMermaidValidator{endpoint: endpoint, secret: secret, client: client}
 }

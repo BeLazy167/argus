@@ -178,6 +178,7 @@ func (ra *ReplyAnalyzer) Analyze(ctx context.Context, event ghpkg.CommentEvent) 
 			Action:         plan.FeedbackAction,
 			DeveloperReply: event.CommentBody,
 			PRNumber:       event.PRNumber,
+			Source:         memory.SourceTrustedReplyFeedback,
 		}
 		if plan.FeedbackAction == "dismissed" {
 			fb.Repo = repo

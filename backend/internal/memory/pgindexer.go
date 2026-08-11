@@ -598,14 +598,16 @@ func (idx *PGIndexer) IndexFeedbackSignal(ctx context.Context, owner, repo strin
 	return nil
 }
 
-// ReconcileFeedbackSignal replaces the active signal for one finding. The
-// deletes are soft and idempotent; upsert resurrects the current document.
+// ReconcileFeedbackSignal replaces reaction-owned state for one finding. The
+// deletes are soft and idempotent; source-specific IDs preserve feedback from
+// trusted replies and automatic praise. The legacy cleanup recognizes old
+// reaction dismissals by the absence of source and developer-explanation text.
 func (idx *PGIndexer) ReconcileFeedbackSignal(ctx context.Context, owner, repo string, fb FeedbackMemory) error {
 	plan, err := feedbackReconciliationPlan(owner, repo, fb)
 	if err != nil {
 		return err
 	}
-	if err := idx.deleteFeedbackDocuments(ctx, plan.DeleteFirst); err != nil {
+	if err := idx.deleteFeedbackDocuments(ctx, plan.DeleteFirst, plan.LegacyDismissalBefore); err != nil {
 		return err
 	}
 	if plan.Upsert != nil {
@@ -613,21 +615,29 @@ func (idx *PGIndexer) ReconcileFeedbackSignal(ctx context.Context, owner, repo s
 			return err
 		}
 	}
-	if err := idx.deleteFeedbackDocuments(ctx, plan.DeleteAfter); err != nil {
+	if err := idx.deleteFeedbackDocuments(ctx, plan.DeleteAfter, plan.LegacyDismissalAfter); err != nil {
 		return err
 	}
 	idx.logger.Info("reconciled feedback signal", "action", fb.Action, "repo", repo, "file", fb.FilePath)
 	return nil
 }
 
-func (idx *PGIndexer) deleteFeedbackDocuments(ctx context.Context, documentIDs []string) error {
-	if len(documentIDs) == 0 {
+func (idx *PGIndexer) deleteFeedbackDocuments(ctx context.Context, documentIDs []string, legacyReactionDismissalID string) error {
+	if len(documentIDs) == 0 && legacyReactionDismissalID == "" {
 		return nil
 	}
 	_, err := idx.pool.Exec(ctx, `
 		UPDATE memories SET deleted_at = now(), updated_at = now()
-		WHERE installation_id = $1 AND custom_id = ANY($2::text[]) AND deleted_at IS NULL
-	`, idx.installationID, documentIDs)
+		WHERE installation_id = $1 AND deleted_at IS NULL AND (
+			custom_id = ANY($2::text[])
+			OR (
+				custom_id = NULLIF($3, '')
+				AND metadata->>'action' = 'dismissed'
+				AND COALESCE(metadata->>'source', '') = ''
+				AND content NOT LIKE '%' || E'\n\nDeveloper explanation:' || '%'
+			)
+		)
+	`, idx.installationID, documentIDs, legacyReactionDismissalID)
 	if err != nil {
 		return fmt.Errorf("retracting stale feedback memory: %w", err)
 	}

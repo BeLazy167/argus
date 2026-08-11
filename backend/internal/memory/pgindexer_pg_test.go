@@ -552,22 +552,62 @@ func (r *racingEmbedder) Embed(ctx context.Context, inputs []string) ([][]float3
 
 func (r *racingEmbedder) Model() string { return "racing-1024" }
 
-func TestPGIndexerReactionFeedbackReversal(t *testing.T) {
+func TestPGIndexerReactionFeedbackReversalPreservesOtherSources(t *testing.T) {
 	pool, install := pgTestPool(t)
 	ctx := context.Background()
 	idx := NewPGIndexer(pool, &stubEmbedder{}, install, pgTestDims, slog.New(slog.DiscardHandler))
-	fb := FeedbackMemory{
+	base := FeedbackMemory{
 		FilePath: "race.go", Category: "concurrency", OriginalBody: "lock ordering can deadlock",
-		PRNumber: 9, Repo: "api", Action: "dismissed",
+		PRNumber: 9, Repo: "api",
 	}
-	dismissedID := dismissalCustomID("api", fb.Category, fb.OriginalBody)
-	confirmedID := FeedbackCustomID("acme", "api", fb.FilePath, fb.Category, fb.OriginalBody, "confirmed")
+
+	trusted := base
+	trusted.Action = "dismissed"
+	trusted.Source = SourceTrustedReplyFeedback
+	trusted.DeveloperReply = "this lock is intentionally one-way"
+	if err := idx.IndexFeedbackSignal(ctx, "acme", "api", trusted); err != nil {
+		t.Fatal(err)
+	}
+	trustedID := dismissalCustomIDForSource("api", base.Category, base.OriginalBody, SourceTrustedReplyFeedback)
+
+	// Model a pre-source trusted reply row from before origin-specific IDs. The
+	// reaction reconciler may clean legacy reaction rows, but not one whose
+	// developer explanation proves it came from the authorized reply path.
+	legacyTrusted := base
+	legacyTrusted.Action = "dismissed"
+	legacyTrusted.DeveloperReply = "legacy trusted explanation"
+	if err := idx.IndexFeedbackSignal(ctx, "acme", "api", legacyTrusted); err != nil {
+		t.Fatal(err)
+	}
+	legacyTrustedID := dismissalCustomID("api", base.Category, base.OriginalBody)
+
+	legacyReaction := base
+	legacyReaction.OriginalBody = "legacy reaction dismissal"
+	legacyReaction.Action = "dismissed"
+	if err := idx.IndexFeedbackSignal(ctx, "acme", "api", legacyReaction); err != nil {
+		t.Fatal(err)
+	}
+	legacyReactionID := dismissalCustomID("api", legacyReaction.Category, legacyReaction.OriginalBody)
+	legacyReaction.Source = SourceReactionFeedback
+	legacyReaction.Action = ""
+	if err := idx.ReconcileFeedbackSignal(ctx, "acme", "api", legacyReaction); err != nil {
+		t.Fatal(err)
+	}
+	if got := readRow(t, pool, install, legacyReactionID); got.deletedAt == nil {
+		t.Fatal("legacy reaction dismissal was not retracted")
+	}
+
+	fb := base
+	fb.Action = "dismissed"
+	fb.Source = SourceReactionFeedback
+	dismissedID := dismissalCustomIDForSource("api", fb.Category, fb.OriginalBody, SourceReactionFeedback)
+	confirmedID := feedbackCustomIDForSource("acme", "api", fb.FilePath, fb.Category, fb.OriginalBody, "confirmed", SourceReactionFeedback)
 
 	if err := idx.ReconcileFeedbackSignal(ctx, "acme", "api", fb); err != nil {
 		t.Fatal(err)
 	}
 	if got := readRow(t, pool, install, dismissedID); got.deletedAt != nil {
-		t.Fatal("dismissal was not live")
+		t.Fatal("reaction dismissal was not live")
 	}
 
 	fb.Action = "confirmed"
@@ -575,11 +615,17 @@ func TestPGIndexerReactionFeedbackReversal(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := readRow(t, pool, install, dismissedID); got.deletedAt == nil {
-		t.Fatal("overturned dismissal remains live and can still suppress")
+		t.Fatal("overturned reaction dismissal remains live and can still suppress")
 	}
 	if got := readRow(t, pool, install, confirmedID); got.deletedAt != nil {
-		t.Fatal("confirmation was not live")
+		t.Fatal("reaction confirmation was not live")
 	}
+	for name, id := range map[string]string{"trusted reply": trustedID, "legacy trusted reply": legacyTrustedID} {
+		if got := readRow(t, pool, install, id); got.deletedAt != nil {
+			t.Fatalf("%s was deleted by reaction reconciliation", name)
+		}
+	}
+
 	// Replay is idempotent and must resurrect neither stale state nor duplicates.
 	if err := idx.ReconcileFeedbackSignal(ctx, "acme", "api", fb); err != nil {
 		t.Fatal(err)
@@ -590,16 +636,21 @@ func TestPGIndexerReactionFeedbackReversal(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := readRow(t, pool, install, confirmedID); got.deletedAt == nil {
-		t.Fatal("neutral reaction tally did not retract confirmation")
+		t.Fatal("neutral reaction tally did not retract reaction confirmation")
 	}
-	var live int
+	for name, id := range map[string]string{"trusted reply": trustedID, "legacy trusted reply": legacyTrustedID} {
+		if got := readRow(t, pool, install, id); got.deletedAt != nil {
+			t.Fatalf("%s was deleted by neutral reaction reconciliation", name)
+		}
+	}
+	var liveReaction int
 	if err := pool.QueryRow(ctx, `
-        SELECT count(*) FROM memories
-        WHERE installation_id = $1 AND custom_id IN ($2, $3) AND deleted_at IS NULL
-    `, install, dismissedID, confirmedID).Scan(&live); err != nil {
+		SELECT count(*) FROM memories
+		WHERE installation_id = $1 AND custom_id IN ($2, $3) AND deleted_at IS NULL
+	`, install, dismissedID, confirmedID).Scan(&liveReaction); err != nil {
 		t.Fatal(err)
 	}
-	if live != 0 {
-		t.Fatalf("live reaction feedback rows = %d, want 0", live)
+	if liveReaction != 0 {
+		t.Fatalf("live reaction feedback rows = %d, want 0", liveReaction)
 	}
 }

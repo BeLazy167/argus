@@ -156,6 +156,7 @@ func (ra *ReactionAnalyzer) HandleCommentReactions(ctx context.Context, event gh
 			OriginalBody: FindingTextFromPostedBody(comment.Body),
 			Action:       action,
 			PRNumber:     event.PRNumber,
+			Source:       memory.SourceReactionFeedback,
 		}
 		if action == "dismissed" {
 			fb.Repo = repo

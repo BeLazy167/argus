@@ -52,7 +52,7 @@ func TestSearchQuarantinesLegacyReplyFeedbackNonDestructively(t *testing.T) {
 }
 
 func TestFeedbackReconciliationPlanReversesDismissal(t *testing.T) {
-	base := FeedbackMemory{FilePath: "a.go", Category: "bug", OriginalBody: "race", Repo: "api"}
+	base := FeedbackMemory{FilePath: "a.go", Category: "bug", OriginalBody: "race", Repo: "api", Source: SourceReactionFeedback}
 	dismissed := base
 	dismissed.Action = "dismissed"
 	confirmed := base
@@ -71,7 +71,7 @@ func TestFeedbackReconciliationPlanReversesDismissal(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dismissalID := dismissalCustomID("api", "bug", "race")
+	dismissalID := dismissalCustomIDForSource("api", "bug", "race", SourceReactionFeedback)
 	if dismissPlan.Upsert == nil || dismissPlan.Upsert.CustomID != dismissalID {
 		t.Fatalf("dismiss plan = %+v", dismissPlan)
 	}
@@ -80,5 +80,15 @@ func TestFeedbackReconciliationPlanReversesDismissal(t *testing.T) {
 	}
 	if neutralPlan.Upsert != nil || len(neutralPlan.DeleteFirst) != 3 {
 		t.Fatalf("neutral reversal plan = %+v", neutralPlan)
+	}
+	trustedDismissalID := dismissalCustomIDForSource("api", "bug", "race", SourceTrustedReplyFeedback)
+	for _, id := range append(append([]string{}, neutralPlan.DeleteFirst...), neutralPlan.DeleteAfter...) {
+		if id == trustedDismissalID {
+			t.Fatalf("reaction plan deletes trusted-reply identity: %+v", neutralPlan)
+		}
+	}
+	base.Source = SourceTrustedReplyFeedback
+	if _, err := feedbackReconciliationPlan("acme", "api", base); err == nil {
+		t.Fatal("trusted reply was accepted by reaction-only reconciler")
 	}
 }
