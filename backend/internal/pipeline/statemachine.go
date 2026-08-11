@@ -109,7 +109,7 @@ func (sm *StateMachine) Run(ctx context.Context, run *PipelineRun) error {
 	if applied, updErr := sm.setRunStatus(ctx, run, "in_progress", "", nil, []string{"pending", "in_progress", "failed"}); updErr != nil {
 		sm.logger.Warn("failed to mark review in_progress", "error", updErr, "review_id", run.ReviewID)
 	} else if !applied {
-		return context.Canceled
+		return sm.terminalizeRejectedAttempt(ctx, run)
 	}
 
 	trans := transitions()
@@ -236,6 +236,23 @@ func (sm *StateMachine) Run(ctx context.Context, run *PipelineRun) error {
 		}
 	}
 	return nil
+}
+
+// terminalizeRejectedAttempt removes a persisted run from crash-recovery
+// consideration when its review row rejects the initial ownership CAS. The
+// review may already be cancelled/completed or a newer retry generation may
+// own it, so this path must not mutate the review row or publish an outcome.
+func (sm *StateMachine) terminalizeRejectedAttempt(ctx context.Context, run *PipelineRun) error {
+	if run.State.IsTerminal() {
+		return context.Canceled
+	}
+	run.State = StateCancelled
+	run.Error = "review attempt is no longer active"
+	run.UpdatedAt = time.Now()
+	if err := sm.persist(context.WithoutCancel(ctx), run); err != nil {
+		return fmt.Errorf("terminalizing rejected pipeline attempt: %w", err)
+	}
+	return context.Canceled
 }
 
 // publishStageChanged emits a stage_changed event if EventBus is attached.

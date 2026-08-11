@@ -29,11 +29,17 @@ import (
 // "review already in progress" comment.
 var ErrInFlight = errors.New("a review for this PR is already in flight")
 
-// launcherStore is the narrow store surface the Launcher needs: the compare-and-
-// set status write used to roll a failed retry back out of limbo. *store.Store
-// satisfies it; tests substitute a fake.
+// ErrInvalidAttemptGeneration is returned when a retry launch has no positive
+// attempt generation. Generation zero cannot own review mutations.
+var ErrInvalidAttemptGeneration = errors.New("retry launch requires a positive attempt generation")
+
+// launcherStore is the narrow store surface the Launcher needs: the
+// generation-aware compare-and-set used to roll a failed retry out of limbo.
+// Keeping this in the declared contract prevents rollback from silently
+// disappearing when a store lacks the method. *store.Store satisfies it; tests
+// substitute a fake.
 type launcherStore interface {
-	UpdateReviewStatusIf(ctx context.Context, id uuid.UUID, status, errMsg string, tokenUsage []byte, allowedCurrent []string) (bool, error)
+	UpdateReviewStatusForAttempt(ctx context.Context, id uuid.UUID, generation int, status, errMsg string, tokenUsage []byte, allowedCurrent []string) (bool, error)
 }
 
 // LaunchSpec is the immutable description of one pipeline launch. Repo + PR key
@@ -57,6 +63,7 @@ type LaunchSpec struct {
 	// created inside the pipeline under an id the caller can't know up front.
 	ReviewID *uuid.UUID
 	// AttemptGeneration identifies a retry launch for generation-aware rollback.
+	// ReviewID launches require a non-nil, positive value after BeforeSpawn.
 	AttemptGeneration *int
 
 	// BeforeSpawn runs synchronously AFTER the slot is won but BEFORE the
@@ -122,6 +129,11 @@ func (l *Launcher) Launch(spec LaunchSpec) error {
 			return err
 		}
 	}
+	if err := validateAttemptGeneration(spec); err != nil {
+		cancel()
+		slot.Release()
+		return err
+	}
 
 	// Pair the slot with its cancel func — the invariant the two old sync.Maps
 	// couldn't enforce (and the checkbox path violated).
@@ -170,6 +182,19 @@ func (l *Launcher) Launch(spec LaunchSpec) error {
 	return nil
 }
 
+func validateAttemptGeneration(spec LaunchSpec) error {
+	if spec.ReviewID == nil {
+		if spec.AttemptGeneration != nil {
+			return ErrInvalidAttemptGeneration
+		}
+		return nil
+	}
+	if spec.AttemptGeneration == nil || *spec.AttemptGeneration <= 0 {
+		return ErrInvalidAttemptGeneration
+	}
+	return nil
+}
+
 // runGuarded runs the pipeline and converts a panic into an error so the
 // goroutine's cleanup + rollback still run. Previously an unrecovered panic in a
 // launch goroutine crashed the whole process (killing every other in-flight
@@ -199,25 +224,14 @@ func (l *Launcher) rollback(ctx context.Context, spec LaunchSpec, cause error) {
 	// Detached from the launch ctx (about to be cancelled by the deferred
 	// teardown) but keeps trace attribution. Conditional so a Stop that raced
 	// this failure isn't flipped from cancelled back to failed.
-	applied := false
-	var uerr error
-	if spec.AttemptGeneration != nil {
-		if attemptStore, ok := l.st.(interface {
-			UpdateReviewStatusForAttempt(context.Context, uuid.UUID, int, string, string, []byte, []string) (bool, error)
-		}); ok {
-			applied, uerr = attemptStore.UpdateReviewStatusForAttempt(context.WithoutCancel(ctx), id, *spec.AttemptGeneration, "failed", cause.Error(), nil, []string{"pending", "in_progress"})
-		}
-	} else {
-		applied, uerr = l.st.UpdateReviewStatusIf(context.WithoutCancel(ctx), id, "failed", cause.Error(), nil, []string{"pending", "in_progress"})
-	}
+	applied, uerr := l.st.UpdateReviewStatusForAttempt(
+		context.WithoutCancel(ctx), id, *spec.AttemptGeneration,
+		"failed", cause.Error(), nil, []string{"pending", "in_progress"},
+	)
 	if uerr != nil {
 		l.logger.Error("launch: failed to roll back review status", "error", uerr, "review_id", id)
 	}
 	if applied && l.eventBus != nil {
-		if spec.AttemptGeneration != nil {
-			l.eventBus.PublishForAttempt(id, *spec.AttemptGeneration, EventError, map[string]string{"error": cause.Error()})
-		} else {
-			l.eventBus.Publish(id, EventError, map[string]string{"error": cause.Error()})
-		}
+		l.eventBus.PublishForAttempt(id, *spec.AttemptGeneration, EventError, map[string]string{"error": cause.Error()})
 	}
 }

@@ -15,31 +15,45 @@ import (
 func TestRecoveredRunCancelsImmediatelyWhenLeaseIsStolen(t *testing.T) {
 	ticks := make(chan time.Time, 1)
 	resumeStarted := make(chan struct{})
+	var cancellationObserved atomic.Bool
 	var mutationAfterCancellation atomic.Bool
 	var released atomic.Bool
 	sm := &StateMachine{
+		stages:            make(map[PipelineState]StageFunc),
 		logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
 		recoveryHeartbeat: ticks,
 		renewRecoveryLeaseFn: func(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
 			return false, nil
 		},
-		resumeRecoveryFn: func(ctx context.Context, _ uuid.UUID) (*PipelineRun, error) {
-			close(resumeStarted)
-			<-ctx.Done()
-			// A recovered stage must observe cancellation before its next
-			// externally visible mutation (including review posting).
-			select {
-			case <-ctx.Done():
-				return nil, context.Cause(ctx)
-			default:
+		setStatus: func(context.Context, uuid.UUID, string, string, []byte, []string) (bool, error) {
+			if cancellationObserved.Load() {
 				mutationAfterCancellation.Store(true)
-				return nil, nil
 			}
+			return true, nil
 		},
+		persist: func(context.Context, *PipelineRun) error {
+			if cancellationObserved.Load() {
+				mutationAfterCancellation.Store(true)
+			}
+			return nil
+		},
+		isCancelled: func(context.Context, uuid.UUID) (bool, error) { return false, nil },
 		releaseRecoveryLeaseFn: func(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
 			released.Store(true)
 			return true, nil
 		},
+	}
+	sm.RegisterStage(StateReviewing, func(ctx context.Context, _ *PipelineRun) error {
+		close(resumeStarted)
+		<-ctx.Done()
+		cancellationObserved.Store(true)
+		// Deliberately ignore cancellation and report success. Run must still
+		// re-check lease ownership before its next transition or persistence.
+		return nil
+	})
+	sm.resumeRecoveryFn = func(ctx context.Context, _ uuid.UUID) (*PipelineRun, error) {
+		run := &PipelineRun{ID: uuid.New(), ReviewID: uuid.New(), State: StateReviewing}
+		return run, sm.Run(ctx, run)
 	}
 
 	done := make(chan error, 1)
