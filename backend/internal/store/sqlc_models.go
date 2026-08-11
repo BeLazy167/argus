@@ -84,3 +84,11 @@ func reviewListFromValues(id uuid.UUID, repoID int64, prNumber int, prTitle, prA
 func fileMemoryCommentFromSQLC(row db.GetFileMemoryCommentsRow) (ReviewComment, error) {
 	return reviewCommentFromValues(row.ID, row.ReviewID, row.FilePath, row.StartLine, row.EndLine, row.Side, row.Body, row.Severity, row.Category, row.Specialist, row.ConfidenceScore, row.CodeSnippet, row.GithubCommentID, row.MatchedPatternID, row.MatchedPatternScore, row.EnforcedRuleContent, row.IsNewFinding, row.CreatedAt, row.State, row.SuppressedReason, row.ResolvedSHA, row.AttemptGeneration)
 }
+
+func providerKeyFromValues(id, installationID int64, repoID *int64, provider, apiKeyEnc string, baseURL, model, keyHint *string, createdAt, updatedAt time.Time) ProviderKey {
+	hint := ""
+	if keyHint != nil {
+		hint = *keyHint
+	}
+	return ProviderKey{ID: id, InstallationID: installationID, RepoID: repoID, Provider: provider, APIKeyEnc: apiKeyEnc, KeyHint: hint, BaseURL: baseURL, Model: model, CreatedAt: createdAt, UpdatedAt: updatedAt}
+}

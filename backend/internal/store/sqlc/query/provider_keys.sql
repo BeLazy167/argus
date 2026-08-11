@@ -27,8 +27,9 @@ ON CONFLICT (installation_id, repo_id, provider) DO UPDATE SET
     updated_at = NOW()
 RETURNING id, installation_id, repo_id, provider, api_key_enc, base_url, model, key_hint, created_at, updated_at;
 
--- name: DeleteProviderKey :execrows
-DELETE FROM provider_keys WHERE id = $1 AND installation_id = $2;
+-- name: DeleteProviderKey :one
+DELETE FROM provider_keys WHERE id = $1 AND installation_id = $2
+RETURNING provider;
 
 -- name: ResolveAPIKeyRepoLevel :one
 SELECT api_key_enc, base_url FROM provider_keys
