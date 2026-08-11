@@ -229,17 +229,19 @@ func validateDiagramCandidate(candidate diagramResult, spec diagramSpec, groundi
 		return fmt.Errorf("diagram type %q was not requested as %q", candidate.Type, spec.Type)
 	}
 	source := strings.TrimSpace(candidate.Mermaid)
+	lines := strings.Split(source, "\n")
+	header := strings.TrimSpace(lines[0])
 	switch spec.Type {
 	case "sequence":
-		if !strings.HasPrefix(source, "sequenceDiagram") {
+		if header != "sequenceDiagram" {
 			return errors.New("sequence diagram has the wrong Mermaid type")
 		}
 	case "dataflow":
-		if !strings.HasPrefix(source, "flowchart TD") {
+		if header != "flowchart TD" {
 			return errors.New("dataflow diagram has the wrong Mermaid type")
 		}
 	case "dependency":
-		if !strings.HasPrefix(source, "graph LR") && !strings.HasPrefix(source, "flowchart LR") {
+		if header != "graph LR" && header != "flowchart LR" {
 			return errors.New("dependency diagram has the wrong Mermaid type")
 		}
 	default:
@@ -275,7 +277,7 @@ func validateDiagramCandidate(candidate diagramResult, spec diagramSpec, groundi
 		allowedEdges[pair] = append(allowedEdges[pair], edge.EvidenceID)
 	}
 	edgeCount := 0
-	for _, line := range strings.Split(source, "\n")[1:] {
+	for _, line := range lines[1:] {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}

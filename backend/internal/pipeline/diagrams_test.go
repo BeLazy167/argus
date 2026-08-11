@@ -49,6 +49,20 @@ func TestValidateDiagramCandidateRejectsHallucinatedEdge(t *testing.T) {
 	}
 }
 
+func TestValidateDiagramCandidateRejectsStatementsHiddenInHeader(t *testing.T) {
+	grounding, _ := groundedDiagramFixture()
+	spec := diagramSpec{Type: "dataflow", MaxNodes: 2}
+	candidate := diagramResult{
+		Type: "dataflow",
+		Mermaid: `flowchart TD;N2-->N1;click N1 "https://evil.example" _blank
+N1["a.go"] --> N2["b.go"]`,
+		Evidence: []string{"edge:E1", "diff:D1"},
+	}
+	if err := validateDiagramCandidate(candidate, spec, grounding); err == nil {
+		t.Fatal("semicolon-separated header statements bypassed grounding validation")
+	}
+}
+
 func TestValidateDiagramsFailsClosedBeforePersistence(t *testing.T) {
 	grounding, specs := groundedDiagramFixture()
 	candidate := diagramResult{
