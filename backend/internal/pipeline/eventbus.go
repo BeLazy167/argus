@@ -339,10 +339,28 @@ func (eb *EventBus) waitToReconnect(ctx context.Context, err error) {
 	}
 }
 
+// authorizedReviewEventsSQL is the single authority relation for every
+// durable-event read. Generation-zero events are review-wide; attempt-scoped
+// events are visible only while their attempt is current.
+const authorizedReviewEventsSQL = `
+	SELECT e.review_id, e.id, COALESCE(e.attempt_generation,0) AS attempt_generation,
+	       e.event_type, e.created_at, e.data
+	FROM review_events e
+	JOIN reviews r ON r.id=e.review_id
+	WHERE e.attempt_generation=0 OR e.attempt_generation=r.attempt_generation`
+
 func (eb *EventBus) deliverStored(ctx context.Context, id int64) error {
 	var reviewID uuid.UUID
 	var evt Event
-	err := eb.pool.QueryRow(ctx, `SELECT review_id, id, COALESCE(attempt_generation,0), event_type, created_at, data FROM review_events WHERE id=$1`, id).Scan(&reviewID, &evt.ID, &evt.AttemptGeneration, &evt.Type, &evt.Timestamp, &evt.Data)
+	err := eb.pool.QueryRow(ctx, `
+		SELECT review_id, id, attempt_generation, event_type, created_at, data
+		FROM (`+authorizedReviewEventsSQL+`) authorized
+		WHERE id=$1`, id).Scan(&reviewID, &evt.ID, &evt.AttemptGeneration, &evt.Type, &evt.Timestamp, &evt.Data)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// A notification can race deletion or BeginReviewRetry. Both mean the
+		// referenced event has no authority now, not that the listener failed.
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("loading review event %d: %w", id, err)
 	}
@@ -379,12 +397,11 @@ func (eb *EventBus) SubscribeContext(ctx context.Context, reviewID uuid.UUID, af
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	rows, err := eb.pool.Query(ctx, `
-		SELECT id, COALESCE(attempt_generation,0), event_type, created_at, data FROM (
-			SELECT e.id, e.attempt_generation, e.event_type, e.created_at, e.data
-			FROM review_events e JOIN reviews r ON r.id=e.review_id
-			WHERE e.review_id=$1 AND e.id>$2
-			  AND (e.attempt_generation=0 OR e.attempt_generation=r.attempt_generation)
-			ORDER BY e.id DESC LIMIT $3
+		SELECT id, attempt_generation, event_type, created_at, data FROM (
+			SELECT id, attempt_generation, event_type, created_at, data
+			FROM (`+authorizedReviewEventsSQL+`) authorized
+			WHERE review_id=$1 AND id>$2
+			ORDER BY id DESC LIMIT $3
 		) replay ORDER BY id`, reviewID, afterID, maxHistoryEvents)
 	if err != nil {
 		return nil, nil, func() {}, fmt.Errorf("querying event replay: %w", err)

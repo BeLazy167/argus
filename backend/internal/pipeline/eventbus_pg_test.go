@@ -19,12 +19,13 @@ func durableEventTestReview(t *testing.T) (*pgxpool.Pool, context.Context, uuid.
 		t.Skip("TEST_DATABASE_URL not set")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	t.Cleanup(cancel)
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
+	// Cleanup is LIFO: cancel listener contexts before waiting for pool.Close.
+	t.Cleanup(cancel)
 	var installationID, repoID int64
 	if err := pool.QueryRow(ctx, `INSERT INTO installations (installation_id,org_login) VALUES ((random()*1000000000)::bigint,'eventbus-test') RETURNING id`).Scan(&installationID); err != nil {
 		t.Fatal(err)
@@ -150,5 +151,54 @@ func TestDurableEventBusDropsStaleAttemptEvents(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("current attempt events=%d want 1", count)
+	}
+}
+
+func TestDurableEventBusDeliveryRechecksAttemptAuthority(t *testing.T) {
+	pool, ctx, reviewID := durableEventTestReview(t)
+	bus := NewDurableEventBus(ctx, pool, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	live, _, unsubscribe, err := bus.SubscribeContext(ctx, reviewID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unsubscribe()
+
+	var staleID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO review_events (review_id, attempt_generation, event_type, data)
+		VALUES ($1, 1, $2, '{}') RETURNING id`, reviewID, EventCompleted).Scan(&staleID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE reviews SET attempt_generation=2 WHERE id=$1`, reviewID); err != nil {
+		t.Fatal(err)
+	}
+
+	// This is the same fetch path used after a remote NOTIFY. The event was
+	// current when inserted but lost authority before delivery.
+	if err := bus.deliverStored(ctx, staleID); err != nil {
+		t.Fatalf("stale delivery should be benign: %v", err)
+	}
+	select {
+	case event := <-live:
+		t.Fatalf("delivered stale event: %+v", event)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	var durableID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO review_events (review_id, attempt_generation, event_type, data)
+		VALUES ($1, 0, $2, '{}') RETURNING id`, reviewID, EventStageChanged).Scan(&durableID); err != nil {
+		t.Fatal(err)
+	}
+	if err := bus.deliverStored(ctx, durableID); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case event := <-live:
+		if event.ID != durableID {
+			t.Fatalf("delivered event id=%d want %d", event.ID, durableID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("generation-zero event was not delivered")
 	}
 }

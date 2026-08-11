@@ -50,6 +50,14 @@ type StateMachine struct {
 	// and any embedder without a store want; NewOrchestrator wires it to
 	// Orchestrator.hydrateResumedRun. See resume_context.go.
 	hydrate func(ctx context.Context, run *PipelineRun)
+
+	// Recovery lease operations are narrow seams so ownership loss can be
+	// tested without timing sleeps or a live database. Nil uses the production
+	// PostgreSQL operation (or Resume) below.
+	renewRecoveryLeaseFn   func(context.Context, uuid.UUID, uuid.UUID) (bool, error)
+	releaseRecoveryLeaseFn func(context.Context, uuid.UUID, uuid.UUID) (bool, error)
+	resumeRecoveryFn       func(context.Context, uuid.UUID) (*PipelineRun, error)
+	recoveryHeartbeat      <-chan time.Time
 }
 
 func NewStateMachine(db *pgxpool.Pool, st *store.Store, logger *slog.Logger) *StateMachine {
@@ -91,6 +99,9 @@ func (sm *StateMachine) setRunStatus(ctx context.Context, run *PipelineRun, stat
 
 // Run executes the pipeline from the current state to completion or failure.
 func (sm *StateMachine) Run(ctx context.Context, run *PipelineRun) error {
+	if err := recoveryLeaseLoss(ctx); err != nil {
+		return err
+	}
 	// Transition review status pending → in_progress on first tick.
 	// Historically nothing did this, so every review looked stuck on "pending"
 	// until it completed/failed, which broke the dashboard's `isLive` check
@@ -105,6 +116,9 @@ func (sm *StateMachine) Run(ctx context.Context, run *PipelineRun) error {
 	for !run.State.IsTerminal() {
 		select {
 		case <-ctx.Done():
+			if err := recoveryLeaseLoss(ctx); err != nil {
+				return err
+			}
 			return sm.handleCancelled(ctx, run)
 		default:
 		}
@@ -143,7 +157,12 @@ func (sm *StateMachine) Run(ctx context.Context, run *PipelineRun) error {
 		stageStart := time.Now()
 
 		if err := stage(ctx, run); err != nil {
-			// Context cancelled mid-stage → treat as cancellation, not failure
+			// Losing a recovery lease is not a user cancellation. The former
+			// owner must stop without detached cleanup writes or GitHub posts.
+			if leaseErr := recoveryLeaseLoss(ctx); leaseErr != nil {
+				return leaseErr
+			}
+			// Context cancelled mid-stage → treat as cancellation, not failure.
 			if errors.Is(err, context.Canceled) {
 				return sm.handleCancelled(ctx, run)
 			}
@@ -177,6 +196,12 @@ func (sm *StateMachine) Run(ctx context.Context, run *PipelineRun) error {
 				sm.onTerminal(context.WithoutCancel(ctx), run.ReviewID, StartedOutcomeFailed, run.Error)
 			}
 			return fmt.Errorf("stage %s failed: %w", failedState, err)
+		}
+
+		// A stage can return at the same moment the heartbeat detects lease
+		// loss. Recheck before publishing its transition or persisting state.
+		if err := recoveryLeaseLoss(ctx); err != nil {
+			return err
 		}
 
 		stageDurationMs := time.Since(stageStart).Milliseconds()
@@ -232,6 +257,16 @@ func publishError(run *PipelineRun, failedStage PipelineState, err error) {
 		"stage": string(failedStage),
 		"error": err.Error(),
 	})
+}
+
+var errRecoveryLeaseLost = errors.New("recovery lease lost")
+
+func recoveryLeaseLoss(ctx context.Context) error {
+	cause := context.Cause(ctx)
+	if errors.Is(cause, errRecoveryLeaseLost) {
+		return cause
+	}
+	return nil
 }
 
 // handleCancelled transitions a run to the cancelled state, persists it, and publishes the event.
@@ -396,21 +431,14 @@ func (sm *StateMachine) RecoverIncomplete(ctx context.Context) error {
 		}
 
 		sm.logger.Info("recovering pipeline run", "run_id", runID, "recovery_owner", owner)
-		stopHeartbeat := make(chan struct{})
-		go sm.renewRecoveryLease(ctx, runID, owner, stopHeartbeat)
-		_, resumeErr := sm.Resume(ctx, runID)
-		close(stopHeartbeat)
-		if resumeErr != nil {
-			sm.logger.Error("failed to recover run", "run_id", runID, "error", resumeErr)
+		if err := sm.recoverClaimed(ctx, runID, owner); err != nil {
+			sm.logger.Error("failed to recover run", "run_id", runID, "error", err)
 			if firstErr == nil {
-				firstErr = resumeErr
+				firstErr = err
 			}
-			// Keep the lease after failure so this invocation can progress to
-			// other rows without immediately reclaiming the same broken run.
+			// Keep the owner-CAS lease after failure. If ownership was lost,
+			// the new owner already controls it; otherwise expiry permits retry.
 			continue
-		}
-		if _, err := sm.db.Exec(ctx, `UPDATE pipeline_states SET recovery_owner=NULL, recovery_lease_until=NULL WHERE id=$1 AND recovery_owner=$2`, runID, owner); err != nil {
-			sm.logger.Warn("clearing recovery lease", "run_id", runID, "error", err)
 		}
 	}
 	if firstErr != nil {
@@ -446,19 +474,92 @@ func (sm *StateMachine) claimIncomplete(ctx context.Context, owner uuid.UUID) (u
 	return id, true, nil
 }
 
-func (sm *StateMachine) renewRecoveryLease(ctx context.Context, runID, owner uuid.UUID, stop <-chan struct{}) {
-	ticker := time.NewTicker(recoveryLeaseDuration / 3)
-	defer ticker.Stop()
+// recoverClaimed owns the complete lifetime of Resume's context. The heartbeat
+// cancels that context as soon as ownership cannot be proved, and this method
+// waits for the heartbeat before attempting the owner-CAS release.
+func (sm *StateMachine) recoverClaimed(ctx context.Context, runID, owner uuid.UUID) error {
+	leaseCtx, cancelLease := context.WithCancelCause(ctx)
+	stopHeartbeat := make(chan struct{})
+	heartbeatDone := make(chan error, 1)
+	go func() {
+		heartbeatDone <- sm.holdRecoveryLease(leaseCtx, runID, owner, stopHeartbeat, cancelLease)
+	}()
+
+	resume := sm.resumeRecoveryFn
+	if resume == nil {
+		resume = sm.Resume
+	}
+	_, resumeErr := resume(leaseCtx, runID)
+	close(stopHeartbeat)
+	heartbeatErr := <-heartbeatDone
+	cancelLease(context.Canceled)
+
+	if heartbeatErr != nil {
+		return heartbeatErr
+	}
+	if resumeErr != nil {
+		return resumeErr
+	}
+
+	released, err := sm.releaseRecoveryLease(ctx, runID, owner)
+	if err != nil {
+		return fmt.Errorf("releasing recovery lease: %w", err)
+	}
+	if !released {
+		return fmt.Errorf("%w: owner changed before release", errRecoveryLeaseLost)
+	}
+	return nil
+}
+
+func (sm *StateMachine) holdRecoveryLease(ctx context.Context, runID, owner uuid.UUID, stop <-chan struct{}, cancel context.CancelCauseFunc) error {
+	ticks := sm.recoveryHeartbeat
+	var ticker *time.Ticker
+	if ticks == nil {
+		ticker = time.NewTicker(recoveryLeaseDuration / 3)
+		ticks = ticker.C
+		defer ticker.Stop()
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		case <-stop:
-			return
-		case <-ticker.C:
-			if _, err := sm.db.Exec(ctx, `UPDATE pipeline_states SET recovery_lease_until=NOW()+make_interval(secs => $3) WHERE id=$1 AND recovery_owner=$2`, runID, owner, recoveryLeaseDuration.Seconds()); err != nil {
-				sm.logger.Warn("renewing recovery lease", "run_id", runID, "error", err)
+			return nil
+		case <-ticks:
+			renewed, err := sm.renewRecoveryLease(ctx, runID, owner)
+			if err != nil {
+				cause := fmt.Errorf("%w: renewing lease: %w", errRecoveryLeaseLost, err)
+				cancel(cause)
+				return cause
+			}
+			if !renewed {
+				cause := fmt.Errorf("%w: owner changed during renewal", errRecoveryLeaseLost)
+				cancel(cause)
+				return cause
 			}
 		}
 	}
+}
+
+func (sm *StateMachine) renewRecoveryLease(ctx context.Context, runID, owner uuid.UUID) (bool, error) {
+	if sm.renewRecoveryLeaseFn != nil {
+		return sm.renewRecoveryLeaseFn(ctx, runID, owner)
+	}
+	tag, err := sm.db.Exec(ctx, `UPDATE pipeline_states SET recovery_lease_until=NOW()+make_interval(secs => $3) WHERE id=$1 AND recovery_owner=$2`, runID, owner, recoveryLeaseDuration.Seconds())
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+func (sm *StateMachine) releaseRecoveryLease(ctx context.Context, runID, owner uuid.UUID) (bool, error) {
+	if sm.releaseRecoveryLeaseFn != nil {
+		return sm.releaseRecoveryLeaseFn(ctx, runID, owner)
+	}
+	tag, err := sm.db.Exec(ctx, `UPDATE pipeline_states SET recovery_owner=NULL, recovery_lease_until=NULL WHERE id=$1 AND recovery_owner=$2`, runID, owner)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
 }
