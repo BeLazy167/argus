@@ -1067,6 +1067,13 @@ func (c *Client) ResolveDefaultBranchCommit(ctx context.Context, installationID 
 
 // GetRepoTree returns all file paths at an immutable commit SHA.
 func (c *Client) GetRepoTree(ctx context.Context, installationID int64, owner, repo, commitSHA string) (RepoTree, error) {
+	// The Git Trees endpoint is keyed by a tree object, not a commit object.
+	// Resolve the commit's root tree explicitly rather than relying on GitHub to
+	// accept a commit SHA as an undocumented shorthand.
+	treeSHA, err := c.GetCommitTree(ctx, installationID, owner, repo, commitSHA)
+	if err != nil {
+		return RepoTree{}, fmt.Errorf("resolving commit tree: %w", err)
+	}
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return RepoTree{}, err
@@ -1074,7 +1081,7 @@ func (c *Client) GetRepoTree(ctx context.Context, installationID int64, owner, r
 	if err := c.restLimiter.Wait(ctx); err != nil {
 		return RepoTree{}, fmt.Errorf("rate limit wait: %w", err)
 	}
-	tree, _, err := client.Git.GetTree(ctx, owner, repo, commitSHA, true)
+	tree, _, err := client.Git.GetTree(ctx, owner, repo, treeSHA, true)
 	if err != nil {
 		return RepoTree{}, fmt.Errorf("fetching repo tree: %w", err)
 	}
