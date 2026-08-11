@@ -1,4 +1,4 @@
-import { useQueryClient } from "@tanstack/react-query";
+import { useQueryClient, type QueryClient } from "@tanstack/react-query";
 import type {
   AutoResolveSummary,
   LearnedMemory,
@@ -25,8 +25,20 @@ export type ReviewDetail = {
 
 type ReviewsVars = { repoId: number; limit?: number; offset?: number };
 
+export const reviewQueryKeys = {
+  lists: () => ["reviews"] as const,
+  list: (variables: ReviewsVars) => [...reviewQueryKeys.lists(), variables] as const,
+  details: () => ["review"] as const,
+  detail: (id: string) => [...reviewQueryKeys.details(), { id }] as const,
+};
+
+export function reconcileTerminalReview(queryClient: QueryClient, reviewId: string): void {
+  void queryClient.invalidateQueries({ queryKey: reviewQueryKeys.detail(reviewId) });
+  void queryClient.invalidateQueries({ queryKey: reviewQueryKeys.lists() });
+}
+
 export const useReviews = createAuthQuery<Review[], ReviewsVars>({
-  queryKey: ["reviews"],
+  queryKey: reviewQueryKeys.lists(),
   fetcher: ({ repoId, limit = 20, offset = 0 }, ctx) => {
     const path = repoId > 0
       ? `/api/v1/repos/${repoId}/reviews?limit=${limit}&offset=${offset}`
@@ -39,7 +51,7 @@ export const useReviews = createAuthQuery<Review[], ReviewsVars>({
 type ReviewVars = { id: string };
 
 export const useReview = createAuthQuery<ReviewDetail, ReviewVars>({
-  queryKey: ["review"],
+  queryKey: reviewQueryKeys.details(),
   fetcher: ({ id }, ctx) => getApi(ctx).get<ReviewDetail>(`/api/v1/reviews/${id}`),
   refetchOnWindowFocus: true,
 });
@@ -55,7 +67,7 @@ export const useTriggerReview = () => {
   const qc = useQueryClient();
   return useTriggerReviewMutation({
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: useReviews.getKey() });
+      qc.invalidateQueries({ queryKey: reviewQueryKeys.lists() });
       qc.invalidateQueries({ queryKey: ["stats"] });
     },
     onError: (err) => console.error("[trigger-review] failed:", err.message),
@@ -69,11 +81,10 @@ const useRetryReviewMutation = createAuthMutation<unknown, string>({
 export const useRetryReview = () => {
   const qc = useQueryClient();
   return useRetryReviewMutation({
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: useReviews.getKey() });
-      // Also refresh the detail query so the retried review leaves its
-      // terminal state and the live stream reconnects (was stranded before).
-      qc.invalidateQueries({ queryKey: useReview.getKey() });
+    onSuccess: (_data, reviewId) => {
+      // Refresh the exact detail so the retried review leaves its terminal
+      // state and the live stream reconnects.
+      reconcileTerminalReview(qc, reviewId);
       qc.invalidateQueries({ queryKey: ["stats"] });
     },
     onError: (err) => console.error("[retry-review] failed:", err.message),
@@ -87,9 +98,8 @@ const useCancelReviewMutation = createAuthMutation<unknown, string>({
 export const useCancelReview = () => {
   const qc = useQueryClient();
   return useCancelReviewMutation({
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: useReviews.getKey() });
-      qc.invalidateQueries({ queryKey: useReview.getKey() });
+    onSuccess: (_data, reviewId) => {
+      reconcileTerminalReview(qc, reviewId);
       qc.invalidateQueries({ queryKey: ["stats"] });
     },
     onError: (err) => console.error("[cancel-review] failed:", err.message),

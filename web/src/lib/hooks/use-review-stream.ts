@@ -3,6 +3,7 @@ import { useAuth } from "@clerk/nextjs";
 import { useQueryClient } from "@tanstack/react-query";
 import { useInstallation } from "@/providers/installation-provider";
 import type { Review, ReviewComment } from "../types";
+import { reconcileTerminalReview, reviewQueryKeys } from "../queries/reviews";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
 
@@ -117,7 +118,7 @@ export function useReviewStream(reviewId: string, enabled: boolean) {
     let unmounted = false;
     let reconnectTimer: ReturnType<typeof setTimeout>;
 
-    const queryKey = ["review", reviewId, active.id];
+    const queryKey = reviewQueryKeys.detail(reviewId);
 
     const patchReview = (patch: Partial<Review>) => {
       qc.setQueryData(queryKey, (old: ReviewCache | undefined) => {
@@ -208,8 +209,7 @@ export function useReviewStream(reviewId: string, enabled: boolean) {
         // left stale data on the first delivery). Only the visible row add
         // and the stage mutation are gated behind terminalRef.
         case "completed":
-          qc.invalidateQueries({ queryKey: ["review", reviewId] });
-          qc.invalidateQueries({ queryKey: ["reviews"] });
+          reconcileTerminalReview(qc, reviewId);
           if (terminalRef.current) break;
           setStage("completed");
           addEntry({ type: "done", message: "Posted to GitHub", icon: "done" });
@@ -217,8 +217,7 @@ export function useReviewStream(reviewId: string, enabled: boolean) {
           break;
 
         case "cancelled":
-          qc.invalidateQueries({ queryKey: ["review", reviewId] });
-          qc.invalidateQueries({ queryKey: ["reviews"] });
+          reconcileTerminalReview(qc, reviewId);
           if (terminalRef.current) break;
           setStage("cancelled");
           addEntry({ type: "stage", message: `Cancelled at ${evt.data.stage}`, icon: "error" });
@@ -226,8 +225,7 @@ export function useReviewStream(reviewId: string, enabled: boolean) {
           break;
 
         case "error":
-          qc.invalidateQueries({ queryKey: ["review", reviewId] });
-          qc.invalidateQueries({ queryKey: ["reviews"] });
+          reconcileTerminalReview(qc, reviewId);
           if (terminalRef.current) break;
           setFailedStage(evt.data.stage as string);
           setStage("failed");
