@@ -11,12 +11,16 @@ import (
 )
 
 type fakeMermaidValidator struct {
-	err   error
-	calls int
+	err            error
+	errorsBySource map[string]error
+	calls          int
 }
 
-func (f *fakeMermaidValidator) Validate(_ context.Context, _ string) error {
+func (f *fakeMermaidValidator) Validate(_ context.Context, source string) error {
 	f.calls++
+	if err := f.errorsBySource[source]; err != nil {
+		return err
+	}
 	return f.err
 }
 
@@ -77,7 +81,59 @@ func TestValidateDiagramsFailsClosedBeforePersistence(t *testing.T) {
 	}
 }
 
-func TestValidateDiagramCandidateEnforcesNodeLimitAndEvidence(t *testing.T) {
+func TestValidateDiagramsRetainsValidCandidateWhenRequestedSiblingFails(t *testing.T) {
+	grounding, sequenceSpecs := groundedDiagramFixture()
+	specs := []diagramSpec{
+		sequenceSpecs[0],
+		{Type: "dataflow", Title: "Data Flow", MaxNodes: 2},
+	}
+	sequence := diagramResult{
+		Type:     "sequence",
+		Mermaid:  "sequenceDiagram\n  N1->>N2: calls",
+		Evidence: []string{"edge:E1", "diff:D1"},
+	}
+	dataflow := diagramResult{
+		Type:     "dataflow",
+		Mermaid:  "flowchart TD\n  N1[\"a.go\"] --> N2[\"b.go\"]",
+		Evidence: []string{"edge:E1", "diff:D1"},
+	}
+
+	tests := []struct {
+		name       string
+		candidates []diagramResult
+		parserErr  map[string]error
+		wantCalls  int
+	}{
+		{name: "missing", candidates: []diagramResult{sequence}, wantCalls: 1},
+		{
+			name: "deterministically invalid",
+			candidates: []diagramResult{sequence, {
+				Type: "dataflow", Mermaid: "flowchart TD\n  N2 --> N1",
+				Evidence: []string{"edge:E1", "diff:D1"},
+			}},
+			wantCalls: 1,
+		},
+		{
+			name: "rejected by deployed parser", candidates: []diagramResult{sequence, dataflow},
+			parserErr: map[string]error{dataflow.Mermaid: errors.New("invalid deployed syntax")},
+			wantCalls: 2,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			validator := &fakeMermaidValidator{errorsBySource: tc.parserErr}
+			got := validateDiagrams(context.Background(), validator, tc.candidates, specs, grounding)
+			if len(got) != 1 || got[0].Type != "sequence" || got[0].Title != "Call Sequence" {
+				t.Fatalf("validated diagrams = %+v, want the valid sequence sibling", got)
+			}
+			if validator.calls != tc.wantCalls {
+				t.Fatalf("deployed parser calls = %d, want %d", validator.calls, tc.wantCalls)
+			}
+		})
+	}
+}
+
+func TestValidateDiagramCandidateEnforcesNodeLimit(t *testing.T) {
 	grounding, specs := groundedDiagramFixture()
 	spec := specs[0]
 	spec.MaxNodes = 1
@@ -88,11 +144,31 @@ func TestValidateDiagramCandidateEnforcesNodeLimitAndEvidence(t *testing.T) {
 	if err := validateDiagramCandidate(candidate, spec, grounding); err == nil {
 		t.Fatal("diagram over requested node limit passed")
 	}
-	candidate.Mermaid = "sequenceDiagram\n  N1->>N2: calls"
-	spec.MaxNodes = 2
-	candidate.Evidence = []string{"edge:E999", "diff:D1"}
-	if err := validateDiagramCandidate(candidate, spec, grounding); err == nil {
-		t.Fatal("unknown evidence id passed")
+}
+
+func TestValidateDiagramCandidateRequiresBoundedDiffEvidence(t *testing.T) {
+	grounding, specs := groundedDiagramFixture()
+	candidate := diagramResult{
+		Type: "sequence", Mermaid: "sequenceDiagram\n  N1->>N2: calls",
+		Evidence: []string{"edge:E1"},
+	}
+
+	err := validateDiagramCandidate(candidate, specs[0], grounding)
+	if err == nil || !strings.Contains(err.Error(), "no bounded diff evidence") {
+		t.Fatalf("validation error = %v, want bounded diff evidence rejection", err)
+	}
+}
+
+func TestValidateDiagramCandidateRejectsUnknownEvidenceID(t *testing.T) {
+	grounding, specs := groundedDiagramFixture()
+	candidate := diagramResult{
+		Type: "sequence", Mermaid: "sequenceDiagram\n  N1->>N2: calls",
+		Evidence: []string{"edge:E1", "diff:D1", "diff:D999"},
+	}
+
+	err := validateDiagramCandidate(candidate, specs[0], grounding)
+	if err == nil || !strings.Contains(err.Error(), `unknown evidence "diff:D999"`) {
+		t.Fatalf("validation error = %v, want unknown evidence ID rejection", err)
 	}
 }
 

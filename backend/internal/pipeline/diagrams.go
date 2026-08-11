@@ -335,24 +335,27 @@ func validateDiagramCandidate(candidate diagramResult, spec diagramSpec, groundi
 }
 
 func validateDiagrams(ctx context.Context, validator MermaidValidator, candidates []diagramResult, specs []diagramSpec, grounding diagramGrounding) []diagramResult {
-	if validator == nil || len(candidates) == 0 || len(candidates) != len(specs) {
+	if validator == nil || len(candidates) == 0 || len(specs) == 0 {
 		return nil
 	}
-	byType := make(map[string]diagramResult, len(candidates))
+	byType := make(map[string][]diagramResult, len(candidates))
 	for _, candidate := range candidates {
-		if _, duplicate := byType[candidate.Type]; duplicate {
-			return nil
-		}
-		byType[candidate.Type] = candidate
+		byType[candidate.Type] = append(byType[candidate.Type], candidate)
 	}
 	valid := make([]diagramResult, 0, len(specs))
 	for _, spec := range specs {
-		candidate, ok := byType[spec.Type]
-		if !ok || validateDiagramCandidate(candidate, spec, grounding) != nil {
-			return nil
+		typedCandidates := byType[spec.Type]
+		// A missing, duplicated, ungrounded, or parser-rejected candidate fails
+		// closed for its requested type without discarding valid siblings.
+		if len(typedCandidates) != 1 {
+			continue
+		}
+		candidate := typedCandidates[0]
+		if validateDiagramCandidate(candidate, spec, grounding) != nil {
+			continue
 		}
 		if err := validator.Validate(ctx, candidate.Mermaid); err != nil {
-			return nil
+			continue
 		}
 		candidate.Title = spec.Title
 		valid = append(valid, candidate)

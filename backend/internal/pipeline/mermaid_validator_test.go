@@ -2,12 +2,36 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestHTTPMermaidValidatorDisabledDoesNotSendPrivateEvidence(t *testing.T) {
+	var requests atomic.Int32
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		requests.Add(1)
+		return nil, errors.New("unexpected validator request")
+	})}
+	validator := NewHTTPMermaidValidator("", "", client)
+
+	err := validator.Validate(context.Background(), "sequenceDiagram\n  private->>evidence: secret")
+	if err == nil || !strings.Contains(err.Error(), "not configured") {
+		t.Fatalf("Validate() error = %v, want disabled validator error", err)
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("disabled validator sent private evidence in %d request(s)", requests.Load())
+	}
+}
 
 func TestHTTPMermaidValidatorFailsClosed(t *testing.T) {
 	tests := []struct {

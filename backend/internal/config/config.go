@@ -54,6 +54,13 @@ type Config struct {
 	SelfHosted              bool   // self-hosted deployment; affects auto-run defaults and install listing
 }
 
+// MermaidValidatorEnabled reports whether diagram generation has its explicit,
+// deployment-local parser endpoint and credential. Load guarantees the pair is
+// either fully configured or intentionally disabled.
+func (c *Config) MermaidValidatorEnabled() bool {
+	return c != nil && c.MermaidValidatorBaseURL != "" && c.MermaidValidatorSecret != ""
+}
+
 func Load() (*Config, error) {
 	port, err := strconv.Atoi(getEnv("PORT", "8080"))
 	if err != nil {

@@ -227,6 +227,21 @@ func TestLoad(t *testing.T) {
 			t.Errorf("error %q should mention GITHUB_APP_ID", err)
 		}
 	})
+	t.Run("mermaid validator may be intentionally disabled", func(t *testing.T) {
+		setRequired(t)
+
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load() with both validator vars unset: %v", err)
+		}
+		if cfg.MermaidValidatorEnabled() {
+			t.Fatal("MermaidValidatorEnabled() = true with both validator vars unset")
+		}
+		if cfg.MermaidValidatorBaseURL != "" || cfg.MermaidValidatorSecret != "" {
+			t.Fatalf("disabled validator unexpectedly has endpoint or secret")
+		}
+	})
+
 	t.Run("mermaid validator requires explicit paired origin and secret", func(t *testing.T) {
 		setRequired(t)
 		t.Setenv("DASHBOARD_BASE_URL", "https://argus.reviews")
@@ -260,6 +275,9 @@ func TestLoad(t *testing.T) {
 		}
 		if cfg.MermaidValidatorBaseURL != "https://dashboard.example.test" {
 			t.Fatalf("MermaidValidatorBaseURL = %q", cfg.MermaidValidatorBaseURL)
+		}
+		if !cfg.MermaidValidatorEnabled() {
+			t.Fatal("MermaidValidatorEnabled() = false with explicit origin and secret")
 		}
 	})
 

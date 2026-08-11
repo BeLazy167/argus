@@ -75,6 +75,7 @@ func Run() error {
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
+	logMermaidValidatorStatus(logger, cfg)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
