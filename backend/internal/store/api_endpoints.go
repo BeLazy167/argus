@@ -266,10 +266,12 @@ func (s *Store) LookupCodeNodeIDsByName(ctx context.Context, repoID int64, names
 		return map[string]int64{}, nil
 	}
 	rows, err := s.Pool.Query(ctx, `
-		SELECT DISTINCT ON (name) name, id
+		SELECT name, MIN(id) AS id
 		FROM code_nodes
 		WHERE repo_id = $1 AND name = ANY($2::text[])
-		ORDER BY name, id`, repoID, names)
+		GROUP BY name
+		HAVING COUNT(*) = 1
+		ORDER BY name`, repoID, names)
 	if err != nil {
 		return nil, fmt.Errorf("lookup code node ids: %w", err)
 	}

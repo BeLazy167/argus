@@ -612,3 +612,25 @@ func TestX(t *testing.T) {
 		t.Fatal("production code stopped being extracted")
 	}
 }
+
+func TestMatchAPIEndpoints_GroundedSegmentFallback(t *testing.T) {
+	client := APIEndpoint{Role: RoleClient, Method: "GET", Path: "/api/v1/jobs/42", RepoID: 2, NodeID: 20}
+	server := APIEndpoint{Role: RoleServer, Method: "GET", Path: "/api/v1/jobs/{}", RepoID: 1, NodeID: 10}
+
+	matches := MatchAPIEndpoints([]APIEndpoint{client, server})
+	if len(matches) != 1 || matches[0].Client.NodeID != client.NodeID || matches[0].Server.NodeID != server.NodeID {
+		t.Fatalf("unique path-pattern fallback = %+v, want client %d -> server %d", matches, client.NodeID, server.NodeID)
+	}
+}
+
+func TestMatchAPIEndpoints_GroundedSegmentFallbackRejectsAmbiguity(t *testing.T) {
+	client := APIEndpoint{Role: RoleClient, Method: "GET", Path: "/api/v1/jobs/42", RepoID: 3, NodeID: 30}
+	servers := []APIEndpoint{
+		{Role: RoleServer, Method: "GET", Path: "/api/v1/jobs/{}", RepoID: 1, NodeID: 10},
+		{Role: RoleServer, Method: "GET", Path: "/api/v1/jobs/{}", RepoID: 2, NodeID: 20},
+	}
+
+	if matches := MatchAPIEndpoints(append(servers, client)); len(matches) != 0 {
+		t.Fatalf("ambiguous fallback invented an edge: %+v", matches)
+	}
+}

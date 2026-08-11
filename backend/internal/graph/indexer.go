@@ -456,22 +456,49 @@ func upsertFileSymbols(ctx context.Context, st indexerStore, repoDBID int64, fil
 	}
 }
 
-// resolveNodeName finds the best node ID for a symbol name referenced from
-// sourceFile. Same-file references prefer the node in that file; otherwise the
-// first match wins.
+// resolveNodeName finds an unambiguous node ID for a symbol reference.
+// Same-file identity wins. A repository-wide name resolves only when unique;
+// collisions remain explicit instead of depending on tree or database order.
 //
-// ONE definition, used by both edge resolution and endpoint anchoring. The two
-// had identical copies, so a change to the collision rule applied to edges
-// would have left endpoints resolving the same name to a different node — the
-// two halves of the graph drifting apart on what a name means.
+// ONE definition, used by both edge resolution and endpoint anchoring.
 func resolveNodeName(sourceFile, name string, keyToID map[string]int64, nameToIDs map[string][]int64) (int64, bool) {
 	if id, ok := keyToID[nodeKey(sourceFile, name)]; ok {
 		return id, true
 	}
-	if ids := nameToIDs[name]; len(ids) > 0 {
+	if ids := nameToIDs[name]; len(ids) == 1 {
 		return ids[0], true
 	}
 	return 0, false
+}
+
+func resolutionPlaceholder(status, name string) string {
+	return status + ":" + name
+}
+
+func ensureResolutionPlaceholder(ctx context.Context, st indexerStore, repoID int64, sourceFile, status, name string, keyToID map[string]int64, nameToIDs map[string][]int64) (int64, bool) {
+	placeholder := resolutionPlaceholder(status, name)
+	if id, ok := keyToID[nodeKey(sourceFile, placeholder)]; ok {
+		return id, true
+	}
+	id, err := st.UpsertCodeNode(ctx, repoID, "module", placeholder, sourceFile, 0, 0, "", 0)
+	if err != nil {
+		slog.Warn("graph: record unresolved edge failed", "status", status, "target", name, "file", sourceFile, "error", err)
+		return 0, false
+	}
+	keyToID[nodeKey(sourceFile, placeholder)] = id
+	nameToIDs[placeholder] = append(nameToIDs[placeholder], id)
+	return id, true
+}
+
+func resolveOrRecordTarget(ctx context.Context, st indexerStore, repoID int64, sourceFile, name string, keyToID map[string]int64, nameToIDs map[string][]int64) (int64, bool) {
+	if id, ok := resolveNodeName(sourceFile, name, keyToID, nameToIDs); ok {
+		return id, true
+	}
+	status := "unresolved"
+	if len(nameToIDs[name]) > 1 {
+		status = "ambiguous"
+	}
+	return ensureResolutionPlaceholder(ctx, st, repoID, sourceFile, status, name, keyToID, nameToIDs)
 }
 
 // resolveAndUpsertEdges runs the edge-resolution + upsert pass after every
@@ -524,7 +551,7 @@ func resolveAndUpsertEdges(ctx context.Context, st indexerStore, repoDBID int64,
 	}
 
 	resolveEdgeTarget := func(sourceFile, targetName string) (int64, bool) {
-		return resolveNodeName(sourceFile, targetName, keyToID, nameToIDs)
+		return resolveOrRecordTarget(ctx, st, repoDBID, sourceFile, targetName, keyToID, nameToIDs)
 	}
 
 	filePaths := make([]string, 0, len(edgesByFile))
@@ -557,28 +584,25 @@ func resolveAndUpsertEdges(ctx context.Context, st indexerStore, repoDBID int64,
 				if sourceID == 0 {
 					continue
 				}
-				targetID, ok := resolveEdgeTarget(filePath, edge.TargetName)
+				moduleName := "module:" + edge.TargetName
+				targetID, ok := resolveNodeName(filePath, moduleName, keyToID, nameToIDs)
 				if !ok {
 					var err error
-					targetID, err = st.UpsertCodeNode(ctx, repoDBID, "module", edge.TargetName, filePath, 0, 0, "", 0)
+					targetID, err = st.UpsertCodeNode(ctx, repoDBID, "module", moduleName, filePath, 0, 0, "", 0)
 					if err != nil {
 						slog.Warn("graph: upsert import node failed", "target", edge.TargetName, "error", err)
 						continue
 					}
-					keyToID[nodeKey(filePath, edge.TargetName)] = targetID
-					nameToIDs[edge.TargetName] = append(nameToIDs[edge.TargetName], targetID)
+					keyToID[nodeKey(filePath, moduleName)] = targetID
+					nameToIDs[moduleName] = append(nameToIDs[moduleName], targetID)
 				}
 				appendEdge(sourceID, targetID, edge.Kind)
 				continue
 			}
 
-			sourceID, ok := keyToID[nodeKey(filePath, edge.SourceName)]
+			sourceID, ok := resolveNodeName(filePath, edge.SourceName, keyToID, nameToIDs)
 			if !ok {
-				sourceIDs := nameToIDs[edge.SourceName]
-				if len(sourceIDs) == 0 {
-					continue
-				}
-				sourceID = sourceIDs[0]
+				continue
 			}
 			targetID, ok := resolveEdgeTarget(filePath, edge.TargetName)
 			if !ok {
@@ -640,8 +664,10 @@ func resolveTypeEdges(symbols []Symbol, keyToID map[string]int64) []Edge {
 	var edges []Edge
 	seen := make(map[[2]string]bool)
 
-	// Build a name-only lookup for type resolution (type names don't carry file paths)
-	nameToKey := make(map[string]string) // symbol name -> first composite key found
+	// Build a name-only lookup for type resolution (type names don't carry file paths).
+	// Repository-wide duplicate type names remain ambiguous.
+	nameToKey := make(map[string]string)
+	ambiguous := make(map[string]bool)
 	for key := range keyToID {
 		// key format is "filePath\x00name"
 		idx := strings.Index(key, "\x00")
@@ -649,9 +675,14 @@ func resolveTypeEdges(symbols []Symbol, keyToID map[string]int64) []Edge {
 			continue
 		}
 		name := key[idx+1:]
-		if _, exists := nameToKey[name]; !exists {
-			nameToKey[name] = key
+		if _, exists := nameToKey[name]; exists {
+			ambiguous[name] = true
+			continue
 		}
+		nameToKey[name] = key
+	}
+	for name := range ambiguous {
+		delete(nameToKey, name)
 	}
 
 	for _, sym := range symbols {

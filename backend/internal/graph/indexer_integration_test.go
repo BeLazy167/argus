@@ -74,6 +74,7 @@ type upsertFullCall struct {
 }
 
 type upsertPlainCall struct {
+	id       int64
 	repoID   int64
 	kind     string
 	name     string
@@ -176,7 +177,7 @@ func (f *fakeIndexerStore) UpsertCodeNodeFullWithHash(_ context.Context, repoID 
 func (f *fakeIndexerStore) UpsertCodeNode(_ context.Context, repoID int64, kind, name, filePath string, _, _ int, _ string, _ int) (int64, error) {
 	f.nextID++
 	f.upsertPlain = append(f.upsertPlain, upsertPlainCall{
-		repoID: repoID, kind: kind, name: name, filePath: filePath,
+		id: f.nextID, repoID: repoID, kind: kind, name: name, filePath: filePath,
 	})
 	return f.nextID, nil
 }
@@ -427,5 +428,48 @@ func TestIndexParsedSymbolsResolvesTypeTargetFromExistingRepoGraph(t *testing.T)
 	}
 	if got := st.upsertEdges[0]; got.targetID != 88 || got.kind != "uses_type" {
 		t.Fatalf("edge = %+v, want target 88 uses_type", got)
+	}
+}
+
+func TestIndexParsedSymbols_RecordsAmbiguousAndUnresolvedTargets(t *testing.T) {
+	const repoID int64 = 42
+	st := newFakeIndexerStore()
+	results := map[string]fileResult{
+		"caller.go": {
+			symbols: []Symbol{{Kind: KindFunction, Name: "Caller", FilePath: "caller.go", LineStart: 1, LineEnd: 5}},
+			edges: []Edge{
+				{SourceName: "Caller", TargetName: "Shared", Kind: EdgeCalls},
+				{SourceName: "Caller", TargetName: "Missing", Kind: EdgeCalls},
+			},
+		},
+		"a/shared.go": {symbols: []Symbol{{Kind: KindFunction, Name: "Shared", FilePath: "a/shared.go", LineStart: 1, LineEnd: 2}}},
+		"b/shared.go": {symbols: []Symbol{{Kind: KindFunction, Name: "Shared", FilePath: "b/shared.go", LineStart: 1, LineEnd: 2}}},
+	}
+
+	if err := indexParsedSymbols(context.Background(), st, repoID, results); err != nil {
+		t.Fatalf("indexParsedSymbols: %v", err)
+	}
+
+	gotNames := make([]string, 0, len(st.upsertPlain))
+	placeholderIDs := map[int64]bool{}
+	for _, call := range st.upsertPlain {
+		gotNames = append(gotNames, call.name)
+		placeholderIDs[call.id] = true
+		if call.kind != "module" || call.filePath != "caller.go" {
+			t.Fatalf("placeholder %+v is not an explicit caller-scoped module", call)
+		}
+	}
+	slices.Sort(gotNames)
+	wantNames := []string{"ambiguous:Shared", "unresolved:Missing"}
+	if !slices.Equal(gotNames, wantNames) {
+		t.Fatalf("placeholder names = %v, want %v", gotNames, wantNames)
+	}
+	if len(st.upsertEdges) != 2 {
+		t.Fatalf("edges = %+v, want two explicit placeholder edges", st.upsertEdges)
+	}
+	for _, edge := range st.upsertEdges {
+		if !placeholderIDs[edge.targetID] {
+			t.Fatalf("edge arbitrarily selected a same-name target instead of a placeholder: %+v", edge)
+		}
 	}
 }
