@@ -66,6 +66,15 @@ func (ra *ReplyAnalyzer) Analyze(ctx context.Context, event ghpkg.CommentEvent) 
 		return err
 	}
 
+	// Authorize before resolving an LLM provider or posting a reply. A transient
+	// permission failure must not spend tokens or create a response that a later
+	// delivery could duplicate; denial still permits the intended observation-only
+	// response, but no reply-derived persistent effect.
+	allowWrites, err := authorizeReplyWrites(ctx, ra.repoPermissions, event, owner, repo)
+	if err != nil {
+		return fmt.Errorf("authorizing reply-derived writes: %w", err)
+	}
+
 	// Resolve DB IDs (webhook sends GitHub IDs, DB uses serial IDs)
 	inst, err := ra.store.GetInstallationByGitHubID(ctx, event.InstallationID)
 	if err != nil {
@@ -122,10 +131,7 @@ func (ra *ReplyAnalyzer) Analyze(ctx context.Context, event ghpkg.CommentEvent) 
 		}
 	}
 
-	plan, err := planReplyEffects(ctx, ra.repoPermissions, event, owner, repo, decision)
-	if err != nil {
-		return fmt.Errorf("authorizing reply-derived writes: %w", err)
-	}
+	plan := planReplyEffects(decision, allowWrites)
 	if !plan.AllowWrites {
 		ra.logger.Info("reply: author lacks repository write permission; skipping all derived writes",
 			"association", event.AuthorAssociation, "author", event.CommentAuthor, "comment_id", original.ID)
@@ -216,16 +222,20 @@ type replyEffectPlan struct {
 	LifecycleEvent LifecycleEvent
 }
 
-func planReplyEffects(ctx context.Context, checker repoWriteAccessChecker, event ghpkg.CommentEvent, owner, repo string, decision replyDecision) (replyEffectPlan, error) {
+func authorizeReplyWrites(ctx context.Context, checker repoWriteAccessChecker, event ghpkg.CommentEvent, owner, repo string) (bool, error) {
 	if checker == nil {
-		return replyEffectPlan{}, fmt.Errorf("repository permission checker is unavailable")
+		return false, fmt.Errorf("repository permission checker is unavailable")
 	}
 	allowed, err := checker.HasRepoWriteAccess(ctx, event.InstallationID, owner, repo, event.CommentAuthor)
 	if err != nil {
-		return replyEffectPlan{}, fmt.Errorf("checking repository permission for %q: %w", event.CommentAuthor, err)
+		return false, fmt.Errorf("checking repository permission for %q: %w", event.CommentAuthor, err)
 	}
-	if !allowed {
-		return replyEffectPlan{}, nil
+	return allowed, nil
+}
+
+func planReplyEffects(decision replyDecision, allowWrites bool) replyEffectPlan {
+	if !allowWrites {
+		return replyEffectPlan{}
 	}
 
 	plan := replyEffectPlan{AllowWrites: true}
@@ -248,13 +258,13 @@ func planReplyEffects(ctx context.Context, checker repoWriteAccessChecker, event
 		plan.FeedbackAction = "dismissed"
 	}
 	plan.LifecycleEvent = replyLifecycleEvent(decision.Action, plan.Outcome)
-	return plan, nil
+	return plan
 }
 
 // replyLifecycleEvent maps an authorized reply decision to the lifecycle event
-// it raises. Authorization is intentionally absent here: planReplyEffects
-// applies one effective repository-permission gate to the complete set of
-// shared-pattern, outcome, lifecycle, and feedback writes.
+// it raises. Authorization is intentionally absent here: Analyze obtains the
+// effective repository-permission verdict before LLM completion, and
+// planReplyEffects applies it to the complete set of derived writes.
 func replyLifecycleEvent(action, outcome string) LifecycleEvent {
 	switch {
 	case outcome == "dismissed" || outcome == "not_applicable_change_kind":

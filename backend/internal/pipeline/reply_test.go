@@ -86,7 +86,7 @@ func (s *stubReplyPermissionChecker) HasRepoWriteAccess(_ context.Context, insta
 	return s.allowed, s.err
 }
 
-func TestPlanReplyEffectsRequiresEffectiveWritePermissionForEveryDerivedAction(t *testing.T) {
+func TestReplyAuthorizationAndPlanningRequireEffectiveWritePermissionForEveryDerivedAction(t *testing.T) {
 	t.Parallel()
 
 	actions := []struct {
@@ -149,18 +149,19 @@ func TestPlanReplyEffectsRequiresEffectiveWritePermissionForEveryDerivedAction(t
 		CommentAuthor:  "octocat",
 	}
 	permissions := []struct {
-		name        string
-		association string
-		allowed     bool
-		err         error
-		wantError   bool
+		name           string
+		association    string
+		checkerAllowed bool
+		err            error
+		wantAllowed    bool
+		wantError      bool
 	}{
 		{name: "org member with read denied", association: "MEMBER"},
 		{name: "collaborator with triage denied", association: "COLLABORATOR"},
-		{name: "write allowed despite untrusted association", association: "NONE", allowed: true},
-		{name: "maintain allowed", association: "CONTRIBUTOR", allowed: true},
-		{name: "admin allowed", allowed: true},
-		{name: "lookup error denied", association: "OWNER", err: errors.New("permission lookup failed"), wantError: true},
+		{name: "write allowed despite untrusted association", association: "NONE", checkerAllowed: true, wantAllowed: true},
+		{name: "maintain allowed", association: "CONTRIBUTOR", checkerAllowed: true, wantAllowed: true},
+		{name: "admin allowed", checkerAllowed: true, wantAllowed: true},
+		{name: "lookup error denied", association: "OWNER", checkerAllowed: true, err: errors.New("permission lookup failed"), wantError: true},
 	}
 
 	for _, permission := range permissions {
@@ -171,15 +172,19 @@ func TestPlanReplyEffectsRequiresEffectiveWritePermissionForEveryDerivedAction(t
 				action := action
 				t.Run(action.name, func(t *testing.T) {
 					t.Parallel()
-					checker := &stubReplyPermissionChecker{allowed: permission.allowed, err: permission.err}
+					checker := &stubReplyPermissionChecker{allowed: permission.checkerAllowed, err: permission.err}
 					replyEvent := event
 					replyEvent.AuthorAssociation = permission.association
-					plan, err := planReplyEffects(context.Background(), checker, replyEvent, "acme", "widgets", action.decision)
+					allowed, err := authorizeReplyWrites(context.Background(), checker, replyEvent, "acme", "widgets")
 					if (err != nil) != permission.wantError {
-						t.Fatalf("planReplyEffects() error = %v, wantError %v", err, permission.wantError)
+						t.Fatalf("authorizeReplyWrites() error = %v, wantError %v", err, permission.wantError)
 					}
+					if allowed != permission.wantAllowed {
+						t.Fatalf("authorizeReplyWrites() = %v, want %v", allowed, permission.wantAllowed)
+					}
+					plan := planReplyEffects(action.decision, allowed)
 					want := replyEffectPlan{}
-					if permission.allowed {
+					if permission.wantAllowed {
 						want = action.want
 					}
 					if plan != want {
