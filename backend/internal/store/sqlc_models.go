@@ -135,3 +135,14 @@ func latestReviewByPRFromSQLC(row db.GetLatestReviewByPRRow) Review {
 func githubReviewCommentFromSQLC(row db.GetCommentByGithubIDRow) (ReviewComment, error) {
 	return reviewCommentFromValues(row.ID, row.ReviewID, row.FilePath, row.StartLine, row.EndLine, row.Side, row.Body, row.Severity, row.Category, row.Specialist, row.ConfidenceScore, row.CodeSnippet, row.GithubCommentID, row.MatchedPatternID, row.MatchedPatternScore, row.EnforcedRuleContent, row.IsNewFinding, row.CreatedAt, row.State, row.SuppressedReason, row.ResolvedSHA, row.AttemptGeneration)
 }
+
+func decisionTraceFromValues(id, repoID int64, filePath, symbolName, traceType, content, severity string, reviewID *uuid.UUID, prNumber int, metadata []byte, createdAt *time.Time) (DecisionTrace, error) {
+	if createdAt == nil {
+		return DecisionTrace{}, fmt.Errorf("decision trace %d has NULL created_at", id)
+	}
+	trace := DecisionTrace{ID: id, RepoID: repoID, FilePath: filePath, SymbolName: symbolName, TraceType: traceType, Content: content, Severity: severity, ReviewID: reviewID, PRNumber: prNumber, CreatedAt: *createdAt}
+	if len(metadata) > 0 {
+		_ = json.Unmarshal(metadata, &trace.Metadata)
+	}
+	return trace, nil
+}
