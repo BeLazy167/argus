@@ -170,15 +170,42 @@ func (s *Store) MarkRepoGraphIndexed(ctx context.Context, repoID int64, nextCurs
 	return nil
 }
 
-// ScheduleGraphIndexRefresh records a verified default-branch head without
-// trusting a repository name alone. All four GitHub-owned identity fields must
-// match one enabled, unsuspended tenant row. Replayed deliveries for the same
-// head are idempotent, and an older observation cannot replace a newer head.
+// ScheduleGraphIndexRefresh records a verified head only when its branch still
+// matches the stored default branch. This is the safe seam for merged PRs: a PR
+// proves its target branch, but not the repository's authoritative default.
 func (s *Store) ScheduleGraphIndexRefresh(
 	ctx context.Context,
 	githubInstallationID, githubRepoID int64,
 	fullName, defaultBranch, commitSHA string,
 	observedAt time.Time,
+) (bool, error) {
+	return s.scheduleGraphIndexRefresh(ctx, githubInstallationID, githubRepoID,
+		fullName, defaultBranch, commitSHA, observedAt, false)
+}
+
+// ScheduleGraphIndexRefreshFromPush records a signed default-branch push. The
+// repository object in that payload authoritatively identifies the default
+// branch, so the first push after a rename may update the stored branch and
+// schedule its immutable head without waiting for a later repository sync.
+func (s *Store) ScheduleGraphIndexRefreshFromPush(
+	ctx context.Context,
+	githubInstallationID, githubRepoID int64,
+	fullName, defaultBranch, commitSHA string,
+	observedAt time.Time,
+) (bool, error) {
+	return s.scheduleGraphIndexRefresh(ctx, githubInstallationID, githubRepoID,
+		fullName, defaultBranch, commitSHA, observedAt, true)
+}
+
+// scheduleGraphIndexRefresh scopes by tenant, installation-owned repository
+// identity, and full name before locking the row. A branch-authoritative push
+// may replace only the branch field; it cannot weaken any other scope.
+func (s *Store) scheduleGraphIndexRefresh(
+	ctx context.Context,
+	githubInstallationID, githubRepoID int64,
+	fullName, defaultBranch, commitSHA string,
+	observedAt time.Time,
+	branchAuthoritative bool,
 ) (bool, error) {
 	if githubInstallationID <= 0 || githubRepoID <= 0 || fullName == "" || defaultBranch == "" || commitSHA == "" {
 		return false, nil
@@ -193,41 +220,49 @@ func (s *Store) ScheduleGraphIndexRefresh(
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var repoID, refreshVersion int64
+	var repoID int64
+	var storedDefaultBranch string
 	var publishedCommit, observedCommit, requestedCommit *string
 	var publishedComplete bool
 	var lastEventAt, requestedAt *time.Time
 	err = tx.QueryRow(ctx, `
-		SELECT r.id, published.commit_sha,
+		SELECT r.id, r.default_branch, published.commit_sha,
 		       COALESCE(published.status = 'published' AND NOT published.tree_truncated
 		         AND published.failed_files = 0 AND published.visited_files = published.expected_files
 		         AND NOT EXISTS (SELECT 1 FROM graph_index_generation_files unavailable
 		           WHERE unavailable.generation_id = published.id AND unavailable.status = 'unavailable'), false),
 		       r.graph_default_head_sha, r.graph_default_head_event_at,
-		       r.graph_refresh_requested_at, r.graph_refresh_commit_sha, r.graph_refresh_version
+		       r.graph_refresh_requested_at, r.graph_refresh_commit_sha
 		FROM repos r
 		JOIN installations i ON i.id = r.installation_id
 		LEFT JOIN graph_index_generations published
 		  ON published.id = r.graph_published_generation_id AND published.repo_id = r.id
 		WHERE i.installation_id = $1 AND i.suspended_at IS NULL
-		  AND r.github_id = $2 AND r.full_name = $3 AND r.default_branch = $4
-		  AND r.enabled
-		FOR UPDATE OF r`, githubInstallationID, githubRepoID, fullName, defaultBranch).Scan(
-		&repoID, &publishedCommit, &publishedComplete, &observedCommit, &lastEventAt,
-		&requestedAt, &requestedCommit, &refreshVersion)
+		  AND r.github_id = $2 AND r.full_name = $3 AND r.enabled
+		FOR UPDATE OF r`, githubInstallationID, githubRepoID, fullName).Scan(
+		&repoID, &storedDefaultBranch, &publishedCommit, &publishedComplete,
+		&observedCommit, &lastEventAt, &requestedAt, &requestedCommit)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
 		return false, fmt.Errorf("schedule graph refresh: scope repository: %w", err)
 	}
-	if lastEventAt != nil && observedAt.Before(*lastEventAt) && (observedCommit == nil || *observedCommit != commitSHA) {
+
+	branchChanged := storedDefaultBranch != defaultBranch
+	if branchChanged && !branchAuthoritative {
+		return false, nil
+	}
+	// A delayed pre-rename delivery must not restore the old branch merely
+	// because its commit happens to equal the currently observed commit.
+	if lastEventAt != nil && observedAt.Before(*lastEventAt) &&
+		(branchChanged || observedCommit == nil || *observedCommit != commitSHA) {
 		return false, nil
 	}
 
-	alreadyIndexed := publishedComplete && publishedCommit != nil && *publishedCommit == commitSHA &&
+	alreadyIndexed := !branchChanged && publishedComplete && publishedCommit != nil && *publishedCommit == commitSHA &&
 		observedCommit != nil && *observedCommit == commitSHA && requestedAt == nil
-	alreadyRequested := requestedAt != nil && requestedCommit != nil && *requestedCommit == commitSHA
+	alreadyRequested := !branchChanged && requestedAt != nil && requestedCommit != nil && *requestedCommit == commitSHA
 	if alreadyIndexed || alreadyRequested {
 		if _, err := tx.Exec(ctx, `
 			UPDATE repos SET graph_default_head_sha = $2,
@@ -245,11 +280,14 @@ func (s *Store) ScheduleGraphIndexRefresh(
 	}
 
 	if _, err := tx.Exec(ctx, `
-		UPDATE repos SET graph_default_head_sha = $2,
-		  graph_default_head_observed_at = $3, graph_default_head_event_at = $3,
-		  graph_refresh_requested_at = NOW(),
-		  graph_refresh_commit_sha = $2, graph_refresh_version = graph_refresh_version + 1
-		WHERE id = $1`, repoID, commitSHA, observedAt); err != nil {
+		UPDATE repos SET default_branch = $2, graph_default_head_sha = $3,
+		  graph_default_head_observed_at = $4, graph_default_head_event_at = $4,
+		  graph_refresh_requested_at = NOW(), graph_refresh_commit_sha = $3,
+		  graph_refresh_version = graph_refresh_version + 1,
+		  graph_index_attempted_at = CASE WHEN $5 THEN NULL ELSE graph_index_attempted_at END,
+		  graph_index_cursor = CASE WHEN $5 THEN 0 ELSE graph_index_cursor END,
+		  updated_at = CASE WHEN $5 THEN NOW() ELSE updated_at END
+		WHERE id = $1`, repoID, defaultBranch, commitSHA, observedAt, branchChanged); err != nil {
 		return false, fmt.Errorf("schedule graph refresh: mark due: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {

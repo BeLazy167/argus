@@ -335,8 +335,15 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) scheduleGraphRefresh(ctx context.Context, update ghpkg.DefaultBranchUpdate) error {
-	scheduled, err := s.store.ScheduleGraphIndexRefresh(ctx, update.InstallationID, update.RepoID,
-		update.RepoFullName, update.DefaultBranch, update.CommitSHA, update.ObservedAt)
+	var scheduled bool
+	var err error
+	if update.BranchIdentityIsAuthoritative() {
+		scheduled, err = s.store.ScheduleGraphIndexRefreshFromPush(ctx, update.InstallationID, update.RepoID,
+			update.RepoFullName, update.DefaultBranch, update.CommitSHA, update.ObservedAt)
+	} else {
+		scheduled, err = s.store.ScheduleGraphIndexRefresh(ctx, update.InstallationID, update.RepoID,
+			update.RepoFullName, update.DefaultBranch, update.CommitSHA, update.ObservedAt)
+	}
 	if err != nil {
 		s.logger.Warn("graph refresh: schedule default branch", "repo", update.RepoFullName,
 			"commit", update.CommitSHA, "error", err)

@@ -25,6 +25,9 @@ func TestDefaultBranchUpdateFromPRUsesMergedTargetCommit(t *testing.T) {
 	if update.DefaultBranch != "main" || !update.ObservedAt.Equal(mergedAt) {
 		t.Fatalf("update = %+v", update)
 	}
+	if update.BranchIdentityIsAuthoritative() {
+		t.Fatal("merged PR target was treated as authoritative default-branch identity")
+	}
 }
 
 func TestDefaultBranchUpdateFromPRRejectsUnmergedAndMismatchedBaseRepo(t *testing.T) {
@@ -61,6 +64,9 @@ func TestDefaultBranchUpdateFromPushRequiresExactDefaultBranch(t *testing.T) {
 	update, ok := DefaultBranchUpdateFromPush(&WebhookEvent{Type: "push", Payload: push})
 	if !ok || update.CommitSHA != "abcdef123456" || !update.ObservedAt.Equal(pushedAt) {
 		t.Fatalf("default push update = %+v, ok=%v", update, ok)
+	}
+	if !update.BranchIdentityIsAuthoritative() {
+		t.Fatal("push repository default branch was not marked authoritative")
 	}
 
 	push.Ref = gh.Ptr("refs/heads/feature")

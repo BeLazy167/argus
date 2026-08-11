@@ -136,6 +136,16 @@ type DefaultBranchUpdate struct {
 	DefaultBranch  string
 	CommitSHA      string
 	ObservedAt     time.Time
+	// branchIdentityAuthoritative is true only when the signed payload itself
+	// declares the repository default branch. A merged PR identifies its target
+	// branch, but does not prove that branch is the repository default.
+	branchIdentityAuthoritative bool
+}
+
+// BranchIdentityIsAuthoritative reports whether this observation may replace
+// the stored repository default branch as well as refresh its head.
+func (u DefaultBranchUpdate) BranchIdentityIsAuthoritative() bool {
+	return u.branchIdentityAuthoritative
 }
 
 // DefaultBranchUpdateFromPR accepts only a verified merged-close transition on
@@ -168,12 +178,13 @@ func DefaultBranchUpdateFromPush(event *WebhookEvent) (DefaultBranchUpdate, bool
 		return DefaultBranchUpdate{}, false
 	}
 	return DefaultBranchUpdate{
-		InstallationID: push.GetInstallation().GetID(),
-		RepoID:         repo.GetID(),
-		RepoFullName:   repo.GetFullName(),
-		DefaultBranch:  branch,
-		CommitSHA:      push.GetAfter(),
-		ObservedAt:     repo.GetPushedAt().Time,
+		InstallationID:              push.GetInstallation().GetID(),
+		RepoID:                      repo.GetID(),
+		RepoFullName:                repo.GetFullName(),
+		DefaultBranch:               branch,
+		CommitSHA:                   push.GetAfter(),
+		ObservedAt:                  repo.GetPushedAt().Time,
+		branchIdentityAuthoritative: true,
 	}, true
 }
 
