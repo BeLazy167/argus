@@ -2,6 +2,9 @@ package graph
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"path/filepath"
 	"sort"
@@ -79,46 +82,302 @@ func selectIndexableFiles(files []string, cap, offset int) (selected []string, d
 	return selected, len(sorted) - cap, (offset + cap) % len(sorted)
 }
 
-// IndexRepoBounded walks a repository's whole tree into the code graph.
-//
-// This is the recall fix. Blast radius was limited by EXTRACTION, not
-// traversal: IndexFiles only ever parses one pull request's changed files, so
-// the graph accumulated as disconnected PR-shaped islands and no traversal
-// engine could join them. Walking the tree once is what turns those islands
-// into a dependency graph.
-//
-// Bounded, unlike the caller that was deleted for OOMing. Returns how many
-// files were indexed and how many the cap left out, so the scheduler can say so
-// rather than record a partial index as a complete one.
+// ErrTruncatedTree means GitHub explicitly reported that its recursive tree is
+// incomplete. The generation is recorded as failed and never published.
+var ErrTruncatedTree = errors.New("github repository tree was truncated")
+
+// FullIndexResult reports one bounded staging window and whether it published.
+type FullIndexResult struct {
+	Snapshot  store.GraphSnapshot
+	Staged    int
+	Remaining int
+	Published bool
+}
+
+type fullIndexGitHub interface {
+	ResolveDefaultBranchCommit(context.Context, int64, string, string, string) (string, error)
+	GetRepoTree(context.Context, int64, string, string, string) (ghpkg.RepoTree, error)
+	GetFileContent(context.Context, int64, string, string, string, string) (string, error)
+}
+
+// IndexRepoBounded stages one deterministic window at an immutable commit and
+// atomically publishes only after every source file has a ready snapshot.
 func IndexRepoBounded(
 	ctx context.Context,
 	st *store.Store,
-	ghClient *ghpkg.Client,
+	ghClient fullIndexGitHub,
 	installationID int64,
-	owner, repo, ref string,
+	owner, repo, defaultBranch string,
 	repoDBID int64,
 	fileCap int,
-	cursor int,
-) (indexed int, dropped int, nextCursor int, err error) {
-	tree, err := ghClient.GetRepoTree(ctx, installationID, owner, repo, ref)
+	_ int,
+) (FullIndexResult, error) {
+	commitSHA, err := ghClient.ResolveDefaultBranchCommit(ctx, installationID, owner, repo, defaultBranch)
 	if err != nil {
-		return 0, 0, cursor, err
+		return FullIndexResult{}, fmt.Errorf("resolve default branch: %w", err)
+	}
+	tree, err := ghClient.GetRepoTree(ctx, installationID, owner, repo, commitSHA)
+	if err != nil {
+		return FullIndexResult{}, err
+	}
+	sourceFiles := filterSourceFiles(tree.Paths)
+	sort.Strings(sourceFiles)
+	snapshot, err := st.BeginGraphGeneration(ctx, repoDBID, commitSHA, len(sourceFiles), len(tree.Paths)-len(sourceFiles), tree.Truncated)
+	if err != nil {
+		return FullIndexResult{}, err
+	}
+	result := FullIndexResult{Snapshot: snapshot}
+	if tree.Truncated {
+		return result, ErrTruncatedTree
 	}
 
-	files, dropped, nextCursor := selectIndexableFiles(filterSourceFiles(tree), fileCap, cursor)
-	if len(files) == 0 {
-		// Not an error. A docs-only or empty repository has nothing to index,
-		// and treating that as a failure would retry it on every tick forever.
-		slog.Info("graph: full index found no source files", "repo", owner+"/"+repo)
-		return 0, 0, 0, nil
+	ready, err := st.ListReadyGraphGenerationPaths(ctx, snapshot.GenerationID)
+	if err != nil {
+		return result, err
+	}
+	pending := make([]string, 0, len(sourceFiles)-len(ready))
+	for _, filePath := range sourceFiles {
+		if _, ok := ready[filePath]; !ok {
+			pending = append(pending, filePath)
+		}
+	}
+	if fileCap > 0 && len(pending) > fileCap {
+		pending = pending[:fileCap]
 	}
 
-	slog.Info("graph: full index starting",
-		"repo", owner+"/"+repo, "ref", ref, "files", len(files),
-		"over_cap", dropped, "from_offset", cursor)
-
-	if err := indexFileSet(ctx, st, ghClient, installationID, owner, repo, ref, repoDBID, files); err != nil {
-		return 0, dropped, cursor, err
+	for _, filePath := range pending {
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+		content, fetchErr := ghClient.GetFileContent(ctx, installationID, owner, repo, filePath, commitSHA)
+		if fetchErr != nil {
+			snapshot, err = st.StageGraphGenerationFile(ctx, repoDBID, snapshot.GenerationID, filePath, nil, nil, nil, fetchErr)
+			if err != nil {
+				return result, err
+			}
+			result.Snapshot = snapshot
+			result.Staged++
+			continue
+		}
+		symbols, edges := ParseFileSymbols(filePath, content)
+		endpoints := anchorEndpoints(ExtractAPIEndpoints(filePath, content), symbols)
+		symbolJSON, err := json.Marshal(symbols)
+		if err != nil {
+			return result, fmt.Errorf("marshal symbols for %s: %w", filePath, err)
+		}
+		edgeJSON, err := json.Marshal(edges)
+		if err != nil {
+			return result, fmt.Errorf("marshal edges for %s: %w", filePath, err)
+		}
+		endpointJSON, err := json.Marshal(endpoints)
+		if err != nil {
+			return result, fmt.Errorf("marshal endpoints for %s: %w", filePath, err)
+		}
+		snapshot, err = st.StageGraphGenerationFile(ctx, repoDBID, snapshot.GenerationID, filePath, symbolJSON, edgeJSON, endpointJSON, nil)
+		if err != nil {
+			return result, err
+		}
+		result.Snapshot = snapshot
+		result.Staged++
 	}
-	return len(files), dropped, nextCursor, nil
+
+	result.Remaining = snapshot.ExpectedFiles - (snapshot.VisitedFiles - snapshot.FailedFiles)
+	if result.Remaining < 0 {
+		result.Remaining = 0
+	}
+	if snapshot.VisitedFiles != snapshot.ExpectedFiles || snapshot.FailedFiles != 0 {
+		return result, nil
+	}
+	if err := publishGraphGeneration(ctx, st, repoDBID, snapshot.GenerationID); err != nil {
+		return result, err
+	}
+	result.Snapshot, err = st.GetGraphSnapshot(ctx, repoDBID)
+	if err != nil {
+		return result, err
+	}
+	result.Published = true
+	result.Remaining = 0
+	return result, nil
+}
+
+// IndexRepo performs an uncapped authoritative full index.
+func IndexRepo(ctx context.Context, st *store.Store, ghClient *ghpkg.Client, installationID int64, owner, repo, defaultBranch string, repoDBID int64) error {
+	_, err := IndexRepoBounded(ctx, st, ghClient, installationID, owner, repo, defaultBranch, repoDBID, 0, 0)
+	return err
+}
+
+func publishGraphGeneration(ctx context.Context, st *store.Store, repoID, generationID int64) error {
+	files, err := st.ListGraphGenerationFiles(ctx, generationID)
+	if err != nil {
+		return err
+	}
+	tx, err := st.Pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("publish graph generation: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var expected, visited, failed int
+	var status string
+	if err := tx.QueryRow(ctx, `
+		SELECT status, expected_files, visited_files, failed_files
+		FROM graph_index_generations WHERE id = $1 AND repo_id = $2 FOR UPDATE`, generationID, repoID).
+		Scan(&status, &expected, &visited, &failed); err != nil {
+		return fmt.Errorf("publish graph generation: validate: %w", err)
+	}
+	if status != "building" || visited != expected || failed != 0 || len(files) != expected {
+		return fmt.Errorf("publish graph generation: incomplete generation status=%s expected=%d visited=%d failed=%d staged=%d", status, expected, visited, failed, len(files))
+	}
+
+	// This transaction is the visibility boundary. Deleted and renamed paths,
+	// removed symbols, endpoints, and every old edge disappear together.
+	if _, err := tx.Exec(ctx, `DELETE FROM code_nodes WHERE repo_id = $1`, repoID); err != nil {
+		return fmt.Errorf("publish graph generation: clear old graph: %w", err)
+	}
+
+	keyToID := map[string]int64{}
+	nameToIDs := map[string][]int64{}
+	edgesByFile := map[string][]Edge{}
+	symbolsByFile := map[string][]Symbol{}
+	endpointsByFile := map[string][]APIEndpoint{}
+	for _, file := range files {
+		var symbols []Symbol
+		var edges []Edge
+		var endpoints []APIEndpoint
+		if err := json.Unmarshal(file.Symbols, &symbols); err != nil {
+			return fmt.Errorf("publish graph generation: decode %s symbols: %w", file.FilePath, err)
+		}
+		if err := json.Unmarshal(file.Edges, &edges); err != nil {
+			return fmt.Errorf("publish graph generation: decode %s edges: %w", file.FilePath, err)
+		}
+		if err := json.Unmarshal(file.Endpoints, &endpoints); err != nil {
+			return fmt.Errorf("publish graph generation: decode %s endpoints: %w", file.FilePath, err)
+		}
+		symbolsByFile[file.FilePath], edgesByFile[file.FilePath], endpointsByFile[file.FilePath] = symbols, edges, endpoints
+		for _, sym := range symbols {
+			var id int64
+			err := tx.QueryRow(ctx, `
+				INSERT INTO code_nodes (repo_id, installation_id, kind, name, file_path, line_start, line_end, language,
+				  return_type, params, visibility, is_async, receiver_type, scope, content_hash, updated_at)
+				VALUES ($1, (SELECT installation_id FROM repos WHERE id = $1), $2, $3, $4, $5, $6, $7,
+				  $8, $9, $10, $11, $12, $13, $14, NOW()) RETURNING id`, repoID, sym.Kind, sym.Name,
+				sym.FilePath, sym.LineStart, sym.LineEnd, langForFile(sym.FilePath), sym.ReturnType,
+				sym.Params, sym.Visibility, sym.IsAsync, sym.Receiver, sym.Scope, computeSymbolHash(sym)).Scan(&id)
+			if err != nil {
+				return fmt.Errorf("publish graph generation: insert node %s: %w", sym.Name, err)
+			}
+			keyToID[nodeKey(sym.FilePath, sym.Name)] = id
+			nameToIDs[sym.Name] = append(nameToIDs[sym.Name], id)
+		}
+	}
+
+	resolved := make([]store.CodeEdgeRow, 0)
+	seen := map[store.CodeEdgeRow]struct{}{}
+	appendEdge := func(sourceID, targetID int64, kind string) {
+		row := store.CodeEdgeRow{SourceID: sourceID, TargetID: targetID, Kind: kind}
+		if sourceID == 0 || targetID == 0 || kind == "" {
+			return
+		}
+		if _, ok := seen[row]; ok {
+			return
+		}
+		seen[row] = struct{}{}
+		resolved = append(resolved, row)
+	}
+	filePaths := make([]string, 0, len(files))
+	for filePath := range symbolsByFile {
+		filePaths = append(filePaths, filePath)
+	}
+	sort.Strings(filePaths)
+	for _, filePath := range filePaths {
+		for _, edge := range edgesByFile[filePath] {
+			if edge.Kind == "imports" {
+				var sourceID int64
+				for _, sym := range symbolsByFile[filePath] {
+					if id := keyToID[nodeKey(filePath, sym.Name)]; id != 0 {
+						sourceID = id
+						break
+					}
+				}
+				if sourceID == 0 {
+					continue
+				}
+				targetID, ok := resolveNodeName(filePath, edge.TargetName, keyToID, nameToIDs)
+				if !ok {
+					if err := tx.QueryRow(ctx, `
+						INSERT INTO code_nodes (repo_id, installation_id, kind, name, file_path, line_start, line_end, language, updated_at)
+						VALUES ($1, (SELECT installation_id FROM repos WHERE id = $1), 'module', $2, $3, 0, 0, '', NOW())
+						RETURNING id`, repoID, edge.TargetName, filePath).Scan(&targetID); err != nil {
+						return fmt.Errorf("publish graph generation: insert module %s: %w", edge.TargetName, err)
+					}
+					keyToID[nodeKey(filePath, edge.TargetName)] = targetID
+					nameToIDs[edge.TargetName] = append(nameToIDs[edge.TargetName], targetID)
+				}
+				appendEdge(sourceID, targetID, edge.Kind)
+				continue
+			}
+			sourceID := keyToID[nodeKey(filePath, edge.SourceName)]
+			if sourceID == 0 {
+				continue
+			}
+			targetID, ok := resolveNodeName(filePath, edge.TargetName, keyToID, nameToIDs)
+			if ok {
+				appendEdge(sourceID, targetID, edge.Kind)
+			}
+		}
+	}
+	var allSymbols []Symbol
+	for _, symbols := range symbolsByFile {
+		allSymbols = append(allSymbols, symbols...)
+	}
+	for _, edge := range resolveTypeEdges(allSymbols, keyToID) {
+		appendEdge(keyToID[edge.SourceName], keyToID[edge.TargetName], edge.Kind)
+	}
+	for _, edge := range resolved {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO code_edges (repo_id, source_id, target_id, kind, inferred, updated_at)
+			VALUES ($1, $2, $3, $4, false, NOW()) ON CONFLICT DO NOTHING`,
+			repoID, edge.SourceID, edge.TargetID, edge.Kind); err != nil {
+			return fmt.Errorf("publish graph generation: insert edge: %w", err)
+		}
+	}
+
+	for _, filePath := range filePaths {
+		for _, endpoint := range endpointsByFile[filePath] {
+			nodeID, ok := resolveEndpointNode(filePath, endpoint, keyToID, nameToIDs, nil)
+			if !ok {
+				continue
+			}
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO api_endpoints (repo_id, node_id, role, method, path_pattern, raw_path, file_path, line, updated_at)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW()) ON CONFLICT DO NOTHING`,
+				repoID, nodeID, endpoint.Role, endpoint.Method, endpoint.Path, endpoint.RawPath, filePath, endpoint.Line); err != nil {
+				return fmt.Errorf("publish graph generation: insert endpoint: %w", err)
+			}
+		}
+	}
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE graph_index_generations SET status = 'published', published_at = NOW(), updated_at = NOW()
+		WHERE id = $1 AND repo_id = $2`, generationID, repoID); err != nil {
+		return fmt.Errorf("publish graph generation: mark generation: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE repos r SET graph_published_generation_id = $2, graph_indexed_at = NOW(), graph_index_cursor = 0,
+		  graph_index_commit_sha = g.commit_sha, graph_index_expected_files = g.expected_files,
+		  graph_index_visited_files = g.visited_files, graph_index_failed_files = g.failed_files,
+		  graph_index_skipped_files = g.skipped_files, graph_index_tree_truncated = g.tree_truncated
+		FROM graph_index_generations g WHERE r.id = $1 AND g.id = $2`, repoID, generationID); err != nil {
+		return fmt.Errorf("publish graph generation: mark repo: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("publish graph generation: commit: %w", err)
+	}
+
+	// Cross-repo API inference is derived from published endpoints. It remains a
+	// separate best-effort projection and is rebuilt from the full installation.
+	if _, err := LinkAPIEndpoints(ctx, st, repoID); err != nil {
+		slog.Warn("graph: cross-repo API linking after generation publish failed", "repo_id", repoID, "error", err)
+	}
+	return nil
 }

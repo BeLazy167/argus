@@ -28,10 +28,11 @@ import (
 // necessary: this is backfill, and the per-PR incremental path already keeps
 // changed files fresh in the meantime.
 const (
-	graphIndexInterval  = time.Hour
-	graphIndexStaleness = 14 * 24 * time.Hour
-	graphIndexPerTick   = 1
-	graphIndexTimeout   = 25 * time.Minute
+	graphIndexInterval             = time.Hour
+	graphIndexContinuationInterval = 2 * time.Minute
+	graphIndexStaleness            = 14 * 24 * time.Hour
+	graphIndexPerTick              = 1
+	graphIndexTimeout              = 25 * time.Minute
 )
 
 // runGraphIndexBackfill walks whole repositories into the code graph on a
@@ -61,14 +62,22 @@ func runGraphIndexBackfill(ctx context.Context, db *store.Store, ghClient *ghpkg
 		indexDueRepos(ctx, db, ghClient, logger)
 	}
 
-	ticker := time.NewTicker(graphIndexInterval)
-	defer ticker.Stop()
-
 	for {
+		delay := graphIndexInterval
+		probeCtx, cancelProbe := context.WithTimeout(ctx, 10*time.Second)
+		building, err := db.HasBuildingGraphGeneration(probeCtx)
+		cancelProbe()
+		if err != nil {
+			logger.Warn("graph index: probing continuation", "error", err)
+		} else if building {
+			delay = graphIndexContinuationInterval
+		}
+		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-ticker.C:
+		case <-timer.C:
 			indexDueRepos(ctx, db, ghClient, logger)
 		}
 	}
@@ -115,7 +124,7 @@ func indexDueRepos(ctx context.Context, db *store.Store, ghClient *ghpkg.Client,
 		// Per-repo deadline. A single unreachable repository must not hold the
 		// backfill open until the next tick arrives and overlaps it.
 		repoCtx, cancel := context.WithTimeout(ctx, graphIndexTimeout)
-		indexed, dropped, nextCursor, err := graph.IndexRepoBounded(repoCtx, db, ghClient,
+		result, err := graph.IndexRepoBounded(repoCtx, db, ghClient,
 			t.GitHubInstallationID, t.Owner, t.Repo, t.DefaultBranch, t.RepoID,
 			graph.DefaultFullIndexFileCap, t.IndexCursor)
 		cancel()
@@ -129,26 +138,17 @@ func indexDueRepos(ctx context.Context, db *store.Store, ghClient *ghpkg.Client,
 			continue
 		}
 
-		if dropped > 0 {
-			// Say so. A capped index recorded as a complete one is the same
-			// false confidence the fragmented graph already produces. The cursor
-			// means the next run covers a different window, so coverage still
-			// completes — over several runs rather than one.
-			logger.Warn("graph index: repo exceeded the file cap, indexed one window",
-				"repo", t.Owner+"/"+t.Repo, "indexed", indexed, "skipped", dropped,
-				"next_offset", nextCursor)
+		if !result.Published {
+			logger.Warn("graph index: generation window staged but not complete",
+				"repo", t.Owner+"/"+t.Repo, "commit", result.Snapshot.CommitSHA,
+				"staged", result.Staged, "remaining", result.Remaining,
+				"visited", result.Snapshot.VisitedFiles, "expected", result.Snapshot.ExpectedFiles,
+				"failed", result.Snapshot.FailedFiles)
+			continue
 		}
-		markCtx, cancelMark := context.WithTimeout(ctx, 30*time.Second)
-		err = db.MarkRepoGraphIndexed(markCtx, t.RepoID, nextCursor)
-		cancelMark()
-		if err != nil {
-			// The index itself succeeded, so do not claim otherwise; the repo is
-			// simply re-selected next tick and re-indexed, which is wasteful but
-			// correct.
-			logger.Error("graph index: marking indexed", "repo", t.Owner+"/"+t.Repo, "error", err)
-		}
-		logger.Info("graph index: full index complete",
-			"repo", t.Owner+"/"+t.Repo, "files", indexed, "skipped", dropped)
+		logger.Info("graph index: full generation published",
+			"repo", t.Owner+"/"+t.Repo, "commit", result.Snapshot.CommitSHA,
+			"files", result.Snapshot.VisitedFiles, "skipped", result.Snapshot.SkippedFiles)
 		rebuilt = true
 	}
 

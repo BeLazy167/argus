@@ -2,9 +2,12 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // RepoIndexTarget is one repository due for a full code-graph index.
@@ -55,8 +58,15 @@ func (s *Store) ListReposDueForGraphIndex(ctx context.Context, staleAfter time.D
 		JOIN installations i ON i.id = r.installation_id
 		WHERE r.enabled
 		  AND i.suspended_at IS NULL
-		  AND (r.graph_indexed_at IS NULL OR r.graph_indexed_at < NOW() - $1::interval)
-		ORDER BY r.graph_indexed_at NULLS FIRST, r.graph_index_attempted_at NULLS FIRST, r.id
+		  AND (EXISTS (
+		        SELECT 1 FROM graph_index_generations g
+		        WHERE g.repo_id = r.id AND g.status = 'building'
+		      ) OR r.graph_indexed_at IS NULL OR r.graph_indexed_at < NOW() - $1::interval)
+		ORDER BY EXISTS (
+		           SELECT 1 FROM graph_index_generations g
+		           WHERE g.repo_id = r.id AND g.status = 'building'
+		         ) DESC,
+		         r.graph_indexed_at NULLS FIRST, r.graph_index_attempted_at NULLS FIRST, r.id
 		LIMIT $2`,
 		fmt.Sprintf("%d seconds", int64(staleAfter.Seconds())), limit)
 	if err != nil {
@@ -115,6 +125,197 @@ func (s *Store) MarkRepoGraphIndexed(ctx context.Context, repoID int64, nextCurs
 		return fmt.Errorf("marking repo %d graph-indexed: %w", repoID, err)
 	}
 	return nil
+}
+
+// GraphSnapshot is the externally visible state of the newest full-index generation.
+type GraphSnapshot struct {
+	GenerationID  int64      `json:"generation_id"`
+	CommitSHA     string     `json:"commit_sha"`
+	Status        string     `json:"status"`
+	TreeTruncated bool       `json:"tree_truncated"`
+	ExpectedFiles int        `json:"expected_files"`
+	VisitedFiles  int        `json:"visited_files"`
+	FailedFiles   int        `json:"failed_files"`
+	SkippedFiles  int        `json:"skipped_files"`
+	Complete      bool       `json:"complete"`
+	StartedAt     time.Time  `json:"started_at"`
+	PublishedAt   *time.Time `json:"published_at,omitempty"`
+}
+
+// GraphGenerationFile is one staged deterministic parser snapshot.
+type GraphGenerationFile struct {
+	FilePath  string
+	Symbols   json.RawMessage
+	Edges     json.RawMessage
+	Endpoints json.RawMessage
+}
+
+// BeginGraphGeneration resumes the same immutable snapshot or supersedes it
+// when the default branch moved. A truncated tree is recorded as failed and is
+// never eligible for publication.
+func (s *Store) BeginGraphGeneration(ctx context.Context, repoID int64, commitSHA string, expectedFiles, skippedFiles int, treeTruncated bool) (GraphSnapshot, error) {
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return GraphSnapshot{}, fmt.Errorf("begin graph generation: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `
+		UPDATE graph_index_generations SET status = 'superseded', updated_at = NOW()
+		WHERE repo_id = $1 AND status = 'building' AND commit_sha <> $2`, repoID, commitSHA); err != nil {
+		return GraphSnapshot{}, fmt.Errorf("supersede graph generation: %w", err)
+	}
+
+	status, message := "building", ""
+	if treeTruncated {
+		status, message = "failed", "github tree response was truncated"
+		if _, err := tx.Exec(ctx, `UPDATE graph_index_generations SET status = 'superseded', updated_at = NOW() WHERE repo_id = $1 AND status = 'building'`, repoID); err != nil {
+			return GraphSnapshot{}, fmt.Errorf("supersede truncated graph generation: %w", err)
+		}
+	}
+	var snap GraphSnapshot
+	err = tx.QueryRow(ctx, `
+		INSERT INTO graph_index_generations (repo_id, commit_sha, status, tree_truncated, expected_files, skipped_files, error)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (repo_id) WHERE status = 'building'
+		DO UPDATE SET expected_files = EXCLUDED.expected_files,
+		              skipped_files = EXCLUDED.skipped_files,
+		              tree_truncated = EXCLUDED.tree_truncated,
+		              updated_at = NOW()
+		RETURNING id, commit_sha, status, tree_truncated, expected_files,
+		          visited_files, failed_files, skipped_files, started_at, published_at`,
+		repoID, commitSHA, status, treeTruncated, expectedFiles, skippedFiles, message).Scan(
+		&snap.GenerationID, &snap.CommitSHA, &snap.Status, &snap.TreeTruncated,
+		&snap.ExpectedFiles, &snap.VisitedFiles, &snap.FailedFiles, &snap.SkippedFiles,
+		&snap.StartedAt, &snap.PublishedAt)
+	if err != nil {
+		return GraphSnapshot{}, fmt.Errorf("insert graph generation: %w", err)
+	}
+	snap.Complete = snap.Status == "published"
+	if _, err := tx.Exec(ctx, `
+		UPDATE repos SET graph_index_commit_sha = $2, graph_index_expected_files = $3,
+		  graph_index_visited_files = $4, graph_index_failed_files = $5,
+		  graph_index_skipped_files = $6, graph_index_tree_truncated = $7
+		WHERE id = $1`, repoID, snap.CommitSHA, snap.ExpectedFiles, snap.VisitedFiles,
+		snap.FailedFiles, snap.SkippedFiles, snap.TreeTruncated); err != nil {
+		return GraphSnapshot{}, fmt.Errorf("update repo graph generation: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return GraphSnapshot{}, fmt.Errorf("commit graph generation: %w", err)
+	}
+	return snap, nil
+}
+
+// StageGraphGenerationFile upserts one file result and refreshes generation
+// counts. Retrying a failed file replaces its failure with a ready snapshot.
+func (s *Store) StageGraphGenerationFile(ctx context.Context, repoID, generationID int64, filePath string, symbols, edges, endpoints []byte, stageErr error) (GraphSnapshot, error) {
+	status, message := "ready", ""
+	if stageErr != nil {
+		status, message = "failed", stageErr.Error()
+		symbols, edges, endpoints = []byte("[]"), []byte("[]"), []byte("[]")
+	}
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return GraphSnapshot{}, fmt.Errorf("stage graph file: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO graph_index_generation_files (generation_id, file_path, status, symbols, edges, endpoints, error)
+		SELECT $1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7
+		WHERE EXISTS (SELECT 1 FROM graph_index_generations WHERE id = $1 AND repo_id = $8 AND status = 'building')
+		ON CONFLICT (generation_id, file_path) DO UPDATE
+		SET status = EXCLUDED.status, symbols = EXCLUDED.symbols, edges = EXCLUDED.edges,
+		    endpoints = EXCLUDED.endpoints, error = EXCLUDED.error, updated_at = NOW()`,
+		generationID, filePath, status, symbols, edges, endpoints, message, repoID); err != nil {
+		return GraphSnapshot{}, fmt.Errorf("stage graph file: upsert: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE graph_index_generations g SET
+		  visited_files = x.visited, failed_files = x.failed, updated_at = NOW()
+		FROM (SELECT count(*)::int visited, count(*) FILTER (WHERE status = 'failed')::int failed
+		      FROM graph_index_generation_files WHERE generation_id = $1) x
+		WHERE g.id = $1 AND g.repo_id = $2 AND g.status = 'building'`, generationID, repoID); err != nil {
+		return GraphSnapshot{}, fmt.Errorf("stage graph file: counts: %w", err)
+	}
+	var snap GraphSnapshot
+	if err := tx.QueryRow(ctx, `
+		SELECT id, commit_sha, status, tree_truncated, expected_files, visited_files,
+		       failed_files, skipped_files, started_at, published_at
+		FROM graph_index_generations WHERE id = $1 AND repo_id = $2`, generationID, repoID).Scan(
+		&snap.GenerationID, &snap.CommitSHA, &snap.Status, &snap.TreeTruncated,
+		&snap.ExpectedFiles, &snap.VisitedFiles, &snap.FailedFiles, &snap.SkippedFiles,
+		&snap.StartedAt, &snap.PublishedAt); err != nil {
+		return GraphSnapshot{}, fmt.Errorf("stage graph file: snapshot: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE repos SET graph_index_visited_files = $2, graph_index_failed_files = $3 WHERE id = $1`, repoID, snap.VisitedFiles, snap.FailedFiles); err != nil {
+		return GraphSnapshot{}, fmt.Errorf("stage graph file: repo counts: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return GraphSnapshot{}, fmt.Errorf("stage graph file: commit: %w", err)
+	}
+	return snap, nil
+}
+
+func (s *Store) ListReadyGraphGenerationPaths(ctx context.Context, generationID int64) (map[string]struct{}, error) {
+	rows, err := s.Pool.Query(ctx, `SELECT file_path FROM graph_index_generation_files WHERE generation_id = $1 AND status = 'ready'`, generationID)
+	if err != nil {
+		return nil, fmt.Errorf("list ready graph paths: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]struct{}{}
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			return nil, err
+		}
+		out[path] = struct{}{}
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListGraphGenerationFiles(ctx context.Context, generationID int64) ([]GraphGenerationFile, error) {
+	rows, err := s.Pool.Query(ctx, `
+		SELECT file_path, symbols, edges, endpoints
+		FROM graph_index_generation_files
+		WHERE generation_id = $1 AND status = 'ready' ORDER BY file_path`, generationID)
+	if err != nil {
+		return nil, fmt.Errorf("list graph generation files: %w", err)
+	}
+	defer rows.Close()
+	return collectOrEmpty(rows, func(row pgx.CollectableRow) (GraphGenerationFile, error) {
+		var f GraphGenerationFile
+		err := row.Scan(&f.FilePath, &f.Symbols, &f.Edges, &f.Endpoints)
+		return f, err
+	})
+}
+
+// GetGraphSnapshot returns the building generation when one exists, otherwise
+// the newest published/failed generation. A repo without a generation returns
+// the zero snapshot without error.
+func (s *Store) GetGraphSnapshot(ctx context.Context, repoID int64) (GraphSnapshot, error) {
+	var snap GraphSnapshot
+	err := s.Pool.QueryRow(ctx, `
+		SELECT id, commit_sha, status, tree_truncated, expected_files, visited_files,
+		       failed_files, skipped_files, started_at, published_at
+		FROM graph_index_generations WHERE repo_id = $1
+		ORDER BY (status = 'building') DESC, started_at DESC LIMIT 1`, repoID).Scan(
+		&snap.GenerationID, &snap.CommitSHA, &snap.Status, &snap.TreeTruncated,
+		&snap.ExpectedFiles, &snap.VisitedFiles, &snap.FailedFiles, &snap.SkippedFiles,
+		&snap.StartedAt, &snap.PublishedAt)
+	if err == pgx.ErrNoRows {
+		return GraphSnapshot{}, nil
+	}
+	if err != nil {
+		return GraphSnapshot{}, fmt.Errorf("get graph snapshot: %w", err)
+	}
+	snap.Complete = snap.Status == "published" && !snap.TreeTruncated && snap.FailedFiles == 0 && snap.VisitedFiles == snap.ExpectedFiles
+	return snap, nil
+}
+
+// HasBuildingGraphGeneration reports whether a capped or failed window needs a prompt continuation.
+func (s *Store) HasBuildingGraphGeneration(ctx context.Context) (bool, error) {
+	var exists bool
+	err := s.Pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM graph_index_generations WHERE status = 'building')`).Scan(&exists)
+	return exists, err
 }
 
 // TryGraphIndexLock takes a session-level advisory lock for the backfill.

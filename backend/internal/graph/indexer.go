@@ -196,25 +196,6 @@ var sourceExts = map[string]bool{
 	".php": true, ".scala": true, ".dart": true,
 }
 
-// IndexRepo performs a full code graph index for a repository.
-// Fetches the repo tree via GitHub API, parses each source file, and upserts nodes+edges.
-func IndexRepo(ctx context.Context, st *store.Store, ghClient *ghpkg.Client, installationID int64, owner, repo, ref string, repoDBID int64) error {
-	tree, err := ghClient.GetRepoTree(ctx, installationID, owner, repo, ref)
-	if err != nil {
-		return err
-	}
-
-	var files []string
-	for _, entry := range tree {
-		if sourceExts[strings.ToLower(filepath.Ext(entry))] {
-			files = append(files, entry)
-		}
-	}
-
-	slog.Info("graph: full index", "repo", owner+"/"+repo, "source_files", len(files))
-	return indexFileSet(ctx, st, ghClient, installationID, owner, repo, ref, repoDBID, files)
-}
-
 // IndexFiles performs incremental code graph indexing for specific files.
 // Deletes old nodes for these files, re-parses, and upserts.
 func IndexFiles(ctx context.Context, st *store.Store, ghClient *ghpkg.Client, installationID int64, owner, repo, ref string, repoDBID int64, files []string) error {

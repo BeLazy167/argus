@@ -1052,26 +1052,39 @@ func (c *Client) SearchCode(ctx context.Context, installationID int64, owner, re
 	return paths, nil
 }
 
-// GetRepoTree returns all file paths in a repo at a given ref using the Git Trees API (recursive).
-func (c *Client) GetRepoTree(ctx context.Context, installationID int64, owner, repo, ref string) ([]string, error) {
+// RepoTree is a recursive Git Trees response. Truncated means GitHub omitted
+// entries and callers must not treat Paths as an authoritative repository view.
+type RepoTree struct {
+	Paths     []string
+	Truncated bool
+}
+
+// ResolveDefaultBranchCommit resolves a mutable branch name once. The returned
+// SHA is then used for both the tree and every file fetch in a full index.
+func (c *Client) ResolveDefaultBranchCommit(ctx context.Context, installationID int64, owner, repo, branch string) (string, error) {
+	return c.GetRef(ctx, installationID, owner, repo, "heads/"+strings.TrimPrefix(branch, "refs/heads/"))
+}
+
+// GetRepoTree returns all file paths at an immutable commit SHA.
+func (c *Client) GetRepoTree(ctx context.Context, installationID int64, owner, repo, commitSHA string) (RepoTree, error) {
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
-		return nil, err
+		return RepoTree{}, err
 	}
 	if err := c.restLimiter.Wait(ctx); err != nil {
-		return nil, fmt.Errorf("rate limit wait: %w", err)
+		return RepoTree{}, fmt.Errorf("rate limit wait: %w", err)
 	}
-	tree, _, err := client.Git.GetTree(ctx, owner, repo, ref, true)
+	tree, _, err := client.Git.GetTree(ctx, owner, repo, commitSHA, true)
 	if err != nil {
-		return nil, fmt.Errorf("fetching repo tree: %w", err)
+		return RepoTree{}, fmt.Errorf("fetching repo tree: %w", err)
 	}
-	var paths []string
+	result := RepoTree{Truncated: tree.GetTruncated()}
 	for _, entry := range tree.Entries {
 		if entry.GetType() == "blob" {
-			paths = append(paths, entry.GetPath())
+			result.Paths = append(result.Paths, entry.GetPath())
 		}
 	}
-	return paths, nil
+	return result, nil
 }
 
 // ReviewSubmission represents a formatted review ready to post to GitHub.

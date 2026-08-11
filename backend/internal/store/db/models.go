@@ -36,6 +36,27 @@ type ApiEndpoint struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
+type ArchitectureAnnotationEdge struct {
+	ID        int64     `json:"id"`
+	RepoID    int64     `json:"repo_id"`
+	PRNumber  int       `json:"pr_number"`
+	SourceID  int64     `json:"source_id"`
+	TargetID  int64     `json:"target_id"`
+	Kind      string    `json:"kind"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type ArchitectureAnnotationNode struct {
+	ID        int64     `json:"id"`
+	RepoID    int64     `json:"repo_id"`
+	PRNumber  int       `json:"pr_number"`
+	Kind      string    `json:"kind"`
+	Name      string    `json:"name"`
+	FilePath  string    `json:"file_path"`
+	Language  string    `json:"language"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 type AutoResolveEvent struct {
 	ID                 int64     `json:"id"`
 	InstallationID     int64     `json:"installation_id"`
@@ -101,6 +122,33 @@ type DecisionTrace struct {
 	PRNumber   *int       `json:"pr_number"`
 	Metadata   []byte     `json:"metadata"`
 	CreatedAt  *time.Time `json:"created_at"`
+}
+
+type GraphIndexGeneration struct {
+	ID            int64      `json:"id"`
+	RepoID        int64      `json:"repo_id"`
+	CommitSha     string     `json:"commit_sha"`
+	Status        string     `json:"status"`
+	TreeTruncated bool       `json:"tree_truncated"`
+	ExpectedFiles int        `json:"expected_files"`
+	VisitedFiles  int        `json:"visited_files"`
+	FailedFiles   int        `json:"failed_files"`
+	SkippedFiles  int        `json:"skipped_files"`
+	Error         string     `json:"error"`
+	StartedAt     time.Time  `json:"started_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
+	PublishedAt   *time.Time `json:"published_at"`
+}
+
+type GraphIndexGenerationFile struct {
+	GenerationID int64           `json:"generation_id"`
+	FilePath     string          `json:"file_path"`
+	Status       string          `json:"status"`
+	Symbols      json.RawMessage `json:"symbols"`
+	Edges        json.RawMessage `json:"edges"`
+	Endpoints    json.RawMessage `json:"endpoints"`
+	Error        string          `json:"error"`
+	UpdatedAt    time.Time       `json:"updated_at"`
 }
 
 type Installation struct {
@@ -283,18 +331,25 @@ type ProviderKey struct {
 }
 
 type Repo struct {
-	ID                    int64           `json:"id"`
-	InstallationID        int64           `json:"installation_id"`
-	GithubID              int64           `json:"github_id"`
-	FullName              string          `json:"full_name"`
-	DefaultBranch         string          `json:"default_branch"`
-	Enabled               bool            `json:"enabled"`
-	SettingsJSON          json.RawMessage `json:"settings_json"`
-	CreatedAt             time.Time       `json:"created_at"`
-	UpdatedAt             time.Time       `json:"updated_at"`
-	GraphIndexedAt        *time.Time      `json:"graph_indexed_at"`
-	GraphIndexAttemptedAt *time.Time      `json:"graph_index_attempted_at"`
-	GraphIndexCursor      int             `json:"graph_index_cursor"`
+	ID                         int64           `json:"id"`
+	InstallationID             int64           `json:"installation_id"`
+	GithubID                   int64           `json:"github_id"`
+	FullName                   string          `json:"full_name"`
+	DefaultBranch              string          `json:"default_branch"`
+	Enabled                    bool            `json:"enabled"`
+	SettingsJSON               json.RawMessage `json:"settings_json"`
+	CreatedAt                  time.Time       `json:"created_at"`
+	UpdatedAt                  time.Time       `json:"updated_at"`
+	GraphIndexedAt             *time.Time      `json:"graph_indexed_at"`
+	GraphIndexAttemptedAt      *time.Time      `json:"graph_index_attempted_at"`
+	GraphIndexCursor           int             `json:"graph_index_cursor"`
+	GraphPublishedGenerationID *int64          `json:"graph_published_generation_id"`
+	GraphIndexCommitSha        *string         `json:"graph_index_commit_sha"`
+	GraphIndexExpectedFiles    int             `json:"graph_index_expected_files"`
+	GraphIndexVisitedFiles     int             `json:"graph_index_visited_files"`
+	GraphIndexFailedFiles      int             `json:"graph_index_failed_files"`
+	GraphIndexSkippedFiles     int             `json:"graph_index_skipped_files"`
+	GraphIndexTreeTruncated    bool            `json:"graph_index_tree_truncated"`
 }
 
 type Review struct {
