@@ -16,6 +16,29 @@ import (
 // repository metadata and its current default-branch commit before retrying.
 var ErrGraphDefaultBranchMismatch = errors.New("graph default head authority requires verification")
 
+// GraphRefreshConflictToken identifies the repository refresh state that was
+// locked when an authority conflict was detected. It is intentionally opaque:
+// callers may only return a token obtained from GraphDefaultBranchMismatchError.
+type GraphRefreshConflictToken struct {
+	refreshVersion int64
+	valid          bool
+}
+
+// GraphDefaultBranchMismatchError carries the optimistic token required by a
+// verified retry. It unwraps to ErrGraphDefaultBranchMismatch for callers that
+// only need to decide whether live GitHub verification is required.
+type GraphDefaultBranchMismatchError struct {
+	ConflictToken GraphRefreshConflictToken
+}
+
+func (e *GraphDefaultBranchMismatchError) Error() string {
+	return fmt.Sprintf("%s (refresh version %d)", ErrGraphDefaultBranchMismatch, e.ConflictToken.refreshVersion)
+}
+
+func (*GraphDefaultBranchMismatchError) Unwrap() error {
+	return ErrGraphDefaultBranchMismatch
+}
+
 const graphIndexPermanentFailureBackoff = 6 * time.Hour
 
 // RepoIndexTarget is one repository due for a full code-graph index.
@@ -201,7 +224,7 @@ func (s *Store) ScheduleGraphIndexRefresh(
 	observedAt time.Time,
 ) (bool, error) {
 	return s.scheduleGraphIndexRefresh(ctx, githubInstallationID, githubRepoID,
-		fullName, defaultBranch, commitSHA, observedAt, false, "", "")
+		fullName, defaultBranch, commitSHA, observedAt, false, "", "", nil)
 }
 
 // ScheduleGraphIndexRefreshFromPush records a signed default-branch push when
@@ -216,7 +239,7 @@ func (s *Store) ScheduleGraphIndexRefreshFromPush(
 	observedAt time.Time,
 ) (bool, error) {
 	return s.scheduleGraphIndexRefresh(ctx, githubInstallationID, githubRepoID,
-		fullName, defaultBranch, commitSHA, observedAt, true, "", "")
+		fullName, defaultBranch, commitSHA, observedAt, true, "", "", nil)
 }
 
 // ScheduleGraphIndexRefreshFromVerifiedPush permits an authority conflict only
@@ -229,9 +252,10 @@ func (s *Store) ScheduleGraphIndexRefreshFromVerifiedPush(
 	fullName, defaultBranch, commitSHA string,
 	observedAt time.Time,
 	verifiedDefaultBranch, verifiedCommitSHA string,
+	conflictToken GraphRefreshConflictToken,
 ) (bool, error) {
 	return s.scheduleGraphIndexRefresh(ctx, githubInstallationID, githubRepoID,
-		fullName, defaultBranch, commitSHA, observedAt, true, verifiedDefaultBranch, verifiedCommitSHA)
+		fullName, defaultBranch, commitSHA, observedAt, true, verifiedDefaultBranch, verifiedCommitSHA, &conflictToken)
 }
 
 // scheduleGraphIndexRefresh scopes by tenant, installation-owned repository
@@ -244,6 +268,7 @@ func (s *Store) scheduleGraphIndexRefresh(
 	observedAt time.Time,
 	branchAuthoritative bool,
 	verifiedDefaultBranch, verifiedCommitSHA string,
+	conflictToken *GraphRefreshConflictToken,
 ) (bool, error) {
 	if githubInstallationID <= 0 || githubRepoID <= 0 || fullName == "" || defaultBranch == "" || commitSHA == "" {
 		return false, nil
@@ -258,13 +283,13 @@ func (s *Store) scheduleGraphIndexRefresh(
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var repoID int64
+	var repoID, refreshVersion int64
 	var storedDefaultBranch string
 	var publishedCommit, observedCommit, requestedCommit *string
 	var publishedComplete bool
 	var lastEventAt, requestedAt *time.Time
 	err = tx.QueryRow(ctx, `
-		SELECT r.id, r.default_branch, published.commit_sha,
+		SELECT r.id, r.default_branch, r.graph_refresh_version, published.commit_sha,
 		       COALESCE(published.status = 'published' AND NOT published.tree_truncated
 		         AND published.failed_files = 0 AND published.visited_files = published.expected_files
 		         AND NOT EXISTS (SELECT 1 FROM graph_index_generation_files unavailable
@@ -278,13 +303,19 @@ func (s *Store) scheduleGraphIndexRefresh(
 		WHERE i.installation_id = $1 AND i.suspended_at IS NULL
 		  AND r.github_id = $2 AND r.full_name = $3 AND r.enabled
 		FOR UPDATE OF r`, githubInstallationID, githubRepoID, fullName).Scan(
-		&repoID, &storedDefaultBranch, &publishedCommit, &publishedComplete,
+		&repoID, &storedDefaultBranch, &refreshVersion, &publishedCommit, &publishedComplete,
 		&observedCommit, &lastEventAt, &requestedAt, &requestedCommit)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
 		return false, fmt.Errorf("schedule graph refresh: scope repository: %w", err)
+	}
+
+	// Live verification happens without a database session or row lock. The
+	// retry may mutate only the exact refresh state that raised the conflict.
+	if conflictToken != nil && (!conflictToken.valid || conflictToken.refreshVersion != refreshVersion) {
+		return false, nil
 	}
 
 	branchChanged := storedDefaultBranch != defaultBranch
@@ -295,7 +326,9 @@ func (s *Store) scheduleGraphIndexRefresh(
 			return false, nil
 		}
 		if verifiedDefaultBranch == "" && verifiedCommitSHA == "" {
-			return false, ErrGraphDefaultBranchMismatch
+			return false, &GraphDefaultBranchMismatchError{
+				ConflictToken: GraphRefreshConflictToken{refreshVersion: refreshVersion, valid: true},
+			}
 		}
 		if verifiedDefaultBranch != defaultBranch || verifiedCommitSHA != commitSHA {
 			return false, nil

@@ -112,6 +112,13 @@ func IndexRepoBounded(
 			snapshot, err = st.GetGraphSnapshot(ctx, repoDBID)
 			return FullIndexResult{Snapshot: snapshot, Unchanged: true}, err
 		}
+		// Persist the immutable head before fetching its tree. A permanent tree
+		// failure can then terminate this generation and participate in the
+		// head-scoped retry backoff; a transient failure leaves it resumable.
+		snapshot, err = st.BeginGraphGeneration(ctx, repoDBID, commitSHA, 0, 0, false, refreshVersion)
+		if err != nil {
+			return FullIndexResult{}, err
+		}
 	}
 	tree, err := ghClient.GetRepoTree(ctx, installationID, owner, repo, commitSHA)
 	if err != nil {

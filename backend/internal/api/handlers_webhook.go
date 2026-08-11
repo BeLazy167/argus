@@ -341,7 +341,8 @@ func (s *Server) scheduleGraphRefresh(ctx context.Context, update ghpkg.DefaultB
 	if update.BranchIdentityIsAuthoritative() {
 		scheduled, err = s.store.ScheduleGraphIndexRefreshFromPush(ctx, update.InstallationID, update.RepoID,
 			update.RepoFullName, update.DefaultBranch, update.CommitSHA, update.ObservedAt)
-		if errors.Is(err, store.ErrGraphDefaultBranchMismatch) {
+		var conflict *store.GraphDefaultBranchMismatchError
+		if errors.As(err, &conflict) {
 			verified, verifyErr := verifyCurrentDefaultHead(ctx, s.repoMetadata, update)
 			if verifyErr != nil {
 				err = verifyErr
@@ -350,7 +351,8 @@ func (s *Server) scheduleGraphRefresh(ctx context.Context, update ghpkg.DefaultB
 			} else {
 				scheduled, err = s.store.ScheduleGraphIndexRefreshFromVerifiedPush(ctx,
 					update.InstallationID, update.RepoID, update.RepoFullName, update.DefaultBranch,
-					update.CommitSHA, update.ObservedAt, update.DefaultBranch, update.CommitSHA)
+					update.CommitSHA, update.ObservedAt, update.DefaultBranch, update.CommitSHA,
+					conflict.ConflictToken)
 			}
 		}
 	} else {

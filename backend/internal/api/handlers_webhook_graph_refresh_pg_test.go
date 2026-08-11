@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -52,6 +53,38 @@ func (f *renamedDefaultBranchGitHub) GetFileContent(_ context.Context, _ int64, 
 	return "package renamed\nfunc " + map[string]string{"b.go": "TrunkB", "c.go": "TrunkC"}[path] + "() {}\n", nil
 }
 
+type interleavedDefaultHeadGitHub struct {
+	mu            sync.Mutex
+	repoID        int64
+	fullName      string
+	currentHead   string
+	blockedHead   string
+	headResolved  chan struct{}
+	releaseResult chan struct{}
+	signalOnce    sync.Once
+}
+
+func (f *interleavedDefaultHeadGitHub) GetRepositoryMetadata(context.Context, int64, string, string) (ghpkg.RepositoryMetadata, error) {
+	return ghpkg.RepositoryMetadata{ID: f.repoID, FullName: f.fullName, DefaultBranch: "main"}, nil
+}
+
+func (f *interleavedDefaultHeadGitHub) ResolveDefaultBranchCommit(context.Context, int64, string, string, string) (string, error) {
+	f.mu.Lock()
+	head := f.currentHead
+	f.mu.Unlock()
+	if head == f.blockedHead {
+		f.signalOnce.Do(func() { close(f.headResolved) })
+		<-f.releaseResult
+	}
+	return head, nil
+}
+
+func (f *interleavedDefaultHeadGitHub) setCurrentHead(head string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.currentHead = head
+}
+
 func webhookGraphTestPool(t *testing.T) (*pgxpool.Pool, context.Context) {
 	t.Helper()
 	dsn := os.Getenv("TEST_DATABASE_URL")
@@ -66,6 +99,106 @@ func webhookGraphTestPool(t *testing.T) (*pgxpool.Pool, context.Context) {
 	}
 	t.Cleanup(pool.Close)
 	return pool, ctx
+}
+
+func TestVerifiedEqualTimeHeadCannotOverwriteNewerVerifiedHead(t *testing.T) {
+	pool, ctx := webhookGraphTestPool(t)
+	st := store.NewWithDB(pool)
+
+	unique := strconv.FormatInt(time.Now().UnixNano(), 10)
+	fullName := "interleaved-head/repo-" + unique
+	var installationDBID, repoID int64
+	var githubInstallationID, githubRepoID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO installations (installation_id, org_login)
+		VALUES ((random()*1000000000)::bigint, $1) RETURNING id, installation_id`, "interleaved-head-"+unique).
+		Scan(&installationDBID, &githubInstallationID); err != nil {
+		t.Fatalf("seed installation: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO repos (installation_id, github_id, full_name, default_branch, enabled)
+		VALUES ($1, (random()*1000000000)::bigint, $2, 'main', true) RETURNING id, github_id`, installationDBID, fullName).
+		Scan(&repoID, &githubRepoID); err != nil {
+		t.Fatalf("seed repo: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM repos WHERE id = $1`, repoID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM installations WHERE id = $1`, installationDBID)
+	})
+
+	const commitB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb7"
+	const commitC = "ccccccccccccccccccccccccccccccccccccccc8"
+	const commitD = "ddddddddddddddddddddddddddddddddddddddd9"
+	observedAt := time.Now().UTC().Truncate(time.Second)
+	pushUpdate := func(commitSHA string) ghpkg.DefaultBranchUpdate {
+		push := &gh.PushEvent{
+			After: gh.Ptr(commitSHA), Ref: gh.Ptr("refs/heads/main"),
+			Installation: &gh.Installation{ID: gh.Ptr(githubInstallationID)},
+			Repo: &gh.PushEventRepository{
+				ID: gh.Ptr(githubRepoID), FullName: gh.Ptr(fullName), DefaultBranch: gh.Ptr("main"),
+				PushedAt: &gh.Timestamp{Time: observedAt},
+			},
+		}
+		update, ok := ghpkg.DefaultBranchUpdateFromPush(&ghpkg.WebhookEvent{Type: "push", Payload: push})
+		if !ok {
+			t.Fatalf("valid default-head push %s was rejected", commitSHA)
+		}
+		return update
+	}
+
+	metadataClient := &interleavedDefaultHeadGitHub{
+		repoID: githubRepoID, fullName: fullName, currentHead: commitB,
+		blockedHead: commitC, headResolved: make(chan struct{}), releaseResult: make(chan struct{}),
+	}
+	server := &Server{
+		store: st, logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		repoMetadata: metadataClient,
+	}
+	if err := server.scheduleGraphRefresh(ctx, pushUpdate(commitB)); err != nil {
+		t.Fatalf("schedule B: %v", err)
+	}
+
+	metadataClient.setCurrentHead(commitC)
+	_, conflictErr := st.ScheduleGraphIndexRefreshFromPush(ctx, githubInstallationID, githubRepoID,
+		fullName, "main", commitC, observedAt)
+	if !errors.Is(conflictErr, store.ErrGraphDefaultBranchMismatch) {
+		t.Fatalf("conflict error %v does not unwrap to ErrGraphDefaultBranchMismatch", conflictErr)
+	}
+	var conflict *store.GraphDefaultBranchMismatchError
+	if !errors.As(conflictErr, &conflict) {
+		t.Fatalf("conflict error type = %T, want *store.GraphDefaultBranchMismatchError", conflictErr)
+	}
+
+	cResult := make(chan error, 1)
+	go func() { cResult <- server.scheduleGraphRefresh(ctx, pushUpdate(commitC)) }()
+	select {
+	case <-metadataClient.headResolved:
+	case <-ctx.Done():
+		t.Fatalf("C live-head verification did not resolve: %v", ctx.Err())
+	}
+
+	// C has read a live C head, but has not retried the database mutation. D
+	// wins a complete conflict -> live verification -> verified retry cycle.
+	metadataClient.setCurrentHead(commitD)
+	if err := server.scheduleGraphRefresh(ctx, pushUpdate(commitD)); err != nil {
+		t.Fatalf("schedule interleaved D: %v", err)
+	}
+	close(metadataClient.releaseResult)
+	if err := <-cResult; err != nil {
+		t.Fatalf("finish stale verified C: %v", err)
+	}
+
+	var head string
+	var requestedCommit *string
+	var version int64
+	if err := pool.QueryRow(ctx, `
+		SELECT graph_default_head_sha, graph_refresh_commit_sha, graph_refresh_version
+		FROM repos WHERE id = $1`, repoID).Scan(&head, &requestedCommit, &version); err != nil {
+		t.Fatal(err)
+	}
+	if head != commitD || requestedCommit == nil || *requestedCommit != commitD || version != 2 {
+		t.Fatalf("stale verified C overwrote D: head=%q requested=%v version=%d", head, requestedCommit, version)
+	}
 }
 
 func TestEqualTimeConflictingDefaultHeadPushesUseLiveHeadAuthority(t *testing.T) {

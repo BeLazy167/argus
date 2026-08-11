@@ -228,30 +228,121 @@ func TestIndexRepoBoundedFailsPinnedGenerationWhenImmutableTreeDisappears(t *tes
 	}
 }
 
-func TestIndexRepoBoundedKeepsPinnedGenerationForTransientTreeFailure(t *testing.T) {
+func TestIndexRepoBoundedKeepsFirstWindowGenerationForTransientTreeFailure(t *testing.T) {
 	pool, ctx := generationTestPool(t)
 	st := store.NewWithDB(pool)
 	installationID := generationSeedInstallation(t, ctx, pool, "{}")
-	repoID := generationSeedRepo(t, ctx, pool, installationID, "generation/transient-tree")
+	repoID := generationSeedRepo(t, ctx, pool, installationID, "generation/transient-first-tree")
 	ghClient := &fakeFullIndexGitHub{
 		sha:      "pinned-sha",
-		tree:     ghpkg.RepoTree{Paths: []string{"a.go", "b.go"}},
-		contents: map[string]string{"a.go": "package p\n", "b.go": "package p\n"},
+		treeErr:  &gh.ErrorResponse{Response: &http.Response{StatusCode: http.StatusServiceUnavailable}},
+		tree:     ghpkg.RepoTree{Paths: []string{"a.go"}},
+		contents: map[string]string{"a.go": "package p\n"},
 		fetchErr: map[string]error{},
 	}
 	first, err := IndexRepoBounded(ctx, st, ghClient, 1, "o", "r", "main", repoID, 1, 0)
-	if err != nil || first.Snapshot.Status != "building" {
-		t.Fatalf("first window = %+v, err=%v", first, err)
+	if err == nil || ghpkg.IsPermanentGitObjectError(err) {
+		t.Fatalf("first tree error = %v, want transient error", err)
+	}
+	if first.Snapshot.GenerationID == 0 || first.Snapshot.Status != "building" || first.Published {
+		t.Fatalf("retryable first generation = %+v, want persisted building generation", first)
 	}
 
-	ghClient.treeErr = &gh.ErrorResponse{Response: &http.Response{StatusCode: http.StatusServiceUnavailable}}
+	// A transient retry resumes the immutable head even if the mutable branch
+	// advances before GitHub recovers.
+	ghClient.sha = "new-default-head"
+	ghClient.treeErr = nil
 	second, err := IndexRepoBounded(ctx, st, ghClient, 1, "o", "r", "main", repoID, 1, 0)
-	if err == nil || ghpkg.IsPermanentGitObjectError(err) {
-		t.Fatalf("tree error = %v, want transient error", err)
+	if err != nil || !second.Published {
+		t.Fatalf("resumed window = %+v, err=%v", second, err)
 	}
-	if second.Snapshot.GenerationID != first.Snapshot.GenerationID || second.Snapshot.Status != "building" {
-		t.Fatalf("retryable generation = %+v, want same building generation", second)
+	if second.Snapshot.GenerationID != first.Snapshot.GenerationID || second.Snapshot.CommitSHA != "pinned-sha" || ghClient.treeRef != "pinned-sha" {
+		t.Fatalf("resumed generation = %+v tree_ref=%q, want first immutable head", second, ghClient.treeRef)
 	}
+}
+
+func TestFirstWindowPermanentTreeFailureBacksOffPromptAndBackfillByHead(t *testing.T) {
+	pool, ctx := generationTestPool(t)
+	st := store.NewWithDB(pool)
+	installationDBID := generationSeedInstallation(t, ctx, pool, "{}")
+	repoID := generationSeedRepo(t, ctx, pool, installationDBID, "generation/permanent-first-tree")
+	if _, err := pool.Exec(ctx, `UPDATE repos SET enabled = true WHERE id = $1`, repoID); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `UPDATE repos SET enabled = false WHERE id = $1`, repoID)
+	})
+
+	var githubInstallationID, githubRepoID int64
+	if err := pool.QueryRow(ctx, `
+		SELECT i.installation_id, r.github_id FROM repos r
+		JOIN installations i ON i.id = r.installation_id WHERE r.id = $1`, repoID).
+		Scan(&githubInstallationID, &githubRepoID); err != nil {
+		t.Fatal(err)
+	}
+	const failedHead = "fffffffffffffffffffffffffffffffffffffff4"
+	observedAt := time.Now().UTC()
+	if scheduled, err := st.ScheduleGraphIndexRefresh(ctx, githubInstallationID, githubRepoID,
+		"generation/permanent-first-tree", "main", failedHead, observedAt); err != nil || !scheduled {
+		t.Fatalf("schedule failed head = %v, err=%v", scheduled, err)
+	}
+	permanent := &gh.ErrorResponse{Response: &http.Response{StatusCode: http.StatusNotFound}}
+	ghClient := &fakeFullIndexGitHub{sha: failedHead, treeErr: permanent}
+	failed, err := IndexRepoBounded(ctx, st, ghClient, githubInstallationID,
+		"generation", "permanent-first-tree", "main", repoID, 0, 0)
+	if !errors.Is(err, permanent) || failed.Snapshot.GenerationID == 0 ||
+		failed.Snapshot.Status != "failed" || failed.Snapshot.CommitSHA != failedHead || failed.Published {
+		t.Fatalf("first permanent tree failure = %+v, err=%v", failed, err)
+	}
+	var publishedGenerationID *int64
+	var nodeCount int
+	if err := pool.QueryRow(ctx, `
+		SELECT graph_published_generation_id,
+		  (SELECT count(*)::int FROM code_nodes WHERE repo_id = repos.id)
+		FROM repos WHERE id = $1`, repoID).Scan(&publishedGenerationID, &nodeCount); err != nil {
+		t.Fatal(err)
+	}
+	if publishedGenerationID != nil || nodeCount != 0 {
+		t.Fatalf("failed first generation partially published: generation=%v nodes=%d", publishedGenerationID, nodeCount)
+	}
+
+	assertDue := func(want bool, phase string) {
+		t.Helper()
+		prompt, err := st.ListReposDueForPromptGraphIndex(ctx, 10000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		backfill, err := st.ListReposDueForGraphIndex(ctx, 14*24*time.Hour, 10000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		promptDue := containsGraphTarget(prompt, repoID, "main")
+		backfillDue := containsGraphTarget(backfill, repoID, "main")
+		if promptDue != want || backfillDue != want {
+			t.Fatalf("%s due state: prompt=%v backfill=%v, want both %v", phase, promptDue, backfillDue, want)
+		}
+	}
+	assertDue(false, "recent permanent failure")
+
+	if _, err := pool.Exec(ctx, `
+		UPDATE graph_index_generations SET updated_at = NOW() - INTERVAL '7 hours'
+		WHERE id = $1`, failed.Snapshot.GenerationID); err != nil {
+		t.Fatal(err)
+	}
+	assertDue(true, "expired permanent failure")
+
+	if _, err := pool.Exec(ctx, `
+		UPDATE graph_index_generations SET updated_at = NOW() WHERE id = $1`, failed.Snapshot.GenerationID); err != nil {
+		t.Fatal(err)
+	}
+	assertDue(false, "renewed permanent failure")
+
+	const newHead = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee5"
+	if scheduled, err := st.ScheduleGraphIndexRefresh(ctx, githubInstallationID, githubRepoID,
+		"generation/permanent-first-tree", "main", newHead, observedAt.Add(time.Minute)); err != nil || !scheduled {
+		t.Fatalf("schedule new head = %v, err=%v", scheduled, err)
+	}
+	assertDue(true, "different head")
 }
 
 func TestIndexRepoBoundedFailsPermanentFailureWithoutMutatingPublishedGeneration(t *testing.T) {
