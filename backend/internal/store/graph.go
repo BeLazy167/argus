@@ -353,28 +353,25 @@ func (s *Store) GetBlastRadius(ctx context.Context, installationID, repoID int64
 	return s.blastRadiusCTE(ctx, installationID, repoID, filePaths, maxDepth)
 }
 
-// blastRadiusPGGraph resolves the seed file paths to node ids, then multi-start
-// traverses the projection. Direction "in" walks edges backwards -- from a
-// changed node to the nodes that DEPEND on it, which is what blast radius
-// means. Seeds are resolved from code_nodes rather than graph.search() because
-// the source table is authoritative and already indexed on (repo_id, file_path).
+// blastRadiusPGGraph exercises the installed projection, then validates its
+// candidate walk against authoritative code_edges before returning rows.
 //
-// installation_id is pushed INTO the traversal as a registered filter column,
-// not applied to its output. max_rows is enforced inside traverse, so a
-// post-filter lets another tenant's nodes consume the budget and then be
-// discarded -- returning fewer rows than the CTE, or none. code_edges is
-// registered with no tenant boundary of its own, so an unfiltered walk can reach
-// any node in the database; the node-side filter is the only thing stopping it.
-// The trailing WHERE on the hydration join is defence in depth, not the
-// boundary: it runs after max_rows and cannot recover rows already spent.
+// pgGraph can filter node columns (including installation_id), but it cannot
+// filter code_edges.inferred. Returning graph.traverse output directly would
+// therefore promote derived API guesses into blast-radius facts. Post-filtering
+// reached nodes is also insufficient: an inferred edge may lead to a node that
+// has a separate parsed path, and an inferred-edge flood can consume max_rows
+// before parsed dependents are returned.
 //
-// The inner max_rows (200) is deliberately wider than the 50 rows returned.
-// Since the walk crosses repositories, a sibling repository can now supply more
-// depth-1 dependents than the whole budget, and traverse spends its budget
-// DURING the walk with no repo awareness — so a budget equal to the result size
-// would let one repository fill it and leave nothing for the repository the pull
-// request is actually in. Ordering same-repo first (see the CTE) can only choose
-// among rows the walk returned, which is why the walk has to return more.
+// The candidates CTE deliberately remains in the query and projection_state
+// forces its evaluation, so a missing/stale/unusable projection still fails and
+// GetBlastRadius disables the fast path. The reached CTE is the policy gate: it
+// walks only NOT inferred edges under the same installation boundary and row
+// ordering as blastRadiusCTE. This trades some speed for engine-independent
+// answers until pgGraph supports edge predicates.
+//
+// The projection probe is bounded at 200 candidates. That budget cannot affect
+// the returned set because candidates are never used as an inclusion filter.
 func (s *Store) blastRadiusPGGraph(ctx context.Context, installationID, repoID int64, filePaths []string, maxDepth int) ([]CodeNode, error) {
 	rows, err := s.Pool.Query(ctx, `
 		WITH RECURSIVE seeds AS (
@@ -400,12 +397,15 @@ func (s *Store) blastRadiusPGGraph(ctx context.Context, installationID, repoID i
 		  FROM reached r
 		  JOIN code_edges ce ON ce.target_id = r.id AND NOT ce.inferred
 		  JOIN code_nodes cn ON cn.id = ce.source_id
-		  JOIN candidates c ON c.id = cn.id
 		  WHERE r.depth < $4 AND cn.installation_id = $1
+		), projection_state AS (
+		  SELECT COUNT(*) AS candidate_count FROM candidates
 		)
-		SELECT id, repo_id, name, file_path, kind, depth
+		SELECT d.id, d.repo_id, d.name, d.file_path, d.kind, d.depth
 		FROM (SELECT DISTINCT id, repo_id, name, file_path, kind, depth FROM reached) d
-		ORDER BY depth, (repo_id <> $2), file_path
+		CROSS JOIN projection_state p
+		WHERE p.candidate_count >= 0
+		ORDER BY d.depth, (d.repo_id <> $2), d.file_path
 		LIMIT 50`, installationID, repoID, filePaths, maxDepth)
 	if err != nil {
 		return nil, fmt.Errorf("pggraph blast radius: %w", err)
@@ -442,13 +442,9 @@ func (s *Store) blastRadiusPGGraph(ctx context.Context, installationID, repoID i
 // silently promoted to fact. It is the same predicate ListGraphEdges,
 // ListArchFileEdges, GetTopChokePoints and GetFileFanIn already carry.
 //
-// KNOWN DIVERGENCE: the pgGraph path above cannot carry this. pgGraph filters
-// are evaluated against registered columns of the NODE table, and `inferred` is
-// a column of code_edges — migration 072 records that a join cannot be pushed
-// into graph.traverse(). Where the extension is built and the projection is
-// fresh, a derived edge is therefore still walked. Consuming these edges on
-// purpose (#221 item 3b) has to settle that before the projection can be
-// trusted as equivalent to the CTE.
+// The pgGraph query carries this same recursive policy gate after its bounded
+// projection probe. An inferred edge therefore cannot change the answer merely
+// because the optional extension is installed.
 //
 // The result is ordered same-repo-first WITHIN each depth. The row budget did
 // not grow when the walk widened from one repository to a whole installation, so
