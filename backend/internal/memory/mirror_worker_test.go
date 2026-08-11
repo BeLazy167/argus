@@ -27,7 +27,7 @@ func (f *fakeMirrorOutbox) MarkMemoryMirrorEventProcessed(_ context.Context, eve
 	f.succeeded = append(f.succeeded, event.ID)
 	return nil
 }
-func (f *fakeMirrorOutbox) ProcessMemoryMirrorEvent(ctx context.Context, event store.MemoryMirrorOutboxEvent, _ string, _ store.MemoryMirrorLegacyOwner, apply store.MemoryMirrorApply) error {
+func (f *fakeMirrorOutbox) ProcessMemoryMirrorPatternDelete(ctx context.Context, event store.MemoryMirrorOutboxEvent, _ string, _ store.MemoryMirrorLegacyOwner, apply store.MemoryMirrorApply) error {
 	if err := apply(ctx, true); err != nil {
 		return err
 	}

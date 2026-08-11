@@ -161,10 +161,10 @@ func TestMemoryMirrorAcknowledgementRejectsLostLease(t *testing.T) {
 	installationID, _, _ := seedLearnTenant(t, ctx, pool, "mirror-lost-lease")
 	event := MemoryMirrorEvent{
 		InstallationID: installationID,
-		AggregateType:  MemoryMirrorRule,
+		AggregateType:  MemoryMirrorPattern,
 		AggregateID:    installationID + 1_000_000_000,
 		Operation:      MemoryMirrorDelete,
-		Payload:        json.RawMessage(`{"custom_id":"rule--1"}`),
+		Payload:        json.RawMessage(`{"custom_id":"lost-lease-pattern"}`),
 	}
 	if err := st.WithMemoryMirrorTx(ctx, func(pgx.Tx) (MemoryMirrorEvent, error) { return event, nil }); err != nil {
 		t.Fatal(err)
@@ -177,7 +177,7 @@ func TestMemoryMirrorAcknowledgementRejectsLostLease(t *testing.T) {
 		t.Fatal(err)
 	}
 	applyCalled := false
-	if err := st.ProcessMemoryMirrorEvent(ctx, claimed[0], "rule--1", nil, func(context.Context, bool) error {
+	if err := st.ProcessMemoryMirrorPatternDelete(ctx, claimed[0], "lost-lease-pattern", nil, func(context.Context, bool) error {
 		applyCalled = true
 		return nil
 	}); err == nil {

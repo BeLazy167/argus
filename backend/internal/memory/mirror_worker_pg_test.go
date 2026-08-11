@@ -237,6 +237,132 @@ func TestMirrorOutboxSerializesDeleteAndRecreateClaimsByCustomID(t *testing.T) {
 	}
 }
 
+type slowMirrorUpsertIndexer struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s *slowMirrorUpsertIndexer) IndexRule(context.Context, string, RuleMemory) error { return nil }
+func (s *slowMirrorUpsertIndexer) DeleteDocument(context.Context, string) error        { return nil }
+func (s *slowMirrorUpsertIndexer) MirrorPattern(ctx context.Context, _ string, _ bool, _ PatternMemory) error {
+	close(s.entered)
+	select {
+	case <-s.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Embedding and other upsert preparation can be slow or network-bound. It must
+// not hold the producer advisory lock: a same-ID relational producer must be
+// able to commit its later event while claim ordering keeps that event blocked
+// behind the still-unacknowledged upsert.
+func TestMirrorSlowUpsertDoesNotBlockSameIDProducer(t *testing.T) {
+	pool, install := pgTestPool(t)
+	ctx := context.Background()
+	lockMirrorOutboxPGTests(t, pool, ctx)
+	st := store.NewWithDB(pool)
+	if _, err := pool.Exec(ctx, `DELETE FROM memory_mirror_outbox`); err != nil {
+		t.Fatalf("clear mirror outbox: %v", err)
+	}
+
+	var repoID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO repos (installation_id, github_id, full_name)
+		VALUES ($1, (random() * 1000000000)::bigint, 'acme/mirror-slow-upsert')
+		RETURNING id`, install).Scan(&repoID); err != nil {
+		t.Fatalf("seed repo: %v", err)
+	}
+	t.Cleanup(func() {
+		bg := context.Background()
+		_, _ = pool.Exec(bg, `DELETE FROM memory_mirror_outbox WHERE installation_id=$1`, install)
+		_, _ = pool.Exec(bg, `DELETE FROM patterns WHERE repo_id=$1`, repoID)
+		_, _ = pool.Exec(bg, `DELETE FROM repos WHERE id=$1`, repoID)
+	})
+
+	const content = "slow embedding must not hold producer locks"
+	source := "manual"
+	customID := PatternCustomID("", "mirror-slow-upsert", source, content)
+	payload, err := NewPatternMirrorPayload(customID, "mirror-slow-upsert", false, PatternMemory{
+		Content: content, Source: source,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	predecessorAggregateID := install*1_000_000 + 2_543
+	predecessor := store.MemoryMirrorEvent{
+		InstallationID: install, AggregateType: store.MemoryMirrorPattern,
+		AggregateID: predecessorAggregateID, Operation: store.MemoryMirrorUpsert, Payload: payload,
+	}
+	if err := st.WithMemoryMirrorTx(ctx, func(pgx.Tx) (store.MemoryMirrorEvent, error) { return predecessor, nil }); err != nil {
+		t.Fatalf("enqueue predecessor: %v", err)
+	}
+
+	slow := &slowMirrorUpsertIndexer{entered: make(chan struct{}), release: make(chan struct{})}
+	worker := NewMirrorWorker(st, func(context.Context, int64) MirrorIndexer { return slow }, slog.New(slog.DiscardHandler))
+	workerDone := make(chan error, 1)
+	go func() {
+		processed, err := worker.RunOnce(ctx, 1)
+		if err == nil && processed != 1 {
+			err = fmt.Errorf("processed=%d want=1", processed)
+		}
+		workerDone <- err
+	}()
+	select {
+	case <-slow.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("slow upsert did not start")
+	}
+
+	type createResult struct {
+		pattern *store.Pattern
+		err     error
+	}
+	created := make(chan createResult, 1)
+	go func() {
+		pattern, err := st.CreatePattern(ctx, install, &repoID, content, nil, nil, &source, nil, nil, stringPointer(customID), nil)
+		created <- createResult{pattern: pattern, err: err}
+	}()
+
+	var result createResult
+	select {
+	case result = <-created:
+		if result.err != nil {
+			close(slow.release)
+			<-workerDone
+			t.Fatalf("same-ID producer failed: %v", result.err)
+		}
+	case <-time.After(2 * time.Second):
+		close(slow.release)
+		<-workerDone
+		result = <-created
+		t.Fatalf("slow upsert blocked same-ID producer commit: pattern=%v err=%v", result.pattern, result.err)
+	}
+
+	secondMachine := store.NewWithDB(pool)
+	second, err := secondMachine.ClaimMemoryMirrorEvents(ctx, 1, time.Minute)
+	if err != nil {
+		close(slow.release)
+		<-workerDone
+		t.Fatalf("second machine claim: %v", err)
+	}
+	if len(second) != 0 {
+		close(slow.release)
+		<-workerDone
+		t.Fatalf("later same-ID event bypassed unacknowledged predecessor: %+v", second)
+	}
+
+	close(slow.release)
+	if err := <-workerDone; err != nil {
+		t.Fatalf("finish slow upsert: %v", err)
+	}
+	later, err := secondMachine.ClaimMemoryMirrorEvents(ctx, 1, time.Minute)
+	if err != nil || len(later) != 1 || result.pattern == nil || later[0].AggregateID != result.pattern.ID {
+		t.Fatalf("later claim=%v pattern=%v err=%v", later, result.pattern, err)
+	}
+}
+
 // A later legacy event has no persisted custom ID until its first worker pass.
 // It must therefore wait behind every earlier pattern transition in the tenant:
 // that earlier event may target the same ID the legacy payload reconstructs.
@@ -418,7 +544,7 @@ func TestMirrorDeleteAndRecreateSerializeTheAuthorityGap(t *testing.T) {
 	releaseDelete := make(chan struct{})
 	processedDelete := make(chan error, 1)
 	go func() {
-		processedDelete <- st.ProcessMemoryMirrorEvent(ctx, claimed[0], customID, nil, func(ctx context.Context, authorized bool) error {
+		processedDelete <- st.ProcessMemoryMirrorPatternDelete(ctx, claimed[0], customID, nil, func(ctx context.Context, authorized bool) error {
 			if !authorized {
 				return fmt.Errorf("delete unexpectedly unauthorized")
 			}

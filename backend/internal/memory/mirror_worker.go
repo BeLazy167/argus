@@ -80,7 +80,8 @@ func NewRuleMirrorPayload(rule RuleMemory, enabled bool) (json.RawMessage, error
 type mirrorOutbox interface {
 	ClaimMemoryMirrorEvents(context.Context, int, time.Duration) ([]store.MemoryMirrorOutboxEvent, error)
 	BindMemoryMirrorEventCustomID(context.Context, store.MemoryMirrorOutboxEvent, string) error
-	ProcessMemoryMirrorEvent(context.Context, store.MemoryMirrorOutboxEvent, string, store.MemoryMirrorLegacyOwner, store.MemoryMirrorApply) error
+	ProcessMemoryMirrorPatternDelete(context.Context, store.MemoryMirrorOutboxEvent, string, store.MemoryMirrorLegacyOwner, store.MemoryMirrorApply) error
+	MarkMemoryMirrorEventProcessed(context.Context, store.MemoryMirrorOutboxEvent) error
 	MarkMemoryMirrorEventFailed(context.Context, store.MemoryMirrorOutboxEvent, error) error
 }
 
@@ -148,26 +149,37 @@ func (w *MirrorWorker) process(ctx context.Context, event store.MemoryMirrorOutb
 		return fmt.Errorf("payload has empty custom_id")
 	}
 
-	legacyOwner := func(identity store.MemoryMirrorPatternIdentity) (bool, error) {
-		category := identity.Category
-		candidate := MirrorPayload{
-			Repo: identity.Repo, Shared: identity.Shared,
-			Pattern: &PatternMemory{
-				Content: identity.Content, Source: identity.Source, Category: category,
-			},
+	if event.AggregateType == store.MemoryMirrorPattern && event.Operation == store.MemoryMirrorDelete {
+		legacyOwner := func(identity store.MemoryMirrorPatternIdentity) (bool, error) {
+			category := identity.Category
+			candidate := MirrorPayload{
+				Repo: identity.Repo, Shared: identity.Shared,
+				Pattern: &PatternMemory{
+					Content: identity.Content, Source: identity.Source, Category: category,
+				},
+			}
+			candidateID, err := legacyPatternMirrorCustomID(candidate)
+			if err != nil {
+				return false, fmt.Errorf("derive legacy pattern %d identity: %w", identity.ID, err)
+			}
+			return candidateID == payload.CustomID, nil
 		}
-		candidateID, err := legacyPatternMirrorCustomID(candidate)
-		if err != nil {
-			return false, fmt.Errorf("derive legacy pattern %d identity: %w", identity.ID, err)
-		}
-		return candidateID == payload.CustomID, nil
+		return w.outbox.ProcessMemoryMirrorPatternDelete(ctx, event, payload.CustomID, legacyOwner, func(ctx context.Context, deleteAuthorized bool) error {
+			if !deleteAuthorized {
+				return nil
+			}
+			return w.applyPayload(ctx, event, payload)
+		})
 	}
-	return w.outbox.ProcessMemoryMirrorEvent(ctx, event, payload.CustomID, legacyOwner, func(ctx context.Context, deleteAuthorized bool) error {
-		if event.Operation == store.MemoryMirrorDelete && !deleteAuthorized {
-			return nil
-		}
-		return w.applyPayload(ctx, event, payload)
-	})
+
+	// Upserts can embed or call a remote provider. Claim ordering already keeps
+	// later same-ID transitions unclaimable until this event is acknowledged, so
+	// do the expensive idempotent work without holding the producer advisory lock
+	// or a database transaction. An ambiguous apply/ack failure safely replays.
+	if err := w.applyPayload(ctx, event, payload); err != nil {
+		return err
+	}
+	return w.outbox.MarkMemoryMirrorEventProcessed(ctx, event)
 }
 
 func (w *MirrorWorker) applyPayload(ctx context.Context, event store.MemoryMirrorOutboxEvent, payload MirrorPayload) error {

@@ -54,9 +54,9 @@ type MemoryMirrorPatternIdentity struct {
 // currently being processed. It runs while the store holds the custom-ID lock.
 type MemoryMirrorLegacyOwner func(MemoryMirrorPatternIdentity) (bool, error)
 
-// MemoryMirrorApply performs the idempotent external memory operation. For a
-// pattern delete, deleteAuthorized is false while another relational pattern
-// still owns the same deterministic custom ID.
+// MemoryMirrorApply performs the idempotent pattern-memory tombstone.
+// deleteAuthorized is false while another relational pattern still owns the
+// same deterministic custom ID.
 type MemoryMirrorApply func(context.Context, bool) error
 
 func (e MemoryMirrorEvent) validate() error {
@@ -196,22 +196,26 @@ func lockMemoryMirrorCustomID(ctx context.Context, tx pgx.Tx, installationID int
 	return nil
 }
 
-// ProcessMemoryMirrorEvent serializes the external side effect, relational
+// ProcessMemoryMirrorPatternDelete serializes the memory tombstone, relational
 // ownership check, and lease acknowledgement for one custom ID. Producers take
 // the same transaction-scoped advisory lock before committing a new event, so
 // a pattern cannot become a live owner in the check-to-delete interval.
 //
-// External operations are deliberately inside the transaction. If the process
-// dies after the external write, the transaction rolls back and stale-lease
-// replay repeats the idempotent operation. If commit succeeds, the CAS
-// acknowledgement and operation are ordered together for every machine.
-func (s *Store) ProcessMemoryMirrorEvent(
+// The quick, idempotent tombstone is deliberately inside the transaction; slow
+// upsert preparation (embedding or network I/O) must use the ordinary
+// apply-then-CAS path without this lock. If the process dies after tombstoning,
+// stale-lease replay repeats the delete safely. A successful commit orders the
+// delete and CAS acknowledgement together for every machine.
+func (s *Store) ProcessMemoryMirrorPatternDelete(
 	ctx context.Context,
 	event MemoryMirrorOutboxEvent,
 	customID string,
 	legacyOwner MemoryMirrorLegacyOwner,
 	apply MemoryMirrorApply,
 ) error {
+	if event.AggregateType != MemoryMirrorPattern || event.Operation != MemoryMirrorDelete {
+		return fmt.Errorf("process memory mirror event %d: expected pattern delete", event.ID)
+	}
 	if customID == "" {
 		return fmt.Errorf("process memory mirror event %d: empty custom ID", event.ID)
 	}
