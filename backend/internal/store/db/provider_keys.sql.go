@@ -155,7 +155,7 @@ type UpsertProviderKeyOrgLevelRow struct {
 	UpdatedAt      time.Time `json:"updated_at"`
 }
 
-// PATCH semantics on conflict (mirrors Store.UpsertProviderKey — keep in sync):
+// PATCH semantics on conflict (Store.UpsertProviderKey delegates here):
 // omitted base_url/model preserve stored values; an empty api_key_enc preserves
 // the stored key (keyless config updates must not destroy a stored key).
 func (q *Queries) UpsertProviderKeyOrgLevel(ctx context.Context, arg UpsertProviderKeyOrgLevelParams) (UpsertProviderKeyOrgLevelRow, error) {

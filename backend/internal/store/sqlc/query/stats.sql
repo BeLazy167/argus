@@ -1,9 +1,7 @@
 -- name: GetStats :one
 -- critical_finds excludes state='suppressed': those findings were generated and
 -- then withheld, so no PR author ever received them. Counting them advertises
--- review coverage that was never delivered. Kept in lockstep with the live
--- raw-SQL Store.GetStats — the sqlc migration swaps one for the other, and a
--- predicate on only one half is how #239 happened.
+-- review coverage that was never delivered.
 SELECT
     (SELECT COUNT(*) FROM reviews
      WHERE NOT (github_review_id IS NULL AND status = 'failed' AND error IN ('auto_run_disabled', 'no_api_key')))::int as total_reviews,

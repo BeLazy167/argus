@@ -1041,10 +1041,8 @@ func (s *Store) GetLatestReviewByPR(ctx context.Context, repoFullName string, pr
 // CriticalFinds in both GetStats and GetStatsScoped excludes state='suppressed'.
 // Those findings were generated and then withheld by the suppression pass, so no
 // PR author ever received them; counting them made the dashboard advertise
-// review coverage that was never delivered (#239). The same predicate must stay
-// on the sqlc mirrors in sqlc/query/stats.sql — the sqlc migration swaps one
-// implementation for the other, and a fix on only one half is the exact failure
-// this issue is a follow-up to.
+// review coverage that was never delivered (#239). The generated query owns
+// the predicate so the Store wrapper cannot drift from it.
 func (s *Store) GetStats(ctx context.Context) (*Stats, error) {
 	row, err := s.q.GetStats(ctx)
 	if err != nil {

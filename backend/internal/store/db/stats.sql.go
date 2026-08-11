@@ -42,9 +42,7 @@ type GetStatsRow struct {
 
 // critical_finds excludes state='suppressed': those findings were generated and
 // then withheld, so no PR author ever received them. Counting them advertises
-// review coverage that was never delivered. Kept in lockstep with the live
-// raw-SQL Store.GetStats — the sqlc migration swaps one for the other, and a
-// predicate on only one half is how #239 happened.
+// review coverage that was never delivered.
 func (q *Queries) GetStats(ctx context.Context) (GetStatsRow, error) {
 	row := q.db.QueryRow(ctx, getStats)
 	var i GetStatsRow
