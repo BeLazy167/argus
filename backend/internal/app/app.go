@@ -153,6 +153,15 @@ func Run() error {
 	// Recover incomplete pipeline runs (async — don't block server startup)
 	appCtx, appCancel := context.WithCancel(context.Background())
 	defer appCancel()
+
+	// Durable projection of relational patterns/rules into the memory store.
+	// The worker is safe to run on every replica: claims use SKIP LOCKED and
+	// deterministic memory IDs make replay after a stale claim idempotent.
+	mirrorWorker := memory.NewMirrorWorker(db, func(ctx context.Context, installationID int64) memory.MirrorIndexer {
+		return memRegistry.GetIndexer(ctx, installationID)
+	}, logger)
+	go mirrorWorker.Run(appCtx, time.Second)
+
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
