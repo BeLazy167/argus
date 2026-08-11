@@ -55,16 +55,33 @@ export type ArchSummary = {
   most_coupled: { file_a: string; file_b: string; score: number }[];
 };
 
+export type GraphSnapshot = {
+  generation_id: number;
+  commit_sha: string;
+  status: string;
+  tree_truncated: boolean;
+  expected_files: number;
+  visited_files: number;
+  failed_files: number;
+  skipped_files: number;
+  complete: boolean;
+  started_at: string;
+  published_at?: string;
+};
+
 export type ArchResponse = {
   files: ArchFile[];
   edges: ArchEdge[];
   summary: ArchSummary;
+  coupling_available: boolean;
+  snapshot: GraphSnapshot;
 };
 
 const useArchitectureQuery = createAuthQuery<ArchResponse, { repoId: number }>({
   queryKey: ["architecture"],
   fetcher: ({ repoId }, ctx) => getApi(ctx).get<ArchResponse>(`/api/v1/repos/${repoId}/architecture`),
   staleTime: 5 * 60 * 1000,
+  refetchInterval: (query) => (query.state.data?.snapshot.status === "building" ? 5_000 : false),
 });
 
 export const useArchitectureData = () => {

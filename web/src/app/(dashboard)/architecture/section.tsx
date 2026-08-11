@@ -3,6 +3,7 @@ import { AlertTriangle, GitBranch, Info, Loader2, Network, Search, X } from "luc
 import { useMemo, useState } from "react";
 import ArchitectureCanvas, { type Lens } from "@/components/graph/ArchitectureCanvas";
 import FileMemorySidebar from "@/components/graph/FileMemorySidebar";
+import GraphSnapshotStatus from "@/components/graph/GraphSnapshotStatus";
 import LensBar from "@/components/graph/LensBar";
 import { useActiveRepo } from "@/lib/hooks/use-active-repo";
 import { useArchitectureData } from "@/lib/queries/architecture";
@@ -116,6 +117,8 @@ function ArchitectureView({ activeId }: { activeId: number }) {
 					</button>
 				)}
 			</div>
+
+			{archData && <GraphSnapshotStatus snapshot={archData.snapshot} />}
 
 			{/* Onboarding guide */}
 			{showGuide && archData && archData.files.length > 0 && (
