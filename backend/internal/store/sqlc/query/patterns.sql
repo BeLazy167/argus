@@ -19,6 +19,15 @@ FROM patterns WHERE id = $1;
 DELETE FROM patterns WHERE id = $1 AND installation_id = ANY($2::bigint[]);
 
 -- name: GetPatternStats :many
-SELECT DATE_TRUNC('week', created_at) as week, COALESCE(source, 'manual') as source, COUNT(*)::int as count
+SELECT DATE_TRUNC('week', created_at)::timestamptz AS week, COALESCE(source, 'manual') as source, COUNT(*)::int as count
 FROM patterns WHERE installation_id = ANY($1::bigint[])
 GROUP BY week, source ORDER BY week;
+
+-- name: GetLowQualityPatterns :many
+SELECT id, installation_id, repo_id, memory_doc_id, content_hash, category,
+       times_matched, times_confirmed, times_dismissed, quality_score,
+       last_matched_at, created_at, updated_at
+FROM pattern_stats
+WHERE installation_id = $1 AND quality_score <= $2
+ORDER BY quality_score ASC
+LIMIT sqlc.arg(row_limit)::bigint;

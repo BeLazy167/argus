@@ -8,8 +8,6 @@ package db
 import (
 	"context"
 	"time"
-
-	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const createPattern = `-- name: CreatePattern :one
@@ -88,6 +86,56 @@ func (q *Queries) DeletePattern(ctx context.Context, arg DeletePatternParams) (i
 	return result.RowsAffected(), nil
 }
 
+const getLowQualityPatterns = `-- name: GetLowQualityPatterns :many
+SELECT id, installation_id, repo_id, memory_doc_id, content_hash, category,
+       times_matched, times_confirmed, times_dismissed, quality_score,
+       last_matched_at, created_at, updated_at
+FROM pattern_stats
+WHERE installation_id = $1 AND quality_score <= $2
+ORDER BY quality_score ASC
+LIMIT $3::bigint
+`
+
+type GetLowQualityPatternsParams struct {
+	InstallationID int64   `json:"installation_id"`
+	QualityScore   float64 `json:"quality_score"`
+	RowLimit       int64   `json:"row_limit"`
+}
+
+func (q *Queries) GetLowQualityPatterns(ctx context.Context, arg GetLowQualityPatternsParams) ([]PatternStat, error) {
+	rows, err := q.db.Query(ctx, getLowQualityPatterns, arg.InstallationID, arg.QualityScore, arg.RowLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []PatternStat
+	for rows.Next() {
+		var i PatternStat
+		if err := rows.Scan(
+			&i.ID,
+			&i.InstallationID,
+			&i.RepoID,
+			&i.MemoryDocID,
+			&i.ContentHash,
+			&i.Category,
+			&i.TimesMatched,
+			&i.TimesConfirmed,
+			&i.TimesDismissed,
+			&i.QualityScore,
+			&i.LastMatchedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getPattern = `-- name: GetPattern :one
 SELECT id, installation_id, repo_id, content, memory_doc_id, created_by, COALESCE(source, 'manual') as source, category, pr_number, created_at, updated_at
 FROM patterns WHERE id = $1
@@ -127,15 +175,15 @@ func (q *Queries) GetPattern(ctx context.Context, id int) (GetPatternRow, error)
 }
 
 const getPatternStats = `-- name: GetPatternStats :many
-SELECT DATE_TRUNC('week', created_at) as week, COALESCE(source, 'manual') as source, COUNT(*)::int as count
+SELECT DATE_TRUNC('week', created_at)::timestamptz AS week, COALESCE(source, 'manual') as source, COUNT(*)::int as count
 FROM patterns WHERE installation_id = ANY($1::bigint[])
 GROUP BY week, source ORDER BY week
 `
 
 type GetPatternStatsRow struct {
-	Week   pgtype.Interval `json:"week"`
-	Source string          `json:"source"`
-	Count  int             `json:"count"`
+	Week   time.Time `json:"week"`
+	Source string    `json:"source"`
+	Count  int       `json:"count"`
 }
 
 func (q *Queries) GetPatternStats(ctx context.Context, dollar_1 []int64) ([]GetPatternStatsRow, error) {

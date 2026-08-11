@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/BeLazy167/argus/backend/internal/store/db"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -231,18 +232,23 @@ func (s *Store) DecayStalePatterns(ctx context.Context, installationID int64, st
 }
 
 func (s *Store) GetLowQualityPatterns(ctx context.Context, installationID int64, maxQuality float64, limit int) ([]PatternQualityStats, error) {
-	rows, err := s.Pool.Query(ctx, `
-		SELECT id, installation_id, repo_id, memory_doc_id, content_hash, category,
-		       times_matched, times_confirmed, times_dismissed, quality_score,
-		       last_matched_at, created_at, updated_at
-		FROM pattern_stats
-		WHERE installation_id = $1 AND quality_score <= $2
-		ORDER BY quality_score ASC
-		LIMIT $3
-	`, installationID, maxQuality, limit)
+	rows, err := s.q.GetLowQualityPatterns(ctx, db.GetLowQualityPatternsParams{
+		InstallationID: installationID,
+		QualityScore:   maxQuality,
+		RowLimit:       int64(limit),
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[PatternQualityStats])
+	stats := make([]PatternQualityStats, 0, len(rows))
+	for _, row := range rows {
+		stats = append(stats, PatternQualityStats{
+			ID: row.ID, InstallationID: row.InstallationID, RepoID: row.RepoID,
+			MemoryDocID: row.MemoryDocID, ContentHash: row.ContentHash, Category: row.Category,
+			TimesMatched: row.TimesMatched, TimesConfirmed: row.TimesConfirmed,
+			TimesDismissed: row.TimesDismissed, QualityScore: row.QualityScore,
+			LastMatchedAt: row.LastMatchedAt, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
+		})
+	}
+	return stats, nil
 }

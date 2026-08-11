@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5"
+	"github.com/BeLazy167/argus/backend/internal/store/db"
 )
 
 type Pattern struct {
@@ -32,26 +32,36 @@ type PatternStat struct {
 }
 
 func (s *Store) ListPatterns(ctx context.Context, installationIDs []int64) ([]Pattern, error) {
-	rows, err := s.Pool.Query(ctx,
-		`SELECT id, installation_id, repo_id, content, memory_doc_id, created_by, COALESCE(source, 'manual'), category, pr_number, created_at, updated_at
-		 FROM patterns WHERE installation_id = ANY($1) ORDER BY created_at DESC`, installationIDs)
+	rows, err := s.q.ListPatterns(ctx, installationIDs)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[Pattern])
+	patterns := make([]Pattern, 0, len(rows))
+	for _, row := range rows {
+		pattern, err := patternFromSQLC(row.ID, row.InstallationID, row.RepoID, row.Content, row.MemoryDocID, row.CreatedBy, row.Source, row.Category, row.PRNumber, row.CreatedAt, row.UpdatedAt)
+		if err != nil {
+			return nil, err
+		}
+		patterns = append(patterns, pattern)
+	}
+	return patterns, nil
 }
 
 // ListPatternsForRepo returns org-wide patterns (repo_id IS NULL) plus patterns scoped to the given repo.
 func (s *Store) ListPatternsForRepo(ctx context.Context, installationIDs []int64, repoID int64) ([]Pattern, error) {
-	rows, err := s.Pool.Query(ctx,
-		`SELECT id, installation_id, repo_id, content, memory_doc_id, created_by, COALESCE(source, 'manual'), category, pr_number, created_at, updated_at
-		 FROM patterns WHERE installation_id = ANY($1) AND (repo_id IS NULL OR repo_id = $2) ORDER BY created_at DESC`, installationIDs, repoID)
+	rows, err := s.q.ListPatternsForRepo(ctx, db.ListPatternsForRepoParams{Column1: installationIDs, RepoID: &repoID})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[Pattern])
+	patterns := make([]Pattern, 0, len(rows))
+	for _, row := range rows {
+		pattern, err := patternFromSQLC(row.ID, row.InstallationID, row.RepoID, row.Content, row.MemoryDocID, row.CreatedBy, row.Source, row.Category, row.PRNumber, row.CreatedAt, row.UpdatedAt)
+		if err != nil {
+			return nil, err
+		}
+		patterns = append(patterns, pattern)
+	}
+	return patterns, nil
 }
 
 // CreatePattern inserts a pattern and its memory-mirror event atomically.
@@ -232,13 +242,13 @@ func (s *Store) GetPatternIDByCustomID(ctx context.Context, installationID int64
 }
 
 func (s *Store) GetPatternStats(ctx context.Context, installationIDs []int64) ([]PatternStat, error) {
-	rows, err := s.Pool.Query(ctx,
-		`SELECT DATE_TRUNC('week', created_at) as week, COALESCE(source, 'manual') as source, COUNT(*)::int as count
-		 FROM patterns WHERE installation_id = ANY($1)
-		 GROUP BY week, source ORDER BY week`, installationIDs)
+	rows, err := s.q.GetPatternStats(ctx, installationIDs)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[PatternStat])
+	stats := make([]PatternStat, 0, len(rows))
+	for _, row := range rows {
+		stats = append(stats, PatternStat{Week: row.Week, Source: row.Source, Count: row.Count})
+	}
+	return stats, nil
 }
