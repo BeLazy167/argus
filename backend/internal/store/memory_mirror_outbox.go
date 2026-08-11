@@ -140,12 +140,15 @@ func (s *Store) ClaimMemoryMirrorEvents(ctx context.Context, limit int, staleAft
 }
 
 func (s *Store) MarkMemoryMirrorEventProcessed(ctx context.Context, event MemoryMirrorOutboxEvent) error {
-	_, err := s.Pool.Exec(ctx, `
+	tag, err := s.Pool.Exec(ctx, `
         UPDATE memory_mirror_outbox
         SET processed_at = now(), claimed_at = NULL, last_error = NULL, updated_at = now()
         WHERE id = $1 AND processed_at IS NULL AND claimed_at = $2`, event.ID, event.ClaimedAt)
 	if err != nil {
 		return fmt.Errorf("mark memory mirror event %d processed: %w", event.ID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("mark memory mirror event %d processed: lease lost", event.ID)
 	}
 	return nil
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/BeLazy167/argus/backend/internal/store/db"
 	"github.com/jackc/pgx/v5"
@@ -92,7 +93,11 @@ func TestPatternAndRuleMutationsEnqueueOrderedMirrorEvents(t *testing.T) {
 	if events[0].typ != "pattern" || events[0].id != pattern.ID || events[5].typ != "pattern" {
 		t.Fatalf("pattern events=%+v", events)
 	}
-	if events[2].typ != "rule" || string(events[2].payload) != `{"custom_id":"rule--`+fmt.Sprint(rule.ID)+`"}` {
+	var disabledPayload map[string]string
+	if err := json.Unmarshal(events[2].payload, &disabledPayload); err != nil {
+		t.Fatal(err)
+	}
+	if events[2].typ != "rule" || disabledPayload["custom_id"] != "rule--"+fmt.Sprint(rule.ID) {
 		t.Fatalf("disabled payload=%s", events[2].payload)
 	}
 }
@@ -116,5 +121,31 @@ func TestWithMemoryMirrorTxRollsBackMutationWhenEnqueueValidationFails(t *testin
 	}
 	if count != 0 {
 		t.Fatalf("rolled-back rules=%d", count)
+	}
+}
+
+func TestMemoryMirrorAcknowledgementRejectsLostLease(t *testing.T) {
+	pool, ctx := fileMemoryTestPool(t)
+	st := &Store{Pool: pool, Q: db.New(pool)}
+	installationID, _, _ := seedLearnTenant(t, ctx, pool, "mirror-lost-lease")
+	event := MemoryMirrorEvent{
+		InstallationID: installationID,
+		AggregateType:  MemoryMirrorRule,
+		AggregateID:    1,
+		Operation:      MemoryMirrorDelete,
+		Payload:        json.RawMessage(`{"custom_id":"rule--1"}`),
+	}
+	if err := st.WithMemoryMirrorTx(ctx, func(pgx.Tx) (MemoryMirrorEvent, error) { return event, nil }); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := st.ClaimMemoryMirrorEvents(ctx, 1, time.Minute)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim=%v err=%v", claimed, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE memory_mirror_outbox SET claimed_at = claimed_at + interval '1 second' WHERE id=$1`, claimed[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.MarkMemoryMirrorEventProcessed(ctx, claimed[0]); err == nil {
+		t.Fatal("stale worker acknowledged a reclaimed lease")
 	}
 }
