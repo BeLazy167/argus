@@ -18,7 +18,7 @@ func TestReviewRetryGenerationConvergesAcrossMachines(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE reviews SET status = 'failed' WHERE id = $1`, reviewID); err != nil {
 		t.Fatal(err)
 	}
-	st := &Store{Pool: pool}
+	st := NewWithDB(pool)
 
 	var winners atomic.Int32
 	var wg sync.WaitGroup
@@ -75,7 +75,7 @@ func TestReviewLifecycleStructuredState(t *testing.T) {
 	pool, ctx := fileMemoryTestPool(t)
 	repoID, rawID := seedFileMemoryRepo(t, ctx, pool)
 	reviewID := uuid.MustParse(rawID)
-	st := &Store{Pool: pool}
+	st := NewWithDB(pool)
 
 	notes := []ReviewMinorNote{{FilePath: "a.go", Line: 7, Severity: "suggestion", Title: "name this timeout"}}
 	if err := st.ReplaceReviewMinorNotes(ctx, reviewID, 1, notes); err != nil {
