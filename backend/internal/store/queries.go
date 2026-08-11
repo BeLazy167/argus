@@ -763,15 +763,15 @@ func (s *Store) ReleaseReviewSignal(ctx context.Context, id uuid.UUID) (bool, er
 // --- Rules ---
 
 func (s *Store) ListRules(ctx context.Context, installationIDs []int64) ([]Rule, error) {
-	rows, err := s.Pool.Query(ctx, `
-		SELECT id, installation_id, category, content, priority, enabled, created_at, updated_at
-		FROM rules WHERE installation_id = ANY($1::bigint[]) ORDER BY priority DESC, category
-	`, installationIDs)
+	rows, err := s.q.ListRules(ctx, installationIDs)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[Rule])
+	rules := make([]Rule, 0, len(rows))
+	for _, row := range rows {
+		rules = append(rules, Rule{ID: row.ID, InstallationID: row.InstallationID, Category: row.Category, Content: row.Content, Priority: row.Priority, Enabled: row.Enabled, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt})
+	}
+	return rules, nil
 }
 
 func (s *Store) CreateRule(ctx context.Context, installationID int64, category, content string, priority int, enabled bool) (*Rule, error) {
@@ -871,15 +871,15 @@ func newRuleMirrorEvent(rule Rule, enabled bool) (MemoryMirrorEvent, error) {
 // --- Model Configs ---
 
 func (s *Store) ListModelConfigs(ctx context.Context, repoID int64) ([]ModelConfig, error) {
-	rows, err := s.Pool.Query(ctx, `
-		SELECT id, repo_id, installation_id, stage, provider, model, base_url, max_tokens, temperature, created_at, updated_at
-		FROM model_configs WHERE repo_id = $1 ORDER BY stage
-	`, repoID)
+	rows, err := s.q.ListModelConfigs(ctx, &repoID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[ModelConfig])
+	configs := make([]ModelConfig, 0, len(rows))
+	for _, row := range rows {
+		configs = append(configs, modelConfigFromValues(row.ID, row.RepoID, nil, row.Stage, row.Provider, row.Model, row.BaseURL, row.MaxTokens, row.Temperature, row.CreatedAt, row.UpdatedAt))
+	}
+	return configs, nil
 }
 
 func (s *Store) UpsertModelConfig(ctx context.Context, repoID int64, stage, provider, model string, baseURL *string, maxTokens int, temperature float32) (*ModelConfig, error) {
@@ -917,15 +917,15 @@ func (s *Store) DeleteModelConfig(ctx context.Context, repoID int64, stage strin
 
 // ListOrgModelConfigs returns installation-level model configs (repo_id IS NULL).
 func (s *Store) ListOrgModelConfigs(ctx context.Context, installationID int64) ([]ModelConfig, error) {
-	rows, err := s.Pool.Query(ctx, `
-		SELECT id, repo_id, installation_id, stage, provider, model, base_url, max_tokens, temperature, created_at, updated_at
-		FROM model_configs WHERE installation_id = $1 AND repo_id IS NULL ORDER BY stage
-	`, installationID)
+	rows, err := s.q.ListOrgModelConfigs(ctx, &installationID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[ModelConfig])
+	configs := make([]ModelConfig, 0, len(rows))
+	for _, row := range rows {
+		configs = append(configs, modelConfigFromValues(row.ID, row.RepoID, row.InstallationID, row.Stage, row.Provider, row.Model, row.BaseURL, row.MaxTokens, row.Temperature, row.CreatedAt, row.UpdatedAt))
+	}
+	return configs, nil
 }
 
 // UpsertOrgModelConfig saves an installation-level model config.
@@ -961,17 +961,15 @@ func (s *Store) DeleteOrgModelConfig(ctx context.Context, installationID int64, 
 
 // ListModelConfigsWithFallback returns repo configs, falling back to org configs for missing stages.
 func (s *Store) ListModelConfigsWithFallback(ctx context.Context, installationID, repoID int64) ([]ModelConfig, error) {
-	rows, err := s.Pool.Query(ctx, `
-		SELECT DISTINCT ON (stage) id, repo_id, installation_id, stage, provider, model, base_url, max_tokens, temperature, created_at, updated_at
-		FROM model_configs
-		WHERE (repo_id = $2 OR (installation_id = $1 AND repo_id IS NULL))
-		ORDER BY stage, repo_id NULLS LAST
-	`, installationID, repoID)
+	rows, err := s.q.ListModelConfigsWithFallback(ctx, db.ListModelConfigsWithFallbackParams{InstallationID: &installationID, RepoID: &repoID})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[ModelConfig])
+	configs := make([]ModelConfig, 0, len(rows))
+	for _, row := range rows {
+		configs = append(configs, modelConfigFromValues(row.ID, row.RepoID, row.InstallationID, row.Stage, row.Provider, row.Model, row.BaseURL, row.MaxTokens, row.Temperature, row.CreatedAt, row.UpdatedAt))
+	}
+	return configs, nil
 }
 
 // --- Review Comments ---
@@ -1275,15 +1273,15 @@ func (s *Store) ListActivity(ctx context.Context, installationIDs []int64, limit
 	if limit <= 0 {
 		limit = 50
 	}
-	rows, err := s.Pool.Query(ctx, `
-		SELECT id, installation_id, action, actor, resource, metadata, created_at
-		FROM activity_log WHERE installation_id = ANY($1::bigint[]) ORDER BY created_at DESC LIMIT $2
-	`, installationIDs, limit)
+	rows, err := s.q.ListActivity(ctx, db.ListActivityParams{Column1: installationIDs, RowLimit: int64(limit)})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[ActivityLog])
+	activity := make([]ActivityLog, 0, len(rows))
+	for _, row := range rows {
+		activity = append(activity, ActivityLog{ID: row.ID, InstallationID: row.InstallationID, Action: row.Action, Actor: row.Actor, Resource: row.Resource, Metadata: row.Metadata, CreatedAt: row.CreatedAt})
+	}
+	return activity, nil
 }
 
 func (s *Store) LogActivity(ctx context.Context, installationID *int64, action, actor, resource string, metadata []byte) error {
@@ -1470,15 +1468,18 @@ func (s *Store) SetScenarioMemoryDocID(ctx context.Context, id int64, memoryDocI
 }
 
 func (s *Store) GetCommentOutcomes(ctx context.Context, reviewCommentID uuid.UUID) ([]CommentOutcome, error) {
-	rows, err := s.Pool.Query(ctx, `
-		SELECT id, review_comment_id, outcome, created_at
-		FROM comment_outcomes WHERE review_comment_id = $1 ORDER BY created_at DESC
-	`, reviewCommentID)
+	rows, err := s.q.GetCommentOutcomes(ctx, reviewCommentID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[CommentOutcome])
+	outcomes := make([]CommentOutcome, 0, len(rows))
+	for _, row := range rows {
+		if row.CreatedAt == nil {
+			return nil, fmt.Errorf("comment outcome %d has NULL created_at", row.ID)
+		}
+		outcomes = append(outcomes, CommentOutcome{ID: int64(row.ID), ReviewCommentID: row.ReviewCommentID, Outcome: row.Outcome, CreatedAt: *row.CreatedAt})
+	}
+	return outcomes, nil
 }
 
 // --- Gauge (address-rate telemetry) ---
@@ -1543,15 +1544,19 @@ func (s *Store) ListReviewGauge(ctx context.Context, installationIDs []int64) ([
 // --- Prompt Templates ---
 
 func (s *Store) ListPromptTemplates(ctx context.Context, repoID int64) ([]PromptTemplate, error) {
-	rows, err := s.Pool.Query(ctx, `
-		SELECT id, repo_id, stage, prompt_text, created_at, updated_at
-		FROM prompt_templates WHERE repo_id = $1 ORDER BY stage
-	`, repoID)
+	rows, err := s.q.ListPromptTemplates(ctx, repoID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[PromptTemplate])
+	templates := make([]PromptTemplate, 0, len(rows))
+	for _, row := range rows {
+		template, err := promptTemplateFromSQLC(row)
+		if err != nil {
+			return nil, err
+		}
+		templates = append(templates, template)
+	}
+	return templates, nil
 }
 
 func (s *Store) UpsertPromptTemplate(ctx context.Context, repoID int64, stage, promptText string) (*PromptTemplate, error) {

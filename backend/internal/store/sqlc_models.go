@@ -49,3 +49,14 @@ func reviewCommentFromValues(id, reviewID uuid.UUID, filePath string, startLine,
 		AttemptGeneration: attemptGeneration,
 	}, nil
 }
+
+func modelConfigFromValues(id int64, repoID, installationID *int64, stage, provider, model string, baseURL *string, maxTokens int, temperature float32, createdAt, updatedAt time.Time) ModelConfig {
+	return ModelConfig{ID: id, RepoID: repoID, InstallationID: installationID, Stage: stage, Provider: provider, Model: model, BaseURL: baseURL, MaxTokens: maxTokens, Temperature: temperature, CreatedAt: createdAt, UpdatedAt: updatedAt}
+}
+
+func promptTemplateFromSQLC(row db.PromptTemplate) (PromptTemplate, error) {
+	if row.CreatedAt == nil || row.UpdatedAt == nil {
+		return PromptTemplate{}, fmt.Errorf("prompt template %d has NULL timestamps", row.ID)
+	}
+	return PromptTemplate{ID: int64(row.ID), RepoID: row.RepoID, Stage: row.Stage, PromptText: row.PromptText, CreatedAt: *row.CreatedAt, UpdatedAt: *row.UpdatedAt}, nil
+}

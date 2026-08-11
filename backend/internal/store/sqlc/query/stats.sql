@@ -36,7 +36,7 @@ SELECT
 
 -- name: ListActivity :many
 SELECT id, installation_id, action, actor, resource, metadata, created_at
-FROM activity_log WHERE installation_id = ANY($1::bigint[]) ORDER BY created_at DESC LIMIT $2;
+FROM activity_log WHERE installation_id = ANY($1::bigint[]) ORDER BY created_at DESC LIMIT sqlc.arg(row_limit)::bigint;
 
 -- name: LogActivity :exec
 INSERT INTO activity_log (installation_id, action, actor, resource, metadata)

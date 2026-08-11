@@ -116,12 +116,12 @@ func (q *Queries) GetStatsScoped(ctx context.Context, dollar_1 []int64) (GetStat
 
 const listActivity = `-- name: ListActivity :many
 SELECT id, installation_id, action, actor, resource, metadata, created_at
-FROM activity_log WHERE installation_id = ANY($1::bigint[]) ORDER BY created_at DESC LIMIT $2
+FROM activity_log WHERE installation_id = ANY($1::bigint[]) ORDER BY created_at DESC LIMIT $2::bigint
 `
 
 type ListActivityParams struct {
-	Column1 []int64 `json:"column_1"`
-	Limit   int32   `json:"limit"`
+	Column1  []int64 `json:"column_1"`
+	RowLimit int64   `json:"row_limit"`
 }
 
 type ListActivityRow struct {
@@ -135,7 +135,7 @@ type ListActivityRow struct {
 }
 
 func (q *Queries) ListActivity(ctx context.Context, arg ListActivityParams) ([]ListActivityRow, error) {
-	rows, err := q.db.Query(ctx, listActivity, arg.Column1, arg.Limit)
+	rows, err := q.db.Query(ctx, listActivity, arg.Column1, arg.RowLimit)
 	if err != nil {
 		return nil, err
 	}

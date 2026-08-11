@@ -48,3 +48,15 @@ func TestReviewCommentFromSQLCRejectsNullableBooleanDrift(t *testing.T) {
 		t.Fatal("IsNewFinding = true, want false")
 	}
 }
+
+func TestPromptTemplateFromSQLCRejectsNullableTimestampDrift(t *testing.T) {
+	row := db.PromptTemplate{ID: 1}
+	if _, err := promptTemplateFromSQLC(row); err == nil {
+		t.Fatal("promptTemplateFromSQLC accepted NULL timestamps")
+	}
+	now := time.Now()
+	row.CreatedAt, row.UpdatedAt = &now, &now
+	if _, err := promptTemplateFromSQLC(row); err != nil {
+		t.Fatalf("promptTemplateFromSQLC: %v", err)
+	}
+}
