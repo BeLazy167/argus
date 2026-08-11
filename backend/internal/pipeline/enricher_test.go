@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -60,23 +61,21 @@ func feedbackLeg(matches []memory.PatternMatch, err error) func(memory.MemoryQue
 // it at retrieval time.
 func filterPatternCandidates(q memory.MemoryQuery, candidates []memory.PatternMatch) []memory.PatternMatch {
 	matches := func(md map[string]string, f memory.FilterCondition) bool {
-		equal := md[f.Key] == f.Value
-		if f.Negate {
-			return !equal
+		value, present := md[f.Key]
+		matched := present && value == f.Value
+		if f.FilterType == "string_contains" {
+			matched = present && strings.Contains(value, f.Value)
 		}
-		return equal
+		if f.Negate {
+			return !matched
+		}
+		return matched
 	}
 	var out []memory.PatternMatch
 	for _, candidate := range candidates {
 		allowed := true
 		for _, f := range q.Filters {
 			allowed = allowed && matches(candidate.Metadata, f)
-		}
-		if allowed && len(q.AnyFilters) > 0 {
-			allowed = false
-			for _, f := range q.AnyFilters {
-				allowed = allowed || matches(candidate.Metadata, f)
-			}
 		}
 		if allowed {
 			out = append(out, candidate)
@@ -149,6 +148,14 @@ func TestEnricher_ExcludesSamePRPatternsBeforeRanking(t *testing.T) {
 		Score: 0.99, ID: "same-pr",
 		Metadata: map[string]string{"repo": "acme/widget", "pr_number": "1"},
 	}
+	samePRShortRepo := memory.PatternMatch{
+		Score: 0.98, ID: "same-pr-short",
+		Metadata: map[string]string{"repo": "widget", "pr_number": "1"},
+	}
+	samePRMissingRepo := memory.PatternMatch{
+		Score: 0.97, ID: "same-pr-missing",
+		Metadata: map[string]string{"pr_number": "1"},
+	}
 	priorPR := memory.PatternMatch{
 		Score: aboveAttribution, ID: "prior-pr",
 		Metadata: map[string]string{"repo": "acme/widget", "pr_number": "2"},
@@ -159,7 +166,7 @@ func TestEnricher_ExcludesSamePRPatternsBeforeRanking(t *testing.T) {
 		}
 		// The same-PR candidate ranks first. Only a predicate applied before
 		// Limit lets the valid older pattern survive the top-1 search.
-		return filterPatternCandidates(q, []memory.PatternMatch{samePR, priorPR}), nil
+		return filterPatternCandidates(q, []memory.PatternMatch{samePR, samePRShortRepo, samePRMissingRepo, priorPR}), nil
 	}}
 	store := &fakeEnrichStore{byMemoryDocID: map[string]int64{"same-pr": 1, "prior-pr": 2}}
 

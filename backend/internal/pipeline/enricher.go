@@ -272,9 +272,10 @@ func (e *Enricher) enrichComment(ctx context.Context, c *FileComment, filePath s
 // searchPriorPatterns retrieves repo and shared patterns concurrently while
 // excluding this PR's own learnings before ranking. The repo container already
 // fixes repository identity, so PR number is sufficient there. Shared patterns
-// use (repo != current OR pr != current), preserving a sibling repository's PR
-// with the same number. Missing provenance remains eligible as prior/manual
-// knowledge because negated filters treat a missing key as not equal.
+// are the union of (a) a different full owner/repo and (b) a different PR. This
+// keeps a sibling repository's same-number PR eligible while rejecting current
+// PR rows whose repo provenance is full, short, or missing: only full names with
+// a slash can enter branch (a), and branch (b) still rejects the current number.
 func (e *Enricher) searchPriorPatterns(ctx context.Context, query string) ([]memory.PatternMatch, error) {
 	prNumber := strconv.Itoa(e.prNumber)
 	queries := []memory.MemoryQuery{
@@ -283,13 +284,22 @@ func (e *Enricher) searchPriorPatterns(ctx context.Context, query string) ([]mem
 			Filters: []memory.FilterCondition{{Key: "pr_number", Value: prNumber, Negate: true}},
 			Limit:   1, Threshold: e.thresholds.FindingEnrich,
 		},
+		// Shared branch (a): a fully-qualified sibling repository. Requiring '/'
+		// prevents a short-name mirror payload from evading same-repo exclusion.
 		{
 			Query: query, Scope: memory.ScopeShared, Type: memory.TypePattern,
-			AnyFilters: []memory.FilterCondition{
+			Filters: []memory.FilterCondition{
+				{Key: "repo", Value: "/", FilterType: "string_contains"},
 				{Key: "repo", Value: e.repoFullName, Negate: true},
-				{Key: "pr_number", Value: prNumber, Negate: true},
 			},
 			Limit: 1, Threshold: e.thresholds.FindingEnrich,
+		},
+		// Shared branch (b): any knowledge from a different PR, including manual
+		// rows with no repo/pr provenance (negation deliberately admits missing).
+		{
+			Query: query, Scope: memory.ScopeShared, Type: memory.TypePattern,
+			Filters: []memory.FilterCondition{{Key: "pr_number", Value: prNumber, Negate: true}},
+			Limit:   1, Threshold: e.thresholds.FindingEnrich,
 		},
 	}
 
