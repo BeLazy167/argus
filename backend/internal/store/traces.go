@@ -7,7 +7,6 @@ import (
 
 	"github.com/BeLazy167/argus/backend/internal/store/db"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 )
 
 // DecisionTrace represents a single decision trace entry.
@@ -101,18 +100,4 @@ func (s *Store) GetHotFiles(ctx context.Context, repoID int64, limit int) ([]Fil
 		files = append(files, FileRisk{FilePath: row.FilePath, TraceCount: row.TraceCount, LastTrace: row.LastTrace})
 	}
 	return files, nil
-}
-
-// scanTrace scans a decision_traces row into a DecisionTrace struct.
-func scanTrace(row pgx.CollectableRow) (DecisionTrace, error) {
-	var t DecisionTrace
-	var metaJSON []byte
-	err := row.Scan(&t.ID, &t.RepoID, &t.FilePath, &t.SymbolName, &t.TraceType, &t.Content, &t.Severity, &t.ReviewID, &t.PRNumber, &metaJSON, &t.CreatedAt)
-	if err != nil {
-		return t, err
-	}
-	if len(metaJSON) > 0 {
-		_ = json.Unmarshal(metaJSON, &t.Metadata)
-	}
-	return t, nil
 }

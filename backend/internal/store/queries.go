@@ -537,16 +537,6 @@ func (s *Store) UpdateReviewStatusIf(ctx context.Context, id uuid.UUID, status, 
 	return tag.RowsAffected() > 0, nil
 }
 
-// markerReviewFilter is the SQL predicate (bare, unambiguous columns) matching
-// synthetic "marker" review rows — idempotency-key inserts that were never real
-// review attempts. signalAutoRunDisabled writes auto_run_disabled (push-signal
-// dedup) and the readiness gate writes no_api_key (onboarding dedup); both carry
-// status='failed' with github_review_id IS NULL. The rows stay in the table so
-// HasFailedReviewWithError dedup keeps working, but dashboard list/stats reads
-// exclude them via `NOT (`+markerReviewFilter+`)` so they don't render as failed
-// reviews or inflate TotalReviews.
-const markerReviewFilter = `github_review_id IS NULL AND status = 'failed' AND error IN ('auto_run_disabled', 'no_api_key')`
-
 // List queries drop the heavy fields (token_usage, diagram*, diagrams,
 // truncated_files, brief) to keep response size manageable. 1 row of those
 // columns averages ~5 KB of JSONB; at limit=200 the list payload was 1.22 MB
