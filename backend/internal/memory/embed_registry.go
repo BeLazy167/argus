@@ -12,7 +12,7 @@ import (
 // EmbeddingsProvider is the provider_keys slot for a customer-supplied
 // embeddings key. Embeddings are deliberately installation-wide (never
 // repo-scoped): an installation has exactly one embedding space —
-// memories.embedding_model and the similarity floors are calibrated per
+// memories.embedding_space and the similarity floors are calibrated per
 // space — so per-repo keys would fragment retrieval. The provider-key API
 // rejects repo-scoped rows for this slot.
 const EmbeddingsProvider = "embeddings"
@@ -194,8 +194,8 @@ func (r *EmbedderRegistry) GetEmbedder(ctx context.Context, installationID int64
 
 	// A failed resolve substitutes the PLATFORM key and model. Caching that
 	// for the full TTL stamps up to five minutes of rows with
-	// embedding_model='voyage-4' while every read gates the score on the
-	// install's real BYOK model — those rows score 0 forever, and because
+	// embedding_space stamped for the platform endpoint while every read gates
+	// the score on the installation's real BYOK space — those rows score 0 forever, and because
 	// their embedding is NOT NULL the backfill sweep (which targets NULLs)
 	// never repairs them. A short TTL bounds the damage to one retry window.
 	ttl := embedderCacheTTL

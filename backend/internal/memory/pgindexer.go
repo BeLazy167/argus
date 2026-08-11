@@ -236,8 +236,8 @@ func (idx *PGIndexer) ImportDocs(ctx context.Context, docs []Doc) error {
 	return idx.upsertDocs(ctx, docs)
 }
 
-// ReembedMissing embeds rows that carry no vector, returning how many it
-// repaired. Scoped to this indexer's installation.
+// ReembedMissing embeds rows with no vector or a vector from a different
+// embedding space, returning how many it repaired. Scoped to this indexer's installation.
 //
 // The write path fails OPEN: when the embedder is absent or breaks its
 // contract, embedForDocs returns nil and the row is written with a NULL
@@ -246,13 +246,13 @@ func (idx *PGIndexer) ImportDocs(ctx context.Context, docs []Doc) error {
 // embeddings outage silently and permanently halved retrieval for whatever was
 // written during it. This is that repair.
 //
-// Content is deliberately NOT rewritten — only embedding and embedding_model.
+// Content is deliberately NOT rewritten — only embedding and its model/space stamps.
 // A re-embed must not resurrect the content of a row that has since been
 // edited, and it must not touch updated_at, which query-time decay reads as
 // the liveness signal for `_shared` patterns.
 //
 // Progress is guaranteed by the predicate itself: every repaired row stops
-// matching `embedding IS NULL`. A batch that repairs nothing therefore means
+// matching the NULL-or-foreign-space condition. A batch that repairs nothing therefore means
 // embedding is failing, and returning an error there is what stops this from
 // spinning forever on the same page.
 func (idx *PGIndexer) ReembedMissing(ctx context.Context, batchSize int) (int, error) {

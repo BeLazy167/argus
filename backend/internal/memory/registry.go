@@ -75,8 +75,8 @@ func (r *Registry) log() *slog.Logger {
 //
 // A nil embedder is NOT a failure: PGIndexer degrades to writing rows with a
 // NULL embedding, which is migration 057's documented fail-open write path.
-// Such a row is reachable through the full-text leg only, and nothing
-// re-embeds it — the dense leg simply never sees it.
+// Such a row is reachable through the full-text leg until ReembedMissing
+// repairs it.
 func (r *Registry) GetIndexer(ctx context.Context, installationID int64) Indexer {
 	if r.pool == nil || r.embedders == nil {
 		return nil

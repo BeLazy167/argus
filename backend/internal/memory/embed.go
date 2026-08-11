@@ -109,10 +109,8 @@ func (e *HTTPEmbedder) Model() string { return e.model }
 // vectors, while endpoint, model, or dimensionality rotation can. The endpoint
 // is hashed so private self-hosted URLs never enter memory rows or telemetry.
 func (e *HTTPEmbedder) SpaceID() string {
-	endpoint := strings.TrimRight(e.baseURL, "/")
+	endpoint := NormalizeBaseURL(e.baseURL)
 	if u, err := url.Parse(endpoint); err == nil {
-		u.Scheme = strings.ToLower(u.Scheme)
-		u.Host = strings.ToLower(u.Host)
 		u.User = nil
 		u.RawQuery = ""
 		u.Fragment = ""
