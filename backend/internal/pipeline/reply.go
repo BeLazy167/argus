@@ -217,11 +217,9 @@ func planReplyEffects(decision replyDecision, authorAssociation string) replyEff
 		if decision.Learning != "" {
 			plan.Outcome = "dismissed"
 			plan.FeedbackAction = "dismissed"
-			plan.LifecycleEvent = EventDismissed
 		} else {
 			plan.Outcome = "confirmed"
 			plan.FeedbackAction = "confirmed"
-			plan.LifecycleEvent = EventAddressedByReply
 		}
 	case "stand_firm":
 		plan.Outcome = "confirmed"
@@ -231,8 +229,8 @@ func planReplyEffects(decision replyDecision, authorAssociation string) replyEff
 	case "not_applicable_change_kind":
 		plan.Outcome = "not_applicable_change_kind"
 		plan.FeedbackAction = "dismissed"
-		plan.LifecycleEvent = EventDismissed
 	}
+	plan.LifecycleEvent, _ = replyLifecycleEvent(decision.Action, plan.Outcome, authorAssociation)
 	return plan
 }
 

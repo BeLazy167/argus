@@ -17,7 +17,7 @@ type BriefingProfile int
 
 const (
 	// ProfileSpecialist renders the deep-review specialist block: synthesis,
-	// combined repo+shared patterns, false positives, approved patterns.
+	// combined repo+shared patterns, dismissed false positives, confirmed findings.
 	ProfileSpecialist BriefingProfile = iota
 	// ProfileReview renders the single-pass reviewer block, which additionally
 	// pulls org rules + past-review context that specialists intentionally skip.
@@ -47,7 +47,7 @@ type Briefing struct {
 	// Patterns is repo-scoped patterns/scenarios (non-feedback) followed by
 	// shared org patterns, in that order, each ≤500 chars.
 	Patterns []string
-	// FalsePositives is type=feedback polarity=negative content (dismissals).
+	// FalsePositives is type=feedback action=dismissed content.
 	FalsePositives []string
 	// Reinforced is confirmed-finding feedback that raises the priority of recurrences.
 	Reinforced []string
@@ -170,10 +170,9 @@ func assembleBriefingWith(ctx context.Context, run runSearchFn, logger *slog.Log
 }
 
 // briefingSections splits a MemoryBlock into the typed prose sections shared by
-// both render profiles, truncating each item to 500 chars. A type=feedback doc
-// routes to FalsePositives (polarity=negative) or Approved (polarity=positive);
-// everything else — repo patterns/scenarios then shared org patterns, in that
-// order — lands in Patterns. Pure (no client), so the parity tests can drive it.
+// both render profiles, truncating each item to 500 chars. Feedback routes by
+// explicit action: dismissed suppresses, confirmed reinforces, and ignored or
+// action-less legacy rows stay neutral. Everything else lands in Patterns.
 func briefingSections(block MemoryBlock) Briefing {
 	var b Briefing
 	if block.Synthesis != "" {
