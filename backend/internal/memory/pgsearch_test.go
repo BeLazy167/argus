@@ -518,10 +518,10 @@ func TestSearchPredicatesORGroupsWithNestedFragments(t *testing.T) {
 			if n := strings.Count(where, " OR "); n != len(or)-1 {
 				t.Errorf("group has %d disjunctions, want %d:\n%s", n, len(or)-1, where)
 			}
-			// The group must be emitted at all: the tenant predicate binds
-			// installation_id and container_tag, so anything beyond those two
-			// args is the group itself.
-			if len(args) <= 2 {
+			// The group must be emitted at all: the base predicates bind
+			// installation, container, and the quarantined legacy source, so
+			// anything beyond those three args is the group itself.
+			if len(args) <= 3 {
 				t.Errorf("OR group emitted no predicate — it was dropped entirely:\n%s", where)
 			}
 		})
@@ -615,7 +615,19 @@ func TestDisableSharedDecayUsesStoredConfidence(t *testing.T) {
 	if !strings.Contains(where, "(metadata->>'confidence')::numeric") {
 		t.Fatalf("disabled decay must compare pinned stored confidence: %s", where)
 	}
-	if len(args) != 3 { // tenant, container, threshold
-		t.Fatalf("args = %d, want 3", len(args))
+	if len(args) != 4 { // tenant, container, quarantined source, threshold
+		t.Fatalf("args = %d, want 4", len(args))
+	}
+}
+
+func TestSearchPredicatesQuarantineLegacyReplyFeedbackAtStorageBoundary(t *testing.T) {
+	idx := &PGIndexer{installationID: 42}
+	where, args := idx.searchPredicates(SearchRequest{ContainerTag: SharedTag})
+
+	if !strings.Contains(where, "metadata->>'source'") || !strings.Contains(where, "<>") {
+		t.Fatalf("legacy reply feedback quarantine missing from storage predicate:\n%s", where)
+	}
+	if len(args) < 3 || args[2] != SourceLegacyReplyFeedback {
+		t.Fatalf("quarantine source is not safely bound: %v", args)
 	}
 }

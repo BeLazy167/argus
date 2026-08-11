@@ -401,12 +401,16 @@ func scanMatches(rows pgx.Rows, req SearchRequest, op string) ([]PatternMatch, e
 // key reads the indexed column (Doc.Type == metadata["type"] by
 // construction); every other key reads the metadata map.
 func (idx *PGIndexer) searchPredicates(req SearchRequest) (string, []any) {
-	args := []any{idx.installationID, req.ContainerTag}
+	// Legacy reply learnings carry no authorization provenance. Keep them stored
+	// for audit, but exclude them before ranking so they cannot crowd trusted
+	// results out of the candidate limit.
+	args := []any{idx.installationID, req.ContainerTag, SourceLegacyReplyFeedback}
 	conds := []string{
 		"installation_id = $1",
 		"container_tag = $2",
 		"deleted_at IS NULL",
 		"invalidated_at IS NULL",
+		"COALESCE(metadata->>'source', '') <> $3",
 	}
 	if req.Filters != nil {
 		for _, f := range req.Filters.AND {

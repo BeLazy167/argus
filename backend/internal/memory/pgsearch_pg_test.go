@@ -849,3 +849,36 @@ func TestPGSearchPointLookupHonoursThreshold(t *testing.T) {
 		}
 	}
 }
+
+func TestPGSearchDirectlyQuarantinesLegacyReplyFeedback(t *testing.T) {
+	idx, ctx := searchTestIndexer(t)
+	if _, err := idx.IndexSharedPattern(ctx, PatternMemory{
+		Content: "legacy reply convention", Source: SourceLegacyReplyFeedback,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := idx.IndexSharedPattern(ctx, PatternMemory{
+		Content: "trusted reply convention", Source: SourceTrustedReplyFeedback,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := idx.Search(ctx, MemoryQuery{
+		Query: "reply convention", Scope: ScopeShared, Type: TypePattern,
+		Limit: 10, Threshold: 0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacy, trusted bool
+	for _, match := range got {
+		legacy = legacy || match.Metadata["source"] == SourceLegacyReplyFeedback
+		trusted = trusted || match.Metadata["source"] == SourceTrustedReplyFeedback
+	}
+	if legacy {
+		t.Fatalf("direct Search returned quarantined legacy feedback: %#v", got)
+	}
+	if !trusted {
+		t.Fatalf("direct Search omitted trusted reply feedback: %#v", got)
+	}
+}
