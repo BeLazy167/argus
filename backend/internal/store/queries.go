@@ -598,16 +598,19 @@ func (s *Store) ReplaceReviewMinorNotes(ctx context.Context, reviewID uuid.UUID,
 
 // GetReviewMinorNotes returns only the review's current attempt.
 func (s *Store) GetReviewMinorNotes(ctx context.Context, reviewID uuid.UUID) ([]ReviewMinorNote, error) {
-	rows, err := s.Pool.Query(ctx, `
-		SELECT n.id, n.review_id, n.attempt_generation, n.file_path, n.line, n.severity, n.title, n.created_at
-		FROM review_minor_notes n JOIN reviews r ON r.id = n.review_id
-		WHERE n.review_id = $1 AND n.attempt_generation = r.attempt_generation
-		ORDER BY n.file_path, n.line, n.id`, reviewID)
+	rows, err := s.q.GetReviewMinorNotes(ctx, reviewID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[ReviewMinorNote])
+	notes := make([]ReviewMinorNote, 0, len(rows))
+	for _, row := range rows {
+		notes = append(notes, ReviewMinorNote{
+			ID: row.ID, ReviewID: row.ReviewID, AttemptGeneration: row.AttemptGeneration,
+			FilePath: row.FilePath, Line: row.Line, Severity: row.Severity,
+			Title: row.Title, CreatedAt: row.CreatedAt,
+		})
+	}
+	return notes, nil
 }
 
 // ClaimReviewSignal atomically elects one machine to deliver a CTA. An

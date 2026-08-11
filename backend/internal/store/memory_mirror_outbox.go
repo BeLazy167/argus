@@ -25,16 +25,16 @@ type MemoryMirrorEvent struct {
 }
 
 type MemoryMirrorOutboxEvent struct {
-	ID             int64
-	InstallationID int64
-	AggregateType  string
-	AggregateID    int64
-	Operation      string
-	Payload        json.RawMessage
-	AttemptCount   int
-	AvailableAt    time.Time
-	ClaimedAt      time.Time
-	CreatedAt      time.Time
+	ID             int64           `db:"id"`
+	InstallationID int64           `db:"installation_id"`
+	AggregateType  string          `db:"aggregate_type"`
+	AggregateID    int64           `db:"aggregate_id"`
+	Operation      string          `db:"operation"`
+	Payload        json.RawMessage `db:"payload"`
+	AttemptCount   int             `db:"attempt_count"`
+	AvailableAt    time.Time       `db:"available_at"`
+	ClaimedAt      time.Time       `db:"claimed_at"`
+	CreatedAt      time.Time       `db:"created_at"`
 }
 
 func (e MemoryMirrorEvent) validate() error {
@@ -132,7 +132,7 @@ func (s *Store) ClaimMemoryMirrorEvents(ctx context.Context, limit int, staleAft
 		return nil, fmt.Errorf("claim memory mirror events: %w", err)
 	}
 	defer rows.Close()
-	events, err := collectOrEmpty(rows, pgx.RowToStructByPos[MemoryMirrorOutboxEvent])
+	events, err := collectOrEmpty(rows, pgx.RowToStructByName[MemoryMirrorOutboxEvent])
 	if err != nil {
 		return nil, fmt.Errorf("read claimed memory mirror events: %w", err)
 	}

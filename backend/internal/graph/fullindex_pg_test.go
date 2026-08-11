@@ -11,7 +11,6 @@ import (
 
 	ghpkg "github.com/BeLazy167/argus/backend/internal/github"
 	"github.com/BeLazy167/argus/backend/internal/store"
-	"github.com/BeLazy167/argus/backend/internal/store/db"
 )
 
 func generationTestPool(t *testing.T) (*pgxpool.Pool, context.Context) {
@@ -86,7 +85,7 @@ func (f *fakeFullIndexGitHub) GetFileContent(_ context.Context, _ int64, _, _, p
 
 func TestIndexRepoBoundedStagesThenAtomicallyPublishes(t *testing.T) {
 	pool, ctx := generationTestPool(t)
-	st := &store.Store{Pool: pool, Q: db.New(pool)}
+	st := store.NewWithDB(pool)
 	installationID := generationSeedInstallation(t, ctx, pool, "{}")
 	repoID := generationSeedRepo(t, ctx, pool, installationID, "generation/atomic")
 	oldID := generationSeedNode(t, ctx, pool, repoID, "Old", "deleted.go")
@@ -157,7 +156,7 @@ func TestIndexRepoBoundedStagesThenAtomicallyPublishes(t *testing.T) {
 
 func TestIndexRepoBoundedRecordsAndRejectsTruncatedTree(t *testing.T) {
 	pool, ctx := generationTestPool(t)
-	st := &store.Store{Pool: pool, Q: db.New(pool)}
+	st := store.NewWithDB(pool)
 	installationID := generationSeedInstallation(t, ctx, pool, "{}")
 	repoID := generationSeedRepo(t, ctx, pool, installationID, "generation/truncated")
 	gh := &fakeFullIndexGitHub{sha: "abcdef", tree: ghpkg.RepoTree{Paths: []string{"a.go"}, Truncated: true}}
@@ -173,7 +172,7 @@ func TestIndexRepoBoundedRecordsAndRejectsTruncatedTree(t *testing.T) {
 
 func TestIndexRepoBoundedRetriesFailedFileBeforePublishing(t *testing.T) {
 	pool, ctx := generationTestPool(t)
-	st := &store.Store{Pool: pool, Q: db.New(pool)}
+	st := store.NewWithDB(pool)
 	installationID := generationSeedInstallation(t, ctx, pool, "{}")
 	repoID := generationSeedRepo(t, ctx, pool, installationID, "generation/retry")
 	gh := &fakeFullIndexGitHub{sha: "fedcba", tree: ghpkg.RepoTree{Paths: []string{"a.go"}}, contents: map[string]string{"a.go": "package p\nfunc A() {}\n"}, fetchErr: map[string]error{"a.go": errors.New("temporary fetch failure")}}
@@ -196,7 +195,7 @@ func TestIndexRepoBoundedRetriesFailedFileBeforePublishing(t *testing.T) {
 
 func TestConcurrentPRHeadsCannotMutatePublishedGeneration(t *testing.T) {
 	pool, ctx := generationTestPool(t)
-	st := &store.Store{Pool: pool, Q: db.New(pool)}
+	st := store.NewWithDB(pool)
 	installationID := generationSeedInstallation(t, ctx, pool, "{}")
 	repoID := generationSeedRepo(t, ctx, pool, installationID, "generation/pr-provenance")
 

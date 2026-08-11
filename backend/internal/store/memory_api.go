@@ -14,16 +14,16 @@ import (
 // MemoryAPI is the safe public representation of a live memory. Vector data
 // and lifecycle tombstones are intentionally absent from this type.
 type MemoryAPI struct {
-	ID             int64           `json:"id"`
-	InstallationID int64           `json:"installation_id"`
-	ContainerTag   string          `json:"container_tag"`
-	CustomID       string          `json:"custom_id"`
-	Type           string          `json:"type"`
-	Content        string          `json:"content"`
-	Metadata       json.RawMessage `json:"metadata"`
-	ReviewID       *uuid.UUID      `json:"review_id"`
-	CreatedAt      time.Time       `json:"created_at"`
-	UpdatedAt      time.Time       `json:"updated_at"`
+	ID             int64           `json:"id" db:"id"`
+	InstallationID int64           `json:"installation_id" db:"installation_id"`
+	ContainerTag   string          `json:"container_tag" db:"container_tag"`
+	CustomID       string          `json:"custom_id" db:"custom_id"`
+	Type           string          `json:"type" db:"type"`
+	Content        string          `json:"content" db:"content"`
+	Metadata       json.RawMessage `json:"metadata" db:"metadata"`
+	ReviewID       *uuid.UUID      `json:"review_id" db:"review_id"`
+	CreatedAt      time.Time       `json:"created_at" db:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at" db:"updated_at"`
 }
 
 // MemoryListFilter is a fully authorized memory-list request. ContainerTags
@@ -79,7 +79,7 @@ func (s *Store) ListMemories(ctx context.Context, filter MemoryListFilter) (Memo
 		return MemoryListResult{}, fmt.Errorf("listing memories: %w", err)
 	}
 	defer rows.Close()
-	memories, err := collectOrEmpty(rows, pgx.RowToStructByPos[MemoryAPI])
+	memories, err := collectOrEmpty(rows, pgx.RowToStructByName[MemoryAPI])
 	if err != nil {
 		return MemoryListResult{}, fmt.Errorf("reading memories: %w", err)
 	}

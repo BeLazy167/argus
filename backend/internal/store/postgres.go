@@ -22,7 +22,11 @@ type Store struct {
 // NewWithDB builds a Store over any sqlc-compatible pool or transaction.
 // Callers that only use generated Store methods do not need a concrete pool.
 func NewWithDB(dbtx db.DBTX) *Store {
-	return &Store{q: db.New(dbtx)}
+	st := &Store{q: db.New(dbtx)}
+	if pool, ok := dbtx.(*pgxpool.Pool); ok {
+		st.Pool = pool
+	}
+	return st
 }
 
 func New(ctx context.Context, databaseURL string) (*Store, error) {
