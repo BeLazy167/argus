@@ -1,0 +1,52 @@
+package memory
+
+import (
+	"context"
+	"strings"
+	"testing"
+)
+
+func TestBriefingRoutesFeedbackByActionNotPolarity(t *testing.T) {
+	block := MemoryBlock{Repo: []PatternMatch{
+		{Content: "confirmed bug class", Metadata: map[string]string{"type": "feedback", "action": "confirmed", "polarity": "negative"}},
+		{Content: "dismissed false alarm", Metadata: map[string]string{"type": "feedback", "action": "dismissed", "polarity": "positive"}},
+		{Content: "clarification pending", Metadata: map[string]string{"type": "feedback", "action": "ignored", "polarity": "negative"}},
+		{Content: "legacy polarity-only feedback", Metadata: map[string]string{"type": "feedback", "polarity": "positive"}},
+	}}
+
+	briefing := briefingSections(block)
+	if len(briefing.Reinforced) != 1 || briefing.Reinforced[0] != "confirmed bug class" {
+		t.Fatalf("reinforced = %#v", briefing.Reinforced)
+	}
+	if len(briefing.FalsePositives) != 1 || briefing.FalsePositives[0] != "dismissed false alarm" {
+		t.Fatalf("false positives = %#v", briefing.FalsePositives)
+	}
+	if len(briefing.Patterns) != 0 {
+		t.Fatalf("neutral or legacy feedback leaked into patterns: %#v", briefing.Patterns)
+	}
+
+	got := briefing.renderReview(3200)
+	if !strings.Contains(got, "Confirmed Findings (flag recurrences)") || strings.Contains(got, "Approved Patterns") {
+		t.Fatalf("feedback semantics are not explicit in rendered prompt: %q", got)
+	}
+	if strings.Contains(got, "clarification pending") || strings.Contains(got, "legacy polarity-only feedback") {
+		t.Fatalf("neutral/unaudited feedback reached prompt: %q", got)
+	}
+}
+
+func TestSearchQuarantinesLegacyReplyFeedbackNonDestructively(t *testing.T) {
+	run := func(context.Context, SearchRequest) ([]PatternMatch, error) {
+		return []PatternMatch{
+			{Content: "legacy unverified", Metadata: map[string]string{"source": "reply_feedback"}},
+			{Content: "authorized", Metadata: map[string]string{"source": "trusted_reply_feedback"}},
+			{Content: "ordinary", Metadata: map[string]string{"source": "auto_learn"}},
+		}, nil
+	}
+	got, err := searchWith(context.Background(), run, MemoryQuery{Query: "q", Repo: "repo", Scope: ScopeRepo, Type: TypePattern})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Content != "authorized" || got[1].Content != "ordinary" {
+		t.Fatalf("legacy reply_feedback was not quarantined: %#v", got)
+	}
+}

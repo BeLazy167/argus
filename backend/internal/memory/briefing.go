@@ -49,8 +49,8 @@ type Briefing struct {
 	Patterns []string
 	// FalsePositives is type=feedback polarity=negative content (dismissals).
 	FalsePositives []string
-	// Approved is type=feedback polarity=positive content (confirmations).
-	Approved []string
+	// Reinforced is confirmed-finding feedback that raises the priority of recurrences.
+	Reinforced []string
 	// Rules is org-wide review rules (ProfileReview only).
 	Rules []string
 	// PastReviews is prior review findings on this repo (ProfileReview only).
@@ -182,14 +182,13 @@ func briefingSections(block MemoryBlock) Briefing {
 	for _, m := range block.Repo {
 		content := util.Truncate(m.Content, 500, true)
 		if m.Metadata["type"] == string(TypeFeedback) {
-			switch Polarity(m.Metadata["polarity"]) {
-			case PolarityNegative:
+			switch m.Metadata["action"] {
+			case "dismissed":
 				b.FalsePositives = append(b.FalsePositives, content)
-				continue
-			case PolarityPositive:
-				b.Approved = append(b.Approved, content)
-				continue
+			case "confirmed":
+				b.Reinforced = append(b.Reinforced, content)
 			}
+			continue
 		}
 		b.Patterns = append(b.Patterns, content)
 	}
@@ -229,9 +228,9 @@ func (b Briefing) renderSpecialist(filePath string, charCap int, emphasizeFalseP
 		}
 	}
 
-	if len(b.Approved) > 0 {
-		sb.WriteString("\n## Approved Patterns (do not flag code following these)\n")
-		for i, m := range b.Approved {
+	if len(b.Reinforced) > 0 {
+		sb.WriteString("\n## Confirmed Findings (flag recurrences)\n")
+		for i, m := range b.Reinforced {
 			sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, m))
 		}
 	}
@@ -284,7 +283,7 @@ func (b Briefing) renderReview(charCap int) string {
 		sb.WriteString(blk)
 	}
 
-	if blk := numberedBlock("\n## Approved Patterns (do not flag code following these)\n", b.Approved); blk != "" {
+	if blk := numberedBlock("\n## Confirmed Findings (flag recurrences)\n", b.Reinforced); blk != "" {
 		sb.WriteString(blk)
 	}
 

@@ -32,14 +32,13 @@ func referenceFormatSpecialistBlock(block MemoryBlock, filePath string, emphasiz
 	for _, m := range block.Repo {
 		mt := m.Metadata["type"]
 		if mt == string(TypeFeedback) {
-			switch Polarity(m.Metadata["polarity"]) {
-			case PolarityNegative:
+			switch m.Metadata["action"] {
+			case "dismissed":
 				negatives = append(negatives, m)
-				continue
-			case PolarityPositive:
+			case "confirmed":
 				positives = append(positives, m)
-				continue
 			}
+			continue
 		}
 		patterns = append(patterns, m)
 	}
@@ -64,7 +63,7 @@ func referenceFormatSpecialistBlock(block MemoryBlock, filePath string, emphasiz
 	}
 
 	if len(positives) > 0 {
-		sb.WriteString("\n## Approved Patterns (do not flag code following these)\n")
+		sb.WriteString("\n## Confirmed Findings (flag recurrences)\n")
 		for i, m := range positives {
 			sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, util.Truncate(m.Content, 500, true)))
 		}
@@ -109,14 +108,13 @@ func referenceReviewRender(block MemoryBlock, rules, pastReviews []string) strin
 		mt := m.Metadata["type"]
 		content := util.Truncate(m.Content, 500, true)
 		if mt == string(TypeFeedback) {
-			switch Polarity(m.Metadata["polarity"]) {
-			case PolarityNegative:
+			switch m.Metadata["action"] {
+			case "dismissed":
 				negResults = append(negResults, content)
-				continue
-			case PolarityPositive:
+			case "confirmed":
 				posResults = append(posResults, content)
-				continue
 			}
+			continue
 		}
 		repoPatterns = append(repoPatterns, content)
 	}
@@ -159,7 +157,7 @@ func referenceReviewRender(block MemoryBlock, rules, pastReviews []string) strin
 		sb.WriteString(blk)
 	}
 
-	if blk := referenceFormatMemoryBlock("\n## Approved Patterns (do not flag code following these)\n", "", posResults); blk != "" {
+	if blk := referenceFormatMemoryBlock("\n## Confirmed Findings (flag recurrences)\n", "", posResults); blk != "" {
 		sb.WriteString(blk)
 	}
 
@@ -176,7 +174,13 @@ func referenceReviewRender(block MemoryBlock, rules, pastReviews []string) strin
 }
 
 func fb(content string, polarity Polarity) PatternMatch {
-	return PatternMatch{Content: content, Metadata: map[string]string{"type": string(TypeFeedback), "polarity": string(polarity)}}
+	action := "confirmed"
+	if polarity == PolarityNegative {
+		action = "dismissed"
+	}
+	return PatternMatch{Content: content, Metadata: map[string]string{
+		"type": string(TypeFeedback), "polarity": string(polarity), "action": action,
+	}}
 }
 
 func pat(content string) PatternMatch {
@@ -216,7 +220,7 @@ func briefingParityCases() map[string]struct {
 			},
 			Shared: []PatternMatch{pat("org rule: no floats for money"), pat("org rule: audit every write")},
 		}},
-		"unknown polarity falls to patterns": {block: MemoryBlock{
+		"unknown action is neutral": {block: MemoryBlock{
 			Repo: []PatternMatch{{Content: "weird feedback", Metadata: map[string]string{"type": string(TypeFeedback), "polarity": "sideways"}}},
 		}},
 		"long items truncated to 500": {block: MemoryBlock{

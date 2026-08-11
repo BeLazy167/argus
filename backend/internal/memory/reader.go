@@ -116,9 +116,25 @@ func searchWith(ctx context.Context, run runSearchFn, q MemoryQuery) ([]PatternM
 	req := q.request()
 	if len(tags) == 1 {
 		req.ContainerTag = tags[0]
-		return run(ctx, req)
+		matches, err := run(ctx, req)
+		return retrievableMatches(matches), err
 	}
-	return searchFanOut(ctx, run, req, tags)
+	matches, err := searchFanOut(ctx, run, req, tags)
+	return retrievableMatches(matches), err
+}
+
+// retrievableMatches quarantines legacy reply-derived shared learnings. Those
+// rows predate authorization provenance, so treating them as trusted would be
+// an irreversible guess. They remain stored for operator audit; authorized
+// replies use SourceTrustedReplyFeedback and remain retrievable.
+func retrievableMatches(matches []PatternMatch) []PatternMatch {
+	out := matches[:0]
+	for _, match := range matches {
+		if match.Metadata["source"] != SourceLegacyReplyFeedback {
+			out = append(out, match)
+		}
+	}
+	return out
 }
 
 // searchFanOut runs one search per container concurrently (write-partitioned

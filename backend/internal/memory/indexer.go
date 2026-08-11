@@ -87,6 +87,16 @@ type Indexer interface {
 	DeleteDocument(ctx context.Context, documentID string) error
 }
 
+const (
+	// SourceLegacyReplyFeedback identifies reply learnings written before the
+	// author authorization boundary existed. Readers quarantine this source
+	// non-destructively because those rows carry no provenance to audit trust.
+	SourceLegacyReplyFeedback = "reply_feedback"
+	// SourceTrustedReplyFeedback identifies reply learnings whose author was
+	// authorized before the write.
+	SourceTrustedReplyFeedback = "trusted_reply_feedback"
+)
+
 // IndexResult identifies the row a write landed on. ID is the deterministic
 // customID: in the Postgres store the document id and the customID are the
 // same value by construction, so a caller can mirror it into patterns.
@@ -448,6 +458,8 @@ func specialistBlockWith(ctx context.Context, run runSearchFn, logger *slog.Logg
 	}()
 
 	wg.Wait()
+	block.Repo = retrievableMatches(block.Repo)
+	block.Shared = retrievableMatches(block.Shared)
 	// Per-leg degradation: keep whatever legs succeeded, Warn the failures,
 	// and error only when ALL legs failed (nothing usable). Callers treat the
 	// returned error as "no institutional memory available at all".
