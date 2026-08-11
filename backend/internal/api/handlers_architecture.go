@@ -11,6 +11,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/BeLazy167/argus/backend/internal/pipeline"
+	"github.com/BeLazy167/argus/backend/internal/store"
 	"github.com/BeLazy167/argus/backend/internal/store/db"
 )
 
@@ -77,10 +78,11 @@ type coupledPair struct {
 }
 
 type archResponse struct {
-	Files             []archFile  `json:"files"`
-	Edges             []archEdge  `json:"edges"`
-	Summary           archSummary `json:"summary"`
-	CouplingAvailable bool        `json:"coupling_available"`
+	Files             []archFile          `json:"files"`
+	Edges             []archEdge          `json:"edges"`
+	Summary           archSummary         `json:"summary"`
+	CouplingAvailable bool                `json:"coupling_available"`
+	Snapshot          store.GraphSnapshot `json:"snapshot"`
 }
 
 // ── Handler ─────────────────────────────────────────────────────────────
@@ -98,7 +100,8 @@ func (s *Server) getArchitecture(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
-	// All 4 queries are independent — run concurrently to cut latency.
+	// All topology, metric, and generation-state queries are independent —
+	// run them concurrently to cut latency.
 	var (
 		mu                sync.Mutex
 		fileMap           = make(map[string]*archFileInfo)
@@ -109,6 +112,7 @@ func (s *Server) getArchitecture(w http.ResponseWriter, r *http.Request) {
 		changeFreq        = make(map[string]int)
 		prFilesList       []archPRFiles
 		couplingAvailable = true
+		snapshot          store.GraphSnapshot
 		fetchErr          error
 	)
 	edgeKey := func(a, b string) string { return a + "\x00" + b }
@@ -166,6 +170,22 @@ func (s *Server) getArchitecture(w http.ResponseWriter, r *http.Request) {
 		mu.Unlock()
 	}()
 
+	// Query 5: newest authoritative generation state. This is independent of
+	// the published topology: a building or failed generation must not hide the
+	// last complete graph.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		latest, err := s.store.GetGraphSnapshot(ctx, repoID)
+		if err != nil {
+			setErr(err)
+			return
+		}
+		mu.Lock()
+		snapshot = latest
+		mu.Unlock()
+	}()
+
 	wg.Wait()
 
 	if fetchErr != nil {
@@ -179,6 +199,7 @@ func (s *Server) getArchitecture(w http.ResponseWriter, r *http.Request) {
 			Files: []archFile{}, Edges: []archEdge{},
 			Summary:           archSummary{},
 			CouplingAvailable: couplingAvailable,
+			Snapshot:          snapshot,
 		})
 		return
 	}
@@ -391,6 +412,7 @@ func (s *Server) getArchitecture(w http.ResponseWriter, r *http.Request) {
 		Edges:             edges,
 		Summary:           summary,
 		CouplingAvailable: couplingAvailable,
+		Snapshot:          snapshot,
 	})
 }
 
