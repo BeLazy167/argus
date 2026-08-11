@@ -258,7 +258,7 @@ func TestConcurrentPRHeadsCannotMutatePublishedGeneration(t *testing.T) {
 
 func TestPublishedGenerationIncludesFileIdentityAndExplicitEdgeResolution(t *testing.T) {
 	pool, ctx := generationTestPool(t)
-	st := &store.Store{Pool: pool, Q: db.New(pool)}
+	st := store.NewWithDB(pool)
 	installationID := generationSeedInstallation(t, ctx, pool, "{}")
 	repoID := generationSeedRepo(t, ctx, pool, installationID, "generation/identity")
 	gh := &fakeFullIndexGitHub{

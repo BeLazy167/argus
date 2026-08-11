@@ -16,7 +16,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/BeLazy167/argus/backend/internal/store"
-	"github.com/BeLazy167/argus/backend/internal/store/db"
 )
 
 func architectureTestPool(t *testing.T) (*pgxpool.Pool, context.Context) {
@@ -58,7 +57,7 @@ func seedArchitectureRepo(t *testing.T, ctx context.Context, pool *pgxpool.Pool)
 func requestArchitecture(t *testing.T, ctx context.Context, pool *pgxpool.Pool, installationID, repoID int64) archResponse {
 	t.Helper()
 	server := &Server{
-		store:  &store.Store{Pool: pool, Q: db.New(pool)},
+		store:  store.NewWithDB(pool),
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 	routeCtx := chi.NewRouteContext()
