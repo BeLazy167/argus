@@ -467,6 +467,12 @@ func (s *Server) retryReview(w http.ResponseWriter, r *http.Request) {
 		ReviewID:          &id,
 		AttemptGeneration: &attemptGeneration,
 		BeforeSpawn: func(bsCtx context.Context) error {
+			// The reaction sweep is a synchronous launch barrier. Do it before
+			// claiming a new retry generation so a transient GitHub failure
+			// cannot leave the review pending without a spawned pipeline.
+			if err := s.reconcileReactionsBeforeReview(bsCtx, inst.InstallationID, repo.FullName, review.PRNumber); err != nil {
+				return err
+			}
 			var claimed bool
 			var err error
 			attemptGeneration, claimed, err = s.store.BeginReviewRetry(bsCtx, id)
@@ -479,9 +485,6 @@ func (s *Server) retryReview(w http.ResponseWriter, r *http.Request) {
 			return nil
 		},
 		Run: func(ctx context.Context) error {
-			if err := s.reconcileReactionsBeforeReview(ctx, inst.InstallationID, repo.FullName, review.PRNumber); err != nil {
-				return err
-			}
 			return s.orchestrator.RetryReview(ctx, id, attemptGeneration)
 		},
 		OnDone: func(err error) {

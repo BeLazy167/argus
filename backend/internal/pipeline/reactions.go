@@ -118,7 +118,15 @@ func (ra *ReactionAnalyzer) HandleCommentReactions(ctx context.Context, event gh
 
 	reactions, err := ra.ghClient.ListCommentReactions(ctx, event.InstallationID, owner, repo, event.CommentID)
 	if err != nil {
-		return fmt.Errorf("fetching reactions for comment %d: %w", event.CommentID, err)
+		if !errors.Is(err, ghpkg.ErrReviewCommentNotFound) {
+			return fmt.Errorf("fetching reactions for comment %d: %w", event.CommentID, err)
+		}
+		// GitHub keeps no reaction aggregate after a review comment is deleted.
+		// Reconcile the reversible reaction-owned memory to neutral, but retain
+		// the historical DB comment ID and append-only outcome/lifecycle audit.
+		ra.logger.Info("reaction: historical comment deleted; reconciling neutral",
+			"comment_id", event.CommentID)
+		reactions = nil
 	}
 
 	// Filter out bot reactions

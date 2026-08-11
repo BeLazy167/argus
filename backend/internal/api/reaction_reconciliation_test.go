@@ -6,12 +6,16 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 
 	ghpkg "github.com/BeLazy167/argus/backend/internal/github"
+	"github.com/BeLazy167/argus/backend/internal/inflight"
+	"github.com/BeLazy167/argus/backend/internal/pipeline"
 )
 
 type recordingReactionSweeper struct {
@@ -165,5 +169,155 @@ func TestPREventLaunchPathsUseReconciledRunner(t *testing.T) {
 				t.Fatalf("%s directly calls HandlePREvent and can bypass reaction reconciliation", tt.fn)
 			}
 		})
+	}
+}
+
+type blockingReactionSweeper struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (s *blockingReactionSweeper) SweepPRReactions(context.Context, int64, string, int) error {
+	close(s.started)
+	<-s.release
+	return nil
+}
+
+func newLaunchBarrierTestServer(sweeper reactionSweeper, handler prEventHandler) *Server {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	return &Server{
+		reactionSweeper: sweeper,
+		prEventHandler:  handler,
+		launcher:        pipeline.NewLauncher(inflight.NewRegistry(), nil, nil, logger),
+	}
+}
+
+func TestLaunchPREventCompletesReactionSweepSynchronouslyBeforeSpawn(t *testing.T) {
+	sweeper := &blockingReactionSweeper{started: make(chan struct{}), release: make(chan struct{})}
+	handled := make(chan struct{})
+	s := newLaunchBarrierTestServer(sweeper, &recordingPREventHandler{onHandle: func() { close(handled) }})
+	beforeSpawn := make(chan struct{})
+	launchResult := make(chan error, 1)
+	evt := ghpkg.PREvent{InstallationID: 91, RepoFullName: "acme/api", PRNumber: 17}
+
+	go func() {
+		launchResult <- s.launchPREvent(pipeline.LaunchSpec{
+			Repo: evt.RepoFullName, PR: evt.PRNumber, BaseCtx: context.Background(),
+			BeforeSpawn: func(context.Context) error {
+				close(beforeSpawn)
+				return nil
+			},
+		}, evt)
+	}()
+
+	select {
+	case <-sweeper.started:
+		// The reconciliation barrier owns the launch call before path-specific
+		// pre-spawn work or the pipeline goroutine can start.
+	case <-beforeSpawn:
+		close(sweeper.release)
+		t.Fatal("path-specific BeforeSpawn ran before reaction reconciliation")
+	}
+	select {
+	case err := <-launchResult:
+		close(sweeper.release)
+		t.Fatalf("launch returned before reaction reconciliation completed: %v", err)
+	default:
+	}
+	select {
+	case <-beforeSpawn:
+		close(sweeper.release)
+		t.Fatal("BeforeSpawn ran while reaction reconciliation was blocked")
+	default:
+	}
+
+	close(sweeper.release)
+	if err := <-launchResult; err != nil {
+		t.Fatalf("launchPREvent: %v", err)
+	}
+	<-beforeSpawn
+	<-handled
+}
+
+func TestLaunchPREventSweepFailureReturnsWithoutSpawning(t *testing.T) {
+	sweepErr := errors.New("GitHub 503 service unavailable")
+	beforeSpawn := false
+	handled := false
+	s := newLaunchBarrierTestServer(
+		&recordingReactionSweeper{err: sweepErr},
+		&recordingPREventHandler{onHandle: func() { handled = true }},
+	)
+	evt := ghpkg.PREvent{InstallationID: 91, RepoFullName: "acme/api", PRNumber: 17}
+
+	err := s.launchPREvent(pipeline.LaunchSpec{
+		Repo: evt.RepoFullName, PR: evt.PRNumber, BaseCtx: context.Background(),
+		BeforeSpawn: func(context.Context) error {
+			beforeSpawn = true
+			return nil
+		},
+	}, evt)
+	if !errors.Is(err, sweepErr) {
+		t.Fatalf("launch error = %v, want wrapped sweep failure", err)
+	}
+	if beforeSpawn {
+		t.Fatal("path-specific BeforeSpawn ran after reconciliation failed")
+	}
+	if handled {
+		t.Fatal("pipeline spawned after reconciliation failed")
+	}
+}
+
+func TestRetryReactionSweepIsInsideSynchronousBeforeSpawn(t *testing.T) {
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	parsed, err := parser.ParseFile(fset, filepath.Join(dir, "handlers_reviews.go"), nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var beforeSpawnReconciles, asyncRunReconciles bool
+	ast.Inspect(parsed, func(n ast.Node) bool {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "retryReview" {
+			return true
+		}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			lit, ok := n.(*ast.CompositeLit)
+			if !ok {
+				return true
+			}
+			for _, elt := range lit.Elts {
+				kv, ok := elt.(*ast.KeyValueExpr)
+				if !ok {
+					continue
+				}
+				key, ok := kv.Key.(*ast.Ident)
+				if !ok || (key.Name != "BeforeSpawn" && key.Name != "Run") {
+					continue
+				}
+				ast.Inspect(kv.Value, func(n ast.Node) bool {
+					sel, ok := n.(*ast.SelectorExpr)
+					if ok && sel.Sel.Name == "reconcileReactionsBeforeReview" {
+						if key.Name == "BeforeSpawn" {
+							beforeSpawnReconciles = true
+						} else {
+							asyncRunReconciles = true
+						}
+					}
+					return true
+				})
+			}
+			return true
+		})
+		return false
+	})
+	if !beforeSpawnReconciles {
+		t.Fatal("retry review does not reconcile reactions in synchronous BeforeSpawn")
+	}
+	if asyncRunReconciles {
+		t.Fatal("retry review defers reaction reconciliation to asynchronous Run")
 	}
 }

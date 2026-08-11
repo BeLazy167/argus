@@ -46,25 +46,43 @@ func (s *Server) reconcileReactionsBeforeReview(ctx context.Context, installatio
 	return nil
 }
 
-// runPREvent is the only fresh-review runner. Reconciliation completes before
-// HandlePREvent, which is the first boundary allowed to read dismissal memory.
-func (s *Server) runPREvent(ctx context.Context, event ghpkg.PREvent) error {
-	if err := s.reconcileReactionsBeforeReview(ctx, event.InstallationID, event.RepoFullName, event.PRNumber); err != nil {
-		return err
-	}
+// handlePREventAfterReconciliation is the only boundary that enters the
+// pipeline after the reaction sweep has succeeded.
+func (s *Server) handlePREventAfterReconciliation(ctx context.Context, event ghpkg.PREvent) error {
 	if s.prEventHandler == nil {
 		return fmt.Errorf("pull request event handler is unavailable")
 	}
 	return s.prEventHandler.HandlePREvent(ctx, event)
 }
 
+// runPREvent is the synchronous runner used outside Launcher. Reconciliation
+// completes before HandlePREvent, which is the first boundary allowed to read
+// dismissal memory.
+func (s *Server) runPREvent(ctx context.Context, event ghpkg.PREvent) error {
+	if err := s.reconcileReactionsBeforeReview(ctx, event.InstallationID, event.RepoFullName, event.PRNumber); err != nil {
+		return err
+	}
+	return s.handlePREventAfterReconciliation(ctx, event)
+}
+
 // launchPREvent preserves Launcher's ownership of admission-adjacent slot,
-// cancel, semaphore cleanup, and generation behavior while making it
-// impossible for a fresh-review call site to provide a Run that skips the
-// reconciliation barrier.
+// cancel, semaphore cleanup, and generation behavior. The sweep runs in
+// BeforeSpawn, synchronously inside Launch and before path-specific pre-spawn
+// work, so a failed reconciliation neither returns an accepted launch nor
+// starts a pipeline that could read stale reaction feedback.
 func (s *Server) launchPREvent(spec pipeline.LaunchSpec, event ghpkg.PREvent) error {
+	pathBeforeSpawn := spec.BeforeSpawn
+	spec.BeforeSpawn = func(ctx context.Context) error {
+		if err := s.reconcileReactionsBeforeReview(ctx, event.InstallationID, event.RepoFullName, event.PRNumber); err != nil {
+			return err
+		}
+		if pathBeforeSpawn != nil {
+			return pathBeforeSpawn(ctx)
+		}
+		return nil
+	}
 	spec.Run = func(ctx context.Context) error {
-		return s.runPREvent(ctx, event)
+		return s.handlePREventAfterReconciliation(ctx, event)
 	}
 	return s.launcher.Launch(spec)
 }

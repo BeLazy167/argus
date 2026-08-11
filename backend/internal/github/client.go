@@ -610,6 +610,45 @@ func (c *Client) AddReaction(ctx context.Context, installationID int64, owner, r
 	return err
 }
 
+// ErrReviewCommentNotFound means GitHub authoritatively reported that the referenced
+// pull request review comment no longer exists. Callers may treat its reaction
+// aggregate as neutral. Other API failures must remain fail-closed.
+var ErrReviewCommentNotFound = errors.New("GitHub review comment not found")
+
+type reviewCommentNotFoundError struct {
+	commentID int64
+	err       error
+}
+
+func (e *reviewCommentNotFoundError) Error() string {
+	return fmt.Sprintf("listing reactions on pull request review comment %d: %v", e.commentID, e.err)
+}
+func (e *reviewCommentNotFoundError) Unwrap() error { return e.err }
+func (e *reviewCommentNotFoundError) Is(target error) bool {
+	return target == ErrReviewCommentNotFound
+}
+
+// commentReactionListError translates only an endpoint-level 404 into the
+// deleted-comment type. The original GitHub error stays in the chain for
+// diagnostics; auth, rate-limit, transport, and server failures stay ordinary
+// errors so the mandatory pre-review sweep fails closed.
+func commentReactionListError(commentID int64, resp *gh.Response, err error) error {
+	status := 0
+	if resp != nil && resp.Response != nil {
+		status = resp.StatusCode
+	}
+	if status == 0 {
+		var responseErr *gh.ErrorResponse
+		if errors.As(err, &responseErr) && responseErr.Response != nil {
+			status = responseErr.Response.StatusCode
+		}
+	}
+	if status == http.StatusNotFound {
+		return &reviewCommentNotFoundError{commentID: commentID, err: err}
+	}
+	return fmt.Errorf("listing comment reactions: %w", err)
+}
+
 // CommentReaction represents a single reaction on a PR review comment.
 type CommentReaction struct {
 	ID      int64
@@ -632,7 +671,7 @@ func (c *Client) ListCommentReactions(ctx context.Context, installationID int64,
 		}
 		reactions, resp, err := client.Reactions.ListPullRequestCommentReactions(ctx, owner, repo, commentID, opts)
 		if err != nil {
-			return nil, fmt.Errorf("listing comment reactions: %w", err)
+			return nil, commentReactionListError(commentID, resp, err)
 		}
 		for _, r := range reactions {
 			all = append(all, CommentReaction{
