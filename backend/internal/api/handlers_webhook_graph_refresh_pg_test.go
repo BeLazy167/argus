@@ -201,6 +201,102 @@ func TestVerifiedEqualTimeHeadCannotOverwriteNewerVerifiedHead(t *testing.T) {
 	}
 }
 
+func TestVerifiedEqualTimeHeadCannotOverwriteWorkerConfirmedHead(t *testing.T) {
+	pool, ctx := webhookGraphTestPool(t)
+	st := store.NewWithDB(pool)
+
+	unique := strconv.FormatInt(time.Now().UnixNano(), 10)
+	fullName := "interleaved-worker-head/repo-" + unique
+	var installationDBID, repoID int64
+	var githubInstallationID, githubRepoID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO installations (installation_id, org_login)
+		VALUES ((random()*1000000000)::bigint, $1) RETURNING id, installation_id`, "interleaved-worker-head-"+unique).
+		Scan(&installationDBID, &githubInstallationID); err != nil {
+		t.Fatalf("seed installation: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO repos (installation_id, github_id, full_name, default_branch, enabled)
+		VALUES ($1, (random()*1000000000)::bigint, $2, 'main', true) RETURNING id, github_id`, installationDBID, fullName).
+		Scan(&repoID, &githubRepoID); err != nil {
+		t.Fatalf("seed repo: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM repos WHERE id = $1`, repoID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM installations WHERE id = $1`, installationDBID)
+	})
+
+	const commitB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb1"
+	const commitC = "ccccccccccccccccccccccccccccccccccccccc2"
+	const commitD = "ddddddddddddddddddddddddddddddddddddddd3"
+	observedAt := time.Now().UTC().Truncate(time.Second)
+	pushUpdate := func(commitSHA string) ghpkg.DefaultBranchUpdate {
+		push := &gh.PushEvent{
+			After: gh.Ptr(commitSHA), Ref: gh.Ptr("refs/heads/main"),
+			Installation: &gh.Installation{ID: gh.Ptr(githubInstallationID)},
+			Repo: &gh.PushEventRepository{
+				ID: gh.Ptr(githubRepoID), FullName: gh.Ptr(fullName), DefaultBranch: gh.Ptr("main"),
+				PushedAt: &gh.Timestamp{Time: observedAt},
+			},
+		}
+		update, ok := ghpkg.DefaultBranchUpdateFromPush(&ghpkg.WebhookEvent{Type: "push", Payload: push})
+		if !ok {
+			t.Fatalf("valid default-head push %s was rejected", commitSHA)
+		}
+		return update
+	}
+
+	metadataClient := &interleavedDefaultHeadGitHub{
+		repoID: githubRepoID, fullName: fullName, currentHead: commitB,
+		blockedHead: commitC, headResolved: make(chan struct{}), releaseResult: make(chan struct{}),
+	}
+	releaseResult := sync.OnceFunc(func() { close(metadataClient.releaseResult) })
+	t.Cleanup(releaseResult)
+	server := &Server{
+		store: st, logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		repoMetadata: metadataClient,
+	}
+	if err := server.scheduleGraphRefresh(ctx, pushUpdate(commitB)); err != nil {
+		t.Fatalf("schedule B: %v", err)
+	}
+
+	metadataClient.setCurrentHead(commitC)
+	cResult := make(chan error, 1)
+	go func() { cResult <- server.scheduleGraphRefresh(ctx, pushUpdate(commitC)) }()
+	select {
+	case <-metadataClient.headResolved:
+	case <-ctx.Done():
+		t.Fatalf("C live-head verification did not resolve: %v", ctx.Err())
+	}
+
+	// C has read a live C head but has not retried the database mutation. The
+	// worker then resolves newer D against the same refresh version and confirms
+	// it before C returns its stale conflict token.
+	alreadyCurrent, confirmed, err := st.ConfirmGraphDefaultHead(ctx, repoID, 1, commitD)
+	if err != nil {
+		t.Fatalf("worker confirm D: %v", err)
+	}
+	if alreadyCurrent || !confirmed {
+		t.Fatalf("worker confirm D = already current %v, confirmed %v", alreadyCurrent, confirmed)
+	}
+	releaseResult()
+	if err := <-cResult; err != nil {
+		t.Fatalf("finish stale verified C: %v", err)
+	}
+
+	var head string
+	var requestedCommit *string
+	var version int64
+	if err := pool.QueryRow(ctx, `
+		SELECT graph_default_head_sha, graph_refresh_commit_sha, graph_refresh_version
+		FROM repos WHERE id = $1`, repoID).Scan(&head, &requestedCommit, &version); err != nil {
+		t.Fatal(err)
+	}
+	if head != commitD || requestedCommit == nil || *requestedCommit != commitD || version != 1 {
+		t.Fatalf("stale verified C overwrote worker-confirmed D: head=%q requested=%v version=%d", head, requestedCommit, version)
+	}
+}
+
 func TestEqualTimeConflictingDefaultHeadPushesUseLiveHeadAuthority(t *testing.T) {
 	pool, ctx := webhookGraphTestPool(t)
 	st := store.NewWithDB(pool)

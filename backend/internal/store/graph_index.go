@@ -20,8 +20,52 @@ var ErrGraphDefaultBranchMismatch = errors.New("graph default head authority req
 // locked when an authority conflict was detected. It is intentionally opaque:
 // callers may only return a token obtained from GraphDefaultBranchMismatchError.
 type GraphRefreshConflictToken struct {
-	refreshVersion int64
-	valid          bool
+	refreshVersion        int64
+	defaultBranch         string
+	defaultHeadSHA        string
+	defaultHeadSHAValid   bool
+	defaultHeadEventAt    time.Time
+	defaultHeadEventValid bool
+	valid                 bool
+}
+
+func newGraphRefreshConflictToken(
+	refreshVersion int64,
+	defaultBranch string,
+	defaultHeadSHA *string,
+	defaultHeadEventAt *time.Time,
+) GraphRefreshConflictToken {
+	token := GraphRefreshConflictToken{
+		refreshVersion: refreshVersion,
+		defaultBranch:  defaultBranch,
+		valid:          true,
+	}
+	if defaultHeadSHA != nil {
+		token.defaultHeadSHA = *defaultHeadSHA
+		token.defaultHeadSHAValid = true
+	}
+	if defaultHeadEventAt != nil {
+		token.defaultHeadEventAt = *defaultHeadEventAt
+		token.defaultHeadEventValid = true
+	}
+	return token
+}
+
+func (t GraphRefreshConflictToken) matches(
+	refreshVersion int64,
+	defaultBranch string,
+	defaultHeadSHA *string,
+	defaultHeadEventAt *time.Time,
+) bool {
+	if !t.valid || t.refreshVersion != refreshVersion || t.defaultBranch != defaultBranch {
+		return false
+	}
+	if t.defaultHeadSHAValid != (defaultHeadSHA != nil) ||
+		(t.defaultHeadSHAValid && t.defaultHeadSHA != *defaultHeadSHA) {
+		return false
+	}
+	return t.defaultHeadEventValid == (defaultHeadEventAt != nil) &&
+		(!t.defaultHeadEventValid || t.defaultHeadEventAt.Equal(*defaultHeadEventAt))
 }
 
 // GraphDefaultBranchMismatchError carries the optimistic token required by a
@@ -314,7 +358,9 @@ func (s *Store) scheduleGraphIndexRefresh(
 
 	// Live verification happens without a database session or row lock. The
 	// retry may mutate only the exact refresh state that raised the conflict.
-	if conflictToken != nil && (!conflictToken.valid || conflictToken.refreshVersion != refreshVersion) {
+	if conflictToken != nil && !conflictToken.matches(
+		refreshVersion, storedDefaultBranch, observedCommit, lastEventAt,
+	) {
 		return false, nil
 	}
 
@@ -327,7 +373,9 @@ func (s *Store) scheduleGraphIndexRefresh(
 		}
 		if verifiedDefaultBranch == "" && verifiedCommitSHA == "" {
 			return false, &GraphDefaultBranchMismatchError{
-				ConflictToken: GraphRefreshConflictToken{refreshVersion: refreshVersion, valid: true},
+				ConflictToken: newGraphRefreshConflictToken(
+					refreshVersion, storedDefaultBranch, observedCommit, lastEventAt,
+				),
 			}
 		}
 		if verifiedDefaultBranch != defaultBranch || verifiedCommitSHA != commitSHA {
