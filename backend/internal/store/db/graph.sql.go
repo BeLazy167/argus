@@ -68,8 +68,13 @@ func (q *Queries) GetFileBugCount(ctx context.Context, arg GetFileBugCountParams
 const getFileFanIn = `-- name: GetFileFanIn :one
 SELECT COUNT(DISTINCT src.file_path)::int as fan_in
 FROM code_edges ce
-JOIN code_nodes src ON src.id = ce.source_id
-JOIN code_nodes tgt ON tgt.id = ce.target_id
+JOIN repos authority ON authority.id = ce.repo_id
+JOIN graph_index_generations published
+  ON published.id = authority.graph_published_generation_id
+ AND published.repo_id = authority.id
+ AND published.status = 'published'
+JOIN code_nodes src ON src.id = ce.source_id AND src.repo_id = authority.id
+JOIN code_nodes tgt ON tgt.id = ce.target_id AND tgt.repo_id = authority.id
 WHERE ce.repo_id = $1 AND tgt.file_path = $2 AND src.file_path != tgt.file_path
   AND NOT ce.inferred
 `
@@ -242,8 +247,13 @@ func (q *Queries) GetFileMemoryPatterns(ctx context.Context, arg GetFileMemoryPa
 const getTopChokePoints = `-- name: GetTopChokePoints :many
 SELECT tgt.file_path, COUNT(DISTINCT src.file_path)::int as fan_in
 FROM code_edges ce
-JOIN code_nodes src ON src.id = ce.source_id
-JOIN code_nodes tgt ON tgt.id = ce.target_id
+JOIN repos authority ON authority.id = ce.repo_id
+JOIN graph_index_generations published
+  ON published.id = authority.graph_published_generation_id
+ AND published.repo_id = authority.id
+ AND published.status = 'published'
+JOIN code_nodes src ON src.id = ce.source_id AND src.repo_id = authority.id
+JOIN code_nodes tgt ON tgt.id = ce.target_id AND tgt.repo_id = authority.id
 WHERE ce.repo_id = $1 AND src.file_path != tgt.file_path AND NOT ce.inferred
 GROUP BY tgt.file_path
 ORDER BY fan_in DESC
@@ -403,8 +413,9 @@ JOIN repos authority ON authority.id = ce.repo_id
 JOIN graph_index_generations published
   ON published.id = authority.graph_published_generation_id
  AND published.repo_id = authority.id
-JOIN code_nodes src ON src.id = ce.source_id
-JOIN code_nodes tgt ON tgt.id = ce.target_id
+ AND published.status = 'published'
+JOIN code_nodes src ON src.id = ce.source_id AND src.repo_id = authority.id
+JOIN code_nodes tgt ON tgt.id = ce.target_id AND tgt.repo_id = authority.id
 WHERE ce.repo_id = $1 AND src.file_path != tgt.file_path AND NOT ce.inferred
 `
 
@@ -449,6 +460,7 @@ JOIN repos authority ON authority.id = cn.repo_id
 JOIN graph_index_generations published
   ON published.id = authority.graph_published_generation_id
  AND published.repo_id = authority.id
+ AND published.status = 'published'
 WHERE cn.repo_id = $1
 ORDER BY cn.file_path, cn.line_start
 `
@@ -497,8 +509,13 @@ const listGraphEdges = `-- name: ListGraphEdges :many
 SELECT ce.id, ce.repo_id, ce.source_id, ce.target_id, ce.kind,
        sn.name as source_name, tn.name as target_name
 FROM code_edges ce
-JOIN code_nodes sn ON sn.id = ce.source_id
-JOIN code_nodes tn ON tn.id = ce.target_id
+JOIN repos authority ON authority.id = ce.repo_id
+JOIN graph_index_generations published
+  ON published.id = authority.graph_published_generation_id
+ AND published.repo_id = authority.id
+ AND published.status = 'published'
+JOIN code_nodes sn ON sn.id = ce.source_id AND sn.repo_id = authority.id
+JOIN code_nodes tn ON tn.id = ce.target_id AND tn.repo_id = authority.id
 WHERE ce.repo_id = $1 AND NOT ce.inferred
 `
 
@@ -546,8 +563,16 @@ func (q *Queries) ListGraphEdges(ctx context.Context, repoID int64) ([]ListGraph
 }
 
 const listGraphNodes = `-- name: ListGraphNodes :many
-SELECT id, repo_id, kind, name, file_path, line_start, line_end, language, pr_number, is_merged
-FROM code_nodes WHERE repo_id = $1 ORDER BY file_path, name
+SELECT cn.id, cn.repo_id, cn.kind, cn.name, cn.file_path, cn.line_start, cn.line_end,
+       cn.language, cn.pr_number, cn.is_merged
+FROM code_nodes cn
+JOIN repos authority ON authority.id = cn.repo_id
+JOIN graph_index_generations published
+  ON published.id = authority.graph_published_generation_id
+ AND published.repo_id = authority.id
+ AND published.status = 'published'
+WHERE cn.repo_id = $1
+ORDER BY cn.file_path, cn.name
 `
 
 type ListGraphNodesRow struct {
@@ -563,6 +588,8 @@ type ListGraphNodesRow struct {
 	IsMerged  bool    `json:"is_merged"`
 }
 
+// The publication pointer is authority for every semantic graph read. Legacy
+// rows remain stored for migration/recovery, but never become UI facts.
 func (q *Queries) ListGraphNodes(ctx context.Context, repoID int64) ([]ListGraphNodesRow, error) {
 	rows, err := q.db.Query(ctx, listGraphNodes, repoID)
 	if err != nil {

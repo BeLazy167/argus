@@ -108,6 +108,9 @@ func TestBlastRadiusScopesByInstallation(t *testing.T) {
 
 	mine := seedBlastTenant(t, ctx, pool, "acme")
 	theirs := seedBlastTenant(t, ctx, pool, "initech")
+	for _, repoID := range []int64{mine.repoA, mine.repoB, theirs.repoA, theirs.repoB} {
+		publishGraphTestGeneration(t, ctx, pool, repoID, fmt.Sprintf("published-%d", repoID))
+	}
 
 	const seedPath = "api/handlers/jobs.go"
 
@@ -244,6 +247,8 @@ func TestBlastRadiusKeepsOwnRepoWithinRowBudget(t *testing.T) {
 	st := &Store{Pool: pool, q: db.New(pool)}
 
 	tenant := seedBlastTenant(t, ctx, pool, "budget")
+	publishGraphTestGeneration(t, ctx, pool, tenant.repoA, "published-api")
+	publishGraphTestGeneration(t, ctx, pool, tenant.repoB, "published-web")
 	const seedPath = "api/handlers/jobs.go"
 	target := seedNode(t, ctx, st, tenant.repoA, "ListJobs", seedPath)
 

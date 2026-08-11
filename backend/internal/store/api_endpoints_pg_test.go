@@ -378,6 +378,8 @@ func TestRepoScopedQueriesIgnoreInferredEdges(t *testing.T) {
 	install := seedInstallation(t, ctx, pool, "{}")
 	apiRepo := apiSeedRepo(t, ctx, pool, install, "acme/api")
 	webRepo := apiSeedRepo(t, ctx, pool, install, "acme/web")
+	publishGraphTestGeneration(t, ctx, pool, apiRepo, "published-api")
+	publishGraphTestGeneration(t, ctx, pool, webRepo, "published-web")
 	apiNode := apiSeedNode(t, ctx, pool, apiRepo, "getJob", "backend/handlers.go")
 	webNode := apiSeedNode(t, ctx, pool, webRepo, "useJob", "web/job.ts")
 
@@ -431,6 +433,8 @@ func TestCrossRepoInferredEdgeStaysOutOfBlastRadius(t *testing.T) {
 	install := seedInstallation(t, ctx, pool, "{}")
 	apiRepo := apiSeedRepo(t, ctx, pool, install, "acme/api")
 	webRepo := apiSeedRepo(t, ctx, pool, install, "acme/web")
+	publishGraphTestGeneration(t, ctx, pool, apiRepo, "published-api")
+	publishGraphTestGeneration(t, ctx, pool, webRepo, "published-web")
 	apiNode := apiSeedNode(t, ctx, pool, apiRepo, "getJob", "handlers.go")
 	webNode := apiSeedNode(t, ctx, pool, webRepo, "useJob", "job.ts")
 

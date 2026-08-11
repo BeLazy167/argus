@@ -35,6 +35,24 @@ type FileMemory struct {
 // parameter, so every writer must pass repo_id as $1.
 const installationOfRepo = `(SELECT r.installation_id FROM repos r WHERE r.id = $1)`
 
+// publishedGraphReposCTE is the shared publication-authority predicate for raw
+// semantic graph reads. Physical code_nodes/code_edges rows are deliberately
+// retained across migrations and failed refreshes, so their existence alone is
+// never authority. The generation must be the owning repo's published pointer,
+// belong to that same repo, and still be marked published.
+//
+// Writer/staging queries must not use this CTE: they need to inspect and mutate
+// physical rows before the first publication and while a later generation is
+// building.
+const publishedGraphReposCTE = `authoritative_graph_repos AS (
+	SELECT authority.id
+	FROM repos authority
+	JOIN graph_index_generations published
+	  ON published.id = authority.graph_published_generation_id
+	 AND published.repo_id = authority.id
+	 AND published.status = 'published'
+)`
+
 // UpsertCodeNode inserts or updates a code node, returning its ID.
 // Only updates base columns (kind, name, file_path, lines, language, pr_number).
 // Does NOT overwrite type-info columns (return_type, params, etc.) if they already exist.
@@ -328,10 +346,11 @@ func (s *Store) GetBlastRadius(ctx context.Context, installationID, repoID int64
 // the returned set because candidates are never used as an inclusion filter.
 func (s *Store) blastRadiusPGGraph(ctx context.Context, installationID, repoID int64, filePaths []string, maxDepth int) ([]CodeNode, error) {
 	rows, err := s.Pool.Query(ctx, `
-		WITH RECURSIVE seeds AS (
-		  SELECT id, repo_id, name, file_path, kind
-		  FROM code_nodes
-		  WHERE installation_id = $1 AND repo_id = $2 AND file_path = ANY($3)
+		WITH RECURSIVE `+publishedGraphReposCTE+`, seeds AS (
+		  SELECT cn.id, cn.repo_id, cn.name, cn.file_path, cn.kind
+		  FROM code_nodes cn
+		  JOIN authoritative_graph_repos authority ON authority.id = cn.repo_id
+		  WHERE cn.installation_id = $1 AND cn.repo_id = $2 AND cn.file_path = ANY($3)
 		), candidates AS (
 		  SELECT DISTINCT t.node_id::bigint AS id
 		  FROM (SELECT array_agg(id::text) AS ids FROM seeds) s
@@ -350,7 +369,8 @@ func (s *Store) blastRadiusPGGraph(ctx context.Context, installationID, repoID i
 		  SELECT cn.id, cn.repo_id, cn.name, cn.file_path, cn.kind, r.depth + 1
 		  FROM reached r
 		  JOIN code_edges ce ON ce.target_id = r.id AND NOT ce.inferred
-		  JOIN code_nodes cn ON cn.id = ce.source_id
+		  JOIN code_nodes cn ON cn.id = ce.source_id AND cn.repo_id = ce.repo_id
+		  JOIN authoritative_graph_repos authority ON authority.id = cn.repo_id
 		  WHERE r.depth < $4 AND cn.installation_id = $1
 		), projection_state AS (
 		  SELECT COUNT(*) AS candidate_count FROM candidates
@@ -409,14 +429,17 @@ func (s *Store) blastRadiusPGGraph(ctx context.Context, installationID, repoID i
 // the primary key because both consumers filter on depth == 1.
 func (s *Store) blastRadiusCTE(ctx context.Context, installationID, repoID int64, filePaths []string, maxDepth int) ([]CodeNode, error) {
 	rows, err := s.Pool.Query(ctx, `
-		WITH RECURSIVE affected AS (
-			SELECT id, repo_id, name, file_path, kind, 0 as depth
-			FROM code_nodes WHERE installation_id = $1 AND repo_id = $2 AND file_path = ANY($3)
+		WITH RECURSIVE `+publishedGraphReposCTE+`, affected AS (
+			SELECT cn.id, cn.repo_id, cn.name, cn.file_path, cn.kind, 0 as depth
+			FROM code_nodes cn
+			JOIN authoritative_graph_repos authority ON authority.id = cn.repo_id
+			WHERE cn.installation_id = $1 AND cn.repo_id = $2 AND cn.file_path = ANY($3)
 			UNION
 			SELECT cn.id, cn.repo_id, cn.name, cn.file_path, cn.kind, a.depth + 1
 			FROM code_nodes cn
-			JOIN code_edges ce ON ce.source_id = cn.id
+			JOIN code_edges ce ON ce.source_id = cn.id AND ce.repo_id = cn.repo_id
 			JOIN affected a ON ce.target_id = a.id
+			JOIN authoritative_graph_repos authority ON authority.id = cn.repo_id
 			WHERE a.depth < $4 AND cn.installation_id = $1 AND NOT ce.inferred
 		)
 		SELECT id, repo_id, name, file_path, kind, depth
@@ -438,12 +461,15 @@ func (s *Store) blastRadiusCTE(ctx context.Context, installationID, repoID int64
 // GetCodeNodesForFile returns all code nodes for a given file with full type info, ordered by line_start.
 func (s *Store) GetCodeNodesForFile(ctx context.Context, repoID int64, filePath string) ([]CodeNode, error) {
 	rows, err := s.Pool.Query(ctx, `
-		SELECT id, repo_id, kind, name, file_path,
-		       COALESCE(line_start, 0), COALESCE(line_end, 0), COALESCE(language, ''),
-		       COALESCE(return_type, ''), COALESCE(params, ''), COALESCE(visibility, ''),
-		       COALESCE(is_async, false), COALESCE(receiver_type, ''), COALESCE(scope, '')
-		FROM code_nodes WHERE repo_id = $1 AND file_path = $2
-		ORDER BY line_start
+		WITH `+publishedGraphReposCTE+`
+		SELECT cn.id, cn.repo_id, cn.kind, cn.name, cn.file_path,
+		       COALESCE(cn.line_start, 0), COALESCE(cn.line_end, 0), COALESCE(cn.language, ''),
+		       COALESCE(cn.return_type, ''), COALESCE(cn.params, ''), COALESCE(cn.visibility, ''),
+		       COALESCE(cn.is_async, false), COALESCE(cn.receiver_type, ''), COALESCE(cn.scope, '')
+		FROM code_nodes cn
+		JOIN authoritative_graph_repos authority ON authority.id = cn.repo_id
+		WHERE cn.repo_id = $1 AND cn.file_path = $2
+		ORDER BY cn.line_start
 	`, repoID, filePath)
 	if err != nil {
 		return nil, fmt.Errorf("get code nodes for file: %w", err)
