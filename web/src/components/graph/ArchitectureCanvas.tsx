@@ -5,7 +5,7 @@ import {
   Controls,
   Background,
   MiniMap,
-  useNodesState,
+  applyNodeChanges,
   useReactFlow,
   ReactFlowProvider,
   MarkerType,
@@ -20,6 +20,7 @@ import dagre from "dagre";
 import FileNode from "./FileNode";
 import GroupNode from "./GroupNode";
 import type { ArchFile, ArchEdge } from "@/lib/queries/architecture";
+import { useFitSearchMatches } from "@/lib/hooks/use-fit-search-matches";
 import type { ColorMode } from "@xyflow/react";
 
 /** Subscribe to theme changes on <html> class list */
@@ -438,8 +439,24 @@ function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQu
     return { nodes: [...groupNodes, ...positionedNodes], edges: rfEdges };
   }, [files, edges, lens, direction, maxDensity]);
 
-  const [positionedNodes, , onNodesChange] = useNodesState(layout.nodes);
+  const [positionedNodes, setPositionedNodes] = useState(layout.nodes);
   const searchLower = searchQuery?.toLowerCase().trim() ?? "";
+  const searchMatchIds = useMemo(
+    () =>
+      searchLower
+        ? files.filter((file) => file.path.toLowerCase().includes(searchLower)).map((file) => file.path)
+        : [],
+    [files, searchLower],
+  );
+  useFitSearchMatches({ fitView, matchIds: searchMatchIds, totalNodes: files.length });
+  const onNodesChange = useCallback(
+    (changes: Parameters<typeof applyNodeChanges>[0]) => {
+      setPositionedNodes((current) =>
+        applyNodeChanges(changes, mergeLayoutPositions(layout.nodes, current)),
+      );
+    },
+    [layout.nodes],
+  );
 
   const visibleElements = useMemo(() => {
     const nodes = mergeLayoutPositions(layout.nodes, positionedNodes);
@@ -455,9 +472,7 @@ function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQu
         emphasizedNodeIds.add(edge.target);
       }
     } else if (searchLower) {
-      for (const file of files) {
-        if (file.path.toLowerCase().includes(searchLower)) emphasizedNodeIds.add(file.path);
-      }
+      for (const id of searchMatchIds) emphasizedNodeIds.add(id);
     }
 
     const fileByPath = new Map(files.map((file) => [file.path, file] as const));
@@ -493,7 +508,7 @@ function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQu
     });
 
     return { nodes: decoratedNodes, edges: decoratedEdges };
-  }, [files, layout, lens, positionedNodes, searchLower, selectedNodeId]);
+  }, [files, layout, lens, positionedNodes, searchLower, searchMatchIds, selectedNodeId]);
 
   const onNodeClick: NodeMouseHandler = useCallback(
     (_event, node) => {
@@ -603,20 +618,10 @@ const nodeTypes = { archFile: FileNode, group: GroupNode };
 
 export default function ArchitectureCanvas(props: Props) {
   const [direction, setDirection] = useState<"TB" | "LR">("TB");
-  const topologyKey = useMemo(
-    () =>
-      JSON.stringify([
-        props.files.map((file) => file.path),
-        props.edges.map((edge) => [edge.source, edge.target]),
-      ]),
-    [props.edges, props.files],
-  );
 
   return (
     <div className="h-full w-full relative">
-      {/* A topology refresh resets React Flow's event state through its key;
-          metric/lens refreshes reconcile from current props during render. */}
-      <ReactFlowProvider key={`${direction}:${topologyKey}`}>
+      <ReactFlowProvider key={direction}>
         <ArchCanvasInner {...props} direction={direction} setDirection={setDirection} />
       </ReactFlowProvider>
     </div>
