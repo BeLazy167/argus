@@ -60,3 +60,14 @@ func TestPromptTemplateFromSQLCRejectsNullableTimestampDrift(t *testing.T) {
 		t.Fatalf("promptTemplateFromSQLC: %v", err)
 	}
 }
+
+func TestScopedReviewFromSQLCPreservesListPayloadShape(t *testing.T) {
+	row := db.ListReviewsScopedRow{ID: uuid.New(), CreatedAt: time.Now()}
+	got := scopedReviewFromSQLC(row)
+	if string(got.Diagrams) != "[]" || string(got.TruncatedFiles) != "[]" {
+		t.Fatalf("list JSON defaults = (%s, %s), want ([], [])", got.Diagrams, got.TruncatedFiles)
+	}
+	if got.TokenUsage != nil || got.ReviewContract != nil {
+		t.Fatalf("heavy fields populated: token=%v contract=%v", got.TokenUsage, got.ReviewContract)
+	}
+}

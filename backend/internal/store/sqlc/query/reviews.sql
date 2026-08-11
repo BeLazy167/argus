@@ -6,13 +6,16 @@ FROM reviews WHERE repo_id = $1
 ORDER BY created_at DESC LIMIT $2 OFFSET $3;
 
 -- name: ListAllReviewsScoped :many
-SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, COALESCE(rv.head_ref,'') as head_ref, rv.github_review_id,
-       rv.status, rv.summary, rv.score, rv.token_usage, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error,
-       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at, rv.trace_id
+SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, COALESCE(rv.head_ref,'') AS head_ref, rv.github_review_id,
+       rv.status, rv.summary, rv.score, rv.trigger, rv.triggered_by, rv.budget_note, rv.duration_ms, rv.error,
+       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at,
+       rv.cross_pr_hash, rv.trace_id
 FROM reviews rv
 JOIN repos r ON rv.repo_id = r.id
 WHERE r.installation_id = ANY($1::bigint[])
-ORDER BY rv.created_at DESC LIMIT $2 OFFSET $3;
+  AND NOT (rv.github_review_id IS NULL AND rv.status = 'failed' AND rv.error IN ('auto_run_disabled', 'no_api_key'))
+ORDER BY rv.created_at DESC
+LIMIT sqlc.arg(row_limit)::bigint OFFSET sqlc.arg(row_offset)::bigint;
 
 -- name: GetReview :one
 SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, COALESCE(head_ref,'') as head_ref, github_review_id,
@@ -111,13 +114,16 @@ UPDATE reviews SET status = $2, error = $3, completed_at = CASE WHEN $2 IN ('com
 WHERE id = $1;
 
 -- name: ListReviewsScoped :many
-SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, COALESCE(rv.head_ref,'') as head_ref, rv.github_review_id,
-       rv.status, rv.summary, rv.score, rv.token_usage, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error,
-       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at, rv.trace_id
+SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, COALESCE(rv.head_ref,'') AS head_ref, rv.github_review_id,
+       rv.status, rv.summary, rv.score, rv.trigger, rv.triggered_by, rv.budget_note, rv.duration_ms, rv.error,
+       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at,
+       rv.cross_pr_hash, rv.trace_id
 FROM reviews rv
 JOIN repos r ON rv.repo_id = r.id
 WHERE rv.repo_id = $1 AND r.installation_id = ANY($2::bigint[])
-ORDER BY rv.created_at DESC LIMIT $3 OFFSET $4;
+  AND NOT (rv.github_review_id IS NULL AND rv.status = 'failed' AND rv.error IN ('auto_run_disabled', 'no_api_key'))
+ORDER BY rv.created_at DESC
+LIMIT sqlc.arg(row_limit)::bigint OFFSET sqlc.arg(row_offset)::bigint;
 
 -- name: GetRepoReviewStats :one
 -- Returns averaged token + cost stats over the last N completed reviews for a repo,

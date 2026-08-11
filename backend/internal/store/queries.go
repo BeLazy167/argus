@@ -645,48 +645,30 @@ func (s *Store) ListReviewsScoped(ctx context.Context, repoID int64, installatio
 	if limit <= 0 {
 		limit = 20
 	}
-	rows, err := s.Pool.Query(ctx, `
-		SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, COALESCE(rv.head_ref,''), rv.github_review_id,
-		       rv.status, rv.summary, rv.score, NULL::jsonb, rv.trigger, rv.triggered_by, rv.budget_note, rv.duration_ms, rv.error,
-		       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at,
-		       NULL::text, NULL::text,
-		       '[]'::jsonb, '[]'::jsonb,
-		       NULL::text, rv.cross_pr_hash, rv.trace_id, NULL::jsonb
-		FROM reviews rv
-		JOIN repos r ON rv.repo_id = r.id
-		WHERE rv.repo_id = $1 AND r.installation_id = ANY($2)
-		  AND NOT (`+markerReviewFilter+`)
-		ORDER BY rv.created_at DESC LIMIT $3 OFFSET $4
-	`, repoID, installationIDs, limit, offset)
+	rows, err := s.q.ListReviewsScoped(ctx, db.ListReviewsScopedParams{RepoID: repoID, Column2: installationIDs, RowLimit: int64(limit), RowOffset: int64(offset)})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[Review])
+	reviews := make([]Review, 0, len(rows))
+	for _, row := range rows {
+		reviews = append(reviews, scopedReviewFromSQLC(row))
+	}
+	return reviews, nil
 }
 
 func (s *Store) ListAllReviewsScoped(ctx context.Context, installationIDs []int64, limit, offset int) ([]Review, error) {
 	if limit <= 0 {
 		limit = 20
 	}
-	rows, err := s.Pool.Query(ctx, `
-		SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, COALESCE(rv.head_ref,''), rv.github_review_id,
-		       rv.status, rv.summary, rv.score, NULL::jsonb, rv.trigger, rv.triggered_by, rv.budget_note, rv.duration_ms, rv.error,
-		       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at,
-		       NULL::text, NULL::text,
-		       '[]'::jsonb, '[]'::jsonb,
-		       NULL::text, rv.cross_pr_hash, rv.trace_id, NULL::jsonb
-		FROM reviews rv
-		JOIN repos r ON rv.repo_id = r.id
-		WHERE r.installation_id = ANY($1)
-		  AND NOT (`+markerReviewFilter+`)
-		ORDER BY rv.created_at DESC LIMIT $2 OFFSET $3
-	`, installationIDs, limit, offset)
+	rows, err := s.q.ListAllReviewsScoped(ctx, db.ListAllReviewsScopedParams{Column1: installationIDs, RowLimit: int64(limit), RowOffset: int64(offset)})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[Review])
+	reviews := make([]Review, 0, len(rows))
+	for _, row := range rows {
+		reviews = append(reviews, allScopedReviewFromSQLC(row))
+	}
+	return reviews, nil
 }
 
 // ReplaceReviewMinorNotes replaces only one attempt's structured notes.

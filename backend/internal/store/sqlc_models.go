@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -59,4 +60,23 @@ func promptTemplateFromSQLC(row db.PromptTemplate) (PromptTemplate, error) {
 		return PromptTemplate{}, fmt.Errorf("prompt template %d has NULL timestamps", row.ID)
 	}
 	return PromptTemplate{ID: int64(row.ID), RepoID: row.RepoID, Stage: row.Stage, PromptText: row.PromptText, CreatedAt: *row.CreatedAt, UpdatedAt: *row.UpdatedAt}, nil
+}
+
+func scopedReviewFromSQLC(row db.ListReviewsScopedRow) Review {
+	return reviewListFromValues(row.ID, row.RepoID, row.PRNumber, row.PRTitle, row.PRAuthor, row.HeadSHA, row.BaseSHA, row.HeadRef, row.GithubReviewID, row.Status, row.Summary, row.Score, row.Trigger, row.TriggeredBy, row.BudgetNote, row.DurationMs, row.Error, row.DeepReview, row.Persona, row.IsIncremental, row.CreatedAt, row.CompletedAt, row.CrossPRHash, row.TraceID)
+}
+
+func allScopedReviewFromSQLC(row db.ListAllReviewsScopedRow) Review {
+	return reviewListFromValues(row.ID, row.RepoID, row.PRNumber, row.PRTitle, row.PRAuthor, row.HeadSHA, row.BaseSHA, row.HeadRef, row.GithubReviewID, row.Status, row.Summary, row.Score, row.Trigger, row.TriggeredBy, row.BudgetNote, row.DurationMs, row.Error, row.DeepReview, row.Persona, row.IsIncremental, row.CreatedAt, row.CompletedAt, row.CrossPRHash, row.TraceID)
+}
+
+func reviewListFromValues(id uuid.UUID, repoID int64, prNumber int, prTitle, prAuthor, headSHA, baseSHA, headRef string, githubReviewID *int64, status string, summary *string, score *int, trigger string, triggeredBy, budgetNote *string, durationMs *int, reviewErr *string, deepReview bool, persona *string, isIncremental bool, createdAt time.Time, completedAt *time.Time, crossPRHash, traceID *string) Review {
+	return Review{
+		ID: id, RepoID: repoID, PRNumber: prNumber, PRTitle: prTitle, PRAuthor: prAuthor,
+		HeadSHA: headSHA, BaseSHA: baseSHA, HeadRef: headRef, GithubReviewID: githubReviewID,
+		Status: status, Summary: summary, Score: score, Trigger: trigger, TriggeredBy: triggeredBy,
+		BudgetNote: budgetNote, DurationMs: durationMs, Error: reviewErr, DeepReview: deepReview,
+		Persona: persona, IsIncremental: isIncremental, CreatedAt: createdAt, CompletedAt: completedAt,
+		Diagrams: json.RawMessage("[]"), TruncatedFiles: json.RawMessage("[]"), CrossPRHash: crossPRHash, TraceID: traceID,
+	}
 }

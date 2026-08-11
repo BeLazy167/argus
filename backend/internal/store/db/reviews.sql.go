@@ -570,19 +570,22 @@ func (q *Queries) GetReview(ctx context.Context, id uuid.UUID) (GetReviewRow, er
 }
 
 const listAllReviewsScoped = `-- name: ListAllReviewsScoped :many
-SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, COALESCE(rv.head_ref,'') as head_ref, rv.github_review_id,
-       rv.status, rv.summary, rv.score, rv.token_usage, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error,
-       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at, rv.trace_id
+SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, COALESCE(rv.head_ref,'') AS head_ref, rv.github_review_id,
+       rv.status, rv.summary, rv.score, rv.trigger, rv.triggered_by, rv.budget_note, rv.duration_ms, rv.error,
+       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at,
+       rv.cross_pr_hash, rv.trace_id
 FROM reviews rv
 JOIN repos r ON rv.repo_id = r.id
 WHERE r.installation_id = ANY($1::bigint[])
-ORDER BY rv.created_at DESC LIMIT $2 OFFSET $3
+  AND NOT (rv.github_review_id IS NULL AND rv.status = 'failed' AND rv.error IN ('auto_run_disabled', 'no_api_key'))
+ORDER BY rv.created_at DESC
+LIMIT $3::bigint OFFSET $2::bigint
 `
 
 type ListAllReviewsScopedParams struct {
-	Column1 []int64 `json:"column_1"`
-	Limit   int32   `json:"limit"`
-	Offset  int32   `json:"offset"`
+	Column1   []int64 `json:"column_1"`
+	RowOffset int64   `json:"row_offset"`
+	RowLimit  int64   `json:"row_limit"`
 }
 
 type ListAllReviewsScopedRow struct {
@@ -598,9 +601,9 @@ type ListAllReviewsScopedRow struct {
 	Status         string     `json:"status"`
 	Summary        *string    `json:"summary"`
 	Score          *int       `json:"score"`
-	TokenUsage     []byte     `json:"token_usage"`
 	Trigger        string     `json:"trigger"`
 	TriggeredBy    *string    `json:"triggered_by"`
+	BudgetNote     *string    `json:"budget_note"`
 	DurationMs     *int       `json:"duration_ms"`
 	Error          *string    `json:"error"`
 	DeepReview     bool       `json:"deep_review"`
@@ -608,11 +611,12 @@ type ListAllReviewsScopedRow struct {
 	IsIncremental  bool       `json:"is_incremental"`
 	CreatedAt      time.Time  `json:"created_at"`
 	CompletedAt    *time.Time `json:"completed_at"`
+	CrossPRHash    *string    `json:"cross_pr_hash"`
 	TraceID        *string    `json:"trace_id"`
 }
 
 func (q *Queries) ListAllReviewsScoped(ctx context.Context, arg ListAllReviewsScopedParams) ([]ListAllReviewsScopedRow, error) {
-	rows, err := q.db.Query(ctx, listAllReviewsScoped, arg.Column1, arg.Limit, arg.Offset)
+	rows, err := q.db.Query(ctx, listAllReviewsScoped, arg.Column1, arg.RowOffset, arg.RowLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -633,9 +637,9 @@ func (q *Queries) ListAllReviewsScoped(ctx context.Context, arg ListAllReviewsSc
 			&i.Status,
 			&i.Summary,
 			&i.Score,
-			&i.TokenUsage,
 			&i.Trigger,
 			&i.TriggeredBy,
+			&i.BudgetNote,
 			&i.DurationMs,
 			&i.Error,
 			&i.DeepReview,
@@ -643,6 +647,7 @@ func (q *Queries) ListAllReviewsScoped(ctx context.Context, arg ListAllReviewsSc
 			&i.IsIncremental,
 			&i.CreatedAt,
 			&i.CompletedAt,
+			&i.CrossPRHash,
 			&i.TraceID,
 		); err != nil {
 			return nil, err
@@ -802,20 +807,23 @@ func (q *Queries) ListReviews(ctx context.Context, arg ListReviewsParams) ([]Lis
 }
 
 const listReviewsScoped = `-- name: ListReviewsScoped :many
-SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, COALESCE(rv.head_ref,'') as head_ref, rv.github_review_id,
-       rv.status, rv.summary, rv.score, rv.token_usage, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error,
-       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at, rv.trace_id
+SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, COALESCE(rv.head_ref,'') AS head_ref, rv.github_review_id,
+       rv.status, rv.summary, rv.score, rv.trigger, rv.triggered_by, rv.budget_note, rv.duration_ms, rv.error,
+       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at,
+       rv.cross_pr_hash, rv.trace_id
 FROM reviews rv
 JOIN repos r ON rv.repo_id = r.id
 WHERE rv.repo_id = $1 AND r.installation_id = ANY($2::bigint[])
-ORDER BY rv.created_at DESC LIMIT $3 OFFSET $4
+  AND NOT (rv.github_review_id IS NULL AND rv.status = 'failed' AND rv.error IN ('auto_run_disabled', 'no_api_key'))
+ORDER BY rv.created_at DESC
+LIMIT $4::bigint OFFSET $3::bigint
 `
 
 type ListReviewsScopedParams struct {
-	RepoID  int64   `json:"repo_id"`
-	Column2 []int64 `json:"column_2"`
-	Limit   int32   `json:"limit"`
-	Offset  int32   `json:"offset"`
+	RepoID    int64   `json:"repo_id"`
+	Column2   []int64 `json:"column_2"`
+	RowOffset int64   `json:"row_offset"`
+	RowLimit  int64   `json:"row_limit"`
 }
 
 type ListReviewsScopedRow struct {
@@ -831,9 +839,9 @@ type ListReviewsScopedRow struct {
 	Status         string     `json:"status"`
 	Summary        *string    `json:"summary"`
 	Score          *int       `json:"score"`
-	TokenUsage     []byte     `json:"token_usage"`
 	Trigger        string     `json:"trigger"`
 	TriggeredBy    *string    `json:"triggered_by"`
+	BudgetNote     *string    `json:"budget_note"`
 	DurationMs     *int       `json:"duration_ms"`
 	Error          *string    `json:"error"`
 	DeepReview     bool       `json:"deep_review"`
@@ -841,6 +849,7 @@ type ListReviewsScopedRow struct {
 	IsIncremental  bool       `json:"is_incremental"`
 	CreatedAt      time.Time  `json:"created_at"`
 	CompletedAt    *time.Time `json:"completed_at"`
+	CrossPRHash    *string    `json:"cross_pr_hash"`
 	TraceID        *string    `json:"trace_id"`
 }
 
@@ -848,8 +857,8 @@ func (q *Queries) ListReviewsScoped(ctx context.Context, arg ListReviewsScopedPa
 	rows, err := q.db.Query(ctx, listReviewsScoped,
 		arg.RepoID,
 		arg.Column2,
-		arg.Limit,
-		arg.Offset,
+		arg.RowOffset,
+		arg.RowLimit,
 	)
 	if err != nil {
 		return nil, err
@@ -871,9 +880,9 @@ func (q *Queries) ListReviewsScoped(ctx context.Context, arg ListReviewsScopedPa
 			&i.Status,
 			&i.Summary,
 			&i.Score,
-			&i.TokenUsage,
 			&i.Trigger,
 			&i.TriggeredBy,
+			&i.BudgetNote,
 			&i.DurationMs,
 			&i.Error,
 			&i.DeepReview,
@@ -881,6 +890,7 @@ func (q *Queries) ListReviewsScoped(ctx context.Context, arg ListReviewsScopedPa
 			&i.IsIncremental,
 			&i.CreatedAt,
 			&i.CompletedAt,
+			&i.CrossPRHash,
 			&i.TraceID,
 		); err != nil {
 			return nil, err
