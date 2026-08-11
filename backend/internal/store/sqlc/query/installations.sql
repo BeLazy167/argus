@@ -41,3 +41,8 @@ SELECT COALESCE(feature_flags, '{}')::jsonb FROM installations WHERE id = $1;
 -- column is NOT NULL (migration 030) with a jsonb_typeof = 'object' CHECK
 -- (032), so both operands are always objects.
 UPDATE installations SET feature_flags = feature_flags || @patch::jsonb WHERE id = @id;
+
+-- name: ListInstallations :many
+SELECT id, installation_id, org_login, clerk_org_id, created_at, suspended_at
+FROM installations
+ORDER BY created_at DESC;

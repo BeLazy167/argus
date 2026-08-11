@@ -31,3 +31,14 @@ FROM repos WHERE installation_id = ANY($1::bigint[]) ORDER BY full_name;
 
 -- name: CountEnabledRepos :one
 SELECT COUNT(*)::int FROM repos WHERE installation_id = $1 AND enabled = TRUE;
+
+-- name: ListRepos :many
+SELECT id, installation_id, github_id, full_name, default_branch, enabled, settings_json, created_at, updated_at
+FROM repos
+ORDER BY full_name;
+
+-- name: ListReposByOwner :many
+SELECT id, installation_id, github_id, full_name, default_branch, enabled, settings_json, created_at, updated_at
+FROM repos
+WHERE full_name LIKE $1::text ESCAPE '\'
+ORDER BY full_name;

@@ -36,12 +36,15 @@ func (s *Store) CreateInstallation(ctx context.Context, installationID int64, or
 }
 
 func (s *Store) ListInstallations(ctx context.Context) ([]Installation, error) {
-	rows, err := s.Pool.Query(ctx, `SELECT id, installation_id, org_login, clerk_org_id, created_at, suspended_at FROM installations ORDER BY created_at DESC`)
+	rows, err := s.q.ListInstallations(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[Installation])
+	installations := make([]Installation, 0, len(rows))
+	for _, row := range rows {
+		installations = append(installations, installationFromSQLC(row.ID, row.InstallationID, row.OrgLogin, row.ClerkOrgID, row.CreatedAt, row.SuspendedAt))
+	}
+	return installations, nil
 }
 
 // --- User Installations ---
@@ -90,18 +93,15 @@ func (s *Store) CountInstallationUsers(ctx context.Context, installationID int64
 }
 
 func (s *Store) ListUserInstallations(ctx context.Context, clerkUserID string) ([]Installation, error) {
-	rows, err := s.Pool.Query(ctx, `
-		SELECT i.id, i.installation_id, i.org_login, i.clerk_org_id, i.created_at, i.suspended_at
-		FROM installations i
-		JOIN user_installations ui ON ui.installation_id = i.id
-		WHERE ui.clerk_user_id = $1
-		ORDER BY i.created_at DESC
-	`, clerkUserID)
+	rows, err := s.q.ListUserInstallations(ctx, clerkUserID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[Installation])
+	installations := make([]Installation, 0, len(rows))
+	for _, row := range rows {
+		installations = append(installations, installationFromSQLC(row.ID, row.InstallationID, row.OrgLogin, row.ClerkOrgID, row.CreatedAt, row.SuspendedAt))
+	}
+	return installations, nil
 }
 
 func (s *Store) GetUserInstallationIDs(ctx context.Context, clerkUserID string) ([]int64, error) {
@@ -235,29 +235,29 @@ func mergeJSON(base, override json.RawMessage) json.RawMessage {
 // --- Repos ---
 
 func (s *Store) ListRepos(ctx context.Context) ([]Repo, error) {
-	rows, err := s.Pool.Query(ctx, `
-		SELECT id, installation_id, github_id, full_name, default_branch, enabled, settings_json, created_at, updated_at
-		FROM repos ORDER BY full_name
-	`)
+	rows, err := s.q.ListRepos(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[Repo])
+	repos := make([]Repo, 0, len(rows))
+	for _, row := range rows {
+		repos = append(repos, repoFromSQLC(row.ID, row.InstallationID, row.GithubID, row.FullName, row.DefaultBranch, row.Enabled, row.SettingsJSON, row.CreatedAt, row.UpdatedAt))
+	}
+	return repos, nil
 }
 
 func (s *Store) ListReposByOwner(ctx context.Context, ownerPrefix string) ([]Repo, error) {
-	// Escape LIKE wildcards to prevent LLM-controlled injection
+	// Escape LIKE wildcards so an LLM-controlled owner stays a literal prefix.
 	escaped := strings.NewReplacer("%", "\\%", "_", "\\_").Replace(ownerPrefix)
-	rows, err := s.Pool.Query(ctx, `
-		SELECT id, installation_id, github_id, full_name, default_branch, enabled, settings_json, created_at, updated_at
-		FROM repos WHERE full_name LIKE $1 ESCAPE '\' ORDER BY full_name
-	`, escaped+"/%")
+	rows, err := s.q.ListReposByOwner(ctx, escaped+"/%")
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[Repo])
+	repos := make([]Repo, 0, len(rows))
+	for _, row := range rows {
+		repos = append(repos, repoFromSQLC(row.ID, row.InstallationID, row.GithubID, row.FullName, row.DefaultBranch, row.Enabled, row.SettingsJSON, row.CreatedAt, row.UpdatedAt))
+	}
+	return repos, nil
 }
 
 func (s *Store) GetRepo(ctx context.Context, id int64) (*Repo, error) {
@@ -316,15 +316,15 @@ func (s *Store) UpsertRepo(ctx context.Context, installationID, githubID int64, 
 }
 
 func (s *Store) ListReposScoped(ctx context.Context, installationIDs []int64) ([]Repo, error) {
-	rows, err := s.Pool.Query(ctx, `
-		SELECT id, installation_id, github_id, full_name, default_branch, enabled, settings_json, created_at, updated_at
-		FROM repos WHERE installation_id = ANY($1) ORDER BY full_name
-	`, installationIDs)
+	rows, err := s.q.ListReposScoped(ctx, installationIDs)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[Repo])
+	repos := make([]Repo, 0, len(rows))
+	for _, row := range rows {
+		repos = append(repos, repoFromSQLC(row.ID, row.InstallationID, row.GithubID, row.FullName, row.DefaultBranch, row.Enabled, row.SettingsJSON, row.CreatedAt, row.UpdatedAt))
+	}
+	return repos, nil
 }
 
 func (s *Store) GetRepoScoped(ctx context.Context, id int64, installationIDs []int64) (*Repo, error) {

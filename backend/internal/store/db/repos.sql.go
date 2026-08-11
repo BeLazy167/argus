@@ -129,6 +129,103 @@ func (q *Queries) GetRepoScoped(ctx context.Context, arg GetRepoScopedParams) (G
 	return i, err
 }
 
+const listRepos = `-- name: ListRepos :many
+SELECT id, installation_id, github_id, full_name, default_branch, enabled, settings_json, created_at, updated_at
+FROM repos
+ORDER BY full_name
+`
+
+type ListReposRow struct {
+	ID             int64           `json:"id"`
+	InstallationID int64           `json:"installation_id"`
+	GithubID       int64           `json:"github_id"`
+	FullName       string          `json:"full_name"`
+	DefaultBranch  string          `json:"default_branch"`
+	Enabled        bool            `json:"enabled"`
+	SettingsJSON   json.RawMessage `json:"settings_json"`
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
+}
+
+func (q *Queries) ListRepos(ctx context.Context) ([]ListReposRow, error) {
+	rows, err := q.db.Query(ctx, listRepos)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListReposRow
+	for rows.Next() {
+		var i ListReposRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.InstallationID,
+			&i.GithubID,
+			&i.FullName,
+			&i.DefaultBranch,
+			&i.Enabled,
+			&i.SettingsJSON,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listReposByOwner = `-- name: ListReposByOwner :many
+SELECT id, installation_id, github_id, full_name, default_branch, enabled, settings_json, created_at, updated_at
+FROM repos
+WHERE full_name LIKE $1::text ESCAPE '\'
+ORDER BY full_name
+`
+
+type ListReposByOwnerRow struct {
+	ID             int64           `json:"id"`
+	InstallationID int64           `json:"installation_id"`
+	GithubID       int64           `json:"github_id"`
+	FullName       string          `json:"full_name"`
+	DefaultBranch  string          `json:"default_branch"`
+	Enabled        bool            `json:"enabled"`
+	SettingsJSON   json.RawMessage `json:"settings_json"`
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
+}
+
+func (q *Queries) ListReposByOwner(ctx context.Context, dollar_1 string) ([]ListReposByOwnerRow, error) {
+	rows, err := q.db.Query(ctx, listReposByOwner, dollar_1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListReposByOwnerRow
+	for rows.Next() {
+		var i ListReposByOwnerRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.InstallationID,
+			&i.GithubID,
+			&i.FullName,
+			&i.DefaultBranch,
+			&i.Enabled,
+			&i.SettingsJSON,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listReposScoped = `-- name: ListReposScoped :many
 SELECT id, installation_id, github_id, full_name, default_branch, enabled, settings_json, created_at, updated_at
 FROM repos WHERE installation_id = ANY($1::bigint[]) ORDER BY full_name
