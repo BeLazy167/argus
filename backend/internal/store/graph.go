@@ -458,6 +458,7 @@ func (s *Store) GetFileMemory(ctx context.Context, repoID int64, filePath string
 		JOIN review_comments rc ON rc.matched_pattern_id = p.id
 		JOIN reviews r ON r.id = rc.review_id
 		WHERE rc.file_path = $1 AND r.repo_id = $2
+		  AND rc.attempt_generation = r.attempt_generation
 		ORDER BY p.created_at DESC LIMIT 10
 	`, filePath, repoID)
 	if err != nil {
@@ -480,10 +481,11 @@ func (s *Store) GetFileMemory(ctx context.Context, repoID int64, filePath string
 		       rc.body, rc.severity, rc.category, rc.specialist, rc.confidence_score,
 		       rc.code_snippet, rc.github_comment_id, rc.matched_pattern_id,
 		       rc.matched_pattern_score, rc.enforced_rule_content, rc.is_new_finding, rc.created_at,
-		       rc.state, rc.suppressed_reason, rc.resolved_sha
+		       rc.state, rc.suppressed_reason, rc.resolved_sha, rc.attempt_generation
 		FROM review_comments rc
 		JOIN reviews r ON r.id = rc.review_id
 		WHERE rc.file_path = $1 AND r.repo_id = $2
+		  AND rc.attempt_generation = r.attempt_generation
 		ORDER BY (rc.state = 'suppressed'), rc.created_at DESC LIMIT 5
 	`, filePath, repoID)
 	if err != nil {
