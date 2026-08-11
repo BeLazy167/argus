@@ -1159,6 +1159,39 @@ type RepoTree struct {
 	Truncated bool
 }
 
+// RepositoryMetadata is the repository identity and default branch needed to
+// arbitrate a branch-name mismatch from an out-of-order push webhook.
+type RepositoryMetadata struct {
+	ID            int64
+	FullName      string
+	DefaultBranch string
+}
+
+// GetRepositoryMetadata reads current repository authority with the target
+// installation's GitHub client. It deliberately returns only fields needed by
+// webhook arbitration.
+func (c *Client) GetRepositoryMetadata(ctx context.Context, installationID int64, owner, repo string) (RepositoryMetadata, error) {
+	if c.app == nil {
+		return RepositoryMetadata{}, errors.New("github app is unavailable")
+	}
+	client, err := c.app.ClientForInstallation(installationID)
+	if err != nil {
+		return RepositoryMetadata{}, err
+	}
+	if err := c.restLimiter.Wait(ctx); err != nil {
+		return RepositoryMetadata{}, fmt.Errorf("rate limit wait: %w", err)
+	}
+	repository, _, err := client.Repositories.Get(ctx, owner, repo)
+	if err != nil {
+		return RepositoryMetadata{}, fmt.Errorf("fetching repository metadata: %w", err)
+	}
+	return RepositoryMetadata{
+		ID:            repository.GetID(),
+		FullName:      repository.GetFullName(),
+		DefaultBranch: repository.GetDefaultBranch(),
+	}, nil
+}
+
 // ResolveDefaultBranchCommit resolves a mutable branch name once. The returned
 // SHA is then used for both the tree and every file fetch in a full index.
 func (c *Client) ResolveDefaultBranchCommit(ctx context.Context, installationID int64, owner, repo, branch string) (string, error) {

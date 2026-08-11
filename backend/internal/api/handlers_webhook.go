@@ -18,6 +18,7 @@ import (
 	ghpkg "github.com/BeLazy167/argus/backend/internal/github"
 	"github.com/BeLazy167/argus/backend/internal/obs"
 	"github.com/BeLazy167/argus/backend/internal/pipeline"
+	"github.com/BeLazy167/argus/backend/internal/store"
 )
 
 // issueLabelsForScenario are labels that trigger auto-scenario creation from issues.
@@ -340,6 +341,18 @@ func (s *Server) scheduleGraphRefresh(ctx context.Context, update ghpkg.DefaultB
 	if update.BranchIdentityIsAuthoritative() {
 		scheduled, err = s.store.ScheduleGraphIndexRefreshFromPush(ctx, update.InstallationID, update.RepoID,
 			update.RepoFullName, update.DefaultBranch, update.CommitSHA, update.ObservedAt)
+		if errors.Is(err, store.ErrGraphDefaultBranchMismatch) {
+			verified, verifyErr := verifyCurrentDefaultBranch(ctx, s.repoMetadata, update)
+			if verifyErr != nil {
+				err = verifyErr
+			} else if !verified {
+				return nil
+			} else {
+				scheduled, err = s.store.ScheduleGraphIndexRefreshFromVerifiedPush(ctx,
+					update.InstallationID, update.RepoID, update.RepoFullName, update.DefaultBranch,
+					update.CommitSHA, update.ObservedAt, update.DefaultBranch)
+			}
+		}
 	} else {
 		scheduled, err = s.store.ScheduleGraphIndexRefresh(ctx, update.InstallationID, update.RepoID,
 			update.RepoFullName, update.DefaultBranch, update.CommitSHA, update.ObservedAt)
@@ -354,6 +367,23 @@ func (s *Server) scheduleGraphRefresh(ctx context.Context, update ghpkg.DefaultB
 			"commit", update.CommitSHA)
 	}
 	return nil
+}
+
+func verifyCurrentDefaultBranch(ctx context.Context, client repoMetadataClient, update ghpkg.DefaultBranchUpdate) (bool, error) {
+	if client == nil {
+		return false, errors.New("repository metadata client is unavailable")
+	}
+	owner, repo, ok := strings.Cut(update.RepoFullName, "/")
+	if !ok || owner == "" || repo == "" || strings.Contains(repo, "/") {
+		return false, errors.New("invalid repository full name")
+	}
+	metadata, err := client.GetRepositoryMetadata(ctx, update.InstallationID, owner, repo)
+	if err != nil {
+		return false, fmt.Errorf("verify current default branch: %w", err)
+	}
+	return metadata.ID == update.RepoID &&
+		metadata.FullName == update.RepoFullName &&
+		metadata.DefaultBranch == update.DefaultBranch, nil
 }
 
 // handleCheckboxTrigger dispatches a review when a user toggles the "Trigger

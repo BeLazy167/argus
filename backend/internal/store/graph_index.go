@@ -11,6 +11,10 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// ErrGraphDefaultBranchMismatch asks the webhook adapter to arbitrate a
+// branch-name change against live GitHub repository metadata before retrying.
+var ErrGraphDefaultBranchMismatch = errors.New("graph default branch mismatch requires verification")
+
 // RepoIndexTarget is one repository due for a full code-graph index.
 //
 // It carries BOTH installation identifiers on purpose, because they are
@@ -180,13 +184,13 @@ func (s *Store) ScheduleGraphIndexRefresh(
 	observedAt time.Time,
 ) (bool, error) {
 	return s.scheduleGraphIndexRefresh(ctx, githubInstallationID, githubRepoID,
-		fullName, defaultBranch, commitSHA, observedAt, false)
+		fullName, defaultBranch, commitSHA, observedAt, false, "")
 }
 
-// ScheduleGraphIndexRefreshFromPush records a signed default-branch push. The
-// repository object in that payload authoritatively identifies the default
-// branch, so the first push after a rename may update the stored branch and
-// schedule its immutable head without waiting for a later repository sync.
+// ScheduleGraphIndexRefreshFromPush records a signed default-branch push when
+// its branch still matches stored authority. A mismatch returns
+// ErrGraphDefaultBranchMismatch without mutation so the API adapter can verify
+// the current branch through installation-authenticated GitHub metadata.
 func (s *Store) ScheduleGraphIndexRefreshFromPush(
 	ctx context.Context,
 	githubInstallationID, githubRepoID int64,
@@ -194,7 +198,21 @@ func (s *Store) ScheduleGraphIndexRefreshFromPush(
 	observedAt time.Time,
 ) (bool, error) {
 	return s.scheduleGraphIndexRefresh(ctx, githubInstallationID, githubRepoID,
-		fullName, defaultBranch, commitSHA, observedAt, true)
+		fullName, defaultBranch, commitSHA, observedAt, true, "")
+}
+
+// ScheduleGraphIndexRefreshFromVerifiedPush permits a branch-name change only
+// when live repository metadata named the same default branch. Repository
+// scope is re-checked and locked inside the retry before mutation.
+func (s *Store) ScheduleGraphIndexRefreshFromVerifiedPush(
+	ctx context.Context,
+	githubInstallationID, githubRepoID int64,
+	fullName, defaultBranch, commitSHA string,
+	observedAt time.Time,
+	verifiedDefaultBranch string,
+) (bool, error) {
+	return s.scheduleGraphIndexRefresh(ctx, githubInstallationID, githubRepoID,
+		fullName, defaultBranch, commitSHA, observedAt, true, verifiedDefaultBranch)
 }
 
 // scheduleGraphIndexRefresh scopes by tenant, installation-owned repository
@@ -206,6 +224,7 @@ func (s *Store) scheduleGraphIndexRefresh(
 	fullName, defaultBranch, commitSHA string,
 	observedAt time.Time,
 	branchAuthoritative bool,
+	verifiedDefaultBranch string,
 ) (bool, error) {
 	if githubInstallationID <= 0 || githubRepoID <= 0 || fullName == "" || defaultBranch == "" || commitSHA == "" {
 		return false, nil
@@ -250,8 +269,13 @@ func (s *Store) scheduleGraphIndexRefresh(
 	}
 
 	branchChanged := storedDefaultBranch != defaultBranch
-	if branchChanged && !branchAuthoritative {
-		return false, nil
+	if branchChanged {
+		if !branchAuthoritative {
+			return false, nil
+		}
+		if verifiedDefaultBranch != defaultBranch {
+			return false, ErrGraphDefaultBranchMismatch
+		}
 	}
 	// A delayed pre-rename delivery must not restore the old branch merely
 	// because its commit happens to equal the currently observed commit.

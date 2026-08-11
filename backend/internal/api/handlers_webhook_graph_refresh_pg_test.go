@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -18,9 +19,21 @@ import (
 )
 
 type renamedDefaultBranchGitHub struct {
-	commitSHA string
-	treeRef   string
-	fileRefs  []string
+	commitSHA     string
+	repoID        int64
+	defaultBranch string
+	metadataErr   error
+	metadataCalls int
+	treeRef       string
+	fileRefs      []string
+}
+
+func (f *renamedDefaultBranchGitHub) GetRepositoryMetadata(_ context.Context, _ int64, owner, repo string) (ghpkg.RepositoryMetadata, error) {
+	f.metadataCalls++
+	if f.metadataErr != nil {
+		return ghpkg.RepositoryMetadata{}, f.metadataErr
+	}
+	return ghpkg.RepositoryMetadata{ID: f.repoID, FullName: owner + "/" + repo, DefaultBranch: f.defaultBranch}, nil
 }
 
 func (f *renamedDefaultBranchGitHub) ResolveDefaultBranchCommit(context.Context, int64, string, string, string) (string, error) {
@@ -56,7 +69,11 @@ func webhookGraphTestPool(t *testing.T) (*pgxpool.Pool, context.Context) {
 func TestDefaultBranchRenamePushPersistsAuthorityAndPublishesImmutableRefresh(t *testing.T) {
 	pool, ctx := webhookGraphTestPool(t)
 	st := store.NewWithDB(pool)
-	server := &Server{store: st, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	metadataClient := &renamedDefaultBranchGitHub{defaultBranch: "trunk"}
+	server := &Server{
+		store: st, logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		repoMetadata: metadataClient,
+	}
 
 	unique := strconv.FormatInt(time.Now().UnixNano(), 10)
 	fullName := "rename-push/repo-" + unique
@@ -74,6 +91,7 @@ func TestDefaultBranchRenamePushPersistsAuthorityAndPublishesImmutableRefresh(t 
 		Scan(&repoID, &githubRepoID); err != nil {
 		t.Fatalf("seed repo: %v", err)
 	}
+	metadataClient.repoID = githubRepoID
 	t.Cleanup(func() {
 		_, _ = pool.Exec(context.Background(), `DELETE FROM repos WHERE id = $1`, repoID)
 		_, _ = pool.Exec(context.Background(), `DELETE FROM installations WHERE id = $1`, installationDBID)
@@ -82,7 +100,7 @@ func TestDefaultBranchRenamePushPersistsAuthorityAndPublishesImmutableRefresh(t 
 	const commitA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa5"
 	const commitB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb6"
 	observedA := time.Now().UTC().Add(-time.Hour)
-	observedB := observedA.Add(time.Minute)
+	observedB := observedA // GitHub records pushed_at at second precision; rename deliveries can tie.
 	var generationA int64
 	if err := pool.QueryRow(ctx, `
 		INSERT INTO graph_index_generations
@@ -141,6 +159,21 @@ func TestDefaultBranchRenamePushPersistsAuthorityAndPublishesImmutableRefresh(t 
 			}
 		})
 	}
+	metadataClient.metadataErr = errors.New("repository metadata unavailable")
+	if err := server.scheduleGraphRefresh(ctx, update); !errors.Is(err, metadataClient.metadataErr) {
+		t.Fatalf("metadata failure = %v, want lookup error", err)
+	}
+	var failedBranch, failedHead string
+	var failedVersion int64
+	if err := pool.QueryRow(ctx, `
+		SELECT default_branch, graph_default_head_sha, graph_refresh_version
+		FROM repos WHERE id = $1`, repoID).Scan(&failedBranch, &failedHead, &failedVersion); err != nil {
+		t.Fatal(err)
+	}
+	if failedBranch != "main" || failedHead != commitA || failedVersion != 0 {
+		t.Fatalf("metadata failure mutated repo: branch=%q head=%q version=%d", failedBranch, failedHead, failedVersion)
+	}
+	metadataClient.metadataErr = nil
 	if err := server.scheduleGraphRefresh(ctx, update); err != nil {
 		t.Fatalf("schedule renamed-default-branch push: %v", err)
 	}
@@ -187,8 +220,11 @@ func TestDefaultBranchRenamePushPersistsAuthorityAndPublishesImmutableRefresh(t 
 		t.Fatal(err)
 	}
 	if storedBranch != "trunk" || storedHead == nil || *storedHead != commitB || refreshVersion != 1 {
-		t.Fatalf("duplicate/older push regressed authority: branch=%q head=%v version=%d",
+		t.Fatalf("equal-time delayed push regressed authority: branch=%q head=%v version=%d",
 			storedBranch, storedHead, refreshVersion)
+	}
+	if metadataClient.metadataCalls != 3 {
+		t.Fatalf("live default-branch metadata lookups = %d, want failed rename, accepted rename, and delayed mismatch", metadataClient.metadataCalls)
 	}
 	snapshot, err := st.GetGraphSnapshot(ctx, repoID)
 	if err != nil {
@@ -209,7 +245,8 @@ func TestDefaultBranchRenamePushPersistsAuthorityAndPublishesImmutableRefresh(t 
 		t.Fatalf("prompt queue omitted trunk target %d: %+v", repoID, prompt)
 	}
 
-	fake := &renamedDefaultBranchGitHub{commitSHA: commitB}
+	metadataClient.commitSHA = commitB
+	fake := metadataClient
 	owner, repo := "rename-push", "repo-"+unique
 	first, err := graph.IndexRepoBounded(ctx, st, fake, githubInstallationID, owner, repo, "trunk", repoID, 1, 0)
 	if err != nil || first.Published {

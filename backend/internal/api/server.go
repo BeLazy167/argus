@@ -23,11 +23,16 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+type repoMetadataClient interface {
+	GetRepositoryMetadata(context.Context, int64, string, string) (ghpkg.RepositoryMetadata, error)
+}
+
 type Server struct {
 	router           chi.Router
 	store            *store.Store
 	memoryLister     memoryListStore
 	ghApp            *ghpkg.App
+	repoMetadata     repoMetadataClient
 	orchestrator     *pipeline.Orchestrator
 	prEventHandler   prEventHandler
 	replyAnalyzer    *pipeline.ReplyAnalyzer
@@ -53,6 +58,7 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 		store:            st,
 		memoryLister:     st,
 		ghApp:            ghApp,
+		repoMetadata:     ghpkg.NewClient(ghApp, cfg.GitHubAppSlug),
 		orchestrator:     orchestrator,
 		replyAnalyzer:    replyAnalyzer,
 		reactionAnalyzer: reactionAnalyzer,
