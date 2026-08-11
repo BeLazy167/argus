@@ -362,40 +362,48 @@ func TestSweepPRReactionsPermissionLookupFailureBlocksReconciliation(t *testing.
 	}
 }
 
-func TestSweepPRReactionsBoundsUniquePermissionLookups(t *testing.T) {
+func TestSweepPRReactionsPermissionBudgetExhaustionDegradesCommentToNeutral(t *testing.T) {
 	category := "bug_risk"
-	reactions := make([]ghpkg.CommentReaction, 0, maxReactionPermissionLookupsPerSweep+1)
-	allowed := make(map[string]bool, maxReactionPermissionLookupsPerSweep+1)
+	reactions := make([]ghpkg.CommentReaction, 0, maxReactionPermissionLookupsPerSweep+2)
+	// Put a real maintainer first to prove the verified prefix is discarded too:
+	// once an unverified tail exists, no partial tally from this comment is safe.
+	reactions = append(reactions, ghpkg.CommentReaction{Content: "-1", User: "maintainer"})
 	for i := 0; i <= maxReactionPermissionLookupsPerSweep; i++ {
-		login := fmt.Sprintf("reactor-%03d", i)
-		reactions = append(reactions, ghpkg.CommentReaction{Content: "-1", User: login})
-		allowed[login] = true
+		reactions = append(reactions, ghpkg.CommentReaction{
+			Content: "-1",
+			User:    fmt.Sprintf("drive-by-%03d", i),
+		})
 	}
-	permissions := &reactionPermissionStub{allowedByLogin: allowed}
+	permissions := &reactionPermissionStub{allowedByLogin: map[string]bool{"maintainer": true}}
 	st := &reactionStoreStub{
 		ids:     []int64{501},
 		comment: &store.ReviewComment{ID: uuid.New(), Body: "race", Category: &category},
 	}
+	idx := &reactionIndexerStub{dismissalLive: true}
+	lifecycle := &recordingReactionLifecycle{}
 	ra := &ReactionAnalyzer{
 		store:           st,
 		ghClient:        &reactionGitHubStub{reactions: reactions},
 		repoPermissions: permissions,
+		memRegistry:     reactionRegistryStub{indexer: idx},
 		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
-		lifecycle:       reactionLifecycleStub{},
+		lifecycle:       lifecycle,
 	}
 
-	err := ra.SweepPRReactions(context.Background(), 91, "acme/api", 17)
-	if err == nil || !strings.Contains(err.Error(), "permission lookup limit") {
-		t.Fatalf("sweep error = %v, want permission lookup limit failure", err)
+	if err := ra.SweepPRReactions(context.Background(), 91, "acme/api", 17); err != nil {
+		t.Fatalf("attacker-controlled permission population blocked review: %v", err)
 	}
 	calls := 0
 	for _, n := range permissions.calls {
 		calls += n
 	}
-	if calls != maxReactionPermissionLookupsPerSweep {
-		t.Fatalf("permission calls = %d, want hard bound %d", calls, maxReactionPermissionLookupsPerSweep)
+	if calls != 0 {
+		t.Fatalf("permission calls = %d, want zero after preflight detects known overload", calls)
 	}
-	if len(st.outcomes) != 0 {
-		t.Fatalf("bounded lookup failure used a partial tally: outcomes=%v", st.outcomes)
+	if len(st.outcomes) != 0 || len(lifecycle.events) != 0 {
+		t.Fatalf("budget-exhausted partial tally mutated ledger: outcomes=%v events=%v", st.outcomes, lifecycle.events)
+	}
+	if idx.dismissalLive || len(idx.actions) != 1 || idx.actions[0] != "" {
+		t.Fatalf("budget-exhausted comment did not retract stale reaction-only state: live=%v actions=%v", idx.dismissalLive, idx.actions)
 	}
 }

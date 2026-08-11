@@ -151,19 +151,36 @@ func (s *Server) handleReviewCommand(ctx context.Context, evt ghpkg.IssueComment
 			_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "rocket")
 		},
 	}, *prEvent)
-	switch {
-	case errors.Is(launchErr, pipeline.ErrInFlight):
-		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
-			"A review is already in progress for this PR.")
-	case errors.Is(launchErr, errRateLimited):
-		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
-			"Rate limit exceeded. Try again later.")
-		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
-	case errors.Is(launchErr, errServerBusy):
+	message, confused := reviewCommandLaunchFailureFeedback(launchErr)
+	if launchErr != nil && !errors.Is(launchErr, pipeline.ErrInFlight) &&
+		!errors.Is(launchErr, errRateLimited) && !errors.Is(launchErr, errServerBusy) &&
+		!errors.Is(launchErr, errReviewRefused) {
+		s.logger.Error("review command: launch failed", "error", launchErr, "repo", evt.RepoFullName, "pr", evt.PRNumber)
+	}
+	if errors.Is(launchErr, errServerBusy) {
 		s.logger.Warn("review command: webhook semaphore full", "repo", evt.RepoFullName, "pr", evt.PRNumber)
-		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
-			"Argus is at capacity right now. Try again in a few minutes.")
+	}
+	if message != "" {
+		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber, message)
+	}
+	if confused {
 		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
+	}
+}
+
+func reviewCommandLaunchFailureFeedback(launchErr error) (message string, confused bool) {
+	switch {
+	case launchErr == nil, errors.Is(launchErr, errReviewRefused):
+		// Admission already posted its path-specific refusal.
+		return "", false
+	case errors.Is(launchErr, pipeline.ErrInFlight):
+		return "A review is already in progress for this PR.", false
+	case errors.Is(launchErr, errRateLimited):
+		return "Rate limit exceeded. Try again later.", true
+	case errors.Is(launchErr, errServerBusy):
+		return "Argus is at capacity right now. Try again in a few minutes.", true
+	default:
+		return "Review could not start because its pre-review checks failed. Try again later.", true
 	}
 }
 

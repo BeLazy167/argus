@@ -139,6 +139,12 @@ func (s *Server) triggerReview(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "review already in-flight"})
 		return
 	}
+	if launchErr != nil {
+		s.logger.Error("manual review: launch failed", "error", launchErr, "repo", repo.FullName, "pr", body.PRNumber)
+		if writeReviewLaunchUnavailable(w, launchErr) {
+			return
+		}
+	}
 
 	if err := s.store.LogActivity(r.Context(), nil, "manual_review_triggered", "", repo.FullName, nil); err != nil {
 		s.logger.Error("failed to log activity", "error", err, "action", "manual_review_triggered")

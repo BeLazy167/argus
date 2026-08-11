@@ -155,9 +155,18 @@ func (ra *ReactionAnalyzer) handleCommentReactions(ctx context.Context, event gh
 	// so only the effective repository permission of its actual actor can make
 	// it authoritative. Cache verdicts by case-insensitive login for the whole
 	// sweep and cap unique lookups so a reaction swarm cannot amplify API calls.
-	filtered, err := ra.authorizedSignalReactions(ctx, event, owner, repo, reactions, permissions)
+	filtered, signalUsable, err := ra.authorizedSignalReactions(ctx, event, owner, repo, reactions, permissions)
 	if err != nil {
 		return fmt.Errorf("authorizing reactors for comment %d: %w", event.CommentID, err)
+	}
+	if !signalUsable {
+		// The unverified tail must not combine with the verified prefix. Treat the
+		// whole comment as neutral and reconcile reversible reaction memory below.
+		// Budget exhaustion is attacker-controllable, so it must not block a review.
+		ra.logger.Warn("reaction: permission budget exhausted; ignoring comment signal",
+			"comment_id", event.CommentID,
+			"permission_lookups", permissions.lookups)
+		filtered = nil
 	}
 
 	signal := TallyReactions(filtered)
@@ -239,11 +248,22 @@ func (ra *ReactionAnalyzer) authorizedSignalReactions(
 	owner, repo string,
 	reactions []ghpkg.CommentReaction,
 	permissions *reactionPermissionCache,
-) ([]ghpkg.CommentReaction, error) {
+) ([]ghpkg.CommentReaction, bool, error) {
 	if permissions == nil {
-		return nil, fmt.Errorf("reaction permission cache is unavailable")
+		return nil, false, fmt.Errorf("reaction permission cache is unavailable")
 	}
-	var authorized []ghpkg.CommentReaction
+
+	type signalReaction struct {
+		reaction ghpkg.CommentReaction
+		login    string
+		key      string
+	}
+	candidates := make([]signalReaction, 0, len(reactions))
+	uncached := make(map[string]struct{})
+	remaining := maxReactionPermissionLookupsPerSweep - permissions.lookups
+	if remaining < 0 {
+		remaining = 0
+	}
 	for _, reaction := range reactions {
 		if reaction.Content != "+1" && reaction.Content != "-1" {
 			continue
@@ -253,29 +273,42 @@ func (ra *ReactionAnalyzer) authorizedSignalReactions(
 		if key == "" || strings.HasSuffix(key, "[bot]") {
 			continue
 		}
-		verdict, ok := permissions.verdicts[key]
+		candidates = append(candidates, signalReaction{reaction: reaction, login: login, key: key})
+		if _, cached := permissions.verdicts[key]; cached {
+			continue
+		}
+		uncached[key] = struct{}{}
+		// Preflight the whole comment before making a new permission request.
+		// Reactor population is attacker-controlled; discovering overload only
+		// after 100 sequential GitHub calls would likely hit the comment deadline
+		// first and turn bounded degradation back into a review DoS.
+		if len(uncached) > remaining {
+			return nil, false, nil
+		}
+	}
+
+	var authorized []ghpkg.CommentReaction
+	for _, candidate := range candidates {
+		verdict, ok := permissions.verdicts[candidate.key]
 		if !ok {
 			if ra.repoPermissions == nil {
-				return nil, fmt.Errorf("repository permission checker is unavailable")
-			}
-			if permissions.lookups >= maxReactionPermissionLookupsPerSweep {
-				return nil, fmt.Errorf("reaction permission lookup limit %d exceeded", maxReactionPermissionLookupsPerSweep)
+				return nil, false, fmt.Errorf("repository permission checker is unavailable")
 			}
 			permissions.lookups++
 			allowed, err := ra.repoPermissions.HasRepoWriteAccess(
-				ctx, event.InstallationID, owner, repo, login,
+				ctx, event.InstallationID, owner, repo, candidate.login,
 			)
 			verdict = reactionPermissionVerdict{allowed: allowed, err: err}
-			permissions.verdicts[key] = verdict
+			permissions.verdicts[candidate.key] = verdict
 		}
 		if verdict.err != nil {
-			return nil, fmt.Errorf("checking repository permission for %q: %w", login, verdict.err)
+			return nil, false, fmt.Errorf("checking repository permission for %q: %w", candidate.login, verdict.err)
 		}
 		if verdict.allowed {
-			authorized = append(authorized, reaction)
+			authorized = append(authorized, candidate.reaction)
 		}
 	}
-	return authorized, nil
+	return authorized, true, nil
 }
 
 // SweepPRReactions enumerates every Argus-posted comment on a PR and runs the
@@ -284,9 +317,12 @@ func (ra *ReactionAnalyzer) authorizedSignalReactions(
 // this sweep so reaction-owned feedback is current before dismissal retrieval.
 //
 // Comment-local failures are accumulated while the sweep continues to converge
-// the remaining comments. Any failure is still returned: a caller must not run
-// a review against potentially stale reaction trust. Systemic auth, permission,
-// and rate-limit failures abort immediately to avoid an N-retry storm.
+// the remaining comments. Any observation/reconciliation failure is returned: a
+// caller must not run a review against potentially stale reaction trust. Actor
+// budget exhaustion is different because reactors control it; the overloaded
+// comment degrades to neutral after clearing reversible reaction-only memory.
+// Systemic auth, permission, and rate-limit failures abort immediately to avoid
+// an N-retry storm.
 func (ra *ReactionAnalyzer) SweepPRReactions(ctx context.Context, installationID int64, repoFullName string, prNumber int) error {
 	if ra == nil || ra.store == nil {
 		return fmt.Errorf("reaction sweep is not configured")

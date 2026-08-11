@@ -129,6 +129,12 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "server busy"})
 			return
 		}
+		if launchErr != nil {
+			s.logger.Error("webhook review: launch failed", "error", launchErr, "repo", prEvt.RepoFullName, "pr", prEvt.PRNumber)
+			if writeReviewLaunchUnavailable(w, launchErr) {
+				return
+			}
+		}
 
 	case "push":
 		if update, ok := ghpkg.DefaultBranchUpdateFromPush(event); ok {
@@ -415,6 +421,8 @@ func verifyCurrentDefaultHead(ctx context.Context, client repoMetadataClient, up
 //     race doesn't leave the checkbox stuck.
 //   - The OnDone failure path restores the checkbox to unchecked with an error
 //     suffix so the user can click again to retry.
+//   - A synchronous failure after the Running swap restores the exact pre-click
+//     body once because OnDone never runs when the pipeline did not spawn.
 func (s *Server) handleCheckboxTrigger(ctx context.Context, evt ghpkg.IssueCommentEvent) {
 	parts := strings.SplitN(evt.RepoFullName, "/", 2)
 	if len(parts) != 2 {
@@ -481,7 +489,8 @@ func (s *Server) handleCheckboxTrigger(ctx context.Context, evt ghpkg.IssueComme
 	// preserved via BeforeSpawn, which runs AFTER the slot is won: allowReview
 	// stays post-acquire (a losing double-click must not burn a force-hourly
 	// token) and the "Running…" swap follows it. `runningBody` is written by
-	// BeforeSpawn before the goroutine spawns, so OnDone reads it safely.
+	// BeforeSpawn before the goroutine spawns, so both OnDone and the synchronous
+	// launch-error path read it safely.
 	var runningBody string
 	launchErr := s.launchPREvent(pipeline.LaunchSpec{
 		Repo:    evt.RepoFullName,
@@ -540,6 +549,20 @@ func (s *Server) handleCheckboxTrigger(ctx context.Context, evt ghpkg.IssueComme
 		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repoName, evt.PRNumber,
 			"Argus is at capacity right now. Try again in a few minutes.")
 		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repoName, evt.CommentID, "confused")
+	case launchErr != nil:
+		s.logger.Error("checkbox trigger: launch failed", "error", launchErr, "repo", evt.RepoFullName, "pr", evt.PRNumber)
+		_, restoreErr := restoreCheckboxAfterSynchronousLaunchFailure(
+			launchErr, runningBody, evt.CommentBody, evt.CommentBodyBefore,
+			func(restored string) error {
+				return ghClient.UpdateIssueComment(ctx, evt.InstallationID, owner, repoName, evt.CommentID, restored)
+			},
+		)
+		if restoreErr != nil {
+			s.logger.Warn("checkbox trigger: restore after launch failure", "error", restoreErr, "comment_id", evt.CommentID)
+		}
+		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repoName, evt.CommentID, "confused")
+		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repoName, evt.PRNumber,
+			"Review could not start because its pre-review checks failed. Try again later.")
 	}
 }
 

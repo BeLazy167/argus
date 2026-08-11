@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"time"
 
 	ghpkg "github.com/BeLazy167/argus/backend/internal/github"
@@ -97,4 +98,36 @@ func (s *Server) launchPREvent(spec pipeline.LaunchSpec, event ghpkg.PREvent) er
 		return s.handlePREventAfterReconciliation(ctx, event)
 	}
 	return s.launcher.Launch(spec)
+}
+
+// writeReviewLaunchUnavailable maps an unclassified synchronous launch error
+// to a retryable, sanitized response. Callers handle their path sentinels first.
+// Returning true lets HTTP handlers return before writing success/activity.
+func writeReviewLaunchUnavailable(w http.ResponseWriter, launchErr error) bool {
+	if launchErr == nil {
+		return false
+	}
+	writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "review could not start"})
+	return true
+}
+
+// restoreCheckboxAfterSynchronousLaunchFailure writes the exact UI body that
+// preceded the checked edit when a synchronous failure happens after the
+// Running swap. It invokes update at most once; failures before the swap do not
+// need an update.
+func restoreCheckboxAfterSynchronousLaunchFailure(
+	launchErr error,
+	runningBody, checkedBody, previousBody string,
+	update func(string) error,
+) (bool, error) {
+	if launchErr == nil || runningBody == "" || runningBody == checkedBody {
+		return false, nil
+	}
+	if previousBody == "" {
+		previousBody = pipeline.ResetTriggerCheckbox(checkedBody)
+	}
+	if previousBody == runningBody {
+		return false, nil
+	}
+	return true, update(previousBody)
 }

@@ -8,8 +8,11 @@ import (
 	"go/token"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -121,6 +124,7 @@ func TestPREventLaunchPathsUseReconciledRunner(t *testing.T) {
 		fn   string
 	}{
 		{name: "pull_request auto review", file: "handlers_webhook.go", fn: "handleWebhook"},
+		{name: "manual API review", file: "handlers_repos.go", fn: "triggerReview"},
 		{name: "argus review command", file: "commands.go", fn: "handleReviewCommand"},
 		{name: "checkbox trigger", file: "handlers_webhook.go", fn: "handleCheckboxTrigger"},
 	}
@@ -357,5 +361,117 @@ func TestRetryReactionSweepIsInsideSynchronousBeforeSpawn(t *testing.T) {
 	}
 	if asyncRunReconciles {
 		t.Fatal("retry review defers reaction reconciliation to asynchronous Run")
+	}
+}
+
+func TestFreshLaunchGenericFailureWritesSanitizedServiceUnavailable(t *testing.T) {
+	secret := "github-token-must-not-leak"
+	rr := httptest.NewRecorder()
+	if !writeReviewLaunchUnavailable(rr, errors.New("reaction sweep failed with "+secret)) {
+		t.Fatal("generic synchronous launch failure was not handled")
+	}
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusServiceUnavailable)
+	}
+	if body := rr.Body.String(); body != "{\"error\":\"review could not start\"}\n" {
+		t.Fatalf("response body = %q, want sanitized launch failure", body)
+	}
+}
+
+func TestReviewCommandGenericLaunchFailureGetsAccurateSanitizedFeedback(t *testing.T) {
+	secret := "github-token-must-not-leak"
+	message, confused := reviewCommandLaunchFailureFeedback(errors.New("reaction sweep failed with " + secret))
+	if message != "Review could not start because its pre-review checks failed. Try again later." {
+		t.Fatalf("message = %q", message)
+	}
+	if !confused {
+		t.Fatal("generic synchronous failure should mark the command as failed")
+	}
+	if strings.Contains(message, secret) {
+		t.Fatal("command feedback leaked the internal launch error")
+	}
+
+	if message, confused := reviewCommandLaunchFailureFeedback(errReviewRefused); message != "" || confused {
+		t.Fatalf("admission refusal got duplicate feedback: message=%q confused=%v", message, confused)
+	}
+}
+
+func TestCheckboxGenericLaunchFailureRestoresExactPriorUIOnce(t *testing.T) {
+	previous := pipeline.TriggerMarker + "\n" + pipeline.TriggerCheckboxUnchecked + "\n\nCost estimate: small"
+	checked := pipeline.TriggerMarker + "\n" + pipeline.TriggerCheckboxChecked + "\n\nCost estimate: small"
+	running := pipeline.ReplaceTriggerWithRunning(checked)
+
+	updates := 0
+	var restoredBody string
+	update := func(body string) error {
+		updates++
+		restoredBody = body
+		return nil
+	}
+	restored, err := restoreCheckboxAfterSynchronousLaunchFailure(
+		errors.New("reaction sweep unavailable"), running, checked, previous, update,
+	)
+	if err != nil || !restored {
+		t.Fatalf("generic synchronous failure restore = %v, %v", restored, err)
+	}
+	if updates != 1 {
+		t.Fatalf("restore updates = %d, want exactly one", updates)
+	}
+	if restoredBody != previous {
+		t.Fatalf("restore body = %q, want exact prior UI %q", restoredBody, previous)
+	}
+
+	if restored, err := restoreCheckboxAfterSynchronousLaunchFailure(nil, running, checked, previous, update); err != nil || restored {
+		t.Fatalf("successful launch requested a second restore: restored=%v err=%v", restored, err)
+	}
+	if restored, err := restoreCheckboxAfterSynchronousLaunchFailure(errors.New("busy"), "", checked, previous, update); err != nil || restored {
+		t.Fatalf("failure before Running requested a restore: restored=%v err=%v", restored, err)
+	}
+	if updates != 1 {
+		t.Fatalf("restore updates after no-op paths = %d, want one", updates)
+	}
+}
+
+func TestFreshLaunchCallersWireGenericSynchronousFailureHandling(t *testing.T) {
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		file string
+		fn   string
+		call string
+	}{
+		{file: "handlers_repos.go", fn: "triggerReview", call: "writeReviewLaunchUnavailable"},
+		{file: "handlers_webhook.go", fn: "handleWebhook", call: "writeReviewLaunchUnavailable"},
+		{file: "commands.go", fn: "handleReviewCommand", call: "reviewCommandLaunchFailureFeedback"},
+		{file: "handlers_webhook.go", fn: "handleCheckboxTrigger", call: "restoreCheckboxAfterSynchronousLaunchFailure"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.fn, func(t *testing.T) {
+			parsed, err := parser.ParseFile(token.NewFileSet(), filepath.Join(dir, tt.file), nil, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			ast.Inspect(parsed, func(n ast.Node) bool {
+				fn, ok := n.(*ast.FuncDecl)
+				if ok && fn.Name.Name != tt.fn {
+					return false
+				}
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				ident, ok := call.Fun.(*ast.Ident)
+				if ok && ident.Name == tt.call {
+					found = true
+				}
+				return true
+			})
+			if !found {
+				t.Fatalf("%s does not call %s", tt.fn, tt.call)
+			}
+		})
 	}
 }
