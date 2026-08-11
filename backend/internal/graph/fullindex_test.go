@@ -61,3 +61,50 @@ func contains(hay []string, needle string) bool {
 	}
 	return false
 }
+
+func TestGenerationFileSymbolRecordsPhysicalLOC(t *testing.T) {
+	tests := []struct {
+		name, content      string
+		wantStart, wantEnd int
+	}{
+		{name: "empty", content: "", wantStart: 0, wantEnd: 0},
+		{name: "one line no newline", content: "package p", wantStart: 1, wantEnd: 1},
+		{name: "trailing newline terminates line", content: "package p\n", wantStart: 1, wantEnd: 1},
+		{name: "multiple lines", content: "package p\nfunc F() {}\n", wantStart: 1, wantEnd: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := generationFileSymbol("a.go", tt.content)
+			if got.Kind != "file" || got.Name != "a.go" || got.FilePath != "a.go" || got.LineStart != tt.wantStart || got.LineEnd != tt.wantEnd {
+				t.Fatalf("file symbol = %+v, want lines %d-%d", got, tt.wantStart, tt.wantEnd)
+			}
+		})
+	}
+}
+
+func TestResolveGenerationNodeKeepsAmbiguityExplicit(t *testing.T) {
+	keys := map[string]int64{nodeKey("same.go", "Local"): 1}
+	names := map[string][]int64{
+		"Local":  {1, 2},
+		"Unique": {3},
+		"Dup":    {4, 5},
+	}
+	tests := []struct {
+		name, sourceFile, target string
+		wantID                   int64
+		wantStatus               generationResolution
+	}{
+		{name: "same file wins", sourceFile: "same.go", target: "Local", wantID: 1, wantStatus: generationResolved},
+		{name: "unique repo target resolves", sourceFile: "same.go", target: "Unique", wantID: 3, wantStatus: generationResolved},
+		{name: "duplicate stays ambiguous", sourceFile: "same.go", target: "Dup", wantStatus: generationAmbiguous},
+		{name: "missing stays unresolved", sourceFile: "same.go", target: "Missing", wantStatus: generationUnresolved},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			id, status := resolveGenerationNode(tt.sourceFile, tt.target, keys, names)
+			if id != tt.wantID || status != tt.wantStatus {
+				t.Fatalf("resolution = %d/%s, want %d/%s", id, status, tt.wantID, tt.wantStatus)
+			}
+		})
+	}
+}

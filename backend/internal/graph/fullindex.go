@@ -57,6 +57,45 @@ func selectPendingFiles(files []string, ready map[string]struct{}, cap int) (sel
 	return pending[:cap], len(pending) - cap
 }
 
+// generationFileSymbol records deterministic physical LOC and file identity
+// in the staged snapshot. A trailing newline terminates the last content line;
+// it does not create another blank line.
+func generationFileSymbol(filePath, content string) Symbol {
+	loc := strings.Count(content, "\n")
+	if content != "" && !strings.HasSuffix(content, "\n") {
+		loc++
+	}
+	lineStart := 0
+	if loc > 0 {
+		lineStart = 1
+	}
+	return Symbol{Kind: "file", Name: filePath, FilePath: filePath, LineStart: lineStart, LineEnd: loc}
+}
+
+type generationResolution string
+
+const (
+	generationResolved   generationResolution = "resolved"
+	generationAmbiguous  generationResolution = "ambiguous"
+	generationUnresolved generationResolution = "unresolved"
+)
+
+// resolveGenerationNode never chooses an arbitrary repository-wide duplicate.
+// Same-file identity wins; otherwise the name must be globally unique.
+func resolveGenerationNode(sourceFile, name string, keyToID map[string]int64, nameToIDs map[string][]int64) (int64, generationResolution) {
+	if id := keyToID[nodeKey(sourceFile, name)]; id != 0 {
+		return id, generationResolved
+	}
+	switch ids := nameToIDs[name]; len(ids) {
+	case 0:
+		return 0, generationUnresolved
+	case 1:
+		return ids[0], generationResolved
+	default:
+		return 0, generationAmbiguous
+	}
+}
+
 // ErrTruncatedTree means GitHub explicitly reported that its recursive tree is
 // incomplete. The generation is recorded as failed and never published.
 var ErrTruncatedTree = errors.New("github repository tree was truncated")
@@ -138,6 +177,10 @@ func IndexRepoBounded(
 			continue
 		}
 		symbols, edges := ParseFileSymbols(filePath, content)
+		// Every source file gets a deterministic identity/LOC node, including
+		// files with no declarations. Metrics and import edges must not depend on
+		// whichever declaration happened to be parsed first.
+		symbols = append([]Symbol{generationFileSymbol(filePath, content)}, symbols...)
 		endpoints := anchorEndpoints(ExtractAPIEndpoints(filePath, content), symbols)
 		symbolJSON, err := json.Marshal(symbols)
 		if err != nil {
@@ -262,6 +305,34 @@ func publishGraphGeneration(ctx context.Context, st *store.Store, repoID, genera
 		seen[row] = struct{}{}
 		resolved = append(resolved, row)
 	}
+	ensureSynthetic := func(filePath, kind, name string) (int64, error) {
+		if id := keyToID[nodeKey(filePath, name)]; id != 0 {
+			return id, nil
+		}
+		var id int64
+		if err := tx.QueryRow(ctx, `
+			INSERT INTO code_nodes (repo_id, installation_id, kind, name, file_path, line_start, line_end, language, updated_at)
+			VALUES ($1, (SELECT installation_id FROM repos WHERE id = $1), $2, $3, $4, 0, 0, '', NOW())
+			RETURNING id`, repoID, kind, name, filePath).Scan(&id); err != nil {
+			return 0, err
+		}
+		keyToID[nodeKey(filePath, name)] = id
+		nameToIDs[name] = append(nameToIDs[name], id)
+		return id, nil
+	}
+	resolveOrPlaceholder := func(filePath, targetName string) (int64, error) {
+		id, status := resolveGenerationNode(filePath, targetName, keyToID, nameToIDs)
+		if status == generationResolved {
+			return id, nil
+		}
+		placeholder := string(status) + ":" + targetName
+		id, err := ensureSynthetic(filePath, "module", placeholder)
+		if err != nil {
+			return 0, fmt.Errorf("insert %s placeholder %s: %w", status, targetName, err)
+		}
+		return id, nil
+	}
+
 	filePaths := make([]string, 0, len(files))
 	for filePath := range symbolsByFile {
 		filePaths = append(filePaths, filePath)
@@ -270,47 +341,56 @@ func publishGraphGeneration(ctx context.Context, st *store.Store, repoID, genera
 	for _, filePath := range filePaths {
 		for _, edge := range edgesByFile[filePath] {
 			if edge.Kind == "imports" {
-				var sourceID int64
-				for _, sym := range symbolsByFile[filePath] {
-					if id := keyToID[nodeKey(filePath, sym.Name)]; id != 0 {
-						sourceID = id
-						break
-					}
-				}
-				if sourceID == 0 {
+				// Imports are file-level facts. A qualified synthetic module keeps
+				// `module:fmt` distinct from a user symbol named `fmt`.
+				sourceID := keyToID[nodeKey(filePath, filePath)]
+				if sourceID == 0 || edge.TargetName == "" {
 					continue
 				}
-				targetID, ok := resolveNodeName(filePath, edge.TargetName, keyToID, nameToIDs)
-				if !ok {
-					if err := tx.QueryRow(ctx, `
-						INSERT INTO code_nodes (repo_id, installation_id, kind, name, file_path, line_start, line_end, language, updated_at)
-						VALUES ($1, (SELECT installation_id FROM repos WHERE id = $1), 'module', $2, $3, 0, 0, '', NOW())
-						RETURNING id`, repoID, edge.TargetName, filePath).Scan(&targetID); err != nil {
-						return fmt.Errorf("publish graph generation: insert module %s: %w", edge.TargetName, err)
-					}
-					keyToID[nodeKey(filePath, edge.TargetName)] = targetID
-					nameToIDs[edge.TargetName] = append(nameToIDs[edge.TargetName], targetID)
+				moduleName := "module:" + edge.TargetName
+				targetID, err := ensureSynthetic(filePath, "module", moduleName)
+				if err != nil {
+					return fmt.Errorf("publish graph generation: insert module %s: %w", edge.TargetName, err)
 				}
 				appendEdge(sourceID, targetID, edge.Kind)
 				continue
 			}
 			sourceID := keyToID[nodeKey(filePath, edge.SourceName)]
+			if sourceID == 0 || edge.TargetName == "" {
+				continue
+			}
+			targetID, err := resolveOrPlaceholder(filePath, edge.TargetName)
+			if err != nil {
+				return fmt.Errorf("publish graph generation: resolve edge target: %w", err)
+			}
+			appendEdge(sourceID, targetID, edge.Kind)
+		}
+	}
+
+	// Type references use the same explicit resolution policy as parsed call
+	// edges. Missing or colliding types remain visible instead of disappearing
+	// or attaching to whichever duplicate happened to be inserted first.
+	for _, filePath := range filePaths {
+		for _, sym := range symbolsByFile[filePath] {
+			sourceID := keyToID[nodeKey(filePath, sym.Name)]
 			if sourceID == 0 {
 				continue
 			}
-			targetID, ok := resolveNodeName(filePath, edge.TargetName, keyToID, nameToIDs)
-			if ok {
-				appendEdge(sourceID, targetID, edge.Kind)
+			for _, expression := range []string{sym.ReturnType, sym.Params} {
+				for _, typeName := range extractTypeNames(expression) {
+					if typeName == sym.Name {
+						continue
+					}
+					targetID, err := resolveOrPlaceholder(filePath, typeName)
+					if err != nil {
+						return fmt.Errorf("publish graph generation: resolve type target: %w", err)
+					}
+					appendEdge(sourceID, targetID, "uses_type")
+				}
 			}
 		}
 	}
-	var allSymbols []Symbol
-	for _, symbols := range symbolsByFile {
-		allSymbols = append(allSymbols, symbols...)
-	}
-	for _, edge := range resolveTypeEdges(allSymbols, keyToID) {
-		appendEdge(keyToID[edge.SourceName], keyToID[edge.TargetName], edge.Kind)
-	}
+
 	for _, edge := range resolved {
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO code_edges (repo_id, source_id, target_id, kind, inferred, updated_at)

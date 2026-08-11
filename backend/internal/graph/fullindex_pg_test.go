@@ -255,3 +255,71 @@ func TestConcurrentPRHeadsCannotMutatePublishedGeneration(t *testing.T) {
 		t.Fatalf("snapshot provenance changed: %+v", snapshot)
 	}
 }
+
+func TestPublishedGenerationIncludesFileIdentityAndExplicitEdgeResolution(t *testing.T) {
+	pool, ctx := generationTestPool(t)
+	st := &store.Store{Pool: pool, Q: db.New(pool)}
+	installationID := generationSeedInstallation(t, ctx, pool, "{}")
+	repoID := generationSeedRepo(t, ctx, pool, installationID, "generation/identity")
+	gh := &fakeFullIndexGitHub{
+		sha:  "identity-sha",
+		tree: ghpkg.RepoTree{Paths: []string{"a.go", "b.go", "c.go"}},
+		contents: map[string]string{
+			"a.go": "package p\nimport \"fmt\"\nfunc Alpha() { Handle(); Missing(); fmt.Println(1) }\n",
+			"b.go": "package p\nfunc Handle() {}\n",
+			"c.go": "package p\nfunc Handle() {}\n",
+		},
+		fetchErr: map[string]error{},
+	}
+	result, err := IndexRepoBounded(ctx, st, gh, 1, "o", "r", "main", repoID, 0, 0)
+	if err != nil {
+		t.Fatalf("publish generation: %v", err)
+	}
+	if !result.Published || !result.Snapshot.Complete {
+		t.Fatalf("generation not complete: %+v", result)
+	}
+
+	var fileCount, aLOC int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM code_nodes WHERE repo_id = $1 AND kind = 'file'`, repoID).Scan(&fileCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT line_end FROM code_nodes WHERE repo_id = $1 AND kind = 'file' AND name = 'a.go'`, repoID).Scan(&aLOC); err != nil {
+		t.Fatal(err)
+	}
+	if fileCount != 3 || aLOC != 3 {
+		t.Fatalf("file identities/LOC = %d/%d, want 3/3", fileCount, aLOC)
+	}
+
+	assertEdge := func(sourceName, sourceKind, targetName, targetKind, kind string) {
+		t.Helper()
+		var count int
+		err := pool.QueryRow(ctx, `
+			SELECT count(*) FROM code_edges e
+			JOIN code_nodes s ON s.id = e.source_id
+			JOIN code_nodes d ON d.id = e.target_id
+			WHERE e.repo_id = $1 AND s.name = $2 AND s.kind = $3
+			  AND d.name = $4 AND d.kind = $5 AND e.kind = $6`,
+			repoID, sourceName, sourceKind, targetName, targetKind, kind).Scan(&count)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Fatalf("edge %s(%s) -%s-> %s(%s) count = %d, want 1", sourceName, sourceKind, kind, targetName, targetKind, count)
+		}
+	}
+	assertEdge("a.go", "file", "module:fmt", "module", "imports")
+	assertEdge("Alpha", "function", "ambiguous:Handle", "module", "calls")
+	assertEdge("Alpha", "function", "unresolved:Missing", "module", "calls")
+
+	var arbitrary int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM code_edges e
+		JOIN code_nodes s ON s.id = e.source_id
+		JOIN code_nodes d ON d.id = e.target_id
+		WHERE e.repo_id = $1 AND s.name = 'Alpha' AND d.name = 'Handle' AND e.kind = 'calls'`, repoID).Scan(&arbitrary); err != nil {
+		t.Fatal(err)
+	}
+	if arbitrary != 0 {
+		t.Fatalf("ambiguous Handle attached to %d arbitrary concrete node(s)", arbitrary)
+	}
+}
