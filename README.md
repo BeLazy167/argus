@@ -197,7 +197,8 @@ Key environment variables — see [`backend/.env.example`](backend/.env.example)
 | `GITHUB_APP_SLUG` | Your app's slug — drives install URLs and the `@mention` Argus answers to |
 | `ENCRYPTION_KEY` | AES key encrypting BYOK provider keys at rest (required for reviews) |
 | `CLERK_JWKS_URL` | Clerk JWKS endpoint; when unset, authed API routes fail closed (503) |
-| `DASHBOARD_BASE_URL` | Dashboard URL linked from GitHub comments |
+| `DASHBOARD_BASE_URL` | Dashboard URL linked from GitHub comments and used for server-side Mermaid validation |
+| `MERMAID_VALIDATOR_SECRET` | Shared backend/dashboard secret for Mermaid parser requests |
 | `SELF_HOSTED` | `true` applies self-host defaults (reviews auto-run unconditionally) |
 | `EMBEDDINGS_API_KEY` | Embeddings key for memory (optional; without it rows are full-text-searchable only) |
 | `EMBEDDINGS_BASE_URL` | Embeddings endpoint (OpenAI-compatible), default Voyage via the AI gateway |

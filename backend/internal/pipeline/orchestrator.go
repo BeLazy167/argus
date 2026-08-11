@@ -339,6 +339,10 @@ type Orchestrator struct {
 	// o.st. Tests assign an in-memory fake to exercise the DB-less enrich path
 	// (see enrich_deps.go and enrich_read_test.go).
 	enrichStoreOverride PatternLinker
+	// mermaidValidator is the backend persistence gate. Production calls the
+	// long-lived web service running the deployed Mermaid package; tests inject
+	// a fake. A nil or unavailable validator rejects every diagram.
+	mermaidValidator MermaidValidator
 }
 
 // LLMRegistry is the subset of llm.Registry used by Orchestrator.
@@ -353,19 +357,20 @@ func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, 
 	sm.eventBus = eventBus
 
 	o := &Orchestrator{
-		db:           db,
-		st:           st,
-		ghClient:     ghClient,
-		sm:           sm,
-		reviewStage:  reviewStage,
-		triageStage:  triageStage,
-		intentStage:  intentStage,
-		scoringStage: scoringStage,
-		memRegistry:  memRegistry,
-		registry:     registry,
-		eventBus:     eventBus,
-		logger:       logger,
-		cfg:          cfg,
+		db:               db,
+		st:               st,
+		ghClient:         ghClient,
+		sm:               sm,
+		reviewStage:      reviewStage,
+		triageStage:      triageStage,
+		intentStage:      intentStage,
+		scoringStage:     scoringStage,
+		memRegistry:      memRegistry,
+		registry:         registry,
+		eventBus:         eventBus,
+		logger:           logger,
+		cfg:              cfg,
+		mermaidValidator: NewHTTPMermaidValidator(cfg.DashboardBaseURL, cfg.MermaidValidatorSecret, nil),
 	}
 	sm.onTerminal = o.FinalizeStartedComment
 	// Same reason as onTerminal: the hook closes over the orchestrator (store +
@@ -3133,7 +3138,8 @@ const enrichmentSystemPrompt = `You help complete a PR description by adding wha
 Rules:
 - If the PR description is EMPTY: write a complete summary of what this PR does (3-6 bullet points covering key changes).
 - If the PR description is PARTIAL: only add bullet points for features/changes the author didn't mention. Match their style and tone.
-- If the PR description already covers everything: return empty arrays.
+- If the PR description already covers everything: return an empty missing_points array.
+- Diagram output is independent: emit exactly the requested diagrams, or an empty array only when the prompt says no diagrams are needed.
 - Write from the author's perspective ("Adds...", "Updates...", "Introduces...") — NOT as a reviewer.
 - Focus on WHAT the code does, not bugs or issues. No security warnings, no criticism.
 - Keep each point to one concise sentence.
@@ -3144,7 +3150,7 @@ Respond with JSON only:
 {
   "missing_points": ["Adds batch processing with configurable concurrency and retry logic"],
   "diagrams": [
-    {"type": "sequence", "title": "Request Flow", "mermaid": "sequenceDiagram\n  Client->>API: fetch()\n  API->>Config: loadConfig()"}
+    {"type": "sequence", "title": "Request Flow", "mermaid": "sequenceDiagram\n  N1->>N2: calls", "evidence": ["edge:E1", "diff:D1"]}
   ]
 }`
 
@@ -3167,7 +3173,9 @@ func (o *Orchestrator) enrichPRDescription(ctx context.Context, run *PipelineRun
 		}
 	}
 
-	prompt := buildEnrichmentPrompt(run)
+	grounding := o.loadDiagramGrounding(ctx, run)
+	specs := selectDiagramTypes(run, grounding)
+	prompt := buildEnrichmentPrompt(run, grounding, specs)
 	resp, err := provider.Complete(ctx, llm.CompletionRequest{
 		Model:       cfg.Model,
 		System:      enrichmentSystemPrompt,
@@ -3195,11 +3203,6 @@ func (o *Orchestrator) enrichPRDescription(ctx context.Context, run *PipelineRun
 		return
 	}
 
-	type diagramResult struct {
-		Type    string `json:"type"`
-		Title   string `json:"title"`
-		Mermaid string `json:"mermaid"`
-	}
 	var result struct {
 		MissingPoints []string        `json:"missing_points"`
 		Diagrams      []diagramResult `json:"diagrams"`
@@ -3221,8 +3224,12 @@ func (o *Orchestrator) enrichPRDescription(ctx context.Context, run *PipelineRun
 		result.Diagrams = []diagramResult{{Type: "dependency", Title: title, Mermaid: result.Diagram}}
 	}
 
-	if len(result.MissingPoints) == 0 && len(result.Diagrams) == 0 {
-		o.logger.Info("enrichPRDescription: nothing missing, skipping")
+	validDiagrams := validateDiagrams(ctx, o.mermaidValidator, result.Diagrams, specs, grounding)
+	if len(result.Diagrams) > 0 && len(validDiagrams) == 0 {
+		o.logger.Warn("all generated diagrams failed grounding or Mermaid validation", "candidates", len(result.Diagrams))
+	}
+	if len(result.MissingPoints) == 0 && len(validDiagrams) == 0 {
+		o.logger.Info("enrichPRDescription: no validated enrichment, skipping")
 		return
 	}
 
@@ -3237,14 +3244,6 @@ func (o *Orchestrator) enrichPRDescription(ctx context.Context, run *PipelineRun
 		section.WriteString("\n")
 	}
 
-	var validDiagrams []diagramResult
-	for _, d := range result.Diagrams {
-		if d.Mermaid == "" || !isValidMermaid(d.Mermaid) {
-			o.logger.Warn("skipping invalid diagram", "type", d.Type, "title", d.Title)
-			continue
-		}
-		validDiagrams = append(validDiagrams, d)
-	}
 	if len(validDiagrams) > 0 {
 		diagramsJSON, marshalErr := json.Marshal(validDiagrams)
 		if marshalErr != nil {
@@ -3299,91 +3298,54 @@ func replaceOrAppendSection(body, startMarker, endMarker, section string) string
 	return strings.TrimRight(body, "\n") + "\n\n" + section
 }
 
-// isValidMermaid does a basic syntax check on mermaid diagram text.
-// Checks balanced brackets/pipes and rejects common LLM syntax errors.
-func isValidMermaid(diagram string) bool {
-	diagramLower := strings.ToLower(diagram)
-	validKeywords := []string{"sequencediagram", "graph ", "flowchart", "classdiagram", "erdiagram", "gantt", "pie", "statediagram", "journey", "gitgraph"}
-	hasKeyword := false
-	for _, kw := range validKeywords {
-		if strings.Contains(diagramLower, kw) {
-			hasKeyword = true
-			break
-		}
-	}
-	if !hasKeyword {
-		return false
-	}
-	var squares, parens, braces, pipes int
-	for _, c := range diagram {
-		switch c {
-		case '[':
-			squares++
-		case ']':
-			squares--
-		case '(':
-			parens++
-		case ')':
-			parens--
-		case '{':
-			braces++
-		case '}':
-			braces--
-		case '|':
-			pipes++
-		}
-		if squares < 0 || parens < 0 || braces < 0 {
-			return false
-		}
-	}
-	return squares == 0 && parens == 0 && braces == 0 && pipes%2 == 0
-}
-
-func buildEnrichmentPrompt(run *PipelineRun) string {
+func buildEnrichmentPrompt(run *PipelineRun, grounding diagramGrounding, specs []diagramSpec) string {
 	var sb strings.Builder
-	safeTitle := sanitizeUserInput(util.Truncate(run.PREvent.PRTitle, 200, false))
-	sb.WriteString(fmt.Sprintf("## PR #%d: %s\n\n", run.PREvent.PRNumber, safeTitle))
-
-	sb.WriteString("### PR Description (what the author says this PR does):\n")
+	sb.WriteString(fmt.Sprintf("## PR #%d\n", run.PREvent.PRNumber))
+	sb.WriteString(wrapSafeDelimiters("pr_title", sanitizeUserInput(util.Truncate(run.PREvent.PRTitle, 200, false))))
+	sb.WriteString("\n\n### PR Description (what the author says this PR does):\n")
 	if run.PREvent.PRBody != "" {
-		sb.WriteString(sanitizeUserInput(util.Truncate(run.PREvent.PRBody, 2000, false)))
+		body := sanitizeUserInput(util.Truncate(run.PREvent.PRBody, 2000, false))
+		sb.WriteString(wrapSafeDelimiters("pr_description", body))
 	} else {
 		sb.WriteString("(empty — no description provided)")
 	}
-	sb.WriteString("\n\n### Actual changes found by code review:\n")
 
-	for _, fr := range run.FileReviews {
-		sb.WriteString(fmt.Sprintf("**%s**\n", fr.Path))
-		for _, c := range fr.Comments {
-			what := c.What
+	var changes strings.Builder
+	for _, review := range run.FileReviews {
+		changes.WriteString(fmt.Sprintf("**%s**\n", sanitizeUserInput(review.Path)))
+		for _, comment := range review.Comments {
+			what := comment.What
 			if what == "" {
-				what = util.Truncate(c.Body, 100, true)
+				what = util.Truncate(comment.Body, 100, true)
 			}
-			sb.WriteString(fmt.Sprintf("- [%s] %s\n", c.Severity, what))
+			changes.WriteString(fmt.Sprintf("- [%s] %s\n", comment.Severity, sanitizeUserInput(what)))
 		}
 	}
+	sb.WriteString("\n\n### Actual changes found by code review:\n")
+	sb.WriteString(wrapSafeDelimiters("review_changes", changes.String()))
 
-	sb.WriteString("\n### Changed files:\n")
-	for _, f := range run.Diff.Files {
-		status := string(f.Status)
-		if f.LargeFile {
+	var changedFiles strings.Builder
+	for _, file := range run.Diff.Files {
+		status := string(file.Status)
+		if file.LargeFile {
 			status += " (large)"
 		}
-		sb.WriteString(fmt.Sprintf("- %s (%s)\n", f.NewName, status))
+		changedFiles.WriteString(fmt.Sprintf("- %s (%s)\n", sanitizeUserInput(file.NewName), status))
 	}
+	sb.WriteString("\n### Changed files:\n")
+	sb.WriteString(wrapSafeDelimiters("changed_files", changedFiles.String()))
 
-	// Diagram instructions (deterministic selection, LLM generates content)
-	specs := selectDiagramTypes(run)
 	if len(specs) > 0 {
 		sb.WriteString("\n### Diagram instructions:\n")
-		sb.WriteString("Generate the following diagrams in the `diagrams` array. Each must be valid Mermaid syntax.\n\n")
-		for _, s := range specs {
-			sb.WriteString(fmt.Sprintf("**%s** (max %d nodes):\n%s\n\n", s.Title, s.MaxNodes, s.Instruction))
+		sb.WriteString("Generate exactly the requested diagram types. Use only the listed N identifiers and directed edges. Every diagram must include matching `evidence` IDs for every drawn edge and at least one diff ID for a drawn node. Do not invent nodes or edges.\n\n")
+		sb.WriteString(formatDiagramGrounding(grounding))
+		sb.WriteString("\n")
+		for _, spec := range specs {
+			sb.WriteString(fmt.Sprintf("**%s** (`type`: `%s`, max %d nodes):\n%s\n\n", spec.Title, spec.Type, spec.MaxNodes, spec.Instruction))
 		}
 	} else {
 		sb.WriteString("\n### Diagram instructions:\nNo diagrams needed — return empty `diagrams` array.\n")
 	}
-
 	return sb.String()
 }
 
@@ -5048,112 +5010,6 @@ func commentTitle(c FileComment) string {
 		src = c.Body
 	}
 	return findingStatement(src)
-}
-
-type diagramSpec struct {
-	Type        string // "sequence", "dataflow", "dependency"
-	Title       string
-	Instruction string // LLM instruction for this diagram type
-	MaxNodes    int
-}
-
-// selectDiagramTypes picks up to 2 diagram types based on PR characteristics.
-// Priority: sequence > dataflow > dependency.
-func selectDiagramTypes(run *PipelineRun) []diagramSpec {
-	var specs []diagramSpec
-
-	fileCount := 0
-	if run.Diff != nil {
-		fileCount = len(run.Diff.Files)
-	}
-
-	// Sequence diagram: 3+ changed files
-	if fileCount >= 3 {
-		specs = append(specs, diagramSpec{
-			Type:  "sequence",
-			Title: "Call Sequence",
-			Instruction: "Generate a Mermaid sequenceDiagram showing which changed files/modules call each other. " +
-				"Annotate any participants involved in bugs with ⚠️. Max 12 participants.",
-			MaxNodes: 12,
-		})
-	}
-
-	// Data flow diagram: security findings, sensitive file paths, or injection-related content
-	dataflow := false
-	sensitivePaths := []string{
-		"auth", "token", "session", "fetch", "api", "login",
-		"oauth", "password", "credential", "validate", "input", "config",
-	}
-	contentKeywords := []string{
-		"injection", "xss", "ssrf", "redirect", "sanitiz", "escap",
-	}
-
-	for _, fr := range run.FileReviews {
-		if dataflow {
-			break
-		}
-		for _, c := range fr.Comments {
-			if strings.ToLower(string(c.Category)) == "security" {
-				dataflow = true
-				break
-			}
-			lower := strings.ToLower(c.What + " " + c.Body)
-			for _, kw := range contentKeywords {
-				if strings.Contains(lower, kw) {
-					dataflow = true
-					break
-				}
-			}
-			if dataflow {
-				break
-			}
-		}
-	}
-
-	if !dataflow && run.Diff != nil {
-		for _, f := range run.Diff.Files {
-			lowerPath := strings.ToLower(f.NewName)
-			for _, sp := range sensitivePaths {
-				if strings.Contains(lowerPath, sp) {
-					dataflow = true
-					break
-				}
-			}
-			if dataflow {
-				break
-			}
-		}
-	}
-
-	if dataflow {
-		specs = append(specs, diagramSpec{
-			Type:  "dataflow",
-			Title: "Data Flow",
-			Instruction: "Generate a Mermaid flowchart TD tracing untrusted input through the system. " +
-				"Mark tainted paths with ⚠️. Max 10 nodes.",
-			MaxNodes: 10,
-		})
-	}
-
-	// Dependency graph: 10+ changed files
-	if fileCount >= 10 {
-		specs = append(specs, diagramSpec{
-			Type:  "dependency",
-			Title: "Dependency Graph",
-			Instruction: "Generate a Mermaid graph LR showing import relationships between changed files. " +
-				"Max 12 nodes.",
-			MaxNodes: 12,
-		})
-	}
-
-	// Cap at 2 (priority order already correct: sequence > dataflow > dependency)
-	if len(specs) > 2 {
-		specs = specs[:2]
-	}
-	if len(specs) == 0 {
-		return nil
-	}
-	return specs
 }
 
 // rebalanceSeverity downgrades lowest-confidence critical findings to warning
