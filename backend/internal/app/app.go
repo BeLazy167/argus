@@ -78,14 +78,18 @@ func Run() error {
 	logMermaidValidatorStatus(logger, cfg)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	// Database
 	db, err := store.New(ctx, cfg.DatabaseURL)
 	if err != nil {
+		cancel()
 		return fmt.Errorf("connecting to database: %w", err)
 	}
+	// The durable event bus holds a pool connection in WaitForNotification.
+	// Defers run LIFO: cancel its root context before Close waits for every pool
+	// connection to be released. Later appCtx/server defers still run first.
 	defer db.Close()
+	defer cancel()
 
 	// GitHub App
 	ghApp := ghpkg.NewApp(cfg.GitHubAppID, cfg.GitHubPrivateKey)
