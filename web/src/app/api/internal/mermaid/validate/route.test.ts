@@ -25,6 +25,12 @@ describe("Mermaid validator route", () => {
 		expect(response.status).toBe(401);
 	});
 
+	it("rejects equal-character-length secrets with different UTF-8 byte lengths", async () => {
+		process.env.MERMAID_VALIDATOR_SECRET = "sécret1234";
+		const response = await POST(request("flowchart TD\n A --> B", "secret1234"));
+		expect(response.status).toBe(401);
+	})
+
 	it("returns the deployed parser version for valid syntax", async () => {
 		const response = await POST(request("flowchart TD\n A --> B"));
 		expect(response.status).toBe(200);

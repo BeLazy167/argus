@@ -32,6 +32,9 @@ export async function POST(request: Request) {
 }
 
 function secretsMatch(expected: string, supplied: string): boolean {
-	if (!expected || expected.length !== supplied.length) return false;
-	return timingSafeEqual(Buffer.from(expected), Buffer.from(supplied));
+	if (!expected) return false;
+	const expectedBytes = Buffer.from(expected);
+	const suppliedBytes = Buffer.from(supplied);
+	if (expectedBytes.length !== suppliedBytes.length) return false;
+	return timingSafeEqual(expectedBytes, suppliedBytes);
 }
