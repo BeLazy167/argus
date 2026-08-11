@@ -623,7 +623,7 @@ func (s *Server) streamReviewWS(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	events, history, unsub, err := s.eventBus.SubscribeContext(ctx, id, afterID)
+	events, history, subscriberClosed, unsub, err := s.eventBus.SubscribeContextWithCloseReason(ctx, id, afterID)
 	if err != nil {
 		s.logger.Error("review stream subscribe", "error", err, "review_id", id)
 		conn.Close(websocket.StatusInternalError, "streaming not available")
@@ -674,24 +674,46 @@ func (s *Server) streamReviewWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Stream live events
+	streamLiveReviewEvents(ctx, conn, events, subscriberClosed)
+}
+
+func streamLiveReviewEvents(
+	ctx context.Context,
+	conn *websocket.Conn,
+	events <-chan pipeline.Event,
+	subscriberClosed <-chan pipeline.SubscriberCloseReason,
+) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case evt, ok := <-events:
 			if !ok {
-				conn.Close(websocket.StatusNormalClosure, "stream ended")
+				reason := pipeline.SubscriberCloseTopic
+				if closedReason, received := <-subscriberClosed; received {
+					reason = closedReason
+				}
+				status, message := reviewStreamClose(reason)
+				_ = conn.Close(status, message)
 				return
 			}
 			if err := wsjson.Write(ctx, conn, evt); err != nil {
 				return
 			}
 			if isTerminalReviewEvent(evt.Type) {
-				conn.Close(websocket.StatusNormalClosure, "review stream ended")
+				_ = conn.Close(websocket.StatusNormalClosure, "review stream ended")
 				return
 			}
 		}
+	}
+}
+
+func reviewStreamClose(reason pipeline.SubscriberCloseReason) (websocket.StatusCode, string) {
+	switch reason {
+	case pipeline.SubscriberCloseDurableOverflow, pipeline.SubscriberCloseDedupExhausted:
+		return websocket.StatusTryAgainLater, "review stream fell behind; reconnect to replay"
+	default:
+		return websocket.StatusNormalClosure, "stream ended"
 	}
 }
 

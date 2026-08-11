@@ -4,7 +4,11 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useInstallation } from "@/providers/installation-provider";
 import type { Review, ReviewComment } from "../types";
 import { reconcileTerminalReview, reviewQueryKeys } from "../queries/reviews";
-import { buildReviewStreamURL, ReviewEventCursor } from "./review-stream-cursor";
+import {
+  buildReviewStreamURL,
+  ReviewEventCursor,
+  shouldReconnectReviewStream,
+} from "./review-stream-cursor";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
 const connectionSnapshot = () => null;
@@ -67,6 +71,7 @@ export type LiveTokens = {
 
 export type WSEvent = {
   id?: number;
+  delivery_id?: string;
   type: string;
   attempt_generation?: number;
   data: Record<string, unknown>;
@@ -441,13 +446,10 @@ export function useReviewStream(reviewId: string, enabled: boolean) {
       ws.onclose = (e) => {
         setConnected(false);
         if (unmounted) return;
-        // Terminal-state short-circuit. Required because the Fly WS proxy
-        // can rewrite `StatusNormalClosure` (1000) to 1006, making the
-        // 1000-check below unreliable in production. Without this, a
-        // completed review keeps reopening sockets in a tight loop.
-        if (session.terminal) return;
-        // Don't reconnect on clean close (server sent terminal event)
-        if (e.code === 1000) return;
+        // Terminal state wins even when a proxy rewrites a clean 1000 close
+        // to 1006. Non-terminal abnormal closes (including backend 1013 after
+        // overflow/dedup exhaustion) reconnect and replay from the cursor.
+        if (!shouldReconnectReviewStream(e.code, session.terminal)) return;
         // Exponential backoff: 1s → 2s → 4s → 8s → 16s max
         reconnectTimer = setTimeout(connect, backoff);
         backoff = Math.min(backoff * 2, 16000);

@@ -95,6 +95,7 @@ var durableRetryDelays = [...]time.Duration{10 * time.Millisecond, 25 * time.Mil
 // Event is a single streaming event published during a pipeline run.
 type Event struct {
 	ID                int64           `json:"id,omitempty"`
+	DeliveryID        string          `json:"delivery_id,omitempty"`
 	AttemptGeneration int             `json:"attempt_generation,omitempty"`
 	Type              EventType       `json:"type"`
 	Timestamp         time.Time       `json:"timestamp"`
@@ -140,8 +141,20 @@ const (
 	subscriberSeenCapacity = maxHistoryEvents * 4
 )
 
+// SubscriberCloseReason tells stream adapters whether a subscription ended
+// normally or must be replayed from its last acknowledged durable cursor.
+type SubscriberCloseReason string
+
+const (
+	SubscriberCloseTopic           SubscriberCloseReason = "topic_closed"
+	SubscriberCloseUnsubscribed    SubscriberCloseReason = "unsubscribed"
+	SubscriberCloseDurableOverflow SubscriberCloseReason = "durable_overflow"
+	SubscriberCloseDedupExhausted  SubscriberCloseReason = "dedup_exhausted"
+)
+
 type topicSubscriber struct {
 	ch            chan Event
+	closed        chan SubscriberCloseReason
 	replayAfterID int64
 	catchUpSeen   map[int64]struct{}
 	freshSeen     map[int64]struct{}
@@ -152,6 +165,7 @@ type topicSubscriber struct {
 func newTopicSubscriber(ch chan Event, replayAfterID int64) *topicSubscriber {
 	subscriber := &topicSubscriber{
 		ch:            ch,
+		closed:        make(chan SubscriberCloseReason, 1),
 		replayAfterID: replayAfterID,
 		catchUpSeen:   make(map[int64]struct{}),
 		freshSeen:     make(map[int64]struct{}),
@@ -160,6 +174,12 @@ func newTopicSubscriber(ch chan Event, replayAfterID int64) *topicSubscriber {
 		subscriber.remember(replayAfterID, deliveryFresh)
 	}
 	return subscriber
+}
+
+func (s *topicSubscriber) close(reason SubscriberCloseReason) {
+	s.closed <- reason
+	close(s.closed)
+	close(s.ch)
 }
 
 func (s *topicSubscriber) seedReplay(events []Event) {
@@ -274,7 +294,7 @@ func (eb *EventBus) CloseTopic(reviewID uuid.UUID) {
 	t.mu.Lock()
 	t.closed = true
 	for id, subscriber := range t.subscribers {
-		close(subscriber.ch)
+		subscriber.close(SubscriberCloseTopic)
 		delete(t.subscribers, id)
 	}
 	t.mu.Unlock()
@@ -315,7 +335,13 @@ func (eb *EventBus) publish(reviewID uuid.UUID, generation int, evtType EventTyp
 		return
 	}
 
-	evt := Event{AttemptGeneration: generation, Type: evtType, Timestamp: time.Now(), Data: raw}
+	evt := Event{
+		DeliveryID:        uuid.NewString(),
+		AttemptGeneration: generation,
+		Type:              evtType,
+		Timestamp:         time.Now(),
+		Data:              raw,
+	}
 	if eb.persistEvent != nil {
 		publishCtx, cancel := context.WithTimeout(context.Background(), durablePublishTimeout)
 		defer cancel()
@@ -379,9 +405,29 @@ func shouldRetryDurablePublish(err error) bool {
 	}
 }
 
+const durableEventEnvelopeMarker = "argus.review-event.v1:3f985e31-2ad4-4d78-b5c4-83f3663e12e0"
+
+type durableEventEnvelope struct {
+	Marker     string          `json:"_argus_event_envelope"`
+	DeliveryID string          `json:"delivery_id"`
+	Data       json.RawMessage `json:"data"`
+}
+
+func marshalDurableEventData(evt *Event) (json.RawMessage, error) {
+	return json.Marshal(durableEventEnvelope{
+		Marker:     durableEventEnvelopeMarker,
+		DeliveryID: evt.DeliveryID,
+		Data:       evt.Data,
+	})
+}
+
 func (eb *EventBus) persistToPostgres(ctx context.Context, reviewID uuid.UUID, evt *Event) (bool, error) {
+	storedData, err := marshalDurableEventData(evt)
+	if err != nil {
+		return true, fmt.Errorf("encoding durable event envelope: %w", err)
+	}
 	var notified string
-	err := eb.pool.QueryRow(ctx, `
+	err = eb.pool.QueryRow(ctx, `
 		WITH inserted AS (
 			INSERT INTO review_events (review_id, attempt_generation, event_type, data)
 			SELECT $1,$2,$3,$4
@@ -389,7 +435,7 @@ func (eb *EventBus) persistToPostgres(ctx context.Context, reviewID uuid.UUID, e
 			RETURNING id, created_at
 		)
 		SELECT id, created_at, pg_notify('argus_review_events', $5 || ':' || id::text)
-		FROM inserted`, reviewID, evt.AttemptGeneration, string(evt.Type), evt.Data, eb.instance.String()).Scan(&evt.ID, &evt.Timestamp, &notified)
+		FROM inserted`, reviewID, evt.AttemptGeneration, string(evt.Type), storedData, eb.instance.String()).Scan(&evt.ID, &evt.Timestamp, &notified)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -428,7 +474,7 @@ func (eb *EventBus) deliverFrom(reviewID uuid.UUID, evt Event, notifyGlobal bool
 				}
 				if evt.ID > 0 && !subscriber.canRemember(source) {
 					delete(t.subscribers, id)
-					close(subscriber.ch)
+					subscriber.close(SubscriberCloseDedupExhausted)
 					eb.logger.Warn("eventbus: reconnecting subscriber after durable dedup window filled",
 						"subscriber", id, "type", evt.Type, "review_id", reviewID)
 					continue
@@ -445,7 +491,7 @@ func (eb *EventBus) deliverFrom(reviewID uuid.UUID, evt Event, notifyGlobal bool
 						// Closing drains already-buffered events, then makes the
 						// browser reconnect and replay from its last received ID.
 						delete(t.subscribers, id)
-						close(subscriber.ch)
+						subscriber.close(SubscriberCloseDurableOverflow)
 						eb.logger.Warn("eventbus: reconnecting slow subscriber",
 							"subscriber", id, "type", evt.Type, "review_id", reviewID)
 						continue
@@ -630,7 +676,11 @@ func (eb *EventBus) waitToReconnect(ctx context.Context, err error) {
 // events are visible only while their attempt is current.
 const authorizedReviewEventsSQL = `
 	SELECT e.review_id, e.id, COALESCE(e.attempt_generation,0) AS attempt_generation,
-	       e.event_type, e.created_at, e.data
+	       e.event_type, e.created_at,
+	       CASE WHEN e.data->>'_argus_event_envelope' = '` + durableEventEnvelopeMarker + `'
+	            THEN COALESCE(e.data->>'delivery_id','') ELSE '' END AS delivery_id,
+	       CASE WHEN e.data->>'_argus_event_envelope' = '` + durableEventEnvelopeMarker + `'
+	            THEN e.data->'data' ELSE e.data END AS data
 	FROM review_events e
 	JOIN reviews r ON r.id=e.review_id
 	WHERE e.attempt_generation=0 OR e.attempt_generation=r.attempt_generation`
@@ -710,8 +760,8 @@ func (eb *EventBus) activeSubscriptionCursorFloor() (int64, bool) {
 func (eb *EventBus) replayStoredTails(ctx context.Context, reviewIDs []uuid.UUID, upper int64) error {
 	for _, reviewID := range reviewIDs {
 		rows, err := eb.pool.Query(ctx, `
-			SELECT id, attempt_generation, event_type, created_at, data FROM (
-				SELECT id, attempt_generation, event_type, created_at, data
+			SELECT id, attempt_generation, event_type, created_at, delivery_id, data FROM (
+				SELECT id, attempt_generation, event_type, created_at, delivery_id, data
 				FROM (`+authorizedReviewEventsSQL+`) authorized
 				WHERE review_id=$1 AND id<=$2
 				ORDER BY id DESC LIMIT $3
@@ -721,7 +771,7 @@ func (eb *EventBus) replayStoredTails(ctx context.Context, reviewIDs []uuid.UUID
 		}
 		for rows.Next() {
 			var evt Event
-			if err := rows.Scan(&evt.ID, &evt.AttemptGeneration, &evt.Type, &evt.Timestamp, &evt.Data); err != nil {
+			if err := rows.Scan(&evt.ID, &evt.AttemptGeneration, &evt.Type, &evt.Timestamp, &evt.DeliveryID, &evt.Data); err != nil {
 				rows.Close()
 				return fmt.Errorf("scanning review event tail for %s: %w", reviewID, err)
 			}
@@ -753,7 +803,7 @@ func (eb *EventBus) catchUpStored(ctx context.Context, afterID int64) (int64, er
 	cursor := afterID
 	for cursor < upper {
 		rows, queryErr := eb.pool.Query(ctx, `
-			SELECT review_id, id, attempt_generation, event_type, created_at, data
+			SELECT review_id, id, attempt_generation, event_type, created_at, delivery_id, data
 			FROM (`+authorizedReviewEventsSQL+`) authorized
 			WHERE id>$1 AND id<=$2 AND review_id=ANY($3::uuid[])
 			ORDER BY id
@@ -766,7 +816,7 @@ func (eb *EventBus) catchUpStored(ctx context.Context, afterID int64) (int64, er
 		for rows.Next() {
 			var reviewID uuid.UUID
 			var evt Event
-			if scanErr := rows.Scan(&reviewID, &evt.ID, &evt.AttemptGeneration, &evt.Type, &evt.Timestamp, &evt.Data); scanErr != nil {
+			if scanErr := rows.Scan(&reviewID, &evt.ID, &evt.AttemptGeneration, &evt.Type, &evt.Timestamp, &evt.DeliveryID, &evt.Data); scanErr != nil {
 				rows.Close()
 				return cursor, fmt.Errorf("scanning review event catch-up: %w", scanErr)
 			}
@@ -833,9 +883,9 @@ func (eb *EventBus) deliverStored(ctx context.Context, id int64) error {
 	var reviewID uuid.UUID
 	var evt Event
 	err := eb.pool.QueryRow(ctx, `
-		SELECT review_id, id, attempt_generation, event_type, created_at, data
+		SELECT review_id, id, attempt_generation, event_type, created_at, delivery_id, data
 		FROM (`+authorizedReviewEventsSQL+`) authorized
-		WHERE id=$1`, id).Scan(&reviewID, &evt.ID, &evt.AttemptGeneration, &evt.Type, &evt.Timestamp, &evt.Data)
+		WHERE id=$1`, id).Scan(&reviewID, &evt.ID, &evt.AttemptGeneration, &evt.Type, &evt.Timestamp, &evt.DeliveryID, &evt.Data)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// A notification can race deletion or BeginReviewRetry. Both mean the
 		// referenced event has no authority now, not that the listener failed.
@@ -879,9 +929,28 @@ func maxDurableEventID(afterID int64, events []Event) int64 {
 // Replaying at most the retained 500-row tail lets the browser's bounded seen-ID
 // set distinguish that late row from exact duplicates.
 func (eb *EventBus) SubscribeContext(ctx context.Context, reviewID uuid.UUID, afterID int64) (<-chan Event, []Event, func(), error) {
+	events, history, _, unsubscribe, err := eb.subscribeContextWithCloseReason(ctx, reviewID, afterID)
+	return events, history, unsubscribe, err
+}
+
+// SubscribeContextWithCloseReason adds the typed terminal cause needed by
+// transports that distinguish a clean terminal stream from a replayable gap.
+func (eb *EventBus) SubscribeContextWithCloseReason(
+	ctx context.Context,
+	reviewID uuid.UUID,
+	afterID int64,
+) (<-chan Event, []Event, <-chan SubscriberCloseReason, func(), error) {
+	return eb.subscribeContextWithCloseReason(ctx, reviewID, afterID)
+}
+
+func (eb *EventBus) subscribeContextWithCloseReason(
+	ctx context.Context,
+	reviewID uuid.UUID,
+	afterID int64,
+) (<-chan Event, []Event, <-chan SubscriberCloseReason, func(), error) {
 	if eb.pool == nil {
-		ch, history, unsub := eb.Subscribe(reviewID)
-		return ch, history, unsub, nil
+		events, history, closed, unsubscribe := eb.subscribeWithCloseReason(reviewID)
+		return events, history, closed, unsubscribe, nil
 	}
 	eb.OpenTopic(reviewID)
 	eb.mu.RLock()
@@ -891,39 +960,38 @@ func (eb *EventBus) SubscribeContext(ctx context.Context, reviewID uuid.UUID, af
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	rows, err := eb.pool.Query(ctx, `
-		SELECT id, attempt_generation, event_type, created_at, data FROM (
-			SELECT id, attempt_generation, event_type, created_at, data
+		SELECT id, attempt_generation, event_type, created_at, delivery_id, data FROM (
+			SELECT id, attempt_generation, event_type, created_at, delivery_id, data
 			FROM (`+authorizedReviewEventsSQL+`) authorized
 			WHERE review_id=$1
 			ORDER BY id DESC LIMIT $2
 		) replay ORDER BY id`, reviewID, maxHistoryEvents)
 	if err != nil {
-		return nil, nil, func() {}, fmt.Errorf("querying event replay: %w", err)
+		return nil, nil, nil, func() {}, fmt.Errorf("querying event replay: %w", err)
 	}
 	history := make([]Event, 0)
 	for rows.Next() {
 		var evt Event
-		if err := rows.Scan(&evt.ID, &evt.AttemptGeneration, &evt.Type, &evt.Timestamp, &evt.Data); err != nil {
+		if err := rows.Scan(&evt.ID, &evt.AttemptGeneration, &evt.Type, &evt.Timestamp, &evt.DeliveryID, &evt.Data); err != nil {
 			rows.Close()
-			return nil, nil, func() {}, err
+			return nil, nil, nil, func() {}, err
 		}
 		history = append(history, evt)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		return nil, nil, func() {}, err
+		return nil, nil, nil, func() {}, err
 	}
 	rows.Close()
 
 	ch := make(chan Event, 64)
+	subscriber := newTopicSubscriber(ch, maxDurableEventID(afterID, history))
 	if t.closed {
-		close(ch)
-		return ch, history, func() {}, nil
+		subscriber.close(SubscriberCloseTopic)
+		return ch, history, subscriber.closed, func() {}, nil
 	}
 	t.nextID++
 	id := t.nextID
-	replayAfterID := maxDurableEventID(afterID, history)
-	subscriber := newTopicSubscriber(ch, replayAfterID)
 	subscriber.seedReplay(history)
 	t.subscribers[id] = subscriber
 	unsub := func() {
@@ -931,37 +999,42 @@ func (eb *EventBus) SubscribeContext(ctx context.Context, reviewID uuid.UUID, af
 		defer t.mu.Unlock()
 		if subscriber, exists := t.subscribers[id]; exists {
 			delete(t.subscribers, id)
-			close(subscriber.ch)
+			subscriber.close(SubscriberCloseUnsubscribed)
 		}
 	}
-	return ch, history, unsub, nil
+	return ch, history, subscriber.closed, unsub, nil
 }
 
 // Subscribe returns a channel of events, the history so far, and an unsubscribe function.
 // Returns nil channel if the topic doesn't exist.
 func (eb *EventBus) Subscribe(reviewID uuid.UUID) (<-chan Event, []Event, func()) {
+	events, history, _, unsubscribe := eb.subscribeWithCloseReason(reviewID)
+	return events, history, unsubscribe
+}
+
+func (eb *EventBus) subscribeWithCloseReason(
+	reviewID uuid.UUID,
+) (<-chan Event, []Event, <-chan SubscriberCloseReason, func()) {
 	eb.mu.RLock()
 	t, ok := eb.topics[reviewID]
 	eb.mu.RUnlock()
 	if !ok {
-		return nil, nil, func() {}
+		return nil, nil, nil, func() {}
 	}
 
 	ch := make(chan Event, 64)
+	subscriber := newTopicSubscriber(ch, 0)
 	t.mu.Lock()
 	t.nextID++
 	id := t.nextID
-	// If topic already closed, return history + closed channel
+	// If topic already closed, return history + closed channel.
 	if t.closed {
-		history := make([]Event, len(t.history))
-		copy(history, t.history)
+		history := append([]Event(nil), t.history...)
+		subscriber.close(SubscriberCloseTopic)
 		t.mu.Unlock()
-		close(ch)
-		return ch, history, func() {}
+		return ch, history, subscriber.closed, func() {}
 	}
-	history := make([]Event, len(t.history))
-	copy(history, t.history)
-	subscriber := newTopicSubscriber(ch, 0)
+	history := append([]Event(nil), t.history...)
 	subscriber.seedReplay(history)
 	t.subscribers[id] = subscriber
 	t.mu.Unlock()
@@ -971,9 +1044,8 @@ func (eb *EventBus) Subscribe(reviewID uuid.UUID) (<-chan Event, []Event, func()
 		defer t.mu.Unlock()
 		if subscriber, exists := t.subscribers[id]; exists {
 			delete(t.subscribers, id)
-			close(subscriber.ch)
+			subscriber.close(SubscriberCloseUnsubscribed)
 		}
 	}
-
-	return ch, history, unsub
+	return ch, history, subscriber.closed, unsub
 }

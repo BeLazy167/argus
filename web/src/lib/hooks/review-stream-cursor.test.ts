@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { buildReviewStreamURL, ReviewEventCursor } from "./review-stream-cursor";
+import {
+	buildReviewStreamURL,
+	ReviewEventCursor,
+	shouldReconnectReviewStream,
+} from "./review-stream-cursor";
 
 describe("ReviewEventCursor", () => {
 	it("advances only after a durable event is processed and dedupes replay", () => {
@@ -40,5 +44,41 @@ describe("buildReviewStreamURL", () => {
 		expect(url.searchParams.get("token")).toBe("a token");
 		expect(url.searchParams.get("installation_id")).toBe("23");
 		expect(url.searchParams.get("after")).toBe("91");
+	});
+});
+
+describe("logical review event delivery", () => {
+	it("dedupes an ambiguous local fallback against its durable replay and advances the cursor", () => {
+		const cursor = new ReviewEventCursor();
+		const process = vi.fn();
+		const local = { delivery_id: "0190f5f0-942d-7b58-9d29-d69f47f3f177" };
+		const replay = { id: 73, delivery_id: local.delivery_id };
+
+		expect(cursor.process(local, process)).toBe(true);
+		expect(cursor.after).toBe(0);
+		expect(cursor.process(replay, process)).toBe(false);
+		expect(cursor.after).toBe(73);
+		expect(process).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps logical identity tracking bounded and accepts legacy events", () => {
+		const cursor = new ReviewEventCursor();
+		const process = vi.fn();
+		for (let id = 1; id <= 1001; id++) {
+			cursor.process({ id, delivery_id: `delivery-${id}` }, process);
+		}
+		expect(cursor.process({ id: 2001, delivery_id: "delivery-1" }, process)).toBe(true);
+		expect(cursor.process({ id: 2002 }, process)).toBe(true);
+	});
+});
+
+describe("review stream reconnect policy", () => {
+	it("reconnects a non-terminal stream after the backend retryable close", () => {
+		expect(shouldReconnectReviewStream(1013, false)).toBe(true);
+	});
+
+	it("does not loop after a terminal event even when a proxy rewrites the clean close", () => {
+		expect(shouldReconnectReviewStream(1006, true)).toBe(false);
+		expect(shouldReconnectReviewStream(1000, false)).toBe(false);
 	});
 });

@@ -575,8 +575,9 @@ func TestDurableEventBusSlowSubscriberIsClosedBeforeDurableDrop(t *testing.T) {
 	topic := eb.topics[reviewID]
 	eb.mu.RUnlock()
 	live := make(chan Event, 1)
+	subscriber := newTopicSubscriber(live, 0)
 	topic.mu.Lock()
-	topic.subscribers[1] = newTopicSubscriber(live, 0)
+	topic.subscribers[1] = subscriber
 	topic.mu.Unlock()
 
 	eb.deliverFrom(reviewID, Event{ID: 10, Type: EventStageChanged}, false, deliveryFresh)
@@ -593,6 +594,9 @@ func TestDurableEventBusSlowSubscriberIsClosedBeforeDurableDrop(t *testing.T) {
 	}
 	if evt, ok := <-live; ok {
 		t.Fatalf("overflow event was treated as delivered: %+v", evt)
+	}
+	if reason := <-subscriber.closed; reason != SubscriberCloseDurableOverflow {
+		t.Fatalf("overflow close reason=%q want %q", reason, SubscriberCloseDurableOverflow)
 	}
 }
 
@@ -723,5 +727,75 @@ func TestDurableEventBusCatchUpFloorDoesNotHideUnseenLowerID(t *testing.T) {
 	case evt := <-live:
 		t.Fatalf("exact replay duplicate delivered: %+v", evt)
 	default:
+	}
+}
+
+func TestDurableEventBusAmbiguousLocalAndReplayShareLogicalDeliveryIdentity(t *testing.T) {
+	eb := NewEventBus()
+	reviewID := uuid.New()
+	eb.OpenTopic(reviewID)
+	var stored Event
+	attempts := 0
+	eb.persistEvent = func(_ context.Context, _ uuid.UUID, evt *Event) (bool, error) {
+		attempts++
+		stored = *evt
+		stored.Data = append(json.RawMessage(nil), evt.Data...)
+		return true, errors.New("connection lost after commit acknowledgement")
+	}
+	live, _, unsub := eb.Subscribe(reviewID)
+	defer unsub()
+
+	payload := map[string]any{"body": "user payload", "nested": map[string]any{"delivery_id": "belongs-to-user"}}
+	eb.PublishForAttempt(reviewID, 2, EventComment, payload)
+	if attempts != 1 {
+		t.Fatalf("ambiguous durable write attempts=%d want 1", attempts)
+	}
+	local := <-live
+	if local.ID != 0 || local.DeliveryID == "" {
+		t.Fatalf("local fallback=%+v, want ID=0 with logical delivery identity", local)
+	}
+	var localPayload map[string]any
+	if err := json.Unmarshal(local.Data, &localPayload); err != nil {
+		t.Fatal(err)
+	}
+	if localPayload["body"] != "user payload" {
+		t.Fatalf("local payload mutated: %s", local.Data)
+	}
+
+	stored.ID = 73
+	stored.Timestamp = time.Unix(73, 0)
+	eb.deliverFrom(reviewID, stored, false, deliveryCatchUp)
+	replay := <-live
+	if replay.ID != 73 || replay.DeliveryID != local.DeliveryID {
+		t.Fatalf("replay=%+v local=%+v", replay, local)
+	}
+	if string(replay.Data) != string(local.Data) {
+		t.Fatalf("replay payload=%s local payload=%s", replay.Data, local.Data)
+	}
+}
+
+func TestDurableEventBusDedupExhaustionHasRetryableCloseReason(t *testing.T) {
+	eb := NewEventBus()
+	reviewID := uuid.New()
+	eb.OpenTopic(reviewID)
+	eb.mu.RLock()
+	topic := eb.topics[reviewID]
+	eb.mu.RUnlock()
+	subscriber := newTopicSubscriber(make(chan Event, 1), 0)
+	for id := int64(1); id <= subscriberSeenCapacity; id++ {
+		subscriber.remember(id, deliveryCatchUp)
+	}
+	topic.mu.Lock()
+	topic.subscribers[1] = subscriber
+	topic.mu.Unlock()
+
+	eb.deliverFrom(reviewID, Event{ID: subscriberSeenCapacity + 1, Type: EventComment}, false, deliveryCatchUp)
+	select {
+	case reason := <-subscriber.closed:
+		if reason != SubscriberCloseDedupExhausted {
+			t.Fatalf("close reason=%q want %q", reason, SubscriberCloseDedupExhausted)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("dedup exhaustion did not signal subscriber closure")
 	}
 }

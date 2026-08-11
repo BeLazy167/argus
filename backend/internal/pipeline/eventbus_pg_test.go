@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"os"
@@ -67,8 +68,12 @@ func TestDurableEventBusCrossMachineDeliveryAndReplay(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("cross-machine event not delivered")
 	}
-	if liveEvent.ID == 0 || liveEvent.Type != EventStageChanged {
+	if liveEvent.ID == 0 || liveEvent.DeliveryID == "" || liveEvent.Type != EventStageChanged {
 		t.Fatalf("live event=%+v", liveEvent)
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(liveEvent.Data, &payload); err != nil || payload["stage"] != "reviewing" || len(payload) != 1 {
+		t.Fatalf("user payload was changed by durable envelope: %s (error: %v)", liveEvent.Data, err)
 	}
 
 	busC := NewDurableEventBus(ctx, pool, logger)
@@ -77,8 +82,11 @@ func TestDurableEventBusCrossMachineDeliveryAndReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer replayUnsub()
-	if len(replay) != 1 || replay[0].ID != liveEvent.ID {
+	if len(replay) != 1 || replay[0].ID != liveEvent.ID || replay[0].DeliveryID != liveEvent.DeliveryID {
 		t.Fatalf("replay=%+v live=%+v", replay, liveEvent)
+	}
+	if string(replay[0].Data) != string(liveEvent.Data) {
+		t.Fatalf("replay payload=%s live payload=%s", replay[0].Data, liveEvent.Data)
 	}
 	_, after, afterUnsub, err := busC.SubscribeContext(ctx, reviewID, liveEvent.ID)
 	if err != nil {
