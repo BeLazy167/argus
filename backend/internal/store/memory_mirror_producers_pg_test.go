@@ -131,7 +131,7 @@ func TestMemoryMirrorAcknowledgementRejectsLostLease(t *testing.T) {
 	event := MemoryMirrorEvent{
 		InstallationID: installationID,
 		AggregateType:  MemoryMirrorRule,
-		AggregateID:    1,
+		AggregateID:    installationID + 1_000_000_000,
 		Operation:      MemoryMirrorDelete,
 		Payload:        json.RawMessage(`{"custom_id":"rule--1"}`),
 	}
