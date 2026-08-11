@@ -110,6 +110,20 @@ func enqueueMemoryMirrorEvent(ctx context.Context, tx pgx.Tx, event MemoryMirror
 			return err
 		}
 	}
+	isRuleTombstone := event.AggregateType == MemoryMirrorRule && event.Operation == MemoryMirrorDelete
+	if isRuleTombstone {
+		// The relational disable/delete is a synchronous visibility boundary.
+		// Take the worker's execution key after the general producer key so an
+		// older in-flight upsert finishes before this transaction tombstones it.
+		// Rule workers never take the general producer key; ordinary pattern
+		// producers never take this execution key and remain nonblocking.
+		if customID == "" {
+			return fmt.Errorf("enqueue rule delete mirror event: empty custom ID")
+		}
+		if err := lockMemoryMirrorExecution(ctx, tx, event.InstallationID, customID); err != nil {
+			return err
+		}
+	}
 	_, err := tx.Exec(ctx, `
         INSERT INTO memory_mirror_outbox
             (installation_id, aggregate_type, aggregate_id, operation, payload)
@@ -123,10 +137,7 @@ func enqueueMemoryMirrorEvent(ctx context.Context, tx pgx.Tx, event MemoryMirror
 	// the Postgres read model unsearchable in the producer transaction. Pattern
 	// custom IDs may have duplicate relational owners and must remain on the
 	// outbox worker's ownership-aware delete path instead.
-	if event.AggregateType == MemoryMirrorRule && event.Operation == MemoryMirrorDelete {
-		if customID == "" {
-			return fmt.Errorf("enqueue rule delete mirror event: empty custom ID")
-		}
+	if isRuleTombstone {
 		if _, err := tx.Exec(ctx, `
 			UPDATE memories
 			SET deleted_at = now(), updated_at = now()
@@ -216,16 +227,30 @@ func lockMemoryMirrorCustomID(ctx context.Context, tx pgx.Tx, installationID int
 	return nil
 }
 
+func memoryMirrorExecutionTenant(installationID int64) string {
+	return fmt.Sprintf("memory-mirror-execution:%d", installationID)
+}
+
+func lockMemoryMirrorExecution(ctx context.Context, tx pgx.Tx, installationID int64, customID string) error {
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))`,
+		memoryMirrorExecutionTenant(installationID), customID); err != nil {
+		return fmt.Errorf("lock memory mirror execution: %w", err)
+	}
+	return nil
+}
+
 // ProcessMemoryMirrorEvent serializes all external side effects and their lease
 // acknowledgements for one tenant/custom ID. The session execution lock uses
 // PostgreSQL's two-int advisory-lock key space, which does not overlap the
-// producer transaction lock's bigint key space.
+// general producer transaction lock's bigint key space. Rule tombstone
+// producers additionally take this execution key as a transaction lock.
 //
 // Slow upserts hold one bounded worker pool connection but no database
-// transaction and no producer lock. Pattern deletes acquire locks in one order:
-// execution lock, then producer transaction lock. This keeps the ownership
-// check, quick tombstone, and acknowledgement atomic without letting embedding
-// or network latency block relational producers.
+// transaction or general producer lock. Pattern deletes acquire locks in one
+// order: execution lock, then producer transaction lock. This keeps the
+// ownership check, quick tombstone, and acknowledgement atomic without letting
+// embedding or network latency block ordinary relational producers.
 func (s *Store) ProcessMemoryMirrorEvent(
 	ctx context.Context,
 	event MemoryMirrorOutboxEvent,
@@ -243,7 +268,7 @@ func (s *Store) ProcessMemoryMirrorEvent(
 		return fmt.Errorf("process memory mirror event %d: postgres pool unavailable", event.ID)
 	}
 
-	lockTenant := fmt.Sprintf("memory-mirror-execution:%d", event.InstallationID)
+	lockTenant := memoryMirrorExecutionTenant(event.InstallationID)
 	conn, err := acquireMirrorExecutionConn(ctx, s.Pool, lockTenant, customID)
 	if err != nil {
 		return fmt.Errorf("process memory mirror event %d: acquire execution lock: %w", event.ID, err)

@@ -363,6 +363,132 @@ func TestMirrorSlowUpsertDoesNotBlockSameIDProducer(t *testing.T) {
 	}
 }
 
+type delayedRuleUpsertIndexer struct {
+	MirrorIndexer
+	entered chan struct{}
+	release <-chan struct{}
+}
+
+func (d *delayedRuleUpsertIndexer) IndexRule(ctx context.Context, owner string, rule RuleMemory) error {
+	close(d.entered)
+	select {
+	case <-d.release:
+		return d.MirrorIndexer.IndexRule(ctx, owner, rule)
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Disabling a rule is a synchronous search-visibility boundary. If its older
+// enabled-rule upsert is already executing on another machine, disable must
+// wait for that side effect and tombstone it before returning.
+func TestRuleDisableWaitsForInFlightOlderUpsertAndWins(t *testing.T) {
+	pool, install := pgTestPool(t)
+	ctx := context.Background()
+	lockMirrorOutboxPGTests(t, pool, ctx)
+	st := store.NewWithDB(pool)
+	if _, err := pool.Exec(ctx, `DELETE FROM memory_mirror_outbox`); err != nil {
+		t.Fatalf("clear mirror outbox: %v", err)
+	}
+
+	rule, err := st.CreateRule(ctx, install, "safety", "disabled rules stay unsearchable", 5, true)
+	if err != nil {
+		t.Fatalf("create rule: %v", err)
+	}
+	customID := RuleCustomID(rule.ID)
+	t.Cleanup(func() {
+		bg := context.Background()
+		_, _ = pool.Exec(bg, `DELETE FROM memory_mirror_outbox WHERE installation_id=$1 AND aggregate_type='rule' AND aggregate_id=$2`, install, rule.ID)
+		_, _ = pool.Exec(bg, `DELETE FROM rules WHERE id=$1`, rule.ID)
+	})
+
+	base := NewPGIndexer(pool, nil, install, pgTestDims, slog.New(slog.DiscardHandler))
+	releaseUpsert := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(releaseUpsert)
+		}
+	}()
+	delayed := &delayedRuleUpsertIndexer{
+		MirrorIndexer: base, entered: make(chan struct{}), release: releaseUpsert,
+	}
+	worker := NewMirrorWorker(st, func(context.Context, int64) MirrorIndexer { return delayed }, slog.New(slog.DiscardHandler))
+	workerDone := make(chan error, 1)
+	go func() {
+		processed, err := worker.RunOnce(ctx, 1)
+		if err == nil && processed != 1 {
+			err = fmt.Errorf("processed=%d want=1", processed)
+		}
+		workerDone <- err
+	}()
+	select {
+	case <-delayed.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("older enabled-rule upsert did not start")
+	}
+
+	type updateResult struct {
+		rule *store.Rule
+		err  error
+	}
+	disableDone := make(chan updateResult, 1)
+	disabled := false
+	go func() {
+		updated, err := st.UpdateRule(ctx, rule.ID, []int64{install}, nil, nil, nil, &disabled)
+		disableDone <- updateResult{rule: updated, err: err}
+	}()
+
+	var early *updateResult
+	select {
+	case result := <-disableDone:
+		early = &result
+	case <-time.After(150 * time.Millisecond):
+		// Expected: the disable transaction waits for the older execution lock.
+	}
+
+	close(releaseUpsert)
+	released = true
+	select {
+	case err := <-workerDone:
+		if err != nil {
+			t.Fatalf("finish older enabled-rule upsert: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("older enabled-rule upsert did not finish")
+	}
+
+	var result updateResult
+	if early != nil {
+		result = *early
+	} else {
+		select {
+		case result = <-disableDone:
+		case <-time.After(5 * time.Second):
+			t.Fatal("rule disable did not resume after older upsert finished")
+		}
+	}
+	if result.err != nil {
+		t.Fatalf("disable rule: %v", result.err)
+	}
+	if result.rule == nil || result.rule.Enabled {
+		t.Fatalf("disabled rule result=%+v", result.rule)
+	}
+
+	var live bool
+	if err := pool.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM live_memories WHERE installation_id=$1 AND custom_id=$2)`,
+		install, customID).Scan(&live); err != nil {
+		t.Fatalf("read live rule memory: %v", err)
+	}
+	if early != nil {
+		t.Fatalf("disable returned before its older upsert completed; live after the old worker returned=%v", live)
+	}
+	if live {
+		t.Fatal("older upsert resurrected rule memory after disable returned")
+	}
+}
+
 type delayedMirrorUpsertIndexer struct {
 	MirrorIndexer
 	entered chan struct{}
