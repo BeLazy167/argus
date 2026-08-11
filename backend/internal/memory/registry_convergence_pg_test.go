@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -428,6 +429,191 @@ func TestEmbeddingLockWaitersDoNotStarveExclusiveHolderWork(t *testing.T) {
 		case <-waiterDone:
 		case <-time.After(2 * time.Second):
 			t.Fatal("advisory-lock waiter did not exit after cancellation")
+		}
+	}
+}
+
+func TestRegistryDistinctTenantRepairsLeavePoolHeadroom(t *testing.T) {
+	pool, firstInstallationID := pgTestPoolWithMaxConns(t, 6)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	installationIDs := []int64{firstInstallationID}
+	for i := 1; i < 5; i++ {
+		var installationID int64
+		if err := pool.QueryRow(ctx, `
+			INSERT INTO installations (installation_id, org_login)
+			VALUES ($1, $2)
+			ON CONFLICT (installation_id) DO UPDATE SET org_login = EXCLUDED.org_login
+			RETURNING id`, 910_060+i, fmt.Sprintf("repair-headroom-%d", i)).Scan(&installationID); err != nil {
+			t.Fatalf("create installation %d: %v", i, err)
+		}
+		installationIDs = append(installationIDs, installationID)
+	}
+	for i, installationID := range installationIDs {
+		model := fmt.Sprintf("headroom-space-%d", i)
+		if _, err := pool.Exec(ctx, `
+			UPDATE installations
+			SET default_settings = jsonb_set(COALESCE(default_settings, '{}'::jsonb),
+				'{test_embedding_model}', to_jsonb($2::text), true)
+			WHERE id = $1`, installationID, model); err != nil {
+			t.Fatalf("configure installation %d: %v", installationID, err)
+		}
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO memories (installation_id, container_tag, custom_id, type, content, metadata)
+			VALUES ($1, 'repo:api', $2, 'pattern', $3, '{}'::jsonb)
+			ON CONFLICT (installation_id, custom_id) DO UPDATE
+			SET content = EXCLUDED.content, embedding = NULL, embedding_model = NULL, embedding_space = NULL,
+				deleted_at = NULL, invalidated_at = NULL`,
+			installationID, fmt.Sprintf("repair-headroom-%d", i), fmt.Sprintf("tenant repair %d", i)); err != nil {
+			t.Fatalf("seed installation %d: %v", installationID, err)
+		}
+	}
+	t.Cleanup(func() {
+		cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancelCleanup()
+		if _, err := pool.Exec(cleanupCtx, `DELETE FROM memories WHERE installation_id = ANY($1)`, installationIDs); err != nil {
+			t.Errorf("cleanup repair memories: %v", err)
+		}
+		if _, err := pool.Exec(cleanupCtx, `
+			UPDATE installations
+			SET default_settings = COALESCE(default_settings, '{}'::jsonb) - 'test_embedding_model'
+			WHERE id = ANY($1)`, installationIDs); err != nil {
+			t.Errorf("cleanup repair installations: %v", err)
+		}
+	})
+
+	providerEntered := make(chan string, len(installationIDs))
+	releaseProviders := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseProviderCalls := func() { releaseOnce.Do(func() { close(releaseProviders) }) }
+	defer releaseProviderCalls()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req embedRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		providerEntered <- req.Model
+		select {
+		case <-releaseProviders:
+		case <-r.Context().Done():
+			return
+		}
+		data := make([]map[string]any, len(req.Input))
+		for i := range req.Input {
+			vec := make([]float32, StorageDimensions)
+			vec[0] = 1
+			data[i] = map[string]any{"index": i, "embedding": vec}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": data})
+	}))
+	defer server.Close()
+
+	embedders := NewEmbedderRegistry(
+		&pgDesiredSpaceResolver{pool: pool, baseURL: server.URL},
+		PlatformEmbeddings{Dimensions: StorageDimensions},
+		discardLogger(),
+	)
+	registry := NewRegistry(discardLogger()).WithPostgresBackend(pool, embedders)
+
+	// Model the durable EventBus LISTEN session, which permanently occupies one
+	// production pool connection. Each repair below has a distinct tenant lock.
+	listener, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("reserve durable listener connection: %v", err)
+	}
+	defer listener.Release()
+
+	results := make(chan reembedResult, len(installationIDs))
+	for _, installationID := range installationIDs {
+		installationID := installationID
+		go func() {
+			n, err := registry.ReembedCurrentSpace(ctx, installationID, 10)
+			results <- reembedResult{repaired: n, err: err}
+		}()
+	}
+
+	seenModels := make(map[string]bool, len(installationIDs))
+	// Six connections admit two repairs (two connections each), while one
+	// listener and one ordinary query slot remain available.
+	for len(seenModels) < 2 {
+		select {
+		case model := <-providerEntered:
+			seenModels[model] = true
+		case <-ctx.Done():
+			t.Fatalf("only %d repairs reached the provider barrier: %v", len(seenModels), ctx.Err())
+		}
+	}
+
+	// A queued caller must be able to abandon the process-local permit wait
+	// without borrowing a pool connection or leaking capacity.
+	cancelledCtx, cancelQueued := context.WithCancel(ctx)
+	cancelledDone := make(chan error, 1)
+	queuedStarted := make(chan struct{})
+	go func() {
+		close(queuedStarted)
+		_, err := registry.ReembedCurrentSpace(cancelledCtx, installationIDs[0], 10)
+		cancelledDone <- err
+	}()
+	<-queuedStarted
+	cancelQueued()
+	select {
+	case err := <-cancelledDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("cancelled repair permit wait error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled repair permit waiter did not exit")
+	}
+	// Give the old implementation time to park every distinct-tenant winner at
+	// the barrier with its advisory-lock connection. A capped Registry leaves
+	// one work connection per admitted repair and one ordinary query slot in
+	// addition to the durable listener.
+	timer := time.NewTimer(3 * reembedLockPollInterval)
+collectEarly:
+	for {
+		select {
+		case model := <-providerEntered:
+			seenModels[model] = true
+		case <-timer.C:
+			break collectEarly
+		}
+	}
+	if len(seenModels) != 2 {
+		t.Errorf("repairs admitted at provider barrier = %d, want capacity-safe 2", len(seenModels))
+	}
+
+	queryCtx, cancelQuery := context.WithTimeout(ctx, 300*time.Millisecond)
+	var one int
+	queryErr := pool.QueryRow(queryCtx, `SELECT 1`).Scan(&one)
+	cancelQuery()
+	if queryErr != nil {
+		t.Errorf("normal pool query starved behind distinct-tenant repairs: %v", queryErr)
+	} else if one != 1 {
+		t.Errorf("normal pool query = %d, want 1", one)
+	}
+
+	releaseProviderCalls()
+	for range installationIDs {
+		select {
+		case result := <-results:
+			if result.err != nil {
+				t.Errorf("repair failed: %v (repaired=%d)", result.err, result.repaired)
+			} else if result.repaired != 1 {
+				t.Errorf("repaired = %d, want 1", result.repaired)
+			}
+		case <-ctx.Done():
+			t.Fatalf("distinct-tenant repairs did not all progress: %v", ctx.Err())
+		}
+	}
+	for len(seenModels) < len(installationIDs) {
+		select {
+		case model := <-providerEntered:
+			seenModels[model] = true
+		default:
+			t.Fatalf("provider saw models %v, want all %d tenant repairs", seenModels, len(installationIDs))
 		}
 	}
 }

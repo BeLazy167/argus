@@ -22,8 +22,9 @@ type Registry struct {
 
 	// Wired by WithPostgresBackend. Without it GetIndexer returns nil and
 	// memory is off, which is the honest answer for an unwired process.
-	pool      *pgxpool.Pool
-	embedders *EmbedderRegistry
+	pool          *pgxpool.Pool
+	embedders     *EmbedderRegistry
+	repairPermits chan struct{}
 }
 
 // NewRegistry constructs a Registry with no usable backend. Call
@@ -59,6 +60,7 @@ func (r *Registry) WithPostgresBackend(pool *pgxpool.Pool, embedders *EmbedderRe
 	}
 	r.pool = pool
 	r.embedders = embedders
+	r.repairPermits = make(chan struct{}, reembedConcurrencyLimit(pool.Config().MaxConns))
 	return r
 }
 
@@ -123,6 +125,40 @@ const reembedLockPollInterval = 50 * time.Millisecond
 // this bound ensures a tenant rotated continuously returns an explicit retry
 // signal instead of monopolizing the advisory lock forever.
 const maxReembedConvergenceRounds = 8
+
+// Each repair can simultaneously retain its session-lock connection and
+// borrow a second connection for provider/corpus queries. Beyond those pairs,
+// reserve one connection for the durable EventBus LISTEN session and one for
+// ordinary database work. Pools smaller than four cannot provide every slot;
+// a minimum of one avoids disabling repair on two- and three-connection pools.
+const (
+	reembedConnectionsPerRepair int32 = 2
+	reembedReservedConnections  int32 = 2
+)
+
+func reembedConcurrencyLimit(maxConns int32) int {
+	limit := (maxConns - reembedReservedConnections) / reembedConnectionsPerRepair
+	if limit < 1 {
+		return 1
+	}
+	return int(limit)
+}
+
+// acquireRepairPermit bounds distinct-tenant winners within this Registry and
+// therefore this process/pool. Cross-machine serialization remains the job of
+// PostgreSQL advisory locks; separate machine pools do not share this permit.
+func (r *Registry) acquireRepairPermit(ctx context.Context) error {
+	select {
+	case r.repairPermits <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (r *Registry) releaseRepairPermit() {
+	<-r.repairPermits
+}
 
 // memoryEmbeddingLockKey namespaces the tenant lock independently from every
 // other advisory lock while retaining the full installation id.
@@ -227,6 +263,14 @@ func (r *Registry) ReembedCurrentSpace(ctx context.Context, installationID int64
 	if r.pool == nil || r.embedders == nil {
 		return 0, fmt.Errorf("reembed current space: postgres memory backend is not configured")
 	}
+
+	// Take the process-local capacity permit before borrowing the session-lock
+	// connection. Otherwise distinct tenant keys can all win and exhaust the
+	// pool while every winner waits for its corpus-work connection.
+	if err := r.acquireRepairPermit(ctx); err != nil {
+		return 0, fmt.Errorf("reembed current space: wait for repair capacity: %w", err)
+	}
+	defer r.releaseRepairPermit()
 
 	lockKey := memoryEmbeddingLockKey(installationID)
 	conn, err := acquireReembedLock(ctx, r.pool, lockKey)
