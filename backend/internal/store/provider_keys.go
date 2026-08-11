@@ -70,15 +70,30 @@ func (s *Store) UpsertProviderKey(ctx context.Context, installationID int64, rep
 }
 
 func (s *Store) ListProviderKeys(ctx context.Context, installationID int64) ([]ProviderKey, error) {
-	rows, err := s.Pool.Query(ctx, `
-		SELECT id, installation_id, repo_id, provider, api_key_enc, key_hint, base_url, model, created_at, updated_at
-		FROM provider_keys WHERE installation_id = $1 ORDER BY provider, repo_id NULLS FIRST
-	`, installationID)
+	rows, err := s.q.ListProviderKeys(ctx, installationID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[ProviderKey])
+	keys := make([]ProviderKey, 0, len(rows))
+	for _, row := range rows {
+		keyHint := ""
+		if row.KeyHint != nil {
+			keyHint = *row.KeyHint
+		}
+		keys = append(keys, ProviderKey{
+			ID:             row.ID,
+			InstallationID: row.InstallationID,
+			RepoID:         row.RepoID,
+			Provider:       row.Provider,
+			APIKeyEnc:      row.APIKeyEnc,
+			KeyHint:        keyHint,
+			BaseURL:        row.BaseURL,
+			Model:          row.Model,
+			CreatedAt:      row.CreatedAt,
+			UpdatedAt:      row.UpdatedAt,
+		})
+	}
+	return keys, nil
 }
 
 func (s *Store) DeleteProviderKey(ctx context.Context, id int64, installationID int64) error {

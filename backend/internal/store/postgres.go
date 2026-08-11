@@ -17,6 +17,13 @@ import (
 type Store struct {
 	Pool *pgxpool.Pool
 	Q    *db.Queries
+	q    *db.Queries
+}
+
+// NewWithDB builds a Store over any sqlc-compatible pool or transaction.
+// Callers that only use generated Store methods do not need a concrete pool.
+func NewWithDB(dbtx db.DBTX) *Store {
+	return &Store{q: db.New(dbtx)}
 }
 
 func New(ctx context.Context, databaseURL string) (*Store, error) {
@@ -47,7 +54,7 @@ func New(ctx context.Context, databaseURL string) (*Store, error) {
 		pool.Close()
 		return nil, fmt.Errorf("pinging database: %w", err)
 	}
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, Q: db.New(pool), q: db.New(pool)}
 	go st.keepAlive()
 	return st, nil
 }
