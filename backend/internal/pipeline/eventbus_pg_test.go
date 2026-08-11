@@ -368,7 +368,7 @@ func TestDurableEventBusCatchUpPaginatesBoundedQueries(t *testing.T) {
 	bus.mu.RUnlock()
 	live := make(chan Event, eventCatchUpBatchSize+2)
 	topic.mu.Lock()
-	topic.subscribers[1] = &topicSubscriber{ch: live}
+	topic.subscribers[1] = newTopicSubscriber(live, 0)
 	topic.mu.Unlock()
 
 	cursor, err := bus.reviewEventHighWater(ctx)
@@ -489,6 +489,109 @@ func TestDurableEventBusListenerReconnectCatchesDisconnectedInterval(t *testing.
 	select {
 	case evt := <-live:
 		t.Fatalf("duplicate after repeated connection churn: %+v", evt)
+	default:
+	}
+}
+
+func TestDurableEventBusReconnectCatchesLateCommitBelowFreshNotification(t *testing.T) {
+	pool, ctx, reviewID := durableEventTestReview(t)
+	config, err := pgxpool.ParseConfig(os.Getenv("TEST_DATABASE_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	applicationName := "eventbus-order-" + uuid.NewString()
+	config.ConnConfig.RuntimeParams["application_name"] = applicationName
+	config.MaxConns = 3
+	listenerPool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(listenerPool.Close)
+	listenerCtx, cancelListener := context.WithCancel(context.Background())
+	t.Cleanup(cancelListener)
+	bus := NewDurableEventBus(listenerCtx, listenerPool, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	live, _, unsubscribe, err := bus.SubscribeContext(ctx, reviewID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unsubscribe()
+
+	slow, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = slow.Rollback(ctx) }()
+	var slowID int64
+	var notified string
+	if err := slow.QueryRow(ctx, `
+		WITH inserted AS (
+			INSERT INTO review_events (review_id, attempt_generation, event_type, data)
+			VALUES ($1,0,$2,'{}') RETURNING id
+		)
+		SELECT id, pg_notify('argus_review_events','remote:' || id::text)
+		FROM inserted`, reviewID, EventComment).Scan(&slowID, &notified); err != nil {
+		t.Fatal(err)
+	}
+
+	var fastID int64
+	if err := pool.QueryRow(ctx, `
+		WITH inserted AS (
+			INSERT INTO review_events (review_id, attempt_generation, event_type, data)
+			VALUES ($1,0,$2,'{}') RETURNING id
+		)
+		SELECT id, pg_notify('argus_review_events','remote:' || id::text)
+		FROM inserted`, reviewID, EventStageChanged).Scan(&fastID, &notified); err != nil {
+		t.Fatal(err)
+	}
+	if slowID >= fastID {
+		t.Fatalf("test setup IDs slow=%d fast=%d", slowID, fastID)
+	}
+	select {
+	case evt := <-live:
+		if evt.ID != fastID {
+			t.Fatalf("first live event=%+v want fast ID %d", evt, fastID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("fast notification not delivered")
+	}
+
+	var listenerPID int32
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		err = pool.QueryRow(ctx, `
+			SELECT pid FROM pg_stat_activity
+			WHERE application_name=$1 AND query='LISTEN argus_review_events'
+			ORDER BY backend_start DESC LIMIT 1`, applicationName).Scan(&listenerPID)
+		if err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if listenerPID == 0 {
+		t.Fatal("listener PID not found")
+	}
+	var terminated bool
+	if err := pool.QueryRow(ctx, `SELECT pg_terminate_backend($1)`, listenerPID).Scan(&terminated); err != nil {
+		t.Fatal(err)
+	}
+	if !terminated {
+		t.Fatalf("listener pid %d was not terminated", listenerPID)
+	}
+	if err := slow.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case evt := <-live:
+		if evt.ID != slowID || evt.Type != EventComment {
+			t.Fatalf("late lower-ID event=%+v want id=%d type=%s", evt, slowID, EventComment)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatalf("late committed ID %d was skipped below fast ID %d", slowID, fastID)
+	}
+	select {
+	case evt := <-live:
+		t.Fatalf("fast event duplicated by reconnect catch-up: %+v", evt)
 	default:
 	}
 }

@@ -119,9 +119,6 @@ type EventBus struct {
 	instance     uuid.UUID
 	persistEvent durableEventPersister
 
-	seenMu sync.Mutex
-	seen   map[int64]struct{}
-
 	// globalMu guards globalSubs. Separate from mu so global-listener
 	// registration doesn't contend with topic open/close.
 	globalMu   sync.RWMutex
@@ -135,18 +132,76 @@ type GlobalHandler func(reviewID uuid.UUID, evt Event)
 // authority before insertion. Errors describe storage failures, not stale work.
 type durableEventPersister func(context.Context, uuid.UUID, *Event) (current bool, err error)
 
+type durableDeliverySource uint8
+
+const (
+	deliveryFresh durableDeliverySource = iota
+	deliveryCatchUp
+	subscriberSeenCapacity = maxHistoryEvents * 4
+)
+
 type topicSubscriber struct {
 	ch            chan Event
-	durableCursor int64
+	replayAfterID int64
+	catchUpSeen   map[int64]struct{}
+	freshSeen     map[int64]struct{}
+	freshOrder    []int64
+	freshNext     int
+}
+
+func newTopicSubscriber(ch chan Event, replayAfterID int64) *topicSubscriber {
+	return &topicSubscriber{
+		ch:            ch,
+		replayAfterID: replayAfterID,
+		catchUpSeen:   make(map[int64]struct{}),
+		freshSeen:     make(map[int64]struct{}),
+	}
+}
+
+func (s *topicSubscriber) hasSeen(id int64, source durableDeliverySource) bool {
+	if id <= s.replayAfterID {
+		return true
+	}
+	if _, duplicate := s.catchUpSeen[id]; duplicate {
+		// A fresh notification overlapping catch-up is the last expected copy.
+		// Remove it so disconnected-only events, which have no copy, remain
+		// bounded by the capacity fail/reconnect path below.
+		if source == deliveryFresh {
+			delete(s.catchUpSeen, id)
+			s.remember(id, deliveryFresh)
+		}
+		return true
+	}
+	_, duplicate := s.freshSeen[id]
+	return duplicate
+}
+
+func (s *topicSubscriber) canRemember(source durableDeliverySource) bool {
+	return source != deliveryCatchUp || len(s.catchUpSeen) < subscriberSeenCapacity
+}
+
+func (s *topicSubscriber) remember(id int64, source durableDeliverySource) {
+	if source == deliveryCatchUp {
+		s.catchUpSeen[id] = struct{}{}
+		return
+	}
+	if len(s.freshOrder) < subscriberSeenCapacity {
+		s.freshOrder = append(s.freshOrder, id)
+	} else {
+		delete(s.freshSeen, s.freshOrder[s.freshNext])
+		s.freshOrder[s.freshNext] = id
+		s.freshNext = (s.freshNext + 1) % subscriberSeenCapacity
+	}
+	s.freshSeen[id] = struct{}{}
 }
 
 type topic struct {
-	mu            sync.Mutex
-	subscribers   map[uint64]*topicSubscriber
-	history       []Event
-	historyCursor int64
-	closed        bool
-	nextID        uint64
+	mu          sync.Mutex
+	subscribers map[uint64]*topicSubscriber
+	history     []Event
+	historySeen map[int64]struct{}
+	closed      bool
+	nextID      uint64
 }
 
 func NewEventBus() *EventBus {
@@ -154,7 +209,6 @@ func NewEventBus() *EventBus {
 		topics:   make(map[uuid.UUID]*topic),
 		logger:   slog.Default(),
 		instance: uuid.New(),
-		seen:     make(map[int64]struct{}),
 	}
 }
 
@@ -189,7 +243,7 @@ func (eb *EventBus) OpenTopic(reviewID uuid.UUID) {
 			return
 		}
 	}
-	eb.topics[reviewID] = &topic{subscribers: make(map[uint64]*topicSubscriber)}
+	eb.topics[reviewID] = &topic{subscribers: make(map[uint64]*topicSubscriber), historySeen: make(map[int64]struct{})}
 }
 
 // CloseTopic marks a topic as closed and closes all subscriber channels.
@@ -331,47 +385,58 @@ func (eb *EventBus) persistToPostgres(ctx context.Context, reviewID uuid.UUID, e
 }
 
 func (eb *EventBus) deliver(reviewID uuid.UUID, evt Event, notifyGlobal bool) {
-	if evt.ID > 0 {
-		eb.seenMu.Lock()
-		if _, duplicate := eb.seen[evt.ID]; duplicate {
-			eb.seenMu.Unlock()
-			return
-		}
-		eb.seen[evt.ID] = struct{}{}
-		if len(eb.seen) > maxHistoryEvents*4 {
-			eb.seen = map[int64]struct{}{evt.ID: {}}
-		}
-		eb.seenMu.Unlock()
-	}
+	eb.deliverFrom(reviewID, evt, notifyGlobal, deliveryFresh)
+}
 
+func (eb *EventBus) deliverFrom(reviewID uuid.UUID, evt Event, notifyGlobal bool, source durableDeliverySource) {
 	eb.mu.RLock()
 	t, ok := eb.topics[reviewID]
 	eb.mu.RUnlock()
 	if ok {
 		t.mu.Lock()
 		if !t.closed {
-			// Durable IDs are per-subscriber cursors: a second subscriber may
-			// replay an event that the first still needs from reconnect catch-up.
-			// ID=0 events exist only in memory and must never advance a cursor.
-			if evt.ID == 0 || evt.ID > t.historyCursor {
-				if len(t.history) < maxHistoryEvents {
-					t.history = append(t.history, evt)
-				}
+			appendHistory := len(t.history) < maxHistoryEvents
+			if evt.ID > 0 {
+				_, duplicate := t.historySeen[evt.ID]
+				appendHistory = appendHistory && !duplicate
+			}
+			if appendHistory {
+				t.history = append(t.history, evt)
 				if evt.ID > 0 {
-					t.historyCursor = evt.ID
+					t.historySeen[evt.ID] = struct{}{}
 				}
 			}
+
 			for id, subscriber := range t.subscribers {
-				if evt.ID > 0 && evt.ID <= subscriber.durableCursor {
+				if evt.ID > 0 && subscriber.hasSeen(evt.ID, source) {
 					continue
 				}
-				if evt.ID > 0 {
-					subscriber.durableCursor = evt.ID
+				if evt.ID > 0 && !subscriber.canRemember(source) {
+					delete(t.subscribers, id)
+					close(subscriber.ch)
+					eb.logger.Warn("eventbus: reconnecting subscriber after durable dedup window filled",
+						"subscriber", id, "type", evt.Type, "review_id", reviewID)
+					continue
 				}
 				select {
 				case subscriber.ch <- evt:
+					if evt.ID > 0 {
+						subscriber.remember(evt.ID, source)
+					}
 				default:
-					eb.logger.Warn("eventbus: dropped event for slow client", "subscriber", id, "type", evt.Type, "review_id", reviewID)
+					if evt.ID > 0 {
+						// Dropping a durable event and retaining this subscription
+						// would permanently move its dedup state past unseen data.
+						// Closing drains already-buffered events, then makes the
+						// browser reconnect and replay from its last received ID.
+						delete(t.subscribers, id)
+						close(subscriber.ch)
+						eb.logger.Warn("eventbus: reconnecting slow subscriber",
+							"subscriber", id, "type", evt.Type, "review_id", reviewID)
+						continue
+					}
+					eb.logger.Warn("eventbus: dropped ephemeral event for slow client",
+						"subscriber", id, "type", evt.Type, "review_id", reviewID)
 				}
 			}
 		}
@@ -491,6 +556,7 @@ func (eb *EventBus) listen(ctx context.Context, ready chan struct{}) {
 		}
 
 		readyOnce.Do(func() { close(ready) })
+		notificationsSinceCheckpoint := 0
 		for ctx.Err() == nil {
 			n, waitErr := conn.Conn().WaitForNotification(ctx)
 			if waitErr != nil {
@@ -498,7 +564,8 @@ func (eb *EventBus) listen(ctx context.Context, ready chan struct{}) {
 				break
 			}
 			parts := strings.SplitN(n.Payload, ":", 2)
-			if len(parts) != 2 || parts[0] == eb.instance.String() {
+			if len(parts) != 2 {
+				eb.logger.Warn("eventbus: invalid notification", "payload", n.Payload)
 				continue
 			}
 			id, parseErr := strconv.ParseInt(parts[1], 10, 64)
@@ -506,14 +573,26 @@ func (eb *EventBus) listen(ctx context.Context, ready chan struct{}) {
 				eb.logger.Warn("eventbus: invalid notification", "payload", n.Payload)
 				continue
 			}
-			var fetchErr error
-			durableCursor, fetchErr = eb.processStoredNotification(ctx, durableCursor, id)
-			if fetchErr != nil {
-				// Reconnect even when LISTEN itself is healthy. This gives both the
-				// point fetch and its catch-up query a fresh retry opportunity.
-				err = fetchErr
-				eb.logger.Error("eventbus: notification recovery failed", "event_id", id, "error", fetchErr)
-				break
+			if parts[0] != eb.instance.String() {
+				var fetchErr error
+				durableCursor, fetchErr = eb.processStoredNotification(ctx, durableCursor, id)
+				if fetchErr != nil {
+					// Reconnect even when LISTEN itself is healthy. This gives both the
+					// point fetch and its catch-up query a fresh retry opportunity.
+					err = fetchErr
+					eb.logger.Error("eventbus: notification recovery failed", "event_id", id, "error", fetchErr)
+					break
+				}
+			}
+
+			notificationsSinceCheckpoint++
+			if notificationsSinceCheckpoint >= eventCatchUpBatchSize {
+				durableCursor, err = eb.catchUpStored(ctx, durableCursor)
+				if err != nil {
+					eb.logger.Error("eventbus: durable checkpoint failed", "error", err)
+					break
+				}
+				notificationsSinceCheckpoint = 0
 			}
 		}
 		conn.Release()
@@ -542,9 +621,23 @@ const authorizedReviewEventsSQL = `
 	WHERE e.attempt_generation=0 OR e.attempt_generation=r.attempt_generation`
 
 func (eb *EventBus) reviewEventHighWater(ctx context.Context) (int64, error) {
+	// BIGSERIAL IDs are allocated before commit. Wait for every transaction
+	// that has already started an INSERT before taking max(id), otherwise an
+	// older ID can commit below the scalar cursor during the next disconnect.
+	tx, err := eb.pool.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("starting review event high-water snapshot: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `LOCK TABLE review_events IN SHARE MODE`); err != nil {
+		return 0, fmt.Errorf("locking review events for high-water snapshot: %w", err)
+	}
 	var id int64
-	if err := eb.pool.QueryRow(ctx, `SELECT COALESCE(max(id),0) FROM review_events`).Scan(&id); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(max(id),0) FROM review_events`).Scan(&id); err != nil {
 		return 0, fmt.Errorf("loading review event high-water: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("committing review event high-water snapshot: %w", err)
 	}
 	return id, nil
 }
@@ -581,7 +674,7 @@ func (eb *EventBus) activeSubscriptionCursorFloor() (int64, bool) {
 		t.mu.Lock()
 		if !t.closed {
 			for _, subscriber := range t.subscribers {
-				cursor := subscriber.durableCursor
+				cursor := subscriber.replayAfterID
 				if cursor < 0 {
 					cursor = 0
 				}
@@ -632,7 +725,7 @@ func (eb *EventBus) catchUpStored(ctx context.Context, afterID int64) (int64, er
 				rows.Close()
 				return cursor, fmt.Errorf("scanning review event catch-up: %w", scanErr)
 			}
-			eb.deliver(reviewID, evt, false)
+			eb.deliverFrom(reviewID, evt, false, deliveryCatchUp)
 			cursor = evt.ID
 			count++
 		}
@@ -660,9 +753,8 @@ func recoverStoredNotification(
 ) (int64, error) {
 	deliverErr := deliverOne(ctx, id)
 	if deliverErr == nil {
-		if id > cursor {
-			return id, nil
-		}
+		// A fresh notification proves only that this ID committed, not that all
+		// lower sequence IDs did. Advance only from a locked durable snapshot.
 		return cursor, nil
 	}
 
@@ -716,6 +808,16 @@ func (eb *EventBus) SubscribeGlobal(h GlobalHandler) {
 	eb.globalMu.Unlock()
 }
 
+func maxDurableEventID(afterID int64, events []Event) int64 {
+	maximum := afterID
+	for _, evt := range events {
+		if evt.ID > 0 && evt.ID > maximum {
+			maximum = evt.ID
+		}
+	}
+	return maximum
+}
+
 // SubscribeContext replays durable events newer than afterID and then streams
 // live notifications without a replay/subscribe gap.
 func (eb *EventBus) SubscribeContext(ctx context.Context, reviewID uuid.UUID, afterID int64) (<-chan Event, []Event, func(), error) {
@@ -762,11 +864,8 @@ func (eb *EventBus) SubscribeContext(ctx context.Context, reviewID uuid.UUID, af
 	}
 	t.nextID++
 	id := t.nextID
-	durableCursor := afterID
-	if len(history) > 0 && history[len(history)-1].ID > durableCursor {
-		durableCursor = history[len(history)-1].ID
-	}
-	t.subscribers[id] = &topicSubscriber{ch: ch, durableCursor: durableCursor}
+	replayAfterID := maxDurableEventID(afterID, history)
+	t.subscribers[id] = newTopicSubscriber(ch, replayAfterID)
 	unsub := func() {
 		t.mu.Lock()
 		defer t.mu.Unlock()
@@ -800,7 +899,7 @@ func (eb *EventBus) Subscribe(reviewID uuid.UUID) (<-chan Event, []Event, func()
 		close(ch)
 		return ch, history, func() {}
 	}
-	t.subscribers[id] = &topicSubscriber{ch: ch}
+	t.subscribers[id] = newTopicSubscriber(ch, 0)
 	history := make([]Event, len(t.history))
 	copy(history, t.history)
 	t.mu.Unlock()

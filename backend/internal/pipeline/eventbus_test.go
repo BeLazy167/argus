@@ -438,9 +438,9 @@ func TestDurableEventBusSubscriberCursorsAreIndependent(t *testing.T) {
 	first := make(chan Event, 4)
 	second := make(chan Event, 4)
 	topic.mu.Lock()
-	topic.subscribers[1] = &topicSubscriber{ch: first, durableCursor: 10}
+	topic.subscribers[1] = newTopicSubscriber(first, 10)
 	// Mirrors a later SubscribeContext replay that has already returned ID 20.
-	topic.subscribers[2] = &topicSubscriber{ch: second, durableCursor: 20}
+	topic.subscribers[2] = newTopicSubscriber(second, 20)
 	topic.mu.Unlock()
 
 	eb.deliver(reviewID, Event{ID: 15, Type: EventComment}, false)
@@ -518,5 +518,138 @@ func TestRecoverStoredNotificationRetriesFailedFetchWithoutAdvancingCursor(t *te
 	}
 	if cursor != 55 || terminalDelivered != 1 || loads != 2 || catches != 2 {
 		t.Fatalf("cursor=%d terminal=%d loads=%d catches=%d", cursor, terminalDelivered, loads, catches)
+	}
+}
+
+func TestDurableEventBusFreshNotificationsAllowOutOfOrderIDs(t *testing.T) {
+	eb := NewEventBus()
+	reviewID := uuid.New()
+	eb.OpenTopic(reviewID)
+	eb.mu.RLock()
+	topic := eb.topics[reviewID]
+	eb.mu.RUnlock()
+	live := make(chan Event, 4)
+	topic.mu.Lock()
+	topic.subscribers[1] = newTopicSubscriber(live, 0)
+	topic.mu.Unlock()
+
+	// BIGSERIAL allocates before commit: transaction 100 can notify before a
+	// still-open transaction 51. Both are fresh live events, not duplicates.
+	eb.deliverFrom(reviewID, Event{ID: 100, Type: EventStageChanged}, false, deliveryFresh)
+	eb.deliverFrom(reviewID, Event{ID: 51, Type: EventComment}, false, deliveryFresh)
+	// A repeated point notification for the same row is still suppressed.
+	eb.deliverFrom(reviewID, Event{ID: 100, Type: EventStageChanged}, false, deliveryFresh)
+
+	for i, want := range []int64{100, 51} {
+		select {
+		case evt := <-live:
+			if evt.ID != want {
+				t.Fatalf("event[%d].ID=%d want %d", i, evt.ID, want)
+			}
+		default:
+			t.Fatalf("event[%d] missing", i)
+		}
+	}
+	select {
+	case evt := <-live:
+		t.Fatalf("duplicate fresh notification delivered: %+v", evt)
+	default:
+	}
+
+	_, history, unsubscribe := eb.Subscribe(reviewID)
+	defer unsubscribe()
+	if len(history) != 2 || history[0].ID != 100 || history[1].ID != 51 {
+		t.Fatalf("out-of-order history=%+v", history)
+	}
+}
+
+func TestDurableEventBusSlowSubscriberIsClosedBeforeDurableDrop(t *testing.T) {
+	eb := NewEventBus()
+	reviewID := uuid.New()
+	eb.OpenTopic(reviewID)
+	eb.mu.RLock()
+	topic := eb.topics[reviewID]
+	eb.mu.RUnlock()
+	live := make(chan Event, 1)
+	topic.mu.Lock()
+	topic.subscribers[1] = newTopicSubscriber(live, 0)
+	topic.mu.Unlock()
+
+	eb.deliverFrom(reviewID, Event{ID: 10, Type: EventStageChanged}, false, deliveryFresh)
+	eb.deliverFrom(reviewID, Event{ID: 11, Type: EventComment}, false, deliveryFresh)
+
+	topic.mu.Lock()
+	_, retained := topic.subscribers[1]
+	topic.mu.Unlock()
+	if retained {
+		t.Fatal("slow subscriber retained after durable channel overflow")
+	}
+	if evt, ok := <-live; !ok || evt.ID != 10 {
+		t.Fatalf("buffered event=(%+v,%v) want ID 10 before close", evt, ok)
+	}
+	if evt, ok := <-live; ok {
+		t.Fatalf("overflow event was treated as delivered: %+v", evt)
+	}
+}
+
+func TestMaxDurableEventIDIgnoresTrailingEphemeralEvents(t *testing.T) {
+	events := []Event{{ID: 12}, {ID: 0, Type: EventReviewCompleted}}
+	if got := maxDurableEventID(7, events); got != 12 {
+		t.Fatalf("max durable ID=%d want 12", got)
+	}
+	if got := maxDurableEventID(20, events); got != 20 {
+		t.Fatalf("existing after ID=%d want 20", got)
+	}
+}
+
+func TestDurableEventBusCatchUpOverlapDoesNotHideFreshLowerID(t *testing.T) {
+	eb := NewEventBus()
+	reviewID := uuid.New()
+	eb.OpenTopic(reviewID)
+	eb.mu.RLock()
+	topic := eb.topics[reviewID]
+	eb.mu.RUnlock()
+	live := make(chan Event, 4)
+	topic.mu.Lock()
+	topic.subscribers[1] = newTopicSubscriber(live, 0)
+	topic.mu.Unlock()
+
+	eb.deliverFrom(reviewID, Event{ID: 100, Type: EventStageChanged}, false, deliveryCatchUp)
+	eb.deliverFrom(reviewID, Event{ID: 100, Type: EventStageChanged}, false, deliveryFresh)
+	eb.deliverFrom(reviewID, Event{ID: 51, Type: EventComment}, false, deliveryFresh)
+
+	for i, want := range []int64{100, 51} {
+		select {
+		case evt := <-live:
+			if evt.ID != want {
+				t.Fatalf("event[%d].ID=%d want %d", i, evt.ID, want)
+			}
+		default:
+			t.Fatalf("event[%d] missing", i)
+		}
+	}
+	select {
+	case evt := <-live:
+		t.Fatalf("catch-up overlap duplicated: %+v", evt)
+	default:
+	}
+}
+
+func TestRecoverStoredNotificationDoesNotTrustSequenceOrder(t *testing.T) {
+	catchCalled := false
+	cursor, err := recoverStoredNotification(context.Background(), 50, 100,
+		func(context.Context, int64) error { return nil },
+		func(context.Context, int64) (int64, error) {
+			catchCalled = true
+			return 0, nil
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cursor != 50 {
+		t.Fatalf("fresh notification advanced cursor=%d want safe checkpoint 50", cursor)
+	}
+	if catchCalled {
+		t.Fatal("successful point notification unexpectedly ran catch-up")
 	}
 }
