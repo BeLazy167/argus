@@ -195,10 +195,20 @@ func (s *Server) handleHelpCommand(ctx context.Context, evt ghpkg.IssueCommentEv
 	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "rocket")
 }
 
-// handleRememberCommand parses @argus-eye remember, stores the pattern in DB
-// (and optionally memory), and posts confirmation.
+// canRemember reports whether an issue commenter may persist review memory.
+// Repo memory accepts repository maintainers. Org-wide memory is narrower:
+// a collaborator on one repository must not influence every repository in the
+// installation, so only installation owners and organization members qualify.
+func canRemember(authorAssociation string, orgWide bool) bool {
+	association := strings.ToUpper(strings.TrimSpace(authorAssociation))
+	if orgWide {
+		return association == "OWNER" || association == "MEMBER"
+	}
+	return ghpkg.IsPrivilegedAssociation(association)
+}
+
+// handleRememberCommand parses @argus-eye remember and persists a pattern.
 func (s *Server) handleRememberCommand(ctx context.Context, evt ghpkg.IssueCommentEvent, owner, repo string, ghClient *ghpkg.Client, args string) {
-	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "eyes")
 
 	// Parse --org flag as discrete token to avoid matching substrings like --org-prefix
 	var isOrg bool
@@ -216,6 +226,16 @@ func (s *Server) handleRememberCommand(ctx context.Context, evt ghpkg.IssueComme
 			fmt.Sprintf("Usage: `@%s remember <pattern>` or `@%s remember --org <pattern>`", s.cfg.GitHubAppSlug, s.cfg.GitHubAppSlug))
 		return
 	}
+	if !canRemember(evt.AuthorAssociation, isOrg) {
+		s.logger.Info("remember: unauthorized commenter", "author", evt.CommentAuthor,
+			"association", evt.AuthorAssociation, "org_wide", isOrg, "pr", evt.PRNumber)
+		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
+		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
+			"Only trusted repository maintainers can persist Argus memory; org-wide memory requires an owner or organization member.")
+		return
+	}
+
+	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "eyes")
 
 	// Look up installation
 	inst, err := s.store.GetInstallationByGitHubID(ctx, evt.InstallationID)
