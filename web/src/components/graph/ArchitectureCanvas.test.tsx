@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import type { Node } from "@xyflow/react";
 import type { ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
@@ -14,16 +14,35 @@ vi.mock("@xyflow/react", () => ({
 	ReactFlow: ({
 		nodes,
 		edges,
+		onNodeClick,
 	}: {
 		nodes: Node[];
 		edges: { id: string; source: string; target: string }[];
+		onNodeClick: (event: unknown, node: Node) => void;
 	}) => (
-		<output data-testid="flow">
-			{JSON.stringify({
-				nodes: nodes.map(({ id }) => id),
-				edges: edges.map(({ source, target }) => `${source}->${target}`),
-			})}
-		</output>
+		<>
+			<output data-testid="flow">
+				{JSON.stringify({
+					nodes: nodes.map(({ id, data, style }) => ({
+						id,
+						selected: data.selected,
+						opacity: style?.opacity,
+					})),
+					edges: edges.map(({ source, target }) => `${source}->${target}`),
+				})}
+			</output>
+			{nodes
+				.filter(({ type }) => type !== "group")
+				.map((node) => (
+					<button
+						key={node.id}
+						data-testid={`node-${node.id}`}
+						onClick={(event) => onNodeClick(event, node)}
+					>
+						{node.id}
+					</button>
+				))}
+		</>
 	),
 	ReactFlowProvider: ({ children }: { children: ReactNode }) => children,
 	useReactFlow: () => ({ fitView: vi.fn() }),
@@ -75,8 +94,13 @@ describe("architecture canvas reconciliation", () => {
 			/>,
 		);
 		const initial = JSON.parse(screen.getByTestId("flow").textContent ?? "{}");
-		expect(initial.nodes).toEqual(expect.arrayContaining(["a.ts", "b.ts"]));
+		expect(initial.nodes.map(({ id }: Node) => id)).toEqual(
+			expect.arrayContaining(["a.ts", "b.ts"]),
+		);
 		expect(initial.edges).toEqual(["a.ts->b.ts"]);
+		fireEvent.click(screen.getByTestId("node-a.ts"));
+		const selected = JSON.parse(screen.getByTestId("flow").textContent ?? "{}");
+		expect(selected.nodes.find(({ id }: Node) => id === "a.ts")?.selected).toBe(true);
 
 		rerender(
 			<ArchitectureCanvas
@@ -87,8 +111,12 @@ describe("architecture canvas reconciliation", () => {
 		);
 
 		const refreshed = JSON.parse(screen.getByTestId("flow").textContent ?? "{}");
-		expect(refreshed.nodes).toEqual(expect.arrayContaining(["b.ts", "c.ts"]));
-		expect(refreshed.nodes).not.toContain("a.ts");
+		const refreshedFileNodes = refreshed.nodes.filter(({ id }: Node) => !id.startsWith("group:"));
+		expect(refreshedFileNodes.map(({ id }: Node) => id)).toEqual(["b.ts", "c.ts"]);
+		expect(refreshedFileNodes.every(({ selected }: { selected: boolean }) => !selected)).toBe(true);
+		expect(refreshedFileNodes.every(({ opacity }: { opacity: number }) => opacity === 1)).toBe(
+			true,
+		);
 		expect(refreshed.edges).toEqual(["b.ts->c.ts"]);
 	});
 });

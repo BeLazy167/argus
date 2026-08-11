@@ -447,6 +447,8 @@ function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQu
         : [],
     [files, searchLower],
   );
+  const activeSelectedNodeId =
+    selectedNodeId && files.some((file) => file.path === selectedNodeId) ? selectedNodeId : null;
   const onNodesChange = useCallback(
     (changes: Parameters<typeof applyNodeChanges>[0]) => {
       setPositionedNodes((current) =>
@@ -461,10 +463,10 @@ function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQu
     const connectedEdgeIds = new Set<string>();
     const emphasizedNodeIds = new Set<string>();
 
-    if (selectedNodeId) {
-      emphasizedNodeIds.add(selectedNodeId);
+    if (activeSelectedNodeId) {
+      emphasizedNodeIds.add(activeSelectedNodeId);
       for (const edge of layout.edges) {
-        if (edge.source !== selectedNodeId && edge.target !== selectedNodeId) continue;
+        if (edge.source !== activeSelectedNodeId && edge.target !== activeSelectedNodeId) continue;
         connectedEdgeIds.add(edge.id);
         emphasizedNodeIds.add(edge.source);
         emphasizedNodeIds.add(edge.target);
@@ -477,10 +479,10 @@ function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQu
     const decoratedNodes = nodes.map((node) => {
       const file = fileByPath.get(node.id);
       let opacity = file ? lensNodeOpacity(file, lens) : 1;
-      if (selectedNodeId || searchLower) opacity = emphasizedNodeIds.has(node.id) ? 1 : 0.1;
+      if (activeSelectedNodeId || searchLower) opacity = emphasizedNodeIds.has(node.id) ? 1 : 0.1;
       return {
         ...node,
-        data: { ...node.data, selected: node.id === selectedNodeId },
+        data: { ...node.data, selected: node.id === activeSelectedNodeId },
         style: { ...node.style, opacity, transition: "opacity 0.3s" },
       };
     });
@@ -489,16 +491,16 @@ function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQu
       const colors = edgeColorsFor((edge.data?.kinds as string[])?.[0] ?? "imports");
       const connectsSearchMatches =
         searchLower && emphasizedNodeIds.has(edge.source) && emphasizedNodeIds.has(edge.target);
-      const emphasized = selectedNodeId
+      const emphasized = activeSelectedNodeId
         ? connectedEdgeIds.has(edge.id)
         : Boolean(connectsSearchMatches);
-      const dimmed = selectedNodeId || searchLower ? !emphasized : false;
+      const dimmed = activeSelectedNodeId || searchLower ? !emphasized : false;
       return {
         ...edge,
-        animated: selectedNodeId ? emphasized : false,
+        animated: activeSelectedNodeId ? emphasized : false,
         style: {
           ...edge.style,
-          stroke: emphasized && selectedNodeId ? colors.highlight : colors.base,
+          stroke: emphasized && activeSelectedNodeId ? colors.highlight : colors.base,
           opacity: dimmed ? 0.05 : 1,
           transition: "all 0.3s",
         },
@@ -506,7 +508,7 @@ function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQu
     });
 
     return { nodes: decoratedNodes, edges: decoratedEdges };
-  }, [files, layout, lens, positionedNodes, searchLower, searchMatchIds, selectedNodeId]);
+  }, [files, layout, lens, positionedNodes, searchLower, searchMatchIds, activeSelectedNodeId]);
 
   const onNodeClick: NodeMouseHandler = useCallback(
     (_event, node) => {
