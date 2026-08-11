@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -548,4 +549,206 @@ func TestDefaultBranchRefreshIsScopedIdempotentAndSurvivesInFlightGeneration(t *
 	if !snapshot.Current || snapshot.PublishedCommitSHA != commitB || snapshot.DefaultHeadSHA != commitB || snapshot.RefreshRequestedAt != nil {
 		t.Fatalf("final freshness = %+v", snapshot)
 	}
+}
+
+func TestFailedDefaultHeadGenerationRemainsQueuedAndRetriesFromPublishedAuthority(t *testing.T) {
+	pool, ctx := generationTestPool(t)
+	st := store.NewWithDB(pool)
+	installationID := generationSeedInstallation(t, ctx, pool, "{}")
+	repoID := generationSeedRepo(t, ctx, pool, installationID, "refresh/failed-next-poll")
+	if _, err := pool.Exec(ctx, `UPDATE repos SET enabled = true WHERE id = $1`, repoID); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `UPDATE repos SET enabled = false WHERE id = $1`, repoID)
+	})
+
+	var githubInstallationID, githubRepoID int64
+	if err := pool.QueryRow(ctx, `
+		SELECT i.installation_id, r.github_id FROM repos r
+		JOIN installations i ON i.id = r.installation_id WHERE r.id = $1`, repoID).
+		Scan(&githubInstallationID, &githubRepoID); err != nil {
+		t.Fatal(err)
+	}
+	const commitA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+	const commitB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2"
+	ghClient := &fakeFullIndexGitHub{
+		sha: commitA, tree: ghpkg.RepoTree{Paths: []string{"a.go"}},
+		contents: map[string]string{"a.go": "package refresh\nfunc PublishedA() {}\n"},
+		fetchErr: map[string]error{},
+	}
+	publishedA, err := IndexRepoBounded(ctx, st, ghClient, githubInstallationID, "refresh", "failed-next-poll", "main", repoID, 0, 0)
+	if err != nil || !publishedA.Published {
+		t.Fatalf("publish A = %+v, err=%v", publishedA, err)
+	}
+
+	observedB := time.Now().UTC()
+	if scheduled, err := st.ScheduleGraphIndexRefresh(ctx, githubInstallationID, githubRepoID,
+		"refresh/failed-next-poll", "main", commitB, observedB); err != nil || !scheduled {
+		t.Fatalf("schedule B = %v, err=%v", scheduled, err)
+	}
+	permanent := &gh.ErrorResponse{Response: &http.Response{StatusCode: http.StatusNotFound}}
+	ghClient.sha = commitB
+	ghClient.tree = ghpkg.RepoTree{Paths: []string{"b.go"}}
+	ghClient.contents = map[string]string{"b.go": "package refresh\nfunc PublishedB() {}\n"}
+	ghClient.fetchErr = map[string]error{"b.go": permanent}
+	failedB, err := IndexRepoBounded(ctx, st, ghClient, githubInstallationID, "refresh", "failed-next-poll", "main", repoID, 0, 0)
+	if err != nil {
+		t.Fatalf("stage failed B: %v", err)
+	}
+	if failedB.Unchanged || failedB.Published || failedB.Snapshot.Status != "failed" {
+		t.Fatalf("failed B = %+v", failedB)
+	}
+	failedGenerationID := failedB.Snapshot.GenerationID
+
+	snapshot, err := st.GetGraphSnapshot(ctx, repoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.PublishedCommitSHA != commitA || snapshot.Current || snapshot.RefreshRequestedAt == nil {
+		t.Fatalf("freshness after failed B = %+v", snapshot)
+	}
+	var publishedAStillVisible int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM code_nodes WHERE repo_id = $1 AND name = 'PublishedA'`, repoID).Scan(&publishedAStillVisible); err != nil {
+		t.Fatal(err)
+	}
+	if publishedAStillVisible != 1 {
+		t.Fatal("failed B changed published generation A")
+	}
+	if scheduled, err := st.ScheduleGraphIndexRefresh(ctx, githubInstallationID, githubRepoID,
+		"refresh/failed-next-poll", "main", commitB, observedB.Add(time.Minute)); err != nil || scheduled {
+		t.Fatalf("duplicate failed B delivery = %v, err=%v", scheduled, err)
+	}
+	snapshot, err = st.GetGraphSnapshot(ctx, repoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.RefreshRequestedAt == nil {
+		t.Fatal("duplicate failed B delivery consumed the pending retry")
+	}
+	prompt, err := st.ListReposDueForPromptGraphIndex(ctx, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsGraphTarget(prompt, repoID, "main") {
+		t.Fatalf("next prompt poll omitted failed B retry: %+v", prompt)
+	}
+
+	delete(ghClient.fetchErr, "b.go")
+	retriedB, err := IndexRepoBounded(ctx, st, ghClient, githubInstallationID, "refresh", "failed-next-poll", "main", repoID, 0, 0)
+	if err != nil {
+		t.Fatalf("retry B: %v", err)
+	}
+	if retriedB.Unchanged || !retriedB.Published || retriedB.Snapshot.PublishedCommitSHA != commitB {
+		t.Fatalf("retry B consumed as unchanged = %+v", retriedB)
+	}
+	if retriedB.Snapshot.GenerationID == failedGenerationID {
+		t.Fatalf("retry mutated failed generation %d instead of creating an immutable replacement", failedGenerationID)
+	}
+	var failedStatus string
+	if err := pool.QueryRow(ctx, `SELECT status FROM graph_index_generations WHERE id = $1`, failedGenerationID).Scan(&failedStatus); err != nil {
+		t.Fatal(err)
+	}
+	if failedStatus != "failed" {
+		t.Fatalf("failed generation status = %q, want failed", failedStatus)
+	}
+}
+
+func TestDefaultBranchMutationInvalidatesFreshnessAndQueuesPromptRefresh(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(context.Context, *store.Store, int64, int64, int64, string) error
+	}{
+		{
+			name: "installation sync upsert",
+			mutate: func(ctx context.Context, st *store.Store, repoID, installationID, githubRepoID int64, fullName string) error {
+				_, err := st.UpsertRepo(ctx, installationID, githubRepoID, fullName, "trunk")
+				return err
+			},
+		},
+		{
+			name: "authenticated update",
+			mutate: func(ctx context.Context, st *store.Store, repoID, _, _ int64, _ string) error {
+				branch := "trunk"
+				_, err := st.UpdateRepo(ctx, repoID, nil, &branch, nil)
+				return err
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool, ctx := generationTestPool(t)
+			st := store.NewWithDB(pool)
+			installationID := generationSeedInstallation(t, ctx, pool, "{}")
+			fullName := "branch-change/" + strings.ReplaceAll(tc.name, " ", "-")
+			repoID := generationSeedRepo(t, ctx, pool, installationID, fullName)
+			if _, err := pool.Exec(ctx, `UPDATE repos SET enabled = true WHERE id = $1`, repoID); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				_, _ = pool.Exec(context.Background(), `UPDATE repos SET enabled = false WHERE id = $1`, repoID)
+			})
+
+			var githubInstallationID, githubRepoID int64
+			if err := pool.QueryRow(ctx, `
+				SELECT i.installation_id, r.github_id FROM repos r
+				JOIN installations i ON i.id = r.installation_id WHERE r.id = $1`, repoID).
+				Scan(&githubInstallationID, &githubRepoID); err != nil {
+				t.Fatal(err)
+			}
+			const commitA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa3"
+			ghClient := &fakeFullIndexGitHub{
+				sha: commitA, tree: ghpkg.RepoTree{Paths: []string{"a.go"}},
+				contents: map[string]string{"a.go": "package branchchange\nfunc MainA() {}\n"},
+				fetchErr: map[string]error{},
+			}
+			publishedA, err := IndexRepoBounded(ctx, st, ghClient, githubInstallationID, "branch-change", strings.TrimPrefix(fullName, "branch-change/"), "main", repoID, 0, 0)
+			if err != nil || !publishedA.Published || !publishedA.Snapshot.Current {
+				t.Fatalf("publish main A = %+v, err=%v", publishedA, err)
+			}
+
+			// A trunk push delivered before this authoritative mutation is ignored
+			// because main is still stored as the default. The mutation must itself
+			// queue a branch-head resolve; no second push is required.
+			if scheduled, err := st.ScheduleGraphIndexRefresh(ctx, githubInstallationID, githubRepoID,
+				fullName, "trunk", "ignored-trunk-head", time.Now().UTC()); err != nil || scheduled {
+				t.Fatalf("pre-sync trunk push = %v, err=%v", scheduled, err)
+			}
+			if err := tc.mutate(ctx, st, repoID, installationID, githubRepoID, fullName); err != nil {
+				t.Fatalf("mutate default branch: %v", err)
+			}
+
+			snapshot, err := st.GetGraphSnapshot(ctx, repoID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if snapshot.Current || snapshot.RefreshRequestedAt == nil || snapshot.PublishedCommitSHA != commitA || snapshot.DefaultHeadSHA != "" {
+				t.Fatalf("freshness after main->trunk = %+v", snapshot)
+			}
+			prompt, err := st.ListReposDueForPromptGraphIndex(ctx, 10000)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !containsGraphTarget(prompt, repoID, "trunk") {
+				t.Fatalf("prompt queue omitted trunk refresh: %+v", prompt)
+			}
+
+			const commitB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb4"
+			ghClient.sha = commitB
+			ghClient.tree = ghpkg.RepoTree{Paths: []string{"b.go"}}
+			ghClient.contents = map[string]string{"b.go": "package branchchange\nfunc TrunkB() {}\n"}
+			refreshed, err := IndexRepoBounded(ctx, st, ghClient, githubInstallationID, "branch-change", strings.TrimPrefix(fullName, "branch-change/"), "trunk", repoID, 0, 0)
+			if err != nil || !refreshed.Published || !refreshed.Snapshot.Current || refreshed.Snapshot.PublishedCommitSHA != commitB {
+				t.Fatalf("publish trunk B = %+v, err=%v", refreshed, err)
+			}
+		})
+	}
+}
+
+func containsGraphTarget(targets []store.RepoIndexTarget, repoID int64, defaultBranch string) bool {
+	for _, target := range targets {
+		if target.RepoID == repoID && target.DefaultBranch == defaultBranch {
+			return true
+		}
+	}
+	return false
 }

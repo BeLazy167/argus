@@ -194,20 +194,27 @@ func (s *Store) ScheduleGraphIndexRefresh(
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	var repoID, refreshVersion int64
-	var indexedCommit, observedCommit, requestedCommit *string
+	var publishedCommit, observedCommit, requestedCommit *string
+	var publishedComplete bool
 	var lastEventAt, requestedAt *time.Time
 	err = tx.QueryRow(ctx, `
-		SELECT r.id, r.graph_index_commit_sha, r.graph_default_head_sha,
-		       r.graph_default_head_event_at, r.graph_refresh_requested_at,
-		       r.graph_refresh_commit_sha, r.graph_refresh_version
+		SELECT r.id, published.commit_sha,
+		       COALESCE(published.status = 'published' AND NOT published.tree_truncated
+		         AND published.failed_files = 0 AND published.visited_files = published.expected_files
+		         AND NOT EXISTS (SELECT 1 FROM graph_index_generation_files unavailable
+		           WHERE unavailable.generation_id = published.id AND unavailable.status = 'unavailable'), false),
+		       r.graph_default_head_sha, r.graph_default_head_event_at,
+		       r.graph_refresh_requested_at, r.graph_refresh_commit_sha, r.graph_refresh_version
 		FROM repos r
 		JOIN installations i ON i.id = r.installation_id
+		LEFT JOIN graph_index_generations published
+		  ON published.id = r.graph_published_generation_id AND published.repo_id = r.id
 		WHERE i.installation_id = $1 AND i.suspended_at IS NULL
 		  AND r.github_id = $2 AND r.full_name = $3 AND r.default_branch = $4
 		  AND r.enabled
-		FOR UPDATE`, githubInstallationID, githubRepoID, fullName, defaultBranch).Scan(
-		&repoID, &indexedCommit, &observedCommit, &lastEventAt, &requestedAt,
-		&requestedCommit, &refreshVersion)
+		FOR UPDATE OF r`, githubInstallationID, githubRepoID, fullName, defaultBranch).Scan(
+		&repoID, &publishedCommit, &publishedComplete, &observedCommit, &lastEventAt,
+		&requestedAt, &requestedCommit, &refreshVersion)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -218,7 +225,7 @@ func (s *Store) ScheduleGraphIndexRefresh(
 		return false, nil
 	}
 
-	alreadyIndexed := indexedCommit != nil && *indexedCommit == commitSHA &&
+	alreadyIndexed := publishedComplete && publishedCommit != nil && *publishedCommit == commitSHA &&
 		observedCommit != nil && *observedCommit == commitSHA && requestedAt == nil
 	alreadyRequested := requestedAt != nil && requestedCommit != nil && *requestedCommit == commitSHA
 	if alreadyIndexed || alreadyRequested {
@@ -226,9 +233,9 @@ func (s *Store) ScheduleGraphIndexRefresh(
 			UPDATE repos SET graph_default_head_sha = $2,
 			  graph_default_head_observed_at = GREATEST(COALESCE(graph_default_head_observed_at, $3), $3),
 			  graph_default_head_event_at = GREATEST(COALESCE(graph_default_head_event_at, $3), $3),
-			  graph_refresh_requested_at = CASE WHEN graph_index_commit_sha = $2 THEN NULL ELSE graph_refresh_requested_at END,
-			  graph_refresh_commit_sha = CASE WHEN graph_index_commit_sha = $2 THEN NULL ELSE graph_refresh_commit_sha END
-			WHERE id = $1`, repoID, commitSHA, observedAt); err != nil {
+			  graph_refresh_requested_at = CASE WHEN $4 THEN NULL ELSE graph_refresh_requested_at END,
+			  graph_refresh_commit_sha = CASE WHEN $4 THEN NULL ELSE graph_refresh_commit_sha END
+			WHERE id = $1`, repoID, commitSHA, observedAt, alreadyIndexed); err != nil {
 			return false, fmt.Errorf("schedule graph refresh: record duplicate head: %w", err)
 		}
 		if err := tx.Commit(ctx); err != nil {
@@ -258,21 +265,32 @@ func (s *Store) ConfirmGraphDefaultHead(ctx context.Context, repoID, refreshVers
 	if repoID <= 0 || commitSHA == "" {
 		return false, false, nil
 	}
-	var indexedCommit *string
 	err = s.Pool.QueryRow(ctx, `
-		UPDATE repos SET graph_default_head_sha = $3, graph_default_head_observed_at = NOW(),
-		  graph_refresh_commit_sha = CASE WHEN graph_refresh_requested_at IS NULL THEN NULL ELSE $3 END,
-		  graph_refresh_requested_at = CASE WHEN graph_index_commit_sha = $3 THEN NULL ELSE graph_refresh_requested_at END,
-		  graph_indexed_at = CASE WHEN graph_index_commit_sha = $3 THEN NOW() ELSE graph_indexed_at END
-		WHERE id = $1 AND graph_refresh_version = $2
-		RETURNING graph_index_commit_sha`, repoID, refreshVersion, commitSHA).Scan(&indexedCommit)
+		WITH authority AS (
+		  SELECT r.id, COALESCE(published.status = 'published' AND NOT published.tree_truncated
+		    AND published.failed_files = 0 AND published.visited_files = published.expected_files
+		    AND published.commit_sha = $3
+		    AND NOT EXISTS (SELECT 1 FROM graph_index_generation_files unavailable
+		      WHERE unavailable.generation_id = published.id AND unavailable.status = 'unavailable'), false) AS already_current
+		  FROM repos r
+		  LEFT JOIN graph_index_generations published
+		    ON published.id = r.graph_published_generation_id AND published.repo_id = r.id
+		  WHERE r.id = $1 AND r.graph_refresh_version = $2
+		)
+		UPDATE repos r SET graph_default_head_sha = $3, graph_default_head_observed_at = NOW(),
+		  graph_refresh_commit_sha = CASE WHEN r.graph_refresh_requested_at IS NULL THEN NULL ELSE $3 END,
+		  graph_refresh_requested_at = CASE WHEN authority.already_current THEN NULL ELSE r.graph_refresh_requested_at END,
+		  graph_indexed_at = CASE WHEN authority.already_current THEN NOW() ELSE r.graph_indexed_at END
+		FROM authority
+		WHERE r.id = authority.id AND r.graph_refresh_version = $2
+		RETURNING authority.already_current`, repoID, refreshVersion, commitSHA).Scan(&alreadyCurrent)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, false, nil
 	}
 	if err != nil {
 		return false, false, fmt.Errorf("confirm graph default head: %w", err)
 	}
-	return indexedCommit != nil && *indexedCommit == commitSHA, true, nil
+	return alreadyCurrent, true, nil
 }
 
 // GraphSnapshot is the externally visible state of the newest full-index generation.
