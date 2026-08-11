@@ -1,6 +1,6 @@
 -- name: CreateReviewComment :exec
-INSERT INTO review_comments (review_id, file_path, start_line, end_line, side, body, severity, category, specialist, confidence_score, code_snippet, github_comment_id, matched_pattern_id, matched_pattern_score, enforced_rule_content, is_new_finding)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16);
+INSERT INTO review_comments (review_id, attempt_generation, file_path, start_line, end_line, side, body, severity, category, specialist, confidence_score, code_snippet, github_comment_id, matched_pattern_id, matched_pattern_score, enforced_rule_content, is_new_finding, suppressed_reason, state)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19);
 
 -- name: GetReviewComments :many
 SELECT id, review_id, file_path, start_line, end_line, side, body, severity, category,
@@ -13,13 +13,16 @@ WHERE review_id = $1
 ORDER BY file_path, start_line;
 
 -- name: GetCommentByGithubID :one
-SELECT id, review_id, file_path, start_line, end_line, side, body, severity, category,
-       specialist, confidence_score, code_snippet, github_comment_id,
-       matched_pattern_id, matched_pattern_score, enforced_rule_content, is_new_finding,
-       created_at
-FROM review_comments WHERE github_comment_id = $1;
+SELECT rc.id, rc.review_id, rc.file_path, rc.start_line, rc.end_line, rc.side, rc.body, rc.severity, rc.category,
+       rc.specialist, rc.confidence_score, rc.code_snippet, rc.github_comment_id,
+       rc.matched_pattern_id, rc.matched_pattern_score, rc.enforced_rule_content, rc.is_new_finding,
+       rc.created_at, rc.state, rc.suppressed_reason, rc.resolved_sha, rc.attempt_generation
+FROM review_comments rc
+JOIN reviews r ON r.id = rc.review_id
+WHERE rc.github_comment_id = $1
+  AND rc.attempt_generation = r.attempt_generation;
 
--- name: RecordCommentOutcome :exec
+-- name: RecordCommentOutcome :execrows
 -- Idempotent: webhook retries delivering the same reaction event produce no-op
 -- second inserts instead of duplicate rows. Paired with the UNIQUE constraint
 -- added in migration 037.

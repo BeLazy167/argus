@@ -92,3 +92,46 @@ func providerKeyFromValues(id, installationID int64, repoID *int64, provider, ap
 	}
 	return ProviderKey{ID: id, InstallationID: installationID, RepoID: repoID, Provider: provider, APIKeyEnc: apiKeyEnc, KeyHint: hint, BaseURL: baseURL, Model: model, CreatedAt: createdAt, UpdatedAt: updatedAt}
 }
+
+func rawMessagePtr(value []byte) *json.RawMessage {
+	if value == nil {
+		return nil
+	}
+	raw := json.RawMessage(value)
+	return &raw
+}
+
+func reviewCoreFromValues(id uuid.UUID, repoID int64, prNumber int, prTitle, prAuthor, headSHA, baseSHA, headRef string, githubReviewID *int64, status string, summary *string, score *int, tokenUsage []byte, trigger string, triggeredBy *string, durationMs *int, reviewErr *string, deepReview bool, persona *string, isIncremental bool, createdAt time.Time, completedAt *time.Time) Review {
+	return Review{ID: id, RepoID: repoID, PRNumber: prNumber, PRTitle: prTitle, PRAuthor: prAuthor, HeadSHA: headSHA, BaseSHA: baseSHA, HeadRef: headRef, GithubReviewID: githubReviewID, Status: status, Summary: summary, Score: score, TokenUsage: rawMessagePtr(tokenUsage), Trigger: trigger, TriggeredBy: triggeredBy, DurationMs: durationMs, Error: reviewErr, DeepReview: deepReview, Persona: persona, IsIncremental: isIncremental, CreatedAt: createdAt, CompletedAt: completedAt}
+}
+
+func fullReviewFromSQLC(row db.GetReviewRow) Review {
+	review := reviewCoreFromValues(row.ID, row.RepoID, row.PRNumber, row.PRTitle, row.PRAuthor, row.HeadSHA, row.BaseSHA, row.HeadRef, row.GithubReviewID, row.Status, row.Summary, row.Score, row.TokenUsage, row.Trigger, row.TriggeredBy, row.DurationMs, row.Error, row.DeepReview, row.Persona, row.IsIncremental, row.CreatedAt, row.CompletedAt)
+	review.Diagram, review.DiagramTitle = row.Diagram, row.DiagramTitle
+	review.Diagrams, review.TruncatedFiles = row.Diagrams, row.TruncatedFiles
+	review.Brief, review.CrossPRHash, review.TraceID = row.Brief, row.CrossPRHash, row.TraceID
+	review.ReviewContract, review.BudgetNote = rawMessagePtr(row.ReviewContract), row.BudgetNote
+	return review
+}
+
+func lastCompletedReviewFromSQLC(row db.GetLastCompletedReviewRow) Review {
+	review := reviewCoreFromValues(row.ID, row.RepoID, row.PRNumber, row.PRTitle, row.PRAuthor, row.HeadSHA, row.BaseSHA, row.HeadRef, row.GithubReviewID, row.Status, row.Summary, row.Score, row.TokenUsage, row.Trigger, row.TriggeredBy, row.DurationMs, row.Error, row.DeepReview, row.Persona, row.IsIncremental, row.CreatedAt, row.CompletedAt)
+	review.Diagram, review.DiagramTitle, review.TraceID = row.Diagram, row.DiagramTitle, row.TraceID
+	return review
+}
+
+func latestReviewBySHAFromSQLC(row db.GetLatestReviewBySHARow) Review {
+	review := reviewCoreFromValues(row.ID, row.RepoID, row.PRNumber, row.PRTitle, row.PRAuthor, row.HeadSHA, row.BaseSHA, row.HeadRef, row.GithubReviewID, row.Status, row.Summary, row.Score, row.TokenUsage, row.Trigger, row.TriggeredBy, row.DurationMs, row.Error, row.DeepReview, row.Persona, row.IsIncremental, row.CreatedAt, row.CompletedAt)
+	review.Diagram, review.DiagramTitle, review.TraceID = row.Diagram, row.DiagramTitle, row.TraceID
+	return review
+}
+
+func latestReviewByPRFromSQLC(row db.GetLatestReviewByPRRow) Review {
+	review := reviewCoreFromValues(row.ID, row.RepoID, row.PRNumber, row.PRTitle, row.PRAuthor, row.HeadSHA, row.BaseSHA, row.HeadRef, row.GithubReviewID, row.Status, row.Summary, row.Score, row.TokenUsage, row.Trigger, row.TriggeredBy, row.DurationMs, row.Error, row.DeepReview, row.Persona, row.IsIncremental, row.CreatedAt, row.CompletedAt)
+	review.Diagram, review.DiagramTitle, review.TraceID = row.Diagram, row.DiagramTitle, row.TraceID
+	return review
+}
+
+func githubReviewCommentFromSQLC(row db.GetCommentByGithubIDRow) (ReviewComment, error) {
+	return reviewCommentFromValues(row.ID, row.ReviewID, row.FilePath, row.StartLine, row.EndLine, row.Side, row.Body, row.Severity, row.Category, row.Specialist, row.ConfidenceScore, row.CodeSnippet, row.GithubCommentID, row.MatchedPatternID, row.MatchedPatternScore, row.EnforcedRuleContent, row.IsNewFinding, row.CreatedAt, row.State, row.SuppressedReason, row.ResolvedSHA, row.AttemptGeneration)
+}

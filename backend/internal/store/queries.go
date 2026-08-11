@@ -276,23 +276,12 @@ func (s *Store) GetRepoScoped(ctx context.Context, id int64, installationIDs []i
 // --- Reviews ---
 
 func (s *Store) GetReview(ctx context.Context, id uuid.UUID) (*Review, error) {
-	var r Review
-	err := s.Pool.QueryRow(ctx, `
-		SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, COALESCE(head_ref,''), github_review_id,
-		       status, summary, score, token_usage, trigger, triggered_by, duration_ms, error,
-		       deep_review, persona, is_incremental, created_at, completed_at,
-		       diagram, diagram_title, diagrams, truncated_files, brief, cross_pr_hash, trace_id, review_contract,
-		       budget_note
-		FROM reviews WHERE id = $1
-	`, id).Scan(&r.ID, &r.RepoID, &r.PRNumber, &r.PRTitle, &r.PRAuthor, &r.HeadSHA, &r.BaseSHA, &r.HeadRef, &r.GithubReviewID,
-		&r.Status, &r.Summary, &r.Score, &r.TokenUsage, &r.Trigger, &r.TriggeredBy, &r.DurationMs, &r.Error,
-		&r.DeepReview, &r.Persona, &r.IsIncremental, &r.CreatedAt, &r.CompletedAt,
-		&r.Diagram, &r.DiagramTitle, &r.Diagrams, &r.TruncatedFiles, &r.Brief, &r.CrossPRHash, &r.TraceID, &r.ReviewContract,
-		&r.BudgetNote)
+	row, err := s.q.GetReview(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	return &r, nil
+	review := fullReviewFromSQLC(row)
+	return &review, nil
 }
 
 func (s *Store) GetReviewComments(ctx context.Context, reviewID uuid.UUID) ([]ReviewComment, error) {
@@ -439,11 +428,7 @@ func (s *Store) GetStartedCommentRef(ctx context.Context, reviewID uuid.UUID) (*
 }
 
 func (s *Store) UpdateReviewStatus(ctx context.Context, id uuid.UUID, status, errMsg string, tokenUsage []byte) error {
-	_, err := s.Pool.Exec(ctx, `
-		UPDATE reviews SET status = $2, error = $3, token_usage = COALESCE($4, token_usage),
-		       completed_at = CASE WHEN $2 IN ('completed','failed') THEN NOW() ELSE NULL END
-		WHERE id = $1
-	`, id, status, nilIfEmpty(errMsg), tokenUsage)
+	err := s.q.UpdateReviewStatus(ctx, db.UpdateReviewStatusParams{ID: id, Status: status, Error: nilIfEmpty(errMsg), TokenUsage: tokenUsage})
 	if err != nil {
 		return fmt.Errorf("updating review status: %w", err)
 	}
@@ -867,11 +852,14 @@ func (s *Store) CreateReviewComment(ctx context.Context, reviewID uuid.UUID, att
 	if state == "" {
 		state = FindingStatePosted
 	}
-	_, err := s.Pool.Exec(ctx, `
-		INSERT INTO review_comments (review_id, attempt_generation, file_path, start_line, end_line, side, body, severity, category, specialist, confidence_score, code_snippet, github_comment_id, matched_pattern_id, matched_pattern_score, enforced_rule_content, is_new_finding, suppressed_reason, state)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
-	`, reviewID, attemptGeneration, filePath, startLine, endLine, side, body, severity, category, specialist, confidenceScore, codeSnippet, githubCommentID, matchedPatternID, matchedPatternScore, enforcedRuleContent, isNewFinding, suppressedReason, string(state))
-	return err
+	return s.q.CreateReviewComment(ctx, db.CreateReviewCommentParams{
+		ReviewID: reviewID, AttemptGeneration: attemptGeneration, FilePath: filePath, StartLine: startLine, EndLine: endLine, Side: side,
+		Body: body, Severity: severity, Category: category, Specialist: specialist,
+		ConfidenceScore: confidenceScore, CodeSnippet: codeSnippet, GithubCommentID: githubCommentID,
+		MatchedPatternID: matchedPatternID, MatchedPatternScore: matchedPatternScore,
+		EnforcedRuleContent: enforcedRuleContent, IsNewFinding: &isNewFinding,
+		SuppressedReason: suppressedReason, State: string(state),
+	})
 }
 
 // GetCommentByGithubID looks up a review comment by its GitHub comment ID.
@@ -913,21 +901,15 @@ func (s *Store) ListPRGithubCommentIDs(ctx context.Context, repoFullName string,
 }
 
 func (s *Store) GetCommentByGithubID(ctx context.Context, githubCommentID int64) (*ReviewComment, error) {
-	var c ReviewComment
-	err := s.Pool.QueryRow(ctx, `
-		SELECT id, review_id, file_path, start_line, end_line, side, body, severity, category,
-		       specialist, confidence_score, code_snippet, github_comment_id,
-		       matched_pattern_id, matched_pattern_score, enforced_rule_content, is_new_finding,
-		       created_at
-		FROM review_comments WHERE github_comment_id = $1
-	`, githubCommentID).Scan(&c.ID, &c.ReviewID, &c.FilePath, &c.StartLine, &c.EndLine, &c.Side, &c.Body, &c.Severity, &c.Category,
-		&c.Specialist, &c.ConfidenceScore, &c.CodeSnippet, &c.GithubCommentID,
-		&c.MatchedPatternID, &c.MatchedPatternScore, &c.EnforcedRuleContent, &c.IsNewFinding,
-		&c.CreatedAt)
+	row, err := s.q.GetCommentByGithubID(ctx, &githubCommentID)
 	if err != nil {
 		return nil, err
 	}
-	return &c, nil
+	comment, err := githubReviewCommentFromSQLC(row)
+	if err != nil {
+		return nil, err
+	}
+	return &comment, nil
 }
 
 // UnboundComment is one posted review_comments row still awaiting its GitHub
@@ -1006,63 +988,27 @@ type RepoReviewStats struct {
 // Non-fatal: returns a zero-value RepoReviewStats on error with no sample_size
 // so the caller can fall through to generic messaging.
 func (s *Store) GetRepoReviewStats(ctx context.Context, repoID int64, limit int) (RepoReviewStats, error) {
-	var stats RepoReviewStats
-	err := s.Pool.QueryRow(ctx, `
-		WITH recent AS (
-			SELECT token_usage FROM reviews
-			WHERE repo_id = $1 AND status = 'completed' AND token_usage IS NOT NULL
-			ORDER BY created_at DESC
-			LIMIT $2
-		)
-		SELECT
-			COUNT(*)::int,
-			COALESCE(AVG((token_usage->'total'->>'total_tokens')::bigint), 0)::bigint,
-			COALESCE(AVG(NULLIF((token_usage->'total'->>'cost')::float8, 0)), 0)::float8,
-			COALESCE(BOOL_OR((token_usage->'total'->>'cost') IS NOT NULL AND (token_usage->'total'->>'cost')::float8 > 0), false)
-		FROM recent
-	`, repoID, limit).Scan(&stats.SampleSize, &stats.AvgTokens, &stats.AvgCost, &stats.CostAvailable)
-	return stats, err
+	row, err := s.q.GetRepoReviewStats(ctx, db.GetRepoReviewStatsParams{RepoID: repoID, RowLimit: int64(limit)})
+	return RepoReviewStats{SampleSize: row.SampleSize, AvgTokens: row.AvgTokens, AvgCost: row.AvgCost, CostAvailable: row.CostAvailable}, err
 }
 
 // GetLastCompletedReview returns the most recent completed review for a repo+PR.
 func (s *Store) GetLastCompletedReview(ctx context.Context, repoID int64, prNumber int) (*Review, error) {
-	var r Review
-	err := s.Pool.QueryRow(ctx, `
-		SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, COALESCE(head_ref,''), github_review_id,
-		       status, summary, score, token_usage, trigger, triggered_by, duration_ms, error,
-		       deep_review, persona, is_incremental, created_at, completed_at,
-		       diagram, diagram_title
-		FROM reviews WHERE repo_id = $1 AND pr_number = $2 AND status = 'completed'
-		ORDER BY completed_at DESC LIMIT 1
-	`, repoID, prNumber).Scan(&r.ID, &r.RepoID, &r.PRNumber, &r.PRTitle, &r.PRAuthor, &r.HeadSHA, &r.BaseSHA, &r.HeadRef, &r.GithubReviewID,
-		&r.Status, &r.Summary, &r.Score, &r.TokenUsage, &r.Trigger, &r.TriggeredBy, &r.DurationMs, &r.Error,
-		&r.DeepReview, &r.Persona, &r.IsIncremental, &r.CreatedAt, &r.CompletedAt,
-		&r.Diagram, &r.DiagramTitle)
+	row, err := s.q.GetLastCompletedReview(ctx, db.GetLastCompletedReviewParams{RepoID: repoID, PRNumber: prNumber})
 	if err != nil {
 		return nil, err
 	}
-	return &r, nil
+	review := lastCompletedReviewFromSQLC(row)
+	return &review, nil
 }
 
 func (s *Store) GetLatestReviewBySHA(ctx context.Context, repoFullName string, prNumber int, headSHA string) (*Review, error) {
-	var r Review
-	err := s.Pool.QueryRow(ctx, `
-		SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, COALESCE(rv.head_ref,''), rv.github_review_id,
-		       rv.status, rv.summary, rv.score, rv.token_usage, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error,
-		       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at,
-		       rv.diagram, rv.diagram_title
-		FROM reviews rv JOIN repos r ON rv.repo_id = r.id
-		WHERE r.full_name = $1 AND rv.pr_number = $2 AND rv.head_sha = $3
-		  AND rv.status = 'completed'
-		ORDER BY rv.created_at DESC LIMIT 1
-	`, repoFullName, prNumber, headSHA).Scan(&r.ID, &r.RepoID, &r.PRNumber, &r.PRTitle, &r.PRAuthor, &r.HeadSHA, &r.BaseSHA, &r.HeadRef, &r.GithubReviewID,
-		&r.Status, &r.Summary, &r.Score, &r.TokenUsage, &r.Trigger, &r.TriggeredBy, &r.DurationMs, &r.Error,
-		&r.DeepReview, &r.Persona, &r.IsIncremental, &r.CreatedAt, &r.CompletedAt,
-		&r.Diagram, &r.DiagramTitle)
+	row, err := s.q.GetLatestReviewBySHA(ctx, db.GetLatestReviewBySHAParams{FullName: repoFullName, PRNumber: prNumber, HeadSHA: headSHA})
 	if err != nil {
 		return nil, err
 	}
-	return &r, nil
+	review := latestReviewBySHAFromSQLC(row)
+	return &review, nil
 }
 
 // HasFailedReviewWithError returns true if a review with status='failed' and the
@@ -1082,24 +1028,12 @@ func (s *Store) HasFailedReviewWithError(ctx context.Context, repoID int64, prNu
 
 // GetLatestReviewByPR returns the most recent completed review for a repo+PR by full name.
 func (s *Store) GetLatestReviewByPR(ctx context.Context, repoFullName string, prNumber int) (*Review, error) {
-	var r Review
-	err := s.Pool.QueryRow(ctx, `
-		SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, COALESCE(rv.head_ref,''), rv.github_review_id,
-		       rv.status, rv.summary, rv.score, rv.token_usage, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error,
-		       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at,
-		       rv.diagram, rv.diagram_title
-		FROM reviews rv JOIN repos r ON rv.repo_id = r.id
-		WHERE r.full_name = $1 AND rv.pr_number = $2
-		  AND rv.status = 'completed'
-		ORDER BY rv.created_at DESC LIMIT 1
-	`, repoFullName, prNumber).Scan(&r.ID, &r.RepoID, &r.PRNumber, &r.PRTitle, &r.PRAuthor, &r.HeadSHA, &r.BaseSHA, &r.HeadRef, &r.GithubReviewID,
-		&r.Status, &r.Summary, &r.Score, &r.TokenUsage, &r.Trigger, &r.TriggeredBy, &r.DurationMs, &r.Error,
-		&r.DeepReview, &r.Persona, &r.IsIncremental, &r.CreatedAt, &r.CompletedAt,
-		&r.Diagram, &r.DiagramTitle)
+	row, err := s.q.GetLatestReviewByPR(ctx, db.GetLatestReviewByPRParams{FullName: repoFullName, PRNumber: prNumber})
 	if err != nil {
 		return nil, err
 	}
-	return &r, nil
+	review := latestReviewByPRFromSQLC(row)
+	return &review, nil
 }
 
 // --- Stats ---
@@ -1112,48 +1046,21 @@ func (s *Store) GetLatestReviewByPR(ctx context.Context, repoFullName string, pr
 // implementation for the other, and a fix on only one half is the exact failure
 // this issue is a follow-up to.
 func (s *Store) GetStats(ctx context.Context) (*Stats, error) {
-	var st Stats
-	err := s.Pool.QueryRow(ctx, `
-		SELECT
-			(SELECT COUNT(*) FROM reviews WHERE NOT (`+markerReviewFilter+`))::int,
-			(SELECT COUNT(*) FROM reviews WHERE created_at >= CURRENT_DATE AND status = 'completed')::int,
-			COALESCE((SELECT AVG(score)::int FROM reviews WHERE score IS NOT NULL), 0),
-			(SELECT COUNT(*) FROM repos WHERE enabled = true)::int,
-			(SELECT COUNT(*) FROM review_comments rc JOIN reviews rv ON rv.id=rc.review_id WHERE rc.attempt_generation=rv.attempt_generation AND rc.severity='critical' AND rc.state <> 'suppressed')::int,
-			(SELECT COUNT(*) FROM reviews WHERE status IN ('pending','in_progress'))::int,
-			COALESCE((SELECT (COUNT(*) FILTER (WHERE score < 10) * 100 / NULLIF(COUNT(*) FILTER (WHERE status = 'completed'), 0))::int FROM reviews), 0),
-			(SELECT COUNT(*) FROM reviews WHERE created_at >= NOW() - INTERVAL '7 days')::int,
-			(SELECT COUNT(*) FROM reviews WHERE score IS NOT NULL AND score <= 4)::int,
-			COALESCE((SELECT (AVG(EXTRACT(EPOCH FROM (completed_at - created_at)) * 1000))::int FROM reviews WHERE completed_at IS NOT NULL), 0),
-			(SELECT COUNT(*) FROM reviews WHERE deep_review = true)::int
-	`).Scan(&st.TotalReviews, &st.CompletedToday, &st.AvgScore, &st.ActiveRepos, &st.CriticalFinds, &st.PendingReviews,
-		&st.CatchRate, &st.PRsThisWeek, &st.HighRiskCount, &st.AvgReviewTimeMs, &st.DeepReviewCount)
-	return &st, err
+	row, err := s.q.GetStats(ctx)
+	if err != nil {
+		return nil, err
+	}
+	stats := Stats{TotalReviews: row.TotalReviews, CompletedToday: row.CompletedToday, AvgScore: row.AvgScore, ActiveRepos: row.ActiveRepos, CriticalFinds: row.CriticalFinds, PendingReviews: row.PendingReviews, CatchRate: row.CatchRate, PRsThisWeek: row.PrsThisWeek, HighRiskCount: row.HighRiskCount, AvgReviewTimeMs: row.AvgReviewTimeMs, DeepReviewCount: row.DeepReviewCount}
+	return &stats, nil
 }
 
 func (s *Store) GetStatsScoped(ctx context.Context, installationIDs []int64) (*Stats, error) {
-	var st Stats
-	err := s.Pool.QueryRow(ctx, `
-		WITH scoped_reviews AS (
-			SELECT * FROM reviews WHERE repo_id IN (SELECT id FROM repos WHERE installation_id = ANY($1))
-		)
-		SELECT
-			(SELECT COUNT(*) FROM scoped_reviews WHERE NOT (`+markerReviewFilter+`))::int,
-			(SELECT COUNT(*) FROM scoped_reviews WHERE created_at >= CURRENT_DATE AND status = 'completed')::int,
-			COALESCE((SELECT AVG(score)::int FROM scoped_reviews WHERE score IS NOT NULL), 0),
-			(SELECT COUNT(*) FROM repos WHERE installation_id = ANY($1) AND enabled = true)::int,
-			(SELECT COUNT(*) FROM review_comments rc JOIN scoped_reviews rv ON rv.id=rc.review_id WHERE rc.attempt_generation=rv.attempt_generation AND rc.severity='critical' AND rc.state <> 'suppressed')::int,
-			(SELECT COUNT(*) FROM scoped_reviews WHERE status IN ('pending','in_progress'))::int,
-			COALESCE((SELECT (COUNT(*) FILTER (WHERE score < 10) * 100 / NULLIF(COUNT(*) FILTER (WHERE status = 'completed'), 0))::int FROM scoped_reviews), 0),
-			(SELECT COUNT(*) FROM scoped_reviews WHERE created_at >= NOW() - INTERVAL '7 days')::int,
-			(SELECT COUNT(*) FROM scoped_reviews WHERE score IS NOT NULL AND score <= 4)::int,
-			COALESCE((SELECT (AVG(EXTRACT(EPOCH FROM (completed_at - created_at)) * 1000))::int FROM scoped_reviews WHERE completed_at IS NOT NULL), 0),
-			(SELECT COUNT(*) FROM scoped_reviews WHERE deep_review = true)::int
-	`, installationIDs).Scan(
-		&st.TotalReviews, &st.CompletedToday, &st.AvgScore, &st.ActiveRepos, &st.CriticalFinds, &st.PendingReviews,
-		&st.CatchRate, &st.PRsThisWeek, &st.HighRiskCount, &st.AvgReviewTimeMs, &st.DeepReviewCount,
-	)
-	return &st, err
+	row, err := s.q.GetStatsScoped(ctx, installationIDs)
+	if err != nil {
+		return nil, err
+	}
+	stats := Stats{TotalReviews: row.TotalReviews, CompletedToday: row.CompletedToday, AvgScore: row.AvgScore, ActiveRepos: row.ActiveRepos, CriticalFinds: row.CriticalFinds, PendingReviews: row.PendingReviews, CatchRate: row.CatchRate, PRsThisWeek: row.PrsThisWeek, HighRiskCount: row.HighRiskCount, AvgReviewTimeMs: row.AvgReviewTimeMs, DeepReviewCount: row.DeepReviewCount}
+	return &stats, nil
 }
 
 // --- Activity ---
@@ -1174,11 +1081,7 @@ func (s *Store) ListActivity(ctx context.Context, installationIDs []int64, limit
 }
 
 func (s *Store) LogActivity(ctx context.Context, installationID *int64, action, actor, resource string, metadata []byte) error {
-	_, err := s.Pool.Exec(ctx, `
-		INSERT INTO activity_log (installation_id, action, actor, resource, metadata)
-		VALUES ($1, $2, $3, $4, $5)
-	`, installationID, action, nilIfEmpty(actor), nilIfEmpty(resource), metadata)
-	return err
+	return s.q.LogActivity(ctx, db.LogActivityParams{InstallationID: installationID, Action: action, Actor: nilIfEmpty(actor), Resource: nilIfEmpty(resource), Metadata: metadata})
 }
 
 // --- Auto-Resolve Events ---
@@ -1329,19 +1232,11 @@ func (s *Store) GetLearnLayerCounts(ctx context.Context, installationIDs []int64
 // event, so callers must gate side effects (e.g. bumping pattern quality) on
 // inserted to avoid double-counting a single 👍/👎.
 func (s *Store) RecordCommentOutcome(ctx context.Context, reviewCommentID uuid.UUID, outcome string) (inserted bool, err error) {
-	// ON CONFLICT matches migration 044's comment_outcomes_unique_per_comment
-	// UNIQUE (review_comment_id, outcome). GitHub redelivers reaction.created
-	// and a removed/re-added reaction replays the same (comment, outcome), so
-	// the write must be idempotent instead of erroring on unique_violation.
-	tag, err := s.Pool.Exec(ctx, `
-		INSERT INTO comment_outcomes (review_comment_id, outcome)
-		VALUES ($1, $2)
-		ON CONFLICT (review_comment_id, outcome) DO NOTHING
-	`, reviewCommentID, outcome)
+	count, err := s.q.RecordCommentOutcome(ctx, db.RecordCommentOutcomeParams{ReviewCommentID: reviewCommentID, Outcome: outcome})
 	if err != nil {
 		return false, err
 	}
-	return tag.RowsAffected() > 0, nil
+	return count > 0, nil
 }
 
 // SetScenarioMemoryDocID records the memory customID for a scenario in

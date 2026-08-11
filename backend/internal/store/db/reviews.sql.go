@@ -159,7 +159,7 @@ func (q *Queries) FindSharedLinkedIssues(ctx context.Context, reviewID uuid.UUID
 const getLastCompletedReview = `-- name: GetLastCompletedReview :one
 SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, COALESCE(head_ref,'') as head_ref, github_review_id,
        status, summary, score, token_usage, trigger, triggered_by, duration_ms, error,
-       deep_review, persona, is_incremental, created_at, completed_at, trace_id
+       deep_review, persona, is_incremental, created_at, completed_at, diagram, diagram_title, trace_id
 FROM reviews WHERE repo_id = $1 AND pr_number = $2 AND status = 'completed'
 ORDER BY completed_at DESC LIMIT 1
 `
@@ -192,6 +192,8 @@ type GetLastCompletedReviewRow struct {
 	IsIncremental  bool       `json:"is_incremental"`
 	CreatedAt      time.Time  `json:"created_at"`
 	CompletedAt    *time.Time `json:"completed_at"`
+	Diagram        *string    `json:"diagram"`
+	DiagramTitle   *string    `json:"diagram_title"`
 	TraceID        *string    `json:"trace_id"`
 }
 
@@ -221,6 +223,8 @@ func (q *Queries) GetLastCompletedReview(ctx context.Context, arg GetLastComplet
 		&i.IsIncremental,
 		&i.CreatedAt,
 		&i.CompletedAt,
+		&i.Diagram,
+		&i.DiagramTitle,
 		&i.TraceID,
 	)
 	return i, err
@@ -315,7 +319,7 @@ func (q *Queries) GetLatestCompletedReviewByPR(ctx context.Context, arg GetLates
 const getLatestReviewByPR = `-- name: GetLatestReviewByPR :one
 SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, COALESCE(rv.head_ref,'') as head_ref, rv.github_review_id,
        rv.status, rv.summary, rv.score, rv.token_usage, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error,
-       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at, rv.trace_id
+       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at, rv.diagram, rv.diagram_title, rv.trace_id
 FROM reviews rv JOIN repos r ON rv.repo_id = r.id
 WHERE r.full_name = $1 AND rv.pr_number = $2
   AND rv.status = 'completed'
@@ -350,6 +354,8 @@ type GetLatestReviewByPRRow struct {
 	IsIncremental  bool       `json:"is_incremental"`
 	CreatedAt      time.Time  `json:"created_at"`
 	CompletedAt    *time.Time `json:"completed_at"`
+	Diagram        *string    `json:"diagram"`
+	DiagramTitle   *string    `json:"diagram_title"`
 	TraceID        *string    `json:"trace_id"`
 }
 
@@ -379,6 +385,8 @@ func (q *Queries) GetLatestReviewByPR(ctx context.Context, arg GetLatestReviewBy
 		&i.IsIncremental,
 		&i.CreatedAt,
 		&i.CompletedAt,
+		&i.Diagram,
+		&i.DiagramTitle,
 		&i.TraceID,
 	)
 	return i, err
@@ -387,7 +395,7 @@ func (q *Queries) GetLatestReviewByPR(ctx context.Context, arg GetLatestReviewBy
 const getLatestReviewBySHA = `-- name: GetLatestReviewBySHA :one
 SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, COALESCE(rv.head_ref,'') as head_ref, rv.github_review_id,
        rv.status, rv.summary, rv.score, rv.token_usage, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error,
-       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at, rv.trace_id
+       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at, rv.diagram, rv.diagram_title, rv.trace_id
 FROM reviews rv JOIN repos r ON rv.repo_id = r.id
 WHERE r.full_name = $1 AND rv.pr_number = $2 AND rv.head_sha = $3
   AND rv.status = 'completed'
@@ -423,6 +431,8 @@ type GetLatestReviewBySHARow struct {
 	IsIncremental  bool       `json:"is_incremental"`
 	CreatedAt      time.Time  `json:"created_at"`
 	CompletedAt    *time.Time `json:"completed_at"`
+	Diagram        *string    `json:"diagram"`
+	DiagramTitle   *string    `json:"diagram_title"`
 	TraceID        *string    `json:"trace_id"`
 }
 
@@ -452,6 +462,8 @@ func (q *Queries) GetLatestReviewBySHA(ctx context.Context, arg GetLatestReviewB
 		&i.IsIncremental,
 		&i.CreatedAt,
 		&i.CompletedAt,
+		&i.Diagram,
+		&i.DiagramTitle,
 		&i.TraceID,
 	)
 	return i, err
@@ -462,33 +474,33 @@ WITH recent AS (
   SELECT token_usage FROM reviews
   WHERE repo_id = $1 AND status = 'completed' AND token_usage IS NOT NULL
   ORDER BY created_at DESC
-  LIMIT $2
+  LIMIT $2::bigint
 )
 SELECT
   COUNT(*)::int AS sample_size,
   COALESCE(AVG((token_usage->'total'->>'total_tokens')::bigint), 0)::bigint AS avg_tokens,
   COALESCE(AVG(NULLIF((token_usage->'total'->>'cost')::float8, 0)), 0)::float8 AS avg_cost,
-  COALESCE(BOOL_OR((token_usage->'total'->>'cost') IS NOT NULL AND (token_usage->'total'->>'cost')::float8 > 0), false) AS cost_available
+  COALESCE(BOOL_OR((token_usage->'total'->>'cost') IS NOT NULL AND (token_usage->'total'->>'cost')::float8 > 0), false)::boolean AS cost_available
 FROM recent
 `
 
 type GetRepoReviewStatsParams struct {
-	RepoID int64 `json:"repo_id"`
-	Limit  int32 `json:"limit"`
+	RepoID   int64 `json:"repo_id"`
+	RowLimit int64 `json:"row_limit"`
 }
 
 type GetRepoReviewStatsRow struct {
-	SampleSize    int         `json:"sample_size"`
-	AvgTokens     int64       `json:"avg_tokens"`
-	AvgCost       float64     `json:"avg_cost"`
-	CostAvailable interface{} `json:"cost_available"`
+	SampleSize    int     `json:"sample_size"`
+	AvgTokens     int64   `json:"avg_tokens"`
+	AvgCost       float64 `json:"avg_cost"`
+	CostAvailable bool    `json:"cost_available"`
 }
 
 // Returns averaged token + cost stats over the last N completed reviews for a repo,
 // used to estimate cost for the "Trigger review" checkbox comment. `cost_available`
 // is true only when at least one review in the sample has token_usage.total.cost.
 func (q *Queries) GetRepoReviewStats(ctx context.Context, arg GetRepoReviewStatsParams) (GetRepoReviewStatsRow, error) {
-	row := q.db.QueryRow(ctx, getRepoReviewStats, arg.RepoID, arg.Limit)
+	row := q.db.QueryRow(ctx, getRepoReviewStats, arg.RepoID, arg.RowLimit)
 	var i GetRepoReviewStatsRow
 	err := row.Scan(
 		&i.SampleSize,
@@ -500,39 +512,45 @@ func (q *Queries) GetRepoReviewStats(ctx context.Context, arg GetRepoReviewStats
 }
 
 const getReview = `-- name: GetReview :one
-SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, COALESCE(head_ref,'') as head_ref, github_review_id,
+SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, COALESCE(head_ref,'') AS head_ref, github_review_id,
        status, summary, score, token_usage, trigger, triggered_by, duration_ms, error,
-       deep_review, persona, is_incremental, created_at, completed_at, simulation_results, diagram, diagram_title, trace_id
+       deep_review, persona, is_incremental, created_at, completed_at,
+       diagram, diagram_title, diagrams, truncated_files, brief, cross_pr_hash, trace_id, review_contract, budget_note
 FROM reviews WHERE id = $1
 `
 
 type GetReviewRow struct {
-	ID                uuid.UUID  `json:"id"`
-	RepoID            int64      `json:"repo_id"`
-	PRNumber          int        `json:"pr_number"`
-	PRTitle           string     `json:"pr_title"`
-	PRAuthor          string     `json:"pr_author"`
-	HeadSHA           string     `json:"head_sha"`
-	BaseSHA           string     `json:"base_sha"`
-	HeadRef           string     `json:"head_ref"`
-	GithubReviewID    *int64     `json:"github_review_id"`
-	Status            string     `json:"status"`
-	Summary           *string    `json:"summary"`
-	Score             *int       `json:"score"`
-	TokenUsage        []byte     `json:"token_usage"`
-	Trigger           string     `json:"trigger"`
-	TriggeredBy       *string    `json:"triggered_by"`
-	DurationMs        *int       `json:"duration_ms"`
-	Error             *string    `json:"error"`
-	DeepReview        bool       `json:"deep_review"`
-	Persona           *string    `json:"persona"`
-	IsIncremental     bool       `json:"is_incremental"`
-	CreatedAt         time.Time  `json:"created_at"`
-	CompletedAt       *time.Time `json:"completed_at"`
-	SimulationResults []byte     `json:"simulation_results"`
-	Diagram           *string    `json:"diagram"`
-	DiagramTitle      *string    `json:"diagram_title"`
-	TraceID           *string    `json:"trace_id"`
+	ID             uuid.UUID  `json:"id"`
+	RepoID         int64      `json:"repo_id"`
+	PRNumber       int        `json:"pr_number"`
+	PRTitle        string     `json:"pr_title"`
+	PRAuthor       string     `json:"pr_author"`
+	HeadSHA        string     `json:"head_sha"`
+	BaseSHA        string     `json:"base_sha"`
+	HeadRef        string     `json:"head_ref"`
+	GithubReviewID *int64     `json:"github_review_id"`
+	Status         string     `json:"status"`
+	Summary        *string    `json:"summary"`
+	Score          *int       `json:"score"`
+	TokenUsage     []byte     `json:"token_usage"`
+	Trigger        string     `json:"trigger"`
+	TriggeredBy    *string    `json:"triggered_by"`
+	DurationMs     *int       `json:"duration_ms"`
+	Error          *string    `json:"error"`
+	DeepReview     bool       `json:"deep_review"`
+	Persona        *string    `json:"persona"`
+	IsIncremental  bool       `json:"is_incremental"`
+	CreatedAt      time.Time  `json:"created_at"`
+	CompletedAt    *time.Time `json:"completed_at"`
+	Diagram        *string    `json:"diagram"`
+	DiagramTitle   *string    `json:"diagram_title"`
+	Diagrams       []byte     `json:"diagrams"`
+	TruncatedFiles []byte     `json:"truncated_files"`
+	Brief          *string    `json:"brief"`
+	CrossPRHash    *string    `json:"cross_pr_hash"`
+	TraceID        *string    `json:"trace_id"`
+	ReviewContract []byte     `json:"review_contract"`
+	BudgetNote     *string    `json:"budget_note"`
 }
 
 func (q *Queries) GetReview(ctx context.Context, id uuid.UUID) (GetReviewRow, error) {
@@ -561,10 +579,15 @@ func (q *Queries) GetReview(ctx context.Context, id uuid.UUID) (GetReviewRow, er
 		&i.IsIncremental,
 		&i.CreatedAt,
 		&i.CompletedAt,
-		&i.SimulationResults,
 		&i.Diagram,
 		&i.DiagramTitle,
+		&i.Diagrams,
+		&i.TruncatedFiles,
+		&i.Brief,
+		&i.CrossPRHash,
 		&i.TraceID,
+		&i.ReviewContract,
+		&i.BudgetNote,
 	)
 	return i, err
 }
@@ -725,7 +748,7 @@ func (q *Queries) ListPRReviewSummaries(ctx context.Context, arg ListPRReviewSum
 const listReviews = `-- name: ListReviews :many
 SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, COALESCE(head_ref,'') as head_ref, github_review_id,
        status, summary, score, token_usage, trigger, triggered_by, duration_ms, error,
-       deep_review, persona, is_incremental, created_at, completed_at, trace_id
+       deep_review, persona, is_incremental, created_at, completed_at, diagram, diagram_title, trace_id
 FROM reviews WHERE repo_id = $1
 ORDER BY created_at DESC LIMIT $2 OFFSET $3
 `
@@ -759,6 +782,8 @@ type ListReviewsRow struct {
 	IsIncremental  bool       `json:"is_incremental"`
 	CreatedAt      time.Time  `json:"created_at"`
 	CompletedAt    *time.Time `json:"completed_at"`
+	Diagram        *string    `json:"diagram"`
+	DiagramTitle   *string    `json:"diagram_title"`
 	TraceID        *string    `json:"trace_id"`
 }
 
@@ -794,6 +819,8 @@ func (q *Queries) ListReviews(ctx context.Context, arg ListReviewsParams) ([]Lis
 			&i.IsIncremental,
 			&i.CreatedAt,
 			&i.CompletedAt,
+			&i.Diagram,
+			&i.DiagramTitle,
 			&i.TraceID,
 		); err != nil {
 			return nil, err
@@ -1050,17 +1077,27 @@ func (q *Queries) UpdateReviewCrossPRHash(ctx context.Context, arg UpdateReviewC
 }
 
 const updateReviewStatus = `-- name: UpdateReviewStatus :exec
-UPDATE reviews SET status = $2, error = $3, completed_at = CASE WHEN $2 IN ('completed','failed','cancelled') THEN NOW() ELSE NULL END
-WHERE id = $1
+UPDATE reviews
+SET status = $1::text,
+    error = $2::text,
+    token_usage = COALESCE($3::jsonb, token_usage),
+    completed_at = CASE WHEN $1::text IN ('completed','failed') THEN NOW() ELSE NULL END
+WHERE id = $4::uuid
 `
 
 type UpdateReviewStatusParams struct {
-	ID     uuid.UUID `json:"id"`
-	Status string    `json:"status"`
-	Error  *string   `json:"error"`
+	Status     string    `json:"status"`
+	Error      *string   `json:"error"`
+	TokenUsage []byte    `json:"token_usage"`
+	ID         uuid.UUID `json:"id"`
 }
 
 func (q *Queries) UpdateReviewStatus(ctx context.Context, arg UpdateReviewStatusParams) error {
-	_, err := q.db.Exec(ctx, updateReviewStatus, arg.ID, arg.Status, arg.Error)
+	_, err := q.db.Exec(ctx, updateReviewStatus,
+		arg.Status,
+		arg.Error,
+		arg.TokenUsage,
+		arg.ID,
+	)
 	return err
 }

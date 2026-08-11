@@ -13,12 +13,13 @@ import (
 )
 
 const createReviewComment = `-- name: CreateReviewComment :exec
-INSERT INTO review_comments (review_id, file_path, start_line, end_line, side, body, severity, category, specialist, confidence_score, code_snippet, github_comment_id, matched_pattern_id, matched_pattern_score, enforced_rule_content, is_new_finding)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+INSERT INTO review_comments (review_id, attempt_generation, file_path, start_line, end_line, side, body, severity, category, specialist, confidence_score, code_snippet, github_comment_id, matched_pattern_id, matched_pattern_score, enforced_rule_content, is_new_finding, suppressed_reason, state)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
 `
 
 type CreateReviewCommentParams struct {
 	ReviewID            uuid.UUID `json:"review_id"`
+	AttemptGeneration   int       `json:"attempt_generation"`
 	FilePath            string    `json:"file_path"`
 	StartLine           *int      `json:"start_line"`
 	EndLine             *int      `json:"end_line"`
@@ -34,11 +35,14 @@ type CreateReviewCommentParams struct {
 	MatchedPatternScore *float32  `json:"matched_pattern_score"`
 	EnforcedRuleContent *string   `json:"enforced_rule_content"`
 	IsNewFinding        *bool     `json:"is_new_finding"`
+	SuppressedReason    *string   `json:"suppressed_reason"`
+	State               string    `json:"state"`
 }
 
 func (q *Queries) CreateReviewComment(ctx context.Context, arg CreateReviewCommentParams) error {
 	_, err := q.db.Exec(ctx, createReviewComment,
 		arg.ReviewID,
+		arg.AttemptGeneration,
 		arg.FilePath,
 		arg.StartLine,
 		arg.EndLine,
@@ -54,16 +58,21 @@ func (q *Queries) CreateReviewComment(ctx context.Context, arg CreateReviewComme
 		arg.MatchedPatternScore,
 		arg.EnforcedRuleContent,
 		arg.IsNewFinding,
+		arg.SuppressedReason,
+		arg.State,
 	)
 	return err
 }
 
 const getCommentByGithubID = `-- name: GetCommentByGithubID :one
-SELECT id, review_id, file_path, start_line, end_line, side, body, severity, category,
-       specialist, confidence_score, code_snippet, github_comment_id,
-       matched_pattern_id, matched_pattern_score, enforced_rule_content, is_new_finding,
-       created_at
-FROM review_comments WHERE github_comment_id = $1
+SELECT rc.id, rc.review_id, rc.file_path, rc.start_line, rc.end_line, rc.side, rc.body, rc.severity, rc.category,
+       rc.specialist, rc.confidence_score, rc.code_snippet, rc.github_comment_id,
+       rc.matched_pattern_id, rc.matched_pattern_score, rc.enforced_rule_content, rc.is_new_finding,
+       rc.created_at, rc.state, rc.suppressed_reason, rc.resolved_sha, rc.attempt_generation
+FROM review_comments rc
+JOIN reviews r ON r.id = rc.review_id
+WHERE rc.github_comment_id = $1
+  AND rc.attempt_generation = r.attempt_generation
 `
 
 type GetCommentByGithubIDRow struct {
@@ -85,6 +94,10 @@ type GetCommentByGithubIDRow struct {
 	EnforcedRuleContent *string   `json:"enforced_rule_content"`
 	IsNewFinding        *bool     `json:"is_new_finding"`
 	CreatedAt           time.Time `json:"created_at"`
+	State               string    `json:"state"`
+	SuppressedReason    *string   `json:"suppressed_reason"`
+	ResolvedSHA         *string   `json:"resolved_sha"`
+	AttemptGeneration   int       `json:"attempt_generation"`
 }
 
 func (q *Queries) GetCommentByGithubID(ctx context.Context, githubCommentID *int64) (GetCommentByGithubIDRow, error) {
@@ -109,6 +122,10 @@ func (q *Queries) GetCommentByGithubID(ctx context.Context, githubCommentID *int
 		&i.EnforcedRuleContent,
 		&i.IsNewFinding,
 		&i.CreatedAt,
+		&i.State,
+		&i.SuppressedReason,
+		&i.ResolvedSHA,
+		&i.AttemptGeneration,
 	)
 	return i, err
 }
@@ -472,7 +489,7 @@ func (q *Queries) ListThreadLinksForReview(ctx context.Context, reviewID uuid.UU
 	return items, nil
 }
 
-const recordCommentOutcome = `-- name: RecordCommentOutcome :exec
+const recordCommentOutcome = `-- name: RecordCommentOutcome :execrows
 INSERT INTO comment_outcomes (review_comment_id, outcome)
 VALUES ($1, $2)
 ON CONFLICT (review_comment_id, outcome) DO NOTHING
@@ -486,7 +503,10 @@ type RecordCommentOutcomeParams struct {
 // Idempotent: webhook retries delivering the same reaction event produce no-op
 // second inserts instead of duplicate rows. Paired with the UNIQUE constraint
 // added in migration 037.
-func (q *Queries) RecordCommentOutcome(ctx context.Context, arg RecordCommentOutcomeParams) error {
-	_, err := q.db.Exec(ctx, recordCommentOutcome, arg.ReviewCommentID, arg.Outcome)
-	return err
+func (q *Queries) RecordCommentOutcome(ctx context.Context, arg RecordCommentOutcomeParams) (int64, error) {
+	result, err := q.db.Exec(ctx, recordCommentOutcome, arg.ReviewCommentID, arg.Outcome)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

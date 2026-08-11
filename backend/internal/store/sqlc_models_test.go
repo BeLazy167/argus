@@ -78,3 +78,22 @@ func TestGeneratedGaugePreservesNullableRates(t *testing.T) {
 		t.Fatalf("zero gauge rates are not nil: %#v", row)
 	}
 }
+
+func TestFullReviewFromSQLCPreservesNullAndJSONFields(t *testing.T) {
+	row := db.GetReviewRow{ID: uuid.New(), CreatedAt: time.Now(), TokenUsage: []byte(`{"total":{}}`), ReviewContract: []byte(`{"depth":"full"}`), Diagrams: []byte(`[]`)}
+	got := fullReviewFromSQLC(row)
+	if got.TokenUsage == nil || string(*got.TokenUsage) != `{"total":{}}` {
+		t.Fatalf("TokenUsage = %v", got.TokenUsage)
+	}
+	if got.ReviewContract == nil || string(*got.ReviewContract) != `{"depth":"full"}` {
+		t.Fatalf("ReviewContract = %v", got.ReviewContract)
+	}
+	if string(got.Diagrams) != "[]" {
+		t.Fatalf("Diagrams = %s", got.Diagrams)
+	}
+	row.TokenUsage, row.ReviewContract = nil, nil
+	got = fullReviewFromSQLC(row)
+	if got.TokenUsage != nil || got.ReviewContract != nil {
+		t.Fatalf("NULL JSON became populated: token=%v contract=%v", got.TokenUsage, got.ReviewContract)
+	}
+}
