@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -233,6 +234,61 @@ func TestMirrorOutboxSerializesDeleteAndRecreateClaimsByCustomID(t *testing.T) {
 	}
 	if len(second) != 0 {
 		t.Fatalf("second machine concurrently claimed same custom ID: %+v", second)
+	}
+}
+
+// A later legacy event has no persisted custom ID until its first worker pass.
+// It must therefore wait behind every earlier pattern transition in the tenant:
+// that earlier event may target the same ID the legacy payload reconstructs.
+func TestMirrorOutboxBoundPatternBlocksLaterLegacyUnknownClaim(t *testing.T) {
+	pool, install := pgTestPool(t)
+	ctx := context.Background()
+	lockMirrorOutboxPGTests(t, pool, ctx)
+	st := store.NewWithDB(pool)
+	if _, err := pool.Exec(ctx, `DELETE FROM memory_mirror_outbox`); err != nil {
+		t.Fatalf("clear mirror outbox: %v", err)
+	}
+
+	const (
+		repo    = "mirror-owner-legacy-order"
+		content = "legacy ordered guard writes"
+	)
+	customID := PatternCustomID("", repo, "learned", content)
+	boundPayload, err := NewPatternMirrorPayload(customID, repo, false, PatternMemory{
+		Content: content, Source: "auto_learn",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyPayload := json.RawMessage(`{
+		"repo":"mirror-owner-legacy-order",
+		"pattern":{"Content":"legacy ordered guard writes","Source":"auto_learn"}
+	}`)
+	firstAggregateID := install*1_000_000 + 2_541
+	legacyAggregateID := firstAggregateID + 1
+	for _, event := range []store.MemoryMirrorEvent{
+		{InstallationID: install, AggregateType: store.MemoryMirrorPattern, AggregateID: firstAggregateID, Operation: store.MemoryMirrorUpsert, Payload: boundPayload},
+		{InstallationID: install, AggregateType: store.MemoryMirrorPattern, AggregateID: legacyAggregateID, Operation: store.MemoryMirrorDelete, Payload: legacyPayload},
+	} {
+		if err := st.WithMemoryMirrorTx(ctx, func(pgx.Tx) (store.MemoryMirrorEvent, error) { return event, nil }); err != nil {
+			t.Fatalf("enqueue event: %v", err)
+		}
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM memory_mirror_outbox WHERE installation_id=$1 AND aggregate_id=ANY($2::bigint[])`, install, []int64{firstAggregateID, legacyAggregateID})
+	})
+
+	first, err := st.ClaimMemoryMirrorEvents(ctx, 1, time.Minute)
+	if err != nil || len(first) != 1 || first[0].AggregateID != firstAggregateID {
+		t.Fatalf("first machine claim=%v err=%v", first, err)
+	}
+	secondMachine := store.NewWithDB(pool)
+	second, err := secondMachine.ClaimMemoryMirrorEvents(ctx, 1, time.Minute)
+	if err != nil {
+		t.Fatalf("second machine claim: %v", err)
+	}
+	if len(second) != 0 {
+		t.Fatalf("later legacy unknown event bypassed earlier bound pattern: %+v", second)
 	}
 }
 

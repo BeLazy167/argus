@@ -150,8 +150,9 @@ func (s *Store) ClaimMemoryMirrorEvents(ctx context.Context, limit int, staleAft
                        AND earlier.aggregate_id = o.aggregate_id)
                       OR NULLIF(earlier.payload->>'custom_id', '') = NULLIF(o.payload->>'custom_id', '')
                       OR (earlier.aggregate_type = 'pattern'
-                          AND NULLIF(earlier.payload->>'custom_id', '') IS NULL
-                          AND o.aggregate_type = 'pattern')
+                          AND o.aggregate_type = 'pattern'
+                          AND (NULLIF(earlier.payload->>'custom_id', '') IS NULL
+                               OR NULLIF(o.payload->>'custom_id', '') IS NULL))
                     )
               )
             ORDER BY o.id
