@@ -113,18 +113,52 @@ func (r *Registry) InvalidateEmbedder(installationID int64) {
 	r.embedders.Invalidate(installationID)
 }
 
-// ReembedCurrentSpace repairs one installation after embedding configuration
-// rotation. A session advisory lock prevents two machines from buying the same
-// replacement vectors concurrently; a busy lock is success because its holder
-// is already converging the same tenant. The caller must provide a bounded
-// context because a large corpus can require many provider batches.
+// reembedLockPollInterval bounds how long a waiter can miss a just-released
+// advisory lock without turning a busy lock into a dropped repair.
+const reembedLockPollInterval = 50 * time.Millisecond
+
+// maxReembedConvergenceRounds bounds configuration churn and concurrent stale
+// writers. The outer request/startup context bounds provider and corpus work;
+// this bound ensures a tenant rotated continuously returns an explicit retry
+// signal instead of monopolizing the advisory lock forever.
+const maxReembedConvergenceRounds = 8
+
+// acquireReembedLock waits for the tenant session lock using side-effect-free
+// try calls. A busy lock is not success: its holder may have captured an older
+// desired space, so this caller remains the durable in-process waiter for the
+// rotation that scheduled it. The caller's context is the wait bound.
+func acquireReembedLock(ctx context.Context, conn *pgxpool.Conn, lockKey int64) error {
+	for {
+		var acquired bool
+		if err := conn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", lockKey).Scan(&acquired); err != nil {
+			return fmt.Errorf("try advisory lock: %w", err)
+		}
+		if acquired {
+			return nil
+		}
+
+		timer := time.NewTimer(reembedLockPollInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return fmt.Errorf("wait for advisory lock: %w", ctx.Err())
+		case <-timer.C:
+		}
+	}
+}
+
+// ReembedCurrentSpace converges one installation to the latest embedding
+// configuration committed in PostgreSQL. The tenant advisory lock serializes
+// provider spend across machines. Lock waiters do not silently succeed, and a
+// holder refreshes desired state after every pass so a B pass that overlaps a
+// B-to-C rotation continues to C before reporting convergence.
+//
+// The caller must provide a bounded context because a large corpus can require
+// many provider batches. Configuration churn is bounded separately by
+// maxReembedConvergenceRounds and fails explicitly when exhausted.
 func (r *Registry) ReembedCurrentSpace(ctx context.Context, installationID int64, batchSize int) (int, error) {
 	if r.pool == nil || r.embedders == nil {
 		return 0, fmt.Errorf("reembed current space: postgres memory backend is not configured")
-	}
-	embedder, _ := r.embedders.GetEmbedder(ctx, installationID)
-	if embedder == nil {
-		return 0, fmt.Errorf("reembed current space: no embedder for installation %d", installationID)
 	}
 
 	conn, err := r.pool.Acquire(ctx)
@@ -135,13 +169,8 @@ func (r *Registry) ReembedCurrentSpace(ctx context.Context, installationID int64
 	// Namespace "ARGU" in the high bits keeps this lock independent of other
 	// tenant-scoped advisory locks while retaining the full installation id.
 	lockKey := (int64(0x41524755) << 32) ^ installationID
-	var acquired bool
-	if err := conn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", lockKey).Scan(&acquired); err != nil {
+	if err := acquireReembedLock(ctx, conn, lockKey); err != nil {
 		return 0, fmt.Errorf("reembed current space: acquire advisory lock: %w", err)
-	}
-	if !acquired {
-		r.log().Info("memory reembed already running", "installation_id", installationID)
-		return 0, nil
 	}
 	defer func() {
 		unlockCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
@@ -152,10 +181,68 @@ func (r *Registry) ReembedCurrentSpace(ctx context.Context, installationID int64
 		}
 	}()
 
-	idx := NewPGIndexer(r.pool, embedder, installationID, r.embedders.Dimensions(), r.log())
-	return idx.ReembedMissing(ctx, batchSize)
-}
+	total := 0
+	lastTarget, lastDesired := "", ""
+	var lastPending int64
+	for round := 1; round <= maxReembedConvergenceRounds; round++ {
+		if err := ctx.Err(); err != nil {
+			return total, fmt.Errorf("reembed current space: %w", err)
+		}
 
+		// Capture desired state only after owning the cross-machine lock, and
+		// bypass the process TTL: another machine may have committed this
+		// rotation, so a locally cached embedder is not authoritative.
+		embedder, err := r.embedders.refreshEmbedder(ctx, installationID)
+		if err != nil {
+			return total, fmt.Errorf("reembed current space: resolve desired space: %w", err)
+		}
+		if embedder == nil {
+			return total, fmt.Errorf("reembed current space: no embedder for installation %d", installationID)
+		}
+		idx := NewPGIndexer(r.pool, embedder, installationID, r.embedders.Dimensions(), r.log())
+		lastTarget = idx.embeddingSpaceID()
+
+		repaired, err := idx.ReembedMissing(ctx, batchSize)
+		total += repaired
+		if err != nil {
+			return total, err
+		}
+
+		// Re-read PostgreSQL after the pass. Equality is on the same canonical
+		// endpoint/model/dimensions identity stamped on rows; credentials-only
+		// rotations therefore do not buy identical vectors again.
+		desiredEmbedder, err := r.embedders.refreshEmbedder(ctx, installationID)
+		if err != nil {
+			return total, fmt.Errorf("reembed current space: verify desired space: %w", err)
+		}
+		if desiredEmbedder == nil {
+			return total, fmt.Errorf("reembed current space: no embedder for installation %d after repair", installationID)
+		}
+		desiredIdx := NewPGIndexer(r.pool, desiredEmbedder, installationID, r.embedders.Dimensions(), r.log())
+		lastDesired = desiredIdx.embeddingSpaceID()
+		if lastDesired != lastTarget {
+			r.log().Info("embedding space rotated during repair; continuing to latest space",
+				"installation_id", installationID, "completed_space", lastTarget,
+				"desired_space", lastDesired, "round", round)
+			continue
+		}
+
+		lastPending, err = desiredIdx.CountReembedPending(ctx)
+		if err != nil {
+			return total, fmt.Errorf("reembed current space: verify corpus: %w", err)
+		}
+		if lastPending == 0 {
+			return total, nil
+		}
+		r.log().Info("memory rows drifted during repair; retrying current space",
+			"installation_id", installationID, "space", lastDesired,
+			"pending", lastPending, "round", round)
+	}
+
+	return total, fmt.Errorf(
+		"reembed current space: desired state did not stabilize after %d rounds (target=%q desired=%q pending=%d); retry",
+		maxReembedConvergenceRounds, lastTarget, lastDesired, lastPending)
+}
 
 // ReembedAllCurrentSpaces converges every installation that owns live memory.
 // It is safe on every replica: ReembedCurrentSpace serializes each tenant with

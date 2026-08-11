@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/url"
 	"strings"
@@ -149,6 +150,35 @@ func NewEmbedderRegistry(resolver EmbedKeyResolver, platform PlatformEmbeddings,
 // against 0, rejecting every vector onto the fail-open NULL path.
 func (r *EmbedderRegistry) Dimensions() int { return r.platform.Dimensions }
 
+// resolveUncached reads the installation's committed provider configuration and
+// builds the matching embedder. The returned embedder is the platform fallback
+// when resolution fails; callers decide whether that fail-open substitute is
+// safe for their operation.
+func (r *EmbedderRegistry) resolveUncached(ctx context.Context, installationID int64) (Embedder, error) {
+	apiKey, baseURL, model := r.platform.APIKey, r.platform.BaseURL, r.platform.Model
+	byokKey, byokBase, byokModel, found, resolveErr := r.resolver.ResolveEmbeddingsKey(ctx, installationID)
+	if resolveErr == nil && found {
+		apiKey = byokKey
+		if byokBase != "" {
+			baseURL = byokBase
+		}
+		// The API requires model whenever base_url is overridden (custom
+		// endpoints serve what they serve, regardless of the request's model
+		// field). A BYOK key without overrides means "platform space, my key".
+		if byokModel != "" {
+			model = byokModel
+		}
+	}
+
+	if apiKey == "" && HostedKeyedBase(baseURL) {
+		// No key anywhere and the hosted endpoint requires one: embeddings
+		// are off for this installation. Keyless CUSTOM bases (local
+		// Ollama/TEI) are legitimate and proceed.
+		return nil, resolveErr
+	}
+	return NewEmbedder(apiKey, baseURL, model, r.platform.Dimensions), resolveErr
+}
+
 // GetEmbedder resolves the embedder for an installation: BYOK "embeddings"
 // key (with its base_url/model overrides) when configured, else the platform
 // key, else nil (embeddings off). Resolution errors fall back to the platform
@@ -164,33 +194,10 @@ func (r *EmbedderRegistry) GetEmbedder(ctx context.Context, installationID int64
 	gen := r.gen[installationID]
 	r.mu.Unlock()
 
-	apiKey, baseURL, model := r.platform.APIKey, r.platform.BaseURL, r.platform.Model
-	byokKey, byokBase, byokModel, found, err := r.resolver.ResolveEmbeddingsKey(ctx, installationID)
-	switch {
-	case err != nil:
+	e, resolveErr := r.resolveUncached(ctx, installationID)
+	if resolveErr != nil {
 		r.logger.Warn("embeddings BYOK resolution failed; using platform key",
-			"installation_id", installationID, "error", err)
-	case found:
-		apiKey = byokKey
-		if byokBase != "" {
-			baseURL = byokBase
-		}
-		// The API requires model whenever base_url is overridden (custom
-		// endpoints serve what they serve, regardless of the request's model
-		// field). A BYOK key without overrides means "platform space, my key".
-		if byokModel != "" {
-			model = byokModel
-		}
-	}
-
-	var e Embedder
-	if apiKey == "" && HostedKeyedBase(baseURL) {
-		// No key anywhere and the hosted endpoint requires one: embeddings
-		// are off for this installation. Keyless CUSTOM bases (local
-		// Ollama/TEI) are legitimate and proceed.
-		e = nil
-	} else {
-		e = NewEmbedder(apiKey, baseURL, model, r.platform.Dimensions)
+			"installation_id", installationID, "error", resolveErr)
 	}
 
 	// A dead CALLER context says nothing about the installation's key, so
@@ -202,11 +209,10 @@ func (r *EmbedderRegistry) GetEmbedder(ctx context.Context, installationID int64
 	// A failed resolve substitutes the PLATFORM key and model. Caching that
 	// for the full TTL stamps up to five minutes of rows with
 	// embedding_space stamped for the platform endpoint while every read gates
-	// the score on the installation's real BYOK space — those rows score 0 forever, and because
-	// their embedding is NOT NULL. The repair sweep selects the foreign
-	// space stamp, but this short TTL still bounds temporary retrieval loss. A short TTL bounds the damage to one retry window.
+	// the score on the installation's real BYOK space. Keep the fallback to one
+	// retry window so the repair predicate can recover any temporary damage.
 	ttl := embedderCacheTTL
-	if err != nil {
+	if resolveErr != nil {
 		ttl = errorEmbedderTTL
 	}
 
@@ -215,6 +221,38 @@ func (r *EmbedderRegistry) GetEmbedder(ctx context.Context, installationID int64
 	// the resolve was in flight; the next caller re-resolves.
 	if r.gen[installationID] == gen {
 		r.cache[installationID] = cachedEmbedder{embedder: e, expiresAt: time.Now().Add(ttl)}
+	}
+	r.mu.Unlock()
+	return e, nil
+}
+
+// refreshEmbedder bypasses the process cache and returns the coordinate space
+// committed in PostgreSQL now. Repair uses this strict path: a resolver outage
+// must be an explicit error, because embedding the corpus with the platform
+// fallback and calling it converged would replace known-good BYOK vectors with
+// the wrong space. Ordinary reads and writes keep GetEmbedder's fail-open
+// behavior.
+func (r *EmbedderRegistry) refreshEmbedder(ctx context.Context, installationID int64) (Embedder, error) {
+	r.mu.Lock()
+	delete(r.cache, installationID)
+	r.gen[installationID]++
+	gen := r.gen[installationID]
+	r.mu.Unlock()
+
+	e, err := r.resolveUncached(ctx, installationID)
+	if err != nil {
+		return nil, fmt.Errorf("refresh embeddings provider: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	// Publish only if another local rotation did not invalidate this result
+	// while PostgreSQL was being read. The caller may still use the coherent
+	// snapshot it received; the convergence loop refreshes again after repair.
+	r.mu.Lock()
+	if r.gen[installationID] == gen {
+		r.cache[installationID] = cachedEmbedder{embedder: e, expiresAt: time.Now().Add(embedderCacheTTL)}
 	}
 	r.mu.Unlock()
 	return e, nil

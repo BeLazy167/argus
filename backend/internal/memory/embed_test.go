@@ -221,7 +221,7 @@ func TestEmbedderRegistryResolution(t *testing.T) {
 		}
 	})
 
-	t.Run("resolver error degrades to platform", func(t *testing.T) {
+	t.Run("resolver error degrades ordinary callers to platform", func(t *testing.T) {
 		r := NewEmbedderRegistry(&fakeEmbedResolver{err: fmt.Errorf("db down")},
 			PlatformEmbeddings{APIKey: "platform"}, logger)
 		e, err := r.GetEmbedder(ctx, 1)
@@ -230,6 +230,14 @@ func TestEmbedderRegistryResolution(t *testing.T) {
 		}
 		if e.(*HTTPEmbedder).apiKey != "platform" {
 			t.Fatal("did not fall back to platform on resolver error")
+		}
+	})
+
+	t.Run("resolver error fails strict repair refresh", func(t *testing.T) {
+		r := NewEmbedderRegistry(&fakeEmbedResolver{err: fmt.Errorf("db down")},
+			PlatformEmbeddings{APIKey: "platform"}, logger)
+		if e, err := r.refreshEmbedder(ctx, 1); err == nil || e != nil {
+			t.Fatalf("refreshEmbedder = (%v, %v), want explicit error without platform fallback", e, err)
 		}
 	})
 
