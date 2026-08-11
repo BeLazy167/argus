@@ -140,6 +140,77 @@ func (s *Store) UpsertCodeEdge(ctx context.Context, repoID, sourceID, targetID i
 	return err
 }
 
+// CodeEdgeRow is one parser-owned edge in an authoritative per-file snapshot.
+type CodeEdgeRow struct {
+	SourceID int64
+	TargetID int64
+	Kind     string
+}
+
+// ReplaceCodeEdgesForFiles replaces every deterministic outgoing edge whose
+// source belongs to one of filePaths. An empty edge set is authoritative and
+// removes relationships that disappeared from the source.
+func (s *Store) ReplaceCodeEdgesForFiles(ctx context.Context, repoID int64, filePaths []string, edges []CodeEdgeRow) error {
+	if len(filePaths) == 0 {
+		return nil
+	}
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("replace code edges: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM code_edges ce
+		USING code_nodes src
+		WHERE ce.source_id = src.id
+		  AND ce.repo_id = $1 AND src.repo_id = $1
+		  AND src.file_path = ANY($2::text[])
+		  AND NOT ce.inferred`, repoID, filePaths); err != nil {
+		return fmt.Errorf("replace code edges: delete: %w", err)
+	}
+	if len(edges) > 0 {
+		batch := &pgx.Batch{}
+		for _, edge := range edges {
+			batch.Queue(`
+				INSERT INTO code_edges (repo_id, source_id, target_id, kind, inferred, updated_at)
+				VALUES ($1, $2, $3, $4, false, NOW())
+				ON CONFLICT (repo_id, source_id, target_id, kind) DO NOTHING`,
+				repoID, edge.SourceID, edge.TargetID, edge.Kind)
+		}
+		if err := tx.SendBatch(ctx, batch).Close(); err != nil {
+			return fmt.Errorf("replace code edges: insert: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("replace code edges: commit: %w", err)
+	}
+	return nil
+}
+
+// DeleteGraphFiles removes deleted or pre-rename paths. Node foreign keys
+// cascade their endpoint and edge rows; the explicit endpoint delete also
+// handles a defensive zero-node snapshot left by an older writer.
+func (s *Store) DeleteGraphFiles(ctx context.Context, repoID int64, filePaths []string) error {
+	if len(filePaths) == 0 {
+		return nil
+	}
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("delete graph files: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `DELETE FROM api_endpoints WHERE repo_id = $1 AND file_path = ANY($2::text[])`, repoID, filePaths); err != nil {
+		return fmt.Errorf("delete graph files: endpoints: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM code_nodes WHERE repo_id = $1 AND file_path = ANY($2::text[])`, repoID, filePaths); err != nil {
+		return fmt.Errorf("delete graph files: nodes: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("delete graph files: commit: %w", err)
+	}
+	return nil
+}
+
 // MarkNodesMerged marks all code_nodes for a given PR as permanently merged.
 func (s *Store) MarkNodesMerged(ctx context.Context, repoID int64, prNumber int) error {
 	_, err := s.Pool.Exec(ctx,

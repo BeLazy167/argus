@@ -186,6 +186,14 @@ func (f *fakeIndexerStore) UpsertCodeEdge(_ context.Context, repoID, sourceID, t
 	return nil
 }
 
+func (f *fakeIndexerStore) ReplaceCodeEdgesForFiles(_ context.Context, repoID int64, _ []string, edges []store.CodeEdgeRow) error {
+	f.upsertEdges = nil
+	for _, edge := range edges {
+		f.upsertEdges = append(f.upsertEdges, upsertEdgeCall{repoID: repoID, sourceID: edge.SourceID, targetID: edge.TargetID, kind: edge.Kind})
+	}
+	return nil
+}
+
 func (f *fakeIndexerStore) DeleteNodesByIDs(_ context.Context, repoID int64, ids []int64) error {
 	// Only record non-empty sweeps. The real store no-ops on empty, and a
 	// test that asserts "0 deletes" should read 0 regardless of whether
@@ -345,3 +353,33 @@ func TestIndexParsedSymbols_HashGatedDiff(t *testing.T) {
 // break — but having it here points at the cause in one line instead of
 // burying the error inside indexFileSet's call graph.
 var _ indexerStore = (*store.Store)(nil)
+
+func TestIndexParsedSymbolsReplacesEdgeSnapshotIncludingEmpty(t *testing.T) {
+	const repoID int64 = 42
+	foo := Symbol{Kind: KindFunction, Name: "Foo", FilePath: "a.go", LineStart: 1, LineEnd: 4}
+	bar := Symbol{Kind: KindFunction, Name: "Bar", FilePath: "a.go", LineStart: 6, LineEnd: 9}
+
+	tests := []struct {
+		name      string
+		edges     []Edge
+		wantEdges int
+	}{
+		{name: "current call is written", edges: []Edge{{SourceName: "Foo", TargetName: "Bar", Kind: "calls"}}, wantEdges: 1},
+		{name: "zero-edge snapshot clears removed call", edges: nil, wantEdges: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := newFakeIndexerStore()
+			st.upsertEdges = []upsertEdgeCall{{repoID: repoID, sourceID: 1, targetID: 2, kind: "calls"}}
+			err := indexParsedSymbols(context.Background(), st, repoID, map[string]fileResult{
+				"a.go": {symbols: []Symbol{foo, bar}, edges: tt.edges},
+			})
+			if err != nil {
+				t.Fatalf("indexParsedSymbols: %v", err)
+			}
+			if got := len(st.upsertEdges); got != tt.wantEdges {
+				t.Fatalf("replacement edge count = %d, want %d (%+v)", got, tt.wantEdges, st.upsertEdges)
+			}
+		})
+	}
+}

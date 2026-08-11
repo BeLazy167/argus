@@ -744,7 +744,11 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 				emitPipelinePanicEvent(graphCtx, o.logger, "graph_incremental_index", r, obs.TraceID(graphCtx))
 			}
 		}()
-		changedFiles := diffFilePaths(patchSet)
+		changedFiles, removedFiles := graphIndexPaths(patchSet)
+		if err := o.st.DeleteGraphFiles(graphCtx, dbRepo.ID, removedFiles); err != nil {
+			o.logger.Warn("[graph] deleted-path reconciliation failed", "error", err, "pr", event.PRNumber)
+			return
+		}
 		if len(changedFiles) == 0 {
 			return
 		}
@@ -4215,6 +4219,26 @@ func diffFilePaths(d *diff.PatchSet) []string {
 		paths = append(paths, f.NewName)
 	}
 	return paths
+}
+
+func graphIndexPaths(d *diff.PatchSet) (active, removed []string) {
+	for _, f := range d.Files {
+		if f.Status == diff.FileDeleted {
+			if f.OldName != "" {
+				removed = append(removed, f.OldName)
+			} else if f.NewName != "" {
+				removed = append(removed, f.NewName)
+			}
+			continue
+		}
+		if f.Status == diff.FileRenamed && f.OldName != "" && f.OldName != f.NewName {
+			removed = append(removed, f.OldName)
+		}
+		if f.NewName != "" {
+			active = append(active, f.NewName)
+		}
+	}
+	return active, removed
 }
 
 // writeDiffSummary appends truncated diffs for each changed file to a prompt builder.

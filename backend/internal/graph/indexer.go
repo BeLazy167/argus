@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"log/slog"
 	"path/filepath"
 	"regexp"
@@ -45,6 +46,7 @@ type indexerStore interface {
 	UpsertCodeNodeFullWithHash(ctx context.Context, repoID int64, kind, name, filePath string, lineStart, lineEnd int, language string, prNumber int, returnType, params, visibility string, isAsync bool, receiverType, scope, contentHash string) (int64, error)
 	UpsertCodeNode(ctx context.Context, repoID int64, kind, name, filePath string, lineStart, lineEnd int, language string, prNumber int) (int64, error)
 	UpsertCodeEdge(ctx context.Context, repoID, sourceID, targetID int64, kind string) error
+	ReplaceCodeEdgesForFiles(ctx context.Context, repoID int64, filePaths []string, edges []store.CodeEdgeRow) error
 	DeleteNodesByIDs(ctx context.Context, repoID int64, ids []int64) error
 }
 
@@ -501,38 +503,38 @@ func resolveAndUpsertEdges(ctx context.Context, st indexerStore, repoDBID int64,
 		return resolveNodeName(sourceFile, targetName, keyToID, nameToIDs)
 	}
 
-	// Upsert edges where both source and target exist in the graph.
-	// Iterate with filePath so we resolve edge source in its own file (composite key),
-	// avoiding cross-file name collisions (e.g. multiple `init`, `New`, `Handle`).
-	for filePath, edges := range edgesByFile {
-		for _, edge := range edges {
-			// Import edges: SourceName is a file path, not a symbol name.
-			// These represent file-level dependencies and are resolved differently.
+	filePaths := make([]string, 0, len(edgesByFile))
+	for filePath := range edgesByFile {
+		filePaths = append(filePaths, filePath)
+	}
+	sort.Strings(filePaths)
+
+	resolved := make([]store.CodeEdgeRow, 0)
+	seen := make(map[store.CodeEdgeRow]struct{})
+	appendEdge := func(sourceID, targetID int64, kind string) {
+		row := store.CodeEdgeRow{SourceID: sourceID, TargetID: targetID, Kind: kind}
+		if _, ok := seen[row]; ok {
+			return
+		}
+		seen[row] = struct{}{}
+		resolved = append(resolved, row)
+	}
+
+	for _, filePath := range filePaths {
+		for _, edge := range edgesByFile[filePath] {
 			if edge.Kind == "imports" {
-				// Use any symbol defined in filePath as the edge source.
-				// The import edge semantically means "this file depends on that module".
 				var sourceID int64
-				var found bool
 				for _, sym := range symbolsByFile[filePath] {
-					if sym.FilePath != filePath {
-						continue
-					}
 					if id, ok := keyToID[nodeKey(filePath, sym.Name)]; ok {
 						sourceID = id
-						found = true
 						break
 					}
 				}
-				if !found {
+				if sourceID == 0 {
 					continue
 				}
-				// Import targets are external packages — they won't be in nameToIDs.
-				// Create a synthetic "module" node so the edge is preserved.
-				// The code_nodes_kind_check constraint only allows
-				// function|method|class|type|interface|file|module, so we
-				// use "module" for external package references.
-				targetID, tok := resolveEdgeTarget(filePath, edge.TargetName)
-				if !tok {
+				targetID, ok := resolveEdgeTarget(filePath, edge.TargetName)
+				if !ok {
 					var err error
 					targetID, err = st.UpsertCodeNode(ctx, repoDBID, "module", edge.TargetName, filePath, 0, 0, "", 0)
 					if err != nil {
@@ -542,15 +544,10 @@ func resolveAndUpsertEdges(ctx context.Context, st indexerStore, repoDBID int64,
 					keyToID[nodeKey(filePath, edge.TargetName)] = targetID
 					nameToIDs[edge.TargetName] = append(nameToIDs[edge.TargetName], targetID)
 				}
-				if err := st.UpsertCodeEdge(ctx, repoDBID, sourceID, targetID, edge.Kind); err != nil {
-					slog.Warn("graph: upsert edge failed", "source", filePath, "target", edge.TargetName, "error", err)
-				}
+				appendEdge(sourceID, targetID, edge.Kind)
 				continue
 			}
 
-			// Non-import edges: resolve source in the file that produced the edge
-			// (composite key) so two files defining a symbol with the same name
-			// (e.g. `init`, `New`) don't have their call edges collapsed.
 			sourceID, ok := keyToID[nodeKey(filePath, edge.SourceName)]
 			if !ok {
 				sourceIDs := nameToIDs[edge.SourceName]
@@ -559,34 +556,25 @@ func resolveAndUpsertEdges(ctx context.Context, st indexerStore, repoDBID int64,
 				}
 				sourceID = sourceIDs[0]
 			}
-
-			targetID, tok := resolveEdgeTarget(filePath, edge.TargetName)
-			if !tok {
-				targetIDs := nameToIDs[edge.TargetName]
-				if len(targetIDs) == 0 {
-					continue
-				}
-				targetID = targetIDs[0]
+			targetID, ok := resolveEdgeTarget(filePath, edge.TargetName)
+			if !ok {
+				continue
 			}
-			if err := st.UpsertCodeEdge(ctx, repoDBID, sourceID, targetID, edge.Kind); err != nil {
-				slog.Warn("graph: upsert edge failed", "source", edge.SourceName, "target", edge.TargetName, "error", err)
-			}
+			appendEdge(sourceID, targetID, edge.Kind)
 		}
 	}
 
-	// Second pass: resolve uses_type edges from return types and parameter types.
 	var allSyms []Symbol
 	for _, syms := range symbolsByFile {
 		allSyms = append(allSyms, syms...)
 	}
 	for _, edge := range resolveTypeEdges(allSyms, keyToID) {
-		sourceID := keyToID[edge.SourceName]
-		targetID := keyToID[edge.TargetName]
-		if err := st.UpsertCodeEdge(ctx, repoDBID, sourceID, targetID, edge.Kind); err != nil {
-			slog.Warn("graph: upsert type edge failed", "source", edge.SourceName, "target", edge.TargetName, "error", err)
-		}
+		appendEdge(keyToID[edge.SourceName], keyToID[edge.TargetName], edge.Kind)
 	}
 
+	if err := st.ReplaceCodeEdgesForFiles(ctx, repoDBID, filePaths, resolved); err != nil {
+		return fmt.Errorf("replace code edges: %w", err)
+	}
 	return nil
 }
 
