@@ -99,38 +99,28 @@ func (s *Server) createPattern(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Index in memory (respect repo scope)
-	var smID *string
-	if s.memRegistry != nil {
-		indexer := s.memRegistry.GetIndexer(r.Context(), body.InstallationID)
-		if indexer != nil {
-			pattern := memory.PatternMemory{Content: body.Content, Source: "dashboard"}
-			var resp *memory.IndexResult
-			var err error
-			if body.RepoID != nil {
-				dbRepo, repoErr := s.store.GetRepo(r.Context(), *body.RepoID)
-				if repoErr == nil {
-					parts := strings.SplitN(dbRepo.FullName, "/", 2)
-					if len(parts) == 2 {
-						resp, err = indexer.IndexPattern(r.Context(), parts[1], pattern)
-					}
-				}
-			} else {
-				resp, err = indexer.IndexSharedPattern(r.Context(), pattern)
-			}
-			if err != nil {
-				s.logger.Error("index pattern in memory", "error", err)
-			} else if resp != nil {
-				smID = &resp.ID
-			}
+	var repoName string
+	if body.RepoID != nil {
+		dbRepo, repoErr := s.store.GetRepoScoped(r.Context(), *body.RepoID, []int64{body.InstallationID})
+		if repoErr != nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "repo not found"})
+			return
 		}
+		parts := strings.SplitN(dbRepo.FullName, "/", 2)
+		if len(parts) != 2 || parts[1] == "" {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+			return
+		}
+		repoName = parts[1]
+	}
+	source := "manual"
+	customID := memory.SharedPatternCustomID(source, body.Content)
+	if body.RepoID != nil {
+		customID = memory.PatternCustomID("", repoName, source, body.Content)
 	}
 
 	createdBy := getUserID(r.Context())
-	// memory_custom_id is nil here: dashboard-created patterns rely on the
-	// memory_doc_id match at read time. The per-finding enrich customId path is
-	// populated by the pipeline write paths (confirmed/auto_learn/convention).
-	pattern, err := s.store.CreatePattern(r.Context(), body.InstallationID, body.RepoID, body.Content, smID, &createdBy, nil, nil, nil, nil)
+	pattern, err := s.store.CreatePattern(r.Context(), body.InstallationID, body.RepoID, body.Content, nil, &createdBy, &source, nil, nil, &customID)
 	if err != nil {
 		s.logger.Error("create pattern", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create pattern"})
@@ -146,23 +136,10 @@ func (s *Server) deletePattern(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fetch pattern for memory cleanup (scoped to user's installations)
-	pattern, getErr := s.store.GetPattern(r.Context(), id)
-
-	// Delete from DB first (scoped auth check)
 	if err := s.store.DeletePattern(r.Context(), id, getInstallationIDs(r.Context())); err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "pattern not found"})
 		return
 	}
 
-	// Only delete from memory after DB deletion succeeds (confirms authorization)
-	if getErr == nil && pattern.MemoryDocID != nil && s.memRegistry != nil {
-		indexer := s.memRegistry.GetIndexer(r.Context(), pattern.InstallationID)
-		if indexer != nil {
-			if err := indexer.DeleteDocument(r.Context(), *pattern.MemoryDocID); err != nil {
-				s.logger.Error("delete pattern from memory", "error", err)
-			}
-		}
-	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }

@@ -636,42 +636,97 @@ func (s *Store) ListRules(ctx context.Context, installationIDs []int64) ([]Rule,
 }
 
 func (s *Store) CreateRule(ctx context.Context, installationID int64, category, content string, priority int, enabled bool) (*Rule, error) {
-	var r Rule
-	err := s.Pool.QueryRow(ctx, `
-		INSERT INTO rules (installation_id, category, content, priority, enabled)
-		VALUES ($1, $2, $3, $4, $5)
-		RETURNING id, installation_id, category, content, priority, enabled, created_at, updated_at
-	`, installationID, category, content, priority, enabled).Scan(&r.ID, &r.InstallationID, &r.Category, &r.Content, &r.Priority, &r.Enabled, &r.CreatedAt, &r.UpdatedAt)
-	return &r, err
-}
-
-func (s *Store) UpdateRule(ctx context.Context, id int64, installationIDs []int64, category, content *string, priority *int, enabled *bool) (*Rule, error) {
-	var r Rule
-	err := s.Pool.QueryRow(ctx, `
-		UPDATE rules SET
-			category = COALESCE($3, category),
-			content = COALESCE($4, content),
-			priority = COALESCE($5, priority),
-			enabled = COALESCE($6, enabled),
-			updated_at = NOW()
-		WHERE id = $1 AND installation_id = ANY($2::bigint[])
-		RETURNING id, installation_id, category, content, priority, enabled, created_at, updated_at
-	`, id, installationIDs, category, content, priority, enabled).Scan(&r.ID, &r.InstallationID, &r.Category, &r.Content, &r.Priority, &r.Enabled, &r.CreatedAt, &r.UpdatedAt)
+	var rule Rule
+	err := s.WithMemoryMirrorTx(ctx, func(tx pgx.Tx) (MemoryMirrorEvent, error) {
+		err := tx.QueryRow(ctx, `
+			INSERT INTO rules (installation_id, category, content, priority, enabled)
+			VALUES ($1, $2, $3, $4, $5)
+			RETURNING id, installation_id, category, content, priority, enabled, created_at, updated_at`,
+			installationID, category, content, priority, enabled).
+			Scan(&rule.ID, &rule.InstallationID, &rule.Category, &rule.Content, &rule.Priority, &rule.Enabled, &rule.CreatedAt, &rule.UpdatedAt)
+		if err != nil {
+			return MemoryMirrorEvent{}, err
+		}
+		return newRuleMirrorEvent(rule, enabled)
+	})
 	if err != nil {
 		return nil, err
 	}
-	return &r, nil
+	return &rule, nil
+}
+
+func (s *Store) UpdateRule(ctx context.Context, id int64, installationIDs []int64, category, content *string, priority *int, enabled *bool) (*Rule, error) {
+	var rule Rule
+	err := s.WithMemoryMirrorTx(ctx, func(tx pgx.Tx) (MemoryMirrorEvent, error) {
+		err := tx.QueryRow(ctx, `
+			UPDATE rules SET
+				category = COALESCE($3, category), content = COALESCE($4, content),
+				priority = COALESCE($5, priority), enabled = COALESCE($6, enabled), updated_at = NOW()
+			WHERE id = $1 AND installation_id = ANY($2::bigint[])
+			RETURNING id, installation_id, category, content, priority, enabled, created_at, updated_at`,
+			id, installationIDs, category, content, priority, enabled).
+			Scan(&rule.ID, &rule.InstallationID, &rule.Category, &rule.Content, &rule.Priority, &rule.Enabled, &rule.CreatedAt, &rule.UpdatedAt)
+		if err != nil {
+			return MemoryMirrorEvent{}, err
+		}
+		return newRuleMirrorEvent(rule, rule.Enabled)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &rule, nil
 }
 
 func (s *Store) DeleteRule(ctx context.Context, id int64, installationIDs []int64) error {
-	ct, err := s.Pool.Exec(ctx, `DELETE FROM rules WHERE id = $1 AND installation_id = ANY($2::bigint[])`, id, installationIDs)
+	return s.WithMemoryMirrorTx(ctx, func(tx pgx.Tx) (MemoryMirrorEvent, error) {
+		var installationID int64
+		err := tx.QueryRow(ctx, `
+			DELETE FROM rules WHERE id = $1 AND installation_id = ANY($2::bigint[])
+			RETURNING installation_id`, id, installationIDs).Scan(&installationID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return MemoryMirrorEvent{}, fmt.Errorf("rule %d not found", id)
+		}
+		if err != nil {
+			return MemoryMirrorEvent{}, err
+		}
+		payload, err := json.Marshal(map[string]string{"custom_id": fmt.Sprintf("rule--%d", id)})
+		if err != nil {
+			return MemoryMirrorEvent{}, err
+		}
+		return MemoryMirrorEvent{InstallationID: installationID, AggregateType: MemoryMirrorRule, AggregateID: id, Operation: MemoryMirrorDelete, Payload: payload}, nil
+	})
+}
+
+func newRuleMirrorEvent(rule Rule, enabled bool) (MemoryMirrorEvent, error) {
+	customID := fmt.Sprintf("rule--%d", rule.ID)
+	operation := MemoryMirrorDelete
+	var payload any = map[string]string{"custom_id": customID}
+	if enabled {
+		type ruleBody struct {
+			RuleID   int64
+			Category string
+			Priority int
+			Content  string
+		}
+		payload = struct {
+			CustomID string   `json:"custom_id"`
+			Enabled  bool     `json:"enabled"`
+			Rule     ruleBody `json:"rule"`
+		}{
+			CustomID: customID,
+			Enabled:  true,
+			Rule: ruleBody{
+				RuleID: rule.ID, Category: rule.Category,
+				Priority: rule.Priority, Content: rule.Content,
+			},
+		}
+		operation = MemoryMirrorUpsert
+	}
+	raw, err := json.Marshal(payload)
 	if err != nil {
-		return err
+		return MemoryMirrorEvent{}, fmt.Errorf("marshal rule mirror payload: %w", err)
 	}
-	if ct.RowsAffected() == 0 {
-		return fmt.Errorf("rule %d not found", id)
-	}
-	return nil
+	return MemoryMirrorEvent{InstallationID: *rule.InstallationID, AggregateType: MemoryMirrorRule, AggregateID: rule.ID, Operation: operation, Payload: raw}, nil
 }
 
 // --- Model Configs ---

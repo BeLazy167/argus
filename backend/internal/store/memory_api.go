@@ -62,7 +62,7 @@ func (s *Store) ListMemories(ctx context.Context, filter MemoryListFilter) (Memo
 		add("type = $%d", filter.Type)
 	}
 	if filter.Query != "" {
-		add("content ILIKE '%%' || $%d || '%%'", filter.Query)
+		add("content_tsv @@ websearch_to_tsquery('english', $%d)", filter.Query)
 	}
 	predicate := strings.Join(where, " AND ")
 

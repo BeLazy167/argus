@@ -79,7 +79,7 @@ func TestMirrorWorkerAppliesIdempotentOperationsAndAcknowledges(t *testing.T) {
 
 func TestMirrorWorkerRetriesFailuresWithoutBlockingLaterEvents(t *testing.T) {
 	t.Parallel()
-	payload, _ := NewPatternMirrorPayload("p", "", true, PatternMemory{Content: "x", CustomID: "p"})
+	payload, _ := NewDeleteMirrorPayload("p")
 	outbox := &fakeMirrorOutbox{events: []store.MemoryMirrorOutboxEvent{{ID: 1, InstallationID: 7, AggregateType: "pattern", Operation: "upsert", Payload: payload}, {ID: 2, InstallationID: 7, AggregateType: "pattern", Operation: "delete", Payload: payload}}}
 	indexer := &fakeMirrorIndexer{fail: errors.New("memory unavailable")}
 	worker := NewMirrorWorker(outbox, func(context.Context, int64) MirrorIndexer { return indexer }, slog.New(slog.NewTextHandler(io.Discard, nil)))

@@ -1,44 +1,13 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
-	"time"
 
 	"github.com/go-chi/chi/v5"
-
-	"github.com/BeLazy167/argus/backend/internal/memory"
 )
-
-// syncRuleMirror applies the rule's current enabled state to memory. Delete is
-// a soft tombstone and IndexRule resurrects the same deterministic custom ID,
-// so disable/re-enable and webhook retries are reversible and idempotent.
-func syncRuleMirror(ctx context.Context, indexer memory.Indexer, rule memory.RuleMemory, enabled bool) error {
-	if enabled {
-		return indexer.IndexRule(ctx, "", rule)
-	}
-	return indexer.DeleteDocument(ctx, memory.RuleCustomID(rule.RuleID))
-}
-
-// mirrorRule best-effort mirrors one relational rule transition into memory.
-// The relational row is authoritative; a mirror error never fails the request.
-func (s *Server) mirrorRule(ctx context.Context, installationID int64, rule memory.RuleMemory, enabled bool) {
-	if s.memRegistry == nil {
-		return
-	}
-	indexer := s.memRegistry.GetIndexer(ctx, installationID)
-	if indexer == nil {
-		return
-	}
-	smCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	if err := syncRuleMirror(smCtx, indexer, rule, enabled); err != nil {
-		s.logger.Warn("sync rule memory mirror", "error", err, "rule_id", rule.RuleID, "enabled", enabled)
-	}
-}
 
 func (s *Server) listRules(w http.ResponseWriter, r *http.Request) {
 	rules, err := s.store.ListRules(r.Context(), getInstallationIDs(r.Context()))
@@ -83,12 +52,6 @@ func (s *Server) createRule(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.LogActivity(r.Context(), &ids[0], "rule_created", "", fmt.Sprintf("rule:%d", rule.ID), nil); err != nil {
 		s.logger.Error("failed to log activity", "error", err, "action", "rule_created")
 	}
-	s.mirrorRule(r.Context(), ids[0], memory.RuleMemory{
-		RuleID:   rule.ID,
-		Category: rule.Category,
-		Priority: rule.Priority,
-		Content:  rule.Content,
-	}, rule.Enabled)
 	writeJSON(w, http.StatusCreated, rule)
 }
 
@@ -113,14 +76,6 @@ func (s *Server) updateRule(w http.ResponseWriter, r *http.Request) {
 		s.handleDBError(w, err, "rule not found")
 		return
 	}
-	if rule.InstallationID != nil {
-		s.mirrorRule(r.Context(), *rule.InstallationID, memory.RuleMemory{
-			RuleID:   rule.ID,
-			Category: rule.Category,
-			Priority: rule.Priority,
-			Content:  rule.Content,
-		}, rule.Enabled)
-	}
 	writeJSON(w, http.StatusOK, rule)
 }
 
@@ -137,12 +92,6 @@ func (s *Server) deleteRule(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.store.LogActivity(r.Context(), nil, "rule_deleted", "", fmt.Sprintf("rule:%d", id), nil); err != nil {
 		s.logger.Error("failed to log activity", "error", err, "action", "rule_deleted")
-	}
-	// DeleteRule scoped the row to ids and confirmed authorization; the rule
-	// was created under ids[0] (see createRule), so its `_shared` doc lives in
-	// that installation's container. Best-effort cleanup by deterministic customID.
-	if len(ids) > 0 {
-		s.mirrorRule(r.Context(), ids[0], memory.RuleMemory{RuleID: id}, false)
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }

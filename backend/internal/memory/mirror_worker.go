@@ -32,6 +32,19 @@ func NewPatternMirrorPayload(customID, repo string, shared bool, pattern Pattern
 	return payload, nil
 }
 
+// NewDeleteMirrorPayload retains the deterministic identity needed after the
+// relational source row has been removed.
+func NewDeleteMirrorPayload(customID string) (json.RawMessage, error) {
+	if customID == "" {
+		return nil, fmt.Errorf("delete mirror payload requires custom_id")
+	}
+	payload, err := json.Marshal(MirrorPayload{CustomID: customID})
+	if err != nil {
+		return nil, fmt.Errorf("marshal delete mirror payload: %w", err)
+	}
+	return payload, nil
+}
+
 func NewRuleMirrorPayload(rule RuleMemory, enabled bool) (json.RawMessage, error) {
 	if rule.RuleID <= 0 || rule.Content == "" {
 		return nil, fmt.Errorf("rule mirror payload requires rule_id and content")
@@ -151,8 +164,17 @@ func (w *MirrorWorker) Run(ctx context.Context, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
-		if _, err := w.RunOnce(ctx, 50); err != nil && ctx.Err() == nil {
-			w.logger.Warn("memory mirror outbox", "error", err)
+		for {
+			processed, err := w.RunOnce(ctx, 1)
+			if err != nil {
+				if ctx.Err() == nil {
+					w.logger.Warn("memory mirror outbox", "error", err)
+				}
+				break
+			}
+			if processed == 0 {
+				break
+			}
 		}
 		select {
 		case <-ctx.Done():

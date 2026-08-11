@@ -225,32 +225,6 @@ func (s *Server) handleRememberCommand(ctx context.Context, evt ghpkg.IssueComme
 		return
 	}
 
-	// Index in memory
-	var smID *string
-	var smWarning string
-	if s.memRegistry != nil {
-		indexer := s.memRegistry.GetIndexer(ctx, inst.ID)
-		if indexer != nil {
-			pattern := memory.PatternMemory{
-				Content: content,
-				Source:  "remember_command",
-				Extra:   map[string]string{"created_by": evt.CommentAuthor},
-			}
-			var resp *memory.IndexResult
-			if isOrg {
-				resp, err = indexer.IndexSharedPattern(ctx, pattern)
-			} else {
-				resp, err = indexer.IndexPattern(ctx, repo, pattern)
-			}
-			if err != nil {
-				s.logger.Error("remember: index in memory", "error", err)
-				smWarning = "\n\n_Warning: semantic search indexing failed. Pattern saved to DB only._"
-			} else if resp != nil {
-				smID = &resp.ID
-			}
-		}
-	}
-
 	// Look up repo for DB write
 	var repoID *int64
 	if !isOrg {
@@ -266,9 +240,12 @@ func (s *Server) handleRememberCommand(ctx context.Context, evt ghpkg.IssueComme
 	}
 
 	createdBy := evt.CommentAuthor
-	// memory_custom_id is nil here (see handlers_patterns.go): `remember`
-	// patterns rely on the memory_doc_id match at read time.
-	_, err = s.store.CreatePattern(ctx, inst.ID, repoID, content, smID, &createdBy, nil, nil, nil, nil)
+	source := "remember_command"
+	customID := memory.SharedPatternCustomID(source, content)
+	if !isOrg {
+		customID = memory.PatternCustomID(owner, repo, source, content)
+	}
+	_, err = s.store.CreatePattern(ctx, inst.ID, repoID, content, nil, &createdBy, &source, nil, nil, &customID)
 	if err != nil {
 		s.logger.Error("remember: save to db", "error", err)
 		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
@@ -284,7 +261,7 @@ func (s *Server) handleRememberCommand(ctx context.Context, evt ghpkg.IssueComme
 		truncated = truncated[:100] + "..."
 	}
 	_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
-		fmt.Sprintf("Remembered (%s): %s%s", scope, truncated, smWarning))
+		fmt.Sprintf("Remembered (%s): %s", scope, truncated))
 	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "rocket")
 }
 

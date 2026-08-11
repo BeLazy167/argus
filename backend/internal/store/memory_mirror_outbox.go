@@ -151,14 +151,19 @@ func (s *Store) MarkMemoryMirrorEventProcessed(ctx context.Context, event Memory
 }
 
 func (s *Store) MarkMemoryMirrorEventFailed(ctx context.Context, event MemoryMirrorOutboxEvent, cause error) error {
-	retryAt := time.Now().Add(memoryMirrorRetryBackoff(event.AttemptCount))
-	_, err := s.Pool.Exec(ctx, `
-        UPDATE memory_mirror_outbox
-        SET claimed_at = NULL, available_at = $3, last_error = left($4, 4000), updated_at = now()
-        WHERE id = $1 AND processed_at IS NULL AND claimed_at = $2`,
-		event.ID, event.ClaimedAt, retryAt, cause.Error())
+	retrySeconds := memoryMirrorRetryBackoff(event.AttemptCount).Seconds()
+	tag, err := s.Pool.Exec(ctx, `
+		UPDATE memory_mirror_outbox
+		SET claimed_at = NULL,
+		    available_at = now() + ($3 * interval '1 second'),
+		    last_error = left($4, 4000), updated_at = now()
+		WHERE id = $1 AND processed_at IS NULL AND claimed_at = $2`,
+		event.ID, event.ClaimedAt, retrySeconds, cause.Error())
 	if err != nil {
 		return fmt.Errorf("mark memory mirror event %d failed: %w", event.ID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("mark memory mirror event %d failed: lease lost", event.ID)
 	}
 	return nil
 }

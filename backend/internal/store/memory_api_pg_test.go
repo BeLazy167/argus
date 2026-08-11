@@ -53,4 +53,20 @@ func TestListMemoriesIsTenantScopedLiveFilteredAndStable(t *testing.T) {
 	if page2.Total != 2 || len(page2.Memories) != 1 || page2.Memories[0].CustomID != "shared-old" {
 		t.Fatalf("page2=%+v", page2)
 	}
+	punctuation, err := st.ListMemories(ctx, MemoryListFilter{InstallationID: mine, ContainerTags: []string{"_shared"}, Type: "pattern", Query: "!!!", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if punctuation.Total != 0 || len(punctuation.Memories) != 0 {
+		t.Fatalf("punctuation query = %+v, want empty without SQL error", punctuation)
+	}
+
+	emptyQuery, err := st.ListMemories(ctx, MemoryListFilter{InstallationID: mine, ContainerTags: []string{"_shared"}, Type: "pattern", Query: "", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if emptyQuery.Total != 2 {
+		t.Fatalf("empty query total = %d, want unfiltered 2", emptyQuery.Total)
+	}
+
 }
