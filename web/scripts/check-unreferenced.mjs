@@ -60,36 +60,6 @@ const ROOT_ENTRIES = [
 	"instrumentation-client.ts",
 ];
 
-/**
- * Orphans that predate this check and belong to other features' in-flight
- * refactors (graph, installation provider, marketing) -- see issue #242.
- * Listing them keeps the gate honest about today's tree while still blocking
- * anything new. An entry that stops being an orphan -- deleted, or newly
- * imported -- fails the check, so no line here can quietly stop describing the
- * tree; the list has to be edited down as #242 is worked.
- */
-const KNOWN_ORPHANS = [
-	"src/components/dashboard/integration-status-badge.tsx",
-	"src/components/graph/GraphCanvas.tsx",
-	"src/components/graph/ModuleNode.tsx",
-	"src/components/graph/file-memory/DepsSection.tsx",
-	"src/components/graph/file-memory/FindingsSection.tsx",
-	"src/components/graph/file-memory/MetricsSection.tsx",
-	"src/components/graph/file-memory/PatternsSection.tsx",
-	"src/components/graph/file-memory/RiskSection.tsx",
-	"src/components/graph/file-memory/Section.tsx",
-	"src/components/graph/file-memory/TracesSection.tsx",
-	"src/components/graph/file-memory/constants.ts",
-	"src/components/graph/file-memory/primitives.tsx",
-	"src/components/graph/layout.ts",
-	"src/components/marketing/marketing-list-page.tsx",
-	"src/components/ui/gradient-mesh.tsx",
-	"src/lib/generated/envelope-types.ts",
-	"src/lib/hooks/review-stream-handlers.ts",
-	"src/providers/installation/context.ts",
-	"src/providers/installation/use-installations.ts",
-];
-
 const MODULE_EXTS = [".ts", ".tsx"];
 
 /** Every .ts/.tsx file under dir, as absolute paths. */
@@ -247,44 +217,22 @@ export function collectOrphans(srcRoot) {
 }
 
 function main() {
-	const { orphans: relToSrc, total } = collectOrphans(SRC);
-	const orphans = relToSrc.map((o) => `src/${o}`);
+	const { orphans, total } = collectOrphans(SRC);
 
-	const baseline = new Set(KNOWN_ORPHANS);
-	const unexpected = orphans.filter((o) => !baseline.has(o));
-	const stale = KNOWN_ORPHANS.filter((k) => !orphans.includes(k));
-
-	let failed = false;
-
-	if (unexpected.length > 0) {
-		failed = true;
+	if (orphans.length > 0) {
 		console.error(
-			`${unexpected.length} module(s) under src/ are reachable from no entry point:\n`,
+			`${orphans.length} module(s) under src/ are reachable from no entry point:\n`,
 		);
-		for (const o of unexpected) console.error(`  ${o}`);
+		for (const orphan of orphans) console.error(`  src/${orphan}`);
 		console.error(
 			"\nDelete them, or import them from something that ships. A file nobody" +
 				"\nimports still typechecks and still builds, so no other gate will" +
 				"\never tell you it is dead.\n",
 		);
+		process.exit(1);
 	}
 
-	if (stale.length > 0) {
-		failed = true;
-		console.error(
-			`${stale.length} KNOWN_ORPHANS entr(y/ies) are no longer orphaned -- delete` +
-				` them from the list in ${relative(WEB_ROOT, fileURLToPath(import.meta.url))}:\n`,
-		);
-		for (const s of stale) console.error(`  ${s}`);
-		console.error("");
-	}
-
-	if (failed) process.exit(1);
-
-	console.log(
-		`ok: all ${total - orphans.length} of ${total} modules under src/ are reachable ` +
-			`(${orphans.length} known orphans pending triage)`,
-	);
+	console.log(`ok: all ${total} modules under src/ are reachable`);
 }
 
 // Importing this file from the test must not walk the real tree or exit.
