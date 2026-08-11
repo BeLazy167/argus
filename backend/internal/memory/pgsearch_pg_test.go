@@ -463,7 +463,7 @@ func (g *gradedEmbedder) Model() string { return "graded-1024" }
 // TopContent, ScenarioResults) gating on absolute cosine floors. If the
 // LIMIT is applied in fused-rank order, a Limit-1 read returns 0.55 while a
 // 0.95 row sits in the pool — attribution (0.80) never fires and a finding
-// that should be suppressed (0.85) posts.
+// that should be suppressed (0.95) posts.
 func TestPGSearchEmitsInSimilarityOrder(t *testing.T) {
 	pool, install := pgTestPool(t)
 	ctx := context.Background()

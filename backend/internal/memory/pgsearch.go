@@ -277,8 +277,8 @@ LIMIT $%[6]d`,
 		// Postgres infer the parameter as integer, an ambiguous bind that
 		// misbehaved on CI.)
 		if req.Threshold > 0 {
-			// Every production read carries a floor (FindingEnrich 0.50,
-			// SpecialistMin 0.60, SuppressionDrop 0.85), so with embeddings
+			// Every production read carries a floor (FindingEnrich 0.70,
+			// SpecialistMin 0.80, SuppressionDrop 0.95), so with embeddings
 			// off this returns empty for all of them: memory is effectively
 			// inert, every finding reads as novel, and suppression stops.
 			// That is intended, but it must not look like a healthy no-match.

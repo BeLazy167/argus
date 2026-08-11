@@ -67,30 +67,39 @@ const (
 	// one is publicly visible and wrong attribution is embarrassing, so it is
 	// deliberately stricter than the internal enrich gate.
 	//
-	// 0.80, not 0.92. At 0.92 this floor sat ABOVE what the corpus can produce
-	// and attribution stopped entirely: 0 of 228 comments between 2026-07-09 and
-	// 2026-08-09, against 44 of 55 before it was raised.
+	// 0.80, not 0.92. Measured 2026-08-11 on the production corpus
+	// (installation 285, 963 type=pattern memories, 1,052 type=review finding
+	// docs) by simulating the gate end to end: for each stored finding, take its
+	// top-1 pattern in its own container plus _shared, keep the ones above
+	// FindingEnrich, then apply the real wordOverlap(match.Content, body) > 0.70
+	// zeroing from enricher.go in that exact direction. 727 findings clear
+	// FindingEnrich; 525 of them survive the overlap guard. Of those 525:
 	//
-	// Measured on production (see issue #250):
-	//   - 964 historical attributed matches, mean score 0.845. 94.2% clear 0.80;
-	//     only 4.5% clear 0.92. The raise discarded 95% of matches that fired.
-	//   - Across 23,419 lexically-distinct pattern pairs — the population the
-	//     wordOverlap guard actually lets through — ZERO reach 0.92. The maximum
-	//     is 0.8649.
-	//   - Five hand-written paraphrases of real findings scored 0.709-0.883
-	//     against their targets (rank 1 of 233 every time) while unrelated
-	//     controls scored 0.125-0.259. The band this floor must sit in is the
-	//     0.7-0.9 paraphrase band, not the ~1.0 verbatim band.
+	//	> 0.70    525   100.0%   p50 0.8075
+	//	> 0.80    278    52.9%   p90 0.8817
+	//	> 0.8649   97    18.5%   max 0.9331
+	//	> 0.92      4     0.8%
 	//
-	// The trap that made 0.92 unreachable rather than merely strict: attribution
-	// requires cos > this AND wordOverlap <= 0.70 (enricher.go). Only near-
-	// verbatim text reaches 0.92, and near-verbatim text is what the overlap
-	// guard deletes. The two conditions are near-mutually-exclusive, so the gate
-	// could never fire regardless of corpus size.
+	// So 0.92 is not unreachable — it is 66x more selective than 0.80, admitting
+	// under 1% of the matches that are eligible to attribute at all. That is the
+	// case against it: a public callout that fires on 1 finding in 130 carries no
+	// signal, not that the gate is mechanically impossible.
 	//
-	// False-positive cost at 0.80, against those same 23,419 pairs: 11 pairs,
-	// 0.047%. Raising this again without re-measuring that distribution will
-	// silently switch attribution off a second time.
+	// Two things a previous version of this comment asserted are FALSE, verified
+	// against the same corpus, and must not be reinstated:
+	//   - There is no 0.8649 ceiling. 97 eligible pairs exceed it and the highest
+	//     is 0.9331. Pairwise across all 463,203 distinct pattern pairs, 114
+	//     reach 0.92 and 17 of those survive the overlap guard.
+	//   - cos > 0.92 and wordOverlap <= 0.70 are not near-mutually-exclusive.
+	//     The guard thins the high tail (13 of 17 above 0.92 removed) but does
+	//     not empty it, and it removes only 28% of the band overall. wordOverlap
+	//     (pipeline/dedup.go) is asymmetric — it divides by the significant words
+	//     of match.Content, the STORED doc — and returns 0 below 2 overlapping
+	//     words, so a long stored doc quoting a short finding verbatim passes.
+	//
+	// Raising this again is a recall decision, not a correctness one, and it
+	// needs this distribution re-measured first: the numbers above are specific
+	// to voyage-4-large raw cosine and this corpus.
 	DefaultThresholdAttribution = 0.80
 
 	// DefaultThresholdSuppressionDrop gates dismissal-driven DROP: a finding

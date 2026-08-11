@@ -223,8 +223,9 @@ func (e *Enricher) enrichComment(ctx context.Context, c *FileComment, filePath s
 		})
 	}
 	// Novel = SUCCESSFUL empty pattern search (score cleared to 0) and no rule.
-	// score>0 means a match at/above the FindingEnrich floor, so a 0.50–0.80 hit
-	// is a match, not a new finding. searchOK gates the branch: a failed/timed-out
+	// score>0 means a match at/above the FindingEnrich floor, so a hit in the
+	// enrich-but-don't-attribute band (0.70–0.80 at current defaults) is a
+	// match, not a new finding. searchOK gates the branch: a failed/timed-out
 	// search leaves IsNewFinding unset rather than conflating "search broke" with
 	// "no prior match".
 	if searchOK && score == 0 && ruleContent == "" {

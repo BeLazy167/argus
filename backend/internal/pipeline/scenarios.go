@@ -107,7 +107,7 @@ func scenarioSeverity(s Severity) string {
 //
 // StoreScenarioSeeds persists seeds, deduping via memory similarity. A new
 // seed is skipped only when the top existing scenario matches it at or above
-// the dedupe threshold (memory.Thresholds.ScenarioDedupe, default 0.85). This
+// the dedupe threshold (memory.Thresholds.ScenarioDedupe, default 0.95). This
 // mirrors the scenario_trigger gate in the orchestrator: an ungated top-1 hit no
 // longer suppresses distinct seeds, so the operator-tunable threshold actually
 // applies. A non-positive threshold is clamped to the default so a misconfigured
