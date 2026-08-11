@@ -246,11 +246,7 @@ func (s *Server) getArchitecture(w http.ResponseWriter, r *http.Request) {
 
 	files := make([]archFile, 0, len(fileMap))
 	for fp, fi := range fileMap {
-		loc := fi.loc
-		if loc == 0 {
-			loc = fi.maxLineEnd // compatibility until a repository is re-indexed
-		}
-		density := bugDensityPerHundredLines(bugCount[fp], loc)
+		density := bugDensityPerHundredLines(bugCount[fp], fi.loc)
 
 		af := archFile{
 			Path:            fp,
@@ -534,10 +530,9 @@ func splitEdgeKey(k string) []string {
 // ── Concurrent query helpers (sqlc-backed) ──────────────────────────────
 
 type archFileInfo struct {
-	language   string
-	symbols    []string
-	loc        int
-	maxLineEnd int
+	language string
+	symbols  []string
+	loc      int
 }
 
 type archEdgeAgg struct {
@@ -569,9 +564,6 @@ func (s *Server) fetchArchNodes(ctx context.Context, repoID int64, fileMap map[s
 			continue
 		}
 		fi.symbols = append(fi.symbols, row.Name)
-		if int(row.LineEnd) > fi.maxLineEnd {
-			fi.maxLineEnd = int(row.LineEnd)
-		}
 	}
 	return nil
 }
