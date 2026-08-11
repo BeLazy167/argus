@@ -39,18 +39,7 @@ const installationOfRepo = `(SELECT r.installation_id FROM repos r WHERE r.id = 
 // Only updates base columns (kind, name, file_path, lines, language, pr_number).
 // Does NOT overwrite type-info columns (return_type, params, etc.) if they already exist.
 func (s *Store) UpsertCodeNode(ctx context.Context, repoID int64, kind, name, filePath string, lineStart, lineEnd int, language string, prNumber int) (int64, error) {
-	var id int64
-	err := s.Pool.QueryRow(ctx, `
-		INSERT INTO code_nodes (repo_id, installation_id, kind, name, file_path, line_start, line_end, language, pr_number, updated_at)
-		VALUES ($1, `+installationOfRepo+`, $2, $3, $4, $5, $6, $7, NULLIF($8, 0), NOW())
-		ON CONFLICT (repo_id, file_path, kind, name)
-		DO UPDATE SET line_start = $5, line_end = $6, language = $7,
-		             pr_number = COALESCE(NULLIF($8, 0), code_nodes.pr_number),
-		             installation_id = EXCLUDED.installation_id,
-		             updated_at = NOW()
-		RETURNING id
-	`, repoID, kind, name, filePath, lineStart, lineEnd, language, prNumber).Scan(&id)
-	return id, err
+	return s.q.UpsertCodeNode(ctx, db.UpsertCodeNodeParams{RepoID: repoID, Kind: kind, Name: name, FilePath: filePath, LineStart: &lineStart, LineEnd: &lineEnd, Language: &language, PRNumber: &prNumber})
 }
 
 // NodeHashRow carries the minimum a hash-gated diff needs: the primary key
@@ -133,12 +122,7 @@ func (s *Store) DeleteNodesByIDs(ctx context.Context, repoID int64, ids []int64)
 // cost once Neon's Rows chart shows code_edges churn materially
 // exceeding code_nodes. Until then the no-op on conflict is sufficient.
 func (s *Store) UpsertCodeEdge(ctx context.Context, repoID, sourceID, targetID int64, kind string) error {
-	_, err := s.Pool.Exec(ctx, `
-		INSERT INTO code_edges (repo_id, source_id, target_id, kind, updated_at)
-		VALUES ($1, $2, $3, $4, NOW())
-		ON CONFLICT (repo_id, source_id, target_id, kind) DO NOTHING
-	`, repoID, sourceID, targetID, kind)
-	return err
+	return s.q.UpsertCodeEdge(ctx, db.UpsertCodeEdgeParams{RepoID: repoID, SourceID: sourceID, TargetID: targetID, Kind: kind})
 }
 
 // CodeEdgeRow is one parser-owned edge in an authoritative per-file snapshot.
@@ -190,24 +174,17 @@ func (s *Store) ReplaceCodeEdgesForFiles(ctx context.Context, repoID int64, file
 
 // MarkNodesMerged marks all code_nodes for a given PR as permanently merged.
 func (s *Store) MarkNodesMerged(ctx context.Context, repoID int64, prNumber int) error {
-	_, err := s.Pool.Exec(ctx,
-		`UPDATE code_nodes SET is_merged = true WHERE repo_id = $1 AND pr_number = $2`,
-		repoID, prNumber)
-	return err
+	return s.q.MarkNodesMerged(ctx, db.MarkNodesMergedParams{RepoID: repoID, PRNumber: &prNumber})
 }
 
 // DeleteUnmergedNodesByPR deletes code_nodes added by a specific PR that haven't been merged.
 func (s *Store) DeleteUnmergedNodesByPR(ctx context.Context, repoID int64, prNumber int) error {
-	_, err := s.Pool.Exec(ctx,
-		`DELETE FROM code_nodes WHERE repo_id = $1 AND pr_number = $2 AND is_merged = false`,
-		repoID, prNumber)
-	return err
+	return s.q.DeleteUnmergedNodesByPR(ctx, db.DeleteUnmergedNodesByPRParams{RepoID: repoID, PRNumber: &prNumber})
 }
 
 // DeleteNodesByFile deletes all code nodes (and cascading edges) for a file.
 func (s *Store) DeleteNodesByFile(ctx context.Context, repoID int64, filePath string) error {
-	_, err := s.Pool.Exec(ctx, `DELETE FROM code_nodes WHERE repo_id = $1 AND file_path = $2`, repoID, filePath)
-	return err
+	return s.q.DeleteNodesByFile(ctx, db.DeleteNodesByFileParams{RepoID: repoID, FilePath: filePath})
 }
 
 // pgGraphOnce guards a single probe for a usable pgGraph projection.

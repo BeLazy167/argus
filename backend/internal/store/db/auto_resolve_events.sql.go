@@ -8,8 +8,6 @@ package db
 import (
 	"context"
 	"time"
-
-	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const getAutoResolveStats = `-- name: GetAutoResolveStats :one
@@ -20,12 +18,12 @@ SELECT
     COALESCE(SUM(github_api_calls), 0)::int     AS api_calls_total
 FROM auto_resolve_events
 WHERE installation_id = ANY($1::bigint[])
-  AND created_at >= NOW() - $2::interval
+  AND created_at >= NOW() - $2::text::interval
 `
 
 type GetAutoResolveStatsParams struct {
-	InstallationIds []int64         `json:"installation_ids"`
-	Period          pgtype.Interval `json:"period"`
+	InstallationIds []int64 `json:"installation_ids"`
+	Period          string  `json:"period"`
 }
 
 type GetAutoResolveStatsRow struct {
@@ -54,18 +52,18 @@ SELECT
     COALESCE((
         SELECT COUNT(*) FROM patterns p
         WHERE p.installation_id = ANY($1::bigint[])
-          AND p.created_at >= NOW() - $2::interval
+          AND p.created_at >= NOW() - $2::text::interval
     ), 0)::int AS patterns_learned,
     COALESCE((
         SELECT COUNT(*) FROM scenarios s
         WHERE s.installation_id = ANY($1::bigint[])
-          AND s.created_at >= NOW() - $2::interval
+          AND s.created_at >= NOW() - $2::text::interval
     ), 0)::int AS scenarios_stored,
     COALESCE((
         SELECT COUNT(*) FROM decision_traces dt
         JOIN repos r ON dt.repo_id = r.id
         WHERE r.installation_id = ANY($1::bigint[])
-          AND dt.created_at >= NOW() - $2::interval
+          AND dt.created_at >= NOW() - $2::text::interval
     ), 0)::int AS decision_traces,
     COALESCE((
         SELECT COUNT(*) FROM comment_outcomes co
@@ -73,13 +71,13 @@ SELECT
         JOIN reviews rv ON rc.review_id = rv.id
         JOIN repos r ON rv.repo_id = r.id
         WHERE r.installation_id = ANY($1::bigint[])
-          AND co.created_at >= NOW() - $2::interval
+          AND co.created_at >= NOW() - $2::text::interval
     ), 0)::int AS feedback_indexed
 `
 
 type GetLearnLayerCountsParams struct {
-	InstallationIds []int64         `json:"installation_ids"`
-	Period          pgtype.Interval `json:"period"`
+	InstallationIds []int64 `json:"installation_ids"`
+	Period          string  `json:"period"`
 }
 
 type GetLearnLayerCountsRow struct {

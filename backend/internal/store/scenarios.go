@@ -18,13 +18,7 @@ import (
 
 // CreateScenario inserts a new active scenario and returns its id.
 func (s *Store) CreateScenario(ctx context.Context, installationID int64, repoID *int64, description, source, sourceRef string, files, modules []string, severity string) (int64, error) {
-	var id int64
-	err := s.Pool.QueryRow(ctx,
-		`INSERT INTO scenarios (installation_id, repo_id, description, source, source_ref, files, modules, severity)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		 RETURNING id`,
-		installationID, repoID, description, source, sourceRef, files, modules, severity).
-		Scan(&id)
+	id, err := s.q.CreateScenario(ctx, db.CreateScenarioParams{InstallationID: installationID, RepoID: repoID, Description: description, Source: source, SourceRef: &sourceRef, Files: files, Modules: modules, Severity: &severity})
 	if err != nil {
 		return 0, fmt.Errorf("create scenario: %w", err)
 	}
@@ -33,13 +27,7 @@ func (s *Store) CreateScenario(ctx context.Context, installationID int64, repoID
 
 // CreatePendingScenario stores a scenario as inactive (pending dev approval).
 func (s *Store) CreatePendingScenario(ctx context.Context, installationID int64, repoID *int64, description, source, sourceRef string, files, modules []string, severity string) (int64, error) {
-	var id int64
-	err := s.Pool.QueryRow(ctx,
-		`INSERT INTO scenarios (installation_id, repo_id, description, source, source_ref, files, modules, severity, active)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, FALSE)
-		 RETURNING id`,
-		installationID, repoID, description, source, sourceRef, files, modules, severity).
-		Scan(&id)
+	id, err := s.q.CreatePendingScenario(ctx, db.CreatePendingScenarioParams{InstallationID: installationID, RepoID: repoID, Description: description, Source: source, SourceRef: &sourceRef, Files: files, Modules: modules, Severity: &severity})
 	if err != nil {
 		return 0, fmt.Errorf("create pending scenario: %w", err)
 	}
@@ -48,7 +36,7 @@ func (s *Store) CreatePendingScenario(ctx context.Context, installationID int64,
 
 // ActivateScenario sets a pending scenario to active (after dev approval).
 func (s *Store) ActivateScenario(ctx context.Context, id int64) error {
-	if _, err := s.Pool.Exec(ctx, `UPDATE scenarios SET active = TRUE WHERE id = $1`, id); err != nil {
+	if err := s.q.ActivateScenario(ctx, id); err != nil {
 		return fmt.Errorf("activate scenario: %w", err)
 	}
 	return nil
@@ -141,7 +129,7 @@ func (s *Store) GetScenario(ctx context.Context, id int64) (*Scenario, error) {
 
 // DeactivateScenario soft-deletes a scenario by setting active = false.
 func (s *Store) DeactivateScenario(ctx context.Context, id int64) error {
-	if _, err := s.Pool.Exec(ctx, `UPDATE scenarios SET active = FALSE WHERE id = $1`, id); err != nil {
+	if err := s.q.DeactivateScenario(ctx, id); err != nil {
 		return fmt.Errorf("deactivate scenario: %w", err)
 	}
 	return nil
@@ -149,13 +137,11 @@ func (s *Store) DeactivateScenario(ctx context.Context, id int64) error {
 
 // DeactivateScenarioScoped soft-deletes a scenario only if it belongs to one of the given installations.
 func (s *Store) DeactivateScenarioScoped(ctx context.Context, id int64, installationIDs []int64) error {
-	tag, err := s.Pool.Exec(ctx,
-		`UPDATE scenarios SET active = FALSE WHERE id = $1 AND installation_id = ANY($2)`,
-		id, installationIDs)
+	count, err := s.q.DeactivateScenarioScoped(ctx, db.DeactivateScenarioScopedParams{ID: id, Column2: installationIDs})
 	if err != nil {
 		return fmt.Errorf("deactivate scenario scoped: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
+	if count == 0 {
 		return pgx.ErrNoRows
 	}
 	return nil
@@ -163,10 +149,7 @@ func (s *Store) DeactivateScenarioScoped(ctx context.Context, id int64, installa
 
 // MarkScenarioOutdated marks scenarios as outdated if their files overlap with changed paths.
 func (s *Store) MarkScenarioOutdated(ctx context.Context, repoID int64, filePaths []string) error {
-	if _, err := s.Pool.Exec(ctx,
-		`UPDATE scenarios SET is_outdated = TRUE
-		 WHERE repo_id = $1 AND active = TRUE AND files && $2::text[]`,
-		repoID, filePaths); err != nil {
+	if err := s.q.MarkScenarioOutdated(ctx, db.MarkScenarioOutdatedParams{RepoID: &repoID, Column2: filePaths}); err != nil {
 		return fmt.Errorf("mark scenario outdated: %w", err)
 	}
 	return nil
