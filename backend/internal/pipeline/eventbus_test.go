@@ -165,6 +165,77 @@ func TestEventBus_PubSub(t *testing.T) {
 	})
 }
 
+func TestEventBusLiveTerminalClosesTopicAfterDeliveringEverySubscriber(t *testing.T) {
+	eb := NewEventBus()
+	reviewID := uuid.New()
+	eb.OpenTopic(reviewID)
+
+	first, _, firstClosed, firstUnsub := eb.subscribeWithCloseReason(reviewID)
+	defer firstUnsub()
+	second, _, secondClosed, secondUnsub := eb.subscribeWithCloseReason(reviewID)
+	defer secondUnsub()
+
+	// deliverFrom models a terminal notification relayed by another app
+	// instance: the local pipeline does not own this topic and cannot close it.
+	eb.deliverFrom(reviewID, Event{ID: 42, Type: EventCompleted}, false, deliveryFresh)
+
+	for name, subscriber := range map[string]struct {
+		events <-chan Event
+		closed <-chan SubscriberCloseReason
+	}{
+		"first":  {first, firstClosed},
+		"second": {second, secondClosed},
+	} {
+		select {
+		case evt, ok := <-subscriber.events:
+			if !ok || evt.ID != 42 || evt.Type != EventCompleted {
+				t.Fatalf("%s terminal event=(%+v,%v)", name, evt, ok)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("%s did not receive terminal event", name)
+		}
+		select {
+		case _, ok := <-subscriber.events:
+			if ok {
+				t.Fatalf("%s subscription remained open after terminal", name)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("%s subscription was not closed after terminal", name)
+		}
+		select {
+		case reason := <-subscriber.closed:
+			if reason != SubscriberCloseTopic {
+				t.Fatalf("%s close reason=%q want %q", name, reason, SubscriberCloseTopic)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("%s close reason was not reported", name)
+		}
+	}
+
+	// Late subscribers can replay the retained terminal, but cannot keep the
+	// terminal topic live while its pointer-guarded history GC is pending.
+	late, history, lateClosed, _ := eb.subscribeWithCloseReason(reviewID)
+	if len(history) != 1 || history[0].ID != 42 {
+		t.Fatalf("late history=%+v", history)
+	}
+	select {
+	case _, ok := <-late:
+		if ok {
+			t.Fatal("late subscriber joined a topic that should be closed")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("late subscription was not closed")
+	}
+	select {
+	case reason := <-lateClosed:
+		if reason != SubscriberCloseTopic {
+			t.Fatalf("late close reason=%q want %q", reason, SubscriberCloseTopic)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("late close reason was not reported")
+	}
+}
+
 // TestEventBus_NewEventTypes_Registry asserts the 26 EventType constants
 // (11 existing + 13 sub-step events + 1 memory-match + 1 review-completed)
 // are all non-empty and distinct. Guards against copy-paste collisions

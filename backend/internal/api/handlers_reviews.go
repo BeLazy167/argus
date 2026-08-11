@@ -623,19 +623,49 @@ func (s *Server) streamReviewWS(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	events, history, subscriberClosed, unsub, err := s.eventBus.SubscribeContextWithCloseReason(ctx, id, afterID)
+	if err := writeReviewStream(ctx, conn, s.eventBus, id, afterID, func(ctx context.Context) (string, error) {
+		current, err := s.store.GetReview(ctx, id)
+		if err != nil {
+			return "", err
+		}
+		return current.Status, nil
+	}); err != nil {
+		s.logger.Error("review stream", "error", err, "review_id", id)
+	}
+}
+
+// writeReviewStream registers the subscriber before re-reading review status.
+// The ordering closes the only gap that durable replay cannot cover: a terminal
+// event whose PostgreSQL persistence failed while the previous local topic was
+// being closed. A terminal before the status read is synthesized; one after it
+// is delivered through the already-registered live subscription.
+func writeReviewStream(
+	ctx context.Context,
+	conn *websocket.Conn,
+	eventBus *pipeline.EventBus,
+	reviewID uuid.UUID,
+	afterID int64,
+	loadCurrentStatus func(context.Context) (string, error),
+) error {
+	events, history, subscriberClosed, unsub, err := eventBus.SubscribeContextWithCloseReason(ctx, reviewID, afterID)
 	if err != nil {
-		s.logger.Error("review stream subscribe", "error", err, "review_id", id)
-		conn.Close(websocket.StatusInternalError, "streaming not available")
-		return
+		_ = conn.Close(websocket.StatusInternalError, "streaming not available")
+		return fmt.Errorf("subscribing to review events: %w", err)
 	}
 	if events == nil {
-		conn.Close(websocket.StatusNormalClosure, "no active stream")
-		return
+		_ = conn.Close(websocket.StatusNormalClosure, "no active stream")
+		return nil
 	}
 	defer unsub()
+
+	status, err := loadCurrentStatus(ctx)
+	if err != nil {
+		_ = conn.Close(websocket.StatusTryAgainLater, "review status unavailable; reconnect")
+		return fmt.Errorf("reloading review status after subscription: %w", err)
+	}
+	terminal := isTerminalReviewStatus(status)
 	if terminal {
-		defer s.eventBus.CloseTopic(id)
+		defer eventBus.CloseTopic(reviewID)
 	}
 
 	// Keepalive: ping every 30s to prevent Fly proxy timeout
@@ -673,30 +703,29 @@ func (s *Server) streamReviewWS(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if err := wsjson.Write(ctx, conn, evt); err != nil {
-			return
+			return nil
 		}
 		terminalReplayed = terminalReplayed || isTerminalReviewEvent(evt.Type)
 	}
 	if replayHasMore {
-		status, message := reviewStreamClose(knownCloseReason)
-		_ = conn.Close(status, message)
-		return
+		closeStatus, message := reviewStreamClose(knownCloseReason)
+		_ = conn.Close(closeStatus, message)
+		return nil
 	}
 	if terminalReplayed {
 		_ = conn.Close(websocket.StatusNormalClosure, "review stream ended")
-		return
+		return nil
 	}
 
-	// A review can become terminal while the browser is disconnected. Replay
-	// its durable tail first so findings/timeline entries are not skipped, then
-	// synthesize the terminal marker only when persistence degraded and no
-	// durable terminal event was available.
+	// Replay the durable tail before synthesizing a degraded terminal marker so
+	// findings and timeline entries are not skipped.
 	if terminal {
-		writeTerminalReviewEvent(ctx, conn, review.Status)
-		return
+		writeTerminalReviewEvent(ctx, conn, status)
+		return nil
 	}
 
 	streamLiveReviewEventsAfterCloseReason(ctx, conn, events, subscriberClosed, knownCloseReason)
+	return nil
 }
 
 func streamLiveReviewEvents(
@@ -768,6 +797,10 @@ func writeTerminalReviewEvent(ctx context.Context, conn *websocket.Conn, status 
 		Data:      mustMarshal(map[string]string{"status": status}),
 	})
 	_ = conn.Close(websocket.StatusNormalClosure, "review already "+status)
+}
+
+func isTerminalReviewStatus(status string) bool {
+	return status == "completed" || status == "failed" || status == "cancelled"
 }
 
 func isTerminalReviewEvent(eventType pipeline.EventType) bool {

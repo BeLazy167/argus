@@ -293,14 +293,26 @@ func (eb *EventBus) CloseTopic(reviewID uuid.UUID) {
 	}
 
 	t.mu.Lock()
+	closed := closeTopicSubscribersLocked(t)
+	t.mu.Unlock()
+	if closed {
+		eb.scheduleTopicGC(reviewID, t)
+	}
+}
+
+func closeTopicSubscribersLocked(t *topic) bool {
+	if t.closed {
+		return false
+	}
 	t.closed = true
 	for id, subscriber := range t.subscribers {
 		subscriber.close(SubscriberCloseTopic)
 		delete(t.subscribers, id)
 	}
-	t.mu.Unlock()
+	return true
+}
 
-	// GC history after 60s
+func (eb *EventBus) scheduleTopicGC(reviewID uuid.UUID, t *topic) {
 	go func() {
 		time.Sleep(60 * time.Second)
 		eb.mu.Lock()
@@ -309,6 +321,10 @@ func (eb *EventBus) CloseTopic(reviewID uuid.UUID) {
 		}
 		eb.mu.Unlock()
 	}()
+}
+
+func isTerminalEventType(eventType EventType) bool {
+	return eventType == EventCompleted || eventType == EventError || eventType == EventCancelled
 }
 
 // Publish sends an event to all subscribers of a review topic AND to any
@@ -455,6 +471,7 @@ func (eb *EventBus) deliverFrom(reviewID uuid.UUID, evt Event, notifyGlobal bool
 	t, ok := eb.topics[reviewID]
 	eb.mu.RUnlock()
 	if ok {
+		topicClosed := false
 		t.mu.Lock()
 		if !t.closed {
 			appendHistory := len(t.history) < maxHistoryEvents
@@ -469,6 +486,7 @@ func (eb *EventBus) deliverFrom(reviewID uuid.UUID, evt Event, notifyGlobal bool
 				}
 			}
 
+			terminal := isTerminalEventType(evt.Type)
 			for id, subscriber := range t.subscribers {
 				if evt.ID > 0 && subscriber.hasSeen(evt.ID, source) {
 					continue
@@ -486,11 +504,10 @@ func (eb *EventBus) deliverFrom(reviewID uuid.UUID, evt Event, notifyGlobal bool
 						subscriber.remember(evt.ID, source)
 					}
 				default:
-					if evt.ID > 0 {
-						// Dropping a durable event and retaining this subscription
-						// would permanently move its dedup state past unseen data.
-						// Closing drains already-buffered events, then makes the
-						// browser reconnect and replay from its last received ID.
+					if evt.ID > 0 || terminal {
+						// A durable drop loses a replayable cursor interval. An
+						// ephemeral terminal drop loses the only local copy. In both
+						// cases reconnect so the status recheck can converge the stream.
 						delete(t.subscribers, id)
 						subscriber.close(SubscriberCloseDurableOverflow)
 						eb.logger.Warn("eventbus: reconnecting slow subscriber",
@@ -501,8 +518,17 @@ func (eb *EventBus) deliverFrom(reviewID uuid.UUID, evt Event, notifyGlobal bool
 						"subscriber", id, "type", evt.Type, "review_id", reviewID)
 				}
 			}
+			// A terminal relayed from another app instance has no local pipeline
+			// defer to close this topic. Close only after every subscriber has
+			// accepted the event; buffered channels drain before reporting closed.
+			if terminal {
+				topicClosed = closeTopicSubscribersLocked(t)
+			}
 		}
 		t.mu.Unlock()
+		if topicClosed {
+			eb.scheduleTopicGC(reviewID, t)
+		}
 	}
 	if !notifyGlobal {
 		return
