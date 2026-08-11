@@ -130,6 +130,7 @@ func Run() error {
 	orchestrator := pipeline.NewOrchestrator(db.Pool, db, ghClient, reviewStage, triageStage, intentStage, scoringStage, memRegistry, registry, eventBus, logger, cfg)
 	replyAnalyzer := pipeline.NewReplyAnalyzer(registry, db, ghClient, memRegistry, logger)
 	reactionAnalyzer := pipeline.NewReactionAnalyzer(db, ghClient, memRegistry, logger)
+	orchestrator.SetRecoveryReactionReconciler(reactionAnalyzer.SweepPRReactions)
 
 	// Mark stale reviews as failed before resuming incomplete pipelines
 	if count, err := db.RecoverStaleReviews(ctx, 10*time.Minute); err != nil {

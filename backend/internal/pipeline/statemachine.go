@@ -51,6 +51,11 @@ type StateMachine struct {
 	// Orchestrator.hydrateResumedRun. See resume_context.go.
 	hydrate func(ctx context.Context, run *PipelineRun)
 
+	// reconcileRecoveryReactions refreshes reaction-owned feedback from the
+	// persisted PR identity before Resume can hydrate a run or read dismissal
+	// memory. Nil is a no-op for embedders that do not configure memory.
+	reconcileRecoveryReactions func(context.Context, int64, string, int) error
+
 	// Recovery lease operations are narrow seams so ownership loss can be
 	// tested without timing sleeps or a live database. Nil uses the production
 	// PostgreSQL operation (or Resume) below.
@@ -502,11 +507,31 @@ func (sm *StateMachine) recoverClaimed(ctx context.Context, runID, owner uuid.UU
 		heartbeatDone <- sm.holdRecoveryLease(leaseCtx, runID, owner, stopHeartbeat, cancelLease)
 	}()
 
-	resume := sm.resumeRecoveryFn
-	if resume == nil {
-		resume = sm.Resume
+	// Loading the persisted identity is intentionally separate from Resume:
+	// loadState only decodes the run payload, while Resume is the boundary that
+	// hydrates runtime context and can therefore read dismissal memory.
+	var recoveryErr error
+	if sm.reconcileRecoveryReactions != nil {
+		run, err := sm.load(leaseCtx, runID)
+		if err != nil {
+			recoveryErr = fmt.Errorf("loading state for reaction reconciliation: %w", err)
+		} else if err := sm.reconcileRecoveryReactions(
+			leaseCtx,
+			run.PREvent.InstallationID,
+			run.PREvent.RepoFullName,
+			run.PREvent.PRNumber,
+		); err != nil {
+			recoveryErr = fmt.Errorf("reconciling reactions before recovery resume: %w", err)
+		}
 	}
-	_, resumeErr := resume(leaseCtx, runID)
+
+	if recoveryErr == nil {
+		resume := sm.resumeRecoveryFn
+		if resume == nil {
+			resume = sm.Resume
+		}
+		_, recoveryErr = resume(leaseCtx, runID)
+	}
 	close(stopHeartbeat)
 	heartbeatErr := <-heartbeatDone
 	cancelLease(context.Canceled)
@@ -514,8 +539,8 @@ func (sm *StateMachine) recoverClaimed(ctx context.Context, runID, owner uuid.UU
 	if heartbeatErr != nil {
 		return heartbeatErr
 	}
-	if resumeErr != nil {
-		return resumeErr
+	if recoveryErr != nil {
+		return recoveryErr
 	}
 
 	released, err := sm.releaseRecoveryLease(ctx, runID, owner)

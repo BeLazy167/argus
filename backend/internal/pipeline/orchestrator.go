@@ -5226,6 +5226,17 @@ func calculateScore(run *PipelineRun) int {
 	return max(1, min(10, score))
 }
 
+// RecoveryReactionReconciler is the narrow pre-resume boundary needed to
+// refresh reaction-owned feedback without making StateMachine depend on the
+// concrete ReactionAnalyzer.
+type RecoveryReactionReconciler func(context.Context, int64, string, int) error
+
+// SetRecoveryReactionReconciler wires the app-created reaction analyzer into
+// crash recovery. The composition root must call this before RecoverIncomplete.
+func (o *Orchestrator) SetRecoveryReactionReconciler(reconcile RecoveryReactionReconciler) {
+	o.sm.reconcileRecoveryReactions = reconcile
+}
+
 // RecoverIncomplete resumes any in-flight pipeline runs after a restart.
 func (o *Orchestrator) RecoverIncomplete(ctx context.Context) error {
 	return o.sm.RecoverIncomplete(ctx)
