@@ -25,6 +25,7 @@ import (
 
 type repoMetadataClient interface {
 	GetRepositoryMetadata(context.Context, int64, string, string) (ghpkg.RepositoryMetadata, error)
+	ResolveDefaultBranchCommit(context.Context, int64, string, string, string) (string, error)
 }
 
 type Server struct {

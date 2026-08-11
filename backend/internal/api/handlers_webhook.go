@@ -342,7 +342,7 @@ func (s *Server) scheduleGraphRefresh(ctx context.Context, update ghpkg.DefaultB
 		scheduled, err = s.store.ScheduleGraphIndexRefreshFromPush(ctx, update.InstallationID, update.RepoID,
 			update.RepoFullName, update.DefaultBranch, update.CommitSHA, update.ObservedAt)
 		if errors.Is(err, store.ErrGraphDefaultBranchMismatch) {
-			verified, verifyErr := verifyCurrentDefaultBranch(ctx, s.repoMetadata, update)
+			verified, verifyErr := verifyCurrentDefaultHead(ctx, s.repoMetadata, update)
 			if verifyErr != nil {
 				err = verifyErr
 			} else if !verified {
@@ -350,7 +350,7 @@ func (s *Server) scheduleGraphRefresh(ctx context.Context, update ghpkg.DefaultB
 			} else {
 				scheduled, err = s.store.ScheduleGraphIndexRefreshFromVerifiedPush(ctx,
 					update.InstallationID, update.RepoID, update.RepoFullName, update.DefaultBranch,
-					update.CommitSHA, update.ObservedAt, update.DefaultBranch)
+					update.CommitSHA, update.ObservedAt, update.DefaultBranch, update.CommitSHA)
 			}
 		}
 	} else {
@@ -369,7 +369,7 @@ func (s *Server) scheduleGraphRefresh(ctx context.Context, update ghpkg.DefaultB
 	return nil
 }
 
-func verifyCurrentDefaultBranch(ctx context.Context, client repoMetadataClient, update ghpkg.DefaultBranchUpdate) (bool, error) {
+func verifyCurrentDefaultHead(ctx context.Context, client repoMetadataClient, update ghpkg.DefaultBranchUpdate) (bool, error) {
 	if client == nil {
 		return false, errors.New("repository metadata client is unavailable")
 	}
@@ -379,11 +379,17 @@ func verifyCurrentDefaultBranch(ctx context.Context, client repoMetadataClient, 
 	}
 	metadata, err := client.GetRepositoryMetadata(ctx, update.InstallationID, owner, repo)
 	if err != nil {
-		return false, fmt.Errorf("verify current default branch: %w", err)
+		return false, fmt.Errorf("verify current default head metadata: %w", err)
 	}
-	return metadata.ID == update.RepoID &&
-		metadata.FullName == update.RepoFullName &&
-		metadata.DefaultBranch == update.DefaultBranch, nil
+	if metadata.ID != update.RepoID || metadata.FullName != update.RepoFullName ||
+		metadata.DefaultBranch != update.DefaultBranch {
+		return false, nil
+	}
+	headSHA, err := client.ResolveDefaultBranchCommit(ctx, update.InstallationID, owner, repo, metadata.DefaultBranch)
+	if err != nil {
+		return false, fmt.Errorf("verify current default head commit: %w", err)
+	}
+	return headSHA != "" && headSHA == update.CommitSHA, nil
 }
 
 // handleCheckboxTrigger dispatches a review when a user toggles the "Trigger

@@ -12,8 +12,11 @@ import (
 )
 
 // ErrGraphDefaultBranchMismatch asks the webhook adapter to arbitrate a
-// branch-name change against live GitHub repository metadata before retrying.
-var ErrGraphDefaultBranchMismatch = errors.New("graph default branch mismatch requires verification")
+// branch-name change or an equal-time conflicting head against live GitHub
+// repository metadata and its current default-branch commit before retrying.
+var ErrGraphDefaultBranchMismatch = errors.New("graph default head authority requires verification")
+
+const graphIndexPermanentFailureBackoff = 6 * time.Hour
 
 // RepoIndexTarget is one repository due for a full code-graph index.
 //
@@ -52,7 +55,8 @@ type RepoIndexTarget struct {
 // immediately due, but stamping its attempt moves it behind every less-recently
 // attempted due repository. Once all due repositories have had a turn, the
 // oldest attempt is selected again, so continuations and transient failures are
-// retried fairly.
+// retried fairly. A terminal failed generation is immutable, so its updated_at
+// is the failure completion time used for the head-scoped quota backoff.
 func (s *Store) ListReposDueForGraphIndex(ctx context.Context, staleAfter time.Duration, limit int) ([]RepoIndexTarget, error) {
 	if limit <= 0 {
 		limit = 1
@@ -64,13 +68,20 @@ func (s *Store) ListReposDueForGraphIndex(ctx context.Context, staleAfter time.D
 		WHERE r.enabled
 		  AND i.suspended_at IS NULL
 		  AND (EXISTS (
-		        SELECT 1 FROM graph_index_generations g
-		        WHERE g.repo_id = r.id AND g.status = 'building'
-		      ) OR r.graph_indexed_at IS NULL OR r.graph_indexed_at < NOW() - $1::interval)
+		        SELECT 1 FROM graph_index_generations building
+		        WHERE building.repo_id = r.id AND building.status = 'building'
+		      ) OR ((r.graph_indexed_at IS NULL OR r.graph_indexed_at < NOW() - $1::interval)
+		        AND NOT EXISTS (
+		          SELECT 1 FROM graph_index_generations failed
+		          WHERE failed.repo_id = r.id AND failed.status = 'failed'
+		            AND failed.commit_sha = COALESCE(r.graph_refresh_commit_sha, r.graph_default_head_sha)
+		            AND failed.updated_at > NOW() - $2::interval
+		        )))
 		ORDER BY r.graph_index_attempted_at NULLS FIRST,
 		         r.graph_indexed_at NULLS FIRST, r.id
-		LIMIT $2`,
-		fmt.Sprintf("%d seconds", int64(staleAfter.Seconds())), limit)
+		LIMIT $3`,
+		fmt.Sprintf("%d seconds", int64(staleAfter.Seconds())),
+		fmt.Sprintf("%d seconds", int64(graphIndexPermanentFailureBackoff.Seconds())), limit)
 	if err != nil {
 		return nil, fmt.Errorf("listing repos due for graph index: %w", err)
 	}
@@ -111,12 +122,18 @@ func (s *Store) ListReposDueForPromptGraphIndex(ctx context.Context, limit int) 
 		FROM repos r
 		JOIN installations i ON i.id = r.installation_id
 		WHERE r.enabled AND i.suspended_at IS NULL
-		  AND (r.graph_refresh_requested_at IS NOT NULL OR EXISTS (
-		    SELECT 1 FROM graph_index_generations g
-		    WHERE g.repo_id = r.id AND g.status = 'building'))
+		  AND (EXISTS (
+		    SELECT 1 FROM graph_index_generations building
+		    WHERE building.repo_id = r.id AND building.status = 'building'
+		  ) OR (r.graph_refresh_requested_at IS NOT NULL AND NOT EXISTS (
+		    SELECT 1 FROM graph_index_generations failed
+		    WHERE failed.repo_id = r.id AND failed.status = 'failed'
+		      AND failed.commit_sha = r.graph_refresh_commit_sha
+		      AND failed.updated_at > NOW() - $1::interval
+		  )))
 		ORDER BY r.graph_index_attempted_at NULLS FIRST,
 		         r.graph_refresh_requested_at NULLS LAST, r.id
-		LIMIT $1`, limit)
+		LIMIT $2`, fmt.Sprintf("%d seconds", int64(graphIndexPermanentFailureBackoff.Seconds())), limit)
 	if err != nil {
 		return nil, fmt.Errorf("listing repos due for prompt graph index: %w", err)
 	}
@@ -184,13 +201,14 @@ func (s *Store) ScheduleGraphIndexRefresh(
 	observedAt time.Time,
 ) (bool, error) {
 	return s.scheduleGraphIndexRefresh(ctx, githubInstallationID, githubRepoID,
-		fullName, defaultBranch, commitSHA, observedAt, false, "")
+		fullName, defaultBranch, commitSHA, observedAt, false, "", "")
 }
 
 // ScheduleGraphIndexRefreshFromPush records a signed default-branch push when
-// its branch still matches stored authority. A mismatch returns
-// ErrGraphDefaultBranchMismatch without mutation so the API adapter can verify
-// the current branch through installation-authenticated GitHub metadata.
+// its branch and ordering still match stored authority. A branch mismatch or
+// equal-time conflicting commit returns ErrGraphDefaultBranchMismatch without
+// mutation so the API adapter can verify the current default head through
+// installation-authenticated GitHub metadata.
 func (s *Store) ScheduleGraphIndexRefreshFromPush(
 	ctx context.Context,
 	githubInstallationID, githubRepoID int64,
@@ -198,21 +216,22 @@ func (s *Store) ScheduleGraphIndexRefreshFromPush(
 	observedAt time.Time,
 ) (bool, error) {
 	return s.scheduleGraphIndexRefresh(ctx, githubInstallationID, githubRepoID,
-		fullName, defaultBranch, commitSHA, observedAt, true, "")
+		fullName, defaultBranch, commitSHA, observedAt, true, "", "")
 }
 
-// ScheduleGraphIndexRefreshFromVerifiedPush permits a branch-name change only
-// when live repository metadata named the same default branch. Repository
-// scope is re-checked and locked inside the retry before mutation.
+// ScheduleGraphIndexRefreshFromVerifiedPush permits an authority conflict only
+// when live repository metadata named the same default branch and its live head
+// equals the webhook commit. Repository scope is re-checked and locked inside
+// the retry before mutation.
 func (s *Store) ScheduleGraphIndexRefreshFromVerifiedPush(
 	ctx context.Context,
 	githubInstallationID, githubRepoID int64,
 	fullName, defaultBranch, commitSHA string,
 	observedAt time.Time,
-	verifiedDefaultBranch string,
+	verifiedDefaultBranch, verifiedCommitSHA string,
 ) (bool, error) {
 	return s.scheduleGraphIndexRefresh(ctx, githubInstallationID, githubRepoID,
-		fullName, defaultBranch, commitSHA, observedAt, true, verifiedDefaultBranch)
+		fullName, defaultBranch, commitSHA, observedAt, true, verifiedDefaultBranch, verifiedCommitSHA)
 }
 
 // scheduleGraphIndexRefresh scopes by tenant, installation-owned repository
@@ -224,7 +243,7 @@ func (s *Store) scheduleGraphIndexRefresh(
 	fullName, defaultBranch, commitSHA string,
 	observedAt time.Time,
 	branchAuthoritative bool,
-	verifiedDefaultBranch string,
+	verifiedDefaultBranch, verifiedCommitSHA string,
 ) (bool, error) {
 	if githubInstallationID <= 0 || githubRepoID <= 0 || fullName == "" || defaultBranch == "" || commitSHA == "" {
 		return false, nil
@@ -269,12 +288,17 @@ func (s *Store) scheduleGraphIndexRefresh(
 	}
 
 	branchChanged := storedDefaultBranch != defaultBranch
-	if branchChanged {
+	equalTimeHeadConflict := lastEventAt != nil && observedAt.Equal(*lastEventAt) &&
+		observedCommit != nil && *observedCommit != commitSHA
+	if branchChanged || equalTimeHeadConflict {
 		if !branchAuthoritative {
 			return false, nil
 		}
-		if verifiedDefaultBranch != defaultBranch {
+		if verifiedDefaultBranch == "" && verifiedCommitSHA == "" {
 			return false, ErrGraphDefaultBranchMismatch
+		}
+		if verifiedDefaultBranch != defaultBranch || verifiedCommitSHA != commitSHA {
+			return false, nil
 		}
 	}
 	// A delayed pre-rename delivery must not restore the old branch merely

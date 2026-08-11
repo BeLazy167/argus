@@ -626,12 +626,54 @@ func TestFailedDefaultHeadGenerationRemainsQueuedAndRetriesFromPublishedAuthorit
 	if snapshot.RefreshRequestedAt == nil {
 		t.Fatal("duplicate failed B delivery consumed the pending retry")
 	}
+	for poll := 0; poll < 3; poll++ {
+		prompt, err := st.ListReposDueForPromptGraphIndex(ctx, 10000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if containsGraphTarget(prompt, repoID, "main") {
+			t.Fatalf("prompt poll %d retried permanently failed B inside quota backoff: %+v", poll, prompt)
+		}
+	}
+
+	// A different requested head is not charged to B's failure backoff.
+	const commitC = "ccccccccccccccccccccccccccccccccccccccc3"
+	if scheduled, err := st.ScheduleGraphIndexRefresh(ctx, githubInstallationID, githubRepoID,
+		"refresh/failed-next-poll", "main", commitC, observedB.Add(2*time.Minute)); err != nil || !scheduled {
+		t.Fatalf("schedule C = %v, err=%v", scheduled, err)
+	}
 	prompt, err := st.ListReposDueForPromptGraphIndex(ctx, 10000)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !containsGraphTarget(prompt, repoID, "main") {
-		t.Fatalf("next prompt poll omitted failed B retry: %+v", prompt)
+		t.Fatalf("new head C did not bypass failed B backoff: %+v", prompt)
+	}
+
+	// A force-push back to B is still protected until B's immutable terminal
+	// timestamp expires, then it becomes due and creates a replacement generation.
+	if scheduled, err := st.ScheduleGraphIndexRefresh(ctx, githubInstallationID, githubRepoID,
+		"refresh/failed-next-poll", "main", commitB, observedB.Add(3*time.Minute)); err != nil || !scheduled {
+		t.Fatalf("reschedule B = %v, err=%v", scheduled, err)
+	}
+	prompt, err = st.ListReposDueForPromptGraphIndex(ctx, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsGraphTarget(prompt, repoID, "main") {
+		t.Fatalf("recent failed B was due before backoff expiry: %+v", prompt)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE graph_index_generations SET updated_at = NOW() - INTERVAL '7 hours'
+		WHERE id = $1 AND status = 'failed'`, failedGenerationID); err != nil {
+		t.Fatalf("age immutable failed generation: %v", err)
+	}
+	prompt, err = st.ListReposDueForPromptGraphIndex(ctx, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsGraphTarget(prompt, repoID, "main") {
+		t.Fatalf("backoff expiry did not make B due: %+v", prompt)
 	}
 
 	delete(ghClient.fetchErr, "b.go")
@@ -651,6 +693,92 @@ func TestFailedDefaultHeadGenerationRemainsQueuedAndRetriesFromPublishedAuthorit
 	}
 	if failedStatus != "failed" {
 		t.Fatalf("failed generation status = %q, want failed", failedStatus)
+	}
+}
+
+func TestPermanentFailureBackoffProtectsPromptAndBackfillQuotaByHead(t *testing.T) {
+	pool, ctx := generationTestPool(t)
+	st := store.NewWithDB(pool)
+	installationID := generationSeedInstallation(t, ctx, pool, "{}")
+	failedRepoID := generationSeedRepo(t, ctx, pool, installationID, "quota/permanent-failure")
+	buildingRepoID := generationSeedRepo(t, ctx, pool, installationID, "quota/transient-building")
+	if _, err := pool.Exec(ctx, `UPDATE repos SET enabled = true WHERE id = ANY($1::bigint[])`,
+		[]int64{failedRepoID, buildingRepoID}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `
+			UPDATE repos SET enabled = false WHERE id = ANY($1::bigint[])`,
+			[]int64{failedRepoID, buildingRepoID})
+	})
+
+	const failedHead = "fffffffffffffffffffffffffffffffffffffff1"
+	if _, err := pool.Exec(ctx, `
+		UPDATE repos SET graph_default_head_sha = $2,
+		  graph_refresh_requested_at = NOW(), graph_refresh_commit_sha = $2
+		WHERE id = $1`, failedRepoID, failedHead); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO graph_index_generations
+		  (repo_id, commit_sha, status, expected_files, visited_files, failed_files, error, updated_at)
+		VALUES ($1, $2, 'failed', 1, 1, 1, 'permanent object failure', NOW())`, failedRepoID, failedHead); err != nil {
+		t.Fatal(err)
+	}
+
+	prompt, err := st.ListReposDueForPromptGraphIndex(ctx, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backfill, err := st.ListReposDueForGraphIndex(ctx, 14*24*time.Hour, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsGraphTarget(prompt, failedRepoID, "main") || containsGraphTarget(backfill, failedRepoID, "main") {
+		t.Fatalf("recent permanent failure consumed quota: prompt=%+v backfill=%+v", prompt, backfill)
+	}
+
+	const newHead = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee2"
+	if _, err := pool.Exec(ctx, `
+		UPDATE repos SET graph_default_head_sha = $2,
+		  graph_refresh_requested_at = NOW(), graph_refresh_commit_sha = $2
+		WHERE id = $1`, failedRepoID, newHead); err != nil {
+		t.Fatal(err)
+	}
+	prompt, err = st.ListReposDueForPromptGraphIndex(ctx, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backfill, err = st.ListReposDueForGraphIndex(ctx, 14*24*time.Hour, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsGraphTarget(prompt, failedRepoID, "main") || !containsGraphTarget(backfill, failedRepoID, "main") {
+		t.Fatalf("new head did not bypass old failure: prompt=%+v backfill=%+v", prompt, backfill)
+	}
+
+	const buildingHead = "ddddddddddddddddddddddddddddddddddddddd3"
+	if _, err := pool.Exec(ctx, `
+		UPDATE repos SET graph_default_head_sha = $2,
+		  graph_refresh_requested_at = NOW(), graph_refresh_commit_sha = $2
+		WHERE id = $1`, buildingRepoID, buildingHead); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO graph_index_generations (repo_id, commit_sha, status, expected_files)
+		VALUES ($1, $2, 'building', 2)`, buildingRepoID, buildingHead); err != nil {
+		t.Fatal(err)
+	}
+	prompt, err = st.ListReposDueForPromptGraphIndex(ctx, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backfill, err = st.ListReposDueForGraphIndex(ctx, 14*24*time.Hour, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsGraphTarget(prompt, buildingRepoID, "main") || !containsGraphTarget(backfill, buildingRepoID, "main") {
+		t.Fatalf("resumable building work was throttled: prompt=%+v backfill=%+v", prompt, backfill)
 	}
 }
 

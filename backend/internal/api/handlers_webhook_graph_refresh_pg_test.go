@@ -24,6 +24,7 @@ type renamedDefaultBranchGitHub struct {
 	defaultBranch string
 	metadataErr   error
 	metadataCalls int
+	headCalls     int
 	treeRef       string
 	fileRefs      []string
 }
@@ -37,6 +38,7 @@ func (f *renamedDefaultBranchGitHub) GetRepositoryMetadata(_ context.Context, _ 
 }
 
 func (f *renamedDefaultBranchGitHub) ResolveDefaultBranchCommit(context.Context, int64, string, string, string) (string, error) {
+	f.headCalls++
 	return f.commitSHA, nil
 }
 
@@ -64,6 +66,87 @@ func webhookGraphTestPool(t *testing.T) (*pgxpool.Pool, context.Context) {
 	}
 	t.Cleanup(pool.Close)
 	return pool, ctx
+}
+
+func TestEqualTimeConflictingDefaultHeadPushesUseLiveHeadAuthority(t *testing.T) {
+	pool, ctx := webhookGraphTestPool(t)
+	st := store.NewWithDB(pool)
+	metadataClient := &renamedDefaultBranchGitHub{defaultBranch: "main"}
+	server := &Server{
+		store: st, logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		repoMetadata: metadataClient,
+	}
+
+	unique := strconv.FormatInt(time.Now().UnixNano(), 10)
+	fullName := "equal-head/repo-" + unique
+	var installationDBID, repoID int64
+	var githubInstallationID, githubRepoID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO installations (installation_id, org_login)
+		VALUES ((random()*1000000000)::bigint, $1) RETURNING id, installation_id`, "equal-head-"+unique).
+		Scan(&installationDBID, &githubInstallationID); err != nil {
+		t.Fatalf("seed installation: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO repos (installation_id, github_id, full_name, default_branch, enabled)
+		VALUES ($1, (random()*1000000000)::bigint, $2, 'main', true) RETURNING id, github_id`, installationDBID, fullName).
+		Scan(&repoID, &githubRepoID); err != nil {
+		t.Fatalf("seed repo: %v", err)
+	}
+	metadataClient.repoID = githubRepoID
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM repos WHERE id = $1`, repoID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM installations WHERE id = $1`, installationDBID)
+	})
+
+	const commitB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb5"
+	const commitC = "ccccccccccccccccccccccccccccccccccccccc6"
+	observedAt := time.Now().UTC().Truncate(time.Second)
+	pushUpdate := func(commitSHA string) ghpkg.DefaultBranchUpdate {
+		push := &gh.PushEvent{
+			After: gh.Ptr(commitSHA), Ref: gh.Ptr("refs/heads/main"),
+			Installation: &gh.Installation{ID: gh.Ptr(githubInstallationID)},
+			Repo: &gh.PushEventRepository{
+				ID: gh.Ptr(githubRepoID), FullName: gh.Ptr(fullName), DefaultBranch: gh.Ptr("main"),
+				PushedAt: &gh.Timestamp{Time: observedAt},
+			},
+		}
+		update, ok := ghpkg.DefaultBranchUpdateFromPush(&ghpkg.WebhookEvent{Type: "push", Payload: push})
+		if !ok {
+			t.Fatalf("valid default-head push %s was rejected", commitSHA)
+		}
+		return update
+	}
+	if err := server.scheduleGraphRefresh(ctx, pushUpdate(commitB)); err != nil {
+		t.Fatalf("schedule B: %v", err)
+	}
+
+	// GitHub now names C as the current main head. The genuine C delivery and
+	// the delayed B delivery have the same second-precision pushed_at value, so
+	// delivery order cannot arbitrate them.
+	metadataClient.commitSHA = commitC
+	if err := server.scheduleGraphRefresh(ctx, pushUpdate(commitC)); err != nil {
+		t.Fatalf("schedule live C: %v", err)
+	}
+	if err := server.scheduleGraphRefresh(ctx, pushUpdate(commitB)); err != nil {
+		t.Fatalf("schedule delayed B: %v", err)
+	}
+
+	var head string
+	var requestedCommit *string
+	var version int64
+	if err := pool.QueryRow(ctx, `
+		SELECT graph_default_head_sha, graph_refresh_commit_sha, graph_refresh_version
+		FROM repos WHERE id = $1`, repoID).Scan(&head, &requestedCommit, &version); err != nil {
+		t.Fatal(err)
+	}
+	if head != commitC || requestedCommit == nil || *requestedCommit != commitC || version != 2 {
+		t.Fatalf("equal-time authority regressed: head=%q requested=%v version=%d", head, requestedCommit, version)
+	}
+	if metadataClient.metadataCalls != 2 || metadataClient.headCalls != 2 {
+		t.Fatalf("live authority lookups = metadata %d head %d, want C arbitration and delayed B rejection",
+			metadataClient.metadataCalls, metadataClient.headCalls)
+	}
 }
 
 func TestDefaultBranchRenamePushPersistsAuthorityAndPublishesImmutableRefresh(t *testing.T) {
@@ -174,6 +257,7 @@ func TestDefaultBranchRenamePushPersistsAuthorityAndPublishesImmutableRefresh(t 
 		t.Fatalf("metadata failure mutated repo: branch=%q head=%q version=%d", failedBranch, failedHead, failedVersion)
 	}
 	metadataClient.metadataErr = nil
+	metadataClient.commitSHA = commitB
 	if err := server.scheduleGraphRefresh(ctx, update); err != nil {
 		t.Fatalf("schedule renamed-default-branch push: %v", err)
 	}
