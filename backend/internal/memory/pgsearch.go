@@ -241,13 +241,13 @@ func (idx *PGIndexer) runSearchVec(ctx context.Context, req SearchRequest, qv *p
 		q := fmt.Sprintf(`
 WITH vec AS (
   SELECT id, row_number() OVER (ORDER BY embedding %[8]s $%[1]d%[9]s) AS rnk
-  FROM memories
+  FROM live_memories
   WHERE %[7]s AND embedding IS NOT NULL AND embedding_space = $%[2]d
   ORDER BY embedding %[8]s $%[1]d%[9]s
   LIMIT $%[4]d
 ), fts AS (
   SELECT id, row_number() OVER (ORDER BY ts_rank_cd(content_tsv, websearch_to_tsquery('english', $%[3]d)) DESC, id) AS rnk
-  FROM memories
+  FROM live_memories
   WHERE %[7]s AND content_tsv @@ websearch_to_tsquery('english', $%[3]d)
   ORDER BY ts_rank_cd(content_tsv, websearch_to_tsquery('english', $%[3]d)) DESC, id
   LIMIT $%[4]d
@@ -260,7 +260,7 @@ WITH vec AS (
          CASE WHEN m.embedding IS NOT NULL AND m.embedding_space = $%[2]d
                    AND NOT ((m.embedding %[8]s $%[1]d%[9]s)::float8 = 'NaN'::float8)
               THEN LEAST(GREATEST(1 - (m.embedding %[8]s $%[1]d%[9]s)::float8, 0::float8), 1::float8) ELSE 0 END AS score
-  FROM fused u JOIN memories m ON m.id = u.id
+  FROM fused u JOIN live_memories m ON m.id = u.id
 )
 SELECT custom_id, content, metadata, score
 FROM scored
@@ -291,7 +291,7 @@ LIMIT $%[6]d`,
 		n := len(args)
 		q := fmt.Sprintf(`
 SELECT custom_id, content, metadata, 0::float8 AS score
-FROM memories
+FROM live_memories
 WHERE %[3]s AND content_tsv @@ websearch_to_tsquery('english', $%[1]d)
 ORDER BY ts_rank_cd(content_tsv, websearch_to_tsquery('english', $%[1]d)) DESC, id
 LIMIT $%[2]d`,
@@ -334,7 +334,8 @@ LIMIT $%[2]d`,
 }
 
 // pinnedScan is the predicate-only leg behind the point-lookup fallback:
-// same WHERE as the hybrid legs (tenant, container, tombstones, filters),
+// same live_memories relation and WHERE as the hybrid legs (tenant,
+// container, filters),
 // no lexical or vector requirement, newest first, score 0.
 // pgQuerier is satisfied by both *pgxpool.Pool and pgx.Tx. The fallback takes
 // it explicitly so it can run INSIDE the caller's open transaction: acquiring
@@ -352,7 +353,7 @@ func pinnedScan(ctx context.Context, q pgQuerier, where string, args []any, req 
 	args = append(args, limit)
 	sql := fmt.Sprintf(`
 SELECT custom_id, content, metadata, 0::float8 AS score
-FROM memories
+FROM live_memories
 WHERE %s
 ORDER BY updated_at DESC, id DESC
 LIMIT $%d`, where, len(args))
@@ -394,8 +395,9 @@ func scanMatches(rows pgx.Rows, req SearchRequest, op string) ([]PatternMatch, e
 	return out, nil
 }
 
-// searchPredicates renders the shared WHERE prefix both legs use: tenant,
-// container, live-row tombstones, and the request's filter groups. Filter
+// searchPredicates renders the request-specific WHERE prefix both legs use:
+// tenant, container, and filter groups. Every query reads live_memories, whose
+// database view owns the shared deleted/invalidated/superseded predicate. Filter
 // semantics: the AND group must all hold, the
 // OR group needs at least one, both ANDed together when present. The `type`
 // key reads the indexed column (Doc.Type == metadata["type"] by
@@ -408,8 +410,6 @@ func (idx *PGIndexer) searchPredicates(req SearchRequest) (string, []any) {
 	conds := []string{
 		"installation_id = $1",
 		"container_tag = $2",
-		"deleted_at IS NULL",
-		"invalidated_at IS NULL",
 		"COALESCE(metadata->>'source', '') <> $3",
 	}
 	if req.Filters != nil {

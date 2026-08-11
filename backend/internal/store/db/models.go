@@ -114,6 +114,25 @@ type Installation struct {
 	FeatureFlags    json.RawMessage `json:"feature_flags"`
 }
 
+type LiveMemory struct {
+	ID             int64            `json:"id"`
+	InstallationID int64            `json:"installation_id"`
+	ContainerTag   string           `json:"container_tag"`
+	CustomID       string           `json:"custom_id"`
+	Type           string           `json:"type"`
+	Content        string           `json:"content"`
+	Metadata       json.RawMessage  `json:"metadata"`
+	Embedding      *pgvector.Vector `json:"embedding"`
+	EmbeddingModel *string          `json:"embedding_model"`
+	ContentTsv     interface{}      `json:"content_tsv"`
+	CreatedAt      time.Time        `json:"created_at"`
+	UpdatedAt      time.Time        `json:"updated_at"`
+	DeletedAt      *time.Time       `json:"deleted_at"`
+	InvalidatedAt  *time.Time       `json:"invalidated_at"`
+	SupersededBy   *int64           `json:"superseded_by"`
+	ReviewID       *uuid.UUID       `json:"review_id"`
+}
+
 type Memory struct {
 	ID             int64            `json:"id"`
 	InstallationID int64            `json:"installation_id"`
@@ -141,6 +160,28 @@ type MemoryExportArchive struct {
 	CustomID       *string         `json:"custom_id"`
 	Payload        json.RawMessage `json:"payload"`
 	ExportedAt     time.Time       `json:"exported_at"`
+}
+
+type MemoryMirrorOutbox struct {
+	ID             int64           `json:"id"`
+	InstallationID int64           `json:"installation_id"`
+	AggregateType  string          `json:"aggregate_type"`
+	AggregateID    int64           `json:"aggregate_id"`
+	Operation      string          `json:"operation"`
+	Payload        json.RawMessage `json:"payload"`
+	AttemptCount   int             `json:"attempt_count"`
+	AvailableAt    time.Time       `json:"available_at"`
+	ClaimedAt      *time.Time      `json:"claimed_at"`
+	ProcessedAt    *time.Time      `json:"processed_at"`
+	LastError      *string         `json:"last_error"`
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
+}
+
+type MemoryReviewAttribution struct {
+	MemoryID     int64     `json:"memory_id"`
+	ReviewID     uuid.UUID `json:"review_id"`
+	AttributedAt time.Time `json:"attributed_at"`
 }
 
 type ModelConfig struct {

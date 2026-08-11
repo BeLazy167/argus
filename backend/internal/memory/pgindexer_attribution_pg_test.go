@@ -151,3 +151,45 @@ func TestPGIndexerStampsReviewAttribution(t *testing.T) {
 		}
 	})
 }
+
+// TestPGIndexerAttributionHistoryIsAppendOnly proves deterministic re-upserts
+// retain every review that learned a row while memories.review_id continues to
+// identify the writer of its current content.
+func TestPGIndexerAttributionHistoryIsAppendOnly(t *testing.T) {
+	pool, install := pgTestPool(t)
+	ctx := context.Background()
+	first, second := seedAttributionReviews(t, pool, install)
+	base := NewPGIndexer(pool, nil, install, StorageDimensions, slog.New(slog.DiscardHandler))
+	doc := Doc{ContainerTag: "api", CustomID: "attr--history", Type: string(TypePattern), Content: "version one", Metadata: map[string]string{"type": string(TypePattern)}}
+
+	firstIdx := base.ForReview(first).(*PGIndexer)
+	if err := firstIdx.ImportDocs(ctx, []Doc{doc}); err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+	doc.Content = "version two"
+	secondIdx := base.ForReview(second).(*PGIndexer)
+	if err := secondIdx.ImportDocs(ctx, []Doc{doc}); err != nil {
+		t.Fatalf("second write: %v", err)
+	}
+	// Repeating the same review write is idempotent history, not a third event.
+	if err := secondIdx.ImportDocs(ctx, []Doc{doc}); err != nil {
+		t.Fatalf("repeated second write: %v", err)
+	}
+
+	var current uuid.UUID
+	var history int
+	if err := pool.QueryRow(ctx, `
+        SELECT m.review_id, count(a.review_id)
+        FROM memories m
+        JOIN memory_review_attributions a ON a.memory_id = m.id
+        WHERE m.installation_id = $1 AND m.custom_id = $2
+        GROUP BY m.review_id`, install, doc.CustomID).Scan(&current, &history); err != nil {
+		t.Fatalf("read attribution: %v", err)
+	}
+	if current != second {
+		t.Errorf("current provenance = %s, want %s", current, second)
+	}
+	if history != 2 {
+		t.Errorf("attribution history = %d, want both reviews exactly once", history)
+	}
+}

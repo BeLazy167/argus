@@ -41,9 +41,10 @@ type PGIndexer struct {
 	installationID int64
 	dims           int // storage dimensionality (memories.embedding)
 	logger         *slog.Logger
-	// reviewID attributes every write this indexer makes to one review run
-	// (migration 070). nil = unattributed, which is correct for rules,
-	// reaction/reply feedback, and backfills — none of those belong to a run.
+	// reviewID attributes every write this indexer makes to one review run.
+	// The row keeps it as current provenance and the attribution ledger appends
+	// it as history. nil is correct for rules, reaction/reply feedback, and
+	// backfills — none of those belong to a run.
 	reviewID *uuid.UUID
 	// disableSharedDecay makes _shared confidence use its stored pinned value.
 	// It is resolved from installations.default_settings for each indexer.
@@ -72,8 +73,9 @@ func NewPGIndexer(pool *pgxpool.Pool, embedder Embedder, installationID int64, d
 
 var _ Indexer = (*PGIndexer)(nil)
 
-// ForReview returns a copy of this indexer that stamps memories.review_id on
-// every row it writes, so a completed review can answer "what did I learn".
+// ForReview returns a copy of this indexer that stamps current provenance and
+// appends review attribution on every row it writes, so a completed review can
+// answer "what did I learn" even after another review re-upserts the row.
 //
 // A copy, not a mutation: Registry.GetIndexer hands out a fresh PGIndexer per
 // call, but the pool and embedder inside it are shared, and mutating the
@@ -273,10 +275,9 @@ func (idx *PGIndexer) ReembedMissing(ctx context.Context, batchSize int) (int, e
 	// is worse than the NULL it replaced. A raced row simply does not match,
 	// stays NULL, and is repaired on a later pass.
 	update := fmt.Sprintf(
-		`UPDATE memories SET embedding = %s, embedding_model = $2, embedding_space = $3
+		`UPDATE live_memories SET embedding = %s, embedding_model = $2, embedding_space = $3
 		 WHERE installation_id = $4 AND custom_id = $5
 		   AND (embedding IS NULL OR embedding_space IS DISTINCT FROM $3)
-		   AND deleted_at IS NULL AND invalidated_at IS NULL
 		   AND content = $6`, cast)
 
 	// A page can make zero progress without being done: if every row on it was
@@ -291,9 +292,8 @@ func (idx *PGIndexer) ReembedMissing(ctx context.Context, batchSize int) (int, e
 	total := 0
 	for {
 		rows, err := idx.pool.Query(ctx, `
-			SELECT custom_id, content FROM memories
+			SELECT custom_id, content FROM live_memories
 			WHERE installation_id = $1
-			  AND deleted_at IS NULL AND invalidated_at IS NULL
 			  AND (embedding IS NULL OR embedding_space IS DISTINCT FROM $2)
 			ORDER BY id
 			LIMIT $3`, idx.installationID, spaceID, batchSize)
@@ -427,20 +427,27 @@ func (idx *PGIndexer) upsertDocs(ctx context.Context, docs []Doc) error {
 	// there. On an unconverted database the cast would fail instead, which is
 	// why the placeholder is probed rather than hard-coded.
 	//
-	// review_id follows the rewrite like content/metadata (migration 070):
-	// whoever wrote the row's current text owns the attribution, and a writer
-	// with no review (a rule, a reaction, a backfill) clears it rather than
-	// leaving a stale review credited with text it never produced.
+	// review_id follows the rewrite like content/metadata and remains useful
+	// current provenance. The CTE also appends the review-to-memory link in the
+	// same statement; deterministic re-upserts therefore cannot transfer
+	// historical attribution away from an earlier review. A writer with no
+	// review clears only current provenance and creates no history row.
 	q := fmt.Sprintf(`
-		INSERT INTO memories (installation_id, container_tag, custom_id, type, content, metadata, embedding, embedding_model, review_id, embedding_space)
-		VALUES ($1, $2, $3, $4, $5, $6, %s, $8, $9, $10)
-		ON CONFLICT (installation_id, custom_id) DO UPDATE
-		SET type = EXCLUDED.type, content = EXCLUDED.content,
-		    metadata = EXCLUDED.metadata,
-		    embedding = EXCLUDED.embedding, embedding_model = EXCLUDED.embedding_model,
-		    embedding_space = EXCLUDED.embedding_space,
-		    container_tag = EXCLUDED.container_tag, updated_at = now(),
-		    deleted_at = NULL, review_id = EXCLUDED.review_id`,
+		WITH upserted AS (
+			INSERT INTO memories (installation_id, container_tag, custom_id, type, content, metadata, embedding, embedding_model, review_id, embedding_space)
+			VALUES ($1, $2, $3, $4, $5, $6, %s, $8, $9, $10)
+			ON CONFLICT (installation_id, custom_id) DO UPDATE
+			SET type = EXCLUDED.type, content = EXCLUDED.content,
+			    metadata = EXCLUDED.metadata,
+			    embedding = EXCLUDED.embedding, embedding_model = EXCLUDED.embedding_model,
+			    embedding_space = EXCLUDED.embedding_space,
+			    container_tag = EXCLUDED.container_tag, updated_at = now(),
+			    deleted_at = NULL, review_id = EXCLUDED.review_id
+			RETURNING id
+		)
+		INSERT INTO memory_review_attributions (memory_id, review_id)
+		SELECT id, $9 FROM upserted WHERE $9::uuid IS NOT NULL
+		ON CONFLICT (memory_id, review_id) DO NOTHING`,
 		vectorParam("$7", usesPGContextVector(ctx, idx.pool, idx.logger)))
 	for i, d := range kept {
 		metaJSON, err := json.Marshal(d.Metadata)
@@ -616,6 +623,59 @@ func (idx *PGIndexer) IndexScenario(ctx context.Context, owner, repo string, sce
 		return err
 	}
 	return idx.upsertOne(ctx, "indexing scenario", doc)
+}
+
+// InvalidateDocument records that a memory is no longer valid without deleting
+// its content or attribution history. Repeating the same transition is a
+// successful no-op; a deleted or unknown document returns an explicit error.
+func (idx *PGIndexer) InvalidateDocument(ctx context.Context, documentID string) error {
+	tag, err := idx.pool.Exec(ctx, `
+		UPDATE memories
+		SET invalidated_at = COALESCE(invalidated_at, now()),
+		    updated_at = CASE WHEN invalidated_at IS NULL THEN now() ELSE updated_at END
+		WHERE installation_id = $1 AND custom_id = $2 AND deleted_at IS NULL`,
+		idx.installationID, documentID)
+	if err != nil {
+		return fmt.Errorf("invalidating memory %s: %w", documentID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("invalidating memory %s: document not found", documentID)
+	}
+	return nil
+}
+
+// SupersedeDocument records that replacementID is the current knowledge that
+// replaces documentID. The replacement must be a distinct live row in the
+// same installation. Repeating the same transition is idempotent; replacing a
+// source with a different target requires a separate policy decision instead
+// of silently rewriting history.
+func (idx *PGIndexer) SupersedeDocument(ctx context.Context, documentID, replacementID string) error {
+	if documentID == replacementID {
+		return fmt.Errorf("superseding memory %s: replacement must be a different document", documentID)
+	}
+	tag, err := idx.pool.Exec(ctx, `
+		UPDATE memories AS source
+		SET invalidated_at = COALESCE(source.invalidated_at, now()),
+		    superseded_by = replacement.id,
+		    updated_at = CASE
+		      WHEN source.invalidated_at IS NULL OR source.superseded_by IS DISTINCT FROM replacement.id THEN now()
+		      ELSE source.updated_at
+		    END
+		FROM live_memories AS replacement
+		WHERE source.installation_id = $1
+		  AND source.custom_id = $2
+		  AND source.deleted_at IS NULL
+		  AND (source.superseded_by IS NULL OR source.superseded_by = replacement.id)
+		  AND replacement.installation_id = source.installation_id
+		  AND replacement.custom_id = $3`,
+		idx.installationID, documentID, replacementID)
+	if err != nil {
+		return fmt.Errorf("superseding memory %s with %s: %w", documentID, replacementID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("superseding memory %s with %s: source or live replacement not found", documentID, replacementID)
+	}
+	return nil
 }
 
 // DeleteDocument soft-deletes by customId. In the PG store doc id == customId

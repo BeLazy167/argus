@@ -71,12 +71,21 @@ func insertLearnedMemory(t *testing.T, ctx context.Context, pool *pgxpool.Pool,
 	if deleted {
 		del = "now()"
 	}
-	_, err := pool.Exec(ctx, `
+	var memoryID int64
+	err := pool.QueryRow(ctx, `
 		INSERT INTO memories (installation_id, container_tag, custom_id, type, content, review_id, deleted_at)
-		VALUES ($1, 'acme-repo', $2, $3, $4, $5, CASE WHEN $6::text IS NULL THEN NULL ELSE now() END)`,
-		installID, customID, memType, content, rid, del)
+		VALUES ($1, 'acme-repo', $2, $3, $4, $5, CASE WHEN $6::text IS NULL THEN NULL ELSE now() END)
+		RETURNING id`,
+		installID, customID, memType, content, rid, del).Scan(&memoryID)
 	if err != nil {
 		t.Fatalf("insert memory %q: %v", customID, err)
+	}
+	if rid != nil {
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO memory_review_attributions (memory_id, review_id)
+			VALUES ($1, $2)`, memoryID, *rid); err != nil {
+			t.Fatalf("attribute memory %q: %v", customID, err)
+		}
 	}
 }
 
@@ -134,21 +143,24 @@ func TestReviewMemoryReadsAreTenantScoped(t *testing.T) {
 // TestReviewMemoryTimeIsTheWriteTime pins that the panel dates each entry by
 // when THIS review wrote it, not when the row first appeared.
 //
-// Writes are upserts: a review that re-learns an existing pattern rewrites a
-// row created weeks earlier. Reading created_at there would stamp every entry
-// with the original review's date, so a re-review's panel would read as "these
-// are all old" — the opposite of what it is there to show.
+// Writes are upserts: a review that re-learns an existing pattern may touch a
+// row created weeks earlier. The append-only attribution timestamp records this
+// review's write without being overwritten by a later review.
 func TestReviewMemoryTimeIsTheWriteTime(t *testing.T) {
 	pool, ctx := fileMemoryTestPool(t)
 	st := &Store{Pool: pool, Q: db.New(pool)}
 
 	install, reviewA, _ := seedLearnTenant(t, ctx, pool, "learn-time")
 
-	// A row this review rewrote: created long ago, updated now — exactly what
-	// the upsert leaves behind.
+	// A row this review rewrote: created long ago, attributed now.
 	if _, err := pool.Exec(ctx, `
-		INSERT INTO memories (installation_id, container_tag, custom_id, type, content, review_id, created_at, updated_at)
-		VALUES ($1, 'acme-repo', 'rewritten', 'pattern', 'relearned', $2, now() - interval '30 days', now())`,
+		WITH inserted AS (
+			INSERT INTO memories (installation_id, container_tag, custom_id, type, content, review_id, created_at, updated_at)
+			VALUES ($1, 'acme-repo', 'rewritten', 'pattern', 'relearned', $2, now() - interval '30 days', now())
+			RETURNING id
+		)
+		INSERT INTO memory_review_attributions (memory_id, review_id)
+		SELECT id, $2 FROM inserted`,
 		install, reviewA); err != nil {
 		t.Fatalf("seed rewritten memory: %v", err)
 	}
@@ -286,5 +298,55 @@ func TestReviewMemoryReadsSelectTheRightRows(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestReviewMemoryReadsPreserveHistoryAndExcludeNonLiveRows(t *testing.T) {
+	pool, ctx := fileMemoryTestPool(t)
+	st := &Store{Pool: pool, Q: db.New(pool)}
+	install, reviewA, reviewB := seedLearnTenant(t, ctx, pool, "learn-history")
+
+	insertLearnedMemory(t, ctx, pool, install, reviewA, "shared", "pattern", "current pattern content", false)
+	var memoryID int64
+	if err := pool.QueryRow(ctx, `
+		UPDATE memories SET review_id = $3
+		WHERE installation_id = $1 AND custom_id = $2
+		RETURNING id`, install, "shared", reviewB).Scan(&memoryID); err != nil {
+		t.Fatalf("rewrite current provenance: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO memory_review_attributions (memory_id, review_id)
+		VALUES ($1, $2)`, memoryID, reviewB); err != nil {
+		t.Fatalf("append second attribution: %v", err)
+	}
+
+	for _, reviewID := range []uuid.UUID{reviewA, reviewB} {
+		list, err := st.ListReviewMemories(ctx, install, reviewID, 0)
+		if err != nil {
+			t.Fatalf("ListReviewMemories(%s): %v", reviewID, err)
+		}
+		if len(list) != 1 || list[0].Excerpt != "current pattern content" {
+			t.Errorf("review %s memories = %+v, want the retained attribution", reviewID, list)
+		}
+	}
+
+	if _, err := pool.Exec(ctx, `UPDATE memories SET invalidated_at = now() WHERE id = $1`, memoryID); err != nil {
+		t.Fatalf("invalidate: %v", err)
+	}
+	for _, reviewID := range []uuid.UUID{reviewA, reviewB} {
+		list, err := st.ListReviewMemories(ctx, install, reviewID, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(list) != 0 {
+			t.Errorf("invalidated row shown to review %s: %+v", reviewID, list)
+		}
+		counts, err := st.CountReviewMemoriesByType(ctx, install, reviewID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(counts) != 0 {
+			t.Errorf("invalidated row counted for review %s: %+v", reviewID, counts)
+		}
 	}
 }

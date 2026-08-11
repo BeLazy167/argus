@@ -142,8 +142,8 @@ func run(ctx context.Context, logger *slog.Logger, st *store.Store, cfg runConfi
 func runReembed(ctx context.Context, logger *slog.Logger, st *store.Store, embeds *memory.EmbedderRegistry, cfg runConfig) error {
 	rows, err := st.Pool.Query(ctx, `
 		SELECT installation_id, count(*)
-		FROM memories
-		WHERE deleted_at IS NULL AND embedding IS NULL
+		FROM live_memories
+		WHERE embedding IS NULL
 		  AND ($1 = 0 OR installation_id = $1)
 		GROUP BY installation_id
 		ORDER BY installation_id`, cfg.installation)
@@ -425,7 +425,7 @@ func repointPatterns(ctx context.Context, st *store.Store, installID int64) (int
 		WHERE p.installation_id = $1
 		  AND p.memory_doc_id IS NOT NULL
 		  AND NOT EXISTS (
-		      SELECT 1 FROM memories m
+		      SELECT 1 FROM live_memories m
 		      WHERE m.installation_id = p.installation_id
 		        AND m.custom_id = p.memory_doc_id)`, installID)
 	if err != nil {

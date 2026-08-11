@@ -39,6 +39,8 @@ type Fake struct {
 	Rules       []memory.RuleMemory     // IndexRule
 	ReviewBatch [][]memory.ReviewMemory // IndexReviewCommentsBatch
 	Scenarios   []FakeScenario          // IndexScenario
+	Invalidated []string                // InvalidateDocument
+	Superseded  [][2]string             // SupersedeDocument
 	Deleted     []string                // DeleteDocument
 }
 
@@ -124,6 +126,20 @@ func (f *Fake) Briefing(_ context.Context, q memory.BriefingQuery) (string, erro
 		return f.BriefingFn(q)
 	}
 	return "", nil
+}
+
+func (f *Fake) InvalidateDocument(_ context.Context, documentID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Invalidated = append(f.Invalidated, documentID)
+	return nil
+}
+
+func (f *Fake) SupersedeDocument(_ context.Context, documentID, replacementID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Superseded = append(f.Superseded, [2]string{documentID, replacementID})
+	return nil
 }
 
 func (f *Fake) DeleteDocument(_ context.Context, documentID string) error {

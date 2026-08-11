@@ -56,12 +56,11 @@ type Indexer interface {
 	IndexScenario(ctx context.Context, owner, repo string, scenarioID int64, description, severity string, files []string) error
 
 	// ForReview returns an Indexer that attributes everything it writes to one
-	// review run (memories.review_id, migration 070). It is what lets a
-	// finished review say what it learned; without it a memory row is
-	// identifiable only down to the pull request, which every re-review of
-	// that PR overwrites. Returns the receiver unchanged for the nil UUID.
-	// Attribution is a property of the WRITER, not of each document, because
-	// one run's writes all belong to the same review.
+	// review run. memories.review_id keeps current provenance, while
+	// memory_review_attributions retains every review that learned the row.
+	// Returns the receiver unchanged for the nil UUID. Attribution is a
+	// property of the writer, not each document, because one run's writes all
+	// belong to the same review.
 	ForReview(reviewID uuid.UUID) Indexer
 
 	// Readers. The reader seam is two deep, error-honest methods: Search (typed
@@ -86,7 +85,11 @@ type Indexer interface {
 	// verbatim. Defined in briefing.go.
 	Briefing(ctx context.Context, q BriefingQuery) (string, error)
 
-	// Maintenance.
+	// Maintenance. Invalidation and supersession preserve history while making
+	// knowledge unavailable to every live-row reader. SupersedeDocument links
+	// documentID to a live replacement in the same installation.
+	InvalidateDocument(ctx context.Context, documentID string) error
+	SupersedeDocument(ctx context.Context, documentID, replacementID string) error
 	DeleteDocument(ctx context.Context, documentID string) error
 }
 

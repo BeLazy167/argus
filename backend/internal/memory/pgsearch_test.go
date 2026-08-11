@@ -465,12 +465,12 @@ func TestSearchPredicatesOrdinalsAreDense(t *testing.T) {
 			n, len(req.Filters.OR)-1, where)
 	}
 
-	// Tombstones bind no args, so the ordinal check cannot see them: deleting
-	// either one silently resurfaces soft-deleted and invalidated memories,
-	// reposting findings the developer already dismissed.
-	for _, pred := range []string{"deleted_at IS NULL", "invalidated_at IS NULL"} {
-		if !strings.Contains(where, pred) {
-			t.Errorf("missing tombstone predicate %q:\n%s", pred, where)
+	// Lifecycle belongs to the live_memories view, not this request-specific
+	// predicate builder. Reintroducing one tombstone here would create another
+	// independently maintained definition that can omit future states.
+	for _, column := range []string{"deleted_at", "invalidated_at", "superseded_by"} {
+		if strings.Contains(where, column) {
+			t.Errorf("search predicate duplicates live-row lifecycle column %q:\n%s", column, where)
 		}
 	}
 }
