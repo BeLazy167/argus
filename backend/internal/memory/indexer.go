@@ -95,13 +95,18 @@ type Indexer interface {
 }
 
 const (
-	// SourceLegacyReplyFeedback identifies reply learnings written before the
+	// SourceLegacyReplyFeedback identifies reply-derived rows written before the
 	// author authorization boundary existed. Readers quarantine this source
 	// non-destructively because those rows carry no provenance to audit trust.
 	SourceLegacyReplyFeedback = "reply_feedback"
-	// SourceTrustedReplyFeedback identifies reply learnings whose author was
-	// authorized before the write.
+	// SourceTrustedReplyFeedback identifies repo-scoped finding feedback whose
+	// author had effective repository write access. Pattern rows with this older
+	// source were incorrectly written installation-wide and are quarantined.
 	SourceTrustedReplyFeedback = "trusted_reply_feedback"
+	// SourceTrustedReplyLearning identifies repo-specific pattern learning from
+	// a reply author with effective repository write access. Its distinct source
+	// keeps new repo-scoped rows distinguishable from legacy shared pattern rows.
+	SourceTrustedReplyLearning = "trusted_repo_reply_learning"
 	// SourceReactionFeedback identifies reversible feedback derived from the
 	// current aggregate GitHub reaction tally.
 	SourceReactionFeedback = "reaction_feedback"

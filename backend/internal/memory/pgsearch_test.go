@@ -615,19 +615,22 @@ func TestDisableSharedDecayUsesStoredConfidence(t *testing.T) {
 	if !strings.Contains(where, "(metadata->>'confidence')::numeric") {
 		t.Fatalf("disabled decay must compare pinned stored confidence: %s", where)
 	}
-	if len(args) != 4 { // tenant, container, quarantined source, threshold
-		t.Fatalf("args = %d, want 4", len(args))
+	if len(args) != 5 { // tenant, container, two quarantined sources, threshold
+		t.Fatalf("args = %d, want 5", len(args))
 	}
 }
 
-func TestSearchPredicatesQuarantineLegacyReplyFeedbackAtStorageBoundary(t *testing.T) {
+func TestSearchPredicatesQuarantineLegacyReplyLearningsAtStorageBoundary(t *testing.T) {
 	idx := &PGIndexer{installationID: 42}
 	where, args := idx.searchPredicates(SearchRequest{ContainerTag: SharedTag})
 
 	if !strings.Contains(where, "metadata->>'source'") || !strings.Contains(where, "<>") {
 		t.Fatalf("legacy reply feedback quarantine missing from storage predicate:\n%s", where)
 	}
-	if len(args) < 3 || args[2] != SourceLegacyReplyFeedback {
-		t.Fatalf("quarantine source is not safely bound: %v", args)
+	if len(args) < 4 || args[2] != SourceLegacyReplyFeedback || args[3] != SourceTrustedReplyFeedback {
+		t.Fatalf("quarantine sources are not safely bound: %v", args)
+	}
+	if !strings.Contains(where, "type = 'pattern'") {
+		t.Fatalf("legacy shared trusted source was not quarantined only as pattern learning:\n%s", where)
 	}
 }

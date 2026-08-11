@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	ghpkg "github.com/BeLazy167/argus/backend/internal/github"
+	"github.com/BeLazy167/argus/backend/internal/memory"
+	"github.com/BeLazy167/argus/backend/internal/memory/memorytest"
 	"github.com/BeLazy167/argus/backend/internal/store"
 )
 
@@ -105,7 +107,7 @@ func TestReplyAuthorizationAndPlanningRequireEffectiveWritePermissionForEveryDer
 			},
 		},
 		{
-			name:     "resolve with shared learning",
+			name:     "resolve with repo learning",
 			decision: replyDecision{Action: "resolve", Learning: "shared convention"},
 			want: replyEffectPlan{
 				AllowWrites:    true,
@@ -196,5 +198,35 @@ func TestReplyAuthorizationAndPlanningRequireEffectiveWritePermissionForEveryDer
 				})
 			}
 		})
+	}
+}
+
+func TestIndexReplyLearningKeepsRepoSpecificKnowledgeInRepoContainer(t *testing.T) {
+	idx := &memorytest.Fake{}
+	event := ghpkg.CommentEvent{
+		FilePath:          "internal/auth.go",
+		AuthorAssociation: "MEMBER",
+	}
+	learning := "this repository delegates authentication to the edge proxy"
+
+	if err := indexReplyLearning(context.Background(), idx, "acme", "widgets", event, learning); err != nil {
+		t.Fatalf("indexReplyLearning: %v", err)
+	}
+	if len(idx.SharedPats) != 0 {
+		t.Fatalf("reply learning was promoted installation-wide: %#v", idx.SharedPats)
+	}
+	if len(idx.Patterns) != 1 {
+		t.Fatalf("repo pattern writes = %d, want one", len(idx.Patterns))
+	}
+	got := idx.Patterns[0]
+	if got.Content != learning || got.Source != memory.SourceTrustedReplyLearning || got.FilePath != event.FilePath {
+		t.Fatalf("repo reply pattern = %#v", got)
+	}
+	wantID := memory.PatternCustomID("acme", "widgets", memory.SourceTrustedReplyLearning, learning)
+	if got.CustomID != wantID {
+		t.Fatalf("reply learning custom ID = %q, want stable repo ID %q", got.CustomID, wantID)
+	}
+	if got.Extra["repo"] != "widgets" || got.Extra["author_association"] != "MEMBER" {
+		t.Fatalf("reply learning provenance = %#v", got.Extra)
 	}
 }

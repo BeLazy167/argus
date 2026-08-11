@@ -18,14 +18,16 @@ import (
 )
 
 type reactionStoreStub struct {
-	comment *store.ReviewComment
-	ids     []int64
+	comment  *store.ReviewComment
+	ids      []int64
+	outcomes []string
 }
 
 func (s *reactionStoreStub) GetCommentByGithubID(context.Context, int64) (*store.ReviewComment, error) {
 	return s.comment, nil
 }
-func (*reactionStoreStub) RecordCommentOutcome(context.Context, uuid.UUID, string) (bool, error) {
+func (s *reactionStoreStub) RecordCommentOutcome(_ context.Context, _ uuid.UUID, outcome string) (bool, error) {
+	s.outcomes = append(s.outcomes, outcome)
 	return true, nil
 }
 func (*reactionStoreStub) GetInstallationByGitHubID(context.Context, int64) (*store.Installation, error) {
@@ -50,6 +52,38 @@ type reactionGitHubStub struct {
 func (g *reactionGitHubStub) ListCommentReactions(context.Context, int64, string, string, int64) ([]ghpkg.CommentReaction, error) {
 	g.calls++
 	return g.reactions, g.err
+}
+
+type reactionPermissionCall struct {
+	installationID int64
+	owner          string
+	repo           string
+	login          string
+}
+
+type reactionPermissionStub struct {
+	allowedByLogin map[string]bool
+	errByLogin     map[string]error
+	calls          map[string]int
+	requests       []reactionPermissionCall
+}
+
+func (s *reactionPermissionStub) HasRepoWriteAccess(_ context.Context, installationID int64, owner, repo, login string) (bool, error) {
+	if s.calls == nil {
+		s.calls = make(map[string]int)
+	}
+	s.calls[login]++
+	s.requests = append(s.requests, reactionPermissionCall{installationID: installationID, owner: owner, repo: repo, login: login})
+	return s.allowedByLogin[login], s.errByLogin[login]
+}
+
+type recordingReactionLifecycle struct {
+	events []LifecycleEvent
+}
+
+func (l *recordingReactionLifecycle) Transition(_ context.Context, transition FindingTransition) (TransitionResult, error) {
+	l.events = append(l.events, transition.Event)
+	return TransitionResult{}, nil
 }
 
 type reactionRegistryStub struct{ indexer memory.Indexer }
@@ -85,10 +119,11 @@ func TestSweepPRReactionsRemovedThumbsDownRetractsDismissal(t *testing.T) {
 				ID: uuid.New(), FilePath: "handler.go", Body: "The guard is inverted", Category: &category,
 			},
 		},
-		ghClient:    gh,
-		memRegistry: reactionRegistryStub{indexer: idx},
-		logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
-		lifecycle:   reactionLifecycleStub{},
+		ghClient:        gh,
+		repoPermissions: &reactionPermissionStub{allowedByLogin: map[string]bool{"maintainer": true}},
+		memRegistry:     reactionRegistryStub{indexer: idx},
+		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		lifecycle:       reactionLifecycleStub{},
 	}
 
 	if err := ra.SweepPRReactions(context.Background(), 91, "acme/api", 17); err != nil {
@@ -192,5 +227,175 @@ func TestSweepPRReactionsTransientServerErrorStillBlocksReview(t *testing.T) {
 	}
 	if !idx.dismissalLive {
 		t.Fatal("transient error silently retracted reaction state")
+	}
+}
+
+func TestSweepPRReactionsCountsOnlyRepoWriteAuthorizedReactors(t *testing.T) {
+	category := "bug_risk"
+	st := &reactionStoreStub{
+		ids: []int64{501},
+		comment: &store.ReviewComment{
+			ID: uuid.New(), FilePath: "handler.go", Body: "The guard is inverted", Category: &category,
+		},
+	}
+	idx := &reactionIndexerStub{dismissalLive: true}
+	lifecycle := &recordingReactionLifecycle{}
+	permissions := &reactionPermissionStub{allowedByLogin: map[string]bool{"maintainer": true}}
+	ra := &ReactionAnalyzer{
+		store: st,
+		ghClient: &reactionGitHubStub{reactions: []ghpkg.CommentReaction{
+			{Content: "-1", User: "drive-by"},
+			{Content: "+1", User: "maintainer"},
+			{Content: "-1", User: "argus[bot]"},
+		}},
+		repoPermissions: permissions,
+		memRegistry:     reactionRegistryStub{indexer: idx},
+		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		lifecycle:       lifecycle,
+	}
+
+	if err := ra.SweepPRReactions(context.Background(), 91, "acme/api", 17); err != nil {
+		t.Fatalf("reaction sweep: %v", err)
+	}
+	if got := strings.Join(st.outcomes, ","); got != "confirmed" {
+		t.Fatalf("recorded outcomes = %q, want only authorized confirmation", got)
+	}
+	if idx.dismissalLive {
+		t.Fatal("untrusted thumbs-down remained authoritative over authorized reactor tally")
+	}
+	if got := strings.Join(idx.actions, ","); got != "confirmed" {
+		t.Fatalf("reconciled actions = %q, want confirmed", got)
+	}
+	if len(lifecycle.events) != 0 {
+		t.Fatalf("untrusted thumbs-down dismissed finding lifecycle: %v", lifecycle.events)
+	}
+	if permissions.calls["drive-by"] != 1 || permissions.calls["maintainer"] != 1 {
+		t.Fatalf("permission calls = %#v, want one per unique non-bot signal actor", permissions.calls)
+	}
+	if permissions.calls["argus[bot]"] != 0 {
+		t.Fatalf("bot permission calls = %d, want zero", permissions.calls["argus[bot]"])
+	}
+	for _, request := range permissions.requests {
+		if request.installationID != 91 || request.owner != "acme" || request.repo != "api" {
+			t.Fatalf("permission request = %+v, want actual installation and repository", request)
+		}
+	}
+}
+
+func TestSweepPRReactionsUntrustedThumbsDownCannotCreateDurableDismissal(t *testing.T) {
+	category := "bug_risk"
+	st := &reactionStoreStub{
+		ids:     []int64{501},
+		comment: &store.ReviewComment{ID: uuid.New(), Body: "race", Category: &category},
+	}
+	idx := &reactionIndexerStub{dismissalLive: true}
+	lifecycle := &recordingReactionLifecycle{}
+	ra := &ReactionAnalyzer{
+		store:           st,
+		ghClient:        &reactionGitHubStub{reactions: []ghpkg.CommentReaction{{Content: "-1", User: "drive-by"}}},
+		repoPermissions: &reactionPermissionStub{},
+		memRegistry:     reactionRegistryStub{indexer: idx},
+		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		lifecycle:       lifecycle,
+	}
+
+	if err := ra.SweepPRReactions(context.Background(), 91, "acme/api", 17); err != nil {
+		t.Fatalf("reaction sweep: %v", err)
+	}
+	if len(st.outcomes) != 0 || len(lifecycle.events) != 0 {
+		t.Fatalf("untrusted reaction created durable writes: outcomes=%v events=%v", st.outcomes, lifecycle.events)
+	}
+	if idx.dismissalLive || len(idx.actions) != 1 || idx.actions[0] != "" {
+		t.Fatalf("untrusted reaction did not reconcile to neutral: live=%v actions=%v", idx.dismissalLive, idx.actions)
+	}
+}
+
+func TestSweepPRReactionsCachesPermissionByUniqueReactorAcrossComments(t *testing.T) {
+	category := "bug_risk"
+	permissions := &reactionPermissionStub{allowedByLogin: map[string]bool{"Maintainer": true}}
+	ra := &ReactionAnalyzer{
+		store: &reactionStoreStub{
+			ids:     []int64{501, 502, 503},
+			comment: &store.ReviewComment{ID: uuid.New(), Body: "race", Category: &category},
+		},
+		ghClient:        &reactionGitHubStub{reactions: []ghpkg.CommentReaction{{Content: "-1", User: "Maintainer"}, {Content: "+1", User: "maintainer"}}},
+		repoPermissions: permissions,
+		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		lifecycle:       reactionLifecycleStub{},
+	}
+
+	if err := ra.SweepPRReactions(context.Background(), 91, "acme/api", 17); err != nil {
+		t.Fatalf("reaction sweep: %v", err)
+	}
+	if permissions.calls["Maintainer"]+permissions.calls["maintainer"] != 1 {
+		t.Fatalf("permission calls = %#v, want one case-insensitive lookup across entire sweep", permissions.calls)
+	}
+}
+
+func TestSweepPRReactionsPermissionLookupFailureBlocksReconciliation(t *testing.T) {
+	category := "bug_risk"
+	lookupErr := errors.New("GitHub permission endpoint unavailable")
+	st := &reactionStoreStub{
+		ids:     []int64{501},
+		comment: &store.ReviewComment{ID: uuid.New(), Body: "race", Category: &category},
+	}
+	idx := &reactionIndexerStub{dismissalLive: true}
+	lifecycle := &recordingReactionLifecycle{}
+	ra := &ReactionAnalyzer{
+		store:           st,
+		ghClient:        &reactionGitHubStub{reactions: []ghpkg.CommentReaction{{Content: "-1", User: "maintainer"}}},
+		repoPermissions: &reactionPermissionStub{errByLogin: map[string]error{"maintainer": lookupErr}},
+		memRegistry:     reactionRegistryStub{indexer: idx},
+		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		lifecycle:       lifecycle,
+	}
+
+	err := ra.SweepPRReactions(context.Background(), 91, "acme/api", 17)
+	if !errors.Is(err, lookupErr) {
+		t.Fatalf("sweep error = %v, want wrapped permission lookup failure", err)
+	}
+	if len(st.outcomes) != 0 || len(idx.actions) != 0 || len(lifecycle.events) != 0 {
+		t.Fatalf("failed-closed lookup mutated state: outcomes=%v actions=%v events=%v", st.outcomes, idx.actions, lifecycle.events)
+	}
+	if !idx.dismissalLive {
+		t.Fatal("permission outage retracted prior state as if actors were unauthorized")
+	}
+}
+
+func TestSweepPRReactionsBoundsUniquePermissionLookups(t *testing.T) {
+	category := "bug_risk"
+	reactions := make([]ghpkg.CommentReaction, 0, maxReactionPermissionLookupsPerSweep+1)
+	allowed := make(map[string]bool, maxReactionPermissionLookupsPerSweep+1)
+	for i := 0; i <= maxReactionPermissionLookupsPerSweep; i++ {
+		login := fmt.Sprintf("reactor-%03d", i)
+		reactions = append(reactions, ghpkg.CommentReaction{Content: "-1", User: login})
+		allowed[login] = true
+	}
+	permissions := &reactionPermissionStub{allowedByLogin: allowed}
+	st := &reactionStoreStub{
+		ids:     []int64{501},
+		comment: &store.ReviewComment{ID: uuid.New(), Body: "race", Category: &category},
+	}
+	ra := &ReactionAnalyzer{
+		store:           st,
+		ghClient:        &reactionGitHubStub{reactions: reactions},
+		repoPermissions: permissions,
+		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		lifecycle:       reactionLifecycleStub{},
+	}
+
+	err := ra.SweepPRReactions(context.Background(), 91, "acme/api", 17)
+	if err == nil || !strings.Contains(err.Error(), "permission lookup limit") {
+		t.Fatalf("sweep error = %v, want permission lookup limit failure", err)
+	}
+	calls := 0
+	for _, n := range permissions.calls {
+		calls += n
+	}
+	if calls != maxReactionPermissionLookupsPerSweep {
+		t.Fatalf("permission calls = %d, want hard bound %d", calls, maxReactionPermissionLookupsPerSweep)
+	}
+	if len(st.outcomes) != 0 {
+		t.Fatalf("bounded lookup failure used a partial tally: outcomes=%v", st.outcomes)
 	}
 }

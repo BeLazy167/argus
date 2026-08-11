@@ -403,14 +403,18 @@ func scanMatches(rows pgx.Rows, req SearchRequest, op string) ([]PatternMatch, e
 // key reads the indexed column (Doc.Type == metadata["type"] by
 // construction); every other key reads the metadata map.
 func (idx *PGIndexer) searchPredicates(req SearchRequest) (string, []any) {
-	// Legacy reply learnings carry no authorization provenance. Keep them stored
-	// for audit, but exclude them before ranking so they cannot crowd trusted
-	// results out of the candidate limit.
-	args := []any{idx.installationID, req.ContainerTag, SourceLegacyReplyFeedback}
+	// Legacy reply rows carry no authorization provenance. Older authorized
+	// reply PATTERNS were also written installation-wide despite being explicitly
+	// repo-specific. Keep both for audit, but exclude them before ranking so they
+	// cannot crowd current trusted repo learning out of the candidate limit.
+	// Trusted feedback rows retain SourceTrustedReplyFeedback and are not pattern
+	// rows, so they remain visible.
+	args := []any{idx.installationID, req.ContainerTag, SourceLegacyReplyFeedback, SourceTrustedReplyFeedback}
 	conds := []string{
 		"installation_id = $1",
 		"container_tag = $2",
 		"COALESCE(metadata->>'source', '') <> $3",
+		"NOT (type = 'pattern' AND COALESCE(metadata->>'source', '') = $4)",
 	}
 	if req.Filters != nil {
 		for _, f := range req.Filters.AND {

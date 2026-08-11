@@ -34,20 +34,22 @@ func TestBriefingRoutesFeedbackByActionNotPolarity(t *testing.T) {
 	}
 }
 
-func TestSearchQuarantinesLegacyReplyFeedbackNonDestructively(t *testing.T) {
+func TestSearchQuarantinesLegacyReplyLearningsNonDestructively(t *testing.T) {
 	run := func(context.Context, SearchRequest) ([]PatternMatch, error) {
 		return []PatternMatch{
-			{Content: "legacy unverified", Metadata: map[string]string{"source": "reply_feedback"}},
-			{Content: "authorized", Metadata: map[string]string{"source": "trusted_reply_feedback"}},
-			{Content: "ordinary", Metadata: map[string]string{"source": "auto_learn"}},
+			{Content: "legacy unverified", Metadata: map[string]string{"type": "pattern", "source": SourceLegacyReplyFeedback}},
+			{Content: "legacy shared authorized", Metadata: map[string]string{"type": "pattern", "source": SourceTrustedReplyFeedback}},
+			{Content: "repo authorized", Metadata: map[string]string{"type": "pattern", "source": SourceTrustedReplyLearning}},
+			{Content: "trusted dismissal", Metadata: map[string]string{"type": "feedback", "source": SourceTrustedReplyFeedback}},
+			{Content: "ordinary", Metadata: map[string]string{"type": "pattern", "source": "auto_learn"}},
 		}, nil
 	}
 	got, err := searchWith(context.Background(), run, MemoryQuery{Query: "q", Repo: "repo", Scope: ScopeRepo, Type: TypePattern})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 2 || got[0].Content != "authorized" || got[1].Content != "ordinary" {
-		t.Fatalf("legacy reply_feedback was not quarantined: %#v", got)
+	if len(got) != 3 || got[0].Content != "repo authorized" || got[1].Content != "trusted dismissal" || got[2].Content != "ordinary" {
+		t.Fatalf("legacy reply learnings were not quarantined without hiding trusted feedback: %#v", got)
 	}
 }
 

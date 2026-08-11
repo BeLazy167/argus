@@ -123,14 +123,19 @@ func searchWith(ctx context.Context, run runSearchFn, q MemoryQuery) ([]PatternM
 	return retrievableMatches(matches), err
 }
 
-// retrievableMatches quarantines legacy reply-derived shared learnings. Those
-// rows predate authorization provenance, so treating them as trusted would be
-// an irreversible guess. They remain stored for operator audit; authorized
-// replies use SourceTrustedReplyFeedback and remain retrievable.
+// retrievableMatches quarantines legacy reply-derived learnings. Unauthorized
+// legacy rows have SourceLegacyReplyFeedback. Pattern rows with the older
+// SourceTrustedReplyFeedback were authorized but incorrectly promoted to the
+// installation-wide container. Both remain stored for audit; current trusted
+// learnings use their repo-specific source and container. Trusted finding
+// feedback keeps the older source and remains retrievable because its type is
+// feedback, not pattern.
 func retrievableMatches(matches []PatternMatch) []PatternMatch {
 	out := matches[:0]
 	for _, match := range matches {
-		if match.Metadata["source"] != SourceLegacyReplyFeedback {
+		source := match.Metadata["source"]
+		legacySharedPattern := match.Metadata["type"] == string(TypePattern) && source == SourceTrustedReplyFeedback
+		if source != SourceLegacyReplyFeedback && !legacySharedPattern {
 			out = append(out, match)
 		}
 	}

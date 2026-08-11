@@ -208,9 +208,11 @@ verdict leaves the thread open (never a false resolve).
 
 The developer rejected the finding (Argus was wrong, or not applicable to this
 change). Terminal state `dismissed`. Raised by a reply whose actual author has
-effective repository write access, or by a 👎-dominant reaction — but a reaction
-is **ledger-only** (records the state for suppression memory, never resolves the
-thread).
+effective repository write access, or by a 👎-dominant reaction whose actual
+reactor also has effective repository write access. A reaction is **ledger-only**
+(records the state for suppression memory, never resolves the thread). Reactor
+permission checks fail closed, are cached case-insensitively across one sweep,
+and stop at a hard per-sweep lookup limit.
 
 ### Deferred
 
@@ -233,7 +235,8 @@ the two are not equivalent.
 
 - `HasRepoWriteAccess` (`internal/github/client.go`) asks GitHub's permission
   API about one login. It accepts `admin`, `maintain`, and `write`. This is the
-  exact answer and is required for every reply-derived persistent write.
+  exact answer and is required for every reply-derived persistent write and
+  every reaction actor admitted into a durable tally.
 - `IsPrivilegedAssociation` (`internal/github/identity.go`) reads the
   `author_association` field on a webhook payload. It accepts `OWNER`,
   `MEMBER`, and `COLLABORATOR`. This is only a coarse proxy and cannot authorize

@@ -43,20 +43,22 @@ type reactionLifecycle interface {
 // ReactionAnalyzer checks reactions on Argus review comments and indexes
 // feedback signals. Thumbs-up = confirmed, thumbs-down = dismissed.
 type ReactionAnalyzer struct {
-	store       reactionStore
-	ghClient    reactionGitHubClient
-	memRegistry reactionMemoryRegistry
-	logger      *slog.Logger
-	lifecycle   reactionLifecycle
+	store           reactionStore
+	ghClient        reactionGitHubClient
+	repoPermissions repoWriteAccessChecker
+	memRegistry     reactionMemoryRegistry
+	logger          *slog.Logger
+	lifecycle       reactionLifecycle
 }
 
 func NewReactionAnalyzer(st *store.Store, ghClient *ghpkg.Client, memRegistry *memory.Registry, logger *slog.Logger) *ReactionAnalyzer {
 	return &ReactionAnalyzer{
-		store:       st,
-		ghClient:    ghClient,
-		memRegistry: memRegistry,
-		logger:      logger,
-		lifecycle:   NewFindingLifecycle(st, ghClient, logger),
+		store:           st,
+		ghClient:        ghClient,
+		repoPermissions: ghClient,
+		memRegistry:     memRegistry,
+		logger:          logger,
+		lifecycle:       NewFindingLifecycle(st, ghClient, logger),
 	}
 }
 
@@ -95,9 +97,29 @@ func (s ReactionSignal) DominantSignal() string {
 	return "" // tied
 }
 
+const maxReactionPermissionLookupsPerSweep = 100
+
+type reactionPermissionVerdict struct {
+	allowed bool
+	err     error
+}
+
+type reactionPermissionCache struct {
+	verdicts map[string]reactionPermissionVerdict
+	lookups  int
+}
+
+func newReactionPermissionCache() *reactionPermissionCache {
+	return &reactionPermissionCache{verdicts: make(map[string]reactionPermissionVerdict)}
+}
+
 // HandleCommentReactions fetches reactions for a PR review comment, determines
-// the dominant signal, and indexes it as a feedback pattern.
+// the dominant authorized signal, and indexes it as a feedback pattern.
 func (ra *ReactionAnalyzer) HandleCommentReactions(ctx context.Context, event ghpkg.CommentEvent) error {
+	return ra.handleCommentReactions(ctx, event, newReactionPermissionCache())
+}
+
+func (ra *ReactionAnalyzer) handleCommentReactions(ctx context.Context, event ghpkg.CommentEvent, permissions *reactionPermissionCache) error {
 	// Only process comments on Argus-posted reviews
 	comment, err := ra.store.GetCommentByGithubID(ctx, event.CommentID)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -129,12 +151,13 @@ func (ra *ReactionAnalyzer) HandleCommentReactions(ctx context.Context, event gh
 		reactions = nil
 	}
 
-	// Filter out bot reactions
-	var filtered []ghpkg.CommentReaction
-	for _, r := range reactions {
-		if !strings.HasSuffix(r.User, "[bot]") {
-			filtered = append(filtered, r)
-		}
+	// A reaction can change durable outcome, lifecycle, and suppression memory,
+	// so only the effective repository permission of its actual actor can make
+	// it authoritative. Cache verdicts by case-insensitive login for the whole
+	// sweep and cap unique lookups so a reaction swarm cannot amplify API calls.
+	filtered, err := ra.authorizedSignalReactions(ctx, event, owner, repo, reactions, permissions)
+	if err != nil {
+		return fmt.Errorf("authorizing reactors for comment %d: %w", event.CommentID, err)
 	}
 
 	signal := TallyReactions(filtered)
@@ -210,6 +233,51 @@ func (ra *ReactionAnalyzer) HandleCommentReactions(ctx context.Context, event gh
 	return nil
 }
 
+func (ra *ReactionAnalyzer) authorizedSignalReactions(
+	ctx context.Context,
+	event ghpkg.CommentEvent,
+	owner, repo string,
+	reactions []ghpkg.CommentReaction,
+	permissions *reactionPermissionCache,
+) ([]ghpkg.CommentReaction, error) {
+	if permissions == nil {
+		return nil, fmt.Errorf("reaction permission cache is unavailable")
+	}
+	var authorized []ghpkg.CommentReaction
+	for _, reaction := range reactions {
+		if reaction.Content != "+1" && reaction.Content != "-1" {
+			continue
+		}
+		login := strings.TrimSpace(reaction.User)
+		key := strings.ToLower(login)
+		if key == "" || strings.HasSuffix(key, "[bot]") {
+			continue
+		}
+		verdict, ok := permissions.verdicts[key]
+		if !ok {
+			if ra.repoPermissions == nil {
+				return nil, fmt.Errorf("repository permission checker is unavailable")
+			}
+			if permissions.lookups >= maxReactionPermissionLookupsPerSweep {
+				return nil, fmt.Errorf("reaction permission lookup limit %d exceeded", maxReactionPermissionLookupsPerSweep)
+			}
+			permissions.lookups++
+			allowed, err := ra.repoPermissions.HasRepoWriteAccess(
+				ctx, event.InstallationID, owner, repo, login,
+			)
+			verdict = reactionPermissionVerdict{allowed: allowed, err: err}
+			permissions.verdicts[key] = verdict
+		}
+		if verdict.err != nil {
+			return nil, fmt.Errorf("checking repository permission for %q: %w", login, verdict.err)
+		}
+		if verdict.allowed {
+			authorized = append(authorized, reaction)
+		}
+	}
+	return authorized, nil
+}
+
 // SweepPRReactions enumerates every Argus-posted comment on a PR and runs the
 // reaction-handling pipeline on each. Used to work around GitHub's lack of
 // webhook events for reactions on PR review comments. Review launches wait for
@@ -231,6 +299,7 @@ func (ra *ReactionAnalyzer) SweepPRReactions(ctx context.Context, installationID
 		return nil
 	}
 	ra.logger.Debug("reaction sweep", "pr", prNumber, "comment_count", len(ids))
+	permissions := newReactionPermissionCache()
 	var failures []error
 	for _, id := range ids {
 		select {
@@ -244,7 +313,7 @@ func (ra *ReactionAnalyzer) SweepPRReactions(ctx context.Context, installationID
 			PRNumber:       prNumber,
 			CommentID:      id,
 		}
-		if err := ra.HandleCommentReactions(ctx, evt); err != nil {
+		if err := ra.handleCommentReactions(ctx, evt, permissions); err != nil {
 			ra.logger.Warn("reaction sweep: comment failed", "error", err, "comment_id", id)
 			if isSystemicSweepError(err) {
 				// Same error will repeat for every remaining comment. Stop.

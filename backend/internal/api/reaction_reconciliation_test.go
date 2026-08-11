@@ -192,11 +192,12 @@ func newLaunchBarrierTestServer(sweeper reactionSweeper, handler prEventHandler)
 	}
 }
 
-func TestLaunchPREventCompletesReactionSweepSynchronouslyBeforeSpawn(t *testing.T) {
+func TestLaunchPREventRunsPathAdmissionBeforeSynchronousReactionSweep(t *testing.T) {
 	sweeper := &blockingReactionSweeper{started: make(chan struct{}), release: make(chan struct{})}
 	handled := make(chan struct{})
 	s := newLaunchBarrierTestServer(sweeper, &recordingPREventHandler{onHandle: func() { close(handled) }})
-	beforeSpawn := make(chan struct{})
+	var mu sync.Mutex
+	order := make([]string, 0, 2)
 	launchResult := make(chan error, 1)
 	evt := ghpkg.PREvent{InstallationID: 91, RepoFullName: "acme/api", PRNumber: 17}
 
@@ -204,19 +205,22 @@ func TestLaunchPREventCompletesReactionSweepSynchronouslyBeforeSpawn(t *testing.
 		launchResult <- s.launchPREvent(pipeline.LaunchSpec{
 			Repo: evt.RepoFullName, PR: evt.PRNumber, BaseCtx: context.Background(),
 			BeforeSpawn: func(context.Context) error {
-				close(beforeSpawn)
+				mu.Lock()
+				order = append(order, "admit")
+				mu.Unlock()
 				return nil
 			},
 		}, evt)
 	}()
 
-	select {
-	case <-sweeper.started:
-		// The reconciliation barrier owns the launch call before path-specific
-		// pre-spawn work or the pipeline goroutine can start.
-	case <-beforeSpawn:
+	<-sweeper.started
+	mu.Lock()
+	order = append(order, "sweep")
+	gotOrder := append([]string(nil), order...)
+	mu.Unlock()
+	if len(gotOrder) != 2 || gotOrder[0] != "admit" || gotOrder[1] != "sweep" {
 		close(sweeper.release)
-		t.Fatal("path-specific BeforeSpawn ran before reaction reconciliation")
+		t.Fatalf("launch barrier order = %v, want [admit sweep]", gotOrder)
 	}
 	select {
 	case err := <-launchResult:
@@ -225,9 +229,9 @@ func TestLaunchPREventCompletesReactionSweepSynchronouslyBeforeSpawn(t *testing.
 	default:
 	}
 	select {
-	case <-beforeSpawn:
+	case <-handled:
 		close(sweeper.release)
-		t.Fatal("BeforeSpawn ran while reaction reconciliation was blocked")
+		t.Fatal("pipeline spawned while reaction reconciliation was blocked")
 	default:
 	}
 
@@ -235,13 +239,43 @@ func TestLaunchPREventCompletesReactionSweepSynchronouslyBeforeSpawn(t *testing.
 	if err := <-launchResult; err != nil {
 		t.Fatalf("launchPREvent: %v", err)
 	}
-	<-beforeSpawn
 	<-handled
 }
 
-func TestLaunchPREventSweepFailureReturnsWithoutSpawning(t *testing.T) {
+func TestLaunchPREventPathRefusalSkipsSweepAndDoesNotCleanup(t *testing.T) {
+	admissionErr := errors.New("review actor lacks write access")
+	sweeps := 0
+	cleanups := 0
+	handled := false
+	s := newLaunchBarrierTestServer(
+		&recordingReactionSweeper{onSweep: func() { sweeps++ }},
+		&recordingPREventHandler{onHandle: func() { handled = true }},
+	)
+	evt := ghpkg.PREvent{InstallationID: 91, RepoFullName: "acme/api", PRNumber: 17}
+
+	err := s.launchPREvent(pipeline.LaunchSpec{
+		Repo: evt.RepoFullName, PR: evt.PRNumber, BaseCtx: context.Background(),
+		BeforeSpawn: func(context.Context) error { return admissionErr },
+		Cleanup:     func() { cleanups++ },
+	}, evt)
+	if !errors.Is(err, admissionErr) {
+		t.Fatalf("launch error = %v, want path admission failure", err)
+	}
+	if sweeps != 0 {
+		t.Fatalf("reaction sweeps = %d, want zero for refused path", sweeps)
+	}
+	if cleanups != 0 {
+		t.Fatalf("cleanup calls = %d, want zero because the path owns its own error cleanup", cleanups)
+	}
+	if handled {
+		t.Fatal("pipeline spawned after path admission failed")
+	}
+}
+
+func TestLaunchPREventSweepFailureCleansSuccessfulPathExactlyOnce(t *testing.T) {
 	sweepErr := errors.New("GitHub 503 service unavailable")
-	beforeSpawn := false
+	beforeSpawn := 0
+	cleanups := 0
 	handled := false
 	s := newLaunchBarrierTestServer(
 		&recordingReactionSweeper{err: sweepErr},
@@ -252,15 +286,19 @@ func TestLaunchPREventSweepFailureReturnsWithoutSpawning(t *testing.T) {
 	err := s.launchPREvent(pipeline.LaunchSpec{
 		Repo: evt.RepoFullName, PR: evt.PRNumber, BaseCtx: context.Background(),
 		BeforeSpawn: func(context.Context) error {
-			beforeSpawn = true
+			beforeSpawn++
 			return nil
 		},
+		Cleanup: func() { cleanups++ },
 	}, evt)
 	if !errors.Is(err, sweepErr) {
 		t.Fatalf("launch error = %v, want wrapped sweep failure", err)
 	}
-	if beforeSpawn {
-		t.Fatal("path-specific BeforeSpawn ran after reconciliation failed")
+	if beforeSpawn != 1 {
+		t.Fatalf("path BeforeSpawn calls = %d, want one", beforeSpawn)
+	}
+	if cleanups != 1 {
+		t.Fatalf("cleanup calls = %d, want exactly one after admitted path cannot spawn", cleanups)
 	}
 	if handled {
 		t.Fatal("pipeline spawned after reconciliation failed")

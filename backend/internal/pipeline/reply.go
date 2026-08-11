@@ -138,23 +138,11 @@ func (ra *ReplyAnalyzer) Analyze(ctx context.Context, event ghpkg.CommentEvent) 
 		return nil
 	}
 
-	// Authorized reply learnings use a distinct source from the legacy rows that
-	// lack author provenance. Readers quarantine that legacy source rather than
-	// guessing whether its author was trusted or deleting audit evidence.
-	if decision.Learning != "" && indexer != nil {
-		_, err := indexer.IndexSharedPattern(ctx, memory.PatternMemory{
-			Content:  decision.Learning,
-			CustomID: memory.SharedPatternCustomID(memory.SourceTrustedReplyFeedback, decision.Learning),
-			Source:   memory.SourceTrustedReplyFeedback,
-			FilePath: event.FilePath,
-			Extra: map[string]string{
-				"repo":               repo,
-				"author_association": event.AuthorAssociation,
-			},
-		})
-		if err != nil {
-			ra.logger.Error("indexing learning from reply", "error", err)
-		}
+	// The model is explicitly asked for knowledge about this specific repo.
+	// Keep that learning in the repo container; promoting it to _shared would
+	// silently apply one repository's convention installation-wide.
+	if err := indexReplyLearning(ctx, indexer, owner, repo, event, decision.Learning); err != nil {
+		ra.logger.Error("indexing learning from reply", "error", err)
 	}
 
 	if plan.Outcome != "" {
@@ -210,6 +198,23 @@ func (ra *ReplyAnalyzer) Analyze(ctx context.Context, event ghpkg.CommentEvent) 
 	}
 
 	return nil
+}
+
+func indexReplyLearning(ctx context.Context, indexer memory.Indexer, owner, repo string, event ghpkg.CommentEvent, learning string) error {
+	if indexer == nil || learning == "" {
+		return nil
+	}
+	_, err := indexer.IndexPattern(ctx, repo, memory.PatternMemory{
+		Content:  learning,
+		CustomID: memory.PatternCustomID(owner, repo, memory.SourceTrustedReplyLearning, learning),
+		Source:   memory.SourceTrustedReplyLearning,
+		FilePath: event.FilePath,
+		Extra: map[string]string{
+			"repo":               repo,
+			"author_association": event.AuthorAssociation,
+		},
+	})
+	return err
 }
 
 // replyEffectPlan is the complete set of persistent effects derived from a

@@ -332,7 +332,7 @@ Every posted finding has exactly one terminal lifecycle state, reconciled across
 |-------|---------|--------|
 | `posted` | Shipped to the PR, no outcome yet (column default) | insert |
 | `addressed` | The flagged problem was fixed — **judge-verified** (below) | auto-resolve on synchronize; a privileged reply confirming the fix; the gauge at merge |
-| `dismissed` | The developer rejected the finding | a privileged reply, or a 👎-dominant reaction (ledger-only) |
+| `dismissed` | The developer rejected the finding | a repo-write-authorized reply, or a repo-write-authorized 👎-dominant reaction (ledger-only) |
 | `deferred` | Acknowledged but not fixed — PR closed without merging | the gauge on an unmerged close |
 | `resolved` | A maintainer explicitly closed the threads via `@argus resolve` | the resolve command (maintainer-only) |
 | `suppressed` | Never posted — dropped by the suppression pass | insert only |
@@ -343,8 +343,8 @@ FindingLifecycle splits events into DECISIONS (record the ledger first, then bes
 
 Resolving a thread clears the finding from GitHub's require-conversation-resolution merge gate, so it is privileged — the authorization boundary is enforced at each call site so **untrusted commenters cannot clear findings from the merge gate**:
 
-- **Reactions are ledger-only.** A 👎 sets `state=dismissed` for suppression memory but NEVER resolves the thread — a reaction is an untrusted, low-effort signal swept from any user, including fork contributors with no write access.
-- **Replies are gated on `author_association`.** Only an owner/member/collaborator reply resolves the thread and writes terminal state; a non-privileged reply keeps its learning signal (pattern/feedback) but does not clear the finding.
+- **Reactions are ledger-only and permission-gated.** A 👎 can set `state=dismissed` for suppression memory but NEVER resolves the thread. Only reactions whose actual actor has effective repository write access enter the tally. Permission lookups fail closed, are cached per case-insensitive reactor across a sweep, and have a hard per-sweep cap.
+- **Replies use effective repository permission.** Argus checks the actual reply author's `write`, `maintain`, or `admin` permission before resolving an LLM provider or posting. A lookup error fails before LLM spend or posting. An ordinary denial may receive an observation-only response, but creates no pattern/feedback, outcome, or lifecycle write.
 - **`@argus resolve` is maintainer-only.** A non-privileged commenter gets a "confused" reaction and a refusal message; only owner/member/collaborator pass `IsPrivilegedAssociation` (`internal/github/identity.go`).
 
 Accepted, intentional corner: a 👎-dismissed finding's thread stays open (ledger-only), so a later push modifying its lines can resolve the *thread* while the provenance rule keeps the *ledger* at `dismissed`.
@@ -553,8 +553,10 @@ Cross-tenant reads are prevented by the `installation_id` predicate on every que
 
 | Container | Written By | Read By |
 |-----------|-----------|---------|
-| `_shared` | `handleRememberCommand (--org)`, `ReplyAnalyzer (learning)`, `IndexSharedPattern` | `triageMemoryHints`, `reviewMemoryBlock`, `specialistMemoryBlock`, `ToolHandler` |
-| `{repo}` | `indexComments`, `indexConfirmedPatterns`, `autoLearnPatterns`, `extractConventions`, `synthesizeFileMemories`, `indexPRSummary`, `handleRememberCommand`, `IndexFeedbackSignal`, `IndexRule` | `triageMemoryHints`, `reviewMemoryBlock`, `specialistMemoryBlock`, `ScoringStage`, `ToolHandler` |
+| `_shared` | `handleRememberCommand (--org)`, `IndexSharedPattern` | `triageMemoryHints`, `reviewMemoryBlock`, `specialistMemoryBlock`, `ToolHandler` |
+| `{repo}` | `indexComments`, `indexConfirmedPatterns`, `autoLearnPatterns`, `extractConventions`, `synthesizeFileMemories`, `indexPRSummary`, `handleRememberCommand`, `ReplyAnalyzer (learning)`, `IndexFeedbackSignal`, `IndexRule` | `triageMemoryHints`, `reviewMemoryBlock`, `specialistMemoryBlock`, `ScoringStage`, `ToolHandler` |
+
+Reply learnings are explicitly repository conventions. Current authorized rows use source `trusted_repo_reply_learning`, a repo-scoped `PatternCustomID`, and the `{repo}` container. Legacy unaudited reply rows and the older `trusted_reply_feedback` pattern rows that were incorrectly promoted to `_shared` remain stored for audit but are quarantined from retrieval. Repo-scoped trusted feedback rows keep `trusted_reply_feedback` and remain retrievable because they are feedback, not patterns.
 
 ### Deduplication Strategy
 
@@ -563,7 +565,7 @@ All memory writes use content-hashed `customId` fields to enable upsert semantic
 | CustomID Function | Format | Used By |
 |-------------------|--------|---------|
 | `FindingFingerprint` | `{repo}--{sanitized_file}--{hash12}` | `indexComments` |
-| `PatternCustomID` | `{repo}--{source}--{hash12}` | `indexConfirmedPatterns`, `autoLearnPatterns`, `extractConventions` |
+| `PatternCustomID` | `{repo}--{source}--{hash12}` | `indexConfirmedPatterns`, `autoLearnPatterns`, `extractConventions`, trusted reply learning |
 | `SynthesisCustomID` | `{repo}--{sanitized_file}--{hash12}--synthesis` | `synthesizeFileMemories` |
 | `PRSummaryCustomID` | `{repo}--pr-{N}-summary` (no hash) | `indexPRSummary` |
 | `FeedbackCustomID` | `{repo}--feedback--{hash12}` | `IndexFeedbackSignal` |

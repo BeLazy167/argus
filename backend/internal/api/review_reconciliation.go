@@ -66,18 +66,30 @@ func (s *Server) runPREvent(ctx context.Context, event ghpkg.PREvent) error {
 }
 
 // launchPREvent preserves Launcher's ownership of admission-adjacent slot,
-// cancel, semaphore cleanup, and generation behavior. The sweep runs in
-// BeforeSpawn, synchronously inside Launch and before path-specific pre-spawn
-// work, so a failed reconciliation neither returns an accepted launch nor
-// starts a pipeline that could read stale reaction feedback.
+// cancel, semaphore cleanup, and generation behavior. Path-specific admission
+// runs first so an unauthorized request cannot force a full reaction sweep.
+// Reconciliation remains a synchronous barrier before the pipeline can read
+// dismissal memory.
 func (s *Server) launchPREvent(spec pipeline.LaunchSpec, event ghpkg.PREvent) error {
 	pathBeforeSpawn := spec.BeforeSpawn
 	spec.BeforeSpawn = func(ctx context.Context) error {
-		if err := s.reconcileReactionsBeforeReview(ctx, event.InstallationID, event.RepoFullName, event.PRNumber); err != nil {
-			return err
-		}
+		pathPrepared := false
 		if pathBeforeSpawn != nil {
-			return pathBeforeSpawn(ctx)
+			if err := pathBeforeSpawn(ctx); err != nil {
+				// Existing path hooks roll back any partial acquisition before they
+				// return an error. Calling Cleanup here would double-release them.
+				return err
+			}
+			pathPrepared = true
+		}
+		if err := s.reconcileReactionsBeforeReview(ctx, event.InstallationID, event.RepoFullName, event.PRNumber); err != nil {
+			// A successful path hook transferred its acquired resource to
+			// Cleanup, but Launcher only invokes Cleanup after spawning. Release
+			// it here because reconciliation prevented the spawn.
+			if pathPrepared && spec.Cleanup != nil {
+				spec.Cleanup()
+			}
+			return err
 		}
 		return nil
 	}
