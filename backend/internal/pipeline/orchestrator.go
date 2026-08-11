@@ -2745,6 +2745,9 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	if existingReviewID, exists, converged, err := o.st.ConvergePostedReview(ctx, run.ReviewID, run.AttemptGeneration); err != nil {
 		return err
 	} else if exists {
+		if !converged && o.lifecycle.ShouldAbortPost(ctx, run.ReviewID, "post: existing review status check failed") {
+			return context.Canceled
+		}
 		if converged {
 			o.persistReviewLinkedPRRefs(ctx, run)
 			o.persistReviewLinkedIssueRefs(ctx, run)
