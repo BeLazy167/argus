@@ -481,7 +481,84 @@ const (
 	ReviewPostAttempted       ReviewPostOutcome = "attempted"
 	ReviewPostRecorded        ReviewPostOutcome = "recorded"
 	ReviewPostAlreadyRecorded ReviewPostOutcome = "already_recorded"
+
+	postedReviewRepairTimeout = 3 * time.Second
+	postedReviewRepairTries   = 3
+	postedReviewRepairDelay   = 50 * time.Millisecond
 )
+
+var (
+	ErrReviewPostRepairConflict       = errors.New("posted review repair conflicts with durable review identity")
+	ErrReviewPostPersistenceAmbiguous = errors.New("GitHub review posted but durable identity is ambiguous; automatic retry disabled")
+)
+
+// RepairPostedReviewID establishes or confirms the durable evidence for a
+// positive GitHub review id after the original persistence transaction failed
+// or returned an ambiguous commit result. It is deliberately detached from the
+// request cancellation, but bounded: a lost client must not strand a worker.
+//
+// The compare-and-set accepts only the same review generation and either a NULL
+// id or the identical id. A newer generation or a different positive id is an
+// integrity conflict, never something this repair may overwrite.
+func (s *Store) RepairPostedReviewID(ctx context.Context, id uuid.UUID, generation int, githubReviewID int64) error {
+	if githubReviewID <= 0 {
+		return fmt.Errorf("repairing posted review: invalid GitHub review id %d", githubReviewID)
+	}
+
+	repairCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), postedReviewRepairTimeout)
+	defer cancel()
+
+	var lastErr error
+	for attempt := 0; attempt < postedReviewRepairTries; attempt++ {
+		var storedID int64
+		err := s.Pool.QueryRow(repairCtx, `
+			UPDATE reviews
+			SET github_review_id=$1
+			WHERE id=$2 AND attempt_generation=$3
+			  AND (github_review_id IS NULL OR github_review_id=$1)
+			RETURNING github_review_id
+		`, githubReviewID, id, generation).Scan(&storedID)
+		if err == nil {
+			if storedID != githubReviewID {
+				return fmt.Errorf("%w: repair returned GitHub review id %d, want %d", ErrReviewPostRepairConflict, storedID, githubReviewID)
+			}
+			return nil
+		}
+		if errors.Is(err, pgx.ErrNoRows) {
+			var currentGeneration int
+			var currentID *int64
+			readErr := s.Pool.QueryRow(repairCtx, `SELECT attempt_generation,github_review_id FROM reviews WHERE id=$1`, id).Scan(&currentGeneration, &currentID)
+			if errors.Is(readErr, pgx.ErrNoRows) {
+				return fmt.Errorf("%w: review %s no longer exists", ErrReviewPostRepairConflict, id)
+			}
+			if readErr == nil {
+				if currentGeneration != generation {
+					return fmt.Errorf("%w: review %s generation is %d, posted generation was %d", ErrReviewPostRepairConflict, id, currentGeneration, generation)
+				}
+				if currentID != nil && *currentID != githubReviewID {
+					return fmt.Errorf("%w: review %s has GitHub review id %d, posted id was %d", ErrReviewPostRepairConflict, id, *currentID, githubReviewID)
+				}
+				lastErr = fmt.Errorf("repair compare-and-set returned no row for review %s", id)
+			} else {
+				lastErr = fmt.Errorf("re-reading review after repair compare-and-set: %w", readErr)
+			}
+		} else {
+			lastErr = fmt.Errorf("repairing GitHub review id %d: %w", githubReviewID, err)
+		}
+
+		if attempt+1 == postedReviewRepairTries {
+			break
+		}
+		timer := time.NewTimer(postedReviewRepairDelay)
+		select {
+		case <-repairCtx.Done():
+			timer.Stop()
+			return fmt.Errorf("repairing GitHub review id %d: %w", githubReviewID, errors.Join(lastErr, repairCtx.Err()))
+		case <-timer.C:
+		}
+	}
+	return fmt.Errorf("repairing GitHub review id %d after %d attempts: %w", githubReviewID, postedReviewRepairTries, lastErr)
+}
 
 // PostReviewForAttempt is the authority boundary for the non-idempotent GitHub
 // review mutation. It locks only this review row, verifies that generation owns
@@ -493,17 +570,20 @@ const (
 // Preparation must happen before this method; post should contain only the
 // external request. Once GitHub returns an id, persistence uses a
 // cancellation-detached context: a concurrent local cancel must not discard the
-// only durable evidence that the external mutation succeeded. An error after
-// post returns an id is inherently ambiguous with respect to transaction commit;
-// the returned id lets callers report that boundary without claiming exactly-once
-// delivery. Likewise, a post callback error can mean GitHub accepted the request
-// but its response was lost; without a GitHub idempotency key or reconciliation
-// lookup, this boundary cannot safely infer or repair that case.
+// only durable evidence that the external mutation succeeded. A failed UPDATE
+// or ambiguous COMMIT is followed by a bounded detached CAS/re-read repair. The
+// non-idempotent callback is never retried. A callback error with no positive id
+// remains irreducibly ambiguous because GitHub supplies no idempotency key or
+// reconciliation identity for this request.
 func (s *Store) PostReviewForAttempt(ctx context.Context, id uuid.UUID, generation int, post func(context.Context) (int64, error)) (githubReviewID int64, outcome ReviewPostOutcome, err error) {
 	if post == nil {
 		return 0, ReviewPostRejected, errors.New("posting review: nil callback")
 	}
-	tx, err := s.Pool.Begin(ctx)
+	begin := s.beginReviewPostTx
+	if begin == nil {
+		begin = s.Pool.Begin
+	}
+	tx, err := begin(ctx)
 	if err != nil {
 		return 0, ReviewPostRejected, fmt.Errorf("beginning review post guard: %w", err)
 	}
@@ -537,14 +617,28 @@ func (s *Store) PostReviewForAttempt(ctx context.Context, id uuid.UUID, generati
 	// the request context was cancelled while the response was in flight.
 	persistCtx := context.WithoutCancel(ctx)
 	tag, persistErr := tx.Exec(persistCtx, `UPDATE reviews SET github_review_id=$1 WHERE id=$2 AND attempt_generation=$3 AND status='in_progress' AND github_review_id IS NULL`, githubReviewID, id, generation)
-	if persistErr != nil {
-		return githubReviewID, ReviewPostAttempted, fmt.Errorf("persisting GitHub review id %d after post succeeded: %w", githubReviewID, persistErr)
+	if persistErr == nil && tag.RowsAffected() != 1 {
+		persistErr = fmt.Errorf("persisting GitHub review id %d after post succeeded: guarded row disappeared", githubReviewID)
 	}
-	if tag.RowsAffected() != 1 {
-		return githubReviewID, ReviewPostAttempted, fmt.Errorf("persisting GitHub review id %d after post succeeded: guarded row disappeared", githubReviewID)
+	if persistErr == nil {
+		persistErr = tx.Commit(persistCtx)
+		if persistErr != nil {
+			persistErr = fmt.Errorf("committing GitHub review id %d after post succeeded (commit outcome may be ambiguous): %w", githubReviewID, persistErr)
+		}
+	} else {
+		persistErr = fmt.Errorf("persisting GitHub review id %d after post succeeded: %w", githubReviewID, persistErr)
 	}
-	if commitErr := tx.Commit(persistCtx); commitErr != nil {
-		return githubReviewID, ReviewPostAttempted, fmt.Errorf("committing GitHub review id %d after post succeeded (commit outcome may be ambiguous): %w", githubReviewID, commitErr)
+	if persistErr == nil {
+		return githubReviewID, ReviewPostRecorded, nil
+	}
+
+	// Release the original row lock before using a fresh connection. On an
+	// ambiguous commit this is harmless (the transaction is already closed); on
+	// an UPDATE failure it is essential or the repair would block behind itself.
+	_ = tx.Rollback(context.Background())
+	if repairErr := s.RepairPostedReviewID(ctx, id, generation, githubReviewID); repairErr != nil {
+		return githubReviewID, ReviewPostAttempted, fmt.Errorf("%w: GitHub review %d; persistence error: %v; detached repair error: %v",
+			ErrReviewPostPersistenceAmbiguous, githubReviewID, persistErr, repairErr)
 	}
 	return githubReviewID, ReviewPostRecorded, nil
 }
@@ -583,6 +677,54 @@ func (s *Store) RunIfReviewAttemptCurrent(ctx context.Context, id uuid.UUID, gen
 	return true, nil
 }
 
+// ReviewCompletionOutcome is the winner election result for follow-up work
+// after a GitHub review id is durable.
+type ReviewCompletionOutcome string
+
+const (
+	ReviewCompletionWon              ReviewCompletionOutcome = "won"
+	ReviewCompletionAlreadyCompleted ReviewCompletionOutcome = "already_completed"
+	ReviewCompletionRejected         ReviewCompletionOutcome = "rejected"
+)
+
+// CompletePostedReview elects exactly one same-generation worker to transition
+// the review to completed. Only ReviewCompletionWon may run linked-reference,
+// event, backfill, hydration, and post-review sink side effects. A concurrent
+// worker that observes the identical durable id already completed is a clean
+// loser, not a cancellation. Different ids are integrity conflicts.
+func (s *Store) CompletePostedReview(ctx context.Context, id uuid.UUID, generation int, githubReviewID int64) (ReviewCompletionOutcome, error) {
+	if githubReviewID <= 0 {
+		return ReviewCompletionRejected, fmt.Errorf("completing posted review: invalid GitHub review id %d", githubReviewID)
+	}
+	tag, err := s.Pool.Exec(ctx, `
+		UPDATE reviews
+		SET status='completed', github_review_id=$1,
+		    completed_at=COALESCE(completed_at,NOW()), error=NULL
+		WHERE id=$2 AND attempt_generation=$3 AND status='in_progress'
+		  AND (github_review_id IS NULL OR github_review_id=$1)
+	`, githubReviewID, id, generation)
+	if err != nil {
+		return ReviewCompletionRejected, fmt.Errorf("completing posted review: %w", err)
+	}
+	if tag.RowsAffected() == 1 {
+		return ReviewCompletionWon, nil
+	}
+
+	var currentGeneration int
+	var status string
+	var currentID *int64
+	if err := s.Pool.QueryRow(ctx, `SELECT attempt_generation,status,github_review_id FROM reviews WHERE id=$1`, id).Scan(&currentGeneration, &status, &currentID); err != nil {
+		return ReviewCompletionRejected, fmt.Errorf("checking posted review completion loser: %w", err)
+	}
+	if currentGeneration == generation && status == "completed" && currentID != nil && *currentID == githubReviewID {
+		return ReviewCompletionAlreadyCompleted, nil
+	}
+	if currentGeneration == generation && currentID != nil && *currentID != githubReviewID {
+		return ReviewCompletionRejected, fmt.Errorf("%w: review %s has GitHub review id %d, completion id was %d", ErrReviewPostRepairConflict, id, *currentID, githubReviewID)
+	}
+	return ReviewCompletionRejected, nil
+}
+
 // GetReviewStatus returns just the status column for a review — a cheap PK
 // lookup used by the state machine's cooperative-cancellation check, which runs
 // at every stage boundary and must stay light.
@@ -617,8 +759,9 @@ func (s *Store) BeginReviewRetry(ctx context.Context, id uuid.UUID) (int, bool, 
 		SET status = 'pending', error = NULL, completed_at = NULL,
 		    attempt_generation = attempt_generation + 1
 		WHERE id = $1 AND status IN ('failed', 'cancelled')
+		  AND (error IS NULL OR error NOT LIKE $2 || '%')
 		RETURNING attempt_generation
-	`, id).Scan(&generation)
+	`, id, ErrReviewPostPersistenceAmbiguous.Error()).Scan(&generation)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, false, nil
 	}

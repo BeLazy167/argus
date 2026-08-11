@@ -2727,25 +2727,6 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		return context.Canceled
 	}
 
-	// A prior PostReview may have succeeded while the following completion write
-	// failed. Converge the durable row instead of returning with it in_progress.
-	if existingReviewID, exists, converged, err := o.st.ConvergePostedReview(ctx, run.ReviewID, run.AttemptGeneration); err != nil {
-		return err
-	} else if exists {
-		if !converged && o.lifecycle.ShouldAbortPost(ctx, run.ReviewID, "post: existing review status check failed") {
-			return context.Canceled
-		}
-		if converged {
-			o.persistReviewLinkedPRRefs(ctx, run)
-			o.persistReviewLinkedIssueRefs(ctx, run)
-			if run.EventBus != nil {
-				run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventReviewCompleted, ReviewCompletedPayload{ReviewID: run.ReviewID, RepoID: run.DBRepoID, PRNumber: run.PREvent.PRNumber, InstallationID: run.PREvent.InstallationID})
-			}
-		}
-		o.logger.Warn("review already posted to GitHub; skipping mutation", "review_id", run.ReviewID, "github_review_id", existingReviewID, "converged", converged)
-		return nil
-	}
-
 	owner, repo, err := splitRepoFullName(run.PREvent.RepoFullName)
 	if err != nil {
 		return err
@@ -2922,10 +2903,13 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		)
 	})
 	if err != nil {
+		if errors.Is(err, store.ErrReviewPostPersistenceAmbiguous) {
+			// Preserve the durable retry-block marker at the start of reviews.error.
+			// The store already includes the positive remote id and both persistence
+			// failures, so another wrapper would only obscure the recovery contract.
+			return err
+		}
 		if ghReviewID > 0 {
-			// GitHub returned an id, but its durable evidence write failed or the
-			// commit response was ambiguous. Do not claim the mutation was undone;
-			// ConvergePostedReview can repair it if the id did commit.
 			return fmt.Errorf("GitHub review %d was posted but recording it is ambiguous: %w", ghReviewID, err)
 		}
 		return fmt.Errorf("posting review: %w", err)
@@ -2934,22 +2918,35 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		return context.Canceled
 	}
 	if postOutcome == store.ReviewPostAlreadyRecorded {
-		// Another worker in this generation won the same authority boundary after
-		// our earlier convergence check. Finish from its durable id; never call
-		// GitHub a second time.
-		_, _, converged, convergeErr := o.st.ConvergePostedReview(ctx, run.ReviewID, run.AttemptGeneration)
-		if convergeErr != nil {
-			return convergeErr
-		}
-		o.logger.Warn("review post already recorded by current attempt; skipping duplicate mutation", "review_id", run.ReviewID, "github_review_id", ghReviewID, "converged", converged)
-		return nil
+		// A concurrent worker or crash-recovered run already made the remote id
+		// durable. Skip the non-idempotent mutation, but join the same completion
+		// CAS below: converging status here would steal the winner election and
+		// omit the winner-only follow-up block.
+		o.logger.Warn("review post already recorded by current attempt; joining completion election", "review_id", run.ReviewID, "github_review_id", ghReviewID)
 	}
 
-	// comment.posted is fired after the atomic PostReview landed so failures
-	// above produce review.failed instead. comment_count reflects what the
-	// author will actually see on GitHub: inline comments posted via the
-	// review submission. Folded-into-summary comments don't count — they're
-	// rendered as part of a single "summary" comment, not per-thread.
+	// The completion CAS is also the follow-up winner election. This includes
+	// workers that observed ReviewPostAlreadyRecorded: exactly one worker may
+	// perform every externally visible completion side effect below.
+	completion, err := o.st.CompletePostedReview(ctx, run.ReviewID, run.AttemptGeneration, ghReviewID)
+	if err != nil {
+		return err
+	}
+	switch completion {
+	case store.ReviewCompletionAlreadyCompleted:
+		o.logger.Warn("post: another worker completed the recorded review; skipping winner followups", "review_id", run.ReviewID, "attempt_generation", run.AttemptGeneration, "github_review_id", ghReviewID)
+		return nil
+	case store.ReviewCompletionRejected:
+		o.logger.Warn("post: completion rejected — review attempt no longer current", "review_id", run.ReviewID, "attempt_generation", run.AttemptGeneration, "github_review_id", ghReviewID)
+		return context.Canceled
+	case store.ReviewCompletionWon:
+		// Continue through the complete winner-only follow-up block.
+	default:
+		return fmt.Errorf("unknown review completion outcome %q", completion)
+	}
+
+	// comment.posted is emitted by the completion winner. A same-generation
+	// loser observed the same remote post but must not duplicate lifecycle events.
 	o.logger.InfoContext(ctx, "comment posted",
 		slog.String("event", "comment.posted"),
 		slog.String("review_id", run.ReviewID.String()),
@@ -2959,32 +2956,11 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		slog.String("trace_id", run.TraceID),
 	)
 
-	// Minimize the "review started" comment now that the full review is posted
+	// Minimize the "review started" comment only after winning completion.
 	if run.StartedCommentNodeID != "" {
 		if err := o.ghClient.MinimizeComment(ctx, run.PREvent.InstallationID, run.StartedCommentNodeID, "RESOLVED"); err != nil {
 			o.logger.Warn("failed to minimize started comment", "error", err)
 		}
-	}
-
-	// Mark completed + store github_review_id + clear any stale error.
-	// The error column gets set by RecoverStaleReviews ("review timed out —
-	// server restarted") if the recovery job ran before we finished posting.
-	// Clearing it prevents completed reviews from showing a ghost timeout error.
-	// Conditional on status='in_progress': a Stop that raced past the pre-post
-	// guards (marking the review cancelled) must not be clobbered back to
-	// completed. The GitHub review is already posted, so we don't roll it back;
-	// we just don't overwrite a terminal status another writer set.
-	tag, err := o.db.Exec(ctx, `
-		UPDATE reviews
-		SET status = 'completed', github_review_id = $1, completed_at = NOW(), error = NULL
-		WHERE id = $2 AND status = 'in_progress' AND attempt_generation = $3
-	`, ghReviewID, run.ReviewID, run.AttemptGeneration)
-	if err != nil {
-		return fmt.Errorf("updating review record: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		o.logger.Warn("post: completion write skipped — review attempt no longer current", "review_id", run.ReviewID, "attempt_generation", run.AttemptGeneration)
-		return context.Canceled
 	}
 
 	// Persist linked_pr_refs BEFORE the EventReviewCompleted publish so the

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func TestReviewRetryGenerationConvergesAcrossMachines(t *testing.T) {
@@ -447,5 +449,234 @@ func TestReviewPostRejectsDisallowedStatusWithoutCallingGitHub(t *testing.T) {
 	}
 	if persisted {
 		t.Fatal("post callback error invented durable GitHub evidence")
+	}
+}
+
+type reviewPostFaultTx struct {
+	pgx.Tx
+	execErr       error
+	commitErr     error
+	afterRollback func()
+	rollbackOnce  sync.Once
+}
+
+func (tx *reviewPostFaultTx) Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error) {
+	if tx.execErr != nil && strings.Contains(sql, "UPDATE reviews SET github_review_id") {
+		err := tx.execErr
+		tx.execErr = nil
+		return pgconn.CommandTag{}, err
+	}
+	return tx.Tx.Exec(ctx, sql, arguments...)
+}
+
+func (tx *reviewPostFaultTx) Commit(ctx context.Context) error {
+	if tx.commitErr == nil {
+		return tx.Tx.Commit(ctx)
+	}
+	injected := tx.commitErr
+	tx.commitErr = nil
+	if err := tx.Tx.Commit(ctx); err != nil {
+		return err
+	}
+	return injected
+}
+
+func (tx *reviewPostFaultTx) Rollback(ctx context.Context) error {
+	err := tx.Tx.Rollback(ctx)
+	tx.rollbackOnce.Do(func() {
+		if tx.afterRollback != nil {
+			tx.afterRollback()
+		}
+	})
+	return err
+}
+
+func TestReviewPostRepairsPositiveIDAfterPersistenceAmbiguity(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		execErr   error
+		commitErr error
+	}{
+		{name: "id update failed", execErr: errors.New("injected id update failure")},
+		{name: "commit response lost", commitErr: errors.New("injected ambiguous commit response")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool, ctx := fileMemoryTestPool(t)
+			_, rawID := seedFileMemoryRepo(t, ctx, pool)
+			reviewID := uuid.MustParse(rawID)
+			if _, err := pool.Exec(ctx, `UPDATE reviews SET status='in_progress' WHERE id=$1`, reviewID); err != nil {
+				t.Fatal(err)
+			}
+
+			st := NewWithDB(pool)
+			var begins atomic.Int32
+			st.beginReviewPostTx = func(ctx context.Context) (pgx.Tx, error) {
+				tx, err := pool.Begin(ctx)
+				if err != nil {
+					return nil, err
+				}
+				if begins.Add(1) == 1 {
+					return &reviewPostFaultTx{Tx: tx, execErr: tc.execErr, commitErr: tc.commitErr}, nil
+				}
+				return tx, nil
+			}
+
+			var postCalls atomic.Int32
+			githubReviewID, outcome, err := st.PostReviewForAttempt(ctx, reviewID, 1, func(context.Context) (int64, error) {
+				postCalls.Add(1)
+				return 7654, nil
+			})
+			if err != nil || githubReviewID != 7654 || outcome != ReviewPostRecorded {
+				t.Fatalf("post with repaired persistence = (%d,%q,%v), want (7654,%q,nil)", githubReviewID, outcome, err, ReviewPostRecorded)
+			}
+
+			calledAgain := false
+			githubReviewID, outcome, err = st.PostReviewForAttempt(ctx, reviewID, 1, func(context.Context) (int64, error) {
+				calledAgain = true
+				return 9999, nil
+			})
+			if err != nil || githubReviewID != 7654 || outcome != ReviewPostAlreadyRecorded {
+				t.Fatalf("post after repair = (%d,%q,%v), want (7654,%q,nil)", githubReviewID, outcome, err, ReviewPostAlreadyRecorded)
+			}
+			if calledAgain || postCalls.Load() != 1 {
+				t.Fatalf("GitHub callback calledAgain=%v calls=%d, want one non-idempotent call", calledAgain, postCalls.Load())
+			}
+
+			var storedID int64
+			if err := pool.QueryRow(ctx, `SELECT github_review_id FROM reviews WHERE id=$1`, reviewID).Scan(&storedID); err != nil {
+				t.Fatal(err)
+			}
+			if storedID != 7654 {
+				t.Fatalf("stored GitHub review id = %d, want 7654", storedID)
+			}
+		})
+	}
+}
+
+func TestCompletePostedReviewElectsOneFollowupWinner(t *testing.T) {
+	pool, ctx := fileMemoryTestPool(t)
+	_, rawID := seedFileMemoryRepo(t, ctx, pool)
+	reviewID := uuid.MustParse(rawID)
+	if _, err := pool.Exec(ctx, `UPDATE reviews SET status='in_progress',github_review_id=2468 WHERE id=$1`, reviewID); err != nil {
+		t.Fatal(err)
+	}
+	st := NewWithDB(pool)
+
+	start := make(chan struct{})
+	outcomes := make(chan ReviewCompletionOutcome, 2)
+	var linkedRefs, events, backfills, hydrations, sinks atomic.Int32
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			outcome, err := st.CompletePostedReview(ctx, reviewID, 1, 2468)
+			if err != nil {
+				t.Errorf("CompletePostedReview: %v", err)
+				return
+			}
+			outcomes <- outcome
+			if outcome != ReviewCompletionWon {
+				return
+			}
+			// These counters model the orchestrator's linked-ref, lifecycle event,
+			// comment backfill, thread hydration, and post-review sink block. The
+			// store CAS is the sole election seam guarding that whole block.
+			linkedRefs.Add(1)
+			events.Add(1)
+			backfills.Add(1)
+			hydrations.Add(1)
+			sinks.Add(1)
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(outcomes)
+
+	counts := map[ReviewCompletionOutcome]int{}
+	for outcome := range outcomes {
+		counts[outcome]++
+	}
+	if counts[ReviewCompletionWon] != 1 || counts[ReviewCompletionAlreadyCompleted] != 1 {
+		t.Fatalf("completion outcomes = %#v, want one winner and one already-completed loser", counts)
+	}
+	if linkedRefs.Load() != 1 || events.Load() != 1 || backfills.Load() != 1 || hydrations.Load() != 1 || sinks.Load() != 1 {
+		t.Fatalf("winner followups refs=%d events=%d backfills=%d hydrations=%d sinks=%d, want each exactly once",
+			linkedRefs.Load(), events.Load(), backfills.Load(), hydrations.Load(), sinks.Load())
+	}
+}
+
+func TestRepairPostedReviewIDRejectsGenerationAndIDConflicts(t *testing.T) {
+	pool, ctx := fileMemoryTestPool(t)
+	_, rawID := seedFileMemoryRepo(t, ctx, pool)
+	reviewID := uuid.MustParse(rawID)
+	st := NewWithDB(pool)
+
+	if _, err := pool.Exec(ctx, `UPDATE reviews SET status='in_progress',github_review_id=111 WHERE id=$1`, reviewID); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RepairPostedReviewID(ctx, reviewID, 1, 222); !errors.Is(err, ErrReviewPostRepairConflict) {
+		t.Fatalf("conflicting id repair error = %v, want ErrReviewPostRepairConflict", err)
+	}
+
+	if _, err := pool.Exec(ctx, `UPDATE reviews SET github_review_id=NULL,attempt_generation=2 WHERE id=$1`, reviewID); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RepairPostedReviewID(ctx, reviewID, 1, 222); !errors.Is(err, ErrReviewPostRepairConflict) {
+		t.Fatalf("stale generation repair error = %v, want ErrReviewPostRepairConflict", err)
+	}
+
+	var generation int
+	var storedID *int64
+	if err := pool.QueryRow(ctx, `SELECT attempt_generation,github_review_id FROM reviews WHERE id=$1`, reviewID).Scan(&generation, &storedID); err != nil {
+		t.Fatal(err)
+	}
+	if generation != 2 || storedID != nil {
+		t.Fatalf("conflict repair mutated row: generation=%d github_review_id=%v", generation, storedID)
+	}
+}
+
+func TestReviewPostAmbiguityDisablesBlindRetryWhenRepairCannotOwnGeneration(t *testing.T) {
+	pool, ctx := fileMemoryTestPool(t)
+	_, rawID := seedFileMemoryRepo(t, ctx, pool)
+	reviewID := uuid.MustParse(rawID)
+	if _, err := pool.Exec(ctx, `UPDATE reviews SET status='in_progress' WHERE id=$1`, reviewID); err != nil {
+		t.Fatal(err)
+	}
+	st := NewWithDB(pool)
+	st.beginReviewPostTx = func(ctx context.Context) (pgx.Tx, error) {
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return &reviewPostFaultTx{
+			Tx:      tx,
+			execErr: errors.New("injected persistence outage"),
+			afterRollback: func() {
+				if _, err := pool.Exec(context.Background(), `UPDATE reviews SET attempt_generation=2 WHERE id=$1`, reviewID); err != nil {
+					t.Errorf("advancing generation after rollback: %v", err)
+				}
+			},
+		}, nil
+	}
+
+	var calls atomic.Int32
+	githubReviewID, outcome, err := st.PostReviewForAttempt(ctx, reviewID, 1, func(context.Context) (int64, error) {
+		calls.Add(1)
+		return 8642, nil
+	})
+	if githubReviewID != 8642 || outcome != ReviewPostAttempted || !errors.Is(err, ErrReviewPostPersistenceAmbiguous) {
+		t.Fatalf("unrepairable post = (%d,%q,%v), want positive id, attempted, persistence ambiguity", githubReviewID, outcome, err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("GitHub calls = %d, want exactly one", calls.Load())
+	}
+
+	if _, updateErr := pool.Exec(ctx, `UPDATE reviews SET status='failed',error=$2 WHERE id=$1`, reviewID, err.Error()); updateErr != nil {
+		t.Fatal(updateErr)
+	}
+	if generation, won, retryErr := st.BeginReviewRetry(ctx, reviewID); retryErr != nil || won || generation != 0 {
+		t.Fatalf("ambiguous retry = generation %d won %v err %v, want blocked", generation, won, retryErr)
 	}
 }
