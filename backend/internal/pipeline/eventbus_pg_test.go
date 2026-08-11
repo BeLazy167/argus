@@ -496,8 +496,12 @@ func TestDurableEventBusListenerReconnectCatchesDisconnectedInterval(t *testing.
 	cancelledID := insert(EventCancelled)
 	assertLive(cancelledID, EventCancelled)
 	select {
-	case evt := <-live:
-		t.Fatalf("duplicate after repeated connection churn: %+v", evt)
+	case evt, ok := <-live:
+		if ok {
+			t.Fatalf("duplicate after repeated connection churn: %+v", evt)
+		}
+		// Remote terminal delivery closes the local topic after the buffered
+		// terminal is observed, so the receiving machine can garbage-collect it.
 	default:
 	}
 }
