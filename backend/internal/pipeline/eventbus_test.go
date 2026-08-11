@@ -439,7 +439,8 @@ func TestDurableEventBusSubscriberCursorsAreIndependent(t *testing.T) {
 	second := make(chan Event, 4)
 	topic.mu.Lock()
 	topic.subscribers[1] = newTopicSubscriber(first, 10)
-	// Mirrors a later SubscribeContext replay that has already returned ID 20.
+	// Mirrors a later SubscribeContext with scalar after=20. That scalar does
+	// not prove ID 15 was visible when 20 committed.
 	topic.subscribers[2] = newTopicSubscriber(second, 20)
 	topic.mu.Unlock()
 
@@ -454,8 +455,11 @@ func TestDurableEventBusSubscriberCursorsAreIndependent(t *testing.T) {
 	}
 	select {
 	case evt := <-second:
-		t.Fatalf("replayed subscriber received duplicate: %+v", evt)
+		if evt.ID != 15 {
+			t.Fatalf("second subscriber event=%+v", evt)
+		}
 	default:
+		t.Fatal("scalar replay floor hid unseen lower-ID event")
 	}
 
 	// Ephemeral fallback events never participate in durable ordering and must
@@ -684,6 +688,40 @@ func TestDurableEventBusReplayFloorDoesNotHideLateFreshLowerID(t *testing.T) {
 	select {
 	case evt := <-live:
 		t.Fatalf("replayed ID was duplicated: %+v", evt)
+	default:
+	}
+}
+
+func TestDurableEventBusCatchUpFloorDoesNotHideUnseenLowerID(t *testing.T) {
+	eb := NewEventBus()
+	reviewID := uuid.New()
+	eb.OpenTopic(reviewID)
+	eb.mu.RLock()
+	topic := eb.topics[reviewID]
+	eb.mu.RUnlock()
+	live := make(chan Event, 2)
+	subscriber := newTopicSubscriber(live, 100)
+	subscriber.seedReplay([]Event{{ID: 100, Type: EventStageChanged}})
+	topic.mu.Lock()
+	topic.subscribers[1] = subscriber
+	topic.mu.Unlock()
+
+	// A scalar high-water is not proof that every lower sequence transaction
+	// committed before the replay snapshot. Catch-up suppresses exact IDs only.
+	eb.deliverFrom(reviewID, Event{ID: 51, Type: EventComment}, false, deliveryCatchUp)
+	select {
+	case evt := <-live:
+		if evt.ID != 51 {
+			t.Fatalf("catch-up event=%+v want late lower ID 51", evt)
+		}
+	default:
+		t.Fatal("catch-up floor hid unseen lower ID")
+	}
+
+	eb.deliverFrom(reviewID, Event{ID: 100, Type: EventStageChanged}, false, deliveryCatchUp)
+	select {
+	case evt := <-live:
+		t.Fatalf("exact replay duplicate delivered: %+v", evt)
 	default:
 	}
 }

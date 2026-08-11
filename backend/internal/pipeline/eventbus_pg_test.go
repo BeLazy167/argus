@@ -85,8 +85,8 @@ func TestDurableEventBusCrossMachineDeliveryAndReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer afterUnsub()
-	if len(after) != 0 {
-		t.Fatalf("cursor replay=%+v, want empty", after)
+	if len(after) != 1 || after[0].ID != liveEvent.ID {
+		t.Fatalf("bounded cursor replay=%+v, want exact seen overlap %d", after, liveEvent.ID)
 	}
 }
 
@@ -647,8 +647,8 @@ func TestDurableEventBusSubscribeBoundaryDeliversLateLowerFreshID(t *testing.T) 
 		t.Fatal(err)
 	}
 	defer unsubscribeAfter()
-	if len(afterHistory) != 0 {
-		t.Fatalf("after replay=%+v want empty", afterHistory)
+	if len(afterHistory) != 1 || afterHistory[0].ID != fastID {
+		t.Fatalf("bounded after replay=%+v want seen overlap %d", afterHistory, fastID)
 	}
 
 	if err := slow.Commit(ctx); err != nil {
@@ -668,5 +668,181 @@ func TestDurableEventBusSubscribeBoundaryDeliversLateLowerFreshID(t *testing.T) 
 			t.Fatalf("%s subscriber received replay overlap duplicate: %+v", name, evt)
 		default:
 		}
+	}
+}
+
+func TestDurableEventBusCombinedBrowserAndListenerGapReplaysLateLowerID(t *testing.T) {
+	pool, ctx, reviewID := durableEventTestReview(t)
+	config, err := pgxpool.ParseConfig(os.Getenv("TEST_DATABASE_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	applicationName := "eventbus-combined-gap-" + uuid.NewString()
+	config.ConnConfig.RuntimeParams["application_name"] = applicationName
+	config.MaxConns = 3
+	listenerPool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(listenerPool.Close)
+	listenerCtx, cancelListener := context.WithCancel(context.Background())
+	t.Cleanup(cancelListener)
+	bus := NewDurableEventBus(listenerCtx, listenerPool, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	listenerPID := func(previous int32) int32 {
+		t.Helper()
+		deadline := time.Now().Add(4 * time.Second)
+		for time.Now().Before(deadline) {
+			var pid int32
+			err := pool.QueryRow(ctx, `
+				SELECT pid FROM pg_stat_activity
+				WHERE application_name=$1 AND query='LISTEN argus_review_events'
+				  AND pid<>$2
+				ORDER BY backend_start DESC LIMIT 1`, applicationName, previous).Scan(&pid)
+			if err == nil {
+				return pid
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("listener %q did not connect", applicationName)
+		return 0
+	}
+
+	// Allocate the lower ID without committing it. A second transaction can
+	// commit and reach the browser first because BIGSERIAL allocation is not
+	// commit ordered.
+	slow, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = slow.Rollback(ctx) }()
+	var slowID int64
+	var notified string
+	if err := slow.QueryRow(ctx, `
+		WITH inserted AS (
+			INSERT INTO review_events (review_id, attempt_generation, event_type, data)
+			VALUES ($1,0,$2,'{}') RETURNING id
+		)
+		SELECT id, pg_notify('argus_review_events','remote:' || id::text)
+		FROM inserted`, reviewID, EventComment).Scan(&slowID, &notified); err != nil {
+		t.Fatal(err)
+	}
+
+	var fastID int64
+	if err := pool.QueryRow(ctx, `
+		WITH inserted AS (
+			INSERT INTO review_events (review_id, attempt_generation, event_type, data)
+			VALUES ($1,0,$2,'{}') RETURNING id
+		)
+		SELECT id, pg_notify('argus_review_events','remote:' || id::text)
+		FROM inserted`, reviewID, EventStageChanged).Scan(&fastID, &notified); err != nil {
+		t.Fatal(err)
+	}
+	if slowID >= fastID {
+		t.Fatalf("test setup IDs slow=%d fast=%d", slowID, fastID)
+	}
+
+	live, history, unsubscribe, err := bus.SubscribeContext(ctx, reviewID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 1 || history[0].ID != fastID {
+		unsubscribe()
+		t.Fatalf("initial replay=%+v want fast ID %d", history, fastID)
+	}
+	unsubscribe()
+	for range live {
+	}
+
+	// The lower row commits while both delivery paths are absent: there is no
+	// browser subscriber and the PostgreSQL LISTEN connection is terminated.
+	firstPID := listenerPID(0)
+	var terminated bool
+	if err := pool.QueryRow(ctx, `SELECT pg_terminate_backend($1)`, firstPID).Scan(&terminated); err != nil {
+		t.Fatal(err)
+	}
+	if !terminated {
+		t.Fatalf("listener pid %d was not terminated", firstPID)
+	}
+	if err := slow.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Let the listener reconnect with no active browser. Its scalar global
+	// catch-up cursor is now past slowID, reproducing the combined-gap loss.
+	_ = listenerPID(firstPID)
+
+	_, replay, replayUnsubscribe, err := bus.SubscribeContext(ctx, reviewID, fastID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer replayUnsubscribe()
+	if len(replay) != 2 || replay[0].ID != slowID || replay[1].ID != fastID {
+		t.Fatalf("bounded reconnect replay=%+v want late lower ID %d and seen ID %d", replay, slowID, fastID)
+	}
+}
+
+func TestDurableEventBusCatchUpOverlapsTailBelowScalarCursor(t *testing.T) {
+	pool, ctx, reviewID := durableEventTestReview(t)
+	bus := NewEventBus()
+	bus.pool = pool
+	bus.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	bus.OpenTopic(reviewID)
+
+	slow, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = slow.Rollback(ctx) }()
+	var slowID int64
+	if err := slow.QueryRow(ctx, `
+		INSERT INTO review_events (review_id, attempt_generation, event_type, data)
+		VALUES ($1,0,$2,'{}') RETURNING id`, reviewID, EventComment).Scan(&slowID); err != nil {
+		t.Fatal(err)
+	}
+	var fastID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO review_events (review_id, attempt_generation, event_type, data)
+		VALUES ($1,0,$2,'{}') RETURNING id`, reviewID, EventStageChanged).Scan(&fastID); err != nil {
+		t.Fatal(err)
+	}
+	if slowID >= fastID {
+		t.Fatalf("test setup IDs slow=%d fast=%d", slowID, fastID)
+	}
+
+	bus.mu.RLock()
+	topic := bus.topics[reviewID]
+	bus.mu.RUnlock()
+	live := make(chan Event, 4)
+	subscriber := newTopicSubscriber(live, fastID)
+	subscriber.seedReplay([]Event{{ID: fastID, Type: EventStageChanged}})
+	topic.mu.Lock()
+	topic.subscribers[1] = subscriber
+	topic.mu.Unlock()
+
+	// The lower ID commits while LISTEN is disconnected but the browser remains
+	// subscribed. A scalar catch-up after fastID must overlap the durable tail.
+	if err := slow.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	cursor, err := bus.catchUpStored(ctx, fastID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cursor != fastID {
+		t.Fatalf("cursor=%d want unchanged high-water %d", cursor, fastID)
+	}
+	select {
+	case evt := <-live:
+		if evt.ID != slowID || evt.Type != EventComment {
+			t.Fatalf("tail overlap event=%+v want id=%d type=%s", evt, slowID, EventComment)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("catch-up skipped late lower ID %d below cursor %d", slowID, fastID)
+	}
+	select {
+	case evt := <-live:
+		t.Fatalf("tail overlap duplicated seen event: %+v", evt)
+	default:
 	}
 }

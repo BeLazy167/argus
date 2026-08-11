@@ -171,12 +171,9 @@ func (s *topicSubscriber) seedReplay(events []Event) {
 }
 
 func (s *topicSubscriber) hasSeen(id int64, source durableDeliverySource) bool {
-	// after=N means the replay query need not return the established durable
-	// prefix again. It cannot suppress fresh NOTIFY: a lower sequence ID may
-	// have committed only after the replay snapshot was taken.
-	if source == deliveryCatchUp && id <= s.replayAfterID {
-		return true
-	}
+	// A scalar after=N is not proof that every lower sequence transaction was
+	// visible: BIGSERIAL allocates before commit. Suppress only exact durable IDs
+	// observed in replay, catch-up, or fresh delivery.
 	if _, duplicate := s.catchUpSeen[id]; duplicate {
 		// A fresh notification overlapping catch-up is the last expected copy.
 		// Remove it so disconnected-only events, which have no copy, remain
@@ -707,22 +704,52 @@ func (eb *EventBus) activeSubscriptionCursorFloor() (int64, bool) {
 	return floor, found
 }
 
+// replayStoredTails overlaps the bounded durable window for each active
+// review. Querying one review at a time keeps every result set at 500 rows even
+// when one machine serves many live reviews.
+func (eb *EventBus) replayStoredTails(ctx context.Context, reviewIDs []uuid.UUID, upper int64) error {
+	for _, reviewID := range reviewIDs {
+		rows, err := eb.pool.Query(ctx, `
+			SELECT id, attempt_generation, event_type, created_at, data FROM (
+				SELECT id, attempt_generation, event_type, created_at, data
+				FROM (`+authorizedReviewEventsSQL+`) authorized
+				WHERE review_id=$1 AND id<=$2
+				ORDER BY id DESC LIMIT $3
+			) tail ORDER BY id`, reviewID, upper, maxHistoryEvents)
+		if err != nil {
+			return fmt.Errorf("querying review event tail for %s: %w", reviewID, err)
+		}
+		for rows.Next() {
+			var evt Event
+			if err := rows.Scan(&evt.ID, &evt.AttemptGeneration, &evt.Type, &evt.Timestamp, &evt.Data); err != nil {
+				rows.Close()
+				return fmt.Errorf("scanning review event tail for %s: %w", reviewID, err)
+			}
+			eb.deliverFrom(reviewID, evt, false, deliveryCatchUp)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return fmt.Errorf("reading review event tail for %s: %w", reviewID, err)
+		}
+		rows.Close()
+	}
+	return nil
+}
+
 // catchUpStored fills one lost-NOTIFY interval for currently subscribed
-// reviews. Each query and result set is bounded; cursor is returned after every
-// successfully consumed page so a later reconnect resumes rather than rescans.
+// reviews. It first overlaps each review's retained tail because a scalar
+// sequence high-water cannot describe a transaction that allocated a lower ID
+// and committed late. Tail queries and forward pages are independently bounded;
+// cursor is returned after every successfully consumed forward page.
 func (eb *EventBus) catchUpStored(ctx context.Context, afterID int64) (int64, error) {
 	upper, err := eb.reviewEventHighWater(ctx)
 	if err != nil {
 		return afterID, err
 	}
-	if upper <= afterID {
-		return afterID, nil
-	}
 	reviewIDs := eb.activeReviewIDs()
 	if len(reviewIDs) == 0 {
 		return upper, nil
 	}
-
 	cursor := afterID
 	for cursor < upper {
 		rows, queryErr := eb.pool.Query(ctx, `
@@ -753,8 +780,17 @@ func (eb *EventBus) catchUpStored(ctx context.Context, afterID int64) (int64, er
 		}
 		rows.Close()
 		if count < eventCatchUpBatchSize {
-			return upper, nil
+			cursor = upper
+			break
 		}
+	}
+	// Forward pages run first to preserve their ascending delivery order. The
+	// overlap then contributes only exact unseen IDs at or below the cursor.
+	if err := eb.replayStoredTails(ctx, reviewIDs, upper); err != nil {
+		return cursor, err
+	}
+	if upper < afterID {
+		return afterID, nil
 	}
 	return upper, nil
 }
@@ -836,8 +872,12 @@ func maxDurableEventID(afterID int64, events []Event) int64 {
 	return maximum
 }
 
-// SubscribeContext replays durable events newer than afterID and then streams
-// live notifications without a replay/subscribe gap.
+// SubscribeContext replays the bounded durable tail and then streams live
+// notifications without a replay/subscribe gap. afterID is a subscriber dedup
+// floor, not a SQL cutoff: sequence IDs are allocated before commit, so a row
+// below afterID may have committed while both the browser and LISTEN were away.
+// Replaying at most the retained 500-row tail lets the browser's bounded seen-ID
+// set distinguish that late row from exact duplicates.
 func (eb *EventBus) SubscribeContext(ctx context.Context, reviewID uuid.UUID, afterID int64) (<-chan Event, []Event, func(), error) {
 	if eb.pool == nil {
 		ch, history, unsub := eb.Subscribe(reviewID)
@@ -854,9 +894,9 @@ func (eb *EventBus) SubscribeContext(ctx context.Context, reviewID uuid.UUID, af
 		SELECT id, attempt_generation, event_type, created_at, data FROM (
 			SELECT id, attempt_generation, event_type, created_at, data
 			FROM (`+authorizedReviewEventsSQL+`) authorized
-			WHERE review_id=$1 AND id>$2
-			ORDER BY id DESC LIMIT $3
-		) replay ORDER BY id`, reviewID, afterID, maxHistoryEvents)
+			WHERE review_id=$1
+			ORDER BY id DESC LIMIT $2
+		) replay ORDER BY id`, reviewID, maxHistoryEvents)
 	if err != nil {
 		return nil, nil, func() {}, fmt.Errorf("querying event replay: %w", err)
 	}
