@@ -65,7 +65,7 @@ func apiSeedNode(t *testing.T, ctx context.Context, pool *pgxpool.Pool, repoID i
 // missing predicate produce a cross-tenant edge rather than an empty result.
 func TestListAPIEndpointsForInstallationOf_TenantBoundary(t *testing.T) {
 	pool, ctx := apiEndpointTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 
 	installA := seedInstallation(t, ctx, pool, "{}")
 	apiRepo := apiSeedRepo(t, ctx, pool, installA, "acme/api")
@@ -117,7 +117,7 @@ func TestListAPIEndpointsForInstallationOf_TenantBoundary(t *testing.T) {
 // whole installation's edge set.
 func TestReplaceAPIEndpointsForFiles_RemovesStaleRows(t *testing.T) {
 	pool, ctx := apiEndpointTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 
 	install := seedInstallation(t, ctx, pool, "{}")
 	repo := apiSeedRepo(t, ctx, pool, install, "acme/api")
@@ -165,7 +165,7 @@ func TestReplaceAPIEndpointsForFiles_RemovesStaleRows(t *testing.T) {
 // does not call.
 func TestReplaceInferredAPIEdges_DropsEdgesNoLongerDerived(t *testing.T) {
 	pool, ctx := apiEndpointTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 
 	install := seedInstallation(t, ctx, pool, "{}")
 	apiRepo := apiSeedRepo(t, ctx, pool, install, "acme/api")
@@ -205,7 +205,7 @@ func TestReplaceInferredAPIEdges_DropsEdgesNoLongerDerived(t *testing.T) {
 // every repo in the installation with it.
 func TestReplaceInferredAPIEdges_LeavesParsedEdgesAlone(t *testing.T) {
 	pool, ctx := apiEndpointTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 
 	install := seedInstallation(t, ctx, pool, "{}")
 	webRepo := apiSeedRepo(t, ctx, pool, install, "acme/web")
@@ -239,7 +239,7 @@ func TestReplaceInferredAPIEdges_LeavesParsedEdgesAlone(t *testing.T) {
 // is the half that destroys data rather than merely leaking it.
 func TestReplaceInferredAPIEdges_StopsAtTheInstallationBoundary(t *testing.T) {
 	pool, ctx := apiEndpointTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 
 	// Two installations, each with a derived cross-repo edge of its own.
 	seed := func(name string) (repo int64, src int64, dst int64) {
@@ -288,7 +288,7 @@ func TestReplaceInferredAPIEdges_StopsAtTheInstallationBoundary(t *testing.T) {
 // `(repo_id = $1 OR true)` now fails with `getRepo = <foreign id>`.
 func TestLookupCodeNodeIDsByName(t *testing.T) {
 	pool, ctx := apiEndpointTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 
 	install := seedInstallation(t, ctx, pool, "{}")
 	repo := apiSeedRepo(t, ctx, pool, install, "acme/api")
@@ -317,7 +317,7 @@ func TestLookupCodeNodeIDsByName(t *testing.T) {
 // being added.
 func TestInferredEdgeProvenance(t *testing.T) {
 	pool, ctx := apiEndpointTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 
 	install := seedInstallation(t, ctx, pool, "{}")
 	apiRepo := apiSeedRepo(t, ctx, pool, install, "acme/api")
@@ -373,7 +373,7 @@ func TestInferredEdgeProvenance(t *testing.T) {
 // predicate does it for all of them.
 func TestRepoScopedQueriesIgnoreInferredEdges(t *testing.T) {
 	pool, ctx := apiEndpointTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 
 	install := seedInstallation(t, ctx, pool, "{}")
 	apiRepo := apiSeedRepo(t, ctx, pool, install, "acme/api")
@@ -411,7 +411,7 @@ func TestRepoScopedQueriesIgnoreInferredEdges(t *testing.T) {
 		t.Fatalf("inferred edge produced a choke point in another repo's file: %+v", choke)
 	}
 
-	fanIn, err := st.Q.GetFileFanIn(ctx, db.GetFileFanInParams{RepoID: webRepo, FilePath: "backend/handlers.go"})
+	fanIn, err := st.q.GetFileFanIn(ctx, db.GetFileFanInParams{RepoID: webRepo, FilePath: "backend/handlers.go"})
 	if err != nil {
 		t.Fatalf("file fan-in: %v", err)
 	}
@@ -426,7 +426,7 @@ func TestRepoScopedQueriesIgnoreInferredEdges(t *testing.T) {
 // review context as though a parser had found it.
 func TestCrossRepoInferredEdgeStaysOutOfBlastRadius(t *testing.T) {
 	pool, ctx := apiEndpointTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 
 	install := seedInstallation(t, ctx, pool, "{}")
 	apiRepo := apiSeedRepo(t, ctx, pool, install, "acme/api")

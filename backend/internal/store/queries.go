@@ -1438,7 +1438,7 @@ func (s *Store) RecordCommentOutcome(ctx context.Context, reviewCommentID uuid.U
 // reconciliation" instead of "never attempted" — otherwise the reconciler treats
 // every freshly-created scenario as drift forever.
 func (s *Store) SetScenarioMemoryDocID(ctx context.Context, id int64, memoryDocID string) error {
-	return s.Q.UpdateScenarioMemoryDocID(ctx, db.UpdateScenarioMemoryDocIDParams{
+	return s.q.UpdateScenarioMemoryDocID(ctx, db.UpdateScenarioMemoryDocIDParams{
 		MemoryDocID: &memoryDocID,
 		ID:          id,
 	})
@@ -1588,7 +1588,41 @@ func nilIfEmpty(s string) *string {
 
 // --- Consumer-facing sqlc pass-throughs (issue #137) ---
 //
-// These thin wrappers absorb the direct *db.Queries (`.Q`) accesses that used
+
+// Cross-PR generated-query wrappers keep sqlc behind the Store boundary.
+func (s *Store) GetLatestRunForReview(ctx context.Context, reviewID uuid.UUID) (uuid.UUID, error) {
+	return s.q.GetLatestRunForReview(ctx, reviewID)
+}
+
+func (s *Store) FindReviewsLinkingToPR(ctx context.Context, arg db.FindReviewsLinkingToPRParams) ([]db.FindReviewsLinkingToPRRow, error) {
+	return s.q.FindReviewsLinkingToPR(ctx, arg)
+}
+
+func (s *Store) SetReviewLinkedPRRefs(ctx context.Context, arg db.SetReviewLinkedPRRefsParams) error {
+	return s.q.SetReviewLinkedPRRefs(ctx, arg)
+}
+
+func (s *Store) SetReviewLinkedIssueRefs(ctx context.Context, arg db.SetReviewLinkedIssueRefsParams) error {
+	return s.q.SetReviewLinkedIssueRefs(ctx, arg)
+}
+
+func (s *Store) UpdateReviewCrossPRHash(ctx context.Context, arg db.UpdateReviewCrossPRHashParams) error {
+	return s.q.UpdateReviewCrossPRHash(ctx, arg)
+}
+
+func (s *Store) GetLatestCompletedReviewByPR(ctx context.Context, arg db.GetLatestCompletedReviewByPRParams) (db.GetLatestCompletedReviewByPRRow, error) {
+	return s.q.GetLatestCompletedReviewByPR(ctx, arg)
+}
+
+func (s *Store) FindSharedLinkedIssues(ctx context.Context, reviewID uuid.UUID) ([]db.FindSharedLinkedIssuesRow, error) {
+	return s.q.FindSharedLinkedIssues(ctx, reviewID)
+}
+
+func (s *Store) MergeStageTokenEntry(ctx context.Context, arg db.MergeStageTokenEntryParams) (int64, error) {
+	return s.q.MergeStageTokenEntry(ctx, arg)
+}
+
+// These thin wrappers keep generated query types behind Store methods used
 // to leak out of the store package into orchestrator stages and API handlers.
 // Routing them through *store.Store keeps callers (and the consumer-declared
 // narrow interfaces over the store) off the generated query layer. Pure
@@ -1599,7 +1633,7 @@ func nilIfEmpty(s string) *string {
 // installation. Callers parse it (pipeline.loadFeatureFlags, the features
 // handler); an empty or "{}" payload means "all defaults".
 func (s *Store) GetInstallationFeatureFlags(ctx context.Context, installationID int64) (json.RawMessage, error) {
-	return s.Q.GetInstallationFeatureFlags(ctx, installationID)
+	return s.q.GetInstallationFeatureFlags(ctx, installationID)
 }
 
 // MergeInstallationFeatureFlags merges the given keys into the feature_flags
@@ -1608,7 +1642,7 @@ func (s *Store) GetInstallationFeatureFlags(ctx context.Context, installationID 
 // keys while operators set others by direct UPDATE, and a
 // lost update between those two writers reverts a backend flip silently.
 func (s *Store) MergeInstallationFeatureFlags(ctx context.Context, installationID int64, patch json.RawMessage) error {
-	return s.Q.MergeInstallationFeatureFlags(ctx, db.MergeInstallationFeatureFlagsParams{
+	return s.q.MergeInstallationFeatureFlags(ctx, db.MergeInstallationFeatureFlagsParams{
 		ID:    installationID,
 		Patch: patch,
 	})
@@ -1618,40 +1652,40 @@ func (s *Store) MergeInstallationFeatureFlags(ctx context.Context, installationI
 // (pre dedup/scoring) recorded for a review's latest run, as raw JSONB. The
 // export path uses it to surface dropped findings.
 func (s *Store) GetAllFileReviewsForReview(ctx context.Context, reviewID uuid.UUID) (json.RawMessage, error) {
-	return s.Q.GetAllFileReviewsForReview(ctx, reviewID)
+	return s.q.GetAllFileReviewsForReview(ctx, reviewID)
 }
 
 // GetTopChokePoints returns the highest fan-in files for a repo (up to limit) —
 // the architecture-summary input.
 func (s *Store) GetTopChokePoints(ctx context.Context, repoID int64, limit int32) ([]db.GetTopChokePointsRow, error) {
-	return s.Q.GetTopChokePoints(ctx, db.GetTopChokePointsParams{RepoID: repoID, Limit: limit})
+	return s.q.GetTopChokePoints(ctx, db.GetTopChokePointsParams{RepoID: repoID, Limit: limit})
 }
 
 // ListArchNodes returns the per-symbol architecture rows (file, name, language,
 // line span) for a repo.
 func (s *Store) ListArchNodes(ctx context.Context, repoID int64) ([]db.ListArchNodesRow, error) {
-	return s.Q.ListArchNodes(ctx, repoID)
+	return s.q.ListArchNodes(ctx, repoID)
 }
 
 // ListArchFileEdges returns the file→file dependency edges for a repo.
 func (s *Store) ListArchFileEdges(ctx context.Context, repoID int64) ([]db.ListArchFileEdgesRow, error) {
-	return s.Q.ListArchFileEdges(ctx, repoID)
+	return s.q.ListArchFileEdges(ctx, repoID)
 }
 
 // ListArchBugDensity returns per-file bug counts and PR-change frequency for a repo.
 func (s *Store) ListArchBugDensity(ctx context.Context, repoID int64) ([]db.ListArchBugDensityRow, error) {
-	return s.Q.ListArchBugDensity(ctx, repoID)
+	return s.q.ListArchBugDensity(ctx, repoID)
 }
 
 // ListArchCoupling returns per-PR file sets used to derive temporal coupling.
 func (s *Store) ListArchCoupling(ctx context.Context, repoID int64) ([]db.ListArchCouplingRow, error) {
-	return s.Q.ListArchCoupling(ctx, repoID)
+	return s.q.ListArchCoupling(ctx, repoID)
 }
 
 // ListGraphNodes returns the code-graph nodes for the repo UI, normalizing a nil
 // result to an empty slice so the JSON response is [] rather than null.
 func (s *Store) ListGraphNodes(ctx context.Context, repoID int64) ([]db.ListGraphNodesRow, error) {
-	rows, err := s.Q.ListGraphNodes(ctx, repoID)
+	rows, err := s.q.ListGraphNodes(ctx, repoID)
 	if rows == nil {
 		rows = []db.ListGraphNodesRow{}
 	}
@@ -1661,7 +1695,7 @@ func (s *Store) ListGraphNodes(ctx context.Context, repoID int64) ([]db.ListGrap
 // ListGraphEdges returns the code-graph edges for the repo UI, normalizing a nil
 // result to an empty slice so the JSON response is [] rather than null.
 func (s *Store) ListGraphEdges(ctx context.Context, repoID int64) ([]db.ListGraphEdgesRow, error) {
-	rows, err := s.Q.ListGraphEdges(ctx, repoID)
+	rows, err := s.q.ListGraphEdges(ctx, repoID)
 	if rows == nil {
 		rows = []db.ListGraphEdgesRow{}
 	}

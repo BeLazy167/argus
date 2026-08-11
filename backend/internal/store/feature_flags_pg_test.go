@@ -73,7 +73,7 @@ func readFlags(t *testing.T, ctx context.Context, pool *pgxpool.Pool, id int64) 
 // every operator-set flag.
 func TestMergeInstallationFeatureFlagsPreservesForeignKeys(t *testing.T) {
 	pool, ctx := mergeTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 	id := seedInstallation(t, ctx, pool,
 		`{"operator_only_flag":"set","cross_pr_checks":false,"some_future_flag":{"nested":1}}`)
 
@@ -101,7 +101,7 @@ func TestMergeInstallationFeatureFlagsPreservesForeignKeys(t *testing.T) {
 // zero value, or the toggles become one-way — settable but never clearable.
 func TestMergeInstallationFeatureFlagsWritesFalse(t *testing.T) {
 	pool, ctx := mergeTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 	id := seedInstallation(t, ctx, pool, `{"issue_acceptance":true,"cross_pr_checks":true,"operator_only_flag":"set"}`)
 
 	patch := json.RawMessage(`{"issue_acceptance":false,"cross_pr_checks":false,"max_linked_prs":5}`)
@@ -127,7 +127,7 @@ func TestMergeInstallationFeatureFlagsWritesFalse(t *testing.T) {
 // both survive: the operator's key is present, and the last toggle write took.
 func TestMergeInstallationFeatureFlagsIsAtomic(t *testing.T) {
 	pool, ctx := mergeTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 	id := seedInstallation(t, ctx, pool, `{}`)
 
 	const n = 20
@@ -166,7 +166,7 @@ func TestMergeInstallationFeatureFlagsIsAtomic(t *testing.T) {
 // would resolve one tenant's search hit to whichever row Postgres returned.
 func TestPatternIDLookupsExcludeOtherTenants(t *testing.T) {
 	pool, ctx := mergeTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 
 	a := seedInstallation(t, ctx, pool, `{}`)
 	b := seedInstallation(t, ctx, pool, `{}`)

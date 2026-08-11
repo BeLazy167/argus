@@ -100,7 +100,7 @@ func insertLearnedMemory(t *testing.T, ctx context.Context, pool *pgxpool.Pool,
 // not secret: it appears in dashboard URLs and in every posted PR comment.
 func TestReviewMemoryReadsAreTenantScoped(t *testing.T) {
 	pool, ctx := fileMemoryTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 
 	mine, reviewA, _ := seedLearnTenant(t, ctx, pool, "learn-mine")
 	theirs, _, _ := seedLearnTenant(t, ctx, pool, "learn-theirs")
@@ -148,7 +148,7 @@ func TestReviewMemoryReadsAreTenantScoped(t *testing.T) {
 // review's write without being overwritten by a later review.
 func TestReviewMemoryTimeIsTheWriteTime(t *testing.T) {
 	pool, ctx := fileMemoryTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 
 	install, reviewA, _ := seedLearnTenant(t, ctx, pool, "learn-time")
 
@@ -183,7 +183,7 @@ func TestReviewMemoryTimeIsTheWriteTime(t *testing.T) {
 // while the PR comment about the same review still says "2 PR summaries".
 func TestReviewMemoryReadsCarryTheDisplayLabel(t *testing.T) {
 	pool, ctx := fileMemoryTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 
 	install, reviewA, _ := seedLearnTenant(t, ctx, pool, "learn-label")
 
@@ -224,7 +224,7 @@ func TestReviewMemoryReadsCarryTheDisplayLabel(t *testing.T) {
 // soft-deleted rows, and excerpt truncation.
 func TestReviewMemoryReadsSelectTheRightRows(t *testing.T) {
 	pool, ctx := fileMemoryTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 
 	install, reviewA, reviewB := seedLearnTenant(t, ctx, pool, "learn-rows")
 

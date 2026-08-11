@@ -62,7 +62,7 @@ func (s *Store) ActivateScenario(ctx context.Context, id int64) error {
 // Briefly: scenarios with zero recent runs are guaranteed the top slots; after they accumulate
 // data the score rewards scenarios whose runs surface real findings (verdict ∈ broken|partial).
 func (s *Store) ListScenariosForFiles(ctx context.Context, repoID int64, filePaths []string) ([]Scenario, error) {
-	rows, err := s.Q.ListScenariosForFiles(ctx, db.ListScenariosForFilesParams{
+	rows, err := s.q.ListScenariosForFiles(ctx, db.ListScenariosForFilesParams{
 		RepoID:  &repoID,
 		Column2: filePaths,
 	})
@@ -78,7 +78,7 @@ func (s *Store) ListScenariosForFiles(ctx context.Context, repoID int64, filePat
 
 // ListScenariosForRepo returns all scenarios for a repo (active + pending).
 func (s *Store) ListScenariosForRepo(ctx context.Context, repoID int64, limit int) ([]Scenario, error) {
-	rows, err := s.Q.ListScenariosForRepo(ctx, db.ListScenariosForRepoParams{
+	rows, err := s.q.ListScenariosForRepo(ctx, db.ListScenariosForRepoParams{
 		RepoID: &repoID,
 		Limit:  int32(limit),
 	})
@@ -175,7 +175,7 @@ func (s *Store) MarkScenarioOutdated(ctx context.Context, repoID int64, filePath
 // UpdateScenarioLastRun writes the denormalized last-run summary onto the scenario row and
 // clears the outdated flag. Called once per scenario per review, alongside CreateScenarioRun.
 func (s *Store) UpdateScenarioLastRun(ctx context.Context, id int64, verdict string, confidence float64, why, fix string, prNumber int, reviewID uuid.UUID) error {
-	if err := s.Q.UpdateScenarioLastRun(ctx, db.UpdateScenarioLastRunParams{
+	if err := s.q.UpdateScenarioLastRun(ctx, db.UpdateScenarioLastRunParams{
 		ID:             id,
 		LastVerdict:    strPtr(verdict),
 		LastConfidence: numericFromFloat(confidence),
@@ -192,7 +192,7 @@ func (s *Store) UpdateScenarioLastRun(ctx context.Context, id int64, verdict str
 // IncrementScenarioTriggerCount bumps the trigger counter. Safe to call after any sim outcome
 // (both "broken" and "fixed" count as triggers — the scenario was exercised).
 func (s *Store) IncrementScenarioTriggerCount(ctx context.Context, id int64) error {
-	if err := s.Q.IncrementScenarioTriggerCount(ctx, id); err != nil {
+	if err := s.q.IncrementScenarioTriggerCount(ctx, id); err != nil {
 		return fmt.Errorf("increment scenario trigger count: %w", err)
 	}
 	return nil
@@ -227,7 +227,7 @@ func UCBScore(wins, n, total float64) float64 {
 // CreateScenarioRun persists one simulation outcome. Idempotent on (scenario_id, review_id) —
 // re-running simulation for the same review overwrites the previous verdict.
 func (s *Store) CreateScenarioRun(ctx context.Context, scenarioID int64, reviewID uuid.UUID, prNumber int, verdict string, confidence float64, why, fix, rootCause, impact string) (ScenarioRun, error) {
-	row, err := s.Q.CreateScenarioRun(ctx, db.CreateScenarioRunParams{
+	row, err := s.q.CreateScenarioRun(ctx, db.CreateScenarioRunParams{
 		ScenarioID: scenarioID,
 		ReviewID:   reviewID,
 		PRNumber:   prNumber,
@@ -246,7 +246,7 @@ func (s *Store) CreateScenarioRun(ctx context.Context, scenarioID int64, reviewI
 
 // GetScenarioRuns returns the last N simulation outcomes for a scenario, newest first.
 func (s *Store) GetScenarioRuns(ctx context.Context, scenarioID int64, limit int) ([]ScenarioRun, error) {
-	rows, err := s.Q.GetScenarioRuns(ctx, db.GetScenarioRunsParams{
+	rows, err := s.q.GetScenarioRuns(ctx, db.GetScenarioRunsParams{
 		ScenarioID: scenarioID,
 		Limit:      int32(limit),
 	})
@@ -262,7 +262,7 @@ func (s *Store) GetScenarioRuns(ctx context.Context, scenarioID int64, limit int
 
 // GetScenarioKPIs returns the 4 summary counts that power the dashboard KPI cards.
 func (s *Store) GetScenarioKPIs(ctx context.Context, repoID int64) (ScenarioKPIs, error) {
-	row, err := s.Q.GetScenarioKPIs(ctx, &repoID)
+	row, err := s.q.GetScenarioKPIs(ctx, &repoID)
 	if err != nil {
 		return ScenarioKPIs{}, fmt.Errorf("get scenario kpis: %w", err)
 	}

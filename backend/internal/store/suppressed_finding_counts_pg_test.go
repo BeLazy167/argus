@@ -102,7 +102,7 @@ func insertCountSeeds(t *testing.T, ctx context.Context, pool *pgxpool.Pool, rev
 // WHERE clause, which drops all-suppressed files from the result entirely.
 func TestArchBugDensityExcludesSuppressedFindings(t *testing.T) {
 	pool, ctx := fileMemoryTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 
 	const filePath = "internal/pipeline/orchestrator.go"
 
@@ -201,7 +201,7 @@ func TestArchBugDensityExcludesSuppressedFindings(t *testing.T) {
 				t.Errorf("change frequency: got %d PRs, want %d — a PR whose findings were all suppressed still changed this file", got.Prs, tc.wantPRs)
 			}
 
-			fileBugs, err := st.Q.GetFileBugCount(ctx, db.GetFileBugCountParams{RepoID: repoID, FilePath: filePath})
+			fileBugs, err := st.q.GetFileBugCount(ctx, db.GetFileBugCountParams{RepoID: repoID, FilePath: filePath})
 			if err != nil {
 				t.Fatalf("GetFileBugCount: %v", err)
 			}
@@ -220,7 +220,7 @@ func TestArchBugDensityExcludesSuppressedFindings(t *testing.T) {
 // this issue follows up on was a correct fix applied to one of a pair.
 func TestStatsCountsExcludeSuppressedFindings(t *testing.T) {
 	pool, ctx := fileMemoryTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 	q := db.New(pool)
 
 	const author = "suppression-count-author"

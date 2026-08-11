@@ -91,7 +91,7 @@ type crossPRHooks struct {
 
 // --- Default adapters over concrete production types ---
 
-// defaultCrossPRStore wraps *store.Store and *store.Store.Q into the
+// defaultCrossPRStore wraps *store.Store into the
 // crossPRStore interface. Pure delegation — no business logic here.
 type defaultCrossPRStore struct{ st *store.Store }
 
@@ -105,31 +105,31 @@ func (d defaultCrossPRStore) GetRepoByFullName(ctx context.Context, fullName str
 	return d.st.GetRepoByFullName(ctx, fullName)
 }
 func (d defaultCrossPRStore) GetLatestRunForReview(ctx context.Context, reviewID uuid.UUID) (uuid.UUID, error) {
-	return d.st.Q.GetLatestRunForReview(ctx, reviewID)
+	return d.st.GetLatestRunForReview(ctx, reviewID)
 }
 func (d defaultCrossPRStore) FindReviewsLinkingToPR(ctx context.Context, arg db.FindReviewsLinkingToPRParams) ([]db.FindReviewsLinkingToPRRow, error) {
-	return d.st.Q.FindReviewsLinkingToPR(ctx, arg)
+	return d.st.FindReviewsLinkingToPR(ctx, arg)
 }
 func (d defaultCrossPRStore) SetReviewLinkedPRRefs(ctx context.Context, arg db.SetReviewLinkedPRRefsParams) error {
-	return d.st.Q.SetReviewLinkedPRRefs(ctx, arg)
+	return d.st.SetReviewLinkedPRRefs(ctx, arg)
 }
 func (d defaultCrossPRStore) SetReviewLinkedIssueRefs(ctx context.Context, arg db.SetReviewLinkedIssueRefsParams) error {
-	return d.st.Q.SetReviewLinkedIssueRefs(ctx, arg)
+	return d.st.SetReviewLinkedIssueRefs(ctx, arg)
 }
 func (d defaultCrossPRStore) UpdateReviewCrossPRHash(ctx context.Context, arg db.UpdateReviewCrossPRHashParams) error {
-	return d.st.Q.UpdateReviewCrossPRHash(ctx, arg)
+	return d.st.UpdateReviewCrossPRHash(ctx, arg)
 }
 func (d defaultCrossPRStore) GetLatestCompletedReviewByPR(ctx context.Context, arg db.GetLatestCompletedReviewByPRParams) (db.GetLatestCompletedReviewByPRRow, error) {
-	return d.st.Q.GetLatestCompletedReviewByPR(ctx, arg)
+	return d.st.GetLatestCompletedReviewByPR(ctx, arg)
 }
 func (d defaultCrossPRStore) FindSharedLinkedIssues(ctx context.Context, reviewID uuid.UUID) ([]db.FindSharedLinkedIssuesRow, error) {
-	return d.st.Q.FindSharedLinkedIssues(ctx, reviewID)
+	return d.st.FindSharedLinkedIssues(ctx, reviewID)
 }
 func (d defaultCrossPRStore) GetAllFileReviewsForReview(ctx context.Context, reviewID uuid.UUID) (json.RawMessage, error) {
 	return d.st.GetAllFileReviewsForReview(ctx, reviewID)
 }
 func (d defaultCrossPRStore) MergeStageTokenEntry(ctx context.Context, arg db.MergeStageTokenEntryParams) (int64, error) {
-	return d.st.Q.MergeStageTokenEntry(ctx, arg)
+	return d.st.MergeStageTokenEntry(ctx, arg)
 }
 func (d defaultCrossPRStore) LoadFeatureFlags(ctx context.Context, installationDBID int64) FeatureFlags {
 	return loadFeatureFlags(ctx, featureFlagReaderFor(d.st), installationDBID)

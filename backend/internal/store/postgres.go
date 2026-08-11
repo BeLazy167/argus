@@ -16,7 +16,6 @@ import (
 // Store wraps a PostgreSQL connection pool and sqlc-generated queries.
 type Store struct {
 	Pool *pgxpool.Pool
-	Q    *db.Queries
 	q    *db.Queries
 }
 
@@ -54,7 +53,7 @@ func New(ctx context.Context, databaseURL string) (*Store, error) {
 		pool.Close()
 		return nil, fmt.Errorf("pinging database: %w", err)
 	}
-	st := &Store{Pool: pool, Q: db.New(pool), q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 	go st.keepAlive()
 	return st, nil
 }

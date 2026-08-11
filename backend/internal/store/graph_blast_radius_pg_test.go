@@ -104,7 +104,7 @@ func seedEdge(t *testing.T, ctx context.Context, pool *pgxpool.Pool, repoID, dep
 // repo_id drops the sibling repo's dependent.
 func TestBlastRadiusScopesByInstallation(t *testing.T) {
 	pool, ctx := fileMemoryTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 
 	mine := seedBlastTenant(t, ctx, pool, "acme")
 	theirs := seedBlastTenant(t, ctx, pool, "initech")
@@ -241,7 +241,7 @@ func TestBlastRadiusScopesByInstallation(t *testing.T) {
 // nothing anywhere reports the loss.
 func TestBlastRadiusKeepsOwnRepoWithinRowBudget(t *testing.T) {
 	pool, ctx := fileMemoryTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 
 	tenant := seedBlastTenant(t, ctx, pool, "budget")
 	const seedPath = "api/handlers/jobs.go"
@@ -311,7 +311,7 @@ func TestCodeNodeInstallationFilledForWriterThatOmitsIt(t *testing.T) {
 // makes the node invisible to its own owner's blast radius.
 func TestUpsertCodeNodeStampsInstallationFromRepo(t *testing.T) {
 	pool, ctx := fileMemoryTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 	tenant := seedBlastTenant(t, ctx, pool, "stamp-test")
 
 	readInstallation := func(id int64) int64 {
