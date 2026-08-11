@@ -203,7 +203,7 @@ function PRAccordionRow({
 }
 
 export default function ReviewsPage() {
-  const { repos, activeId, setSelectedId, isLoading: reposLoading } = useActiveRepo();
+  const { repos, activeId, isLoading: reposLoading } = useActiveRepo();
   const [statusFilter] = useSearchParamState("status", "all");
   const updateParams = useUpdateSearchParams();
   const [expandedPR, setExpandedPR] = useState<string | null>(null);

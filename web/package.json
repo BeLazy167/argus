@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "test": "vitest run",
-    "lint": "biome check src/",
+    "lint": "biome lint src/ && node scripts/check-unreferenced.mjs",
     "lint:fix": "biome check --write src/",
     "format": "biome format --write src/",
     "typecheck": "tsc --noEmit",

@@ -14,7 +14,7 @@ import {
 } from "lucide-react";
 import { Suspense, useEffect, useRef, useState } from "react";
 import { QueryProvider } from "@/providers/query-provider";
-import { InstallationProvider, useInstallation } from "@/providers/installation-provider";
+import { InstallationProvider } from "@/providers/installation-provider";
 import { ActiveRepoProvider, useActiveRepo } from "@/providers/active-repo-provider";
 import { RepoSelect } from "@/components/dashboard/repo-select";
 import { ThemeToggle } from "@/components/dashboard/theme-toggle";
@@ -108,7 +108,6 @@ function SidebarLink({
 
 function UserFooter({ collapsed }: { collapsed: boolean }) {
   const { user } = useUser();
-  const { active: installation } = useInstallation();
   const displayName = user?.fullName ?? user?.primaryEmailAddress?.emailAddress ?? "Account";
 
   return (

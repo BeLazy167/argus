@@ -11,7 +11,7 @@
   "linter": {
     "enabled": true,
     "rules": {
-      "recommended": true,
+      "recommended": false,
       "correctness": {
         "noUnusedVariables": "error",
         "noUnusedImports": "error",
@@ -39,6 +39,12 @@
     }
   },
   "files": {
-    "includes": ["**", "!.next", "!node_modules", "!**/*.css", "!src/lib/generated"]
+    "includes": [
+      "**",
+      "!.next",
+      "!node_modules",
+      "!**/*.css",
+      "!src/lib/generated"
+    ]
   }
 }

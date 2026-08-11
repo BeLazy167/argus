@@ -10,7 +10,6 @@ import {
   FileCode,
   AlertTriangle,
   RotateCcw,
-  Loader2,
   Clock,
   GitPullRequest,
   Check,

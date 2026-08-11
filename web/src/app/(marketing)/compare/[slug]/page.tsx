@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { Check, X, Minus } from "lucide-react";
+import { Check, X } from "lucide-react";
 import {
   competitors,
   competitorSlugs,

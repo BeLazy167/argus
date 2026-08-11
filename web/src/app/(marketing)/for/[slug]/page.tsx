@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { personas, personaSlugs, getPersona } from "@/lib/pseo/personas";
+import { personaSlugs, getPersona } from "@/lib/pseo/personas";
 
 export function generateStaticParams() {
   return personaSlugs.map((slug) => ({ slug }));
@@ -14,7 +14,6 @@ export function generateMetadata({
   return params.then(({ slug }) => {
     const p = getPersona(slug);
     if (!p) return { title: "Not Found" };
-    const shortTitle = p.title.replace("AI Code Review for ", "");
     return {
       title: `${p.title} — Argus`,
       description: p.subtitle,

@@ -93,6 +93,7 @@ export function MemoriesSection() {
 			offset,
 		},
 		enabled: Boolean(active),
+
 	});
 
 	const total = data?.total ?? 0;
