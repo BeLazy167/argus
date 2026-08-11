@@ -4392,7 +4392,7 @@ func (o *Orchestrator) validateStage(ctx context.Context, run *PipelineRun) erro
 			for _, p := range changedPaths {
 				changedSet[p] = true
 			}
-			nodes, err := o.st.GetBlastRadius(ctx, run.DBRepoID, changedPaths, 2)
+			nodes, err := o.st.GetBlastRadius(ctx, run.DBInstallationID, run.DBRepoID, changedPaths, 2)
 			if err != nil {
 				o.logger.Warn("[validate] blast radius query failed", "error", err, "pr", run.PREvent.PRNumber)
 				return
@@ -4401,15 +4401,19 @@ func (o *Orchestrator) validateStage(ctx context.Context, run *PipelineRun) erro
 				return
 			}
 			depContents := make(map[string]string)
-			seen := make(map[string]bool)
-			for _, n := range nodes {
-				if n.Depth != 1 || changedSet[n.FilePath] || seen[n.FilePath] || len(depContents) >= 3 {
-					continue
+			// Sibling-repository dependents are excluded from the fetch: their
+			// path resolved against THIS repository at HeadSHA is a different
+			// file, and analyzeBlastRadius would ask the lead model which
+			// assumptions the diff violates in source that never depended on it —
+			// inventing impacts that get stamped onto every comment's
+			// BlastRadius count.
+			for _, path := range dependentFetchPaths(nodes, run.DBRepoID, changedSet) {
+				if len(depContents) >= 3 {
+					break
 				}
-				seen[n.FilePath] = true
-				content, fetchErr := o.ghClient.GetFileContent(ctx, run.PREvent.InstallationID, owner, repo, n.FilePath, run.PREvent.HeadSHA)
+				content, fetchErr := o.ghClient.GetFileContent(ctx, run.PREvent.InstallationID, owner, repo, path, run.PREvent.HeadSHA)
 				if fetchErr == nil {
-					depContents[n.FilePath] = truncateLines(content, 200)
+					depContents[path] = truncateLines(content, 200)
 				}
 			}
 			if len(depContents) > 0 {

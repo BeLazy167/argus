@@ -118,6 +118,20 @@ a recursive CTE otherwise. The Validate stage uses it to weight changes to
 widely used code. `FileComment.BlastRadius` records the dependent count on the
 finding itself.
 
+The walk is bounded by `installation_id`, not `repo_id`. Repositories inside one
+installation may depend on each other, so the walk crosses repository lines;
+across installations there is no legitimate edge, so it never crosses tenant
+lines. `repo_id` still resolves the seeds, because two repositories in one
+installation can hold the same file path. `code_nodes.installation_id` is
+denormalised from `repos` for this — a pgGraph filter can only read a registered
+column of the node table.
+
+A dependent in a sibling repository is **listed but never read**. Every consumer
+resolves a dependent's path against this pull request's own repository at its
+head SHA, which is the only ref it has, so reading a sibling's path there returns
+a different file under the same name. The prompt marks those entries as
+belonging to another repository and omits their source.
+
 ---
 
 ## Memory

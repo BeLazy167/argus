@@ -37,60 +37,6 @@ func (q *Queries) DeleteUnmergedNodesByPR(ctx context.Context, arg DeleteUnmerge
 	return err
 }
 
-const getBlastRadius = `-- name: GetBlastRadius :many
-WITH RECURSIVE affected AS (
-    SELECT id, name, file_path, kind, 0 as depth
-    FROM code_nodes WHERE code_nodes.repo_id = $1 AND code_nodes.file_path = ANY($2::text[])
-    UNION
-    SELECT cn.id, cn.name, cn.file_path, cn.kind, a.depth + 1
-    FROM code_nodes cn
-    JOIN code_edges ce ON ce.source_id = cn.id
-    JOIN affected a ON ce.target_id = a.id
-    WHERE a.depth < $3::int AND cn.repo_id = $1
-)
-SELECT DISTINCT id, name, file_path, kind, depth FROM affected ORDER BY depth, file_path LIMIT 50
-`
-
-type GetBlastRadiusParams struct {
-	RepoID    int64    `json:"repo_id"`
-	FilePaths []string `json:"file_paths"`
-	MaxDepth  int      `json:"max_depth"`
-}
-
-type GetBlastRadiusRow struct {
-	ID       int64  `json:"id"`
-	Name     string `json:"name"`
-	FilePath string `json:"file_path"`
-	Kind     string `json:"kind"`
-	Depth    int32  `json:"depth"`
-}
-
-func (q *Queries) GetBlastRadius(ctx context.Context, arg GetBlastRadiusParams) ([]GetBlastRadiusRow, error) {
-	rows, err := q.db.Query(ctx, getBlastRadius, arg.RepoID, arg.FilePaths, arg.MaxDepth)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []GetBlastRadiusRow
-	for rows.Next() {
-		var i GetBlastRadiusRow
-		if err := rows.Scan(
-			&i.ID,
-			&i.Name,
-			&i.FilePath,
-			&i.Kind,
-			&i.Depth,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const getFileBugCount = `-- name: GetFileBugCount :one
 SELECT COUNT(*)::int as bugs
 FROM review_comments rc
@@ -478,10 +424,11 @@ func (q *Queries) UpsertCodeEdge(ctx context.Context, arg UpsertCodeEdgeParams) 
 }
 
 const upsertCodeNode = `-- name: UpsertCodeNode :one
-INSERT INTO code_nodes (repo_id, kind, name, file_path, line_start, line_end, language, pr_number, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+INSERT INTO code_nodes (repo_id, installation_id, kind, name, file_path, line_start, line_end, language, pr_number, updated_at)
+VALUES ($1, (SELECT r.installation_id FROM repos r WHERE r.id = $1), $2, $3, $4, $5, $6, $7, $8, NOW())
 ON CONFLICT (repo_id, file_path, kind, name)
-DO UPDATE SET line_start = $5, line_end = $6, language = $7, pr_number = $8, updated_at = NOW()
+DO UPDATE SET line_start = $5, line_end = $6, language = $7, pr_number = $8,
+              installation_id = EXCLUDED.installation_id, updated_at = NOW()
 RETURNING id
 `
 
@@ -496,6 +443,9 @@ type UpsertCodeNodeParams struct {
 	PRNumber  *int    `json:"pr_number"`
 }
 
+// installation_id is derived from repos rather than taken as a parameter so the
+// denormalised tenant column can never disagree with repos.installation_id.
+// See store/graph.go installationOfRepo.
 func (q *Queries) UpsertCodeNode(ctx context.Context, arg UpsertCodeNodeParams) (int64, error) {
 	row := q.db.QueryRow(ctx, upsertCodeNode,
 		arg.RepoID,

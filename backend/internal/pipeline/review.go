@@ -318,25 +318,25 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p revie
 			changedPaths = append(changedPaths, f.NewName)
 			changedSet[f.NewName] = true
 		}
-		nodes, err := rs.store.GetBlastRadius(ctx, run.DBRepoID, changedPaths, 2)
+		nodes, err := rs.store.GetBlastRadius(ctx, run.DBInstallationID, run.DBRepoID, changedPaths, 2)
 		if err != nil {
 			slog.Warn("blast radius query failed", "error", err)
 		} else {
 			// Fetch content of depth-1 dependents NOT in the diff (max 3 files, 200 lines each)
 			depContents := make(map[string]string)
-			seen := make(map[string]bool)
-			for _, n := range nodes {
-				if n.Depth != 1 || changedSet[n.FilePath] || seen[n.FilePath] || len(depContents) >= 3 {
-					continue
+			// Sibling-repository dependents are listed but their source is never
+			// fetched — owner/repo/HeadSHA below name only this PR's repository.
+			for _, path := range dependentFetchPaths(nodes, run.DBRepoID, changedSet) {
+				if len(depContents) >= 3 {
+					break
 				}
-				seen[n.FilePath] = true
-				content, fetchErr := rs.ghClient.GetFileContent(ctx, run.PREvent.InstallationID, owner, repo, n.FilePath, run.PREvent.HeadSHA)
+				content, fetchErr := rs.ghClient.GetFileContent(ctx, run.PREvent.InstallationID, owner, repo, path, run.PREvent.HeadSHA)
 				if fetchErr != nil {
 					continue
 				}
-				depContents[n.FilePath] = truncateLines(content, 200)
+				depContents[path] = truncateLines(content, 200)
 			}
-			blastContext = FormatBlastRadius(nodes, depContents)
+			blastContext = FormatBlastRadius(nodes, depContents, run.DBRepoID)
 		}
 	}
 

@@ -211,9 +211,47 @@ func FormatTypeContext(ctx context.Context, st *store.Store, repoID int64, fileP
 	return sb.String()
 }
 
+// dependentFetchPaths picks, in blast-radius order, the dependent files whose
+// SOURCE may be fetched for the review prompt. Deduplicated; the caller applies
+// its own cap on how many it actually fetches.
+//
+// Every caller resolves these paths against the pull request's own repository at
+// its head SHA, and that is the whole reason foreign repositories are excluded.
+// Since #221 item 2 the walk crosses into sibling repositories of the same
+// installation; two repositories in one installation routinely hold the same
+// path, so fetching a sibling's `src/index.ts` here succeeds and returns THIS
+// repository's unrelated file, which is then presented to the model as the
+// dependent's source. When the path does not exist locally the fetch just errors
+// and the dependent is dropped with no trace. Neither outcome is detectable
+// downstream, so the filter has to happen before the fetch.
+//
+// Shared by reviewFile and validateStage: the two ran byte-identical selection
+// loops, and the wrong-repository fetch was originally fixed in only one of them.
+func dependentFetchPaths(nodes []store.CodeNode, prRepoID int64, changed map[string]bool) []string {
+	paths := make([]string, 0, len(nodes))
+	seen := make(map[string]bool, len(nodes))
+	for _, n := range nodes {
+		if n.Depth != 1 || n.RepoID != prRepoID || changed[n.FilePath] || seen[n.FilePath] {
+			continue
+		}
+		seen[n.FilePath] = true
+		paths = append(paths, n.FilePath)
+	}
+	return paths
+}
+
 // FormatBlastRadius formats code graph blast radius results as a context block for the review prompt.
 // If fileContents is provided, includes source code of key dependent files (depth 1 only, capped).
-func FormatBlastRadius(nodes []store.CodeNode, fileContents map[string]string) string {
+//
+// prRepoID is the DB id of the repository the pull request is in. Since #221
+// item 2 the walk crosses into sibling repositories of the same installation, so
+// a bare path is ambiguous: two repositories in one installation routinely hold
+// the same `src/index.ts`, and an unlabelled line invites the model to report a
+// finding against a path that means something different in the repository being
+// reviewed. Marking them also explains why those dependents carry no source
+// below — their contents are deliberately not fetched, because the only ref
+// available here is this repository's head SHA.
+func FormatBlastRadius(nodes []store.CodeNode, fileContents map[string]string, prRepoID int64) string {
 	if len(nodes) == 0 {
 		return ""
 	}
@@ -221,7 +259,11 @@ func FormatBlastRadius(nodes []store.CodeNode, fileContents map[string]string) s
 	sb.WriteString("\n<blast_radius>\n")
 	sb.WriteString("These code symbols depend on the changed files. Check if your changes break them:\n\n")
 	for _, n := range nodes {
-		sb.WriteString(fmt.Sprintf("- [depth %d] %s `%s` in %s\n", n.Depth, n.Kind, n.Name, n.FilePath))
+		origin := ""
+		if n.RepoID != prRepoID {
+			origin = " (another repository in this installation — not a path in this PR's repo)"
+		}
+		sb.WriteString(fmt.Sprintf("- [depth %d] %s `%s` in %s%s\n", n.Depth, n.Kind, n.Name, n.FilePath, origin))
 	}
 
 	// Include source of depth-1 dependents so the LLM can trace call chains

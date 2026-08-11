@@ -46,24 +46,25 @@ type CodeEdge struct {
 }
 
 type CodeNode struct {
-	ID           int64      `json:"id"`
-	RepoID       int64      `json:"repo_id"`
-	Kind         string     `json:"kind"`
-	Name         string     `json:"name"`
-	FilePath     string     `json:"file_path"`
-	LineStart    *int       `json:"line_start"`
-	LineEnd      *int       `json:"line_end"`
-	Language     *string    `json:"language"`
-	UpdatedAt    *time.Time `json:"updated_at"`
-	PRNumber     *int       `json:"pr_number"`
-	IsMerged     bool       `json:"is_merged"`
-	ReturnType   *string    `json:"return_type"`
-	Params       *string    `json:"params"`
-	Visibility   *string    `json:"visibility"`
-	IsAsync      *bool      `json:"is_async"`
-	ReceiverType *string    `json:"receiver_type"`
-	Scope        *string    `json:"scope"`
-	ContentHash  *string    `json:"content_hash"`
+	ID             int64      `json:"id"`
+	RepoID         int64      `json:"repo_id"`
+	Kind           string     `json:"kind"`
+	Name           string     `json:"name"`
+	FilePath       string     `json:"file_path"`
+	LineStart      *int       `json:"line_start"`
+	LineEnd        *int       `json:"line_end"`
+	Language       *string    `json:"language"`
+	UpdatedAt      *time.Time `json:"updated_at"`
+	PRNumber       *int       `json:"pr_number"`
+	IsMerged       bool       `json:"is_merged"`
+	ReturnType     *string    `json:"return_type"`
+	Params         *string    `json:"params"`
+	Visibility     *string    `json:"visibility"`
+	IsAsync        *bool      `json:"is_async"`
+	ReceiverType   *string    `json:"receiver_type"`
+	Scope          *string    `json:"scope"`
+	ContentHash    *string    `json:"content_hash"`
+	InstallationID int64      `json:"installation_id"`
 }
 
 type CommentOutcome struct {

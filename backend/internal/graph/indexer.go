@@ -136,6 +136,13 @@ const symbolHashSeparator = 0x1f
 // extend the fields mixed in here. Otherwise a column change would leave
 // stale row data around because the hash wouldn't flip. Keep this list in
 // lockstep with UpsertCodeNodeFullWithHash.
+//
+// code_nodes.installation_id is the one deliberate exception. It is not symbol
+// content — it is derived in SQL from the row's own repo_id (migration 071,
+// store.installationOfRepo), so it cannot drift while repo_id is unchanged, and
+// repo_id is part of the unique index this hash diffs within. Mixing it in
+// would force a rewrite of every row in the fleet for a value that never
+// differs.
 func computeSymbolHash(sym Symbol) string {
 	// Rough upper bound: 10 fields + 10 separators + 2 int fields (≤10 chars).
 	// Oversizing slightly avoids regrowth for typical symbols.

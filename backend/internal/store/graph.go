@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -19,37 +21,34 @@ type FileMemory struct {
 	Traces         []DecisionTrace `json:"traces"`
 }
 
+// installationOfRepo is the ONLY expression that writes code_nodes.installation_id.
+//
+// The column is a denormalisation of repos.installation_id, kept because pgGraph
+// can only filter a traversal on a registered column of the node table. Deriving
+// it in SQL rather than taking it as a parameter means the two can never
+// disagree: a caller cannot stamp one tenant's id onto another tenant's node,
+// and a repo whose installation_id ever changed self-heals on its next index
+// pass because the ON CONFLICT branch rewrites the column too.
+//
+// It is spliced into the INSERT column list at the position of the repo_id
+// parameter, so every writer must pass repo_id as $1.
+const installationOfRepo = `(SELECT r.installation_id FROM repos r WHERE r.id = $1)`
+
 // UpsertCodeNode inserts or updates a code node, returning its ID.
 // Only updates base columns (kind, name, file_path, lines, language, pr_number).
 // Does NOT overwrite type-info columns (return_type, params, etc.) if they already exist.
 func (s *Store) UpsertCodeNode(ctx context.Context, repoID int64, kind, name, filePath string, lineStart, lineEnd int, language string, prNumber int) (int64, error) {
 	var id int64
 	err := s.Pool.QueryRow(ctx, `
-		INSERT INTO code_nodes (repo_id, kind, name, file_path, line_start, line_end, language, pr_number, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8, 0), NOW())
+		INSERT INTO code_nodes (repo_id, installation_id, kind, name, file_path, line_start, line_end, language, pr_number, updated_at)
+		VALUES ($1, `+installationOfRepo+`, $2, $3, $4, $5, $6, $7, NULLIF($8, 0), NOW())
 		ON CONFLICT (repo_id, file_path, kind, name)
 		DO UPDATE SET line_start = $5, line_end = $6, language = $7,
 		             pr_number = COALESCE(NULLIF($8, 0), code_nodes.pr_number),
+		             installation_id = EXCLUDED.installation_id,
 		             updated_at = NOW()
 		RETURNING id
 	`, repoID, kind, name, filePath, lineStart, lineEnd, language, prNumber).Scan(&id)
-	return id, err
-}
-
-// UpsertCodeNodeFull inserts or updates a code node with type info, returning its ID.
-func (s *Store) UpsertCodeNodeFull(ctx context.Context, repoID int64, kind, name, filePath string, lineStart, lineEnd int, language string, prNumber int, returnType, params, visibility string, isAsync bool, receiverType, scope string) (int64, error) {
-	var id int64
-	err := s.Pool.QueryRow(ctx, `
-		INSERT INTO code_nodes (repo_id, kind, name, file_path, line_start, line_end, language, pr_number, return_type, params, visibility, is_async, receiver_type, scope, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8, 0), $9, $10, $11, $12, $13, $14, NOW())
-		ON CONFLICT (repo_id, file_path, kind, name)
-		DO UPDATE SET line_start = $5, line_end = $6, language = $7,
-		             pr_number = COALESCE(NULLIF($8, 0), code_nodes.pr_number),
-		             return_type = $9, params = $10, visibility = $11,
-		             is_async = $12, receiver_type = $13, scope = $14,
-		             updated_at = NOW()
-		RETURNING id
-	`, repoID, kind, name, filePath, lineStart, lineEnd, language, prNumber, returnType, params, visibility, isAsync, receiverType, scope).Scan(&id)
 	return id, err
 }
 
@@ -86,22 +85,23 @@ func (s *Store) GetNodesHashesForFile(ctx context.Context, repoID int64, filePat
 	})
 }
 
-// UpsertCodeNodeFullWithHash is UpsertCodeNodeFull plus a content_hash write.
-// The hash is written on both INSERT and UPDATE paths so the next diff pass
+// UpsertCodeNodeFullWithHash writes a code node with type info plus a
+// content_hash. The hash is written on both INSERT and UPDATE paths so the next diff pass
 // can compare against it. Calling code is expected to have already verified
 // the hash does NOT match an existing row — skipping unchanged rows entirely
 // is the whole point of the diff.
 func (s *Store) UpsertCodeNodeFullWithHash(ctx context.Context, repoID int64, kind, name, filePath string, lineStart, lineEnd int, language string, prNumber int, returnType, params, visibility string, isAsync bool, receiverType, scope, contentHash string) (int64, error) {
 	var id int64
 	err := s.Pool.QueryRow(ctx, `
-		INSERT INTO code_nodes (repo_id, kind, name, file_path, line_start, line_end, language, pr_number, return_type, params, visibility, is_async, receiver_type, scope, content_hash, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8, 0), $9, $10, $11, $12, $13, $14, $15, NOW())
+		INSERT INTO code_nodes (repo_id, installation_id, kind, name, file_path, line_start, line_end, language, pr_number, return_type, params, visibility, is_async, receiver_type, scope, content_hash, updated_at)
+		VALUES ($1, `+installationOfRepo+`, $2, $3, $4, $5, $6, $7, NULLIF($8, 0), $9, $10, $11, $12, $13, $14, $15, NOW())
 		ON CONFLICT (repo_id, file_path, kind, name)
 		DO UPDATE SET line_start = $5, line_end = $6, language = $7,
 		             pr_number = COALESCE(NULLIF($8, 0), code_nodes.pr_number),
 		             return_type = $9, params = $10, visibility = $11,
 		             is_async = $12, receiver_type = $13, scope = $14,
 		             content_hash = $15,
+		             installation_id = EXCLUDED.installation_id,
 		             updated_at = NOW()
 		RETURNING id
 	`, repoID, kind, name, filePath, lineStart, lineEnd, language, prNumber, returnType, params, visibility, isAsync, receiverType, scope, contentHash).Scan(&id)
@@ -163,9 +163,11 @@ func (s *Store) DeleteNodesByFile(ctx context.Context, repoID int64, filePath st
 }
 
 // pgGraphOnce guards a single probe for a usable pgGraph projection.
+// pgGraphReady is written after the probe and again if a traversal ever fails,
+// so it is atomic rather than a plain bool.
 var (
 	pgGraphOnce  sync.Once
-	pgGraphReady bool
+	pgGraphReady atomic.Bool
 )
 
 // pgGraphAvailable reports whether the graph extension is installed and its
@@ -207,9 +209,29 @@ func (s *Store) pgGraphAvailable(ctx context.Context) bool {
 			       )`).Scan(&ready); err != nil {
 			return // stays false: the CTE needs no extension
 		}
-		pgGraphReady = ready
+		pgGraphReady.Store(ready)
 	})
-	return pgGraphReady
+	return pgGraphReady.Load()
+}
+
+// disablePGGraph turns the traversal path off for the rest of the process and
+// says why, exactly once.
+//
+// A traversal error here is structural, not transient: the filter column is not
+// registered (migration 072 raises a NOTICE and continues when
+// graph.add_filter_column fails, and lib/pq discards NOTICEs, so the migration
+// reports success either way), or the projection does not carry code_nodes.
+// Without this the process re-issues one guaranteed-failing query per reviewed
+// file per review, forever, and pgGraphAvailable cannot see it — the probe reads
+// pg_extension and graph.status(), neither of which knows about filter columns.
+// That is the same invisible failure as the `WHERE built` predicate described
+// above, where the fast path was dead in production and nothing looked broken.
+// The CTE is measured FASTER on this fleet, so turning the path off costs
+// nothing and this log line is the only signal that it happened.
+func disablePGGraph(err error) {
+	if pgGraphReady.CompareAndSwap(true, false) {
+		slog.Warn("pggraph blast radius failed; using the recursive CTE for the rest of this process", "error", err)
+	}
 }
 
 // GetBlastRadius finds all nodes transitively depending on the given file paths
@@ -226,7 +248,21 @@ func (s *Store) pgGraphAvailable(ctx context.Context) bool {
 // graph is large enough for the setup to amortise -- their own published
 // figure is 107ms for a depth-2 walk over 2M nodes, where a CTE would be far
 // worse.
-func (s *Store) GetBlastRadius(ctx context.Context, repoID int64, filePaths []string, maxDepth int) ([]CodeNode, error) {
+//
+// THE TENANT BOUNDARY IS installationID, NOT repoID, and the two are used for
+// different jobs. repoID resolves the SEEDS: the changed paths came from one
+// pull request in one repository, and two repositories in the same installation
+// routinely contain the same path (`src/index.ts`), so seeding without it walks
+// from the wrong file. installationID bounds the WALK: repositories inside one
+// installation legitimately depend on each other (an API repo and the web repo
+// that calls it), and scoping the walk to repoID makes those edges unreachable —
+// which is what #221 item 2 exists to fix. Across installations there is no
+// legitimate edge at all, so the walk must never leave the installation.
+//
+// Passing an installationID that does not own repoID yields no seeds and
+// therefore an empty result. That is deliberate: a mismatched pair fails closed
+// rather than resolving seeds in one tenant and walking in another.
+func (s *Store) GetBlastRadius(ctx context.Context, installationID, repoID int64, filePaths []string, maxDepth int) ([]CodeNode, error) {
 	if len(filePaths) == 0 {
 		return []CodeNode{}, nil
 	}
@@ -236,11 +272,14 @@ func (s *Store) GetBlastRadius(ctx context.Context, repoID int64, filePaths []st
 		// rather than failing, and an empty blast radius is indistinguishable
 		// from "nothing depends on this file" at every call site. Re-running
 		// the CTE costs ~1ms and is the only way to tell the two apart.
-		if nodes, err := s.blastRadiusPGGraph(ctx, repoID, filePaths, maxDepth); err == nil && len(nodes) > 0 {
+		nodes, err := s.blastRadiusPGGraph(ctx, installationID, repoID, filePaths, maxDepth)
+		if err != nil {
+			disablePGGraph(err)
+		} else if len(nodes) > 0 {
 			return nodes, nil
 		}
 	}
-	return s.blastRadiusCTE(ctx, repoID, filePaths, maxDepth)
+	return s.blastRadiusCTE(ctx, installationID, repoID, filePaths, maxDepth)
 }
 
 // blastRadiusPGGraph resolves the seed file paths to node ids, then multi-start
@@ -249,66 +288,101 @@ func (s *Store) GetBlastRadius(ctx context.Context, repoID int64, filePaths []st
 // means. Seeds are resolved from code_nodes rather than graph.search() because
 // the source table is authoritative and already indexed on (repo_id, file_path).
 //
-// repo_id is pushed INTO the traversal as a registered filter column, not
-// applied to its output. max_rows is enforced inside traverse, so a post-filter
-// lets nodes from other repos consume the budget and then be discarded --
-// returning fewer rows than the CTE, or none. code_edges is registered without
-// a repo boundary, so a walk can otherwise cross repos and, through them,
-// installations. The CTE never had this exposure: its repo_id predicate sits
-// inside the recursion.
-func (s *Store) blastRadiusPGGraph(ctx context.Context, repoID int64, filePaths []string, maxDepth int) ([]CodeNode, error) {
+// installation_id is pushed INTO the traversal as a registered filter column,
+// not applied to its output. max_rows is enforced inside traverse, so a
+// post-filter lets another tenant's nodes consume the budget and then be
+// discarded -- returning fewer rows than the CTE, or none. code_edges is
+// registered with no tenant boundary of its own, so an unfiltered walk can reach
+// any node in the database; the node-side filter is the only thing stopping it.
+// The trailing WHERE on the hydration join is defence in depth, not the
+// boundary: it runs after max_rows and cannot recover rows already spent.
+//
+// The inner max_rows (200) is deliberately wider than the 50 rows returned.
+// Since the walk crosses repositories, a sibling repository can now supply more
+// depth-1 dependents than the whole budget, and traverse spends its budget
+// DURING the walk with no repo awareness — so a budget equal to the result size
+// would let one repository fill it and leave nothing for the repository the pull
+// request is actually in. Ordering same-repo first (see the CTE) can only choose
+// among rows the walk returned, which is why the walk has to return more.
+func (s *Store) blastRadiusPGGraph(ctx context.Context, installationID, repoID int64, filePaths []string, maxDepth int) ([]CodeNode, error) {
 	rows, err := s.Pool.Query(ctx, `
 		WITH seeds AS (
 		  SELECT array_agg(id::text) AS ids
-		  FROM code_nodes WHERE repo_id = $1 AND file_path = ANY($2)
+		  FROM code_nodes WHERE installation_id = $1 AND repo_id = $2 AND file_path = ANY($3)
+		), reached AS (
+		  SELECT DISTINCT cn.id, cn.repo_id, cn.name, cn.file_path, cn.kind, t.depth
+		  FROM seeds s
+		  CROSS JOIN LATERAL graph.traverse(
+		      (SELECT array_agg('public.code_nodes'::regclass) FROM generate_series(1, array_length(s.ids, 1))),
+		      s.ids,
+		      max_depth := $4,
+		      direction := 'in',
+		      hydrate := false,
+		      filter := graph.eq('installation_id', to_jsonb($1::bigint)),
+		      max_rows := 200
+		  ) t
+		  JOIN code_nodes cn ON cn.id = t.node_id::bigint
+		  WHERE cn.installation_id = $1
 		)
-		SELECT DISTINCT cn.id, cn.name, cn.file_path, cn.kind, t.depth
-		FROM seeds s
-		CROSS JOIN LATERAL graph.traverse(
-		    (SELECT array_agg('public.code_nodes'::regclass) FROM generate_series(1, array_length(s.ids, 1))),
-		    s.ids,
-		    max_depth := $3,
-		    direction := 'in',
-		    hydrate := false,
-		    filter := graph.eq('repo_id', to_jsonb($1::bigint)),
-		    max_rows := 50
-		) t
-		JOIN code_nodes cn ON cn.id = t.node_id::bigint
-		WHERE cn.repo_id = $1
-		ORDER BY t.depth, cn.file_path
-		LIMIT 50`, repoID, filePaths, maxDepth)
+		SELECT id, repo_id, name, file_path, kind, depth FROM reached
+		ORDER BY depth, (repo_id <> $2), file_path
+		LIMIT 50`, installationID, repoID, filePaths, maxDepth)
 	if err != nil {
 		return nil, fmt.Errorf("pggraph blast radius: %w", err)
 	}
 	defer rows.Close()
 	return collectOrEmpty(rows, func(row pgx.CollectableRow) (CodeNode, error) {
 		var n CodeNode
-		err := row.Scan(&n.ID, &n.Name, &n.FilePath, &n.Kind, &n.Depth)
+		err := row.Scan(&n.ID, &n.RepoID, &n.Name, &n.FilePath, &n.Kind, &n.Depth)
 		return n, err
 	})
 }
 
-func (s *Store) blastRadiusCTE(ctx context.Context, repoID int64, filePaths []string, maxDepth int) ([]CodeNode, error) {
+// blastRadiusCTE is the fallback, and it must return the SAME SET as
+// blastRadiusPGGraph or the two paths disagree on who a customer's dependents
+// are depending on which extensions the database happens to have. Its recursive
+// step therefore filters on installation_id — the same boundary the traversal
+// filter enforces — and NOT on repo_id, which would silently stop the walk at
+// the repository edge and hide every cross-repo dependent.
+//
+// repo_id is SELECTED, not just filtered on, because the walk now returns nodes
+// from sibling repositories and the caller has to be able to tell which. Both
+// consumers resolve a dependent's path against the pull request's own
+// repository at its head SHA; handed a sibling repository's path with no way to
+// recognise it, they either fetch a same-named file from the wrong repository or
+// silently drop the dependent.
+//
+// The result is ordered same-repo-first WITHIN each depth. The row budget did
+// not grow when the walk widened from one repository to a whole installation, so
+// ordering on bare file_path let an alphabetically earlier sibling repository
+// (`admin-ui/...` before `api/...`) consume all 50 slots and evict the
+// dependents the pre-#221 query was guaranteed to return — a regression in the
+// case that already worked, with no signal that truncation happened. Depth stays
+// the primary key because both consumers filter on depth == 1.
+func (s *Store) blastRadiusCTE(ctx context.Context, installationID, repoID int64, filePaths []string, maxDepth int) ([]CodeNode, error) {
 	rows, err := s.Pool.Query(ctx, `
 		WITH RECURSIVE affected AS (
-			SELECT id, name, file_path, kind, 0 as depth
-			FROM code_nodes WHERE repo_id = $1 AND file_path = ANY($2)
+			SELECT id, repo_id, name, file_path, kind, 0 as depth
+			FROM code_nodes WHERE installation_id = $1 AND repo_id = $2 AND file_path = ANY($3)
 			UNION
-			SELECT cn.id, cn.name, cn.file_path, cn.kind, a.depth + 1
+			SELECT cn.id, cn.repo_id, cn.name, cn.file_path, cn.kind, a.depth + 1
 			FROM code_nodes cn
 			JOIN code_edges ce ON ce.source_id = cn.id
 			JOIN affected a ON ce.target_id = a.id
-			WHERE a.depth < $3 AND cn.repo_id = $1
+			WHERE a.depth < $4 AND cn.installation_id = $1
 		)
-		SELECT DISTINCT id, name, file_path, kind, depth FROM affected ORDER BY depth, file_path LIMIT 50
-	`, repoID, filePaths, maxDepth)
+		SELECT id, repo_id, name, file_path, kind, depth
+		FROM (SELECT DISTINCT id, repo_id, name, file_path, kind, depth FROM affected) d
+		ORDER BY depth, (repo_id <> $2), file_path
+		LIMIT 50
+	`, installationID, repoID, filePaths, maxDepth)
 	if err != nil {
 		return nil, fmt.Errorf("blast radius query: %w", err)
 	}
 	defer rows.Close()
 	return collectOrEmpty(rows, func(row pgx.CollectableRow) (CodeNode, error) {
 		var n CodeNode
-		err := row.Scan(&n.ID, &n.Name, &n.FilePath, &n.Kind, &n.Depth)
+		err := row.Scan(&n.ID, &n.RepoID, &n.Name, &n.FilePath, &n.Kind, &n.Depth)
 		return n, err
 	})
 }
