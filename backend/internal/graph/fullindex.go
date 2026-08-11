@@ -57,45 +57,6 @@ func selectPendingFiles(files []string, ready map[string]struct{}, cap int) (sel
 	return pending[:cap], len(pending) - cap
 }
 
-// generationFileSymbol records deterministic physical LOC and file identity
-// in the staged snapshot. A trailing newline terminates the last content line;
-// it does not create another blank line.
-func generationFileSymbol(filePath, content string) Symbol {
-	loc := strings.Count(content, "\n")
-	if content != "" && !strings.HasSuffix(content, "\n") {
-		loc++
-	}
-	lineStart := 0
-	if loc > 0 {
-		lineStart = 1
-	}
-	return Symbol{Kind: "file", Name: filePath, FilePath: filePath, LineStart: lineStart, LineEnd: loc}
-}
-
-type generationResolution string
-
-const (
-	generationResolved   generationResolution = "resolved"
-	generationAmbiguous  generationResolution = "ambiguous"
-	generationUnresolved generationResolution = "unresolved"
-)
-
-// resolveGenerationNode never chooses an arbitrary repository-wide duplicate.
-// Same-file identity wins; otherwise the name must be globally unique.
-func resolveGenerationNode(sourceFile, name string, keyToID map[string]int64, nameToIDs map[string][]int64) (int64, generationResolution) {
-	if id := keyToID[nodeKey(sourceFile, name)]; id != 0 {
-		return id, generationResolved
-	}
-	switch ids := nameToIDs[name]; len(ids) {
-	case 0:
-		return 0, generationUnresolved
-	case 1:
-		return ids[0], generationResolved
-	default:
-		return 0, generationAmbiguous
-	}
-}
-
 // ErrTruncatedTree means GitHub explicitly reported that its recursive tree is
 // incomplete. The generation is recorded as failed and never published.
 var ErrTruncatedTree = errors.New("github repository tree was truncated")
@@ -177,11 +138,14 @@ func IndexRepoBounded(
 			continue
 		}
 		symbols, edges := ParseFileSymbols(filePath, content)
+		// Endpoint ownership is grounded in declarations, not the broad file
+		// span. Add the file identity only after anchoring so a declaration-free
+		// route stays explicitly unanchored rather than gaining a false handler.
+		endpoints := anchorEndpoints(ExtractAPIEndpoints(filePath, content), symbols)
 		// Every source file gets a deterministic identity/LOC node, including
 		// files with no declarations. Metrics and import edges must not depend on
 		// whichever declaration happened to be parsed first.
-		symbols = append([]Symbol{generationFileSymbol(filePath, content)}, symbols...)
-		endpoints := anchorEndpoints(ExtractAPIEndpoints(filePath, content), symbols)
+		symbols = append(symbols, fileSymbol(filePath, content))
 		symbolJSON, err := json.Marshal(symbols)
 		if err != nil {
 			return result, fmt.Errorf("marshal symbols for %s: %w", filePath, err)
@@ -321,8 +285,8 @@ func publishGraphGeneration(ctx context.Context, st *store.Store, repoID, genera
 		return id, nil
 	}
 	resolveOrPlaceholder := func(filePath, targetName string) (int64, error) {
-		id, status := resolveGenerationNode(filePath, targetName, keyToID, nameToIDs)
-		if status == generationResolved {
+		id, status := describeNodeResolution(filePath, targetName, keyToID, nameToIDs)
+		if status == resolutionResolved {
 			return id, nil
 		}
 		placeholder := string(status) + ":" + targetName

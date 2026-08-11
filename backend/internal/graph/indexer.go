@@ -491,14 +491,34 @@ func upsertFileSymbols(ctx context.Context, st indexerStore, repoDBID int64, fil
 // collisions remain explicit instead of depending on tree or database order.
 //
 // ONE definition, used by both edge resolution and endpoint anchoring.
+type nodeResolution string
+
+const (
+	resolutionResolved   nodeResolution = "resolved"
+	resolutionAmbiguous  nodeResolution = "ambiguous"
+	resolutionUnresolved nodeResolution = "unresolved"
+)
+
+// describeNodeResolution never chooses an arbitrary repository-wide duplicate.
+// Same-file identity wins; otherwise a name must be globally unique. Both the
+// incremental writer and atomic generation publisher use this policy.
+func describeNodeResolution(sourceFile, name string, keyToID map[string]int64, nameToIDs map[string][]int64) (int64, nodeResolution) {
+	if id := keyToID[nodeKey(sourceFile, name)]; id != 0 {
+		return id, resolutionResolved
+	}
+	switch ids := nameToIDs[name]; len(ids) {
+	case 0:
+		return 0, resolutionUnresolved
+	case 1:
+		return ids[0], resolutionResolved
+	default:
+		return 0, resolutionAmbiguous
+	}
+}
+
 func resolveNodeName(sourceFile, name string, keyToID map[string]int64, nameToIDs map[string][]int64) (int64, bool) {
-	if id, ok := keyToID[nodeKey(sourceFile, name)]; ok {
-		return id, true
-	}
-	if ids := nameToIDs[name]; len(ids) == 1 {
-		return ids[0], true
-	}
-	return 0, false
+	id, status := describeNodeResolution(sourceFile, name, keyToID, nameToIDs)
+	return id, status == resolutionResolved
 }
 
 func resolutionPlaceholder(status, name string) string {
@@ -521,14 +541,11 @@ func ensureResolutionPlaceholder(ctx context.Context, st indexerStore, repoID in
 }
 
 func resolveOrRecordTarget(ctx context.Context, st indexerStore, repoID int64, sourceFile, name string, keyToID map[string]int64, nameToIDs map[string][]int64) (int64, bool) {
-	if id, ok := resolveNodeName(sourceFile, name, keyToID, nameToIDs); ok {
+	id, status := describeNodeResolution(sourceFile, name, keyToID, nameToIDs)
+	if status == resolutionResolved {
 		return id, true
 	}
-	status := "unresolved"
-	if len(nameToIDs[name]) > 1 {
-		status = "ambiguous"
-	}
-	return ensureResolutionPlaceholder(ctx, st, repoID, sourceFile, status, name, keyToID, nameToIDs)
+	return ensureResolutionPlaceholder(ctx, st, repoID, sourceFile, string(status), name, keyToID, nameToIDs)
 }
 
 // resolveAndUpsertEdges runs the edge-resolution + upsert pass after every

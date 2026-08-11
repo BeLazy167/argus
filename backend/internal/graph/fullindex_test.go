@@ -62,7 +62,7 @@ func contains(hay []string, needle string) bool {
 	return false
 }
 
-func TestGenerationFileSymbolRecordsPhysicalLOC(t *testing.T) {
+func TestFullGenerationUsesFileSymbolPhysicalLOC(t *testing.T) {
 	tests := []struct {
 		name, content      string
 		wantStart, wantEnd int
@@ -74,7 +74,7 @@ func TestGenerationFileSymbolRecordsPhysicalLOC(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := generationFileSymbol("a.go", tt.content)
+			got := fileSymbol("a.go", tt.content)
 			if got.Kind != "file" || got.Name != "a.go" || got.FilePath != "a.go" || got.LineStart != tt.wantStart || got.LineEnd != tt.wantEnd {
 				t.Fatalf("file symbol = %+v, want lines %d-%d", got, tt.wantStart, tt.wantEnd)
 			}
@@ -82,7 +82,7 @@ func TestGenerationFileSymbolRecordsPhysicalLOC(t *testing.T) {
 	}
 }
 
-func TestResolveGenerationNodeKeepsAmbiguityExplicit(t *testing.T) {
+func TestDescribeNodeResolutionKeepsAmbiguityExplicit(t *testing.T) {
 	keys := map[string]int64{nodeKey("same.go", "Local"): 1}
 	names := map[string][]int64{
 		"Local":  {1, 2},
@@ -92,16 +92,16 @@ func TestResolveGenerationNodeKeepsAmbiguityExplicit(t *testing.T) {
 	tests := []struct {
 		name, sourceFile, target string
 		wantID                   int64
-		wantStatus               generationResolution
+		wantStatus               nodeResolution
 	}{
-		{name: "same file wins", sourceFile: "same.go", target: "Local", wantID: 1, wantStatus: generationResolved},
-		{name: "unique repo target resolves", sourceFile: "same.go", target: "Unique", wantID: 3, wantStatus: generationResolved},
-		{name: "duplicate stays ambiguous", sourceFile: "same.go", target: "Dup", wantStatus: generationAmbiguous},
-		{name: "missing stays unresolved", sourceFile: "same.go", target: "Missing", wantStatus: generationUnresolved},
+		{name: "same file wins", sourceFile: "same.go", target: "Local", wantID: 1, wantStatus: resolutionResolved},
+		{name: "unique repo target resolves", sourceFile: "same.go", target: "Unique", wantID: 3, wantStatus: resolutionResolved},
+		{name: "duplicate stays ambiguous", sourceFile: "same.go", target: "Dup", wantStatus: resolutionAmbiguous},
+		{name: "missing stays unresolved", sourceFile: "same.go", target: "Missing", wantStatus: resolutionUnresolved},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			id, status := resolveGenerationNode(tt.sourceFile, tt.target, keys, names)
+			id, status := describeNodeResolution(tt.sourceFile, tt.target, keys, names)
 			if id != tt.wantID || status != tt.wantStatus {
 				t.Fatalf("resolution = %d/%s, want %d/%s", id, status, tt.wantID, tt.wantStatus)
 			}
