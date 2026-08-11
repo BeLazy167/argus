@@ -38,9 +38,9 @@
 // Thread resolution is a privileged action (it clears a finding from the
 // unresolved-conversations / merge-gate view), so only TRUSTED, deliberate
 // triggers do it: auto-resolve (a push that modified the anchored lines), a
-// reply and `@argus resolve` — both gated on author_association ∈
-// owner/member/collaborator at their call sites (a review-comment replier and an
-// issue commenter are the same untrusted population as a reactor). REACTIONS are
+// reply and `@argus resolve`. Reply transitions require the actual replier's
+// effective repository write permission; the command retains its explicit
+// author-association policy. REACTIONS are
 // explicitly ledger-only (EventReactionDismissed): a 👎 is an untrusted,
 // low-effort signal swept on every PR event from any user, and must never drive
 // ResolveReviewThread. The gauge is ledger-only too — it runs post-close and

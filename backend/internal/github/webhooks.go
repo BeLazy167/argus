@@ -205,10 +205,10 @@ type CommentEvent struct {
 	InReplyToID    int64
 	CommentBody    string
 	CommentAuthor  string
-	// AuthorAssociation is the replier's relationship to the repo (GitHub's
-	// author_association). Gates the reply path's privileged shortcut (resolving
-	// the thread / writing terminal ledger state) — a review-comment replier is
-	// the same untrusted population as a reactor.
+	// AuthorAssociation is the replier's coarse relationship to the repo
+	// (GitHub's author_association). It is attribution only on the reply path;
+	// derived writes require an effective repository permission lookup for
+	// CommentAuthor.
 	AuthorAssociation string
 	FilePath          string
 	DiffHunk          string

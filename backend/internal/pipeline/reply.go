@@ -13,24 +13,30 @@ import (
 	"github.com/BeLazy167/argus/backend/internal/store"
 )
 
+type repoWriteAccessChecker interface {
+	HasRepoWriteAccess(context.Context, int64, string, string, string) (bool, error)
+}
+
 // ReplyAnalyzer handles incoming replies to Argus review comments.
 type ReplyAnalyzer struct {
-	registry    *llm.Registry
-	store       *store.Store
-	ghClient    *ghpkg.Client
-	memRegistry *memory.Registry
-	logger      *slog.Logger
-	lifecycle   *FindingLifecycle
+	registry        *llm.Registry
+	store           *store.Store
+	ghClient        *ghpkg.Client
+	repoPermissions repoWriteAccessChecker
+	memRegistry     *memory.Registry
+	logger          *slog.Logger
+	lifecycle       *FindingLifecycle
 }
 
 func NewReplyAnalyzer(registry *llm.Registry, st *store.Store, ghClient *ghpkg.Client, memRegistry *memory.Registry, logger *slog.Logger) *ReplyAnalyzer {
 	return &ReplyAnalyzer{
-		registry:    registry,
-		store:       st,
-		ghClient:    ghClient,
-		memRegistry: memRegistry,
-		logger:      logger,
-		lifecycle:   NewFindingLifecycle(st, ghClient, logger),
+		registry:        registry,
+		store:           st,
+		ghClient:        ghClient,
+		repoPermissions: ghClient,
+		memRegistry:     memRegistry,
+		logger:          logger,
+		lifecycle:       NewFindingLifecycle(st, ghClient, logger),
 	}
 }
 
@@ -116,9 +122,12 @@ func (ra *ReplyAnalyzer) Analyze(ctx context.Context, event ghpkg.CommentEvent) 
 		}
 	}
 
-	plan := planReplyEffects(decision, event.AuthorAssociation)
+	plan, err := planReplyEffects(ctx, ra.repoPermissions, event, owner, repo, decision)
+	if err != nil {
+		return fmt.Errorf("authorizing reply-derived writes: %w", err)
+	}
 	if !plan.AllowWrites {
-		ra.logger.Info("reply: non-privileged replier observed; skipping all derived writes",
+		ra.logger.Info("reply: author lacks repository write permission; skipping all derived writes",
 			"association", event.AuthorAssociation, "author", event.CommentAuthor, "comment_id", original.ID)
 		return nil
 	}
@@ -207,9 +216,16 @@ type replyEffectPlan struct {
 	LifecycleEvent LifecycleEvent
 }
 
-func planReplyEffects(decision replyDecision, authorAssociation string) replyEffectPlan {
-	if !ghpkg.IsPrivilegedAssociation(authorAssociation) {
-		return replyEffectPlan{}
+func planReplyEffects(ctx context.Context, checker repoWriteAccessChecker, event ghpkg.CommentEvent, owner, repo string, decision replyDecision) (replyEffectPlan, error) {
+	if checker == nil {
+		return replyEffectPlan{}, fmt.Errorf("repository permission checker is unavailable")
+	}
+	allowed, err := checker.HasRepoWriteAccess(ctx, event.InstallationID, owner, repo, event.CommentAuthor)
+	if err != nil {
+		return replyEffectPlan{}, fmt.Errorf("checking repository permission for %q: %w", event.CommentAuthor, err)
+	}
+	if !allowed {
+		return replyEffectPlan{}, nil
 	}
 
 	plan := replyEffectPlan{AllowWrites: true}
@@ -231,29 +247,23 @@ func planReplyEffects(decision replyDecision, authorAssociation string) replyEff
 		plan.Outcome = "not_applicable_change_kind"
 		plan.FeedbackAction = "dismissed"
 	}
-	plan.LifecycleEvent, _ = replyLifecycleEvent(decision.Action, plan.Outcome, authorAssociation)
-	return plan
+	plan.LifecycleEvent = replyLifecycleEvent(decision.Action, plan.Outcome)
+	return plan, nil
 }
 
-// replyLifecycleEvent maps a reply decision to the FindingLifecycle event it
-// should raise, and whether the replier is AUTHORIZED to raise it. A rejection
-// (outcome dismissed / not-applicable) → EventDismissed; a plain confirm-and-fix
-// resolve → EventAddressedByReply; stand_firm / clarify raise nothing (event="").
-//
-// Both events resolve the thread and write terminal ledger state, so they are
-// gated on the replier's privilege: for a non-privileged replier authorized is
-// false and the caller MUST skip all reply-derived persistent effects. Pure —
-// unit-tested without the LLM/DB path.
-func replyLifecycleEvent(action, outcome, authorAssociation string) (event LifecycleEvent, authorized bool) {
+// replyLifecycleEvent maps an authorized reply decision to the lifecycle event
+// it raises. Authorization is intentionally absent here: planReplyEffects
+// applies one effective repository-permission gate to the complete set of
+// shared-pattern, outcome, lifecycle, and feedback writes.
+func replyLifecycleEvent(action, outcome string) LifecycleEvent {
 	switch {
 	case outcome == "dismissed" || outcome == "not_applicable_change_kind":
-		event = EventDismissed
+		return EventDismissed
 	case action == "resolve": // confirmed finding, developer fixed it
-		event = EventAddressedByReply
+		return EventAddressedByReply
 	default:
-		return "", false
+		return ""
 	}
-	return event, ghpkg.IsPrivilegedAssociation(authorAssociation)
 }
 
 func buildReplyPrompt(original *store.ReviewComment, event ghpkg.CommentEvent) string {

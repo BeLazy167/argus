@@ -1,6 +1,8 @@
 package pipeline
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -8,45 +10,25 @@ import (
 	"github.com/BeLazy167/argus/backend/internal/store"
 )
 
-// TestReplyLifecycleEvent pins the reply-path authorization gate: the mapping
-// from a reply decision to its lifecycle event, AND that thread-resolving /
-// terminal-state transitions only fire for a privileged (owner/member/
-// collaborator) replier. A non-privileged reply must yield authorized=false so
-// the caller skips the transition — an untrusted "I fixed it" can neither resolve
-// the thread nor write terminal ledger state (nor override a maintainer's
-// dismissal via addressed-by-reply).
+// TestReplyLifecycleEvent pins the decision-to-lifecycle mapping. Authorization
+// is applied once to the complete effect plan before any reply-derived write.
 func TestReplyLifecycleEvent(t *testing.T) {
 	tests := []struct {
-		name           string
-		action         string
-		outcome        string
-		assoc          string
-		wantEvent      LifecycleEvent
-		wantAuthorized bool
+		name      string
+		action    string
+		outcome   string
+		wantEvent LifecycleEvent
 	}{
-		// Privileged repliers drive the transition.
-		{"owner resolve+fixed → addressed-by-reply", "resolve", "confirmed", "OWNER", EventAddressedByReply, true},
-		{"member resolve+learning → dismissed", "resolve", "dismissed", "MEMBER", EventDismissed, true},
-		{"collaborator not-applicable → dismissed", "not_applicable_change_kind", "not_applicable_change_kind", "COLLABORATOR", EventDismissed, true},
-
-		// Untrusted repliers: correct event mapping but NOT authorized → caller skips.
-		{"fork contributor (NONE) resolve+fixed → NOT authorized", "resolve", "confirmed", "NONE", EventAddressedByReply, false},
-		{"contributor resolve+learning → NOT authorized", "resolve", "dismissed", "CONTRIBUTOR", EventDismissed, false},
-		{"contributor not-applicable → NOT authorized", "not_applicable_change_kind", "not_applicable_change_kind", "CONTRIBUTOR", EventDismissed, false},
-		{"empty association → NOT authorized (fail-closed)", "resolve", "confirmed", "", EventAddressedByReply, false},
-
-		// Non-terminal actions raise no transition regardless of privilege.
-		{"stand_firm (owner) → no event", "stand_firm", "confirmed", "OWNER", "", false},
-		{"clarify (owner) → no event", "clarify", "ignored", "OWNER", "", false},
+		{"resolve+fixed → addressed-by-reply", "resolve", "confirmed", EventAddressedByReply},
+		{"resolve+learning → dismissed", "resolve", "dismissed", EventDismissed},
+		{"not-applicable → dismissed", "not_applicable_change_kind", "not_applicable_change_kind", EventDismissed},
+		{"stand_firm → no event", "stand_firm", "confirmed", ""},
+		{"clarify → no event", "clarify", "ignored", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ev, ok := replyLifecycleEvent(tt.action, tt.outcome, tt.assoc)
-			if ev != tt.wantEvent {
-				t.Errorf("event = %q, want %q", ev, tt.wantEvent)
-			}
-			if ok != tt.wantAuthorized {
-				t.Errorf("authorized = %v, want %v", ok, tt.wantAuthorized)
+			if got := replyLifecycleEvent(tt.action, tt.outcome); got != tt.wantEvent {
+				t.Errorf("event = %q, want %q", got, tt.wantEvent)
 			}
 		})
 	}
@@ -84,29 +66,129 @@ func TestBuildReplyPromptContainsOnlyDelimitedSanitizedFields(t *testing.T) {
 	}
 }
 
-func TestPlanReplyEffectsFailsClosedBeforeWrites(t *testing.T) {
-	decision := replyDecision{Action: "resolve", Learning: "shared convention"}
-	tests := []struct {
-		association string
-		wantWrites  bool
+type stubReplyPermissionChecker struct {
+	allowed bool
+	err     error
+	calls   int
+
+	installationID int64
+	owner          string
+	repo           string
+	login          string
+}
+
+func (s *stubReplyPermissionChecker) HasRepoWriteAccess(_ context.Context, installationID int64, owner, repo, login string) (bool, error) {
+	s.calls++
+	s.installationID = installationID
+	s.owner = owner
+	s.repo = repo
+	s.login = login
+	return s.allowed, s.err
+}
+
+func TestPlanReplyEffectsRequiresEffectiveWritePermissionForEveryDerivedAction(t *testing.T) {
+	t.Parallel()
+
+	actions := []struct {
+		name     string
+		decision replyDecision
+		want     replyEffectPlan
 	}{
-		{"OWNER", true},
-		{"MEMBER", true},
-		{"COLLABORATOR", true},
-		{"CONTRIBUTOR", false},
-		{"NONE", false},
-		{"", false},
-		{" owner ", true},
-		{"TRIAGE", false},
+		{
+			name:     "resolve fixed",
+			decision: replyDecision{Action: "resolve"},
+			want: replyEffectPlan{
+				AllowWrites:    true,
+				Outcome:        "confirmed",
+				FeedbackAction: "confirmed",
+				LifecycleEvent: EventAddressedByReply,
+			},
+		},
+		{
+			name:     "resolve with shared learning",
+			decision: replyDecision{Action: "resolve", Learning: "shared convention"},
+			want: replyEffectPlan{
+				AllowWrites:    true,
+				Outcome:        "dismissed",
+				FeedbackAction: "dismissed",
+				LifecycleEvent: EventDismissed,
+			},
+		},
+		{
+			name:     "stand firm",
+			decision: replyDecision{Action: "stand_firm"},
+			want: replyEffectPlan{
+				AllowWrites:    true,
+				Outcome:        "confirmed",
+				FeedbackAction: "confirmed",
+			},
+		},
+		{
+			name:     "clarify",
+			decision: replyDecision{Action: "clarify"},
+			want: replyEffectPlan{
+				AllowWrites: true,
+				Outcome:     "ignored",
+			},
+		},
+		{
+			name:     "not applicable change kind",
+			decision: replyDecision{Action: "not_applicable_change_kind"},
+			want: replyEffectPlan{
+				AllowWrites:    true,
+				Outcome:        "not_applicable_change_kind",
+				FeedbackAction: "dismissed",
+				LifecycleEvent: EventDismissed,
+			},
+		},
 	}
-	for _, tt := range tests {
-		t.Run(tt.association, func(t *testing.T) {
-			plan := planReplyEffects(decision, tt.association)
-			if plan.AllowWrites != tt.wantWrites {
-				t.Fatalf("AllowWrites = %v, want %v", plan.AllowWrites, tt.wantWrites)
-			}
-			if !tt.wantWrites && (plan.Outcome != "" || plan.FeedbackAction != "" || plan.LifecycleEvent != "") {
-				t.Fatalf("untrusted reply planned derived writes: %+v", plan)
+
+	event := ghpkg.CommentEvent{
+		InstallationID: 42,
+		RepoFullName:   "acme/widgets",
+		CommentAuthor:  "octocat",
+	}
+	permissions := []struct {
+		name        string
+		association string
+		allowed     bool
+		err         error
+		wantError   bool
+	}{
+		{name: "org member with read denied", association: "MEMBER"},
+		{name: "collaborator with triage denied", association: "COLLABORATOR"},
+		{name: "write allowed despite untrusted association", association: "NONE", allowed: true},
+		{name: "maintain allowed", association: "CONTRIBUTOR", allowed: true},
+		{name: "admin allowed", allowed: true},
+		{name: "lookup error denied", association: "OWNER", err: errors.New("permission lookup failed"), wantError: true},
+	}
+
+	for _, permission := range permissions {
+		permission := permission
+		t.Run(permission.name, func(t *testing.T) {
+			t.Parallel()
+			for _, action := range actions {
+				action := action
+				t.Run(action.name, func(t *testing.T) {
+					t.Parallel()
+					checker := &stubReplyPermissionChecker{allowed: permission.allowed, err: permission.err}
+					replyEvent := event
+					replyEvent.AuthorAssociation = permission.association
+					plan, err := planReplyEffects(context.Background(), checker, replyEvent, "acme", "widgets", action.decision)
+					if (err != nil) != permission.wantError {
+						t.Fatalf("planReplyEffects() error = %v, wantError %v", err, permission.wantError)
+					}
+					want := replyEffectPlan{}
+					if permission.allowed {
+						want = action.want
+					}
+					if plan != want {
+						t.Fatalf("planReplyEffects() = %+v, want %+v", plan, want)
+					}
+					if checker.calls != 1 || checker.installationID != 42 || checker.owner != "acme" || checker.repo != "widgets" || checker.login != "octocat" {
+						t.Fatalf("permission lookup = calls:%d (%d, %q, %q, %q), want actual reply author and repository", checker.calls, checker.installationID, checker.owner, checker.repo, checker.login)
+					}
+				})
 			}
 		})
 	}

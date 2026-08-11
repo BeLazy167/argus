@@ -207,9 +207,10 @@ verdict leaves the thread open (never a false resolve).
 ### Dismissed
 
 The developer rejected the finding (Argus was wrong, or not applicable to this
-change). Terminal state `dismissed`. Raised by a privileged reply, or by a
-👎-dominant reaction — but a reaction is **ledger-only** (records the state for
-suppression memory, never resolves the thread).
+change). Terminal state `dismissed`. Raised by a reply whose actual author has
+effective repository write access, or by a 👎-dominant reaction — but a reaction
+is **ledger-only** (records the state for suppression memory, never resolves the
+thread).
 
 ### Deferred
 
@@ -232,10 +233,11 @@ the two are not equivalent.
 
 - `HasRepoWriteAccess` (`internal/github/client.go`) asks GitHub's permission
   API about one login. It accepts `admin`, `maintain`, and `write`. This is the
-  exact answer.
+  exact answer and is required for every reply-derived persistent write.
 - `IsPrivilegedAssociation` (`internal/github/identity.go`) reads the
   `author_association` field on a webhook payload. It accepts `OWNER`,
-  `MEMBER`, and `COLLABORATOR`. This is a coarse proxy for push permission.
+  `MEMBER`, and `COLLABORATOR`. This is only a coarse proxy and cannot authorize
+  reply-derived writes.
 
 `CONTRIBUTOR` means only that the person had a pull request merged. It grants
 nothing. `FIRST_TIME_CONTRIBUTOR`, `MANNEQUIN`, and `NONE` also grant nothing.
