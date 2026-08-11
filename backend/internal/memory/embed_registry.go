@@ -203,8 +203,8 @@ func (r *EmbedderRegistry) GetEmbedder(ctx context.Context, installationID int64
 	// for the full TTL stamps up to five minutes of rows with
 	// embedding_space stamped for the platform endpoint while every read gates
 	// the score on the installation's real BYOK space — those rows score 0 forever, and because
-	// their embedding is NOT NULL the backfill sweep (which targets NULLs)
-	// never repairs them. A short TTL bounds the damage to one retry window.
+	// their embedding is NOT NULL. The repair sweep selects the foreign
+	// space stamp, but this short TTL still bounds temporary retrieval loss. A short TTL bounds the damage to one retry window.
 	ttl := embedderCacheTTL
 	if err != nil {
 		ttl = errorEmbedderTTL

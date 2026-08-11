@@ -54,10 +54,9 @@ func (s *Store) ListPatternsForRepo(ctx context.Context, installationIDs []int64
 	return collectOrEmpty(rows, pgx.RowToStructByPos[Pattern])
 }
 
-// CreatePattern inserts a pattern row. memoryCustomID is the deterministic
-// customId mirrored from the memory write (nil when unknown); it durably
-// keys the row so the per-finding enrich read can resolve a search hit back to
-// this pattern by customId even when the hit's own id is a chunk id.
+// CreatePattern inserts a pattern and its memory-mirror event atomically.
+// Callers must supply a deterministic memoryCustomID (or a legacy memoryDocID)
+// so a committed relational row always has a retryable mirror identity.
 func (s *Store) CreatePattern(ctx context.Context, installationID int64, repoID *int64, content string, memoryDocID *string, createdBy *string, source *string, category *string, prNumber *int, memoryCustomID *string) (*Pattern, error) {
 	customID := firstNonEmpty(memoryCustomID, memoryDocID)
 	if customID == "" {

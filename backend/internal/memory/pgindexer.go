@@ -286,7 +286,7 @@ func (idx *PGIndexer) ReembedMissing(ctx context.Context, batchSize int) (int, e
 	cast := vectorParam("$1", usesPGContextVector(ctx, idx.pool, idx.logger))
 	spaceID := idx.embeddingSpaceID()
 	// The content predicate closes a race, and is not redundant with
-	// `embedding IS NULL`. A live upsert can rewrite this row's content
+	// the NULL-or-foreign-space predicate. A live upsert can rewrite this row's content
 	// between the SELECT and the UPDATE and leave the embedding NULL again
 	// (the same embedder is still failing), and identity alone would then
 	// stamp a vector derived from the OLD text onto the NEW content --

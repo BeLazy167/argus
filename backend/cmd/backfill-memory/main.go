@@ -58,7 +58,7 @@ func main() {
 	}
 	// Needed to resolve a per-installation BYOK embeddings key. Without it the
 	// registry silently falls back to the platform key and stamps rows with the
-	// WRONG embedding_model — and embedding_model is an equality gate at read
+	// WRONG embedding space — and embedding_space is an equality gate at read
 	// time, not a label, so those rows would score 0 forever while reading fine.
 	if err := crypto.InitFromEnv(); err != nil {
 		logger.Error("ENCRYPTION_KEY is required to resolve embeddings keys", "error", err)

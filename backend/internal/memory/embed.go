@@ -28,7 +28,7 @@ type Embedder interface {
 	// have at once — IndexReviewCommentsBatch stays one API call.
 	Embed(ctx context.Context, inputs []string) ([][]float32, error)
 	// Model identifies the embedding space. Rows persist it in
-	// memories.embedding_model so a model change can gate search and drive
+	// memories.embedding_space so endpoint/model rotation can gate search and drive
 	// re-embedding instead of silently mixing incomparable vectors.
 	Model() string
 }

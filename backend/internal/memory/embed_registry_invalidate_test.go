@@ -35,9 +35,9 @@ func (b *blockingEmbedResolver) ResolveEmbeddingsKey(context.Context, int64) (st
 // "embeddings" key and InvalidateEmbedder fires. Without the guard the
 // in-flight resolve re-caches the OLD key and model for the full TTL, so every
 // memory written in that window is embedded with a revoked key and stamped
-// with the superseded embedding_model. Reads gate the score on
-// embedding_model, so those rows are invisible — and being NOT NULL, the
-// backfill sweep never repairs them.
+// with the superseded embedding space. Reads gate the score on
+// embedding_space, so those rows are invisible — and carrying a foreign space stamp, the
+// repair sweep must select them as well as NULL vectors.
 func TestEmbedderInvalidateDuringResolve(t *testing.T) {
 	r := &blockingEmbedResolver{
 		// Buffered: the post-rotation re-read resolves again, and its send
@@ -81,8 +81,8 @@ func TestEmbedderInvalidateDuringResolve(t *testing.T) {
 // PLATFORM key and model. Caching that for the full TTL stamps up to five
 // minutes of rows with the platform model while reads gate the score on the
 // install's real BYOK model — those rows score 0 forever, and because their
-// embedding is NOT NULL the backfill sweep, which targets NULLs, never
-// repairs them. Asserted on the stored expiry, since the window is real time.
+// embedding is NOT NULL; the repair sweep must select its foreign space
+// stamp as well as NULL vectors. Asserted on the stored expiry, since the window is real time.
 func TestEmbedderErrorResolveCachesBriefly(t *testing.T) {
 	reg := NewEmbedderRegistry(&fakeEmbedResolver{err: context.DeadlineExceeded},
 		PlatformEmbeddings{APIKey: "platform"}, discardLogger())

@@ -58,9 +58,8 @@ CREATE INDEX memory_mirror_outbox_pending_idx
   ON memory_mirror_outbox (available_at, claimed_at, id)
   WHERE processed_at IS NULL;
 
--- Keep the btree live-row scope aligned with the view. The vector index's older
--- predicate remains usable because the view implies it; rebuilding it is an
--- operator-specific concern when production owns the column with pgContext.
-DROP INDEX IF EXISTS memories_scope_idx;
-CREATE INDEX memories_scope_idx ON memories (installation_id, container_tag, type)
+-- Add a lifecycle-complete scope index without replacing the existing index.
+-- Keeping migrations additive avoids an index-coverage gap during deploy; the
+-- older index remains useful to binaries that predate this view.
+CREATE INDEX memories_live_scope_idx ON memories (installation_id, container_tag, type)
   WHERE deleted_at IS NULL AND invalidated_at IS NULL AND superseded_by IS NULL;
