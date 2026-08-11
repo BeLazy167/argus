@@ -525,16 +525,16 @@ type VwMemoryAb struct {
 }
 
 type VwReviewGauge struct {
-	InstallationID       int64          `json:"installation_id"`
-	Category             string         `json:"category"`
-	ChangeClass          interface{}    `json:"change_class"`
-	PostedFindings       int64          `json:"posted_findings"`
-	AddressedHuman       int64          `json:"addressed_human"`
-	AddressedAgent       int64          `json:"addressed_agent"`
-	Dismissed            int64          `json:"dismissed"`
-	Ignored              int64          `json:"ignored"`
-	Deferred             int64          `json:"deferred"`
-	AddressRate          pgtype.Numeric `json:"address_rate"`
-	DismissRate          pgtype.Numeric `json:"dismiss_rate"`
-	MedianSecondsToMerge float64        `json:"median_seconds_to_merge"`
+	InstallationID       int64    `json:"installation_id"`
+	Category             string   `json:"category"`
+	ChangeClass          string   `json:"change_class"`
+	PostedFindings       int64    `json:"posted_findings"`
+	AddressedHuman       int64    `json:"addressed_human"`
+	AddressedAgent       int64    `json:"addressed_agent"`
+	Dismissed            int64    `json:"dismissed"`
+	Ignored              int64    `json:"ignored"`
+	Deferred             int64    `json:"deferred"`
+	AddressRate          *float64 `json:"address_rate"`
+	DismissRate          *float64 `json:"dismiss_rate"`
+	MedianSecondsToMerge *float64 `json:"median_seconds_to_merge"`
 }

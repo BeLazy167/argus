@@ -1508,19 +1508,21 @@ func (s *Store) RecordFindingOutcome(ctx context.Context, reviewCommentID uuid.U
 
 // ListReviewGauge reads vw_review_gauge scoped to the given installations.
 func (s *Store) ListReviewGauge(ctx context.Context, installationIDs []int64) ([]GaugeRow, error) {
-	rows, err := s.Pool.Query(ctx, `
-		SELECT installation_id, category, change_class, posted_findings,
-		       addressed_human, addressed_agent, dismissed, ignored, deferred,
-		       address_rate, dismiss_rate, median_seconds_to_merge
-		FROM vw_review_gauge
-		WHERE installation_id = ANY($1)
-		ORDER BY category, change_class
-	`, installationIDs)
+	rows, err := s.q.ListReviewGauge(ctx, installationIDs)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[GaugeRow])
+	gauge := make([]GaugeRow, 0, len(rows))
+	for _, row := range rows {
+		gauge = append(gauge, GaugeRow{
+			InstallationID: row.InstallationID, Category: row.Category, ChangeClass: row.ChangeClass,
+			PostedFindings: row.PostedFindings, AddressedHuman: row.AddressedHuman,
+			AddressedAgent: row.AddressedAgent, Dismissed: row.Dismissed, Ignored: row.Ignored,
+			Deferred: row.Deferred, AddressRate: row.AddressRate, DismissRate: row.DismissRate,
+			MedianSecondsToMerge: row.MedianSecondsToMerge,
+		})
+	}
+	return gauge, nil
 }
 
 // --- Prompt Templates ---

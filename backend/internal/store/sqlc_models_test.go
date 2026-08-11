@@ -71,3 +71,10 @@ func TestScopedReviewFromSQLCPreservesListPayloadShape(t *testing.T) {
 		t.Fatalf("heavy fields populated: token=%v contract=%v", got.TokenUsage, got.ReviewContract)
 	}
 }
+
+func TestGeneratedGaugePreservesNullableRates(t *testing.T) {
+	row := db.VwReviewGauge{}
+	if row.AddressRate != nil || row.DismissRate != nil || row.MedianSecondsToMerge != nil {
+		t.Fatalf("zero gauge rates are not nil: %#v", row)
+	}
+}

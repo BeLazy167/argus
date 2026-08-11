@@ -162,6 +162,48 @@ func (q *Queries) ListActivity(ctx context.Context, arg ListActivityParams) ([]L
 	return items, nil
 }
 
+const listReviewGauge = `-- name: ListReviewGauge :many
+SELECT installation_id, category, change_class, posted_findings,
+       addressed_human, addressed_agent, dismissed, ignored, deferred,
+       address_rate, dismiss_rate, median_seconds_to_merge
+FROM vw_review_gauge
+WHERE installation_id = ANY($1::bigint[])
+ORDER BY category, change_class
+`
+
+func (q *Queries) ListReviewGauge(ctx context.Context, dollar_1 []int64) ([]VwReviewGauge, error) {
+	rows, err := q.db.Query(ctx, listReviewGauge, dollar_1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []VwReviewGauge
+	for rows.Next() {
+		var i VwReviewGauge
+		if err := rows.Scan(
+			&i.InstallationID,
+			&i.Category,
+			&i.ChangeClass,
+			&i.PostedFindings,
+			&i.AddressedHuman,
+			&i.AddressedAgent,
+			&i.Dismissed,
+			&i.Ignored,
+			&i.Deferred,
+			&i.AddressRate,
+			&i.DismissRate,
+			&i.MedianSecondsToMerge,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const logActivity = `-- name: LogActivity :exec
 INSERT INTO activity_log (installation_id, action, actor, resource, metadata)
 VALUES ($1, $2, $3, $4, $5)

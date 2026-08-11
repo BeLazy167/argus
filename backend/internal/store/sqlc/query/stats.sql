@@ -41,3 +41,11 @@ FROM activity_log WHERE installation_id = ANY($1::bigint[]) ORDER BY created_at 
 -- name: LogActivity :exec
 INSERT INTO activity_log (installation_id, action, actor, resource, metadata)
 VALUES ($1, $2, $3, $4, $5);
+
+-- name: ListReviewGauge :many
+SELECT installation_id, category, change_class, posted_findings,
+       addressed_human, addressed_agent, dismissed, ignored, deferred,
+       address_rate, dismiss_rate, median_seconds_to_merge
+FROM vw_review_gauge
+WHERE installation_id = ANY($1::bigint[])
+ORDER BY category, change_class;
