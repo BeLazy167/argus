@@ -1015,6 +1015,7 @@ func (s *Store) ListPRGithubCommentIDs(ctx context.Context, repoFullName string,
 		JOIN repos r ON rv.repo_id = r.id
 		WHERE r.full_name = $1 AND rv.pr_number = $2
 		  AND rv.status = 'completed'
+		  AND rc.attempt_generation = rv.attempt_generation
 		  AND rc.github_comment_id IS NOT NULL
 	`, repoFullName, prNumber)
 	if err != nil {
@@ -1075,6 +1076,7 @@ func (s *Store) ListUnboundReviewComments(ctx context.Context, reviewID uuid.UUI
 		SELECT id, file_path, end_line, body
 		FROM review_comments
 		WHERE review_id = $1 AND github_comment_id IS NULL AND end_line IS NOT NULL
+		  AND attempt_generation = (SELECT attempt_generation FROM reviews WHERE id=$1)
 		  AND suppressed_reason IS NULL
 		ORDER BY created_at, id
 	`, reviewID)
@@ -1240,7 +1242,7 @@ func (s *Store) GetStats(ctx context.Context) (*Stats, error) {
 			(SELECT COUNT(*) FROM reviews WHERE created_at >= CURRENT_DATE AND status = 'completed')::int,
 			COALESCE((SELECT AVG(score)::int FROM reviews WHERE score IS NOT NULL), 0),
 			(SELECT COUNT(*) FROM repos WHERE enabled = true)::int,
-			(SELECT COUNT(*) FROM review_comments WHERE severity = 'critical' AND state <> 'suppressed')::int,
+			(SELECT COUNT(*) FROM review_comments rc JOIN reviews rv ON rv.id=rc.review_id WHERE rc.attempt_generation=rv.attempt_generation AND rc.severity='critical' AND rc.state <> 'suppressed')::int,
 			(SELECT COUNT(*) FROM reviews WHERE status IN ('pending','in_progress'))::int,
 			COALESCE((SELECT (COUNT(*) FILTER (WHERE score < 10) * 100 / NULLIF(COUNT(*) FILTER (WHERE status = 'completed'), 0))::int FROM reviews), 0),
 			(SELECT COUNT(*) FROM reviews WHERE created_at >= NOW() - INTERVAL '7 days')::int,
@@ -1263,7 +1265,7 @@ func (s *Store) GetStatsScoped(ctx context.Context, installationIDs []int64) (*S
 			(SELECT COUNT(*) FROM scoped_reviews WHERE created_at >= CURRENT_DATE AND status = 'completed')::int,
 			COALESCE((SELECT AVG(score)::int FROM scoped_reviews WHERE score IS NOT NULL), 0),
 			(SELECT COUNT(*) FROM repos WHERE installation_id = ANY($1) AND enabled = true)::int,
-			(SELECT COUNT(*) FROM review_comments WHERE review_id IN (SELECT id FROM scoped_reviews) AND severity = 'critical' AND state <> 'suppressed')::int,
+			(SELECT COUNT(*) FROM review_comments rc JOIN scoped_reviews rv ON rv.id=rc.review_id WHERE rc.attempt_generation=rv.attempt_generation AND rc.severity='critical' AND rc.state <> 'suppressed')::int,
 			(SELECT COUNT(*) FROM scoped_reviews WHERE status IN ('pending','in_progress'))::int,
 			COALESCE((SELECT (COUNT(*) FILTER (WHERE score < 10) * 100 / NULLIF(COUNT(*) FILTER (WHERE status = 'completed'), 0))::int FROM scoped_reviews), 0),
 			(SELECT COUNT(*) FROM scoped_reviews WHERE created_at >= NOW() - INTERVAL '7 days')::int,
@@ -1513,6 +1515,7 @@ func (s *Store) ListPostedFindings(ctx context.Context, repoID int64, prNumber i
 		FROM review_comments rc
 		JOIN reviews rv ON rv.id = rc.review_id
 		WHERE rv.repo_id = $1 AND rv.pr_number = $2 AND rv.status = 'completed'
+		  AND rc.attempt_generation = rv.attempt_generation
 		  AND rc.suppressed_reason IS NULL
 		  AND rc.github_comment_id IS NOT NULL
 		  AND NOT EXISTS (
