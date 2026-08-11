@@ -383,3 +383,49 @@ func TestIndexParsedSymbolsReplacesEdgeSnapshotIncludingEmpty(t *testing.T) {
 		})
 	}
 }
+
+func TestIndexParsedSymbolsResolvesEdgeTargetFromExistingRepoGraph(t *testing.T) {
+	const repoID int64 = 42
+	st := newFakeIndexerStore()
+	st.nodeIDsByName = map[string]int64{"UntouchedTarget": 77}
+
+	err := indexParsedSymbols(context.Background(), st, repoID, map[string]fileResult{
+		"changed.go": {
+			symbols: []Symbol{{Kind: KindFunction, Name: "ChangedCaller", FilePath: "changed.go", LineStart: 1, LineEnd: 4}},
+			edges:   []Edge{{SourceName: "ChangedCaller", TargetName: "UntouchedTarget", Kind: "calls"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("indexParsedSymbols: %v", err)
+	}
+	if len(st.upsertEdges) != 1 {
+		t.Fatalf("replacement edges = %+v, want one cross-file call", st.upsertEdges)
+	}
+	if got := st.upsertEdges[0].targetID; got != 77 {
+		t.Fatalf("target id = %d, want existing repo node 77", got)
+	}
+}
+
+func TestIndexParsedSymbolsResolvesTypeTargetFromExistingRepoGraph(t *testing.T) {
+	const repoID int64 = 42
+	st := newFakeIndexerStore()
+	st.nodeIDsByName = map[string]int64{"UntouchedType": 88}
+
+	err := indexParsedSymbols(context.Background(), st, repoID, map[string]fileResult{
+		"changed.go": {
+			symbols: []Symbol{{
+				Kind: KindFunction, Name: "ChangedCaller", FilePath: "changed.go",
+				LineStart: 1, LineEnd: 4, ReturnType: "*UntouchedType",
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("indexParsedSymbols: %v", err)
+	}
+	if len(st.upsertEdges) != 1 {
+		t.Fatalf("replacement edges = %+v, want one cross-file type edge", st.upsertEdges)
+	}
+	if got := st.upsertEdges[0]; got.targetID != 88 || got.kind != "uses_type" {
+		t.Fatalf("edge = %+v, want target 88 uses_type", got)
+	}
+}

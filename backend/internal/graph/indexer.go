@@ -479,6 +479,50 @@ func resolveNodeName(sourceFile, name string, keyToID map[string]int64, nameToID
 // Edges and symbol slices are kept separate from the fileResult map so the
 // caller can free file bodies eagerly during the fetch/parse phase.
 func resolveAndUpsertEdges(ctx context.Context, st indexerStore, repoDBID int64, edgesByFile map[string][]Edge, symbolsByFile map[string][]Symbol, keyToID map[string]int64, nameToIDs map[string][]int64) error {
+	// An incremental run only parses changed files. Resolve targets that live in
+	// untouched files from the published repo graph before replacing the changed
+	// files' outgoing edge snapshots; otherwise a one-file change would silently
+	// delete every call or type edge into an unchanged file.
+	missing := map[string]struct{}{}
+	for filePath, edges := range edgesByFile {
+		for _, edge := range edges {
+			if _, ok := resolveNodeName(filePath, edge.TargetName, keyToID, nameToIDs); !ok && edge.TargetName != "" {
+				missing[edge.TargetName] = struct{}{}
+			}
+		}
+	}
+	for filePath, symbols := range symbolsByFile {
+		for _, sym := range symbols {
+			for _, expression := range []string{sym.ReturnType, sym.Params} {
+				for _, typeName := range extractTypeNames(expression) {
+					if _, ok := resolveNodeName(filePath, typeName, keyToID, nameToIDs); !ok {
+						missing[typeName] = struct{}{}
+					}
+				}
+			}
+		}
+	}
+	if len(missing) > 0 {
+		names := make([]string, 0, len(missing))
+		for name := range missing {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		dbIDs, err := st.LookupCodeNodeIDsByName(ctx, repoDBID, names)
+		if err != nil {
+			return fmt.Errorf("resolve existing edge targets: %w", err)
+		}
+		for name, id := range dbIDs {
+			if id == 0 {
+				continue
+			}
+			nameToIDs[name] = append(nameToIDs[name], id)
+			// resolveTypeEdges consumes composite keys. The empty path marks a
+			// database fallback without pretending to know the target's path.
+			keyToID[nodeKey("", name)] = id
+		}
+	}
+
 	resolveEdgeTarget := func(sourceFile, targetName string) (int64, bool) {
 		return resolveNodeName(sourceFile, targetName, keyToID, nameToIDs)
 	}
