@@ -300,11 +300,19 @@ stateDiagram-v2
 
 ### Suppression v2
 
-Dismissals are stored by category+content — semantic and file-path-free — carrying the `change_kind` of the PR they came from and the developer's reason. A future finding is suppressed when any of:
+Dismissals are stored by category+content — semantic and file-path-free — carrying the `change_kind` of the PR they came from and the developer's reason. A 👎 means "this finding was a **false positive**", so the gate's job is to stop re-posting that same wrong claim however it is worded next time — it is not duplicate detection.
 
-- a single dismissal matches at ≥ 0.85 similarity, or
-- ≥ 3 similar dismissals match at ≥ 0.60, or
+Both sides of the comparison store the **finding statement**, never the rendered GitHub body. `formatCommentBody()` wraps every finding in shared chrome (emoji, `**P1 (8/10) · Bug:**`, the impact paragraph, the suggestion block, the "React 👎 to dismiss" footer); `FindingTextFromPostedBody()` strips it back off when a dismissal is read out of Postgres, and the enricher queries with `commentTitle()`. Storing one shape and querying the other is what kept this gate at zero suppressions for its whole deployed life.
+
+"The statement" is one function, not a convention: both entry points end with `findingStatement()` — first line, then first sentence, then a 300-byte rune-safe cap that counts its own ellipsis so re-normalising is a no-op. Two similar-but-separate normalisers is how the shapes drifted apart the first time; the multi-line `what` the LLM sometimes emits (a `Context:\ndiff --git …` blob echoed into the field) is where they diverged hardest. Every `memory.FeedbackMemory` writer must take `OriginalBody` from `FindingTextFromPostedBody()` (a stored row) or `commentTitle()` (a live finding); `TestFeedbackMemorySitesStoreTheStatement` fails on any site that does not.
+
+A future finding is suppressed when any of:
+
+- a single dismissal matches at ≥ 0.80 similarity, or
+- ≥ 3 similar dismissals match at ≥ 0.75, or
 - the category is auto-suppressed after 3 consecutive negative outcomes.
+
+The floors are calibrated on the finding-statement distribution (`internal/memory/thresholds.go` carries the measurement). A floor read off the rendered-comment distribution is ~0.4 too high.
 
 Exemptions and scoping:
 

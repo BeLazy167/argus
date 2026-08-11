@@ -3454,11 +3454,16 @@ func (o *Orchestrator) learnPositivePatterns(ctx context.Context, run *PipelineR
 			}
 			// Route praise through IndexFeedbackSignal so the doc lands with
 			// type=feedback, polarity=positive, action=confirmed metadata —
-			// pure-prose content (c.Body), structured fields in metadata.
+			// pure-prose content, structured fields in metadata.
 			if err := run.Indexer.IndexFeedbackSignal(ctx, owner, repo, memory.FeedbackMemory{
-				FilePath:     fr.Path,
-				Category:     string(c.Category),
-				OriginalBody: c.Body,
+				FilePath: fr.Path,
+				Category: string(c.Category),
+				// commentTitle, not c.Body: every feedback document holds the
+				// finding STATEMENT, and c here is a live FileComment whose body
+				// may carry the multi-line "Context:\ndiff --git …" blob the LLM
+				// echoes into `what`. Storing that raw would put a diff-dominated
+				// embedding next to one-sentence documents.
+				OriginalBody: commentTitle(c),
 				Action:       "confirmed",
 				PRNumber:     run.PREvent.PRNumber,
 			}); err != nil {
@@ -4958,22 +4963,60 @@ func capitalizeCategory(cat string) string {
 // abbreviations like "Dr.", "i.e.") that plain `. ` split tripped on.
 var commentTitleSentenceRe = regexp.MustCompile(`[.!?]\s+[A-Z]`)
 
-// commentTitle returns the one-line headline for the comment.
-// The LLM is prompted to produce `what` as a single short sentence, but when
-// it emits multiple we take only the first. The sentence boundary is detected
-// via a regex that requires an uppercase letter after whitespace, which avoids
-// breaking on mid-word periods. Falls back to a 300-char rune-boundary-safe
-// truncation (via util.Truncate) when no sentence boundary is found.
+// statementMaxBytes caps a finding statement. The cap is a budget for the WHOLE
+// result: findingStatement leaves anything already within
+// statementMaxBytes+len("...") alone, so re-normalising an already-truncated
+// statement is a no-op instead of chewing three more bytes off it each pass.
+// That idempotence is what makes the round trip in
+// TestFindingTextRoundTripsThroughPostedBody exact.
+const statementMaxBytes = 300
+
+// findingStatement is THE normalisation of free finding text into the one-line
+// statement, and the single function both halves of the dismissal comparison
+// end with — commentTitle on the read/render side, FindingTextFromPostedBody on
+// the write side.
+//
+// WHY ONE FUNCTION: the two sides used to normalise differently.
+// FindingTextFromPostedBody cut at the first "\n"; commentTitle only truncated,
+// keeping newlines. For a finding whose `what` is multi-line — 6 of 200 live
+// findings carry a "Context:\ndiff --git a/…" blob the LLM echoed into `what` —
+// the read side then embedded ~300 bytes dominated by diff while the write side
+// stored the clean opening sentence. That is the same cross-shape mismatch this
+// whole path exists to eliminate, reintroduced on exactly the corpus slice that
+// needed it most. A single normaliser cannot drift from itself.
+//
+// The three steps, in order:
+//  1. first line only — everything after it is context the LLM appended to
+//     `what`, not part of the claim;
+//  2. first sentence, if a boundary exists before byte 280. The regex requires
+//     an uppercase letter after whitespace, which avoids splitting "v1.2",
+//     "e.g." and URLs the way a plain ". " split did;
+//  3. otherwise a rune-boundary-safe truncation to the byte budget.
+func findingStatement(src string) string {
+	s := strings.TrimSpace(src)
+	if line, _, multiline := strings.Cut(s, "\n"); multiline {
+		s = strings.TrimSpace(line)
+	}
+	if idx := commentTitleSentenceRe.FindStringIndex(s); idx != nil && idx[0] > 0 && idx[0] < 280 {
+		// idx[0] points at the terminal punctuation; include it.
+		return s[:idx[0]+1]
+	}
+	if len(s) <= statementMaxBytes+len("...") {
+		return s
+	}
+	return util.Truncate(s, statementMaxBytes, true)
+}
+
+// commentTitle returns the one-line headline for the comment — the statement
+// formatCommentBody renders into the header, the enricher queries dismissals
+// with, and FindingTextFromPostedBody recovers back out of a posted body.
+// `what` is the source when the LLM supplied one; otherwise the body.
 func commentTitle(c FileComment) string {
 	src := c.What
 	if src == "" {
 		src = c.Body
 	}
-	if idx := commentTitleSentenceRe.FindStringIndex(src); idx != nil && idx[0] > 0 && idx[0] < 280 {
-		// idx[0] points at the terminal punctuation; include it.
-		return src[:idx[0]+1]
-	}
-	return util.Truncate(src, 300, true)
+	return findingStatement(src)
 }
 
 type diagramSpec struct {

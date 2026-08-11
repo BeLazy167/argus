@@ -231,16 +231,25 @@ func (e *Enricher) enrichComment(ctx context.Context, c *FileComment, filePath s
 		c.IsNewFinding = true
 	}
 
-	// Dismissal suppression v2: retrieve the top dismissed-feedback matches (query
-	// by body — the dismissal doc content IS the finding text), lifecycle-filter
-	// by change kind, then decide drop (single exact match ≥ SuppressionDrop, a
-	// team-feedback streak of similar dismissals, or a category the repo
-	// auto-suppressed) vs downgrade (≥ SuppressionDowngrade). Security and Law-12
-	// permanent checks are exempt from drops — memory may downgrade, never silence
-	// them. Non-fatal; memory-gated.
-	dismissals := memory.BestEffort(e.logger, "dismissal", memory.RepoTagNew(e.repo), len(c.Body),
+	// Dismissal suppression v2: retrieve the top dismissed-feedback matches,
+	// lifecycle-filter by change kind, then decide drop (single match ≥
+	// SuppressionDrop, a team-feedback streak of similar dismissals, or a category
+	// the repo auto-suppressed) vs downgrade (≥ SuppressionDowngrade). Security
+	// and Law-12 permanent checks are exempt from drops — memory may downgrade,
+	// never silence them. Non-fatal; memory-gated.
+	//
+	// The query is commentTitle(c), NOT c.Body: a dismissal doc stores the
+	// statement FindingTextFromPostedBody recovers from the rendered comment, and
+	// commentTitle is the function that produced that same line when the comment
+	// was rendered. Querying with c.Body instead pairs an untruncated body — which
+	// occasionally carries a whole "Context:\ndiff --git ..." blob the LLM echoed
+	// into `what` — against a one-sentence document, and the diff then dominates
+	// the embedding: six such bodies in the live corpus scored 0.9455 against
+	// UNRELATED findings on the same file, including a praise against a bug.
+	dismissalQuery := commentTitle(*c)
+	dismissals := memory.BestEffort(e.logger, "dismissal", memory.RepoTagNew(e.repo), len(dismissalQuery),
 		func() ([]memory.PatternMatch, error) {
-			return dismissalSearch(ctx, e.reader, e.repo, c.Body, e.thresholds.FindingEnrich)
+			return dismissalSearch(ctx, e.reader, e.repo, dismissalQuery, e.thresholds.FindingEnrich)
 		})
 	eval := evaluateDismissals(dismissals, e.changeClass,
 		suppressionExempt(c.Category, c.Body), autoSuppressed[string(c.Category)], e.thresholds)

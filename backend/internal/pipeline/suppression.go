@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
@@ -10,12 +11,89 @@ import (
 	"github.com/BeLazy167/argus/backend/internal/memory"
 )
 
+// postedBodyHeaderRe matches the presentation header formatCommentBody prepends
+// to every finding it renders: a severity emoji, then a bold label
+// ("P1 (8/10) · Bug:" — or a bare "Security:" for praise, which has no
+// priority), then the title sentence.
+//
+// The leading emoji is REQUIRED and enumerated from severityEmoji's four
+// returns, which is what stops the pattern from eating real prose: a finding
+// that legitimately opens "Fix the **timeout:** it is unset" is bold text with
+// a colon in exactly the header's shape, and a pattern that let the emoji be
+// optional truncated it to "it is unset". TestFindingTextRoundTripsThroughPostedBody
+// covers every severity, so adding a fifth emoji fails there rather than
+// silently falling through to the unparsed path.
+var postedBodyHeaderRe = regexp.MustCompile(`^(?:\x{1F534}|\x{1F7E1}|\x{1F4A1}|\x{2705}) \*\*[^*\n]{1,160}:\*\*[ \t]*`)
+
+// mediumConfidenceSuffix is what formatCommentBody appends inside <summary>
+// when it wraps a medium-confidence finding in <details>.
+const mediumConfidenceSuffix = " (medium confidence)"
+
+// FindingTextFromPostedBody recovers the finding's own statement from a body
+// that formatCommentBody already rendered for GitHub.
+//
+// WHY THIS EXISTS: dismissal suppression compares two texts that were being
+// produced in two different shapes. The READ side (dismissalSearch, called from
+// the enricher) queries with the in-pipeline FileComment.Body — one plain
+// sentence, e.g. "The cleanup failure skips both resource shutdown calls". The
+// WRITE side read review_comments.body back out of Postgres, which is the
+// POSTED body: emoji + "**P1 (8/10) · Bug:**" + title, then the impact
+// paragraph, then a ```suggestion block, then "---" and the
+// "<sub>React 👎 to dismiss · Argus learns from feedback</sub>" footer,
+// optionally wrapped in <details><summary>…(medium confidence)</summary>.
+//
+// Embedded, those two shapes are not neighbours. Measured on the live corpus
+// (2026-08-10): across the 43 production dismissals that have any later finding
+// in the same repo, the highest cross-shape similarity reached anywhere is
+// 0.5726 — below even the 0.70 FindingEnrich floor dismissalSearch retrieves
+// with. dismissalSearch therefore returned ZERO rows on every review ever run,
+// and `SELECT count(*) FROM review_comments WHERE state='suppressed'` is 0
+// after 45 dismissals. No drop/downgrade floor could have changed that; the
+// gate was never reached. Same corpus, shapes matched: max 0.9563.
+//
+// The rendering chrome is peeled off, and then the result goes through
+// findingStatement — the SAME normaliser commentTitle ends with. Both halves of
+// the comparison therefore apply identical rules (first line, first sentence,
+// byte budget) rather than merely similar ones. A body with no recognisable
+// header is normalised too, not passed through: a legacy or hand-edited body
+// left in its raw multi-line shape is exactly the mismatch this function
+// exists to remove, and findingStatement never empties non-empty text, so no
+// dismissal can become an unsearchable empty document.
+func FindingTextFromPostedBody(body string) string {
+	s := strings.TrimSpace(body)
+	// Medium-confidence findings hide the header inside <summary>.
+	if rest, wrapped := strings.CutPrefix(s, "<details><summary>"); wrapped {
+		if summary, _, closed := strings.Cut(rest, "</summary>"); closed {
+			s = strings.TrimSuffix(strings.TrimSpace(summary), mediumConfidenceSuffix)
+		}
+	}
+	// Everything past the header line is impact prose, suggestion block, memory
+	// tag and footer — chrome shared by every finding, which is exactly what
+	// pulls unrelated findings together in embedding space.
+	if line, _, multiline := strings.Cut(s, "\n"); multiline {
+		s = line
+	}
+	if loc := postedBodyHeaderRe.FindStringIndex(s); loc != nil {
+		if title := strings.TrimSpace(s[loc[1]:]); title != "" {
+			s = title
+		}
+	}
+	return findingStatement(s)
+}
+
 // dismissalSearch retrieves the top dismissed-feedback matches (type=feedback,
 // action=dismissed) semantically matching the finding body in the repo container
 // — the read half of dismissal suppression. An empty body has nothing to query,
 // so it short-circuits to no matches. Retrieval uses the FindingEnrich floor;
 // the caller degrades a search error via memory.BestEffort (suppression is
 // non-fatal). Result shaping (drop/downgrade policy) lives in evaluateDismissals.
+//
+// body MUST be the finding STATEMENT — commentTitle for a live finding,
+// FindingTextFromPostedBody for one read back out of Postgres. The stored
+// dismissal docs hold exactly that, and cosine between a statement and a
+// rendered comment body is not a similarity between the findings: measured
+// on the live corpus, the SAME finding scored 0.7193 mean / 0.9000 max across
+// the shape boundary, so an identical re-post never reached the drop floor.
 func dismissalSearch(ctx context.Context, indexer memory.Indexer, repo, body string, threshold float64) ([]memory.PatternMatch, error) {
 	if body == "" {
 		return nil, nil
@@ -31,14 +109,17 @@ func dismissalSearch(ctx context.Context, indexer memory.Indexer, repo, body str
 	})
 }
 
-// Dismissal-match suppression policy (locked). A generated finding that
-// semantically matches a finding a developer previously 👎-dismissed in this
-// repo is gated by the match similarity, against the memory.Thresholds floors:
+// Dismissal-match suppression policy (locked). A 👎 means "this finding was a
+// FALSE POSITIVE" — not "duplicate", not "similar" — so a generated finding
+// that restates a claim a developer already rejected in this repo is gated by
+// the match similarity, against the memory.Thresholds floors:
 //
 //	>= SuppressionDrop      → DROP (never posted, persisted flagged suppressed)
 //	>= SuppressionDowngrade → DOWNGRADE severity one level + attribution note
 //	below                   → untouched
 //
+// Both sides of that comparison must be the finding STATEMENT (see
+// FindingTextFromPostedBody); a floor is only meaningful for one text shape.
 // The floors sit above the FindingEnrich retrieval threshold so a weak
 // coincidental match doesn't silently mute a real finding. Every floor is now
 // read from the resolved memory.Thresholds (single source, no bare literals);

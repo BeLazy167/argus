@@ -224,9 +224,12 @@ func (ra *ReplyAnalyzer) Analyze(ctx context.Context, event ghpkg.CommentEvent) 
 
 		if feedbackAction != "" {
 			fb := memory.FeedbackMemory{
-				FilePath:       original.FilePath,
-				Category:       *original.Category,
-				OriginalBody:   original.Body,
+				FilePath: original.FilePath,
+				Category: *original.Category,
+				// original.Body is the RENDERED GitHub body; dismissalSearch queries
+				// with the finding statement, so store the statement (same reason as
+				// the reaction path in reactions.go).
+				OriginalBody:   FindingTextFromPostedBody(original.Body),
 				Action:         feedbackAction,
 				DeveloperReply: event.CommentBody,
 				PRNumber:       event.PRNumber,

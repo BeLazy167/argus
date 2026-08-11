@@ -156,9 +156,12 @@ func (ra *ReactionAnalyzer) HandleCommentReactions(ctx context.Context, event gh
 	}
 	if indexer != nil && comment.Category != nil {
 		fb := memory.FeedbackMemory{
-			FilePath:       comment.FilePath,
-			Category:       *comment.Category,
-			OriginalBody:   comment.Body,
+			FilePath: comment.FilePath,
+			Category: *comment.Category,
+			// comment.Body is the RENDERED GitHub body (header, impact prose,
+			// suggestion block, "React 👎 to dismiss" footer). Store the finding
+			// statement instead, because that is what dismissalSearch queries with.
+			OriginalBody:   FindingTextFromPostedBody(comment.Body),
 			Action:         action,
 			DeveloperReply: "", // no text reply, just a reaction
 			PRNumber:       event.PRNumber,

@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -318,9 +319,12 @@ func TestEvaluateDismissals(t *testing.T) {
 			wantAction: dismissalNone,
 		},
 		{
-			name:       "single exact match drops (v1 behavior preserved)",
-			matches:    []memory.PatternMatch{mkDismissal(dropFloor+0.01, "", "7")},
-			wantAction: dismissalDrop, wantReasonPrefix: "dismissed_match:0.96", wantSimilar: 1,
+			name:    "single exact match drops (v1 behavior preserved)",
+			matches: []memory.PatternMatch{mkDismissal(dropFloor+0.01, "", "7")},
+			// Derived, not literal: the reason string carries the score, so a
+			// literal here silently stops describing the case when the floor moves.
+			wantAction: dismissalDrop, wantSimilar: 1,
+			wantReasonPrefix: fmt.Sprintf("dismissed_match:%.2f", dropFloor+0.01),
 		},
 		{
 			name:       "single mid match only downgrades",

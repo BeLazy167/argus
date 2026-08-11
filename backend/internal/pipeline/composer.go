@@ -465,7 +465,9 @@ func formatCommentBody(c FileComment) string {
 	}
 
 	// Dismissal-downgrade attribution: the finding matched a previously-dismissed
-	// similar finding (0.60–0.85) so its severity was lowered. Idiom-matched to
+	// similar finding (the [SuppressionDowngrade, SuppressionDrop) band) so its
+	// severity was lowered. No literal band here — it moved twice already and the
+	// comment did not follow. Idiom-matched to
 	// renderMemoryTag (italic, em-dash lead-in).
 	if c.DismissedDowngrade {
 		note := "_— Previously dismissed a similar finding"
