@@ -115,6 +115,23 @@ func enqueueMemoryMirrorEvent(ctx context.Context, tx pgx.Tx, event MemoryMirror
 	if err != nil {
 		return fmt.Errorf("enqueue memory mirror event: %w", err)
 	}
+
+	// A rule owns its custom ID uniquely, so disabling or deleting it can make
+	// the Postgres read model unsearchable in the producer transaction. Pattern
+	// custom IDs may have duplicate relational owners and must remain on the
+	// outbox worker's ownership-aware delete path instead.
+	if event.AggregateType == MemoryMirrorRule && event.Operation == MemoryMirrorDelete {
+		if customID == "" {
+			return fmt.Errorf("enqueue rule delete mirror event: empty custom ID")
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE memories
+			SET deleted_at = now(), updated_at = now()
+			WHERE installation_id = $1 AND custom_id = $2 AND deleted_at IS NULL`,
+			event.InstallationID, customID); err != nil {
+			return fmt.Errorf("tombstone rule memory %s: %w", customID, err)
+		}
+	}
 	return nil
 }
 

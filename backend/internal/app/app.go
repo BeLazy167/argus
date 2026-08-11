@@ -154,20 +154,20 @@ func Run() error {
 
 	// Recover incomplete pipeline runs (async — don't block server startup)
 	appCtx, appCancel := context.WithCancel(context.Background())
-	defer appCancel()
 
 	// Migration 074 deliberately stamps existing vectors with an unknown
-	// embedding space. Converge them automatically on deploy; per-installation
-	// advisory locks prevent duplicate provider spend across replicas.
+	// embedding space. Check immediately on startup, retry transient failures
+	// with bounded backoff, and periodically converge the whole fleet so a
+	// failed rotation trigger cannot strand a tenant. Per-installation advisory
+	// locks and Registry capacity limits keep every replica safe to run this.
+	reembedDone := make(chan struct{})
 	go func() {
-		reembedCtx, cancel := context.WithTimeout(appCtx, 2*time.Hour)
-		defer cancel()
-		repaired, err := memRegistry.ReembedAllCurrentSpaces(reembedCtx)
-		if err != nil {
-			logger.Warn("startup memory reembed", "repaired", repaired, "error", err)
-			return
-		}
-		logger.Info("startup memory reembed complete", "repaired", repaired)
+		defer close(reembedDone)
+		runMemoryReembedConvergence(appCtx, logger, defaultReembedConvergenceOptions(), memRegistry.ReembedAllCurrentSpaces)
+	}()
+	defer func() {
+		appCancel()
+		<-reembedDone
 	}()
 
 	// Durable projection of relational patterns/rules into the memory store.

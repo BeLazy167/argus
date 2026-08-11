@@ -251,3 +251,183 @@ func TestDeletePatternLegacyNullMemoryIdentityEnqueuesReplayableDelete(t *testin
 		t.Fatalf("delete payload is not replayable: %+v", payload)
 	}
 }
+
+func TestRuleDisableTombstonesLiveMemoryBeforeStoreReturns(t *testing.T) {
+	pool, ctx := fileMemoryTestPool(t)
+	lockMirrorOutboxPGTests(t, pool, ctx)
+	requireMirrorOutbox(t, pool, ctx)
+	st := &Store{Pool: pool, q: db.New(pool)}
+	installationID, _, _ := seedLearnTenant(t, ctx, pool, "rule-disable-boundary")
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM memory_mirror_outbox WHERE installation_id=$1`, installationID)
+	})
+
+	rule, err := st.CreateRule(ctx, installationID, "safety", "never expose disabled rules", 5, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	customID := "rule--" + fmt.Sprint(rule.ID)
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO memories (installation_id, container_tag, custom_id, type, content)
+		VALUES ($1, '_shared', $2, 'rule', 'never expose disabled rules')`, installationID, customID); err != nil {
+		t.Fatal(err)
+	}
+
+	disabled := false
+	updated, err := st.UpdateRule(ctx, rule.ID, []int64{installationID}, nil, nil, nil, &disabled)
+	if err != nil {
+		t.Fatalf("disable rule: %v", err)
+	}
+	if updated.Enabled {
+		t.Fatal("rule remained enabled")
+	}
+	var live bool
+	if err := pool.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM live_memories WHERE installation_id=$1 AND custom_id=$2)`,
+		installationID, customID).Scan(&live); err != nil {
+		t.Fatal(err)
+	}
+	if live {
+		t.Fatal("UpdateRule returned while the disabled rule was still searchable")
+	}
+}
+
+func TestRuleDeleteTombstonesLiveMemoryBeforeStoreReturns(t *testing.T) {
+	pool, ctx := fileMemoryTestPool(t)
+	lockMirrorOutboxPGTests(t, pool, ctx)
+	requireMirrorOutbox(t, pool, ctx)
+	st := &Store{Pool: pool, q: db.New(pool)}
+	installationID, _, _ := seedLearnTenant(t, ctx, pool, "rule-delete-boundary")
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM memory_mirror_outbox WHERE installation_id=$1`, installationID)
+	})
+
+	rule, err := st.CreateRule(ctx, installationID, "safety", "never expose deleted rules", 5, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	customID := "rule--" + fmt.Sprint(rule.ID)
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO memories (installation_id, container_tag, custom_id, type, content)
+		VALUES ($1, '_shared', $2, 'rule', 'never expose deleted rules')`, installationID, customID); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := st.DeleteRule(ctx, rule.ID, []int64{installationID}); err != nil {
+		t.Fatalf("delete rule: %v", err)
+	}
+	var live bool
+	if err := pool.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM live_memories WHERE installation_id=$1 AND custom_id=$2)`,
+		installationID, customID).Scan(&live); err != nil {
+		t.Fatal(err)
+	}
+	if live {
+		t.Fatal("DeleteRule returned while the deleted rule was still searchable")
+	}
+}
+
+func TestRuleDisableRollsBackWhenLiveMemoryTombstoneFails(t *testing.T) {
+	pool, ctx := fileMemoryTestPool(t)
+	lockMirrorOutboxPGTests(t, pool, ctx)
+	requireMirrorOutbox(t, pool, ctx)
+	st := &Store{Pool: pool, q: db.New(pool)}
+	installationID, _, _ := seedLearnTenant(t, ctx, pool, "rule-tombstone-rollback")
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM memory_mirror_outbox WHERE installation_id=$1`, installationID)
+	})
+
+	rule, err := st.CreateRule(ctx, installationID, "safety", "rollback atomically", 5, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	customID := "rule--" + fmt.Sprint(rule.ID)
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO memories (installation_id, container_tag, custom_id, type, content)
+		VALUES ($1, '_shared', $2, 'rule', 'rollback atomically')`, installationID, customID); err != nil {
+		t.Fatal(err)
+	}
+
+	blocker, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = blocker.Rollback(context.Background()) }()
+	if _, err := blocker.Exec(ctx, `
+		SELECT 1 FROM memories WHERE installation_id=$1 AND custom_id=$2 FOR UPDATE`, installationID, customID); err != nil {
+		t.Fatal(err)
+	}
+
+	attemptCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	disabled := false
+	if _, err := st.UpdateRule(attemptCtx, rule.ID, []int64{installationID}, nil, nil, nil, &disabled); err == nil {
+		t.Fatal("expected blocked memory tombstone to fail")
+	}
+	if err := blocker.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	var enabled, live bool
+	if err := pool.QueryRow(ctx, `SELECT enabled FROM rules WHERE id=$1`, rule.ID).Scan(&enabled); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM live_memories WHERE installation_id=$1 AND custom_id=$2)`,
+		installationID, customID).Scan(&live); err != nil {
+		t.Fatal(err)
+	}
+	if !enabled || !live {
+		t.Fatalf("failed tombstone did not roll back atomically: enabled=%v live=%v", enabled, live)
+	}
+	var eventCount int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM memory_mirror_outbox
+		WHERE installation_id=$1 AND aggregate_type='rule' AND aggregate_id=$2`,
+		installationID, rule.ID).Scan(&eventCount); err != nil {
+		t.Fatal(err)
+	}
+	if eventCount != 1 {
+		t.Fatalf("outbox event count=%d, want only the original create event", eventCount)
+	}
+}
+
+func TestPatternDeleteDoesNotBlindlyUseRuleProducerTombstone(t *testing.T) {
+	pool, ctx := fileMemoryTestPool(t)
+	lockMirrorOutboxPGTests(t, pool, ctx)
+	requireMirrorOutbox(t, pool, ctx)
+	st := &Store{Pool: pool, q: db.New(pool)}
+	installationID, _, _ := seedLearnTenant(t, ctx, pool, "pattern-delete-owner-check")
+	var repoID int64
+	if err := pool.QueryRow(ctx, `SELECT id FROM repos WHERE installation_id=$1`, installationID).Scan(&repoID); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM memory_mirror_outbox WHERE installation_id=$1`, installationID)
+	})
+
+	customID := "duplicate-owned-pattern"
+	source := "manual"
+	pattern, err := st.CreatePattern(ctx, installationID, &repoID, "shared identity owner", nil, nil, &source, nil, nil, &customID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO memories (installation_id, container_tag, custom_id, type, content)
+		VALUES ($1, 'pattern-delete-owner-check', $2, 'pattern', 'shared identity owner')`, installationID, customID); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := st.DeletePattern(ctx, pattern.ID, []int64{installationID}); err != nil {
+		t.Fatal(err)
+	}
+	var live bool
+	if err := pool.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM live_memories WHERE installation_id=$1 AND custom_id=$2)`,
+		installationID, customID).Scan(&live); err != nil {
+		t.Fatal(err)
+	}
+	if !live {
+		t.Fatal("pattern producer bypassed the worker's duplicate-owner authorization")
+	}
+}

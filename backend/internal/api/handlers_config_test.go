@@ -131,3 +131,31 @@ func TestScheduleMemoryReembedDetachesFromRequest(t *testing.T) {
 		t.Fatal("embedding rotation did not schedule corpus repair")
 	}
 }
+
+func TestScheduleMemoryReembedReturnsBeforeRepairCompletes(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	s := &Server{logger: slog.New(slog.DiscardHandler), reembedMemories: func(context.Context, int64) (int, error) {
+		close(started)
+		<-release
+		return 0, nil
+	}}
+	returned := make(chan struct{})
+	go func() {
+		s.scheduleMemoryReembed(context.Background(), 77)
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(100 * time.Millisecond):
+		close(release)
+		t.Fatal("provider-key handler trigger waited for corpus convergence")
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("provider-key handler did not promptly trigger convergence")
+	}
+	close(release)
+}
