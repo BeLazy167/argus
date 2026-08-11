@@ -195,6 +195,179 @@ func TestRegistryOverlappingEmbeddingRotationsConvergeToLatestSpace(t *testing.T
 	}
 }
 
+func TestRegistryDuplicateTenantRepairsDoNotStarveAnotherTenant(t *testing.T) {
+	pool, firstInstallationID := pgTestPoolWithMaxConns(t, 20)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	var secondInstallationID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO installations (installation_id, org_login)
+		VALUES ($1, $2)
+		ON CONFLICT (installation_id) DO UPDATE SET org_login = EXCLUDED.org_login
+		RETURNING id`, 910_020, "repair-capacity-neighbour").Scan(&secondInstallationID); err != nil {
+		t.Fatalf("create second installation: %v", err)
+	}
+	installationIDs := []int64{firstInstallationID, secondInstallationID}
+	setDesired := func(installationID int64, model string) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, `
+			UPDATE installations
+			SET default_settings = jsonb_set(COALESCE(default_settings, '{}'::jsonb),
+				'{test_embedding_model}', to_jsonb($2::text), true)
+			WHERE id = $1`, installationID, model); err != nil {
+			t.Fatalf("set installation %d desired embedding space %s: %v", installationID, model, err)
+		}
+	}
+	setDesired(firstInstallationID, "space-B")
+	setDesired(secondInstallationID, "other-space")
+	for i, installationID := range installationIDs {
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO memories (installation_id, container_tag, custom_id, type, content, metadata)
+			VALUES ($1, 'repo:api', $2, 'pattern', $3, '{}'::jsonb)
+			ON CONFLICT (installation_id, custom_id) DO UPDATE
+			SET content = EXCLUDED.content, embedding = NULL, embedding_model = NULL, embedding_space = NULL,
+				deleted_at = NULL, invalidated_at = NULL`,
+			installationID, fmt.Sprintf("duplicate-capacity-%d", i), fmt.Sprintf("repair tenant %d", i)); err != nil {
+			t.Fatalf("seed installation %d: %v", installationID, err)
+		}
+	}
+	t.Cleanup(func() {
+		cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancelCleanup()
+		if _, err := pool.Exec(cleanupCtx, `DELETE FROM memories WHERE installation_id = ANY($1)`, installationIDs); err != nil {
+			t.Errorf("cleanup repair memories: %v", err)
+		}
+		if _, err := pool.Exec(cleanupCtx, `
+			UPDATE installations
+			SET default_settings = COALESCE(default_settings, '{}'::jsonb) - 'test_embedding_model'
+			WHERE id = ANY($1)`, installationIDs); err != nil {
+			t.Errorf("cleanup repair installations: %v", err)
+		}
+	})
+
+	bEntered := make(chan struct{})
+	otherEntered := make(chan struct{})
+	releaseB := make(chan struct{})
+	var enterBOnce, enterOtherOnce, releaseBOnce sync.Once
+	releaseBlockedB := func() { releaseBOnce.Do(func() { close(releaseB) }) }
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req embedRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		switch req.Model {
+		case "space-B":
+			enterBOnce.Do(func() { close(bEntered) })
+			select {
+			case <-releaseB:
+			case <-r.Context().Done():
+				return
+			}
+		case "other-space":
+			enterOtherOnce.Do(func() { close(otherEntered) })
+		}
+		data := make([]map[string]any, len(req.Input))
+		for i := range req.Input {
+			vec := make([]float32, StorageDimensions)
+			vec[0] = 1
+			data[i] = map[string]any{"index": i, "embedding": vec}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": data})
+	}))
+	defer server.Close()
+	defer releaseBlockedB()
+
+	embedders := NewEmbedderRegistry(
+		&pgDesiredSpaceResolver{pool: pool, baseURL: server.URL},
+		PlatformEmbeddings{Dimensions: StorageDimensions},
+		discardLogger(),
+	)
+	registry := NewRegistry(discardLogger()).WithPostgresBackend(pool, embedders)
+
+	firstResults := make(chan reembedResult, 10)
+	go func() {
+		n, err := registry.ReembedCurrentSpace(ctx, firstInstallationID, 10)
+		firstResults <- reembedResult{repaired: n, err: err}
+	}()
+	select {
+	case <-bEntered:
+	case <-ctx.Done():
+		t.Fatalf("first tenant did not enter space B provider call: %v", ctx.Err())
+	}
+
+	// MaxConns=20 admits nine repairs. These nine duplicates used to fill the
+	// remaining eight permits (with one queued) while repeatedly polling the
+	// same advisory lock, preventing an unrelated tenant from starting.
+	const duplicateCount = 9
+	duplicatesStarted := make(chan struct{}, duplicateCount)
+	for i := 0; i < duplicateCount; i++ {
+		go func() {
+			duplicatesStarted <- struct{}{}
+			n, err := registry.ReembedCurrentSpace(ctx, firstInstallationID, 10)
+			firstResults <- reembedResult{repaired: n, err: err}
+		}()
+	}
+	for i := 0; i < duplicateCount; i++ {
+		<-duplicatesStarted
+	}
+	time.Sleep(5 * reembedLockPollInterval)
+
+	// A later desired space must not be swallowed while same-installation calls
+	// coalesce behind the in-flight repair.
+	setDesired(firstInstallationID, "space-C")
+	otherDone := make(chan reembedResult, 1)
+	go func() {
+		n, err := registry.ReembedCurrentSpace(ctx, secondInstallationID, 10)
+		otherDone <- reembedResult{repaired: n, err: err}
+	}()
+	select {
+	case <-otherEntered:
+	case <-time.After(time.Second):
+		t.Fatal("another tenant could not start while duplicate repairs waited")
+	}
+
+	releaseBlockedB()
+	firstTotal := 0
+	for i := 0; i < duplicateCount+1; i++ {
+		select {
+		case result := <-firstResults:
+			if result.err != nil {
+				t.Errorf("first-tenant repair failed: %v (repaired=%d)", result.err, result.repaired)
+			}
+			firstTotal += result.repaired
+		case <-ctx.Done():
+			t.Fatalf("first-tenant repairs did not finish: %v", ctx.Err())
+		}
+	}
+	if firstTotal != 2 {
+		t.Errorf("first tenant repaired %d rows across B then C, want 2", firstTotal)
+	}
+	select {
+	case result := <-otherDone:
+		if result.err != nil {
+			t.Errorf("other-tenant repair failed: %v (repaired=%d)", result.err, result.repaired)
+		} else if result.repaired != 1 {
+			t.Errorf("other tenant repaired %d rows, want 1", result.repaired)
+		}
+	case <-ctx.Done():
+		t.Fatalf("other-tenant repair did not finish: %v", ctx.Err())
+	}
+
+	wantSpace := NewEmbedder("", server.URL, "space-C", StorageDimensions).SpaceID()
+	var gotSpaces []string
+	if err := pool.QueryRow(ctx, `
+		SELECT COALESCE(array_agg(DISTINCT embedding_space), ARRAY[]::text[])
+		FROM live_memories WHERE installation_id = $1`, firstInstallationID).Scan(&gotSpaces); err != nil {
+		t.Fatalf("read first tenant final corpus spaces: %v", err)
+	}
+	if len(gotSpaces) != 1 || gotSpaces[0] != wantSpace {
+		t.Fatalf("first tenant final corpus spaces = %v, want canonical C space %q", gotSpaces, wantSpace)
+	}
+}
+
 func TestRegistryCapturedIndexerCannotWriteObsoleteSpaceAfterRepair(t *testing.T) {
 	pool, installationID := pgTestPool(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)

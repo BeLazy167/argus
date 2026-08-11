@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -25,6 +26,9 @@ type Registry struct {
 	pool          *pgxpool.Pool
 	embedders     *EmbedderRegistry
 	repairPermits chan struct{}
+
+	repairKeysMu sync.Mutex
+	repairKeys   map[int64]*repairKey
 }
 
 // NewRegistry constructs a Registry with no usable backend. Call
@@ -160,6 +164,54 @@ func (r *Registry) releaseRepairPermit() {
 	<-r.repairPermits
 }
 
+// repairKey serializes same-installation callers inside one Registry before
+// they can occupy global repair capacity or poll PostgreSQL. refs includes the
+// holder and waiters so an entry remains reachable across every handoff.
+type repairKey struct {
+	permit chan struct{}
+	refs   int
+}
+
+func (r *Registry) acquireRepairKey(ctx context.Context, installationID int64) (*repairKey, error) {
+	r.repairKeysMu.Lock()
+	if r.repairKeys == nil {
+		r.repairKeys = make(map[int64]*repairKey)
+	}
+	key := r.repairKeys[installationID]
+	if key == nil {
+		key = &repairKey{permit: make(chan struct{}, 1)}
+		key.permit <- struct{}{}
+		r.repairKeys[installationID] = key
+	}
+	key.refs++
+	r.repairKeysMu.Unlock()
+
+	select {
+	case <-key.permit:
+		return key, nil
+	case <-ctx.Done():
+		r.dropRepairKeyRef(installationID, key)
+		return nil, ctx.Err()
+	}
+}
+
+func (r *Registry) releaseRepairKey(installationID int64, key *repairKey) {
+	// Make the key available before dropping the holder's ref. A concurrent
+	// acquirer must find this same entry rather than create a second lock.
+	key.permit <- struct{}{}
+	r.dropRepairKeyRef(installationID, key)
+}
+
+func (r *Registry) dropRepairKeyRef(installationID int64, key *repairKey) {
+	r.repairKeysMu.Lock()
+	defer r.repairKeysMu.Unlock()
+
+	key.refs--
+	if key.refs == 0 && r.repairKeys[installationID] == key {
+		delete(r.repairKeys, installationID)
+	}
+}
+
 // memoryEmbeddingLockKey namespaces the tenant lock independently from every
 // other advisory lock while retaining the full installation id.
 func memoryEmbeddingLockKey(installationID int64) int64 {
@@ -264,7 +316,16 @@ func (r *Registry) ReembedCurrentSpace(ctx context.Context, installationID int64
 		return 0, fmt.Errorf("reembed current space: postgres memory backend is not configured")
 	}
 
-	// Take the process-local capacity permit before borrowing the session-lock
+	// Serialize this process's duplicate callers before they occupy global
+	// capacity or poll PostgreSQL. The advisory lock remains authoritative
+	// across Registries and machines.
+	repairKey, err := r.acquireRepairKey(ctx, installationID)
+	if err != nil {
+		return 0, fmt.Errorf("reembed current space: wait for installation repair: %w", err)
+	}
+	defer r.releaseRepairKey(installationID, repairKey)
+
+	// Bound distinct-tenant winners before borrowing the session-lock
 	// connection. Otherwise distinct tenant keys can all win and exhaust the
 	// pool while every winner waits for its corpus-work connection.
 	if err := r.acquireRepairPermit(ctx); err != nil {
