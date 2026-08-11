@@ -87,9 +87,20 @@ func IndexRepoBounded(
 	fileCap int,
 	_ int,
 ) (FullIndexResult, error) {
-	commitSHA, err := ghClient.ResolveDefaultBranchCommit(ctx, installationID, owner, repo, defaultBranch)
+	// A bounded continuation must finish the snapshot it started. Resolving the
+	// mutable branch again here would restart a large repository every time a
+	// commit landed between windows, so an otherwise healthy busy repo might
+	// never publish a complete graph.
+	snapshot, err := st.GetGraphSnapshot(ctx, repoDBID)
 	if err != nil {
-		return FullIndexResult{}, fmt.Errorf("resolve default branch: %w", err)
+		return FullIndexResult{}, err
+	}
+	commitSHA := snapshot.CommitSHA
+	if snapshot.Status != "building" || commitSHA == "" {
+		commitSHA, err = ghClient.ResolveDefaultBranchCommit(ctx, installationID, owner, repo, defaultBranch)
+		if err != nil {
+			return FullIndexResult{}, fmt.Errorf("resolve default branch: %w", err)
+		}
 	}
 	tree, err := ghClient.GetRepoTree(ctx, installationID, owner, repo, commitSHA)
 	if err != nil {
@@ -97,7 +108,7 @@ func IndexRepoBounded(
 	}
 	sourceFiles := filterSourceFiles(tree.Paths)
 	sort.Strings(sourceFiles)
-	snapshot, err := st.BeginGraphGeneration(ctx, repoDBID, commitSHA, len(sourceFiles), len(tree.Paths)-len(sourceFiles), tree.Truncated)
+	snapshot, err = st.BeginGraphGeneration(ctx, repoDBID, commitSHA, len(sourceFiles), len(tree.Paths)-len(sourceFiles), tree.Truncated)
 	if err != nil {
 		return FullIndexResult{}, err
 	}

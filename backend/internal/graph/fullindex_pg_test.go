@@ -92,8 +92,9 @@ func TestIndexRepoBoundedStagesThenAtomicallyPublishes(t *testing.T) {
 	oldID := generationSeedNode(t, ctx, pool, repoID, "Old", "deleted.go")
 	_ = oldID
 
+	const snapshotSHA = "0123456789012345678901234567890123456789"
 	gh := &fakeFullIndexGitHub{
-		sha:  "0123456789012345678901234567890123456789",
+		sha:  snapshotSHA,
 		tree: ghpkg.RepoTree{Paths: []string{"a.go", "b.go", "README.md"}},
 		contents: map[string]string{
 			"a.go": "package p\nfunc Alpha() { Beta() }\n",
@@ -117,6 +118,9 @@ func TestIndexRepoBoundedStagesThenAtomicallyPublishes(t *testing.T) {
 		t.Fatal("partial generation changed the published graph")
 	}
 
+	// A continuation belongs to the generation's immutable snapshot even when
+	// the mutable default branch advances between bounded windows.
+	gh.sha = "9999999999999999999999999999999999999999"
 	second, err := IndexRepoBounded(ctx, st, gh, 1, "o", "r", "main", repoID, 1, 0)
 	if err != nil {
 		t.Fatalf("second window: %v", err)
@@ -124,12 +128,12 @@ func TestIndexRepoBoundedStagesThenAtomicallyPublishes(t *testing.T) {
 	if !second.Published || !second.Snapshot.Complete {
 		t.Fatalf("second window did not publish: %+v", second)
 	}
-	if gh.treeRef != gh.sha {
-		t.Fatalf("tree ref = %q, want immutable SHA %q", gh.treeRef, gh.sha)
+	if gh.treeRef != snapshotSHA {
+		t.Fatalf("tree ref = %q, want immutable generation SHA %q", gh.treeRef, snapshotSHA)
 	}
 	for _, ref := range gh.fileRefs {
-		if ref != gh.sha {
-			t.Fatalf("file ref = %q, want immutable SHA %q", ref, gh.sha)
+		if ref != snapshotSHA {
+			t.Fatalf("file ref = %q, want immutable generation SHA %q", ref, snapshotSHA)
 		}
 	}
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM code_nodes WHERE id = $1`, oldID).Scan(&oldCount); err != nil {
