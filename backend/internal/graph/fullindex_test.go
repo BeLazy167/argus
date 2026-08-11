@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -104,6 +105,38 @@ func TestDescribeNodeResolutionKeepsAmbiguityExplicit(t *testing.T) {
 			id, status := describeNodeResolution(tt.sourceFile, tt.target, keys, names)
 			if id != tt.wantID || status != tt.wantStatus {
 				t.Fatalf("resolution = %d/%s, want %d/%s", id, status, tt.wantID, tt.wantStatus)
+			}
+		})
+	}
+}
+
+func TestBoundedFullIndexFileCapCannotBypassFleetBudget(t *testing.T) {
+	for _, tt := range []struct {
+		requested int
+		want      int
+	}{{-1, DefaultFullIndexFileCap}, {0, DefaultFullIndexFileCap}, {1, 1}, {DefaultFullIndexFileCap, DefaultFullIndexFileCap}, {DefaultFullIndexFileCap + 1, DefaultFullIndexFileCap}} {
+		if got := boundedFullIndexFileCap(tt.requested); got != tt.want {
+			t.Errorf("boundedFullIndexFileCap(%d) = %d, want %d", tt.requested, got, tt.want)
+		}
+	}
+}
+
+func TestGraphGenerationPublishLimitsAreInclusive(t *testing.T) {
+	limits := graphGenerationPublishLimits{JSONBytes: 10, Files: 2, Symbols: 2, Edges: 3, Endpoints: 1}
+	atLimit := graphGenerationStats{JSONBytes: 10, Files: 2, Symbols: 2, Edges: 3, Endpoints: 1}
+	if err := limits.validate(atLimit); err != nil {
+		t.Fatalf("exact limits rejected: %v", err)
+	}
+	for name, over := range map[string]graphGenerationStats{
+		"bytes":     {JSONBytes: 11},
+		"files":     {Files: 3},
+		"symbols":   {Symbols: 3},
+		"edges":     {Edges: 4},
+		"endpoints": {Endpoints: 2},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if !errors.Is(limits.validate(over), ErrGraphGenerationResourceLimit) {
+				t.Fatalf("over-limit stats accepted: %+v", over)
 			}
 		})
 	}

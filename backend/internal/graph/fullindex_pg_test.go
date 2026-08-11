@@ -2,6 +2,7 @@ package graph
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"os"
@@ -970,4 +971,109 @@ func containsGraphTarget(targets []store.RepoIndexTarget, repoID int64, defaultB
 		}
 	}
 	return false
+}
+
+func TestPublishGraphGenerationResourceLimitsAreTerminalAndAtomic(t *testing.T) {
+	pool, ctx := generationTestPool(t)
+	st := store.NewWithDB(pool)
+	original := defaultGraphGenerationPublishLimits
+	defaultGraphGenerationPublishLimits = graphGenerationPublishLimits{
+		JSONBytes: 1 << 20, Files: 10, Symbols: 1, Edges: 10, Endpoints: 10,
+		ResolutionNodes: 10, PublishedEdges: 10,
+	}
+	t.Cleanup(func() { defaultGraphGenerationPublishLimits = original })
+
+	t.Run("exact bound publishes with small-graph parity", func(t *testing.T) {
+		installationID := generationSeedInstallation(t, ctx, pool, "{}")
+		repoID := generationSeedRepo(t, ctx, pool, installationID, "generation/exact-resource-limit")
+		snapshot, err := st.BeginGraphGeneration(ctx, repoID, "exact-head", 1, 0, false, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		symbolJSON, _ := json.Marshal([]Symbol{{Kind: "file", Name: "a.go", FilePath: "a.go", LineStart: 1, LineEnd: 1}})
+		if _, err := st.StageGraphGenerationFile(ctx, repoID, snapshot.GenerationID, "a.go", symbolJSON, []byte("[]"), []byte("[]"), nil, false); err != nil {
+			t.Fatal(err)
+		}
+		if err := publishGraphGeneration(ctx, st, repoID, snapshot.GenerationID); err != nil {
+			t.Fatalf("publish at exact symbol bound: %v", err)
+		}
+		var status string
+		var nodes int
+		if err := pool.QueryRow(ctx, `SELECT status, (SELECT count(*)::int FROM code_nodes WHERE repo_id = $2)
+			FROM graph_index_generations WHERE id = $1`, snapshot.GenerationID, repoID).Scan(&status, &nodes); err != nil {
+			t.Fatal(err)
+		}
+		if status != "published" || nodes != 1 {
+			t.Fatalf("exact-bound status/nodes = %s/%d, want published/1", status, nodes)
+		}
+	})
+
+	t.Run("one over fails terminal without replacing published graph", func(t *testing.T) {
+		installationID := generationSeedInstallation(t, ctx, pool, "{}")
+		repoID := generationSeedRepo(t, ctx, pool, installationID, "generation/over-resource-limit")
+		if _, err := pool.Exec(ctx, `UPDATE repos SET enabled = true WHERE id = $1`, repoID); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			_, _ = pool.Exec(context.Background(), `UPDATE repos SET enabled = false WHERE id = $1`, repoID)
+		})
+		var oldGenerationID int64
+		if err := pool.QueryRow(ctx, `INSERT INTO graph_index_generations
+			(repo_id, commit_sha, status, expected_files, visited_files, published_at)
+			VALUES ($1, 'old-head', 'published', 0, 0, NOW()) RETURNING id`, repoID).Scan(&oldGenerationID); err != nil {
+			t.Fatal(err)
+		}
+		oldNodeID := generationSeedNode(t, ctx, pool, repoID, "Old", "old.go")
+		if _, err := pool.Exec(ctx, `UPDATE repos SET graph_published_generation_id = $2,
+			graph_refresh_requested_at = NOW(), graph_refresh_commit_sha = 'large-head',
+			graph_default_head_sha = 'large-head' WHERE id = $1`, repoID, oldGenerationID); err != nil {
+			t.Fatal(err)
+		}
+
+		snapshot, err := st.BeginGraphGeneration(ctx, repoID, "large-head", 1, 0, false, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		symbolJSON, _ := json.Marshal([]Symbol{
+			{Kind: "file", Name: "large.go", FilePath: "large.go"},
+			{Kind: "function", Name: "TooMuch", FilePath: "large.go"},
+		})
+		if _, err := st.StageGraphGenerationFile(ctx, repoID, snapshot.GenerationID, "large.go", symbolJSON, []byte("[]"), []byte("[]"), nil, false); err != nil {
+			t.Fatal(err)
+		}
+		err = publishGraphGeneration(ctx, st, repoID, snapshot.GenerationID)
+		if !errors.Is(err, ErrGraphGenerationResourceLimit) {
+			t.Fatalf("publish error = %v, want resource limit", err)
+		}
+		var status string
+		var publishedID *int64
+		var oldNodes, newNodes int
+		if err := pool.QueryRow(ctx, `SELECT g.status, r.graph_published_generation_id,
+			(SELECT count(*)::int FROM code_nodes WHERE id = $3),
+			(SELECT count(*)::int FROM code_nodes WHERE repo_id = $2 AND file_path = 'large.go')
+			FROM graph_index_generations g JOIN repos r ON r.id = g.repo_id
+			WHERE g.id = $1`, snapshot.GenerationID, repoID, oldNodeID).
+			Scan(&status, &publishedID, &oldNodes, &newNodes); err != nil {
+			t.Fatal(err)
+		}
+		if status != "failed" || publishedID == nil || *publishedID != oldGenerationID || oldNodes != 1 || newNodes != 0 {
+			t.Fatalf("terminal publication = status %s published %v old/new nodes %d/%d", status, publishedID, oldNodes, newNodes)
+		}
+
+		prompt, err := st.ListReposDueForPromptGraphIndex(ctx, 10000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		backfill, err := st.ListReposDueForGraphIndex(ctx, 14*24*time.Hour, 10000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, targets := range [][]store.RepoIndexTarget{prompt, backfill} {
+			for _, target := range targets {
+				if target.RepoID == repoID {
+					t.Fatal("oversized immutable generation remained immediately retryable")
+				}
+			}
+		}
+	})
 }

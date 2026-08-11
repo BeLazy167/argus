@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -226,6 +225,30 @@ func (s *Store) ListReposDueForPromptGraphIndex(ctx context.Context, limit int) 
 		out = append(out, target)
 	}
 	return out, rows.Err()
+}
+
+// TryReserveGraphIndexWindow atomically reserves the fleet-wide API-budget slot.
+// The timestamp lives in Postgres, so restarts and machines with offset tickers
+// cannot accelerate the cadence. A crash after reservation spends the slot
+// conservatively rather than risking a second GitHub burst.
+func (s *Store) TryReserveGraphIndexWindow(ctx context.Context, minimumSpacing time.Duration) (bool, error) {
+	if minimumSpacing <= 0 {
+		return false, fmt.Errorf("reserve graph index window: minimum spacing must be positive")
+	}
+	var reserved bool
+	err := s.Pool.QueryRow(ctx, `
+		WITH reserved AS (
+		  UPDATE graph_index_budget SET last_window_started_at = NOW()
+		  WHERE singleton AND (last_window_started_at IS NULL OR
+		    last_window_started_at <= NOW() - $1::interval)
+		  RETURNING 1
+		)
+		SELECT EXISTS (SELECT 1 FROM reserved)`,
+		fmt.Sprintf("%d milliseconds", minimumSpacing.Milliseconds())).Scan(&reserved)
+	if err != nil {
+		return false, fmt.Errorf("reserve graph index window: %w", err)
+	}
+	return reserved, nil
 }
 
 // MarkRepoGraphAttempted records that an index was tried, whatever the outcome.
@@ -483,14 +506,6 @@ type GraphSnapshot struct {
 	GenerationRefreshVersion int64      `json:"-"`
 }
 
-// GraphGenerationFile is one staged deterministic parser snapshot.
-type GraphGenerationFile struct {
-	FilePath  string
-	Symbols   json.RawMessage
-	Edges     json.RawMessage
-	Endpoints json.RawMessage
-}
-
 // BeginGraphGeneration resumes the same immutable snapshot or supersedes it
 // when the default branch moved. A truncated tree is recorded as failed and is
 // never eligible for publication.
@@ -659,22 +674,6 @@ func (s *Store) ListReadyGraphGenerationPaths(ctx context.Context, generationID 
 		out[path] = struct{}{}
 	}
 	return out, rows.Err()
-}
-
-func (s *Store) ListGraphGenerationFiles(ctx context.Context, generationID int64) ([]GraphGenerationFile, error) {
-	rows, err := s.Pool.Query(ctx, `
-		SELECT file_path, symbols, edges, endpoints
-		FROM graph_index_generation_files
-		WHERE generation_id = $1 AND status = 'ready' ORDER BY file_path`, generationID)
-	if err != nil {
-		return nil, fmt.Errorf("list graph generation files: %w", err)
-	}
-	defer rows.Close()
-	return collectOrEmpty(rows, func(row pgx.CollectableRow) (GraphGenerationFile, error) {
-		var f GraphGenerationFile
-		err := row.Scan(&f.FilePath, &f.Symbols, &f.Edges, &f.Endpoints)
-		return f, err
-	})
 }
 
 // GetGraphSnapshot returns the building generation when one exists, otherwise

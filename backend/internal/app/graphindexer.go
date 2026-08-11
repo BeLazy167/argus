@@ -10,29 +10,24 @@ import (
 	"github.com/BeLazy167/argus/backend/internal/store"
 )
 
-// How the full-index backfill is paced.
-//
-// One repo per tick, hourly. The pacing is set by the two costs a full index
-// carries, and both are per-installation:
-//
-//   - GitHub API. IndexRepoBounded fetches one file per call, so a capped index is
-//     up to DefaultFullIndexFileCap calls. An installation gets 5000/hour, and
-//     those same calls are what reviews need — so a burst that indexed several
-//     repos at once could starve the thing users are waiting on.
-//   - Memory. The cross-file edge-resolution pass retains parsed symbols for
-//     every file in the run. One repo at a time keeps that to a single repo's
-//     worth on a 1024 MB machine.
-//
-// At one repo an hour a 25-repo installation reaches full coverage in about a
-// day, and the refresh interval then keeps it current. Deliberately slower than
-// necessary: this is backfill, and the per-PR incremental path already keeps
-// changed files fresh in the meantime.
+// How the full-index backfill is paced. Tickers are only wake-ups; Postgres
+// authoritatively admits at most one fleet window per minimum spacing. A first
+// window costs one ref lookup plus two tree calls. GetFileContent can cost two
+// calls when GitHub returns an out-of-line blob, so the bound counts both.
 const (
 	graphIndexInterval             = time.Hour
 	graphIndexContinuationInterval = 2 * time.Minute
+	graphIndexMinimumSpacing       = 5 * time.Minute
+	graphIndexBudgetHour           = time.Hour
 	graphIndexStaleness            = 14 * 24 * time.Hour
 	graphIndexPerTick              = 1
 	graphIndexTimeout              = 25 * time.Minute
+	graphIndexFileCap              = graph.DefaultFullIndexFileCap
+
+	minimumGitHubInstallationQuota       = 5000
+	graphIndexMaxCallsPerWindow          = 3 + 2*graphIndexFileCap
+	graphIndexMaxCallsPerHour            = 600
+	graphIndexReservedReviewCallsPerHour = 4400
 )
 
 // runGraphIndexBackfill walks whole repositories into the code graph on a
@@ -108,6 +103,14 @@ func indexDueRepos(ctx context.Context, db *store.Store, ghClient *ghpkg.Client,
 	if len(targets) == 0 {
 		return
 	}
+	reserved, err := db.TryReserveGraphIndexWindow(ctx, graphIndexMinimumSpacing)
+	if err != nil {
+		logger.Error("graph index: reserving persistent API budget", "error", err)
+		return
+	}
+	if !reserved {
+		return
+	}
 
 	rebuilt := false
 	for _, t := range targets {
@@ -123,7 +126,7 @@ func indexDueRepos(ctx context.Context, db *store.Store, ghClient *ghpkg.Client,
 		repoCtx, cancel := context.WithTimeout(ctx, graphIndexTimeout)
 		result, err := graph.IndexRepoBounded(repoCtx, db, ghClient,
 			t.GitHubInstallationID, t.Owner, t.Repo, t.DefaultBranch, t.RepoID,
-			graph.DefaultFullIndexFileCap, t.IndexCursor)
+			graphIndexFileCap, t.IndexCursor)
 		cancel()
 
 		if err != nil {
