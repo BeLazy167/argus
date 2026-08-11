@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -57,25 +58,31 @@ func (s *Store) UpsertPatternStats(ctx context.Context, stats PatternQualityStat
 }
 
 // IncrementPatternMatch records that a learned pattern was matched during a
-// review. It self-seeds the pattern_stats row from the patterns table on first
-// match (keyed by installation_id + memory_doc_id, seeded quality 0.5 = the
-// Bayesian prior) and
-// bumps times_matched thereafter. No outcome is applied — confirmed/dismissed
-// land later via RecordPatternOutcome. A patterns row without a memory_doc_id
-// (not yet mirrored) is skipped by the WHERE clause; the ON CONFLICT keeps
-// concurrent matches within one review atomic.
+// review. It self-seeds pattern_stats from the patterns table on first match,
+// preferring the deterministic memory_custom_id and falling back to the legacy
+// memory_doc_id. This keeps stats working after the outbox repairs a memory
+// write that originally failed before memory_doc_id could be recorded. A row
+// with neither durable identity returns an error so the enricher logs the
+// broken retrieval→resolution→stats chain instead of silently losing the hit.
+// The ON CONFLICT update keeps concurrent matches atomic.
 func (s *Store) IncrementPatternMatch(ctx context.Context, patternID int64) error {
-	_, err := s.Pool.Exec(ctx, `
+	tag, err := s.Pool.Exec(ctx, `
 		INSERT INTO pattern_stats (installation_id, repo_id, memory_doc_id, content_hash, category, times_matched, quality_score, last_matched_at)
-		SELECT p.installation_id, p.repo_id, p.memory_doc_id, md5(p.content), COALESCE(p.category, ''), 1, 0.5, NOW()
+		SELECT p.installation_id, p.repo_id, COALESCE(p.memory_custom_id, p.memory_doc_id), md5(p.content), COALESCE(p.category, ''), 1, 0.5, NOW()
 		FROM patterns p
-		WHERE p.id = $1 AND p.memory_doc_id IS NOT NULL
+		WHERE p.id = $1 AND COALESCE(p.memory_custom_id, p.memory_doc_id) IS NOT NULL
 		ON CONFLICT (installation_id, memory_doc_id) DO UPDATE SET
 			times_matched   = pattern_stats.times_matched + 1,
 			last_matched_at = NOW(),
 			updated_at      = NOW()
 	`, patternID)
-	return err
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("pattern %d resolved from retrieval but has no durable memory identity", patternID)
+	}
+	return nil
 }
 
 // RecordPatternOutcome applies a developer outcome (confirmed/dismissed) to the
@@ -106,7 +113,7 @@ func (s *Store) RecordPatternOutcome(ctx context.Context, patternID int64, confi
 		-- counters -- the exact leak migration 062's composite UNIQUE closes on
 		-- the write path. Both halves must be scoped or neither is.
 		WHERE p.id = $1
-		  AND ps.memory_doc_id = p.memory_doc_id
+		  AND ps.memory_doc_id = COALESCE(p.memory_custom_id, p.memory_doc_id)
 		  AND ps.installation_id = p.installation_id
 		RETURNING ps.quality_score
 	`, patternID, confirmInc, dismissInc).Scan(&quality)
