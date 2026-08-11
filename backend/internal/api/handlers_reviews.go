@@ -597,25 +597,12 @@ func (s *Server) streamReviewWS(w http.ResponseWriter, r *http.Request) {
 
 	ctx := conn.CloseRead(r.Context())
 
-	// Terminal state: send final event and close
-	if review.Status == "completed" || review.Status == "failed" || review.Status == "cancelled" {
-		evtType := pipeline.EventCompleted
-		if review.Status == "failed" {
-			evtType = pipeline.EventError
-		}
-		if review.Status == "cancelled" {
-			evtType = pipeline.EventCancelled
-		}
-		_ = wsjson.Write(ctx, conn, pipeline.Event{
-			Type:      evtType,
-			Timestamp: time.Now(),
-			Data:      mustMarshal(map[string]string{"status": review.Status}),
-		})
-		conn.Close(websocket.StatusNormalClosure, "review already "+review.Status)
-		return
-	}
-
+	terminal := review.Status == "completed" || review.Status == "failed" || review.Status == "cancelled"
 	if s.eventBus == nil {
+		if terminal {
+			writeTerminalReviewEvent(ctx, conn, review.Status)
+			return
+		}
 		conn.Close(websocket.StatusInternalError, "streaming not available")
 		return
 	}
@@ -639,6 +626,9 @@ func (s *Server) streamReviewWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer unsub()
+	if terminal {
+		defer s.eventBus.CloseTopic(id)
+	}
 
 	// Keepalive: ping every 30s to prevent Fly proxy timeout
 	go func() {
@@ -667,6 +657,15 @@ func (s *Server) streamReviewWS(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// A review can become terminal while the browser is disconnected. Replay
+	// its durable tail first so findings/timeline entries are not skipped, then
+	// synthesize the terminal marker only when persistence degraded and no
+	// durable terminal event was available.
+	if terminal {
+		writeTerminalReviewEvent(ctx, conn, review.Status)
+		return
+	}
+
 	// Stream live events
 	for {
 		select {
@@ -686,6 +685,22 @@ func (s *Server) streamReviewWS(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+func writeTerminalReviewEvent(ctx context.Context, conn *websocket.Conn, status string) {
+	evtType := pipeline.EventCompleted
+	if status == "failed" {
+		evtType = pipeline.EventError
+	}
+	if status == "cancelled" {
+		evtType = pipeline.EventCancelled
+	}
+	_ = wsjson.Write(ctx, conn, pipeline.Event{
+		Type:      evtType,
+		Timestamp: time.Now(),
+		Data:      mustMarshal(map[string]string{"status": status}),
+	})
+	_ = conn.Close(websocket.StatusNormalClosure, "review already "+status)
 }
 
 func isTerminalReviewEvent(eventType pipeline.EventType) bool {

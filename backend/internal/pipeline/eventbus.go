@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -77,7 +78,18 @@ type ReviewCompletedPayload struct {
 	InstallationID int64     `json:"installation_id"`
 }
 
-const maxHistoryEvents = 500
+const (
+	maxHistoryEvents          = 500
+	durablePublishAttempts    = 3
+	durablePublishTimeout     = 5 * time.Second
+	eventRetention            = 7 * 24 * time.Hour
+	eventPruneSafetyWindow    = time.Hour
+	eventPruneInterval        = 6 * time.Hour
+	eventPruneBatchSize       = 5000
+	eventPruneAdvisoryLockKey = int64(0x415247555345564e) // "ARGUSEVN"
+)
+
+var durableRetryDelays = [...]time.Duration{10 * time.Millisecond, 25 * time.Millisecond}
 
 // Event is a single streaming event published during a pipeline run.
 type Event struct {
@@ -99,11 +111,12 @@ type Event struct {
 //     EventReviewCompleted). Callers MUST not block — handler runs
 //     synchronously under t.mu; spawn a goroutine if work is non-trivial.
 type EventBus struct {
-	mu       sync.RWMutex
-	topics   map[uuid.UUID]*topic
-	logger   *slog.Logger
-	pool     *pgxpool.Pool
-	instance uuid.UUID
+	mu           sync.RWMutex
+	topics       map[uuid.UUID]*topic
+	logger       *slog.Logger
+	pool         *pgxpool.Pool
+	instance     uuid.UUID
+	persistEvent durableEventPersister
 
 	seenMu sync.Mutex
 	seen   map[int64]struct{}
@@ -116,6 +129,10 @@ type EventBus struct {
 
 // GlobalHandler receives every published event. Must not block.
 type GlobalHandler func(reviewID uuid.UUID, evt Event)
+
+// durableEventPersister returns current=false when an attempt event lost
+// authority before insertion. Errors describe storage failures, not stale work.
+type durableEventPersister func(context.Context, uuid.UUID, *Event) (current bool, err error)
 
 type topic struct {
 	mu          sync.Mutex
@@ -140,6 +157,7 @@ func NewDurableEventBus(ctx context.Context, pool *pgxpool.Pool, logger *slog.Lo
 	eb := NewEventBus()
 	eb.pool = pool
 	eb.logger = logger
+	eb.persistEvent = eb.persistToPostgres
 	ready := make(chan struct{})
 	go eb.listen(ctx, ready)
 	select {
@@ -148,6 +166,7 @@ func NewDurableEventBus(ctx context.Context, pool *pgxpool.Pool, logger *slog.Lo
 	case <-time.After(2 * time.Second):
 		logger.Warn("eventbus: listener startup timed out")
 	}
+	go eb.pruneLoop(ctx)
 	return eb
 }
 
@@ -221,29 +240,87 @@ func (eb *EventBus) publish(reviewID uuid.UUID, generation int, evtType EventTyp
 	}
 
 	evt := Event{AttemptGeneration: generation, Type: evtType, Timestamp: time.Now(), Data: raw}
-	if eb.pool != nil {
-		var notified string
-		publishCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if eb.persistEvent != nil {
+		publishCtx, cancel := context.WithTimeout(context.Background(), durablePublishTimeout)
 		defer cancel()
-		err = eb.pool.QueryRow(publishCtx, `
-			WITH inserted AS (
-				INSERT INTO review_events (review_id, attempt_generation, event_type, data)
-				SELECT $1,$2,$3,$4
-				WHERE $2=0 OR EXISTS (SELECT 1 FROM reviews WHERE id=$1 AND attempt_generation=$2)
-				RETURNING id, created_at
-			)
-			SELECT id, created_at, pg_notify('argus_review_events', $5 || ':' || id::text)
-			FROM inserted`, reviewID, generation, string(evtType), raw, eb.instance.String()).Scan(&evt.ID, &evt.Timestamp, &notified)
-		if err != nil {
-			if !errors.Is(err, pgx.ErrNoRows) {
-				eb.logger.Error("eventbus: durable publish failed", "type", evtType, "review_id", reviewID, "error", err)
-			}
-			if generation > 0 {
-				return
-			}
+		current, persistAttempts, persistErr := eb.persistWithRetry(publishCtx, reviewID, &evt)
+		if !current {
+			return
+		}
+		if persistErr != nil {
+			// Persistence is an availability enhancement, not the authority for
+			// local lifecycle delivery. In particular, ReviewCompleted must still
+			// reach the local cross-PR subscriber when PostgreSQL has a transient
+			// outage. ID=0 tells clients this event cannot advance a replay cursor.
+			eb.logger.Error("eventbus: durable publish failed; delivering locally",
+				"type", evtType, "review_id", reviewID, "attempts", persistAttempts, "error", persistErr)
 		}
 	}
 	eb.deliver(reviewID, evt, true)
+}
+
+func (eb *EventBus) persistWithRetry(ctx context.Context, reviewID uuid.UUID, evt *Event) (bool, int, error) {
+	var lastErr error
+	attempts := 0
+	localTimestamp := evt.Timestamp
+	for attempt := 0; attempt < durablePublishAttempts; attempt++ {
+		attempts = attempt + 1
+		current, err := eb.persistEvent(ctx, reviewID, evt)
+		if err == nil {
+			return current, attempt + 1, nil
+		}
+		lastErr = err
+		// A failed Scan may have assigned a prefix of the returned columns. Never
+		// expose a cursor unless the complete durable write result was observed.
+		evt.ID = 0
+		evt.Timestamp = localTimestamp
+		if !shouldRetryDurablePublish(err) || attempt == durablePublishAttempts-1 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return true, attempt + 1, errors.Join(lastErr, ctx.Err())
+		case <-time.After(durableRetryDelays[attempt]):
+		}
+	}
+	return true, attempts, lastErr
+}
+
+func shouldRetryDurablePublish(err error) bool {
+	if pgconn.SafeToRetry(err) {
+		return true
+	}
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	// These server-side failures guarantee the statement did not commit.
+	switch pgErr.Code {
+	case "40001", "40P01", "53300", "57P03":
+		return true
+	default:
+		return false
+	}
+}
+
+func (eb *EventBus) persistToPostgres(ctx context.Context, reviewID uuid.UUID, evt *Event) (bool, error) {
+	var notified string
+	err := eb.pool.QueryRow(ctx, `
+		WITH inserted AS (
+			INSERT INTO review_events (review_id, attempt_generation, event_type, data)
+			SELECT $1,$2,$3,$4
+			WHERE $2=0 OR EXISTS (SELECT 1 FROM reviews WHERE id=$1 AND attempt_generation=$2)
+			RETURNING id, created_at
+		)
+		SELECT id, created_at, pg_notify('argus_review_events', $5 || ':' || id::text)
+		FROM inserted`, reviewID, evt.AttemptGeneration, string(evt.Type), evt.Data, eb.instance.String()).Scan(&evt.ID, &evt.Timestamp, &notified)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return true, err
+	}
+	return true, nil
 }
 
 func (eb *EventBus) deliver(reviewID uuid.UUID, evt Event, notifyGlobal bool) {
@@ -288,6 +365,69 @@ func (eb *EventBus) deliver(reviewID uuid.UUID, evt Event, notifyGlobal bool) {
 	for _, h := range handlers {
 		h(reviewID, evt)
 	}
+}
+
+func (eb *EventBus) pruneLoop(ctx context.Context) {
+	ticker := time.NewTicker(eventPruneInterval)
+	defer ticker.Stop()
+	for {
+		eb.pruneUntilCaughtUp(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (eb *EventBus) pruneUntilCaughtUp(ctx context.Context) {
+	for ctx.Err() == nil {
+		deleted, err := eb.pruneReviewEvents(ctx, time.Now())
+		if err != nil {
+			eb.logger.Warn("eventbus: retention cleanup failed", "error", err)
+			return
+		}
+		if deleted < eventPruneBatchSize {
+			return
+		}
+	}
+}
+
+// pruneReviewEvents removes events outside both replay guarantees: every
+// event younger than the safety window is retained for delayed LISTEN fetches;
+// afterwards, the newest replay window per review is retained for reconnects,
+// and the absolute retention deadline removes even low-volume histories.
+// The transaction-scoped advisory lock makes concurrent app machines race-safe.
+func (eb *EventBus) pruneReviewEvents(ctx context.Context, now time.Time) (int64, error) {
+	var deleted int64
+	err := eb.pool.QueryRow(ctx, `
+		WITH cleanup_lock AS MATERIALIZED (
+			SELECT pg_try_advisory_xact_lock($1) AS acquired
+		), ranked AS MATERIALIZED (
+			SELECT e.id, e.created_at,
+			       row_number() OVER (PARTITION BY e.review_id ORDER BY e.id DESC) AS replay_position
+			FROM review_events e
+			CROSS JOIN cleanup_lock l
+			WHERE l.acquired
+		), victims AS (
+			SELECT id
+			FROM ranked
+			WHERE created_at < $2
+			  AND (created_at < $3 OR replay_position > $4)
+			ORDER BY id
+			LIMIT $5
+		), removed AS (
+			DELETE FROM review_events e
+			USING victims v
+			WHERE e.id=v.id
+			RETURNING e.id
+		)
+		SELECT count(*) FROM removed`, eventPruneAdvisoryLockKey,
+		now.Add(-eventPruneSafetyWindow), now.Add(-eventRetention), maxHistoryEvents, eventPruneBatchSize).Scan(&deleted)
+	if err != nil {
+		return 0, fmt.Errorf("pruning review events: %w", err)
+	}
+	return deleted, nil
 }
 
 func (eb *EventBus) listen(ctx context.Context, ready chan struct{}) {

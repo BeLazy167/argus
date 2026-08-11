@@ -1,13 +1,20 @@
 package pipeline
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 )
+
+type retryableEventPersistError struct{ message string }
+
+func (e retryableEventPersistError) Error() string   { return e.message }
+func (retryableEventPersistError) SafeToRetry() bool { return true }
 
 func TestEventBus_PubSub(t *testing.T) {
 	t.Run("subscribe_then_publish", func(t *testing.T) {
@@ -313,5 +320,109 @@ func TestEventBusOpenTopicStartsFreshGenerationAfterClose(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("reopened topic did not deliver")
+	}
+}
+
+func TestDurableEventBusPublishDegradesWithoutSkippingLocalLifecycle(t *testing.T) {
+	eb := NewEventBus()
+	reviewID := uuid.New()
+	eb.OpenTopic(reviewID)
+	attempts := 0
+	eb.persistEvent = func(context.Context, uuid.UUID, *Event) (bool, error) {
+		attempts++
+		return true, retryableEventPersistError{message: "postgres unavailable"}
+	}
+	live, _, unsub := eb.Subscribe(reviewID)
+	defer unsub()
+	global := make(chan Event, 1)
+	eb.SubscribeGlobal(func(_ uuid.UUID, evt Event) { global <- evt })
+
+	eb.PublishForAttempt(reviewID, 1, EventReviewCompleted, ReviewCompletedPayload{ReviewID: reviewID})
+	if attempts != durablePublishAttempts {
+		t.Fatalf("persistence attempts=%d want %d", attempts, durablePublishAttempts)
+	}
+	for name, events := range map[string]<-chan Event{"topic": live, "global": global} {
+		select {
+		case evt := <-events:
+			if evt.Type != EventReviewCompleted || evt.ID != 0 {
+				t.Fatalf("%s event=%+v", name, evt)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("%s delivery was suppressed by durable failure", name)
+		}
+	}
+}
+
+func TestDurableEventBusPublishRetriesBeforeDelivery(t *testing.T) {
+	eb := NewEventBus()
+	reviewID := uuid.New()
+	eb.OpenTopic(reviewID)
+	attempts := 0
+	eb.persistEvent = func(_ context.Context, _ uuid.UUID, evt *Event) (bool, error) {
+		attempts++
+		if attempts < durablePublishAttempts {
+			return true, retryableEventPersistError{message: "transient"}
+		}
+		evt.ID = 42
+		evt.Timestamp = time.Unix(42, 0)
+		return true, nil
+	}
+	live, _, unsub := eb.Subscribe(reviewID)
+	defer unsub()
+	eb.PublishForAttempt(reviewID, 1, EventStageChanged, map[string]string{"stage": "reviewing"})
+	select {
+	case evt := <-live:
+		if evt.ID != 42 {
+			t.Fatalf("event ID=%d want durable ID 42", evt.ID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("retried durable event was not delivered")
+	}
+	if attempts != durablePublishAttempts {
+		t.Fatalf("persistence attempts=%d want %d", attempts, durablePublishAttempts)
+	}
+}
+
+func TestDurableEventBusStaleAttemptIsNotDelivered(t *testing.T) {
+	eb := NewEventBus()
+	reviewID := uuid.New()
+	eb.OpenTopic(reviewID)
+	eb.persistEvent = func(context.Context, uuid.UUID, *Event) (bool, error) {
+		return false, nil
+	}
+	live, _, unsub := eb.Subscribe(reviewID)
+	defer unsub()
+	globalCalls := 0
+	eb.SubscribeGlobal(func(uuid.UUID, Event) { globalCalls++ })
+	eb.PublishForAttempt(reviewID, 1, EventCompleted, nil)
+	select {
+	case evt := <-live:
+		t.Fatalf("stale event delivered: %+v", evt)
+	default:
+	}
+	if globalCalls != 0 {
+		t.Fatalf("stale event reached %d global subscribers", globalCalls)
+	}
+}
+
+func TestDurableEventBusDoesNotRetryAmbiguousWriteFailure(t *testing.T) {
+	eb := NewEventBus()
+	reviewID := uuid.New()
+	eb.OpenTopic(reviewID)
+	attempts := 0
+	eb.persistEvent = func(context.Context, uuid.UUID, *Event) (bool, error) {
+		attempts++
+		return true, errors.New("connection lost after write may have committed")
+	}
+	live, _, unsub := eb.Subscribe(reviewID)
+	defer unsub()
+	eb.PublishForAttempt(reviewID, 1, EventComment, nil)
+	if attempts != 1 {
+		t.Fatalf("ambiguous write attempts=%d want 1; retry could duplicate a committed event", attempts)
+	}
+	select {
+	case <-live:
+	case <-time.After(time.Second):
+		t.Fatal("ambiguous durable failure suppressed local delivery")
 	}
 }

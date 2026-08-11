@@ -202,3 +202,63 @@ func TestDurableEventBusDeliveryRechecksAttemptAuthority(t *testing.T) {
 		t.Fatal("generation-zero event was not delivered")
 	}
 }
+
+func TestDurableEventBusPrunesOutsideReplayGuarantees(t *testing.T) {
+	pool, ctx, reviewID := durableEventTestReview(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	bus := NewEventBus()
+	bus.pool = pool
+	bus.logger = logger
+	now := time.Now().UTC()
+
+	// More than one replay window, all old enough that delayed NOTIFY fetches
+	// cannot still be in flight.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO review_events (review_id, attempt_generation, event_type, data, created_at)
+		SELECT $1, 1, $2, '{}', $3
+		FROM generate_series(1, $4)`, reviewID, EventStageChanged,
+		now.Add(-2*eventPruneSafetyWindow), maxHistoryEvents+10); err != nil {
+		t.Fatal(err)
+	}
+	var expiredID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO review_events (review_id, attempt_generation, event_type, data, created_at)
+		VALUES ($1,1,$2,'{}',$3) RETURNING id`, reviewID, EventComment,
+		now.Add(-eventRetention-time.Hour)).Scan(&expiredID); err != nil {
+		t.Fatal(err)
+	}
+	var recentID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO review_events (review_id, attempt_generation, event_type, data, created_at)
+		VALUES ($1,1,$2,'{}',$3) RETURNING id`, reviewID, EventComment,
+		now).Scan(&recentID); err != nil {
+		t.Fatal(err)
+	}
+
+	deleted, err := bus.pruneReviewEvents(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted != 13 { // twelve beyond replay capacity plus the expired row
+		t.Fatalf("deleted=%d want 13", deleted)
+	}
+	var remaining int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM review_events WHERE review_id=$1`, reviewID).Scan(&remaining); err != nil {
+		t.Fatal(err)
+	}
+	if remaining != maxHistoryEvents-1 { // absolute expiry can shrink the replay window
+		t.Fatalf("remaining=%d want %d", remaining, maxHistoryEvents-1)
+	}
+	for name, id := range map[string]int64{"expired": expiredID, "recent": recentID} {
+		var exists bool
+		if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM review_events WHERE id=$1)`, id).Scan(&exists); err != nil {
+			t.Fatal(err)
+		}
+		if name == "expired" && exists {
+			t.Fatal("expired event survived absolute retention")
+		}
+		if name == "recent" && !exists {
+			t.Fatal("recent event was pruned despite notification safety window")
+		}
+	}
+}
