@@ -2,7 +2,6 @@ package api
 
 import (
 	"github.com/BeLazy167/argus/backend/internal/store"
-	"github.com/BeLazy167/argus/backend/internal/store/db"
 )
 
 // This file holds the typed JSON response envelopes returned by the API
@@ -12,12 +11,6 @@ import (
 // GaugeResponse wraps GET /api/v1/stats/gauge.
 type GaugeResponse struct {
 	Gauge []store.GaugeRow `json:"gauge"`
-}
-
-// GraphResponse wraps GET /api/v1/repos/{repoID}/graph.
-type GraphResponse struct {
-	Nodes []db.ListGraphNodesRow `json:"nodes"`
-	Edges []db.ListGraphEdgesRow `json:"edges"`
 }
 
 // SyncReposResponse wraps POST /api/v1/installations/{id}/sync.

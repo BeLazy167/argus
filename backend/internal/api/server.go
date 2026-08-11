@@ -220,7 +220,6 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 				r.Get("/patterns/{patternID}", s.getPattern)
 
 				// Graph & Architecture
-				r.Get("/repos/{repoID}/graph", s.getGraph)
 				r.Get("/repos/{repoID}/architecture", s.getArchitecture)
 				r.Get("/repos/{repoID}/files/*", s.getFileMemory)
 
