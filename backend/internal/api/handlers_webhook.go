@@ -96,7 +96,7 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		// is preserved onto the detached BaseCtx so every stage event carries the
 		// id the FE/webhook-ingress saw.
 		prEvt := *prEvent
-		launchErr := s.launcher.Launch(pipeline.LaunchSpec{
+		launchErr := s.launchPREvent(pipeline.LaunchSpec{
 			Repo:    prEvt.RepoFullName,
 			PR:      prEvt.PRNumber,
 			BaseCtx: obs.SetTraceID(context.Background(), obs.TraceID(r.Context())),
@@ -107,13 +107,12 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 				return nil
 			},
 			Cleanup: s.releaseSem,
-			Run:     func(ctx context.Context) error { return s.orchestrator.HandlePREvent(ctx, prEvt) },
 			OnDone: func(err error) {
 				if err != nil && !errors.Is(err, context.Canceled) {
 					s.logger.Error("review pipeline failed", "error", err, "pr", prEvt.PRNumber)
 				}
 			},
-		})
+		}, prEvt)
 		if errors.Is(launchErr, pipeline.ErrInFlight) {
 			s.logger.Info("review already in-flight", "repo", prEvt.RepoFullName, "pr", prEvt.PRNumber)
 			break
@@ -122,38 +121,6 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			s.logger.Warn("webhook semaphore full")
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "server busy"})
 			return
-		}
-
-		// Fire-and-forget reaction sweep. GitHub doesn't webhook reactions on
-		// PR review comments, so we opportunistically re-check reactions on
-		// every pull_request event. Decoupled from the review goroutine so a
-		// slow sweep doesn't delay the review pipeline. Guarded by the same
-		// webhook semaphore as every other handler goroutine so a burst of
-		// PR events can't spawn unbounded sweepers.
-		if s.reactionAnalyzer != nil {
-			if s.acquireSem() {
-				traceID := obs.TraceID(r.Context())
-				go func(installationID int64, fullName string, pr int) {
-					defer s.releaseSem()
-					// Propagate installation_id onto the detached ctx so slog
-					// records fired before the analyzer resolves the DB inst
-					// still carry attribution. Downstream resolve overwrites
-					// this with the DB id (inner-ctx wins).
-					sweepCtx, cancel := context.WithTimeout(
-						obs.SetInstallationID(
-							obs.SetTraceID(context.Background(), traceID),
-							installationID,
-						),
-						60*time.Second,
-					)
-					defer cancel()
-					if err := s.reactionAnalyzer.SweepPRReactions(sweepCtx, installationID, fullName, pr); err != nil {
-						s.logger.Warn("reaction sweep failed", "error", err, "pr", pr)
-					}
-				}(prEvent.InstallationID, prEvent.RepoFullName, prEvent.PRNumber)
-			} else {
-				s.logger.Warn("webhook semaphore full for reaction sweep", "pr", prEvent.PRNumber)
-			}
 		}
 
 	case "pull_request_review_comment":
@@ -442,7 +409,7 @@ func (s *Server) handleCheckboxTrigger(ctx context.Context, evt ghpkg.IssueComme
 	// token) and the "Running…" swap follows it. `runningBody` is written by
 	// BeforeSpawn before the goroutine spawns, so OnDone reads it safely.
 	var runningBody string
-	launchErr := s.launcher.Launch(pipeline.LaunchSpec{
+	launchErr := s.launchPREvent(pipeline.LaunchSpec{
 		Repo:    evt.RepoFullName,
 		PR:      evt.PRNumber,
 		BaseCtx: ctx,
@@ -471,7 +438,6 @@ func (s *Server) handleCheckboxTrigger(ctx context.Context, evt ghpkg.IssueComme
 			return nil
 		},
 		Cleanup: s.releaseSem,
-		Run:     func(runCtx context.Context) error { return s.orchestrator.HandlePREvent(runCtx, *prEvent) },
 		OnDone: func(err error) {
 			if err != nil {
 				s.logger.Error("checkbox trigger: pipeline failed", "error", err, "pr", evt.PRNumber)
@@ -487,7 +453,7 @@ func (s *Server) handleCheckboxTrigger(ctx context.Context, evt ghpkg.IssueComme
 			}
 			_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repoName, evt.CommentID, "rocket")
 		},
-	})
+	}, *prEvent)
 	switch {
 	case errors.Is(launchErr, pipeline.ErrInFlight):
 		s.logger.Info("checkbox trigger: review already in progress", "repo", evt.RepoFullName, "pr", evt.PRNumber)

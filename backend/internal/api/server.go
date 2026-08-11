@@ -29,8 +29,10 @@ type Server struct {
 	memoryLister     memoryListStore
 	ghApp            *ghpkg.App
 	orchestrator     *pipeline.Orchestrator
+	prEventHandler   prEventHandler
 	replyAnalyzer    *pipeline.ReplyAnalyzer
 	reactionAnalyzer *pipeline.ReactionAnalyzer
+	reactionSweeper  reactionSweeper
 	registry         *llm.Registry
 	eventBus         *pipeline.EventBus
 	webhookSecret    []byte
@@ -64,6 +66,12 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 		memRegistry:      memRegistry,
 		cfg:              cfg,
 		commandRe:        commandRe(cfg.GitHubAppSlug),
+	}
+	if orchestrator != nil {
+		s.prEventHandler = orchestrator
+	}
+	if reactionAnalyzer != nil {
+		s.reactionSweeper = reactionAnalyzer
 	}
 	// The registry is shared: the launcher registers slots + cancels on it; the
 	// cancel handler (cancelReview) consults the same instance via registry.Cancel.

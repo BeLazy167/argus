@@ -100,7 +100,7 @@ func (s *Server) handleReviewCommand(ctx context.Context, evt ghpkg.IssueComment
 	// what lets the dashboard Stop button abort a slash-command review (this path
 	// used to be the one missing it). BaseCtx is the dispatch ctx (trace +
 	// installation already tagged).
-	launchErr := s.launcher.Launch(pipeline.LaunchSpec{
+	launchErr := s.launchPREvent(pipeline.LaunchSpec{
 		Repo:    evt.RepoFullName,
 		PR:      evt.PRNumber,
 		BaseCtx: ctx,
@@ -141,7 +141,6 @@ func (s *Server) handleReviewCommand(ctx context.Context, evt ghpkg.IssueComment
 			return nil
 		},
 		Cleanup: s.releaseSem,
-		Run:     func(runCtx context.Context) error { return s.orchestrator.HandlePREvent(runCtx, *prEvent) },
 		OnDone: func(err error) {
 			if err != nil {
 				s.logger.Error("review command: pipeline failed", "error", err, "pr", evt.PRNumber)
@@ -152,7 +151,7 @@ func (s *Server) handleReviewCommand(ctx context.Context, evt ghpkg.IssueComment
 			}
 			_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "rocket")
 		},
-	})
+	}, *prEvent)
 	switch {
 	case errors.Is(launchErr, pipeline.ErrInFlight):
 		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,

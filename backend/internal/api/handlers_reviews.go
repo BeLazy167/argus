@@ -478,7 +478,12 @@ func (s *Server) retryReview(w http.ResponseWriter, r *http.Request) {
 			}
 			return nil
 		},
-		Run: func(ctx context.Context) error { return s.orchestrator.RetryReview(ctx, id, attemptGeneration) },
+		Run: func(ctx context.Context) error {
+			if err := s.reconcileReactionsBeforeReview(ctx, inst.InstallationID, repo.FullName, review.PRNumber); err != nil {
+				return err
+			}
+			return s.orchestrator.RetryReview(ctx, id, attemptGeneration)
+		},
 		OnDone: func(err error) {
 			// context.Canceled means a Stop halted the retry — the state machine
 			// already marked it cancelled, so it isn't a failure to log. The

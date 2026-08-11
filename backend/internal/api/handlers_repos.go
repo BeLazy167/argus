@@ -125,17 +125,16 @@ func (s *Server) triggerReview(w http.ResponseWriter, r *http.Request) {
 		RepoID:         repo.GithubID,
 		PRNumber:       body.PRNumber,
 	}
-	launchErr := s.launcher.Launch(pipeline.LaunchSpec{
+	launchErr := s.launchPREvent(pipeline.LaunchSpec{
 		Repo:    repo.FullName,
 		PR:      body.PRNumber,
 		BaseCtx: context.Background(),
-		Run:     func(ctx context.Context) error { return s.orchestrator.HandlePREvent(ctx, prEvent) },
 		OnDone: func(err error) {
 			if err != nil && !errors.Is(err, context.Canceled) {
 				s.logger.Error("manual review failed", "error", err, "repo", repo.FullName, "pr", body.PRNumber)
 			}
 		},
-	})
+	}, prEvent)
 	if errors.Is(launchErr, pipeline.ErrInFlight) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "review already in-flight"})
 		return
