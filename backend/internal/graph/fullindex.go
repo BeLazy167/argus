@@ -150,7 +150,7 @@ func IndexRepoBounded(
 				// A published generation must contain a ready snapshot for every
 				// source file. Fail this immutable generation immediately and leave
 				// the previous published projection untouched.
-				result.Remaining = snapshot.ExpectedFiles - (snapshot.VisitedFiles - snapshot.FailedFiles - snapshot.UnavailableFiles)
+				result.Remaining = snapshot.ExpectedFiles - (snapshot.VisitedFiles - snapshot.FailedFiles)
 				return result, nil
 			}
 			continue

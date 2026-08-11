@@ -286,7 +286,7 @@ func TestIndexRepoBoundedFailsPermanentFailureWithoutMutatingPublishedGeneration
 		t.Fatalf("first window: %v", err)
 	}
 	if first.Published || first.Snapshot.Status != "failed" || first.Snapshot.Complete ||
-		first.Snapshot.FailedFiles != 0 || first.Snapshot.UnavailableFiles != 1 {
+		first.Snapshot.FailedFiles != 1 || first.Snapshot.UnavailableFiles != 1 {
 		t.Fatalf("permanent-failure window = %+v, want terminal failed generation", first)
 	}
 	if got := ghClient.filePaths; len(got) != 1 || got[0] != "a.go" {

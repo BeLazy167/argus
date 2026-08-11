@@ -242,7 +242,7 @@ func (s *Store) StageGraphGenerationFile(ctx context.Context, repoID, generation
 	if _, err := tx.Exec(ctx, `
 		UPDATE graph_index_generations g SET
 		  visited_files = x.visited, failed_files = x.failed, updated_at = NOW()
-		FROM (SELECT count(*)::int visited, count(*) FILTER (WHERE status = 'failed')::int failed
+		FROM (SELECT count(*)::int visited, count(*) FILTER (WHERE status IN ('failed', 'unavailable'))::int failed
 		      FROM graph_index_generation_files WHERE generation_id = $1) x
 		WHERE g.id = $1 AND g.repo_id = $2 AND g.status = 'building'`, generationID, repoID); err != nil {
 		return GraphSnapshot{}, fmt.Errorf("stage graph file: counts: %w", err)
