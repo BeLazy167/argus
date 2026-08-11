@@ -97,7 +97,8 @@ func (r *Registry) GetIndexer(ctx context.Context, installationID int64) Indexer
 			"installation_id", installationID, "error", err)
 	}
 	return NewPGIndexer(r.pool, embedder, installationID, r.embedders.Dimensions(), r.log(),
-		WithSharedDecayDisabled(disableSharedDecay))
+		WithSharedDecayDisabled(disableSharedDecay),
+		withWriteEmbedderResolver(r.embedders.resolveUncachedFromConn))
 }
 
 // InvalidateEmbedder drops the cached embedder for an installation. Call after
@@ -123,6 +124,12 @@ const reembedLockPollInterval = 50 * time.Millisecond
 // signal instead of monopolizing the advisory lock forever.
 const maxReembedConvergenceRounds = 8
 
+// memoryEmbeddingLockKey namespaces the tenant lock independently from every
+// other advisory lock while retaining the full installation id.
+func memoryEmbeddingLockKey(installationID int64) int64 {
+	return (int64(0x41524755) << 32) ^ installationID
+}
+
 // acquireReembedLock waits for the tenant session lock using side-effect-free
 // try calls. A busy lock is not success: its holder may have captured an older
 // desired space, so this caller remains the durable in-process waiter for the
@@ -147,6 +154,31 @@ func acquireReembedLock(ctx context.Context, conn *pgxpool.Conn, lockKey int64) 
 	}
 }
 
+// acquireEmbeddingWriteLock takes the shared side of the same tenant lock used
+// by repair. Writers can embed concurrently, but an exclusive repair cannot
+// report convergence while a writer that resolved the previous space can
+// still commit. The writer resolves its embedder only after acquiring this
+// lock, so a write starting after repair sees the committed current provider.
+func acquireEmbeddingWriteLock(ctx context.Context, conn *pgxpool.Conn, lockKey int64) error {
+	for {
+		var acquired bool
+		if err := conn.QueryRow(ctx, "SELECT pg_try_advisory_lock_shared($1)", lockKey).Scan(&acquired); err != nil {
+			return fmt.Errorf("try shared advisory lock: %w", err)
+		}
+		if acquired {
+			return nil
+		}
+
+		timer := time.NewTimer(reembedLockPollInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return fmt.Errorf("wait for shared advisory lock: %w", ctx.Err())
+		case <-timer.C:
+		}
+	}
+}
+
 // ReembedCurrentSpace converges one installation to the latest embedding
 // configuration committed in PostgreSQL. The tenant advisory lock serializes
 // provider spend across machines. Lock waiters do not silently succeed, and a
@@ -166,9 +198,7 @@ func (r *Registry) ReembedCurrentSpace(ctx context.Context, installationID int64
 		return 0, fmt.Errorf("reembed current space: acquire lock connection: %w", err)
 	}
 	defer conn.Release()
-	// Namespace "ARGU" in the high bits keeps this lock independent of other
-	// tenant-scoped advisory locks while retaining the full installation id.
-	lockKey := (int64(0x41524755) << 32) ^ installationID
+	lockKey := memoryEmbeddingLockKey(installationID)
 	if err := acquireReembedLock(ctx, conn, lockKey); err != nil {
 		return 0, fmt.Errorf("reembed current space: acquire advisory lock: %w", err)
 	}

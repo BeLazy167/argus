@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -21,8 +22,20 @@ type pgDesiredSpaceResolver struct {
 }
 
 func (r *pgDesiredSpaceResolver) ResolveEmbeddingsKey(ctx context.Context, installationID int64) (string, string, string, bool, error) {
+	return r.resolve(ctx, r.pool, installationID)
+}
+
+func (r *pgDesiredSpaceResolver) ResolveEmbeddingsKeyFromConn(ctx context.Context, conn *pgxpool.Conn, installationID int64) (string, string, string, bool, error) {
+	return r.resolve(ctx, conn, installationID)
+}
+
+type pgDesiredSpaceQuerier interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func (r *pgDesiredSpaceResolver) resolve(ctx context.Context, q pgDesiredSpaceQuerier, installationID int64) (string, string, string, bool, error) {
 	var model string
-	err := r.pool.QueryRow(ctx, `
+	err := q.QueryRow(ctx, `
 		SELECT COALESCE(default_settings->>'test_embedding_model', '')
 		FROM installations WHERE id = $1`, installationID).Scan(&model)
 	return "", r.baseURL, model, true, err
@@ -177,5 +190,117 @@ func TestRegistryOverlappingEmbeddingRotationsConvergeToLatestSpace(t *testing.T
 	}
 	if pending != 0 {
 		t.Fatalf("final corpus has %d row(s) outside C", pending)
+	}
+}
+
+func TestRegistryCapturedIndexerCannotWriteObsoleteSpaceAfterRepair(t *testing.T) {
+	pool, installationID := pgTestPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req embedRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		data := make([]map[string]any, len(req.Input))
+		for i, text := range req.Input {
+			vec := make([]float32, StorageDimensions)
+			vec[0] = float32(len(text) + 1)
+			data[i] = map[string]any{"index": i, "embedding": vec}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": data})
+	}))
+	defer server.Close()
+
+	setDesired := func(model string) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, `
+			UPDATE installations
+			SET default_settings = jsonb_set(COALESCE(default_settings, '{}'::jsonb),
+				'{test_embedding_model}', to_jsonb($2::text), true)
+			WHERE id = $1`, installationID, model); err != nil {
+			t.Fatalf("set desired embedding space %s: %v", model, err)
+		}
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `
+			UPDATE installations SET default_settings = COALESCE(default_settings, '{}'::jsonb) - 'test_embedding_model'
+			WHERE id = $1`, installationID)
+	})
+
+	newMachine := func() *Registry {
+		embedders := NewEmbedderRegistry(
+			&pgDesiredSpaceResolver{pool: pool, baseURL: server.URL},
+			PlatformEmbeddings{Dimensions: StorageDimensions},
+			discardLogger(),
+		)
+		return NewRegistry(discardLogger()).WithPostgresBackend(pool, embedders)
+	}
+
+	setDesired("space-A")
+	machineA := newMachine()
+	capturedA := machineA.GetIndexer(ctx, installationID)
+	if capturedA == nil {
+		t.Fatal("machine A did not resolve an indexer")
+	}
+	if err := capturedA.(*PGIndexer).ImportDocs(ctx, []Doc{
+		lifecycleDoc("before-rotation", "memory written before rotation"),
+	}); err != nil {
+		t.Fatalf("seed space A: %v", err)
+	}
+
+	setDesired("space-B")
+	machineB := newMachine()
+	if repaired, err := machineB.ReembedCurrentSpace(ctx, installationID, 10); err != nil {
+		t.Fatalf("repair space B: %v (repaired=%d)", err, repaired)
+	}
+
+	// This is the late PipelineRun/multi-machine writer: it was handed an A
+	// indexer before rotation and writes only after B repair reported success.
+	if err := capturedA.(*PGIndexer).ImportDocs(ctx, []Doc{
+		lifecycleDoc("late-writer", "late writer survives dense retrieval"),
+	}); err != nil {
+		t.Fatalf("late captured-A write: %v", err)
+	}
+
+	wantSpace := NewEmbedder("", server.URL, "space-B", StorageDimensions).SpaceID()
+	var gotSpaces []string
+	if err := pool.QueryRow(ctx, `
+		SELECT COALESCE(array_agg(DISTINCT embedding_space), ARRAY[]::text[])
+		FROM live_memories WHERE installation_id = $1`, installationID).Scan(&gotSpaces); err != nil {
+		t.Fatalf("read final corpus spaces: %v", err)
+	}
+	if len(gotSpaces) != 1 || gotSpaces[0] != wantSpace {
+		t.Fatalf("final live corpus spaces = %v, want only B %q", gotSpaces, wantSpace)
+	}
+
+	current := machineB.GetIndexer(ctx, installationID)
+	matches, err := current.Search(ctx, MemoryQuery{
+		Query: "late writer survives dense retrieval", Repo: "api", Scope: ScopeRepo,
+		Type: TypePattern, Limit: 10, Threshold: 0.9,
+	})
+	if err != nil {
+		t.Fatalf("search current B space: %v", err)
+	}
+	found := false
+	for _, match := range matches {
+		if match.ID == "late-writer" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("late writer is excluded from B dense retrieval: matches=%+v", matches)
+	}
+
+	pending, err := current.(*PGIndexer).CountReembedPending(ctx)
+	if err != nil {
+		t.Fatalf("count final pending rows: %v", err)
+	}
+	if pending != 0 {
+		t.Fatalf("final corpus has %d row(s) outside B after late write", pending)
 	}
 }

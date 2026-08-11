@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -49,6 +50,10 @@ type PGIndexer struct {
 	// disableSharedDecay makes _shared confidence use its stored pinned value.
 	// It is resolved from installations.default_settings for each indexer.
 	disableSharedDecay bool
+	// resolveWriteEmbedder bypasses process caches through the connection that
+	// holds this tenant's shared embedding-space lock. Registry-created
+	// indexers set it; direct indexers retain their explicitly supplied embedder.
+	resolveWriteEmbedder func(context.Context, *pgxpool.Conn, int64) (Embedder, error)
 }
 
 // NewPGIndexer builds the Postgres-backed Indexer for one installation.
@@ -61,6 +66,14 @@ type PGIndexerOption func(*PGIndexer)
 // confidence decay. False/default preserves the normal retirement policy.
 func WithSharedDecayDisabled(disabled bool) PGIndexerOption {
 	return func(idx *PGIndexer) { idx.disableSharedDecay = disabled }
+}
+
+// withWriteEmbedderResolver equips ordinary Registry writers with a durable,
+// connection-bound current-space resolver. It is internal because callers
+// constructing a fixed PGIndexer for repair, backfill, or tests intentionally
+// own that fixed embedder.
+func withWriteEmbedderResolver(resolve func(context.Context, *pgxpool.Conn, int64) (Embedder, error)) PGIndexerOption {
+	return func(idx *PGIndexer) { idx.resolveWriteEmbedder = resolve }
 }
 
 func NewPGIndexer(pool *pgxpool.Pool, embedder Embedder, installationID int64, dims int, logger *slog.Logger, opts ...PGIndexerOption) *PGIndexer {
@@ -425,6 +438,10 @@ func (idx *PGIndexer) mirrorDoc(ctx context.Context, doc Doc) error {
 	return idx.writeDocs(ctx, []Doc{doc}, true)
 }
 
+type pgBatchSender interface {
+	SendBatch(context.Context, *pgx.Batch) pgx.BatchResults
+}
+
 func (idx *PGIndexer) writeDocs(ctx context.Context, docs []Doc, preserveExisting bool) error {
 	kept := make([]Doc, 0, len(docs))
 	seen := make(map[string]int, len(docs))
@@ -452,7 +469,51 @@ func (idx *PGIndexer) writeDocs(ctx context.Context, docs []Doc, preserveExistin
 	}
 	sort.Slice(kept, func(i, j int) bool { return kept[i].CustomID < kept[j].CustomID })
 
-	vecs, model := idx.embedForDocs(ctx, kept)
+	// Probe before reserving a connection for the tenant lock. The catalog
+	// probe is process-wide and unrelated to embedding-space authority.
+	pgctx := usesPGContextVector(ctx, idx.pool, idx.logger)
+	if idx.resolveWriteEmbedder == nil {
+		return idx.writeKeptDocs(ctx, kept, preserveExisting, idx, idx.pool, pgctx)
+	}
+
+	conn, err := idx.pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("upsert memories: acquire embedding-space connection: %w", err)
+	}
+	defer conn.Release()
+	lockKey := memoryEmbeddingLockKey(idx.installationID)
+	if err := acquireEmbeddingWriteLock(ctx, conn, lockKey); err != nil {
+		return fmt.Errorf("upsert memories: acquire embedding-space lock: %w", err)
+	}
+	defer func() {
+		unlockCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		var released bool
+		if err := conn.QueryRow(unlockCtx, "SELECT pg_advisory_unlock_shared($1)", lockKey).Scan(&released); err != nil || !released {
+			idx.logger.Warn("release memory write advisory lock", "installation_id", idx.installationID, "released", released, "error", err)
+		}
+	}()
+
+	// Resolve only after the shared lock is held and through that same
+	// connection. A rotation may commit while this provider call is in flight,
+	// but its exclusive repair cannot finish until this write commits; if repair
+	// already finished, this read necessarily observes the repaired space.
+	embedder, resolveErr := idx.resolveWriteEmbedder(ctx, conn, idx.installationID)
+	if resolveErr != nil {
+		// Never substitute the platform embedder here: that would stamp a
+		// confidently wrong space for a BYOK tenant. Preserve the established
+		// fail-open write path by landing NULL for a later repair instead.
+		idx.logger.Warn("resolve current memory embedder; row lands unembedded for backfill",
+			"installation_id", idx.installationID, "error", resolveErr)
+		embedder = nil
+	}
+	active := *idx
+	active.embedder = embedder
+	return idx.writeKeptDocs(ctx, kept, preserveExisting, &active, conn, pgctx)
+}
+
+func (idx *PGIndexer) writeKeptDocs(ctx context.Context, kept []Doc, preserveExisting bool, active *PGIndexer, sender pgBatchSender, pgctx bool) error {
+	vecs, model := active.embedForDocs(ctx, kept)
 
 	// ON CONFLICT notes: deleted_at resets — a re-index of the same customId
 	// is a deliberate recreate. invalidated_at/superseded_by are PRESERVED —
@@ -495,7 +556,7 @@ func (idx *PGIndexer) writeDocs(ctx context.Context, docs []Doc, preserveExistin
 		INSERT INTO memory_review_attributions (memory_id, review_id)
 		SELECT id, $9 FROM upserted WHERE $9::uuid IS NOT NULL
 		ON CONFLICT (memory_id, review_id) DO NOTHING`,
-		vectorParam("$7", usesPGContextVector(ctx, idx.pool, idx.logger)), conflictPredicate)
+		vectorParam("$7", pgctx), conflictPredicate)
 	for i, d := range kept {
 		metaJSON, err := json.Marshal(d.Metadata)
 		if err != nil {
@@ -514,14 +575,14 @@ func (idx *PGIndexer) writeDocs(ctx context.Context, docs []Doc, preserveExistin
 		content := strings.ReplaceAll(d.Content, "\x00", "")
 		var embeddingSpace *string
 		if vecs != nil {
-			space := idx.embeddingSpaceID()
+			space := active.embeddingSpaceID()
 			embeddingSpace = &space
 		}
 		batch.Queue(q,
 			idx.installationID, d.ContainerTag, d.CustomID, d.Type,
 			content, metaJSON, embedding, embeddingModel, idx.reviewID, embeddingSpace)
 	}
-	br := idx.pool.SendBatch(ctx, batch)
+	br := sender.SendBatch(ctx, batch)
 	var execErr error
 	for range kept {
 		if _, err := br.Exec(); err != nil {

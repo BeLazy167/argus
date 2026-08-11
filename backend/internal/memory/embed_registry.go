@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // EmbeddingsProvider is the provider_keys slot for a customer-supplied
@@ -150,13 +152,12 @@ func NewEmbedderRegistry(resolver EmbedKeyResolver, platform PlatformEmbeddings,
 // against 0, rejecting every vector onto the fail-open NULL path.
 func (r *EmbedderRegistry) Dimensions() int { return r.platform.Dimensions }
 
-// resolveUncached reads the installation's committed provider configuration and
-// builds the matching embedder. The returned embedder is the platform fallback
-// when resolution fails; callers decide whether that fail-open substitute is
-// safe for their operation.
-func (r *EmbedderRegistry) resolveUncached(ctx context.Context, installationID int64) (Embedder, error) {
+type connectionEmbedKeyResolver interface {
+	ResolveEmbeddingsKeyFromConn(ctx context.Context, conn *pgxpool.Conn, installationID int64) (apiKey, baseURL, model string, found bool, err error)
+}
+
+func (r *EmbedderRegistry) buildEmbedder(byokKey, byokBase, byokModel string, found bool, resolveErr error) (Embedder, error) {
 	apiKey, baseURL, model := r.platform.APIKey, r.platform.BaseURL, r.platform.Model
-	byokKey, byokBase, byokModel, found, resolveErr := r.resolver.ResolveEmbeddingsKey(ctx, installationID)
 	if resolveErr == nil && found {
 		apiKey = byokKey
 		if byokBase != "" {
@@ -177,6 +178,31 @@ func (r *EmbedderRegistry) resolveUncached(ctx context.Context, installationID i
 		return nil, resolveErr
 	}
 	return NewEmbedder(apiKey, baseURL, model, r.platform.Dimensions), resolveErr
+}
+
+// resolveUncached reads the installation's committed provider configuration and
+// builds the matching embedder. The returned embedder is the platform fallback
+// when resolution fails; callers decide whether that fail-open substitute is
+// safe for their operation.
+func (r *EmbedderRegistry) resolveUncached(ctx context.Context, installationID int64) (Embedder, error) {
+	key, base, model, found, err := r.resolver.ResolveEmbeddingsKey(ctx, installationID)
+	return r.buildEmbedder(key, base, model, found, err)
+}
+
+// resolveUncachedFromConn reads the provider configuration through the
+// connection that owns a writer's shared embedding-space lock. This path never
+// consults or populates the process cache: the lock only fences the space that
+// PostgreSQL says is current now.
+func (r *EmbedderRegistry) resolveUncachedFromConn(ctx context.Context, conn *pgxpool.Conn, installationID int64) (Embedder, error) {
+	resolver, ok := r.resolver.(connectionEmbedKeyResolver)
+	if !ok {
+		// Preserve compatibility with non-Postgres/custom resolvers. This still
+		// bypasses the embedder cache and remains fenced by the held shared lock;
+		// the production Store implements the connection-bound fast path above.
+		return r.resolveUncached(ctx, installationID)
+	}
+	key, base, model, found, err := resolver.ResolveEmbeddingsKeyFromConn(ctx, conn, installationID)
+	return r.buildEmbedder(key, base, model, found, err)
 }
 
 // GetEmbedder resolves the embedder for an installation: BYOK "embeddings"

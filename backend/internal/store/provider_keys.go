@@ -8,6 +8,7 @@ import (
 	"github.com/BeLazy167/argus/backend/internal/crypto"
 	"github.com/BeLazy167/argus/backend/internal/store/db"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // UpsertProviderKey creates or rotates a provider key. base_url/model use
@@ -119,10 +120,14 @@ func (s *Store) ResolveAPIKey(ctx context.Context, installationID int64, repoID 
 // calibrated per space), so per-repo keys would fragment retrieval. The API
 // rejects repo-scoped embeddings rows; this reads only the org-level row.
 // model is "" when the row leaves it NULL (caller applies the platform model).
-func (s *Store) ResolveEmbeddingsKey(ctx context.Context, installationID int64) (apiKey, baseURL, model string, found bool, err error) {
+type embeddingKeyQuerier interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func resolveEmbeddingsKey(ctx context.Context, q embeddingKeyQuerier, installationID int64) (apiKey, baseURL, model string, found bool, err error) {
 	var enc string
 	var bu, m *string
-	err = s.Pool.QueryRow(ctx, `
+	err = q.QueryRow(ctx, `
 		SELECT api_key_enc, base_url, model FROM provider_keys
 		WHERE installation_id = $1 AND repo_id IS NULL AND provider = 'embeddings'
 	`, installationID).Scan(&enc, &bu, &m)
@@ -147,4 +152,17 @@ func (s *Store) ResolveEmbeddingsKey(ctx context.Context, installationID int64) 
 		model = *m
 	}
 	return decrypted, baseURL, model, true, nil
+}
+
+func (s *Store) ResolveEmbeddingsKey(ctx context.Context, installationID int64) (apiKey, baseURL, model string, found bool, err error) {
+	return resolveEmbeddingsKey(ctx, s.Pool, installationID)
+}
+
+// ResolveEmbeddingsKeyFromConn is the connection-bound form used by memory
+// writers while they hold the tenant embedding-space advisory lock. Reading
+// the encrypted provider row and writing the resulting vector on the same
+// locked connection prevents a completed repair from being followed by a
+// stale, previously captured indexer write.
+func (s *Store) ResolveEmbeddingsKeyFromConn(ctx context.Context, conn *pgxpool.Conn, installationID int64) (apiKey, baseURL, model string, found bool, err error) {
+	return resolveEmbeddingsKey(ctx, conn, installationID)
 }
