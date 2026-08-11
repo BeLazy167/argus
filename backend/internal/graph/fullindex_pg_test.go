@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -161,6 +162,13 @@ func TestIndexRepoBoundedStagesThenAtomicallyPublishes(t *testing.T) {
 	}
 	if edgeCount != 1 {
 		t.Fatalf("published edge count = %d, want 1", edgeCount)
+	}
+	var stagedPayloads int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM graph_index_generation_files WHERE generation_id = $1`, second.Snapshot.GenerationID).Scan(&stagedPayloads); err != nil {
+		t.Fatal(err)
+	}
+	if stagedPayloads != 0 {
+		t.Fatalf("published generation retained %d staged payloads, want 0", stagedPayloads)
 	}
 }
 
@@ -405,8 +413,8 @@ func TestIndexRepoBoundedFailsPermanentFailureWithoutMutatingPublishedGeneration
 		WHERE generation_id = $1 AND status = 'unavailable'`, first.Snapshot.GenerationID).Scan(&unavailable); err != nil {
 		t.Fatal(err)
 	}
-	if unavailable != 1 {
-		t.Fatalf("unavailable files = %d, want 1", unavailable)
+	if unavailable != 0 {
+		t.Fatalf("terminal generation retained %d unavailable payloads, want 0", unavailable)
 	}
 
 	waitingRepoID := generationSeedRepo(t, ctx, pool, installationID, "generation/waiting-after-permanent")
@@ -973,6 +981,157 @@ func containsGraphTarget(targets []store.RepoIndexTarget, repoID int64, defaultB
 	return false
 }
 
+func TestGraphGenerationTerminalCleanupKeepsOnlyBuildingPayloads(t *testing.T) {
+	pool, ctx := generationTestPool(t)
+	st := store.NewWithDB(pool)
+	installationID := generationSeedInstallation(t, ctx, pool, "{}")
+	repoID := generationSeedRepo(t, ctx, pool, installationID, "generation/terminal-cleanup")
+	var publishedID int64
+	if err := pool.QueryRow(ctx, `INSERT INTO graph_index_generations
+		(repo_id, commit_sha, status, expected_files, visited_files, published_at)
+		VALUES ($1, 'published-head', 'published', 1, 1, NOW()) RETURNING id`, repoID).Scan(&publishedID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO graph_index_generation_files (generation_id, file_path, status) VALUES ($1, 'old.go', 'ready')`, publishedID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE repos SET graph_published_generation_id = $2 WHERE id = $1`, repoID, publishedID); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := st.BeginGraphGeneration(ctx, repoID, "head-0", 1, 0, false, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var retainedPublishedID int64
+	var publishedStatus string
+	var publishedPayloads int
+	if err := pool.QueryRow(ctx, `SELECT r.graph_published_generation_id, g.status,
+		(SELECT count(*)::int FROM graph_index_generation_files WHERE generation_id = g.id)
+		FROM repos r JOIN graph_index_generations g ON g.id = r.graph_published_generation_id
+		WHERE r.id = $1`, repoID).Scan(&retainedPublishedID, &publishedStatus, &publishedPayloads); err != nil {
+		t.Fatal(err)
+	}
+	if retainedPublishedID != publishedID || publishedStatus != "published" || publishedPayloads != 0 {
+		t.Fatalf("published audit cleanup: pointer=%d status=%s payloads=%d", retainedPublishedID, publishedStatus, publishedPayloads)
+	}
+	if _, err := st.StageGraphGenerationFile(ctx, repoID, first.GenerationID, "a.go", []byte("[]"), []byte("[]"), []byte("[]"), nil, false); err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := st.BeginGraphGeneration(ctx, repoID, "head-0", 1, 0, false, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.GenerationID != first.GenerationID {
+		t.Fatalf("same head created generation %d, want resumed %d", resumed.GenerationID, first.GenerationID)
+	}
+	var currentPayloads int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM graph_index_generation_files WHERE generation_id = $1`, first.GenerationID).Scan(&currentPayloads); err != nil {
+		t.Fatal(err)
+	}
+	if currentPayloads != 1 {
+		t.Fatalf("building generation payloads = %d, want 1", currentPayloads)
+	}
+
+	previousID := first.GenerationID
+	for i := 1; i <= 4; i++ {
+		head := fmt.Sprintf("head-%d", i)
+		next, err := st.BeginGraphGeneration(ctx, repoID, head, 1, 0, false, int64(i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var previousStatus string
+		var previousPayloads, allPayloads int
+		if err := pool.QueryRow(ctx, `SELECT status FROM graph_index_generations WHERE id = $1`, previousID).Scan(&previousStatus); err != nil {
+			t.Fatal(err)
+		}
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM graph_index_generation_files WHERE generation_id = $1`, previousID).Scan(&previousPayloads); err != nil {
+			t.Fatal(err)
+		}
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM graph_index_generation_files f JOIN graph_index_generations g ON g.id = f.generation_id WHERE g.repo_id = $1`, repoID).Scan(&allPayloads); err != nil {
+			t.Fatal(err)
+		}
+		if previousStatus != "superseded" || previousPayloads != 0 || allPayloads != 0 {
+			t.Fatalf("head %d cleanup: previous status=%s payloads=%d all=%d", i, previousStatus, previousPayloads, allPayloads)
+		}
+		if _, err := st.StageGraphGenerationFile(ctx, repoID, next.GenerationID, "a.go", []byte("[]"), []byte("[]"), []byte("[]"), nil, false); err != nil {
+			t.Fatal(err)
+		}
+		previousID = next.GenerationID
+	}
+
+	if err := st.FailGraphGeneration(ctx, repoID, previousID, errors.New("terminal test")); err != nil {
+		t.Fatal(err)
+	}
+	var failedPayloads int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM graph_index_generation_files WHERE generation_id = $1`, previousID).Scan(&failedPayloads); err != nil {
+		t.Fatal(err)
+	}
+	if failedPayloads != 0 {
+		t.Fatalf("failed generation retained %d payloads, want 0", failedPayloads)
+	}
+}
+
+func TestParserDuplicateGoMethodsPublishWithStableCanonicalNode(t *testing.T) {
+	pool, ctx := generationTestPool(t)
+	st := store.NewWithDB(pool)
+	installationID := generationSeedInstallation(t, ctx, pool, "{}")
+	repoID := generationSeedRepo(t, ctx, pool, installationID, "generation/duplicate-methods")
+	const filePath = "handlers.go"
+	const source = `package duplicate
+	type Alpha struct{}
+	type Beta struct{}
+	func (Alpha) Handle() {}
+	func (Beta) Handle() {}
+	func Caller() { Alpha{}.Handle() }`
+
+	symbols, edges := ParseFileSymbols(filePath, source)
+	symbols = append(symbols, fileSymbol(filePath, source))
+	symbolJSON, err := json.Marshal(symbols)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edgeJSON, err := json.Marshal(edges)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := st.BeginGraphGeneration(ctx, repoID, "duplicate-method-head", 1, 0, false, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.StageGraphGenerationFile(ctx, repoID, snapshot.GenerationID, filePath, symbolJSON, edgeJSON, []byte("[]"), nil, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := publishGraphGeneration(ctx, st, repoID, snapshot.GenerationID); err != nil {
+		t.Fatalf("publish parser fixture with legal duplicate method names: %v", err)
+	}
+
+	var status, receiver string
+	var methodCount, resolvedCalls, buildingCount, stagedPayloads int
+	if err := pool.QueryRow(ctx, `SELECT status FROM graph_index_generations WHERE id = $1`, snapshot.GenerationID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*)::int, min(receiver_type) FROM code_nodes WHERE repo_id = $1 AND file_path = $2 AND kind = 'method' AND name = 'Handle'`, repoID, filePath).Scan(&methodCount, &receiver); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*)::int FROM code_edges e
+		JOIN code_nodes source ON source.id = e.source_id
+		JOIN code_nodes target ON target.id = e.target_id
+		WHERE e.repo_id = $1 AND source.name = 'Caller' AND target.name = 'Handle'
+		  AND target.kind = 'method' AND target.receiver_type = 'Alpha'`, repoID).Scan(&resolvedCalls); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*)::int FROM graph_index_generations WHERE repo_id = $1 AND status = 'building'`, repoID).Scan(&buildingCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*)::int FROM graph_index_generation_files WHERE generation_id = $1`, snapshot.GenerationID).Scan(&stagedPayloads); err != nil {
+		t.Fatal(err)
+	}
+	if status != "published" || methodCount != 1 || receiver != "Alpha" || resolvedCalls != 1 || buildingCount != 0 || stagedPayloads != 0 {
+		t.Fatalf("published duplicate fixture: status=%s methods=%d receiver=%q resolved_calls=%d building=%d staged=%d", status, methodCount, receiver, resolvedCalls, buildingCount, stagedPayloads)
+	}
+}
+
 func TestPublishGraphGenerationResourceLimitsAreTerminalAndAtomic(t *testing.T) {
 	pool, ctx := generationTestPool(t)
 	st := store.NewWithDB(pool)
@@ -1059,6 +1218,13 @@ func TestPublishGraphGenerationResourceLimitsAreTerminalAndAtomic(t *testing.T) 
 		if status != "failed" || publishedID == nil || *publishedID != oldGenerationID || oldNodes != 1 || newNodes != 0 {
 			t.Fatalf("terminal publication = status %s published %v old/new nodes %d/%d", status, publishedID, oldNodes, newNodes)
 		}
+		var stagedPayloads int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM graph_index_generation_files WHERE generation_id = $1`, snapshot.GenerationID).Scan(&stagedPayloads); err != nil {
+			t.Fatal(err)
+		}
+		if stagedPayloads != 0 {
+			t.Fatalf("preflight-failed generation retained %d staged payloads, want 0", stagedPayloads)
+		}
 
 		prompt, err := st.ListReposDueForPromptGraphIndex(ctx, 10000)
 		if err != nil {
@@ -1074,6 +1240,41 @@ func TestPublishGraphGenerationResourceLimitsAreTerminalAndAtomic(t *testing.T) 
 					t.Fatal("oversized immutable generation remained immediately retryable")
 				}
 			}
+		}
+	})
+
+	t.Run("dynamic resolution limit failure removes staging atomically", func(t *testing.T) {
+		limits := defaultGraphGenerationPublishLimits
+		defaultGraphGenerationPublishLimits.ResolutionNodes = 1
+		defer func() { defaultGraphGenerationPublishLimits = limits }()
+		installationID := generationSeedInstallation(t, ctx, pool, "{}")
+		repoID := generationSeedRepo(t, ctx, pool, installationID, "generation/dynamic-resource-limit")
+		snapshot, err := st.BeginGraphGeneration(ctx, repoID, "dynamic-head", 1, 0, false, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		symbolJSON, _ := json.Marshal([]Symbol{{Kind: "file", Name: "a.go", FilePath: "a.go"}})
+		edgeJSON, _ := json.Marshal([]Edge{{SourceName: "a.go", TargetName: "Missing", Kind: "calls"}})
+		if _, err := st.StageGraphGenerationFile(ctx, repoID, snapshot.GenerationID, "a.go", symbolJSON, edgeJSON, []byte("[]"), nil, false); err != nil {
+			t.Fatal(err)
+		}
+		err = publishGraphGeneration(ctx, st, repoID, snapshot.GenerationID)
+		if !errors.Is(err, ErrGraphGenerationResourceLimit) {
+			t.Fatalf("publish error = %v, want dynamic resource limit", err)
+		}
+		var status string
+		var nodes, stagedPayloads int
+		if err := pool.QueryRow(ctx, `SELECT status FROM graph_index_generations WHERE id = $1`, snapshot.GenerationID).Scan(&status); err != nil {
+			t.Fatal(err)
+		}
+		if err := pool.QueryRow(ctx, `SELECT count(*)::int FROM code_nodes WHERE repo_id = $1`, repoID).Scan(&nodes); err != nil {
+			t.Fatal(err)
+		}
+		if err := pool.QueryRow(ctx, `SELECT count(*)::int FROM graph_index_generation_files WHERE generation_id = $1`, snapshot.GenerationID).Scan(&stagedPayloads); err != nil {
+			t.Fatal(err)
+		}
+		if status != "failed" || nodes != 0 || stagedPayloads != 0 {
+			t.Fatalf("dynamic limit cleanup: status=%s nodes=%d staged=%d", status, nodes, stagedPayloads)
 		}
 	})
 }

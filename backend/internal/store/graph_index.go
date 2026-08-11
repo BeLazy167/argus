@@ -528,6 +528,14 @@ func (s *Store) BeginGraphGeneration(ctx context.Context, repoID int64, commitSH
 			return GraphSnapshot{}, fmt.Errorf("supersede truncated graph generation: %w", err)
 		}
 	}
+	// Generation files are resumable staging payloads, not audit history. This
+	// also reclaims payloads left by older binaries whenever a repo is touched,
+	// while the status predicate protects the one resumable generation.
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM graph_index_generation_files f USING graph_index_generations g
+		WHERE f.generation_id = g.id AND g.repo_id = $1 AND g.status <> 'building'`, repoID); err != nil {
+		return GraphSnapshot{}, fmt.Errorf("clean terminal graph generation payloads: %w", err)
+	}
 	var snap GraphSnapshot
 	err = tx.QueryRow(ctx, `
 		INSERT INTO graph_index_generations (repo_id, commit_sha, status, tree_truncated, expected_files, skipped_files, error, refresh_version)
@@ -630,6 +638,11 @@ func (s *Store) StageGraphGenerationFile(ctx context.Context, repoID, generation
 	if _, err := tx.Exec(ctx, `UPDATE repos SET graph_index_visited_files = $2, graph_index_failed_files = $3 WHERE id = $1`, repoID, snap.VisitedFiles, snap.FailedFiles); err != nil {
 		return GraphSnapshot{}, fmt.Errorf("stage graph file: repo counts: %w", err)
 	}
+	if snap.Status != "building" {
+		if _, err := tx.Exec(ctx, `DELETE FROM graph_index_generation_files WHERE generation_id = $1`, generationID); err != nil {
+			return GraphSnapshot{}, fmt.Errorf("stage graph file: clean terminal payloads: %w", err)
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return GraphSnapshot{}, fmt.Errorf("stage graph file: commit: %w", err)
 	}
@@ -643,7 +656,12 @@ func (s *Store) FailGraphGeneration(ctx context.Context, repoID, generationID in
 	if generationErr != nil {
 		message = generationErr.Error()
 	}
-	tag, err := s.Pool.Exec(ctx, `
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("fail graph generation: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	tag, err := tx.Exec(ctx, `
 		UPDATE graph_index_generations SET status = 'failed', error = $3, updated_at = NOW()
 		WHERE id = $1 AND repo_id = $2 AND status = 'building'`, generationID, repoID, message)
 	if err != nil {
@@ -651,6 +669,12 @@ func (s *Store) FailGraphGeneration(ctx context.Context, repoID, generationID in
 	}
 	if tag.RowsAffected() != 1 {
 		return fmt.Errorf("fail graph generation: generation %d is not building for repo %d", generationID, repoID)
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM graph_index_generation_files WHERE generation_id = $1`, generationID); err != nil {
+		return fmt.Errorf("fail graph generation: clean terminal payloads: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("fail graph generation: commit: %w", err)
 	}
 	return nil
 }

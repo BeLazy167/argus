@@ -354,6 +354,9 @@ func commitGraphPublishPreflightFailure(ctx context.Context, tx pgx.Tx, repoID, 
 	if tag.RowsAffected() != 1 {
 		return errors.Join(limitErr, fmt.Errorf("fail oversized graph generation: generation is no longer building"))
 	}
+	if _, err := tx.Exec(ctx, `DELETE FROM graph_index_generation_files WHERE generation_id = $1`, generationID); err != nil {
+		return errors.Join(limitErr, fmt.Errorf("clean oversized graph generation payloads: %w", err))
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return errors.Join(limitErr, fmt.Errorf("commit oversized graph failure: %w", err))
 	}
@@ -428,6 +431,18 @@ func publishGraphGeneration(ctx context.Context, st *store.Store, repoID, genera
 
 	keyToID := make(map[string]int64, stats.Symbols)
 	nameToIDs := make(map[string][]int64, stats.Symbols)
+	rememberedIDs := make(map[int64]struct{}, stats.Symbols)
+	rememberNode := func(filePath, name string, id int64) {
+		key := nodeKey(filePath, name)
+		if keyToID[key] == 0 {
+			keyToID[key] = id
+		}
+		if _, exists := rememberedIDs[id]; exists {
+			return
+		}
+		rememberedIDs[id] = struct{}{}
+		nameToIDs[name] = append(nameToIDs[name], id)
+	}
 	if err := forEachStagedGraphFile(ctx, tx, generationID, "graph_symbols", func(file stagedGraphFile) error {
 		var symbols []Symbol
 		if err := json.Unmarshal(file.Symbols, &symbols); err != nil {
@@ -438,10 +453,16 @@ func publishGraphGeneration(ctx context.Context, st *store.Store, repoID, genera
 			end := min(start+nodeBatchSize, len(symbols))
 			batch := &pgx.Batch{}
 			for _, sym := range symbols[start:end] {
+				// The storage key predates receiver metadata, so two legal Go
+				// methods can intentionally collapse to the first parser-order row.
+				// The no-op update is required for PostgreSQL to return that row's ID.
 				batch.Queue(`INSERT INTO code_nodes (repo_id, installation_id, kind, name, file_path, line_start, line_end, language,
 				  return_type, params, visibility, is_async, receiver_type, scope, content_hash, updated_at)
 				VALUES ($1, (SELECT installation_id FROM repos WHERE id = $1), $2, $3, $4, $5, $6, $7,
-				  $8, $9, $10, $11, $12, $13, $14, NOW()) RETURNING id`, repoID, sym.Kind, sym.Name,
+				  $8, $9, $10, $11, $12, $13, $14, NOW())
+				ON CONFLICT (repo_id, file_path, kind, name) DO UPDATE
+				SET updated_at = code_nodes.updated_at
+				RETURNING id`, repoID, sym.Kind, sym.Name,
 					sym.FilePath, sym.LineStart, sym.LineEnd, langForFile(sym.FilePath), sym.ReturnType,
 					sym.Params, sym.Visibility, sym.IsAsync, sym.Receiver, sym.Scope, computeSymbolHash(sym))
 			}
@@ -452,8 +473,7 @@ func publishGraphGeneration(ctx context.Context, st *store.Store, repoID, genera
 					_ = results.Close()
 					return fmt.Errorf("publish graph generation: insert node %s: %w", sym.Name, err)
 				}
-				keyToID[nodeKey(sym.FilePath, sym.Name)] = id
-				nameToIDs[sym.Name] = append(nameToIDs[sym.Name], id)
+				rememberNode(sym.FilePath, sym.Name, id)
 			}
 			if err := results.Close(); err != nil {
 				return fmt.Errorf("publish graph generation: close node batch: %w", err)
@@ -478,8 +498,7 @@ func publishGraphGeneration(ctx context.Context, st *store.Store, repoID, genera
 			RETURNING id`, repoID, kind, name, filePath).Scan(&id); err != nil {
 			return 0, err
 		}
-		keyToID[nodeKey(filePath, name)] = id
-		nameToIDs[name] = append(nameToIDs[name], id)
+		rememberNode(filePath, name, id)
 		return id, nil
 	}
 	resolveOrPlaceholder := func(filePath, targetName string) (int64, error) {
@@ -661,6 +680,9 @@ func publishGraphGeneration(ctx context.Context, st *store.Store, repoID, genera
 		    ELSE r.graph_refresh_commit_sha END
 		FROM graph_index_generations g WHERE r.id = $1 AND g.id = $2`, repoID, generationID); err != nil {
 		return fmt.Errorf("publish graph generation: mark repo: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM graph_index_generation_files WHERE generation_id = $1`, generationID); err != nil {
+		return fmt.Errorf("publish graph generation: clean staging payloads: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("publish graph generation: commit: %w", err)
