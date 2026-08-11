@@ -46,6 +46,7 @@ func (s *Store) ReplaceArchitectureAnnotations(ctx context.Context, repoID int64
 	}
 
 	idsByName := make(map[string][]int64, len(nodes))
+	seenNodeIDs := make(map[int64]struct{}, len(nodes))
 	writtenNodes := 0
 	for _, n := range nodes {
 		if n.Name == "" || n.Kind == "" || n.FilePath == "" {
@@ -60,8 +61,11 @@ func (s *Store) ReplaceArchitectureAnnotations(ctx context.Context, repoID int64
 			RETURNING id`, repoID, prNumber, n.Kind, n.Name, n.FilePath, n.Language).Scan(&id); err != nil {
 			return 0, 0, fmt.Errorf("replace architecture annotations: insert node: %w", err)
 		}
-		idsByName[n.Name] = append(idsByName[n.Name], id)
-		writtenNodes++
+		if _, duplicate := seenNodeIDs[id]; !duplicate {
+			seenNodeIDs[id] = struct{}{}
+			idsByName[n.Name] = append(idsByName[n.Name], id)
+			writtenNodes++
+		}
 	}
 
 	writtenEdges := 0
@@ -72,13 +76,14 @@ func (s *Store) ReplaceArchitectureAnnotations(ctx context.Context, repoID int64
 		if len(sources) != 1 || len(targets) != 1 || e.Kind == "" {
 			continue
 		}
-		if _, err := tx.Exec(ctx, `
+		tag, err := tx.Exec(ctx, `
 			INSERT INTO architecture_annotation_edges (repo_id, pr_number, source_id, target_id, kind)
 			VALUES ($1, $2, $3, $4, $5)
-			ON CONFLICT DO NOTHING`, repoID, prNumber, sources[0], targets[0], e.Kind); err != nil {
+			ON CONFLICT DO NOTHING`, repoID, prNumber, sources[0], targets[0], e.Kind)
+		if err != nil {
 			return 0, 0, fmt.Errorf("replace architecture annotations: insert edge: %w", err)
 		}
-		writtenEdges++
+		writtenEdges += int(tag.RowsAffected())
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return 0, 0, fmt.Errorf("replace architecture annotations: commit: %w", err)

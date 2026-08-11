@@ -76,3 +76,45 @@ func TestReplaceArchitectureAnnotationsDropsAmbiguousEdges(t *testing.T) {
 		t.Fatalf("ambiguous name produced %d edge(s), want 0", writtenEdges)
 	}
 }
+
+func TestReplaceArchitectureAnnotationsDeduplicatesIdenticalLLMItems(t *testing.T) {
+	pool, ctx := apiEndpointTestPool(t)
+	st := &Store{Pool: pool, Q: db.New(pool)}
+	installationID := seedInstallation(t, ctx, pool, "{}")
+	repoID := apiSeedRepo(t, ctx, pool, installationID, "annotation/duplicates")
+
+	nodes := []ArchitectureAnnotationNode{
+		{Name: "Handler", Kind: "function", FilePath: "handler.go"},
+		{Name: "Handler", Kind: "function", FilePath: "handler.go"},
+		{Name: "Store", Kind: "class", FilePath: "store.go"},
+	}
+	edge := ArchitectureAnnotationEdgeInput{Source: "Handler", Target: "Store", Kind: "calls"}
+	writtenNodes, writtenEdges, err := st.ReplaceArchitectureAnnotations(ctx, repoID, 8, nodes, []ArchitectureAnnotationEdgeInput{edge, edge})
+	if err != nil {
+		t.Fatalf("replace annotations: %v", err)
+	}
+	if writtenNodes != 2 || writtenEdges != 1 {
+		t.Fatalf("unique written nodes/edges = %d/%d, want 2/1", writtenNodes, writtenEdges)
+	}
+}
+
+func TestReplaceArchitectureAnnotationsEmptySnapshotClearsNodes(t *testing.T) {
+	pool, ctx := apiEndpointTestPool(t)
+	st := &Store{Pool: pool, Q: db.New(pool)}
+	installationID := seedInstallation(t, ctx, pool, "{}")
+	repoID := apiSeedRepo(t, ctx, pool, installationID, "annotation/empty")
+
+	if _, _, err := st.ReplaceArchitectureAnnotations(ctx, repoID, 9, []ArchitectureAnnotationNode{{Name: "Old", Kind: "component", FilePath: "old.go"}}, nil); err != nil {
+		t.Fatalf("seed annotations: %v", err)
+	}
+	if _, _, err := st.ReplaceArchitectureAnnotations(ctx, repoID, 9, nil, nil); err != nil {
+		t.Fatalf("clear annotations: %v", err)
+	}
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM architecture_annotation_nodes WHERE repo_id = $1 AND pr_number = 9`, repoID).Scan(&count); err != nil {
+		t.Fatalf("count annotations: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("empty snapshot left %d stale node(s)", count)
+	}
+}

@@ -4167,10 +4167,6 @@ Rules:
 		return
 	}
 
-	if len(result.Nodes) == 0 {
-		return
-	}
-
 	nodes := make([]store.ArchitectureAnnotationNode, 0, len(result.Nodes))
 	for _, n := range result.Nodes {
 		nodes = append(nodes, store.ArchitectureAnnotationNode{
