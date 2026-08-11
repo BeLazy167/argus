@@ -124,6 +124,11 @@ type DecisionTrace struct {
 	CreatedAt  *time.Time `json:"created_at"`
 }
 
+type GraphIndexBudget struct {
+	Singleton           bool       `json:"singleton"`
+	LastWindowStartedAt *time.Time `json:"last_window_started_at"`
+}
+
 type GraphIndexGeneration struct {
 	ID             int64      `json:"id"`
 	RepoID         int64      `json:"repo_id"`
