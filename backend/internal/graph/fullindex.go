@@ -16,15 +16,12 @@ import (
 
 // DefaultFullIndexFileCap bounds one full-repo index.
 //
-// indexFileSet streams file CONTENT — each body goes out of scope at the end of
-// its iteration — but it must retain the parsed symbols and edges of every file
-// until the cross-file edge-resolution pass runs. That retained set is what
-// scales with repo size, and it is why an earlier full-index caller OOM'd a
-// 512 MB VM on an 890-file repo and was deleted rather than bounded.
+// Each window fetches, parses, and stages at most this many files. Parsed facts
+// are persisted between continuations, so the live graph remains unchanged
+// until the final atomic publish and file bodies never accumulate in memory.
 //
-// The machines now run at 1024 MB, so 1500 files leaves real headroom over the
-// size that previously failed. It also bounds the OTHER cost: indexFileSet
-// fetches one file per GitHub API call, so this is 1500 calls against an
+// The cap also bounds GitHub cost: each source file is one API call, so a window
+// can consume up to 1500 calls against an
 // installation's 5000/hour budget — which is why the scheduler runs one repo
 // per tick rather than a whole installation at once.
 const DefaultFullIndexFileCap = 1500
@@ -43,43 +40,21 @@ func filterSourceFiles(entries []string) []string {
 	return out
 }
 
-// selectIndexableFiles applies the cap, starting from offset, and reports what
-// it left out plus where the next run should resume.
-//
-// Sorted, so a given offset always names the same window. The window ROTATES
-// because a cap takes a prefix, and a fixed prefix would exclude the same
-// alphabetical tail on every run forever — on a monorepo where web/ sorts after
-// backend/, an entire top-level tree would never enter the graph while the repo
-// reported as fully indexed.
-//
-// Rotating is safe because the orphan sweep is per-FILE: upsertFileSymbols
-// loads hashes for one path and can only orphan ids belonging to that same
-// path, so files a run does not visit keep their existing nodes. Successive
-// windows accumulate coverage rather than deleting each other's work.
-//
-// Returns the dropped count rather than logging, so the caller can report it. A
-// cap that truncates silently reads, to everything above it, as "this repo is
-// fully indexed" — the same false confidence the fragmented graph produces.
-func selectIndexableFiles(files []string, cap, offset int) (selected []string, dropped, nextOffset int) {
-	sorted := make([]string, len(files))
-	copy(sorted, files)
-	sort.Strings(sorted)
-
-	if cap <= 0 || len(sorted) <= cap {
-		return sorted, 0, 0
+// selectPendingFiles returns the deterministic next window of source files that
+// do not yet have a ready staged snapshot. Failed files remain pending, so the
+// next continuation retries them rather than waiting for a cursor to wrap.
+func selectPendingFiles(files []string, ready map[string]struct{}, cap int) (selected []string, remaining int) {
+	pending := make([]string, 0, len(files)-len(ready))
+	for _, filePath := range files {
+		if _, ok := ready[filePath]; !ok {
+			pending = append(pending, filePath)
+		}
 	}
-	if offset < 0 || offset >= len(sorted) {
-		offset = 0
+	sort.Strings(pending)
+	if cap <= 0 || len(pending) <= cap {
+		return pending, 0
 	}
-
-	// Wraps, so a window near the end of the list is still a full window rather
-	// than a short tail — otherwise the last run of each cycle would index fewer
-	// files than the cap allows for no reason.
-	selected = make([]string, 0, cap)
-	for i := range cap {
-		selected = append(selected, sorted[(offset+i)%len(sorted)])
-	}
-	return selected, len(sorted) - cap, (offset + cap) % len(sorted)
+	return pending[:cap], len(pending) - cap
 }
 
 // ErrTruncatedTree means GitHub explicitly reported that its recursive tree is
@@ -135,15 +110,7 @@ func IndexRepoBounded(
 	if err != nil {
 		return result, err
 	}
-	pending := make([]string, 0, len(sourceFiles)-len(ready))
-	for _, filePath := range sourceFiles {
-		if _, ok := ready[filePath]; !ok {
-			pending = append(pending, filePath)
-		}
-	}
-	if fileCap > 0 && len(pending) > fileCap {
-		pending = pending[:fileCap]
-	}
+	pending, _ := selectPendingFiles(sourceFiles, ready, fileCap)
 
 	for _, filePath := range pending {
 		if err := ctx.Err(); err != nil {

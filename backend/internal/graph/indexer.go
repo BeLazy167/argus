@@ -45,7 +45,6 @@ type indexerStore interface {
 	GetNodesHashesForFile(ctx context.Context, repoID int64, filePath string) ([]store.NodeHashRow, error)
 	UpsertCodeNodeFullWithHash(ctx context.Context, repoID int64, kind, name, filePath string, lineStart, lineEnd int, language string, prNumber int, returnType, params, visibility string, isAsync bool, receiverType, scope, contentHash string) (int64, error)
 	UpsertCodeNode(ctx context.Context, repoID int64, kind, name, filePath string, lineStart, lineEnd int, language string, prNumber int) (int64, error)
-	UpsertCodeEdge(ctx context.Context, repoID, sourceID, targetID int64, kind string) error
 	ReplaceCodeEdgesForFiles(ctx context.Context, repoID int64, filePaths []string, edges []store.CodeEdgeRow) error
 	DeleteNodesByIDs(ctx context.Context, repoID int64, ids []int64) error
 }
