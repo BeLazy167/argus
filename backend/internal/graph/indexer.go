@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -33,6 +34,13 @@ func symbolDiffKey(kind, name string) string { return kind + "\x1f" + name }
 // to track one more call site, which dilutes the test's focus on the
 // diff loop.
 type indexerStore interface {
+	// apiEndpointStore is embedded, not duplicated, so the cross-repo API
+	// linking pass and the indexer cannot drift apart on what persistence
+	// they need. See apilink.go.
+	apiEndpointStore
+
+	ReplaceAPIEndpointsForFiles(ctx context.Context, repoID int64, filePaths []string, rows []store.APIEndpointRow) (bool, error)
+	LookupCodeNodeIDsByName(ctx context.Context, repoID int64, names []string) (map[string]int64, error)
 	GetNodesHashesForFile(ctx context.Context, repoID int64, filePath string) ([]store.NodeHashRow, error)
 	UpsertCodeNodeFullWithHash(ctx context.Context, repoID int64, kind, name, filePath string, lineStart, lineEnd int, language string, prNumber int, returnType, params, visibility string, isAsync bool, receiverType, scope, contentHash string) (int64, error)
 	UpsertCodeNode(ctx context.Context, repoID int64, kind, name, filePath string, lineStart, lineEnd int, language string, prNumber int) (int64, error)
@@ -244,6 +252,7 @@ func indexFileSet(ctx context.Context, st indexerStore, ghClient *ghpkg.Client, 
 	nameToIDs := make(map[string][]int64)
 	edgesByFile := make(map[string][]Edge, len(files))
 	symbolsByFile := make(map[string][]Symbol, len(files))
+	endpointsByFile := make(map[string][]APIEndpoint, len(files))
 
 	for _, f := range files {
 		if ctx.Err() != nil {
@@ -258,9 +267,146 @@ func indexFileSet(ctx context.Context, st indexerStore, ghClient *ghpkg.Client, 
 		upsertFileSymbols(ctx, st, repoDBID, f, syms, keyToID, nameToIDs)
 		edgesByFile[f] = edges
 		symbolsByFile[f] = syms
+		// Assigned for every VISITED file, including files with no endpoints,
+		// because the empty slice is what deletes a route that was removed
+		// from the file. A file whose fetch failed is skipped above and keeps
+		// its existing rows — we did not observe it, so we cannot claim its
+		// endpoints are gone.
+		//
+		endpointsByFile[f] = anchorEndpoints(ExtractAPIEndpoints(f, content), syms)
 	}
 
-	return resolveAndUpsertEdges(ctx, st, repoDBID, edgesByFile, symbolsByFile, keyToID, nameToIDs)
+	if err := resolveAndUpsertEdges(ctx, st, repoDBID, edgesByFile, symbolsByFile, keyToID, nameToIDs); err != nil {
+		return err
+	}
+
+	// After the nodes exist, not before: an endpoint row references the
+	// code_node it belongs to, so it cannot be written until that node has an
+	// id.
+	changed := persistAPIEndpoints(ctx, st, repoDBID, endpointsByFile, keyToID, nameToIDs)
+	if !changed {
+		// Nothing this run visited altered the route table, so the derived edge
+		// set it feeds cannot have changed either. Without this gate every
+		// incremental index — including a PR that touches twenty files
+		// declaring nothing — re-listed the whole installation, rematched it,
+		// and rewrote every derived edge, inside the 10s budget the pass shares
+		// with the GitHub file fetches.
+		return nil
+	}
+
+	written, err := LinkAPIEndpoints(ctx, st, repoDBID)
+	if err != nil {
+		// Non-fatal, like every other enrichment in this loop. The parsed graph
+		// is already written and correct; the derived edges are an addition.
+		slog.Warn("graph: cross-repo API linking failed", "repo", owner+"/"+repo, "error", err)
+		return nil
+	}
+	slog.Info("graph: cross-repo API edges", "repo", owner+"/"+repo, "edges", written)
+	return nil
+}
+
+// persistAPIEndpoints resolves each extracted endpoint to a code_nodes id and
+// rewrites the api_endpoints rows for every file the run visited.
+//
+// Resolution order, and the order matters:
+//
+//  1. the HANDLER named in the registration — chi's r.Get("/x", s.healthz)
+//     names a symbol that almost always lives in another file, and that symbol
+//     is what a change to the endpoint actually touches;
+//  2. the symbol that ENCLOSES the site, which is the only anchor a client call
+//     or an inline handler has.
+//
+// An endpoint that resolves to neither is dropped rather than anchored to a
+// synthesised node. Attaching it to something that does not describe it is how
+// an inferred edge starts pointing at the wrong code.
+//
+// Handlers this run did not parse are resolved from the DATABASE, in one
+// batched lookup. keyToID/nameToIDs only hold the files a single run visited,
+// so an incremental index of server.go could not see the handler functions its
+// routes name and fell through to the enclosing router function — anchoring all
+// 80+ routes to `routes`, while a full index anchored each to its handler.
+// Which node a route carried then depended on which files a PR happened to
+// change.
+//
+// Returns whether the stored route table changed, which is what gates the
+// installation-wide re-derivation of calls_api edges.
+func persistAPIEndpoints(ctx context.Context, st indexerStore, repoDBID int64, endpointsByFile map[string][]APIEndpoint, keyToID map[string]int64, nameToIDs map[string][]int64) bool {
+	filePaths := make([]string, 0, len(endpointsByFile))
+	for filePath := range endpointsByFile {
+		filePaths = append(filePaths, filePath)
+	}
+	sort.Strings(filePaths) // deterministic row order, so the change gate is stable
+
+	dbIDs := lookupUnresolvedHandlers(ctx, st, repoDBID, endpointsByFile, keyToID, nameToIDs)
+
+	rows := make([]store.APIEndpointRow, 0, len(endpointsByFile))
+	for _, filePath := range filePaths {
+		for _, e := range endpointsByFile[filePath] {
+			nodeID, ok := resolveEndpointNode(filePath, e, keyToID, nameToIDs, dbIDs)
+			if !ok {
+				continue
+			}
+			rows = append(rows, store.APIEndpointRow{
+				RepoID: repoDBID, NodeID: nodeID, Role: e.Role, Method: e.Method,
+				PathPattern: e.Path, RawPath: e.RawPath, FilePath: filePath, Line: e.Line,
+			})
+		}
+	}
+
+	changed, err := st.ReplaceAPIEndpointsForFiles(ctx, repoDBID, filePaths, rows)
+	if err != nil {
+		slog.Warn("graph: persist api endpoints failed", "repo_id", repoDBID, "files", len(filePaths), "error", err)
+		return false
+	}
+	return changed
+}
+
+// lookupUnresolvedHandlers batches the DB fallback for every endpoint name this
+// run's own parse cannot resolve. One query per run, not per endpoint; a lookup
+// failure is logged and degrades to the in-run maps rather than dropping rows.
+func lookupUnresolvedHandlers(ctx context.Context, st indexerStore, repoDBID int64, endpointsByFile map[string][]APIEndpoint, keyToID map[string]int64, nameToIDs map[string][]int64) map[string]int64 {
+	missing := map[string]struct{}{}
+	for filePath, eps := range endpointsByFile {
+		for _, e := range eps {
+			for _, name := range []string{e.Handler, e.Symbol} {
+				if name == "" {
+					continue
+				}
+				if _, ok := resolveNodeName(filePath, name, keyToID, nameToIDs); !ok {
+					missing[name] = struct{}{}
+				}
+			}
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(missing))
+	for name := range missing {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	ids, err := st.LookupCodeNodeIDsByName(ctx, repoDBID, names)
+	if err != nil {
+		slog.Warn("graph: endpoint handler lookup failed", "repo_id", repoDBID, "error", err)
+		return nil
+	}
+	return ids
+}
+
+func resolveEndpointNode(filePath string, e APIEndpoint, keyToID map[string]int64, nameToIDs map[string][]int64, dbIDs map[string]int64) (int64, bool) {
+	for _, name := range []string{e.Handler, e.Symbol} {
+		if name == "" {
+			continue
+		}
+		if id, ok := resolveNodeName(filePath, name, keyToID, nameToIDs); ok {
+			return id, true
+		}
+		if id, ok := dbIDs[name]; ok {
+			return id, true
+		}
+	}
+	return 0, false
 }
 
 // indexParsedSymbols runs the hash-gated diff + edge upsert loop against
@@ -328,23 +474,31 @@ func upsertFileSymbols(ctx context.Context, st indexerStore, repoDBID int64, fil
 	}
 }
 
+// resolveNodeName finds the best node ID for a symbol name referenced from
+// sourceFile. Same-file references prefer the node in that file; otherwise the
+// first match wins.
+//
+// ONE definition, used by both edge resolution and endpoint anchoring. The two
+// had identical copies, so a change to the collision rule applied to edges
+// would have left endpoints resolving the same name to a different node — the
+// two halves of the graph drifting apart on what a name means.
+func resolveNodeName(sourceFile, name string, keyToID map[string]int64, nameToIDs map[string][]int64) (int64, bool) {
+	if id, ok := keyToID[nodeKey(sourceFile, name)]; ok {
+		return id, true
+	}
+	if ids := nameToIDs[name]; len(ids) > 0 {
+		return ids[0], true
+	}
+	return 0, false
+}
+
 // resolveAndUpsertEdges runs the edge-resolution + upsert pass after every
 // file's nodes have been committed and keyToID/nameToIDs are fully populated.
 // Edges and symbol slices are kept separate from the fileResult map so the
 // caller can free file bodies eagerly during the fetch/parse phase.
 func resolveAndUpsertEdges(ctx context.Context, st indexerStore, repoDBID int64, edgesByFile map[string][]Edge, symbolsByFile map[string][]Symbol, keyToID map[string]int64, nameToIDs map[string][]int64) error {
-	// resolveEdgeTarget finds the best node ID for an edge target name.
-	// For same-file references, prefer the node in the source file.
-	// Otherwise, pick the first (most common) match.
 	resolveEdgeTarget := func(sourceFile, targetName string) (int64, bool) {
-		if id, ok := keyToID[nodeKey(sourceFile, targetName)]; ok {
-			return id, true
-		}
-		ids := nameToIDs[targetName]
-		if len(ids) > 0 {
-			return ids[0], true
-		}
-		return 0, false
+		return resolveNodeName(sourceFile, targetName, keyToID, nameToIDs)
 	}
 
 	// Upsert edges where both source and target exist in the graph.

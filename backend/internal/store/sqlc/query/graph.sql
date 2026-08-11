@@ -22,12 +22,17 @@ SELECT id, repo_id, kind, name, file_path, line_start, line_end, language, pr_nu
 FROM code_nodes WHERE repo_id = $1 ORDER BY file_path, name;
 
 -- name: ListGraphEdges :many
+-- `NOT ce.inferred` excludes derived cross-repo API edges, and it is load
+-- bearing rather than tidy. Those edges carry the CLIENT's repo_id while their
+-- target node lives in another repository, so this query would return an edge
+-- pointing at a node id that ListGraphNodes — filtered on the same repo_id —
+-- does not contain. The canvas would render a dangling edge to nothing.
 SELECT ce.id, ce.repo_id, ce.source_id, ce.target_id, ce.kind,
        sn.name as source_name, tn.name as target_name
 FROM code_edges ce
 JOIN code_nodes sn ON sn.id = ce.source_id
 JOIN code_nodes tn ON tn.id = ce.target_id
-WHERE ce.repo_id = $1;
+WHERE ce.repo_id = $1 AND NOT ce.inferred;
 
 -- name: MarkNodesMerged :exec
 UPDATE code_nodes SET is_merged = true WHERE repo_id = $1 AND pr_number = $2;
@@ -45,11 +50,16 @@ ORDER BY file_path, line_start;
 
 -- name: ListArchFileEdges :many
 -- Returns inter-file edges (excludes self-references) for fan-in/fan-out + edge graph.
+--
+-- `NOT ce.inferred`: a derived cross-repo API edge names a file in ANOTHER
+-- repository, and every metric built on this query — fan-in, fan-out, coupling,
+-- choke points — is a statement about THIS repository's architecture. Letting
+-- one in adds a foreign file to the file set and inflates the counts.
 SELECT src.file_path as source_path, tgt.file_path as target_path, ce.kind
 FROM code_edges ce
 JOIN code_nodes src ON src.id = ce.source_id
 JOIN code_nodes tgt ON tgt.id = ce.target_id
-WHERE ce.repo_id = $1 AND src.file_path != tgt.file_path;
+WHERE ce.repo_id = $1 AND src.file_path != tgt.file_path AND NOT ce.inferred;
 
 -- name: ListArchBugDensity :many
 -- Returns bug count + PR count per file for bug density and change frequency metrics.
@@ -89,22 +99,26 @@ LIMIT 200;
 
 -- name: GetTopChokePoints :many
 -- Top files by fan_in (used for review prompt context injection + memory indexing).
+-- `NOT ce.inferred` for the same reason as ListArchFileEdges: this ranks files
+-- WITHIN one repository, and a cross-repo edge would list a foreign file.
 SELECT tgt.file_path, COUNT(DISTINCT src.file_path)::int as fan_in
 FROM code_edges ce
 JOIN code_nodes src ON src.id = ce.source_id
 JOIN code_nodes tgt ON tgt.id = ce.target_id
-WHERE ce.repo_id = $1 AND src.file_path != tgt.file_path
+WHERE ce.repo_id = $1 AND src.file_path != tgt.file_path AND NOT ce.inferred
 GROUP BY tgt.file_path
 ORDER BY fan_in DESC
 LIMIT $2;
 
 -- name: GetFileFanIn :one
--- Single-file fan-in lookup for review prompt enrichment.
+-- Single-file fan-in lookup for review prompt enrichment. `NOT ce.inferred`
+-- keeps the number the review LLM is told a count of parsed dependents.
 SELECT COUNT(DISTINCT src.file_path)::int as fan_in
 FROM code_edges ce
 JOIN code_nodes src ON src.id = ce.source_id
 JOIN code_nodes tgt ON tgt.id = ce.target_id
-WHERE ce.repo_id = $1 AND tgt.file_path = $2 AND src.file_path != tgt.file_path;
+WHERE ce.repo_id = $1 AND tgt.file_path = $2 AND src.file_path != tgt.file_path
+  AND NOT ce.inferred;
 
 -- name: GetFileBugCount :one
 -- Single-file bug count for review prompt enrichment. Same predicate as

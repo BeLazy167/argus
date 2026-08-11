@@ -67,6 +67,7 @@ FROM code_edges ce
 JOIN code_nodes src ON src.id = ce.source_id
 JOIN code_nodes tgt ON tgt.id = ce.target_id
 WHERE ce.repo_id = $1 AND tgt.file_path = $2 AND src.file_path != tgt.file_path
+  AND NOT ce.inferred
 `
 
 type GetFileFanInParams struct {
@@ -74,7 +75,8 @@ type GetFileFanInParams struct {
 	FilePath string `json:"file_path"`
 }
 
-// Single-file fan-in lookup for review prompt enrichment.
+// Single-file fan-in lookup for review prompt enrichment. `NOT ce.inferred`
+// keeps the number the review LLM is told a count of parsed dependents.
 func (q *Queries) GetFileFanIn(ctx context.Context, arg GetFileFanInParams) (int, error) {
 	row := q.db.QueryRow(ctx, getFileFanIn, arg.RepoID, arg.FilePath)
 	var fan_in int
@@ -87,7 +89,7 @@ SELECT tgt.file_path, COUNT(DISTINCT src.file_path)::int as fan_in
 FROM code_edges ce
 JOIN code_nodes src ON src.id = ce.source_id
 JOIN code_nodes tgt ON tgt.id = ce.target_id
-WHERE ce.repo_id = $1 AND src.file_path != tgt.file_path
+WHERE ce.repo_id = $1 AND src.file_path != tgt.file_path AND NOT ce.inferred
 GROUP BY tgt.file_path
 ORDER BY fan_in DESC
 LIMIT $2
@@ -104,6 +106,8 @@ type GetTopChokePointsRow struct {
 }
 
 // Top files by fan_in (used for review prompt context injection + memory indexing).
+// `NOT ce.inferred` for the same reason as ListArchFileEdges: this ranks files
+// WITHIN one repository, and a cross-repo edge would list a foreign file.
 func (q *Queries) GetTopChokePoints(ctx context.Context, arg GetTopChokePointsParams) ([]GetTopChokePointsRow, error) {
 	rows, err := q.db.Query(ctx, getTopChokePoints, arg.RepoID, arg.Limit)
 	if err != nil {
@@ -219,7 +223,7 @@ SELECT src.file_path as source_path, tgt.file_path as target_path, ce.kind
 FROM code_edges ce
 JOIN code_nodes src ON src.id = ce.source_id
 JOIN code_nodes tgt ON tgt.id = ce.target_id
-WHERE ce.repo_id = $1 AND src.file_path != tgt.file_path
+WHERE ce.repo_id = $1 AND src.file_path != tgt.file_path AND NOT ce.inferred
 `
 
 type ListArchFileEdgesRow struct {
@@ -229,6 +233,11 @@ type ListArchFileEdgesRow struct {
 }
 
 // Returns inter-file edges (excludes self-references) for fan-in/fan-out + edge graph.
+//
+// `NOT ce.inferred`: a derived cross-repo API edge names a file in ANOTHER
+// repository, and every metric built on this query — fan-in, fan-out, coupling,
+// choke points — is a statement about THIS repository's architecture. Letting
+// one in adds a foreign file to the file set and inflates the counts.
 func (q *Queries) ListArchFileEdges(ctx context.Context, repoID int64) ([]ListArchFileEdgesRow, error) {
 	rows, err := q.db.Query(ctx, listArchFileEdges, repoID)
 	if err != nil {
@@ -296,7 +305,7 @@ SELECT ce.id, ce.repo_id, ce.source_id, ce.target_id, ce.kind,
 FROM code_edges ce
 JOIN code_nodes sn ON sn.id = ce.source_id
 JOIN code_nodes tn ON tn.id = ce.target_id
-WHERE ce.repo_id = $1
+WHERE ce.repo_id = $1 AND NOT ce.inferred
 `
 
 type ListGraphEdgesRow struct {
@@ -309,6 +318,11 @@ type ListGraphEdgesRow struct {
 	TargetName string `json:"target_name"`
 }
 
+// `NOT ce.inferred` excludes derived cross-repo API edges, and it is load
+// bearing rather than tidy. Those edges carry the CLIENT's repo_id while their
+// target node lives in another repository, so this query would return an edge
+// pointing at a node id that ListGraphNodes — filtered on the same repo_id —
+// does not contain. The canvas would render a dangling edge to nothing.
 func (q *Queries) ListGraphEdges(ctx context.Context, repoID int64) ([]ListGraphEdgesRow, error) {
 	rows, err := q.db.Query(ctx, listGraphEdges, repoID)
 	if err != nil {

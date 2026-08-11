@@ -352,6 +352,24 @@ func (s *Store) blastRadiusPGGraph(ctx context.Context, installationID, repoID i
 // recognise it, they either fetch a same-named file from the wrong repository or
 // silently drop the dependent.
 //
+// `AND NOT ce.inferred` is load-bearing since the walk became installation-
+// scoped. While the recursion filtered repo_id, a derived cross-repo calls_api
+// edge could not be traversed: its target node sat in another repository and
+// the predicate stopped there. Widening the walk to the installation removed
+// exactly that accident, so the derived edge is now reachable and an inferred
+// relation would enter review context as though a parser had found it. Nothing
+// consumes these edges deliberately yet, so they are excluded here rather than
+// silently promoted to fact. It is the same predicate ListGraphEdges,
+// ListArchFileEdges, GetTopChokePoints and GetFileFanIn already carry.
+//
+// KNOWN DIVERGENCE: the pgGraph path above cannot carry this. pgGraph filters
+// are evaluated against registered columns of the NODE table, and `inferred` is
+// a column of code_edges — migration 072 records that a join cannot be pushed
+// into graph.traverse(). Where the extension is built and the projection is
+// fresh, a derived edge is therefore still walked. Consuming these edges on
+// purpose (#221 item 3b) has to settle that before the projection can be
+// trusted as equivalent to the CTE.
+//
 // The result is ordered same-repo-first WITHIN each depth. The row budget did
 // not grow when the walk widened from one repository to a whole installation, so
 // ordering on bare file_path let an alphabetically earlier sibling repository
@@ -369,7 +387,7 @@ func (s *Store) blastRadiusCTE(ctx context.Context, installationID, repoID int64
 			FROM code_nodes cn
 			JOIN code_edges ce ON ce.source_id = cn.id
 			JOIN affected a ON ce.target_id = a.id
-			WHERE a.depth < $4 AND cn.installation_id = $1
+			WHERE a.depth < $4 AND cn.installation_id = $1 AND NOT ce.inferred
 		)
 		SELECT id, repo_id, name, file_path, kind, depth
 		FROM (SELECT DISTINCT id, repo_id, name, file_path, kind, depth FROM affected) d

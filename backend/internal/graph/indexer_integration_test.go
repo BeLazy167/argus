@@ -13,6 +13,7 @@ package graph
 
 import (
 	"context"
+	"slices"
 	"testing"
 
 	"github.com/BeLazy167/argus/backend/internal/store"
@@ -36,6 +37,20 @@ type fakeIndexerStore struct {
 	upsertPlain    []upsertPlainCall
 	upsertEdges    []upsertEdgeCall
 	deletes        []deleteCall
+
+	// API-endpoint side of indexerStore. endpointRows is the fake's whole
+	// api_endpoints table, keyed by file, and installEndpoints is what a
+	// sibling repo in the same installation already has — the two together
+	// let a test drive the cross-repo linking pass with no database.
+	endpointRows     map[string][]store.APIEndpointRow
+	installEndpoints []store.APIEndpointRow
+	inferredEdges    []upsertEdgeCall
+	// nodeIDsByName is what the DB already knows about symbols this run did
+	// not parse — the fallback an incremental index depends on.
+	nodeIDsByName map[string]int64
+	// linkCalls counts how often the installation-wide re-derivation ran, so a
+	// test can assert the change gate actually gates.
+	linkCalls int
 
 	// nextID feeds monotonically increasing IDs to upsert returns.
 	// Seeded high enough that it cannot collide with seeded existing IDs.
@@ -80,8 +95,59 @@ type deleteCall struct {
 func newFakeIndexerStore() *fakeIndexerStore {
 	return &fakeIndexerStore{
 		hashesByFile: map[string][]store.NodeHashRow{},
+		endpointRows: map[string][]store.APIEndpointRow{},
 		nextID:       1000,
 	}
+}
+
+// ReplaceAPIEndpointsForFiles models the real store's equality gate: it reports
+// changed only when the rows for the visited files actually differ.
+func (f *fakeIndexerStore) ReplaceAPIEndpointsForFiles(_ context.Context, _ int64, filePaths []string, rows []store.APIEndpointRow) (bool, error) {
+	next := map[string][]store.APIEndpointRow{}
+	for _, p := range filePaths {
+		next[p] = nil
+	}
+	for _, r := range rows {
+		next[r.FilePath] = append(next[r.FilePath], r)
+	}
+	changed := false
+	for _, p := range filePaths {
+		if !slices.Equal(f.endpointRows[p], next[p]) {
+			changed = true
+		}
+		f.endpointRows[p] = next[p]
+	}
+	return changed, nil
+}
+
+func (f *fakeIndexerStore) LookupCodeNodeIDsByName(_ context.Context, _ int64, names []string) (map[string]int64, error) {
+	out := map[string]int64{}
+	for _, n := range names {
+		if id, ok := f.nodeIDsByName[n]; ok {
+			out[n] = id
+		}
+	}
+	return out, nil
+}
+
+// ListAPIEndpointsForInstallationOf returns what this repo just wrote plus what
+// the fake was seeded with for sibling repos — the same union the real query
+// produces from the installation join.
+func (f *fakeIndexerStore) ListAPIEndpointsForInstallationOf(_ context.Context, _ int64) ([]store.APIEndpointRow, bool, error) {
+	out := append([]store.APIEndpointRow{}, f.installEndpoints...)
+	for _, rows := range f.endpointRows {
+		out = append(out, rows...)
+	}
+	return out, false, nil
+}
+
+func (f *fakeIndexerStore) ReplaceInferredAPIEdges(_ context.Context, _ int64, edges []store.InferredEdgeRow) (int, error) {
+	f.linkCalls++
+	f.inferredEdges = nil
+	for _, e := range edges {
+		f.inferredEdges = append(f.inferredEdges, upsertEdgeCall{repoID: e.RepoID, sourceID: e.SourceID, targetID: e.TargetID, kind: e.Kind})
+	}
+	return len(edges), nil
 }
 
 func (f *fakeIndexerStore) GetNodesHashesForFile(_ context.Context, repoID int64, filePath string) ([]store.NodeHashRow, error) {

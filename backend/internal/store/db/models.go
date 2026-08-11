@@ -23,6 +23,19 @@ type ActivityLog struct {
 	InstallationID *int64    `json:"installation_id"`
 }
 
+type ApiEndpoint struct {
+	ID          int64     `json:"id"`
+	RepoID      int64     `json:"repo_id"`
+	NodeID      int64     `json:"node_id"`
+	Role        string    `json:"role"`
+	Method      string    `json:"method"`
+	PathPattern string    `json:"path_pattern"`
+	RawPath     string    `json:"raw_path"`
+	FilePath    string    `json:"file_path"`
+	Line        int       `json:"line"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
 type AutoResolveEvent struct {
 	ID                 int64     `json:"id"`
 	InstallationID     int64     `json:"installation_id"`
@@ -43,6 +56,7 @@ type CodeEdge struct {
 	TargetID  int64      `json:"target_id"`
 	Kind      string     `json:"kind"`
 	UpdatedAt *time.Time `json:"updated_at"`
+	Inferred  bool       `json:"inferred"`
 }
 
 type CodeNode struct {
