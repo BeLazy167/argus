@@ -41,8 +41,8 @@ func filterSourceFiles(entries []string) []string {
 }
 
 // selectPendingFiles returns the deterministic next window of source files that
-// do not yet have a ready staged snapshot. Failed files remain pending, so the
-// next continuation retries them rather than waiting for a cursor to wrap.
+// do not yet have a ready staged snapshot. Transient failures remain pending,
+// so a continuation retries them.
 func selectPendingFiles(files []string, ready map[string]struct{}, cap int) (selected []string, remaining int) {
 	pending := make([]string, 0, len(files)-len(ready))
 	for _, filePath := range files {
@@ -104,7 +104,17 @@ func IndexRepoBounded(
 	}
 	tree, err := ghClient.GetRepoTree(ctx, installationID, owner, repo, commitSHA)
 	if err != nil {
-		return FullIndexResult{}, err
+		if snapshot.Status == "building" && ghpkg.IsPermanentGitObjectError(err) {
+			if failErr := st.FailGraphGeneration(ctx, repoDBID, snapshot.GenerationID, err); failErr != nil {
+				return FullIndexResult{Snapshot: snapshot}, errors.Join(err, failErr)
+			}
+			snapshot, failErr := st.GetGraphSnapshot(ctx, repoDBID)
+			if failErr != nil {
+				return FullIndexResult{}, errors.Join(err, failErr)
+			}
+			return FullIndexResult{Snapshot: snapshot}, err
+		}
+		return FullIndexResult{Snapshot: snapshot}, err
 	}
 	sourceFiles := filterSourceFiles(tree.Paths)
 	sort.Strings(sourceFiles)
@@ -129,12 +139,20 @@ func IndexRepoBounded(
 		}
 		content, fetchErr := ghClient.GetFileContent(ctx, installationID, owner, repo, filePath, commitSHA)
 		if fetchErr != nil {
-			snapshot, err = st.StageGraphGenerationFile(ctx, repoDBID, snapshot.GenerationID, filePath, nil, nil, nil, fetchErr)
+			permanent := ghpkg.IsPermanentGitObjectError(fetchErr)
+			snapshot, err = st.StageGraphGenerationFile(ctx, repoDBID, snapshot.GenerationID, filePath, nil, nil, nil, fetchErr, permanent)
 			if err != nil {
 				return result, err
 			}
 			result.Snapshot = snapshot
 			result.Staged++
+			if permanent {
+				// A published generation must contain a ready snapshot for every
+				// source file. Fail this immutable generation immediately and leave
+				// the previous published projection untouched.
+				result.Remaining = snapshot.ExpectedFiles - (snapshot.VisitedFiles - snapshot.FailedFiles - snapshot.UnavailableFiles)
+				return result, nil
+			}
 			continue
 		}
 		symbols, edges := ParseFileSymbols(filePath, content)
@@ -158,7 +176,7 @@ func IndexRepoBounded(
 		if err != nil {
 			return result, fmt.Errorf("marshal endpoints for %s: %w", filePath, err)
 		}
-		snapshot, err = st.StageGraphGenerationFile(ctx, repoDBID, snapshot.GenerationID, filePath, symbolJSON, edgeJSON, endpointJSON, nil)
+		snapshot, err = st.StageGraphGenerationFile(ctx, repoDBID, snapshot.GenerationID, filePath, symbolJSON, edgeJSON, endpointJSON, nil, false)
 		if err != nil {
 			return result, err
 		}
@@ -202,7 +220,7 @@ func publishGraphGeneration(ctx context.Context, st *store.Store, repoID, genera
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var expected, visited, failed int
+	var expected, visited, failed, unavailable int
 	var status string
 	if err := tx.QueryRow(ctx, `
 		SELECT status, expected_files, visited_files, failed_files
@@ -210,8 +228,13 @@ func publishGraphGeneration(ctx context.Context, st *store.Store, repoID, genera
 		Scan(&status, &expected, &visited, &failed); err != nil {
 		return fmt.Errorf("publish graph generation: validate: %w", err)
 	}
-	if status != "building" || visited != expected || failed != 0 || len(files) != expected {
-		return fmt.Errorf("publish graph generation: incomplete generation status=%s expected=%d visited=%d failed=%d staged=%d", status, expected, visited, failed, len(files))
+	if err := tx.QueryRow(ctx, `
+		SELECT count(*)::int FROM graph_index_generation_files
+		WHERE generation_id = $1 AND status = 'unavailable'`, generationID).Scan(&unavailable); err != nil {
+		return fmt.Errorf("publish graph generation: count unavailable: %w", err)
+	}
+	if status != "building" || visited != expected || failed != 0 || unavailable != 0 || len(files) != expected {
+		return fmt.Errorf("publish graph generation: incomplete generation status=%s expected=%d visited=%d failed=%d ready=%d unavailable=%d", status, expected, visited, failed, len(files), unavailable)
 	}
 
 	// This transaction is the visibility boundary. Deleted and renamed paths,

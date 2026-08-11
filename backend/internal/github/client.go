@@ -203,6 +203,65 @@ func (c *Client) UpdatePRDescription(ctx context.Context, installationID int64, 
 	return nil
 }
 
+type permanentFileContentError struct {
+	err error
+}
+
+func (e *permanentFileContentError) Error() string { return e.err.Error() }
+func (e *permanentFileContentError) Unwrap() error { return e.err }
+
+// IsPermanentGitObjectError reports whether retrying the same immutable Git
+// object cannot succeed. Authentication, rate limits, transport failures, and
+// server errors are deliberately transient.
+func IsPermanentGitObjectError(err error) bool {
+	var permanent *permanentFileContentError
+	if errors.As(err, &permanent) {
+		return true
+	}
+	var responseErr *gh.ErrorResponse
+	if !errors.As(err, &responseErr) || responseErr.Response == nil {
+		return false
+	}
+	switch responseErr.Response.StatusCode {
+	case http.StatusNotFound, http.StatusUnprocessableEntity:
+		return true
+	default:
+		return false
+	}
+}
+
+// maxFileContentBytes bounds the raw-blob fallback before parser and prompt
+// callers receive the content. The Contents API already inlines files up to
+// 1 MiB; 5 MiB covers unusually large source files without allowing one blob
+// to dominate a graph window's memory.
+const maxFileContentBytes = 5 << 20
+
+type rawBlobFetcher func(context.Context, string) ([]byte, error)
+
+func decodeRepositoryContent(ctx context.Context, content *gh.RepositoryContent, fetchRaw rawBlobFetcher) (string, error) {
+	decoded, err := content.GetContent()
+	if err == nil {
+		return decoded, nil
+	}
+	if content.GetEncoding() != "none" {
+		return "", &permanentFileContentError{err: fmt.Errorf("decoding content: %w", err)}
+	}
+	if content.GetSHA() == "" {
+		return "", &permanentFileContentError{err: errors.New("raw blob fallback requires a blob SHA")}
+	}
+	if content.GetSize() < 0 || content.GetSize() > maxFileContentBytes {
+		return "", &permanentFileContentError{err: fmt.Errorf("file size %d exceeds graph source limit %d", content.GetSize(), maxFileContentBytes)}
+	}
+	raw, err := fetchRaw(ctx, content.GetSHA())
+	if err != nil {
+		return "", fmt.Errorf("fetching raw blob: %w", err)
+	}
+	if len(raw) > maxFileContentBytes {
+		return "", &permanentFileContentError{err: fmt.Errorf("raw blob size %d exceeds graph source limit %d", len(raw), maxFileContentBytes)}
+	}
+	return string(raw), nil
+}
+
 // GetFileContent fetches the content of a file from a repo at a specific ref.
 func (c *Client) GetFileContent(ctx context.Context, installationID int64, owner, repo, path, ref string) (string, error) {
 	client, err := c.app.ClientForInstallation(installationID)
@@ -218,14 +277,16 @@ func (c *Client) GetFileContent(ctx context.Context, installationID int64, owner
 		return "", fmt.Errorf("fetching file content: %w", err)
 	}
 	if content == nil {
-		return "", fmt.Errorf("file %s not found at ref %s", path, ref)
+		return "", &permanentFileContentError{err: fmt.Errorf("file %s is not a regular file at ref %s", path, ref)}
 	}
 
-	decoded, err := content.GetContent()
-	if err != nil {
-		return "", fmt.Errorf("decoding content: %w", err)
-	}
-	return decoded, nil
+	return decodeRepositoryContent(ctx, content, func(ctx context.Context, sha string) ([]byte, error) {
+		if err := c.restLimiter.Wait(ctx); err != nil {
+			return nil, fmt.Errorf("rate limit wait: %w", err)
+		}
+		raw, _, err := client.Git.GetBlobRaw(ctx, owner, repo, sha)
+		return raw, err
+	})
 }
 
 // PostReview creates a pull request review with all inline comments in one atomic API call.

@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// Capped generations must retry failures promptly and never revisit ready files.
+// Capped generations retry transient failures and never revisit ready files.
 func TestSelectPendingFiles(t *testing.T) {
 	files := []string{"c.go", "a.go", "b.go"}
 	tests := []struct {
@@ -19,7 +19,7 @@ func TestSelectPendingFiles(t *testing.T) {
 		{name: "uncapped sorts all", cap: 0, want: []string{"a.go", "b.go", "c.go"}},
 		{name: "cap reports remaining", cap: 2, want: []string{"a.go", "b.go"}, wantRemaining: 1},
 		{name: "ready files are skipped", ready: map[string]struct{}{"a.go": {}}, cap: 2, want: []string{"b.go", "c.go"}},
-		{name: "failed file is absent from ready and retried first", ready: map[string]struct{}{"b.go": {}, "c.go": {}}, cap: 1, want: []string{"a.go"}},
+		{name: "transient failure is absent from ready set and retried first", ready: map[string]struct{}{"b.go": {}, "c.go": {}}, cap: 1, want: []string{"a.go"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

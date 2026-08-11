@@ -4,16 +4,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"log/slog"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 
-	ghpkg "github.com/BeLazy167/argus/backend/internal/github"
 	"github.com/BeLazy167/argus/backend/internal/store"
 )
 
@@ -25,8 +22,8 @@ import (
 // to untangle the two purposes.
 func symbolDiffKey(kind, name string) string { return kind + "\x1f" + name }
 
-// indexerStore is the narrow persistence surface indexFileSet + its
-// phase-1/2/3 diff helper require. Declaring it here (instead of taking
+// indexerStore is the narrow persistence surface retained symbol-diff and
+// endpoint helpers require. Declaring it here (instead of taking
 // *store.Store concretely) lets the integration test in
 // indexer_integration_test.go drop in a recording fake that asserts call
 // counts and arguments — without standing up Postgres. *store.Store
@@ -50,10 +47,7 @@ type indexerStore interface {
 	DeleteNodesByIDs(ctx context.Context, repoID int64, ids []int64) error
 }
 
-// fileResult bundles the parser output for a single file so indexFileSet
-// can hand pre-parsed data to indexParsedSymbols without the test also
-// needing a fake GitHub client. Exported field names are intentional —
-// the struct is package-internal but the names flow into the test helper.
+// fileResult bundles parser output for the symbol-diff helpers.
 type fileResult struct {
 	symbols []Symbol
 	edges   []Edge
@@ -196,40 +190,6 @@ var sourceExts = map[string]bool{
 	".php": true, ".scala": true, ".dart": true,
 }
 
-// ErrNonAuthoritativeGraphRef is returned when a caller attempts to write a
-// PR head or stale commit into the published default-branch projection.
-var ErrNonAuthoritativeGraphRef = errors.New("graph ref is not the published generation commit")
-
-// IndexFiles refreshes files only when ref is the exact commit already
-// published for the repository. PR heads belong to review input, not the live
-// authoritative graph, and are rejected before any GitHub fetch or DB write.
-func IndexFiles(ctx context.Context, st *store.Store, ghClient *ghpkg.Client, installationID int64, owner, repo, ref string, repoDBID int64, files []string) error {
-	authoritative, err := st.IsPublishedGraphCommit(ctx, repoDBID, ref)
-	if err != nil {
-		return err
-	}
-	if !authoritative {
-		return fmt.Errorf("%w: repo_id=%d ref=%s", ErrNonAuthoritativeGraphRef, repoDBID, ref)
-	}
-
-	var sourceFiles []string
-	for _, f := range files {
-		if sourceExts[strings.ToLower(filepath.Ext(f))] {
-			sourceFiles = append(sourceFiles, f)
-		}
-	}
-	if len(sourceFiles) == 0 {
-		return nil
-	}
-
-	// Per-file DELETE loop removed — indexFileSet now runs a hash-gated
-	// diff that touches only changed/new/removed symbols. See
-	// computeSymbolHash + the orphan sweep at the end of indexFileSet.
-
-	slog.Info("graph: incremental index", "repo", owner+"/"+repo, "files", len(sourceFiles))
-	return indexFileSet(ctx, st, ghClient, installationID, owner, repo, ref, repoDBID, sourceFiles)
-}
-
 // fileSymbol records deterministic physical LOC and file identity in the existing
 // code_nodes schema. A trailing newline terminates the last content line; it
 // does not create an additional blank line.
@@ -243,78 +203,6 @@ func fileSymbol(filePath, content string) Symbol {
 		lineStart = 1
 	}
 	return Symbol{Kind: "file", Name: filePath, FilePath: filePath, LineStart: lineStart, LineEnd: loc}
-}
-
-// indexFileSet fetches content for each file, parses symbols/edges, and upserts them.
-// The store dependency is the narrow indexerStore interface so the IO loop
-// below can be exercised by an in-memory fake in indexer_integration_test.go.
-// *store.Store implicitly satisfies indexerStore, so callers pass it through.
-//
-// Streams per file: fetch → parse → upsert nodes → next file. Only
-// symbols + edges (small structs) accumulate for the cross-file edge-resolution
-// pass. The memory win vs. the older version comes from NOT buffering a
-// `map[string]fileResult{content, symbols, edges}` across files — content
-// goes out of scope when each iteration ends. Symbol strings carved from
-// `content` by the parser still share backing bytes with the file body,
-// so peak memory scales with parsed-text-retained-per-file, not raw file
-// size. An earlier version OOM'd a 512 MB VM on an 890-file full re-index.
-func indexFileSet(ctx context.Context, st indexerStore, ghClient *ghpkg.Client, installationID int64, owner, repo, ref string, repoDBID int64, files []string) error {
-	keyToID := make(map[string]int64)
-	nameToIDs := make(map[string][]int64)
-	edgesByFile := make(map[string][]Edge, len(files))
-	symbolsByFile := make(map[string][]Symbol, len(files))
-	endpointsByFile := make(map[string][]APIEndpoint, len(files))
-
-	for _, f := range files {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		content, err := ghClient.GetFileContent(ctx, installationID, owner, repo, f, ref)
-		if err != nil {
-			slog.Warn("graph: fetch file failed", "file", f, "error", err)
-			continue
-		}
-		syms, edges := ParseFileSymbols(f, content)
-		endpointsByFile[f] = anchorEndpoints(ExtractAPIEndpoints(f, content), syms)
-		syms = append(syms, fileSymbol(f, content))
-		upsertFileSymbols(ctx, st, repoDBID, f, syms, keyToID, nameToIDs)
-		edgesByFile[f] = edges
-		symbolsByFile[f] = syms
-		// Assigned for every VISITED file, including files with no endpoints,
-		// because the empty slice is what deletes a route that was removed
-		// from the file. A file whose fetch failed is skipped above and keeps
-		// its existing rows — we did not observe it, so we cannot claim its
-		// endpoints are gone.
-		//
-	}
-
-	if err := resolveAndUpsertEdges(ctx, st, repoDBID, edgesByFile, symbolsByFile, keyToID, nameToIDs); err != nil {
-		return err
-	}
-
-	// After the nodes exist, not before: an endpoint row references the
-	// code_node it belongs to, so it cannot be written until that node has an
-	// id.
-	changed := persistAPIEndpoints(ctx, st, repoDBID, endpointsByFile, keyToID, nameToIDs)
-	if !changed {
-		// Nothing this run visited altered the route table, so the derived edge
-		// set it feeds cannot have changed either. Without this gate every
-		// incremental index — including a PR that touches twenty files
-		// declaring nothing — re-listed the whole installation, rematched it,
-		// and rewrote every derived edge, inside the 10s budget the pass shares
-		// with the GitHub file fetches.
-		return nil
-	}
-
-	written, err := LinkAPIEndpoints(ctx, st, repoDBID)
-	if err != nil {
-		// Non-fatal, like every other enrichment in this loop. The parsed graph
-		// is already written and correct; the derived edges are an addition.
-		slog.Warn("graph: cross-repo API linking failed", "repo", owner+"/"+repo, "error", err)
-		return nil
-	}
-	slog.Info("graph: cross-repo API edges", "repo", owner+"/"+repo, "edges", written)
-	return nil
 }
 
 // persistAPIEndpoints resolves each extracted endpoint to a code_nodes id and
@@ -421,17 +309,11 @@ func resolveEndpointNode(filePath string, e APIEndpoint, keyToID map[string]int6
 	return 0, false
 }
 
-// indexParsedSymbols runs the hash-gated diff + edge upsert loop against
-// an already-populated parser result map. Split out of indexFileSet so the
-// integration test can drive the exact three-phase loop (plan, apply,
-// sweep) and the two edge-resolution passes without standing up a GitHub
-// client. indexFileSet uses this after its fetch+parse phase; the behavior
-// is identical — no extra retries, no extra logging.
+// indexParsedSymbols is the test seam for the retained hash-gated symbol diff
+// and edge-resolution algorithm. It accepts already-parsed results so tests can
+// exercise persistence without a GitHub client.
 func indexParsedSymbols(ctx context.Context, st indexerStore, repoDBID int64, results map[string]fileResult) error {
-	// Thin wrapper over the two streaming helpers. Fans results out so the
-	// edge-resolution pass can see all files. indexFileSet prefers calling
-	// upsertFileSymbols directly per file to bound memory; this entry point
-	// exists for the integration test's pre-populated results map.
+	// Fan results out before resolving cross-file edges.
 	keyToID := make(map[string]int64)
 	nameToIDs := make(map[string][]int64)
 	edgesByFile := make(map[string][]Edge, len(results))

@@ -23,7 +23,7 @@ CREATE INDEX graph_index_generations_repo_started
 CREATE TABLE graph_index_generation_files (
     generation_id BIGINT NOT NULL REFERENCES graph_index_generations(id) ON DELETE CASCADE,
     file_path TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('ready', 'failed')),
+    status TEXT NOT NULL CHECK (status IN ('ready', 'failed', 'unavailable')),
     symbols JSONB NOT NULL DEFAULT '[]'::jsonb,
     edges JSONB NOT NULL DEFAULT '[]'::jsonb,
     endpoints JSONB NOT NULL DEFAULT '[]'::jsonb,

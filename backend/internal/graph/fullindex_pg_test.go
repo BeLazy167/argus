@@ -3,10 +3,12 @@ package graph
 import (
 	"context"
 	"errors"
+	"net/http"
 	"os"
 	"testing"
 	"time"
 
+	gh "github.com/google/go-github/v68/github"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	ghpkg "github.com/BeLazy167/argus/backend/internal/github"
@@ -60,12 +62,14 @@ func generationSeedNode(t *testing.T, ctx context.Context, pool *pgxpool.Pool, r
 }
 
 type fakeFullIndexGitHub struct {
-	sha      string
-	tree     ghpkg.RepoTree
-	contents map[string]string
-	fetchErr map[string]error
-	treeRef  string
-	fileRefs []string
+	sha       string
+	tree      ghpkg.RepoTree
+	treeErr   error
+	contents  map[string]string
+	fetchErr  map[string]error
+	treeRef   string
+	fileRefs  []string
+	filePaths []string
 }
 
 func (f *fakeFullIndexGitHub) ResolveDefaultBranchCommit(context.Context, int64, string, string, string) (string, error) {
@@ -73,10 +77,14 @@ func (f *fakeFullIndexGitHub) ResolveDefaultBranchCommit(context.Context, int64,
 }
 func (f *fakeFullIndexGitHub) GetRepoTree(_ context.Context, _ int64, _, _, ref string) (ghpkg.RepoTree, error) {
 	f.treeRef = ref
+	if f.treeErr != nil {
+		return ghpkg.RepoTree{}, f.treeErr
+	}
 	return f.tree, nil
 }
 func (f *fakeFullIndexGitHub) GetFileContent(_ context.Context, _ int64, _, _, path, ref string) (string, error) {
 	f.fileRefs = append(f.fileRefs, ref)
+	f.filePaths = append(f.filePaths, path)
 	if err := f.fetchErr[path]; err != nil {
 		return "", err
 	}
@@ -193,66 +201,167 @@ func TestIndexRepoBoundedRetriesFailedFileBeforePublishing(t *testing.T) {
 	}
 }
 
-func TestConcurrentPRHeadsCannotMutatePublishedGeneration(t *testing.T) {
+func TestIndexRepoBoundedFailsPinnedGenerationWhenImmutableTreeDisappears(t *testing.T) {
 	pool, ctx := generationTestPool(t)
 	st := store.NewWithDB(pool)
 	installationID := generationSeedInstallation(t, ctx, pool, "{}")
-	repoID := generationSeedRepo(t, ctx, pool, installationID, "generation/pr-provenance")
+	repoID := generationSeedRepo(t, ctx, pool, installationID, "generation/permanent-tree")
+	ghClient := &fakeFullIndexGitHub{
+		sha:      "pinned-sha",
+		tree:     ghpkg.RepoTree{Paths: []string{"a.go", "b.go"}},
+		contents: map[string]string{"a.go": "package p\n", "b.go": "package p\n"},
+		fetchErr: map[string]error{},
+	}
+	first, err := IndexRepoBounded(ctx, st, ghClient, 1, "o", "r", "main", repoID, 1, 0)
+	if err != nil || first.Snapshot.Status != "building" {
+		t.Fatalf("first window = %+v, err=%v", first, err)
+	}
 
-	const baseSHA = "base-commit-sha"
-	var generationID int64
+	ghClient.treeErr = &gh.ErrorResponse{Response: &http.Response{StatusCode: http.StatusNotFound}}
+	second, err := IndexRepoBounded(ctx, st, ghClient, 1, "o", "r", "main", repoID, 1, 0)
+	if err == nil || !ghpkg.IsPermanentGitObjectError(err) {
+		t.Fatalf("tree error = %v, want permanent error", err)
+	}
+	if second.Snapshot.GenerationID != first.Snapshot.GenerationID || second.Snapshot.Status != "failed" || second.Published {
+		t.Fatalf("terminal generation = %+v, want same failed generation", second)
+	}
+}
+
+func TestIndexRepoBoundedKeepsPinnedGenerationForTransientTreeFailure(t *testing.T) {
+	pool, ctx := generationTestPool(t)
+	st := store.NewWithDB(pool)
+	installationID := generationSeedInstallation(t, ctx, pool, "{}")
+	repoID := generationSeedRepo(t, ctx, pool, installationID, "generation/transient-tree")
+	ghClient := &fakeFullIndexGitHub{
+		sha:      "pinned-sha",
+		tree:     ghpkg.RepoTree{Paths: []string{"a.go", "b.go"}},
+		contents: map[string]string{"a.go": "package p\n", "b.go": "package p\n"},
+		fetchErr: map[string]error{},
+	}
+	first, err := IndexRepoBounded(ctx, st, ghClient, 1, "o", "r", "main", repoID, 1, 0)
+	if err != nil || first.Snapshot.Status != "building" {
+		t.Fatalf("first window = %+v, err=%v", first, err)
+	}
+
+	ghClient.treeErr = &gh.ErrorResponse{Response: &http.Response{StatusCode: http.StatusServiceUnavailable}}
+	second, err := IndexRepoBounded(ctx, st, ghClient, 1, "o", "r", "main", repoID, 1, 0)
+	if err == nil || ghpkg.IsPermanentGitObjectError(err) {
+		t.Fatalf("tree error = %v, want transient error", err)
+	}
+	if second.Snapshot.GenerationID != first.Snapshot.GenerationID || second.Snapshot.Status != "building" {
+		t.Fatalf("retryable generation = %+v, want same building generation", second)
+	}
+}
+
+func TestIndexRepoBoundedFailsPermanentFailureWithoutMutatingPublishedGeneration(t *testing.T) {
+	pool, ctx := generationTestPool(t)
+	st := store.NewWithDB(pool)
+	installationID := generationSeedInstallation(t, ctx, pool, "{}")
+	repoID := generationSeedRepo(t, ctx, pool, installationID, "generation/permanent-failure")
+	oldID := generationSeedNode(t, ctx, pool, repoID, "PublishedBeforeFailure", "old.go")
+	var publishedGenerationID int64
 	if err := pool.QueryRow(ctx, `
 		INSERT INTO graph_index_generations
 		  (repo_id, commit_sha, status, expected_files, visited_files, published_at)
-		VALUES ($1, $2, 'published', 1, 1, NOW()) RETURNING id`, repoID, baseSHA).Scan(&generationID); err != nil {
-		t.Fatalf("seed published generation: %v", err)
+		VALUES ($1, 'published-sha', 'published', 1, 1, NOW()) RETURNING id`, repoID).Scan(&publishedGenerationID); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `
-		UPDATE repos SET graph_published_generation_id = $2, graph_index_commit_sha = $3,
-		  graph_index_expected_files = 1, graph_index_visited_files = 1, graph_indexed_at = NOW()
-		WHERE id = $1`, repoID, generationID, baseSHA); err != nil {
-		t.Fatalf("mark published generation: %v", err)
-	}
-	sourceID := generationSeedNode(t, ctx, pool, repoID, "BaseSource", "base.go")
-	targetID := generationSeedNode(t, ctx, pool, repoID, "BaseTarget", "target.go")
-	if _, err := pool.Exec(ctx, `INSERT INTO code_edges (repo_id, source_id, target_id, kind) VALUES ($1, $2, $3, 'calls')`, repoID, sourceID, targetID); err != nil {
-		t.Fatalf("seed base edge: %v", err)
-	}
-
-	start := make(chan struct{})
-	errs := make(chan error, 2)
-	for _, prSHA := range []string{"pr-head-one", "pr-head-two"} {
-		prSHA := prSHA
-		go func() {
-			<-start
-			// A nil GitHub client is intentional: provenance must reject the PR
-			// ref before any fetch can occur.
-			errs <- IndexFiles(ctx, st, nil, 1, "owner", "repo", prSHA, repoID, []string{"base.go"})
-		}()
-	}
-	close(start)
-	for range 2 {
-		if err := <-errs; !errors.Is(err, ErrNonAuthoritativeGraphRef) {
-			t.Fatalf("PR indexing error = %v, want ErrNonAuthoritativeGraphRef", err)
-		}
-	}
-
-	var nodes, edges int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM code_nodes WHERE repo_id = $1`, repoID).Scan(&nodes); err != nil {
+		UPDATE repos SET graph_published_generation_id = $2, graph_indexed_at = NOW(),
+		  graph_index_commit_sha = 'published-sha', graph_index_expected_files = 1,
+		  graph_index_visited_files = 1
+		WHERE id = $1`, repoID, publishedGenerationID); err != nil {
 		t.Fatal(err)
 	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM code_edges WHERE repo_id = $1`, repoID).Scan(&edges); err != nil {
+	permanent := &gh.ErrorResponse{Response: &http.Response{StatusCode: http.StatusNotFound}}
+	ghClient := &fakeFullIndexGitHub{
+		sha:      "immutable-sha",
+		tree:     ghpkg.RepoTree{Paths: []string{"a.go", "b.go"}},
+		contents: map[string]string{"b.go": "package p\nfunc B() {}\n"},
+		fetchErr: map[string]error{"a.go": permanent},
+	}
+
+	first, err := IndexRepoBounded(ctx, st, ghClient, 1, "o", "r", "main", repoID, 1, 0)
+	if err != nil {
+		t.Fatalf("first window: %v", err)
+	}
+	if first.Published || first.Snapshot.Status != "failed" || first.Snapshot.Complete ||
+		first.Snapshot.FailedFiles != 0 || first.Snapshot.UnavailableFiles != 1 {
+		t.Fatalf("permanent-failure window = %+v, want terminal failed generation", first)
+	}
+	if got := ghClient.filePaths; len(got) != 1 || got[0] != "a.go" {
+		t.Fatalf("fetches = %v, want stop immediately after permanent failure", got)
+	}
+	var oldCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM code_nodes WHERE id = $1`, oldID).Scan(&oldCount); err != nil {
 		t.Fatal(err)
 	}
-	if nodes != 2 || edges != 1 {
-		t.Fatalf("published graph mutated by concurrent PR heads: nodes=%d edges=%d", nodes, edges)
+	if oldCount != 1 {
+		t.Fatal("failed generation changed the published projection")
 	}
-	snapshot, err := st.GetGraphSnapshot(ctx, repoID)
+	var currentPublishedID int64
+	if err := pool.QueryRow(ctx, `SELECT graph_published_generation_id FROM repos WHERE id = $1`, repoID).Scan(&currentPublishedID); err != nil {
+		t.Fatal(err)
+	}
+	if currentPublishedID != publishedGenerationID {
+		t.Fatalf("published generation = %d, want unchanged %d", currentPublishedID, publishedGenerationID)
+	}
+	var unavailable int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM graph_index_generation_files
+		WHERE generation_id = $1 AND status = 'unavailable'`, first.Snapshot.GenerationID).Scan(&unavailable); err != nil {
+		t.Fatal(err)
+	}
+	if unavailable != 1 {
+		t.Fatalf("unavailable files = %d, want 1", unavailable)
+	}
+
+	waitingRepoID := generationSeedRepo(t, ctx, pool, installationID, "generation/waiting-after-permanent")
+	if _, err := pool.Exec(ctx, `
+		UPDATE repos SET enabled = true,
+		  graph_index_attempted_at = CASE WHEN id = $1 THEN NOW() ELSE NULL END
+		WHERE id = ANY($2::bigint[])`, repoID, []int64{repoID, waitingRepoID}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `UPDATE repos SET enabled = false WHERE id = ANY($1::bigint[])`, []int64{repoID, waitingRepoID})
+	})
+	targets, err := st.ListReposDueForGraphIndex(ctx, 14*24*time.Hour, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !snapshot.Complete || snapshot.CommitSHA != baseSHA || snapshot.GenerationID != generationID {
-		t.Fatalf("snapshot provenance changed: %+v", snapshot)
+	if len(targets) != 1 || targets[0].RepoID != waitingRepoID {
+		t.Fatalf("target after permanent failure = %+v, want waiting repo %d", targets, waitingRepoID)
+	}
+}
+
+func TestListReposDueForGraphIndexDoesNotLetBuildingGenerationStarveQueue(t *testing.T) {
+	pool, ctx := generationTestPool(t)
+	st := store.NewWithDB(pool)
+	installationID := generationSeedInstallation(t, ctx, pool, "{}")
+	buildingRepoID := generationSeedRepo(t, ctx, pool, installationID, "scheduler/building")
+	waitingRepoID := generationSeedRepo(t, ctx, pool, installationID, "scheduler/waiting")
+	if _, err := pool.Exec(ctx, `
+		UPDATE repos SET enabled = true,
+		  graph_index_attempted_at = CASE WHEN id = $1 THEN NOW() ELSE NULL END
+		WHERE id = ANY($2::bigint[])`, buildingRepoID, []int64{buildingRepoID, waitingRepoID}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `UPDATE repos SET enabled = false WHERE id = ANY($1::bigint[])`, []int64{buildingRepoID, waitingRepoID})
+	})
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO graph_index_generations (repo_id, commit_sha, status, expected_files)
+		VALUES ($1, 'building-sha', 'building', 2)`, buildingRepoID); err != nil {
+		t.Fatal(err)
+	}
+
+	targets, err := st.ListReposDueForGraphIndex(ctx, 14*24*time.Hour, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 1 || targets[0].RepoID != waitingRepoID {
+		t.Fatalf("first target = %+v, want never-attempted repo %d", targets, waitingRepoID)
 	}
 }
 

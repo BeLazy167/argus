@@ -218,9 +218,9 @@ func Run() error {
 
 	// Code-graph full-index backfill — walks whole repos, one per hour.
 	//
-	// The per-PR path (graph.IndexFiles) only ever parses a pull request's
-	// changed files, so the graph accumulated as disconnected islands and blast
-	// radius returned fragments. This is what gives it the rest of the repo.
+	// Before authoritative generations, the graph accumulated as disconnected
+	// pull-request-shaped islands and blast radius returned fragments. This
+	// backfill publishes complete default-branch snapshots.
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {

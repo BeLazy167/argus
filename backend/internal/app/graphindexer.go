@@ -15,7 +15,7 @@ import (
 // One repo per tick, hourly. The pacing is set by the two costs a full index
 // carries, and both are per-installation:
 //
-//   - GitHub API. indexFileSet fetches one file per call, so a capped index is
+//   - GitHub API. IndexRepoBounded fetches one file per call, so a capped index is
 //     up to DefaultFullIndexFileCap calls. An installation gets 5000/hour, and
 //     those same calls are what reviews need — so a burst that indexed several
 //     repos at once could starve the thing users are waiting on.
@@ -38,11 +38,9 @@ const (
 // runGraphIndexBackfill walks whole repositories into the code graph on a
 // schedule.
 //
-// This is the missing recall half of the code graph. graph.IndexFiles runs on
-// every pull request but only over that PR's changed files, so the graph grew
-// as disconnected PR-shaped islands — 29% of nodes isolated — and traversal
-// over it returns a fragment that looks like a real answer. graph.IndexRepo
-// existed to fix that and had no caller.
+// This is the authoritative recall path for the code graph. Before this
+// backfill, only pull-request-shaped fragments were indexed, so traversal over
+// the projection returned a fragment that looked like a real answer.
 //
 // Runs until ctx is cancelled. Every failure is logged and skipped rather than
 // returned: this is a background improvement to review quality, and it must
@@ -143,12 +141,13 @@ func indexDueRepos(ctx context.Context, db *store.Store, ghClient *ghpkg.Client,
 				"repo", t.Owner+"/"+t.Repo, "commit", result.Snapshot.CommitSHA,
 				"staged", result.Staged, "remaining", result.Remaining,
 				"visited", result.Snapshot.VisitedFiles, "expected", result.Snapshot.ExpectedFiles,
-				"failed", result.Snapshot.FailedFiles)
+				"failed", result.Snapshot.FailedFiles, "unavailable", result.Snapshot.UnavailableFiles)
 			continue
 		}
 		logger.Info("graph index: full generation published",
 			"repo", t.Owner+"/"+t.Repo, "commit", result.Snapshot.CommitSHA,
-			"files", result.Snapshot.VisitedFiles, "skipped", result.Snapshot.SkippedFiles)
+			"files", result.Snapshot.VisitedFiles, "skipped", result.Snapshot.SkippedFiles,
+			"unavailable", result.Snapshot.UnavailableFiles)
 		rebuilt = true
 	}
 

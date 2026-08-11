@@ -247,7 +247,7 @@ func isMatchablePath(p string) bool {
 // — N call sites for one path against M declarations of it — so a generated
 // client that repeats a call thousands of times would otherwise materialise
 // N*M matches in memory before any caller could cap the WRITES. This runs in a
-// background goroutine on a VM that has already OOM'd once (see indexFileSet).
+// background goroutine on a VM that has already OOM'd during graph indexing.
 //
 // THE SEAM: everything unmatched after this returns is what embedding proposal
 // plus LLM confirmation would attach to — take the leftover client endpoints,

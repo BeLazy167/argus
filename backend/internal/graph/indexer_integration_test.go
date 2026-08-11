@@ -350,9 +350,8 @@ func TestIndexParsedSymbols_HashGatedDiff(t *testing.T) {
 
 // Static check: the real *store.Store must satisfy indexerStore. If this
 // ever fails to compile, we have a method-signature drift between the
-// two and the production call sites (IndexFiles/IndexRepo) will also
-// break — but having it here points at the cause in one line instead of
-// burying the error inside indexFileSet's call graph.
+// two; having it here points at interface drift in one line instead of
+// burying the error inside the symbol-diff helpers.
 var _ indexerStore = (*store.Store)(nil)
 
 func TestIndexParsedSymbolsReplacesEdgeSnapshotIncludingEmpty(t *testing.T) {
