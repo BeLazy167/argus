@@ -1,8 +1,13 @@
 import { QueryClient } from "@tanstack/react-query";
-import { describe, expect, it, vi } from "vitest";
-import { reconcileTerminalReview, reviewQueryKeys, useReview } from "./reviews";
+import { describe, expect, expectTypeOf, it, vi } from "vitest";
+import type { ReviewMinorNote } from "../generated/api-types";
+import { reconcileTerminalReview, reviewQueryKeys, useReview, type ReviewDetail } from "./reviews";
 
 describe("review query cache coordinates", () => {
+	it("keeps minor notes on the generated response type", () => {
+		expectTypeOf<ReviewDetail["minor_notes"]>().toEqualTypeOf<ReviewMinorNote[]>();
+	});
+
 	it("uses one detail key for reads and live updates", () => {
 		const id = "review-123";
 		const client = new QueryClient();

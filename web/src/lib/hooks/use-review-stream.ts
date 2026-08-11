@@ -65,6 +65,7 @@ export type LiveTokens = {
 
 export type WSEvent = {
   type: string;
+  attempt_generation?: number;
   data: Record<string, unknown>;
 };
 
@@ -155,6 +156,7 @@ export function useReviewStream(reviewId: string, enabled: boolean) {
             const comment: ReviewComment = {
               id: crypto.randomUUID(),
               review_id: reviewId,
+              attempt_generation: evt.attempt_generation ?? 0,
               file_path: evt.data.file_path as string,
               end_line: evt.data.line as number,
               body: evt.data.body as string,

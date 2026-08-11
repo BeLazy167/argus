@@ -34,6 +34,7 @@ export type {
   PatternStat,
   Persona,
   PRReviewSummary,
+  ReviewMinorNote,
   Rule,
   ScenarioKPIs,
   ScenarioRun,

@@ -159,6 +159,23 @@ export interface ReviewComment {
    * resolved-by-commit breadcrumb.
    */
   resolved_sha?: string;
+  /**
+   * AttemptGeneration identifies the retry attempt that produced this finding.
+   */
+  attempt_generation: number /* int */;
+}
+/**
+ * ReviewMinorNote is a structured near-miss finding folded into the review summary.
+ */
+export interface ReviewMinorNote {
+  id: string;
+  review_id: string;
+  attempt_generation: number /* int */;
+  file_path: string;
+  line: number /* int */;
+  severity: string;
+  title: string;
+  created_at: string;
 }
 /**
  * PRReviewSummary is one review pass in a PR's incremental history. Reviews are
@@ -225,10 +242,9 @@ export interface LearnedMemory {
    */
   excerpt: string;
   /**
-   * WrittenAt is memories.updated_at, not created_at. Writes are upserts, so
-   * a review that re-learns an existing pattern rewrites a row first created
-   * weeks ago; created_at would date the panel's entries to the original
-   * review and read as "this review learned nothing new today".
+   * WrittenAt is memory_review_attributions.attributed_at: the time this
+   * review learned the row. A later deterministic re-upsert updates current
+   * provenance without changing the earlier review's historical timestamp.
    */
   written_at: string;
 }
