@@ -473,3 +473,25 @@ func TestIndexParsedSymbols_RecordsAmbiguousAndUnresolvedTargets(t *testing.T) {
 		}
 	}
 }
+
+func TestIndexParsedSymbols_ImportUsesFileAndQualifiedModuleIdentity(t *testing.T) {
+	st := newFakeIndexerStore()
+	results := map[string]fileResult{
+		"a.go": {
+			symbols: []Symbol{
+				{Kind: KindFunction, Name: "A", FilePath: "a.go", LineStart: 1, LineEnd: 3},
+				{Kind: "file", Name: "a.go", FilePath: "a.go", LineStart: 1, LineEnd: 10},
+			},
+			edges: []Edge{{SourceName: "a.go", TargetName: "example.com/acme/lib", Kind: EdgeImports}},
+		},
+	}
+	if err := indexParsedSymbols(context.Background(), st, 42, results); err != nil {
+		t.Fatalf("indexParsedSymbols: %v", err)
+	}
+	if len(st.upsertPlain) != 1 || st.upsertPlain[0].name != "module:example.com/acme/lib" {
+		t.Fatalf("module identity = %+v", st.upsertPlain)
+	}
+	if len(st.upsertEdges) != 1 || st.upsertEdges[0].sourceID != 1002 || st.upsertEdges[0].targetID != st.upsertPlain[0].id {
+		t.Fatalf("import did not use file -> module identities: full=%+v plain=%+v edges=%+v", st.upsertFull, st.upsertPlain, st.upsertEdges)
+	}
+}

@@ -590,14 +590,10 @@ func resolveAndUpsertEdges(ctx context.Context, st indexerStore, repoDBID int64,
 	for _, filePath := range filePaths {
 		for _, edge := range edgesByFile[filePath] {
 			if edge.Kind == "imports" {
-				var sourceID int64
-				for _, sym := range symbolsByFile[filePath] {
-					if id, ok := keyToID[nodeKey(filePath, sym.Name)]; ok {
-						sourceID = id
-						break
-					}
-				}
-				if sourceID == 0 {
+				// Import relationships belong to the deterministic file identity,
+				// never an arbitrary first symbol in that file.
+				sourceID, found := keyToID[nodeKey(filePath, filePath)]
+				if !found {
 					continue
 				}
 				moduleName := "module:" + edge.TargetName
