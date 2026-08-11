@@ -32,6 +32,27 @@ func NewPatternMirrorPayload(customID, repo string, shared bool, pattern Pattern
 	return payload, nil
 }
 
+// legacyPatternMirrorCustomID reconstructs the memory identity for patterns
+// written before patterns.memory_doc_id and memory_custom_id were populated.
+// Pipeline sources need their historical source-segment mapping; other sources
+// use the current pattern writer's canonical derivation.
+func legacyPatternMirrorCustomID(payload MirrorPayload) (string, error) {
+	if payload.Pattern == nil || payload.Pattern.Content == "" {
+		return "", fmt.Errorf("legacy pattern payload is incomplete")
+	}
+	if !payload.Shared && payload.Repo == "" {
+		return "", fmt.Errorf("legacy repo pattern payload has empty repo")
+	}
+	category := payload.Pattern.Category
+	if customID := PipelinePatternCustomID(payload.Repo, payload.Pattern.Source, payload.Pattern.Content, &category, payload.Shared); customID != "" {
+		return customID, nil
+	}
+	if payload.Shared {
+		return SharedPatternCustomID(patternSource(*payload.Pattern), payload.Pattern.Content), nil
+	}
+	return PatternCustomID("", payload.Repo, patternSource(*payload.Pattern), payload.Pattern.Content), nil
+}
+
 // NewDeleteMirrorPayload retains the deterministic identity needed after the
 // relational source row has been removed.
 func NewDeleteMirrorPayload(customID string) (json.RawMessage, error) {
@@ -64,8 +85,9 @@ type mirrorOutbox interface {
 
 type MirrorIndexer interface {
 	IndexRule(context.Context, string, RuleMemory) error
-	IndexPattern(context.Context, string, PatternMemory) (*IndexResult, error)
-	IndexSharedPattern(context.Context, PatternMemory) (*IndexResult, error)
+	// MirrorPattern repairs relational state without replacing an already-live
+	// pipeline write, whose review attribution and metadata are richer.
+	MirrorPattern(context.Context, string, bool, PatternMemory) error
 	DeleteDocument(context.Context, string) error
 }
 
@@ -115,6 +137,13 @@ func (w *MirrorWorker) apply(ctx context.Context, event store.MemoryMirrorOutbox
 	if err := json.Unmarshal(event.Payload, &payload); err != nil {
 		return fmt.Errorf("decode payload: %w", err)
 	}
+	if payload.CustomID == "" && event.AggregateType == store.MemoryMirrorPattern {
+		customID, err := legacyPatternMirrorCustomID(payload)
+		if err != nil {
+			return err
+		}
+		payload.CustomID = customID
+	}
 	if payload.CustomID == "" {
 		return fmt.Errorf("payload has empty custom_id")
 	}
@@ -134,15 +163,10 @@ func (w *MirrorWorker) apply(ctx context.Context, event store.MemoryMirrorOutbox
 			return fmt.Errorf("pattern payload is incomplete")
 		}
 		payload.Pattern.CustomID = payload.CustomID
-		if payload.Shared {
-			_, err := indexer.IndexSharedPattern(ctx, *payload.Pattern)
-			return err
-		}
-		if payload.Repo == "" {
+		if !payload.Shared && payload.Repo == "" {
 			return fmt.Errorf("repo pattern payload has empty repo")
 		}
-		_, err := indexer.IndexPattern(ctx, payload.Repo, *payload.Pattern)
-		return err
+		return indexer.MirrorPattern(ctx, payload.Repo, payload.Shared, *payload.Pattern)
 	case store.MemoryMirrorRule:
 		if payload.Rule == nil || payload.Rule.RuleID != event.AggregateID {
 			return fmt.Errorf("rule payload is incomplete or mismatched")

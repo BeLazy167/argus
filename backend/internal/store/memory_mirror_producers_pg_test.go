@@ -39,7 +39,7 @@ func TestPatternAndRuleMutationsEnqueueOrderedMirrorEvents(t *testing.T) {
 
 	customID := "mirror-producers--manual--abc"
 	source := "manual"
-	pattern, err := st.CreatePattern(ctx, installationID, &repoID, "guard writes", nil, nil, &source, nil, nil, &customID)
+	pattern, err := st.CreatePattern(ctx, installationID, &repoID, "guard writes", nil, nil, &source, nil, nil, &customID, map[string]string{"repo": "acme/mirror-producers"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,6 +92,17 @@ func TestPatternAndRuleMutationsEnqueueOrderedMirrorEvents(t *testing.T) {
 	}
 	if events[0].typ != "pattern" || events[0].id != pattern.ID || events[5].typ != "pattern" {
 		t.Fatalf("pattern events=%+v", events)
+	}
+	var patternPayload struct {
+		Pattern struct {
+			Extra map[string]string
+		} `json:"pattern"`
+	}
+	if err := json.Unmarshal(events[0].payload, &patternPayload); err != nil {
+		t.Fatal(err)
+	}
+	if patternPayload.Pattern.Extra["repo"] != "acme/mirror-producers" {
+		t.Fatalf("pattern mirror lost full origin repo: %s", events[0].payload)
 	}
 	var disabledPayload map[string]string
 	if err := json.Unmarshal(events[2].payload, &disabledPayload); err != nil {
@@ -147,5 +158,65 @@ func TestMemoryMirrorAcknowledgementRejectsLostLease(t *testing.T) {
 	}
 	if err := st.MarkMemoryMirrorEventProcessed(ctx, claimed[0]); err == nil {
 		t.Fatal("stale worker acknowledged a reclaimed lease")
+	}
+}
+
+func TestDeletePatternLegacyNullMemoryIdentityEnqueuesReplayableDelete(t *testing.T) {
+	pool, ctx := fileMemoryTestPool(t)
+	requireMirrorOutbox(t, pool, ctx)
+	st := &Store{Pool: pool, q: db.New(pool)}
+	installationID, _, _ := seedLearnTenant(t, ctx, pool, "mirror-legacy-delete")
+	var repoID int64
+	if err := pool.QueryRow(ctx, `SELECT id FROM repos WHERE installation_id=$1`, installationID).Scan(&repoID); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM memory_mirror_outbox WHERE installation_id=$1`, installationID)
+	})
+
+	var patternID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO patterns (installation_id, repo_id, content, source, category, pr_number, memory_doc_id, memory_custom_id)
+		VALUES ($1, $2, 'legacy guard writes', 'auto_learn', 'correctness', 17, NULL, NULL)
+		RETURNING id`, installationID, repoID).Scan(&patternID); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := st.DeletePattern(ctx, patternID, []int64{installationID}); err != nil {
+		t.Fatalf("delete legacy pattern: %v", err)
+	}
+
+	var remaining int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM patterns WHERE id=$1`, patternID).Scan(&remaining); err != nil {
+		t.Fatal(err)
+	}
+	if remaining != 0 {
+		t.Fatalf("remaining patterns=%d, want 0", remaining)
+	}
+
+	var operation string
+	var payload struct {
+		CustomID string `json:"custom_id"`
+		Repo     string `json:"repo"`
+		Pattern  struct {
+			Content  string
+			Source   string
+			Category string
+			PRNumber int
+		} `json:"pattern"`
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT operation, payload
+		FROM memory_mirror_outbox
+		WHERE installation_id=$1 AND aggregate_type='pattern' AND aggregate_id=$2
+		ORDER BY id DESC LIMIT 1`, installationID, patternID).Scan(&operation, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if operation != MemoryMirrorDelete {
+		t.Fatalf("operation=%q, want delete", operation)
+	}
+	if payload.CustomID != "" || payload.Repo == "" || payload.Pattern.Content != "legacy guard writes" ||
+		payload.Pattern.Source != "auto_learn" || payload.Pattern.Category != "correctness" || payload.Pattern.PRNumber != 17 {
+		t.Fatalf("delete payload is not replayable: %+v", payload)
 	}
 }

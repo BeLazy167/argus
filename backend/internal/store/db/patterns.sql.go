@@ -74,7 +74,8 @@ func (q *Queries) CreatePattern(ctx context.Context, arg CreatePatternParams) (C
 const deletePattern = `-- name: DeletePattern :one
 DELETE FROM patterns
 WHERE id = $1::bigint AND installation_id = ANY($2::bigint[])
-RETURNING installation_id, COALESCE(memory_custom_id, memory_doc_id)::text AS custom_id
+RETURNING installation_id, memory_custom_id, memory_doc_id,
+          repo_id, content, COALESCE(source, 'manual')::text AS source, category, pr_number
 `
 
 type DeletePatternParams struct {
@@ -83,14 +84,29 @@ type DeletePatternParams struct {
 }
 
 type DeletePatternRow struct {
-	InstallationID int64  `json:"installation_id"`
-	CustomID       string `json:"custom_id"`
+	InstallationID int64   `json:"installation_id"`
+	MemoryCustomID *string `json:"memory_custom_id"`
+	MemoryDocID    *string `json:"memory_doc_id"`
+	RepoID         *int64  `json:"repo_id"`
+	Content        string  `json:"content"`
+	Source         string  `json:"source"`
+	Category       *string `json:"category"`
+	PRNumber       *int    `json:"pr_number"`
 }
 
 func (q *Queries) DeletePattern(ctx context.Context, arg DeletePatternParams) (DeletePatternRow, error) {
 	row := q.db.QueryRow(ctx, deletePattern, arg.ID, arg.InstallationIds)
 	var i DeletePatternRow
-	err := row.Scan(&i.InstallationID, &i.CustomID)
+	err := row.Scan(
+		&i.InstallationID,
+		&i.MemoryCustomID,
+		&i.MemoryDocID,
+		&i.RepoID,
+		&i.Content,
+		&i.Source,
+		&i.Category,
+		&i.PRNumber,
+	)
 	return i, err
 }
 

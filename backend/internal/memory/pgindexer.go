@@ -402,6 +402,30 @@ func (idx *PGIndexer) ReembedMissing(ctx context.Context, batchSize int) (int, e
 // statement rolls back every row, and the deterministic upserts make a
 // retry re-converge.
 func (idx *PGIndexer) upsertDocs(ctx context.Context, docs []Doc) error {
+	return idx.writeDocs(ctx, docs, false)
+}
+
+// mirrorDoc repairs a missing or previously deleted memory row from the
+// relational outbox. An already-live row is authoritative: it may have been
+// written by a review-bound pipeline indexer with provenance and metadata the
+// relational projection cannot represent. The conflict predicate makes that
+// preservation atomic with a concurrent pipeline write.
+func (idx *PGIndexer) mirrorDoc(ctx context.Context, doc Doc) error {
+	var exists bool
+	if err := idx.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM memories
+			WHERE installation_id = $1 AND custom_id = $2 AND deleted_at IS NULL
+		)`, idx.installationID, doc.CustomID).Scan(&exists); err != nil {
+		return fmt.Errorf("check mirrored memory %s: %w", doc.CustomID, err)
+	}
+	if exists {
+		return nil
+	}
+	return idx.writeDocs(ctx, []Doc{doc}, true)
+}
+
+func (idx *PGIndexer) writeDocs(ctx context.Context, docs []Doc, preserveExisting bool) error {
 	kept := make([]Doc, 0, len(docs))
 	seen := make(map[string]int, len(docs))
 	skippedEmpty := 0
@@ -451,6 +475,10 @@ func (idx *PGIndexer) upsertDocs(ctx context.Context, docs []Doc) error {
 	// same statement; deterministic re-upserts therefore cannot transfer
 	// historical attribution away from an earlier review. A writer with no
 	// review clears only current provenance and creates no history row.
+	conflictPredicate := ""
+	if preserveExisting {
+		conflictPredicate = " WHERE memories.deleted_at IS NOT NULL"
+	}
 	q := fmt.Sprintf(`
 		WITH upserted AS (
 			INSERT INTO memories (installation_id, container_tag, custom_id, type, content, metadata, embedding, embedding_model, review_id, embedding_space)
@@ -461,13 +489,13 @@ func (idx *PGIndexer) upsertDocs(ctx context.Context, docs []Doc) error {
 			    embedding = EXCLUDED.embedding, embedding_model = EXCLUDED.embedding_model,
 			    embedding_space = EXCLUDED.embedding_space,
 			    container_tag = EXCLUDED.container_tag, updated_at = now(),
-			    deleted_at = NULL, review_id = EXCLUDED.review_id
+			    deleted_at = NULL, review_id = EXCLUDED.review_id%s
 			RETURNING id
 		)
 		INSERT INTO memory_review_attributions (memory_id, review_id)
 		SELECT id, $9 FROM upserted WHERE $9::uuid IS NOT NULL
 		ON CONFLICT (memory_id, review_id) DO NOTHING`,
-		vectorParam("$7", usesPGContextVector(ctx, idx.pool, idx.logger)))
+		vectorParam("$7", usesPGContextVector(ctx, idx.pool, idx.logger)), conflictPredicate)
 	for i, d := range kept {
 		metaJSON, err := json.Marshal(d.Metadata)
 		if err != nil {
@@ -552,6 +580,28 @@ func (idx *PGIndexer) IndexRule(ctx context.Context, owner string, rule RuleMemo
 		return err
 	}
 	return idx.upsertOne(ctx, "indexing rule", doc)
+}
+
+// MirrorPattern converges a relational pattern into memory without reducing a
+// live pipeline-written row. Missing rows are inserted and soft-deleted rows
+// are recreated; live rows retain their current metadata and review provenance.
+func (idx *PGIndexer) MirrorPattern(ctx context.Context, repo string, shared bool, p PatternMemory) error {
+	var (
+		doc Doc
+		err error
+	)
+	if shared {
+		doc, err = buildSharedPatternDoc(p)
+	} else {
+		doc, err = buildPatternDoc(repo, p)
+	}
+	if err != nil {
+		return err
+	}
+	if err := idx.mirrorDoc(ctx, doc); err != nil {
+		return fmt.Errorf("mirroring pattern: %w", err)
+	}
+	return nil
 }
 
 // IndexPattern writes a repo-scoped pattern. The returned IndexResult.ID is

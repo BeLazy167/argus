@@ -245,7 +245,7 @@ func (s *Server) handleRememberCommand(ctx context.Context, evt ghpkg.IssueComme
 	if !isOrg {
 		customID = memory.PatternCustomID(owner, repo, source, content)
 	}
-	_, err = s.store.CreatePattern(ctx, inst.ID, repoID, content, nil, &createdBy, &source, nil, nil, &customID)
+	_, err = s.store.CreatePattern(ctx, inst.ID, repoID, content, nil, &createdBy, &source, nil, nil, &customID, nil)
 	if err != nil {
 		s.logger.Error("remember: save to db", "error", err)
 		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")

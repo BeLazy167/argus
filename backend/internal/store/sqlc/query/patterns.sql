@@ -18,7 +18,8 @@ FROM patterns WHERE id = sqlc.arg(id)::bigint;
 -- name: DeletePattern :one
 DELETE FROM patterns
 WHERE id = sqlc.arg(id)::bigint AND installation_id = ANY(sqlc.arg(installation_ids)::bigint[])
-RETURNING installation_id, COALESCE(memory_custom_id, memory_doc_id)::text AS custom_id;
+RETURNING installation_id, memory_custom_id, memory_doc_id,
+          repo_id, content, COALESCE(source, 'manual')::text AS source, category, pr_number;
 
 -- name: GetPatternStats :many
 SELECT DATE_TRUNC('week', created_at)::timestamptz AS week, COALESCE(source, 'manual') as source, COUNT(*)::int as count

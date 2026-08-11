@@ -173,7 +173,9 @@ func Run() error {
 	// The worker is safe to run on every replica: claims use SKIP LOCKED and
 	// deterministic memory IDs make replay after a stale claim idempotent.
 	mirrorWorker := memory.NewMirrorWorker(db, func(ctx context.Context, installationID int64) memory.MirrorIndexer {
-		return memRegistry.GetIndexer(ctx, installationID)
+		idx := memRegistry.GetIndexer(ctx, installationID)
+		mirrorIndexer, _ := idx.(memory.MirrorIndexer)
+		return mirrorIndexer
 	}, logger)
 	go mirrorWorker.Run(appCtx, time.Second)
 

@@ -3397,7 +3397,7 @@ func (o *Orchestrator) indexConfirmedPatterns(ctx context.Context, run *Pipeline
 			src := "scoring_confirmed"
 			cat := string(c.Category)
 			prNum := run.PREvent.PRNumber
-			if _, dbErr := o.st.CreatePattern(ctx, run.DBInstallationID, &run.DBRepoID, content, smID, strPtrOrNil("argus:confirmed"), &src, &cat, &prNum, strPtrOrNil(customID)); dbErr != nil {
+			if _, dbErr := o.st.CreatePattern(ctx, run.DBInstallationID, &run.DBRepoID, content, smID, strPtrOrNil("argus:confirmed"), &src, &cat, &prNum, strPtrOrNil(customID), nil); dbErr != nil {
 				o.logger.Warn("persisting confirmed pattern to DB", "error", dbErr, "file", fr.Path)
 			}
 		}
@@ -3616,7 +3616,7 @@ The "pattern" value must be the actual pattern text, NOT the word "description".
 		src := "auto_learn"
 		cat := strPtrOrNil(p.Category)
 		prNum := run.PREvent.PRNumber
-		if _, dbErr := o.st.CreatePattern(ctx, run.DBInstallationID, &run.DBRepoID, p.Pattern, smID, strPtrOrNil("argus:auto_learn"), &src, cat, &prNum, strPtrOrNil(customID)); dbErr != nil {
+		if _, dbErr := o.st.CreatePattern(ctx, run.DBInstallationID, &run.DBRepoID, p.Pattern, smID, strPtrOrNil("argus:auto_learn"), &src, cat, &prNum, strPtrOrNil(customID), nil); dbErr != nil {
 			o.logger.Warn("persisting auto-learned pattern", "error", dbErr)
 		}
 
@@ -3637,7 +3637,7 @@ The "pattern" value must be the actual pattern text, NOT the word "description".
 			} else if orgResp != nil {
 				orgSmID = &orgResp.ID
 			}
-			if _, dbErr := o.st.CreatePattern(ctx, run.DBInstallationID, nil, p.Pattern, orgSmID, strPtrOrNil("argus:auto_learn"), &src, cat, &prNum, strPtrOrNil(orgCustomID)); dbErr != nil {
+			if _, dbErr := o.st.CreatePattern(ctx, run.DBInstallationID, nil, p.Pattern, orgSmID, strPtrOrNil("argus:auto_learn"), &src, cat, &prNum, strPtrOrNil(orgCustomID), map[string]string{"repo": run.PREvent.RepoFullName}); dbErr != nil {
 				o.logger.Warn("persisting org-level pattern", "error", dbErr)
 			}
 			o.logger.Info("promoted pattern to org level", "pattern", util.Truncate(p.Pattern, 80, true))
@@ -3771,7 +3771,7 @@ Return [] if no clear conventions emerge. JSON array only.`, run.PREvent.RepoFul
 		src := "convention"
 		cat := strPtrOrNil(c.Category)
 		prNum := run.PREvent.PRNumber
-		if _, dbErr := o.st.CreatePattern(ctx, run.DBInstallationID, &run.DBRepoID, content, smID, strPtrOrNil("argus:convention"), &src, cat, &prNum, strPtrOrNil(customID)); dbErr != nil {
+		if _, dbErr := o.st.CreatePattern(ctx, run.DBInstallationID, &run.DBRepoID, content, smID, strPtrOrNil("argus:convention"), &src, cat, &prNum, strPtrOrNil(customID), nil); dbErr != nil {
 			o.logger.Warn("persisting convention pattern", "error", dbErr)
 		}
 	}
