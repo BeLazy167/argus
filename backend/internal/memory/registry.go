@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -153,4 +154,45 @@ func (r *Registry) ReembedCurrentSpace(ctx context.Context, installationID int64
 
 	idx := NewPGIndexer(r.pool, embedder, installationID, r.embedders.Dimensions(), r.log())
 	return idx.ReembedMissing(ctx, batchSize)
+}
+
+
+// ReembedAllCurrentSpaces converges every installation that owns live memory.
+// It is safe on every replica: ReembedCurrentSpace serializes each tenant with
+// an advisory lock, and a clean tenant performs no embedding calls.
+func (r *Registry) ReembedAllCurrentSpaces(ctx context.Context) (int, error) {
+	if r.pool == nil || r.embedders == nil {
+		return 0, fmt.Errorf("reembed all spaces: postgres memory backend is not configured")
+	}
+	rows, err := r.pool.Query(ctx, `SELECT DISTINCT installation_id FROM live_memories ORDER BY installation_id`)
+	if err != nil {
+		return 0, fmt.Errorf("reembed all spaces: list installations: %w", err)
+	}
+	var installationIDs []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("reembed all spaces: scan installation: %w", err)
+		}
+		installationIDs = append(installationIDs, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("reembed all spaces: read installations: %w", err)
+	}
+
+	total := 0
+	var failures []error
+	for _, installationID := range installationIDs {
+		if err := ctx.Err(); err != nil {
+			return total, errors.Join(append(failures, err)...)
+		}
+		repaired, err := r.ReembedCurrentSpace(ctx, installationID, 100)
+		total += repaired
+		if err != nil {
+			failures = append(failures, fmt.Errorf("installation %d: %w", installationID, err))
+		}
+	}
+	return total, errors.Join(failures...)
 }

@@ -238,6 +238,25 @@ func (idx *PGIndexer) ImportDocs(ctx context.Context, docs []Doc) error {
 	return idx.upsertDocs(ctx, docs)
 }
 
+// CountReembedPending reports live rows that cannot participate in the active
+// dense space. It shares ReembedMissing's predicate so fleet planning cannot
+// report healthy while foreign-space vectors remain excluded from search.
+func (idx *PGIndexer) CountReembedPending(ctx context.Context) (int64, error) {
+	if idx.embedder == nil {
+		return 0, fmt.Errorf("count reembed pending: no embedder configured for installation %d", idx.installationID)
+	}
+	var count int64
+	err := idx.pool.QueryRow(ctx, `
+		SELECT count(*) FROM live_memories
+		WHERE installation_id = $1
+		  AND (embedding IS NULL OR embedding_space IS DISTINCT FROM $2)`,
+		idx.installationID, idx.embeddingSpaceID()).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count reembed pending: %w", err)
+	}
+	return count, nil
+}
+
 // ReembedMissing embeds rows with no vector or a vector from a different
 // embedding space, returning how many it repaired. Scoped to this indexer's installation.
 //

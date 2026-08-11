@@ -141,35 +141,50 @@ func run(ctx context.Context, logger *slog.Logger, st *store.Store, cfg runConfi
 // registry, so a clean fleet is a no-op that reports zero instead of an error.
 func runReembed(ctx context.Context, logger *slog.Logger, st *store.Store, embeds *memory.EmbedderRegistry, cfg runConfig) error {
 	rows, err := st.Pool.Query(ctx, `
-		SELECT installation_id, count(*)
+		SELECT DISTINCT installation_id
 		FROM live_memories
-		WHERE embedding IS NULL
-		  AND ($1 = 0 OR installation_id = $1)
-		GROUP BY installation_id
+		WHERE $1 = 0 OR installation_id = $1
 		ORDER BY installation_id`, cfg.installation)
 	if err != nil {
-		return fmt.Errorf("listing installations with unembedded rows: %w", err)
+		return fmt.Errorf("listing installations with live memory: %w", err)
 	}
-	type target struct {
-		id      int64
-		pending int64
-	}
-	var targets []target
+	var installationIDs []int64
 	for rows.Next() {
-		var t target
-		if err := rows.Scan(&t.id, &t.pending); err != nil {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
 			rows.Close()
 			return fmt.Errorf("scanning installation: %w", err)
 		}
-		targets = append(targets, t)
+		installationIDs = append(installationIDs, id)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("reading installations: %w", err)
 	}
 
+	type target struct {
+		id      int64
+		pending int64
+		idx     *memory.PGIndexer
+	}
+	var targets []target
+	for _, id := range installationIDs {
+		embedder, _ := embeds.GetEmbedder(ctx, id)
+		if embedder == nil {
+			logger.Warn("reembed: no embedder resolved; skipping installation", "installation_id", id)
+			continue
+		}
+		idx := memory.NewPGIndexer(st.Pool, embedder, id, embeds.Dimensions(), logger)
+		pending, err := idx.CountReembedPending(ctx)
+		if err != nil {
+			return fmt.Errorf("counting installation %d reembed rows: %w", id, err)
+		}
+		if pending > 0 {
+			targets = append(targets, target{id: id, pending: pending, idx: idx})
+		}
+	}
 	if len(targets) == 0 {
-		logger.Info("reembed: nothing to do; every live memory row carries a vector")
+		logger.Info("reembed: nothing to do; every live memory row is in its current embedding space")
 		return nil
 	}
 
@@ -177,38 +192,21 @@ func runReembed(ctx context.Context, logger *slog.Logger, st *store.Store, embed
 	for _, t := range targets {
 		total += t.pending
 	}
-	logger.Info("reembed starting", "installations", len(targets), "unembedded_rows", total, "plan", cfg.plan)
+	logger.Info("reembed starting", "installations", len(targets), "pending_rows", total, "plan", cfg.plan)
 	if cfg.plan {
 		for _, t := range targets {
-			logger.Info("reembed planned", "installation_id", t.id, "unembedded_rows", t.pending)
+			logger.Info("reembed planned", "installation_id", t.id, "pending_rows", t.pending)
 		}
 		return nil
 	}
 
-	// One installation's failure must not strand the others. A transient
-	// embeddings 5xx or a pool timeout on the first install would otherwise
-	// abort the sweep and leave every later installation's rows on the
-	// full-text leg until someone noticed and reran by hand -- and "someone
-	// reruns it" is exactly the assumption whose absence created this repair
-	// in the first place. Failures are collected and reported at the end, so
-	// the exit code still tells the truth.
 	repairedTotal := 0
 	var failed []int64
 	for _, t := range targets {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		embedder, _ := embeds.GetEmbedder(ctx, t.id)
-		if embedder == nil {
-			// Not fatal, and not a failure either: an installation with no
-			// embeddings provider has nothing to repair with. Logged at Warn
-			// because those rows stay half-retrievable until one is set.
-			logger.Warn("reembed: no embedder resolved; skipping installation",
-				"installation_id", t.id, "unembedded_rows", t.pending)
-			continue
-		}
-		idx := memory.NewPGIndexer(st.Pool, embedder, t.id, embeds.Dimensions(), logger)
-		repaired, err := idx.ReembedMissing(ctx, pageSize)
+		repaired, err := t.idx.ReembedMissing(ctx, pageSize)
 		repairedTotal += repaired
 		if err != nil {
 			logger.Error("reembed: installation failed; continuing with the rest",

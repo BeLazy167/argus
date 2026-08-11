@@ -45,11 +45,7 @@ type MemoryListResult struct {
 // ListMemories lists only live rows for one installation in deterministic
 // updated_at,id order and reports the matching total before pagination.
 func (s *Store) ListMemories(ctx context.Context, filter MemoryListFilter) (MemoryListResult, error) {
-	where := []string{
-		"installation_id = $1",
-		"deleted_at IS NULL",
-		"invalidated_at IS NULL",
-	}
+	where := []string{"installation_id = $1"}
 	args := []any{filter.InstallationID}
 	add := func(clause string, value any) {
 		args = append(args, value)
@@ -67,7 +63,7 @@ func (s *Store) ListMemories(ctx context.Context, filter MemoryListFilter) (Memo
 	predicate := strings.Join(where, " AND ")
 
 	var total int
-	if err := s.Pool.QueryRow(ctx, "SELECT COUNT(*)::int FROM memories WHERE "+predicate, args...).Scan(&total); err != nil {
+	if err := s.Pool.QueryRow(ctx, "SELECT COUNT(*)::int FROM live_memories WHERE "+predicate, args...).Scan(&total); err != nil {
 		return MemoryListResult{}, fmt.Errorf("counting memories: %w", err)
 	}
 
@@ -75,7 +71,7 @@ func (s *Store) ListMemories(ctx context.Context, filter MemoryListFilter) (Memo
 	rows, err := s.Pool.Query(ctx, fmt.Sprintf(`
         SELECT id, installation_id, container_tag, custom_id, type, content,
                metadata, review_id, created_at, updated_at
-        FROM memories
+        FROM live_memories
         WHERE %s
         ORDER BY updated_at DESC, id DESC
         LIMIT $%d OFFSET $%d`, predicate, len(args)-1, len(args)), args...)
