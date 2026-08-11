@@ -58,10 +58,23 @@ type memorySinkAttempt struct {
 
 type memorySinkAttemptContextKey struct{}
 
-// memorySinkWrite is the only mutation door for work run by PostReviewIndexer.
-// It does not add review ownership arguments to every sink: RunAll installs the
-// generation-owned attempt in context, and each sink wraps only its actual
-// side effect (not slow LLM preparation) with this function.
+// withMemorySinkAttempt installs the generation authority without acquiring it.
+// Callers can finish arbitrary preparation first, then memorySinkWrite holds the
+// review-row lock only across the mutation itself.
+func withMemorySinkAttempt(ctx context.Context, o *Orchestrator, authority memorySinkAuthority, run *PipelineRun) (context.Context, *memorySinkAttempt) {
+	attempt := &memorySinkAttempt{
+		authority:  authority,
+		reviewID:   run.ReviewID,
+		generation: run.AttemptGeneration,
+		o:          o,
+	}
+	return context.WithValue(ctx, memorySinkAttemptContextKey{}, attempt), attempt
+}
+
+// memorySinkWrite is the only mutation door for attempt-owned memory/index
+// work. It does not add review ownership arguments to every sink: callers
+// install the generation-owned attempt in context and wrap only the actual side
+// effect (not slow LLM or batch preparation) with this function.
 func memorySinkWrite(ctx context.Context, op string, write func(context.Context) error) (bool, error) {
 	attempt, _ := ctx.Value(memorySinkAttemptContextKey{}).(*memorySinkAttempt)
 	if attempt == nil || attempt.authority == nil {
@@ -98,13 +111,7 @@ type PostReviewIndexer struct {
 // the review is already composed). ctx is the cancel-detached context the sinks
 // index under; stage is the telemetry stage label ("pre_post" or "post_review").
 func (p *PostReviewIndexer) RunAll(ctx context.Context, run *PipelineRun, owner, repo, stage string, sinks []memorySink) {
-	attempt := &memorySinkAttempt{
-		authority:  p.authority,
-		reviewID:   run.ReviewID,
-		generation: run.AttemptGeneration,
-		o:          p.o,
-	}
-	sinkCtx := context.WithValue(ctx, memorySinkAttemptContextKey{}, attempt)
+	sinkCtx, attempt := withMemorySinkAttempt(ctx, p.o, p.authority, run)
 	for _, sink := range sinks {
 		if sink.enabled != nil && !sink.enabled(run) {
 			continue

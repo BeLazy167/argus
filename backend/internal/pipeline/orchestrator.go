@@ -4736,14 +4736,6 @@ func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghRe
 		}
 	}
 
-	current, err := o.st.IsReviewAttemptCurrent(ctx, run.ReviewID, run.AttemptGeneration)
-	if err != nil {
-		return fmt.Errorf("checking review attempt before comment memory: %w", err)
-	}
-	if !current {
-		return context.Canceled
-	}
-
 	// Batch index all comments to memory in a single call. The write
 	// floor keeps low-signal findings out of the reviews container: critical/
 	// warning always, suggestions only when scored >= reviewSuggestionScoreFloor,
@@ -4769,8 +4761,28 @@ func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghRe
 				})
 			}
 		}
-		if err := run.Indexer.IndexReviewCommentsBatch(ctx, owner, repo, batch); err != nil {
+
+		// The batch is fully prepared before the guard acquires the review-row
+		// lock. Only the mutation is linearized with BeginReviewRetry, closing
+		// the scalar check/write race without holding that lock across unrelated
+		// GitHub, comment-persistence, or batch-building work.
+		authority := o.sinkAuthority
+		if authority == nil {
+			authority = o.st
+		}
+		sinkCtx, _ := withMemorySinkAttempt(ctx, o, authority, run)
+		authorized, err := memorySinkWrite(sinkCtx, "indexComments.memory", func(writeCtx context.Context) error {
+			return run.Indexer.IndexReviewCommentsBatch(writeCtx, owner, repo, batch)
+		})
+		if err != nil {
 			o.logger.Error("batch indexing review comments", "error", err, "count", len(batch))
+			if !authorized {
+				return fmt.Errorf("checking review attempt before comment memory: %w", err)
+			}
+			return nil
+		}
+		if !authorized {
+			return context.Canceled
 		}
 	}
 	return nil
