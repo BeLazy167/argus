@@ -84,7 +84,17 @@ func (r *Registry) GetIndexer(ctx context.Context, installationID int64) Indexer
 	// GetEmbedder absorbs resolution failures internally (a broken BYOK row
 	// falls back to the platform key) and never returns a non-nil error.
 	embedder, _ := r.embedders.GetEmbedder(ctx, installationID)
-	return NewPGIndexer(r.pool, embedder, installationID, r.embedders.Dimensions(), r.log())
+	var disableSharedDecay bool
+	if err := r.pool.QueryRow(ctx, `
+		SELECT COALESCE(default_settings, '{}'::jsonb) @> '{"disable_shared_decay": true}'::jsonb
+		FROM installations WHERE id = $1`, installationID).Scan(&disableSharedDecay); err != nil {
+		// Settings lookup failure must not disable retirement silently. Default
+		// decay remains active and the warning makes the override failure visible.
+		r.log().Warn("resolve shared memory decay setting; using decay default",
+			"installation_id", installationID, "error", err)
+	}
+	return NewPGIndexer(r.pool, embedder, installationID, r.embedders.Dimensions(), r.log(),
+		WithSharedDecayDisabled(disableSharedDecay))
 }
 
 // InvalidateEmbedder drops the cached embedder for an installation. Call after

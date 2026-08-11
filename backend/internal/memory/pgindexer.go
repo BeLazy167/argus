@@ -45,14 +45,29 @@ type PGIndexer struct {
 	// (migration 070). nil = unattributed, which is correct for rules,
 	// reaction/reply feedback, and backfills — none of those belong to a run.
 	reviewID *uuid.UUID
+	// disableSharedDecay makes _shared confidence use its stored pinned value.
+	// It is resolved from installations.default_settings for each indexer.
+	disableSharedDecay bool
 }
 
 // NewPGIndexer builds the Postgres-backed Indexer for one installation.
 // The pool must have pgvector-go types registered (store.New does this).
 // dims is the storage dimensionality; vectors of any other length are
 // rejected fail-open at write time (migration 059's contract).
-func NewPGIndexer(pool *pgxpool.Pool, embedder Embedder, installationID int64, dims int, logger *slog.Logger) *PGIndexer {
-	return &PGIndexer{pool: pool, embedder: embedder, installationID: installationID, dims: dims, logger: logger}
+type PGIndexerOption func(*PGIndexer)
+
+// WithSharedDecayDisabled opts this installation out of query-time shared
+// confidence decay. False/default preserves the normal retirement policy.
+func WithSharedDecayDisabled(disabled bool) PGIndexerOption {
+	return func(idx *PGIndexer) { idx.disableSharedDecay = disabled }
+}
+
+func NewPGIndexer(pool *pgxpool.Pool, embedder Embedder, installationID int64, dims int, logger *slog.Logger, opts ...PGIndexerOption) *PGIndexer {
+	idx := &PGIndexer{pool: pool, embedder: embedder, installationID: installationID, dims: dims, logger: logger}
+	for _, opt := range opts {
+		opt(idx)
+	}
+	return idx
 }
 
 var _ Indexer = (*PGIndexer)(nil)
@@ -195,6 +210,19 @@ func allZero(v []float32) bool {
 	return true
 }
 
+// embeddingSpaceID returns the durable identity of the active coordinate
+// system. HTTP embedders include their endpoint; small test/custom embedders
+// that only implement Embedder retain a conservative model+dimensions identity.
+func (idx *PGIndexer) embeddingSpaceID() string {
+	if idx.embedder == nil {
+		return ""
+	}
+	if identified, ok := idx.embedder.(interface{ SpaceID() string }); ok {
+		return identified.SpaceID()
+	}
+	return fmt.Sprintf("legacy:%s:%d", idx.embedder.Model(), idx.dims)
+}
+
 // ImportDocs writes pre-built documents through the SAME path live writes use.
 //
 // Exported solely for the phase-0 archive backfill (cmd/backfill-memory). It
@@ -235,6 +263,7 @@ func (idx *PGIndexer) ReembedMissing(ctx context.Context, batchSize int) (int, e
 		batchSize = 100
 	}
 	cast := vectorParam("$1", usesPGContextVector(ctx, idx.pool, idx.logger))
+	spaceID := idx.embeddingSpaceID()
 	// The content predicate closes a race, and is not redundant with
 	// `embedding IS NULL`. A live upsert can rewrite this row's content
 	// between the SELECT and the UPDATE and leave the embedding NULL again
@@ -244,9 +273,11 @@ func (idx *PGIndexer) ReembedMissing(ctx context.Context, batchSize int) (int, e
 	// is worse than the NULL it replaced. A raced row simply does not match,
 	// stays NULL, and is repaired on a later pass.
 	update := fmt.Sprintf(
-		`UPDATE memories SET embedding = %s, embedding_model = $2
-		 WHERE installation_id = $3 AND custom_id = $4 AND embedding IS NULL
-		   AND content = $5`, cast)
+		`UPDATE memories SET embedding = %s, embedding_model = $2, embedding_space = $3
+		 WHERE installation_id = $4 AND custom_id = $5
+		   AND (embedding IS NULL OR embedding_space IS DISTINCT FROM $3)
+		   AND deleted_at IS NULL AND invalidated_at IS NULL
+		   AND content = $6`, cast)
 
 	// A page can make zero progress without being done: if every row on it was
 	// rewritten between the SELECT and the UPDATE, the content predicate
@@ -261,9 +292,11 @@ func (idx *PGIndexer) ReembedMissing(ctx context.Context, batchSize int) (int, e
 	for {
 		rows, err := idx.pool.Query(ctx, `
 			SELECT custom_id, content FROM memories
-			WHERE installation_id = $1 AND deleted_at IS NULL AND embedding IS NULL
+			WHERE installation_id = $1
+			  AND deleted_at IS NULL AND invalidated_at IS NULL
+			  AND (embedding IS NULL OR embedding_space IS DISTINCT FROM $2)
 			ORDER BY id
-			LIMIT $2`, idx.installationID, batchSize)
+			LIMIT $3`, idx.installationID, spaceID, batchSize)
 		if err != nil {
 			return total, fmt.Errorf("reembed: selecting unembedded rows: %w", err)
 		}
@@ -293,7 +326,7 @@ func (idx *PGIndexer) ReembedMissing(ctx context.Context, batchSize int) (int, e
 		batch := &pgx.Batch{}
 		for i, d := range docs {
 			v := pgvector.NewVector(vecs[i])
-			batch.Queue(update, v, model, idx.installationID, d.CustomID, d.Content)
+			batch.Queue(update, v, model, spaceID, idx.installationID, d.CustomID, d.Content)
 		}
 		br := idx.pool.SendBatch(ctx, batch)
 		repaired := 0
@@ -399,12 +432,13 @@ func (idx *PGIndexer) upsertDocs(ctx context.Context, docs []Doc) error {
 	// with no review (a rule, a reaction, a backfill) clears it rather than
 	// leaving a stale review credited with text it never produced.
 	q := fmt.Sprintf(`
-		INSERT INTO memories (installation_id, container_tag, custom_id, type, content, metadata, embedding, embedding_model, review_id)
-		VALUES ($1, $2, $3, $4, $5, $6, %s, $8, $9)
+		INSERT INTO memories (installation_id, container_tag, custom_id, type, content, metadata, embedding, embedding_model, review_id, embedding_space)
+		VALUES ($1, $2, $3, $4, $5, $6, %s, $8, $9, $10)
 		ON CONFLICT (installation_id, custom_id) DO UPDATE
 		SET type = EXCLUDED.type, content = EXCLUDED.content,
 		    metadata = EXCLUDED.metadata,
 		    embedding = EXCLUDED.embedding, embedding_model = EXCLUDED.embedding_model,
+		    embedding_space = EXCLUDED.embedding_space,
 		    container_tag = EXCLUDED.container_tag, updated_at = now(),
 		    deleted_at = NULL, review_id = EXCLUDED.review_id`,
 		vectorParam("$7", usesPGContextVector(ctx, idx.pool, idx.logger)))
@@ -424,9 +458,14 @@ func (idx *PGIndexer) upsertDocs(ctx context.Context, docs []Doc) error {
 		// one poisoned doc would abort the whole implicit transaction — strip
 		// rather than lose the batch.
 		content := strings.ReplaceAll(d.Content, "\x00", "")
+		var embeddingSpace *string
+		if vecs != nil {
+			space := idx.embeddingSpaceID()
+			embeddingSpace = &space
+		}
 		batch.Queue(q,
 			idx.installationID, d.ContainerTag, d.CustomID, d.Type,
-			content, metaJSON, embedding, embeddingModel, idx.reviewID)
+			content, metaJSON, embedding, embeddingModel, idx.reviewID, embeddingSpace)
 	}
 	br := idx.pool.SendBatch(ctx, batch)
 	var execErr error

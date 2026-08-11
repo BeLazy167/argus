@@ -91,22 +91,23 @@ func pgTestPool(t *testing.T) (*pgxpool.Pool, int64) {
 }
 
 type memRow struct {
-	containerTag string
-	docType      string
-	content      string
-	metadata     map[string]string
-	hasEmbedding bool
-	model        *string
-	deletedAt    *time.Time
+	containerTag   string
+	docType        string
+	content        string
+	metadata       map[string]string
+	hasEmbedding   bool
+	model          *string
+	embeddingSpace *string
+	deletedAt      *time.Time
 }
 
 func readRow(t *testing.T, pool *pgxpool.Pool, install int64, customID string) memRow {
 	t.Helper()
 	var r memRow
 	err := pool.QueryRow(context.Background(), `
-		SELECT container_tag, type, content, metadata, embedding IS NOT NULL, embedding_model, deleted_at
+		SELECT container_tag, type, content, metadata, embedding IS NOT NULL, embedding_model, embedding_space, deleted_at
 		FROM memories WHERE installation_id = $1 AND custom_id = $2`,
-		install, customID).Scan(&r.containerTag, &r.docType, &r.content, &r.metadata, &r.hasEmbedding, &r.model, &r.deletedAt)
+		install, customID).Scan(&r.containerTag, &r.docType, &r.content, &r.metadata, &r.hasEmbedding, &r.model, &r.embeddingSpace, &r.deletedAt)
 	if err != nil {
 		t.Fatalf("read row %s: %v", customID, err)
 	}
@@ -466,13 +467,30 @@ func TestPGIndexerReembedMissing(t *testing.T) {
 		}
 	}
 
-	// A clean corpus is a no-op, not an error.
+	// A non-NULL vector in a foreign space is just as unusable as a missing
+	// vector and must be repaired after endpoint/model rotation.
+	if _, err := pool.Exec(ctx, `UPDATE memories SET embedding_space = 'retired-space'
+		WHERE installation_id = $1 AND custom_id = 'reembed-a'`, install); err != nil {
+		t.Fatalf("rotate space: %v", err)
+	}
 	again, err := idx.ReembedMissing(ctx, 10)
 	if err != nil {
-		t.Fatalf("second pass: %v", err)
+		t.Fatalf("mismatched-space pass: %v", err)
 	}
-	if again != 0 {
-		t.Errorf("second pass repaired = %d, want 0", again)
+	if again != 1 {
+		t.Errorf("mismatched-space pass repaired = %d, want 1", again)
+	}
+	if got := readRow(t, pool, install, "reembed-a").embeddingSpace; got == nil || *got != idx.embeddingSpaceID() {
+		t.Errorf("embedding_space = %v, want current %q", got, idx.embeddingSpaceID())
+	}
+
+	// A clean corpus is a no-op, not an error.
+	clean, err := idx.ReembedMissing(ctx, 10)
+	if err != nil {
+		t.Fatalf("clean pass: %v", err)
+	}
+	if clean != 0 {
+		t.Errorf("clean pass repaired = %d, want 0", clean)
 	}
 }
 

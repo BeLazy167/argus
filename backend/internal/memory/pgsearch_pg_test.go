@@ -161,7 +161,7 @@ func TestPGSearchModelSpaceIsolation(t *testing.T) {
 	idx, ctx := searchTestIndexer(t)
 	// Re-stamp one row as a foreign embedding space.
 	if _, err := idx.pool.Exec(ctx,
-		"UPDATE memories SET embedding_model = 'other-model' WHERE installation_id = $1 AND content LIKE '%goroutine leak%'",
+		"UPDATE memories SET embedding_space = 'other-space' WHERE installation_id = $1 AND content LIKE '%goroutine leak%'",
 		idx.installationID); err != nil {
 		t.Fatal(err)
 	}

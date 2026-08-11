@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -102,6 +103,24 @@ func NewEmbedder(apiKey, baseURL, model string, dims int) *HTTPEmbedder {
 
 // Model implements Embedder.
 func (e *HTTPEmbedder) Model() string { return e.model }
+
+// SpaceID identifies the coordinate system emitted by this embedder. It
+// deliberately excludes the API key: credential rotation does not change
+// vectors, while endpoint, model, or dimensionality rotation can. The endpoint
+// is hashed so private self-hosted URLs never enter memory rows or telemetry.
+func (e *HTTPEmbedder) SpaceID() string {
+	endpoint := strings.TrimRight(e.baseURL, "/")
+	if u, err := url.Parse(endpoint); err == nil {
+		u.Scheme = strings.ToLower(u.Scheme)
+		u.Host = strings.ToLower(u.Host)
+		u.User = nil
+		u.RawQuery = ""
+		u.Fragment = ""
+		endpoint = u.String()
+	}
+	sum := sha256.Sum256([]byte(fmt.Sprintf("v1\x00%s\x00%s\x00%d", endpoint, e.model, e.dims)))
+	return fmt.Sprintf("v1:%x", sum[:])
+}
 
 type embedRequest struct {
 	Model string   `json:"model"`

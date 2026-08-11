@@ -600,3 +600,22 @@ func TestFilterSQLConfidenceIsComputed(t *testing.T) {
 		t.Errorf("non-confidence numeric keys must still read stored metadata: %q (%d args)", other, len(otherArgs))
 	}
 }
+
+func TestDisableSharedDecayUsesStoredConfidence(t *testing.T) {
+	idx := &PGIndexer{installationID: 42, disableSharedDecay: true}
+	where, args := idx.searchPredicates(SearchRequest{
+		ContainerTag: SharedTag,
+		Filters: &SearchFilters{AND: []FilterCondition{{
+			Key: "confidence", Value: "0.30", FilterType: "numeric", NumericOperator: ">=",
+		}}},
+	})
+	if strings.Contains(where, "EXTRACT(EPOCH") {
+		t.Fatalf("disable_shared_decay still applies age decay: %s", where)
+	}
+	if !strings.Contains(where, "(metadata->>'confidence')::numeric") {
+		t.Fatalf("disabled decay must compare pinned stored confidence: %s", where)
+	}
+	if len(args) != 3 { // tenant, container, threshold
+		t.Fatalf("args = %d, want 3", len(args))
+	}
+}

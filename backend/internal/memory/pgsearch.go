@@ -236,13 +236,13 @@ func (idx *PGIndexer) runSearchVec(ctx context.Context, req SearchRequest, qv *p
 		// enough to matter -- and price the recall cost first, because every
 		// absolute floor above (0.80 attribution, 0.95 suppression) assumes
 		// exact distances.
-		args = append(args, qv, idx.embedder.Model(), req.Query, pool, req.Threshold, limit)
+		args = append(args, qv, idx.embeddingSpaceID(), req.Query, pool, req.Threshold, limit)
 		n := len(args)
 		q := fmt.Sprintf(`
 WITH vec AS (
   SELECT id, row_number() OVER (ORDER BY embedding %[8]s $%[1]d%[9]s) AS rnk
   FROM memories
-  WHERE %[7]s AND embedding IS NOT NULL AND embedding_model = $%[2]d
+  WHERE %[7]s AND embedding IS NOT NULL AND embedding_space = $%[2]d
   ORDER BY embedding %[8]s $%[1]d%[9]s
   LIMIT $%[4]d
 ), fts AS (
@@ -257,7 +257,7 @@ WITH vec AS (
   FROM vec v FULL OUTER JOIN fts f USING (id)
 ), scored AS (
   SELECT m.custom_id, m.content, m.metadata, u.rrf,
-         CASE WHEN m.embedding IS NOT NULL AND m.embedding_model = $%[2]d
+         CASE WHEN m.embedding IS NOT NULL AND m.embedding_space = $%[2]d
                    AND NOT ((m.embedding %[8]s $%[1]d%[9]s)::float8 = 'NaN'::float8)
               THEN LEAST(GREATEST(1 - (m.embedding %[8]s $%[1]d%[9]s)::float8, 0::float8), 1::float8) ELSE 0 END AS score
   FROM fused u JOIN memories m ON m.id = u.id
@@ -410,14 +410,14 @@ func (idx *PGIndexer) searchPredicates(req SearchRequest) (string, []any) {
 	}
 	if req.Filters != nil {
 		for _, f := range req.Filters.AND {
-			frag, a := filterSQL(f, len(args))
+			frag, a := filterSQLWithDecay(f, len(args), idx.disableSharedDecay)
 			conds = append(conds, frag)
 			args = append(args, a...)
 		}
 		if len(req.Filters.OR) > 0 {
 			var ors []string
 			for _, f := range req.Filters.OR {
-				frag, a := filterSQL(f, len(args))
+				frag, a := filterSQLWithDecay(f, len(args), idx.disableSharedDecay)
 				ors = append(ors, frag)
 				args = append(args, a...)
 			}
@@ -443,6 +443,10 @@ var numericLiteral = regexp.MustCompile(numericLiteralPattern)
 // type column), returning the fragment and its ordered args. base is the
 // number of args already placed.
 func filterSQL(f FilterCondition, base int) (string, []any) {
+	return filterSQLWithDecay(f, base, false)
+}
+
+func filterSQLWithDecay(f FilterCondition, base int, disableSharedDecay bool) (string, []any) {
 	var frag string
 	var args []any
 	switch {
@@ -496,9 +500,13 @@ func filterSQL(f FilterCondition, base int) (string, []any) {
 			//
 			// So: keep the presence and regex guards, and swap only the
 			// VALUE they gate for the age-derived one.
+			confidence := effectiveConfidenceSQL()
+			if disableSharedDecay {
+				confidence = "(metadata->>'confidence')::numeric"
+			}
 			frag = fmt.Sprintf(
 				`CASE WHEN metadata->>'confidence' ~ '%s' THEN %s END %s $%d::numeric`,
-				numericLiteralPattern, effectiveConfidenceSQL(), op, base+1)
+				numericLiteralPattern, confidence, op, base+1)
 			args = []any{f.Value}
 			break
 		}

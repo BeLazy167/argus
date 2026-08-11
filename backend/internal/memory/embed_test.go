@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -473,5 +474,27 @@ func TestEmbedFlightSurvivesOwnerCancel(t *testing.T) {
 	}
 	if len(joinerVecs) != 1 || joinerVecs[0][0] != 7 {
 		t.Fatalf("joiner got wrong result: %v", joinerVecs)
+	}
+}
+
+func TestHTTPEmbedderSpaceIDIdentifiesEndpointModelAndDimensions(t *testing.T) {
+	base := NewEmbedder("secret-a", "HTTPS://API.Example.com/v1/", "model-a", 1024)
+	same := NewEmbedder("secret-b", "https://api.example.com/v1", "model-a", 1024)
+	if base.SpaceID() != same.SpaceID() {
+		t.Fatal("API-key rotation changed the embedding space; secrets are not space identity")
+	}
+
+	rotations := []*HTTPEmbedder{
+		NewEmbedder("secret-a", "https://other.example.com/v1", "model-a", 1024),
+		NewEmbedder("secret-a", "https://api.example.com/v1", "model-b", 1024),
+		NewEmbedder("secret-a", "https://api.example.com/v1", "model-a", 1536),
+	}
+	for i, rotated := range rotations {
+		if base.SpaceID() == rotated.SpaceID() {
+			t.Errorf("rotation %d did not change embedding-space identity", i)
+		}
+	}
+	if strings.Contains(base.SpaceID(), "secret") || strings.Contains(base.SpaceID(), "example.com") {
+		t.Fatalf("space id leaks endpoint or credentials: %q", base.SpaceID())
 	}
 }
