@@ -366,8 +366,11 @@ func (s *Store) GetReviewComments(ctx context.Context, reviewID uuid.UUID) ([]Re
 		SELECT id, review_id, file_path, start_line, end_line, side, body, severity, category,
 		       specialist, confidence_score, code_snippet, github_comment_id,
 		       matched_pattern_id, matched_pattern_score, enforced_rule_content, is_new_finding,
-		       created_at, state, suppressed_reason, resolved_sha
-		FROM review_comments WHERE review_id = $1 ORDER BY file_path, start_line
+		       created_at, state, suppressed_reason, resolved_sha, attempt_generation
+		FROM review_comments rc
+		WHERE review_id = $1
+		  AND attempt_generation = (SELECT attempt_generation FROM reviews WHERE id = $1)
+		ORDER BY file_path, start_line
 	`, reviewID)
 	if err != nil {
 		return nil, err
@@ -386,10 +389,11 @@ func (s *Store) GetPRCompletedReviewComments(ctx context.Context, repoID int64, 
 		SELECT rc.id, rc.review_id, rc.file_path, rc.start_line, rc.end_line, rc.side, rc.body, rc.severity, rc.category,
 		       rc.specialist, rc.confidence_score, rc.code_snippet, rc.github_comment_id,
 		       rc.matched_pattern_id, rc.matched_pattern_score, rc.enforced_rule_content, rc.is_new_finding,
-		       rc.created_at, rc.state, rc.suppressed_reason, rc.resolved_sha
+		       rc.created_at, rc.state, rc.suppressed_reason, rc.resolved_sha, rc.attempt_generation
 		FROM review_comments rc
 		JOIN reviews r ON rc.review_id = r.id
 		WHERE r.repo_id = $1 AND r.pr_number = $2 AND r.status = 'completed'
+		  AND rc.attempt_generation = r.attempt_generation
 		ORDER BY rc.file_path, rc.start_line, rc.created_at
 	`, repoID, prNumber)
 	if err != nil {
@@ -409,9 +413,9 @@ func (s *Store) ListPRReviewSummaries(ctx context.Context, repoID int64, prNumbe
 		SELECT rv.id, rv.head_sha, rv.status, rv.score, rv.is_incremental, rv.deep_review,
 		       rv.created_at, rv.completed_at,
 		       (SELECT COUNT(*) FROM review_comments rc
-		          WHERE rc.review_id = rv.id AND rc.state <> 'suppressed')::int AS comment_count,
+		          WHERE rc.review_id = rv.id AND rc.attempt_generation = rv.attempt_generation AND rc.state <> 'suppressed')::int AS comment_count,
 		       (SELECT COUNT(*) FROM review_comments rc
-		          WHERE rc.review_id = rv.id AND rc.state <> 'suppressed' AND rc.is_new_finding)::int AS new_count
+		          WHERE rc.review_id = rv.id AND rc.attempt_generation = rv.attempt_generation AND rc.state <> 'suppressed' AND rc.is_new_finding)::int AS new_count
 		FROM reviews rv
 		WHERE rv.repo_id = $1 AND rv.pr_number = $2
 		  AND NOT (`+markerReviewFilter+`)
@@ -525,6 +529,45 @@ func (s *Store) UpdateReviewStatus(ctx context.Context, id uuid.UUID, status, er
 // GetReviewStatus returns just the status column for a review — a cheap PK
 // lookup used by the state machine's cooperative-cancellation check, which runs
 // at every stage boundary and must stay light.
+// ConvergePostedReview repairs a review whose GitHub mutation succeeded but
+// whose completion write did not. Cancelled rows remain cancelled.
+func (s *Store) ConvergePostedReview(ctx context.Context, id uuid.UUID) (int64, bool, error) {
+	var githubReviewID int64
+	err := s.Pool.QueryRow(ctx, `
+		UPDATE reviews
+		SET status = 'completed', completed_at = COALESCE(completed_at, NOW()), error = NULL
+		WHERE id = $1 AND github_review_id IS NOT NULL
+		  AND status IN ('pending','in_progress','failed')
+		RETURNING github_review_id`, id).Scan(&githubReviewID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("converging posted review: %w", err)
+	}
+	return githubReviewID, true, nil
+}
+
+// BeginReviewRetry atomically starts one new generation. Concurrent callers
+// cannot both advance a failed/cancelled review to pending.
+func (s *Store) BeginReviewRetry(ctx context.Context, id uuid.UUID) (int, bool, error) {
+	var generation int
+	err := s.Pool.QueryRow(ctx, `
+		UPDATE reviews
+		SET status = 'pending', error = NULL, completed_at = NULL,
+		    attempt_generation = attempt_generation + 1
+		WHERE id = $1 AND status IN ('failed', 'cancelled')
+		RETURNING attempt_generation
+	`, id).Scan(&generation)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("beginning review retry: %w", err)
+	}
+	return generation, true, nil
+}
+
 func (s *Store) GetReviewStatus(ctx context.Context, id uuid.UUID) (string, error) {
 	var status string
 	if err := s.Pool.QueryRow(ctx, `SELECT status FROM reviews WHERE id = $1`, id).Scan(&status); err != nil {
@@ -619,6 +662,72 @@ func (s *Store) ListAllReviewsScoped(ctx context.Context, installationIDs []int6
 	}
 	defer rows.Close()
 	return collectOrEmpty(rows, pgx.RowToStructByPos[Review])
+}
+
+// ReplaceReviewMinorNotes replaces only one attempt's structured notes.
+func (s *Store) ReplaceReviewMinorNotes(ctx context.Context, reviewID uuid.UUID, attemptGeneration int, notes []ReviewMinorNote) error {
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("beginning minor notes replace: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	if _, err = tx.Exec(ctx, `DELETE FROM review_minor_notes WHERE review_id = $1 AND attempt_generation = $2`, reviewID, attemptGeneration); err != nil {
+		return fmt.Errorf("clearing minor notes: %w", err)
+	}
+	for _, note := range notes {
+		if _, err = tx.Exec(ctx, `INSERT INTO review_minor_notes (review_id, attempt_generation, file_path, line, severity, title) VALUES ($1,$2,$3,$4,$5,$6)`, reviewID, attemptGeneration, note.FilePath, note.Line, note.Severity, note.Title); err != nil {
+			return fmt.Errorf("inserting minor note: %w", err)
+		}
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return fmt.Errorf("committing minor notes: %w", err)
+	}
+	return nil
+}
+
+// GetReviewMinorNotes returns only the review's current attempt.
+func (s *Store) GetReviewMinorNotes(ctx context.Context, reviewID uuid.UUID) ([]ReviewMinorNote, error) {
+	rows, err := s.Pool.Query(ctx, `
+		SELECT n.id, n.review_id, n.attempt_generation, n.file_path, n.line, n.severity, n.title, n.created_at
+		FROM review_minor_notes n JOIN reviews r ON r.id = n.review_id
+		WHERE n.review_id = $1 AND n.attempt_generation = r.attempt_generation
+		ORDER BY n.file_path, n.line, n.id`, reviewID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return collectOrEmpty(rows, pgx.RowToStructByPos[ReviewMinorNote])
+}
+
+// ClaimReviewSignal atomically elects one machine to deliver a CTA. An
+// abandoned claim becomes retryable after the lease expires.
+func (s *Store) ClaimReviewSignal(ctx context.Context, repoID int64, prNumber int, kind string, staleAfter time.Duration) (uuid.UUID, bool, error) {
+	id := uuid.New()
+	err := s.Pool.QueryRow(ctx, `
+		INSERT INTO review_signals (id, repo_id, pr_number, kind)
+		VALUES ($1,$2,$3,$4)
+		ON CONFLICT (repo_id, pr_number, kind) DO UPDATE
+		SET id = EXCLUDED.id, claimed_at = NOW()
+		WHERE review_signals.delivered_at IS NULL
+		  AND review_signals.claimed_at < NOW() - make_interval(secs => $5)
+		RETURNING id`, id, repoID, prNumber, kind, staleAfter.Seconds()).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, false, nil
+	}
+	if err != nil {
+		return uuid.Nil, false, fmt.Errorf("claiming review signal: %w", err)
+	}
+	return id, true, nil
+}
+
+func (s *Store) CompleteReviewSignal(ctx context.Context, id uuid.UUID) error {
+	_, err := s.Pool.Exec(ctx, `UPDATE review_signals SET delivered_at = NOW() WHERE id = $1`, id)
+	return err
+}
+
+func (s *Store) ReleaseReviewSignal(ctx context.Context, id uuid.UUID) error {
+	_, err := s.Pool.Exec(ctx, `DELETE FROM review_signals WHERE id = $1 AND delivered_at IS NULL`, id)
+	return err
 }
 
 // --- Rules ---
@@ -837,14 +946,14 @@ func (s *Store) ListModelConfigsWithFallback(ctx context.Context, installationID
 
 // --- Review Comments ---
 
-func (s *Store) CreateReviewComment(ctx context.Context, reviewID uuid.UUID, filePath string, startLine, endLine *int, side *string, body string, severity, category, specialist, codeSnippet *string, confidenceScore *int, githubCommentID *int64, matchedPatternID *int64, matchedPatternScore *float32, enforcedRuleContent *string, isNewFinding bool, suppressedReason *string, state FindingState) error {
+func (s *Store) CreateReviewComment(ctx context.Context, reviewID uuid.UUID, attemptGeneration int, filePath string, startLine, endLine *int, side *string, body string, severity, category, specialist, codeSnippet *string, confidenceScore *int, githubCommentID *int64, matchedPatternID *int64, matchedPatternScore *float32, enforcedRuleContent *string, isNewFinding bool, suppressedReason *string, state FindingState) error {
 	if state == "" {
 		state = FindingStatePosted
 	}
 	_, err := s.Pool.Exec(ctx, `
-		INSERT INTO review_comments (review_id, file_path, start_line, end_line, side, body, severity, category, specialist, confidence_score, code_snippet, github_comment_id, matched_pattern_id, matched_pattern_score, enforced_rule_content, is_new_finding, suppressed_reason, state)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
-	`, reviewID, filePath, startLine, endLine, side, body, severity, category, specialist, confidenceScore, codeSnippet, githubCommentID, matchedPatternID, matchedPatternScore, enforcedRuleContent, isNewFinding, suppressedReason, string(state))
+		INSERT INTO review_comments (review_id, attempt_generation, file_path, start_line, end_line, side, body, severity, category, specialist, confidence_score, code_snippet, github_comment_id, matched_pattern_id, matched_pattern_score, enforced_rule_content, is_new_finding, suppressed_reason, state)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+	`, reviewID, attemptGeneration, filePath, startLine, endLine, side, body, severity, category, specialist, confidenceScore, codeSnippet, githubCommentID, matchedPatternID, matchedPatternScore, enforcedRuleContent, isNewFinding, suppressedReason, string(state))
 	return err
 }
 

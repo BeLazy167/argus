@@ -191,16 +191,17 @@ func (o *Orchestrator) buildRun(ctx context.Context, in buildRunInput) *Pipeline
 	}
 
 	run := &PipelineRun{
-		ID:               uuid.New(),
-		ReviewID:         in.reviewID,
-		State:            StatePending,
-		PREvent:          in.event,
-		DBInstallationID: in.dbInstallationID,
-		DBRepoID:         in.dbRepoID,
-		TraceID:          in.traceID,
-		Diff:             in.patchSet,
-		RawDiff:          in.rawDiff,
-		BudgetLimits:     BudgetLimits(mergedSettings),
+		ID:                uuid.New(),
+		ReviewID:          in.reviewID,
+		AttemptGeneration: 1,
+		State:             StatePending,
+		PREvent:           in.event,
+		DBInstallationID:  in.dbInstallationID,
+		DBRepoID:          in.dbRepoID,
+		TraceID:           in.traceID,
+		Diff:              in.patchSet,
+		RawDiff:           in.rawDiff,
+		BudgetLimits:      BudgetLimits(mergedSettings),
 		ResolvedPersona: resolvePersona(ctx, o.st, in.dbInstallationID,
 			loadPersona(mergedSettings), loadCustomPersonaPrompt(mergedSettings)),
 		Persona:             loadPersona(mergedSettings),
@@ -882,40 +883,28 @@ func (o *Orchestrator) postTriggerComment(ctx context.Context, event ghpkg.PREve
 	return nil
 }
 
-// autoRunDisabledMarker is the reviews.error code recorded once per PR the
-// first time the trigger affordance is posted for an auto-run-disabled repo.
-// It is the dedup key (mirroring the no_api_key onboarding marker) that keeps
-// later events from re-posting the trigger comment. Marker rows are excluded
-// from dashboard list/stats reads — see isMarkerReview in the store.
-const autoRunDisabledMarker = "auto_run_disabled"
+// autoRunDisabledSignal is a CTA delivery outcome, not a review attempt.
+const autoRunDisabledSignal = "auto_run_disabled"
 
-// signalAutoRunDisabled emits the on-demand "Trigger review" affordance when
-// auto-run is off (#161), so a honored event (opened/synchronize/reopened) is a
-// visible signal rather than a silent no-op. It is idempotent: the comment is
-// posted at most once per PR, deduped on a recorded marker review row, so
-// opened + later pushes yield a single comment. Everything here is best-effort
-// — a GitHub or DB failure logs and returns without failing the webhook.
 func (o *Orchestrator) signalAutoRunDisabled(ctx context.Context, event ghpkg.PREvent, owner, repo string, dbRepo *store.Repo) {
-	already, err := o.st.HasFailedReviewWithError(ctx, dbRepo.ID, event.PRNumber, autoRunDisabledMarker)
+	claimID, claimed, err := o.st.ClaimReviewSignal(ctx, dbRepo.ID, event.PRNumber, autoRunDisabledSignal, 10*time.Minute)
 	if err != nil {
-		o.logger.Error("checking prior auto-run-disabled signal", "error", err, "repo", event.RepoFullName, "pr", event.PRNumber)
+		o.logger.Error("claiming auto-run-disabled signal", "error", err, "repo", event.RepoFullName, "pr", event.PRNumber)
+		return
 	}
-	if already {
-		o.logger.Info("auto-run disabled; trigger affordance already posted, skipping", "repo", event.RepoFullName, "pr", event.PRNumber, "action", event.Action)
+	if !claimed {
+		o.logger.Info("auto-run disabled; trigger affordance already claimed", "repo", event.RepoFullName, "pr", event.PRNumber, "action", event.Action)
 		return
 	}
 	if err := o.postTriggerComment(ctx, event, owner, repo, dbRepo); err != nil {
 		o.logger.Error("posting auto-run-disabled trigger affordance", "error", err, "repo", event.RepoFullName, "pr", event.PRNumber)
+		if releaseErr := o.st.ReleaseReviewSignal(context.WithoutCancel(ctx), claimID); releaseErr != nil {
+			o.logger.Error("releasing auto-run-disabled claim", "error", releaseErr, "repo", event.RepoFullName, "pr", event.PRNumber)
+		}
 		return
 	}
-	// Record the marker only after the comment posts so a failed post retries
-	// on the next event instead of being permanently suppressed.
-	reviewID := uuid.New()
-	if _, err := o.db.Exec(ctx, `
-		INSERT INTO reviews (id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, head_ref, status, trigger, error, trace_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'failed', 'webhook', $9, NULL)
-	`, reviewID, dbRepo.ID, event.PRNumber, event.PRTitle, event.PRAuthor, event.HeadSHA, event.BaseSHA, event.HeadRef, autoRunDisabledMarker); err != nil {
-		o.logger.Error("recording auto-run-disabled signal", "error", err, "repo", event.RepoFullName)
+	if err := o.st.CompleteReviewSignal(context.WithoutCancel(ctx), claimID); err != nil {
+		o.logger.Error("completing auto-run-disabled signal", "error", err, "repo", event.RepoFullName, "pr", event.PRNumber)
 	}
 	o.logger.Info("auto-run disabled; posted trigger affordance", "repo", event.RepoFullName, "pr", event.PRNumber, "action", event.Action)
 }
@@ -978,7 +967,7 @@ func (o *Orchestrator) handlePRClosed(ctx context.Context, event ghpkg.PREvent) 
 // terminal state, so Resume would be a silent no-op and the review would sit
 // on "pending" forever. For those we rebuild a fresh run for the SAME review
 // and drive it from the initial state.
-func (o *Orchestrator) RetryReview(ctx context.Context, reviewID uuid.UUID) error {
+func (o *Orchestrator) RetryReview(ctx context.Context, reviewID uuid.UUID, attemptGeneration int) error {
 	// Topic may already be opened by the caller (retry handler opens it
 	// before spawning the goroutine so the WebSocket can subscribe immediately).
 	if o.eventBus != nil {
@@ -995,7 +984,7 @@ func (o *Orchestrator) RetryReview(ctx context.Context, reviewID uuid.UUID) erro
 		// persist (e.g. a restart during an early, non-persisted stage). There's
 		// nothing to rebuild from, so reconstruct a fresh run from the review +
 		// repo rows and fetch the diff fresh from GitHub.
-		return o.retryFromReviewRow(ctx, reviewID)
+		return o.retryFromReviewRow(ctx, reviewID, attemptGeneration)
 	}
 	if err != nil {
 		return fmt.Errorf("finding pipeline run for review %s: %w", reviewID, err)
@@ -1005,6 +994,7 @@ func (o *Orchestrator) RetryReview(ctx context.Context, reviewID uuid.UUID) erro
 	if err != nil {
 		return fmt.Errorf("loading pipeline run %s: %w", runID, err)
 	}
+	prev.AttemptGeneration = attemptGeneration
 
 	// Non-terminal run: resume in place. Resume re-resolves the value-safe
 	// json:"-" context it lost (flags, thresholds, indexer, contract) via the
@@ -1022,6 +1012,7 @@ func (o *Orchestrator) RetryReview(ctx context.Context, reviewID uuid.UUID) erro
 	if err != nil {
 		return err
 	}
+	fresh.AttemptGeneration = attemptGeneration
 	fresh.EventBus = o.eventBus
 	// Resolve the live-only dependencies the sibling no-run retry path gets from
 	// buildRun: the memory indexer never survives persistence (without it the
@@ -1094,7 +1085,7 @@ func retryPREvent(livePR *ghpkg.PREvent, repo *store.Repo) ghpkg.PREvent {
 // the run uses the same cooperative-cancel / conditional-write machinery. On any
 // failure (including the metadata/diff fetch) the handler goroutine rolls the
 // review back to "failed" — we never proceed with mismatched SHAs.
-func (o *Orchestrator) retryFromReviewRow(ctx context.Context, reviewID uuid.UUID) error {
+func (o *Orchestrator) retryFromReviewRow(ctx context.Context, reviewID uuid.UUID, attemptGeneration int) error {
 	review, err := o.st.GetReview(ctx, reviewID)
 	if err != nil {
 		return fmt.Errorf("loading review %s for no-run retry: %w", reviewID, err)
@@ -1160,6 +1151,7 @@ func (o *Orchestrator) retryFromReviewRow(ctx context.Context, reviewID uuid.UUI
 		previousReviewID: previousReviewID,
 		indexer:          o.resolveIndexer(ctx, repo.InstallationID),
 	})
+	run.AttemptGeneration = attemptGeneration
 	run.PriorComments = priorComments
 	// Same pre-review enrichment the fresh webhook path runs, so a no-run retry
 	// resolves intent (+ change class) and re-attaches SAST/arch/link context
@@ -2741,11 +2733,17 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		return context.Canceled
 	}
 
-	// Guard: don't re-post if this review was already posted (stale recovery)
-	var existingReviewID *int64
-	_ = o.db.QueryRow(ctx, `SELECT github_review_id FROM reviews WHERE id = $1`, run.ReviewID).Scan(&existingReviewID)
-	if existingReviewID != nil && *existingReviewID > 0 {
-		o.logger.Warn("skipping post — review already posted", "review_id", run.ReviewID, "github_review_id", *existingReviewID)
+	// A prior PostReview may have succeeded while the following completion write
+	// failed. Converge the durable row instead of returning with it in_progress.
+	if existingReviewID, converged, err := o.st.ConvergePostedReview(ctx, run.ReviewID); err != nil {
+		return err
+	} else if converged {
+		o.persistReviewLinkedPRRefs(ctx, run)
+		o.persistReviewLinkedIssueRefs(ctx, run)
+		if run.EventBus != nil {
+			run.EventBus.Publish(run.ReviewID, EventReviewCompleted, ReviewCompletedPayload{ReviewID: run.ReviewID, RepoID: run.DBRepoID, PRNumber: run.PREvent.PRNumber, InstallationID: run.PREvent.InstallationID})
+		}
+		o.logger.Warn("converged review already posted to GitHub", "review_id", run.ReviewID, "github_review_id", existingReviewID)
 		return nil
 	}
 
@@ -2842,13 +2840,21 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 			"error", dbErr, "review_id", run.ReviewID)
 	}
 
+	minorNotes := make([]store.ReviewMinorNote, 0, len(run.MinorNotes))
+	for _, note := range run.MinorNotes {
+		minorNotes = append(minorNotes, store.ReviewMinorNote{FilePath: note.Path, Line: note.Line, Severity: string(note.Severity), Title: note.Title})
+	}
+	if err := o.st.ReplaceReviewMinorNotes(ctx, run.ReviewID, run.AttemptGeneration, minorNotes); err != nil {
+		o.logger.Error("persisting minor notes", "error", err, "review_id", run.ReviewID)
+	}
+
 	// Persist comments to DB BEFORE posting to GitHub.
 	// If PostReview fails (403 rate limit, 502, etc.), comments are still
 	// visible on the dashboard. ghReviewID=0 means github_comment_id is nil
 	// for now — backfilled after successful post.
 	// Guard: skip if comments already persisted (retry after post failure).
 	var existingComments int
-	_ = o.db.QueryRow(ctx, `SELECT COUNT(*) FROM review_comments WHERE review_id = $1`, run.ReviewID).Scan(&existingComments)
+	_ = o.db.QueryRow(ctx, `SELECT COUNT(*) FROM review_comments WHERE review_id = $1 AND attempt_generation = $2`, run.ReviewID, run.AttemptGeneration).Scan(&existingComments)
 	if existingComments == 0 {
 		o.indexComments(ctx, run, 0, owner, repo)
 	}
@@ -4609,7 +4615,7 @@ func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghRe
 			// suppressed_reason + state='suppressed' and with github_comment_id
 			// nil (never posted) — so the dashboard keeps the full record while
 			// the PR stays clean.
-			if err := o.st.CreateReviewComment(ctx, run.ReviewID, fr.Path, startLine, &line, &side, formattedBody, &sev, &cat, specialist, snippet, confidenceScore, ghCommentID, matchedPatternID, matchedPatternScore, enforcedRule, c.IsNewFinding, suppressedReason, state); err != nil {
+			if err := o.st.CreateReviewComment(ctx, run.ReviewID, run.AttemptGeneration, fr.Path, startLine, &line, &side, formattedBody, &sev, &cat, specialist, snippet, confidenceScore, ghCommentID, matchedPatternID, matchedPatternScore, enforcedRule, c.IsNewFinding, suppressedReason, state); err != nil {
 				o.logger.Error("persisting review comment", "error", err, "file", fr.Path)
 			}
 

@@ -79,6 +79,12 @@ func (s *Server) getReview(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load review comments"})
 		return
 	}
+	minorNotes, err := s.store.GetReviewMinorNotes(r.Context(), id)
+	if err != nil {
+		s.logger.Error("fetching review minor notes", "error", err, "review_id", id)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load review minor notes"})
+		return
+	}
 
 	// Incremental-history sidecars: the PR's per-SHA review passes and its
 	// auto-resolve pushes. Auxiliary to the review itself, so a failure degrades
@@ -107,6 +113,7 @@ func (s *Server) getReview(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, ReviewDetailResponse{
 		Review:            review,
 		Comments:          comments,
+		MinorNotes:        minorNotes,
 		History:           history,
 		AutoResolveEvents: autoResolves,
 		Memories:          memories,
@@ -143,6 +150,11 @@ func (s *Server) exportReview(w http.ResponseWriter, r *http.Request) {
 	comments, err := s.store.GetReviewComments(r.Context(), id)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load comments"})
+		return
+	}
+	minorNotes, err := s.store.GetReviewMinorNotes(r.Context(), id)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load minor notes"})
 		return
 	}
 
@@ -367,6 +379,7 @@ func (s *Server) exportReview(w http.ResponseWriter, r *http.Request) {
 			Status:        review.Status,
 			TotalFindings: len(findings),
 			Findings:      findings,
+			MinorNotes:    minorNotes,
 		}
 		if err := json.NewEncoder(w).Encode(export); err != nil {
 			s.logger.Warn("export encode failed", "error", err)
@@ -446,15 +459,25 @@ func (s *Server) retryReview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var attemptGeneration int
 	launchErr := s.launcher.Launch(pipeline.LaunchSpec{
 		Repo:     repo.FullName,
 		PR:       review.PRNumber,
 		BaseCtx:  obs.SetTraceID(context.Background(), obs.TraceID(r.Context())),
 		ReviewID: &id,
 		BeforeSpawn: func(bsCtx context.Context) error {
-			return s.store.UpdateReviewStatus(bsCtx, id, "pending", "", nil)
+			var claimed bool
+			var err error
+			attemptGeneration, claimed, err = s.store.BeginReviewRetry(bsCtx, id)
+			if err != nil {
+				return err
+			}
+			if !claimed {
+				return pipeline.ErrReviewRunning
+			}
+			return nil
 		},
-		Run: func(ctx context.Context) error { return s.orchestrator.RetryReview(ctx, id) },
+		Run: func(ctx context.Context) error { return s.orchestrator.RetryReview(ctx, id, attemptGeneration) },
 		OnDone: func(err error) {
 			// context.Canceled means a Stop halted the retry — the state machine
 			// already marked it cancelled, so it isn't a failure to log. The
@@ -464,7 +487,7 @@ func (s *Server) retryReview(w http.ResponseWriter, r *http.Request) {
 			}
 		},
 	})
-	if errors.Is(launchErr, pipeline.ErrInFlight) {
+	if errors.Is(launchErr, pipeline.ErrInFlight) || errors.Is(launchErr, pipeline.ErrReviewRunning) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "another review for this PR is in flight"})
 		return
 	}

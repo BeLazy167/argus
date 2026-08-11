@@ -108,6 +108,20 @@ type ReviewComment struct {
 	// at-merge) or still open — the viewer then shows the state pill with no
 	// resolved-by-commit breadcrumb.
 	ResolvedSHA *string `json:"resolved_sha,omitempty"`
+	// AttemptGeneration identifies the retry attempt that produced this finding.
+	AttemptGeneration int `json:"attempt_generation"`
+}
+
+// ReviewMinorNote is a structured near-miss finding folded into the review summary.
+type ReviewMinorNote struct {
+	ID                uuid.UUID `json:"id"`
+	ReviewID          uuid.UUID `json:"review_id"`
+	AttemptGeneration int       `json:"attempt_generation"`
+	FilePath          string    `json:"file_path"`
+	Line              int       `json:"line"`
+	Severity          string    `json:"severity"`
+	Title             string    `json:"title"`
+	CreatedAt         time.Time `json:"created_at"`
 }
 
 // PRReviewSummary is one review pass in a PR's incremental history. Reviews are

@@ -103,12 +103,14 @@ type StageTokens struct {
 
 // PipelineRun tracks the state and intermediate results of a single review.
 type PipelineRun struct {
-	ID               uuid.UUID
-	ReviewID         uuid.UUID
-	State            PipelineState
-	PREvent          github.PREvent
-	DBInstallationID int64 // DB serial ID (for provider_keys, model_configs lookups)
-	DBRepoID         int64 // DB serial ID (for model_configs, reviews lookups)
+	ID       uuid.UUID
+	ReviewID uuid.UUID
+	// AttemptGeneration increments whenever the same review row is retried.
+	AttemptGeneration int `json:"attempt_generation"`
+	State             PipelineState
+	PREvent           github.PREvent
+	DBInstallationID  int64 // DB serial ID (for provider_keys, model_configs lookups)
+	DBRepoID          int64 // DB serial ID (for model_configs, reviews lookups)
 	// TraceID carries the X-Argus-Trace-Id header from the initiating HTTP request. Empty
 	// when the event entered outside the middleware (e.g. sweeper recovery). Persisted via
 	// reviews.trace_id so async stages can continue the same trace from a fresh ctx.
