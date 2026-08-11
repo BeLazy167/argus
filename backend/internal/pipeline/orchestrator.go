@@ -898,12 +898,12 @@ func (o *Orchestrator) signalAutoRunDisabled(ctx context.Context, event ghpkg.PR
 	}
 	if err := o.postTriggerComment(ctx, event, owner, repo, dbRepo); err != nil {
 		o.logger.Error("posting auto-run-disabled trigger affordance", "error", err, "repo", event.RepoFullName, "pr", event.PRNumber)
-		if releaseErr := o.st.ReleaseReviewSignal(context.WithoutCancel(ctx), claimID); releaseErr != nil {
+		if released, releaseErr := o.st.ReleaseReviewSignal(context.WithoutCancel(ctx), claimID); releaseErr != nil || !released {
 			o.logger.Error("releasing auto-run-disabled claim", "error", releaseErr, "repo", event.RepoFullName, "pr", event.PRNumber)
 		}
 		return
 	}
-	if err := o.st.CompleteReviewSignal(context.WithoutCancel(ctx), claimID); err != nil {
+	if completed, err := o.st.CompleteReviewSignal(context.WithoutCancel(ctx), claimID); err != nil || !completed {
 		o.logger.Error("completing auto-run-disabled signal", "error", err, "repo", event.RepoFullName, "pr", event.PRNumber)
 	}
 	o.logger.Info("auto-run disabled; posted trigger affordance", "repo", event.RepoFullName, "pr", event.PRNumber, "action", event.Action)
@@ -1002,7 +1002,7 @@ func (o *Orchestrator) RetryReview(ctx context.Context, reviewID uuid.UUID, atte
 	// (intent/SAST/arch/links) stay unresolved by design: re-running them
 	// mid-flight would re-charge the intent LLM call on every resume.
 	if !prev.State.IsTerminal() {
-		_, err = o.sm.Resume(ctx, runID)
+		_, err = o.sm.ResumeAttempt(ctx, runID, attemptGeneration)
 		return err
 	}
 
@@ -1911,7 +1911,7 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 	}
 	if run.EventBus != nil {
 		enricher.publish = func(evt EventType, data map[string]any) {
-			run.EventBus.Publish(run.ReviewID, evt, data)
+			run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, evt, data)
 		}
 	}
 
@@ -1940,7 +1940,7 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 		slog.Int("total", res.Total()))
 
 	if run.EventBus != nil {
-		run.EventBus.Publish(run.ReviewID, EventFindingsEnriched, map[string]any{
+		run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventFindingsEnriched, map[string]any{
 			"matched":    res.Matched,
 			"enforced":   res.Enforced,
 			"novel":      res.Novel,
@@ -2171,7 +2171,7 @@ func (o *Orchestrator) synthesize(ctx context.Context, run *PipelineRun) error {
 	}
 
 	if run.EventBus != nil {
-		run.EventBus.Publish(run.ReviewID, EventSynthesis, map[string]any{
+		run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventSynthesis, map[string]any{
 			"summary": run.Synthesis.Summary,
 			"score":   run.Synthesis.Score,
 		})
@@ -2261,7 +2261,7 @@ func (o *Orchestrator) verifyIntent(ctx context.Context, run *PipelineRun) *Inte
 		"pr", run.PREvent.PRNumber)
 
 	if run.EventBus != nil {
-		run.EventBus.Publish(run.ReviewID, EventIntentVerified, map[string]any{
+		run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventIntentVerified, map[string]any{
 			"delivers":     verdict.Delivers,
 			"unmet":        len(verdict.UnmetCriteria),
 			"out_of_scope": len(verdict.OutOfScopeFindings),
@@ -2364,7 +2364,7 @@ func (o *Orchestrator) generateConversationalBrief(ctx context.Context, run *Pip
 	}
 	run.Tokens.addToTotal(run.Tokens.Synthesis)
 	if run.EventBus != nil {
-		run.EventBus.Publish(run.ReviewID, EventTokenUpdate, map[string]any{
+		run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventTokenUpdate, map[string]any{
 			"total_tokens": run.Tokens.Total.TotalTokens,
 			"cost":         run.Tokens.Total.Cost,
 		})
@@ -2373,7 +2373,7 @@ func (o *Orchestrator) generateConversationalBrief(ctx context.Context, run *Pip
 		// fallback = true when the LLM returned empty; the caller falls back
 		// to a deterministic template.
 		trimmedLen := len(strings.TrimSpace(resp.Content))
-		run.EventBus.Publish(run.ReviewID, EventBriefGenerated, map[string]any{
+		run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventBriefGenerated, map[string]any{
 			"length":   trimmedLen,
 			"fallback": trimmedLen == 0,
 		})
@@ -2723,6 +2723,13 @@ func (o *Orchestrator) pass2(ctx context.Context, run *PipelineRun) error {
 }
 
 func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
+	current, err := o.st.IsReviewAttemptCurrent(ctx, run.ReviewID, run.AttemptGeneration)
+	if err != nil {
+		return fmt.Errorf("checking review attempt: %w", err)
+	}
+	if !current {
+		return context.Canceled
+	}
 	// Final cancel guard: a Stop that landed after the last stage-boundary
 	// cooperative check must still keep us from posting. Never post a review the
 	// user cancelled. Returning context.Canceled routes Run through
@@ -2735,15 +2742,17 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 
 	// A prior PostReview may have succeeded while the following completion write
 	// failed. Converge the durable row instead of returning with it in_progress.
-	if existingReviewID, converged, err := o.st.ConvergePostedReview(ctx, run.ReviewID); err != nil {
+	if existingReviewID, exists, converged, err := o.st.ConvergePostedReview(ctx, run.ReviewID, run.AttemptGeneration); err != nil {
 		return err
-	} else if converged {
-		o.persistReviewLinkedPRRefs(ctx, run)
-		o.persistReviewLinkedIssueRefs(ctx, run)
-		if run.EventBus != nil {
-			run.EventBus.Publish(run.ReviewID, EventReviewCompleted, ReviewCompletedPayload{ReviewID: run.ReviewID, RepoID: run.DBRepoID, PRNumber: run.PREvent.PRNumber, InstallationID: run.PREvent.InstallationID})
+	} else if exists {
+		if converged {
+			o.persistReviewLinkedPRRefs(ctx, run)
+			o.persistReviewLinkedIssueRefs(ctx, run)
+			if run.EventBus != nil {
+				run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventReviewCompleted, ReviewCompletedPayload{ReviewID: run.ReviewID, RepoID: run.DBRepoID, PRNumber: run.PREvent.PRNumber, InstallationID: run.PREvent.InstallationID})
+			}
 		}
-		o.logger.Warn("converged review already posted to GitHub", "review_id", run.ReviewID, "github_review_id", existingReviewID)
+		o.logger.Warn("review already posted to GitHub; skipping mutation", "review_id", run.ReviewID, "github_review_id", existingReviewID, "converged", converged)
 		return nil
 	}
 
@@ -2831,10 +2840,10 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		UPDATE reviews SET summary = $1, score = $2, token_usage = $3, file_count = $4,
 		       deep_review = $5, persona = $6, is_incremental = $7, simulation_results = $8,
 		       truncated_files = $9, brief = $10, review_contract = $11
-		WHERE id = $12
+		WHERE id = $12 AND attempt_generation = $13
 	`, run.Synthesis.Summary, run.Synthesis.Score, tokenUsageJSON, len(run.FileReviews),
 		run.DeepReview, persona, run.IsIncremental, simResultsJSON, truncatedFilesJSON,
-		run.Synthesis.Brief, contractJSON, run.ReviewID)
+		run.Synthesis.Brief, contractJSON, run.ReviewID, run.AttemptGeneration)
 	if dbErr != nil {
 		o.logger.Error("pre-post DB update failed — review data at risk if PostReview also fails",
 			"error", dbErr, "review_id", run.ReviewID)
@@ -2896,6 +2905,14 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		return context.Canceled
 	}
 
+	current, err = o.st.IsReviewAttemptCurrent(ctx, run.ReviewID, run.AttemptGeneration)
+	if err != nil {
+		return fmt.Errorf("checking review attempt before GitHub post: %w", err)
+	}
+	if !current {
+		return context.Canceled
+	}
+
 	ghReviewID, err := o.ghClient.PostReview(
 		ctx,
 		run.PREvent.InstallationID,
@@ -2953,13 +2970,14 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	tag, err := o.db.Exec(ctx, `
 		UPDATE reviews
 		SET status = 'completed', github_review_id = $1, completed_at = NOW(), error = NULL
-		WHERE id = $2 AND status = 'in_progress'
-	`, ghReviewID, run.ReviewID)
+		WHERE id = $2 AND status = 'in_progress' AND attempt_generation = $3
+	`, ghReviewID, run.ReviewID, run.AttemptGeneration)
 	if err != nil {
 		return fmt.Errorf("updating review record: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		o.logger.Warn("post: completion write skipped — review no longer in_progress", "review_id", run.ReviewID)
+		o.logger.Warn("post: completion write skipped — review attempt no longer current", "review_id", run.ReviewID, "attempt_generation", run.AttemptGeneration)
+		return context.Canceled
 	}
 
 	// Persist linked_pr_refs BEFORE the EventReviewCompleted publish so the
@@ -2977,7 +2995,7 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	// Moving this inside the transaction would leak events on rollback —
 	// see cross-PR stage handler in crosspr_stage.go.
 	if run.EventBus != nil {
-		run.EventBus.Publish(run.ReviewID, EventReviewCompleted, ReviewCompletedPayload{
+		run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventReviewCompleted, ReviewCompletedPayload{
 			ReviewID:       run.ReviewID,
 			RepoID:         run.DBRepoID,
 			PRNumber:       run.PREvent.PRNumber,
@@ -3002,7 +3020,7 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	// pattern learning). This event marks the moment the author's PR gets the
 	// inline comments visible on GitHub.
 	if run.EventBus != nil {
-		run.EventBus.Publish(run.ReviewID, EventPostedToGitHub, map[string]any{
+		run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventPostedToGitHub, map[string]any{
 			"github_review_id": ghReviewID,
 			"inline":           len(submission.GitHub.Comments),
 			"folded":           counts.FoldedImportant + counts.FoldedMinor,
@@ -3088,7 +3106,7 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	}
 
 	if run.EventBus != nil {
-		run.EventBus.Publish(run.ReviewID, EventCompleted, map[string]any{
+		run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventCompleted, map[string]any{
 			"review_id":      run.ReviewID,
 			"total_comments": countComments(run),
 			"duration_ms":    time.Since(run.CreatedAt).Milliseconds(),
@@ -3673,7 +3691,7 @@ The "pattern" value must be the actual pattern text, NOT the word "description".
 	if len(patterns) > 0 {
 		if run.EventBus != nil {
 			for _, p := range patterns {
-				run.EventBus.Publish(run.ReviewID, EventPatternLearned, map[string]string{
+				run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventPatternLearned, map[string]string{
 					"pattern":  p.Pattern,
 					"category": p.Category,
 				})
@@ -4765,7 +4783,7 @@ func publishMemoryIndexed(run *PipelineRun, kind string, success bool, count int
 	if run == nil || run.EventBus == nil {
 		return
 	}
-	run.EventBus.Publish(run.ReviewID, EventMemoryIndexed, map[string]any{
+	run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventMemoryIndexed, map[string]any{
 		"kind":    kind,
 		"success": success,
 		"count":   count,

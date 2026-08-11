@@ -97,14 +97,14 @@ func (ts *TriageStage) Execute(ctx context.Context, run *PipelineRun) error {
 	run.TriageResults = triageSlice
 
 	if run.EventBus != nil {
-		run.EventBus.Publish(run.ReviewID, EventTriageComplete, map[string]any{
+		run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventTriageComplete, map[string]any{
 			"files": triageSlice,
 		})
 	}
 
 	// Token usage is accumulated inside llmTriage if it ran
 	if run.EventBus != nil {
-		run.EventBus.Publish(run.ReviewID, EventTokenUpdate, map[string]any{
+		run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventTokenUpdate, map[string]any{
 			"total_tokens": run.Tokens.Total.TotalTokens,
 			"cost":         run.Tokens.Total.Cost,
 		})

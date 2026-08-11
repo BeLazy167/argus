@@ -289,3 +289,29 @@ done:
 		t.Errorf("received %d events, want %d", received, n)
 	}
 }
+
+func TestEventBusOpenTopicStartsFreshGenerationAfterClose(t *testing.T) {
+	eb := NewEventBus()
+	id := uuid.New()
+	eb.OpenTopic(id)
+	eb.Publish(id, EventError, "old")
+	eb.CloseTopic(id)
+	eb.OpenTopic(id)
+	events, history, unsub := eb.Subscribe(id)
+	defer unsub()
+	if events == nil {
+		t.Fatal("reopened topic has no live subscription")
+	}
+	if len(history) != 0 {
+		t.Fatalf("reopened history=%d want 0", len(history))
+	}
+	eb.Publish(id, EventStageChanged, "new")
+	select {
+	case evt := <-events:
+		if evt.Type != EventStageChanged {
+			t.Fatalf("event=%s", evt.Type)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("reopened topic did not deliver")
+	}
+}

@@ -3,6 +3,7 @@
 CREATE TABLE review_events (
     id          BIGSERIAL PRIMARY KEY,
     review_id   UUID NOT NULL REFERENCES reviews(id) ON DELETE CASCADE,
+    attempt_generation INT,
     event_type  TEXT NOT NULL,
     data        JSONB NOT NULL DEFAULT '{}',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()

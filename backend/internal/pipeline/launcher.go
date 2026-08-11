@@ -56,6 +56,8 @@ type LaunchSpec struct {
 	// EventError. Nil for HandlePREvent launches, whose review row and topic are
 	// created inside the pipeline under an id the caller can't know up front.
 	ReviewID *uuid.UUID
+	// AttemptGeneration identifies a retry launch for generation-aware rollback.
+	AttemptGeneration *int
 
 	// BeforeSpawn runs synchronously AFTER the slot is won but BEFORE the
 	// goroutine spawns. Returning an error releases the slot and surfaces the
@@ -197,10 +199,25 @@ func (l *Launcher) rollback(ctx context.Context, spec LaunchSpec, cause error) {
 	// Detached from the launch ctx (about to be cancelled by the deferred
 	// teardown) but keeps trace attribution. Conditional so a Stop that raced
 	// this failure isn't flipped from cancelled back to failed.
-	if _, uerr := l.st.UpdateReviewStatusIf(context.WithoutCancel(ctx), id, "failed", cause.Error(), nil, []string{"pending", "in_progress"}); uerr != nil {
+	applied := false
+	var uerr error
+	if spec.AttemptGeneration != nil {
+		if attemptStore, ok := l.st.(interface {
+			UpdateReviewStatusForAttempt(context.Context, uuid.UUID, int, string, string, []byte, []string) (bool, error)
+		}); ok {
+			applied, uerr = attemptStore.UpdateReviewStatusForAttempt(context.WithoutCancel(ctx), id, *spec.AttemptGeneration, "failed", cause.Error(), nil, []string{"pending", "in_progress"})
+		}
+	} else {
+		applied, uerr = l.st.UpdateReviewStatusIf(context.WithoutCancel(ctx), id, "failed", cause.Error(), nil, []string{"pending", "in_progress"})
+	}
+	if uerr != nil {
 		l.logger.Error("launch: failed to roll back review status", "error", uerr, "review_id", id)
 	}
-	if l.eventBus != nil {
-		l.eventBus.Publish(id, EventError, map[string]string{"error": cause.Error()})
+	if applied && l.eventBus != nil {
+		if spec.AttemptGeneration != nil {
+			l.eventBus.PublishForAttempt(id, *spec.AttemptGeneration, EventError, map[string]string{"error": cause.Error()})
+		} else {
+			l.eventBus.Publish(id, EventError, map[string]string{"error": cause.Error()})
+		}
 	}
 }

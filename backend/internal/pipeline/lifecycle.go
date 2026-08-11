@@ -143,7 +143,16 @@ func (l *ReviewLifecycle) CancelStranded(ctx context.Context, reviewID uuid.UUID
 	if err != nil {
 		return fmt.Errorf("stranded cancel %s: %w", reviewID, err)
 	}
-	if found {
+	currentGeneration := 0
+	if reader, ok := l.st.(interface {
+		GetReviewAttemptGeneration(context.Context, uuid.UUID) (int, error)
+	}); ok {
+		currentGeneration, err = reader.GetReviewAttemptGeneration(ctx, reviewID)
+		if err != nil {
+			return fmt.Errorf("loading cancel attempt generation: %w", err)
+		}
+	}
+	if found && (currentGeneration == 0 || run.AttemptGeneration == 0 || run.AttemptGeneration == currentGeneration) {
 		// Skip entirely when the run already reached a terminal state: it kept
 		// its real outcome and a completed review must never flip to cancelled.
 		if run.State.IsTerminal() {
@@ -165,13 +174,25 @@ func (l *ReviewLifecycle) CancelStranded(ctx context.Context, reviewID uuid.UUID
 	// or another machine) consults reviews.status at each stage boundary
 	// (StateMachine cooperative cancel) and post() re-checks before posting — so
 	// it will actually halt and never post a cancelled review.
-	if _, err := l.st.UpdateReviewStatusIf(ctx, reviewID, "cancelled", note, nil, []string{"pending", "in_progress"}); err != nil {
+	applied, err := l.st.UpdateReviewStatusIf(ctx, reviewID, "cancelled", note, nil, []string{"pending", "in_progress"})
+	if err != nil {
 		return fmt.Errorf("updating review status for stranded cancel %s: %w", reviewID, err)
 	}
+	if !applied {
+		return nil
+	}
 
-	// Nudge any connected live-stream clients into the stopped state.
+	// Nudge connected clients only for the generation the user actually stopped.
 	if l.eventBus != nil {
-		l.eventBus.Publish(reviewID, EventCancelled, map[string]string{"stage": string(StateCancelled)})
+		generation := currentGeneration
+		if generation == 0 && found {
+			generation = run.AttemptGeneration
+		}
+		if generation > 0 {
+			l.eventBus.PublishForAttempt(reviewID, generation, EventCancelled, map[string]string{"stage": string(StateCancelled)})
+		} else {
+			l.eventBus.Publish(reviewID, EventCancelled, map[string]string{"stage": string(StateCancelled)})
+		}
 	}
 	return nil
 }

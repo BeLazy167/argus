@@ -1,12 +1,19 @@
 package pipeline
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // EventType classifies pipeline streaming events.
@@ -74,9 +81,11 @@ const maxHistoryEvents = 500
 
 // Event is a single streaming event published during a pipeline run.
 type Event struct {
-	Type      EventType       `json:"type"`
-	Timestamp time.Time       `json:"timestamp"`
-	Data      json.RawMessage `json:"data"`
+	ID                int64           `json:"id,omitempty"`
+	AttemptGeneration int             `json:"attempt_generation,omitempty"`
+	Type              EventType       `json:"type"`
+	Timestamp         time.Time       `json:"timestamp"`
+	Data              json.RawMessage `json:"data"`
 }
 
 // EventBus provides per-review pub/sub for streaming pipeline events.
@@ -90,9 +99,14 @@ type Event struct {
 //     EventReviewCompleted). Callers MUST not block — handler runs
 //     synchronously under t.mu; spawn a goroutine if work is non-trivial.
 type EventBus struct {
-	mu     sync.RWMutex
-	topics map[uuid.UUID]*topic
-	logger *slog.Logger
+	mu       sync.RWMutex
+	topics   map[uuid.UUID]*topic
+	logger   *slog.Logger
+	pool     *pgxpool.Pool
+	instance uuid.UUID
+
+	seenMu sync.Mutex
+	seen   map[int64]struct{}
 
 	// globalMu guards globalSubs. Separate from mu so global-listener
 	// registration doesn't contend with topic open/close.
@@ -113,20 +127,43 @@ type topic struct {
 
 func NewEventBus() *EventBus {
 	return &EventBus{
-		topics: make(map[uuid.UUID]*topic),
-		logger: slog.Default(),
+		topics:   make(map[uuid.UUID]*topic),
+		logger:   slog.Default(),
+		instance: uuid.New(),
+		seen:     make(map[int64]struct{}),
 	}
+}
+
+// NewDurableEventBus persists events and relays PostgreSQL notifications from
+// every application machine into this process's local subscribers.
+func NewDurableEventBus(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) *EventBus {
+	eb := NewEventBus()
+	eb.pool = pool
+	eb.logger = logger
+	ready := make(chan struct{})
+	go eb.listen(ctx, ready)
+	select {
+	case <-ready:
+	case <-ctx.Done():
+	case <-time.After(2 * time.Second):
+		logger.Warn("eventbus: listener startup timed out")
+	}
+	return eb
 }
 
 // OpenTopic creates a topic for a review. Safe to call multiple times.
 func (eb *EventBus) OpenTopic(reviewID uuid.UUID) {
 	eb.mu.Lock()
 	defer eb.mu.Unlock()
-	if _, ok := eb.topics[reviewID]; !ok {
-		eb.topics[reviewID] = &topic{
-			subscribers: make(map[uint64]chan Event),
+	if existing, ok := eb.topics[reviewID]; ok {
+		existing.mu.Lock()
+		closed := existing.closed
+		existing.mu.Unlock()
+		if !closed {
+			return
 		}
 	}
+	eb.topics[reviewID] = &topic{subscribers: make(map[uint64]chan Event)}
 }
 
 // CloseTopic marks a topic as closed and closes all subscriber channels.
@@ -151,7 +188,9 @@ func (eb *EventBus) CloseTopic(reviewID uuid.UUID) {
 	go func() {
 		time.Sleep(60 * time.Second)
 		eb.mu.Lock()
-		delete(eb.topics, reviewID)
+		if eb.topics[reviewID] == t {
+			delete(eb.topics, reviewID)
+		}
 		eb.mu.Unlock()
 	}()
 }
@@ -166,20 +205,61 @@ func (eb *EventBus) CloseTopic(reviewID uuid.UUID) {
 // observe events (e.g. EventReviewCompleted) even after the UI topic has
 // already been closed.
 func (eb *EventBus) Publish(reviewID uuid.UUID, evtType EventType, data any) {
+	eb.publish(reviewID, 0, evtType, data)
+}
+
+// PublishForAttempt drops the event when generation is no longer current.
+func (eb *EventBus) PublishForAttempt(reviewID uuid.UUID, generation int, evtType EventType, data any) {
+	eb.publish(reviewID, generation, evtType, data)
+}
+
+func (eb *EventBus) publish(reviewID uuid.UUID, generation int, evtType EventType, data any) {
 	raw, err := json.Marshal(data)
 	if err != nil {
 		eb.logger.Error("eventbus: marshal failed", "type", evtType, "review_id", reviewID, "error", err)
 		return
 	}
 
-	evt := Event{
-		Type:      evtType,
-		Timestamp: time.Now(),
-		Data:      raw,
+	evt := Event{AttemptGeneration: generation, Type: evtType, Timestamp: time.Now(), Data: raw}
+	if eb.pool != nil {
+		var notified string
+		publishCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		err = eb.pool.QueryRow(publishCtx, `
+			WITH inserted AS (
+				INSERT INTO review_events (review_id, attempt_generation, event_type, data)
+				SELECT $1,$2,$3,$4
+				WHERE $2=0 OR EXISTS (SELECT 1 FROM reviews WHERE id=$1 AND attempt_generation=$2)
+				RETURNING id, created_at
+			)
+			SELECT id, created_at, pg_notify('argus_review_events', $5 || ':' || id::text)
+			FROM inserted`, reviewID, generation, string(evtType), raw, eb.instance.String()).Scan(&evt.ID, &evt.Timestamp, &notified)
+		if err != nil {
+			if !errors.Is(err, pgx.ErrNoRows) {
+				eb.logger.Error("eventbus: durable publish failed", "type", evtType, "review_id", reviewID, "error", err)
+			}
+			if generation > 0 {
+				return
+			}
+		}
+	}
+	eb.deliver(reviewID, evt, true)
+}
+
+func (eb *EventBus) deliver(reviewID uuid.UUID, evt Event, notifyGlobal bool) {
+	if evt.ID > 0 {
+		eb.seenMu.Lock()
+		if _, duplicate := eb.seen[evt.ID]; duplicate {
+			eb.seenMu.Unlock()
+			return
+		}
+		eb.seen[evt.ID] = struct{}{}
+		if len(eb.seen) > maxHistoryEvents*4 {
+			eb.seen = map[int64]struct{}{evt.ID: {}}
+		}
+		eb.seenMu.Unlock()
 	}
 
-	// Per-review delivery (topic may not exist — e.g. CLI replay, or a
-	// late-fire lifecycle event published after CloseTopic).
 	eb.mu.RLock()
 	t, ok := eb.topics[reviewID]
 	eb.mu.RUnlock()
@@ -193,21 +273,81 @@ func (eb *EventBus) Publish(reviewID uuid.UUID, evtType EventType, data any) {
 				select {
 				case ch <- evt:
 				default:
-					eb.logger.Warn("eventbus: dropped event for slow client", "subscriber", id, "type", evtType, "review_id", reviewID)
+					eb.logger.Warn("eventbus: dropped event for slow client", "subscriber", id, "type", evt.Type, "review_id", reviewID)
 				}
 			}
 		}
 		t.mu.Unlock()
 	}
-
-	// Global delivery. Snapshot under RLock so a concurrent SubscribeGlobal
-	// can't race with invocation. Handlers are invoked outside the lock.
+	if !notifyGlobal {
+		return
+	}
 	eb.globalMu.RLock()
-	handlers := eb.globalSubs
+	handlers := append([]GlobalHandler(nil), eb.globalSubs...)
 	eb.globalMu.RUnlock()
 	for _, h := range handlers {
 		h(reviewID, evt)
 	}
+}
+
+func (eb *EventBus) listen(ctx context.Context, ready chan struct{}) {
+	var readyOnce sync.Once
+	for ctx.Err() == nil {
+		conn, err := eb.pool.Acquire(ctx)
+		if err != nil {
+			eb.waitToReconnect(ctx, err)
+			continue
+		}
+		_, err = conn.Exec(ctx, `LISTEN argus_review_events`)
+		if err != nil {
+			conn.Release()
+			eb.waitToReconnect(ctx, err)
+			continue
+		}
+		readyOnce.Do(func() { close(ready) })
+		for ctx.Err() == nil {
+			n, waitErr := conn.Conn().WaitForNotification(ctx)
+			if waitErr != nil {
+				err = waitErr
+				break
+			}
+			parts := strings.SplitN(n.Payload, ":", 2)
+			if len(parts) != 2 || parts[0] == eb.instance.String() {
+				continue
+			}
+			id, parseErr := strconv.ParseInt(parts[1], 10, 64)
+			if parseErr != nil {
+				eb.logger.Warn("eventbus: invalid notification", "payload", n.Payload)
+				continue
+			}
+			if fetchErr := eb.deliverStored(ctx, id); fetchErr != nil {
+				eb.logger.Error("eventbus: notification fetch failed", "event_id", id, "error", fetchErr)
+			}
+		}
+		conn.Release()
+		if ctx.Err() == nil {
+			eb.waitToReconnect(ctx, err)
+		}
+	}
+}
+
+func (eb *EventBus) waitToReconnect(ctx context.Context, err error) {
+	eb.logger.Warn("eventbus: listener disconnected", "error", err)
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+	}
+}
+
+func (eb *EventBus) deliverStored(ctx context.Context, id int64) error {
+	var reviewID uuid.UUID
+	var evt Event
+	err := eb.pool.QueryRow(ctx, `SELECT review_id, id, COALESCE(attempt_generation,0), event_type, created_at, data FROM review_events WHERE id=$1`, id).Scan(&reviewID, &evt.ID, &evt.AttemptGeneration, &evt.Type, &evt.Timestamp, &evt.Data)
+	if err != nil {
+		return fmt.Errorf("loading review event %d: %w", id, err)
+	}
+	eb.deliver(reviewID, evt, false)
+	return nil
 }
 
 // SubscribeGlobal registers a bus-level handler invoked for every Publish.
@@ -222,6 +362,65 @@ func (eb *EventBus) SubscribeGlobal(h GlobalHandler) {
 	eb.globalMu.Lock()
 	eb.globalSubs = append(eb.globalSubs, h)
 	eb.globalMu.Unlock()
+}
+
+// SubscribeContext replays durable events newer than afterID and then streams
+// live notifications without a replay/subscribe gap.
+func (eb *EventBus) SubscribeContext(ctx context.Context, reviewID uuid.UUID, afterID int64) (<-chan Event, []Event, func(), error) {
+	if eb.pool == nil {
+		ch, history, unsub := eb.Subscribe(reviewID)
+		return ch, history, unsub, nil
+	}
+	eb.OpenTopic(reviewID)
+	eb.mu.RLock()
+	t := eb.topics[reviewID]
+	eb.mu.RUnlock()
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	rows, err := eb.pool.Query(ctx, `
+		SELECT id, COALESCE(attempt_generation,0), event_type, created_at, data FROM (
+			SELECT e.id, e.attempt_generation, e.event_type, e.created_at, e.data
+			FROM review_events e JOIN reviews r ON r.id=e.review_id
+			WHERE e.review_id=$1 AND e.id>$2
+			  AND (e.attempt_generation=0 OR e.attempt_generation=r.attempt_generation)
+			ORDER BY e.id DESC LIMIT $3
+		) replay ORDER BY id`, reviewID, afterID, maxHistoryEvents)
+	if err != nil {
+		return nil, nil, func() {}, fmt.Errorf("querying event replay: %w", err)
+	}
+	history := make([]Event, 0)
+	for rows.Next() {
+		var evt Event
+		if err := rows.Scan(&evt.ID, &evt.AttemptGeneration, &evt.Type, &evt.Timestamp, &evt.Data); err != nil {
+			rows.Close()
+			return nil, nil, func() {}, err
+		}
+		history = append(history, evt)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, nil, func() {}, err
+	}
+	rows.Close()
+
+	ch := make(chan Event, 64)
+	if t.closed {
+		close(ch)
+		return ch, history, func() {}, nil
+	}
+	t.nextID++
+	id := t.nextID
+	t.subscribers[id] = ch
+	unsub := func() {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		if _, exists := t.subscribers[id]; exists {
+			delete(t.subscribers, id)
+			close(ch)
+		}
+	}
+	return ch, history, unsub, nil
 }
 
 // Subscribe returns a channel of events, the history so far, and an unsubscribe function.

@@ -10,6 +10,7 @@ import (
 
 	"github.com/BeLazy167/argus/backend/internal/store"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -38,9 +39,11 @@ type StateMachine struct {
 	// can be exercised without a live DB. Defaults wired in NewStateMachine.
 	// setStatus is a compare-and-set: an empty allowedCurrent means an
 	// unconditional write.
-	persist   func(ctx context.Context, run *PipelineRun) error
-	setStatus func(ctx context.Context, reviewID uuid.UUID, status, errMsg string, tokenUsage []byte, allowedCurrent []string) (bool, error)
-	load      func(ctx context.Context, runID uuid.UUID) (*PipelineRun, error)
+	persist           func(ctx context.Context, run *PipelineRun) error
+	setStatus         func(ctx context.Context, reviewID uuid.UUID, status, errMsg string, tokenUsage []byte, allowedCurrent []string) (bool, error)
+	setAttemptStatus  func(ctx context.Context, reviewID uuid.UUID, generation int, status, errMsg string, tokenUsage []byte, allowedCurrent []string) (bool, error)
+	currentGeneration func(ctx context.Context, reviewID uuid.UUID) (int, error)
+	load              func(ctx context.Context, runID uuid.UUID) (*PipelineRun, error)
 	// hydrate re-resolves the context a persisted run loses to json:"-" (feature
 	// flags, similarity thresholds, memory indexer, review contract) before the
 	// loaded run re-enters the stage loop. Nil is a no-op, which is what tests
@@ -70,11 +73,20 @@ func NewStateMachine(db *pgxpool.Pool, st *store.Store, logger *slog.Logger) *St
 		}
 		return st.UpdateReviewStatusIf(ctx, reviewID, status, errMsg, tokenUsage, allowedCurrent)
 	}
+	sm.setAttemptStatus = st.UpdateReviewStatusForAttempt
+	sm.currentGeneration = st.GetReviewAttemptGeneration
 	return sm
 }
 
 func (sm *StateMachine) RegisterStage(state PipelineState, fn StageFunc) {
 	sm.stages[state] = fn
+}
+
+func (sm *StateMachine) setRunStatus(ctx context.Context, run *PipelineRun, status, errMsg string, tokenUsage []byte, allowedCurrent []string) (bool, error) {
+	if sm.setAttemptStatus != nil {
+		return sm.setAttemptStatus(ctx, run.ReviewID, run.AttemptGeneration, status, errMsg, tokenUsage, allowedCurrent)
+	}
+	return sm.setStatus(ctx, run.ReviewID, status, errMsg, tokenUsage, allowedCurrent)
 }
 
 // Run executes the pipeline from the current state to completion or failure.
@@ -83,8 +95,10 @@ func (sm *StateMachine) Run(ctx context.Context, run *PipelineRun) error {
 	// Historically nothing did this, so every review looked stuck on "pending"
 	// until it completed/failed, which broke the dashboard's `isLive` check
 	// and stream handshake timing. Non-fatal: log Warn if the DB is down.
-	if _, updErr := sm.setStatus(ctx, run.ReviewID, "in_progress", "", nil, nil); updErr != nil {
+	if applied, updErr := sm.setRunStatus(ctx, run, "in_progress", "", nil, []string{"pending", "in_progress", "failed"}); updErr != nil {
 		sm.logger.Warn("failed to mark review in_progress", "error", updErr, "review_id", run.ReviewID)
+	} else if !applied {
+		return context.Canceled
 	}
 
 	trans := transitions()
@@ -138,7 +152,6 @@ func (sm *StateMachine) Run(ctx context.Context, run *PipelineRun) error {
 			run.State = StateFailed
 			run.Error = err.Error()
 			run.UpdatedAt = time.Now()
-			publishError(run, failedState, err)
 			if persistErr := sm.persist(context.WithoutCancel(ctx), run); persistErr != nil {
 				sm.logger.Error("failed to persist failure state", "error", persistErr, "review_id", run.ReviewID)
 			}
@@ -148,7 +161,7 @@ func (sm *StateMachine) Run(ctx context.Context, run *PipelineRun) error {
 			}
 			// Conditional: don't overwrite a review another writer already moved
 			// to a terminal state — e.g. a cancel that raced this failure.
-			applied, persistErr := sm.setStatus(context.WithoutCancel(ctx), run.ReviewID, string(StateFailed), run.Error, tokenUsage, []string{"pending", "in_progress"})
+			applied, persistErr := sm.setRunStatus(context.WithoutCancel(ctx), run, string(StateFailed), run.Error, tokenUsage, []string{"pending", "in_progress"})
 			if persistErr != nil {
 				sm.logger.Error("failed to update review status on failure", "error", persistErr, "review_id", run.ReviewID)
 			}
@@ -157,6 +170,9 @@ func (sm *StateMachine) Run(ctx context.Context, run *PipelineRun) error {
 			// rewrite the PR comment to its own outcome and contradict the
 			// status that was actually persisted. Detached ctx: the run's
 			// context is already dead and the rewrite must still reach GitHub.
+			if applied {
+				publishError(run, failedState, err)
+			}
 			if applied && sm.onTerminal != nil {
 				sm.onTerminal(context.WithoutCancel(ctx), run.ReviewID, StartedOutcomeFailed, run.Error)
 			}
@@ -202,7 +218,7 @@ func publishStageChanged(run *PipelineRun) {
 	if run.EventBus == nil {
 		return
 	}
-	run.EventBus.Publish(run.ReviewID, EventStageChanged, map[string]string{
+	run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventStageChanged, map[string]string{
 		"stage": string(run.State),
 	})
 }
@@ -212,7 +228,7 @@ func publishError(run *PipelineRun, failedStage PipelineState, err error) {
 	if run.EventBus == nil {
 		return
 	}
-	run.EventBus.Publish(run.ReviewID, EventError, map[string]string{
+	run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventError, map[string]string{
 		"stage": string(failedStage),
 		"error": err.Error(),
 	})
@@ -228,12 +244,6 @@ func (sm *StateMachine) handleCancelled(ctx context.Context, run *PipelineRun) e
 
 	dbCtx := context.WithoutCancel(ctx)
 
-	if run.EventBus != nil {
-		run.EventBus.Publish(run.ReviewID, EventCancelled, map[string]string{
-			"stage": string(cancelledAtStage),
-		})
-	}
-
 	if persistErr := sm.persist(dbCtx, run); persistErr != nil {
 		sm.logger.Error("failed to persist cancelled state", "error", persistErr, "review_id", run.ReviewID)
 	}
@@ -242,7 +252,7 @@ func (sm *StateMachine) handleCancelled(ctx context.Context, run *PipelineRun) e
 		tokenUsage, _ = json.Marshal(&run.Tokens)
 	}
 	// Conditional: never flip a review that already reached completed/failed.
-	applied, persistErr := sm.setStatus(dbCtx, run.ReviewID, "cancelled", run.Error, tokenUsage, []string{"pending", "in_progress"})
+	applied, persistErr := sm.setRunStatus(dbCtx, run, "cancelled", run.Error, tokenUsage, []string{"pending", "in_progress"})
 	if persistErr != nil {
 		sm.logger.Error("failed to update review status on cancel", "error", persistErr, "review_id", run.ReviewID)
 	}
@@ -250,6 +260,9 @@ func (sm *StateMachine) handleCancelled(ctx context.Context, run *PipelineRun) e
 	// deferred callback would fire even when the write was rejected, letting a
 	// losing canceller overwrite a comment that already reports the real
 	// outcome.
+	if applied && run.EventBus != nil {
+		run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventCancelled, map[string]string{"stage": string(cancelledAtStage)})
+	}
 	if applied && sm.onTerminal != nil {
 		sm.onTerminal(dbCtx, run.ReviewID, StartedOutcomeCancelled, "")
 	}
@@ -280,9 +293,26 @@ func shouldPersist(state PipelineState) bool {
 // not "the same review, continued" but a differently-configured one. That is
 // what hydrate does; see resume_context.go for what it deliberately leaves out.
 func (sm *StateMachine) Resume(ctx context.Context, runID uuid.UUID) (*PipelineRun, error) {
+	return sm.resume(ctx, runID, 0)
+}
+
+func (sm *StateMachine) ResumeAttempt(ctx context.Context, runID uuid.UUID, attemptGeneration int) (*PipelineRun, error) {
+	return sm.resume(ctx, runID, attemptGeneration)
+}
+
+func (sm *StateMachine) resume(ctx context.Context, runID uuid.UUID, attemptGeneration int) (*PipelineRun, error) {
 	run, err := sm.load(ctx, runID)
 	if err != nil {
 		return nil, fmt.Errorf("loading state: %w", err)
+	}
+	if attemptGeneration > 0 {
+		run.AttemptGeneration = attemptGeneration
+	} else if run.AttemptGeneration == 0 && sm.currentGeneration != nil {
+		generation, err := sm.currentGeneration(ctx, run.ReviewID)
+		if err != nil {
+			return nil, fmt.Errorf("loading attempt generation: %w", err)
+		}
+		run.AttemptGeneration = generation
 	}
 	run.EventBus = sm.eventBus
 	if run.State.IsTerminal() {
@@ -354,40 +384,81 @@ const recoverStaleAfter = 10 * time.Minute
 // be owned by another live process; taking them over would double-execute
 // the pipeline and post a duplicate GitHub review.
 func (sm *StateMachine) RecoverIncomplete(ctx context.Context) error {
-	rows, err := sm.db.Query(ctx,
-		`SELECT id FROM pipeline_states
-		 WHERE state NOT IN ($1, $2, $3)
-		   AND updated_at < NOW() - make_interval(secs => $4)
-		 ORDER BY updated_at`,
-		StateCompleted, StateFailed, StateCancelled,
-		recoverStaleAfter.Seconds(),
-	)
-	if err != nil {
-		return fmt.Errorf("querying incomplete runs: %w", err)
-	}
-	defer rows.Close()
-
-	var ids []uuid.UUID
-	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
-			return fmt.Errorf("scanning id: %w", err)
-		}
-		ids = append(ids, id)
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterating rows: %w", err)
-	}
-
 	var firstErr error
-	for _, id := range ids {
-		sm.logger.Info("recovering pipeline run", "run_id", id)
-		if _, err := sm.Resume(ctx, id); err != nil {
-			sm.logger.Error("failed to recover run", "run_id", id, "error", err)
+	for ctx.Err() == nil {
+		owner := uuid.New()
+		runID, claimed, err := sm.claimIncomplete(ctx, owner)
+		if err != nil {
+			return fmt.Errorf("claiming incomplete run: %w", err)
+		}
+		if !claimed {
+			return firstErr
+		}
+
+		sm.logger.Info("recovering pipeline run", "run_id", runID, "recovery_owner", owner)
+		stopHeartbeat := make(chan struct{})
+		go sm.renewRecoveryLease(ctx, runID, owner, stopHeartbeat)
+		_, resumeErr := sm.Resume(ctx, runID)
+		close(stopHeartbeat)
+		if resumeErr != nil {
+			sm.logger.Error("failed to recover run", "run_id", runID, "error", resumeErr)
 			if firstErr == nil {
-				firstErr = err
+				firstErr = resumeErr
+			}
+			// Keep the lease after failure so this invocation can progress to
+			// other rows without immediately reclaiming the same broken run.
+			continue
+		}
+		if _, err := sm.db.Exec(ctx, `UPDATE pipeline_states SET recovery_owner=NULL, recovery_lease_until=NULL WHERE id=$1 AND recovery_owner=$2`, runID, owner); err != nil {
+			sm.logger.Warn("clearing recovery lease", "run_id", runID, "error", err)
+		}
+	}
+	if firstErr != nil {
+		return firstErr
+	}
+	return ctx.Err()
+}
+
+const recoveryLeaseDuration = 2 * time.Minute
+
+func (sm *StateMachine) claimIncomplete(ctx context.Context, owner uuid.UUID) (uuid.UUID, bool, error) {
+	var id uuid.UUID
+	err := sm.db.QueryRow(ctx, `
+		WITH candidate AS (
+			SELECT id FROM pipeline_states
+			WHERE state NOT IN ($1,$2,$3)
+			  AND updated_at < NOW() - make_interval(secs => $4)
+			  AND (recovery_lease_until IS NULL OR recovery_lease_until < NOW())
+			ORDER BY updated_at
+			FOR UPDATE SKIP LOCKED
+			LIMIT 1
+		)
+		UPDATE pipeline_states ps
+		SET recovery_owner=$5, recovery_lease_until=NOW() + make_interval(secs => $6)
+		FROM candidate WHERE ps.id=candidate.id
+		RETURNING ps.id`, StateCompleted, StateFailed, StateCancelled, recoverStaleAfter.Seconds(), owner, recoveryLeaseDuration.Seconds()).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, false, nil
+	}
+	if err != nil {
+		return uuid.Nil, false, err
+	}
+	return id, true, nil
+}
+
+func (sm *StateMachine) renewRecoveryLease(ctx context.Context, runID, owner uuid.UUID, stop <-chan struct{}) {
+	ticker := time.NewTicker(recoveryLeaseDuration / 3)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-stop:
+			return
+		case <-ticker.C:
+			if _, err := sm.db.Exec(ctx, `UPDATE pipeline_states SET recovery_lease_until=NOW()+make_interval(secs => $3) WHERE id=$1 AND recovery_owner=$2`, runID, owner, recoveryLeaseDuration.Seconds()); err != nil {
+				sm.logger.Warn("renewing recovery lease", "run_id", runID, "error", err)
 			}
 		}
 	}
-	return firstErr
 }

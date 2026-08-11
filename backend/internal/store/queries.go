@@ -526,26 +526,61 @@ func (s *Store) UpdateReviewStatus(ctx context.Context, id uuid.UUID, status, er
 	return nil
 }
 
+// UpdateReviewStatusForAttempt applies a review-owned write only while the
+// caller's generation is still current.
+func (s *Store) UpdateReviewStatusForAttempt(ctx context.Context, id uuid.UUID, generation int, status, errMsg string, tokenUsage []byte, allowedCurrent []string) (bool, error) {
+	query := `UPDATE reviews SET status=$3, error=$4, token_usage=COALESCE($5,token_usage), completed_at=CASE WHEN $3 IN ('completed','failed') THEN NOW() ELSE completed_at END WHERE id=$1 AND attempt_generation=$2`
+	args := []any{id, generation, status, nilIfEmpty(errMsg), tokenUsage}
+	if len(allowedCurrent) > 0 {
+		query += ` AND status = ANY($6)`
+		args = append(args, allowedCurrent)
+	}
+	tag, err := s.Pool.Exec(ctx, query, args...)
+	if err != nil {
+		return false, fmt.Errorf("updating review attempt status: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+func (s *Store) GetReviewAttemptGeneration(ctx context.Context, id uuid.UUID) (int, error) {
+	var generation int
+	if err := s.Pool.QueryRow(ctx, `SELECT attempt_generation FROM reviews WHERE id=$1`, id).Scan(&generation); err != nil {
+		return 0, err
+	}
+	return generation, nil
+}
+
+func (s *Store) IsReviewAttemptCurrent(ctx context.Context, id uuid.UUID, generation int) (bool, error) {
+	var current bool
+	if err := s.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM reviews WHERE id=$1 AND attempt_generation=$2)`, id, generation).Scan(&current); err != nil {
+		return false, err
+	}
+	return current, nil
+}
+
 // GetReviewStatus returns just the status column for a review — a cheap PK
 // lookup used by the state machine's cooperative-cancellation check, which runs
 // at every stage boundary and must stay light.
 // ConvergePostedReview repairs a review whose GitHub mutation succeeded but
 // whose completion write did not. Cancelled rows remain cancelled.
-func (s *Store) ConvergePostedReview(ctx context.Context, id uuid.UUID) (int64, bool, error) {
+func (s *Store) ConvergePostedReview(ctx context.Context, id uuid.UUID, generation int) (int64, bool, bool, error) {
 	var githubReviewID int64
-	err := s.Pool.QueryRow(ctx, `
-		UPDATE reviews
-		SET status = 'completed', completed_at = COALESCE(completed_at, NOW()), error = NULL
-		WHERE id = $1 AND github_review_id IS NOT NULL
-		  AND status IN ('pending','in_progress','failed')
-		RETURNING github_review_id`, id).Scan(&githubReviewID)
+	var status string
+	err := s.Pool.QueryRow(ctx, `SELECT github_review_id,status FROM reviews WHERE id=$1 AND attempt_generation=$2 AND github_review_id IS NOT NULL`, id, generation).Scan(&githubReviewID, &status)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, false, nil
+		return 0, false, false, nil
 	}
 	if err != nil {
-		return 0, false, fmt.Errorf("converging posted review: %w", err)
+		return 0, false, false, fmt.Errorf("checking posted review: %w", err)
 	}
-	return githubReviewID, true, nil
+	if status == "cancelled" || status == "completed" {
+		return githubReviewID, true, false, nil
+	}
+	tag, err := s.Pool.Exec(ctx, `UPDATE reviews SET status='completed',completed_at=COALESCE(completed_at,NOW()),error=NULL WHERE id=$1 AND attempt_generation=$2 AND status IN ('pending','in_progress','failed')`, id, generation)
+	if err != nil {
+		return 0, true, false, fmt.Errorf("converging posted review: %w", err)
+	}
+	return githubReviewID, true, tag.RowsAffected() > 0, nil
 }
 
 // BeginReviewRetry atomically starts one new generation. Concurrent callers
@@ -720,14 +755,19 @@ func (s *Store) ClaimReviewSignal(ctx context.Context, repoID int64, prNumber in
 	return id, true, nil
 }
 
-func (s *Store) CompleteReviewSignal(ctx context.Context, id uuid.UUID) error {
-	_, err := s.Pool.Exec(ctx, `UPDATE review_signals SET delivered_at = NOW() WHERE id = $1`, id)
-	return err
+func (s *Store) CompleteReviewSignal(ctx context.Context, id uuid.UUID) (bool, error) {
+	tag, err := s.Pool.Exec(ctx, `UPDATE review_signals SET delivered_at=NOW() WHERE id=$1 AND delivered_at IS NULL`, id)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
 }
-
-func (s *Store) ReleaseReviewSignal(ctx context.Context, id uuid.UUID) error {
-	_, err := s.Pool.Exec(ctx, `DELETE FROM review_signals WHERE id = $1 AND delivered_at IS NULL`, id)
-	return err
+func (s *Store) ReleaseReviewSignal(ctx context.Context, id uuid.UUID) (bool, error) {
+	tag, err := s.Pool.Exec(ctx, `DELETE FROM review_signals WHERE id=$1 AND delivered_at IS NULL`, id)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 // --- Rules ---

@@ -168,7 +168,7 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 					p.promptExtra = run.ResolvedPersona.Overlay
 				}
 				if run.EventBus != nil {
-					run.EventBus.Publish(run.ReviewID, EventFileReviewStarted, map[string]any{
+					run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventFileReviewStarted, map[string]any{
 						"file_path":  p.file.NewName,
 						"specialist": string(p.specialist),
 						"action":     string(p.action),
@@ -202,7 +202,7 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 		run.Tokens.Review = append(run.Tokens.Review, r.tokens)
 		run.Tokens.addToTotal(r.tokens)
 		if run.EventBus != nil {
-			run.EventBus.Publish(run.ReviewID, EventTokenUpdate, map[string]any{
+			run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventTokenUpdate, map[string]any{
 				"total_tokens": run.Tokens.Total.TotalTokens,
 				"cost":         run.Tokens.Total.Cost,
 			})
@@ -217,7 +217,7 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 			// Stream each comment as it arrives
 			if run.EventBus != nil {
 				for _, c := range r.review.Comments {
-					run.EventBus.Publish(run.ReviewID, EventComment, map[string]any{
+					run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventComment, map[string]any{
 						"file_path":  r.review.Path,
 						"line":       c.Line,
 						"severity":   c.Severity,

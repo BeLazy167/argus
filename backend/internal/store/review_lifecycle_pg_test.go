@@ -40,6 +40,22 @@ func TestReviewRetryGenerationConvergesAcrossMachines(t *testing.T) {
 	if got := winners.Load(); got != 1 {
 		t.Fatalf("winners = %d, want 1", got)
 	}
+	for _, staleStatus := range []string{"failed", "completed"} {
+		applied, err := st.UpdateReviewStatusForAttempt(ctx, reviewID, 1, staleStatus, "stale", nil, []string{"pending", "in_progress"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if applied {
+			t.Fatalf("stale generation applied status %s", staleStatus)
+		}
+	}
+	var status string
+	if err := pool.QueryRow(ctx, `SELECT status FROM reviews WHERE id=$1`, reviewID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "pending" {
+		t.Fatalf("status=%q want pending", status)
+	}
 
 	if _, err := pool.Exec(ctx, `
         INSERT INTO review_comments (review_id, attempt_generation, file_path, body) VALUES
@@ -93,15 +109,32 @@ func TestReviewLifecycleStructuredState(t *testing.T) {
 	if got := claims.Load(); got != 1 {
 		t.Fatalf("signal winners = %d, want 1", got)
 	}
+	var oldClaim uuid.UUID
+	if err := pool.QueryRow(ctx, `SELECT id FROM review_signals WHERE repo_id=$1 AND pr_number=9`, repoID).Scan(&oldClaim); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE review_signals SET claimed_at=NOW()-INTERVAL '2 hours' WHERE id=$1`, oldClaim); err != nil {
+		t.Fatal(err)
+	}
+	newClaim, won, err := st.ClaimReviewSignal(ctx, repoID, 9, "auto_run_disabled", time.Hour)
+	if err != nil || !won {
+		t.Fatalf("reclaim won=%v err=%v", won, err)
+	}
+	if completed, err := st.CompleteReviewSignal(ctx, oldClaim); err != nil || completed {
+		t.Fatalf("late completion applied=%v err=%v", completed, err)
+	}
+	if completed, err := st.CompleteReviewSignal(ctx, newClaim); err != nil || !completed {
+		t.Fatalf("owner completion applied=%v err=%v", completed, err)
+	}
 
 	if _, err := pool.Exec(ctx, `UPDATE reviews SET status='failed', github_review_id=123, error='post write failed' WHERE id=$1`, reviewID); err != nil {
 		t.Fatal(err)
 	}
-	ghID, applied, err := st.ConvergePostedReview(ctx, reviewID)
+	ghID, exists, applied, err := st.ConvergePostedReview(ctx, reviewID, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !applied || ghID != 123 {
+	if !exists || !applied || ghID != 123 {
 		t.Fatalf("converge = (%d,%v), want (123,true)", ghID, applied)
 	}
 	var status string
@@ -116,7 +149,7 @@ func TestReviewLifecycleStructuredState(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE reviews SET status='cancelled' WHERE id=$1`, reviewID); err != nil {
 		t.Fatal(err)
 	}
-	if _, applied, err := st.ConvergePostedReview(ctx, reviewID); err != nil || applied {
-		t.Fatalf("cancelled converge applied=%v err=%v", applied, err)
+	if _, exists, applied, err := st.ConvergePostedReview(ctx, reviewID, 1); err != nil || !exists || applied {
+		t.Fatalf("cancelled converge exists=%v applied=%v err=%v", exists, applied, err)
 	}
 }

@@ -173,7 +173,7 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 	}
 	run.Tokens.addToTotal(run.Tokens.Scoring)
 	if run.EventBus != nil {
-		run.EventBus.Publish(run.ReviewID, EventTokenUpdate, map[string]any{
+		run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventTokenUpdate, map[string]any{
 			"total_tokens": run.Tokens.Total.TotalTokens,
 			"cost":         run.Tokens.Total.Cost,
 		})
@@ -307,7 +307,7 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 	})
 
 	if run.EventBus != nil {
-		run.EventBus.Publish(run.ReviewID, EventScoringUpdate, map[string]any{
+		run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventScoringUpdate, map[string]any{
 			"kept":        kept,
 			"dropped":     dropped,
 			"minor_notes": minor,

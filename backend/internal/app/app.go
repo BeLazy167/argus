@@ -121,7 +121,7 @@ func Run() error {
 		WithPostgresBackend(db.Pool, embedRegistry)
 
 	// Pipeline
-	eventBus := pipeline.NewEventBus()
+	eventBus := pipeline.NewDurableEventBus(ctx, db.Pool, logger)
 	triageStage := pipeline.NewTriageStage(registry, db)
 	reviewStage := pipeline.NewReviewStage(registry, db, ghClient, memRegistry, cfg.MaxConcurrentReviews)
 	intentStage := pipeline.NewIntentExtractionStage(registry, db, ghClient, logger)

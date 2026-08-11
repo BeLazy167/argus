@@ -461,10 +461,11 @@ func (s *Server) retryReview(w http.ResponseWriter, r *http.Request) {
 
 	var attemptGeneration int
 	launchErr := s.launcher.Launch(pipeline.LaunchSpec{
-		Repo:     repo.FullName,
-		PR:       review.PRNumber,
-		BaseCtx:  obs.SetTraceID(context.Background(), obs.TraceID(r.Context())),
-		ReviewID: &id,
+		Repo:              repo.FullName,
+		PR:                review.PRNumber,
+		BaseCtx:           obs.SetTraceID(context.Background(), obs.TraceID(r.Context())),
+		ReviewID:          &id,
+		AttemptGeneration: &attemptGeneration,
 		BeforeSpawn: func(bsCtx context.Context) error {
 			var claimed bool
 			var err error
@@ -597,10 +598,13 @@ func (s *Server) streamReviewWS(w http.ResponseWriter, r *http.Request) {
 	ctx := conn.CloseRead(r.Context())
 
 	// Terminal state: send final event and close
-	if review.Status == "completed" || review.Status == "failed" {
+	if review.Status == "completed" || review.Status == "failed" || review.Status == "cancelled" {
 		evtType := pipeline.EventCompleted
 		if review.Status == "failed" {
 			evtType = pipeline.EventError
+		}
+		if review.Status == "cancelled" {
+			evtType = pipeline.EventCancelled
 		}
 		_ = wsjson.Write(ctx, conn, pipeline.Event{
 			Type:      evtType,
@@ -616,7 +620,20 @@ func (s *Server) streamReviewWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	events, history, unsub := s.eventBus.Subscribe(id)
+	var afterID int64
+	if cursor := r.URL.Query().Get("after"); cursor != "" {
+		afterID, err = strconv.ParseInt(cursor, 10, 64)
+		if err != nil || afterID < 0 {
+			conn.Close(websocket.StatusPolicyViolation, "invalid event cursor")
+			return
+		}
+	}
+	events, history, unsub, err := s.eventBus.SubscribeContext(ctx, id, afterID)
+	if err != nil {
+		s.logger.Error("review stream subscribe", "error", err, "review_id", id)
+		conn.Close(websocket.StatusInternalError, "streaming not available")
+		return
+	}
 	if events == nil {
 		conn.Close(websocket.StatusNormalClosure, "no active stream")
 		return
@@ -644,6 +661,10 @@ func (s *Server) streamReviewWS(w http.ResponseWriter, r *http.Request) {
 		if err := wsjson.Write(ctx, conn, evt); err != nil {
 			return
 		}
+		if isTerminalReviewEvent(evt.Type) {
+			conn.Close(websocket.StatusNormalClosure, "review stream ended")
+			return
+		}
 	}
 
 	// Stream live events
@@ -659,8 +680,16 @@ func (s *Server) streamReviewWS(w http.ResponseWriter, r *http.Request) {
 			if err := wsjson.Write(ctx, conn, evt); err != nil {
 				return
 			}
+			if isTerminalReviewEvent(evt.Type) {
+				conn.Close(websocket.StatusNormalClosure, "review stream ended")
+				return
+			}
 		}
 	}
+}
+
+func isTerminalReviewEvent(eventType pipeline.EventType) bool {
+	return eventType == pipeline.EventCompleted || eventType == pipeline.EventError || eventType == pipeline.EventCancelled
 }
 
 func mustMarshal(v any) json.RawMessage {
