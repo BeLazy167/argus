@@ -363,6 +363,192 @@ func TestMirrorSlowUpsertDoesNotBlockSameIDProducer(t *testing.T) {
 	}
 }
 
+type delayedMirrorUpsertIndexer struct {
+	MirrorIndexer
+	entered chan struct{}
+	release <-chan struct{}
+}
+
+func (d *delayedMirrorUpsertIndexer) MirrorPattern(ctx context.Context, repo string, shared bool, pattern PatternMemory) error {
+	close(d.entered)
+	select {
+	case <-d.release:
+		return d.MirrorIndexer.MirrorPattern(ctx, repo, shared, pattern)
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// A reclaimed worker may acknowledge an upsert and apply its successor delete
+// while the original upsert is still in flight. The original worker's failed
+// acknowledgement must not let its late side effect resurrect deleted memory.
+func TestMirrorStaleUpsertCannotResurrectAfterReclaimAndDelete(t *testing.T) {
+	pool, install := pgTestPoolWithMaxConns(t, 3)
+	ctx := context.Background()
+	lockMirrorOutboxPGTests(t, pool, ctx)
+	st := store.NewWithDB(pool)
+	if _, err := pool.Exec(ctx, `DELETE FROM memory_mirror_outbox`); err != nil {
+		t.Fatalf("clear mirror outbox: %v", err)
+	}
+
+	const (
+		repo    = "mirror-stale-upsert"
+		content = "late upserts stay behind authoritative deletes"
+	)
+	customID := PatternCustomID("", repo, "manual", content)
+	upsertPayload, err := NewPatternMirrorPayload(customID, repo, false, PatternMemory{
+		Content: content, Source: "manual",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deletePayload, err := NewDeleteMirrorPayload(customID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	upsertAggregateID := time.Now().UnixNano()
+	deleteAggregateID := upsertAggregateID + 1
+	if err := st.WithMemoryMirrorTx(ctx, func(pgx.Tx) (store.MemoryMirrorEvent, error) {
+		return store.MemoryMirrorEvent{
+			InstallationID: install, AggregateType: store.MemoryMirrorPattern,
+			AggregateID: upsertAggregateID, Operation: store.MemoryMirrorUpsert, Payload: upsertPayload,
+		}, nil
+	}); err != nil {
+		t.Fatalf("enqueue upsert: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM memory_mirror_outbox WHERE installation_id=$1 AND aggregate_id=ANY($2::bigint[])`, install, []int64{upsertAggregateID, deleteAggregateID})
+	})
+
+	idx := NewPGIndexer(pool, nil, install, pgTestDims, slog.New(slog.DiscardHandler))
+	releaseFirst := make(chan struct{})
+	releasedFirst := false
+	defer func() {
+		if !releasedFirst {
+			close(releaseFirst)
+		}
+	}()
+	firstIndexer := &delayedMirrorUpsertIndexer{
+		MirrorIndexer: idx, entered: make(chan struct{}), release: releaseFirst,
+	}
+	const staleAfter = 25 * time.Millisecond
+	firstWorker := NewMirrorWorker(st, func(context.Context, int64) MirrorIndexer { return firstIndexer }, slog.New(slog.DiscardHandler))
+	firstWorker.staleAfter = staleAfter
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := firstWorker.RunOnce(ctx, 1)
+		firstDone <- err
+	}()
+	select {
+	case <-firstIndexer.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first worker did not enter slow upsert")
+	}
+
+	// This successor is produced while the worker-only execution guard is held.
+	// It must commit without waiting for the network-bound predecessor.
+	producerCtx, cancelProducer := context.WithTimeout(ctx, time.Second)
+	defer cancelProducer()
+	if err := st.WithMemoryMirrorTx(producerCtx, func(pgx.Tx) (store.MemoryMirrorEvent, error) {
+		return store.MemoryMirrorEvent{
+			InstallationID: install, AggregateType: store.MemoryMirrorPattern,
+			AggregateID: deleteAggregateID, Operation: store.MemoryMirrorDelete, Payload: deletePayload,
+		}, nil
+	}); err != nil {
+		t.Fatalf("enqueue delete while upsert is slow: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var stale bool
+		if err := pool.QueryRow(ctx, `
+			SELECT claimed_at <= clock_timestamp() - ($2 * interval '1 second')
+			FROM memory_mirror_outbox
+			WHERE installation_id=$1 AND aggregate_id=$3`, install, staleAfter.Seconds(), upsertAggregateID).Scan(&stale); err != nil {
+			t.Fatalf("observe stale lease: %v", err)
+		}
+		if stale {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("first upsert lease did not become stale")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	secondMachine := store.NewWithDB(pool)
+	secondWorker := NewMirrorWorker(secondMachine, func(context.Context, int64) MirrorIndexer { return idx }, slog.New(slog.DiscardHandler))
+	secondWorker.staleAfter = staleAfter
+	secondUpsertDone := make(chan error, 1)
+	go func() {
+		processed, err := secondWorker.RunOnce(ctx, 1)
+		if err == nil && processed != 1 {
+			err = fmt.Errorf("processed reclaimed upserts=%d want=1", processed)
+		}
+		secondUpsertDone <- err
+	}()
+
+	// Wait until B owns the lease. Before the execution lock existed, B would
+	// now finish E1 and E2 before A's delayed external upsert returned.
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		var attempts int
+		if err := pool.QueryRow(ctx, `
+			SELECT attempt_count FROM memory_mirror_outbox
+			WHERE installation_id=$1 AND aggregate_id=$2`, install, upsertAggregateID).Scan(&attempts); err != nil {
+			t.Fatalf("observe reclaimed lease: %v", err)
+		}
+		if attempts == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("second worker did not reclaim stale upsert")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	secondFinishedBeforeFirst := false
+	select {
+	case err := <-secondUpsertDone:
+		if err != nil {
+			t.Fatalf("process reclaimed upsert: %v", err)
+		}
+		secondFinishedBeforeFirst = true
+		if processed, err := secondWorker.RunOnce(ctx, 1); err != nil || processed != 1 {
+			t.Fatalf("process delete before late upsert: processed=%d err=%v", processed, err)
+		}
+		if row := readRow(t, pool, install, customID); row.deletedAt == nil {
+			t.Fatal("delete did not tombstone memory before the original upsert returned")
+		}
+	case <-time.After(250 * time.Millisecond):
+		// The execution lock makes the reclaimed worker wait without blocking
+		// the producer above. Let the original side effect finish so B can replay.
+	}
+
+	close(releaseFirst)
+	releasedFirst = true
+	if err := <-firstDone; err == nil {
+		t.Fatal("original worker unexpectedly acknowledged the reclaimed lease")
+	}
+	if !secondFinishedBeforeFirst {
+		select {
+		case err := <-secondUpsertDone:
+			if err != nil {
+				t.Fatalf("process serialized reclaimed upsert: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("reclaimed upsert did not resume after original worker released")
+		}
+		if processed, err := secondWorker.RunOnce(ctx, 1); err != nil || processed != 1 {
+			t.Fatalf("process serialized delete: processed=%d err=%v", processed, err)
+		}
+	}
+
+	if row := readRow(t, pool, install, customID); row.deletedAt == nil {
+		t.Fatal("late stale upsert resurrected memory after its authoritative delete")
+	}
+}
+
 // A later legacy event has no persisted custom ID until its first worker pass.
 // It must therefore wait behind every earlier pattern transition in the tenant:
 // that earlier event may target the same ID the legacy payload reconstructs.
@@ -544,7 +730,7 @@ func TestMirrorDeleteAndRecreateSerializeTheAuthorityGap(t *testing.T) {
 	releaseDelete := make(chan struct{})
 	processedDelete := make(chan error, 1)
 	go func() {
-		processedDelete <- st.ProcessMemoryMirrorPatternDelete(ctx, claimed[0], customID, nil, func(ctx context.Context, authorized bool) error {
+		processedDelete <- st.ProcessMemoryMirrorEvent(ctx, claimed[0], customID, nil, func(ctx context.Context, authorized bool) error {
 			if !authorized {
 				return fmt.Errorf("delete unexpectedly unauthorized")
 			}

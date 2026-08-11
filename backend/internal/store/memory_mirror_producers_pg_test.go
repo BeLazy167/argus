@@ -177,7 +177,7 @@ func TestMemoryMirrorAcknowledgementRejectsLostLease(t *testing.T) {
 		t.Fatal(err)
 	}
 	applyCalled := false
-	if err := st.ProcessMemoryMirrorPatternDelete(ctx, claimed[0], "lost-lease-pattern", nil, func(context.Context, bool) error {
+	if err := st.ProcessMemoryMirrorEvent(ctx, claimed[0], "lost-lease-pattern", nil, func(context.Context, bool) error {
 		applyCalled = true
 		return nil
 	}); err == nil {

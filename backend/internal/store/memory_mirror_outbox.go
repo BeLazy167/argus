@@ -3,10 +3,13 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const (
@@ -54,9 +57,9 @@ type MemoryMirrorPatternIdentity struct {
 // currently being processed. It runs while the store holds the custom-ID lock.
 type MemoryMirrorLegacyOwner func(MemoryMirrorPatternIdentity) (bool, error)
 
-// MemoryMirrorApply performs the idempotent pattern-memory tombstone.
-// deleteAuthorized is false while another relational pattern still owns the
-// same deterministic custom ID.
+// MemoryMirrorApply performs an idempotent external memory operation. For a
+// pattern delete, deleteAuthorized is false while another relational pattern
+// still owns the same deterministic custom ID.
 type MemoryMirrorApply func(context.Context, bool) error
 
 func (e MemoryMirrorEvent) validate() error {
@@ -213,35 +216,135 @@ func lockMemoryMirrorCustomID(ctx context.Context, tx pgx.Tx, installationID int
 	return nil
 }
 
-// ProcessMemoryMirrorPatternDelete serializes the memory tombstone, relational
-// ownership check, and lease acknowledgement for one custom ID. Producers take
-// the same transaction-scoped advisory lock before committing a new event, so
-// a pattern cannot become a live owner in the check-to-delete interval.
+// ProcessMemoryMirrorEvent serializes all external side effects and their lease
+// acknowledgements for one tenant/custom ID. The session execution lock uses
+// PostgreSQL's two-int advisory-lock key space, which does not overlap the
+// producer transaction lock's bigint key space.
 //
-// The quick, idempotent tombstone is deliberately inside the transaction; slow
-// upsert preparation (embedding or network I/O) must use the ordinary
-// apply-then-CAS path without this lock. If the process dies after tombstoning,
-// stale-lease replay repeats the delete safely. A successful commit orders the
-// delete and CAS acknowledgement together for every machine.
-func (s *Store) ProcessMemoryMirrorPatternDelete(
+// Slow upserts hold one bounded worker pool connection but no database
+// transaction and no producer lock. Pattern deletes acquire locks in one order:
+// execution lock, then producer transaction lock. This keeps the ownership
+// check, quick tombstone, and acknowledgement atomic without letting embedding
+// or network latency block relational producers.
+func (s *Store) ProcessMemoryMirrorEvent(
 	ctx context.Context,
 	event MemoryMirrorOutboxEvent,
 	customID string,
 	legacyOwner MemoryMirrorLegacyOwner,
 	apply MemoryMirrorApply,
-) error {
-	if event.AggregateType != MemoryMirrorPattern || event.Operation != MemoryMirrorDelete {
-		return fmt.Errorf("process memory mirror event %d: expected pattern delete", event.ID)
-	}
+) (returnErr error) {
 	if customID == "" {
 		return fmt.Errorf("process memory mirror event %d: empty custom ID", event.ID)
 	}
 	if apply == nil {
 		return fmt.Errorf("process memory mirror event %d: nil apply callback", event.ID)
 	}
-	tx, err := s.Pool.Begin(ctx)
+	if s.Pool == nil {
+		return fmt.Errorf("process memory mirror event %d: postgres pool unavailable", event.ID)
+	}
+
+	lockTenant := fmt.Sprintf("memory-mirror-execution:%d", event.InstallationID)
+	conn, err := acquireMirrorExecutionConn(ctx, s.Pool, lockTenant, customID)
 	if err != nil {
-		return fmt.Errorf("process memory mirror event %d: begin: %w", event.ID, err)
+		return fmt.Errorf("process memory mirror event %d: acquire execution lock: %w", event.ID, err)
+	}
+	defer func() {
+		unlockCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), memoryMirrorUnlockTimeout)
+		defer cancel()
+		var unlocked bool
+		unlockErr := conn.QueryRow(unlockCtx,
+			`SELECT pg_advisory_unlock(hashtext($1), hashtext($2))`, lockTenant, customID).Scan(&unlocked)
+		if unlockErr == nil && unlocked {
+			conn.Release()
+			return
+		}
+		// Closing a suspect session releases all of its advisory locks and keeps
+		// it out of the pool even when cancellation or a network fault obscures
+		// the unlock result.
+		closeMirrorExecutionConn(conn)
+		if unlockErr == nil {
+			unlockErr = errors.New("execution lock was not held by its session")
+		}
+		returnErr = errors.Join(returnErr,
+			fmt.Errorf("process memory mirror event %d: release execution lock: %w", event.ID, unlockErr))
+	}()
+
+	if event.AggregateType == MemoryMirrorPattern && event.Operation == MemoryMirrorDelete {
+		return s.processMemoryMirrorPatternDelete(ctx, conn, event, customID, legacyOwner, apply)
+	}
+
+	var leased bool
+	if err := conn.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM memory_mirror_outbox
+			WHERE id = $1 AND processed_at IS NULL AND claimed_at = $2
+		)`, event.ID, event.ClaimedAt).Scan(&leased); err != nil {
+		return fmt.Errorf("process memory mirror event %d: verify lease: %w", event.ID, err)
+	}
+	if !leased {
+		return fmt.Errorf("process memory mirror event %d: lease lost", event.ID)
+	}
+	if err := apply(ctx, true); err != nil {
+		return err
+	}
+	return acknowledgeMemoryMirrorEvent(ctx, conn, event)
+}
+
+const (
+	memoryMirrorLockRetryDelay = 10 * time.Millisecond
+	memoryMirrorUnlockTimeout  = 5 * time.Second
+)
+
+func acquireMirrorExecutionConn(ctx context.Context, pool *pgxpool.Pool, lockTenant, customID string) (*pgxpool.Conn, error) {
+	for {
+		conn, err := pool.Acquire(ctx)
+		if err != nil {
+			return nil, err
+		}
+		var locked bool
+		if err := conn.QueryRow(ctx,
+			`SELECT pg_try_advisory_lock(hashtext($1), hashtext($2))`, lockTenant, customID).Scan(&locked); err != nil {
+			// A query error can hide whether the server acquired the session lock.
+			// Discarding the connection makes either outcome safe.
+			closeMirrorExecutionConn(conn)
+			return nil, err
+		}
+		if locked {
+			return conn, nil
+		}
+		// A blocking advisory-lock call would pin one pool connection per stale
+		// worker. Polling without a checked-out connection leaves capacity for
+		// the lock holder's memory write and for relational producers.
+		conn.Release()
+		timer := time.NewTimer(memoryMirrorLockRetryDelay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func closeMirrorExecutionConn(conn *pgxpool.Conn) {
+	closeCtx, cancel := context.WithTimeout(context.Background(), memoryMirrorUnlockTimeout)
+	defer cancel()
+	_ = conn.Hijack().Close(closeCtx)
+}
+
+func (s *Store) processMemoryMirrorPatternDelete(
+	ctx context.Context,
+	conn *pgxpool.Conn,
+	event MemoryMirrorOutboxEvent,
+	customID string,
+	legacyOwner MemoryMirrorLegacyOwner,
+	apply MemoryMirrorApply,
+) error {
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("process memory mirror event %d: begin delete: %w", event.ID, err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
@@ -260,19 +363,28 @@ func (s *Store) ProcessMemoryMirrorPatternDelete(
 	if !leased {
 		return fmt.Errorf("process memory mirror event %d: lease lost", event.ID)
 	}
-
-	deleteAuthorized := true
-	if event.AggregateType == MemoryMirrorPattern && event.Operation == MemoryMirrorDelete {
-		deleteAuthorized, err = patternMirrorDeleteAuthorized(ctx, tx, event.InstallationID, customID, legacyOwner)
-		if err != nil {
-			return fmt.Errorf("process memory mirror event %d: check pattern owner: %w", event.ID, err)
-		}
+	deleteAuthorized, err := patternMirrorDeleteAuthorized(ctx, tx, event.InstallationID, customID, legacyOwner)
+	if err != nil {
+		return fmt.Errorf("process memory mirror event %d: check pattern owner: %w", event.ID, err)
 	}
 	if err := apply(ctx, deleteAuthorized); err != nil {
 		return err
 	}
+	if err := acknowledgeMemoryMirrorEvent(ctx, tx, event); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("process memory mirror event %d: commit delete: %w", event.ID, err)
+	}
+	return nil
+}
 
-	tag, err := tx.Exec(ctx, `
+type memoryMirrorAcknowledgementDB interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}
+
+func acknowledgeMemoryMirrorEvent(ctx context.Context, db memoryMirrorAcknowledgementDB, event MemoryMirrorOutboxEvent) error {
+	tag, err := db.Exec(ctx, `
 		UPDATE memory_mirror_outbox
 		SET processed_at = now(), claimed_at = NULL, last_error = NULL, updated_at = now()
 		WHERE id = $1 AND processed_at IS NULL AND claimed_at = $2`, event.ID, event.ClaimedAt)
@@ -281,9 +393,6 @@ func (s *Store) ProcessMemoryMirrorPatternDelete(
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("process memory mirror event %d: lease lost", event.ID)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("process memory mirror event %d: commit: %w", event.ID, err)
 	}
 	return nil
 }

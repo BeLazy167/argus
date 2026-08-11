@@ -23,11 +23,7 @@ func (f *fakeMirrorOutbox) ClaimMemoryMirrorEvents(_ context.Context, _ int, _ t
 func (f *fakeMirrorOutbox) BindMemoryMirrorEventCustomID(_ context.Context, _ store.MemoryMirrorOutboxEvent, _ string) error {
 	return nil
 }
-func (f *fakeMirrorOutbox) MarkMemoryMirrorEventProcessed(_ context.Context, event store.MemoryMirrorOutboxEvent) error {
-	f.succeeded = append(f.succeeded, event.ID)
-	return nil
-}
-func (f *fakeMirrorOutbox) ProcessMemoryMirrorPatternDelete(ctx context.Context, event store.MemoryMirrorOutboxEvent, _ string, _ store.MemoryMirrorLegacyOwner, apply store.MemoryMirrorApply) error {
+func (f *fakeMirrorOutbox) ProcessMemoryMirrorEvent(ctx context.Context, event store.MemoryMirrorOutboxEvent, _ string, _ store.MemoryMirrorLegacyOwner, apply store.MemoryMirrorApply) error {
 	if err := apply(ctx, true); err != nil {
 		return err
 	}
