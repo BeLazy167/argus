@@ -278,3 +278,174 @@ func TestReviewAttemptOwnedWriteLinearizesWithRetry(t *testing.T) {
 		t.Fatalf("stale guard current=%v called=%v, want no obsolete mutation", current, called)
 	}
 }
+
+func waitForBlockedReviewLifecycleQuery(t *testing.T, ctx context.Context, pool interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, queryFragment string) {
+	t.Helper()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var blocked bool
+		err := pool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM pg_stat_activity
+				WHERE datname = current_database()
+				  AND pid <> pg_backend_pid()
+				  AND query LIKE '%' || $1 || '%'
+				  AND cardinality(pg_blocking_pids(pid)) > 0
+			)`, queryFragment).Scan(&blocked)
+		if err != nil {
+			t.Fatalf("checking blocked lifecycle query %q: %v", queryFragment, err)
+		}
+		if blocked {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("lifecycle query %q never blocked behind review post: %v", queryFragment, context.Cause(ctx))
+		case <-ticker.C:
+		}
+	}
+}
+
+func TestReviewPostLinearizesWithCancelAndRetry(t *testing.T) {
+	pool, ctx := fileMemoryTestPool(t)
+	_, rawID := seedFileMemoryRepo(t, ctx, pool)
+	reviewID := uuid.MustParse(rawID)
+	if _, err := pool.Exec(ctx, `UPDATE reviews SET status = 'in_progress' WHERE id = $1`, reviewID); err != nil {
+		t.Fatal(err)
+	}
+	st := NewWithDB(pool)
+	testCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	postEntered := make(chan struct{})
+	releasePost := make(chan struct{})
+	var releasePostOnce sync.Once
+	release := func() { releasePostOnce.Do(func() { close(releasePost) }) }
+	t.Cleanup(release)
+	postResult := make(chan error, 1)
+	var postCalls atomic.Int32
+	go func() {
+		githubReviewID, outcome, err := st.PostReviewForAttempt(testCtx, reviewID, 1, func(context.Context) (int64, error) {
+			postCalls.Add(1)
+			close(postEntered)
+			<-releasePost
+			return 9876, nil
+		})
+		if err == nil && (githubReviewID != 9876 || outcome != ReviewPostRecorded) {
+			err = fmt.Errorf("post = (%d,%q), want (9876,%q)", githubReviewID, outcome, ReviewPostRecorded)
+		}
+		postResult <- err
+	}()
+	select {
+	case <-postEntered:
+	case err := <-postResult:
+		t.Fatalf("guarded post failed before entering GitHub: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("guarded post did not enter GitHub")
+	}
+
+	cancelResult := make(chan error, 1)
+	go func() {
+		applied, err := st.UpdateReviewStatusForAttempt(testCtx, reviewID, 1, "cancelled", "cancelled by user", nil, []string{"pending", "in_progress"})
+		if err == nil && !applied {
+			err = errors.New("cancel did not apply after waiting for post authority")
+		}
+		cancelResult <- err
+	}()
+	waitForBlockedReviewLifecycleQuery(t, testCtx, pool, `UPDATE reviews SET status=$3`)
+
+	release()
+	if err := <-postResult; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-cancelResult; err != nil {
+		t.Fatal(err)
+	}
+
+	// Retry is admissible only after cancel commits; it must see the id that was
+	// durably recorded before cancel acquired the row and must not allow either
+	// generation to issue another external mutation.
+	generation, won, err := st.BeginReviewRetry(testCtx, reviewID)
+	if err != nil || !won || generation != 2 {
+		t.Fatalf("retry = generation %d won %v err %v, want generation 2 winner", generation, won, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE reviews SET status = 'in_progress' WHERE id = $1 AND attempt_generation = 2`, reviewID); err != nil {
+		t.Fatal(err)
+	}
+
+	staleCalled := false
+	if githubReviewID, outcome, err := st.PostReviewForAttempt(ctx, reviewID, 1, func(context.Context) (int64, error) {
+		staleCalled = true
+		return 111, nil
+	}); err != nil || githubReviewID != 0 || outcome != ReviewPostRejected {
+		t.Fatalf("stale post = (%d,%q,%v), want (0,%q,nil)", githubReviewID, outcome, err, ReviewPostRejected)
+	}
+	if staleCalled {
+		t.Fatal("stale generation called GitHub")
+	}
+
+	currentCalled := false
+	githubReviewID, outcome, err := st.PostReviewForAttempt(ctx, reviewID, 2, func(context.Context) (int64, error) {
+		currentCalled = true
+		return 222, nil
+	})
+	if err != nil || githubReviewID != 9876 || outcome != ReviewPostAlreadyRecorded {
+		t.Fatalf("current retry post = (%d,%q,%v), want existing (9876,%q,nil)", githubReviewID, outcome, err, ReviewPostAlreadyRecorded)
+	}
+	if currentCalled {
+		t.Fatal("retry called GitHub even though the prior linearized post id was durable")
+	}
+	if got := postCalls.Load(); got != 1 {
+		t.Fatalf("GitHub calls = %d, want exactly 1", got)
+	}
+
+	var storedID int64
+	var storedGeneration int
+	if err := pool.QueryRow(ctx, `SELECT github_review_id, attempt_generation FROM reviews WHERE id = $1`, reviewID).Scan(&storedID, &storedGeneration); err != nil {
+		t.Fatal(err)
+	}
+	if storedID != 9876 || storedGeneration != 2 {
+		t.Fatalf("review row = id %d generation %d, want id 9876 generation 2", storedID, storedGeneration)
+	}
+}
+
+func TestReviewPostRejectsDisallowedStatusWithoutCallingGitHub(t *testing.T) {
+	pool, ctx := fileMemoryTestPool(t)
+	_, rawID := seedFileMemoryRepo(t, ctx, pool)
+	reviewID := uuid.MustParse(rawID)
+	st := NewWithDB(pool)
+
+	called := false
+	githubReviewID, outcome, err := st.PostReviewForAttempt(ctx, reviewID, 1, func(context.Context) (int64, error) {
+		called = true
+		return 123, nil
+	})
+	if err != nil || githubReviewID != 0 || outcome != ReviewPostRejected {
+		t.Fatalf("pending post = (%d,%q,%v), want rejected", githubReviewID, outcome, err)
+	}
+	if called {
+		t.Fatal("pending review called GitHub")
+	}
+
+	if _, err := pool.Exec(ctx, `UPDATE reviews SET status = 'in_progress' WHERE id = $1`, reviewID); err != nil {
+		t.Fatal(err)
+	}
+	ambiguous := errors.New("response lost after request")
+	githubReviewID, outcome, err = st.PostReviewForAttempt(ctx, reviewID, 1, func(context.Context) (int64, error) {
+		return 0, ambiguous
+	})
+	if !errors.Is(err, ambiguous) || githubReviewID != 0 || outcome != ReviewPostAttempted {
+		t.Fatalf("ambiguous post = (%d,%q,%v), want attempted with original error", githubReviewID, outcome, err)
+	}
+	var persisted bool
+	if err := pool.QueryRow(ctx, `SELECT github_review_id IS NOT NULL FROM reviews WHERE id = $1`, reviewID).Scan(&persisted); err != nil {
+		t.Fatal(err)
+	}
+	if persisted {
+		t.Fatal("post callback error invented durable GitHub evidence")
+	}
+}

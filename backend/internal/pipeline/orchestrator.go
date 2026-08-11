@@ -2907,37 +2907,42 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		return context.Canceled
 	}
 
-	current, err = o.st.IsReviewAttemptCurrent(ctx, run.ReviewID, run.AttemptGeneration)
+	// PostReview is non-idempotent, so a scalar generation check is not enough:
+	// retry/cancel could advance the row after the check but before GitHub returns.
+	// The store holds this review row's attempt authority across only the external
+	// call and writes the returned id through that same transaction. Preparation,
+	// memory indexing, and comment persistence above remain outside the lock.
+	ghReviewID, postOutcome, err := o.st.PostReviewForAttempt(ctx, run.ReviewID, run.AttemptGeneration, func(postCtx context.Context) (int64, error) {
+		return o.ghClient.PostReview(
+			postCtx,
+			run.PREvent.InstallationID,
+			owner, repo,
+			run.PREvent.PRNumber,
+			&submission.GitHub,
+		)
+	})
 	if err != nil {
-		return fmt.Errorf("checking review attempt before GitHub post: %w", err)
-	}
-	if !current {
-		return context.Canceled
-	}
-
-	ghReviewID, err := o.ghClient.PostReview(
-		ctx,
-		run.PREvent.InstallationID,
-		owner, repo,
-		run.PREvent.PRNumber,
-		&submission.GitHub,
-	)
-	if err != nil {
+		if ghReviewID > 0 {
+			// GitHub returned an id, but its durable evidence write failed or the
+			// commit response was ambiguous. Do not claim the mutation was undone;
+			// ConvergePostedReview can repair it if the id did commit.
+			return fmt.Errorf("GitHub review %d was posted but recording it is ambiguous: %w", ghReviewID, err)
+		}
 		return fmt.Errorf("posting review: %w", err)
 	}
-
-	// Persist github_review_id UNCONDITIONALLY and immediately, separate from
-	// the status compare-and-set below. If a cross-machine Stop lands between
-	// here and the status write, that CAS no-ops (status already cancelled) and
-	// would leave github_review_id NULL — then a later retry's already-posted
-	// guard (keyed on github_review_id) wouldn't fire and we'd double-post to
-	// GitHub. Recording the id right after the post closes that window. Best
-	// effort: don't fail the review (it IS posted) if this write blips.
-	if _, idErr := o.db.Exec(ctx,
-		`UPDATE reviews SET github_review_id = $1 WHERE id = $2`,
-		ghReviewID, run.ReviewID,
-	); idErr != nil {
-		o.logger.Error("post: failed to persist github_review_id after PostReview", "error", idErr, "review_id", run.ReviewID, "github_review_id", ghReviewID)
+	if postOutcome == store.ReviewPostRejected {
+		return context.Canceled
+	}
+	if postOutcome == store.ReviewPostAlreadyRecorded {
+		// Another worker in this generation won the same authority boundary after
+		// our earlier convergence check. Finish from its durable id; never call
+		// GitHub a second time.
+		_, _, converged, convergeErr := o.st.ConvergePostedReview(ctx, run.ReviewID, run.AttemptGeneration)
+		if convergeErr != nil {
+			return convergeErr
+		}
+		o.logger.Warn("review post already recorded by current attempt; skipping duplicate mutation", "review_id", run.ReviewID, "github_review_id", ghReviewID, "converged", converged)
+		return nil
 	}
 
 	// comment.posted is fired after the atomic PostReview landed so failures

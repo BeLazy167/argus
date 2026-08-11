@@ -470,6 +470,85 @@ func (s *Store) IsReviewAttemptCurrent(ctx context.Context, id uuid.UUID, genera
 	return current, nil
 }
 
+// ReviewPostOutcome describes whether PostReviewForAttempt invoked the external
+// mutation and durably recorded its id. Rejected and already-recorded outcomes
+// never call GitHub. Attempted accompanies an error after the callback began;
+// the remote result may be ambiguous even when no id was returned.
+type ReviewPostOutcome string
+
+const (
+	ReviewPostRejected        ReviewPostOutcome = "rejected"
+	ReviewPostAttempted       ReviewPostOutcome = "attempted"
+	ReviewPostRecorded        ReviewPostOutcome = "recorded"
+	ReviewPostAlreadyRecorded ReviewPostOutcome = "already_recorded"
+)
+
+// PostReviewForAttempt is the authority boundary for the non-idempotent GitHub
+// review mutation. It locks only this review row, verifies that generation owns
+// an in-progress attempt, calls post, and records the returned id through the
+// same transaction before releasing the lock. Generation-changing retry and
+// cancellation/failure writes therefore linearize either before the callback
+// (which is then skipped) or after its id is durable.
+//
+// Preparation must happen before this method; post should contain only the
+// external request. Once GitHub returns an id, persistence uses a
+// cancellation-detached context: a concurrent local cancel must not discard the
+// only durable evidence that the external mutation succeeded. An error after
+// post returns an id is inherently ambiguous with respect to transaction commit;
+// the returned id lets callers report that boundary without claiming exactly-once
+// delivery. Likewise, a post callback error can mean GitHub accepted the request
+// but its response was lost; without a GitHub idempotency key or reconciliation
+// lookup, this boundary cannot safely infer or repair that case.
+func (s *Store) PostReviewForAttempt(ctx context.Context, id uuid.UUID, generation int, post func(context.Context) (int64, error)) (githubReviewID int64, outcome ReviewPostOutcome, err error) {
+	if post == nil {
+		return 0, ReviewPostRejected, errors.New("posting review: nil callback")
+	}
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return 0, ReviewPostRejected, fmt.Errorf("beginning review post guard: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+
+	var currentGeneration int
+	var status string
+	var recordedID *int64
+	if err = tx.QueryRow(ctx, `SELECT attempt_generation,status,github_review_id FROM reviews WHERE id=$1 FOR NO KEY UPDATE`, id).Scan(&currentGeneration, &status, &recordedID); err != nil {
+		return 0, ReviewPostRejected, fmt.Errorf("locking review for post: %w", err)
+	}
+	if currentGeneration != generation {
+		return 0, ReviewPostRejected, nil
+	}
+	if recordedID != nil {
+		return *recordedID, ReviewPostAlreadyRecorded, nil
+	}
+	if status != "in_progress" {
+		return 0, ReviewPostRejected, nil
+	}
+
+	githubReviewID, err = post(ctx)
+	if err != nil {
+		return githubReviewID, ReviewPostAttempted, err
+	}
+	if githubReviewID <= 0 {
+		return githubReviewID, ReviewPostAttempted, fmt.Errorf("posting review returned invalid id %d", githubReviewID)
+	}
+
+	// GitHub has acknowledged the mutation. Finish the evidence write even if
+	// the request context was cancelled while the response was in flight.
+	persistCtx := context.WithoutCancel(ctx)
+	tag, persistErr := tx.Exec(persistCtx, `UPDATE reviews SET github_review_id=$1 WHERE id=$2 AND attempt_generation=$3 AND status='in_progress' AND github_review_id IS NULL`, githubReviewID, id, generation)
+	if persistErr != nil {
+		return githubReviewID, ReviewPostAttempted, fmt.Errorf("persisting GitHub review id %d after post succeeded: %w", githubReviewID, persistErr)
+	}
+	if tag.RowsAffected() != 1 {
+		return githubReviewID, ReviewPostAttempted, fmt.Errorf("persisting GitHub review id %d after post succeeded: guarded row disappeared", githubReviewID)
+	}
+	if commitErr := tx.Commit(persistCtx); commitErr != nil {
+		return githubReviewID, ReviewPostAttempted, fmt.Errorf("committing GitHub review id %d after post succeeded (commit outcome may be ambiguous): %w", githubReviewID, commitErr)
+	}
+	return githubReviewID, ReviewPostRecorded, nil
+}
+
 // RunIfReviewAttemptCurrent linearizes an attempt-owned external side effect
 // against BeginReviewRetry. The callback runs while holding a NO KEY UPDATE
 // lock on the review row: a retry's generation bump waits, while writes that
