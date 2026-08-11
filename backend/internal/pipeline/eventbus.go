@@ -146,10 +146,11 @@ const (
 type SubscriberCloseReason string
 
 const (
-	SubscriberCloseTopic           SubscriberCloseReason = "topic_closed"
-	SubscriberCloseUnsubscribed    SubscriberCloseReason = "unsubscribed"
-	SubscriberCloseDurableOverflow SubscriberCloseReason = "durable_overflow"
-	SubscriberCloseDedupExhausted  SubscriberCloseReason = "dedup_exhausted"
+	SubscriberCloseTopic               SubscriberCloseReason = "topic_closed"
+	SubscriberCloseUnsubscribed        SubscriberCloseReason = "unsubscribed"
+	SubscriberCloseDurableOverflow     SubscriberCloseReason = "durable_overflow"
+	SubscriberCloseDedupExhausted      SubscriberCloseReason = "dedup_exhausted"
+	SubscriberCloseReplayPageExhausted SubscriberCloseReason = "replay_page_exhausted"
 )
 
 type topicSubscriber struct {
@@ -922,12 +923,95 @@ func maxDurableEventID(afterID int64, events []Event) int64 {
 	return maximum
 }
 
-// SubscribeContext replays the bounded durable tail and then streams live
-// notifications without a replay/subscribe gap. afterID is a subscriber dedup
-// floor, not a SQL cutoff: sequence IDs are allocated before commit, so a row
-// below afterID may have committed while both the browser and LISTEN were away.
-// Replaying at most the retained 500-row tail lets the browser's bounded seen-ID
-// set distinguish that late row from exact duplicates.
+func (eb *EventBus) loadSubscriptionReplay(
+	ctx context.Context,
+	reviewID uuid.UUID,
+	afterID int64,
+) ([]Event, bool, error) {
+	if afterID <= 0 {
+		rows, err := eb.pool.Query(ctx, `
+			SELECT id, attempt_generation, event_type, created_at, delivery_id, data FROM (
+				SELECT id, attempt_generation, event_type, created_at, delivery_id, data
+				FROM (`+authorizedReviewEventsSQL+`) authorized
+				WHERE review_id=$1
+				ORDER BY id DESC LIMIT $2
+			) replay ORDER BY id`, reviewID, maxHistoryEvents)
+		if err != nil {
+			return nil, false, fmt.Errorf("querying initial event replay: %w", err)
+		}
+		history, err := scanSubscriptionReplay(rows, 0)
+		return history, false, err
+	}
+
+	// A reconnect must not jump to the newest tail: doing so advances the
+	// browser cursor past an arbitrarily large missing interval. Return the
+	// earliest forward page instead. The bounded lower-ID overlap preserves the
+	// existing BIGSERIAL late-commit guarantee, and a typed abnormal close asks
+	// the browser to fetch another page when the forward interval is larger.
+	rows, err := eb.pool.Query(ctx, `
+		WITH overlap AS (
+			SELECT id, attempt_generation, event_type, created_at, delivery_id, data
+			FROM (`+authorizedReviewEventsSQL+`) authorized
+			WHERE review_id=$1 AND id<=$2
+			ORDER BY id DESC LIMIT $3
+		), forward AS (
+			SELECT id, attempt_generation, event_type, created_at, delivery_id, data
+			FROM (`+authorizedReviewEventsSQL+`) authorized
+			WHERE review_id=$1 AND id>$2
+			ORDER BY id LIMIT $4
+		)
+		SELECT id, attempt_generation, event_type, created_at, delivery_id, data
+		FROM (
+			SELECT 0 AS segment, * FROM overlap
+			UNION ALL
+			SELECT 1 AS segment, * FROM forward
+		) replay
+		ORDER BY segment, id`, reviewID, afterID, maxHistoryEvents, maxHistoryEvents+1)
+	if err != nil {
+		return nil, false, fmt.Errorf("querying paged event replay after %d: %w", afterID, err)
+	}
+	history, err := scanSubscriptionReplay(rows, afterID)
+	if err != nil {
+		return nil, false, err
+	}
+	forwardCount := 0
+	for _, evt := range history {
+		if evt.ID > afterID {
+			forwardCount++
+		}
+	}
+	hasMore := forwardCount > maxHistoryEvents
+	if hasMore {
+		history = history[:len(history)-1]
+	}
+	return history, hasMore, nil
+}
+
+func scanSubscriptionReplay(rows pgx.Rows, afterID int64) ([]Event, error) {
+	history := make([]Event, 0, maxHistoryEvents*2+1)
+	for rows.Next() {
+		var evt Event
+		if err := rows.Scan(&evt.ID, &evt.AttemptGeneration, &evt.Type, &evt.Timestamp, &evt.DeliveryID, &evt.Data); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scanning event replay after %d: %w", afterID, err)
+		}
+		history = append(history, evt)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("reading event replay after %d: %w", afterID, err)
+	}
+	rows.Close()
+	return history, nil
+}
+
+// SubscribeContext replays durable events and then streams live notifications
+// without a replay/subscribe gap. With no cursor it returns only the newest 500
+// events. A reconnect returns up to 500 exact lower-ID overlap rows plus the
+// earliest 500 rows above afterID; larger forward gaps close retryably so the
+// browser advances its cursor page by page without unbounded server memory.
+// afterID is not a strict lower cutoff because sequence IDs allocate before
+// commit and a previously unseen lower ID may commit while LISTEN is offline.
 func (eb *EventBus) SubscribeContext(ctx context.Context, reviewID uuid.UUID, afterID int64) (<-chan Event, []Event, func(), error) {
 	events, history, _, unsubscribe, err := eb.subscribeContextWithCloseReason(ctx, reviewID, afterID)
 	return events, history, unsubscribe, err
@@ -959,35 +1043,19 @@ func (eb *EventBus) subscribeContextWithCloseReason(
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	rows, err := eb.pool.Query(ctx, `
-		SELECT id, attempt_generation, event_type, created_at, delivery_id, data FROM (
-			SELECT id, attempt_generation, event_type, created_at, delivery_id, data
-			FROM (`+authorizedReviewEventsSQL+`) authorized
-			WHERE review_id=$1
-			ORDER BY id DESC LIMIT $2
-		) replay ORDER BY id`, reviewID, maxHistoryEvents)
+	history, replayHasMore, err := eb.loadSubscriptionReplay(ctx, reviewID, afterID)
 	if err != nil {
-		return nil, nil, nil, func() {}, fmt.Errorf("querying event replay: %w", err)
-	}
-	history := make([]Event, 0)
-	for rows.Next() {
-		var evt Event
-		if err := rows.Scan(&evt.ID, &evt.AttemptGeneration, &evt.Type, &evt.Timestamp, &evt.DeliveryID, &evt.Data); err != nil {
-			rows.Close()
-			return nil, nil, nil, func() {}, err
-		}
-		history = append(history, evt)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
 		return nil, nil, nil, func() {}, err
 	}
-	rows.Close()
 
 	ch := make(chan Event, 64)
 	subscriber := newTopicSubscriber(ch, maxDurableEventID(afterID, history))
 	if t.closed {
 		subscriber.close(SubscriberCloseTopic)
+		return ch, history, subscriber.closed, func() {}, nil
+	}
+	if replayHasMore {
+		subscriber.close(SubscriberCloseReplayPageExhausted)
 		return ch, history, subscriber.closed, func() {}, nil
 	}
 	t.nextID++

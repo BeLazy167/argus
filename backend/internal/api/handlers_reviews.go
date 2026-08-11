@@ -654,15 +654,37 @@ func (s *Server) streamReviewWS(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// Replay history
+	// A bounded reconnect page is closed before this handler starts. Capture its
+	// typed reason now; other closures may still arrive while history is written.
+	var knownCloseReason pipeline.SubscriberCloseReason
+	select {
+	case knownCloseReason = <-subscriberClosed:
+	default:
+	}
+	replayHasMore := knownCloseReason == pipeline.SubscriberCloseReplayPageExhausted
+
+	// Replay history. Defer a terminal marker found in a partial page: otherwise
+	// the browser's terminal no-loop rule would prevent it from fetching the
+	// remaining gap. On the final page, write every message before cleanly
+	// closing even if sequence allocation placed the terminal marker earlier.
+	terminalReplayed := false
 	for _, evt := range history {
+		if replayHasMore && isTerminalReviewEvent(evt.Type) {
+			continue
+		}
 		if err := wsjson.Write(ctx, conn, evt); err != nil {
 			return
 		}
-		if isTerminalReviewEvent(evt.Type) {
-			conn.Close(websocket.StatusNormalClosure, "review stream ended")
-			return
-		}
+		terminalReplayed = terminalReplayed || isTerminalReviewEvent(evt.Type)
+	}
+	if replayHasMore {
+		status, message := reviewStreamClose(knownCloseReason)
+		_ = conn.Close(status, message)
+		return
+	}
+	if terminalReplayed {
+		_ = conn.Close(websocket.StatusNormalClosure, "review stream ended")
+		return
 	}
 
 	// A review can become terminal while the browser is disconnected. Replay
@@ -674,7 +696,7 @@ func (s *Server) streamReviewWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	streamLiveReviewEvents(ctx, conn, events, subscriberClosed)
+	streamLiveReviewEventsAfterCloseReason(ctx, conn, events, subscriberClosed, knownCloseReason)
 }
 
 func streamLiveReviewEvents(
@@ -683,15 +705,28 @@ func streamLiveReviewEvents(
 	events <-chan pipeline.Event,
 	subscriberClosed <-chan pipeline.SubscriberCloseReason,
 ) {
+	streamLiveReviewEventsAfterCloseReason(ctx, conn, events, subscriberClosed, "")
+}
+
+func streamLiveReviewEventsAfterCloseReason(
+	ctx context.Context,
+	conn *websocket.Conn,
+	events <-chan pipeline.Event,
+	subscriberClosed <-chan pipeline.SubscriberCloseReason,
+	knownCloseReason pipeline.SubscriberCloseReason,
+) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case evt, ok := <-events:
 			if !ok {
-				reason := pipeline.SubscriberCloseTopic
-				if closedReason, received := <-subscriberClosed; received {
-					reason = closedReason
+				reason := knownCloseReason
+				if reason == "" {
+					reason = pipeline.SubscriberCloseTopic
+					if closedReason, received := <-subscriberClosed; received {
+						reason = closedReason
+					}
 				}
 				status, message := reviewStreamClose(reason)
 				_ = conn.Close(status, message)
@@ -710,7 +745,9 @@ func streamLiveReviewEvents(
 
 func reviewStreamClose(reason pipeline.SubscriberCloseReason) (websocket.StatusCode, string) {
 	switch reason {
-	case pipeline.SubscriberCloseDurableOverflow, pipeline.SubscriberCloseDedupExhausted:
+	case pipeline.SubscriberCloseDurableOverflow,
+		pipeline.SubscriberCloseDedupExhausted,
+		pipeline.SubscriberCloseReplayPageExhausted:
 		return websocket.StatusTryAgainLater, "review stream fell behind; reconnect to replay"
 	default:
 		return websocket.StatusNormalClosure, "stream ended"

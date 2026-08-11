@@ -82,3 +82,21 @@ describe("review stream reconnect policy", () => {
 		expect(shouldReconnectReviewStream(1000, false)).toBe(false);
 	});
 });
+
+describe("paged reconnect replay", () => {
+	it("drains overlapping bounded pages without skipping or reprocessing the gap", () => {
+		const cursor = new ReviewEventCursor();
+		const handled: number[] = [];
+		const process = (id: number) =>
+			cursor.process({ id, delivery_id: `delivery-${id}` }, () => handled.push(id));
+
+		for (let id = 1; id <= 500; id++) process(id);
+		expect(cursor.after).toBe(500);
+		// The next backend page overlaps the prior 500 IDs for late lower-ID
+		// correctness, then continues from the durable cursor.
+		for (let id = 1; id <= 650; id++) process(id);
+
+		expect(cursor.after).toBe(650);
+		expect(handled).toEqual(Array.from({ length: 650 }, (_, index) => index + 1));
+	});
+});

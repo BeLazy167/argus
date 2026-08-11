@@ -32,6 +32,11 @@ func TestReviewStreamSubscriberCloseContract(t *testing.T) {
 			wantStatus: websocket.StatusTryAgainLater,
 		},
 		{
+			name:       "bounded replay page asks browser for the next page",
+			reason:     pipeline.SubscriberCloseReplayPageExhausted,
+			wantStatus: websocket.StatusTryAgainLater,
+		},
+		{
 			name:       "terminal completion stays clean",
 			reason:     pipeline.SubscriberCloseTopic,
 			event:      &pipeline.Event{Type: pipeline.EventCompleted},

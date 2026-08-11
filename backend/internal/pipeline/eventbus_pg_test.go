@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"slices"
 	"testing"
 	"time"
 
@@ -852,5 +853,112 @@ func TestDurableEventBusCatchUpOverlapsTailBelowScalarCursor(t *testing.T) {
 	case evt := <-live:
 		t.Fatalf("tail overlap duplicated seen event: %+v", evt)
 	default:
+	}
+}
+
+func TestDurableEventBusReconnectPagesEveryRetainedEventAfterCursor(t *testing.T) {
+	pool, ctx, reviewID := durableEventTestReview(t)
+	bus := NewEventBus()
+	bus.pool = pool
+	bus.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	rows, err := pool.Query(ctx, `
+		INSERT INTO review_events (review_id, attempt_generation, event_type, data)
+		SELECT $1, 0, $2, jsonb_build_object('sequence', value)
+		FROM generate_series(1, 651) AS value
+		RETURNING id`, reviewID, EventComment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		t.Fatal(err)
+	}
+	rows.Close()
+	if len(ids) != 651 {
+		t.Fatalf("inserted IDs=%d want 651", len(ids))
+	}
+	slices.Sort(ids)
+
+	firstEvents, firstHistory, firstClosed, firstUnsubscribe, err :=
+		bus.SubscribeContextWithCloseReason(ctx, reviewID, ids[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer firstUnsubscribe()
+	if len(firstHistory) > maxHistoryEvents*2 {
+		t.Fatalf("first reconnect page grew to %d events", len(firstHistory))
+	}
+	if len(firstHistory) != maxHistoryEvents+1 || firstHistory[0].ID != ids[0] || firstHistory[1].ID != ids[1] || firstHistory[len(firstHistory)-1].ID != ids[500] {
+		t.Fatalf("first reconnect page does not start at cursor: len=%d first=%d second=%d last=%d",
+			len(firstHistory), firstHistory[0].ID, firstHistory[1].ID, firstHistory[len(firstHistory)-1].ID)
+	}
+	select {
+	case reason := <-firstClosed:
+		if reason != SubscriberCloseReplayPageExhausted {
+			t.Fatalf("first page close reason=%q", reason)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("partial reconnect page left a live subscription instead of requesting the next page")
+	}
+	if _, ok := <-firstEvents; ok {
+		t.Fatal("partial reconnect page events channel remained open")
+	}
+
+	cursor := ids[500]
+	secondEvents, secondHistory, secondClosed, secondUnsubscribe, err :=
+		bus.SubscribeContextWithCloseReason(ctx, reviewID, cursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer secondUnsubscribe()
+	if len(secondHistory) > maxHistoryEvents*2 {
+		t.Fatalf("second reconnect page grew to %d events", len(secondHistory))
+	}
+	forward := make(map[int64]struct{}, len(ids)-1)
+	for _, evt := range firstHistory {
+		if evt.ID > ids[0] {
+			forward[evt.ID] = struct{}{}
+		}
+	}
+	for _, evt := range secondHistory {
+		if evt.ID > cursor {
+			forward[evt.ID] = struct{}{}
+		}
+	}
+	if len(forward) != len(ids)-1 {
+		t.Fatalf("paged reconnect recovered %d/%d forward events", len(forward), len(ids)-1)
+	}
+	select {
+	case reason := <-secondClosed:
+		t.Fatalf("final replay page unexpectedly closed: %q", reason)
+	default:
+	}
+	secondUnsubscribe()
+	if _, ok := <-secondEvents; ok {
+		t.Fatal("unsubscribe did not close final live channel")
+	}
+
+	initialEvents, initialHistory, _, initialUnsubscribe, err :=
+		bus.SubscribeContextWithCloseReason(ctx, reviewID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer initialUnsubscribe()
+	if len(initialHistory) != maxHistoryEvents || initialHistory[0].ID != ids[len(ids)-maxHistoryEvents] {
+		t.Fatalf("initial history len=%d first=%d, want bounded newest tail beginning %d",
+			len(initialHistory), initialHistory[0].ID, ids[len(ids)-maxHistoryEvents])
+	}
+	if initialEvents == nil {
+		t.Fatal("initial bounded history did not retain a live subscription")
 	}
 }
