@@ -203,10 +203,10 @@ function ArchitectureView({ activeId }: { activeId: number }) {
 					)}
 				</div>
 
-				{selectedFilePath && (
+				{selectedFile && (
 					<div className="border-t md:border-t-0 md:border-l border-iron bg-[var(--graph-bg)] md:w-[320px] md:shrink-0 h-[50vh] md:h-auto overflow-hidden">
 						<FileMemorySidebar
-							filePath={selectedFilePath}
+							filePath={selectedFile.path}
 							archFile={selectedFile}
 							allFiles={archData?.files}
 							onClose={() => setSelectedFilePath(null)}
