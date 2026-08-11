@@ -20,7 +20,6 @@ import dagre from "dagre";
 import FileNode from "./FileNode";
 import GroupNode from "./GroupNode";
 import type { ArchFile, ArchEdge } from "@/lib/queries/architecture";
-import { useFitSearchMatches } from "@/lib/hooks/use-fit-search-matches";
 import type { ColorMode } from "@xyflow/react";
 
 /** Subscribe to theme changes on <html> class list */
@@ -448,7 +447,6 @@ function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQu
         : [],
     [files, searchLower],
   );
-  useFitSearchMatches({ fitView, matchIds: searchMatchIds, totalNodes: files.length });
   const onNodesChange = useCallback(
     (changes: Parameters<typeof applyNodeChanges>[0]) => {
       setPositionedNodes((current) =>
