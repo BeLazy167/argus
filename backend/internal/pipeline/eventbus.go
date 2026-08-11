@@ -150,16 +150,31 @@ type topicSubscriber struct {
 }
 
 func newTopicSubscriber(ch chan Event, replayAfterID int64) *topicSubscriber {
-	return &topicSubscriber{
+	subscriber := &topicSubscriber{
 		ch:            ch,
 		replayAfterID: replayAfterID,
 		catchUpSeen:   make(map[int64]struct{}),
 		freshSeen:     make(map[int64]struct{}),
 	}
+	if replayAfterID > 0 {
+		subscriber.remember(replayAfterID, deliveryFresh)
+	}
+	return subscriber
+}
+
+func (s *topicSubscriber) seedReplay(events []Event) {
+	for _, evt := range events {
+		if evt.ID > 0 {
+			s.remember(evt.ID, deliveryFresh)
+		}
+	}
 }
 
 func (s *topicSubscriber) hasSeen(id int64, source durableDeliverySource) bool {
-	if id <= s.replayAfterID {
+	// after=N means the replay query need not return the established durable
+	// prefix again. It cannot suppress fresh NOTIFY: a lower sequence ID may
+	// have committed only after the replay snapshot was taken.
+	if source == deliveryCatchUp && id <= s.replayAfterID {
 		return true
 	}
 	if _, duplicate := s.catchUpSeen[id]; duplicate {
@@ -183,6 +198,9 @@ func (s *topicSubscriber) canRemember(source durableDeliverySource) bool {
 func (s *topicSubscriber) remember(id int64, source durableDeliverySource) {
 	if source == deliveryCatchUp {
 		s.catchUpSeen[id] = struct{}{}
+		return
+	}
+	if _, duplicate := s.freshSeen[id]; duplicate {
 		return
 	}
 	if len(s.freshOrder) < subscriberSeenCapacity {
@@ -865,7 +883,9 @@ func (eb *EventBus) SubscribeContext(ctx context.Context, reviewID uuid.UUID, af
 	t.nextID++
 	id := t.nextID
 	replayAfterID := maxDurableEventID(afterID, history)
-	t.subscribers[id] = newTopicSubscriber(ch, replayAfterID)
+	subscriber := newTopicSubscriber(ch, replayAfterID)
+	subscriber.seedReplay(history)
+	t.subscribers[id] = subscriber
 	unsub := func() {
 		t.mu.Lock()
 		defer t.mu.Unlock()
@@ -899,9 +919,11 @@ func (eb *EventBus) Subscribe(reviewID uuid.UUID) (<-chan Event, []Event, func()
 		close(ch)
 		return ch, history, func() {}
 	}
-	t.subscribers[id] = newTopicSubscriber(ch, 0)
 	history := make([]Event, len(t.history))
 	copy(history, t.history)
+	subscriber := newTopicSubscriber(ch, 0)
+	subscriber.seedReplay(history)
+	t.subscribers[id] = subscriber
 	t.mu.Unlock()
 
 	unsub := func() {

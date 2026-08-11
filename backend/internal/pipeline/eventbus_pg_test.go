@@ -595,3 +595,78 @@ func TestDurableEventBusReconnectCatchesLateCommitBelowFreshNotification(t *test
 	default:
 	}
 }
+
+func TestDurableEventBusSubscribeBoundaryDeliversLateLowerFreshID(t *testing.T) {
+	pool, ctx, reviewID := durableEventTestReview(t)
+	listenerCtx, cancelListener := context.WithCancel(context.Background())
+	t.Cleanup(cancelListener)
+	bus := NewDurableEventBus(listenerCtx, pool, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	slow, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = slow.Rollback(ctx) }()
+	var slowID int64
+	var notified string
+	if err := slow.QueryRow(ctx, `
+		WITH inserted AS (
+			INSERT INTO review_events (review_id, attempt_generation, event_type, data)
+			VALUES ($1,0,$2,'{}') RETURNING id
+		)
+		SELECT id, pg_notify('argus_review_events','remote:' || id::text)
+		FROM inserted`, reviewID, EventComment).Scan(&slowID, &notified); err != nil {
+		t.Fatal(err)
+	}
+	var fastID int64
+	if err := pool.QueryRow(ctx, `
+		WITH inserted AS (
+			INSERT INTO review_events (review_id, attempt_generation, event_type, data)
+			VALUES ($1,0,$2,'{}') RETURNING id
+		)
+		SELECT id, pg_notify('argus_review_events','remote:' || id::text)
+		FROM inserted`, reviewID, EventStageChanged).Scan(&fastID, &notified); err != nil {
+		t.Fatal(err)
+	}
+	if slowID >= fastID {
+		t.Fatalf("test setup IDs slow=%d fast=%d", slowID, fastID)
+	}
+
+	fromStart, history, unsubscribeStart, err := bus.SubscribeContext(ctx, reviewID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unsubscribeStart()
+	if len(history) != 1 || history[0].ID != fastID {
+		t.Fatalf("initial replay=%+v want fast ID %d", history, fastID)
+	}
+	// Mirrors a browser that processed fastID and reconnects while the lower-ID
+	// transaction is still open. Its scalar after must not hide a future NOTIFY.
+	fromAfter, afterHistory, unsubscribeAfter, err := bus.SubscribeContext(ctx, reviewID, fastID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unsubscribeAfter()
+	if len(afterHistory) != 0 {
+		t.Fatalf("after replay=%+v want empty", afterHistory)
+	}
+
+	if err := slow.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for name, live := range map[string]<-chan Event{"initial": fromStart, "after": fromAfter} {
+		select {
+		case evt := <-live:
+			if evt.ID != slowID || evt.Type != EventComment {
+				t.Fatalf("%s fresh event=%+v want id=%d type=%s", name, evt, slowID, EventComment)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s subscriber missed late lower ID %d below after %d", name, slowID, fastID)
+		}
+		select {
+		case evt := <-live:
+			t.Fatalf("%s subscriber received replay overlap duplicate: %+v", name, evt)
+		default:
+		}
+	}
+}

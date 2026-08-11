@@ -443,7 +443,7 @@ func TestDurableEventBusSubscriberCursorsAreIndependent(t *testing.T) {
 	topic.subscribers[2] = newTopicSubscriber(second, 20)
 	topic.mu.Unlock()
 
-	eb.deliver(reviewID, Event{ID: 15, Type: EventComment}, false)
+	eb.deliverFrom(reviewID, Event{ID: 15, Type: EventComment}, false, deliveryCatchUp)
 	select {
 	case evt := <-first:
 		if evt.ID != 15 {
@@ -651,5 +651,39 @@ func TestRecoverStoredNotificationDoesNotTrustSequenceOrder(t *testing.T) {
 	}
 	if catchCalled {
 		t.Fatal("successful point notification unexpectedly ran catch-up")
+	}
+}
+
+func TestDurableEventBusReplayFloorDoesNotHideLateFreshLowerID(t *testing.T) {
+	eb := NewEventBus()
+	reviewID := uuid.New()
+	eb.OpenTopic(reviewID)
+	eb.mu.RLock()
+	topic := eb.topics[reviewID]
+	eb.mu.RUnlock()
+	live := make(chan Event, 4)
+	replayed := []Event{{ID: 100, Type: EventStageChanged}, {ID: 0, Type: EventReviewCompleted}}
+	subscriber := newTopicSubscriber(live, maxDurableEventID(0, replayed))
+	subscriber.seedReplay(replayed)
+	topic.mu.Lock()
+	topic.subscribers[1] = subscriber
+	topic.mu.Unlock()
+
+	// The queued copy of replayed ID 100 is an exact duplicate. ID 51 is not:
+	// its transaction committed only after the replay snapshot.
+	eb.deliverFrom(reviewID, Event{ID: 100, Type: EventStageChanged}, false, deliveryFresh)
+	eb.deliverFrom(reviewID, Event{ID: 51, Type: EventComment}, false, deliveryFresh)
+	select {
+	case evt := <-live:
+		if evt.ID != 51 {
+			t.Fatalf("fresh event=%+v want late lower ID 51", evt)
+		}
+	default:
+		t.Fatal("late lower-ID fresh notification was hidden by replay floor")
+	}
+	select {
+	case evt := <-live:
+		t.Fatalf("replayed ID was duplicated: %+v", evt)
+	default:
 	}
 }
