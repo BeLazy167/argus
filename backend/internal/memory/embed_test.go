@@ -478,10 +478,14 @@ func TestEmbedFlightSurvivesOwnerCancel(t *testing.T) {
 }
 
 func TestHTTPEmbedderSpaceIDIdentifiesEndpointModelAndDimensions(t *testing.T) {
-	base := NewEmbedder("secret-a", "HTTPS://API.Example.com/v1/", "model-a", 1024)
+	base := NewEmbedder("secret-a", "HTTPS://API.Example.com:443/v1/", "model-a", 1024)
 	same := NewEmbedder("secret-b", "https://api.example.com/v1", "model-a", 1024)
 	if base.SpaceID() != same.SpaceID() {
-		t.Fatal("API-key rotation changed the embedding space; secrets are not space identity")
+		t.Fatal("API-key/default-port rotation changed the embedding space")
+	}
+	privateURL := NewEmbedder("key", "https://user:password@api.example.com/v1?token=secret#fragment", "model-a", 1024)
+	if privateURL.SpaceID() != same.SpaceID() {
+		t.Fatal("userinfo/query/fragment changed the coordinate-space identity")
 	}
 
 	rotations := []*HTTPEmbedder{

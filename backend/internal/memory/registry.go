@@ -2,7 +2,9 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -108,4 +110,47 @@ func (r *Registry) InvalidateEmbedder(installationID int64) {
 		return
 	}
 	r.embedders.Invalidate(installationID)
+}
+
+// ReembedCurrentSpace repairs one installation after embedding configuration
+// rotation. A session advisory lock prevents two machines from buying the same
+// replacement vectors concurrently; a busy lock is success because its holder
+// is already converging the same tenant. The caller must provide a bounded
+// context because a large corpus can require many provider batches.
+func (r *Registry) ReembedCurrentSpace(ctx context.Context, installationID int64, batchSize int) (int, error) {
+	if r.pool == nil || r.embedders == nil {
+		return 0, fmt.Errorf("reembed current space: postgres memory backend is not configured")
+	}
+	embedder, _ := r.embedders.GetEmbedder(ctx, installationID)
+	if embedder == nil {
+		return 0, fmt.Errorf("reembed current space: no embedder for installation %d", installationID)
+	}
+
+	conn, err := r.pool.Acquire(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("reembed current space: acquire lock connection: %w", err)
+	}
+	defer conn.Release()
+	// Namespace "ARGU" in the high bits keeps this lock independent of other
+	// tenant-scoped advisory locks while retaining the full installation id.
+	lockKey := (int64(0x41524755) << 32) ^ installationID
+	var acquired bool
+	if err := conn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", lockKey).Scan(&acquired); err != nil {
+		return 0, fmt.Errorf("reembed current space: acquire advisory lock: %w", err)
+	}
+	if !acquired {
+		r.log().Info("memory reembed already running", "installation_id", installationID)
+		return 0, nil
+	}
+	defer func() {
+		unlockCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		var released bool
+		if err := conn.QueryRow(unlockCtx, "SELECT pg_advisory_unlock($1)", lockKey).Scan(&released); err != nil || !released {
+			r.log().Warn("release memory reembed advisory lock", "installation_id", installationID, "released", released, "error", err)
+		}
+	}()
+
+	idx := NewPGIndexer(r.pool, embedder, installationID, r.embedders.Dimensions(), r.log())
+	return idx.ReembedMissing(ctx, batchSize)
 }

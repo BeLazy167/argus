@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/BeLazy167/argus/backend/internal/crypto"
@@ -81,14 +82,24 @@ func (s *Store) ListProviderKeys(ctx context.Context, installationID int64) ([]P
 }
 
 func (s *Store) DeleteProviderKey(ctx context.Context, id int64, installationID int64) error {
-	ct, err := s.Pool.Exec(ctx, `DELETE FROM provider_keys WHERE id = $1 AND installation_id = $2`, id, installationID)
+	_, err := s.DeleteProviderKeyReturningProvider(ctx, id, installationID)
+	return err
+}
+
+// DeleteProviderKeyReturningProvider atomically deletes a tenant-scoped key and
+// returns its provider slot so callers can trigger provider-specific cleanup.
+func (s *Store) DeleteProviderKeyReturningProvider(ctx context.Context, id int64, installationID int64) (string, error) {
+	var provider string
+	err := s.Pool.QueryRow(ctx,
+		`DELETE FROM provider_keys WHERE id = $1 AND installation_id = $2 RETURNING provider`,
+		id, installationID).Scan(&provider)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", fmt.Errorf("provider key %d not found", id)
+	}
 	if err != nil {
-		return err
+		return "", err
 	}
-	if ct.RowsAffected() == 0 {
-		return fmt.Errorf("provider key %d not found", id)
-	}
-	return nil
+	return provider, nil
 }
 
 // ResolveAPIKey resolves an API key for a provider: repo-level → org-level → env fallback.

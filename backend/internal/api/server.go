@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -39,6 +40,7 @@ type Server struct {
 	webhookSem       chan struct{}      // bounded concurrency for webhook goroutines
 	audit            *auditLogger
 	memRegistry      *memory.Registry
+	reembedMemories  func(context.Context, int64) (int, error)
 	cfg              *config.Config
 	commandRe        *regexp.Regexp // "@<app-slug> <command>" matcher, built from cfg.GitHubAppSlug
 }
@@ -65,6 +67,11 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 	// cancel handler (cancelReview) consults the same instance via registry.Cancel.
 	s.inflight = inflight.NewRegistry()
 	s.launcher = pipeline.NewLauncher(s.inflight, eventBus, st, logger)
+	if memRegistry != nil {
+		s.reembedMemories = func(ctx context.Context, installationID int64) (int, error) {
+			return memRegistry.ReembedCurrentSpace(ctx, installationID, 100)
+		}
+	}
 
 	r := chi.NewRouter()
 	// traceIDMiddleware must be outermost — every downstream middleware,

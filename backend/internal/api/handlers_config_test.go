@@ -1,8 +1,11 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"log/slog"
 	"testing"
+	"time"
 )
 
 func ptrOf[T any](v T) *T { return &v }
@@ -104,5 +107,27 @@ func TestOrgDefaultsThresholdValidation(t *testing.T) {
 				t.Fatalf("validate msg=%q, want %q", msg, tc.wantMsg)
 			}
 		})
+	}
+}
+
+func TestScheduleMemoryReembedDetachesFromRequest(t *testing.T) {
+	called := make(chan int64, 1)
+	s := &Server{logger: slog.New(slog.DiscardHandler), reembedMemories: func(ctx context.Context, installationID int64) (int, error) {
+		if err := ctx.Err(); err != nil {
+			t.Errorf("repair inherited cancelled request context: %v", err)
+		}
+		called <- installationID
+		return 3, nil
+	}}
+	requestCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	s.scheduleMemoryReembed(requestCtx, 77)
+	select {
+	case got := <-called:
+		if got != 77 {
+			t.Fatalf("installation = %d, want 77", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("embedding rotation did not schedule corpus repair")
 	}
 }
