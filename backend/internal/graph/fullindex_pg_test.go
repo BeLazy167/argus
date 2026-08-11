@@ -432,3 +432,120 @@ func TestPublishedGenerationIncludesFileIdentityAndExplicitEdgeResolution(t *tes
 		t.Fatalf("ambiguous Handle attached to %d arbitrary concrete node(s)", arbitrary)
 	}
 }
+
+func TestDefaultBranchRefreshIsScopedIdempotentAndSurvivesInFlightGeneration(t *testing.T) {
+	pool, ctx := generationTestPool(t)
+	st := store.NewWithDB(pool)
+	installationID := generationSeedInstallation(t, ctx, pool, "{}")
+	repoID := generationSeedRepo(t, ctx, pool, installationID, "refresh/scoped")
+	if _, err := pool.Exec(ctx, `UPDATE repos SET enabled = true WHERE id = $1`, repoID); err != nil {
+		t.Fatal(err)
+	}
+	generationSeedNode(t, ctx, pool, repoID, "PublishedBeforeRefresh", "old.go")
+
+	var githubInstallationID, githubRepoID int64
+	if err := pool.QueryRow(ctx, `
+		SELECT i.installation_id, r.github_id FROM repos r
+		JOIN installations i ON i.id = r.installation_id WHERE r.id = $1`, repoID).
+		Scan(&githubInstallationID, &githubRepoID); err != nil {
+		t.Fatal(err)
+	}
+	observedA := time.Now().UTC()
+	const commitA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const commitB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+	if scheduled, err := st.ScheduleGraphIndexRefresh(ctx, githubInstallationID+1, githubRepoID,
+		"refresh/scoped", "main", commitA, observedA); err != nil || scheduled {
+		t.Fatalf("cross-tenant schedule = %v, %v", scheduled, err)
+	}
+	if scheduled, err := st.ScheduleGraphIndexRefresh(ctx, githubInstallationID, githubRepoID,
+		"other/scoped", "main", commitA, observedA); err != nil || scheduled {
+		t.Fatalf("wrong-repo schedule = %v, %v", scheduled, err)
+	}
+	if scheduled, err := st.ScheduleGraphIndexRefresh(ctx, githubInstallationID, githubRepoID,
+		"refresh/scoped", "feature", commitA, observedA); err != nil || scheduled {
+		t.Fatalf("non-default-branch schedule = %v, %v", scheduled, err)
+	}
+	if scheduled, err := st.ScheduleGraphIndexRefresh(ctx, githubInstallationID, githubRepoID,
+		"refresh/scoped", "main", commitA, observedA); err != nil || !scheduled {
+		t.Fatalf("default-head schedule = %v, %v", scheduled, err)
+	}
+	if scheduled, err := st.ScheduleGraphIndexRefresh(ctx, githubInstallationID, githubRepoID,
+		"refresh/scoped", "main", commitA, observedA.Add(time.Minute)); err != nil || scheduled {
+		t.Fatalf("duplicate schedule = %v, %v", scheduled, err)
+	}
+	var version int64
+	if err := pool.QueryRow(ctx, `SELECT graph_refresh_version FROM repos WHERE id = $1`, repoID).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != 1 {
+		t.Fatalf("refresh version after duplicate = %d, want 1", version)
+	}
+
+	ghClient := &fakeFullIndexGitHub{
+		sha:  commitA,
+		tree: ghpkg.RepoTree{Paths: []string{"a.go", "b.go"}},
+		contents: map[string]string{
+			"a.go": "package refresh\nfunc A() {}\n",
+			"b.go": "package refresh\nfunc B() {}\n",
+		},
+		fetchErr: map[string]error{},
+	}
+	first, err := IndexRepoBounded(ctx, st, ghClient, githubInstallationID, "refresh", "scoped", "main", repoID, 1, 0)
+	if err != nil || first.Published {
+		t.Fatalf("first generation window = %+v, %v", first, err)
+	}
+	var oldCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM code_nodes WHERE repo_id = $1 AND file_path = 'old.go'`, repoID).Scan(&oldCount); err != nil {
+		t.Fatal(err)
+	}
+	if oldCount != 1 {
+		t.Fatal("staging a refresh mutated the published graph")
+	}
+
+	if scheduled, err := st.ScheduleGraphIndexRefresh(ctx, githubInstallationID, githubRepoID,
+		"refresh/scoped", "main", commitB, observedA.Add(2*time.Minute)); err != nil || !scheduled {
+		t.Fatalf("second default-head schedule = %v, %v", scheduled, err)
+	}
+	second, err := IndexRepoBounded(ctx, st, ghClient, githubInstallationID, "refresh", "scoped", "main", repoID, 1, 0)
+	if err != nil || !second.Published {
+		t.Fatalf("finish immutable generation A = %+v, %v", second, err)
+	}
+	snapshot, err := st.GetGraphSnapshot(ctx, repoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.PublishedCommitSHA != commitA || snapshot.DefaultHeadSHA != commitB || snapshot.Current || snapshot.RefreshRequestedAt == nil {
+		t.Fatalf("freshness after raced publish = %+v", snapshot)
+	}
+	prompt, err := st.ListReposDueForPromptGraphIndex(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, target := range prompt {
+		found = found || target.RepoID == repoID
+	}
+	if !found {
+		t.Fatalf("prompt queue omitted refreshed repo %d: %+v", repoID, prompt)
+	}
+
+	// An older delayed delivery cannot replace the newer observed head.
+	if scheduled, err := st.ScheduleGraphIndexRefresh(ctx, githubInstallationID, githubRepoID,
+		"refresh/scoped", "main", commitA, observedA); err != nil || scheduled {
+		t.Fatalf("older delivery schedule = %v, %v", scheduled, err)
+	}
+
+	ghClient.sha = commitB
+	final, err := IndexRepoBounded(ctx, st, ghClient, githubInstallationID, "refresh", "scoped", "main", repoID, 0, 0)
+	if err != nil || !final.Published {
+		t.Fatalf("publish generation B = %+v, %v", final, err)
+	}
+	snapshot, err = st.GetGraphSnapshot(ctx, repoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snapshot.Current || snapshot.PublishedCommitSHA != commitB || snapshot.DefaultHeadSHA != commitB || snapshot.RefreshRequestedAt != nil {
+		t.Fatalf("final freshness = %+v", snapshot)
+	}
+}

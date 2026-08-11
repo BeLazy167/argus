@@ -33,7 +33,8 @@ These match the API calls the backend actually makes:
 
 ### Subscribe to events
 
-- `pull_request` — triggers reviews
+- `pull_request` — triggers reviews and refreshes the graph after a merge
+- `push` — refreshes the graph when the default branch moves
 - `pull_request_review_comment` — reply analysis on inline comment threads
 - `issue_comment` — `@argus-eye` commands
 - `installation` — tracks installs/uninstalls

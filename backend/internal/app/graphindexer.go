@@ -47,36 +47,30 @@ const (
 // never take the server down or stop trying because one repository is
 // unreachable.
 func runGraphIndexBackfill(ctx context.Context, db *store.Store, ghClient *ghpkg.Client, logger *slog.Logger) {
-	// First tick soon after boot, not a full interval later. Machines restart on
-	// every deploy and can be stopped by autostop, so a loop that only ever fires
-	// at T+1h would index nothing on a machine that never stays up an hour.
-	// Delayed a little so it does not compete with startup recovery work.
+	// First backfill soon after boot, not a full interval later. Prompt refreshes
+	// then use their own short poll; ordinary stale repositories keep the hourly
+	// pacing that protects the installation's GitHub budget.
 	first := time.NewTimer(2 * time.Minute)
 	defer first.Stop()
 	select {
 	case <-ctx.Done():
 		return
 	case <-first.C:
-		indexDueRepos(ctx, db, ghClient, logger)
+		indexDueRepos(ctx, db, ghClient, logger, false)
 	}
 
+	promptTicker := time.NewTicker(graphIndexContinuationInterval)
+	defer promptTicker.Stop()
+	backfillTicker := time.NewTicker(graphIndexInterval)
+	defer backfillTicker.Stop()
 	for {
-		delay := graphIndexInterval
-		probeCtx, cancelProbe := context.WithTimeout(ctx, 10*time.Second)
-		building, err := db.HasBuildingGraphGeneration(probeCtx)
-		cancelProbe()
-		if err != nil {
-			logger.Warn("graph index: probing continuation", "error", err)
-		} else if building {
-			delay = graphIndexContinuationInterval
-		}
-		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
-			timer.Stop()
 			return
-		case <-timer.C:
-			indexDueRepos(ctx, db, ghClient, logger)
+		case <-promptTicker.C:
+			indexDueRepos(ctx, db, ghClient, logger, true)
+		case <-backfillTicker.C:
+			indexDueRepos(ctx, db, ghClient, logger, false)
 		}
 	}
 }
@@ -85,7 +79,7 @@ func runGraphIndexBackfill(ctx context.Context, db *store.Store, ghClient *ghpkg
 //
 // Split from the loop so the scheduling and the work can be reasoned about —
 // and tested — separately.
-func indexDueRepos(ctx context.Context, db *store.Store, ghClient *ghpkg.Client, logger *slog.Logger) {
+func indexDueRepos(ctx context.Context, db *store.Store, ghClient *ghpkg.Client, logger *slog.Logger, promptOnly bool) {
 	// Only one machine indexes at a time. Both run this loop, and a duplicated
 	// full index costs a second 1500-call burst against the same installation's
 	// GitHub budget — the budget in-flight reviews are drawing on.
@@ -100,7 +94,12 @@ func indexDueRepos(ctx context.Context, db *store.Store, ghClient *ghpkg.Client,
 	defer release()
 
 	listCtx, cancelList := context.WithTimeout(ctx, 30*time.Second)
-	targets, err := db.ListReposDueForGraphIndex(listCtx, graphIndexStaleness, graphIndexPerTick)
+	var targets []store.RepoIndexTarget
+	if promptOnly {
+		targets, err = db.ListReposDueForPromptGraphIndex(listCtx, graphIndexPerTick)
+	} else {
+		targets, err = db.ListReposDueForGraphIndex(listCtx, graphIndexStaleness, graphIndexPerTick)
+	}
 	cancelList()
 	if err != nil {
 		logger.Error("graph index: listing due repos", "error", err)
@@ -136,6 +135,11 @@ func indexDueRepos(ctx context.Context, db *store.Store, ghClient *ghpkg.Client,
 			continue
 		}
 
+		if result.Unchanged {
+			logger.Info("graph index: published generation already matches default branch",
+				"repo", t.Owner+"/"+t.Repo, "commit", result.Snapshot.PublishedCommitSHA)
+			continue
+		}
 		if !result.Published {
 			logger.Warn("graph index: generation window staged but not complete",
 				"repo", t.Owner+"/"+t.Repo, "commit", result.Snapshot.CommitSHA,

@@ -65,8 +65,13 @@ export type GraphSnapshot = {
   failed_files: number;
   skipped_files: number;
   complete: boolean;
+  current: boolean;
   started_at: string;
   published_at?: string;
+  topology_published_at?: string;
+  published_commit_sha: string;
+  default_head_sha: string;
+  refresh_requested_at?: string;
 };
 
 export type ArchResponse = {
@@ -81,7 +86,10 @@ const useArchitectureQuery = createAuthQuery<ArchResponse, { repoId: number }>({
   queryKey: ["architecture"],
   fetcher: ({ repoId }, ctx) => getApi(ctx).get<ArchResponse>(`/api/v1/repos/${repoId}/architecture`),
   staleTime: 5 * 60 * 1000,
-  refetchInterval: (query) => (query.state.data?.snapshot.status === "building" ? 5_000 : false),
+  refetchInterval: (query) => {
+    const snapshot = query.state.data?.snapshot;
+    return snapshot?.status === "building" || snapshot?.refresh_requested_at ? 5_000 : false;
+  },
 });
 
 export const useArchitectureData = () => {

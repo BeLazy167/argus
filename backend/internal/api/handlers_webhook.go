@@ -65,6 +65,12 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			slog.String("delivery_id", deliveryID),
 			slog.String("trace_id", obs.TraceID(r.Context())),
 		)
+		if update, ok := ghpkg.DefaultBranchUpdateFromPR(*prEvent); ok {
+			if err := s.scheduleGraphRefresh(r.Context(), update); err != nil {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "failed to schedule graph refresh"})
+				return
+			}
+		}
 		// pull_request.edited: the author tweaked the PR body (or title/base).
 		// We don't want to re-review on body edits, but we DO want to refresh
 		// the cross-PR section when the set of linked-PR refs changes — a
@@ -121,6 +127,14 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			s.logger.Warn("webhook semaphore full")
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "server busy"})
 			return
+		}
+
+	case "push":
+		if update, ok := ghpkg.DefaultBranchUpdateFromPush(event); ok {
+			if err := s.scheduleGraphRefresh(r.Context(), update); err != nil {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "failed to schedule graph refresh"})
+				return
+			}
 		}
 
 	case "pull_request_review_comment":
@@ -318,6 +332,21 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "accepted"})
+}
+
+func (s *Server) scheduleGraphRefresh(ctx context.Context, update ghpkg.DefaultBranchUpdate) error {
+	scheduled, err := s.store.ScheduleGraphIndexRefresh(ctx, update.InstallationID, update.RepoID,
+		update.RepoFullName, update.DefaultBranch, update.CommitSHA, update.ObservedAt)
+	if err != nil {
+		s.logger.Warn("graph refresh: schedule default branch", "repo", update.RepoFullName,
+			"commit", update.CommitSHA, "error", err)
+		return err
+	}
+	if scheduled {
+		s.logger.Info("graph refresh: default branch changed", "repo", update.RepoFullName,
+			"commit", update.CommitSHA)
+	}
+	return nil
 }
 
 // handleCheckboxTrigger dispatches a review when a user toggles the "Trigger

@@ -125,19 +125,20 @@ type DecisionTrace struct {
 }
 
 type GraphIndexGeneration struct {
-	ID            int64      `json:"id"`
-	RepoID        int64      `json:"repo_id"`
-	CommitSha     string     `json:"commit_sha"`
-	Status        string     `json:"status"`
-	TreeTruncated bool       `json:"tree_truncated"`
-	ExpectedFiles int        `json:"expected_files"`
-	VisitedFiles  int        `json:"visited_files"`
-	FailedFiles   int        `json:"failed_files"`
-	SkippedFiles  int        `json:"skipped_files"`
-	Error         string     `json:"error"`
-	StartedAt     time.Time  `json:"started_at"`
-	UpdatedAt     time.Time  `json:"updated_at"`
-	PublishedAt   *time.Time `json:"published_at"`
+	ID             int64      `json:"id"`
+	RepoID         int64      `json:"repo_id"`
+	CommitSha      string     `json:"commit_sha"`
+	Status         string     `json:"status"`
+	TreeTruncated  bool       `json:"tree_truncated"`
+	ExpectedFiles  int        `json:"expected_files"`
+	VisitedFiles   int        `json:"visited_files"`
+	FailedFiles    int        `json:"failed_files"`
+	SkippedFiles   int        `json:"skipped_files"`
+	Error          string     `json:"error"`
+	StartedAt      time.Time  `json:"started_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+	PublishedAt    *time.Time `json:"published_at"`
+	RefreshVersion int64      `json:"refresh_version"`
 }
 
 type GraphIndexGenerationFile struct {
@@ -354,6 +355,12 @@ type Repo struct {
 	GraphIndexFailedFiles      int             `json:"graph_index_failed_files"`
 	GraphIndexSkippedFiles     int             `json:"graph_index_skipped_files"`
 	GraphIndexTreeTruncated    bool            `json:"graph_index_tree_truncated"`
+	GraphRefreshRequestedAt    *time.Time      `json:"graph_refresh_requested_at"`
+	GraphRefreshCommitSha      *string         `json:"graph_refresh_commit_sha"`
+	GraphDefaultHeadSha        *string         `json:"graph_default_head_sha"`
+	GraphDefaultHeadObservedAt *time.Time      `json:"graph_default_head_observed_at"`
+	GraphDefaultHeadEventAt    *time.Time      `json:"graph_default_head_event_at"`
+	GraphRefreshVersion        int64           `json:"graph_refresh_version"`
 }
 
 type Review struct {

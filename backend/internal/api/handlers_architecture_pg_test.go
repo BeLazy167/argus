@@ -116,3 +116,52 @@ func TestArchitectureResponseShowsNewestBuildingSnapshotWithPublishedTopology(t 
 		t.Fatalf("last published topology hidden while building: %+v", response.Files)
 	}
 }
+
+func TestArchitectureResponseDoesNotCallOldPublishedGenerationCurrentAfterDefaultHeadMoves(t *testing.T) {
+	pool, ctx := architectureTestPool(t)
+	installationID, repoID := seedArchitectureRepo(t, ctx, pool)
+	if _, err := pool.Exec(ctx, `UPDATE repos SET enabled = true WHERE id = $1`, repoID); err != nil {
+		t.Fatal(err)
+	}
+	var generationID int64
+	const publishedSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const defaultHeadSHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO graph_index_generations
+		  (repo_id, commit_sha, status, expected_files, visited_files, published_at)
+		VALUES ($1, $2, 'published', 1, 1, NOW()) RETURNING id`, repoID, publishedSHA).Scan(&generationID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE repos SET graph_published_generation_id = $2, graph_index_commit_sha = $3,
+		  graph_default_head_sha = $3, graph_default_head_observed_at = NOW()
+		WHERE id = $1`, repoID, generationID, publishedSHA); err != nil {
+		t.Fatal(err)
+	}
+
+	var githubInstallationID, githubRepoID int64
+	if err := pool.QueryRow(ctx, `
+		SELECT i.installation_id, r.github_id FROM repos r
+		JOIN installations i ON i.id = r.installation_id WHERE r.id = $1`, repoID).
+		Scan(&githubInstallationID, &githubRepoID); err != nil {
+		t.Fatal(err)
+	}
+	var fullName string
+	if err := pool.QueryRow(ctx, `SELECT full_name FROM repos WHERE id = $1`, repoID).Scan(&fullName); err != nil {
+		t.Fatal(err)
+	}
+	st := store.NewWithDB(pool)
+	scheduled, err := st.ScheduleGraphIndexRefresh(ctx, githubInstallationID, githubRepoID,
+		fullName, "main", defaultHeadSHA, time.Now().Add(time.Minute))
+	if err != nil || !scheduled {
+		t.Fatalf("schedule refresh = %v, %v", scheduled, err)
+	}
+
+	response := requestArchitecture(t, ctx, pool, installationID, repoID)
+	if !response.Snapshot.Complete || response.Snapshot.Current {
+		t.Fatalf("moved-head snapshot completeness/current = %+v", response.Snapshot)
+	}
+	if response.Snapshot.PublishedCommitSHA != publishedSHA || response.Snapshot.DefaultHeadSHA != defaultHeadSHA || response.Snapshot.RefreshRequestedAt == nil {
+		t.Fatalf("moved-head freshness = %+v", response.Snapshot)
+	}
+}

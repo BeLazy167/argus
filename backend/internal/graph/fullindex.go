@@ -67,6 +67,7 @@ type FullIndexResult struct {
 	Staged    int
 	Remaining int
 	Published bool
+	Unchanged bool
 }
 
 type fullIndexGitHub interface {
@@ -96,10 +97,20 @@ func IndexRepoBounded(
 		return FullIndexResult{}, err
 	}
 	commitSHA := snapshot.CommitSHA
+	refreshVersion := snapshot.GenerationRefreshVersion
 	if snapshot.Status != "building" || commitSHA == "" {
+		refreshVersion = snapshot.RefreshVersion
 		commitSHA, err = ghClient.ResolveDefaultBranchCommit(ctx, installationID, owner, repo, defaultBranch)
 		if err != nil {
 			return FullIndexResult{}, fmt.Errorf("resolve default branch: %w", err)
+		}
+		alreadyCurrent, _, err := st.ConfirmGraphDefaultHead(ctx, repoDBID, refreshVersion, commitSHA)
+		if err != nil {
+			return FullIndexResult{}, err
+		}
+		if alreadyCurrent {
+			snapshot, err = st.GetGraphSnapshot(ctx, repoDBID)
+			return FullIndexResult{Snapshot: snapshot, Unchanged: true}, err
 		}
 	}
 	tree, err := ghClient.GetRepoTree(ctx, installationID, owner, repo, commitSHA)
@@ -118,7 +129,7 @@ func IndexRepoBounded(
 	}
 	sourceFiles := filterSourceFiles(tree.Paths)
 	sort.Strings(sourceFiles)
-	snapshot, err = st.BeginGraphGeneration(ctx, repoDBID, commitSHA, len(sourceFiles), len(tree.Paths)-len(sourceFiles), tree.Truncated)
+	snapshot, err = st.BeginGraphGeneration(ctx, repoDBID, commitSHA, len(sourceFiles), len(tree.Paths)-len(sourceFiles), tree.Truncated, refreshVersion)
 	if err != nil {
 		return FullIndexResult{}, err
 	}
@@ -411,7 +422,15 @@ func publishGraphGeneration(ctx context.Context, st *store.Store, repoID, genera
 		UPDATE repos r SET graph_published_generation_id = $2, graph_indexed_at = NOW(), graph_index_cursor = 0,
 		  graph_index_commit_sha = g.commit_sha, graph_index_expected_files = g.expected_files,
 		  graph_index_visited_files = g.visited_files, graph_index_failed_files = g.failed_files,
-		  graph_index_skipped_files = g.skipped_files, graph_index_tree_truncated = g.tree_truncated
+		  graph_index_skipped_files = g.skipped_files, graph_index_tree_truncated = g.tree_truncated,
+		  graph_default_head_sha = CASE WHEN r.graph_refresh_version = g.refresh_version THEN g.commit_sha ELSE r.graph_default_head_sha END,
+		  graph_default_head_observed_at = CASE WHEN r.graph_refresh_version = g.refresh_version THEN NOW() ELSE r.graph_default_head_observed_at END,
+		  graph_refresh_requested_at = CASE
+		    WHEN r.graph_refresh_version = g.refresh_version AND r.graph_refresh_commit_sha = g.commit_sha THEN NULL
+		    ELSE r.graph_refresh_requested_at END,
+		  graph_refresh_commit_sha = CASE
+		    WHEN r.graph_refresh_version = g.refresh_version AND r.graph_refresh_commit_sha = g.commit_sha THEN NULL
+		    ELSE r.graph_refresh_commit_sha END
 		FROM graph_index_generations g WHERE r.id = $1 AND g.id = $2`, repoID, generationID); err != nil {
 		return fmt.Errorf("publish graph generation: mark repo: %w", err)
 	}
