@@ -666,15 +666,14 @@ func (s *Store) ListRules(ctx context.Context, installationIDs []int64) ([]Rule,
 func (s *Store) CreateRule(ctx context.Context, installationID int64, category, content string, priority int, enabled bool) (*Rule, error) {
 	var rule Rule
 	err := s.WithMemoryMirrorTx(ctx, func(tx pgx.Tx) (MemoryMirrorEvent, error) {
-		err := tx.QueryRow(ctx, `
-			INSERT INTO rules (installation_id, category, content, priority, enabled)
-			VALUES ($1, $2, $3, $4, $5)
-			RETURNING id, installation_id, category, content, priority, enabled, created_at, updated_at`,
-			installationID, category, content, priority, enabled).
-			Scan(&rule.ID, &rule.InstallationID, &rule.Category, &rule.Content, &rule.Priority, &rule.Enabled, &rule.CreatedAt, &rule.UpdatedAt)
+		row, err := db.New(tx).CreateRule(ctx, db.CreateRuleParams{
+			InstallationID: &installationID, Category: category, Content: content,
+			Priority: priority, Enabled: enabled,
+		})
 		if err != nil {
 			return MemoryMirrorEvent{}, err
 		}
+		rule = Rule{ID: row.ID, InstallationID: row.InstallationID, Category: row.Category, Content: row.Content, Priority: row.Priority, Enabled: row.Enabled, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt}
 		return newRuleMirrorEvent(rule, enabled)
 	})
 	if err != nil {
@@ -686,17 +685,14 @@ func (s *Store) CreateRule(ctx context.Context, installationID int64, category, 
 func (s *Store) UpdateRule(ctx context.Context, id int64, installationIDs []int64, category, content *string, priority *int, enabled *bool) (*Rule, error) {
 	var rule Rule
 	err := s.WithMemoryMirrorTx(ctx, func(tx pgx.Tx) (MemoryMirrorEvent, error) {
-		err := tx.QueryRow(ctx, `
-			UPDATE rules SET
-				category = COALESCE($3, category), content = COALESCE($4, content),
-				priority = COALESCE($5, priority), enabled = COALESCE($6, enabled), updated_at = NOW()
-			WHERE id = $1 AND installation_id = ANY($2::bigint[])
-			RETURNING id, installation_id, category, content, priority, enabled, created_at, updated_at`,
-			id, installationIDs, category, content, priority, enabled).
-			Scan(&rule.ID, &rule.InstallationID, &rule.Category, &rule.Content, &rule.Priority, &rule.Enabled, &rule.CreatedAt, &rule.UpdatedAt)
+		row, err := db.New(tx).UpdateRule(ctx, db.UpdateRuleParams{
+			ID: id, InstallationIds: installationIDs, Category: category,
+			Content: content, Priority: priority, Enabled: enabled,
+		})
 		if err != nil {
 			return MemoryMirrorEvent{}, err
 		}
+		rule = Rule{ID: row.ID, InstallationID: row.InstallationID, Category: row.Category, Content: row.Content, Priority: row.Priority, Enabled: row.Enabled, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt}
 		return newRuleMirrorEvent(rule, rule.Enabled)
 	})
 	if err != nil {
@@ -707,21 +703,21 @@ func (s *Store) UpdateRule(ctx context.Context, id int64, installationIDs []int6
 
 func (s *Store) DeleteRule(ctx context.Context, id int64, installationIDs []int64) error {
 	return s.WithMemoryMirrorTx(ctx, func(tx pgx.Tx) (MemoryMirrorEvent, error) {
-		var installationID int64
-		err := tx.QueryRow(ctx, `
-			DELETE FROM rules WHERE id = $1 AND installation_id = ANY($2::bigint[])
-			RETURNING installation_id`, id, installationIDs).Scan(&installationID)
+		installationID, err := db.New(tx).DeleteRule(ctx, db.DeleteRuleParams{ID: id, InstallationIds: installationIDs})
 		if errors.Is(err, pgx.ErrNoRows) {
 			return MemoryMirrorEvent{}, fmt.Errorf("rule %d not found", id)
 		}
 		if err != nil {
 			return MemoryMirrorEvent{}, err
 		}
+		if installationID == nil {
+			return MemoryMirrorEvent{}, fmt.Errorf("rule %d has no installation", id)
+		}
 		payload, err := json.Marshal(map[string]string{"custom_id": fmt.Sprintf("rule--%d", id)})
 		if err != nil {
 			return MemoryMirrorEvent{}, err
 		}
-		return MemoryMirrorEvent{InstallationID: installationID, AggregateType: MemoryMirrorRule, AggregateID: id, Operation: MemoryMirrorDelete, Payload: payload}, nil
+		return MemoryMirrorEvent{InstallationID: *installationID, AggregateType: MemoryMirrorRule, AggregateID: id, Operation: MemoryMirrorDelete, Payload: payload}, nil
 	})
 }
 

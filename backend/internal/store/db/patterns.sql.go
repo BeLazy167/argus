@@ -71,8 +71,10 @@ func (q *Queries) CreatePattern(ctx context.Context, arg CreatePatternParams) (C
 	return i, err
 }
 
-const deletePattern = `-- name: DeletePattern :execrows
-DELETE FROM patterns WHERE id = $1::bigint AND installation_id = ANY($2::bigint[])
+const deletePattern = `-- name: DeletePattern :one
+DELETE FROM patterns
+WHERE id = $1::bigint AND installation_id = ANY($2::bigint[])
+RETURNING installation_id, COALESCE(memory_custom_id, memory_doc_id)::text AS custom_id
 `
 
 type DeletePatternParams struct {
@@ -80,12 +82,16 @@ type DeletePatternParams struct {
 	InstallationIds []int64 `json:"installation_ids"`
 }
 
-func (q *Queries) DeletePattern(ctx context.Context, arg DeletePatternParams) (int64, error) {
-	result, err := q.db.Exec(ctx, deletePattern, arg.ID, arg.InstallationIds)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
+type DeletePatternRow struct {
+	InstallationID int64  `json:"installation_id"`
+	CustomID       string `json:"custom_id"`
+}
+
+func (q *Queries) DeletePattern(ctx context.Context, arg DeletePatternParams) (DeletePatternRow, error) {
+	row := q.db.QueryRow(ctx, deletePattern, arg.ID, arg.InstallationIds)
+	var i DeletePatternRow
+	err := row.Scan(&i.InstallationID, &i.CustomID)
+	return i, err
 }
 
 const getLowQualityPatterns = `-- name: GetLowQualityPatterns :many

@@ -17,5 +17,6 @@ UPDATE rules SET
 WHERE id = sqlc.arg(id)::bigint AND installation_id = ANY(sqlc.arg(installation_ids)::bigint[])
 RETURNING id, installation_id, category, content, priority, enabled, created_at, updated_at;
 
--- name: DeleteRule :execrows
-DELETE FROM rules WHERE id = $1 AND installation_id = ANY($2::bigint[]);
+-- name: DeleteRule :one
+DELETE FROM rules WHERE id = sqlc.arg(id)::bigint AND installation_id = ANY(sqlc.arg(installation_ids)::bigint[])
+RETURNING installation_id;

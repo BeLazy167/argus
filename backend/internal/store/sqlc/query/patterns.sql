@@ -15,8 +15,10 @@ RETURNING id, installation_id, repo_id, content, memory_doc_id, created_by, COAL
 SELECT id, installation_id, repo_id, content, memory_doc_id, created_by, COALESCE(source, 'manual') as source, category, pr_number, created_at, updated_at
 FROM patterns WHERE id = sqlc.arg(id)::bigint;
 
--- name: DeletePattern :execrows
-DELETE FROM patterns WHERE id = sqlc.arg(id)::bigint AND installation_id = ANY(sqlc.arg(installation_ids)::bigint[]);
+-- name: DeletePattern :one
+DELETE FROM patterns
+WHERE id = sqlc.arg(id)::bigint AND installation_id = ANY(sqlc.arg(installation_ids)::bigint[])
+RETURNING installation_id, COALESCE(memory_custom_id, memory_doc_id)::text AS custom_id;
 
 -- name: GetPatternStats :many
 SELECT DATE_TRUNC('week', created_at)::timestamptz AS week, COALESCE(source, 'manual') as source, COUNT(*)::int as count

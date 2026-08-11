@@ -76,26 +76,28 @@ func (s *Store) CreatePattern(ctx context.Context, installationID int64, repoID 
 
 	var pattern Pattern
 	err := s.WithMemoryMirrorTx(ctx, func(tx pgx.Tx) (MemoryMirrorEvent, error) {
+		q := db.New(tx)
 		repo := ""
 		if repoID != nil {
-			var fullName string
-			if err := tx.QueryRow(ctx,
-				`SELECT full_name FROM repos WHERE id = $1 AND installation_id = $2`,
-				*repoID, installationID).Scan(&fullName); err != nil {
+			repoRow, err := q.GetRepoScoped(ctx, db.GetRepoScopedParams{ID: *repoID, Column2: []int64{installationID}})
+			if err != nil {
 				return MemoryMirrorEvent{}, fmt.Errorf("resolve pattern repo: %w", err)
 			}
-			_, repo, _ = strings.Cut(fullName, "/")
+			_, repo, _ = strings.Cut(repoRow.FullName, "/")
 			if repo == "" {
 				return MemoryMirrorEvent{}, fmt.Errorf("repo %d has invalid full name", *repoID)
 			}
 		}
 
-		err := tx.QueryRow(ctx,
-			`INSERT INTO patterns (installation_id, repo_id, content, memory_doc_id, created_by, source, category, pr_number, memory_custom_id)
-			 VALUES ($1, $2, $3, $4, $5, COALESCE($6, 'manual'), $7, $8, $9)
-			 RETURNING id, installation_id, repo_id, content, memory_doc_id, created_by, COALESCE(source, 'manual'), category, pr_number, created_at, updated_at`,
-			installationID, repoID, content, memoryDocID, createdBy, source, category, prNumber, memoryCustomID).
-			Scan(&pattern.ID, &pattern.InstallationID, &pattern.RepoID, &pattern.Content, &pattern.MemoryDocID, &pattern.CreatedBy, &pattern.Source, &pattern.Category, &pattern.PRNumber, &pattern.CreatedAt, &pattern.UpdatedAt)
+		row, err := q.CreatePattern(ctx, db.CreatePatternParams{
+			InstallationID: installationID, RepoID: repoID, Content: content,
+			MemoryDocID: memoryDocID, CreatedBy: createdBy, Source: source,
+			Category: category, PRNumber: prNumber, MemoryCustomID: memoryCustomID,
+		})
+		if err != nil {
+			return MemoryMirrorEvent{}, err
+		}
+		pattern, err = patternFromSQLC(row.ID, row.InstallationID, row.RepoID, row.Content, row.MemoryDocID, row.CreatedBy, row.Source, row.Category, row.PRNumber, row.CreatedAt, row.UpdatedAt)
 		if err != nil {
 			return MemoryMirrorEvent{}, err
 		}
@@ -119,28 +121,22 @@ func (s *Store) CreatePattern(ctx context.Context, installationID int64, repoID 
 
 func (s *Store) DeletePattern(ctx context.Context, id int64, installationIDs []int64) error {
 	return s.WithMemoryMirrorTx(ctx, func(tx pgx.Tx) (MemoryMirrorEvent, error) {
-		var installationID int64
-		var customID *string
-		err := tx.QueryRow(ctx, `
-			DELETE FROM patterns
-			WHERE id = $1 AND installation_id = ANY($2)
-			RETURNING installation_id, COALESCE(memory_custom_id, memory_doc_id)`,
-			id, installationIDs).Scan(&installationID, &customID)
+		row, err := db.New(tx).DeletePattern(ctx, db.DeletePatternParams{ID: id, InstallationIds: installationIDs})
 		if errors.Is(err, pgx.ErrNoRows) {
 			return MemoryMirrorEvent{}, fmt.Errorf("pattern not found")
 		}
 		if err != nil {
 			return MemoryMirrorEvent{}, err
 		}
-		if customID == nil || *customID == "" {
+		if row.CustomID == "" {
 			return MemoryMirrorEvent{}, fmt.Errorf("pattern %d has no durable memory identity", id)
 		}
-		payload, err := json.Marshal(map[string]string{"custom_id": *customID})
+		payload, err := json.Marshal(map[string]string{"custom_id": row.CustomID})
 		if err != nil {
 			return MemoryMirrorEvent{}, fmt.Errorf("marshal pattern delete payload: %w", err)
 		}
 		return MemoryMirrorEvent{
-			InstallationID: installationID,
+			InstallationID: row.InstallationID,
 			AggregateType:  MemoryMirrorPattern,
 			AggregateID:    id,
 			Operation:      MemoryMirrorDelete,

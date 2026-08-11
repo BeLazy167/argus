@@ -57,21 +57,21 @@ func (q *Queries) CreateRule(ctx context.Context, arg CreateRuleParams) (CreateR
 	return i, err
 }
 
-const deleteRule = `-- name: DeleteRule :execrows
-DELETE FROM rules WHERE id = $1 AND installation_id = ANY($2::bigint[])
+const deleteRule = `-- name: DeleteRule :one
+DELETE FROM rules WHERE id = $1::bigint AND installation_id = ANY($2::bigint[])
+RETURNING installation_id
 `
 
 type DeleteRuleParams struct {
-	ID      int64   `json:"id"`
-	Column2 []int64 `json:"column_2"`
+	ID              int64   `json:"id"`
+	InstallationIds []int64 `json:"installation_ids"`
 }
 
-func (q *Queries) DeleteRule(ctx context.Context, arg DeleteRuleParams) (int64, error) {
-	result, err := q.db.Exec(ctx, deleteRule, arg.ID, arg.Column2)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
+func (q *Queries) DeleteRule(ctx context.Context, arg DeleteRuleParams) (*int64, error) {
+	row := q.db.QueryRow(ctx, deleteRule, arg.ID, arg.InstallationIds)
+	var installation_id *int64
+	err := row.Scan(&installation_id)
+	return installation_id, err
 }
 
 const listRules = `-- name: ListRules :many
