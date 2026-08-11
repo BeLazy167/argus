@@ -426,3 +426,97 @@ func TestDurableEventBusDoesNotRetryAmbiguousWriteFailure(t *testing.T) {
 		t.Fatal("ambiguous durable failure suppressed local delivery")
 	}
 }
+
+func TestDurableEventBusSubscriberCursorsAreIndependent(t *testing.T) {
+	eb := NewEventBus()
+	reviewID := uuid.New()
+	eb.OpenTopic(reviewID)
+	eb.mu.RLock()
+	topic := eb.topics[reviewID]
+	eb.mu.RUnlock()
+
+	first := make(chan Event, 4)
+	second := make(chan Event, 4)
+	topic.mu.Lock()
+	topic.subscribers[1] = &topicSubscriber{ch: first, durableCursor: 10}
+	// Mirrors a later SubscribeContext replay that has already returned ID 20.
+	topic.subscribers[2] = &topicSubscriber{ch: second, durableCursor: 20}
+	topic.mu.Unlock()
+
+	eb.deliver(reviewID, Event{ID: 15, Type: EventComment}, false)
+	select {
+	case evt := <-first:
+		if evt.ID != 15 {
+			t.Fatalf("first subscriber event=%+v", evt)
+		}
+	default:
+		t.Fatal("first subscriber missed durable event")
+	}
+	select {
+	case evt := <-second:
+		t.Fatalf("replayed subscriber received duplicate: %+v", evt)
+	default:
+	}
+
+	// Ephemeral fallback events never participate in durable ordering and must
+	// reach both subscribers even when their durable cursors differ.
+	eb.deliver(reviewID, Event{ID: 0, Type: EventReviewCompleted}, false)
+	for name, ch := range map[string]<-chan Event{"first": first, "second": second} {
+		select {
+		case evt := <-ch:
+			if evt.ID != 0 || evt.Type != EventReviewCompleted {
+				t.Fatalf("%s ephemeral event=%+v", name, evt)
+			}
+		default:
+			t.Fatalf("%s subscriber missed ephemeral event", name)
+		}
+	}
+}
+
+func TestRecoverStoredNotificationRetriesFailedFetchWithoutAdvancingCursor(t *testing.T) {
+	ctx := context.Background()
+	loadErr := errors.New("transient stored fetch")
+	catchErr := errors.New("transient catch-up fetch")
+	loads := 0
+	catches := 0
+
+	cursor, err := recoverStoredNotification(ctx, 50, 40,
+		func(context.Context, int64) error {
+			loads++
+			return loadErr
+		},
+		func(_ context.Context, after int64) (int64, error) {
+			catches++
+			if after != 39 {
+				t.Fatalf("catch-up after=%d want 39", after)
+			}
+			return after, catchErr
+		})
+	if !errors.Is(err, loadErr) || !errors.Is(err, catchErr) {
+		t.Fatalf("recovery error=%v", err)
+	}
+	if cursor != 39 {
+		t.Fatalf("failed recovery cursor=%d want 39", cursor)
+	}
+
+	terminalDelivered := 0
+	cursor, err = recoverStoredNotification(ctx, cursor, 40,
+		func(context.Context, int64) error {
+			loads++
+			return loadErr
+		},
+		func(_ context.Context, after int64) (int64, error) {
+			catches++
+			if after != 39 {
+				t.Fatalf("retried catch-up after=%d want 39", after)
+			}
+			terminalDelivered++
+			return 55, nil
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cursor != 55 || terminalDelivered != 1 || loads != 2 || catches != 2 {
+		t.Fatalf("cursor=%d terminal=%d loads=%d catches=%d", cursor, terminalDelivered, loads, catches)
+	}
+}

@@ -262,3 +262,233 @@ func TestDurableEventBusPrunesOutsideReplayGuarantees(t *testing.T) {
 		}
 	}
 }
+
+func TestDurableEventBusCatchUpAcrossChurnMultipleReviews(t *testing.T) {
+	pool, ctx, reviewA := durableEventTestReview(t)
+	_, _, reviewB := durableEventTestReview(t)
+	_, _, unrelatedReview := durableEventTestReview(t)
+	bus := NewEventBus()
+	bus.pool = pool
+	bus.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	liveA, _, unsubA, err := bus.SubscribeContext(ctx, reviewA, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unsubA()
+	liveB, _, unsubB, err := bus.SubscribeContext(ctx, reviewB, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unsubB()
+	// A topic without a live subscriber is deliberately outside catch-up. A
+	// later SubscribeContext will replay its own authorized history.
+	bus.OpenTopic(unrelatedReview)
+
+	cursor, err := bus.reviewEventHighWater(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	insert := func(reviewID uuid.UUID, generation int, eventType EventType) int64 {
+		t.Helper()
+		var id int64
+		if err := pool.QueryRow(ctx, `
+			INSERT INTO review_events (review_id, attempt_generation, event_type, data)
+			VALUES ($1,$2,$3,'{}') RETURNING id`, reviewID, generation, eventType).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	stageID := insert(reviewA, 1, EventStageChanged)
+	_ = insert(unrelatedReview, 1, EventComment)
+	commentID := insert(reviewB, 1, EventComment)
+	completedID := insert(reviewA, 0, EventReviewCompleted)
+
+	cursor, err = bus.catchUpStored(ctx, cursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEvents := func(name string, ch <-chan Event, wantIDs []int64, wantTypes []EventType) {
+		t.Helper()
+		for i := range wantIDs {
+			select {
+			case evt := <-ch:
+				if evt.ID != wantIDs[i] || evt.Type != wantTypes[i] {
+					t.Fatalf("%s event[%d]=%+v want id=%d type=%s", name, i, evt, wantIDs[i], wantTypes[i])
+				}
+			case <-time.After(time.Second):
+				t.Fatalf("%s event[%d] not delivered", name, i)
+			}
+		}
+	}
+	assertEvents("review A", liveA, []int64{stageID, completedID}, []EventType{EventStageChanged, EventReviewCompleted})
+	assertEvents("review B", liveB, []int64{commentID}, []EventType{EventComment})
+
+	// Reconnect with no new rows: overlap must not duplicate delivery.
+	cursor, err = bus.catchUpStored(ctx, cursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, ch := range map[string]<-chan Event{"review A": liveA, "review B": liveB} {
+		select {
+		case evt := <-ch:
+			t.Fatalf("%s duplicate after churn: %+v", name, evt)
+		default:
+		}
+	}
+	bus.mu.RLock()
+	unrelatedTopic := bus.topics[unrelatedReview]
+	bus.mu.RUnlock()
+	unrelatedTopic.mu.Lock()
+	unrelatedHistory := len(unrelatedTopic.history)
+	unrelatedTopic.mu.Unlock()
+	if unrelatedHistory != 0 {
+		t.Fatalf("unsubscribed cross-tenant topic received %d events", unrelatedHistory)
+	}
+
+	cancelledID := insert(reviewB, 0, EventCancelled)
+	cursor, err = bus.catchUpStored(ctx, cursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEvents("review B terminal", liveB, []int64{cancelledID}, []EventType{EventCancelled})
+	if cursor < cancelledID {
+		t.Fatalf("cursor=%d did not reach terminal id=%d", cursor, cancelledID)
+	}
+}
+
+func TestDurableEventBusCatchUpPaginatesBoundedQueries(t *testing.T) {
+	pool, ctx, reviewID := durableEventTestReview(t)
+	bus := NewEventBus()
+	bus.pool = pool
+	bus.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	bus.OpenTopic(reviewID)
+	bus.mu.RLock()
+	topic := bus.topics[reviewID]
+	bus.mu.RUnlock()
+	live := make(chan Event, eventCatchUpBatchSize+2)
+	topic.mu.Lock()
+	topic.subscribers[1] = &topicSubscriber{ch: live}
+	topic.mu.Unlock()
+
+	cursor, err := bus.reviewEventHighWater(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO review_events (review_id, attempt_generation, event_type, data)
+		SELECT $1,1,$2,'{}' FROM generate_series(1,$3)`,
+		reviewID, EventStageChanged, eventCatchUpBatchSize+1); err != nil {
+		t.Fatal(err)
+	}
+	cursor, err = bus.catchUpStored(ctx, cursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var previous int64
+	for i := 0; i < eventCatchUpBatchSize+1; i++ {
+		select {
+		case evt := <-live:
+			if evt.ID <= previous {
+				t.Fatalf("event[%d] id=%d after %d; catch-up order is not increasing", i, evt.ID, previous)
+			}
+			previous = evt.ID
+		case <-time.After(time.Second):
+			t.Fatalf("received %d catch-up events, want %d", i, eventCatchUpBatchSize+1)
+		}
+	}
+	if cursor != previous {
+		t.Fatalf("cursor=%d last event=%d", cursor, previous)
+	}
+}
+
+func TestDurableEventBusListenerReconnectCatchesDisconnectedInterval(t *testing.T) {
+	pool, ctx, reviewID := durableEventTestReview(t)
+	config, err := pgxpool.ParseConfig(os.Getenv("TEST_DATABASE_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	applicationName := "eventbus-churn-" + uuid.NewString()
+	config.ConnConfig.RuntimeParams["application_name"] = applicationName
+	config.MaxConns = 3
+	listenerPool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(listenerPool.Close)
+	listenerCtx, cancelListener := context.WithCancel(context.Background())
+	t.Cleanup(cancelListener)
+	bus := NewDurableEventBus(listenerCtx, listenerPool, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	live, _, unsubscribe, err := bus.SubscribeContext(ctx, reviewID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unsubscribe()
+
+	listenerPID := func(previous int32) int32 {
+		t.Helper()
+		deadline := time.Now().Add(4 * time.Second)
+		for time.Now().Before(deadline) {
+			var pid int32
+			err := pool.QueryRow(ctx, `
+				SELECT pid FROM pg_stat_activity
+				WHERE application_name=$1 AND query='LISTEN argus_review_events'
+				  AND pid<>$2
+				ORDER BY backend_start DESC LIMIT 1`, applicationName, previous).Scan(&pid)
+			if err == nil {
+				return pid
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("listener %q did not connect", applicationName)
+		return 0
+	}
+	terminate := func(pid int32) {
+		t.Helper()
+		var terminated bool
+		if err := pool.QueryRow(ctx, `SELECT pg_terminate_backend($1)`, pid).Scan(&terminated); err != nil {
+			t.Fatal(err)
+		}
+		if !terminated {
+			t.Fatalf("listener pid %d was not terminated", pid)
+		}
+	}
+	insert := func(eventType EventType) int64 {
+		t.Helper()
+		var id int64
+		if err := pool.QueryRow(ctx, `
+			INSERT INTO review_events (review_id, attempt_generation, event_type, data)
+			VALUES ($1,0,$2,'{}') RETURNING id`, reviewID, eventType).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	assertLive := func(wantID int64, wantType EventType) {
+		t.Helper()
+		select {
+		case evt := <-live:
+			if evt.ID != wantID || evt.Type != wantType {
+				t.Fatalf("live event=%+v want id=%d type=%s", evt, wantID, wantType)
+			}
+		case <-time.After(4 * time.Second):
+			t.Fatalf("missed reconnect event id=%d type=%s", wantID, wantType)
+		}
+	}
+
+	firstPID := listenerPID(0)
+	terminate(firstPID)
+	stageID := insert(EventStageChanged)
+	completedID := insert(EventReviewCompleted)
+	assertLive(stageID, EventStageChanged)
+	assertLive(completedID, EventReviewCompleted)
+
+	secondPID := listenerPID(firstPID)
+	terminate(secondPID)
+	cancelledID := insert(EventCancelled)
+	assertLive(cancelledID, EventCancelled)
+	select {
+	case evt := <-live:
+		t.Fatalf("duplicate after repeated connection churn: %+v", evt)
+	default:
+	}
+}
