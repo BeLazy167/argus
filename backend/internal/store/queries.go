@@ -470,6 +470,40 @@ func (s *Store) IsReviewAttemptCurrent(ctx context.Context, id uuid.UUID, genera
 	return current, nil
 }
 
+// RunIfReviewAttemptCurrent linearizes an attempt-owned external side effect
+// against BeginReviewRetry. The callback runs while holding a NO KEY UPDATE
+// lock on the review row: a retry's generation bump waits, while writes that
+// reference reviews through a foreign key can still take KEY SHARE and avoid
+// self-deadlocking on their separate connection.
+//
+// The callback should contain only the mutation, never the potentially slow
+// work that prepares it. current=false means the generation already lost
+// ownership. An authority lookup/transaction failure is returned as an error;
+// callers must not mistake storage failure for a stale attempt.
+func (s *Store) RunIfReviewAttemptCurrent(ctx context.Context, id uuid.UUID, generation int, write func(context.Context) error) (current bool, err error) {
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("beginning review attempt guard: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+
+	var currentGeneration int
+	if err = tx.QueryRow(ctx, `SELECT attempt_generation FROM reviews WHERE id=$1 FOR NO KEY UPDATE`, id).Scan(&currentGeneration); err != nil {
+		return false, fmt.Errorf("locking review attempt: %w", err)
+	}
+	if currentGeneration != generation {
+		return false, nil
+	}
+
+	if err = write(ctx); err != nil {
+		return true, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return true, fmt.Errorf("committing review attempt guard: %w", err)
+	}
+	return true, nil
+}
+
 // GetReviewStatus returns just the status column for a review — a cheap PK
 // lookup used by the state machine's cooperative-cancellation check, which runs
 // at every stage boundary and must stay light.

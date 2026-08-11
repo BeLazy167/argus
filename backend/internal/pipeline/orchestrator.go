@@ -342,6 +342,9 @@ type Orchestrator struct {
 	// long-lived web service running the deployed Mermaid package; tests inject
 	// a fake. A nil or unavailable validator rejects every diagram.
 	mermaidValidator MermaidValidator
+	// sinkAuthority serializes detached memory mutations with attempt-generation
+	// advancement. Production uses st; tests can inject a deterministic fake.
+	sinkAuthority memorySinkAuthority
 }
 
 // LLMRegistry is the subset of llm.Registry used by Orchestrator.
@@ -370,6 +373,7 @@ func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, 
 		logger:           logger,
 		cfg:              cfg,
 		mermaidValidator: NewHTTPMermaidValidator(cfg.MermaidValidatorBaseURL, cfg.MermaidValidatorSecret, nil),
+		sinkAuthority:    st,
 	}
 	sm.onTerminal = o.FinalizeStartedComment
 	// Same reason as onTerminal: the hook closes over the orchestrator (store +
@@ -2865,7 +2869,6 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	if !current {
 		return context.Canceled
 	}
-	o.indexConfirmedPatterns(ctx, run, owner, repo)
 
 	// Pre-post memory sinks: pattern learning, convention extraction, file-memory
 	// synthesis, and PR/architecture summary indexing. Run BEFORE PostReview so a
@@ -2874,6 +2877,7 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	// indexer must not abort the others or the completion write).
 	prePostCtx := context.WithoutCancel(ctx)
 	o.indexer().RunAll(prePostCtx, run, owner, repo, "pre_post", []memorySink{
+		{name: "indexConfirmedPatterns", run: o.indexConfirmedPatterns},
 		{name: "autoLearnPatterns", enabled: func(r *PipelineRun) bool { return r.LearnPatterns }, run: o.autoLearnPatterns},
 		{name: "learnPositivePatterns", enabled: func(r *PipelineRun) bool { return r.LearnPatterns }, run: func(ctx context.Context, r *PipelineRun, owner, repo string) {
 			o.learnPositivePatterns(ctx, r, owner, repo)
@@ -3234,13 +3238,19 @@ func (o *Orchestrator) enrichPRDescription(ctx context.Context, run *PipelineRun
 		diagramsJSON, marshalErr := json.Marshal(validDiagrams)
 		if marshalErr != nil {
 			o.logger.Warn("failed to marshal diagrams", "error", marshalErr)
-		} else if _, dbErr := o.db.Exec(ctx, `UPDATE reviews SET diagrams = $1 WHERE id = $2`,
-			diagramsJSON, run.ReviewID); dbErr != nil {
-			o.logger.Warn("failed to save diagrams", "error", dbErr)
+		} else {
+			tag, dbErr := o.db.Exec(ctx, `UPDATE reviews SET diagrams = $1 WHERE id = $2 AND attempt_generation = $3`, diagramsJSON, run.ReviewID, run.AttemptGeneration)
+			if dbErr != nil {
+				o.logger.Warn("failed to save diagrams", "error", dbErr)
+			} else if tag.RowsAffected() == 0 {
+				return
+			}
 		}
-		if _, dbErr := o.db.Exec(ctx, `UPDATE reviews SET diagram = $1, diagram_title = $2 WHERE id = $3`,
-			validDiagrams[0].Mermaid, validDiagrams[0].Title, run.ReviewID); dbErr != nil {
+		tag, dbErr := o.db.Exec(ctx, `UPDATE reviews SET diagram = $1, diagram_title = $2 WHERE id = $3 AND attempt_generation = $4`, validDiagrams[0].Mermaid, validDiagrams[0].Title, run.ReviewID, run.AttemptGeneration)
+		if dbErr != nil {
 			o.logger.Warn("failed to save legacy diagram", "error", dbErr)
+		} else if tag.RowsAffected() == 0 {
+			return
 		}
 	}
 	for _, d := range validDiagrams {
@@ -3267,8 +3277,14 @@ func (o *Orchestrator) enrichPRDescription(ctx context.Context, run *PipelineRun
 	// Replace existing enrichment or append
 	newBody := replaceOrAppendSection(body, enrichmentStartMarker, enrichmentEndMarker, section.String())
 
-	if err := o.ghClient.UpdatePRDescription(ctx, run.PREvent.InstallationID, owner, repo, run.PREvent.PRNumber, newBody); err != nil {
+	authorized, err := memorySinkWrite(ctx, "enrichPRDescription.github", func(writeCtx context.Context) error {
+		return o.ghClient.UpdatePRDescription(writeCtx, run.PREvent.InstallationID, owner, repo, run.PREvent.PRNumber, newBody)
+	})
+	if err != nil {
 		o.logger.Warn("enrichPRDescription: failed to update PR", "error", err)
+		return
+	}
+	if !authorized {
 		return
 	}
 	o.logger.Info("enriched PR description", "pr", run.PREvent.PRNumber)
@@ -3374,13 +3390,18 @@ func (o *Orchestrator) indexConfirmedPatterns(ctx context.Context, run *Pipeline
 			indexed++
 			content := fmt.Sprintf("Confirmed pattern [%s]: %s (file: %s)", c.Category, c.Body, fr.Path)
 			customID := memory.PatternCustomID(owner, repo, "confirmed", content)
-			resp, err := run.Indexer.IndexPattern(ctx, repo, memory.PatternMemory{
-				Content:  content,
-				CustomID: customID,
-				Source:   "scoring_confirmed",
-				Score:    c.Score,
-				PRNumber: run.PREvent.PRNumber,
-				Category: string(c.Category),
+			var resp *memory.IndexResult
+			authorized, err := memorySinkWrite(ctx, "indexConfirmedPatterns.memory", func(writeCtx context.Context) error {
+				var writeErr error
+				resp, writeErr = run.Indexer.IndexPattern(writeCtx, repo, memory.PatternMemory{
+					Content:  content,
+					CustomID: customID,
+					Source:   "scoring_confirmed",
+					Score:    c.Score,
+					PRNumber: run.PREvent.PRNumber,
+					Category: string(c.Category),
+				})
+				return writeErr
 			})
 			if err != nil {
 				// Non-fatal, but the DB row below lands with a NULL memory_doc_id —
@@ -3388,6 +3409,9 @@ func (o *Orchestrator) indexConfirmedPatterns(ctx context.Context, run *Pipeline
 				// which can quote secrets) so silent write-failures are visible.
 				o.logger.Warn("indexing confirmed pattern", "error", err, "file", fr.Path,
 					"custom_id", customID)
+			}
+			if !authorized {
+				return
 			}
 			// Also persist to local DB so the patterns dashboard stays current
 			var smID *string
@@ -3397,8 +3421,15 @@ func (o *Orchestrator) indexConfirmedPatterns(ctx context.Context, run *Pipeline
 			src := "scoring_confirmed"
 			cat := string(c.Category)
 			prNum := run.PREvent.PRNumber
-			if _, dbErr := o.st.CreatePattern(ctx, run.DBInstallationID, &run.DBRepoID, content, smID, strPtrOrNil("argus:confirmed"), &src, &cat, &prNum, strPtrOrNil(customID), nil); dbErr != nil {
+			authorized, dbErr := memorySinkWrite(ctx, "indexConfirmedPatterns.pattern", func(writeCtx context.Context) error {
+				_, writeErr := o.st.CreatePattern(writeCtx, run.DBInstallationID, &run.DBRepoID, content, smID, strPtrOrNil("argus:confirmed"), &src, &cat, &prNum, strPtrOrNil(customID), nil)
+				return writeErr
+			})
+			if dbErr != nil {
 				o.logger.Warn("persisting confirmed pattern to DB", "error", dbErr, "file", fr.Path)
+			}
+			if !authorized {
+				return
 			}
 		}
 	}
@@ -3434,22 +3465,28 @@ func (o *Orchestrator) learnPositivePatterns(ctx context.Context, run *PipelineR
 			// Route praise through IndexFeedbackSignal so the doc lands with
 			// type=feedback, polarity=positive, action=confirmed metadata —
 			// pure-prose content, structured fields in metadata.
-			if err := run.Indexer.IndexFeedbackSignal(ctx, owner, repo, memory.FeedbackMemory{
-				FilePath: fr.Path,
-				Category: string(c.Category),
-				// commentTitle, not c.Body: every feedback document holds the
-				// finding STATEMENT, and c here is a live FileComment whose body
-				// may carry the multi-line "Context:\ndiff --git …" blob the LLM
-				// echoes into `what`. Storing that raw would put a diff-dominated
-				// embedding next to one-sentence documents.
-				OriginalBody: commentTitle(c),
-				Action:       "confirmed",
-				PRNumber:     run.PREvent.PRNumber,
-				Source:       memory.SourceAutomaticPraise,
-			}); err != nil {
+			authorized, err := memorySinkWrite(ctx, "learnPositivePatterns.feedback", func(writeCtx context.Context) error {
+				return run.Indexer.IndexFeedbackSignal(writeCtx, owner, repo, memory.FeedbackMemory{
+					FilePath: fr.Path,
+					Category: string(c.Category),
+					// commentTitle, not c.Body: every feedback document holds the
+					// finding STATEMENT, and c here is a live FileComment whose body
+					// may carry the multi-line "Context:\ndiff --git …" blob the LLM
+					// echoes into `what`. Storing that raw would put a diff-dominated
+					// embedding next to one-sentence documents.
+					OriginalBody: commentTitle(c),
+					Action:       "confirmed",
+					PRNumber:     run.PREvent.PRNumber,
+					Source:       memory.SourceAutomaticPraise,
+				})
+			})
+			if err != nil {
 				o.logger.Warn("positive pattern indexing failed", "error", err)
-			} else {
+			} else if authorized {
 				indexed++
+			}
+			if !authorized {
+				return indexed
 			}
 		}
 	}
@@ -3599,15 +3636,23 @@ The "pattern" value must be the actual pattern text, NOT the word "description".
 			continue
 		}
 		customID := memory.PatternCustomID(owner, repo, "learned", p.Pattern)
-		smResp, err := run.Indexer.IndexPattern(ctx, repo, memory.PatternMemory{
-			Content:  p.Pattern,
-			CustomID: customID,
-			Source:   "auto_learn",
-			PRNumber: run.PREvent.PRNumber,
-			Category: p.Category,
+		var smResp *memory.IndexResult
+		authorized, err := memorySinkWrite(ctx, "autoLearnPatterns.memory", func(writeCtx context.Context) error {
+			var writeErr error
+			smResp, writeErr = run.Indexer.IndexPattern(writeCtx, repo, memory.PatternMemory{
+				Content:  p.Pattern,
+				CustomID: customID,
+				Source:   "auto_learn",
+				PRNumber: run.PREvent.PRNumber,
+				Category: p.Category,
+			})
+			return writeErr
 		})
 		if err != nil {
 			o.logger.Warn("indexing auto-learned pattern", "error", err)
+		}
+		if !authorized {
+			return
 		}
 		var smID *string
 		if smResp != nil {
@@ -3616,29 +3661,51 @@ The "pattern" value must be the actual pattern text, NOT the word "description".
 		src := "auto_learn"
 		cat := strPtrOrNil(p.Category)
 		prNum := run.PREvent.PRNumber
-		if _, dbErr := o.st.CreatePattern(ctx, run.DBInstallationID, &run.DBRepoID, p.Pattern, smID, strPtrOrNil("argus:auto_learn"), &src, cat, &prNum, strPtrOrNil(customID), nil); dbErr != nil {
+		authorized, dbErr := memorySinkWrite(ctx, "autoLearnPatterns.pattern", func(writeCtx context.Context) error {
+			_, writeErr := o.st.CreatePattern(writeCtx, run.DBInstallationID, &run.DBRepoID, p.Pattern, smID, strPtrOrNil("argus:auto_learn"), &src, cat, &prNum, strPtrOrNil(customID), nil)
+			return writeErr
+		})
+		if dbErr != nil {
 			o.logger.Warn("persisting auto-learned pattern", "error", dbErr)
+		}
+		if !authorized {
+			return
 		}
 
 		// Also store as org-level if pattern is generic (doesn't reference repo-specific file paths)
 		if isGenericPattern(p.Pattern, run.Diff) {
 			orgCustomID := memory.PatternCustomID(owner, "", "org_learned", p.Pattern)
 			var orgSmID *string
-			orgResp, orgErr := run.Indexer.IndexSharedPattern(ctx, memory.PatternMemory{
-				Content:  p.Pattern,
-				CustomID: orgCustomID,
-				Source:   "auto_learn",
-				PRNumber: run.PREvent.PRNumber,
-				Category: p.Category,
-				Extra:    map[string]string{"repo": run.PREvent.RepoFullName},
+			var orgResp *memory.IndexResult
+			authorized, orgErr := memorySinkWrite(ctx, "autoLearnPatterns.shared_memory", func(writeCtx context.Context) error {
+				var writeErr error
+				orgResp, writeErr = run.Indexer.IndexSharedPattern(writeCtx, memory.PatternMemory{
+					Content:  p.Pattern,
+					CustomID: orgCustomID,
+					Source:   "auto_learn",
+					PRNumber: run.PREvent.PRNumber,
+					Category: p.Category,
+					Extra:    map[string]string{"repo": run.PREvent.RepoFullName},
+				})
+				return writeErr
 			})
 			if orgErr != nil {
 				o.logger.Warn("indexing org pattern", "error", orgErr)
 			} else if orgResp != nil {
 				orgSmID = &orgResp.ID
 			}
-			if _, dbErr := o.st.CreatePattern(ctx, run.DBInstallationID, nil, p.Pattern, orgSmID, strPtrOrNil("argus:auto_learn"), &src, cat, &prNum, strPtrOrNil(orgCustomID), map[string]string{"repo": run.PREvent.RepoFullName}); dbErr != nil {
+			if !authorized {
+				return
+			}
+			authorized, dbErr := memorySinkWrite(ctx, "autoLearnPatterns.shared_pattern", func(writeCtx context.Context) error {
+				_, writeErr := o.st.CreatePattern(writeCtx, run.DBInstallationID, nil, p.Pattern, orgSmID, strPtrOrNil("argus:auto_learn"), &src, cat, &prNum, strPtrOrNil(orgCustomID), map[string]string{"repo": run.PREvent.RepoFullName})
+				return writeErr
+			})
+			if dbErr != nil {
 				o.logger.Warn("persisting org-level pattern", "error", dbErr)
+			}
+			if !authorized {
+				return
 			}
 			o.logger.Info("promoted pattern to org level", "pattern", util.Truncate(p.Pattern, 80, true))
 		}
@@ -3754,15 +3821,23 @@ Return [] if no clear conventions emerge. JSON array only.`, run.PREvent.RepoFul
 		}
 		content := fmt.Sprintf("Convention [%s]: %s", c.Category, c.Convention)
 		customID := memory.PatternCustomID(owner, repo, "convention", c.Convention)
-		smResp, err := run.Indexer.IndexPattern(ctx, repo, memory.PatternMemory{
-			Content:  content,
-			CustomID: customID,
-			Source:   "convention_extraction",
-			PRNumber: run.PREvent.PRNumber,
-			Category: c.Category,
+		var smResp *memory.IndexResult
+		authorized, err := memorySinkWrite(ctx, "extractConventions.memory", func(writeCtx context.Context) error {
+			var writeErr error
+			smResp, writeErr = run.Indexer.IndexPattern(writeCtx, repo, memory.PatternMemory{
+				Content:  content,
+				CustomID: customID,
+				Source:   "convention_extraction",
+				PRNumber: run.PREvent.PRNumber,
+				Category: c.Category,
+			})
+			return writeErr
 		})
 		if err != nil {
 			o.logger.Warn("indexing convention", "error", err)
+		}
+		if !authorized {
+			return
 		}
 		var smID *string
 		if smResp != nil {
@@ -3771,8 +3846,15 @@ Return [] if no clear conventions emerge. JSON array only.`, run.PREvent.RepoFul
 		src := "convention"
 		cat := strPtrOrNil(c.Category)
 		prNum := run.PREvent.PRNumber
-		if _, dbErr := o.st.CreatePattern(ctx, run.DBInstallationID, &run.DBRepoID, content, smID, strPtrOrNil("argus:convention"), &src, cat, &prNum, strPtrOrNil(customID), nil); dbErr != nil {
+		authorized, dbErr := memorySinkWrite(ctx, "extractConventions.pattern", func(writeCtx context.Context) error {
+			_, writeErr := o.st.CreatePattern(writeCtx, run.DBInstallationID, &run.DBRepoID, content, smID, strPtrOrNil("argus:convention"), &src, cat, &prNum, strPtrOrNil(customID), nil)
+			return writeErr
+		})
+		if dbErr != nil {
 			o.logger.Warn("persisting convention pattern", "error", dbErr)
+		}
+		if !authorized {
+			return
 		}
 	}
 
@@ -3907,17 +3989,26 @@ Max 200 words. Be concrete.`
 		run.Tokens.addToTotal(fileTok)
 
 		customID := memory.SynthesisCustomID(owner, repo, fc.path)
-		_, err = run.Indexer.IndexPattern(ctx, repo, memory.PatternMemory{
-			Content:  resp.Content,
-			CustomID: customID,
-			Source:   "synthesis",
-			PRNumber: run.PREvent.PRNumber,
-			FilePath: fc.path,
+		authorized, err := memorySinkWrite(ctx, "synthesizeFileMemories.memory", func(writeCtx context.Context) error {
+			_, writeErr := run.Indexer.IndexPattern(writeCtx, repo, memory.PatternMemory{
+				Content:  resp.Content,
+				CustomID: customID,
+				Source:   "synthesis",
+				PRNumber: run.PREvent.PRNumber,
+				FilePath: fc.path,
+			})
+			return writeErr
 		})
 		if err != nil {
 			o.logger.Warn("indexing file synthesis", "error", err, "file", fc.path)
 			failed++
+			if !authorized {
+				return
+			}
 			continue
+		}
+		if !authorized {
+			return
 		}
 		succeeded++
 	}
@@ -3946,15 +4037,21 @@ func (o *Orchestrator) indexPRSummary(ctx context.Context, run *PipelineRun, own
 		util.Truncate(run.Synthesis.Summary, 800, false))
 
 	customID := memory.PRSummaryCustomID(owner, repo, run.PREvent.PRNumber)
-	_, err := run.Indexer.IndexPattern(ctx, repo, memory.PatternMemory{
-		Content:  content,
-		CustomID: customID,
-		Source:   "pr_summary",
-		PRNumber: run.PREvent.PRNumber,
-		PRAuthor: run.PREvent.PRAuthor,
+	authorized, err := memorySinkWrite(ctx, "indexPRSummary.memory", func(writeCtx context.Context) error {
+		_, writeErr := run.Indexer.IndexPattern(writeCtx, repo, memory.PatternMemory{
+			Content:  content,
+			CustomID: customID,
+			Source:   "pr_summary",
+			PRNumber: run.PREvent.PRNumber,
+			PRAuthor: run.PREvent.PRAuthor,
+		})
+		return writeErr
 	})
 	if err != nil {
 		o.logger.Warn("indexing PR summary", "error", err)
+	}
+	if !authorized {
+		return
 	}
 	publishMemoryIndexed(run, "pr_summary", err == nil, 1)
 }
@@ -3992,15 +4089,23 @@ func (o *Orchestrator) indexArchitectureSummary(ctx context.Context, run *Pipeli
 	// unusual owner/repo names. The literal format string uses `--` between
 	// them — not `/` — so the customId stays in the allowed char set.
 	customID := fmt.Sprintf("arch-summary:%s--%s", memory.CustomIDSanitize(owner), memory.CustomIDSanitize(repo))
-	_, err = run.Indexer.IndexPattern(chokeCtx, repo, memory.PatternMemory{
-		Content:  sb.String(),
-		CustomID: customID,
-		Source:   "arch_summary",
-		Extra:    map[string]string{"choke_points": fmt.Sprintf("%d", len(rows))},
+	authorized, err := memorySinkWrite(chokeCtx, "indexArchitectureSummary.memory", func(writeCtx context.Context) error {
+		_, writeErr := run.Indexer.IndexPattern(writeCtx, repo, memory.PatternMemory{
+			Content:  sb.String(),
+			CustomID: customID,
+			Source:   "arch_summary",
+			Extra:    map[string]string{"choke_points": fmt.Sprintf("%d", len(rows))},
+		})
+		return writeErr
 	})
 	if err != nil {
 		o.logger.Warn("indexing arch summary", "error", err)
-		publishMemoryIndexed(run, "arch_summary", false, 0)
+		if authorized {
+			publishMemoryIndexed(run, "arch_summary", false, 0)
+		}
+		return
+	}
+	if !authorized {
 		return
 	}
 	o.logger.Info("indexed architecture summary", "owner", owner, "repo", repo, "choke_points", len(rows))
@@ -4128,11 +4233,19 @@ Rules:
 			Source: e.Source, Target: e.Target, Kind: e.Kind,
 		})
 	}
-	writtenNodes, writtenEdges, err := o.st.ReplaceArchitectureAnnotations(
-		ctx, run.DBRepoID, run.PREvent.PRNumber, nodes, edges,
-	)
+	var writtenNodes, writtenEdges int
+	authorized, err := memorySinkWrite(ctx, "extractArchitectureGraph.annotations", func(writeCtx context.Context) error {
+		var writeErr error
+		writtenNodes, writtenEdges, writeErr = o.st.ReplaceArchitectureAnnotations(
+			writeCtx, run.DBRepoID, run.PREvent.PRNumber, nodes, edges,
+		)
+		return writeErr
+	})
 	if err != nil {
 		o.logger.Warn("replaceArchitectureAnnotations", "error", err)
+		return
+	}
+	if !authorized {
 		return
 	}
 
@@ -4537,7 +4650,7 @@ func (o *Orchestrator) validateStage(ctx context.Context, run *PipelineRun) erro
 // post() to run its pre-post and post-review memory sink clusters under one
 // panic-isolation loop.
 func (o *Orchestrator) indexer() *PostReviewIndexer {
-	return &PostReviewIndexer{o: o}
+	return &PostReviewIndexer{o: o, authority: o.sinkAuthority}
 }
 
 func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghReviewID int64, owner, repo string) error {

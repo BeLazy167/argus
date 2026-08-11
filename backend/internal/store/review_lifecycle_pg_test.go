@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -204,5 +205,76 @@ func TestReviewLifecycleStructuredState(t *testing.T) {
 	}
 	if _, exists, applied, err := st.ConvergePostedReview(ctx, reviewID, 1); err != nil || !exists || applied {
 		t.Fatalf("cancelled converge exists=%v applied=%v err=%v", exists, applied, err)
+	}
+}
+
+func TestReviewAttemptOwnedWriteLinearizesWithRetry(t *testing.T) {
+	pool, ctx := fileMemoryTestPool(t)
+	_, rawID := seedFileMemoryRepo(t, ctx, pool)
+	reviewID := uuid.MustParse(rawID)
+	if _, err := pool.Exec(ctx, `UPDATE reviews SET status = 'failed' WHERE id = $1`, reviewID); err != nil {
+		t.Fatal(err)
+	}
+	st := NewWithDB(pool)
+	testCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	writeEntered := make(chan struct{})
+	releaseWrite := make(chan struct{})
+	writeResult := make(chan error, 1)
+	go func() {
+		current, err := st.RunIfReviewAttemptCurrent(testCtx, reviewID, 1, func(writeCtx context.Context) error {
+			// This separate-pool FK write proves FOR NO KEY UPDATE is compatible
+			// with the KEY SHARE lock taken for a review-owned child row.
+			if _, insertErr := pool.Exec(writeCtx, `INSERT INTO review_comments (review_id, attempt_generation, file_path, body) VALUES ($1, 1, 'owned.go', 'owned write')`, reviewID); insertErr != nil {
+				return insertErr
+			}
+			close(writeEntered)
+			<-releaseWrite
+			return nil
+		})
+		if err == nil && !current {
+			err = errors.New("generation 1 unexpectedly lost ownership before its guarded write")
+		}
+		writeResult <- err
+	}()
+	select {
+	case <-writeEntered:
+	case err := <-writeResult:
+		t.Fatalf("guarded write failed before entering: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("guarded write did not enter")
+	}
+
+	retryStarted := make(chan struct{})
+	retryResult := make(chan error, 1)
+	go func() {
+		close(retryStarted)
+		generation, won, err := st.BeginReviewRetry(testCtx, reviewID)
+		if err == nil && (!won || generation != 2) {
+			err = fmt.Errorf("retry = generation %d won %v, want generation 2 winner", generation, won)
+		}
+		retryResult <- err
+	}()
+	<-retryStarted
+	close(releaseWrite)
+
+	if err := <-writeResult; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-retryResult; err != nil {
+		t.Fatal(err)
+	}
+
+	called := false
+	current, err := st.RunIfReviewAttemptCurrent(ctx, reviewID, 1, func(context.Context) error {
+		called = true
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current || called {
+		t.Fatalf("stale guard current=%v called=%v, want no obsolete mutation", current, called)
 	}
 }
