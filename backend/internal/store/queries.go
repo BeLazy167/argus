@@ -372,8 +372,11 @@ func (s *Store) SetFindingResolvedSHA(ctx context.Context, commentID uuid.UUID, 
 		return nil
 	}
 	_, err := s.Pool.Exec(ctx, `
-		UPDATE review_comments SET resolved_sha = $2
-		WHERE id = $1 AND resolved_sha IS NULL
+		UPDATE review_comments rc SET resolved_sha = $2
+		FROM reviews r
+		WHERE rc.id = $1 AND rc.review_id = r.id
+		  AND rc.attempt_generation = r.attempt_generation
+		  AND rc.resolved_sha IS NULL
 	`, commentID, sha)
 	if err != nil {
 		return fmt.Errorf("setting finding resolved sha: %w", err)
@@ -582,6 +585,13 @@ func (s *Store) ReplaceReviewMinorNotes(ctx context.Context, reviewID uuid.UUID,
 		return fmt.Errorf("beginning minor notes replace: %w", err)
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
+	var currentGeneration int
+	if err = tx.QueryRow(ctx, `SELECT attempt_generation FROM reviews WHERE id = $1 FOR UPDATE`, reviewID).Scan(&currentGeneration); err != nil {
+		return fmt.Errorf("locking review for minor notes: %w", err)
+	}
+	if currentGeneration != attemptGeneration {
+		return ErrReviewAttemptStale
+	}
 	if _, err = tx.Exec(ctx, `DELETE FROM review_minor_notes WHERE review_id = $1 AND attempt_generation = $2`, reviewID, attemptGeneration); err != nil {
 		return fmt.Errorf("clearing minor notes: %w", err)
 	}
@@ -837,11 +847,15 @@ func (s *Store) ListModelConfigsWithFallback(ctx context.Context, installationID
 
 // --- Review Comments ---
 
+// ErrReviewAttemptStale means an attempt-owned write lost the generation race
+// to BeginReviewRetry. Callers must stop that worker instead of publishing it.
+var ErrReviewAttemptStale = errors.New("review attempt is no longer current")
+
 func (s *Store) CreateReviewComment(ctx context.Context, reviewID uuid.UUID, attemptGeneration int, filePath string, startLine, endLine *int, side *string, body string, severity, category, specialist, codeSnippet *string, confidenceScore *int, githubCommentID *int64, matchedPatternID *int64, matchedPatternScore *float32, enforcedRuleContent *string, isNewFinding bool, suppressedReason *string, state FindingState) error {
 	if state == "" {
 		state = FindingStatePosted
 	}
-	return s.q.CreateReviewComment(ctx, db.CreateReviewCommentParams{
+	count, err := s.q.CreateReviewComment(ctx, db.CreateReviewCommentParams{
 		ReviewID: reviewID, AttemptGeneration: attemptGeneration, FilePath: filePath, StartLine: startLine, EndLine: endLine, Side: side,
 		Body: body, Severity: severity, Category: category, Specialist: specialist,
 		ConfidenceScore: confidenceScore, CodeSnippet: codeSnippet, GithubCommentID: githubCommentID,
@@ -849,6 +863,13 @@ func (s *Store) CreateReviewComment(ctx context.Context, reviewID uuid.UUID, att
 		EnforcedRuleContent: enforcedRuleContent, IsNewFinding: &isNewFinding,
 		SuppressedReason: suppressedReason, State: string(state),
 	})
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		return ErrReviewAttemptStale
+	}
+	return nil
 }
 
 // GetCommentByGithubID looks up a review comment by its GitHub comment ID.
@@ -951,8 +972,11 @@ func (s *Store) ListUnboundReviewComments(ctx context.Context, reviewID uuid.UUI
 // onto a single id (see FindingLifecycle #165 same-line binding fix).
 func (s *Store) BindGitHubCommentID(ctx context.Context, commentID uuid.UUID, githubCommentID int64) (bool, error) {
 	tag, err := s.Pool.Exec(ctx, `
-		UPDATE review_comments SET github_comment_id = $2
-		WHERE id = $1 AND github_comment_id IS NULL
+		UPDATE review_comments rc SET github_comment_id = $2
+		FROM reviews r
+		WHERE rc.id = $1 AND rc.review_id = r.id
+		  AND rc.attempt_generation = r.attempt_generation
+		  AND rc.github_comment_id IS NULL
 	`, commentID, githubCommentID)
 	if err != nil {
 		return false, fmt.Errorf("binding github comment id: %w", err)

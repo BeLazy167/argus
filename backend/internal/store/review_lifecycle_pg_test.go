@@ -2,12 +2,14 @@ package store
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 func TestReviewRetryGenerationConvergesAcrossMachines(t *testing.T) {
@@ -68,6 +70,57 @@ func TestReviewRetryGenerationConvergesAcrossMachines(t *testing.T) {
 	}
 	if len(comments) != 1 || comments[0].Body != "current" || comments[0].AttemptGeneration != 2 {
 		t.Fatalf("comments = %+v, want current generation only", comments)
+	}
+
+	if err := st.CreateReviewComment(ctx, reviewID, 1, "stale.go", nil, nil, nil, "stale write", nil, nil, nil, nil, nil, nil, nil, nil, nil, true, nil, FindingStatePosted); !errors.Is(err, ErrReviewAttemptStale) {
+		t.Fatalf("stale comment write error = %v, want ErrReviewAttemptStale", err)
+	}
+	if err := st.CreateReviewComment(ctx, reviewID, 2, "current.go", nil, nil, nil, "current write", nil, nil, nil, nil, nil, nil, nil, nil, nil, true, nil, FindingStatePosted); err != nil {
+		t.Fatalf("current comment write: %v", err)
+	}
+	if err := st.ReplaceReviewMinorNotes(ctx, reviewID, 1, []ReviewMinorNote{{FilePath: "stale.go", Title: "stale"}}); !errors.Is(err, ErrReviewAttemptStale) {
+		t.Fatalf("stale minor-note write error = %v, want ErrReviewAttemptStale", err)
+	}
+
+	var obsoleteID uuid.UUID
+	if err := pool.QueryRow(ctx, `UPDATE review_comments SET github_comment_id=111 WHERE review_id=$1 AND attempt_generation=1 RETURNING id`, reviewID).Scan(&obsoleteID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.GetCommentByGithubID(ctx, 111); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("obsolete github comment lookup error = %v, want no rows", err)
+	}
+	if inserted, err := st.RecordCommentOutcome(ctx, obsoleteID, "confirmed"); err != nil || inserted {
+		t.Fatalf("obsolete outcome inserted=%v err=%v", inserted, err)
+	}
+	if updated, err := st.UpdateFindingStateFrom(ctx, obsoleteID, FindingStateDismissed, []FindingState{FindingStatePosted}); err != nil || updated {
+		t.Fatalf("obsolete state updated=%v err=%v", updated, err)
+	}
+	if hydrated, err := st.HydrateThreadNodeID(ctx, reviewID, 111, "thread-obsolete"); err != nil || hydrated != 0 {
+		t.Fatalf("obsolete thread hydrated=%d err=%v", hydrated, err)
+	}
+
+	var installationID, patternID int64
+	if err := pool.QueryRow(ctx, `SELECT installation_id FROM repos WHERE id=$1`, repoID).Scan(&installationID); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO patterns (installation_id,repo_id,content,memory_custom_id) VALUES ($1,$2,'retry pattern','retry-pattern') RETURNING id`, installationID, repoID).Scan(&patternID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO pattern_stats (installation_id,repo_id,memory_doc_id,content_hash) VALUES ($1,$2,'retry-pattern','hash')`, installationID, repoID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE review_comments SET matched_pattern_id=$2 WHERE review_id=$1`, reviewID, patternID); err != nil {
+		t.Fatal(err)
+	}
+	if _, updated, err := st.RecordPatternOutcome(ctx, obsoleteID, patternID, true); err != nil || updated {
+		t.Fatalf("obsolete pattern outcome updated=%v err=%v", updated, err)
+	}
+	var currentID uuid.UUID
+	if err := pool.QueryRow(ctx, `SELECT id FROM review_comments WHERE review_id=$1 AND attempt_generation=2 ORDER BY created_at LIMIT 1`, reviewID).Scan(&currentID); err != nil {
+		t.Fatal(err)
+	}
+	if _, updated, err := st.RecordPatternOutcome(ctx, currentID, patternID, true); err != nil || !updated {
+		t.Fatalf("current pattern outcome updated=%v err=%v", updated, err)
 	}
 }
 

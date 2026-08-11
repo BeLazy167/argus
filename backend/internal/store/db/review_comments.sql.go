@@ -12,9 +12,12 @@ import (
 	"github.com/google/uuid"
 )
 
-const createReviewComment = `-- name: CreateReviewComment :exec
+const createReviewComment = `-- name: CreateReviewComment :execrows
 INSERT INTO review_comments (review_id, attempt_generation, file_path, start_line, end_line, side, body, severity, category, specialist, confidence_score, code_snippet, github_comment_id, matched_pattern_id, matched_pattern_score, enforced_rule_content, is_new_finding, suppressed_reason, state)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19
+WHERE EXISTS (
+  SELECT 1 FROM reviews WHERE id = $1 AND attempt_generation = $2
+)
 `
 
 type CreateReviewCommentParams struct {
@@ -39,8 +42,8 @@ type CreateReviewCommentParams struct {
 	State               string    `json:"state"`
 }
 
-func (q *Queries) CreateReviewComment(ctx context.Context, arg CreateReviewCommentParams) error {
-	_, err := q.db.Exec(ctx, createReviewComment,
+func (q *Queries) CreateReviewComment(ctx context.Context, arg CreateReviewCommentParams) (int64, error) {
+	result, err := q.db.Exec(ctx, createReviewComment,
 		arg.ReviewID,
 		arg.AttemptGeneration,
 		arg.FilePath,
@@ -61,7 +64,10 @@ func (q *Queries) CreateReviewComment(ctx context.Context, arg CreateReviewComme
 		arg.SuppressedReason,
 		arg.State,
 	)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const getCommentByGithubID = `-- name: GetCommentByGithubID :one
@@ -332,8 +338,10 @@ func (q *Queries) GetReviewComments(ctx context.Context, reviewID uuid.UUID) ([]
 }
 
 const getThreadLinkForComment = `-- name: GetThreadLinkForComment :one
-SELECT id, review_id, file_path, end_line, github_comment_id, graphql_thread_node_id
-FROM review_comments WHERE id = $1
+SELECT rc.id, rc.review_id, rc.file_path, rc.end_line, rc.github_comment_id, rc.graphql_thread_node_id
+FROM review_comments rc
+JOIN reviews r ON r.id = rc.review_id
+WHERE rc.id = $1 AND rc.attempt_generation = r.attempt_generation
 `
 
 type GetThreadLinkForCommentRow struct {
@@ -366,6 +374,7 @@ const hydrateThreadNodeID = `-- name: HydrateThreadNodeID :execrows
 UPDATE review_comments
 SET graphql_thread_node_id = $1
 WHERE review_id = $2 AND github_comment_id = $3 AND graphql_thread_node_id IS NULL
+  AND attempt_generation = (SELECT attempt_generation FROM reviews WHERE id = $2)
 `
 
 type HydrateThreadNodeIDParams struct {
@@ -444,10 +453,12 @@ func (q *Queries) ListPostedFindings(ctx context.Context, arg ListPostedFindings
 }
 
 const listThreadLinksForReview = `-- name: ListThreadLinksForReview :many
-SELECT id, review_id, file_path, end_line, github_comment_id, graphql_thread_node_id
-FROM review_comments
-WHERE review_id = $1 AND graphql_thread_node_id IS NOT NULL
-ORDER BY file_path, end_line
+SELECT rc.id, rc.review_id, rc.file_path, rc.end_line, rc.github_comment_id, rc.graphql_thread_node_id
+FROM review_comments rc
+JOIN reviews r ON r.id = rc.review_id
+WHERE rc.review_id = $1 AND rc.attempt_generation = r.attempt_generation
+  AND rc.graphql_thread_node_id IS NOT NULL
+ORDER BY rc.file_path, rc.end_line
 `
 
 type ListThreadLinksForReviewRow struct {
@@ -491,20 +502,23 @@ func (q *Queries) ListThreadLinksForReview(ctx context.Context, reviewID uuid.UU
 
 const recordCommentOutcome = `-- name: RecordCommentOutcome :execrows
 INSERT INTO comment_outcomes (review_comment_id, outcome)
-VALUES ($1, $2)
+SELECT rc.id, $1
+FROM review_comments rc
+JOIN reviews r ON r.id = rc.review_id
+WHERE rc.id = $2 AND rc.attempt_generation = r.attempt_generation
 ON CONFLICT (review_comment_id, outcome) DO NOTHING
 `
 
 type RecordCommentOutcomeParams struct {
-	ReviewCommentID uuid.UUID `json:"review_comment_id"`
 	Outcome         string    `json:"outcome"`
+	ReviewCommentID uuid.UUID `json:"review_comment_id"`
 }
 
 // Idempotent: webhook retries delivering the same reaction event produce no-op
 // second inserts instead of duplicate rows. Paired with the UNIQUE constraint
 // added in migration 037.
 func (q *Queries) RecordCommentOutcome(ctx context.Context, arg RecordCommentOutcomeParams) (int64, error) {
-	result, err := q.db.Exec(ctx, recordCommentOutcome, arg.ReviewCommentID, arg.Outcome)
+	result, err := q.db.Exec(ctx, recordCommentOutcome, arg.Outcome, arg.ReviewCommentID)
 	if err != nil {
 		return 0, err
 	}

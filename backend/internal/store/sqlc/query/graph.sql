@@ -86,6 +86,7 @@ SELECT rc.file_path,
 FROM review_comments rc
 JOIN reviews r ON r.id = rc.review_id
 WHERE r.repo_id = $1
+  AND rc.attempt_generation = r.attempt_generation
 GROUP BY rc.file_path;
 
 -- name: ListArchCoupling :many
@@ -152,6 +153,7 @@ SELECT COUNT(*)::int as bugs
 FROM review_comments rc
 JOIN reviews r ON r.id = rc.review_id
 WHERE r.repo_id = $1 AND rc.file_path = $2 AND rc.severity IN ('critical','warning')
+  AND rc.attempt_generation = r.attempt_generation
   AND rc.state <> 'suppressed';
 
 -- name: GetFileMemoryPatterns :many

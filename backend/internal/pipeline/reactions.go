@@ -11,6 +11,7 @@ import (
 	ghpkg "github.com/BeLazy167/argus/backend/internal/github"
 	"github.com/BeLazy167/argus/backend/internal/memory"
 	"github.com/BeLazy167/argus/backend/internal/store"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -121,7 +122,7 @@ func (ra *ReactionAnalyzer) HandleCommentReactions(ctx context.Context, event gh
 			ra.logger.Error("reaction: recording outcome", "error", recordErr, "outcome", action)
 		}
 		if inserted {
-			recordPatternOutcome(ctx, ra.store, ra.logger, comment.MatchedPatternID, action)
+			recordPatternOutcome(ctx, ra.store, ra.logger, comment.ID, comment.MatchedPatternID, action)
 		}
 	}
 
@@ -222,11 +223,11 @@ func (ra *ReactionAnalyzer) SweepPRReactions(ctx context.Context, installationID
 // No-op when the comment matched no pattern (patternID nil) or the signal is
 // soft ("ignored"). Shared by the reaction and reply outcome paths. Every
 // failure is non-fatal Warn — outcome learning must never break the webhook.
-func recordPatternOutcome(ctx context.Context, st *store.Store, logger *slog.Logger, patternID *int64, action string) {
+func recordPatternOutcome(ctx context.Context, st *store.Store, logger *slog.Logger, commentID uuid.UUID, patternID *int64, action string) {
 	if patternID == nil || (action != "confirmed" && action != "dismissed") {
 		return
 	}
-	quality, ok, err := st.RecordPatternOutcome(ctx, *patternID, action == "confirmed")
+	quality, ok, err := st.RecordPatternOutcome(ctx, commentID, *patternID, action == "confirmed")
 	if err != nil {
 		logger.Warn("pattern outcome", "error", err, "pattern_id", *patternID, "action", action)
 		return

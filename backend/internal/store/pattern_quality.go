@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/BeLazy167/argus/backend/internal/store/db"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -93,7 +94,7 @@ func (s *Store) IncrementPatternMatch(ctx context.Context, patternID int64) erro
 // join maps it to pattern_stats via the shared memory_doc_id. Returns the
 // quality AFTER the update and updated=false when no stats row exists yet (a
 // match that predates stats wiring, or a pattern never seeded) — non-fatal.
-func (s *Store) RecordPatternOutcome(ctx context.Context, patternID int64, confirmed bool) (quality float64, updated bool, err error) {
+func (s *Store) RecordPatternOutcome(ctx context.Context, commentID uuid.UUID, patternID int64, confirmed bool) (quality float64, updated bool, err error) {
 	var confirmInc, dismissInc int
 	if confirmed {
 		confirmInc = 1
@@ -116,8 +117,14 @@ func (s *Store) RecordPatternOutcome(ctx context.Context, patternID int64, confi
 		WHERE p.id = $1
 		  AND ps.memory_doc_id = COALESCE(p.memory_custom_id, p.memory_doc_id)
 		  AND ps.installation_id = p.installation_id
+		  AND EXISTS (
+		      SELECT 1 FROM review_comments rc
+		      JOIN reviews r ON r.id = rc.review_id
+		      WHERE rc.id = $4 AND rc.matched_pattern_id = p.id
+		        AND rc.attempt_generation = r.attempt_generation
+		  )
 		RETURNING ps.quality_score
-	`, patternID, confirmInc, dismissInc).Scan(&quality)
+	`, patternID, confirmInc, dismissInc, commentID).Scan(&quality)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, false, nil
 	}
@@ -147,7 +154,8 @@ func (s *Store) GetAutoSuppressedCategories(ctx context.Context, repoID int64) (
 			FROM comment_outcomes co
 			JOIN review_comments rc ON co.review_comment_id = rc.id
 			JOIN reviews rv ON rc.review_id = rv.id
-			WHERE rv.repo_id = $1 AND rc.category IS NOT NULL AND rc.category <> ''
+			WHERE rv.repo_id = $1 AND rc.attempt_generation = rv.attempt_generation
+			  AND rc.category IS NOT NULL AND rc.category <> ''
 		) recent
 		WHERE rn <= $2
 		GROUP BY category

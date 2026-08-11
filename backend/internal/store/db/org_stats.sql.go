@@ -158,6 +158,7 @@ JOIN reviews r ON rc.review_id = r.id
 JOIN repos rp ON r.repo_id = rp.id
 WHERE rp.installation_id = ANY($1::bigint[])
   AND r.created_at >= NOW() - $2::interval
+  AND rc.attempt_generation = r.attempt_generation
   AND rc.state <> 'suppressed'
 GROUP BY rc.category
 ORDER BY COUNT(*) DESC
@@ -205,6 +206,7 @@ JOIN reviews r ON rc.review_id = r.id
 JOIN repos rp ON r.repo_id = rp.id
 WHERE rp.installation_id = ANY($1::bigint[])
   AND r.created_at >= NOW() - $2::interval
+  AND rc.attempt_generation = r.attempt_generation
   AND rc.state <> 'suppressed'
 GROUP BY rc.severity
 ORDER BY COUNT(*) DESC
@@ -252,6 +254,7 @@ JOIN reviews r ON rc.review_id = r.id
 JOIN repos rp ON r.repo_id = rp.id
 WHERE rp.installation_id = ANY($1::bigint[])
   AND r.created_at >= NOW() - $2::interval
+  AND rc.attempt_generation = r.attempt_generation
   AND rc.state <> 'suppressed'
 `
 
@@ -330,7 +333,7 @@ SELECT
     -- state <> 'suppressed': a suppressed finding was generated then withheld,
     -- so the PR author never received it. Counting it inflates the org's
     -- critical-finding headline with defects nobody was ever told about.
-    (SELECT COUNT(*) FROM review_comments rc JOIN scoped s ON rc.review_id = s.id WHERE rc.severity = 'critical' AND rc.state <> 'suppressed')::int AS critical_finds,
+    (SELECT COUNT(*) FROM review_comments rc JOIN scoped s ON rc.review_id = s.id WHERE rc.attempt_generation = s.attempt_generation AND rc.severity = 'critical' AND rc.state <> 'suppressed')::int AS critical_finds,
     COALESCE((SELECT (COUNT(*) FILTER (WHERE score < 10) * 100 / NULLIF(COUNT(*) FILTER (WHERE score IS NOT NULL), 0))::int FROM scoped), 0) AS catch_rate
 `
 
@@ -527,6 +530,7 @@ JOIN reviews r ON rc.review_id = r.id
 JOIN repos rp ON r.repo_id = rp.id
 WHERE rp.installation_id = ANY($1::bigint[])
   AND r.created_at >= NOW() - $2::interval
+  AND rc.attempt_generation = r.attempt_generation
   AND rc.severity = 'critical'
   AND rc.state <> 'suppressed'
   AND r.pr_author IS NOT NULL AND r.pr_author != ''

@@ -48,6 +48,7 @@ SELECT
         JOIN reviews rv ON rc.review_id = rv.id
         JOIN repos r ON rv.repo_id = r.id
         WHERE r.installation_id = ANY(@installation_ids::bigint[])
+          AND rc.attempt_generation = rv.attempt_generation
           AND co.created_at >= NOW() - sqlc.arg(period)::text::interval
     ), 0)::int AS feedback_indexed;
 

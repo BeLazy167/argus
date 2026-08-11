@@ -148,7 +148,7 @@ func (ra *ReplyAnalyzer) Analyze(ctx context.Context, event ghpkg.CommentEvent) 
 			ra.logger.Error("recording comment outcome", "error", err, "outcome", plan.Outcome)
 		}
 		if inserted {
-			recordPatternOutcome(ctx, ra.store, ra.logger, original.MatchedPatternID, plan.Outcome)
+			recordPatternOutcome(ctx, ra.store, ra.logger, original.ID, original.MatchedPatternID, plan.Outcome)
 		}
 	}
 

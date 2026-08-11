@@ -1,6 +1,9 @@
--- name: CreateReviewComment :exec
+-- name: CreateReviewComment :execrows
 INSERT INTO review_comments (review_id, attempt_generation, file_path, start_line, end_line, side, body, severity, category, specialist, confidence_score, code_snippet, github_comment_id, matched_pattern_id, matched_pattern_score, enforced_rule_content, is_new_finding, suppressed_reason, state)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19);
+SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19
+WHERE EXISTS (
+  SELECT 1 FROM reviews WHERE id = $1 AND attempt_generation = $2
+);
 
 -- name: GetReviewComments :many
 SELECT id, review_id, file_path, start_line, end_line, side, body, severity, category,
@@ -27,7 +30,10 @@ WHERE rc.github_comment_id = $1
 -- second inserts instead of duplicate rows. Paired with the UNIQUE constraint
 -- added in migration 037.
 INSERT INTO comment_outcomes (review_comment_id, outcome)
-VALUES ($1, $2)
+SELECT rc.id, sqlc.arg(outcome)
+FROM review_comments rc
+JOIN reviews r ON r.id = rc.review_id
+WHERE rc.id = sqlc.arg(review_comment_id) AND rc.attempt_generation = r.attempt_generation
 ON CONFLICT (review_comment_id, outcome) DO NOTHING;
 
 -- name: GetCommentOutcomes :many
@@ -42,23 +48,28 @@ FROM comment_outcomes WHERE review_comment_id = $1 ORDER BY created_at DESC;
 -- affected so the caller can log hydration coverage.
 UPDATE review_comments
 SET graphql_thread_node_id = $1
-WHERE review_id = $2 AND github_comment_id = $3 AND graphql_thread_node_id IS NULL;
+WHERE review_id = $2 AND github_comment_id = $3 AND graphql_thread_node_id IS NULL
+  AND attempt_generation = (SELECT attempt_generation FROM reviews WHERE id = $2);
 
 -- name: GetThreadLinkForComment :one
 -- ThreadRegistry lookup: the full thread identity for one finding. Powers
 -- "dismissing finding X targets exactly X's thread" — the node id returned is
 -- X's own, not a neighbour's picked by line proximity.
-SELECT id, review_id, file_path, end_line, github_comment_id, graphql_thread_node_id
-FROM review_comments WHERE id = $1;
+SELECT rc.id, rc.review_id, rc.file_path, rc.end_line, rc.github_comment_id, rc.graphql_thread_node_id
+FROM review_comments rc
+JOIN reviews r ON r.id = rc.review_id
+WHERE rc.id = $1 AND rc.attempt_generation = r.attempt_generation;
 
 -- name: ListThreadLinksForReview :many
 -- All hydrated thread links for a review — the "threads for review R" lookup
 -- consumers use instead of re-listing every GitHub thread and re-matching by
 -- proximity.
-SELECT id, review_id, file_path, end_line, github_comment_id, graphql_thread_node_id
-FROM review_comments
-WHERE review_id = $1 AND graphql_thread_node_id IS NOT NULL
-ORDER BY file_path, end_line;
+SELECT rc.id, rc.review_id, rc.file_path, rc.end_line, rc.github_comment_id, rc.graphql_thread_node_id
+FROM review_comments rc
+JOIN reviews r ON r.id = rc.review_id
+WHERE rc.review_id = $1 AND rc.attempt_generation = r.attempt_generation
+  AND rc.graphql_thread_node_id IS NOT NULL
+ORDER BY rc.file_path, rc.end_line;
 
 
 -- name: GetPRCompletedReviewComments :many

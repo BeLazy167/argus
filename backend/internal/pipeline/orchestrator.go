@@ -2840,6 +2840,9 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		minorNotes = append(minorNotes, store.ReviewMinorNote{FilePath: note.Path, Line: note.Line, Severity: string(note.Severity), Title: note.Title})
 	}
 	if err := o.st.ReplaceReviewMinorNotes(ctx, run.ReviewID, run.AttemptGeneration, minorNotes); err != nil {
+		if errors.Is(err, store.ErrReviewAttemptStale) {
+			return context.Canceled
+		}
 		o.logger.Error("persisting minor notes", "error", err, "review_id", run.ReviewID)
 	}
 
@@ -2851,7 +2854,16 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	var existingComments int
 	_ = o.db.QueryRow(ctx, `SELECT COUNT(*) FROM review_comments WHERE review_id = $1 AND attempt_generation = $2`, run.ReviewID, run.AttemptGeneration).Scan(&existingComments)
 	if existingComments == 0 {
-		o.indexComments(ctx, run, 0, owner, repo)
+		if err := o.indexComments(ctx, run, 0, owner, repo); err != nil {
+			return err
+		}
+	}
+	current, err = o.st.IsReviewAttemptCurrent(ctx, run.ReviewID, run.AttemptGeneration)
+	if err != nil {
+		return fmt.Errorf("checking review attempt before learning: %w", err)
+	}
+	if !current {
+		return context.Canceled
 	}
 	o.indexConfirmedPatterns(ctx, run, owner, repo)
 
@@ -4527,7 +4539,7 @@ func (o *Orchestrator) indexer() *PostReviewIndexer {
 	return &PostReviewIndexer{o: o}
 }
 
-func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghReviewID int64, owner, repo string) {
+func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghReviewID int64, owner, repo string) error {
 	// Fetch GitHub comment IDs for the review we just posted
 	type ghCommentKey struct {
 		Path string
@@ -4601,10 +4613,21 @@ func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghRe
 			// nil (never posted) — so the dashboard keeps the full record while
 			// the PR stays clean.
 			if err := o.st.CreateReviewComment(ctx, run.ReviewID, run.AttemptGeneration, fr.Path, startLine, &line, &side, formattedBody, &sev, &cat, specialist, snippet, confidenceScore, ghCommentID, matchedPatternID, matchedPatternScore, enforcedRule, c.IsNewFinding, suppressedReason, state); err != nil {
+				if errors.Is(err, store.ErrReviewAttemptStale) {
+					return context.Canceled
+				}
 				o.logger.Error("persisting review comment", "error", err, "file", fr.Path)
 			}
 
 		}
+	}
+
+	current, err := o.st.IsReviewAttemptCurrent(ctx, run.ReviewID, run.AttemptGeneration)
+	if err != nil {
+		return fmt.Errorf("checking review attempt before comment memory: %w", err)
+	}
+	if !current {
+		return context.Canceled
 	}
 
 	// Batch index all comments to memory in a single call. The write
@@ -4636,6 +4659,7 @@ func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghRe
 			o.logger.Error("batch indexing review comments", "error", err, "count", len(batch))
 		}
 	}
+	return nil
 }
 
 // backfillGitHubCommentIDs binds each just-posted GitHub review comment to its

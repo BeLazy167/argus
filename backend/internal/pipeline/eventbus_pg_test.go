@@ -93,7 +93,7 @@ func TestDurableEventBusCrossMachineDeliveryAndReplay(t *testing.T) {
 func TestRecoveryClaimIsAtomicAcrossMachines(t *testing.T) {
 	pool, ctx, reviewID := durableEventTestReview(t)
 	runID := uuid.New()
-	if _, err := pool.Exec(ctx, `INSERT INTO pipeline_states (id,review_id,state,payload,updated_at) VALUES ($1,$2,$3,'{}',NOW()-INTERVAL '20 minutes')`, runID, reviewID, StatePosting); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO pipeline_states (id,review_id,state,payload,updated_at) VALUES ($1,$2,$3,'{}','-infinity'::timestamptz)`, runID, reviewID, StatePosting); err != nil {
 		t.Fatal(err)
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
