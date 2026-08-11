@@ -22,7 +22,6 @@ import (
 
 	"github.com/BeLazy167/argus/backend/internal/config"
 	ghpkg "github.com/BeLazy167/argus/backend/internal/github"
-	"github.com/BeLazy167/argus/backend/internal/graph"
 	"github.com/BeLazy167/argus/backend/internal/llm"
 	"github.com/BeLazy167/argus/backend/internal/memory"
 	"github.com/BeLazy167/argus/backend/internal/obs"
@@ -738,31 +737,6 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 			)
 		}
 	}
-
-	// Incremental graph indexing for changed files (non-blocking, 10s timeout)
-	graphCtx, graphCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-	go func() {
-		defer graphCancel()
-		defer func() {
-			if r := recover(); r != nil {
-				o.logger.Error("[graph] incremental index panic", "recover", r, "pr", event.PRNumber)
-				emitPipelinePanicEvent(graphCtx, o.logger, "graph_incremental_index", r, obs.TraceID(graphCtx))
-			}
-		}()
-		changedFiles, removedFiles := graphIndexPaths(patchSet)
-		if err := o.st.DeleteGraphFiles(graphCtx, dbRepo.ID, removedFiles); err != nil {
-			o.logger.Warn("[graph] deleted-path reconciliation failed", "error", err, "pr", event.PRNumber)
-			return
-		}
-		if len(changedFiles) == 0 {
-			return
-		}
-		if err := graph.IndexFiles(graphCtx, o.st, o.ghClient, event.InstallationID, owner, repo, event.HeadSHA, dbRepo.ID, changedFiles); err != nil {
-			o.logger.Warn("[graph] incremental index failed", "error", err, "pr", event.PRNumber)
-		} else {
-			o.logger.Info("[graph] incremental index done", "files", len(changedFiles), "pr", event.PRNumber)
-		}
-	}()
 
 	// Pre-review context enrichers: SAST hints, architecture context, linked
 	// issues/PRs + feature flags, and author intent. Each is best-effort and
@@ -4021,7 +3995,7 @@ func (o *Orchestrator) indexArchitectureSummary(ctx context.Context, run *Pipeli
 }
 
 // extractArchitectureGraph uses an LLM to identify architectural components from
-// changed files and upserts nodes/edges into the code graph.
+// changed files and stores them as a separate LLM annotation snapshot.
 func (o *Orchestrator) extractArchitectureGraph(ctx context.Context, run *PipelineRun, owner, repo string) {
 	if run.Diff == nil || len(run.Diff.Files) == 0 {
 		return
@@ -4179,24 +4153,31 @@ func diffFilePaths(d *diff.PatchSet) []string {
 	return paths
 }
 
-func graphIndexPaths(d *diff.PatchSet) (active, removed []string) {
+// blastRadiusBasePaths maps a PR diff onto the published default-branch
+// graph. Deleted and renamed files are represented by their old path because
+// that is where existing base dependents point; other changes use the current
+// path. The PR head itself is never projected into code_nodes/code_edges.
+func blastRadiusBasePaths(d *diff.PatchSet) []string {
+	if d == nil {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(d.Files))
+	paths := make([]string, 0, len(d.Files))
 	for _, f := range d.Files {
-		if f.Status == diff.FileDeleted {
-			if f.OldName != "" {
-				removed = append(removed, f.OldName)
-			} else if f.NewName != "" {
-				removed = append(removed, f.NewName)
-			}
+		path := f.NewName
+		if (f.Status == diff.FileDeleted || f.Status == diff.FileRenamed) && f.OldName != "" {
+			path = f.OldName
+		}
+		if path == "" {
 			continue
 		}
-		if f.Status == diff.FileRenamed && f.OldName != "" && f.OldName != f.NewName {
-			removed = append(removed, f.OldName)
+		if _, duplicate := seen[path]; duplicate {
+			continue
 		}
-		if f.NewName != "" {
-			active = append(active, f.NewName)
-		}
+		seen[path] = struct{}{}
+		paths = append(paths, path)
 	}
-	return active, removed
+	return paths
 }
 
 // writeDiffSummary appends truncated diffs for each changed file to a prompt builder.
@@ -4390,7 +4371,8 @@ func (o *Orchestrator) validateStage(ctx context.Context, run *PipelineRun) erro
 			for _, p := range changedPaths {
 				changedSet[p] = true
 			}
-			nodes, err := o.st.GetBlastRadius(ctx, run.DBInstallationID, run.DBRepoID, changedPaths, 2)
+			basePaths := blastRadiusBasePaths(run.Diff)
+			nodes, err := o.st.GetBlastRadius(ctx, run.DBInstallationID, run.DBRepoID, basePaths, 2)
 			if err != nil {
 				o.logger.Warn("[validate] blast radius query failed", "error", err, "pr", run.PREvent.PRNumber)
 				return

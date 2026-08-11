@@ -193,3 +193,66 @@ func TestIndexRepoBoundedRetriesFailedFileBeforePublishing(t *testing.T) {
 		t.Fatalf("retry did not publish: %+v", second)
 	}
 }
+
+func TestConcurrentPRHeadsCannotMutatePublishedGeneration(t *testing.T) {
+	pool, ctx := generationTestPool(t)
+	st := &store.Store{Pool: pool, Q: db.New(pool)}
+	installationID := generationSeedInstallation(t, ctx, pool, "{}")
+	repoID := generationSeedRepo(t, ctx, pool, installationID, "generation/pr-provenance")
+
+	const baseSHA = "base-commit-sha"
+	var generationID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO graph_index_generations
+		  (repo_id, commit_sha, status, expected_files, visited_files, published_at)
+		VALUES ($1, $2, 'published', 1, 1, NOW()) RETURNING id`, repoID, baseSHA).Scan(&generationID); err != nil {
+		t.Fatalf("seed published generation: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE repos SET graph_published_generation_id = $2, graph_index_commit_sha = $3,
+		  graph_index_expected_files = 1, graph_index_visited_files = 1, graph_indexed_at = NOW()
+		WHERE id = $1`, repoID, generationID, baseSHA); err != nil {
+		t.Fatalf("mark published generation: %v", err)
+	}
+	sourceID := generationSeedNode(t, ctx, pool, repoID, "BaseSource", "base.go")
+	targetID := generationSeedNode(t, ctx, pool, repoID, "BaseTarget", "target.go")
+	if _, err := pool.Exec(ctx, `INSERT INTO code_edges (repo_id, source_id, target_id, kind) VALUES ($1, $2, $3, 'calls')`, repoID, sourceID, targetID); err != nil {
+		t.Fatalf("seed base edge: %v", err)
+	}
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	for _, prSHA := range []string{"pr-head-one", "pr-head-two"} {
+		prSHA := prSHA
+		go func() {
+			<-start
+			// A nil GitHub client is intentional: provenance must reject the PR
+			// ref before any fetch can occur.
+			errs <- IndexFiles(ctx, st, nil, 1, "owner", "repo", prSHA, repoID, []string{"base.go"})
+		}()
+	}
+	close(start)
+	for range 2 {
+		if err := <-errs; !errors.Is(err, ErrNonAuthoritativeGraphRef) {
+			t.Fatalf("PR indexing error = %v, want ErrNonAuthoritativeGraphRef", err)
+		}
+	}
+
+	var nodes, edges int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM code_nodes WHERE repo_id = $1`, repoID).Scan(&nodes); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM code_edges WHERE repo_id = $1`, repoID).Scan(&edges); err != nil {
+		t.Fatal(err)
+	}
+	if nodes != 2 || edges != 1 {
+		t.Fatalf("published graph mutated by concurrent PR heads: nodes=%d edges=%d", nodes, edges)
+	}
+	snapshot, err := st.GetGraphSnapshot(ctx, repoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snapshot.Complete || snapshot.CommitSHA != baseSHA || snapshot.GenerationID != generationID {
+		t.Fatalf("snapshot provenance changed: %+v", snapshot)
+	}
+}

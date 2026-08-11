@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -195,9 +196,22 @@ var sourceExts = map[string]bool{
 	".php": true, ".scala": true, ".dart": true,
 }
 
-// IndexFiles performs incremental code graph indexing for specific files.
-// Deletes old nodes for these files, re-parses, and upserts.
+// ErrNonAuthoritativeGraphRef is returned when a caller attempts to write a
+// PR head or stale commit into the published default-branch projection.
+var ErrNonAuthoritativeGraphRef = errors.New("graph ref is not the published generation commit")
+
+// IndexFiles refreshes files only when ref is the exact commit already
+// published for the repository. PR heads belong to review input, not the live
+// authoritative graph, and are rejected before any GitHub fetch or DB write.
 func IndexFiles(ctx context.Context, st *store.Store, ghClient *ghpkg.Client, installationID int64, owner, repo, ref string, repoDBID int64, files []string) error {
+	authoritative, err := st.IsPublishedGraphCommit(ctx, repoDBID, ref)
+	if err != nil {
+		return err
+	}
+	if !authoritative {
+		return fmt.Errorf("%w: repo_id=%d ref=%s", ErrNonAuthoritativeGraphRef, repoDBID, ref)
+	}
+
 	var sourceFiles []string
 	for _, f := range files {
 		if sourceExts[strings.ToLower(filepath.Ext(f))] {

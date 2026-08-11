@@ -127,6 +127,25 @@ func (s *Store) MarkRepoGraphIndexed(ctx context.Context, repoID int64, nextCurs
 	return nil
 }
 
+// IsPublishedGraphCommit reports whether ref is the immutable commit currently
+// materialized in code_nodes/code_edges for repoID. PR heads and stale
+// generations must never write into that published projection.
+func (s *Store) IsPublishedGraphCommit(ctx context.Context, repoID int64, ref string) (bool, error) {
+	var matches bool
+	err := s.Pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM repos r
+			JOIN graph_index_generations g ON g.id = r.graph_published_generation_id
+			WHERE r.id = $1 AND g.repo_id = r.id AND g.status = 'published' AND g.commit_sha = $2
+			  AND NOT g.tree_truncated AND g.failed_files = 0 AND g.visited_files = g.expected_files
+		)`, repoID, ref).Scan(&matches)
+	if err != nil {
+		return false, fmt.Errorf("check published graph commit: %w", err)
+	}
+	return matches, nil
+}
+
 // GraphSnapshot is the externally visible state of the newest full-index generation.
 type GraphSnapshot struct {
 	GenerationID  int64      `json:"generation_id"`

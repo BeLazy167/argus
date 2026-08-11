@@ -318,7 +318,8 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p revie
 			changedPaths = append(changedPaths, f.NewName)
 			changedSet[f.NewName] = true
 		}
-		nodes, err := rs.store.GetBlastRadius(ctx, run.DBInstallationID, run.DBRepoID, changedPaths, 2)
+		basePaths := blastRadiusBasePaths(run.Diff)
+		nodes, err := rs.store.GetBlastRadius(ctx, run.DBInstallationID, run.DBRepoID, basePaths, 2)
 		if err != nil {
 			slog.Warn("blast radius query failed", "error", err)
 		} else {
