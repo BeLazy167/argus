@@ -362,21 +362,19 @@ func (s *Store) GetReview(ctx context.Context, id uuid.UUID) (*Review, error) {
 }
 
 func (s *Store) GetReviewComments(ctx context.Context, reviewID uuid.UUID) ([]ReviewComment, error) {
-	rows, err := s.Pool.Query(ctx, `
-		SELECT id, review_id, file_path, start_line, end_line, side, body, severity, category,
-		       specialist, confidence_score, code_snippet, github_comment_id,
-		       matched_pattern_id, matched_pattern_score, enforced_rule_content, is_new_finding,
-		       created_at, state, suppressed_reason, resolved_sha, attempt_generation
-		FROM review_comments rc
-		WHERE review_id = $1
-		  AND attempt_generation = (SELECT attempt_generation FROM reviews WHERE id = $1)
-		ORDER BY file_path, start_line
-	`, reviewID)
+	rows, err := s.q.GetReviewComments(ctx, reviewID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[ReviewComment])
+	comments := make([]ReviewComment, 0, len(rows))
+	for _, row := range rows {
+		comment, err := reviewCommentFromSQLC(row)
+		if err != nil {
+			return nil, err
+		}
+		comments = append(comments, comment)
+	}
+	return comments, nil
 }
 
 // GetPRCompletedReviewComments returns review comments across ALL completed
@@ -385,22 +383,19 @@ func (s *Store) GetReviewComments(ctx context.Context, reviewID uuid.UUID) ([]Re
 // two pushes ago is still visible to the current run. Ordered by file+line to
 // keep buildPriorComments' per-file grouping deterministic; caller dedupes.
 func (s *Store) GetPRCompletedReviewComments(ctx context.Context, repoID int64, prNumber int) ([]ReviewComment, error) {
-	rows, err := s.Pool.Query(ctx, `
-		SELECT rc.id, rc.review_id, rc.file_path, rc.start_line, rc.end_line, rc.side, rc.body, rc.severity, rc.category,
-		       rc.specialist, rc.confidence_score, rc.code_snippet, rc.github_comment_id,
-		       rc.matched_pattern_id, rc.matched_pattern_score, rc.enforced_rule_content, rc.is_new_finding,
-		       rc.created_at, rc.state, rc.suppressed_reason, rc.resolved_sha, rc.attempt_generation
-		FROM review_comments rc
-		JOIN reviews r ON rc.review_id = r.id
-		WHERE r.repo_id = $1 AND r.pr_number = $2 AND r.status = 'completed'
-		  AND rc.attempt_generation = r.attempt_generation
-		ORDER BY rc.file_path, rc.start_line, rc.created_at
-	`, repoID, prNumber)
+	rows, err := s.q.GetPRCompletedReviewComments(ctx, db.GetPRCompletedReviewCommentsParams{RepoID: repoID, PRNumber: prNumber})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[ReviewComment])
+	comments := make([]ReviewComment, 0, len(rows))
+	for _, row := range rows {
+		comment, err := completedReviewCommentFromSQLC(row)
+		if err != nil {
+			return nil, err
+		}
+		comments = append(comments, comment)
+	}
+	return comments, nil
 }
 
 // ListPRReviewSummaries returns every review pass for a repo+PR (one row per
@@ -409,23 +404,20 @@ func (s *Store) GetPRCompletedReviewComments(ctx context.Context, repoID int64, 
 // reviews (auto_run_disabled / no_api_key stubs) are excluded so they don't
 // render as failed passes — same predicate the list endpoints use.
 func (s *Store) ListPRReviewSummaries(ctx context.Context, repoID int64, prNumber int) ([]PRReviewSummary, error) {
-	rows, err := s.Pool.Query(ctx, `
-		SELECT rv.id, rv.head_sha, rv.status, rv.score, rv.is_incremental, rv.deep_review,
-		       rv.created_at, rv.completed_at,
-		       (SELECT COUNT(*) FROM review_comments rc
-		          WHERE rc.review_id = rv.id AND rc.attempt_generation = rv.attempt_generation AND rc.state <> 'suppressed')::int AS comment_count,
-		       (SELECT COUNT(*) FROM review_comments rc
-		          WHERE rc.review_id = rv.id AND rc.attempt_generation = rv.attempt_generation AND rc.state <> 'suppressed' AND rc.is_new_finding)::int AS new_count
-		FROM reviews rv
-		WHERE rv.repo_id = $1 AND rv.pr_number = $2
-		  AND NOT (`+markerReviewFilter+`)
-		ORDER BY rv.created_at ASC
-	`, repoID, prNumber)
+	rows, err := s.q.ListPRReviewSummaries(ctx, db.ListPRReviewSummariesParams{RepoID: repoID, PRNumber: prNumber})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[PRReviewSummary])
+	summaries := make([]PRReviewSummary, 0, len(rows))
+	for _, row := range rows {
+		summaries = append(summaries, PRReviewSummary{
+			ID: row.ID, HeadSHA: row.HeadSHA, Status: row.Status, Score: row.Score,
+			IsIncremental: row.IsIncremental, DeepReview: row.DeepReview,
+			CreatedAt: row.CreatedAt, CompletedAt: row.CompletedAt,
+			CommentCount: row.CommentCount, NewCount: row.NewCount,
+		})
+	}
+	return summaries, nil
 }
 
 // ListPRAutoResolveEvents returns the auto-resolve events for a repo+PR, oldest
@@ -436,17 +428,15 @@ func (s *Store) ListPRReviewSummaries(ctx context.Context, repoID int64, prNumbe
 // "Auto-resolved 0 threads" noise and defeat the viewer's single-pass hide gate.
 // The counts feed the incremental-history timeline.
 func (s *Store) ListPRAutoResolveEvents(ctx context.Context, repoID int64, prNumber int) ([]AutoResolveSummary, error) {
-	rows, err := s.Pool.Query(ctx, `
-		SELECT source_sha, resolved_count, attempted_count, created_at
-		FROM auto_resolve_events
-		WHERE repo_id = $1 AND pr_number = $2 AND resolved_count > 0
-		ORDER BY created_at ASC
-	`, repoID, prNumber)
+	rows, err := s.q.ListPRAutoResolveEvents(ctx, db.ListPRAutoResolveEventsParams{RepoID: repoID, PRNumber: prNumber})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[AutoResolveSummary])
+	events := make([]AutoResolveSummary, 0, len(rows))
+	for _, row := range rows {
+		events = append(events, AutoResolveSummary{SourceSHA: row.SourceSHA, ResolvedCount: row.ResolvedCount, AttemptedCount: row.AttemptedCount, CreatedAt: row.CreatedAt})
+	}
+	return events, nil
 }
 
 // SetFindingResolvedSHA stamps the resolving push commit onto a finding
@@ -1510,26 +1500,15 @@ type PostedFinding struct {
 // outcomes ('confirmed'/'dismissed') do NOT exclude a finding — a dismissed
 // finding can still be addressed; the view weighs both signals.
 func (s *Store) ListPostedFindings(ctx context.Context, repoID int64, prNumber int) ([]PostedFinding, error) {
-	rows, err := s.Pool.Query(ctx, `
-		SELECT rc.id, rc.file_path, COALESCE(rc.end_line, rc.start_line, 0), rc.created_at, rv.head_sha
-		FROM review_comments rc
-		JOIN reviews rv ON rv.id = rc.review_id
-		WHERE rv.repo_id = $1 AND rv.pr_number = $2 AND rv.status = 'completed'
-		  AND rc.attempt_generation = rv.attempt_generation
-		  AND rc.suppressed_reason IS NULL
-		  AND rc.github_comment_id IS NOT NULL
-		  AND NOT EXISTS (
-		      SELECT 1 FROM comment_outcomes co
-		      WHERE co.review_comment_id = rc.id
-		        AND co.outcome IN ('addressed_human','addressed_agent','ignored','deferred')
-		  )
-		ORDER BY rc.created_at
-	`, repoID, prNumber)
+	rows, err := s.q.ListPostedFindings(ctx, db.ListPostedFindingsParams{RepoID: repoID, PRNumber: prNumber})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[PostedFinding])
+	findings := make([]PostedFinding, 0, len(rows))
+	for _, row := range rows {
+		findings = append(findings, PostedFinding{ID: row.ID, FilePath: row.FilePath, Line: row.Line, PostedAt: row.PostedAt, HeadSHA: row.HeadSHA})
+	}
+	return findings, nil
 }
 
 // RecordFindingOutcome writes a merge-time outcome for a posted finding,

@@ -282,3 +282,15 @@ SET token_usage = jsonb_set(
     true
 )
 WHERE id = sqlc.arg(review_id)::uuid;
+
+-- name: ListPRReviewSummaries :many
+SELECT rv.id, rv.head_sha, rv.status, rv.score, rv.is_incremental, rv.deep_review,
+       rv.created_at, rv.completed_at,
+       (SELECT COUNT(*) FROM review_comments rc
+          WHERE rc.review_id = rv.id AND rc.attempt_generation = rv.attempt_generation AND rc.state <> 'suppressed')::int AS comment_count,
+       (SELECT COUNT(*) FROM review_comments rc
+          WHERE rc.review_id = rv.id AND rc.attempt_generation = rv.attempt_generation AND rc.state <> 'suppressed' AND rc.is_new_finding)::int AS new_count
+FROM reviews rv
+WHERE rv.repo_id = $1 AND rv.pr_number = $2
+  AND NOT (rv.github_review_id IS NULL AND rv.status = 'failed' AND rv.error IN ('auto_run_disabled', 'no_api_key'))
+ORDER BY rv.created_at ASC;

@@ -3,6 +3,9 @@ package store
 import (
 	"testing"
 	"time"
+
+	"github.com/BeLazy167/argus/backend/internal/store/db"
+	"github.com/google/uuid"
 )
 
 func TestPatternFromSQLCRejectsNullableTimestampDrift(t *testing.T) {
@@ -27,5 +30,21 @@ func TestPatternFromSQLCRejectsNullableTimestampDrift(t *testing.T) {
 				t.Fatalf("timestamps = (%v, %v), want %v", got.CreatedAt, got.UpdatedAt, now)
 			}
 		})
+	}
+}
+
+func TestReviewCommentFromSQLCRejectsNullableBooleanDrift(t *testing.T) {
+	row := db.GetReviewCommentsRow{ID: uuid.New(), ReviewID: uuid.New(), CreatedAt: time.Now(), State: "posted"}
+	if _, err := reviewCommentFromSQLC(row); err == nil {
+		t.Fatal("reviewCommentFromSQLC accepted NULL is_new_finding")
+	}
+	isNew := false
+	row.IsNewFinding = &isNew
+	got, err := reviewCommentFromSQLC(row)
+	if err != nil {
+		t.Fatalf("reviewCommentFromSQLC: %v", err)
+	}
+	if got.IsNewFinding {
+		t.Fatal("IsNewFinding = true, want false")
 	}
 }

@@ -655,6 +655,68 @@ func (q *Queries) ListAllReviewsScoped(ctx context.Context, arg ListAllReviewsSc
 	return items, nil
 }
 
+const listPRReviewSummaries = `-- name: ListPRReviewSummaries :many
+SELECT rv.id, rv.head_sha, rv.status, rv.score, rv.is_incremental, rv.deep_review,
+       rv.created_at, rv.completed_at,
+       (SELECT COUNT(*) FROM review_comments rc
+          WHERE rc.review_id = rv.id AND rc.attempt_generation = rv.attempt_generation AND rc.state <> 'suppressed')::int AS comment_count,
+       (SELECT COUNT(*) FROM review_comments rc
+          WHERE rc.review_id = rv.id AND rc.attempt_generation = rv.attempt_generation AND rc.state <> 'suppressed' AND rc.is_new_finding)::int AS new_count
+FROM reviews rv
+WHERE rv.repo_id = $1 AND rv.pr_number = $2
+  AND NOT (rv.github_review_id IS NULL AND rv.status = 'failed' AND rv.error IN ('auto_run_disabled', 'no_api_key'))
+ORDER BY rv.created_at ASC
+`
+
+type ListPRReviewSummariesParams struct {
+	RepoID   int64 `json:"repo_id"`
+	PRNumber int   `json:"pr_number"`
+}
+
+type ListPRReviewSummariesRow struct {
+	ID            uuid.UUID  `json:"id"`
+	HeadSHA       string     `json:"head_sha"`
+	Status        string     `json:"status"`
+	Score         *int       `json:"score"`
+	IsIncremental bool       `json:"is_incremental"`
+	DeepReview    bool       `json:"deep_review"`
+	CreatedAt     time.Time  `json:"created_at"`
+	CompletedAt   *time.Time `json:"completed_at"`
+	CommentCount  int        `json:"comment_count"`
+	NewCount      int        `json:"new_count"`
+}
+
+func (q *Queries) ListPRReviewSummaries(ctx context.Context, arg ListPRReviewSummariesParams) ([]ListPRReviewSummariesRow, error) {
+	rows, err := q.db.Query(ctx, listPRReviewSummaries, arg.RepoID, arg.PRNumber)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListPRReviewSummariesRow
+	for rows.Next() {
+		var i ListPRReviewSummariesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.HeadSHA,
+			&i.Status,
+			&i.Score,
+			&i.IsIncremental,
+			&i.DeepReview,
+			&i.CreatedAt,
+			&i.CompletedAt,
+			&i.CommentCount,
+			&i.NewCount,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listReviews = `-- name: ListReviews :many
 SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, COALESCE(head_ref,'') as head_ref, github_review_id,
        status, summary, score, token_usage, trigger, triggered_by, duration_ms, error,

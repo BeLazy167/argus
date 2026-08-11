@@ -50,3 +50,9 @@ SELECT
         WHERE r.installation_id = ANY(@installation_ids::bigint[])
           AND co.created_at >= NOW() - @period::interval
     ), 0)::int AS feedback_indexed;
+
+-- name: ListPRAutoResolveEvents :many
+SELECT source_sha, resolved_count, attempted_count, created_at
+FROM auto_resolve_events
+WHERE repo_id = $1 AND pr_number = $2 AND resolved_count > 0
+ORDER BY created_at ASC;

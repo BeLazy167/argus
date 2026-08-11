@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/BeLazy167/argus/backend/internal/store/db"
+	"github.com/jackc/pgx/v5"
 )
 
 type Pattern struct {

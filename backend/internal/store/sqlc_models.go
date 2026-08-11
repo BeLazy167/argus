@@ -3,6 +3,9 @@ package store
 import (
 	"fmt"
 	"time"
+
+	"github.com/BeLazy167/argus/backend/internal/store/db"
+	"github.com/google/uuid"
 )
 
 func patternFromSQLC(id int, installationID int64, repoID *int64, content string, memoryDocID, createdBy *string, source string, category *string, prNumber *int, createdAt, updatedAt *time.Time) (Pattern, error) {
@@ -22,4 +25,27 @@ func installationFromSQLC(id, installationID int64, orgLogin string, clerkOrgID 
 
 func repoFromSQLC(id, installationID, githubID int64, fullName, defaultBranch string, enabled bool, settingsJSON []byte, createdAt, updatedAt time.Time) Repo {
 	return Repo{ID: id, InstallationID: installationID, GithubID: githubID, FullName: fullName, DefaultBranch: defaultBranch, Enabled: enabled, SettingsJSON: settingsJSON, CreatedAt: createdAt, UpdatedAt: updatedAt}
+}
+
+func reviewCommentFromSQLC(row db.GetReviewCommentsRow) (ReviewComment, error) {
+	return reviewCommentFromValues(row.ID, row.ReviewID, row.FilePath, row.StartLine, row.EndLine, row.Side, row.Body, row.Severity, row.Category, row.Specialist, row.ConfidenceScore, row.CodeSnippet, row.GithubCommentID, row.MatchedPatternID, row.MatchedPatternScore, row.EnforcedRuleContent, row.IsNewFinding, row.CreatedAt, row.State, row.SuppressedReason, row.ResolvedSHA, row.AttemptGeneration)
+}
+
+func completedReviewCommentFromSQLC(row db.GetPRCompletedReviewCommentsRow) (ReviewComment, error) {
+	return reviewCommentFromValues(row.ID, row.ReviewID, row.FilePath, row.StartLine, row.EndLine, row.Side, row.Body, row.Severity, row.Category, row.Specialist, row.ConfidenceScore, row.CodeSnippet, row.GithubCommentID, row.MatchedPatternID, row.MatchedPatternScore, row.EnforcedRuleContent, row.IsNewFinding, row.CreatedAt, row.State, row.SuppressedReason, row.ResolvedSHA, row.AttemptGeneration)
+}
+
+func reviewCommentFromValues(id, reviewID uuid.UUID, filePath string, startLine, endLine *int, side *string, body string, severity, category, specialist *string, confidenceScore *int, codeSnippet *string, githubCommentID, matchedPatternID *int64, matchedPatternScore *float32, enforcedRuleContent *string, isNewFinding *bool, createdAt time.Time, state string, suppressedReason, resolvedSHA *string, attemptGeneration int) (ReviewComment, error) {
+	if isNewFinding == nil {
+		return ReviewComment{}, fmt.Errorf("review comment %s has NULL is_new_finding", id)
+	}
+	return ReviewComment{
+		ID: id, ReviewID: reviewID, FilePath: filePath, StartLine: startLine, EndLine: endLine,
+		Side: side, Body: body, Severity: severity, Category: category, Specialist: specialist,
+		ConfidenceScore: confidenceScore, CodeSnippet: codeSnippet, GithubCommentID: githubCommentID,
+		MatchedPatternID: matchedPatternID, MatchedPatternScore: matchedPatternScore,
+		EnforcedRuleContent: enforcedRuleContent, IsNewFinding: *isNewFinding, CreatedAt: createdAt,
+		State: state, SuppressedReason: suppressedReason, ResolvedSHA: resolvedSHA,
+		AttemptGeneration: attemptGeneration,
+	}, nil
 }

@@ -179,6 +179,7 @@ type LiveMemory struct {
 	InvalidatedAt  *time.Time       `json:"invalidated_at"`
 	SupersededBy   *int64           `json:"superseded_by"`
 	ReviewID       *uuid.UUID       `json:"review_id"`
+	EmbeddingSpace *string          `json:"embedding_space"`
 }
 
 type Memory struct {
@@ -198,6 +199,7 @@ type Memory struct {
 	InvalidatedAt  *time.Time       `json:"invalidated_at"`
 	SupersededBy   *int64           `json:"superseded_by"`
 	ReviewID       *uuid.UUID       `json:"review_id"`
+	EmbeddingSpace *string          `json:"embedding_space"`
 }
 
 type MemoryExportArchive struct {
@@ -299,13 +301,15 @@ type Persona struct {
 }
 
 type PipelineState struct {
-	ID        uuid.UUID `json:"id"`
-	ReviewID  uuid.UUID `json:"review_id"`
-	State     string    `json:"state"`
-	Payload   []byte    `json:"payload"`
-	Error     *string   `json:"error"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID                 uuid.UUID  `json:"id"`
+	ReviewID           uuid.UUID  `json:"review_id"`
+	State              string     `json:"state"`
+	Payload            []byte     `json:"payload"`
+	Error              *string    `json:"error"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+	RecoveryOwner      *uuid.UUID `json:"recovery_owner"`
+	RecoveryLeaseUntil *time.Time `json:"recovery_lease_until"`
 }
 
 type PromptTemplate struct {
@@ -391,6 +395,7 @@ type Review struct {
 	ReviewContract     []byte          `json:"review_contract"`
 	StartedCommentID   *int64          `json:"started_comment_id"`
 	BudgetNote         *string         `json:"budget_note"`
+	AttemptGeneration  int             `json:"attempt_generation"`
 }
 
 type ReviewComment struct {
@@ -416,6 +421,37 @@ type ReviewComment struct {
 	State               string    `json:"state"`
 	GraphqlThreadNodeID *string   `json:"graphql_thread_node_id"`
 	ResolvedSHA         *string   `json:"resolved_sha"`
+	AttemptGeneration   int       `json:"attempt_generation"`
+}
+
+type ReviewEvent struct {
+	ID                int64           `json:"id"`
+	ReviewID          uuid.UUID       `json:"review_id"`
+	AttemptGeneration *int            `json:"attempt_generation"`
+	EventType         string          `json:"event_type"`
+	Data              json.RawMessage `json:"data"`
+	CreatedAt         time.Time       `json:"created_at"`
+}
+
+type ReviewMinorNote struct {
+	ID                uuid.UUID `json:"id"`
+	ReviewID          uuid.UUID `json:"review_id"`
+	AttemptGeneration int       `json:"attempt_generation"`
+	FilePath          string    `json:"file_path"`
+	Line              int       `json:"line"`
+	Severity          string    `json:"severity"`
+	Title             string    `json:"title"`
+	CreatedAt         time.Time `json:"created_at"`
+}
+
+type ReviewSignal struct {
+	ID          uuid.UUID  `json:"id"`
+	RepoID      int64      `json:"repo_id"`
+	PRNumber    int        `json:"pr_number"`
+	Kind        string     `json:"kind"`
+	ClaimedAt   time.Time  `json:"claimed_at"`
+	DeliveredAt *time.Time `json:"delivered_at"`
+	CreatedAt   time.Time  `json:"created_at"`
 }
 
 type Rule struct {

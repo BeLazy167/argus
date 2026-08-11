@@ -7,6 +7,7 @@ package db
 
 import (
 	"context"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 )
@@ -139,4 +140,48 @@ func (q *Queries) InsertAutoResolveEvent(ctx context.Context, arg InsertAutoReso
 		arg.ResolvedThreadKeys,
 	)
 	return err
+}
+
+const listPRAutoResolveEvents = `-- name: ListPRAutoResolveEvents :many
+SELECT source_sha, resolved_count, attempted_count, created_at
+FROM auto_resolve_events
+WHERE repo_id = $1 AND pr_number = $2 AND resolved_count > 0
+ORDER BY created_at ASC
+`
+
+type ListPRAutoResolveEventsParams struct {
+	RepoID   int64 `json:"repo_id"`
+	PRNumber int   `json:"pr_number"`
+}
+
+type ListPRAutoResolveEventsRow struct {
+	SourceSHA      string    `json:"source_sha"`
+	ResolvedCount  int       `json:"resolved_count"`
+	AttemptedCount int       `json:"attempted_count"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
+func (q *Queries) ListPRAutoResolveEvents(ctx context.Context, arg ListPRAutoResolveEventsParams) ([]ListPRAutoResolveEventsRow, error) {
+	rows, err := q.db.Query(ctx, listPRAutoResolveEvents, arg.RepoID, arg.PRNumber)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListPRAutoResolveEventsRow
+	for rows.Next() {
+		var i ListPRAutoResolveEventsRow
+		if err := rows.Scan(
+			&i.SourceSHA,
+			&i.ResolvedCount,
+			&i.AttemptedCount,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
