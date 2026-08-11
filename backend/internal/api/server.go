@@ -26,6 +26,7 @@ import (
 type Server struct {
 	router           chi.Router
 	store            *store.Store
+	memoryLister     memoryListStore
 	ghApp            *ghpkg.App
 	orchestrator     *pipeline.Orchestrator
 	replyAnalyzer    *pipeline.ReplyAnalyzer
@@ -48,6 +49,7 @@ type Server struct {
 func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchestrator, replyAnalyzer *pipeline.ReplyAnalyzer, reactionAnalyzer *pipeline.ReactionAnalyzer, registry *llm.Registry, eventBus *pipeline.EventBus, cfg *config.Config, logger *slog.Logger, memRegistry *memory.Registry) *Server {
 	s := &Server{
 		store:            st,
+		memoryLister:     st,
 		ghApp:            ghApp,
 		orchestrator:     orchestrator,
 		replyAnalyzer:    replyAnalyzer,
@@ -181,6 +183,9 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 				// export also accessible via signed URL at public route above
 				r.Post("/reviews/{reviewID}/retry", s.retryReview)
 				r.Post("/reviews/{reviewID}/cancel", s.cancelReview)
+
+				// Memories
+				r.Get("/memories", s.listMemories)
 
 				// Rules
 				r.Get("/rules", s.listRules)
