@@ -312,10 +312,8 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p revie
 	// Query blast radius from code graph + fetch dependent file contents
 	var blastContext string
 	if run.BlastRadius && rs.store != nil && rs.ghClient != nil {
-		changedPaths := make([]string, 0, len(run.Diff.Files))
 		changedSet := make(map[string]bool, len(run.Diff.Files))
 		for _, f := range run.Diff.Files {
-			changedPaths = append(changedPaths, f.NewName)
 			changedSet[f.NewName] = true
 		}
 		basePaths := blastRadiusBasePaths(run.Diff)
