@@ -130,28 +130,47 @@ func memoryEmbeddingLockKey(installationID int64) int64 {
 	return (int64(0x41524755) << 32) ^ installationID
 }
 
-// acquireReembedLock waits for the tenant session lock using side-effect-free
-// try calls. A busy lock is not success: its holder may have captured an older
-// desired space, so this caller remains the durable in-process waiter for the
-// rotation that scheduled it. The caller's context is the wait bound.
-func acquireReembedLock(ctx context.Context, conn *pgxpool.Conn, lockKey int64) error {
+// acquireEmbeddingLock polls a session advisory lock without reserving a pool
+// connection while another session owns it. Only the winning session remains
+// checked out; every loser releases before sleeping so the holder can borrow a
+// separate connection for corpus and provider-configuration work.
+func acquireEmbeddingLock(ctx context.Context, pool *pgxpool.Pool, lockKey int64, shared bool) (*pgxpool.Conn, error) {
+	lockKind := "advisory lock"
+	query := "SELECT pg_try_advisory_lock($1)"
+	if shared {
+		lockKind = "shared advisory lock"
+		query = "SELECT pg_try_advisory_lock_shared($1)"
+	}
+
 	for {
+		conn, err := pool.Acquire(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("acquire connection for %s: %w", lockKind, err)
+		}
 		var acquired bool
-		if err := conn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", lockKey).Scan(&acquired); err != nil {
-			return fmt.Errorf("try advisory lock: %w", err)
+		if err := conn.QueryRow(ctx, query, lockKey).Scan(&acquired); err != nil {
+			// The server may have acquired the session lock before the client
+			// observed the query failure. Never return that session to the pool.
+			discardEmbeddingLockConn(conn)
+			return nil, fmt.Errorf("try %s: %w", lockKind, err)
 		}
 		if acquired {
-			return nil
+			return conn, nil
 		}
+		conn.Release()
 
 		timer := time.NewTimer(reembedLockPollInterval)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return fmt.Errorf("wait for advisory lock: %w", ctx.Err())
+			return nil, fmt.Errorf("wait for %s: %w", lockKind, ctx.Err())
 		case <-timer.C:
 		}
 	}
+}
+
+func acquireReembedLock(ctx context.Context, pool *pgxpool.Pool, lockKey int64) (*pgxpool.Conn, error) {
+	return acquireEmbeddingLock(ctx, pool, lockKey, false)
 }
 
 // acquireEmbeddingWriteLock takes the shared side of the same tenant lock used
@@ -159,24 +178,40 @@ func acquireReembedLock(ctx context.Context, conn *pgxpool.Conn, lockKey int64) 
 // report convergence while a writer that resolved the previous space can
 // still commit. The writer resolves its embedder only after acquiring this
 // lock, so a write starting after repair sees the committed current provider.
-func acquireEmbeddingWriteLock(ctx context.Context, conn *pgxpool.Conn, lockKey int64) error {
-	for {
-		var acquired bool
-		if err := conn.QueryRow(ctx, "SELECT pg_try_advisory_lock_shared($1)", lockKey).Scan(&acquired); err != nil {
-			return fmt.Errorf("try shared advisory lock: %w", err)
-		}
-		if acquired {
-			return nil
-		}
+func acquireEmbeddingWriteLock(ctx context.Context, pool *pgxpool.Pool, lockKey int64) (*pgxpool.Conn, error) {
+	return acquireEmbeddingLock(ctx, pool, lockKey, true)
+}
 
-		timer := time.NewTimer(reembedLockPollInterval)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return fmt.Errorf("wait for shared advisory lock: %w", ctx.Err())
-		case <-timer.C:
-		}
+// discardEmbeddingLockConn closes a session whose lock state is uncertain.
+// Releasing it to the pool could strand a session advisory lock indefinitely.
+func discardEmbeddingLockConn(conn *pgxpool.Conn) {
+	raw := conn.Hijack()
+	closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = raw.Close(closeCtx)
+}
+
+func releaseEmbeddingLock(ctx context.Context, conn *pgxpool.Conn, lockKey int64, shared bool, logger *slog.Logger, installationID int64) {
+	query := "SELECT pg_advisory_unlock($1)"
+	kind := "memory reembed advisory lock"
+	if shared {
+		query = "SELECT pg_advisory_unlock_shared($1)"
+		kind = "memory write advisory lock"
 	}
+
+	unlockCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	var released bool
+	err := conn.QueryRow(unlockCtx, query, lockKey).Scan(&released)
+	if err == nil && released {
+		conn.Release()
+		return
+	}
+
+	logger.Warn("release "+kind, "installation_id", installationID, "released", released, "error", err)
+	// A failed or false unlock leaves the session's lock depth uncertain. Close
+	// it instead of poisoning the pool with a possibly still-locked session.
+	discardEmbeddingLockConn(conn)
 }
 
 // ReembedCurrentSpace converges one installation to the latest embedding
@@ -193,23 +228,12 @@ func (r *Registry) ReembedCurrentSpace(ctx context.Context, installationID int64
 		return 0, fmt.Errorf("reembed current space: postgres memory backend is not configured")
 	}
 
-	conn, err := r.pool.Acquire(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("reembed current space: acquire lock connection: %w", err)
-	}
-	defer conn.Release()
 	lockKey := memoryEmbeddingLockKey(installationID)
-	if err := acquireReembedLock(ctx, conn, lockKey); err != nil {
+	conn, err := acquireReembedLock(ctx, r.pool, lockKey)
+	if err != nil {
 		return 0, fmt.Errorf("reembed current space: acquire advisory lock: %w", err)
 	}
-	defer func() {
-		unlockCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		defer cancel()
-		var released bool
-		if err := conn.QueryRow(unlockCtx, "SELECT pg_advisory_unlock($1)", lockKey).Scan(&released); err != nil || !released {
-			r.log().Warn("release memory reembed advisory lock", "installation_id", installationID, "released", released, "error", err)
-		}
-	}()
+	defer releaseEmbeddingLock(ctx, conn, lockKey, false, r.log(), installationID)
 
 	total := 0
 	lastTarget, lastDesired := "", ""

@@ -8,7 +8,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -476,23 +475,12 @@ func (idx *PGIndexer) writeDocs(ctx context.Context, docs []Doc, preserveExistin
 		return idx.writeKeptDocs(ctx, kept, preserveExisting, idx, idx.pool, pgctx)
 	}
 
-	conn, err := idx.pool.Acquire(ctx)
-	if err != nil {
-		return fmt.Errorf("upsert memories: acquire embedding-space connection: %w", err)
-	}
-	defer conn.Release()
 	lockKey := memoryEmbeddingLockKey(idx.installationID)
-	if err := acquireEmbeddingWriteLock(ctx, conn, lockKey); err != nil {
+	conn, err := acquireEmbeddingWriteLock(ctx, idx.pool, lockKey)
+	if err != nil {
 		return fmt.Errorf("upsert memories: acquire embedding-space lock: %w", err)
 	}
-	defer func() {
-		unlockCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		defer cancel()
-		var released bool
-		if err := conn.QueryRow(unlockCtx, "SELECT pg_advisory_unlock_shared($1)", lockKey).Scan(&released); err != nil || !released {
-			idx.logger.Warn("release memory write advisory lock", "installation_id", idx.installationID, "released", released, "error", err)
-		}
-	}()
+	defer releaseEmbeddingLock(ctx, conn, lockKey, true, idx.logger, idx.installationID)
 
 	// Resolve only after the shared lock is held and through that same
 	// connection. A rotation may commit while this provider call is in flight,

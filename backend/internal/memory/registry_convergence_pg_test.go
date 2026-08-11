@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -302,5 +303,131 @@ func TestRegistryCapturedIndexerCannotWriteObsoleteSpaceAfterRepair(t *testing.T
 	}
 	if pending != 0 {
 		t.Fatalf("final corpus has %d row(s) outside B after late write", pending)
+	}
+}
+
+func TestEmbeddingLockWaitersDoNotStarveExclusiveHolderWork(t *testing.T) {
+	pool, installationID := pgTestPoolWithMaxConns(t, 2)
+	holderCtx, cancelHolder := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelHolder()
+
+	bEntered := make(chan struct{})
+	releaseB := make(chan struct{})
+	var enterOnce, releaseOnce sync.Once
+	releaseProvider := func() { releaseOnce.Do(func() { close(releaseB) }) }
+	defer releaseProvider()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req embedRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.Model == "space-B" {
+			enterOnce.Do(func() { close(bEntered) })
+			select {
+			case <-releaseB:
+			case <-r.Context().Done():
+				return
+			}
+		}
+		data := make([]map[string]any, len(req.Input))
+		for i := range req.Input {
+			vec := make([]float32, StorageDimensions)
+			vec[0] = 1
+			data[i] = map[string]any{"index": i, "embedding": vec}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": data})
+	}))
+	defer server.Close()
+
+	setDesired := func(model string) {
+		t.Helper()
+		if _, err := pool.Exec(holderCtx, `
+			UPDATE installations
+			SET default_settings = jsonb_set(COALESCE(default_settings, '{}'::jsonb),
+				'{test_embedding_model}', to_jsonb($2::text), true)
+			WHERE id = $1`, installationID, model); err != nil {
+			t.Fatalf("set desired embedding space %s: %v", model, err)
+		}
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `
+			UPDATE installations SET default_settings = COALESCE(default_settings, '{}'::jsonb) - 'test_embedding_model'
+			WHERE id = $1`, installationID)
+	})
+
+	embedders := NewEmbedderRegistry(
+		&pgDesiredSpaceResolver{pool: pool, baseURL: server.URL},
+		PlatformEmbeddings{Dimensions: StorageDimensions},
+		discardLogger(),
+	)
+	registry := NewRegistry(discardLogger()).WithPostgresBackend(pool, embedders)
+
+	setDesired("space-A")
+	capturedA := registry.GetIndexer(holderCtx, installationID)
+	if capturedA == nil {
+		t.Fatal("memory registry did not resolve the test embedder")
+	}
+	if err := capturedA.(*PGIndexer).ImportDocs(holderCtx, []Doc{
+		lifecycleDoc("small-pool-seed", "holder must borrow a work connection"),
+	}); err != nil {
+		t.Fatalf("seed space A: %v", err)
+	}
+
+	setDesired("space-B")
+	holderDone := make(chan reembedResult, 1)
+	go func() {
+		n, err := registry.ReembedCurrentSpace(holderCtx, installationID, 10)
+		holderDone <- reembedResult{repaired: n, err: err}
+	}()
+	select {
+	case <-bEntered:
+	case <-holderCtx.Done():
+		t.Fatalf("exclusive holder did not reach provider: %v", holderCtx.Err())
+	}
+
+	waiterCtx, cancelWaiters := context.WithCancel(holderCtx)
+	defer cancelWaiters()
+	const waiterCount = 12
+	waiterDone := make(chan error, waiterCount)
+	start := make(chan struct{})
+	for i := 0; i < waiterCount; i++ {
+		i := i
+		go func() {
+			<-start
+			if i%2 == 0 {
+				_, err := registry.ReembedCurrentSpace(waiterCtx, installationID, 10)
+				waiterDone <- err
+				return
+			}
+			err := capturedA.(*PGIndexer).ImportDocs(waiterCtx, []Doc{
+				lifecycleDoc(fmt.Sprintf("small-pool-writer-%d", i), "writer waiting behind repair"),
+			})
+			waiterDone <- err
+		}()
+	}
+	close(start)
+	// Give both exclusive and shared waiters several chances to observe the
+	// busy lock before the holder asks the pool for its UPDATE connection.
+	time.Sleep(3 * reembedLockPollInterval)
+	releaseProvider()
+
+	select {
+	case result := <-holderDone:
+		if result.err != nil {
+			t.Fatalf("exclusive holder failed with lock waiters present: %v (repaired=%d)", result.err, result.repaired)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("exclusive holder was starved of its work connection by advisory-lock waiters")
+	}
+
+	cancelWaiters()
+	for i := 0; i < waiterCount; i++ {
+		select {
+		case <-waiterDone:
+		case <-time.After(2 * time.Second):
+			t.Fatal("advisory-lock waiter did not exit after cancellation")
+		}
 	}
 }

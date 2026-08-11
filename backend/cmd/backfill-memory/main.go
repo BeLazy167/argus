@@ -88,9 +88,10 @@ func run(ctx context.Context, logger *slog.Logger, st *store.Store, cfg runConfi
 		Model:      getenv("EMBEDDINGS_MODEL", "voyage-4"),
 		Dimensions: 1024,
 	}, logger)
+	memRegistry := memory.NewRegistry(logger).WithPostgresBackend(st.Pool, embedRegistry)
 
 	if cfg.reembed {
-		return runReembed(ctx, logger, st, embedRegistry, cfg)
+		return runReembed(ctx, logger, st, embedRegistry, memRegistry, cfg)
 	}
 
 	installs, err := archivedInstallations(ctx, st, cfg.installation)
@@ -104,7 +105,7 @@ func run(ctx context.Context, logger *slog.Logger, st *store.Store, cfg runConfi
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		imported, skipped, err := backfillInstallation(ctx, logger, st, embedRegistry, id, cfg)
+		imported, skipped, err := backfillInstallation(ctx, logger, st, embedRegistry, memRegistry, id, cfg)
 		totalImported += imported
 		totalSkipped += skipped
 		if err != nil {
@@ -139,7 +140,7 @@ func run(ctx context.Context, logger *slog.Logger, st *store.Store, cfg runConfi
 //
 // Installations are resolved from the damage itself rather than from a
 // registry, so a clean fleet is a no-op that reports zero instead of an error.
-func runReembed(ctx context.Context, logger *slog.Logger, st *store.Store, embeds *memory.EmbedderRegistry, cfg runConfig) error {
+func runReembed(ctx context.Context, logger *slog.Logger, st *store.Store, embeds *memory.EmbedderRegistry, registry *memory.Registry, cfg runConfig) error {
 	rows, err := st.Pool.Query(ctx, `
 		SELECT DISTINCT installation_id
 		FROM live_memories
@@ -165,23 +166,46 @@ func runReembed(ctx context.Context, logger *slog.Logger, st *store.Store, embed
 	type target struct {
 		id      int64
 		pending int64
-		idx     *memory.PGIndexer
 	}
 	var targets []target
 	for _, id := range installationIDs {
 		embedder, _ := embeds.GetEmbedder(ctx, id)
 		if embedder == nil {
-			logger.Warn("reembed: no embedder resolved; skipping installation", "installation_id", id)
+			if cfg.plan {
+				// Preserve dry-run behavior: unavailable providers are reported and
+				// omitted because no current-space count can be computed.
+				logger.Warn("reembed: no embedder resolved; skipping installation", "installation_id", id)
+				continue
+			}
+			// A cached nil is not execution authority. PostgreSQL may have gained
+			// a provider since it was cached; strict repair resolves under lock.
+			targets = append(targets, target{id: id})
 			continue
 		}
-		idx := memory.NewPGIndexer(st.Pool, embedder, id, embeds.Dimensions(), logger)
+
+		idx, ok := registry.GetIndexer(ctx, id).(*memory.PGIndexer)
+		if !ok {
+			logger.Warn("reembed: no indexer resolved; skipping installation", "installation_id", id)
+			continue
+		}
 		pending, err := idx.CountReembedPending(ctx)
 		if err != nil {
-			return fmt.Errorf("counting installation %d reembed rows: %w", id, err)
+			if cfg.plan {
+				return fmt.Errorf("counting installation %d reembed rows: %w", id, err)
+			}
+			// Counting is progress metadata, not write authority. The strict
+			// repair below may resolve a newly configured provider even when this
+			// process still has a cached stale reader.
+			logger.Warn("reembed: could not count with cached reader; continuing with durable repair",
+				"installation_id", id, "error", err)
 		}
-		if pending > 0 {
-			targets = append(targets, target{id: id, pending: pending, idx: idx})
+		if cfg.plan && pending == 0 {
+			continue
 		}
+		// Execution still visits clean-looking installations. This count can
+		// come from a process-cached reader, while ReembedCurrentSpace resolves
+		// PostgreSQL's durable current space only after taking the tenant lock.
+		targets = append(targets, target{id: id, pending: pending})
 	}
 	if len(targets) == 0 {
 		logger.Info("reembed: nothing to do; every live memory row is in its current embedding space")
@@ -206,7 +230,7 @@ func runReembed(ctx context.Context, logger *slog.Logger, st *store.Store, embed
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		repaired, err := t.idx.ReembedMissing(ctx, pageSize)
+		repaired, err := registry.ReembedCurrentSpace(ctx, t.id, pageSize)
 		repairedTotal += repaired
 		if err != nil {
 			logger.Error("reembed: installation failed; continuing with the rest",
@@ -269,7 +293,7 @@ type archivedDoc struct {
 	Metadata map[string]string `json:"metadata"`
 }
 
-func backfillInstallation(ctx context.Context, logger *slog.Logger, st *store.Store, embeds *memory.EmbedderRegistry, installID int64, cfg runConfig) (int, int, error) {
+func backfillInstallation(ctx context.Context, logger *slog.Logger, st *store.Store, embeds *memory.EmbedderRegistry, registry *memory.Registry, installID int64, cfg runConfig) (int, int, error) {
 	// The archive keys on the SERVER doc_id precisely because customIds can
 	// collide across merge-corrupted documents. upsertDocs dedupes
 	// last-write-wins on customId, so any collision silently drops a document
@@ -294,7 +318,10 @@ func backfillInstallation(ctx context.Context, logger *slog.Logger, st *store.St
 		// site. Refuse rather than build a corpus that reads as empty.
 		return 0, 0, fmt.Errorf("no embedder resolved for installation %d; configure an embeddings provider before backfilling", installID)
 	}
-	idx := memory.NewPGIndexer(st.Pool, embedder, installID, embeds.Dimensions(), logger)
+	idx, ok := registry.GetIndexer(ctx, installID).(*memory.PGIndexer)
+	if !ok {
+		return 0, 0, fmt.Errorf("memory registry is not configured for installation %d", installID)
+	}
 
 	var imported, skipped int
 	var lastID int64

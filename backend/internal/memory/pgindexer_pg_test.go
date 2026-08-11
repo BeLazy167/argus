@@ -52,6 +52,11 @@ func (s *stubEmbedder) Model() string { return "stub-1024" }
 
 func pgTestPool(t *testing.T) (*pgxpool.Pool, int64) {
 	t.Helper()
+	return pgTestPoolWithMaxConns(t, 0)
+}
+
+func pgTestPoolWithMaxConns(t *testing.T, maxConns int32) (*pgxpool.Pool, int64) {
+	t.Helper()
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
 		t.Skip("TEST_DATABASE_URL not set; PG-backed tests run where the CI harness provides a database")
@@ -61,6 +66,9 @@ func pgTestPool(t *testing.T) (*pgxpool.Pool, int64) {
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		t.Fatalf("parse dsn: %v", err)
+	}
+	if maxConns > 0 {
+		cfg.MaxConns = maxConns
 	}
 	cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
 		return pgxvector.RegisterTypes(ctx, conn)
