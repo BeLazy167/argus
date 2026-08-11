@@ -183,13 +183,33 @@ func (q *Queries) ListArchBugDensity(ctx context.Context, repoID int64) ([]ListA
 }
 
 const listArchCoupling = `-- name: ListArchCoupling :many
-SELECT r.pr_number, array_agg(DISTINCT rc.file_path)::text[] AS files
-FROM review_comments rc
-JOIN reviews r ON r.id = rc.review_id
-WHERE r.repo_id = $1 AND r.status = 'completed'
-GROUP BY r.pr_number
-ORDER BY r.pr_number DESC
-LIMIT 200
+WITH recent_reviews AS (
+    SELECT id, pr_number
+    FROM reviews
+    WHERE repo_id = $1 AND status = 'completed'
+    ORDER BY created_at DESC
+    LIMIT 200
+), changed AS (
+    SELECT r.pr_number,
+           COALESCE(NULLIF(f->>'NewName', '/dev/null'), NULLIF(f->>'new_name', '/dev/null'),
+                    NULLIF(f->>'OldName', '/dev/null'), NULLIF(f->>'old_name', '/dev/null')) AS file_path
+    FROM recent_reviews r
+    CROSS JOIN LATERAL (
+        SELECT payload
+        FROM pipeline_states
+        WHERE review_id = r.id
+        ORDER BY updated_at DESC
+        LIMIT 1
+    ) ps
+    CROSS JOIN LATERAL jsonb_array_elements(
+        COALESCE(ps.payload->'Diff'->'Files', ps.payload->'diff'->'files', '[]'::jsonb)
+    ) AS f
+)
+SELECT pr_number, array_agg(DISTINCT file_path)::text[] AS files
+FROM changed
+WHERE file_path IS NOT NULL AND file_path <> ''
+GROUP BY pr_number
+ORDER BY pr_number DESC
 `
 
 type ListArchCouplingRow struct {
@@ -197,7 +217,9 @@ type ListArchCouplingRow struct {
 	Files    []string `json:"files"`
 }
 
-// Returns last 200 PRs with their touched files for Jaccard co-change coupling.
+// Returns actual changed files from the latest persisted pipeline state of the
+// last 200 completed reviews. Findings are not a file-change ledger: clean files
+// have no review_comment row and must still contribute to co-change metrics.
 func (q *Queries) ListArchCoupling(ctx context.Context, repoID int64) ([]ListArchCouplingRow, error) {
 	rows, err := q.db.Query(ctx, listArchCoupling, repoID)
 	if err != nil {
@@ -259,18 +281,21 @@ func (q *Queries) ListArchFileEdges(ctx context.Context, repoID int64) ([]ListAr
 }
 
 const listArchNodes = `-- name: ListArchNodes :many
-SELECT file_path, COALESCE(language, '')::text as language, name,
-       (COALESCE(line_end, 0) - COALESCE(line_start, 0) + 1)::int as line_span
+SELECT file_path, COALESCE(language, '')::text AS language, name, kind,
+       COALESCE(line_start, 0)::int AS line_start,
+       COALESCE(line_end, 0)::int AS line_end
 FROM code_nodes
 WHERE repo_id = $1
 ORDER BY file_path, line_start
 `
 
 type ListArchNodesRow struct {
-	FilePath string `json:"file_path"`
-	Language string `json:"language"`
-	Name     string `json:"name"`
-	LineSpan int    `json:"line_span"`
+	FilePath  string `json:"file_path"`
+	Language  string `json:"language"`
+	Name      string `json:"name"`
+	Kind      string `json:"kind"`
+	LineStart int    `json:"line_start"`
+	LineEnd   int    `json:"line_end"`
 }
 
 // Returns all code nodes for a repo, used to compute file-level architecture metrics.
@@ -287,7 +312,9 @@ func (q *Queries) ListArchNodes(ctx context.Context, repoID int64) ([]ListArchNo
 			&i.FilePath,
 			&i.Language,
 			&i.Name,
-			&i.LineSpan,
+			&i.Kind,
+			&i.LineStart,
+			&i.LineEnd,
 		); err != nil {
 			return nil, err
 		}

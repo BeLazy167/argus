@@ -216,6 +216,21 @@ func IndexFiles(ctx context.Context, st *store.Store, ghClient *ghpkg.Client, in
 	return indexFileSet(ctx, st, ghClient, installationID, owner, repo, ref, repoDBID, sourceFiles)
 }
 
+// fileSymbol records deterministic physical LOC and file identity in the existing
+// code_nodes schema. A trailing newline terminates the last content line; it
+// does not create an additional blank line.
+func fileSymbol(filePath, content string) Symbol {
+	loc := strings.Count(content, "\n")
+	if content != "" && !strings.HasSuffix(content, "\n") {
+		loc++
+	}
+	lineStart := 0
+	if loc > 0 {
+		lineStart = 1
+	}
+	return Symbol{Kind: "file", Name: filePath, FilePath: filePath, LineStart: lineStart, LineEnd: loc}
+}
+
 // indexFileSet fetches content for each file, parses symbols/edges, and upserts them.
 // The store dependency is the narrow indexerStore interface so the IO loop
 // below can be exercised by an in-memory fake in indexer_integration_test.go.
@@ -246,6 +261,8 @@ func indexFileSet(ctx context.Context, st indexerStore, ghClient *ghpkg.Client, 
 			continue
 		}
 		syms, edges := ParseFileSymbols(f, content)
+		endpointsByFile[f] = anchorEndpoints(ExtractAPIEndpoints(f, content), syms)
+		syms = append(syms, fileSymbol(f, content))
 		upsertFileSymbols(ctx, st, repoDBID, f, syms, keyToID, nameToIDs)
 		edgesByFile[f] = edges
 		symbolsByFile[f] = syms
@@ -255,7 +272,6 @@ func indexFileSet(ctx context.Context, st indexerStore, ghClient *ghpkg.Client, 
 		// its existing rows — we did not observe it, so we cannot claim its
 		// endpoints are gone.
 		//
-		endpointsByFile[f] = anchorEndpoints(ExtractAPIEndpoints(f, content), syms)
 	}
 
 	if err := resolveAndUpsertEdges(ctx, st, repoDBID, edgesByFile, symbolsByFile, keyToID, nameToIDs); err != nil {

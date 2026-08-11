@@ -11,6 +11,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/BeLazy167/argus/backend/internal/pipeline"
+	"github.com/BeLazy167/argus/backend/internal/store/db"
 )
 
 // Thresholds kept in sync with backend orchestrator / frontend.
@@ -143,7 +144,7 @@ func (s *Server) getArchitecture(w http.ResponseWriter, r *http.Request) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := s.fetchArchBugs(ctx, repoID, bugCount, changeFreq, &mu); err != nil {
+		if err := s.fetchArchBugs(ctx, repoID, bugCount, &mu); err != nil {
 			setErr(err)
 		}
 	}()
@@ -203,6 +204,13 @@ func (s *Server) getArchitecture(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Change frequency comes from the same actual changed-file ledger as
+	// coupling. review_comments only describe findings and omit clean files.
+	clear(changeFreq)
+	for filePath, count := range fileOccurrence {
+		changeFreq[filePath] = count
+	}
+
 	// Build coupling map: file -> top 3 coupled files with Jaccard score
 	couplingMap := make(map[string][]fileCoupling)
 	maxCoupling := make(map[string]float64) // max coupling score per file
@@ -238,12 +246,11 @@ func (s *Server) getArchitecture(w http.ResponseWriter, r *http.Request) {
 
 	files := make([]archFile, 0, len(fileMap))
 	for fp, fi := range fileMap {
-		linesApprox := fi.linesSum
-		if linesApprox < 10 {
-			linesApprox = 10 // floor to avoid division by tiny numbers
+		loc := fi.loc
+		if loc == 0 {
+			loc = fi.maxLineEnd // compatibility until a repository is re-indexed
 		}
-		density := float64(bugCount[fp]) / float64(linesApprox) * 100
-		density = math.Round(density*100) / 100
+		density := bugDensityPerHundredLines(bugCount[fp], loc)
 
 		af := archFile{
 			Path:            fp,
@@ -304,18 +311,7 @@ func (s *Server) getArchitecture(w http.ResponseWriter, r *http.Request) {
 		p90Bug := percentileValue(bugDens, 90)
 		p90Chg := percentileValue(chgFreqs, 90)
 		for i := range files {
-			switch {
-			case float64(files[i].FanIn) >= p90FanIn && files[i].BugDensity >= p90Bug:
-				files[i].Insight = "Critical choke point with high bug density. " + strconv.Itoa(files[i].FanIn) + " files depend on this. Prioritize refactoring."
-			case float64(files[i].FanIn) >= p90FanIn:
-				files[i].Insight = "Choke point. " + strconv.Itoa(files[i].FanIn) + " files break if this breaks. Consider splitting into smaller modules."
-			case files[i].BugDensity >= p90Bug:
-				files[i].Insight = "Bug hotspot. High defect rate per line. Review changes here carefully."
-			case float64(files[i].ChangeFrequency) >= p90Chg && maxCoupling[files[i].Path] >= tightCouplingThreshold:
-				files[i].Insight = "Unstable coupling. Changes frequently and tightly coupled — changes here ripple."
-			case float64(files[i].ChangeFrequency) >= p90Chg:
-				files[i].Insight = "High churn. Frequently modified — may indicate unclear responsibilities."
-			}
+			files[i].Insight = architectureInsight(files[i], p90FanIn, p90Bug, p90Chg, maxCoupling[files[i].Path])
 		}
 	}
 
@@ -404,14 +400,15 @@ func (s *Server) getArchitecture(w http.ResponseWriter, r *http.Request) {
 
 // ── Math helpers ────────────────────────────────────────────────────────
 
-// adaptiveWeights returns risk-score weights proportional to each metric's
-// standard deviation (high-variance metrics dominate). Falls back to equal
+// adaptiveWeights returns risk-score weights proportional to each normalized
+// metric's standard deviation. Normalization prevents raw units from deciding
+// the weights. Falls back to equal
 // 0.25 weights when every metric is constant. Returned weights always sum to 1.
 func adaptiveWeights(fanIns, bugDens, chgFreqs, couplings []float64) (wFanIn, wBug, wChg, wCoup float64) {
-	sdFanIn := stddev(fanIns)
-	sdBug := stddev(bugDens)
-	sdChg := stddev(chgFreqs)
-	sdCoup := stddev(couplings)
+	sdFanIn := stddev(normalizedValues(fanIns))
+	sdBug := stddev(normalizedValues(bugDens))
+	sdChg := stddev(normalizedValues(chgFreqs))
+	sdCoup := stddev(normalizedValues(couplings))
 	totalSD := sdFanIn + sdBug + sdChg + sdCoup
 
 	// Weights from standard deviation; if all zero, equal weights
@@ -419,6 +416,40 @@ func adaptiveWeights(fanIns, bugDens, chgFreqs, couplings []float64) (wFanIn, wB
 		return sdFanIn / totalSD, sdBug / totalSD, sdChg / totalSD, sdCoup / totalSD
 	}
 	return 0.25, 0.25, 0.25, 0.25
+}
+
+func bugDensityPerHundredLines(bugs, loc int) float64 {
+	if loc <= 0 {
+		return 0
+	}
+	density := float64(bugs) / float64(loc) * 100
+	return math.Round(density*100) / 100
+}
+
+func normalizedValues(vals []float64) []float64 {
+	max := maxVal(vals)
+	out := make([]float64, len(vals))
+	for i, value := range vals {
+		out[i] = safeNorm(value, max)
+	}
+	return out
+}
+
+func architectureInsight(file archFile, p90FanIn, p90Bug, p90Change, coupling float64) string {
+	switch {
+	case file.FanIn > 0 && file.BugDensity > 0 && float64(file.FanIn) >= p90FanIn && file.BugDensity >= p90Bug:
+		return "Critical choke point with high bug density. " + strconv.Itoa(file.FanIn) + " files depend on this. Prioritize refactoring."
+	case file.FanIn > 0 && float64(file.FanIn) >= p90FanIn:
+		return "Choke point. " + strconv.Itoa(file.FanIn) + " files break if this breaks. Consider splitting into smaller modules."
+	case file.BugDensity > 0 && file.BugDensity >= p90Bug:
+		return "Bug hotspot. High defect rate per line. Review changes here carefully."
+	case file.ChangeFrequency > 0 && float64(file.ChangeFrequency) >= p90Change && coupling >= tightCouplingThreshold:
+		return "Unstable coupling. Changes frequently and tightly coupled — changes here ripple."
+	case file.ChangeFrequency > 0 && float64(file.ChangeFrequency) >= p90Change:
+		return "High churn. Frequently modified — may indicate unclear responsibilities."
+	default:
+		return ""
+	}
 }
 
 func stddev(vals []float64) float64 {
@@ -503,9 +534,10 @@ func splitEdgeKey(k string) []string {
 // ── Concurrent query helpers (sqlc-backed) ──────────────────────────────
 
 type archFileInfo struct {
-	language string
-	symbols  []string
-	linesSum int
+	language   string
+	symbols    []string
+	loc        int
+	maxLineEnd int
 }
 
 type archEdgeAgg struct {
@@ -530,9 +562,15 @@ func (s *Server) fetchArchNodes(ctx context.Context, repoID int64, fileMap map[s
 			fi = &archFileInfo{language: row.Language}
 			fileMap[row.FilePath] = fi
 		}
+		if row.Kind == "file" {
+			if int(row.LineEnd) > fi.loc {
+				fi.loc = int(row.LineEnd)
+			}
+			continue
+		}
 		fi.symbols = append(fi.symbols, row.Name)
-		if row.LineSpan > 0 {
-			fi.linesSum += int(row.LineSpan)
+		if int(row.LineEnd) > fi.maxLineEnd {
+			fi.maxLineEnd = int(row.LineEnd)
 		}
 	}
 	return nil
@@ -545,22 +583,30 @@ func (s *Server) fetchArchEdges(ctx context.Context, repoID int64, fanIn, fanOut
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	for _, row := range rows {
-		fanOut[row.SourcePath]++
-		fanIn[row.TargetPath]++
-		k := edgeKey(row.SourcePath, row.TargetPath)
-		ea, ok := fileEdges[k]
-		if !ok {
-			ea = &archEdgeAgg{kinds: make(map[string]bool)}
-			fileEdges[k] = ea
-		}
-		ea.kinds[row.Kind] = true
-		ea.count++
-	}
+	aggregateArchEdges(rows, fanIn, fanOut, fileEdges, edgeKey)
 	return nil
 }
 
-func (s *Server) fetchArchBugs(ctx context.Context, repoID int64, bugCount, changeFreq map[string]int, mu *sync.Mutex) error {
+func aggregateArchEdges(rows []db.ListArchFileEdgesRow, fanIn, fanOut map[string]int, fileEdges map[string]*archEdgeAgg, edgeKey func(string, string) string) {
+	seenPairs := make(map[string]bool)
+	for _, row := range rows {
+		key := edgeKey(row.SourcePath, row.TargetPath)
+		if !seenPairs[key] {
+			seenPairs[key] = true
+			fanOut[row.SourcePath]++
+			fanIn[row.TargetPath]++
+		}
+		edge, ok := fileEdges[key]
+		if !ok {
+			edge = &archEdgeAgg{kinds: make(map[string]bool)}
+			fileEdges[key] = edge
+		}
+		edge.kinds[row.Kind] = true
+		edge.count++
+	}
+}
+
+func (s *Server) fetchArchBugs(ctx context.Context, repoID int64, bugCount map[string]int, mu *sync.Mutex) error {
 	rows, err := s.store.ListArchBugDensity(ctx, repoID)
 	if err != nil {
 		return err
@@ -569,7 +615,6 @@ func (s *Server) fetchArchBugs(ctx context.Context, repoID int64, bugCount, chan
 	defer mu.Unlock()
 	for _, row := range rows {
 		bugCount[row.FilePath] = int(row.Bugs)
-		changeFreq[row.FilePath] = int(row.Prs)
 	}
 	return nil
 }

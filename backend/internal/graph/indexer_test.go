@@ -406,3 +406,23 @@ func sortEdgeSlice(edges []Edge) {
 		return edges[i].TargetName < edges[j].TargetName
 	})
 }
+
+func TestFileSymbolUsesPhysicalFileLOC(t *testing.T) {
+	tests := []struct {
+		name, content string
+		wantLOC       int
+	}{
+		{name: "empty", content: "", wantLOC: 0},
+		{name: "one line", content: "package p", wantLOC: 1},
+		{name: "trailing newline", content: "package p\n", wantLOC: 1},
+		{name: "three lines", content: "package p\n\nfunc F() {}\n", wantLOC: 3},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sym := fileSymbol("a.go", tc.content)
+			if sym.Kind != "file" || sym.Name != "a.go" || sym.FilePath != "a.go" || sym.LineEnd != tc.wantLOC {
+				t.Fatalf("fileSymbol = %+v, want file identity with LOC %d", sym, tc.wantLOC)
+			}
+		})
+	}
+}
