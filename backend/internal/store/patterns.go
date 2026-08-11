@@ -188,15 +188,15 @@ func newPatternOutboxPayload(pattern Pattern, customID, repo string) (json.RawMe
 }
 
 func (s *Store) GetPattern(ctx context.Context, id int64) (*Pattern, error) {
-	var p Pattern
-	err := s.Pool.QueryRow(ctx,
-		`SELECT id, installation_id, repo_id, content, memory_doc_id, created_by, COALESCE(source, 'manual'), category, pr_number, created_at, updated_at
-		 FROM patterns WHERE id = $1`, id).
-		Scan(&p.ID, &p.InstallationID, &p.RepoID, &p.Content, &p.MemoryDocID, &p.CreatedBy, &p.Source, &p.Category, &p.PRNumber, &p.CreatedAt, &p.UpdatedAt)
+	row, err := s.q.GetPattern(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	return &p, nil
+	pattern, err := patternFromSQLC(row.ID, row.InstallationID, row.RepoID, row.Content, row.MemoryDocID, row.CreatedBy, row.Source, row.Category, row.PRNumber, row.CreatedAt, row.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &pattern, nil
 }
 
 // GetPatternIDByMemoryDocID maps a memory pattern doc id back to its

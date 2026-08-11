@@ -303,7 +303,7 @@ func TestReviewMemoryReadsSelectTheRightRows(t *testing.T) {
 
 func TestReviewMemoryReadsPreserveHistoryAndExcludeNonLiveRows(t *testing.T) {
 	pool, ctx := fileMemoryTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 	install, reviewA, reviewB := seedLearnTenant(t, ctx, pool, "learn-history")
 
 	insertLearnedMemory(t, ctx, pool, install, reviewA, "shared", "pattern", "current pattern content", false)

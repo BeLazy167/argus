@@ -9,12 +9,12 @@ RETURNING id, installation_id, category, content, priority, enabled, created_at,
 
 -- name: UpdateRule :one
 UPDATE rules SET
-    category = COALESCE($3, category),
-    content = COALESCE($4, content),
-    priority = COALESCE($5, priority),
-    enabled = COALESCE($6, enabled),
+    category = COALESCE(sqlc.narg(category)::text, category),
+    content = COALESCE(sqlc.narg(content)::text, content),
+    priority = COALESCE(sqlc.narg(priority)::int, priority),
+    enabled = COALESCE(sqlc.narg(enabled)::boolean, enabled),
     updated_at = NOW()
-WHERE id = $1 AND installation_id = ANY($2::bigint[])
+WHERE id = sqlc.arg(id)::bigint AND installation_id = ANY(sqlc.arg(installation_ids)::bigint[])
 RETURNING id, installation_id, category, content, priority, enabled, created_at, updated_at;
 
 -- name: DeleteRule :execrows

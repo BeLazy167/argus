@@ -10,7 +10,7 @@ import (
 
 func TestListMemoriesIsTenantScopedLiveFilteredAndStable(t *testing.T) {
 	pool, ctx := fileMemoryTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 	mine, reviewID, _ := seedLearnTenant(t, ctx, pool, "memory-api-mine")
 	theirs, _, _ := seedLearnTenant(t, ctx, pool, "memory-api-theirs")
 

@@ -794,33 +794,20 @@ func (s *Store) ListModelConfigs(ctx context.Context, repoID int64) ([]ModelConf
 }
 
 func (s *Store) UpsertModelConfig(ctx context.Context, repoID int64, stage, provider, model string, baseURL *string, maxTokens int, temperature float32) (*ModelConfig, error) {
-	var mc ModelConfig
-	err := s.Pool.QueryRow(ctx, `
-		INSERT INTO model_configs (repo_id, stage, provider, model, base_url, max_tokens, temperature)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
-		ON CONFLICT (repo_id, stage) DO UPDATE SET
-			provider = EXCLUDED.provider,
-			model = EXCLUDED.model,
-			base_url = EXCLUDED.base_url,
-			max_tokens = EXCLUDED.max_tokens,
-			temperature = EXCLUDED.temperature,
-			updated_at = NOW()
-		RETURNING id, repo_id, installation_id, stage, provider, model, base_url, max_tokens, temperature, created_at, updated_at
-	`, repoID, stage, provider, model, baseURL, maxTokens, temperature).Scan(
-		&mc.ID, &mc.RepoID, &mc.InstallationID, &mc.Stage, &mc.Provider, &mc.Model, &mc.BaseURL,
-		&mc.MaxTokens, &mc.Temperature, &mc.CreatedAt, &mc.UpdatedAt)
+	row, err := s.q.UpsertModelConfig(ctx, db.UpsertModelConfigParams{RepoID: &repoID, Stage: stage, Provider: provider, Model: model, BaseURL: baseURL, MaxTokens: maxTokens, Temperature: temperature})
 	if err != nil {
 		return nil, err
 	}
-	return &mc, nil
+	config := modelConfigFromValues(row.ID, row.RepoID, nil, row.Stage, row.Provider, row.Model, row.BaseURL, row.MaxTokens, row.Temperature, row.CreatedAt, row.UpdatedAt)
+	return &config, nil
 }
 
 func (s *Store) DeleteModelConfig(ctx context.Context, repoID int64, stage string) error {
-	ct, err := s.Pool.Exec(ctx, `DELETE FROM model_configs WHERE repo_id = $1 AND stage = $2`, repoID, stage)
+	count, err := s.q.DeleteModelConfig(ctx, db.DeleteModelConfigParams{RepoID: &repoID, Stage: stage})
 	if err != nil {
 		return err
 	}
-	if ct.RowsAffected() == 0 {
+	if count == 0 {
 		return fmt.Errorf("config not found for repo %d stage %s", repoID, stage)
 	}
 	return nil
@@ -841,30 +828,21 @@ func (s *Store) ListOrgModelConfigs(ctx context.Context, installationID int64) (
 
 // UpsertOrgModelConfig saves an installation-level model config.
 func (s *Store) UpsertOrgModelConfig(ctx context.Context, installationID int64, stage, provider, model string, baseURL *string, maxTokens int, temperature float32) (*ModelConfig, error) {
-	var mc ModelConfig
-	err := s.Pool.QueryRow(ctx, `
-		INSERT INTO model_configs (installation_id, repo_id, stage, provider, model, base_url, max_tokens, temperature)
-		VALUES ($1, NULL, $2, $3, $4, $5, $6, $7)
-		ON CONFLICT (installation_id, stage) WHERE repo_id IS NULL AND installation_id IS NOT NULL DO UPDATE SET
-			provider = EXCLUDED.provider, model = EXCLUDED.model, base_url = EXCLUDED.base_url,
-			max_tokens = EXCLUDED.max_tokens, temperature = EXCLUDED.temperature, updated_at = NOW()
-		RETURNING id, repo_id, installation_id, stage, provider, model, base_url, max_tokens, temperature, created_at, updated_at
-	`, installationID, stage, provider, model, baseURL, maxTokens, temperature).Scan(
-		&mc.ID, &mc.RepoID, &mc.InstallationID, &mc.Stage, &mc.Provider, &mc.Model, &mc.BaseURL,
-		&mc.MaxTokens, &mc.Temperature, &mc.CreatedAt, &mc.UpdatedAt)
+	row, err := s.q.UpsertOrgModelConfig(ctx, db.UpsertOrgModelConfigParams{InstallationID: &installationID, Stage: stage, Provider: provider, Model: model, BaseURL: baseURL, MaxTokens: maxTokens, Temperature: temperature})
 	if err != nil {
 		return nil, err
 	}
-	return &mc, nil
+	config := modelConfigFromValues(row.ID, row.RepoID, row.InstallationID, row.Stage, row.Provider, row.Model, row.BaseURL, row.MaxTokens, row.Temperature, row.CreatedAt, row.UpdatedAt)
+	return &config, nil
 }
 
 // DeleteOrgModelConfig removes an installation-level config.
 func (s *Store) DeleteOrgModelConfig(ctx context.Context, installationID int64, stage string) error {
-	ct, err := s.Pool.Exec(ctx, `DELETE FROM model_configs WHERE installation_id = $1 AND stage = $2 AND repo_id IS NULL`, installationID, stage)
+	count, err := s.q.DeleteOrgModelConfig(ctx, db.DeleteOrgModelConfigParams{InstallationID: &installationID, Stage: stage})
 	if err != nil {
 		return err
 	}
-	if ct.RowsAffected() == 0 {
+	if count == 0 {
 		return fmt.Errorf("org config not found for installation %d stage %s", installationID, stage)
 	}
 	return nil
@@ -1473,27 +1451,23 @@ func (s *Store) ListPromptTemplates(ctx context.Context, repoID int64) ([]Prompt
 }
 
 func (s *Store) UpsertPromptTemplate(ctx context.Context, repoID int64, stage, promptText string) (*PromptTemplate, error) {
-	var pt PromptTemplate
-	err := s.Pool.QueryRow(ctx, `
-		INSERT INTO prompt_templates (repo_id, stage, prompt_text)
-		VALUES ($1, $2, $3)
-		ON CONFLICT (repo_id, stage) DO UPDATE SET
-			prompt_text = EXCLUDED.prompt_text,
-			updated_at = NOW()
-		RETURNING id, repo_id, stage, prompt_text, created_at, updated_at
-	`, repoID, stage, promptText).Scan(&pt.ID, &pt.RepoID, &pt.Stage, &pt.PromptText, &pt.CreatedAt, &pt.UpdatedAt)
+	row, err := s.q.UpsertPromptTemplate(ctx, db.UpsertPromptTemplateParams{RepoID: repoID, Stage: stage, PromptText: promptText})
 	if err != nil {
 		return nil, err
 	}
-	return &pt, nil
+	template, err := promptTemplateFromSQLC(row)
+	if err != nil {
+		return nil, err
+	}
+	return &template, nil
 }
 
 func (s *Store) DeletePromptTemplate(ctx context.Context, repoID int64, stage string) error {
-	ct, err := s.Pool.Exec(ctx, `DELETE FROM prompt_templates WHERE repo_id = $1 AND stage = $2`, repoID, stage)
+	count, err := s.q.DeletePromptTemplate(ctx, db.DeletePromptTemplateParams{RepoID: repoID, Stage: stage})
 	if err != nil {
 		return err
 	}
-	if ct.RowsAffected() == 0 {
+	if count == 0 {
 		return fmt.Errorf("prompt template not found for repo %d stage %s", repoID, stage)
 	}
 	return nil

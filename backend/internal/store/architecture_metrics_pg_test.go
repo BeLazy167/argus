@@ -4,14 +4,13 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/google/uuid"
-
 	"github.com/BeLazy167/argus/backend/internal/store/db"
+	"github.com/google/uuid"
 )
 
 func TestListArchCouplingUsesActualChangedFiles(t *testing.T) {
 	pool, ctx := fileMemoryTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 	tenant := seedBlastTenant(t, ctx, pool, "arch-coupling")
 	reviewID := uuid.New()
 	if _, err := pool.Exec(ctx, `

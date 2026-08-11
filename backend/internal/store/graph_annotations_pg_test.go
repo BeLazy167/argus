@@ -1,14 +1,13 @@
 package store
 
 import (
-	"testing"
-
 	"github.com/BeLazy167/argus/backend/internal/store/db"
+	"testing"
 )
 
 func TestReplaceArchitectureAnnotationsDoesNotMutateCodeFacts(t *testing.T) {
 	pool, ctx := apiEndpointTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 	installationID := seedInstallation(t, ctx, pool, "{}")
 	repoID := apiSeedRepo(t, ctx, pool, installationID, "annotation/facts")
 
@@ -59,7 +58,7 @@ func TestReplaceArchitectureAnnotationsDoesNotMutateCodeFacts(t *testing.T) {
 
 func TestReplaceArchitectureAnnotationsDropsAmbiguousEdges(t *testing.T) {
 	pool, ctx := apiEndpointTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 	installationID := seedInstallation(t, ctx, pool, "{}")
 	repoID := apiSeedRepo(t, ctx, pool, installationID, "annotation/ambiguous")
 
@@ -79,7 +78,7 @@ func TestReplaceArchitectureAnnotationsDropsAmbiguousEdges(t *testing.T) {
 
 func TestReplaceArchitectureAnnotationsDeduplicatesIdenticalLLMItems(t *testing.T) {
 	pool, ctx := apiEndpointTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 	installationID := seedInstallation(t, ctx, pool, "{}")
 	repoID := apiSeedRepo(t, ctx, pool, installationID, "annotation/duplicates")
 
@@ -100,7 +99,7 @@ func TestReplaceArchitectureAnnotationsDeduplicatesIdenticalLLMItems(t *testing.
 
 func TestReplaceArchitectureAnnotationsEmptySnapshotClearsNodes(t *testing.T) {
 	pool, ctx := apiEndpointTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 	installationID := seedInstallation(t, ctx, pool, "{}")
 	repoID := apiSeedRepo(t, ctx, pool, installationID, "annotation/empty")
 

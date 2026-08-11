@@ -27,7 +27,7 @@ func requireMirrorOutbox(t *testing.T, pool interface {
 func TestPatternAndRuleMutationsEnqueueOrderedMirrorEvents(t *testing.T) {
 	pool, ctx := fileMemoryTestPool(t)
 	requireMirrorOutbox(t, pool, ctx)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 	installationID, _, _ := seedLearnTenant(t, ctx, pool, "mirror-producers")
 	var repoID int64
 	if err := pool.QueryRow(ctx, `SELECT id FROM repos WHERE installation_id=$1`, installationID).Scan(&repoID); err != nil {
@@ -104,7 +104,7 @@ func TestPatternAndRuleMutationsEnqueueOrderedMirrorEvents(t *testing.T) {
 
 func TestWithMemoryMirrorTxRollsBackMutationWhenEnqueueValidationFails(t *testing.T) {
 	pool, ctx := fileMemoryTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 	installationID, _, _ := seedLearnTenant(t, ctx, pool, "mirror-rollback")
 	err := st.WithMemoryMirrorTx(ctx, func(tx pgx.Tx) (MemoryMirrorEvent, error) {
 		if _, err := tx.Exec(ctx, `INSERT INTO rules (installation_id,category,content) VALUES ($1,'test','must roll back')`, installationID); err != nil {
@@ -126,7 +126,7 @@ func TestWithMemoryMirrorTxRollsBackMutationWhenEnqueueValidationFails(t *testin
 
 func TestMemoryMirrorAcknowledgementRejectsLostLease(t *testing.T) {
 	pool, ctx := fileMemoryTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 	installationID, _, _ := seedLearnTenant(t, ctx, pool, "mirror-lost-lease")
 	event := MemoryMirrorEvent{
 		InstallationID: installationID,

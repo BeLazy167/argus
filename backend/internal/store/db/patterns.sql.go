@@ -11,20 +11,21 @@ import (
 )
 
 const createPattern = `-- name: CreatePattern :one
-INSERT INTO patterns (installation_id, repo_id, content, memory_doc_id, created_by, source, category, pr_number)
-VALUES ($1, $2, $3, $4, $5, COALESCE($6, 'manual'), $7, $8)
+INSERT INTO patterns (installation_id, repo_id, content, memory_doc_id, created_by, source, category, pr_number, memory_custom_id)
+VALUES ($1, $2, $3, $4, $5, COALESCE($8::text, 'manual'), $6, $7, $9::text)
 RETURNING id, installation_id, repo_id, content, memory_doc_id, created_by, COALESCE(source, 'manual') as source, category, pr_number, created_at, updated_at
 `
 
 type CreatePatternParams struct {
-	InstallationID int64       `json:"installation_id"`
-	RepoID         *int64      `json:"repo_id"`
-	Content        string      `json:"content"`
-	MemoryDocID    *string     `json:"memory_doc_id"`
-	CreatedBy      *string     `json:"created_by"`
-	Column6        interface{} `json:"column_6"`
-	Category       *string     `json:"category"`
-	PRNumber       *int        `json:"pr_number"`
+	InstallationID int64   `json:"installation_id"`
+	RepoID         *int64  `json:"repo_id"`
+	Content        string  `json:"content"`
+	MemoryDocID    *string `json:"memory_doc_id"`
+	CreatedBy      *string `json:"created_by"`
+	Category       *string `json:"category"`
+	PRNumber       *int    `json:"pr_number"`
+	Source         *string `json:"source"`
+	MemoryCustomID *string `json:"memory_custom_id"`
 }
 
 type CreatePatternRow struct {
@@ -48,9 +49,10 @@ func (q *Queries) CreatePattern(ctx context.Context, arg CreatePatternParams) (C
 		arg.Content,
 		arg.MemoryDocID,
 		arg.CreatedBy,
-		arg.Column6,
 		arg.Category,
 		arg.PRNumber,
+		arg.Source,
+		arg.MemoryCustomID,
 	)
 	var i CreatePatternRow
 	err := row.Scan(
@@ -70,16 +72,16 @@ func (q *Queries) CreatePattern(ctx context.Context, arg CreatePatternParams) (C
 }
 
 const deletePattern = `-- name: DeletePattern :execrows
-DELETE FROM patterns WHERE id = $1 AND installation_id = ANY($2::bigint[])
+DELETE FROM patterns WHERE id = $1::bigint AND installation_id = ANY($2::bigint[])
 `
 
 type DeletePatternParams struct {
-	ID      int     `json:"id"`
-	Column2 []int64 `json:"column_2"`
+	ID              int64   `json:"id"`
+	InstallationIds []int64 `json:"installation_ids"`
 }
 
 func (q *Queries) DeletePattern(ctx context.Context, arg DeletePatternParams) (int64, error) {
-	result, err := q.db.Exec(ctx, deletePattern, arg.ID, arg.Column2)
+	result, err := q.db.Exec(ctx, deletePattern, arg.ID, arg.InstallationIds)
 	if err != nil {
 		return 0, err
 	}
@@ -138,7 +140,7 @@ func (q *Queries) GetLowQualityPatterns(ctx context.Context, arg GetLowQualityPa
 
 const getPattern = `-- name: GetPattern :one
 SELECT id, installation_id, repo_id, content, memory_doc_id, created_by, COALESCE(source, 'manual') as source, category, pr_number, created_at, updated_at
-FROM patterns WHERE id = $1
+FROM patterns WHERE id = $1::bigint
 `
 
 type GetPatternRow struct {
@@ -155,7 +157,7 @@ type GetPatternRow struct {
 	UpdatedAt      *time.Time `json:"updated_at"`
 }
 
-func (q *Queries) GetPattern(ctx context.Context, id int) (GetPatternRow, error) {
+func (q *Queries) GetPattern(ctx context.Context, id int64) (GetPatternRow, error) {
 	row := q.db.QueryRow(ctx, getPattern, id)
 	var i GetPatternRow
 	err := row.Scan(

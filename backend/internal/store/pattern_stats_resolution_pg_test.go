@@ -1,14 +1,13 @@
 package store
 
 import (
-	"testing"
-
 	"github.com/BeLazy167/argus/backend/internal/store/db"
+	"testing"
 )
 
 func TestIncrementPatternMatchUsesDurableCustomIDAfterMirrorRecovery(t *testing.T) {
 	pool, ctx := fileMemoryTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 	installationID, _, _ := seedLearnTenant(t, ctx, pool, "pattern-stats-custom-id")
 	var repoID int64
 	if err := pool.QueryRow(ctx, `SELECT id FROM repos WHERE installation_id=$1`, installationID).Scan(&repoID); err != nil {

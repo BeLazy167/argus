@@ -121,22 +121,22 @@ func (q *Queries) ListRules(ctx context.Context, dollar_1 []int64) ([]ListRulesR
 
 const updateRule = `-- name: UpdateRule :one
 UPDATE rules SET
-    category = COALESCE($3, category),
-    content = COALESCE($4, content),
-    priority = COALESCE($5, priority),
-    enabled = COALESCE($6, enabled),
+    category = COALESCE($1::text, category),
+    content = COALESCE($2::text, content),
+    priority = COALESCE($3::int, priority),
+    enabled = COALESCE($4::boolean, enabled),
     updated_at = NOW()
-WHERE id = $1 AND installation_id = ANY($2::bigint[])
+WHERE id = $5::bigint AND installation_id = ANY($6::bigint[])
 RETURNING id, installation_id, category, content, priority, enabled, created_at, updated_at
 `
 
 type UpdateRuleParams struct {
-	ID       int64   `json:"id"`
-	Column2  []int64 `json:"column_2"`
-	Category string  `json:"category"`
-	Content  string  `json:"content"`
-	Priority int     `json:"priority"`
-	Enabled  bool    `json:"enabled"`
+	Category        *string `json:"category"`
+	Content         *string `json:"content"`
+	Priority        *int    `json:"priority"`
+	Enabled         *bool   `json:"enabled"`
+	ID              int64   `json:"id"`
+	InstallationIds []int64 `json:"installation_ids"`
 }
 
 type UpdateRuleRow struct {
@@ -152,12 +152,12 @@ type UpdateRuleRow struct {
 
 func (q *Queries) UpdateRule(ctx context.Context, arg UpdateRuleParams) (UpdateRuleRow, error) {
 	row := q.db.QueryRow(ctx, updateRule,
-		arg.ID,
-		arg.Column2,
 		arg.Category,
 		arg.Content,
 		arg.Priority,
 		arg.Enabled,
+		arg.ID,
+		arg.InstallationIds,
 	)
 	var i UpdateRuleRow
 	err := row.Scan(
