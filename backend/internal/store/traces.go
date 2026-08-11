@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/BeLazy167/argus/backend/internal/store/db"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -103,18 +104,15 @@ func (s *Store) GetHotFiles(ctx context.Context, repoID int64, limit int) ([]Fil
 	if limit <= 0 {
 		limit = 20
 	}
-	rows, err := s.Pool.Query(ctx,
-		`SELECT file_path, COUNT(*)::int AS trace_count, MAX(created_at) AS last_trace
-		 FROM decision_traces
-		 WHERE repo_id = $1 AND created_at > NOW() - INTERVAL '90 days'
-		 GROUP BY file_path
-		 ORDER BY trace_count DESC
-		 LIMIT $2`, repoID, limit)
+	rows, err := s.q.GetHotFiles(ctx, db.GetHotFilesParams{RepoID: repoID, RowLimit: int64(limit)})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[FileRisk])
+	files := make([]FileRisk, 0, len(rows))
+	for _, row := range rows {
+		files = append(files, FileRisk{FilePath: row.FilePath, TraceCount: row.TraceCount, LastTrace: row.LastTrace})
+	}
+	return files, nil
 }
 
 // scanTrace scans a decision_traces row into a DecisionTrace struct.

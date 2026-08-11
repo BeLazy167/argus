@@ -71,27 +71,27 @@ func (q *Queries) GetFileRiskScore(ctx context.Context, arg GetFileRiskScorePara
 }
 
 const getHotFiles = `-- name: GetHotFiles :many
-SELECT file_path, COUNT(*)::int AS trace_count, MAX(created_at) AS last_trace
+SELECT file_path, COUNT(*)::int AS trace_count, MAX(created_at)::timestamptz AS last_trace
 FROM decision_traces
 WHERE repo_id = $1 AND created_at > NOW() - INTERVAL '90 days'
 GROUP BY file_path
 ORDER BY trace_count DESC
-LIMIT $2
+LIMIT $2::bigint
 `
 
 type GetHotFilesParams struct {
-	RepoID int64 `json:"repo_id"`
-	Limit  int32 `json:"limit"`
+	RepoID   int64 `json:"repo_id"`
+	RowLimit int64 `json:"row_limit"`
 }
 
 type GetHotFilesRow struct {
-	FilePath   string      `json:"file_path"`
-	TraceCount int         `json:"trace_count"`
-	LastTrace  interface{} `json:"last_trace"`
+	FilePath   string    `json:"file_path"`
+	TraceCount int       `json:"trace_count"`
+	LastTrace  time.Time `json:"last_trace"`
 }
 
 func (q *Queries) GetHotFiles(ctx context.Context, arg GetHotFilesParams) ([]GetHotFilesRow, error) {
-	rows, err := q.db.Query(ctx, getHotFiles, arg.RepoID, arg.Limit)
+	rows, err := q.db.Query(ctx, getHotFiles, arg.RepoID, arg.RowLimit)
 	if err != nil {
 		return nil, err
 	}

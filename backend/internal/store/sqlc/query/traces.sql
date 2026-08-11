@@ -29,9 +29,9 @@ FROM decision_traces
 WHERE repo_id = $1 AND file_path = $2 AND created_at > NOW() - INTERVAL '90 days';
 
 -- name: GetHotFiles :many
-SELECT file_path, COUNT(*)::int AS trace_count, MAX(created_at) AS last_trace
+SELECT file_path, COUNT(*)::int AS trace_count, MAX(created_at)::timestamptz AS last_trace
 FROM decision_traces
 WHERE repo_id = $1 AND created_at > NOW() - INTERVAL '90 days'
 GROUP BY file_path
 ORDER BY trace_count DESC
-LIMIT $2;
+LIMIT sqlc.arg(row_limit)::bigint;
