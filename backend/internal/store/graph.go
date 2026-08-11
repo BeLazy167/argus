@@ -377,12 +377,13 @@ func (s *Store) GetBlastRadius(ctx context.Context, installationID, repoID int64
 // among rows the walk returned, which is why the walk has to return more.
 func (s *Store) blastRadiusPGGraph(ctx context.Context, installationID, repoID int64, filePaths []string, maxDepth int) ([]CodeNode, error) {
 	rows, err := s.Pool.Query(ctx, `
-		WITH seeds AS (
-		  SELECT array_agg(id::text) AS ids
-		  FROM code_nodes WHERE installation_id = $1 AND repo_id = $2 AND file_path = ANY($3)
-		), reached AS (
-		  SELECT DISTINCT cn.id, cn.repo_id, cn.name, cn.file_path, cn.kind, t.depth
-		  FROM seeds s
+		WITH RECURSIVE seeds AS (
+		  SELECT id, repo_id, name, file_path, kind
+		  FROM code_nodes
+		  WHERE installation_id = $1 AND repo_id = $2 AND file_path = ANY($3)
+		), candidates AS (
+		  SELECT DISTINCT t.node_id::bigint AS id
+		  FROM (SELECT array_agg(id::text) AS ids FROM seeds) s
 		  CROSS JOIN LATERAL graph.traverse(
 		      (SELECT array_agg('public.code_nodes'::regclass) FROM generate_series(1, array_length(s.ids, 1))),
 		      s.ids,
@@ -392,10 +393,18 @@ func (s *Store) blastRadiusPGGraph(ctx context.Context, installationID, repoID i
 		      filter := graph.eq('installation_id', to_jsonb($1::bigint)),
 		      max_rows := 200
 		  ) t
-		  JOIN code_nodes cn ON cn.id = t.node_id::bigint
-		  WHERE cn.installation_id = $1
+		), reached AS (
+		  SELECT id, repo_id, name, file_path, kind, 0 AS depth FROM seeds
+		  UNION
+		  SELECT cn.id, cn.repo_id, cn.name, cn.file_path, cn.kind, r.depth + 1
+		  FROM reached r
+		  JOIN code_edges ce ON ce.target_id = r.id AND NOT ce.inferred
+		  JOIN code_nodes cn ON cn.id = ce.source_id
+		  JOIN candidates c ON c.id = cn.id
+		  WHERE r.depth < $4 AND cn.installation_id = $1
 		)
-		SELECT id, repo_id, name, file_path, kind, depth FROM reached
+		SELECT id, repo_id, name, file_path, kind, depth
+		FROM (SELECT DISTINCT id, repo_id, name, file_path, kind, depth FROM reached) d
 		ORDER BY depth, (repo_id <> $2), file_path
 		LIMIT 50`, installationID, repoID, filePaths, maxDepth)
 	if err != nil {

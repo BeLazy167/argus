@@ -121,6 +121,15 @@ func TestBlastRadiusScopesByInstallation(t *testing.T) {
 	crossRepo := seedNode(t, ctx, st, mine.repoB, "JobsPage", "web/pages/jobs.tsx")
 	seedEdge(t, ctx, pool, mine.repoB, crossRepo, target)
 
+	// A derived cross-repo match is intentionally NOT authoritative graph evidence.
+	// Both traversal engines must exclude it; before #254 only the CTE did.
+	inferred := seedNode(t, ctx, st, mine.repoB, "GuessedClient", "web/guessed.ts")
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO code_edges (repo_id, source_id, target_id, kind, inferred, updated_at)
+		VALUES ($1, $2, $3, 'calls_api', true, NOW())`, mine.repoB, inferred, target); err != nil {
+		t.Fatalf("seed inferred edge: %v", err)
+	}
+
 	// initech: another customer entirely, wired to acme's node by a corrupt edge.
 	foreign := seedNode(t, ctx, st, theirs.repoA, "SecretPipeline", "initech/secret.go")
 	seedEdge(t, ctx, pool, theirs.repoA, foreign, target)
@@ -144,6 +153,9 @@ func TestBlastRadiusScopesByInstallation(t *testing.T) {
 		},
 	}
 	if st.pgGraphAvailable(ctx) {
+		if err := st.RebuildCodeGraphProjection(ctx); err != nil {
+			t.Fatalf("rebuild pgGraph fixture: %v", err)
+		}
 		paths["pggraph"] = func(c context.Context) ([]CodeNode, error) {
 			return st.blastRadiusPGGraph(c, mine.installID, mine.repoA, []string{seedPath}, 2)
 		}
@@ -168,6 +180,9 @@ func TestBlastRadiusScopesByInstallation(t *testing.T) {
 
 			if slices.Contains(got, "SecretPipeline") {
 				t.Fatalf("TENANT LEAK: blast radius returned another installation's node; got %v", got)
+			}
+			if slices.Contains(got, "GuessedClient") {
+				t.Fatalf("inferred edge changed authoritative blast radius on %s path; got %v", name, got)
 			}
 			if _, ok := byName["JobsPage"]; !ok {
 				t.Fatalf("cross-repo dependent inside the installation was not reached; got %v", got)
