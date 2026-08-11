@@ -9,7 +9,24 @@ import (
 
 	"github.com/BeLazy167/argus/backend/internal/store/db"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+func lockMirrorOutboxPGTests(t *testing.T, pool *pgxpool.Pool, ctx context.Context) {
+	t.Helper()
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire mirror test lock connection: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock(90254)`); err != nil {
+		conn.Release()
+		t.Fatalf("acquire mirror test lock: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = conn.Exec(context.Background(), `SELECT pg_advisory_unlock(90254)`)
+		conn.Release()
+	})
+}
 
 func requireMirrorOutbox(t *testing.T, pool interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
@@ -26,6 +43,7 @@ func requireMirrorOutbox(t *testing.T, pool interface {
 
 func TestPatternAndRuleMutationsEnqueueOrderedMirrorEvents(t *testing.T) {
 	pool, ctx := fileMemoryTestPool(t)
+	lockMirrorOutboxPGTests(t, pool, ctx)
 	requireMirrorOutbox(t, pool, ctx)
 	st := &Store{Pool: pool, q: db.New(pool)}
 	installationID, _, _ := seedLearnTenant(t, ctx, pool, "mirror-producers")
@@ -115,6 +133,7 @@ func TestPatternAndRuleMutationsEnqueueOrderedMirrorEvents(t *testing.T) {
 
 func TestWithMemoryMirrorTxRollsBackMutationWhenEnqueueValidationFails(t *testing.T) {
 	pool, ctx := fileMemoryTestPool(t)
+	lockMirrorOutboxPGTests(t, pool, ctx)
 	st := &Store{Pool: pool, q: db.New(pool)}
 	installationID, _, _ := seedLearnTenant(t, ctx, pool, "mirror-rollback")
 	err := st.WithMemoryMirrorTx(ctx, func(tx pgx.Tx) (MemoryMirrorEvent, error) {
@@ -137,6 +156,7 @@ func TestWithMemoryMirrorTxRollsBackMutationWhenEnqueueValidationFails(t *testin
 
 func TestMemoryMirrorAcknowledgementRejectsLostLease(t *testing.T) {
 	pool, ctx := fileMemoryTestPool(t)
+	lockMirrorOutboxPGTests(t, pool, ctx)
 	st := &Store{Pool: pool, q: db.New(pool)}
 	installationID, _, _ := seedLearnTenant(t, ctx, pool, "mirror-lost-lease")
 	event := MemoryMirrorEvent{
@@ -156,6 +176,16 @@ func TestMemoryMirrorAcknowledgementRejectsLostLease(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE memory_mirror_outbox SET claimed_at = claimed_at + interval '1 second' WHERE id=$1`, claimed[0].ID); err != nil {
 		t.Fatal(err)
 	}
+	applyCalled := false
+	if err := st.ProcessMemoryMirrorEvent(ctx, claimed[0], "rule--1", nil, func(context.Context, bool) error {
+		applyCalled = true
+		return nil
+	}); err == nil {
+		t.Fatal("stale worker processed an event after losing its lease")
+	}
+	if applyCalled {
+		t.Fatal("stale worker reached the external operation after losing its lease")
+	}
 	if err := st.MarkMemoryMirrorEventProcessed(ctx, claimed[0]); err == nil {
 		t.Fatal("stale worker acknowledged a reclaimed lease")
 	}
@@ -163,6 +193,7 @@ func TestMemoryMirrorAcknowledgementRejectsLostLease(t *testing.T) {
 
 func TestDeletePatternLegacyNullMemoryIdentityEnqueuesReplayableDelete(t *testing.T) {
 	pool, ctx := fileMemoryTestPool(t)
+	lockMirrorOutboxPGTests(t, pool, ctx)
 	requireMirrorOutbox(t, pool, ctx)
 	st := &Store{Pool: pool, q: db.New(pool)}
 	installationID, _, _ := seedLearnTenant(t, ctx, pool, "mirror-legacy-delete")

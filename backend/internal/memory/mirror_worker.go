@@ -79,7 +79,8 @@ func NewRuleMirrorPayload(rule RuleMemory, enabled bool) (json.RawMessage, error
 
 type mirrorOutbox interface {
 	ClaimMemoryMirrorEvents(context.Context, int, time.Duration) ([]store.MemoryMirrorOutboxEvent, error)
-	MarkMemoryMirrorEventProcessed(context.Context, store.MemoryMirrorOutboxEvent) error
+	BindMemoryMirrorEventCustomID(context.Context, store.MemoryMirrorOutboxEvent, string) error
+	ProcessMemoryMirrorEvent(context.Context, store.MemoryMirrorOutboxEvent, string, store.MemoryMirrorLegacyOwner, store.MemoryMirrorApply) error
 	MarkMemoryMirrorEventFailed(context.Context, store.MemoryMirrorOutboxEvent, error) error
 }
 
@@ -115,7 +116,7 @@ func (w *MirrorWorker) RunOnce(ctx context.Context, limit int) (int, error) {
 	processed := 0
 	failures := make([]error, 0)
 	for _, event := range events {
-		applyErr := w.apply(ctx, event)
+		applyErr := w.process(ctx, event)
 		if applyErr != nil {
 			if markErr := w.outbox.MarkMemoryMirrorEventFailed(ctx, event, applyErr); markErr != nil {
 				applyErr = errors.Join(applyErr, markErr)
@@ -123,16 +124,12 @@ func (w *MirrorWorker) RunOnce(ctx context.Context, limit int) (int, error) {
 			failures = append(failures, fmt.Errorf("mirror event %d: %w", event.ID, applyErr))
 			continue
 		}
-		if err := w.outbox.MarkMemoryMirrorEventProcessed(ctx, event); err != nil {
-			failures = append(failures, err)
-			continue
-		}
 		processed++
 	}
 	return processed, errors.Join(failures...)
 }
 
-func (w *MirrorWorker) apply(ctx context.Context, event store.MemoryMirrorOutboxEvent) error {
+func (w *MirrorWorker) process(ctx context.Context, event store.MemoryMirrorOutboxEvent) error {
 	var payload MirrorPayload
 	if err := json.Unmarshal(event.Payload, &payload); err != nil {
 		return fmt.Errorf("decode payload: %w", err)
@@ -142,11 +139,38 @@ func (w *MirrorWorker) apply(ctx context.Context, event store.MemoryMirrorOutbox
 		if err != nil {
 			return err
 		}
+		if err := w.outbox.BindMemoryMirrorEventCustomID(ctx, event, customID); err != nil {
+			return err
+		}
 		payload.CustomID = customID
 	}
 	if payload.CustomID == "" {
 		return fmt.Errorf("payload has empty custom_id")
 	}
+
+	legacyOwner := func(identity store.MemoryMirrorPatternIdentity) (bool, error) {
+		category := identity.Category
+		candidate := MirrorPayload{
+			Repo: identity.Repo, Shared: identity.Shared,
+			Pattern: &PatternMemory{
+				Content: identity.Content, Source: identity.Source, Category: category,
+			},
+		}
+		candidateID, err := legacyPatternMirrorCustomID(candidate)
+		if err != nil {
+			return false, fmt.Errorf("derive legacy pattern %d identity: %w", identity.ID, err)
+		}
+		return candidateID == payload.CustomID, nil
+	}
+	return w.outbox.ProcessMemoryMirrorEvent(ctx, event, payload.CustomID, legacyOwner, func(ctx context.Context, deleteAuthorized bool) error {
+		if event.Operation == store.MemoryMirrorDelete && !deleteAuthorized {
+			return nil
+		}
+		return w.applyPayload(ctx, event, payload)
+	})
+}
+
+func (w *MirrorWorker) applyPayload(ctx context.Context, event store.MemoryMirrorOutboxEvent, payload MirrorPayload) error {
 	indexer := w.getIndexer(ctx, event.InstallationID)
 	if indexer == nil {
 		return fmt.Errorf("memory indexer unavailable for installation %d", event.InstallationID)

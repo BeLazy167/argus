@@ -37,6 +37,28 @@ type MemoryMirrorOutboxEvent struct {
 	CreatedAt      time.Time       `db:"created_at"`
 }
 
+// MemoryMirrorPatternIdentity is the relational identity needed to reconstruct
+// a pre-mirror pattern's deterministic custom ID. Legacy rows have neither
+// memory_custom_id nor memory_doc_id, so the memory package remains the single
+// authority for deriving their ID from this projection.
+type MemoryMirrorPatternIdentity struct {
+	ID       int64
+	Repo     string
+	Shared   bool
+	Content  string
+	Source   string
+	Category string
+}
+
+// MemoryMirrorLegacyOwner reports whether a legacy pattern owns the custom ID
+// currently being processed. It runs while the store holds the custom-ID lock.
+type MemoryMirrorLegacyOwner func(MemoryMirrorPatternIdentity) (bool, error)
+
+// MemoryMirrorApply performs the idempotent external memory operation. For a
+// pattern delete, deleteAuthorized is false while another relational pattern
+// still owns the same deterministic custom ID.
+type MemoryMirrorApply func(context.Context, bool) error
+
 func (e MemoryMirrorEvent) validate() error {
 	if e.InstallationID <= 0 || e.AggregateID <= 0 {
 		return fmt.Errorf("mirror event requires installation and aggregate ids")
@@ -79,6 +101,12 @@ func enqueueMemoryMirrorEvent(ctx context.Context, tx pgx.Tx, event MemoryMirror
 	if err := event.validate(); err != nil {
 		return err
 	}
+	customID := mirrorEventCustomID(event.Payload)
+	if customID != "" {
+		if err := lockMemoryMirrorCustomID(ctx, tx, event.InstallationID, customID); err != nil {
+			return err
+		}
+	}
 	_, err := tx.Exec(ctx, `
         INSERT INTO memory_mirror_outbox
             (installation_id, aggregate_type, aggregate_id, operation, payload)
@@ -90,9 +118,11 @@ func enqueueMemoryMirrorEvent(ctx context.Context, tx pgx.Tx, event MemoryMirror
 	return nil
 }
 
-// ClaimMemoryMirrorEvents leases the oldest ready event for each aggregate.
-// Earlier unprocessed transitions block later ones, preserving source order
-// even when multiple workers use SKIP LOCKED concurrently.
+// ClaimMemoryMirrorEvents leases the oldest ready event for each custom ID.
+// Aggregate ordering remains as a fallback, and an unbound legacy pattern is a
+// conservative installation-wide pattern barrier until the worker reconstructs
+// and binds its ID. Earlier transitions therefore cannot finish after later
+// transitions when multiple workers use SKIP LOCKED concurrently.
 func (s *Store) ClaimMemoryMirrorEvents(ctx context.Context, limit int, staleAfter time.Duration) ([]MemoryMirrorOutboxEvent, error) {
 	if limit <= 0 {
 		limit = 50
@@ -112,10 +142,17 @@ func (s *Store) ClaimMemoryMirrorEvents(ctx context.Context, limit int, staleAft
               AND (o.claimed_at IS NULL OR o.claimed_at <= now() - ($2 * interval '1 second'))
               AND NOT EXISTS (
                   SELECT 1 FROM memory_mirror_outbox earlier
-                  WHERE earlier.aggregate_type = o.aggregate_type
-                    AND earlier.aggregate_id = o.aggregate_id
+                  WHERE earlier.installation_id = o.installation_id
                     AND earlier.id < o.id
                     AND earlier.processed_at IS NULL
+                    AND (
+                      (earlier.aggregate_type = o.aggregate_type
+                       AND earlier.aggregate_id = o.aggregate_id)
+                      OR NULLIF(earlier.payload->>'custom_id', '') = NULLIF(o.payload->>'custom_id', '')
+                      OR (earlier.aggregate_type = 'pattern'
+                          AND NULLIF(earlier.payload->>'custom_id', '') IS NULL
+                          AND o.aggregate_type = 'pattern')
+                    )
               )
             ORDER BY o.id
             FOR UPDATE SKIP LOCKED
@@ -137,6 +174,172 @@ func (s *Store) ClaimMemoryMirrorEvents(ctx context.Context, limit int, staleAft
 		return nil, fmt.Errorf("read claimed memory mirror events: %w", err)
 	}
 	return events, nil
+}
+
+func mirrorEventCustomID(payload json.RawMessage) string {
+	var identity struct {
+		CustomID string `json:"custom_id"`
+	}
+	if err := json.Unmarshal(payload, &identity); err != nil {
+		return ""
+	}
+	return identity.CustomID
+}
+
+func lockMemoryMirrorCustomID(ctx context.Context, tx pgx.Tx, installationID int64, customID string) error {
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+		fmt.Sprintf("memory-mirror:%d:%s", installationID, customID)); err != nil {
+		return fmt.Errorf("lock memory mirror custom ID: %w", err)
+	}
+	return nil
+}
+
+// ProcessMemoryMirrorEvent serializes the external side effect, relational
+// ownership check, and lease acknowledgement for one custom ID. Producers take
+// the same transaction-scoped advisory lock before committing a new event, so
+// a pattern cannot become a live owner in the check-to-delete interval.
+//
+// External operations are deliberately inside the transaction. If the process
+// dies after the external write, the transaction rolls back and stale-lease
+// replay repeats the idempotent operation. If commit succeeds, the CAS
+// acknowledgement and operation are ordered together for every machine.
+func (s *Store) ProcessMemoryMirrorEvent(
+	ctx context.Context,
+	event MemoryMirrorOutboxEvent,
+	customID string,
+	legacyOwner MemoryMirrorLegacyOwner,
+	apply MemoryMirrorApply,
+) error {
+	if customID == "" {
+		return fmt.Errorf("process memory mirror event %d: empty custom ID", event.ID)
+	}
+	if apply == nil {
+		return fmt.Errorf("process memory mirror event %d: nil apply callback", event.ID)
+	}
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("process memory mirror event %d: begin: %w", event.ID, err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := lockMemoryMirrorCustomID(ctx, tx, event.InstallationID, customID); err != nil {
+		return fmt.Errorf("process memory mirror event %d: %w", event.ID, err)
+	}
+	var leased bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM memory_mirror_outbox
+			WHERE id = $1 AND processed_at IS NULL AND claimed_at = $2
+			FOR UPDATE
+		)`, event.ID, event.ClaimedAt).Scan(&leased); err != nil {
+		return fmt.Errorf("process memory mirror event %d: verify lease: %w", event.ID, err)
+	}
+	if !leased {
+		return fmt.Errorf("process memory mirror event %d: lease lost", event.ID)
+	}
+
+	deleteAuthorized := true
+	if event.AggregateType == MemoryMirrorPattern && event.Operation == MemoryMirrorDelete {
+		deleteAuthorized, err = patternMirrorDeleteAuthorized(ctx, tx, event.InstallationID, customID, legacyOwner)
+		if err != nil {
+			return fmt.Errorf("process memory mirror event %d: check pattern owner: %w", event.ID, err)
+		}
+	}
+	if err := apply(ctx, deleteAuthorized); err != nil {
+		return err
+	}
+
+	tag, err := tx.Exec(ctx, `
+		UPDATE memory_mirror_outbox
+		SET processed_at = now(), claimed_at = NULL, last_error = NULL, updated_at = now()
+		WHERE id = $1 AND processed_at IS NULL AND claimed_at = $2`, event.ID, event.ClaimedAt)
+	if err != nil {
+		return fmt.Errorf("process memory mirror event %d: acknowledge: %w", event.ID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("process memory mirror event %d: lease lost", event.ID)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("process memory mirror event %d: commit: %w", event.ID, err)
+	}
+	return nil
+}
+
+func patternMirrorDeleteAuthorized(
+	ctx context.Context,
+	tx pgx.Tx,
+	installationID int64,
+	customID string,
+	legacyOwner MemoryMirrorLegacyOwner,
+) (bool, error) {
+	var explicitlyOwned bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM patterns
+			WHERE installation_id = $1
+			  AND COALESCE(NULLIF(memory_custom_id, ''), NULLIF(memory_doc_id, '')) = $2
+		)`, installationID, customID).Scan(&explicitlyOwned); err != nil {
+		return false, err
+	}
+	if explicitlyOwned {
+		return false, nil
+	}
+	if legacyOwner == nil {
+		return true, nil
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT p.id, COALESCE(split_part(r.full_name, '/', 2), ''), p.repo_id IS NULL,
+		       p.content, COALESCE(p.source, 'manual'), COALESCE(p.category, '')
+		FROM patterns p
+		LEFT JOIN repos r ON r.id = p.repo_id AND r.installation_id = p.installation_id
+		WHERE p.installation_id = $1
+		  AND NULLIF(p.memory_custom_id, '') IS NULL
+		  AND NULLIF(p.memory_doc_id, '') IS NULL`, installationID)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var identity MemoryMirrorPatternIdentity
+		if err := rows.Scan(&identity.ID, &identity.Repo, &identity.Shared, &identity.Content, &identity.Source, &identity.Category); err != nil {
+			return false, err
+		}
+		owns, err := legacyOwner(identity)
+		if err != nil {
+			return false, err
+		}
+		if owns {
+			return false, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// BindMemoryMirrorEventCustomID persists a reconstructed legacy identity under
+// the active lease. Once bound, a retry blocks only transitions for the same
+// custom ID instead of conservatively blocking every pattern transition in the
+// installation behind an unknown legacy identity.
+func (s *Store) BindMemoryMirrorEventCustomID(ctx context.Context, event MemoryMirrorOutboxEvent, customID string) error {
+	if customID == "" {
+		return fmt.Errorf("bind memory mirror event %d custom ID: empty custom ID", event.ID)
+	}
+	tag, err := s.Pool.Exec(ctx, `
+		UPDATE memory_mirror_outbox
+		SET payload = jsonb_set(payload, '{custom_id}', to_jsonb($3::text), true),
+		    updated_at = now()
+		WHERE id = $1 AND processed_at IS NULL AND claimed_at = $2
+		  AND NULLIF(payload->>'custom_id', '') IS NULL`, event.ID, event.ClaimedAt, customID)
+	if err != nil {
+		return fmt.Errorf("bind memory mirror event %d custom ID: %w", event.ID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("bind memory mirror event %d custom ID: lease lost or identity already bound", event.ID)
+	}
+	return nil
 }
 
 func (s *Store) MarkMemoryMirrorEventProcessed(ctx context.Context, event MemoryMirrorOutboxEvent) error {

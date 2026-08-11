@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS memory_mirror_outbox_custom_id_pending_idx;
