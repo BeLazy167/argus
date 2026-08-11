@@ -116,79 +116,46 @@ func (ra *ReplyAnalyzer) Analyze(ctx context.Context, event ghpkg.CommentEvent) 
 		}
 	}
 
-	// Index the learning in memory. Derive a deterministic customID from the
-	// normalized Learning text (SharedPatternCustomID idiom) so re-stating the
-	// same insight upserts one doc instead of accreting a new _shared doc per
-	// reply forever.
+	plan := planReplyEffects(decision, event.AuthorAssociation)
+	if !plan.AllowWrites {
+		ra.logger.Info("reply: non-privileged replier observed; skipping all derived writes",
+			"association", event.AuthorAssociation, "author", event.CommentAuthor, "comment_id", original.ID)
+		return nil
+	}
+
+	// Authorized reply learnings use a distinct source from the legacy rows that
+	// lack author provenance. Readers quarantine that legacy source rather than
+	// guessing whether its author was trusted or deleting audit evidence.
 	if decision.Learning != "" && indexer != nil {
 		_, err := indexer.IndexSharedPattern(ctx, memory.PatternMemory{
 			Content:  decision.Learning,
-			CustomID: memory.SharedPatternCustomID("reply_feedback", decision.Learning),
-			Source:   "reply_feedback",
+			CustomID: memory.SharedPatternCustomID(memory.SourceTrustedReplyFeedback, decision.Learning),
+			Source:   memory.SourceTrustedReplyFeedback,
 			FilePath: event.FilePath,
-			Extra:    map[string]string{"repo": repo},
+			Extra: map[string]string{
+				"repo":               repo,
+				"author_association": event.AuthorAssociation,
+			},
 		})
 		if err != nil {
 			ra.logger.Error("indexing learning from reply", "error", err)
 		}
 	}
 
-	// Determine outcome for the original comment
-	var outcome string
-	switch decision.Action {
-	case "resolve":
-		if decision.Learning != "" {
-			outcome = "dismissed"
-		} else {
-			outcome = "confirmed"
-		}
-	case "stand_firm":
-		outcome = "confirmed"
-	case "clarify":
-		outcome = "ignored"
-	case "not_applicable_change_kind":
-		// Valid finding, wrong change kind — pattern quality is untouched
-		// (recordPatternOutcome only reacts to confirmed/dismissed).
-		outcome = "not_applicable_change_kind"
-	}
-	if outcome != "" {
-		inserted, err := ra.store.RecordCommentOutcome(ctx, original.ID, outcome)
+	if plan.Outcome != "" {
+		inserted, err := ra.store.RecordCommentOutcome(ctx, original.ID, plan.Outcome)
 		if err != nil {
-			ra.logger.Error("recording comment outcome", "error", err, "outcome", outcome)
+			ra.logger.Error("recording comment outcome", "error", err, "outcome", plan.Outcome)
 		}
-		// Feed hard outcomes (confirmed/dismissed; "ignored" is filtered inside)
-		// back into pattern quality, but only on first record to avoid
-		// double-counting replayed outcomes.
 		if inserted {
-			recordPatternOutcome(ctx, ra.store, ra.logger, original.MatchedPatternID, outcome)
+			recordPatternOutcome(ctx, ra.store, ra.logger, original.MatchedPatternID, plan.Outcome)
 		}
 	}
-	// Finding lifecycle: one Transition owns BOTH the ledger state and the thread
-	// resolution. A rejection (Argus was wrong, or N/A for this change kind) →
-	// dismissed; a plain resolve where the developer confirmed and fixed it →
-	// addressed-by-reply (human evidence that may override a prior dismissal).
-	//
-	// AUTHORIZATION: resolving the thread + writing terminal ledger state is a
-	// privileged shortcut — a review-comment replier is the same untrusted
-	// population as a reactor, and EventAddressedByReply could otherwise let a
-	// fork contributor's "good catch, fixed it" flip a maintainer's dismissal to
-	// addressed and clear the finding from the require-resolution merge gate. So
-	// only a trusted replier (owner/member/collaborator) drives the transition;
-	// an untrusted reply keeps its non-terminal learning (comment_outcomes +
-	// pattern/feedback signals, above and below) but does NOT resolve the thread
-	// or write terminal state. The push→auto-resolve path (judge-verified, #166)
-	// remains the resolution mechanism for everyone, including fork PRs.
-	lcEvent, authorized := replyLifecycleEvent(decision.Action, outcome, event.AuthorAssociation)
-	switch {
-	case lcEvent == "":
-		// stand_firm / clarify — no lifecycle transition.
-	case !authorized:
-		ra.logger.Info("reply: non-privileged replier — recording learning only, skipping thread resolution + terminal state",
-			"would_be_event", lcEvent, "association", event.AuthorAssociation, "author", event.CommentAuthor, "comment_id", original.ID)
-	default:
+
+	if plan.LifecycleEvent != "" {
 		if _, err := ra.lifecycle.Transition(ctx, FindingTransition{
 			FindingID:      original.ID,
-			Event:          lcEvent,
+			Event:          plan.LifecycleEvent,
 			InstallationID: event.InstallationID,
 			Owner:          owner,
 			Repo:           repo,
@@ -199,57 +166,74 @@ func (ra *ReplyAnalyzer) Analyze(ctx context.Context, event ghpkg.CommentEvent) 
 		}
 	}
 
-	// Index feedback signal for pattern reinforcement/suppression. "clarify"
-	// (outcome=ignored) is recorded as a WEAK negative signal: the developer
-	// engaged but neither confirmed nor dismissed. FeedbackCustomID hashes the
-	// action, so ignored coexists with confirmed/dismissed on the same finding.
-	if indexer != nil && original.Category != nil {
-		var feedbackAction string
-		switch decision.Action {
-		case "resolve":
-			if decision.Learning != "" {
-				feedbackAction = "dismissed"
-			} else {
-				feedbackAction = "confirmed"
-			}
-		case "stand_firm":
-			feedbackAction = "confirmed"
-		case "clarify":
-			feedbackAction = "ignored"
-		case "not_applicable_change_kind":
-			// Change-kind-scoped dismissal: the change_kind stamp below lets
-			// retrieval ignore it when reviewing production-grade PRs.
-			feedbackAction = "dismissed"
+	// Clarification is deliberately neutral: it records an ignored outcome for
+	// telemetry, but creates no reinforcement or suppression memory.
+	if indexer != nil && original.Category != nil && plan.FeedbackAction != "" {
+		fb := memory.FeedbackMemory{
+			FilePath: original.FilePath,
+			Category: *original.Category,
+			// Store the finding statement, not the rendered GitHub wrapper, so
+			// dismissal retrieval compares the same semantic text.
+			OriginalBody:   FindingTextFromPostedBody(original.Body),
+			Action:         plan.FeedbackAction,
+			DeveloperReply: event.CommentBody,
+			PRNumber:       event.PRNumber,
 		}
-
-		if feedbackAction != "" {
-			fb := memory.FeedbackMemory{
-				FilePath: original.FilePath,
-				Category: *original.Category,
-				// original.Body is the RENDERED GitHub body; dismissalSearch queries
-				// with the finding statement, so store the statement (same reason as
-				// the reaction path in reactions.go).
-				OriginalBody:   FindingTextFromPostedBody(original.Body),
-				Action:         feedbackAction,
-				DeveloperReply: event.CommentBody,
-				PRNumber:       event.PRNumber,
+		if plan.FeedbackAction == "dismissed" {
+			fb.Repo = repo
+			fb.Reason = decision.Learning
+			if kind, kerr := ra.store.GetCommentChangeClass(ctx, original.ID); kerr != nil {
+				ra.logger.Warn("comment change class lookup", "error", kerr, "comment_id", original.ID)
+			} else {
+				fb.ChangeKind = kind
 			}
-			if feedbackAction == "dismissed" {
-				fb.Repo = repo
-				fb.Reason = decision.Learning
-				if kind, kerr := ra.store.GetCommentChangeClass(ctx, original.ID); kerr != nil {
-					ra.logger.Warn("comment change class lookup", "error", kerr, "comment_id", original.ID)
-				} else {
-					fb.ChangeKind = kind
-				}
-			}
-			if err := indexer.IndexFeedbackSignal(ctx, owner, repo, fb); err != nil {
-				ra.logger.Error("indexing feedback signal", "error", err, "action", feedbackAction)
-			}
+		}
+		if err := indexer.IndexFeedbackSignal(ctx, owner, repo, fb); err != nil {
+			ra.logger.Error("indexing feedback signal", "error", err, "action", plan.FeedbackAction)
 		}
 	}
 
 	return nil
+}
+
+// replyEffectPlan is the complete set of persistent effects derived from a
+// reply. A zero plan means observation only: no repo/shared memory, outcome,
+// pattern-quality, or lifecycle write is authorized.
+type replyEffectPlan struct {
+	AllowWrites    bool
+	Outcome        string
+	FeedbackAction string
+	LifecycleEvent LifecycleEvent
+}
+
+func planReplyEffects(decision replyDecision, authorAssociation string) replyEffectPlan {
+	if !ghpkg.IsPrivilegedAssociation(authorAssociation) {
+		return replyEffectPlan{}
+	}
+
+	plan := replyEffectPlan{AllowWrites: true}
+	switch decision.Action {
+	case "resolve":
+		if decision.Learning != "" {
+			plan.Outcome = "dismissed"
+			plan.FeedbackAction = "dismissed"
+			plan.LifecycleEvent = EventDismissed
+		} else {
+			plan.Outcome = "confirmed"
+			plan.FeedbackAction = "confirmed"
+			plan.LifecycleEvent = EventAddressedByReply
+		}
+	case "stand_firm":
+		plan.Outcome = "confirmed"
+		plan.FeedbackAction = "confirmed"
+	case "clarify":
+		plan.Outcome = "ignored"
+	case "not_applicable_change_kind":
+		plan.Outcome = "not_applicable_change_kind"
+		plan.FeedbackAction = "dismissed"
+		plan.LifecycleEvent = EventDismissed
+	}
+	return plan
 }
 
 // replyLifecycleEvent maps a reply decision to the FindingLifecycle event it
@@ -259,8 +243,8 @@ func (ra *ReplyAnalyzer) Analyze(ctx context.Context, event ghpkg.CommentEvent) 
 //
 // Both events resolve the thread and write terminal ledger state, so they are
 // gated on the replier's privilege: for a non-privileged replier authorized is
-// false and the caller MUST skip the transition (keeping only non-terminal
-// learning). Pure — unit-tested without the LLM/DB path.
+// false and the caller MUST skip all reply-derived persistent effects. Pure —
+// unit-tested without the LLM/DB path.
 func replyLifecycleEvent(action, outcome, authorAssociation string) (event LifecycleEvent, authorized bool) {
 	switch {
 	case outcome == "dismissed" || outcome == "not_applicable_change_kind":
@@ -277,28 +261,48 @@ func buildReplyPrompt(original *store.ReviewComment, event ghpkg.CommentEvent) s
 	var sb strings.Builder
 	sb.WriteString("A developer replied to your review comment. Analyze their reply and decide how to respond.\n\n")
 	sb.WriteString("## Original Argus Comment\n")
-	sb.WriteString(fmt.Sprintf("File: %s\n", original.FilePath))
+	sb.WriteString(replyPromptField("original_file", original.FilePath) + "\n")
 	if original.Severity != nil {
-		sb.WriteString(fmt.Sprintf("Severity: %s\n", *original.Severity))
+		sb.WriteString(replyPromptField("original_severity", *original.Severity) + "\n")
 	}
 	if original.Category != nil {
-		sb.WriteString(fmt.Sprintf("Category: %s\n", *original.Category))
+		sb.WriteString(replyPromptField("original_category", *original.Category) + "\n")
 	}
-	sb.WriteString(fmt.Sprintf("Comment: %s\n\n", original.Body))
+	sb.WriteString(replyPromptField("original_comment", original.Body) + "\n\n")
 
 	sb.WriteString("## Developer Reply\n")
-	sb.WriteString(fmt.Sprintf("Author: %s\n", event.CommentAuthor))
-	sb.WriteString(fmt.Sprintf("Reply: %s\n\n", event.CommentBody))
+	sb.WriteString(replyPromptField("reply_author", event.CommentAuthor) + "\n")
+	sb.WriteString(replyPromptField("developer_reply", event.CommentBody) + "\n\n")
 
 	if event.DiffHunk != "" {
 		sb.WriteString("## Code Context (diff hunk)\n")
-		sb.WriteString(event.DiffHunk)
-		sb.WriteString("\n\n")
+		sb.WriteString(replyPromptField("diff_hunk", event.DiffHunk) + "\n\n")
 	}
 
 	sb.WriteString(`Respond with JSON only:
 {"action": "resolve|clarify|stand_firm|not_applicable_change_kind", "reply": "your response", "learning": "optional pattern to remember"}`)
 	return sb.String()
+}
+
+var replyPromptTags = []string{
+	"original_file",
+	"original_severity",
+	"original_category",
+	"original_comment",
+	"reply_author",
+	"developer_reply",
+	"diff_hunk",
+}
+
+// replyPromptField applies the repository's full prompt-safety idiom to one
+// field. Every known tag is scrubbed, not only the field's own tag, so content
+// cannot synthesize a misleading sibling boundary either.
+func replyPromptField(tag, value string) string {
+	value = strings.ReplaceAll(sanitizeUserInput(value), "\x00", "")
+	for _, promptTag := range replyPromptTags {
+		value = scrubDelimiterToken(promptTag, value)
+	}
+	return wrapInDelimiters(tag, value)
 }
 
 func parseReplyDecision(content string, decision *replyDecision) error {
@@ -332,7 +336,7 @@ const replySystemPrompt = `You are Argus, an AI code reviewer. A developer has r
 Analyze their reply and choose one action:
 
 - "resolve": The developer's explanation is valid, they've addressed the concern, or you were wrong. Thank them briefly.
-- "clarify": The developer seems confused or partially addressed the issue. Clarify your point with more detail.
+- "clarify": The developer seems confused or partially addressed the issue. Clarify your point with more detail. This is neutral feedback and creates no pattern memory.
 - "stand_firm": The issue is real and the developer hasn't addressed it. Politely but firmly explain why the concern stands.
 - "not_applicable_change_kind": The finding is technically VALID but does not apply to this kind of change — e.g. the developer explains this is a one-off script, prototype, or throwaway tooling where the flagged rigor is intentionally skipped. Acknowledge briefly and step back.
 
