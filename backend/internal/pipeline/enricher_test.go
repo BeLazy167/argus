@@ -110,13 +110,13 @@ func TestEnricher_PatternMatchAboveGate(t *testing.T) {
 	}
 }
 
-// A near-identical hit is the code's own prior review comment: the self-match
-// guard zeroes its score so it neither links nor bumps stats, and the finding is
-// treated as novel (successful empty after zeroing, no rule).
-func TestEnricher_SelfMatchGuardZeroesScore(t *testing.T) {
+// An identical type=pattern hit is a real learned-pattern match. Review
+// comments live under type=review and cannot enter this leg, so overlap must not
+// sever retrieval from relational attribution and pattern_stats.
+func TestEnricher_ExactPatternMatchIncrementsStats(t *testing.T) {
 	body := "nil pointer dereference crashes handler"
 	fake := &memorytest.Fake{
-		// Same text as the finding body ⇒ wordOverlap > 0.7 ⇒ score zeroed.
+		// Same text is the strongest possible pattern match.
 		SearchFn: patternLeg([]memory.PatternMatch{{Score: 0.95, ID: "doc1", Content: body}}, nil),
 	}
 	store := &fakeEnrichStore{byMemoryDocID: map[string]int64{"doc1": 99}}
@@ -125,17 +125,17 @@ func TestEnricher_SelfMatchGuardZeroesScore(t *testing.T) {
 	})
 	c := got[0]
 
-	if c.MatchedPatternScore != 0 {
-		t.Errorf("self-match must zero the score, got %v", c.MatchedPatternScore)
+	if c.MatchedPatternScore != 0.95 || c.MatchedPatternID != 99 {
+		t.Errorf("exact pattern did not link: score=%v id=%d", c.MatchedPatternScore, c.MatchedPatternID)
 	}
-	if len(store.incremented) != 0 {
-		t.Errorf("a zeroed self-match must not increment, got %v", store.incremented)
+	if len(store.incremented) != 1 || store.incremented[0] != 99 {
+		t.Errorf("exact pattern must increment stats, got %v", store.incremented)
 	}
-	if !c.IsNewFinding {
-		t.Error("a zeroed self-match with no rule must be novel")
+	if c.IsNewFinding {
+		t.Error("an exact learned pattern was marked novel")
 	}
-	if res.Matched != 0 || res.Novel != 1 {
-		t.Errorf("result = %+v, want Matched=0 Novel=1", res)
+	if res.Matched != 1 || res.Novel != 0 {
+		t.Errorf("result = %+v, want Matched=1 Novel=0", res)
 	}
 }
 

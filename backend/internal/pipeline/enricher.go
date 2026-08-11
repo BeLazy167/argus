@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"sync"
 
 	"github.com/BeLazy167/argus/backend/internal/memory"
@@ -162,14 +161,11 @@ func (e *Enricher) enrichComment(ctx context.Context, c *FileComment, filePath s
 			"caller", "rule-enrich", "file", filePath, "line", c.Line, "query_len", len(query), "error", ruleErr)
 	}
 
-	// Self-match guard: a near-identical hit is this code's own prior review
-	// comment (re-review noise), not a learned pattern. Zero it so it neither
-	// persists, attributes, nor bumps stats.
+	// The query is type=pattern, so an identical hit is the strongest possible
+	// learned-pattern match, not this review's own type=review document. Treating
+	// high lexical overlap as a self-match discarded the common exact-pattern
+	// case before relational resolution and left pattern_stats almost empty.
 	score := match.Score
-	if score > 0 && match.Content != "" &&
-		wordOverlap(strings.ToLower(match.Content), strings.ToLower(c.Body)) > 0.7 {
-		score = 0
-	}
 
 	// Persist best-match pattern id + score for every hit at/above the
 	// FindingEnrich floor. Public footer attribution stays gated at the

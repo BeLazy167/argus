@@ -108,3 +108,14 @@ func TestParseMemoryListParamsRejectsInvalidBoundsAndScope(t *testing.T) {
 		}
 	}
 }
+
+func TestParseMemoryListParamsUsesDashboardPageDefault(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/memories?installation_id=7", nil)
+	params, err := parseMemoryListParams(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if params.limit != 25 || params.offset != 0 || params.scope != "all" {
+		t.Fatalf("defaults = limit %d offset %d scope %q", params.limit, params.offset, params.scope)
+	}
+}

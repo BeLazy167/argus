@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	defaultMemoryListLimit = 50
+	defaultMemoryListLimit = 25
 	maxMemoryListLimit     = 100
 )
 
