@@ -4140,44 +4140,28 @@ Rules:
 		return
 	}
 
-	// Delete stale nodes for removed files
-	for _, f := range run.Diff.Files {
-		if f.Status == diff.FileDeleted {
-			if err := o.st.DeleteNodesByFile(ctx, run.DBRepoID, f.NewName); err != nil {
-				o.logger.Warn("deleteNodesByFile", "error", err, "file", f.NewName)
-			}
-		}
-	}
-
-	// Upsert nodes, collect name→ID
-	nodeIDs := make(map[string]int64, len(result.Nodes))
+	nodes := make([]store.ArchitectureAnnotationNode, 0, len(result.Nodes))
 	for _, n := range result.Nodes {
-		if n.Name == "" || n.FilePath == "" || n.Kind == "" {
-			continue
-		}
-		id, err := o.st.UpsertCodeNode(ctx, run.DBRepoID, n.Kind, n.Name, n.FilePath, 0, 0, n.Language, run.PREvent.PRNumber)
-		if err != nil {
-			o.logger.Warn("upsertCodeNode", "error", err, "name", n.Name)
-			continue
-		}
-		nodeIDs[n.Name] = id
+		nodes = append(nodes, store.ArchitectureAnnotationNode{
+			Name: n.Name, Kind: n.Kind, FilePath: n.FilePath, Language: n.Language,
+		})
 	}
-
-	// Upsert edges
+	edges := make([]store.ArchitectureAnnotationEdgeInput, 0, len(result.Edges))
 	for _, e := range result.Edges {
-		srcID, ok1 := nodeIDs[e.Source]
-		tgtID, ok2 := nodeIDs[e.Target]
-		if !ok1 || !ok2 {
-			o.logger.Debug("extractArchitectureGraph: skipping edge, unresolved name", "source", e.Source, "target", e.Target)
-			continue
-		}
-		if err := o.st.UpsertCodeEdge(ctx, run.DBRepoID, srcID, tgtID, e.Kind); err != nil {
-			o.logger.Warn("upsertCodeEdge", "error", err, "edge", e.Source+"->"+e.Target)
-		}
+		edges = append(edges, store.ArchitectureAnnotationEdgeInput{
+			Source: e.Source, Target: e.Target, Kind: e.Kind,
+		})
+	}
+	writtenNodes, writtenEdges, err := o.st.ReplaceArchitectureAnnotations(
+		ctx, run.DBRepoID, run.PREvent.PRNumber, nodes, edges,
+	)
+	if err != nil {
+		o.logger.Warn("replaceArchitectureAnnotations", "error", err)
+		return
 	}
 
-	o.logger.Info("extracted architecture graph", "nodes", len(nodeIDs), "edges", len(result.Edges), "repo", run.PREvent.RepoFullName)
-	publishMemoryIndexed(run, "arch_graph", true, len(nodeIDs))
+	o.logger.Info("extracted architecture annotations", "nodes", writtenNodes, "edges", writtenEdges, "repo", run.PREvent.RepoFullName)
+	publishMemoryIndexed(run, "arch_graph", true, writtenNodes)
 }
 
 // ─── Lead Agent Helpers ──────────────────────────────────────────────────────
