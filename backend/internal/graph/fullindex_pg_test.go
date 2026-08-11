@@ -1278,3 +1278,87 @@ func TestPublishGraphGenerationResourceLimitsAreTerminalAndAtomic(t *testing.T) 
 		}
 	})
 }
+
+func TestForEachStagedGraphFileFetchesBoundedBatches(t *testing.T) {
+	pool, ctx := generationTestPool(t)
+	installationID := generationSeedInstallation(t, ctx, pool, "{}")
+	repoID := generationSeedRepo(t, ctx, pool, installationID, "generation/batched-cursor")
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `UPDATE repos SET enabled = false WHERE id = $1`, repoID)
+	})
+
+	const fileCount = stagedGraphFileFetchBatchSize*2 + 7
+	var generationID int64
+	if err := pool.QueryRow(ctx, `INSERT INTO graph_index_generations
+		(repo_id, commit_sha, status, expected_files, visited_files)
+		VALUES ($1, 'batched-cursor-head', 'building', $2, $2) RETURNING id`, repoID, fileCount).Scan(&generationID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO graph_index_generation_files
+		(generation_id, file_path, status, symbols, edges, endpoints)
+		SELECT $1, 'file-' || lpad(n::text, 4, '0') || '.go', 'ready', '[]'::jsonb, '[]'::jsonb, '[]'::jsonb
+		FROM generate_series(1, $2) AS n`, generationID, fileCount); err != nil {
+		t.Fatal(err)
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+
+	paths := make([]string, 0, fileCount)
+	stats, err := forEachStagedGraphFile(ctx, tx, generationID, "graph_batch_test", func(file stagedGraphFile) error {
+		if len(paths) == 0 {
+			var one int
+			if err := tx.QueryRow(ctx, `SELECT 1`).Scan(&one); err != nil {
+				return fmt.Errorf("query inside callback: %w", err)
+			}
+			if one != 1 {
+				return fmt.Errorf("query inside callback = %d, want 1", one)
+			}
+		}
+		paths = append(paths, file.FilePath)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Files != fileCount {
+		t.Fatalf("visited files = %d, want %d", stats.Files, fileCount)
+	}
+	const wantFetches = 4 // three populated batches plus the terminating empty fetch.
+	if stats.Fetches != wantFetches {
+		t.Fatalf("FETCH statements = %d, want %d", stats.Fetches, wantFetches)
+	}
+	for i, path := range paths {
+		want := fmt.Sprintf("file-%04d.go", i+1)
+		if path != want {
+			t.Fatalf("path %d = %q, want %q", i, path, want)
+		}
+	}
+
+	// The cursor must be closed before the helper returns, leaving the pgx
+	// transaction protocol ready for the publication pass's next statement.
+	var one int
+	if err := tx.QueryRow(ctx, `SELECT 1`).Scan(&one); err != nil || one != 1 {
+		t.Fatalf("query after batched cursor = %d, %v", one, err)
+	}
+
+	cancelCtx, cancel := context.WithCancel(ctx)
+	callbacks := 0
+	canceledStats, err := forEachStagedGraphFile(cancelCtx, tx, generationID, "graph_batch_cancel_test", func(stagedGraphFile) error {
+		callbacks++
+		cancel()
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled iteration error = %v, want context.Canceled", err)
+	}
+	if callbacks != 1 || canceledStats.Files != 1 || canceledStats.Fetches != 1 {
+		t.Fatalf("canceled iteration callbacks/files/fetches = %d/%d/%d, want 1/1/1", callbacks, canceledStats.Files, canceledStats.Fetches)
+	}
+	if err := tx.QueryRow(ctx, `SELECT 1`).Scan(&one); err != nil || one != 1 {
+		t.Fatalf("query after canceled cursor = %d, %v", one, err)
+	}
+}

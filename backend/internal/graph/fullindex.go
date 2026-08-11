@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -317,29 +318,81 @@ type stagedGraphFile struct {
 	Endpoints json.RawMessage
 }
 
-// forEachStagedGraphFile uses a server-side cursor. FETCH returns exactly one
-// staged row, and fn must finish with it before the next fetch, so arbitrary
-// generation JSON is never materialized in the app.
-func forEachStagedGraphFile(ctx context.Context, tx pgx.Tx, generationID int64, cursor string, fn func(stagedGraphFile) error) error {
+const stagedGraphFileFetchBatchSize = 256
+
+type stagedGraphFileIterationStats struct {
+	Fetches int
+	Files   int
+}
+
+// fetchStagedGraphFileBatch closes Rows before returning. Publication callbacks
+// issue queries on the same pgx transaction, which is not allowed while Rows is
+// still active on its connection.
+func fetchStagedGraphFileBatch(ctx context.Context, tx pgx.Tx, cursorIdentifier string) ([]stagedGraphFile, error) {
+	rows, err := tx.Query(ctx, fmt.Sprintf("FETCH FORWARD %d FROM %s", stagedGraphFileFetchBatchSize, cursorIdentifier))
+	if err != nil {
+		return nil, fmt.Errorf("fetch staged graph files: %w", err)
+	}
+	defer rows.Close()
+
+	files := make([]stagedGraphFile, 0, stagedGraphFileFetchBatchSize)
+	for rows.Next() {
+		var file stagedGraphFile
+		if err := rows.Scan(&file.FilePath, &file.Symbols, &file.Edges, &file.Endpoints); err != nil {
+			return nil, fmt.Errorf("scan staged graph file: %w", err)
+		}
+		files = append(files, file)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate staged graph files: %w", err)
+	}
+	return files, nil
+}
+
+// forEachStagedGraphFile reads a cursor in bounded batches, reducing each of
+// the four publication passes to O(files/batch) FETCH round trips. A batch holds
+// raw JSON only; the preflight caps all staged JSON at 32 MiB, and fn decodes
+// and releases one file before the next. The terminating empty FETCH is counted
+// in the returned instrumentation.
+func forEachStagedGraphFile(ctx context.Context, tx pgx.Tx, generationID int64, cursor string, fn func(stagedGraphFile) error) (stats stagedGraphFileIterationStats, retErr error) {
 	cursorIdentifier := pgx.Identifier{cursor}.Sanitize()
 	if _, err := tx.Exec(ctx, fmt.Sprintf(`DECLARE %s NO SCROLL CURSOR FOR
 		SELECT file_path, symbols, edges, endpoints
 		FROM graph_index_generation_files
 		WHERE generation_id = %d AND status = 'ready' ORDER BY file_path`, cursorIdentifier, generationID)); err != nil {
-		return fmt.Errorf("declare staged graph cursor: %w", err)
+		return stats, fmt.Errorf("declare staged graph cursor: %w", err)
 	}
-	defer func() { _, _ = tx.Exec(ctx, "CLOSE "+cursorIdentifier) }()
+	defer func() {
+		// Cancellation must not strand an open cursor on a transaction that the
+		// caller may still need to roll back. Bound cleanup independently.
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if _, err := tx.Exec(cleanupCtx, "CLOSE "+cursorIdentifier); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("close staged graph cursor: %w", err))
+		}
+	}()
+
 	for {
-		var file stagedGraphFile
-		err := tx.QueryRow(ctx, "FETCH NEXT FROM "+cursorIdentifier).Scan(&file.FilePath, &file.Symbols, &file.Edges, &file.Endpoints)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil
+		if err := ctx.Err(); err != nil {
+			return stats, fmt.Errorf("fetch staged graph files: %w", err)
 		}
+		files, err := fetchStagedGraphFileBatch(ctx, tx, cursorIdentifier)
+		stats.Fetches++
 		if err != nil {
-			return fmt.Errorf("fetch staged graph file: %w", err)
+			return stats, err
 		}
-		if err := fn(file); err != nil {
-			return err
+		if len(files) == 0 {
+			return stats, nil
+		}
+		for i := range files {
+			if err := ctx.Err(); err != nil {
+				return stats, fmt.Errorf("process staged graph files: %w", err)
+			}
+			if err := fn(files[i]); err != nil {
+				return stats, err
+			}
+			stats.Files++
+			files[i] = stagedGraphFile{}
 		}
 	}
 }
@@ -443,7 +496,7 @@ func publishGraphGeneration(ctx context.Context, st *store.Store, repoID, genera
 		rememberedIDs[id] = struct{}{}
 		nameToIDs[name] = append(nameToIDs[name], id)
 	}
-	if err := forEachStagedGraphFile(ctx, tx, generationID, "graph_symbols", func(file stagedGraphFile) error {
+	if _, err := forEachStagedGraphFile(ctx, tx, generationID, "graph_symbols", func(file stagedGraphFile) error {
 		var symbols []Symbol
 		if err := json.Unmarshal(file.Symbols, &symbols); err != nil {
 			return fmt.Errorf("publish graph generation: decode %s symbols: %w", file.FilePath, err)
@@ -549,7 +602,7 @@ func publishGraphGeneration(ctx context.Context, st *store.Store, repoID, genera
 		return nil
 	}
 
-	if err := forEachStagedGraphFile(ctx, tx, generationID, "graph_edges", func(file stagedGraphFile) error {
+	if _, err := forEachStagedGraphFile(ctx, tx, generationID, "graph_edges", func(file stagedGraphFile) error {
 		var edges []Edge
 		if err := json.Unmarshal(file.Edges, &edges); err != nil {
 			return fmt.Errorf("publish graph generation: decode %s edges: %w", file.FilePath, err)
@@ -589,7 +642,7 @@ func publishGraphGeneration(ctx context.Context, st *store.Store, repoID, genera
 		return err
 	}
 
-	if err := forEachStagedGraphFile(ctx, tx, generationID, "graph_types", func(file stagedGraphFile) error {
+	if _, err := forEachStagedGraphFile(ctx, tx, generationID, "graph_types", func(file stagedGraphFile) error {
 		var symbols []Symbol
 		if err := json.Unmarshal(file.Symbols, &symbols); err != nil {
 			return fmt.Errorf("publish graph generation: decode %s symbols for types: %w", file.FilePath, err)
@@ -625,7 +678,7 @@ func publishGraphGeneration(ctx context.Context, st *store.Store, repoID, genera
 		return err
 	}
 
-	if err := forEachStagedGraphFile(ctx, tx, generationID, "graph_endpoints", func(file stagedGraphFile) error {
+	if _, err := forEachStagedGraphFile(ctx, tx, generationID, "graph_endpoints", func(file stagedGraphFile) error {
 		var endpoints []APIEndpoint
 		if err := json.Unmarshal(file.Endpoints, &endpoints); err != nil {
 			return fmt.Errorf("publish graph generation: decode %s endpoints: %w", file.FilePath, err)
