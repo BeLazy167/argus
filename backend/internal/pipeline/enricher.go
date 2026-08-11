@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"sync"
 
 	"github.com/BeLazy167/argus/backend/internal/memory"
@@ -26,7 +27,7 @@ const enrichConcurrency = 5
 
 // Enricher annotates each finding with pattern/rule matches, a novelty flag,
 // and dismissal-suppression decisions. It owns the per-finding fan-out, the
-// self-match guard, and the suppression bookkeeping.
+// same-PR provenance guard, and the suppression bookkeeping.
 //
 // Non-fatal by contract: a pattern- OR rule-search error leaves a finding's
 // novelty UNSET (never novel-on-error, preserving the #128/#147 semantics), and
@@ -73,7 +74,7 @@ func (r EnrichResult) Total() int { return r.Matched + r.Enforced + r.Novel }
 // Run enriches every comment in reviews IN PLACE, fanning out per finding under
 // the concurrency bound. It fetches the repo's auto-suppressed categories once
 // (memory-gated on repoID), then for each finding runs the pattern + rule reads
-// (errors gate novelty), applies the self-match guard, links + counts a pattern
+// (errors gate novelty), excludes same-PR provenance, links + counts a pattern
 // hit, records rule attribution, decides dismissal drop/downgrade, and publishes
 // EventMemoryMatched. Returns the aggregate counters + suppression keys; the
 // caller applies them.
@@ -123,19 +124,17 @@ func (e *Enricher) Run(ctx context.Context, reviews []FileReview) EnrichResult {
 
 // enrichComment runs the whole per-finding decision for a single comment,
 // mutating it in place. This is the body of the fan-out in Run: pattern + rule
-// reads, the self-match guard, pattern linking + stats, rule attribution,
+// reads, same-PR exclusion, pattern linking + stats, rule attribution,
 // novelty, then dismissal suppression.
 func (e *Enricher) enrichComment(ctx context.Context, c *FileComment, filePath string, autoSuppressed map[string]bool) {
 	// Build a richer query: category + file + body gives retrieval more semantic signal.
 	query := fmt.Sprintf("[%s|%s] %s:%d %s", c.Severity, c.Category, filePath, c.Line, c.Body)
 
-	// Pattern enrichment: best type=pattern match across repo + shared. Errors
-	// PROPAGATE — a broken/timed-out search must never mark a finding novel, so
-	// patErr gates the novel branch below rather than degrading to a zero match.
-	// Top-1 shaping across the two containers is the pure BestMatch adapter.
-	patternMatches, patErr := e.reader.Search(ctx, memory.MemoryQuery{
-		Query: query, Repo: e.repo, Scope: memory.ScopeBoth, Type: memory.TypePattern,
-		Limit: 1, Threshold: e.thresholds.FindingEnrich})
+	// Pattern enrichment: best type=pattern match across repo + shared. Same-PR
+	// patterns are excluded in retrieval so a re-review cannot cite knowledge
+	// learned from an earlier review of itself, or let that hit crowd out older
+	// knowledge. Errors propagate to the novelty gate below.
+	patternMatches, patErr := e.searchPriorPatterns(ctx, query)
 	match := memory.BestMatch(patternMatches...)
 
 	// Rules live in the shared container under type=rule metadata. A rule-search
@@ -268,6 +267,56 @@ func (e *Enricher) enrichComment(ctx context.Context, c *FileComment, filePath s
 			"similar_dismissals", eval.similarCount,
 			"new_severity", c.Severity)
 	}
+}
+
+// searchPriorPatterns retrieves repo and shared patterns concurrently while
+// excluding this PR's own learnings before ranking. The repo container already
+// fixes repository identity, so PR number is sufficient there. Shared patterns
+// use (repo != current OR pr != current), preserving a sibling repository's PR
+// with the same number. Missing provenance remains eligible as prior/manual
+// knowledge because negated filters treat a missing key as not equal.
+func (e *Enricher) searchPriorPatterns(ctx context.Context, query string) ([]memory.PatternMatch, error) {
+	prNumber := strconv.Itoa(e.prNumber)
+	queries := []memory.MemoryQuery{
+		{
+			Query: query, Repo: e.repo, Scope: memory.ScopeRepo, Type: memory.TypePattern,
+			Filters: []memory.FilterCondition{{Key: "pr_number", Value: prNumber, Negate: true}},
+			Limit:   1, Threshold: e.thresholds.FindingEnrich,
+		},
+		{
+			Query: query, Scope: memory.ScopeShared, Type: memory.TypePattern,
+			AnyFilters: []memory.FilterCondition{
+				{Key: "repo", Value: e.repoFullName, Negate: true},
+				{Key: "pr_number", Value: prNumber, Negate: true},
+			},
+			Limit: 1, Threshold: e.thresholds.FindingEnrich,
+		},
+	}
+
+	type searchResult struct {
+		matches []memory.PatternMatch
+		err     error
+	}
+	results := make([]searchResult, len(queries))
+	var wg sync.WaitGroup
+	wg.Add(len(queries))
+	for i, q := range queries {
+		go func(i int, q memory.MemoryQuery) {
+			defer wg.Done()
+			results[i].matches, results[i].err = e.reader.Search(ctx, q)
+		}(i, q)
+	}
+	wg.Wait()
+
+	var matches []memory.PatternMatch
+	var errs []error
+	for _, result := range results {
+		matches = append(matches, result.matches...)
+		if result.err != nil {
+			errs = append(errs, result.err)
+		}
+	}
+	return matches, errors.Join(errs...)
 }
 
 // tally computes the aggregate counters over the enriched reviews and records a

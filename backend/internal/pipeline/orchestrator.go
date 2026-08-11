@@ -1856,7 +1856,7 @@ func (o *Orchestrator) resolveCandidates(
 // suppression keys into the run, then logs + publishes the aggregate. Non-fatal
 // end-to-end — a disabled indexer or malformed repo name is a no-op, and the
 // Enricher leaves novelty unset on any search error. The per-finding fan-out,
-// self-match guard, pattern/rule linking, and suppression bookkeeping all live
+// same-PR exclusion, pattern/rule linking, and suppression bookkeeping all live
 // inside the Enricher (see enricher.go); this call site only builds deps and
 // applies the result.
 func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) error {

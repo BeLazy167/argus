@@ -54,6 +54,40 @@ func feedbackLeg(matches []memory.PatternMatch, err error) func(memory.MemoryQue
 	}
 }
 
+// filterPatternCandidates applies the equality/negation subset used by the
+// same-PR tests before Limit, mirroring the Postgres predicate order. It makes a
+// top same-PR candidate crowd out an older candidate unless the query excludes
+// it at retrieval time.
+func filterPatternCandidates(q memory.MemoryQuery, candidates []memory.PatternMatch) []memory.PatternMatch {
+	matches := func(md map[string]string, f memory.FilterCondition) bool {
+		equal := md[f.Key] == f.Value
+		if f.Negate {
+			return !equal
+		}
+		return equal
+	}
+	var out []memory.PatternMatch
+	for _, candidate := range candidates {
+		allowed := true
+		for _, f := range q.Filters {
+			allowed = allowed && matches(candidate.Metadata, f)
+		}
+		if allowed && len(q.AnyFilters) > 0 {
+			allowed = false
+			for _, f := range q.AnyFilters {
+				allowed = allowed || matches(candidate.Metadata, f)
+			}
+		}
+		if allowed {
+			out = append(out, candidate)
+			if q.Limit > 0 && len(out) == q.Limit {
+				break
+			}
+		}
+	}
+	return out
+}
+
 // enrichComments runs the Enricher over the given comments (one file) and
 // returns the enriched comments plus the aggregate result.
 func enrichComments(e *Enricher, comments []FileComment) ([]FileComment, EnrichResult) {
@@ -110,14 +144,72 @@ func TestEnricher_PatternMatchAboveGate(t *testing.T) {
 	}
 }
 
-// An identical type=pattern hit is a real learned-pattern match. Review
-// comments live under type=review and cannot enter this leg, so overlap must not
-// sever retrieval from relational attribution and pattern_stats.
+func TestEnricher_ExcludesSamePRPatternsBeforeRanking(t *testing.T) {
+	samePR := memory.PatternMatch{
+		Score: 0.99, ID: "same-pr",
+		Metadata: map[string]string{"repo": "acme/widget", "pr_number": "1"},
+	}
+	priorPR := memory.PatternMatch{
+		Score: aboveAttribution, ID: "prior-pr",
+		Metadata: map[string]string{"repo": "acme/widget", "pr_number": "2"},
+	}
+	fake := &memorytest.Fake{SearchFn: func(q memory.MemoryQuery) ([]memory.PatternMatch, error) {
+		if q.Type != memory.TypePattern {
+			return nil, nil
+		}
+		// The same-PR candidate ranks first. Only a predicate applied before
+		// Limit lets the valid older pattern survive the top-1 search.
+		return filterPatternCandidates(q, []memory.PatternMatch{samePR, priorPR}), nil
+	}}
+	store := &fakeEnrichStore{byMemoryDocID: map[string]int64{"same-pr": 1, "prior-pr": 2}}
+
+	got, res := enrichComments(newTestEnricher(fake, store), []FileComment{{
+		Severity: SeverityWarning, Category: CategoryBug, Line: 10, Body: "same issue again",
+	}})
+	c := got[0]
+	if c.MatchedPatternID != 2 || c.MatchedPatternPR != 2 {
+		t.Errorf("same-PR pattern crowded out prior knowledge: id=%d pr=%d score=%v", c.MatchedPatternID, c.MatchedPatternPR, c.MatchedPatternScore)
+	}
+	if c.IsNewFinding || res.Matched != 1 {
+		t.Errorf("the eligible prior-PR pattern should remain a match: comment=%+v result=%+v", c, res)
+	}
+	if len(store.incremented) != 1 || store.incremented[0] != 2 {
+		t.Errorf("pattern stats incremented %v, want only the prior-PR pattern [2]", store.incremented)
+	}
+}
+
+func TestEnricher_SharedPatternFromSiblingPRWithSameNumberRemainsEligible(t *testing.T) {
+	fake := &memorytest.Fake{SearchFn: func(q memory.MemoryQuery) ([]memory.PatternMatch, error) {
+		if q.Type == memory.TypePattern && q.Scope == memory.ScopeShared {
+			return filterPatternCandidates(q, []memory.PatternMatch{{
+				Score: aboveAttribution, ID: "sibling",
+				Metadata: map[string]string{"repo": "acme/other", "pr_number": "1"},
+			}}), nil
+		}
+		return nil, nil
+	}}
+	store := &fakeEnrichStore{byMemoryDocID: map[string]int64{"sibling": 7}}
+
+	got, _ := enrichComments(newTestEnricher(fake, store), []FileComment{{
+		Severity: SeverityWarning, Category: CategoryBug, Line: 10, Body: "shared issue",
+	}})
+	if got[0].MatchedPatternID != 7 || got[0].MatchedPatternPR != 1 {
+		t.Errorf("sibling pattern sharing the PR number was excluded: %+v", got[0])
+	}
+}
+
+// An identical type=pattern hit from an earlier PR is a real learned-pattern
+// match. Review comments live under type=review and cannot enter this leg, so
+// lexical overlap must not sever retrieval from relational attribution and
+// pattern_stats.
 func TestEnricher_ExactPatternMatchIncrementsStats(t *testing.T) {
 	body := "nil pointer dereference crashes handler"
 	fake := &memorytest.Fake{
 		// Same text is the strongest possible pattern match.
-		SearchFn: patternLeg([]memory.PatternMatch{{Score: 0.95, ID: "doc1", Content: body}}, nil),
+		SearchFn: patternLeg([]memory.PatternMatch{{
+			Score: 0.95, ID: "doc1", Content: body,
+			Metadata: map[string]string{"pr_number": "77"},
+		}}, nil),
 	}
 	store := &fakeEnrichStore{byMemoryDocID: map[string]int64{"doc1": 99}}
 	got, res := enrichComments(newTestEnricher(fake, store), []FileComment{

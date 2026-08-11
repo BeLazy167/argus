@@ -14,9 +14,13 @@ import (
 // include, and the retrieval knobs pass through verbatim.
 func TestMemoryQueryRequest(t *testing.T) {
 	q := MemoryQuery{
-		Query:     "nil deref",
-		Type:      TypeFeedback,
-		Filters:   []FilterCondition{{Key: "action", Value: "dismissed"}},
+		Query:   "nil deref",
+		Type:    TypeFeedback,
+		Filters: []FilterCondition{{Key: "action", Value: "dismissed"}},
+		AnyFilters: []FilterCondition{
+			{Key: "repo", Value: "acme/widget", Negate: true},
+			{Key: "pr_number", Value: "42", Negate: true},
+		},
 		Limit:     5,
 		Threshold: 0.5,
 		Enrich:    true,
@@ -34,6 +38,9 @@ func TestMemoryQueryRequest(t *testing.T) {
 	}
 	if req.Filters.AND[1].Key != "action" || req.Filters.AND[1].Value != "dismissed" {
 		t.Errorf("second condition must be the extra filter, got %+v", req.Filters.AND[1])
+	}
+	if len(req.Filters.OR) != 2 || req.Filters.OR[0].Key != "repo" || req.Filters.OR[1].Key != "pr_number" {
+		t.Errorf("AnyFilters must lower to one OR group, got %+v", req.Filters.OR)
 	}
 	if req.Include == nil || !req.Include.RelatedMemories || !req.Include.Summaries {
 		t.Errorf("Enrich must request related memories + summaries, got %+v", req.Include)
