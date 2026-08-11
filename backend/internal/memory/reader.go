@@ -16,7 +16,7 @@ import (
 // error-honest entry point behind every value-level reader adapter (pattern
 // enrich, dismissal suppression, scenario dedup, triage/scoring hints, rule
 // lookup, agentic search). It expresses container scope, a single type filter
-// plus extra AND/OR conditions, and the retrieval knobs (limit, threshold,
+// plus extra AND conditions, and the retrieval knobs (limit, threshold, rerank,
 // enrich); per-call result shaping (top-1, truncation, id parsing) lives in the
 // pure adapters, never here.
 type MemoryQuery struct {
@@ -29,13 +29,9 @@ type MemoryQuery struct {
 	Type MemoryType
 	// Filters are extra equality/numeric conditions ANDed with Type (e.g.
 	// action=dismissed, severity=high, confidence>=floor).
-	Filters []FilterCondition
-	// AnyFilters is one parenthesized OR group, itself ANDed with Type and
-	// Filters. It expresses exclusions such as "repo differs OR PR differs"
-	// without widening the tenant/type predicates.
-	AnyFilters []FilterCondition
-	Limit      int
-	Threshold  float64
+	Filters   []FilterCondition
+	Limit     int
+	Threshold float64
 	// Enrich requests related memories + summaries so each Match carries
 	// RichContent (the hint-render path); off keeps the response lean.
 	Enrich bool
@@ -83,11 +79,8 @@ func (q MemoryQuery) request() SearchRequest {
 		and = append(and, FilterCondition{Key: "type", Value: string(q.Type)})
 	}
 	and = append(and, q.Filters...)
-	if len(and) > 0 || len(q.AnyFilters) > 0 {
-		req.Filters = &SearchFilters{
-			AND: and,
-			OR:  append([]FilterCondition(nil), q.AnyFilters...),
-		}
+	if len(and) > 0 {
+		req.Filters = &SearchFilters{AND: and}
 	}
 	if q.Enrich {
 		req.Include = &SearchInclude{RelatedMemories: true, Summaries: true}
