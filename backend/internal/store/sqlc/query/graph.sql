@@ -154,3 +154,27 @@ JOIN reviews r ON r.id = rc.review_id
 WHERE r.repo_id = $1 AND rc.file_path = $2 AND rc.severity IN ('critical','warning')
   AND rc.state <> 'suppressed';
 
+-- name: GetFileMemoryPatterns :many
+SELECT DISTINCT p.id, p.installation_id, p.repo_id, p.content, p.memory_doc_id,
+       p.created_by, COALESCE(p.source, 'manual') AS source, p.category, p.pr_number,
+       p.created_at, p.updated_at
+FROM patterns p
+JOIN review_comments rc ON rc.matched_pattern_id = p.id
+JOIN reviews r ON r.id = rc.review_id
+WHERE rc.file_path = $1 AND r.repo_id = $2
+  AND rc.attempt_generation = r.attempt_generation
+ORDER BY p.created_at DESC
+LIMIT 10;
+
+-- name: GetFileMemoryComments :many
+SELECT rc.id, rc.review_id, rc.file_path, rc.start_line, rc.end_line, rc.side,
+       rc.body, rc.severity, rc.category, rc.specialist, rc.confidence_score,
+       rc.code_snippet, rc.github_comment_id, rc.matched_pattern_id,
+       rc.matched_pattern_score, rc.enforced_rule_content, rc.is_new_finding, rc.created_at,
+       rc.state, rc.suppressed_reason, rc.resolved_sha, rc.attempt_generation
+FROM review_comments rc
+JOIN reviews r ON r.id = rc.review_id
+WHERE rc.file_path = $1 AND r.repo_id = $2
+  AND rc.attempt_generation = r.attempt_generation
+ORDER BY (rc.state = 'suppressed'), rc.created_at DESC
+LIMIT 5;

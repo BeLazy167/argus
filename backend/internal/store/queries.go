@@ -633,14 +633,9 @@ const markerReviewFilter = `github_review_id IS NULL AND status = 'failed' AND e
 // columns averages ~5 KB of JSONB; at limit=200 the list payload was 1.22 MB
 // (measured via Fly logs on the dashboard route) — ~95% of which was data the
 // list view never renders. The detail endpoint (GET /reviews/{id}) still
-// returns the full Review struct via getReview. Scan shape stays identical
-// so pgx.RowToStructByPos[Review] keeps working without a new type.
-//
-// POSITIONAL mapping: this SELECT must list exactly as many columns as Review
-// has fields, in the same order. Adding budget_note to the struct without
-// adding it here 500'd every reviews list in production with "number of field
-// descriptions must equal number of destinations, got 30 and 31". A column
-// that a list view does not need is selected as NULL rather than omitted.
+// returns the full Review struct via GetReview. The generated row type owns
+// the list query's scan order, so adding a field to Review cannot recreate the
+// production 500 caused by a positional destination-count mismatch.
 func (s *Store) ListReviewsScoped(ctx context.Context, repoID int64, installationIDs []int64, limit, offset int) ([]Review, error) {
 	if limit <= 0 {
 		limit = 20

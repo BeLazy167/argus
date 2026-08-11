@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/BeLazy167/argus/backend/internal/store/db"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -502,24 +503,17 @@ func (s *Store) GetFileMemory(ctx context.Context, repoID int64, filePath string
 	mem.RiskScore.FilePath = filePath
 	mem.RiskScore.LastTrace = lastTrace
 
-	// Patterns linked via review comments on this file
-	pRows, err := s.Pool.Query(ctx, `
-		SELECT DISTINCT p.id, p.installation_id, p.repo_id, p.content, p.memory_doc_id,
-		       p.created_by, COALESCE(p.source, 'manual'), p.category, p.pr_number, p.created_at, p.updated_at
-		FROM patterns p
-		JOIN review_comments rc ON rc.matched_pattern_id = p.id
-		JOIN reviews r ON r.id = rc.review_id
-		WHERE rc.file_path = $1 AND r.repo_id = $2
-		  AND rc.attempt_generation = r.attempt_generation
-		ORDER BY p.created_at DESC LIMIT 10
-	`, filePath, repoID)
+	// Patterns linked via review comments on this file.
+	patternRows, err := s.q.GetFileMemoryPatterns(ctx, db.GetFileMemoryPatternsParams{FilePath: filePath, RepoID: repoID})
 	if err != nil {
 		return nil, fmt.Errorf("file memory patterns: %w", err)
 	}
-	defer pRows.Close()
-	mem.Patterns, err = collectOrEmpty(pRows, pgx.RowToStructByPos[Pattern])
-	if err != nil {
-		return nil, fmt.Errorf("file memory patterns scan: %w", err)
+	for _, row := range patternRows {
+		pattern, err := patternFromSQLC(row.ID, row.InstallationID, row.RepoID, row.Content, row.MemoryDocID, row.CreatedBy, row.Source, row.Category, row.PRNumber, row.CreatedAt, row.UpdatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("file memory patterns: %w", err)
+		}
+		mem.Patterns = append(mem.Patterns, pattern)
 	}
 
 	// Recent comments on this file. Suppressed findings stay in the payload —
@@ -528,25 +522,16 @@ func (s *Store) GetFileMemory(ctx context.Context, repoID int64, filePath string
 	// window and hide every finding Argus actually posted on that file.
 	// state is NOT NULL DEFAULT 'posted' (migration 051), so the boolean key is
 	// never NULL and false (posted) always sorts first.
-	cRows, err := s.Pool.Query(ctx, `
-		SELECT rc.id, rc.review_id, rc.file_path, rc.start_line, rc.end_line, rc.side,
-		       rc.body, rc.severity, rc.category, rc.specialist, rc.confidence_score,
-		       rc.code_snippet, rc.github_comment_id, rc.matched_pattern_id,
-		       rc.matched_pattern_score, rc.enforced_rule_content, rc.is_new_finding, rc.created_at,
-		       rc.state, rc.suppressed_reason, rc.resolved_sha, rc.attempt_generation
-		FROM review_comments rc
-		JOIN reviews r ON r.id = rc.review_id
-		WHERE rc.file_path = $1 AND r.repo_id = $2
-		  AND rc.attempt_generation = r.attempt_generation
-		ORDER BY (rc.state = 'suppressed'), rc.created_at DESC LIMIT 5
-	`, filePath, repoID)
+	commentRows, err := s.q.GetFileMemoryComments(ctx, db.GetFileMemoryCommentsParams{FilePath: filePath, RepoID: repoID})
 	if err != nil {
 		return nil, fmt.Errorf("file memory comments: %w", err)
 	}
-	defer cRows.Close()
-	mem.RecentComments, err = collectOrEmpty(cRows, pgx.RowToStructByPos[ReviewComment])
-	if err != nil {
-		return nil, fmt.Errorf("file memory comments scan: %w", err)
+	for _, row := range commentRows {
+		comment, err := fileMemoryCommentFromSQLC(row)
+		if err != nil {
+			return nil, fmt.Errorf("file memory comments: %w", err)
+		}
+		mem.RecentComments = append(mem.RecentComments, comment)
 	}
 
 	// Decision traces

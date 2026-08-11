@@ -80,3 +80,7 @@ func reviewListFromValues(id uuid.UUID, repoID int64, prNumber int, prTitle, prA
 		Diagrams: json.RawMessage("[]"), TruncatedFiles: json.RawMessage("[]"), CrossPRHash: crossPRHash, TraceID: traceID,
 	}
 }
+
+func fileMemoryCommentFromSQLC(row db.GetFileMemoryCommentsRow) (ReviewComment, error) {
+	return reviewCommentFromValues(row.ID, row.ReviewID, row.FilePath, row.StartLine, row.EndLine, row.Side, row.Body, row.Severity, row.Category, row.Specialist, row.ConfidenceScore, row.CodeSnippet, row.GithubCommentID, row.MatchedPatternID, row.MatchedPatternScore, row.EnforcedRuleContent, row.IsNewFinding, row.CreatedAt, row.State, row.SuppressedReason, row.ResolvedSHA, row.AttemptGeneration)
+}

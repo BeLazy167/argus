@@ -7,6 +7,9 @@ package db
 
 import (
 	"context"
+	"time"
+
+	"github.com/google/uuid"
 )
 
 const deleteNodesByFile = `-- name: DeleteNodesByFile :exec
@@ -82,6 +85,157 @@ func (q *Queries) GetFileFanIn(ctx context.Context, arg GetFileFanInParams) (int
 	var fan_in int
 	err := row.Scan(&fan_in)
 	return fan_in, err
+}
+
+const getFileMemoryComments = `-- name: GetFileMemoryComments :many
+SELECT rc.id, rc.review_id, rc.file_path, rc.start_line, rc.end_line, rc.side,
+       rc.body, rc.severity, rc.category, rc.specialist, rc.confidence_score,
+       rc.code_snippet, rc.github_comment_id, rc.matched_pattern_id,
+       rc.matched_pattern_score, rc.enforced_rule_content, rc.is_new_finding, rc.created_at,
+       rc.state, rc.suppressed_reason, rc.resolved_sha, rc.attempt_generation
+FROM review_comments rc
+JOIN reviews r ON r.id = rc.review_id
+WHERE rc.file_path = $1 AND r.repo_id = $2
+  AND rc.attempt_generation = r.attempt_generation
+ORDER BY (rc.state = 'suppressed'), rc.created_at DESC
+LIMIT 5
+`
+
+type GetFileMemoryCommentsParams struct {
+	FilePath string `json:"file_path"`
+	RepoID   int64  `json:"repo_id"`
+}
+
+type GetFileMemoryCommentsRow struct {
+	ID                  uuid.UUID `json:"id"`
+	ReviewID            uuid.UUID `json:"review_id"`
+	FilePath            string    `json:"file_path"`
+	StartLine           *int      `json:"start_line"`
+	EndLine             *int      `json:"end_line"`
+	Side                *string   `json:"side"`
+	Body                string    `json:"body"`
+	Severity            *string   `json:"severity"`
+	Category            *string   `json:"category"`
+	Specialist          *string   `json:"specialist"`
+	ConfidenceScore     *int      `json:"confidence_score"`
+	CodeSnippet         *string   `json:"code_snippet"`
+	GithubCommentID     *int64    `json:"github_comment_id"`
+	MatchedPatternID    *int64    `json:"matched_pattern_id"`
+	MatchedPatternScore *float32  `json:"matched_pattern_score"`
+	EnforcedRuleContent *string   `json:"enforced_rule_content"`
+	IsNewFinding        *bool     `json:"is_new_finding"`
+	CreatedAt           time.Time `json:"created_at"`
+	State               string    `json:"state"`
+	SuppressedReason    *string   `json:"suppressed_reason"`
+	ResolvedSHA         *string   `json:"resolved_sha"`
+	AttemptGeneration   int       `json:"attempt_generation"`
+}
+
+func (q *Queries) GetFileMemoryComments(ctx context.Context, arg GetFileMemoryCommentsParams) ([]GetFileMemoryCommentsRow, error) {
+	rows, err := q.db.Query(ctx, getFileMemoryComments, arg.FilePath, arg.RepoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GetFileMemoryCommentsRow
+	for rows.Next() {
+		var i GetFileMemoryCommentsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ReviewID,
+			&i.FilePath,
+			&i.StartLine,
+			&i.EndLine,
+			&i.Side,
+			&i.Body,
+			&i.Severity,
+			&i.Category,
+			&i.Specialist,
+			&i.ConfidenceScore,
+			&i.CodeSnippet,
+			&i.GithubCommentID,
+			&i.MatchedPatternID,
+			&i.MatchedPatternScore,
+			&i.EnforcedRuleContent,
+			&i.IsNewFinding,
+			&i.CreatedAt,
+			&i.State,
+			&i.SuppressedReason,
+			&i.ResolvedSHA,
+			&i.AttemptGeneration,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const getFileMemoryPatterns = `-- name: GetFileMemoryPatterns :many
+SELECT DISTINCT p.id, p.installation_id, p.repo_id, p.content, p.memory_doc_id,
+       p.created_by, COALESCE(p.source, 'manual') AS source, p.category, p.pr_number,
+       p.created_at, p.updated_at
+FROM patterns p
+JOIN review_comments rc ON rc.matched_pattern_id = p.id
+JOIN reviews r ON r.id = rc.review_id
+WHERE rc.file_path = $1 AND r.repo_id = $2
+  AND rc.attempt_generation = r.attempt_generation
+ORDER BY p.created_at DESC
+LIMIT 10
+`
+
+type GetFileMemoryPatternsParams struct {
+	FilePath string `json:"file_path"`
+	RepoID   int64  `json:"repo_id"`
+}
+
+type GetFileMemoryPatternsRow struct {
+	ID             int        `json:"id"`
+	InstallationID int64      `json:"installation_id"`
+	RepoID         *int64     `json:"repo_id"`
+	Content        string     `json:"content"`
+	MemoryDocID    *string    `json:"memory_doc_id"`
+	CreatedBy      *string    `json:"created_by"`
+	Source         string     `json:"source"`
+	Category       *string    `json:"category"`
+	PRNumber       *int       `json:"pr_number"`
+	CreatedAt      *time.Time `json:"created_at"`
+	UpdatedAt      *time.Time `json:"updated_at"`
+}
+
+func (q *Queries) GetFileMemoryPatterns(ctx context.Context, arg GetFileMemoryPatternsParams) ([]GetFileMemoryPatternsRow, error) {
+	rows, err := q.db.Query(ctx, getFileMemoryPatterns, arg.FilePath, arg.RepoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GetFileMemoryPatternsRow
+	for rows.Next() {
+		var i GetFileMemoryPatternsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.InstallationID,
+			&i.RepoID,
+			&i.Content,
+			&i.MemoryDocID,
+			&i.CreatedBy,
+			&i.Source,
+			&i.Category,
+			&i.PRNumber,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const getTopChokePoints = `-- name: GetTopChokePoints :many
