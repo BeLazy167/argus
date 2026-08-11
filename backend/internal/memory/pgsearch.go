@@ -82,7 +82,7 @@ func (idx *PGIndexer) embedQuery(ctx context.Context, query string) (*pgvector.V
 // adapter above this seam is a top-N-by-similarity consumer: BestMatch,
 // TopContent, ScenarioResults (reader.go: "Matches arrive already sorted by
 // similarity descending"), and every caller gates on an ABSOLUTE cosine floor
-// (Attribution 0.80, SuppressionDrop 0.85, ScenarioDedupe 0.85). Ordering the
+// (Attribution 0.80, SuppressionDrop 0.95, ScenarioDedupe 0.95). Ordering the
 // LIMIT by fused rank instead let a lexically-similar 0.55 row displace a
 // 0.95 row from a Limit-1 read — the floor then never fires, attribution
 // credits the wrong pattern, and a finding that should be suppressed posts.
@@ -234,7 +234,7 @@ func (idx *PGIndexer) runSearchVec(ctx context.Context, req SearchRequest, qv *p
 		// so total corpus growth does not move this number and is the wrong
 		// trigger for revisiting. Revisit if a SINGLE container grows large
 		// enough to matter -- and price the recall cost first, because every
-		// absolute floor above (0.80 attribution, 0.85 suppression) assumes
+		// absolute floor above (0.80 attribution, 0.95 suppression) assumes
 		// exact distances.
 		args = append(args, qv, idx.embedder.Model(), req.Query, pool, req.Threshold, limit)
 		n := len(args)

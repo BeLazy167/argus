@@ -57,7 +57,32 @@ const (
 	// above FindingEnrich so only strong matches earn a public callout. This
 	// one is publicly visible and wrong attribution is embarrassing, so it is
 	// deliberately stricter than the internal enrich gate.
-	DefaultThresholdAttribution = 0.92
+	//
+	// 0.80, not 0.92. At 0.92 this floor sat ABOVE what the corpus can produce
+	// and attribution stopped entirely: 0 of 228 comments between 2026-07-09 and
+	// 2026-08-09, against 44 of 55 before it was raised.
+	//
+	// Measured on production (see issue #250):
+	//   - 964 historical attributed matches, mean score 0.845. 94.2% clear 0.80;
+	//     only 4.5% clear 0.92. The raise discarded 95% of matches that fired.
+	//   - Across 23,419 lexically-distinct pattern pairs — the population the
+	//     wordOverlap guard actually lets through — ZERO reach 0.92. The maximum
+	//     is 0.8649.
+	//   - Five hand-written paraphrases of real findings scored 0.709-0.883
+	//     against their targets (rank 1 of 233 every time) while unrelated
+	//     controls scored 0.125-0.259. The band this floor must sit in is the
+	//     0.7-0.9 paraphrase band, not the ~1.0 verbatim band.
+	//
+	// The trap that made 0.92 unreachable rather than merely strict: attribution
+	// requires cos > this AND wordOverlap <= 0.70 (enricher.go). Only near-
+	// verbatim text reaches 0.92, and near-verbatim text is what the overlap
+	// guard deletes. The two conditions are near-mutually-exclusive, so the gate
+	// could never fire regardless of corpus size.
+	//
+	// False-positive cost at 0.80, against those same 23,419 pairs: 11 pairs,
+	// 0.047%. Raising this again without re-measuring that distribution will
+	// silently switch attribution off a second time.
+	DefaultThresholdAttribution = 0.80
 
 	// DefaultThresholdSuppressionDrop gates dismissal-driven DROP: a finding
 	// that semantically matches a previously 👎-dismissed finding at/above this
