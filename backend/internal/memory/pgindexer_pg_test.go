@@ -551,3 +551,55 @@ func (r *racingEmbedder) Embed(ctx context.Context, inputs []string) ([][]float3
 }
 
 func (r *racingEmbedder) Model() string { return "racing-1024" }
+
+func TestPGIndexerReactionFeedbackReversal(t *testing.T) {
+	pool, install := pgTestPool(t)
+	ctx := context.Background()
+	idx := NewPGIndexer(pool, &stubEmbedder{}, install, pgTestDims, slog.New(slog.DiscardHandler))
+	fb := FeedbackMemory{
+		FilePath: "race.go", Category: "concurrency", OriginalBody: "lock ordering can deadlock",
+		PRNumber: 9, Repo: "api", Action: "dismissed",
+	}
+	dismissedID := dismissalCustomID("api", fb.Category, fb.OriginalBody)
+	confirmedID := FeedbackCustomID("acme", "api", fb.FilePath, fb.Category, fb.OriginalBody, "confirmed")
+
+	if err := idx.ReconcileFeedbackSignal(ctx, "acme", "api", fb); err != nil {
+		t.Fatal(err)
+	}
+	if got := readRow(t, pool, install, dismissedID); got.deletedAt != nil {
+		t.Fatal("dismissal was not live")
+	}
+
+	fb.Action = "confirmed"
+	if err := idx.ReconcileFeedbackSignal(ctx, "acme", "api", fb); err != nil {
+		t.Fatal(err)
+	}
+	if got := readRow(t, pool, install, dismissedID); got.deletedAt == nil {
+		t.Fatal("overturned dismissal remains live and can still suppress")
+	}
+	if got := readRow(t, pool, install, confirmedID); got.deletedAt != nil {
+		t.Fatal("confirmation was not live")
+	}
+	// Replay is idempotent and must resurrect neither stale state nor duplicates.
+	if err := idx.ReconcileFeedbackSignal(ctx, "acme", "api", fb); err != nil {
+		t.Fatal(err)
+	}
+
+	fb.Action = ""
+	if err := idx.ReconcileFeedbackSignal(ctx, "acme", "api", fb); err != nil {
+		t.Fatal(err)
+	}
+	if got := readRow(t, pool, install, confirmedID); got.deletedAt == nil {
+		t.Fatal("neutral reaction tally did not retract confirmation")
+	}
+	var live int
+	if err := pool.QueryRow(ctx, `
+        SELECT count(*) FROM memories
+        WHERE installation_id = $1 AND custom_id IN ($2, $3) AND deleted_at IS NULL
+    `, install, dismissedID, confirmedID).Scan(&live); err != nil {
+		t.Fatal(err)
+	}
+	if live != 0 {
+		t.Fatalf("live reaction feedback rows = %d, want 0", live)
+	}
+}

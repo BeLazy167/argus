@@ -33,6 +33,7 @@ type Fake struct {
 
 	mu          sync.Mutex
 	Feedback    []memory.FeedbackMemory // IndexFeedbackSignal
+	Reconciled  []memory.FeedbackMemory // ReconcileFeedbackSignal
 	Patterns    []memory.PatternMemory  // IndexPattern
 	SharedPats  []memory.PatternMemory  // IndexSharedPattern
 	Rules       []memory.RuleMemory     // IndexRule
@@ -83,6 +84,13 @@ func (f *Fake) IndexFeedbackSignal(_ context.Context, _, _ string, fb memory.Fee
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.Feedback = append(f.Feedback, fb)
+	return nil
+}
+
+func (f *Fake) ReconcileFeedbackSignal(_ context.Context, _, _ string, fb memory.FeedbackMemory) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Reconciled = append(f.Reconciled, fb)
 	return nil
 }
 

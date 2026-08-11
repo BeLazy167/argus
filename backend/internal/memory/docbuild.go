@@ -168,6 +168,47 @@ func buildFeedbackDoc(owner, repo string, fb FeedbackMemory) (Doc, error) {
 	}, nil
 }
 
+type feedbackReconciliation struct {
+	DeleteFirst []string
+	Upsert      *Doc
+	DeleteAfter []string
+}
+
+// feedbackReconciliationPlan orders state replacement fail-safe: removing a
+// stale dismissal happens before installing confirmation, so a failed reinforce
+// write cannot leave suppression active. Installing dismissal happens before
+// removing confirmation because suppression is the requested current state.
+func feedbackReconciliationPlan(owner, repo string, fb FeedbackMemory) (feedbackReconciliation, error) {
+	confirmedID := FeedbackCustomID(owner, repo, fb.FilePath, fb.Category, fb.OriginalBody, "confirmed")
+	ignoredID := FeedbackCustomID(owner, repo, fb.FilePath, fb.Category, fb.OriginalBody, "ignored")
+	dismissedID := dismissalCustomID(repo, fb.Category, fb.OriginalBody)
+
+	switch fb.Action {
+	case "":
+		return feedbackReconciliation{DeleteFirst: []string{dismissedID, confirmedID, ignoredID}}, nil
+	case "confirmed":
+		doc, err := buildFeedbackDoc(owner, repo, fb)
+		if err != nil {
+			return feedbackReconciliation{}, err
+		}
+		return feedbackReconciliation{
+			DeleteFirst: []string{dismissedID, ignoredID},
+			Upsert:      &doc,
+		}, nil
+	case "dismissed":
+		doc, err := buildFeedbackDoc(owner, repo, fb)
+		if err != nil {
+			return feedbackReconciliation{}, err
+		}
+		return feedbackReconciliation{
+			Upsert:      &doc,
+			DeleteAfter: []string{confirmedID, ignoredID},
+		}, nil
+	default:
+		return feedbackReconciliation{}, fmt.Errorf("reconciling feedback signal: unsupported action %q (want confirmed|dismissed|empty)", fb.Action)
+	}
+}
+
 // buildScenarioDoc shapes a scenario doc: description plus a "Related files"
 // suffix when files exist, scenario_id in metadata (not content).
 func buildScenarioDoc(repo string, scenarioID int64, description, severity string, files []string) (Doc, error) {

@@ -107,10 +107,6 @@ func (ra *ReactionAnalyzer) HandleCommentReactions(ctx context.Context, event gh
 
 	signal := TallyReactions(filtered)
 	action := signal.DominantSignal()
-	if action == "" {
-		return nil
-	}
-
 	ra.logger.Info("reaction signal",
 		"action", action,
 		"confirmed", signal.Confirmed,
@@ -119,25 +115,20 @@ func (ra *ReactionAnalyzer) HandleCommentReactions(ctx context.Context, event gh
 		"file", comment.FilePath,
 	)
 
-	// Record outcome in DB
-	inserted, err := ra.store.RecordCommentOutcome(ctx, comment.ID, action)
-	if err != nil {
-		ra.logger.Error("reaction: recording outcome", "error", err, "outcome", action)
+	if action != "" {
+		inserted, recordErr := ra.store.RecordCommentOutcome(ctx, comment.ID, action)
+		if recordErr != nil {
+			ra.logger.Error("reaction: recording outcome", "error", recordErr, "outcome", action)
+		}
+		if inserted {
+			recordPatternOutcome(ctx, ra.store, ra.logger, comment.MatchedPatternID, action)
+		}
 	}
 
-	// Feed the outcome back into the matched pattern's empirical quality — but
-	// ONLY on first record. The sweep replays every PR event; RecordCommentOutcome
-	// is idempotent, so bumping stats unconditionally would inflate the counts.
-	if inserted {
-		recordPatternOutcome(ctx, ra.store, ra.logger, comment.MatchedPatternID, action)
-	}
-
-	// Finding lifecycle: a 👎-dominant comment is dismissed in the LEDGER ONLY
-	// (EventReactionDismissed → no thread resolution). A reaction is an untrusted,
-	// low-effort signal swept from any user on every PR event; letting it drive
-	// ResolveReviewThread would let a fork contributor clear a finding from the
-	// merge-gate view via the app's write token. state=dismissed still feeds
-	// suppression memory — the pre-#165 behavior. Non-fatal.
+	// A 👎-dominant comment is dismissed in the ledger only. Reaction removal
+	// retracts suppression below, but cannot safely rewrite this lifecycle row:
+	// the legacy ledger does not distinguish a reaction dismissal from a trusted
+	// reply dismissal.
 	if action == "dismissed" {
 		if _, err := ra.lifecycle.Transition(ctx, FindingTransition{
 			FindingID: comment.ID,
@@ -147,7 +138,9 @@ func (ra *ReactionAnalyzer) HandleCommentReactions(ctx context.Context, event gh
 		}
 	}
 
-	// Index feedback signal for pattern reinforcement/suppression
+	// Reconcile current reaction feedback on every sweep, including the neutral
+	// (tied/removed) state. This retracts a stale dismissal rather than leaving
+	// an append-only suppression row behind.
 	var indexer memory.Indexer
 	if ra.memRegistry != nil {
 		if inst, instErr := ra.store.GetInstallationByGitHubID(ctx, event.InstallationID); instErr == nil {
@@ -158,24 +151,21 @@ func (ra *ReactionAnalyzer) HandleCommentReactions(ctx context.Context, event gh
 		fb := memory.FeedbackMemory{
 			FilePath: comment.FilePath,
 			Category: *comment.Category,
-			// comment.Body is the RENDERED GitHub body (header, impact prose,
-			// suggestion block, "React 👎 to dismiss" footer). Store the finding
-			// statement instead, because that is what dismissalSearch queries with.
-			OriginalBody:   FindingTextFromPostedBody(comment.Body),
-			Action:         action,
-			DeveloperReply: "", // no text reply, just a reaction
-			PRNumber:       event.PRNumber,
+			// Store the finding statement because dismissal retrieval queries it.
+			OriginalBody: FindingTextFromPostedBody(comment.Body),
+			Action:       action,
+			PRNumber:     event.PRNumber,
 		}
 		if action == "dismissed" {
 			fb.Repo = repo
-			if kind, kerr := ra.store.GetCommentChangeClass(ctx, comment.ID); kerr != nil {
-				ra.logger.Warn("reaction: comment change class lookup", "error", kerr, "comment_id", comment.ID)
+			if kind, kindErr := ra.store.GetCommentChangeClass(ctx, comment.ID); kindErr != nil {
+				ra.logger.Warn("reaction: comment change class lookup", "error", kindErr, "comment_id", comment.ID)
 			} else {
 				fb.ChangeKind = kind
 			}
 		}
-		if err := indexer.IndexFeedbackSignal(ctx, owner, repo, fb); err != nil {
-			ra.logger.Error("reaction: indexing feedback signal", "error", err, "action", action)
+		if err := indexer.ReconcileFeedbackSignal(ctx, owner, repo, fb); err != nil {
+			ra.logger.Error("reaction: reconciling feedback signal", "error", err, "action", action)
 		}
 	}
 

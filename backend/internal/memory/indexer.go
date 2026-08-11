@@ -50,6 +50,9 @@ type Indexer interface {
 	IndexPattern(ctx context.Context, repo string, pattern PatternMemory) (*IndexResult, error)
 	IndexSharedPattern(ctx context.Context, pattern PatternMemory) (*IndexResult, error)
 	IndexFeedbackSignal(ctx context.Context, owner, repo string, feedback FeedbackMemory) error
+	// ReconcileFeedbackSignal makes feedback a current state rather than an
+	// append-only history. An empty Action retracts all active signals.
+	ReconcileFeedbackSignal(ctx context.Context, owner, repo string, feedback FeedbackMemory) error
 	IndexScenario(ctx context.Context, owner, repo string, scenarioID int64, description, severity string, files []string) error
 
 	// ForReview returns an Indexer that attributes everything it writes to one

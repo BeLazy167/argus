@@ -50,3 +50,35 @@ func TestSearchQuarantinesLegacyReplyFeedbackNonDestructively(t *testing.T) {
 		t.Fatalf("legacy reply_feedback was not quarantined: %#v", got)
 	}
 }
+
+func TestFeedbackReconciliationPlanReversesDismissal(t *testing.T) {
+	base := FeedbackMemory{FilePath: "a.go", Category: "bug", OriginalBody: "race", Repo: "api"}
+	dismissed := base
+	dismissed.Action = "dismissed"
+	confirmed := base
+	confirmed.Action = "confirmed"
+
+	dismissPlan, err := feedbackReconciliationPlan("acme", "api", dismissed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirmPlan, err := feedbackReconciliationPlan("acme", "api", confirmed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	neutralPlan, err := feedbackReconciliationPlan("acme", "api", base)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dismissalID := dismissalCustomID("api", "bug", "race")
+	if dismissPlan.Upsert == nil || dismissPlan.Upsert.CustomID != dismissalID {
+		t.Fatalf("dismiss plan = %+v", dismissPlan)
+	}
+	if confirmPlan.Upsert == nil || len(confirmPlan.DeleteFirst) < 1 || confirmPlan.DeleteFirst[0] != dismissalID {
+		t.Fatalf("confirmed reversal plan = %+v", confirmPlan)
+	}
+	if neutralPlan.Upsert != nil || len(neutralPlan.DeleteFirst) != 3 {
+		t.Fatalf("neutral reversal plan = %+v", neutralPlan)
+	}
+}
