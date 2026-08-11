@@ -123,6 +123,22 @@ func enqueueMemoryMirrorEvent(ctx context.Context, tx pgx.Tx, event MemoryMirror
 		if err := lockMemoryMirrorExecution(ctx, tx, event.InstallationID, customID); err != nil {
 			return err
 		}
+
+		// Once the execution lock is held, any claimed predecessor is either
+		// finished or waiting to verify its lease. Acknowledge every older rule
+		// transition for this identity before publishing the tombstone. Clearing
+		// claimed_at makes a waiting worker fail its ownership check, while keeping
+		// the completed row and payload as outbox audit history.
+		if _, err := tx.Exec(ctx, `
+			UPDATE memory_mirror_outbox
+			SET processed_at = now(), claimed_at = NULL, updated_at = now()
+			WHERE installation_id = $1
+			  AND aggregate_type = 'rule'
+			  AND processed_at IS NULL
+			  AND (aggregate_id = $2 OR NULLIF(payload->>'custom_id', '') = $3)`,
+			event.InstallationID, event.AggregateID, customID); err != nil {
+			return fmt.Errorf("supersede older rule mirror events: %w", err)
+		}
 	}
 	_, err := tx.Exec(ctx, `
         INSERT INTO memory_mirror_outbox

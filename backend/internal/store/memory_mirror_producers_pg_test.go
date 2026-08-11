@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -252,6 +253,241 @@ func TestDeletePatternLegacyNullMemoryIdentityEnqueuesReplayableDelete(t *testin
 	}
 }
 
+func TestRuleDisableSupersedesQueuedOlderUpsert(t *testing.T) {
+	pool, ctx := fileMemoryTestPool(t)
+	lockMirrorOutboxPGTests(t, pool, ctx)
+	requireMirrorOutbox(t, pool, ctx)
+	st := &Store{Pool: pool, q: db.New(pool)}
+	installationID, _, _ := seedLearnTenant(t, ctx, pool, "rule-disable-queued")
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM memory_mirror_outbox WHERE installation_id=$1`, installationID)
+	})
+
+	rule, err := st.CreateRule(ctx, installationID, "safety", "queued rules stay disabled", 5, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var predecessorID int64
+	if err := pool.QueryRow(ctx, `
+		SELECT id FROM memory_mirror_outbox
+		WHERE installation_id=$1 AND aggregate_type='rule' AND aggregate_id=$2`,
+		installationID, rule.ID).Scan(&predecessorID); err != nil {
+		t.Fatal(err)
+	}
+
+	disabled := false
+	if _, err := st.UpdateRule(ctx, rule.ID, []int64{installationID}, nil, nil, nil, &disabled); err != nil {
+		t.Fatalf("disable rule: %v", err)
+	}
+
+	var predecessorProcessed bool
+	if err := pool.QueryRow(ctx, `
+		SELECT processed_at IS NOT NULL
+		FROM memory_mirror_outbox WHERE id=$1`, predecessorID).Scan(&predecessorProcessed); err != nil {
+		t.Fatal(err)
+	}
+	if !predecessorProcessed {
+		t.Fatal("disable left its queued enabled-rule upsert eligible to resurrect memory")
+	}
+
+	var pendingID int64
+	var pendingOperation string
+	if err := pool.QueryRow(ctx, `
+		SELECT id, operation FROM memory_mirror_outbox
+		WHERE installation_id=$1 AND aggregate_type='rule' AND aggregate_id=$2
+		  AND processed_at IS NULL`, installationID, rule.ID).Scan(&pendingID, &pendingOperation); err != nil {
+		t.Fatalf("read pending transition after disable: %v", err)
+	}
+	if pendingOperation != MemoryMirrorDelete || pendingID <= predecessorID {
+		t.Fatalf("pending transition id=%d operation=%q, want the later rule tombstone", pendingID, pendingOperation)
+	}
+}
+
+func TestRuleDisableSupersedesOnlyOlderTransitionsForThatRule(t *testing.T) {
+	pool, ctx := fileMemoryTestPool(t)
+	lockMirrorOutboxPGTests(t, pool, ctx)
+	requireMirrorOutbox(t, pool, ctx)
+	st := &Store{Pool: pool, q: db.New(pool)}
+	if _, err := pool.Exec(ctx, `DELETE FROM memory_mirror_outbox`); err != nil {
+		t.Fatalf("clear mirror outbox: %v", err)
+	}
+	installationID, _, _ := seedLearnTenant(t, ctx, pool, "rule-disable-scope")
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM memory_mirror_outbox WHERE installation_id=$1`, installationID)
+	})
+	var repoID int64
+	if err := pool.QueryRow(ctx, `SELECT id FROM repos WHERE installation_id=$1`, installationID).Scan(&repoID); err != nil {
+		t.Fatal(err)
+	}
+
+	rule, err := st.CreateRule(ctx, installationID, "safety", "supersede only me", 5, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updatedContent := "supersede every older transition for me"
+	if _, err := st.UpdateRule(ctx, rule.ID, []int64{installationID}, nil, &updatedContent, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	otherRule, err := st.CreateRule(ctx, installationID, "safety", "leave other rules queued", 5, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := "manual"
+	patternCustomID := "rule-disable-distinct-pattern"
+	pattern, err := st.CreatePattern(ctx, installationID, &repoID, "leave patterns queued", nil, nil, &source, nil, nil, &patternCustomID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	disabled := false
+	if _, err := st.UpdateRule(ctx, rule.ID, []int64{installationID}, nil, nil, nil, &disabled); err != nil {
+		t.Fatalf("disable rule: %v", err)
+	}
+
+	var superseded int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM memory_mirror_outbox
+		WHERE installation_id=$1 AND aggregate_type='rule' AND aggregate_id=$2
+		  AND operation='upsert' AND processed_at IS NOT NULL`, installationID, rule.ID).Scan(&superseded); err != nil {
+		t.Fatal(err)
+	}
+	if superseded != 2 {
+		t.Fatalf("superseded same-rule upserts=%d, want 2", superseded)
+	}
+	for _, identity := range []struct {
+		typ string
+		id  int64
+	}{{MemoryMirrorRule, otherRule.ID}, {MemoryMirrorPattern, pattern.ID}} {
+		var pending bool
+		if err := pool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM memory_mirror_outbox
+				WHERE installation_id=$1 AND aggregate_type=$2 AND aggregate_id=$3
+				  AND processed_at IS NULL
+			)`, installationID, identity.typ, identity.id).Scan(&pending); err != nil {
+			t.Fatal(err)
+		}
+		if !pending {
+			t.Fatalf("disable suppressed distinct %s event %d", identity.typ, identity.id)
+		}
+	}
+}
+
+func TestRuleDisableRevokesClaimedPredecessorWaitingToExecute(t *testing.T) {
+	pool, ctx := fileMemoryTestPool(t)
+	lockMirrorOutboxPGTests(t, pool, ctx)
+	requireMirrorOutbox(t, pool, ctx)
+	st := &Store{Pool: pool, q: db.New(pool)}
+	if _, err := pool.Exec(ctx, `DELETE FROM memory_mirror_outbox`); err != nil {
+		t.Fatalf("clear mirror outbox: %v", err)
+	}
+	installationID, _, _ := seedLearnTenant(t, ctx, pool, "rule-disable-claimed")
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM memory_mirror_outbox WHERE installation_id=$1`, installationID)
+	})
+
+	rule, err := st.CreateRule(ctx, installationID, "safety", "claimed rules stay disabled", 5, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	customID := fmt.Sprintf("rule--%d", rule.ID)
+	claimed, err := st.ClaimMemoryMirrorEvents(ctx, 1, time.Minute)
+	if err != nil || len(claimed) != 1 || claimed[0].AggregateID != rule.ID {
+		t.Fatalf("claim predecessor=%+v err=%v", claimed, err)
+	}
+
+	blocker, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Release()
+	lockTenant := memoryMirrorExecutionTenant(installationID)
+	if _, err := blocker.Exec(ctx, `SELECT pg_advisory_lock(hashtext($1), hashtext($2))`, lockTenant, customID); err != nil {
+		t.Fatal(err)
+	}
+	locked := true
+	defer func() {
+		if locked {
+			_, _ = blocker.Exec(context.Background(), `SELECT pg_advisory_unlock(hashtext($1), hashtext($2))`, lockTenant, customID)
+		}
+	}()
+
+	secondMachine := NewWithDB(pool)
+	applyCalled := make(chan struct{}, 1)
+	workerDone := make(chan error, 1)
+	go func() {
+		workerDone <- secondMachine.ProcessMemoryMirrorEvent(ctx, claimed[0], customID, nil, func(context.Context, bool) error {
+			applyCalled <- struct{}{}
+			return nil
+		})
+	}()
+	select {
+	case err := <-workerDone:
+		t.Fatalf("claimed worker did not wait for execution ownership: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	disableDone := make(chan error, 1)
+	disabled := false
+	go func() {
+		_, err := st.UpdateRule(ctx, rule.ID, []int64{installationID}, nil, nil, nil, &disabled)
+		disableDone <- err
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var waiting bool
+		if err := pool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM pg_locks
+				WHERE locktype='advisory' AND NOT granted AND objsubid=2
+				  AND classid=(hashtext($1)::bigint & 4294967295)::oid
+				  AND objid=(hashtext($2)::bigint & 4294967295)::oid
+			)`, lockTenant, customID).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("disable did not wait behind the execution lock")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if _, err := blocker.Exec(ctx, `SELECT pg_advisory_unlock(hashtext($1), hashtext($2))`, lockTenant, customID); err != nil {
+		t.Fatal(err)
+	}
+	locked = false
+	select {
+	case err := <-disableDone:
+		if err != nil {
+			t.Fatalf("disable rule: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("disable did not finish after execution lock release")
+	}
+	select {
+	case err := <-workerDone:
+		if err == nil || !strings.Contains(err.Error(), "lease lost") {
+			t.Fatalf("claimed predecessor result=%v, want lost lease", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("claimed predecessor did not recheck ownership")
+	}
+	select {
+	case <-applyCalled:
+		t.Fatal("claimed predecessor applied after disable superseded its lease")
+	default:
+	}
+	var predecessorProcessed bool
+	if err := pool.QueryRow(ctx, `SELECT processed_at IS NOT NULL FROM memory_mirror_outbox WHERE id=$1`, claimed[0].ID).Scan(&predecessorProcessed); err != nil {
+		t.Fatal(err)
+	}
+	if !predecessorProcessed {
+		t.Fatal("claimed predecessor was not transactionally acknowledged")
+	}
+}
+
 func TestRuleDisableTombstonesLiveMemoryBeforeStoreReturns(t *testing.T) {
 	pool, ctx := fileMemoryTestPool(t)
 	lockMirrorOutboxPGTests(t, pool, ctx)
@@ -324,6 +560,101 @@ func TestRuleDeleteTombstonesLiveMemoryBeforeStoreReturns(t *testing.T) {
 	}
 	if live {
 		t.Fatal("DeleteRule returned while the deleted rule was still searchable")
+	}
+}
+
+func TestRuleDeleteFailureKeepsPredecessorRetryableAndRetrySupersedesIt(t *testing.T) {
+	pool, ctx := fileMemoryTestPool(t)
+	lockMirrorOutboxPGTests(t, pool, ctx)
+	requireMirrorOutbox(t, pool, ctx)
+	st := &Store{Pool: pool, q: db.New(pool)}
+	if _, err := pool.Exec(ctx, `DELETE FROM memory_mirror_outbox`); err != nil {
+		t.Fatalf("clear mirror outbox: %v", err)
+	}
+	installationID, _, _ := seedLearnTenant(t, ctx, pool, "rule-delete-retry")
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM memory_mirror_outbox WHERE installation_id=$1`, installationID)
+	})
+
+	rule, err := st.CreateRule(ctx, installationID, "safety", "failed delete remains retryable", 5, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	customID := fmt.Sprintf("rule--%d", rule.ID)
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO memories (installation_id, container_tag, custom_id, type, content)
+		VALUES ($1, '_shared', $2, 'rule', 'failed delete remains retryable')`, installationID, customID); err != nil {
+		t.Fatal(err)
+	}
+	var predecessorID int64
+	if err := pool.QueryRow(ctx, `
+		SELECT id FROM memory_mirror_outbox
+		WHERE installation_id=$1 AND aggregate_type='rule' AND aggregate_id=$2`,
+		installationID, rule.ID).Scan(&predecessorID); err != nil {
+		t.Fatal(err)
+	}
+
+	blocker, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = blocker.Rollback(context.Background()) }()
+	if _, err := blocker.Exec(ctx, `
+		SELECT 1 FROM memories WHERE installation_id=$1 AND custom_id=$2 FOR UPDATE`, installationID, customID); err != nil {
+		t.Fatal(err)
+	}
+	attemptCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	if err := st.DeleteRule(attemptCtx, rule.ID, []int64{installationID}); err == nil {
+		cancel()
+		t.Fatal("expected blocked rule delete to fail")
+	}
+	cancel()
+	if err := blocker.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	var ruleStillExists, predecessorPending bool
+	if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM rules WHERE id=$1)`, rule.ID).Scan(&ruleStillExists); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT processed_at IS NULL FROM memory_mirror_outbox WHERE id=$1`, predecessorID).Scan(&predecessorPending); err != nil {
+		t.Fatal(err)
+	}
+	var eventCount int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM memory_mirror_outbox
+		WHERE installation_id=$1 AND aggregate_type='rule' AND aggregate_id=$2`,
+		installationID, rule.ID).Scan(&eventCount); err != nil {
+		t.Fatal(err)
+	}
+	if !ruleStillExists || !predecessorPending || eventCount != 1 {
+		t.Fatalf("failed delete was not atomic: rule=%v predecessor_pending=%v events=%d", ruleStillExists, predecessorPending, eventCount)
+	}
+
+	if err := st.DeleteRule(ctx, rule.ID, []int64{installationID}); err != nil {
+		t.Fatalf("retry delete rule: %v", err)
+	}
+	var predecessorProcessed, live bool
+	if err := pool.QueryRow(ctx, `SELECT processed_at IS NOT NULL FROM memory_mirror_outbox WHERE id=$1`, predecessorID).Scan(&predecessorProcessed); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM live_memories WHERE installation_id=$1 AND custom_id=$2)`,
+		installationID, customID).Scan(&live); err != nil {
+		t.Fatal(err)
+	}
+	if !predecessorProcessed || live {
+		t.Fatalf("successful delete retry left resurrection possible: predecessor_processed=%v live=%v", predecessorProcessed, live)
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM memory_mirror_outbox
+		WHERE installation_id=$1 AND aggregate_type='rule' AND aggregate_id=$2`,
+		installationID, rule.ID).Scan(&eventCount); err != nil {
+		t.Fatal(err)
+	}
+	if eventCount != 2 {
+		t.Fatalf("delete retry event count=%d, want predecessor audit row and one tombstone", eventCount)
 	}
 }
 
