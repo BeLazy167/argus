@@ -13,30 +13,19 @@ import (
 	"github.com/BeLazy167/argus/backend/internal/memory"
 )
 
-// indexRule mirrors a rule into the installation's `_shared` memory container
-// (type=rule) so specialists that query it can retrieve org rules. Best-effort,
-// mirroring the webhook feedback-indexing convention (reactions.go / reply.go):
-// never fails the request, Warn on error, bounded by a 5s timeout. IndexRule
-// upserts on the deterministic customID (rule--{id}), so this doubles as the
-// update path.
-func (s *Server) indexRule(ctx context.Context, installationID int64, rule memory.RuleMemory) {
-	if s.memRegistry == nil {
-		return
+// syncRuleMirror applies the rule's current enabled state to memory. Delete is
+// a soft tombstone and IndexRule resurrects the same deterministic custom ID,
+// so disable/re-enable and webhook retries are reversible and idempotent.
+func syncRuleMirror(ctx context.Context, indexer memory.Indexer, rule memory.RuleMemory, enabled bool) error {
+	if enabled {
+		return indexer.IndexRule(ctx, "", rule)
 	}
-	indexer := s.memRegistry.GetIndexer(ctx, installationID)
-	if indexer == nil {
-		return
-	}
-	smCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	if err := indexer.IndexRule(smCtx, "", rule); err != nil {
-		s.logger.Warn("index rule in memory", "error", err, "rule_id", rule.RuleID)
-	}
+	return indexer.DeleteDocument(ctx, memory.RuleCustomID(rule.RuleID))
 }
 
-// deleteRuleDoc best-effort removes a rule's `_shared` doc by its deterministic
-// customID (rule--{id}). Non-fatal, Warn on error, 5s timeout.
-func (s *Server) deleteRuleDoc(ctx context.Context, installationID, ruleID int64) {
+// mirrorRule best-effort mirrors one relational rule transition into memory.
+// The relational row is authoritative; a mirror error never fails the request.
+func (s *Server) mirrorRule(ctx context.Context, installationID int64, rule memory.RuleMemory, enabled bool) {
 	if s.memRegistry == nil {
 		return
 	}
@@ -46,8 +35,8 @@ func (s *Server) deleteRuleDoc(ctx context.Context, installationID, ruleID int64
 	}
 	smCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	if err := indexer.DeleteDocument(smCtx, memory.RuleCustomID(ruleID)); err != nil {
-		s.logger.Warn("delete rule from memory", "error", err, "rule_id", ruleID)
+	if err := syncRuleMirror(smCtx, indexer, rule, enabled); err != nil {
+		s.logger.Warn("sync rule memory mirror", "error", err, "rule_id", rule.RuleID, "enabled", enabled)
 	}
 }
 
@@ -94,12 +83,12 @@ func (s *Server) createRule(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.LogActivity(r.Context(), &ids[0], "rule_created", "", fmt.Sprintf("rule:%d", rule.ID), nil); err != nil {
 		s.logger.Error("failed to log activity", "error", err, "action", "rule_created")
 	}
-	s.indexRule(r.Context(), ids[0], memory.RuleMemory{
+	s.mirrorRule(r.Context(), ids[0], memory.RuleMemory{
 		RuleID:   rule.ID,
 		Category: rule.Category,
 		Priority: rule.Priority,
 		Content:  rule.Content,
-	})
+	}, rule.Enabled)
 	writeJSON(w, http.StatusCreated, rule)
 }
 
@@ -125,12 +114,12 @@ func (s *Server) updateRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if rule.InstallationID != nil {
-		s.indexRule(r.Context(), *rule.InstallationID, memory.RuleMemory{
+		s.mirrorRule(r.Context(), *rule.InstallationID, memory.RuleMemory{
 			RuleID:   rule.ID,
 			Category: rule.Category,
 			Priority: rule.Priority,
 			Content:  rule.Content,
-		})
+		}, rule.Enabled)
 	}
 	writeJSON(w, http.StatusOK, rule)
 }
@@ -153,7 +142,7 @@ func (s *Server) deleteRule(w http.ResponseWriter, r *http.Request) {
 	// was created under ids[0] (see createRule), so its `_shared` doc lives in
 	// that installation's container. Best-effort cleanup by deterministic customID.
 	if len(ids) > 0 {
-		s.deleteRuleDoc(r.Context(), ids[0], id)
+		s.mirrorRule(r.Context(), ids[0], memory.RuleMemory{RuleID: id}, false)
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
