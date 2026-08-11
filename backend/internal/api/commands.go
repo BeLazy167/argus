@@ -4,18 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/BeLazy167/argus/backend/internal/admission"
 	"regexp"
 	"sort"
 	"strings"
 
-	gh "github.com/google/go-github/v68/github"
-
+	"github.com/BeLazy167/argus/backend/internal/admission"
 	ghpkg "github.com/BeLazy167/argus/backend/internal/github"
 	"github.com/BeLazy167/argus/backend/internal/llm"
 	"github.com/BeLazy167/argus/backend/internal/memory"
 	"github.com/BeLazy167/argus/backend/internal/pipeline"
 	"github.com/BeLazy167/argus/backend/internal/store"
+	gh "github.com/google/go-github/v68/github"
 )
 
 // --- Command Dispatch ---
@@ -194,16 +193,29 @@ func (s *Server) handleHelpCommand(ctx context.Context, evt ghpkg.IssueCommentEv
 	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "rocket")
 }
 
-// canRemember reports whether an issue commenter may persist review memory.
-// Repo memory accepts repository maintainers. Org-wide memory is narrower:
-// a collaborator on one repository must not influence every repository in the
-// installation, so only installation owners and organization members qualify.
-func canRemember(authorAssociation string, orgWide bool) bool {
-	association := strings.ToUpper(strings.TrimSpace(authorAssociation))
-	if orgWide {
-		return association == "OWNER" || association == "MEMBER"
+type repoWritePermissionChecker interface {
+	HasRepoWriteAccess(ctx context.Context, installationID int64, owner, repo, login string) (bool, error)
+}
+
+type rememberAuthorization struct {
+	InstallationID    int64
+	Owner             string
+	Repo              string
+	CommentAuthor     string
+	AuthorAssociation string
+	OrgWide           bool
+}
+
+// authorizeRemember reports whether an issue commenter may persist review
+// memory. Repository memory uses GitHub's effective permission for the actual
+// commenter. Org-wide memory intentionally retains its separate, narrower
+// trusted-author policy.
+func authorizeRemember(ctx context.Context, permissions repoWritePermissionChecker, auth rememberAuthorization) (bool, error) {
+	if auth.OrgWide {
+		association := strings.ToUpper(strings.TrimSpace(auth.AuthorAssociation))
+		return association == "OWNER" || association == "MEMBER", nil
 	}
-	return ghpkg.IsPrivilegedAssociation(association)
+	return permissions.HasRepoWriteAccess(ctx, auth.InstallationID, auth.Owner, auth.Repo, auth.CommentAuthor)
 }
 
 // handleRememberCommand parses @argus-eye remember and persists a pattern.
@@ -225,12 +237,35 @@ func (s *Server) handleRememberCommand(ctx context.Context, evt ghpkg.IssueComme
 			fmt.Sprintf("Usage: `@%s remember <pattern>` or `@%s remember --org <pattern>`", s.cfg.GitHubAppSlug, s.cfg.GitHubAppSlug))
 		return
 	}
-	if !canRemember(evt.AuthorAssociation, isOrg) {
+	authorized := func() bool {
+		allowed, err := authorizeRemember(ctx, ghClient, rememberAuthorization{
+			InstallationID:    evt.InstallationID,
+			Owner:             owner,
+			Repo:              repo,
+			CommentAuthor:     evt.CommentAuthor,
+			AuthorAssociation: evt.AuthorAssociation,
+			OrgWide:           isOrg,
+		})
+		if err != nil {
+			s.logger.Warn("remember: permission lookup failed", "error", err, "author", evt.CommentAuthor,
+				"repo", evt.RepoFullName, "pr", evt.PRNumber)
+			_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
+			return false
+		}
+		if allowed {
+			return true
+		}
 		s.logger.Info("remember: unauthorized commenter", "author", evt.CommentAuthor,
 			"association", evt.AuthorAssociation, "org_wide", isOrg, "pr", evt.PRNumber)
 		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
 		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
 			"Only trusted repository maintainers can persist Argus memory; org-wide memory requires an owner or organization member.")
+		return false
+	}
+
+	// Org-wide memory intentionally keeps its trusted-author policy and does
+	// not depend on permission to this one repository.
+	if isOrg && !authorized() {
 		return
 	}
 
@@ -263,6 +298,13 @@ func (s *Server) handleRememberCommand(ctx context.Context, evt ghpkg.IssueComme
 	customID := memory.SharedPatternCustomID(source, content)
 	if !isOrg {
 		customID = memory.PatternCustomID(owner, repo, source, content)
+	}
+
+	// Keep the effective-permission lookup adjacent to the write. GitHub does
+	// not offer an atomic permission-check-and-write operation, so this is the
+	// narrowest practical TOCTOU window.
+	if !isOrg && !authorized() {
+		return
 	}
 	_, err = s.store.CreatePattern(ctx, inst.ID, repoID, content, nil, &createdBy, &source, nil, nil, &customID, nil)
 	if err != nil {
