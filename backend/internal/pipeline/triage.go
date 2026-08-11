@@ -113,7 +113,7 @@ func (ts *TriageStage) Execute(ctx context.Context, run *PipelineRun) error {
 	return nil
 }
 
-func buildTriagePrompt(files []diff.FileDiff) string {
+func buildTriagePrompt(files []diff.FileDiff, memoryHints string) string {
 	var sb strings.Builder
 	sb.WriteString("Classify each file for code review depth.\n\nFiles changed:\n")
 	for _, f := range files {
@@ -126,6 +126,10 @@ func buildTriagePrompt(files []diff.FileDiff) string {
 		if len(lines) > maxDiffLines {
 			sb.WriteString(fmt.Sprintf("\n... (%d more lines)\n", len(lines)-maxDiffLines))
 		}
+	}
+	if memoryHints != "" {
+		sb.WriteString("\n\n")
+		sb.WriteString(wrapRetrievedMemory(memoryHints))
 	}
 	return sb.String()
 }
@@ -142,10 +146,8 @@ func (ts *TriageStage) llmTriage(ctx context.Context, run *PipelineRun) (map[str
 	if splitErr != nil {
 		slog.Warn("triage: invalid repo name, skipping memory hints", "error", splitErr)
 	}
-	prompt := buildTriagePrompt(run.Diff.Files)
-	if hints := triageMemoryHints(ctx, run.Indexer, run.Thresholds, owner, repo, run.Diff.Files); hints != "" {
-		prompt += "\n" + hints
-	}
+	hints := triageMemoryHints(ctx, run.Indexer, run.Thresholds, owner, repo, run.Diff.Files)
+	prompt := buildTriagePrompt(run.Diff.Files, hints)
 
 	resp, err := provider.Complete(ctx, llm.CompletionRequest{
 		Model:       cfg.Model,

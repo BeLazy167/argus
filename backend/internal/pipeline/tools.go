@@ -192,7 +192,7 @@ func (th *ToolHandler) searchMemory(ctx context.Context, argsJSON string) (strin
 	for i, r := range results {
 		sb.WriteString(fmt.Sprintf("--- Result %d (score: %.2f) ---\n%s\n\n", i+1, r.Score, r.Content))
 	}
-	return sb.String(), nil
+	return wrapRetrievedMemory(sb.String()), nil
 }
 
 func (th *ToolHandler) listRepos(ctx context.Context, argsJSON string) (string, error) {

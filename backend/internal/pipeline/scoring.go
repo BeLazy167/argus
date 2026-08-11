@@ -378,7 +378,7 @@ func applyThresholdFilter(run *PipelineRun, skip func(fi, ci int) bool) (kept, m
 func buildScoringPrompt(run *PipelineRun, memContext string) string {
 	var sb strings.Builder
 	if memContext != "" {
-		sb.WriteString(memContext)
+		sb.WriteString(wrapRetrievedMemory(memContext))
 		sb.WriteString("\n")
 	}
 	// Sanitize + truncate user-controlled fields
