@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -833,16 +834,25 @@ const graphIndexLockKey int64 = 0x4152475553475831 // "ARGUSGX1"
 // path is the only path and is correct. A missing extension is therefore not an
 // error worth failing an otherwise successful index over.
 func (s *Store) RebuildCodeGraphProjection(ctx context.Context) error {
+	started := time.Now()
+	slog.InfoContext(ctx, "pgGraph projection rebuild probe started")
 	var exists bool
 	if err := s.Pool.QueryRow(ctx,
 		`SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'graph')`).Scan(&exists); err != nil {
 		return fmt.Errorf("probing for pgGraph: %w", err)
 	}
 	if !exists {
+		slog.InfoContext(ctx, "pgGraph projection rebuild skipped", "pggraph_available", false,
+			"duration_ms", time.Since(started).Milliseconds())
 		return nil
 	}
+	slog.InfoContext(ctx, "pgGraph projection rebuild started", "pggraph_available", true)
 	if _, err := s.Pool.Exec(ctx, `SELECT graph.build()`); err != nil {
+		slog.ErrorContext(ctx, "pgGraph projection rebuild failed",
+			"duration_ms", time.Since(started).Milliseconds(), "error", err)
 		return fmt.Errorf("rebuilding pgGraph projection: %w", err)
 	}
+	slog.InfoContext(ctx, "pgGraph projection rebuild completed",
+		"duration_ms", time.Since(started).Milliseconds())
 	return nil
 }

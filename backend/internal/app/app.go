@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"log"
 	"log/slog"
 	"net/http"
 	"os"
@@ -25,11 +26,14 @@ import (
 
 // Run initializes all components and starts the server.
 func Run() error {
+	processStarted := time.Now()
 	// Base handler stays JSON-on-stdout for Fly log shipping. We wrap it with
 	// obs.Handler when POSTHOG_API_KEY is set so every structured slog call
 	// that declares an `event=` attr also lands in PostHog. Missing key =
 	// kill-switch: text logs continue, PostHog forwarding is a no-op.
-	var baseHandler slog.Handler = slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})
+	var baseHandler slog.Handler = obs.NewContextHandler(
+		slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}),
+	)
 	var phClient posthog.Client
 	var phHandler *obs.Handler
 	if apiKey := os.Getenv("POSTHOG_API_KEY"); apiKey != "" {
@@ -37,6 +41,9 @@ func Run() error {
 			Endpoint:  "https://us.i.posthog.com",
 			BatchSize: 100,
 			Interval:  10 * time.Second,
+			Verbose:   true,
+			Transport: obs.NewLoggingRoundTripper("posthog", http.DefaultTransport),
+			Logger:    obs.NewPrintfLogger(slog.New(baseHandler)),
 		})
 		if err != nil {
 			slog.New(baseHandler).Error("posthog init failed", "error", err)
@@ -52,6 +59,10 @@ func Run() error {
 	// this, slog.Default() stays on Go's stdlib text handler and those
 	// structured events never reach the forwarder.
 	slog.SetDefault(logger)
+	logger.Info("backend process startup started")
+	defer func() {
+		logger.Info("backend process stopped", "duration_ms", time.Since(processStarted).Milliseconds())
+	}()
 	// Ordering: phHandler.Close() must run BEFORE phClient.Close() so the
 	// drain goroutine finishes enqueuing into posthog-go before we ask
 	// posthog-go to flush its wire queue. defer runs LIFO, so declare the
@@ -68,6 +79,14 @@ func Run() error {
 			if err := phHandler.Close(); err != nil {
 				logger.Warn("posthog handler close", "error", err)
 			}
+			logger.Info("posthog forwarding totals",
+				"sent", phHandler.Sent(),
+				"dropped_buffer", phHandler.DroppedBuffer(),
+				"dropped_breaker", phHandler.DroppedBreaker(),
+				"dropped_enqueue", phHandler.DroppedEnqueue(),
+				"dropped_unattributed", phHandler.DroppedUnattributed(),
+				"breaker_open", phHandler.BreakerOpen(),
+			)
 		}()
 	}
 
@@ -75,16 +94,35 @@ func Run() error {
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
+	logger.Info("backend configuration loaded",
+		"environment", cfg.Env,
+		"port", cfg.Port,
+		"github_app_id", cfg.GitHubAppID,
+		"github_app_slug", cfg.GitHubAppSlug,
+		"self_hosted", cfg.SelfHosted,
+		"max_concurrent_reviews", cfg.MaxConcurrentReviews,
+		"embeddings_model", cfg.EmbeddingsModel,
+		"embeddings_dimensions", cfg.EmbeddingsDimensions,
+		"embeddings_key_configured", cfg.EmbeddingsAPIKey != "",
+		"encryption_configured", cfg.EncryptionKey != "",
+		"authentication_configured", cfg.ClerkJWKSURL != "",
+		"posthog_configured", phClient != nil,
+	)
 	logMermaidValidatorStatus(logger, cfg)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Database
+	databaseStarted := time.Now()
+	logger.InfoContext(ctx, "database initialization started")
 	db, err := store.New(ctx, cfg.DatabaseURL)
 	if err != nil {
 		cancel()
+		logger.ErrorContext(ctx, "database initialization failed", "duration_ms", time.Since(databaseStarted).Milliseconds(), "error", err)
 		return fmt.Errorf("connecting to database: %w", err)
 	}
+	logger.InfoContext(ctx, "database initialization completed", "duration_ms", time.Since(databaseStarted).Milliseconds(),
+		"max_connections", db.Pool.Config().MaxConns, "min_connections", db.Pool.Config().MinConns)
 	// The durable event bus holds a pool connection in WaitForNotification.
 	// Defers run LIFO: cancel its root context before Close waits for every pool
 	// connection to be released. Later appCtx/server defers still run first.
@@ -92,30 +130,42 @@ func Run() error {
 	defer cancel()
 
 	// GitHub App
+	logger.InfoContext(ctx, "github clients initialization started")
 	ghApp := ghpkg.NewApp(cfg.GitHubAppID, cfg.GitHubPrivateKey)
 	ghClient := ghpkg.NewClient(ghApp, cfg.GitHubAppSlug)
+	logger.InfoContext(ctx, "github clients initialization completed", "app_id", cfg.GitHubAppID, "app_slug", cfg.GitHubAppSlug)
 
 	// Encryption (optional — only required if BYOK keys are used)
 	if cfg.EncryptionKey != "" {
+		logger.InfoContext(ctx, "encryption initialization started")
 		if err := crypto.Init(cfg.EncryptionKey); err != nil {
+			logger.ErrorContext(ctx, "encryption initialization failed", "error", err)
 			return fmt.Errorf("initializing encryption: %w", err)
 		}
+		logger.InfoContext(ctx, "encryption initialization completed")
+	} else {
+		logger.InfoContext(ctx, "encryption initialization skipped", "reason", "encryption key not configured")
 	}
 
 	// LLM (BYOK only — keys resolved from DB)
+	logger.InfoContext(ctx, "llm registry initialization started")
 	registry := llm.NewRegistry()
 	registry.SetResolver(db)
 	registry.SetReferer(cfg.DashboardBaseURL)
+	logger.InfoContext(ctx, "llm registry initialization completed")
 
 	// Pricing (DB-backed, cached 10min)
+	logger.InfoContext(ctx, "pricing cache initialization started")
 	pricingCache := store.NewPricingCache(db)
 	llm.SetPricingLookup(func(model string) (float64, float64, bool) {
 		return pricingCache.Lookup(ctx, model)
 	})
+	logger.InfoContext(ctx, "pricing cache initialization completed", "cache_ttl", 10*time.Minute)
 
 	// Memory / RAG (per-org via registry). Memory lives in Postgres; wiring it
 	// here — rather than leaving the constructors referenced only by tests —
 	// is what makes GetIndexer return anything at all.
+	logger.InfoContext(ctx, "memory registry initialization started")
 	embedRegistry := memory.NewEmbedderRegistry(db, memory.PlatformEmbeddings{
 		APIKey:     cfg.EmbeddingsAPIKey,
 		BaseURL:    cfg.EmbeddingsBaseURL,
@@ -124,8 +174,12 @@ func Run() error {
 	}, logger)
 	memRegistry := memory.NewRegistry(logger).
 		WithPostgresBackend(db.Pool, embedRegistry)
+	logger.InfoContext(ctx, "memory registry initialization completed",
+		"platform_provider_configured", cfg.EmbeddingsAPIKey != "", "model", cfg.EmbeddingsModel,
+		"dimensions", cfg.EmbeddingsDimensions)
 
 	// Pipeline
+	logger.InfoContext(ctx, "pipeline components initialization started")
 	eventBus := pipeline.NewDurableEventBus(ctx, db.Pool, logger)
 	triageStage := pipeline.NewTriageStage(registry, db)
 	reviewStage := pipeline.NewReviewStage(registry, db, ghClient, memRegistry, cfg.MaxConcurrentReviews)
@@ -135,12 +189,16 @@ func Run() error {
 	replyAnalyzer := pipeline.NewReplyAnalyzer(registry, db, ghClient, memRegistry, logger)
 	reactionAnalyzer := pipeline.NewReactionAnalyzer(db, ghClient, memRegistry, logger)
 	orchestrator.SetRecoveryReactionReconciler(reactionAnalyzer.SweepPRReactions)
+	logger.InfoContext(ctx, "pipeline components initialization completed", "max_concurrent_reviews", cfg.MaxConcurrentReviews)
 
-	// Mark stale reviews as failed before resuming incomplete pipelines
+	// Mark stale reviews as failed before resuming incomplete pipelines.
+	staleRecoveryStarted := time.Now()
+	logger.InfoContext(ctx, "stale review recovery started", "stale_after", 10*time.Minute)
 	if count, err := db.RecoverStaleReviews(ctx, 10*time.Minute); err != nil {
-		logger.Warn("failed to recover stale reviews", "error", err)
-	} else if count > 0 {
-		logger.Info("recovered stale reviews", "count", count)
+		logger.WarnContext(ctx, "stale review recovery failed", "duration_ms", time.Since(staleRecoveryStarted).Milliseconds(), "error", err)
+	} else {
+		logger.InfoContext(ctx, "stale review recovery completed", "count", count,
+			"duration_ms", time.Since(staleRecoveryStarted).Milliseconds())
 	}
 
 	// Reconcile the shipped personas into rows.
@@ -152,12 +210,18 @@ func Run() error {
 	//
 	// Non-fatal. Resolution falls back to the compiled-in overlay on any miss,
 	// so a failed seed costs the dashboard listing, not a single review.
+	personaSeedStarted := time.Now()
+	logger.InfoContext(ctx, "built-in persona reconciliation started")
 	if err := db.SeedBuiltinPersonas(ctx, builtinPersonaRows()); err != nil {
-		logger.Warn("seeding built-in personas", "error", err)
+		logger.WarnContext(ctx, "built-in persona reconciliation failed", "duration_ms", time.Since(personaSeedStarted).Milliseconds(), "error", err)
+	} else {
+		logger.InfoContext(ctx, "built-in persona reconciliation completed", "persona_count", len(builtinPersonaRows()),
+			"duration_ms", time.Since(personaSeedStarted).Milliseconds())
 	}
 
 	// Recover incomplete pipeline runs (async — don't block server startup)
 	appCtx, appCancel := context.WithCancel(context.Background())
+	logger.InfoContext(appCtx, "background workers initialization started")
 
 	// Migration 074 deliberately stamps existing vectors with an unknown
 	// embedding space. Check immediately on startup, retry transient failures
@@ -170,8 +234,10 @@ func Run() error {
 		runMemoryReembedConvergence(appCtx, logger, defaultReembedConvergenceOptions(), memRegistry.ReembedAllCurrentSpaces)
 	}()
 	defer func() {
+		logger.Info("background workers shutdown started")
 		appCancel()
 		<-reembedDone
+		logger.Info("background workers shutdown completed")
 	}()
 
 	// Durable projection of relational patterns/rules into the memory store.
@@ -183,40 +249,64 @@ func Run() error {
 		return mirrorIndexer
 	}, logger)
 	go mirrorWorker.Run(appCtx, time.Second)
+	logger.InfoContext(appCtx, "memory mirror worker launched", "poll_interval", time.Second)
 
 	go func() {
+		operationID := obs.NewLogID()
+		started := time.Now()
+		logger.InfoContext(appCtx, "pipeline recovery worker started", "operation_id", operationID)
 		defer func() {
 			if r := recover(); r != nil {
-				logger.Error("RecoverIncomplete panic", "recover", r)
+				logger.ErrorContext(appCtx, "pipeline recovery worker panic", "operation_id", operationID, "recover", r)
 			}
+			logger.InfoContext(context.WithoutCancel(appCtx), "pipeline recovery worker stopped",
+				"operation_id", operationID, "duration_ms", time.Since(started).Milliseconds())
 		}()
 		if err := orchestrator.RecoverIncomplete(appCtx); err != nil {
-			logger.Error("recovering incomplete pipelines", "error", err)
+			logger.ErrorContext(appCtx, "recovering incomplete pipelines", "operation_id", operationID, "error", err)
 		}
 	}()
 
 	// Pattern decay goroutine — runs daily, cleans stale low-quality patterns
 	go func() {
+		workerStarted := time.Now()
+		logger.InfoContext(appCtx, "pattern decay worker started", "interval", 24*time.Hour)
+		defer func() {
+			logger.InfoContext(context.WithoutCancel(appCtx), "pattern decay worker stopped",
+				"duration_ms", time.Since(workerStarted).Milliseconds(), "reason", appCtx.Err())
+		}()
 		ticker := time.NewTicker(24 * time.Hour)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
 				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				operationID := obs.NewLogID()
+				cycleStarted := time.Now()
+				logger.InfoContext(ctx, "pattern decay cycle started", "operation_id", operationID)
 				installations, err := db.ListInstallations(ctx)
 				if err != nil {
-					logger.Error("pattern decay: list installations", "error", err)
+					logger.ErrorContext(ctx, "pattern decay cycle failed", "operation_id", operationID,
+						"phase", "list_installations", "duration_ms", time.Since(cycleStarted).Milliseconds(), "error", err)
 					cancel()
 					continue
 				}
+				totalDeleted := 0
+				failures := 0
 				for _, inst := range installations {
 					deleted, err := db.DecayStalePatterns(ctx, inst.ID, 90*24*time.Hour, 0.3)
 					if err != nil {
-						logger.Error("pattern decay", "installation", inst.ID, "error", err)
-					} else if deleted > 0 {
-						logger.Info("pattern decay", "installation", inst.ID, "deleted", deleted)
+						failures++
+						logger.ErrorContext(ctx, "pattern decay", "operation_id", operationID, "installation", inst.ID, "error", err)
+					} else {
+						totalDeleted += deleted
+						logger.InfoContext(ctx, "pattern decay installation completed", "operation_id", operationID,
+							"installation", inst.ID, "deleted", deleted)
 					}
 				}
+				logger.InfoContext(ctx, "pattern decay cycle completed", "operation_id", operationID,
+					"installation_count", len(installations), "deleted", totalDeleted,
+					"failure_count", failures, "duration_ms", time.Since(cycleStarted).Milliseconds())
 				cancel()
 			case <-appCtx.Done():
 				return
@@ -230,30 +320,47 @@ func Run() error {
 	// pull-request-shaped islands and blast radius returned fragments. This
 	// backfill publishes complete default-branch snapshots.
 	go func() {
+		workerStarted := time.Now()
+		logger.InfoContext(appCtx, "graph index backfill worker launched")
 		defer func() {
 			if r := recover(); r != nil {
-				logger.Error("graph index backfill panic", "recover", r)
+				logger.ErrorContext(context.WithoutCancel(appCtx), "graph index backfill worker panic", "recover", r)
 			}
+			logger.InfoContext(context.WithoutCancel(appCtx), "graph index backfill worker stopped",
+				"duration_ms", time.Since(workerStarted).Milliseconds(), "reason", appCtx.Err())
 		}()
 		runGraphIndexBackfill(appCtx, db, ghClient, logger)
 	}()
+	logger.InfoContext(appCtx, "background workers initialization completed")
 
 	// JWT auth (Clerk or SuperTokens)
 	if cfg.ClerkJWKSURL != "" {
+		logger.InfoContext(ctx, "JWT authentication initialization started")
 		api.InitJWKS(cfg.ClerkJWKSURL, logger)
+		logger.InfoContext(ctx, "JWT authentication initialization completed")
+	} else {
+		logger.WarnContext(ctx, "JWT authentication initialization skipped", "reason", "Clerk JWKS URL not configured")
 	}
 
 	// API Server
+	logger.InfoContext(ctx, "API server initialization started")
 	server := api.NewServer(db, ghApp, orchestrator, replyAnalyzer, reactionAnalyzer, registry, eventBus, cfg, logger, memRegistry)
-	defer server.Close()
+	defer func() {
+		logger.Info("API server resources close started")
+		server.Close()
+		logger.Info("API server resources close completed")
+	}()
 
 	httpServer := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Port),
 		Handler:      server,
+		ErrorLog:     log.New(obs.NewLogWriter(logger, slog.LevelError, "HTTP server error"), "", 0),
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 60 * time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
+	logger.InfoContext(ctx, "API server initialization completed", "address", httpServer.Addr,
+		"read_timeout", httpServer.ReadTimeout, "write_timeout", httpServer.WriteTimeout, "idle_timeout", httpServer.IdleTimeout)
 
 	// Memory profiler — periodic RSS/heap samples + threshold-triggered
 	// gzipped pprof heap dump. Tied to appCtx so it shuts down with the
@@ -263,8 +370,11 @@ func Run() error {
 	// Graceful shutdown
 	errCh := make(chan error, 1)
 	go func() {
-		logger.Info("server starting", "port", cfg.Port)
-		errCh <- httpServer.ListenAndServe()
+		started := time.Now()
+		logger.Info("HTTP server listen started", "port", cfg.Port, "address", httpServer.Addr)
+		err := httpServer.ListenAndServe()
+		logger.Info("HTTP server listen stopped", "duration_ms", time.Since(started).Milliseconds(), "error", err)
+		errCh <- err
 	}()
 
 	sigCh := make(chan os.Signal, 1)
@@ -283,14 +393,23 @@ func Run() error {
 		)
 	case err := <-errCh:
 		if err != http.ErrServerClosed {
+			logger.Error("HTTP server stopped unexpectedly", "error", err)
 			return fmt.Errorf("server error: %w", err)
 		}
+		logger.Info("HTTP server was already closed")
 	}
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
-
-	return httpServer.Shutdown(shutdownCtx)
+	shutdownStarted := time.Now()
+	logger.InfoContext(shutdownCtx, "graceful HTTP shutdown started", "timeout", 10*time.Second)
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		logger.ErrorContext(shutdownCtx, "graceful HTTP shutdown failed",
+			"duration_ms", time.Since(shutdownStarted).Milliseconds(), "error", err)
+		return err
+	}
+	logger.Info("graceful HTTP shutdown completed", "duration_ms", time.Since(shutdownStarted).Milliseconds())
+	return nil
 }
 
 // builtinPersonaRows adapts the pipeline's compiled-in personas to the store's

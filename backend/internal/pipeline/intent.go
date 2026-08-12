@@ -78,7 +78,19 @@ func NewIntentExtractionStage(registry *llm.Registry, st *store.Store, ghClient 
 //
 // Returns nil even when extraction fails. Intent extraction is a best-effort
 // enrichment; a failure must not stop the review pipeline.
-func (ie *IntentExtractionStage) Execute(ctx context.Context, run *PipelineRun) error {
+func (ie *IntentExtractionStage) Execute(ctx context.Context, run *PipelineRun) (err error) {
+	opID, started := pipelineOperationStart(ctx, ie.logger, "intent_extraction_stage", "assemble author, issue, linked-PR, and commit evidence into a structured PR intent and resolve any pending review contract", run)
+	defer func() {
+		if err != nil {
+			pipelineOperationFailure(ctx, ie.logger, opID, "intent_extraction_stage", started, err)
+			return
+		}
+		var intent *PRIntent
+		if run != nil {
+			intent = run.PRIntent
+		}
+		pipelineOperationResult(ctx, ie.logger, opID, "intent_extraction_stage", "success", started, intent)
+	}()
 	if run == nil {
 		return nil
 	}

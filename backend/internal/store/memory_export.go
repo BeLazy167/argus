@@ -26,7 +26,25 @@ type ExportedDoc struct {
 // silently-truncated archive is worse than a short one — this table's only job
 // is to still hold the SM-only classes when the containers are gone. Returns
 // (archived, skipped).
-func (s *Store) ArchiveExportedDocs(ctx context.Context, installationID int64, docs []ExportedDoc) (int, int, error) {
+func (s *Store) ArchiveExportedDocs(ctx context.Context, installationID int64, docs []ExportedDoc) (storeResult0 int, storeResult1 int, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx,
+
+			"ArchiveExportedDocs", "installation_id",
+
+			storeLogValue(installationID), "docs_count",
+			len(docs))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0,
+
+				storeResult1)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0,
+			storeResult1)
+	}()
+
 	if len(docs) == 0 {
 		return 0, 0, nil
 	}
@@ -71,7 +89,24 @@ func (s *Store) ArchiveExportedDocs(ctx context.Context, installationID int64, d
 
 // CountArchivedDocs reports how many documents an installation has archived,
 // so an export run can report progress and a re-run can be verified.
-func (s *Store) CountArchivedDocs(ctx context.Context, installationID int64) (int64, error) {
+func (s *Store) CountArchivedDocs(ctx context.Context, installationID int64) (storeResult0 int64, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx,
+
+			"CountArchivedDocs", "installation_id",
+
+			storeLogValue(installationID))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish,
+				recovered,
+				storeResult0)
+			panic(recovered)
+
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	var n int64
 	err := s.Pool.QueryRow(ctx,
 		`SELECT count(*) FROM memory_export_archive WHERE installation_id = $1`,

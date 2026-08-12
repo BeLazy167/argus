@@ -52,6 +52,7 @@ func threadNodeIDForFinding(ctx context.Context, r threadLinkReader, commentID u
 // row. The helper reports API and persistence failures. Normal posting logs and
 // continues; crash recovery propagates them and withholds terminal completion.
 func (o *Orchestrator) hydrateThreadNodeIDs(ctx context.Context, run *PipelineRun, owner, repo string) error {
+	o.logger.InfoContext(ctx, "thread registry hydration started", "event", "pipeline.thread_registry.hydration_started", "review_id", run.ReviewID, "attempt_generation", run.AttemptGeneration, "repo", run.PREvent.RepoFullName, "pr_number", run.PREvent.PRNumber)
 	client := o.postedReviewBindingClient()
 	if client == nil {
 		return fmt.Errorf("thread-registry: binding client unavailable")
@@ -60,12 +61,15 @@ func (o *Orchestrator) hydrateThreadNodeIDs(ctx context.Context, run *PipelineRu
 	if err != nil {
 		return fmt.Errorf("thread-registry: listing threads to hydrate: %w", err)
 	}
+	o.logger.InfoContext(ctx, "thread registry GitHub threads listed", "event", "pipeline.thread_registry.threads_listed", "review_id", run.ReviewID, "thread_count", len(threads))
 	hydrated := 0
+	skipped := 0
 	var hydrateErrors []error
 	for _, t := range threads {
 		// Need both handles to bind: the node id we store and the REST id we
 		// join on. GraphQL omits databaseId for some threads (FirstCommentID 0).
 		if t.ID == "" || t.FirstCommentID == 0 {
+			skipped++
 			continue
 		}
 		n, hydrateErr := o.st.HydrateThreadNodeID(ctx, run.ReviewID, t.FirstCommentID, t.ID)
@@ -75,12 +79,12 @@ func (o *Orchestrator) hydrateThreadNodeIDs(ctx context.Context, run *PipelineRu
 		}
 		hydrated += int(n)
 	}
-	if hydrated > 0 {
-		o.logger.Info("thread-registry: hydrated thread node ids", "count", hydrated, "review_id", run.ReviewID)
-	}
+	o.logger.InfoContext(ctx, "thread-registry: hydrated thread node ids", "event", "pipeline.thread_registry.hydrated", "count", hydrated, "skipped_count", skipped, "error_count", len(hydrateErrors), "review_id", run.ReviewID)
 	if err := errors.Join(hydrateErrors...); err != nil {
+		o.logger.WarnContext(ctx, "thread registry hydration incomplete", "event", "pipeline.thread_registry.hydration_failed", "review_id", run.ReviewID, "error_count", len(hydrateErrors), "error", err)
 		return fmt.Errorf("thread-registry: hydrating node ids: %w", err)
 	}
+	o.logger.InfoContext(ctx, "thread registry hydration completed", "event", "pipeline.thread_registry.hydration_completed", "review_id", run.ReviewID, "hydrated_count", hydrated)
 	return nil
 }
 
@@ -162,6 +166,7 @@ func pairCommentsToRows(rows []unboundCommentRow, comments []postedComment) (map
 // uses the live node id from ListReviewThreads. Best-effort: a load error logs
 // and yields nil (treated as "no stored links").
 func (o *Orchestrator) storedThreadIDsForReview(ctx context.Context, reviewID uuid.UUID) map[int64]string {
+	o.logger.DebugContext(ctx, "thread registry link load started", "event", "pipeline.thread_registry.links_started", "review_id", reviewID)
 	links, err := o.st.ListThreadLinksForReview(ctx, reviewID)
 	if err != nil {
 		o.logger.Warn("thread-registry: loading stored thread links", "error", err, "review_id", reviewID)
@@ -173,5 +178,6 @@ func (o *Orchestrator) storedThreadIDsForReview(ctx context.Context, reviewID uu
 			m[*l.RestCommentID] = *l.ThreadNodeID
 		}
 	}
+	o.logger.InfoContext(ctx, "thread registry links loaded", "event", "pipeline.thread_registry.links_loaded", "review_id", reviewID, "link_count", len(m), "row_count", len(links))
 	return m
 }

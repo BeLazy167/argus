@@ -3,10 +3,12 @@ package sast
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // staticcheckOutput is the JSON structure emitted by `staticcheck -f json`.
@@ -32,7 +34,15 @@ func (s *StaticcheckRunner) CanRun(language string) bool {
 
 // Run writes the provided Go files to a temp directory and invokes staticcheck.
 // Returns empty findings (not an error) if the staticcheck binary is not installed.
-func (s *StaticcheckRunner) Run(ctx context.Context, files map[string]string) ([]Finding, error) {
+func (s *StaticcheckRunner) Run(ctx context.Context, files map[string]string) (findings []Finding, err error) {
+	started := time.Now()
+	defer func() {
+		level := slog.LevelInfo
+		if err != nil {
+			level = slog.LevelError
+		}
+		slog.Log(ctx, level, "SAST tool run completed", "tool", "staticcheck", "file_count", len(files), "finding_count", len(findings), "duration_ms", time.Since(started).Milliseconds(), "error", err)
+	}()
 	if _, err := exec.LookPath("staticcheck"); err != nil {
 		return nil, nil
 	}
@@ -66,7 +76,7 @@ func (s *StaticcheckRunner) Run(ctx context.Context, files map[string]string) ([
 	cmd := exec.CommandContext(ctx, "staticcheck", "-f", "json", "./...")
 	cmd.Dir = dir
 
-	out, runErr := cmd.Output()
+	out, runErr := runCommand(ctx, "staticcheck", cmd)
 	// staticcheck exits non-zero when findings exist — that's expected.
 	if runErr != nil {
 		if _, ok := runErr.(*exec.ExitError); !ok {
@@ -74,7 +84,6 @@ func (s *StaticcheckRunner) Run(ctx context.Context, files map[string]string) ([
 		}
 	}
 
-	var findings []Finding
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		if line == "" {
 			continue

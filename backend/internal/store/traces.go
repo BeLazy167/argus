@@ -32,7 +32,23 @@ type FileRisk struct {
 }
 
 // CreateTrace inserts a new decision trace.
-func (s *Store) CreateTrace(ctx context.Context, repoID int64, filePath string, symbolName string, traceType string, content string, severity string, reviewID *uuid.UUID, prNumber int, metadata map[string]any) error {
+func (s *Store) CreateTrace(ctx context.Context, repoID int64, filePath string, symbolName string, traceType string, content string, severity string, reviewID *uuid.UUID, prNumber int, metadata map[string]any) (storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx,
+			"CreateTrace",
+			"repo_id", storeLogValue(repoID), "file_path",
+			storeLogValue(filePath),
+			"trace_type", storeLogValue(traceType), "severity", storeLogValue(severity), "review_id",
+			storeLogValue(reviewID), "pr_number",
+			storeLogValue(prNumber))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered)
+			panic(recovered)
+		}
+		storeFinish(storeErr)
+	}()
+
 	metaJSON, err := json.Marshal(metadata)
 	if err != nil {
 		metaJSON = []byte("{}")
@@ -41,7 +57,22 @@ func (s *Store) CreateTrace(ctx context.Context, repoID int64, filePath string, 
 }
 
 // ListTracesForFiles returns recent traces for given files, ordered by created_at DESC.
-func (s *Store) ListTracesForFiles(ctx context.Context, repoID int64, filePaths []string, limit int) ([]DecisionTrace, error) {
+func (s *Store) ListTracesForFiles(ctx context.Context, repoID int64, filePaths []string, limit int) (storeResult0 []DecisionTrace, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx,
+			"ListTracesForFiles",
+			"repo_id", storeLogValue(repoID),
+			"file_paths_count", len(filePaths), "limit", storeLogValue(limit))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish,
+				recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	if limit <= 0 {
 		limit = 50
 	}
@@ -61,7 +92,22 @@ func (s *Store) ListTracesForFiles(ctx context.Context, repoID int64, filePaths 
 }
 
 // ListTracesForRepo returns the most recent traces across the repo.
-func (s *Store) ListTracesForRepo(ctx context.Context, repoID int64, limit int) ([]DecisionTrace, error) {
+func (s *Store) ListTracesForRepo(ctx context.Context, repoID int64, limit int) (storeResult0 []DecisionTrace, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx,
+			"ListTracesForRepo",
+			"repo_id", storeLogValue(repoID), "limit",
+			storeLogValue(limit),
+		)
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish,
+				recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	if limit <= 0 {
 		limit = 50
 	}
@@ -82,12 +128,41 @@ func (s *Store) ListTracesForRepo(ctx context.Context, repoID int64, limit int) 
 
 // GetFileRiskScore returns the weighted trace count for a file over the last 90 days.
 // Weights: critical=5, warning=3, suggestion=1, other=1.
-func (s *Store) GetFileRiskScore(ctx context.Context, repoID int64, filePath string) (int, error) {
+func (s *Store) GetFileRiskScore(ctx context.Context, repoID int64, filePath string) (storeResult0 int, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx,
+			"GetFileRiskScore",
+			"repo_id", storeLogValue(repoID), "file_path",
+			storeLogValue(filePath))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr,
+			storeResult0)
+	}()
+
 	return s.q.GetFileRiskScore(ctx, db.GetFileRiskScoreParams{RepoID: repoID, FilePath: filePath})
 }
 
 // GetHotFiles returns files with the most traces, indicating fragility.
-func (s *Store) GetHotFiles(ctx context.Context, repoID int64, limit int) ([]FileRisk, error) {
+func (s *Store) GetHotFiles(ctx context.Context, repoID int64, limit int) (storeResult0 []FileRisk, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx,
+			"GetHotFiles",
+			"repo_id", storeLogValue(repoID), "limit",
+			storeLogValue(limit))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish,
+				recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	if limit <= 0 {
 		limit = 20
 	}

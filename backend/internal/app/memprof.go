@@ -83,12 +83,16 @@ func loadMemProfConfig() memProfConfig {
 // The goroutine exits only when ctx is cancelled. A deferred recover ensures
 // a panic inside the profiler cannot crash the main process.
 func StartMemoryProfiler(ctx context.Context, logger *slog.Logger) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.InfoContext(ctx, "[memprof] initialization started")
 	cfg := loadMemProfConfig()
 	if !cfg.Enabled {
-		logger.Info("[memprof] disabled")
+		logger.InfoContext(ctx, "[memprof] initialization completed", "enabled", false, "worker_started", false)
 		return
 	}
-	logger.Info("[memprof] enabled",
+	logger.InfoContext(ctx, "[memprof] configuration loaded",
 		"interval", cfg.Interval.String(),
 		"rss_threshold_mb", cfg.RSSThresholdMB,
 		"cooldown", cfg.Cooldown.String(),
@@ -96,16 +100,21 @@ func StartMemoryProfiler(ctx context.Context, logger *slog.Logger) {
 		"log_base64", cfg.LogBase64,
 	)
 	go memProfLoop(ctx, logger, cfg)
+	logger.InfoContext(ctx, "[memprof] initialization completed", "enabled", true, "worker_started", true)
 }
 
 func memProfLoop(ctx context.Context, logger *slog.Logger, cfg memProfConfig) {
+	started := time.Now()
+	logger.InfoContext(ctx, "[memprof] worker started", "interval", cfg.Interval)
 	defer func() {
 		if r := recover(); r != nil {
-			logger.Error("[memprof] panic",
+			logger.ErrorContext(context.WithoutCancel(ctx), "[memprof] worker panic",
 				"recover", r,
 				"stack", string(debug.Stack()),
 			)
 		}
+		logger.InfoContext(context.WithoutCancel(ctx), "[memprof] worker stopped",
+			"duration_ms", time.Since(started).Milliseconds(), "reason", ctx.Err())
 	}()
 
 	ticker := time.NewTicker(cfg.Interval)
@@ -117,10 +126,12 @@ func memProfLoop(ctx context.Context, logger *slog.Logger, cfg memProfConfig) {
 		case <-ctx.Done():
 			// Emit a final sample so the log stream ends with the final RSS
 			// trajectory — useful right before an OOM kill.
+			logger.InfoContext(context.WithoutCancel(ctx), "[memprof] final sample started", "reason", ctx.Err())
 			sampleAndLog(logger, cfg, &lastDump)
-			logger.Info("[memprof] stopped")
+			logger.InfoContext(context.WithoutCancel(ctx), "[memprof] final sample completed")
 			return
-		case <-ticker.C:
+		case tick := <-ticker.C:
+			logger.InfoContext(ctx, "[memprof] tick", "scheduled_at", tick)
 			sampleAndLog(logger, cfg, &lastDump)
 		}
 	}
@@ -129,6 +140,8 @@ func memProfLoop(ctx context.Context, logger *slog.Logger, cfg memProfConfig) {
 // sampleAndLog takes one RSS + runtime sample, logs it, and may trigger a
 // heap-snapshot dump. lastDump is mutated in place when a dump is taken.
 func sampleAndLog(logger *slog.Logger, cfg memProfConfig, lastDump *time.Time) {
+	sampleStarted := time.Now()
+	logger.Debug("[memprof] sample started")
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 
@@ -143,6 +156,7 @@ func sampleAndLog(logger *slog.Logger, cfg memProfConfig, lastDump *time.Time) {
 		"num_gc", m.NumGC,
 		"pause_total_ms", m.PauseTotalNs/uint64(time.Millisecond),
 		"goroutines", runtime.NumGoroutine(),
+		"duration_ms", time.Since(sampleStarted).Milliseconds(),
 	)
 
 	if rssMB < cfg.RSSThresholdMB {
@@ -157,11 +171,14 @@ func sampleAndLog(logger *slog.Logger, cfg memProfConfig, lastDump *time.Time) {
 		return
 	}
 
+	logger.Warn("[memprof] heap snapshot started", "rss_mb", rssMB, "threshold_mb", cfg.RSSThresholdMB, "dump_dir", cfg.DumpDir)
+	snapshotStarted := time.Now()
 	path, size, err := writeHeapSnapshot(cfg.DumpDir)
 	if err != nil {
-		logger.Warn("[memprof] snapshot failed",
+		logger.Warn("[memprof] heap snapshot failed",
 			"error", err,
 			"rss_mb", rssMB,
+			"duration_ms", time.Since(snapshotStarted).Milliseconds(),
 		)
 		return
 	}
@@ -171,11 +188,18 @@ func sampleAndLog(logger *slog.Logger, cfg memProfConfig, lastDump *time.Time) {
 		"size_bytes", size,
 		"rss_mb", rssMB,
 		"threshold_mb", cfg.RSSThresholdMB,
+		"duration_ms", time.Since(snapshotStarted).Milliseconds(),
 	)
 
 	if cfg.LogBase64 {
+		base64Started := time.Now()
+		logger.Info("[memprof] base64 emit started", "path", path, "size_bytes", size)
 		if err := logBase64Chunks(logger, path); err != nil {
-			logger.Warn("[memprof] base64 emit failed", "error", err)
+			logger.Warn("[memprof] base64 emit failed", "path", path,
+				"duration_ms", time.Since(base64Started).Milliseconds(), "error", err)
+		} else {
+			logger.Info("[memprof] base64 emit completed", "path", path,
+				"duration_ms", time.Since(base64Started).Milliseconds())
 		}
 	}
 }

@@ -37,6 +37,9 @@ func (o *Orchestrator) postedReviewBindingClient() postedReviewBindingClient {
 // posted inline finding has both durable IDs. Callers must not mark the review
 // completed or emit terminal events before this method succeeds.
 func (o *Orchestrator) RecoverPostedReviewBindings(ctx context.Context, reviewID uuid.UUID, generation int, githubReviewID int64) error {
+	if o != nil && o.logger != nil {
+		o.logger.InfoContext(ctx, "posted review binding recovery started", "event", "pipeline.binding_recovery.started", "review_id", reviewID, "attempt_generation", generation, "github_review_id", githubReviewID)
+	}
 	if generation < 1 {
 		return fmt.Errorf("recovering posted review bindings: invalid generation %d", generation)
 	}
@@ -56,6 +59,7 @@ func (o *Orchestrator) RecoverPostedReviewBindings(ctx context.Context, reviewID
 		return fmt.Errorf("recovering posted review bindings: loading generation: %w", err)
 	}
 	if currentGeneration != generation {
+		o.logger.WarnContext(ctx, "posted review binding recovery rejected for stale generation", "event", "pipeline.binding_recovery.rejected", "review_id", reviewID, "attempt_generation", generation, "current_generation", currentGeneration, "reason", "stale_generation")
 		return fmt.Errorf("recovering posted review bindings: generation changed from %d to %d", generation, currentGeneration)
 	}
 	if review.GithubReviewID == nil || *review.GithubReviewID != githubReviewID {
@@ -92,6 +96,7 @@ func (o *Orchestrator) RecoverPostedReviewBindings(ctx context.Context, reviewID
 	// REST enumeration is always required. Persisted review_comments include
 	// findings folded into the summary, so DB rows alone cannot distinguish a
 	// summary-only delivery from inline comments that are not visible yet.
+	o.logger.InfoContext(ctx, "posted review REST binding recovery started", "event", "pipeline.binding_recovery.rest_started", "review_id", reviewID, "attempt_generation", generation, "github_review_id", githubReviewID)
 	if err := o.backfillGitHubCommentIDs(ctx, run, githubReviewID, owner, repoName); err != nil {
 		return fmt.Errorf("recovering posted review bindings: %w", err)
 	}
@@ -103,10 +108,13 @@ func (o *Orchestrator) RecoverPostedReviewBindings(ctx context.Context, reviewID
 	if !state.Current {
 		return fmt.Errorf("recovering posted review bindings: review delivery changed during REST enumeration")
 	}
+	o.logger.InfoContext(ctx, "posted review REST binding recovery verified", "event", "pipeline.binding_recovery.rest_verified", "review_id", reviewID, "bound_comment_count", state.BoundGitHubCommentIDs, "missing_thread_count", state.MissingThreadNodeIDs)
 	if state.BoundGitHubCommentIDs == 0 {
+		o.logger.InfoContext(ctx, "posted review binding recovery completed", "event", "pipeline.binding_recovery.completed", "review_id", reviewID, "attempt_generation", generation, "github_review_id", githubReviewID, "summary_only", true)
 		return nil // successful empty enumeration: summary-only review
 	}
 	if state.MissingThreadNodeIDs > 0 {
+		o.logger.InfoContext(ctx, "posted review GraphQL binding recovery started", "event", "pipeline.binding_recovery.graphql_started", "review_id", reviewID, "missing_thread_count", state.MissingThreadNodeIDs)
 		if err := o.hydrateThreadNodeIDs(ctx, run, owner, repoName); err != nil {
 			return fmt.Errorf("recovering posted review bindings: %w", err)
 		}
@@ -120,7 +128,9 @@ func (o *Orchestrator) RecoverPostedReviewBindings(ctx context.Context, reviewID
 		return fmt.Errorf("recovering posted review bindings: review delivery changed during GraphQL enumeration")
 	}
 	if state.MissingThreadNodeIDs > 0 {
+		o.logger.WarnContext(ctx, "posted review binding recovery incomplete", "event", "pipeline.binding_recovery.incomplete", "review_id", reviewID, "missing_thread_count", state.MissingThreadNodeIDs)
 		return fmt.Errorf("recovering posted review bindings: %d delivered comments have no GraphQL thread yet", state.MissingThreadNodeIDs)
 	}
+	o.logger.InfoContext(ctx, "posted review binding recovery completed", "event", "pipeline.binding_recovery.completed", "review_id", reviewID, "attempt_generation", generation, "github_review_id", githubReviewID, "bound_comment_count", state.BoundGitHubCommentIDs)
 	return nil
 }

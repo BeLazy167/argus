@@ -106,7 +106,15 @@ func minorNoteFrom(path string, c FileComment) MinorNote {
 // Execute runs the judge + deterministic caps + threshold filter for EVERY
 // review (a single cheap LLM call). Pass2/validate/multi-pass remain gated
 // behind deep review elsewhere — only the earned-findings gate is always on.
-func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
+func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) (err error) {
+	opID, started := pipelineOperationStart(ctx, slog.Default(), "scoring_stage", "judge, deduplicate, calibrate, confidence-label, and threshold every review finding while degrading safely when scoring is unavailable", run)
+	defer func() {
+		if err != nil {
+			pipelineOperationFailure(ctx, slog.Default(), opID, "scoring_stage", started, err)
+			return
+		}
+		pipelineOperationResult(ctx, slog.Default(), opID, "scoring_stage", "success", started, map[string]any{"file_reviews": run.FileReviews, "all_file_reviews": run.AllFileReviews, "minor_notes": run.MinorNotes, "scoring_skipped": run.ScoringSkipped, "tokens": run.Tokens.Scoring}, "finding_count", countFlatComments(run))
+	}()
 	// Resolve the judge model: repo row → org row, else scoring is skipped.
 	// Configuration-gap skips are never silent — ScoringUnconfigured surfaces
 	// a setup notice in the posted summary (scoringSkippedNotice).

@@ -9,6 +9,8 @@ import (
 )
 
 func (s *Server) getFileMemory(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.getFileMemory")
+	defer op.Finish(w)
 	repoID, err := strconv.ParseInt(chi.URLParam(r, "repoID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo id"})
@@ -27,7 +29,7 @@ func (s *Server) getFileMemory(w http.ResponseWriter, r *http.Request) {
 
 	mem, err := s.store.GetFileMemory(r.Context(), repoID, filePath)
 	if err != nil {
-		s.logger.Error("get file memory", "error", err)
+		s.logger.ErrorContext(r.Context(), "get file memory", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load file memory"})
 		return
 	}

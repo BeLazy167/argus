@@ -1,6 +1,7 @@
 package obs
 
 import (
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -69,6 +70,7 @@ func (c *CircuitBreaker) AllowRequest() bool {
 		if c.now().Sub(c.openedAt) >= c.openDuration {
 			// transition open -> half-open; consume the one probe slot.
 			c.state = stateHalfOpen
+			slog.Info("circuit breaker probe allowed", "open_duration_ms", c.openDuration.Milliseconds())
 			return true
 		}
 		return false
@@ -83,8 +85,12 @@ func (c *CircuitBreaker) AllowRequest() bool {
 func (c *CircuitBreaker) RecordSuccess() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	wasHalfOpen := c.state == stateHalfOpen
 	c.consecutiveFails = 0
 	c.state = stateClosed
+	if wasHalfOpen {
+		slog.Info("circuit breaker closed after successful probe")
+	}
 }
 
 // RecordFailure is called after a downstream call fails. In half-open state,
@@ -106,6 +112,7 @@ func (c *CircuitBreaker) RecordFailure() {
 func (c *CircuitBreaker) trip() {
 	c.state = stateOpen
 	c.openedAt = c.now()
+	slog.Warn("circuit breaker opened", "failure_count", c.consecutiveFails, "open_duration_ms", c.openDuration.Milliseconds())
 }
 
 // IsOpen reports whether the breaker is in the open state. Half-open returns

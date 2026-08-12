@@ -26,12 +26,12 @@ func NewPricingCache(st *Store) *PricingCache {
 	return &PricingCache{store: st, ttl: 10 * time.Minute}
 }
 
-func (pc *PricingCache) get(ctx context.Context) []ModelPricing {
+func (pc *PricingCache) get(ctx context.Context) ([]ModelPricing, error) {
 	pc.mu.RLock()
 	if time.Since(pc.loaded) < pc.ttl && len(pc.entries) > 0 {
 		e := pc.entries
 		pc.mu.RUnlock()
-		return e
+		return e, nil
 	}
 	pc.mu.RUnlock()
 
@@ -39,34 +39,50 @@ func (pc *PricingCache) get(ctx context.Context) []ModelPricing {
 	defer pc.mu.Unlock()
 	// Double-check after acquiring write lock
 	if time.Since(pc.loaded) < pc.ttl && len(pc.entries) > 0 {
-		return pc.entries
+		return pc.entries, nil
 	}
 
 	rows, err := pc.store.Pool.Query(ctx, `SELECT model_pattern, input_per_million, output_per_million FROM model_pricing ORDER BY length(model_pattern) DESC`)
 	if err != nil {
-		return pc.entries // return stale on error
+		return pc.entries, err // return stale on error
 	}
 	defer rows.Close()
 
 	var entries []ModelPricing
+	var scanErr error
 	for rows.Next() {
 		var p ModelPricing
 		if err := rows.Scan(&p.Pattern, &p.InputPerMil, &p.OutputPerMil); err != nil {
+			if scanErr == nil {
+				scanErr = err
+			}
 			continue
 		}
 		entries = append(entries, p)
+	}
+	if err := rows.Err(); err != nil && scanErr == nil {
+		scanErr = err
 	}
 	if len(entries) > 0 {
 		pc.entries = entries
 		pc.loaded = time.Now()
 	}
-	return pc.entries
+	return pc.entries, scanErr
 }
 
 // Lookup finds pricing for a model. Tries exact match first, then prefix match.
 // Returns (inputPer1M, outputPer1M, found).
-func (pc *PricingCache) Lookup(ctx context.Context, model string) (float64, float64, bool) {
-	entries := pc.get(ctx)
+func (pc *PricingCache) Lookup(ctx context.Context, model string) (inputPerMillion float64, outputPerMillion float64, found bool) {
+	var loadErr error
+	storeFinish := beginStoreOperation(ctx, "PricingCache.Lookup", "model", model)
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, inputPerMillion, outputPerMillion, found)
+			panic(recovered)
+		}
+		storeFinish(loadErr, inputPerMillion, outputPerMillion, found)
+	}()
+	entries, loadErr := pc.get(ctx)
 	// Exact match
 	for _, e := range entries {
 		if e.Pattern == model {

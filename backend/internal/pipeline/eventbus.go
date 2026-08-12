@@ -255,11 +255,14 @@ func NewDurableEventBus(ctx context.Context, pool *pgxpool.Pool, logger *slog.Lo
 	eb.pool = pool
 	eb.logger = logger
 	eb.persistEvent = eb.persistToPostgres
+	logger.InfoContext(ctx, "durable event bus starting", "event", "pipeline.eventbus.started", "instance_id", eb.instance)
 	ready := make(chan struct{})
 	go eb.listen(ctx, ready)
 	select {
 	case <-ready:
+		logger.InfoContext(ctx, "durable event bus listener ready", "event", "pipeline.eventbus.listener_ready", "instance_id", eb.instance)
 	case <-ctx.Done():
+		logger.WarnContext(ctx, "durable event bus startup cancelled", "event", "pipeline.eventbus.startup_cancelled", "instance_id", eb.instance, "error", ctx.Err())
 	case <-time.After(2 * time.Second):
 		logger.Warn("eventbus: listener startup timed out")
 	}
@@ -276,10 +279,12 @@ func (eb *EventBus) OpenTopic(reviewID uuid.UUID) {
 		closed := existing.closed
 		existing.mu.Unlock()
 		if !closed {
+			eb.logger.Debug("event bus topic already open", "event", "pipeline.eventbus.topic_open_noop", "review_id", reviewID)
 			return
 		}
 	}
 	eb.topics[reviewID] = &topic{subscribers: make(map[uint64]*topicSubscriber), historySeen: make(map[int64]struct{})}
+	eb.logger.Info("event bus topic opened", "event", "pipeline.eventbus.topic_opened", "review_id", reviewID)
 }
 
 // CloseTopic marks a topic as closed and closes all subscriber channels.
@@ -289,6 +294,7 @@ func (eb *EventBus) CloseTopic(reviewID uuid.UUID) {
 	t, ok := eb.topics[reviewID]
 	eb.mu.RUnlock()
 	if !ok {
+		eb.logger.Debug("event bus topic close skipped", "event", "pipeline.eventbus.topic_close_noop", "review_id", reviewID, "reason", "not_found")
 		return
 	}
 
@@ -296,7 +302,10 @@ func (eb *EventBus) CloseTopic(reviewID uuid.UUID) {
 	closed := closeTopicSubscribersLocked(t)
 	t.mu.Unlock()
 	if closed {
+		eb.logger.Info("event bus topic closed", "event", "pipeline.eventbus.topic_closed", "review_id", reviewID)
 		eb.scheduleTopicGC(reviewID, t)
+	} else {
+		eb.logger.Debug("event bus topic close skipped", "event", "pipeline.eventbus.topic_close_noop", "review_id", reviewID, "reason", "already_closed")
 	}
 }
 
@@ -318,6 +327,7 @@ func (eb *EventBus) scheduleTopicGC(reviewID uuid.UUID, t *topic) {
 		eb.mu.Lock()
 		if eb.topics[reviewID] == t {
 			delete(eb.topics, reviewID)
+			eb.logger.Info("event bus topic pruned from memory", "event", "pipeline.eventbus.topic_pruned", "review_id", reviewID)
 		}
 		eb.mu.Unlock()
 	}()
@@ -346,6 +356,8 @@ func (eb *EventBus) PublishForAttempt(reviewID uuid.UUID, generation int, evtTyp
 }
 
 func (eb *EventBus) publish(reviewID uuid.UUID, generation int, evtType EventType, data any) {
+	startedAt := time.Now()
+	eb.logger.Debug("event bus publish started", "event", "pipeline.eventbus.publish_started", "review_id", reviewID, "attempt_generation", generation, "event_type", evtType)
 	raw, err := json.Marshal(data)
 	if err != nil {
 		eb.logger.Error("eventbus: marshal failed", "type", evtType, "review_id", reviewID, "error", err)
@@ -364,6 +376,7 @@ func (eb *EventBus) publish(reviewID uuid.UUID, generation int, evtType EventTyp
 		defer cancel()
 		current, persistAttempts, persistErr := eb.persistWithRetry(publishCtx, reviewID, &evt)
 		if !current {
+			eb.logger.Info("event bus publish dropped for stale attempt", "event", "pipeline.eventbus.publish_dropped", "review_id", reviewID, "attempt_generation", generation, "event_type", evtType, "reason", "stale_attempt")
 			return
 		}
 		if persistErr != nil {
@@ -376,6 +389,9 @@ func (eb *EventBus) publish(reviewID uuid.UUID, generation int, evtType EventTyp
 		}
 	}
 	eb.deliver(reviewID, evt, true)
+	eb.logger.Info("event bus event published", "event", "pipeline.eventbus.published", "review_id", reviewID,
+		"attempt_generation", generation, "event_type", evtType, "event_id", evt.ID, "delivery_id", evt.DeliveryID,
+		"duration_ms", time.Since(startedAt).Milliseconds())
 }
 
 func (eb *EventBus) persistWithRetry(ctx context.Context, reviewID uuid.UUID, evt *Event) (bool, int, error) {
@@ -384,11 +400,14 @@ func (eb *EventBus) persistWithRetry(ctx context.Context, reviewID uuid.UUID, ev
 	localTimestamp := evt.Timestamp
 	for attempt := 0; attempt < durablePublishAttempts; attempt++ {
 		attempts = attempt + 1
+		eb.logger.DebugContext(ctx, "event bus durable persist attempt", "event", "pipeline.eventbus.persist_attempt", "review_id", reviewID, "event_type", evt.Type, "attempt_generation", evt.AttemptGeneration, "attempt", attempts)
 		current, err := eb.persistEvent(ctx, reviewID, evt)
 		if err == nil {
+			eb.logger.InfoContext(ctx, "event bus durable persist completed", "event", "pipeline.eventbus.persisted", "review_id", reviewID, "event_type", evt.Type, "attempt_generation", evt.AttemptGeneration, "event_id", evt.ID, "attempts", attempts, "current", current)
 			return current, attempt + 1, nil
 		}
 		lastErr = err
+		eb.logger.WarnContext(ctx, "event bus durable persist attempt failed", "event", "pipeline.eventbus.persist_attempt_failed", "review_id", reviewID, "event_type", evt.Type, "attempt_generation", evt.AttemptGeneration, "attempt", attempts, "retryable", shouldRetryDurablePublish(err), "error", err)
 		// A failed Scan may have assigned a prefix of the returned columns. Never
 		// expose a cursor unless the complete durable write result was observed.
 		evt.ID = 0
@@ -467,6 +486,7 @@ func (eb *EventBus) deliver(reviewID uuid.UUID, evt Event, notifyGlobal bool) {
 }
 
 func (eb *EventBus) deliverFrom(reviewID uuid.UUID, evt Event, notifyGlobal bool, source durableDeliverySource) {
+	delivered, duplicates, disconnected, dropped := 0, 0, 0, 0
 	eb.mu.RLock()
 	t, ok := eb.topics[reviewID]
 	eb.mu.RUnlock()
@@ -489,10 +509,12 @@ func (eb *EventBus) deliverFrom(reviewID uuid.UUID, evt Event, notifyGlobal bool
 			terminal := isTerminalEventType(evt.Type)
 			for id, subscriber := range t.subscribers {
 				if evt.ID > 0 && subscriber.hasSeen(evt.ID, source) {
+					duplicates++
 					continue
 				}
 				if evt.ID > 0 && !subscriber.canRemember(source) {
 					delete(t.subscribers, id)
+					disconnected++
 					subscriber.close(SubscriberCloseDedupExhausted)
 					eb.logger.Warn("eventbus: reconnecting subscriber after durable dedup window filled",
 						"subscriber", id, "type", evt.Type, "review_id", reviewID)
@@ -500,6 +522,7 @@ func (eb *EventBus) deliverFrom(reviewID uuid.UUID, evt Event, notifyGlobal bool
 				}
 				select {
 				case subscriber.ch <- evt:
+					delivered++
 					if evt.ID > 0 {
 						subscriber.remember(evt.ID, source)
 					}
@@ -509,11 +532,13 @@ func (eb *EventBus) deliverFrom(reviewID uuid.UUID, evt Event, notifyGlobal bool
 						// ephemeral terminal drop loses the only local copy. In both
 						// cases reconnect so the status recheck can converge the stream.
 						delete(t.subscribers, id)
+						disconnected++
 						subscriber.close(SubscriberCloseDurableOverflow)
 						eb.logger.Warn("eventbus: reconnecting slow subscriber",
 							"subscriber", id, "type", evt.Type, "review_id", reviewID)
 						continue
 					}
+					dropped++
 					eb.logger.Warn("eventbus: dropped ephemeral event for slow client",
 						"subscriber", id, "type", evt.Type, "review_id", reviewID)
 				}
@@ -530,6 +555,9 @@ func (eb *EventBus) deliverFrom(reviewID uuid.UUID, evt Event, notifyGlobal bool
 			eb.scheduleTopicGC(reviewID, t)
 		}
 	}
+	eb.logger.Debug("event bus delivery completed", "event", "pipeline.eventbus.delivered", "review_id", reviewID,
+		"event_type", evt.Type, "event_id", evt.ID, "source", source, "delivered", delivered,
+		"duplicates", duplicates, "disconnected", disconnected, "dropped", dropped, "topic_found", ok)
 	if !notifyGlobal {
 		return
 	}
@@ -539,6 +567,7 @@ func (eb *EventBus) deliverFrom(reviewID uuid.UUID, evt Event, notifyGlobal bool
 	for _, h := range handlers {
 		h(reviewID, evt)
 	}
+	eb.logger.Debug("event bus global delivery completed", "event", "pipeline.eventbus.global_delivered", "review_id", reviewID, "event_type", evt.Type, "handler_count", len(handlers))
 }
 
 func (eb *EventBus) pruneLoop(ctx context.Context) {
@@ -555,13 +584,18 @@ func (eb *EventBus) pruneLoop(ctx context.Context) {
 }
 
 func (eb *EventBus) pruneUntilCaughtUp(ctx context.Context) {
+	eb.logger.DebugContext(ctx, "event bus retention prune started", "event", "pipeline.eventbus.prune_started")
+	totalDeleted := int64(0)
 	for ctx.Err() == nil {
 		deleted, err := eb.pruneReviewEvents(ctx, time.Now())
 		if err != nil {
 			eb.logger.Warn("eventbus: retention cleanup failed", "error", err)
 			return
 		}
+		totalDeleted += deleted
+		eb.logger.InfoContext(ctx, "event bus retention prune batch completed", "event", "pipeline.eventbus.prune_batch", "deleted_count", deleted, "total_deleted", totalDeleted)
 		if deleted < eventPruneBatchSize {
+			eb.logger.InfoContext(ctx, "event bus retention prune completed", "event", "pipeline.eventbus.prune_completed", "deleted_count", totalDeleted)
 			return
 		}
 	}
@@ -614,6 +648,7 @@ func (eb *EventBus) listen(ctx context.Context, ready chan struct{}) {
 			eb.waitToReconnect(ctx, err)
 			continue
 		}
+		eb.logger.InfoContext(ctx, "event bus listener connection acquired", "event", "pipeline.eventbus.listener_connected", "instance_id", eb.instance)
 		_, err = conn.Exec(ctx, `LISTEN argus_review_events`)
 		if err != nil {
 			conn.Release()
@@ -643,6 +678,7 @@ func (eb *EventBus) listen(ctx context.Context, ready chan struct{}) {
 			continue
 		}
 
+		eb.logger.InfoContext(ctx, "event bus listener catch-up completed", "event", "pipeline.eventbus.listener_caught_up", "cursor", durableCursor)
 		readyOnce.Do(func() { close(ready) })
 		notificationsSinceCheckpoint := 0
 		for ctx.Err() == nil {
@@ -691,7 +727,7 @@ func (eb *EventBus) listen(ctx context.Context, ready chan struct{}) {
 }
 
 func (eb *EventBus) waitToReconnect(ctx context.Context, err error) {
-	eb.logger.Warn("eventbus: listener disconnected", "error", err)
+	eb.logger.WarnContext(ctx, "eventbus: listener disconnected", "event", "pipeline.eventbus.listener_disconnected", "error", err)
 	select {
 	case <-ctx.Done():
 	case <-time.After(time.Second):
@@ -932,11 +968,14 @@ func (eb *EventBus) deliverStored(ctx context.Context, id int64) error {
 // non-trivial.
 func (eb *EventBus) SubscribeGlobal(h GlobalHandler) {
 	if h == nil {
+		eb.logger.Debug("event bus global subscription skipped", "event", "pipeline.eventbus.global_subscribe_skipped", "reason", "nil_handler")
 		return
 	}
 	eb.globalMu.Lock()
 	eb.globalSubs = append(eb.globalSubs, h)
+	count := len(eb.globalSubs)
 	eb.globalMu.Unlock()
+	eb.logger.Info("event bus global subscriber registered", "event", "pipeline.eventbus.global_subscribed", "subscriber_count", count)
 }
 
 func maxDurableEventID(afterID int64, events []Event) int64 {
@@ -1058,6 +1097,7 @@ func (eb *EventBus) subscribeContextWithCloseReason(
 	reviewID uuid.UUID,
 	afterID int64,
 ) (<-chan Event, []Event, <-chan SubscriberCloseReason, func(), error) {
+	eb.logger.InfoContext(ctx, "event bus subscription started", "event", "pipeline.eventbus.subscribe_started", "review_id", reviewID, "after_id", afterID, "durable", eb.pool != nil)
 	if eb.pool == nil {
 		events, history, closed, unsubscribe := eb.subscribeWithCloseReason(reviewID)
 		return events, history, closed, unsubscribe, nil
@@ -1071,29 +1111,35 @@ func (eb *EventBus) subscribeContextWithCloseReason(
 	defer t.mu.Unlock()
 	history, replayHasMore, err := eb.loadSubscriptionReplay(ctx, reviewID, afterID)
 	if err != nil {
+		eb.logger.ErrorContext(ctx, "event bus replay load failed", "event", "pipeline.eventbus.replay_failed", "review_id", reviewID, "after_id", afterID, "error", err)
 		return nil, nil, nil, func() {}, err
 	}
+	eb.logger.InfoContext(ctx, "event bus replay loaded", "event", "pipeline.eventbus.replay_loaded", "review_id", reviewID, "after_id", afterID, "replay_count", len(history), "has_more", replayHasMore)
 
 	ch := make(chan Event, 64)
 	subscriber := newTopicSubscriber(ch, maxDurableEventID(afterID, history))
 	if t.closed {
 		subscriber.close(SubscriberCloseTopic)
+		eb.logger.InfoContext(ctx, "event bus subscription closed immediately", "event", "pipeline.eventbus.subscribe_closed", "review_id", reviewID, "reason", SubscriberCloseTopic, "replay_count", len(history))
 		return ch, history, subscriber.closed, func() {}, nil
 	}
 	if replayHasMore {
 		subscriber.close(SubscriberCloseReplayPageExhausted)
+		eb.logger.InfoContext(ctx, "event bus replay page exhausted", "event", "pipeline.eventbus.subscribe_closed", "review_id", reviewID, "reason", SubscriberCloseReplayPageExhausted, "replay_count", len(history))
 		return ch, history, subscriber.closed, func() {}, nil
 	}
 	t.nextID++
 	id := t.nextID
 	subscriber.seedReplay(history)
 	t.subscribers[id] = subscriber
+	eb.logger.InfoContext(ctx, "event bus subscriber registered", "event", "pipeline.eventbus.subscribed", "review_id", reviewID, "subscriber_id", id, "after_id", afterID, "replay_count", len(history))
 	unsub := func() {
 		t.mu.Lock()
 		defer t.mu.Unlock()
 		if subscriber, exists := t.subscribers[id]; exists {
 			delete(t.subscribers, id)
 			subscriber.close(SubscriberCloseUnsubscribed)
+			eb.logger.Info("event bus subscriber removed", "event", "pipeline.eventbus.unsubscribed", "review_id", reviewID, "subscriber_id", id, "reason", SubscriberCloseUnsubscribed)
 		}
 	}
 	return ch, history, subscriber.closed, unsub, nil
@@ -1113,6 +1159,7 @@ func (eb *EventBus) subscribeWithCloseReason(
 	t, ok := eb.topics[reviewID]
 	eb.mu.RUnlock()
 	if !ok {
+		eb.logger.Info("event bus subscription skipped", "event", "pipeline.eventbus.subscribe_skipped", "review_id", reviewID, "reason", "topic_not_found")
 		return nil, nil, nil, func() {}
 	}
 
@@ -1132,6 +1179,7 @@ func (eb *EventBus) subscribeWithCloseReason(
 	subscriber.seedReplay(history)
 	t.subscribers[id] = subscriber
 	t.mu.Unlock()
+	eb.logger.Info("event bus subscriber registered", "event", "pipeline.eventbus.subscribed", "review_id", reviewID, "subscriber_id", id, "replay_count", len(history), "durable", false)
 
 	unsub := func() {
 		t.mu.Lock()
@@ -1139,6 +1187,7 @@ func (eb *EventBus) subscribeWithCloseReason(
 		if subscriber, exists := t.subscribers[id]; exists {
 			delete(t.subscribers, id)
 			subscriber.close(SubscriberCloseUnsubscribed)
+			eb.logger.Info("event bus subscriber removed", "event", "pipeline.eventbus.unsubscribed", "review_id", reviewID, "subscriber_id", id, "reason", SubscriberCloseUnsubscribed)
 		}
 	}
 	return ch, history, subscriber.closed, unsub

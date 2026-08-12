@@ -4,6 +4,9 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
+
+	"github.com/BeLazy167/argus/backend/internal/obs"
 
 	"github.com/odvcencio/gotreesitter"
 	"github.com/odvcencio/gotreesitter/grammars"
@@ -20,11 +23,16 @@ var tsEngine struct {
 // gotreesitter pure-Go tree-sitter runtime. Returns nil, nil on failure
 // so the caller can fall back to regex parsing.
 func parseTreeSitter(filePath, content string) (syms []Symbol, edges []Edge) {
+	operationID := obs.NewLogID()
+	started := time.Now()
+	slog.Debug("graph tree-sitter parse started", "operation_id", operationID,
+		"file", filePath, "source_bytes", len(content))
 	// Recover from any panic in the tree-sitter parser so the caller can
 	// fall back to regex parsing instead of crashing.
 	defer func() {
 		if r := recover(); r != nil {
-			slog.Warn("graph: tree-sitter panic, falling back", "file", filePath, "panic", r)
+			slog.Warn("graph tree-sitter parse panicked; regex fallback selected", "operation_id", operationID, "file", filePath,
+				"fallback", "regex", "duration_ms", time.Since(started).Milliseconds(), "panic", r)
 			syms = nil
 			edges = nil
 		}
@@ -42,11 +50,15 @@ func parseTreeSitter(filePath, content string) (syms []Symbol, edges []Edge) {
 	// unsupported extensions, so we return silently without logging.
 	entry := grammars.DetectLanguage(filePath)
 	if entry == nil || entry.Language == nil {
+		slog.Debug("graph tree-sitter parse skipped", "operation_id", operationID, "file", filePath,
+			"reason", "unsupported_language", "fallback", "regex", "duration_ms", time.Since(started).Milliseconds())
 		return nil, nil
 	}
 
 	lang := entry.Language()
 	if lang == nil {
+		slog.Warn("graph tree-sitter language initialization failed; regex fallback selected", "operation_id", operationID,
+			"file", filePath, "duration_ms", time.Since(started).Milliseconds())
 		return nil, nil
 	}
 
@@ -63,18 +75,21 @@ func parseTreeSitter(filePath, content string) (syms []Symbol, edges []Edge) {
 		tree, err = p.Parse([]byte(content))
 	}
 	if err != nil {
-		slog.Debug("graph: tree-sitter parse error", "file", filePath, "error", err)
+		slog.Warn("graph tree-sitter parse failed; regex fallback selected", "operation_id", operationID, "file", filePath,
+			"fallback", "regex", "duration_ms", time.Since(started).Milliseconds(), "error", err)
 		return nil, nil
 	}
 	if tree == nil {
-		slog.Debug("graph: tree-sitter nil tree", "file", filePath)
+		slog.Warn("graph tree-sitter returned nil tree; regex fallback selected", "operation_id", operationID, "file", filePath,
+			"fallback", "regex", "duration_ms", time.Since(started).Milliseconds())
 		return nil, nil
 	}
 	defer tree.Release()
 
 	root := tree.RootNode()
 	if root == nil || root.IsError() {
-		slog.Debug("graph: tree-sitter AST error", "file", filePath)
+		slog.Warn("graph tree-sitter AST invalid; regex fallback selected", "operation_id", operationID, "file", filePath,
+			"fallback", "regex", "duration_ms", time.Since(started).Milliseconds())
 		return nil, nil
 	}
 
@@ -82,6 +97,9 @@ func parseTreeSitter(filePath, content string) (syms []Symbol, edges []Edge) {
 
 	// Walk the AST and extract symbols + edges
 	walkNode(root, lang, source, filePath, &syms, &edges)
+	slog.Debug("graph tree-sitter parse completed", "operation_id", operationID, "file", filePath,
+		"parser", "tree_sitter", "root_type", root.Type(lang), "symbol_count", len(syms), "edge_count", len(edges),
+		"duration_ms", time.Since(started).Milliseconds())
 
 	return syms, edges
 }

@@ -27,6 +27,8 @@ func commandRe(appSlug string) *regexp.Regexp {
 }
 
 func (s *Server) dispatchCommand(ctx context.Context, evt ghpkg.IssueCommentEvent) {
+	op := s.beginOperation(ctx, "command.dispatchCommand")
+	defer op.Complete()
 	match := s.commandRe.FindStringSubmatch(strings.TrimSpace(evt.CommentBody))
 	if match == nil {
 		return
@@ -59,6 +61,8 @@ func (s *Server) dispatchCommand(ctx context.Context, evt ghpkg.IssueCommentEven
 }
 
 func (s *Server) handleReviewCommand(ctx context.Context, evt ghpkg.IssueCommentEvent, owner, repo string, ghClient *ghpkg.Client, args string) {
+	op := s.beginOperation(ctx, "command.handleReviewCommand")
+	defer op.Complete()
 	force := strings.Contains(args, "--force")
 	var personaOverride string
 	if idx := strings.Index(args, "--persona"); idx >= 0 {
@@ -72,7 +76,7 @@ func (s *Server) handleReviewCommand(ctx context.Context, evt ghpkg.IssueComment
 
 	prEvent, err := ghClient.GetPullRequest(ctx, evt.InstallationID, owner, repo, evt.PRNumber)
 	if err != nil {
-		s.logger.Error("review command: fetch PR failed", "error", err, "pr", evt.PRNumber)
+		s.logger.ErrorContext(ctx, "review command: fetch PR failed", "error", err, "pr", evt.PRNumber)
 		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
 		return
 	}
@@ -131,18 +135,18 @@ func (s *Server) handleReviewCommand(ctx context.Context, evt ghpkg.IssueComment
 			})
 			if !verdict.Allowed() {
 				s.releaseSem()
-				s.logger.Info("review command refused", "repo", evt.RepoFullName, "pr", evt.PRNumber,
+				s.logger.InfoContext(ctx, "review command refused", "repo", evt.RepoFullName, "pr", evt.PRNumber,
 					"by", evt.CommentAuthor, "reason", verdict.Reason)
 				s.replyRefused(ctx, evt, verdict)
 				return errReviewRefused
 			}
-			s.logger.Info("review command triggered", "repo", evt.RepoFullName, "pr", evt.PRNumber, "force", force, "by", evt.CommentAuthor)
+			s.logger.InfoContext(ctx, "review command triggered", "repo", evt.RepoFullName, "pr", evt.PRNumber, "force", force, "by", evt.CommentAuthor)
 			return nil
 		},
 		Cleanup: s.releaseSem,
 		OnDone: func(err error) {
 			if err != nil {
-				s.logger.Error("review command: pipeline failed", "error", err, "pr", evt.PRNumber)
+				s.logger.ErrorContext(ctx, "review command: pipeline failed", "error", err, "pr", evt.PRNumber)
 				_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
 				_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
 					"Review failed. Check the Argus dashboard for details.")
@@ -155,10 +159,10 @@ func (s *Server) handleReviewCommand(ctx context.Context, evt ghpkg.IssueComment
 	if launchErr != nil && !errors.Is(launchErr, pipeline.ErrInFlight) &&
 		!errors.Is(launchErr, errRateLimited) && !errors.Is(launchErr, errServerBusy) &&
 		!errors.Is(launchErr, errReviewRefused) {
-		s.logger.Error("review command: launch failed", "error", launchErr, "repo", evt.RepoFullName, "pr", evt.PRNumber)
+		s.logger.ErrorContext(ctx, "review command: launch failed", "error", launchErr, "repo", evt.RepoFullName, "pr", evt.PRNumber)
 	}
 	if errors.Is(launchErr, errServerBusy) {
-		s.logger.Warn("review command: webhook semaphore full", "repo", evt.RepoFullName, "pr", evt.PRNumber)
+		s.logger.WarnContext(ctx, "review command: webhook semaphore full", "repo", evt.RepoFullName, "pr", evt.PRNumber)
 	}
 	if message != "" {
 		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber, message)
@@ -186,6 +190,8 @@ func reviewCommandLaunchFailureFeedback(launchErr error) (message string, confus
 
 // handleHelpCommand posts available commands and usage.
 func (s *Server) handleHelpCommand(ctx context.Context, evt ghpkg.IssueCommentEvent, owner, repo string, ghClient *ghpkg.Client) {
+	op := s.beginOperation(ctx, "command.handleHelpCommand")
+	defer op.Complete()
 	help := `### Argus Commands
 
 | Command | Description |
@@ -237,6 +243,8 @@ func authorizeRemember(ctx context.Context, permissions repoWritePermissionCheck
 
 // handleRememberCommand parses @argus-eye remember and persists a pattern.
 func (s *Server) handleRememberCommand(ctx context.Context, evt ghpkg.IssueCommentEvent, owner, repo string, ghClient *ghpkg.Client, args string) {
+	op := s.beginOperation(ctx, "command.handleRememberCommand")
+	defer op.Complete()
 
 	// Parse --org flag as discrete token to avoid matching substrings like --org-prefix
 	var isOrg bool
@@ -264,7 +272,7 @@ func (s *Server) handleRememberCommand(ctx context.Context, evt ghpkg.IssueComme
 			OrgWide:           isOrg,
 		})
 		if err != nil {
-			s.logger.Warn("remember: permission lookup failed", "error", err, "author", evt.CommentAuthor,
+			s.logger.WarnContext(ctx, "remember: permission lookup failed", "error", err, "author", evt.CommentAuthor,
 				"repo", evt.RepoFullName, "pr", evt.PRNumber)
 			_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
 			return false
@@ -272,7 +280,7 @@ func (s *Server) handleRememberCommand(ctx context.Context, evt ghpkg.IssueComme
 		if allowed {
 			return true
 		}
-		s.logger.Info("remember: unauthorized commenter", "author", evt.CommentAuthor,
+		s.logger.InfoContext(ctx, "remember: unauthorized commenter", "author", evt.CommentAuthor,
 			"association", evt.AuthorAssociation, "org_wide", isOrg, "pr", evt.PRNumber)
 		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
 		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
@@ -291,7 +299,7 @@ func (s *Server) handleRememberCommand(ctx context.Context, evt ghpkg.IssueComme
 	// Look up installation
 	inst, err := s.store.GetInstallationByGitHubID(ctx, evt.InstallationID)
 	if err != nil {
-		s.logger.Error("remember: lookup installation", "error", err)
+		s.logger.ErrorContext(ctx, "remember: lookup installation", "error", err)
 		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
 		return
 	}
@@ -301,7 +309,7 @@ func (s *Server) handleRememberCommand(ctx context.Context, evt ghpkg.IssueComme
 	if !isOrg {
 		dbRepo, err := s.store.GetRepoByFullName(ctx, evt.RepoFullName)
 		if err != nil {
-			s.logger.Error("remember: lookup repo for scoping", "error", err, "repo", evt.RepoFullName)
+			s.logger.ErrorContext(ctx, "remember: lookup repo for scoping", "error", err, "repo", evt.RepoFullName)
 			_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
 			_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
 				"Failed to scope pattern to this repo. Please try again.")
@@ -325,7 +333,7 @@ func (s *Server) handleRememberCommand(ctx context.Context, evt ghpkg.IssueComme
 	}
 	_, err = s.store.CreatePattern(ctx, inst.ID, repoID, content, nil, &createdBy, &source, nil, nil, &customID, nil)
 	if err != nil {
-		s.logger.Error("remember: save to db", "error", err)
+		s.logger.ErrorContext(ctx, "remember: save to db", "error", err)
 		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
 		return
 	}
@@ -394,12 +402,14 @@ func classifyResolveError(err error) (phrase string, fatal bool) {
 // Auto-resolve on push (orchestrator.autoResolveOnSynchronize)
 // stays the cautious path; manual invocation is the trust-the-operator path.
 func (s *Server) handleResolveCommand(ctx context.Context, evt ghpkg.IssueCommentEvent, owner, repo string, ghClient *ghpkg.Client) {
+	op := s.beginOperation(ctx, "command.handleResolveCommand")
+	defer op.Complete()
 	// Authorization: `@argus resolve` writes the terminal 'resolved' ledger state
 	// and closes threads (clearing them from the merge-gate view), so it is
 	// maintainer-only. Issue comments come from the same untrusted population as
 	// reactions — a drive-by fork contributor must not resolve findings.
 	if !ghpkg.IsPrivilegedAssociation(evt.AuthorAssociation) {
-		s.logger.Info("resolve: unauthorized commenter", "author", evt.CommentAuthor, "association", evt.AuthorAssociation, "pr", evt.PRNumber)
+		s.logger.InfoContext(ctx, "resolve: unauthorized commenter", "author", evt.CommentAuthor, "association", evt.AuthorAssociation, "pr", evt.PRNumber)
 		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
 		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
 			"Only repository maintainers (owner, member, or collaborator) can resolve Argus threads.")
@@ -410,7 +420,7 @@ func (s *Server) handleResolveCommand(ctx context.Context, evt ghpkg.IssueCommen
 
 	threads, err := ghClient.ListReviewThreads(ctx, evt.InstallationID, owner, repo, evt.PRNumber)
 	if err != nil {
-		s.logger.Error("resolve: list threads", "error", err)
+		s.logger.ErrorContext(ctx, "resolve: list threads", "error", err)
 		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
 		return
 	}
@@ -456,7 +466,7 @@ func (s *Server) handleResolveCommand(ctx context.Context, evt ghpkg.IssueCommen
 		if resolveErr == nil {
 			resolveErr = errors.New("thread not resolved")
 		}
-		s.logger.Error("resolve: resolve thread", "error", resolveErr, "thread_id", t.ID)
+		s.logger.ErrorContext(ctx, "resolve: resolve thread", "error", resolveErr, "thread_id", t.ID)
 		failed++
 		phrase, fatal := classifyResolveError(resolveErr)
 		if firstErrPhrase == "" && phrase != "" {
@@ -494,19 +504,21 @@ type fileFix struct {
 
 // handleFixCommand applies suggestion blocks from bot review comments as a commit.
 func (s *Server) handleFixCommand(ctx context.Context, evt ghpkg.IssueCommentEvent, owner, repo string, ghClient *ghpkg.Client) {
+	op := s.beginOperation(ctx, "command.handleFixCommand")
+	defer op.Complete()
 	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "eyes")
 
 	// Get PR details for head ref
 	pr, err := ghClient.GetPullRequest(ctx, evt.InstallationID, owner, repo, evt.PRNumber)
 	if err != nil {
-		s.logger.Error("fix: getting PR", "error", err)
+		s.logger.ErrorContext(ctx, "fix: getting PR", "error", err)
 		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber, "Failed to get PR details: "+err.Error())
 		return
 	}
 
 	fixes, err := collectBotFixes(ctx, evt, owner, repo, ghClient)
 	if err != nil {
-		s.logger.Error("fix: listing comments", "error", err)
+		s.logger.ErrorContext(ctx, "fix: listing comments", "error", err)
 		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber, "Failed to list review comments: "+err.Error())
 		return
 	}
@@ -525,13 +537,13 @@ func (s *Server) handleFixCommand(ctx context.Context, evt ghpkg.IssueCommentEve
 	// Get current head SHA and tree
 	headSHA, err := ghClient.GetRef(ctx, evt.InstallationID, owner, repo, "heads/"+pr.HeadRef)
 	if err != nil {
-		s.logger.Error("fix: getting ref", "error", err)
+		s.logger.ErrorContext(ctx, "fix: getting ref", "error", err)
 		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber, "Failed to get branch head: "+err.Error())
 		return
 	}
 	baseTreeSHA, err := ghClient.GetCommitTree(ctx, evt.InstallationID, owner, repo, headSHA)
 	if err != nil {
-		s.logger.Error("fix: getting tree", "error", err)
+		s.logger.ErrorContext(ctx, "fix: getting tree", "error", err)
 		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber, "Failed to read commit tree: "+err.Error())
 		return
 	}
@@ -542,7 +554,7 @@ func (s *Server) handleFixCommand(ctx context.Context, evt ghpkg.IssueCommentEve
 	for path, pathFixes := range fileFixMap {
 		content, err := ghClient.GetFileContent(ctx, evt.InstallationID, owner, repo, path, headSHA)
 		if err != nil {
-			s.logger.Warn("fix: fetching file", "path", path, "error", err)
+			s.logger.WarnContext(ctx, "fix: fetching file", "path", path, "error", err)
 			continue
 		}
 
@@ -555,11 +567,11 @@ func (s *Server) handleFixCommand(ctx context.Context, evt ghpkg.IssueCommentEve
 		lowestModified := len(lines) + 1
 		for _, fix := range pathFixes {
 			if fix.startLine < 1 || fix.line > len(lines) {
-				s.logger.Warn("fix: skipping out-of-range suggestion", "path", path, "startLine", fix.startLine, "line", fix.line, "fileLines", len(lines))
+				s.logger.WarnContext(ctx, "fix: skipping out-of-range suggestion", "path", path, "startLine", fix.startLine, "line", fix.line, "fileLines", len(lines))
 				continue
 			}
 			if fix.line >= lowestModified {
-				s.logger.Warn("fix: skipping overlapping suggestion", "path", path, "line", fix.line, "lowestModified", lowestModified)
+				s.logger.WarnContext(ctx, "fix: skipping overlapping suggestion", "path", path, "line", fix.line, "lowestModified", lowestModified)
 				continue
 			}
 			suggestionLines := strings.Split(fix.suggestion, "\n")
@@ -575,7 +587,7 @@ func (s *Server) handleFixCommand(ctx context.Context, evt ghpkg.IssueCommentEve
 		newContent := strings.Join(lines, "\n")
 		blobSHA, err := ghClient.CreateBlob(ctx, evt.InstallationID, owner, repo, newContent, "utf-8")
 		if err != nil {
-			s.logger.Error("fix: creating blob", "path", path, "error", err)
+			s.logger.ErrorContext(ctx, "fix: creating blob", "path", path, "error", err)
 			continue
 		}
 		appliedCount += fileApplied
@@ -596,7 +608,7 @@ func (s *Server) handleFixCommand(ctx context.Context, evt ghpkg.IssueCommentEve
 	// Atomic commit
 	treeSHA, err := ghClient.CreateTree(ctx, evt.InstallationID, owner, repo, baseTreeSHA, treeEntries)
 	if err != nil {
-		s.logger.Error("fix: creating tree", "error", err)
+		s.logger.ErrorContext(ctx, "fix: creating tree", "error", err)
 		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber, "Failed to create fix commit tree: "+err.Error())
 		return
 	}
@@ -604,13 +616,13 @@ func (s *Server) handleFixCommand(ctx context.Context, evt ghpkg.IssueCommentEve
 	commitMsg := fmt.Sprintf("fix: apply %d Argus suggestions", appliedCount)
 	commitSHA, err := ghClient.CreateCommit(ctx, evt.InstallationID, owner, repo, commitMsg, treeSHA, []string{headSHA})
 	if err != nil {
-		s.logger.Error("fix: creating commit", "error", err)
+		s.logger.ErrorContext(ctx, "fix: creating commit", "error", err)
 		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber, "Failed to create fix commit: "+err.Error())
 		return
 	}
 
 	if err := ghClient.UpdateRef(ctx, evt.InstallationID, owner, repo, "heads/"+pr.HeadRef, commitSHA); err != nil {
-		s.logger.Error("fix: updating ref", "error", err)
+		s.logger.ErrorContext(ctx, "fix: updating ref", "error", err)
 		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
 			"Failed to push fix commit. Argus needs write access to create commits. Check your GitHub App permissions at https://github.com/settings/installations")
 		return
@@ -673,6 +685,8 @@ func parseSuggestionBlock(body string) string {
 
 // handleTestCommand generates a test plan or draft test code from review findings.
 func (s *Server) handleTestCommand(ctx context.Context, evt ghpkg.IssueCommentEvent, owner, repo string, ghClient *ghpkg.Client, args string) {
+	op := s.beginOperation(ctx, "command.handleTestCommand")
+	defer op.Complete()
 	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "eyes")
 
 	review, err := s.store.GetLatestReviewByPR(ctx, fmt.Sprintf("%s/%s", owner, repo), evt.PRNumber)
@@ -732,7 +746,7 @@ func (s *Server) handleTestCommand(ctx context.Context, evt ghpkg.IssueCommentEv
 		Stage:       "test_gen",
 	})
 	if err != nil {
-		s.logger.Error("test generation failed", "error", err)
+		s.logger.ErrorContext(ctx, "test generation failed", "error", err)
 		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
 		return
 	}

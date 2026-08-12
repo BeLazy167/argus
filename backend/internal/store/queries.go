@@ -24,7 +24,21 @@ func collectOrEmpty[T any](rows pgx.Rows, fn pgx.RowToFunc[T]) ([]T, error) {
 
 // --- Installations ---
 
-func (s *Store) CreateInstallation(ctx context.Context, installationID int64, orgLogin string) (*Installation, error) {
+func (s *Store) CreateInstallation(ctx context.Context, installationID int64, orgLogin string) (storeResult0 *Installation, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "CreateInstallation",
+
+			"installation_id",
+
+			storeLogValue(installationID))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	row, err := s.q.CreateInstallation(ctx, db.CreateInstallationParams{InstallationID: installationID, OrgLogin: orgLogin})
 	if err != nil {
 		return nil, err
@@ -33,7 +47,20 @@ func (s *Store) CreateInstallation(ctx context.Context, installationID int64, or
 	return &installation, nil
 }
 
-func (s *Store) ListInstallations(ctx context.Context) ([]Installation, error) {
+func (s *Store) ListInstallations(ctx context.Context) (storeResult0 []Installation, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ListInstallations")
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish,
+				recovered, storeResult0,
+			)
+
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	rows, err := s.q.ListInstallations(ctx)
 	if err != nil {
 		return nil, err
@@ -47,7 +74,22 @@ func (s *Store) ListInstallations(ctx context.Context) ([]Installation, error) {
 
 // --- User Installations ---
 
-func (s *Store) LinkUserInstallation(ctx context.Context, clerkUserID string, installationID int64, role string) (*UserInstallation, error) {
+func (s *Store) LinkUserInstallation(ctx context.Context, clerkUserID string, installationID int64, role string) (storeResult0 *UserInstallation, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "LinkUserInstallation",
+
+			"clerk_user_id",
+
+			storeLogValue(clerkUserID), "installation_id",
+			storeLogValue(installationID), "role", storeLogValue(role))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	row, err := s.q.LinkUserInstallation(ctx, db.LinkUserInstallationParams{ClerkUserID: clerkUserID, InstallationID: installationID, Role: role})
 	if errors.Is(err, pgx.ErrNoRows) {
 		row, err = s.q.GetUserInstallationByUserAndInstallation(ctx, db.GetUserInstallationByUserAndInstallationParams{ClerkUserID: clerkUserID, InstallationID: installationID})
@@ -64,7 +106,21 @@ func (s *Store) LinkUserInstallation(ctx context.Context, clerkUserID string, in
 // silently degrade authorization decisions (a query failure used to
 // return false and fall through as a first-owner claim).
 // A pgx.ErrNoRows result is treated as "not linked" with a nil error.
-func (s *Store) IsUserLinkedToInstallation(ctx context.Context, clerkUserID string, installationID int64) (bool, error) {
+func (s *Store) IsUserLinkedToInstallation(ctx context.Context, clerkUserID string, installationID int64) (storeResult0 bool, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "IsUserLinkedToInstallation",
+
+			"clerk_user_id", storeLogValue(clerkUserID), "installation_id",
+			storeLogValue(installationID))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered,
+				storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	var exists int
 	err := s.Pool.QueryRow(ctx, `
 		SELECT 1 FROM user_installations WHERE installation_id = $1 AND clerk_user_id = $2
@@ -79,13 +135,42 @@ func (s *Store) IsUserLinkedToInstallation(ctx context.Context, clerkUserID stri
 }
 
 // CountInstallationUsers returns the number of users linked to an installation.
-func (s *Store) CountInstallationUsers(ctx context.Context, installationID int64) (int, error) {
+func (s *Store) CountInstallationUsers(ctx context.Context, installationID int64) (storeResult0 int, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "CountInstallationUsers",
+
+			"installation_id",
+
+			storeLogValue(installationID))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	var count int
 	err := s.Pool.QueryRow(ctx, `SELECT count(*) FROM user_installations WHERE installation_id = $1`, installationID).Scan(&count)
 	return count, err
 }
 
-func (s *Store) ListUserInstallations(ctx context.Context, clerkUserID string) ([]Installation, error) {
+func (s *Store) ListUserInstallations(ctx context.Context, clerkUserID string) (storeResult0 []Installation, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ListUserInstallations",
+
+			"clerk_user_id",
+
+			storeLogValue(clerkUserID))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	rows, err := s.q.ListUserInstallations(ctx, clerkUserID)
 	if err != nil {
 		return nil, err
@@ -97,7 +182,21 @@ func (s *Store) ListUserInstallations(ctx context.Context, clerkUserID string) (
 	return installations, nil
 }
 
-func (s *Store) GetUserInstallationIDs(ctx context.Context, clerkUserID string) ([]int64, error) {
+func (s *Store) GetUserInstallationIDs(ctx context.Context, clerkUserID string) (storeResult0 []int64, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetUserInstallationIDs",
+
+			"clerk_user_id",
+
+			storeLogValue(clerkUserID))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	rows, err := s.q.GetUserInstallationIDs(ctx, clerkUserID)
 	if err != nil {
 		return nil, err
@@ -107,7 +206,23 @@ func (s *Store) GetUserInstallationIDs(ctx context.Context, clerkUserID string) 
 	return ids, nil
 }
 
-func (s *Store) GetInstallation(ctx context.Context, id int64) (*Installation, error) {
+func (s *Store) GetInstallation(ctx context.Context, id int64) (storeResult0 *Installation, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetInstallation",
+
+			"id",
+			storeLogValue(id))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish,
+				recovered,
+
+				storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	row, err := s.q.GetInstallation(ctx, id)
 	if err != nil {
 		return nil, err
@@ -116,7 +231,21 @@ func (s *Store) GetInstallation(ctx context.Context, id int64) (*Installation, e
 	return &installation, nil
 }
 
-func (s *Store) GetInstallationByGitHubID(ctx context.Context, ghInstallationID int64) (*Installation, error) {
+func (s *Store) GetInstallationByGitHubID(ctx context.Context, ghInstallationID int64) (storeResult0 *Installation, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetInstallationByGitHubID",
+
+			"gh_installation_id", storeLogValue(ghInstallationID))
+	defer func() {
+		if recovered := recover(); recovered !=
+
+			nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	row, err := s.q.GetInstallationByGitHubID(ctx, ghInstallationID)
 	if err != nil {
 		return nil, err
@@ -125,7 +254,19 @@ func (s *Store) GetInstallationByGitHubID(ctx context.Context, ghInstallationID 
 	return &installation, nil
 }
 
-func (s *Store) GetInstallationByClerkOrgID(ctx context.Context, clerkOrgID string) (*Installation, error) {
+func (s *Store) GetInstallationByClerkOrgID(ctx context.Context, clerkOrgID string) (storeResult0 *Installation, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetInstallationByClerkOrgID",
+
+			"clerk_org_id", storeLogValue(clerkOrgID))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	row, err := s.q.GetInstallationByClerkOrgID(ctx, &clerkOrgID)
 	if err != nil {
 		return nil, err
@@ -134,34 +275,138 @@ func (s *Store) GetInstallationByClerkOrgID(ctx context.Context, clerkOrgID stri
 	return &installation, nil
 }
 
-func (s *Store) CountReviewsThisMonth(ctx context.Context, installationID int64) (int, error) {
+func (s *Store) CountReviewsThisMonth(ctx context.Context, installationID int64) (storeResult0 int, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "CountReviewsThisMonth",
+
+			"installation_id",
+
+			storeLogValue(installationID))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	return s.q.CountReviewsThisMonth(ctx, installationID)
 }
 
-func (s *Store) CountEnabledRepos(ctx context.Context, installationID int64) (int, error) {
+func (s *Store) CountEnabledRepos(ctx context.Context, installationID int64) (storeResult0 int, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "CountEnabledRepos",
+
+			"installation_id",
+
+			storeLogValue(installationID))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	return s.q.CountEnabledRepos(ctx, installationID)
 }
 
-func (s *Store) SuspendInstallation(ctx context.Context, id int64) error {
+func (s *Store) SuspendInstallation(ctx context.Context, id int64) (storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "SuspendInstallation",
+
+			"id",
+
+			storeLogValue(id))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish,
+
+				recovered)
+			panic(recovered)
+		}
+		storeFinish(storeErr)
+	}()
+
 	return s.q.SuspendInstallation(ctx, id)
 }
 
-func (s *Store) SetInstallationClerkOrgID(ctx context.Context, installationID int64, clerkOrgID string) error {
+func (s *Store) SetInstallationClerkOrgID(ctx context.Context, installationID int64, clerkOrgID string) (storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "SetInstallationClerkOrgID",
+
+			"installation_id", storeLogValue(installationID), "clerk_org_id",
+			storeLogValue(
+				clerkOrgID))
+	defer func() {
+
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered)
+			panic(recovered)
+		}
+		storeFinish(storeErr)
+	}()
+
 	return s.q.SetInstallationClerkOrgID(ctx, db.SetInstallationClerkOrgIDParams{ClerkOrgID: &clerkOrgID, ID: installationID})
 }
 
 // --- Org Default Settings ---
 
-func (s *Store) GetOrgDefaults(ctx context.Context, installationID int64) (json.RawMessage, error) {
+func (s *Store) GetOrgDefaults(ctx context.Context, installationID int64) (storeResult0 json.RawMessage, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetOrgDefaults",
+
+			"installation_id",
+
+			storeLogValue(installationID))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr,
+			storeResult0)
+	}()
+
 	return s.q.GetOrgDefaults(ctx, installationID)
 }
 
-func (s *Store) SetOrgDefaults(ctx context.Context, installationID int64, settings json.RawMessage) error {
+func (s *Store) SetOrgDefaults(ctx context.Context, installationID int64, settings json.RawMessage) (storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "SetOrgDefaults",
+
+			"installation_id",
+
+			storeLogValue(installationID))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered)
+			panic(recovered)
+		}
+		storeFinish(storeErr)
+	}()
+
 	return s.q.SetOrgDefaults(ctx, db.SetOrgDefaultsParams{DefaultSettings: settings, ID: installationID})
 }
 
 // GetMergedSettings returns org defaults merged with repo overrides (repo wins).
-func (s *Store) GetMergedSettings(ctx context.Context, installationID int64, repoID int64) (json.RawMessage, error) {
+func (s *Store) GetMergedSettings(ctx context.Context, installationID int64, repoID int64) (storeResult0 json.RawMessage, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetMergedSettings",
+
+			"installation_id",
+
+			storeLogValue(installationID), "repo_id", storeLogValue(repoID))
+	defer func() {
+		if recovered :=
+			recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	var orgDefaults, repoSettings json.RawMessage
 	if err := s.Pool.QueryRow(ctx, `SELECT COALESCE(default_settings, '{}') FROM installations WHERE id = $1`, installationID).Scan(&orgDefaults); err != nil {
 		return nil, fmt.Errorf("fetching org defaults: %w", err)
@@ -190,7 +435,21 @@ func mergeJSON(base, override json.RawMessage) json.RawMessage {
 
 // --- Repos ---
 
-func (s *Store) ListRepos(ctx context.Context) ([]Repo, error) {
+func (s *Store) ListRepos(ctx context.Context) (storeResult0 []Repo, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ListRepos")
+	defer func() {
+
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered,
+				storeResult0)
+			panic(
+				recovered,
+			)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	rows, err := s.q.ListRepos(ctx)
 	if err != nil {
 		return nil, err
@@ -202,7 +461,19 @@ func (s *Store) ListRepos(ctx context.Context) ([]Repo, error) {
 	return repos, nil
 }
 
-func (s *Store) ListReposByOwner(ctx context.Context, ownerPrefix string) ([]Repo, error) {
+func (s *Store) ListReposByOwner(ctx context.Context, ownerPrefix string) (storeResult0 []Repo, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ListReposByOwner")
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish,
+				recovered, storeResult0)
+
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	// Escape LIKE wildcards so an LLM-controlled owner stays a literal prefix.
 	escaped := strings.NewReplacer("%", "\\%", "_", "\\_").Replace(ownerPrefix)
 	rows, err := s.q.ListReposByOwner(ctx, escaped+"/%")
@@ -216,7 +487,22 @@ func (s *Store) ListReposByOwner(ctx context.Context, ownerPrefix string) ([]Rep
 	return repos, nil
 }
 
-func (s *Store) GetRepo(ctx context.Context, id int64) (*Repo, error) {
+func (s *Store) GetRepo(ctx context.Context, id int64) (storeResult0 *Repo, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetRepo",
+
+			"id", storeLogValue(id))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered,
+
+				storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	row, err := s.q.GetRepo(ctx, id)
 	if err != nil {
 		return nil, err
@@ -225,7 +511,24 @@ func (s *Store) GetRepo(ctx context.Context, id int64) (*Repo, error) {
 	return &repo, nil
 }
 
-func (s *Store) GetRepoByFullName(ctx context.Context, fullName string) (*Repo, error) {
+func (s *Store) GetRepoByFullName(ctx context.Context, fullName string) (storeResult0 *Repo, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetRepoByFullName",
+
+			"full_name",
+
+			storeLogValue(fullName))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(
+				storeFinish,
+				recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	row, err := s.q.GetRepoByFullName(ctx, fullName)
 	if err != nil {
 		return nil, err
@@ -234,7 +537,20 @@ func (s *Store) GetRepoByFullName(ctx context.Context, fullName string) (*Repo, 
 	return &repo, nil
 }
 
-func (s *Store) UpdateRepo(ctx context.Context, id int64, enabled *bool, defaultBranch *string, settingsJSON []byte) (*Repo, error) {
+func (s *Store) UpdateRepo(ctx context.Context, id int64, enabled *bool, defaultBranch *string, settingsJSON []byte) (storeResult0 *Repo, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "UpdateRepo",
+
+			"id",
+			storeLogValue(id), "enabled", storeLogValue(enabled))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	row, err := s.q.UpdateRepo(ctx, db.UpdateRepoParams{ID: id, Enabled: enabled, DefaultBranch: defaultBranch, SettingsJSON: settingsJSON})
 	if err != nil {
 		return nil, err
@@ -243,7 +559,25 @@ func (s *Store) UpdateRepo(ctx context.Context, id int64, enabled *bool, default
 	return &repo, nil
 }
 
-func (s *Store) UpsertRepo(ctx context.Context, installationID, githubID int64, fullName, defaultBranch string) (*Repo, error) {
+func (s *Store) UpsertRepo(ctx context.Context, installationID, githubID int64, fullName, defaultBranch string) (storeResult0 *Repo, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "UpsertRepo",
+
+			"installation_id",
+
+			storeLogValue(installationID), "github_id", storeLogValue(githubID), "full_name",
+			storeLogValue(fullName),
+		)
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish,
+				recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr,
+			storeResult0)
+	}()
+
 	row, err := s.q.UpsertRepo(ctx, db.UpsertRepoParams{InstallationID: installationID, GithubID: githubID, FullName: fullName, DefaultBranch: defaultBranch})
 	if err != nil {
 		return nil, err
@@ -252,7 +586,22 @@ func (s *Store) UpsertRepo(ctx context.Context, installationID, githubID int64, 
 	return &repo, nil
 }
 
-func (s *Store) ListReposScoped(ctx context.Context, installationIDs []int64) ([]Repo, error) {
+func (s *Store) ListReposScoped(ctx context.Context, installationIDs []int64) (storeResult0 []Repo, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ListReposScoped",
+
+			"installation_ids_count",
+
+			len(installationIDs))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr,
+			storeResult0)
+	}()
+
 	rows, err := s.q.ListReposScoped(ctx, installationIDs)
 	if err != nil {
 		return nil, err
@@ -264,7 +613,21 @@ func (s *Store) ListReposScoped(ctx context.Context, installationIDs []int64) ([
 	return repos, nil
 }
 
-func (s *Store) GetRepoScoped(ctx context.Context, id int64, installationIDs []int64) (*Repo, error) {
+func (s *Store) GetRepoScoped(ctx context.Context, id int64, installationIDs []int64) (storeResult0 *Repo, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetRepoScoped",
+
+			"id",
+			storeLogValue(id), "installation_ids_count", len(installationIDs))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	row, err := s.q.GetRepoScoped(ctx, db.GetRepoScopedParams{ID: id, Column2: installationIDs})
 	if err != nil {
 		return nil, err
@@ -275,7 +638,22 @@ func (s *Store) GetRepoScoped(ctx context.Context, id int64, installationIDs []i
 
 // --- Reviews ---
 
-func (s *Store) GetReview(ctx context.Context, id uuid.UUID) (*Review, error) {
+func (s *Store) GetReview(ctx context.Context, id uuid.UUID) (storeResult0 *Review, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetReview",
+
+			"id", storeLogValue(id))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered,
+
+				storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	row, err := s.q.GetReview(ctx, id)
 	if err != nil {
 		return nil, err
@@ -284,7 +662,24 @@ func (s *Store) GetReview(ctx context.Context, id uuid.UUID) (*Review, error) {
 	return &review, nil
 }
 
-func (s *Store) GetReviewComments(ctx context.Context, reviewID uuid.UUID) ([]ReviewComment, error) {
+func (s *Store) GetReviewComments(ctx context.Context, reviewID uuid.UUID) (storeResult0 []ReviewComment, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetReviewComments",
+
+			"review_id",
+
+			storeLogValue(reviewID))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(
+				storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr,
+			storeResult0)
+	}()
+
 	rows, err := s.q.GetReviewComments(ctx, reviewID)
 	if err != nil {
 		return nil, err
@@ -305,7 +700,19 @@ func (s *Store) GetReviewComments(ctx context.Context, reviewID uuid.UUID) ([]Re
 // re-reviews dedup against every prior finding on the PR, so a comment posted
 // two pushes ago is still visible to the current run. Ordered by file+line to
 // keep buildPriorComments' per-file grouping deterministic; caller dedupes.
-func (s *Store) GetPRCompletedReviewComments(ctx context.Context, repoID int64, prNumber int) ([]ReviewComment, error) {
+func (s *Store) GetPRCompletedReviewComments(ctx context.Context, repoID int64, prNumber int) (storeResult0 []ReviewComment, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetPRCompletedReviewComments",
+
+			"repo_id", storeLogValue(repoID), "pr_number", storeLogValue(prNumber))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	rows, err := s.q.GetPRCompletedReviewComments(ctx, db.GetPRCompletedReviewCommentsParams{RepoID: repoID, PRNumber: prNumber})
 	if err != nil {
 		return nil, err
@@ -326,7 +733,21 @@ func (s *Store) GetPRCompletedReviewComments(ctx context.Context, repoID int64, 
 // finding counts. Powers the review-detail viewer's incremental history. Marker
 // reviews (auto_run_disabled / no_api_key stubs) are excluded so they don't
 // render as failed passes — same predicate the list endpoints use.
-func (s *Store) ListPRReviewSummaries(ctx context.Context, repoID int64, prNumber int) ([]PRReviewSummary, error) {
+func (s *Store) ListPRReviewSummaries(ctx context.Context, repoID int64, prNumber int) (storeResult0 []PRReviewSummary, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ListPRReviewSummaries",
+
+			"repo_id",
+
+			storeLogValue(repoID), "pr_number", storeLogValue(prNumber))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	rows, err := s.q.ListPRReviewSummaries(ctx, db.ListPRReviewSummariesParams{RepoID: repoID, PRNumber: prNumber})
 	if err != nil {
 		return nil, err
@@ -350,7 +771,21 @@ func (s *Store) ListPRReviewSummaries(ctx context.Context, repoID int64, prNumbe
 // resolved nothing (resolved_count = 0). Without the filter those surface as
 // "Auto-resolved 0 threads" noise and defeat the viewer's single-pass hide gate.
 // The counts feed the incremental-history timeline.
-func (s *Store) ListPRAutoResolveEvents(ctx context.Context, repoID int64, prNumber int) ([]AutoResolveSummary, error) {
+func (s *Store) ListPRAutoResolveEvents(ctx context.Context, repoID int64, prNumber int) (storeResult0 []AutoResolveSummary, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ListPRAutoResolveEvents",
+
+			"repo_id",
+
+			storeLogValue(repoID), "pr_number", storeLogValue(prNumber))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	rows, err := s.q.ListPRAutoResolveEvents(ctx, db.ListPRAutoResolveEventsParams{RepoID: repoID, PRNumber: prNumber})
 	if err != nil {
 		return nil, err
@@ -367,7 +802,22 @@ func (s *Store) ListPRAutoResolveEvents(ctx context.Context, repoID int64, prNum
 // commit that closed the finding wins and later re-resolves are silent no-ops.
 // Called best-effort by FindingLifecycle when a finding is marked
 // addressed/resolved on a known SHA; a missing row or empty SHA is a no-op.
-func (s *Store) SetFindingResolvedSHA(ctx context.Context, commentID uuid.UUID, sha string) error {
+func (s *Store) SetFindingResolvedSHA(ctx context.Context, commentID uuid.UUID, sha string) (storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "SetFindingResolvedSHA",
+
+			"comment_id",
+
+			storeLogValue(commentID), "sha", storeLogValue(sha))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered)
+			panic(recovered)
+		}
+		storeFinish(storeErr)
+	}()
+
 	if sha == "" {
 		return nil
 	}
@@ -397,7 +847,21 @@ type StartedCommentRef struct {
 
 // SetStartedCommentID records the id of the progress comment so a later
 // failure or cancel — possibly on another machine — can rewrite it.
-func (s *Store) SetStartedCommentID(ctx context.Context, reviewID uuid.UUID, commentID int64) error {
+func (s *Store) SetStartedCommentID(ctx context.Context, reviewID uuid.UUID, commentID int64) (storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "SetStartedCommentID",
+
+			"review_id",
+
+			storeLogValue(reviewID), "comment_id", storeLogValue(commentID))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered)
+			panic(recovered)
+		}
+		storeFinish(storeErr)
+	}()
+
 	_, err := s.Pool.Exec(ctx,
 		`UPDATE reviews SET started_comment_id = $2 WHERE id = $1`, reviewID, commentID)
 	return err
@@ -406,7 +870,23 @@ func (s *Store) SetStartedCommentID(ctx context.Context, reviewID uuid.UUID, com
 // GetStartedCommentRef loads the progress-comment reference for a review.
 // Returns (nil, nil) when the review never posted one — an ordinary case
 // (auto-run off, or the create call failed), not an error.
-func (s *Store) GetStartedCommentRef(ctx context.Context, reviewID uuid.UUID) (*StartedCommentRef, error) {
+func (s *Store) GetStartedCommentRef(ctx context.Context, reviewID uuid.UUID) (storeResult0 *StartedCommentRef, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetStartedCommentRef",
+
+			"review_id",
+
+			storeLogValue(reviewID))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr,
+			storeResult0)
+	}()
+
 	var ref StartedCommentRef
 	var commentID *int64
 	var triggeredBy *string
@@ -430,7 +910,21 @@ func (s *Store) GetStartedCommentRef(ctx context.Context, reviewID uuid.UUID) (*
 	return &ref, nil
 }
 
-func (s *Store) UpdateReviewStatus(ctx context.Context, id uuid.UUID, status, errMsg string, tokenUsage []byte) error {
+func (s *Store) UpdateReviewStatus(ctx context.Context, id uuid.UUID, status, errMsg string, tokenUsage []byte) (storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "UpdateReviewStatus",
+
+			"id",
+			storeLogValue(id), "status", storeLogValue(status))
+	defer func() {
+		if recovered :=
+			recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered)
+			panic(recovered)
+		}
+		storeFinish(storeErr)
+	}()
+
 	err := s.q.UpdateReviewStatus(ctx, db.UpdateReviewStatusParams{
 		ID:                   id,
 		Status:               status,
@@ -446,7 +940,23 @@ func (s *Store) UpdateReviewStatus(ctx context.Context, id uuid.UUID, status, er
 
 // UpdateReviewStatusForAttempt applies a review-owned write only while the
 // caller's generation is still current.
-func (s *Store) UpdateReviewStatusForAttempt(ctx context.Context, id uuid.UUID, generation int, status, errMsg string, tokenUsage []byte, allowedCurrent []string) (bool, error) {
+func (s *Store) UpdateReviewStatusForAttempt(ctx context.Context, id uuid.UUID, generation int, status, errMsg string, tokenUsage []byte, allowedCurrent []string) (storeResult0 bool, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "UpdateReviewStatusForAttempt",
+
+			"id", storeLogValue(id), "generation", storeLogValue(
+				generation), "status", storeLogValue(status), "allowed_current_count",
+
+			len(allowedCurrent))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	query := `UPDATE reviews SET status=$3,
 		error=CASE WHEN error LIKE $6 || '%' AND COALESCE($4,'') NOT LIKE $6 || '%' THEN error ELSE $4 END,
 		token_usage=COALESCE($5,token_usage), completed_at=CASE WHEN $3 IN ('completed','failed') THEN NOW() ELSE completed_at END
@@ -463,7 +973,23 @@ func (s *Store) UpdateReviewStatusForAttempt(ctx context.Context, id uuid.UUID, 
 	return tag.RowsAffected() > 0, nil
 }
 
-func (s *Store) GetReviewAttemptGeneration(ctx context.Context, id uuid.UUID) (int, error) {
+func (s *Store) GetReviewAttemptGeneration(ctx context.Context, id uuid.UUID) (storeResult0 int, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetReviewAttemptGeneration",
+
+			"id", storeLogValue(id))
+	defer func() {
+		if recovered :=
+			recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish,
+
+				recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	var generation int
 	if err := s.Pool.QueryRow(ctx, `SELECT attempt_generation FROM reviews WHERE id=$1`, id).Scan(&generation); err != nil {
 		return 0, err
@@ -471,7 +997,22 @@ func (s *Store) GetReviewAttemptGeneration(ctx context.Context, id uuid.UUID) (i
 	return generation, nil
 }
 
-func (s *Store) IsReviewAttemptCurrent(ctx context.Context, id uuid.UUID, generation int) (bool, error) {
+func (s *Store) IsReviewAttemptCurrent(ctx context.Context, id uuid.UUID, generation int) (storeResult0 bool, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "IsReviewAttemptCurrent",
+
+			"id",
+
+			storeLogValue(id), "generation", storeLogValue(generation))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	var current bool
 	if err := s.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM reviews WHERE id=$1 AND attempt_generation=$2)`, id, generation).Scan(&current); err != nil {
 		return false, err
@@ -623,7 +1164,24 @@ func repairPostedReviewID(ctx context.Context, q reviewPostQuerier, id uuid.UUID
 // RepairPostedReviewID is the bounded detached recovery entry point for a
 // known positive GitHub id. The normal post path first repairs on its locked
 // session and falls back here only after quarantining that session.
-func (s *Store) RepairPostedReviewID(ctx context.Context, id uuid.UUID, generation int, githubReviewID int64) error {
+func (s *Store) RepairPostedReviewID(ctx context.Context, id uuid.UUID, generation int, githubReviewID int64) (storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "RepairPostedReviewID",
+
+			"id",
+
+			storeLogValue(id), "generation", storeLogValue(generation), "github_review_id",
+			storeLogValue(githubReviewID),
+		)
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish,
+				recovered)
+			panic(recovered)
+		}
+		storeFinish(storeErr)
+	}()
+
 	if githubReviewID <= 0 {
 		return fmt.Errorf("repairing posted review: invalid GitHub review id %d", githubReviewID)
 	}
@@ -636,7 +1194,22 @@ func (s *Store) RepairPostedReviewID(ctx context.Context, id uuid.UUID, generati
 // completing the review. It intentionally preserves the ambiguous-post claim,
 // status, and claim clock so any binding failure remains recoverable without a
 // duplicate post. Repeating the same exact attachment is idempotent.
-func (s *Store) AttachReconciledReviewID(ctx context.Context, id uuid.UUID, generation int, exactClaim string, githubReviewID int64) (bool, error) {
+func (s *Store) AttachReconciledReviewID(ctx context.Context, id uuid.UUID, generation int, exactClaim string, githubReviewID int64) (storeResult0 bool, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "AttachReconciledReviewID",
+
+			"id",
+			storeLogValue(id), "generation", storeLogValue(generation), "github_review_id",
+			storeLogValue(githubReviewID))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr,
+			storeResult0)
+	}()
+
 	if githubReviewID <= 0 {
 		return false, fmt.Errorf("attaching reconciled review: invalid GitHub review id %d", githubReviewID)
 	}
@@ -681,7 +1254,20 @@ type ReconciledCompletionMetadata struct {
 // CompleteReconciledReviewWithEvents atomically commits terminal status and
 // the three durable recovered lifecycle events. Semantic keys make repair and
 // concurrent retries idempotent; NOTIFY is deferred by PostgreSQL until commit.
-func (s *Store) CompleteReconciledReviewWithEvents(ctx context.Context, id uuid.UUID, generation int, exactClaim string, githubReviewID int64, metadata ReconciledCompletionMetadata) (ReviewCompletionOutcome, error) {
+func (s *Store) CompleteReconciledReviewWithEvents(ctx context.Context, id uuid.UUID, generation int, exactClaim string, githubReviewID int64, metadata ReconciledCompletionMetadata) (storeResult0 ReviewCompletionOutcome, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "CompleteReconciledReviewWithEvents",
+
+			"id", storeLogValue(id), "generation", storeLogValue(generation), "github_review_id",
+			storeLogValue(githubReviewID))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	if githubReviewID <= 0 {
 		return ReviewCompletionRejected, fmt.Errorf("completing reconciled review: invalid GitHub review id %d", githubReviewID)
 	}
@@ -691,6 +1277,9 @@ func (s *Store) CompleteReconciledReviewWithEvents(ctx context.Context, id uuid.
 	if err != nil {
 		return ReviewCompletionRejected, fmt.Errorf("starting reconciled completion: %w", err)
 	}
+	txFinish := beginStoreTransaction(completeCtx, "CompleteReconciledReviewWithEvents", "review_id", id, "generation", generation, "github_review_id", githubReviewID)
+	committed := false
+	defer func() { txFinish(storeErr, committed) }()
 	defer func() { _ = tx.Rollback(completeCtx) }()
 
 	var currentGeneration int
@@ -758,7 +1347,22 @@ func (s *Store) CompleteReconciledReviewWithEvents(ctx context.Context, id uuid.
 // CompleteReconciledReview completes an exact, already-attached delivery. The
 // returned winner is the only caller allowed to emit recovered completion
 // actions. Binding recovery must succeed before this method is called.
-func (s *Store) CompleteReconciledReview(ctx context.Context, id uuid.UUID, generation int, exactClaim string, githubReviewID int64) (ReviewCompletionOutcome, error) {
+func (s *Store) CompleteReconciledReview(ctx context.Context, id uuid.UUID, generation int, exactClaim string, githubReviewID int64) (storeResult0 ReviewCompletionOutcome, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "CompleteReconciledReview",
+
+			"id",
+			storeLogValue(id), "generation", storeLogValue(generation), "github_review_id",
+			storeLogValue(githubReviewID))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr,
+			storeResult0)
+	}()
+
 	if githubReviewID <= 0 {
 		return ReviewCompletionRejected, fmt.Errorf("completing reconciled review: invalid GitHub review id %d", githubReviewID)
 	}
@@ -796,7 +1400,20 @@ func (s *Store) CompleteReconciledReview(ctx context.Context, id uuid.UUID, gene
 // ClearReconciledReviewClaim authorizes a retry only for an exact, aged claim.
 // PostgreSQL's clock and the DB-derived claim column are the age authority;
 // marker timestamps are observability only and may come from a skewed host.
-func (s *Store) ClearReconciledReviewClaim(ctx context.Context, id uuid.UUID, generation int, exactClaim string) (bool, error) {
+func (s *Store) ClearReconciledReviewClaim(ctx context.Context, id uuid.UUID, generation int, exactClaim string) (storeResult0 bool, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ClearReconciledReviewClaim",
+
+			"id", storeLogValue(id), "generation", storeLogValue(generation))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	clearCtx, cancel := detachedReviewPostContext(ctx)
 	defer cancel()
 	tag, err := s.Pool.Exec(clearCtx, `
@@ -835,7 +1452,22 @@ func (s *Store) ClearReconciledReviewClaim(ctx context.Context, id uuid.UUID, ge
 // GetRecordedReviewID is the early, read-only crash-recovery check used before
 // pre-post learning. It deliberately does not change review status: callers
 // with an id must still join CompletePostedReview's winner election.
-func (s *Store) GetRecordedReviewID(ctx context.Context, id uuid.UUID, generation int) (int64, bool, error) {
+func (s *Store) GetRecordedReviewID(ctx context.Context, id uuid.UUID, generation int) (storeResult0 int64, storeResult1 bool, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetRecordedReviewID",
+
+			"id",
+
+			storeLogValue(id), "generation", storeLogValue(generation))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0, storeResult1)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0, storeResult1)
+	}()
+
 	var githubReviewID int64
 	err := s.Pool.QueryRow(ctx, `SELECT github_review_id FROM reviews WHERE id=$1 AND attempt_generation=$2 AND github_review_id IS NOT NULL`, id, generation).Scan(&githubReviewID)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -869,6 +1501,21 @@ func rollbackReviewPostTx(ctx context.Context, tx pgx.Tx) bool {
 // unconfirmed rollback/unlock safe to quarantine without reopening a duplicate
 // delivery window. Cancel/failure writers preserve this marker.
 func (s *Store) PostReviewForAttempt(ctx context.Context, id uuid.UUID, generation int, post func(context.Context) (int64, error)) (githubReviewID int64, outcome ReviewPostOutcome, err error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "PostReviewForAttempt",
+
+			"id",
+
+			storeLogValue(id), "generation", storeLogValue(generation))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered, githubReviewID, outcome)
+			panic(recovered)
+		}
+		storeFinish(err, githubReviewID, outcome)
+	}()
+
 	if post == nil {
 		return 0, ReviewPostRejected, errors.New("posting review: nil callback")
 	}
@@ -1173,10 +1820,26 @@ func (s *Store) PostReviewForAttempt(ctx context.Context, id uuid.UUID, generati
 // ownership. An authority lookup/transaction failure is returned as an error;
 // callers must not mistake storage failure for a stale attempt.
 func (s *Store) RunIfReviewAttemptCurrent(ctx context.Context, id uuid.UUID, generation int, write func(context.Context) error) (current bool, err error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "RunIfReviewAttemptCurrent",
+
+			"id", storeLogValue(id), "generation", storeLogValue(generation))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered, current)
+			panic(recovered)
+		}
+		storeFinish(err, current)
+	}()
+
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
 		return false, fmt.Errorf("beginning review attempt guard: %w", err)
 	}
+	txFinish := beginStoreTransaction(ctx, "RunIfReviewAttemptCurrent", "review_id", id, "generation", generation)
+	committed := false
+	defer func() { txFinish(err, committed) }()
 	defer func() { _ = tx.Rollback(context.Background()) }()
 
 	var currentGeneration int
@@ -1193,6 +1856,7 @@ func (s *Store) RunIfReviewAttemptCurrent(ctx context.Context, id uuid.UUID, gen
 	if err = tx.Commit(ctx); err != nil {
 		return true, fmt.Errorf("committing review attempt guard: %w", err)
 	}
+	committed = true
 	return true, nil
 }
 
@@ -1211,7 +1875,25 @@ const (
 // event, backfill, hydration, and post-review sink side effects. A concurrent
 // worker that observes the identical durable id already completed is a clean
 // loser, not a cancellation. Different ids are integrity conflicts.
-func (s *Store) CompletePostedReview(ctx context.Context, id uuid.UUID, generation int, githubReviewID int64) (ReviewCompletionOutcome, error) {
+func (s *Store) CompletePostedReview(ctx context.Context, id uuid.UUID, generation int, githubReviewID int64) (storeResult0 ReviewCompletionOutcome, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "CompletePostedReview",
+
+			"id",
+
+			storeLogValue(id), "generation", storeLogValue(generation), "github_review_id",
+			storeLogValue(githubReviewID),
+		)
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish,
+				recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr,
+			storeResult0)
+	}()
+
 	if githubReviewID <= 0 {
 		return ReviewCompletionRejected, fmt.Errorf("completing posted review: invalid GitHub review id %d", githubReviewID)
 	}
@@ -1250,7 +1932,23 @@ func (s *Store) CompletePostedReview(ctx context.Context, id uuid.UUID, generati
 // at every stage boundary and must stay light.
 // ConvergePostedReview repairs a review whose GitHub mutation succeeded but
 // whose completion write did not. Cancelled rows remain cancelled.
-func (s *Store) ConvergePostedReview(ctx context.Context, id uuid.UUID, generation int) (int64, bool, bool, error) {
+func (s *Store) ConvergePostedReview(ctx context.Context, id uuid.UUID, generation int) (storeResult0 int64, storeResult1 bool, storeResult2 bool, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ConvergePostedReview",
+
+			"id",
+
+			storeLogValue(id), "generation", storeLogValue(generation))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0, storeResult1, storeResult2)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0, storeResult1,
+			storeResult2)
+	}()
+
 	var githubReviewID int64
 	var status string
 	err := s.Pool.QueryRow(ctx, `SELECT github_review_id,status FROM reviews WHERE id=$1 AND attempt_generation=$2 AND github_review_id IS NOT NULL`, id, generation).Scan(&githubReviewID, &status)
@@ -1272,11 +1970,30 @@ func (s *Store) ConvergePostedReview(ctx context.Context, id uuid.UUID, generati
 
 // BeginReviewRetry atomically starts one new generation. Concurrent callers
 // cannot both advance a failed/cancelled review to pending.
-func (s *Store) BeginReviewRetry(ctx context.Context, id uuid.UUID) (int, bool, error) {
+func (s *Store) BeginReviewRetry(ctx context.Context, id uuid.UUID) (storeResult0 int, storeResult1 bool, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "BeginReviewRetry",
+
+			"id", storeLogValue(id))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish,
+				recovered,
+
+				storeResult0, storeResult1)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0,
+			storeResult1)
+	}()
+
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
 		return 0, false, fmt.Errorf("beginning review retry transaction: %w", err)
 	}
+	txFinish := beginStoreTransaction(ctx, "BeginReviewRetry", "review_id", id)
+	committed := false
+	defer func() { txFinish(storeErr, committed) }()
 	closed := false
 	defer func() {
 		if !closed {
@@ -1305,6 +2022,7 @@ func (s *Store) BeginReviewRetry(ctx context.Context, id uuid.UUID) (int, bool, 
 		if err = tx.Commit(ctx); err != nil {
 			return 0, false, fmt.Errorf("committing review retry loser: %w", err)
 		}
+		committed = true
 		closed = true
 		return 0, false, nil
 	}
@@ -1314,11 +2032,28 @@ func (s *Store) BeginReviewRetry(ctx context.Context, id uuid.UUID) (int, bool, 
 	if err = tx.Commit(ctx); err != nil {
 		return 0, false, fmt.Errorf("committing review retry: %w", err)
 	}
+	committed = true
 	closed = true
 	return generation, true, nil
 }
 
-func (s *Store) GetReviewStatus(ctx context.Context, id uuid.UUID) (string, error) {
+func (s *Store) GetReviewStatus(ctx context.Context, id uuid.UUID) (storeResult0 string, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetReviewStatus",
+
+			"id",
+			storeLogValue(id))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish,
+				recovered,
+
+				storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	var status string
 	if err := s.Pool.QueryRow(ctx, `SELECT status FROM reviews WHERE id = $1`, id).Scan(&status); err != nil {
 		return "", fmt.Errorf("querying review status: %w", err)
@@ -1331,7 +2066,24 @@ func (s *Store) GetReviewStatus(ctx context.Context, id uuid.UUID) (string, erro
 // racing. A completion write (allowed: in_progress) must not clobber a cancel,
 // and a cancel write (allowed: pending/in_progress) must not flip an already
 // completed/failed review. Returns whether a row was actually updated.
-func (s *Store) UpdateReviewStatusIf(ctx context.Context, id uuid.UUID, status, errMsg string, tokenUsage []byte, allowedCurrent []string) (bool, error) {
+func (s *Store) UpdateReviewStatusIf(ctx context.Context, id uuid.UUID, status, errMsg string, tokenUsage []byte, allowedCurrent []string) (storeResult0 bool, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "UpdateReviewStatusIf",
+
+			"id",
+
+			storeLogValue(id), "status", storeLogValue(status), "allowed_current_count",
+			len(
+				allowedCurrent))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered,
+				storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	tag, err := s.Pool.Exec(ctx, `
 		UPDATE reviews SET status = $2,
 		       error = CASE WHEN error LIKE $6 || '%' AND COALESCE($3,'') NOT LIKE $6 || '%' THEN error ELSE $3 END,
@@ -1353,7 +2105,25 @@ func (s *Store) UpdateReviewStatusIf(ctx context.Context, id uuid.UUID, status, 
 // returns the full Review struct via GetReview. The generated row type owns
 // the list query's scan order, so adding a field to Review cannot recreate the
 // production 500 caused by a positional destination-count mismatch.
-func (s *Store) ListReviewsScoped(ctx context.Context, repoID int64, installationIDs []int64, limit, offset int) ([]Review, error) {
+func (s *Store) ListReviewsScoped(ctx context.Context, repoID int64, installationIDs []int64, limit, offset int) (storeResult0 []Review, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ListReviewsScoped",
+
+			"repo_id",
+
+			storeLogValue(repoID), "installation_ids_count", len(installationIDs), "limit",
+			storeLogValue(limit), "offset",
+
+			storeLogValue(offset))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	if limit <= 0 {
 		limit = 20
 	}
@@ -1368,7 +2138,23 @@ func (s *Store) ListReviewsScoped(ctx context.Context, repoID int64, installatio
 	return reviews, nil
 }
 
-func (s *Store) ListAllReviewsScoped(ctx context.Context, installationIDs []int64, limit, offset int) ([]Review, error) {
+func (s *Store) ListAllReviewsScoped(ctx context.Context, installationIDs []int64, limit, offset int) (storeResult0 []Review, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ListAllReviewsScoped",
+
+			"installation_ids_count",
+
+			len(installationIDs), "limit", storeLogValue(limit), "offset",
+			storeLogValue(offset))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish,
+				recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	if limit <= 0 {
 		limit = 20
 	}
@@ -1384,11 +2170,30 @@ func (s *Store) ListAllReviewsScoped(ctx context.Context, installationIDs []int6
 }
 
 // ReplaceReviewMinorNotes replaces only one attempt's structured notes.
-func (s *Store) ReplaceReviewMinorNotes(ctx context.Context, reviewID uuid.UUID, attemptGeneration int, notes []ReviewMinorNote) error {
+func (s *Store) ReplaceReviewMinorNotes(ctx context.Context, reviewID uuid.UUID, attemptGeneration int, notes []ReviewMinorNote) (storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ReplaceReviewMinorNotes",
+
+			"review_id",
+
+			storeLogValue(reviewID), "attempt_generation",
+			storeLogValue(attemptGeneration), "notes_count", len(
+				notes))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered)
+			panic(recovered)
+		}
+		storeFinish(storeErr)
+	}()
+
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("beginning minor notes replace: %w", err)
 	}
+	txFinish := beginStoreTransaction(ctx, "ReplaceReviewMinorNotes", "review_id", reviewID, "generation", attemptGeneration, "note_count", len(notes))
+	committed := false
+	defer func() { txFinish(storeErr, committed) }()
 	defer func() { _ = tx.Rollback(context.Background()) }()
 	var currentGeneration int
 	if err = tx.QueryRow(ctx, `SELECT attempt_generation FROM reviews WHERE id = $1 FOR UPDATE`, reviewID).Scan(&currentGeneration); err != nil {
@@ -1408,11 +2213,28 @@ func (s *Store) ReplaceReviewMinorNotes(ctx context.Context, reviewID uuid.UUID,
 	if err = tx.Commit(ctx); err != nil {
 		return fmt.Errorf("committing minor notes: %w", err)
 	}
+	committed = true
 	return nil
 }
 
 // GetReviewMinorNotes returns only the review's current attempt.
-func (s *Store) GetReviewMinorNotes(ctx context.Context, reviewID uuid.UUID) ([]ReviewMinorNote, error) {
+func (s *Store) GetReviewMinorNotes(ctx context.Context, reviewID uuid.UUID) (storeResult0 []ReviewMinorNote, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetReviewMinorNotes",
+
+			"review_id",
+
+			storeLogValue(reviewID))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr,
+			storeResult0)
+	}()
+
 	rows, err := s.q.GetReviewMinorNotes(ctx, reviewID)
 	if err != nil {
 		return nil, err
@@ -1430,7 +2252,24 @@ func (s *Store) GetReviewMinorNotes(ctx context.Context, reviewID uuid.UUID) ([]
 
 // ClaimReviewSignal atomically elects one machine to deliver a CTA. An
 // abandoned claim becomes retryable after the lease expires.
-func (s *Store) ClaimReviewSignal(ctx context.Context, repoID int64, prNumber int, kind string, staleAfter time.Duration) (uuid.UUID, bool, error) {
+func (s *Store) ClaimReviewSignal(ctx context.Context, repoID int64, prNumber int, kind string, staleAfter time.Duration) (storeResult0 uuid.UUID, storeResult1 bool, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ClaimReviewSignal",
+
+			"repo_id",
+
+			storeLogValue(repoID), "pr_number", storeLogValue(prNumber), "kind", storeLogValue(kind), "stale_after",
+			storeLogValue(staleAfter))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0, storeResult1)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0,
+			storeResult1,
+		)
+	}()
+
 	id := uuid.New()
 	err := s.Pool.QueryRow(ctx, `
 		INSERT INTO review_signals (id, repo_id, pr_number, kind)
@@ -1449,14 +2288,46 @@ func (s *Store) ClaimReviewSignal(ctx context.Context, repoID int64, prNumber in
 	return id, true, nil
 }
 
-func (s *Store) CompleteReviewSignal(ctx context.Context, id uuid.UUID) (bool, error) {
+func (s *Store) CompleteReviewSignal(ctx context.Context, id uuid.UUID) (storeResult0 bool, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "CompleteReviewSignal",
+
+			"id",
+
+			storeLogValue(id))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish,
+
+				recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	tag, err := s.Pool.Exec(ctx, `UPDATE review_signals SET delivered_at=NOW() WHERE id=$1 AND delivered_at IS NULL`, id)
 	if err != nil {
 		return false, err
 	}
 	return tag.RowsAffected() > 0, nil
 }
-func (s *Store) ReleaseReviewSignal(ctx context.Context, id uuid.UUID) (bool, error) {
+func (s *Store) ReleaseReviewSignal(ctx context.Context, id uuid.UUID) (storeResult0 bool, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ReleaseReviewSignal",
+
+			"id",
+
+			storeLogValue(id))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish,
+
+				recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	tag, err := s.Pool.Exec(ctx, `DELETE FROM review_signals WHERE id=$1 AND delivered_at IS NULL`, id)
 	if err != nil {
 		return false, err
@@ -1466,7 +2337,23 @@ func (s *Store) ReleaseReviewSignal(ctx context.Context, id uuid.UUID) (bool, er
 
 // --- Rules ---
 
-func (s *Store) ListRules(ctx context.Context, installationIDs []int64) ([]Rule, error) {
+func (s *Store) ListRules(ctx context.Context, installationIDs []int64) (storeResult0 []Rule, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ListRules",
+
+			"installation_ids_count",
+
+			len(installationIDs))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr,
+			storeResult0)
+	}()
+
 	rows, err := s.q.ListRules(ctx, installationIDs)
 	if err != nil {
 		return nil, err
@@ -1478,7 +2365,26 @@ func (s *Store) ListRules(ctx context.Context, installationIDs []int64) ([]Rule,
 	return rules, nil
 }
 
-func (s *Store) CreateRule(ctx context.Context, installationID int64, category, content string, priority int, enabled bool) (*Rule, error) {
+func (s *Store) CreateRule(ctx context.Context, installationID int64, category, content string, priority int, enabled bool) (storeResult0 *Rule, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "CreateRule",
+
+			"installation_id",
+
+			storeLogValue(installationID), "category", storeLogValue(category), "priority",
+			storeLogValue(priority),
+			"enabled",
+
+			storeLogValue(enabled))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	var rule Rule
 	err := s.WithMemoryMirrorTx(ctx, func(tx pgx.Tx) (MemoryMirrorEvent, error) {
 		row, err := db.New(tx).CreateRule(ctx, db.CreateRuleParams{
@@ -1497,7 +2403,21 @@ func (s *Store) CreateRule(ctx context.Context, installationID int64, category, 
 	return &rule, nil
 }
 
-func (s *Store) UpdateRule(ctx context.Context, id int64, installationIDs []int64, category, content *string, priority *int, enabled *bool) (*Rule, error) {
+func (s *Store) UpdateRule(ctx context.Context, id int64, installationIDs []int64, category, content *string, priority *int, enabled *bool) (storeResult0 *Rule, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "UpdateRule",
+
+			"id",
+			storeLogValue(id), "installation_ids_count", len(installationIDs), "category", storeLogValue(category), "priority", storeLogValue(priority), "enabled", storeLogValue(enabled))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered,
+				storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	var rule Rule
 	err := s.WithMemoryMirrorTx(ctx, func(tx pgx.Tx) (MemoryMirrorEvent, error) {
 		row, err := db.New(tx).UpdateRule(ctx, db.UpdateRuleParams{
@@ -1516,7 +2436,21 @@ func (s *Store) UpdateRule(ctx context.Context, id int64, installationIDs []int6
 	return &rule, nil
 }
 
-func (s *Store) DeleteRule(ctx context.Context, id int64, installationIDs []int64) error {
+func (s *Store) DeleteRule(ctx context.Context, id int64, installationIDs []int64) (storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "DeleteRule",
+
+			"id",
+			storeLogValue(id), "installation_ids_count", len(installationIDs))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered)
+			panic(recovered)
+		}
+		storeFinish(storeErr)
+	}()
+
 	return s.WithMemoryMirrorTx(ctx, func(tx pgx.Tx) (MemoryMirrorEvent, error) {
 		installationID, err := db.New(tx).DeleteRule(ctx, db.DeleteRuleParams{ID: id, InstallationIds: installationIDs})
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -1570,7 +2504,25 @@ func newRuleMirrorEvent(rule Rule, enabled bool) (MemoryMirrorEvent, error) {
 
 // --- Model Configs ---
 
-func (s *Store) ListModelConfigs(ctx context.Context, repoID int64) ([]ModelConfig, error) {
+func (s *Store) ListModelConfigs(ctx context.Context, repoID int64) (storeResult0 []ModelConfig, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ListModelConfigs",
+
+			"repo_id",
+
+			storeLogValue(repoID))
+	defer func() {
+		if recovered :=
+			recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish,
+
+				recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	rows, err := s.q.ListModelConfigs(ctx, &repoID)
 	if err != nil {
 		return nil, err
@@ -1582,7 +2534,22 @@ func (s *Store) ListModelConfigs(ctx context.Context, repoID int64) ([]ModelConf
 	return configs, nil
 }
 
-func (s *Store) UpsertModelConfig(ctx context.Context, repoID int64, stage, provider, model string, baseURL *string, maxTokens int, temperature float32) (*ModelConfig, error) {
+func (s *Store) UpsertModelConfig(ctx context.Context, repoID int64, stage, provider, model string, baseURL *string, maxTokens int, temperature float32) (storeResult0 *ModelConfig, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "UpsertModelConfig",
+
+			"repo_id",
+
+			storeLogValue(repoID), "stage", storeLogValue(stage),
+			"provider", storeLogValue(provider), "model", storeLogValue(model))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	row, err := s.q.UpsertModelConfig(ctx, db.UpsertModelConfigParams{RepoID: &repoID, Stage: stage, Provider: provider, Model: model, BaseURL: baseURL, MaxTokens: maxTokens, Temperature: temperature})
 	if err != nil {
 		return nil, err
@@ -1591,7 +2558,23 @@ func (s *Store) UpsertModelConfig(ctx context.Context, repoID int64, stage, prov
 	return &config, nil
 }
 
-func (s *Store) DeleteModelConfig(ctx context.Context, repoID int64, stage string) error {
+func (s *Store) DeleteModelConfig(ctx context.Context, repoID int64, stage string) (storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "DeleteModelConfig",
+
+			"repo_id",
+
+			storeLogValue(repoID), "stage", storeLogValue(stage),
+		)
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered)
+			panic(recovered)
+		}
+		storeFinish(storeErr)
+	}()
+
 	count, err := s.q.DeleteModelConfig(ctx, db.DeleteModelConfigParams{RepoID: &repoID, Stage: stage})
 	if err != nil {
 		return err
@@ -1603,7 +2586,21 @@ func (s *Store) DeleteModelConfig(ctx context.Context, repoID int64, stage strin
 }
 
 // ListOrgModelConfigs returns installation-level model configs (repo_id IS NULL).
-func (s *Store) ListOrgModelConfigs(ctx context.Context, installationID int64) ([]ModelConfig, error) {
+func (s *Store) ListOrgModelConfigs(ctx context.Context, installationID int64) (storeResult0 []ModelConfig, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ListOrgModelConfigs",
+
+			"installation_id",
+
+			storeLogValue(installationID))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	rows, err := s.q.ListOrgModelConfigs(ctx, &installationID)
 	if err != nil {
 		return nil, err
@@ -1616,7 +2613,24 @@ func (s *Store) ListOrgModelConfigs(ctx context.Context, installationID int64) (
 }
 
 // UpsertOrgModelConfig saves an installation-level model config.
-func (s *Store) UpsertOrgModelConfig(ctx context.Context, installationID int64, stage, provider, model string, baseURL *string, maxTokens int, temperature float32) (*ModelConfig, error) {
+func (s *Store) UpsertOrgModelConfig(ctx context.Context, installationID int64, stage, provider, model string, baseURL *string, maxTokens int, temperature float32) (storeResult0 *ModelConfig, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "UpsertOrgModelConfig",
+
+			"installation_id",
+
+			storeLogValue(installationID), "stage", storeLogValue(stage), "provider",
+			storeLogValue(provider),
+			"model", storeLogValue(model))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	row, err := s.q.UpsertOrgModelConfig(ctx, db.UpsertOrgModelConfigParams{InstallationID: &installationID, Stage: stage, Provider: provider, Model: model, BaseURL: baseURL, MaxTokens: maxTokens, Temperature: temperature})
 	if err != nil {
 		return nil, err
@@ -1626,7 +2640,22 @@ func (s *Store) UpsertOrgModelConfig(ctx context.Context, installationID int64, 
 }
 
 // DeleteOrgModelConfig removes an installation-level config.
-func (s *Store) DeleteOrgModelConfig(ctx context.Context, installationID int64, stage string) error {
+func (s *Store) DeleteOrgModelConfig(ctx context.Context, installationID int64, stage string) (storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "DeleteOrgModelConfig",
+
+			"installation_id",
+
+			storeLogValue(installationID), "stage", storeLogValue(stage))
+	defer func() {
+		if recovered :=
+			recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered)
+			panic(recovered)
+		}
+		storeFinish(storeErr)
+	}()
+
 	count, err := s.q.DeleteOrgModelConfig(ctx, db.DeleteOrgModelConfigParams{InstallationID: &installationID, Stage: stage})
 	if err != nil {
 		return err
@@ -1638,7 +2667,20 @@ func (s *Store) DeleteOrgModelConfig(ctx context.Context, installationID int64, 
 }
 
 // ListModelConfigsWithFallback returns repo configs, falling back to org configs for missing stages.
-func (s *Store) ListModelConfigsWithFallback(ctx context.Context, installationID, repoID int64) ([]ModelConfig, error) {
+func (s *Store) ListModelConfigsWithFallback(ctx context.Context, installationID, repoID int64) (storeResult0 []ModelConfig, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ListModelConfigsWithFallback",
+
+			"installation_id", storeLogValue(installationID), "repo_id",
+			storeLogValue(repoID))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	rows, err := s.q.ListModelConfigsWithFallback(ctx, db.ListModelConfigsWithFallbackParams{InstallationID: &installationID, RepoID: &repoID})
 	if err != nil {
 		return nil, err
@@ -1656,12 +2698,46 @@ func (s *Store) ListModelConfigsWithFallback(ctx context.Context, installationID
 // to BeginReviewRetry. Callers must stop that worker instead of publishing it.
 var ErrReviewAttemptStale = errors.New("review attempt is no longer current")
 
-func (s *Store) CreateReviewComment(ctx context.Context, reviewID uuid.UUID, attemptGeneration int, filePath string, startLine, endLine *int, side *string, body string, severity, category, specialist, codeSnippet *string, confidenceScore *int, githubCommentID *int64, matchedPatternID *int64, matchedPatternScore *float32, enforcedRuleContent *string, isNewFinding bool, suppressedReason *string, state FindingState) error {
+func (s *Store) CreateReviewComment(ctx context.Context, reviewID uuid.UUID, attemptGeneration int, filePath string, startLine, endLine *int, side *string, body string, severity, category, specialist, codeSnippet *string, confidenceScore *int, githubCommentID *int64, matchedPatternID *int64, matchedPatternScore *float32, enforcedRuleContent *string, isNewFinding bool, suppressedReason *string, state FindingState) (storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "CreateReviewComment",
+
+			"review_id",
+
+			storeLogValue(reviewID), "attempt_generation", storeLogValue(attemptGeneration), "file_path", storeLogValue(filePath), "severity", storeLogValue(severity), "category", storeLogValue(category), "confidence_score", storeLogValue(confidenceScore), "github_comment_id",
+			storeLogValue(githubCommentID), "matched_pattern_id",
+			storeLogValue(matchedPatternID))
+	defer func() {
+
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered)
+			panic(recovered)
+		}
+		storeFinish(storeErr)
+	}()
+
 	return s.CreateReviewCommentWithInlineManifest(ctx, reviewID, attemptGeneration, filePath, startLine, endLine, side, body, severity, category, specialist, codeSnippet, confidenceScore, githubCommentID, matchedPatternID, matchedPatternScore, enforcedRuleContent, isNewFinding, suppressedReason, state, false)
 }
 
 // CreateReviewCommentWithInlineManifest persists whether this exact row was selected by Compose for the external submission.
-func (s *Store) CreateReviewCommentWithInlineManifest(ctx context.Context, reviewID uuid.UUID, attemptGeneration int, filePath string, startLine, endLine *int, side *string, body string, severity, category, specialist, codeSnippet *string, confidenceScore *int, githubCommentID *int64, matchedPatternID *int64, matchedPatternScore *float32, enforcedRuleContent *string, isNewFinding bool, suppressedReason *string, state FindingState, wasPostedInline bool) error {
+func (s *Store) CreateReviewCommentWithInlineManifest(ctx context.Context, reviewID uuid.UUID, attemptGeneration int, filePath string, startLine, endLine *int, side *string, body string, severity, category, specialist, codeSnippet *string, confidenceScore *int, githubCommentID *int64, matchedPatternID *int64, matchedPatternScore *float32, enforcedRuleContent *string, isNewFinding bool, suppressedReason *string, state FindingState, wasPostedInline bool) (storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "CreateReviewCommentWithInlineManifest",
+
+			"review_id", storeLogValue(reviewID), "attempt_generation",
+			storeLogValue(attemptGeneration), "file_path",
+
+			storeLogValue(filePath), "severity", storeLogValue(severity), "category", storeLogValue(category), "confidence_score", storeLogValue(confidenceScore), "github_comment_id",
+			storeLogValue(githubCommentID), "matched_pattern_id",
+			storeLogValue(matchedPatternID))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered)
+			panic(recovered)
+		}
+		storeFinish(storeErr)
+	}()
+
 	if state == "" {
 		state = FindingStatePosted
 	}
@@ -1692,7 +2768,23 @@ func (s *Store) CreateReviewCommentWithInlineManifest(ctx context.Context, revie
 // written comment rows but not yet posted them to GitHub, so their IDs would
 // be stale or absent. Belt-and-suspenders since we also require the ID to
 // be non-NULL.
-func (s *Store) ListPRGithubCommentIDs(ctx context.Context, repoFullName string, prNumber int) ([]int64, error) {
+func (s *Store) ListPRGithubCommentIDs(ctx context.Context, repoFullName string, prNumber int) (storeResult0 []int64, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ListPRGithubCommentIDs",
+
+			"repo_full_name",
+
+			storeLogValue(repoFullName), "pr_number",
+			storeLogValue(prNumber))
+	defer func() {
+		if recovered :=
+			recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	rows, err := s.Pool.Query(ctx, `
 		SELECT DISTINCT rc.github_comment_id
 		FROM review_comments rc
@@ -1720,7 +2812,22 @@ func (s *Store) ListPRGithubCommentIDs(ctx context.Context, repoFullName string,
 	return ids, rows.Err()
 }
 
-func (s *Store) GetCommentByGithubID(ctx context.Context, githubCommentID int64) (*ReviewComment, error) {
+func (s *Store) GetCommentByGithubID(ctx context.Context, githubCommentID int64) (storeResult0 *ReviewComment, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetCommentByGithubID",
+
+			"github_comment_id",
+
+			storeLogValue(githubCommentID))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	row, err := s.q.GetCommentByGithubID(ctx, &githubCommentID)
 	if err != nil {
 		return nil, err
@@ -1734,7 +2841,21 @@ func (s *Store) GetCommentByGithubID(ctx context.Context, githubCommentID int64)
 
 // SaveExpectedReviewInlineCount finalizes the attempt-owned delivery manifest.
 // It succeeds only when exactly expected rows were stamped by Compose.
-func (s *Store) SaveExpectedReviewInlineCount(ctx context.Context, reviewID uuid.UUID, generation, expected int) error {
+func (s *Store) SaveExpectedReviewInlineCount(ctx context.Context, reviewID uuid.UUID, generation, expected int) (storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "SaveExpectedReviewInlineCount",
+
+			"review_id", storeLogValue(reviewID), "generation",
+			storeLogValue(generation),
+		)
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered)
+			panic(recovered)
+		}
+		storeFinish(storeErr)
+	}()
+
 	if expected < 0 {
 		return fmt.Errorf("saving inline manifest: invalid expected count %d", expected)
 	}
@@ -1756,7 +2877,22 @@ func (s *Store) SaveExpectedReviewInlineCount(ctx context.Context, reviewID uuid
 
 // ExpectedReviewInlineCount returns false for legacy attempts that predate the
 // exact manifest. Such attempts are intentionally not auto-reconcilable.
-func (s *Store) ExpectedReviewInlineCount(ctx context.Context, reviewID uuid.UUID, generation int) (int, bool, error) {
+func (s *Store) ExpectedReviewInlineCount(ctx context.Context, reviewID uuid.UUID, generation int) (storeResult0 int, storeResult1 bool, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ExpectedReviewInlineCount",
+
+			"review_id", storeLogValue(reviewID), "generation", storeLogValue(generation))
+	defer func() {
+		if recovered :=
+
+			recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0,
+				storeResult1)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0, storeResult1)
+	}()
+
 	var count *int
 	err := s.Pool.QueryRow(ctx, `SELECT expected_github_inline_count FROM reviews WHERE id=$1 AND attempt_generation=$2`, reviewID, generation).Scan(&count)
 	if err != nil {
@@ -1786,7 +2922,20 @@ type UnboundComment struct {
 // are excluded too: they were never posted to GitHub, so binding a posted
 // comment's id to one via the order-fallback would be wrong. Ordered by
 // created_at so same-line ties bind in insertion order (the submission order).
-func (s *Store) ListUnboundReviewComments(ctx context.Context, reviewID uuid.UUID) ([]UnboundComment, error) {
+func (s *Store) ListUnboundReviewComments(ctx context.Context, reviewID uuid.UUID) (storeResult0 []UnboundComment, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ListUnboundReviewComments",
+
+			"review_id", storeLogValue(reviewID))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr,
+			storeResult0)
+	}()
+
 	rows, err := s.Pool.Query(ctx, `
 		SELECT id, file_path, end_line, body
 		FROM review_comments
@@ -1822,7 +2971,20 @@ type PostedReviewBindingState struct {
 // GetPostedReviewBindingState counts current-generation rows that are already
 // bound to delivered inline comments. Suppressed and folded summary rows have
 // no GitHub comment ID and do not require a GraphQL thread.
-func (s *Store) GetPostedReviewBindingState(ctx context.Context, reviewID uuid.UUID, generation int, githubReviewID int64) (PostedReviewBindingState, error) {
+func (s *Store) GetPostedReviewBindingState(ctx context.Context, reviewID uuid.UUID, generation int, githubReviewID int64) (storeResult0 PostedReviewBindingState, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetPostedReviewBindingState",
+
+			"review_id", storeLogValue(reviewID), "generation", storeLogValue(generation),
+			"github_review_id", storeLogValue(githubReviewID))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	var state PostedReviewBindingState
 	err := s.Pool.QueryRow(ctx, `
 		SELECT r.attempt_generation=$2 AND r.github_review_id=$3,
@@ -1851,7 +3013,20 @@ func (s *Store) GetPostedReviewBindingState(ctx context.Context, reviewID uuid.U
 // ListPostedReviewGitHubCommentIDs returns the exact REST IDs already bound
 // to posted findings in one current generation. Summary-only and folded rows
 // remain unbound and are intentionally absent.
-func (s *Store) ListPostedReviewGitHubCommentIDs(ctx context.Context, reviewID uuid.UUID, generation int) ([]int64, error) {
+func (s *Store) ListPostedReviewGitHubCommentIDs(ctx context.Context, reviewID uuid.UUID, generation int) (storeResult0 []int64, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ListPostedReviewGitHubCommentIDs",
+
+			"review_id", storeLogValue(reviewID), "generation",
+			storeLogValue(generation))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	rows, err := s.Pool.Query(ctx, `
 		SELECT rc.github_comment_id
 		FROM review_comments rc
@@ -1885,7 +3060,22 @@ func (s *Store) ListPostedReviewGitHubCommentIDs(ctx context.Context, reviewID u
 // bound row. Returns whether the row was updated. This replaces the old fuzzy
 // (review_id, file_path, end_line) UPDATE that collapsed two same-line findings
 // onto a single id (see FindingLifecycle #165 same-line binding fix).
-func (s *Store) BindGitHubCommentID(ctx context.Context, commentID uuid.UUID, githubCommentID int64) (bool, error) {
+func (s *Store) BindGitHubCommentID(ctx context.Context, commentID uuid.UUID, githubCommentID int64) (storeResult0 bool, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "BindGitHubCommentID",
+
+			"comment_id",
+
+			storeLogValue(commentID), "github_comment_id",
+			storeLogValue(githubCommentID))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	tag, err := s.Pool.Exec(ctx, `
 		UPDATE review_comments rc SET github_comment_id = $2
 		FROM reviews r
@@ -1915,13 +3105,42 @@ type RepoReviewStats struct {
 //
 // Non-fatal: returns a zero-value RepoReviewStats on error with no sample_size
 // so the caller can fall through to generic messaging.
-func (s *Store) GetRepoReviewStats(ctx context.Context, repoID int64, limit int) (RepoReviewStats, error) {
+func (s *Store) GetRepoReviewStats(ctx context.Context, repoID int64, limit int) (storeResult0 RepoReviewStats, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetRepoReviewStats",
+
+			"repo_id",
+
+			storeLogValue(repoID), "limit", storeLogValue(limit))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	row, err := s.q.GetRepoReviewStats(ctx, db.GetRepoReviewStatsParams{RepoID: repoID, RowLimit: int64(limit)})
 	return RepoReviewStats{SampleSize: row.SampleSize, AvgTokens: row.AvgTokens, AvgCost: row.AvgCost, CostAvailable: row.CostAvailable}, err
 }
 
 // GetLastCompletedReview returns the most recent completed review for a repo+PR.
-func (s *Store) GetLastCompletedReview(ctx context.Context, repoID int64, prNumber int) (*Review, error) {
+func (s *Store) GetLastCompletedReview(ctx context.Context, repoID int64, prNumber int) (storeResult0 *Review, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetLastCompletedReview",
+
+			"repo_id",
+
+			storeLogValue(repoID), "pr_number", storeLogValue(prNumber))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	row, err := s.q.GetLastCompletedReview(ctx, db.GetLastCompletedReviewParams{RepoID: repoID, PRNumber: prNumber})
 	if err != nil {
 		return nil, err
@@ -1930,7 +3149,23 @@ func (s *Store) GetLastCompletedReview(ctx context.Context, repoID int64, prNumb
 	return &review, nil
 }
 
-func (s *Store) GetLatestReviewBySHA(ctx context.Context, repoFullName string, prNumber int, headSHA string) (*Review, error) {
+func (s *Store) GetLatestReviewBySHA(ctx context.Context, repoFullName string, prNumber int, headSHA string) (storeResult0 *Review, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetLatestReviewBySHA",
+
+			"repo_full_name",
+
+			storeLogValue(repoFullName), "pr_number", storeLogValue(prNumber), "head_sha",
+			storeLogValue(headSHA))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr,
+			storeResult0)
+	}()
+
 	row, err := s.q.GetLatestReviewBySHA(ctx, db.GetLatestReviewBySHAParams{FullName: repoFullName, PRNumber: prNumber, HeadSHA: headSHA})
 	if err != nil {
 		return nil, err
@@ -1943,7 +3178,24 @@ func (s *Store) GetLatestReviewBySHA(ctx context.Context, repoFullName string, p
 // given error code already exists for this PR. Used by the readiness gate to
 // suppress duplicate "welcome to Argus" comments when users retry
 // `@argus-eye review` while the API key is still missing.
-func (s *Store) HasFailedReviewWithError(ctx context.Context, repoID int64, prNumber int, errorCode string) (bool, error) {
+func (s *Store) HasFailedReviewWithError(ctx context.Context, repoID int64, prNumber int, errorCode string) (storeResult0 bool, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "HasFailedReviewWithError",
+
+			"repo_id",
+			storeLogValue(repoID), "pr_number", storeLogValue(prNumber), "error_code",
+			storeLogValue(errorCode))
+
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish,
+				recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr,
+			storeResult0)
+	}()
+
 	var exists bool
 	err := s.Pool.QueryRow(ctx, `
 		SELECT EXISTS (
@@ -1955,7 +3207,23 @@ func (s *Store) HasFailedReviewWithError(ctx context.Context, repoID int64, prNu
 }
 
 // GetLatestReviewByPR returns the most recent completed review for a repo+PR by full name.
-func (s *Store) GetLatestReviewByPR(ctx context.Context, repoFullName string, prNumber int) (*Review, error) {
+func (s *Store) GetLatestReviewByPR(ctx context.Context, repoFullName string, prNumber int) (storeResult0 *Review, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetLatestReviewByPR",
+
+			"repo_full_name",
+
+			storeLogValue(repoFullName), "pr_number", storeLogValue(prNumber))
+	defer func() {
+		if recovered :=
+
+			recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	row, err := s.q.GetLatestReviewByPR(ctx, db.GetLatestReviewByPRParams{FullName: repoFullName, PRNumber: prNumber})
 	if err != nil {
 		return nil, err
@@ -1971,7 +3239,18 @@ func (s *Store) GetLatestReviewByPR(ctx context.Context, repoFullName string, pr
 // PR author ever received them; counting them made the dashboard advertise
 // review coverage that was never delivered (#239). The generated query owns
 // the predicate so the Store wrapper cannot drift from it.
-func (s *Store) GetStats(ctx context.Context) (*Stats, error) {
+func (s *Store) GetStats(ctx context.Context) (storeResult0 *Stats, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetStats")
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered,
+				storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	row, err := s.q.GetStats(ctx)
 	if err != nil {
 		return nil, err
@@ -1980,7 +3259,23 @@ func (s *Store) GetStats(ctx context.Context) (*Stats, error) {
 	return &stats, nil
 }
 
-func (s *Store) GetStatsScoped(ctx context.Context, installationIDs []int64) (*Stats, error) {
+func (s *Store) GetStatsScoped(ctx context.Context, installationIDs []int64) (storeResult0 *Stats, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetStatsScoped",
+
+			"installation_ids_count",
+
+			len(installationIDs))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr,
+			storeResult0)
+	}()
+
 	row, err := s.q.GetStatsScoped(ctx, installationIDs)
 	if err != nil {
 		return nil, err
@@ -1991,7 +3286,22 @@ func (s *Store) GetStatsScoped(ctx context.Context, installationIDs []int64) (*S
 
 // --- Activity ---
 
-func (s *Store) ListActivity(ctx context.Context, installationIDs []int64, limit int) ([]ActivityLog, error) {
+func (s *Store) ListActivity(ctx context.Context, installationIDs []int64, limit int) (storeResult0 []ActivityLog, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ListActivity",
+
+			"installation_ids_count",
+
+			len(installationIDs), "limit", storeLogValue(limit))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	if limit <= 0 {
 		limit = 50
 	}
@@ -2006,7 +3316,23 @@ func (s *Store) ListActivity(ctx context.Context, installationIDs []int64, limit
 	return activity, nil
 }
 
-func (s *Store) LogActivity(ctx context.Context, installationID *int64, action, actor, resource string, metadata []byte) error {
+func (s *Store) LogActivity(ctx context.Context, installationID *int64, action, actor, resource string, metadata []byte) (storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "LogActivity",
+
+			"installation_id",
+
+			storeLogValue(installationID), "action", storeLogValue(action), "actor", storeLogValue(actor), "resource",
+
+			storeLogValue(resource))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered)
+			panic(recovered)
+		}
+		storeFinish(storeErr)
+	}()
+
 	return s.q.LogActivity(ctx, db.LogActivityParams{InstallationID: installationID, Action: action, Actor: nilIfEmpty(actor), Resource: nilIfEmpty(resource), Metadata: metadata})
 }
 
@@ -2040,7 +3366,18 @@ type InsertAutoResolveEventParams struct {
 // Writes are best-effort: callers already use a short DB-only context
 // so that a slow GitHub path doesn't leak into this insert, and a lost
 // row here is a dropped stats datapoint — not a correctness issue.
-func (s *Store) InsertAutoResolveEvent(ctx context.Context, p InsertAutoResolveEventParams) error {
+func (s *Store) InsertAutoResolveEvent(ctx context.Context, p InsertAutoResolveEventParams) (storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "InsertAutoResolveEvent")
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish,
+				recovered)
+			panic(recovered)
+		}
+		storeFinish(storeErr)
+	}()
+
 	keys := p.ResolvedThreadKeys
 	if keys == nil {
 		keys = []string{}
@@ -2064,7 +3401,21 @@ type GetAutoResolveStatsRow struct {
 // GetAutoResolveStats sums auto_resolve_events for the given installations
 // over the given period (e.g. "30 days"). Used by the stats overview
 // handler.
-func (s *Store) GetAutoResolveStats(ctx context.Context, installationIDs []int64, period string) (GetAutoResolveStatsRow, error) {
+func (s *Store) GetAutoResolveStats(ctx context.Context, installationIDs []int64, period string) (storeResult0 GetAutoResolveStatsRow, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetAutoResolveStats",
+
+			"installation_ids_count",
+
+			len(installationIDs), "period", storeLogValue(period))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	row, err := s.q.GetAutoResolveStats(ctx, db.GetAutoResolveStatsParams{InstallationIds: installationIDs, Period: period})
 	result := GetAutoResolveStatsRow{EventCount: row.EventCount, ResolvedTotal: row.ResolvedTotal, AttemptedTotal: row.AttemptedTotal, APICallsTotal: row.APICallsTotal}
 	if err != nil {
@@ -2086,7 +3437,21 @@ type GetLearnLayerCountsRow struct {
 // learn-layer tables. Uses four correlated subqueries rather than UNION
 // ALL so the caller gets a single flat row and the planner treats each
 // count independently.
-func (s *Store) GetLearnLayerCounts(ctx context.Context, installationIDs []int64, period string) (GetLearnLayerCountsRow, error) {
+func (s *Store) GetLearnLayerCounts(ctx context.Context, installationIDs []int64, period string) (storeResult0 GetLearnLayerCountsRow, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetLearnLayerCounts",
+
+			"installation_ids_count",
+
+			len(installationIDs), "period", storeLogValue(period))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	row, err := s.q.GetLearnLayerCounts(ctx, db.GetLearnLayerCountsParams{InstallationIds: installationIDs, Period: period})
 	result := GetLearnLayerCountsRow{PatternsLearned: row.PatternsLearned, ScenariosStored: row.ScenariosStored, DecisionTraces: row.DecisionTraces, FeedbackIndexed: row.FeedbackIndexed}
 	if err != nil {
@@ -2103,6 +3468,22 @@ func (s *Store) GetLearnLayerCounts(ctx context.Context, installationIDs []int64
 // event, so callers must gate side effects (e.g. bumping pattern quality) on
 // inserted to avoid double-counting a single 👍/👎.
 func (s *Store) RecordCommentOutcome(ctx context.Context, reviewCommentID uuid.UUID, outcome string) (inserted bool, err error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "RecordCommentOutcome",
+
+			"review_comment_id",
+
+			storeLogValue(reviewCommentID), "outcome",
+			storeLogValue(outcome),
+		)
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, inserted)
+			panic(recovered)
+		}
+		storeFinish(err, inserted)
+	}()
+
 	count, err := s.q.RecordCommentOutcome(ctx, db.RecordCommentOutcomeParams{ReviewCommentID: reviewCommentID, Outcome: outcome})
 	if err != nil {
 		return false, err
@@ -2115,14 +3496,44 @@ func (s *Store) RecordCommentOutcome(ctx context.Context, reviewCommentID uuid.U
 // IndexScenario so a NULL memory_doc_id genuinely means "write failed / pending
 // reconciliation" instead of "never attempted" — otherwise the reconciler treats
 // every freshly-created scenario as drift forever.
-func (s *Store) SetScenarioMemoryDocID(ctx context.Context, id int64, memoryDocID string) error {
+func (s *Store) SetScenarioMemoryDocID(ctx context.Context, id int64, memoryDocID string) (storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "SetScenarioMemoryDocID",
+
+			"id",
+
+			storeLogValue(id), "memory_doc_id", storeLogValue(memoryDocID))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered)
+			panic(recovered)
+		}
+		storeFinish(storeErr)
+	}()
+
 	return s.q.UpdateScenarioMemoryDocID(ctx, db.UpdateScenarioMemoryDocIDParams{
 		MemoryDocID: &memoryDocID,
 		ID:          id,
 	})
 }
 
-func (s *Store) GetCommentOutcomes(ctx context.Context, reviewCommentID uuid.UUID) ([]CommentOutcome, error) {
+func (s *Store) GetCommentOutcomes(ctx context.Context, reviewCommentID uuid.UUID) (storeResult0 []CommentOutcome, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetCommentOutcomes",
+
+			"review_comment_id",
+
+			storeLogValue(reviewCommentID))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	rows, err := s.q.GetCommentOutcomes(ctx, reviewCommentID)
 	if err != nil {
 		return nil, err
@@ -2155,7 +3566,22 @@ type PostedFinding struct {
 // findings for a PR that don't yet have a merge-time outcome. Reaction-driven
 // outcomes ('confirmed'/'dismissed') do NOT exclude a finding — a dismissed
 // finding can still be addressed; the view weighs both signals.
-func (s *Store) ListPostedFindings(ctx context.Context, repoID int64, prNumber int) ([]PostedFinding, error) {
+func (s *Store) ListPostedFindings(ctx context.Context, repoID int64, prNumber int) (storeResult0 []PostedFinding, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ListPostedFindings",
+
+			"repo_id",
+
+			storeLogValue(repoID), "pr_number", storeLogValue(prNumber))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	rows, err := s.q.ListPostedFindings(ctx, db.ListPostedFindingsParams{RepoID: repoID, PRNumber: prNumber})
 	if err != nil {
 		return nil, err
@@ -2170,7 +3596,23 @@ func (s *Store) ListPostedFindings(ctx context.Context, repoID int64, prNumber i
 // RecordFindingOutcome writes a merge-time outcome for a posted finding,
 // idempotently (webhook redeliveries replay the same (comment, outcome)).
 // addressedAt is nil for 'ignored'/'deferred'.
-func (s *Store) RecordFindingOutcome(ctx context.Context, reviewCommentID uuid.UUID, outcome string, addressedAt *time.Time) error {
+func (s *Store) RecordFindingOutcome(ctx context.Context, reviewCommentID uuid.UUID, outcome string, addressedAt *time.Time) (storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "RecordFindingOutcome",
+
+			"review_comment_id",
+
+			storeLogValue(reviewCommentID), "outcome",
+			storeLogValue(outcome),
+		)
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered)
+			panic(recovered)
+		}
+		storeFinish(storeErr)
+	}()
+
 	_, err := s.Pool.Exec(ctx, `
 		INSERT INTO comment_outcomes (review_comment_id, outcome, addressed_at)
 		VALUES ($1, $2, $3)
@@ -2180,7 +3622,22 @@ func (s *Store) RecordFindingOutcome(ctx context.Context, reviewCommentID uuid.U
 }
 
 // ListReviewGauge reads vw_review_gauge scoped to the given installations.
-func (s *Store) ListReviewGauge(ctx context.Context, installationIDs []int64) ([]GaugeRow, error) {
+func (s *Store) ListReviewGauge(ctx context.Context, installationIDs []int64) (storeResult0 []GaugeRow, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ListReviewGauge",
+
+			"installation_ids_count",
+
+			len(installationIDs))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr,
+			storeResult0)
+	}()
+
 	rows, err := s.q.ListReviewGauge(ctx, installationIDs)
 	if err != nil {
 		return nil, err
@@ -2200,7 +3657,24 @@ func (s *Store) ListReviewGauge(ctx context.Context, installationIDs []int64) ([
 
 // --- Prompt Templates ---
 
-func (s *Store) ListPromptTemplates(ctx context.Context, repoID int64) ([]PromptTemplate, error) {
+func (s *Store) ListPromptTemplates(ctx context.Context, repoID int64) (storeResult0 []PromptTemplate, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ListPromptTemplates",
+
+			"repo_id",
+
+			storeLogValue(repoID))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish,
+
+				recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	rows, err := s.q.ListPromptTemplates(ctx, repoID)
 	if err != nil {
 		return nil, err
@@ -2216,7 +3690,22 @@ func (s *Store) ListPromptTemplates(ctx context.Context, repoID int64) ([]Prompt
 	return templates, nil
 }
 
-func (s *Store) UpsertPromptTemplate(ctx context.Context, repoID int64, stage, promptText string) (*PromptTemplate, error) {
+func (s *Store) UpsertPromptTemplate(ctx context.Context, repoID int64, stage, promptText string) (storeResult0 *PromptTemplate, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "UpsertPromptTemplate",
+
+			"repo_id",
+
+			storeLogValue(repoID), "stage", storeLogValue(stage))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	row, err := s.q.UpsertPromptTemplate(ctx, db.UpsertPromptTemplateParams{RepoID: repoID, Stage: stage, PromptText: promptText})
 	if err != nil {
 		return nil, err
@@ -2228,7 +3717,22 @@ func (s *Store) UpsertPromptTemplate(ctx context.Context, repoID int64, stage, p
 	return &template, nil
 }
 
-func (s *Store) DeletePromptTemplate(ctx context.Context, repoID int64, stage string) error {
+func (s *Store) DeletePromptTemplate(ctx context.Context, repoID int64, stage string) (storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "DeletePromptTemplate",
+
+			"repo_id",
+
+			storeLogValue(repoID), "stage", storeLogValue(stage))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered)
+			panic(recovered)
+		}
+		storeFinish(storeErr)
+	}()
+
 	count, err := s.q.DeletePromptTemplate(ctx, db.DeletePromptTemplateParams{RepoID: repoID, Stage: stage})
 	if err != nil {
 		return err
@@ -2240,7 +3744,25 @@ func (s *Store) DeletePromptTemplate(ctx context.Context, repoID int64, stage st
 }
 
 // RecoverStaleReviews marks old in-progress/pending reviews as failed.
-func (s *Store) RecoverStaleReviews(ctx context.Context, maxAge time.Duration) (int64, error) {
+func (s *Store) RecoverStaleReviews(ctx context.Context, maxAge time.Duration) (storeResult0 int64, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "RecoverStaleReviews",
+
+			"max_age",
+
+			storeLogValue(maxAge))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(
+				storeFinish,
+
+				recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	tag, err := s.Pool.Exec(ctx, `
 		UPDATE reviews SET status = 'failed',
 		       error = CASE WHEN error LIKE $2 || '%' THEN error ELSE 'review timed out — server restarted' END,
@@ -2265,35 +3787,140 @@ func nilIfEmpty(s string) *string {
 //
 
 // Cross-PR generated-query wrappers keep sqlc behind the Store boundary.
-func (s *Store) GetLatestRunForReview(ctx context.Context, reviewID uuid.UUID) (uuid.UUID, error) {
+func (s *Store) GetLatestRunForReview(ctx context.Context, reviewID uuid.UUID) (storeResult0 uuid.UUID, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetLatestRunForReview",
+
+			"review_id",
+
+			storeLogValue(reviewID))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr,
+			storeResult0)
+	}()
+
 	return s.q.GetLatestRunForReview(ctx, reviewID)
 }
 
-func (s *Store) FindReviewsLinkingToPR(ctx context.Context, arg db.FindReviewsLinkingToPRParams) ([]db.FindReviewsLinkingToPRRow, error) {
+func (s *Store) FindReviewsLinkingToPR(ctx context.Context, arg db.FindReviewsLinkingToPRParams) (storeResult0 []db.FindReviewsLinkingToPRRow, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "FindReviewsLinkingToPR")
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish,
+				recovered, storeResult0,
+			)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	return s.q.FindReviewsLinkingToPR(ctx, arg)
 }
 
-func (s *Store) SetReviewLinkedPRRefs(ctx context.Context, arg db.SetReviewLinkedPRRefsParams) error {
+func (s *Store) SetReviewLinkedPRRefs(ctx context.Context, arg db.SetReviewLinkedPRRefsParams) (storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "SetReviewLinkedPRRefs")
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish,
+				recovered)
+			panic(
+				recovered,
+			)
+		}
+		storeFinish(storeErr)
+	}()
+
 	return s.q.SetReviewLinkedPRRefs(ctx, arg)
 }
 
-func (s *Store) SetReviewLinkedIssueRefs(ctx context.Context, arg db.SetReviewLinkedIssueRefsParams) error {
+func (s *Store) SetReviewLinkedIssueRefs(ctx context.Context, arg db.SetReviewLinkedIssueRefsParams) (storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "SetReviewLinkedIssueRefs")
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish,
+				recovered)
+			panic(
+				recovered)
+		}
+		storeFinish(storeErr)
+	}()
+
 	return s.q.SetReviewLinkedIssueRefs(ctx, arg)
 }
 
-func (s *Store) UpdateReviewCrossPRHash(ctx context.Context, arg db.UpdateReviewCrossPRHashParams) error {
+func (s *Store) UpdateReviewCrossPRHash(ctx context.Context, arg db.UpdateReviewCrossPRHashParams) (storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "UpdateReviewCrossPRHash")
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish,
+				recovered)
+			panic(
+				recovered,
+			)
+		}
+		storeFinish(storeErr)
+	}()
+
 	return s.q.UpdateReviewCrossPRHash(ctx, arg)
 }
 
-func (s *Store) GetLatestCompletedReviewByPR(ctx context.Context, arg db.GetLatestCompletedReviewByPRParams) (db.GetLatestCompletedReviewByPRRow, error) {
+func (s *Store) GetLatestCompletedReviewByPR(ctx context.Context, arg db.GetLatestCompletedReviewByPRParams) (storeResult0 db.GetLatestCompletedReviewByPRRow, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetLatestCompletedReviewByPR")
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	return s.q.GetLatestCompletedReviewByPR(ctx, arg)
 }
 
-func (s *Store) FindSharedLinkedIssues(ctx context.Context, reviewID uuid.UUID) ([]db.FindSharedLinkedIssuesRow, error) {
+func (s *Store) FindSharedLinkedIssues(ctx context.Context, reviewID uuid.UUID) (storeResult0 []db.FindSharedLinkedIssuesRow, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "FindSharedLinkedIssues",
+
+			"review_id",
+
+			storeLogValue(reviewID))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr,
+			storeResult0)
+	}()
+
 	return s.q.FindSharedLinkedIssues(ctx, reviewID)
 }
 
-func (s *Store) MergeStageTokenEntry(ctx context.Context, arg db.MergeStageTokenEntryParams) (int64, error) {
+func (s *Store) MergeStageTokenEntry(ctx context.Context, arg db.MergeStageTokenEntryParams) (storeResult0 int64, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "MergeStageTokenEntry")
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish,
+				recovered, storeResult0,
+			)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	return s.q.MergeStageTokenEntry(ctx, arg)
 }
 
@@ -2307,7 +3934,20 @@ func (s *Store) MergeStageTokenEntry(ctx context.Context, arg db.MergeStageToken
 // GetInstallationFeatureFlags returns the raw feature_flags JSONB for an
 // installation. Callers parse it (pipeline.loadFeatureFlags, the features
 // handler); an empty or "{}" payload means "all defaults".
-func (s *Store) GetInstallationFeatureFlags(ctx context.Context, installationID int64) (json.RawMessage, error) {
+func (s *Store) GetInstallationFeatureFlags(ctx context.Context, installationID int64) (storeResult0 json.RawMessage, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetInstallationFeatureFlags",
+
+			"installation_id", storeLogValue(installationID))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	return s.q.GetInstallationFeatureFlags(ctx, installationID)
 }
 
@@ -2316,7 +3956,22 @@ func (s *Store) GetInstallationFeatureFlags(ctx context.Context, installationID 
 // read-modify-writing in Go keeps it atomic: the settings form owns three
 // keys while operators set others by direct UPDATE, and a
 // lost update between those two writers reverts a backend flip silently.
-func (s *Store) MergeInstallationFeatureFlags(ctx context.Context, installationID int64, patch json.RawMessage) error {
+func (s *Store) MergeInstallationFeatureFlags(ctx context.Context, installationID int64, patch json.RawMessage) (storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "MergeInstallationFeatureFlags",
+
+			"installation_id", storeLogValue(installationID), "patch_count",
+			len(patch))
+	defer func() {
+		if recovered :=
+			recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered)
+			panic(
+				recovered)
+		}
+		storeFinish(storeErr)
+	}()
+
 	return s.q.MergeInstallationFeatureFlags(ctx, db.MergeInstallationFeatureFlagsParams{
 		ID:    installationID,
 		Patch: patch,
@@ -2326,40 +3981,155 @@ func (s *Store) MergeInstallationFeatureFlags(ctx context.Context, installationI
 // GetAllFileReviewsForReview returns the unfiltered per-file review payload
 // (pre dedup/scoring) recorded for a review's latest run, as raw JSONB. The
 // export path uses it to surface dropped findings.
-func (s *Store) GetAllFileReviewsForReview(ctx context.Context, reviewID uuid.UUID) (json.RawMessage, error) {
+func (s *Store) GetAllFileReviewsForReview(ctx context.Context, reviewID uuid.UUID) (storeResult0 json.RawMessage, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetAllFileReviewsForReview",
+
+			"review_id", storeLogValue(reviewID))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr,
+			storeResult0)
+	}()
+
 	return s.q.GetAllFileReviewsForReview(ctx, reviewID)
 }
 
 // GetTopChokePoints returns the highest fan-in files for a repo (up to limit) —
 // the architecture-summary input.
-func (s *Store) GetTopChokePoints(ctx context.Context, repoID int64, limit int32) ([]db.GetTopChokePointsRow, error) {
+func (s *Store) GetTopChokePoints(ctx context.Context, repoID int64, limit int32) (storeResult0 []db.GetTopChokePointsRow, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetTopChokePoints",
+
+			"repo_id",
+
+			storeLogValue(repoID), "limit", storeLogValue(limit),
+		)
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	return s.q.GetTopChokePoints(ctx, db.GetTopChokePointsParams{RepoID: repoID, Limit: limit})
 }
 
 // ListArchNodes returns the per-symbol architecture rows (file, name, language,
 // line span) for a repo.
-func (s *Store) ListArchNodes(ctx context.Context, repoID int64) ([]db.ListArchNodesRow, error) {
+func (s *Store) ListArchNodes(ctx context.Context, repoID int64) (storeResult0 []db.ListArchNodesRow, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ListArchNodes",
+
+			"repo_id",
+
+			storeLogValue(repoID))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish,
+
+				recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	return s.q.ListArchNodes(ctx, repoID)
 }
 
 // ListArchFileEdges returns the file→file dependency edges for a repo.
-func (s *Store) ListArchFileEdges(ctx context.Context, repoID int64) ([]db.ListArchFileEdgesRow, error) {
+func (s *Store) ListArchFileEdges(ctx context.Context, repoID int64) (storeResult0 []db.ListArchFileEdgesRow, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ListArchFileEdges",
+
+			"repo_id",
+
+			storeLogValue(repoID))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish,
+
+				recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	return s.q.ListArchFileEdges(ctx, repoID)
 }
 
 // ListArchBugDensity returns per-file bug counts and PR-change frequency for a repo.
-func (s *Store) ListArchBugDensity(ctx context.Context, repoID int64) ([]db.ListArchBugDensityRow, error) {
+func (s *Store) ListArchBugDensity(ctx context.Context, repoID int64) (storeResult0 []db.ListArchBugDensityRow, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ListArchBugDensity",
+
+			"repo_id",
+
+			storeLogValue(repoID))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(
+				storeFinish,
+
+				recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	return s.q.ListArchBugDensity(ctx, repoID)
 }
 
 // ListArchCoupling returns per-PR file sets used to derive temporal coupling.
-func (s *Store) ListArchCoupling(ctx context.Context, repoID int64) ([]db.ListArchCouplingRow, error) {
+func (s *Store) ListArchCoupling(ctx context.Context, repoID int64) (storeResult0 []db.ListArchCouplingRow, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ListArchCoupling",
+
+			"repo_id",
+
+			storeLogValue(repoID))
+	defer func() {
+		if recovered :=
+			recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish,
+
+				recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	return s.q.ListArchCoupling(ctx, repoID)
 }
 
 // ListGraphNodes returns the code-graph nodes for the repo UI, normalizing a nil
 // result to an empty slice so the JSON response is [] rather than null.
-func (s *Store) ListGraphNodes(ctx context.Context, repoID int64) ([]db.ListGraphNodesRow, error) {
+func (s *Store) ListGraphNodes(ctx context.Context, repoID int64) (storeResult0 []db.ListGraphNodesRow, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ListGraphNodes",
+
+			"repo_id",
+
+			storeLogValue(repoID))
+	defer func() {
+		if recovered :=
+			recover(); recovered != nil {
+			storeFinishPanic(storeFinish,
+
+				recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	rows, err := s.q.ListGraphNodes(ctx, repoID)
 	if rows == nil {
 		rows = []db.ListGraphNodesRow{}
@@ -2369,7 +4139,24 @@ func (s *Store) ListGraphNodes(ctx context.Context, repoID int64) ([]db.ListGrap
 
 // ListGraphEdges returns the code-graph edges for the repo UI, normalizing a nil
 // result to an empty slice so the JSON response is [] rather than null.
-func (s *Store) ListGraphEdges(ctx context.Context, repoID int64) ([]db.ListGraphEdgesRow, error) {
+func (s *Store) ListGraphEdges(ctx context.Context, repoID int64) (storeResult0 []db.ListGraphEdgesRow, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ListGraphEdges",
+
+			"repo_id",
+
+			storeLogValue(repoID))
+	defer func() {
+		if recovered :=
+			recover(); recovered != nil {
+			storeFinishPanic(storeFinish,
+
+				recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	rows, err := s.q.ListGraphEdges(ctx, repoID)
 	if rows == nil {
 		rows = []db.ListGraphEdgesRow{}

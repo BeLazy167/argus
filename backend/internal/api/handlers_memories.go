@@ -85,6 +85,8 @@ func parseMemoryListParams(r *http.Request) (memoryListParams, error) {
 }
 
 func (s *Server) listMemories(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.listMemories")
+	defer op.Finish(w)
 	params, err := parseMemoryListParams(r)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -103,14 +105,14 @@ func (s *Server) listMemories(w http.ResponseWriter, r *http.Request) {
 		repo, repoErr := s.memoryLister.GetRepoScoped(r.Context(), *params.repoID, []int64{params.installationID})
 		if repoErr != nil || repo.InstallationID != params.installationID {
 			if repoErr != nil && !errors.Is(repoErr, pgx.ErrNoRows) {
-				s.logger.Error("resolve memory repo", "error", repoErr)
+				s.logger.ErrorContext(r.Context(), "resolve memory repo", "error", repoErr)
 			}
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "repo not found"})
 			return
 		}
 		parts := strings.SplitN(repo.FullName, "/", 2)
 		if len(parts) != 2 || parts[1] == "" {
-			s.logger.Error("repo has invalid full name", "repo_id", repo.ID)
+			s.logger.ErrorContext(r.Context(), "repo has invalid full name", "repo_id", repo.ID)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 			return
 		}
@@ -124,7 +126,7 @@ func (s *Server) listMemories(w http.ResponseWriter, r *http.Request) {
 
 	result, err := s.memoryLister.ListMemories(r.Context(), filter)
 	if err != nil {
-		s.logger.Error("list memories", "error", err)
+		s.logger.ErrorContext(r.Context(), "list memories", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}

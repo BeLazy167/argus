@@ -81,11 +81,27 @@ func (e MemoryMirrorEvent) validate() error {
 // WithMemoryMirrorTx commits a relational mutation and its mirror event as one
 // transaction. The callback performs the source-row mutation and returns the
 // event describing the resulting desired memory state.
-func (s *Store) WithMemoryMirrorTx(ctx context.Context, fn func(pgx.Tx) (MemoryMirrorEvent, error)) error {
+func (s *Store) WithMemoryMirrorTx(ctx context.Context, fn func(pgx.Tx) (MemoryMirrorEvent, error)) (storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "WithMemoryMirrorTx")
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish,
+
+				recovered,
+			)
+			panic(recovered)
+		}
+		storeFinish(storeErr)
+	}()
+
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin memory mirror transaction: %w", err)
 	}
+	txFinish := beginStoreTransaction(ctx, "WithMemoryMirrorTx")
+	committed := false
+	defer func() { txFinish(storeErr, committed) }()
 	defer func() { _ = tx.Rollback(ctx) }()
 	event, err := fn(tx)
 	if err != nil {
@@ -97,6 +113,7 @@ func (s *Store) WithMemoryMirrorTx(ctx context.Context, fn func(pgx.Tx) (MemoryM
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit memory mirror transaction: %w", err)
 	}
+	committed = true
 	return nil
 }
 
@@ -170,7 +187,23 @@ func enqueueMemoryMirrorEvent(ctx context.Context, tx pgx.Tx, event MemoryMirror
 // conservative installation-wide pattern barrier until the worker reconstructs
 // and binds its ID. Earlier transitions therefore cannot finish after later
 // transitions when multiple workers use SKIP LOCKED concurrently.
-func (s *Store) ClaimMemoryMirrorEvents(ctx context.Context, limit int, staleAfter time.Duration) ([]MemoryMirrorOutboxEvent, error) {
+func (s *Store) ClaimMemoryMirrorEvents(ctx context.Context, limit int, staleAfter time.Duration) (storeResult0 []MemoryMirrorOutboxEvent, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ClaimMemoryMirrorEvents",
+
+			"limit", storeLogValue(limit), "stale_after", storeLogValue(staleAfter))
+	defer func() {
+
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish,
+				recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(
+			storeErr,
+			storeResult0)
+	}()
+
 	if limit <= 0 {
 		limit = 50
 	}
@@ -274,6 +307,20 @@ func (s *Store) ProcessMemoryMirrorEvent(
 	legacyOwner MemoryMirrorLegacyOwner,
 	apply MemoryMirrorApply,
 ) (returnErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ProcessMemoryMirrorEvent",
+
+			"custom_id", storeLogValue(customID))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish,
+				recovered)
+			panic(recovered)
+		}
+		storeFinish(returnErr)
+	}()
+
 	if customID == "" {
 		return fmt.Errorf("process memory mirror event %d: empty custom ID", event.ID)
 	}
@@ -495,7 +542,22 @@ func patternMirrorDeleteAuthorized(
 // the active lease. Once bound, a retry blocks only transitions for the same
 // custom ID instead of conservatively blocking every pattern transition in the
 // installation behind an unknown legacy identity.
-func (s *Store) BindMemoryMirrorEventCustomID(ctx context.Context, event MemoryMirrorOutboxEvent, customID string) error {
+func (s *Store) BindMemoryMirrorEventCustomID(ctx context.Context, event MemoryMirrorOutboxEvent, customID string) (storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "BindMemoryMirrorEventCustomID",
+
+			"custom_id",
+			storeLogValue(customID))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish,
+				recovered)
+			panic(recovered)
+		}
+		storeFinish(storeErr)
+	}()
+
 	if customID == "" {
 		return fmt.Errorf("bind memory mirror event %d custom ID: empty custom ID", event.ID)
 	}
@@ -514,7 +576,20 @@ func (s *Store) BindMemoryMirrorEventCustomID(ctx context.Context, event MemoryM
 	return nil
 }
 
-func (s *Store) MarkMemoryMirrorEventProcessed(ctx context.Context, event MemoryMirrorOutboxEvent) error {
+func (s *Store) MarkMemoryMirrorEventProcessed(ctx context.Context, event MemoryMirrorOutboxEvent) (storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "MarkMemoryMirrorEventProcessed")
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish,
+
+				recovered)
+			panic(recovered)
+		}
+		storeFinish(storeErr)
+	}()
+
 	tag, err := s.Pool.Exec(ctx, `
         UPDATE memory_mirror_outbox
         SET processed_at = now(), claimed_at = NULL, last_error = NULL, updated_at = now()
@@ -528,7 +603,20 @@ func (s *Store) MarkMemoryMirrorEventProcessed(ctx context.Context, event Memory
 	return nil
 }
 
-func (s *Store) MarkMemoryMirrorEventFailed(ctx context.Context, event MemoryMirrorOutboxEvent, cause error) error {
+func (s *Store) MarkMemoryMirrorEventFailed(ctx context.Context, event MemoryMirrorOutboxEvent, cause error) (storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "MarkMemoryMirrorEventFailed")
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish,
+
+				recovered)
+			panic(recovered)
+		}
+		storeFinish(storeErr)
+	}()
+
 	retrySeconds := memoryMirrorRetryBackoff(event.AttemptCount).Seconds()
 	tag, err := s.Pool.Exec(ctx, `
 		UPDATE memory_mirror_outbox

@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	ghpkg "github.com/BeLazy167/argus/backend/internal/github"
+	"github.com/BeLazy167/argus/backend/internal/obs"
 	"github.com/BeLazy167/argus/backend/internal/store"
 )
 
@@ -112,6 +113,41 @@ type fullIndexGitHub interface {
 // IndexRepoBounded stages one deterministic window at an immutable commit and
 // atomically publishes only after every source file has a ready snapshot.
 func IndexRepoBounded(
+	ctx context.Context,
+	st *store.Store,
+	ghClient fullIndexGitHub,
+	installationID int64,
+	owner, repo, defaultBranch string,
+	repoDBID int64,
+	fileCap int,
+	legacyCap int,
+) (result FullIndexResult, err error) {
+	operationID := obs.NewLogID()
+	started := time.Now()
+	slog.InfoContext(ctx, "graph full-index window started",
+		"operation_id", operationID, "installation_id", installationID,
+		"repo", owner+"/"+repo, "repo_id", repoDBID, "default_branch", defaultBranch,
+		"file_cap", boundedFullIndexFileCap(fileCap))
+	result, err = indexRepoBounded(ctx, st, ghClient, installationID, owner, repo, defaultBranch, repoDBID, fileCap, legacyCap)
+	if payload, marshalErr := json.Marshal(result); marshalErr == nil {
+		obs.LogPayload(ctx, slog.Default(), "graph full-index window result", operationID, "result", "application/json", payload)
+	}
+	level := slog.LevelInfo
+	message := "graph full-index window completed"
+	if err != nil {
+		level = slog.LevelError
+		message = "graph full-index window failed"
+	}
+	slog.Log(ctx, level, message,
+		"operation_id", operationID, "installation_id", installationID,
+		"repo", owner+"/"+repo, "repo_id", repoDBID,
+		"generation_id", result.Snapshot.GenerationID, "staged", result.Staged,
+		"remaining", result.Remaining, "published", result.Published,
+		"unchanged", result.Unchanged, "duration_ms", time.Since(started).Milliseconds(), "error", err)
+	return result, err
+}
+
+func indexRepoBounded(
 	ctx context.Context,
 	st *store.Store,
 	ghClient fullIndexGitHub,

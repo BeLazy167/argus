@@ -9,9 +9,13 @@ package api
 
 import (
 	"crypto/subtle"
+	"log/slog"
 	"net/http"
 	"net/http/pprof"
 	"os"
+	"time"
+
+	"github.com/BeLazy167/argus/backend/internal/obs"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -47,11 +51,15 @@ func requireAdminToken(expected string) func(http.Handler) http.Handler {
 	want := []byte(expected)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			started, operationID := time.Now(), obs.NewLogID()
+			slog.InfoContext(r.Context(), "pprof authorization started", "operation_id", operationID, "operation", "middleware.pprof_auth", "action", "start")
 			got := []byte(r.Header.Get("X-Admin-Token"))
 			if len(got) != len(want) || subtle.ConstantTimeCompare(got, want) != 1 {
+				slog.WarnContext(r.Context(), "pprof authorization denied", "operation_id", operationID, "operation", "middleware.pprof_auth", "action", "denial", "duration_ms", time.Since(started).Milliseconds())
 				http.NotFound(w, r)
 				return
 			}
+			slog.InfoContext(r.Context(), "pprof authorization accepted", "operation_id", operationID, "operation", "middleware.pprof_auth", "action", "success", "duration_ms", time.Since(started).Milliseconds())
 			next.ServeHTTP(w, r)
 		})
 	}

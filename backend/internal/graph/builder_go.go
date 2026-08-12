@@ -4,21 +4,28 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"log/slog"
 	"strings"
+	"time"
 	"unicode"
+
+	"github.com/BeLazy167/argus/backend/internal/obs"
 )
 
 // parseGoAST extracts symbols and edges from Go source using the stdlib AST parser.
 // Returns nil, nil if parsing fails so the caller can fall back to regex.
-func parseGoAST(filePath, content string) ([]Symbol, []Edge) {
+func parseGoAST(filePath, content string) (syms []Symbol, edges []Edge) {
+	operationID := obs.NewLogID()
+	started := time.Now()
+	slog.Debug("graph Go AST parse started", "operation_id", operationID, "file", filePath, "source_bytes", len(content))
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, filePath, content, parser.ParseComments)
 	if err != nil {
+		slog.Warn("graph Go AST parse failed; regex fallback selected", "operation_id", operationID,
+			"file", filePath, "source_bytes", len(content), "parser", "go_ast", "fallback", "go_regex",
+			"duration_ms", time.Since(started).Milliseconds(), "error", err)
 		return nil, nil
 	}
-
-	var syms []Symbol
-	var edges []Edge
 
 	// Import edges
 	for _, imp := range f.Imports {
@@ -61,6 +68,9 @@ func parseGoAST(filePath, content string) ([]Symbol, []Edge) {
 		return true
 	})
 
+	slog.Debug("graph Go AST parse completed", "operation_id", operationID, "file", filePath,
+		"parser", "go_ast", "import_count", len(f.Imports), "symbol_count", len(syms), "edge_count", len(edges),
+		"duration_ms", time.Since(started).Milliseconds())
 	return syms, edges
 }
 

@@ -44,7 +44,20 @@ type MemoryListResult struct {
 
 // ListMemories lists only live rows for one installation in deterministic
 // updated_at,id order and reports the matching total before pagination.
-func (s *Store) ListMemories(ctx context.Context, filter MemoryListFilter) (MemoryListResult, error) {
+func (s *Store) ListMemories(ctx context.Context, filter MemoryListFilter) (storeResult0 MemoryListResult, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx,
+			"ListMemories",
+		)
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	where := []string{"installation_id = $1"}
 	args := []any{filter.InstallationID}
 	add := func(clause string, value any) {

@@ -215,12 +215,27 @@ func (r *EmbedderRegistry) GetEmbedder(ctx context.Context, installationID int64
 	r.mu.Lock()
 	if c, ok := r.cache[installationID]; ok && time.Now().Before(c.expiresAt) {
 		r.mu.Unlock()
+		model := ""
+		if c.embedder != nil {
+			model = c.embedder.Model()
+		}
+		r.logger.DebugContext(ctx, "embedding provider cache hit", "installation_id", installationID,
+			"model", model, "enabled", c.embedder != nil, "expires_at", c.expiresAt)
 		return c.embedder, nil
 	}
 	gen := r.gen[installationID]
 	r.mu.Unlock()
 
+	r.logger.DebugContext(ctx, "embedding provider resolution started", "installation_id", installationID)
+	resolveStarted := time.Now()
 	e, resolveErr := r.resolveUncached(ctx, installationID)
+	model := ""
+	if e != nil {
+		model = e.Model()
+	}
+	r.logger.InfoContext(ctx, "embedding provider resolved", "installation_id", installationID,
+		"model", model, "enabled", e != nil, "fallback", resolveErr != nil,
+		"duration_ms", time.Since(resolveStarted).Milliseconds())
 	if resolveErr != nil {
 		r.logger.Warn("embeddings BYOK resolution failed; using platform key",
 			"installation_id", installationID, "error", resolveErr)
@@ -288,6 +303,7 @@ func (r *EmbedderRegistry) refreshEmbedder(ctx context.Context, installationID i
 // review picks up the change immediately (same contract as
 // Registry.InvalidateClient); the TTL bounds staleness where it isn't called.
 func (r *EmbedderRegistry) Invalidate(installationID int64) {
+	r.logger.Info("embedding provider cache invalidated", "installation_id", installationID)
 	r.mu.Lock()
 	delete(r.cache, installationID)
 	r.gen[installationID]++

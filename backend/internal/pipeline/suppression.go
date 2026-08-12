@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strconv"
 	"strings"
@@ -94,7 +95,15 @@ func FindingTextFromPostedBody(body string) string {
 // rendered comment body is not a similarity between the findings: measured
 // on the live corpus, the SAME finding scored 0.7193 mean / 0.9000 max across
 // the shape boundary, so an identical re-post never reached the drop floor.
-func dismissalSearch(ctx context.Context, indexer memory.Indexer, repo, body string, threshold float64) ([]memory.PatternMatch, error) {
+func dismissalSearch(ctx context.Context, indexer memory.Indexer, repo, body string, threshold float64) (matches []memory.PatternMatch, err error) {
+	opID, started := pipelineOperationStart(ctx, slog.Default(), "dismissal_memory_search", "retrieve prior trusted dismissal feedback for the same finding semantics and expose failures distinctly from no matches", map[string]any{"repo": repo, "body": body, "threshold": threshold})
+	defer func() {
+		if err != nil {
+			pipelineOperationFailure(ctx, slog.Default(), opID, "dismissal_memory_search", started, err)
+			return
+		}
+		pipelineOperationResult(ctx, slog.Default(), opID, "dismissal_memory_search", "completed", started, matches, "match_count", len(matches))
+	}()
 	if body == "" {
 		return nil, nil
 	}

@@ -1,6 +1,10 @@
 package admission
 
-import "fmt"
+import (
+	"fmt"
+	"log/slog"
+	"time"
+)
 
 // Limits bound what one review may cost.
 //
@@ -88,6 +92,7 @@ func (t TokenEstimate) known() bool { return t.Samples > 0 && t.AvgTokens > 0 }
 // first hit would let a request that merely reduces on size slip past a token
 // count that should refuse it.
 func Budget(size Size, est TokenEstimate, lim Limits) Verdict {
+	started := time.Now()
 	v := Allow()
 
 	if lim.HardFiles > 0 && size.Files >= lim.HardFiles {
@@ -116,5 +121,9 @@ func Budget(size Size, est TokenEstimate, lim Limits) Verdict {
 		}
 	}
 
+	slog.Info("admission budget decided", "outcome", v.Outcome, "reason", v.Reason,
+		"files", size.Files, "lines", size.Lines, "estimated_tokens", est.AvgTokens,
+		"token_samples", est.Samples, "max_files", v.MaxFiles, "force_shallow", v.ForceShallow,
+		"duration_ms", time.Since(started).Milliseconds())
 	return v
 }

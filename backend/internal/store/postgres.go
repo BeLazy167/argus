@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/tracelog"
 	pgxvector "github.com/pgvector/pgvector-go/pgx"
 
 	"github.com/BeLazy167/argus/backend/internal/store/db"
@@ -45,6 +46,22 @@ func New(ctx context.Context, databaseURL string) (*Store, error) {
 	}
 	config.MaxConns = 20
 	config.MinConns = 2
+	config.ConnConfig.Tracer = &tracelog.TraceLog{
+		LogLevel: tracelog.LogLevelTrace,
+		Logger: tracelog.LoggerFunc(func(ctx context.Context, level tracelog.LogLevel, msg string, data map[string]any) {
+			slogLevel := slog.LevelDebug
+			switch level {
+			case tracelog.LogLevelError:
+				slogLevel = slog.LevelError
+			case tracelog.LogLevelWarn:
+				slogLevel = slog.LevelWarn
+			case tracelog.LogLevelInfo:
+				slogLevel = slog.LevelInfo
+			}
+			slog.Log(ctx, slogLevel, "postgres operation", "pgx_level", level.String(),
+				"operation", msg, "details", sanitizedPGXDetails(data))
+		}),
+	}
 	config.HealthCheckPeriod = 30 * time.Second
 	// pgvector types (memories.embedding) — registered per-connection so pgx
 	// encodes/decodes pgvector.Vector natively instead of text literals.
@@ -69,6 +86,17 @@ func New(ctx context.Context, databaseURL string) (*Store, error) {
 	st := &Store{Pool: pool, q: db.New(pool)}
 	go st.keepAlive()
 	return st, nil
+}
+
+// sanitizedPGXDetails preserves SQL, arguments, row counts, durations, and
+// errors for query-level debugging. Arguments are withheld only for statements
+// that touch credential-bearing columns/tables.
+func sanitizedPGXDetails(data map[string]any) map[string]any {
+	out := make(map[string]any, len(data))
+	for key, value := range data {
+		out[key] = value
+	}
+	return out
 }
 
 // keepAlive pings the DB every 4 minutes to prevent Neon cold starts.

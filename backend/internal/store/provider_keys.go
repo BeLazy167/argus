@@ -16,7 +16,19 @@ import (
 // — a key-only rotation must never silently strip a custom endpoint or its
 // declared model (that would flip the row back to platform defaults and
 // fragment the embedding space). To clear them, delete and recreate the row.
-func (s *Store) UpsertProviderKey(ctx context.Context, installationID int64, repoID *int64, provider, apiKey string, baseURL, model *string) (*ProviderKey, error) {
+func (s *Store) UpsertProviderKey(ctx context.Context, installationID int64, repoID *int64, provider, apiKey string, baseURL, model *string) (storeResult0 *ProviderKey, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "UpsertProviderKey", "installation_id", storeLogValue(installationID), "repo_id", storeLogValue(repoID), "provider", storeLogValue(provider), "model", storeLogValue(
+			model,
+		))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	// Empty apiKey updates endpoint/model metadata without destroying a stored key.
 	enc, hint := "", ""
 	if apiKey != "" {
@@ -49,7 +61,21 @@ func (s *Store) UpsertProviderKey(ctx context.Context, installationID int64, rep
 	return &key, nil
 }
 
-func (s *Store) ListProviderKeys(ctx context.Context, installationID int64) ([]ProviderKey, error) {
+func (s *Store) ListProviderKeys(ctx context.Context, installationID int64) (storeResult0 []ProviderKey, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ListProviderKeys", "installation_id", storeLogValue(installationID))
+	defer func() {
+		if recovered :=
+			recover(); recovered != nil {
+			storeFinishPanic(storeFinish,
+				recovered,
+
+				storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	rows, err := s.q.ListProviderKeys(ctx, installationID)
 	if err != nil {
 		return nil, err
@@ -61,14 +87,36 @@ func (s *Store) ListProviderKeys(ctx context.Context, installationID int64) ([]P
 	return keys, nil
 }
 
-func (s *Store) DeleteProviderKey(ctx context.Context, id int64, installationID int64) error {
+func (s *Store) DeleteProviderKey(ctx context.Context, id int64, installationID int64) (storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "DeleteProviderKey", "id", storeLogValue(id), "installation_id",
+			storeLogValue(installationID))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered)
+			panic(recovered)
+		}
+		storeFinish(storeErr)
+	}()
+
 	_, err := s.DeleteProviderKeyReturningProvider(ctx, id, installationID)
 	return err
 }
 
 // DeleteProviderKeyReturningProvider atomically deletes a tenant-scoped key and
 // returns its provider slot so callers can trigger provider-specific cleanup.
-func (s *Store) DeleteProviderKeyReturningProvider(ctx context.Context, id int64, installationID int64) (string, error) {
+func (s *Store) DeleteProviderKeyReturningProvider(ctx context.Context, id int64, installationID int64) (storeResult0 string, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "DeleteProviderKeyReturningProvider", "id", storeLogValue(id), "installation_id", storeLogValue(installationID))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	provider, err := s.q.DeleteProviderKey(ctx, db.DeleteProviderKeyParams{ID: id, InstallationID: installationID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", fmt.Errorf("provider key %d not found", id)
@@ -82,6 +130,19 @@ func (s *Store) DeleteProviderKeyReturningProvider(ctx context.Context, id int64
 // ResolveAPIKey resolves an API key for a provider: repo-level → org-level → env fallback.
 // Returns decrypted apiKey, baseURL, and whether a DB key was found.
 func (s *Store) ResolveAPIKey(ctx context.Context, installationID int64, repoID *int64, provider string) (apiKey string, baseURL string, found bool, err error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ResolveAPIKey", "installation_id", storeLogValue(installationID), "repo_id", storeLogValue(repoID),
+			"provider", storeLogValue(provider))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered,
+				baseURL, found)
+			panic(recovered)
+		}
+		storeFinish(err, baseURL,
+			found)
+	}()
+
 	var enc string
 	var configuredBaseURL *string
 	resolved := false
@@ -155,6 +216,19 @@ func resolveEmbeddingsKey(ctx context.Context, q embeddingKeyQuerier, installati
 }
 
 func (s *Store) ResolveEmbeddingsKey(ctx context.Context, installationID int64) (apiKey, baseURL, model string, found bool, err error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ResolveEmbeddingsKey", "installation_id", storeLogValue(installationID))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish,
+
+				recovered, baseURL, model, found)
+			panic(recovered)
+		}
+		storeFinish(err, baseURL, model, found)
+	}()
+
 	return resolveEmbeddingsKey(ctx, s.Pool, installationID)
 }
 
@@ -164,5 +238,19 @@ func (s *Store) ResolveEmbeddingsKey(ctx context.Context, installationID int64) 
 // locked connection prevents a completed repair from being followed by a
 // stale, previously captured indexer write.
 func (s *Store) ResolveEmbeddingsKeyFromConn(ctx context.Context, conn *pgxpool.Conn, installationID int64) (apiKey, baseURL, model string, found bool, err error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ResolveEmbeddingsKeyFromConn", "installation_id",
+			storeLogValue(installationID))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish,
+
+				recovered, baseURL, model, found)
+			panic(recovered)
+		}
+		storeFinish(err, baseURL, model, found)
+	}()
+
 	return resolveEmbeddingsKey(ctx, conn, installationID)
 }

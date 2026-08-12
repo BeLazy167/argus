@@ -58,7 +58,7 @@ func NewChatProvider(name, apiKey, baseURL string) *ChatProvider {
 		name:    name,
 		apiKey:  apiKey,
 		baseURL: baseURL,
-		client:  &http.Client{Timeout: llmClientTimeout},
+		client:  &http.Client{Timeout: llmClientTimeout, Transport: obs.NewLoggingRoundTripper("llm:"+name, http.DefaultTransport)},
 	}
 }
 
@@ -123,7 +123,7 @@ func NewAzureProvider(apiKey, baseURL string) *ChatProvider {
 		authStyle:       authStyle,
 		pathFn:          pathFn,
 		useResponsesAPI: isCognitive,
-		client:          &http.Client{Timeout: llmClientTimeout},
+		client:          &http.Client{Timeout: llmClientTimeout, Transport: obs.NewLoggingRoundTripper("llm:azure", http.DefaultTransport)},
 	}
 }
 
@@ -162,7 +162,7 @@ func NewVercelGatewayProvider(apiKey, baseURL string) *ChatProvider {
 		apiKey:      apiKey,
 		baseURL:     baseURL,
 		gatewayOnly: only,
-		client:      &http.Client{Timeout: llmClientTimeout},
+		client:      &http.Client{Timeout: llmClientTimeout, Transport: obs.NewLoggingRoundTripper("llm:vercel", http.DefaultTransport)},
 	}
 }
 
@@ -174,7 +174,7 @@ func NewGCPVertexProvider(apiKey, baseURL string) *ChatProvider {
 		name:    "gcp_vertex",
 		apiKey:  apiKey,
 		baseURL: baseURL,
-		client:  &http.Client{Timeout: llmClientTimeout},
+		client:  &http.Client{Timeout: llmClientTimeout, Transport: obs.NewLoggingRoundTripper("llm:gcp_vertex", http.DefaultTransport)},
 	}
 }
 
@@ -188,31 +188,48 @@ func NewAWSBedrockProvider(apiKey, baseURL string) *ChatProvider {
 		pathFn: func(_ string) string {
 			return "/openai/v1/chat/completions"
 		},
-		client: &http.Client{Timeout: llmClientTimeout},
+		client: &http.Client{Timeout: llmClientTimeout, Transport: obs.NewLoggingRoundTripper("llm:aws_bedrock", http.DefaultTransport)},
 	}
 }
 
 func (p *ChatProvider) Name() string { return p.name }
 
 // Complete wraps the underlying HTTP call with structured telemetry. Every
-// invocation emits exactly one slog record — `llm.call.completed` on success
-// (Info), `llm.call.failed` on error (Error) — both carrying stage, model,
-// provider, and a numeric status_code so PostHog can slice cost/latency by
-// stage without crossing the log-stream boundary. Forwarding is driven by
-// the `event=` attr, so adding new record attrs does not require new
-// handler logic; it does require the attr key to appear in obs.AllowedKeys.
+// invocation emits a start record, chunked request/response payload records,
+// and one terminal `llm.call.completed` or `llm.call.failed` summary. The
+// terminal records carry stage, model, provider, and numeric status so PostHog
+// can slice cost/latency; the high-cardinality payload records remain stdout-
+// only because they do not declare an `event` attribute.
 func (p *ChatProvider) Complete(ctx context.Context, req CompletionRequest) (CompletionResponse, error) {
+	operationID := obs.NewLogID()
 	start := time.Now()
+	if payload, err := json.Marshal(req); err == nil {
+		obs.LogPayload(ctx, slog.Default(), "LLM completion request", operationID, "request", "application/json", payload)
+	}
+	slog.InfoContext(ctx, "LLM completion started",
+		"operation_id", operationID,
+		"provider", p.name,
+		"model", req.Model,
+		"stage", req.Stage,
+		"message_count", len(req.Messages),
+		"tool_count", len(req.Tools),
+		"max_tokens", req.MaxTokens,
+		"temperature", req.Temperature,
+		"json_mode", req.JSONMode,
+		"reasoning_effort", req.ReasoningEffort,
+	)
 	resp, statusCode, err := p.complete(ctx, req)
 	durationMs := time.Since(start).Milliseconds()
 
 	if err != nil {
 		slog.ErrorContext(ctx, "llm call failed",
 			slog.String("event", "llm.call.failed"),
+			slog.String("operation_id", operationID),
 			slog.String("provider", p.name),
 			slog.String("model", req.Model),
 			slog.String("stage", req.Stage),
 			slog.String("error_class", classifyLLMError(err)),
+			slog.String("error", err.Error()),
 			slog.Int("status_code", statusCode),
 			slog.Int64("duration_ms", durationMs),
 			slog.String("trace_id", obs.TraceID(ctx)),
@@ -220,8 +237,12 @@ func (p *ChatProvider) Complete(ctx context.Context, req CompletionRequest) (Com
 		return resp, err
 	}
 
+	if payload, err := json.Marshal(resp); err == nil {
+		obs.LogPayload(ctx, slog.Default(), "LLM completion response", operationID, "response", "application/json", payload)
+	}
 	slog.InfoContext(ctx, "llm call completed",
 		slog.String("event", "llm.call.completed"),
+		slog.String("operation_id", operationID),
 		slog.String("provider", p.name),
 		slog.String("model", req.Model),
 		slog.String("stage", req.Stage),

@@ -7,8 +7,22 @@ import "log/slog"
 // allowlist_test AST walker fails CI if a new slog.String/Int/... call
 // introduces a literal key that is not present here (or in DenyKeys).
 var AllowedKeys = map[string]struct{}{
+
+	// operational logging (non-sensitive configuration, decisions, and counts)
+	"outcome": {}, "source": {}, "self_hosted": {}, "enabled": {}, "explicit": {},
+	"files": {}, "lines": {}, "estimated_tokens": {}, "token_samples": {}, "max_files": {},
+	"force_shallow": {}, "permission_checker_configured": {}, "rate_limiter_configured": {},
+	"actor_kind": {}, "force": {}, "slot": {}, "configured": {}, "cancelled": {},
+	"provider_cache_ttl": {}, "repo_id_ptr": {}, "cache_result": {}, "config_count": {},
+	"available": {}, "plaintext_bytes": {}, "ciphertext_bytes": {}, "input_bytes": {},
+	"file_count": {}, "lines_changed": {}, "input_file_count": {}, "large_file_count": {},
+	"template": {}, "output_bytes": {}, "format": {}, "ttl_ms": {}, "valid": {},
+	"runner_count": {}, "eligible_count": {}, "finding_count": {}, "buffer_size": {},
+	"sent": {}, "dropped_buffer": {}, "dropped_breaker": {}, "dropped_enqueue": {},
+	"dropped_unattributed": {}, "failure_count": {}, "open_duration_ms": {},
+
 	// identity / scope
-	"event": {}, "trace_id": {}, "review_id": {}, "installation_id": {}, "repo": {},
+	"event": {}, "operation_id": {}, "trace_id": {}, "review_id": {}, "installation_id": {}, "repo": {},
 	"pr_number": {}, "user_id": {}, "github_login": {}, "delivery_id": {},
 
 	// lifecycle
@@ -32,7 +46,7 @@ var AllowedKeys = map[string]struct{}{
 	"total": {}, "line": {}, "pattern_id": {}, "quality": {}, "similar_dismissals": {},
 
 	// performance
-	"duration_ms": {}, "tokens": {}, "prompt_tokens": {}, "completion_tokens": {},
+	"duration_ms": {}, "trigger_to_start_ms": {}, "tokens": {}, "prompt_tokens": {}, "completion_tokens": {},
 	"cost_usd": {}, "rss_mb": {}, "age_minutes": {},
 
 	// errors
@@ -61,7 +75,7 @@ var AllowedKeys = map[string]struct{}{
 var DenyKeys = map[string]struct{}{
 	"api_key": {}, "api_key_enc": {}, "prompt_text": {},
 	"custom_persona_prompt": {}, "password": {}, "secret": {},
-	"token": {}, "key_hint": {},
+	"token": {}, "key_hint": {}, "error": {}, "payload": {},
 }
 
 // FilterAttrs walks the slog.Record's attrs and returns only keys in

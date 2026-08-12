@@ -83,6 +83,10 @@ type intentExecutor interface {
 // language is detected. File content comes from the diff's FullContent when
 // present, else a GitHub fetch via dep.
 func attachSAST(ctx context.Context, run *PipelineRun, dep sastFileFetcher, logger *slog.Logger) {
+	opID, started := pipelineOperationStart(ctx, logger, "prereview_sast", "fetch changed file contents and attach static-analysis hints before review", run)
+	defer func() {
+		pipelineOperationResult(ctx, logger, opID, "prereview_sast", "completed", started, run.SastFindings)
+	}()
 	if run == nil || run.Diff == nil || len(run.Diff.Files) > prereviewSASTFileCap {
 		return
 	}
@@ -136,6 +140,10 @@ func attachSAST(ctx context.Context, run *PipelineRun, dep sastFileFetcher, logg
 // the LLM knows which files are risky before reviewing. Non-fatal — two bulk
 // queries (edges + bug density); if both fail run.ArchContext stays nil.
 func attachArchContext(ctx context.Context, run *PipelineRun, dep archContextReader, logger *slog.Logger) {
+	opID, started := pipelineOperationStart(ctx, logger, "prereview_architecture", "attach graph edges and historical bug-density signals for changed files", run)
+	defer func() {
+		pipelineOperationResult(ctx, logger, opID, "prereview_architecture", "completed", started, run.ArchContext)
+	}()
 	if run == nil {
 		return
 	}
@@ -218,6 +226,10 @@ func attachArchContext(ctx context.Context, run *PipelineRun, dep archContextRea
 // a cancelled context and silently always fell back to defaults; the deferred
 // cancel here fixes that so configured flags actually take effect.
 func attachLinks(ctx context.Context, run *PipelineRun, dep linkEnricherDeps, logger *slog.Logger) {
+	opID, started := pipelineOperationStart(ctx, logger, "prereview_links", "hydrate linked issues, linked pull requests, and feature flags before review", run)
+	defer func() {
+		pipelineOperationResult(ctx, logger, opID, "prereview_links", "completed", started, map[string]any{"issues": run.LinkedIssues, "prs": run.LinkedPRs, "feature_flags": run.FeatureFlags})
+	}()
 	if run == nil {
 		return
 	}
@@ -267,6 +279,10 @@ func attachLinks(ctx context.Context, run *PipelineRun, dep linkEnricherDeps, lo
 // Execute is documented to always return nil; a non-nil error indicates a
 // programmer error (contract drift) and is logged loudly rather than swallowed.
 func attachIntent(ctx context.Context, run *PipelineRun, stage intentExecutor, logger *slog.Logger) {
+	opID, started := pipelineOperationStart(ctx, logger, "prereview_intent", "execute best-effort author-intent extraction before review", run)
+	defer func() {
+		pipelineOperationResult(ctx, logger, opID, "prereview_intent", "completed", started, run.PRIntent)
+	}()
 	if run == nil {
 		return
 	}
@@ -334,6 +350,10 @@ func intentExecutorFor(stage *IntentExtractionStage) intentExecutor {
 // intent-aware context — closing the gap where retries skipped intent and
 // persisted contracts with an empty change class.
 func (o *Orchestrator) enrichPreReview(ctx context.Context, run *PipelineRun) {
+	opID, started := pipelineOperationStart(ctx, o.logger, "prereview_enrichment", "run all pre-review context enrichers with identical semantics for webhook and retry paths", run)
+	defer func() {
+		pipelineOperationResult(ctx, o.logger, opID, "prereview_enrichment", "completed", started, run)
+	}()
 	if run == nil {
 		return
 	}

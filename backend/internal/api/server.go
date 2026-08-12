@@ -118,8 +118,8 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 	r.Use(traceIDMiddleware)
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
-	r.Use(middleware.Logger)
-	r.Use(middleware.Recoverer)
+	r.Use(s.requestLogging)
+	r.Use(s.panicRecovery)
 	if cfg.CORSAllowOrigin != "" {
 		r.Use(cors(cfg.CORSAllowOrigin))
 	}
@@ -287,18 +287,25 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.router.ServeHTTP(w, r)
+	ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
+	op := s.beginOperation(r.Context(), "api.ServeHTTP")
+	defer op.Finish(ww)
+	s.router.ServeHTTP(ww, r)
 }
 
 // --- Health ---
 
-func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.healthz")
+	defer op.Finish(w)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.readyz")
+	defer op.Finish(w)
 	if err := s.store.Pool.Ping(r.Context()); err != nil {
-		s.logger.Error("readyz ping failed", "error", err)
+		s.logger.ErrorContext(r.Context(), "readyz ping failed", "error", err)
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not ready"})
 		return
 	}

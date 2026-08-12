@@ -6,6 +6,9 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
+
+	"github.com/BeLazy167/argus/backend/internal/obs"
 )
 
 // Cross-repo API edges, by string matching only.
@@ -256,7 +259,27 @@ func isMatchablePath(p string) bool {
 // is persisted exactly like a string match. That path is NOT built; it is the
 // documented fallback for what string matching misses, not the primary
 // mechanism.
-func MatchAPIEndpoints(endpoints []APIEndpoint) []APIMatch {
+func MatchAPIEndpoints(endpoints []APIEndpoint) (out []APIMatch) {
+	operationID := obs.NewLogID()
+	started := time.Now()
+	serverCount, clientCount := 0, 0
+	for _, endpoint := range endpoints {
+		switch endpoint.Role {
+		case RoleServer:
+			serverCount++
+		case RoleClient:
+			clientCount++
+		}
+	}
+	slog.Info("graph API endpoint matching started", "operation_id", operationID,
+		"endpoint_count", len(endpoints), "server_count", serverCount, "client_count", clientCount,
+		"strategy", "normalized_method_path_then_compatible_pattern", "match_cap", maxInferredEdgesPerRun)
+	defer func() {
+		slog.Info("graph API endpoint matching completed", "operation_id", operationID,
+			"endpoint_count", len(endpoints), "server_count", serverCount, "client_count", clientCount,
+			"match_count", len(out), "truncated", len(out) >= maxInferredEdgesPerRun,
+			"duration_ms", time.Since(started).Milliseconds())
+	}()
 	type key struct{ method, path string }
 	servers := make(map[key][]APIEndpoint)
 	anyServers := make(map[string][]APIEndpoint)
@@ -271,7 +294,6 @@ func MatchAPIEndpoints(endpoints []APIEndpoint) []APIMatch {
 		servers[key{e.Method, e.Path}] = append(servers[key{e.Method, e.Path}], e)
 	}
 
-	var out []APIMatch
 	for _, c := range endpoints {
 		if c.Role != RoleClient || !isMatchablePath(c.Path) {
 			continue
@@ -292,8 +314,9 @@ func MatchAPIEndpoints(endpoints []APIEndpoint) []APIMatch {
 				continue
 			}
 			if len(out) >= maxInferredEdgesPerRun {
-				slog.Warn("graph: api match cross product hit the cap, truncating",
-					"cap", maxInferredEdgesPerRun, "method", c.Method, "path", c.Path)
+				slog.Warn("graph API endpoint matching truncated at cap",
+					"operation_id", operationID, "cap", maxInferredEdgesPerRun,
+					"method", c.Method, "path", c.Path, "server_count", serverCount, "client_count", clientCount)
 				return out
 			}
 			out = append(out, APIMatch{Client: c, Server: s})
@@ -371,8 +394,28 @@ func serverPatternMatchesClient(serverPath, clientPath string) bool {
 // source file. Dispatch is per language because the discriminator between "this
 // declares a route" and "this calls one" is language-specific — see each
 // extractor.
-func ExtractAPIEndpoints(filePath, content string) []APIEndpoint {
+func ExtractAPIEndpoints(filePath, content string) (out []APIEndpoint) {
+	operationID := obs.NewLogID()
+	started := time.Now()
+	lang := langForFile(filePath)
+	slog.Debug("graph API endpoint extraction started", "operation_id", operationID,
+		"file", filePath, "language", lang, "source_bytes", len(content))
+	defer func() {
+		servers, clients := 0, 0
+		for _, endpoint := range out {
+			if endpoint.Role == RoleServer {
+				servers++
+			} else if endpoint.Role == RoleClient {
+				clients++
+			}
+		}
+		slog.Debug("graph API endpoint extraction completed", "operation_id", operationID,
+			"file", filePath, "language", lang, "endpoint_count", len(out),
+			"server_count", servers, "client_count", clients, "duration_ms", time.Since(started).Milliseconds())
+	}()
 	if len(content) > maxContentBytes {
+		slog.Warn("graph API endpoint extraction skipped", "operation_id", operationID, "file", filePath,
+			"reason", "source_too_large", "source_bytes", len(content), "limit_bytes", maxContentBytes)
 		return nil
 	}
 	// Test files declare no route table and call no API. A fixture string
@@ -385,9 +428,9 @@ func ExtractAPIEndpoints(filePath, content string) []APIEndpoint {
 	// claimed dependency. Filtered HERE rather than at the one call site, so no
 	// future caller of the exported extractor has to remember.
 	if isTestFile(filePath) {
+		slog.Debug("graph API endpoint extraction skipped", "operation_id", operationID, "file", filePath, "reason", "test_file")
 		return nil
 	}
-	lang := langForFile(filePath)
 	// Comments are blanked before anything reads the text. The extractors are
 	// regex/line based and have no notion of a comment, so
 	// `// r.Get("/api/v1/legacy/thing", h.Legacy)` was extracted as a real
@@ -406,9 +449,11 @@ func ExtractAPIEndpoints(filePath, content string) []APIEndpoint {
 	case "python":
 		eps = extractPythonEndpoints(filePath, content)
 	default:
+		slog.Debug("graph API endpoint extraction skipped", "operation_id", operationID, "file", filePath,
+			"language", lang, "reason", "unsupported_language")
 		return nil
 	}
-	out := eps[:0]
+	out = eps[:0]
 	for _, e := range eps {
 		if isMatchablePath(e.Path) {
 			out = append(out, e)

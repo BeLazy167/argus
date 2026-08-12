@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/BeLazy167/argus/backend/internal/obs"
 	"github.com/BeLazy167/argus/backend/internal/util"
 	"github.com/google/uuid"
 )
@@ -417,7 +418,24 @@ func feedbackShape(fb FeedbackMemory) (Polarity, string, bool) {
 // assembleBriefingWith. The repo (OR-of-types) and shared (numeric
 // confidence) legs keep bespoke SearchRequests the single-type MemoryQuery
 // does not model.
-func specialistBlockWith(ctx context.Context, run runSearchFn, logger *slog.Logger, repo, filePath, specialistQuery string, thresholds Thresholds) (MemoryBlock, error) {
+func specialistBlockWith(ctx context.Context, run runSearchFn, logger *slog.Logger, repo, filePath, specialistQuery string, thresholds Thresholds) (block MemoryBlock, err error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	operationID := obs.NewLogID()
+	started := time.Now()
+	logger.InfoContext(ctx, "memory specialist retrieval started", "operation_id", operationID,
+		"repo", repo, "file", filePath, "query_len", len(specialistQuery))
+	defer func() {
+		attrs := []any{"operation_id", operationID, "repo", repo, "file", filePath,
+			"has_synthesis", block.Synthesis != "", "repo_count", len(block.Repo), "shared_count", len(block.Shared),
+			"duration_ms", time.Since(started).Milliseconds(), "error", err}
+		if err != nil {
+			logger.WarnContext(ctx, "memory specialist retrieval failed", attrs...)
+		} else {
+			logger.InfoContext(ctx, "memory specialist retrieval completed", attrs...)
+		}
+	}()
 	if repo == "" {
 		// Every leg is repo-scoped. briefingWith already guards this for the
 		// briefing path; keeping it here too means a direct caller cannot
@@ -429,7 +447,6 @@ func specialistBlockWith(ctx context.Context, run runSearchFn, logger *slog.Logg
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	var block MemoryBlock
 	var synthErr, repoErr, sharedErr error
 	var wg sync.WaitGroup
 	wg.Add(3)
@@ -440,6 +457,12 @@ func specialistBlockWith(ctx context.Context, run runSearchFn, logger *slog.Logg
 	// the AND filter is what actually narrows results to this file's synthesis.
 	go func() {
 		defer wg.Done()
+		legStarted := time.Now()
+		defer func() {
+			logger.DebugContext(ctx, "memory specialist retrieval leg completed", "operation_id", operationID,
+				"leg", "synthesis", "result_count", map[bool]int{true: 1, false: 0}[block.Synthesis != ""],
+				"duration_ms", time.Since(legStarted).Milliseconds(), "error", synthErr)
+		}()
 		if filePath == "" {
 			return
 		}
@@ -463,6 +486,12 @@ func specialistBlockWith(ctx context.Context, run runSearchFn, logger *slog.Logg
 	// 2. Repo signal — semantic, type IN {pattern, scenario, feedback}.
 	go func() {
 		defer wg.Done()
+		legStarted := time.Now()
+		defer func() {
+			logger.DebugContext(ctx, "memory specialist retrieval leg completed", "operation_id", operationID,
+				"leg", "repo_patterns", "result_count", len(block.Repo),
+				"duration_ms", time.Since(legStarted).Milliseconds(), "error", repoErr)
+		}()
 		block.Repo, repoErr = run(ctx, SearchRequest{
 			Query:        specialistQuery,
 			ContainerTag: RepoTagNew(repo),
@@ -483,6 +512,12 @@ func specialistBlockWith(ctx context.Context, run runSearchFn, logger *slog.Logg
 	// the threshold as a float, not a lexicographic string.
 	go func() {
 		defer wg.Done()
+		legStarted := time.Now()
+		defer func() {
+			logger.DebugContext(ctx, "memory specialist retrieval leg completed", "operation_id", operationID,
+				"leg", "shared_patterns", "result_count", len(block.Shared),
+				"duration_ms", time.Since(legStarted).Milliseconds(), "error", sharedErr)
+		}()
 		block.Shared, sharedErr = run(ctx, SearchRequest{
 			Query:        specialistQuery,
 			ContainerTag: SharedTag,
@@ -512,8 +547,11 @@ func specialistBlockWith(ctx context.Context, run runSearchFn, logger *slog.Logg
 		}
 	}
 	if failures == 3 {
-		return MemoryBlock{}, cmp.Or(synthErr, repoErr, sharedErr)
+		err = cmp.Or(synthErr, repoErr, sharedErr)
+		return MemoryBlock{}, err
 	}
+	logger.DebugContext(ctx, "memory specialist retrieval policy selected", "operation_id", operationID,
+		"policy", "keep_successful_legs", "failed_legs", failures, "successful_legs", 3-failures)
 	return block, nil
 }
 

@@ -466,6 +466,8 @@ func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, 
 
 // HandlePREvent processes a pull request webhook event.
 func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) error {
+	handleStartedAt := time.Now()
+	o.logger.InfoContext(ctx, "pull request pipeline trigger received", "event", "pipeline.review.triggered", "repo", event.RepoFullName, "pr_number", event.PRNumber, "action", event.Action, "installation_id", event.InstallationID)
 	// Only review on opened, synchronize, reopened, manual
 	switch event.Action {
 	case "opened", "synchronize", "reopened", "manual":
@@ -473,7 +475,7 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 	case "closed":
 		return o.handlePRClosed(ctx, event)
 	default:
-		o.logger.Info("ignoring PR action", "action", event.Action)
+		o.logger.InfoContext(ctx, "ignoring PR action", "event", "pipeline.review.trigger_skipped", "action", event.Action, "repo", event.RepoFullName, "pr_number", event.PRNumber, "reason", "unsupported_action")
 		return nil
 	}
 
@@ -667,8 +669,10 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', 'webhook', 0, $9)
 	`, reviewID, dbRepo.ID, event.PRNumber, event.PRTitle, event.PRAuthor, event.HeadSHA, event.BaseSHA, event.HeadRef, strPtrOrNil(traceID))
 	if err != nil {
+		o.logger.ErrorContext(ctx, "review record creation failed", "event", "pipeline.review.record_failed", "review_id", reviewID, "repo", event.RepoFullName, "pr_number", event.PRNumber, "error", err)
 		return fmt.Errorf("creating review record: %w", err)
 	}
+	o.logger.InfoContext(ctx, "review record created", "event", "pipeline.review.record_created", "review_id", reviewID, "repo_id", dbRepo.ID, "repo", event.RepoFullName, "pr_number", event.PRNumber, "status", "pending")
 
 	// Resolve per-org memory indexer
 	indexer := o.resolveIndexer(ctx, inst.ID)
@@ -778,6 +782,7 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		slog.Bool("deep_review", run.DeepReview),
 		slog.String("trigger", trigger),
 		slog.String("trace_id", run.TraceID),
+		slog.Int64("trigger_to_start_ms", time.Since(handleStartedAt).Milliseconds()),
 	)
 
 	startTime := time.Now()
@@ -959,6 +964,7 @@ func (o *Orchestrator) handlePRClosed(ctx context.Context, event ghpkg.PREvent) 
 // on "pending" forever. For those we rebuild a fresh run for the SAME review
 // and drive it from the initial state.
 func (o *Orchestrator) RetryReview(ctx context.Context, reviewID uuid.UUID, attemptGeneration int) error {
+	o.logger.InfoContext(ctx, "review retry started", "event", "pipeline.review.retry_started", "review_id", reviewID, "attempt_generation", attemptGeneration)
 	// Topic may already be opened by the caller (retry handler opens it
 	// before spawning the goroutine so the WebSocket can subscribe immediately).
 	if o.eventBus != nil {
@@ -993,6 +999,7 @@ func (o *Orchestrator) RetryReview(ctx context.Context, reviewID uuid.UUID, atte
 	// (intent/SAST/arch/links) stay unresolved by design: re-running them
 	// mid-flight would re-charge the intent LLM call on every resume.
 	if !prev.State.IsTerminal() {
+		o.logger.InfoContext(ctx, "review retry resuming non-terminal run", "event", "pipeline.review.retry_resume", "review_id", reviewID, "run_id", runID, "stage", string(prev.State), "attempt_generation", attemptGeneration)
 		_, err = o.sm.ResumeAttempt(ctx, runID, attemptGeneration)
 		return err
 	}
@@ -1043,6 +1050,7 @@ func (o *Orchestrator) RetryReview(ctx context.Context, reviewID uuid.UUID, atte
 	// survive persistence (all json:"-"). Without this a retried review posts
 	// against an empty contract and loses intent-aware review context.
 	o.enrichPreReview(ctx, fresh)
+	o.logger.InfoContext(ctx, "review retry rebuilt terminal run", "event", "pipeline.review.retry_rebuilt", "review_id", reviewID, "run_id", fresh.ID, "attempt_generation", attemptGeneration)
 	return o.sm.Run(ctx, fresh)
 }
 
@@ -1248,6 +1256,7 @@ func (o *Orchestrator) CancelStranded(ctx context.Context, reviewID uuid.UUID) e
 }
 
 func (o *Orchestrator) postStartedComment(ctx context.Context, event ghpkg.PREvent, run *PipelineRun, stageModels string) {
+	o.logger.InfoContext(ctx, "review progress comment post started", "event", "pipeline.github.progress_post_started", "review_id", run.ReviewID, "repo", event.RepoFullName, "pr_number", event.PRNumber)
 	owner, repo, err := splitRepoFullName(event.RepoFullName)
 	if err != nil {
 		o.logger.Warn("failed to split repo name for started comment", "error", err)
@@ -1289,11 +1298,14 @@ func (o *Orchestrator) postStartedComment(ctx context.Context, event ghpkg.PREve
 		return
 	}
 	run.StartedCommentNodeID = nodeID
+	o.logger.InfoContext(ctx, "review progress comment posted", "event", "pipeline.github.progress_posted", "review_id", run.ReviewID, "repo", event.RepoFullName, "pr_number", event.PRNumber, "comment_id", commentID, "comment_node_id", nodeID)
 	// Persist the REST id so a failure or a cancel on another machine can
 	// rewrite this comment. Non-fatal: losing it costs a stale "watch live"
 	// on one PR, which is strictly better than failing the review over it.
 	if err := o.st.SetStartedCommentID(ctx, run.ReviewID, commentID); err != nil {
-		o.logger.Warn("failed to persist started-comment id", "error", err, "review_id", run.ReviewID)
+		o.logger.WarnContext(ctx, "failed to persist started-comment id", "event", "pipeline.github.progress_ref_failed", "error", err, "review_id", run.ReviewID, "comment_id", commentID)
+	} else {
+		o.logger.InfoContext(ctx, "review progress comment reference persisted", "event", "pipeline.github.progress_ref_persisted", "review_id", run.ReviewID, "comment_id", commentID)
 	}
 }
 
@@ -2721,11 +2733,14 @@ func durablePostSucceeded(githubReviewID int64, outcome store.ReviewPostOutcome,
 }
 
 func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
+	postStartedAt := time.Now()
+	o.logger.InfoContext(ctx, "review posting stage started", "event", "pipeline.github.review_post_started", "review_id", run.ReviewID, "attempt_generation", run.AttemptGeneration, "repo", run.PREvent.RepoFullName, "pr_number", run.PREvent.PRNumber)
 	current, err := o.st.IsReviewAttemptCurrent(ctx, run.ReviewID, run.AttemptGeneration)
 	if err != nil {
 		return fmt.Errorf("checking review attempt: %w", err)
 	}
 	if !current {
+		o.logger.InfoContext(ctx, "review posting cancelled for stale attempt", "event", "pipeline.github.review_post_skipped", "review_id", run.ReviewID, "attempt_generation", run.AttemptGeneration, "reason", "stale_attempt")
 		return context.Canceled
 	}
 
@@ -2923,6 +2938,7 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	ghReviewID := recordedReviewID
 	postOutcome := store.ReviewPostAlreadyRecorded
 	if !postAlreadyRecorded {
+		o.logger.InfoContext(ctx, "GitHub review mutation started", "event", "pipeline.github.review_mutation_started", "review_id", run.ReviewID, "attempt_generation", run.AttemptGeneration, "inline_count", len(submission.GitHub.Comments))
 		// The exact hidden marker is the remote idempotency key for crash and
 		// response-loss reconciliation. It is stable for this review generation.
 		submission.GitHub.Summary += "\n\n" + ghpkg.ReviewMarker(run.ReviewID.String(), run.AttemptGeneration)
@@ -2956,6 +2972,7 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		}
 		return fmt.Errorf("posting review: %w", err)
 	}
+	o.logger.InfoContext(ctx, "GitHub review mutation evaluated", "event", "pipeline.github.review_mutation_completed", "review_id", run.ReviewID, "attempt_generation", run.AttemptGeneration, "github_review_id", ghReviewID, "post_outcome", string(postOutcome), "duration_ms", time.Since(postStartedAt).Milliseconds())
 	if postOutcome == store.ReviewPostRejected {
 		return context.Canceled
 	}
@@ -2970,10 +2987,12 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	// The completion CAS is also the follow-up winner election. This includes
 	// workers that observed ReviewPostAlreadyRecorded: exactly one worker may
 	// perform every externally visible completion side effect below.
+	o.logger.InfoContext(ctx, "review completion mutation started", "event", "pipeline.review.completion_started", "review_id", run.ReviewID, "attempt_generation", run.AttemptGeneration, "github_review_id", ghReviewID)
 	completion, err := o.st.CompletePostedReview(ctx, run.ReviewID, run.AttemptGeneration, ghReviewID)
 	if err != nil {
 		return err
 	}
+	o.logger.InfoContext(ctx, "review completion mutation evaluated", "event", "pipeline.review.completion_evaluated", "review_id", run.ReviewID, "attempt_generation", run.AttemptGeneration, "github_review_id", ghReviewID, "completion_outcome", string(completion))
 	switch completion {
 	case store.ReviewCompletionAlreadyCompleted:
 		o.logger.Warn("post: another worker completed the recorded review; skipping winner followups", "review_id", run.ReviewID, "attempt_generation", run.AttemptGeneration, "github_review_id", ghReviewID)
@@ -3000,8 +3019,11 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 
 	// Minimize the "review started" comment only after winning completion.
 	if run.StartedCommentNodeID != "" {
+		o.logger.InfoContext(ctx, "review progress comment minimize started", "event", "pipeline.github.progress_minimize_started", "review_id", run.ReviewID, "comment_node_id", run.StartedCommentNodeID)
 		if err := o.ghClient.MinimizeComment(ctx, run.PREvent.InstallationID, run.StartedCommentNodeID, "RESOLVED"); err != nil {
-			o.logger.Warn("failed to minimize started comment", "error", err)
+			o.logger.WarnContext(ctx, "failed to minimize started comment", "event", "pipeline.github.progress_minimize_failed", "review_id", run.ReviewID, "comment_node_id", run.StartedCommentNodeID, "error", err)
+		} else {
+			o.logger.InfoContext(ctx, "review progress comment minimized", "event", "pipeline.github.progress_minimized", "review_id", run.ReviewID, "comment_node_id", run.StartedCommentNodeID)
 		}
 	}
 
@@ -3144,6 +3166,7 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		})
 	}
 
+	o.logger.InfoContext(ctx, "review posting stage completed", "event", "pipeline.github.review_post_completed", "review_id", run.ReviewID, "attempt_generation", run.AttemptGeneration, "github_review_id", ghReviewID, "duration_ms", time.Since(postStartedAt).Milliseconds())
 	return nil
 }
 

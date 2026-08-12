@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/posthog/posthog-go"
 )
@@ -88,6 +89,7 @@ func newHandler(inner slog.Handler, client posthogEnqueuer) *Handler {
 	}
 	h.shared.wg.Add(1)
 	go h.drain()
+	h.logInternal(context.Background(), slog.LevelInfo, "PostHog log forwarding configured", "client_configured", client != nil, "buffer_size", defaultBufferSize)
 	return h
 }
 
@@ -107,7 +109,11 @@ func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 	if err := h.inner.Handle(ctx, r); err != nil {
 		return err
 	}
-	if h.client == nil || h.shared.closed.Load() {
+	if h.client == nil {
+		return nil
+	}
+	if h.shared.closed.Load() {
+		h.logInternal(ctx, slog.LevelWarn, "PostHog event dropped", "reason", "handler_closed")
 		return nil
 	}
 	event, ok := h.resolveEvent(r)
@@ -118,6 +124,7 @@ func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 	distinctID, repo, ok := h.resolveDistinctID(ctx, props)
 	if !ok {
 		h.shared.droppedUnattributed.Add(1)
+		h.logInternal(ctx, slog.LevelWarn, "PostHog event dropped", "event", event, "reason", "unattributed")
 		return nil
 	}
 	// "event" is the promoter key, not a payload property — strip before send.
@@ -133,6 +140,7 @@ func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 	case h.shared.buf <- pendingEvent{msg: msg}:
 	default:
 		h.shared.droppedBuffer.Add(1)
+		h.logInternal(ctx, slog.LevelWarn, "PostHog event dropped", "event", event, "reason", "buffer_full")
 	}
 	return nil
 }
@@ -159,11 +167,13 @@ func (h *Handler) WithGroup(name string) slog.Handler {
 // been enqueued (which hands them to posthog-go's own flush queue — callers
 // must still call posthog.Client.Close() afterward for the wire flush).
 func (h *Handler) Close() error {
+	started := time.Now()
 	h.shared.closeOnce.Do(func() {
 		h.shared.closed.Store(true)
 		close(h.shared.stopCh)
 	})
 	h.shared.wg.Wait()
+	h.logInternal(context.Background(), slog.LevelInfo, "PostHog log forwarding closed", "sent", h.Sent(), "dropped_buffer", h.DroppedBuffer(), "dropped_breaker", h.DroppedBreaker(), "dropped_enqueue", h.DroppedEnqueue(), "dropped_unattributed", h.DroppedUnattributed(), "duration_ms", time.Since(started).Milliseconds())
 	return nil
 }
 
@@ -277,10 +287,11 @@ func (h *Handler) drain() {
 	// malformed event cannot kill the drain goroutine and silently disable all
 	// telemetry for the remainder of the process.
 	defer func() {
-		if r := recover(); r != nil {
+		if recovered := recover(); recovered != nil {
 			// Route via the inner handler directly to avoid recursion through
 			// our own forwarder on shutdown.
 			h.shared.droppedEnqueue.Add(1)
+			h.logInternal(context.Background(), slog.LevelError, "PostHog drain panic recovered", "panic_msg_redacted", "posthog forward panic")
 		}
 	}()
 	for {
@@ -303,13 +314,27 @@ func (h *Handler) drain() {
 func (h *Handler) forward(msg posthog.Capture) {
 	if !h.shared.cb.AllowRequest() {
 		h.shared.droppedBreaker.Add(1)
+		h.logInternal(context.Background(), slog.LevelWarn, "PostHog event dropped", "event", msg.Event, "reason", "circuit_breaker_open")
 		return
 	}
 	if err := h.client.Enqueue(msg); err != nil {
+		wasOpen := h.shared.cb.IsOpen()
 		h.shared.cb.RecordFailure()
 		h.shared.droppedEnqueue.Add(1)
+		h.logInternal(context.Background(), slog.LevelError, "PostHog enqueue failed", "event", msg.Event, "error", err)
+		if !wasOpen && h.shared.cb.IsOpen() {
+			h.logInternal(context.Background(), slog.LevelWarn, "PostHog circuit breaker opened")
+		}
 		return
 	}
 	h.shared.cb.RecordSuccess()
 	h.shared.sent.Add(1)
+}
+
+// logInternal writes directly to the wrapped handler. Going through slog.Default
+// here would recurse back into this PostHog forwarding handler.
+func (h *Handler) logInternal(ctx context.Context, level slog.Level, message string, args ...any) {
+	record := slog.NewRecord(time.Now(), level, message, 0)
+	record.Add(args...)
+	_ = h.inner.Handle(ctx, record)
 }

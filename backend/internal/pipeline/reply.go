@@ -48,7 +48,15 @@ type replyDecision struct {
 
 // Analyze processes a comment reply event: looks up the original Argus comment,
 // sends context to LLM, and executes the decided action.
-func (ra *ReplyAnalyzer) Analyze(ctx context.Context, event ghpkg.CommentEvent) error {
+func (ra *ReplyAnalyzer) Analyze(ctx context.Context, event ghpkg.CommentEvent) (err error) {
+	opID, started := pipelineOperationStart(ctx, ra.logger, "reply_analysis", "authorize and classify a developer reply, post the model response, then apply permitted learning, outcome, lifecycle, and feedback effects", event)
+	defer func() {
+		if err != nil {
+			pipelineOperationFailure(ctx, ra.logger, opID, "reply_analysis", started, err)
+			return
+		}
+		pipelineOperationResult(ctx, ra.logger, opID, "reply_analysis", "success", started, map[string]any{"comment_id": event.CommentID, "in_reply_to_id": event.InReplyToID})
+	}()
 	if event.InReplyToID == 0 {
 		return nil
 	}

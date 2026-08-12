@@ -57,6 +57,8 @@ func parseFeatureFlags(raw json.RawMessage) featureFlagsResponse {
 }
 
 func (s *Server) getFeatureFlags(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.getFeatureFlags")
+	defer op.Finish(w)
 	installationID, err := strconv.ParseInt(chi.URLParam(r, "installationID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid installation id"})
@@ -68,7 +70,7 @@ func (s *Server) getFeatureFlags(w http.ResponseWriter, r *http.Request) {
 	}
 	raw, err := s.store.GetInstallationFeatureFlags(r.Context(), installationID)
 	if err != nil {
-		s.logger.Error("fetching feature flags", "error", err, "installation_id", installationID)
+		s.logger.ErrorContext(r.Context(), "fetching feature flags", "error", err, "installation_id", installationID)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
@@ -76,6 +78,8 @@ func (s *Server) getFeatureFlags(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) setFeatureFlags(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.setFeatureFlags")
+	defer op.Finish(w)
 	installationID, err := strconv.ParseInt(chi.URLParam(r, "installationID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid installation id"})
@@ -114,7 +118,7 @@ func (s *Server) setFeatureFlags(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.store.MergeInstallationFeatureFlags(r.Context(), installationID, raw); err != nil {
-		s.logger.Error("updating feature flags", "error", err, "installation_id", installationID)
+		s.logger.ErrorContext(r.Context(), "updating feature flags", "error", err, "installation_id", installationID)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "save failed"})
 		return
 	}

@@ -79,6 +79,7 @@ func (r EnrichResult) Total() int { return r.Matched + r.Enforced + r.Novel }
 // EventMemoryMatched. Returns the aggregate counters + suppression keys; the
 // caller applies them.
 func (e *Enricher) Run(ctx context.Context, reviews []FileReview) EnrichResult {
+	opID, started := pipelineOperationStart(ctx, e.logger, "finding_enrichment_stage", "concurrently link findings to patterns and rules, determine novelty, and evaluate learned dismissal suppression", reviews)
 	// Suppression-v2 input shared by every goroutine (read-only): the categories
 	// this repo auto-suppressed via consecutive-ignore streaks.
 	autoSuppressed := map[string]bool{}
@@ -119,7 +120,9 @@ func (e *Enricher) Run(ctx context.Context, reviews []FileReview) EnrichResult {
 	}
 	wg.Wait()
 
-	return e.tally(reviews)
+	result := e.tally(reviews)
+	pipelineOperationResult(ctx, e.logger, opID, "finding_enrichment_stage", "success", started, map[string]any{"reviews": reviews, "summary": result}, "finding_count", result.Total(), "suppressed_count", result.Suppressed)
+	return result
 }
 
 // enrichComment runs the whole per-finding decision for a single comment,

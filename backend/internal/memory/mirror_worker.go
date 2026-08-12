@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/BeLazy167/argus/backend/internal/obs"
 	"github.com/BeLazy167/argus/backend/internal/store"
 )
 
@@ -109,6 +110,25 @@ func NewMirrorWorker(outbox mirrorOutbox, getIndexer func(context.Context, int64
 // RunOnce claims and applies a bounded page. Each operation is idempotent:
 // upserts use deterministic custom IDs and deletes are repeatable soft deletes.
 func (w *MirrorWorker) RunOnce(ctx context.Context, limit int) (int, error) {
+	operationID := obs.NewLogID()
+	started := time.Now()
+	w.logger.DebugContext(ctx, "memory mirror cycle started", "operation_id", operationID, "limit", limit)
+	processed, err := w.runOnce(ctx, limit)
+	level := slog.LevelDebug
+	if processed > 0 {
+		level = slog.LevelInfo
+	}
+	message := "memory mirror cycle completed"
+	if err != nil {
+		level = slog.LevelError
+		message = "memory mirror cycle failed"
+	}
+	w.logger.Log(ctx, level, message, "operation_id", operationID, "limit", limit,
+		"processed", processed, "duration_ms", time.Since(started).Milliseconds(), "error", err)
+	return processed, err
+}
+
+func (w *MirrorWorker) runOnce(ctx context.Context, limit int) (int, error) {
 	events, err := w.outbox.ClaimMemoryMirrorEvents(ctx, limit, w.staleAfter)
 	if err != nil {
 		return 0, err
@@ -209,6 +229,13 @@ func (w *MirrorWorker) applyPayload(ctx context.Context, event store.MemoryMirro
 
 // Run drains ready events and polls until ctx is cancelled.
 func (w *MirrorWorker) Run(ctx context.Context, interval time.Duration) {
+	operationID := obs.NewLogID()
+	started := time.Now()
+	w.logger.InfoContext(ctx, "memory mirror worker started", "operation_id", operationID, "interval", interval)
+	defer func() {
+		w.logger.InfoContext(context.WithoutCancel(ctx), "memory mirror worker stopped",
+			"operation_id", operationID, "duration_ms", time.Since(started).Milliseconds(), "error", ctx.Err())
+	}()
 	if interval <= 0 {
 		interval = time.Second
 	}

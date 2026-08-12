@@ -3,6 +3,9 @@ package graph
 import (
 	"context"
 	"log/slog"
+	"time"
+
+	"github.com/BeLazy167/argus/backend/internal/obs"
 
 	"github.com/BeLazy167/argus/backend/internal/store"
 )
@@ -57,19 +60,39 @@ type apiEndpointStore interface {
 // each pass writes the COMPLETE derived set it saw, so the last writer leaves a
 // consistent set and the next endpoint change re-derives it. A partial set is
 // never written — that is what the truncation refusal below protects.
-func LinkAPIEndpoints(ctx context.Context, st apiEndpointStore, repoID int64) (int, error) {
+func LinkAPIEndpoints(ctx context.Context, st apiEndpointStore, repoID int64) (written int, err error) {
+	operationID := obs.NewLogID()
+	started := time.Now()
+	slog.InfoContext(ctx, "graph API linking started", "operation_id", operationID, "repo_id", repoID,
+		"strategy", "installation_wide_normalized_endpoint_match", "edge_cap", maxInferredEdgesPerRun)
+	defer func() {
+		attrs := []any{"operation_id", operationID, "repo_id", repoID, "written_count", written,
+			"duration_ms", time.Since(started).Milliseconds(), "error", err}
+		if err != nil {
+			slog.WarnContext(ctx, "graph API linking failed", attrs...)
+			return
+		}
+		slog.InfoContext(ctx, "graph API linking completed", attrs...)
+	}()
+	readStarted := time.Now()
 	rows, truncated, err := st.ListAPIEndpointsForInstallationOf(ctx, repoID)
 	if err != nil {
+		slog.WarnContext(ctx, "graph API endpoint window load failed", "operation_id", operationID,
+			"repo_id", repoID, "duration_ms", time.Since(readStarted).Milliseconds(), "error", err)
 		return 0, err
 	}
+	slog.DebugContext(ctx, "graph API endpoint window loaded", "operation_id", operationID,
+		"repo_id", repoID, "endpoint_count", len(rows), "truncated", truncated,
+		"duration_ms", time.Since(readStarted).Milliseconds())
 	if truncated {
 		// A clipped window is biased against the freshest rows: the rewrite
 		// path assigns new ids to whichever repo was just indexed, so ORDER BY
 		// id puts them last. Replacing the edge set from a partial view would
 		// delete links this pass cannot re-derive, so it does nothing and says
 		// so instead.
-		slog.Warn("graph: installation endpoint window truncated, skipping API linking",
-			"repo_id", repoID, "limit", store.MaxInstallationAPIEndpoints)
+		slog.WarnContext(ctx, "graph API linking skipped", "operation_id", operationID,
+			"repo_id", repoID, "reason", "installation_endpoint_window_truncated",
+			"limit", store.MaxInstallationAPIEndpoints, "endpoint_count", len(rows))
 		return 0, nil
 	}
 
@@ -103,5 +126,18 @@ func LinkAPIEndpoints(ctx context.Context, st apiEndpointStore, repoID int64) (i
 		edges = append(edges, e)
 	}
 
-	return st.ReplaceInferredAPIEdges(ctx, repoID, edges)
+	slog.DebugContext(ctx, "graph API linking edge set prepared", "operation_id", operationID,
+		"repo_id", repoID, "endpoint_count", len(endpoints), "match_count", len(matches),
+		"deduplicated_edge_count", len(edges), "duplicate_count", len(matches)-len(edges))
+	writeStarted := time.Now()
+	written, err = st.ReplaceInferredAPIEdges(ctx, repoID, edges)
+	if err != nil {
+		slog.WarnContext(ctx, "graph API inferred edge replacement failed", "operation_id", operationID,
+			"repo_id", repoID, "edge_count", len(edges), "duration_ms", time.Since(writeStarted).Milliseconds(), "error", err)
+		return written, err
+	}
+	slog.DebugContext(ctx, "graph API inferred edge replacement completed", "operation_id", operationID,
+		"repo_id", repoID, "edge_count", len(edges), "written_count", written,
+		"duration_ms", time.Since(writeStarted).Milliseconds())
+	return written, nil
 }

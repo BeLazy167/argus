@@ -95,6 +95,6 @@ func (s *Server) replyRefused(ctx context.Context, evt ghpkg.IssueCommentEvent, 
 	gh := ghpkg.NewClient(s.ghApp, s.cfg.GitHubAppSlug)
 	body := fmt.Sprintf("> **Argus** did not run a review.\n>\n> %s", v.Reason)
 	if err := gh.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber, body); err != nil {
-		s.logger.Warn("posting refusal comment", "error", err, "repo", evt.RepoFullName, "pr", evt.PRNumber)
+		s.logger.WarnContext(ctx, "posting refusal comment", "error", err, "repo", evt.RepoFullName, "pr", evt.PRNumber)
 	}
 }

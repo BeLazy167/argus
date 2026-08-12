@@ -26,6 +26,8 @@ const (
 // authenticated review's own repository and installation; no scope supplied by
 // the request is trusted for the GitHub lookup.
 func (s *Server) reconcileAmbiguousReviewPost(ctx context.Context, review *store.Review, repo *store.Repo, githubInstallationID int64, userID string) (reviewPostReconciliationOutcome, error) {
+	op := s.beginOperation(ctx, "review.reconcileAmbiguousReviewPost")
+	defer op.Complete()
 	if review.Error == nil || !strings.HasPrefix(*review.Error, store.ErrReviewPostPersistenceAmbiguous.Error()) {
 		return reviewPostNotNeeded, nil
 	}
@@ -99,7 +101,7 @@ func (s *Server) reconcileAmbiguousReviewPost(ctx context.Context, review *store
 	})
 	installationID := repo.InstallationID
 	if err := s.store.LogActivity(ctx, &installationID, "review."+action, userID, repo.FullName, metadata); err != nil {
-		s.logger.Warn("review post reconciliation audit write failed", "error", err, "review_id", review.ID)
+		s.logger.WarnContext(ctx, "review post reconciliation audit write failed", "error", err, "review_id", review.ID)
 	}
 	return outcome, nil
 }

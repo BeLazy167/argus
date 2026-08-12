@@ -132,6 +132,10 @@ var bulletRe = regexp.MustCompile(`(?m)^[\s]*[-*]\s+(?:\[[ xX]\]\s+)?(.+)$`)
 // Non-fatal: logs Warn and returns on any error. The caller wires this into
 // validateStage inside a goroutine with the standard defer-recover panic guard.
 func (o *Orchestrator) runIssueAcceptanceWorker(ctx context.Context, run *PipelineRun) {
+	opID, started := pipelineOperationStart(ctx, o.logger, "issue_acceptance_stage", "fetch judgeable linked issues, evaluate every explicit criterion against the changed code, and roll up issue-level acceptance verdicts", run)
+	defer func() {
+		pipelineOperationResult(ctx, o.logger, opID, "issue_acceptance_stage", "completed", started, run.IssueAcceptance, "issue_count", len(run.IssueAcceptance))
+	}()
 	if !run.FeatureFlags.IssueAcceptance {
 		o.logger.Info("[validate] issue acceptance skipped — disabled by feature flag", "pr", run.PREvent.PRNumber)
 		return

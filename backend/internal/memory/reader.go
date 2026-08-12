@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/BeLazy167/argus/backend/internal/obs"
 	"github.com/BeLazy167/argus/backend/internal/util"
 )
 
@@ -102,25 +103,56 @@ func (q MemoryQuery) request() SearchRequest {
 type runSearchFn func(ctx context.Context, req SearchRequest) ([]PatternMatch, error)
 
 // searchWith is the shared Search orchestration over a transport core.
-func searchWith(ctx context.Context, run runSearchFn, q MemoryQuery) ([]PatternMatch, error) {
+func searchWith(ctx context.Context, run runSearchFn, q MemoryQuery) (matches []PatternMatch, err error) {
+	operationID := obs.NewLogID()
+	started := time.Now()
+	logger := slog.Default()
+	logger.InfoContext(ctx, "memory search orchestration started",
+		"operation_id", operationID, "scope", q.Scope, "repo", q.Repo,
+		"memory_type", q.Type, "query_len", len(q.Query), "limit", q.Limit,
+		"threshold", q.Threshold, "enrich", q.Enrich, "point_lookup", q.PointLookup,
+		"filter_count", len(q.Filters))
+	defer func() {
+		attrs := []any{"operation_id", operationID, "scope", q.Scope, "memory_type", q.Type,
+			"result_count", len(matches), "duration_ms", time.Since(started).Milliseconds(), "error", err}
+		if err != nil {
+			logger.WarnContext(ctx, "memory search orchestration failed", attrs...)
+			return
+		}
+		logger.InfoContext(ctx, "memory search orchestration completed", attrs...)
+	}()
+
 	tags, err := q.containerTags()
 	if err != nil {
 		return nil, err
 	}
 	if len(tags) == 0 {
+		logger.InfoContext(ctx, "memory search skipped",
+			"operation_id", operationID, "reason", "scope_requires_repo", "scope", q.Scope)
 		return nil, nil
 	}
+	logger.DebugContext(ctx, "memory retrieval plan selected",
+		"operation_id", operationID, "strategy", map[bool]string{true: "fan_out", false: "single_container"}[len(tags) > 1],
+		"container_count", len(tags), "containers", tags)
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	req := q.request()
 	if len(tags) == 1 {
 		req.ContainerTag = tags[0]
-		matches, err := run(ctx, req)
-		return retrievableMatches(matches), err
+		matches, err = run(ctx, req)
+		beforeFilter := len(matches)
+		matches = retrievableMatches(matches)
+		logger.DebugContext(ctx, "memory retrieval filtering completed", "operation_id", operationID,
+			"container", tags[0], "raw_count", beforeFilter, "retrievable_count", len(matches))
+		return matches, err
 	}
-	matches, err := searchFanOut(ctx, run, req, tags)
-	return retrievableMatches(matches), err
+	matches, err = searchFanOut(ctx, run, req, tags)
+	beforeFilter := len(matches)
+	matches = retrievableMatches(matches)
+	logger.DebugContext(ctx, "memory retrieval filtering completed", "operation_id", operationID,
+		"container_count", len(tags), "raw_count", beforeFilter, "retrievable_count", len(matches))
+	return matches, err
 }
 
 // retrievableMatches quarantines legacy reply-derived learnings. Unauthorized
@@ -148,31 +180,46 @@ func retrievableMatches(matches []PatternMatch) []PatternMatch {
 // container masquerade as a genuine no-match on the enrich novelty path.
 func searchFanOut(ctx context.Context, run runSearchFn, base SearchRequest, tags []string) ([]PatternMatch, error) {
 	type legResult struct {
-		matches []PatternMatch
-		err     error
+		matches  []PatternMatch
+		err      error
+		duration time.Duration
 	}
+	operationID := obs.NewLogID()
+	started := time.Now()
+	slog.InfoContext(ctx, "memory search fan-out started", "operation_id", operationID,
+		"container_count", len(tags), "containers", tags, "query_len", len(base.Query))
 	legs := make([]legResult, len(tags))
 	var wg sync.WaitGroup
 	wg.Add(len(tags))
 	for i, tag := range tags {
 		go func(i int, tag string) {
 			defer wg.Done()
+			legStarted := time.Now()
 			req := base
 			req.ContainerTag = tag
+			slog.DebugContext(ctx, "memory search fan-out leg started", "operation_id", operationID, "container", tag)
 			m, err := run(ctx, req)
-			legs[i] = legResult{m, err}
+			legs[i] = legResult{matches: m, err: err, duration: time.Since(legStarted)}
 		}(i, tag)
 	}
 	wg.Wait()
 
 	var out []PatternMatch
-	for _, leg := range legs {
+	for i, leg := range legs {
+		attrs := []any{"operation_id", operationID, "container", tags[i], "result_count", len(leg.matches),
+			"duration_ms", leg.duration.Milliseconds(), "error", leg.err}
 		if leg.err != nil {
+			slog.WarnContext(ctx, "memory search fan-out leg failed", attrs...)
+			slog.WarnContext(ctx, "memory search fan-out failed", "operation_id", operationID,
+				"failed_container", tags[i], "duration_ms", time.Since(started).Milliseconds(), "error", leg.err)
 			return nil, leg.err
 		}
+		slog.DebugContext(ctx, "memory search fan-out leg completed", attrs...)
 		out = append(out, leg.matches...)
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Score > out[j].Score })
+	slog.InfoContext(ctx, "memory search fan-out completed", "operation_id", operationID,
+		"container_count", len(tags), "result_count", len(out), "duration_ms", time.Since(started).Milliseconds())
 	return out, nil
 }
 

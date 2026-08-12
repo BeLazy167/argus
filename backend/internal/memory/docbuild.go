@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/BeLazy167/argus/backend/internal/util"
 )
@@ -28,6 +29,16 @@ type Doc struct {
 // fails validation are skipped (Warn) and counted; the caller decides how an
 // all-dropped batch surfaces.
 func buildReviewDocs(owner, repo string, comments []ReviewMemory, logger *slog.Logger) (docs []Doc, skipped int) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	started := time.Now()
+	logger.Debug("memory review document build started", "repo", repo, "comment_count", len(comments))
+	defer func() {
+		logger.Debug("memory review document build completed", "repo", repo,
+			"comment_count", len(comments), "document_count", len(docs), "skipped_count", skipped,
+			"duration_ms", time.Since(started).Milliseconds())
+	}()
 	docs = make([]Doc, 0, len(comments))
 	for _, c := range comments {
 		meta, err := Metadata{
@@ -56,7 +67,10 @@ func buildReviewDocs(owner, repo string, comments []ReviewMemory, logger *slog.L
 
 // buildRuleDoc shapes an owner-scoped rule: `_shared` container, type=rule,
 // rule_id/priority provenance in Extra.
-func buildRuleDoc(rule RuleMemory) (Doc, error) {
+func buildRuleDoc(rule RuleMemory) (doc Doc, err error) {
+	started := time.Now()
+	slog.Debug("memory rule document build started", "rule_id", rule.RuleID, "category", rule.Category)
+	defer func() { logDocBuildResult("rule", started, doc, err) }()
 	meta, err := Metadata{
 		Type:     TypeRule,
 		Category: rule.Category,
@@ -78,7 +92,10 @@ func buildRuleDoc(rule RuleMemory) (Doc, error) {
 // and mirrors it into metadata["custom_id"] so search hits resolve back to
 // their patterns row (search results carry metadata but no
 // top-level customId, and the result's own ID may be a chunk id).
-func buildPatternDoc(repo string, p PatternMemory) (Doc, error) {
+func buildPatternDoc(repo string, p PatternMemory) (doc Doc, err error) {
+	started := time.Now()
+	slog.Debug("memory pattern document build started", "repo", repo, "source", patternSource(p), "custom_id_supplied", p.CustomID != "")
+	defer func() { logDocBuildResult("pattern", started, doc, err) }()
 	if p.CustomID == "" {
 		p.CustomID = PatternCustomID("", repo, patternSource(p), p.Content)
 	}
@@ -100,7 +117,10 @@ func buildPatternDoc(repo string, p PatternMemory) (Doc, error) {
 // buildSharedPatternDoc pins confidence=1.00 on every write — successful
 // re-learning is the liveness signal shared-pattern decay keys off. Extra is
 // copied before the pin so the caller's map is never mutated.
-func buildSharedPatternDoc(p PatternMemory) (Doc, error) {
+func buildSharedPatternDoc(p PatternMemory) (doc Doc, err error) {
+	started := time.Now()
+	slog.Debug("memory shared pattern document build started", "source", patternSource(p), "custom_id_supplied", p.CustomID != "")
+	defer func() { logDocBuildResult("shared_pattern", started, doc, err) }()
 	if p.CustomID == "" {
 		p.CustomID = SharedPatternCustomID(patternSource(p), p.Content)
 	}
@@ -130,7 +150,11 @@ func buildSharedPatternDoc(p PatternMemory) (Doc, error) {
 // with change-kind/reason provenance. Unrecognized actions error — the valid
 // set is small and stable, so anything else is a caller bug that must
 // surface, not silently drop.
-func buildFeedbackDoc(owner, repo string, fb FeedbackMemory) (Doc, error) {
+func buildFeedbackDoc(owner, repo string, fb FeedbackMemory) (doc Doc, err error) {
+	started := time.Now()
+	slog.Debug("memory feedback document build started", "repo", repo, "action", fb.Action,
+		"source", fb.Source, "category", fb.Category, "has_reason", fb.Reason != "")
+	defer func() { logDocBuildResult("feedback", started, doc, err) }()
 	polarity, content, ok := feedbackShape(fb)
 	if !ok {
 		return Doc{}, fmt.Errorf("indexing feedback signal: unsupported action %q (want confirmed|dismissed|ignored)", fb.Action)
@@ -182,7 +206,19 @@ type feedbackReconciliation struct {
 // reinforce write cannot leave suppression active. Installing dismissal happens
 // before removing confirmation because suppression is the requested current state.
 // Source-specific IDs ensure this plan cannot retract trusted replies or praise.
-func feedbackReconciliationPlan(owner, repo string, fb FeedbackMemory) (feedbackReconciliation, error) {
+func feedbackReconciliationPlan(owner, repo string, fb FeedbackMemory) (plan feedbackReconciliation, err error) {
+	started := time.Now()
+	slog.Debug("memory feedback reconciliation plan started", "repo", repo, "action", fb.Action, "source", fb.Source)
+	defer func() {
+		attrs := []any{"repo", repo, "action", fb.Action, "source", fb.Source,
+			"delete_first_count", len(plan.DeleteFirst), "has_upsert", plan.Upsert != nil,
+			"delete_after_count", len(plan.DeleteAfter), "duration_ms", time.Since(started).Milliseconds(), "error", err}
+		if err != nil {
+			slog.Warn("memory feedback reconciliation plan failed", attrs...)
+			return
+		}
+		slog.Debug("memory feedback reconciliation plan completed", attrs...)
+	}()
 	if fb.Source != SourceReactionFeedback {
 		return feedbackReconciliation{}, fmt.Errorf("reconciling feedback signal: source %q is not reversible reaction feedback", fb.Source)
 	}
@@ -224,7 +260,11 @@ func feedbackReconciliationPlan(owner, repo string, fb FeedbackMemory) (feedback
 
 // buildScenarioDoc shapes a scenario doc: description plus a "Related files"
 // suffix when files exist, scenario_id in metadata (not content).
-func buildScenarioDoc(repo string, scenarioID int64, description, severity string, files []string) (Doc, error) {
+func buildScenarioDoc(repo string, scenarioID int64, description, severity string, files []string) (doc Doc, err error) {
+	started := time.Now()
+	slog.Debug("memory scenario document build started", "repo", repo, "scenario_id", scenarioID,
+		"severity", severity, "file_count", len(files))
+	defer func() { logDocBuildResult("scenario", started, doc, err) }()
 	content := description
 	if len(files) > 0 {
 		content += "\n\nRelated files: " + strings.Join(files, ", ")
@@ -244,6 +284,17 @@ func buildScenarioDoc(repo string, scenarioID int64, description, severity strin
 		Content:      content,
 		Metadata:     meta,
 	}, nil
+}
+
+func logDocBuildResult(kind string, started time.Time, doc Doc, err error) {
+	attrs := []any{"document_kind", kind, "container", doc.ContainerTag, "custom_id", doc.CustomID,
+		"memory_type", doc.Type, "content_chars", len(doc.Content), "metadata_count", len(doc.Metadata),
+		"duration_ms", time.Since(started).Milliseconds(), "error", err}
+	if err != nil {
+		slog.Warn("memory document build failed", attrs...)
+		return
+	}
+	slog.Debug("memory document build completed", attrs...)
 }
 
 // patternSource is the customId source segment: explicit Source, else the

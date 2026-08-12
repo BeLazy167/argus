@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/BeLazy167/argus/backend/internal/obs"
 )
 
 type openRouterModel struct {
@@ -45,6 +47,8 @@ var openRouterCache sync.Map // key: int64 (installationID), value: *modelCache
 const modelCacheTTL = time.Hour
 
 func (s *Server) listOpenRouterModels(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.listOpenRouterModels")
+	defer op.Finish(w)
 	idStr := r.URL.Query().Get("installation_id")
 	if idStr == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "installation_id required"})
@@ -74,7 +78,7 @@ func (s *Server) listOpenRouterModels(w http.ResponseWriter, r *http.Request) {
 	// Resolve OpenRouter API key
 	apiKey, _, found, err := s.store.ResolveAPIKey(r.Context(), installationID, nil, "openrouter")
 	if err != nil {
-		s.logger.Error("resolve openrouter key", "error", err)
+		s.logger.ErrorContext(r.Context(), "resolve openrouter key", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "key resolution failed"})
 		return
 	}
@@ -91,9 +95,9 @@ func (s *Server) listOpenRouterModels(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", apiKey))
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := (&http.Client{Transport: obs.NewLoggingRoundTripper("openrouter-models", http.DefaultTransport), Timeout: 30 * time.Second}).Do(req)
 	if err != nil {
-		s.logger.Error("fetch openrouter models", "error", err)
+		s.logger.ErrorContext(r.Context(), "fetch openrouter models", "error", err)
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to fetch models"})
 		return
 	}
@@ -106,7 +110,7 @@ func (s *Server) listOpenRouterModels(w http.ResponseWriter, r *http.Request) {
 
 	var orResp openRouterModelsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&orResp); err != nil {
-		s.logger.Error("decode openrouter response", "error", err)
+		s.logger.ErrorContext(r.Context(), "decode openrouter response", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to parse models"})
 		return
 	}

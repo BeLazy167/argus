@@ -34,11 +34,29 @@ type ArchitectureAnnotationEdgeInput struct {
 
 // ReplaceArchitectureAnnotations atomically replaces one PR's LLM annotation
 // snapshot. Empty nodes or edges are authoritative empty snapshots.
-func (s *Store) ReplaceArchitectureAnnotations(ctx context.Context, repoID int64, prNumber int, nodes []ArchitectureAnnotationNode, edges []ArchitectureAnnotationEdgeInput) (int, int, error) {
+func (s *Store) ReplaceArchitectureAnnotations(ctx context.Context, repoID int64, prNumber int, nodes []ArchitectureAnnotationNode, edges []ArchitectureAnnotationEdgeInput) (storeResult0 int, storeResult1 int, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ReplaceArchitectureAnnotations",
+
+			"repo_id", storeLogValue(repoID), "pr_number", storeLogValue(prNumber), "nodes_count", len(nodes), "edges_count", len(edges))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0,
+				storeResult1)
+			panic(recovered)
+		}
+		storeFinish(storeErr,
+			storeResult0, storeResult1)
+	}()
+
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
 		return 0, 0, fmt.Errorf("replace architecture annotations: begin: %w", err)
 	}
+	txFinish := beginStoreTransaction(ctx, "ReplaceArchitectureAnnotations", "repo_id", repoID, "pr_number", prNumber, "node_count", len(nodes), "edge_count", len(edges))
+	committed := false
+	defer func() { txFinish(storeErr, committed) }()
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	if _, err := tx.Exec(ctx, `DELETE FROM architecture_annotation_nodes WHERE repo_id = $1 AND pr_number = $2`, repoID, prNumber); err != nil {
@@ -88,11 +106,26 @@ func (s *Store) ReplaceArchitectureAnnotations(ctx context.Context, repoID int64
 	if err := tx.Commit(ctx); err != nil {
 		return 0, 0, fmt.Errorf("replace architecture annotations: commit: %w", err)
 	}
+	committed = true
 	return writtenNodes, writtenEdges, nil
 }
 
 // ListArchitectureAnnotations returns all LLM annotation snapshots for a repo.
-func (s *Store) ListArchitectureAnnotations(ctx context.Context, repoID int64) ([]ArchitectureAnnotationNode, []ArchitectureAnnotationEdge, error) {
+func (s *Store) ListArchitectureAnnotations(ctx context.Context, repoID int64) (storeResult0 []ArchitectureAnnotationNode, storeResult1 []ArchitectureAnnotationEdge, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ListArchitectureAnnotations",
+
+			"repo_id", storeLogValue(repoID))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered,
+				storeResult0, storeResult1)
+			panic(recovered)
+		}
+		storeFinish(storeErr,
+			storeResult0, storeResult1)
+	}()
+
 	nodeRows, err := s.Pool.Query(ctx, `
 		SELECT id, name, kind, file_path, language
 		FROM architecture_annotation_nodes WHERE repo_id = $1 ORDER BY id`, repoID)

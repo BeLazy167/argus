@@ -81,7 +81,15 @@ func NewSimulationEngine(registry *llm.Registry, st *store.Store, ghClient *ghpk
 // RunSimulations executes scenario simulations for a PR and returns results.
 // Each scenario is simulated independently. Low-confidence results are still
 // returned but marked as uncertain.
-func (e *SimulationEngine) RunSimulations(ctx context.Context, req SimulationRequest) ([]SimulationResult, error) {
+func (e *SimulationEngine) RunSimulations(ctx context.Context, req SimulationRequest) (results []SimulationResult, err error) {
+	opID, started := pipelineOperationStart(ctx, e.logger, "simulation_stage", "run the highest-ranked bounded scenario set against changed code and persist each scenario verdict", req)
+	defer func() {
+		if err != nil {
+			pipelineOperationFailure(ctx, e.logger, opID, "simulation_stage", started, err)
+			return
+		}
+		pipelineOperationResult(ctx, e.logger, opID, "simulation_stage", "success", started, results, "result_count", len(results), "passed_count", countPassedSimulations(results))
+	}()
 	if len(req.Scenarios) == 0 {
 		return nil, nil
 	}
@@ -97,7 +105,6 @@ func (e *SimulationEngine) RunSimulations(ctx context.Context, req SimulationReq
 		}
 	}
 
-	var results []SimulationResult
 	// Simulate up to 5 scenarios per PR. The candidate list is already ranked by UCB1 score
 	// in SQL (see docs/plans/2026-04-17-ucb-scenario-selection.md) — the first 5 are the
 	// best balance of exploitation (scenarios that find real bugs) and exploration
@@ -197,7 +204,15 @@ Rules:
 - 'verdict' MUST be one of the four literal strings. Pick 'fixed' when passes is true, 'broken' when passes is false and confidence ≥ 0.8, 'partial' when passes is false and confidence ≥ 0.5, 'unclear' otherwise.
 - If you're unsure, set confidence < 0.5 and use 'unclear'. It's better to flag uncertainty than to miss a real issue or raise a false alarm.`
 
-func (e *SimulationEngine) simulateScenario(ctx context.Context, req SimulationRequest, scenario SimScenario, cfg llm.ModelConfig, provider llm.Provider) (SimulationResult, error) {
+func (e *SimulationEngine) simulateScenario(ctx context.Context, req SimulationRequest, scenario SimScenario, cfg llm.ModelConfig, provider llm.Provider) (result SimulationResult, err error) {
+	opID, started := pipelineOperationStart(ctx, e.logger, "scenario_simulation", "build a scenario-specific execution prompt, invoke the synthesis model, parse its verdict, and attach exact token usage", map[string]any{"request": req, "scenario": scenario, "model_config": cfg})
+	defer func() {
+		if err != nil {
+			pipelineOperationFailure(ctx, e.logger, opID, "scenario_simulation", started, err, "scenario_id", scenario.ID)
+			return
+		}
+		pipelineOperationResult(ctx, e.logger, opID, "scenario_simulation", result.Verdict, started, result, "scenario_id", scenario.ID)
+	}()
 	prompt := buildSimulationPrompt(req, scenario)
 
 	resp, err := provider.Complete(ctx, llm.CompletionRequest{
@@ -229,7 +244,7 @@ func (e *SimulationEngine) simulateScenario(ctx context.Context, req SimulationR
 		Provider:         cfg.Provider,
 	})
 
-	result, err := parseSimulationResponse(resp.Content, scenario.Description)
+	result, err = parseSimulationResponse(resp.Content, scenario.Description)
 	if err != nil {
 		return SimulationResult{}, err
 	}

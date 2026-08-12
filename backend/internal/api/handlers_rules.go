@@ -10,9 +10,11 @@ import (
 )
 
 func (s *Server) listRules(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.listRules")
+	defer op.Finish(w)
 	rules, err := s.store.ListRules(r.Context(), getInstallationIDs(r.Context()))
 	if err != nil {
-		s.logger.Error("list rules", "error", err)
+		s.logger.ErrorContext(r.Context(), "list rules", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
@@ -20,6 +22,8 @@ func (s *Server) listRules(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) createRule(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.createRule")
+	defer op.Finish(w)
 	var body struct {
 		Category string `json:"category"`
 		Content  string `json:"content"`
@@ -45,17 +49,19 @@ func (s *Server) createRule(w http.ResponseWriter, r *http.Request) {
 	}
 	rule, err := s.store.CreateRule(r.Context(), ids[0], body.Category, body.Content, body.Priority, enabled)
 	if err != nil {
-		s.logger.Error("create rule", "error", err)
+		s.logger.ErrorContext(r.Context(), "create rule", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create rule"})
 		return
 	}
 	if err := s.store.LogActivity(r.Context(), &ids[0], "rule_created", "", fmt.Sprintf("rule:%d", rule.ID), nil); err != nil {
-		s.logger.Error("failed to log activity", "error", err, "action", "rule_created")
+		s.logger.ErrorContext(r.Context(), "failed to log activity", "error", err, "action", "rule_created")
 	}
 	writeJSON(w, http.StatusCreated, rule)
 }
 
 func (s *Server) updateRule(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.updateRule")
+	defer op.Finish(w)
 	id, err := strconv.ParseInt(chi.URLParam(r, "ruleID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid rule id"})
@@ -80,6 +86,8 @@ func (s *Server) updateRule(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteRule(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.deleteRule")
+	defer op.Finish(w)
 	id, err := strconv.ParseInt(chi.URLParam(r, "ruleID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid rule id"})
@@ -91,7 +99,7 @@ func (s *Server) deleteRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.store.LogActivity(r.Context(), nil, "rule_deleted", "", fmt.Sprintf("rule:%d", id), nil); err != nil {
-		s.logger.Error("failed to log activity", "error", err, "action", "rule_deleted")
+		s.logger.ErrorContext(r.Context(), "failed to log activity", "error", err, "action", "rule_deleted")
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }

@@ -83,6 +83,8 @@ func validatePersonaInput(in personaInput) error {
 
 // listPersonas returns the built-ins plus this installation's own.
 func (s *Server) listPersonas(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.listPersonas")
+	defer op.Finish(w)
 	ids := getInstallationIDs(r.Context())
 	if len(ids) == 0 {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "no installation"})
@@ -90,7 +92,7 @@ func (s *Server) listPersonas(w http.ResponseWriter, r *http.Request) {
 	}
 	personas, err := s.store.ListPersonas(r.Context(), ids[0])
 	if err != nil {
-		s.logger.Error("list personas", "error", err)
+		s.logger.ErrorContext(r.Context(), "list personas", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
@@ -108,6 +110,8 @@ func (s *Server) listPersonas(w http.ResponseWriter, r *http.Request) {
 // writing a built-in's slug creates a SHADOW, so the shipped text stays intact
 // and deleting the shadow restores it.
 func (s *Server) upsertPersona(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.upsertPersona")
+	defer op.Finish(w)
 	ids := getInstallationIDs(r.Context())
 	if len(ids) == 0 {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "no installation"})
@@ -136,12 +140,12 @@ func (s *Server) upsertPersona(w http.ResponseWriter, r *http.Request) {
 		SpecialistHint: in.SpecialistHint,
 	})
 	if err != nil {
-		s.logger.Error("upsert persona", "error", err, "slug", in.Slug)
+		s.logger.ErrorContext(r.Context(), "upsert persona", "error", err, "slug", in.Slug)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save persona"})
 		return
 	}
 	if err := s.store.LogActivity(r.Context(), &ids[0], "persona_saved", "", "persona:"+in.Slug, nil); err != nil {
-		s.logger.Error("failed to log activity", "error", err, "action", "persona_saved")
+		s.logger.ErrorContext(r.Context(), "failed to log activity", "error", err, "action", "persona_saved")
 	}
 	writeJSON(w, http.StatusOK, saved)
 }
@@ -151,6 +155,8 @@ func (s *Server) upsertPersona(w http.ResponseWriter, r *http.Request) {
 // Deleting a shadow reveals the built-in of the same slug again, so a repo that
 // selected that slug keeps working rather than resolving to nothing.
 func (s *Server) deletePersona(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.deletePersona")
+	defer op.Finish(w)
 	ids := getInstallationIDs(r.Context())
 	if len(ids) == 0 {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "no installation"})
@@ -165,12 +171,12 @@ func (s *Server) deletePersona(w http.ResponseWriter, r *http.Request) {
 	// the caller's own row — a built-in (installation_id IS NULL) and another
 	// installation's row are both unreachable from here.
 	if err := s.store.DeletePersona(r.Context(), ids[0], slug); err != nil {
-		s.logger.Error("delete persona", "error", err, "slug", slug)
+		s.logger.ErrorContext(r.Context(), "delete persona", "error", err, "slug", slug)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to delete persona"})
 		return
 	}
 	if err := s.store.LogActivity(r.Context(), &ids[0], "persona_deleted", "", "persona:"+slug, nil); err != nil {
-		s.logger.Error("failed to log activity", "error", err, "action", "persona_deleted")
+		s.logger.ErrorContext(r.Context(), "failed to log activity", "error", err, "action", "persona_deleted")
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }

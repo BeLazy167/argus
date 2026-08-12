@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"sort"
@@ -17,6 +18,8 @@ import (
 	"time"
 
 	"golang.org/x/sync/singleflight"
+
+	"github.com/BeLazy167/argus/backend/internal/obs"
 )
 
 // Embedder turns text into vectors for the memories store. Implementations
@@ -94,11 +97,18 @@ func NewEmbedder(apiKey, baseURL, model string, dims int) *HTTPEmbedder {
 		baseURL: baseURL,
 		model:   model,
 		dims:    dims,
-		http:    &http.Client{Timeout: 30 * time.Second},
+		http:    &http.Client{Timeout: 30 * time.Second, Transport: obs.NewLoggingRoundTripper(embeddingService(baseURL), http.DefaultTransport)},
 		backoff: DefaultBackoff,
 		cache:   make(map[string]*list.Element, embedCacheSize),
 		order:   list.New(),
 	}
+}
+
+func embeddingService(baseURL string) string {
+	if u, err := url.Parse(baseURL); err == nil && u.Hostname() != "" {
+		return "embeddings:" + strings.ToLower(u.Hostname())
+	}
+	return "embeddings:custom"
 }
 
 // Model implements Embedder.
@@ -143,7 +153,23 @@ type embedResponse struct {
 // Embed implements Embedder: cache lookup, one chunked upstream call for the
 // misses, cache fill, and vectors returned in input order.
 func (e *HTTPEmbedder) Embed(ctx context.Context, inputs []string) ([][]float32, error) {
+	operationID := obs.NewLogID()
+	started := time.Now()
+	if payload, err := json.Marshal(map[string]any{"model": e.model, "input": inputs}); err == nil {
+		obs.LogPayload(ctx, slog.Default(), "embedding request inputs", operationID, "request", "application/json", payload)
+	}
+	slog.InfoContext(ctx, "embedding operation started",
+		"operation_id", operationID,
+		"provider", embeddingService(e.baseURL),
+		"model", e.model,
+		"input_count", len(inputs),
+		"dimensions", e.dims,
+	)
 	if len(inputs) == 0 {
+		slog.InfoContext(ctx, "embedding operation completed",
+			"operation_id", operationID, "provider", embeddingService(e.baseURL),
+			"model", e.model, "input_count", 0, "vector_count", 0,
+			"cache_hits", 0, "cache_misses", 0, "duration_ms", time.Since(started).Milliseconds())
 		return nil, nil
 	}
 
@@ -158,11 +184,22 @@ func (e *HTTPEmbedder) Embed(ctx context.Context, inputs []string) ([][]float32,
 		missIdx = append(missIdx, i)
 		missTexts = append(missTexts, text)
 	}
+	slog.DebugContext(ctx, "embedding cache lookup completed",
+		"operation_id", operationID,
+		"model", e.model,
+		"cache_hits", len(inputs)-len(missTexts),
+		"cache_misses", len(missTexts),
+	)
 
 	for start := 0; start < len(missTexts); start += maxEmbedBatch {
 		end := min(start+maxEmbedBatch, len(missTexts))
 		vecs, err := e.embedBatchShared(ctx, missTexts[start:end])
 		if err != nil {
+			slog.ErrorContext(ctx, "embedding operation failed",
+				"operation_id", operationID, "provider", embeddingService(e.baseURL),
+				"model", e.model, "input_count", len(inputs),
+				"cache_hits", len(inputs)-len(missTexts), "cache_misses", len(missTexts),
+				"duration_ms", time.Since(started).Milliseconds(), "error", err)
 			return nil, err
 		}
 		for j, vec := range vecs {
@@ -171,6 +208,19 @@ func (e *HTTPEmbedder) Embed(ctx context.Context, inputs []string) ([][]float32,
 			e.cachePut(cacheKey(e.model, inputs[i]), vec)
 		}
 	}
+	if payload, err := json.Marshal(map[string]any{"model": e.model, "vectors": out}); err == nil {
+		obs.LogPayload(ctx, slog.Default(), "embedding response vectors", operationID, "response", "application/json", payload)
+	}
+	slog.InfoContext(ctx, "embedding operation completed",
+		"operation_id", operationID,
+		"provider", embeddingService(e.baseURL),
+		"model", e.model,
+		"input_count", len(inputs),
+		"vector_count", len(out),
+		"cache_hits", len(inputs)-len(missTexts),
+		"cache_misses", len(missTexts),
+		"duration_ms", time.Since(started).Milliseconds(),
+	)
 	return out, nil
 }
 
@@ -246,7 +296,13 @@ func (e *HTTPEmbedder) embedBatch(ctx context.Context, texts []string) ([][]floa
 	}
 
 	var vecs [][]float32
+	attempt := 0
 	err = retryWithBackoff(ctx, e.backoff, func(ctx context.Context) error {
+		attempt++
+		attemptStarted := time.Now()
+		slog.DebugContext(ctx, "embedding HTTP attempt started",
+			"provider", embeddingService(e.baseURL), "model", e.model,
+			"attempt", attempt, "input_count", len(texts), "request_bytes", len(body))
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, e.baseURL+"/embeddings", bytes.NewReader(body))
 		if err != nil {
 			return fmt.Errorf("build embed request: %w", err)
@@ -268,6 +324,10 @@ func (e *HTTPEmbedder) embedBatch(ctx context.Context, texts []string) ([][]floa
 		if err != nil {
 			return fmt.Errorf("read embeddings response: %w", err)
 		}
+		slog.DebugContext(ctx, "embedding HTTP attempt received response",
+			"provider", embeddingService(e.baseURL), "model", e.model,
+			"attempt", attempt, "status_code", resp.StatusCode,
+			"response_bytes", len(respBody), "duration_ms", time.Since(attemptStarted).Milliseconds())
 		// Embedding providers' 500s are genuinely transient, so they are
 		// retried here even though isRetryableStatus excludes 500 for the
 		// general case (matches the official OpenAI SDK policy: 408/429/5xx).

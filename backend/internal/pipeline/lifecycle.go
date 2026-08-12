@@ -117,16 +117,21 @@ func shouldRefuseRetry(state PipelineState, fresh bool) bool {
 // a retry that would run concurrently with an in-flight run — notably a
 // cancelled-but-not-yet-halted review whose run is still executing/posting.
 func (l *ReviewLifecycle) EnsureNotRunning(ctx context.Context, reviewID uuid.UUID) error {
+	l.logger.InfoContext(ctx, "review retry liveness check started", "event", "pipeline.lifecycle.retry_check_started", "review_id", reviewID)
 	state, fresh, found, err := l.latestRunLiveness(ctx, reviewID)
 	if err != nil {
+		l.logger.ErrorContext(ctx, "review retry liveness check failed", "event", "pipeline.lifecycle.retry_check_failed", "review_id", reviewID, "error", err)
 		return fmt.Errorf("checking live run for review %s: %w", reviewID, err)
 	}
 	if !found {
+		l.logger.InfoContext(ctx, "review retry allowed: no persisted run", "event", "pipeline.lifecycle.retry_allowed", "review_id", reviewID, "reason", "no_run")
 		return nil // no run persisted — nothing to collide with
 	}
 	if shouldRefuseRetry(state, fresh) {
+		l.logger.WarnContext(ctx, "review retry refused: pipeline run appears live", "event", "pipeline.lifecycle.retry_refused", "review_id", reviewID, "stage", string(state), "fresh", fresh)
 		return ErrReviewRunning
 	}
+	l.logger.InfoContext(ctx, "review retry allowed", "event", "pipeline.lifecycle.retry_allowed", "review_id", reviewID, "stage", string(state), "fresh", fresh)
 	return nil
 }
 
@@ -138,9 +143,11 @@ func (l *ReviewLifecycle) EnsureNotRunning(ctx context.Context, reviewID uuid.UU
 // resurrect the orphaned run.
 func (l *ReviewLifecycle) CancelStranded(ctx context.Context, reviewID uuid.UUID) error {
 	const note = "stopped by user"
+	l.logger.InfoContext(ctx, "stranded review cancellation started", "event", "pipeline.lifecycle.cancel_started", "review_id", reviewID)
 
 	run, found, err := l.loadLatestRun(ctx, reviewID)
 	if err != nil {
+		l.logger.ErrorContext(ctx, "stranded review cancellation load failed", "event", "pipeline.lifecycle.cancel_failed", "review_id", reviewID, "error", err)
 		return fmt.Errorf("stranded cancel %s: %w", reviewID, err)
 	}
 	currentGeneration := 0
@@ -149,6 +156,7 @@ func (l *ReviewLifecycle) CancelStranded(ctx context.Context, reviewID uuid.UUID
 	}); ok {
 		currentGeneration, err = reader.GetReviewAttemptGeneration(ctx, reviewID)
 		if err != nil {
+			l.logger.ErrorContext(ctx, "stranded review cancellation generation load failed", "event", "pipeline.lifecycle.cancel_failed", "review_id", reviewID, "error", err)
 			return fmt.Errorf("loading cancel attempt generation: %w", err)
 		}
 	}
@@ -156,14 +164,20 @@ func (l *ReviewLifecycle) CancelStranded(ctx context.Context, reviewID uuid.UUID
 		// Skip entirely when the run already reached a terminal state: it kept
 		// its real outcome and a completed review must never flip to cancelled.
 		if run.State.IsTerminal() {
+			l.logger.InfoContext(ctx, "stranded review cancellation skipped for terminal run", "event", "pipeline.lifecycle.cancel_skipped", "review_id", reviewID, "stage", string(run.State), "reason", "terminal")
 			return nil
 		}
+		previousState := run.State
 		run.State = StateCancelled
 		run.Error = note
 		run.UpdatedAt = time.Now()
 		if perr := l.persistRun(ctx, run); perr != nil {
+			l.logger.ErrorContext(ctx, "stranded run cancellation persist failed", "event", "pipeline.state.persist_failed", "review_id", reviewID, "stage", string(run.State), "error", perr)
 			return fmt.Errorf("persisting cancelled run %s: %w", reviewID, perr)
 		}
+		l.logger.InfoContext(ctx, "pipeline run state mutated", "event", "pipeline.state.mutated", "review_id", reviewID, "previous_state", string(previousState), "stage", string(run.State), "reason", "stranded_cancel")
+	} else if found {
+		l.logger.InfoContext(ctx, "stranded run cancellation skipped for stale generation", "event", "pipeline.lifecycle.cancel_run_skipped", "review_id", reviewID, "attempt_generation", run.AttemptGeneration, "current_generation", currentGeneration, "reason", "stale_generation")
 	}
 	// No persisted run (review failed before the first state write) falls through
 	// here: only the review row needs flipping.
@@ -176,8 +190,10 @@ func (l *ReviewLifecycle) CancelStranded(ctx context.Context, reviewID uuid.UUID
 	// it will actually halt and never post a cancelled review.
 	applied, err := l.st.UpdateReviewStatusIf(ctx, reviewID, "cancelled", note, nil, []string{"pending", "in_progress"})
 	if err != nil {
+		l.logger.ErrorContext(ctx, "stranded review status cancellation failed", "event", "pipeline.lifecycle.cancel_failed", "review_id", reviewID, "error", err)
 		return fmt.Errorf("updating review status for stranded cancel %s: %w", reviewID, err)
 	}
+	l.logger.InfoContext(ctx, "review status mutation evaluated", "event", "pipeline.review_status.mutated", "review_id", reviewID, "status", "cancelled", "applied", applied)
 	if !applied {
 		return nil
 	}
@@ -194,6 +210,7 @@ func (l *ReviewLifecycle) CancelStranded(ctx context.Context, reviewID uuid.UUID
 			l.eventBus.Publish(reviewID, EventCancelled, map[string]string{"stage": string(StateCancelled)})
 		}
 	}
+	l.logger.InfoContext(ctx, "stranded review cancellation completed", "event", "pipeline.lifecycle.cancel_completed", "review_id", reviewID, "attempt_generation", currentGeneration)
 	return nil
 }
 
@@ -207,10 +224,13 @@ func (l *ReviewLifecycle) CancelStranded(ctx context.Context, reviewID uuid.UUID
 // site-specific failure message — the two sites' historical strings are
 // grep-load-bearing (log alerts), so they must not collapse into one.
 func (l *ReviewLifecycle) ShouldAbortPost(ctx context.Context, reviewID uuid.UUID, warnMsg string) bool {
+	l.logger.DebugContext(ctx, "pre-post cancellation guard started", "event", "pipeline.lifecycle.post_guard_started", "review_id", reviewID)
 	status, err := l.st.GetReviewStatus(ctx, reviewID)
 	if err != nil {
-		l.logger.Warn(warnMsg, "error", err, "review_id", reviewID)
+		l.logger.WarnContext(ctx, warnMsg, "event", "pipeline.lifecycle.post_guard_failed", "error", err, "review_id", reviewID)
 		return false
 	}
-	return status == "cancelled"
+	abort := status == "cancelled"
+	l.logger.InfoContext(ctx, "pre-post cancellation guard evaluated", "event", "pipeline.lifecycle.post_guard_evaluated", "review_id", reviewID, "status", status, "abort", abort)
+	return abort
 }

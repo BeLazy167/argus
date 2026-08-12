@@ -76,7 +76,7 @@ func (c *jwksCache) getKey(kid string) (*rsa.PublicKey, error) {
 	if err != nil {
 		return nil, fmt.Errorf("creating JWKS request: %w", err)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := (&http.Client{Transport: obs.NewLoggingRoundTripper("jwks", http.DefaultTransport), Timeout: 10 * time.Second}).Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetching JWKS: %w", err)
 	}
@@ -202,14 +202,14 @@ func (s *Server) resolveInstallationIDs(ctx context.Context, claims jwtClaims, i
 			// already have the link, so we skip the write on the hot path.
 			alreadyLinked, checkErr := s.store.IsUserLinkedToInstallation(ctx, claims.Sub, inst.ID)
 			if checkErr != nil {
-				s.logger.Warn("auto-link precheck failed", "user", claims.Sub, "installation", inst.ID, "error", checkErr)
+				s.logger.WarnContext(ctx, "auto-link precheck failed", "user", claims.Sub, "installation", inst.ID, "error", checkErr)
 			} else if !alreadyLinked {
 				role := claims.OrgRole
 				if role == "" {
 					role = "org_member"
 				}
 				if _, linkErr := s.store.LinkUserInstallation(ctx, claims.Sub, inst.ID, role); linkErr != nil {
-					s.logger.Warn("auto-link user to org installation failed", "user", claims.Sub, "installation", inst.ID, "error", linkErr)
+					s.logger.WarnContext(ctx, "auto-link user to org installation failed", "user", claims.Sub, "installation", inst.ID, "error", linkErr)
 				}
 			}
 		} else {
@@ -242,8 +242,10 @@ func (s *Server) resolveInstallationIDs(ctx context.Context, claims jwtClaims, i
 // jwtAuth validates JWTs via JWKS. Works with both Clerk and SuperTokens.
 func (s *Server) jwtAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		op := s.beginOperation(r.Context(), "middleware.jwt_auth")
+		defer op.Finish(w)
 		if cache == nil || cache.url == "" {
-			s.logger.Error("JWT auth unavailable: JWKS URL not configured")
+			s.logger.ErrorContext(r.Context(), "JWT auth unavailable: JWKS URL not configured")
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "authentication not configured"})
 			return
 		}
@@ -276,6 +278,8 @@ func (s *Server) jwtAuth(next http.Handler) http.Handler {
 
 func (s *Server) requireInstallationScope(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		op := s.beginOperation(r.Context(), "middleware.installation_scope")
+		defer op.Finish(w)
 		userID := getUserID(r.Context())
 		if userID == "" {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
@@ -284,7 +288,7 @@ func (s *Server) requireInstallationScope(next http.Handler) http.Handler {
 		claims := jwtClaims{Sub: userID, OrgID: getOrgID(r.Context()), OrgRole: getOrgRole(r.Context())}
 		ids, err := s.resolveInstallationIDs(r.Context(), claims, r.Header.Get("X-Installation-ID"))
 		if err != nil {
-			s.logger.Error("resolving installation scope", "error", err)
+			s.logger.ErrorContext(r.Context(), "resolving installation scope", "error", err)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 			return
 		}
@@ -328,7 +332,8 @@ func cors(allowOrigin string) func(http.Handler) http.Handler {
 				w.Header().Set("Vary", "Origin")
 			}
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Installation-ID")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Installation-ID, X-Argus-Trace-Id")
+			w.Header().Set("Access-Control-Expose-Headers", "X-Argus-Trace-Id")
 			w.Header().Set("Access-Control-Max-Age", "86400")
 
 			if r.Method == http.MethodOptions {

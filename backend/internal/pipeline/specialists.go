@@ -256,7 +256,11 @@ func formatMemoryBlock(header, footer string, results []string) string {
 // file, or "" when the indexer is nil. The memory module owns retrieval, typed
 // dispatch, per-section truncation, and the 2400-char cap; this wrapper only
 // picks the specialist's semantic query and the specialist render profile.
-func specialistBriefing(ctx context.Context, indexer memory.Indexer, owner, repo string, s Specialist, filePath string, thresholds memory.Thresholds) string {
+func specialistBriefing(ctx context.Context, indexer memory.Indexer, owner, repo string, s Specialist, filePath string, thresholds memory.Thresholds) (result string) {
+	opID, started := pipelineOperationStart(ctx, slog.Default(), "specialist_memory_briefing", "retrieve role-specific repository memory for one specialist review unit", map[string]any{"owner": owner, "repo": repo, "specialist": s, "file": filePath, "thresholds": thresholds})
+	defer func() {
+		pipelineOperationResult(ctx, slog.Default(), opID, "specialist_memory_briefing", "completed", started, result, "result_bytes", len(result))
+	}()
 	if indexer == nil {
 		return ""
 	}
@@ -284,7 +288,11 @@ func specialistBriefing(ctx context.Context, indexer memory.Indexer, owner, repo
 // "" when the indexer is nil or repo is empty. The review profile additionally
 // folds in org rules + past-review context (side-searches specialists skip);
 // the module caps the whole block at 3200 chars.
-func reviewBriefing(ctx context.Context, indexer memory.Indexer, owner, repo, filePath string, thresholds memory.Thresholds) string {
+func reviewBriefing(ctx context.Context, indexer memory.Indexer, owner, repo, filePath string, thresholds memory.Thresholds) (result string) {
+	opID, started := pipelineOperationStart(ctx, slog.Default(), "review_memory_briefing", "retrieve repository conventions and prior feedback for one general review unit", map[string]any{"owner": owner, "repo": repo, "file": filePath, "thresholds": thresholds})
+	defer func() {
+		pipelineOperationResult(ctx, slog.Default(), opID, "review_memory_briefing", "completed", started, result, "result_bytes", len(result))
+	}()
 	if indexer == nil || repo == "" {
 		return ""
 	}

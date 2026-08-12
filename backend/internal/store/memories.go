@@ -80,7 +80,22 @@ func LearnedMemoryLabel(typ string, count int) string {
 // limit is clamped to learnedMemoryLimitMax; a non-positive limit means the
 // maximum. Returns an empty slice (never nil) when the review wrote nothing —
 // which is itself the answer the review page needs to show.
-func (s *Store) ListReviewMemories(ctx context.Context, installationID int64, reviewID uuid.UUID, limit int) ([]LearnedMemory, error) {
+func (s *Store) ListReviewMemories(ctx context.Context, installationID int64, reviewID uuid.UUID, limit int) (storeResult0 []LearnedMemory, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ListReviewMemories",
+			"installation_id",
+
+			storeLogValue(installationID), "review_id", storeLogValue(reviewID), "limit",
+			storeLogValue(limit))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	if limit <= 0 || limit > learnedMemoryLimitMax {
 		limit = learnedMemoryLimitMax
 	}
@@ -111,7 +126,21 @@ func (s *Store) ListReviewMemories(ctx context.Context, installationID int64, re
 // wrote, ordered by count then type so the rendering is stable. Unlike
 // ListReviewMemories it is NOT capped, so the counts stay correct for a review
 // that wrote more rows than the preview list shows. Same tenant scoping.
-func (s *Store) CountReviewMemoriesByType(ctx context.Context, installationID int64, reviewID uuid.UUID) ([]LearnedMemoryCount, error) {
+func (s *Store) CountReviewMemoriesByType(ctx context.Context, installationID int64, reviewID uuid.UUID) (storeResult0 []LearnedMemoryCount, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "CountReviewMemoriesByType",
+			"installation_id",
+
+			storeLogValue(installationID), "review_id", storeLogValue(reviewID))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr,
+			storeResult0)
+	}()
+
 	rows, err := s.Pool.Query(ctx, `
 		SELECT m.type, COUNT(*)::int
 		FROM memory_review_attributions a

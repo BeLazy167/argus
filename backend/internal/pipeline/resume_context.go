@@ -75,8 +75,12 @@ type resumeContextDeps interface {
 // full review.
 func hydrateResumeContext(ctx context.Context, run *PipelineRun, dep resumeContextDeps, logger *slog.Logger) {
 	if run == nil {
+		if logger != nil {
+			logger.DebugContext(ctx, "resume context hydration skipped", "event", "pipeline.recovery.hydration_skipped", "reason", "nil_run")
+		}
 		return
 	}
+	logger.InfoContext(ctx, "resume context hydration started", "event", "pipeline.recovery.hydration_started", "run_id", run.ID, "review_id", run.ReviewID, "stage", string(run.State), "attempt_generation", run.AttemptGeneration)
 	hydrateCtx, cancel := context.WithTimeout(ctx, resumeHydrateTimeout)
 	// Deferred, not cancelled between the reads: the pre-review link island
 	// once cancelled its context before the feature-flag read, so flags silently
@@ -121,7 +125,8 @@ func hydrateResumeContext(ctx context.Context, run *PipelineRun, dep resumeConte
 		run.Contract.Signals = append(run.Contract.Signals, ContractSignalResumeRebuild)
 	}
 
-	logger.Info("resume: pipeline context rehydrated",
+	logger.InfoContext(ctx, "resume: pipeline context rehydrated",
+		"event", "pipeline.recovery.hydration_completed", "run_id", run.ID,
 		"review_id", run.ReviewID, "state", run.State,
 		"issue_acceptance", run.FeatureFlags.IssueAcceptance,
 		"scenario_trigger", run.Thresholds.ScenarioTrigger,

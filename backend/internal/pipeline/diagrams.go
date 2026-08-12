@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"sort"
 	"strings"
@@ -54,7 +55,11 @@ type diagramGrounding struct {
 	Evidence map[string]bool
 }
 
-func (o *Orchestrator) loadDiagramGrounding(ctx context.Context, run *PipelineRun) diagramGrounding {
+func (o *Orchestrator) loadDiagramGrounding(ctx context.Context, run *PipelineRun) (grounding diagramGrounding) {
+	opID, started := pipelineOperationStart(ctx, o.logger, "diagram_grounding", "bound diagram generation to changed-file graph edges and capped diff evidence", run)
+	defer func() {
+		pipelineOperationResult(ctx, o.logger, opID, "diagram_grounding", "completed", started, grounding, "node_count", len(grounding.Nodes), "edge_count", len(grounding.Edges), "diff_count", len(grounding.Diffs))
+	}()
 	if o == nil || o.st == nil || run == nil || run.DBRepoID == 0 {
 		return buildDiagramGrounding(run, nil)
 	}
@@ -334,7 +339,11 @@ func validateDiagramCandidate(candidate diagramResult, spec diagramSpec, groundi
 	return nil
 }
 
-func validateDiagrams(ctx context.Context, validator MermaidValidator, candidates []diagramResult, specs []diagramSpec, grounding diagramGrounding) []diagramResult {
+func validateDiagrams(ctx context.Context, validator MermaidValidator, candidates []diagramResult, specs []diagramSpec, grounding diagramGrounding) (valid []diagramResult) {
+	opID, started := pipelineOperationStart(ctx, slog.Default(), "diagram_validation", "fail each requested diagram type closed unless it is unique, grounded, semantically bounded, and accepted by the Mermaid parser", map[string]any{"candidates": candidates, "specs": specs, "grounding": grounding})
+	defer func() {
+		pipelineOperationResult(ctx, slog.Default(), opID, "diagram_validation", "completed", started, valid, "candidate_count", len(candidates), "valid_count", len(valid))
+	}()
 	if validator == nil || len(candidates) == 0 || len(specs) == 0 {
 		return nil
 	}
@@ -342,7 +351,7 @@ func validateDiagrams(ctx context.Context, validator MermaidValidator, candidate
 	for _, candidate := range candidates {
 		byType[candidate.Type] = append(byType[candidate.Type], candidate)
 	}
-	valid := make([]diagramResult, 0, len(specs))
+	valid = make([]diagramResult, 0, len(specs))
 	for _, spec := range specs {
 		typedCandidates := byType[spec.Type]
 		// A missing, duplicated, ungrounded, or parser-rejected candidate fails

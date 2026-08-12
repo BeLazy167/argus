@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"math"
@@ -477,7 +478,12 @@ func layer3LineProximity(findings []taggedComment, lineThreshold int) []taggedCo
 //	Layer 1: Canonical vuln type fingerprint (file + vuln type)
 //	Layer 2: TF-IDF cosine similarity for ungrouped findings
 //	Layer 3: Line proximity for remaining same-file/same-category
-func SmartDedup(reviews []FileReview, lineThreshold int, cosineThreshold float64) []FileReview {
+func SmartDedup(reviews []FileReview, lineThreshold int, cosineThreshold float64) (result []FileReview) {
+	ctx := context.Background()
+	opID, started := pipelineOperationStart(ctx, slog.Default(), "smart_dedup", "collapse canonical vulnerability duplicates, TF-IDF semantic duplicates, and same-category line-proximity duplicates while preserving the strongest representative", map[string]any{"reviews": reviews, "line_threshold": lineThreshold, "cosine_threshold": cosineThreshold})
+	defer func() {
+		pipelineOperationResult(ctx, slog.Default(), opID, "smart_dedup", "completed", started, result, "input_file_count", len(reviews), "output_file_count", len(result))
+	}()
 	// Flatten
 	var all []taggedComment
 	for _, fr := range reviews {
@@ -523,7 +529,7 @@ func SmartDedup(reviews []FileReview, lineThreshold int, cosineThreshold float64
 	}
 	sort.Strings(paths)
 
-	result := make([]FileReview, 0, len(paths))
+	result = make([]FileReview, 0, len(paths))
 	for _, p := range paths {
 		result = append(result, FileReview{Path: p, Comments: kept[p]})
 	}

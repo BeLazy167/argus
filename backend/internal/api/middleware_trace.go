@@ -1,7 +1,9 @@
 package api
 
 import (
+	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -18,6 +20,7 @@ import (
 // a single user gesture across multiple API calls.
 func traceIDMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started := time.Now()
 		id := r.Header.Get("X-Argus-Trace-Id")
 		// Reject attacker-controlled values: anything not UUID-shaped gets a
 		// fresh mint. Prevents injection into slog records / PostHog props /
@@ -27,6 +30,9 @@ func traceIDMiddleware(next http.Handler) http.Handler {
 			id = uuid.NewString()
 		}
 		w.Header().Set("X-Argus-Trace-Id", id)
-		next.ServeHTTP(w, r.WithContext(obs.SetTraceID(r.Context(), id)))
+		ctx := obs.SetTraceID(r.Context(), id)
+		slog.DebugContext(ctx, "trace middleware dispatch", "operation", "middleware.trace", "action", "dispatch", "trace_id", id)
+		next.ServeHTTP(w, r.WithContext(ctx))
+		slog.DebugContext(ctx, "trace middleware completed", "operation", "middleware.trace", "action", "success", "trace_id", id, "duration_ms", time.Since(started).Milliseconds())
 	})
 }

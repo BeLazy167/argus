@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/BeLazy167/argus/backend/internal/obs"
 )
 
 const maxMermaidSourceBytes = 20_000
@@ -34,9 +36,10 @@ func NewHTTPMermaidValidator(dashboardBaseURL, secret string, client *http.Clien
 		endpoint = base.String()
 	}
 	if client == nil {
-		client = &http.Client{Timeout: 3 * time.Second}
+		client = &http.Client{Timeout: 3 * time.Second, Transport: obs.NewLoggingRoundTripper("mermaid-validator", http.DefaultTransport)}
 	} else {
 		clone := *client
+		clone.Transport = obs.NewLoggingRoundTripper("mermaid-validator", clone.Transport)
 		client = &clone
 	}
 	// The shared secret is scoped to the explicitly configured parser origin.

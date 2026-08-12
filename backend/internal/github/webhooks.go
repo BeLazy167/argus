@@ -3,10 +3,12 @@ package github
 import (
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/BeLazy167/argus/backend/internal/obs"
 	"github.com/BeLazy167/argus/backend/internal/util"
 	gh "github.com/google/go-github/v68/github"
 )
@@ -53,7 +55,16 @@ const (
 )
 
 // ParseWebhook validates the webhook signature and parses the event.
-func ParseWebhook(r *http.Request, secret []byte) (*WebhookEvent, error) {
+func ParseWebhook(r *http.Request, secret []byte) (result *WebhookEvent, err error) {
+	ctx := r.Context()
+	op := beginSemantic(ctx, "webhook.ParseWebhook", 0, "", "", 0, "event_type", r.Header.Get("X-GitHub-Event"))
+	defer func() {
+		if result != nil {
+			op.finish(err, "action", result.Action)
+		} else {
+			op.finish(err)
+		}
+	}()
 	// Limit webhook body to 10MB to prevent abuse
 	const maxBodySize = 10 << 20
 	defer r.Body.Close()
@@ -65,6 +76,10 @@ func ParseWebhook(r *http.Request, secret []byte) (*WebhookEvent, error) {
 	if err := gh.ValidateSignature(r.Header.Get("X-Hub-Signature-256"), payload, secret); err != nil {
 		return nil, fmt.Errorf("invalid signature: %w", err)
 	}
+	// Only verified webhook bodies reach stdout. This keeps complete signed
+	// inputs while preventing unauthenticated callers from forcing log floods.
+	obs.LogPayload(ctx, slog.Default(), "verified GitHub webhook body", obs.NewLogID(),
+		"request", r.Header.Get("Content-Type"), payload)
 
 	eventType := r.Header.Get("X-GitHub-Event")
 	event, err := gh.ParseWebHook(eventType, payload)

@@ -117,12 +117,14 @@ func truncateDetail(s string) string {
 // auto-run off (the trigger comment owns that flow and has its own failed
 // state), or the create call failed at start.
 func (o *Orchestrator) FinalizeStartedComment(ctx context.Context, reviewID uuid.UUID, outcome StartedOutcome, detail string) {
+	o.logger.InfoContext(ctx, "progress comment finalization started", "event", "pipeline.github.progress_finalize_started", "review_id", reviewID, "status", string(outcome))
 	ref, err := o.st.GetStartedCommentRef(ctx, reviewID)
 	if err != nil {
 		o.logger.Warn("finalize started comment: loading ref", "error", err, "review_id", reviewID)
 		return
 	}
 	if ref == nil {
+		o.logger.InfoContext(ctx, "progress comment finalization skipped", "event", "pipeline.github.progress_finalize_skipped", "review_id", reviewID, "reason", "comment_not_recorded")
 		return
 	}
 	owner, repo, err := splitRepoFullName(ref.RepoFullName)
@@ -132,9 +134,11 @@ func (o *Orchestrator) FinalizeStartedComment(ctx context.Context, reviewID uuid
 	}
 	body := BuildTerminalStartedComment(outcome, o.cfg.DashboardBaseURL, reviewID.String(), detail, "", true)
 	if err := o.ghClient.UpdateIssueComment(ctx, ref.InstallationID, owner, repo, ref.CommentID, body); err != nil {
-		o.logger.Warn("finalize started comment: updating comment",
-			"error", err, "review_id", reviewID, "comment_id", ref.CommentID)
+		o.logger.WarnContext(ctx, "finalize started comment: updating comment", "event", "pipeline.github.progress_finalize_failed",
+			"error", err, "review_id", reviewID, "comment_id", ref.CommentID, "status", string(outcome))
+		return
 	}
+	o.logger.InfoContext(ctx, "progress comment finalized", "event", "pipeline.github.progress_finalized", "review_id", reviewID, "comment_id", ref.CommentID, "status", string(outcome))
 }
 
 // stageModelOrder is the render order for the models listed on the progress

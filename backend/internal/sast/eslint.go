@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // eslintFileResult is the top-level JSON structure from `eslint --format json`.
@@ -36,7 +38,15 @@ func (e *ESLintRunner) CanRun(language string) bool {
 
 // Run writes the provided files to a temp directory and invokes eslint.
 // Returns empty findings (not an error) if eslint or node is not installed.
-func (e *ESLintRunner) Run(ctx context.Context, files map[string]string) ([]Finding, error) {
+func (e *ESLintRunner) Run(ctx context.Context, files map[string]string) (findings []Finding, err error) {
+	started := time.Now()
+	defer func() {
+		level := slog.LevelInfo
+		if err != nil {
+			level = slog.LevelError
+		}
+		slog.Log(ctx, level, "SAST tool run completed", "tool", "eslint", "file_count", len(files), "finding_count", len(findings), "duration_ms", time.Since(started).Milliseconds(), "error", err)
+	}()
 	if _, err := exec.LookPath("node"); err != nil {
 		return nil, nil
 	}
@@ -80,7 +90,7 @@ func (e *ESLintRunner) Run(ctx context.Context, files map[string]string) ([]Find
 	cmd := exec.CommandContext(ctx, "eslint", args...)
 	cmd.Dir = dir
 
-	out, runErr := cmd.Output()
+	out, runErr := runCommand(ctx, "eslint", cmd)
 	// eslint exits non-zero when findings exist.
 	if runErr != nil {
 		if _, ok := runErr.(*exec.ExitError); !ok {
@@ -93,7 +103,6 @@ func (e *ESLintRunner) Run(ctx context.Context, files map[string]string) ([]Find
 		return nil, fmt.Errorf("parsing eslint output: %w", err)
 	}
 
-	var findings []Finding
 	for _, r := range results {
 		rel, _ := filepath.Rel(dir, r.FilePath)
 		for _, m := range r.Messages {

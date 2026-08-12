@@ -88,6 +88,8 @@ type archResponse struct {
 // ── Handler ─────────────────────────────────────────────────────────────
 
 func (s *Server) getArchitecture(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.getArchitecture")
+	defer op.Finish(w)
 	repoID, err := strconv.ParseInt(chi.URLParam(r, "repoID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo id"})
@@ -159,7 +161,7 @@ func (s *Server) getArchitecture(w http.ResponseWriter, r *http.Request) {
 		defer wg.Done()
 		list, err := s.fetchArchCoupling(ctx, repoID)
 		if err != nil {
-			s.logger.Warn("architecture: coupling query (non-fatal)", "error", err)
+			s.logger.WarnContext(r.Context(), "architecture: coupling query (non-fatal)", "error", err)
 			mu.Lock()
 			couplingAvailable = false
 			mu.Unlock()
@@ -189,7 +191,7 @@ func (s *Server) getArchitecture(w http.ResponseWriter, r *http.Request) {
 	wg.Wait()
 
 	if fetchErr != nil {
-		s.logger.Error("architecture: query failed", "error", fetchErr)
+		s.logger.ErrorContext(r.Context(), "architecture: query failed", "error", fetchErr)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load architecture"})
 		return
 	}

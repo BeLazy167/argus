@@ -54,21 +54,26 @@ type graphQLErrors struct {
 
 // doGraphQL executes a GraphQL request and checks for both HTTP and GraphQL errors.
 // It reads the raw response body to detect GraphQL errors that go-github's Do ignores.
-func doGraphQL(ctx context.Context, client *gh.Client, body any, result any) error {
+func doGraphQL(ctx context.Context, client *gh.Client, installationID int64, body any, result any) (err error) {
+	operation, owner, repo, prNumber, attrs := graphQLOperation(body)
+	call := beginAPICall(ctx, operation, installationID, owner, repo, prNumber, attrs...)
+	var response *gh.Response
+	defer func() { call.finish(response, err) }()
+
 	req, err := client.NewRequest("POST", "graphql", body)
 	if err != nil {
 		return fmt.Errorf("creating graphql request: %w", err)
 	}
 	// BareDo sends the request without reading/closing the body, so we can read it ourselves.
 	// client.Do(ctx, req, nil) reads and closes the body, making subsequent ReadAll fail.
-	resp, err := client.BareDo(ctx, req)
-	if resp != nil && resp.Body != nil {
-		defer resp.Body.Close()
+	response, err = client.BareDo(ctx, req)
+	if response != nil && response.Body != nil {
+		defer response.Body.Close()
 	}
 	if err != nil {
 		return err
 	}
-	raw, err := io.ReadAll(resp.Body)
+	raw, err := io.ReadAll(response.Body)
 	if err != nil {
 		return fmt.Errorf("reading graphql response: %w", err)
 	}
@@ -91,7 +96,8 @@ func doGraphQL(ctx context.Context, client *gh.Client, body any, result any) err
 }
 
 // GetPRDiff fetches the unified diff for a pull request.
-func (c *Client) GetPRDiff(ctx context.Context, installationID int64, owner, repo string, prNumber int) (string, error) {
+func (c *Client) getPRDiffLogged(ctx context.Context, installationID int64, owner, repo string, prNumber int) (string, error) {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return "", err
@@ -124,7 +130,8 @@ type PRCommit struct {
 //
 // Used by intent extraction to pull the author's per-commit narrative when
 // the PR description is thin.
-func (c *Client) ListPRCommits(ctx context.Context, installationID int64, owner, repo string, prNumber, maxCommits int) ([]PRCommit, error) {
+func (c *Client) listPRCommitsLogged(ctx context.Context, installationID int64, owner, repo string, prNumber, maxCommits int) ([]PRCommit, error) {
+
 	if maxCommits <= 0 {
 		return nil, nil
 	}
@@ -162,7 +169,8 @@ func (c *Client) ListPRCommits(ctx context.Context, installationID int64, owner,
 }
 
 // GetPRFiles fetches per-file change data for a pull request with pagination.
-func (c *Client) GetPRFiles(ctx context.Context, installationID int64, owner, repo string, prNumber int) ([]*gh.CommitFile, error) {
+func (c *Client) getPRFilesLogged(ctx context.Context, installationID int64, owner, repo string, prNumber int) ([]*gh.CommitFile, error) {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return nil, err
@@ -188,7 +196,8 @@ func (c *Client) GetPRFiles(ctx context.Context, installationID int64, owner, re
 }
 
 // UpdatePRDescription updates the body of a pull request.
-func (c *Client) UpdatePRDescription(ctx context.Context, installationID int64, owner, repo string, prNumber int, body string) error {
+func (c *Client) updatePRDescriptionLogged(ctx context.Context, installationID int64, owner, repo string, prNumber int, body string) error {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return err
@@ -269,7 +278,8 @@ func decodeRepositoryContent(ctx context.Context, content *gh.RepositoryContent,
 }
 
 // GetFileContent fetches the content of a file from a repo at a specific ref.
-func (c *Client) GetFileContent(ctx context.Context, installationID int64, owner, repo, path, ref string) (string, error) {
+func (c *Client) getFileContentLogged(ctx context.Context, installationID int64, owner, repo, path, ref string) (string, error) {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return "", err
@@ -326,7 +336,8 @@ func isConclusiveReview4xx(err error) bool {
 // PostReview creates a pull request review with all inline comments in one atomic API call.
 // Comments must be pre-validated — invalid lines should be folded into the summary body
 // by the caller, not included in the Comments slice.
-func (c *Client) PostReview(ctx context.Context, installationID int64, owner, repo string, prNumber int, review *ReviewSubmission) (int64, error) {
+func (c *Client) postReviewLogged(ctx context.Context, installationID int64, owner, repo string, prNumber int, review *ReviewSubmission) (int64, error) {
+
 	if review == nil {
 		return 0, definitelyNotCreated(errors.New("posting review: nil submission"))
 	}
@@ -507,7 +518,8 @@ func ReviewMarker(reviewID string, generation int) string {
 // FindReviewByMarker performs a complete paginated lookup through the same
 // installation-scoped client used to post. A match must have the exact marker,
 // our bot identity, and (when supplied) the reviewed head commit.
-func (c *Client) FindReviewByMarker(ctx context.Context, installationID int64, owner, repo string, prNumber int, marker, headSHA string) (int64, bool, error) {
+func (c *Client) findReviewByMarkerLogged(ctx context.Context, installationID int64, owner, repo string, prNumber int, marker, headSHA string) (int64, bool, error) {
+
 	if c == nil || c.app == nil {
 		return 0, false, errors.New("listing reviews: GitHub App is not configured")
 	}
@@ -563,7 +575,8 @@ func is422(err error) bool {
 }
 
 // GetCompareCommitsDiff fetches the diff between two commits (for incremental re-review).
-func (c *Client) GetCompareCommitsDiff(ctx context.Context, installationID int64, owner, repo, base, head string) (string, error) {
+func (c *Client) getCompareCommitsDiffLogged(ctx context.Context, installationID int64, owner, repo, base, head string) (string, error) {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return "", err
@@ -600,7 +613,8 @@ type CommitTouch struct {
 // ListCommitsTouchingFile returns commits reachable from ref that modified
 // path since the given time, oldest first. One page (100 commits) is plenty
 // for the address-detection window between a review comment and the merge.
-func (c *Client) ListCommitsTouchingFile(ctx context.Context, installationID int64, owner, repo, path, ref string, since time.Time) ([]CommitTouch, error) {
+func (c *Client) listCommitsTouchingFileLogged(ctx context.Context, installationID int64, owner, repo, path, ref string, since time.Time) ([]CommitTouch, error) {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return nil, err
@@ -631,7 +645,8 @@ func (c *Client) ListCommitsTouchingFile(ctx context.Context, installationID int
 }
 
 // ListReviewComments returns all comments for a specific review, used to capture github_comment_ids after posting.
-func (c *Client) ListReviewComments(ctx context.Context, installationID int64, owner, repo string, prNumber int, reviewID int64) ([]*gh.PullRequestComment, error) {
+func (c *Client) listReviewCommentsLogged(ctx context.Context, installationID int64, owner, repo string, prNumber int, reviewID int64) ([]*gh.PullRequestComment, error) {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return nil, err
@@ -657,7 +672,8 @@ func (c *Client) ListReviewComments(ctx context.Context, installationID int64, o
 }
 
 // ReplyToComment posts a reply to an existing PR review comment thread.
-func (c *Client) ReplyToComment(ctx context.Context, installationID int64, owner, repo string, prNumber int, commentID int64, body string) (*gh.PullRequestComment, error) {
+func (c *Client) replyToCommentLogged(ctx context.Context, installationID int64, owner, repo string, prNumber int, commentID int64, body string) (*gh.PullRequestComment, error) {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return nil, err
@@ -674,7 +690,8 @@ func (c *Client) ReplyToComment(ctx context.Context, installationID int64, owner
 }
 
 // GetPullRequest fetches full PR details (for constructing PREvent from issue_comment).
-func (c *Client) GetPullRequest(ctx context.Context, installationID int64, owner, repo string, prNumber int) (*PREvent, error) {
+func (c *Client) getPullRequestLogged(ctx context.Context, installationID int64, owner, repo string, prNumber int) (*PREvent, error) {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return nil, err
@@ -701,7 +718,8 @@ func (c *Client) GetPullRequest(ctx context.Context, installationID int64, owner
 }
 
 // AddReaction adds an emoji reaction to an issue comment.
-func (c *Client) AddReaction(ctx context.Context, installationID int64, owner, repo string, commentID int64, reaction string) error {
+func (c *Client) addReactionLogged(ctx context.Context, installationID int64, owner, repo string, commentID int64, reaction string) error {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return err
@@ -760,7 +778,8 @@ type CommentReaction struct {
 }
 
 // ListCommentReactions fetches all reactions on a pull request review comment.
-func (c *Client) ListCommentReactions(ctx context.Context, installationID int64, owner, repo string, commentID int64) ([]CommentReaction, error) {
+func (c *Client) listCommentReactionsLogged(ctx context.Context, installationID int64, owner, repo string, commentID int64) ([]CommentReaction, error) {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return nil, err
@@ -792,7 +811,8 @@ func (c *Client) ListCommentReactions(ctx context.Context, installationID int64,
 }
 
 // CreateIssueComment posts a comment on an issue or PR.
-func (c *Client) CreateIssueComment(ctx context.Context, installationID int64, owner, repo string, number int, body string) error {
+func (c *Client) createIssueCommentLogged(ctx context.Context, installationID int64, owner, repo string, number int, body string) error {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return err
@@ -807,7 +827,8 @@ func (c *Client) CreateIssueComment(ctx context.Context, installationID int64, o
 // UpdateIssueComment edits the body of an existing issue comment by its REST
 // comment ID. Used e.g., to swap the "Trigger" checkbox line for a "Running"
 // marker once a checkbox-triggered review has been dispatched.
-func (c *Client) UpdateIssueComment(ctx context.Context, installationID int64, owner, repo string, commentID int64, body string) error {
+func (c *Client) updateIssueCommentLogged(ctx context.Context, installationID int64, owner, repo string, commentID int64, body string) error {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return err
@@ -820,7 +841,8 @@ func (c *Client) UpdateIssueComment(ctx context.Context, installationID int64, o
 }
 
 // CreateIssueCommentWithNodeID posts a comment and returns its GraphQL node ID (for minimizing later).
-func (c *Client) CreateIssueCommentWithNodeID(ctx context.Context, installationID int64, owner, repo string, number int, body string) (string, error) {
+func (c *Client) createIssueCommentWithNodeIDLogged(ctx context.Context, installationID int64, owner, repo string, number int, body string) (string, error) {
+
 	nodeID, _, err := c.CreateIssueCommentRef(ctx, installationID, owner, repo, number, body)
 	return nodeID, err
 }
@@ -830,7 +852,8 @@ func (c *Client) CreateIssueCommentWithNodeID(ctx context.Context, installationI
 // not interchangeable — minimizeComment takes only the former and
 // Issues.EditComment only the latter — and a comment that must be rewritten
 // later from another process needs the REST id persisted.
-func (c *Client) CreateIssueCommentRef(ctx context.Context, installationID int64, owner, repo string, number int, body string) (nodeID string, commentID int64, err error) {
+func (c *Client) createIssueCommentRefLogged(ctx context.Context, installationID int64, owner, repo string, number int, body string) (nodeID string, commentID int64, err error) {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return "", 0, err
@@ -857,7 +880,8 @@ func (c *Client) CreateIssueCommentRef(ctx context.Context, installationID int64
 // GitHub returns 404 for a user with no access at all, which is a denial, not
 // an error — but every other failure IS returned, so callers can fail closed
 // rather than treat an outage as permission.
-func (c *Client) HasRepoWriteAccess(ctx context.Context, installationID int64, owner, repo, login string) (bool, error) {
+func (c *Client) hasRepoWriteAccessLogged(ctx context.Context, installationID int64, owner, repo, login string) (bool, error) {
+
 	if login == "" {
 		return false, nil
 	}
@@ -884,7 +908,8 @@ func (c *Client) HasRepoWriteAccess(ctx context.Context, installationID int64, o
 }
 
 // ListPRComments returns ALL review comments on a PR (across all reviews).
-func (c *Client) ListPRComments(ctx context.Context, installationID int64, owner, repo string, prNumber int) ([]*gh.PullRequestComment, error) {
+func (c *Client) listPRCommentsLogged(ctx context.Context, installationID int64, owner, repo string, prNumber int) ([]*gh.PullRequestComment, error) {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return nil, err
@@ -925,7 +950,8 @@ type ReviewThread struct {
 }
 
 // ListReviewThreads fetches unresolved review threads via GraphQL.
-func (c *Client) ListReviewThreads(ctx context.Context, installationID int64, owner, repo string, prNumber int) ([]ReviewThread, error) {
+func (c *Client) listReviewThreadsLogged(ctx context.Context, installationID int64, owner, repo string, prNumber int) ([]ReviewThread, error) {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return nil, err
@@ -998,7 +1024,7 @@ func (c *Client) ListReviewThreads(ctx context.Context, installationID int64, ow
 		if err := c.restLimiter.Wait(ctx); err != nil {
 			return nil, fmt.Errorf("rate limit wait: %w", err)
 		}
-		if err := doGraphQL(ctx, client, body, &result); err != nil {
+		if err := doGraphQL(ctx, client, installationID, body, &result); err != nil {
 			return nil, fmt.Errorf("graphql reviewThreads: %w", err)
 		}
 
@@ -1027,7 +1053,8 @@ func (c *Client) ListReviewThreads(ctx context.Context, installationID int64, ow
 }
 
 // ResolveReviewThread marks a review thread as resolved via GraphQL.
-func (c *Client) ResolveReviewThread(ctx context.Context, installationID int64, threadID string) error {
+func (c *Client) resolveReviewThreadLogged(ctx context.Context, installationID int64, threadID string) error {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return err
@@ -1043,11 +1070,12 @@ func (c *Client) ResolveReviewThread(ctx context.Context, installationID int64, 
 	if err := c.restLimiter.Wait(ctx); err != nil {
 		return fmt.Errorf("rate limit wait: %w", err)
 	}
-	return doGraphQL(ctx, client, body, nil)
+	return doGraphQL(ctx, client, installationID, body, nil)
 }
 
 // FindThreadForComment returns the thread ID for a given review comment node ID.
-func (c *Client) FindThreadForComment(ctx context.Context, installationID int64, owner, repo string, prNumber int, commentNodeID string) (string, error) {
+func (c *Client) findThreadForCommentLogged(ctx context.Context, installationID int64, owner, repo string, prNumber int, commentNodeID string) (string, error) {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return "", err
@@ -1093,7 +1121,7 @@ func (c *Client) FindThreadForComment(ctx context.Context, installationID int64,
 	if err := c.restLimiter.Wait(ctx); err != nil {
 		return "", fmt.Errorf("rate limit wait: %w", err)
 	}
-	if err := doGraphQL(ctx, client, body, &result); err != nil {
+	if err := doGraphQL(ctx, client, installationID, body, &result); err != nil {
 		return "", err
 	}
 
@@ -1108,7 +1136,8 @@ func (c *Client) FindThreadForComment(ctx context.Context, installationID int64,
 }
 
 // MinimizeComment hides a comment via GraphQL minimizeComment mutation.
-func (c *Client) MinimizeComment(ctx context.Context, installationID int64, nodeID, reason string) error {
+func (c *Client) minimizeCommentLogged(ctx context.Context, installationID int64, nodeID, reason string) error {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return err
@@ -1127,13 +1156,14 @@ func (c *Client) MinimizeComment(ctx context.Context, installationID int64, node
 	if err := c.restLimiter.Wait(ctx); err != nil {
 		return fmt.Errorf("rate limit wait: %w", err)
 	}
-	return doGraphQL(ctx, client, body, nil)
+	return doGraphQL(ctx, client, installationID, body, nil)
 }
 
 // --- Git Data API (for @argus-eye fix command) ---
 
 // CreateBlob creates a blob in the repo and returns its SHA.
-func (c *Client) CreateBlob(ctx context.Context, installationID int64, owner, repo, content, encoding string) (string, error) {
+func (c *Client) createBlobLogged(ctx context.Context, installationID int64, owner, repo, content, encoding string) (string, error) {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return "", err
@@ -1152,7 +1182,8 @@ func (c *Client) CreateBlob(ctx context.Context, installationID int64, owner, re
 }
 
 // CreateTree creates a tree object from entries and returns its SHA.
-func (c *Client) CreateTree(ctx context.Context, installationID int64, owner, repo, baseTreeSHA string, entries []*gh.TreeEntry) (string, error) {
+func (c *Client) createTreeLogged(ctx context.Context, installationID int64, owner, repo, baseTreeSHA string, entries []*gh.TreeEntry) (string, error) {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return "", err
@@ -1168,7 +1199,8 @@ func (c *Client) CreateTree(ctx context.Context, installationID int64, owner, re
 }
 
 // CreateCommit creates a commit object and returns its SHA.
-func (c *Client) CreateCommit(ctx context.Context, installationID int64, owner, repo, message, treeSHA string, parentSHAs []string) (string, error) {
+func (c *Client) createCommitLogged(ctx context.Context, installationID int64, owner, repo, message, treeSHA string, parentSHAs []string) (string, error) {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return "", err
@@ -1192,7 +1224,8 @@ func (c *Client) CreateCommit(ctx context.Context, installationID int64, owner, 
 }
 
 // UpdateRef updates a git reference to point to a new SHA.
-func (c *Client) UpdateRef(ctx context.Context, installationID int64, owner, repo, ref, sha string) error {
+func (c *Client) updateRefLogged(ctx context.Context, installationID int64, owner, repo, ref, sha string) error {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return err
@@ -1211,7 +1244,8 @@ func (c *Client) UpdateRef(ctx context.Context, installationID int64, owner, rep
 }
 
 // GetRef returns the SHA a ref points to.
-func (c *Client) GetRef(ctx context.Context, installationID int64, owner, repo, ref string) (string, error) {
+func (c *Client) getRefLogged(ctx context.Context, installationID int64, owner, repo, ref string) (string, error) {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return "", err
@@ -1227,7 +1261,8 @@ func (c *Client) GetRef(ctx context.Context, installationID int64, owner, repo, 
 }
 
 // GetCommitTree returns the tree SHA for a given commit.
-func (c *Client) GetCommitTree(ctx context.Context, installationID int64, owner, repo, commitSHA string) (string, error) {
+func (c *Client) getCommitTreeLogged(ctx context.Context, installationID int64, owner, repo, commitSHA string) (string, error) {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return "", err
@@ -1244,7 +1279,8 @@ func (c *Client) GetCommitTree(ctx context.Context, installationID int64, owner,
 
 // SearchCode searches for a symbol name in a repository and returns matching file paths.
 // Uses the GitHub code search API. Returns up to 5 unique file paths.
-func (c *Client) SearchCode(ctx context.Context, installationID int64, owner, repo, query string) ([]string, error) {
+func (c *Client) searchCodeLogged(ctx context.Context, installationID int64, owner, repo, query string) ([]string, error) {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return nil, err
@@ -1299,7 +1335,8 @@ type RepositoryMetadata struct {
 // GetRepositoryMetadata reads current repository authority with the target
 // installation's GitHub client. It deliberately returns only fields needed by
 // webhook arbitration.
-func (c *Client) GetRepositoryMetadata(ctx context.Context, installationID int64, owner, repo string) (RepositoryMetadata, error) {
+func (c *Client) getRepositoryMetadataLogged(ctx context.Context, installationID int64, owner, repo string) (RepositoryMetadata, error) {
+
 	if c.app == nil {
 		return RepositoryMetadata{}, errors.New("github app is unavailable")
 	}
@@ -1323,12 +1360,15 @@ func (c *Client) GetRepositoryMetadata(ctx context.Context, installationID int64
 
 // ResolveDefaultBranchCommit resolves a mutable branch name once. The returned
 // SHA is then used for both the tree and every file fetch in a full index.
-func (c *Client) ResolveDefaultBranchCommit(ctx context.Context, installationID int64, owner, repo, branch string) (string, error) {
+func (c *Client) resolveDefaultBranchCommitLogged(ctx context.Context, installationID int64, owner, repo, branch string) (string, error) {
+
 	return c.GetRef(ctx, installationID, owner, repo, "heads/"+strings.TrimPrefix(branch, "refs/heads/"))
 }
 
-// GetRepoTree returns all immutable file blobs at a commit SHA.
-func (c *Client) GetRepoTree(ctx context.Context, installationID int64, owner, repo, commitSHA string) (RepoTree, error) {
+// getRepoTreeLogged returns all immutable file blobs at a commit SHA.
+// The exported semantic wrapper is defined in client_logging.go.
+func (c *Client) getRepoTreeLogged(ctx context.Context, installationID int64, owner, repo, commitSHA string) (RepoTree, error) {
+
 	// The Git Trees endpoint is keyed by a tree object, not a commit object.
 	// Resolve the commit's root tree explicitly rather than relying on GitHub to
 	// accept a commit SHA as an undocumented shorthand.
@@ -1362,7 +1402,7 @@ func (c *Client) GetRepoTree(ctx context.Context, installationID int64, owner, r
 }
 
 // GetBlobContent fetches one immutable tree blob in a single GitHub call.
-func (c *Client) GetBlobContent(ctx context.Context, installationID int64, owner, repo string, file RepoTreeFile) (string, error) {
+func (c *Client) getBlobContentLogged(ctx context.Context, installationID int64, owner, repo string, file RepoTreeFile) (string, error) {
 	if file.SHA == "" {
 		return "", &permanentFileContentError{err: fmt.Errorf("file %s has no blob SHA", file.Path)}
 	}
@@ -1420,7 +1460,8 @@ type Issue struct {
 // GetIssue fetches a single issue's title + body via the REST API.
 // Returns an *Issue (or error) for the given owner/repo/number. Used by the
 // acceptance worker to pull criteria from issue descriptions.
-func (c *Client) GetIssue(ctx context.Context, installationID int64, owner, repo string, number int) (*Issue, error) {
+func (c *Client) getIssueLogged(ctx context.Context, installationID int64, owner, repo string, number int) (*Issue, error) {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return nil, err
@@ -1465,7 +1506,8 @@ type ClosingIssueRef struct {
 // more than 50 issues are extremely rare; if they exist, we return the first
 // 50 GitHub serves. Pagination via pageInfo.endCursor is left as a future
 // upgrade when a real workload needs it.
-func (c *Client) GetClosingIssues(ctx context.Context, installationID int64, owner, repo string, prNumber int) ([]ClosingIssueRef, error) {
+func (c *Client) getClosingIssuesLogged(ctx context.Context, installationID int64, owner, repo string, prNumber int) ([]ClosingIssueRef, error) {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return nil, err
@@ -1519,7 +1561,7 @@ func (c *Client) GetClosingIssues(ctx context.Context, installationID int64, own
 		} `json:"data"`
 	}
 
-	if err := doGraphQL(ctx, client, body, &resp); err != nil {
+	if err := doGraphQL(ctx, client, installationID, body, &resp); err != nil {
 		return nil, fmt.Errorf("closing issues graphql: %w", err)
 	}
 

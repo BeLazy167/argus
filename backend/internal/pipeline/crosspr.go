@@ -19,7 +19,15 @@ import (
 //
 // Routes through Orchestrator.crossPRGithubDep so integration tests can
 // inject canned PR metadata / diff without real GitHub calls.
-func hydratePRLink(ctx context.Context, o *Orchestrator, run *PipelineRun, link PRLink) PRLink {
+func hydratePRLink(ctx context.Context, o *Orchestrator, run *PipelineRun, link PRLink) (result PRLink) {
+	opID, started := pipelineOperationStart(ctx, o.logger, "crosspr_link_hydration", "fetch linked pull-request metadata and unified diff under a bounded timeout, marking inaccessible links explicitly", map[string]any{"run": run, "link": link})
+	defer func() {
+		verdict := "accessible"
+		if !result.Accessible {
+			verdict = "inaccessible"
+		}
+		pipelineOperationResult(ctx, o.logger, opID, "crosspr_link_hydration", verdict, started, result)
+	}()
 	fetchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 

@@ -82,6 +82,20 @@ func CanTransitionFindingState(from, to FindingState) bool {
 // silent no-op (updated=false), never an error. A missing row is likewise a
 // non-fatal no-op.
 func (s *Store) UpdateFindingStateFrom(ctx context.Context, commentID uuid.UUID, to FindingState, allowedFrom []FindingState) (updated bool, err error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "UpdateFindingStateFrom",
+
+			"comment_id", storeLogValue(commentID), "allowed_from_count",
+			len(allowedFrom))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered, updated)
+			panic(recovered)
+		}
+		storeFinish(err, updated)
+	}()
+
 	if len(allowedFrom) == 0 {
 		return false, nil
 	}
@@ -106,7 +120,22 @@ func (s *Store) UpdateFindingStateFrom(ctx context.Context, commentID uuid.UUID,
 // that produced the given comment ("" when the review predates contracts).
 // Feedback indexers stamp it on dismissal memories so retrieval can ignore
 // prototype-era dismissals during production review.
-func (s *Store) GetCommentChangeClass(ctx context.Context, commentID uuid.UUID) (string, error) {
+func (s *Store) GetCommentChangeClass(ctx context.Context, commentID uuid.UUID) (storeResult0 string, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetCommentChangeClass",
+
+			"comment_id", storeLogValue(commentID))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish,
+
+				recovered,
+				storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	var class string
 	err := s.Pool.QueryRow(ctx, `
 		SELECT COALESCE(rv.review_contract->>'change_class', '')

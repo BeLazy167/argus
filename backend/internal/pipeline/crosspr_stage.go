@@ -701,6 +701,10 @@ func (o *Orchestrator) enqueueSiblingRefreshes(ctx context.Context, reviewID uui
 // leaves a retryable state (next refresh recomputes, finds the bundle
 // unchanged, and skips).
 func (o *Orchestrator) runCrossPRStage(ctx context.Context, reviewID uuid.UUID) {
+	opID, started := pipelineOperationStart(ctx, o.logger, "crosspr_analysis_stage", "hydrate linked pull requests and prior findings, judge combination risks, persist coverage/hash/tokens, and update the sticky review section", map[string]any{"review_id": reviewID})
+	defer func() {
+		pipelineOperationResult(ctx, o.logger, opID, "crosspr_analysis_stage", "completed", started, map[string]any{"review_id": reviewID})
+	}()
 	mu := acquireCrossPRMutex(reviewID)
 	mu.Lock()
 	defer mu.Unlock()
@@ -1630,6 +1634,10 @@ type jointLinkedReviewSummary struct {
 // (diff + prior findings) in parallel, and issues one LLM verdict per
 // issue — aggregated output goes out as one sticky section write.
 func (o *Orchestrator) runCrossPRAcceptanceStage(ctx context.Context, reviewID uuid.UUID) {
+	opID, started := pipelineOperationStart(ctx, o.logger, "crosspr_joint_acceptance_stage", "hydrate all reviews linked to shared issues, judge joint acceptance criteria, persist tokens, and update joint-acceptance output", map[string]any{"review_id": reviewID})
+	defer func() {
+		pipelineOperationResult(ctx, o.logger, opID, "crosspr_joint_acceptance_stage", "completed", started, map[string]any{"review_id": reviewID})
+	}()
 	mu := acquireJointAcceptanceMutex(reviewID)
 	mu.Lock()
 	defer mu.Unlock()

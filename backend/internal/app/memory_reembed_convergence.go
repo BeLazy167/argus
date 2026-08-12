@@ -4,6 +4,8 @@ import (
 	"context"
 	"log/slog"
 	"time"
+
+	"github.com/BeLazy167/argus/backend/internal/obs"
 )
 
 const (
@@ -48,34 +50,63 @@ func runMemoryReembedConvergence(
 		return
 	}
 	options = normalizedReembedConvergenceOptions(options)
+	workerStarted := time.Now()
+	logger.InfoContext(ctx, "memory reembed convergence worker started",
+		"sweep_interval", options.SweepInterval, "attempt_timeout", options.AttemptTimeout,
+		"retry_min", options.RetryMin, "retry_max", options.RetryMax)
+	defer func() {
+		logger.InfoContext(context.WithoutCancel(ctx), "memory reembed convergence worker stopped",
+			"duration_ms", time.Since(workerStarted).Milliseconds(), "reason", ctx.Err())
+	}()
 	retryDelay := options.RetryMin
+	attemptNumber := 0
 
 	for {
+		attemptNumber++
+		operationID := obs.NewLogID()
+		attemptStarted := time.Now()
+		logger.InfoContext(ctx, "memory reembed convergence attempt started",
+			"operation_id", operationID, "attempt", attemptNumber, "timeout", options.AttemptTimeout)
 		attemptCtx, cancel := context.WithTimeout(ctx, options.AttemptTimeout)
 		repaired, err := reembed(attemptCtx)
+		attemptErr := attemptCtx.Err()
 		cancel()
 		if ctx.Err() != nil {
+			logger.InfoContext(context.WithoutCancel(ctx), "memory reembed convergence attempt stopped",
+				"operation_id", operationID, "attempt", attemptNumber, "repaired", repaired,
+				"duration_ms", time.Since(attemptStarted).Milliseconds(), "reason", ctx.Err(), "error", err)
 			return
 		}
 
 		delay := options.SweepInterval
 		if err != nil {
-			logger.Warn("memory reembed convergence", "repaired", repaired, "retry_in", retryDelay, "error", err)
+			logger.WarnContext(ctx, "memory reembed convergence attempt failed",
+				"operation_id", operationID, "attempt", attemptNumber, "repaired", repaired,
+				"timed_out", attemptErr == context.DeadlineExceeded,
+				"duration_ms", time.Since(attemptStarted).Milliseconds(), "retry_in", retryDelay, "error", err)
 			delay = retryDelay
 			retryDelay = nextReembedRetry(retryDelay, options.RetryMax)
 		} else {
-			logger.Info("memory reembed convergence complete", "repaired", repaired, "next_sweep_in", options.SweepInterval)
+			logger.InfoContext(ctx, "memory reembed convergence attempt completed",
+				"operation_id", operationID, "attempt", attemptNumber, "repaired", repaired,
+				"duration_ms", time.Since(attemptStarted).Milliseconds(), "next_sweep_in", options.SweepInterval)
 			retryDelay = options.RetryMin
 		}
 
+		logger.InfoContext(ctx, "memory reembed convergence wait started",
+			"operation_id", operationID, "delay", delay, "next_attempt", attemptNumber+1)
 		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
 			if !timer.Stop() {
 				<-timer.C
 			}
+			logger.InfoContext(context.WithoutCancel(ctx), "memory reembed convergence wait stopped",
+				"operation_id", operationID, "reason", ctx.Err())
 			return
 		case <-timer.C:
+			logger.InfoContext(ctx, "memory reembed convergence wait completed",
+				"operation_id", operationID, "next_attempt", attemptNumber+1)
 		}
 	}
 }

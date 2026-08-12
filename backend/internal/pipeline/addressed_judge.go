@@ -118,7 +118,15 @@ Respond with ONLY a JSON object, no prose, no code fence:
 // plus the error on any resolution/LLM/parse failure so the caller degrades safe.
 // The parse-failure path still returns the call's Tokens — the provider billed us
 // for a response we could not read, and that spend must still reach the stats.
-func (j *llmAddressedJudge) Judge(ctx context.Context, finding JudgeFinding, interDiffPatch string) (JudgeVerdict, error) {
+func (j *llmAddressedJudge) Judge(ctx context.Context, finding JudgeFinding, interDiffPatch string) (verdict JudgeVerdict, err error) {
+	opID, started := pipelineOperationStart(ctx, j.logger, "addressed_judge", "decide whether an inter-diff semantically fixed a proximity-selected finding; failures leave the finding open", map[string]any{"finding": finding, "inter_diff_patch": interDiffPatch})
+	defer func() {
+		if err != nil {
+			pipelineOperationFailure(ctx, j.logger, opID, "addressed_judge", started, err)
+			return
+		}
+		pipelineOperationResult(ctx, j.logger, opID, "addressed_judge", fmt.Sprintf("addressed=%t", verdict.Addressed), started, verdict)
+	}()
 	provider, cfg, err := j.registry.ResolveProvider(ctx,
 		storeConfigLister{st: j.store, installationID: finding.DBInstallationID},
 		finding.DBInstallationID, finding.DBRepoID, llm.StageReview)

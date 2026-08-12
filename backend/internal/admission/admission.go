@@ -1,6 +1,10 @@
 package admission
 
-import "context"
+import (
+	"context"
+	"log/slog"
+	"time"
+)
 
 // PermissionChecker answers whether an actor may spend this repo's review
 // budget. The GitHub adapter asks GitHub for push permission; the dashboard
@@ -58,6 +62,7 @@ type Admission struct {
 // can be authorized, rather than admitting them: an unwired dependency must not
 // read as permission.
 func New(perms PermissionChecker, rate RateLimiter) *Admission {
+	slog.Info("admission configured", "permission_checker_configured", perms != nil, "rate_limiter_configured", rate != nil)
 	return &Admission{perms: perms, rate: rate}
 }
 
@@ -68,7 +73,14 @@ func New(perms PermissionChecker, rate RateLimiter) *Admission {
 // token — otherwise anyone can exhaust a repo's hourly budget without ever
 // being allowed to run anything. The Budget is last, because it is the only
 // gate that needs the fetched diff.
-func (a *Admission) Decide(ctx context.Context, req Request) Verdict {
+func (a *Admission) Decide(ctx context.Context, req Request) (verdict Verdict) {
+	started := time.Now()
+	slog.InfoContext(ctx, "admission decision started", "repo", req.RepoFullName, "actor_kind", req.Actor.Kind,
+		"force", req.Force, "files", req.Size.Files, "lines", req.Size.Lines)
+	defer func() {
+		slog.InfoContext(ctx, "admission decision completed", "repo", req.RepoFullName, "actor_kind", req.Actor.Kind,
+			"outcome", verdict.Outcome, "reason", verdict.Reason, "duration_ms", time.Since(started).Milliseconds())
+	}()
 	// 1. Who authorized this.
 	if req.Actor.CanBeAuthorized() {
 		if a.perms == nil {

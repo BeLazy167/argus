@@ -9,6 +9,8 @@ import (
 )
 
 func (s *Server) listPricing(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.listPricing")
+	defer op.Finish(w)
 	rows, err := s.store.Pool.Query(r.Context(), `SELECT model_pattern, input_per_million, output_per_million FROM model_pricing ORDER BY model_pattern`)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to list pricing"})
@@ -36,6 +38,8 @@ func (s *Server) listPricing(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) upsertPricing(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.upsertPricing")
+	defer op.Finish(w)
 	var body struct {
 		Pattern string  `json:"model_pattern"`
 		Input   float64 `json:"input_per_million"`
@@ -66,6 +70,8 @@ func (s *Server) upsertPricing(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deletePricing(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.deletePricing")
+	defer op.Finish(w)
 	pattern, err := url.PathUnescape(chi.URLParam(r, "pattern"))
 	if err != nil || pattern == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid pattern"})

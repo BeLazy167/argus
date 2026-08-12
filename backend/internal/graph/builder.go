@@ -1,10 +1,15 @@
 package graph
 
 import (
+	"context"
+	"encoding/json"
 	"log/slog"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
+
+	"github.com/BeLazy167/argus/backend/internal/obs"
 )
 
 // maxContentBytes limits source file size to prevent OOM on minified/binary files.
@@ -206,33 +211,53 @@ func langForFile(path string) string {
 
 // ParseFileSymbols extracts symbols and edges from a source file.
 // Dispatch order: Go AST > tree-sitter > regex fallback > empty.
-func ParseFileSymbols(filePath, content string) ([]Symbol, []Edge) {
+func ParseFileSymbols(filePath, content string) (syms []Symbol, edges []Edge) {
+	ctx := context.Background()
+	operationID := obs.NewLogID()
+	started := time.Now()
 	lang := langForFile(filePath)
+	parserName := "unsupported"
+	slog.Info("source graph parse started",
+		"operation_id", operationID, "file", filePath, "language", lang, "source_bytes", len(content))
+	obs.LogPayload(ctx, slog.Default(), "source graph parse input", operationID, "source", "text/plain", []byte(content))
+	defer func() {
+		if payload, err := json.Marshal(map[string]any{"symbols": syms, "edges": edges}); err == nil {
+			obs.LogPayload(ctx, slog.Default(), "source graph parse output", operationID, "result", "application/json", payload)
+		}
+		slog.Info("source graph parse completed",
+			"operation_id", operationID, "file", filePath, "language", lang,
+			"parser", parserName, "symbol_count", len(syms), "edge_count", len(edges),
+			"duration_ms", time.Since(started).Milliseconds())
+	}()
 	if lang == "" {
 		return nil, nil
 	}
 	if len(content) > maxContentBytes {
+		parserName = "skipped_too_large"
 		slog.Warn("graph: file too large, skipping", "file", filePath, "bytes", len(content))
 		return nil, nil
 	}
 	lines := strings.Split(content, "\n")
 
-	// Go: prefer AST parser, then regex
+	// Go: prefer AST parser, then regex.
 	if lang == "go" {
-		syms, edges := parseGoAST(filePath, content)
+		parserName = "go_ast"
+		syms, edges = parseGoAST(filePath, content)
 		if syms != nil || edges != nil {
 			return syms, edges
 		}
+		parserName = "go_regex_fallback"
 		return parseGo(filePath, content, lines)
 	}
 
-	// Non-Go: try tree-sitter first
-	syms, edges := parseTreeSitter(filePath, content)
+	// Non-Go: try tree-sitter first.
+	parserName = "tree_sitter"
+	syms, edges = parseTreeSitter(filePath, content)
 	if syms != nil || edges != nil {
 		return syms, edges
 	}
 
-	// tree-sitter unavailable — fall back to regex parsers
+	parserName = "regex_fallback"
 	switch lang {
 	case "typescript", "javascript":
 		return parseTS(filePath, content, lines)
@@ -245,6 +270,7 @@ func ParseFileSymbols(filePath, content string) ([]Symbol, []Edge) {
 	case "csharp":
 		return parseCSharp(filePath, content, lines)
 	default:
+		parserName = "unsupported_language"
 		return nil, nil
 	}
 }

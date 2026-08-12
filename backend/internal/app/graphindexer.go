@@ -55,6 +55,16 @@ const (
 // never take the server down or stop trying because one repository is
 // unreachable.
 func runGraphIndexBackfill(ctx context.Context, db *store.Store, ghClient *ghpkg.Client, logger *slog.Logger) {
+	workerStarted := time.Now()
+	logger.InfoContext(ctx, "graph index backfill worker started",
+		"initial_delay", 2*time.Minute, "prompt_interval", graphIndexContinuationInterval,
+		"backfill_interval", graphIndexInterval, "minimum_window_spacing", graphIndexMinimumSpacing,
+		"staleness", graphIndexStaleness, "repos_per_tick", graphIndexPerTick,
+		"repo_timeout", graphIndexTimeout, "file_cap", graphIndexFileCap)
+	defer func() {
+		logger.InfoContext(context.WithoutCancel(ctx), "graph index backfill scheduler stopped",
+			"duration_ms", time.Since(workerStarted).Milliseconds(), "reason", ctx.Err())
+	}()
 	// First backfill soon after boot, not a full interval later. Prompt refreshes
 	// then use their own short poll; ordinary stale repositories keep the hourly
 	// pacing that protects the installation's GitHub budget.
@@ -62,8 +72,10 @@ func runGraphIndexBackfill(ctx context.Context, db *store.Store, ghClient *ghpkg
 	defer first.Stop()
 	select {
 	case <-ctx.Done():
+		logger.InfoContext(context.WithoutCancel(ctx), "graph index initial delay cancelled", "reason", ctx.Err())
 		return
 	case <-first.C:
+		logger.InfoContext(ctx, "graph index initial tick due", "tick_kind", "stale")
 		indexDueRepos(ctx, db, ghClient, logger, false)
 	}
 
@@ -76,8 +88,10 @@ func runGraphIndexBackfill(ctx context.Context, db *store.Store, ghClient *ghpkg
 		case <-ctx.Done():
 			return
 		case <-promptTicker.C:
+			logger.InfoContext(ctx, "graph index tick due", "tick_kind", "prompt")
 			indexDueRepos(ctx, db, ghClient, logger, true)
 		case <-backfillTicker.C:
+			logger.InfoContext(ctx, "graph index tick due", "tick_kind", "stale")
 			indexDueRepos(ctx, db, ghClient, logger, false)
 		}
 	}
@@ -88,20 +102,52 @@ func runGraphIndexBackfill(ctx context.Context, db *store.Store, ghClient *ghpkg
 // Split from the loop so the scheduling and the work can be reasoned about —
 // and tested — separately.
 func indexDueRepos(ctx context.Context, db *store.Store, ghClient *ghpkg.Client, logger *slog.Logger, promptOnly bool) {
+	tickKind := "stale"
+	if promptOnly {
+		tickKind = "prompt"
+	}
+	tickStarted := time.Now()
+	logger.InfoContext(ctx, "graph index cycle started", "tick_kind", tickKind, "limit", graphIndexPerTick)
+	completed := false
+	defer func() {
+		if !completed {
+			logger.InfoContext(context.WithoutCancel(ctx), "graph index cycle stopped",
+				"tick_kind", tickKind, "duration_ms", time.Since(tickStarted).Milliseconds(), "reason", ctx.Err())
+		}
+	}()
+	complete := func(outcome string, attrs ...any) {
+		args := []any{"tick_kind", tickKind, "outcome", outcome, "duration_ms", time.Since(tickStarted).Milliseconds()}
+		args = append(args, attrs...)
+		logger.InfoContext(context.WithoutCancel(ctx), "graph index cycle completed", args...)
+		completed = true
+	}
+
 	// Only one machine indexes at a time. Both run this loop, and a duplicated
 	// full index costs a second 1500-call burst against the same installation's
 	// GitHub budget — the budget in-flight reviews are drawing on.
+	lockStarted := time.Now()
+	logger.InfoContext(ctx, "graph index fleet lock acquisition started", "tick_kind", tickKind)
 	acquired, release, err := db.TryGraphIndexLock(ctx)
 	if err != nil {
-		logger.Error("graph index: taking lock", "error", err)
+		logger.ErrorContext(ctx, "graph index fleet lock acquisition failed", "tick_kind", tickKind,
+			"duration_ms", time.Since(lockStarted).Milliseconds(), "error", err)
+		complete("lock_error")
 		return
 	}
+	logger.InfoContext(ctx, "graph index fleet lock acquisition completed", "tick_kind", tickKind,
+		"acquired", acquired, "duration_ms", time.Since(lockStarted).Milliseconds())
 	if !acquired {
+		complete("lock_not_acquired")
 		return
 	}
-	defer release()
+	defer func() {
+		release()
+		logger.InfoContext(context.WithoutCancel(ctx), "graph index fleet lock released", "tick_kind", tickKind)
+	}()
 
 	listCtx, cancelList := context.WithTimeout(ctx, 30*time.Second)
+	listStarted := time.Now()
+	logger.InfoContext(listCtx, "graph index due repository query started", "tick_kind", tickKind, "limit", graphIndexPerTick)
 	var targets []store.RepoIndexTarget
 	if promptOnly {
 		targets, err = db.ListReposDueForPromptGraphIndex(listCtx, graphIndexPerTick)
@@ -110,28 +156,55 @@ func indexDueRepos(ctx context.Context, db *store.Store, ghClient *ghpkg.Client,
 	}
 	cancelList()
 	if err != nil {
-		logger.Error("graph index: listing due repos", "error", err)
+		logger.ErrorContext(ctx, "graph index due repository query failed", "tick_kind", tickKind,
+			"duration_ms", time.Since(listStarted).Milliseconds(), "error", err)
+		complete("list_error")
 		return
 	}
+	logger.InfoContext(ctx, "graph index due repository query completed", "tick_kind", tickKind,
+		"target_count", len(targets), "duration_ms", time.Since(listStarted).Milliseconds())
 	if len(targets) == 0 {
+		complete("no_due_repositories", "target_count", 0)
 		return
 	}
+
+	reserveStarted := time.Now()
+	logger.InfoContext(ctx, "graph index API window reservation started", "tick_kind", tickKind,
+		"minimum_spacing", graphIndexMinimumSpacing)
 	reserved, err := db.TryReserveGraphIndexWindow(ctx, graphIndexMinimumSpacing)
 	if err != nil {
-		logger.Error("graph index: reserving persistent API budget", "error", err)
+		logger.ErrorContext(ctx, "graph index API window reservation failed", "tick_kind", tickKind,
+			"duration_ms", time.Since(reserveStarted).Milliseconds(), "error", err)
+		complete("reservation_error", "target_count", len(targets))
 		return
 	}
+	logger.InfoContext(ctx, "graph index API window reservation completed", "tick_kind", tickKind,
+		"reserved", reserved, "duration_ms", time.Since(reserveStarted).Milliseconds())
 	if !reserved {
+		complete("window_not_reserved", "target_count", len(targets))
 		return
 	}
 
 	rebuilt := false
+	succeeded := 0
+	failed := 0
+	staged := 0
+	unchanged := 0
 	for _, t := range targets {
+		repo := t.Owner + "/" + t.Repo
+		repoStarted := time.Now()
+		logger.InfoContext(ctx, "graph index repository attempt started", "tick_kind", tickKind,
+			"repo", repo, "repo_id", t.RepoID, "installation_id", t.GitHubInstallationID,
+			"default_branch", t.DefaultBranch, "cursor", t.IndexCursor, "timeout", graphIndexTimeout)
 		// Stamp the attempt BEFORE trying. A repo that reliably kills the worker
 		// — OOM, deadline, panic — would otherwise never record anything and
 		// would be re-selected forever, starving every repo behind it.
 		if err := db.MarkRepoGraphAttempted(ctx, t.RepoID); err != nil {
-			logger.Error("graph index: marking attempt", "repo", t.Owner+"/"+t.Repo, "error", err)
+			logger.ErrorContext(ctx, "graph index repository attempt stamp failed", "tick_kind", tickKind,
+				"repo", repo, "repo_id", t.RepoID, "error", err)
+		} else {
+			logger.InfoContext(ctx, "graph index repository attempt stamped", "tick_kind", tickKind,
+				"repo", repo, "repo_id", t.RepoID)
 		}
 
 		// Per-repo deadline. A single unreachable repository must not hold the
@@ -143,35 +216,45 @@ func indexDueRepos(ctx context.Context, db *store.Store, ghClient *ghpkg.Client,
 		cancel()
 
 		if err != nil {
+			failed++
 			// Deliberately does NOT mark the repo indexed, so it stays at the
 			// front of the queue and is retried next tick instead of waiting out
 			// a full staleness window.
-			logger.Error("graph index: full index failed",
-				"repo", t.Owner+"/"+t.Repo, "error", err)
+			logger.ErrorContext(ctx, "graph index repository attempt failed", "tick_kind", tickKind,
+				"repo", repo, "repo_id", t.RepoID, "duration_ms", time.Since(repoStarted).Milliseconds(), "error", err)
 			continue
 		}
 
 		if result.Unchanged {
-			logger.Info("graph index: published generation already matches default branch",
-				"repo", t.Owner+"/"+t.Repo, "commit", result.Snapshot.PublishedCommitSHA)
+			unchanged++
+			succeeded++
+			logger.InfoContext(ctx, "graph index repository attempt completed", "tick_kind", tickKind,
+				"repo", repo, "repo_id", t.RepoID, "outcome", "unchanged",
+				"commit", result.Snapshot.PublishedCommitSHA, "duration_ms", time.Since(repoStarted).Milliseconds())
 			continue
 		}
 		if !result.Published {
-			logger.Warn("graph index: generation window staged but not complete",
-				"repo", t.Owner+"/"+t.Repo, "commit", result.Snapshot.CommitSHA,
+			staged++
+			succeeded++
+			logger.WarnContext(ctx, "graph index repository attempt completed", "tick_kind", tickKind,
+				"repo", repo, "repo_id", t.RepoID, "outcome", "staged_incomplete", "commit", result.Snapshot.CommitSHA,
 				"staged", result.Staged, "remaining", result.Remaining,
 				"visited", result.Snapshot.VisitedFiles, "expected", result.Snapshot.ExpectedFiles,
-				"failed", result.Snapshot.FailedFiles, "unavailable", result.Snapshot.UnavailableFiles)
+				"failed", result.Snapshot.FailedFiles, "unavailable", result.Snapshot.UnavailableFiles,
+				"duration_ms", time.Since(repoStarted).Milliseconds())
 			continue
 		}
-		logger.Info("graph index: full generation published",
-			"repo", t.Owner+"/"+t.Repo, "commit", result.Snapshot.CommitSHA,
+		succeeded++
+		logger.InfoContext(ctx, "graph index repository generation published", "tick_kind", tickKind,
+			"repo", repo, "repo_id", t.RepoID, "commit", result.Snapshot.CommitSHA,
 			"files", result.Snapshot.VisitedFiles, "skipped", result.Snapshot.SkippedFiles,
-			"unavailable", result.Snapshot.UnavailableFiles)
+			"unavailable", result.Snapshot.UnavailableFiles, "duration_ms", time.Since(repoStarted).Milliseconds())
 		rebuilt = true
 	}
 
 	if !rebuilt {
+		complete("repositories_processed", "target_count", len(targets), "succeeded", succeeded,
+			"failed", failed, "staged", staged, "unchanged", unchanged, "projection_rebuilt", false)
 		return
 	}
 	// One rebuild per tick, after the repos, not once per repo. graph.build()
@@ -179,9 +262,19 @@ func indexDueRepos(ctx context.Context, db *store.Store, ghClient *ghpkg.Client,
 	// full scan for no extra freshness.
 	buildCtx, cancelBuild := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancelBuild()
+	projectionStarted := time.Now()
+	logger.InfoContext(buildCtx, "graph index projection rebuild started", "tick_kind", tickKind, "timeout", 5*time.Minute)
 	if err := db.RebuildCodeGraphProjection(buildCtx); err != nil {
 		// Non-fatal: blast radius falls back to the recursive CTE, which is
 		// correct, just slower. The rows are written either way.
-		logger.Warn("graph index: pgGraph projection rebuild failed", "error", err)
+		logger.WarnContext(buildCtx, "graph index projection rebuild failed", "tick_kind", tickKind,
+			"duration_ms", time.Since(projectionStarted).Milliseconds(), "error", err)
+		complete("repositories_processed", "target_count", len(targets), "succeeded", succeeded,
+			"failed", failed, "staged", staged, "unchanged", unchanged, "projection_rebuilt", false)
+		return
 	}
+	logger.InfoContext(buildCtx, "graph index projection rebuild completed", "tick_kind", tickKind,
+		"duration_ms", time.Since(projectionStarted).Milliseconds())
+	complete("repositories_processed", "target_count", len(targets), "succeeded", succeeded,
+		"failed", failed, "staged", staged, "unchanged", unchanged, "projection_rebuilt", true)
 }

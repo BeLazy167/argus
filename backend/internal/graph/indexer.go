@@ -10,6 +10,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/BeLazy167/argus/backend/internal/obs"
 
 	"github.com/BeLazy167/argus/backend/internal/store"
 )
@@ -231,6 +234,14 @@ func fileSymbol(filePath, content string) Symbol {
 // Returns whether the stored route table changed, which is what gates the
 // installation-wide re-derivation of calls_api edges.
 func persistAPIEndpoints(ctx context.Context, st indexerStore, repoDBID int64, endpointsByFile map[string][]APIEndpoint, keyToID map[string]int64, nameToIDs map[string][]int64) bool {
+	operationID := obs.NewLogID()
+	started := time.Now()
+	endpointCount := 0
+	for _, endpoints := range endpointsByFile {
+		endpointCount += len(endpoints)
+	}
+	slog.InfoContext(ctx, "graph API endpoint persistence started", "operation_id", operationID,
+		"repo_id", repoDBID, "file_count", len(endpointsByFile), "endpoint_count", endpointCount)
 	filePaths := make([]string, 0, len(endpointsByFile))
 	for filePath := range endpointsByFile {
 		filePaths = append(filePaths, filePath)
@@ -255,9 +266,16 @@ func persistAPIEndpoints(ctx context.Context, st indexerStore, repoDBID int64, e
 
 	changed, err := st.ReplaceAPIEndpointsForFiles(ctx, repoDBID, filePaths, rows)
 	if err != nil {
-		slog.Warn("graph: persist api endpoints failed", "repo_id", repoDBID, "files", len(filePaths), "error", err)
+		slog.WarnContext(ctx, "graph API endpoint persistence failed", "operation_id", operationID,
+			"repo_id", repoDBID, "file_count", len(filePaths), "extracted_count", endpointCount,
+			"resolved_count", len(rows), "dropped_unresolved_count", endpointCount-len(rows),
+			"duration_ms", time.Since(started).Milliseconds(), "error", err)
 		return false
 	}
+	slog.InfoContext(ctx, "graph API endpoint persistence completed", "operation_id", operationID,
+		"repo_id", repoDBID, "file_count", len(filePaths), "extracted_count", endpointCount,
+		"resolved_count", len(rows), "dropped_unresolved_count", endpointCount-len(rows),
+		"changed", changed, "duration_ms", time.Since(started).Milliseconds())
 	return changed
 }
 
@@ -265,6 +283,7 @@ func persistAPIEndpoints(ctx context.Context, st indexerStore, repoDBID int64, e
 // run's own parse cannot resolve. One query per run, not per endpoint; a lookup
 // failure is logged and degrades to the in-run maps rather than dropping rows.
 func lookupUnresolvedHandlers(ctx context.Context, st indexerStore, repoDBID int64, endpointsByFile map[string][]APIEndpoint, keyToID map[string]int64, nameToIDs map[string][]int64) map[string]int64 {
+	started := time.Now()
 	missing := map[string]struct{}{}
 	for filePath, eps := range endpointsByFile {
 		for _, e := range eps {
@@ -279,6 +298,8 @@ func lookupUnresolvedHandlers(ctx context.Context, st indexerStore, repoDBID int
 		}
 	}
 	if len(missing) == 0 {
+		slog.DebugContext(ctx, "graph endpoint handler lookup skipped", "repo_id", repoDBID,
+			"reason", "all_handlers_resolved_in_run", "duration_ms", time.Since(started).Milliseconds())
 		return nil
 	}
 	names := make([]string, 0, len(missing))
@@ -288,9 +309,12 @@ func lookupUnresolvedHandlers(ctx context.Context, st indexerStore, repoDBID int
 	sort.Strings(names)
 	ids, err := st.LookupCodeNodeIDsByName(ctx, repoDBID, names)
 	if err != nil {
-		slog.Warn("graph: endpoint handler lookup failed", "repo_id", repoDBID, "error", err)
+		slog.WarnContext(ctx, "graph endpoint handler lookup failed", "repo_id", repoDBID,
+			"lookup_count", len(names), "duration_ms", time.Since(started).Milliseconds(), "error", err)
 		return nil
 	}
+	slog.DebugContext(ctx, "graph endpoint handler lookup completed", "repo_id", repoDBID,
+		"lookup_count", len(names), "resolved_count", len(ids), "duration_ms", time.Since(started).Milliseconds())
 	return ids
 }
 
@@ -312,7 +336,25 @@ func resolveEndpointNode(filePath string, e APIEndpoint, keyToID map[string]int6
 // indexParsedSymbols is the test seam for the retained hash-gated symbol diff
 // and edge-resolution algorithm. It accepts already-parsed results so tests can
 // exercise persistence without a GitHub client.
-func indexParsedSymbols(ctx context.Context, st indexerStore, repoDBID int64, results map[string]fileResult) error {
+func indexParsedSymbols(ctx context.Context, st indexerStore, repoDBID int64, results map[string]fileResult) (err error) {
+	operationID := obs.NewLogID()
+	started := time.Now()
+	symbolCount, edgeCount := 0, 0
+	for _, result := range results {
+		symbolCount += len(result.symbols)
+		edgeCount += len(result.edges)
+	}
+	slog.InfoContext(ctx, "graph parsed symbol indexing started", "operation_id", operationID,
+		"repo_id", repoDBID, "file_count", len(results), "symbol_count", symbolCount, "edge_count", edgeCount)
+	defer func() {
+		attrs := []any{"operation_id", operationID, "repo_id", repoDBID, "file_count", len(results),
+			"symbol_count", symbolCount, "edge_count", edgeCount, "duration_ms", time.Since(started).Milliseconds(), "error", err}
+		if err != nil {
+			slog.WarnContext(ctx, "graph parsed symbol indexing failed", attrs...)
+			return
+		}
+		slog.InfoContext(ctx, "graph parsed symbol indexing completed", attrs...)
+	}()
 	// Fan results out before resolving cross-file edges.
 	keyToID := make(map[string]int64)
 	nameToIDs := make(map[string][]int64)
@@ -323,7 +365,8 @@ func indexParsedSymbols(ctx context.Context, st indexerStore, repoDBID int64, re
 		edgesByFile[filePath] = res.edges
 		symbolsByFile[filePath] = res.symbols
 	}
-	return resolveAndUpsertEdges(ctx, st, repoDBID, edgesByFile, symbolsByFile, keyToID, nameToIDs)
+	err = resolveAndUpsertEdges(ctx, st, repoDBID, edgesByFile, symbolsByFile, keyToID, nameToIDs)
+	return err
 }
 
 // upsertFileSymbols runs the hash-gated plan/apply/sweep for one file and
@@ -336,6 +379,8 @@ func indexParsedSymbols(ctx context.Context, st indexerStore, repoDBID int64, re
 // duplicates. Edge resolution picks the first match so behavior is benign
 // in practice, but the invariant is "one entry per symbol per run."
 func upsertFileSymbols(ctx context.Context, st indexerStore, repoDBID int64, filePath string, symbols []Symbol, keyToID map[string]int64, nameToIDs map[string][]int64) {
+	started := time.Now()
+	slog.DebugContext(ctx, "graph file symbol diff started", "repo_id", repoDBID, "file", filePath, "parsed_count", len(symbols))
 	existing, err := st.GetNodesHashesForFile(ctx, repoDBID, filePath)
 	if err != nil {
 		slog.Warn("graph: load existing node hashes failed", "file", filePath, "error", err)
@@ -346,6 +391,7 @@ func upsertFileSymbols(ctx context.Context, st indexerStore, repoDBID int64, fil
 	}
 	plan := planSymbolDiff(symbols, existing)
 	lang := langForFile(filePath)
+	failedUpserts := 0
 
 	// Phase 1: reuse IDs of unchanged rows for edge resolution.
 	for _, u := range plan.Unchanged {
@@ -355,15 +401,23 @@ func upsertFileSymbols(ctx context.Context, st indexerStore, repoDBID int64, fil
 	for _, sym := range plan.Changed {
 		id, err := st.UpsertCodeNodeFullWithHash(ctx, repoDBID, sym.Kind, sym.Name, sym.FilePath, sym.LineStart, sym.LineEnd, lang, 0, sym.ReturnType, sym.Params, sym.Visibility, sym.IsAsync, sym.Receiver, sym.Scope, computeSymbolHash(sym))
 		if err != nil {
-			slog.Warn("graph: upsert node failed", "name", sym.Name, "file", sym.FilePath, "error", err)
+			failedUpserts++
+			slog.WarnContext(ctx, "graph node upsert failed", "repo_id", repoDBID, "name", sym.Name,
+				"kind", sym.Kind, "file", sym.FilePath, "error", err)
 			continue
 		}
 		rememberSymbolResolution(sym, id, keyToID, nameToIDs)
 	}
 	// Phase 3: batch-delete orphans (no-ops on len == 0).
-	if err := st.DeleteNodesByIDs(ctx, repoDBID, plan.Orphans); err != nil {
-		slog.Warn("graph: orphan sweep failed", "file", filePath, "error", err)
+	orphanErr := st.DeleteNodesByIDs(ctx, repoDBID, plan.Orphans)
+	if orphanErr != nil {
+		slog.WarnContext(ctx, "graph orphan node sweep failed", "repo_id", repoDBID, "file", filePath,
+			"orphan_count", len(plan.Orphans), "error", orphanErr)
 	}
+	slog.DebugContext(ctx, "graph file symbol diff completed", "repo_id", repoDBID, "file", filePath,
+		"existing_count", len(existing), "parsed_count", len(symbols), "unchanged_count", len(plan.Unchanged),
+		"changed_count", len(plan.Changed), "failed_upsert_count", failedUpserts, "orphan_count", len(plan.Orphans),
+		"orphan_sweep_error", orphanErr, "duration_ms", time.Since(started).Milliseconds())
 }
 
 // rememberSymbolResolution registers both the persisted qualified identity and
@@ -457,7 +511,24 @@ func resolveOrRecordTarget(ctx context.Context, st indexerStore, repoID int64, s
 // file's nodes have been committed and keyToID/nameToIDs are fully populated.
 // Edges and symbol slices are kept separate from the fileResult map so the
 // caller can free file bodies eagerly during the fetch/parse phase.
-func resolveAndUpsertEdges(ctx context.Context, st indexerStore, repoDBID int64, edgesByFile map[string][]Edge, symbolsByFile map[string][]Symbol, keyToID map[string]int64, nameToIDs map[string][]int64) error {
+func resolveAndUpsertEdges(ctx context.Context, st indexerStore, repoDBID int64, edgesByFile map[string][]Edge, symbolsByFile map[string][]Symbol, keyToID map[string]int64, nameToIDs map[string][]int64) (err error) {
+	operationID := obs.NewLogID()
+	started := time.Now()
+	parsedEdgeCount := 0
+	for _, edges := range edgesByFile {
+		parsedEdgeCount += len(edges)
+	}
+	slog.InfoContext(ctx, "graph edge resolution started", "operation_id", operationID, "repo_id", repoDBID,
+		"file_count", len(edgesByFile), "parsed_edge_count", parsedEdgeCount, "known_symbol_count", len(keyToID))
+	defer func() {
+		attrs := []any{"operation_id", operationID, "repo_id", repoDBID, "file_count", len(edgesByFile),
+			"parsed_edge_count", parsedEdgeCount, "duration_ms", time.Since(started).Milliseconds(), "error", err}
+		if err != nil {
+			slog.WarnContext(ctx, "graph edge resolution failed", attrs...)
+			return
+		}
+		slog.InfoContext(ctx, "graph edge resolution completed", attrs...)
+	}()
 	// An incremental run only parses changed files. Resolve targets that live in
 	// untouched files from the published repo graph before replacing the changed
 	// files' outgoing edge snapshots; otherwise a one-file change would silently

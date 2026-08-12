@@ -32,6 +32,8 @@ const preReviewReactionSweepTimeout = 60 * time.Second
 // longer exist. If memory is not wired, suppression is unavailable anyway and
 // there is nothing to reconcile.
 func (s *Server) reconcileReactionsBeforeReview(ctx context.Context, installationID int64, repoFullName string, prNumber int) error {
+	op := s.beginOperation(ctx, "review.reconcileReactionsBeforeReview")
+	defer op.Complete()
 	if s.reactionSweeper == nil {
 		if s.memRegistry != nil {
 			return fmt.Errorf("reaction reconciliation is unavailable while review memory is enabled")
@@ -50,6 +52,8 @@ func (s *Server) reconcileReactionsBeforeReview(ctx context.Context, installatio
 // handlePREventAfterReconciliation is the only boundary that enters the
 // pipeline after the reaction sweep has succeeded.
 func (s *Server) handlePREventAfterReconciliation(ctx context.Context, event ghpkg.PREvent) error {
+	op := s.beginOperation(ctx, "review.handlePREventAfterReconciliation")
+	defer op.Complete()
 	if s.prEventHandler == nil {
 		return fmt.Errorf("pull request event handler is unavailable")
 	}
@@ -60,6 +64,8 @@ func (s *Server) handlePREventAfterReconciliation(ctx context.Context, event ghp
 // completes before HandlePREvent, which is the first boundary allowed to read
 // dismissal memory.
 func (s *Server) runPREvent(ctx context.Context, event ghpkg.PREvent) error {
+	op := s.beginOperation(ctx, "review.runPREvent")
+	defer op.Complete()
 	if err := s.reconcileReactionsBeforeReview(ctx, event.InstallationID, event.RepoFullName, event.PRNumber); err != nil {
 		return err
 	}

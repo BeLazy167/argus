@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/BeLazy167/argus/backend/internal/obs"
 	"github.com/go-chi/chi/v5"
 
 	ghpkg "github.com/BeLazy167/argus/backend/internal/github"
@@ -17,9 +18,11 @@ import (
 )
 
 func (s *Server) listRepos(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.listRepos")
+	defer op.Finish(w)
 	repos, err := s.store.ListReposScoped(r.Context(), getInstallationIDs(r.Context()))
 	if err != nil {
-		s.logger.Error("list repos", "error", err)
+		s.logger.ErrorContext(r.Context(), "list repos", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
@@ -27,6 +30,8 @@ func (s *Server) listRepos(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getRepo(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.getRepo")
+	defer op.Finish(w)
 	id, err := strconv.ParseInt(chi.URLParam(r, "repoID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo id"})
@@ -41,6 +46,8 @@ func (s *Server) getRepo(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) updateRepo(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.updateRepo")
+	defer op.Finish(w)
 	id, err := strconv.ParseInt(chi.URLParam(r, "repoID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo id"})
@@ -71,6 +78,8 @@ func (s *Server) updateRepo(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) triggerReview(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.triggerReview")
+	defer op.Finish(w)
 	repoID, err := strconv.ParseInt(chi.URLParam(r, "repoID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo id"})
@@ -92,7 +101,7 @@ func (s *Server) triggerReview(w http.ResponseWriter, r *http.Request) {
 
 	inst, err := s.store.GetInstallation(r.Context(), repo.InstallationID)
 	if err != nil {
-		s.logger.Error("lookup installation for manual review", "error", err)
+		s.logger.ErrorContext(r.Context(), "lookup installation for manual review", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "installation not found"})
 		return
 	}
@@ -103,7 +112,7 @@ func (s *Server) triggerReview(w http.ResponseWriter, r *http.Request) {
 	// which is the asymmetry the seam exists to remove.
 	orgLogin, _, ok := strings.Cut(repo.FullName, "/")
 	if !ok {
-		s.logger.Error("manual review: malformed repo full name", "repo", repo.FullName)
+		s.logger.ErrorContext(r.Context(), "manual review: malformed repo full name", "repo", repo.FullName)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "review failed"})
 		return
 	}
@@ -112,12 +121,12 @@ func (s *Server) triggerReview(w http.ResponseWriter, r *http.Request) {
 		RepoFullName: repo.FullName,
 		OrgLogin:     orgLogin,
 	}); !verdict.Allowed() {
-		s.logger.Info("manual review refused", "repo", repo.FullName, "pr", body.PRNumber, "reason", verdict.Reason)
+		s.logger.InfoContext(r.Context(), "manual review refused", "repo", repo.FullName, "pr", body.PRNumber, "reason", verdict.Reason)
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": verdict.Reason})
 		return
 	}
-	// The launcher owns slot + cancel + spawn. Detached BaseCtx mirrors the
-	// original (background, no request trace).
+	// The launcher owns slot + cancel + spawn. Detach cancellation while
+	// preserving the inbound trace so dashboard actions correlate end to end.
 	prEvent := ghpkg.PREvent{
 		Action:         "manual",
 		InstallationID: inst.InstallationID,
@@ -128,10 +137,10 @@ func (s *Server) triggerReview(w http.ResponseWriter, r *http.Request) {
 	launchErr := s.launchPREvent(pipeline.LaunchSpec{
 		Repo:    repo.FullName,
 		PR:      body.PRNumber,
-		BaseCtx: context.Background(),
+		BaseCtx: obs.SetTraceID(context.Background(), obs.TraceID(r.Context())),
 		OnDone: func(err error) {
 			if err != nil && !errors.Is(err, context.Canceled) {
-				s.logger.Error("manual review failed", "error", err, "repo", repo.FullName, "pr", body.PRNumber)
+				s.logger.ErrorContext(r.Context(), "manual review failed", "error", err, "repo", repo.FullName, "pr", body.PRNumber)
 			}
 		},
 	}, prEvent)
@@ -140,14 +149,14 @@ func (s *Server) triggerReview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if launchErr != nil {
-		s.logger.Error("manual review: launch failed", "error", launchErr, "repo", repo.FullName, "pr", body.PRNumber)
+		s.logger.ErrorContext(r.Context(), "manual review: launch failed", "error", launchErr, "repo", repo.FullName, "pr", body.PRNumber)
 		if writeReviewLaunchUnavailable(w, launchErr) {
 			return
 		}
 	}
 
 	if err := s.store.LogActivity(r.Context(), nil, "manual_review_triggered", "", repo.FullName, nil); err != nil {
-		s.logger.Error("failed to log activity", "error", err, "action", "manual_review_triggered")
+		s.logger.ErrorContext(r.Context(), "failed to log activity", "error", err, "action", "manual_review_triggered")
 	}
 
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "triggered", "repo": repo.FullName, "pr_number": fmt.Sprintf("%d", body.PRNumber)})

@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/BeLazy167/argus/backend/internal/obs"
 	"github.com/jackc/pgx/v5"
 	pgvector "github.com/pgvector/pgvector-go"
 )
@@ -204,6 +207,16 @@ func (idx *PGIndexer) runSearchVec(ctx context.Context, req SearchRequest, qv *p
 	// Which vector type the column actually holds decides the operator, the
 	// parameter cast, and whether ANN tuning applies. Probed once per process.
 	pgctx := usesPGContextVector(ctx, idx.pool, idx.logger)
+	vectorEngine := "pgvector"
+	vectorStrategy := "hnsw_ann"
+	if pgctx {
+		vectorEngine = "pgcontext"
+		vectorStrategy = "exact"
+	}
+	idx.logger.InfoContext(ctx, "memory search vector engine selected",
+		"installation_id", idx.installationID, "engine", vectorEngine,
+		"strategy", vectorStrategy, "vector_query", qv != nil,
+		"embedding_space", idx.embeddingSpaceID())
 
 	if qv != nil {
 		if !pgctx {
@@ -587,12 +600,48 @@ func effectiveConfidenceSQL() string {
 }
 
 func (idx *PGIndexer) Search(ctx context.Context, q MemoryQuery) ([]PatternMatch, error) {
-	return searchWith(ctx, idx.memoRunSearch(), q)
+	operationID := obs.NewLogID()
+	started := time.Now()
+	if payload, err := json.Marshal(q); err == nil {
+		obs.LogPayload(ctx, idx.logger, "memory search request", operationID, "request", "application/json", payload)
+	}
+	idx.logger.InfoContext(ctx, "memory search started", "operation_id", operationID,
+		"installation_id", idx.installationID)
+	matches, err := searchWith(ctx, idx.memoRunSearch(), q)
+	if payload, marshalErr := json.Marshal(matches); marshalErr == nil {
+		obs.LogPayload(ctx, idx.logger, "memory search results", operationID, "result", "application/json", payload)
+	}
+	level := slog.LevelInfo
+	message := "memory search completed"
+	if err != nil {
+		level = slog.LevelError
+		message = "memory search failed"
+	}
+	idx.logger.Log(ctx, level, message, "operation_id", operationID,
+		"installation_id", idx.installationID, "result_count", len(matches),
+		"duration_ms", time.Since(started).Milliseconds(), "error", err)
+	return matches, err
 }
 
 // Briefing implements the briefing seam over the same core: shared assembly
 // (specialist block + review side-searches, shared floors and per-leg
 // degradation) and the pure renderers.
 func (idx *PGIndexer) Briefing(ctx context.Context, q BriefingQuery) (string, error) {
-	return briefingWith(ctx, idx.memoRunSearch(), idx.logger, q)
+	operationID := obs.NewLogID()
+	started := time.Now()
+	if payload, err := json.Marshal(q); err == nil {
+		obs.LogPayload(ctx, idx.logger, "memory briefing request", operationID, "request", "application/json", payload)
+	}
+	briefing, err := briefingWith(ctx, idx.memoRunSearch(), idx.logger, q)
+	obs.LogPayload(ctx, idx.logger, "memory briefing result", operationID, "result", "text/markdown", []byte(briefing))
+	level := slog.LevelInfo
+	message := "memory briefing completed"
+	if err != nil {
+		level = slog.LevelError
+		message = "memory briefing failed"
+	}
+	idx.logger.Log(ctx, level, message, "operation_id", operationID,
+		"installation_id", idx.installationID, "result_bytes", len(briefing),
+		"duration_ms", time.Since(started).Milliseconds(), "error", err)
+	return briefing, err
 }

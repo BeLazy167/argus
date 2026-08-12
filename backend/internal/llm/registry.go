@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -65,6 +66,7 @@ type Registry struct {
 }
 
 func NewRegistry() *Registry {
+	slog.Info("LLM registry configured", "provider_cache_ttl", (5 * time.Minute).String())
 	return &Registry{
 		providerCache: make(map[string]cachedProvider),
 		cacheTTL:      5 * time.Minute,
@@ -74,15 +76,28 @@ func NewRegistry() *Registry {
 // SetResolver configures the DB-backed key resolver for dynamic provider creation.
 func (r *Registry) SetResolver(resolver KeyResolver) {
 	r.resolver = resolver
+	slog.Info("LLM key resolver configured", "configured", resolver != nil)
 }
 
 // SetReferer configures the HTTP-Referer header sent on OpenRouter requests.
 func (r *Registry) SetReferer(referer string) {
 	r.referer = referer
+	slog.Info("LLM provider referer configured", "configured", referer != "")
 }
 
 // GetProviderForRepo resolves a provider from BYOK keys in the database.
-func (r *Registry) GetProviderForRepo(ctx context.Context, installationID int64, repoID *int64, providerName string) (Provider, error) {
+func (r *Registry) GetProviderForRepo(ctx context.Context, installationID int64, repoID *int64, providerName string) (provider Provider, err error) {
+	started := time.Now()
+	cacheResult := "miss"
+	defer func() {
+		level := slog.LevelInfo
+		if err != nil {
+			level = slog.LevelError
+		}
+		slog.Log(ctx, level, "LLM provider resolution completed", "installation_id", installationID,
+			"repo_id", repoID, "provider", providerName, "cache_result", cacheResult,
+			"duration_ms", time.Since(started).Milliseconds(), "error", err)
+	}()
 	if r.resolver == nil {
 		return nil, fmt.Errorf("no key resolver configured")
 	}
@@ -92,6 +107,7 @@ func (r *Registry) GetProviderForRepo(ctx context.Context, installationID int64,
 	r.cacheMu.RLock()
 	if cached, ok := r.providerCache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
 		r.cacheMu.RUnlock()
+		cacheResult = "hit"
 		return cached.provider, nil
 	}
 	r.cacheMu.RUnlock()
@@ -113,7 +129,8 @@ func (r *Registry) GetProviderForRepo(ctx context.Context, installationID int64,
 	r.cacheMu.Lock()
 	r.providerCache[cacheKey] = cachedProvider{provider: p, expiresAt: time.Now().Add(r.cacheTTL)}
 	r.cacheMu.Unlock()
-	return p, nil
+	provider = p
+	return provider, nil
 }
 
 // GetConfig returns the model config for a repo + stage.
@@ -122,36 +139,57 @@ func (r *Registry) GetProviderForRepo(ctx context.Context, installationID int64,
 // the user-selected defaults, so an unconfigured stage errors and surfaces as
 // an explicit, guided setup step instead of silently running a model the user
 // never chose.
-func (r *Registry) GetConfig(repoID int64, stage PipelineStage, repoConfigs []ModelConfig) (ModelConfig, error) {
+func (r *Registry) GetConfig(repoID int64, stage PipelineStage, repoConfigs []ModelConfig) (cfg ModelConfig, err error) {
+	started := time.Now()
+	source := "none"
+	defer func() {
+		slog.Info("LLM model configuration selected", "repo_id", repoID, "stage", stage,
+			"provider", cfg.Provider, "model", cfg.Model, "source", source,
+			"config_count", len(repoConfigs), "duration_ms", time.Since(started).Milliseconds(), "error", err)
+	}()
 	var orgFallback *ModelConfig
-	for _, cfg := range repoConfigs {
-		if cfg.Stage == stage {
-			if cfg.RepoID == repoID {
+	for _, candidate := range repoConfigs {
+		if candidate.Stage == stage {
+			if candidate.RepoID == repoID {
+				source = "repo"
+				cfg = candidate
 				return cfg, nil
 			}
-			if cfg.RepoID == 0 {
-				c := cfg
+			if candidate.RepoID == 0 {
+				c := candidate
 				orgFallback = &c
 			}
 		}
 	}
 	if orgFallback != nil {
-		return *orgFallback, nil
+		source = "organization"
+		cfg = *orgFallback
+		return cfg, nil
 	}
 	return ModelConfig{}, fmt.Errorf("%w for repo %d stage %s — configure one in the dashboard", ErrNoModelConfig, repoID, stage)
 }
 
 // ResolveProvider resolves the LLM provider and model config for a pipeline stage.
-func (r *Registry) ResolveProvider(ctx context.Context, cfgLister ModelConfigLister, installationID, repoID int64, stage PipelineStage) (Provider, ModelConfig, error) {
+func (r *Registry) ResolveProvider(ctx context.Context, cfgLister ModelConfigLister, installationID, repoID int64, stage PipelineStage) (provider Provider, cfg ModelConfig, err error) {
+	started := time.Now()
+	defer func() {
+		level := slog.LevelInfo
+		if err != nil {
+			level = slog.LevelError
+		}
+		slog.Log(ctx, level, "LLM stage resolution completed", "installation_id", installationID,
+			"repo_id", repoID, "stage", stage, "provider", cfg.Provider, "model", cfg.Model,
+			"duration_ms", time.Since(started).Milliseconds(), "error", err)
+	}()
 	configs, err := cfgLister.ListLLMConfigs(ctx, repoID)
 	if err != nil {
 		return nil, ModelConfig{}, fmt.Errorf("resolve %s: list configs: %w", stage, err)
 	}
-	cfg, err := r.GetConfig(repoID, stage, configs)
+	cfg, err = r.GetConfig(repoID, stage, configs)
 	if err != nil {
 		return nil, ModelConfig{}, fmt.Errorf("resolve %s: %w", stage, err)
 	}
-	provider, err := r.GetProviderForRepo(ctx, installationID, &repoID, cfg.Provider)
+	provider, err = r.GetProviderForRepo(ctx, installationID, &repoID, cfg.Provider)
 	if err != nil {
 		return nil, ModelConfig{}, fmt.Errorf("resolve %s provider: %w", stage, err)
 	}
@@ -160,11 +198,22 @@ func (r *Registry) ResolveProvider(ctx context.Context, cfgLister ModelConfigLis
 
 // HasKeyForRepo returns true if a BYOK key exists in the database for this provider.
 func (r *Registry) HasKeyForRepo(ctx context.Context, installationID int64, repoID *int64, providerName string) bool {
+	started := time.Now()
 	if r.resolver == nil {
+		slog.WarnContext(ctx, "LLM key availability check skipped", "installation_id", installationID,
+			"repo_id", repoID, "provider", providerName, "reason", "resolver_not_configured")
 		return false
 	}
 	_, _, found, err := r.resolver.ResolveAPIKey(ctx, installationID, repoID, providerName)
-	return err == nil && found
+	available := err == nil && found
+	level := slog.LevelInfo
+	if err != nil {
+		level = slog.LevelError
+	}
+	slog.Log(ctx, level, "LLM key availability checked", "installation_id", installationID,
+		"repo_id", repoID, "provider", providerName, "available", available,
+		"duration_ms", time.Since(started).Milliseconds(), "error", err)
+	return available
 }
 
 // newProviderForName creates the appropriate provider based on the provider name.

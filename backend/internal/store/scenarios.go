@@ -17,7 +17,25 @@ import (
 )
 
 // CreateScenario inserts a new active scenario and returns its id.
-func (s *Store) CreateScenario(ctx context.Context, installationID int64, repoID *int64, description, source, sourceRef string, files, modules []string, severity string) (int64, error) {
+func (s *Store) CreateScenario(ctx context.Context, installationID int64, repoID *int64, description, source, sourceRef string, files, modules []string, severity string) (storeResult0 int64, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "CreateScenario",
+
+			"installation_id",
+
+			storeLogValue(installationID), "repo_id", storeLogValue(repoID), "source",
+			storeLogValue(source), "files_count", len(files), "modules_count", len(modules),
+
+			"severity",
+			storeLogValue(severity))
+	defer func() {
+		if recovered :=
+			recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
 	id, err := s.q.CreateScenario(ctx, db.CreateScenarioParams{InstallationID: installationID, RepoID: repoID, Description: description, Source: source, SourceRef: &sourceRef, Files: files, Modules: modules, Severity: &severity})
 	if err != nil {
 		return 0, fmt.Errorf("create scenario: %w", err)
@@ -26,7 +44,22 @@ func (s *Store) CreateScenario(ctx context.Context, installationID int64, repoID
 }
 
 // CreatePendingScenario stores a scenario as inactive (pending dev approval).
-func (s *Store) CreatePendingScenario(ctx context.Context, installationID int64, repoID *int64, description, source, sourceRef string, files, modules []string, severity string) (int64, error) {
+func (s *Store) CreatePendingScenario(ctx context.Context, installationID int64, repoID *int64, description, source, sourceRef string, files, modules []string, severity string) (storeResult0 int64, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "CreatePendingScenario",
+
+			"installation_id",
+
+			storeLogValue(installationID), "repo_id", storeLogValue(repoID), "source", storeLogValue(source), "files_count",
+			len(files), "modules_count", len(modules), "severity", storeLogValue(severity))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	id, err := s.q.CreatePendingScenario(ctx, db.CreatePendingScenarioParams{InstallationID: installationID, RepoID: repoID, Description: description, Source: source, SourceRef: &sourceRef, Files: files, Modules: modules, Severity: &severity})
 	if err != nil {
 		return 0, fmt.Errorf("create pending scenario: %w", err)
@@ -35,7 +68,21 @@ func (s *Store) CreatePendingScenario(ctx context.Context, installationID int64,
 }
 
 // ActivateScenario sets a pending scenario to active (after dev approval).
-func (s *Store) ActivateScenario(ctx context.Context, id int64) error {
+func (s *Store) ActivateScenario(ctx context.Context, id int64) (storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ActivateScenario",
+
+			"id",
+			storeLogValue(id))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish,
+				recovered)
+			panic(recovered)
+		}
+		storeFinish(storeErr)
+	}()
+
 	if err := s.q.ActivateScenario(ctx, id); err != nil {
 		return fmt.Errorf("activate scenario: %w", err)
 	}
@@ -49,7 +96,22 @@ func (s *Store) ActivateScenario(ctx context.Context, id int64) error {
 //
 // Briefly: scenarios with zero recent runs are guaranteed the top slots; after they accumulate
 // data the score rewards scenarios whose runs surface real findings (verdict ∈ broken|partial).
-func (s *Store) ListScenariosForFiles(ctx context.Context, repoID int64, filePaths []string) ([]Scenario, error) {
+func (s *Store) ListScenariosForFiles(ctx context.Context, repoID int64, filePaths []string) (storeResult0 []Scenario, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ListScenariosForFiles",
+
+			"repo_id",
+			storeLogValue(repoID), "file_paths_count", len(filePaths))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered,
+
+				storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	rows, err := s.q.ListScenariosForFiles(ctx, db.ListScenariosForFilesParams{
 		RepoID:  &repoID,
 		Column2: filePaths,
@@ -65,7 +127,24 @@ func (s *Store) ListScenariosForFiles(ctx context.Context, repoID int64, filePat
 }
 
 // ListScenariosForRepo returns all scenarios for a repo (active + pending).
-func (s *Store) ListScenariosForRepo(ctx context.Context, repoID int64, limit int) ([]Scenario, error) {
+func (s *Store) ListScenariosForRepo(ctx context.Context, repoID int64, limit int) (storeResult0 []Scenario, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ListScenariosForRepo",
+
+			"repo_id",
+			storeLogValue(
+				repoID), "limit", storeLogValue(limit))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered,
+
+				storeResult0,
+			)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	rows, err := s.q.ListScenariosForRepo(ctx, db.ListScenariosForRepoParams{
 		RepoID: &repoID,
 		Limit:  int32(limit),
@@ -81,7 +160,23 @@ func (s *Store) ListScenariosForRepo(ctx context.Context, repoID int64, limit in
 }
 
 // GetScenario loads a single scenario by id.
-func (s *Store) GetScenario(ctx context.Context, id int64) (*Scenario, error) {
+func (s *Store) GetScenario(ctx context.Context, id int64) (storeResult0 *Scenario, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetScenario",
+
+			"id",
+			storeLogValue(id))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish,
+				recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr,
+
+			storeResult0)
+	}()
+
 	// Single-row query kept inline — no sqlc binding needed.
 	var sc Scenario
 	var stepsRaw []byte
@@ -128,7 +223,20 @@ func (s *Store) GetScenario(ctx context.Context, id int64) (*Scenario, error) {
 }
 
 // DeactivateScenario soft-deletes a scenario by setting active = false.
-func (s *Store) DeactivateScenario(ctx context.Context, id int64) error {
+func (s *Store) DeactivateScenario(ctx context.Context, id int64) (storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "DeactivateScenario",
+
+			"id", storeLogValue(id))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish,
+				recovered)
+			panic(recovered)
+		}
+		storeFinish(storeErr)
+	}()
+
 	if err := s.q.DeactivateScenario(ctx, id); err != nil {
 		return fmt.Errorf("deactivate scenario: %w", err)
 	}
@@ -136,7 +244,23 @@ func (s *Store) DeactivateScenario(ctx context.Context, id int64) error {
 }
 
 // DeactivateScenarioScoped soft-deletes a scenario only if it belongs to one of the given installations.
-func (s *Store) DeactivateScenarioScoped(ctx context.Context, id int64, installationIDs []int64) error {
+func (s *Store) DeactivateScenarioScoped(ctx context.Context, id int64, installationIDs []int64) (storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "DeactivateScenarioScoped",
+
+			"id",
+			storeLogValue(id), "installation_ids_count", len(installationIDs))
+	defer func() {
+		if recovered :=
+			recover(); recovered != nil {
+			storeFinishPanic(storeFinish,
+
+				recovered)
+			panic(recovered)
+		}
+		storeFinish(storeErr)
+	}()
+
 	count, err := s.q.DeactivateScenarioScoped(ctx, db.DeactivateScenarioScopedParams{ID: id, Column2: installationIDs})
 	if err != nil {
 		return fmt.Errorf("deactivate scenario scoped: %w", err)
@@ -148,7 +272,21 @@ func (s *Store) DeactivateScenarioScoped(ctx context.Context, id int64, installa
 }
 
 // MarkScenarioOutdated marks scenarios as outdated if their files overlap with changed paths.
-func (s *Store) MarkScenarioOutdated(ctx context.Context, repoID int64, filePaths []string) error {
+func (s *Store) MarkScenarioOutdated(ctx context.Context, repoID int64, filePaths []string) (storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "MarkScenarioOutdated",
+
+			"repo_id",
+			storeLogValue(
+				repoID), "file_paths_count", len(filePaths))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered)
+			panic(recovered)
+		}
+		storeFinish(storeErr)
+	}()
+
 	if err := s.q.MarkScenarioOutdated(ctx, db.MarkScenarioOutdatedParams{RepoID: &repoID, Column2: filePaths}); err != nil {
 		return fmt.Errorf("mark scenario outdated: %w", err)
 	}
@@ -157,7 +295,23 @@ func (s *Store) MarkScenarioOutdated(ctx context.Context, repoID int64, filePath
 
 // UpdateScenarioLastRun writes the denormalized last-run summary onto the scenario row and
 // clears the outdated flag. Called once per scenario per review, alongside CreateScenarioRun.
-func (s *Store) UpdateScenarioLastRun(ctx context.Context, id int64, verdict string, confidence float64, why, fix string, prNumber int, reviewID uuid.UUID) error {
+func (s *Store) UpdateScenarioLastRun(ctx context.Context, id int64, verdict string, confidence float64, why, fix string, prNumber int, reviewID uuid.UUID) (storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "UpdateScenarioLastRun",
+
+			"id",
+			storeLogValue(id),
+
+			"verdict", storeLogValue(verdict), "confidence", storeLogValue(confidence), "pr_number",
+			storeLogValue(prNumber), "review_id", storeLogValue(reviewID))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered)
+			panic(recovered)
+		}
+		storeFinish(storeErr)
+	}()
+
 	if err := s.q.UpdateScenarioLastRun(ctx, db.UpdateScenarioLastRunParams{
 		ID:             id,
 		LastVerdict:    strPtr(verdict),
@@ -174,7 +328,20 @@ func (s *Store) UpdateScenarioLastRun(ctx context.Context, id int64, verdict str
 
 // IncrementScenarioTriggerCount bumps the trigger counter. Safe to call after any sim outcome
 // (both "broken" and "fixed" count as triggers — the scenario was exercised).
-func (s *Store) IncrementScenarioTriggerCount(ctx context.Context, id int64) error {
+func (s *Store) IncrementScenarioTriggerCount(ctx context.Context, id int64) (storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "IncrementScenarioTriggerCount",
+
+			"id", storeLogValue(id))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered)
+			panic(recovered)
+		}
+		storeFinish(storeErr)
+	}()
+
 	if err := s.q.IncrementScenarioTriggerCount(ctx, id); err != nil {
 		return fmt.Errorf("increment scenario trigger count: %w", err)
 	}
@@ -209,7 +376,22 @@ func UCBScore(wins, n, total float64) float64 {
 
 // CreateScenarioRun persists one simulation outcome. Idempotent on (scenario_id, review_id) —
 // re-running simulation for the same review overwrites the previous verdict.
-func (s *Store) CreateScenarioRun(ctx context.Context, scenarioID int64, reviewID uuid.UUID, prNumber int, verdict string, confidence float64, why, fix, rootCause, impact string) (ScenarioRun, error) {
+func (s *Store) CreateScenarioRun(ctx context.Context, scenarioID int64, reviewID uuid.UUID, prNumber int, verdict string, confidence float64, why, fix, rootCause, impact string) (storeResult0 ScenarioRun, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "CreateScenarioRun",
+
+			"scenario_id",
+			storeLogValue(scenarioID), "review_id", storeLogValue(reviewID), "pr_number",
+			storeLogValue(prNumber), "verdict", storeLogValue(verdict), "confidence", storeLogValue(confidence))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	row, err := s.q.CreateScenarioRun(ctx, db.CreateScenarioRunParams{
 		ScenarioID: scenarioID,
 		ReviewID:   reviewID,
@@ -228,7 +410,25 @@ func (s *Store) CreateScenarioRun(ctx context.Context, scenarioID int64, reviewI
 }
 
 // GetScenarioRuns returns the last N simulation outcomes for a scenario, newest first.
-func (s *Store) GetScenarioRuns(ctx context.Context, scenarioID int64, limit int) ([]ScenarioRun, error) {
+func (s *Store) GetScenarioRuns(ctx context.Context, scenarioID int64, limit int) (storeResult0 []ScenarioRun, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetScenarioRuns",
+
+			"scenario_id",
+
+			storeLogValue(
+				scenarioID,
+			), "limit", storeLogValue(limit))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered,
+
+				storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	rows, err := s.q.GetScenarioRuns(ctx, db.GetScenarioRunsParams{
 		ScenarioID: scenarioID,
 		Limit:      int32(limit),
@@ -244,7 +444,24 @@ func (s *Store) GetScenarioRuns(ctx context.Context, scenarioID int64, limit int
 }
 
 // GetScenarioKPIs returns the 4 summary counts that power the dashboard KPI cards.
-func (s *Store) GetScenarioKPIs(ctx context.Context, repoID int64) (ScenarioKPIs, error) {
+func (s *Store) GetScenarioKPIs(ctx context.Context, repoID int64) (storeResult0 ScenarioKPIs, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetScenarioKPIs",
+
+			"repo_id",
+
+			storeLogValue(repoID))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered,
+				storeResult0)
+			panic(recovered)
+		}
+
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	row, err := s.q.GetScenarioKPIs(ctx, &repoID)
 	if err != nil {
 		return ScenarioKPIs{}, fmt.Errorf("get scenario kpis: %w", err)

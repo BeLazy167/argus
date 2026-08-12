@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/BeLazy167/argus/backend/internal/obs"
 	"github.com/BeLazy167/argus/backend/internal/store"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -96,14 +97,29 @@ func (sm *StateMachine) RegisterStage(state PipelineState, fn StageFunc) {
 }
 
 func (sm *StateMachine) setRunStatus(ctx context.Context, run *PipelineRun, status, errMsg string, tokenUsage []byte, allowedCurrent []string) (bool, error) {
+	sm.logger.InfoContext(ctx, "review status mutation started", "event", "pipeline.review_status.mutation_started",
+		"review_id", run.ReviewID, "attempt_generation", run.AttemptGeneration, "status", status, "allowed_current", allowedCurrent)
+	var applied bool
+	var err error
 	if sm.setAttemptStatus != nil {
-		return sm.setAttemptStatus(ctx, run.ReviewID, run.AttemptGeneration, status, errMsg, tokenUsage, allowedCurrent)
+		applied, err = sm.setAttemptStatus(ctx, run.ReviewID, run.AttemptGeneration, status, errMsg, tokenUsage, allowedCurrent)
+	} else {
+		applied, err = sm.setStatus(ctx, run.ReviewID, status, errMsg, tokenUsage, allowedCurrent)
 	}
-	return sm.setStatus(ctx, run.ReviewID, status, errMsg, tokenUsage, allowedCurrent)
+	if err != nil {
+		sm.logger.ErrorContext(ctx, "review status mutation failed", "event", "pipeline.review_status.mutation_failed",
+			"review_id", run.ReviewID, "attempt_generation", run.AttemptGeneration, "status", status, "error", err)
+	} else {
+		sm.logger.InfoContext(ctx, "review status mutation evaluated", "event", "pipeline.review_status.mutated",
+			"review_id", run.ReviewID, "attempt_generation", run.AttemptGeneration, "status", status, "applied", applied)
+	}
+	return applied, err
 }
 
 // Run executes the pipeline from the current state to completion or failure.
 func (sm *StateMachine) Run(ctx context.Context, run *PipelineRun) error {
+	sm.logger.InfoContext(ctx, "pipeline state machine started", "event", "pipeline.state_machine.started",
+		"run_id", run.ID, "review_id", run.ReviewID, "attempt_generation", run.AttemptGeneration, "stage", string(run.State))
 	if err := recoveryLeaseLoss(ctx); err != nil {
 		return err
 	}
@@ -147,8 +163,10 @@ func (sm *StateMachine) Run(ctx context.Context, run *PipelineRun) error {
 			if !exists {
 				return fmt.Errorf("no transition from state %s", run.State)
 			}
+			previousState := run.State
 			run.State = next
 			run.UpdatedAt = time.Now()
+			sm.logStateMutation(ctx, run, previousState, "implicit_transition")
 			publishStageChanged(run)
 			if shouldPersist(run.State) {
 				if err := sm.persist(ctx, run); err != nil {
@@ -158,10 +176,21 @@ func (sm *StateMachine) Run(ctx context.Context, run *PipelineRun) error {
 			continue
 		}
 
-		sm.logger.Info("executing stage", "state", run.State, "review_id", run.ReviewID)
+		stageOperationID := obs.NewLogID()
+		sm.logger.InfoContext(ctx, "executing stage", "operation_id", stageOperationID,
+			"state", run.State, "review_id", run.ReviewID)
+		if payload, err := json.Marshal(run); err == nil {
+			obs.LogPayload(ctx, sm.logger, "pipeline stage input", stageOperationID, "input", "application/json", payload)
+		}
 		stageStart := time.Now()
 
 		if err := stage(ctx, run); err != nil {
+			if payload, marshalErr := json.Marshal(run); marshalErr == nil {
+				obs.LogPayload(ctx, sm.logger, "pipeline stage output", stageOperationID, "error_result", "application/json", payload)
+			}
+			sm.logger.ErrorContext(ctx, "pipeline stage execution failed", "operation_id", stageOperationID,
+				"state", run.State, "review_id", run.ReviewID,
+				"duration_ms", time.Since(stageStart).Milliseconds(), "error", err)
 			// Losing a recovery lease is not a user cancellation. The former
 			// owner must stop without detached cleanup writes or GitHub posts.
 			if leaseErr := recoveryLeaseLoss(ctx); leaseErr != nil {
@@ -176,6 +205,7 @@ func (sm *StateMachine) Run(ctx context.Context, run *PipelineRun) error {
 			run.State = StateFailed
 			run.Error = err.Error()
 			run.UpdatedAt = time.Now()
+			sm.logStateMutation(context.WithoutCancel(ctx), run, failedState, "stage_error")
 			if persistErr := sm.persist(context.WithoutCancel(ctx), run); persistErr != nil {
 				sm.logger.Error("failed to persist failure state", "error", persistErr, "review_id", run.ReviewID)
 			}
@@ -210,6 +240,9 @@ func (sm *StateMachine) Run(ctx context.Context, run *PipelineRun) error {
 		}
 
 		stageDurationMs := time.Since(stageStart).Milliseconds()
+		if payload, err := json.Marshal(run); err == nil {
+			obs.LogPayload(ctx, sm.logger, "pipeline stage output", stageOperationID, "result", "application/json", payload)
+		}
 		// stage.completed fires for every successful stage transition. The
 		// attrs are a deliberate subset of the tracker-era signature — token
 		// totals are aggregated per-stage on run.Tokens and are emitted via
@@ -218,6 +251,7 @@ func (sm *StateMachine) Run(ctx context.Context, run *PipelineRun) error {
 		// record past the slog.Handler buffer's record size budget.
 		sm.logger.InfoContext(ctx, "stage completed",
 			slog.String("event", "stage.completed"),
+			slog.String("operation_id", stageOperationID),
 			slog.String("review_id", run.ReviewID.String()),
 			slog.String("stage", string(run.State)),
 			slog.Int64("duration_ms", stageDurationMs),
@@ -231,8 +265,10 @@ func (sm *StateMachine) Run(ctx context.Context, run *PipelineRun) error {
 		if !exists {
 			return fmt.Errorf("no transition from state %s", run.State)
 		}
+		previousState := run.State
 		run.State = next
 		run.UpdatedAt = time.Now()
+		sm.logStateMutation(ctx, run, previousState, "stage_completed")
 		publishStageChanged(run)
 		if shouldPersist(run.State) {
 			if err := sm.persist(ctx, run); err != nil {
@@ -240,7 +276,15 @@ func (sm *StateMachine) Run(ctx context.Context, run *PipelineRun) error {
 			}
 		}
 	}
+	sm.logger.InfoContext(ctx, "pipeline state machine finished", "event", "pipeline.state_machine.completed",
+		"run_id", run.ID, "review_id", run.ReviewID, "attempt_generation", run.AttemptGeneration, "stage", string(run.State))
 	return nil
+}
+
+func (sm *StateMachine) logStateMutation(ctx context.Context, run *PipelineRun, previous PipelineState, reason string) {
+	sm.logger.InfoContext(ctx, "pipeline run state mutated", "event", "pipeline.state.mutated",
+		"run_id", run.ID, "review_id", run.ReviewID, "attempt_generation", run.AttemptGeneration,
+		"previous_state", string(previous), "stage", string(run.State), "reason", reason)
 }
 
 // terminalizeRejectedAttempt removes a persisted run from crash-recovery
@@ -251,9 +295,11 @@ func (sm *StateMachine) terminalizeRejectedAttempt(ctx context.Context, run *Pip
 	if run.State.IsTerminal() {
 		return context.Canceled
 	}
+	previousState := run.State
 	run.State = StateCancelled
 	run.Error = "review attempt is no longer active"
 	run.UpdatedAt = time.Now()
+	sm.logStateMutation(context.WithoutCancel(ctx), run, previousState, "attempt_rejected")
 	if err := sm.persist(context.WithoutCancel(ctx), run); err != nil {
 		return fmt.Errorf("terminalizing rejected pipeline attempt: %w", err)
 	}
@@ -300,6 +346,7 @@ func (sm *StateMachine) handleCancelled(ctx context.Context, run *PipelineRun) e
 	run.UpdatedAt = time.Now()
 
 	dbCtx := context.WithoutCancel(ctx)
+	sm.logStateMutation(dbCtx, run, cancelledAtStage, "cancelled")
 
 	if persistErr := sm.persist(dbCtx, run); persistErr != nil {
 		sm.logger.Error("failed to persist cancelled state", "error", persistErr, "review_id", run.ReviewID)
@@ -358,6 +405,7 @@ func (sm *StateMachine) ResumeAttempt(ctx context.Context, runID uuid.UUID, atte
 }
 
 func (sm *StateMachine) resume(ctx context.Context, runID uuid.UUID, attemptGeneration int) (*PipelineRun, error) {
+	sm.logger.InfoContext(ctx, "pipeline resume started", "event", "pipeline.recovery.resume_started", "run_id", runID, "attempt_generation", attemptGeneration)
 	run, err := sm.load(ctx, runID)
 	if err != nil {
 		return nil, fmt.Errorf("loading state: %w", err)
@@ -373,6 +421,7 @@ func (sm *StateMachine) resume(ctx context.Context, runID uuid.UUID, attemptGene
 	}
 	run.EventBus = sm.eventBus
 	if run.State.IsTerminal() {
+		sm.logger.InfoContext(ctx, "pipeline resume skipped for terminal run", "event", "pipeline.recovery.resume_skipped", "run_id", runID, "review_id", run.ReviewID, "stage", string(run.State), "reason", "terminal")
 		return run, nil
 	}
 	if sm.eventBus != nil {
@@ -384,11 +433,18 @@ func (sm *StateMachine) resume(ctx context.Context, runID uuid.UUID, attemptGene
 	if sm.hydrate != nil {
 		sm.hydrate(ctx, run)
 	}
-	sm.logger.Info("resuming pipeline", "run_id", runID, "state", run.State)
-	return run, sm.Run(ctx, run)
+	sm.logger.InfoContext(ctx, "resuming pipeline", "event", "pipeline.recovery.resume_running", "run_id", runID, "review_id", run.ReviewID, "stage", string(run.State), "attempt_generation", run.AttemptGeneration)
+	err = sm.Run(ctx, run)
+	if err != nil {
+		sm.logger.ErrorContext(ctx, "pipeline resume failed", "event", "pipeline.recovery.resume_failed", "run_id", runID, "review_id", run.ReviewID, "stage", string(run.State), "error", err)
+	} else {
+		sm.logger.InfoContext(ctx, "pipeline resume completed", "event", "pipeline.recovery.resume_completed", "run_id", runID, "review_id", run.ReviewID, "stage", string(run.State))
+	}
+	return run, err
 }
 
 func (sm *StateMachine) persistState(ctx context.Context, run *PipelineRun) error {
+	sm.logger.DebugContext(ctx, "pipeline state persistence started", "event", "pipeline.state.persist_started", "run_id", run.ID, "review_id", run.ReviewID, "stage", string(run.State), "attempt_generation", run.AttemptGeneration)
 	payload, err := json.Marshal(run)
 	if err != nil {
 		return fmt.Errorf("marshaling run: %w", err)
@@ -404,8 +460,10 @@ func (sm *StateMachine) persistState(ctx context.Context, run *PipelineRun) erro
 			updated_at = NOW()
 	`, run.ID, run.ReviewID, run.State, payload, run.Error)
 	if err != nil {
+		sm.logger.ErrorContext(ctx, "pipeline state persistence failed", "event", "pipeline.state.persist_failed", "run_id", run.ID, "review_id", run.ReviewID, "stage", string(run.State), "error", err)
 		return fmt.Errorf("upserting pipeline_states: %w", err)
 	}
+	sm.logger.InfoContext(ctx, "pipeline state persisted", "event", "pipeline.state.persisted", "run_id", run.ID, "review_id", run.ReviewID, "stage", string(run.State), "attempt_generation", run.AttemptGeneration)
 	return nil
 }
 
@@ -441,6 +499,7 @@ const recoverStaleAfter = 10 * time.Minute
 // be owned by another live process; taking them over would double-execute
 // the pipeline and post a duplicate GitHub review.
 func (sm *StateMachine) RecoverIncomplete(ctx context.Context) error {
+	sm.logger.InfoContext(ctx, "pipeline recovery scan started", "event", "pipeline.recovery.scan_started")
 	var firstErr error
 	for ctx.Err() == nil {
 		owner := uuid.New()
@@ -449,10 +508,11 @@ func (sm *StateMachine) RecoverIncomplete(ctx context.Context) error {
 			return fmt.Errorf("claiming incomplete run: %w", err)
 		}
 		if !claimed {
+			sm.logger.InfoContext(ctx, "pipeline recovery scan completed", "event", "pipeline.recovery.scan_completed", "error_present", firstErr != nil)
 			return firstErr
 		}
 
-		sm.logger.Info("recovering pipeline run", "run_id", runID, "recovery_owner", owner)
+		sm.logger.InfoContext(ctx, "recovering pipeline run", "event", "pipeline.recovery.claimed", "run_id", runID, "recovery_owner", owner)
 		if err := sm.recoverClaimed(ctx, runID, owner); err != nil {
 			sm.logger.Error("failed to recover run", "run_id", runID, "error", err)
 			if firstErr == nil {
@@ -569,6 +629,7 @@ func (sm *StateMachine) holdRecoveryLease(ctx context.Context, runID, owner uuid
 		case <-stop:
 			return nil
 		case <-ticks:
+			sm.logger.DebugContext(ctx, "pipeline recovery lease renewal started", "event", "pipeline.recovery.lease_renew_started", "run_id", runID, "recovery_owner", owner)
 			renewed, err := sm.renewRecoveryLease(ctx, runID, owner)
 			if err != nil {
 				cause := fmt.Errorf("%w: renewing lease: %w", errRecoveryLeaseLost, err)
@@ -576,10 +637,12 @@ func (sm *StateMachine) holdRecoveryLease(ctx context.Context, runID, owner uuid
 				return cause
 			}
 			if !renewed {
+				sm.logger.WarnContext(ctx, "pipeline recovery lease ownership lost", "event", "pipeline.recovery.lease_lost", "run_id", runID, "recovery_owner", owner)
 				cause := fmt.Errorf("%w: owner changed during renewal", errRecoveryLeaseLost)
 				cancel(cause)
 				return cause
 			}
+			sm.logger.DebugContext(ctx, "pipeline recovery lease renewed", "event", "pipeline.recovery.lease_renewed", "run_id", runID, "recovery_owner", owner)
 		}
 	}
 }

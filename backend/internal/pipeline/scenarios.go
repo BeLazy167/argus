@@ -28,7 +28,11 @@ type scenarioStore interface {
 // scenario dedup/trigger just proceed as if nothing matched. severity="" leaves
 // the search severity-agnostic. Retrieval is threshold-free (the caller applies
 // the dedupe/trigger threshold to the returned similarities).
-func scenarioSearch(ctx context.Context, indexer memory.Indexer, logger *slog.Logger, repo, query, severity string, limit int) []memory.ScenarioSearchResult {
+func scenarioSearch(ctx context.Context, indexer memory.Indexer, logger *slog.Logger, repo, query, severity string, limit int) (results []memory.ScenarioSearchResult) {
+	opID, started := pipelineOperationStart(ctx, logger, "scenario_memory_search", "retrieve, threshold, parse, and deduplicate scenario memories relevant to a semantic query", map[string]any{"repo": repo, "query": query, "severity": severity, "limit": limit})
+	defer func() {
+		pipelineOperationResult(ctx, logger, opID, "scenario_memory_search", "completed", started, results, "result_count", len(results))
+	}()
 	var filters []memory.FilterCondition
 	if severity != "" {
 		filters = append(filters, memory.FilterCondition{Key: "severity", Value: severity})
@@ -113,6 +117,10 @@ func scenarioSeverity(s Severity) string {
 // applies. A non-positive threshold is clamped to the default so a misconfigured
 // 0 can never collapse every distinct seed into "duplicate".
 func StoreScenarioSeeds(ctx context.Context, st scenarioStore, indexer memory.Indexer, owner, repo string, installationID int64, repoID *int64, dedupeThreshold float64, seeds []ScenarioSeed) {
+	opID, started := pipelineOperationStart(ctx, slog.Default(), "store_scenario_seeds", "deduplicate, persist, index, and link active scenarios extracted from accepted findings", map[string]any{"owner": owner, "repo": repo, "installation_id": installationID, "repo_id": repoID, "seeds": seeds})
+	defer func() {
+		pipelineOperationResult(ctx, slog.Default(), opID, "store_scenario_seeds", "completed", started, map[string]any{"seed_count": len(seeds), "repo": repo})
+	}()
 	for _, seed := range seeds {
 		if indexer != nil {
 			existing := scenarioSearch(ctx, indexer, slog.Default(), repo, seed.Description, "", 1)
@@ -172,6 +180,10 @@ func isDuplicateScenario(existing []memory.ScenarioSearchResult, dedupeThreshold
 
 // StorePendingScenarioSeeds stores scenarios as inactive (pending dev approval via reaction).
 func StorePendingScenarioSeeds(ctx context.Context, st scenarioStore, installationID int64, repoID *int64, seeds []ScenarioSeed) {
+	opID, started := pipelineOperationStart(ctx, slog.Default(), "store_pending_scenario_seeds", "persist low-confidence scenario candidates for later approval without indexing them as active", map[string]any{"installation_id": installationID, "repo_id": repoID, "seeds": seeds})
+	defer func() {
+		pipelineOperationResult(ctx, slog.Default(), opID, "store_pending_scenario_seeds", "completed", started, map[string]any{"seed_count": len(seeds)})
+	}()
 	for _, seed := range seeds {
 		_, _ = st.CreatePendingScenario(ctx, installationID, repoID, seed.Description, seed.Source, seed.SourceRef, seed.Files, nil, seed.Severity)
 	}

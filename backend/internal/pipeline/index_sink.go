@@ -14,6 +14,7 @@ import (
 	"context"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -111,12 +112,15 @@ type PostReviewIndexer struct {
 // the review is already composed). ctx is the cancel-detached context the sinks
 // index under; stage is the telemetry stage label ("pre_post" or "post_review").
 func (p *PostReviewIndexer) RunAll(ctx context.Context, run *PipelineRun, owner, repo, stage string, sinks []memorySink) {
+	p.o.logger.InfoContext(ctx, "memory sink cluster started", "event", "pipeline.index.cluster_started", "review_id", run.ReviewID, "attempt_generation", run.AttemptGeneration, "stage", stage, "sink_count", len(sinks))
 	sinkCtx, attempt := withMemorySinkAttempt(ctx, p.o, p.authority, run)
 	for _, sink := range sinks {
 		if sink.enabled != nil && !sink.enabled(run) {
+			p.o.logger.DebugContext(ctx, "memory sink skipped by feature gate", "event", "pipeline.index.sink_skipped", "review_id", run.ReviewID, "stage", stage, "op", sink.name, "reason", "disabled")
 			continue
 		}
 		if attempt.stale.Load() {
+			p.o.logger.InfoContext(ctx, "memory sink cluster stopped for stale attempt", "event", "pipeline.index.cluster_stopped", "review_id", run.ReviewID, "stage", stage, "reason", "stale_attempt")
 			return
 		}
 		if p.authority != nil {
@@ -136,12 +140,15 @@ func (p *PostReviewIndexer) RunAll(ctx context.Context, run *PipelineRun, owner,
 		}
 		p.runSink(sinkCtx, run, owner, repo, stage, sink)
 	}
+	p.o.logger.InfoContext(ctx, "memory sink cluster completed", "event", "pipeline.index.cluster_completed", "review_id", run.ReviewID, "attempt_generation", run.AttemptGeneration, "stage", stage)
 }
 
 // runSink invokes one sink under a recover guard. Kept as its own method so the
 // deferred recover pops per sink — a single defer inside RunAll's loop would
 // unwind the whole loop on the first panic instead of isolating it.
 func (p *PostReviewIndexer) runSink(ctx context.Context, run *PipelineRun, owner, repo, stage string, sink memorySink) {
+	startedAt := time.Now()
+	p.o.logger.InfoContext(ctx, "memory sink started", "event", "pipeline.index.sink_started", "review_id", run.ReviewID, "attempt_generation", run.AttemptGeneration, "stage", stage, "op", sink.name)
 	defer func() {
 		if r := recover(); r != nil {
 			// Default message mirrors the historical per-cluster logs ("pre-post
@@ -159,4 +166,5 @@ func (p *PostReviewIndexer) runSink(ctx context.Context, run *PipelineRun, owner
 		}
 	}()
 	sink.run(ctx, run, owner, repo)
+	p.o.logger.InfoContext(ctx, "memory sink completed", "event", "pipeline.index.sink_completed", "review_id", run.ReviewID, "attempt_generation", run.AttemptGeneration, "stage", stage, "op", sink.name, "duration_ms", time.Since(startedAt).Milliseconds())
 }

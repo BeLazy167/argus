@@ -214,6 +214,9 @@ type FindingLifecycle struct {
 
 // NewFindingLifecycle wires the module over the store ledger and GitHub client.
 func NewFindingLifecycle(ledger findingLedger, gh threadResolver, logger *slog.Logger) *FindingLifecycle {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &FindingLifecycle{ledger: ledger, gh: gh, logger: logger}
 }
 
@@ -292,8 +295,10 @@ type TransitionResult struct {
 // so Transition returns an error only for an unknown event (a programming
 // mistake); everything else is reported via the result and logged.
 func (l *FindingLifecycle) Transition(ctx context.Context, req FindingTransition) (TransitionResult, error) {
+	l.logger.InfoContext(ctx, "finding lifecycle transition started", "event", "pipeline.finding.transition_started", "finding_id", req.FindingID, "lifecycle_event", string(req.Event), "thread_id", req.ThreadNodeID, "pr_number", req.PRNumber)
 	pol, ok := eventPolicies[req.Event]
 	if !ok {
+		l.logger.ErrorContext(ctx, "finding lifecycle transition rejected", "event", "pipeline.finding.transition_rejected", "finding_id", req.FindingID, "lifecycle_event", string(req.Event), "reason", "unknown_event")
 		return TransitionResult{}, fmt.Errorf("finding-lifecycle: unknown event %q", req.Event)
 	}
 	res := TransitionResult{NewState: pol.state}
@@ -302,6 +307,7 @@ func (l *FindingLifecycle) Transition(ctx context.Context, req FindingTransition
 		// Record the decision first, then best-effort resolve.
 		l.writeLedger(ctx, req, pol, &res)
 		l.resolveThread(ctx, req, pol, &res)
+		l.logTransitionResult(ctx, req, res)
 		return res, nil
 	}
 
@@ -313,24 +319,34 @@ func (l *FindingLifecycle) Transition(ctx context.Context, req FindingTransition
 		} else if rerr := l.gh.ResolveReviewThread(ctx, req.InstallationID, nodeID); rerr != nil {
 			res.ThreadErr = rerr
 			l.logger.Warn("finding-lifecycle: resolve thread", "error", rerr, "finding", req.FindingID, "thread", nodeID)
+			l.logTransitionResult(ctx, req, res)
 			return res, nil // under-claim: leave the prior state
 		} else {
 			res.ThreadResolved = true
 		}
 	}
 	l.writeLedger(ctx, req, pol, &res)
+	l.logTransitionResult(ctx, req, res)
 	return res, nil
+}
+
+func (l *FindingLifecycle) logTransitionResult(ctx context.Context, req FindingTransition, res TransitionResult) {
+	l.logger.InfoContext(ctx, "finding lifecycle transition completed", "event", "pipeline.finding.transition_completed",
+		"finding_id", req.FindingID, "lifecycle_event", string(req.Event), "status", string(res.NewState),
+		"ledger_changed", res.LedgerChanged, "thread_resolved", res.ThreadResolved, "thread_error", res.ThreadErr != nil)
 }
 
 // writeLedger applies the event's ledger move (the ONLY writer of
 // review_comments.state), restricted to the event's allowed source states.
 func (l *FindingLifecycle) writeLedger(ctx context.Context, req FindingTransition, pol eventPolicy, res *TransitionResult) {
+	l.logger.DebugContext(ctx, "finding ledger mutation started", "event", "pipeline.finding.ledger_started", "finding_id", req.FindingID, "lifecycle_event", string(req.Event), "status", string(pol.state))
 	changed, err := l.ledger.UpdateFindingStateFrom(ctx, req.FindingID, pol.state, pol.allowedFrom)
 	if err != nil {
 		l.logger.Warn("finding-lifecycle: ledger update", "error", err, "finding", req.FindingID, "event", req.Event)
 		return
 	}
 	res.LedgerChanged = changed
+	l.logger.InfoContext(ctx, "finding ledger mutation evaluated", "event", "pipeline.finding.ledger_mutated", "finding_id", req.FindingID, "lifecycle_event", string(req.Event), "status", string(pol.state), "applied", changed)
 
 	// Resolved-by-commit breadcrumb (#167): stamp the resolving SHA ONLY when this
 	// event actually moved the finding to a resolved-ish terminal — so we never
@@ -350,6 +366,7 @@ func (l *FindingLifecycle) writeLedger(ctx context.Context, req FindingTransitio
 // but does not undo the already-written ledger decision.
 func (l *FindingLifecycle) resolveThread(ctx context.Context, req FindingTransition, pol eventPolicy, res *TransitionResult) {
 	if !pol.resolvesThread {
+		l.logger.DebugContext(ctx, "finding thread resolution skipped", "event", "pipeline.finding.thread_skipped", "finding_id", req.FindingID, "lifecycle_event", string(req.Event), "reason", "ledger_only")
 		return
 	}
 	nodeID := l.locateThread(ctx, req)
@@ -363,6 +380,7 @@ func (l *FindingLifecycle) resolveThread(ctx context.Context, req FindingTransit
 		return
 	}
 	res.ThreadResolved = true
+	l.logger.InfoContext(ctx, "finding thread resolved", "event", "pipeline.finding.thread_resolved", "finding_id", req.FindingID, "lifecycle_event", string(req.Event), "thread_id", nodeID)
 }
 
 // ThreadTransition is a bulk-resolver request: resolve one review thread the
@@ -391,6 +409,7 @@ type ThreadTransition struct {
 // Transition (ledger + thread); an untracked thread (pre-DB / unmapped) is
 // resolved directly — it has no ledger row to move.
 func (l *FindingLifecycle) TransitionThread(ctx context.Context, req ThreadTransition) (TransitionResult, error) {
+	l.logger.InfoContext(ctx, "review thread transition started", "event", "pipeline.finding.thread_transition_started", "thread_id", req.ThreadNodeID, "github_comment_id", req.RestCommentID, "lifecycle_event", string(req.Event), "pr_number", req.PRNumber)
 	if finding, err := l.ledger.GetCommentByGithubID(ctx, req.RestCommentID); err == nil && finding != nil {
 		return l.Transition(ctx, FindingTransition{
 			FindingID:      finding.ID,
@@ -410,6 +429,7 @@ func (l *FindingLifecycle) TransitionThread(ctx context.Context, req ThreadTrans
 		res.NewState = pol.state
 	}
 	if req.ThreadNodeID == "" {
+		l.logger.InfoContext(ctx, "review thread transition skipped", "event", "pipeline.finding.thread_transition_skipped", "github_comment_id", req.RestCommentID, "reason", "thread_id_unavailable")
 		return res, nil
 	}
 	if err := l.gh.ResolveReviewThread(ctx, req.InstallationID, req.ThreadNodeID); err != nil {
@@ -417,6 +437,7 @@ func (l *FindingLifecycle) TransitionThread(ctx context.Context, req ThreadTrans
 		l.logger.Warn("finding-lifecycle: direct resolve of untracked thread", "error", err, "thread", req.ThreadNodeID)
 	} else {
 		res.ThreadResolved = true
+		l.logger.InfoContext(ctx, "untracked review thread resolved", "event", "pipeline.finding.thread_resolved", "thread_id", req.ThreadNodeID, "github_comment_id", req.RestCommentID, "lifecycle_event", string(req.Event))
 	}
 	return res, nil
 }

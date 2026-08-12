@@ -4,12 +4,54 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/BeLazy167/argus/backend/internal/llm"
 	"github.com/BeLazy167/argus/backend/internal/memory"
+	"github.com/BeLazy167/argus/backend/internal/obs"
 	"github.com/BeLazy167/argus/backend/internal/store"
 )
+
+// pipelineOperationStart emits a correlated semantic boundary and its complete
+// structured input. Keeping this in a listed pipeline file lets every stage use
+// one vocabulary without weakening the repository's file-scope constraint.
+func pipelineOperationStart(ctx context.Context, logger *slog.Logger, operation, semantics string, input any) (string, time.Time) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	operationID := obs.NewLogID()
+	started := time.Now()
+	logger.InfoContext(ctx, "pipeline operation started", "operation_id", operationID, "operation", operation, "semantics", semantics)
+	if payload, err := json.Marshal(input); err != nil {
+		logger.WarnContext(ctx, "pipeline operation input serialization failed", "operation_id", operationID, "operation", operation, "error", err)
+	} else {
+		obs.LogPayload(ctx, logger, "pipeline operation input", operationID, "input", "application/json", payload)
+	}
+	return operationID, started
+}
+
+func pipelineOperationResult(ctx context.Context, logger *slog.Logger, operationID, operation, verdict string, started time.Time, result any, attrs ...any) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	if payload, err := json.Marshal(result); err != nil {
+		logger.WarnContext(ctx, "pipeline operation result serialization failed", "operation_id", operationID, "operation", operation, "error", err)
+	} else {
+		obs.LogPayload(ctx, logger, "pipeline operation result", operationID, "result", "application/json", payload)
+	}
+	base := []any{"operation_id", operationID, "operation", operation, "verdict", verdict, "duration_ms", time.Since(started).Milliseconds()}
+	logger.InfoContext(ctx, "pipeline operation completed", append(base, attrs...)...)
+}
+
+func pipelineOperationFailure(ctx context.Context, logger *slog.Logger, operationID, operation string, started time.Time, err error, attrs ...any) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	base := []any{"operation_id", operationID, "operation", operation, "verdict", "failure", "duration_ms", time.Since(started).Milliseconds(), "error", err}
+	logger.ErrorContext(ctx, "pipeline operation failed", append(base, attrs...)...)
+}
 
 // agenticMemoryTags returns the container tags a deep review of repo may
 // search, most-specific first: the repo's unified container and the shared
@@ -135,7 +177,15 @@ func (th *ToolHandler) tagAllowed(tag string) bool {
 }
 
 // Handle dispatches a tool call and returns the result as a string.
-func (th *ToolHandler) Handle(ctx context.Context, call llm.ToolCall) (string, error) {
+func (th *ToolHandler) Handle(ctx context.Context, call llm.ToolCall) (result string, err error) {
+	opID, started := pipelineOperationStart(ctx, slog.Default(), "review_tool_invocation", "execute one allowlisted agentic review tool and return its complete result to the model", map[string]any{"repo": th.repo, "tool_call": call})
+	defer func() {
+		if err != nil {
+			pipelineOperationFailure(ctx, slog.Default(), opID, "review_tool_invocation", started, err, "tool", call.Function.Name)
+			return
+		}
+		pipelineOperationResult(ctx, slog.Default(), opID, "review_tool_invocation", "success", started, map[string]any{"tool": call.Function.Name, "result": result}, "tool", call.Function.Name, "result_bytes", len(result))
+	}()
 	switch call.Function.Name {
 	case "search_memory":
 		return th.searchMemory(ctx, call.Function.Arguments)

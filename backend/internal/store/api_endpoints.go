@@ -98,7 +98,23 @@ func sameEndpointSet(a, b []APIEndpointRow) bool {
 // + planSymbolDiff): a PR that touches twenty files declaring nothing must not
 // rewrite rows, and the `false` it returns is what stops the caller re-deriving
 // the whole installation's edge set for no reason.
-func (s *Store) ReplaceAPIEndpointsForFiles(ctx context.Context, repoID int64, filePaths []string, rows []APIEndpointRow) (bool, error) {
+func (s *Store) ReplaceAPIEndpointsForFiles(ctx context.Context, repoID int64, filePaths []string, rows []APIEndpointRow) (storeResult0 bool, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ReplaceAPIEndpointsForFiles",
+
+			"repo_id",
+			storeLogValue(repoID), "file_paths_count", len(filePaths), "rows_count",
+			len(rows))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr,
+			storeResult0,
+		)
+	}()
+
 	if len(filePaths) == 0 {
 		return false, nil
 	}
@@ -115,6 +131,9 @@ func (s *Store) ReplaceAPIEndpointsForFiles(ctx context.Context, repoID int64, f
 	if err != nil {
 		return false, fmt.Errorf("replace api endpoints: begin: %w", err)
 	}
+	txFinish := beginStoreTransaction(ctx, "ReplaceAPIEndpointsForFiles", "repo_id", repoID, "file_count", len(filePaths), "row_count", len(rows))
+	committed := false
+	defer func() { txFinish(storeErr, committed) }()
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	if _, err := tx.Exec(ctx,
@@ -138,6 +157,7 @@ func (s *Store) ReplaceAPIEndpointsForFiles(ctx context.Context, repoID int64, f
 	if err := tx.Commit(ctx); err != nil {
 		return false, fmt.Errorf("replace api endpoints: commit: %w", err)
 	}
+	committed = true
 	return true, nil
 }
 
@@ -171,6 +191,19 @@ func (s *Store) listAPIEndpointsForFiles(ctx context.Context, repoID int64, file
 // installation has no cross-repo API calls", and the caller must be able to
 // refuse to rewrite the derived edge set from a partial view.
 func (s *Store) ListAPIEndpointsForInstallationOf(ctx context.Context, repoID int64) (endpoints []APIEndpointRow, truncated bool, err error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ListAPIEndpointsForInstallationOf",
+
+			"repo_id", storeLogValue(repoID))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, endpoints,
+				truncated)
+			panic(recovered)
+		}
+		storeFinish(err, endpoints, truncated)
+	}()
+
 	rows, err := s.Pool.Query(ctx, `
 		SELECT e.repo_id, e.node_id, e.role, e.method, e.path_pattern, e.raw_path, e.file_path, e.line
 		FROM api_endpoints e
@@ -216,11 +249,30 @@ func (s *Store) ListAPIEndpointsForInstallationOf(ctx context.Context, repoID in
 // ON CONFLICT DO NOTHING, matching UpsertCodeEdge. Its comment states the
 // reason — a re-upsert of an unchanged edge must be a cheap no-op with no row
 // rewrite and no WAL volume, which is why code_edges hash-gating was deferred.
-func (s *Store) ReplaceInferredAPIEdges(ctx context.Context, repoID int64, edges []InferredEdgeRow) (int, error) {
+func (s *Store) ReplaceInferredAPIEdges(ctx context.Context, repoID int64, edges []InferredEdgeRow) (storeResult0 int, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ReplaceInferredAPIEdges",
+
+			"repo_id",
+
+			storeLogValue(repoID), "edges_count", len(edges))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered,
+				storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr,
+			storeResult0)
+	}()
+
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("replace inferred api edges: begin: %w", err)
 	}
+	txFinish := beginStoreTransaction(ctx, "ReplaceInferredAPIEdges", "repo_id", repoID, "edge_count", len(edges))
+	committed := false
+	defer func() { txFinish(storeErr, committed) }()
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	if _, err := tx.Exec(ctx, `
@@ -249,6 +301,7 @@ func (s *Store) ReplaceInferredAPIEdges(ctx context.Context, repoID int64, edges
 	if err := tx.Commit(ctx); err != nil {
 		return 0, fmt.Errorf("replace inferred api edges: commit: %w", err)
 	}
+	committed = true
 	return len(edges), nil
 }
 
@@ -256,7 +309,23 @@ func (s *Store) ReplaceInferredAPIEdges(ctx context.Context, repoID int64, edges
 // Qualified names match exactly. An unqualified name also matches the final
 // component of a receiver/scoped identity (Handle -> Alpha.Handle). A zero ID
 // means the name exists but is ambiguous; callers must not choose one row.
-func (s *Store) LookupCodeNodeIDsByName(ctx context.Context, repoID int64, names []string) (map[string]int64, error) {
+func (s *Store) LookupCodeNodeIDsByName(ctx context.Context, repoID int64, names []string) (storeResult0 map[string]int64, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "LookupCodeNodeIDsByName",
+
+			"repo_id",
+
+			storeLogValue(repoID), "names_count", len(names))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered,
+				storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr,
+			storeResult0)
+	}()
+
 	if len(names) == 0 {
 		return map[string]int64{}, nil
 	}

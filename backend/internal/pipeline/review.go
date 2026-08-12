@@ -46,7 +46,15 @@ type workUnit struct {
 	specialist Specialist // empty for skim single-pass
 }
 
-func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
+func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) (err error) {
+	opID, started := pipelineOperationStart(ctx, slog.Default(), "review_stage", "route triaged files into bounded parallel specialist review units, invoke review tools/models, and merge findings by file", run)
+	defer func() {
+		if err != nil {
+			pipelineOperationFailure(ctx, slog.Default(), opID, "review_stage", started, err)
+			return
+		}
+		pipelineOperationResult(ctx, slog.Default(), opID, "review_stage", "success", started, map[string]any{"file_reviews": run.FileReviews, "review_tokens": run.Tokens.Review}, "reviewed_file_count", len(run.FileReviews), "finding_count", countFlatComments(run))
+	}()
 	if run.Diff == nil || len(run.Diff.Files) == 0 {
 		return nil
 	}
@@ -289,14 +297,21 @@ type reviewParams struct {
 	deepReview     bool       // controls agentic memory access for deep files
 }
 
-func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p reviewParams, fileContents map[string]string, owner, repo string, cfg llm.ModelConfig, provider llm.Provider) (FileReview, StageTokens, error) {
+func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p reviewParams, fileContents map[string]string, owner, repo string, cfg llm.ModelConfig, provider llm.Provider) (review FileReview, tokens StageTokens, err error) {
+	opID, started := pipelineOperationStart(ctx, slog.Default(), "file_review_analysis", "assemble complete per-file context, run the configured general or specialist reviewer including agentic tool iterations, parse and validate findings, and account token spend", map[string]any{"run": run, "params": p, "file_contents": fileContents, "owner": owner, "repo": repo, "model_config": cfg})
+	defer func() {
+		if err != nil {
+			pipelineOperationFailure(ctx, slog.Default(), opID, "file_review_analysis", started, err, "file", p.file.NewName, "specialist", p.specialist)
+			return
+		}
+		pipelineOperationResult(ctx, slog.Default(), opID, "file_review_analysis", "success", started, map[string]any{"review": review, "tokens": tokens}, "file", p.file.NewName, "specialist", p.specialist, "finding_count", len(review.Comments))
+	}()
 	var indexer memory.Indexer
 	if rs.memRegistry != nil {
 		indexer = rs.memRegistry.GetIndexer(ctx, run.DBInstallationID)
 	}
 
-	review := FileReview{Path: p.file.NewName}
-	var tokens StageTokens
+	review = FileReview{Path: p.file.NewName}
 	tokens.Model = cfg.Model
 	tokens.Provider = cfg.Provider
 	tokens.File = p.file.NewName

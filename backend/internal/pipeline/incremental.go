@@ -89,7 +89,9 @@ func NewIncrementalResolver(st incrementalStore, gh interDiffFetcher, logger *sl
 // retry is not a push, and an empty/errored compare there would falsely pollute
 // the force-push/base-change signal (and its ERROR-level parse alarm).
 func (r *IncrementalResolver) ResolvePriors(ctx context.Context, repoID int64, prNumber int) *IncrementalPlan {
+	r.logger.InfoContext(ctx, "incremental prior resolution started", "event", "pipeline.incremental.priors_started", "repo_id", repoID, "pr_number", prNumber)
 	_, plan := r.loadPriors(ctx, repoID, prNumber)
+	r.logger.InfoContext(ctx, "incremental prior resolution completed", "event", "pipeline.incremental.priors_completed", "repo_id", repoID, "pr_number", prNumber, "previous_review_id", plan.PreviousReviewID, "prior_file_count", len(plan.PriorComments))
 	return plan
 }
 
@@ -111,10 +113,12 @@ func (r *IncrementalResolver) loadPriors(ctx context.Context, repoID int64, prNu
 		return nil, plan
 	}
 	if prev == nil {
+		r.logger.InfoContext(ctx, "incremental prior resolution found no completed review", "event", "pipeline.incremental.no_prior", "repo_id", repoID, "pr_number", prNumber)
 		return nil, plan
 	}
 	plan.PreviousReviewID = &prev.ID
 	plan.PriorComments = r.aggregatePriorComments(ctx, repoID, prNumber)
+	r.logger.InfoContext(ctx, "incremental prior context loaded", "event", "pipeline.incremental.priors_loaded", "repo_id", repoID, "pr_number", prNumber, "previous_review_id", prev.ID, "prior_file_count", len(plan.PriorComments))
 	return prev, plan
 }
 
@@ -129,6 +133,7 @@ func (r *IncrementalResolver) loadPriors(ctx context.Context, repoID int64, prNu
 // plan across the review path and the auto-resolve goroutine pays a single
 // GitHub round-trip per push.
 func (r *IncrementalResolver) Resolve(ctx context.Context, repoID int64, event ghpkg.PREvent) *IncrementalPlan {
+	r.logger.InfoContext(ctx, "incremental review resolution started", "event", "pipeline.incremental.resolve_started", "repo_id", repoID, "repo", event.RepoFullName, "pr_number", event.PRNumber, "new_head", event.HeadSHA)
 	prev, plan := r.loadPriors(ctx, repoID, event.PRNumber)
 	if prev == nil {
 		return plan
@@ -142,6 +147,7 @@ func (r *IncrementalResolver) Resolve(ctx context.Context, repoID int64, event g
 		return plan
 	}
 
+	r.logger.InfoContext(ctx, "incremental compare fetch started", "event", "pipeline.incremental.compare_started", "repo", event.RepoFullName, "pr_number", event.PRNumber, "previous_head", prev.HeadSHA, "new_head", event.HeadSHA)
 	interDiff, err := r.gh.GetCompareCommitsDiff(ctx, event.InstallationID, owner, repo, prev.HeadSHA, event.HeadSHA)
 	if err != nil {
 		r.signalFallback(ctx, plan, "inter_diff_fetch_failed", prev.HeadSHA, event, err)
@@ -172,6 +178,7 @@ func (r *IncrementalResolver) Resolve(ctx context.Context, repoID int64, event g
 	plan.InterDiffPatch = interPatch
 	plan.InterDiffRaw = interDiff
 	r.logger.InfoContext(ctx, "incremental re-review",
+		"event", "pipeline.incremental.resolved", "repo_id", repoID, "file_count", len(interPatch.Files),
 		"previous_review_id", prev.ID,
 		"previous_head", prev.HeadSHA,
 		"new_head", event.HeadSHA,
@@ -182,12 +189,16 @@ func (r *IncrementalResolver) Resolve(ctx context.Context, repoID int64, event g
 // aggregatePriorComments loads and dedupes prior comments across all completed
 // reviews on the PR. Returns nil when there are none.
 func (r *IncrementalResolver) aggregatePriorComments(ctx context.Context, repoID int64, prNumber int) map[string][]PriorComment {
+	r.logger.DebugContext(ctx, "incremental prior comment load started", "event", "pipeline.incremental.comments_started", "repo_id", repoID, "pr_number", prNumber)
 	comments, err := r.store.GetPRCompletedReviewComments(ctx, repoID, prNumber)
 	if err != nil {
 		r.logger.WarnContext(ctx, "incremental: load prior comments", "error", err, "pr", prNumber)
 		return nil
 	}
-	return buildPriorComments(dedupeReviewComments(comments))
+	deduped := dedupeReviewComments(comments)
+	result := buildPriorComments(deduped)
+	r.logger.InfoContext(ctx, "incremental prior comments loaded", "event", "pipeline.incremental.comments_loaded", "repo_id", repoID, "pr_number", prNumber, "comment_count", len(comments), "deduped_count", len(deduped), "file_count", len(result))
+	return result
 }
 
 // signalFallback marks the plan as a full-review fallback and SURFACES it as a

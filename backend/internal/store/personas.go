@@ -34,7 +34,18 @@ type Persona struct {
 // An installation's persona SHADOWS a built-in with the same slug, which is how
 // a team retunes "security_auditor" without losing the name everyone knows.
 // Resolution below picks the installation row when both exist.
-func (s *Store) ListPersonas(ctx context.Context, installationID int64) ([]Persona, error) {
+func (s *Store) ListPersonas(ctx context.Context, installationID int64) (storeResult0 []Persona, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ListPersonas", "installation_id", storeLogValue(installationID))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	// DISTINCT ON collapses a shadow and the built-in it overrides into the ONE
 	// row that resolution would pick — matching GetPersona, which already
 	// deduplicates the same way. Without it both rows come back: two cards with
@@ -83,7 +94,18 @@ func (s *Store) ListPersonas(ctx context.Context, installationID int64) ([]Perso
 //
 // ORDER BY installation_id NULLS LAST makes an installation's own row win over
 // the built-in of the same slug.
-func (s *Store) GetPersona(ctx context.Context, installationID int64, slug string) (*Persona, error) {
+func (s *Store) GetPersona(ctx context.Context, installationID int64, slug string) (storeResult0 *Persona, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetPersona", "installation_id", storeLogValue(installationID), "slug", storeLogValue(slug))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered,
+				storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	rows, err := s.Pool.Query(ctx, `
 		SELECT id, installation_id, slug, name, prompt_overlay, specialist_hint, is_builtin
 		FROM personas
@@ -111,7 +133,18 @@ func (s *Store) GetPersona(ctx context.Context, installationID int64, slug strin
 // Built-ins are not writable through this path: installationID is required, so
 // a write always lands on an installation row. Shadowing a built-in slug is
 // allowed and is the supported way to retune one.
-func (s *Store) UpsertPersona(ctx context.Context, installationID int64, p Persona) (*Persona, error) {
+func (s *Store) UpsertPersona(ctx context.Context, installationID int64, p Persona) (storeResult0 *Persona, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "UpsertPersona", "installation_id", storeLogValue(installationID))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	if installationID == 0 {
 		return nil, fmt.Errorf("upsert persona: installation is required")
 	}
@@ -137,7 +170,17 @@ func (s *Store) UpsertPersona(ctx context.Context, installationID int64, p Perso
 // Scoped to installation_id, so a built-in cannot be deleted by any caller and
 // one installation cannot delete another's. Deleting a shadow reveals the
 // built-in of the same slug again rather than breaking repos that selected it.
-func (s *Store) DeletePersona(ctx context.Context, installationID int64, slug string) error {
+func (s *Store) DeletePersona(ctx context.Context, installationID int64, slug string) (storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "DeletePersona", "installation_id", storeLogValue(installationID), "slug", storeLogValue(slug))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered)
+			panic(recovered)
+		}
+		storeFinish(storeErr)
+	}()
+
 	_, err := s.Pool.Exec(ctx,
 		`DELETE FROM personas WHERE installation_id = $1 AND slug = $2`, installationID, slug)
 	if err != nil {
@@ -162,7 +205,18 @@ func (s *Store) DeletePersona(ctx context.Context, installationID int64, slug st
 // Only rows with installation_id IS NULL are touched. An installation's own
 // persona, including one that shadows a built-in slug, is never rewritten or
 // removed by a deploy.
-func (s *Store) SeedBuiltinPersonas(ctx context.Context, builtins []Persona) error {
+func (s *Store) SeedBuiltinPersonas(ctx context.Context, builtins []Persona) (storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "SeedBuiltinPersonas", "builtins_count", len(builtins))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered)
+			panic(recovered)
+		}
+		storeFinish(
+			storeErr)
+	}()
+
 	if len(builtins) == 0 {
 		// Refuse rather than treat it as "nothing is shipped". An empty slice
 		// here almost certainly means a caller wiring mistake, and the prune

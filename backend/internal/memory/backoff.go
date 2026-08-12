@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/rand/v2"
 	"strconv"
 	"strings"
@@ -142,7 +143,11 @@ func retryWithBackoff(ctx context.Context, policy BackoffPolicy, fn func(ctx con
 	var lastErr error
 	var totalSlept time.Duration
 	for attempt := 1; attempt <= policy.MaxAttempts; attempt++ {
+		attemptStarted := time.Now()
+		slog.DebugContext(ctx, "retry attempt started", "attempt", attempt, "max_attempts", policy.MaxAttempts)
 		if err := fn(ctx); err != nil {
+			slog.DebugContext(ctx, "retry attempt failed", "attempt", attempt,
+				"max_attempts", policy.MaxAttempts, "duration_ms", time.Since(attemptStarted).Milliseconds(), "error", err)
 			var retryable *retryableError
 			if !errors.As(err, &retryable) {
 				return err // non-retryable — short-circuit
@@ -178,6 +183,10 @@ func retryWithBackoff(ctx context.Context, policy BackoffPolicy, fn func(ctx con
 			if sleepFor <= 0 {
 				break
 			}
+			slog.InfoContext(ctx, "retry backoff scheduled", "attempt", attempt,
+				"next_attempt", attempt+1, "status_code", retryable.StatusCode,
+				"retry_after_ms", retryable.RetryAfter.Milliseconds(),
+				"sleep_ms", sleepFor.Milliseconds(), "cumulative_sleep_ms", totalSlept.Milliseconds())
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -190,7 +199,12 @@ func retryWithBackoff(ctx context.Context, policy BackoffPolicy, fn func(ctx con
 			}
 			continue
 		}
+		slog.DebugContext(ctx, "retry operation succeeded", "attempt", attempt,
+			"max_attempts", policy.MaxAttempts, "duration_ms", time.Since(attemptStarted).Milliseconds(),
+			"cumulative_sleep_ms", totalSlept.Milliseconds())
 		return nil
 	}
+	slog.ErrorContext(ctx, "retry attempts exhausted", "max_attempts", policy.MaxAttempts,
+		"cumulative_sleep_ms", totalSlept.Milliseconds(), "error", lastErr)
 	return lastErr
 }

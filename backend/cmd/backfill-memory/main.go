@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/BeLazy167/argus/backend/internal/crypto"
 	"github.com/BeLazy167/argus/backend/internal/memory"
@@ -49,7 +50,11 @@ func main() {
 	flag.BoolVar(&cfg.reembed, "reembed", false, "repair mode: embed live memories rows that have a NULL embedding, then exit (ignores the archive)")
 	flag.Parse()
 
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	slog.SetDefault(logger)
+	started := time.Now()
+	logger.Info("memory backfill command started",
+		"installation_id", cfg.installation, "plan", cfg.plan, "repoint", cfg.repoint, "reembed", cfg.reembed)
 
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
@@ -67,21 +72,43 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	go func() {
+		<-ctx.Done()
+		logger.Info("memory backfill shutdown requested", "reason", ctx.Err())
+	}()
 
+	connectionStarted := time.Now()
+	logger.InfoContext(ctx, "memory backfill database initialization started")
 	st, err := store.New(ctx, dsn)
 	if err != nil {
-		logger.Error("connecting to postgres", "error", err)
+		logger.ErrorContext(ctx, "memory backfill database initialization failed",
+			"duration_ms", time.Since(connectionStarted).Milliseconds(), "error", err)
 		os.Exit(1)
 	}
-	defer st.Close()
+	logger.InfoContext(ctx, "memory backfill database initialization completed",
+		"duration_ms", time.Since(connectionStarted).Milliseconds())
+	defer func() {
+		logger.Info("memory backfill database close started")
+		st.Close()
+		logger.Info("memory backfill database close completed")
+	}()
 
 	if err := run(ctx, logger, st, cfg); err != nil {
-		logger.Error("backfill failed", "error", err)
+		logger.Error("memory backfill command failed", "duration_ms", time.Since(started).Milliseconds(), "error", err)
 		os.Exit(1)
 	}
+	logger.Info("memory backfill command completed", "duration_ms", time.Since(started).Milliseconds())
 }
 
 func run(ctx context.Context, logger *slog.Logger, st *store.Store, cfg runConfig) error {
+	runStarted := time.Now()
+	mode := "archive_import"
+	if cfg.reembed {
+		mode = "reembed"
+	}
+	logger.InfoContext(ctx, "memory backfill run started", "mode", mode,
+		"installation_id", cfg.installation, "plan", cfg.plan, "repoint", cfg.repoint)
+	logger.InfoContext(ctx, "memory backfill registries initialization started")
 	embedRegistry := memory.NewEmbedderRegistry(st, memory.PlatformEmbeddings{
 		APIKey:     os.Getenv("EMBEDDINGS_API_KEY"),
 		BaseURL:    getenv("EMBEDDINGS_BASE_URL", "https://api.voyageai.com/v1"),
@@ -89,6 +116,7 @@ func run(ctx context.Context, logger *slog.Logger, st *store.Store, cfg runConfi
 		Dimensions: 1024,
 	}, logger)
 	memRegistry := memory.NewRegistry(logger).WithPostgresBackend(st.Pool, embedRegistry)
+	logger.InfoContext(ctx, "memory backfill registries initialization completed")
 
 	if cfg.reembed {
 		return runReembed(ctx, logger, st, embedRegistry, memRegistry, cfg)
@@ -98,22 +126,33 @@ func run(ctx context.Context, logger *slog.Logger, st *store.Store, cfg runConfi
 	if err != nil {
 		return fmt.Errorf("listing archived installations: %w", err)
 	}
-	logger.Info("backfill starting", "installations", len(installs), "plan", cfg.plan, "repoint", cfg.repoint)
+	logger.InfoContext(ctx, "archive backfill cycle started", "installations", len(installs), "plan", cfg.plan, "repoint", cfg.repoint)
 
 	var totalImported, totalSkipped int
 	for _, id := range installs {
 		if ctx.Err() != nil {
+			logger.InfoContext(context.WithoutCancel(ctx), "archive backfill cycle stopped", "reason", ctx.Err(),
+				"imported", totalImported, "skipped_no_type", totalSkipped, "duration_ms", time.Since(runStarted).Milliseconds())
 			return ctx.Err()
 		}
+		installationStarted := time.Now()
+		logger.InfoContext(ctx, "archive installation backfill started", "installation_id", id)
 		imported, skipped, err := backfillInstallation(ctx, logger, st, embedRegistry, memRegistry, id, cfg)
 		totalImported += imported
 		totalSkipped += skipped
 		if err != nil {
+			logger.ErrorContext(ctx, "archive installation backfill failed", "installation_id", id,
+				"imported", imported, "skipped_no_type", skipped,
+				"duration_ms", time.Since(installationStarted).Milliseconds(), "error", err)
 			return fmt.Errorf("installation %d: %w", id, err)
 		}
 		if cfg.repoint && !cfg.plan {
+			repointStarted := time.Now()
+			logger.InfoContext(ctx, "pattern repoint started", "installation_id", id)
 			repointed, orphaned, err := repointPatterns(ctx, st, id)
 			if err != nil {
+				logger.ErrorContext(ctx, "pattern repoint failed", "installation_id", id,
+					"duration_ms", time.Since(repointStarted).Milliseconds(), "error", err)
 				return fmt.Errorf("repointing installation %d: %w", id, err)
 			}
 			// Orphans are patterns whose archived doc no longer exists —
@@ -121,12 +160,17 @@ func run(ctx context.Context, logger *slog.Logger, st *store.Store, cfg runConfi
 			// Their id is cleared rather than left dangling: a dangling id
 			// makes deletion a silent no-op, while NULL marks the row as
 			// unindexed so the next write re-indexes it properly.
-			logger.Info("patterns repointed", "installation_id", id,
-				"repointed", repointed, "orphaned_ids_cleared", orphaned)
+			logger.InfoContext(ctx, "pattern repoint completed", "installation_id", id,
+				"repointed", repointed, "orphaned_ids_cleared", orphaned,
+				"duration_ms", time.Since(repointStarted).Milliseconds())
 		}
+		logger.InfoContext(ctx, "archive installation backfill completed", "installation_id", id,
+			"imported", imported, "skipped_no_type", skipped,
+			"duration_ms", time.Since(installationStarted).Milliseconds())
 	}
 
-	logger.Info("backfill complete", "imported", totalImported, "skipped_no_type", totalSkipped)
+	logger.InfoContext(ctx, "archive backfill cycle completed", "imported", totalImported,
+		"skipped_no_type", totalSkipped, "duration_ms", time.Since(runStarted).Milliseconds())
 	if totalImported == 0 && !cfg.plan {
 		return fmt.Errorf("nothing was imported; refusing to report success on an empty corpus")
 	}
@@ -141,12 +185,15 @@ func run(ctx context.Context, logger *slog.Logger, st *store.Store, cfg runConfi
 // Installations are resolved from the damage itself rather than from a
 // registry, so a clean fleet is a no-op that reports zero instead of an error.
 func runReembed(ctx context.Context, logger *slog.Logger, st *store.Store, embeds *memory.EmbedderRegistry, registry *memory.Registry, cfg runConfig) error {
+	runStarted := time.Now()
+	logger.InfoContext(ctx, "reembed discovery started", "installation_id", cfg.installation, "plan", cfg.plan)
 	rows, err := st.Pool.Query(ctx, `
 		SELECT DISTINCT installation_id
 		FROM live_memories
 		WHERE $1 = 0 OR installation_id = $1
 		ORDER BY installation_id`, cfg.installation)
 	if err != nil {
+		logger.ErrorContext(ctx, "reembed discovery failed", "phase", "list_installations", "error", err)
 		return fmt.Errorf("listing installations with live memory: %w", err)
 	}
 	var installationIDs []int64
@@ -160,8 +207,10 @@ func runReembed(ctx context.Context, logger *slog.Logger, st *store.Store, embed
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
+		logger.ErrorContext(ctx, "reembed discovery failed", "phase", "read_installations", "error", err)
 		return fmt.Errorf("reading installations: %w", err)
 	}
+	logger.InfoContext(ctx, "reembed installation discovery completed", "installation_count", len(installationIDs))
 
 	type target struct {
 		id      int64
@@ -169,6 +218,8 @@ func runReembed(ctx context.Context, logger *slog.Logger, st *store.Store, embed
 	}
 	var targets []target
 	for _, id := range installationIDs {
+		discoveryStarted := time.Now()
+		logger.InfoContext(ctx, "reembed installation inspection started", "installation_id", id)
 		embedder, _ := embeds.GetEmbedder(ctx, id)
 		if embedder == nil {
 			if cfg.plan {
@@ -200,15 +251,20 @@ func runReembed(ctx context.Context, logger *slog.Logger, st *store.Store, embed
 				"installation_id", id, "error", err)
 		}
 		if cfg.plan && pending == 0 {
+			logger.InfoContext(ctx, "reembed installation inspection completed", "installation_id", id,
+				"pending_rows", pending, "selected", false, "duration_ms", time.Since(discoveryStarted).Milliseconds())
 			continue
 		}
 		// Execution still visits clean-looking installations. This count can
 		// come from a process-cached reader, while ReembedCurrentSpace resolves
 		// PostgreSQL's durable current space only after taking the tenant lock.
 		targets = append(targets, target{id: id, pending: pending})
+		logger.InfoContext(ctx, "reembed installation inspection completed", "installation_id", id,
+			"pending_rows", pending, "selected", true, "duration_ms", time.Since(discoveryStarted).Milliseconds())
 	}
 	if len(targets) == 0 {
-		logger.Info("reembed: nothing to do; every live memory row is in its current embedding space")
+		logger.InfoContext(ctx, "reembed discovery completed", "target_count", 0,
+			"outcome", "nothing_to_do", "duration_ms", time.Since(runStarted).Milliseconds())
 		return nil
 	}
 
@@ -216,11 +272,13 @@ func runReembed(ctx context.Context, logger *slog.Logger, st *store.Store, embed
 	for _, t := range targets {
 		total += t.pending
 	}
-	logger.Info("reembed starting", "installations", len(targets), "pending_rows", total, "plan", cfg.plan)
+	logger.InfoContext(ctx, "reembed execution started", "installations", len(targets), "pending_rows", total, "plan", cfg.plan)
 	if cfg.plan {
 		for _, t := range targets {
-			logger.Info("reembed planned", "installation_id", t.id, "pending_rows", t.pending)
+			logger.InfoContext(ctx, "reembed installation planned", "installation_id", t.id, "pending_rows", t.pending)
 		}
+		logger.InfoContext(ctx, "reembed execution completed", "plan", true, "installations", len(targets),
+			"pending_rows", total, "duration_ms", time.Since(runStarted).Milliseconds())
 		return nil
 	}
 
@@ -228,17 +286,27 @@ func runReembed(ctx context.Context, logger *slog.Logger, st *store.Store, embed
 	var failed []int64
 	for _, t := range targets {
 		if ctx.Err() != nil {
+			logger.InfoContext(context.WithoutCancel(ctx), "reembed execution stopped", "reason", ctx.Err(),
+				"repaired", repairedTotal, "failed_installations", len(failed), "duration_ms", time.Since(runStarted).Milliseconds())
 			return ctx.Err()
 		}
+		attemptStarted := time.Now()
+		logger.InfoContext(ctx, "reembed installation attempt started", "installation_id", t.id,
+			"pending_rows", t.pending, "page_size", pageSize)
 		repaired, err := registry.ReembedCurrentSpace(ctx, t.id, pageSize)
 		repairedTotal += repaired
 		if err != nil {
-			logger.Error("reembed: installation failed; continuing with the rest",
-				"installation_id", t.id, "repaired_before_failure", repaired, "error", err)
+			logger.ErrorContext(ctx, "reembed installation attempt failed",
+				"installation_id", t.id, "repaired_before_failure", repaired,
+				"duration_ms", time.Since(attemptStarted).Milliseconds(), "error", err)
 			failed = append(failed, t.id)
+		} else {
+			logger.InfoContext(ctx, "reembed installation attempt completed", "installation_id", t.id,
+				"repaired", repaired, "duration_ms", time.Since(attemptStarted).Milliseconds())
 		}
 	}
-	logger.Info("reembed complete", "repaired", repairedTotal, "failed_installations", len(failed))
+	logger.InfoContext(ctx, "reembed execution completed", "repaired", repairedTotal,
+		"failed_installations", len(failed), "duration_ms", time.Since(runStarted).Milliseconds())
 	if len(failed) > 0 {
 		return fmt.Errorf("%d of %d installation(s) failed to reembed (%v); %d rows repaired",
 			len(failed), len(targets), failed, repairedTotal)
@@ -294,6 +362,8 @@ type archivedDoc struct {
 }
 
 func backfillInstallation(ctx context.Context, logger *slog.Logger, st *store.Store, embeds *memory.EmbedderRegistry, registry *memory.Registry, installID int64, cfg runConfig) (int, int, error) {
+	started := time.Now()
+	logger.InfoContext(ctx, "archive installation import started", "installation_id", installID, "plan", cfg.plan)
 	// The archive keys on the SERVER doc_id precisely because customIds can
 	// collide across merge-corrupted documents. upsertDocs dedupes
 	// last-write-wins on customId, so any collision silently drops a document
@@ -325,10 +395,15 @@ func backfillInstallation(ctx context.Context, logger *slog.Logger, st *store.St
 
 	var imported, skipped int
 	var lastID int64
+	batchNumber := 0
 	for {
 		if ctx.Err() != nil {
 			return imported, skipped, ctx.Err()
 		}
+		batchNumber++
+		batchStarted := time.Now()
+		logger.InfoContext(ctx, "archive import batch started", "installation_id", installID,
+			"batch_number", batchNumber, "after_archive_id", lastID, "page_size", pageSize)
 		rows, err := st.Pool.Query(ctx, `
 			SELECT id, container_tag, custom_id, payload
 			FROM memory_export_archive
@@ -377,6 +452,9 @@ func backfillInstallation(ctx context.Context, logger *slog.Logger, st *store.St
 			return imported, skipped, err
 		}
 		if n == 0 {
+			logger.InfoContext(ctx, "archive import batch completed", "installation_id", installID,
+				"batch_number", batchNumber, "archive_rows", 0, "imported", 0, "outcome", "end_of_archive",
+				"duration_ms", time.Since(batchStarted).Milliseconds())
 			break
 		}
 		if len(docs) > 0 && !cfg.plan {
@@ -385,8 +463,13 @@ func backfillInstallation(ctx context.Context, logger *slog.Logger, st *store.St
 			}
 		}
 		imported += len(docs)
-		logger.Info("batch imported", "installation_id", installID, "batch", len(docs), "running_total", imported)
+		logger.InfoContext(ctx, "archive import batch completed", "installation_id", installID,
+			"batch_number", batchNumber, "archive_rows", n, "imported", len(docs),
+			"running_total", imported, "skipped_running_total", skipped, "plan", cfg.plan,
+			"duration_ms", time.Since(batchStarted).Milliseconds())
 	}
+	logger.InfoContext(ctx, "archive installation import completed", "installation_id", installID,
+		"imported", imported, "skipped_no_type", skipped, "duration_ms", time.Since(started).Milliseconds())
 	return imported, skipped, nil
 }
 

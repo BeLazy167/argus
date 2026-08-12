@@ -40,7 +40,21 @@ func RecalculateQuality(confirmed, dismissed int) float64 {
 	return (float64(confirmed) + 2.5) / (float64(confirmed) + float64(dismissed) + 5.0)
 }
 
-func (s *Store) UpsertPatternStats(ctx context.Context, stats PatternQualityStats) error {
+func (s *Store) UpsertPatternStats(ctx context.Context, stats PatternQualityStats) (storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx,
+			"UpsertPatternStats",
+		)
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish,
+
+				recovered)
+			panic(recovered)
+		}
+		storeFinish(storeErr)
+	}()
+
 	_, err := s.Pool.Exec(ctx, `
 		INSERT INTO pattern_stats (installation_id, repo_id, memory_doc_id, content_hash, category, times_matched, times_confirmed, times_dismissed, quality_score, last_matched_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
@@ -67,7 +81,21 @@ func (s *Store) UpsertPatternStats(ctx context.Context, stats PatternQualityStat
 // with neither durable identity returns an error so the enricher logs the
 // broken retrieval→resolution→stats chain instead of silently losing the hit.
 // The ON CONFLICT update keeps concurrent matches atomic.
-func (s *Store) IncrementPatternMatch(ctx context.Context, patternID int64) error {
+func (s *Store) IncrementPatternMatch(ctx context.Context, patternID int64) (storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx,
+			"IncrementPatternMatch",
+			"pattern_id", storeLogValue(patternID))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(
+				storeFinish, recovered)
+			panic(recovered)
+		}
+		storeFinish(storeErr)
+	}()
+
 	tag, err := s.Pool.Exec(ctx, `
 		INSERT INTO pattern_stats (installation_id, repo_id, memory_doc_id, content_hash, category, times_matched, quality_score, last_matched_at)
 		SELECT p.installation_id, p.repo_id, COALESCE(p.memory_custom_id, p.memory_doc_id), md5(p.content), COALESCE(p.category, ''), 1, 0.5, NOW()
@@ -95,6 +123,21 @@ func (s *Store) IncrementPatternMatch(ctx context.Context, patternID int64) erro
 // quality AFTER the update and updated=false when no stats row exists yet (a
 // match that predates stats wiring, or a pattern never seeded) — non-fatal.
 func (s *Store) RecordPatternOutcome(ctx context.Context, commentID uuid.UUID, patternID int64, confirmed bool) (quality float64, updated bool, err error) {
+	storeFinish :=
+		beginStoreOperation(ctx,
+			"RecordPatternOutcome",
+			"comment_id", storeLogValue(commentID), "pattern_id", storeLogValue(patternID), "confirmed",
+
+			storeLogValue(confirmed))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish,
+				recovered, quality, updated)
+			panic(recovered)
+		}
+		storeFinish(err, quality, updated)
+	}()
+
 	var confirmInc, dismissInc int
 	if confirmed {
 		confirmInc = 1
@@ -146,7 +189,22 @@ const CategoryIgnoreStreak = 3
 // ignored) — i.e. the team has consistently rejected the category's findings.
 // A category with fewer than CategoryIgnoreStreak recorded outcomes never
 // qualifies; a single confirmed outcome resets the streak by construction.
-func (s *Store) GetAutoSuppressedCategories(ctx context.Context, repoID int64) (map[string]bool, error) {
+func (s *Store) GetAutoSuppressedCategories(ctx context.Context, repoID int64) (storeResult0 map[string]bool, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx,
+			"GetAutoSuppressedCategories",
+			"repo_id", storeLogValue(
+				repoID))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(
+				storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	rows, err := s.Pool.Query(ctx, `
 		SELECT category FROM (
 			SELECT rc.category, co.outcome,
@@ -177,7 +235,20 @@ func (s *Store) GetAutoSuppressedCategories(ctx context.Context, repoID int64) (
 	return out, rows.Err()
 }
 
-func (s *Store) GetPatternHealthStats(ctx context.Context, installationID int64, since time.Time) (PatternHealthStats, error) {
+func (s *Store) GetPatternHealthStats(ctx context.Context, installationID int64, since time.Time) (storeResult0 PatternHealthStats, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx,
+			"GetPatternHealthStats",
+			"installation_id", storeLogValue(installationID))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr,
+			storeResult0)
+	}()
+
 	var stats PatternHealthStats
 
 	// Patterns learned in the window
@@ -225,7 +296,22 @@ func (s *Store) GetPatternHealthStats(ctx context.Context, installationID int64,
 
 // DecayStalePatterns deletes pattern_stats rows where last_matched_at is older than staleAfter
 // and quality_score is below minQuality. Returns count of deleted rows.
-func (s *Store) DecayStalePatterns(ctx context.Context, installationID int64, staleAfter time.Duration, minQuality float64) (int, error) {
+func (s *Store) DecayStalePatterns(ctx context.Context, installationID int64, staleAfter time.Duration, minQuality float64) (storeResult0 int, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx,
+			"DecayStalePatterns",
+			"installation_id", storeLogValue(installationID), "stale_after",
+			storeLogValue(staleAfter),
+			"min_quality", storeLogValue(minQuality))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(
+				storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	cutoff := time.Now().Add(-staleAfter)
 	tag, err := s.Pool.Exec(ctx, `
 		DELETE FROM pattern_stats
@@ -239,7 +325,22 @@ func (s *Store) DecayStalePatterns(ctx context.Context, installationID int64, st
 	return int(tag.RowsAffected()), nil
 }
 
-func (s *Store) GetLowQualityPatterns(ctx context.Context, installationID int64, maxQuality float64, limit int) ([]PatternQualityStats, error) {
+func (s *Store) GetLowQualityPatterns(ctx context.Context, installationID int64, maxQuality float64, limit int) (storeResult0 []PatternQualityStats, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx,
+			"GetLowQualityPatterns",
+			"installation_id", storeLogValue(installationID), "max_quality",
+			storeLogValue(maxQuality), "limit", storeLogValue(limit),
+		)
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish,
+				recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	rows, err := s.q.GetLowQualityPatterns(ctx, db.GetLowQualityPatternsParams{
 		InstallationID: installationID,
 		QualityScore:   maxQuality,

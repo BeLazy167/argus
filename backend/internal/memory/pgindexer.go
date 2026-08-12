@@ -8,7 +8,9 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/BeLazy167/argus/backend/internal/obs"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -442,6 +444,29 @@ type pgBatchSender interface {
 }
 
 func (idx *PGIndexer) writeDocs(ctx context.Context, docs []Doc, preserveExisting bool) error {
+	operationID := obs.NewLogID()
+	started := time.Now()
+	if payload, err := json.Marshal(docs); err == nil {
+		obs.LogPayload(ctx, idx.logger, "memory index documents", operationID, "input", "application/json", payload)
+	}
+	idx.logger.InfoContext(ctx, "memory index batch started",
+		"operation_id", operationID, "installation_id", idx.installationID,
+		"review_id", idx.reviewID, "document_count", len(docs), "preserve_existing", preserveExisting)
+	err := idx.writeDocsInner(ctx, docs, preserveExisting)
+	level := slog.LevelInfo
+	message := "memory index batch completed"
+	if err != nil {
+		level = slog.LevelError
+		message = "memory index batch failed"
+	}
+	idx.logger.Log(ctx, level, message,
+		"operation_id", operationID, "installation_id", idx.installationID,
+		"review_id", idx.reviewID, "document_count", len(docs),
+		"preserve_existing", preserveExisting, "duration_ms", time.Since(started).Milliseconds(), "error", err)
+	return err
+}
+
+func (idx *PGIndexer) writeDocsInner(ctx context.Context, docs []Doc, preserveExisting bool) error {
 	kept := make([]Doc, 0, len(docs))
 	seen := make(map[string]int, len(docs))
 	skippedEmpty := 0
@@ -471,6 +496,13 @@ func (idx *PGIndexer) writeDocs(ctx context.Context, docs []Doc, preserveExistin
 	// Probe before reserving a connection for the tenant lock. The catalog
 	// probe is process-wide and unrelated to embedding-space authority.
 	pgctx := usesPGContextVector(ctx, idx.pool, idx.logger)
+	vectorEngine := "pgvector"
+	if pgctx {
+		vectorEngine = "pgcontext"
+	}
+	idx.logger.InfoContext(ctx, "memory index vector engine selected",
+		"installation_id", idx.installationID, "engine", vectorEngine,
+		"document_count", len(kept), "preserve_existing", preserveExisting)
 	if idx.resolveWriteEmbedder == nil {
 		return idx.writeKeptDocs(ctx, kept, preserveExisting, idx, idx.pool, pgctx)
 	}

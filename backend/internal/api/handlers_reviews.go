@@ -5,12 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/BeLazy167/argus/backend/internal/admission"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/BeLazy167/argus/backend/internal/admission"
 	"github.com/BeLazy167/argus/backend/internal/obs"
 	"github.com/BeLazy167/argus/backend/internal/util"
 	"github.com/go-chi/chi/v5"
@@ -23,12 +24,14 @@ import (
 )
 
 func (s *Server) listAllReviews(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.listAllReviews")
+	defer op.Finish(w)
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 
 	reviews, err := s.store.ListAllReviewsScoped(r.Context(), getInstallationIDs(r.Context()), limit, offset)
 	if err != nil {
-		s.logger.Error("list all reviews", "error", err)
+		s.logger.ErrorContext(r.Context(), "list all reviews", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
@@ -36,6 +39,8 @@ func (s *Server) listAllReviews(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listReviews(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.listReviews")
+	defer op.Finish(w)
 	repoID, err := strconv.ParseInt(chi.URLParam(r, "repoID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo id"})
@@ -46,7 +51,7 @@ func (s *Server) listReviews(w http.ResponseWriter, r *http.Request) {
 
 	reviews, err := s.store.ListReviewsScoped(r.Context(), repoID, getInstallationIDs(r.Context()), limit, offset)
 	if err != nil {
-		s.logger.Error("list reviews", "error", err)
+		s.logger.ErrorContext(r.Context(), "list reviews", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
@@ -54,6 +59,8 @@ func (s *Server) listReviews(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getReview(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.getReview")
+	defer op.Finish(w)
 	id, err := uuid.Parse(chi.URLParam(r, "reviewID"))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid review id"})
@@ -76,13 +83,13 @@ func (s *Server) getReview(w http.ResponseWriter, r *http.Request) {
 	}
 	comments, err := s.store.GetReviewComments(r.Context(), id)
 	if err != nil {
-		s.logger.Error("fetching review comments", "error", err, "review_id", id)
+		s.logger.ErrorContext(r.Context(), "fetching review comments", "error", err, "review_id", id)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load review comments"})
 		return
 	}
 	minorNotes, err := s.store.GetReviewMinorNotes(r.Context(), id)
 	if err != nil {
-		s.logger.Error("fetching review minor notes", "error", err, "review_id", id)
+		s.logger.ErrorContext(r.Context(), "fetching review minor notes", "error", err, "review_id", id)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load review minor notes"})
 		return
 	}
@@ -92,11 +99,11 @@ func (s *Server) getReview(w http.ResponseWriter, r *http.Request) {
 	// to an empty timeline rather than failing the whole detail view.
 	history, err := s.store.ListPRReviewSummaries(r.Context(), review.RepoID, review.PRNumber)
 	if err != nil {
-		s.logger.Warn("fetching PR review history", "error", err, "review_id", id)
+		s.logger.WarnContext(r.Context(), "fetching PR review history", "error", err, "review_id", id)
 	}
 	autoResolves, err := s.store.ListPRAutoResolveEvents(r.Context(), review.RepoID, review.PRNumber)
 	if err != nil {
-		s.logger.Warn("fetching PR auto-resolve events", "error", err, "review_id", id)
+		s.logger.WarnContext(r.Context(), "fetching PR auto-resolve events", "error", err, "review_id", id)
 	}
 
 	// What the review learned. Auxiliary like the two sidecars above: a failure
@@ -104,11 +111,11 @@ func (s *Server) getReview(w http.ResponseWriter, r *http.Request) {
 	// review view. Both reads are scoped by the repo's installation.
 	memories, err := s.store.ListReviewMemories(r.Context(), repo.InstallationID, id, 0)
 	if err != nil {
-		s.logger.Warn("fetching review memories", "error", err, "review_id", id)
+		s.logger.WarnContext(r.Context(), "fetching review memories", "error", err, "review_id", id)
 	}
 	memoryCounts, err := s.store.CountReviewMemoriesByType(r.Context(), repo.InstallationID, id)
 	if err != nil {
-		s.logger.Warn("counting review memories", "error", err, "review_id", id)
+		s.logger.WarnContext(r.Context(), "counting review memories", "error", err, "review_id", id)
 	}
 
 	writeJSON(w, http.StatusOK, ReviewDetailResponse{
@@ -125,6 +132,8 @@ func (s *Server) getReview(w http.ResponseWriter, r *http.Request) {
 // exportReviewPublic handles the public export endpoint with HMAC signature verification.
 // Falls through to the same export logic as the auth-protected route.
 func (s *Server) exportReviewPublic(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.exportReviewPublic")
+	defer op.Finish(w)
 	reviewID := chi.URLParam(r, "reviewID")
 	sig := r.URL.Query().Get("sig")
 	exp := r.URL.Query().Get("exp")
@@ -137,6 +146,8 @@ func (s *Server) exportReviewPublic(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) exportReview(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.exportReview")
+	defer op.Finish(w)
 	id, err := uuid.Parse(chi.URLParam(r, "reviewID"))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid review id"})
@@ -239,7 +250,7 @@ func (s *Server) exportReview(w http.ResponseWriter, r *http.Request) {
 	// These are comments the LLM generated but were filtered by dedup/scoring.
 	rawPayload, perr := s.store.GetAllFileReviewsForReview(r.Context(), id)
 	if perr != nil {
-		s.logger.Warn("export: load unfiltered payload failed", "review_id", id, "error", perr)
+		s.logger.WarnContext(r.Context(), "export: load unfiltered payload failed", "review_id", id, "error", perr)
 	} else if len(rawPayload) > 0 {
 		// rawPayload is json.RawMessage (via sqlc's jsonb → RawMessage override).
 		// A null JSONB path result scans as literal bytes "null" or zero length.
@@ -261,7 +272,7 @@ func (s *Server) exportReview(w http.ResponseWriter, r *http.Request) {
 				} `json:"Comments"`
 			}
 			if err := json.Unmarshal(rawPayload, &allFileReviews); err != nil {
-				s.logger.Warn("export: unfiltered payload unmarshal failed", "review_id", id, "error", err)
+				s.logger.WarnContext(r.Context(), "export: unfiltered payload unmarshal failed", "review_id", id, "error", err)
 			} else {
 				for _, fr := range allFileReviews {
 					for _, c := range fr.Comments {
@@ -365,7 +376,7 @@ func (s *Server) exportReview(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if _, err := w.Write([]byte(sb.String())); err != nil {
-			s.logger.Warn("export write failed", "error", err)
+			s.logger.WarnContext(r.Context(), "export write failed", "error", err)
 		}
 
 	default: // json
@@ -383,12 +394,14 @@ func (s *Server) exportReview(w http.ResponseWriter, r *http.Request) {
 			MinorNotes:    minorNotes,
 		}
 		if err := json.NewEncoder(w).Encode(export); err != nil {
-			s.logger.Warn("export encode failed", "error", err)
+			s.logger.WarnContext(r.Context(), "export encode failed", "error", err)
 		}
 	}
 }
 
 func (s *Server) retryReview(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.retryReview")
+	defer op.Finish(w)
 	id, err := uuid.Parse(chi.URLParam(r, "reviewID"))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid review id"})
@@ -425,7 +438,7 @@ func (s *Server) retryReview(w http.ResponseWriter, r *http.Request) {
 		// Never expose GitHub, marker, or persistence details. A failed/incomplete
 		// lookup and a still-recent claim both mean the same safe user action: wait
 		// and retry. The detailed reason remains in structured server logs.
-		s.logger.Warn("retry: review post reconciliation deferred", "error", reconcileErr, "review_id", id, "repo", repo.FullName)
+		s.logger.WarnContext(r.Context(), "retry: review post reconciliation deferred", "error", reconcileErr, "review_id", id, "repo", repo.FullName)
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "review post reconciliation is still pending; retry later"})
 		return
 	}
@@ -445,7 +458,7 @@ func (s *Server) retryReview(w http.ResponseWriter, r *http.Request) {
 		retrier = s.orchestrator
 	}
 	if retrier == nil {
-		s.logger.Error("retry precheck unavailable", "review_id", id)
+		s.logger.ErrorContext(r.Context(), "retry precheck unavailable", "review_id", id)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "retry failed"})
 		return
 	}
@@ -454,7 +467,7 @@ func (s *Server) retryReview(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 			return
 		}
-		s.logger.Error("retry precheck failed", "error", err, "review_id", id)
+		s.logger.ErrorContext(r.Context(), "retry precheck failed", "error", err, "review_id", id)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "retry failed"})
 		return
 	}
@@ -474,7 +487,7 @@ func (s *Server) retryReview(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		// Without this the whole name becomes the org rate-limit bucket key,
 		// silently mixing one repo's budget with an org that does not exist.
-		s.logger.Error("retry: malformed repo full name", "repo", repo.FullName, "review_id", id)
+		s.logger.ErrorContext(r.Context(), "retry: malformed repo full name", "repo", repo.FullName, "review_id", id)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "retry failed"})
 		return
 	}
@@ -483,7 +496,7 @@ func (s *Server) retryReview(w http.ResponseWriter, r *http.Request) {
 		RepoFullName: repo.FullName,
 		OrgLogin:     orgLogin,
 	}); !verdict.Allowed() {
-		s.logger.Info("retry refused", "review_id", id, "repo", repo.FullName, "reason", verdict.Reason)
+		s.logger.InfoContext(r.Context(), "retry refused", "review_id", id, "repo", repo.FullName, "reason", verdict.Reason)
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": verdict.Reason})
 		return
 	}
@@ -521,7 +534,7 @@ func (s *Server) retryReview(w http.ResponseWriter, r *http.Request) {
 			// already marked it cancelled, so it isn't a failure to log. The
 			// rollback + EventError for real failures are owned by the launcher.
 			if err != nil && !errors.Is(err, context.Canceled) {
-				s.logger.Error("retry review failed", "error", err, "review_id", id)
+				s.logger.ErrorContext(r.Context(), "retry review failed", "error", err, "review_id", id)
 			}
 		},
 	})
@@ -531,7 +544,7 @@ func (s *Server) retryReview(w http.ResponseWriter, r *http.Request) {
 	}
 	if launchErr != nil {
 		// BeforeSpawn (mark-pending) failed — slot already released by the launcher.
-		s.logger.Error("retry: mark pending failed", "error", launchErr, "review_id", id)
+		s.logger.ErrorContext(r.Context(), "retry: mark pending failed", "error", launchErr, "review_id", id)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "update failed"})
 		return
 	}
@@ -540,6 +553,8 @@ func (s *Server) retryReview(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) cancelReview(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.cancelReview")
+	defer op.Finish(w)
 	id, err := uuid.Parse(chi.URLParam(r, "reviewID"))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid review id"})
@@ -564,7 +579,7 @@ func (s *Server) cancelReview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.inflight.Cancel(repo.FullName, review.PRNumber) {
-		s.logger.Info("cancel requested", "review_id", id, "repo", repo.FullName, "pr", review.PRNumber)
+		s.logger.InfoContext(r.Context(), "cancel requested", "review_id", id, "repo", repo.FullName, "pr", review.PRNumber)
 		writeJSON(w, http.StatusAccepted, map[string]string{"status": "cancelling", "review_id": id.String()})
 		return
 	}
@@ -573,11 +588,11 @@ func (s *Server) cancelReview(w http.ResponseWriter, r *http.Request) {
 	// (and its latest run) cancelled directly so the UI leaves pending/in_progress
 	// limbo and the recovery sweeper won't resurrect the orphaned run.
 	if err := s.orchestrator.CancelStranded(r.Context(), id); err != nil {
-		s.logger.Error("stranded cancel failed", "error", err, "review_id", id)
+		s.logger.ErrorContext(r.Context(), "stranded cancel failed", "error", err, "review_id", id)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "cancel failed"})
 		return
 	}
-	s.logger.Info("stranded cancel: marked review cancelled", "review_id", id, "repo", repo.FullName, "pr", review.PRNumber)
+	s.logger.InfoContext(r.Context(), "stranded cancel: marked review cancelled", "review_id", id, "repo", repo.FullName, "pr", review.PRNumber)
 	// The pipeline's own terminal hook cannot fire here: the run is on another
 	// machine (or gone), which is why this branch exists at all. Rewrite the
 	// PR's progress comment directly, or it keeps advertising "watch live" for
@@ -588,7 +603,21 @@ func (s *Server) cancelReview(w http.ResponseWriter, r *http.Request) {
 
 // --- WebSocket Stream ---
 
+func writeWebSocketJSON(ctx context.Context, conn *websocket.Conn, value any) error {
+	operationID := obs.NewLogID()
+	if payload, err := json.Marshal(value); err == nil {
+		obs.LogPayload(ctx, slog.Default(), "websocket frame", operationID, "outbound", "application/json", payload)
+	}
+	started := time.Now()
+	err := wsjson.Write(ctx, conn, value)
+	slog.DebugContext(ctx, "websocket frame write completed", "operation_id", operationID,
+		"duration_ms", time.Since(started).Milliseconds(), "error", err)
+	return err
+}
+
 func (s *Server) streamReviewWS(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.streamReviewWS")
+	defer op.Finish(w)
 	// Auth via query params (browser WebSocket API can't set headers)
 	token := r.URL.Query().Get("token")
 	installationHint := r.URL.Query().Get("installation_id")
@@ -627,10 +656,19 @@ func (s *Server) streamReviewWS(w http.ResponseWriter, r *http.Request) {
 		InsecureSkipVerify: true, // CORS handled by chi middleware
 	})
 	if err != nil {
-		s.logger.Warn("websocket accept failed", "error", err)
+		s.logger.WarnContext(r.Context(), "websocket accept failed", "error", err)
 		return
 	}
-	defer conn.CloseNow()
+	wsOperationID := obs.NewLogID()
+	wsStarted := time.Now()
+	s.logger.InfoContext(r.Context(), "websocket connection accepted", "operation_id", wsOperationID,
+		"review_id", id, "trace_id", obs.TraceID(r.Context()))
+	defer func() {
+		conn.CloseNow()
+		s.logger.InfoContext(context.WithoutCancel(r.Context()), "websocket connection closed",
+			"operation_id", wsOperationID, "review_id", id,
+			"duration_ms", time.Since(wsStarted).Milliseconds())
+	}()
 
 	ctx := conn.CloseRead(r.Context())
 
@@ -659,7 +697,7 @@ func (s *Server) streamReviewWS(w http.ResponseWriter, r *http.Request) {
 		}
 		return current.Status, nil
 	}); err != nil {
-		s.logger.Error("review stream", "error", err, "review_id", id)
+		s.logger.ErrorContext(r.Context(), "review stream", "error", err, "review_id", id)
 	}
 }
 
@@ -706,7 +744,11 @@ func writeReviewStream(
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if err := conn.Ping(ctx); err != nil {
+				pingStarted := time.Now()
+				err := conn.Ping(ctx)
+				slog.DebugContext(ctx, "websocket ping completed", "review_id", reviewID,
+					"duration_ms", time.Since(pingStarted).Milliseconds(), "error", err)
+				if err != nil {
 					return
 				}
 			}
@@ -731,7 +773,7 @@ func writeReviewStream(
 		if replayHasMore && isTerminalReviewEvent(evt.Type) {
 			continue
 		}
-		if err := wsjson.Write(ctx, conn, evt); err != nil {
+		if err := writeWebSocketJSON(ctx, conn, evt); err != nil {
 			return nil
 		}
 		terminalReplayed = terminalReplayed || isTerminalReviewEvent(evt.Type)
@@ -790,7 +832,7 @@ func streamLiveReviewEventsAfterCloseReason(
 				_ = conn.Close(status, message)
 				return
 			}
-			if err := wsjson.Write(ctx, conn, evt); err != nil {
+			if err := writeWebSocketJSON(ctx, conn, evt); err != nil {
 				return
 			}
 			if isTerminalReviewEvent(evt.Type) {
@@ -820,7 +862,7 @@ func writeTerminalReviewEvent(ctx context.Context, conn *websocket.Conn, status 
 	if status == "cancelled" {
 		evtType = pipeline.EventCancelled
 	}
-	_ = wsjson.Write(ctx, conn, pipeline.Event{
+	_ = writeWebSocketJSON(ctx, conn, pipeline.Event{
 		Type:      evtType,
 		Timestamp: time.Now(),
 		Data:      mustMarshal(map[string]string{"status": status}),

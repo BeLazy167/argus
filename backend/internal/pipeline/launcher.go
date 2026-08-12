@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime/debug"
+	"time"
 
 	"github.com/BeLazy167/argus/backend/internal/inflight"
 	"github.com/BeLazy167/argus/backend/internal/obs"
@@ -113,23 +114,44 @@ func NewLauncher(registry *inflight.Registry, eventBus *EventBus, st launcherSto
 // goroutine owns slot release, cancel teardown, topic close, rollback, OnDone,
 // Cleanup, and panic recovery.
 func (l *Launcher) Launch(spec LaunchSpec) error {
+	logger := l.logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.InfoContext(spec.BaseCtx, "pipeline launch requested",
+		"event", "pipeline.launch.requested", "repo", spec.Repo, "pr_number", spec.PR,
+		"review_id", reviewIDString(spec.ReviewID), "attempt_generation", attemptGenerationValue(spec.AttemptGeneration))
 	slot, ok := l.registry.Begin(spec.Repo, spec.PR)
 	if !ok {
+		logger.WarnContext(spec.BaseCtx, "pipeline launch rejected: review already in flight",
+			"event", "pipeline.launch.rejected", "reason", "in_flight", "repo", spec.Repo,
+			"pr_number", spec.PR, "review_id", reviewIDString(spec.ReviewID))
 		return ErrInFlight
 	}
+	logger.InfoContext(spec.BaseCtx, "pipeline in-flight slot acquired",
+		"event", "pipeline.launch.slot_acquired", "repo", spec.Repo, "pr_number", spec.PR,
+		"review_id", reviewIDString(spec.ReviewID))
 
 	ctx, cancel := context.WithCancel(spec.BaseCtx)
 
 	// Synchronous post-acquire prep. On failure, undo the acquire and surface the
 	// error to the caller WITHOUT spawning — nothing to roll back, nothing ran.
 	if spec.BeforeSpawn != nil {
+		logger.InfoContext(ctx, "pipeline pre-launch hook started", "event", "pipeline.launch.before_spawn_started",
+			"repo", spec.Repo, "pr_number", spec.PR, "review_id", reviewIDString(spec.ReviewID))
 		if err := spec.BeforeSpawn(ctx); err != nil {
+			logger.ErrorContext(ctx, "pipeline pre-launch hook failed", "event", "pipeline.launch.before_spawn_failed",
+				"repo", spec.Repo, "pr_number", spec.PR, "review_id", reviewIDString(spec.ReviewID), "error", err)
 			cancel()
 			slot.Release()
 			return err
 		}
+		logger.InfoContext(ctx, "pipeline pre-launch hook completed", "event", "pipeline.launch.before_spawn_completed",
+			"repo", spec.Repo, "pr_number", spec.PR, "review_id", reviewIDString(spec.ReviewID))
 	}
 	if err := validateAttemptGeneration(spec); err != nil {
+		logger.ErrorContext(ctx, "pipeline launch validation failed", "event", "pipeline.launch.validation_failed",
+			"repo", spec.Repo, "pr_number", spec.PR, "review_id", reviewIDString(spec.ReviewID), "error", err)
 		cancel()
 		slot.Release()
 		return err
@@ -138,12 +160,20 @@ func (l *Launcher) Launch(spec LaunchSpec) error {
 	// Pair the slot with its cancel func — the invariant the two old sync.Maps
 	// couldn't enforce (and the checkbox path violated).
 	slot.BindCancel(cancel)
+	logger.InfoContext(ctx, "pipeline cancellation registered", "event", "pipeline.launch.cancel_bound",
+		"repo", spec.Repo, "pr_number", spec.PR, "review_id", reviewIDString(spec.ReviewID))
 
 	if spec.ReviewID != nil && l.eventBus != nil {
 		l.eventBus.OpenTopic(*spec.ReviewID)
+		logger.InfoContext(ctx, "pipeline event topic opened", "event", "pipeline.launch.topic_opened",
+			"review_id", spec.ReviewID.String(), "attempt_generation", attemptGenerationValue(spec.AttemptGeneration))
 	}
 
 	go func() {
+		startedAt := time.Now()
+		logger.InfoContext(ctx, "pipeline launch goroutine started", "event", "pipeline.launch.started",
+			"repo", spec.Repo, "pr_number", spec.PR, "review_id", reviewIDString(spec.ReviewID),
+			"attempt_generation", attemptGenerationValue(spec.AttemptGeneration))
 		defer func() {
 			// Runs on every exit (normal, error, recovered panic). LIFO: declared
 			// first → runs last, after runGuarded turned any Run panic into a
@@ -157,15 +187,27 @@ func (l *Launcher) Launch(spec LaunchSpec) error {
 			}
 			if spec.ReviewID != nil && l.eventBus != nil {
 				l.eventBus.CloseTopic(*spec.ReviewID)
+				logger.InfoContext(context.WithoutCancel(ctx), "pipeline event topic closed", "event", "pipeline.launch.topic_closed",
+					"review_id", spec.ReviewID.String(), "attempt_generation", attemptGenerationValue(spec.AttemptGeneration))
 			}
 			if spec.Cleanup != nil {
 				spec.Cleanup()
 			}
 			cancel()
 			slot.Release()
+			logger.InfoContext(context.WithoutCancel(ctx), "pipeline launch goroutine finished", "event", "pipeline.launch.finished",
+				"repo", spec.Repo, "pr_number", spec.PR, "review_id", reviewIDString(spec.ReviewID),
+				"attempt_generation", attemptGenerationValue(spec.AttemptGeneration), "duration_ms", time.Since(startedAt).Milliseconds())
 		}()
 
 		err := l.runGuarded(ctx, spec)
+		if err != nil {
+			logger.ErrorContext(ctx, "pipeline launch execution ended with error", "event", "pipeline.launch.run_failed",
+				"repo", spec.Repo, "pr_number", spec.PR, "review_id", reviewIDString(spec.ReviewID), "error", err)
+		} else {
+			logger.InfoContext(ctx, "pipeline launch execution completed", "event", "pipeline.launch.run_completed",
+				"repo", spec.Repo, "pr_number", spec.PR, "review_id", reviewIDString(spec.ReviewID))
+		}
 		// Roll a failed retry out of pending/in_progress limbo — but never on a
 		// Stop (context.Canceled): the state machine already wrote the cancelled
 		// status, and the original retry path guarded its rollback the same way.
@@ -175,11 +217,32 @@ func (l *Launcher) Launch(spec LaunchSpec) error {
 		// OnDone gets the raw result so each path replicates its original
 		// branching (a Stop is a no-op for some paths, failure feedback for others).
 		if spec.OnDone != nil {
+			logger.InfoContext(ctx, "pipeline completion hook started", "event", "pipeline.launch.on_done_started",
+				"repo", spec.Repo, "pr_number", spec.PR, "review_id", reviewIDString(spec.ReviewID))
 			spec.OnDone(err)
+			logger.InfoContext(ctx, "pipeline completion hook finished", "event", "pipeline.launch.on_done_finished",
+				"repo", spec.Repo, "pr_number", spec.PR, "review_id", reviewIDString(spec.ReviewID))
 		}
 	}()
 
+	logger.InfoContext(ctx, "pipeline launch accepted", "event", "pipeline.launch.accepted",
+		"repo", spec.Repo, "pr_number", spec.PR, "review_id", reviewIDString(spec.ReviewID),
+		"attempt_generation", attemptGenerationValue(spec.AttemptGeneration))
 	return nil
+}
+
+func reviewIDString(id *uuid.UUID) string {
+	if id == nil {
+		return ""
+	}
+	return id.String()
+}
+
+func attemptGenerationValue(generation *int) int {
+	if generation == nil {
+		return 0
+	}
+	return *generation
 }
 
 func validateAttemptGeneration(spec LaunchSpec) error {
@@ -218,6 +281,8 @@ func (l *Launcher) runGuarded(ctx context.Context, spec LaunchSpec) (err error) 
 // there is no external row for the Launcher to touch.
 func (l *Launcher) rollback(ctx context.Context, spec LaunchSpec, cause error) {
 	if spec.ReviewID == nil {
+		l.logger.DebugContext(ctx, "pipeline rollback skipped for launch without review id",
+			"event", "pipeline.launch.rollback_skipped", "reason", "review_id_unavailable", "repo", spec.Repo, "pr_number", spec.PR)
 		return
 	}
 	id := *spec.ReviewID
@@ -229,7 +294,13 @@ func (l *Launcher) rollback(ctx context.Context, spec LaunchSpec, cause error) {
 		"failed", cause.Error(), nil, []string{"pending", "in_progress"},
 	)
 	if uerr != nil {
-		l.logger.Error("launch: failed to roll back review status", "error", uerr, "review_id", id)
+		l.logger.ErrorContext(context.WithoutCancel(ctx), "launch: failed to roll back review status",
+			"event", "pipeline.launch.rollback_failed", "error", uerr, "review_id", id,
+			"attempt_generation", *spec.AttemptGeneration)
+	} else {
+		l.logger.InfoContext(context.WithoutCancel(ctx), "pipeline launch rollback evaluated",
+			"event", "pipeline.launch.rollback_evaluated", "review_id", id,
+			"attempt_generation", *spec.AttemptGeneration, "status", "failed", "applied", applied)
 	}
 	if applied && l.eventBus != nil {
 		l.eventBus.PublishForAttempt(id, *spec.AttemptGeneration, EventError, map[string]string{"error": cause.Error()})

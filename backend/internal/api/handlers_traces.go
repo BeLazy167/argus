@@ -8,6 +8,8 @@ import (
 )
 
 func (s *Server) listTraces(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.listTraces")
+	defer op.Finish(w)
 	repoID, err := strconv.ParseInt(chi.URLParam(r, "repoID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo id"})
@@ -27,7 +29,7 @@ func (s *Server) listTraces(w http.ResponseWriter, r *http.Request) {
 	if filePath != "" {
 		traces, err := s.store.ListTracesForFiles(r.Context(), repoID, []string{filePath}, limit)
 		if err != nil {
-			s.logger.Error("list traces for file", "error", err)
+			s.logger.ErrorContext(r.Context(), "list traces for file", "error", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 			return
 		}
@@ -37,7 +39,7 @@ func (s *Server) listTraces(w http.ResponseWriter, r *http.Request) {
 
 	traces, err := s.store.ListTracesForRepo(r.Context(), repoID, limit)
 	if err != nil {
-		s.logger.Error("list traces for repo", "error", err)
+		s.logger.ErrorContext(r.Context(), "list traces for repo", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
@@ -45,6 +47,8 @@ func (s *Server) listTraces(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getRepoRisk(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.getRepoRisk")
+	defer op.Finish(w)
 	repoID, err := strconv.ParseInt(chi.URLParam(r, "repoID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo id"})
@@ -62,7 +66,7 @@ func (s *Server) getRepoRisk(w http.ResponseWriter, r *http.Request) {
 
 	hotFiles, err := s.store.GetHotFiles(r.Context(), repoID, limit)
 	if err != nil {
-		s.logger.Error("get hot files", "error", err)
+		s.logger.ErrorContext(r.Context(), "get hot files", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}

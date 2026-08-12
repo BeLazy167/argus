@@ -1,5 +1,7 @@
 package admission
 
+import "log/slog"
+
 // AutoRun decides the pull-request webhook path, where nobody asked for the
 // review and the repo's own setting is the authority.
 //
@@ -19,14 +21,18 @@ package admission
 // explicit reports whether anything was stored at all. Without it "stored
 // false" and "unset" are the same value, and the override cannot be removed.
 func AutoRun(selfHosted, enabled, explicit bool) Verdict {
+	verdict := Signal("auto-review is off for this repo")
+	source := "hosted_default"
 	if explicit {
+		source = "repo_setting"
 		if enabled {
-			return Allow()
+			verdict = Allow()
 		}
-		return Signal("auto-review is off for this repo")
+	} else if selfHosted {
+		source = "self_hosted_default"
+		verdict = Allow()
 	}
-	if selfHosted {
-		return Allow()
-	}
-	return Signal("auto-review is off for this repo")
+	slog.Info("admission auto-run decided", "outcome", verdict.Outcome, "source", source,
+		"self_hosted", selfHosted, "enabled", enabled, "explicit", explicit)
+	return verdict
 }

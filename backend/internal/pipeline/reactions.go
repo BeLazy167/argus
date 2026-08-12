@@ -116,7 +116,14 @@ func newReactionPermissionCache() *reactionPermissionCache {
 // HandleCommentReactions fetches reactions for a PR review comment, determines
 // the dominant authorized signal, and indexes it as a feedback pattern.
 func (ra *ReactionAnalyzer) HandleCommentReactions(ctx context.Context, event ghpkg.CommentEvent) error {
-	return ra.handleCommentReactions(ctx, event, newReactionPermissionCache())
+	ra.logger.InfoContext(ctx, "reaction analysis started", "event", "pipeline.reaction.analysis_started", "repo", event.RepoFullName, "pr_number", event.PRNumber, "github_comment_id", event.CommentID)
+	err := ra.handleCommentReactions(ctx, event, newReactionPermissionCache())
+	if err != nil {
+		ra.logger.ErrorContext(ctx, "reaction analysis failed", "event", "pipeline.reaction.analysis_failed", "repo", event.RepoFullName, "pr_number", event.PRNumber, "github_comment_id", event.CommentID, "error", err)
+	} else {
+		ra.logger.InfoContext(ctx, "reaction analysis completed", "event", "pipeline.reaction.analysis_completed", "repo", event.RepoFullName, "pr_number", event.PRNumber, "github_comment_id", event.CommentID)
+	}
+	return err
 }
 
 func (ra *ReactionAnalyzer) handleCommentReactions(ctx context.Context, event ghpkg.CommentEvent, permissions *reactionPermissionCache) error {
@@ -138,6 +145,7 @@ func (ra *ReactionAnalyzer) handleCommentReactions(ctx context.Context, event gh
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
+	ra.logger.DebugContext(ctx, "GitHub comment reaction fetch started", "event", "pipeline.reaction.fetch_started", "github_comment_id", event.CommentID)
 	reactions, err := ra.ghClient.ListCommentReactions(ctx, event.InstallationID, owner, repo, event.CommentID)
 	if err != nil {
 		if !errors.Is(err, ghpkg.ErrReviewCommentNotFound) {
@@ -155,6 +163,7 @@ func (ra *ReactionAnalyzer) handleCommentReactions(ctx context.Context, event gh
 	// so only the effective repository permission of its actual actor can make
 	// it authoritative. Cache verdicts by case-insensitive login for the whole
 	// sweep and cap unique lookups so a reaction swarm cannot amplify API calls.
+	ra.logger.InfoContext(ctx, "GitHub comment reactions fetched", "event", "pipeline.reaction.fetched", "github_comment_id", event.CommentID, "reaction_count", len(reactions))
 	filtered, signalUsable, err := ra.authorizedSignalReactions(ctx, event, owner, repo, reactions, permissions)
 	if err != nil {
 		return fmt.Errorf("authorizing reactors for comment %d: %w", event.CommentID, err)
@@ -171,8 +180,8 @@ func (ra *ReactionAnalyzer) handleCommentReactions(ctx context.Context, event gh
 
 	signal := TallyReactions(filtered)
 	action := signal.DominantSignal()
-	ra.logger.Info("reaction signal",
-		"action", action,
+	ra.logger.InfoContext(ctx, "reaction signal",
+		"event", "pipeline.reaction.signal_evaluated", "action", action,
 		"confirmed", signal.Confirmed,
 		"dismissed", signal.Dismissed,
 		"comment_id", event.CommentID,
@@ -180,10 +189,12 @@ func (ra *ReactionAnalyzer) handleCommentReactions(ctx context.Context, event gh
 	)
 
 	if action != "" {
+		ra.logger.InfoContext(ctx, "reaction outcome mutation started", "event", "pipeline.reaction.outcome_started", "finding_id", comment.ID, "action", action)
 		inserted, recordErr := ra.store.RecordCommentOutcome(ctx, comment.ID, action)
 		if recordErr != nil {
 			ra.logger.Error("reaction: recording outcome", "error", recordErr, "outcome", action)
 		}
+		ra.logger.InfoContext(ctx, "reaction outcome mutation evaluated", "event", "pipeline.reaction.outcome_recorded", "finding_id", comment.ID, "action", action, "applied", inserted)
 		if inserted {
 			recordPatternOutcome(ctx, ra.store, ra.logger, comment.ID, comment.MatchedPatternID, action)
 		}
@@ -235,10 +246,12 @@ func (ra *ReactionAnalyzer) handleCommentReactions(ctx context.Context, event gh
 			fb.ChangeKind = kind
 		}
 	}
+	ra.logger.InfoContext(ctx, "reaction feedback reconciliation started", "event", "pipeline.reaction.memory_started", "finding_id", comment.ID, "action", action, "repo", event.RepoFullName, "pr_number", event.PRNumber)
 	if err := indexer.ReconcileFeedbackSignal(ctx, owner, repo, fb); err != nil {
 		return fmt.Errorf("reconciling feedback for comment %d: %w", event.CommentID, err)
 	}
 
+	ra.logger.InfoContext(ctx, "reaction feedback reconciled", "event", "pipeline.reaction.memory_reconciled", "finding_id", comment.ID, "action", action)
 	return nil
 }
 
@@ -324,6 +337,9 @@ func (ra *ReactionAnalyzer) authorizedSignalReactions(
 // Systemic auth, permission, and rate-limit failures abort immediately to avoid
 // an N-retry storm.
 func (ra *ReactionAnalyzer) SweepPRReactions(ctx context.Context, installationID int64, repoFullName string, prNumber int) error {
+	if ra != nil && ra.logger != nil {
+		ra.logger.InfoContext(ctx, "reaction sweep started", "event", "pipeline.reaction.sweep_started", "installation_id", installationID, "repo", repoFullName, "pr_number", prNumber)
+	}
 	if ra == nil || ra.store == nil {
 		return fmt.Errorf("reaction sweep is not configured")
 	}
@@ -332,6 +348,7 @@ func (ra *ReactionAnalyzer) SweepPRReactions(ctx context.Context, installationID
 		return fmt.Errorf("listing PR comment ids: %w", err)
 	}
 	if len(ids) == 0 {
+		ra.logger.InfoContext(ctx, "reaction sweep completed", "event", "pipeline.reaction.sweep_completed", "installation_id", installationID, "repo", repoFullName, "pr_number", prNumber, "comment_count", 0, "failure_count", 0)
 		return nil
 	}
 	ra.logger.Debug("reaction sweep", "pr", prNumber, "comment_count", len(ids))
@@ -359,8 +376,10 @@ func (ra *ReactionAnalyzer) SweepPRReactions(ctx context.Context, installationID
 		}
 	}
 	if err := errors.Join(failures...); err != nil {
+		ra.logger.WarnContext(ctx, "reaction sweep incomplete", "event", "pipeline.reaction.sweep_failed", "installation_id", installationID, "repo", repoFullName, "pr_number", prNumber, "comment_count", len(ids), "failure_count", len(failures), "error", err)
 		return fmt.Errorf("reaction sweep incomplete: %w", err)
 	}
+	ra.logger.InfoContext(ctx, "reaction sweep completed", "event", "pipeline.reaction.sweep_completed", "installation_id", installationID, "repo", repoFullName, "pr_number", prNumber, "comment_count", len(ids), "failure_count", 0, "permission_lookups", permissions.lookups)
 	return nil
 }
 

@@ -10,13 +10,17 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+
+	"github.com/BeLazy167/argus/backend/internal/obs"
 )
 
 func (s *Server) listMyInstallations(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.listMyInstallations")
+	defer op.Finish(w)
 	userID := getUserID(r.Context())
 	list, err := s.store.ListUserInstallations(r.Context(), userID)
 	if err != nil {
-		s.logger.Error("list user installations", "error", err)
+		s.logger.ErrorContext(r.Context(), "list user installations", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
@@ -24,6 +28,8 @@ func (s *Server) listMyInstallations(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) linkInstallation(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.linkInstallation")
+	defer op.Finish(w)
 	userID := getUserID(r.Context())
 	orgID := getOrgID(r.Context())
 	var body struct {
@@ -49,14 +55,14 @@ func (s *Server) linkInstallation(w http.ResponseWriter, r *http.Request) {
 	// first-owner claim when the claim-count or membership check errors out.
 	claimedCount, countErr := s.store.CountInstallationUsers(r.Context(), inst.ID)
 	if countErr != nil {
-		s.logger.Error("count installation users", "error", countErr, "installation", inst.ID)
+		s.logger.ErrorContext(r.Context(), "count installation users", "error", countErr, "installation", inst.ID)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to validate installation claim"})
 		return
 	}
 	if claimedCount > 0 {
 		alreadyLinked, linkErr := s.store.IsUserLinkedToInstallation(r.Context(), userID, inst.ID)
 		if linkErr != nil {
-			s.logger.Error("check user installation link", "error", linkErr, "installation", inst.ID, "user", userID)
+			s.logger.ErrorContext(r.Context(), "check user installation link", "error", linkErr, "installation", inst.ID, "user", userID)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to validate installation claim"})
 			return
 		}
@@ -77,14 +83,14 @@ func (s *Server) linkInstallation(w http.ResponseWriter, r *http.Request) {
 
 	if body.ClerkOrgID != "" {
 		if err := s.store.SetInstallationClerkOrgID(r.Context(), inst.ID, body.ClerkOrgID); err != nil {
-			s.logger.Error("set clerk org id", "error", err)
+			s.logger.ErrorContext(r.Context(), "set clerk org id", "error", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to link org"})
 			return
 		}
 	}
 	ui, err := s.store.LinkUserInstallation(r.Context(), userID, inst.ID, role)
 	if err != nil {
-		s.logger.Error("link installation", "error", err)
+		s.logger.ErrorContext(r.Context(), "link installation", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to link installation"})
 		return
 	}
@@ -96,15 +102,15 @@ func (s *Server) linkInstallation(w http.ResponseWriter, r *http.Request) {
 		if s.ghApp != nil {
 			repos, listErr := s.ghApp.ListInstallationRepos(syncCtx, inst.InstallationID)
 			if listErr != nil {
-				s.logger.Warn("auto-sync repos after link failed", "error", listErr, "installation", inst.ID)
+				s.logger.WarnContext(syncCtx, "auto-sync repos after link failed", "error", listErr, "installation", inst.ID)
 				return
 			}
-			for _, r := range repos {
-				if _, upsertErr := s.store.UpsertRepo(syncCtx, inst.ID, r.GetID(), r.GetFullName(), r.GetDefaultBranch()); upsertErr != nil {
-					s.logger.Warn("auto-sync upsert repo failed", "error", upsertErr, "repo", r.GetFullName())
+			for _, repo := range repos {
+				if _, upsertErr := s.store.UpsertRepo(syncCtx, inst.ID, repo.GetID(), repo.GetFullName(), repo.GetDefaultBranch()); upsertErr != nil {
+					s.logger.WarnContext(syncCtx, "auto-sync upsert repo failed", "error", upsertErr, "repo", repo.GetFullName())
 				}
 			}
-			s.logger.Info("auto-synced repos after link", "count", len(repos), "installation", inst.ID)
+			s.logger.InfoContext(syncCtx, "auto-synced repos after link", "count", len(repos), "installation", inst.ID)
 		}
 	}()
 
@@ -112,10 +118,14 @@ func (s *Server) linkInstallation(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listInstallations(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.listInstallations")
+	defer op.Finish(w)
 	s.listMyInstallations(w, r)
 }
 
 func (s *Server) getCurrentInstallation(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.getCurrentInstallation")
+	defer op.Finish(w)
 	ids := getInstallationIDs(r.Context())
 	if len(ids) == 0 {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no active installation"})
@@ -136,6 +146,8 @@ func (s *Server) getCurrentInstallation(w http.ResponseWriter, r *http.Request) 
 //
 // Called automatically by the frontend when a user is in a Clerk org but has no scoped installation.
 func (s *Server) autoLinkInstallation(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.autoLinkInstallation")
+	defer op.Finish(w)
 	orgID := getOrgID(r.Context())
 	if orgID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no org context"})
@@ -162,7 +174,7 @@ func (s *Server) autoLinkInstallation(w http.ResponseWriter, r *http.Request) {
 			role = "org_member"
 		}
 		if _, linkErr := s.store.LinkUserInstallation(r.Context(), userID, inst.ID, role); linkErr != nil {
-			s.logger.Warn("auto-link: ensure user_installations row", "error", linkErr)
+			s.logger.WarnContext(r.Context(), "auto-link: ensure user_installations row", "error", linkErr)
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "linked", "org_login": inst.OrgLogin})
 		return
@@ -171,7 +183,7 @@ func (s *Server) autoLinkInstallation(w http.ResponseWriter, r *http.Request) {
 	// Path 2: Find user's installations that match the org slug and are not yet linked to a Clerk org.
 	installations, err := s.store.ListUserInstallations(r.Context(), userID)
 	if err != nil {
-		s.logger.Error("auto-link: list installations", "error", err)
+		s.logger.ErrorContext(r.Context(), "auto-link: list installations", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
@@ -179,11 +191,11 @@ func (s *Server) autoLinkInstallation(w http.ResponseWriter, r *http.Request) {
 	for _, inst := range installations {
 		if strings.EqualFold(inst.OrgLogin, body.OrgSlug) && (inst.ClerkOrgID == nil || *inst.ClerkOrgID == "") {
 			if err := s.store.SetInstallationClerkOrgID(r.Context(), inst.ID, orgID); err != nil {
-				s.logger.Error("auto-link: set clerk_org_id", "error", err)
+				s.logger.ErrorContext(r.Context(), "auto-link: set clerk_org_id", "error", err)
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to link"})
 				return
 			}
-			s.logger.Info("auto-linked installation to clerk org", "installation", inst.OrgLogin, "clerk_org_id", orgID)
+			s.logger.InfoContext(r.Context(), "auto-linked installation to clerk org", "installation", inst.OrgLogin, "clerk_org_id", orgID)
 			writeJSON(w, http.StatusOK, map[string]string{"status": "linked", "org_login": inst.OrgLogin})
 			return
 		}
@@ -194,6 +206,8 @@ func (s *Server) autoLinkInstallation(w http.ResponseWriter, r *http.Request) {
 
 // getInstallURL returns a GitHub App install URL with suggested_target_id pre-selecting the org.
 func (s *Server) getInstallURL(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.getInstallURL")
+	defer op.Finish(w)
 	orgName := r.URL.Query().Get("org")
 	baseURL := fmt.Sprintf("https://github.com/apps/%s/installations/new", s.cfg.GitHubAppSlug)
 
@@ -213,7 +227,7 @@ func (s *Server) getInstallURL(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := (&http.Client{Transport: obs.NewLoggingRoundTripper("github-public", http.DefaultTransport), Timeout: 10 * time.Second}).Do(req)
 	if err != nil || resp.StatusCode != 200 {
 		// Org not found or API error — fall back to generic URL
 		writeJSON(w, http.StatusOK, map[string]string{"url": baseURL})
@@ -235,6 +249,8 @@ func (s *Server) getInstallURL(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) syncRepos(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.syncRepos")
+	defer op.Finish(w)
 	installationDBID, err := strconv.ParseInt(chi.URLParam(r, "installationID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid installation id"})
@@ -262,7 +278,7 @@ func (s *Server) syncRepos(w http.ResponseWriter, r *http.Request) {
 
 	repos, err := s.ghApp.ListInstallationRepos(r.Context(), inst.InstallationID)
 	if err != nil {
-		s.logger.Error("sync repos: list from github", "error", err)
+		s.logger.ErrorContext(r.Context(), "sync repos: list from github", "error", err)
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to list repos from GitHub"})
 		return
 	}
@@ -271,7 +287,7 @@ func (s *Server) syncRepos(w http.ResponseWriter, r *http.Request) {
 	for _, repo := range repos {
 		_, err := s.store.UpsertRepo(r.Context(), installationDBID, repo.GetID(), repo.GetFullName(), repo.GetDefaultBranch())
 		if err != nil {
-			s.logger.Warn("sync repo upsert failed", "error", err, "repo", repo.GetFullName())
+			s.logger.WarnContext(r.Context(), "sync repo upsert failed", "error", err, "repo", repo.GetFullName())
 			continue
 		}
 		count++

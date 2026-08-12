@@ -6,6 +6,9 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
+
+	"github.com/BeLazy167/argus/backend/internal/obs"
 
 	"github.com/BeLazy167/argus/backend/internal/util"
 )
@@ -74,18 +77,44 @@ type BriefingQuery struct {
 // policy (every leg is repo-scoped), and duplicating it per backend is the
 // drift class this seam exists to remove. Adapters keep only their own
 // disabled-state check.
-func briefingWith(ctx context.Context, run runSearchFn, logger *slog.Logger, q BriefingQuery) (string, error) {
+func briefingWith(ctx context.Context, run runSearchFn, logger *slog.Logger, q BriefingQuery) (rendered string, err error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	operationID := obs.NewLogID()
+	started := time.Now()
+	logger.InfoContext(ctx, "memory briefing started", "operation_id", operationID,
+		"repo", q.Repo, "file", q.FilePath, "profile", q.Options.Profile,
+		"query_len", len(q.Query), "char_cap", q.Options.CharCap,
+		"emphasize_false_positives", q.Options.EmphasizeFalsePositives)
+	defer func() {
+		attrs := []any{"operation_id", operationID, "repo", q.Repo, "file", q.FilePath,
+			"profile", q.Options.Profile, "rendered_chars", len(rendered),
+			"duration_ms", time.Since(started).Milliseconds(), "error", err}
+		if err != nil {
+			logger.WarnContext(ctx, "memory briefing failed", attrs...)
+		} else {
+			logger.InfoContext(ctx, "memory briefing completed", attrs...)
+		}
+	}()
 	if q.Repo == "" {
+		logger.InfoContext(ctx, "memory briefing skipped", "operation_id", operationID, "reason", "empty_repo")
 		return "", nil
 	}
 	b, err := assembleBriefingWith(ctx, run, logger, q)
 	if err != nil {
 		return "", err
 	}
+	logger.DebugContext(ctx, "memory briefing sections assembled", "operation_id", operationID,
+		"has_synthesis", b.Synthesis != "", "pattern_count", len(b.Patterns),
+		"false_positive_count", len(b.FalsePositives), "reinforced_count", len(b.Reinforced),
+		"rule_count", len(b.Rules), "past_review_count", len(b.PastReviews))
 	if q.Options.Profile == ProfileReview {
-		return b.renderReview(q.Options.CharCap), nil
+		rendered = b.renderReview(q.Options.CharCap)
+		return rendered, nil
 	}
-	return b.renderSpecialist(q.FilePath, q.Options.CharCap, q.Options.EmphasizeFalsePositives), nil
+	rendered = b.renderSpecialist(q.FilePath, q.Options.CharCap, q.Options.EmphasizeFalsePositives)
+	return rendered, nil
 }
 
 // assembleBriefing runs the typed reads and dispatches results into sections.
@@ -95,6 +124,13 @@ func briefingWith(ctx context.Context, run runSearchFn, logger *slog.Logger, q B
 // Any leg error is returned so Briefing degrades the whole block rather than
 // serving a partial one.
 func assembleBriefingWith(ctx context.Context, run runSearchFn, logger *slog.Logger, q BriefingQuery) (Briefing, error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	operationID := obs.NewLogID()
+	started := time.Now()
+	logger.InfoContext(ctx, "memory briefing assembly started", "operation_id", operationID,
+		"repo", q.Repo, "file", q.FilePath, "profile", q.Options.Profile, "query_len", len(q.Query))
 	// Normalize once so EVERY leg reads resolved floors — the specialistBlock
 	// legs AND the review-profile rules / past-review side-searches below. A
 	// retried/resumed run delivers a zero Thresholds (PipelineRun.Thresholds is
@@ -105,9 +141,15 @@ func assembleBriefingWith(ctx context.Context, run runSearchFn, logger *slog.Log
 		// Specialist profile has no side-searches — one specialistBlock (own 5s).
 		block, err := specialistBlockWith(ctx, run, logger, q.Repo, q.FilePath, q.Query, q.Options.Thresholds)
 		if err != nil {
+			logger.WarnContext(ctx, "memory briefing assembly failed", "operation_id", operationID,
+				"strategy", "specialist_only", "duration_ms", time.Since(started).Milliseconds(), "error", err)
 			return Briefing{}, err
 		}
-		return briefingSections(block), nil
+		b := briefingSections(block)
+		logger.InfoContext(ctx, "memory briefing assembly completed", "operation_id", operationID,
+			"strategy", "specialist_only", "pattern_count", len(b.Patterns),
+			"duration_ms", time.Since(started).Milliseconds())
+		return b, nil
 	}
 
 	// Review profile: the three legs — specialistBlock (synthesis/repo/shared),
@@ -151,7 +193,13 @@ func assembleBriefingWith(ctx context.Context, run runSearchFn, logger *slog.Log
 	// The rules and past-review side-searches are OPTIONAL: a failed leg is
 	// Warn-logged and its section omitted, so a transient single-leg error
 	// never blanks the whole briefing (the #147 gate's resilience finding).
+	logger.DebugContext(ctx, "memory briefing retrieval legs completed", "operation_id", operationID,
+		"specialist_repo_count", len(block.Repo), "specialist_shared_count", len(block.Shared),
+		"rule_count", len(rules), "past_review_count", len(pastReviews),
+		"specialist_error", blockErr, "rules_error", rulesErr, "past_reviews_error", pastErr)
 	if blockErr != nil {
+		logger.WarnContext(ctx, "memory briefing assembly failed", "operation_id", operationID,
+			"strategy", "review_parallel", "duration_ms", time.Since(started).Milliseconds(), "error", blockErr)
 		return Briefing{}, blockErr
 	}
 	if rulesErr != nil {
@@ -166,6 +214,11 @@ func assembleBriefingWith(ctx context.Context, run runSearchFn, logger *slog.Log
 	b := briefingSections(block)
 	b.Rules = rules
 	b.PastReviews = pastReviews
+	logger.InfoContext(ctx, "memory briefing assembly completed", "operation_id", operationID,
+		"strategy", "review_parallel", "has_synthesis", b.Synthesis != "", "pattern_count", len(b.Patterns),
+		"false_positive_count", len(b.FalsePositives), "reinforced_count", len(b.Reinforced),
+		"rule_count", len(b.Rules), "past_review_count", len(b.PastReviews),
+		"duration_ms", time.Since(started).Milliseconds())
 	return b, nil
 }
 

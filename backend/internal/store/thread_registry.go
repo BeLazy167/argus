@@ -35,7 +35,21 @@ type ThreadLink struct {
 // GraphQL review-thread node id, keyed on the REST comment id (an exact match,
 // not a proximity guess). Only fills NULL rows, so a re-post or webhook retry
 // can't overwrite an established link. Returns rows affected.
-func (s *Store) HydrateThreadNodeID(ctx context.Context, reviewID uuid.UUID, githubCommentID int64, threadNodeID string) (int64, error) {
+func (s *Store) HydrateThreadNodeID(ctx context.Context, reviewID uuid.UUID, githubCommentID int64, threadNodeID string) (storeResult0 int64, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "HydrateThreadNodeID", "review_id",
+			storeLogValue(reviewID),
+
+			"github_comment_id", storeLogValue(githubCommentID), "thread_node_id", storeLogValue(threadNodeID))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	return s.q.HydrateThreadNodeID(ctx, db.HydrateThreadNodeIDParams{
 		GraphqlThreadNodeID: &threadNodeID,
 		ReviewID:            reviewID,
@@ -46,7 +60,18 @@ func (s *Store) HydrateThreadNodeID(ctx context.Context, reviewID uuid.UUID, git
 // GetThreadLinkForComment returns the thread identity for a single finding —
 // the "thread for finding X" lookup. The node id is X's own; dismissal targets
 // exactly X's thread rather than a neighbouring finding's.
-func (s *Store) GetThreadLinkForComment(ctx context.Context, commentID uuid.UUID) (*ThreadLink, error) {
+func (s *Store) GetThreadLinkForComment(ctx context.Context, commentID uuid.UUID) (storeResult0 *ThreadLink, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetThreadLinkForComment", "comment_id",
+			storeLogValue(commentID))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	row, err := s.q.GetThreadLinkForComment(ctx, commentID)
 	if err != nil {
 		return nil, err
@@ -64,7 +89,18 @@ func (s *Store) GetThreadLinkForComment(ctx context.Context, commentID uuid.UUID
 // ListThreadLinksForReview returns every hydrated thread link for a review —
 // the "threads for review R" lookup. Only rows with a stored node id are
 // returned; unhydrated / suppressed findings are omitted.
-func (s *Store) ListThreadLinksForReview(ctx context.Context, reviewID uuid.UUID) ([]ThreadLink, error) {
+func (s *Store) ListThreadLinksForReview(ctx context.Context, reviewID uuid.UUID) (storeResult0 []ThreadLink, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ListThreadLinksForReview", "review_id",
+			storeLogValue(reviewID))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	rows, err := s.q.ListThreadLinksForReview(ctx, reviewID)
 	if err != nil {
 		return nil, err

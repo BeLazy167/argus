@@ -32,7 +32,23 @@ type PatternStat struct {
 	Count  int       `json:"count"`
 }
 
-func (s *Store) ListPatterns(ctx context.Context, installationIDs []int64) ([]Pattern, error) {
+func (s *Store) ListPatterns(ctx context.Context, installationIDs []int64) (storeResult0 []Pattern, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ListPatterns",
+
+			"installation_ids_count",
+
+			len(installationIDs))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr,
+			storeResult0)
+	}()
+
 	rows, err := s.q.ListPatterns(ctx, installationIDs)
 	if err != nil {
 		return nil, err
@@ -49,7 +65,22 @@ func (s *Store) ListPatterns(ctx context.Context, installationIDs []int64) ([]Pa
 }
 
 // ListPatternsForRepo returns org-wide patterns (repo_id IS NULL) plus patterns scoped to the given repo.
-func (s *Store) ListPatternsForRepo(ctx context.Context, installationIDs []int64, repoID int64) ([]Pattern, error) {
+func (s *Store) ListPatternsForRepo(ctx context.Context, installationIDs []int64, repoID int64) (storeResult0 []Pattern, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ListPatternsForRepo",
+
+			"installation_ids_count",
+
+			len(installationIDs), "repo_id", storeLogValue(repoID))
+	defer func() {
+		if recovered :=
+			recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	rows, err := s.q.ListPatternsForRepo(ctx, db.ListPatternsForRepoParams{Column1: installationIDs, RepoID: &repoID})
 	if err != nil {
 		return nil, err
@@ -71,7 +102,27 @@ func (s *Store) ListPatternsForRepo(ctx context.Context, installationIDs []int64
 // mirrorExtra carries provenance that the patterns table does not model but a
 // repaired memory document still needs (for example a shared pattern's full
 // owner/repo origin).
-func (s *Store) CreatePattern(ctx context.Context, installationID int64, repoID *int64, content string, memoryDocID *string, createdBy *string, source *string, category *string, prNumber *int, memoryCustomID *string, mirrorExtra map[string]string) (*Pattern, error) {
+func (s *Store) CreatePattern(ctx context.Context, installationID int64, repoID *int64, content string, memoryDocID *string, createdBy *string, source *string, category *string, prNumber *int, memoryCustomID *string, mirrorExtra map[string]string) (storeResult0 *Pattern, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "CreatePattern",
+
+			"installation_id",
+
+			storeLogValue(installationID), "repo_id", storeLogValue(repoID), "memory_doc_id",
+
+			storeLogValue(memoryDocID), "source", storeLogValue(source), "category", storeLogValue(category), "pr_number",
+			storeLogValue(prNumber), "memory_custom_id", storeLogValue(memoryCustomID), "mirror_extra_count",
+			len(mirrorExtra))
+	defer func() {
+		if recovered :=
+			recover(); recovered != nil {
+			storeFinishPanic(storeFinish,
+				recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	customID := firstNonEmpty(memoryCustomID, memoryDocID)
 	if customID == "" {
 		return nil, fmt.Errorf("creating pattern requires a deterministic memory identity")
@@ -122,7 +173,22 @@ func (s *Store) CreatePattern(ctx context.Context, installationID int64, repoID 
 	return &pattern, nil
 }
 
-func (s *Store) DeletePattern(ctx context.Context, id int64, installationIDs []int64) error {
+func (s *Store) DeletePattern(ctx context.Context, id int64, installationIDs []int64) (storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "DeletePattern",
+
+			"id",
+			storeLogValue(id), "installation_ids_count", len(installationIDs))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish,
+				recovered)
+			panic(recovered)
+		}
+		storeFinish(storeErr)
+	}()
+
 	return s.WithMemoryMirrorTx(ctx, func(tx pgx.Tx) (MemoryMirrorEvent, error) {
 		q := db.New(tx)
 		row, err := q.DeletePattern(ctx, db.DeletePatternParams{ID: id, InstallationIds: installationIDs})
@@ -208,7 +274,22 @@ func newPatternOutboxPayload(pattern Pattern, customID, repo string, extra map[s
 	return raw, nil
 }
 
-func (s *Store) GetPattern(ctx context.Context, id int64) (*Pattern, error) {
+func (s *Store) GetPattern(ctx context.Context, id int64) (storeResult0 *Pattern, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetPattern",
+
+			"id",
+			storeLogValue(id))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered,
+				storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	row, err := s.q.GetPattern(ctx, id)
 	if err != nil {
 		return nil, err
@@ -232,7 +313,24 @@ func (s *Store) GetPattern(ctx context.Context, id int64) (*Pattern, error) {
 // the SAME string here, and an unscoped LIMIT 1 with no ORDER BY can resolve
 // one tenant's hit to another tenant's row — persisting a foreign
 // matched_pattern_id and bumping its stats.
-func (s *Store) GetPatternIDByMemoryDocID(ctx context.Context, installationID int64, memoryDocID string) (int64, error) {
+func (s *Store) GetPatternIDByMemoryDocID(ctx context.Context, installationID int64, memoryDocID string) (storeResult0 int64, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetPatternIDByMemoryDocID",
+
+			"installation_id", storeLogValue(installationID), "memory_doc_id",
+			storeLogValue(
+				memoryDocID,
+			))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered,
+				storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	var id int64
 	err := s.Pool.QueryRow(ctx,
 		`SELECT id FROM patterns WHERE installation_id = $1 AND memory_doc_id = $2 LIMIT 1`,
@@ -252,7 +350,24 @@ func (s *Store) GetPatternIDByMemoryDocID(ctx context.Context, installationID in
 // docs never mirrored to the patterns table) — a miss, not a failure.
 // Scoped by installation for the same reason as the sibling above: customIds
 // are deterministic per repo+content, so they were never globally unique.
-func (s *Store) GetPatternIDByCustomID(ctx context.Context, installationID int64, customID string) (int64, error) {
+func (s *Store) GetPatternIDByCustomID(ctx context.Context, installationID int64, customID string) (storeResult0 int64, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetPatternIDByCustomID",
+
+			"installation_id",
+
+			storeLogValue(installationID), "custom_id",
+			storeLogValue(customID),
+		)
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr,
+			storeResult0)
+	}()
+
 	var id int64
 	err := s.Pool.QueryRow(ctx,
 		`SELECT id FROM patterns WHERE installation_id = $1 AND memory_custom_id = $2 LIMIT 1`,
@@ -263,7 +378,23 @@ func (s *Store) GetPatternIDByCustomID(ctx context.Context, installationID int64
 	return id, nil
 }
 
-func (s *Store) GetPatternStats(ctx context.Context, installationIDs []int64) ([]PatternStat, error) {
+func (s *Store) GetPatternStats(ctx context.Context, installationIDs []int64) (storeResult0 []PatternStat, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetPatternStats",
+
+			"installation_ids_count",
+
+			len(installationIDs))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr,
+			storeResult0)
+	}()
+
 	rows, err := s.q.GetPatternStats(ctx, installationIDs)
 	if err != nil {
 		return nil, err

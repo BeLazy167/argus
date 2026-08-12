@@ -1,6 +1,10 @@
 package llm
 
-import "context"
+import (
+	"context"
+	"log/slog"
+	"time"
+)
 
 // Provider is the interface for LLM backends.
 // Any OpenAI-compatible API works (OpenRouter, Anthropic, Groq, Ollama, etc.).
@@ -121,18 +125,29 @@ type PricingLookup func(model string) (float64, float64, bool)
 var pricingLookup PricingLookup
 
 // SetPricingLookup configures the global pricing resolver (called once at server init).
-func SetPricingLookup(fn PricingLookup) { pricingLookup = fn }
+func SetPricingLookup(fn PricingLookup) {
+	pricingLookup = fn
+	slog.Info("LLM pricing lookup configured", "configured", fn != nil)
+}
 
 // EstimateCost calculates cost from token counts using the DB-backed pricing table.
 // Returns 0 if no pricing lookup is configured or model isn't found.
 func EstimateCost(model string, usage TokenUsage) float64 {
+	started := time.Now()
 	if pricingLookup == nil {
+		slog.Debug("LLM cost estimation skipped", "model", model, "reason", "pricing_lookup_not_configured")
 		return 0
 	}
 	input, output, ok := pricingLookup(model)
 	if !ok {
+		slog.Debug("LLM cost estimation skipped", "model", model, "reason", "model_pricing_not_found",
+			"duration_ms", time.Since(started).Milliseconds())
 		return 0
 	}
-	return (float64(usage.PromptTokens) * input / 1_000_000) +
+	cost := (float64(usage.PromptTokens) * input / 1_000_000) +
 		(float64(usage.CompletionTokens) * output / 1_000_000)
+	slog.Debug("LLM cost estimated", "model", model, "prompt_tokens", usage.PromptTokens,
+		"completion_tokens", usage.CompletionTokens, "cost_usd", cost,
+		"duration_ms", time.Since(started).Milliseconds())
+	return cost
 }

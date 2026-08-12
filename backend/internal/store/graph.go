@@ -243,6 +243,7 @@ var (
 // mandatory CREATE EXTENSION introduced for pgcontext earlier.
 func (s *Store) pgGraphAvailable(ctx context.Context) bool {
 	pgGraphOnce.Do(func() {
+		probeStarted := time.Now()
 		var ready bool
 		if err := s.Pool.QueryRow(ctx, `
 			SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'graph')
@@ -250,9 +251,14 @@ func (s *Store) pgGraphAvailable(ctx context.Context) bool {
 			         SELECT 1 FROM graph.status()
 			         WHERE schema_status = 'current' AND NOT read_only
 			       )`).Scan(&ready); err != nil {
+			slog.WarnContext(ctx, "pgGraph availability probe failed; recursive CTE selected",
+				"duration_ms", time.Since(probeStarted).Milliseconds(), "error", err)
 			return // stays false: the CTE needs no extension
 		}
 		pgGraphReady.Store(ready)
+		slog.InfoContext(ctx, "pgGraph availability probed", "pggraph_available", ready,
+			"selected_engine", map[bool]string{true: "pggraph", false: "recursive_cte"}[ready],
+			"duration_ms", time.Since(probeStarted).Milliseconds())
 	})
 	return pgGraphReady.Load()
 }
@@ -306,23 +312,48 @@ func disablePGGraph(err error) {
 // therefore an empty result. That is deliberate: a mismatched pair fails closed
 // rather than resolving seeds in one tenant and walking in another.
 func (s *Store) GetBlastRadius(ctx context.Context, installationID, repoID int64, filePaths []string, maxDepth int) ([]CodeNode, error) {
+	started := time.Now()
 	if len(filePaths) == 0 {
+		slog.InfoContext(ctx, "blast radius completed", "engine", "none", "repo_id", repoID,
+			"installation_id", installationID, "seed_file_count", 0, "result_count", 0,
+			"max_depth", maxDepth, "duration_ms", time.Since(started).Milliseconds())
 		return []CodeNode{}, nil
 	}
 	if s.pgGraphAvailable(ctx) {
+		slog.InfoContext(ctx, "blast radius traversal started", "engine", "pggraph",
+			"repo_id", repoID, "installation_id", installationID,
+			"seed_file_count", len(filePaths), "max_depth", maxDepth)
 		// An EMPTY result falls through too, not just an error. A projection
-		// that is stale or not yet built answers a traversal with zero rows
-		// rather than failing, and an empty blast radius is indistinguishable
-		// from "nothing depends on this file" at every call site. Re-running
-		// the CTE costs ~1ms and is the only way to tell the two apart.
+		// that is stale or not yet built answers a traversal with zero rows.
 		nodes, err := s.blastRadiusPGGraph(ctx, installationID, repoID, filePaths, maxDepth)
 		if err != nil {
 			disablePGGraph(err)
+			slog.WarnContext(ctx, "pgGraph traversal failed; retrying with recursive CTE",
+				"repo_id", repoID, "installation_id", installationID, "error", err)
 		} else if len(nodes) > 0 {
+			slog.InfoContext(ctx, "blast radius completed", "engine", "pggraph",
+				"repo_id", repoID, "installation_id", installationID,
+				"seed_file_count", len(filePaths), "result_count", len(nodes),
+				"max_depth", maxDepth, "duration_ms", time.Since(started).Milliseconds())
 			return nodes, nil
+		} else {
+			slog.InfoContext(ctx, "pgGraph traversal returned no nodes; verifying with recursive CTE",
+				"repo_id", repoID, "installation_id", installationID)
 		}
 	}
-	return s.blastRadiusCTE(ctx, installationID, repoID, filePaths, maxDepth)
+	slog.InfoContext(ctx, "blast radius traversal started", "engine", "recursive_cte",
+		"repo_id", repoID, "installation_id", installationID,
+		"seed_file_count", len(filePaths), "max_depth", maxDepth)
+	nodes, err := s.blastRadiusCTE(ctx, installationID, repoID, filePaths, maxDepth)
+	level := slog.LevelInfo
+	if err != nil {
+		level = slog.LevelError
+	}
+	slog.Log(ctx, level, "blast radius completed", "engine", "recursive_cte",
+		"repo_id", repoID, "installation_id", installationID,
+		"seed_file_count", len(filePaths), "result_count", len(nodes),
+		"max_depth", maxDepth, "duration_ms", time.Since(started).Milliseconds(), "error", err)
+	return nodes, err
 }
 
 // blastRadiusPGGraph exercises the installed projection, then validates its

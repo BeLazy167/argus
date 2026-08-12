@@ -67,7 +67,7 @@ const stickyFooterPrefix = "_Updated at "
 //
 // Raw GitHub errors are wrapped with %w plus the review id + section for
 // diagnosability.
-func (c *Client) UpdateStickySection(
+func (c *Client) updateStickySectionLogged(
 	ctx context.Context,
 	installationID int64,
 	owner, repo string,
@@ -76,6 +76,7 @@ func (c *Client) UpdateStickySection(
 	section string,
 	sectionMD string,
 ) error {
+
 	if stickyReviewID <= 0 {
 		return fmt.Errorf("sticky review id is zero or negative (section=%s): %w",
 			section, ErrStickyNotFound)

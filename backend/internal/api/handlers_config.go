@@ -34,13 +34,15 @@ func (s *Server) verifyRepoAccess(w http.ResponseWriter, r *http.Request) (int64
 // --- Model Config ---
 
 func (s *Server) getModelConfigs(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.getModelConfigs")
+	defer op.Finish(w)
 	repoID, ok := s.verifyRepoAccess(w, r)
 	if !ok {
 		return
 	}
 	configs, err := s.store.ListModelConfigs(r.Context(), repoID)
 	if err != nil {
-		s.logger.Error("list model configs", "error", err)
+		s.logger.ErrorContext(r.Context(), "list model configs", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
@@ -48,6 +50,8 @@ func (s *Server) getModelConfigs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) upsertModelConfig(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.upsertModelConfig")
+	defer op.Finish(w)
 	repoID, ok := s.verifyRepoAccess(w, r)
 	if !ok {
 		return
@@ -84,7 +88,7 @@ func (s *Server) upsertModelConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg, err := s.store.UpsertModelConfig(r.Context(), repoID, stage, body.Provider, body.Model, body.BaseURL, body.MaxTokens, body.Temperature)
 	if err != nil {
-		s.logger.Error("upsert model config", "error", err)
+		s.logger.ErrorContext(r.Context(), "upsert model config", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save config"})
 		return
 	}
@@ -93,6 +97,8 @@ func (s *Server) upsertModelConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteModelConfig(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.deleteModelConfig")
+	defer op.Finish(w)
 	repoID, ok := s.verifyRepoAccess(w, r)
 	if !ok {
 		return
@@ -108,6 +114,8 @@ func (s *Server) deleteModelConfig(w http.ResponseWriter, r *http.Request) {
 
 // testConfig sends a minimal LLM request to verify API key + model work end-to-end.
 func (s *Server) testConfig(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.testConfig")
+	defer op.Finish(w)
 	installationID, err := strconv.ParseInt(chi.URLParam(r, "installationID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid installation id"})
@@ -163,6 +171,8 @@ func (s *Server) testConfig(w http.ResponseWriter, r *http.Request) {
 // --- Org Model Config ---
 
 func (s *Server) getOrgModelConfigs(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.getOrgModelConfigs")
+	defer op.Finish(w)
 	installationID, err := strconv.ParseInt(chi.URLParam(r, "installationID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid installation id"})
@@ -174,7 +184,7 @@ func (s *Server) getOrgModelConfigs(w http.ResponseWriter, r *http.Request) {
 	}
 	configs, err := s.store.ListOrgModelConfigs(r.Context(), installationID)
 	if err != nil {
-		s.logger.Error("list org model configs", "error", err)
+		s.logger.ErrorContext(r.Context(), "list org model configs", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
@@ -182,6 +192,8 @@ func (s *Server) getOrgModelConfigs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) upsertOrgModelConfig(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.upsertOrgModelConfig")
+	defer op.Finish(w)
 	installationID, err := strconv.ParseInt(chi.URLParam(r, "installationID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid installation id"})
@@ -223,7 +235,7 @@ func (s *Server) upsertOrgModelConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg, err := s.store.UpsertOrgModelConfig(r.Context(), installationID, stage, body.Provider, body.Model, body.BaseURL, body.MaxTokens, body.Temperature)
 	if err != nil {
-		s.logger.Error("upsert org model config", "error", err)
+		s.logger.ErrorContext(r.Context(), "upsert org model config", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save config"})
 		return
 	}
@@ -232,6 +244,8 @@ func (s *Server) upsertOrgModelConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteOrgModelConfig(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.deleteOrgModelConfig")
+	defer op.Finish(w)
 	installationID, err := strconv.ParseInt(chi.URLParam(r, "installationID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid installation id"})
@@ -253,13 +267,15 @@ func (s *Server) deleteOrgModelConfig(w http.ResponseWriter, r *http.Request) {
 // --- Prompt Templates ---
 
 func (s *Server) listPromptTemplates(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.listPromptTemplates")
+	defer op.Finish(w)
 	repoID, ok := s.verifyRepoAccess(w, r)
 	if !ok {
 		return
 	}
 	customs, err := s.store.ListPromptTemplates(r.Context(), repoID)
 	if err != nil {
-		s.logger.Error("list prompt templates", "error", err)
+		s.logger.ErrorContext(r.Context(), "list prompt templates", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
@@ -285,6 +301,8 @@ func (s *Server) listPromptTemplates(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) upsertPromptTemplate(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.upsertPromptTemplate")
+	defer op.Finish(w)
 	repoID, ok := s.verifyRepoAccess(w, r)
 	if !ok {
 		return
@@ -317,7 +335,7 @@ func (s *Server) upsertPromptTemplate(w http.ResponseWriter, r *http.Request) {
 	}
 	pt, err := s.store.UpsertPromptTemplate(r.Context(), repoID, stage, validated)
 	if err != nil {
-		s.logger.Error("upsert prompt template", "error", err)
+		s.logger.ErrorContext(r.Context(), "upsert prompt template", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save prompt"})
 		return
 	}
@@ -326,6 +344,8 @@ func (s *Server) upsertPromptTemplate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deletePromptTemplate(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.deletePromptTemplate")
+	defer op.Finish(w)
 	repoID, ok := s.verifyRepoAccess(w, r)
 	if !ok {
 		return
@@ -339,7 +359,9 @@ func (s *Server) deletePromptTemplate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
-func (s *Server) listDefaultPrompts(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) listDefaultPrompts(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.listDefaultPrompts")
+	defer op.Finish(w)
 	defaults := pipeline.DefaultPrompts()
 	type entry struct {
 		Stage      string `json:"stage"`
@@ -355,6 +377,8 @@ func (s *Server) listDefaultPrompts(w http.ResponseWriter, _ *http.Request) {
 // --- Provider Keys ---
 
 func (s *Server) listProviderKeys(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.listProviderKeys")
+	defer op.Finish(w)
 	installationID, err := strconv.ParseInt(chi.URLParam(r, "installationID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid installation id"})
@@ -368,7 +392,7 @@ func (s *Server) listProviderKeys(w http.ResponseWriter, r *http.Request) {
 	}
 	keys, err := s.store.ListProviderKeys(r.Context(), installationID)
 	if err != nil {
-		s.logger.Error("list provider keys", "error", err)
+		s.logger.ErrorContext(r.Context(), "list provider keys", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
@@ -381,6 +405,8 @@ func (s *Server) listProviderKeys(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) upsertProviderKey(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.upsertProviderKey")
+	defer op.Finish(w)
 	installationID, err := strconv.ParseInt(chi.URLParam(r, "installationID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid installation id"})
@@ -458,11 +484,11 @@ func (s *Server) upsertProviderKey(w http.ResponseWriter, r *http.Request) {
 			storedKey, storedBase, storedModel, found, kerr := s.store.ResolveEmbeddingsKey(r.Context(), installationID)
 			switch {
 			case kerr != nil && req.APIKey == "":
-				s.logger.Error("resolve stored embeddings key", "error", kerr)
+				s.logger.ErrorContext(r.Context(), "resolve stored embeddings key", "error", kerr)
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not verify the stored embeddings key; try again"})
 				return
 			case kerr != nil:
-				s.logger.Warn("resolve stored embeddings key failed; validating keyed save without stored row", "error", kerr)
+				s.logger.WarnContext(r.Context(), "resolve stored embeddings key failed; validating keyed save without stored row", "error", kerr)
 			default:
 				stored = memory.StoredEmbedKey{Found: found, HasKey: storedKey != "", BaseURL: storedBase, Model: storedModel}
 			}
@@ -497,7 +523,7 @@ func (s *Server) upsertProviderKey(w http.ResponseWriter, r *http.Request) {
 	}
 	pk, err := s.store.UpsertProviderKey(r.Context(), installationID, body.RepoID, body.Provider, body.APIKey, body.BaseURL, body.Model)
 	if err != nil {
-		s.logger.Error("upsert provider key", "error", err)
+		s.logger.ErrorContext(r.Context(), "upsert provider key", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save key"})
 		return
 	}
@@ -513,6 +539,8 @@ func (s *Server) upsertProviderKey(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteProviderKey(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.deleteProviderKey")
+	defer op.Finish(w)
 	installationID, err := strconv.ParseInt(chi.URLParam(r, "installationID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid installation id"})
@@ -555,16 +583,18 @@ func (s *Server) scheduleMemoryReembed(requestCtx context.Context, installationI
 		defer cancel()
 		repaired, err := s.reembedMemories(ctx, installationID)
 		if err != nil {
-			s.logger.Warn("memory reembed after provider rotation", "installation_id", installationID, "repaired", repaired, "error", err)
+			s.logger.WarnContext(ctx, "memory reembed after provider rotation", "installation_id", installationID, "repaired", repaired, "error", err)
 			return
 		}
-		s.logger.Info("memory reembed after provider rotation complete", "installation_id", installationID, "repaired", repaired)
+		s.logger.InfoContext(ctx, "memory reembed after provider rotation complete", "installation_id", installationID, "repaired", repaired)
 	}()
 }
 
 // --- Org Default Settings ---
 
 func (s *Server) getOrgDefaults(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.getOrgDefaults")
+	defer op.Finish(w)
 	installationID, err := strconv.ParseInt(chi.URLParam(r, "installationID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid installation id"})
@@ -656,6 +686,8 @@ func (b orgDefaultsBody) validate() (string, bool) {
 }
 
 func (s *Server) setOrgDefaults(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.setOrgDefaults")
+	defer op.Finish(w)
 	installationID, err := strconv.ParseInt(chi.URLParam(r, "installationID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid installation id"})
@@ -689,6 +721,8 @@ func (s *Server) setOrgDefaults(w http.ResponseWriter, r *http.Request) {
 
 // deleteRepoSettingKey removes a single key from repo settings_json, reverting it to org default inheritance.
 func (s *Server) deleteRepoSettingKey(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.deleteRepoSettingKey")
+	defer op.Finish(w)
 	repoID, ok := s.verifyRepoAccess(w, r)
 	if !ok {
 		return
@@ -703,7 +737,7 @@ func (s *Server) deleteRepoSettingKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := s.store.Pool.Exec(r.Context(), `UPDATE repos SET settings_json = settings_json - $2, updated_at = NOW() WHERE id = $1`, repoID, key); err != nil {
-		s.logger.Error("delete repo setting key", "error", err)
+		s.logger.ErrorContext(r.Context(), "delete repo setting key", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to remove key"})
 		return
 	}
@@ -714,6 +748,8 @@ func (s *Server) deleteRepoSettingKey(w http.ResponseWriter, r *http.Request) {
 // getEmbeddingsCatalog serves the curated embeddings provider/model menu the
 // settings UI renders. Static content, but served (not baked into the web
 // bundle) so self-hosted deployments always match their backend's catalog.
-func (s *Server) getEmbeddingsCatalog(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) getEmbeddingsCatalog(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.getEmbeddingsCatalog")
+	defer op.Finish(w)
 	writeJSON(w, http.StatusOK, map[string]interface{}{"providers": memory.EmbedCatalog()})
 }

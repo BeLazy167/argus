@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/BeLazy167/argus/backend/internal/obs"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -64,7 +65,10 @@ func (r *Registry) WithPostgresBackend(pool *pgxpool.Pool, embedders *EmbedderRe
 	}
 	r.pool = pool
 	r.embedders = embedders
-	r.repairPermits = make(chan struct{}, reembedConcurrencyLimit(pool.Config().MaxConns))
+	repairLimit := reembedConcurrencyLimit(pool.Config().MaxConns)
+	r.repairPermits = make(chan struct{}, repairLimit)
+	r.log().Info("postgres memory backend wired", "dimensions", embedders.Dimensions(),
+		"pool_max_connections", pool.Config().MaxConns, "reembed_concurrency_limit", repairLimit)
 	return r
 }
 
@@ -87,24 +91,37 @@ func (r *Registry) log() *slog.Logger {
 // Such a row is reachable through the full-text leg until ReembedMissing
 // repairs it.
 func (r *Registry) GetIndexer(ctx context.Context, installationID int64) Indexer {
+	operationID := obs.NewLogID()
+	started := time.Now()
+	r.log().InfoContext(ctx, "memory indexer resolution started", "operation_id", operationID,
+		"installation_id", installationID, "backend_wired", r.pool != nil && r.embedders != nil)
 	if r.pool == nil || r.embedders == nil {
+		r.log().WarnContext(ctx, "memory indexer resolution skipped", "operation_id", operationID,
+			"installation_id", installationID, "reason", "backend_not_wired",
+			"duration_ms", time.Since(started).Milliseconds())
 		return nil
 	}
 	// GetEmbedder absorbs resolution failures internally (a broken BYOK row
 	// falls back to the platform key) and never returns a non-nil error.
 	embedder, _ := r.embedders.GetEmbedder(ctx, installationID)
 	var disableSharedDecay bool
-	if err := r.pool.QueryRow(ctx, `
+	settingsErr := r.pool.QueryRow(ctx, `
 		SELECT COALESCE(default_settings, '{}'::jsonb) @> '{"disable_shared_decay": true}'::jsonb
-		FROM installations WHERE id = $1`, installationID).Scan(&disableSharedDecay); err != nil {
+		FROM installations WHERE id = $1`, installationID).Scan(&disableSharedDecay)
+	if settingsErr != nil {
 		// Settings lookup failure must not disable retirement silently. Default
 		// decay remains active and the warning makes the override failure visible.
-		r.log().Warn("resolve shared memory decay setting; using decay default",
-			"installation_id", installationID, "error", err)
+		r.log().WarnContext(ctx, "resolve shared memory decay setting; using decay default",
+			"operation_id", operationID, "installation_id", installationID, "error", settingsErr)
 	}
-	return NewPGIndexer(r.pool, embedder, installationID, r.embedders.Dimensions(), r.log(),
+	idx := NewPGIndexer(r.pool, embedder, installationID, r.embedders.Dimensions(), r.log(),
 		WithSharedDecayDisabled(disableSharedDecay),
 		withWriteEmbedderResolver(r.embedders.resolveUncachedFromConn))
+	r.log().InfoContext(ctx, "memory indexer resolution completed", "operation_id", operationID,
+		"installation_id", installationID, "embedder_available", embedder != nil,
+		"shared_decay_disabled", disableSharedDecay, "settings_defaulted", settingsErr != nil,
+		"dimensions", r.embedders.Dimensions(), "duration_ms", time.Since(started).Milliseconds())
+	return idx
 }
 
 // InvalidateEmbedder drops the cached embedder for an installation. Call after
@@ -115,9 +132,12 @@ func (r *Registry) GetIndexer(ctx context.Context, installationID int64) Indexer
 // superseded key, landing rows in a vector space the reader will not search.
 func (r *Registry) InvalidateEmbedder(installationID int64) {
 	if r.embedders == nil {
+		r.log().Debug("memory embedder invalidation skipped", "installation_id", installationID, "reason", "registry_not_wired")
 		return
 	}
+	r.log().Info("memory embedder invalidation started", "installation_id", installationID)
 	r.embedders.Invalidate(installationID)
+	r.log().Info("memory embedder invalidation completed", "installation_id", installationID)
 }
 
 // reembedLockPollInterval bounds how long a waiter can miss a just-released
@@ -311,7 +331,20 @@ func releaseEmbeddingLock(ctx context.Context, conn *pgxpool.Conn, lockKey int64
 // The caller must provide a bounded context because a large corpus can require
 // many provider batches. Configuration churn is bounded separately by
 // maxReembedConvergenceRounds and fails explicitly when exhausted.
-func (r *Registry) ReembedCurrentSpace(ctx context.Context, installationID int64, batchSize int) (int, error) {
+func (r *Registry) ReembedCurrentSpace(ctx context.Context, installationID int64, batchSize int) (total int, err error) {
+	operationID := obs.NewLogID()
+	started := time.Now()
+	r.log().InfoContext(ctx, "memory reembed current space started", "operation_id", operationID,
+		"installation_id", installationID, "batch_size", batchSize)
+	defer func() {
+		attrs := []any{"operation_id", operationID, "installation_id", installationID, "batch_size", batchSize,
+			"reembedded", total, "duration_ms", time.Since(started).Milliseconds(), "error", err}
+		if err != nil {
+			r.log().ErrorContext(ctx, "memory reembed current space failed", attrs...)
+			return
+		}
+		r.log().InfoContext(ctx, "memory reembed current space completed", attrs...)
+	}()
 	if r.pool == nil || r.embedders == nil {
 		return 0, fmt.Errorf("reembed current space: postgres memory backend is not configured")
 	}
@@ -340,7 +373,7 @@ func (r *Registry) ReembedCurrentSpace(ctx context.Context, installationID int64
 	}
 	defer releaseEmbeddingLock(ctx, conn, lockKey, false, r.log(), installationID)
 
-	total := 0
+	total = 0
 	lastTarget, lastDesired := "", ""
 	var lastPending int64
 	for round := 1; round <= maxReembedConvergenceRounds; round++ {
@@ -406,7 +439,19 @@ func (r *Registry) ReembedCurrentSpace(ctx context.Context, installationID int64
 // ReembedAllCurrentSpaces converges every installation that owns live memory.
 // It is safe on every replica: ReembedCurrentSpace serializes each tenant with
 // an advisory lock, and a clean tenant performs no embedding calls.
-func (r *Registry) ReembedAllCurrentSpaces(ctx context.Context) (int, error) {
+func (r *Registry) ReembedAllCurrentSpaces(ctx context.Context) (total int, err error) {
+	operationID := obs.NewLogID()
+	started := time.Now()
+	r.log().InfoContext(ctx, "memory reembed all spaces started", "operation_id", operationID)
+	defer func() {
+		attrs := []any{"operation_id", operationID, "reembedded", total,
+			"duration_ms", time.Since(started).Milliseconds(), "error", err}
+		if err != nil {
+			r.log().ErrorContext(ctx, "memory reembed all spaces failed", attrs...)
+			return
+		}
+		r.log().InfoContext(ctx, "memory reembed all spaces completed", attrs...)
+	}()
 	if r.pool == nil || r.embedders == nil {
 		return 0, fmt.Errorf("reembed all spaces: postgres memory backend is not configured")
 	}
@@ -428,7 +473,7 @@ func (r *Registry) ReembedAllCurrentSpaces(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("reembed all spaces: read installations: %w", err)
 	}
 
-	total := 0
+	total = 0
 	var failures []error
 	for _, installationID := range installationIDs {
 		if err := ctx.Err(); err != nil {
