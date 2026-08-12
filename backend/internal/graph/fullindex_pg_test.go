@@ -1072,6 +1072,67 @@ func TestGraphGenerationTerminalCleanupKeepsOnlyBuildingPayloads(t *testing.T) {
 	}
 }
 
+func TestFullAndIncrementalQualifiedMissResolutionParity(t *testing.T) {
+	pool, ctx := generationTestPool(t)
+	st := store.NewWithDB(pool)
+	installationID := generationSeedInstallation(t, ctx, pool, "{}")
+	repoID := generationSeedRepo(t, ctx, pool, installationID, "generation/qualified-miss-parity")
+
+	defs := []Symbol{{Kind: KindMethod, Name: "Alpha.Handle", Receiver: "Alpha", FilePath: "defs.go", LineStart: 1, LineEnd: 1}}
+	caller := []Symbol{{Kind: KindFunction, Name: "Caller", FilePath: "caller.go", LineStart: 1, LineEnd: 1}}
+	callerEdges := []Edge{{SourceName: "Caller", TargetName: "Missing.Handle", Kind: EdgeCalls}}
+	snapshot, err := st.BeginGraphGeneration(ctx, repoID, "qualified-miss-head", 2, 0, false, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage := func(filePath string, symbols []Symbol, edges []Edge) {
+		t.Helper()
+		symbolJSON, err := json.Marshal(symbols)
+		if err != nil {
+			t.Fatal(err)
+		}
+		edgeJSON, err := json.Marshal(edges)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.StageGraphGenerationFile(ctx, repoID, snapshot.GenerationID, filePath, symbolJSON, edgeJSON, []byte("[]"), nil, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stage("defs.go", defs, nil)
+	stage("caller.go", caller, callerEdges)
+	if err := publishGraphGeneration(ctx, st, repoID, snapshot.GenerationID); err != nil {
+		t.Fatal(err)
+	}
+
+	assertUnresolved := func(phase string) {
+		t.Helper()
+		var unresolved, wrongConcrete int
+		if err := pool.QueryRow(ctx, `SELECT
+			count(*) FILTER (WHERE target.name = 'unresolved:Missing.Handle')::int,
+			count(*) FILTER (WHERE target.name = 'Alpha.Handle')::int
+			FROM code_edges edge
+			JOIN code_nodes source ON source.id = edge.source_id
+			JOIN code_nodes target ON target.id = edge.target_id
+			WHERE edge.repo_id = $1 AND source.name = 'Caller' AND edge.kind = 'calls'`, repoID).
+			Scan(&unresolved, &wrongConcrete); err != nil {
+			t.Fatal(err)
+		}
+		if unresolved != 1 || wrongConcrete != 0 {
+			t.Fatalf("%s resolution: unresolved=%d concrete_alias=%d, want 1/0", phase, unresolved, wrongConcrete)
+		}
+	}
+	assertUnresolved("full")
+
+	caller[0].LineEnd = 2 // force the incremental hash/update path
+	if err := indexParsedSymbols(ctx, st, repoID, map[string]fileResult{
+		"caller.go": {symbols: caller, edges: callerEdges},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	assertUnresolved("incremental")
+}
+
 func TestParserDuplicateGoMethodsPublishDistinctQualifiedNodes(t *testing.T) {
 	pool, ctx := generationTestPool(t)
 	st := store.NewWithDB(pool)
@@ -1085,7 +1146,7 @@ func TestParserDuplicateGoMethodsPublishDistinctQualifiedNodes(t *testing.T) {
 	func BetaDone() {}
 	func (Alpha) Handle() { AlphaDone() }
 	func (Beta) Handle() { BetaDone() }
-	func Caller() { Alpha{}.Handle(); Beta{}.Handle(); Handle() }`
+	func Caller() { Alpha{}.Handle(); Beta{}.Handle(); Handle(); Missing{}.Handle() }`
 
 	symbols, edges := ParseFileSymbols(filePath, source)
 	symbols = append(symbols, fileSymbol(filePath, source))
@@ -1109,7 +1170,7 @@ func TestParserDuplicateGoMethodsPublishDistinctQualifiedNodes(t *testing.T) {
 	}
 
 	var status string
-	var methodCount, qualifiedCallerCalls, qualifiedSourceCalls, ambiguousCalls, buildingCount, stagedPayloads int
+	var methodCount, qualifiedCallerCalls, qualifiedSourceCalls, ambiguousCalls, unresolvedQualifiedCalls, buildingCount, stagedPayloads int
 	if err := pool.QueryRow(ctx, `SELECT status FROM graph_index_generations WHERE id = $1`, snapshot.GenerationID).Scan(&status); err != nil {
 		t.Fatal(err)
 	}
@@ -1136,14 +1197,21 @@ func TestParserDuplicateGoMethodsPublishDistinctQualifiedNodes(t *testing.T) {
 		WHERE e.repo_id = $1 AND source.name = 'Caller' AND target.name = 'ambiguous:Handle' AND e.kind = 'calls'`, repoID).Scan(&ambiguousCalls); err != nil {
 		t.Fatal(err)
 	}
+	if err := pool.QueryRow(ctx, `SELECT count(*)::int FROM code_edges e
+		JOIN code_nodes source ON source.id = e.source_id
+		JOIN code_nodes target ON target.id = e.target_id
+		WHERE e.repo_id = $1 AND source.name = 'Caller'
+		  AND target.name = 'unresolved:Missing.Handle' AND e.kind = 'calls'`, repoID).Scan(&unresolvedQualifiedCalls); err != nil {
+		t.Fatal(err)
+	}
 	if err := pool.QueryRow(ctx, `SELECT count(*)::int FROM graph_index_generations WHERE repo_id = $1 AND status = 'building'`, repoID).Scan(&buildingCount); err != nil {
 		t.Fatal(err)
 	}
 	if err := pool.QueryRow(ctx, `SELECT count(*)::int FROM graph_index_generation_files WHERE generation_id = $1`, snapshot.GenerationID).Scan(&stagedPayloads); err != nil {
 		t.Fatal(err)
 	}
-	if status != "published" || methodCount != 2 || qualifiedCallerCalls != 2 || qualifiedSourceCalls != 2 || ambiguousCalls != 1 || buildingCount != 0 || stagedPayloads != 0 {
-		t.Fatalf("published duplicate fixture: status=%s methods=%d caller_calls=%d source_calls=%d ambiguous=%d building=%d staged=%d", status, methodCount, qualifiedCallerCalls, qualifiedSourceCalls, ambiguousCalls, buildingCount, stagedPayloads)
+	if status != "published" || methodCount != 2 || qualifiedCallerCalls != 2 || qualifiedSourceCalls != 2 || ambiguousCalls != 1 || unresolvedQualifiedCalls != 1 || buildingCount != 0 || stagedPayloads != 0 {
+		t.Fatalf("published duplicate fixture: status=%s methods=%d caller_calls=%d source_calls=%d ambiguous=%d unresolved_qualified=%d building=%d staged=%d", status, methodCount, qualifiedCallerCalls, qualifiedSourceCalls, ambiguousCalls, unresolvedQualifiedCalls, buildingCount, stagedPayloads)
 	}
 }
 
@@ -1375,5 +1443,27 @@ func TestForEachStagedGraphFileFetchesBoundedBatches(t *testing.T) {
 	}
 	if err := tx.QueryRow(ctx, `SELECT 1`).Scan(&one); err != nil || one != 1 {
 		t.Fatalf("query after canceled cursor = %d, %v", one, err)
+	}
+}
+
+func TestListReposDueForGraphIndexSelectsLegacyRecentTimestampWithoutPublishedAuthority(t *testing.T) {
+	pool, ctx := generationTestPool(t)
+	st := store.NewWithDB(pool)
+	installationID := generationSeedInstallation(t, ctx, pool, "{}")
+	repoID := generationSeedRepo(t, ctx, pool, installationID, "upgrade/legacy-recent")
+	generationSeedNode(t, ctx, pool, repoID, "LegacyGraphRow", "legacy.go")
+	if _, err := pool.Exec(ctx, `
+		UPDATE repos SET enabled = true, graph_indexed_at = NOW(), graph_published_generation_id = NULL
+		WHERE id = $1`, repoID); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = pool.Exec(ctx, `UPDATE repos SET enabled = false WHERE id = $1`, repoID) })
+
+	targets, err := st.ListReposDueForGraphIndex(ctx, 14*24*time.Hour, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsGraphTarget(targets, repoID, "main") {
+		t.Fatalf("legacy repo with recent timestamp and null generation authority not immediately due: %+v", targets)
 	}
 }

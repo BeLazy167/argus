@@ -398,6 +398,26 @@ func TestResolveTypeEdges(t *testing.T) {
 	}
 }
 
+func TestDescribeNodeResolutionNeverFallsBackFromQualifiedName(t *testing.T) {
+	keyToID := map[string]int64{}
+	nameToIDs := map[string][]int64{
+		"Handle":       {11},
+		"Alpha.Handle": {11},
+	}
+	if id, status := describeNodeResolution("caller.go", "Missing.Handle", keyToID, nameToIDs); id != 0 || status != resolutionUnresolved {
+		t.Fatalf("qualified miss = (%d, %s), want unresolved", id, status)
+	}
+	if id, status := describeNodeResolution("caller.go", "Missing::Handle", keyToID, nameToIDs); id != 0 || status != resolutionUnresolved {
+		t.Fatalf("Rust/C++ qualified miss = (%d, %s), want unresolved", id, status)
+	}
+	if id, status := describeNodeResolution("caller.go", "Handle", keyToID, nameToIDs); id != 11 || status != resolutionResolved {
+		t.Fatalf("unqualified alias = (%d, %s), want (11, resolved)", id, status)
+	}
+	if id, status := describeNodeResolution("caller.go", "Alpha.Handle", keyToID, nameToIDs); id != 11 || status != resolutionResolved {
+		t.Fatalf("qualified exact = (%d, %s), want (11, resolved)", id, status)
+	}
+}
+
 func sortEdgeSlice(edges []Edge) {
 	sort.Slice(edges, func(i, j int) bool {
 		if edges[i].SourceName != edges[j].SourceName {

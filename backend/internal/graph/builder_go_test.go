@@ -389,3 +389,24 @@ func TestParseGoASTPreservesReceiverQualifiedMethodIdentity(t *testing.T) {
 		t.Fatalf("missing qualified call edges: %+v; got %+v", wantEdges, edges)
 	}
 }
+
+func TestParseGoASTMethodVisibilityUsesDeclarationName(t *testing.T) {
+	src := `package visibility
+
+type worker struct{}
+
+func (worker) Exported() {}
+func (worker) hidden() {}
+`
+	syms, _ := parseGoAST("visibility.go", src)
+	byName := make(map[string]Symbol, len(syms))
+	for _, sym := range syms {
+		byName[sym.Name] = sym
+	}
+	if got := byName["worker.Exported"].Visibility; got != "exported" {
+		t.Fatalf("worker.Exported visibility = %q, want exported", got)
+	}
+	if got := byName["worker.hidden"].Visibility; got != "unexported" {
+		t.Fatalf("worker.hidden visibility = %q, want unexported", got)
+	}
+}

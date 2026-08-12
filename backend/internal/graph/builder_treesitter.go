@@ -106,7 +106,7 @@ func walkNodeDepth(n *gotreesitter.Node, lang *gotreesitter.Language, source []b
 	case "function_declaration", "generator_function_declaration", "function",
 		"function_definition", "function_item":
 		// Python: function_definition with self/cls first param is a method
-		if kind == "function_definition" && isPythonMethod(n, lang, source) {
+		if kind == "function_definition" && isPythonMethod(n, lang) {
 			extractMethodSymbol(n, lang, source, filePath, syms, edges)
 		} else {
 			extractFuncSymbol(n, lang, source, filePath, "function", syms, edges)
@@ -760,17 +760,18 @@ func countParams(paramsText string) int {
 	return strings.Count(t, ",") + 1
 }
 
-// isPythonMethod detects if a function_definition is a method by checking
-// if its first parameter is "self" or "cls" (Python convention).
-func isPythonMethod(n *gotreesitter.Node, lang *gotreesitter.Language, source []byte) bool {
-	paramsNode := n.ChildByFieldName("parameters", lang)
-	if paramsNode == nil {
-		return false
-	}
-	for _, child := range paramsNode.Children() {
-		if child.IsNamed() {
-			text := child.Text(source)
-			return text == "self" || text == "cls"
+// isPythonMethod classifies by lexical ownership, not by a conventional
+// receiver parameter. Static methods and methods with a nonstandard first
+// parameter are still methods; a top-level function named self is not.
+func isPythonMethod(n *gotreesitter.Node, lang *gotreesitter.Language) bool {
+	for parent := n.Parent(); parent != nil; parent = parent.Parent() {
+		switch parent.Type(lang) {
+		case "class_definition":
+			return true
+		case "function_definition", "lambda":
+			// The nearest declaration is another function, so n is a nested
+			// local function rather than a method of an outer class.
+			return false
 		}
 	}
 	return false

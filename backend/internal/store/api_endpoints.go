@@ -261,24 +261,21 @@ func (s *Store) LookupCodeNodeIDsByName(ctx context.Context, repoID int64, names
 		return map[string]int64{}, nil
 	}
 	rows, err := s.Pool.Query(ctx, `
-		WITH requested(name, simple_name, qualified) AS (
-			SELECT name, regexp_replace(name, '^.*\.', ''), strpos(name, '.') > 0
+		WITH requested(name, qualified) AS (
+			SELECT name, strpos(name, '.') > 0 OR strpos(name, '::') > 0
 			FROM unnest($2::text[]) name
 		), matches AS (
-			SELECT requested.name AS requested_name, requested.qualified, cn.id,
-				cn.name = requested.name AS exact
+			SELECT requested.name AS requested_name, cn.id
 			FROM requested
 			JOIN code_nodes cn ON cn.repo_id = $1 AND (
-				cn.name = requested.name OR cn.name LIKE ('%.' || requested.simple_name)
-			)
+				cn.name = requested.name OR (NOT requested.qualified AND (
+					right(cn.name, length(requested.name) + 1) = '.' || requested.name OR
+					right(cn.name, length(requested.name) + 2) = '::' || requested.name
+				)))
 		)
-		SELECT requested_name, CASE
-			WHEN qualified AND COUNT(*) FILTER (WHERE exact) = 1 THEN MIN(id) FILTER (WHERE exact)
-			WHEN qualified AND COUNT(*) FILTER (WHERE exact) > 1 THEN 0
-			WHEN COUNT(*) = 1 THEN MIN(id)
-			ELSE 0 END AS id
+		SELECT requested_name, CASE WHEN COUNT(*) = 1 THEN MIN(id) ELSE 0 END AS id
 		FROM matches
-		GROUP BY requested_name, qualified
+		GROUP BY requested_name
 		ORDER BY requested_name`, repoID, names)
 	if err != nil {
 		return nil, fmt.Errorf("lookup code node ids: %w", err)

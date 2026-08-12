@@ -105,15 +105,16 @@ func simpleSymbolName(name string) string {
 // for method nodes. Explicit type selectors (Alpha.Handle) are already stable.
 func qualifyScopedCall(target, owner string) string {
 	owner = receiverIdentity(owner)
-	if owner == "" {
-		return target
-	}
-	for _, prefix := range []string{"self.", "this.", "cls.", "Self::"} {
-		if strings.HasPrefix(target, prefix) {
-			return qualifySymbolName(owner, strings.TrimPrefix(target, prefix))
+	if owner != "" {
+		for _, prefix := range []string{"self.", "this.", "cls.", "Self::"} {
+			if strings.HasPrefix(target, prefix) {
+				return qualifySymbolName(owner, strings.TrimPrefix(target, prefix))
+			}
 		}
 	}
-	return target
+	// Rust and C++ spell explicit type/namespace selectors with ::, while
+	// persisted receiver identities use dots in every language.
+	return strings.ReplaceAll(target, "::", ".")
 }
 
 // --- Go patterns ---

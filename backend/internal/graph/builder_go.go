@@ -77,7 +77,9 @@ func funcDeclSymbol(fset *token.FileSet, filePath string, decl *ast.FuncDecl) Sy
 
 	params := formatFieldList(decl.Type.Params)
 	returnType := formatResults(decl.Type.Results)
-	vis := visibility(name)
+	// Qualification adds the receiver before the declaration name. Go export
+	// visibility is defined only by the declaration identifier itself.
+	vis := visibility(decl.Name.Name)
 	scope := "package"
 	if decl.Recv != nil {
 		scope = "method"

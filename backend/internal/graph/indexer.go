@@ -407,13 +407,10 @@ func describeNodeResolution(sourceFile, name string, keyToID map[string]int64, n
 	if id := keyToID[nodeKey(sourceFile, name)]; id != 0 {
 		return id, resolutionResolved
 	}
+	// Qualified references are authoritative: if Type.Handle is absent, a
+	// unique unrelated Handle must not silently become its target. Unqualified
+	// references already have their method aliases registered under name.
 	ids := nameToIDs[name]
-	// Parser selectors can carry a variable receiver (s.Handle) while nodes
-	// carry a type receiver (Server.Handle). Exact qualified identity wins;
-	// otherwise the final component may resolve only when globally unique.
-	if len(ids) == 0 && simpleSymbolName(name) != name {
-		ids = nameToIDs[simpleSymbolName(name)]
-	}
 	switch len(ids) {
 	case 0:
 		return 0, resolutionUnresolved

@@ -335,6 +335,41 @@ func TestLookupCodeNodeIDsByNameReturnsAmbiguousForQualifiedAliases(t *testing.T
 	}
 }
 
+func TestLookupCodeNodeIDsByNameQualifiedMissDoesNotFallBackAndAliasesAreLiteral(t *testing.T) {
+	pool, ctx := apiEndpointTestPool(t)
+	st := &Store{Pool: pool, q: db.New(pool)}
+	install := seedInstallation(t, ctx, pool, "{}")
+	repo := apiSeedRepo(t, ctx, pool, install, "acme/literal-aliases")
+
+	alphaRun := apiSeedNode(t, ctx, pool, repo, "Alpha.run", "alpha.go")
+	rustRun := apiSeedNode(t, ctx, pool, repo, "RustType::run", "lib.rs")
+	rustOnly := apiSeedNode(t, ctx, pool, repo, "RustType::rust_only", "lib.rs")
+	underscore := apiSeedNode(t, ctx, pool, repo, "Type.handle_one", "underscore.go")
+	percent := apiSeedNode(t, ctx, pool, repo, "Type.handle%one", "percent.go")
+	apiSeedNode(t, ctx, pool, repo, "Type.handleXone", "wildcards.go")
+
+	ids, err := st.LookupCodeNodeIDsByName(ctx, repo, []string{
+		"Missing.run", "Missing::run", "Alpha.run", "RustType::run",
+		"rust_only", "handle_one", "handle%one",
+	})
+	if err != nil {
+		t.Fatalf("lookup: %v", err)
+	}
+	for _, missing := range []string{"Missing.run", "Missing::run"} {
+		if id, ok := ids[missing]; ok {
+			t.Fatalf("qualified miss %q resolved to %d", missing, id)
+		}
+	}
+	for name, want := range map[string]int64{
+		"Alpha.run": alphaRun, "RustType::run": rustRun, "rust_only": rustOnly,
+		"handle_one": underscore, "handle%one": percent,
+	} {
+		if got := ids[name]; got != want {
+			t.Errorf("%s = %d, want %d", name, got, want)
+		}
+	}
+}
+
 func TestInferredEdgeProvenance(t *testing.T) {
 	pool, ctx := apiEndpointTestPool(t)
 	st := &Store{Pool: pool, q: db.New(pool)}

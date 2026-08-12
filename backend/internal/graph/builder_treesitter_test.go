@@ -524,3 +524,68 @@ class Beta:
 		t.Fatalf("nested class identities collapsed: %+v", syms)
 	}
 }
+
+func TestTreeSitterPythonUsesLexicalClassOwnershipForMethods(t *testing.T) {
+	src := `def top_level(self):
+    pass
+
+class Handler:
+    @staticmethod
+    def parse(value):
+        return Helper.build(value)
+
+    def dispatch(request):
+        return Worker.run(request)
+`
+	syms, edges := parseTreeSitter("handlers.py", src)
+	byName := make(map[string]Symbol, len(syms))
+	for _, sym := range syms {
+		byName[sym.Name] = sym
+	}
+	for _, name := range []string{"Handler.parse", "Handler.dispatch"} {
+		if sym, ok := byName[name]; !ok || sym.Kind != KindMethod || sym.Receiver != "Handler" {
+			t.Errorf("%s = %+v, want class-qualified method", name, sym)
+		}
+	}
+	if sym, ok := byName["top_level"]; !ok || sym.Kind != KindFunction || sym.Receiver != "" {
+		t.Errorf("top_level = %+v, want package function", sym)
+	}
+	if _, ok := byName["Handler.top_level"]; ok {
+		t.Fatal("top-level self parameter incorrectly created a method")
+	}
+	for _, want := range []Edge{
+		{SourceName: "Handler.parse", TargetName: "Helper.build", Kind: EdgeCalls},
+		{SourceName: "Handler.dispatch", TargetName: "Worker.run", Kind: EdgeCalls},
+	} {
+		if !slices.Contains(edges, want) {
+			t.Errorf("missing canonical qualified edge %+v in %+v", want, edges)
+		}
+	}
+}
+
+func TestTreeSitterCanonicalizesRustScopeResolutionCalls(t *testing.T) {
+	src := `struct Worker {}
+impl Worker {
+    fn run() { Worker::finish(); }
+    fn finish() {}
+}`
+	_, edges := parseTreeSitter("worker.rs", src)
+	want := Edge{SourceName: "Worker.run", TargetName: "Worker.finish", Kind: EdgeCalls}
+	if !slices.Contains(edges, want) {
+		t.Fatalf("missing canonical edge %+v in %+v", want, edges)
+	}
+}
+
+func TestQualifyScopedCallCanonicalizesCppAndRustQualifiers(t *testing.T) {
+	for target, want := range map[string]string{
+		"Worker::finish":         "Worker.finish",
+		"namespace::Worker::run": "namespace.Worker.run",
+	} {
+		if got := qualifyScopedCall(target, ""); got != want {
+			t.Errorf("qualifyScopedCall(%q) = %q, want %q", target, got, want)
+		}
+	}
+	if got := qualifyScopedCall("Self::finish", "Worker"); got != "Worker.finish" {
+		t.Errorf("Self::finish = %q, want Worker.finish", got)
+	}
+}

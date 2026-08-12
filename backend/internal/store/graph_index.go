@@ -136,7 +136,8 @@ func (s *Store) ListReposDueForGraphIndex(ctx context.Context, staleAfter time.D
 		  AND (EXISTS (
 		        SELECT 1 FROM graph_index_generations building
 		        WHERE building.repo_id = r.id AND building.status = 'building'
-		      ) OR ((r.graph_indexed_at IS NULL OR r.graph_indexed_at < NOW() - $1::interval)
+		      ) OR ((r.graph_published_generation_id IS NULL OR r.graph_indexed_at IS NULL OR
+		             r.graph_indexed_at < NOW() - $1::interval)
 		        AND NOT EXISTS (
 		          SELECT 1 FROM graph_index_generations failed
 		          WHERE failed.repo_id = r.id AND failed.status = 'failed'

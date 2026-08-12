@@ -568,20 +568,28 @@ func TestIndexParsedSymbols_IncrementalDBFallbackKeepsQualifiedAndAmbiguousMetho
 			edges: []Edge{
 				{SourceName: "Caller", TargetName: "Alpha.Handle", Kind: EdgeCalls},
 				{SourceName: "Caller", TargetName: "Handle", Kind: EdgeCalls},
+				{SourceName: "Caller", TargetName: "Missing.Handle", Kind: EdgeCalls},
 			},
 		},
 	}
 	if err := indexParsedSymbols(context.Background(), st, 42, results); err != nil {
 		t.Fatalf("indexParsedSymbols: %v", err)
 	}
-	if len(st.upsertPlain) != 1 || st.upsertPlain[0].name != "ambiguous:Handle" {
-		t.Fatalf("placeholders = %+v, want ambiguous:Handle", st.upsertPlain)
+	placeholderIDs := map[string]int64{}
+	for _, placeholder := range st.upsertPlain {
+		placeholderIDs[placeholder.name] = placeholder.id
+	}
+	for _, name := range []string{"ambiguous:Handle", "unresolved:Missing.Handle"} {
+		if placeholderIDs[name] == 0 {
+			t.Fatalf("placeholders = %+v, missing %s", st.upsertPlain, name)
+		}
 	}
 	gotTargets := map[int64]bool{}
 	for _, edge := range st.upsertEdges {
 		gotTargets[edge.targetID] = true
 	}
-	if !gotTargets[77] || !gotTargets[st.upsertPlain[0].id] || len(gotTargets) != 2 {
-		t.Fatalf("incremental targets = %+v, want qualified node 77 and ambiguity placeholder", st.upsertEdges)
+	if !gotTargets[77] || !gotTargets[placeholderIDs["ambiguous:Handle"]] ||
+		!gotTargets[placeholderIDs["unresolved:Missing.Handle"]] || len(gotTargets) != 3 {
+		t.Fatalf("incremental targets = %+v, want exact, ambiguous, and unresolved targets", st.upsertEdges)
 	}
 }
