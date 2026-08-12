@@ -2717,6 +2717,15 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	if !current {
 		return context.Canceled
 	}
+
+	// Crash recovery must discover a durable GitHub id before repeating any
+	// pre-post LLM or memory mutation. This is read-only: the worker still joins
+	// CompletePostedReview below so exactly one contender wins every follow-up.
+	recordedReviewID, postAlreadyRecorded, err := o.st.GetRecordedReviewID(ctx, run.ReviewID, run.AttemptGeneration)
+	if err != nil {
+		return err
+	}
+
 	// Final cancel guard: a Stop that landed after the last stage-boundary
 	// cooperative check must still keep us from posting. Never post a review the
 	// user cancelled. Returning context.Canceled routes Run through
@@ -2776,107 +2785,111 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 			"total", counts.InlineCandidates, "cap", maxInlineComments, "dropped", counts.CapOverflow)
 	}
 
-	// Persist review data BEFORE posting to GitHub so a 502 doesn't lose results
-	var tokenUsageJSON []byte
-	if run.Tokens.Total.TotalTokens > 0 {
-		if b, err := json.Marshal(&run.Tokens); err != nil {
-			slog.Warn("failed to marshal token usage", "error", err)
-		} else {
-			tokenUsageJSON = b
+	if !postAlreadyRecorded {
+		// Persist review data BEFORE posting to GitHub so a 502 doesn't lose results
+		var tokenUsageJSON []byte
+		if run.Tokens.Total.TotalTokens > 0 {
+			if b, err := json.Marshal(&run.Tokens); err != nil {
+				slog.Warn("failed to marshal token usage", "error", err)
+			} else {
+				tokenUsageJSON = b
+			}
 		}
-	}
-	persona := strPtrOrNil(string(run.Persona))
-	simResultsJSON, simErr := json.Marshal(run.Synthesis.SimulationResults)
-	if simErr != nil {
-		o.logger.Warn("failed to marshal simulation results", "error", simErr)
-		simResultsJSON = nil
-	}
-	var truncatedFilesJSON []byte
-	if len(run.TruncatedFiles) > 0 {
-		truncatedFilesJSON, _ = json.Marshal(run.TruncatedFiles)
-	}
-	var contractJSON []byte
-	if run.Contract != nil {
-		// Resolve a still-pending contract (intent stage fast-exited) to the
-		// production default before persisting, so the stored value matches the
-		// treat-empty-as-production behavior consumers already assume.
-		run.Contract.Finalize()
-		if b, err := json.Marshal(run.Contract); err != nil {
-			o.logger.Warn("failed to marshal review contract", "error", err)
-		} else {
-			contractJSON = b
+		persona := strPtrOrNil(string(run.Persona))
+		simResultsJSON, simErr := json.Marshal(run.Synthesis.SimulationResults)
+		if simErr != nil {
+			o.logger.Warn("failed to marshal simulation results", "error", simErr)
+			simResultsJSON = nil
 		}
-	}
-	_, dbErr := o.db.Exec(ctx, `
+		var truncatedFilesJSON []byte
+		if len(run.TruncatedFiles) > 0 {
+			truncatedFilesJSON, _ = json.Marshal(run.TruncatedFiles)
+		}
+		var contractJSON []byte
+		if run.Contract != nil {
+			// Resolve a still-pending contract (intent stage fast-exited) to the
+			// production default before persisting, so the stored value matches the
+			// treat-empty-as-production behavior consumers already assume.
+			run.Contract.Finalize()
+			if b, err := json.Marshal(run.Contract); err != nil {
+				o.logger.Warn("failed to marshal review contract", "error", err)
+			} else {
+				contractJSON = b
+			}
+		}
+		_, dbErr := o.db.Exec(ctx, `
 		UPDATE reviews SET summary = $1, score = $2, token_usage = $3, file_count = $4,
 		       deep_review = $5, persona = $6, is_incremental = $7, simulation_results = $8,
 		       truncated_files = $9, brief = $10, review_contract = $11
 		WHERE id = $12 AND attempt_generation = $13
 	`, run.Synthesis.Summary, run.Synthesis.Score, tokenUsageJSON, len(run.FileReviews),
-		run.DeepReview, persona, run.IsIncremental, simResultsJSON, truncatedFilesJSON,
-		run.Synthesis.Brief, contractJSON, run.ReviewID, run.AttemptGeneration)
-	if dbErr != nil {
-		o.logger.Error("pre-post DB update failed — review data at risk if PostReview also fails",
-			"error", dbErr, "review_id", run.ReviewID)
-	}
+			run.DeepReview, persona, run.IsIncremental, simResultsJSON, truncatedFilesJSON,
+			run.Synthesis.Brief, contractJSON, run.ReviewID, run.AttemptGeneration)
+		if dbErr != nil {
+			o.logger.Error("pre-post DB update failed — review data at risk if PostReview also fails",
+				"error", dbErr, "review_id", run.ReviewID)
+		}
 
-	minorNotes := make([]store.ReviewMinorNote, 0, len(run.MinorNotes))
-	for _, note := range run.MinorNotes {
-		minorNotes = append(minorNotes, store.ReviewMinorNote{FilePath: note.Path, Line: note.Line, Severity: string(note.Severity), Title: note.Title})
-	}
-	if err := o.st.ReplaceReviewMinorNotes(ctx, run.ReviewID, run.AttemptGeneration, minorNotes); err != nil {
-		if errors.Is(err, store.ErrReviewAttemptStale) {
+		minorNotes := make([]store.ReviewMinorNote, 0, len(run.MinorNotes))
+		for _, note := range run.MinorNotes {
+			minorNotes = append(minorNotes, store.ReviewMinorNote{FilePath: note.Path, Line: note.Line, Severity: string(note.Severity), Title: note.Title})
+		}
+		if err := o.st.ReplaceReviewMinorNotes(ctx, run.ReviewID, run.AttemptGeneration, minorNotes); err != nil {
+			if errors.Is(err, store.ErrReviewAttemptStale) {
+				return context.Canceled
+			}
+			o.logger.Error("persisting minor notes", "error", err, "review_id", run.ReviewID)
+		}
+
+		// Persist comments to DB BEFORE posting to GitHub.
+		// If PostReview fails (403 rate limit, 502, etc.), comments are still
+		// visible on the dashboard. ghReviewID=0 means github_comment_id is nil
+		// for now — backfilled after successful post.
+		// Guard: skip if comments already persisted (retry after post failure).
+		var existingComments int
+		_ = o.db.QueryRow(ctx, `SELECT COUNT(*) FROM review_comments WHERE review_id = $1 AND attempt_generation = $2`, run.ReviewID, run.AttemptGeneration).Scan(&existingComments)
+		if existingComments == 0 {
+			if err := o.indexComments(ctx, run, 0, owner, repo); err != nil {
+				return err
+			}
+		}
+		current, err = o.st.IsReviewAttemptCurrent(ctx, run.ReviewID, run.AttemptGeneration)
+		if err != nil {
+			return fmt.Errorf("checking review attempt before learning: %w", err)
+		}
+		if !current {
 			return context.Canceled
 		}
-		o.logger.Error("persisting minor notes", "error", err, "review_id", run.ReviewID)
-	}
 
-	// Persist comments to DB BEFORE posting to GitHub.
-	// If PostReview fails (403 rate limit, 502, etc.), comments are still
-	// visible on the dashboard. ghReviewID=0 means github_comment_id is nil
-	// for now — backfilled after successful post.
-	// Guard: skip if comments already persisted (retry after post failure).
-	var existingComments int
-	_ = o.db.QueryRow(ctx, `SELECT COUNT(*) FROM review_comments WHERE review_id = $1 AND attempt_generation = $2`, run.ReviewID, run.AttemptGeneration).Scan(&existingComments)
-	if existingComments == 0 {
-		if err := o.indexComments(ctx, run, 0, owner, repo); err != nil {
-			return err
-		}
-	}
-	current, err = o.st.IsReviewAttemptCurrent(ctx, run.ReviewID, run.AttemptGeneration)
-	if err != nil {
-		return fmt.Errorf("checking review attempt before learning: %w", err)
-	}
-	if !current {
-		return context.Canceled
-	}
+		// Pre-post memory sinks: pattern learning, convention extraction, file-memory
+		// synthesis, and PR/architecture summary indexing. Run BEFORE PostReview so a
+		// 403/502 there doesn't lose them. Detached from ctx so a post-review cancel
+		// doesn't skip indexing; each sink is panic-isolated by RunAll (one exploding
+		// indexer must not abort the others or the completion write).
+		prePostCtx := context.WithoutCancel(ctx)
+		o.indexer().RunAll(prePostCtx, run, owner, repo, "pre_post", []memorySink{
+			{name: "indexConfirmedPatterns", run: o.indexConfirmedPatterns},
+			{name: "autoLearnPatterns", enabled: func(r *PipelineRun) bool { return r.LearnPatterns }, run: o.autoLearnPatterns},
+			{name: "learnPositivePatterns", enabled: func(r *PipelineRun) bool { return r.LearnPatterns }, run: func(ctx context.Context, r *PipelineRun, owner, repo string) {
+				o.learnPositivePatterns(ctx, r, owner, repo)
+			}},
+			{name: "extractConventions", enabled: func(r *PipelineRun) bool { return r.LearnConventions }, run: o.extractConventions},
+			{name: "synthesizeFileMemories", enabled: func(r *PipelineRun) bool { return r.FileSynthesis }, run: o.synthesizeFileMemories},
+			{name: "indexPRSummary", run: o.indexPRSummary},
+			{name: "indexArchitectureSummary", run: o.indexArchitectureSummary},
+		})
 
-	// Pre-post memory sinks: pattern learning, convention extraction, file-memory
-	// synthesis, and PR/architecture summary indexing. Run BEFORE PostReview so a
-	// 403/502 there doesn't lose them. Detached from ctx so a post-review cancel
-	// doesn't skip indexing; each sink is panic-isolated by RunAll (one exploding
-	// indexer must not abort the others or the completion write).
-	prePostCtx := context.WithoutCancel(ctx)
-	o.indexer().RunAll(prePostCtx, run, owner, repo, "pre_post", []memorySink{
-		{name: "indexConfirmedPatterns", run: o.indexConfirmedPatterns},
-		{name: "autoLearnPatterns", enabled: func(r *PipelineRun) bool { return r.LearnPatterns }, run: o.autoLearnPatterns},
-		{name: "learnPositivePatterns", enabled: func(r *PipelineRun) bool { return r.LearnPatterns }, run: func(ctx context.Context, r *PipelineRun, owner, repo string) {
-			o.learnPositivePatterns(ctx, r, owner, repo)
-		}},
-		{name: "extractConventions", enabled: func(r *PipelineRun) bool { return r.LearnConventions }, run: o.extractConventions},
-		{name: "synthesizeFileMemories", enabled: func(r *PipelineRun) bool { return r.FileSynthesis }, run: o.synthesizeFileMemories},
-		{name: "indexPRSummary", run: o.indexPRSummary},
-		{name: "indexArchitectureSummary", run: o.indexArchitectureSummary},
-	})
-
-	// "Learned: …" footnote. Appended here rather than inside Compose because
-	// the memory sinks only just finished: Compose runs before them (it must,
-	// so the posted token breakdown reports the review's own spend), and a
-	// count taken there would always read zero. The tally is read BACK from the
-	// memories table, so the line reports rows that actually landed rather than
-	// writes that were attempted — which is the whole point, since a failed
-	// index only logs at Warn.
-	appendLearnedLine(prePostCtx, o.st, run, &submission, o.logger)
+		// "Learned: …" footnote. Appended here rather than inside Compose because
+		// the memory sinks only just finished: Compose runs before them (it must,
+		// so the posted token breakdown reports the review's own spend), and a
+		// count taken there would always read zero. The tally is read BACK from the
+		// memories table, so the line reports rows that actually landed rather than
+		// writes that were attempted — which is the whole point, since a failed
+		// index only logs at Warn.
+		appendLearnedLine(prePostCtx, o.st, run, &submission, o.logger)
+	} else {
+		o.logger.Warn("review post id recovered before pre-post enrichment; skipping repeat sinks", "review_id", run.ReviewID, "attempt_generation", run.AttemptGeneration, "github_review_id", recordedReviewID)
+	}
 
 	// Final cancel guard, immediately before the GitHub post: the pre-post
 	// enrichment block above runs for seconds, and a cross-machine Stop landing
@@ -2890,18 +2903,22 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 
 	// PostReview is non-idempotent, so a scalar generation check is not enough:
 	// retry/cancel could advance the row after the check but before GitHub returns.
-	// The store holds this review row's attempt authority across only the external
-	// call and writes the returned id through that same transaction. Preparation,
-	// memory indexing, and comment persistence above remain outside the lock.
-	ghReviewID, postOutcome, err := o.st.PostReviewForAttempt(ctx, run.ReviewID, run.AttemptGeneration, func(postCtx context.Context) (int64, error) {
-		return o.ghClient.PostReview(
-			postCtx,
-			run.PREvent.InstallationID,
-			owner, repo,
-			run.PREvent.PRNumber,
-			&submission.GitHub,
-		)
-	})
+	// The store holds per-review session authority across its durable claim,
+	// external call, evidence write, and repair; its row lock spans the external
+	// call itself. Preparation and memory indexing remain outside that boundary.
+	ghReviewID := recordedReviewID
+	postOutcome := store.ReviewPostAlreadyRecorded
+	if !postAlreadyRecorded {
+		ghReviewID, postOutcome, err = o.st.PostReviewForAttempt(ctx, run.ReviewID, run.AttemptGeneration, func(postCtx context.Context) (int64, error) {
+			return o.ghClient.PostReview(
+				postCtx,
+				run.PREvent.InstallationID,
+				owner, repo,
+				run.PREvent.PRNumber,
+				&submission.GitHub,
+			)
+		})
+	}
 	if err != nil {
 		if errors.Is(err, store.ErrReviewPostPersistenceAmbiguous) {
 			// Preserve the durable retry-block marker at the start of reviews.error.

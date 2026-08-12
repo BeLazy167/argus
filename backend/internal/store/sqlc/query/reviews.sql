@@ -113,7 +113,12 @@ AND r.created_at >= date_trunc('month', NOW());
 -- name: UpdateReviewStatus :exec
 UPDATE reviews
 SET status = sqlc.arg(status)::text,
-    error = sqlc.narg(error)::text,
+    error = CASE
+        WHEN error LIKE sqlc.arg(protected_error_prefix)::text || '%'
+         AND COALESCE(sqlc.narg(error)::text, '') NOT LIKE sqlc.arg(protected_error_prefix)::text || '%'
+        THEN error
+        ELSE sqlc.narg(error)::text
+    END,
     token_usage = COALESCE(sqlc.narg(token_usage)::jsonb, token_usage),
     completed_at = CASE WHEN sqlc.arg(status)::text IN ('completed','failed') THEN NOW() ELSE NULL END
 WHERE id = sqlc.arg(id)::uuid;

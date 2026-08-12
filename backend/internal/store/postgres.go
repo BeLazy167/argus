@@ -22,7 +22,10 @@ type Store struct {
 	// that fences the non-idempotent GitHub review mutation. Production leaves
 	// it nil and uses Pool.Begin; PostgreSQL tests wrap a real transaction to
 	// simulate a lost UPDATE or COMMIT response.
-	beginReviewPostTx func(context.Context) (pgx.Tx, error)
+	beginReviewPostTx func(context.Context, *pgxpool.Conn) (pgx.Tx, error)
+	// unlockReviewPostSession injects an unconfirmed session-unlock result in
+	// PostgreSQL tests. Production executes pg_advisory_unlock directly.
+	unlockReviewPostSession func(context.Context, *pgxpool.Conn, string) (bool, error)
 }
 
 // NewWithDB builds a Store over any sqlc-compatible pool or transaction.

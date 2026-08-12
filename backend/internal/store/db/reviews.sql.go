@@ -1079,22 +1079,29 @@ func (q *Queries) UpdateReviewCrossPRHash(ctx context.Context, arg UpdateReviewC
 const updateReviewStatus = `-- name: UpdateReviewStatus :exec
 UPDATE reviews
 SET status = $1::text,
-    error = $2::text,
-    token_usage = COALESCE($3::jsonb, token_usage),
+    error = CASE
+        WHEN error LIKE $2::text || '%'
+         AND COALESCE($3::text, '') NOT LIKE $2::text || '%'
+        THEN error
+        ELSE $3::text
+    END,
+    token_usage = COALESCE($4::jsonb, token_usage),
     completed_at = CASE WHEN $1::text IN ('completed','failed') THEN NOW() ELSE NULL END
-WHERE id = $4::uuid
+WHERE id = $5::uuid
 `
 
 type UpdateReviewStatusParams struct {
-	Status     string    `json:"status"`
-	Error      *string   `json:"error"`
-	TokenUsage []byte    `json:"token_usage"`
-	ID         uuid.UUID `json:"id"`
+	Status               string    `json:"status"`
+	ProtectedErrorPrefix string    `json:"protected_error_prefix"`
+	Error                *string   `json:"error"`
+	TokenUsage           []byte    `json:"token_usage"`
+	ID                   uuid.UUID `json:"id"`
 }
 
 func (q *Queries) UpdateReviewStatus(ctx context.Context, arg UpdateReviewStatusParams) error {
 	_, err := q.db.Exec(ctx, updateReviewStatus,
 		arg.Status,
+		arg.ProtectedErrorPrefix,
 		arg.Error,
 		arg.TokenUsage,
 		arg.ID,
