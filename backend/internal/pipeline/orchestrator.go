@@ -4907,11 +4907,15 @@ func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghRe
 // Now the pairing runs in Go (pairCommentsToRows): each posted comment claims
 // exactly one row on its (path, line), preferring an exact body match, so
 // same-line findings bind to distinct rows and distinct threads.
+
+// postedReviewCommentLine returns the immutable post-time anchor used by the
+// persisted row. Reviews are pinned to the posting commit, while GitHub's line
+// can move as the PR head advances; original_line continues to match end_line.
 func postedReviewCommentLine(comment *gh.PullRequestComment) int {
-	if line := comment.GetLine(); line != 0 {
+	if line := comment.GetOriginalLine(); line != 0 {
 		return line
 	}
-	if line := comment.GetOriginalLine(); line != 0 {
+	if line := comment.GetLine(); line != 0 {
 		return line
 	}
 	return comment.GetPosition()
@@ -4979,7 +4983,15 @@ func (o *Orchestrator) backfillGitHubCommentIDs(ctx context.Context, run *Pipeli
 		if _, alreadyBound := bound[gc.GetID()]; alreadyBound {
 			continue
 		}
-		posted = append(posted, postedComment{GithubID: gc.GetID(), Path: gc.GetPath(), Line: postedReviewCommentLine(gc), Body: gc.GetBody()})
+		posted = append(posted, postedComment{
+			GithubID:     gc.GetID(),
+			Path:         gc.GetPath(),
+			Line:         postedReviewCommentLine(gc),
+			GitHubLine:   gc.GetLine(),
+			OriginalLine: gc.GetOriginalLine(),
+			Position:     gc.GetPosition(),
+			Body:         gc.GetBody(),
+		})
 	}
 	if len(unbound) != len(posted) {
 		return fmt.Errorf("backfilling GitHub comments: unbound manifest rows=%d unbound remote comments=%d", len(unbound), len(posted))

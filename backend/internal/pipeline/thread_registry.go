@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/BeLazy167/argus/backend/internal/store"
@@ -99,12 +100,16 @@ type unboundCommentRow struct {
 }
 
 // postedComment is one GitHub review comment ListReviewComments returned, to be
-// bound to exactly one unboundCommentRow.
+// bound to exactly one unboundCommentRow. The reported line fields are retained
+// so an anchor mismatch identifies the PR-level payload GitHub returned.
 type postedComment struct {
-	GithubID int64
-	Path     string
-	Line     int
-	Body     string
+	GithubID     int64
+	Path         string
+	Line         int
+	GitHubLine   int
+	OriginalLine int
+	Position     int
+	Body         string
 }
 
 // pairCommentsToRows binds each posted GitHub review comment to EXACTLY ONE
@@ -115,12 +120,12 @@ type postedComment struct {
 // finding B would resolve finding A's thread. Binding 1:1 keeps the
 // finding↔comment↔thread chain distinct even for same-line findings.
 //
-// Within a (path, line) group the preference is: an unclaimed EXACT body match
-// first (the posted body IS the stored body — formatCommentBody renders both),
-// then stable input order for the degenerate identical-body case. Each comment
-// claims its row, so the next same-line comment necessarily picks a different
-// row. Returns rowID → githubCommentID; a comment with no unclaimed row on its
-// (path, line) is skipped (leaves the row unbound, as before).
+// Within a (path, line) group, an unclaimed exact body match is required (the
+// posted body is the stored body — formatCommentBody renders both). Multiple
+// matches fail closed because choosing one could cross-wire finding threads.
+// Zero matches also fail closed: the manifest and unbound-count checks require
+// a complete 1:1 binding, so skipping would only defer the same integrity error
+// and hide the mismatched GitHub anchor. Returns rowID → githubCommentID.
 func normalizePostedCommentBody(body string) string {
 	body = strings.ReplaceAll(body, "\r\n", "\n")
 	lines := strings.Split(body, "\n")
@@ -151,7 +156,15 @@ func pairCommentsToRows(rows []unboundCommentRow, comments []postedComment) (map
 			}
 		}
 		if len(matches) != 1 {
-			return nil, fmt.Errorf("comment binding at %s:%d has %d normalized body matches", c.Path, c.Line, len(matches))
+			pathLines := make([]int, 0)
+			for candidateLoc := range byLoc {
+				if candidateLoc.path == c.Path {
+					pathLines = append(pathLines, candidateLoc.line)
+				}
+			}
+			slices.Sort(pathLines)
+			pathLines = slices.Compact(pathLines)
+			return nil, fmt.Errorf("comment binding at %s:%d has %d normalized body matches (github line=%d original_line=%d position=%d; stored candidate lines for path=%v)", c.Path, c.Line, len(matches), c.GitHubLine, c.OriginalLine, c.Position, pathLines)
 		}
 		picked := matches[0]
 		claimed[picked] = true

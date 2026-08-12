@@ -644,7 +644,9 @@ func (c *Client) listCommitsTouchingFileLogged(ctx context.Context, installation
 	return out, nil
 }
 
-// ListReviewComments returns all comments for a specific review, used to capture github_comment_ids after posting.
+// ListReviewComments returns all comments for a specific review, used to capture
+// github_comment_ids after posting. It uses the PR-level endpoint because the
+// legacy per-review endpoint omits modern line anchor fields.
 func (c *Client) listReviewCommentsLogged(ctx context.Context, installationID int64, owner, repo string, prNumber int, reviewID int64) ([]*gh.PullRequestComment, error) {
 
 	client, err := c.app.ClientForInstallation(installationID)
@@ -653,16 +655,20 @@ func (c *Client) listReviewCommentsLogged(ctx context.Context, installationID in
 	}
 
 	var all []*gh.PullRequestComment
-	opts := &gh.ListOptions{PerPage: 100}
+	opts := &gh.PullRequestListCommentsOptions{ListOptions: gh.ListOptions{PerPage: 100}}
 	for {
 		if err := c.restLimiter.Wait(ctx); err != nil {
 			return nil, fmt.Errorf("rate limit wait: %w", err)
 		}
-		comments, resp, err := client.PullRequests.ListReviewComments(ctx, owner, repo, prNumber, reviewID, opts)
+		comments, resp, err := client.PullRequests.ListComments(ctx, owner, repo, prNumber, opts)
 		if err != nil {
 			return nil, fmt.Errorf("listing review comments: %w", err)
 		}
-		all = append(all, comments...)
+		for _, comment := range comments {
+			if comment.GetPullRequestReviewID() == reviewID {
+				all = append(all, comment)
+			}
+		}
 		if resp.NextPage == 0 {
 			break
 		}

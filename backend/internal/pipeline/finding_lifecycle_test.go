@@ -10,6 +10,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 
 	ghpkg "github.com/BeLazy167/argus/backend/internal/github"
@@ -716,12 +717,40 @@ func TestPairCommentsToRows_IdenticalBodiesFailClosed(t *testing.T) {
 	}
 }
 
-func TestPairCommentsToRows_NoRowForCommentFailsClosed(t *testing.T) {
-	ra := uuid.New()
-	rows := []unboundCommentRow{{ID: ra, Path: "a.go", Line: 5, Body: "x"}}
-	comments := []postedComment{{GithubID: 99, Path: "b.go", Line: 9, Body: "y"}}
-	if got, err := pairCommentsToRows(rows, comments); err == nil || got != nil {
+func TestPairCommentsToRows_NoRowForCommentFailsClosedWithAnchorDetails(t *testing.T) {
+	ra, rb := uuid.New(), uuid.New()
+	rows := []unboundCommentRow{
+		{ID: ra, Path: "a.go", Line: 178, Body: "x"},
+		{ID: rb, Path: "a.go", Line: 184, Body: "y"},
+	}
+	comments := []postedComment{{GithubID: 99, Path: "a.go", Line: 31, GitHubLine: 31, OriginalLine: 30, Position: 31, Body: "y"}}
+	got, err := pairCommentsToRows(rows, comments)
+	if err == nil || got != nil {
 		t.Fatalf("unmatched pairing = %v, %v; want fail closed", got, err)
+	}
+	for _, detail := range []string{"github line=31 original_line=30 position=31", "stored candidate lines for path=[178 184]"} {
+		if !strings.Contains(err.Error(), detail) {
+			t.Errorf("error %q missing %q", err, detail)
+		}
+	}
+}
+
+func TestPairCommentsToRows_MultiLineCommentUsesEndLine(t *testing.T) {
+	id := uuid.New()
+	githubComment := &github.PullRequestComment{
+		StartLine: github.Ptr(178),
+		Line:      github.Ptr(184),
+		Position:  github.Ptr(31),
+	}
+	got, err := pairCommentsToRows(
+		[]unboundCommentRow{{ID: id, Path: "pkg/pay.go", Line: 184, Body: "multi-line finding"}},
+		[]postedComment{{GithubID: 101, Path: "pkg/pay.go", Line: postedReviewCommentLine(githubComment), Position: githubComment.GetPosition(), Body: "multi-line finding"}},
+	)
+	if err != nil {
+		t.Fatalf("pairing multi-line comment: %v", err)
+	}
+	if got[id] != 101 {
+		t.Fatalf("binding = %v, want stored end_line 184 bound to comment 101", got)
 	}
 }
 
@@ -733,13 +762,40 @@ func TestPairCommentsToRowsNormalizesCRLFAndTrailingWhitespace(t *testing.T) {
 	}
 }
 
-func TestPostedReviewCommentLinePrefersOutdatedOriginalLine(t *testing.T) {
+func TestPostedReviewCommentLinePrefersOriginalLine(t *testing.T) {
 	comment := &github.PullRequestComment{Line: github.Ptr(0), OriginalLine: github.Ptr(27), Position: github.Ptr(3)}
 	if got := postedReviewCommentLine(comment); got != 27 {
 		t.Fatalf("line=%d want original_line 27", got)
 	}
 	comment.Line = github.Ptr(31)
-	if got := postedReviewCommentLine(comment); got != 31 {
-		t.Fatalf("line=%d want current line 31", got)
+	if got := postedReviewCommentLine(comment); got != 27 {
+		t.Fatalf("shifted line=%d want immutable original_line 27", got)
+	}
+}
+
+func TestPairCommentsToRows_ShiftedAnchorUsesOriginalLine(t *testing.T) {
+	id := uuid.New()
+	githubComment := &github.PullRequestComment{
+		Line:         github.Ptr(146),
+		OriginalLine: github.Ptr(141),
+		Position:     github.Ptr(31),
+	}
+	got, err := pairCommentsToRows(
+		[]unboundCommentRow{{ID: id, Path: "view.go", Line: 141, Body: "shifted finding"}},
+		[]postedComment{{
+			GithubID:     202,
+			Path:         "view.go",
+			Line:         postedReviewCommentLine(githubComment),
+			GitHubLine:   githubComment.GetLine(),
+			OriginalLine: githubComment.GetOriginalLine(),
+			Position:     githubComment.GetPosition(),
+			Body:         "shifted finding",
+		}},
+	)
+	if err != nil {
+		t.Fatalf("pairing shifted comment: %v", err)
+	}
+	if got[id] != 202 {
+		t.Fatalf("binding = %v, want stored end_line 141 bound to comment 202", got)
 	}
 }
