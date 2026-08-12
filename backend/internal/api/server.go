@@ -38,56 +38,62 @@ type reviewRetryRunner interface {
 	RetryReview(context.Context, uuid.UUID, int) error
 }
 
+type reviewBindingRecoverer interface {
+	RecoverPostedReviewBindings(context.Context, uuid.UUID, int, int64) error
+}
+
 type Server struct {
-	router           chi.Router
-	store            *store.Store
-	memoryLister     memoryListStore
-	ghApp            *ghpkg.App
-	repoMetadata     repoMetadataClient
-	reviewPostLookup reviewPostLookup
-	reviewRetrier    reviewRetryRunner
-	orchestrator     *pipeline.Orchestrator
-	prEventHandler   prEventHandler
-	replyAnalyzer    *pipeline.ReplyAnalyzer
-	reactionAnalyzer *pipeline.ReactionAnalyzer
-	reactionSweeper  reactionSweeper
-	registry         *llm.Registry
-	eventBus         *pipeline.EventBus
-	webhookSecret    []byte
-	logger           *slog.Logger
-	rateLimiter      *RateLimiter
-	inflight         *inflight.Registry // per-PR in-flight slots + paired cancel fns
-	launcher         *pipeline.Launcher // shared slot/cancel/topic/spawn/rollback lifecycle
-	webhookSem       chan struct{}      // bounded concurrency for webhook goroutines
-	audit            *auditLogger
-	memRegistry      *memory.Registry
-	reembedMemories  func(context.Context, int64) (int, error)
-	cfg              *config.Config
-	commandRe        *regexp.Regexp // "@<app-slug> <command>" matcher, built from cfg.GitHubAppSlug
+	router                 chi.Router
+	store                  *store.Store
+	memoryLister           memoryListStore
+	ghApp                  *ghpkg.App
+	repoMetadata           repoMetadataClient
+	reviewPostLookup       reviewPostLookup
+	reviewRetrier          reviewRetryRunner
+	reviewBindingRecoverer reviewBindingRecoverer
+	orchestrator           *pipeline.Orchestrator
+	prEventHandler         prEventHandler
+	replyAnalyzer          *pipeline.ReplyAnalyzer
+	reactionAnalyzer       *pipeline.ReactionAnalyzer
+	reactionSweeper        reactionSweeper
+	registry               *llm.Registry
+	eventBus               *pipeline.EventBus
+	webhookSecret          []byte
+	logger                 *slog.Logger
+	rateLimiter            *RateLimiter
+	inflight               *inflight.Registry // per-PR in-flight slots + paired cancel fns
+	launcher               *pipeline.Launcher // shared slot/cancel/topic/spawn/rollback lifecycle
+	webhookSem             chan struct{}      // bounded concurrency for webhook goroutines
+	audit                  *auditLogger
+	memRegistry            *memory.Registry
+	reembedMemories        func(context.Context, int64) (int, error)
+	cfg                    *config.Config
+	commandRe              *regexp.Regexp // "@<app-slug> <command>" matcher, built from cfg.GitHubAppSlug
 }
 
 func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchestrator, replyAnalyzer *pipeline.ReplyAnalyzer, reactionAnalyzer *pipeline.ReactionAnalyzer, registry *llm.Registry, eventBus *pipeline.EventBus, cfg *config.Config, logger *slog.Logger, memRegistry *memory.Registry) *Server {
 	githubClient := ghpkg.NewClient(ghApp, cfg.GitHubAppSlug)
 	s := &Server{
-		store:            st,
-		memoryLister:     st,
-		ghApp:            ghApp,
-		repoMetadata:     githubClient,
-		reviewPostLookup: githubClient,
-		reviewRetrier:    orchestrator,
-		orchestrator:     orchestrator,
-		replyAnalyzer:    replyAnalyzer,
-		reactionAnalyzer: reactionAnalyzer,
-		registry:         registry,
-		eventBus:         eventBus,
-		webhookSecret:    []byte(cfg.GitHubWebhookSecret),
-		logger:           logger,
-		rateLimiter:      NewRateLimiter(),
-		webhookSem:       make(chan struct{}, 50),
-		audit:            newAuditLogger(logger),
-		memRegistry:      memRegistry,
-		cfg:              cfg,
-		commandRe:        commandRe(cfg.GitHubAppSlug),
+		store:                  st,
+		memoryLister:           st,
+		ghApp:                  ghApp,
+		repoMetadata:           githubClient,
+		reviewPostLookup:       githubClient,
+		reviewRetrier:          orchestrator,
+		reviewBindingRecoverer: orchestrator,
+		orchestrator:           orchestrator,
+		replyAnalyzer:          replyAnalyzer,
+		reactionAnalyzer:       reactionAnalyzer,
+		registry:               registry,
+		eventBus:               eventBus,
+		webhookSecret:          []byte(cfg.GitHubWebhookSecret),
+		logger:                 logger,
+		rateLimiter:            NewRateLimiter(),
+		webhookSem:             make(chan struct{}, 50),
+		audit:                  newAuditLogger(logger),
+		memRegistry:            memRegistry,
+		cfg:                    cfg,
+		commandRe:              commandRe(cfg.GitHubAppSlug),
 	}
 	if orchestrator != nil {
 		s.prEventHandler = orchestrator

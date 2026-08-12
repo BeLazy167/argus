@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -22,6 +23,7 @@ import (
 )
 
 type postLookupStub struct {
+	mu                        sync.Mutex
 	id                        int64
 	found                     bool
 	err                       error
@@ -31,6 +33,8 @@ type postLookupStub struct {
 }
 
 func (f *postLookupStub) FindReviewByMarker(_ context.Context, installationID int64, owner, repo string, pr int, marker, head string) (int64, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.installationID, f.owner, f.repo, f.pr, f.marker, f.head = installationID, owner, repo, pr, marker, head
 	return f.id, f.found, f.err
 }
@@ -59,7 +63,7 @@ func TestReconcileAmbiguousReviewPost(t *testing.T) {
 
 	t.Run("committed response loss attaches exact remote id with tenant scope", func(t *testing.T) {
 		lookup := &postLookupStub{id: 9911, found: true}
-		srv := &Server{store: store.NewWithDB(pool), reviewPostLookup: lookup, logger: logger}
+		srv := &Server{store: store.NewWithDB(pool), reviewPostLookup: lookup, reviewBindingRecoverer: &reviewBindingRecovererStub{}, logger: logger}
 		outcome, err := srv.reconcileAmbiguousReviewPost(ctx, review, repo, githubInstallationID, "user-1")
 		if err != nil || outcome != reviewPostAlreadyDelivered {
 			t.Fatalf("outcome=%q err=%v", outcome, err)
@@ -139,6 +143,23 @@ func (r *reviewRetryRunnerStub) RetryReview(_ context.Context, _ uuid.UUID, gene
 	return context.Canceled
 }
 
+type reviewBindingRecovererStub struct {
+	mu       sync.Mutex
+	failures int
+	calls    int
+}
+
+func (r *reviewBindingRecovererStub) RecoverPostedReviewBindings(context.Context, uuid.UUID, int, int64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls++
+	if r.failures > 0 {
+		r.failures--
+		return errors.New("binding enumeration unavailable")
+	}
+	return nil
+}
+
 func retryReviewRequest(ctx context.Context, reviewID uuid.UUID) *http.Request {
 	routeCtx := chi.NewRouteContext()
 	routeCtx.URLParams.Add("reviewID", reviewID.String())
@@ -196,20 +217,39 @@ func TestRetryReviewReconciliationFoundShortCircuitsAndAbsenceLaunches(t *testin
 				terminalEvents.Add(1)
 			}
 		})
+		recoverer := &reviewBindingRecovererStub{failures: 1}
 		srv := &Server{
-			store:            store.NewWithDB(pool),
-			reviewPostLookup: &postLookupStub{id: 90041, found: true},
-			eventBus:         eventBus,
-			logger:           logger,
+			store:                  store.NewWithDB(pool),
+			reviewPostLookup:       &postLookupStub{id: 90041, found: true},
+			reviewBindingRecoverer: recoverer,
+			eventBus:               eventBus,
+			logger:                 logger,
 			// Deliberately nil: reaching the normal retry precheck or launcher is
 			// a test failure by panic. Positive reconciliation must return first.
 			reviewRetrier: nil,
 			launcher:      nil,
 		}
+		first := httptest.NewRecorder()
+		srv.retryReview(first, retryReviewRequest(ctx, reviewID))
+		if first.Code != http.StatusConflict {
+			t.Fatalf("first status=%d body=%s", first.Code, first.Body.String())
+		}
+		var firstStoredID int64
+		var firstStatus string
+		if err := pool.QueryRow(ctx, `SELECT github_review_id,status FROM reviews WHERE id=$1`, reviewID).Scan(&firstStoredID, &firstStatus); err != nil {
+			t.Fatal(err)
+		}
+		if firstStoredID != 90041 || firstStatus != "failed" {
+			t.Fatalf("after failed binding: id=%d status=%q", firstStoredID, firstStatus)
+		}
+		if reviewCompletedEvents.Load() != 0 || postedEvents.Load() != 0 || terminalEvents.Load() != 0 {
+			t.Fatalf("failed binding emitted events: review=%d posted=%d terminal=%d", reviewCompletedEvents.Load(), postedEvents.Load(), terminalEvents.Load())
+		}
+
 		rr := httptest.NewRecorder()
 		srv.retryReview(rr, retryReviewRequest(ctx, reviewID))
 		if rr.Code != http.StatusOK {
-			t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+			t.Fatalf("retry status=%d body=%s", rr.Code, rr.Body.String())
 		}
 		var body map[string]string
 		if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
@@ -254,6 +294,66 @@ func TestRetryReviewReconciliationFoundShortCircuitsAndAbsenceLaunches(t *testin
 		}
 		if audits != 1 {
 			t.Fatalf("reconciliation audits=%d, want 1", audits)
+		}
+	})
+
+	t.Run("concurrent positive recovery emits one terminal lifecycle", func(t *testing.T) {
+		reviewID := uuid.New()
+		claim := store.ErrReviewPostPersistenceAmbiguous.Error() + ": concurrent recovery"
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO reviews(id,repo_id,pr_number,pr_title,pr_author,head_sha,base_sha,status,error,attempt_generation,review_post_claimed_at)
+			VALUES($1,$2,43,'title','author','head-43','base','failed',$3,6,NOW())
+		`, reviewID, repoID, claim); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DELETE FROM reviews WHERE id=$1`, reviewID) })
+		review, err := store.NewWithDB(pool).GetReview(ctx, reviewID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		repoRow, err := store.NewWithDB(pool).GetRepo(ctx, repoID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		eventBus := pipeline.NewEventBus()
+		var terminalEvents atomic.Int32
+		var postedEvents atomic.Int32
+		eventBus.SubscribeGlobal(func(gotID uuid.UUID, evt pipeline.Event) {
+			if gotID != reviewID {
+				return
+			}
+			if evt.Type == pipeline.EventCompleted {
+				terminalEvents.Add(1)
+			}
+			if evt.Type == pipeline.EventPostedToGitHub {
+				postedEvents.Add(1)
+			}
+		})
+		srv := &Server{
+			store:                  store.NewWithDB(pool),
+			reviewPostLookup:       &postLookupStub{id: 90043, found: true},
+			reviewBindingRecoverer: &reviewBindingRecovererStub{},
+			eventBus:               eventBus,
+			logger:                 logger,
+		}
+		var wg sync.WaitGroup
+		var failures atomic.Int32
+		for range 12 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				outcome, err := srv.reconcileAmbiguousReviewPost(context.Background(), review, repoRow, githubInstallationID, "race-user")
+				if err != nil || outcome != reviewPostAlreadyDelivered {
+					failures.Add(1)
+				}
+			}()
+		}
+		wg.Wait()
+		if failures.Load() != 0 {
+			t.Fatalf("concurrent recovery failures=%d", failures.Load())
+		}
+		if terminalEvents.Load() != 1 || postedEvents.Load() != 1 {
+			t.Fatalf("events posted=%d terminal=%d, want one each", postedEvents.Load(), terminalEvents.Load())
 		}
 	})
 

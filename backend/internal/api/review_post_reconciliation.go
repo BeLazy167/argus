@@ -55,6 +55,20 @@ func (s *Server) reconcileAmbiguousReviewPost(ctx context.Context, review *store
 	action := "post_claim_cleared"
 	outcome := reviewPostClaimCleared
 	if found {
+		attached, attachErr := s.store.AttachReconciledReviewID(ctx, review.ID, generation, exactClaim, githubReviewID)
+		if attachErr != nil || !attached {
+			return reviewPostNotNeeded, fmt.Errorf("%w: attaching verified review id: %v", errReviewPostRetryLater, attachErr)
+		}
+		recoverer := s.reviewBindingRecoverer
+		if recoverer == nil {
+			recoverer = s.orchestrator
+		}
+		if recoverer == nil {
+			return reviewPostNotNeeded, fmt.Errorf("%w: review binding recovery is unavailable", errReviewPostRetryLater)
+		}
+		if recoverErr := recoverer.RecoverPostedReviewBindings(ctx, review.ID, generation, githubReviewID); recoverErr != nil {
+			return reviewPostNotNeeded, fmt.Errorf("%w: recovering delivered review bindings: %v", errReviewPostRetryLater, recoverErr)
+		}
 		completion, completeErr := s.store.CompleteReconciledReview(ctx, review.ID, generation, exactClaim, githubReviewID)
 		if completeErr != nil || completion == store.ReviewCompletionRejected {
 			return reviewPostNotNeeded, fmt.Errorf("%w: completing verified review id: %v", errReviewPostRetryLater, completeErr)

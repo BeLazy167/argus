@@ -2,6 +2,8 @@ package pipeline
 
 import (
 	"context"
+	"errors"
+	"fmt"
 
 	"github.com/BeLazy167/argus/backend/internal/store"
 	"github.com/google/uuid"
@@ -46,24 +48,28 @@ func threadNodeIDForFinding(ctx context.Context, r threadLinkReader, commentID u
 //
 // Threads from other reviews / sibling bots on the same PR are harmless: the
 // UPDATE is scoped to this review_id, so their FirstCommentIDs simply match no
-// row. Best-effort — a miss leaves graphql_thread_node_id NULL and consumers
-// fall back to the fuzzy path for that row.
-func (o *Orchestrator) hydrateThreadNodeIDs(ctx context.Context, run *PipelineRun, owner, repo string) {
-	threads, err := o.ghClient.ListReviewThreads(ctx, run.PREvent.InstallationID, owner, repo, run.PREvent.PRNumber)
+// row. The helper reports API and persistence failures. Normal posting logs and
+// continues; crash recovery propagates them and withholds terminal completion.
+func (o *Orchestrator) hydrateThreadNodeIDs(ctx context.Context, run *PipelineRun, owner, repo string) error {
+	client := o.postedReviewBindingClient()
+	if client == nil {
+		return fmt.Errorf("thread-registry: binding client unavailable")
+	}
+	threads, err := client.ListReviewThreads(ctx, run.PREvent.InstallationID, owner, repo, run.PREvent.PRNumber)
 	if err != nil {
-		o.logger.Warn("thread-registry: listing threads to hydrate", "error", err, "review_id", run.ReviewID)
-		return
+		return fmt.Errorf("thread-registry: listing threads to hydrate: %w", err)
 	}
 	hydrated := 0
+	var hydrateErrors []error
 	for _, t := range threads {
 		// Need both handles to bind: the node id we store and the REST id we
 		// join on. GraphQL omits databaseId for some threads (FirstCommentID 0).
 		if t.ID == "" || t.FirstCommentID == 0 {
 			continue
 		}
-		n, err := o.st.HydrateThreadNodeID(ctx, run.ReviewID, t.FirstCommentID, t.ID)
-		if err != nil {
-			o.logger.Warn("thread-registry: hydrating node id", "error", err, "thread_id", t.ID, "review_id", run.ReviewID)
+		n, hydrateErr := o.st.HydrateThreadNodeID(ctx, run.ReviewID, t.FirstCommentID, t.ID)
+		if hydrateErr != nil {
+			hydrateErrors = append(hydrateErrors, fmt.Errorf("thread %s: %w", t.ID, hydrateErr))
 			continue
 		}
 		hydrated += int(n)
@@ -71,6 +77,10 @@ func (o *Orchestrator) hydrateThreadNodeIDs(ctx context.Context, run *PipelineRu
 	if hydrated > 0 {
 		o.logger.Info("thread-registry: hydrated thread node ids", "count", hydrated, "review_id", run.ReviewID)
 	}
+	if err := errors.Join(hydrateErrors...); err != nil {
+		return fmt.Errorf("thread-registry: hydrating node ids: %w", err)
+	}
+	return nil
 }
 
 // unboundCommentRow is a persisted review_comments row awaiting its GitHub REST

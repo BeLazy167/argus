@@ -1101,6 +1101,9 @@ func TestCompleteReconciledReviewElectsOneSameGenerationWinner(t *testing.T) {
 	}
 
 	const githubReviewID int64 = 4455
+	if attached, err := st.AttachReconciledReviewID(ctx, reviewID, 1, claim, githubReviewID); err != nil || !attached {
+		t.Fatalf("AttachReconciledReviewID = %v,%v", attached, err)
+	}
 	var winners atomic.Int32
 	var already atomic.Int32
 	var wg sync.WaitGroup

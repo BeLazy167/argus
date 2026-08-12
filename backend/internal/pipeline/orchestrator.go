@@ -345,6 +345,10 @@ type Orchestrator struct {
 	// sinkAuthority serializes detached memory mutations with attempt-generation
 	// advancement. Production uses st; tests can inject a deterministic fake.
 	sinkAuthority memorySinkAuthority
+	// reviewBindingClient is the narrow GitHub seam for binding a delivered
+	// review's REST comments to GraphQL threads. Production falls back to
+	// ghClient; recovery tests inject a deterministic implementation.
+	reviewBindingClient postedReviewBindingClient
 }
 
 // LLMRegistry is the subset of llm.Registry used by Orchestrator.
@@ -3045,13 +3049,19 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		})
 	}
 
-	// Backfill github_comment_ids now that we have the ghReviewID
-	o.backfillGitHubCommentIDs(ctx, run, ghReviewID, owner, repo)
+	// Backfill github_comment_ids now that we have the ghReviewID. Normal posts
+	// keep this post-post work best-effort; recovery uses the same helpers but
+	// propagates their errors before it permits terminal completion.
+	if err := o.backfillGitHubCommentIDs(ctx, run, ghReviewID, owner, repo); err != nil {
+		o.logger.Error("backfilling GitHub comment IDs", "error", err, "review_id", run.ReviewID)
+	}
 
 	// ThreadRegistry (#162): bind each just-posted finding to its GraphQL
 	// review-thread node id. Runs AFTER the backfill above so the github_comment_id
 	// join key is present; authoritative one-shot hydrate off the fresh review.
-	o.hydrateThreadNodeIDs(ctx, run, owner, repo)
+	if err := o.hydrateThreadNodeIDs(ctx, run, owner, repo); err != nil {
+		o.logger.Warn("thread-registry: hydrating thread node IDs", "error", err, "review_id", run.ReviewID)
+	}
 
 	// Pattern learning, conventions, file synthesis, and PR summary now run
 	// BEFORE PostReview (see above). Only architecture graph + PR enrichment
@@ -4814,19 +4824,21 @@ func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghRe
 // Now the pairing runs in Go (pairCommentsToRows): each posted comment claims
 // exactly one row on its (path, line), preferring an exact body match, so
 // same-line findings bind to distinct rows and distinct threads.
-func (o *Orchestrator) backfillGitHubCommentIDs(ctx context.Context, run *PipelineRun, ghReviewID int64, owner, repo string) {
-	if ghReviewID == 0 {
-		return
+func (o *Orchestrator) backfillGitHubCommentIDs(ctx context.Context, run *PipelineRun, ghReviewID int64, owner, repo string) error {
+	if ghReviewID <= 0 {
+		return fmt.Errorf("backfilling GitHub comments: invalid review id %d", ghReviewID)
 	}
-	ghComments, err := o.ghClient.ListReviewComments(ctx, run.PREvent.InstallationID, owner, repo, run.PREvent.PRNumber, ghReviewID)
+	client := o.postedReviewBindingClient()
+	if client == nil {
+		return errors.New("backfilling GitHub comments: client unavailable")
+	}
+	ghComments, err := client.ListReviewComments(ctx, run.PREvent.InstallationID, owner, repo, run.PREvent.PRNumber, ghReviewID)
 	if err != nil {
-		o.logger.Error("listing review comments for backfill", "error", err)
-		return
+		return fmt.Errorf("listing review comments for backfill: %w", err)
 	}
 	rows, err := o.st.ListUnboundReviewComments(ctx, run.ReviewID)
 	if err != nil {
-		o.logger.Error("loading unbound review comments for backfill", "error", err, "review_id", run.ReviewID)
-		return
+		return fmt.Errorf("loading unbound review comments for backfill: %w", err)
 	}
 	unbound := make([]unboundCommentRow, 0, len(rows))
 	for _, r := range rows {
@@ -4842,10 +4854,11 @@ func (o *Orchestrator) backfillGitHubCommentIDs(ctx context.Context, run *Pipeli
 	}
 
 	updated := 0
+	var bindErrors []error
 	for commentID, ghID := range pairCommentsToRows(unbound, posted) {
-		ok, err := o.st.BindGitHubCommentID(ctx, commentID, ghID)
-		if err != nil {
-			o.logger.Error("backfilling github_comment_id", "error", err, "comment_id", commentID)
+		ok, bindErr := o.st.BindGitHubCommentID(ctx, commentID, ghID)
+		if bindErr != nil {
+			bindErrors = append(bindErrors, fmt.Errorf("comment %s: %w", commentID, bindErr))
 		} else if ok {
 			updated++
 		}
@@ -4853,6 +4866,34 @@ func (o *Orchestrator) backfillGitHubCommentIDs(ctx context.Context, run *Pipeli
 	if updated > 0 {
 		o.logger.Info("backfilled github comment IDs", "count", updated, "review_id", run.ReviewID)
 	}
+	if err := errors.Join(bindErrors...); err != nil {
+		return fmt.Errorf("backfilling github_comment_id: %w", err)
+	}
+
+	// A successful listing is not enough if eventual consistency returned only
+	// part of the delivered review. Compare the exact remote ID set with the
+	// current generation's durable bindings; folded summary findings are absent
+	// from both sets and therefore do not block recovery.
+	storedIDs, err := o.st.ListPostedReviewGitHubCommentIDs(ctx, run.ReviewID, run.AttemptGeneration)
+	if err != nil {
+		return err
+	}
+	remoteIDs := make(map[int64]struct{}, len(ghComments))
+	for _, comment := range ghComments {
+		if comment.GetID() <= 0 {
+			return errors.New("backfilling GitHub comments: remote comment has no database id")
+		}
+		remoteIDs[comment.GetID()] = struct{}{}
+	}
+	if len(remoteIDs) != len(ghComments) || len(storedIDs) != len(remoteIDs) {
+		return fmt.Errorf("backfilling GitHub comments: delivered=%d bound=%d", len(ghComments), len(storedIDs))
+	}
+	for _, id := range storedIDs {
+		if _, ok := remoteIDs[id]; !ok {
+			return fmt.Errorf("backfilling GitHub comments: stored binding %d is not in delivered review", id)
+		}
+	}
+	return nil
 }
 
 // loadPrompts fetches custom prompt templates for a repo and returns a stage→prompt_text map.

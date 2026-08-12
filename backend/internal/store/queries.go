@@ -632,9 +632,47 @@ func (s *Store) RepairPostedReviewID(ctx context.Context, id uuid.UUID, generati
 	return repairPostedReviewID(repairCtx, s.Pool, id, generation, githubReviewID)
 }
 
-// CompleteReconciledReview atomically attaches marker-verified positive
-// evidence and completes that exact generation. The returned winner is the only
-// caller allowed to emit recovered completion actions.
+// AttachReconciledReviewID records marker-verified positive evidence without
+// completing the review. It intentionally preserves the ambiguous-post claim,
+// status, and claim clock so any binding failure remains recoverable without a
+// duplicate post. Repeating the same exact attachment is idempotent.
+func (s *Store) AttachReconciledReviewID(ctx context.Context, id uuid.UUID, generation int, exactClaim string, githubReviewID int64) (bool, error) {
+	if githubReviewID <= 0 {
+		return false, fmt.Errorf("attaching reconciled review: invalid GitHub review id %d", githubReviewID)
+	}
+	attachCtx, cancel := detachedReviewPostContext(ctx)
+	defer cancel()
+	tag, err := s.Pool.Exec(attachCtx, `
+		UPDATE reviews SET github_review_id=$1
+		WHERE id=$2 AND attempt_generation=$3 AND github_review_id IS NULL
+		  AND error=$4 AND status IN ('failed','cancelled','in_progress')
+	`, githubReviewID, id, generation, exactClaim)
+	if err != nil {
+		return false, fmt.Errorf("attaching reconciled GitHub review id: %w", err)
+	}
+	if tag.RowsAffected() == 1 {
+		return true, nil
+	}
+	var currentGeneration int
+	var status string
+	var currentID *int64
+	var currentClaim *string
+	if err := s.Pool.QueryRow(attachCtx, `SELECT attempt_generation,status,github_review_id,error FROM reviews WHERE id=$1`, id).Scan(&currentGeneration, &status, &currentID, &currentClaim); err != nil {
+		return false, fmt.Errorf("checking reconciled GitHub review attachment: %w", err)
+	}
+	if currentGeneration == generation && currentID != nil && *currentID == githubReviewID &&
+		((currentClaim != nil && *currentClaim == exactClaim) || status == "completed") {
+		return true, nil
+	}
+	if currentGeneration == generation && currentID != nil && *currentID != githubReviewID {
+		return false, fmt.Errorf("%w: review %s has GitHub review id %d, reconciled id was %d", ErrReviewPostRepairConflict, id, *currentID, githubReviewID)
+	}
+	return false, nil
+}
+
+// CompleteReconciledReview completes an exact, already-attached delivery. The
+// returned winner is the only caller allowed to emit recovered completion
+// actions. Binding recovery must succeed before this method is called.
 func (s *Store) CompleteReconciledReview(ctx context.Context, id uuid.UUID, generation int, exactClaim string, githubReviewID int64) (ReviewCompletionOutcome, error) {
 	if githubReviewID <= 0 {
 		return ReviewCompletionRejected, fmt.Errorf("completing reconciled review: invalid GitHub review id %d", githubReviewID)
@@ -643,10 +681,10 @@ func (s *Store) CompleteReconciledReview(ctx context.Context, id uuid.UUID, gene
 	defer cancel()
 	tag, err := s.Pool.Exec(completeCtx, `
 		UPDATE reviews
-		SET github_review_id=$1, status='completed', completed_at=COALESCE(completed_at,NOW()),
+		SET status='completed', completed_at=COALESCE(completed_at,NOW()),
 		    error=NULL, review_post_claimed_at=NULL
-		WHERE id=$2 AND attempt_generation=$3 AND github_review_id IS NULL AND error=$4
-		  AND status IN ('failed','cancelled')
+		WHERE id=$2 AND attempt_generation=$3 AND github_review_id=$1 AND error=$4
+		  AND status IN ('failed','cancelled','in_progress')
 	`, githubReviewID, id, generation, exactClaim)
 	if err != nil {
 		return ReviewCompletionRejected, fmt.Errorf("completing reconciled GitHub review: %w", err)
@@ -1644,6 +1682,76 @@ func (s *Store) ListUnboundReviewComments(ctx context.Context, reviewID uuid.UUI
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// PostedReviewBindingState describes the durable inline-comment bindings for
+// one exact delivery. Current is false when the generation or GitHub review ID
+// no longer matches the review row.
+type PostedReviewBindingState struct {
+	Current               bool
+	BoundGitHubCommentIDs int
+	MissingThreadNodeIDs  int
+}
+
+// GetPostedReviewBindingState counts current-generation rows that are already
+// bound to delivered inline comments. Suppressed and folded summary rows have
+// no GitHub comment ID and do not require a GraphQL thread.
+func (s *Store) GetPostedReviewBindingState(ctx context.Context, reviewID uuid.UUID, generation int, githubReviewID int64) (PostedReviewBindingState, error) {
+	var state PostedReviewBindingState
+	err := s.Pool.QueryRow(ctx, `
+		SELECT r.attempt_generation=$2 AND r.github_review_id=$3,
+		       count(rc.id) FILTER (WHERE rc.github_comment_id IS NOT NULL)::int,
+		       count(rc.id) FILTER (
+		           WHERE rc.github_comment_id IS NOT NULL AND rc.graphql_thread_node_id IS NULL
+		       )::int
+		FROM reviews r
+		LEFT JOIN review_comments rc
+		  ON rc.review_id=r.id
+		 AND rc.attempt_generation=$2
+		 AND rc.end_line IS NOT NULL
+		 AND rc.suppressed_reason IS NULL
+		WHERE r.id=$1
+		GROUP BY r.attempt_generation,r.github_review_id
+	`, reviewID, generation, githubReviewID).Scan(
+		&state.Current,
+		&state.BoundGitHubCommentIDs,
+		&state.MissingThreadNodeIDs,
+	)
+	if err != nil {
+		return PostedReviewBindingState{}, fmt.Errorf("reading posted review binding state: %w", err)
+	}
+	return state, nil
+}
+
+// ListPostedReviewGitHubCommentIDs returns the exact REST IDs already bound
+// to posted findings in one current generation. Summary-only and folded rows
+// remain unbound and are intentionally absent.
+func (s *Store) ListPostedReviewGitHubCommentIDs(ctx context.Context, reviewID uuid.UUID, generation int) ([]int64, error) {
+	rows, err := s.Pool.Query(ctx, `
+		SELECT rc.github_comment_id
+		FROM review_comments rc
+		JOIN reviews r ON r.id=rc.review_id AND r.attempt_generation=rc.attempt_generation
+		WHERE rc.review_id=$1 AND rc.attempt_generation=$2
+		  AND rc.github_comment_id IS NOT NULL
+		  AND rc.end_line IS NOT NULL AND rc.suppressed_reason IS NULL
+		ORDER BY rc.github_comment_id
+	`, reviewID, generation)
+	if err != nil {
+		return nil, fmt.Errorf("listing posted review GitHub comment ids: %w", err)
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scanning posted review GitHub comment id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("listing posted review GitHub comment ids: %w", err)
+	}
+	return ids, nil
 }
 
 // BindGitHubCommentID binds exactly one review_comments row to its GitHub REST

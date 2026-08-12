@@ -925,82 +925,99 @@ func (c *Client) ListReviewThreads(ctx context.Context, installationID int64, ow
 		return nil, err
 	}
 
-	body := map[string]any{
-		"query": `query($owner: String!, $repo: String!, $pr: Int!) {
-			repository(owner: $owner, name: $repo) {
-				pullRequest(number: $pr) {
-					reviewThreads(first: 100) {
-						nodes {
-							id
-							isResolved
-							comments(first: 1) {
-								nodes {
-									author { login }
-									databaseId
-									body
-									path
-									line
+	var threads []ReviewThread
+	var after *string
+	for {
+		body := map[string]any{
+			"query": `query($owner: String!, $repo: String!, $pr: Int!, $after: String) {
+				repository(owner: $owner, name: $repo) {
+					pullRequest(number: $pr) {
+						reviewThreads(first: 100, after: $after) {
+							nodes {
+								id
+								isResolved
+								comments(first: 1) {
+									nodes {
+										author { login }
+										databaseId
+										body
+										path
+										line
+									}
 								}
 							}
+							pageInfo { hasNextPage endCursor }
 						}
 					}
 				}
-			}
-		}`,
-		"variables": map[string]any{
-			"owner": owner,
-			"repo":  repo,
-			"pr":    prNumber,
-		},
-	}
-
-	var result struct {
-		Data struct {
-			Repository struct {
-				PullRequest struct {
-					ReviewThreads struct {
-						Nodes []struct {
-							ID         string `json:"id"`
-							IsResolved bool   `json:"isResolved"`
-							Comments   struct {
-								Nodes []struct {
-									Author struct {
-										Login string `json:"login"`
-									} `json:"author"`
-									DatabaseID int64  `json:"databaseId"`
-									Body       string `json:"body"`
-									Path       string `json:"path"`
-									Line       int    `json:"line"`
-								} `json:"nodes"`
-							} `json:"comments"`
-						} `json:"nodes"`
-					} `json:"reviewThreads"`
-				} `json:"pullRequest"`
-			} `json:"repository"`
-		} `json:"data"`
-	}
-
-	if err := c.restLimiter.Wait(ctx); err != nil {
-		return nil, fmt.Errorf("rate limit wait: %w", err)
-	}
-	if err := doGraphQL(ctx, client, body, &result); err != nil {
-		return nil, fmt.Errorf("graphql reviewThreads: %w", err)
-	}
-
-	var threads []ReviewThread
-	for _, n := range result.Data.Repository.PullRequest.ReviewThreads.Nodes {
-		t := ReviewThread{ID: n.ID, IsResolved: n.IsResolved}
-		if len(n.Comments.Nodes) > 0 {
-			c0 := n.Comments.Nodes[0]
-			t.AuthorLogin = c0.Author.Login
-			t.FirstCommentID = c0.DatabaseID
-			t.Body = c0.Body
-			t.Path = c0.Path
-			t.Line = c0.Line
+			}`,
+			"variables": map[string]any{
+				"owner": owner,
+				"repo":  repo,
+				"pr":    prNumber,
+				"after": after,
+			},
 		}
-		threads = append(threads, t)
+
+		var result struct {
+			Data struct {
+				Repository struct {
+					PullRequest struct {
+						ReviewThreads struct {
+							Nodes []struct {
+								ID         string `json:"id"`
+								IsResolved bool   `json:"isResolved"`
+								Comments   struct {
+									Nodes []struct {
+										Author struct {
+											Login string `json:"login"`
+										} `json:"author"`
+										DatabaseID int64  `json:"databaseId"`
+										Body       string `json:"body"`
+										Path       string `json:"path"`
+										Line       int    `json:"line"`
+									} `json:"nodes"`
+								} `json:"comments"`
+							} `json:"nodes"`
+							PageInfo struct {
+								HasNextPage bool   `json:"hasNextPage"`
+								EndCursor   string `json:"endCursor"`
+							} `json:"pageInfo"`
+						} `json:"reviewThreads"`
+					} `json:"pullRequest"`
+				} `json:"repository"`
+			} `json:"data"`
+		}
+
+		if err := c.restLimiter.Wait(ctx); err != nil {
+			return nil, fmt.Errorf("rate limit wait: %w", err)
+		}
+		if err := doGraphQL(ctx, client, body, &result); err != nil {
+			return nil, fmt.Errorf("graphql reviewThreads: %w", err)
+		}
+
+		page := result.Data.Repository.PullRequest.ReviewThreads
+		for _, n := range page.Nodes {
+			t := ReviewThread{ID: n.ID, IsResolved: n.IsResolved}
+			if len(n.Comments.Nodes) > 0 {
+				c0 := n.Comments.Nodes[0]
+				t.AuthorLogin = c0.Author.Login
+				t.FirstCommentID = c0.DatabaseID
+				t.Body = c0.Body
+				t.Path = c0.Path
+				t.Line = c0.Line
+			}
+			threads = append(threads, t)
+		}
+		if !page.PageInfo.HasNextPage {
+			return threads, nil
+		}
+		if page.PageInfo.EndCursor == "" {
+			return nil, fmt.Errorf("graphql reviewThreads: next page has empty cursor")
+		}
+		cursor := page.PageInfo.EndCursor
+		after = &cursor
 	}
-	return threads, nil
 }
 
 // ResolveReviewThread marks a review thread as resolved via GraphQL.
