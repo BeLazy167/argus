@@ -120,7 +120,7 @@ func TestRecordedIDRecoverySkipsPrePostSinksAndKeepsCompletionElection(t *testin
 	if !(precheck < gate && gate < sinks && sinks < completion) {
 		t.Fatalf("unsafe recorded-id ordering: precheck=%d gate=%d sinks=%d completion=%d", precheck, gate, sinks, completion)
 	}
-	if strings.Index(src[:completion], "if postAlreadyRecorded {\n\t\treturn") >= 0 {
+	if strings.Contains(src[:completion], "if postAlreadyRecorded {\n\t\treturn") {
 		t.Fatal("recorded-id recovery returns before the completion winner election")
 	}
 }
