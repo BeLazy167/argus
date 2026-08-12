@@ -20,6 +20,7 @@ import (
 	"github.com/BeLazy167/argus/backend/internal/store"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -32,6 +33,11 @@ type reviewPostLookup interface {
 	FindReviewByMarker(context.Context, int64, string, string, int, string, string) (int64, bool, error)
 }
 
+type reviewRetryRunner interface {
+	EnsureNotRunning(context.Context, uuid.UUID) error
+	RetryReview(context.Context, uuid.UUID, int) error
+}
+
 type Server struct {
 	router           chi.Router
 	store            *store.Store
@@ -39,6 +45,7 @@ type Server struct {
 	ghApp            *ghpkg.App
 	repoMetadata     repoMetadataClient
 	reviewPostLookup reviewPostLookup
+	reviewRetrier    reviewRetryRunner
 	orchestrator     *pipeline.Orchestrator
 	prEventHandler   prEventHandler
 	replyAnalyzer    *pipeline.ReplyAnalyzer
@@ -67,6 +74,7 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 		ghApp:            ghApp,
 		repoMetadata:     githubClient,
 		reviewPostLookup: githubClient,
+		reviewRetrier:    orchestrator,
 		orchestrator:     orchestrator,
 		replyAnalyzer:    replyAnalyzer,
 		reactionAnalyzer: reactionAnalyzer,

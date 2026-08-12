@@ -1021,44 +1021,136 @@ func TestReviewPostPreCallbackGuardFailureClearsExactClaim(t *testing.T) {
 	}
 }
 
-func TestReconcileReviewPostClaimUsesExactCASAndMinimumAge(t *testing.T) {
+func TestClearReconciledReviewClaimUsesDatabaseClockAndExactCAS(t *testing.T) {
 	pool, ctx := fileMemoryTestPool(t)
 	_, rawID := seedFileMemoryRepo(t, ctx, pool)
 	reviewID := uuid.MustParse(rawID)
 	st := NewWithDB(pool)
-	oldClaim := reviewPostClaimMarkerFor(reviewID, 1, time.Now().Add(-ReviewPostReconciliationMinAge-time.Minute))
-	if _, err := pool.Exec(ctx, `UPDATE reviews SET status='failed',error=$2 WHERE id=$1`, reviewID, oldClaim); err != nil {
+
+	// The marker timestamp is observability only. A machine one day ahead must
+	// not keep a database-aged claim blocked.
+	futureMarker := reviewPostClaimMarkerFor(reviewID, 1, time.Now().Add(24*time.Hour))
+	if _, err := pool.Exec(ctx, `
+		UPDATE reviews
+		SET status='failed', error=$2,
+		    review_post_claimed_at=NOW()-make_interval(secs => $3)
+		WHERE id=$1
+	`, reviewID, futureMarker, ReviewPostReconciliationMinAge.Seconds()); err != nil {
+		t.Fatal(err)
+	}
+	if cleared, err := st.ClearReconciledReviewClaim(ctx, reviewID, 1, futureMarker); err != nil || !cleared {
+		t.Fatalf("database-aged future-marker clear = %v,%v, want true,nil", cleared, err)
+	}
+
+	// Conversely, a machine one day behind must not authorize a recent claim.
+	pastMarker := reviewPostClaimMarkerFor(reviewID, 1, time.Now().Add(-24*time.Hour))
+	if _, err := pool.Exec(ctx, `
+		UPDATE reviews SET error=$2, review_post_claimed_at=NOW() WHERE id=$1
+	`, reviewID, pastMarker); err != nil {
+		t.Fatal(err)
+	}
+	if cleared, err := st.ClearReconciledReviewClaim(ctx, reviewID, 1, pastMarker); !errors.Is(err, ErrReviewPostClaimTooRecent) || cleared {
+		t.Fatalf("database-recent past-marker clear = %v,%v, want false,too-recent", cleared, err)
+	}
+
+	// The SQL boundary is inclusive: exactly five database minutes is old enough.
+	boundaryMarker := reviewPostClaimMarkerFor(reviewID, 1, time.Now())
+	if _, err := pool.Exec(ctx, `
+		UPDATE reviews
+		SET error=$2, review_post_claimed_at=NOW()-make_interval(secs => $3)
+		WHERE id=$1
+	`, reviewID, boundaryMarker, ReviewPostReconciliationMinAge.Seconds()); err != nil {
+		t.Fatal(err)
+	}
+	if cleared, err := st.ClearReconciledReviewClaim(ctx, reviewID, 1, boundaryMarker); err != nil || !cleared {
+		t.Fatalf("exact database-age boundary clear = %v,%v, want true,nil", cleared, err)
+	}
+
+	// A stale machine can never clear a replacement claim, even when both are old.
+	replacement := boundaryMarker + " changed"
+	if _, err := pool.Exec(ctx, `
+		UPDATE reviews
+		SET error=$2, review_post_claimed_at=NOW()-INTERVAL '1 hour'
+		WHERE id=$1
+	`, reviewID, replacement); err != nil {
+		t.Fatal(err)
+	}
+	if cleared, err := st.ClearReconciledReviewClaim(ctx, reviewID, 1, boundaryMarker); err != nil || cleared {
+		t.Fatalf("stale exact clear = %v,%v, want false,nil", cleared, err)
+	}
+}
+
+func TestCompleteReconciledReviewElectsOneSameGenerationWinner(t *testing.T) {
+	pool, ctx := fileMemoryTestPool(t)
+	_, rawID := seedFileMemoryRepo(t, ctx, pool)
+	reviewID := uuid.MustParse(rawID)
+	st := NewWithDB(pool)
+	claim := reviewPostClaimMarkerFor(reviewID, 1, time.Now().Add(24*time.Hour))
+	if _, err := pool.Exec(ctx, `
+		UPDATE reviews
+		SET status='failed', error=$2, review_post_claimed_at=NOW()
+		WHERE id=$1
+	`, reviewID, claim); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO review_comments(review_id,attempt_generation,file_path,end_line,body)
+		VALUES($1,1,'current.go',7,'original generation comment')
+	`, reviewID); err != nil {
 		t.Fatal(err)
 	}
 
-	attached, err := st.AttachReconciledReviewID(ctx, reviewID, 1, oldClaim, 4455)
-	if err != nil || !attached {
-		t.Fatalf("attach = %v, %v", attached, err)
+	const githubReviewID int64 = 4455
+	var winners atomic.Int32
+	var already atomic.Int32
+	var wg sync.WaitGroup
+	for i := 0; i < 12; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			outcome, err := st.CompleteReconciledReview(context.Background(), reviewID, 1, claim, githubReviewID)
+			if err != nil {
+				t.Errorf("CompleteReconciledReview: %v", err)
+				return
+			}
+			switch outcome {
+			case ReviewCompletionWon:
+				winners.Add(1)
+			case ReviewCompletionAlreadyCompleted:
+				already.Add(1)
+			default:
+				t.Errorf("outcome = %q", outcome)
+			}
+		}()
 	}
+	wg.Wait()
+	if got := winners.Load(); got != 1 {
+		t.Fatalf("completion winners = %d, want 1", got)
+	}
+	if got := already.Load(); got != 11 {
+		t.Fatalf("already-completed losers = %d, want 11", got)
+	}
+
 	var storedID int64
+	var status string
+	var generation int
 	var stateError *string
-	if err := pool.QueryRow(ctx, `SELECT github_review_id,error FROM reviews WHERE id=$1`, reviewID).Scan(&storedID, &stateError); err != nil {
+	var claimedAt *time.Time
+	if err := pool.QueryRow(ctx, `
+		SELECT github_review_id,status,attempt_generation,error,review_post_claimed_at
+		FROM reviews WHERE id=$1
+	`, reviewID).Scan(&storedID, &status, &generation, &stateError, &claimedAt); err != nil {
 		t.Fatal(err)
 	}
-	if storedID != 4455 || stateError != nil {
-		t.Fatalf("state id=%d error=%v", storedID, stateError)
+	if storedID != githubReviewID || status != "completed" || generation != 1 || stateError != nil || claimedAt != nil {
+		t.Fatalf("review = id %d status %q generation %d error %v claimed_at %v", storedID, status, generation, stateError, claimedAt)
 	}
-
-	// A different durable claim must never be cleared by a stale reconciler.
-	if _, err := pool.Exec(ctx, `UPDATE reviews SET github_review_id=NULL,error=$2 WHERE id=$1`, reviewID, oldClaim+" changed"); err != nil {
+	comments, err := st.GetReviewComments(ctx, reviewID)
+	if err != nil {
 		t.Fatal(err)
 	}
-	cleared, err := st.ClearReconciledReviewClaim(ctx, reviewID, 1, oldClaim)
-	if err != nil || cleared {
-		t.Fatalf("stale exact clear = %v,%v", cleared, err)
-	}
-
-	recentClaim := reviewPostClaimMarkerFor(reviewID, 1, time.Now())
-	if _, err := pool.Exec(ctx, `UPDATE reviews SET error=$2 WHERE id=$1`, reviewID, recentClaim); err != nil {
-		t.Fatal(err)
-	}
-	if cleared, err := st.ClearReconciledReviewClaim(ctx, reviewID, 1, recentClaim); !errors.Is(err, ErrReviewPostClaimTooRecent) || cleared {
-		t.Fatalf("recent clear = %v,%v, want retry later", cleared, err)
+	if len(comments) != 1 || comments[0].Body != "original generation comment" {
+		t.Fatalf("current comments = %+v", comments)
 	}
 }
 

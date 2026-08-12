@@ -9,28 +9,37 @@ import (
 	"time"
 
 	ghpkg "github.com/BeLazy167/argus/backend/internal/github"
+	"github.com/BeLazy167/argus/backend/internal/pipeline"
 	"github.com/BeLazy167/argus/backend/internal/store"
 )
 
 var errReviewPostRetryLater = errors.New("review post reconciliation is pending")
 
+type reviewPostReconciliationOutcome string
+
+const (
+	reviewPostNotNeeded        reviewPostReconciliationOutcome = "not_needed"
+	reviewPostClaimCleared     reviewPostReconciliationOutcome = "claim_cleared"
+	reviewPostAlreadyDelivered reviewPostReconciliationOutcome = "already_delivered"
+)
+
 // reconcileAmbiguousReviewPost is the dashboard retry safety gate. It uses the
 // authenticated review's own repository and installation; no scope supplied by
 // the request is trusted for the GitHub lookup.
-func (s *Server) reconcileAmbiguousReviewPost(ctx context.Context, review *store.Review, repo *store.Repo, githubInstallationID int64, userID string) error {
+func (s *Server) reconcileAmbiguousReviewPost(ctx context.Context, review *store.Review, repo *store.Repo, githubInstallationID int64, userID string) (reviewPostReconciliationOutcome, error) {
 	if review.Error == nil || !strings.HasPrefix(*review.Error, store.ErrReviewPostPersistenceAmbiguous.Error()) {
-		return nil
+		return reviewPostNotNeeded, nil
 	}
 	if s.reviewPostLookup == nil {
-		return fmt.Errorf("%w: review lookup is unavailable", errReviewPostRetryLater)
+		return reviewPostNotNeeded, fmt.Errorf("%w: review lookup is unavailable", errReviewPostRetryLater)
 	}
 	owner, repoName, ok := strings.Cut(repo.FullName, "/")
 	if !ok || owner == "" || repoName == "" {
-		return fmt.Errorf("%w: malformed repository identity", errReviewPostRetryLater)
+		return reviewPostNotNeeded, fmt.Errorf("%w: malformed repository identity", errReviewPostRetryLater)
 	}
 	generation, err := s.store.GetReviewAttemptGeneration(ctx, review.ID)
 	if err != nil {
-		return fmt.Errorf("%w: reading attempt generation: %v", errReviewPostRetryLater, err)
+		return reviewPostNotNeeded, fmt.Errorf("%w: reading attempt generation: %v", errReviewPostRetryLater, err)
 	}
 	exactClaim := *review.Error
 	marker := ghpkg.ReviewMarker(review.ID.String(), generation)
@@ -40,20 +49,26 @@ func (s *Server) reconcileAmbiguousReviewPost(ctx context.Context, review *store
 	)
 	cancel()
 	if lookupErr != nil {
-		return fmt.Errorf("%w: remote lookup failed: %v", errReviewPostRetryLater, lookupErr)
+		return reviewPostNotNeeded, fmt.Errorf("%w: remote lookup failed: %v", errReviewPostRetryLater, lookupErr)
 	}
 
 	action := "post_claim_cleared"
+	outcome := reviewPostClaimCleared
 	if found {
-		attached, attachErr := s.store.AttachReconciledReviewID(ctx, review.ID, generation, exactClaim, githubReviewID)
-		if attachErr != nil || !attached {
-			return fmt.Errorf("%w: attaching verified review id: %v", errReviewPostRetryLater, attachErr)
+		completion, completeErr := s.store.CompleteReconciledReview(ctx, review.ID, generation, exactClaim, githubReviewID)
+		if completeErr != nil || completion == store.ReviewCompletionRejected {
+			return reviewPostNotNeeded, fmt.Errorf("%w: completing verified review id: %v", errReviewPostRetryLater, completeErr)
+		}
+		outcome = reviewPostAlreadyDelivered
+		if completion == store.ReviewCompletionAlreadyCompleted {
+			return outcome, nil
 		}
 		action = "post_id_attached"
+		s.publishRecoveredReviewCompletion(review, repo, githubInstallationID, generation, githubReviewID)
 	} else {
 		cleared, clearErr := s.store.ClearReconciledReviewClaim(ctx, review.ID, generation, exactClaim)
 		if clearErr != nil || !cleared {
-			return fmt.Errorf("%w: claim is recent or changed: %v", errReviewPostRetryLater, clearErr)
+			return reviewPostNotNeeded, fmt.Errorf("%w: claim is recent or changed: %v", errReviewPostRetryLater, clearErr)
 		}
 	}
 
@@ -74,5 +89,28 @@ func (s *Server) reconcileAmbiguousReviewPost(ctx context.Context, review *store
 	if err := s.store.LogActivity(ctx, &installationID, "review."+action, userID, repo.FullName, metadata); err != nil {
 		s.logger.Warn("review post reconciliation audit write failed", "error", err, "review_id", review.ID)
 	}
-	return nil
+	return outcome, nil
+}
+
+// publishRecoveredReviewCompletion emits the completion lifecycle that the
+// crashed posting worker could not finish. Only CompleteReconciledReview's CAS
+// winner calls this helper, so concurrent retry handlers do not duplicate it.
+func (s *Server) publishRecoveredReviewCompletion(review *store.Review, repo *store.Repo, githubInstallationID int64, generation int, githubReviewID int64) {
+	if s.eventBus == nil {
+		return
+	}
+	s.eventBus.PublishForAttempt(review.ID, generation, pipeline.EventReviewCompleted, pipeline.ReviewCompletedPayload{
+		ReviewID:       review.ID,
+		RepoID:         repo.ID,
+		PRNumber:       review.PRNumber,
+		InstallationID: githubInstallationID,
+	})
+	s.eventBus.PublishForAttempt(review.ID, generation, pipeline.EventPostedToGitHub, map[string]any{
+		"github_review_id": githubReviewID,
+		"recovered":        true,
+	})
+	s.eventBus.PublishForAttempt(review.ID, generation, pipeline.EventCompleted, map[string]any{
+		"status":    "completed",
+		"recovered": true,
+	})
 }

@@ -521,9 +521,9 @@ func reviewPostClaimMarkerFor(id uuid.UUID, generation int, claimedAt time.Time)
 		ErrReviewPostPersistenceAmbiguous, id, generation, claimedAt.UTC().Format(time.RFC3339Nano))
 }
 
-// ReviewPostClaimedAt extracts the durable claim timestamp. Claims written by
-// older versions deliberately have no usable age and therefore cannot be
-// cleared from a negative remote lookup automatically.
+// ReviewPostClaimedAt extracts the marker's observability timestamp. It must
+// never authorize reconciliation: only reviews.review_post_claimed_at compared
+// with PostgreSQL NOW() is authoritative across application machines.
 func ReviewPostClaimedAt(marker string) (time.Time, bool) {
 	const key = "claimed_at="
 	start := strings.Index(marker, key)
@@ -548,7 +548,7 @@ func reviewDefinitelyNotCreated(err error) bool {
 func (s *Store) clearReviewPostClaim(ctx context.Context, id uuid.UUID, generation int, claim string) error {
 	clearCtx, cancel := detachedReviewPostContext(ctx)
 	defer cancel()
-	_, err := s.Pool.Exec(clearCtx, `UPDATE reviews SET error=NULL WHERE id=$1 AND attempt_generation=$2 AND github_review_id IS NULL AND error=$3`, id, generation, claim)
+	_, err := s.Pool.Exec(clearCtx, `UPDATE reviews SET error=NULL,review_post_claimed_at=NULL WHERE id=$1 AND attempt_generation=$2 AND github_review_id IS NULL AND error=$3`, id, generation, claim)
 	if err != nil {
 		return fmt.Errorf("clearing exact review post claim: %w", err)
 	}
@@ -572,7 +572,8 @@ func repairPostedReviewID(ctx context.Context, q reviewPostQuerier, id uuid.UUID
 		err := q.QueryRow(ctx, `
 			UPDATE reviews
 			SET github_review_id=$1,
-			    error=CASE WHEN error LIKE $4 || '%' THEN NULL ELSE error END
+			    error=CASE WHEN error LIKE $4 || '%' THEN NULL ELSE error END,
+			    review_post_claimed_at=CASE WHEN error LIKE $4 || '%' THEN NULL ELSE review_post_claimed_at END
 			WHERE id=$2 AND attempt_generation=$3
 			  AND (github_review_id IS NULL OR github_review_id=$1)
 			RETURNING github_review_id
@@ -631,57 +632,81 @@ func (s *Store) RepairPostedReviewID(ctx context.Context, id uuid.UUID, generati
 	return repairPostedReviewID(repairCtx, s.Pool, id, generation, githubReviewID)
 }
 
-// AttachReconciledReviewID records a marker-verified remote review using an
-// exact claim compare-and-set. A changed claim, generation, or existing
-// different id is never overwritten.
-func (s *Store) AttachReconciledReviewID(ctx context.Context, id uuid.UUID, generation int, exactClaim string, githubReviewID int64) (bool, error) {
+// CompleteReconciledReview atomically attaches marker-verified positive
+// evidence and completes that exact generation. The returned winner is the only
+// caller allowed to emit recovered completion actions.
+func (s *Store) CompleteReconciledReview(ctx context.Context, id uuid.UUID, generation int, exactClaim string, githubReviewID int64) (ReviewCompletionOutcome, error) {
 	if githubReviewID <= 0 {
-		return false, fmt.Errorf("attaching reconciled review: invalid GitHub review id %d", githubReviewID)
+		return ReviewCompletionRejected, fmt.Errorf("completing reconciled review: invalid GitHub review id %d", githubReviewID)
 	}
-	attachCtx, cancel := detachedReviewPostContext(ctx)
+	completeCtx, cancel := detachedReviewPostContext(ctx)
 	defer cancel()
-	tag, err := s.Pool.Exec(attachCtx, `
-		UPDATE reviews SET github_review_id=$1,error=NULL
+	tag, err := s.Pool.Exec(completeCtx, `
+		UPDATE reviews
+		SET github_review_id=$1, status='completed', completed_at=COALESCE(completed_at,NOW()),
+		    error=NULL, review_post_claimed_at=NULL
 		WHERE id=$2 AND attempt_generation=$3 AND github_review_id IS NULL AND error=$4
+		  AND status IN ('failed','cancelled')
 	`, githubReviewID, id, generation, exactClaim)
 	if err != nil {
-		return false, fmt.Errorf("attaching reconciled GitHub review id: %w", err)
+		return ReviewCompletionRejected, fmt.Errorf("completing reconciled GitHub review: %w", err)
+	}
+	if tag.RowsAffected() == 1 {
+		return ReviewCompletionWon, nil
+	}
+
+	var currentGeneration int
+	var status string
+	var currentID *int64
+	if err := s.Pool.QueryRow(completeCtx, `SELECT attempt_generation,status,github_review_id FROM reviews WHERE id=$1`, id).Scan(&currentGeneration, &status, &currentID); err != nil {
+		return ReviewCompletionRejected, fmt.Errorf("checking reconciled GitHub review loser: %w", err)
+	}
+	if currentGeneration == generation && status == "completed" && currentID != nil && *currentID == githubReviewID {
+		return ReviewCompletionAlreadyCompleted, nil
+	}
+	if currentGeneration == generation && currentID != nil && *currentID != githubReviewID {
+		return ReviewCompletionRejected, fmt.Errorf("%w: review %s has GitHub review id %d, reconciled id was %d", ErrReviewPostRepairConflict, id, *currentID, githubReviewID)
+	}
+	return ReviewCompletionRejected, nil
+}
+
+// ClearReconciledReviewClaim authorizes a retry only for an exact, aged claim.
+// PostgreSQL's clock and the DB-derived claim column are the age authority;
+// marker timestamps are observability only and may come from a skewed host.
+func (s *Store) ClearReconciledReviewClaim(ctx context.Context, id uuid.UUID, generation int, exactClaim string) (bool, error) {
+	clearCtx, cancel := detachedReviewPostContext(ctx)
+	defer cancel()
+	tag, err := s.Pool.Exec(clearCtx, `
+		UPDATE reviews SET error=NULL,review_post_claimed_at=NULL
+		WHERE id=$1 AND attempt_generation=$2 AND github_review_id IS NULL AND error=$3
+		  AND review_post_claimed_at IS NOT NULL
+		  AND review_post_claimed_at <= NOW()-make_interval(secs => $4)
+	`, id, generation, exactClaim, ReviewPostReconciliationMinAge.Seconds())
+	if err != nil {
+		return false, fmt.Errorf("clearing reconciled review post claim: %w", err)
 	}
 	if tag.RowsAffected() == 1 {
 		return true, nil
 	}
-	var currentGeneration int
-	var currentID *int64
-	if err := s.Pool.QueryRow(attachCtx, `SELECT attempt_generation,github_review_id FROM reviews WHERE id=$1`, id).Scan(&currentGeneration, &currentID); err != nil {
-		return false, fmt.Errorf("checking reconciled GitHub review loser: %w", err)
-	}
-	if currentGeneration == generation && currentID != nil && *currentID == githubReviewID {
-		return true, nil
-	}
-	if currentGeneration == generation && currentID != nil && *currentID != githubReviewID {
-		return false, fmt.Errorf("%w: review %s has GitHub review id %d, reconciled id was %d", ErrReviewPostRepairConflict, id, *currentID, githubReviewID)
-	}
-	return false, nil
-}
 
-// ClearReconciledReviewClaim authorizes a retry only for an exact, aged claim.
-// The caller must first complete a successful remote marker lookup that found
-// nothing; enforcing age again here keeps a buggy caller from clearing early.
-func (s *Store) ClearReconciledReviewClaim(ctx context.Context, id uuid.UUID, generation int, exactClaim string) (bool, error) {
-	claimedAt, ok := ReviewPostClaimedAt(exactClaim)
-	if !ok || time.Since(claimedAt) < ReviewPostReconciliationMinAge {
+	// Distinguish an exact claim that is still inside the consistency window
+	// from an exact-CAS loser. Both stay blocked, but callers surface the former
+	// as an intentional retry delay rather than a changed claim.
+	var recent bool
+	if err := s.Pool.QueryRow(clearCtx, `
+		SELECT EXISTS(
+			SELECT 1 FROM reviews
+			WHERE id=$1 AND attempt_generation=$2 AND github_review_id IS NULL AND error=$3
+			  AND review_post_claimed_at IS NOT NULL
+			  AND review_post_claimed_at > NOW()-make_interval(secs => $4)
+		)
+	`, id, generation, exactClaim, ReviewPostReconciliationMinAge.Seconds()).Scan(&recent); err != nil {
+		return false, fmt.Errorf("checking reconciled review post claim age: %w", err)
+	}
+	if recent {
 		return false, ErrReviewPostClaimTooRecent
 	}
-	clearCtx, cancel := detachedReviewPostContext(ctx)
-	defer cancel()
-	tag, err := s.Pool.Exec(clearCtx, `
-		UPDATE reviews SET error=NULL
-		WHERE id=$1 AND attempt_generation=$2 AND github_review_id IS NULL AND error=$3
-	`, id, generation, exactClaim)
-	if err != nil {
-		return false, fmt.Errorf("clearing reconciled review post claim: %w", err)
-	}
-	return tag.RowsAffected() == 1, nil
+	return false, nil
 }
 
 // GetRecordedReviewID is the early, read-only crash-recovery check used before
@@ -825,8 +850,12 @@ func (s *Store) PostReviewForAttempt(ctx context.Context, id uuid.UUID, generati
 	if status != "in_progress" {
 		return 0, ReviewPostRejected, nil
 	}
-	claimMarker := reviewPostClaimMarkerFor(id, generation, time.Now())
-	tag, claimErr := claimTx.Exec(ctx, `UPDATE reviews SET error=$1 WHERE id=$2 AND attempt_generation=$3 AND status='in_progress' AND github_review_id IS NULL`, claimMarker, id, generation)
+	var claimedAt time.Time
+	if claimErr := claimTx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&claimedAt); claimErr != nil {
+		return 0, ReviewPostRejected, fmt.Errorf("reading authoritative review post claim clock: %w", claimErr)
+	}
+	claimMarker := reviewPostClaimMarkerFor(id, generation, claimedAt)
+	tag, claimErr := claimTx.Exec(ctx, `UPDATE reviews SET error=$1,review_post_claimed_at=$2 WHERE id=$3 AND attempt_generation=$4 AND status='in_progress' AND github_review_id IS NULL`, claimMarker, claimedAt, id, generation)
 	if claimErr != nil || tag.RowsAffected() != 1 {
 		if claimErr == nil {
 			claimErr = errors.New("guarded review row disappeared")
@@ -887,7 +916,7 @@ func (s *Store) PostReviewForAttempt(ctx context.Context, id uuid.UUID, generati
 	}
 	clearUnusedClaim := func() error {
 		clearCtx, cancelClear := detachedReviewPostContext(ctx)
-		tag, clearErr := tx.Exec(clearCtx, `UPDATE reviews SET error=NULL WHERE id=$1 AND attempt_generation=$2 AND github_review_id IS NULL AND error=$3`, id, generation, claimMarker)
+		tag, clearErr := tx.Exec(clearCtx, `UPDATE reviews SET error=NULL,review_post_claimed_at=NULL WHERE id=$1 AND attempt_generation=$2 AND github_review_id IS NULL AND error=$3`, id, generation, claimMarker)
 		cancelClear()
 		if clearErr == nil && tag.RowsAffected() != 1 {
 			clearErr = errors.New("exact review post claim disappeared")
@@ -947,7 +976,7 @@ func (s *Store) PostReviewForAttempt(ctx context.Context, id uuid.UUID, generati
 	// A positive id is authoritative evidence even if the client also returned
 	// an error. Every detached operation after this point has its own deadline.
 	persistCtx, cancelPersist := detachedReviewPostContext(ctx)
-	tag, persistErr := tx.Exec(persistCtx, `UPDATE reviews SET github_review_id=$1,error=NULL WHERE id=$2 AND attempt_generation=$3 AND status='in_progress' AND github_review_id IS NULL`, githubReviewID, id, generation)
+	tag, persistErr := tx.Exec(persistCtx, `UPDATE reviews SET github_review_id=$1,error=NULL,review_post_claimed_at=NULL WHERE id=$2 AND attempt_generation=$3 AND status='in_progress' AND github_review_id IS NULL`, githubReviewID, id, generation)
 	cancelPersist()
 	if persistErr == nil && tag.RowsAffected() != 1 {
 		persistErr = fmt.Errorf("persisting GitHub review id %d after post succeeded: guarded row disappeared", githubReviewID)
@@ -1066,7 +1095,8 @@ func (s *Store) CompletePostedReview(ctx context.Context, id uuid.UUID, generati
 	tag, err := s.Pool.Exec(ctx, `
 		UPDATE reviews
 		SET status='completed', github_review_id=$1,
-		    completed_at=COALESCE(completed_at,NOW()), error=NULL
+		    completed_at=COALESCE(completed_at,NOW()), error=NULL,
+		    review_post_claimed_at=NULL
 		WHERE id=$2 AND attempt_generation=$3 AND status='in_progress'
 		  AND (github_review_id IS NULL OR github_review_id=$1)
 	`, githubReviewID, id, generation)
@@ -1110,7 +1140,7 @@ func (s *Store) ConvergePostedReview(ctx context.Context, id uuid.UUID, generati
 	if status == "cancelled" || status == "completed" {
 		return githubReviewID, true, false, nil
 	}
-	tag, err := s.Pool.Exec(ctx, `UPDATE reviews SET status='completed',completed_at=COALESCE(completed_at,NOW()),error=NULL WHERE id=$1 AND attempt_generation=$2 AND status IN ('pending','in_progress','failed')`, id, generation)
+	tag, err := s.Pool.Exec(ctx, `UPDATE reviews SET status='completed',completed_at=COALESCE(completed_at,NOW()),error=NULL,review_post_claimed_at=NULL WHERE id=$1 AND attempt_generation=$2 AND status IN ('pending','in_progress','failed')`, id, generation)
 	if err != nil {
 		return 0, true, false, fmt.Errorf("converging posted review: %w", err)
 	}
@@ -1142,6 +1172,7 @@ func (s *Store) BeginReviewRetry(ctx context.Context, id uuid.UUID) (int, bool, 
 	err = tx.QueryRow(ctx, `
 		UPDATE reviews
 		SET status = 'pending', error = NULL, completed_at = NULL,
+		    review_post_claimed_at = NULL,
 		    attempt_generation = attempt_generation + 1
 		WHERE id = $1 AND status IN ('failed', 'cancelled')
 		  AND (error IS NULL OR error NOT LIKE $2 || '%')

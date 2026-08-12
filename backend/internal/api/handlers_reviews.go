@@ -408,10 +408,43 @@ func (s *Server) retryReview(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "only failed or cancelled reviews can be retried"})
 		return
 	}
+	// repo.InstallationID is the DB serial, not GitHub's installation id. The
+	// marker lookup must authenticate as the GitHub installation.
+	inst, instErr := s.store.GetInstallation(r.Context(), repo.InstallationID)
+	if instErr != nil {
+		s.handleDBError(w, instErr, "installation not found")
+		return
+	}
+	reconciliation, reconcileErr := s.reconcileAmbiguousReviewPost(r.Context(), review, repo, inst.InstallationID, getUserID(r.Context()))
+	if reconcileErr != nil {
+		// Never expose GitHub, marker, or persistence details. A failed/incomplete
+		// lookup and a still-recent claim both mean the same safe user action: wait
+		// and retry. The detailed reason remains in structured server logs.
+		s.logger.Warn("retry: review post reconciliation deferred", "error", reconcileErr, "review_id", id, "repo", repo.FullName)
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "review post reconciliation is still pending; retry later"})
+		return
+	}
+	if reconciliation == reviewPostAlreadyDelivered {
+		// The requested retry is already satisfied by the review found on GitHub.
+		// Do not enter admission, BeginReviewRetry, or Launcher: all would charge a
+		// redundant generation and hide the original attempt's comments.
+		writeJSON(w, http.StatusOK, map[string]string{"status": "already delivered", "review_id": id.String()})
+		return
+	}
+
 	// Refuse if the previous run is still live (e.g. a review cancelled but not
 	// yet halted whose run is still executing): retrying now would double-run
 	// the pipeline and post twice. Synchronous so we can surface 409.
-	if err := s.orchestrator.EnsureNotRunning(r.Context(), id); err != nil {
+	retrier := s.reviewRetrier
+	if retrier == nil {
+		retrier = s.orchestrator
+	}
+	if retrier == nil {
+		s.logger.Error("retry precheck unavailable", "review_id", id)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "retry failed"})
+		return
+	}
+	if err := retrier.EnsureNotRunning(r.Context(), id); err != nil {
 		if errors.Is(err, pipeline.ErrReviewRunning) {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 			return
@@ -430,25 +463,8 @@ func (s *Server) retryReview(w http.ResponseWriter, r *http.Request) {
 	// goroutine spawned). Trace_id is preserved onto the detached BaseCtx.
 	// Retry was the least protected path: no rate limit, no concurrency token,
 	// no check beyond installation scope — while re-running the whole pipeline
-	// at the cost of a fresh review. It goes through Admission like everything
+	// at the cost of a fresh review. It goes through Admission like everything.
 
-	// repo.InstallationID is the DB serial, not GitHub's installation id. The
-	// dashboard actor is authorized on its organisation role and never reaches
-	// GitHub, but passing the wrong id anyway would sit there waiting for the
-	// day someone widens the actor kinds.
-	inst, instErr := s.store.GetInstallation(r.Context(), repo.InstallationID)
-	if instErr != nil {
-		s.handleDBError(w, instErr, "installation not found")
-		return
-	}
-	if err := s.reconcileAmbiguousReviewPost(r.Context(), review, repo, inst.InstallationID, getUserID(r.Context())); err != nil {
-		// Never expose GitHub, marker, or persistence details. A failed/incomplete
-		// lookup and a still-recent claim both mean the same safe user action: wait
-		// and retry. The detailed reason remains in structured server logs.
-		s.logger.Warn("retry: review post reconciliation deferred", "error", err, "review_id", id, "repo", repo.FullName)
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "review post reconciliation is still pending; retry later"})
-		return
-	}
 	orgLogin, _, ok := strings.Cut(repo.FullName, "/")
 	if !ok {
 		// Without this the whole name becomes the org rate-limit bucket key,
@@ -493,7 +509,7 @@ func (s *Server) retryReview(w http.ResponseWriter, r *http.Request) {
 			return nil
 		},
 		Run: func(ctx context.Context) error {
-			return s.orchestrator.RetryReview(ctx, id, attemptGeneration)
+			return retrier.RetryReview(ctx, id, attemptGeneration)
 		},
 		OnDone: func(err error) {
 			// context.Canceled means a Stop halted the retry — the state machine
