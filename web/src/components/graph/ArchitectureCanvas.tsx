@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import {
   ReactFlow,
   Controls,
@@ -90,6 +90,14 @@ type Props = {
 };
 
 const EMPTY_SEARCH_REQUEST: ArchitectureSearchRequest = { id: 0, query: "" };
+
+/**
+ * Above this node count the canvas switches to cheap rendering: straight
+ * edges instead of smoothstep routing. Chosen where routing + full mounting
+ * began to dominate first paint; qbraid-account (924 files) is the observed
+ * failure case.
+ */
+const LARGE_GRAPH_NODE_COUNT = 400;
 
 /** Per-lens border/glow for highlighted nodes */
 function lensHighlightStyle(file: ArchFile, lens: Lens): { borderColor?: string; boxShadow?: string } {
@@ -279,7 +287,12 @@ function ArchCanvasInner({
         id: `e-${i}`,
         source: e.source,
         target: e.target,
-        type: "smoothstep",
+        // Explicit per-edge type: React Flow's defaultEdgeOptions only fills
+        // ABSENT fields, so the large-graph switch must happen here, not on
+        // the <ReactFlow> prop. Smoothstep routing across 1000+ edges is a
+        // measurable part of first paint; straight edges read fine at
+        // overview scale.
+        type: files.length > LARGE_GRAPH_NODE_COUNT ? "straight" : "smoothstep",
         style: { stroke: colors.base, strokeWidth: sw },
         markerEnd: { type: MarkerType.ArrowClosed, width: 8, height: 8, color: colors.base },
         data: { kinds: e.kinds, weight: e.weight },
@@ -509,7 +522,29 @@ function ArchCanvasInner({
     [layout.nodes],
   );
 
+  // Referential stability caches: decoration (opacity/selection emphasis)
+  // rebuilds ALL node/edge objects, which makes React Flow re-render every
+  // memo'd node on each keystroke or click. At full-repo scale (900+ nodes,
+  // 1000+ edges — qBraid/qbraid-account) that froze the tab ("page
+  // unresponsive"). Reusing the previous object when a node's decoration
+  // signature is unchanged keeps re-renders proportional to what actually
+  // changed.
+  const nodeDecorCache = useRef(new Map<string, { sig: string; node: Node }>());
+  const edgeDecorCache = useRef(new Map<string, { sig: string; edge: Edge }>());
+  // Cache validity is tied to layout identity: the layout memo rebuilds
+  // whenever server data (files/edges/direction) changes, and node data /
+  // edge endpoints can ONLY change through such a rebuild. Clearing on
+  // layout change makes the signatures below purely about decoration
+  // (emphasis/position), so refreshed metrics or re-used index-based edge
+  // ids can never serve stale objects.
+  const decorCacheLayout = useRef<typeof layout | null>(null);
+
   const visibleElements = useMemo(() => {
+    if (decorCacheLayout.current !== layout) {
+      decorCacheLayout.current = layout;
+      nodeDecorCache.current.clear();
+      edgeDecorCache.current.clear();
+    }
     const nodes = mergeLayoutPositions(layout.nodes, positionedNodes);
     const connectedEdgeIds = new Set<string>();
     const emphasizedNodeIds = new Set<string>();
@@ -527,17 +562,26 @@ function ArchCanvasInner({
     }
 
     const fileByPath = new Map(files.map((file) => [file.path, file] as const));
+    const nodeCache = nodeDecorCache.current;
     const decoratedNodes = nodes.map((node) => {
       const file = fileByPath.get(node.id);
       let opacity = file ? lensNodeOpacity(file, lens) : 1;
       if (activeSelectedNodeId || searchLower) opacity = emphasizedNodeIds.has(node.id) ? 1 : 0.1;
-      return {
+      const selected = node.id === activeSelectedNodeId;
+      // Position is part of the signature so drags still propagate.
+      const sig = `${opacity}|${selected}|${node.position.x},${node.position.y}|${lens}`;
+      const cached = nodeCache.get(node.id);
+      if (cached && cached.sig === sig) return cached.node;
+      const decorated = {
         ...node,
-        data: { ...node.data, selected: node.id === activeSelectedNodeId },
+        data: { ...node.data, selected },
         style: { ...node.style, opacity, transition: "opacity 0.3s" },
       };
+      nodeCache.set(node.id, { sig, node: decorated });
+      return decorated;
     });
 
+    const edgeCache = edgeDecorCache.current;
     const decoratedEdges = layout.edges.map((edge) => {
       const colors = edgeColorsFor((edge.data?.kinds as string[])?.[0] ?? "imports");
       const connectsSearchMatches =
@@ -546,16 +590,19 @@ function ArchCanvasInner({
         ? connectedEdgeIds.has(edge.id)
         : Boolean(connectsSearchMatches);
       const dimmed = activeSelectedNodeId || searchLower ? !emphasized : false;
-      return {
+      const animated = activeSelectedNodeId ? emphasized : false;
+      const stroke = emphasized && activeSelectedNodeId ? colors.highlight : colors.base;
+      const opacity = dimmed ? 0.05 : 1;
+      const sig = `${animated}|${stroke}|${opacity}`;
+      const cached = edgeCache.get(edge.id);
+      if (cached && cached.sig === sig) return cached.edge;
+      const decorated = {
         ...edge,
-        animated: activeSelectedNodeId ? emphasized : false,
-        style: {
-          ...edge.style,
-          stroke: emphasized && activeSelectedNodeId ? colors.highlight : colors.base,
-          opacity: dimmed ? 0.05 : 1,
-          transition: "all 0.3s",
-        },
+        animated,
+        style: { ...edge.style, stroke, opacity, transition: "all 0.3s" },
       };
+      edgeCache.set(edge.id, { sig, edge: decorated });
+      return decorated;
     });
 
     return { nodes: decoratedNodes, edges: decoratedEdges };
@@ -591,9 +638,19 @@ function ArchCanvasInner({
         proOptions={{ hideAttribution: true }}
         className="!bg-[var(--graph-bg)]"
         fitView
-        fitViewOptions={{ padding: 0.2, minZoom: 0.45, maxZoom: 1 }}
-        minZoom={0.15}
+        // minZoom floors must stay far below full-repo fit scale: a 900+ file
+        // graph needs ~0.02 zoom to fit, and a floor above it makes fitView
+        // stop early — the viewport then shows an empty region of a huge
+        // canvas and the page looks broken (observed on qBraid/qbraid-account,
+        // 924 files). Small graphs are unaffected: fit clamps at maxZoom 1.
+        fitViewOptions={{ padding: 0.2, minZoom: 0.02, maxZoom: 1 }}
+        minZoom={0.02}
         maxZoom={2.5}
+        // Virtualize: only mount nodes/edges intersecting the viewport. At
+        // full-repo scale mounting everything froze the tab; when zoomed out
+        // far enough that all nodes are visible they are tiny and cheap, and
+        // when zoomed in the working set is small.
+        onlyRenderVisibleElements
         defaultEdgeOptions={{ type: "smoothstep" }}
       >
         <Background color="var(--graph-dots)" gap={32} size={1} />

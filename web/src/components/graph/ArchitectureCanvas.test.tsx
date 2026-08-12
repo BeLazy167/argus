@@ -269,3 +269,45 @@ describe("architecture canvas reconciliation", () => {
 		expect(refreshed.edges).toEqual(["b.ts->c.ts"]);
 	});
 });
+
+describe("decoration cache freshness", () => {
+	beforeEach(() => {
+		fitViewMock.mockClear();
+		setReducedMotion(false);
+	});
+
+	it("propagates refreshed metrics and topology for surviving nodes", () => {
+		// Regression: the decoration cache once keyed only on emphasis
+		// signature, so a data refresh that kept a node's id/position (but
+		// changed its metrics or an index-reused edge's endpoints) served the
+		// stale object. The cache must invalidate whenever layout rebuilds.
+		const before = [file("src/a.ts"), file("src/b.ts")];
+		const { rerender } = render(
+			<ArchitectureCanvas
+				files={before}
+				edges={[edge("src/a.ts", "src/b.ts")]}
+				lens="risk"
+				searchRequest={searchRequest(0, "")}
+			/>,
+		);
+		const initial = JSON.parse(screen.getByTestId("flow").textContent ?? "{}");
+		expect(initial.edges).toEqual(["src/a.ts->src/b.ts"]);
+
+		const refreshedB = { ...file("src/b.ts"), fan_in: 9, risk_score: 8 };
+		rerender(
+			<ArchitectureCanvas
+				files={[refreshedB, file("src/c.ts")]}
+				edges={[edge("src/b.ts", "src/c.ts")]}
+				lens="risk"
+				searchRequest={searchRequest(0, "")}
+			/>,
+		);
+		const refreshed = JSON.parse(screen.getByTestId("flow").textContent ?? "{}");
+		// Old edge (same index-based id e-0) must be replaced, not reused.
+		expect(refreshed.edges).toEqual(["src/b.ts->src/c.ts"]);
+		expect(refreshed.nodes.map((n: { id: string }) => n.id)).toEqual(
+			expect.arrayContaining(["src/b.ts", "src/c.ts"]),
+		);
+		expect(refreshed.nodes.map((n: { id: string }) => n.id)).not.toContain("src/a.ts");
+	});
+});

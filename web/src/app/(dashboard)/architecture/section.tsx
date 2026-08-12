@@ -1,6 +1,6 @@
 "use client";
 import { AlertTriangle, GitBranch, Info, Loader2, Network, Search, X } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import ArchitectureCanvas, {
 	type ArchitectureSearchRequest,
 	type Lens,
@@ -29,6 +29,11 @@ function ArchitectureView({ activeId }: { activeId: number }) {
 	const { data: archData, isLoading, error } = useArchitectureData();
 	const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
 	const [lens, setLens] = useState<Lens>("risk");
+	// The input echoes keystrokes immediately; the graph-wide search request is
+	// committed on a short debounce so full-repo graphs (900+ nodes) don't
+	// re-decorate the whole element tree per keystroke.
+	const [searchInput, setSearchInput] = useState("");
+	const searchDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const [searchRequest, setSearchRequest] = useState<ArchitectureSearchRequest>({
 		id: 0,
 		query: "",
@@ -62,6 +67,10 @@ function ArchitectureView({ activeId }: { activeId: number }) {
 	}, [archData]);
 
 	const normalizedSearch = searchRequest.query.toLowerCase().trim();
+	// While the debounced request lags the input echo, the previous query's
+	// match count is stale for the visible text — announce indeterminate
+	// progress instead of a false result.
+	const searchPending = searchInput.toLowerCase().trim() !== normalizedSearch;
 	const searchMatchCount = normalizedSearch
 		? (archData?.files.filter((file) => file.path.toLowerCase().includes(normalizedSearch))
 				.length ?? 0)
@@ -78,11 +87,15 @@ function ArchitectureView({ activeId }: { activeId: number }) {
 					<Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 text-slate-text" />
 					<input
 						type="text"
-						value={searchRequest.query}
+						value={searchInput}
 						onChange={(event) => {
 							const query = event.target.value;
-							setSearchRequest((current) => ({ id: current.id + 1, query }));
-							setSelectedFilePath(null);
+							setSearchInput(query);
+							if (searchDebounce.current) clearTimeout(searchDebounce.current);
+							searchDebounce.current = setTimeout(() => {
+								setSearchRequest((current) => ({ id: current.id + 1, query }));
+								setSelectedFilePath(null);
+							}, 150);
 						}}
 						aria-label="Find file"
 						aria-describedby="architecture-search-status"
@@ -95,7 +108,7 @@ function ArchitectureView({ activeId }: { activeId: number }) {
 						aria-live="polite"
 						className="sr-only"
 					>
-						{searchStatusText(searchMatchCount)}
+						{searchPending ? "Searching…" : searchStatusText(searchMatchCount)}
 					</span>
 				</div>
 
@@ -221,8 +234,11 @@ function ArchitectureView({ activeId }: { activeId: number }) {
 									No architecture data yet
 								</h3>
 								<p className="text-[11px] font-mono text-slate-500 leading-relaxed">
-									Architecture metrics are computed from reviewed code. Trigger a review to start
-									building the dependency graph.
+									The dependency graph is indexed automatically from this repo&apos;s default
+									branch by a background indexer — no review required. If the repo was enabled
+									recently, the first index may still be in progress; the status line above
+									tracks it. Review-derived signals (bug density, change coupling) fill in as
+									reviews happen.
 								</p>
 							</div>
 						</div>
