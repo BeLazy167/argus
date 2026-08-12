@@ -1079,10 +1079,10 @@ func TestRustGenericImplAndTurbofishResolveExactlyInFullAndIncrementalIndexes(t 
 	installationID := generationSeedInstallation(t, ctx, pool, "{}")
 	repoID := generationSeedRepo(t, ctx, pool, installationID, "generation/rust-generic-resolution")
 	const filePath = "worker.rs"
-	const source = `struct Worker<T>(T);
-impl<T> Worker<T> {
-    fn run() { Worker::<T>::finish(); }
-    fn finish() {}
+	const source = `struct Worker<const VALUE: bool>;
+impl<const N: usize> Worker<{N > 0}> {
+    fn run() { Worker::<{N > 0}>::finish::<fn()->Vec<u8>>(); }
+    fn finish<T>() {}
 }`
 
 	parse := func(content string) ([]Symbol, []Edge) {

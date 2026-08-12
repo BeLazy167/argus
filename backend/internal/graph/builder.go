@@ -101,64 +101,9 @@ func simpleSymbolName(name string) string {
 	return name
 }
 
-// matchingAngleEnd returns the byte after the balanced generic argument list
-// that starts at start, or -1 when the list is incomplete.
-func matchingAngleEnd(value string, start int) int {
-	depth := 0
-	for i := start; i < len(value); i++ {
-		switch value[i] {
-		case '<':
-			depth++
-		case '>':
-			depth--
-			if depth == 0 {
-				return i + 1
-			}
-		}
-	}
-	return -1
-}
-
-// stripRustGenericArguments removes balanced generic argument lists while
-// retaining the surrounding type path. It is intentionally used only for Rust
-// receiver types; applying it to every language would corrupt C++ operators.
-func stripRustGenericArguments(value string) string {
-	var out strings.Builder
-	for i := 0; i < len(value); {
-		if value[i] == '<' {
-			if end := matchingAngleEnd(value, i); end != -1 {
-				i = end
-				continue
-			}
-		}
-		out.WriteByte(value[i])
-		i++
-	}
-	return out.String()
-}
-
-// stripRustTurbofishArguments removes balanced ::<...> argument lists from a
-// Rust call path. Requiring the turbofish marker keeps C++ templates and
-// operator spellings intact when this shared call normalizer sees them.
-func stripRustTurbofishArguments(value string) string {
-	var out strings.Builder
-	for i := 0; i < len(value); {
-		if strings.HasPrefix(value[i:], "::<") {
-			if end := matchingAngleEnd(value, i+2); end != -1 {
-				i = end
-				continue
-			}
-		}
-		out.WriteByte(value[i])
-		i++
-	}
-	return out.String()
-}
-
 // qualifyScopedCall maps language self-references onto the same identity used
 // for method nodes. Explicit type selectors (Alpha.Handle) are already stable.
 func qualifyScopedCall(target, owner string) string {
-	target = stripRustTurbofishArguments(target)
 	owner = receiverIdentity(owner)
 	if owner != "" {
 		for _, prefix := range []string{"self.", "this.", "cls.", "Self::"} {

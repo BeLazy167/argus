@@ -357,7 +357,7 @@ func extractImplSymbol(n *gotreesitter.Node, lang *gotreesitter.Language, source
 	if typeNode == nil {
 		return
 	}
-	typeName := receiverIdentity(stripRustGenericArguments(typeNode.Text(source)))
+	typeName := receiverIdentity(rustTypeIdentity(typeNode, lang, source))
 	if typeName == "" {
 		return
 	}
@@ -576,14 +576,75 @@ func extractCallsRecursive(sourceName, owner string, n *gotreesitter.Node, lang 
 	}
 }
 
+// rustTypeIdentity returns the declared type at the outside of a Rust impl
+// target. Generic arguments describe an instantiation, not a different graph
+// owner, so the grammar's type field is authoritative instead of the source
+// spelling between angle brackets.
+func rustTypeIdentity(n *gotreesitter.Node, lang *gotreesitter.Language, source []byte) string {
+	if n == nil {
+		return ""
+	}
+	switch n.Type(lang) {
+	case "generic_type":
+		return rustTypeIdentity(n.ChildByFieldName("type", lang), lang, source)
+	case "scoped_type_identifier":
+		if name := n.ChildByFieldName("name", lang); name != nil {
+			return rustTypeIdentity(name, lang, source)
+		}
+	case "reference_type", "pointer_type", "parenthesized_type":
+		if inner := n.ChildByFieldName("type", lang); inner != nil {
+			return rustTypeIdentity(inner, lang, source)
+		}
+	case "type_identifier", "identifier", "primitive_type", "self":
+		return n.Text(source)
+	}
+	return n.Text(source)
+}
+
 // resolveCallTarget resolves the target name from a call expression's function node.
 func resolveCallTarget(n *gotreesitter.Node, lang *gotreesitter.Language, source []byte) string {
+	if lang.Name == "rust" {
+		return resolveRustCallTarget(n, lang, source)
+	}
 	if n.Type(lang) == "parenthesized_expression" {
 		for _, child := range n.Children() {
 			if child.IsNamed() {
 				return resolveCallTarget(child, lang, source)
 			}
 		}
+	}
+	return n.Text(source)
+}
+
+// resolveRustCallTarget follows the Rust grammar's function, path, type, and
+// name fields. This drops only nodes that the grammar identified as generic
+// arguments; operators such as >, >>, and -> inside those arguments never
+// participate in delimiter matching.
+func resolveRustCallTarget(n *gotreesitter.Node, lang *gotreesitter.Language, source []byte) string {
+	if n == nil {
+		return ""
+	}
+	switch n.Type(lang) {
+	case "parenthesized_expression":
+		for _, child := range n.Children() {
+			if child.IsNamed() {
+				return resolveRustCallTarget(child, lang, source)
+			}
+		}
+	case "generic_function":
+		return resolveRustCallTarget(n.ChildByFieldName("function", lang), lang, source)
+	case "generic_type":
+		return resolveRustCallTarget(n.ChildByFieldName("type", lang), lang, source)
+	case "scoped_identifier", "scoped_type_identifier":
+		path := resolveRustCallTarget(n.ChildByFieldName("path", lang), lang, source)
+		name := resolveRustCallTarget(n.ChildByFieldName("name", lang), lang, source)
+		if path == "" {
+			return name
+		}
+		if name == "" {
+			return path
+		}
+		return path + "::" + name
 	}
 	return n.Text(source)
 }

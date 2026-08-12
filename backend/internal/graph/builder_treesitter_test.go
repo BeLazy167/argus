@@ -627,10 +627,81 @@ impl<'a, T, U> Worker<'a, Pair<T, U>, Vec<Result<T, U>>> {
 	}
 }
 
+func TestTreeSitterCanonicalizesRustGenericSyntaxByAST(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+	}{
+		{
+			name: "const generic comparison",
+			source: `struct Worker<const VALUE: bool>;
+impl<const N: usize> Worker<{N > 0}> {
+    fn run() { Worker::<{N > 0}>::finish(); }
+    fn finish() {}
+}`,
+		},
+		{
+			name: "const generic shift",
+			source: `struct Worker<const VALUE: usize>;
+impl Worker<{8 >> 1}> {
+    fn run() { Worker::<{8 >> 1}>::finish(); }
+    fn finish() {}
+}`,
+		},
+		{
+			name: "function type",
+			source: `struct Worker<T>(T);
+impl Worker<fn()->usize> {
+    fn run() { Worker::<fn()->usize>::finish(); }
+    fn finish() {}
+}`,
+		},
+		{
+			name: "nested types and lifetime",
+			source: `struct Worker<T>(T);
+impl<'a, T, E> Worker<Result<Vec<&'a T>, E>> {
+    fn run() { Worker::<Result<Vec<&'a T>, E>>::finish(); }
+    fn finish() {}
+}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			syms, edges := parseTreeSitter("worker.rs", tt.source)
+			for _, name := range []string{"Worker.run", "Worker.finish"} {
+				if !slices.ContainsFunc(syms, func(sym Symbol) bool {
+					return sym.Kind == KindMethod && sym.Name == name && sym.Receiver == "Worker"
+				}) {
+					t.Errorf("missing canonical method %q in %+v", name, syms)
+				}
+			}
+			want := Edge{SourceName: "Worker.run", TargetName: "Worker.finish", Kind: EdgeCalls}
+			if !slices.Contains(edges, want) {
+				t.Fatalf("missing canonical call edge %+v in %+v", want, edges)
+			}
+		})
+	}
+}
+
+func TestTreeSitterCanonicalizesNestedRustTurbofishCallByAST(t *testing.T) {
+	src := `struct Wrapper<T>(T);
+impl<T> Wrapper<T> {
+    fn run<U>() { Wrapper::<fn()->Vec<u8>>::convert::<U>(); }
+    fn convert<U>() {}
+}`
+	_, edges := parseTreeSitter("wrapper.rs", src)
+	want := Edge{SourceName: "Wrapper.run", TargetName: "Wrapper.convert", Kind: EdgeCalls}
+	if !slices.Contains(edges, want) {
+		t.Fatalf("missing AST-canonical call edge %+v in %+v", want, edges)
+	}
+}
+
 func TestRustGenericNormalizationDoesNotChangeCppOperatorsOrGoReceivers(t *testing.T) {
 	for target, want := range map[string]string{
 		"Worker<int>::finish": "Worker<int>.finish",
 		"Widget::operator<<":  "Widget.operator<<",
+		"Widget::operator>>":  "Widget.operator>>",
 	} {
 		if got := qualifyScopedCall(target, ""); got != want {
 			t.Errorf("qualifyScopedCall(%q) = %q, want %q", target, got, want)
