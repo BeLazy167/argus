@@ -2,7 +2,6 @@ package pipeline
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -202,12 +201,17 @@ func (e *SimulationEngine) simulateScenario(ctx context.Context, req SimulationR
 	prompt := buildSimulationPrompt(req, scenario)
 
 	resp, err := provider.Complete(ctx, llm.CompletionRequest{
-		Model:       cfg.Model,
-		System:      simulationSystemPrompt,
-		Messages:    []llm.Message{{Role: "user", Content: prompt}},
-		MaxTokens:   600,
-		Temperature: 0.3, // low temp for more deterministic reasoning
-		Stage:       "simulation",
+		Model:    cfg.Model,
+		System:   simulationSystemPrompt,
+		Messages: []llm.Message{{Role: "user", Content: prompt}},
+		// gpt-5.x reasoning and visible output share MaxTokens. The response
+		// includes three paragraph fields, so reserve the same 4000-token
+		// reasoning-aware budget as other structured synthesis calls.
+		MaxTokens:       4000,
+		Temperature:     0.3, // low temp for more deterministic reasoning
+		JSONMode:        true,
+		ReasoningEffort: llm.ReasoningLow,
+		Stage:           "simulation",
 	})
 	if err != nil {
 		return SimulationResult{}, err
@@ -296,33 +300,41 @@ func parseSimulationResponse(content string, scenario string) (SimulationResult,
 	result := SimulationResult{Scenario: scenario}
 
 	var parsed struct {
-		Passes     bool    `json:"passes"`
-		Confidence float64 `json:"confidence"`
-		Verdict    string  `json:"verdict"`
-		Why        string  `json:"why"`
-		Fix        string  `json:"fix"`
-		RootCause  string  `json:"root_cause"`
-		Impact     string  `json:"impact"`
-		Suggestion string  `json:"suggestion"`
+		Passes     *bool    `json:"passes"`
+		Confidence *float64 `json:"confidence"`
+		Verdict    string   `json:"verdict"`
+		Why        string   `json:"why"`
+		Fix        string   `json:"fix"`
+		RootCause  *string  `json:"root_cause"`
+		Impact     string   `json:"impact"`
+		Suggestion string   `json:"suggestion"`
 	}
 
-	cleaned := extractJSON(content)
-	if err := json.Unmarshal([]byte(cleaned), &parsed); err != nil {
+	salvaged, err := unmarshalLLMObjectWithSalvage(content, &parsed)
+	if err != nil {
 		return result, fmt.Errorf("failed to parse simulation response: %w", err)
 	}
+	if salvaged && (parsed.Passes == nil || parsed.Confidence == nil || parsed.RootCause == nil) {
+		return result, fmt.Errorf("failed to parse simulation response: truncated verdict fields")
+	}
+	if parsed.Passes == nil || parsed.Confidence == nil {
+		return result, fmt.Errorf("failed to parse simulation response: missing verdict fields")
+	}
 
-	result.Passes = parsed.Passes
-	result.Confidence = max(0, min(1, parsed.Confidence))
-	result.Verdict = normalizeVerdict(parsed.Verdict, parsed.Passes, result.Confidence)
+	result.Passes = *parsed.Passes
+	result.Confidence = max(0, min(1, *parsed.Confidence))
+	result.Verdict = normalizeVerdict(parsed.Verdict, result.Passes, result.Confidence)
 	result.Why = parsed.Why
 	result.Fix = parsed.Fix
-	result.RootCause = parsed.RootCause
+	if parsed.RootCause != nil {
+		result.RootCause = *parsed.RootCause
+	}
 	result.Impact = parsed.Impact
 	result.Suggestion = parsed.Suggestion
 	// Backfill plain-English fields when the LLM forgot to populate them. Keeps the UI
 	// from rendering empty "Why:" lines when we still have the longer root_cause / suggestion.
 	if result.Why == "" {
-		result.Why = firstSentence(parsed.RootCause)
+		result.Why = firstSentence(result.RootCause)
 	}
 	if result.Fix == "" {
 		result.Fix = firstSentence(parsed.Suggestion)

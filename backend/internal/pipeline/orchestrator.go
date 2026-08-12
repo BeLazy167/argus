@@ -3624,20 +3624,24 @@ Findings:
 Return JSON array: [{"pattern": "<concrete reusable pattern text>", "category": "bug|security|architecture|regression"}]
 The "pattern" value must be the actual pattern text, NOT the word "description". Return [] if no repo-specific patterns emerge. JSON array only.`, run.PREvent.RepoFullName, strings.Join(highConf, "\n"))
 
-	resp, err := provider.Complete(ctx, llm.CompletionRequest{
+	request := llm.CompletionRequest{
 		Model:       cfg.Model,
 		System:      "You extract reusable code review patterns from review findings. Be specific to this codebase.",
 		Messages:    []llm.Message{{Role: "user", Content: prompt}},
 		MaxTokens:   500,
 		Temperature: 0.3,
-		JSONMode:    true,
-		Stage:       "pattern_learning",
-	})
+		// This was already enabled when prose responses were observed. Some
+		// providers ignore response_format, and OpenAI-style JSON mode prefers
+		// an object even though this prompt asks for a bare array.
+		JSONMode: true,
+		Stage:    "pattern_learning",
+	}
+	resp, err := provider.Complete(ctx, request)
 	if err != nil {
 		o.logger.Warn("auto-learn LLM call failed", "error", err)
 		return
 	}
-	run.Tokens.Patterns = StageTokens{
+	patternTokens := StageTokens{
 		PromptTokens:     resp.TokensUsed.PromptTokens,
 		CompletionTokens: resp.TokensUsed.CompletionTokens,
 		TotalTokens:      resp.TokensUsed.TotalTokens,
@@ -3645,17 +3649,38 @@ The "pattern" value must be the actual pattern text, NOT the word "description".
 		Model:            cfg.Model,
 		Provider:         cfg.Provider,
 	}
-	run.Tokens.addToTotal(run.Tokens.Patterns)
 
 	type learnedPattern struct {
 		Pattern  string `json:"pattern"`
 		Category string `json:"category"`
 	}
-	patterns, err := unmarshalLLMArray[learnedPattern](resp.Content)
-	if err != nil {
-		o.logger.Warn("auto-learn parse failed", "error", err)
-		return
+	patterns, parseErr := unmarshalLLMArray[learnedPattern](resp.Content)
+	if parseErr != nil {
+		request.Messages = append(request.Messages,
+			llm.Message{Role: "assistant", Content: resp.Content},
+			llm.Message{Role: "user", Content: "Your previous reply was not a JSON array. Reply with ONLY the JSON array."},
+		)
+		retryResp, retryErr := provider.Complete(ctx, request)
+		if retryErr != nil {
+			o.logger.Warn("auto-learn retry failed", "error", retryErr, "parse_error", parseErr)
+			run.Tokens.Patterns = patternTokens
+			run.Tokens.addToTotal(run.Tokens.Patterns)
+			return
+		}
+		patternTokens.PromptTokens += retryResp.TokensUsed.PromptTokens
+		patternTokens.CompletionTokens += retryResp.TokensUsed.CompletionTokens
+		patternTokens.TotalTokens += retryResp.TokensUsed.TotalTokens
+		patternTokens.Cost += retryResp.Cost
+		patterns, parseErr = unmarshalLLMArray[learnedPattern](retryResp.Content)
+		if parseErr != nil {
+			o.logger.Warn("auto-learn parse failed after retry", "error", parseErr)
+			run.Tokens.Patterns = patternTokens
+			run.Tokens.addToTotal(run.Tokens.Patterns)
+			return
+		}
 	}
+	run.Tokens.Patterns = patternTokens
+	run.Tokens.addToTotal(run.Tokens.Patterns)
 	if len(patterns) > 3 {
 		patterns = patterns[:3]
 	}
@@ -4194,9 +4219,14 @@ Rules:
 		Messages: []llm.Message{
 			{Role: "user", Content: prompt.String()},
 		},
-		MaxTokens:   600,
-		Temperature: 0.2,
-		Stage:       "arch_graph",
+		// gpt-5.x counts reasoning and visible JSON against MaxTokens. Budget
+		// 4000 so reasoning burn cannot consume the space needed for the
+		// documented maximum of 15 nodes plus their dependency edges.
+		MaxTokens:       4000,
+		Temperature:     0.2,
+		JSONMode:        true,
+		ReasoningEffort: llm.ReasoningLow,
+		Stage:           "arch_graph",
 	}
 
 	resp, err := provider.Complete(graphCtx, req)
@@ -4243,10 +4273,15 @@ Rules:
 		Edges []graphEdge `json:"edges"`
 	}
 
-	jsonStr := extractJSON(resp.Content)
 	var result graphResult
-	if err := json.Unmarshal([]byte(jsonStr), &result); err != nil {
-		o.logger.Warn("extractArchitectureGraph parse failed", "error", err, "response_prefix", util.Truncate(resp.Content, 200, true))
+	salvaged, parseErr := unmarshalLLMObjectWithSalvage(resp.Content, &result)
+	if parseErr != nil {
+		o.logger.Warn("extractArchitectureGraph parse failed", "error", parseErr, "response_prefix", util.Truncate(resp.Content, 200, true))
+		return
+	}
+	if salvaged && len(result.Nodes) == 0 {
+		// Never erase a prior graph snapshot with an empty partial response.
+		o.logger.Warn("extractArchitectureGraph salvage recovered no nodes", "response_prefix", util.Truncate(resp.Content, 200, true))
 		return
 	}
 

@@ -1881,16 +1881,23 @@ func (o *Orchestrator) judgeSharedIssue(
 	}, run)
 
 	var judged jointAcceptanceJudgeResponse
-	cleaned := stripCodeFences(resp.Content)
-	if err := json.Unmarshal([]byte(cleaned), &judged); err != nil {
+	salvaged, parseErr := unmarshalLLMObjectWithSalvage(resp.Content, &judged)
+	if parseErr != nil {
 		o.logger.Warn("[joint-accept] LLM parse failed",
 			"issue", fmt.Sprintf("%s/%s#%d", row.Owner, row.Repo, row.Number),
-			"error", err,
-			"error_type", fmt.Sprintf("%T", err),
+			"error", parseErr,
+			"error_type", fmt.Sprintf("%T", parseErr),
 			"model", cfg.Model,
 			"provider", cfg.Provider,
 			"tokens_used", resp.TokensUsed.TotalTokens,
 			"cost", resp.Cost,
+			"response_prefix", util.Truncate(resp.Content, 200, true))
+		return nil
+	}
+
+	if salvaged && len(judged.Criteria) == 0 {
+		o.logger.Warn("[joint-accept] truncated response recovered no criteria",
+			"issue", fmt.Sprintf("%s/%s#%d", row.Owner, row.Repo, row.Number),
 			"response_prefix", util.Truncate(resp.Content, 200, true))
 		return nil
 	}

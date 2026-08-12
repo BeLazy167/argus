@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -563,72 +564,267 @@ func customOrDefault(prompts map[string]string, key, fallback string) string {
 	return fallback
 }
 
-// unmarshalLLMArray parses a JSON array from LLM output, handling markdown code fences.
+// unmarshalLLMArray parses a JSON array from LLM output, handling markdown
+// fences, common model escaping mistakes, and JSON-mode object wrappers.
 func unmarshalLLMArray[T any](content string) ([]T, error) {
 	if content == "" {
 		return nil, nil
 	}
-	// Strip markdown code fences: ```json ... ``` or ``` ... ```
 	cleaned := stripCodeFences(content)
+
 	var result []T
-	if err := json.Unmarshal([]byte(cleaned), &result); err == nil {
+	if err := unmarshalJSONWithEscapeRepair(cleaned, &result); err == nil {
 		return result, nil
 	}
+	if strings.HasPrefix(strings.TrimSpace(cleaned), "{") {
+		if wrapped, ok := unwrapLLMArray(cleaned); ok {
+			if err := unmarshalJSONWithEscapeRepair(wrapped, &result); err == nil {
+				return result, nil
+			}
+		} else if json.Valid([]byte(repairInvalidJSONEscapes(cleaned))) {
+			// A complete object with zero or multiple array fields is ambiguous.
+			return nil, fmt.Errorf("no JSON array found in response")
+		}
+		// A truncated wrapper may still contain a complete array. Fall through
+		// to the existing bracket extraction and truncation recovery below.
+	}
+
 	start := strings.Index(cleaned, "[")
 	end := strings.LastIndex(cleaned, "]")
 	if start >= 0 && end > start {
 		chunk := cleaned[start : end+1]
-		var result []T
-		if err := json.Unmarshal([]byte(chunk), &result); err != nil {
+		if err := unmarshalJSONWithEscapeRepair(chunk, &result); err != nil {
 			repaired := strings.ReplaceAll(chunk, "}\n{", "},\n{")
 			repaired = strings.ReplaceAll(repaired, "} {", "}, {")
 			repaired = strings.ReplaceAll(repaired, "}\t{", "},\t{")
-			if err2 := json.Unmarshal([]byte(repaired), &result); err2 != nil {
+			if err2 := unmarshalJSONWithEscapeRepair(repaired, &result); err2 != nil {
 				recovered := recoverTruncatedArray[T](cleaned[start:])
 				if recovered != nil {
 					return recovered, nil
 				}
 				return nil, fmt.Errorf("parsing JSON from response: %w", err)
 			}
-			return result, nil
 		}
 		return result, nil
 	}
-	recovered := recoverTruncatedArray[T](cleaned)
-	if recovered != nil {
+	if recovered := recoverTruncatedArray[T](cleaned); recovered != nil {
 		return recovered, nil
 	}
 	return nil, fmt.Errorf("no JSON array found in response")
 }
 
-func recoverTruncatedArray[T any](content string) []T {
-	start := strings.Index(content, "[")
-	if start < 0 {
-		return nil
-	}
-	body := content[start+1:]
-	depth := 0
-	lastClose := -1
-	for i, ch := range body {
-		switch ch {
-		case '{':
-			depth++
-		case '}':
-			depth--
-			if depth == 0 {
-				lastClose = i
-			}
+// unmarshalLLMObject parses an LLM-produced top-level object. If output was cut
+// off, it salvages the longest syntactically complete prefix and closes its open
+// containers. This preserves completed top-level arrays and their completed
+// elements while dropping only the partial trailing value. A trailing object
+// is partial until its own closing delimiter arrives, even if a nested object or
+// array inside it completed before truncation.
+func unmarshalLLMObject(content string, result any) error {
+	_, err := unmarshalLLMObjectWithSalvage(content, result)
+	return err
+}
+
+// unmarshalLLMObjectWithSalvage also reports whether parsing required the
+// truncated-response salvage path. Callers that persist snapshots can use this
+// to reject an empty partial result rather than clobber known-good data.
+func unmarshalLLMObjectWithSalvage(content string, result any) (bool, error) {
+	cleaned := stripCodeFences(content)
+	object := extractJSON(cleaned)
+	if err := unmarshalJSONWithEscapeRepair(object, result); err == nil {
+		return false, nil
+	} else if recovered, ok := recoverTruncatedJSON(repairInvalidJSONEscapes(object), '{'); ok {
+		if recoverErr := json.Unmarshal([]byte(recovered), result); recoverErr == nil {
+			return true, nil
 		}
+		return false, fmt.Errorf("parsing JSON object from response: %w", err)
+	} else {
+		return false, fmt.Errorf("parsing JSON object from response: %w", err)
 	}
-	if lastClose <= 0 {
+}
+
+func unmarshalJSONWithEscapeRepair(content string, result any) error {
+	err := json.Unmarshal([]byte(content), result)
+	if err == nil {
 		return nil
 	}
-	closed := content[start:start+1+lastClose+1] + "]"
+	repaired := repairInvalidJSONEscapes(content)
+	if repaired == content {
+		return err
+	}
+	if repairErr := json.Unmarshal([]byte(repaired), result); repairErr != nil {
+		return err
+	}
+	return nil
+}
+
+// repairInvalidJSONEscapes doubles unsupported backslashes inside JSON strings.
+// JSON permits only \", \\, \/, \b, \f, \n, \r, \t, and \u escapes.
+func repairInvalidJSONEscapes(content string) string {
+	var repaired strings.Builder
+	repaired.Grow(len(content))
+	inString := false
+	for i := 0; i < len(content); i++ {
+		ch := content[i]
+		if ch == '"' {
+			inString = !inString
+			repaired.WriteByte(ch)
+			continue
+		}
+		if ch != '\\' || !inString || i+1 >= len(content) {
+			repaired.WriteByte(ch)
+			continue
+		}
+		next := content[i+1]
+		if !strings.ContainsRune(`"\/bfnrtu`, rune(next)) {
+			repaired.WriteByte('\\')
+		}
+		repaired.WriteByte(ch)
+		repaired.WriteByte(next)
+		i++
+	}
+	return repaired.String()
+}
+
+// unwrapLLMArray accepts the object shape encouraged by OpenAI-style
+// json_object mode when exactly one field contains an array. Scalar metadata is
+// allowed, but multiple array-valued fields are ambiguous and are rejected.
+func unwrapLLMArray(content string) (string, bool) {
+	var object map[string]json.RawMessage
+	if err := unmarshalJSONWithEscapeRepair(content, &object); err != nil {
+		return "", false
+	}
+	var array json.RawMessage
+	for _, raw := range object {
+		trimmed := bytes.TrimSpace(raw)
+		if len(trimmed) == 0 || trimmed[0] != '[' {
+			continue
+		}
+		if array != nil {
+			return "", false
+		}
+		array = raw
+	}
+	return string(array), array != nil
+}
+
+func recoverTruncatedArray[T any](content string) []T {
+	recovered, ok := recoverTruncatedJSON(repairInvalidJSONEscapes(content), '[')
+	if !ok {
+		return nil
+	}
 	var result []T
-	if err := json.Unmarshal([]byte(closed), &result); err != nil {
+	if err := json.Unmarshal([]byte(recovered), &result); err != nil {
 		return nil
 	}
 	return result
+}
+
+const maxLLMJSONSalvageBytes = 256 << 10
+
+type truncatedJSONCandidate struct {
+	end   int
+	stack []byte
+}
+
+// recoverTruncatedJSON scans once for safe value boundaries, then decodes
+// candidates from newest to oldest. For object roots, nested candidates are
+// limited to complete direct elements of a top-level array field; arbitrary
+// nested closes must not promote an unfinished trailing element.
+func recoverTruncatedJSON(content string, root byte) (string, bool) {
+	start := strings.IndexByte(content, root)
+	if start < 0 {
+		return "", false
+	}
+	content = content[start:]
+	if len(content) > maxLLMJSONSalvageBytes {
+		slog.Warn("LLM JSON salvage input exceeded limit; scanning prefix",
+			"input_bytes", len(content), "salvage_bytes", maxLLMJSONSalvageBytes)
+		content = content[:maxLLMJSONSalvageBytes]
+	}
+	stack := make([]byte, 0, 4)
+	candidates := make([]truncatedJSONCandidate, 0, 16)
+	inString := false
+	escaped := false
+	for i := 0; i < len(content); i++ {
+		ch := content[i]
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+			} else if ch == '"' {
+				inString = false
+			}
+			continue
+		}
+		if ch == '"' {
+			inString = true
+			continue
+		}
+		switch ch {
+		case '{', '[':
+			stack = append(stack, ch)
+		case ',':
+			// At the root object, a comma proves the preceding field value is
+			// complete. This covers scalar fields before a truncated later field.
+			if root == '{' && len(stack) == 1 {
+				candidates = appendTruncatedJSONCandidate(candidates, i, stack)
+			}
+		case '}', ']':
+			if len(stack) == 0 || (ch == '}' && stack[len(stack)-1] != '{') || (ch == ']' && stack[len(stack)-1] != '[') {
+				return decodeTruncatedJSONCandidate(content, candidates)
+			}
+			closed := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			safeBoundary := len(stack) == 0
+			if root == '[' {
+				// A direct object/array element of the root array completed.
+				safeBoundary = len(stack) == 1 && stack[0] == '['
+			} else if closed == '{' {
+				// A direct element object completed inside a top-level array field.
+				safeBoundary = len(stack) == 2 && stack[0] == '{' && stack[1] == '['
+			} else if closed == '[' {
+				// A complete top-level array field is also a safe object prefix.
+				safeBoundary = len(stack) == 1 && stack[0] == '{'
+			}
+			if safeBoundary {
+				candidates = appendTruncatedJSONCandidate(candidates, i+1, stack)
+			}
+			if len(stack) == 0 {
+				return decodeTruncatedJSONCandidate(content, candidates)
+			}
+		}
+	}
+	return decodeTruncatedJSONCandidate(content, candidates)
+}
+
+func appendTruncatedJSONCandidate(candidates []truncatedJSONCandidate, end int, stack []byte) []truncatedJSONCandidate {
+	return append(candidates, truncatedJSONCandidate{end: end, stack: append([]byte(nil), stack...)})
+}
+
+func decodeTruncatedJSONCandidate(content string, candidates []truncatedJSONCandidate) (string, bool) {
+	for i := len(candidates) - 1; i >= 0; i-- {
+		candidate := content[:candidates[i].end] + closeJSONContainers(candidates[i].stack)
+		if json.Valid([]byte(candidate)) {
+			return candidate, true
+		}
+	}
+	return "", false
+}
+
+func closeJSONContainers(stack []byte) string {
+	var closed strings.Builder
+	closed.Grow(len(stack))
+	for i := len(stack) - 1; i >= 0; i-- {
+		if stack[i] == '{' {
+			closed.WriteByte('}')
+		} else {
+			closed.WriteByte(']')
+		}
+	}
+	return closed.String()
 }
 
 // stripCodeFences removes markdown code fences (```json\n...\n```) from LLM output.

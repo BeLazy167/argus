@@ -1252,3 +1252,32 @@ func TestEnqueueSiblingRefreshes_HopGuardBreaksCycle(t *testing.T) {
 		t.Fatalf("hop guard failed: %d debounce timers created, want 0", count)
 	}
 }
+
+func TestJudgeSharedIssueRejectsSalvagedResponseWithoutCriteria(t *testing.T) {
+	t.Cleanup(resetCrossPRGlobals)
+	h := newHarness(t)
+
+	issueKey := ghKey("acme", "api", 99)
+	h.gh.issues[issueKey] = &ghpkg.Issue{
+		Owner: "acme", Repo: "api", Number: 99,
+		Title: "Vendor acceptance",
+		Body:  "- [ ] Run git grep for Vendor",
+	}
+
+	secondID := uuid.New()
+	secondRepo := &store.Repo{ID: 502, InstallationID: 2001, FullName: "acme/secondary", Enabled: true}
+	h.store.repos[secondRepo.ID] = secondRepo
+	h.store.reviews[secondID] = &store.Review{ID: secondID, RepoID: secondRepo.ID, PRNumber: 43, Status: "completed"}
+	h.gh.prDiffs[ghKey("acme", "primary", 42)] = "--- a/main.go\n+++ b/main.go\n"
+	h.gh.prDiffs[ghKey("acme", "secondary", 43)] = "--- a/secondary.go\n+++ b/secondary.go\n"
+	h.llm.SetContent(`{"schema_version":1,"criteria":[{"text":"truncated`)
+
+	row := db.FindSharedLinkedIssuesRow{
+		Owner: "acme", Repo: "api", Number: 99,
+		ReviewIds: []uuid.UUID{h.reviewID, secondID},
+	}
+	got := h.o.judgeSharedIssue(context.Background(), h.run, h.llm, llm.ModelConfig{Model: "fake"}, row)
+	if got != nil {
+		t.Fatalf("judgeSharedIssue() = %+v, want nil for salvaged response without complete criteria", got)
+	}
+}
