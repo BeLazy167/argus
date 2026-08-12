@@ -278,14 +278,9 @@ func TestReplaceInferredAPIEdges_StopsAtTheInstallationBoundary(t *testing.T) {
 // LookupCodeNodeIDsByName is the fallback an incremental index depends on: the
 // handler a route names lives in a file the run never fetched.
 //
-// SEED ORDER IS THE TEST. The query is `SELECT DISTINCT ON (name) ... ORDER BY
-// name, id`, so it returns the LOWEST id bearing the name. Seeding the wanted
-// node first gave it the lowest id, and it then won whether or not
-// `WHERE repo_id = $1` was there at all — the assertion named the scoping
-// predicate while being unable to observe it. The foreign repo's node is
-// therefore seeded FIRST and holds the lower id: only the repo_id predicate
-// keeps it from being the answer. Relaxing that predicate to
-// `(repo_id = $1 OR true)` now fails with `getRepo = <foreign id>`.
+// The foreign repository is seeded first so its lower ID would expose a
+// missing repo_id predicate. The lookup must still return only this repo's
+// unique exact match; qualified-alias ambiguity is covered separately below.
 func TestLookupCodeNodeIDsByName(t *testing.T) {
 	pool, ctx := apiEndpointTestPool(t)
 	st := &Store{Pool: pool, q: db.New(pool)}
@@ -315,6 +310,31 @@ func TestLookupCodeNodeIDsByName(t *testing.T) {
 // sits in the same table as a parsed one, so a consumer has to be able to tell
 // them apart. Two signals, and the boolean is the one that survives new kinds
 // being added.
+func TestLookupCodeNodeIDsByNameReturnsAmbiguousForQualifiedAliases(t *testing.T) {
+	pool, ctx := apiEndpointTestPool(t)
+	st := &Store{Pool: pool, q: db.New(pool)}
+	install := seedInstallation(t, ctx, pool, "{}")
+	repo := apiSeedRepo(t, ctx, pool, install, "acme/qualified")
+	apiSeedNode(t, ctx, pool, repo, "Handle", "functions.go")
+	apiSeedNode(t, ctx, pool, repo, "Alpha.Handle", "handlers.go")
+	alphaID := apiSeedNode(t, ctx, pool, repo, "Alpha.Done", "handlers.go")
+	apiSeedNode(t, ctx, pool, repo, "Beta.Handle", "handlers.go")
+
+	ids, err := st.LookupCodeNodeIDsByName(ctx, repo, []string{"Handle", "Alpha.Done", "Missing"})
+	if err != nil {
+		t.Fatalf("lookup: %v", err)
+	}
+	if id, ok := ids["Handle"]; !ok || id != 0 {
+		t.Fatalf("Handle = (%d, %v), want explicit ambiguous sentinel", id, ok)
+	}
+	if ids["Alpha.Done"] != alphaID {
+		t.Fatalf("Alpha.Done = %d, want %d", ids["Alpha.Done"], alphaID)
+	}
+	if _, ok := ids["Missing"]; ok {
+		t.Fatal("missing name unexpectedly resolved")
+	}
+}
+
 func TestInferredEdgeProvenance(t *testing.T) {
 	pool, ctx := apiEndpointTestPool(t)
 	st := &Store{Pool: pool, q: db.New(pool)}

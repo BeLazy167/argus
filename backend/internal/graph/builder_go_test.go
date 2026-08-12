@@ -36,7 +36,7 @@ func (s *Server) Start(addr string) error {
 `,
 			wantSyms: []Symbol{
 				{Kind: "type", Name: "Server", FilePath: "test.go", LineStart: 3, LineEnd: 3, Visibility: "exported", Scope: "package"},
-				{Kind: "method", Name: "Start", FilePath: "test.go", LineStart: 5, LineEnd: 7, Params: "(addr string)", ReturnType: "error", Visibility: "exported", Receiver: "*Server", Scope: "method"},
+				{Kind: "method", Name: "Server.Start", FilePath: "test.go", LineStart: 5, LineEnd: 7, Params: "(addr string)", ReturnType: "error", Visibility: "exported", Receiver: "*Server", Scope: "method"},
 			},
 		},
 		{
@@ -145,7 +145,7 @@ func (f Foo) Bar() int {
 `,
 			wantSyms: []Symbol{
 				{Kind: "type", Name: "Foo", FilePath: "test.go", LineStart: 3, LineEnd: 3, Visibility: "exported", Scope: "package"},
-				{Kind: "method", Name: "Bar", FilePath: "test.go", LineStart: 5, LineEnd: 7, Params: "()", ReturnType: "int", Visibility: "exported", Receiver: "Foo", Scope: "method"},
+				{Kind: "method", Name: "Foo.Bar", FilePath: "test.go", LineStart: 5, LineEnd: 7, Params: "()", ReturnType: "int", Visibility: "exported", Receiver: "Foo", Scope: "method"},
 			},
 		},
 		{
@@ -310,7 +310,7 @@ func helper() {
 	}
 
 	// Verify GetUser method
-	gu, ok := symMap["GetUser"]
+	gu, ok := symMap["UserService.GetUser"]
 	if !ok {
 		t.Fatal("missing GetUser symbol")
 	}
@@ -341,14 +341,51 @@ func helper() {
 	// Verify call edges exist for GetUser
 	callMap := make(map[string]bool)
 	for _, e := range edges {
-		if e.Kind == "calls" && e.SourceName == "GetUser" {
+		if e.Kind == "calls" && e.SourceName == "UserService.GetUser" {
 			callMap[e.TargetName] = true
 		}
 	}
-	if !callMap["Query"] {
-		t.Error("missing call edge GetUser -> Query")
+	if !callMap["s.db.Query"] {
+		t.Error("missing call edge UserService.GetUser -> s.db.Query")
 	}
 	if !callMap["fmt.Sprintf"] {
-		t.Error("missing call edge GetUser -> fmt.Sprintf")
+		t.Error("missing call edge UserService.GetUser -> fmt.Sprintf")
+	}
+}
+
+func TestParseGoASTPreservesReceiverQualifiedMethodIdentity(t *testing.T) {
+	src := `package handlers
+	type Alpha struct{}
+	type Beta struct{}
+	func (a Alpha) Handle() { a.Done() }
+	func (a Alpha) Done() {}
+	func (b Beta) Handle() { b.Done() }
+	func (b Beta) Done() {}
+	func Caller() { Alpha{}.Handle(); Beta{}.Handle(); Handle() }`
+
+	syms, edges := parseGoAST("handlers.go", src)
+	methods := map[string]bool{}
+	for _, sym := range syms {
+		if sym.Kind == KindMethod {
+			methods[sym.Name] = true
+		}
+	}
+	for _, name := range []string{"Alpha.Handle", "Alpha.Done", "Beta.Handle", "Beta.Done"} {
+		if !methods[name] {
+			t.Errorf("missing qualified method %q in %+v", name, syms)
+		}
+	}
+	wantEdges := map[Edge]bool{
+		{SourceName: "Alpha.Handle", TargetName: "Alpha.Done", Kind: EdgeCalls}: true,
+		{SourceName: "Beta.Handle", TargetName: "Beta.Done", Kind: EdgeCalls}:   true,
+		{SourceName: "Caller", TargetName: "Alpha.Handle", Kind: EdgeCalls}:     true,
+		{SourceName: "Caller", TargetName: "Beta.Handle", Kind: EdgeCalls}:      true,
+		{SourceName: "Caller", TargetName: "Handle", Kind: EdgeCalls}:           true,
+	}
+	for _, edge := range edges {
+		delete(wantEdges, edge)
+	}
+	if len(wantEdges) != 0 {
+		t.Fatalf("missing qualified call edges: %+v; got %+v", wantEdges, edges)
 	}
 }

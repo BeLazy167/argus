@@ -494,7 +494,14 @@ func publishGraphGeneration(ctx context.Context, st *store.Store, repoID, genera
 			return
 		}
 		rememberedIDs[id] = struct{}{}
-		nameToIDs[name] = append(nameToIDs[name], id)
+		nameToIDs[name] = appendUniqueID(nameToIDs[name], id)
+	}
+	rememberSymbol := func(sym Symbol, id int64) {
+		rememberNode(sym.FilePath, sym.Name, id)
+		if (sym.Kind == KindMethod || sym.Kind == KindClass) && simpleSymbolName(sym.Name) != sym.Name {
+			alias := simpleSymbolName(sym.Name)
+			nameToIDs[alias] = appendUniqueID(nameToIDs[alias], id)
+		}
 	}
 	if _, err := forEachStagedGraphFile(ctx, tx, generationID, "graph_symbols", func(file stagedGraphFile) error {
 		var symbols []Symbol
@@ -506,9 +513,6 @@ func publishGraphGeneration(ctx context.Context, st *store.Store, repoID, genera
 			end := min(start+nodeBatchSize, len(symbols))
 			batch := &pgx.Batch{}
 			for _, sym := range symbols[start:end] {
-				// The storage key predates receiver metadata, so two legal Go
-				// methods can intentionally collapse to the first parser-order row.
-				// The no-op update is required for PostgreSQL to return that row's ID.
 				batch.Queue(`INSERT INTO code_nodes (repo_id, installation_id, kind, name, file_path, line_start, line_end, language,
 				  return_type, params, visibility, is_async, receiver_type, scope, content_hash, updated_at)
 				VALUES ($1, (SELECT installation_id FROM repos WHERE id = $1), $2, $3, $4, $5, $6, $7,
@@ -526,7 +530,7 @@ func publishGraphGeneration(ctx context.Context, st *store.Store, repoID, genera
 					_ = results.Close()
 					return fmt.Errorf("publish graph generation: insert node %s: %w", sym.Name, err)
 				}
-				rememberNode(sym.FilePath, sym.Name, id)
+				rememberSymbol(sym, id)
 			}
 			if err := results.Close(); err != nil {
 				return fmt.Errorf("publish graph generation: close node batch: %w", err)

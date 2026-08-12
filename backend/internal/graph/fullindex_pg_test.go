@@ -1072,7 +1072,7 @@ func TestGraphGenerationTerminalCleanupKeepsOnlyBuildingPayloads(t *testing.T) {
 	}
 }
 
-func TestParserDuplicateGoMethodsPublishWithStableCanonicalNode(t *testing.T) {
+func TestParserDuplicateGoMethodsPublishDistinctQualifiedNodes(t *testing.T) {
 	pool, ctx := generationTestPool(t)
 	st := store.NewWithDB(pool)
 	installationID := generationSeedInstallation(t, ctx, pool, "{}")
@@ -1081,9 +1081,11 @@ func TestParserDuplicateGoMethodsPublishWithStableCanonicalNode(t *testing.T) {
 	const source = `package duplicate
 	type Alpha struct{}
 	type Beta struct{}
-	func (Alpha) Handle() {}
-	func (Beta) Handle() {}
-	func Caller() { Alpha{}.Handle() }`
+	func AlphaDone() {}
+	func BetaDone() {}
+	func (Alpha) Handle() { AlphaDone() }
+	func (Beta) Handle() { BetaDone() }
+	func Caller() { Alpha{}.Handle(); Beta{}.Handle(); Handle() }`
 
 	symbols, edges := ParseFileSymbols(filePath, source)
 	symbols = append(symbols, fileSymbol(filePath, source))
@@ -1106,19 +1108,32 @@ func TestParserDuplicateGoMethodsPublishWithStableCanonicalNode(t *testing.T) {
 		t.Fatalf("publish parser fixture with legal duplicate method names: %v", err)
 	}
 
-	var status, receiver string
-	var methodCount, resolvedCalls, buildingCount, stagedPayloads int
+	var status string
+	var methodCount, qualifiedCallerCalls, qualifiedSourceCalls, ambiguousCalls, buildingCount, stagedPayloads int
 	if err := pool.QueryRow(ctx, `SELECT status FROM graph_index_generations WHERE id = $1`, snapshot.GenerationID).Scan(&status); err != nil {
 		t.Fatal(err)
 	}
-	if err := pool.QueryRow(ctx, `SELECT count(*)::int, min(receiver_type) FROM code_nodes WHERE repo_id = $1 AND file_path = $2 AND kind = 'method' AND name = 'Handle'`, repoID, filePath).Scan(&methodCount, &receiver); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT count(*)::int FROM code_nodes WHERE repo_id = $1 AND file_path = $2 AND kind = 'method' AND name IN ('Alpha.Handle', 'Beta.Handle')`, repoID, filePath).Scan(&methodCount); err != nil {
 		t.Fatal(err)
 	}
 	if err := pool.QueryRow(ctx, `SELECT count(*)::int FROM code_edges e
 		JOIN code_nodes source ON source.id = e.source_id
 		JOIN code_nodes target ON target.id = e.target_id
-		WHERE e.repo_id = $1 AND source.name = 'Caller' AND target.name = 'Handle'
-		  AND target.kind = 'method' AND target.receiver_type = 'Alpha'`, repoID).Scan(&resolvedCalls); err != nil {
+		WHERE e.repo_id = $1 AND source.name = 'Caller'
+		  AND target.name IN ('Alpha.Handle', 'Beta.Handle') AND e.kind = 'calls'`, repoID).Scan(&qualifiedCallerCalls); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*)::int FROM code_edges e
+		JOIN code_nodes source ON source.id = e.source_id
+		JOIN code_nodes target ON target.id = e.target_id
+		WHERE e.repo_id = $1 AND ((source.name = 'Alpha.Handle' AND target.name = 'AlphaDone')
+		  OR (source.name = 'Beta.Handle' AND target.name = 'BetaDone')) AND e.kind = 'calls'`, repoID).Scan(&qualifiedSourceCalls); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*)::int FROM code_edges e
+		JOIN code_nodes source ON source.id = e.source_id
+		JOIN code_nodes target ON target.id = e.target_id
+		WHERE e.repo_id = $1 AND source.name = 'Caller' AND target.name = 'ambiguous:Handle' AND e.kind = 'calls'`, repoID).Scan(&ambiguousCalls); err != nil {
 		t.Fatal(err)
 	}
 	if err := pool.QueryRow(ctx, `SELECT count(*)::int FROM graph_index_generations WHERE repo_id = $1 AND status = 'building'`, repoID).Scan(&buildingCount); err != nil {
@@ -1127,8 +1142,8 @@ func TestParserDuplicateGoMethodsPublishWithStableCanonicalNode(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*)::int FROM graph_index_generation_files WHERE generation_id = $1`, snapshot.GenerationID).Scan(&stagedPayloads); err != nil {
 		t.Fatal(err)
 	}
-	if status != "published" || methodCount != 1 || receiver != "Alpha" || resolvedCalls != 1 || buildingCount != 0 || stagedPayloads != 0 {
-		t.Fatalf("published duplicate fixture: status=%s methods=%d receiver=%q resolved_calls=%d building=%d staged=%d", status, methodCount, receiver, resolvedCalls, buildingCount, stagedPayloads)
+	if status != "published" || methodCount != 2 || qualifiedCallerCalls != 2 || qualifiedSourceCalls != 2 || ambiguousCalls != 1 || buildingCount != 0 || stagedPayloads != 0 {
+		t.Fatalf("published duplicate fixture: status=%s methods=%d caller_calls=%d source_calls=%d ambiguous=%d building=%d staged=%d", status, methodCount, qualifiedCallerCalls, qualifiedSourceCalls, ambiguousCalls, buildingCount, stagedPayloads)
 	}
 }
 

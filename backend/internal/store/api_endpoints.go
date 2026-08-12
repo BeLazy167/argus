@@ -252,26 +252,34 @@ func (s *Store) ReplaceInferredAPIEdges(ctx context.Context, repoID int64, edges
 	return len(edges), nil
 }
 
-// LookupCodeNodeIDsByName resolves symbol names to one node id each, for the
-// given repository.
-//
-// The indexer's in-memory name map only holds the files a single run visited,
-// so an incremental index of server.go could not see the handler functions
-// named by its routes and anchored every route to the enclosing router function
-// instead. Which node a route carried then depended on which files a PR
-// happened to change. DISTINCT ON with an id order makes the answer stable
-// rather than a function of tree-walk order.
+// LookupCodeNodeIDsByName resolves symbol names for the given repository.
+// Qualified names match exactly. An unqualified name also matches the final
+// component of a receiver/scoped identity (Handle -> Alpha.Handle). A zero ID
+// means the name exists but is ambiguous; callers must not choose one row.
 func (s *Store) LookupCodeNodeIDsByName(ctx context.Context, repoID int64, names []string) (map[string]int64, error) {
 	if len(names) == 0 {
 		return map[string]int64{}, nil
 	}
 	rows, err := s.Pool.Query(ctx, `
-		SELECT name, MIN(id) AS id
-		FROM code_nodes
-		WHERE repo_id = $1 AND name = ANY($2::text[])
-		GROUP BY name
-		HAVING COUNT(*) = 1
-		ORDER BY name`, repoID, names)
+		WITH requested(name, simple_name, qualified) AS (
+			SELECT name, regexp_replace(name, '^.*\.', ''), strpos(name, '.') > 0
+			FROM unnest($2::text[]) name
+		), matches AS (
+			SELECT requested.name AS requested_name, requested.qualified, cn.id,
+				cn.name = requested.name AS exact
+			FROM requested
+			JOIN code_nodes cn ON cn.repo_id = $1 AND (
+				cn.name = requested.name OR cn.name LIKE ('%.' || requested.simple_name)
+			)
+		)
+		SELECT requested_name, CASE
+			WHEN qualified AND COUNT(*) FILTER (WHERE exact) = 1 THEN MIN(id) FILTER (WHERE exact)
+			WHEN qualified AND COUNT(*) FILTER (WHERE exact) > 1 THEN 0
+			WHEN COUNT(*) = 1 THEN MIN(id)
+			ELSE 0 END AS id
+		FROM matches
+		GROUP BY requested_name, qualified
+		ORDER BY requested_name`, repoID, names)
 	if err != nil {
 		return nil, fmt.Errorf("lookup code node ids: %w", err)
 	}

@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"slices"
 	"testing"
 )
 
@@ -34,8 +35,8 @@ export function add(a: number, b: number): number {
 	}
 
 	// Check method
-	if s, ok := symMap["greet"]; !ok || s.Kind != "method" {
-		t.Errorf("greet: got %+v", symMap["greet"])
+	if s, ok := symMap["App.greet"]; !ok || s.Kind != "method" {
+		t.Errorf("greet: got %+v", symMap["App.greet"])
 	}
 
 	// Check function
@@ -110,8 +111,8 @@ class Dog(Animal):
 	if classCount["Dog"] != 1 {
 		t.Errorf("expected 1 Dog class, got %d", classCount["Dog"])
 	}
-	if methodCount["speak"] != 2 {
-		t.Errorf("expected 2 speak methods, got %d", methodCount["speak"])
+	if methodCount["Animal.speak"] != 1 || methodCount["Dog.speak"] != 1 {
+		t.Errorf("expected receiver-qualified speak methods, got %+v", methodCount)
 	}
 
 	// Check inheritance
@@ -234,11 +235,11 @@ public interface Database {
 	if s, ok := symMap["Database"]; !ok || s.Kind != "interface" {
 		t.Errorf("Database: got %+v", symMap["Database"])
 	}
-	if s, ok := symMap["getUser"]; !ok || s.Kind != "method" {
-		t.Errorf("getUser: got %+v", symMap["getUser"])
+	if s, ok := symMap["UserService.getUser"]; !ok || s.Kind != "method" {
+		t.Errorf("getUser: got %+v", symMap["UserService.getUser"])
 	}
-	if s, ok := symMap["helper"]; !ok || s.Kind != "method" {
-		t.Errorf("helper: got %+v", symMap["helper"])
+	if s, ok := symMap["UserService.helper"]; !ok || s.Kind != "method" {
+		t.Errorf("helper: got %+v", symMap["UserService.helper"])
 	}
 
 	// Check import edges
@@ -285,11 +286,11 @@ public interface IUserService {
 	if s, ok := symMap["IUserService"]; !ok || s.Kind != "interface" {
 		t.Errorf("IUserService: got %+v", symMap["IUserService"])
 	}
-	if s, ok := symMap["GetUser"]; !ok || s.Kind != "method" {
-		t.Errorf("GetUser: got %+v", symMap["GetUser"])
+	if s, ok := symMap["UserController.GetUser"]; !ok || s.Kind != "method" {
+		t.Errorf("GetUser: got %+v", symMap["UserController.GetUser"])
 	}
-	if s, ok := symMap["Log"]; !ok || s.Kind != "method" {
-		t.Errorf("Log: got %+v", symMap["Log"])
+	if s, ok := symMap["UserController.Log"]; !ok || s.Kind != "method" {
+		t.Errorf("Log: got %+v", symMap["UserController.Log"])
 	}
 
 	// Check using/import edges
@@ -390,7 +391,7 @@ func (s *Server) Start() error {
 	if !names["NewServer"] {
 		t.Errorf("expected NewServer function symbol, got syms=%+v", syms)
 	}
-	if !names["Start"] {
+	if !names["Server.Start"] {
 		t.Errorf("expected Start method symbol, got syms=%+v", syms)
 	}
 }
@@ -460,11 +461,66 @@ impl Config {
 	// Count how many times "new" appears
 	count := 0
 	for _, s := range syms {
-		if s.Name == "new" {
+		if s.Name == "Config.new" {
 			count++
 		}
 	}
 	if count != 1 {
-		t.Errorf("expected exactly 1 'new' symbol, got %d", count)
+		t.Errorf("expected exactly 1 'Config.new' symbol, got %d", count)
+	}
+}
+
+func TestTreeSitterPythonPreservesClassQualifiedMethodsAndSources(t *testing.T) {
+	src := `class Alpha:
+    def handle(self):
+        self.done()
+    def done(self):
+        pass
+
+class Beta:
+    def handle(self):
+        self.done()
+    def done(self):
+        pass
+`
+	syms, edges := parseTreeSitter("handlers.py", src)
+	methods := map[string]bool{}
+	for _, sym := range syms {
+		if sym.Kind == KindMethod {
+			methods[sym.Name] = true
+		}
+	}
+	for _, name := range []string{"Alpha.handle", "Alpha.done", "Beta.handle", "Beta.done"} {
+		if !methods[name] {
+			t.Errorf("missing qualified Python method %q in %+v", name, syms)
+		}
+	}
+	for _, want := range []Edge{
+		{SourceName: "Alpha.handle", TargetName: "Alpha.done", Kind: EdgeCalls},
+		{SourceName: "Beta.handle", TargetName: "Beta.done", Kind: EdgeCalls},
+	} {
+		if !slices.Contains(edges, want) {
+			t.Errorf("missing edge %+v in %+v", want, edges)
+		}
+	}
+}
+
+func TestTreeSitterPythonPreservesNestedClassIdentity(t *testing.T) {
+	src := `class Alpha:
+    class Item:
+        pass
+class Beta:
+    class Item:
+        pass
+`
+	syms, _ := parseTreeSitter("nested.py", src)
+	names := map[string]bool{}
+	for _, sym := range syms {
+		if sym.Kind == KindClass {
+			names[sym.Name] = true
+		}
+	}
+	if !names["Alpha.Item"] || !names["Beta.Item"] {
+		t.Fatalf("nested class identities collapsed: %+v", syms)
 	}
 }

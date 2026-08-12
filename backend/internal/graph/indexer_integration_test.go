@@ -494,3 +494,94 @@ func TestIndexParsedSymbols_ImportUsesFileAndQualifiedModuleIdentity(t *testing.
 		t.Fatalf("import did not use file -> module identities: full=%+v plain=%+v edges=%+v", st.upsertFull, st.upsertPlain, st.upsertEdges)
 	}
 }
+
+func TestIndexParsedSymbols_PreservesQualifiedMethodsAndMarksUnqualifiedDuplicateAmbiguous(t *testing.T) {
+	st := newFakeIndexerStore()
+	results := map[string]fileResult{
+		"handlers.go": {
+			symbols: []Symbol{
+				{Kind: KindMethod, Name: "Alpha.Handle", Receiver: "Alpha", FilePath: "handlers.go", LineStart: 3, LineEnd: 3},
+				{Kind: KindMethod, Name: "Alpha.Done", Receiver: "Alpha", FilePath: "handlers.go", LineStart: 4, LineEnd: 4},
+				{Kind: KindMethod, Name: "Beta.Handle", Receiver: "Beta", FilePath: "handlers.go", LineStart: 6, LineEnd: 6},
+				{Kind: KindMethod, Name: "Beta.Done", Receiver: "Beta", FilePath: "handlers.go", LineStart: 7, LineEnd: 7},
+				{Kind: KindFunction, Name: "Caller", FilePath: "handlers.go", LineStart: 9, LineEnd: 9},
+			},
+			edges: []Edge{
+				{SourceName: "Alpha.Handle", TargetName: "Alpha.Done", Kind: EdgeCalls},
+				{SourceName: "Beta.Handle", TargetName: "Beta.Done", Kind: EdgeCalls},
+				{SourceName: "Caller", TargetName: "Handle", Kind: EdgeCalls},
+			},
+		},
+	}
+	if err := indexParsedSymbols(context.Background(), st, 42, results); err != nil {
+		t.Fatalf("indexParsedSymbols: %v", err)
+	}
+
+	gotMethods := []string{}
+	for _, call := range st.upsertFull {
+		if call.kind == KindMethod {
+			gotMethods = append(gotMethods, call.name)
+		}
+	}
+	slices.Sort(gotMethods)
+	wantMethods := []string{"Alpha.Done", "Alpha.Handle", "Beta.Done", "Beta.Handle"}
+	if !slices.Equal(gotMethods, wantMethods) {
+		t.Fatalf("stored methods = %v, want %v", gotMethods, wantMethods)
+	}
+	if len(st.upsertPlain) != 1 || st.upsertPlain[0].name != "ambiguous:Handle" {
+		t.Fatalf("unqualified duplicate target = %+v, want explicit ambiguous placeholder", st.upsertPlain)
+	}
+	if len(st.upsertEdges) != 3 {
+		t.Fatalf("edges = %+v, want two qualified calls and one ambiguous call", st.upsertEdges)
+	}
+}
+
+func TestIndexParsedSymbols_QualifiedClassesKeepTypeAmbiguityExplicit(t *testing.T) {
+	st := newFakeIndexerStore()
+	results := map[string]fileResult{
+		"models.py": {symbols: []Symbol{
+			{Kind: KindClass, Name: "Alpha.Item", FilePath: "models.py", LineStart: 2, LineEnd: 3},
+			{Kind: KindClass, Name: "Beta.Item", FilePath: "models.py", LineStart: 5, LineEnd: 6},
+			{Kind: KindFunction, Name: "make", FilePath: "models.py", LineStart: 8, LineEnd: 9, ReturnType: "Item"},
+		}},
+	}
+	if err := indexParsedSymbols(context.Background(), st, 42, results); err != nil {
+		t.Fatalf("indexParsedSymbols: %v", err)
+	}
+	if len(st.upsertPlain) != 1 || st.upsertPlain[0].name != "ambiguous:Item" {
+		t.Fatalf("type resolution = %+v, want explicit ambiguous class placeholder", st.upsertPlain)
+	}
+	if len(st.upsertEdges) != 1 || st.upsertEdges[0].kind != EdgeUsesType || st.upsertEdges[0].targetID != st.upsertPlain[0].id {
+		t.Fatalf("type edges = %+v, want make -> ambiguous:Item", st.upsertEdges)
+	}
+}
+
+func TestIndexParsedSymbols_IncrementalDBFallbackKeepsQualifiedAndAmbiguousMethodsDistinct(t *testing.T) {
+	st := newFakeIndexerStore()
+	st.nodeIDsByName = map[string]int64{
+		"Alpha.Handle": 77,
+		"Handle":       0, // store sentinel: more than one qualified alias exists
+	}
+	results := map[string]fileResult{
+		"caller.go": {
+			symbols: []Symbol{{Kind: KindFunction, Name: "Caller", FilePath: "caller.go", LineStart: 1, LineEnd: 2}},
+			edges: []Edge{
+				{SourceName: "Caller", TargetName: "Alpha.Handle", Kind: EdgeCalls},
+				{SourceName: "Caller", TargetName: "Handle", Kind: EdgeCalls},
+			},
+		},
+	}
+	if err := indexParsedSymbols(context.Background(), st, 42, results); err != nil {
+		t.Fatalf("indexParsedSymbols: %v", err)
+	}
+	if len(st.upsertPlain) != 1 || st.upsertPlain[0].name != "ambiguous:Handle" {
+		t.Fatalf("placeholders = %+v, want ambiguous:Handle", st.upsertPlain)
+	}
+	gotTargets := map[int64]bool{}
+	for _, edge := range st.upsertEdges {
+		gotTargets[edge.targetID] = true
+	}
+	if !gotTargets[77] || !gotTargets[st.upsertPlain[0].id] || len(gotTargets) != 2 {
+		t.Fatalf("incremental targets = %+v, want qualified node 77 and ambiguity placeholder", st.upsertEdges)
+	}
+}

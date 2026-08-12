@@ -191,7 +191,7 @@ func extractFuncSymbol(n *gotreesitter.Node, lang *gotreesitter.Language, source
 	}
 	*syms = append(*syms, sym)
 
-	extractBodyCallEdges(name, n, lang, source, edges)
+	extractBodyCallEdges(name, "", n, lang, source, edges)
 }
 
 // extractMethodSymbol extracts a method symbol.
@@ -200,6 +200,11 @@ func extractMethodSymbol(n *gotreesitter.Node, lang *gotreesitter.Language, sour
 	if name == "" {
 		return
 	}
+	owner := receiverIdentity(extractReceiver(n, lang, source))
+	if owner == "" {
+		owner = enclosingTypeName(n, lang, source)
+	}
+	name = qualifySymbolName(owner, name)
 
 	params := extractFieldText(n, lang, source, "parameters")
 	sym := Symbol{
@@ -212,12 +217,12 @@ func extractMethodSymbol(n *gotreesitter.Node, lang *gotreesitter.Language, sour
 		ParamCount: countParams(params),
 		ReturnType: returnTypeOf(n, lang, source),
 		Visibility: visibilityFromModifiers(n, lang, source),
-		Receiver:   extractReceiver(n, lang, source),
+		Receiver:   owner,
 		Scope:      "method",
 	}
 	*syms = append(*syms, sym)
 
-	extractBodyCallEdges(name, n, lang, source, edges)
+	extractBodyCallEdges(name, owner, n, lang, source, edges)
 }
 
 // extractClassSymbol extracts a class symbol and inheritance/implements edges.
@@ -230,6 +235,7 @@ func extractClassSymbol(n *gotreesitter.Node, lang *gotreesitter.Language, sourc
 	if name == "" {
 		return
 	}
+	name = qualifySymbolName(enclosingTypeName(n, lang, source), name)
 
 	vis := visibilityFromModifiers(n, lang, source)
 
@@ -389,7 +395,7 @@ func extractImplSymbol(n *gotreesitter.Node, lang *gotreesitter.Language, source
 		if nameNode == nil {
 			continue
 		}
-		name := nameNode.Text(source)
+		name := qualifySymbolName(typeName, nameNode.Text(source))
 		params := extractFieldText(child, lang, source, "parameters")
 		returnType := extractFieldText(child, lang, source, "return_type")
 
@@ -417,7 +423,7 @@ func extractImplSymbol(n *gotreesitter.Node, lang *gotreesitter.Language, source
 			bodyNode = child.ChildByFieldName("block", lang)
 		}
 		if bodyNode != nil {
-			extractCallEdges(name, bodyNode, lang, source, edges)
+			extractCallEdges(name, typeName, bodyNode, lang, source, edges)
 		}
 	}
 }
@@ -523,12 +529,12 @@ func extractIncludeEdges(n *gotreesitter.Node, lang *gotreesitter.Language, sour
 }
 
 // extractCallEdges walks a function body and extracts call edges.
-func extractCallEdges(sourceName string, body *gotreesitter.Node, lang *gotreesitter.Language, source []byte, edges *[]Edge) {
+func extractCallEdges(sourceName, owner string, body *gotreesitter.Node, lang *gotreesitter.Language, source []byte, edges *[]Edge) {
 	seen := make(map[string]bool)
-	extractCallsRecursive(sourceName, body, lang, source, edges, seen)
+	extractCallsRecursive(sourceName, owner, body, lang, source, edges, seen)
 }
 
-func extractCallsRecursive(sourceName string, n *gotreesitter.Node, lang *gotreesitter.Language, source []byte, edges *[]Edge, seen map[string]bool) {
+func extractCallsRecursive(sourceName, owner string, n *gotreesitter.Node, lang *gotreesitter.Language, source []byte, edges *[]Edge, seen map[string]bool) {
 	if n == nil {
 		return
 	}
@@ -554,7 +560,7 @@ func extractCallsRecursive(sourceName string, n *gotreesitter.Node, lang *gotree
 			}
 		}
 		if funcNode != nil {
-			target := resolveCallTarget(funcNode, lang, source)
+			target := qualifyScopedCall(resolveCallTarget(funcNode, lang, source), owner)
 			if target != "" && target != sourceName && !isBuiltin(target) && !seen[target] {
 				seen[target] = true
 				*edges = append(*edges, Edge{SourceName: sourceName, TargetName: target, Kind: "calls"})
@@ -565,7 +571,7 @@ func extractCallsRecursive(sourceName string, n *gotreesitter.Node, lang *gotree
 	// Recurse into children
 	for _, child := range n.Children() {
 		if child.IsNamed() {
-			extractCallsRecursive(sourceName, child, lang, source, edges, seen)
+			extractCallsRecursive(sourceName, owner, child, lang, source, edges, seen)
 		}
 	}
 }
@@ -596,6 +602,26 @@ func nodeName(n *gotreesitter.Node, lang *gotreesitter.Language, source []byte) 
 	return extractFieldText(n, lang, source, "name")
 }
 
+// enclosingTypeName returns the lexical receiver/scope for class methods and
+// nested classes. Walking parents makes the identity independent of traversal
+// order and works for Python, Java, TypeScript, C#, Ruby, and similar grammars.
+func enclosingTypeName(n *gotreesitter.Node, lang *gotreesitter.Language, source []byte) string {
+	var names []string
+	for parent := n.Parent(); parent != nil; parent = parent.Parent() {
+		switch parent.Type(lang) {
+		case "class_declaration", "class", "class_specifier", "class_definition",
+			"struct_declaration", "record_declaration", "module":
+			if name := nodeName(parent, lang, source); name != "" {
+				names = append(names, name)
+			}
+		}
+	}
+	for left, right := 0, len(names)-1; left < right; left, right = left+1, right-1 {
+		names[left], names[right] = names[right], names[left]
+	}
+	return strings.Join(names, ".")
+}
+
 // returnTypeOf returns the return type text, trying "return_type" then "type" fields.
 func returnTypeOf(n *gotreesitter.Node, lang *gotreesitter.Language, source []byte) string {
 	if rt := extractFieldText(n, lang, source, "return_type"); rt != "" {
@@ -605,10 +631,10 @@ func returnTypeOf(n *gotreesitter.Node, lang *gotreesitter.Language, source []by
 }
 
 // extractBodyCallEdges extracts call edges from a node's "body" field.
-func extractBodyCallEdges(name string, n *gotreesitter.Node, lang *gotreesitter.Language, source []byte, edges *[]Edge) {
+func extractBodyCallEdges(name, owner string, n *gotreesitter.Node, lang *gotreesitter.Language, source []byte, edges *[]Edge) {
 	bodyNode := n.ChildByFieldName("body", lang)
 	if bodyNode != nil {
-		extractCallEdges(name, bodyNode, lang, source, edges)
+		extractCallEdges(name, owner, bodyNode, lang, source, edges)
 	}
 }
 
@@ -716,7 +742,7 @@ func extractVariableDeclaratorSymbol(n *gotreesitter.Node, lang *gotreesitter.La
 
 	bodyNode := valueNode.ChildByFieldName("body", lang)
 	if bodyNode != nil {
-		extractCallEdges(name, bodyNode, lang, source, edges)
+		extractCallEdges(name, "", bodyNode, lang, source, edges)
 	}
 }
 

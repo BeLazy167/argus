@@ -302,7 +302,7 @@ func resolveEndpointNode(filePath string, e APIEndpoint, keyToID map[string]int6
 		if id, ok := resolveNodeName(filePath, name, keyToID, nameToIDs); ok {
 			return id, true
 		}
-		if id, ok := dbIDs[name]; ok {
+		if id, ok := dbIDs[name]; ok && id != 0 {
 			return id, true
 		}
 	}
@@ -349,8 +349,7 @@ func upsertFileSymbols(ctx context.Context, st indexerStore, repoDBID int64, fil
 
 	// Phase 1: reuse IDs of unchanged rows for edge resolution.
 	for _, u := range plan.Unchanged {
-		keyToID[nodeKey(u.Symbol.FilePath, u.Symbol.Name)] = u.NodeID
-		nameToIDs[u.Symbol.Name] = append(nameToIDs[u.Symbol.Name], u.NodeID)
+		rememberSymbolResolution(u.Symbol, u.NodeID, keyToID, nameToIDs)
 	}
 	// Phase 2: upsert the subset that actually changed (or is new).
 	for _, sym := range plan.Changed {
@@ -359,13 +358,33 @@ func upsertFileSymbols(ctx context.Context, st indexerStore, repoDBID int64, fil
 			slog.Warn("graph: upsert node failed", "name", sym.Name, "file", sym.FilePath, "error", err)
 			continue
 		}
-		keyToID[nodeKey(sym.FilePath, sym.Name)] = id
-		nameToIDs[sym.Name] = append(nameToIDs[sym.Name], id)
+		rememberSymbolResolution(sym, id, keyToID, nameToIDs)
 	}
 	// Phase 3: batch-delete orphans (no-ops on len == 0).
 	if err := st.DeleteNodesByIDs(ctx, repoDBID, plan.Orphans); err != nil {
 		slog.Warn("graph: orphan sweep failed", "file", filePath, "error", err)
 	}
+}
+
+// rememberSymbolResolution registers both the persisted qualified identity and
+// its unqualified lookup alias. Aliases are intentionally name-only: same-file
+// unqualified duplicates must remain ambiguous rather than winning by map order.
+func rememberSymbolResolution(sym Symbol, id int64, keyToID map[string]int64, nameToIDs map[string][]int64) {
+	keyToID[nodeKey(sym.FilePath, sym.Name)] = id
+	nameToIDs[sym.Name] = appendUniqueID(nameToIDs[sym.Name], id)
+	if (sym.Kind == KindMethod || sym.Kind == KindClass) && simpleSymbolName(sym.Name) != sym.Name {
+		alias := simpleSymbolName(sym.Name)
+		nameToIDs[alias] = appendUniqueID(nameToIDs[alias], id)
+	}
+}
+
+func appendUniqueID(ids []int64, id int64) []int64 {
+	for _, existing := range ids {
+		if existing == id {
+			return ids
+		}
+	}
+	return append(ids, id)
 }
 
 // resolveNodeName finds an unambiguous node ID for a symbol reference.
@@ -388,7 +407,14 @@ func describeNodeResolution(sourceFile, name string, keyToID map[string]int64, n
 	if id := keyToID[nodeKey(sourceFile, name)]; id != 0 {
 		return id, resolutionResolved
 	}
-	switch ids := nameToIDs[name]; len(ids) {
+	ids := nameToIDs[name]
+	// Parser selectors can carry a variable receiver (s.Handle) while nodes
+	// carry a type receiver (Server.Handle). Exact qualified identity wins;
+	// otherwise the final component may resolve only when globally unique.
+	if len(ids) == 0 && simpleSymbolName(name) != name {
+		ids = nameToIDs[simpleSymbolName(name)]
+	}
+	switch len(ids) {
 	case 0:
 		return 0, resolutionUnresolved
 	case 1:
@@ -470,12 +496,13 @@ func resolveAndUpsertEdges(ctx context.Context, st indexerStore, repoDBID int64,
 		}
 		for name, id := range dbIDs {
 			if id == 0 {
+				// The store returns zero when qualified aliases exist but the
+				// unqualified request matches more than one. Two sentinels preserve
+				// that ambiguity without inventing a concrete target.
+				nameToIDs[name] = []int64{-1, -2}
 				continue
 			}
-			nameToIDs[name] = append(nameToIDs[name], id)
-			// resolveTypeEdges consumes composite keys. The empty path marks a
-			// database fallback without pretending to know the target's path.
-			keyToID[nodeKey("", name)] = id
+			nameToIDs[name] = appendUniqueID(nameToIDs[name], id)
 		}
 	}
 
@@ -537,12 +564,27 @@ func resolveAndUpsertEdges(ctx context.Context, st indexerStore, repoDBID int64,
 		}
 	}
 
-	var allSyms []Symbol
-	for _, syms := range symbolsByFile {
-		allSyms = append(allSyms, syms...)
-	}
-	for _, edge := range resolveTypeEdges(allSyms, keyToID) {
-		appendEdge(keyToID[edge.SourceName], keyToID[edge.TargetName], edge.Kind)
+	// Resolve type references through the same exact/alias/placeholder policy as
+	// call edges. This keeps incremental replacement in parity with atomic full
+	// publication, including explicit ambiguity for nested same-name classes.
+	for filePath, symbols := range symbolsByFile {
+		for _, sym := range symbols {
+			sourceID := keyToID[nodeKey(filePath, sym.Name)]
+			if sourceID == 0 {
+				continue
+			}
+			for _, expression := range []string{sym.ReturnType, sym.Params} {
+				for _, typeName := range extractTypeNames(expression) {
+					if typeName == sym.Name {
+						continue
+					}
+					targetID, ok := resolveEdgeTarget(filePath, typeName)
+					if ok {
+						appendEdge(sourceID, targetID, EdgeUsesType)
+					}
+				}
+			}
+		}
 	}
 
 	if err := st.ReplaceCodeEdgesForFiles(ctx, repoDBID, filePaths, resolved); err != nil {
