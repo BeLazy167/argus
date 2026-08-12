@@ -26,7 +26,7 @@ RUN apk --no-cache add universal-ctags || apk --no-cache add ctags || true
 
 # Node.js + eslint for TS/JS SAST (optional — graceful degradation if unavailable)
 RUN apk --no-cache add nodejs npm && \
-    npm install -g eslint@9.17.0 && \
+    npm install -g eslint@9.17.0 typescript@6.0.3 @typescript-eslint/parser@8.67.0 && \
     npm cache clean --force || true
 
 # Python + semgrep for universal SAST (optional — largest dependency)

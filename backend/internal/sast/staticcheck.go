@@ -3,6 +3,7 @@ package sast
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -76,14 +77,21 @@ func (s *StaticcheckRunner) Run(ctx context.Context, files map[string]string) (f
 	cmd := exec.CommandContext(ctx, "staticcheck", "-f", "json", "./...")
 	cmd.Dir = dir
 
-	out, runErr := runCommand(ctx, "staticcheck", cmd)
-	// staticcheck exits non-zero when findings exist — that's expected.
+	out, stderr, runErr := runCommand(ctx, "staticcheck", cmd)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, fmt.Errorf("staticcheck interrupted: %w", ctxErr)
+	}
+	// staticcheck exits non-zero when findings exist — that's expected when output is present.
 	if runErr != nil {
 		if _, ok := runErr.(*exec.ExitError); !ok {
 			return nil, runErr
 		}
+		if len(strings.TrimSpace(string(out))) == 0 {
+			return nil, fmt.Errorf("staticcheck failed with no output: %s: %w", strings.TrimSpace(string(stderr)), runErr)
+		}
 	}
 
+	parsedRecords := 0
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		if line == "" {
 			continue
@@ -92,6 +100,10 @@ func (s *StaticcheckRunner) Run(ctx context.Context, files map[string]string) (f
 		if err := json.Unmarshal([]byte(line), &sc); err != nil {
 			continue
 		}
+		if sc.Code == "" || sc.Message == "" || sc.Location.File == "" {
+			continue
+		}
+		parsedRecords++
 		// Make path relative to temp dir so callers see the original file name.
 		rel, _ := filepath.Rel(dir, sc.Location.File)
 		sev := sc.Severity
@@ -106,6 +118,9 @@ func (s *StaticcheckRunner) Run(ctx context.Context, files map[string]string) (f
 			Message:  sc.Message,
 			Severity: sev,
 		})
+	}
+	if runErr != nil && parsedRecords == 0 {
+		return nil, fmt.Errorf("staticcheck failed without valid output: %s: %w", strings.TrimSpace(string(stderr)), runErr)
 	}
 	return findings, nil
 }

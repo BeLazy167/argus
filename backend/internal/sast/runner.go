@@ -3,9 +3,9 @@ package sast
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"log/slog"
 	"os/exec"
+	"sort"
 	"sync"
 	"time"
 
@@ -41,9 +41,10 @@ func DefaultRunners() []Runner {
 	return runners
 }
 
-// runCommand is the single subprocess boundary for SAST integrations. It logs
-// the exact invocation plus complete stdout/stderr in Fly-safe chunks.
-func runCommand(ctx context.Context, tool string, cmd *exec.Cmd) ([]byte, error) {
+// runCommand is the single subprocess boundary for SAST integrations. It captures
+// complete stdout/stderr but never payload-logs stdout because tool output may embed
+// private source code. Completion logs retain byte counts for diagnostics.
+func runCommand(ctx context.Context, tool string, cmd *exec.Cmd) ([]byte, []byte, error) {
 	operationID := obs.NewLogID()
 	started := time.Now()
 	var stdout, stderr bytes.Buffer
@@ -52,7 +53,6 @@ func runCommand(ctx context.Context, tool string, cmd *exec.Cmd) ([]byte, error)
 	slog.InfoContext(ctx, "SAST subprocess started",
 		"operation_id", operationID, "tool", tool, "command", cmd.Args, "working_directory", cmd.Dir)
 	err := cmd.Run()
-	obs.LogPayload(ctx, slog.Default(), "SAST subprocess stdout", operationID, "stdout", "text/plain", stdout.Bytes())
 	obs.LogPayload(ctx, slog.Default(), "SAST subprocess stderr", operationID, "stderr", "text/plain", stderr.Bytes())
 	exitCode := 0
 	if cmd.ProcessState != nil {
@@ -62,7 +62,7 @@ func runCommand(ctx context.Context, tool string, cmd *exec.Cmd) ([]byte, error)
 		"operation_id", operationID, "tool", tool, "exit_code", exitCode,
 		"duration_ms", time.Since(started).Milliseconds(), "stdout_bytes", stdout.Len(),
 		"stderr_bytes", stderr.Len(), "error", err)
-	return stdout.Bytes(), err
+	return stdout.Bytes(), stderr.Bytes(), err
 }
 
 // RunAll executes all eligible runners in parallel, collecting their findings.
@@ -109,13 +109,10 @@ func RunAll(ctx context.Context, runners []Runner, language string, files map[st
 				// Graceful degradation: skip failed runners.
 				return nil
 			}
-			if payload, marshalErr := json.Marshal(findings); marshalErr == nil {
-				obs.LogPayload(rctx, slog.Default(), "SAST findings", operationID, "result", "application/json", payload)
-			} else {
-				slog.ErrorContext(rctx, "SAST findings serialization failed", "operation_id", operationID, "tool", r.Name(), "error", marshalErr)
-			}
+			severityCounts, ruleIDs := summarizeFindings(findings)
 			slog.InfoContext(rctx, "SAST runner completed", "operation_id", operationID,
 				"tool", r.Name(), "language", language, "finding_count", len(findings),
+				"severity_counts", severityCounts, "rule_ids", ruleIDs,
 				"duration_ms", time.Since(started).Milliseconds())
 			mu.Lock()
 			all = append(all, findings...)
@@ -128,4 +125,21 @@ func RunAll(ctx context.Context, runners []Runner, language string, files map[st
 		return all, err
 	}
 	return all, nil
+}
+
+func summarizeFindings(findings []Finding) (map[string]int, []string) {
+	severityCounts := make(map[string]int)
+	ruleSet := make(map[string]struct{})
+	for _, finding := range findings {
+		severityCounts[finding.Severity]++
+		if finding.Rule != "" {
+			ruleSet[finding.Rule] = struct{}{}
+		}
+	}
+	ruleIDs := make([]string, 0, len(ruleSet))
+	for rule := range ruleSet {
+		ruleIDs = append(ruleIDs, rule)
+	}
+	sort.Strings(ruleIDs)
+	return severityCounts, ruleIDs
 }

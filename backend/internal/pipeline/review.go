@@ -600,19 +600,20 @@ func buildFileReviewPrompt(run *PipelineRun, file diff.FileDiff, fileContent str
 		sb.WriteString(typeContext)
 	}
 
-	// Inject SAST findings as hints for the reviewer to verify
+	// Inject SAST findings as hints for the reviewer to verify.
 	if run.SastFindings != nil {
 		if fileSast, ok := run.SastFindings[file.NewName]; ok && len(fileSast) > 0 {
-			sb.WriteString("\n<sast_findings>\n")
-			sb.WriteString("Static analysis tools found these issues in this file. Verify each and include in your review if valid:\n")
+			var sast strings.Builder
+			sast.WriteString("Static analysis tools found these issues in this file. Verify each and include in your review if valid:\n")
 			for i, f := range fileSast {
 				if i >= 10 {
-					sb.WriteString(fmt.Sprintf("... and %d more SAST findings\n", len(fileSast)-10))
+					sast.WriteString(fmt.Sprintf("... and %d more SAST findings\n", len(fileSast)-10))
 					break
 				}
-				sb.WriteString(fmt.Sprintf("- Line %d: [%s] %s (%s)\n", f.Line, f.Rule, f.Message, f.Severity))
+				sast.WriteString(fmt.Sprintf("- Line %d: [%s] %s (%s)\n",
+					f.Line, sanitizeUserInput(f.Rule), sanitizeUserInput(f.Message), f.Severity))
 			}
-			sb.WriteString("</sast_findings>\n")
+			sb.WriteString("\n" + wrapSafeDelimiters("sast_findings", sast.String()) + "\n")
 		}
 	}
 

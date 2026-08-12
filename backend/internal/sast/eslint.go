@@ -3,11 +3,13 @@ package sast
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -19,12 +21,25 @@ type eslintFileResult struct {
 }
 
 type eslintMessage struct {
-	RuleID   string `json:"ruleId"`
-	Message  string `json:"message"`
-	Line     int    `json:"line"`
-	Column   int    `json:"column"`
-	Severity int    `json:"severity"` // 1=warning, 2=error
+	RuleID   *string `json:"ruleId"`
+	Message  string  `json:"message"`
+	Line     int     `json:"line"`
+	Column   int     `json:"column"`
+	Severity int     `json:"severity"` // 1=warning, 2=error
 }
+
+const eslintFlatConfig = `import { createRequire } from "node:module";
+const require = createRequire(import.meta.url);
+const tsParser = require("@typescript-eslint/parser");
+const rules = {
+  "require-await": "warn",
+  "no-async-promise-executor": "error",
+};
+export default [
+  { files: ["**/*.{js,jsx,mjs,cjs}"], languageOptions: { parserOptions: { ecmaFeatures: { jsx: true } } }, rules },
+  { files: ["**/*.{ts,tsx}"], languageOptions: { parser: tsParser, parserOptions: { ecmaFeatures: { jsx: true } } }, rules },
+];
+`
 
 // ESLintRunner runs eslint on TypeScript/JavaScript source files.
 type ESLintRunner struct{}
@@ -59,9 +74,18 @@ func (e *ESLintRunner) Run(ctx context.Context, files map[string]string) (findin
 		return nil, err
 	}
 	defer os.RemoveAll(dir)
+	// ESLint compares config and target paths literally when enforcing its base path.
+	// Resolve symlinks (notably macOS /var -> /private/var) so both share one prefix.
+	dir, err = filepath.EvalSymlinks(dir)
+	if err != nil {
+		return nil, err
+	}
 
 	var targets []string
 	for name, content := range files {
+		if !eslintSupportedFile(name) {
+			continue
+		}
 		fp := filepath.Join(dir, name)
 		if !strings.HasPrefix(filepath.Clean(fp), filepath.Clean(dir)+string(os.PathSeparator)) {
 			continue // skip path traversal attempts
@@ -79,40 +103,63 @@ func (e *ESLintRunner) Run(ctx context.Context, files map[string]string) (findin
 		return nil, nil
 	}
 
+	configPath := filepath.Join(dir, "eslint.config.mjs")
+	if err := os.WriteFile(configPath, []byte(eslintFlatConfig), 0o644); err != nil {
+		return nil, err
+	}
+
+	nodePath, err := globalNodeModulesPath(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	args := []string{
 		"--format", "json",
-		"--no-eslintrc",
+		"--config", configPath,
 		"--no-config-lookup",
-		"--rule", `{"require-await":"warn","no-async-promise-executor":"error"}`,
 	}
 	args = append(args, targets...)
 
 	cmd := exec.CommandContext(ctx, "eslint", args...)
 	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "NODE_PATH="+nodePath)
 
-	out, runErr := runCommand(ctx, "eslint", cmd)
-	// eslint exits non-zero when findings exist.
-	if runErr != nil {
-		if _, ok := runErr.(*exec.ExitError); !ok {
-			return nil, runErr
-		}
+	out, stderr, runErr := runCommand(ctx, "eslint", cmd)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, fmt.Errorf("eslint interrupted: %w", ctxErr)
+	}
+	var exitErr *exec.ExitError
+	if runErr != nil && !errors.As(runErr, &exitErr) {
+		return nil, runErr
 	}
 
 	var results []eslintFileResult
 	if err := json.Unmarshal(out, &results); err != nil {
+		if exitErr != nil {
+			return nil, fmt.Errorf("eslint failed (exit %d): %s: %w", exitErr.ExitCode(), strings.TrimSpace(string(stderr)), err)
+		}
 		return nil, fmt.Errorf("parsing eslint output: %w", err)
 	}
+	// ESLint exits 1 when findings exist; other non-zero codes are fatal errors.
+	if exitErr != nil && exitErr.ExitCode() != 1 {
+		return nil, fmt.Errorf("eslint failed (exit %d): %s", exitErr.ExitCode(), strings.TrimSpace(string(stderr)))
+	}
 
+	ignored := make(map[string]string)
 	for _, r := range results {
 		rel, _ := filepath.Rel(dir, r.FilePath)
 		for _, m := range r.Messages {
+			if m.RuleID == nil && strings.Contains(strings.ToLower(m.Message), "file ignored") {
+				ignored[rel] = m.Message
+				continue
+			}
 			sev := "warning"
 			if m.Severity == 2 {
 				sev = "error"
 			}
-			rule := m.RuleID
-			if rule == "" {
-				rule = "unknown"
+			rule := "unknown"
+			if m.RuleID != nil && *m.RuleID != "" {
+				rule = *m.RuleID
 			}
 			findings = append(findings, Finding{
 				File:     rel,
@@ -124,5 +171,41 @@ func (e *ESLintRunner) Run(ctx context.Context, files map[string]string) (findin
 			})
 		}
 	}
+	if len(ignored) > 0 {
+		ignoredFiles := make([]string, 0, len(ignored))
+		for file, message := range ignored {
+			ignoredFiles = append(ignoredFiles, fmt.Sprintf("%s: %s", file, message))
+		}
+		sort.Strings(ignoredFiles)
+		slog.WarnContext(ctx, "ESLint ignored configured files", "files", ignoredFiles, "ignored_count", len(ignoredFiles), "target_count", len(targets))
+		if len(ignoredFiles) == len(targets) {
+			return nil, fmt.Errorf("eslint ignored all configured targets: %s", strings.Join(ignoredFiles, "; "))
+		}
+	}
 	return findings, nil
+}
+
+func eslintSupportedFile(name string) bool {
+	switch filepath.Ext(name) {
+	case ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx":
+		return true
+	default:
+		return false
+	}
+}
+
+func globalNodeModulesPath(ctx context.Context) (string, error) {
+	cmd := exec.CommandContext(ctx, "npm", "root", "-g")
+	out, stderr, err := runCommand(ctx, "npm", cmd)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return "", fmt.Errorf("finding global node modules interrupted: %w", ctxErr)
+	}
+	if err != nil {
+		return "", fmt.Errorf("finding global node modules: %s: %w", strings.TrimSpace(string(stderr)), err)
+	}
+	path := strings.TrimSpace(string(out))
+	if path == "" {
+		return "", errors.New("finding global node modules: npm returned an empty path")
+	}
+	return path, nil
 }

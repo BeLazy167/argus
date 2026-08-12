@@ -82,7 +82,10 @@ func (s *SemgrepRunner) Run(ctx context.Context, files map[string]string) (findi
 
 	cmd := exec.CommandContext(ctx, "semgrep", "scan", "--config", "auto", "--json", "--quiet", dir)
 
-	out, runErr := runCommand(ctx, "semgrep", cmd)
+	out, stderr, runErr := runCommand(ctx, "semgrep", cmd)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, fmt.Errorf("semgrep interrupted: %w", ctxErr)
+	}
 	if runErr != nil {
 		var exitErr *exec.ExitError
 		if !errors.As(runErr, &exitErr) {
@@ -92,9 +95,9 @@ func (s *SemgrepRunner) Run(ctx context.Context, files map[string]string) (findi
 		if exitErr.ExitCode() == 1 && len(out) > 0 {
 			// fall through to parse findings
 		} else if exitErr.ExitCode() == 1 {
-			return nil, fmt.Errorf("semgrep failed with no output: %w", runErr)
+			return nil, fmt.Errorf("semgrep failed with no output: %s: %w", strings.TrimSpace(string(stderr)), runErr)
 		} else {
-			return nil, fmt.Errorf("semgrep error (exit %d): %w", exitErr.ExitCode(), runErr)
+			return nil, fmt.Errorf("semgrep error (exit %d): %s: %w", exitErr.ExitCode(), strings.TrimSpace(string(stderr)), runErr)
 		}
 	}
 
