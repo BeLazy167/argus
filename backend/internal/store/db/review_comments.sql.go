@@ -13,8 +13,8 @@ import (
 )
 
 const createReviewComment = `-- name: CreateReviewComment :execrows
-INSERT INTO review_comments (review_id, attempt_generation, file_path, start_line, end_line, side, body, severity, category, specialist, confidence_score, code_snippet, github_comment_id, matched_pattern_id, matched_pattern_score, enforced_rule_content, is_new_finding, suppressed_reason, state)
-SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19
+INSERT INTO review_comments (review_id, attempt_generation, file_path, start_line, end_line, side, body, severity, category, specialist, confidence_score, code_snippet, github_comment_id, matched_pattern_id, matched_pattern_score, enforced_rule_content, is_new_finding, suppressed_reason, state, was_posted_inline)
+SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
 WHERE EXISTS (
   SELECT 1 FROM reviews WHERE id = $1 AND attempt_generation = $2
 )
@@ -40,6 +40,7 @@ type CreateReviewCommentParams struct {
 	IsNewFinding        *bool     `json:"is_new_finding"`
 	SuppressedReason    *string   `json:"suppressed_reason"`
 	State               string    `json:"state"`
+	WasPostedInline     bool      `json:"was_posted_inline"`
 }
 
 func (q *Queries) CreateReviewComment(ctx context.Context, arg CreateReviewCommentParams) (int64, error) {
@@ -63,6 +64,7 @@ func (q *Queries) CreateReviewComment(ctx context.Context, arg CreateReviewComme
 		arg.IsNewFinding,
 		arg.SuppressedReason,
 		arg.State,
+		arg.WasPostedInline,
 	)
 	if err != nil {
 		return 0, err

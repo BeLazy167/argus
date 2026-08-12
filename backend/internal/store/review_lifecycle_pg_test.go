@@ -1236,3 +1236,35 @@ func TestReviewPostSecondGuardQueryFailureClearsClaim(t *testing.T) {
 		t.Fatalf("guard failure retained claim %q", *stateError)
 	}
 }
+
+func TestCompleteReconciledReviewWithEventsIsAtomicAndIdempotent(t *testing.T) {
+	pool, ctx := fileMemoryTestPool(t)
+	repoID, rawID := seedFileMemoryRepo(t, ctx, pool)
+	reviewID := uuid.MustParse(rawID)
+	claim := ErrReviewPostPersistenceAmbiguous.Error() + ": exact claim"
+	const generation = 3
+	const githubReviewID int64 = 991
+	if _, err := pool.Exec(ctx, `UPDATE reviews SET status='failed',error=$2,attempt_generation=$3,github_review_id=$4 WHERE id=$1`, reviewID, claim, generation, githubReviewID); err != nil {
+		t.Fatal(err)
+	}
+	meta := ReconciledCompletionMetadata{RepoID: repoID, PRNumber: 1, InstallationID: 42}
+	outcome, err := NewWithDB(pool).CompleteReconciledReviewWithEvents(ctx, reviewID, generation, claim, githubReviewID, meta)
+	if err != nil || outcome != ReviewCompletionWon {
+		t.Fatalf("first completion = %q, %v", outcome, err)
+	}
+	outcome, err = NewWithDB(pool).CompleteReconciledReviewWithEvents(ctx, reviewID, generation, claim, githubReviewID, meta)
+	if err != nil || outcome != ReviewCompletionAlreadyCompleted {
+		t.Fatalf("repeat completion = %q, %v", outcome, err)
+	}
+	var status string
+	var total, distinctSemantic, distinctDelivery int
+	if err := pool.QueryRow(ctx, `SELECT status FROM reviews WHERE id=$1`, reviewID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*),count(DISTINCT semantic_key),count(DISTINCT data->>'delivery_id') FROM review_events WHERE review_id=$1 AND semantic_key LIKE 'recovered.%'`, reviewID).Scan(&total, &distinctSemantic, &distinctDelivery); err != nil {
+		t.Fatal(err)
+	}
+	if status != "completed" || total != 3 || distinctSemantic != 3 || distinctDelivery != 3 {
+		t.Fatalf("status=%s events=%d semantic=%d delivery=%d", status, total, distinctSemantic, distinctDelivery)
+	}
+}

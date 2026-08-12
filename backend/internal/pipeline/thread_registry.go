@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/BeLazy167/argus/backend/internal/store"
 	"github.com/google/uuid"
@@ -116,7 +117,16 @@ type postedComment struct {
 // claims its row, so the next same-line comment necessarily picks a different
 // row. Returns rowID → githubCommentID; a comment with no unclaimed row on its
 // (path, line) is skipped (leaves the row unbound, as before).
-func pairCommentsToRows(rows []unboundCommentRow, comments []postedComment) map[uuid.UUID]int64 {
+func normalizePostedCommentBody(body string) string {
+	body = strings.ReplaceAll(body, "\r\n", "\n")
+	lines := strings.Split(body, "\n")
+	for i := range lines {
+		lines[i] = strings.TrimRight(lines[i], " \t")
+	}
+	return strings.TrimRight(strings.Join(lines, "\n"), "\n")
+}
+
+func pairCommentsToRows(rows []unboundCommentRow, comments []postedComment) (map[uuid.UUID]int64, error) {
 	type loc struct {
 		path string
 		line int
@@ -130,31 +140,20 @@ func pairCommentsToRows(rows []unboundCommentRow, comments []postedComment) map[
 	out := make(map[uuid.UUID]int64, len(comments))
 	for _, c := range comments {
 		group := byLoc[loc{c.Path, c.Line}]
-		picked := uuid.Nil
-		// Prefer an unclaimed exact body match — the authoritative 1:1 signal.
+		matches := make([]uuid.UUID, 0, 1)
 		for _, r := range group {
-			if !claimed[r.ID] && r.Body == c.Body {
-				picked = r.ID
-				break
+			if !claimed[r.ID] && normalizePostedCommentBody(r.Body) == normalizePostedCommentBody(c.Body) {
+				matches = append(matches, r.ID)
 			}
 		}
-		// Degenerate fallback (identical bodies, or GitHub normalised the body):
-		// first unclaimed row in insertion order.
-		if picked == uuid.Nil {
-			for _, r := range group {
-				if !claimed[r.ID] {
-					picked = r.ID
-					break
-				}
-			}
+		if len(matches) != 1 {
+			return nil, fmt.Errorf("comment binding at %s:%d has %d normalized body matches", c.Path, c.Line, len(matches))
 		}
-		if picked == uuid.Nil {
-			continue // no row left for this comment
-		}
+		picked := matches[0]
 		claimed[picked] = true
 		out[picked] = c.GithubID
 	}
-	return out
+	return out, nil
 }
 
 // storedThreadIDsForReview loads the ThreadRegistry links hydrated at post time

@@ -275,14 +275,14 @@ func TestRetryReviewReconciliationFoundShortCircuitsAndAbsenceLaunches(t *testin
 		if len(comments) != 1 || comments[0].Body != "original delivered comment" {
 			t.Fatalf("current comments=%+v", comments)
 		}
-		if got := reviewCompletedEvents.Load(); got != 1 {
-			t.Fatalf("review_completed events=%d, want 1", got)
+		if got := reviewCompletedEvents.Load(); got != 0 {
+			t.Fatalf("ephemeral review_completed events=%d, want 0", got)
 		}
-		if got := postedEvents.Load(); got != 1 {
-			t.Fatalf("posted_to_github events=%d, want 1", got)
+		if got := postedEvents.Load(); got != 0 {
+			t.Fatalf("ephemeral posted_to_github events=%d, want 0", got)
 		}
-		if got := terminalEvents.Load(); got != 1 {
-			t.Fatalf("completed events=%d, want 1", got)
+		if got := terminalEvents.Load(); got != 0 {
+			t.Fatalf("ephemeral completed events=%d, want 0", got)
 		}
 		var audits int
 		if err := pool.QueryRow(ctx, `
@@ -352,7 +352,7 @@ func TestRetryReviewReconciliationFoundShortCircuitsAndAbsenceLaunches(t *testin
 		if failures.Load() != 0 {
 			t.Fatalf("concurrent recovery failures=%d", failures.Load())
 		}
-		if terminalEvents.Load() != 1 || postedEvents.Load() != 1 {
+		if terminalEvents.Load() != 0 || postedEvents.Load() != 0 {
 			t.Fatalf("events posted=%d terminal=%d, want one each", postedEvents.Load(), terminalEvents.Load())
 		}
 	})

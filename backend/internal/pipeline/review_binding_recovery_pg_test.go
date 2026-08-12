@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 
@@ -46,16 +47,16 @@ func TestRecoverPostedReviewBindingsBindsSameLineCommentsAndThreads(t *testing.T
 	const generation = 4
 	const githubReviewID int64 = 90041
 	if _, err := pool.Exec(ctx, `
-		UPDATE reviews SET status='failed', attempt_generation=$2, github_review_id=$3
+		UPDATE reviews SET status='failed', attempt_generation=$2, github_review_id=$3, expected_github_inline_count=2
 		WHERE id=$1
 	`, reviewID, generation, githubReviewID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `
-		INSERT INTO review_comments(review_id,attempt_generation,file_path,end_line,body)
-		VALUES ($1,$2,'same.go',17,'first body'),
-		       ($1,$2,'same.go',17,'second body'),
-		       ($1,$2,'folded.go',29,'summary-only folded body')
+		INSERT INTO review_comments(review_id,attempt_generation,file_path,end_line,body,was_posted_inline)
+		VALUES ($1,$2,'same.go',17,'first body',true),
+		       ($1,$2,'same.go',17,'second body',true),
+		       ($1,$2,'folded.go',29,'summary-only folded body',false)
 	`, reviewID, generation); err != nil {
 		t.Fatal(err)
 	}
@@ -120,10 +121,10 @@ func TestRecoverPostedReviewBindingsFailureIsRetriableAndSummaryOnlyCompletesAft
 	st := store.NewWithDB(pool)
 	const generation = 2
 	const githubReviewID int64 = 902
-	if _, err := pool.Exec(ctx, `UPDATE reviews SET status='failed',attempt_generation=$2,github_review_id=$3 WHERE id=$1`, reviewID, generation, githubReviewID); err != nil {
+	if _, err := pool.Exec(ctx, `UPDATE reviews SET status='failed',attempt_generation=$2,github_review_id=$3,expected_github_inline_count=1 WHERE id=$1`, reviewID, generation, githubReviewID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO review_comments(review_id,attempt_generation,file_path,end_line,body) VALUES($1,$2,'retry.go',8,'retry body')`, reviewID, generation); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO review_comments(review_id,attempt_generation,file_path,end_line,body,was_posted_inline) VALUES($1,$2,'retry.go',8,'retry body',true)`, reviewID, generation); err != nil {
 		t.Fatal(err)
 	}
 	client := &recoveryBindingClient{
@@ -155,6 +156,9 @@ func TestRecoverPostedReviewBindingsFailureIsRetriableAndSummaryOnlyCompletesAft
 	if _, err := pool.Exec(ctx, `DELETE FROM review_comments WHERE review_id=$1`, summaryReviewID); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := pool.Exec(ctx, `UPDATE reviews SET expected_github_inline_count=0 WHERE id=$1`, summaryReviewID); err != nil {
+		t.Fatal(err)
+	}
 	client.mu.Lock()
 	client.comments = nil
 	commentCallsBefore := client.commentCalls
@@ -169,5 +173,23 @@ func TestRecoverPostedReviewBindingsFailureIsRetriableAndSummaryOnlyCompletesAft
 	client.mu.Unlock()
 	if commentCalls != commentCallsBefore+1 || threadCalls != threadCallsBefore {
 		t.Fatalf("summary-only API calls: comments=%d threads=%d", commentCalls-commentCallsBefore, threadCalls-threadCallsBefore)
+	}
+}
+
+func TestRecoverPostedReviewBindingsRejectsLegacyAttemptWithoutManifest(t *testing.T) {
+	pool, ctx, reviewID := durableEventTestReview(t)
+	st := store.NewWithDB(pool)
+	const generation = 9
+	const githubReviewID int64 = 909
+	if _, err := pool.Exec(ctx, `UPDATE reviews SET status='failed',attempt_generation=$2,github_review_id=$3,expected_github_inline_count=NULL WHERE id=$1`, reviewID, generation, githubReviewID); err != nil {
+		t.Fatal(err)
+	}
+	client := &recoveryBindingClient{}
+	o := &Orchestrator{st: st, reviewBindingClient: client, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	if err := o.RecoverPostedReviewBindings(ctx, reviewID, generation, githubReviewID); err == nil || !strings.Contains(err.Error(), "manifest") {
+		t.Fatalf("error=%v want manifest rejection", err)
+	}
+	if client.commentCalls != 0 {
+		t.Fatalf("remote comment calls=%d want 0", client.commentCalls)
 	}
 }

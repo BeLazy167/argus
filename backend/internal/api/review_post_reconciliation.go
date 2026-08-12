@@ -9,7 +9,6 @@ import (
 	"time"
 
 	ghpkg "github.com/BeLazy167/argus/backend/internal/github"
-	"github.com/BeLazy167/argus/backend/internal/pipeline"
 	"github.com/BeLazy167/argus/backend/internal/store"
 )
 
@@ -69,7 +68,7 @@ func (s *Server) reconcileAmbiguousReviewPost(ctx context.Context, review *store
 		if recoverErr := recoverer.RecoverPostedReviewBindings(ctx, review.ID, generation, githubReviewID); recoverErr != nil {
 			return reviewPostNotNeeded, fmt.Errorf("%w: recovering delivered review bindings: %v", errReviewPostRetryLater, recoverErr)
 		}
-		completion, completeErr := s.store.CompleteReconciledReview(ctx, review.ID, generation, exactClaim, githubReviewID)
+		completion, completeErr := s.store.CompleteReconciledReviewWithEvents(ctx, review.ID, generation, exactClaim, githubReviewID, store.ReconciledCompletionMetadata{RepoID: repo.ID, PRNumber: review.PRNumber, InstallationID: githubInstallationID})
 		if completeErr != nil || completion == store.ReviewCompletionRejected {
 			return reviewPostNotNeeded, fmt.Errorf("%w: completing verified review id: %v", errReviewPostRetryLater, completeErr)
 		}
@@ -78,7 +77,6 @@ func (s *Server) reconcileAmbiguousReviewPost(ctx context.Context, review *store
 			return outcome, nil
 		}
 		action = "post_id_attached"
-		s.publishRecoveredReviewCompletion(review, repo, githubInstallationID, generation, githubReviewID)
 	} else {
 		cleared, clearErr := s.store.ClearReconciledReviewClaim(ctx, review.ID, generation, exactClaim)
 		if clearErr != nil || !cleared {
@@ -104,27 +102,4 @@ func (s *Server) reconcileAmbiguousReviewPost(ctx context.Context, review *store
 		s.logger.Warn("review post reconciliation audit write failed", "error", err, "review_id", review.ID)
 	}
 	return outcome, nil
-}
-
-// publishRecoveredReviewCompletion emits the completion lifecycle that the
-// crashed posting worker could not finish. Only CompleteReconciledReview's CAS
-// winner calls this helper, so concurrent retry handlers do not duplicate it.
-func (s *Server) publishRecoveredReviewCompletion(review *store.Review, repo *store.Repo, githubInstallationID int64, generation int, githubReviewID int64) {
-	if s.eventBus == nil {
-		return
-	}
-	s.eventBus.PublishForAttempt(review.ID, generation, pipeline.EventReviewCompleted, pipeline.ReviewCompletedPayload{
-		ReviewID:       review.ID,
-		RepoID:         repo.ID,
-		PRNumber:       review.PRNumber,
-		InstallationID: githubInstallationID,
-	})
-	s.eventBus.PublishForAttempt(review.ID, generation, pipeline.EventPostedToGitHub, map[string]any{
-		"github_review_id": githubReviewID,
-		"recovered":        true,
-	})
-	s.eventBus.PublishForAttempt(review.ID, generation, pipeline.EventCompleted, map[string]any{
-		"status":    "completed",
-		"recovered": true,
-	})
 }

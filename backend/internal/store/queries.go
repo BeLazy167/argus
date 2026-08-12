@@ -670,6 +670,91 @@ func (s *Store) AttachReconciledReviewID(ctx context.Context, id uuid.UUID, gene
 	return false, nil
 }
 
+const recoveredEventEnvelopeMarker = "argus.review-event.v1:3f985e31-2ad4-4d78-b5c4-83f3663e12e0"
+
+type ReconciledCompletionMetadata struct {
+	RepoID         int64
+	PRNumber       int
+	InstallationID int64
+}
+
+// CompleteReconciledReviewWithEvents atomically commits terminal status and
+// the three durable recovered lifecycle events. Semantic keys make repair and
+// concurrent retries idempotent; NOTIFY is deferred by PostgreSQL until commit.
+func (s *Store) CompleteReconciledReviewWithEvents(ctx context.Context, id uuid.UUID, generation int, exactClaim string, githubReviewID int64, metadata ReconciledCompletionMetadata) (ReviewCompletionOutcome, error) {
+	if githubReviewID <= 0 {
+		return ReviewCompletionRejected, fmt.Errorf("completing reconciled review: invalid GitHub review id %d", githubReviewID)
+	}
+	completeCtx, cancel := detachedReviewPostContext(ctx)
+	defer cancel()
+	tx, err := s.Pool.Begin(completeCtx)
+	if err != nil {
+		return ReviewCompletionRejected, fmt.Errorf("starting reconciled completion: %w", err)
+	}
+	defer func() { _ = tx.Rollback(completeCtx) }()
+
+	var currentGeneration int
+	var status string
+	var currentID *int64
+	var currentClaim *string
+	if err := tx.QueryRow(completeCtx, `SELECT attempt_generation,status,github_review_id,error FROM reviews WHERE id=$1 FOR UPDATE`, id).Scan(&currentGeneration, &status, &currentID, &currentClaim); err != nil {
+		return ReviewCompletionRejected, fmt.Errorf("locking reconciled review: %w", err)
+	}
+	if currentGeneration != generation || currentID == nil || *currentID != githubReviewID {
+		return ReviewCompletionRejected, nil
+	}
+	outcome := ReviewCompletionAlreadyCompleted
+	if status != "completed" {
+		if currentClaim == nil || *currentClaim != exactClaim || (status != "failed" && status != "cancelled" && status != "in_progress") {
+			return ReviewCompletionRejected, nil
+		}
+		tag, updateErr := tx.Exec(completeCtx, `UPDATE reviews SET status='completed',completed_at=COALESCE(completed_at,NOW()),error=NULL,review_post_claimed_at=NULL WHERE id=$1 AND attempt_generation=$2 AND github_review_id=$3 AND error=$4`, id, generation, githubReviewID, exactClaim)
+		if updateErr != nil {
+			return ReviewCompletionRejected, fmt.Errorf("completing reconciled GitHub review: %w", updateErr)
+		}
+		if tag.RowsAffected() != 1 {
+			return ReviewCompletionRejected, nil
+		}
+		outcome = ReviewCompletionWon
+	}
+
+	type recoveredEvent struct {
+		key, eventType string
+		payload        any
+	}
+	events := []recoveredEvent{
+		{"recovered.review_completed", "review_completed", map[string]any{"review_id": id, "repo_id": metadata.RepoID, "pr_number": metadata.PRNumber, "installation_id": metadata.InstallationID}},
+		{"recovered.posted_to_github", "posted_to_github", map[string]any{"github_review_id": githubReviewID, "recovered": true}},
+		{"recovered.completed", "completed", map[string]any{"status": "completed", "recovered": true}},
+	}
+	for _, event := range events {
+		payload, marshalErr := json.Marshal(event.payload)
+		if marshalErr != nil {
+			return ReviewCompletionRejected, fmt.Errorf("encoding recovered event %s: %w", event.key, marshalErr)
+		}
+		deliveryID := uuid.NewSHA1(uuid.NameSpaceOID, []byte(fmt.Sprintf("argus:%s:%d:%s", id, generation, event.key))).String()
+		envelope, marshalErr := json.Marshal(map[string]any{"_argus_event_envelope": recoveredEventEnvelopeMarker, "delivery_id": deliveryID, "data": json.RawMessage(payload)})
+		if marshalErr != nil {
+			return ReviewCompletionRejected, fmt.Errorf("encoding recovered event envelope %s: %w", event.key, marshalErr)
+		}
+		if _, insertErr := tx.Exec(completeCtx, `
+			WITH inserted AS (
+			  INSERT INTO review_events(review_id,attempt_generation,event_type,data,semantic_key)
+			  VALUES($1,$2,$3,$4,$5)
+			  ON CONFLICT (review_id,attempt_generation,semantic_key) WHERE semantic_key IS NOT NULL DO NOTHING
+			  RETURNING id
+			)
+			SELECT pg_notify('argus_review_events','recovered:'||id::text) FROM inserted
+		`, id, generation, event.eventType, envelope, event.key); insertErr != nil {
+			return ReviewCompletionRejected, fmt.Errorf("persisting recovered event %s: %w", event.key, insertErr)
+		}
+	}
+	if err := tx.Commit(completeCtx); err != nil {
+		return ReviewCompletionRejected, fmt.Errorf("committing reconciled completion: %w", err)
+	}
+	return outcome, nil
+}
+
 // CompleteReconciledReview completes an exact, already-attached delivery. The
 // returned winner is the only caller allowed to emit recovered completion
 // actions. Binding recovery must succeed before this method is called.
@@ -1210,7 +1295,7 @@ func (s *Store) BeginReviewRetry(ctx context.Context, id uuid.UUID) (int, bool, 
 	err = tx.QueryRow(ctx, `
 		UPDATE reviews
 		SET status = 'pending', error = NULL, completed_at = NULL,
-		    review_post_claimed_at = NULL,
+		    review_post_claimed_at = NULL, expected_github_inline_count = NULL,
 		    attempt_generation = attempt_generation + 1
 		WHERE id = $1 AND status IN ('failed', 'cancelled')
 		  AND (error IS NULL OR error NOT LIKE $2 || '%')
@@ -1572,6 +1657,11 @@ func (s *Store) ListModelConfigsWithFallback(ctx context.Context, installationID
 var ErrReviewAttemptStale = errors.New("review attempt is no longer current")
 
 func (s *Store) CreateReviewComment(ctx context.Context, reviewID uuid.UUID, attemptGeneration int, filePath string, startLine, endLine *int, side *string, body string, severity, category, specialist, codeSnippet *string, confidenceScore *int, githubCommentID *int64, matchedPatternID *int64, matchedPatternScore *float32, enforcedRuleContent *string, isNewFinding bool, suppressedReason *string, state FindingState) error {
+	return s.CreateReviewCommentWithInlineManifest(ctx, reviewID, attemptGeneration, filePath, startLine, endLine, side, body, severity, category, specialist, codeSnippet, confidenceScore, githubCommentID, matchedPatternID, matchedPatternScore, enforcedRuleContent, isNewFinding, suppressedReason, state, false)
+}
+
+// CreateReviewCommentWithInlineManifest persists whether this exact row was selected by Compose for the external submission.
+func (s *Store) CreateReviewCommentWithInlineManifest(ctx context.Context, reviewID uuid.UUID, attemptGeneration int, filePath string, startLine, endLine *int, side *string, body string, severity, category, specialist, codeSnippet *string, confidenceScore *int, githubCommentID *int64, matchedPatternID *int64, matchedPatternScore *float32, enforcedRuleContent *string, isNewFinding bool, suppressedReason *string, state FindingState, wasPostedInline bool) error {
 	if state == "" {
 		state = FindingStatePosted
 	}
@@ -1581,7 +1671,7 @@ func (s *Store) CreateReviewComment(ctx context.Context, reviewID uuid.UUID, att
 		ConfidenceScore: confidenceScore, CodeSnippet: codeSnippet, GithubCommentID: githubCommentID,
 		MatchedPatternID: matchedPatternID, MatchedPatternScore: matchedPatternScore,
 		EnforcedRuleContent: enforcedRuleContent, IsNewFinding: &isNewFinding,
-		SuppressedReason: suppressedReason, State: string(state),
+		SuppressedReason: suppressedReason, State: string(state), WasPostedInline: wasPostedInline,
 	})
 	if err != nil {
 		return err
@@ -1642,6 +1732,42 @@ func (s *Store) GetCommentByGithubID(ctx context.Context, githubCommentID int64)
 	return &comment, nil
 }
 
+// SaveExpectedReviewInlineCount finalizes the attempt-owned delivery manifest.
+// It succeeds only when exactly expected rows were stamped by Compose.
+func (s *Store) SaveExpectedReviewInlineCount(ctx context.Context, reviewID uuid.UUID, generation, expected int) error {
+	if expected < 0 {
+		return fmt.Errorf("saving inline manifest: invalid expected count %d", expected)
+	}
+	tag, err := s.Pool.Exec(ctx, `
+		UPDATE reviews r SET expected_github_inline_count=$3
+		WHERE r.id=$1 AND r.attempt_generation=$2
+		  AND (r.expected_github_inline_count IS NULL OR r.expected_github_inline_count=$3)
+		  AND (SELECT count(*) FROM review_comments rc
+		       WHERE rc.review_id=$1 AND rc.attempt_generation=$2 AND rc.was_posted_inline)=$3
+	`, reviewID, generation, expected)
+	if err != nil {
+		return fmt.Errorf("saving inline manifest: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("saving inline manifest: attempt changed or stamped row count differs from %d", expected)
+	}
+	return nil
+}
+
+// ExpectedReviewInlineCount returns false for legacy attempts that predate the
+// exact manifest. Such attempts are intentionally not auto-reconcilable.
+func (s *Store) ExpectedReviewInlineCount(ctx context.Context, reviewID uuid.UUID, generation int) (int, bool, error) {
+	var count *int
+	err := s.Pool.QueryRow(ctx, `SELECT expected_github_inline_count FROM reviews WHERE id=$1 AND attempt_generation=$2`, reviewID, generation).Scan(&count)
+	if err != nil {
+		return 0, false, fmt.Errorf("reading inline manifest: %w", err)
+	}
+	if count == nil {
+		return 0, false, nil
+	}
+	return *count, true, nil
+}
+
 // UnboundComment is one posted review_comments row still awaiting its GitHub
 // REST comment id (github_comment_id backfill). Line is end_line (the posted
 // anchor); Body is the exact stored comment body used to disambiguate two
@@ -1666,7 +1792,7 @@ func (s *Store) ListUnboundReviewComments(ctx context.Context, reviewID uuid.UUI
 		FROM review_comments
 		WHERE review_id = $1 AND github_comment_id IS NULL AND end_line IS NOT NULL
 		  AND attempt_generation = (SELECT attempt_generation FROM reviews WHERE id=$1)
-		  AND suppressed_reason IS NULL
+		  AND was_posted_inline
 		ORDER BY created_at, id
 	`, reviewID)
 	if err != nil {
@@ -1708,8 +1834,7 @@ func (s *Store) GetPostedReviewBindingState(ctx context.Context, reviewID uuid.U
 		LEFT JOIN review_comments rc
 		  ON rc.review_id=r.id
 		 AND rc.attempt_generation=$2
-		 AND rc.end_line IS NOT NULL
-		 AND rc.suppressed_reason IS NULL
+		 AND rc.was_posted_inline
 		WHERE r.id=$1
 		GROUP BY r.attempt_generation,r.github_review_id
 	`, reviewID, generation, githubReviewID).Scan(
@@ -1733,7 +1858,7 @@ func (s *Store) ListPostedReviewGitHubCommentIDs(ctx context.Context, reviewID u
 		JOIN reviews r ON r.id=rc.review_id AND r.attempt_generation=rc.attempt_generation
 		WHERE rc.review_id=$1 AND rc.attempt_generation=$2
 		  AND rc.github_comment_id IS NOT NULL
-		  AND rc.end_line IS NOT NULL AND rc.suppressed_reason IS NULL
+		  AND rc.was_posted_inline
 		ORDER BY rc.github_comment_id
 	`, reviewID, generation)
 	if err != nil {
@@ -1766,7 +1891,7 @@ func (s *Store) BindGitHubCommentID(ctx context.Context, commentID uuid.UUID, gi
 		FROM reviews r
 		WHERE rc.id = $1 AND rc.review_id = r.id
 		  AND rc.attempt_generation = r.attempt_generation
-		  AND rc.github_comment_id IS NULL
+		  AND rc.github_comment_id IS NULL AND rc.was_posted_inline
 	`, commentID, githubCommentID)
 	if err != nil {
 		return false, fmt.Errorf("binding github comment id: %w", err)

@@ -104,7 +104,7 @@ func TestIndexCommentsMemoryWriteLinearizesWithReviewRetry(t *testing.T) {
 
 	oldResult := make(chan error, 1)
 	go func() {
-		oldResult <- o.indexComments(ctx, makeRun(1, "obsolete"), 0, "acme", "race")
+		oldResult <- o.indexComments(ctx, makeRun(1, "obsolete"), 0, "acme", "race", nil)
 	}()
 	select {
 	case <-barrier.prepared:
@@ -134,7 +134,7 @@ func TestIndexCommentsMemoryWriteLinearizesWithReviewRetry(t *testing.T) {
 		t.Fatalf("obsolete memories = %d, want 0", obsolete)
 	}
 
-	if err := o.indexComments(ctx, makeRun(2, "current"), 0, "acme", "race"); err != nil {
+	if err := o.indexComments(ctx, makeRun(2, "current"), 0, "acme", "race", nil); err != nil {
 		t.Fatalf("current indexComments: %v", err)
 	}
 	var current int

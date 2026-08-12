@@ -2860,9 +2860,12 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		var existingComments int
 		_ = o.db.QueryRow(ctx, `SELECT COUNT(*) FROM review_comments WHERE review_id = $1 AND attempt_generation = $2`, run.ReviewID, run.AttemptGeneration).Scan(&existingComments)
 		if existingComments == 0 {
-			if err := o.indexComments(ctx, run, 0, owner, repo); err != nil {
+			if err := o.indexComments(ctx, run, 0, owner, repo, &submission); err != nil {
 				return err
 			}
+		}
+		if err := o.st.SaveExpectedReviewInlineCount(ctx, run.ReviewID, run.AttemptGeneration, len(submission.GitHub.Comments)); err != nil {
+			return err
 		}
 		current, err = o.st.IsReviewAttemptCurrent(ctx, run.ReviewID, run.AttemptGeneration)
 		if err != nil {
@@ -4679,7 +4682,18 @@ func (o *Orchestrator) indexer() *PostReviewIndexer {
 	return &PostReviewIndexer{o: o, authority: o.sinkAuthority}
 }
 
-func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghReviewID int64, owner, repo string) error {
+func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghReviewID int64, owner, repo string, submission *ComposedReview) error {
+	type inlineManifestKey struct {
+		Path, Body      string
+		Line, StartLine int
+	}
+	selected := make(map[inlineManifestKey]int)
+	if submission != nil {
+		for _, c := range submission.GitHub.Comments {
+			selected[inlineManifestKey{Path: c.Path, Body: c.Body, Line: c.Line, StartLine: c.StartLine}]++
+		}
+	}
+
 	// Fetch GitHub comment IDs for the review we just posted
 	type ghCommentKey struct {
 		Path string
@@ -4748,17 +4762,28 @@ func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghRe
 			}
 
 			formattedBody := formatCommentBody(c)
+			manifestKey := inlineManifestKey{Path: fr.Path, Body: formattedBody, Line: c.Line, StartLine: c.StartLine}
+			wasPostedInline := selected[manifestKey] > 0
+			if wasPostedInline {
+				selected[manifestKey]--
+			}
 			// Suppressed (dropped) comments are still persisted — flagged via
 			// suppressed_reason + state='suppressed' and with github_comment_id
 			// nil (never posted) — so the dashboard keeps the full record while
 			// the PR stays clean.
-			if err := o.st.CreateReviewComment(ctx, run.ReviewID, run.AttemptGeneration, fr.Path, startLine, &line, &side, formattedBody, &sev, &cat, specialist, snippet, confidenceScore, ghCommentID, matchedPatternID, matchedPatternScore, enforcedRule, c.IsNewFinding, suppressedReason, state); err != nil {
+			if err := o.st.CreateReviewCommentWithInlineManifest(ctx, run.ReviewID, run.AttemptGeneration, fr.Path, startLine, &line, &side, formattedBody, &sev, &cat, specialist, snippet, confidenceScore, ghCommentID, matchedPatternID, matchedPatternScore, enforcedRule, c.IsNewFinding, suppressedReason, state, wasPostedInline); err != nil {
 				if errors.Is(err, store.ErrReviewAttemptStale) {
 					return context.Canceled
 				}
 				o.logger.Error("persisting review comment", "error", err, "file", fr.Path)
 			}
 
+		}
+	}
+
+	for key, remaining := range selected {
+		if remaining != 0 {
+			return fmt.Errorf("persisting inline manifest: %d selected comments were not stored at %s:%d", remaining, key.Path, key.Line)
 		}
 	}
 
@@ -4824,9 +4849,26 @@ func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghRe
 // Now the pairing runs in Go (pairCommentsToRows): each posted comment claims
 // exactly one row on its (path, line), preferring an exact body match, so
 // same-line findings bind to distinct rows and distinct threads.
+func postedReviewCommentLine(comment *gh.PullRequestComment) int {
+	if line := comment.GetLine(); line != 0 {
+		return line
+	}
+	if line := comment.GetOriginalLine(); line != 0 {
+		return line
+	}
+	return comment.GetPosition()
+}
+
 func (o *Orchestrator) backfillGitHubCommentIDs(ctx context.Context, run *PipelineRun, ghReviewID int64, owner, repo string) error {
 	if ghReviewID <= 0 {
 		return fmt.Errorf("backfilling GitHub comments: invalid review id %d", ghReviewID)
+	}
+	expected, hasManifest, err := o.st.ExpectedReviewInlineCount(ctx, run.ReviewID, run.AttemptGeneration)
+	if err != nil {
+		return err
+	}
+	if !hasManifest {
+		return errors.New("backfilling GitHub comments: exact inline manifest is unavailable")
 	}
 	client := o.postedReviewBindingClient()
 	if client == nil {
@@ -4836,6 +4878,36 @@ func (o *Orchestrator) backfillGitHubCommentIDs(ctx context.Context, run *Pipeli
 	if err != nil {
 		return fmt.Errorf("listing review comments for backfill: %w", err)
 	}
+	remoteByID := make(map[int64]*gh.PullRequestComment, len(ghComments))
+	for _, comment := range ghComments {
+		id := comment.GetID()
+		if id <= 0 {
+			return errors.New("backfilling GitHub comments: remote comment has no database id")
+		}
+		if _, duplicate := remoteByID[id]; duplicate {
+			return fmt.Errorf("backfilling GitHub comments: duplicate remote id %d", id)
+		}
+		remoteByID[id] = comment
+	}
+	if len(remoteByID) != expected {
+		return fmt.Errorf("backfilling GitHub comments: delivered=%d expected=%d", len(remoteByID), expected)
+	}
+
+	storedIDs, err := o.st.ListPostedReviewGitHubCommentIDs(ctx, run.ReviewID, run.AttemptGeneration)
+	if err != nil {
+		return err
+	}
+	bound := make(map[int64]struct{}, len(storedIDs))
+	for _, id := range storedIDs {
+		if _, duplicate := bound[id]; duplicate {
+			return fmt.Errorf("backfilling GitHub comments: duplicate stored binding %d", id)
+		}
+		if _, exists := remoteByID[id]; !exists {
+			return fmt.Errorf("backfilling GitHub comments: stored binding %d is not in delivered review", id)
+		}
+		bound[id] = struct{}{}
+	}
+
 	rows, err := o.st.ListUnboundReviewComments(ctx, run.ReviewID)
 	if err != nil {
 		return fmt.Errorf("loading unbound review comments for backfill: %w", err)
@@ -4844,54 +4916,61 @@ func (o *Orchestrator) backfillGitHubCommentIDs(ctx context.Context, run *Pipeli
 	for _, r := range rows {
 		unbound = append(unbound, unboundCommentRow{ID: r.ID, Path: r.FilePath, Line: r.Line, Body: r.Body})
 	}
-	posted := make([]postedComment, 0, len(ghComments))
+	posted := make([]postedComment, 0, len(remoteByID)-len(bound))
 	for _, gc := range ghComments {
-		line := gc.GetLine()
-		if line == 0 {
-			line = gc.GetPosition()
+		if _, alreadyBound := bound[gc.GetID()]; alreadyBound {
+			continue
 		}
-		posted = append(posted, postedComment{GithubID: gc.GetID(), Path: gc.GetPath(), Line: line, Body: gc.GetBody()})
+		posted = append(posted, postedComment{GithubID: gc.GetID(), Path: gc.GetPath(), Line: postedReviewCommentLine(gc), Body: gc.GetBody()})
 	}
-
+	if len(unbound) != len(posted) {
+		return fmt.Errorf("backfilling GitHub comments: unbound manifest rows=%d unbound remote comments=%d", len(unbound), len(posted))
+	}
+	pairs, pairErr := pairCommentsToRows(unbound, posted)
+	if pairErr != nil {
+		return fmt.Errorf("backfilling GitHub comments: %w", pairErr)
+	}
+	if len(pairs) != len(posted) {
+		return fmt.Errorf("backfilling GitHub comments: paired=%d unbound=%d", len(pairs), len(posted))
+	}
 	updated := 0
 	var bindErrors []error
-	for commentID, ghID := range pairCommentsToRows(unbound, posted) {
+	for commentID, ghID := range pairs {
 		ok, bindErr := o.st.BindGitHubCommentID(ctx, commentID, ghID)
 		if bindErr != nil {
 			bindErrors = append(bindErrors, fmt.Errorf("comment %s: %w", commentID, bindErr))
-		} else if ok {
+		} else if !ok {
+			bindErrors = append(bindErrors, fmt.Errorf("comment %s: binding compare-and-set lost", commentID))
+		} else {
 			updated++
 		}
-	}
-	if updated > 0 {
-		o.logger.Info("backfilled github comment IDs", "count", updated, "review_id", run.ReviewID)
 	}
 	if err := errors.Join(bindErrors...); err != nil {
 		return fmt.Errorf("backfilling github_comment_id: %w", err)
 	}
+	if updated > 0 {
+		o.logger.Info("backfilled github comment IDs", "count", updated, "review_id", run.ReviewID)
+	}
 
-	// A successful listing is not enough if eventual consistency returned only
-	// part of the delivered review. Compare the exact remote ID set with the
-	// current generation's durable bindings; folded summary findings are absent
-	// from both sets and therefore do not block recovery.
-	storedIDs, err := o.st.ListPostedReviewGitHubCommentIDs(ctx, run.ReviewID, run.AttemptGeneration)
+	storedIDs, err = o.st.ListPostedReviewGitHubCommentIDs(ctx, run.ReviewID, run.AttemptGeneration)
 	if err != nil {
 		return err
 	}
-	remoteIDs := make(map[int64]struct{}, len(ghComments))
-	for _, comment := range ghComments {
-		if comment.GetID() <= 0 {
-			return errors.New("backfilling GitHub comments: remote comment has no database id")
-		}
-		remoteIDs[comment.GetID()] = struct{}{}
+	if len(storedIDs) != expected {
+		return fmt.Errorf("backfilling GitHub comments: bound=%d expected=%d", len(storedIDs), expected)
 	}
-	if len(remoteIDs) != len(ghComments) || len(storedIDs) != len(remoteIDs) {
-		return fmt.Errorf("backfilling GitHub comments: delivered=%d bound=%d", len(ghComments), len(storedIDs))
-	}
+	verified := make(map[int64]struct{}, len(storedIDs))
 	for _, id := range storedIDs {
-		if _, ok := remoteIDs[id]; !ok {
-			return fmt.Errorf("backfilling GitHub comments: stored binding %d is not in delivered review", id)
+		if _, duplicate := verified[id]; duplicate {
+			return fmt.Errorf("backfilling GitHub comments: duplicate final binding %d", id)
 		}
+		if _, exists := remoteByID[id]; !exists {
+			return fmt.Errorf("backfilling GitHub comments: final binding %d is not remote", id)
+		}
+		verified[id] = struct{}{}
+	}
+	if len(verified) != len(remoteByID) {
+		return fmt.Errorf("backfilling GitHub comments: remote and stored id sets differ")
 	}
 	return nil
 }

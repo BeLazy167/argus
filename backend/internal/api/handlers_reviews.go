@@ -19,6 +19,7 @@ import (
 	"nhooyr.io/websocket/wsjson"
 
 	"github.com/BeLazy167/argus/backend/internal/pipeline"
+	"github.com/BeLazy167/argus/backend/internal/store"
 )
 
 func (s *Server) listAllReviews(w http.ResponseWriter, r *http.Request) {
@@ -404,7 +405,11 @@ func (s *Server) retryReview(w http.ResponseWriter, r *http.Request) {
 		s.handleDBError(w, err, "review not found")
 		return
 	}
-	if review.Status != "failed" && review.Status != "cancelled" {
+	// Completed rows carrying the exact ambiguous-post claim are admitted only
+	// to the reconciliation repair path. This lets an older status commit repair
+	// missing semantic outbox rows without launching a new attempt.
+	repairCompleted := review.Status == "completed" && review.Error != nil && strings.HasPrefix(*review.Error, store.ErrReviewPostPersistenceAmbiguous.Error())
+	if review.Status != "failed" && review.Status != "cancelled" && !repairCompleted {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "only failed or cancelled reviews can be retried"})
 		return
 	}
