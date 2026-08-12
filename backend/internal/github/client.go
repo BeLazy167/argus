@@ -218,12 +218,18 @@ func IsPermanentGitObjectError(err error) bool {
 	if errors.As(err, &permanent) {
 		return true
 	}
+	// go-github rejects literal catch-all directory names such as [...slug]
+	// before making a request because they contain "..". The immutable tree
+	// cannot change, so retrying that path representation can never succeed.
+	if strings.Contains(err.Error(), "path must not contain '..' due to auth vulnerability issue") {
+		return true
+	}
 	var responseErr *gh.ErrorResponse
 	if !errors.As(err, &responseErr) || responseErr.Response == nil {
 		return false
 	}
 	switch responseErr.Response.StatusCode {
-	case http.StatusNotFound, http.StatusUnprocessableEntity:
+	case http.StatusBadRequest, http.StatusNotFound, http.StatusGone, http.StatusUnprocessableEntity:
 		return true
 	default:
 		return false
@@ -1267,10 +1273,19 @@ func (c *Client) SearchCode(ctx context.Context, installationID int64, owner, re
 }
 
 // RepoTree is a recursive Git Trees response. Truncated means GitHub omitted
-// entries and callers must not treat Paths as an authoritative repository view.
+// entries and callers must not treat Files as an authoritative repository view.
 type RepoTree struct {
-	Paths     []string
+	Files     []RepoTreeFile
 	Truncated bool
+}
+
+// RepoTreeFile identifies one immutable blob returned by a recursive tree.
+// Size is used to reject oversized source files before spending a blob fetch.
+type RepoTreeFile struct {
+	Path string
+	SHA  string
+	Mode string
+	Size int64
 }
 
 // RepositoryMetadata is the repository identity and default branch needed to
@@ -1312,7 +1327,7 @@ func (c *Client) ResolveDefaultBranchCommit(ctx context.Context, installationID 
 	return c.GetRef(ctx, installationID, owner, repo, "heads/"+strings.TrimPrefix(branch, "refs/heads/"))
 }
 
-// GetRepoTree returns all file paths at an immutable commit SHA.
+// GetRepoTree returns all immutable file blobs at a commit SHA.
 func (c *Client) GetRepoTree(ctx context.Context, installationID int64, owner, repo, commitSHA string) (RepoTree, error) {
 	// The Git Trees endpoint is keyed by a tree object, not a commit object.
 	// Resolve the commit's root tree explicitly rather than relying on GitHub to
@@ -1335,10 +1350,40 @@ func (c *Client) GetRepoTree(ctx context.Context, installationID int64, owner, r
 	result := RepoTree{Truncated: tree.GetTruncated()}
 	for _, entry := range tree.Entries {
 		if entry.GetType() == "blob" {
-			result.Paths = append(result.Paths, entry.GetPath())
+			result.Files = append(result.Files, RepoTreeFile{
+				Path: entry.GetPath(),
+				SHA:  entry.GetSHA(),
+				Mode: entry.GetMode(),
+				Size: int64(entry.GetSize()),
+			})
 		}
 	}
 	return result, nil
+}
+
+// GetBlobContent fetches one immutable tree blob in a single GitHub call.
+func (c *Client) GetBlobContent(ctx context.Context, installationID int64, owner, repo string, file RepoTreeFile) (string, error) {
+	if file.SHA == "" {
+		return "", &permanentFileContentError{err: fmt.Errorf("file %s has no blob SHA", file.Path)}
+	}
+	if file.Size < 0 || file.Size > maxFileContentBytes {
+		return "", &permanentFileContentError{err: fmt.Errorf("file size %d exceeds graph source limit %d", file.Size, maxFileContentBytes)}
+	}
+	client, err := c.app.ClientForInstallation(installationID)
+	if err != nil {
+		return "", err
+	}
+	if err := c.restLimiter.Wait(ctx); err != nil {
+		return "", fmt.Errorf("rate limit wait: %w", err)
+	}
+	raw, _, err := client.Git.GetBlobRaw(ctx, owner, repo, file.SHA)
+	if err != nil {
+		return "", fmt.Errorf("fetching raw blob: %w", err)
+	}
+	if len(raw) > maxFileContentBytes {
+		return "", &permanentFileContentError{err: fmt.Errorf("raw blob size %d exceeds graph source limit %d", len(raw), maxFileContentBytes)}
+	}
+	return string(raw), nil
 }
 
 // ReviewSubmission represents a formatted review ready to post to GitHub.

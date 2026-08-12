@@ -130,20 +130,21 @@ type GraphIndexBudget struct {
 }
 
 type GraphIndexGeneration struct {
-	ID             int64      `json:"id"`
-	RepoID         int64      `json:"repo_id"`
-	CommitSha      string     `json:"commit_sha"`
-	Status         string     `json:"status"`
-	TreeTruncated  bool       `json:"tree_truncated"`
-	ExpectedFiles  int        `json:"expected_files"`
-	VisitedFiles   int        `json:"visited_files"`
-	FailedFiles    int        `json:"failed_files"`
-	SkippedFiles   int        `json:"skipped_files"`
-	Error          string     `json:"error"`
-	StartedAt      time.Time  `json:"started_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
-	PublishedAt    *time.Time `json:"published_at"`
-	RefreshVersion int64      `json:"refresh_version"`
+	ID               int64      `json:"id"`
+	RepoID           int64      `json:"repo_id"`
+	CommitSha        string     `json:"commit_sha"`
+	Status           string     `json:"status"`
+	TreeTruncated    bool       `json:"tree_truncated"`
+	ExpectedFiles    int        `json:"expected_files"`
+	VisitedFiles     int        `json:"visited_files"`
+	FailedFiles      int        `json:"failed_files"`
+	SkippedFiles     int        `json:"skipped_files"`
+	Error            string     `json:"error"`
+	StartedAt        time.Time  `json:"started_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
+	PublishedAt      *time.Time `json:"published_at"`
+	RefreshVersion   int64      `json:"refresh_version"`
+	UnavailableFiles int        `json:"unavailable_files"`
 }
 
 type GraphIndexGenerationFile struct {
@@ -155,6 +156,7 @@ type GraphIndexGenerationFile struct {
 	Endpoints    json.RawMessage `json:"endpoints"`
 	Error        string          `json:"error"`
 	UpdatedAt    time.Time       `json:"updated_at"`
+	AttemptCount int             `json:"attempt_count"`
 }
 
 type Installation struct {

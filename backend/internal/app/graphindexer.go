@@ -11,13 +11,24 @@ import (
 )
 
 // How the full-index backfill is paced. Tickers are only wake-ups; Postgres
-// authoritatively admits at most one fleet window per minimum spacing. A first
-// window costs one ref lookup plus two tree calls. GetFileContent can cost two
-// calls when GitHub returns an out-of-line blob, so the bound counts both.
+// authoritatively admits at most one fleet window per minimum spacing.
+//
+// A first window costs one ref lookup, one commit lookup, one recursive tree
+// lookup, and one raw-blob lookup per file: 3 + 95 = 98 calls. Continuations
+// reuse the immutable commit but repeat the two tree lookups, so charging every
+// window the first-window bound stays conservative.
+//
+// Reservations are spaced 12 minutes apart, but GitHub quotas actual call time.
+// Work reserved just before a quota reset can slip into the next quota hour, so
+// the bound includes one straddling window: floor(60/12) + 1 = 6 windows. Thus
+// 6 * 98 = 588 calls/hour, leaving 5,000 - 588 = 4,412 minimum-quota calls for
+// reviews, above their 4,400-call reserve. A 1,371-source-file repo needs 15
+// windows and 168 minutes of spacing from first admission to last without fleet
+// contention.
 const (
 	graphIndexInterval             = time.Hour
 	graphIndexContinuationInterval = 2 * time.Minute
-	graphIndexMinimumSpacing       = 5 * time.Minute
+	graphIndexMinimumSpacing       = 12 * time.Minute
 	graphIndexBudgetHour           = time.Hour
 	graphIndexStaleness            = 14 * 24 * time.Hour
 	graphIndexPerTick              = 1
@@ -25,7 +36,9 @@ const (
 	graphIndexFileCap              = graph.DefaultFullIndexFileCap
 
 	minimumGitHubInstallationQuota       = 5000
-	graphIndexMaxCallsPerWindow          = 3 + 2*graphIndexFileCap
+	graphIndexFixedCallsPerWindow        = 3
+	graphIndexCallsPerFile               = 1
+	graphIndexMaxCallsPerWindow          = graphIndexFixedCallsPerWindow + graphIndexCallsPerFile*graphIndexFileCap
 	graphIndexMaxCallsPerHour            = 600
 	graphIndexReservedReviewCallsPerHour = 4400
 )

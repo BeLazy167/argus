@@ -17,16 +17,36 @@ import (
 	"github.com/BeLazy167/argus/backend/internal/store"
 )
 
-// DefaultFullIndexFileCap bounds one full-repo index.
+// DefaultFullIndexFileCap bounds one full-repo index window.
 //
 // Each window fetches, parses, and stages at most this many files. Parsed facts
 // are persisted between continuations, so the live graph remains unchanged
 // until the final atomic publish and file bodies never accumulate in memory.
 //
-// The cap also bounds GitHub cost: each source file costs one call and can fall
-// back to a second blob call, so a window can consume at most 40 file-content calls (GetFileContent can fall back to a
-// second blob call). Fleet cadence is separately persisted by the scheduler.
-const DefaultFullIndexFileCap = 20
+// Full indexing fetches each source directly by the blob SHA returned in the
+// recursive repository tree. That is one GitHub call per file; fleet cadence
+// and the corresponding hourly call bound are co-tuned in app/graphindexer.go.
+const DefaultFullIndexFileCap = 95
+
+// A source gets three attempts at its immutable blob before a transient fetch
+// failure becomes a bounded omission. Publication tolerates at most 1% omitted
+// files, with a floor of one file and an absolute ceiling of 10; it always
+// requires at least one ready source when the repository has source files.
+const (
+	maxGraphGenerationFileAttempts     = 3
+	maxGraphGenerationUnavailableFiles = 10
+	maxGraphGenerationUnavailableRatio = 100
+)
+
+var ErrGraphGenerationTooManyUnavailable = errors.New("graph generation has too many unavailable files")
+
+func graphGenerationUnavailableLimit(expected int) int {
+	if expected <= 0 {
+		return 0
+	}
+	limit := (expected + maxGraphGenerationUnavailableRatio - 1) / maxGraphGenerationUnavailableRatio
+	return min(limit, maxGraphGenerationUnavailableFiles)
+}
 
 func boundedFullIndexFileCap(requested int) int {
 	if requested <= 0 || requested > DefaultFullIndexFileCap {
@@ -39,11 +59,15 @@ func boundedFullIndexFileCap(requested int) int {
 //
 // A real repository's tree is mostly not code. Every non-source entry that got
 // through would cost a GitHub fetch and parse to nothing.
-func filterSourceFiles(entries []string) []string {
-	out := make([]string, 0, len(entries))
-	for _, e := range entries {
-		if sourceExts[strings.ToLower(filepath.Ext(e))] {
-			out = append(out, e)
+func filterSourceFiles(entries []ghpkg.RepoTreeFile) []ghpkg.RepoTreeFile {
+	out := make([]ghpkg.RepoTreeFile, 0, len(entries))
+	for _, entry := range entries {
+		// Git trees expose symlinks as blobs whose content is the target pathname,
+		// not the dereferenced source. The old Contents API dereferenced them;
+		// direct blob fetching instead skips mode 120000 to avoid parsing a path
+		// string as code. Most source symlinks duplicate an in-repo target.
+		if entry.Mode != "120000" && sourceExts[strings.ToLower(filepath.Ext(entry.Path))] {
+			out = append(out, entry)
 		}
 	}
 	return out
@@ -52,14 +76,14 @@ func filterSourceFiles(entries []string) []string {
 // selectPendingFiles returns the deterministic next window of source files that
 // do not yet have a ready staged snapshot. Transient failures remain pending,
 // so a continuation retries them.
-func selectPendingFiles(files []string, ready map[string]struct{}, cap int) (selected []string, remaining int) {
-	pending := make([]string, 0, len(files)-len(ready))
-	for _, filePath := range files {
-		if _, ok := ready[filePath]; !ok {
-			pending = append(pending, filePath)
+func selectPendingFiles(files []ghpkg.RepoTreeFile, ready map[string]struct{}, cap int) (selected []ghpkg.RepoTreeFile, remaining int) {
+	pending := make([]ghpkg.RepoTreeFile, 0, len(files)-len(ready))
+	for _, file := range files {
+		if _, ok := ready[file.Path]; !ok {
+			pending = append(pending, file)
 		}
 	}
-	sort.Strings(pending)
+	sort.Slice(pending, func(i, j int) bool { return pending[i].Path < pending[j].Path })
 	if cap <= 0 || len(pending) <= cap {
 		return pending, 0
 	}
@@ -82,7 +106,7 @@ type FullIndexResult struct {
 type fullIndexGitHub interface {
 	ResolveDefaultBranchCommit(context.Context, int64, string, string, string) (string, error)
 	GetRepoTree(context.Context, int64, string, string, string) (ghpkg.RepoTree, error)
-	GetFileContent(context.Context, int64, string, string, string, string) (string, error)
+	GetBlobContent(context.Context, int64, string, string, ghpkg.RepoTreeFile) (string, error)
 }
 
 // IndexRepoBounded stages one deterministic window at an immutable commit and
@@ -144,9 +168,9 @@ func IndexRepoBounded(
 		}
 		return FullIndexResult{Snapshot: snapshot}, err
 	}
-	sourceFiles := filterSourceFiles(tree.Paths)
-	sort.Strings(sourceFiles)
-	snapshot, err = st.BeginGraphGeneration(ctx, repoDBID, commitSHA, len(sourceFiles), len(tree.Paths)-len(sourceFiles), tree.Truncated, refreshVersion)
+	sourceFiles := filterSourceFiles(tree.Files)
+	sort.Slice(sourceFiles, func(i, j int) bool { return sourceFiles[i].Path < sourceFiles[j].Path })
+	snapshot, err = st.BeginGraphGeneration(ctx, repoDBID, commitSHA, len(sourceFiles), len(tree.Files)-len(sourceFiles), tree.Truncated, refreshVersion)
 	if err != nil {
 		return FullIndexResult{}, err
 	}
@@ -165,32 +189,30 @@ func IndexRepoBounded(
 		return result, limitErr
 	}
 
-	ready, err := st.ListReadyGraphGenerationPaths(ctx, snapshot.GenerationID)
+	completed, err := st.ListCompletedGraphGenerationPaths(ctx, snapshot.GenerationID)
 	if err != nil {
 		return result, err
 	}
-	pending, _ := selectPendingFiles(sourceFiles, ready, fileCap)
+	pending, _ := selectPendingFiles(sourceFiles, completed, fileCap)
 
-	for _, filePath := range pending {
+	for _, file := range pending {
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
-		content, fetchErr := ghClient.GetFileContent(ctx, installationID, owner, repo, filePath, commitSHA)
+		filePath := file.Path
+		content, fetchErr := ghClient.GetBlobContent(ctx, installationID, owner, repo, file)
 		if fetchErr != nil {
-			permanent := ghpkg.IsPermanentGitObjectError(fetchErr)
-			snapshot, err = st.StageGraphGenerationFile(ctx, repoDBID, snapshot.GenerationID, filePath, nil, nil, nil, fetchErr, permanent)
+			attempts, attemptErr := st.GetGraphGenerationFileAttemptCount(ctx, snapshot.GenerationID, filePath)
+			if attemptErr != nil {
+				return result, attemptErr
+			}
+			unavailable := ghpkg.IsPermanentGitObjectError(fetchErr) || attempts+1 >= maxGraphGenerationFileAttempts
+			snapshot, err = st.StageGraphGenerationFile(ctx, repoDBID, snapshot.GenerationID, filePath, nil, nil, nil, fetchErr, unavailable)
 			if err != nil {
 				return result, err
 			}
 			result.Snapshot = snapshot
 			result.Staged++
-			if permanent {
-				// A published generation must contain a ready snapshot for every
-				// source file. Fail this immutable generation immediately and leave
-				// the previous published projection untouched.
-				result.Remaining = snapshot.ExpectedFiles - (snapshot.VisitedFiles - snapshot.FailedFiles)
-				return result, nil
-			}
 			continue
 		}
 		symbols, edges := ParseFileSymbols(filePath, content)
@@ -222,11 +244,25 @@ func IndexRepoBounded(
 		result.Staged++
 	}
 
-	result.Remaining = snapshot.ExpectedFiles - (snapshot.VisitedFiles - snapshot.FailedFiles)
+	result.Remaining = snapshot.ExpectedFiles - snapshot.VisitedFiles + snapshot.FailedFiles
 	if result.Remaining < 0 {
 		result.Remaining = 0
 	}
 	if snapshot.VisitedFiles != snapshot.ExpectedFiles || snapshot.FailedFiles != 0 {
+		return result, nil
+	}
+	unavailableLimit := graphGenerationUnavailableLimit(snapshot.ExpectedFiles)
+	readyFiles := snapshot.ExpectedFiles - snapshot.UnavailableFiles
+	if snapshot.UnavailableFiles > unavailableLimit || (snapshot.ExpectedFiles > 0 && readyFiles == 0) {
+		limitErr := fmt.Errorf("%w: unavailable=%d limit=%d ready=%d expected=%d",
+			ErrGraphGenerationTooManyUnavailable, snapshot.UnavailableFiles, unavailableLimit, readyFiles, snapshot.ExpectedFiles)
+		if failErr := st.FailGraphGeneration(ctx, repoDBID, snapshot.GenerationID, limitErr); failErr != nil {
+			return result, errors.Join(limitErr, failErr)
+		}
+		result.Snapshot, err = st.GetGraphSnapshot(ctx, repoDBID)
+		if err != nil {
+			return result, errors.Join(limitErr, err)
+		}
 		return result, nil
 	}
 	if err := publishGraphGeneration(ctx, st, repoDBID, snapshot.GenerationID); err != nil {
@@ -465,8 +501,10 @@ func publishGraphGeneration(ctx context.Context, st *store.Store, repoID, genera
 		return fmt.Errorf("publish graph generation: validate: %w", err)
 	}
 	stats.Files = ready
-	if status != "building" || visited != expected || failed != 0 || unavailable != 0 || ready != int64(expected) {
-		return fmt.Errorf("publish graph generation: incomplete generation status=%s expected=%d visited=%d failed=%d ready=%d unavailable=%d", status, expected, visited, failed, ready, unavailable)
+	unavailableLimit := graphGenerationUnavailableLimit(expected)
+	if status != "building" || visited != expected || failed != 0 ||
+		unavailable > unavailableLimit || (expected > 0 && ready == 0) || ready+int64(unavailable) != int64(expected) {
+		return fmt.Errorf("publish graph generation: incomplete generation status=%s expected=%d visited=%d failed=%d ready=%d unavailable=%d limit=%d", status, expected, visited, failed, ready, unavailable, unavailableLimit)
 	}
 	if !arraysValid {
 		limitErr := fmt.Errorf("%w: staged facts must be JSON arrays or null", ErrGraphGenerationResourceLimit)

@@ -359,9 +359,8 @@ func (s *Store) scheduleGraphIndexRefresh(
 	err = tx.QueryRow(ctx, `
 		SELECT r.id, r.default_branch, r.graph_refresh_version, published.commit_sha,
 		       COALESCE(published.status = 'published' AND NOT published.tree_truncated
-		         AND published.failed_files = 0 AND published.visited_files = published.expected_files
-		         AND NOT EXISTS (SELECT 1 FROM graph_index_generation_files unavailable
-		           WHERE unavailable.generation_id = published.id AND unavailable.status = 'unavailable'), false),
+		         AND published.failed_files = 0
+		         AND published.visited_files = published.expected_files, false),
 		       r.graph_default_head_sha, r.graph_default_head_event_at,
 		       r.graph_refresh_requested_at, r.graph_refresh_commit_sha
 		FROM repos r
@@ -459,10 +458,9 @@ func (s *Store) ConfirmGraphDefaultHead(ctx context.Context, repoID, refreshVers
 	err = s.Pool.QueryRow(ctx, `
 		WITH authority AS (
 		  SELECT r.id, COALESCE(published.status = 'published' AND NOT published.tree_truncated
-		    AND published.failed_files = 0 AND published.visited_files = published.expected_files
-		    AND published.commit_sha = $3
-		    AND NOT EXISTS (SELECT 1 FROM graph_index_generation_files unavailable
-		      WHERE unavailable.generation_id = published.id AND unavailable.status = 'unavailable'), false) AS already_current
+		    AND published.failed_files = 0
+		    AND published.visited_files = published.expected_files
+		    AND published.commit_sha = $3, false) AS already_current
 		  FROM repos r
 		  LEFT JOIN graph_index_generations published
 		    ON published.id = r.graph_published_generation_id AND published.repo_id = r.id
@@ -547,18 +545,14 @@ func (s *Store) BeginGraphGeneration(ctx context.Context, repoID int64, commitSH
 		              tree_truncated = EXCLUDED.tree_truncated,
 		              updated_at = NOW()
 		RETURNING id, commit_sha, status, tree_truncated, expected_files,
-		          visited_files, failed_files, skipped_files, started_at, published_at, refresh_version`,
+		          visited_files, failed_files, unavailable_files, skipped_files,
+		          started_at, published_at, refresh_version`,
 		repoID, commitSHA, status, treeTruncated, expectedFiles, skippedFiles, message, refreshVersion).Scan(
 		&snap.GenerationID, &snap.CommitSHA, &snap.Status, &snap.TreeTruncated,
-		&snap.ExpectedFiles, &snap.VisitedFiles, &snap.FailedFiles, &snap.SkippedFiles,
-		&snap.StartedAt, &snap.PublishedAt, &snap.GenerationRefreshVersion)
+		&snap.ExpectedFiles, &snap.VisitedFiles, &snap.FailedFiles, &snap.UnavailableFiles,
+		&snap.SkippedFiles, &snap.StartedAt, &snap.PublishedAt, &snap.GenerationRefreshVersion)
 	if err != nil {
 		return GraphSnapshot{}, fmt.Errorf("insert graph generation: %w", err)
-	}
-	if err := tx.QueryRow(ctx, `
-		SELECT count(*)::int FROM graph_index_generation_files
-		WHERE generation_id = $1 AND status = 'unavailable'`, snap.GenerationID).Scan(&snap.UnavailableFiles); err != nil {
-		return GraphSnapshot{}, fmt.Errorf("count unavailable graph files: %w", err)
 	}
 	snap.Complete = snap.Status == "published"
 	if _, err := tx.Exec(ctx, `
@@ -597,44 +591,37 @@ func (s *Store) StageGraphGenerationFile(ctx context.Context, repoID, generation
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO graph_index_generation_files (generation_id, file_path, status, symbols, edges, endpoints, error)
-		SELECT $1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7
+		INSERT INTO graph_index_generation_files
+		  (generation_id, file_path, status, symbols, edges, endpoints, error, attempt_count)
+		SELECT $1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7, 1
 		WHERE EXISTS (SELECT 1 FROM graph_index_generations WHERE id = $1 AND repo_id = $8 AND status = 'building')
 		ON CONFLICT (generation_id, file_path) DO UPDATE
 		SET status = EXCLUDED.status, symbols = EXCLUDED.symbols, edges = EXCLUDED.edges,
-		    endpoints = EXCLUDED.endpoints, error = EXCLUDED.error, updated_at = NOW()`,
+		    endpoints = EXCLUDED.endpoints, error = EXCLUDED.error,
+		    attempt_count = graph_index_generation_files.attempt_count + 1, updated_at = NOW()`,
 		generationID, filePath, status, symbols, edges, endpoints, message, repoID); err != nil {
 		return GraphSnapshot{}, fmt.Errorf("stage graph file: upsert: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE graph_index_generations g SET
-		  visited_files = x.visited, failed_files = x.failed, updated_at = NOW()
-		FROM (SELECT count(*)::int visited, count(*) FILTER (WHERE status IN ('failed', 'unavailable'))::int failed
+		  visited_files = x.visited, failed_files = x.failed,
+		  unavailable_files = x.unavailable, updated_at = NOW()
+		FROM (SELECT count(*)::int visited,
+		             count(*) FILTER (WHERE status = 'failed')::int failed,
+		             count(*) FILTER (WHERE status = 'unavailable')::int unavailable
 		      FROM graph_index_generation_files WHERE generation_id = $1) x
 		WHERE g.id = $1 AND g.repo_id = $2 AND g.status = 'building'`, generationID, repoID); err != nil {
 		return GraphSnapshot{}, fmt.Errorf("stage graph file: counts: %w", err)
 	}
-	if permanentlyUnavailable {
-		if _, err := tx.Exec(ctx, `
-			UPDATE graph_index_generations SET status = 'failed', error = $3, updated_at = NOW()
-			WHERE id = $1 AND repo_id = $2 AND status = 'building'`, generationID, repoID, message); err != nil {
-			return GraphSnapshot{}, fmt.Errorf("stage graph file: fail generation: %w", err)
-		}
-	}
 	var snap GraphSnapshot
 	if err := tx.QueryRow(ctx, `
 		SELECT id, commit_sha, status, tree_truncated, expected_files, visited_files,
-		       failed_files, skipped_files, started_at, published_at, refresh_version
+		       failed_files, unavailable_files, skipped_files, started_at, published_at, refresh_version
 		FROM graph_index_generations WHERE id = $1 AND repo_id = $2`, generationID, repoID).Scan(
 		&snap.GenerationID, &snap.CommitSHA, &snap.Status, &snap.TreeTruncated,
-		&snap.ExpectedFiles, &snap.VisitedFiles, &snap.FailedFiles, &snap.SkippedFiles,
-		&snap.StartedAt, &snap.PublishedAt, &snap.GenerationRefreshVersion); err != nil {
+		&snap.ExpectedFiles, &snap.VisitedFiles, &snap.FailedFiles, &snap.UnavailableFiles,
+		&snap.SkippedFiles, &snap.StartedAt, &snap.PublishedAt, &snap.GenerationRefreshVersion); err != nil {
 		return GraphSnapshot{}, fmt.Errorf("stage graph file: snapshot: %w", err)
-	}
-	if err := tx.QueryRow(ctx, `
-		SELECT count(*)::int FROM graph_index_generation_files
-		WHERE generation_id = $1 AND status = 'unavailable'`, generationID).Scan(&snap.UnavailableFiles); err != nil {
-		return GraphSnapshot{}, fmt.Errorf("stage graph file: count unavailable: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE repos SET graph_index_visited_files = $2, graph_index_failed_files = $3 WHERE id = $1`, repoID, snap.VisitedFiles, snap.FailedFiles); err != nil {
 		return GraphSnapshot{}, fmt.Errorf("stage graph file: repo counts: %w", err)
@@ -680,14 +667,14 @@ func (s *Store) FailGraphGeneration(ctx context.Context, repoID, generationID in
 	return nil
 }
 
-// ListReadyGraphGenerationPaths returns successfully parsed files that do not
-// need to be fetched on a continuation. Transient failures remain retryable.
-func (s *Store) ListReadyGraphGenerationPaths(ctx context.Context, generationID int64) (map[string]struct{}, error) {
+// ListCompletedGraphGenerationPaths returns files that do not need another
+// fetch. Ready files have parsed facts; unavailable files are bounded omissions.
+func (s *Store) ListCompletedGraphGenerationPaths(ctx context.Context, generationID int64) (map[string]struct{}, error) {
 	rows, err := s.Pool.Query(ctx, `
 		SELECT file_path FROM graph_index_generation_files
-		WHERE generation_id = $1 AND status = 'ready'`, generationID)
+		WHERE generation_id = $1 AND status IN ('ready', 'unavailable')`, generationID)
 	if err != nil {
-		return nil, fmt.Errorf("list ready graph paths: %w", err)
+		return nil, fmt.Errorf("list completed graph paths: %w", err)
 	}
 	defer rows.Close()
 	out := map[string]struct{}{}
@@ -699,6 +686,21 @@ func (s *Store) ListReadyGraphGenerationPaths(ctx context.Context, generationID 
 		out[path] = struct{}{}
 	}
 	return out, rows.Err()
+}
+
+// GetGraphGenerationFileAttemptCount returns the durable attempt count for one
+// immutable file. A missing row has zero attempts.
+func (s *Store) GetGraphGenerationFileAttemptCount(ctx context.Context, generationID int64, filePath string) (int, error) {
+	var attempts int
+	err := s.Pool.QueryRow(ctx, `SELECT attempt_count FROM graph_index_generation_files
+		WHERE generation_id = $1 AND file_path = $2`, generationID, filePath).Scan(&attempts)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("get graph file attempt count: %w", err)
+	}
+	return attempts, nil
 }
 
 // GetGraphSnapshot returns the building generation when one exists, otherwise
@@ -717,16 +719,12 @@ func (s *Store) GetGraphSnapshot(ctx context.Context, repoID int64) (GraphSnapsh
 
 	err := s.Pool.QueryRow(ctx, `
 		SELECT g.id, g.commit_sha, g.status, g.tree_truncated, g.expected_files,
-		       g.visited_files, g.failed_files,
-		       CASE WHEN g.id IS NULL THEN NULL ELSE (
-		         SELECT count(*)::int FROM graph_index_generation_files f
-		         WHERE f.generation_id = g.id AND f.status = 'unavailable') END,
+		       g.visited_files, g.failed_files, g.unavailable_files,
 		       g.skipped_files, g.started_at, g.published_at, g.refresh_version,
 		       published.commit_sha, published.published_at,
 		       COALESCE(published.status = 'published' AND NOT published.tree_truncated
-		         AND published.failed_files = 0 AND published.visited_files = published.expected_files
-		         AND NOT EXISTS (SELECT 1 FROM graph_index_generation_files unavailable
-		           WHERE unavailable.generation_id = published.id AND unavailable.status = 'unavailable'), false),
+		         AND published.failed_files = 0
+		         AND published.visited_files = published.expected_files, false),
 		       r.graph_default_head_sha, r.graph_refresh_requested_at, r.graph_refresh_version
 		FROM repos r
 		LEFT JOIN LATERAL (

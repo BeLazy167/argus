@@ -45,12 +45,12 @@ func (f *renamedDefaultBranchGitHub) ResolveDefaultBranchCommit(context.Context,
 
 func (f *renamedDefaultBranchGitHub) GetRepoTree(_ context.Context, _ int64, _, _, ref string) (ghpkg.RepoTree, error) {
 	f.treeRef = ref
-	return ghpkg.RepoTree{Paths: []string{"b.go", "c.go"}}, nil
+	return ghpkg.RepoTree{Files: []ghpkg.RepoTreeFile{{Path: "b.go", SHA: "blob-b"}, {Path: "c.go", SHA: "blob-c"}}}, nil
 }
 
-func (f *renamedDefaultBranchGitHub) GetFileContent(_ context.Context, _ int64, _, _, path, ref string) (string, error) {
-	f.fileRefs = append(f.fileRefs, ref)
-	return "package renamed\nfunc " + map[string]string{"b.go": "TrunkB", "c.go": "TrunkC"}[path] + "() {}\n", nil
+func (f *renamedDefaultBranchGitHub) GetBlobContent(_ context.Context, _ int64, _, _ string, file ghpkg.RepoTreeFile) (string, error) {
+	f.fileRefs = append(f.fileRefs, file.SHA)
+	return "package renamed\nfunc " + map[string]string{"b.go": "TrunkB", "c.go": "TrunkC"}[file.Path] + "() {}\n", nil
 }
 
 type interleavedDefaultHeadGitHub struct {
@@ -579,9 +579,9 @@ func TestDefaultBranchRenamePushPersistsAuthorityAndPublishesImmutableRefresh(t 
 	if fake.treeRef != commitB {
 		t.Fatalf("tree ref = %q, want immutable B %q", fake.treeRef, commitB)
 	}
-	for _, ref := range fake.fileRefs {
-		if ref != commitB {
-			t.Fatalf("file ref = %q, want immutable B %q", ref, commitB)
+	for _, sha := range fake.fileRefs {
+		if sha != "blob-b" && sha != "blob-c" {
+			t.Fatalf("blob SHA = %q, want immutable tree blob", sha)
 		}
 	}
 	var mainA, trunkB int

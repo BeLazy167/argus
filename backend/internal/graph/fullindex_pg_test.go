@@ -86,13 +86,13 @@ func (f *fakeFullIndexGitHub) GetRepoTree(_ context.Context, _ int64, _, _, ref 
 	}
 	return f.tree, nil
 }
-func (f *fakeFullIndexGitHub) GetFileContent(_ context.Context, _ int64, _, _, path, ref string) (string, error) {
-	f.fileRefs = append(f.fileRefs, ref)
-	f.filePaths = append(f.filePaths, path)
-	if err := f.fetchErr[path]; err != nil {
+func (f *fakeFullIndexGitHub) GetBlobContent(_ context.Context, _ int64, _, _ string, file ghpkg.RepoTreeFile) (string, error) {
+	f.fileRefs = append(f.fileRefs, file.SHA)
+	f.filePaths = append(f.filePaths, file.Path)
+	if err := f.fetchErr[file.Path]; err != nil {
 		return "", err
 	}
-	return f.contents[path], nil
+	return f.contents[file.Path], nil
 }
 
 func TestIndexRepoBoundedStagesThenAtomicallyPublishes(t *testing.T) {
@@ -106,7 +106,7 @@ func TestIndexRepoBoundedStagesThenAtomicallyPublishes(t *testing.T) {
 	const snapshotSHA = "0123456789012345678901234567890123456789"
 	gh := &fakeFullIndexGitHub{
 		sha:  snapshotSHA,
-		tree: ghpkg.RepoTree{Paths: []string{"a.go", "b.go", "README.md"}},
+		tree: ghpkg.RepoTree{Files: []ghpkg.RepoTreeFile{{Path: "a.go", SHA: "sha-a.go"}, {Path: "b.go", SHA: "sha-b.go"}, {Path: "README.md", SHA: "sha-README.md"}}},
 		contents: map[string]string{
 			"a.go": "package p\nfunc Alpha() { Beta() }\n",
 			"b.go": "package p\nfunc Beta() {}\n",
@@ -142,9 +142,9 @@ func TestIndexRepoBoundedStagesThenAtomicallyPublishes(t *testing.T) {
 	if gh.treeRef != snapshotSHA {
 		t.Fatalf("tree ref = %q, want immutable generation SHA %q", gh.treeRef, snapshotSHA)
 	}
-	for _, ref := range gh.fileRefs {
-		if ref != snapshotSHA {
-			t.Fatalf("file ref = %q, want immutable generation SHA %q", ref, snapshotSHA)
+	for _, sha := range gh.fileRefs {
+		if !strings.HasPrefix(sha, "sha-") {
+			t.Fatalf("blob SHA = %q, want tree-provided immutable SHA", sha)
 		}
 	}
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM code_nodes WHERE id = $1`, oldID).Scan(&oldCount); err != nil {
@@ -178,7 +178,7 @@ func TestIndexRepoBoundedRecordsAndRejectsTruncatedTree(t *testing.T) {
 	st := store.NewWithDB(pool)
 	installationID := generationSeedInstallation(t, ctx, pool, "{}")
 	repoID := generationSeedRepo(t, ctx, pool, installationID, "generation/truncated")
-	gh := &fakeFullIndexGitHub{sha: "abcdef", tree: ghpkg.RepoTree{Paths: []string{"a.go"}, Truncated: true}}
+	gh := &fakeFullIndexGitHub{sha: "abcdef", tree: ghpkg.RepoTree{Files: []ghpkg.RepoTreeFile{{Path: "a.go", SHA: "sha-a.go"}}, Truncated: true}}
 
 	result, err := IndexRepoBounded(ctx, st, gh, 1, "o", "r", "main", repoID, 10, 0)
 	if !errors.Is(err, ErrTruncatedTree) {
@@ -194,7 +194,7 @@ func TestIndexRepoBoundedRetriesFailedFileBeforePublishing(t *testing.T) {
 	st := store.NewWithDB(pool)
 	installationID := generationSeedInstallation(t, ctx, pool, "{}")
 	repoID := generationSeedRepo(t, ctx, pool, installationID, "generation/retry")
-	gh := &fakeFullIndexGitHub{sha: "fedcba", tree: ghpkg.RepoTree{Paths: []string{"a.go"}}, contents: map[string]string{"a.go": "package p\nfunc A() {}\n"}, fetchErr: map[string]error{"a.go": errors.New("temporary fetch failure")}}
+	gh := &fakeFullIndexGitHub{sha: "fedcba", tree: ghpkg.RepoTree{Files: []ghpkg.RepoTreeFile{{Path: "a.go", SHA: "sha-a.go"}}}, contents: map[string]string{"a.go": "package p\nfunc A() {}\n"}, fetchErr: map[string]error{"a.go": errors.New("temporary fetch failure")}}
 	first, err := IndexRepoBounded(ctx, st, gh, 1, "o", "r", "main", repoID, 1, 0)
 	if err != nil {
 		t.Fatalf("first: %v", err)
@@ -212,6 +212,123 @@ func TestIndexRepoBoundedRetriesFailedFileBeforePublishing(t *testing.T) {
 	}
 }
 
+func TestIndexRepoBoundedSkipsSourceSymlinkBlob(t *testing.T) {
+	pool, ctx := generationTestPool(t)
+	st := store.NewWithDB(pool)
+	installationID := generationSeedInstallation(t, ctx, pool, "{}")
+	repoID := generationSeedRepo(t, ctx, pool, installationID, "generation/source-symlink")
+	ghClient := &fakeFullIndexGitHub{
+		sha: "symlink-sha",
+		tree: ghpkg.RepoTree{Files: []ghpkg.RepoTreeFile{
+			{Path: "main.go", SHA: "main-blob", Mode: "100644"},
+			{Path: "linked.go", SHA: "link-blob", Mode: "120000"},
+		}},
+		contents: map[string]string{
+			"main.go":   "package p\nfunc Main() {}\n",
+			"linked.go": "../../../tests/example_election_test.go",
+		},
+		fetchErr: map[string]error{},
+	}
+
+	result, err := IndexRepoBounded(ctx, st, ghClient, 1, "o", "r", "main", repoID, 0, 0)
+	if err != nil || !result.Published || result.Snapshot.ExpectedFiles != 1 || result.Snapshot.SkippedFiles != 1 {
+		t.Fatalf("symlink generation = %+v, err=%v", result, err)
+	}
+	if !slices.Equal(ghClient.filePaths, []string{"main.go"}) {
+		t.Fatalf("blob fetches = %v, want symlink blob skipped", ghClient.filePaths)
+	}
+	var linkedNodes int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM code_nodes WHERE repo_id = $1 AND file_path = 'linked.go'`, repoID).Scan(&linkedNodes); err != nil {
+		t.Fatal(err)
+	}
+	if linkedNodes != 0 {
+		t.Fatalf("symlink pathname blob produced %d source nodes", linkedNodes)
+	}
+}
+
+func TestIndexRepoBoundedPublishesNextJSCatchAllPathByBlobSHA(t *testing.T) {
+	pool, ctx := generationTestPool(t)
+	st := store.NewWithDB(pool)
+	installationID := generationSeedInstallation(t, ctx, pool, "{}")
+	repoID := generationSeedRepo(t, ctx, pool, installationID, "generation/next-catch-all")
+	const routePath = "src/app/api/admin/[...slug]/route.ts"
+	ghClient := &fakeFullIndexGitHub{
+		sha:      "catch-all-sha",
+		tree:     ghpkg.RepoTree{Files: []ghpkg.RepoTreeFile{{Path: routePath, SHA: "route-blob-sha"}}},
+		contents: map[string]string{routePath: "export async function GET() { return new Response('ok') }\n"},
+		fetchErr: map[string]error{},
+	}
+
+	result, err := IndexRepoBounded(ctx, st, ghClient, 1, "o", "r", "main", repoID, 0, 0)
+	if err != nil || !result.Published || !result.Snapshot.Complete {
+		t.Fatalf("catch-all route generation = %+v, err=%v", result, err)
+	}
+	if !slices.Equal(ghClient.filePaths, []string{routePath}) || !slices.Equal(ghClient.fileRefs, []string{"route-blob-sha"}) {
+		t.Fatalf("blob fetch = paths %v SHAs %v", ghClient.filePaths, ghClient.fileRefs)
+	}
+}
+
+func TestIndexRepoBoundedPublishesWithOneUnavailableFile(t *testing.T) {
+	pool, ctx := generationTestPool(t)
+	st := store.NewWithDB(pool)
+	installationID := generationSeedInstallation(t, ctx, pool, "{}")
+	repoID := generationSeedRepo(t, ctx, pool, installationID, "generation/unavailable")
+	permanent := &gh.ErrorResponse{Response: &http.Response{StatusCode: http.StatusNotFound}}
+	ghClient := &fakeFullIndexGitHub{
+		sha: "unavailable-sha",
+		tree: ghpkg.RepoTree{Files: []ghpkg.RepoTreeFile{
+			{Path: "a.go", SHA: "sha-a.go"},
+			{Path: "src/app/api/admin/[...slug]/route.ts", SHA: "sha-route.ts"},
+		}},
+		contents: map[string]string{"a.go": "package p\nfunc A() {}\n"},
+		fetchErr: map[string]error{"src/app/api/admin/[...slug]/route.ts": permanent},
+	}
+
+	result, err := IndexRepoBounded(ctx, st, ghClient, 1, "o", "r", "main", repoID, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Published || !result.Snapshot.Complete || result.Snapshot.FailedFiles != 0 || result.Snapshot.UnavailableFiles != 1 {
+		t.Fatalf("generation = %+v, want published with one unavailable file", result)
+	}
+	var files int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM code_nodes WHERE repo_id = $1 AND kind = 'file'`, repoID).Scan(&files); err != nil {
+		t.Fatal(err)
+	}
+	if files != 1 {
+		t.Fatalf("published file nodes = %d, want only the ready source", files)
+	}
+}
+
+func TestIndexRepoBoundedDoesNotPublishAllFailedFiles(t *testing.T) {
+	pool, ctx := generationTestPool(t)
+	st := store.NewWithDB(pool)
+	installationID := generationSeedInstallation(t, ctx, pool, "{}")
+	repoID := generationSeedRepo(t, ctx, pool, installationID, "generation/all-failed")
+	ghClient := &fakeFullIndexGitHub{
+		sha:      "all-failed-sha",
+		tree:     ghpkg.RepoTree{Files: []ghpkg.RepoTreeFile{{Path: "a.go", SHA: "sha-a.go"}}},
+		fetchErr: map[string]error{"a.go": errors.New("temporary fetch failure")},
+	}
+
+	for attempt := 1; attempt <= maxGraphGenerationFileAttempts; attempt++ {
+		result, err := IndexRepoBounded(ctx, st, ghClient, 1, "o", "r", "main", repoID, 0, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Published {
+			t.Fatalf("attempt %d published all-failed generation: %+v", attempt, result)
+		}
+	}
+	snapshot, err := st.GetGraphSnapshot(ctx, repoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Status != "failed" || snapshot.Complete || snapshot.UnavailableFiles != 1 {
+		t.Fatalf("all-failed snapshot = %+v, want terminal failed generation with persisted omission", snapshot)
+	}
+}
+
 func TestIndexRepoBoundedFailsPinnedGenerationWhenImmutableTreeDisappears(t *testing.T) {
 	pool, ctx := generationTestPool(t)
 	st := store.NewWithDB(pool)
@@ -219,7 +336,7 @@ func TestIndexRepoBoundedFailsPinnedGenerationWhenImmutableTreeDisappears(t *tes
 	repoID := generationSeedRepo(t, ctx, pool, installationID, "generation/permanent-tree")
 	ghClient := &fakeFullIndexGitHub{
 		sha:      "pinned-sha",
-		tree:     ghpkg.RepoTree{Paths: []string{"a.go", "b.go"}},
+		tree:     ghpkg.RepoTree{Files: []ghpkg.RepoTreeFile{{Path: "a.go", SHA: "sha-a.go"}, {Path: "b.go", SHA: "sha-b.go"}}},
 		contents: map[string]string{"a.go": "package p\n", "b.go": "package p\n"},
 		fetchErr: map[string]error{},
 	}
@@ -246,7 +363,7 @@ func TestIndexRepoBoundedKeepsFirstWindowGenerationForTransientTreeFailure(t *te
 	ghClient := &fakeFullIndexGitHub{
 		sha:      "pinned-sha",
 		treeErr:  &gh.ErrorResponse{Response: &http.Response{StatusCode: http.StatusServiceUnavailable}},
-		tree:     ghpkg.RepoTree{Paths: []string{"a.go"}},
+		tree:     ghpkg.RepoTree{Files: []ghpkg.RepoTreeFile{{Path: "a.go", SHA: "sha-a.go"}}},
 		contents: map[string]string{"a.go": "package p\n"},
 		fetchErr: map[string]error{},
 	}
@@ -355,12 +472,12 @@ func TestFirstWindowPermanentTreeFailureBacksOffPromptAndBackfillByHead(t *testi
 	assertDue(true, "different head")
 }
 
-func TestIndexRepoBoundedFailsPermanentFailureWithoutMutatingPublishedGeneration(t *testing.T) {
+func TestIndexRepoBoundedPublishesPermanentOmissionWithoutMutatingUntilComplete(t *testing.T) {
 	pool, ctx := generationTestPool(t)
 	st := store.NewWithDB(pool)
 	installationID := generationSeedInstallation(t, ctx, pool, "{}")
-	repoID := generationSeedRepo(t, ctx, pool, installationID, "generation/permanent-failure")
-	oldID := generationSeedNode(t, ctx, pool, repoID, "PublishedBeforeFailure", "old.go")
+	repoID := generationSeedRepo(t, ctx, pool, installationID, "generation/permanent-omission")
+	oldID := generationSeedNode(t, ctx, pool, repoID, "PublishedBeforeRefresh", "old.go")
 	var publishedGenerationID int64
 	if err := pool.QueryRow(ctx, `
 		INSERT INTO graph_index_generations
@@ -368,72 +485,44 @@ func TestIndexRepoBoundedFailsPermanentFailureWithoutMutatingPublishedGeneration
 		VALUES ($1, 'published-sha', 'published', 1, 1, NOW()) RETURNING id`, repoID).Scan(&publishedGenerationID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, `
-		UPDATE repos SET graph_published_generation_id = $2, graph_indexed_at = NOW(),
-		  graph_index_commit_sha = 'published-sha', graph_index_expected_files = 1,
-		  graph_index_visited_files = 1
-		WHERE id = $1`, repoID, publishedGenerationID); err != nil {
+	if _, err := pool.Exec(ctx, `UPDATE repos SET graph_published_generation_id = $2 WHERE id = $1`, repoID, publishedGenerationID); err != nil {
 		t.Fatal(err)
 	}
 	permanent := &gh.ErrorResponse{Response: &http.Response{StatusCode: http.StatusNotFound}}
 	ghClient := &fakeFullIndexGitHub{
-		sha:      "immutable-sha",
-		tree:     ghpkg.RepoTree{Paths: []string{"a.go", "b.go"}},
+		sha: "immutable-sha",
+		tree: ghpkg.RepoTree{Files: []ghpkg.RepoTreeFile{
+			{Path: "a.go", SHA: "sha-a.go"}, {Path: "b.go", SHA: "sha-b.go"},
+		}},
 		contents: map[string]string{"b.go": "package p\nfunc B() {}\n"},
 		fetchErr: map[string]error{"a.go": permanent},
 	}
 
 	first, err := IndexRepoBounded(ctx, st, ghClient, 1, "o", "r", "main", repoID, 1, 0)
-	if err != nil {
-		t.Fatalf("first window: %v", err)
-	}
-	if first.Published || first.Snapshot.Status != "failed" || first.Snapshot.Complete ||
-		first.Snapshot.FailedFiles != 1 || first.Snapshot.UnavailableFiles != 1 {
-		t.Fatalf("permanent-failure window = %+v, want terminal failed generation", first)
-	}
-	if got := ghClient.filePaths; len(got) != 1 || got[0] != "a.go" {
-		t.Fatalf("fetches = %v, want stop immediately after permanent failure", got)
+	if err != nil || first.Published || first.Snapshot.Status != "building" ||
+		first.Snapshot.FailedFiles != 0 || first.Snapshot.UnavailableFiles != 1 {
+		t.Fatalf("omission window = %+v, err=%v", first, err)
 	}
 	var oldCount int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM code_nodes WHERE id = $1`, oldID).Scan(&oldCount); err != nil {
 		t.Fatal(err)
 	}
 	if oldCount != 1 {
-		t.Fatal("failed generation changed the published projection")
-	}
-	var currentPublishedID int64
-	if err := pool.QueryRow(ctx, `SELECT graph_published_generation_id FROM repos WHERE id = $1`, repoID).Scan(&currentPublishedID); err != nil {
-		t.Fatal(err)
-	}
-	if currentPublishedID != publishedGenerationID {
-		t.Fatalf("published generation = %d, want unchanged %d", currentPublishedID, publishedGenerationID)
-	}
-	var unavailable int
-	if err := pool.QueryRow(ctx, `
-		SELECT count(*) FROM graph_index_generation_files
-		WHERE generation_id = $1 AND status = 'unavailable'`, first.Snapshot.GenerationID).Scan(&unavailable); err != nil {
-		t.Fatal(err)
-	}
-	if unavailable != 0 {
-		t.Fatalf("terminal generation retained %d unavailable payloads, want 0", unavailable)
+		t.Fatal("partial generation changed the published projection")
 	}
 
-	waitingRepoID := generationSeedRepo(t, ctx, pool, installationID, "generation/waiting-after-permanent")
-	if _, err := pool.Exec(ctx, `
-		UPDATE repos SET enabled = true,
-		  graph_index_attempted_at = CASE WHEN id = $1 THEN NOW() ELSE NULL END
-		WHERE id = ANY($2::bigint[])`, repoID, []int64{repoID, waitingRepoID}); err != nil {
+	second, err := IndexRepoBounded(ctx, st, ghClient, 1, "o", "r", "main", repoID, 1, 0)
+	if err != nil || !second.Published || !second.Snapshot.Complete || second.Snapshot.UnavailableFiles != 1 {
+		t.Fatalf("published omission = %+v, err=%v", second, err)
+	}
+	if got := ghClient.filePaths; !slices.Equal(got, []string{"a.go", "b.go"}) {
+		t.Fatalf("fetches = %v, want unavailable file skipped on continuation", got)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM code_nodes WHERE id = $1`, oldID).Scan(&oldCount); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		_, _ = pool.Exec(ctx, `UPDATE repos SET enabled = false WHERE id = ANY($1::bigint[])`, []int64{repoID, waitingRepoID})
-	})
-	targets, err := st.ListReposDueForGraphIndex(ctx, 14*24*time.Hour, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(targets) != 1 || targets[0].RepoID != waitingRepoID {
-		t.Fatalf("target after permanent failure = %+v, want waiting repo %d", targets, waitingRepoID)
+	if oldCount != 0 {
+		t.Fatal("old graph survived completed refresh")
 	}
 }
 
@@ -474,7 +563,7 @@ func TestPublishedGenerationIncludesFileIdentityAndExplicitEdgeResolution(t *tes
 	repoID := generationSeedRepo(t, ctx, pool, installationID, "generation/identity")
 	gh := &fakeFullIndexGitHub{
 		sha:  "identity-sha",
-		tree: ghpkg.RepoTree{Paths: []string{"a.go", "b.go", "c.go"}},
+		tree: ghpkg.RepoTree{Files: []ghpkg.RepoTreeFile{{Path: "a.go", SHA: "sha-a.go"}, {Path: "b.go", SHA: "sha-b.go"}, {Path: "c.go", SHA: "sha-c.go"}}},
 		contents: map[string]string{
 			"a.go": "package p\nimport \"fmt\"\nfunc Alpha() { Handle(); Missing(); fmt.Println(1) }\n",
 			"b.go": "package p\nfunc Handle() {}\n",
@@ -586,7 +675,7 @@ func TestDefaultBranchRefreshIsScopedIdempotentAndSurvivesInFlightGeneration(t *
 
 	ghClient := &fakeFullIndexGitHub{
 		sha:  commitA,
-		tree: ghpkg.RepoTree{Paths: []string{"a.go", "b.go"}},
+		tree: ghpkg.RepoTree{Files: []ghpkg.RepoTreeFile{{Path: "a.go", SHA: "sha-a.go"}, {Path: "b.go", SHA: "sha-b.go"}}},
 		contents: map[string]string{
 			"a.go": "package refresh\nfunc A() {}\n",
 			"b.go": "package refresh\nfunc B() {}\n",
@@ -674,7 +763,7 @@ func TestFailedDefaultHeadGenerationRemainsQueuedAndRetriesFromPublishedAuthorit
 	const commitA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
 	const commitB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2"
 	ghClient := &fakeFullIndexGitHub{
-		sha: commitA, tree: ghpkg.RepoTree{Paths: []string{"a.go"}},
+		sha: commitA, tree: ghpkg.RepoTree{Files: []ghpkg.RepoTreeFile{{Path: "a.go", SHA: "sha-a.go"}}},
 		contents: map[string]string{"a.go": "package refresh\nfunc PublishedA() {}\n"},
 		fetchErr: map[string]error{},
 	}
@@ -690,7 +779,7 @@ func TestFailedDefaultHeadGenerationRemainsQueuedAndRetriesFromPublishedAuthorit
 	}
 	permanent := &gh.ErrorResponse{Response: &http.Response{StatusCode: http.StatusNotFound}}
 	ghClient.sha = commitB
-	ghClient.tree = ghpkg.RepoTree{Paths: []string{"b.go"}}
+	ghClient.tree = ghpkg.RepoTree{Files: []ghpkg.RepoTreeFile{{Path: "b.go", SHA: "sha-b.go"}}}
 	ghClient.contents = map[string]string{"b.go": "package refresh\nfunc PublishedB() {}\n"}
 	ghClient.fetchErr = map[string]error{"b.go": permanent}
 	failedB, err := IndexRepoBounded(ctx, st, ghClient, githubInstallationID, "refresh", "failed-next-poll", "main", repoID, 0, 0)
@@ -926,7 +1015,7 @@ func TestDefaultBranchMutationInvalidatesFreshnessAndQueuesPromptRefresh(t *test
 			}
 			const commitA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa3"
 			ghClient := &fakeFullIndexGitHub{
-				sha: commitA, tree: ghpkg.RepoTree{Paths: []string{"a.go"}},
+				sha: commitA, tree: ghpkg.RepoTree{Files: []ghpkg.RepoTreeFile{{Path: "a.go", SHA: "sha-a.go"}}},
 				contents: map[string]string{"a.go": "package branchchange\nfunc MainA() {}\n"},
 				fetchErr: map[string]error{},
 			}
@@ -963,7 +1052,7 @@ func TestDefaultBranchMutationInvalidatesFreshnessAndQueuesPromptRefresh(t *test
 
 			const commitB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb4"
 			ghClient.sha = commitB
-			ghClient.tree = ghpkg.RepoTree{Paths: []string{"b.go"}}
+			ghClient.tree = ghpkg.RepoTree{Files: []ghpkg.RepoTreeFile{{Path: "b.go", SHA: "sha-b.go"}}}
 			ghClient.contents = map[string]string{"b.go": "package branchchange\nfunc TrunkB() {}\n"}
 			refreshed, err := IndexRepoBounded(ctx, st, ghClient, githubInstallationID, "branch-change", strings.TrimPrefix(fullName, "branch-change/"), "trunk", repoID, 0, 0)
 			if err != nil || !refreshed.Published || !refreshed.Snapshot.Current || refreshed.Snapshot.PublishedCommitSHA != commitB {
