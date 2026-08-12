@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1070,6 +1071,84 @@ func TestGraphGenerationTerminalCleanupKeepsOnlyBuildingPayloads(t *testing.T) {
 	if failedPayloads != 0 {
 		t.Fatalf("failed generation retained %d payloads, want 0", failedPayloads)
 	}
+}
+
+func TestRustGenericImplAndTurbofishResolveExactlyInFullAndIncrementalIndexes(t *testing.T) {
+	pool, ctx := generationTestPool(t)
+	st := store.NewWithDB(pool)
+	installationID := generationSeedInstallation(t, ctx, pool, "{}")
+	repoID := generationSeedRepo(t, ctx, pool, installationID, "generation/rust-generic-resolution")
+	const filePath = "worker.rs"
+	const source = `struct Worker<T>(T);
+impl<T> Worker<T> {
+    fn run() { Worker::<T>::finish(); }
+    fn finish() {}
+}`
+
+	parse := func(content string) ([]Symbol, []Edge) {
+		t.Helper()
+		symbols, edges := ParseFileSymbols(filePath, content)
+		for _, name := range []string{"Worker.run", "Worker.finish"} {
+			if !slices.ContainsFunc(symbols, func(sym Symbol) bool {
+				return sym.Kind == KindMethod && sym.Name == name && sym.Receiver == "Worker"
+			}) {
+				t.Fatalf("missing canonical method %q in %+v", name, symbols)
+			}
+		}
+		want := Edge{SourceName: "Worker.run", TargetName: "Worker.finish", Kind: EdgeCalls}
+		if !slices.Contains(edges, want) {
+			t.Fatalf("missing canonical edge %+v in %+v", want, edges)
+		}
+		return append(symbols, fileSymbol(filePath, content)), edges
+	}
+
+	symbols, edges := parse(source)
+	symbolJSON, err := json.Marshal(symbols)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edgeJSON, err := json.Marshal(edges)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := st.BeginGraphGeneration(ctx, repoID, "rust-generic-head", 1, 0, false, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.StageGraphGenerationFile(ctx, repoID, snapshot.GenerationID, filePath, symbolJSON, edgeJSON, []byte("[]"), nil, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := publishGraphGeneration(ctx, st, repoID, snapshot.GenerationID); err != nil {
+		t.Fatal(err)
+	}
+
+	assertExact := func(phase string) {
+		t.Helper()
+		var exact, wrongTarget int
+		if err := pool.QueryRow(ctx, `SELECT
+			count(*) FILTER (WHERE target.name = 'Worker.finish')::int,
+			count(*) FILTER (WHERE target.name <> 'Worker.finish')::int
+			FROM code_edges edge
+			JOIN code_nodes source ON source.id = edge.source_id
+			JOIN code_nodes target ON target.id = edge.target_id
+			WHERE edge.repo_id = $1 AND source.name = 'Worker.run' AND edge.kind = 'calls'`, repoID).
+			Scan(&exact, &wrongTarget); err != nil {
+			t.Fatal(err)
+		}
+		if exact != 1 || wrongTarget != 0 {
+			t.Fatalf("%s resolution: exact=%d wrong_target=%d, want 1/0", phase, exact, wrongTarget)
+		}
+	}
+	assertExact("full")
+
+	incrementalSource := strings.ReplaceAll(source, "fn run()", "pub fn run()")
+	incrementalSymbols, incrementalEdges := parse(incrementalSource)
+	if err := indexParsedSymbols(ctx, st, repoID, map[string]fileResult{
+		filePath: {symbols: incrementalSymbols, edges: incrementalEdges},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	assertExact("incremental")
 }
 
 func TestFullAndIncrementalQualifiedMissResolutionParity(t *testing.T) {

@@ -576,6 +576,71 @@ impl Worker {
 	}
 }
 
+func TestTreeSitterCanonicalizesRustGenericImplAndTurbofishCalls(t *testing.T) {
+	src := `struct Worker<T>(T);
+impl<T> Worker<T> {
+    fn run() { Worker::<T>::finish(); }
+    fn finish() {}
+}`
+	syms, edges := parseTreeSitter("worker.rs", src)
+	methods := make(map[string]Symbol)
+	for _, sym := range syms {
+		if sym.Kind == KindMethod {
+			methods[sym.Name] = sym
+		}
+	}
+	for _, name := range []string{"Worker.run", "Worker.finish"} {
+		if sym, ok := methods[name]; !ok || sym.Receiver != "Worker" {
+			t.Errorf("%s = %+v, want canonical generic receiver", name, sym)
+		}
+	}
+	want := Edge{SourceName: "Worker.run", TargetName: "Worker.finish", Kind: EdgeCalls}
+	if !slices.Contains(edges, want) {
+		t.Fatalf("missing canonical generic edge %+v in %+v", want, edges)
+	}
+}
+
+func TestTreeSitterCanonicalizesNestedRustGenericArgumentsAndLifetimes(t *testing.T) {
+	src := `struct Pair<T, U>(T, U);
+struct Worker<'a, T, U>(&'a T, U);
+impl<'a, T, U> Worker<'a, Pair<T, U>, Vec<Result<T, U>>> {
+    fn run() {
+        Worker::<'a, Pair<T, U>, Vec<Result<T, U>>>::finish::<Result<T, U>>();
+    }
+    fn finish<V>() {}
+}`
+	syms, edges := parseTreeSitter("worker.rs", src)
+	methods := make(map[string]Symbol)
+	for _, sym := range syms {
+		if sym.Kind == KindMethod {
+			methods[sym.Name] = sym
+		}
+	}
+	for _, name := range []string{"Worker.run", "Worker.finish"} {
+		if sym, ok := methods[name]; !ok || sym.Receiver != "Worker" {
+			t.Errorf("%s = %+v, want canonical nested generic receiver", name, sym)
+		}
+	}
+	want := Edge{SourceName: "Worker.run", TargetName: "Worker.finish", Kind: EdgeCalls}
+	if !slices.Contains(edges, want) {
+		t.Fatalf("missing nested generic call %+v in %+v", want, edges)
+	}
+}
+
+func TestRustGenericNormalizationDoesNotChangeCppOperatorsOrGoReceivers(t *testing.T) {
+	for target, want := range map[string]string{
+		"Worker<int>::finish": "Worker<int>.finish",
+		"Widget::operator<<":  "Widget.operator<<",
+	} {
+		if got := qualifyScopedCall(target, ""); got != want {
+			t.Errorf("qualifyScopedCall(%q) = %q, want %q", target, got, want)
+		}
+	}
+	if got := receiverIdentity("w *Worker[T]"); got != "Worker" {
+		t.Errorf("generic Go receiver = %q, want Worker", got)
+	}
+}
+
 func TestQualifyScopedCallCanonicalizesCppAndRustQualifiers(t *testing.T) {
 	for target, want := range map[string]string{
 		"Worker::finish":         "Worker.finish",

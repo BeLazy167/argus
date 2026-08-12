@@ -357,7 +357,7 @@ func extractImplSymbol(n *gotreesitter.Node, lang *gotreesitter.Language, source
 	if typeNode == nil {
 		return
 	}
-	typeName := typeNode.Text(source)
+	typeName := receiverIdentity(stripRustGenericArguments(typeNode.Text(source)))
 	if typeName == "" {
 		return
 	}
