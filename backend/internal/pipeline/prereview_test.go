@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 
 	ghpkg "github.com/BeLazy167/argus/backend/internal/github"
@@ -121,7 +122,7 @@ func (f fakeArchReader) ListArchBugDensity(ctx context.Context, repoID int64) ([
 func fanInEdges(target string, n int) []db.ListArchFileEdgesRow {
 	edges := make([]db.ListArchFileEdgesRow, n)
 	for i := range edges {
-		edges[i] = db.ListArchFileEdgesRow{SourcePath: "src.go", TargetPath: target}
+		edges[i] = db.ListArchFileEdgesRow{SourcePath: fmt.Sprintf("src-%d.go", i), TargetPath: target}
 	}
 	return edges
 }
@@ -143,6 +144,22 @@ func TestAttachArchContext_MarksChokePointAndHotspot(t *testing.T) {
 	}
 	if _, ok := run.ArchContext["quiet.go"]; ok {
 		t.Error("quiet.go (below thresholds) should not be in ArchContext")
+	}
+}
+
+func TestAttachArchContext_CountsDistinctFileDependencies(t *testing.T) {
+	run := prereviewRun([]diff.FileDiff{{NewName: "hub.go"}})
+	edges := make([]db.ListArchFileEdgesRow, ArchChokePointFanIn)
+	for i := range edges {
+		// One source file can contribute many symbol/kind edges to the same
+		// target. Architecture fan-in counts that dependency once.
+		edges[i] = db.ListArchFileEdgesRow{SourcePath: "one-caller.go", TargetPath: "hub.go"}
+	}
+
+	attachArchContext(context.Background(), run, fakeArchReader{edges: edges}, discardLogger())
+
+	if run.ArchContext != nil {
+		t.Fatalf("duplicate symbol edges made one dependent look like a choke point: %+v", run.ArchContext)
 	}
 }
 

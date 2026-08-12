@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 )
@@ -45,10 +46,19 @@ type Config struct {
 	MaxConcurrentReviews int
 
 	// Deployment identity (self-hosting)
-	DashboardBaseURL string // web dashboard base URL, linked from GitHub comments
-	APIBaseURL       string // public API base URL, used for signed export links
-	GitHubAppSlug    string // GitHub App slug, used to build install URLs
-	SelfHosted       bool   // self-hosted deployment; affects auto-run defaults and install listing
+	DashboardBaseURL        string // web dashboard base URL, linked from GitHub comments
+	MermaidValidatorBaseURL string // explicit backend→dashboard parser origin; no vendor default
+	MermaidValidatorSecret  string // shared backend→dashboard validator credential
+	APIBaseURL              string // public API base URL, used for signed export links
+	GitHubAppSlug           string // GitHub App slug, used to build install URLs
+	SelfHosted              bool   // self-hosted deployment; affects auto-run defaults and install listing
+}
+
+// MermaidValidatorEnabled reports whether diagram generation has its explicit,
+// deployment-local parser endpoint and credential. Load guarantees the pair is
+// either fully configured or intentionally disabled.
+func (c *Config) MermaidValidatorEnabled() bool {
+	return c != nil && c.MermaidValidatorBaseURL != "" && c.MermaidValidatorSecret != ""
 }
 
 func Load() (*Config, error) {
@@ -82,6 +92,17 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	validatorBaseURL := os.Getenv("MERMAID_VALIDATOR_BASE_URL")
+	validatorSecret := os.Getenv("MERMAID_VALIDATOR_SECRET")
+	if (validatorBaseURL == "") != (validatorSecret == "") {
+		return nil, fmt.Errorf("MERMAID_VALIDATOR_BASE_URL and MERMAID_VALIDATOR_SECRET must be configured together")
+	}
+	if validatorBaseURL != "" {
+		parsed, parseErr := url.Parse(validatorBaseURL)
+		if parseErr != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+			return nil, fmt.Errorf("MERMAID_VALIDATOR_BASE_URL must be an absolute http(s) URL")
+		}
+	}
 
 	cfg := &Config{
 		Port: port,
@@ -105,10 +126,12 @@ func Load() (*Config, error) {
 
 		MaxConcurrentReviews: maxWorkers,
 
-		DashboardBaseURL: getEnv("DASHBOARD_BASE_URL", "https://argus.reviews"),
-		APIBaseURL:       getEnv("API_BASE_URL", "https://api.argus.reviews"),
-		GitHubAppSlug:    getEnv("GITHUB_APP_SLUG", "argus-eye"),
-		SelfHosted:       getEnv("SELF_HOSTED", "false") == "true",
+		DashboardBaseURL:        getEnv("DASHBOARD_BASE_URL", "https://argus.reviews"),
+		MermaidValidatorBaseURL: validatorBaseURL,
+		MermaidValidatorSecret:  validatorSecret,
+		APIBaseURL:              getEnv("API_BASE_URL", "https://api.argus.reviews"),
+		GitHubAppSlug:           getEnv("GITHUB_APP_SLUG", "argus-eye"),
+		SelfHosted:              getEnv("SELF_HOSTED", "false") == "true",
 	}
 
 	return cfg, nil

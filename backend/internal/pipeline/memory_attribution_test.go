@@ -95,6 +95,36 @@ func TestLearnedLineIsCountedAfterTheMemorySinks(t *testing.T) {
 	}
 }
 
+// TestRecordedIDRecoverySkipsPrePostSinksAndKeepsCompletionElection pins the
+// crash-recovery ordering around the non-idempotent post. A durable id must be
+// read before pre-post LLM/memory work, and recovery must continue to the normal
+// completion CAS rather than return early and omit winner follow-ups.
+func TestRecordedIDRecoverySkipsPrePostSinksAndKeepsCompletionElection(t *testing.T) {
+	data, err := os.ReadFile(filepath.Clean("orchestrator.go"))
+	if err != nil {
+		t.Fatalf("read orchestrator.go: %v", err)
+	}
+	src := string(data)
+	postStart := strings.Index(src, "func (o *Orchestrator) post(")
+	if postStart < 0 {
+		t.Fatal("post stage not found")
+	}
+	src = src[postStart:]
+	precheck := strings.Index(src, "GetRecordedReviewID(")
+	gate := strings.Index(src, "if !postAlreadyRecorded {")
+	sinks := strings.Index(src, `"pre_post"`)
+	completion := strings.Index(src, "CompletePostedReview(")
+	if precheck < 0 || gate < 0 || sinks < 0 || completion < 0 {
+		t.Fatalf("recovery landmarks moved: precheck=%d gate=%d sinks=%d completion=%d", precheck, gate, sinks, completion)
+	}
+	if !(precheck < gate && gate < sinks && sinks < completion) {
+		t.Fatalf("unsafe recorded-id ordering: precheck=%d gate=%d sinks=%d completion=%d", precheck, gate, sinks, completion)
+	}
+	if strings.Contains(src[:completion], "if postAlreadyRecorded {\n\t\treturn") {
+		t.Fatal("recorded-id recovery returns before the completion winner election")
+	}
+}
+
 // TestIndexerForReviewAttributesWrites covers the helper's two contracts: it
 // passes the review through, and it tolerates the nil indexer that means
 // "memory is unconfigured for this org" instead of panicking mid-review.

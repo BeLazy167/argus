@@ -10,66 +10,62 @@ import (
 	"github.com/BeLazy167/argus/backend/internal/store"
 )
 
-// How the full-index backfill is paced.
-//
-// One repo per tick, hourly. The pacing is set by the two costs a full index
-// carries, and both are per-installation:
-//
-//   - GitHub API. indexFileSet fetches one file per call, so a capped index is
-//     up to DefaultFullIndexFileCap calls. An installation gets 5000/hour, and
-//     those same calls are what reviews need — so a burst that indexed several
-//     repos at once could starve the thing users are waiting on.
-//   - Memory. The cross-file edge-resolution pass retains parsed symbols for
-//     every file in the run. One repo at a time keeps that to a single repo's
-//     worth on a 1024 MB machine.
-//
-// At one repo an hour a 25-repo installation reaches full coverage in about a
-// day, and the refresh interval then keeps it current. Deliberately slower than
-// necessary: this is backfill, and the per-PR incremental path already keeps
-// changed files fresh in the meantime.
+// How the full-index backfill is paced. Tickers are only wake-ups; Postgres
+// authoritatively admits at most one fleet window per minimum spacing. A first
+// window costs one ref lookup plus two tree calls. GetFileContent can cost two
+// calls when GitHub returns an out-of-line blob, so the bound counts both.
 const (
-	graphIndexInterval  = time.Hour
-	graphIndexStaleness = 14 * 24 * time.Hour
-	graphIndexPerTick   = 1
-	graphIndexTimeout   = 25 * time.Minute
+	graphIndexInterval             = time.Hour
+	graphIndexContinuationInterval = 2 * time.Minute
+	graphIndexMinimumSpacing       = 5 * time.Minute
+	graphIndexBudgetHour           = time.Hour
+	graphIndexStaleness            = 14 * 24 * time.Hour
+	graphIndexPerTick              = 1
+	graphIndexTimeout              = 25 * time.Minute
+	graphIndexFileCap              = graph.DefaultFullIndexFileCap
+
+	minimumGitHubInstallationQuota       = 5000
+	graphIndexMaxCallsPerWindow          = 3 + 2*graphIndexFileCap
+	graphIndexMaxCallsPerHour            = 600
+	graphIndexReservedReviewCallsPerHour = 4400
 )
 
 // runGraphIndexBackfill walks whole repositories into the code graph on a
 // schedule.
 //
-// This is the missing recall half of the code graph. graph.IndexFiles runs on
-// every pull request but only over that PR's changed files, so the graph grew
-// as disconnected PR-shaped islands — 29% of nodes isolated — and traversal
-// over it returns a fragment that looks like a real answer. graph.IndexRepo
-// existed to fix that and had no caller.
+// This is the authoritative recall path for the code graph. Before this
+// backfill, only pull-request-shaped fragments were indexed, so traversal over
+// the projection returned a fragment that looked like a real answer.
 //
 // Runs until ctx is cancelled. Every failure is logged and skipped rather than
 // returned: this is a background improvement to review quality, and it must
 // never take the server down or stop trying because one repository is
 // unreachable.
 func runGraphIndexBackfill(ctx context.Context, db *store.Store, ghClient *ghpkg.Client, logger *slog.Logger) {
-	// First tick soon after boot, not a full interval later. Machines restart on
-	// every deploy and can be stopped by autostop, so a loop that only ever fires
-	// at T+1h would index nothing on a machine that never stays up an hour.
-	// Delayed a little so it does not compete with startup recovery work.
+	// First backfill soon after boot, not a full interval later. Prompt refreshes
+	// then use their own short poll; ordinary stale repositories keep the hourly
+	// pacing that protects the installation's GitHub budget.
 	first := time.NewTimer(2 * time.Minute)
 	defer first.Stop()
 	select {
 	case <-ctx.Done():
 		return
 	case <-first.C:
-		indexDueRepos(ctx, db, ghClient, logger)
+		indexDueRepos(ctx, db, ghClient, logger, false)
 	}
 
-	ticker := time.NewTicker(graphIndexInterval)
-	defer ticker.Stop()
-
+	promptTicker := time.NewTicker(graphIndexContinuationInterval)
+	defer promptTicker.Stop()
+	backfillTicker := time.NewTicker(graphIndexInterval)
+	defer backfillTicker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			indexDueRepos(ctx, db, ghClient, logger)
+		case <-promptTicker.C:
+			indexDueRepos(ctx, db, ghClient, logger, true)
+		case <-backfillTicker.C:
+			indexDueRepos(ctx, db, ghClient, logger, false)
 		}
 	}
 }
@@ -78,7 +74,7 @@ func runGraphIndexBackfill(ctx context.Context, db *store.Store, ghClient *ghpkg
 //
 // Split from the loop so the scheduling and the work can be reasoned about —
 // and tested — separately.
-func indexDueRepos(ctx context.Context, db *store.Store, ghClient *ghpkg.Client, logger *slog.Logger) {
+func indexDueRepos(ctx context.Context, db *store.Store, ghClient *ghpkg.Client, logger *slog.Logger, promptOnly bool) {
 	// Only one machine indexes at a time. Both run this loop, and a duplicated
 	// full index costs a second 1500-call burst against the same installation's
 	// GitHub budget — the budget in-flight reviews are drawing on.
@@ -93,13 +89,26 @@ func indexDueRepos(ctx context.Context, db *store.Store, ghClient *ghpkg.Client,
 	defer release()
 
 	listCtx, cancelList := context.WithTimeout(ctx, 30*time.Second)
-	targets, err := db.ListReposDueForGraphIndex(listCtx, graphIndexStaleness, graphIndexPerTick)
+	var targets []store.RepoIndexTarget
+	if promptOnly {
+		targets, err = db.ListReposDueForPromptGraphIndex(listCtx, graphIndexPerTick)
+	} else {
+		targets, err = db.ListReposDueForGraphIndex(listCtx, graphIndexStaleness, graphIndexPerTick)
+	}
 	cancelList()
 	if err != nil {
 		logger.Error("graph index: listing due repos", "error", err)
 		return
 	}
 	if len(targets) == 0 {
+		return
+	}
+	reserved, err := db.TryReserveGraphIndexWindow(ctx, graphIndexMinimumSpacing)
+	if err != nil {
+		logger.Error("graph index: reserving persistent API budget", "error", err)
+		return
+	}
+	if !reserved {
 		return
 	}
 
@@ -115,9 +124,9 @@ func indexDueRepos(ctx context.Context, db *store.Store, ghClient *ghpkg.Client,
 		// Per-repo deadline. A single unreachable repository must not hold the
 		// backfill open until the next tick arrives and overlaps it.
 		repoCtx, cancel := context.WithTimeout(ctx, graphIndexTimeout)
-		indexed, dropped, nextCursor, err := graph.IndexRepoBounded(repoCtx, db, ghClient,
+		result, err := graph.IndexRepoBounded(repoCtx, db, ghClient,
 			t.GitHubInstallationID, t.Owner, t.Repo, t.DefaultBranch, t.RepoID,
-			graph.DefaultFullIndexFileCap, t.IndexCursor)
+			graphIndexFileCap, t.IndexCursor)
 		cancel()
 
 		if err != nil {
@@ -129,26 +138,23 @@ func indexDueRepos(ctx context.Context, db *store.Store, ghClient *ghpkg.Client,
 			continue
 		}
 
-		if dropped > 0 {
-			// Say so. A capped index recorded as a complete one is the same
-			// false confidence the fragmented graph already produces. The cursor
-			// means the next run covers a different window, so coverage still
-			// completes — over several runs rather than one.
-			logger.Warn("graph index: repo exceeded the file cap, indexed one window",
-				"repo", t.Owner+"/"+t.Repo, "indexed", indexed, "skipped", dropped,
-				"next_offset", nextCursor)
+		if result.Unchanged {
+			logger.Info("graph index: published generation already matches default branch",
+				"repo", t.Owner+"/"+t.Repo, "commit", result.Snapshot.PublishedCommitSHA)
+			continue
 		}
-		markCtx, cancelMark := context.WithTimeout(ctx, 30*time.Second)
-		err = db.MarkRepoGraphIndexed(markCtx, t.RepoID, nextCursor)
-		cancelMark()
-		if err != nil {
-			// The index itself succeeded, so do not claim otherwise; the repo is
-			// simply re-selected next tick and re-indexed, which is wasteful but
-			// correct.
-			logger.Error("graph index: marking indexed", "repo", t.Owner+"/"+t.Repo, "error", err)
+		if !result.Published {
+			logger.Warn("graph index: generation window staged but not complete",
+				"repo", t.Owner+"/"+t.Repo, "commit", result.Snapshot.CommitSHA,
+				"staged", result.Staged, "remaining", result.Remaining,
+				"visited", result.Snapshot.VisitedFiles, "expected", result.Snapshot.ExpectedFiles,
+				"failed", result.Snapshot.FailedFiles, "unavailable", result.Snapshot.UnavailableFiles)
+			continue
 		}
-		logger.Info("graph index: full index complete",
-			"repo", t.Owner+"/"+t.Repo, "files", indexed, "skipped", dropped)
+		logger.Info("graph index: full generation published",
+			"repo", t.Owner+"/"+t.Repo, "commit", result.Snapshot.CommitSHA,
+			"files", result.Snapshot.VisitedFiles, "skipped", result.Snapshot.SkippedFiles,
+			"unavailable", result.Snapshot.UnavailableFiles)
 		rebuilt = true
 	}
 

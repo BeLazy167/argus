@@ -2,7 +2,6 @@
 
 import { useEffect, useRef, useState } from "react";
 import {
-  GitPullRequest,
   Zap,
   FileSearch,
   MessageSquare,
@@ -17,7 +16,6 @@ import {
   FlaskConical,
   Layers,
   RefreshCw,
-  Play,
   SlidersHorizontal,
   Brain,
   Key,

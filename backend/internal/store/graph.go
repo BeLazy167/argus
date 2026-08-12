@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/BeLazy167/argus/backend/internal/store/db"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -34,22 +35,29 @@ type FileMemory struct {
 // parameter, so every writer must pass repo_id as $1.
 const installationOfRepo = `(SELECT r.installation_id FROM repos r WHERE r.id = $1)`
 
+// publishedGraphReposCTE is the shared publication-authority predicate for raw
+// semantic graph reads. Physical code_nodes/code_edges rows are deliberately
+// retained across migrations and failed refreshes, so their existence alone is
+// never authority. The generation must be the owning repo's published pointer,
+// belong to that same repo, and still be marked published.
+//
+// Writer/staging queries must not use this CTE: they need to inspect and mutate
+// physical rows before the first publication and while a later generation is
+// building.
+const publishedGraphReposCTE = `authoritative_graph_repos AS (
+	SELECT authority.id
+	FROM repos authority
+	JOIN graph_index_generations published
+	  ON published.id = authority.graph_published_generation_id
+	 AND published.repo_id = authority.id
+	 AND published.status = 'published'
+)`
+
 // UpsertCodeNode inserts or updates a code node, returning its ID.
 // Only updates base columns (kind, name, file_path, lines, language, pr_number).
 // Does NOT overwrite type-info columns (return_type, params, etc.) if they already exist.
 func (s *Store) UpsertCodeNode(ctx context.Context, repoID int64, kind, name, filePath string, lineStart, lineEnd int, language string, prNumber int) (int64, error) {
-	var id int64
-	err := s.Pool.QueryRow(ctx, `
-		INSERT INTO code_nodes (repo_id, installation_id, kind, name, file_path, line_start, line_end, language, pr_number, updated_at)
-		VALUES ($1, `+installationOfRepo+`, $2, $3, $4, $5, $6, $7, NULLIF($8, 0), NOW())
-		ON CONFLICT (repo_id, file_path, kind, name)
-		DO UPDATE SET line_start = $5, line_end = $6, language = $7,
-		             pr_number = COALESCE(NULLIF($8, 0), code_nodes.pr_number),
-		             installation_id = EXCLUDED.installation_id,
-		             updated_at = NOW()
-		RETURNING id
-	`, repoID, kind, name, filePath, lineStart, lineEnd, language, prNumber).Scan(&id)
-	return id, err
+	return s.q.UpsertCodeNode(ctx, db.UpsertCodeNodeParams{RepoID: repoID, Kind: kind, Name: name, FilePath: filePath, LineStart: &lineStart, LineEnd: &lineEnd, Language: &language, PRNumber: &prNumber})
 }
 
 // NodeHashRow carries the minimum a hash-gated diff needs: the primary key
@@ -132,34 +140,69 @@ func (s *Store) DeleteNodesByIDs(ctx context.Context, repoID int64, ids []int64)
 // cost once Neon's Rows chart shows code_edges churn materially
 // exceeding code_nodes. Until then the no-op on conflict is sufficient.
 func (s *Store) UpsertCodeEdge(ctx context.Context, repoID, sourceID, targetID int64, kind string) error {
-	_, err := s.Pool.Exec(ctx, `
-		INSERT INTO code_edges (repo_id, source_id, target_id, kind, updated_at)
-		VALUES ($1, $2, $3, $4, NOW())
-		ON CONFLICT (repo_id, source_id, target_id, kind) DO NOTHING
-	`, repoID, sourceID, targetID, kind)
-	return err
+	return s.q.UpsertCodeEdge(ctx, db.UpsertCodeEdgeParams{RepoID: repoID, SourceID: sourceID, TargetID: targetID, Kind: kind})
+}
+
+// CodeEdgeRow is one parser-owned edge in an authoritative per-file snapshot.
+type CodeEdgeRow struct {
+	SourceID int64
+	TargetID int64
+	Kind     string
+}
+
+// ReplaceCodeEdgesForFiles replaces every deterministic outgoing edge whose
+// source belongs to one of filePaths. An empty edge set is authoritative and
+// removes relationships that disappeared from the source.
+func (s *Store) ReplaceCodeEdgesForFiles(ctx context.Context, repoID int64, filePaths []string, edges []CodeEdgeRow) error {
+	if len(filePaths) == 0 {
+		return nil
+	}
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("replace code edges: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM code_edges ce
+		USING code_nodes src
+		WHERE ce.source_id = src.id
+		  AND ce.repo_id = $1 AND src.repo_id = $1
+		  AND src.file_path = ANY($2::text[])
+		  AND NOT ce.inferred`, repoID, filePaths); err != nil {
+		return fmt.Errorf("replace code edges: delete: %w", err)
+	}
+	if len(edges) > 0 {
+		batch := &pgx.Batch{}
+		for _, edge := range edges {
+			batch.Queue(`
+				INSERT INTO code_edges (repo_id, source_id, target_id, kind, inferred, updated_at)
+				VALUES ($1, $2, $3, $4, false, NOW())
+				ON CONFLICT (repo_id, source_id, target_id, kind) DO NOTHING`,
+				repoID, edge.SourceID, edge.TargetID, edge.Kind)
+		}
+		if err := tx.SendBatch(ctx, batch).Close(); err != nil {
+			return fmt.Errorf("replace code edges: insert: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("replace code edges: commit: %w", err)
+	}
+	return nil
 }
 
 // MarkNodesMerged marks all code_nodes for a given PR as permanently merged.
 func (s *Store) MarkNodesMerged(ctx context.Context, repoID int64, prNumber int) error {
-	_, err := s.Pool.Exec(ctx,
-		`UPDATE code_nodes SET is_merged = true WHERE repo_id = $1 AND pr_number = $2`,
-		repoID, prNumber)
-	return err
+	return s.q.MarkNodesMerged(ctx, db.MarkNodesMergedParams{RepoID: repoID, PRNumber: &prNumber})
 }
 
 // DeleteUnmergedNodesByPR deletes code_nodes added by a specific PR that haven't been merged.
 func (s *Store) DeleteUnmergedNodesByPR(ctx context.Context, repoID int64, prNumber int) error {
-	_, err := s.Pool.Exec(ctx,
-		`DELETE FROM code_nodes WHERE repo_id = $1 AND pr_number = $2 AND is_merged = false`,
-		repoID, prNumber)
-	return err
+	return s.q.DeleteUnmergedNodesByPR(ctx, db.DeleteUnmergedNodesByPRParams{RepoID: repoID, PRNumber: &prNumber})
 }
 
 // DeleteNodesByFile deletes all code nodes (and cascading edges) for a file.
 func (s *Store) DeleteNodesByFile(ctx context.Context, repoID int64, filePath string) error {
-	_, err := s.Pool.Exec(ctx, `DELETE FROM code_nodes WHERE repo_id = $1 AND file_path = $2`, repoID, filePath)
-	return err
+	return s.q.DeleteNodesByFile(ctx, db.DeleteNodesByFileParams{RepoID: repoID, FilePath: filePath})
 }
 
 // pgGraphOnce guards a single probe for a usable pgGraph projection.
@@ -282,36 +325,35 @@ func (s *Store) GetBlastRadius(ctx context.Context, installationID, repoID int64
 	return s.blastRadiusCTE(ctx, installationID, repoID, filePaths, maxDepth)
 }
 
-// blastRadiusPGGraph resolves the seed file paths to node ids, then multi-start
-// traverses the projection. Direction "in" walks edges backwards -- from a
-// changed node to the nodes that DEPEND on it, which is what blast radius
-// means. Seeds are resolved from code_nodes rather than graph.search() because
-// the source table is authoritative and already indexed on (repo_id, file_path).
+// blastRadiusPGGraph exercises the installed projection, then validates its
+// candidate walk against authoritative code_edges before returning rows.
 //
-// installation_id is pushed INTO the traversal as a registered filter column,
-// not applied to its output. max_rows is enforced inside traverse, so a
-// post-filter lets another tenant's nodes consume the budget and then be
-// discarded -- returning fewer rows than the CTE, or none. code_edges is
-// registered with no tenant boundary of its own, so an unfiltered walk can reach
-// any node in the database; the node-side filter is the only thing stopping it.
-// The trailing WHERE on the hydration join is defence in depth, not the
-// boundary: it runs after max_rows and cannot recover rows already spent.
+// pgGraph can filter node columns (including installation_id), but it cannot
+// filter code_edges.inferred. Returning graph.traverse output directly would
+// therefore promote derived API guesses into blast-radius facts. Post-filtering
+// reached nodes is also insufficient: an inferred edge may lead to a node that
+// has a separate parsed path, and an inferred-edge flood can consume max_rows
+// before parsed dependents are returned.
 //
-// The inner max_rows (200) is deliberately wider than the 50 rows returned.
-// Since the walk crosses repositories, a sibling repository can now supply more
-// depth-1 dependents than the whole budget, and traverse spends its budget
-// DURING the walk with no repo awareness — so a budget equal to the result size
-// would let one repository fill it and leave nothing for the repository the pull
-// request is actually in. Ordering same-repo first (see the CTE) can only choose
-// among rows the walk returned, which is why the walk has to return more.
+// The candidates CTE deliberately remains in the query and projection_state
+// forces its evaluation, so a missing/stale/unusable projection still fails and
+// GetBlastRadius disables the fast path. The reached CTE is the policy gate: it
+// walks only NOT inferred edges under the same installation boundary and row
+// ordering as blastRadiusCTE. This trades some speed for engine-independent
+// answers until pgGraph supports edge predicates.
+//
+// The projection probe is bounded at 200 candidates. That budget cannot affect
+// the returned set because candidates are never used as an inclusion filter.
 func (s *Store) blastRadiusPGGraph(ctx context.Context, installationID, repoID int64, filePaths []string, maxDepth int) ([]CodeNode, error) {
 	rows, err := s.Pool.Query(ctx, `
-		WITH seeds AS (
-		  SELECT array_agg(id::text) AS ids
-		  FROM code_nodes WHERE installation_id = $1 AND repo_id = $2 AND file_path = ANY($3)
-		), reached AS (
-		  SELECT DISTINCT cn.id, cn.repo_id, cn.name, cn.file_path, cn.kind, t.depth
-		  FROM seeds s
+		WITH RECURSIVE `+publishedGraphReposCTE+`, seeds AS (
+		  SELECT cn.id, cn.repo_id, cn.name, cn.file_path, cn.kind
+		  FROM code_nodes cn
+		  JOIN authoritative_graph_repos authority ON authority.id = cn.repo_id
+		  WHERE cn.installation_id = $1 AND cn.repo_id = $2 AND cn.file_path = ANY($3)
+		), candidates AS (
+		  SELECT DISTINCT t.node_id::bigint AS id
+		  FROM (SELECT array_agg(id::text) AS ids FROM seeds) s
 		  CROSS JOIN LATERAL graph.traverse(
 		      (SELECT array_agg('public.code_nodes'::regclass) FROM generate_series(1, array_length(s.ids, 1))),
 		      s.ids,
@@ -321,11 +363,23 @@ func (s *Store) blastRadiusPGGraph(ctx context.Context, installationID, repoID i
 		      filter := graph.eq('installation_id', to_jsonb($1::bigint)),
 		      max_rows := 200
 		  ) t
-		  JOIN code_nodes cn ON cn.id = t.node_id::bigint
-		  WHERE cn.installation_id = $1
+		), reached AS (
+		  SELECT id, repo_id, name, file_path, kind, 0 AS depth FROM seeds
+		  UNION
+		  SELECT cn.id, cn.repo_id, cn.name, cn.file_path, cn.kind, r.depth + 1
+		  FROM reached r
+		  JOIN code_edges ce ON ce.target_id = r.id AND NOT ce.inferred
+		  JOIN code_nodes cn ON cn.id = ce.source_id AND cn.repo_id = ce.repo_id
+		  JOIN authoritative_graph_repos authority ON authority.id = cn.repo_id
+		  WHERE r.depth < $4 AND cn.installation_id = $1
+		), projection_state AS (
+		  SELECT COUNT(*) AS candidate_count FROM candidates
 		)
-		SELECT id, repo_id, name, file_path, kind, depth FROM reached
-		ORDER BY depth, (repo_id <> $2), file_path
+		SELECT d.id, d.repo_id, d.name, d.file_path, d.kind, d.depth
+		FROM (SELECT DISTINCT id, repo_id, name, file_path, kind, depth FROM reached) d
+		CROSS JOIN projection_state p
+		WHERE p.candidate_count >= 0
+		ORDER BY d.depth, (d.repo_id <> $2), d.file_path
 		LIMIT 50`, installationID, repoID, filePaths, maxDepth)
 	if err != nil {
 		return nil, fmt.Errorf("pggraph blast radius: %w", err)
@@ -362,13 +416,9 @@ func (s *Store) blastRadiusPGGraph(ctx context.Context, installationID, repoID i
 // silently promoted to fact. It is the same predicate ListGraphEdges,
 // ListArchFileEdges, GetTopChokePoints and GetFileFanIn already carry.
 //
-// KNOWN DIVERGENCE: the pgGraph path above cannot carry this. pgGraph filters
-// are evaluated against registered columns of the NODE table, and `inferred` is
-// a column of code_edges — migration 072 records that a join cannot be pushed
-// into graph.traverse(). Where the extension is built and the projection is
-// fresh, a derived edge is therefore still walked. Consuming these edges on
-// purpose (#221 item 3b) has to settle that before the projection can be
-// trusted as equivalent to the CTE.
+// The pgGraph query carries this same recursive policy gate after its bounded
+// projection probe. An inferred edge therefore cannot change the answer merely
+// because the optional extension is installed.
 //
 // The result is ordered same-repo-first WITHIN each depth. The row budget did
 // not grow when the walk widened from one repository to a whole installation, so
@@ -379,14 +429,17 @@ func (s *Store) blastRadiusPGGraph(ctx context.Context, installationID, repoID i
 // the primary key because both consumers filter on depth == 1.
 func (s *Store) blastRadiusCTE(ctx context.Context, installationID, repoID int64, filePaths []string, maxDepth int) ([]CodeNode, error) {
 	rows, err := s.Pool.Query(ctx, `
-		WITH RECURSIVE affected AS (
-			SELECT id, repo_id, name, file_path, kind, 0 as depth
-			FROM code_nodes WHERE installation_id = $1 AND repo_id = $2 AND file_path = ANY($3)
+		WITH RECURSIVE `+publishedGraphReposCTE+`, affected AS (
+			SELECT cn.id, cn.repo_id, cn.name, cn.file_path, cn.kind, 0 as depth
+			FROM code_nodes cn
+			JOIN authoritative_graph_repos authority ON authority.id = cn.repo_id
+			WHERE cn.installation_id = $1 AND cn.repo_id = $2 AND cn.file_path = ANY($3)
 			UNION
 			SELECT cn.id, cn.repo_id, cn.name, cn.file_path, cn.kind, a.depth + 1
 			FROM code_nodes cn
-			JOIN code_edges ce ON ce.source_id = cn.id
+			JOIN code_edges ce ON ce.source_id = cn.id AND ce.repo_id = cn.repo_id
 			JOIN affected a ON ce.target_id = a.id
+			JOIN authoritative_graph_repos authority ON authority.id = cn.repo_id
 			WHERE a.depth < $4 AND cn.installation_id = $1 AND NOT ce.inferred
 		)
 		SELECT id, repo_id, name, file_path, kind, depth
@@ -408,12 +461,15 @@ func (s *Store) blastRadiusCTE(ctx context.Context, installationID, repoID int64
 // GetCodeNodesForFile returns all code nodes for a given file with full type info, ordered by line_start.
 func (s *Store) GetCodeNodesForFile(ctx context.Context, repoID int64, filePath string) ([]CodeNode, error) {
 	rows, err := s.Pool.Query(ctx, `
-		SELECT id, repo_id, kind, name, file_path,
-		       COALESCE(line_start, 0), COALESCE(line_end, 0), COALESCE(language, ''),
-		       COALESCE(return_type, ''), COALESCE(params, ''), COALESCE(visibility, ''),
-		       COALESCE(is_async, false), COALESCE(receiver_type, ''), COALESCE(scope, '')
-		FROM code_nodes WHERE repo_id = $1 AND file_path = $2
-		ORDER BY line_start
+		WITH `+publishedGraphReposCTE+`
+		SELECT cn.id, cn.repo_id, cn.kind, cn.name, cn.file_path,
+		       COALESCE(cn.line_start, 0), COALESCE(cn.line_end, 0), COALESCE(cn.language, ''),
+		       COALESCE(cn.return_type, ''), COALESCE(cn.params, ''), COALESCE(cn.visibility, ''),
+		       COALESCE(cn.is_async, false), COALESCE(cn.receiver_type, ''), COALESCE(cn.scope, '')
+		FROM code_nodes cn
+		JOIN authoritative_graph_repos authority ON authority.id = cn.repo_id
+		WHERE cn.repo_id = $1 AND cn.file_path = $2
+		ORDER BY cn.line_start
 	`, repoID, filePath)
 	if err != nil {
 		return nil, fmt.Errorf("get code nodes for file: %w", err)
@@ -450,23 +506,17 @@ func (s *Store) GetFileMemory(ctx context.Context, repoID int64, filePath string
 	mem.RiskScore.FilePath = filePath
 	mem.RiskScore.LastTrace = lastTrace
 
-	// Patterns linked via review comments on this file
-	pRows, err := s.Pool.Query(ctx, `
-		SELECT DISTINCT p.id, p.installation_id, p.repo_id, p.content, p.memory_doc_id,
-		       p.created_by, COALESCE(p.source, 'manual'), p.category, p.pr_number, p.created_at, p.updated_at
-		FROM patterns p
-		JOIN review_comments rc ON rc.matched_pattern_id = p.id
-		JOIN reviews r ON r.id = rc.review_id
-		WHERE rc.file_path = $1 AND r.repo_id = $2
-		ORDER BY p.created_at DESC LIMIT 10
-	`, filePath, repoID)
+	// Patterns linked via review comments on this file.
+	patternRows, err := s.q.GetFileMemoryPatterns(ctx, db.GetFileMemoryPatternsParams{FilePath: filePath, RepoID: repoID})
 	if err != nil {
 		return nil, fmt.Errorf("file memory patterns: %w", err)
 	}
-	defer pRows.Close()
-	mem.Patterns, err = collectOrEmpty(pRows, pgx.RowToStructByPos[Pattern])
-	if err != nil {
-		return nil, fmt.Errorf("file memory patterns scan: %w", err)
+	for _, row := range patternRows {
+		pattern, err := patternFromSQLC(row.ID, row.InstallationID, row.RepoID, row.Content, row.MemoryDocID, row.CreatedBy, row.Source, row.Category, row.PRNumber, row.CreatedAt, row.UpdatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("file memory patterns: %w", err)
+		}
+		mem.Patterns = append(mem.Patterns, pattern)
 	}
 
 	// Recent comments on this file. Suppressed findings stay in the payload —
@@ -475,24 +525,16 @@ func (s *Store) GetFileMemory(ctx context.Context, repoID int64, filePath string
 	// window and hide every finding Argus actually posted on that file.
 	// state is NOT NULL DEFAULT 'posted' (migration 051), so the boolean key is
 	// never NULL and false (posted) always sorts first.
-	cRows, err := s.Pool.Query(ctx, `
-		SELECT rc.id, rc.review_id, rc.file_path, rc.start_line, rc.end_line, rc.side,
-		       rc.body, rc.severity, rc.category, rc.specialist, rc.confidence_score,
-		       rc.code_snippet, rc.github_comment_id, rc.matched_pattern_id,
-		       rc.matched_pattern_score, rc.enforced_rule_content, rc.is_new_finding, rc.created_at,
-		       rc.state, rc.suppressed_reason, rc.resolved_sha
-		FROM review_comments rc
-		JOIN reviews r ON r.id = rc.review_id
-		WHERE rc.file_path = $1 AND r.repo_id = $2
-		ORDER BY (rc.state = 'suppressed'), rc.created_at DESC LIMIT 5
-	`, filePath, repoID)
+	commentRows, err := s.q.GetFileMemoryComments(ctx, db.GetFileMemoryCommentsParams{FilePath: filePath, RepoID: repoID})
 	if err != nil {
 		return nil, fmt.Errorf("file memory comments: %w", err)
 	}
-	defer cRows.Close()
-	mem.RecentComments, err = collectOrEmpty(cRows, pgx.RowToStructByPos[ReviewComment])
-	if err != nil {
-		return nil, fmt.Errorf("file memory comments scan: %w", err)
+	for _, row := range commentRows {
+		comment, err := fileMemoryCommentFromSQLC(row)
+		if err != nil {
+			return nil, fmt.Errorf("file memory comments: %w", err)
+		}
+		mem.RecentComments = append(mem.RecentComments, comment)
 	}
 
 	// Decision traces

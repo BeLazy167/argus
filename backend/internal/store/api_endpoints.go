@@ -252,24 +252,31 @@ func (s *Store) ReplaceInferredAPIEdges(ctx context.Context, repoID int64, edges
 	return len(edges), nil
 }
 
-// LookupCodeNodeIDsByName resolves symbol names to one node id each, for the
-// given repository.
-//
-// The indexer's in-memory name map only holds the files a single run visited,
-// so an incremental index of server.go could not see the handler functions
-// named by its routes and anchored every route to the enclosing router function
-// instead. Which node a route carried then depended on which files a PR
-// happened to change. DISTINCT ON with an id order makes the answer stable
-// rather than a function of tree-walk order.
+// LookupCodeNodeIDsByName resolves symbol names for the given repository.
+// Qualified names match exactly. An unqualified name also matches the final
+// component of a receiver/scoped identity (Handle -> Alpha.Handle). A zero ID
+// means the name exists but is ambiguous; callers must not choose one row.
 func (s *Store) LookupCodeNodeIDsByName(ctx context.Context, repoID int64, names []string) (map[string]int64, error) {
 	if len(names) == 0 {
 		return map[string]int64{}, nil
 	}
 	rows, err := s.Pool.Query(ctx, `
-		SELECT DISTINCT ON (name) name, id
-		FROM code_nodes
-		WHERE repo_id = $1 AND name = ANY($2::text[])
-		ORDER BY name, id`, repoID, names)
+		WITH requested(name, qualified) AS (
+			SELECT name, strpos(name, '.') > 0 OR strpos(name, '::') > 0
+			FROM unnest($2::text[]) name
+		), matches AS (
+			SELECT requested.name AS requested_name, cn.id
+			FROM requested
+			JOIN code_nodes cn ON cn.repo_id = $1 AND (
+				cn.name = requested.name OR (NOT requested.qualified AND (
+					right(cn.name, length(requested.name) + 1) = '.' || requested.name OR
+					right(cn.name, length(requested.name) + 2) = '::' || requested.name
+				)))
+		)
+		SELECT requested_name, CASE WHEN COUNT(*) = 1 THEN MIN(id) ELSE 0 END AS id
+		FROM matches
+		GROUP BY requested_name
+		ORDER BY requested_name`, repoID, names)
 	if err != nil {
 		return nil, fmt.Errorf("lookup code node ids: %w", err)
 	}

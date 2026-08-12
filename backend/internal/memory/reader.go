@@ -116,9 +116,30 @@ func searchWith(ctx context.Context, run runSearchFn, q MemoryQuery) ([]PatternM
 	req := q.request()
 	if len(tags) == 1 {
 		req.ContainerTag = tags[0]
-		return run(ctx, req)
+		matches, err := run(ctx, req)
+		return retrievableMatches(matches), err
 	}
-	return searchFanOut(ctx, run, req, tags)
+	matches, err := searchFanOut(ctx, run, req, tags)
+	return retrievableMatches(matches), err
+}
+
+// retrievableMatches quarantines legacy reply-derived learnings. Unauthorized
+// legacy rows have SourceLegacyReplyFeedback. Pattern rows with the older
+// SourceTrustedReplyFeedback were authorized but incorrectly promoted to the
+// installation-wide container. Both remain stored for audit; current trusted
+// learnings use their repo-specific source and container. Trusted finding
+// feedback keeps the older source and remains retrievable because its type is
+// feedback, not pattern.
+func retrievableMatches(matches []PatternMatch) []PatternMatch {
+	out := matches[:0]
+	for _, match := range matches {
+		source := match.Metadata["source"]
+		legacySharedPattern := match.Metadata["type"] == string(TypePattern) && source == SourceTrustedReplyFeedback
+		if source != SourceLegacyReplyFeedback && !legacySharedPattern {
+			out = append(out, match)
+		}
+	}
+	return out
 }
 
 // searchFanOut runs one search per container concurrently (write-partitioned

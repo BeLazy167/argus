@@ -18,7 +18,6 @@ import (
 	"testing"
 
 	"github.com/BeLazy167/argus/backend/internal/store"
-	"github.com/BeLazy167/argus/backend/internal/store/db"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -93,7 +92,7 @@ func TestDefaultCrossPRStore_LoadFeatureFlags(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			dbtx := &flagDBTX{row: tc.row}
-			d := defaultCrossPRStore{st: &store.Store{Q: db.New(dbtx)}}
+			d := defaultCrossPRStore{st: store.NewWithDB(dbtx)}
 
 			got := d.LoadFeatureFlags(context.Background(), tc.id)
 			if got != tc.want {
@@ -104,7 +103,7 @@ func TestDefaultCrossPRStore_LoadFeatureFlags(t *testing.T) {
 
 	t.Run("forwards the installation id it was given", func(t *testing.T) {
 		dbtx := &flagDBTX{row: flagRow{raw: json.RawMessage(storedBlob)}}
-		d := defaultCrossPRStore{st: &store.Store{Q: db.New(dbtx)}}
+		d := defaultCrossPRStore{st: store.NewWithDB(dbtx)}
 
 		d.LoadFeatureFlags(context.Background(), 2001)
 		if len(dbtx.args) != 1 || dbtx.args[0] != int64(2001) {

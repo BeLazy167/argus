@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -500,12 +501,12 @@ func (s *Server) upsertProviderKey(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save key"})
 		return
 	}
-	// An "embeddings" upsert changes which vector space this install writes
-	// into; without dropping the cache, up to embedderCacheTTL of writes would
-	// use the superseded key/model and land in a space the reader never
-	// searches (search filters on embedding_model).
-	if s.memRegistry != nil {
+	// An embeddings rotation changes the active coordinate space. Invalidate
+	// the cached client before scheduling a detached, advisory-lock-guarded
+	// repair; dense reads remain fail-closed to the new space while it runs.
+	if body.Provider == memory.EmbeddingsProvider && s.memRegistry != nil {
 		s.memRegistry.InvalidateEmbedder(installationID)
+		s.scheduleMemoryReembed(r.Context(), installationID)
 	}
 	s.auditSettings(r, installationID, "provider_key.upsert", map[string]interface{}{"provider": body.Provider})
 	writeJSON(w, http.StatusOK, newProviderKeyResponse(*pk))
@@ -527,18 +528,38 @@ func (s *Server) deleteProviderKey(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid key id"})
 		return
 	}
-	if err := s.store.DeleteProviderKey(r.Context(), keyID, installationID); err != nil {
+	provider, err := s.store.DeleteProviderKeyReturningProvider(r.Context(), keyID, installationID)
+	if err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "key not found"})
 		return
 	}
-	// Deletion identifies the key by id, so we cannot tell whether it was the
-	// embeddings slot — invalidate unconditionally. A needless drop costs one
-	// cache miss; a missed one keeps embedding with a revoked key.
-	if s.memRegistry != nil {
+	if provider == memory.EmbeddingsProvider && s.memRegistry != nil {
 		s.memRegistry.InvalidateEmbedder(installationID)
+		s.scheduleMemoryReembed(r.Context(), installationID)
 	}
 	s.auditSettings(r, installationID, "provider_key.delete", map[string]interface{}{"key_id": keyID})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+const memoryReembedTimeout = 30 * time.Minute
+
+// scheduleMemoryReembed detaches repair from the HTTP request but bounds its
+// lifetime. Registry-level advisory locking makes duplicate rotations and
+// cross-machine handlers converge without duplicate provider spend.
+func (s *Server) scheduleMemoryReembed(requestCtx context.Context, installationID int64) {
+	if s.reembedMemories == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(requestCtx), memoryReembedTimeout)
+	go func() {
+		defer cancel()
+		repaired, err := s.reembedMemories(ctx, installationID)
+		if err != nil {
+			s.logger.Warn("memory reembed after provider rotation", "installation_id", installationID, "repaired", repaired, "error", err)
+			return
+		}
+		s.logger.Info("memory reembed after provider rotation complete", "installation_id", installationID, "repaired", repaired)
+	}()
 }
 
 // --- Org Default Settings ---

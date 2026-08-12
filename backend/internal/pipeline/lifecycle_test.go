@@ -18,19 +18,19 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-// casWrite records one UpdateReviewStatusIf call and whether its compare-and-set
-// actually applied (current status ∈ allowed).
+// casWrite records one review-status compare-and-set and whether it actually
+// applied (current status ∈ allowed).
 type casWrite struct {
-	id      uuid.UUID
-	status  string
-	allowed []string
-	applied bool
+	id         uuid.UUID
+	generation int
+	status     string
+	allowed    []string
+	applied    bool
 }
 
-// fakeReviewStore models the two review-status store methods the lifecycle and
-// launcher touch. UpdateReviewStatusIf enforces the real CAS contract: it writes
-// only when the current status is in allowedCurrent. errOnMissingStatus makes
-// GetReviewStatus fail for ids with no seeded status (to exercise fail-open).
+// fakeReviewStore models the review-status store methods the lifecycle and
+// launcher touch. Its update methods enforce the real CAS contract: they write
+// only when the current status is in allowedCurrent.
 type fakeReviewStore struct {
 	mu     sync.Mutex
 	status map[uuid.UUID]string
@@ -64,6 +64,14 @@ func (f *fakeReviewStore) GetReviewStatus(_ context.Context, id uuid.UUID) (stri
 }
 
 func (f *fakeReviewStore) UpdateReviewStatusIf(_ context.Context, id uuid.UUID, status, _ string, _ []byte, allowedCurrent []string) (bool, error) {
+	return f.updateReviewStatus(id, 0, status, allowedCurrent)
+}
+
+func (f *fakeReviewStore) UpdateReviewStatusForAttempt(_ context.Context, id uuid.UUID, generation int, status, _ string, _ []byte, allowedCurrent []string) (bool, error) {
+	return f.updateReviewStatus(id, generation, status, allowedCurrent)
+}
+
+func (f *fakeReviewStore) updateReviewStatus(id uuid.UUID, generation int, status string, allowedCurrent []string) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	cur := f.status[id]
@@ -77,7 +85,7 @@ func (f *fakeReviewStore) UpdateReviewStatusIf(_ context.Context, id uuid.UUID, 
 	if applied {
 		f.status[id] = status
 	}
-	f.writes = append(f.writes, casWrite{id: id, status: status, allowed: append([]string(nil), allowedCurrent...), applied: applied})
+	f.writes = append(f.writes, casWrite{id: id, generation: generation, status: status, allowed: append([]string(nil), allowedCurrent...), applied: applied})
 	return applied, nil
 }
 

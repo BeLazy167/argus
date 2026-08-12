@@ -51,7 +51,7 @@ func seedExportInstall(t *testing.T, ctx context.Context, pool *pgxpool.Pool) in
 // must refresh the payload so a re-export after a fix actually takes.
 func TestArchiveExportedDocsIsIdempotent(t *testing.T) {
 	pool, ctx := exportTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 	id := seedExportInstall(t, ctx, pool)
 
 	docs := []ExportedDoc{
@@ -108,7 +108,7 @@ func TestArchiveExportedDocsIsIdempotent(t *testing.T) {
 // what the archive does not hold.
 func TestArchiveExportedDocsSkipsEmptyDocID(t *testing.T) {
 	pool, ctx := exportTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 	id := seedExportInstall(t, ctx, pool)
 
 	archived, skipped, err := st.ArchiveExportedDocs(ctx, id, []ExportedDoc{
@@ -140,7 +140,7 @@ func TestArchiveExportedDocsSkipsEmptyDocID(t *testing.T) {
 // assumed unique globally.
 func TestArchiveExportedDocsScopesByInstallation(t *testing.T) {
 	pool, ctx := exportTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 	a := seedExportInstall(t, ctx, pool)
 	b := seedExportInstall(t, ctx, pool)
 

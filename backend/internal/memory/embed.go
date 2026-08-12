@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -27,7 +28,7 @@ type Embedder interface {
 	// have at once — IndexReviewCommentsBatch stays one API call.
 	Embed(ctx context.Context, inputs []string) ([][]float32, error)
 	// Model identifies the embedding space. Rows persist it in
-	// memories.embedding_model so a model change can gate search and drive
+	// memories.embedding_space so endpoint/model rotation can gate search and drive
 	// re-embedding instead of silently mixing incomparable vectors.
 	Model() string
 }
@@ -102,6 +103,22 @@ func NewEmbedder(apiKey, baseURL, model string, dims int) *HTTPEmbedder {
 
 // Model implements Embedder.
 func (e *HTTPEmbedder) Model() string { return e.model }
+
+// SpaceID identifies the coordinate system emitted by this embedder. It
+// deliberately excludes the API key: credential rotation does not change
+// vectors, while endpoint, model, or dimensionality rotation can. The endpoint
+// is hashed so private self-hosted URLs never enter memory rows or telemetry.
+func (e *HTTPEmbedder) SpaceID() string {
+	endpoint := NormalizeBaseURL(e.baseURL)
+	if u, err := url.Parse(endpoint); err == nil {
+		u.User = nil
+		u.RawQuery = ""
+		u.Fragment = ""
+		endpoint = u.String()
+	}
+	sum := sha256.Sum256([]byte(fmt.Sprintf("v1\x00%s\x00%s\x00%d", endpoint, e.model, e.dims)))
+	return fmt.Sprintf("v1:%x", sum[:])
+}
 
 type embedRequest struct {
 	Model string   `json:"model"`

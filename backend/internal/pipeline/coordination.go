@@ -144,7 +144,7 @@ func (o *Orchestrator) leadBrief(ctx context.Context, run *PipelineRun) (*LeadBr
 	o.logger.Info("lead brief produced", "files", fileCount, "cross_cutting", len(brief.CrossCuttingConcerns()))
 
 	if run.EventBus != nil {
-		run.EventBus.Publish(run.ReviewID, EventLeadBrief, map[string]any{
+		run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventLeadBrief, map[string]any{
 			"files":         fileCount,
 			"cross_cutting": len(brief.CrossCuttingConcerns()),
 		})
@@ -216,7 +216,7 @@ func (o *Orchestrator) analyzeBlastRadius(ctx context.Context, run *PipelineRun,
 
 	o.logger.Info("blast radius analysis", "impacts", len(impacts), "repo", fmt.Sprintf("%s/%s", owner, repo))
 	if run.EventBus != nil {
-		run.EventBus.Publish(run.ReviewID, EventBlastRadius, map[string]any{
+		run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventBlastRadius, map[string]any{
 			"impacts": len(impacts),
 		})
 	}

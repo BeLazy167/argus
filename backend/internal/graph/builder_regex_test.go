@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -39,11 +40,11 @@ public interface Database {
 	if s, ok := symMap["Database"]; !ok || s.Kind != "interface" {
 		t.Errorf("Database: got %+v", symMap["Database"])
 	}
-	if s, ok := symMap["getUser"]; !ok || s.Kind != "method" {
-		t.Errorf("getUser: got %+v", symMap["getUser"])
+	if s, ok := symMap["UserService.getUser"]; !ok || s.Kind != "method" {
+		t.Errorf("getUser: got %+v", symMap["UserService.getUser"])
 	}
-	if s, ok := symMap["helper"]; !ok || s.Kind != "method" {
-		t.Errorf("helper: got %+v", symMap["helper"])
+	if s, ok := symMap["UserService.helper"]; !ok || s.Kind != "method" {
+		t.Errorf("helper: got %+v", symMap["UserService.helper"])
 	}
 
 	importCount := 0
@@ -140,11 +141,11 @@ public interface IUserService {
 	if s, ok := symMap["IUserService"]; !ok || s.Kind != "interface" {
 		t.Errorf("IUserService: got %+v", symMap["IUserService"])
 	}
-	if s, ok := symMap["GetUser"]; !ok || s.Kind != "method" {
-		t.Errorf("GetUser: got %+v", symMap["GetUser"])
+	if s, ok := symMap["UserController.GetUser"]; !ok || s.Kind != "method" {
+		t.Errorf("GetUser: got %+v", symMap["UserController.GetUser"])
 	}
-	if s, ok := symMap["Log"]; !ok || s.Kind != "method" {
-		t.Errorf("Log: got %+v", symMap["Log"])
+	if s, ok := symMap["UserController.Log"]; !ok || s.Kind != "method" {
+		t.Errorf("Log: got %+v", symMap["UserController.Log"])
 	}
 
 	importCount := 0
@@ -247,4 +248,58 @@ func TestLangForFile_Extended(t *testing.T) {
 
 func splitLines(s string) []string {
 	return strings.Split(s, "\n")
+}
+
+func TestParsePythonFallbackPreservesClassQualifiedMethods(t *testing.T) {
+	src := `class Alpha:
+    def handle(self):
+        self.done()
+    def done(self):
+        pass
+class Beta:
+    def handle(self):
+        self.done()
+    def done(self):
+        pass
+`
+	syms, edges := parsePython("handlers.py", src, splitLines(src))
+	methods := map[string]bool{}
+	for _, sym := range syms {
+		if sym.Kind == KindMethod {
+			methods[sym.Name] = true
+		}
+	}
+	for _, name := range []string{"Alpha.handle", "Alpha.done", "Beta.handle", "Beta.done"} {
+		if !methods[name] {
+			t.Errorf("missing qualified fallback method %q in %+v", name, syms)
+		}
+	}
+	for _, want := range []Edge{
+		{SourceName: "Alpha.handle", TargetName: "Alpha.done", Kind: EdgeCalls},
+		{SourceName: "Beta.handle", TargetName: "Beta.done", Kind: EdgeCalls},
+	} {
+		if !slices.Contains(edges, want) {
+			t.Errorf("missing edge %+v in %+v", want, edges)
+		}
+	}
+}
+
+func TestParsePythonFallbackPreservesNestedClassIdentity(t *testing.T) {
+	src := `class Alpha:
+    class Item:
+        pass
+class Beta:
+    class Item:
+        pass
+`
+	syms, _ := parsePython("nested.py", src, splitLines(src))
+	names := map[string]bool{}
+	for _, sym := range syms {
+		if sym.Kind == KindClass {
+			names[sym.Name] = true
+		}
+	}
+	if !names["Alpha.Item"] || !names["Beta.Item"] {
+		t.Fatalf("nested fallback class identities collapsed: %+v", syms)
+	}
 }

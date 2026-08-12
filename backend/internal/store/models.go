@@ -108,6 +108,20 @@ type ReviewComment struct {
 	// at-merge) or still open — the viewer then shows the state pill with no
 	// resolved-by-commit breadcrumb.
 	ResolvedSHA *string `json:"resolved_sha,omitempty"`
+	// AttemptGeneration identifies the retry attempt that produced this finding.
+	AttemptGeneration int `json:"attempt_generation"`
+}
+
+// ReviewMinorNote is a structured near-miss finding folded into the review summary.
+type ReviewMinorNote struct {
+	ID                uuid.UUID `json:"id"`
+	ReviewID          uuid.UUID `json:"review_id"`
+	AttemptGeneration int       `json:"attempt_generation"`
+	FilePath          string    `json:"file_path"`
+	Line              int       `json:"line"`
+	Severity          string    `json:"severity"`
+	Title             string    `json:"title"`
+	CreatedAt         time.Time `json:"created_at"`
 }
 
 // PRReviewSummary is one review pass in a PR's incremental history. Reviews are
@@ -162,10 +176,9 @@ type LearnedMemory struct {
 	ContainerTag string `json:"container_tag"`
 	// Excerpt is the leading LearnedMemoryExcerptChars of the content.
 	Excerpt string `json:"excerpt"`
-	// WrittenAt is memories.updated_at, not created_at. Writes are upserts, so
-	// a review that re-learns an existing pattern rewrites a row first created
-	// weeks ago; created_at would date the panel's entries to the original
-	// review and read as "this review learned nothing new today".
+	// WrittenAt is memory_review_attributions.attributed_at: the time this
+	// review learned the row. A later deterministic re-upsert updates current
+	// provenance without changing the earlier review's historical timestamp.
 	WrittenAt time.Time `json:"written_at"`
 }
 

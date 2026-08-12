@@ -1,99 +1,35 @@
 package graph
 
 import (
-	"fmt"
+	"errors"
+	"slices"
 	"strings"
 	"testing"
 )
 
-// A full index accumulates per-file symbol and edge slices across EVERY file so
-// the cross-file edge-resolution pass can see them all. That is the part which
-// does not stream, and it is why the previous full-index caller OOM'd a 512 MB
-// VM on an 890-file repo and was deleted rather than fixed.
-//
-// The cap is the thing that makes re-wiring it safe. These tests pin its two
-// non-obvious properties: it must be deterministic, and it must be loud.
-func TestSelectIndexableFiles(t *testing.T) {
-	mk := func(n int) []string {
-		out := make([]string, 0, n)
-		for i := range n {
-			out = append(out, fmt.Sprintf("src/pkg%03d/file.go", i))
-		}
-		return out
+// Capped generations retry transient failures and never revisit ready files.
+func TestSelectPendingFiles(t *testing.T) {
+	files := []string{"c.go", "a.go", "b.go"}
+	tests := []struct {
+		name          string
+		ready         map[string]struct{}
+		cap           int
+		want          []string
+		wantRemaining int
+	}{
+		{name: "uncapped sorts all", cap: 0, want: []string{"a.go", "b.go", "c.go"}},
+		{name: "cap reports remaining", cap: 2, want: []string{"a.go", "b.go"}, wantRemaining: 1},
+		{name: "ready files are skipped", ready: map[string]struct{}{"a.go": {}}, cap: 2, want: []string{"b.go", "c.go"}},
+		{name: "transient failure is absent from ready set and retried first", ready: map[string]struct{}{"b.go": {}, "c.go": {}}, cap: 1, want: []string{"a.go"}},
 	}
-
-	t.Run("under the cap, everything is indexed and nothing is reported dropped", func(t *testing.T) {
-		in := mk(10)
-		got, dropped, _ := selectIndexableFiles(in, 100, 0)
-		if len(got) != 10 || dropped != 0 {
-			t.Errorf("got %d files and %d dropped, want 10 and 0", len(got), dropped)
-		}
-	})
-
-	t.Run("over the cap, the excess is reported rather than silently lost", func(t *testing.T) {
-		in := mk(150)
-		got, dropped, _ := selectIndexableFiles(in, 100, 0)
-		if len(got) != 100 {
-			t.Errorf("indexed %d files, want the cap of 100", len(got))
-		}
-		// A cap that truncates silently reads, from every dashboard above it, as
-		// "this repo is fully indexed" — the exact false confidence the whole
-		// issue is about. The count is what lets the caller log it.
-		if dropped != 50 {
-			t.Errorf("reported %d dropped, want 50", dropped)
-		}
-	})
-
-	t.Run("the same offset always names the same window", func(t *testing.T) {
-		in := mk(150)
-		first, _, _ := selectIndexableFiles(in, 100, 40)
-		second, _, _ := selectIndexableFiles(in, 100, 40)
-		for i := range first {
-			if first[i] != second[i] {
-				t.Fatalf("window differs between runs at %d: %q vs %q", i, first[i], second[i])
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, remaining := selectPendingFiles(files, tt.ready, tt.cap)
+			if !slices.Equal(got, tt.want) || remaining != tt.wantRemaining {
+				t.Fatalf("selected/remaining = %v/%d, want %v/%d", got, remaining, tt.want, tt.wantRemaining)
 			}
-		}
-	})
-
-	// The property that matters most, and the one a fixed prefix fails: over
-	// successive runs every file must eventually be indexed. A cap that always
-	// took sorted[:100] would exclude the same alphabetical tail forever — on a
-	// monorepo where web/ sorts after backend/, an entire top-level tree would
-	// never enter the graph while the repo reported as indexed.
-	t.Run("the window rotates until the whole repo is covered", func(t *testing.T) {
-		in := mk(250)
-		seen := map[string]bool{}
-		offset := 0
-		for range 10 { // more than enough cycles at 100 per run
-			var window []string
-			window, _, offset = selectIndexableFiles(in, 100, offset)
-			for _, f := range window {
-				seen[f] = true
-			}
-			if len(seen) == len(in) {
-				break
-			}
-		}
-		if len(seen) != len(in) {
-			t.Errorf("after repeated runs only %d/%d files were ever indexed — the rest are permanently invisible to the graph", len(seen), len(in))
-		}
-	})
-
-	t.Run("an out-of-range offset restarts rather than indexing nothing", func(t *testing.T) {
-		in := mk(150)
-		got, _, _ := selectIndexableFiles(in, 100, 9999)
-		if len(got) != 100 {
-			t.Errorf("indexed %d files from a stale offset, want a full window", len(got))
-		}
-	})
-
-	t.Run("a zero or negative cap means no cap", func(t *testing.T) {
-		in := mk(50)
-		got, dropped, _ := selectIndexableFiles(in, 0, 0)
-		if len(got) != 50 || dropped != 0 {
-			t.Errorf("got %d/%d, want all 50 indexed with none dropped", len(got), dropped)
-		}
-	})
+		})
+	}
 }
 
 // Only source files are candidates. The tree of a real repo is mostly not code,
@@ -125,4 +61,83 @@ func contains(hay []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+func TestFullGenerationUsesFileSymbolPhysicalLOC(t *testing.T) {
+	tests := []struct {
+		name, content      string
+		wantStart, wantEnd int
+	}{
+		{name: "empty", content: "", wantStart: 0, wantEnd: 0},
+		{name: "one line no newline", content: "package p", wantStart: 1, wantEnd: 1},
+		{name: "trailing newline terminates line", content: "package p\n", wantStart: 1, wantEnd: 1},
+		{name: "multiple lines", content: "package p\nfunc F() {}\n", wantStart: 1, wantEnd: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := fileSymbol("a.go", tt.content)
+			if got.Kind != "file" || got.Name != "a.go" || got.FilePath != "a.go" || got.LineStart != tt.wantStart || got.LineEnd != tt.wantEnd {
+				t.Fatalf("file symbol = %+v, want lines %d-%d", got, tt.wantStart, tt.wantEnd)
+			}
+		})
+	}
+}
+
+func TestDescribeNodeResolutionKeepsAmbiguityExplicit(t *testing.T) {
+	keys := map[string]int64{nodeKey("same.go", "Local"): 1}
+	names := map[string][]int64{
+		"Local":  {1, 2},
+		"Unique": {3},
+		"Dup":    {4, 5},
+	}
+	tests := []struct {
+		name, sourceFile, target string
+		wantID                   int64
+		wantStatus               nodeResolution
+	}{
+		{name: "same file wins", sourceFile: "same.go", target: "Local", wantID: 1, wantStatus: resolutionResolved},
+		{name: "unique repo target resolves", sourceFile: "same.go", target: "Unique", wantID: 3, wantStatus: resolutionResolved},
+		{name: "duplicate stays ambiguous", sourceFile: "same.go", target: "Dup", wantStatus: resolutionAmbiguous},
+		{name: "missing stays unresolved", sourceFile: "same.go", target: "Missing", wantStatus: resolutionUnresolved},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			id, status := describeNodeResolution(tt.sourceFile, tt.target, keys, names)
+			if id != tt.wantID || status != tt.wantStatus {
+				t.Fatalf("resolution = %d/%s, want %d/%s", id, status, tt.wantID, tt.wantStatus)
+			}
+		})
+	}
+}
+
+func TestBoundedFullIndexFileCapCannotBypassFleetBudget(t *testing.T) {
+	for _, tt := range []struct {
+		requested int
+		want      int
+	}{{-1, DefaultFullIndexFileCap}, {0, DefaultFullIndexFileCap}, {1, 1}, {DefaultFullIndexFileCap, DefaultFullIndexFileCap}, {DefaultFullIndexFileCap + 1, DefaultFullIndexFileCap}} {
+		if got := boundedFullIndexFileCap(tt.requested); got != tt.want {
+			t.Errorf("boundedFullIndexFileCap(%d) = %d, want %d", tt.requested, got, tt.want)
+		}
+	}
+}
+
+func TestGraphGenerationPublishLimitsAreInclusive(t *testing.T) {
+	limits := graphGenerationPublishLimits{JSONBytes: 10, Files: 2, Symbols: 2, Edges: 3, Endpoints: 1}
+	atLimit := graphGenerationStats{JSONBytes: 10, Files: 2, Symbols: 2, Edges: 3, Endpoints: 1}
+	if err := limits.validate(atLimit); err != nil {
+		t.Fatalf("exact limits rejected: %v", err)
+	}
+	for name, over := range map[string]graphGenerationStats{
+		"bytes":     {JSONBytes: 11},
+		"files":     {Files: 3},
+		"symbols":   {Symbols: 3},
+		"edges":     {Edges: 4},
+		"endpoints": {Endpoints: 2},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if !errors.Is(limits.validate(over), ErrGraphGenerationResourceLimit) {
+				t.Fatalf("over-limit stats accepted: %+v", over)
+			}
+		})
+	}
 }

@@ -67,39 +67,13 @@ const (
 	// one is publicly visible and wrong attribution is embarrassing, so it is
 	// deliberately stricter than the internal enrich gate.
 	//
-	// 0.80, not 0.92. Measured 2026-08-11 on the production corpus
-	// (installation 285, 963 type=pattern memories, 1,052 type=review finding
-	// docs) by simulating the gate end to end: for each stored finding, take its
-	// top-1 pattern in its own container plus _shared, keep the ones above
-	// FindingEnrich, then apply the real wordOverlap(match.Content, body) > 0.70
-	// zeroing from enricher.go in that exact direction. 727 findings clear
-	// FindingEnrich; 525 of them survive the overlap guard. Of those 525:
-	//
-	//	> 0.70    525   100.0%   p50 0.8075
-	//	> 0.80    278    52.9%   p90 0.8817
-	//	> 0.8649   97    18.5%   max 0.9331
-	//	> 0.92      4     0.8%
-	//
-	// So 0.92 is not unreachable — it is 66x more selective than 0.80, admitting
-	// under 1% of the matches that are eligible to attribute at all. That is the
-	// case against it: a public callout that fires on 1 finding in 130 carries no
-	// signal, not that the gate is mechanically impossible.
-	//
-	// Two things a previous version of this comment asserted are FALSE, verified
-	// against the same corpus, and must not be reinstated:
-	//   - There is no 0.8649 ceiling. 97 eligible pairs exceed it and the highest
-	//     is 0.9331. Pairwise across all 463,203 distinct pattern pairs, 114
-	//     reach 0.92 and 17 of those survive the overlap guard.
-	//   - cos > 0.92 and wordOverlap <= 0.70 are not near-mutually-exclusive.
-	//     The guard thins the high tail (13 of 17 above 0.92 removed) but does
-	//     not empty it, and it removes only 28% of the band overall. wordOverlap
-	//     (pipeline/dedup.go) is asymmetric — it divides by the significant words
-	//     of match.Content, the STORED doc — and returns 0 below 2 overlapping
-	//     words, so a long stored doc quoting a short finding verbatim passes.
-	//
-	// Raising this again is a recall decision, not a correctness one, and it
-	// needs this distribution re-measured first: the numbers above are specific
-	// to voyage-4-large raw cosine and this corpus.
+	// 0.80 remains the policy floor. The production distribution recorded in
+	// #253 was measured after applying the exact-text word-overlap guard. That
+	// guard was removed when durable pattern identity made exact matches valid
+	// retrieval hits, so its old eligible population and percentages are no
+	// longer evidence for the current gate and are deliberately not repeated
+	// here. Re-measure the unguarded top-1 population before changing this
+	// value; never infer current selectivity from the pre-removal denominator.
 	DefaultThresholdAttribution = 0.80
 
 	// DefaultThresholdSuppressionDrop gates dismissal-driven DROP: a finding

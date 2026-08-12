@@ -25,42 +25,38 @@ func collectOrEmpty[T any](rows pgx.Rows, fn pgx.RowToFunc[T]) ([]T, error) {
 // --- Installations ---
 
 func (s *Store) CreateInstallation(ctx context.Context, installationID int64, orgLogin string) (*Installation, error) {
-	var inst Installation
-	err := s.Pool.QueryRow(ctx, `
-		INSERT INTO installations (installation_id, org_login)
-		VALUES ($1, $2)
-		ON CONFLICT (installation_id) DO UPDATE SET org_login = $2, suspended_at = NULL
-		RETURNING id, installation_id, org_login, clerk_org_id, created_at, suspended_at
-	`, installationID, orgLogin).Scan(&inst.ID, &inst.InstallationID, &inst.OrgLogin, &inst.ClerkOrgID, &inst.CreatedAt, &inst.SuspendedAt)
-	return &inst, err
-}
-
-func (s *Store) ListInstallations(ctx context.Context) ([]Installation, error) {
-	rows, err := s.Pool.Query(ctx, `SELECT id, installation_id, org_login, clerk_org_id, created_at, suspended_at FROM installations ORDER BY created_at DESC`)
+	row, err := s.q.CreateInstallation(ctx, db.CreateInstallationParams{InstallationID: installationID, OrgLogin: orgLogin})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[Installation])
+	installation := installationFromSQLC(row.ID, row.InstallationID, row.OrgLogin, row.ClerkOrgID, row.CreatedAt, row.SuspendedAt)
+	return &installation, nil
+}
+
+func (s *Store) ListInstallations(ctx context.Context) ([]Installation, error) {
+	rows, err := s.q.ListInstallations(ctx)
+	if err != nil {
+		return nil, err
+	}
+	installations := make([]Installation, 0, len(rows))
+	for _, row := range rows {
+		installations = append(installations, installationFromSQLC(row.ID, row.InstallationID, row.OrgLogin, row.ClerkOrgID, row.CreatedAt, row.SuspendedAt))
+	}
+	return installations, nil
 }
 
 // --- User Installations ---
 
 func (s *Store) LinkUserInstallation(ctx context.Context, clerkUserID string, installationID int64, role string) (*UserInstallation, error) {
-	var ui UserInstallation
-	err := s.Pool.QueryRow(ctx, `
-		INSERT INTO user_installations (clerk_user_id, installation_id, role)
-		VALUES ($1, $2, $3)
-		ON CONFLICT (clerk_user_id, installation_id) DO NOTHING
-		RETURNING id, clerk_user_id, installation_id, role, created_at
-	`, clerkUserID, installationID, role).Scan(&ui.ID, &ui.ClerkUserID, &ui.InstallationID, &ui.Role, &ui.CreatedAt)
-	if err == pgx.ErrNoRows {
-		err = s.Pool.QueryRow(ctx, `
-			SELECT id, clerk_user_id, installation_id, role, created_at
-			FROM user_installations WHERE clerk_user_id = $1 AND installation_id = $2
-		`, clerkUserID, installationID).Scan(&ui.ID, &ui.ClerkUserID, &ui.InstallationID, &ui.Role, &ui.CreatedAt)
+	row, err := s.q.LinkUserInstallation(ctx, db.LinkUserInstallationParams{ClerkUserID: clerkUserID, InstallationID: installationID, Role: role})
+	if errors.Is(err, pgx.ErrNoRows) {
+		row, err = s.q.GetUserInstallationByUserAndInstallation(ctx, db.GetUserInstallationByUserAndInstallationParams{ClerkUserID: clerkUserID, InstallationID: installationID})
 	}
-	return &ui, err
+	if err != nil {
+		return nil, err
+	}
+	installation := UserInstallation{ID: row.ID, ClerkUserID: row.ClerkUserID, InstallationID: row.InstallationID, Role: row.Role, CreatedAt: row.CreatedAt}
+	return &installation, nil
 }
 
 // IsUserLinkedToInstallation checks if a user is already linked to an installation.
@@ -90,118 +86,78 @@ func (s *Store) CountInstallationUsers(ctx context.Context, installationID int64
 }
 
 func (s *Store) ListUserInstallations(ctx context.Context, clerkUserID string) ([]Installation, error) {
-	rows, err := s.Pool.Query(ctx, `
-		SELECT i.id, i.installation_id, i.org_login, i.clerk_org_id, i.created_at, i.suspended_at
-		FROM installations i
-		JOIN user_installations ui ON ui.installation_id = i.id
-		WHERE ui.clerk_user_id = $1
-		ORDER BY i.created_at DESC
-	`, clerkUserID)
+	rows, err := s.q.ListUserInstallations(ctx, clerkUserID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[Installation])
+	installations := make([]Installation, 0, len(rows))
+	for _, row := range rows {
+		installations = append(installations, installationFromSQLC(row.ID, row.InstallationID, row.OrgLogin, row.ClerkOrgID, row.CreatedAt, row.SuspendedAt))
+	}
+	return installations, nil
 }
 
 func (s *Store) GetUserInstallationIDs(ctx context.Context, clerkUserID string) ([]int64, error) {
-	rows, err := s.Pool.Query(ctx, `
-		SELECT installation_id FROM user_installations WHERE clerk_user_id = $1
-	`, clerkUserID)
+	rows, err := s.q.GetUserInstallationIDs(ctx, clerkUserID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var ids []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	if ids == nil {
-		ids = []int64{}
-	}
-	return ids, rows.Err()
+	ids := make([]int64, len(rows))
+	copy(ids, rows)
+	return ids, nil
 }
 
 func (s *Store) GetInstallation(ctx context.Context, id int64) (*Installation, error) {
-	var inst Installation
-	err := s.Pool.QueryRow(ctx, `
-		SELECT id, installation_id, org_login, clerk_org_id, created_at, suspended_at
-		FROM installations WHERE id = $1
-	`, id).Scan(&inst.ID, &inst.InstallationID, &inst.OrgLogin, &inst.ClerkOrgID, &inst.CreatedAt, &inst.SuspendedAt)
+	row, err := s.q.GetInstallation(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	return &inst, nil
+	installation := installationFromSQLC(row.ID, row.InstallationID, row.OrgLogin, row.ClerkOrgID, row.CreatedAt, row.SuspendedAt)
+	return &installation, nil
 }
 
 func (s *Store) GetInstallationByGitHubID(ctx context.Context, ghInstallationID int64) (*Installation, error) {
-	var inst Installation
-	err := s.Pool.QueryRow(ctx, `
-		SELECT id, installation_id, org_login, clerk_org_id, created_at, suspended_at
-		FROM installations WHERE installation_id = $1
-	`, ghInstallationID).Scan(&inst.ID, &inst.InstallationID, &inst.OrgLogin, &inst.ClerkOrgID, &inst.CreatedAt, &inst.SuspendedAt)
+	row, err := s.q.GetInstallationByGitHubID(ctx, ghInstallationID)
 	if err != nil {
 		return nil, err
 	}
-	return &inst, nil
+	installation := installationFromSQLC(row.ID, row.InstallationID, row.OrgLogin, row.ClerkOrgID, row.CreatedAt, row.SuspendedAt)
+	return &installation, nil
 }
 
 func (s *Store) GetInstallationByClerkOrgID(ctx context.Context, clerkOrgID string) (*Installation, error) {
-	var inst Installation
-	err := s.Pool.QueryRow(ctx, `
-		SELECT id, installation_id, org_login, clerk_org_id, created_at, suspended_at
-		FROM installations WHERE clerk_org_id = $1
-	`, clerkOrgID).Scan(&inst.ID, &inst.InstallationID, &inst.OrgLogin, &inst.ClerkOrgID, &inst.CreatedAt, &inst.SuspendedAt)
+	row, err := s.q.GetInstallationByClerkOrgID(ctx, &clerkOrgID)
 	if err != nil {
 		return nil, err
 	}
-	return &inst, nil
+	installation := installationFromSQLC(row.ID, row.InstallationID, row.OrgLogin, row.ClerkOrgID, row.CreatedAt, row.SuspendedAt)
+	return &installation, nil
 }
 
 func (s *Store) CountReviewsThisMonth(ctx context.Context, installationID int64) (int, error) {
-	var count int
-	err := s.Pool.QueryRow(ctx, `
-		SELECT COUNT(*) FROM reviews r
-		JOIN repos rp ON r.repo_id = rp.id
-		WHERE rp.installation_id = $1
-		AND r.created_at >= date_trunc('month', NOW())
-	`, installationID).Scan(&count)
-	return count, err
+	return s.q.CountReviewsThisMonth(ctx, installationID)
 }
 
 func (s *Store) CountEnabledRepos(ctx context.Context, installationID int64) (int, error) {
-	var count int
-	err := s.Pool.QueryRow(ctx, `SELECT COUNT(*) FROM repos WHERE installation_id = $1 AND enabled = TRUE`, installationID).Scan(&count)
-	return count, err
+	return s.q.CountEnabledRepos(ctx, installationID)
 }
 
 func (s *Store) SuspendInstallation(ctx context.Context, id int64) error {
-	_, err := s.Pool.Exec(ctx, `UPDATE installations SET suspended_at = NOW() WHERE id = $1`, id)
-	return err
+	return s.q.SuspendInstallation(ctx, id)
 }
 
 func (s *Store) SetInstallationClerkOrgID(ctx context.Context, installationID int64, clerkOrgID string) error {
-	_, err := s.Pool.Exec(ctx, `
-		UPDATE installations SET clerk_org_id = $1 WHERE id = $2
-	`, clerkOrgID, installationID)
-	return err
+	return s.q.SetInstallationClerkOrgID(ctx, db.SetInstallationClerkOrgIDParams{ClerkOrgID: &clerkOrgID, ID: installationID})
 }
 
 // --- Org Default Settings ---
 
 func (s *Store) GetOrgDefaults(ctx context.Context, installationID int64) (json.RawMessage, error) {
-	var settings json.RawMessage
-	err := s.Pool.QueryRow(ctx, `SELECT COALESCE(default_settings, '{}') FROM installations WHERE id = $1`, installationID).Scan(&settings)
-	return settings, err
+	return s.q.GetOrgDefaults(ctx, installationID)
 }
 
 func (s *Store) SetOrgDefaults(ctx context.Context, installationID int64, settings json.RawMessage) error {
-	_, err := s.Pool.Exec(ctx, `UPDATE installations SET default_settings = $1 WHERE id = $2`, settings, installationID)
-	return err
+	return s.q.SetOrgDefaults(ctx, db.SetOrgDefaultsParams{DefaultSettings: settings, ID: installationID})
 }
 
 // GetMergedSettings returns org defaults merged with repo overrides (repo wins).
@@ -235,145 +191,113 @@ func mergeJSON(base, override json.RawMessage) json.RawMessage {
 // --- Repos ---
 
 func (s *Store) ListRepos(ctx context.Context) ([]Repo, error) {
-	rows, err := s.Pool.Query(ctx, `
-		SELECT id, installation_id, github_id, full_name, default_branch, enabled, settings_json, created_at, updated_at
-		FROM repos ORDER BY full_name
-	`)
+	rows, err := s.q.ListRepos(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[Repo])
+	repos := make([]Repo, 0, len(rows))
+	for _, row := range rows {
+		repos = append(repos, repoFromSQLC(row.ID, row.InstallationID, row.GithubID, row.FullName, row.DefaultBranch, row.Enabled, row.SettingsJSON, row.CreatedAt, row.UpdatedAt))
+	}
+	return repos, nil
 }
 
 func (s *Store) ListReposByOwner(ctx context.Context, ownerPrefix string) ([]Repo, error) {
-	// Escape LIKE wildcards to prevent LLM-controlled injection
+	// Escape LIKE wildcards so an LLM-controlled owner stays a literal prefix.
 	escaped := strings.NewReplacer("%", "\\%", "_", "\\_").Replace(ownerPrefix)
-	rows, err := s.Pool.Query(ctx, `
-		SELECT id, installation_id, github_id, full_name, default_branch, enabled, settings_json, created_at, updated_at
-		FROM repos WHERE full_name LIKE $1 ESCAPE '\' ORDER BY full_name
-	`, escaped+"/%")
+	rows, err := s.q.ListReposByOwner(ctx, escaped+"/%")
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[Repo])
+	repos := make([]Repo, 0, len(rows))
+	for _, row := range rows {
+		repos = append(repos, repoFromSQLC(row.ID, row.InstallationID, row.GithubID, row.FullName, row.DefaultBranch, row.Enabled, row.SettingsJSON, row.CreatedAt, row.UpdatedAt))
+	}
+	return repos, nil
 }
 
 func (s *Store) GetRepo(ctx context.Context, id int64) (*Repo, error) {
-	var r Repo
-	err := s.Pool.QueryRow(ctx, `
-		SELECT id, installation_id, github_id, full_name, default_branch, enabled, settings_json, created_at, updated_at
-		FROM repos WHERE id = $1
-	`, id).Scan(&r.ID, &r.InstallationID, &r.GithubID, &r.FullName, &r.DefaultBranch, &r.Enabled, &r.SettingsJSON, &r.CreatedAt, &r.UpdatedAt)
+	row, err := s.q.GetRepo(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	return &r, nil
+	repo := repoFromSQLC(row.ID, row.InstallationID, row.GithubID, row.FullName, row.DefaultBranch, row.Enabled, row.SettingsJSON, row.CreatedAt, row.UpdatedAt)
+	return &repo, nil
 }
 
 func (s *Store) GetRepoByFullName(ctx context.Context, fullName string) (*Repo, error) {
-	var r Repo
-	err := s.Pool.QueryRow(ctx, `
-		SELECT id, installation_id, github_id, full_name, default_branch, enabled, settings_json, created_at, updated_at
-		FROM repos WHERE full_name = $1
-	`, fullName).Scan(&r.ID, &r.InstallationID, &r.GithubID, &r.FullName, &r.DefaultBranch, &r.Enabled, &r.SettingsJSON, &r.CreatedAt, &r.UpdatedAt)
+	row, err := s.q.GetRepoByFullName(ctx, fullName)
 	if err != nil {
 		return nil, err
 	}
-	return &r, nil
+	repo := repoFromSQLC(row.ID, row.InstallationID, row.GithubID, row.FullName, row.DefaultBranch, row.Enabled, row.SettingsJSON, row.CreatedAt, row.UpdatedAt)
+	return &repo, nil
 }
 
 func (s *Store) UpdateRepo(ctx context.Context, id int64, enabled *bool, defaultBranch *string, settingsJSON []byte) (*Repo, error) {
-	var r Repo
-	err := s.Pool.QueryRow(ctx, `
-		UPDATE repos SET
-			enabled = COALESCE($2, enabled),
-			default_branch = COALESCE($3, default_branch),
-			settings_json = CASE WHEN $4::jsonb IS NULL THEN settings_json ELSE settings_json || $4::jsonb END,
-			updated_at = NOW()
-		WHERE id = $1
-		RETURNING id, installation_id, github_id, full_name, default_branch, enabled, settings_json, created_at, updated_at
-	`, id, enabled, defaultBranch, settingsJSON).Scan(&r.ID, &r.InstallationID, &r.GithubID, &r.FullName, &r.DefaultBranch, &r.Enabled, &r.SettingsJSON, &r.CreatedAt, &r.UpdatedAt)
+	row, err := s.q.UpdateRepo(ctx, db.UpdateRepoParams{ID: id, Enabled: enabled, DefaultBranch: defaultBranch, SettingsJSON: settingsJSON})
 	if err != nil {
 		return nil, err
 	}
-	return &r, nil
+	repo := repoFromSQLC(row.ID, row.InstallationID, row.GithubID, row.FullName, row.DefaultBranch, row.Enabled, row.SettingsJSON, row.CreatedAt, row.UpdatedAt)
+	return &repo, nil
 }
 
 func (s *Store) UpsertRepo(ctx context.Context, installationID, githubID int64, fullName, defaultBranch string) (*Repo, error) {
-	var r Repo
-	err := s.Pool.QueryRow(ctx, `
-		INSERT INTO repos (installation_id, github_id, full_name, default_branch)
-		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (github_id) DO UPDATE SET full_name = $3, default_branch = $4, updated_at = NOW()
-		RETURNING id, installation_id, github_id, full_name, default_branch, enabled, settings_json, created_at, updated_at
-	`, installationID, githubID, fullName, defaultBranch).Scan(&r.ID, &r.InstallationID, &r.GithubID, &r.FullName, &r.DefaultBranch, &r.Enabled, &r.SettingsJSON, &r.CreatedAt, &r.UpdatedAt)
+	row, err := s.q.UpsertRepo(ctx, db.UpsertRepoParams{InstallationID: installationID, GithubID: githubID, FullName: fullName, DefaultBranch: defaultBranch})
 	if err != nil {
 		return nil, err
 	}
-	return &r, nil
+	repo := repoFromSQLC(row.ID, row.InstallationID, row.GithubID, row.FullName, row.DefaultBranch, row.Enabled, row.SettingsJSON, row.CreatedAt, row.UpdatedAt)
+	return &repo, nil
 }
 
 func (s *Store) ListReposScoped(ctx context.Context, installationIDs []int64) ([]Repo, error) {
-	rows, err := s.Pool.Query(ctx, `
-		SELECT id, installation_id, github_id, full_name, default_branch, enabled, settings_json, created_at, updated_at
-		FROM repos WHERE installation_id = ANY($1) ORDER BY full_name
-	`, installationIDs)
+	rows, err := s.q.ListReposScoped(ctx, installationIDs)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[Repo])
+	repos := make([]Repo, 0, len(rows))
+	for _, row := range rows {
+		repos = append(repos, repoFromSQLC(row.ID, row.InstallationID, row.GithubID, row.FullName, row.DefaultBranch, row.Enabled, row.SettingsJSON, row.CreatedAt, row.UpdatedAt))
+	}
+	return repos, nil
 }
 
 func (s *Store) GetRepoScoped(ctx context.Context, id int64, installationIDs []int64) (*Repo, error) {
-	var r Repo
-	err := s.Pool.QueryRow(ctx, `
-		SELECT id, installation_id, github_id, full_name, default_branch, enabled, settings_json, created_at, updated_at
-		FROM repos WHERE id = $1 AND installation_id = ANY($2)
-	`, id, installationIDs).Scan(&r.ID, &r.InstallationID, &r.GithubID, &r.FullName, &r.DefaultBranch, &r.Enabled, &r.SettingsJSON, &r.CreatedAt, &r.UpdatedAt)
+	row, err := s.q.GetRepoScoped(ctx, db.GetRepoScopedParams{ID: id, Column2: installationIDs})
 	if err != nil {
 		return nil, err
 	}
-	return &r, nil
+	repo := repoFromSQLC(row.ID, row.InstallationID, row.GithubID, row.FullName, row.DefaultBranch, row.Enabled, row.SettingsJSON, row.CreatedAt, row.UpdatedAt)
+	return &repo, nil
 }
 
 // --- Reviews ---
 
 func (s *Store) GetReview(ctx context.Context, id uuid.UUID) (*Review, error) {
-	var r Review
-	err := s.Pool.QueryRow(ctx, `
-		SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, COALESCE(head_ref,''), github_review_id,
-		       status, summary, score, token_usage, trigger, triggered_by, duration_ms, error,
-		       deep_review, persona, is_incremental, created_at, completed_at,
-		       diagram, diagram_title, diagrams, truncated_files, brief, cross_pr_hash, trace_id, review_contract,
-		       budget_note
-		FROM reviews WHERE id = $1
-	`, id).Scan(&r.ID, &r.RepoID, &r.PRNumber, &r.PRTitle, &r.PRAuthor, &r.HeadSHA, &r.BaseSHA, &r.HeadRef, &r.GithubReviewID,
-		&r.Status, &r.Summary, &r.Score, &r.TokenUsage, &r.Trigger, &r.TriggeredBy, &r.DurationMs, &r.Error,
-		&r.DeepReview, &r.Persona, &r.IsIncremental, &r.CreatedAt, &r.CompletedAt,
-		&r.Diagram, &r.DiagramTitle, &r.Diagrams, &r.TruncatedFiles, &r.Brief, &r.CrossPRHash, &r.TraceID, &r.ReviewContract,
-		&r.BudgetNote)
+	row, err := s.q.GetReview(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	return &r, nil
+	review := fullReviewFromSQLC(row)
+	return &review, nil
 }
 
 func (s *Store) GetReviewComments(ctx context.Context, reviewID uuid.UUID) ([]ReviewComment, error) {
-	rows, err := s.Pool.Query(ctx, `
-		SELECT id, review_id, file_path, start_line, end_line, side, body, severity, category,
-		       specialist, confidence_score, code_snippet, github_comment_id,
-		       matched_pattern_id, matched_pattern_score, enforced_rule_content, is_new_finding,
-		       created_at, state, suppressed_reason, resolved_sha
-		FROM review_comments WHERE review_id = $1 ORDER BY file_path, start_line
-	`, reviewID)
+	rows, err := s.q.GetReviewComments(ctx, reviewID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[ReviewComment])
+	comments := make([]ReviewComment, 0, len(rows))
+	for _, row := range rows {
+		comment, err := reviewCommentFromSQLC(row)
+		if err != nil {
+			return nil, err
+		}
+		comments = append(comments, comment)
+	}
+	return comments, nil
 }
 
 // GetPRCompletedReviewComments returns review comments across ALL completed
@@ -382,21 +306,19 @@ func (s *Store) GetReviewComments(ctx context.Context, reviewID uuid.UUID) ([]Re
 // two pushes ago is still visible to the current run. Ordered by file+line to
 // keep buildPriorComments' per-file grouping deterministic; caller dedupes.
 func (s *Store) GetPRCompletedReviewComments(ctx context.Context, repoID int64, prNumber int) ([]ReviewComment, error) {
-	rows, err := s.Pool.Query(ctx, `
-		SELECT rc.id, rc.review_id, rc.file_path, rc.start_line, rc.end_line, rc.side, rc.body, rc.severity, rc.category,
-		       rc.specialist, rc.confidence_score, rc.code_snippet, rc.github_comment_id,
-		       rc.matched_pattern_id, rc.matched_pattern_score, rc.enforced_rule_content, rc.is_new_finding,
-		       rc.created_at, rc.state, rc.suppressed_reason, rc.resolved_sha
-		FROM review_comments rc
-		JOIN reviews r ON rc.review_id = r.id
-		WHERE r.repo_id = $1 AND r.pr_number = $2 AND r.status = 'completed'
-		ORDER BY rc.file_path, rc.start_line, rc.created_at
-	`, repoID, prNumber)
+	rows, err := s.q.GetPRCompletedReviewComments(ctx, db.GetPRCompletedReviewCommentsParams{RepoID: repoID, PRNumber: prNumber})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[ReviewComment])
+	comments := make([]ReviewComment, 0, len(rows))
+	for _, row := range rows {
+		comment, err := completedReviewCommentFromSQLC(row)
+		if err != nil {
+			return nil, err
+		}
+		comments = append(comments, comment)
+	}
+	return comments, nil
 }
 
 // ListPRReviewSummaries returns every review pass for a repo+PR (one row per
@@ -405,23 +327,20 @@ func (s *Store) GetPRCompletedReviewComments(ctx context.Context, repoID int64, 
 // reviews (auto_run_disabled / no_api_key stubs) are excluded so they don't
 // render as failed passes — same predicate the list endpoints use.
 func (s *Store) ListPRReviewSummaries(ctx context.Context, repoID int64, prNumber int) ([]PRReviewSummary, error) {
-	rows, err := s.Pool.Query(ctx, `
-		SELECT rv.id, rv.head_sha, rv.status, rv.score, rv.is_incremental, rv.deep_review,
-		       rv.created_at, rv.completed_at,
-		       (SELECT COUNT(*) FROM review_comments rc
-		          WHERE rc.review_id = rv.id AND rc.state <> 'suppressed')::int AS comment_count,
-		       (SELECT COUNT(*) FROM review_comments rc
-		          WHERE rc.review_id = rv.id AND rc.state <> 'suppressed' AND rc.is_new_finding)::int AS new_count
-		FROM reviews rv
-		WHERE rv.repo_id = $1 AND rv.pr_number = $2
-		  AND NOT (`+markerReviewFilter+`)
-		ORDER BY rv.created_at ASC
-	`, repoID, prNumber)
+	rows, err := s.q.ListPRReviewSummaries(ctx, db.ListPRReviewSummariesParams{RepoID: repoID, PRNumber: prNumber})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[PRReviewSummary])
+	summaries := make([]PRReviewSummary, 0, len(rows))
+	for _, row := range rows {
+		summaries = append(summaries, PRReviewSummary{
+			ID: row.ID, HeadSHA: row.HeadSHA, Status: row.Status, Score: row.Score,
+			IsIncremental: row.IsIncremental, DeepReview: row.DeepReview,
+			CreatedAt: row.CreatedAt, CompletedAt: row.CompletedAt,
+			CommentCount: row.CommentCount, NewCount: row.NewCount,
+		})
+	}
+	return summaries, nil
 }
 
 // ListPRAutoResolveEvents returns the auto-resolve events for a repo+PR, oldest
@@ -432,17 +351,15 @@ func (s *Store) ListPRReviewSummaries(ctx context.Context, repoID int64, prNumbe
 // "Auto-resolved 0 threads" noise and defeat the viewer's single-pass hide gate.
 // The counts feed the incremental-history timeline.
 func (s *Store) ListPRAutoResolveEvents(ctx context.Context, repoID int64, prNumber int) ([]AutoResolveSummary, error) {
-	rows, err := s.Pool.Query(ctx, `
-		SELECT source_sha, resolved_count, attempted_count, created_at
-		FROM auto_resolve_events
-		WHERE repo_id = $1 AND pr_number = $2 AND resolved_count > 0
-		ORDER BY created_at ASC
-	`, repoID, prNumber)
+	rows, err := s.q.ListPRAutoResolveEvents(ctx, db.ListPRAutoResolveEventsParams{RepoID: repoID, PRNumber: prNumber})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[AutoResolveSummary])
+	events := make([]AutoResolveSummary, 0, len(rows))
+	for _, row := range rows {
+		events = append(events, AutoResolveSummary{SourceSHA: row.SourceSHA, ResolvedCount: row.ResolvedCount, AttemptedCount: row.AttemptedCount, CreatedAt: row.CreatedAt})
+	}
+	return events, nil
 }
 
 // SetFindingResolvedSHA stamps the resolving push commit onto a finding
@@ -455,8 +372,11 @@ func (s *Store) SetFindingResolvedSHA(ctx context.Context, commentID uuid.UUID, 
 		return nil
 	}
 	_, err := s.Pool.Exec(ctx, `
-		UPDATE review_comments SET resolved_sha = $2
-		WHERE id = $1 AND resolved_sha IS NULL
+		UPDATE review_comments rc SET resolved_sha = $2
+		FROM reviews r
+		WHERE rc.id = $1 AND rc.review_id = r.id
+		  AND rc.attempt_generation = r.attempt_generation
+		  AND rc.resolved_sha IS NULL
 	`, commentID, sha)
 	if err != nil {
 		return fmt.Errorf("setting finding resolved sha: %w", err)
@@ -511,20 +431,893 @@ func (s *Store) GetStartedCommentRef(ctx context.Context, reviewID uuid.UUID) (*
 }
 
 func (s *Store) UpdateReviewStatus(ctx context.Context, id uuid.UUID, status, errMsg string, tokenUsage []byte) error {
-	_, err := s.Pool.Exec(ctx, `
-		UPDATE reviews SET status = $2, error = $3, token_usage = COALESCE($4, token_usage),
-		       completed_at = CASE WHEN $2 IN ('completed','failed') THEN NOW() ELSE NULL END
-		WHERE id = $1
-	`, id, status, nilIfEmpty(errMsg), tokenUsage)
+	err := s.q.UpdateReviewStatus(ctx, db.UpdateReviewStatusParams{
+		ID:                   id,
+		Status:               status,
+		Error:                nilIfEmpty(errMsg),
+		TokenUsage:           tokenUsage,
+		ProtectedErrorPrefix: ErrReviewPostPersistenceAmbiguous.Error(),
+	})
 	if err != nil {
 		return fmt.Errorf("updating review status: %w", err)
 	}
 	return nil
 }
 
+// UpdateReviewStatusForAttempt applies a review-owned write only while the
+// caller's generation is still current.
+func (s *Store) UpdateReviewStatusForAttempt(ctx context.Context, id uuid.UUID, generation int, status, errMsg string, tokenUsage []byte, allowedCurrent []string) (bool, error) {
+	query := `UPDATE reviews SET status=$3,
+		error=CASE WHEN error LIKE $6 || '%' AND COALESCE($4,'') NOT LIKE $6 || '%' THEN error ELSE $4 END,
+		token_usage=COALESCE($5,token_usage), completed_at=CASE WHEN $3 IN ('completed','failed') THEN NOW() ELSE completed_at END
+		WHERE id=$1 AND attempt_generation=$2`
+	args := []any{id, generation, status, nilIfEmpty(errMsg), tokenUsage, ErrReviewPostPersistenceAmbiguous.Error()}
+	if len(allowedCurrent) > 0 {
+		query += ` AND status = ANY($7)`
+		args = append(args, allowedCurrent)
+	}
+	tag, err := s.Pool.Exec(ctx, query, args...)
+	if err != nil {
+		return false, fmt.Errorf("updating review attempt status: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+func (s *Store) GetReviewAttemptGeneration(ctx context.Context, id uuid.UUID) (int, error) {
+	var generation int
+	if err := s.Pool.QueryRow(ctx, `SELECT attempt_generation FROM reviews WHERE id=$1`, id).Scan(&generation); err != nil {
+		return 0, err
+	}
+	return generation, nil
+}
+
+func (s *Store) IsReviewAttemptCurrent(ctx context.Context, id uuid.UUID, generation int) (bool, error) {
+	var current bool
+	if err := s.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM reviews WHERE id=$1 AND attempt_generation=$2)`, id, generation).Scan(&current); err != nil {
+		return false, err
+	}
+	return current, nil
+}
+
+// ReviewPostOutcome describes whether PostReviewForAttempt invoked the external
+// mutation and durably recorded its id. Rejected and already-recorded outcomes
+// never call GitHub. Attempted accompanies an error after the callback began;
+// the remote result may be ambiguous even when no id was returned.
+type ReviewPostOutcome string
+
+const (
+	ReviewPostRejected             ReviewPostOutcome = "rejected"
+	ReviewPostAttempted            ReviewPostOutcome = "attempted"
+	ReviewPostDefinitelyNotCreated ReviewPostOutcome = "definitely_not_created"
+	ReviewPostRecorded             ReviewPostOutcome = "recorded"
+	ReviewPostAlreadyRecorded      ReviewPostOutcome = "already_recorded"
+
+	postedReviewOperationTimeout = 3 * time.Second
+	postedReviewRepairTimeout    = 3 * time.Second
+	postedReviewRepairTries      = 3
+	postedReviewRepairDelay      = 50 * time.Millisecond
+	// ReviewPostReconciliationMinAge gives GitHub's eventually consistent review
+	// listing time to expose a successful mutation before absence can authorize a
+	// retry. A positive marker match never waits.
+	ReviewPostReconciliationMinAge = 5 * time.Minute
+	// hashtextextended keeps the complete UUID in PostgreSQL's stable 64-bit
+	// advisory-lock namespace. The seed separates review posting from other
+	// application advisory locks.
+	postedReviewLockSeed int64 = 0x4152475553504f53
+)
+
+var (
+	ErrReviewPostRepairConflict       = errors.New("posted review repair conflicts with durable review identity")
+	ErrReviewPostPersistenceAmbiguous = errors.New("GitHub review posted but durable identity is ambiguous; automatic retry disabled")
+	ErrReviewPostClaimTooRecent       = errors.New("review post reconciliation is not yet safe")
+)
+
+func reviewPostClaimMarker() string {
+	return ErrReviewPostPersistenceAmbiguous.Error() + ": posting authority claimed; reconciliation required"
+}
+
+func reviewPostClaimMarkerFor(id uuid.UUID, generation int, claimedAt time.Time) string {
+	return fmt.Sprintf("%s: posting authority claimed; review=%s; generation=%d; claimed_at=%s; reconciliation required",
+		ErrReviewPostPersistenceAmbiguous, id, generation, claimedAt.UTC().Format(time.RFC3339Nano))
+}
+
+// ReviewPostClaimedAt extracts the marker's observability timestamp. It must
+// never authorize reconciliation: only reviews.review_post_claimed_at compared
+// with PostgreSQL NOW() is authoritative across application machines.
+func ReviewPostClaimedAt(marker string) (time.Time, bool) {
+	const key = "claimed_at="
+	start := strings.Index(marker, key)
+	if start < 0 {
+		return time.Time{}, false
+	}
+	value := marker[start+len(key):]
+	if end := strings.IndexByte(value, ';'); end >= 0 {
+		value = value[:end]
+	}
+	claimedAt, err := time.Parse(time.RFC3339Nano, value)
+	return claimedAt, err == nil
+}
+
+func reviewDefinitelyNotCreated(err error) bool {
+	var certain interface{ DefinitelyNotCreated() bool }
+	return errors.As(err, &certain) && certain.DefinitelyNotCreated()
+}
+
+// clearReviewPostClaim removes only the exact claim created by this call. The
+// detached deadline keeps cleanup bounded even when the request was cancelled.
+func (s *Store) clearReviewPostClaim(ctx context.Context, id uuid.UUID, generation int, claim string) error {
+	clearCtx, cancel := detachedReviewPostContext(ctx)
+	defer cancel()
+	_, err := s.Pool.Exec(clearCtx, `UPDATE reviews SET error=NULL,review_post_claimed_at=NULL WHERE id=$1 AND attempt_generation=$2 AND github_review_id IS NULL AND error=$3`, id, generation, claim)
+	if err != nil {
+		return fmt.Errorf("clearing exact review post claim: %w", err)
+	}
+	return nil
+}
+
+func detachedReviewPostContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), postedReviewOperationTimeout)
+}
+
+type reviewPostQuerier interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+// repairPostedReviewID establishes or confirms positive remote evidence using
+// the supplied session. ctx must be deadline bounded by the caller.
+func repairPostedReviewID(ctx context.Context, q reviewPostQuerier, id uuid.UUID, generation int, githubReviewID int64) error {
+	var lastErr error
+	for attempt := 0; attempt < postedReviewRepairTries; attempt++ {
+		var storedID int64
+		err := q.QueryRow(ctx, `
+			UPDATE reviews
+			SET github_review_id=$1,
+			    error=CASE WHEN error LIKE $4 || '%' THEN NULL ELSE error END,
+			    review_post_claimed_at=CASE WHEN error LIKE $4 || '%' THEN NULL ELSE review_post_claimed_at END
+			WHERE id=$2 AND attempt_generation=$3
+			  AND (github_review_id IS NULL OR github_review_id=$1)
+			RETURNING github_review_id
+		`, githubReviewID, id, generation, ErrReviewPostPersistenceAmbiguous.Error()).Scan(&storedID)
+		if err == nil {
+			if storedID != githubReviewID {
+				return fmt.Errorf("%w: repair returned GitHub review id %d, want %d", ErrReviewPostRepairConflict, storedID, githubReviewID)
+			}
+			return nil
+		}
+		if errors.Is(err, pgx.ErrNoRows) {
+			var currentGeneration int
+			var currentID *int64
+			readErr := q.QueryRow(ctx, `SELECT attempt_generation,github_review_id FROM reviews WHERE id=$1`, id).Scan(&currentGeneration, &currentID)
+			if errors.Is(readErr, pgx.ErrNoRows) {
+				return fmt.Errorf("%w: review %s no longer exists", ErrReviewPostRepairConflict, id)
+			}
+			if readErr == nil {
+				if currentGeneration != generation {
+					return fmt.Errorf("%w: review %s generation is %d, posted generation was %d", ErrReviewPostRepairConflict, id, currentGeneration, generation)
+				}
+				if currentID != nil && *currentID != githubReviewID {
+					return fmt.Errorf("%w: review %s has GitHub review id %d, posted id was %d", ErrReviewPostRepairConflict, id, *currentID, githubReviewID)
+				}
+				lastErr = fmt.Errorf("repair compare-and-set returned no row for review %s", id)
+			} else {
+				lastErr = fmt.Errorf("re-reading review after repair compare-and-set: %w", readErr)
+			}
+		} else {
+			lastErr = fmt.Errorf("repairing GitHub review id %d: %w", githubReviewID, err)
+		}
+
+		if attempt+1 == postedReviewRepairTries {
+			break
+		}
+		timer := time.NewTimer(postedReviewRepairDelay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return fmt.Errorf("repairing GitHub review id %d: %w", githubReviewID, errors.Join(lastErr, ctx.Err()))
+		case <-timer.C:
+		}
+	}
+	return fmt.Errorf("repairing GitHub review id %d after %d attempts: %w", githubReviewID, postedReviewRepairTries, lastErr)
+}
+
+// RepairPostedReviewID is the bounded detached recovery entry point for a
+// known positive GitHub id. The normal post path first repairs on its locked
+// session and falls back here only after quarantining that session.
+func (s *Store) RepairPostedReviewID(ctx context.Context, id uuid.UUID, generation int, githubReviewID int64) error {
+	if githubReviewID <= 0 {
+		return fmt.Errorf("repairing posted review: invalid GitHub review id %d", githubReviewID)
+	}
+	repairCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), postedReviewRepairTimeout)
+	defer cancel()
+	return repairPostedReviewID(repairCtx, s.Pool, id, generation, githubReviewID)
+}
+
+// AttachReconciledReviewID records marker-verified positive evidence without
+// completing the review. It intentionally preserves the ambiguous-post claim,
+// status, and claim clock so any binding failure remains recoverable without a
+// duplicate post. Repeating the same exact attachment is idempotent.
+func (s *Store) AttachReconciledReviewID(ctx context.Context, id uuid.UUID, generation int, exactClaim string, githubReviewID int64) (bool, error) {
+	if githubReviewID <= 0 {
+		return false, fmt.Errorf("attaching reconciled review: invalid GitHub review id %d", githubReviewID)
+	}
+	attachCtx, cancel := detachedReviewPostContext(ctx)
+	defer cancel()
+	tag, err := s.Pool.Exec(attachCtx, `
+		UPDATE reviews SET github_review_id=$1
+		WHERE id=$2 AND attempt_generation=$3 AND github_review_id IS NULL
+		  AND error=$4 AND status IN ('failed','cancelled','in_progress')
+	`, githubReviewID, id, generation, exactClaim)
+	if err != nil {
+		return false, fmt.Errorf("attaching reconciled GitHub review id: %w", err)
+	}
+	if tag.RowsAffected() == 1 {
+		return true, nil
+	}
+	var currentGeneration int
+	var status string
+	var currentID *int64
+	var currentClaim *string
+	if err := s.Pool.QueryRow(attachCtx, `SELECT attempt_generation,status,github_review_id,error FROM reviews WHERE id=$1`, id).Scan(&currentGeneration, &status, &currentID, &currentClaim); err != nil {
+		return false, fmt.Errorf("checking reconciled GitHub review attachment: %w", err)
+	}
+	if currentGeneration == generation && currentID != nil && *currentID == githubReviewID &&
+		((currentClaim != nil && *currentClaim == exactClaim) || status == "completed") {
+		return true, nil
+	}
+	if currentGeneration == generation && currentID != nil && *currentID != githubReviewID {
+		return false, fmt.Errorf("%w: review %s has GitHub review id %d, reconciled id was %d", ErrReviewPostRepairConflict, id, *currentID, githubReviewID)
+	}
+	return false, nil
+}
+
+const recoveredEventEnvelopeMarker = "argus.review-event.v1:3f985e31-2ad4-4d78-b5c4-83f3663e12e0"
+
+type ReconciledCompletionMetadata struct {
+	RepoID         int64
+	PRNumber       int
+	InstallationID int64
+}
+
+// CompleteReconciledReviewWithEvents atomically commits terminal status and
+// the three durable recovered lifecycle events. Semantic keys make repair and
+// concurrent retries idempotent; NOTIFY is deferred by PostgreSQL until commit.
+func (s *Store) CompleteReconciledReviewWithEvents(ctx context.Context, id uuid.UUID, generation int, exactClaim string, githubReviewID int64, metadata ReconciledCompletionMetadata) (ReviewCompletionOutcome, error) {
+	if githubReviewID <= 0 {
+		return ReviewCompletionRejected, fmt.Errorf("completing reconciled review: invalid GitHub review id %d", githubReviewID)
+	}
+	completeCtx, cancel := detachedReviewPostContext(ctx)
+	defer cancel()
+	tx, err := s.Pool.Begin(completeCtx)
+	if err != nil {
+		return ReviewCompletionRejected, fmt.Errorf("starting reconciled completion: %w", err)
+	}
+	defer func() { _ = tx.Rollback(completeCtx) }()
+
+	var currentGeneration int
+	var status string
+	var currentID *int64
+	var currentClaim *string
+	if err := tx.QueryRow(completeCtx, `SELECT attempt_generation,status,github_review_id,error FROM reviews WHERE id=$1 FOR UPDATE`, id).Scan(&currentGeneration, &status, &currentID, &currentClaim); err != nil {
+		return ReviewCompletionRejected, fmt.Errorf("locking reconciled review: %w", err)
+	}
+	if currentGeneration != generation || currentID == nil || *currentID != githubReviewID {
+		return ReviewCompletionRejected, nil
+	}
+	outcome := ReviewCompletionAlreadyCompleted
+	if status != "completed" {
+		if currentClaim == nil || *currentClaim != exactClaim || (status != "failed" && status != "cancelled" && status != "in_progress") {
+			return ReviewCompletionRejected, nil
+		}
+		tag, updateErr := tx.Exec(completeCtx, `UPDATE reviews SET status='completed',completed_at=COALESCE(completed_at,NOW()),error=NULL,review_post_claimed_at=NULL WHERE id=$1 AND attempt_generation=$2 AND github_review_id=$3 AND error=$4`, id, generation, githubReviewID, exactClaim)
+		if updateErr != nil {
+			return ReviewCompletionRejected, fmt.Errorf("completing reconciled GitHub review: %w", updateErr)
+		}
+		if tag.RowsAffected() != 1 {
+			return ReviewCompletionRejected, nil
+		}
+		outcome = ReviewCompletionWon
+	}
+
+	type recoveredEvent struct {
+		key, eventType string
+		payload        any
+	}
+	events := []recoveredEvent{
+		{"recovered.review_completed", "review_completed", map[string]any{"review_id": id, "repo_id": metadata.RepoID, "pr_number": metadata.PRNumber, "installation_id": metadata.InstallationID}},
+		{"recovered.posted_to_github", "posted_to_github", map[string]any{"github_review_id": githubReviewID, "recovered": true}},
+		{"recovered.completed", "completed", map[string]any{"status": "completed", "recovered": true}},
+	}
+	for _, event := range events {
+		payload, marshalErr := json.Marshal(event.payload)
+		if marshalErr != nil {
+			return ReviewCompletionRejected, fmt.Errorf("encoding recovered event %s: %w", event.key, marshalErr)
+		}
+		deliveryID := uuid.NewSHA1(uuid.NameSpaceOID, []byte(fmt.Sprintf("argus:%s:%d:%s", id, generation, event.key))).String()
+		envelope, marshalErr := json.Marshal(map[string]any{"_argus_event_envelope": recoveredEventEnvelopeMarker, "delivery_id": deliveryID, "data": json.RawMessage(payload)})
+		if marshalErr != nil {
+			return ReviewCompletionRejected, fmt.Errorf("encoding recovered event envelope %s: %w", event.key, marshalErr)
+		}
+		if _, insertErr := tx.Exec(completeCtx, `
+			WITH inserted AS (
+			  INSERT INTO review_events(review_id,attempt_generation,event_type,data,semantic_key)
+			  VALUES($1,$2,$3,$4,$5)
+			  ON CONFLICT (review_id,attempt_generation,semantic_key) WHERE semantic_key IS NOT NULL DO NOTHING
+			  RETURNING id
+			)
+			SELECT pg_notify('argus_review_events','recovered:'||id::text) FROM inserted
+		`, id, generation, event.eventType, envelope, event.key); insertErr != nil {
+			return ReviewCompletionRejected, fmt.Errorf("persisting recovered event %s: %w", event.key, insertErr)
+		}
+	}
+	if err := tx.Commit(completeCtx); err != nil {
+		return ReviewCompletionRejected, fmt.Errorf("committing reconciled completion: %w", err)
+	}
+	return outcome, nil
+}
+
+// CompleteReconciledReview completes an exact, already-attached delivery. The
+// returned winner is the only caller allowed to emit recovered completion
+// actions. Binding recovery must succeed before this method is called.
+func (s *Store) CompleteReconciledReview(ctx context.Context, id uuid.UUID, generation int, exactClaim string, githubReviewID int64) (ReviewCompletionOutcome, error) {
+	if githubReviewID <= 0 {
+		return ReviewCompletionRejected, fmt.Errorf("completing reconciled review: invalid GitHub review id %d", githubReviewID)
+	}
+	completeCtx, cancel := detachedReviewPostContext(ctx)
+	defer cancel()
+	tag, err := s.Pool.Exec(completeCtx, `
+		UPDATE reviews
+		SET status='completed', completed_at=COALESCE(completed_at,NOW()),
+		    error=NULL, review_post_claimed_at=NULL
+		WHERE id=$2 AND attempt_generation=$3 AND github_review_id=$1 AND error=$4
+		  AND status IN ('failed','cancelled','in_progress')
+	`, githubReviewID, id, generation, exactClaim)
+	if err != nil {
+		return ReviewCompletionRejected, fmt.Errorf("completing reconciled GitHub review: %w", err)
+	}
+	if tag.RowsAffected() == 1 {
+		return ReviewCompletionWon, nil
+	}
+
+	var currentGeneration int
+	var status string
+	var currentID *int64
+	if err := s.Pool.QueryRow(completeCtx, `SELECT attempt_generation,status,github_review_id FROM reviews WHERE id=$1`, id).Scan(&currentGeneration, &status, &currentID); err != nil {
+		return ReviewCompletionRejected, fmt.Errorf("checking reconciled GitHub review loser: %w", err)
+	}
+	if currentGeneration == generation && status == "completed" && currentID != nil && *currentID == githubReviewID {
+		return ReviewCompletionAlreadyCompleted, nil
+	}
+	if currentGeneration == generation && currentID != nil && *currentID != githubReviewID {
+		return ReviewCompletionRejected, fmt.Errorf("%w: review %s has GitHub review id %d, reconciled id was %d", ErrReviewPostRepairConflict, id, *currentID, githubReviewID)
+	}
+	return ReviewCompletionRejected, nil
+}
+
+// ClearReconciledReviewClaim authorizes a retry only for an exact, aged claim.
+// PostgreSQL's clock and the DB-derived claim column are the age authority;
+// marker timestamps are observability only and may come from a skewed host.
+func (s *Store) ClearReconciledReviewClaim(ctx context.Context, id uuid.UUID, generation int, exactClaim string) (bool, error) {
+	clearCtx, cancel := detachedReviewPostContext(ctx)
+	defer cancel()
+	tag, err := s.Pool.Exec(clearCtx, `
+		UPDATE reviews SET error=NULL,review_post_claimed_at=NULL
+		WHERE id=$1 AND attempt_generation=$2 AND github_review_id IS NULL AND error=$3
+		  AND review_post_claimed_at IS NOT NULL
+		  AND review_post_claimed_at <= NOW()-make_interval(secs => $4)
+	`, id, generation, exactClaim, ReviewPostReconciliationMinAge.Seconds())
+	if err != nil {
+		return false, fmt.Errorf("clearing reconciled review post claim: %w", err)
+	}
+	if tag.RowsAffected() == 1 {
+		return true, nil
+	}
+
+	// Distinguish an exact claim that is still inside the consistency window
+	// from an exact-CAS loser. Both stay blocked, but callers surface the former
+	// as an intentional retry delay rather than a changed claim.
+	var recent bool
+	if err := s.Pool.QueryRow(clearCtx, `
+		SELECT EXISTS(
+			SELECT 1 FROM reviews
+			WHERE id=$1 AND attempt_generation=$2 AND github_review_id IS NULL AND error=$3
+			  AND review_post_claimed_at IS NOT NULL
+			  AND review_post_claimed_at > NOW()-make_interval(secs => $4)
+		)
+	`, id, generation, exactClaim, ReviewPostReconciliationMinAge.Seconds()).Scan(&recent); err != nil {
+		return false, fmt.Errorf("checking reconciled review post claim age: %w", err)
+	}
+	if recent {
+		return false, ErrReviewPostClaimTooRecent
+	}
+	return false, nil
+}
+
+// GetRecordedReviewID is the early, read-only crash-recovery check used before
+// pre-post learning. It deliberately does not change review status: callers
+// with an id must still join CompletePostedReview's winner election.
+func (s *Store) GetRecordedReviewID(ctx context.Context, id uuid.UUID, generation int) (int64, bool, error) {
+	var githubReviewID int64
+	err := s.Pool.QueryRow(ctx, `SELECT github_review_id FROM reviews WHERE id=$1 AND attempt_generation=$2 AND github_review_id IS NOT NULL`, id, generation).Scan(&githubReviewID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("checking recorded GitHub review id: %w", err)
+	}
+	return githubReviewID, true, nil
+}
+
+// rollbackReviewPostTx bounds cleanup after the non-idempotent callback. false
+// means the transaction state is unconfirmed and its connection must never be
+// returned to the pool.
+func rollbackReviewPostTx(ctx context.Context, tx pgx.Tx) bool {
+	rollbackCtx, cancel := detachedReviewPostContext(ctx)
+	defer cancel()
+	err := tx.Rollback(rollbackCtx)
+	return err == nil || errors.Is(err, pgx.ErrTxClosed)
+}
+
+// PostReviewForAttempt is the authority boundary for the non-idempotent GitHub
+// mutation. A per-review PostgreSQL session advisory lock spans the durable
+// pre-post claim, external call, evidence transaction, and repair. Retry takes
+// the matching transaction lock, so another machine cannot advance generation
+// while positive evidence is being persisted.
+//
+// The claim is committed before the external call. It is intentionally
+// conservative: if the process or connection disappears at any later point,
+// automatic retry remains blocked until reconciliation. This also makes an
+// unconfirmed rollback/unlock safe to quarantine without reopening a duplicate
+// delivery window. Cancel/failure writers preserve this marker.
+func (s *Store) PostReviewForAttempt(ctx context.Context, id uuid.UUID, generation int, post func(context.Context) (int64, error)) (githubReviewID int64, outcome ReviewPostOutcome, err error) {
+	if post == nil {
+		return 0, ReviewPostRejected, errors.New("posting review: nil callback")
+	}
+
+	conn, err := s.Pool.Acquire(ctx)
+	if err != nil {
+		return 0, ReviewPostRejected, fmt.Errorf("acquiring review post authority session: %w", err)
+	}
+	locked := false
+	quarantined := false
+	quarantine := func(reason error) error {
+		if quarantined {
+			return reason
+		}
+		quarantined = true
+		locked = false
+		raw := conn.Hijack()
+		closeCtx, cancel := detachedReviewPostContext(ctx)
+		defer cancel()
+		if closeErr := raw.Close(closeCtx); closeErr != nil {
+			return errors.Join(reason, fmt.Errorf("closing quarantined review post session: %w", closeErr))
+		}
+		return reason
+	}
+	defer func() {
+		if quarantined {
+			return
+		}
+		if locked {
+			unlockCtx, cancel := detachedReviewPostContext(ctx)
+			var unlocked bool
+			var unlockErr error
+			if s.unlockReviewPostSession == nil {
+				unlockErr = conn.QueryRow(unlockCtx, `SELECT pg_advisory_unlock(hashtextextended($1,$2))`, id.String(), postedReviewLockSeed).Scan(&unlocked)
+			} else {
+				unlocked, unlockErr = s.unlockReviewPostSession(unlockCtx, conn, id.String())
+			}
+			cancel()
+			if unlockErr != nil || !unlocked {
+				if unlockErr == nil {
+					unlockErr = errors.New("PostgreSQL reported review post advisory lock was not held")
+				}
+				cleanupErr := quarantine(fmt.Errorf("releasing review post authority: %w", unlockErr))
+				if err == nil {
+					err = cleanupErr
+				} else {
+					err = errors.Join(err, cleanupErr)
+				}
+				return
+			}
+		}
+		conn.Release()
+	}()
+
+	if _, err = conn.Exec(ctx, `SELECT pg_advisory_lock(hashtextextended($1,$2))`, id.String(), postedReviewLockSeed); err != nil {
+		return 0, ReviewPostRejected, quarantine(fmt.Errorf("acquiring review post authority (outcome unconfirmed): %w", err))
+	}
+	locked = true
+
+	// Commit a conservative claim before the request can escape this process.
+	// Same-generation workers serialize on the session lock and treat an old
+	// claim as an ambiguity, never as permission to call GitHub again.
+	beginClaim := s.beginReviewPostClaimTx
+	var claimTx pgx.Tx
+	var beginErr error
+	if beginClaim == nil {
+		claimTx, beginErr = conn.Begin(ctx)
+	} else {
+		claimTx, beginErr = beginClaim(ctx, conn)
+	}
+	if beginErr != nil {
+		return 0, ReviewPostRejected, fmt.Errorf("beginning review post claim: %w", beginErr)
+	}
+	claimClosed := false
+	defer func() {
+		if !claimClosed && !rollbackReviewPostTx(ctx, claimTx) {
+			cleanupErr := quarantine(errors.New("review post claim rollback outcome unconfirmed"))
+			if err == nil {
+				err = cleanupErr
+			} else {
+				err = errors.Join(err, cleanupErr)
+			}
+		}
+	}()
+
+	var currentGeneration int
+	var status string
+	var recordedID *int64
+	var existingError *string
+	if err = claimTx.QueryRow(ctx, `SELECT attempt_generation,status,github_review_id,error FROM reviews WHERE id=$1 FOR NO KEY UPDATE`, id).Scan(&currentGeneration, &status, &recordedID, &existingError); err != nil {
+		return 0, ReviewPostRejected, fmt.Errorf("locking review for post claim: %w", err)
+	}
+	if currentGeneration != generation {
+		return 0, ReviewPostRejected, nil
+	}
+	if recordedID != nil {
+		return *recordedID, ReviewPostAlreadyRecorded, nil
+	}
+	if existingError != nil && strings.HasPrefix(*existingError, ErrReviewPostPersistenceAmbiguous.Error()) {
+		return 0, ReviewPostRejected, fmt.Errorf("%w: review %s already has an unresolved posting claim", ErrReviewPostPersistenceAmbiguous, id)
+	}
+	if status != "in_progress" {
+		return 0, ReviewPostRejected, nil
+	}
+	var claimedAt time.Time
+	if claimErr := claimTx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&claimedAt); claimErr != nil {
+		return 0, ReviewPostRejected, fmt.Errorf("reading authoritative review post claim clock: %w", claimErr)
+	}
+	claimMarker := reviewPostClaimMarkerFor(id, generation, claimedAt)
+	tag, claimErr := claimTx.Exec(ctx, `UPDATE reviews SET error=$1,review_post_claimed_at=$2 WHERE id=$3 AND attempt_generation=$4 AND status='in_progress' AND github_review_id IS NULL`, claimMarker, claimedAt, id, generation)
+	if claimErr != nil || tag.RowsAffected() != 1 {
+		if claimErr == nil {
+			claimErr = errors.New("guarded review row disappeared")
+		}
+		return 0, ReviewPostRejected, fmt.Errorf("recording durable review post claim: %w", claimErr)
+	}
+	claimCommitCtx, cancelClaimCommit := context.WithTimeout(ctx, postedReviewOperationTimeout)
+	claimErr = claimTx.Commit(claimCommitCtx)
+	cancelClaimCommit()
+	claimClosed = true
+	if claimErr != nil {
+		// COMMIT may have succeeded, but no external call happened. Quarantine the
+		// uncertain session, then safely clear only this exact claim on a fresh,
+		// bounded connection so retry cannot be stranded by a local commit loss.
+		commitErr := quarantine(fmt.Errorf("committing durable review post claim: %w", claimErr))
+		if clearErr := s.clearReviewPostClaim(ctx, id, generation, claimMarker); clearErr != nil {
+			commitErr = errors.Join(commitErr, clearErr)
+		}
+		return 0, ReviewPostRejected, commitErr
+	}
+
+	begin := s.beginReviewPostTx
+	var tx pgx.Tx
+	if begin == nil {
+		tx, err = conn.Begin(ctx)
+	} else {
+		tx, err = begin(ctx, conn)
+	}
+	if err != nil {
+		guardErr := fmt.Errorf("beginning review post guard: %w", err)
+		if clearErr := s.clearReviewPostClaim(ctx, id, generation, claimMarker); clearErr != nil {
+			guardErr = errors.Join(guardErr, clearErr)
+		}
+		return 0, ReviewPostRejected, guardErr
+	}
+	txClosed := false
+	defer func() {
+		if !txClosed && !rollbackReviewPostTx(ctx, tx) {
+			cleanupErr := quarantine(errors.New("review post rollback outcome unconfirmed"))
+			if err == nil {
+				err = cleanupErr
+			} else {
+				err = errors.Join(err, cleanupErr)
+			}
+		}
+	}()
+
+	if err = tx.QueryRow(ctx, `SELECT attempt_generation,status,github_review_id FROM reviews WHERE id=$1 FOR NO KEY UPDATE`, id).Scan(&currentGeneration, &status, &recordedID); err != nil {
+		guardErr := fmt.Errorf("locking review for post: %w", err)
+		if !rollbackReviewPostTx(ctx, tx) {
+			guardErr = errors.Join(guardErr, quarantine(errors.New("review post guard rollback outcome unconfirmed")))
+		}
+		txClosed = true
+		if clearErr := s.clearReviewPostClaim(ctx, id, generation, claimMarker); clearErr != nil {
+			guardErr = errors.Join(guardErr, clearErr)
+		}
+		return 0, ReviewPostRejected, guardErr
+	}
+	clearUnusedClaim := func() error {
+		clearCtx, cancelClear := detachedReviewPostContext(ctx)
+		tag, clearErr := tx.Exec(clearCtx, `UPDATE reviews SET error=NULL,review_post_claimed_at=NULL WHERE id=$1 AND attempt_generation=$2 AND github_review_id IS NULL AND error=$3`, id, generation, claimMarker)
+		cancelClear()
+		if clearErr == nil && tag.RowsAffected() != 1 {
+			clearErr = errors.New("exact review post claim disappeared")
+		}
+		if clearErr != nil {
+			return fmt.Errorf("clearing unused review post claim: %w", clearErr)
+		}
+		commitCtx, cancelCommit := detachedReviewPostContext(ctx)
+		commitErr := tx.Commit(commitCtx)
+		cancelCommit()
+		if commitErr != nil {
+			return fmt.Errorf("committing unused review post claim cleanup: %w", commitErr)
+		}
+		txClosed = true
+		return nil
+	}
+	if currentGeneration != generation {
+		return 0, ReviewPostRejected, clearUnusedClaim()
+	}
+	if recordedID != nil {
+		if clearErr := clearUnusedClaim(); clearErr != nil {
+			return *recordedID, ReviewPostAlreadyRecorded, clearErr
+		}
+		return *recordedID, ReviewPostAlreadyRecorded, nil
+	}
+	if status != "in_progress" {
+		// Cancellation won the small gap between claim commit and this guard. The
+		// callback has not run, so remove only our exact claim before allowing retry.
+		return 0, ReviewPostRejected, clearUnusedClaim()
+	}
+
+	githubReviewID, callbackErr := post(ctx)
+	if githubReviewID <= 0 {
+		if callbackErr != nil && reviewDefinitelyNotCreated(callbackErr) {
+			// GitHub conclusively did not create a review. Clear only our exact
+			// durable claim in the already-locked transaction before exposing the
+			// retryable failure.
+			if clearErr := clearUnusedClaim(); clearErr != nil {
+				// The remote mutation is still known absent, so a fresh exact CAS is
+				// safe even if the cleanup transaction response was lost.
+				if !txClosed {
+					_ = rollbackReviewPostTx(ctx, tx)
+					txClosed = true
+				}
+				if fallbackErr := s.clearReviewPostClaim(ctx, id, generation, claimMarker); fallbackErr != nil {
+					callbackErr = errors.Join(callbackErr, clearErr, fallbackErr)
+				}
+			}
+			return githubReviewID, ReviewPostDefinitelyNotCreated, callbackErr
+		}
+		if callbackErr != nil {
+			return githubReviewID, ReviewPostAttempted, callbackErr
+		}
+		return githubReviewID, ReviewPostAttempted, fmt.Errorf("posting review returned invalid id %d", githubReviewID)
+	}
+
+	// A positive id is authoritative evidence even if the client also returned
+	// an error. Every detached operation after this point has its own deadline.
+	persistCtx, cancelPersist := detachedReviewPostContext(ctx)
+	tag, persistErr := tx.Exec(persistCtx, `UPDATE reviews SET github_review_id=$1,error=NULL,review_post_claimed_at=NULL WHERE id=$2 AND attempt_generation=$3 AND status='in_progress' AND github_review_id IS NULL`, githubReviewID, id, generation)
+	cancelPersist()
+	if persistErr == nil && tag.RowsAffected() != 1 {
+		persistErr = fmt.Errorf("persisting GitHub review id %d after post succeeded: guarded row disappeared", githubReviewID)
+	}
+	if persistErr == nil {
+		commitCtx, cancelCommit := detachedReviewPostContext(ctx)
+		persistErr = tx.Commit(commitCtx)
+		cancelCommit()
+		if persistErr == nil {
+			txClosed = true
+		} else {
+			persistErr = fmt.Errorf("committing GitHub review id %d after post succeeded (commit outcome may be ambiguous): %w", githubReviewID, persistErr)
+		}
+	} else {
+		persistErr = fmt.Errorf("persisting GitHub review id %d after post succeeded: %w", githubReviewID, persistErr)
+	}
+	if persistErr == nil {
+		return githubReviewID, ReviewPostRecorded, nil
+	}
+
+	rollbackConfirmed := txClosed || rollbackReviewPostTx(ctx, tx)
+	txClosed = true
+	if !rollbackConfirmed {
+		persistErr = errors.Join(persistErr, quarantine(errors.New("review post rollback outcome unconfirmed")))
+	}
+
+	var repairErr error
+	if !quarantined {
+		repairCtx, cancelRepair := context.WithTimeout(context.WithoutCancel(ctx), postedReviewRepairTimeout)
+		repairErr = repairPostedReviewID(repairCtx, conn, id, generation, githubReviewID)
+		cancelRepair()
+		if repairErr != nil {
+			repairErr = errors.Join(repairErr, quarantine(errors.New("review post repair session became untrustworthy")))
+		}
+	}
+	if quarantined {
+		// The durable claim prevents BeginReviewRetry from winning this race after
+		// the session lock is released, so a fresh-session repair remains safe.
+		if fallbackErr := s.RepairPostedReviewID(ctx, id, generation, githubReviewID); fallbackErr == nil {
+			return githubReviewID, ReviewPostRecorded, nil
+		} else if repairErr == nil {
+			repairErr = fallbackErr
+		} else {
+			repairErr = errors.Join(repairErr, fallbackErr)
+		}
+	}
+	if repairErr == nil {
+		return githubReviewID, ReviewPostRecorded, nil
+	}
+
+	ambiguityErr := fmt.Errorf("%w: GitHub review %d; persistence error: %v; detached repair error: %v", ErrReviewPostPersistenceAmbiguous, githubReviewID, persistErr, repairErr)
+	// Upgrade the pre-call marker with the known id and failure evidence. Failure
+	// here cannot reopen retry: the conservative claim is already committed.
+	blockCtx, cancelBlock := detachedReviewPostContext(ctx)
+	_, blockErr := s.Pool.Exec(blockCtx, `UPDATE reviews SET error=$1 WHERE id=$2 AND attempt_generation=$3 AND github_review_id IS NULL AND error LIKE $4 || '%'`, ambiguityErr.Error(), id, generation, ErrReviewPostPersistenceAmbiguous.Error())
+	cancelBlock()
+	if blockErr != nil {
+		ambiguityErr = errors.Join(ambiguityErr, fmt.Errorf("updating durable review post ambiguity evidence: %w", blockErr))
+	}
+	return githubReviewID, ReviewPostAttempted, ambiguityErr
+}
+
+// RunIfReviewAttemptCurrent linearizes an attempt-owned external side effect
+// against BeginReviewRetry. The callback runs while holding a NO KEY UPDATE
+// lock on the review row: a retry's generation bump waits, while writes that
+// reference reviews through a foreign key can still take KEY SHARE and avoid
+// self-deadlocking on their separate connection.
+//
+// The callback should contain only the mutation, never the potentially slow
+// work that prepares it. current=false means the generation already lost
+// ownership. An authority lookup/transaction failure is returned as an error;
+// callers must not mistake storage failure for a stale attempt.
+func (s *Store) RunIfReviewAttemptCurrent(ctx context.Context, id uuid.UUID, generation int, write func(context.Context) error) (current bool, err error) {
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("beginning review attempt guard: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+
+	var currentGeneration int
+	if err = tx.QueryRow(ctx, `SELECT attempt_generation FROM reviews WHERE id=$1 FOR NO KEY UPDATE`, id).Scan(&currentGeneration); err != nil {
+		return false, fmt.Errorf("locking review attempt: %w", err)
+	}
+	if currentGeneration != generation {
+		return false, nil
+	}
+
+	if err = write(ctx); err != nil {
+		return true, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return true, fmt.Errorf("committing review attempt guard: %w", err)
+	}
+	return true, nil
+}
+
+// ReviewCompletionOutcome is the winner election result for follow-up work
+// after a GitHub review id is durable.
+type ReviewCompletionOutcome string
+
+const (
+	ReviewCompletionWon              ReviewCompletionOutcome = "won"
+	ReviewCompletionAlreadyCompleted ReviewCompletionOutcome = "already_completed"
+	ReviewCompletionRejected         ReviewCompletionOutcome = "rejected"
+)
+
+// CompletePostedReview elects exactly one same-generation worker to transition
+// the review to completed. Only ReviewCompletionWon may run linked-reference,
+// event, backfill, hydration, and post-review sink side effects. A concurrent
+// worker that observes the identical durable id already completed is a clean
+// loser, not a cancellation. Different ids are integrity conflicts.
+func (s *Store) CompletePostedReview(ctx context.Context, id uuid.UUID, generation int, githubReviewID int64) (ReviewCompletionOutcome, error) {
+	if githubReviewID <= 0 {
+		return ReviewCompletionRejected, fmt.Errorf("completing posted review: invalid GitHub review id %d", githubReviewID)
+	}
+	tag, err := s.Pool.Exec(ctx, `
+		UPDATE reviews
+		SET status='completed', github_review_id=$1,
+		    completed_at=COALESCE(completed_at,NOW()), error=NULL,
+		    review_post_claimed_at=NULL
+		WHERE id=$2 AND attempt_generation=$3 AND status='in_progress'
+		  AND (github_review_id IS NULL OR github_review_id=$1)
+	`, githubReviewID, id, generation)
+	if err != nil {
+		return ReviewCompletionRejected, fmt.Errorf("completing posted review: %w", err)
+	}
+	if tag.RowsAffected() == 1 {
+		return ReviewCompletionWon, nil
+	}
+
+	var currentGeneration int
+	var status string
+	var currentID *int64
+	if err := s.Pool.QueryRow(ctx, `SELECT attempt_generation,status,github_review_id FROM reviews WHERE id=$1`, id).Scan(&currentGeneration, &status, &currentID); err != nil {
+		return ReviewCompletionRejected, fmt.Errorf("checking posted review completion loser: %w", err)
+	}
+	if currentGeneration == generation && status == "completed" && currentID != nil && *currentID == githubReviewID {
+		return ReviewCompletionAlreadyCompleted, nil
+	}
+	if currentGeneration == generation && currentID != nil && *currentID != githubReviewID {
+		return ReviewCompletionRejected, fmt.Errorf("%w: review %s has GitHub review id %d, completion id was %d", ErrReviewPostRepairConflict, id, *currentID, githubReviewID)
+	}
+	return ReviewCompletionRejected, nil
+}
+
 // GetReviewStatus returns just the status column for a review — a cheap PK
 // lookup used by the state machine's cooperative-cancellation check, which runs
 // at every stage boundary and must stay light.
+// ConvergePostedReview repairs a review whose GitHub mutation succeeded but
+// whose completion write did not. Cancelled rows remain cancelled.
+func (s *Store) ConvergePostedReview(ctx context.Context, id uuid.UUID, generation int) (int64, bool, bool, error) {
+	var githubReviewID int64
+	var status string
+	err := s.Pool.QueryRow(ctx, `SELECT github_review_id,status FROM reviews WHERE id=$1 AND attempt_generation=$2 AND github_review_id IS NOT NULL`, id, generation).Scan(&githubReviewID, &status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, false, nil
+	}
+	if err != nil {
+		return 0, false, false, fmt.Errorf("checking posted review: %w", err)
+	}
+	if status == "cancelled" || status == "completed" {
+		return githubReviewID, true, false, nil
+	}
+	tag, err := s.Pool.Exec(ctx, `UPDATE reviews SET status='completed',completed_at=COALESCE(completed_at,NOW()),error=NULL,review_post_claimed_at=NULL WHERE id=$1 AND attempt_generation=$2 AND status IN ('pending','in_progress','failed')`, id, generation)
+	if err != nil {
+		return 0, true, false, fmt.Errorf("converging posted review: %w", err)
+	}
+	return githubReviewID, true, tag.RowsAffected() > 0, nil
+}
+
+// BeginReviewRetry atomically starts one new generation. Concurrent callers
+// cannot both advance a failed/cancelled review to pending.
+func (s *Store) BeginReviewRetry(ctx context.Context, id uuid.UUID) (int, bool, error) {
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return 0, false, fmt.Errorf("beginning review retry transaction: %w", err)
+	}
+	closed := false
+	defer func() {
+		if !closed {
+			_ = rollbackReviewPostTx(ctx, tx)
+		}
+	}()
+
+	// Match PostReviewForAttempt's per-review session lock before touching the
+	// generation. Lock-before-row ordering avoids a deadlock with the posting
+	// transaction; cancellation may wait on the row but never holds this lock.
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,$2))`, id.String(), postedReviewLockSeed); err != nil {
+		return 0, false, fmt.Errorf("acquiring review retry authority: %w", err)
+	}
+
+	var generation int
+	err = tx.QueryRow(ctx, `
+		UPDATE reviews
+		SET status = 'pending', error = NULL, completed_at = NULL,
+		    review_post_claimed_at = NULL, expected_github_inline_count = NULL,
+		    attempt_generation = attempt_generation + 1
+		WHERE id = $1 AND status IN ('failed', 'cancelled')
+		  AND (error IS NULL OR error NOT LIKE $2 || '%')
+		RETURNING attempt_generation
+	`, id, ErrReviewPostPersistenceAmbiguous.Error()).Scan(&generation)
+	if errors.Is(err, pgx.ErrNoRows) {
+		if err = tx.Commit(ctx); err != nil {
+			return 0, false, fmt.Errorf("committing review retry loser: %w", err)
+		}
+		closed = true
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("beginning review retry: %w", err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return 0, false, fmt.Errorf("committing review retry: %w", err)
+	}
+	closed = true
+	return generation, true, nil
+}
+
 func (s *Store) GetReviewStatus(ctx context.Context, id uuid.UUID) (string, error) {
 	var status string
 	if err := s.Pool.QueryRow(ctx, `SELECT status FROM reviews WHERE id = $1`, id).Scan(&status); err != nil {
@@ -540,182 +1333,270 @@ func (s *Store) GetReviewStatus(ctx context.Context, id uuid.UUID) (string, erro
 // completed/failed review. Returns whether a row was actually updated.
 func (s *Store) UpdateReviewStatusIf(ctx context.Context, id uuid.UUID, status, errMsg string, tokenUsage []byte, allowedCurrent []string) (bool, error) {
 	tag, err := s.Pool.Exec(ctx, `
-		UPDATE reviews SET status = $2, error = $3, token_usage = COALESCE($4, token_usage),
+		UPDATE reviews SET status = $2,
+		       error = CASE WHEN error LIKE $6 || '%' AND COALESCE($3,'') NOT LIKE $6 || '%' THEN error ELSE $3 END,
+		       token_usage = COALESCE($4, token_usage),
 		       completed_at = CASE WHEN $2 IN ('completed','failed') THEN NOW() ELSE completed_at END
 		WHERE id = $1 AND status = ANY($5)
-	`, id, status, nilIfEmpty(errMsg), tokenUsage, allowedCurrent)
+	`, id, status, nilIfEmpty(errMsg), tokenUsage, allowedCurrent, ErrReviewPostPersistenceAmbiguous.Error())
 	if err != nil {
 		return false, fmt.Errorf("updating review status: %w", err)
 	}
 	return tag.RowsAffected() > 0, nil
 }
 
-// markerReviewFilter is the SQL predicate (bare, unambiguous columns) matching
-// synthetic "marker" review rows — idempotency-key inserts that were never real
-// review attempts. signalAutoRunDisabled writes auto_run_disabled (push-signal
-// dedup) and the readiness gate writes no_api_key (onboarding dedup); both carry
-// status='failed' with github_review_id IS NULL. The rows stay in the table so
-// HasFailedReviewWithError dedup keeps working, but dashboard list/stats reads
-// exclude them via `NOT (`+markerReviewFilter+`)` so they don't render as failed
-// reviews or inflate TotalReviews.
-const markerReviewFilter = `github_review_id IS NULL AND status = 'failed' AND error IN ('auto_run_disabled', 'no_api_key')`
-
 // List queries drop the heavy fields (token_usage, diagram*, diagrams,
 // truncated_files, brief) to keep response size manageable. 1 row of those
 // columns averages ~5 KB of JSONB; at limit=200 the list payload was 1.22 MB
 // (measured via Fly logs on the dashboard route) — ~95% of which was data the
 // list view never renders. The detail endpoint (GET /reviews/{id}) still
-// returns the full Review struct via getReview. Scan shape stays identical
-// so pgx.RowToStructByPos[Review] keeps working without a new type.
-//
-// POSITIONAL mapping: this SELECT must list exactly as many columns as Review
-// has fields, in the same order. Adding budget_note to the struct without
-// adding it here 500'd every reviews list in production with "number of field
-// descriptions must equal number of destinations, got 30 and 31". A column
-// that a list view does not need is selected as NULL rather than omitted.
+// returns the full Review struct via GetReview. The generated row type owns
+// the list query's scan order, so adding a field to Review cannot recreate the
+// production 500 caused by a positional destination-count mismatch.
 func (s *Store) ListReviewsScoped(ctx context.Context, repoID int64, installationIDs []int64, limit, offset int) ([]Review, error) {
 	if limit <= 0 {
 		limit = 20
 	}
-	rows, err := s.Pool.Query(ctx, `
-		SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, COALESCE(rv.head_ref,''), rv.github_review_id,
-		       rv.status, rv.summary, rv.score, NULL::jsonb, rv.trigger, rv.triggered_by, rv.budget_note, rv.duration_ms, rv.error,
-		       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at,
-		       NULL::text, NULL::text,
-		       '[]'::jsonb, '[]'::jsonb,
-		       NULL::text, rv.cross_pr_hash, rv.trace_id, NULL::jsonb
-		FROM reviews rv
-		JOIN repos r ON rv.repo_id = r.id
-		WHERE rv.repo_id = $1 AND r.installation_id = ANY($2)
-		  AND NOT (`+markerReviewFilter+`)
-		ORDER BY rv.created_at DESC LIMIT $3 OFFSET $4
-	`, repoID, installationIDs, limit, offset)
+	rows, err := s.q.ListReviewsScoped(ctx, db.ListReviewsScopedParams{RepoID: repoID, Column2: installationIDs, RowLimit: int64(limit), RowOffset: int64(offset)})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[Review])
+	reviews := make([]Review, 0, len(rows))
+	for _, row := range rows {
+		reviews = append(reviews, scopedReviewFromSQLC(row))
+	}
+	return reviews, nil
 }
 
 func (s *Store) ListAllReviewsScoped(ctx context.Context, installationIDs []int64, limit, offset int) ([]Review, error) {
 	if limit <= 0 {
 		limit = 20
 	}
-	rows, err := s.Pool.Query(ctx, `
-		SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, COALESCE(rv.head_ref,''), rv.github_review_id,
-		       rv.status, rv.summary, rv.score, NULL::jsonb, rv.trigger, rv.triggered_by, rv.budget_note, rv.duration_ms, rv.error,
-		       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at,
-		       NULL::text, NULL::text,
-		       '[]'::jsonb, '[]'::jsonb,
-		       NULL::text, rv.cross_pr_hash, rv.trace_id, NULL::jsonb
-		FROM reviews rv
-		JOIN repos r ON rv.repo_id = r.id
-		WHERE r.installation_id = ANY($1)
-		  AND NOT (`+markerReviewFilter+`)
-		ORDER BY rv.created_at DESC LIMIT $2 OFFSET $3
-	`, installationIDs, limit, offset)
+	rows, err := s.q.ListAllReviewsScoped(ctx, db.ListAllReviewsScopedParams{Column1: installationIDs, RowLimit: int64(limit), RowOffset: int64(offset)})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[Review])
+	reviews := make([]Review, 0, len(rows))
+	for _, row := range rows {
+		reviews = append(reviews, allScopedReviewFromSQLC(row))
+	}
+	return reviews, nil
+}
+
+// ReplaceReviewMinorNotes replaces only one attempt's structured notes.
+func (s *Store) ReplaceReviewMinorNotes(ctx context.Context, reviewID uuid.UUID, attemptGeneration int, notes []ReviewMinorNote) error {
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("beginning minor notes replace: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	var currentGeneration int
+	if err = tx.QueryRow(ctx, `SELECT attempt_generation FROM reviews WHERE id = $1 FOR UPDATE`, reviewID).Scan(&currentGeneration); err != nil {
+		return fmt.Errorf("locking review for minor notes: %w", err)
+	}
+	if currentGeneration != attemptGeneration {
+		return ErrReviewAttemptStale
+	}
+	if _, err = tx.Exec(ctx, `DELETE FROM review_minor_notes WHERE review_id = $1 AND attempt_generation = $2`, reviewID, attemptGeneration); err != nil {
+		return fmt.Errorf("clearing minor notes: %w", err)
+	}
+	for _, note := range notes {
+		if _, err = tx.Exec(ctx, `INSERT INTO review_minor_notes (review_id, attempt_generation, file_path, line, severity, title) VALUES ($1,$2,$3,$4,$5,$6)`, reviewID, attemptGeneration, note.FilePath, note.Line, note.Severity, note.Title); err != nil {
+			return fmt.Errorf("inserting minor note: %w", err)
+		}
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return fmt.Errorf("committing minor notes: %w", err)
+	}
+	return nil
+}
+
+// GetReviewMinorNotes returns only the review's current attempt.
+func (s *Store) GetReviewMinorNotes(ctx context.Context, reviewID uuid.UUID) ([]ReviewMinorNote, error) {
+	rows, err := s.q.GetReviewMinorNotes(ctx, reviewID)
+	if err != nil {
+		return nil, err
+	}
+	notes := make([]ReviewMinorNote, 0, len(rows))
+	for _, row := range rows {
+		notes = append(notes, ReviewMinorNote{
+			ID: row.ID, ReviewID: row.ReviewID, AttemptGeneration: row.AttemptGeneration,
+			FilePath: row.FilePath, Line: row.Line, Severity: row.Severity,
+			Title: row.Title, CreatedAt: row.CreatedAt,
+		})
+	}
+	return notes, nil
+}
+
+// ClaimReviewSignal atomically elects one machine to deliver a CTA. An
+// abandoned claim becomes retryable after the lease expires.
+func (s *Store) ClaimReviewSignal(ctx context.Context, repoID int64, prNumber int, kind string, staleAfter time.Duration) (uuid.UUID, bool, error) {
+	id := uuid.New()
+	err := s.Pool.QueryRow(ctx, `
+		INSERT INTO review_signals (id, repo_id, pr_number, kind)
+		VALUES ($1,$2,$3,$4)
+		ON CONFLICT (repo_id, pr_number, kind) DO UPDATE
+		SET id = EXCLUDED.id, claimed_at = NOW()
+		WHERE review_signals.delivered_at IS NULL
+		  AND review_signals.claimed_at < NOW() - make_interval(secs => $5)
+		RETURNING id`, id, repoID, prNumber, kind, staleAfter.Seconds()).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, false, nil
+	}
+	if err != nil {
+		return uuid.Nil, false, fmt.Errorf("claiming review signal: %w", err)
+	}
+	return id, true, nil
+}
+
+func (s *Store) CompleteReviewSignal(ctx context.Context, id uuid.UUID) (bool, error) {
+	tag, err := s.Pool.Exec(ctx, `UPDATE review_signals SET delivered_at=NOW() WHERE id=$1 AND delivered_at IS NULL`, id)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+func (s *Store) ReleaseReviewSignal(ctx context.Context, id uuid.UUID) (bool, error) {
+	tag, err := s.Pool.Exec(ctx, `DELETE FROM review_signals WHERE id=$1 AND delivered_at IS NULL`, id)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 // --- Rules ---
 
 func (s *Store) ListRules(ctx context.Context, installationIDs []int64) ([]Rule, error) {
-	rows, err := s.Pool.Query(ctx, `
-		SELECT id, installation_id, category, content, priority, enabled, created_at, updated_at
-		FROM rules WHERE installation_id = ANY($1::bigint[]) ORDER BY priority DESC, category
-	`, installationIDs)
+	rows, err := s.q.ListRules(ctx, installationIDs)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[Rule])
+	rules := make([]Rule, 0, len(rows))
+	for _, row := range rows {
+		rules = append(rules, Rule{ID: row.ID, InstallationID: row.InstallationID, Category: row.Category, Content: row.Content, Priority: row.Priority, Enabled: row.Enabled, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt})
+	}
+	return rules, nil
 }
 
 func (s *Store) CreateRule(ctx context.Context, installationID int64, category, content string, priority int, enabled bool) (*Rule, error) {
-	var r Rule
-	err := s.Pool.QueryRow(ctx, `
-		INSERT INTO rules (installation_id, category, content, priority, enabled)
-		VALUES ($1, $2, $3, $4, $5)
-		RETURNING id, installation_id, category, content, priority, enabled, created_at, updated_at
-	`, installationID, category, content, priority, enabled).Scan(&r.ID, &r.InstallationID, &r.Category, &r.Content, &r.Priority, &r.Enabled, &r.CreatedAt, &r.UpdatedAt)
-	return &r, err
-}
-
-func (s *Store) UpdateRule(ctx context.Context, id int64, installationIDs []int64, category, content *string, priority *int, enabled *bool) (*Rule, error) {
-	var r Rule
-	err := s.Pool.QueryRow(ctx, `
-		UPDATE rules SET
-			category = COALESCE($3, category),
-			content = COALESCE($4, content),
-			priority = COALESCE($5, priority),
-			enabled = COALESCE($6, enabled),
-			updated_at = NOW()
-		WHERE id = $1 AND installation_id = ANY($2::bigint[])
-		RETURNING id, installation_id, category, content, priority, enabled, created_at, updated_at
-	`, id, installationIDs, category, content, priority, enabled).Scan(&r.ID, &r.InstallationID, &r.Category, &r.Content, &r.Priority, &r.Enabled, &r.CreatedAt, &r.UpdatedAt)
+	var rule Rule
+	err := s.WithMemoryMirrorTx(ctx, func(tx pgx.Tx) (MemoryMirrorEvent, error) {
+		row, err := db.New(tx).CreateRule(ctx, db.CreateRuleParams{
+			InstallationID: &installationID, Category: category, Content: content,
+			Priority: priority, Enabled: enabled,
+		})
+		if err != nil {
+			return MemoryMirrorEvent{}, err
+		}
+		rule = Rule{ID: row.ID, InstallationID: row.InstallationID, Category: row.Category, Content: row.Content, Priority: row.Priority, Enabled: row.Enabled, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt}
+		return newRuleMirrorEvent(rule, enabled)
+	})
 	if err != nil {
 		return nil, err
 	}
-	return &r, nil
+	return &rule, nil
+}
+
+func (s *Store) UpdateRule(ctx context.Context, id int64, installationIDs []int64, category, content *string, priority *int, enabled *bool) (*Rule, error) {
+	var rule Rule
+	err := s.WithMemoryMirrorTx(ctx, func(tx pgx.Tx) (MemoryMirrorEvent, error) {
+		row, err := db.New(tx).UpdateRule(ctx, db.UpdateRuleParams{
+			ID: id, InstallationIds: installationIDs, Category: category,
+			Content: content, Priority: priority, Enabled: enabled,
+		})
+		if err != nil {
+			return MemoryMirrorEvent{}, err
+		}
+		rule = Rule{ID: row.ID, InstallationID: row.InstallationID, Category: row.Category, Content: row.Content, Priority: row.Priority, Enabled: row.Enabled, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt}
+		return newRuleMirrorEvent(rule, rule.Enabled)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &rule, nil
 }
 
 func (s *Store) DeleteRule(ctx context.Context, id int64, installationIDs []int64) error {
-	ct, err := s.Pool.Exec(ctx, `DELETE FROM rules WHERE id = $1 AND installation_id = ANY($2::bigint[])`, id, installationIDs)
+	return s.WithMemoryMirrorTx(ctx, func(tx pgx.Tx) (MemoryMirrorEvent, error) {
+		installationID, err := db.New(tx).DeleteRule(ctx, db.DeleteRuleParams{ID: id, InstallationIds: installationIDs})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return MemoryMirrorEvent{}, fmt.Errorf("rule %d not found", id)
+		}
+		if err != nil {
+			return MemoryMirrorEvent{}, err
+		}
+		if installationID == nil {
+			return MemoryMirrorEvent{}, fmt.Errorf("rule %d has no installation", id)
+		}
+		payload, err := json.Marshal(map[string]string{"custom_id": fmt.Sprintf("rule--%d", id)})
+		if err != nil {
+			return MemoryMirrorEvent{}, err
+		}
+		return MemoryMirrorEvent{InstallationID: *installationID, AggregateType: MemoryMirrorRule, AggregateID: id, Operation: MemoryMirrorDelete, Payload: payload}, nil
+	})
+}
+
+func newRuleMirrorEvent(rule Rule, enabled bool) (MemoryMirrorEvent, error) {
+	customID := fmt.Sprintf("rule--%d", rule.ID)
+	operation := MemoryMirrorDelete
+	var payload any = map[string]string{"custom_id": customID}
+	if enabled {
+		type ruleBody struct {
+			RuleID   int64
+			Category string
+			Priority int
+			Content  string
+		}
+		payload = struct {
+			CustomID string   `json:"custom_id"`
+			Enabled  bool     `json:"enabled"`
+			Rule     ruleBody `json:"rule"`
+		}{
+			CustomID: customID,
+			Enabled:  true,
+			Rule: ruleBody{
+				RuleID: rule.ID, Category: rule.Category,
+				Priority: rule.Priority, Content: rule.Content,
+			},
+		}
+		operation = MemoryMirrorUpsert
+	}
+	raw, err := json.Marshal(payload)
 	if err != nil {
-		return err
+		return MemoryMirrorEvent{}, fmt.Errorf("marshal rule mirror payload: %w", err)
 	}
-	if ct.RowsAffected() == 0 {
-		return fmt.Errorf("rule %d not found", id)
-	}
-	return nil
+	return MemoryMirrorEvent{InstallationID: *rule.InstallationID, AggregateType: MemoryMirrorRule, AggregateID: rule.ID, Operation: operation, Payload: raw}, nil
 }
 
 // --- Model Configs ---
 
 func (s *Store) ListModelConfigs(ctx context.Context, repoID int64) ([]ModelConfig, error) {
-	rows, err := s.Pool.Query(ctx, `
-		SELECT id, repo_id, installation_id, stage, provider, model, base_url, max_tokens, temperature, created_at, updated_at
-		FROM model_configs WHERE repo_id = $1 ORDER BY stage
-	`, repoID)
+	rows, err := s.q.ListModelConfigs(ctx, &repoID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[ModelConfig])
+	configs := make([]ModelConfig, 0, len(rows))
+	for _, row := range rows {
+		configs = append(configs, modelConfigFromValues(row.ID, row.RepoID, nil, row.Stage, row.Provider, row.Model, row.BaseURL, row.MaxTokens, row.Temperature, row.CreatedAt, row.UpdatedAt))
+	}
+	return configs, nil
 }
 
 func (s *Store) UpsertModelConfig(ctx context.Context, repoID int64, stage, provider, model string, baseURL *string, maxTokens int, temperature float32) (*ModelConfig, error) {
-	var mc ModelConfig
-	err := s.Pool.QueryRow(ctx, `
-		INSERT INTO model_configs (repo_id, stage, provider, model, base_url, max_tokens, temperature)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
-		ON CONFLICT (repo_id, stage) DO UPDATE SET
-			provider = EXCLUDED.provider,
-			model = EXCLUDED.model,
-			base_url = EXCLUDED.base_url,
-			max_tokens = EXCLUDED.max_tokens,
-			temperature = EXCLUDED.temperature,
-			updated_at = NOW()
-		RETURNING id, repo_id, installation_id, stage, provider, model, base_url, max_tokens, temperature, created_at, updated_at
-	`, repoID, stage, provider, model, baseURL, maxTokens, temperature).Scan(
-		&mc.ID, &mc.RepoID, &mc.InstallationID, &mc.Stage, &mc.Provider, &mc.Model, &mc.BaseURL,
-		&mc.MaxTokens, &mc.Temperature, &mc.CreatedAt, &mc.UpdatedAt)
+	row, err := s.q.UpsertModelConfig(ctx, db.UpsertModelConfigParams{RepoID: &repoID, Stage: stage, Provider: provider, Model: model, BaseURL: baseURL, MaxTokens: maxTokens, Temperature: temperature})
 	if err != nil {
 		return nil, err
 	}
-	return &mc, nil
+	config := modelConfigFromValues(row.ID, row.RepoID, nil, row.Stage, row.Provider, row.Model, row.BaseURL, row.MaxTokens, row.Temperature, row.CreatedAt, row.UpdatedAt)
+	return &config, nil
 }
 
 func (s *Store) DeleteModelConfig(ctx context.Context, repoID int64, stage string) error {
-	ct, err := s.Pool.Exec(ctx, `DELETE FROM model_configs WHERE repo_id = $1 AND stage = $2`, repoID, stage)
+	count, err := s.q.DeleteModelConfig(ctx, db.DeleteModelConfigParams{RepoID: &repoID, Stage: stage})
 	if err != nil {
 		return err
 	}
-	if ct.RowsAffected() == 0 {
+	if count == 0 {
 		return fmt.Errorf("config not found for repo %d stage %s", repoID, stage)
 	}
 	return nil
@@ -723,43 +1604,34 @@ func (s *Store) DeleteModelConfig(ctx context.Context, repoID int64, stage strin
 
 // ListOrgModelConfigs returns installation-level model configs (repo_id IS NULL).
 func (s *Store) ListOrgModelConfigs(ctx context.Context, installationID int64) ([]ModelConfig, error) {
-	rows, err := s.Pool.Query(ctx, `
-		SELECT id, repo_id, installation_id, stage, provider, model, base_url, max_tokens, temperature, created_at, updated_at
-		FROM model_configs WHERE installation_id = $1 AND repo_id IS NULL ORDER BY stage
-	`, installationID)
+	rows, err := s.q.ListOrgModelConfigs(ctx, &installationID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[ModelConfig])
+	configs := make([]ModelConfig, 0, len(rows))
+	for _, row := range rows {
+		configs = append(configs, modelConfigFromValues(row.ID, row.RepoID, row.InstallationID, row.Stage, row.Provider, row.Model, row.BaseURL, row.MaxTokens, row.Temperature, row.CreatedAt, row.UpdatedAt))
+	}
+	return configs, nil
 }
 
 // UpsertOrgModelConfig saves an installation-level model config.
 func (s *Store) UpsertOrgModelConfig(ctx context.Context, installationID int64, stage, provider, model string, baseURL *string, maxTokens int, temperature float32) (*ModelConfig, error) {
-	var mc ModelConfig
-	err := s.Pool.QueryRow(ctx, `
-		INSERT INTO model_configs (installation_id, repo_id, stage, provider, model, base_url, max_tokens, temperature)
-		VALUES ($1, NULL, $2, $3, $4, $5, $6, $7)
-		ON CONFLICT (installation_id, stage) WHERE repo_id IS NULL AND installation_id IS NOT NULL DO UPDATE SET
-			provider = EXCLUDED.provider, model = EXCLUDED.model, base_url = EXCLUDED.base_url,
-			max_tokens = EXCLUDED.max_tokens, temperature = EXCLUDED.temperature, updated_at = NOW()
-		RETURNING id, repo_id, installation_id, stage, provider, model, base_url, max_tokens, temperature, created_at, updated_at
-	`, installationID, stage, provider, model, baseURL, maxTokens, temperature).Scan(
-		&mc.ID, &mc.RepoID, &mc.InstallationID, &mc.Stage, &mc.Provider, &mc.Model, &mc.BaseURL,
-		&mc.MaxTokens, &mc.Temperature, &mc.CreatedAt, &mc.UpdatedAt)
+	row, err := s.q.UpsertOrgModelConfig(ctx, db.UpsertOrgModelConfigParams{InstallationID: &installationID, Stage: stage, Provider: provider, Model: model, BaseURL: baseURL, MaxTokens: maxTokens, Temperature: temperature})
 	if err != nil {
 		return nil, err
 	}
-	return &mc, nil
+	config := modelConfigFromValues(row.ID, row.RepoID, row.InstallationID, row.Stage, row.Provider, row.Model, row.BaseURL, row.MaxTokens, row.Temperature, row.CreatedAt, row.UpdatedAt)
+	return &config, nil
 }
 
 // DeleteOrgModelConfig removes an installation-level config.
 func (s *Store) DeleteOrgModelConfig(ctx context.Context, installationID int64, stage string) error {
-	ct, err := s.Pool.Exec(ctx, `DELETE FROM model_configs WHERE installation_id = $1 AND stage = $2 AND repo_id IS NULL`, installationID, stage)
+	count, err := s.q.DeleteOrgModelConfig(ctx, db.DeleteOrgModelConfigParams{InstallationID: &installationID, Stage: stage})
 	if err != nil {
 		return err
 	}
-	if ct.RowsAffected() == 0 {
+	if count == 0 {
 		return fmt.Errorf("org config not found for installation %d stage %s", installationID, stage)
 	}
 	return nil
@@ -767,30 +1639,47 @@ func (s *Store) DeleteOrgModelConfig(ctx context.Context, installationID int64, 
 
 // ListModelConfigsWithFallback returns repo configs, falling back to org configs for missing stages.
 func (s *Store) ListModelConfigsWithFallback(ctx context.Context, installationID, repoID int64) ([]ModelConfig, error) {
-	rows, err := s.Pool.Query(ctx, `
-		SELECT DISTINCT ON (stage) id, repo_id, installation_id, stage, provider, model, base_url, max_tokens, temperature, created_at, updated_at
-		FROM model_configs
-		WHERE (repo_id = $2 OR (installation_id = $1 AND repo_id IS NULL))
-		ORDER BY stage, repo_id NULLS LAST
-	`, installationID, repoID)
+	rows, err := s.q.ListModelConfigsWithFallback(ctx, db.ListModelConfigsWithFallbackParams{InstallationID: &installationID, RepoID: &repoID})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[ModelConfig])
+	configs := make([]ModelConfig, 0, len(rows))
+	for _, row := range rows {
+		configs = append(configs, modelConfigFromValues(row.ID, row.RepoID, row.InstallationID, row.Stage, row.Provider, row.Model, row.BaseURL, row.MaxTokens, row.Temperature, row.CreatedAt, row.UpdatedAt))
+	}
+	return configs, nil
 }
 
 // --- Review Comments ---
 
-func (s *Store) CreateReviewComment(ctx context.Context, reviewID uuid.UUID, filePath string, startLine, endLine *int, side *string, body string, severity, category, specialist, codeSnippet *string, confidenceScore *int, githubCommentID *int64, matchedPatternID *int64, matchedPatternScore *float32, enforcedRuleContent *string, isNewFinding bool, suppressedReason *string, state FindingState) error {
+// ErrReviewAttemptStale means an attempt-owned write lost the generation race
+// to BeginReviewRetry. Callers must stop that worker instead of publishing it.
+var ErrReviewAttemptStale = errors.New("review attempt is no longer current")
+
+func (s *Store) CreateReviewComment(ctx context.Context, reviewID uuid.UUID, attemptGeneration int, filePath string, startLine, endLine *int, side *string, body string, severity, category, specialist, codeSnippet *string, confidenceScore *int, githubCommentID *int64, matchedPatternID *int64, matchedPatternScore *float32, enforcedRuleContent *string, isNewFinding bool, suppressedReason *string, state FindingState) error {
+	return s.CreateReviewCommentWithInlineManifest(ctx, reviewID, attemptGeneration, filePath, startLine, endLine, side, body, severity, category, specialist, codeSnippet, confidenceScore, githubCommentID, matchedPatternID, matchedPatternScore, enforcedRuleContent, isNewFinding, suppressedReason, state, false)
+}
+
+// CreateReviewCommentWithInlineManifest persists whether this exact row was selected by Compose for the external submission.
+func (s *Store) CreateReviewCommentWithInlineManifest(ctx context.Context, reviewID uuid.UUID, attemptGeneration int, filePath string, startLine, endLine *int, side *string, body string, severity, category, specialist, codeSnippet *string, confidenceScore *int, githubCommentID *int64, matchedPatternID *int64, matchedPatternScore *float32, enforcedRuleContent *string, isNewFinding bool, suppressedReason *string, state FindingState, wasPostedInline bool) error {
 	if state == "" {
 		state = FindingStatePosted
 	}
-	_, err := s.Pool.Exec(ctx, `
-		INSERT INTO review_comments (review_id, file_path, start_line, end_line, side, body, severity, category, specialist, confidence_score, code_snippet, github_comment_id, matched_pattern_id, matched_pattern_score, enforced_rule_content, is_new_finding, suppressed_reason, state)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
-	`, reviewID, filePath, startLine, endLine, side, body, severity, category, specialist, confidenceScore, codeSnippet, githubCommentID, matchedPatternID, matchedPatternScore, enforcedRuleContent, isNewFinding, suppressedReason, string(state))
-	return err
+	count, err := s.q.CreateReviewComment(ctx, db.CreateReviewCommentParams{
+		ReviewID: reviewID, AttemptGeneration: attemptGeneration, FilePath: filePath, StartLine: startLine, EndLine: endLine, Side: side,
+		Body: body, Severity: severity, Category: category, Specialist: specialist,
+		ConfidenceScore: confidenceScore, CodeSnippet: codeSnippet, GithubCommentID: githubCommentID,
+		MatchedPatternID: matchedPatternID, MatchedPatternScore: matchedPatternScore,
+		EnforcedRuleContent: enforcedRuleContent, IsNewFinding: &isNewFinding,
+		SuppressedReason: suppressedReason, State: string(state), WasPostedInline: wasPostedInline,
+	})
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		return ErrReviewAttemptStale
+	}
+	return nil
 }
 
 // GetCommentByGithubID looks up a review comment by its GitHub comment ID.
@@ -811,6 +1700,7 @@ func (s *Store) ListPRGithubCommentIDs(ctx context.Context, repoFullName string,
 		JOIN repos r ON rv.repo_id = r.id
 		WHERE r.full_name = $1 AND rv.pr_number = $2
 		  AND rv.status = 'completed'
+		  AND rc.attempt_generation = rv.attempt_generation
 		  AND rc.github_comment_id IS NOT NULL
 	`, repoFullName, prNumber)
 	if err != nil {
@@ -831,21 +1721,51 @@ func (s *Store) ListPRGithubCommentIDs(ctx context.Context, repoFullName string,
 }
 
 func (s *Store) GetCommentByGithubID(ctx context.Context, githubCommentID int64) (*ReviewComment, error) {
-	var c ReviewComment
-	err := s.Pool.QueryRow(ctx, `
-		SELECT id, review_id, file_path, start_line, end_line, side, body, severity, category,
-		       specialist, confidence_score, code_snippet, github_comment_id,
-		       matched_pattern_id, matched_pattern_score, enforced_rule_content, is_new_finding,
-		       created_at
-		FROM review_comments WHERE github_comment_id = $1
-	`, githubCommentID).Scan(&c.ID, &c.ReviewID, &c.FilePath, &c.StartLine, &c.EndLine, &c.Side, &c.Body, &c.Severity, &c.Category,
-		&c.Specialist, &c.ConfidenceScore, &c.CodeSnippet, &c.GithubCommentID,
-		&c.MatchedPatternID, &c.MatchedPatternScore, &c.EnforcedRuleContent, &c.IsNewFinding,
-		&c.CreatedAt)
+	row, err := s.q.GetCommentByGithubID(ctx, &githubCommentID)
 	if err != nil {
 		return nil, err
 	}
-	return &c, nil
+	comment, err := githubReviewCommentFromSQLC(row)
+	if err != nil {
+		return nil, err
+	}
+	return &comment, nil
+}
+
+// SaveExpectedReviewInlineCount finalizes the attempt-owned delivery manifest.
+// It succeeds only when exactly expected rows were stamped by Compose.
+func (s *Store) SaveExpectedReviewInlineCount(ctx context.Context, reviewID uuid.UUID, generation, expected int) error {
+	if expected < 0 {
+		return fmt.Errorf("saving inline manifest: invalid expected count %d", expected)
+	}
+	tag, err := s.Pool.Exec(ctx, `
+		UPDATE reviews r SET expected_github_inline_count=$3
+		WHERE r.id=$1 AND r.attempt_generation=$2
+		  AND (r.expected_github_inline_count IS NULL OR r.expected_github_inline_count=$3)
+		  AND (SELECT count(*) FROM review_comments rc
+		       WHERE rc.review_id=$1 AND rc.attempt_generation=$2 AND rc.was_posted_inline)=$3
+	`, reviewID, generation, expected)
+	if err != nil {
+		return fmt.Errorf("saving inline manifest: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("saving inline manifest: attempt changed or stamped row count differs from %d", expected)
+	}
+	return nil
+}
+
+// ExpectedReviewInlineCount returns false for legacy attempts that predate the
+// exact manifest. Such attempts are intentionally not auto-reconcilable.
+func (s *Store) ExpectedReviewInlineCount(ctx context.Context, reviewID uuid.UUID, generation int) (int, bool, error) {
+	var count *int
+	err := s.Pool.QueryRow(ctx, `SELECT expected_github_inline_count FROM reviews WHERE id=$1 AND attempt_generation=$2`, reviewID, generation).Scan(&count)
+	if err != nil {
+		return 0, false, fmt.Errorf("reading inline manifest: %w", err)
+	}
+	if count == nil {
+		return 0, false, nil
+	}
+	return *count, true, nil
 }
 
 // UnboundComment is one posted review_comments row still awaiting its GitHub
@@ -871,7 +1791,8 @@ func (s *Store) ListUnboundReviewComments(ctx context.Context, reviewID uuid.UUI
 		SELECT id, file_path, end_line, body
 		FROM review_comments
 		WHERE review_id = $1 AND github_comment_id IS NULL AND end_line IS NOT NULL
-		  AND suppressed_reason IS NULL
+		  AND attempt_generation = (SELECT attempt_generation FROM reviews WHERE id=$1)
+		  AND was_posted_inline
 		ORDER BY created_at, id
 	`, reviewID)
 	if err != nil {
@@ -889,6 +1810,75 @@ func (s *Store) ListUnboundReviewComments(ctx context.Context, reviewID uuid.UUI
 	return out, rows.Err()
 }
 
+// PostedReviewBindingState describes the durable inline-comment bindings for
+// one exact delivery. Current is false when the generation or GitHub review ID
+// no longer matches the review row.
+type PostedReviewBindingState struct {
+	Current               bool
+	BoundGitHubCommentIDs int
+	MissingThreadNodeIDs  int
+}
+
+// GetPostedReviewBindingState counts current-generation rows that are already
+// bound to delivered inline comments. Suppressed and folded summary rows have
+// no GitHub comment ID and do not require a GraphQL thread.
+func (s *Store) GetPostedReviewBindingState(ctx context.Context, reviewID uuid.UUID, generation int, githubReviewID int64) (PostedReviewBindingState, error) {
+	var state PostedReviewBindingState
+	err := s.Pool.QueryRow(ctx, `
+		SELECT r.attempt_generation=$2 AND r.github_review_id=$3,
+		       count(rc.id) FILTER (WHERE rc.github_comment_id IS NOT NULL)::int,
+		       count(rc.id) FILTER (
+		           WHERE rc.github_comment_id IS NOT NULL AND rc.graphql_thread_node_id IS NULL
+		       )::int
+		FROM reviews r
+		LEFT JOIN review_comments rc
+		  ON rc.review_id=r.id
+		 AND rc.attempt_generation=$2
+		 AND rc.was_posted_inline
+		WHERE r.id=$1
+		GROUP BY r.attempt_generation,r.github_review_id
+	`, reviewID, generation, githubReviewID).Scan(
+		&state.Current,
+		&state.BoundGitHubCommentIDs,
+		&state.MissingThreadNodeIDs,
+	)
+	if err != nil {
+		return PostedReviewBindingState{}, fmt.Errorf("reading posted review binding state: %w", err)
+	}
+	return state, nil
+}
+
+// ListPostedReviewGitHubCommentIDs returns the exact REST IDs already bound
+// to posted findings in one current generation. Summary-only and folded rows
+// remain unbound and are intentionally absent.
+func (s *Store) ListPostedReviewGitHubCommentIDs(ctx context.Context, reviewID uuid.UUID, generation int) ([]int64, error) {
+	rows, err := s.Pool.Query(ctx, `
+		SELECT rc.github_comment_id
+		FROM review_comments rc
+		JOIN reviews r ON r.id=rc.review_id AND r.attempt_generation=rc.attempt_generation
+		WHERE rc.review_id=$1 AND rc.attempt_generation=$2
+		  AND rc.github_comment_id IS NOT NULL
+		  AND rc.was_posted_inline
+		ORDER BY rc.github_comment_id
+	`, reviewID, generation)
+	if err != nil {
+		return nil, fmt.Errorf("listing posted review GitHub comment ids: %w", err)
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scanning posted review GitHub comment id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("listing posted review GitHub comment ids: %w", err)
+	}
+	return ids, nil
+}
+
 // BindGitHubCommentID binds exactly one review_comments row to its GitHub REST
 // comment id. Scoped to id (the finding's PK) and guarded by
 // github_comment_id IS NULL so a replayed backfill can't re-point an already
@@ -897,8 +1887,11 @@ func (s *Store) ListUnboundReviewComments(ctx context.Context, reviewID uuid.UUI
 // onto a single id (see FindingLifecycle #165 same-line binding fix).
 func (s *Store) BindGitHubCommentID(ctx context.Context, commentID uuid.UUID, githubCommentID int64) (bool, error) {
 	tag, err := s.Pool.Exec(ctx, `
-		UPDATE review_comments SET github_comment_id = $2
-		WHERE id = $1 AND github_comment_id IS NULL
+		UPDATE review_comments rc SET github_comment_id = $2
+		FROM reviews r
+		WHERE rc.id = $1 AND rc.review_id = r.id
+		  AND rc.attempt_generation = r.attempt_generation
+		  AND rc.github_comment_id IS NULL AND rc.was_posted_inline
 	`, commentID, githubCommentID)
 	if err != nil {
 		return false, fmt.Errorf("binding github comment id: %w", err)
@@ -923,63 +1916,27 @@ type RepoReviewStats struct {
 // Non-fatal: returns a zero-value RepoReviewStats on error with no sample_size
 // so the caller can fall through to generic messaging.
 func (s *Store) GetRepoReviewStats(ctx context.Context, repoID int64, limit int) (RepoReviewStats, error) {
-	var stats RepoReviewStats
-	err := s.Pool.QueryRow(ctx, `
-		WITH recent AS (
-			SELECT token_usage FROM reviews
-			WHERE repo_id = $1 AND status = 'completed' AND token_usage IS NOT NULL
-			ORDER BY created_at DESC
-			LIMIT $2
-		)
-		SELECT
-			COUNT(*)::int,
-			COALESCE(AVG((token_usage->'total'->>'total_tokens')::bigint), 0)::bigint,
-			COALESCE(AVG(NULLIF((token_usage->'total'->>'cost')::float8, 0)), 0)::float8,
-			COALESCE(BOOL_OR((token_usage->'total'->>'cost') IS NOT NULL AND (token_usage->'total'->>'cost')::float8 > 0), false)
-		FROM recent
-	`, repoID, limit).Scan(&stats.SampleSize, &stats.AvgTokens, &stats.AvgCost, &stats.CostAvailable)
-	return stats, err
+	row, err := s.q.GetRepoReviewStats(ctx, db.GetRepoReviewStatsParams{RepoID: repoID, RowLimit: int64(limit)})
+	return RepoReviewStats{SampleSize: row.SampleSize, AvgTokens: row.AvgTokens, AvgCost: row.AvgCost, CostAvailable: row.CostAvailable}, err
 }
 
 // GetLastCompletedReview returns the most recent completed review for a repo+PR.
 func (s *Store) GetLastCompletedReview(ctx context.Context, repoID int64, prNumber int) (*Review, error) {
-	var r Review
-	err := s.Pool.QueryRow(ctx, `
-		SELECT id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, COALESCE(head_ref,''), github_review_id,
-		       status, summary, score, token_usage, trigger, triggered_by, duration_ms, error,
-		       deep_review, persona, is_incremental, created_at, completed_at,
-		       diagram, diagram_title
-		FROM reviews WHERE repo_id = $1 AND pr_number = $2 AND status = 'completed'
-		ORDER BY completed_at DESC LIMIT 1
-	`, repoID, prNumber).Scan(&r.ID, &r.RepoID, &r.PRNumber, &r.PRTitle, &r.PRAuthor, &r.HeadSHA, &r.BaseSHA, &r.HeadRef, &r.GithubReviewID,
-		&r.Status, &r.Summary, &r.Score, &r.TokenUsage, &r.Trigger, &r.TriggeredBy, &r.DurationMs, &r.Error,
-		&r.DeepReview, &r.Persona, &r.IsIncremental, &r.CreatedAt, &r.CompletedAt,
-		&r.Diagram, &r.DiagramTitle)
+	row, err := s.q.GetLastCompletedReview(ctx, db.GetLastCompletedReviewParams{RepoID: repoID, PRNumber: prNumber})
 	if err != nil {
 		return nil, err
 	}
-	return &r, nil
+	review := lastCompletedReviewFromSQLC(row)
+	return &review, nil
 }
 
 func (s *Store) GetLatestReviewBySHA(ctx context.Context, repoFullName string, prNumber int, headSHA string) (*Review, error) {
-	var r Review
-	err := s.Pool.QueryRow(ctx, `
-		SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, COALESCE(rv.head_ref,''), rv.github_review_id,
-		       rv.status, rv.summary, rv.score, rv.token_usage, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error,
-		       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at,
-		       rv.diagram, rv.diagram_title
-		FROM reviews rv JOIN repos r ON rv.repo_id = r.id
-		WHERE r.full_name = $1 AND rv.pr_number = $2 AND rv.head_sha = $3
-		  AND rv.status = 'completed'
-		ORDER BY rv.created_at DESC LIMIT 1
-	`, repoFullName, prNumber, headSHA).Scan(&r.ID, &r.RepoID, &r.PRNumber, &r.PRTitle, &r.PRAuthor, &r.HeadSHA, &r.BaseSHA, &r.HeadRef, &r.GithubReviewID,
-		&r.Status, &r.Summary, &r.Score, &r.TokenUsage, &r.Trigger, &r.TriggeredBy, &r.DurationMs, &r.Error,
-		&r.DeepReview, &r.Persona, &r.IsIncremental, &r.CreatedAt, &r.CompletedAt,
-		&r.Diagram, &r.DiagramTitle)
+	row, err := s.q.GetLatestReviewBySHA(ctx, db.GetLatestReviewBySHAParams{FullName: repoFullName, PRNumber: prNumber, HeadSHA: headSHA})
 	if err != nil {
 		return nil, err
 	}
-	return &r, nil
+	review := latestReviewBySHAFromSQLC(row)
+	return &review, nil
 }
 
 // HasFailedReviewWithError returns true if a review with status='failed' and the
@@ -999,24 +1956,12 @@ func (s *Store) HasFailedReviewWithError(ctx context.Context, repoID int64, prNu
 
 // GetLatestReviewByPR returns the most recent completed review for a repo+PR by full name.
 func (s *Store) GetLatestReviewByPR(ctx context.Context, repoFullName string, prNumber int) (*Review, error) {
-	var r Review
-	err := s.Pool.QueryRow(ctx, `
-		SELECT rv.id, rv.repo_id, rv.pr_number, rv.pr_title, rv.pr_author, rv.head_sha, rv.base_sha, COALESCE(rv.head_ref,''), rv.github_review_id,
-		       rv.status, rv.summary, rv.score, rv.token_usage, rv.trigger, rv.triggered_by, rv.duration_ms, rv.error,
-		       rv.deep_review, rv.persona, rv.is_incremental, rv.created_at, rv.completed_at,
-		       rv.diagram, rv.diagram_title
-		FROM reviews rv JOIN repos r ON rv.repo_id = r.id
-		WHERE r.full_name = $1 AND rv.pr_number = $2
-		  AND rv.status = 'completed'
-		ORDER BY rv.created_at DESC LIMIT 1
-	`, repoFullName, prNumber).Scan(&r.ID, &r.RepoID, &r.PRNumber, &r.PRTitle, &r.PRAuthor, &r.HeadSHA, &r.BaseSHA, &r.HeadRef, &r.GithubReviewID,
-		&r.Status, &r.Summary, &r.Score, &r.TokenUsage, &r.Trigger, &r.TriggeredBy, &r.DurationMs, &r.Error,
-		&r.DeepReview, &r.Persona, &r.IsIncremental, &r.CreatedAt, &r.CompletedAt,
-		&r.Diagram, &r.DiagramTitle)
+	row, err := s.q.GetLatestReviewByPR(ctx, db.GetLatestReviewByPRParams{FullName: repoFullName, PRNumber: prNumber})
 	if err != nil {
 		return nil, err
 	}
-	return &r, nil
+	review := latestReviewByPRFromSQLC(row)
+	return &review, nil
 }
 
 // --- Stats ---
@@ -1024,53 +1969,24 @@ func (s *Store) GetLatestReviewByPR(ctx context.Context, repoFullName string, pr
 // CriticalFinds in both GetStats and GetStatsScoped excludes state='suppressed'.
 // Those findings were generated and then withheld by the suppression pass, so no
 // PR author ever received them; counting them made the dashboard advertise
-// review coverage that was never delivered (#239). The same predicate must stay
-// on the sqlc mirrors in sqlc/query/stats.sql — the sqlc migration swaps one
-// implementation for the other, and a fix on only one half is the exact failure
-// this issue is a follow-up to.
+// review coverage that was never delivered (#239). The generated query owns
+// the predicate so the Store wrapper cannot drift from it.
 func (s *Store) GetStats(ctx context.Context) (*Stats, error) {
-	var st Stats
-	err := s.Pool.QueryRow(ctx, `
-		SELECT
-			(SELECT COUNT(*) FROM reviews WHERE NOT (`+markerReviewFilter+`))::int,
-			(SELECT COUNT(*) FROM reviews WHERE created_at >= CURRENT_DATE AND status = 'completed')::int,
-			COALESCE((SELECT AVG(score)::int FROM reviews WHERE score IS NOT NULL), 0),
-			(SELECT COUNT(*) FROM repos WHERE enabled = true)::int,
-			(SELECT COUNT(*) FROM review_comments WHERE severity = 'critical' AND state <> 'suppressed')::int,
-			(SELECT COUNT(*) FROM reviews WHERE status IN ('pending','in_progress'))::int,
-			COALESCE((SELECT (COUNT(*) FILTER (WHERE score < 10) * 100 / NULLIF(COUNT(*) FILTER (WHERE status = 'completed'), 0))::int FROM reviews), 0),
-			(SELECT COUNT(*) FROM reviews WHERE created_at >= NOW() - INTERVAL '7 days')::int,
-			(SELECT COUNT(*) FROM reviews WHERE score IS NOT NULL AND score <= 4)::int,
-			COALESCE((SELECT (AVG(EXTRACT(EPOCH FROM (completed_at - created_at)) * 1000))::int FROM reviews WHERE completed_at IS NOT NULL), 0),
-			(SELECT COUNT(*) FROM reviews WHERE deep_review = true)::int
-	`).Scan(&st.TotalReviews, &st.CompletedToday, &st.AvgScore, &st.ActiveRepos, &st.CriticalFinds, &st.PendingReviews,
-		&st.CatchRate, &st.PRsThisWeek, &st.HighRiskCount, &st.AvgReviewTimeMs, &st.DeepReviewCount)
-	return &st, err
+	row, err := s.q.GetStats(ctx)
+	if err != nil {
+		return nil, err
+	}
+	stats := Stats{TotalReviews: row.TotalReviews, CompletedToday: row.CompletedToday, AvgScore: row.AvgScore, ActiveRepos: row.ActiveRepos, CriticalFinds: row.CriticalFinds, PendingReviews: row.PendingReviews, CatchRate: row.CatchRate, PRsThisWeek: row.PrsThisWeek, HighRiskCount: row.HighRiskCount, AvgReviewTimeMs: row.AvgReviewTimeMs, DeepReviewCount: row.DeepReviewCount}
+	return &stats, nil
 }
 
 func (s *Store) GetStatsScoped(ctx context.Context, installationIDs []int64) (*Stats, error) {
-	var st Stats
-	err := s.Pool.QueryRow(ctx, `
-		WITH scoped_reviews AS (
-			SELECT * FROM reviews WHERE repo_id IN (SELECT id FROM repos WHERE installation_id = ANY($1))
-		)
-		SELECT
-			(SELECT COUNT(*) FROM scoped_reviews WHERE NOT (`+markerReviewFilter+`))::int,
-			(SELECT COUNT(*) FROM scoped_reviews WHERE created_at >= CURRENT_DATE AND status = 'completed')::int,
-			COALESCE((SELECT AVG(score)::int FROM scoped_reviews WHERE score IS NOT NULL), 0),
-			(SELECT COUNT(*) FROM repos WHERE installation_id = ANY($1) AND enabled = true)::int,
-			(SELECT COUNT(*) FROM review_comments WHERE review_id IN (SELECT id FROM scoped_reviews) AND severity = 'critical' AND state <> 'suppressed')::int,
-			(SELECT COUNT(*) FROM scoped_reviews WHERE status IN ('pending','in_progress'))::int,
-			COALESCE((SELECT (COUNT(*) FILTER (WHERE score < 10) * 100 / NULLIF(COUNT(*) FILTER (WHERE status = 'completed'), 0))::int FROM scoped_reviews), 0),
-			(SELECT COUNT(*) FROM scoped_reviews WHERE created_at >= NOW() - INTERVAL '7 days')::int,
-			(SELECT COUNT(*) FROM scoped_reviews WHERE score IS NOT NULL AND score <= 4)::int,
-			COALESCE((SELECT (AVG(EXTRACT(EPOCH FROM (completed_at - created_at)) * 1000))::int FROM scoped_reviews WHERE completed_at IS NOT NULL), 0),
-			(SELECT COUNT(*) FROM scoped_reviews WHERE deep_review = true)::int
-	`, installationIDs).Scan(
-		&st.TotalReviews, &st.CompletedToday, &st.AvgScore, &st.ActiveRepos, &st.CriticalFinds, &st.PendingReviews,
-		&st.CatchRate, &st.PRsThisWeek, &st.HighRiskCount, &st.AvgReviewTimeMs, &st.DeepReviewCount,
-	)
-	return &st, err
+	row, err := s.q.GetStatsScoped(ctx, installationIDs)
+	if err != nil {
+		return nil, err
+	}
+	stats := Stats{TotalReviews: row.TotalReviews, CompletedToday: row.CompletedToday, AvgScore: row.AvgScore, ActiveRepos: row.ActiveRepos, CriticalFinds: row.CriticalFinds, PendingReviews: row.PendingReviews, CatchRate: row.CatchRate, PRsThisWeek: row.PrsThisWeek, HighRiskCount: row.HighRiskCount, AvgReviewTimeMs: row.AvgReviewTimeMs, DeepReviewCount: row.DeepReviewCount}
+	return &stats, nil
 }
 
 // --- Activity ---
@@ -1079,23 +1995,19 @@ func (s *Store) ListActivity(ctx context.Context, installationIDs []int64, limit
 	if limit <= 0 {
 		limit = 50
 	}
-	rows, err := s.Pool.Query(ctx, `
-		SELECT id, installation_id, action, actor, resource, metadata, created_at
-		FROM activity_log WHERE installation_id = ANY($1::bigint[]) ORDER BY created_at DESC LIMIT $2
-	`, installationIDs, limit)
+	rows, err := s.q.ListActivity(ctx, db.ListActivityParams{Column1: installationIDs, RowLimit: int64(limit)})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[ActivityLog])
+	activity := make([]ActivityLog, 0, len(rows))
+	for _, row := range rows {
+		activity = append(activity, ActivityLog{ID: row.ID, InstallationID: row.InstallationID, Action: row.Action, Actor: row.Actor, Resource: row.Resource, Metadata: row.Metadata, CreatedAt: row.CreatedAt})
+	}
+	return activity, nil
 }
 
 func (s *Store) LogActivity(ctx context.Context, installationID *int64, action, actor, resource string, metadata []byte) error {
-	_, err := s.Pool.Exec(ctx, `
-		INSERT INTO activity_log (installation_id, action, actor, resource, metadata)
-		VALUES ($1, $2, $3, $4, $5)
-	`, installationID, action, nilIfEmpty(actor), nilIfEmpty(resource), metadata)
-	return err
+	return s.q.LogActivity(ctx, db.LogActivityParams{InstallationID: installationID, Action: action, Actor: nilIfEmpty(actor), Resource: nilIfEmpty(resource), Metadata: metadata})
 }
 
 // --- Auto-Resolve Events ---
@@ -1129,29 +2041,11 @@ type InsertAutoResolveEventParams struct {
 // so that a slow GitHub path doesn't leak into this insert, and a lost
 // row here is a dropped stats datapoint — not a correctness issue.
 func (s *Store) InsertAutoResolveEvent(ctx context.Context, p InsertAutoResolveEventParams) error {
-	// ON CONFLICT DO NOTHING guards against GitHub's webhook-retry
-	// behavior — a retried synchronize delivery would otherwise double-
-	// count the same resolve activity against the unique (installation,
-	// repo, pr, sha) key.
-	// Coerce nil slice to empty: pgx serializes nil []string as SQL NULL,
-	// but migration 041 declared resolved_thread_keys NOT NULL DEFAULT '{}'.
-	// The DEFAULT only applies when the column is omitted from the INSERT;
-	// an explicit NULL (from a nil slice) violates the constraint.
 	keys := p.ResolvedThreadKeys
 	if keys == nil {
 		keys = []string{}
 	}
-	_, err := s.Pool.Exec(ctx, `
-		INSERT INTO auto_resolve_events
-			(installation_id, repo_id, pr_number, source_sha,
-			 resolved_count, attempted_count, github_api_calls,
-			 resolved_thread_keys)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		ON CONFLICT (installation_id, repo_id, pr_number, source_sha)
-		DO NOTHING
-	`, p.InstallationID, p.RepoID, p.PRNumber, p.SourceSHA,
-		p.ResolvedCount, p.AttemptedCount, p.GitHubAPICalls,
-		keys)
+	err := s.q.InsertAutoResolveEvent(ctx, db.InsertAutoResolveEventParams{InstallationID: p.InstallationID, RepoID: p.RepoID, PRNumber: p.PRNumber, SourceSHA: p.SourceSHA, ResolvedCount: p.ResolvedCount, AttemptedCount: p.AttemptedCount, GitHubAPICalls: p.GitHubAPICalls, ResolvedThreadKeys: keys})
 	if err != nil {
 		return fmt.Errorf("insert auto_resolve_events: %w", err)
 	}
@@ -1171,21 +2065,12 @@ type GetAutoResolveStatsRow struct {
 // over the given period (e.g. "30 days"). Used by the stats overview
 // handler.
 func (s *Store) GetAutoResolveStats(ctx context.Context, installationIDs []int64, period string) (GetAutoResolveStatsRow, error) {
-	var r GetAutoResolveStatsRow
-	err := s.Pool.QueryRow(ctx, `
-		SELECT
-		  COUNT(*)::int,
-		  COALESCE(SUM(resolved_count), 0)::int,
-		  COALESCE(SUM(attempted_count), 0)::int,
-		  COALESCE(SUM(github_api_calls), 0)::int
-		FROM auto_resolve_events
-		WHERE installation_id = ANY($1::bigint[])
-		  AND created_at >= NOW() - $2::interval
-	`, installationIDs, period).Scan(&r.EventCount, &r.ResolvedTotal, &r.AttemptedTotal, &r.APICallsTotal)
+	row, err := s.q.GetAutoResolveStats(ctx, db.GetAutoResolveStatsParams{InstallationIds: installationIDs, Period: period})
+	result := GetAutoResolveStatsRow{EventCount: row.EventCount, ResolvedTotal: row.ResolvedTotal, AttemptedTotal: row.AttemptedTotal, APICallsTotal: row.APICallsTotal}
 	if err != nil {
-		return r, fmt.Errorf("get auto_resolve_events stats: %w", err)
+		return result, fmt.Errorf("get auto_resolve_events stats: %w", err)
 	}
-	return r, nil
+	return result, nil
 }
 
 // GetLearnLayerCountsRow returns counts of new rows in the learn-layer
@@ -1202,40 +2087,12 @@ type GetLearnLayerCountsRow struct {
 // ALL so the caller gets a single flat row and the planner treats each
 // count independently.
 func (s *Store) GetLearnLayerCounts(ctx context.Context, installationIDs []int64, period string) (GetLearnLayerCountsRow, error) {
-	var r GetLearnLayerCountsRow
-	err := s.Pool.QueryRow(ctx, `
-		SELECT
-		  COALESCE((
-		    SELECT COUNT(*) FROM patterns p
-		    WHERE p.installation_id = ANY($1::bigint[])
-		      AND p.created_at >= NOW() - $2::interval
-		  ), 0)::int,
-		  COALESCE((
-		    SELECT COUNT(*) FROM scenarios s
-		    WHERE s.installation_id = ANY($1::bigint[])
-		      AND s.created_at >= NOW() - $2::interval
-		  ), 0)::int,
-		  COALESCE((
-		    SELECT COUNT(*) FROM decision_traces dt
-		    JOIN repos rp ON dt.repo_id = rp.id
-		    WHERE rp.installation_id = ANY($1::bigint[])
-		      AND dt.created_at >= NOW() - $2::interval
-		  ), 0)::int,
-		  COALESCE((
-		    SELECT COUNT(*) FROM comment_outcomes co
-		    JOIN review_comments rc ON co.review_comment_id = rc.id
-		    JOIN reviews rv ON rc.review_id = rv.id
-		    JOIN repos rp ON rv.repo_id = rp.id
-		    WHERE rp.installation_id = ANY($1::bigint[])
-		      AND co.created_at >= NOW() - $2::interval
-		  ), 0)::int
-	`, installationIDs, period).Scan(
-		&r.PatternsLearned, &r.ScenariosStored, &r.DecisionTraces, &r.FeedbackIndexed,
-	)
+	row, err := s.q.GetLearnLayerCounts(ctx, db.GetLearnLayerCountsParams{InstallationIds: installationIDs, Period: period})
+	result := GetLearnLayerCountsRow{PatternsLearned: row.PatternsLearned, ScenariosStored: row.ScenariosStored, DecisionTraces: row.DecisionTraces, FeedbackIndexed: row.FeedbackIndexed}
 	if err != nil {
-		return r, fmt.Errorf("get learn-layer counts: %w", err)
+		return result, fmt.Errorf("get learn-layer counts: %w", err)
 	}
-	return r, nil
+	return result, nil
 }
 
 // --- Comment Outcomes ---
@@ -1246,19 +2103,11 @@ func (s *Store) GetLearnLayerCounts(ctx context.Context, installationIDs []int64
 // event, so callers must gate side effects (e.g. bumping pattern quality) on
 // inserted to avoid double-counting a single 👍/👎.
 func (s *Store) RecordCommentOutcome(ctx context.Context, reviewCommentID uuid.UUID, outcome string) (inserted bool, err error) {
-	// ON CONFLICT matches migration 044's comment_outcomes_unique_per_comment
-	// UNIQUE (review_comment_id, outcome). GitHub redelivers reaction.created
-	// and a removed/re-added reaction replays the same (comment, outcome), so
-	// the write must be idempotent instead of erroring on unique_violation.
-	tag, err := s.Pool.Exec(ctx, `
-		INSERT INTO comment_outcomes (review_comment_id, outcome)
-		VALUES ($1, $2)
-		ON CONFLICT (review_comment_id, outcome) DO NOTHING
-	`, reviewCommentID, outcome)
+	count, err := s.q.RecordCommentOutcome(ctx, db.RecordCommentOutcomeParams{ReviewCommentID: reviewCommentID, Outcome: outcome})
 	if err != nil {
 		return false, err
 	}
-	return tag.RowsAffected() > 0, nil
+	return count > 0, nil
 }
 
 // SetScenarioMemoryDocID records the memory customID for a scenario in
@@ -1267,22 +2116,25 @@ func (s *Store) RecordCommentOutcome(ctx context.Context, reviewCommentID uuid.U
 // reconciliation" instead of "never attempted" — otherwise the reconciler treats
 // every freshly-created scenario as drift forever.
 func (s *Store) SetScenarioMemoryDocID(ctx context.Context, id int64, memoryDocID string) error {
-	return s.Q.UpdateScenarioMemoryDocID(ctx, db.UpdateScenarioMemoryDocIDParams{
+	return s.q.UpdateScenarioMemoryDocID(ctx, db.UpdateScenarioMemoryDocIDParams{
 		MemoryDocID: &memoryDocID,
 		ID:          id,
 	})
 }
 
 func (s *Store) GetCommentOutcomes(ctx context.Context, reviewCommentID uuid.UUID) ([]CommentOutcome, error) {
-	rows, err := s.Pool.Query(ctx, `
-		SELECT id, review_comment_id, outcome, created_at
-		FROM comment_outcomes WHERE review_comment_id = $1 ORDER BY created_at DESC
-	`, reviewCommentID)
+	rows, err := s.q.GetCommentOutcomes(ctx, reviewCommentID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[CommentOutcome])
+	outcomes := make([]CommentOutcome, 0, len(rows))
+	for _, row := range rows {
+		if row.CreatedAt == nil {
+			return nil, fmt.Errorf("comment outcome %d has NULL created_at", row.ID)
+		}
+		outcomes = append(outcomes, CommentOutcome{ID: int64(row.ID), ReviewCommentID: row.ReviewCommentID, Outcome: row.Outcome, CreatedAt: *row.CreatedAt})
+	}
+	return outcomes, nil
 }
 
 // --- Gauge (address-rate telemetry) ---
@@ -1304,25 +2156,15 @@ type PostedFinding struct {
 // outcomes ('confirmed'/'dismissed') do NOT exclude a finding — a dismissed
 // finding can still be addressed; the view weighs both signals.
 func (s *Store) ListPostedFindings(ctx context.Context, repoID int64, prNumber int) ([]PostedFinding, error) {
-	rows, err := s.Pool.Query(ctx, `
-		SELECT rc.id, rc.file_path, COALESCE(rc.end_line, rc.start_line, 0), rc.created_at, rv.head_sha
-		FROM review_comments rc
-		JOIN reviews rv ON rv.id = rc.review_id
-		WHERE rv.repo_id = $1 AND rv.pr_number = $2 AND rv.status = 'completed'
-		  AND rc.suppressed_reason IS NULL
-		  AND rc.github_comment_id IS NOT NULL
-		  AND NOT EXISTS (
-		      SELECT 1 FROM comment_outcomes co
-		      WHERE co.review_comment_id = rc.id
-		        AND co.outcome IN ('addressed_human','addressed_agent','ignored','deferred')
-		  )
-		ORDER BY rc.created_at
-	`, repoID, prNumber)
+	rows, err := s.q.ListPostedFindings(ctx, db.ListPostedFindingsParams{RepoID: repoID, PRNumber: prNumber})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[PostedFinding])
+	findings := make([]PostedFinding, 0, len(rows))
+	for _, row := range rows {
+		findings = append(findings, PostedFinding{ID: row.ID, FilePath: row.FilePath, Line: row.Line, PostedAt: row.PostedAt, HeadSHA: row.HeadSHA})
+	}
+	return findings, nil
 }
 
 // RecordFindingOutcome writes a merge-time outcome for a posted finding,
@@ -1339,57 +2181,59 @@ func (s *Store) RecordFindingOutcome(ctx context.Context, reviewCommentID uuid.U
 
 // ListReviewGauge reads vw_review_gauge scoped to the given installations.
 func (s *Store) ListReviewGauge(ctx context.Context, installationIDs []int64) ([]GaugeRow, error) {
-	rows, err := s.Pool.Query(ctx, `
-		SELECT installation_id, category, change_class, posted_findings,
-		       addressed_human, addressed_agent, dismissed, ignored, deferred,
-		       address_rate, dismiss_rate, median_seconds_to_merge
-		FROM vw_review_gauge
-		WHERE installation_id = ANY($1)
-		ORDER BY category, change_class
-	`, installationIDs)
+	rows, err := s.q.ListReviewGauge(ctx, installationIDs)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[GaugeRow])
+	gauge := make([]GaugeRow, 0, len(rows))
+	for _, row := range rows {
+		gauge = append(gauge, GaugeRow{
+			InstallationID: row.InstallationID, Category: row.Category, ChangeClass: row.ChangeClass,
+			PostedFindings: row.PostedFindings, AddressedHuman: row.AddressedHuman,
+			AddressedAgent: row.AddressedAgent, Dismissed: row.Dismissed, Ignored: row.Ignored,
+			Deferred: row.Deferred, AddressRate: row.AddressRate, DismissRate: row.DismissRate,
+			MedianSecondsToMerge: row.MedianSecondsToMerge,
+		})
+	}
+	return gauge, nil
 }
 
 // --- Prompt Templates ---
 
 func (s *Store) ListPromptTemplates(ctx context.Context, repoID int64) ([]PromptTemplate, error) {
-	rows, err := s.Pool.Query(ctx, `
-		SELECT id, repo_id, stage, prompt_text, created_at, updated_at
-		FROM prompt_templates WHERE repo_id = $1 ORDER BY stage
-	`, repoID)
+	rows, err := s.q.ListPromptTemplates(ctx, repoID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[PromptTemplate])
+	templates := make([]PromptTemplate, 0, len(rows))
+	for _, row := range rows {
+		template, err := promptTemplateFromSQLC(row)
+		if err != nil {
+			return nil, err
+		}
+		templates = append(templates, template)
+	}
+	return templates, nil
 }
 
 func (s *Store) UpsertPromptTemplate(ctx context.Context, repoID int64, stage, promptText string) (*PromptTemplate, error) {
-	var pt PromptTemplate
-	err := s.Pool.QueryRow(ctx, `
-		INSERT INTO prompt_templates (repo_id, stage, prompt_text)
-		VALUES ($1, $2, $3)
-		ON CONFLICT (repo_id, stage) DO UPDATE SET
-			prompt_text = EXCLUDED.prompt_text,
-			updated_at = NOW()
-		RETURNING id, repo_id, stage, prompt_text, created_at, updated_at
-	`, repoID, stage, promptText).Scan(&pt.ID, &pt.RepoID, &pt.Stage, &pt.PromptText, &pt.CreatedAt, &pt.UpdatedAt)
+	row, err := s.q.UpsertPromptTemplate(ctx, db.UpsertPromptTemplateParams{RepoID: repoID, Stage: stage, PromptText: promptText})
 	if err != nil {
 		return nil, err
 	}
-	return &pt, nil
+	template, err := promptTemplateFromSQLC(row)
+	if err != nil {
+		return nil, err
+	}
+	return &template, nil
 }
 
 func (s *Store) DeletePromptTemplate(ctx context.Context, repoID int64, stage string) error {
-	ct, err := s.Pool.Exec(ctx, `DELETE FROM prompt_templates WHERE repo_id = $1 AND stage = $2`, repoID, stage)
+	count, err := s.q.DeletePromptTemplate(ctx, db.DeletePromptTemplateParams{RepoID: repoID, Stage: stage})
 	if err != nil {
 		return err
 	}
-	if ct.RowsAffected() == 0 {
+	if count == 0 {
 		return fmt.Errorf("prompt template not found for repo %d stage %s", repoID, stage)
 	}
 	return nil
@@ -1398,11 +2242,12 @@ func (s *Store) DeletePromptTemplate(ctx context.Context, repoID int64, stage st
 // RecoverStaleReviews marks old in-progress/pending reviews as failed.
 func (s *Store) RecoverStaleReviews(ctx context.Context, maxAge time.Duration) (int64, error) {
 	tag, err := s.Pool.Exec(ctx, `
-		UPDATE reviews SET status = 'failed', error = 'review timed out — server restarted',
+		UPDATE reviews SET status = 'failed',
+		       error = CASE WHEN error LIKE $2 || '%' THEN error ELSE 'review timed out — server restarted' END,
 		       completed_at = NOW()
 		WHERE status IN ('pending', 'in_progress')
 		  AND created_at < NOW() - make_interval(secs => $1)
-	`, float64(maxAge.Seconds()))
+	`, float64(maxAge.Seconds()), ErrReviewPostPersistenceAmbiguous.Error())
 	if err != nil {
 		return 0, fmt.Errorf("recovering stale reviews: %w", err)
 	}
@@ -1418,7 +2263,41 @@ func nilIfEmpty(s string) *string {
 
 // --- Consumer-facing sqlc pass-throughs (issue #137) ---
 //
-// These thin wrappers absorb the direct *db.Queries (`.Q`) accesses that used
+
+// Cross-PR generated-query wrappers keep sqlc behind the Store boundary.
+func (s *Store) GetLatestRunForReview(ctx context.Context, reviewID uuid.UUID) (uuid.UUID, error) {
+	return s.q.GetLatestRunForReview(ctx, reviewID)
+}
+
+func (s *Store) FindReviewsLinkingToPR(ctx context.Context, arg db.FindReviewsLinkingToPRParams) ([]db.FindReviewsLinkingToPRRow, error) {
+	return s.q.FindReviewsLinkingToPR(ctx, arg)
+}
+
+func (s *Store) SetReviewLinkedPRRefs(ctx context.Context, arg db.SetReviewLinkedPRRefsParams) error {
+	return s.q.SetReviewLinkedPRRefs(ctx, arg)
+}
+
+func (s *Store) SetReviewLinkedIssueRefs(ctx context.Context, arg db.SetReviewLinkedIssueRefsParams) error {
+	return s.q.SetReviewLinkedIssueRefs(ctx, arg)
+}
+
+func (s *Store) UpdateReviewCrossPRHash(ctx context.Context, arg db.UpdateReviewCrossPRHashParams) error {
+	return s.q.UpdateReviewCrossPRHash(ctx, arg)
+}
+
+func (s *Store) GetLatestCompletedReviewByPR(ctx context.Context, arg db.GetLatestCompletedReviewByPRParams) (db.GetLatestCompletedReviewByPRRow, error) {
+	return s.q.GetLatestCompletedReviewByPR(ctx, arg)
+}
+
+func (s *Store) FindSharedLinkedIssues(ctx context.Context, reviewID uuid.UUID) ([]db.FindSharedLinkedIssuesRow, error) {
+	return s.q.FindSharedLinkedIssues(ctx, reviewID)
+}
+
+func (s *Store) MergeStageTokenEntry(ctx context.Context, arg db.MergeStageTokenEntryParams) (int64, error) {
+	return s.q.MergeStageTokenEntry(ctx, arg)
+}
+
+// These thin wrappers keep generated query types behind Store methods used
 // to leak out of the store package into orchestrator stages and API handlers.
 // Routing them through *store.Store keeps callers (and the consumer-declared
 // narrow interfaces over the store) off the generated query layer. Pure
@@ -1429,7 +2308,7 @@ func nilIfEmpty(s string) *string {
 // installation. Callers parse it (pipeline.loadFeatureFlags, the features
 // handler); an empty or "{}" payload means "all defaults".
 func (s *Store) GetInstallationFeatureFlags(ctx context.Context, installationID int64) (json.RawMessage, error) {
-	return s.Q.GetInstallationFeatureFlags(ctx, installationID)
+	return s.q.GetInstallationFeatureFlags(ctx, installationID)
 }
 
 // MergeInstallationFeatureFlags merges the given keys into the feature_flags
@@ -1438,7 +2317,7 @@ func (s *Store) GetInstallationFeatureFlags(ctx context.Context, installationID 
 // keys while operators set others by direct UPDATE, and a
 // lost update between those two writers reverts a backend flip silently.
 func (s *Store) MergeInstallationFeatureFlags(ctx context.Context, installationID int64, patch json.RawMessage) error {
-	return s.Q.MergeInstallationFeatureFlags(ctx, db.MergeInstallationFeatureFlagsParams{
+	return s.q.MergeInstallationFeatureFlags(ctx, db.MergeInstallationFeatureFlagsParams{
 		ID:    installationID,
 		Patch: patch,
 	})
@@ -1448,40 +2327,40 @@ func (s *Store) MergeInstallationFeatureFlags(ctx context.Context, installationI
 // (pre dedup/scoring) recorded for a review's latest run, as raw JSONB. The
 // export path uses it to surface dropped findings.
 func (s *Store) GetAllFileReviewsForReview(ctx context.Context, reviewID uuid.UUID) (json.RawMessage, error) {
-	return s.Q.GetAllFileReviewsForReview(ctx, reviewID)
+	return s.q.GetAllFileReviewsForReview(ctx, reviewID)
 }
 
 // GetTopChokePoints returns the highest fan-in files for a repo (up to limit) —
 // the architecture-summary input.
 func (s *Store) GetTopChokePoints(ctx context.Context, repoID int64, limit int32) ([]db.GetTopChokePointsRow, error) {
-	return s.Q.GetTopChokePoints(ctx, db.GetTopChokePointsParams{RepoID: repoID, Limit: limit})
+	return s.q.GetTopChokePoints(ctx, db.GetTopChokePointsParams{RepoID: repoID, Limit: limit})
 }
 
 // ListArchNodes returns the per-symbol architecture rows (file, name, language,
 // line span) for a repo.
 func (s *Store) ListArchNodes(ctx context.Context, repoID int64) ([]db.ListArchNodesRow, error) {
-	return s.Q.ListArchNodes(ctx, repoID)
+	return s.q.ListArchNodes(ctx, repoID)
 }
 
 // ListArchFileEdges returns the file→file dependency edges for a repo.
 func (s *Store) ListArchFileEdges(ctx context.Context, repoID int64) ([]db.ListArchFileEdgesRow, error) {
-	return s.Q.ListArchFileEdges(ctx, repoID)
+	return s.q.ListArchFileEdges(ctx, repoID)
 }
 
 // ListArchBugDensity returns per-file bug counts and PR-change frequency for a repo.
 func (s *Store) ListArchBugDensity(ctx context.Context, repoID int64) ([]db.ListArchBugDensityRow, error) {
-	return s.Q.ListArchBugDensity(ctx, repoID)
+	return s.q.ListArchBugDensity(ctx, repoID)
 }
 
 // ListArchCoupling returns per-PR file sets used to derive temporal coupling.
 func (s *Store) ListArchCoupling(ctx context.Context, repoID int64) ([]db.ListArchCouplingRow, error) {
-	return s.Q.ListArchCoupling(ctx, repoID)
+	return s.q.ListArchCoupling(ctx, repoID)
 }
 
 // ListGraphNodes returns the code-graph nodes for the repo UI, normalizing a nil
 // result to an empty slice so the JSON response is [] rather than null.
 func (s *Store) ListGraphNodes(ctx context.Context, repoID int64) ([]db.ListGraphNodesRow, error) {
-	rows, err := s.Q.ListGraphNodes(ctx, repoID)
+	rows, err := s.q.ListGraphNodes(ctx, repoID)
 	if rows == nil {
 		rows = []db.ListGraphNodesRow{}
 	}
@@ -1491,7 +2370,7 @@ func (s *Store) ListGraphNodes(ctx context.Context, repoID int64) ([]db.ListGrap
 // ListGraphEdges returns the code-graph edges for the repo UI, normalizing a nil
 // result to an empty slice so the JSON response is [] rather than null.
 func (s *Store) ListGraphEdges(ctx context.Context, repoID int64) ([]db.ListGraphEdgesRow, error) {
-	rows, err := s.Q.ListGraphEdges(ctx, repoID)
+	rows, err := s.q.ListGraphEdges(ctx, repoID)
 	if rows == nil {
 		rows = []db.ListGraphEdgesRow{}
 	}

@@ -8,25 +8,24 @@ package db
 import (
 	"context"
 	"time"
-
-	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const createPattern = `-- name: CreatePattern :one
-INSERT INTO patterns (installation_id, repo_id, content, memory_doc_id, created_by, source, category, pr_number)
-VALUES ($1, $2, $3, $4, $5, COALESCE($6, 'manual'), $7, $8)
+INSERT INTO patterns (installation_id, repo_id, content, memory_doc_id, created_by, source, category, pr_number, memory_custom_id)
+VALUES ($1, $2, $3, $4, $5, COALESCE($8::text, 'manual'), $6, $7, $9::text)
 RETURNING id, installation_id, repo_id, content, memory_doc_id, created_by, COALESCE(source, 'manual') as source, category, pr_number, created_at, updated_at
 `
 
 type CreatePatternParams struct {
-	InstallationID int64       `json:"installation_id"`
-	RepoID         *int64      `json:"repo_id"`
-	Content        string      `json:"content"`
-	MemoryDocID    *string     `json:"memory_doc_id"`
-	CreatedBy      *string     `json:"created_by"`
-	Column6        interface{} `json:"column_6"`
-	Category       *string     `json:"category"`
-	PRNumber       *int        `json:"pr_number"`
+	InstallationID int64   `json:"installation_id"`
+	RepoID         *int64  `json:"repo_id"`
+	Content        string  `json:"content"`
+	MemoryDocID    *string `json:"memory_doc_id"`
+	CreatedBy      *string `json:"created_by"`
+	Category       *string `json:"category"`
+	PRNumber       *int    `json:"pr_number"`
+	Source         *string `json:"source"`
+	MemoryCustomID *string `json:"memory_custom_id"`
 }
 
 type CreatePatternRow struct {
@@ -50,9 +49,10 @@ func (q *Queries) CreatePattern(ctx context.Context, arg CreatePatternParams) (C
 		arg.Content,
 		arg.MemoryDocID,
 		arg.CreatedBy,
-		arg.Column6,
 		arg.Category,
 		arg.PRNumber,
+		arg.Source,
+		arg.MemoryCustomID,
 	)
 	var i CreatePatternRow
 	err := row.Scan(
@@ -71,26 +71,98 @@ func (q *Queries) CreatePattern(ctx context.Context, arg CreatePatternParams) (C
 	return i, err
 }
 
-const deletePattern = `-- name: DeletePattern :execrows
-DELETE FROM patterns WHERE id = $1 AND installation_id = ANY($2::bigint[])
+const deletePattern = `-- name: DeletePattern :one
+DELETE FROM patterns
+WHERE id = $1::bigint AND installation_id = ANY($2::bigint[])
+RETURNING installation_id, memory_custom_id, memory_doc_id,
+          repo_id, content, COALESCE(source, 'manual')::text AS source, category, pr_number
 `
 
 type DeletePatternParams struct {
-	ID      int     `json:"id"`
-	Column2 []int64 `json:"column_2"`
+	ID              int64   `json:"id"`
+	InstallationIds []int64 `json:"installation_ids"`
 }
 
-func (q *Queries) DeletePattern(ctx context.Context, arg DeletePatternParams) (int64, error) {
-	result, err := q.db.Exec(ctx, deletePattern, arg.ID, arg.Column2)
+type DeletePatternRow struct {
+	InstallationID int64   `json:"installation_id"`
+	MemoryCustomID *string `json:"memory_custom_id"`
+	MemoryDocID    *string `json:"memory_doc_id"`
+	RepoID         *int64  `json:"repo_id"`
+	Content        string  `json:"content"`
+	Source         string  `json:"source"`
+	Category       *string `json:"category"`
+	PRNumber       *int    `json:"pr_number"`
+}
+
+func (q *Queries) DeletePattern(ctx context.Context, arg DeletePatternParams) (DeletePatternRow, error) {
+	row := q.db.QueryRow(ctx, deletePattern, arg.ID, arg.InstallationIds)
+	var i DeletePatternRow
+	err := row.Scan(
+		&i.InstallationID,
+		&i.MemoryCustomID,
+		&i.MemoryDocID,
+		&i.RepoID,
+		&i.Content,
+		&i.Source,
+		&i.Category,
+		&i.PRNumber,
+	)
+	return i, err
+}
+
+const getLowQualityPatterns = `-- name: GetLowQualityPatterns :many
+SELECT id, installation_id, repo_id, memory_doc_id, content_hash, category,
+       times_matched, times_confirmed, times_dismissed, quality_score,
+       last_matched_at, created_at, updated_at
+FROM pattern_stats
+WHERE installation_id = $1 AND quality_score <= $2
+ORDER BY quality_score ASC
+LIMIT $3::bigint
+`
+
+type GetLowQualityPatternsParams struct {
+	InstallationID int64   `json:"installation_id"`
+	QualityScore   float64 `json:"quality_score"`
+	RowLimit       int64   `json:"row_limit"`
+}
+
+func (q *Queries) GetLowQualityPatterns(ctx context.Context, arg GetLowQualityPatternsParams) ([]PatternStat, error) {
+	rows, err := q.db.Query(ctx, getLowQualityPatterns, arg.InstallationID, arg.QualityScore, arg.RowLimit)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	return result.RowsAffected(), nil
+	defer rows.Close()
+	var items []PatternStat
+	for rows.Next() {
+		var i PatternStat
+		if err := rows.Scan(
+			&i.ID,
+			&i.InstallationID,
+			&i.RepoID,
+			&i.MemoryDocID,
+			&i.ContentHash,
+			&i.Category,
+			&i.TimesMatched,
+			&i.TimesConfirmed,
+			&i.TimesDismissed,
+			&i.QualityScore,
+			&i.LastMatchedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const getPattern = `-- name: GetPattern :one
 SELECT id, installation_id, repo_id, content, memory_doc_id, created_by, COALESCE(source, 'manual') as source, category, pr_number, created_at, updated_at
-FROM patterns WHERE id = $1
+FROM patterns WHERE id = $1::bigint
 `
 
 type GetPatternRow struct {
@@ -107,7 +179,7 @@ type GetPatternRow struct {
 	UpdatedAt      *time.Time `json:"updated_at"`
 }
 
-func (q *Queries) GetPattern(ctx context.Context, id int) (GetPatternRow, error) {
+func (q *Queries) GetPattern(ctx context.Context, id int64) (GetPatternRow, error) {
 	row := q.db.QueryRow(ctx, getPattern, id)
 	var i GetPatternRow
 	err := row.Scan(
@@ -127,15 +199,15 @@ func (q *Queries) GetPattern(ctx context.Context, id int) (GetPatternRow, error)
 }
 
 const getPatternStats = `-- name: GetPatternStats :many
-SELECT DATE_TRUNC('week', created_at) as week, COALESCE(source, 'manual') as source, COUNT(*)::int as count
+SELECT DATE_TRUNC('week', created_at)::timestamptz AS week, COALESCE(source, 'manual') as source, COUNT(*)::int as count
 FROM patterns WHERE installation_id = ANY($1::bigint[])
 GROUP BY week, source ORDER BY week
 `
 
 type GetPatternStatsRow struct {
-	Week   pgtype.Interval `json:"week"`
-	Source string          `json:"source"`
-	Count  int             `json:"count"`
+	Week   time.Time `json:"week"`
+	Source string    `json:"source"`
+	Count  int       `json:"count"`
 }
 
 func (q *Queries) GetPatternStats(ctx context.Context, dollar_1 []int64) ([]GetPatternStatsRow, error) {

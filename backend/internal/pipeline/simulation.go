@@ -122,7 +122,7 @@ func (e *SimulationEngine) RunSimulations(ctx context.Context, req SimulationReq
 
 	// Aggregate stream signal — silent when zero scenarios actually ran.
 	if len(results) > 0 && req.Run.EventBus != nil {
-		req.Run.EventBus.Publish(req.Run.ReviewID, EventSimulationsComplete, map[string]any{
+		req.Run.EventBus.PublishForAttempt(req.Run.ReviewID, req.Run.AttemptGeneration, EventSimulationsComplete, map[string]any{
 			"total":  len(results),
 			"passed": countPassedSimulations(results),
 		})
@@ -232,7 +232,7 @@ func (e *SimulationEngine) simulateScenario(ctx context.Context, req SimulationR
 	result.ScenarioID = scenario.ID
 
 	if req.Run.EventBus != nil {
-		req.Run.EventBus.Publish(req.Run.ReviewID, EventScenarioSimulated, map[string]any{
+		req.Run.EventBus.PublishForAttempt(req.Run.ReviewID, req.Run.AttemptGeneration, EventScenarioSimulated, map[string]any{
 			"scenario_id": scenario.ID,
 			"verdict":     result.Verdict,
 			"files":       len(scenario.Files),

@@ -1,22 +1,5 @@
-import type { FindingState, GraphNode, GraphEdge } from "../types";
-import { useActiveRepo } from "@/lib/hooks/use-active-repo";
+import type { FindingState } from "../types";
 import { createAuthQuery, getApi } from "@/lib/query-kit";
-
-type GraphPayload = { nodes: GraphNode[]; edges: GraphEdge[] };
-
-const useGraphQuery = createAuthQuery<GraphPayload, { repoId: number }>({
-  queryKey: ["graph"],
-  fetcher: ({ repoId }, ctx) => getApi(ctx).get<GraphPayload>(`/api/v1/repos/${repoId}/graph`),
-  staleTime: 2 * 60 * 1000,
-});
-
-export const useGraphData = () => {
-  const { activeId } = useActiveRepo();
-  return useGraphQuery({
-    variables: { repoId: activeId ?? 0 },
-    enabled: !!activeId,
-  });
-};
 
 /** One recent review finding on a file, as GetFileMemory returns it. */
 export type FileMemoryComment = {

@@ -299,7 +299,7 @@ func judgeIssue(
 				rejected++
 			}
 		}
-		run.EventBus.Publish(run.ReviewID, EventAcceptanceChecked, map[string]any{
+		run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventAcceptanceChecked, map[string]any{
 			"issue":    link.Number,
 			"accepted": accepted,
 			"rejected": rejected,

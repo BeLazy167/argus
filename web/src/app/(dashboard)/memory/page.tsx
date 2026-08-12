@@ -15,6 +15,10 @@ const sectionLoading = () => (
 		<Loader2 className="h-6 w-6 animate-spin text-slate-text" aria-hidden />
 	</div>
 );
+const MemoriesSection = dynamic(
+	() => import("./memories-section").then((m) => m.MemoriesSection),
+	{ loading: sectionLoading },
+);
 const PatternsSection = dynamic(
 	() => import("../patterns/section").then((m) => m.PatternsSection),
 	{ loading: sectionLoading },
@@ -32,9 +36,10 @@ const InsightsSection = dynamic(
 	{ loading: sectionLoading },
 );
 
-type MemoryTab = "patterns" | "scenarios" | "architecture" | "insights";
+type MemoryTab = "memories" | "patterns" | "scenarios" | "architecture" | "insights";
 
 const TABS: { key: MemoryTab; label: string }[] = [
+	{ key: "memories", label: "Memories" },
 	{ key: "patterns", label: "Patterns" },
 	{ key: "scenarios", label: "Scenarios" },
 	{ key: "architecture", label: "Architecture" },
@@ -43,6 +48,7 @@ const TABS: { key: MemoryTab; label: string }[] = [
 
 function isMemoryTab(value: string | null): value is MemoryTab {
 	return (
+		value === "memories" ||
 		value === "patterns" ||
 		value === "scenarios" ||
 		value === "architecture" ||
@@ -57,7 +63,7 @@ export default function MemoryPage() {
 	// Read once at mount — the tab bar owns state thereafter (no effect).
 	const [tab, setTab] = useState<MemoryTab>(() => {
 		const t = searchParams.get("tab");
-		return isMemoryTab(t) ? t : "patterns";
+		return isMemoryTab(t) ? t : "memories";
 	});
 
 	// Mirror the active tab into ?tab= so refresh/share reflects the viewed
@@ -65,7 +71,7 @@ export default function MemoryPage() {
 	// the param for a clean URL.
 	const selectTab = (key: MemoryTab) => {
 		setTab(key);
-		updateParams({ tab: key === "patterns" ? "" : key });
+		updateParams({ tab: key === "memories" ? "" : key });
 	};
 
 	return (
@@ -104,6 +110,7 @@ export default function MemoryPage() {
 				))}
 			</div>
 
+			{tab === "memories" && <MemoriesSection />}
 			{tab === "patterns" && <PatternsSection />}
 			{tab === "scenarios" && <ScenariosSection />}
 			{tab === "architecture" && <ArchitectureSection />}

@@ -18,13 +18,7 @@ import (
 
 // CreateScenario inserts a new active scenario and returns its id.
 func (s *Store) CreateScenario(ctx context.Context, installationID int64, repoID *int64, description, source, sourceRef string, files, modules []string, severity string) (int64, error) {
-	var id int64
-	err := s.Pool.QueryRow(ctx,
-		`INSERT INTO scenarios (installation_id, repo_id, description, source, source_ref, files, modules, severity)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		 RETURNING id`,
-		installationID, repoID, description, source, sourceRef, files, modules, severity).
-		Scan(&id)
+	id, err := s.q.CreateScenario(ctx, db.CreateScenarioParams{InstallationID: installationID, RepoID: repoID, Description: description, Source: source, SourceRef: &sourceRef, Files: files, Modules: modules, Severity: &severity})
 	if err != nil {
 		return 0, fmt.Errorf("create scenario: %w", err)
 	}
@@ -33,13 +27,7 @@ func (s *Store) CreateScenario(ctx context.Context, installationID int64, repoID
 
 // CreatePendingScenario stores a scenario as inactive (pending dev approval).
 func (s *Store) CreatePendingScenario(ctx context.Context, installationID int64, repoID *int64, description, source, sourceRef string, files, modules []string, severity string) (int64, error) {
-	var id int64
-	err := s.Pool.QueryRow(ctx,
-		`INSERT INTO scenarios (installation_id, repo_id, description, source, source_ref, files, modules, severity, active)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, FALSE)
-		 RETURNING id`,
-		installationID, repoID, description, source, sourceRef, files, modules, severity).
-		Scan(&id)
+	id, err := s.q.CreatePendingScenario(ctx, db.CreatePendingScenarioParams{InstallationID: installationID, RepoID: repoID, Description: description, Source: source, SourceRef: &sourceRef, Files: files, Modules: modules, Severity: &severity})
 	if err != nil {
 		return 0, fmt.Errorf("create pending scenario: %w", err)
 	}
@@ -48,7 +36,7 @@ func (s *Store) CreatePendingScenario(ctx context.Context, installationID int64,
 
 // ActivateScenario sets a pending scenario to active (after dev approval).
 func (s *Store) ActivateScenario(ctx context.Context, id int64) error {
-	if _, err := s.Pool.Exec(ctx, `UPDATE scenarios SET active = TRUE WHERE id = $1`, id); err != nil {
+	if err := s.q.ActivateScenario(ctx, id); err != nil {
 		return fmt.Errorf("activate scenario: %w", err)
 	}
 	return nil
@@ -62,7 +50,7 @@ func (s *Store) ActivateScenario(ctx context.Context, id int64) error {
 // Briefly: scenarios with zero recent runs are guaranteed the top slots; after they accumulate
 // data the score rewards scenarios whose runs surface real findings (verdict ∈ broken|partial).
 func (s *Store) ListScenariosForFiles(ctx context.Context, repoID int64, filePaths []string) ([]Scenario, error) {
-	rows, err := s.Q.ListScenariosForFiles(ctx, db.ListScenariosForFilesParams{
+	rows, err := s.q.ListScenariosForFiles(ctx, db.ListScenariosForFilesParams{
 		RepoID:  &repoID,
 		Column2: filePaths,
 	})
@@ -78,7 +66,7 @@ func (s *Store) ListScenariosForFiles(ctx context.Context, repoID int64, filePat
 
 // ListScenariosForRepo returns all scenarios for a repo (active + pending).
 func (s *Store) ListScenariosForRepo(ctx context.Context, repoID int64, limit int) ([]Scenario, error) {
-	rows, err := s.Q.ListScenariosForRepo(ctx, db.ListScenariosForRepoParams{
+	rows, err := s.q.ListScenariosForRepo(ctx, db.ListScenariosForRepoParams{
 		RepoID: &repoID,
 		Limit:  int32(limit),
 	})
@@ -141,7 +129,7 @@ func (s *Store) GetScenario(ctx context.Context, id int64) (*Scenario, error) {
 
 // DeactivateScenario soft-deletes a scenario by setting active = false.
 func (s *Store) DeactivateScenario(ctx context.Context, id int64) error {
-	if _, err := s.Pool.Exec(ctx, `UPDATE scenarios SET active = FALSE WHERE id = $1`, id); err != nil {
+	if err := s.q.DeactivateScenario(ctx, id); err != nil {
 		return fmt.Errorf("deactivate scenario: %w", err)
 	}
 	return nil
@@ -149,13 +137,11 @@ func (s *Store) DeactivateScenario(ctx context.Context, id int64) error {
 
 // DeactivateScenarioScoped soft-deletes a scenario only if it belongs to one of the given installations.
 func (s *Store) DeactivateScenarioScoped(ctx context.Context, id int64, installationIDs []int64) error {
-	tag, err := s.Pool.Exec(ctx,
-		`UPDATE scenarios SET active = FALSE WHERE id = $1 AND installation_id = ANY($2)`,
-		id, installationIDs)
+	count, err := s.q.DeactivateScenarioScoped(ctx, db.DeactivateScenarioScopedParams{ID: id, Column2: installationIDs})
 	if err != nil {
 		return fmt.Errorf("deactivate scenario scoped: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
+	if count == 0 {
 		return pgx.ErrNoRows
 	}
 	return nil
@@ -163,10 +149,7 @@ func (s *Store) DeactivateScenarioScoped(ctx context.Context, id int64, installa
 
 // MarkScenarioOutdated marks scenarios as outdated if their files overlap with changed paths.
 func (s *Store) MarkScenarioOutdated(ctx context.Context, repoID int64, filePaths []string) error {
-	if _, err := s.Pool.Exec(ctx,
-		`UPDATE scenarios SET is_outdated = TRUE
-		 WHERE repo_id = $1 AND active = TRUE AND files && $2::text[]`,
-		repoID, filePaths); err != nil {
+	if err := s.q.MarkScenarioOutdated(ctx, db.MarkScenarioOutdatedParams{RepoID: &repoID, Column2: filePaths}); err != nil {
 		return fmt.Errorf("mark scenario outdated: %w", err)
 	}
 	return nil
@@ -175,7 +158,7 @@ func (s *Store) MarkScenarioOutdated(ctx context.Context, repoID int64, filePath
 // UpdateScenarioLastRun writes the denormalized last-run summary onto the scenario row and
 // clears the outdated flag. Called once per scenario per review, alongside CreateScenarioRun.
 func (s *Store) UpdateScenarioLastRun(ctx context.Context, id int64, verdict string, confidence float64, why, fix string, prNumber int, reviewID uuid.UUID) error {
-	if err := s.Q.UpdateScenarioLastRun(ctx, db.UpdateScenarioLastRunParams{
+	if err := s.q.UpdateScenarioLastRun(ctx, db.UpdateScenarioLastRunParams{
 		ID:             id,
 		LastVerdict:    strPtr(verdict),
 		LastConfidence: numericFromFloat(confidence),
@@ -192,7 +175,7 @@ func (s *Store) UpdateScenarioLastRun(ctx context.Context, id int64, verdict str
 // IncrementScenarioTriggerCount bumps the trigger counter. Safe to call after any sim outcome
 // (both "broken" and "fixed" count as triggers — the scenario was exercised).
 func (s *Store) IncrementScenarioTriggerCount(ctx context.Context, id int64) error {
-	if err := s.Q.IncrementScenarioTriggerCount(ctx, id); err != nil {
+	if err := s.q.IncrementScenarioTriggerCount(ctx, id); err != nil {
 		return fmt.Errorf("increment scenario trigger count: %w", err)
 	}
 	return nil
@@ -227,7 +210,7 @@ func UCBScore(wins, n, total float64) float64 {
 // CreateScenarioRun persists one simulation outcome. Idempotent on (scenario_id, review_id) —
 // re-running simulation for the same review overwrites the previous verdict.
 func (s *Store) CreateScenarioRun(ctx context.Context, scenarioID int64, reviewID uuid.UUID, prNumber int, verdict string, confidence float64, why, fix, rootCause, impact string) (ScenarioRun, error) {
-	row, err := s.Q.CreateScenarioRun(ctx, db.CreateScenarioRunParams{
+	row, err := s.q.CreateScenarioRun(ctx, db.CreateScenarioRunParams{
 		ScenarioID: scenarioID,
 		ReviewID:   reviewID,
 		PRNumber:   prNumber,
@@ -246,7 +229,7 @@ func (s *Store) CreateScenarioRun(ctx context.Context, scenarioID int64, reviewI
 
 // GetScenarioRuns returns the last N simulation outcomes for a scenario, newest first.
 func (s *Store) GetScenarioRuns(ctx context.Context, scenarioID int64, limit int) ([]ScenarioRun, error) {
-	rows, err := s.Q.GetScenarioRuns(ctx, db.GetScenarioRunsParams{
+	rows, err := s.q.GetScenarioRuns(ctx, db.GetScenarioRunsParams{
 		ScenarioID: scenarioID,
 		Limit:      int32(limit),
 	})
@@ -262,7 +245,7 @@ func (s *Store) GetScenarioRuns(ctx context.Context, scenarioID int64, limit int
 
 // GetScenarioKPIs returns the 4 summary counts that power the dashboard KPI cards.
 func (s *Store) GetScenarioKPIs(ctx context.Context, repoID int64) (ScenarioKPIs, error) {
-	row, err := s.Q.GetScenarioKPIs(ctx, &repoID)
+	row, err := s.q.GetScenarioKPIs(ctx, &repoID)
 	if err != nil {
 		return ScenarioKPIs{}, fmt.Errorf("get scenario kpis: %w", err)
 	}

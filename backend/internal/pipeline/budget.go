@@ -91,7 +91,7 @@ func (o *Orchestrator) applyReduce(ctx context.Context, run *PipelineRun, v admi
 	}
 
 	if run.EventBus != nil {
-		run.EventBus.Publish(run.ReviewID, EventBudgetReduced, map[string]any{
+		run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventBudgetReduced, map[string]any{
 			"max_files": v.MaxFiles,
 			"shallow":   v.ForceShallow,
 			"reason":    v.Reason,
@@ -116,7 +116,7 @@ func (o *Orchestrator) refuseForBudget(ctx context.Context, run *PipelineRun, ev
 	}
 
 	if run.EventBus != nil {
-		run.EventBus.Publish(run.ReviewID, EventError, map[string]string{"error": v.Reason})
+		run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventError, map[string]string{"error": v.Reason})
 	}
 
 	owner, repo, err := splitRepoFullName(event.RepoFullName)

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -220,7 +221,7 @@ func TestEmbedderRegistryResolution(t *testing.T) {
 		}
 	})
 
-	t.Run("resolver error degrades to platform", func(t *testing.T) {
+	t.Run("resolver error degrades ordinary callers to platform", func(t *testing.T) {
 		r := NewEmbedderRegistry(&fakeEmbedResolver{err: fmt.Errorf("db down")},
 			PlatformEmbeddings{APIKey: "platform"}, logger)
 		e, err := r.GetEmbedder(ctx, 1)
@@ -229,6 +230,14 @@ func TestEmbedderRegistryResolution(t *testing.T) {
 		}
 		if e.(*HTTPEmbedder).apiKey != "platform" {
 			t.Fatal("did not fall back to platform on resolver error")
+		}
+	})
+
+	t.Run("resolver error fails strict repair refresh", func(t *testing.T) {
+		r := NewEmbedderRegistry(&fakeEmbedResolver{err: fmt.Errorf("db down")},
+			PlatformEmbeddings{APIKey: "platform"}, logger)
+		if e, err := r.refreshEmbedder(ctx, 1); err == nil || e != nil {
+			t.Fatalf("refreshEmbedder = (%v, %v), want explicit error without platform fallback", e, err)
 		}
 	})
 
@@ -473,5 +482,31 @@ func TestEmbedFlightSurvivesOwnerCancel(t *testing.T) {
 	}
 	if len(joinerVecs) != 1 || joinerVecs[0][0] != 7 {
 		t.Fatalf("joiner got wrong result: %v", joinerVecs)
+	}
+}
+
+func TestHTTPEmbedderSpaceIDIdentifiesEndpointModelAndDimensions(t *testing.T) {
+	base := NewEmbedder("secret-a", "HTTPS://API.Example.com:443/v1/", "model-a", 1024)
+	same := NewEmbedder("secret-b", "https://api.example.com/v1", "model-a", 1024)
+	if base.SpaceID() != same.SpaceID() {
+		t.Fatal("API-key/default-port rotation changed the embedding space")
+	}
+	privateURL := NewEmbedder("key", "https://user:password@api.example.com/v1?token=secret#fragment", "model-a", 1024)
+	if privateURL.SpaceID() != same.SpaceID() {
+		t.Fatal("userinfo/query/fragment changed the coordinate-space identity")
+	}
+
+	rotations := []*HTTPEmbedder{
+		NewEmbedder("secret-a", "https://other.example.com/v1", "model-a", 1024),
+		NewEmbedder("secret-a", "https://api.example.com/v1", "model-b", 1024),
+		NewEmbedder("secret-a", "https://api.example.com/v1", "model-a", 1536),
+	}
+	for i, rotated := range rotations {
+		if base.SpaceID() == rotated.SpaceID() {
+			t.Errorf("rotation %d did not change embedding-space identity", i)
+		}
+	}
+	if strings.Contains(base.SpaceID(), "secret") || strings.Contains(base.SpaceID(), "example.com") {
+		t.Fatalf("space id leaks endpoint or credentials: %q", base.SpaceID())
 	}
 }

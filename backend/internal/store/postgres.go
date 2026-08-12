@@ -16,7 +16,26 @@ import (
 // Store wraps a PostgreSQL connection pool and sqlc-generated queries.
 type Store struct {
 	Pool *pgxpool.Pool
-	Q    *db.Queries
+	q    *db.Queries
+
+	// beginReviewPostClaimTx and beginReviewPostTx are narrow failure-injection
+	// seams for the two posting transactions. Production leaves them nil and
+	// uses Conn.Begin; PostgreSQL tests simulate lost claim/persistence commits.
+	beginReviewPostClaimTx func(context.Context, *pgxpool.Conn) (pgx.Tx, error)
+	beginReviewPostTx      func(context.Context, *pgxpool.Conn) (pgx.Tx, error)
+	// unlockReviewPostSession injects an unconfirmed session-unlock result in
+	// PostgreSQL tests. Production executes pg_advisory_unlock directly.
+	unlockReviewPostSession func(context.Context, *pgxpool.Conn, string) (bool, error)
+}
+
+// NewWithDB builds a Store over any sqlc-compatible pool or transaction.
+// Callers that only use generated Store methods do not need a concrete pool.
+func NewWithDB(dbtx db.DBTX) *Store {
+	st := &Store{q: db.New(dbtx)}
+	if pool, ok := dbtx.(*pgxpool.Pool); ok {
+		st.Pool = pool
+	}
+	return st
 }
 
 func New(ctx context.Context, databaseURL string) (*Store, error) {
@@ -47,7 +66,7 @@ func New(ctx context.Context, databaseURL string) (*Store, error) {
 		pool.Close()
 		return nil, fmt.Errorf("pinging database: %w", err)
 	}
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 	go st.keepAlive()
 	return st, nil
 }

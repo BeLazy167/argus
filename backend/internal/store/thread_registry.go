@@ -36,7 +36,7 @@ type ThreadLink struct {
 // not a proximity guess). Only fills NULL rows, so a re-post or webhook retry
 // can't overwrite an established link. Returns rows affected.
 func (s *Store) HydrateThreadNodeID(ctx context.Context, reviewID uuid.UUID, githubCommentID int64, threadNodeID string) (int64, error) {
-	return s.Q.HydrateThreadNodeID(ctx, db.HydrateThreadNodeIDParams{
+	return s.q.HydrateThreadNodeID(ctx, db.HydrateThreadNodeIDParams{
 		GraphqlThreadNodeID: &threadNodeID,
 		ReviewID:            reviewID,
 		GithubCommentID:     &githubCommentID,
@@ -47,7 +47,7 @@ func (s *Store) HydrateThreadNodeID(ctx context.Context, reviewID uuid.UUID, git
 // the "thread for finding X" lookup. The node id is X's own; dismissal targets
 // exactly X's thread rather than a neighbouring finding's.
 func (s *Store) GetThreadLinkForComment(ctx context.Context, commentID uuid.UUID) (*ThreadLink, error) {
-	row, err := s.Q.GetThreadLinkForComment(ctx, commentID)
+	row, err := s.q.GetThreadLinkForComment(ctx, commentID)
 	if err != nil {
 		return nil, err
 	}
@@ -65,7 +65,7 @@ func (s *Store) GetThreadLinkForComment(ctx context.Context, commentID uuid.UUID
 // the "threads for review R" lookup. Only rows with a stored node id are
 // returned; unhydrated / suppressed findings are omitted.
 func (s *Store) ListThreadLinksForReview(ctx context.Context, reviewID uuid.UUID) ([]ThreadLink, error) {
-	rows, err := s.Q.ListThreadLinksForReview(ctx, reviewID)
+	rows, err := s.q.ListThreadLinksForReview(ctx, reviewID)
 	if err != nil {
 		return nil, err
 	}

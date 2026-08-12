@@ -52,6 +52,11 @@ func (s *stubEmbedder) Model() string { return "stub-1024" }
 
 func pgTestPool(t *testing.T) (*pgxpool.Pool, int64) {
 	t.Helper()
+	return pgTestPoolWithMaxConns(t, 0)
+}
+
+func pgTestPoolWithMaxConns(t *testing.T, maxConns int32) (*pgxpool.Pool, int64) {
+	t.Helper()
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
 		t.Skip("TEST_DATABASE_URL not set; PG-backed tests run where the CI harness provides a database")
@@ -61,6 +66,9 @@ func pgTestPool(t *testing.T) (*pgxpool.Pool, int64) {
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		t.Fatalf("parse dsn: %v", err)
+	}
+	if maxConns > 0 {
+		cfg.MaxConns = maxConns
 	}
 	cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
 		return pgxvector.RegisterTypes(ctx, conn)
@@ -91,22 +99,23 @@ func pgTestPool(t *testing.T) (*pgxpool.Pool, int64) {
 }
 
 type memRow struct {
-	containerTag string
-	docType      string
-	content      string
-	metadata     map[string]string
-	hasEmbedding bool
-	model        *string
-	deletedAt    *time.Time
+	containerTag   string
+	docType        string
+	content        string
+	metadata       map[string]string
+	hasEmbedding   bool
+	model          *string
+	embeddingSpace *string
+	deletedAt      *time.Time
 }
 
 func readRow(t *testing.T, pool *pgxpool.Pool, install int64, customID string) memRow {
 	t.Helper()
 	var r memRow
 	err := pool.QueryRow(context.Background(), `
-		SELECT container_tag, type, content, metadata, embedding IS NOT NULL, embedding_model, deleted_at
+		SELECT container_tag, type, content, metadata, embedding IS NOT NULL, embedding_model, embedding_space, deleted_at
 		FROM memories WHERE installation_id = $1 AND custom_id = $2`,
-		install, customID).Scan(&r.containerTag, &r.docType, &r.content, &r.metadata, &r.hasEmbedding, &r.model, &r.deletedAt)
+		install, customID).Scan(&r.containerTag, &r.docType, &r.content, &r.metadata, &r.hasEmbedding, &r.model, &r.embeddingSpace, &r.deletedAt)
 	if err != nil {
 		t.Fatalf("read row %s: %v", customID, err)
 	}
@@ -466,13 +475,30 @@ func TestPGIndexerReembedMissing(t *testing.T) {
 		}
 	}
 
-	// A clean corpus is a no-op, not an error.
+	// A non-NULL vector in a foreign space is just as unusable as a missing
+	// vector and must be repaired after endpoint/model rotation.
+	if _, err := pool.Exec(ctx, `UPDATE memories SET embedding_space = 'retired-space'
+		WHERE installation_id = $1 AND custom_id = 'reembed-a'`, install); err != nil {
+		t.Fatalf("rotate space: %v", err)
+	}
 	again, err := idx.ReembedMissing(ctx, 10)
 	if err != nil {
-		t.Fatalf("second pass: %v", err)
+		t.Fatalf("mismatched-space pass: %v", err)
 	}
-	if again != 0 {
-		t.Errorf("second pass repaired = %d, want 0", again)
+	if again != 1 {
+		t.Errorf("mismatched-space pass repaired = %d, want 1", again)
+	}
+	if got := readRow(t, pool, install, "reembed-a").embeddingSpace; got == nil || *got != idx.embeddingSpaceID() {
+		t.Errorf("embedding_space = %v, want current %q", got, idx.embeddingSpaceID())
+	}
+
+	// A clean corpus is a no-op, not an error.
+	clean, err := idx.ReembedMissing(ctx, 10)
+	if err != nil {
+		t.Fatalf("clean pass: %v", err)
+	}
+	if clean != 0 {
+		t.Errorf("clean pass repaired = %d, want 0", clean)
 	}
 }
 
@@ -533,3 +559,106 @@ func (r *racingEmbedder) Embed(ctx context.Context, inputs []string) ([][]float3
 }
 
 func (r *racingEmbedder) Model() string { return "racing-1024" }
+
+func TestPGIndexerReactionFeedbackReversalPreservesOtherSources(t *testing.T) {
+	pool, install := pgTestPool(t)
+	ctx := context.Background()
+	idx := NewPGIndexer(pool, &stubEmbedder{}, install, pgTestDims, slog.New(slog.DiscardHandler))
+	base := FeedbackMemory{
+		FilePath: "race.go", Category: "concurrency", OriginalBody: "lock ordering can deadlock",
+		PRNumber: 9, Repo: "api",
+	}
+
+	trusted := base
+	trusted.Action = "dismissed"
+	trusted.Source = SourceTrustedReplyFeedback
+	trusted.DeveloperReply = "this lock is intentionally one-way"
+	if err := idx.IndexFeedbackSignal(ctx, "acme", "api", trusted); err != nil {
+		t.Fatal(err)
+	}
+	trustedID := dismissalCustomIDForSource("api", base.Category, base.OriginalBody, SourceTrustedReplyFeedback)
+
+	// Model a pre-source trusted reply row from before origin-specific IDs. The
+	// reaction reconciler may clean legacy reaction rows, but not one whose
+	// developer explanation proves it came from the authorized reply path.
+	legacyTrusted := base
+	legacyTrusted.Action = "dismissed"
+	legacyTrusted.DeveloperReply = "legacy trusted explanation"
+	if err := idx.IndexFeedbackSignal(ctx, "acme", "api", legacyTrusted); err != nil {
+		t.Fatal(err)
+	}
+	legacyTrustedID := dismissalCustomID("api", base.Category, base.OriginalBody)
+
+	legacyReaction := base
+	legacyReaction.OriginalBody = "legacy reaction dismissal"
+	legacyReaction.Action = "dismissed"
+	if err := idx.IndexFeedbackSignal(ctx, "acme", "api", legacyReaction); err != nil {
+		t.Fatal(err)
+	}
+	legacyReactionID := dismissalCustomID("api", legacyReaction.Category, legacyReaction.OriginalBody)
+	legacyReaction.Source = SourceReactionFeedback
+	legacyReaction.Action = ""
+	if err := idx.ReconcileFeedbackSignal(ctx, "acme", "api", legacyReaction); err != nil {
+		t.Fatal(err)
+	}
+	if got := readRow(t, pool, install, legacyReactionID); got.deletedAt == nil {
+		t.Fatal("legacy reaction dismissal was not retracted")
+	}
+
+	fb := base
+	fb.Action = "dismissed"
+	fb.Source = SourceReactionFeedback
+	dismissedID := dismissalCustomIDForSource("api", fb.Category, fb.OriginalBody, SourceReactionFeedback)
+	confirmedID := feedbackCustomIDForSource("acme", "api", fb.FilePath, fb.Category, fb.OriginalBody, "confirmed", SourceReactionFeedback)
+
+	if err := idx.ReconcileFeedbackSignal(ctx, "acme", "api", fb); err != nil {
+		t.Fatal(err)
+	}
+	if got := readRow(t, pool, install, dismissedID); got.deletedAt != nil {
+		t.Fatal("reaction dismissal was not live")
+	}
+
+	fb.Action = "confirmed"
+	if err := idx.ReconcileFeedbackSignal(ctx, "acme", "api", fb); err != nil {
+		t.Fatal(err)
+	}
+	if got := readRow(t, pool, install, dismissedID); got.deletedAt == nil {
+		t.Fatal("overturned reaction dismissal remains live and can still suppress")
+	}
+	if got := readRow(t, pool, install, confirmedID); got.deletedAt != nil {
+		t.Fatal("reaction confirmation was not live")
+	}
+	for name, id := range map[string]string{"trusted reply": trustedID, "legacy trusted reply": legacyTrustedID} {
+		if got := readRow(t, pool, install, id); got.deletedAt != nil {
+			t.Fatalf("%s was deleted by reaction reconciliation", name)
+		}
+	}
+
+	// Replay is idempotent and must resurrect neither stale state nor duplicates.
+	if err := idx.ReconcileFeedbackSignal(ctx, "acme", "api", fb); err != nil {
+		t.Fatal(err)
+	}
+
+	fb.Action = ""
+	if err := idx.ReconcileFeedbackSignal(ctx, "acme", "api", fb); err != nil {
+		t.Fatal(err)
+	}
+	if got := readRow(t, pool, install, confirmedID); got.deletedAt == nil {
+		t.Fatal("neutral reaction tally did not retract reaction confirmation")
+	}
+	for name, id := range map[string]string{"trusted reply": trustedID, "legacy trusted reply": legacyTrustedID} {
+		if got := readRow(t, pool, install, id); got.deletedAt != nil {
+			t.Fatalf("%s was deleted by neutral reaction reconciliation", name)
+		}
+	}
+	var liveReaction int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM memories
+		WHERE installation_id = $1 AND custom_id IN ($2, $3) AND deleted_at IS NULL
+	`, install, dismissedID, confirmedID).Scan(&liveReaction); err != nil {
+		t.Fatal(err)
+	}
+	if liveReaction != 0 {
+		t.Fatalf("live reaction feedback rows = %d, want 0", liveReaction)
+	}
+}

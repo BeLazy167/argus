@@ -247,7 +247,7 @@ func isMatchablePath(p string) bool {
 // — N call sites for one path against M declarations of it — so a generated
 // client that repeats a call thousands of times would otherwise materialise
 // N*M matches in memory before any caller could cap the WRITES. This runs in a
-// background goroutine on a VM that has already OOM'd once (see indexFileSet).
+// background goroutine on a VM that has already OOM'd during graph indexing.
 //
 // THE SEAM: everything unmatched after this returns is what embedding proposal
 // plus LLM confirmation would attach to — take the leftover client endpoints,
@@ -278,6 +278,9 @@ func MatchAPIEndpoints(endpoints []APIEndpoint) []APIMatch {
 		}
 		candidates := append([]APIEndpoint{}, servers[key{c.Method, c.Path}]...)
 		candidates = append(candidates, anyServers[c.Path]...)
+		if len(candidates) == 0 {
+			candidates = uniqueCompatibleServer(c, endpoints)
+		}
 		for _, s := range candidates {
 			// Cross-repo only. This subsumes the self-match case as well: a
 			// route and a call on the same line are in the same repository by
@@ -297,6 +300,71 @@ func MatchAPIEndpoints(endpoints []APIEndpoint) []APIMatch {
 		}
 	}
 	return out
+}
+
+// uniqueCompatibleServer is the grounded fallback for an unmatched client.
+// A concrete client segment may match a declared server parameter, but an edge
+// is emitted only when exactly one cross-repository declaration fits. This
+// recovers calls such as /jobs/42 -> /jobs/{} without guessing between services.
+func uniqueCompatibleServer(client APIEndpoint, endpoints []APIEndpoint) []APIEndpoint {
+	var match APIEndpoint
+	found := false
+	for _, server := range endpoints {
+		if server.Role != RoleServer || server.RepoID == client.RepoID {
+			continue
+		}
+		if server.Method != AnyMethod && server.Method != client.Method {
+			continue
+		}
+		if !serverPatternMatchesClient(server.Path, client.Path) {
+			continue
+		}
+		if found && (match.RepoID != server.RepoID || match.NodeID != server.NodeID) {
+			return nil
+		}
+		match = server
+		found = true
+	}
+	if !found {
+		return nil
+	}
+	return []APIEndpoint{match}
+}
+
+func serverPatternMatchesClient(serverPath, clientPath string) bool {
+	server := strings.Split(strings.TrimPrefix(serverPath, "/"), "/")
+	client := strings.Split(strings.TrimPrefix(clientPath, "/"), "/")
+	if len(server) == 0 || len(client) == 0 {
+		return false
+	}
+	usedPattern := false
+	for i, segment := range server {
+		if segment == wildcardSegment {
+			if i >= len(client) {
+				return false
+			}
+			for _, remaining := range client[i:] {
+				if remaining == paramSegment || remaining == wildcardSegment {
+					return false
+				}
+			}
+			return true
+		}
+		if i >= len(client) {
+			return false
+		}
+		if segment == paramSegment {
+			if client[i] == paramSegment || client[i] == wildcardSegment {
+				return false
+			}
+			usedPattern = true
+			continue
+		}
+		if segment != client[i] {
+			return false
+		}
+	}
+	return usedPattern && len(server) == len(client)
 }
 
 // ExtractAPIEndpoints recovers the route table and the client call sites of one

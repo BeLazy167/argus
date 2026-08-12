@@ -35,9 +35,9 @@ type SearchInclude struct {
 	Summaries       bool
 }
 
-// SearchFilters supports AND/OR metadata filtering. AND and OR are mutually
-// exclusive: precedence between them is undefined, so a request carrying both
-// would be non-deterministic.
+// SearchFilters supports AND/OR metadata filtering. Conditions in AND must all
+// hold; when OR is non-empty, at least one of its conditions must also hold.
+// The OR group is parenthesized before it is combined with AND.
 type SearchFilters struct {
 	AND []FilterCondition
 	OR  []FilterCondition

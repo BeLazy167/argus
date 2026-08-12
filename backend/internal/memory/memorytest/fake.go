@@ -33,11 +33,14 @@ type Fake struct {
 
 	mu          sync.Mutex
 	Feedback    []memory.FeedbackMemory // IndexFeedbackSignal
+	Reconciled  []memory.FeedbackMemory // ReconcileFeedbackSignal
 	Patterns    []memory.PatternMemory  // IndexPattern
 	SharedPats  []memory.PatternMemory  // IndexSharedPattern
 	Rules       []memory.RuleMemory     // IndexRule
 	ReviewBatch [][]memory.ReviewMemory // IndexReviewCommentsBatch
 	Scenarios   []FakeScenario          // IndexScenario
+	Invalidated []string                // InvalidateDocument
+	Superseded  [][2]string             // SupersedeDocument
 	Deleted     []string                // DeleteDocument
 }
 
@@ -86,6 +89,13 @@ func (f *Fake) IndexFeedbackSignal(_ context.Context, _, _ string, fb memory.Fee
 	return nil
 }
 
+func (f *Fake) ReconcileFeedbackSignal(_ context.Context, _, _ string, fb memory.FeedbackMemory) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Reconciled = append(f.Reconciled, fb)
+	return nil
+}
+
 func (f *Fake) IndexScenario(_ context.Context, owner, repo string, scenarioID int64, description, severity string, files []string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -116,6 +126,20 @@ func (f *Fake) Briefing(_ context.Context, q memory.BriefingQuery) (string, erro
 		return f.BriefingFn(q)
 	}
 	return "", nil
+}
+
+func (f *Fake) InvalidateDocument(_ context.Context, documentID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Invalidated = append(f.Invalidated, documentID)
+	return nil
+}
+
+func (f *Fake) SupersedeDocument(_ context.Context, documentID, replacementID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Superseded = append(f.Superseded, [2]string{documentID, replacementID})
+	return nil
 }
 
 func (f *Fake) DeleteDocument(_ context.Context, documentID string) error {

@@ -24,17 +24,14 @@ const LearnedMemoryExcerptChars = 280
 // unbounded caller-supplied limit buys nothing and costs a response.
 const learnedMemoryLimitMax = 50
 
-// reviewMemoryPredicates is the ONE scoping clause both reads below share, in
-// the shape memory/pgsearch.go searchPredicates established: tenant first,
-// every value bound as a parameter, every condition inside the query so no row
-// from another installation can be fetched and then discarded.
+// reviewMemoryPredicates is the ONE tenant + attribution clause both reads
+// share. Lifecycle filtering belongs to the live_memories database view, the
+// same relation search, re-embedding, and archive reconciliation read.
 //
 // installationID is not redundant with reviewID even though a review id is
-// globally unique. It is the tenancy predicate: it is what makes a caller that
-// passes someone else's review id (guessed, leaked, or copied from a URL) get
-// zero rows instead of that tenant's private memory content. It also keeps the
-// read on memories_review_idx, which is keyed installation-first.
-const reviewMemoryPredicates = `installation_id = $1 AND review_id = $2 AND deleted_at IS NULL`
+// globally unique. It is the tenancy predicate: a caller that passes someone
+// else's review id gets zero rows instead of that tenant's private content.
+const reviewMemoryPredicates = `m.installation_id = $1 AND a.review_id = $2`
 
 // learnedNoun maps a memory type to its (singular, plural) display nouns.
 //
@@ -88,10 +85,11 @@ func (s *Store) ListReviewMemories(ctx context.Context, installationID int64, re
 		limit = learnedMemoryLimitMax
 	}
 	rows, err := s.Pool.Query(ctx, `
-		SELECT type, container_tag, left(content, $3), updated_at
-		FROM memories
+		SELECT m.type, m.container_tag, left(m.content, $3), a.attributed_at
+		FROM memory_review_attributions a
+		JOIN live_memories m ON m.id = a.memory_id
 		WHERE `+reviewMemoryPredicates+`
-		ORDER BY updated_at DESC, id DESC
+		ORDER BY a.attributed_at DESC, m.id DESC
 		LIMIT $4
 	`, installationID, reviewID, LearnedMemoryExcerptChars, limit)
 	if err != nil {
@@ -115,11 +113,12 @@ func (s *Store) ListReviewMemories(ctx context.Context, installationID int64, re
 // that wrote more rows than the preview list shows. Same tenant scoping.
 func (s *Store) CountReviewMemoriesByType(ctx context.Context, installationID int64, reviewID uuid.UUID) ([]LearnedMemoryCount, error) {
 	rows, err := s.Pool.Query(ctx, `
-		SELECT type, COUNT(*)::int
-		FROM memories
+		SELECT m.type, COUNT(*)::int
+		FROM memory_review_attributions a
+		JOIN live_memories m ON m.id = a.memory_id
 		WHERE `+reviewMemoryPredicates+`
-		GROUP BY type
-		ORDER BY COUNT(*) DESC, type
+		GROUP BY m.type
+		ORDER BY COUNT(*) DESC, m.type
 	`, installationID, reviewID)
 	if err != nil {
 		return nil, fmt.Errorf("counting review memories: %w", err)

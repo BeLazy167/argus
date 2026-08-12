@@ -1,8 +1,11 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"log/slog"
 	"testing"
+	"time"
 )
 
 func ptrOf[T any](v T) *T { return &v }
@@ -105,4 +108,54 @@ func TestOrgDefaultsThresholdValidation(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestScheduleMemoryReembedDetachesFromRequest(t *testing.T) {
+	called := make(chan int64, 1)
+	s := &Server{logger: slog.New(slog.DiscardHandler), reembedMemories: func(ctx context.Context, installationID int64) (int, error) {
+		if err := ctx.Err(); err != nil {
+			t.Errorf("repair inherited cancelled request context: %v", err)
+		}
+		called <- installationID
+		return 3, nil
+	}}
+	requestCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	s.scheduleMemoryReembed(requestCtx, 77)
+	select {
+	case got := <-called:
+		if got != 77 {
+			t.Fatalf("installation = %d, want 77", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("embedding rotation did not schedule corpus repair")
+	}
+}
+
+func TestScheduleMemoryReembedReturnsBeforeRepairCompletes(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	s := &Server{logger: slog.New(slog.DiscardHandler), reembedMemories: func(context.Context, int64) (int, error) {
+		close(started)
+		<-release
+		return 0, nil
+	}}
+	returned := make(chan struct{})
+	go func() {
+		s.scheduleMemoryReembed(context.Background(), 77)
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(100 * time.Millisecond):
+		close(release)
+		t.Fatal("provider-key handler trigger waited for corpus convergence")
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("provider-key handler did not promptly trigger convergence")
+	}
+	close(release)
 }

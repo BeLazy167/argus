@@ -102,7 +102,7 @@ func insertCountSeeds(t *testing.T, ctx context.Context, pool *pgxpool.Pool, rev
 // WHERE clause, which drops all-suppressed files from the result entirely.
 func TestArchBugDensityExcludesSuppressedFindings(t *testing.T) {
 	pool, ctx := fileMemoryTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 
 	const filePath = "internal/pipeline/orchestrator.go"
 
@@ -201,7 +201,7 @@ func TestArchBugDensityExcludesSuppressedFindings(t *testing.T) {
 				t.Errorf("change frequency: got %d PRs, want %d — a PR whose findings were all suppressed still changed this file", got.Prs, tc.wantPRs)
 			}
 
-			fileBugs, err := st.Q.GetFileBugCount(ctx, db.GetFileBugCountParams{RepoID: repoID, FilePath: filePath})
+			fileBugs, err := st.q.GetFileBugCount(ctx, db.GetFileBugCountParams{RepoID: repoID, FilePath: filePath})
 			if err != nil {
 				t.Fatalf("GetFileBugCount: %v", err)
 			}
@@ -213,6 +213,56 @@ func TestArchBugDensityExcludesSuppressedFindings(t *testing.T) {
 	}
 }
 
+// TestFindingAggregatesExcludeObsoleteAttempts prevents a retry's hidden
+// findings from inflating architecture and organization statistics.
+func TestFindingAggregatesExcludeObsoleteAttempts(t *testing.T) {
+	pool, ctx := fileMemoryTestPool(t)
+	st := NewWithDB(pool)
+	installID, repoID, reviewID := seedCountRepo(t, ctx, pool, "retry-metrics")
+	const filePath = "retry.go"
+	if _, err := pool.Exec(ctx, `INSERT INTO review_comments (review_id, attempt_generation, file_path, end_line, body, severity, state)
+		VALUES ($1, 1, $2, 10, 'obsolete critical', 'critical', 'posted')`, reviewID, filePath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE reviews SET attempt_generation = 2 WHERE id = $1`, reviewID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO review_comments (review_id, attempt_generation, file_path, end_line, body, severity, state)
+		VALUES ($1, 2, $2, 20, 'current warning', 'warning', 'posted')`, reviewID, filePath); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := st.ListArchBugDensity(ctx, repoID)
+	if err != nil || len(rows) != 1 || rows[0].Bugs != 1 || rows[0].Prs != 1 {
+		t.Fatalf("architecture rows=%+v err=%v, want one current-attempt bug", rows, err)
+	}
+	fileBugs, err := st.q.GetFileBugCount(ctx, db.GetFileBugCountParams{RepoID: repoID, FilePath: filePath})
+	if err != nil || fileBugs != 1 {
+		t.Fatalf("file bugs=%d err=%v, want current-attempt count 1", fileBugs, err)
+	}
+	stats, err := st.GetStatsScoped(ctx, []int64{installID})
+	if err != nil || stats.CriticalFinds != 0 {
+		t.Fatalf("scoped criticals=%d err=%v, obsolete critical leaked", stats.CriticalFinds, err)
+	}
+	period := pgtype.Interval{Days: 30, Valid: true}
+	overview, err := st.q.StatsOverview(ctx, db.StatsOverviewParams{InstallationIds: []int64{installID}, Period: period})
+	if err != nil || overview.CriticalFinds != 0 {
+		t.Fatalf("overview criticals=%d err=%v, obsolete critical leaked", overview.CriticalFinds, err)
+	}
+	severity, err := st.q.StatsFindingsBySeverity(ctx, db.StatsFindingsBySeverityParams{InstallationIds: []int64{installID}, Period: period})
+	if err != nil || len(severity) != 1 || severity[0].Severity == nil || *severity[0].Severity != "warning" || severity[0].Count != 1 {
+		t.Fatalf("severity rows=%+v err=%v, want only current warning", severity, err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO comment_outcomes (review_comment_id, outcome)
+		SELECT id, 'confirmed' FROM review_comments WHERE review_id=$1`, reviewID); err != nil {
+		t.Fatal(err)
+	}
+	learn, err := st.q.GetLearnLayerCounts(ctx, db.GetLearnLayerCountsParams{InstallationIds: []int64{installID}, Period: "30 days"})
+	if err != nil || learn.FeedbackIndexed != 1 {
+		t.Fatalf("feedback indexed=%d err=%v, want only current-attempt outcome", learn.FeedbackIndexed, err)
+	}
+}
+
 // TestStatsCountsExcludeSuppressedFindings covers the siblings of the #239
 // query: every dashboard count that aggregates review_comments. They make the
 // same claim — "this is what Argus reported" — and a suppressed row is exactly
@@ -220,7 +270,7 @@ func TestArchBugDensityExcludesSuppressedFindings(t *testing.T) {
 // this issue follows up on was a correct fix applied to one of a pair.
 func TestStatsCountsExcludeSuppressedFindings(t *testing.T) {
 	pool, ctx := fileMemoryTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 	q := db.New(pool)
 
 	const author = "suppression-count-author"

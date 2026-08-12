@@ -14,6 +14,7 @@ import (
 
 	ghpkg "github.com/BeLazy167/argus/backend/internal/github"
 	"github.com/BeLazy167/argus/backend/internal/store"
+	github "github.com/google/go-github/v68/github"
 	"github.com/google/uuid"
 )
 
@@ -688,7 +689,10 @@ func TestPairCommentsToRows_SameLineDistinctRows(t *testing.T) {
 		{GithubID: 1002, Path: "pay.go", Line: 42, Body: "**Security**: missing authz"},
 		{GithubID: 1001, Path: "pay.go", Line: 42, Body: "**Bug**: off-by-one"},
 	}
-	got := pairCommentsToRows(rows, comments)
+	got, err := pairCommentsToRows(rows, comments)
+	if err != nil {
+		t.Fatalf("pairing: %v", err)
+	}
 	if len(got) != 2 {
 		t.Fatalf("want 2 distinct bindings, got %d: %v", len(got), got)
 	}
@@ -703,34 +707,39 @@ func TestPairCommentsToRows_SameLineDistinctRows(t *testing.T) {
 // TestPairCommentsToRows_IdenticalBodiesStillDistinct covers the degenerate case
 // (two same-line findings with identical bodies): the pairing must still assign
 // each comment its own row rather than collapsing both onto one.
-func TestPairCommentsToRows_IdenticalBodiesStillDistinct(t *testing.T) {
+func TestPairCommentsToRows_IdenticalBodiesFailClosed(t *testing.T) {
 	ra, rb := uuid.New(), uuid.New()
-	rows := []unboundCommentRow{
-		{ID: ra, Path: "a.go", Line: 5, Body: "same"},
-		{ID: rb, Path: "a.go", Line: 5, Body: "same"},
-	}
-	comments := []postedComment{
-		{GithubID: 10, Path: "a.go", Line: 5, Body: "same"},
-		{GithubID: 11, Path: "a.go", Line: 5, Body: "same"},
-	}
-	got := pairCommentsToRows(rows, comments)
-	if len(got) != 2 {
-		t.Fatalf("want 2 distinct bindings, got %d: %v", len(got), got)
-	}
-	if got[ra] == got[rb] {
-		t.Fatalf("identical-body findings collapsed onto one github id %d", got[ra])
+	rows := []unboundCommentRow{{ID: ra, Path: "a.go", Line: 5, Body: "same"}, {ID: rb, Path: "a.go", Line: 5, Body: "same"}}
+	comments := []postedComment{{GithubID: 10, Path: "a.go", Line: 5, Body: "same"}, {GithubID: 11, Path: "a.go", Line: 5, Body: "same"}}
+	if got, err := pairCommentsToRows(rows, comments); err == nil || got != nil {
+		t.Fatalf("ambiguous pairing = %v, %v; want fail closed", got, err)
 	}
 }
 
-// TestPairCommentsToRows_NoRowForComment: a comment whose (path, line) has no
-// unbound row is skipped (leaves nothing bound), mirroring the old backfill's
-// no-match behaviour.
-func TestPairCommentsToRows_NoRowForComment(t *testing.T) {
+func TestPairCommentsToRows_NoRowForCommentFailsClosed(t *testing.T) {
 	ra := uuid.New()
 	rows := []unboundCommentRow{{ID: ra, Path: "a.go", Line: 5, Body: "x"}}
 	comments := []postedComment{{GithubID: 99, Path: "b.go", Line: 9, Body: "y"}}
-	got := pairCommentsToRows(rows, comments)
-	if len(got) != 0 {
-		t.Fatalf("want no bindings for a comment with no matching row, got %v", got)
+	if got, err := pairCommentsToRows(rows, comments); err == nil || got != nil {
+		t.Fatalf("unmatched pairing = %v, %v; want fail closed", got, err)
+	}
+}
+
+func TestPairCommentsToRowsNormalizesCRLFAndTrailingWhitespace(t *testing.T) {
+	id := uuid.New()
+	got, err := pairCommentsToRows([]unboundCommentRow{{ID: id, Path: "old.go", Line: 7, Body: "first  \r\nsecond\n"}}, []postedComment{{GithubID: 44, Path: "old.go", Line: 7, Body: "first\nsecond"}})
+	if err != nil || got[id] != 44 {
+		t.Fatalf("pairing=%v err=%v", got, err)
+	}
+}
+
+func TestPostedReviewCommentLinePrefersOutdatedOriginalLine(t *testing.T) {
+	comment := &github.PullRequestComment{Line: github.Ptr(0), OriginalLine: github.Ptr(27), Position: github.Ptr(3)}
+	if got := postedReviewCommentLine(comment); got != 27 {
+		t.Fatalf("line=%d want original_line 27", got)
+	}
+	comment.Line = github.Ptr(31)
+	if got := postedReviewCommentLine(comment); got != 31 {
+		t.Fatalf("line=%d want current line 31", got)
 	}
 }

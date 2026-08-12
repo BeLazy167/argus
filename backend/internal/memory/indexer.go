@@ -50,15 +50,18 @@ type Indexer interface {
 	IndexPattern(ctx context.Context, repo string, pattern PatternMemory) (*IndexResult, error)
 	IndexSharedPattern(ctx context.Context, pattern PatternMemory) (*IndexResult, error)
 	IndexFeedbackSignal(ctx context.Context, owner, repo string, feedback FeedbackMemory) error
+	// ReconcileFeedbackSignal makes reaction feedback a current state rather
+	// than append-only history. An empty Action retracts only reaction-owned
+	// signals; trusted replies and automatic praise have separate identities.
+	ReconcileFeedbackSignal(ctx context.Context, owner, repo string, feedback FeedbackMemory) error
 	IndexScenario(ctx context.Context, owner, repo string, scenarioID int64, description, severity string, files []string) error
 
 	// ForReview returns an Indexer that attributes everything it writes to one
-	// review run (memories.review_id, migration 070). It is what lets a
-	// finished review say what it learned; without it a memory row is
-	// identifiable only down to the pull request, which every re-review of
-	// that PR overwrites. Returns the receiver unchanged for the nil UUID.
-	// Attribution is a property of the WRITER, not of each document, because
-	// one run's writes all belong to the same review.
+	// review run. memories.review_id keeps current provenance, while
+	// memory_review_attributions retains every review that learned the row.
+	// Returns the receiver unchanged for the nil UUID. Attribution is a
+	// property of the writer, not each document, because one run's writes all
+	// belong to the same review.
 	ForReview(reviewID uuid.UUID) Indexer
 
 	// Readers. The reader seam is two deep, error-honest methods: Search (typed
@@ -83,9 +86,34 @@ type Indexer interface {
 	// verbatim. Defined in briefing.go.
 	Briefing(ctx context.Context, q BriefingQuery) (string, error)
 
-	// Maintenance.
+	// Maintenance. Invalidation and supersession preserve history while making
+	// knowledge unavailable to every live-row reader. SupersedeDocument links
+	// documentID to a live replacement in the same installation.
+	InvalidateDocument(ctx context.Context, documentID string) error
+	SupersedeDocument(ctx context.Context, documentID, replacementID string) error
 	DeleteDocument(ctx context.Context, documentID string) error
 }
+
+const (
+	// SourceLegacyReplyFeedback identifies reply-derived rows written before the
+	// author authorization boundary existed. Readers quarantine this source
+	// non-destructively because those rows carry no provenance to audit trust.
+	SourceLegacyReplyFeedback = "reply_feedback"
+	// SourceTrustedReplyFeedback identifies repo-scoped finding feedback whose
+	// author had effective repository write access. Pattern rows with this older
+	// source were incorrectly written installation-wide and are quarantined.
+	SourceTrustedReplyFeedback = "trusted_reply_feedback"
+	// SourceTrustedReplyLearning identifies repo-specific pattern learning from
+	// a reply author with effective repository write access. Its distinct source
+	// keeps new repo-scoped rows distinguishable from legacy shared pattern rows.
+	SourceTrustedReplyLearning = "trusted_repo_reply_learning"
+	// SourceReactionFeedback identifies reversible feedback derived from the
+	// current aggregate GitHub reaction tally.
+	SourceReactionFeedback = "reaction_feedback"
+	// SourceAutomaticPraise identifies positive feedback learned from an Argus
+	// praise finding rather than from a developer action.
+	SourceAutomaticPraise = "automatic_praise"
+)
 
 // IndexResult identifies the row a write landed on. ID is the deterministic
 // customID: in the Postgres store the document id and the customID are the
@@ -217,7 +245,15 @@ func RuleCustomID(ruleID int64) string {
 // writer is IndexFeedbackSignal below; its invariants are round-tripped in
 // dismissal_id_test.go through that write path.
 func dismissalCustomID(repo, category, body string) string {
-	h := sha256.Sum256([]byte(category + "|" + normalizeBody(body)))
+	return dismissalCustomIDForSource(repo, category, body, "")
+}
+
+func dismissalCustomIDForSource(repo, category, body, source string) string {
+	identity := category + "|" + normalizeBody(body)
+	if source != "" {
+		identity += "|" + source
+	}
+	h := sha256.Sum256([]byte(identity))
 	hash := hex.EncodeToString(h[:6])
 	prefix := fmt.Sprintf("%s--dismissal", repoIDSegment(repo))
 	return truncateIDWithSuffix(prefix, hash)
@@ -225,10 +261,19 @@ func dismissalCustomID(repo, category, body string) string {
 
 // FeedbackCustomID returns a stable customId for a feedback signal on a finding.
 // Includes `action` in the hash so confirmed and dismissed signals for the
-// same finding coexist instead of silently overwriting each other.
+// same finding coexist instead of silently overwriting each other. Production
+// feedback writers also add Source through feedbackCustomIDForSource.
 func FeedbackCustomID(owner, repo, filePath, category, body, action string) string {
+	return feedbackCustomIDForSource(owner, repo, filePath, category, body, action, "")
+}
+
+func feedbackCustomIDForSource(owner, repo, filePath, category, body, action, source string) string {
 	_ = owner
-	h := sha256.Sum256([]byte(filePath + "|" + category + "|" + normalizeBody(body) + "|" + action))
+	identity := filePath + "|" + category + "|" + normalizeBody(body) + "|" + action
+	if source != "" {
+		identity += "|" + source
+	}
+	h := sha256.Sum256([]byte(identity))
 	hash := hex.EncodeToString(h[:6])
 	prefix := fmt.Sprintf("%s--feedback", repoIDSegment(repo))
 	return truncateIDWithSuffix(prefix, hash)
@@ -269,6 +314,9 @@ type FeedbackMemory struct {
 	// Repo is the repo short name, mirrored into dismissal metadata for
 	// post-hoc audits (the container tag already scopes retrieval).
 	Repo string
+	// Source owns the feedback document identity. Reaction feedback is
+	// reversible without deleting trusted-reply or automatic-praise knowledge.
+	Source string
 }
 
 // buildReviewContent keeps content pure-prose: the finding body only. No
@@ -448,6 +496,8 @@ func specialistBlockWith(ctx context.Context, run runSearchFn, logger *slog.Logg
 	}()
 
 	wg.Wait()
+	block.Repo = retrievableMatches(block.Repo)
+	block.Shared = retrievableMatches(block.Shared)
 	// Per-leg degradation: keep whatever legs succeeded, Warn the failures,
 	// and error only when ALL legs failed (nothing usable). Callers treat the
 	// returned error as "no institutional memory available at all".

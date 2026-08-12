@@ -48,16 +48,14 @@ packages:
     fallback_type: "unknown"
     frontmatter: |
       // biome-ignore-all lint: generated file
-      import type { GaugeRow, Review, ReviewComment, PRReviewSummary, AutoResolveSummary, LearnedMemory, LearnedMemoryCount } from "./api-types";
-      import type { GraphNode, GraphEdge } from "../types";
+      import type { GaugeRow, Review, ReviewComment, ReviewMinorNote, PRReviewSummary, AutoResolveSummary, LearnedMemory, LearnedMemoryCount } from "./api-types";
     type_mappings:
       time.Time: "string"
       store.GaugeRow: "GaugeRow"
       store.Review: "Review"
       store.ReviewComment: "ReviewComment"
+      store.ReviewMinorNote: "ReviewMinorNote"
       store.PRReviewSummary: "PRReviewSummary"
       store.AutoResolveSummary: "AutoResolveSummary"
       store.LearnedMemory: "LearnedMemory"
       store.LearnedMemoryCount: "LearnedMemoryCount"
-      db.ListGraphNodesRow: "GraphNode"
-      db.ListGraphEdgesRow: "GraphEdge"

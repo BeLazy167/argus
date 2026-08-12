@@ -236,18 +236,18 @@ func (idx *PGIndexer) runSearchVec(ctx context.Context, req SearchRequest, qv *p
 		// enough to matter -- and price the recall cost first, because every
 		// absolute floor above (0.80 attribution, 0.95 suppression) assumes
 		// exact distances.
-		args = append(args, qv, idx.embedder.Model(), req.Query, pool, req.Threshold, limit)
+		args = append(args, qv, idx.embeddingSpaceID(), req.Query, pool, req.Threshold, limit)
 		n := len(args)
 		q := fmt.Sprintf(`
 WITH vec AS (
   SELECT id, row_number() OVER (ORDER BY embedding %[8]s $%[1]d%[9]s) AS rnk
-  FROM memories
-  WHERE %[7]s AND embedding IS NOT NULL AND embedding_model = $%[2]d
+  FROM live_memories
+  WHERE %[7]s AND embedding IS NOT NULL AND embedding_space = $%[2]d
   ORDER BY embedding %[8]s $%[1]d%[9]s
   LIMIT $%[4]d
 ), fts AS (
   SELECT id, row_number() OVER (ORDER BY ts_rank_cd(content_tsv, websearch_to_tsquery('english', $%[3]d)) DESC, id) AS rnk
-  FROM memories
+  FROM live_memories
   WHERE %[7]s AND content_tsv @@ websearch_to_tsquery('english', $%[3]d)
   ORDER BY ts_rank_cd(content_tsv, websearch_to_tsquery('english', $%[3]d)) DESC, id
   LIMIT $%[4]d
@@ -257,10 +257,10 @@ WITH vec AS (
   FROM vec v FULL OUTER JOIN fts f USING (id)
 ), scored AS (
   SELECT m.custom_id, m.content, m.metadata, u.rrf,
-         CASE WHEN m.embedding IS NOT NULL AND m.embedding_model = $%[2]d
+         CASE WHEN m.embedding IS NOT NULL AND m.embedding_space = $%[2]d
                    AND NOT ((m.embedding %[8]s $%[1]d%[9]s)::float8 = 'NaN'::float8)
               THEN LEAST(GREATEST(1 - (m.embedding %[8]s $%[1]d%[9]s)::float8, 0::float8), 1::float8) ELSE 0 END AS score
-  FROM fused u JOIN memories m ON m.id = u.id
+  FROM fused u JOIN live_memories m ON m.id = u.id
 )
 SELECT custom_id, content, metadata, score
 FROM scored
@@ -291,7 +291,7 @@ LIMIT $%[6]d`,
 		n := len(args)
 		q := fmt.Sprintf(`
 SELECT custom_id, content, metadata, 0::float8 AS score
-FROM memories
+FROM live_memories
 WHERE %[3]s AND content_tsv @@ websearch_to_tsquery('english', $%[1]d)
 ORDER BY ts_rank_cd(content_tsv, websearch_to_tsquery('english', $%[1]d)) DESC, id
 LIMIT $%[2]d`,
@@ -334,7 +334,8 @@ LIMIT $%[2]d`,
 }
 
 // pinnedScan is the predicate-only leg behind the point-lookup fallback:
-// same WHERE as the hybrid legs (tenant, container, tombstones, filters),
+// same live_memories relation and WHERE as the hybrid legs (tenant,
+// container, filters),
 // no lexical or vector requirement, newest first, score 0.
 // pgQuerier is satisfied by both *pgxpool.Pool and pgx.Tx. The fallback takes
 // it explicitly so it can run INSIDE the caller's open transaction: acquiring
@@ -352,7 +353,7 @@ func pinnedScan(ctx context.Context, q pgQuerier, where string, args []any, req 
 	args = append(args, limit)
 	sql := fmt.Sprintf(`
 SELECT custom_id, content, metadata, 0::float8 AS score
-FROM memories
+FROM live_memories
 WHERE %s
 ORDER BY updated_at DESC, id DESC
 LIMIT $%d`, where, len(args))
@@ -394,30 +395,37 @@ func scanMatches(rows pgx.Rows, req SearchRequest, op string) ([]PatternMatch, e
 	return out, nil
 }
 
-// searchPredicates renders the shared WHERE prefix both legs use: tenant,
-// container, live-row tombstones, and the request's filter groups. Filter
+// searchPredicates renders the request-specific WHERE prefix both legs use:
+// tenant, container, and filter groups. Every query reads live_memories, whose
+// database view owns the shared deleted/invalidated/superseded predicate. Filter
 // semantics: the AND group must all hold, the
 // OR group needs at least one, both ANDed together when present. The `type`
 // key reads the indexed column (Doc.Type == metadata["type"] by
 // construction); every other key reads the metadata map.
 func (idx *PGIndexer) searchPredicates(req SearchRequest) (string, []any) {
-	args := []any{idx.installationID, req.ContainerTag}
+	// Legacy reply rows carry no authorization provenance. Older authorized
+	// reply PATTERNS were also written installation-wide despite being explicitly
+	// repo-specific. Keep both for audit, but exclude them before ranking so they
+	// cannot crowd current trusted repo learning out of the candidate limit.
+	// Trusted feedback rows retain SourceTrustedReplyFeedback and are not pattern
+	// rows, so they remain visible.
+	args := []any{idx.installationID, req.ContainerTag, SourceLegacyReplyFeedback, SourceTrustedReplyFeedback}
 	conds := []string{
 		"installation_id = $1",
 		"container_tag = $2",
-		"deleted_at IS NULL",
-		"invalidated_at IS NULL",
+		"COALESCE(metadata->>'source', '') <> $3",
+		"NOT (type = 'pattern' AND COALESCE(metadata->>'source', '') = $4)",
 	}
 	if req.Filters != nil {
 		for _, f := range req.Filters.AND {
-			frag, a := filterSQL(f, len(args))
+			frag, a := filterSQLWithDecay(f, len(args), idx.disableSharedDecay)
 			conds = append(conds, frag)
 			args = append(args, a...)
 		}
 		if len(req.Filters.OR) > 0 {
 			var ors []string
 			for _, f := range req.Filters.OR {
-				frag, a := filterSQL(f, len(args))
+				frag, a := filterSQLWithDecay(f, len(args), idx.disableSharedDecay)
 				ors = append(ors, frag)
 				args = append(args, a...)
 			}
@@ -443,6 +451,10 @@ var numericLiteral = regexp.MustCompile(numericLiteralPattern)
 // type column), returning the fragment and its ordered args. base is the
 // number of args already placed.
 func filterSQL(f FilterCondition, base int) (string, []any) {
+	return filterSQLWithDecay(f, base, false)
+}
+
+func filterSQLWithDecay(f FilterCondition, base int, disableSharedDecay bool) (string, []any) {
 	var frag string
 	var args []any
 	switch {
@@ -496,9 +508,13 @@ func filterSQL(f FilterCondition, base int) (string, []any) {
 			//
 			// So: keep the presence and regex guards, and swap only the
 			// VALUE they gate for the age-derived one.
+			confidence := effectiveConfidenceSQL()
+			if disableSharedDecay {
+				confidence = "(metadata->>'confidence')::numeric"
+			}
 			frag = fmt.Sprintf(
 				`CASE WHEN metadata->>'confidence' ~ '%s' THEN %s END %s $%d::numeric`,
-				numericLiteralPattern, effectiveConfidenceSQL(), op, base+1)
+				numericLiteralPattern, confidence, op, base+1)
 			args = []any{f.Value}
 			break
 		}

@@ -19,6 +19,7 @@ import (
 	"nhooyr.io/websocket/wsjson"
 
 	"github.com/BeLazy167/argus/backend/internal/pipeline"
+	"github.com/BeLazy167/argus/backend/internal/store"
 )
 
 func (s *Server) listAllReviews(w http.ResponseWriter, r *http.Request) {
@@ -79,6 +80,12 @@ func (s *Server) getReview(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load review comments"})
 		return
 	}
+	minorNotes, err := s.store.GetReviewMinorNotes(r.Context(), id)
+	if err != nil {
+		s.logger.Error("fetching review minor notes", "error", err, "review_id", id)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load review minor notes"})
+		return
+	}
 
 	// Incremental-history sidecars: the PR's per-SHA review passes and its
 	// auto-resolve pushes. Auxiliary to the review itself, so a failure degrades
@@ -107,6 +114,7 @@ func (s *Server) getReview(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, ReviewDetailResponse{
 		Review:            review,
 		Comments:          comments,
+		MinorNotes:        minorNotes,
 		History:           history,
 		AutoResolveEvents: autoResolves,
 		Memories:          memories,
@@ -143,6 +151,11 @@ func (s *Server) exportReview(w http.ResponseWriter, r *http.Request) {
 	comments, err := s.store.GetReviewComments(r.Context(), id)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load comments"})
+		return
+	}
+	minorNotes, err := s.store.GetReviewMinorNotes(r.Context(), id)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load minor notes"})
 		return
 	}
 
@@ -367,6 +380,7 @@ func (s *Server) exportReview(w http.ResponseWriter, r *http.Request) {
 			Status:        review.Status,
 			TotalFindings: len(findings),
 			Findings:      findings,
+			MinorNotes:    minorNotes,
 		}
 		if err := json.NewEncoder(w).Encode(export); err != nil {
 			s.logger.Warn("export encode failed", "error", err)
@@ -391,14 +405,51 @@ func (s *Server) retryReview(w http.ResponseWriter, r *http.Request) {
 		s.handleDBError(w, err, "review not found")
 		return
 	}
-	if review.Status != "failed" && review.Status != "cancelled" {
+	// Completed rows carrying the exact ambiguous-post claim are admitted only
+	// to the reconciliation repair path. This lets an older status commit repair
+	// missing semantic outbox rows without launching a new attempt.
+	repairCompleted := review.Status == "completed" && review.Error != nil && strings.HasPrefix(*review.Error, store.ErrReviewPostPersistenceAmbiguous.Error())
+	if review.Status != "failed" && review.Status != "cancelled" && !repairCompleted {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "only failed or cancelled reviews can be retried"})
 		return
 	}
+	// repo.InstallationID is the DB serial, not GitHub's installation id. The
+	// marker lookup must authenticate as the GitHub installation.
+	inst, instErr := s.store.GetInstallation(r.Context(), repo.InstallationID)
+	if instErr != nil {
+		s.handleDBError(w, instErr, "installation not found")
+		return
+	}
+	reconciliation, reconcileErr := s.reconcileAmbiguousReviewPost(r.Context(), review, repo, inst.InstallationID, getUserID(r.Context()))
+	if reconcileErr != nil {
+		// Never expose GitHub, marker, or persistence details. A failed/incomplete
+		// lookup and a still-recent claim both mean the same safe user action: wait
+		// and retry. The detailed reason remains in structured server logs.
+		s.logger.Warn("retry: review post reconciliation deferred", "error", reconcileErr, "review_id", id, "repo", repo.FullName)
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "review post reconciliation is still pending; retry later"})
+		return
+	}
+	if reconciliation == reviewPostAlreadyDelivered {
+		// The requested retry is already satisfied by the review found on GitHub.
+		// Do not enter admission, BeginReviewRetry, or Launcher: all would charge a
+		// redundant generation and hide the original attempt's comments.
+		writeJSON(w, http.StatusOK, map[string]string{"status": "already delivered", "review_id": id.String()})
+		return
+	}
+
 	// Refuse if the previous run is still live (e.g. a review cancelled but not
 	// yet halted whose run is still executing): retrying now would double-run
 	// the pipeline and post twice. Synchronous so we can surface 409.
-	if err := s.orchestrator.EnsureNotRunning(r.Context(), id); err != nil {
+	retrier := s.reviewRetrier
+	if retrier == nil {
+		retrier = s.orchestrator
+	}
+	if retrier == nil {
+		s.logger.Error("retry precheck unavailable", "review_id", id)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "retry failed"})
+		return
+	}
+	if err := retrier.EnsureNotRunning(r.Context(), id); err != nil {
 		if errors.Is(err, pipeline.ErrReviewRunning) {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 			return
@@ -417,17 +468,8 @@ func (s *Server) retryReview(w http.ResponseWriter, r *http.Request) {
 	// goroutine spawned). Trace_id is preserved onto the detached BaseCtx.
 	// Retry was the least protected path: no rate limit, no concurrency token,
 	// no check beyond installation scope — while re-running the whole pipeline
-	// at the cost of a fresh review. It goes through Admission like everything
+	// at the cost of a fresh review. It goes through Admission like everything.
 
-	// repo.InstallationID is the DB serial, not GitHub's installation id. The
-	// dashboard actor is authorized on its organisation role and never reaches
-	// GitHub, but passing the wrong id anyway would sit there waiting for the
-	// day someone widens the actor kinds.
-	inst, instErr := s.store.GetInstallation(r.Context(), repo.InstallationID)
-	if instErr != nil {
-		s.handleDBError(w, instErr, "installation not found")
-		return
-	}
 	orgLogin, _, ok := strings.Cut(repo.FullName, "/")
 	if !ok {
 		// Without this the whole name becomes the org rate-limit bucket key,
@@ -446,15 +488,34 @@ func (s *Server) retryReview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var attemptGeneration int
 	launchErr := s.launcher.Launch(pipeline.LaunchSpec{
-		Repo:     repo.FullName,
-		PR:       review.PRNumber,
-		BaseCtx:  obs.SetTraceID(context.Background(), obs.TraceID(r.Context())),
-		ReviewID: &id,
+		Repo:              repo.FullName,
+		PR:                review.PRNumber,
+		BaseCtx:           obs.SetTraceID(context.Background(), obs.TraceID(r.Context())),
+		ReviewID:          &id,
+		AttemptGeneration: &attemptGeneration,
 		BeforeSpawn: func(bsCtx context.Context) error {
-			return s.store.UpdateReviewStatus(bsCtx, id, "pending", "", nil)
+			// The reaction sweep is a synchronous launch barrier. Do it before
+			// claiming a new retry generation so a transient GitHub failure
+			// cannot leave the review pending without a spawned pipeline.
+			if err := s.reconcileReactionsBeforeReview(bsCtx, inst.InstallationID, repo.FullName, review.PRNumber); err != nil {
+				return err
+			}
+			var claimed bool
+			var err error
+			attemptGeneration, claimed, err = s.store.BeginReviewRetry(bsCtx, id)
+			if err != nil {
+				return err
+			}
+			if !claimed {
+				return pipeline.ErrReviewRunning
+			}
+			return nil
 		},
-		Run: func(ctx context.Context) error { return s.orchestrator.RetryReview(ctx, id) },
+		Run: func(ctx context.Context) error {
+			return retrier.RetryReview(ctx, id, attemptGeneration)
+		},
 		OnDone: func(err error) {
 			// context.Canceled means a Stop halted the retry — the state machine
 			// already marked it cancelled, so it isn't a failure to log. The
@@ -464,7 +525,7 @@ func (s *Server) retryReview(w http.ResponseWriter, r *http.Request) {
 			}
 		},
 	})
-	if errors.Is(launchErr, pipeline.ErrInFlight) {
+	if errors.Is(launchErr, pipeline.ErrInFlight) || errors.Is(launchErr, pipeline.ErrReviewRunning) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "another review for this PR is in flight"})
 		return
 	}
@@ -573,32 +634,68 @@ func (s *Server) streamReviewWS(w http.ResponseWriter, r *http.Request) {
 
 	ctx := conn.CloseRead(r.Context())
 
-	// Terminal state: send final event and close
-	if review.Status == "completed" || review.Status == "failed" {
-		evtType := pipeline.EventCompleted
-		if review.Status == "failed" {
-			evtType = pipeline.EventError
-		}
-		_ = wsjson.Write(ctx, conn, pipeline.Event{
-			Type:      evtType,
-			Timestamp: time.Now(),
-			Data:      mustMarshal(map[string]string{"status": review.Status}),
-		})
-		conn.Close(websocket.StatusNormalClosure, "review already "+review.Status)
-		return
-	}
-
+	terminal := review.Status == "completed" || review.Status == "failed" || review.Status == "cancelled"
 	if s.eventBus == nil {
+		if terminal {
+			writeTerminalReviewEvent(ctx, conn, review.Status)
+			return
+		}
 		conn.Close(websocket.StatusInternalError, "streaming not available")
 		return
 	}
 
-	events, history, unsub := s.eventBus.Subscribe(id)
+	var afterID int64
+	if cursor := r.URL.Query().Get("after"); cursor != "" {
+		afterID, err = strconv.ParseInt(cursor, 10, 64)
+		if err != nil || afterID < 0 {
+			conn.Close(websocket.StatusPolicyViolation, "invalid event cursor")
+			return
+		}
+	}
+	if err := writeReviewStream(ctx, conn, s.eventBus, id, afterID, func(ctx context.Context) (string, error) {
+		current, err := s.store.GetReview(ctx, id)
+		if err != nil {
+			return "", err
+		}
+		return current.Status, nil
+	}); err != nil {
+		s.logger.Error("review stream", "error", err, "review_id", id)
+	}
+}
+
+// writeReviewStream registers the subscriber before re-reading review status.
+// The ordering closes the only gap that durable replay cannot cover: a terminal
+// event whose PostgreSQL persistence failed while the previous local topic was
+// being closed. A terminal before the status read is synthesized; one after it
+// is delivered through the already-registered live subscription.
+func writeReviewStream(
+	ctx context.Context,
+	conn *websocket.Conn,
+	eventBus *pipeline.EventBus,
+	reviewID uuid.UUID,
+	afterID int64,
+	loadCurrentStatus func(context.Context) (string, error),
+) error {
+	events, history, subscriberClosed, unsub, err := eventBus.SubscribeContextWithCloseReason(ctx, reviewID, afterID)
+	if err != nil {
+		_ = conn.Close(websocket.StatusInternalError, "streaming not available")
+		return fmt.Errorf("subscribing to review events: %w", err)
+	}
 	if events == nil {
-		conn.Close(websocket.StatusNormalClosure, "no active stream")
-		return
+		_ = conn.Close(websocket.StatusNormalClosure, "no active stream")
+		return nil
 	}
 	defer unsub()
+
+	status, err := loadCurrentStatus(ctx)
+	if err != nil {
+		_ = conn.Close(websocket.StatusTryAgainLater, "review status unavailable; reconnect")
+		return fmt.Errorf("reloading review status after subscription: %w", err)
+	}
+	terminal := isTerminalReviewStatus(status)
+	if terminal {
+		defer eventBus.CloseTopic(reviewID)
+	}
 
 	// Keepalive: ping every 30s to prevent Fly proxy timeout
 	go func() {
@@ -616,28 +713,127 @@ func (s *Server) streamReviewWS(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// Replay history
+	// A bounded reconnect page is closed before this handler starts. Capture its
+	// typed reason now; other closures may still arrive while history is written.
+	var knownCloseReason pipeline.SubscriberCloseReason
+	select {
+	case knownCloseReason = <-subscriberClosed:
+	default:
+	}
+	replayHasMore := knownCloseReason == pipeline.SubscriberCloseReplayPageExhausted
+
+	// Replay history. Defer a terminal marker found in a partial page: otherwise
+	// the browser's terminal no-loop rule would prevent it from fetching the
+	// remaining gap. On the final page, write every message before cleanly
+	// closing even if sequence allocation placed the terminal marker earlier.
+	terminalReplayed := false
 	for _, evt := range history {
-		if err := wsjson.Write(ctx, conn, evt); err != nil {
-			return
+		if replayHasMore && isTerminalReviewEvent(evt.Type) {
+			continue
 		}
+		if err := wsjson.Write(ctx, conn, evt); err != nil {
+			return nil
+		}
+		terminalReplayed = terminalReplayed || isTerminalReviewEvent(evt.Type)
+	}
+	if replayHasMore {
+		closeStatus, message := reviewStreamClose(knownCloseReason)
+		_ = conn.Close(closeStatus, message)
+		return nil
+	}
+	if terminalReplayed {
+		_ = conn.Close(websocket.StatusNormalClosure, "review stream ended")
+		return nil
 	}
 
-	// Stream live events
+	// Replay the durable tail before synthesizing a degraded terminal marker so
+	// findings and timeline entries are not skipped.
+	if terminal {
+		writeTerminalReviewEvent(ctx, conn, status)
+		return nil
+	}
+
+	streamLiveReviewEventsAfterCloseReason(ctx, conn, events, subscriberClosed, knownCloseReason)
+	return nil
+}
+
+func streamLiveReviewEvents(
+	ctx context.Context,
+	conn *websocket.Conn,
+	events <-chan pipeline.Event,
+	subscriberClosed <-chan pipeline.SubscriberCloseReason,
+) {
+	streamLiveReviewEventsAfterCloseReason(ctx, conn, events, subscriberClosed, "")
+}
+
+func streamLiveReviewEventsAfterCloseReason(
+	ctx context.Context,
+	conn *websocket.Conn,
+	events <-chan pipeline.Event,
+	subscriberClosed <-chan pipeline.SubscriberCloseReason,
+	knownCloseReason pipeline.SubscriberCloseReason,
+) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case evt, ok := <-events:
 			if !ok {
-				conn.Close(websocket.StatusNormalClosure, "stream ended")
+				reason := knownCloseReason
+				if reason == "" {
+					reason = pipeline.SubscriberCloseTopic
+					if closedReason, received := <-subscriberClosed; received {
+						reason = closedReason
+					}
+				}
+				status, message := reviewStreamClose(reason)
+				_ = conn.Close(status, message)
 				return
 			}
 			if err := wsjson.Write(ctx, conn, evt); err != nil {
 				return
 			}
+			if isTerminalReviewEvent(evt.Type) {
+				_ = conn.Close(websocket.StatusNormalClosure, "review stream ended")
+				return
+			}
 		}
 	}
+}
+
+func reviewStreamClose(reason pipeline.SubscriberCloseReason) (websocket.StatusCode, string) {
+	switch reason {
+	case pipeline.SubscriberCloseDurableOverflow,
+		pipeline.SubscriberCloseDedupExhausted,
+		pipeline.SubscriberCloseReplayPageExhausted:
+		return websocket.StatusTryAgainLater, "review stream fell behind; reconnect to replay"
+	default:
+		return websocket.StatusNormalClosure, "stream ended"
+	}
+}
+
+func writeTerminalReviewEvent(ctx context.Context, conn *websocket.Conn, status string) {
+	evtType := pipeline.EventCompleted
+	if status == "failed" {
+		evtType = pipeline.EventError
+	}
+	if status == "cancelled" {
+		evtType = pipeline.EventCancelled
+	}
+	_ = wsjson.Write(ctx, conn, pipeline.Event{
+		Type:      evtType,
+		Timestamp: time.Now(),
+		Data:      mustMarshal(map[string]string{"status": status}),
+	})
+	_ = conn.Close(websocket.StatusNormalClosure, "review already "+status)
+}
+
+func isTerminalReviewStatus(status string) bool {
+	return status == "completed" || status == "failed" || status == "cancelled"
+}
+
+func isTerminalReviewEvent(eventType pipeline.EventType) bool {
+	return eventType == pipeline.EventCompleted || eventType == pipeline.EventError || eventType == pipeline.EventCancelled
 }
 
 func mustMarshal(v any) json.RawMessage {

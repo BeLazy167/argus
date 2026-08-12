@@ -198,6 +198,8 @@ Key environment variables — see [`backend/.env.example`](backend/.env.example)
 | `ENCRYPTION_KEY` | AES key encrypting BYOK provider keys at rest (required for reviews) |
 | `CLERK_JWKS_URL` | Clerk JWKS endpoint; when unset, authed API routes fail closed (503) |
 | `DASHBOARD_BASE_URL` | Dashboard URL linked from GitHub comments |
+| `MERMAID_VALIDATOR_BASE_URL` | Explicit dashboard origin for server-side Mermaid validation; configure with the secret (no vendor default) |
+| `MERMAID_VALIDATOR_SECRET` | Shared backend/dashboard secret for Mermaid parser requests; configure with the validator base URL |
 | `SELF_HOSTED` | `true` applies self-host defaults (reviews auto-run unconditionally) |
 | `EMBEDDINGS_API_KEY` | Embeddings key for memory (optional; without it rows are full-text-searchable only) |
 | `EMBEDDINGS_BASE_URL` | Embeddings endpoint (OpenAI-compatible), default Voyage via the AI gateway |

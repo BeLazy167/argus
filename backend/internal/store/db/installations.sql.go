@@ -14,7 +14,7 @@ import (
 const createInstallation = `-- name: CreateInstallation :one
 INSERT INTO installations (installation_id, org_login)
 VALUES ($1, $2)
-ON CONFLICT (installation_id) DO UPDATE SET org_login = $2
+ON CONFLICT (installation_id) DO UPDATE SET org_login = $2, suspended_at = NULL
 RETURNING id, installation_id, org_login, clerk_org_id, created_at, suspended_at
 `
 
@@ -152,6 +152,48 @@ func (q *Queries) GetOrgDefaults(ctx context.Context, id int64) (json.RawMessage
 	return column_1, err
 }
 
+const listInstallations = `-- name: ListInstallations :many
+SELECT id, installation_id, org_login, clerk_org_id, created_at, suspended_at
+FROM installations
+ORDER BY created_at DESC
+`
+
+type ListInstallationsRow struct {
+	ID             int64      `json:"id"`
+	InstallationID int64      `json:"installation_id"`
+	OrgLogin       string     `json:"org_login"`
+	ClerkOrgID     *string    `json:"clerk_org_id"`
+	CreatedAt      time.Time  `json:"created_at"`
+	SuspendedAt    *time.Time `json:"suspended_at"`
+}
+
+func (q *Queries) ListInstallations(ctx context.Context) ([]ListInstallationsRow, error) {
+	rows, err := q.db.Query(ctx, listInstallations)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListInstallationsRow
+	for rows.Next() {
+		var i ListInstallationsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.InstallationID,
+			&i.OrgLogin,
+			&i.ClerkOrgID,
+			&i.CreatedAt,
+			&i.SuspendedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const mergeInstallationFeatureFlags = `-- name: MergeInstallationFeatureFlags :exec
 UPDATE installations SET feature_flags = feature_flags || $1::jsonb WHERE id = $2
 `
@@ -201,10 +243,10 @@ func (q *Queries) SetOrgDefaults(ctx context.Context, arg SetOrgDefaultsParams) 
 }
 
 const suspendInstallation = `-- name: SuspendInstallation :exec
-UPDATE installations SET suspended_at = NOW() WHERE installation_id = $1
+UPDATE installations SET suspended_at = NOW() WHERE id = $1
 `
 
-func (q *Queries) SuspendInstallation(ctx context.Context, installationID int64) error {
-	_, err := q.db.Exec(ctx, suspendInstallation, installationID)
+func (q *Queries) SuspendInstallation(ctx context.Context, id int64) error {
+	_, err := q.db.Exec(ctx, suspendInstallation, id)
 	return err
 }

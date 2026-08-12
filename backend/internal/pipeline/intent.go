@@ -202,7 +202,7 @@ func (ie *IntentExtractionStage) Execute(ctx context.Context, run *PipelineRun) 
 		"pr", run.PREvent.PRNumber)
 
 	if run.EventBus != nil {
-		run.EventBus.Publish(run.ReviewID, EventIntentExtracted, map[string]any{
+		run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventIntentExtracted, map[string]any{
 			"goal":      util.Truncate(parsed.Goal, 120, true),
 			"non_goals": len(parsed.NonGoals),
 			"criteria":  len(parsed.AcceptanceCriteria),

@@ -104,10 +104,13 @@ func seedEdge(t *testing.T, ctx context.Context, pool *pgxpool.Pool, repoID, dep
 // repo_id drops the sibling repo's dependent.
 func TestBlastRadiusScopesByInstallation(t *testing.T) {
 	pool, ctx := fileMemoryTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 
 	mine := seedBlastTenant(t, ctx, pool, "acme")
 	theirs := seedBlastTenant(t, ctx, pool, "initech")
+	for _, repoID := range []int64{mine.repoA, mine.repoB, theirs.repoA, theirs.repoB} {
+		publishGraphTestGeneration(t, ctx, pool, repoID, fmt.Sprintf("published-%d", repoID))
+	}
 
 	const seedPath = "api/handlers/jobs.go"
 
@@ -120,6 +123,18 @@ func TestBlastRadiusScopesByInstallation(t *testing.T) {
 	// by installation instead of repo.
 	crossRepo := seedNode(t, ctx, st, mine.repoB, "JobsPage", "web/pages/jobs.tsx")
 	seedEdge(t, ctx, pool, mine.repoB, crossRepo, target)
+
+	// A derived cross-repo match is intentionally NOT authoritative graph evidence.
+	// Both traversal engines must exclude it; before #254 only the CTE did.
+	for i := 0; i < 210; i++ {
+		name := fmt.Sprintf("GuessedClient%03d", i)
+		inferred := seedNode(t, ctx, st, mine.repoB, name, fmt.Sprintf("web/guessed-%03d.ts", i))
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO code_edges (repo_id, source_id, target_id, kind, inferred, updated_at)
+			VALUES ($1, $2, $3, 'calls_api', true, NOW())`, mine.repoB, inferred, target); err != nil {
+			t.Fatalf("seed inferred edge %d: %v", i, err)
+		}
+	}
 
 	// initech: another customer entirely, wired to acme's node by a corrupt edge.
 	foreign := seedNode(t, ctx, st, theirs.repoA, "SecretPipeline", "initech/secret.go")
@@ -144,6 +159,9 @@ func TestBlastRadiusScopesByInstallation(t *testing.T) {
 		},
 	}
 	if st.pgGraphAvailable(ctx) {
+		if err := st.RebuildCodeGraphProjection(ctx); err != nil {
+			t.Fatalf("rebuild pgGraph fixture: %v", err)
+		}
 		paths["pggraph"] = func(c context.Context) ([]CodeNode, error) {
 			return st.blastRadiusPGGraph(c, mine.installID, mine.repoA, []string{seedPath}, 2)
 		}
@@ -168,6 +186,11 @@ func TestBlastRadiusScopesByInstallation(t *testing.T) {
 
 			if slices.Contains(got, "SecretPipeline") {
 				t.Fatalf("TENANT LEAK: blast radius returned another installation's node; got %v", got)
+			}
+			for _, gotName := range got {
+				if strings.HasPrefix(gotName, "GuessedClient") {
+					t.Fatalf("inferred edge changed authoritative blast radius on %s path; got %v", name, got)
+				}
 			}
 			if _, ok := byName["JobsPage"]; !ok {
 				t.Fatalf("cross-repo dependent inside the installation was not reached; got %v", got)
@@ -221,9 +244,11 @@ func TestBlastRadiusScopesByInstallation(t *testing.T) {
 // nothing anywhere reports the loss.
 func TestBlastRadiusKeepsOwnRepoWithinRowBudget(t *testing.T) {
 	pool, ctx := fileMemoryTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 
 	tenant := seedBlastTenant(t, ctx, pool, "budget")
+	publishGraphTestGeneration(t, ctx, pool, tenant.repoA, "published-api")
+	publishGraphTestGeneration(t, ctx, pool, tenant.repoB, "published-web")
 	const seedPath = "api/handlers/jobs.go"
 	target := seedNode(t, ctx, st, tenant.repoA, "ListJobs", seedPath)
 
@@ -291,7 +316,7 @@ func TestCodeNodeInstallationFilledForWriterThatOmitsIt(t *testing.T) {
 // makes the node invisible to its own owner's blast radius.
 func TestUpsertCodeNodeStampsInstallationFromRepo(t *testing.T) {
 	pool, ctx := fileMemoryTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 	tenant := seedBlastTenant(t, ctx, pool, "stamp-test")
 
 	readInstallation := func(id int64) int64 {

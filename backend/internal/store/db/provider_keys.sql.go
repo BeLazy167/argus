@@ -10,8 +10,9 @@ import (
 	"time"
 )
 
-const deleteProviderKey = `-- name: DeleteProviderKey :execrows
+const deleteProviderKey = `-- name: DeleteProviderKey :one
 DELETE FROM provider_keys WHERE id = $1 AND installation_id = $2
+RETURNING provider
 `
 
 type DeleteProviderKeyParams struct {
@@ -19,12 +20,11 @@ type DeleteProviderKeyParams struct {
 	InstallationID int64 `json:"installation_id"`
 }
 
-func (q *Queries) DeleteProviderKey(ctx context.Context, arg DeleteProviderKeyParams) (int64, error) {
-	result, err := q.db.Exec(ctx, deleteProviderKey, arg.ID, arg.InstallationID)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
+func (q *Queries) DeleteProviderKey(ctx context.Context, arg DeleteProviderKeyParams) (string, error) {
+	row := q.db.QueryRow(ctx, deleteProviderKey, arg.ID, arg.InstallationID)
+	var provider string
+	err := row.Scan(&provider)
+	return provider, err
 }
 
 const listProviderKeys = `-- name: ListProviderKeys :many
@@ -155,7 +155,7 @@ type UpsertProviderKeyOrgLevelRow struct {
 	UpdatedAt      time.Time `json:"updated_at"`
 }
 
-// PATCH semantics on conflict (mirrors Store.UpsertProviderKey — keep in sync):
+// PATCH semantics on conflict (Store.UpsertProviderKey delegates here):
 // omitted base_url/model preserve stored values; an empty api_key_enc preserves
 // the stored key (keyless config updates must not destroy a stored key).
 func (q *Queries) UpsertProviderKeyOrgLevel(ctx context.Context, arg UpsertProviderKeyOrgLevelParams) (UpsertProviderKeyOrgLevelRow, error) {

@@ -465,12 +465,12 @@ func TestSearchPredicatesOrdinalsAreDense(t *testing.T) {
 			n, len(req.Filters.OR)-1, where)
 	}
 
-	// Tombstones bind no args, so the ordinal check cannot see them: deleting
-	// either one silently resurfaces soft-deleted and invalidated memories,
-	// reposting findings the developer already dismissed.
-	for _, pred := range []string{"deleted_at IS NULL", "invalidated_at IS NULL"} {
-		if !strings.Contains(where, pred) {
-			t.Errorf("missing tombstone predicate %q:\n%s", pred, where)
+	// Lifecycle belongs to the live_memories view, not this request-specific
+	// predicate builder. Reintroducing one tombstone here would create another
+	// independently maintained definition that can omit future states.
+	for _, column := range []string{"deleted_at", "invalidated_at", "superseded_by"} {
+		if strings.Contains(where, column) {
+			t.Errorf("search predicate duplicates live-row lifecycle column %q:\n%s", column, where)
 		}
 	}
 }
@@ -518,10 +518,10 @@ func TestSearchPredicatesORGroupsWithNestedFragments(t *testing.T) {
 			if n := strings.Count(where, " OR "); n != len(or)-1 {
 				t.Errorf("group has %d disjunctions, want %d:\n%s", n, len(or)-1, where)
 			}
-			// The group must be emitted at all: the tenant predicate binds
-			// installation_id and container_tag, so anything beyond those two
-			// args is the group itself.
-			if len(args) <= 2 {
+			// The group must be emitted at all: the base predicates bind
+			// installation, container, and the quarantined legacy source, so
+			// anything beyond those three args is the group itself.
+			if len(args) <= 3 {
 				t.Errorf("OR group emitted no predicate — it was dropped entirely:\n%s", where)
 			}
 		})
@@ -598,5 +598,39 @@ func TestFilterSQLConfidenceIsComputed(t *testing.T) {
 	}, 0)
 	if !strings.Contains(other, "metadata->>") || len(otherArgs) != 2 {
 		t.Errorf("non-confidence numeric keys must still read stored metadata: %q (%d args)", other, len(otherArgs))
+	}
+}
+
+func TestDisableSharedDecayUsesStoredConfidence(t *testing.T) {
+	idx := &PGIndexer{installationID: 42, disableSharedDecay: true}
+	where, args := idx.searchPredicates(SearchRequest{
+		ContainerTag: SharedTag,
+		Filters: &SearchFilters{AND: []FilterCondition{{
+			Key: "confidence", Value: "0.30", FilterType: "numeric", NumericOperator: ">=",
+		}}},
+	})
+	if strings.Contains(where, "EXTRACT(EPOCH") {
+		t.Fatalf("disable_shared_decay still applies age decay: %s", where)
+	}
+	if !strings.Contains(where, "(metadata->>'confidence')::numeric") {
+		t.Fatalf("disabled decay must compare pinned stored confidence: %s", where)
+	}
+	if len(args) != 5 { // tenant, container, two quarantined sources, threshold
+		t.Fatalf("args = %d, want 5", len(args))
+	}
+}
+
+func TestSearchPredicatesQuarantineLegacyReplyLearningsAtStorageBoundary(t *testing.T) {
+	idx := &PGIndexer{installationID: 42}
+	where, args := idx.searchPredicates(SearchRequest{ContainerTag: SharedTag})
+
+	if !strings.Contains(where, "metadata->>'source'") || !strings.Contains(where, "<>") {
+		t.Fatalf("legacy reply feedback quarantine missing from storage predicate:\n%s", where)
+	}
+	if len(args) < 4 || args[2] != SourceLegacyReplyFeedback || args[3] != SourceTrustedReplyFeedback {
+		t.Fatalf("quarantine sources are not safely bound: %v", args)
+	}
+	if !strings.Contains(where, "type = 'pattern'") {
+		t.Fatalf("legacy shared trusted source was not quarantined only as pattern learning:\n%s", where)
 	}
 }

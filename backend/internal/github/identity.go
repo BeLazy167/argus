@@ -20,14 +20,11 @@ func IsArgusThread(authorLogin, appSlug string) bool {
 }
 
 // IsPrivilegedAssociation reports whether a GitHub author_association grants
-// maintainer-level trust on the repo — the gate for privileged actions like
-// `@argus resolve` and the reply-path thread-resolution / terminal-state
-// shortcut. OWNER / MEMBER / COLLABORATOR can write and resolve conversations;
-// CONTRIBUTOR / FIRST_TIME_CONTRIBUTOR / MANNEQUIN / NONE (a fork contributor on
-// someone else's repo) cannot. Case-insensitive and whitespace-trimmed; an
-// empty or unknown association denies (fail-closed). author_association is a
-// coarse proxy for write permission — good enough here; a follow-up can tighten
-// to the collaborator-permission API if ever needed.
+// coarse maintainer-level trust. It is a cheap gate for commands whose policy
+// explicitly uses association (for example `@argus resolve`); it must not
+// authorize reply-derived persistent writes, which require an effective
+// repository permission lookup for the actual replier. Case-insensitive and
+// whitespace-trimmed; an empty or unknown association denies (fail-closed).
 func IsPrivilegedAssociation(authorAssociation string) bool {
 	switch strings.ToUpper(strings.TrimSpace(authorAssociation)) {
 	case "OWNER", "MEMBER", "COLLABORATOR":

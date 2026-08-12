@@ -1,11 +1,21 @@
 "use client";
 import { AlertTriangle, GitBranch, Info, Loader2, Network, Search, X } from "lucide-react";
 import { useMemo, useState } from "react";
-import ArchitectureCanvas, { type Lens } from "@/components/graph/ArchitectureCanvas";
+import ArchitectureCanvas, {
+	type ArchitectureSearchRequest,
+	type Lens,
+} from "@/components/graph/ArchitectureCanvas";
 import FileMemorySidebar from "@/components/graph/FileMemorySidebar";
+import GraphSnapshotStatus from "@/components/graph/GraphSnapshotStatus";
 import LensBar from "@/components/graph/LensBar";
 import { useActiveRepo } from "@/lib/hooks/use-active-repo";
 import { useArchitectureData } from "@/lib/queries/architecture";
+
+function searchStatusText(matchCount: number | null): string {
+	if (matchCount === null) return "";
+	if (matchCount === 0) return "No matching files.";
+	return `${matchCount} matching ${matchCount === 1 ? "file" : "files"}.`;
+}
 
 export function ArchitectureSection() {
 	const { activeId } = useActiveRepo();
@@ -19,7 +29,10 @@ function ArchitectureView({ activeId }: { activeId: number }) {
 	const { data: archData, isLoading, error } = useArchitectureData();
 	const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
 	const [lens, setLens] = useState<Lens>("risk");
-	const [searchQuery, setSearchQuery] = useState("");
+	const [searchRequest, setSearchRequest] = useState<ArchitectureSearchRequest>({
+		id: 0,
+		query: "",
+	});
 	const [showGuide, setShowGuide] = useState(() =>
 		typeof window !== "undefined"
 			? localStorage.getItem("argus-arch-guide-dismissed") !== "1"
@@ -48,6 +61,12 @@ function ArchitectureView({ activeId }: { activeId: number }) {
 		};
 	}, [archData]);
 
+	const normalizedSearch = searchRequest.query.toLowerCase().trim();
+	const searchMatchCount = normalizedSearch
+		? (archData?.files.filter((file) => file.path.toLowerCase().includes(normalizedSearch))
+				.length ?? 0)
+		: null;
+
 	return (
 		<div className="flex flex-col h-[calc(100vh-13rem)] min-h-[540px] bg-[var(--graph-bg)] border border-iron">
 			{/* Toolbar: lens switcher + search + stats */}
@@ -59,12 +78,25 @@ function ArchitectureView({ activeId }: { activeId: number }) {
 					<Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 text-slate-text" />
 					<input
 						type="text"
-						value={searchQuery}
-						onChange={(e) => setSearchQuery(e.target.value)}
+						value={searchRequest.query}
+						onChange={(event) => {
+							const query = event.target.value;
+							setSearchRequest((current) => ({ id: current.id + 1, query }));
+							setSelectedFilePath(null);
+						}}
 						aria-label="Find file"
+						aria-describedby="architecture-search-status"
 						placeholder="Find file..."
 						className="pl-7 pr-2 py-1.5 w-44 text-[11px] font-mono bg-card border border-iron text-foreground placeholder:text-slate-text focus:border-amber-500/50 focus:outline-none transition-colors"
 					/>
+					<span
+						id="architecture-search-status"
+						role="status"
+						aria-live="polite"
+						className="sr-only"
+					>
+						{searchStatusText(searchMatchCount)}
+					</span>
 				</div>
 
 				<div className="flex-1" />
@@ -116,6 +148,8 @@ function ArchitectureView({ activeId }: { activeId: number }) {
 					</button>
 				)}
 			</div>
+
+			{archData && <GraphSnapshotStatus snapshot={archData.snapshot} />}
 
 			{/* Onboarding guide */}
 			{showGuide && archData && archData.files.length > 0 && (
@@ -197,16 +231,16 @@ function ArchitectureView({ activeId }: { activeId: number }) {
 							files={archData.files}
 							edges={archData.edges}
 							lens={lens}
-							searchQuery={searchQuery}
+							searchRequest={searchRequest}
 							onSelectFile={setSelectedFilePath}
 						/>
 					)}
 				</div>
 
-				{selectedFilePath && (
+				{selectedFile && (
 					<div className="border-t md:border-t-0 md:border-l border-iron bg-[var(--graph-bg)] md:w-[320px] md:shrink-0 h-[50vh] md:h-auto overflow-hidden">
 						<FileMemorySidebar
-							filePath={selectedFilePath}
+							filePath={selectedFile.path}
 							archFile={selectedFile}
 							allFiles={archData?.files}
 							onClose={() => setSelectedFilePath(null)}

@@ -75,16 +75,21 @@ func Run() error {
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
+	logMermaidValidatorStatus(logger, cfg)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	// Database
 	db, err := store.New(ctx, cfg.DatabaseURL)
 	if err != nil {
+		cancel()
 		return fmt.Errorf("connecting to database: %w", err)
 	}
+	// The durable event bus holds a pool connection in WaitForNotification.
+	// Defers run LIFO: cancel its root context before Close waits for every pool
+	// connection to be released. Later appCtx/server defers still run first.
 	defer db.Close()
+	defer cancel()
 
 	// GitHub App
 	ghApp := ghpkg.NewApp(cfg.GitHubAppID, cfg.GitHubPrivateKey)
@@ -121,7 +126,7 @@ func Run() error {
 		WithPostgresBackend(db.Pool, embedRegistry)
 
 	// Pipeline
-	eventBus := pipeline.NewEventBus()
+	eventBus := pipeline.NewDurableEventBus(ctx, db.Pool, logger)
 	triageStage := pipeline.NewTriageStage(registry, db)
 	reviewStage := pipeline.NewReviewStage(registry, db, ghClient, memRegistry, cfg.MaxConcurrentReviews)
 	intentStage := pipeline.NewIntentExtractionStage(registry, db, ghClient, logger)
@@ -129,6 +134,7 @@ func Run() error {
 	orchestrator := pipeline.NewOrchestrator(db.Pool, db, ghClient, reviewStage, triageStage, intentStage, scoringStage, memRegistry, registry, eventBus, logger, cfg)
 	replyAnalyzer := pipeline.NewReplyAnalyzer(registry, db, ghClient, memRegistry, logger)
 	reactionAnalyzer := pipeline.NewReactionAnalyzer(db, ghClient, memRegistry, logger)
+	orchestrator.SetRecoveryReactionReconciler(reactionAnalyzer.SweepPRReactions)
 
 	// Mark stale reviews as failed before resuming incomplete pipelines
 	if count, err := db.RecoverStaleReviews(ctx, 10*time.Minute); err != nil {
@@ -152,7 +158,32 @@ func Run() error {
 
 	// Recover incomplete pipeline runs (async — don't block server startup)
 	appCtx, appCancel := context.WithCancel(context.Background())
-	defer appCancel()
+
+	// Migration 074 deliberately stamps existing vectors with an unknown
+	// embedding space. Check immediately on startup, retry transient failures
+	// with bounded backoff, and periodically converge the whole fleet so a
+	// failed rotation trigger cannot strand a tenant. Per-installation advisory
+	// locks and Registry capacity limits keep every replica safe to run this.
+	reembedDone := make(chan struct{})
+	go func() {
+		defer close(reembedDone)
+		runMemoryReembedConvergence(appCtx, logger, defaultReembedConvergenceOptions(), memRegistry.ReembedAllCurrentSpaces)
+	}()
+	defer func() {
+		appCancel()
+		<-reembedDone
+	}()
+
+	// Durable projection of relational patterns/rules into the memory store.
+	// The worker is safe to run on every replica: claims use SKIP LOCKED and
+	// deterministic memory IDs make replay after a stale claim idempotent.
+	mirrorWorker := memory.NewMirrorWorker(db, func(ctx context.Context, installationID int64) memory.MirrorIndexer {
+		idx := memRegistry.GetIndexer(ctx, installationID)
+		mirrorIndexer, _ := idx.(memory.MirrorIndexer)
+		return mirrorIndexer
+	}, logger)
+	go mirrorWorker.Run(appCtx, time.Second)
+
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -195,9 +226,9 @@ func Run() error {
 
 	// Code-graph full-index backfill — walks whole repos, one per hour.
 	//
-	// The per-PR path (graph.IndexFiles) only ever parses a pull request's
-	// changed files, so the graph accumulated as disconnected islands and blast
-	// radius returned fragments. This is what gives it the rest of the repo.
+	// Before authoritative generations, the graph accumulated as disconnected
+	// pull-request-shaped islands and blast radius returned fragments. This
+	// backfill publishes complete default-branch snapshots.
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {

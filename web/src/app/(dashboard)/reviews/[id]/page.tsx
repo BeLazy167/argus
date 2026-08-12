@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, useCallback, useEffect } from "react";
+import { useMemo, useState, useCallback, useSyncExternalStore } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import dynamic from "next/dynamic";
@@ -10,7 +10,6 @@ import {
   FileCode,
   AlertTriangle,
   RotateCcw,
-  Loader2,
   Clock,
   GitPullRequest,
   Check,
@@ -40,6 +39,7 @@ import { useReviewStream } from "@/lib/hooks/use-review-stream";
 import { PipelineProgress } from "./progress-bar";
 import { ActivityTimeline } from "./activity-timeline";
 import { LearnedMemories } from "./_components/learned-memory";
+import { MinorNotes } from "./_components/minor-notes";
 import { MermaidChart } from "./mermaid-chart";
 import type { AutoResolveSummary, FindingState, PRReviewSummary, Repo, ReviewComment, ReviewContract, StageTokens, TokenUsage } from "@/lib/types";
 import { STAGE_ORDER, stageLabel } from "@/lib/stage-labels";
@@ -599,11 +599,9 @@ function FileGroup({
   /** comment.id → resolving commit, for the resolved-by-commit breadcrumb. */
   resolvedCommits?: Map<string, { sha: string; url?: string }>;
 }) {
-  const [expanded, setExpanded] = useState(true);
-
-  useEffect(() => {
-    if (forceExpanded !== undefined) setExpanded(forceExpanded);
-  }, [forceExpanded]);
+  // The parent includes its expand-toggle generation in this component's
+  // key, so a global expand/collapse action resets this local state by remount.
+  const [expanded, setExpanded] = useState(forceExpanded ?? true);
   const Chevron = expanded ? ChevronDown : ChevronRight;
   const contentId = `${id}-content`;
   const language = langFromPath(filePath);
@@ -1053,6 +1051,34 @@ function IncrementalHistory({
   );
 }
 
+function createActiveFileStore(fileCount: number) {
+  let activeFileId: string | null = null;
+  return {
+    getSnapshot: () => activeFileId,
+    getServerSnapshot: () => null,
+    subscribe: (onStoreChange: () => void) => {
+      if (fileCount === 0 || typeof IntersectionObserver === "undefined") return () => {};
+      const observer = new IntersectionObserver(
+        (entries) => {
+          const active = entries.find((entry) => entry.isIntersecting)?.target.id;
+          if (active && active !== activeFileId) {
+            activeFileId = active;
+            onStoreChange();
+          }
+        },
+        { rootMargin: "-10% 0px -60% 0px", threshold: 0 },
+      );
+      const timer = window.setTimeout(() => {
+        document.querySelectorAll("section[id^='file-']").forEach((element) => observer.observe(element));
+      }, 100);
+      return () => {
+        window.clearTimeout(timer);
+        observer.disconnect();
+      };
+    },
+  };
+}
+
 /* ── Main Page ───────────────────────────────── */
 
 export default function ReviewDetailPage() {
@@ -1170,33 +1196,14 @@ export default function ReviewDetailPage() {
     return { newFindings, patternMatches, rulesEnforced, memoryUsed, total: comments.length };
   }, [comments]);
 
-  // Scroll-aware active file tracking
-  const [activeFileId, setActiveFileId] = useState<string | null>(null);
-
-  useEffect(() => {
-    const observer = new IntersectionObserver(
-      (entries) => {
-        for (const entry of entries) {
-          if (entry.isIntersecting) {
-            setActiveFileId(entry.target.id);
-            break;
-          }
-        }
-      },
-      { rootMargin: "-10% 0px -60% 0px", threshold: 0 },
-    );
-
-    const timer = setTimeout(() => {
-      document.querySelectorAll("section[id^='file-']").forEach((el) => {
-        observer.observe(el);
-      });
-    }, 100);
-
-    return () => {
-      clearTimeout(timer);
-      observer.disconnect();
-    };
-  }, [grouped.length]);
+  // IntersectionObserver is an external store. Recreate it when the number
+  // of file sections changes; useSyncExternalStore owns subscribe/cleanup.
+  const activeFileStore = useMemo(() => createActiveFileStore(grouped.length), [grouped.length]);
+  const activeFileId = useSyncExternalStore(
+    activeFileStore.subscribe,
+    activeFileStore.getSnapshot,
+    activeFileStore.getServerSnapshot,
+  );
 
   if (isLoading) {
     return (
@@ -1604,6 +1611,8 @@ export default function ReviewDetailPage() {
         })()}
       </div>
 
+      <MinorNotes notes={data?.minor_notes ?? []} />
+
       {/* What Argus learned — the memory rows this review wrote. Hidden while
           live: the memory sinks run at the very end of the pipeline, so an empty
           panel mid-review would report a failure that has not happened. */}
@@ -1760,7 +1769,7 @@ export default function ReviewDetailPage() {
 
               return (
                 <FileGroup
-                  key={filePath}
+                  key={`${filePath}:${expandToggle}`}
                   id={fid}
                   filePath={filePath}
                   fileComments={filtered}

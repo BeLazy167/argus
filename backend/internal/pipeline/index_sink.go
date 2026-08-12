@@ -13,6 +13,9 @@ package pipeline
 import (
 	"context"
 	"strings"
+	"sync/atomic"
+
+	"github.com/google/uuid"
 )
 
 // memorySink is one post-review memory/index step: a feature-gated unit of
@@ -36,11 +39,70 @@ type memorySink struct {
 	run func(ctx context.Context, run *PipelineRun, owner, repo string)
 }
 
+// memorySinkAuthority is the generation-ownership boundary for detached
+// post-review sinks. *store.Store implements it with a PostgreSQL row lock so
+// the authority check and an external mutation are ordered against a retry on
+// another machine.
+type memorySinkAuthority interface {
+	IsReviewAttemptCurrent(ctx context.Context, reviewID uuid.UUID, generation int) (bool, error)
+	RunIfReviewAttemptCurrent(ctx context.Context, reviewID uuid.UUID, generation int, write func(context.Context) error) (bool, error)
+}
+
+type memorySinkAttempt struct {
+	authority  memorySinkAuthority
+	reviewID   uuid.UUID
+	generation int
+	o          *Orchestrator
+	stale      atomic.Bool
+}
+
+type memorySinkAttemptContextKey struct{}
+
+// withMemorySinkAttempt installs the generation authority without acquiring it.
+// Callers can finish arbitrary preparation first, then memorySinkWrite holds the
+// review-row lock only across the mutation itself.
+func withMemorySinkAttempt(ctx context.Context, o *Orchestrator, authority memorySinkAuthority, run *PipelineRun) (context.Context, *memorySinkAttempt) {
+	attempt := &memorySinkAttempt{
+		authority:  authority,
+		reviewID:   run.ReviewID,
+		generation: run.AttemptGeneration,
+		o:          o,
+	}
+	return context.WithValue(ctx, memorySinkAttemptContextKey{}, attempt), attempt
+}
+
+// memorySinkWrite is the only mutation door for attempt-owned memory/index
+// work. It does not add review ownership arguments to every sink: callers
+// install the generation-owned attempt in context and wrap only the actual side
+// effect (not slow LLM or batch preparation) with this function.
+func memorySinkWrite(ctx context.Context, op string, write func(context.Context) error) (bool, error) {
+	attempt, _ := ctx.Value(memorySinkAttemptContextKey{}).(*memorySinkAttempt)
+	if attempt == nil || attempt.authority == nil {
+		return true, write(ctx)
+	}
+	if attempt.stale.Load() {
+		return false, nil
+	}
+	current, err := attempt.authority.RunIfReviewAttemptCurrent(ctx, attempt.reviewID, attempt.generation, write)
+	if !current && err == nil {
+		attempt.markStale(op)
+	}
+	return current, err
+}
+
+func (a *memorySinkAttempt) markStale(op string) {
+	if a.stale.CompareAndSwap(false, true) {
+		a.o.logger.Info("memory sink stopped: review attempt no longer current",
+			"op", op, "review_id", a.reviewID, "attempt_generation", a.generation)
+	}
+}
+
 // PostReviewIndexer runs post()'s post-review memory sink clusters. It owns the
-// shared recover→emitPipelinePanicEvent isolation and the feature-gating loop
-// that post() used to hand-roll per sink.
+// shared recover→emitPipelinePanicEvent isolation, generation ownership, and
+// the feature-gating loop that post() used to hand-roll per sink.
 type PostReviewIndexer struct {
-	o *Orchestrator
+	o         *Orchestrator
+	authority memorySinkAuthority
 }
 
 // RunAll executes each enabled sink in order under panic isolation: a sink that
@@ -49,11 +111,30 @@ type PostReviewIndexer struct {
 // the review is already composed). ctx is the cancel-detached context the sinks
 // index under; stage is the telemetry stage label ("pre_post" or "post_review").
 func (p *PostReviewIndexer) RunAll(ctx context.Context, run *PipelineRun, owner, repo, stage string, sinks []memorySink) {
+	sinkCtx, attempt := withMemorySinkAttempt(ctx, p.o, p.authority, run)
 	for _, sink := range sinks {
 		if sink.enabled != nil && !sink.enabled(run) {
 			continue
 		}
-		p.runSink(ctx, run, owner, repo, stage, sink)
+		if attempt.stale.Load() {
+			return
+		}
+		if p.authority != nil {
+			current, err := p.authority.IsReviewAttemptCurrent(sinkCtx, run.ReviewID, run.AttemptGeneration)
+			if err != nil {
+				// Authority storage failures are not evidence of staleness. Report
+				// them and keep trying later sinks; completion remains best-effort.
+				p.o.logger.Error("checking memory sink attempt authority",
+					"error", err, "op", sink.name, "review_id", run.ReviewID,
+					"attempt_generation", run.AttemptGeneration)
+				continue
+			}
+			if !current {
+				attempt.markStale(sink.name)
+				return
+			}
+		}
+		p.runSink(sinkCtx, run, owner, repo, stage, sink)
 	}
 }
 

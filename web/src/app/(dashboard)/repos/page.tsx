@@ -16,7 +16,6 @@ import {
 } from "lucide-react";
 import { useRepos, useUpdateRepo, useSyncRepos } from "@/lib/queries/repos";
 import { useReviews, useTriggerReview } from "@/lib/queries/reviews";
-import { useInstallation } from "@/providers/installation-provider";
 import { useApi } from "@/lib/hooks/use-api";
 import { useOrganization } from "@clerk/nextjs";
 import { formatDistanceToNow } from "@/lib/time";
@@ -240,7 +239,6 @@ function RepoCard({ repo }: { repo: Repo }) {
 export default function ReposPage() {
   const { data: repos, isLoading } = useRepos();
   const syncRepos = useSyncRepos();
-  const { active } = useInstallation();
   // Enabled repos first, each block alphabetical — otherwise the handful of
   // enabled repos gets buried pages deep behind hundreds of disabled ones and
   // the first pages read as "everything is disabled". Sort BEFORE pagination.

@@ -2,7 +2,6 @@ package api
 
 import (
 	"github.com/BeLazy167/argus/backend/internal/store"
-	"github.com/BeLazy167/argus/backend/internal/store/db"
 )
 
 // This file holds the typed JSON response envelopes returned by the API
@@ -12,12 +11,6 @@ import (
 // GaugeResponse wraps GET /api/v1/stats/gauge.
 type GaugeResponse struct {
 	Gauge []store.GaugeRow `json:"gauge"`
-}
-
-// GraphResponse wraps GET /api/v1/repos/{repoID}/graph.
-type GraphResponse struct {
-	Nodes []db.ListGraphNodesRow `json:"nodes"`
-	Edges []db.ListGraphEdgesRow `json:"edges"`
 }
 
 // SyncReposResponse wraps POST /api/v1/installations/{id}/sync.
@@ -32,6 +25,7 @@ type SyncReposResponse struct {
 type ReviewDetailResponse struct {
 	Review            *store.Review              `json:"review"`
 	Comments          []store.ReviewComment      `json:"comments"`
+	MinorNotes        []store.ReviewMinorNote    `json:"minor_notes"`
 	History           []store.PRReviewSummary    `json:"history"`
 	AutoResolveEvents []store.AutoResolveSummary `json:"auto_resolve_events"`
 	// Memories is what the review wrote into institutional memory — a capped,
@@ -47,13 +41,14 @@ type ReviewDetailResponse struct {
 
 // ReviewExportResponse is the JSON body of the review export download.
 type ReviewExportResponse struct {
-	ReviewID      string          `json:"review_id"`
-	PRNumber      int             `json:"pr_number"`
-	PRTitle       string          `json:"pr_title"`
-	Score         *int            `json:"score"`
-	Status        string          `json:"status"`
-	TotalFindings int             `json:"total_findings"`
-	Findings      []ExportFinding `json:"findings"`
+	ReviewID      string                  `json:"review_id"`
+	PRNumber      int                     `json:"pr_number"`
+	PRTitle       string                  `json:"pr_title"`
+	Score         *int                    `json:"score"`
+	Status        string                  `json:"status"`
+	TotalFindings int                     `json:"total_findings"`
+	Findings      []ExportFinding         `json:"findings"`
+	MinorNotes    []store.ReviewMinorNote `json:"minor_notes"`
 }
 
 // ExportFinding is one finding row in the review export payload.

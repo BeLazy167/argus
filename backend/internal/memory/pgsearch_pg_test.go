@@ -161,7 +161,7 @@ func TestPGSearchModelSpaceIsolation(t *testing.T) {
 	idx, ctx := searchTestIndexer(t)
 	// Re-stamp one row as a foreign embedding space.
 	if _, err := idx.pool.Exec(ctx,
-		"UPDATE memories SET embedding_model = 'other-model' WHERE installation_id = $1 AND content LIKE '%goroutine leak%'",
+		"UPDATE memories SET embedding_space = 'other-space' WHERE installation_id = $1 AND content LIKE '%goroutine leak%'",
 		idx.installationID); err != nil {
 		t.Fatal(err)
 	}
@@ -847,5 +847,52 @@ func TestPGSearchPointLookupHonoursThreshold(t *testing.T) {
 		if pm.Score < 0.85 {
 			t.Fatalf("point-lookup fallback returned score %v below the caller's 0.85 floor: %q", pm.Score, pm.Content)
 		}
+	}
+}
+
+func TestPGSearchDirectlyQuarantinesLegacyReplyLearnings(t *testing.T) {
+	idx, ctx := searchTestIndexer(t)
+	if _, err := idx.IndexSharedPattern(ctx, PatternMemory{
+		Content: "legacy unauthorized reply convention", Source: SourceLegacyReplyFeedback,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := idx.IndexSharedPattern(ctx, PatternMemory{
+		Content: "legacy shared authorized reply convention", Source: SourceTrustedReplyFeedback,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := idx.IndexPattern(ctx, "api", PatternMemory{
+		Content: "current repo authorized reply convention", Source: SourceTrustedReplyLearning,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	shared, err := idx.Search(ctx, MemoryQuery{
+		Query: "reply convention", Scope: ScopeShared, Type: TypePattern,
+		Limit: 10, Threshold: 0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, match := range shared {
+		if match.Metadata["source"] == SourceLegacyReplyFeedback || match.Metadata["source"] == SourceTrustedReplyFeedback {
+			t.Fatalf("direct shared Search returned quarantined legacy reply learning: %#v", shared)
+		}
+	}
+
+	repo, err := idx.Search(ctx, MemoryQuery{
+		Query: "reply convention", Repo: "api", Scope: ScopeRepo, Type: TypePattern,
+		Limit: 10, Threshold: 0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var current bool
+	for _, match := range repo {
+		current = current || match.Metadata["source"] == SourceTrustedReplyLearning
+	}
+	if !current {
+		t.Fatalf("direct repo Search omitted current trusted reply learning: %#v", repo)
 	}
 }

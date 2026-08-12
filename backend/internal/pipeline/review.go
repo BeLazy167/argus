@@ -168,7 +168,7 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 					p.promptExtra = run.ResolvedPersona.Overlay
 				}
 				if run.EventBus != nil {
-					run.EventBus.Publish(run.ReviewID, EventFileReviewStarted, map[string]any{
+					run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventFileReviewStarted, map[string]any{
 						"file_path":  p.file.NewName,
 						"specialist": string(p.specialist),
 						"action":     string(p.action),
@@ -202,7 +202,7 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 		run.Tokens.Review = append(run.Tokens.Review, r.tokens)
 		run.Tokens.addToTotal(r.tokens)
 		if run.EventBus != nil {
-			run.EventBus.Publish(run.ReviewID, EventTokenUpdate, map[string]any{
+			run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventTokenUpdate, map[string]any{
 				"total_tokens": run.Tokens.Total.TotalTokens,
 				"cost":         run.Tokens.Total.Cost,
 			})
@@ -217,7 +217,7 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 			// Stream each comment as it arrives
 			if run.EventBus != nil {
 				for _, c := range r.review.Comments {
-					run.EventBus.Publish(run.ReviewID, EventComment, map[string]any{
+					run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventComment, map[string]any{
 						"file_path":  r.review.Path,
 						"line":       c.Line,
 						"severity":   c.Severity,
@@ -312,13 +312,12 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p revie
 	// Query blast radius from code graph + fetch dependent file contents
 	var blastContext string
 	if run.BlastRadius && rs.store != nil && rs.ghClient != nil {
-		changedPaths := make([]string, 0, len(run.Diff.Files))
 		changedSet := make(map[string]bool, len(run.Diff.Files))
 		for _, f := range run.Diff.Files {
-			changedPaths = append(changedPaths, f.NewName)
 			changedSet[f.NewName] = true
 		}
-		nodes, err := rs.store.GetBlastRadius(ctx, run.DBInstallationID, run.DBRepoID, changedPaths, 2)
+		basePaths := blastRadiusBasePaths(run.Diff)
+		nodes, err := rs.store.GetBlastRadius(ctx, run.DBInstallationID, run.DBRepoID, basePaths, 2)
 		if err != nil {
 			slog.Warn("blast radius query failed", "error", err)
 		} else {
@@ -476,10 +475,17 @@ func composeReviewSystemPrompt(systemBase, owner, repo string, specialist Specia
 			sys += specialistOverlay(specialist)
 		}
 	}
+	// Keep the established memory_context contract while applying the same
+	// unanchored sanitizer and explicit data-only boundary as every other
+	// retrieved-memory consumer.
+	memoryContext := ""
+	if memoryBriefing != "" {
+		memoryContext = "\n\n" + wrapUntrustedRetrievedMemory("memory_context", memoryBriefing)
+	}
 	// reviewLaws is injected exactly once here — the single severity/scope
 	// rubric for every review call. Base prompts, specialist overlays, and
 	// personas are focus/tone lenses only and must not restate severity rules.
-	return sys + reviewLaws + memoryBriefing + promptExtra
+	return sys + reviewLaws + memoryContext + promptExtra
 }
 
 // reviewLaws is the single review rubric injected once into every review

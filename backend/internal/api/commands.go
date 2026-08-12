@@ -4,18 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/BeLazy167/argus/backend/internal/admission"
 	"regexp"
 	"sort"
 	"strings"
 
-	gh "github.com/google/go-github/v68/github"
-
+	"github.com/BeLazy167/argus/backend/internal/admission"
 	ghpkg "github.com/BeLazy167/argus/backend/internal/github"
 	"github.com/BeLazy167/argus/backend/internal/llm"
 	"github.com/BeLazy167/argus/backend/internal/memory"
 	"github.com/BeLazy167/argus/backend/internal/pipeline"
 	"github.com/BeLazy167/argus/backend/internal/store"
+	gh "github.com/google/go-github/v68/github"
 )
 
 // --- Command Dispatch ---
@@ -100,7 +99,7 @@ func (s *Server) handleReviewCommand(ctx context.Context, evt ghpkg.IssueComment
 	// what lets the dashboard Stop button abort a slash-command review (this path
 	// used to be the one missing it). BaseCtx is the dispatch ctx (trace +
 	// installation already tagged).
-	launchErr := s.launcher.Launch(pipeline.LaunchSpec{
+	launchErr := s.launchPREvent(pipeline.LaunchSpec{
 		Repo:    evt.RepoFullName,
 		PR:      evt.PRNumber,
 		BaseCtx: ctx,
@@ -141,7 +140,6 @@ func (s *Server) handleReviewCommand(ctx context.Context, evt ghpkg.IssueComment
 			return nil
 		},
 		Cleanup: s.releaseSem,
-		Run:     func(runCtx context.Context) error { return s.orchestrator.HandlePREvent(runCtx, *prEvent) },
 		OnDone: func(err error) {
 			if err != nil {
 				s.logger.Error("review command: pipeline failed", "error", err, "pr", evt.PRNumber)
@@ -152,20 +150,37 @@ func (s *Server) handleReviewCommand(ctx context.Context, evt ghpkg.IssueComment
 			}
 			_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "rocket")
 		},
-	})
-	switch {
-	case errors.Is(launchErr, pipeline.ErrInFlight):
-		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
-			"A review is already in progress for this PR.")
-	case errors.Is(launchErr, errRateLimited):
-		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
-			"Rate limit exceeded. Try again later.")
-		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
-	case errors.Is(launchErr, errServerBusy):
+	}, *prEvent)
+	message, confused := reviewCommandLaunchFailureFeedback(launchErr)
+	if launchErr != nil && !errors.Is(launchErr, pipeline.ErrInFlight) &&
+		!errors.Is(launchErr, errRateLimited) && !errors.Is(launchErr, errServerBusy) &&
+		!errors.Is(launchErr, errReviewRefused) {
+		s.logger.Error("review command: launch failed", "error", launchErr, "repo", evt.RepoFullName, "pr", evt.PRNumber)
+	}
+	if errors.Is(launchErr, errServerBusy) {
 		s.logger.Warn("review command: webhook semaphore full", "repo", evt.RepoFullName, "pr", evt.PRNumber)
-		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
-			"Argus is at capacity right now. Try again in a few minutes.")
+	}
+	if message != "" {
+		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber, message)
+	}
+	if confused {
 		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
+	}
+}
+
+func reviewCommandLaunchFailureFeedback(launchErr error) (message string, confused bool) {
+	switch {
+	case launchErr == nil, errors.Is(launchErr, errReviewRefused):
+		// Admission already posted its path-specific refusal.
+		return "", false
+	case errors.Is(launchErr, pipeline.ErrInFlight):
+		return "A review is already in progress for this PR.", false
+	case errors.Is(launchErr, errRateLimited):
+		return "Rate limit exceeded. Try again later.", true
+	case errors.Is(launchErr, errServerBusy):
+		return "Argus is at capacity right now. Try again in a few minutes.", true
+	default:
+		return "Review could not start because its pre-review checks failed. Try again later.", true
 	}
 }
 
@@ -195,10 +210,33 @@ func (s *Server) handleHelpCommand(ctx context.Context, evt ghpkg.IssueCommentEv
 	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "rocket")
 }
 
-// handleRememberCommand parses @argus-eye remember, stores the pattern in DB
-// (and optionally memory), and posts confirmation.
+type repoWritePermissionChecker interface {
+	HasRepoWriteAccess(ctx context.Context, installationID int64, owner, repo, login string) (bool, error)
+}
+
+type rememberAuthorization struct {
+	InstallationID    int64
+	Owner             string
+	Repo              string
+	CommentAuthor     string
+	AuthorAssociation string
+	OrgWide           bool
+}
+
+// authorizeRemember reports whether an issue commenter may persist review
+// memory. Repository memory uses GitHub's effective permission for the actual
+// commenter. Org-wide memory intentionally retains its separate, narrower
+// trusted-author policy.
+func authorizeRemember(ctx context.Context, permissions repoWritePermissionChecker, auth rememberAuthorization) (bool, error) {
+	if auth.OrgWide {
+		association := strings.ToUpper(strings.TrimSpace(auth.AuthorAssociation))
+		return association == "OWNER" || association == "MEMBER", nil
+	}
+	return permissions.HasRepoWriteAccess(ctx, auth.InstallationID, auth.Owner, auth.Repo, auth.CommentAuthor)
+}
+
+// handleRememberCommand parses @argus-eye remember and persists a pattern.
 func (s *Server) handleRememberCommand(ctx context.Context, evt ghpkg.IssueCommentEvent, owner, repo string, ghClient *ghpkg.Client, args string) {
-	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "eyes")
 
 	// Parse --org flag as discrete token to avoid matching substrings like --org-prefix
 	var isOrg bool
@@ -216,6 +254,39 @@ func (s *Server) handleRememberCommand(ctx context.Context, evt ghpkg.IssueComme
 			fmt.Sprintf("Usage: `@%s remember <pattern>` or `@%s remember --org <pattern>`", s.cfg.GitHubAppSlug, s.cfg.GitHubAppSlug))
 		return
 	}
+	authorized := func() bool {
+		allowed, err := authorizeRemember(ctx, ghClient, rememberAuthorization{
+			InstallationID:    evt.InstallationID,
+			Owner:             owner,
+			Repo:              repo,
+			CommentAuthor:     evt.CommentAuthor,
+			AuthorAssociation: evt.AuthorAssociation,
+			OrgWide:           isOrg,
+		})
+		if err != nil {
+			s.logger.Warn("remember: permission lookup failed", "error", err, "author", evt.CommentAuthor,
+				"repo", evt.RepoFullName, "pr", evt.PRNumber)
+			_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
+			return false
+		}
+		if allowed {
+			return true
+		}
+		s.logger.Info("remember: unauthorized commenter", "author", evt.CommentAuthor,
+			"association", evt.AuthorAssociation, "org_wide", isOrg, "pr", evt.PRNumber)
+		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
+		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
+			"Only trusted repository maintainers can persist Argus memory; org-wide memory requires an owner or organization member.")
+		return false
+	}
+
+	// Org-wide memory intentionally keeps its trusted-author policy and does
+	// not depend on permission to this one repository.
+	if isOrg && !authorized() {
+		return
+	}
+
+	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "eyes")
 
 	// Look up installation
 	inst, err := s.store.GetInstallationByGitHubID(ctx, evt.InstallationID)
@@ -223,32 +294,6 @@ func (s *Server) handleRememberCommand(ctx context.Context, evt ghpkg.IssueComme
 		s.logger.Error("remember: lookup installation", "error", err)
 		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
 		return
-	}
-
-	// Index in memory
-	var smID *string
-	var smWarning string
-	if s.memRegistry != nil {
-		indexer := s.memRegistry.GetIndexer(ctx, inst.ID)
-		if indexer != nil {
-			pattern := memory.PatternMemory{
-				Content: content,
-				Source:  "remember_command",
-				Extra:   map[string]string{"created_by": evt.CommentAuthor},
-			}
-			var resp *memory.IndexResult
-			if isOrg {
-				resp, err = indexer.IndexSharedPattern(ctx, pattern)
-			} else {
-				resp, err = indexer.IndexPattern(ctx, repo, pattern)
-			}
-			if err != nil {
-				s.logger.Error("remember: index in memory", "error", err)
-				smWarning = "\n\n_Warning: semantic search indexing failed. Pattern saved to DB only._"
-			} else if resp != nil {
-				smID = &resp.ID
-			}
-		}
 	}
 
 	// Look up repo for DB write
@@ -266,9 +311,19 @@ func (s *Server) handleRememberCommand(ctx context.Context, evt ghpkg.IssueComme
 	}
 
 	createdBy := evt.CommentAuthor
-	// memory_custom_id is nil here (see handlers_patterns.go): `remember`
-	// patterns rely on the memory_doc_id match at read time.
-	_, err = s.store.CreatePattern(ctx, inst.ID, repoID, content, smID, &createdBy, nil, nil, nil, nil)
+	source := "remember_command"
+	customID := memory.SharedPatternCustomID(source, content)
+	if !isOrg {
+		customID = memory.PatternCustomID(owner, repo, source, content)
+	}
+
+	// Keep the effective-permission lookup adjacent to the write. GitHub does
+	// not offer an atomic permission-check-and-write operation, so this is the
+	// narrowest practical TOCTOU window.
+	if !isOrg && !authorized() {
+		return
+	}
+	_, err = s.store.CreatePattern(ctx, inst.ID, repoID, content, nil, &createdBy, &source, nil, nil, &customID, nil)
 	if err != nil {
 		s.logger.Error("remember: save to db", "error", err)
 		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
@@ -284,7 +339,7 @@ func (s *Server) handleRememberCommand(ctx context.Context, evt ghpkg.IssueComme
 		truncated = truncated[:100] + "..."
 	}
 	_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
-		fmt.Sprintf("Remembered (%s): %s%s", scope, truncated, smWarning))
+		fmt.Sprintf("Remembered (%s): %s", scope, truncated))
 	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "rocket")
 }
 

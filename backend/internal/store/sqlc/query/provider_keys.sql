@@ -3,7 +3,7 @@ SELECT id, installation_id, repo_id, provider, api_key_enc, base_url, model, key
 FROM provider_keys WHERE installation_id = $1 ORDER BY provider, repo_id NULLS FIRST;
 
 -- name: UpsertProviderKeyOrgLevel :one
--- PATCH semantics on conflict (mirrors Store.UpsertProviderKey — keep in sync):
+-- PATCH semantics on conflict (Store.UpsertProviderKey delegates here):
 -- omitted base_url/model preserve stored values; an empty api_key_enc preserves
 -- the stored key (keyless config updates must not destroy a stored key).
 INSERT INTO provider_keys (installation_id, repo_id, provider, api_key_enc, base_url, key_hint, model)
@@ -27,8 +27,9 @@ ON CONFLICT (installation_id, repo_id, provider) DO UPDATE SET
     updated_at = NOW()
 RETURNING id, installation_id, repo_id, provider, api_key_enc, base_url, model, key_hint, created_at, updated_at;
 
--- name: DeleteProviderKey :execrows
-DELETE FROM provider_keys WHERE id = $1 AND installation_id = $2;
+-- name: DeleteProviderKey :one
+DELETE FROM provider_keys WHERE id = $1 AND installation_id = $2
+RETURNING provider;
 
 -- name: ResolveAPIKeyRepoLevel :one
 SELECT api_key_enc, base_url FROM provider_keys

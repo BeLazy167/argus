@@ -65,7 +65,7 @@ func apiSeedNode(t *testing.T, ctx context.Context, pool *pgxpool.Pool, repoID i
 // missing predicate produce a cross-tenant edge rather than an empty result.
 func TestListAPIEndpointsForInstallationOf_TenantBoundary(t *testing.T) {
 	pool, ctx := apiEndpointTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 
 	installA := seedInstallation(t, ctx, pool, "{}")
 	apiRepo := apiSeedRepo(t, ctx, pool, installA, "acme/api")
@@ -117,7 +117,7 @@ func TestListAPIEndpointsForInstallationOf_TenantBoundary(t *testing.T) {
 // whole installation's edge set.
 func TestReplaceAPIEndpointsForFiles_RemovesStaleRows(t *testing.T) {
 	pool, ctx := apiEndpointTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 
 	install := seedInstallation(t, ctx, pool, "{}")
 	repo := apiSeedRepo(t, ctx, pool, install, "acme/api")
@@ -165,7 +165,7 @@ func TestReplaceAPIEndpointsForFiles_RemovesStaleRows(t *testing.T) {
 // does not call.
 func TestReplaceInferredAPIEdges_DropsEdgesNoLongerDerived(t *testing.T) {
 	pool, ctx := apiEndpointTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 
 	install := seedInstallation(t, ctx, pool, "{}")
 	apiRepo := apiSeedRepo(t, ctx, pool, install, "acme/api")
@@ -205,7 +205,7 @@ func TestReplaceInferredAPIEdges_DropsEdgesNoLongerDerived(t *testing.T) {
 // every repo in the installation with it.
 func TestReplaceInferredAPIEdges_LeavesParsedEdgesAlone(t *testing.T) {
 	pool, ctx := apiEndpointTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 
 	install := seedInstallation(t, ctx, pool, "{}")
 	webRepo := apiSeedRepo(t, ctx, pool, install, "acme/web")
@@ -239,7 +239,7 @@ func TestReplaceInferredAPIEdges_LeavesParsedEdgesAlone(t *testing.T) {
 // is the half that destroys data rather than merely leaking it.
 func TestReplaceInferredAPIEdges_StopsAtTheInstallationBoundary(t *testing.T) {
 	pool, ctx := apiEndpointTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 
 	// Two installations, each with a derived cross-repo edge of its own.
 	seed := func(name string) (repo int64, src int64, dst int64) {
@@ -278,17 +278,12 @@ func TestReplaceInferredAPIEdges_StopsAtTheInstallationBoundary(t *testing.T) {
 // LookupCodeNodeIDsByName is the fallback an incremental index depends on: the
 // handler a route names lives in a file the run never fetched.
 //
-// SEED ORDER IS THE TEST. The query is `SELECT DISTINCT ON (name) ... ORDER BY
-// name, id`, so it returns the LOWEST id bearing the name. Seeding the wanted
-// node first gave it the lowest id, and it then won whether or not
-// `WHERE repo_id = $1` was there at all — the assertion named the scoping
-// predicate while being unable to observe it. The foreign repo's node is
-// therefore seeded FIRST and holds the lower id: only the repo_id predicate
-// keeps it from being the answer. Relaxing that predicate to
-// `(repo_id = $1 OR true)` now fails with `getRepo = <foreign id>`.
+// The foreign repository is seeded first so its lower ID would expose a
+// missing repo_id predicate. The lookup must still return only this repo's
+// unique exact match; qualified-alias ambiguity is covered separately below.
 func TestLookupCodeNodeIDsByName(t *testing.T) {
 	pool, ctx := apiEndpointTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 
 	install := seedInstallation(t, ctx, pool, "{}")
 	repo := apiSeedRepo(t, ctx, pool, install, "acme/api")
@@ -315,9 +310,69 @@ func TestLookupCodeNodeIDsByName(t *testing.T) {
 // sits in the same table as a parsed one, so a consumer has to be able to tell
 // them apart. Two signals, and the boolean is the one that survives new kinds
 // being added.
+func TestLookupCodeNodeIDsByNameReturnsAmbiguousForQualifiedAliases(t *testing.T) {
+	pool, ctx := apiEndpointTestPool(t)
+	st := &Store{Pool: pool, q: db.New(pool)}
+	install := seedInstallation(t, ctx, pool, "{}")
+	repo := apiSeedRepo(t, ctx, pool, install, "acme/qualified")
+	apiSeedNode(t, ctx, pool, repo, "Handle", "functions.go")
+	apiSeedNode(t, ctx, pool, repo, "Alpha.Handle", "handlers.go")
+	alphaID := apiSeedNode(t, ctx, pool, repo, "Alpha.Done", "handlers.go")
+	apiSeedNode(t, ctx, pool, repo, "Beta.Handle", "handlers.go")
+
+	ids, err := st.LookupCodeNodeIDsByName(ctx, repo, []string{"Handle", "Alpha.Done", "Missing"})
+	if err != nil {
+		t.Fatalf("lookup: %v", err)
+	}
+	if id, ok := ids["Handle"]; !ok || id != 0 {
+		t.Fatalf("Handle = (%d, %v), want explicit ambiguous sentinel", id, ok)
+	}
+	if ids["Alpha.Done"] != alphaID {
+		t.Fatalf("Alpha.Done = %d, want %d", ids["Alpha.Done"], alphaID)
+	}
+	if _, ok := ids["Missing"]; ok {
+		t.Fatal("missing name unexpectedly resolved")
+	}
+}
+
+func TestLookupCodeNodeIDsByNameQualifiedMissDoesNotFallBackAndAliasesAreLiteral(t *testing.T) {
+	pool, ctx := apiEndpointTestPool(t)
+	st := &Store{Pool: pool, q: db.New(pool)}
+	install := seedInstallation(t, ctx, pool, "{}")
+	repo := apiSeedRepo(t, ctx, pool, install, "acme/literal-aliases")
+
+	alphaRun := apiSeedNode(t, ctx, pool, repo, "Alpha.run", "alpha.go")
+	rustRun := apiSeedNode(t, ctx, pool, repo, "RustType::run", "lib.rs")
+	rustOnly := apiSeedNode(t, ctx, pool, repo, "RustType::rust_only", "lib.rs")
+	underscore := apiSeedNode(t, ctx, pool, repo, "Type.handle_one", "underscore.go")
+	percent := apiSeedNode(t, ctx, pool, repo, "Type.handle%one", "percent.go")
+	apiSeedNode(t, ctx, pool, repo, "Type.handleXone", "wildcards.go")
+
+	ids, err := st.LookupCodeNodeIDsByName(ctx, repo, []string{
+		"Missing.run", "Missing::run", "Alpha.run", "RustType::run",
+		"rust_only", "handle_one", "handle%one",
+	})
+	if err != nil {
+		t.Fatalf("lookup: %v", err)
+	}
+	for _, missing := range []string{"Missing.run", "Missing::run"} {
+		if id, ok := ids[missing]; ok {
+			t.Fatalf("qualified miss %q resolved to %d", missing, id)
+		}
+	}
+	for name, want := range map[string]int64{
+		"Alpha.run": alphaRun, "RustType::run": rustRun, "rust_only": rustOnly,
+		"handle_one": underscore, "handle%one": percent,
+	} {
+		if got := ids[name]; got != want {
+			t.Errorf("%s = %d, want %d", name, got, want)
+		}
+	}
+}
+
 func TestInferredEdgeProvenance(t *testing.T) {
 	pool, ctx := apiEndpointTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 
 	install := seedInstallation(t, ctx, pool, "{}")
 	apiRepo := apiSeedRepo(t, ctx, pool, install, "acme/api")
@@ -373,11 +428,13 @@ func TestInferredEdgeProvenance(t *testing.T) {
 // predicate does it for all of them.
 func TestRepoScopedQueriesIgnoreInferredEdges(t *testing.T) {
 	pool, ctx := apiEndpointTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 
 	install := seedInstallation(t, ctx, pool, "{}")
 	apiRepo := apiSeedRepo(t, ctx, pool, install, "acme/api")
 	webRepo := apiSeedRepo(t, ctx, pool, install, "acme/web")
+	publishGraphTestGeneration(t, ctx, pool, apiRepo, "published-api")
+	publishGraphTestGeneration(t, ctx, pool, webRepo, "published-web")
 	apiNode := apiSeedNode(t, ctx, pool, apiRepo, "getJob", "backend/handlers.go")
 	webNode := apiSeedNode(t, ctx, pool, webRepo, "useJob", "web/job.ts")
 
@@ -411,7 +468,7 @@ func TestRepoScopedQueriesIgnoreInferredEdges(t *testing.T) {
 		t.Fatalf("inferred edge produced a choke point in another repo's file: %+v", choke)
 	}
 
-	fanIn, err := st.Q.GetFileFanIn(ctx, db.GetFileFanInParams{RepoID: webRepo, FilePath: "backend/handlers.go"})
+	fanIn, err := st.q.GetFileFanIn(ctx, db.GetFileFanInParams{RepoID: webRepo, FilePath: "backend/handlers.go"})
 	if err != nil {
 		t.Fatalf("file fan-in: %v", err)
 	}
@@ -426,11 +483,13 @@ func TestRepoScopedQueriesIgnoreInferredEdges(t *testing.T) {
 // review context as though a parser had found it.
 func TestCrossRepoInferredEdgeStaysOutOfBlastRadius(t *testing.T) {
 	pool, ctx := apiEndpointTestPool(t)
-	st := &Store{Pool: pool, Q: db.New(pool)}
+	st := &Store{Pool: pool, q: db.New(pool)}
 
 	install := seedInstallation(t, ctx, pool, "{}")
 	apiRepo := apiSeedRepo(t, ctx, pool, install, "acme/api")
 	webRepo := apiSeedRepo(t, ctx, pool, install, "acme/web")
+	publishGraphTestGeneration(t, ctx, pool, apiRepo, "published-api")
+	publishGraphTestGeneration(t, ctx, pool, webRepo, "published-web")
 	apiNode := apiSeedNode(t, ctx, pool, apiRepo, "getJob", "handlers.go")
 	webNode := apiSeedNode(t, ctx, pool, webRepo, "useJob", "job.ts")
 

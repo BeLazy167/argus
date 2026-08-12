@@ -41,10 +41,10 @@ func TestIsArgusThread(t *testing.T) {
 	}
 }
 
-// TestIsPrivilegedAssociation is the canonical truth-table for the
-// maintainer-trust gate used by `@argus resolve` and the reply-path shortcut:
-// only owner/member/collaborator; everyone else (and unknown/empty) is denied
-// fail-closed. Case-insensitive + whitespace-trimmed.
+// TestIsPrivilegedAssociation is the canonical truth-table for coarse
+// association policies such as `@argus resolve`: only owner/member/collaborator;
+// everyone else (and unknown/empty) is denied fail-closed. Reply-derived writes
+// use the effective repository-permission check instead.
 func TestIsPrivilegedAssociation(t *testing.T) {
 	tests := []struct {
 		assoc string

@@ -142,10 +142,11 @@ func buildFeedbackDoc(owner, repo string, fb FeedbackMemory) (Doc, error) {
 		Polarity: polarity,
 		Action:   fb.Action,
 		PRNumber: fb.PRNumber,
+		Source:   fb.Source,
 	}
-	customID := FeedbackCustomID(owner, repo, fb.FilePath, fb.Category, fb.OriginalBody, fb.Action)
+	customID := feedbackCustomIDForSource(owner, repo, fb.FilePath, fb.Category, fb.OriginalBody, fb.Action, fb.Source)
 	if fb.Action == "dismissed" {
-		customID = dismissalCustomID(repo, fb.Category, fb.OriginalBody)
+		customID = dismissalCustomIDForSource(repo, fb.Category, fb.OriginalBody, fb.Source)
 		extra := map[string]string{"repo": repo}
 		if fb.ChangeKind != "" {
 			extra["change_kind"] = fb.ChangeKind
@@ -166,6 +167,59 @@ func buildFeedbackDoc(owner, repo string, fb FeedbackMemory) (Doc, error) {
 		Content:      content,
 		Metadata:     meta,
 	}, nil
+}
+
+type feedbackReconciliation struct {
+	DeleteFirst           []string
+	LegacyDismissalBefore string
+	Upsert                *Doc
+	DeleteAfter           []string
+	LegacyDismissalAfter  string
+}
+
+// feedbackReconciliationPlan orders reaction-owned state replacement fail-safe:
+// removing a stale dismissal happens before installing confirmation, so a failed
+// reinforce write cannot leave suppression active. Installing dismissal happens
+// before removing confirmation because suppression is the requested current state.
+// Source-specific IDs ensure this plan cannot retract trusted replies or praise.
+func feedbackReconciliationPlan(owner, repo string, fb FeedbackMemory) (feedbackReconciliation, error) {
+	if fb.Source != SourceReactionFeedback {
+		return feedbackReconciliation{}, fmt.Errorf("reconciling feedback signal: source %q is not reversible reaction feedback", fb.Source)
+	}
+	confirmedID := feedbackCustomIDForSource(owner, repo, fb.FilePath, fb.Category, fb.OriginalBody, "confirmed", fb.Source)
+	ignoredID := feedbackCustomIDForSource(owner, repo, fb.FilePath, fb.Category, fb.OriginalBody, "ignored", fb.Source)
+	dismissedID := dismissalCustomIDForSource(repo, fb.Category, fb.OriginalBody, fb.Source)
+	legacyDismissedID := dismissalCustomID(repo, fb.Category, fb.OriginalBody)
+
+	switch fb.Action {
+	case "":
+		return feedbackReconciliation{
+			DeleteFirst:           []string{dismissedID, confirmedID, ignoredID},
+			LegacyDismissalBefore: legacyDismissedID,
+		}, nil
+	case "confirmed":
+		doc, err := buildFeedbackDoc(owner, repo, fb)
+		if err != nil {
+			return feedbackReconciliation{}, err
+		}
+		return feedbackReconciliation{
+			DeleteFirst:           []string{dismissedID, ignoredID},
+			LegacyDismissalBefore: legacyDismissedID,
+			Upsert:                &doc,
+		}, nil
+	case "dismissed":
+		doc, err := buildFeedbackDoc(owner, repo, fb)
+		if err != nil {
+			return feedbackReconciliation{}, err
+		}
+		return feedbackReconciliation{
+			Upsert:               &doc,
+			DeleteAfter:          []string{confirmedID, ignoredID},
+			LegacyDismissalAfter: legacyDismissedID,
+		}, nil
+	default:
+		return feedbackReconciliation{}, fmt.Errorf("reconciling feedback signal: unsupported action %q (want confirmed|dismissed|empty)", fb.Action)
+	}
 }
 
 // buildScenarioDoc shapes a scenario doc: description plus a "Related files"

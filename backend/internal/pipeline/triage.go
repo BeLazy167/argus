@@ -97,14 +97,14 @@ func (ts *TriageStage) Execute(ctx context.Context, run *PipelineRun) error {
 	run.TriageResults = triageSlice
 
 	if run.EventBus != nil {
-		run.EventBus.Publish(run.ReviewID, EventTriageComplete, map[string]any{
+		run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventTriageComplete, map[string]any{
 			"files": triageSlice,
 		})
 	}
 
 	// Token usage is accumulated inside llmTriage if it ran
 	if run.EventBus != nil {
-		run.EventBus.Publish(run.ReviewID, EventTokenUpdate, map[string]any{
+		run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventTokenUpdate, map[string]any{
 			"total_tokens": run.Tokens.Total.TotalTokens,
 			"cost":         run.Tokens.Total.Cost,
 		})
@@ -113,7 +113,7 @@ func (ts *TriageStage) Execute(ctx context.Context, run *PipelineRun) error {
 	return nil
 }
 
-func buildTriagePrompt(files []diff.FileDiff) string {
+func buildTriagePrompt(files []diff.FileDiff, memoryHints string) string {
 	var sb strings.Builder
 	sb.WriteString("Classify each file for code review depth.\n\nFiles changed:\n")
 	for _, f := range files {
@@ -126,6 +126,10 @@ func buildTriagePrompt(files []diff.FileDiff) string {
 		if len(lines) > maxDiffLines {
 			sb.WriteString(fmt.Sprintf("\n... (%d more lines)\n", len(lines)-maxDiffLines))
 		}
+	}
+	if memoryHints != "" {
+		sb.WriteString("\n\n")
+		sb.WriteString(wrapRetrievedMemory(memoryHints))
 	}
 	return sb.String()
 }
@@ -142,10 +146,8 @@ func (ts *TriageStage) llmTriage(ctx context.Context, run *PipelineRun) (map[str
 	if splitErr != nil {
 		slog.Warn("triage: invalid repo name, skipping memory hints", "error", splitErr)
 	}
-	prompt := buildTriagePrompt(run.Diff.Files)
-	if hints := triageMemoryHints(ctx, run.Indexer, run.Thresholds, owner, repo, run.Diff.Files); hints != "" {
-		prompt += "\n" + hints
-	}
+	hints := triageMemoryHints(ctx, run.Indexer, run.Thresholds, owner, repo, run.Diff.Files)
+	prompt := buildTriagePrompt(run.Diff.Files, hints)
 
 	resp, err := provider.Complete(ctx, llm.CompletionRequest{
 		Model:       cfg.Model,

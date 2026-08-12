@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -19,52 +20,96 @@ import (
 	"github.com/BeLazy167/argus/backend/internal/store"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
 
+type repoMetadataClient interface {
+	GetRepositoryMetadata(context.Context, int64, string, string) (ghpkg.RepositoryMetadata, error)
+	ResolveDefaultBranchCommit(context.Context, int64, string, string, string) (string, error)
+}
+
+type reviewPostLookup interface {
+	FindReviewByMarker(context.Context, int64, string, string, int, string, string) (int64, bool, error)
+}
+
+type reviewRetryRunner interface {
+	EnsureNotRunning(context.Context, uuid.UUID) error
+	RetryReview(context.Context, uuid.UUID, int) error
+}
+
+type reviewBindingRecoverer interface {
+	RecoverPostedReviewBindings(context.Context, uuid.UUID, int, int64) error
+}
+
 type Server struct {
-	router           chi.Router
-	store            *store.Store
-	ghApp            *ghpkg.App
-	orchestrator     *pipeline.Orchestrator
-	replyAnalyzer    *pipeline.ReplyAnalyzer
-	reactionAnalyzer *pipeline.ReactionAnalyzer
-	registry         *llm.Registry
-	eventBus         *pipeline.EventBus
-	webhookSecret    []byte
-	logger           *slog.Logger
-	rateLimiter      *RateLimiter
-	inflight         *inflight.Registry // per-PR in-flight slots + paired cancel fns
-	launcher         *pipeline.Launcher // shared slot/cancel/topic/spawn/rollback lifecycle
-	webhookSem       chan struct{}      // bounded concurrency for webhook goroutines
-	audit            *auditLogger
-	memRegistry      *memory.Registry
-	cfg              *config.Config
-	commandRe        *regexp.Regexp // "@<app-slug> <command>" matcher, built from cfg.GitHubAppSlug
+	router                 chi.Router
+	store                  *store.Store
+	memoryLister           memoryListStore
+	ghApp                  *ghpkg.App
+	repoMetadata           repoMetadataClient
+	reviewPostLookup       reviewPostLookup
+	reviewRetrier          reviewRetryRunner
+	reviewBindingRecoverer reviewBindingRecoverer
+	orchestrator           *pipeline.Orchestrator
+	prEventHandler         prEventHandler
+	replyAnalyzer          *pipeline.ReplyAnalyzer
+	reactionAnalyzer       *pipeline.ReactionAnalyzer
+	reactionSweeper        reactionSweeper
+	registry               *llm.Registry
+	eventBus               *pipeline.EventBus
+	webhookSecret          []byte
+	logger                 *slog.Logger
+	rateLimiter            *RateLimiter
+	inflight               *inflight.Registry // per-PR in-flight slots + paired cancel fns
+	launcher               *pipeline.Launcher // shared slot/cancel/topic/spawn/rollback lifecycle
+	webhookSem             chan struct{}      // bounded concurrency for webhook goroutines
+	audit                  *auditLogger
+	memRegistry            *memory.Registry
+	reembedMemories        func(context.Context, int64) (int, error)
+	cfg                    *config.Config
+	commandRe              *regexp.Regexp // "@<app-slug> <command>" matcher, built from cfg.GitHubAppSlug
 }
 
 func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchestrator, replyAnalyzer *pipeline.ReplyAnalyzer, reactionAnalyzer *pipeline.ReactionAnalyzer, registry *llm.Registry, eventBus *pipeline.EventBus, cfg *config.Config, logger *slog.Logger, memRegistry *memory.Registry) *Server {
+	githubClient := ghpkg.NewClient(ghApp, cfg.GitHubAppSlug)
 	s := &Server{
-		store:            st,
-		ghApp:            ghApp,
-		orchestrator:     orchestrator,
-		replyAnalyzer:    replyAnalyzer,
-		reactionAnalyzer: reactionAnalyzer,
-		registry:         registry,
-		eventBus:         eventBus,
-		webhookSecret:    []byte(cfg.GitHubWebhookSecret),
-		logger:           logger,
-		rateLimiter:      NewRateLimiter(),
-		webhookSem:       make(chan struct{}, 50),
-		audit:            newAuditLogger(logger),
-		memRegistry:      memRegistry,
-		cfg:              cfg,
-		commandRe:        commandRe(cfg.GitHubAppSlug),
+		store:                  st,
+		memoryLister:           st,
+		ghApp:                  ghApp,
+		repoMetadata:           githubClient,
+		reviewPostLookup:       githubClient,
+		reviewRetrier:          orchestrator,
+		reviewBindingRecoverer: orchestrator,
+		orchestrator:           orchestrator,
+		replyAnalyzer:          replyAnalyzer,
+		reactionAnalyzer:       reactionAnalyzer,
+		registry:               registry,
+		eventBus:               eventBus,
+		webhookSecret:          []byte(cfg.GitHubWebhookSecret),
+		logger:                 logger,
+		rateLimiter:            NewRateLimiter(),
+		webhookSem:             make(chan struct{}, 50),
+		audit:                  newAuditLogger(logger),
+		memRegistry:            memRegistry,
+		cfg:                    cfg,
+		commandRe:              commandRe(cfg.GitHubAppSlug),
+	}
+	if orchestrator != nil {
+		s.prEventHandler = orchestrator
+	}
+	if reactionAnalyzer != nil {
+		s.reactionSweeper = reactionAnalyzer
 	}
 	// The registry is shared: the launcher registers slots + cancels on it; the
 	// cancel handler (cancelReview) consults the same instance via registry.Cancel.
 	s.inflight = inflight.NewRegistry()
 	s.launcher = pipeline.NewLauncher(s.inflight, eventBus, st, logger)
+	if memRegistry != nil {
+		s.reembedMemories = func(ctx context.Context, installationID int64) (int, error) {
+			return memRegistry.ReembedCurrentSpace(ctx, installationID, 100)
+		}
+	}
 
 	r := chi.NewRouter()
 	// traceIDMiddleware must be outermost — every downstream middleware,
@@ -175,6 +220,9 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 				r.Post("/reviews/{reviewID}/retry", s.retryReview)
 				r.Post("/reviews/{reviewID}/cancel", s.cancelReview)
 
+				// Memories
+				r.Get("/memories", s.listMemories)
+
 				// Rules
 				r.Get("/rules", s.listRules)
 				r.Post("/rules", s.createRule)
@@ -213,7 +261,6 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 				r.Get("/patterns/{patternID}", s.getPattern)
 
 				// Graph & Architecture
-				r.Get("/repos/{repoID}/graph", s.getGraph)
 				r.Get("/repos/{repoID}/architecture", s.getArchitecture)
 				r.Get("/repos/{repoID}/files/*", s.getFileMemory)
 

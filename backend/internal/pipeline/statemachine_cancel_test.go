@@ -150,6 +150,45 @@ func TestRun_HappyPath_RunsToCompletion(t *testing.T) {
 	}
 }
 
+// TestRun_InitialAuthorityRejectedTerminalizesPersistedRun proves that a
+// recovered run whose review is already cancelled/completed does not remain a
+// non-terminal recovery candidate forever after the initial status CAS rejects
+// its attempt.
+func TestRun_InitialAuthorityRejectedTerminalizesPersistedRun(t *testing.T) {
+	sm, _ := newTestSM()
+	run := &PipelineRun{ID: uuid.New(), ReviewID: uuid.New(), State: StateReviewing}
+
+	statusWrites := 0
+	sm.setStatus = func(context.Context, uuid.UUID, string, string, []byte, []string) (bool, error) {
+		statusWrites++
+		return false, nil
+	}
+	var persistedState PipelineState
+	var persistedError string
+	sm.persist = func(_ context.Context, got *PipelineRun) error {
+		persistedState = got.State
+		persistedError = got.Error
+		return nil
+	}
+
+	err := sm.Run(context.Background(), run)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run err = %v, want context.Canceled", err)
+	}
+	if run.State != StateCancelled {
+		t.Fatalf("run.State = %q, want %q", run.State, StateCancelled)
+	}
+	if persistedState != StateCancelled {
+		t.Errorf("persisted state = %q, want %q", persistedState, StateCancelled)
+	}
+	if persistedError == "" {
+		t.Error("terminalized run did not record why its authority was rejected")
+	}
+	if statusWrites != 1 {
+		t.Errorf("review status writes = %d, want only the rejected ownership CAS", statusWrites)
+	}
+}
+
 // TestRun_StageFailure_WritesFailedConditionally proves a stage failure writes
 // "failed" as a compare-and-set (so a racing cancel isn't clobbered).
 func TestRun_StageFailure_WritesFailedConditionally(t *testing.T) {

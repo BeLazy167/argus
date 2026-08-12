@@ -163,9 +163,21 @@ func attachArchContext(ctx context.Context, run *PipelineRun, dep archContextRea
 		return
 	}
 
-	fanInByFile := make(map[string]int, len(edges))
+	// File-level fan-in is the number of distinct files that depend on a
+	// target, not the number of symbol/kind edges between them. This matches
+	// aggregateArchEdges and the architecture dashboard.
+	dependentsByFile := make(map[string]map[string]struct{}, len(edges))
 	for _, e := range edges {
-		fanInByFile[e.TargetPath]++
+		dependents := dependentsByFile[e.TargetPath]
+		if dependents == nil {
+			dependents = make(map[string]struct{})
+			dependentsByFile[e.TargetPath] = dependents
+		}
+		dependents[e.SourcePath] = struct{}{}
+	}
+	fanInByFile := make(map[string]int, len(dependentsByFile))
+	for target, dependents := range dependentsByFile {
+		fanInByFile[target] = len(dependents)
 	}
 	bugsByFile := make(map[string]int, len(density))
 	for _, d := range density {
