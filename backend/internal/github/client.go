@@ -289,13 +289,47 @@ func (c *Client) GetFileContent(ctx context.Context, installationID int64, owner
 	})
 }
 
+// reviewPostError carries the only safe automatic-retry fact: no CreateReview
+// request could have created a review. Every other failure remains ambiguous.
+type reviewPostError struct {
+	err                  error
+	definitelyNotCreated bool
+}
+
+func (e *reviewPostError) Error() string              { return e.err.Error() }
+func (e *reviewPostError) Unwrap() error              { return e.err }
+func (e *reviewPostError) DefinitelyNotCreated() bool { return e.definitelyNotCreated }
+
+// IsReviewDefinitelyNotCreated reports whether GitHub conclusively rejected the
+// mutation, or whether it failed before any CreateReview request was sent.
+func IsReviewDefinitelyNotCreated(err error) bool {
+	var certain interface{ DefinitelyNotCreated() bool }
+	return errors.As(err, &certain) && certain.DefinitelyNotCreated()
+}
+
+func definitelyNotCreated(err error) error {
+	return &reviewPostError{err: err, definitelyNotCreated: true}
+}
+
+func isConclusiveReview4xx(err error) bool {
+	var responseErr *gh.ErrorResponse
+	return errors.As(err, &responseErr) && responseErr.Response != nil &&
+		responseErr.Response.StatusCode >= http.StatusBadRequest && responseErr.Response.StatusCode < http.StatusInternalServerError
+}
+
 // PostReview creates a pull request review with all inline comments in one atomic API call.
 // Comments must be pre-validated — invalid lines should be folded into the summary body
 // by the caller, not included in the Comments slice.
 func (c *Client) PostReview(ctx context.Context, installationID int64, owner, repo string, prNumber int, review *ReviewSubmission) (int64, error) {
+	if review == nil {
+		return 0, definitelyNotCreated(errors.New("posting review: nil submission"))
+	}
+	if c == nil || c.app == nil {
+		return 0, definitelyNotCreated(errors.New("creating github client: GitHub App is not configured"))
+	}
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
-		return 0, fmt.Errorf("creating github client: %w", err)
+		return 0, definitelyNotCreated(fmt.Errorf("creating github client: %w", err))
 	}
 
 	comments := make([]*gh.DraftReviewComment, len(review.Comments))
@@ -326,11 +360,21 @@ func (c *Client) PostReview(ctx context.Context, installationID int64, owner, re
 		req.CommitID = gh.Ptr(review.HeadSHA)
 	}
 
-	// Single atomic call. Retry on transient errors.
+	// Single atomic call. Retry on transient errors. Once any request has an
+	// ambiguous outcome, a later conclusive response cannot erase that earlier
+	// uncertainty.
 	if err := c.restLimiter.Wait(ctx); err != nil {
-		return 0, fmt.Errorf("rate limit wait: %w", err)
+		return 0, definitelyNotCreated(fmt.Errorf("rate limit wait: %w", err))
 	}
-	ghReview, _, err := client.PullRequests.CreateReview(ctx, owner, repo, prNumber, req)
+	mutationUncertain := false
+	createReview := func() (*gh.PullRequestReview, error) {
+		created, _, createErr := client.PullRequests.CreateReview(ctx, owner, repo, prNumber, req)
+		if createErr != nil && !isConclusiveReview4xx(createErr) {
+			mutationUncertain = true
+		}
+		return created, createErr
+	}
+	ghReview, err := createReview()
 
 	// Handle secondary rate limit (403) — respect Retry-After and retry once.
 	if err != nil {
@@ -359,29 +403,33 @@ func (c *Client) PostReview(ctx context.Context, installationID int64, owner, re
 			select {
 			case <-time.After(wait):
 			case <-ctx.Done():
-				return 0, fmt.Errorf("context cancelled during rate limit wait: %w", ctx.Err())
+				waitErr := fmt.Errorf("context cancelled during rate limit wait: %w", ctx.Err())
+				if !mutationUncertain {
+					return 0, definitelyNotCreated(waitErr)
+				}
+				return 0, &reviewPostError{err: waitErr}
 			}
-			ghReview, _, err = client.PullRequests.CreateReview(ctx, owner, repo, prNumber, req)
+			ghReview, err = createReview()
 		}
 	}
 
-	// Retry once on 5xx (transient GitHub errors).
+	// A 5xx may mean GitHub committed the review and lost the response. Never
+	// repeat that mutation: an immediate negative list is not authoritative under
+	// eventual consistency. An exact marker match is positive evidence; every
+	// other result remains ambiguous for the durable dashboard reconciler.
 	if err != nil && isRetryable(err) {
-		slog.Warn("review post failed (5xx), checking if review was created anyway",
+		slog.Warn("review post failed (5xx), reconciling exact marker without retrying mutation",
 			"comments", len(comments), "error", err)
-		time.Sleep(2 * time.Second)
-
-		// GitHub 502s are phantom failures — the review may have been created
-		// despite the error response. Check before retrying to avoid duplicates.
-		existingID, checkErr := findBotReview(ctx, client, owner, repo, prNumber, c.appSlug)
-		if checkErr == nil && existingID > 0 {
-			slog.Info("review was created despite 5xx, skipping retry",
-				"github_review_id", existingID)
-			return existingID, nil
+		marker := reviewMarkerFromBody(review.Summary)
+		if marker != "" {
+			existingID, found, checkErr := c.FindReviewByMarker(ctx, installationID, owner, repo, prNumber, marker, review.HeadSHA)
+			if checkErr == nil && found {
+				slog.Info("review was created despite 5xx, recovered exact marker",
+					"github_review_id", existingID)
+				return existingID, nil
+			}
+			slog.Warn("exact review marker not yet observable after 5xx", "check_error", checkErr)
 		}
-
-		slog.Warn("no existing review found, retrying", "check_error", checkErr)
-		ghReview, _, err = client.PullRequests.CreateReview(ctx, owner, repo, prNumber, req)
 	}
 	if err != nil && is422(err) {
 		errStr := err.Error()
@@ -390,7 +438,7 @@ func (c *Client) PostReview(ctx context.Context, installationID int64, owner, re
 			slog.Warn("review post failed (422 submitted too quickly), waiting before retry",
 				"comments", len(comments), "error", err)
 			time.Sleep(10 * time.Second)
-			ghReview, _, err = client.PullRequests.CreateReview(ctx, owner, repo, prNumber, req)
+			ghReview, err = createReview()
 			// If still failing with position errors after the wait, fall through to start_line stripping.
 			if err != nil && is422(err) {
 				errStr = err.Error()
@@ -399,7 +447,7 @@ func (c *Client) PostReview(ctx context.Context, installationID int64, owner, re
 					slog.Warn("review post still too quick, waiting longer",
 						"comments", len(comments), "error", err)
 					time.Sleep(20 * time.Second)
-					ghReview, _, err = client.PullRequests.CreateReview(ctx, owner, repo, prNumber, req)
+					ghReview, err = createReview()
 				}
 			}
 		}
@@ -413,15 +461,82 @@ func (c *Client) PostReview(ctx context.Context, installationID int64, owner, re
 				comments[i].StartLine = nil
 				comments[i].StartSide = nil
 			}
-			ghReview, _, err = client.PullRequests.CreateReview(ctx, owner, repo, prNumber, req)
+			ghReview, err = createReview()
 		} else {
 			slog.Warn("review post failed (422 non-line)", "comments", len(comments), "error", err)
 		}
 	}
 	if err != nil {
-		return 0, fmt.Errorf("posting review: %w", err)
+		postErr := fmt.Errorf("posting review: %w", err)
+		if !mutationUncertain && isConclusiveReview4xx(err) {
+			return 0, definitelyNotCreated(postErr)
+		}
+		return 0, &reviewPostError{err: postErr}
+	}
+	if ghReview == nil || ghReview.GetID() <= 0 {
+		return 0, &reviewPostError{err: errors.New("posting review: GitHub returned no review id")}
 	}
 	return ghReview.GetID(), nil
+}
+
+func reviewMarkerFromBody(body string) string {
+	const prefix = "<!-- argus-review:"
+	start := strings.LastIndex(body, prefix)
+	if start < 0 {
+		return ""
+	}
+	end := strings.Index(body[start:], "-->")
+	if end < 0 {
+		return ""
+	}
+	return body[start : start+end+len("-->")]
+}
+
+// ReviewMarker is the stable, hidden identity embedded in one review attempt.
+// It contains no tenant data and is exact-matchable during remote reconciliation.
+func ReviewMarker(reviewID string, generation int) string {
+	return fmt.Sprintf("<!-- argus-review:%s:generation:%d -->", reviewID, generation)
+}
+
+// FindReviewByMarker performs a complete paginated lookup through the same
+// installation-scoped client used to post. A match must have the exact marker,
+// our bot identity, and (when supplied) the reviewed head commit.
+func (c *Client) FindReviewByMarker(ctx context.Context, installationID int64, owner, repo string, prNumber int, marker, headSHA string) (int64, bool, error) {
+	if c == nil || c.app == nil {
+		return 0, false, errors.New("listing reviews: GitHub App is not configured")
+	}
+	if marker == "" {
+		return 0, false, errors.New("listing reviews: empty reconciliation marker")
+	}
+	client, err := c.app.ClientForInstallation(installationID)
+	if err != nil {
+		return 0, false, fmt.Errorf("creating github client: %w", err)
+	}
+	opts := &gh.ListOptions{PerPage: 100}
+	for {
+		if err := c.restLimiter.Wait(ctx); err != nil {
+			return 0, false, fmt.Errorf("rate limit wait: %w", err)
+		}
+		reviews, resp, err := client.PullRequests.ListReviews(ctx, owner, repo, prNumber, opts)
+		if err != nil {
+			return 0, false, fmt.Errorf("listing reviews for reconciliation: %w", err)
+		}
+		for _, review := range reviews {
+			if !strings.Contains(review.GetBody(), marker) ||
+				!IsArgusThread(review.GetUser().GetLogin(), c.appSlug) ||
+				(headSHA != "" && review.GetCommitID() != headSHA) {
+				continue
+			}
+			if review.GetID() <= 0 {
+				return 0, false, errors.New("reconciled GitHub review has no id")
+			}
+			return review.GetID(), true, nil
+		}
+		if resp == nil || resp.NextPage == 0 {
+			return 0, false, nil
+		}
+		opts.Page = resp.NextPage
+	}
 }
 
 func isRetryable(err error) bool {
@@ -439,24 +554,6 @@ func is422(err error) bool {
 		return ghErr.Response.StatusCode == 422
 	}
 	return false
-}
-
-// findBotReview checks if the App's bot login (<appSlug>[bot]) already has a
-// review on this PR created in the last 5 minutes. Handles GitHub phantom
-// 502s where the review was created server-side but the response was lost.
-func findBotReview(ctx context.Context, client *gh.Client, owner, repo string, prNumber int, appSlug string) (int64, error) {
-	reviews, _, err := client.PullRequests.ListReviews(ctx, owner, repo, prNumber, &gh.ListOptions{PerPage: 30})
-	if err != nil {
-		return 0, fmt.Errorf("listing reviews: %w", err)
-	}
-	cutoff := time.Now().Add(-5 * time.Minute)
-	for i := len(reviews) - 1; i >= 0; i-- {
-		r := reviews[i]
-		if IsArgusThread(r.GetUser().GetLogin(), appSlug) && r.GetSubmittedAt().Time.After(cutoff) {
-			return r.GetID(), nil
-		}
-	}
-	return 0, nil
 }
 
 // GetCompareCommitsDiff fetches the diff between two commits (for incremental re-review).

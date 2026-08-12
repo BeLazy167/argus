@@ -441,6 +441,14 @@ func (s *Server) retryReview(w http.ResponseWriter, r *http.Request) {
 		s.handleDBError(w, instErr, "installation not found")
 		return
 	}
+	if err := s.reconcileAmbiguousReviewPost(r.Context(), review, repo, inst.InstallationID, getUserID(r.Context())); err != nil {
+		// Never expose GitHub, marker, or persistence details. A failed/incomplete
+		// lookup and a still-recent claim both mean the same safe user action: wait
+		// and retry. The detailed reason remains in structured server logs.
+		s.logger.Warn("retry: review post reconciliation deferred", "error", err, "review_id", id, "repo", repo.FullName)
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "review post reconciliation is still pending; retry later"})
+		return
+	}
 	orgLogin, _, ok := strings.Cut(repo.FullName, "/")
 	if !ok {
 		// Without this the whole name becomes the org rate-limit bucket key,

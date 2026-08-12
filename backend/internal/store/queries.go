@@ -486,15 +486,20 @@ func (s *Store) IsReviewAttemptCurrent(ctx context.Context, id uuid.UUID, genera
 type ReviewPostOutcome string
 
 const (
-	ReviewPostRejected        ReviewPostOutcome = "rejected"
-	ReviewPostAttempted       ReviewPostOutcome = "attempted"
-	ReviewPostRecorded        ReviewPostOutcome = "recorded"
-	ReviewPostAlreadyRecorded ReviewPostOutcome = "already_recorded"
+	ReviewPostRejected             ReviewPostOutcome = "rejected"
+	ReviewPostAttempted            ReviewPostOutcome = "attempted"
+	ReviewPostDefinitelyNotCreated ReviewPostOutcome = "definitely_not_created"
+	ReviewPostRecorded             ReviewPostOutcome = "recorded"
+	ReviewPostAlreadyRecorded      ReviewPostOutcome = "already_recorded"
 
 	postedReviewOperationTimeout = 3 * time.Second
 	postedReviewRepairTimeout    = 3 * time.Second
 	postedReviewRepairTries      = 3
 	postedReviewRepairDelay      = 50 * time.Millisecond
+	// ReviewPostReconciliationMinAge gives GitHub's eventually consistent review
+	// listing time to expose a successful mutation before absence can authorize a
+	// retry. A positive marker match never waits.
+	ReviewPostReconciliationMinAge = 5 * time.Minute
 	// hashtextextended keeps the complete UUID in PostgreSQL's stable 64-bit
 	// advisory-lock namespace. The seed separates review posting from other
 	// application advisory locks.
@@ -504,10 +509,50 @@ const (
 var (
 	ErrReviewPostRepairConflict       = errors.New("posted review repair conflicts with durable review identity")
 	ErrReviewPostPersistenceAmbiguous = errors.New("GitHub review posted but durable identity is ambiguous; automatic retry disabled")
+	ErrReviewPostClaimTooRecent       = errors.New("review post reconciliation is not yet safe")
 )
 
 func reviewPostClaimMarker() string {
 	return ErrReviewPostPersistenceAmbiguous.Error() + ": posting authority claimed; reconciliation required"
+}
+
+func reviewPostClaimMarkerFor(id uuid.UUID, generation int, claimedAt time.Time) string {
+	return fmt.Sprintf("%s: posting authority claimed; review=%s; generation=%d; claimed_at=%s; reconciliation required",
+		ErrReviewPostPersistenceAmbiguous, id, generation, claimedAt.UTC().Format(time.RFC3339Nano))
+}
+
+// ReviewPostClaimedAt extracts the durable claim timestamp. Claims written by
+// older versions deliberately have no usable age and therefore cannot be
+// cleared from a negative remote lookup automatically.
+func ReviewPostClaimedAt(marker string) (time.Time, bool) {
+	const key = "claimed_at="
+	start := strings.Index(marker, key)
+	if start < 0 {
+		return time.Time{}, false
+	}
+	value := marker[start+len(key):]
+	if end := strings.IndexByte(value, ';'); end >= 0 {
+		value = value[:end]
+	}
+	claimedAt, err := time.Parse(time.RFC3339Nano, value)
+	return claimedAt, err == nil
+}
+
+func reviewDefinitelyNotCreated(err error) bool {
+	var certain interface{ DefinitelyNotCreated() bool }
+	return errors.As(err, &certain) && certain.DefinitelyNotCreated()
+}
+
+// clearReviewPostClaim removes only the exact claim created by this call. The
+// detached deadline keeps cleanup bounded even when the request was cancelled.
+func (s *Store) clearReviewPostClaim(ctx context.Context, id uuid.UUID, generation int, claim string) error {
+	clearCtx, cancel := detachedReviewPostContext(ctx)
+	defer cancel()
+	_, err := s.Pool.Exec(clearCtx, `UPDATE reviews SET error=NULL WHERE id=$1 AND attempt_generation=$2 AND github_review_id IS NULL AND error=$3`, id, generation, claim)
+	if err != nil {
+		return fmt.Errorf("clearing exact review post claim: %w", err)
+	}
+	return nil
 }
 
 func detachedReviewPostContext(ctx context.Context) (context.Context, context.CancelFunc) {
@@ -584,6 +629,59 @@ func (s *Store) RepairPostedReviewID(ctx context.Context, id uuid.UUID, generati
 	repairCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), postedReviewRepairTimeout)
 	defer cancel()
 	return repairPostedReviewID(repairCtx, s.Pool, id, generation, githubReviewID)
+}
+
+// AttachReconciledReviewID records a marker-verified remote review using an
+// exact claim compare-and-set. A changed claim, generation, or existing
+// different id is never overwritten.
+func (s *Store) AttachReconciledReviewID(ctx context.Context, id uuid.UUID, generation int, exactClaim string, githubReviewID int64) (bool, error) {
+	if githubReviewID <= 0 {
+		return false, fmt.Errorf("attaching reconciled review: invalid GitHub review id %d", githubReviewID)
+	}
+	attachCtx, cancel := detachedReviewPostContext(ctx)
+	defer cancel()
+	tag, err := s.Pool.Exec(attachCtx, `
+		UPDATE reviews SET github_review_id=$1,error=NULL
+		WHERE id=$2 AND attempt_generation=$3 AND github_review_id IS NULL AND error=$4
+	`, githubReviewID, id, generation, exactClaim)
+	if err != nil {
+		return false, fmt.Errorf("attaching reconciled GitHub review id: %w", err)
+	}
+	if tag.RowsAffected() == 1 {
+		return true, nil
+	}
+	var currentGeneration int
+	var currentID *int64
+	if err := s.Pool.QueryRow(attachCtx, `SELECT attempt_generation,github_review_id FROM reviews WHERE id=$1`, id).Scan(&currentGeneration, &currentID); err != nil {
+		return false, fmt.Errorf("checking reconciled GitHub review loser: %w", err)
+	}
+	if currentGeneration == generation && currentID != nil && *currentID == githubReviewID {
+		return true, nil
+	}
+	if currentGeneration == generation && currentID != nil && *currentID != githubReviewID {
+		return false, fmt.Errorf("%w: review %s has GitHub review id %d, reconciled id was %d", ErrReviewPostRepairConflict, id, *currentID, githubReviewID)
+	}
+	return false, nil
+}
+
+// ClearReconciledReviewClaim authorizes a retry only for an exact, aged claim.
+// The caller must first complete a successful remote marker lookup that found
+// nothing; enforcing age again here keeps a buggy caller from clearing early.
+func (s *Store) ClearReconciledReviewClaim(ctx context.Context, id uuid.UUID, generation int, exactClaim string) (bool, error) {
+	claimedAt, ok := ReviewPostClaimedAt(exactClaim)
+	if !ok || time.Since(claimedAt) < ReviewPostReconciliationMinAge {
+		return false, ErrReviewPostClaimTooRecent
+	}
+	clearCtx, cancel := detachedReviewPostContext(ctx)
+	defer cancel()
+	tag, err := s.Pool.Exec(clearCtx, `
+		UPDATE reviews SET error=NULL
+		WHERE id=$1 AND attempt_generation=$2 AND github_review_id IS NULL AND error=$3
+	`, id, generation, exactClaim)
+	if err != nil {
+		return false, fmt.Errorf("clearing reconciled review post claim: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 // GetRecordedReviewID is the early, read-only crash-recovery check used before
@@ -685,7 +783,14 @@ func (s *Store) PostReviewForAttempt(ctx context.Context, id uuid.UUID, generati
 	// Commit a conservative claim before the request can escape this process.
 	// Same-generation workers serialize on the session lock and treat an old
 	// claim as an ambiguity, never as permission to call GitHub again.
-	claimTx, beginErr := conn.Begin(ctx)
+	beginClaim := s.beginReviewPostClaimTx
+	var claimTx pgx.Tx
+	var beginErr error
+	if beginClaim == nil {
+		claimTx, beginErr = conn.Begin(ctx)
+	} else {
+		claimTx, beginErr = beginClaim(ctx, conn)
+	}
 	if beginErr != nil {
 		return 0, ReviewPostRejected, fmt.Errorf("beginning review post claim: %w", beginErr)
 	}
@@ -720,7 +825,7 @@ func (s *Store) PostReviewForAttempt(ctx context.Context, id uuid.UUID, generati
 	if status != "in_progress" {
 		return 0, ReviewPostRejected, nil
 	}
-	claimMarker := reviewPostClaimMarker()
+	claimMarker := reviewPostClaimMarkerFor(id, generation, time.Now())
 	tag, claimErr := claimTx.Exec(ctx, `UPDATE reviews SET error=$1 WHERE id=$2 AND attempt_generation=$3 AND status='in_progress' AND github_review_id IS NULL`, claimMarker, id, generation)
 	if claimErr != nil || tag.RowsAffected() != 1 {
 		if claimErr == nil {
@@ -733,10 +838,14 @@ func (s *Store) PostReviewForAttempt(ctx context.Context, id uuid.UUID, generati
 	cancelClaimCommit()
 	claimClosed = true
 	if claimErr != nil {
-		// COMMIT may have succeeded. No external call happened, but this session is
-		// no longer trustworthy; quarantine it and leave any committed claim for
-		// reconciliation rather than guessing.
-		return 0, ReviewPostRejected, quarantine(fmt.Errorf("committing durable review post claim: %w", claimErr))
+		// COMMIT may have succeeded, but no external call happened. Quarantine the
+		// uncertain session, then safely clear only this exact claim on a fresh,
+		// bounded connection so retry cannot be stranded by a local commit loss.
+		commitErr := quarantine(fmt.Errorf("committing durable review post claim: %w", claimErr))
+		if clearErr := s.clearReviewPostClaim(ctx, id, generation, claimMarker); clearErr != nil {
+			commitErr = errors.Join(commitErr, clearErr)
+		}
+		return 0, ReviewPostRejected, commitErr
 	}
 
 	begin := s.beginReviewPostTx
@@ -747,7 +856,11 @@ func (s *Store) PostReviewForAttempt(ctx context.Context, id uuid.UUID, generati
 		tx, err = begin(ctx, conn)
 	}
 	if err != nil {
-		return 0, ReviewPostRejected, fmt.Errorf("beginning review post guard: %w", err)
+		guardErr := fmt.Errorf("beginning review post guard: %w", err)
+		if clearErr := s.clearReviewPostClaim(ctx, id, generation, claimMarker); clearErr != nil {
+			guardErr = errors.Join(guardErr, clearErr)
+		}
+		return 0, ReviewPostRejected, guardErr
 	}
 	txClosed := false
 	defer func() {
@@ -762,29 +875,69 @@ func (s *Store) PostReviewForAttempt(ctx context.Context, id uuid.UUID, generati
 	}()
 
 	if err = tx.QueryRow(ctx, `SELECT attempt_generation,status,github_review_id FROM reviews WHERE id=$1 FOR NO KEY UPDATE`, id).Scan(&currentGeneration, &status, &recordedID); err != nil {
-		return 0, ReviewPostRejected, fmt.Errorf("locking review for post: %w", err)
+		guardErr := fmt.Errorf("locking review for post: %w", err)
+		if !rollbackReviewPostTx(ctx, tx) {
+			guardErr = errors.Join(guardErr, quarantine(errors.New("review post guard rollback outcome unconfirmed")))
+		}
+		txClosed = true
+		if clearErr := s.clearReviewPostClaim(ctx, id, generation, claimMarker); clearErr != nil {
+			guardErr = errors.Join(guardErr, clearErr)
+		}
+		return 0, ReviewPostRejected, guardErr
+	}
+	clearUnusedClaim := func() error {
+		clearCtx, cancelClear := detachedReviewPostContext(ctx)
+		tag, clearErr := tx.Exec(clearCtx, `UPDATE reviews SET error=NULL WHERE id=$1 AND attempt_generation=$2 AND github_review_id IS NULL AND error=$3`, id, generation, claimMarker)
+		cancelClear()
+		if clearErr == nil && tag.RowsAffected() != 1 {
+			clearErr = errors.New("exact review post claim disappeared")
+		}
+		if clearErr != nil {
+			return fmt.Errorf("clearing unused review post claim: %w", clearErr)
+		}
+		commitCtx, cancelCommit := detachedReviewPostContext(ctx)
+		commitErr := tx.Commit(commitCtx)
+		cancelCommit()
+		if commitErr != nil {
+			return fmt.Errorf("committing unused review post claim cleanup: %w", commitErr)
+		}
+		txClosed = true
+		return nil
 	}
 	if currentGeneration != generation {
-		return 0, ReviewPostRejected, nil
+		return 0, ReviewPostRejected, clearUnusedClaim()
 	}
 	if recordedID != nil {
+		if clearErr := clearUnusedClaim(); clearErr != nil {
+			return *recordedID, ReviewPostAlreadyRecorded, clearErr
+		}
 		return *recordedID, ReviewPostAlreadyRecorded, nil
 	}
 	if status != "in_progress" {
 		// Cancellation won the small gap between claim commit and this guard. The
 		// callback has not run, so remove only our exact claim before allowing retry.
-		if _, clearErr := tx.Exec(ctx, `UPDATE reviews SET error=NULL WHERE id=$1 AND attempt_generation=$2 AND error=$3`, id, generation, claimMarker); clearErr != nil {
-			return 0, ReviewPostRejected, fmt.Errorf("clearing unused review post claim: %w", clearErr)
-		}
-		if commitErr := tx.Commit(ctx); commitErr != nil {
-			return 0, ReviewPostRejected, fmt.Errorf("committing unused review post claim cleanup: %w", commitErr)
-		}
-		txClosed = true
-		return 0, ReviewPostRejected, nil
+		return 0, ReviewPostRejected, clearUnusedClaim()
 	}
 
 	githubReviewID, callbackErr := post(ctx)
 	if githubReviewID <= 0 {
+		if callbackErr != nil && reviewDefinitelyNotCreated(callbackErr) {
+			// GitHub conclusively did not create a review. Clear only our exact
+			// durable claim in the already-locked transaction before exposing the
+			// retryable failure.
+			if clearErr := clearUnusedClaim(); clearErr != nil {
+				// The remote mutation is still known absent, so a fresh exact CAS is
+				// safe even if the cleanup transaction response was lost.
+				if !txClosed {
+					_ = rollbackReviewPostTx(ctx, tx)
+					txClosed = true
+				}
+				if fallbackErr := s.clearReviewPostClaim(ctx, id, generation, claimMarker); fallbackErr != nil {
+					callbackErr = errors.Join(callbackErr, clearErr, fallbackErr)
+				}
+			}
+			return githubReviewID, ReviewPostDefinitelyNotCreated, callbackErr
+		}
 		if callbackErr != nil {
 			return githubReviewID, ReviewPostAttempted, callbackErr
 		}

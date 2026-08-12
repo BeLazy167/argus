@@ -18,11 +18,11 @@ type Store struct {
 	Pool *pgxpool.Pool
 	q    *db.Queries
 
-	// beginReviewPostTx is a narrow failure-injection seam for the transaction
-	// that fences the non-idempotent GitHub review mutation. Production leaves
-	// it nil and uses Pool.Begin; PostgreSQL tests wrap a real transaction to
-	// simulate a lost UPDATE or COMMIT response.
-	beginReviewPostTx func(context.Context, *pgxpool.Conn) (pgx.Tx, error)
+	// beginReviewPostClaimTx and beginReviewPostTx are narrow failure-injection
+	// seams for the two posting transactions. Production leaves them nil and
+	// uses Conn.Begin; PostgreSQL tests simulate lost claim/persistence commits.
+	beginReviewPostClaimTx func(context.Context, *pgxpool.Conn) (pgx.Tx, error)
+	beginReviewPostTx      func(context.Context, *pgxpool.Conn) (pgx.Tx, error)
 	// unlockReviewPostSession injects an unconfirmed session-unlock result in
 	// PostgreSQL tests. Production executes pg_advisory_unlock directly.
 	unlockReviewPostSession func(context.Context, *pgxpool.Conn, string) (bool, error)

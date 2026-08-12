@@ -28,12 +28,17 @@ type repoMetadataClient interface {
 	ResolveDefaultBranchCommit(context.Context, int64, string, string, string) (string, error)
 }
 
+type reviewPostLookup interface {
+	FindReviewByMarker(context.Context, int64, string, string, int, string, string) (int64, bool, error)
+}
+
 type Server struct {
 	router           chi.Router
 	store            *store.Store
 	memoryLister     memoryListStore
 	ghApp            *ghpkg.App
 	repoMetadata     repoMetadataClient
+	reviewPostLookup reviewPostLookup
 	orchestrator     *pipeline.Orchestrator
 	prEventHandler   prEventHandler
 	replyAnalyzer    *pipeline.ReplyAnalyzer
@@ -55,11 +60,13 @@ type Server struct {
 }
 
 func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchestrator, replyAnalyzer *pipeline.ReplyAnalyzer, reactionAnalyzer *pipeline.ReactionAnalyzer, registry *llm.Registry, eventBus *pipeline.EventBus, cfg *config.Config, logger *slog.Logger, memRegistry *memory.Registry) *Server {
+	githubClient := ghpkg.NewClient(ghApp, cfg.GitHubAppSlug)
 	s := &Server{
 		store:            st,
 		memoryLister:     st,
 		ghApp:            ghApp,
-		repoMetadata:     ghpkg.NewClient(ghApp, cfg.GitHubAppSlug),
+		repoMetadata:     githubClient,
+		reviewPostLookup: githubClient,
 		orchestrator:     orchestrator,
 		replyAnalyzer:    replyAnalyzer,
 		reactionAnalyzer: reactionAnalyzer,

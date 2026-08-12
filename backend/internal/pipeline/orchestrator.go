@@ -2709,6 +2709,13 @@ func (o *Orchestrator) pass2(ctx context.Context, run *PipelineRun) error {
 	return nil
 }
 
+func durablePostSucceeded(githubReviewID int64, outcome store.ReviewPostOutcome, err error) bool {
+	if err == nil || githubReviewID <= 0 {
+		return false
+	}
+	return outcome == store.ReviewPostRecorded || outcome == store.ReviewPostAlreadyRecorded
+}
+
 func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	current, err := o.st.IsReviewAttemptCurrent(ctx, run.ReviewID, run.AttemptGeneration)
 	if err != nil {
@@ -2909,6 +2916,9 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	ghReviewID := recordedReviewID
 	postOutcome := store.ReviewPostAlreadyRecorded
 	if !postAlreadyRecorded {
+		// The exact hidden marker is the remote idempotency key for crash and
+		// response-loss reconciliation. It is stable for this review generation.
+		submission.GitHub.Summary += "\n\n" + ghpkg.ReviewMarker(run.ReviewID.String(), run.AttemptGeneration)
 		ghReviewID, postOutcome, err = o.st.PostReviewForAttempt(ctx, run.ReviewID, run.AttemptGeneration, func(postCtx context.Context) (int64, error) {
 			return o.ghClient.PostReview(
 				postCtx,
@@ -2918,6 +2928,14 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 				&submission.GitHub,
 			)
 		})
+	}
+	if durablePostSucceeded(ghReviewID, postOutcome, err) {
+		// The mutation id is durable; only bounded session unlock/quarantine
+		// cleanup failed. Keep the failure observable without false-failing the
+		// review or skipping completion and winner follow-ups.
+		o.logger.Error("review post cleanup failed after durable id; continuing completion",
+			"error", err, "review_id", run.ReviewID, "attempt_generation", run.AttemptGeneration, "github_review_id", ghReviewID)
+		err = nil
 	}
 	if err != nil {
 		if errors.Is(err, store.ErrReviewPostPersistenceAmbiguous) {

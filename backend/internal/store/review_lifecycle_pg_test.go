@@ -444,6 +444,13 @@ func TestReviewPostRejectsDisallowedStatusWithoutCallingGitHub(t *testing.T) {
 	if !errors.Is(err, ambiguous) || githubReviewID != 0 || outcome != ReviewPostAttempted {
 		t.Fatalf("ambiguous post = (%d,%q,%v), want attempted with original error", githubReviewID, outcome, err)
 	}
+	calledAgain := false
+	if _, outcome, err := st.PostReviewForAttempt(ctx, reviewID, 1, func(context.Context) (int64, error) {
+		calledAgain = true
+		return 999, nil
+	}); !errors.Is(err, ErrReviewPostPersistenceAmbiguous) || outcome != ReviewPostRejected || calledAgain {
+		t.Fatalf("repeat ambiguous post = (%q,%v), called=%v; want blocked", outcome, err, calledAgain)
+	}
 	var persisted bool
 	if err := pool.QueryRow(ctx, `SELECT github_review_id IS NOT NULL FROM reviews WHERE id = $1`, reviewID).Scan(&persisted); err != nil {
 		t.Fatal(err)
@@ -951,5 +958,186 @@ func TestRecoverStaleReviewsPreservesDurablePostAmbiguity(t *testing.T) {
 	}
 	if generation, won, err := st.BeginReviewRetry(ctx, reviewID); err != nil || won || generation != 0 {
 		t.Fatalf("retry after stale recovery = (%d,%v,%v), want ambiguity-blocked loser", generation, won, err)
+	}
+}
+
+type definiteReviewPostFailure struct{ err error }
+
+func (e definiteReviewPostFailure) Error() string              { return e.err.Error() }
+func (e definiteReviewPostFailure) Unwrap() error              { return e.err }
+func (e definiteReviewPostFailure) DefinitelyNotCreated() bool { return true }
+
+func TestReviewPostDefiniteFailureClearsExactClaimAndCanRetry(t *testing.T) {
+	pool, ctx := fileMemoryTestPool(t)
+	_, rawID := seedFileMemoryRepo(t, ctx, pool)
+	reviewID := uuid.MustParse(rawID)
+	if _, err := pool.Exec(ctx, `UPDATE reviews SET status='in_progress' WHERE id=$1`, reviewID); err != nil {
+		t.Fatal(err)
+	}
+	st := NewWithDB(pool)
+
+	remoteErr := definiteReviewPostFailure{err: errors.New("GitHub rejected request")}
+	githubReviewID, outcome, err := st.PostReviewForAttempt(ctx, reviewID, 1, func(context.Context) (int64, error) {
+		return 0, remoteErr
+	})
+	if !errors.Is(err, remoteErr.err) || githubReviewID != 0 || outcome != ReviewPostDefinitelyNotCreated {
+		t.Fatalf("definite post = (%d,%q,%v), want definitely-not-created", githubReviewID, outcome, err)
+	}
+	var stateError *string
+	if err := pool.QueryRow(ctx, `SELECT error FROM reviews WHERE id=$1`, reviewID).Scan(&stateError); err != nil {
+		t.Fatal(err)
+	}
+	if stateError != nil {
+		t.Fatalf("definite failure retained claim %q", *stateError)
+	}
+
+	githubReviewID, outcome, err = st.PostReviewForAttempt(ctx, reviewID, 1, func(context.Context) (int64, error) { return 7788, nil })
+	if err != nil || githubReviewID != 7788 || outcome != ReviewPostRecorded {
+		t.Fatalf("retry post = (%d,%q,%v), want recorded", githubReviewID, outcome, err)
+	}
+}
+
+func TestReviewPostPreCallbackGuardFailureClearsExactClaim(t *testing.T) {
+	pool, ctx := fileMemoryTestPool(t)
+	_, rawID := seedFileMemoryRepo(t, ctx, pool)
+	reviewID := uuid.MustParse(rawID)
+	if _, err := pool.Exec(ctx, `UPDATE reviews SET status='in_progress' WHERE id=$1`, reviewID); err != nil {
+		t.Fatal(err)
+	}
+	st := NewWithDB(pool)
+	injected := errors.New("second transaction unavailable")
+	st.beginReviewPostTx = func(context.Context, *pgxpool.Conn) (pgx.Tx, error) { return nil, injected }
+	called := false
+	_, outcome, err := st.PostReviewForAttempt(ctx, reviewID, 1, func(context.Context) (int64, error) { called = true; return 1, nil })
+	if !errors.Is(err, injected) || outcome != ReviewPostRejected || called {
+		t.Fatalf("post = (%q,%v), called=%v", outcome, err, called)
+	}
+	var stateError *string
+	if err := pool.QueryRow(ctx, `SELECT error FROM reviews WHERE id=$1`, reviewID).Scan(&stateError); err != nil {
+		t.Fatal(err)
+	}
+	if stateError != nil {
+		t.Fatalf("pre-callback failure retained claim %q", *stateError)
+	}
+}
+
+func TestReconcileReviewPostClaimUsesExactCASAndMinimumAge(t *testing.T) {
+	pool, ctx := fileMemoryTestPool(t)
+	_, rawID := seedFileMemoryRepo(t, ctx, pool)
+	reviewID := uuid.MustParse(rawID)
+	st := NewWithDB(pool)
+	oldClaim := reviewPostClaimMarkerFor(reviewID, 1, time.Now().Add(-ReviewPostReconciliationMinAge-time.Minute))
+	if _, err := pool.Exec(ctx, `UPDATE reviews SET status='failed',error=$2 WHERE id=$1`, reviewID, oldClaim); err != nil {
+		t.Fatal(err)
+	}
+
+	attached, err := st.AttachReconciledReviewID(ctx, reviewID, 1, oldClaim, 4455)
+	if err != nil || !attached {
+		t.Fatalf("attach = %v, %v", attached, err)
+	}
+	var storedID int64
+	var stateError *string
+	if err := pool.QueryRow(ctx, `SELECT github_review_id,error FROM reviews WHERE id=$1`, reviewID).Scan(&storedID, &stateError); err != nil {
+		t.Fatal(err)
+	}
+	if storedID != 4455 || stateError != nil {
+		t.Fatalf("state id=%d error=%v", storedID, stateError)
+	}
+
+	// A different durable claim must never be cleared by a stale reconciler.
+	if _, err := pool.Exec(ctx, `UPDATE reviews SET github_review_id=NULL,error=$2 WHERE id=$1`, reviewID, oldClaim+" changed"); err != nil {
+		t.Fatal(err)
+	}
+	cleared, err := st.ClearReconciledReviewClaim(ctx, reviewID, 1, oldClaim)
+	if err != nil || cleared {
+		t.Fatalf("stale exact clear = %v,%v", cleared, err)
+	}
+
+	recentClaim := reviewPostClaimMarkerFor(reviewID, 1, time.Now())
+	if _, err := pool.Exec(ctx, `UPDATE reviews SET error=$2 WHERE id=$1`, reviewID, recentClaim); err != nil {
+		t.Fatal(err)
+	}
+	if cleared, err := st.ClearReconciledReviewClaim(ctx, reviewID, 1, recentClaim); !errors.Is(err, ErrReviewPostClaimTooRecent) || cleared {
+		t.Fatalf("recent clear = %v,%v, want retry later", cleared, err)
+	}
+}
+
+func TestReviewPostClaimCommitAmbiguityClearsBeforeExternalCall(t *testing.T) {
+	pool, ctx := fileMemoryTestPool(t)
+	_, rawID := seedFileMemoryRepo(t, ctx, pool)
+	reviewID := uuid.MustParse(rawID)
+	if _, err := pool.Exec(ctx, `UPDATE reviews SET status='in_progress' WHERE id=$1`, reviewID); err != nil {
+		t.Fatal(err)
+	}
+	st := NewWithDB(pool)
+	st.beginReviewPostClaimTx = func(ctx context.Context, conn *pgxpool.Conn) (pgx.Tx, error) {
+		tx, err := conn.Begin(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return &reviewPostFaultTx{Tx: tx, commitErr: errors.New("claim commit response lost")}, nil
+	}
+	called := false
+	_, outcome, err := st.PostReviewForAttempt(ctx, reviewID, 1, func(context.Context) (int64, error) { called = true; return 12, nil })
+	if err == nil || outcome != ReviewPostRejected || called {
+		t.Fatalf("post=(%q,%v) called=%v", outcome, err, called)
+	}
+	var stateError *string
+	if err := pool.QueryRow(ctx, `SELECT error FROM reviews WHERE id=$1`, reviewID).Scan(&stateError); err != nil {
+		t.Fatal(err)
+	}
+	if stateError != nil {
+		t.Fatalf("ambiguous local commit retained claim %q", *stateError)
+	}
+	st.beginReviewPostClaimTx = nil
+	id, outcome, err := st.PostReviewForAttempt(ctx, reviewID, 1, func(context.Context) (int64, error) { return 13, nil })
+	if err != nil || id != 13 || outcome != ReviewPostRecorded {
+		t.Fatalf("retry=(%d,%q,%v)", id, outcome, err)
+	}
+}
+
+type reviewPostErrorRow struct{ err error }
+
+func (r reviewPostErrorRow) Scan(...any) error { return r.err }
+
+type reviewPostQueryFaultTx struct {
+	pgx.Tx
+	err error
+}
+
+func (tx *reviewPostQueryFaultTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	if strings.Contains(sql, "SELECT attempt_generation,status,github_review_id FROM reviews") {
+		return reviewPostErrorRow{err: tx.err}
+	}
+	return tx.Tx.QueryRow(ctx, sql, args...)
+}
+
+func TestReviewPostSecondGuardQueryFailureClearsClaim(t *testing.T) {
+	pool, ctx := fileMemoryTestPool(t)
+	_, rawID := seedFileMemoryRepo(t, ctx, pool)
+	reviewID := uuid.MustParse(rawID)
+	if _, err := pool.Exec(ctx, `UPDATE reviews SET status='in_progress' WHERE id=$1`, reviewID); err != nil {
+		t.Fatal(err)
+	}
+	st := NewWithDB(pool)
+	injected := errors.New("guard query failed")
+	st.beginReviewPostTx = func(ctx context.Context, conn *pgxpool.Conn) (pgx.Tx, error) {
+		tx, err := conn.Begin(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return &reviewPostQueryFaultTx{Tx: tx, err: injected}, nil
+	}
+	called := false
+	_, outcome, err := st.PostReviewForAttempt(ctx, reviewID, 1, func(context.Context) (int64, error) { called = true; return 1, nil })
+	if !errors.Is(err, injected) || outcome != ReviewPostRejected || called {
+		t.Fatalf("post=(%q,%v), called=%v", outcome, err, called)
+	}
+	var stateError *string
+	if err := pool.QueryRow(ctx, `SELECT error FROM reviews WHERE id=$1`, reviewID).Scan(&stateError); err != nil {
+		t.Fatal(err)
+	}
+	if stateError != nil {
+		t.Fatalf("guard failure retained claim %q", *stateError)
 	}
 }
