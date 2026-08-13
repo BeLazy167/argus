@@ -33,16 +33,33 @@ const (
 // rewrite can never target an unrelated comment even if an id is stale.
 const StartedCommentMarker = "<!-- argus-progress-v1 -->"
 
-// BuildStartedComment renders the in-progress body.
-//
-// rows are the pre-rendered "| **Label** | value |" lines describing the run.
-func BuildStartedComment(dashboardBaseURL, reviewID string, rows []string) string {
+// BuildStartedComment renders the compact in-progress body.
+func BuildStartedComment(dashboardBaseURL, reviewID, mode, scope, estimate, models string) string {
 	var b strings.Builder
 	b.WriteString(StartedCommentMarker)
 	b.WriteString("\n")
-	fmt.Fprintf(&b, "> **Argus** is reviewing this PR — [watch live](%s/reviews/%s)\n\n| | |\n|---|---|\n%s",
-		dashboardBaseURL, reviewID, strings.Join(rows, "\n"))
-	return b.String()
+	fmt.Fprintf(&b, "**Argus** is reviewing this PR · [watch live](%s/reviews/%s)\n", dashboardBaseURL, reviewID)
+
+	parts := make([]string, 0, 3)
+	if mode != "" {
+		parts = append(parts, mode)
+	}
+	if scope != "" {
+		parts = append(parts, scope)
+	}
+	if estimate != "" {
+		parts = append(parts, estimate)
+	}
+	if len(parts) > 0 {
+		b.WriteString("\n<sub>")
+		b.WriteString(strings.Join(parts, " · "))
+		b.WriteString("</sub>\n")
+	}
+	if models != "" {
+		b.WriteString("\n")
+		b.WriteString(models)
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // BuildTerminalStartedComment rewrites the progress comment for a review that
@@ -72,7 +89,7 @@ func BuildTerminalStartedComment(outcome StartedOutcome, dashboardBaseURL, revie
 			b.WriteString("> **Argus** review was cancelled.\n")
 		}
 	default:
-		b.WriteString("> **Argus** review failed — no review was posted.\n")
+		b.WriteString("> **Argus** review failed. Argus did not post a review.\n")
 	}
 
 	if detail = strings.TrimSpace(detail); detail != "" {
@@ -82,12 +99,12 @@ func BuildTerminalStartedComment(outcome StartedOutcome, dashboardBaseURL, revie
 	}
 
 	if canRetry {
-		b.WriteString("\nRe-run by ticking the box below.\n\n")
+		b.WriteString("\nSelect the box to run the review again.\n\n")
 		b.WriteString(TriggerCheckboxUnchecked)
 		b.WriteString("\n")
 	}
 
-	fmt.Fprintf(&b, "\n<sub>[Details →](%s/reviews/%s)</sub>", dashboardBaseURL, reviewID)
+	fmt.Fprintf(&b, "\n<sub>[Details](%s/reviews/%s)</sub>", dashboardBaseURL, reviewID)
 	return b.String()
 }
 
@@ -141,89 +158,85 @@ func (o *Orchestrator) FinalizeStartedComment(ctx context.Context, reviewID uuid
 	o.logger.InfoContext(ctx, "progress comment finalized", "event", "pipeline.github.progress_finalized", "review_id", reviewID, "comment_id", ref.CommentID, "status", string(outcome))
 }
 
-// stageModelOrder is the render order for the models listed on the progress
-// comment: the sequence a reader watches the pipeline execute in.
+// stageModelOrder is the order in the compact model line.
 var stageModelOrder = []string{"triage", "review", "scoring", "synthesis"}
 
-// formatStageModels renders the per-stage model assignment for the progress
-// comment, e.g. "triage, scoring `openai / gpt-5-mini` · review `anthropic / opus`".
-//
-// Takes every resolved config rather than one model name because the stages
-// bill separately and an installation can point each at a different provider.
-// Stages sharing a model collapse into one entry, so the common
-// "everything on one model" case stays short.
+func shortModelName(model string) string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return ""
+	}
+	parts := strings.Split(model, "/")
+	name := parts[len(parts)-1]
+	if index := strings.LastIndex(name, "-"); index >= 0 && index+1 < len(name) {
+		return name[index+1:]
+	}
+	return name
+}
+
+// formatStageModels shows short model names and keeps the full IDs in a tooltip.
 func formatStageModels(configs []store.ModelConfig) string {
 	byStage := make(map[string]string, len(configs))
-	providers := make(map[string]bool, len(configs))
 	for _, c := range configs {
 		if c.Model == "" {
 			continue
 		}
-		byStage[c.Stage] = c.Model
-		providers[c.Provider] = true
+		full := c.Model
+		if c.Provider != "" && !strings.HasPrefix(full, c.Provider+"/") {
+			full = c.Provider + "/" + full
+		}
+		byStage[c.Stage] = full
 	}
 	if len(byStage) == 0 {
 		return ""
 	}
 
-	// One provider for everything is the common case, and repeating it on every
-	// stage was what made this row wrap to three lines in a PR comment. Name it
-	// once, or per-model only when they genuinely differ.
-	shared := len(providers) == 1
-	if !shared {
-		for _, c := range configs {
-			if c.Model != "" {
-				byStage[c.Stage] = c.Provider + "/" + c.Model
+	var visible []string
+	var fullIDs []string
+	lastModel := ""
+	var stages []string
+	flush := func() {
+		if lastModel == "" || len(stages) == 0 {
+			return
+		}
+		labels := make([]string, len(stages))
+		for i, stage := range stages {
+			if stage == "scoring" {
+				labels[i] = "score"
+			} else {
+				labels[i] = stage
 			}
 		}
+		label := strings.Join(labels, "/")
+		visible = append(visible, fmt.Sprintf("%s (%s)", shortModelName(lastModel), label))
+		fullIDs = append(fullIDs, label+": "+lastModel)
 	}
-
-	var order []string
-	members := make(map[string][]string)
-	for _, st := range stageModelOrder {
-		name, ok := byStage[st]
-		if !ok {
+	for _, stage := range stageModelOrder {
+		model := byStage[stage]
+		if model == "" {
 			continue
 		}
-		if _, seen := members[name]; !seen {
-			order = append(order, name)
+		if lastModel != "" && model != lastModel {
+			flush()
+			stages = nil
 		}
-		members[name] = append(members[name], st)
+		lastModel = model
+		stages = append(stages, stage)
 	}
-	parts := make([]string, 0, len(order))
-	for _, name := range order {
-		parts = append(parts, fmt.Sprintf("%s `%s`", strings.Join(members[name], ", "), name))
+	flush()
+	if len(visible) == 0 {
+		return ""
 	}
-	line := strings.Join(parts, " · ")
-	if shared {
-		for p := range providers {
-			if p != "" {
-				line += " _(via " + p + ")_"
-			}
-		}
-	}
-	return line
+	return fmt.Sprintf("<sub title=%q>models: %s</sub>", strings.Join(fullIDs, " · "), strings.Join(visible, " · "))
 }
 
-// formatCostEstimate renders the expected spend for a run that is starting,
-// from this repo's own recent completed reviews.
-//
-// It is explicitly an ESTIMATE and says so: the actual figure is unknowable
-// until the run finishes, and the posted review carries the real per-stage
-// breakdown. Showing nothing was the worse option — the progress comment named
-// a model and no price at all, which reads as "free".
-//
-// Returns "" when there is no sample, rather than inventing a number from one
-// unrelated review. Cost is omitted (tokens only) when the provider never
-// reported it, which is normal for self-hosted and some OSS endpoints.
-func formatCostEstimate(stats store.RepoReviewStats) string {
+// formatTokenEstimate renders the expected token use from recent reviews.
+func formatTokenEstimate(stats store.RepoReviewStats) string {
 	if stats.SampleSize == 0 || stats.AvgTokens == 0 {
 		return ""
 	}
-	if stats.CostAvailable && stats.AvgCost > 0 {
-		return fmt.Sprintf("~%s tokens · ~$%.2f _(avg of last %d)_",
-			humanizeTokens(stats.AvgTokens), stats.AvgCost, stats.SampleSize)
+	if stats.AvgTokens >= 1000 {
+		return fmt.Sprintf("est ~%.0fk tokens", float64(stats.AvgTokens)/1000)
 	}
-	return fmt.Sprintf("~%s tokens _(avg of last %d)_",
-		humanizeTokens(stats.AvgTokens), stats.SampleSize)
+	return fmt.Sprintf("est ~%d tokens", stats.AvgTokens)
 }

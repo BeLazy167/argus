@@ -1263,34 +1263,28 @@ func (o *Orchestrator) postStartedComment(ctx context.Context, event ghpkg.PREve
 		return
 	}
 
-	var rows []string
-	if stageModels != "" {
-		rows = append(rows, fmt.Sprintf("| **Models** | %s |", stageModels))
+	mode := "review"
+	if run.DeepReview {
+		mode = "deep review"
+	} else if run.IsIncremental {
+		mode = "incremental review"
 	}
 	if run.Persona != "" && run.Persona != PersonaDefault {
-		rows = append(rows, fmt.Sprintf("| **Persona** | %s |", strings.ReplaceAll(string(run.Persona), "|", "\\|")))
+		mode += " · " + strings.ReplaceAll(string(run.Persona), "|", "\\|")
 	}
-	if run.DeepReview {
-		rows = append(rows, "| **Mode** | Deep review |")
-	} else if run.IsIncremental {
-		rows = append(rows, "| **Mode** | Incremental |")
-	}
-	rows = append(rows, fmt.Sprintf("| **Scope** | %d files, ~%d lines |",
-		len(run.Diff.Files), run.Diff.TotalLinesChanged()))
-	// Historical spend for THIS repo. No GitHub round-trip is needed — the
-	// scope above already comes from the fetched diff — so this costs one
-	// bounded aggregate query. A failure is not worth failing the comment
-	// over: the row is simply omitted.
+	scope := fmt.Sprintf("%d files ~%d lines", len(run.Diff.Files), run.Diff.TotalLinesChanged())
+
+	var estimate string
 	statsCtx, cancelStats := context.WithTimeout(ctx, statsQueryTimeout)
 	stats, statsErr := o.st.GetRepoReviewStats(statsCtx, run.DBRepoID, historicalReviewSampleLimit)
 	cancelStats()
 	if statsErr != nil {
 		o.logger.Warn("repo review stats for started comment", "error", statsErr, "repo_id", run.DBRepoID)
-	} else if est := formatCostEstimate(stats); est != "" {
-		rows = append(rows, fmt.Sprintf("| **Cost** | %s |", est))
+	} else {
+		estimate = formatTokenEstimate(stats)
 	}
 
-	body := BuildStartedComment(o.cfg.DashboardBaseURL, run.ReviewID.String(), rows)
+	body := BuildStartedComment(o.cfg.DashboardBaseURL, run.ReviewID.String(), mode, scope, estimate, stageModels)
 
 	nodeID, commentID, err := o.ghClient.CreateIssueCommentRef(ctx, event.InstallationID, owner, repo, event.PRNumber, body)
 	if err != nil {
@@ -2110,16 +2104,14 @@ func (o *Orchestrator) synthesize(ctx context.Context, run *PipelineRun) error {
 		if n == 1 {
 			noun = "file"
 		}
-		brief = fmt.Sprintf("Argus reviewed %d %s and found no issues. Code looks good.", n, noun)
+		brief = fmt.Sprintf("### Findings summary\n\n- Argus reviewed %d %s. No blocking findings from Argus.", n, noun)
 	} else {
 		// Try LLM-generated conversational brief
 		brief = o.generateConversationalBrief(ctx, run, score)
 	}
 
-	// Capture the H2 headline BEFORE the intent header is prepended to brief —
-	// otherwise the posted comment's H2 would pull the first sentence of the
-	// intent disclaimer ("### 🔍 PR intent vs diff … _Argus read the diff …_")
-	// instead of the actual synthesis verdict.
+	// Capture the H2 headline before the purpose and acceptance sections are
+	// prepended to the findings summary.
 	//
 	// Preferred path: the synthesis LLM was prompted to emit a dedicated
 	// `**Headline:** …` line (≤100 chars, no markdown). When present we strip
@@ -2140,7 +2132,7 @@ func (o *Orchestrator) synthesize(ctx context.Context, run *PipelineRun) error {
 		brief = briefBody
 	}
 
-	// Prepend intent header + [INTENT] finding; both return "" when not applicable.
+	// Put the purpose and author checks before the findings summary.
 	if header := FormatIntentHeader(run, verdict); header != "" {
 		brief = header + "\n" + brief
 	}
@@ -2273,37 +2265,31 @@ func (o *Orchestrator) verifyIntent(ctx context.Context, run *PipelineRun) *Inte
 	return verdict
 }
 
-const synthesisBriefSystemPrompt = `You are writing a concise verdict for a pull request review. Per-file inline comments are shown separately — do NOT repeat them.
+const synthesisBriefSystemPrompt = `Write a short pull request review summary in Simplified Technical English.
 
-Format (markdown) — emit EXACTLY these lines in this order:
+Return exactly this format:
 
-**Headline:** [Plain prose, MAX 100 CHARACTERS, no markdown, no trailing period. This is the one-liner shown in the posted H2; if it exceeds 100 chars it will be cut and look bad. Pick the single most important takeaway — e.g. "Ships the partner auth flow cleanly, but token storage still leaks identity into query strings".]
+**Headline:** [A factual verdict phrase. Use 10 words or fewer. Use active voice. Do not use marketing language.]
 
-**Verdict:** [1-2 sentences: what this PR does and whether it's ready to merge. Headline may repeat the gist; this line gives nuance.]
+### Findings summary
 
-[severity line — compact inline, only non-zero counts, e.g.:]
-🔴 4 P0 · 🟡 3 P1 · 💡 2 P2 · 64 files reviewed
-
-**Top priority:** [The single most important root cause to fix first.]
-
-**Fix order:** file1.ts → file2.ts → file3.ts
-[One line. Arrow-separated. Dependency order.]
-
-**Architecture:** [1 sentence — what's good, what to watch.]
+- [State the most important finding in 20 words or fewer.]
+- [State the next finding in 20 words or fewer. Omit this line when it adds no new fact.]
+- [State the final finding in 20 words or fewer. Omit this line when it adds no new fact.]
 
 Rules:
-- Headline is REQUIRED. Count characters carefully — the 100-char limit is hard.
-- Severity line: only include non-zero counts. Never show "0 suggestions" or "0 clean".
-- Do NOT use a markdown table. Use the compact inline format shown above.
-- If score >= 8, keep the verdict positive and brief. Omit fix order and top priority.
-- If critical issues exist, Top priority and Fix order are required.
-- If no critical issues, omit both.
-- Group related findings by ROOT CAUSE, then surface the root cause in Top priority.
-- Fix order: dependency order. If fixing file A changes the API file B uses, list A first.
-- Do NOT list individual findings — those are inline.
-- Use "we" not "you". Collaborative tone.
-- Argus advises, it never gates merges. When the PR is not ready, say it "needs work" and name what would change the verdict — never "blocked", "rejected", "do not merge", or similar denial language.
-- No greetings, no score, no link, no comment count — those are shown separately.`
+- Do not say that a pull request is ready to merge.
+- Do not decide whether to merge.
+- Do not repeat the score or the finding counts.
+- Use one topic in each sentence.
+- Use active voice.
+- Use simple present or simple past tense.
+- Do not use em dashes or semicolons.
+- Do not use these words: cleanly, comprehensive, seamless, robust.
+- Do not use greetings, links, tables, or decorative language.
+- Do not repeat individual inline comments.
+- If Argus found no blocking findings, write: No blocking findings from Argus.
+- If Argus found blocking findings, name the root cause first.`
 
 // generateConversationalBrief calls the LLM to produce a natural-language summary of the review.
 // Falls back to a deterministic brief on failure.
@@ -2325,8 +2311,8 @@ func (o *Orchestrator) generateConversationalBrief(ctx context.Context, run *Pip
 		}
 	}
 	top := topCategories(run, 2)
-	fallback := fmt.Sprintf("Argus found %d issues (%d critical, %d warnings) across %d files. Key concerns: %s.",
-		countComments(run), criticals, warnings, len(run.Diff.Files), strings.Join(top, ", "))
+	fallback := fmt.Sprintf("### Findings summary\n\n- Argus found %d findings in %d files.\n- The main categories are %s.\n- The review includes %d blocking findings and %d warnings.",
+		countComments(run), len(run.Diff.Files), strings.Join(top, ", "), criticals, warnings)
 
 	// Resolve synthesis provider (falls back to review provider)
 	lister := storeConfigLister{st: o.st, installationID: run.DBInstallationID}
@@ -2403,7 +2389,23 @@ func (o *Orchestrator) generateConversationalBrief(ctx context.Context, run *Pip
 		}
 	}
 
-	return brief
+	return sanitizeSynthesisBrief(brief)
+}
+
+func sanitizeSynthesisBrief(brief string) string {
+	replacements := map[string]string{
+		"ready to merge": "has no blocking findings from Argus",
+		"Ready to merge": "No blocking findings from Argus",
+		"cleanly":        "",
+		"comprehensive":  "complete",
+		"seamless":       "direct",
+		"robust":         "reliable",
+		"—":              ".",
+	}
+	for old, replacement := range replacements {
+		brief = strings.ReplaceAll(brief, old, replacement)
+	}
+	return strings.TrimSpace(brief)
 }
 
 func extractFirstSentences(text string, n int) string {

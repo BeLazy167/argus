@@ -693,66 +693,58 @@ func DemoteOutOfScopeFindings(run *PipelineRun, verdict *IntentVerdict) (unmatch
 	return unmatched, false
 }
 
-// FormatIntentHeader renders the top-of-review block summarising the author's
-// stated motivation. When verdict is non-nil and !Delivers it also emits the
-// "does not deliver" verdict section. Returns "" when there is nothing to say
-// (no intent extracted).
+// FormatIntentHeader renders the author-stated purpose and acceptance checks.
+// Argus compares this information with the diff. It does not execute the code.
 func FormatIntentHeader(run *PipelineRun, verdict *IntentVerdict) string {
 	if !run.PRIntent.HasIntent() {
 		return ""
 	}
 	p := run.PRIntent
 	var sb strings.Builder
-	// Section title framed as LLM analysis, not an execution log. The prior
-	// label ("What Argus thinks this PR does") + "Criteria checked" bullets
-	// misled readers into thinking runtime flows were actually exercised — see
-	// a production review where OAuth/cold-start criteria rendered
-	// with ✅ framing. Argus reads diff text; it cannot click buttons or clone
-	// repos. The disclaimer line makes the static-analysis boundary explicit.
-	sb.WriteString("### 🔍 PR intent vs diff (LLM analysis)\n")
-	sb.WriteString("_Argus read the diff against the stated intent. This is not an execution log — reviewer still needs to test behavior._\n\n")
-	sb.WriteString("**Goal:** " + p.Goal + "\n")
-	if len(p.NonGoals) > 0 {
-		// Bulleted list — joining full sentences with "; " was hard to read on
-		// a production review where each entry was itself a full
-		// sentence with its own punctuation.
-		sb.WriteString("**Not in scope:**\n")
-		for _, g := range p.NonGoals {
-			sb.WriteString("- " + g + "\n")
+	sb.WriteString("### What this PR does\n\n")
+	sb.WriteString("- " + p.Goal + "\n")
+	for i, g := range p.NonGoals {
+		if i == 2 {
+			break
 		}
-	}
-	if len(p.AcceptanceCriteria) > 0 {
-		sb.WriteString("**Stated acceptance criteria** _(from PR/issue — not independently verified):_\n")
-		for _, c := range p.AcceptanceCriteria {
-			sb.WriteString("- " + c + "\n")
-		}
+		sb.WriteString("- Excludes: " + g + "\n")
 	}
 	if p.Source == IntentSourceInferred {
-		sb.WriteString("_(Argus inferred this goal from the diff — no PR description was provided.)_\n")
+		sb.WriteString("\n_Argus inferred this purpose from the diff. The author did not state a purpose._\n")
 	}
 
-	// "Intent delivered / not delivered" rather than the older "Verdict"
-	// wording — the synthesis brief already uses "**Verdict:**" as its prefix,
-	// and having two ### Verdict headings caused reader confusion
-	// (✅ Verdict: delivers stated goal vs "not ready to merge yet" body).
-	// This heading answers a narrower question: does the diff match what the
-	// author said they were doing? The synthesis brief covers ready-to-merge
-	// separately.
+	if len(p.AcceptanceCriteria) > 0 {
+		sb.WriteString("\n### Check before merge\n\n")
+		sb.WriteString("**Stated by the author — not verified by Argus**\n\n")
+		for _, c := range p.AcceptanceCriteria {
+			sb.WriteString("- Make sure that " + lowerFirstWord(c) + "\n")
+		}
+	}
+
 	if verdict != nil && !verdict.Delivers {
-		sb.WriteString("\n### ⚠️ Intent not delivered\n")
+		sb.WriteString("\n**The diff does not meet the stated intent.**\n")
 		if verdict.Rationale != "" {
 			sb.WriteString(verdict.Rationale + "\n")
 		}
 		if len(verdict.UnmetCriteria) > 0 {
-			sb.WriteString("\nUnmet criteria:\n")
+			sb.WriteString("\n**Unmet criteria:**\n")
 			for _, c := range verdict.UnmetCriteria {
 				sb.WriteString("- " + c + "\n")
 			}
 		}
-	} else if verdict != nil && verdict.Delivers {
-		sb.WriteString("\n### ✅ Intent delivered\n")
 	}
 	return sb.String()
+}
+
+func lowerFirstWord(s string) string {
+	if s == "" {
+		return s
+	}
+	runes := []rune(s)
+	if len(runes) > 1 && runes[0] >= 'A' && runes[0] <= 'Z' && runes[1] >= 'a' && runes[1] <= 'z' {
+		runes[0] += 'a' - 'A'
+	}
+	return string(runes)
 }
 
 // FormatIntentFinding renders the HIGH-severity [INTENT] finding that heads the
@@ -779,7 +771,7 @@ func FormatIntentFinding(verdict *IntentVerdict) string {
 
 // NoIntentCallout is the non-blocking footer shown when shouldShowNoIntentCallout
 // fires — Argus had nothing to check the code against.
-const NoIntentCallout = "\n---\n_ℹ️ No PR description or linked issue — Argus reviewed the diff in isolation. Next review will be sharper with a short \"why\" in the PR body._\n"
+const NoIntentCallout = "\n---\n_ℹ️ Argus found no PR description or linked issue. Argus reviewed only the diff. Add the purpose to the PR body._\n"
 
 // shouldShowNoIntentCallout reports whether the "no description" footer belongs
 // in the review. Exists as a predicate so orchestrator.synthesize and tests

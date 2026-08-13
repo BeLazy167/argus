@@ -9,12 +9,12 @@ import (
 )
 
 func TestBuildStartedComment_CarriesMarkerAndLiveLink(t *testing.T) {
-	body := BuildStartedComment("https://argus.reviews", "abc-123", []string{"| **Scope** | 3 files |"})
+	body := BuildStartedComment("https://argus.reviews", "abc-123", "deep review", "3 files ~40 lines", "est ~125k tokens", `<sub title="triage: openai/luna">models: luna (triage)</sub>`)
 
 	if !strings.HasPrefix(body, StartedCommentMarker) {
 		t.Errorf("progress comment must lead with the marker so a rewrite can identify it; got %q", body)
 	}
-	for _, want := range []string{"watch live", "https://argus.reviews/reviews/abc-123", "| **Scope** | 3 files |"} {
+	for _, want := range []string{"watch live", "https://argus.reviews/reviews/abc-123", "<sub>deep review · 3 files ~40 lines · est ~125k tokens</sub>", "models: luna (triage)"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("progress comment missing %q:\n%s", want, body)
 		}
@@ -91,11 +91,10 @@ func TestFormatStageModels_GroupsSharedModels(t *testing.T) {
 		{Stage: "scoring", Provider: "openai", Model: "gpt-5-mini"},
 	})
 
-	// triage and scoring share a model, so they collapse into one entry. The
-	// providers differ here, so each model keeps its own prefix.
-	want := "triage, scoring `openai/gpt-5-mini` · review `anthropic/opus`"
-	if got != want {
-		t.Errorf("formatStageModels =\n  %q\nwant\n  %q", got, want)
+	for _, want := range []string{"mini (triage)", "opus (review)", "mini (score)", "openai/gpt-5-mini", "anthropic/opus"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("formatStageModels missing %q: %q", want, got)
+		}
 	}
 }
 
@@ -143,7 +142,7 @@ func TestJoinModels(t *testing.T) {
 	}
 }
 
-func TestFormatCostEstimate(t *testing.T) {
+func TestFormatTokenEstimate(t *testing.T) {
 	cases := []struct {
 		name  string
 		stats store.RepoReviewStats
@@ -152,14 +151,14 @@ func TestFormatCostEstimate(t *testing.T) {
 		{
 			"tokens and cost",
 			store.RepoReviewStats{AvgTokens: 125_000, SampleSize: 7, CostAvailable: true, AvgCost: 0.42},
-			"~125.0k tokens · ~$0.42 _(avg of last 7)_",
+			"est ~125k tokens",
 		},
 		{
 			// Normal for self-hosted and some OSS endpoints: tokens are known,
 			// price is not. Showing "$0.00" would be a lie.
 			"cost unavailable falls back to tokens",
 			store.RepoReviewStats{AvgTokens: 9_000, SampleSize: 3},
-			"~9.0k tokens _(avg of last 3)_",
+			"est ~9k tokens",
 		},
 		{"no sample renders nothing", store.RepoReviewStats{}, ""},
 		{
@@ -170,8 +169,8 @@ func TestFormatCostEstimate(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := formatCostEstimate(tc.stats); got != tc.want {
-				t.Errorf("formatCostEstimate = %q, want %q", got, tc.want)
+			if got := formatTokenEstimate(tc.stats); got != tc.want {
+				t.Errorf("formatTokenEstimate = %q, want %q", got, tc.want)
 			}
 		})
 	}
@@ -208,13 +207,9 @@ func TestFormatStageModels_CollapsesASharedProvider(t *testing.T) {
 		{Stage: "synthesis", Provider: "vercel", Model: "openai/gpt-5.6-terra"},
 	})
 
-	if strings.Count(got, "vercel") != 1 {
-		t.Errorf("shared provider should appear exactly once, got %q", got)
-	}
-	if !strings.Contains(got, "scoring, synthesis `openai/gpt-5.6-terra`") {
-		t.Errorf("stages sharing a model should collapse: %q", got)
-	}
-	if !strings.Contains(got, "_(via vercel)_") {
-		t.Errorf("the shared provider should still be named: %q", got)
+	for _, want := range []string{"luna (triage)", "sol (review)", "terra (score/synthesis)", "vercel/openai/gpt-5.6-terra"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("compact model line missing %q: %q", want, got)
+		}
 	}
 }
