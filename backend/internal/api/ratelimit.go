@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"sync"
 	"time"
 
@@ -98,28 +97,11 @@ func (rl *RateLimiter) Stop() {
 	rl.stopOnce.Do(func() { close(rl.done) })
 }
 
-// allowReview applies plan-aware rate limiting. Pro-tier installations bypass
-// the per-repo/per-org/force buckets entirely; Free-tier falls through to the
-// underlying token-bucket limiter.
-//
-// A failed plan lookup is treated as Free-tier (fail-safe), and only logged at
-// Warn level — we never want a DB blip to silently uncap a Free install.
-//
-// Args:
-//
-//	ctx: request context; lookup is bounded by the caller's deadline.
-//	repoFullName: "owner/repo" used as the per-repo bucket key.
-//	orgLogin: GitHub org/user login used as the per-org bucket key.
-//	force: passes through to the underlying limiter's force-bucket logic.
-//	ghInstallationID: GitHub installation ID (not the internal store row ID).
-//
-// Returns true if the review is allowed to proceed.
-func (s *Server) allowReview(ctx context.Context, repoFullName, orgLogin string, force bool, ghInstallationID int64) bool {
-	inst, err := s.store.GetInstallationByGitHubID(ctx, ghInstallationID)
-	if err != nil {
-		s.logger.Warn("rate limit: plan lookup failed, applying free-tier caps", "error", err, "ghInstallationID", ghInstallationID)
-	} else if s.cfg.IsPro(inst.PlanTier) {
-		return true
-	}
-	return s.rateLimiter.AllowReview(repoFullName, orgLogin, force)
-}
+// The per-repo / per-org buckets are reached through Admission now, which is
+// the one place that decides whether a review may run. A Server.allowReview
+// wrapper used to sit here: it took a context and an installation id and
+// discarded both, and it carried the note that rate limits are "deliberately
+// NOT the abuse control for public repositories … an unauthorized contributor
+// triggering a review is an authorization problem". That is now true by
+// construction — authorization runs before the limiter, inside Decide — so the
+// wrapper had nothing left to do and golangci-lint reported it unused.

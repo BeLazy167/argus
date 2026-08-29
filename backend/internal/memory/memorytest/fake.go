@@ -1,8 +1,8 @@
 // Package memorytest provides an in-memory memory.Indexer for pipeline tests.
 // It is the second adapter behind the memory.Indexer interface (the first being
-// the Supermemory-backed indexerImpl): read methods return configurable stub
-// values and write methods record their arguments, so a test can assert what
-// the pipeline persisted instead of driving a live Supermemory client.
+// PGIndexer): read methods return configurable stub values and write methods
+// record their arguments, so a test can assert what the pipeline persisted
+// instead of driving a live database.
 package memorytest
 
 import (
@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/BeLazy167/argus/backend/internal/memory"
+	"github.com/google/uuid"
 )
 
 // Fake is a concurrency-safe, no-op-by-default memory.Indexer. With no stubs
@@ -25,13 +26,21 @@ type Fake struct {
 	SearchFn   func(q memory.MemoryQuery) ([]memory.PatternMatch, error)
 	BriefingFn func(q memory.BriefingQuery) (string, error)
 
+	// ReviewID records the attribution ForReview was called with, so a test can
+	// assert the pipeline stamped its writes with the run's review. uuid.Nil
+	// means ForReview was never called (or was called with Nil).
+	ReviewID uuid.UUID
+
 	mu          sync.Mutex
 	Feedback    []memory.FeedbackMemory // IndexFeedbackSignal
+	Reconciled  []memory.FeedbackMemory // ReconcileFeedbackSignal
 	Patterns    []memory.PatternMemory  // IndexPattern
 	SharedPats  []memory.PatternMemory  // IndexSharedPattern
 	Rules       []memory.RuleMemory     // IndexRule
 	ReviewBatch [][]memory.ReviewMemory // IndexReviewCommentsBatch
 	Scenarios   []FakeScenario          // IndexScenario
+	Invalidated []string                // InvalidateDocument
+	Superseded  [][2]string             // SupersedeDocument
 	Deleted     []string                // DeleteDocument
 }
 
@@ -44,8 +53,6 @@ type FakeScenario struct {
 
 // Ensure Fake satisfies the interface at compile time.
 var _ memory.Indexer = (*Fake)(nil)
-
-func (f *Fake) DisableLLMFilter(context.Context) error { return nil }
 
 func (f *Fake) IndexReviewCommentsBatch(_ context.Context, _, _ string, comments []memory.ReviewMemory) error {
 	f.mu.Lock()
@@ -61,14 +68,14 @@ func (f *Fake) IndexRule(_ context.Context, _ string, rule memory.RuleMemory) er
 	return nil
 }
 
-func (f *Fake) IndexPattern(_ context.Context, _ string, pattern memory.PatternMemory) (*memory.AddResponse, error) {
+func (f *Fake) IndexPattern(_ context.Context, _ string, pattern memory.PatternMemory) (*memory.IndexResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.Patterns = append(f.Patterns, pattern)
 	return nil, nil
 }
 
-func (f *Fake) IndexSharedPattern(_ context.Context, pattern memory.PatternMemory) (*memory.AddResponse, error) {
+func (f *Fake) IndexSharedPattern(_ context.Context, pattern memory.PatternMemory) (*memory.IndexResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.SharedPats = append(f.SharedPats, pattern)
@@ -82,11 +89,29 @@ func (f *Fake) IndexFeedbackSignal(_ context.Context, _, _ string, fb memory.Fee
 	return nil
 }
 
+func (f *Fake) ReconcileFeedbackSignal(_ context.Context, _, _ string, fb memory.FeedbackMemory) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Reconciled = append(f.Reconciled, fb)
+	return nil
+}
+
 func (f *Fake) IndexScenario(_ context.Context, owner, repo string, scenarioID int64, description, severity string, files []string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.Scenarios = append(f.Scenarios, FakeScenario{Owner: owner, Repo: repo, ScenarioID: scenarioID, Description: description, Severity: severity, Files: files})
 	return nil
+}
+
+// ForReview records the attribution and returns the SAME Fake, unlike
+// PGIndexer which returns a copy. A copy would split the recorded writes across
+// two objects and every existing assertion against the original would silently
+// see an empty slice.
+func (f *Fake) ForReview(reviewID uuid.UUID) memory.Indexer {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ReviewID = reviewID
+	return f
 }
 
 func (f *Fake) Search(_ context.Context, q memory.MemoryQuery) ([]memory.PatternMatch, error) {
@@ -101,6 +126,20 @@ func (f *Fake) Briefing(_ context.Context, q memory.BriefingQuery) (string, erro
 		return f.BriefingFn(q)
 	}
 	return "", nil
+}
+
+func (f *Fake) InvalidateDocument(_ context.Context, documentID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Invalidated = append(f.Invalidated, documentID)
+	return nil
+}
+
+func (f *Fake) SupersedeDocument(_ context.Context, documentID, replacementID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Superseded = append(f.Superseded, [2]string{documentID, replacementID})
+	return nil
 }
 
 func (f *Fake) DeleteDocument(_ context.Context, documentID string) error {

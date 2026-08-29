@@ -36,7 +36,11 @@ type ChatProvider struct {
 	authStyle       AuthStyle
 	pathFn          func(model string) string // custom path builder (nil = default /chat/completions)
 	useResponsesAPI bool                      // Azure Foundry Responses API format
-	client          *http.Client
+	// gatewayOnly pins Vercel AI Gateway routing to these upstream provider
+	// slugs. Empty means "let the gateway choose", which permits fallback
+	// across providers mid-request.
+	gatewayOnly []string
+	client      *http.Client
 }
 
 // llmClientTimeout bounds a single HTTP request to any provider. Must exceed
@@ -54,7 +58,7 @@ func NewChatProvider(name, apiKey, baseURL string) *ChatProvider {
 		name:    name,
 		apiKey:  apiKey,
 		baseURL: baseURL,
-		client:  &http.Client{Timeout: llmClientTimeout},
+		client:  &http.Client{Timeout: llmClientTimeout, Transport: obs.NewLoggingRoundTripper("llm:"+name, http.DefaultTransport)},
 	}
 }
 
@@ -119,7 +123,46 @@ func NewAzureProvider(apiKey, baseURL string) *ChatProvider {
 		authStyle:       authStyle,
 		pathFn:          pathFn,
 		useResponsesAPI: isCognitive,
-		client:          &http.Client{Timeout: llmClientTimeout},
+		client:          &http.Client{Timeout: llmClientTimeout, Transport: obs.NewLoggingRoundTripper("llm:azure", http.DefaultTransport)},
+	}
+}
+
+// NewVercelGatewayProvider creates a provider for Vercel AI Gateway — a single
+// OpenAI-compatible endpoint fronting many upstream providers, with model IDs
+// in "creator/model" form (e.g. "openai/gpt-5.4", "anthropic/claude-sonnet-4.6").
+//
+// Append ?only=azure to baseURL (comma-separated for several) to pin routing to
+// specific upstream providers. Without it the gateway picks a provider and may
+// fall back to another mid-request — which silently moves spend between the
+// account's BYOK credentials and Vercel-billed system credentials.
+func NewVercelGatewayProvider(apiKey, baseURL string) *ChatProvider {
+	var only []string
+	if u, err := url.Parse(baseURL); err == nil {
+		q := u.Query()
+		// Branch on the parameter being PRESENT, not on it having a value.
+		// Keying on a non-empty value left "?only=" attached to baseURL, and
+		// since the request path is appended by string concatenation the result
+		// was ".../v1?only=/chat/completions" — path collapses to /v1 and the
+		// endpoint is swallowed by the query. Stripping on presence means a
+		// valueless param degrades to unpinned routing instead of breaking
+		// every request.
+		if _, present := q["only"]; present {
+			for _, slug := range strings.Split(q.Get("only"), ",") {
+				if slug = strings.TrimSpace(slug); slug != "" {
+					only = append(only, slug)
+				}
+			}
+			q.Del("only")
+			u.RawQuery = q.Encode()
+			baseURL = strings.TrimSuffix(u.String(), "?")
+		}
+	}
+	return &ChatProvider{
+		name:        "vercel",
+		apiKey:      apiKey,
+		baseURL:     baseURL,
+		gatewayOnly: only,
+		client:      &http.Client{Timeout: llmClientTimeout, Transport: obs.NewLoggingRoundTripper("llm:vercel", http.DefaultTransport)},
 	}
 }
 
@@ -131,7 +174,7 @@ func NewGCPVertexProvider(apiKey, baseURL string) *ChatProvider {
 		name:    "gcp_vertex",
 		apiKey:  apiKey,
 		baseURL: baseURL,
-		client:  &http.Client{Timeout: llmClientTimeout},
+		client:  &http.Client{Timeout: llmClientTimeout, Transport: obs.NewLoggingRoundTripper("llm:gcp_vertex", http.DefaultTransport)},
 	}
 }
 
@@ -145,31 +188,48 @@ func NewAWSBedrockProvider(apiKey, baseURL string) *ChatProvider {
 		pathFn: func(_ string) string {
 			return "/openai/v1/chat/completions"
 		},
-		client: &http.Client{Timeout: llmClientTimeout},
+		client: &http.Client{Timeout: llmClientTimeout, Transport: obs.NewLoggingRoundTripper("llm:aws_bedrock", http.DefaultTransport)},
 	}
 }
 
 func (p *ChatProvider) Name() string { return p.name }
 
 // Complete wraps the underlying HTTP call with structured telemetry. Every
-// invocation emits exactly one slog record — `llm.call.completed` on success
-// (Info), `llm.call.failed` on error (Error) — both carrying stage, model,
-// provider, and a numeric status_code so PostHog can slice cost/latency by
-// stage without crossing the log-stream boundary. Forwarding is driven by
-// the `event=` attr, so adding new record attrs does not require new
-// handler logic; it does require the attr key to appear in obs.AllowedKeys.
+// invocation emits a start record, chunked request/response payload records,
+// and one terminal `llm.call.completed` or `llm.call.failed` summary. The
+// terminal records carry stage, model, provider, and numeric status so PostHog
+// can slice cost/latency; the high-cardinality payload records remain stdout-
+// only because they do not declare an `event` attribute.
 func (p *ChatProvider) Complete(ctx context.Context, req CompletionRequest) (CompletionResponse, error) {
+	operationID := obs.NewLogID()
 	start := time.Now()
+	if payload, err := json.Marshal(req); err == nil {
+		obs.LogPayload(ctx, slog.Default(), "LLM completion request", operationID, "request", "application/json", payload)
+	}
+	slog.InfoContext(ctx, "LLM completion started",
+		"operation_id", operationID,
+		"provider", p.name,
+		"model", req.Model,
+		"stage", req.Stage,
+		"message_count", len(req.Messages),
+		"tool_count", len(req.Tools),
+		"max_tokens", req.MaxTokens,
+		"temperature", req.Temperature,
+		"json_mode", req.JSONMode,
+		"reasoning_effort", req.ReasoningEffort,
+	)
 	resp, statusCode, err := p.complete(ctx, req)
 	durationMs := time.Since(start).Milliseconds()
 
 	if err != nil {
 		slog.ErrorContext(ctx, "llm call failed",
 			slog.String("event", "llm.call.failed"),
+			slog.String("operation_id", operationID),
 			slog.String("provider", p.name),
 			slog.String("model", req.Model),
 			slog.String("stage", req.Stage),
 			slog.String("error_class", classifyLLMError(err)),
+			slog.String("error", err.Error()),
 			slog.Int("status_code", statusCode),
 			slog.Int64("duration_ms", durationMs),
 			slog.String("trace_id", obs.TraceID(ctx)),
@@ -177,8 +237,12 @@ func (p *ChatProvider) Complete(ctx context.Context, req CompletionRequest) (Com
 		return resp, err
 	}
 
+	if payload, err := json.Marshal(resp); err == nil {
+		obs.LogPayload(ctx, slog.Default(), "LLM completion response", operationID, "response", "application/json", payload)
+	}
 	slog.InfoContext(ctx, "llm call completed",
 		slog.String("event", "llm.call.completed"),
+		slog.String("operation_id", operationID),
 		slog.String("provider", p.name),
 		slog.String("model", req.Model),
 		slog.String("stage", req.Stage),
@@ -374,6 +438,18 @@ type chatRequest struct {
 	// the right shape per provider.
 	ReasoningEffort string          `json:"reasoning_effort,omitempty"`
 	ResponseFormat  *responseFormat `json:"response_format,omitempty"`
+	// ProviderOptions carries Vercel AI Gateway routing directives. The
+	// gateway ignores a top-level `gateway` key without erroring, so the
+	// nested providerOptions form is the only one that actually binds.
+	ProviderOptions *providerOptions `json:"providerOptions,omitempty"`
+}
+
+type providerOptions struct {
+	Gateway *gatewayRouting `json:"gateway,omitempty"`
+}
+
+type gatewayRouting struct {
+	Only []string `json:"only,omitempty"`
 }
 
 type responseFormat struct {
@@ -403,6 +479,19 @@ func (p *ChatProvider) adjustRequestForProvider(body *chatRequest, model string)
 	// This prevents thinking tokens from leaking into the response for ALL models.
 	if p.isOpenRouter() {
 		body.Reasoning = &reasoningConfig{Exclude: true}
+	}
+
+	// Layer 2: Vercel AI Gateway — its structured-output layer accepts only
+	// response_format types "json" and "json_schema". The OpenAI spelling
+	// "json_object" that complete() writes for JSONMode is rejected with
+	// HTTP 400 "Invalid input" for every upstream model (verified against
+	// anthropic/*, openai/*, zai/*). Rewrite the type so JSONMode callers keep
+	// the guardrail instead of losing the whole call.
+	if p.isVercelGateway() && body.ResponseFormat != nil && body.ResponseFormat.Type == "json_object" {
+		body.ResponseFormat.Type = "json"
+	}
+	if len(p.gatewayOnly) > 0 {
+		body.ProviderOptions = &providerOptions{Gateway: &gatewayRouting{Only: p.gatewayOnly}}
 	}
 
 	switch {
@@ -458,6 +547,19 @@ func (p *ChatProvider) adjustRequestForProvider(body *chatRequest, model string)
 		body.Temperature = &temp
 	}
 
+	// Vercel AI Gateway: "minimal" is not portable across the upstream OpenAI
+	// snapshots it fronts. gpt-5.4 and the gpt-5.6-luna/sol/terra family reject
+	// it with HTTP 400 ("Supported values are: none, low, medium, high, xhigh"),
+	// while gpt-5, gpt-5-mini and gpt-5.5 accept it. Rather than track which
+	// snapshot allows what, clamp to the nearest supported step. "low" — not
+	// "none" — because the gpt-5.x default above exists to stop reasoning from
+	// eating the whole token budget, not to disable reasoning outright.
+	//
+	// Only the gateway needs this. Direct Azure accepts "minimal" and keeps it.
+	if p.isVercelGateway() && body.ReasoningEffort == string(ReasoningMinimal) {
+		body.ReasoningEffort = string(ReasoningLow)
+	}
+
 	// Invariant: never ship both wrapped AND top-level reasoning on the same
 	// body. OpenRouter gets wrapped; every other provider gets top-level.
 	// A trailing belt-and-suspenders clean-up in case a new branch sets both.
@@ -470,6 +572,14 @@ func (p *ChatProvider) adjustRequestForProvider(body *chatRequest, model string)
 
 func (p *ChatProvider) isOpenRouter() bool {
 	return p.name == "openrouter" || strings.Contains(p.baseURL, "openrouter.ai")
+}
+
+// isVercelGateway reports whether requests route through Vercel AI Gateway,
+// which fronts many upstream providers behind one OpenAI-compatible endpoint.
+// Matches on baseURL as well as name so a custom-base-URL key still gets the
+// gateway's wire quirks applied.
+func (p *ChatProvider) isVercelGateway() bool {
+	return p.name == "vercel" || strings.Contains(p.baseURL, "ai-gateway.vercel.sh")
 }
 
 func isOpenAIReasoning(m string) bool {

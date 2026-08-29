@@ -3,8 +3,12 @@ package memory
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
+	"time"
+
+	"github.com/BeLazy167/argus/backend/internal/obs"
 
 	"github.com/BeLazy167/argus/backend/internal/util"
 )
@@ -16,7 +20,7 @@ type BriefingProfile int
 
 const (
 	// ProfileSpecialist renders the deep-review specialist block: synthesis,
-	// combined repo+shared patterns, false positives, approved patterns.
+	// combined repo+shared patterns, dismissed false positives, confirmed findings.
 	ProfileSpecialist BriefingProfile = iota
 	// ProfileReview renders the single-pass reviewer block, which additionally
 	// pulls org rules + past-review context that specialists intentionally skip.
@@ -46,10 +50,10 @@ type Briefing struct {
 	// Patterns is repo-scoped patterns/scenarios (non-feedback) followed by
 	// shared org patterns, in that order, each ≤500 chars.
 	Patterns []string
-	// FalsePositives is type=feedback polarity=negative content (dismissals).
+	// FalsePositives is type=feedback action=dismissed content.
 	FalsePositives []string
-	// Approved is type=feedback polarity=positive content (confirmations).
-	Approved []string
+	// Reinforced is confirmed-finding feedback that raises the priority of recurrences.
+	Reinforced []string
 	// Rules is org-wide review rules (ProfileReview only).
 	Rules []string
 	// PastReviews is prior review findings on this repo (ProfileReview only).
@@ -67,26 +71,50 @@ type BriefingQuery struct {
 	Options  BriefingOptions
 }
 
-// Briefing assembles the institutional-memory block for a review prompt and
-// renders it to markdown, returning the string the caller embeds verbatim. It
-// owns the whole retrieval → dispatch → truncation → render path: q.Query is the
-// semantic query for the repo/shared/past-review reads; q.Options.Profile
-// selects the render shape and which side-searches run. Returns ("", nil) on nil
-// client or empty repo, and ("", err) when any underlying retrieval failed so a
-// caller can degrade the block (via BestEffort) instead of embedding a silently
-// partial one. Each underlying read owns its own 5s timeout.
-func (idx *indexerImpl) Briefing(ctx context.Context, q BriefingQuery) (string, error) {
-	if idx.client == nil || q.Repo == "" {
+// briefingWith is the shared Briefing pipeline over a transport core:
+// assemble (shared orchestration, shared floors) then render (already pure).
+// The empty-repo no-op lives here, not in the adapters — it is orchestration
+// policy (every leg is repo-scoped), and duplicating it per backend is the
+// drift class this seam exists to remove. Adapters keep only their own
+// disabled-state check.
+func briefingWith(ctx context.Context, run runSearchFn, logger *slog.Logger, q BriefingQuery) (rendered string, err error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	operationID := obs.NewLogID()
+	started := time.Now()
+	logger.InfoContext(ctx, "memory briefing started", "operation_id", operationID,
+		"repo", q.Repo, "file", q.FilePath, "profile", q.Options.Profile,
+		"query_len", len(q.Query), "char_cap", q.Options.CharCap,
+		"emphasize_false_positives", q.Options.EmphasizeFalsePositives)
+	defer func() {
+		attrs := []any{"operation_id", operationID, "repo", q.Repo, "file", q.FilePath,
+			"profile", q.Options.Profile, "rendered_chars", len(rendered),
+			"duration_ms", time.Since(started).Milliseconds(), "error", err}
+		if err != nil {
+			logger.WarnContext(ctx, "memory briefing failed", attrs...)
+		} else {
+			logger.InfoContext(ctx, "memory briefing completed", attrs...)
+		}
+	}()
+	if q.Repo == "" {
+		logger.InfoContext(ctx, "memory briefing skipped", "operation_id", operationID, "reason", "empty_repo")
 		return "", nil
 	}
-	b, err := idx.assembleBriefing(ctx, q)
+	b, err := assembleBriefingWith(ctx, run, logger, q)
 	if err != nil {
 		return "", err
 	}
+	logger.DebugContext(ctx, "memory briefing sections assembled", "operation_id", operationID,
+		"has_synthesis", b.Synthesis != "", "pattern_count", len(b.Patterns),
+		"false_positive_count", len(b.FalsePositives), "reinforced_count", len(b.Reinforced),
+		"rule_count", len(b.Rules), "past_review_count", len(b.PastReviews))
 	if q.Options.Profile == ProfileReview {
-		return b.renderReview(q.Options.CharCap), nil
+		rendered = b.renderReview(q.Options.CharCap)
+		return rendered, nil
 	}
-	return b.renderSpecialist(q.FilePath, q.Options.CharCap, q.Options.EmphasizeFalsePositives), nil
+	rendered = b.renderSpecialist(q.FilePath, q.Options.CharCap, q.Options.EmphasizeFalsePositives)
+	return rendered, nil
 }
 
 // assembleBriefing runs the typed reads and dispatches results into sections.
@@ -95,7 +123,14 @@ func (idx *indexerImpl) Briefing(ctx context.Context, q BriefingQuery) (string, 
 // All per-item content is truncated to 500 chars here so the render stays pure.
 // Any leg error is returned so Briefing degrades the whole block rather than
 // serving a partial one.
-func (idx *indexerImpl) assembleBriefing(ctx context.Context, q BriefingQuery) (Briefing, error) {
+func assembleBriefingWith(ctx context.Context, run runSearchFn, logger *slog.Logger, q BriefingQuery) (Briefing, error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	operationID := obs.NewLogID()
+	started := time.Now()
+	logger.InfoContext(ctx, "memory briefing assembly started", "operation_id", operationID,
+		"repo", q.Repo, "file", q.FilePath, "profile", q.Options.Profile, "query_len", len(q.Query))
 	// Normalize once so EVERY leg reads resolved floors — the specialistBlock
 	// legs AND the review-profile rules / past-review side-searches below. A
 	// retried/resumed run delivers a zero Thresholds (PipelineRun.Thresholds is
@@ -104,11 +139,17 @@ func (idx *indexerImpl) assembleBriefing(ctx context.Context, q BriefingQuery) (
 	q.Options.Thresholds = q.Options.Thresholds.WithDefaults()
 	if q.Options.Profile != ProfileReview {
 		// Specialist profile has no side-searches — one specialistBlock (own 5s).
-		block, err := idx.specialistBlock(ctx, q.Repo, q.FilePath, q.Query, q.Options.Thresholds)
+		block, err := specialistBlockWith(ctx, run, logger, q.Repo, q.FilePath, q.Query, q.Options.Thresholds)
 		if err != nil {
+			logger.WarnContext(ctx, "memory briefing assembly failed", "operation_id", operationID,
+				"strategy", "specialist_only", "duration_ms", time.Since(started).Milliseconds(), "error", err)
 			return Briefing{}, err
 		}
-		return briefingSections(block), nil
+		b := briefingSections(block)
+		logger.InfoContext(ctx, "memory briefing assembly completed", "operation_id", operationID,
+			"strategy", "specialist_only", "pattern_count", len(b.Patterns),
+			"duration_ms", time.Since(started).Milliseconds())
+		return b, nil
 	}
 
 	// Review profile: the three legs — specialistBlock (synthesis/repo/shared),
@@ -126,23 +167,23 @@ func (idx *indexerImpl) assembleBriefing(ctx context.Context, q BriefingQuery) (
 	wg.Add(3)
 	go func() {
 		defer wg.Done()
-		block, blockErr = idx.specialistBlock(ctx, q.Repo, q.FilePath, q.Query, q.Options.Thresholds)
+		block, blockErr = specialistBlockWith(ctx, run, logger, q.Repo, q.FilePath, q.Query, q.Options.Thresholds)
 	}()
 	go func() {
 		defer wg.Done()
 		var m []PatternMatch
-		m, rulesErr = idx.Search(ctx, MemoryQuery{
+		m, rulesErr = searchWith(ctx, run, MemoryQuery{
 			Query: "review rules conventions", Scope: ScopeShared, Type: TypeRule,
-			Limit: 3, Threshold: q.Options.Thresholds.FindingEnrich, Rerank: true, Enrich: true,
+			Limit: 3, Threshold: q.Options.Thresholds.FindingEnrich, Enrich: true,
 		})
 		rules = HintStrings(m)
 	}()
 	go func() {
 		defer wg.Done()
 		var m []PatternMatch
-		m, pastErr = idx.Search(ctx, MemoryQuery{
+		m, pastErr = searchWith(ctx, run, MemoryQuery{
 			Query: q.Query, Repo: q.Repo, Scope: ScopeRepo, Type: TypeReview,
-			Limit: 2, Threshold: q.Options.Thresholds.FindingEnrich, Rerank: true, Enrich: true,
+			Limit: 2, Threshold: q.Options.Thresholds.FindingEnrich, Enrich: true,
 		})
 		pastReviews = HintStrings(m)
 	}()
@@ -152,36 +193,39 @@ func (idx *indexerImpl) assembleBriefing(ctx context.Context, q BriefingQuery) (
 	// The rules and past-review side-searches are OPTIONAL: a failed leg is
 	// Warn-logged and its section omitted, so a transient single-leg error
 	// never blanks the whole briefing (the #147 gate's resilience finding).
+	logger.DebugContext(ctx, "memory briefing retrieval legs completed", "operation_id", operationID,
+		"specialist_repo_count", len(block.Repo), "specialist_shared_count", len(block.Shared),
+		"rule_count", len(rules), "past_review_count", len(pastReviews),
+		"specialist_error", blockErr, "rules_error", rulesErr, "past_reviews_error", pastErr)
 	if blockErr != nil {
+		logger.WarnContext(ctx, "memory briefing assembly failed", "operation_id", operationID,
+			"strategy", "review_parallel", "duration_ms", time.Since(started).Milliseconds(), "error", blockErr)
 		return Briefing{}, blockErr
 	}
 	if rulesErr != nil {
-		idx.warnLeg("briefing.rules", SharedTag, len(q.Query), rulesErr)
+		logDegrade(logger, "briefing.rules", SharedTag, len(q.Query), rulesErr)
 		rules = nil
 	}
 	if pastErr != nil {
-		idx.warnLeg("briefing.past_reviews", RepoTagNew(q.Repo), len(q.Query), pastErr)
+		logDegrade(logger, "briefing.past_reviews", RepoTagNew(q.Repo), len(q.Query), pastErr)
 		pastReviews = nil
 	}
 
 	b := briefingSections(block)
 	b.Rules = rules
 	b.PastReviews = pastReviews
+	logger.InfoContext(ctx, "memory briefing assembly completed", "operation_id", operationID,
+		"strategy", "review_parallel", "has_synthesis", b.Synthesis != "", "pattern_count", len(b.Patterns),
+		"false_positive_count", len(b.FalsePositives), "reinforced_count", len(b.Reinforced),
+		"rule_count", len(b.Rules), "past_review_count", len(b.PastReviews),
+		"duration_ms", time.Since(started).Milliseconds())
 	return b, nil
 }
 
-// warnLeg is the per-leg sibling of BestEffort: same "memory read degraded"
-// Warn shape (via the shared logDegrade helper), used where a multi-leg
-// assembly keeps its successful legs instead of zeroing the whole result.
-func (idx *indexerImpl) warnLeg(caller, container string, queryLen int, err error) {
-	logDegrade(idx.logger, caller, container, queryLen, err)
-}
-
 // briefingSections splits a MemoryBlock into the typed prose sections shared by
-// both render profiles, truncating each item to 500 chars. A type=feedback doc
-// routes to FalsePositives (polarity=negative) or Approved (polarity=positive);
-// everything else — repo patterns/scenarios then shared org patterns, in that
-// order — lands in Patterns. Pure (no client), so the parity tests can drive it.
+// both render profiles, truncating each item to 500 chars. Feedback routes by
+// explicit action: dismissed suppresses, confirmed reinforces, and ignored or
+// action-less legacy rows stay neutral. Everything else lands in Patterns.
 func briefingSections(block MemoryBlock) Briefing {
 	var b Briefing
 	if block.Synthesis != "" {
@@ -190,14 +234,13 @@ func briefingSections(block MemoryBlock) Briefing {
 	for _, m := range block.Repo {
 		content := util.Truncate(m.Content, 500, true)
 		if m.Metadata["type"] == string(TypeFeedback) {
-			switch Polarity(m.Metadata["polarity"]) {
-			case PolarityNegative:
+			switch m.Metadata["action"] {
+			case "dismissed":
 				b.FalsePositives = append(b.FalsePositives, content)
-				continue
-			case PolarityPositive:
-				b.Approved = append(b.Approved, content)
-				continue
+			case "confirmed":
+				b.Reinforced = append(b.Reinforced, content)
 			}
+			continue
 		}
 		b.Patterns = append(b.Patterns, content)
 	}
@@ -237,9 +280,9 @@ func (b Briefing) renderSpecialist(filePath string, charCap int, emphasizeFalseP
 		}
 	}
 
-	if len(b.Approved) > 0 {
-		sb.WriteString("\n## Approved Patterns (do not flag code following these)\n")
-		for i, m := range b.Approved {
+	if len(b.Reinforced) > 0 {
+		sb.WriteString("\n## Confirmed Findings (flag recurrences)\n")
+		for i, m := range b.Reinforced {
 			sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, m))
 		}
 	}
@@ -292,7 +335,7 @@ func (b Briefing) renderReview(charCap int) string {
 		sb.WriteString(blk)
 	}
 
-	if blk := numberedBlock("\n## Approved Patterns (do not flag code following these)\n", b.Approved); blk != "" {
+	if blk := numberedBlock("\n## Confirmed Findings (flag recurrences)\n", b.Reinforced); blk != "" {
 		sb.WriteString(blk)
 	}
 

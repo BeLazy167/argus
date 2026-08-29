@@ -32,7 +32,15 @@ const (
 // ─── Lead Agent Stage Wrappers ───────────────────────────────────────────────
 
 // leadBriefStage runs the Lead Agent's briefing phase (Phase 1).
-func (o *Orchestrator) leadBriefStage(ctx context.Context, run *PipelineRun) error {
+func (o *Orchestrator) leadBriefStage(ctx context.Context, run *PipelineRun) (err error) {
+	opID, started := pipelineOperationStart(ctx, o.logger, "lead_brief_stage", "produce a lead-agent review plan that assigns files and cross-cutting concerns before specialist execution", run)
+	defer func() {
+		if err != nil {
+			pipelineOperationFailure(ctx, o.logger, opID, "lead_brief_stage", started, err)
+		} else {
+			pipelineOperationResult(ctx, o.logger, opID, "lead_brief_stage", "success", started, run.LeadBrief)
+		}
+	}()
 	if !run.DeepReview {
 		o.logger.Info("[briefing] skipped — deep review not enabled", "pr", run.PREvent.PRNumber)
 		return nil
@@ -144,7 +152,7 @@ func (o *Orchestrator) leadBrief(ctx context.Context, run *PipelineRun) (*LeadBr
 	o.logger.Info("lead brief produced", "files", fileCount, "cross_cutting", len(brief.CrossCuttingConcerns()))
 
 	if run.EventBus != nil {
-		run.EventBus.Publish(run.ReviewID, EventLeadBrief, map[string]any{
+		run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventLeadBrief, map[string]any{
 			"files":         fileCount,
 			"cross_cutting": len(brief.CrossCuttingConcerns()),
 		})
@@ -167,7 +175,11 @@ Return [] if nothing breaks.`
 
 // analyzeBlastRadius checks if dependent code breaks due to PR changes.
 // Non-fatal: returns nil on error.
-func (o *Orchestrator) analyzeBlastRadius(ctx context.Context, run *PipelineRun, owner, repo string, depContents map[string]string) []BlastRadiusImpact {
+func (o *Orchestrator) analyzeBlastRadius(ctx context.Context, run *PipelineRun, owner, repo string, depContents map[string]string) (impacts []BlastRadiusImpact) {
+	opID, started := pipelineOperationStart(ctx, o.logger, "blast_radius_analysis", "judge behavior changes across graph-derived dependents and return only actionable impacts", map[string]any{"run": run, "owner": owner, "repo": repo, "dependent_contents": depContents})
+	defer func() {
+		pipelineOperationResult(ctx, o.logger, opID, "blast_radius_analysis", "success", started, impacts, "impact_count", len(impacts))
+	}()
 	if run.Diff == nil || len(run.Diff.Files) == 0 || len(depContents) == 0 {
 		return nil
 	}
@@ -208,7 +220,7 @@ func (o *Orchestrator) analyzeBlastRadius(ctx context.Context, run *PipelineRun,
 		Provider:         cfg.Provider,
 	})
 
-	impacts, err := unmarshalLLMArray[BlastRadiusImpact](resp.Content)
+	impacts, err = unmarshalLLMArray[BlastRadiusImpact](resp.Content)
 	if err != nil {
 		o.logger.Warn("analyzeBlastRadius parse failed", "error", err, "response_prefix", util.Truncate(resp.Content, 200, true))
 		return nil
@@ -216,7 +228,7 @@ func (o *Orchestrator) analyzeBlastRadius(ctx context.Context, run *PipelineRun,
 
 	o.logger.Info("blast radius analysis", "impacts", len(impacts), "repo", fmt.Sprintf("%s/%s", owner, repo))
 	if run.EventBus != nil {
-		run.EventBus.Publish(run.ReviewID, EventBlastRadius, map[string]any{
+		run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventBlastRadius, map[string]any{
 			"impacts": len(impacts),
 		})
 	}

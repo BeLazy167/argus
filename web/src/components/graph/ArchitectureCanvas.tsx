@@ -1,12 +1,11 @@
 "use client";
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import {
   ReactFlow,
   Controls,
   Background,
   MiniMap,
-  useNodesState,
-  useEdgesState,
+  applyNodeChanges,
   useReactFlow,
   ReactFlowProvider,
   MarkerType,
@@ -20,6 +19,7 @@ import dagre from "dagre";
 
 import FileNode from "./FileNode";
 import GroupNode from "./GroupNode";
+import { useMountEffect } from "@/lib/hooks/use-mount-effect";
 import type { ArchFile, ArchEdge } from "@/lib/queries/architecture";
 import type { ColorMode } from "@xyflow/react";
 
@@ -75,13 +75,29 @@ function edgeColorsFor(kind: string) {
 
 export type Lens = "risk" | "choke" | "hotspot" | "coupling";
 
+export type ArchitectureSearchRequest = {
+  /** Monotonically increasing ID owned by the search input event handler. */
+  id: number;
+  query: string;
+};
+
 type Props = {
   files: ArchFile[];
   edges: ArchEdge[];
   lens: Lens;
-  searchQuery?: string;
+  searchRequest?: ArchitectureSearchRequest;
   onSelectFile?: (filePath: string | null) => void;
 };
+
+const EMPTY_SEARCH_REQUEST: ArchitectureSearchRequest = { id: 0, query: "" };
+
+/**
+ * Above this node count the canvas switches to cheap rendering: straight
+ * edges instead of smoothstep routing. Chosen where routing + full mounting
+ * began to dominate first paint; acme-account (924 files) is the observed
+ * failure case.
+ */
+const LARGE_GRAPH_NODE_COUNT = 400;
 
 /** Per-lens border/glow for highlighted nodes */
 function lensHighlightStyle(file: ArchFile, lens: Lens): { borderColor?: string; boxShadow?: string } {
@@ -159,11 +175,65 @@ type InnerProps = Props & {
   setDirection: (d: "TB" | "LR") => void;
 };
 
-function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQuery, onSelectFile }: InnerProps) {
+/**
+ * Reconciles server-refreshed membership with event-driven drag positions.
+ * Refreshed data owns which nodes exist and their current data/styles; local
+ * state owns only the position a user changed through React Flow callbacks.
+ */
+export function mergeLayoutPositions(layoutNodes: Node[], currentNodes: Node[]): Node[] {
+  const currentPositions = new Map(
+    currentNodes.map((node) => [node.id, node.position] as const),
+  );
+  return layoutNodes.map((node) => ({
+    ...node,
+    position: currentPositions.get(node.id) ?? node.position,
+  }));
+}
+
+type SearchViewportCommandProps = {
+  matchIds: string[];
+  totalNodes: number;
+};
+
+/**
+ * One keyed search request owns one viewport command. Topology refreshes update
+ * the rendered graph without remounting this command, so they cannot replay it.
+ */
+function SearchViewportCommand({ matchIds, totalNodes }: SearchViewportCommandProps) {
+  const { fitView } = useReactFlow();
+
+  useMountEffect(() => {
+    if (matchIds.length === 0 || matchIds.length >= totalNodes) return;
+    const reduceMotion =
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    void fitView({
+      nodes: matchIds.map((id) => ({ id })),
+      padding: 0.3,
+      duration: reduceMotion ? 0 : 300,
+    });
+  });
+
+  return null;
+}
+
+function ArchCanvasInner({
+  files,
+  edges,
+  lens,
+  direction,
+  setDirection,
+  searchRequest = EMPTY_SEARCH_REQUEST,
+  onSelectFile,
+}: InnerProps) {
   const { fitView } = useReactFlow();
   // Imperative store handle — the initial view reads live pane size + viewport
   const colorMode = useColorMode();
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [selection, setSelection] = useState<{
+    nodeId: string;
+    searchRequestId: number;
+  } | null>(null);
   const maxDensity = useMemo(() => Math.max(...files.map((f) => f.bug_density), 0.01), [files]);
 
   const layout = useMemo(() => {
@@ -217,7 +287,12 @@ function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQu
         id: `e-${i}`,
         source: e.source,
         target: e.target,
-        type: "smoothstep",
+        // Explicit per-edge type: React Flow's defaultEdgeOptions only fills
+        // ABSENT fields, so the large-graph switch must happen here, not on
+        // the <ReactFlow> prop. Smoothstep routing across 1000+ edges is a
+        // measurable part of first paint; straight edges read fine at
+        // overview scale.
+        type: files.length > LARGE_GRAPH_NODE_COUNT ? "straight" : "smoothstep",
         style: { stroke: colors.base, strokeWidth: sw },
         markerEnd: { type: MarkerType.ArrowClosed, width: 8, height: 8, color: colors.base },
         data: { kinds: e.kinds, weight: e.weight },
@@ -424,122 +499,138 @@ function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQu
     return { nodes: [...groupNodes, ...positionedNodes], edges: rfEdges };
   }, [files, edges, lens, direction, maxDensity]);
 
-  const [nodes, setNodes, onNodesChange] = useNodesState(layout.nodes);
-  const [rfEdges, setEdges, onEdgesChange] = useEdgesState(layout.edges);
+  const [positionedNodes, setPositionedNodes] = useState(layout.nodes);
+  const searchLower = searchRequest.query.toLowerCase().trim();
+  const searchMatchIds = useMemo(
+    () =>
+      searchLower
+        ? files.filter((file) => file.path.toLowerCase().includes(searchLower)).map((file) => file.path)
+        : [],
+    [files, searchLower],
+  );
+  const activeSelectedNodeId =
+    selection?.searchRequestId === searchRequest.id &&
+    files.some((file) => file.path === selection.nodeId)
+      ? selection.nodeId
+      : null;
+  const onNodesChange = useCallback(
+    (changes: Parameters<typeof applyNodeChanges>[0]) => {
+      setPositionedNodes((current) =>
+        applyNodeChanges(changes, mergeLayoutPositions(layout.nodes, current)),
+      );
+    },
+    [layout.nodes],
+  );
 
-  // Smart default view: frame the top-risk cluster instead of fitting all nodes.
-  // Initial view: handled by React Flow's built-in `fitView` prop (see the
-  // <ReactFlow> element below). Three generations of bespoke initial-fit
-  // effects all lost races against panZoom initialization; the library runs
-  // its one-shot fit at the correct internal lifecycle moment instead.
+  // Referential stability caches: decoration (opacity/selection emphasis)
+  // rebuilds ALL node/edge objects, which makes React Flow re-render every
+  // memo'd node on each keystroke or click. At full-repo scale (900+ nodes,
+  // 1000+ edges — AcmeOrg/acme-account) that froze the tab ("page
+  // unresponsive"). Reusing the previous object when a node's decoration
+  // signature is unchanged keeps re-renders proportional to what actually
+  // changed.
+  const nodeDecorCache = useRef(new Map<string, { sig: string; node: Node }>());
+  const edgeDecorCache = useRef(new Map<string, { sig: string; edge: Edge }>());
+  // Cache validity is tied to layout identity: the layout memo rebuilds
+  // whenever server data (files/edges/direction) changes, and node data /
+  // edge endpoints can ONLY change through such a rebuild. Clearing on
+  // layout change makes the signatures below purely about decoration
+  // (emphasis/position), so refreshed metrics or re-used index-based edge
+  // ids can never serve stale objects.
+  const decorCacheLayout = useRef<typeof layout | null>(null);
 
-  // Highlight connected nodes on selection, search, or lens change.
-  //
-  // Reads `layout.edges` (stable memo) instead of stateful `rfEdges` to
-  // avoid infinite loops. setNodes/setEdges are stable refs from hooks.
-  const searchLower = searchQuery?.toLowerCase().trim() ?? "";
-  useEffect(() => {
-    // Search mode: dim non-matching nodes
-    if (searchLower && !selectedNodeId) {
-      const matchIds = new Set(
-        files.filter((f) => f.path.toLowerCase().includes(searchLower)).map((f) => f.path)
-      );
-      setNodes((nds) =>
-        nds.map((n) => ({
-          ...n,
-          data: { ...n.data, selected: false },
-          style: { ...n.style, opacity: matchIds.has(n.id) ? 1 : 0.1, transition: "opacity 0.3s" },
-        }))
-      );
-      setEdges((eds) =>
-        eds.map((e) => {
-          const colors = edgeColorsFor((e.data?.kinds as string[])?.[0] ?? "imports");
-          const isConn = matchIds.has(e.source) && matchIds.has(e.target);
-          return { ...e, animated: false, style: { ...e.style, stroke: colors.base, opacity: isConn ? 1 : 0.05, transition: "all 0.3s" } };
-        })
-      );
-      // Auto-fit to matches
-      if (matchIds.size > 0 && matchIds.size < files.length) {
-        fitView({ nodes: Array.from(matchIds).map((id) => ({ id })), padding: 0.3, duration: 300 });
-      }
-      return;
+  const visibleElements = useMemo(() => {
+    if (decorCacheLayout.current !== layout) {
+      decorCacheLayout.current = layout;
+      nodeDecorCache.current.clear();
+      edgeDecorCache.current.clear();
     }
-
-    if (!selectedNodeId) {
-      setNodes((nds) =>
-        nds.map((n) => {
-          const f = files.find((f) => f.path === n.id);
-          return {
-            ...n,
-            data: { ...n.data, selected: false },
-            style: { ...n.style, opacity: f ? lensNodeOpacity(f, lens) : 1, transition: "opacity 0.3s" },
-          };
-        })
-      );
-      setEdges((eds) =>
-        eds.map((e) => {
-          const colors = edgeColorsFor((e.data?.kinds as string[])?.[0] ?? "imports");
-          return { ...e, animated: false, style: { ...e.style, stroke: colors.base, opacity: 1, transition: "all 0.3s" } };
-        })
-      );
-      return;
-    }
-
+    const nodes = mergeLayoutPositions(layout.nodes, positionedNodes);
     const connectedEdgeIds = new Set<string>();
-    const connectedNodeIds = new Set<string>([selectedNodeId]);
-    for (const e of layout.edges) {
-      if (e.source === selectedNodeId || e.target === selectedNodeId) {
-        connectedEdgeIds.add(e.id);
-        connectedNodeIds.add(e.source);
-        connectedNodeIds.add(e.target);
+    const emphasizedNodeIds = new Set<string>();
+
+    if (activeSelectedNodeId) {
+      emphasizedNodeIds.add(activeSelectedNodeId);
+      for (const edge of layout.edges) {
+        if (edge.source !== activeSelectedNodeId && edge.target !== activeSelectedNodeId) continue;
+        connectedEdgeIds.add(edge.id);
+        emphasizedNodeIds.add(edge.source);
+        emphasizedNodeIds.add(edge.target);
       }
+    } else if (searchLower) {
+      for (const id of searchMatchIds) emphasizedNodeIds.add(id);
     }
 
-    setNodes((nds) =>
-      nds.map((n) => ({
-        ...n,
-        data: { ...n.data, selected: n.id === selectedNodeId },
-        style: { ...n.style, opacity: connectedNodeIds.has(n.id) ? 1 : 0.1, transition: "opacity 0.3s" },
-      }))
-    );
-    setEdges((eds) =>
-      eds.map((e) => {
-        const isConn = connectedEdgeIds.has(e.id);
-        const colors = edgeColorsFor((e.data?.kinds as string[])?.[0] ?? "imports");
-        return {
-          ...e,
-          animated: isConn,
-          style: { ...e.style, stroke: isConn ? colors.highlight : colors.base, opacity: isConn ? 1 : 0.05, transition: "all 0.3s" },
-        };
-      })
-    );
-    // Intentionally excluding setNodes/setEdges (stable from state hooks)
-    // and files (subsumed by layout which already depends on files).
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedNodeId, lens, layout, searchLower]);
+    const fileByPath = new Map(files.map((file) => [file.path, file] as const));
+    const nodeCache = nodeDecorCache.current;
+    const decoratedNodes = nodes.map((node) => {
+      const file = fileByPath.get(node.id);
+      let opacity = file ? lensNodeOpacity(file, lens) : 1;
+      if (activeSelectedNodeId || searchLower) opacity = emphasizedNodeIds.has(node.id) ? 1 : 0.1;
+      const selected = node.id === activeSelectedNodeId;
+      // Position is part of the signature so drags still propagate.
+      const sig = `${opacity}|${selected}|${node.position.x},${node.position.y}|${lens}`;
+      const cached = nodeCache.get(node.id);
+      if (cached && cached.sig === sig) return cached.node;
+      const decorated = {
+        ...node,
+        data: { ...node.data, selected },
+        style: { ...node.style, opacity, transition: "opacity 0.3s" },
+      };
+      nodeCache.set(node.id, { sig, node: decorated });
+      return decorated;
+    });
+
+    const edgeCache = edgeDecorCache.current;
+    const decoratedEdges = layout.edges.map((edge) => {
+      const colors = edgeColorsFor((edge.data?.kinds as string[])?.[0] ?? "imports");
+      const connectsSearchMatches =
+        searchLower && emphasizedNodeIds.has(edge.source) && emphasizedNodeIds.has(edge.target);
+      const emphasized = activeSelectedNodeId
+        ? connectedEdgeIds.has(edge.id)
+        : Boolean(connectsSearchMatches);
+      const dimmed = activeSelectedNodeId || searchLower ? !emphasized : false;
+      const animated = activeSelectedNodeId ? emphasized : false;
+      const stroke = emphasized && activeSelectedNodeId ? colors.highlight : colors.base;
+      const opacity = dimmed ? 0.05 : 1;
+      const sig = `${animated}|${stroke}|${opacity}`;
+      const cached = edgeCache.get(edge.id);
+      if (cached && cached.sig === sig) return cached.edge;
+      const decorated = {
+        ...edge,
+        animated,
+        style: { ...edge.style, stroke, opacity, transition: "all 0.3s" },
+      };
+      edgeCache.set(edge.id, { sig, edge: decorated });
+      return decorated;
+    });
+
+    return { nodes: decoratedNodes, edges: decoratedEdges };
+  }, [files, layout, lens, positionedNodes, searchLower, searchMatchIds, activeSelectedNodeId]);
 
   const onNodeClick: NodeMouseHandler = useCallback(
     (_event, node) => {
       if (node.type === "group") return;
-      const isDeselect = selectedNodeId === node.id;
-      setSelectedNodeId(isDeselect ? null : node.id);
+      const isDeselect = activeSelectedNodeId === node.id;
+      setSelection(
+        isDeselect ? null : { nodeId: node.id, searchRequestId: searchRequest.id },
+      );
       onSelectFile?.(isDeselect ? null : node.id);
     },
-    [selectedNodeId, onSelectFile]
+    [activeSelectedNodeId, searchRequest.id, onSelectFile]
   );
 
   const onPaneClick = useCallback(() => {
-    setSelectedNodeId(null);
+    setSelection(null);
     onSelectFile?.(null);
   }, [onSelectFile]);
 
   return (
     <>
       <ReactFlow
-        nodes={nodes}
-        edges={rfEdges}
+        nodes={visibleElements.nodes}
+        edges={visibleElements.edges}
         onNodesChange={onNodesChange}
-        onEdgesChange={onEdgesChange}
         onNodeClick={onNodeClick}
         onPaneClick={onPaneClick}
         nodeTypes={nodeTypes}
@@ -547,9 +638,19 @@ function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQu
         proOptions={{ hideAttribution: true }}
         className="!bg-[var(--graph-bg)]"
         fitView
-        fitViewOptions={{ padding: 0.2, minZoom: 0.45, maxZoom: 1 }}
-        minZoom={0.15}
+        // minZoom floors must stay far below full-repo fit scale: a 900+ file
+        // graph needs ~0.02 zoom to fit, and a floor above it makes fitView
+        // stop early — the viewport then shows an empty region of a huge
+        // canvas and the page looks broken (observed on AcmeOrg/acme-account,
+        // 924 files). Small graphs are unaffected: fit clamps at maxZoom 1.
+        fitViewOptions={{ padding: 0.2, minZoom: 0.02, maxZoom: 1 }}
+        minZoom={0.02}
         maxZoom={2.5}
+        // Virtualize: only mount nodes/edges intersecting the viewport. At
+        // full-repo scale mounting everything froze the tab; when zoomed out
+        // far enough that all nodes are visible they are tiny and cheap, and
+        // when zoomed in the working set is small.
+        onlyRenderVisibleElements
         defaultEdgeOptions={{ type: "smoothstep" }}
       >
         <Background color="var(--graph-dots)" gap={32} size={1} />
@@ -568,6 +669,12 @@ function ArchCanvasInner({ files, edges, lens, direction, setDirection, searchQu
           zoomable
         />
       </ReactFlow>
+
+      <SearchViewportCommand
+        key={searchRequest.id}
+        matchIds={searchMatchIds}
+        totalNodes={files.length}
+      />
 
       {/* Direction toggle + fit-all */}
       <div className="absolute top-4 right-4 z-10 flex gap-1 bg-[var(--graph-surface)]/80 backdrop-blur-sm border border-[var(--graph-border)] p-0.5">
@@ -630,7 +737,6 @@ export default function ArchitectureCanvas(props: Props) {
 
   return (
     <div className="h-full w-full relative">
-      {/* Only remount on direction change (which recomputes layout); lens changes update in place. */}
       <ReactFlowProvider key={direction}>
         <ArchCanvasInner {...props} direction={direction} setDirection={setDirection} />
       </ReactFlowProvider>

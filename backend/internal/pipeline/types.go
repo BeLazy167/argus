@@ -1,9 +1,11 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/BeLazy167/argus/backend/internal/admission"
 	"log/slog"
 	"strings"
 	"sync"
@@ -76,7 +78,14 @@ type RunTokenUsage struct {
 	CrossPR       StageTokens   `json:"cross_pr,omitempty"`
 	Simulation    []StageTokens `json:"simulation,omitempty"`
 	Reply         StageTokens   `json:"reply,omitempty"` // reserved; reply worker not yet instrumented
-	Total         StageTokens   `json:"total"`
+	// AutoResolve is the AddressedJudge spend from auto-resolve passes. Those
+	// calls fire on a LATER push, outside any live run, and merge into this
+	// bucket on the review whose threads they judged (see
+	// persistAsyncStageTokens + stageKeyAutoResolve). Without the field the
+	// stats aggregator, which decodes token_usage into this struct, would drop
+	// the bucket and the spend would be invisible.
+	AutoResolve StageTokens `json:"auto_resolve,omitempty"`
+	Total       StageTokens `json:"total"`
 }
 
 // StageTokens holds token counts and cost for a single LLM call or stage aggregate.
@@ -95,21 +104,23 @@ type StageTokens struct {
 
 // PipelineRun tracks the state and intermediate results of a single review.
 type PipelineRun struct {
-	ID                  uuid.UUID
-	ReviewID            uuid.UUID
-	State               PipelineState
-	PREvent             github.PREvent
-	DBInstallationID    int64 // DB serial ID (for provider_keys, model_configs lookups)
-	DBRepoID            int64 // DB serial ID (for model_configs, reviews lookups)
+	ID       uuid.UUID
+	ReviewID uuid.UUID
+	// AttemptGeneration increments whenever the same review row is retried.
+	AttemptGeneration int `json:"attempt_generation"`
+	State             PipelineState
+	PREvent           github.PREvent
+	DBInstallationID  int64 // DB serial ID (for provider_keys, model_configs lookups)
+	DBRepoID          int64 // DB serial ID (for model_configs, reviews lookups)
 	// TraceID carries the X-Argus-Trace-Id header from the initiating HTTP request. Empty
 	// when the event entered outside the middleware (e.g. sweeper recovery). Persisted via
 	// reviews.trace_id so async stages can continue the same trace from a fresh ctx.
-	TraceID string
-	Diff                *diff.PatchSet
-	RawDiff             string
-	TriageResults       []TriageResult
-	FileReviews         []FileReview
-	AllFileReviews      []FileReview        // pre-scoring snapshot: all comments with scores, before threshold drop
+	TraceID        string
+	Diff           *diff.PatchSet
+	RawDiff        string
+	TriageResults  []TriageResult
+	FileReviews    []FileReview
+	AllFileReviews []FileReview // pre-scoring snapshot: all comments with scores, before threshold drop
 	// MinorNotes collects near-miss findings (scored within the near-miss band
 	// below their severity threshold) plus nits demoted from files that carry a
 	// blocking finding. Rendered collapsed in the summary, never inline.
@@ -130,18 +141,18 @@ type PipelineRun struct {
 	FileSynthesis       bool
 	ArchitectureGraph   bool
 	TruncatedFiles      []string
-	LeadBrief           *LeadBrief        `json:"lead_brief,omitempty"`
-	LeadAgentError      string            `json:"lead_agent_error,omitempty"`
-	ScoringSkipped      bool              // true when scoring provider unavailable — synthesis uses all comments
+	LeadBrief           *LeadBrief `json:"lead_brief,omitempty"`
+	LeadAgentError      string     `json:"lead_agent_error,omitempty"`
+	ScoringSkipped      bool       // true when scoring provider unavailable — synthesis uses all comments
 	ScoringUnconfigured bool
 	// ScoringMissingKey narrows the unconfigured cause: the scoring model row
 	// exists but no API key resolves for its provider — the remedy is a key,
 	// not a model config.
 	ScoringMissingKey bool              // true when the skip was resolution failure (no model config/key) — posts a setup notice
-	Prompts             map[string]string // custom prompt overrides per stage
-	IsIncremental       bool
-	PreviousReviewID    *uuid.UUID
-	PriorComments       map[string][]PriorComment // file path -> prior unresolved comments from previous review
+	Prompts           map[string]string // custom prompt overrides per stage
+	IsIncremental     bool
+	PreviousReviewID  *uuid.UUID
+	PriorComments     map[string][]PriorComment // file path -> prior unresolved comments from previous review
 	// SastFindings holds SAST tool results keyed by file path.
 	SastFindings map[string][]SastFinding `json:"-"`
 	// ArchContext holds per-file architecture metrics for review prompt enrichment.
@@ -179,10 +190,33 @@ type PipelineRun struct {
 	StartedCommentNodeID string            `json:"-"` // node ID of the "review started" GH comment, for minimizing later
 	Indexer              memory.Indexer    `json:"-"` // per-org indexer resolved from Registry
 	Thresholds           memory.Thresholds `json:"-"` // per-run similarity gates (merged org→repo settings, Bundle 3)
-	EventBus             *EventBus         `json:"-"` // not persisted
-	Error                string
-	CreatedAt            time.Time
-	UpdatedAt            time.Time
+
+	// BudgetLimits is resolved from merged settings at build time, like every
+	// other setting on this struct. Persisted, so a recovered or retried run
+	// keeps the repo's configured caps instead of silently falling back to the
+	// defaults.
+	BudgetLimits admission.Limits `json:"budget_limits,omitempty"`
+
+	// ResolvedPersona is the overlay pair this run uses, looked up once from
+	// the personas table with the compiled-in text as fallback. Persisted so a
+	// recovered run keeps the persona it started with, rather than silently
+	// picking up an edit made mid-review.
+	ResolvedPersona ResolvedPersona `json:"resolved_persona,omitempty"`
+	// BudgetMaxFiles caps how many files a reduced review looks at. Zero means
+	// no cap. Set only when the Budget returned reduce.
+	//
+	// PERSISTED, unlike the derived config above. PipelineRun is marshalled to
+	// pipeline_states and unmarshalled back by crash recovery, and the Budget
+	// runs once at entry — not on recovery. Excluded, a recovered reduced
+	// review would restore with a zero cap, which budgetCapFiles reads as
+	// "uncapped", and would process the entire diff it was reduced away from.
+	BudgetMaxFiles int `json:"budget_max_files,omitempty"`
+	// BudgetNote is why the review was reduced, for the posted summary.
+	BudgetNote string    `json:"budget_note,omitempty"`
+	EventBus   *EventBus `json:"-"` // not persisted
+	Error      string
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
 }
 
 // LeadBrief is the output of the Lead Agent's briefing phase.
@@ -283,16 +317,16 @@ type FileComment struct {
 	// renderer can produce the right phrasing: "pattern" | "convention" |
 	// "rule" | "similarity". Empty string ⇒ no memory tag rendered.
 	MatchedPatternKind    string `json:"-"`
-	MatchedPatternPR      int    `json:"-"`                      // source PR number (from Supermemory doc metadata)
+	MatchedPatternPR      int    `json:"-"`                      // source PR number (from memory doc metadata)
 	MatchedPatternAuthor  string `json:"-"`                      // source PR author login
 	MatchedPatternAgeDays int    `json:"-"`                      // rounded days since source indexed
 	BlastRadius           int    `json:"blast_radius,omitempty"` // number of downstream dependents affected
 	EnforcedRuleContent   string `json:"-"`
 	IsNewFinding          bool   `json:"-"`
-	Suppressed            bool   `json:"-"` // dismissal-match drop: persisted flagged, never posted/counted
-	SuppressedReason      string `json:"-"` // e.g. "dismissed_match:0.91"; → review_comments.suppressed_reason
-	DismissedDowngrade    bool   `json:"-"` // dismissal-match downgrade: severity lowered one level + note
-	DismissedMatchPR      int    `json:"-"` // source PR of the dismissed finding (0 = unknown), for the note
+	Suppressed            bool   `json:"-"`                     // dismissal-match drop: persisted flagged, never posted/counted
+	SuppressedReason      string `json:"-"`                     // e.g. "dismissed_match:0.91"; → review_comments.suppressed_reason
+	DismissedDowngrade    bool   `json:"-"`                     // dismissal-match downgrade: severity lowered one level + note
+	DismissedMatchPR      int    `json:"-"`                     // source PR of the dismissed finding (0 = unknown), for the note
 	DedupCount            int    `json:"dedup_count,omitempty"` // how many duplicate findings were merged into this one
 	// Corroboration is the number of DISTINCT specialists that independently
 	// produced this finding, recorded when dedup merges a cluster. Scoring
@@ -489,6 +523,27 @@ func (r *RunTokenUsage) addCrossPR(s StageTokens) {
 	r.mu.Unlock()
 }
 
+// addAutoResolve mirrors addCrossPR for the AutoResolve bucket. resolveCandidates
+// calls it once per AddressedJudge call against a pass-local RunTokenUsage, then
+// merges the summed bucket into the reviews row in ONE query — per-call DB writes
+// would cost up to maxJudgeCallsPerPush UPDATEs per push for the same total.
+func (r *RunTokenUsage) addAutoResolve(s StageTokens) {
+	r.mu.Lock()
+	r.AutoResolve.PromptTokens += s.PromptTokens
+	r.AutoResolve.CompletionTokens += s.CompletionTokens
+	r.AutoResolve.TotalTokens += s.TotalTokens
+	r.AutoResolve.Cost += s.Cost
+	if r.AutoResolve.Model == "" {
+		r.AutoResolve.Model = s.Model
+		r.AutoResolve.Provider = s.Provider
+	}
+	r.Total.PromptTokens += s.PromptTokens
+	r.Total.CompletionTokens += s.CompletionTokens
+	r.Total.TotalTokens += s.TotalTokens
+	r.Total.Cost += s.Cost
+	r.mu.Unlock()
+}
+
 // addSimulation appends a per-scenario StageTokens and rolls into Total.
 // Order is scenario-selection order (UCB1 top-5, stable).
 func (r *RunTokenUsage) addSimulation(s StageTokens) {
@@ -509,72 +564,267 @@ func customOrDefault(prompts map[string]string, key, fallback string) string {
 	return fallback
 }
 
-// unmarshalLLMArray parses a JSON array from LLM output, handling markdown code fences.
+// unmarshalLLMArray parses a JSON array from LLM output, handling markdown
+// fences, common model escaping mistakes, and JSON-mode object wrappers.
 func unmarshalLLMArray[T any](content string) ([]T, error) {
 	if content == "" {
 		return nil, nil
 	}
-	// Strip markdown code fences: ```json ... ``` or ``` ... ```
 	cleaned := stripCodeFences(content)
+
 	var result []T
-	if err := json.Unmarshal([]byte(cleaned), &result); err == nil {
+	if err := unmarshalJSONWithEscapeRepair(cleaned, &result); err == nil {
 		return result, nil
 	}
+	if strings.HasPrefix(strings.TrimSpace(cleaned), "{") {
+		if wrapped, ok := unwrapLLMArray(cleaned); ok {
+			if err := unmarshalJSONWithEscapeRepair(wrapped, &result); err == nil {
+				return result, nil
+			}
+		} else if json.Valid([]byte(repairInvalidJSONEscapes(cleaned))) {
+			// A complete object with zero or multiple array fields is ambiguous.
+			return nil, fmt.Errorf("no JSON array found in response")
+		}
+		// A truncated wrapper may still contain a complete array. Fall through
+		// to the existing bracket extraction and truncation recovery below.
+	}
+
 	start := strings.Index(cleaned, "[")
 	end := strings.LastIndex(cleaned, "]")
 	if start >= 0 && end > start {
 		chunk := cleaned[start : end+1]
-		var result []T
-		if err := json.Unmarshal([]byte(chunk), &result); err != nil {
+		if err := unmarshalJSONWithEscapeRepair(chunk, &result); err != nil {
 			repaired := strings.ReplaceAll(chunk, "}\n{", "},\n{")
 			repaired = strings.ReplaceAll(repaired, "} {", "}, {")
 			repaired = strings.ReplaceAll(repaired, "}\t{", "},\t{")
-			if err2 := json.Unmarshal([]byte(repaired), &result); err2 != nil {
+			if err2 := unmarshalJSONWithEscapeRepair(repaired, &result); err2 != nil {
 				recovered := recoverTruncatedArray[T](cleaned[start:])
 				if recovered != nil {
 					return recovered, nil
 				}
 				return nil, fmt.Errorf("parsing JSON from response: %w", err)
 			}
-			return result, nil
 		}
 		return result, nil
 	}
-	recovered := recoverTruncatedArray[T](cleaned)
-	if recovered != nil {
+	if recovered := recoverTruncatedArray[T](cleaned); recovered != nil {
 		return recovered, nil
 	}
 	return nil, fmt.Errorf("no JSON array found in response")
 }
 
-func recoverTruncatedArray[T any](content string) []T {
-	start := strings.Index(content, "[")
-	if start < 0 {
-		return nil
-	}
-	body := content[start+1:]
-	depth := 0
-	lastClose := -1
-	for i, ch := range body {
-		switch ch {
-		case '{':
-			depth++
-		case '}':
-			depth--
-			if depth == 0 {
-				lastClose = i
-			}
+// unmarshalLLMObject parses an LLM-produced top-level object. If output was cut
+// off, it salvages the longest syntactically complete prefix and closes its open
+// containers. This preserves completed top-level arrays and their completed
+// elements while dropping only the partial trailing value. A trailing object
+// is partial until its own closing delimiter arrives, even if a nested object or
+// array inside it completed before truncation.
+func unmarshalLLMObject(content string, result any) error {
+	_, err := unmarshalLLMObjectWithSalvage(content, result)
+	return err
+}
+
+// unmarshalLLMObjectWithSalvage also reports whether parsing required the
+// truncated-response salvage path. Callers that persist snapshots can use this
+// to reject an empty partial result rather than clobber known-good data.
+func unmarshalLLMObjectWithSalvage(content string, result any) (bool, error) {
+	cleaned := stripCodeFences(content)
+	object := extractJSON(cleaned)
+	if err := unmarshalJSONWithEscapeRepair(object, result); err == nil {
+		return false, nil
+	} else if recovered, ok := recoverTruncatedJSON(repairInvalidJSONEscapes(object), '{'); ok {
+		if recoverErr := json.Unmarshal([]byte(recovered), result); recoverErr == nil {
+			return true, nil
 		}
+		return false, fmt.Errorf("parsing JSON object from response: %w", err)
+	} else {
+		return false, fmt.Errorf("parsing JSON object from response: %w", err)
 	}
-	if lastClose <= 0 {
+}
+
+func unmarshalJSONWithEscapeRepair(content string, result any) error {
+	err := json.Unmarshal([]byte(content), result)
+	if err == nil {
 		return nil
 	}
-	closed := content[start:start+1+lastClose+1] + "]"
+	repaired := repairInvalidJSONEscapes(content)
+	if repaired == content {
+		return err
+	}
+	if repairErr := json.Unmarshal([]byte(repaired), result); repairErr != nil {
+		return err
+	}
+	return nil
+}
+
+// repairInvalidJSONEscapes doubles unsupported backslashes inside JSON strings.
+// JSON permits only \", \\, \/, \b, \f, \n, \r, \t, and \u escapes.
+func repairInvalidJSONEscapes(content string) string {
+	var repaired strings.Builder
+	repaired.Grow(len(content))
+	inString := false
+	for i := 0; i < len(content); i++ {
+		ch := content[i]
+		if ch == '"' {
+			inString = !inString
+			repaired.WriteByte(ch)
+			continue
+		}
+		if ch != '\\' || !inString || i+1 >= len(content) {
+			repaired.WriteByte(ch)
+			continue
+		}
+		next := content[i+1]
+		if !strings.ContainsRune(`"\/bfnrtu`, rune(next)) {
+			repaired.WriteByte('\\')
+		}
+		repaired.WriteByte(ch)
+		repaired.WriteByte(next)
+		i++
+	}
+	return repaired.String()
+}
+
+// unwrapLLMArray accepts the object shape encouraged by OpenAI-style
+// json_object mode when exactly one field contains an array. Scalar metadata is
+// allowed, but multiple array-valued fields are ambiguous and are rejected.
+func unwrapLLMArray(content string) (string, bool) {
+	var object map[string]json.RawMessage
+	if err := unmarshalJSONWithEscapeRepair(content, &object); err != nil {
+		return "", false
+	}
+	var array json.RawMessage
+	for _, raw := range object {
+		trimmed := bytes.TrimSpace(raw)
+		if len(trimmed) == 0 || trimmed[0] != '[' {
+			continue
+		}
+		if array != nil {
+			return "", false
+		}
+		array = raw
+	}
+	return string(array), array != nil
+}
+
+func recoverTruncatedArray[T any](content string) []T {
+	recovered, ok := recoverTruncatedJSON(repairInvalidJSONEscapes(content), '[')
+	if !ok {
+		return nil
+	}
 	var result []T
-	if err := json.Unmarshal([]byte(closed), &result); err != nil {
+	if err := json.Unmarshal([]byte(recovered), &result); err != nil {
 		return nil
 	}
 	return result
+}
+
+const maxLLMJSONSalvageBytes = 256 << 10
+
+type truncatedJSONCandidate struct {
+	end   int
+	stack []byte
+}
+
+// recoverTruncatedJSON scans once for safe value boundaries, then decodes
+// candidates from newest to oldest. For object roots, nested candidates are
+// limited to complete direct elements of a top-level array field; arbitrary
+// nested closes must not promote an unfinished trailing element.
+func recoverTruncatedJSON(content string, root byte) (string, bool) {
+	start := strings.IndexByte(content, root)
+	if start < 0 {
+		return "", false
+	}
+	content = content[start:]
+	if len(content) > maxLLMJSONSalvageBytes {
+		slog.Warn("LLM JSON salvage input exceeded limit; scanning prefix",
+			"input_bytes", len(content), "salvage_bytes", maxLLMJSONSalvageBytes)
+		content = content[:maxLLMJSONSalvageBytes]
+	}
+	stack := make([]byte, 0, 4)
+	candidates := make([]truncatedJSONCandidate, 0, 16)
+	inString := false
+	escaped := false
+	for i := 0; i < len(content); i++ {
+		ch := content[i]
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+			} else if ch == '"' {
+				inString = false
+			}
+			continue
+		}
+		if ch == '"' {
+			inString = true
+			continue
+		}
+		switch ch {
+		case '{', '[':
+			stack = append(stack, ch)
+		case ',':
+			// At the root object, a comma proves the preceding field value is
+			// complete. This covers scalar fields before a truncated later field.
+			if root == '{' && len(stack) == 1 {
+				candidates = appendTruncatedJSONCandidate(candidates, i, stack)
+			}
+		case '}', ']':
+			if len(stack) == 0 || (ch == '}' && stack[len(stack)-1] != '{') || (ch == ']' && stack[len(stack)-1] != '[') {
+				return decodeTruncatedJSONCandidate(content, candidates)
+			}
+			closed := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			safeBoundary := len(stack) == 0
+			if root == '[' {
+				// A direct object/array element of the root array completed.
+				safeBoundary = len(stack) == 1 && stack[0] == '['
+			} else if closed == '{' {
+				// A direct element object completed inside a top-level array field.
+				safeBoundary = len(stack) == 2 && stack[0] == '{' && stack[1] == '['
+			} else if closed == '[' {
+				// A complete top-level array field is also a safe object prefix.
+				safeBoundary = len(stack) == 1 && stack[0] == '{'
+			}
+			if safeBoundary {
+				candidates = appendTruncatedJSONCandidate(candidates, i+1, stack)
+			}
+			if len(stack) == 0 {
+				return decodeTruncatedJSONCandidate(content, candidates)
+			}
+		}
+	}
+	return decodeTruncatedJSONCandidate(content, candidates)
+}
+
+func appendTruncatedJSONCandidate(candidates []truncatedJSONCandidate, end int, stack []byte) []truncatedJSONCandidate {
+	return append(candidates, truncatedJSONCandidate{end: end, stack: append([]byte(nil), stack...)})
+}
+
+func decodeTruncatedJSONCandidate(content string, candidates []truncatedJSONCandidate) (string, bool) {
+	for i := len(candidates) - 1; i >= 0; i-- {
+		candidate := content[:candidates[i].end] + closeJSONContainers(candidates[i].stack)
+		if json.Valid([]byte(candidate)) {
+			return candidate, true
+		}
+	}
+	return "", false
+}
+
+func closeJSONContainers(stack []byte) string {
+	var closed strings.Builder
+	closed.Grow(len(stack))
+	for i := len(stack) - 1; i >= 0; i-- {
+		if stack[i] == '{' {
+			closed.WriteByte('}')
+		} else {
+			closed.WriteByte(']')
+		}
+	}
+	return closed.String()
 }
 
 // stripCodeFences removes markdown code fences (```json\n...\n```) from LLM output.

@@ -1,10 +1,13 @@
 package diff
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // PatchSet represents the entire diff of a PR.
@@ -53,7 +56,7 @@ const (
 type LineType string
 
 const (
-	LineContext  LineType = "context"
+	LineContext LineType = "context"
 	LineAdded   LineType = "added"
 	LineDeleted LineType = "deleted"
 )
@@ -120,8 +123,22 @@ func (f *FileDiff) ValidCommentLines() map[int]bool {
 }
 
 // Parse parses a unified diff string into a PatchSet.
-func Parse(raw string) (*PatchSet, error) {
-	ps := &PatchSet{}
+func Parse(raw string) (ps *PatchSet, err error) {
+	started := time.Now()
+	defer func() {
+		level := slog.LevelDebug
+		if err != nil {
+			level = slog.LevelError
+		}
+		fileCount, linesChanged := 0, 0
+		if ps != nil {
+			fileCount, linesChanged = len(ps.Files), ps.TotalLinesChanged()
+		}
+		slog.Log(context.Background(), level, "unified diff parsing completed", "input_bytes", len(raw),
+			"file_count", fileCount, "lines_changed", linesChanged,
+			"duration_ms", time.Since(started).Milliseconds(), "error", err)
+	}()
+	ps = &PatchSet{}
 	fileDiffs := splitFiles(raw)
 
 	for _, fd := range fileDiffs {
@@ -170,8 +187,22 @@ type FileInfo struct {
 
 // ParseFromFiles builds a PatchSet from GitHub's per-file API data.
 // Files with a patch are parsed normally; files without are marked as LargeFile.
-func ParseFromFiles(files []FileInfo) (*PatchSet, error) {
-	ps := &PatchSet{}
+func ParseFromFiles(files []FileInfo) (ps *PatchSet, err error) {
+	started := time.Now()
+	defer func() {
+		level := slog.LevelDebug
+		if err != nil {
+			level = slog.LevelError
+		}
+		parsedFiles, largeFiles := 0, 0
+		if ps != nil {
+			parsedFiles, largeFiles = len(ps.Files), ps.CountLargeFiles()
+		}
+		slog.Log(context.Background(), level, "GitHub file patches parsed", "input_file_count", len(files),
+			"file_count", parsedFiles, "large_file_count", largeFiles,
+			"duration_ms", time.Since(started).Milliseconds(), "error", err)
+	}()
+	ps = &PatchSet{}
 	for _, f := range files {
 		var status FileStatus
 		switch f.Status {

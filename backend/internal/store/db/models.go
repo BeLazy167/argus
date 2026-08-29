@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/pgvector/pgvector-go"
 )
 
 type ActivityLog struct {
@@ -20,6 +21,40 @@ type ActivityLog struct {
 	Metadata       []byte    `json:"metadata"`
 	CreatedAt      time.Time `json:"created_at"`
 	InstallationID *int64    `json:"installation_id"`
+}
+
+type ApiEndpoint struct {
+	ID          int64     `json:"id"`
+	RepoID      int64     `json:"repo_id"`
+	NodeID      int64     `json:"node_id"`
+	Role        string    `json:"role"`
+	Method      string    `json:"method"`
+	PathPattern string    `json:"path_pattern"`
+	RawPath     string    `json:"raw_path"`
+	FilePath    string    `json:"file_path"`
+	Line        int       `json:"line"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+type ArchitectureAnnotationEdge struct {
+	ID        int64     `json:"id"`
+	RepoID    int64     `json:"repo_id"`
+	PRNumber  int       `json:"pr_number"`
+	SourceID  int64     `json:"source_id"`
+	TargetID  int64     `json:"target_id"`
+	Kind      string    `json:"kind"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type ArchitectureAnnotationNode struct {
+	ID        int64     `json:"id"`
+	RepoID    int64     `json:"repo_id"`
+	PRNumber  int       `json:"pr_number"`
+	Kind      string    `json:"kind"`
+	Name      string    `json:"name"`
+	FilePath  string    `json:"file_path"`
+	Language  string    `json:"language"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 type AutoResolveEvent struct {
@@ -42,27 +77,29 @@ type CodeEdge struct {
 	TargetID  int64      `json:"target_id"`
 	Kind      string     `json:"kind"`
 	UpdatedAt *time.Time `json:"updated_at"`
+	Inferred  bool       `json:"inferred"`
 }
 
 type CodeNode struct {
-	ID           int64      `json:"id"`
-	RepoID       int64      `json:"repo_id"`
-	Kind         string     `json:"kind"`
-	Name         string     `json:"name"`
-	FilePath     string     `json:"file_path"`
-	LineStart    *int       `json:"line_start"`
-	LineEnd      *int       `json:"line_end"`
-	Language     *string    `json:"language"`
-	UpdatedAt    *time.Time `json:"updated_at"`
-	PRNumber     *int       `json:"pr_number"`
-	IsMerged     bool       `json:"is_merged"`
-	ReturnType   *string    `json:"return_type"`
-	Params       *string    `json:"params"`
-	Visibility   *string    `json:"visibility"`
-	IsAsync      *bool      `json:"is_async"`
-	ReceiverType *string    `json:"receiver_type"`
-	Scope        *string    `json:"scope"`
-	ContentHash  *string    `json:"content_hash"`
+	ID             int64      `json:"id"`
+	RepoID         int64      `json:"repo_id"`
+	Kind           string     `json:"kind"`
+	Name           string     `json:"name"`
+	FilePath       string     `json:"file_path"`
+	LineStart      *int       `json:"line_start"`
+	LineEnd        *int       `json:"line_end"`
+	Language       *string    `json:"language"`
+	UpdatedAt      *time.Time `json:"updated_at"`
+	PRNumber       *int       `json:"pr_number"`
+	IsMerged       bool       `json:"is_merged"`
+	ReturnType     *string    `json:"return_type"`
+	Params         *string    `json:"params"`
+	Visibility     *string    `json:"visibility"`
+	IsAsync        *bool      `json:"is_async"`
+	ReceiverType   *string    `json:"receiver_type"`
+	Scope          *string    `json:"scope"`
+	ContentHash    *string    `json:"content_hash"`
+	InstallationID int64      `json:"installation_id"`
 }
 
 type CommentOutcome struct {
@@ -74,31 +111,135 @@ type CommentOutcome struct {
 }
 
 type DecisionTrace struct {
-	ID            int64      `json:"id"`
-	RepoID        int64      `json:"repo_id"`
-	FilePath      string     `json:"file_path"`
-	SymbolName    *string    `json:"symbol_name"`
-	TraceType     string     `json:"trace_type"`
-	Content       string     `json:"content"`
-	Severity      *string    `json:"severity"`
-	ReviewID      *uuid.UUID `json:"review_id"`
-	PRNumber      *int       `json:"pr_number"`
-	Metadata      []byte     `json:"metadata"`
-	CreatedAt     *time.Time `json:"created_at"`
-	SupermemoryID *string    `json:"supermemory_id"`
+	ID         int64      `json:"id"`
+	RepoID     int64      `json:"repo_id"`
+	FilePath   string     `json:"file_path"`
+	SymbolName *string    `json:"symbol_name"`
+	TraceType  string     `json:"trace_type"`
+	Content    string     `json:"content"`
+	Severity   *string    `json:"severity"`
+	ReviewID   *uuid.UUID `json:"review_id"`
+	PRNumber   *int       `json:"pr_number"`
+	Metadata   []byte     `json:"metadata"`
+	CreatedAt  *time.Time `json:"created_at"`
+}
+
+type GraphIndexBudget struct {
+	Singleton           bool       `json:"singleton"`
+	LastWindowStartedAt *time.Time `json:"last_window_started_at"`
+}
+
+type GraphIndexGeneration struct {
+	ID               int64      `json:"id"`
+	RepoID           int64      `json:"repo_id"`
+	CommitSha        string     `json:"commit_sha"`
+	Status           string     `json:"status"`
+	TreeTruncated    bool       `json:"tree_truncated"`
+	ExpectedFiles    int        `json:"expected_files"`
+	VisitedFiles     int        `json:"visited_files"`
+	FailedFiles      int        `json:"failed_files"`
+	SkippedFiles     int        `json:"skipped_files"`
+	Error            string     `json:"error"`
+	StartedAt        time.Time  `json:"started_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
+	PublishedAt      *time.Time `json:"published_at"`
+	RefreshVersion   int64      `json:"refresh_version"`
+	UnavailableFiles int        `json:"unavailable_files"`
+}
+
+type GraphIndexGenerationFile struct {
+	GenerationID int64           `json:"generation_id"`
+	FilePath     string          `json:"file_path"`
+	Status       string          `json:"status"`
+	Symbols      json.RawMessage `json:"symbols"`
+	Edges        json.RawMessage `json:"edges"`
+	Endpoints    json.RawMessage `json:"endpoints"`
+	Error        string          `json:"error"`
+	UpdatedAt    time.Time       `json:"updated_at"`
+	AttemptCount int             `json:"attempt_count"`
 }
 
 type Installation struct {
-	ID                int64           `json:"id"`
-	InstallationID    int64           `json:"installation_id"`
-	OrgLogin          string          `json:"org_login"`
-	CreatedAt         time.Time       `json:"created_at"`
-	SuspendedAt       *time.Time      `json:"suspended_at"`
-	ClerkOrgID        *string         `json:"clerk_org_id"`
-	PlanTier          string          `json:"plan_tier"`
-	DefaultSettings   []byte          `json:"default_settings"`
-	FeatureFlags      json.RawMessage `json:"feature_flags"`
-	SupermemoryKeyEnc *string         `json:"supermemory_key_enc"`
+	ID              int64           `json:"id"`
+	InstallationID  int64           `json:"installation_id"`
+	OrgLogin        string          `json:"org_login"`
+	CreatedAt       time.Time       `json:"created_at"`
+	SuspendedAt     *time.Time      `json:"suspended_at"`
+	ClerkOrgID      *string         `json:"clerk_org_id"`
+	DefaultSettings []byte          `json:"default_settings"`
+	FeatureFlags    json.RawMessage `json:"feature_flags"`
+}
+
+type LiveMemory struct {
+	ID             int64            `json:"id"`
+	InstallationID int64            `json:"installation_id"`
+	ContainerTag   string           `json:"container_tag"`
+	CustomID       string           `json:"custom_id"`
+	Type           string           `json:"type"`
+	Content        string           `json:"content"`
+	Metadata       json.RawMessage  `json:"metadata"`
+	Embedding      *pgvector.Vector `json:"embedding"`
+	EmbeddingModel *string          `json:"embedding_model"`
+	ContentTsv     interface{}      `json:"content_tsv"`
+	CreatedAt      time.Time        `json:"created_at"`
+	UpdatedAt      time.Time        `json:"updated_at"`
+	DeletedAt      *time.Time       `json:"deleted_at"`
+	InvalidatedAt  *time.Time       `json:"invalidated_at"`
+	SupersededBy   *int64           `json:"superseded_by"`
+	ReviewID       *uuid.UUID       `json:"review_id"`
+	EmbeddingSpace *string          `json:"embedding_space"`
+}
+
+type Memory struct {
+	ID             int64            `json:"id"`
+	InstallationID int64            `json:"installation_id"`
+	ContainerTag   string           `json:"container_tag"`
+	CustomID       string           `json:"custom_id"`
+	Type           string           `json:"type"`
+	Content        string           `json:"content"`
+	Metadata       json.RawMessage  `json:"metadata"`
+	Embedding      *pgvector.Vector `json:"embedding"`
+	EmbeddingModel *string          `json:"embedding_model"`
+	ContentTsv     interface{}      `json:"content_tsv"`
+	CreatedAt      time.Time        `json:"created_at"`
+	UpdatedAt      time.Time        `json:"updated_at"`
+	DeletedAt      *time.Time       `json:"deleted_at"`
+	InvalidatedAt  *time.Time       `json:"invalidated_at"`
+	SupersededBy   *int64           `json:"superseded_by"`
+	ReviewID       *uuid.UUID       `json:"review_id"`
+	EmbeddingSpace *string          `json:"embedding_space"`
+}
+
+type MemoryExportArchive struct {
+	ID             int64           `json:"id"`
+	InstallationID int64           `json:"installation_id"`
+	ContainerTag   string          `json:"container_tag"`
+	DocID          string          `json:"doc_id"`
+	CustomID       *string         `json:"custom_id"`
+	Payload        json.RawMessage `json:"payload"`
+	ExportedAt     time.Time       `json:"exported_at"`
+}
+
+type MemoryMirrorOutbox struct {
+	ID             int64           `json:"id"`
+	InstallationID int64           `json:"installation_id"`
+	AggregateType  string          `json:"aggregate_type"`
+	AggregateID    int64           `json:"aggregate_id"`
+	Operation      string          `json:"operation"`
+	Payload        json.RawMessage `json:"payload"`
+	AttemptCount   int             `json:"attempt_count"`
+	AvailableAt    time.Time       `json:"available_at"`
+	ClaimedAt      *time.Time      `json:"claimed_at"`
+	ProcessedAt    *time.Time      `json:"processed_at"`
+	LastError      *string         `json:"last_error"`
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
+}
+
+type MemoryReviewAttribution struct {
+	MemoryID     int64     `json:"memory_id"`
+	ReviewID     uuid.UUID `json:"review_id"`
+	AttributedAt time.Time `json:"attributed_at"`
 }
 
 type ModelConfig struct {
@@ -125,25 +266,25 @@ type ModelPricing struct {
 }
 
 type Pattern struct {
-	ID                  int        `json:"id"`
-	InstallationID      int64      `json:"installation_id"`
-	RepoID              *int64     `json:"repo_id"`
-	Content             string     `json:"content"`
-	SupermemoryID       *string    `json:"supermemory_id"`
-	CreatedBy           *string    `json:"created_by"`
-	CreatedAt           *time.Time `json:"created_at"`
-	UpdatedAt           *time.Time `json:"updated_at"`
-	Source              *string    `json:"source"`
-	Category            *string    `json:"category"`
-	PRNumber            *int       `json:"pr_number"`
-	SupermemoryCustomID *string    `json:"supermemory_custom_id"`
+	ID             int        `json:"id"`
+	InstallationID int64      `json:"installation_id"`
+	RepoID         *int64     `json:"repo_id"`
+	Content        string     `json:"content"`
+	MemoryDocID    *string    `json:"memory_doc_id"`
+	CreatedBy      *string    `json:"created_by"`
+	CreatedAt      *time.Time `json:"created_at"`
+	UpdatedAt      *time.Time `json:"updated_at"`
+	Source         *string    `json:"source"`
+	Category       *string    `json:"category"`
+	PRNumber       *int       `json:"pr_number"`
+	MemoryCustomID *string    `json:"memory_custom_id"`
 }
 
 type PatternStat struct {
 	ID             int64      `json:"id"`
 	InstallationID int64      `json:"installation_id"`
 	RepoID         *int64     `json:"repo_id"`
-	SupermemoryID  string     `json:"supermemory_id"`
+	MemoryDocID    string     `json:"memory_doc_id"`
 	ContentHash    string     `json:"content_hash"`
 	Category       string     `json:"category"`
 	TimesMatched   int        `json:"times_matched"`
@@ -155,14 +296,28 @@ type PatternStat struct {
 	UpdatedAt      time.Time  `json:"updated_at"`
 }
 
+type Persona struct {
+	ID             int       `json:"id"`
+	InstallationID *int64    `json:"installation_id"`
+	Slug           string    `json:"slug"`
+	Name           string    `json:"name"`
+	PromptOverlay  string    `json:"prompt_overlay"`
+	SpecialistHint string    `json:"specialist_hint"`
+	IsBuiltin      bool      `json:"is_builtin"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
 type PipelineState struct {
-	ID        uuid.UUID `json:"id"`
-	ReviewID  uuid.UUID `json:"review_id"`
-	State     string    `json:"state"`
-	Payload   []byte    `json:"payload"`
-	Error     *string   `json:"error"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID                 uuid.UUID  `json:"id"`
+	ReviewID           uuid.UUID  `json:"review_id"`
+	State              string     `json:"state"`
+	Payload            []byte     `json:"payload"`
+	Error              *string    `json:"error"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+	RecoveryOwner      *uuid.UUID `json:"recovery_owner"`
+	RecoveryLeaseUntil *time.Time `json:"recovery_lease_until"`
 }
 
 type PromptTemplate struct {
@@ -184,57 +339,79 @@ type ProviderKey struct {
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 	KeyHint        *string   `json:"key_hint"`
+	Model          *string   `json:"model"`
 }
 
 type Repo struct {
-	ID             int64           `json:"id"`
-	InstallationID int64           `json:"installation_id"`
-	GithubID       int64           `json:"github_id"`
-	FullName       string          `json:"full_name"`
-	DefaultBranch  string          `json:"default_branch"`
-	Enabled        bool            `json:"enabled"`
-	SettingsJSON   json.RawMessage `json:"settings_json"`
-	CreatedAt      time.Time       `json:"created_at"`
-	UpdatedAt      time.Time       `json:"updated_at"`
+	ID                         int64           `json:"id"`
+	InstallationID             int64           `json:"installation_id"`
+	GithubID                   int64           `json:"github_id"`
+	FullName                   string          `json:"full_name"`
+	DefaultBranch              string          `json:"default_branch"`
+	Enabled                    bool            `json:"enabled"`
+	SettingsJSON               json.RawMessage `json:"settings_json"`
+	CreatedAt                  time.Time       `json:"created_at"`
+	UpdatedAt                  time.Time       `json:"updated_at"`
+	GraphIndexedAt             *time.Time      `json:"graph_indexed_at"`
+	GraphIndexAttemptedAt      *time.Time      `json:"graph_index_attempted_at"`
+	GraphIndexCursor           int             `json:"graph_index_cursor"`
+	GraphPublishedGenerationID *int64          `json:"graph_published_generation_id"`
+	GraphIndexCommitSha        *string         `json:"graph_index_commit_sha"`
+	GraphIndexExpectedFiles    int             `json:"graph_index_expected_files"`
+	GraphIndexVisitedFiles     int             `json:"graph_index_visited_files"`
+	GraphIndexFailedFiles      int             `json:"graph_index_failed_files"`
+	GraphIndexSkippedFiles     int             `json:"graph_index_skipped_files"`
+	GraphIndexTreeTruncated    bool            `json:"graph_index_tree_truncated"`
+	GraphRefreshRequestedAt    *time.Time      `json:"graph_refresh_requested_at"`
+	GraphRefreshCommitSha      *string         `json:"graph_refresh_commit_sha"`
+	GraphDefaultHeadSha        *string         `json:"graph_default_head_sha"`
+	GraphDefaultHeadObservedAt *time.Time      `json:"graph_default_head_observed_at"`
+	GraphDefaultHeadEventAt    *time.Time      `json:"graph_default_head_event_at"`
+	GraphRefreshVersion        int64           `json:"graph_refresh_version"`
 }
 
 type Review struct {
-	ID                 uuid.UUID       `json:"id"`
-	RepoID             int64           `json:"repo_id"`
-	PRNumber           int             `json:"pr_number"`
-	PRTitle            string          `json:"pr_title"`
-	PRAuthor           string          `json:"pr_author"`
-	HeadSHA            string          `json:"head_sha"`
-	BaseSHA            string          `json:"base_sha"`
-	GithubReviewID     *int64          `json:"github_review_id"`
-	Status             string          `json:"status"`
-	Summary            *string         `json:"summary"`
-	Score              *int            `json:"score"`
-	TokenUsage         []byte          `json:"token_usage"`
-	Trigger            string          `json:"trigger"`
-	TriggeredBy        *string         `json:"triggered_by"`
-	DurationMs         *int            `json:"duration_ms"`
-	Error              *string         `json:"error"`
-	CreatedAt          time.Time       `json:"created_at"`
-	CompletedAt        *time.Time      `json:"completed_at"`
-	FileCount          *int            `json:"file_count"`
-	DeepReview         bool            `json:"deep_review"`
-	Persona            *string         `json:"persona"`
-	IsIncremental      bool            `json:"is_incremental"`
-	ResolvedStaleCount *int            `json:"resolved_stale_count"`
-	HeadRef            *string         `json:"head_ref"`
-	SimulationResults  []byte          `json:"simulation_results"`
-	Diagram            *string         `json:"diagram"`
-	DiagramTitle       *string         `json:"diagram_title"`
-	Diagrams           []byte          `json:"diagrams"`
-	TruncatedFiles     []byte          `json:"truncated_files"`
-	Brief              *string         `json:"brief"`
-	MemoryEnabled      bool            `json:"memory_enabled"`
-	CrossPRHash        *string         `json:"cross_pr_hash"`
-	LinkedPRRefs       json.RawMessage `json:"linked_pr_refs"`
-	LinkedIssueRefs    json.RawMessage `json:"linked_issue_refs"`
-	TraceID            *string         `json:"trace_id"`
-	ReviewContract     []byte          `json:"review_contract"`
+	ID                        uuid.UUID       `json:"id"`
+	RepoID                    int64           `json:"repo_id"`
+	PRNumber                  int             `json:"pr_number"`
+	PRTitle                   string          `json:"pr_title"`
+	PRAuthor                  string          `json:"pr_author"`
+	HeadSHA                   string          `json:"head_sha"`
+	BaseSHA                   string          `json:"base_sha"`
+	GithubReviewID            *int64          `json:"github_review_id"`
+	Status                    string          `json:"status"`
+	Summary                   *string         `json:"summary"`
+	Score                     *int            `json:"score"`
+	TokenUsage                []byte          `json:"token_usage"`
+	Trigger                   string          `json:"trigger"`
+	TriggeredBy               *string         `json:"triggered_by"`
+	DurationMs                *int            `json:"duration_ms"`
+	Error                     *string         `json:"error"`
+	CreatedAt                 time.Time       `json:"created_at"`
+	CompletedAt               *time.Time      `json:"completed_at"`
+	FileCount                 *int            `json:"file_count"`
+	DeepReview                bool            `json:"deep_review"`
+	Persona                   *string         `json:"persona"`
+	IsIncremental             bool            `json:"is_incremental"`
+	ResolvedStaleCount        *int            `json:"resolved_stale_count"`
+	HeadRef                   *string         `json:"head_ref"`
+	SimulationResults         []byte          `json:"simulation_results"`
+	Diagram                   *string         `json:"diagram"`
+	DiagramTitle              *string         `json:"diagram_title"`
+	Diagrams                  []byte          `json:"diagrams"`
+	TruncatedFiles            []byte          `json:"truncated_files"`
+	Brief                     *string         `json:"brief"`
+	MemoryEnabled             bool            `json:"memory_enabled"`
+	CrossPRHash               *string         `json:"cross_pr_hash"`
+	LinkedPRRefs              json.RawMessage `json:"linked_pr_refs"`
+	LinkedIssueRefs           json.RawMessage `json:"linked_issue_refs"`
+	TraceID                   *string         `json:"trace_id"`
+	ReviewContract            []byte          `json:"review_contract"`
+	StartedCommentID          *int64          `json:"started_comment_id"`
+	BudgetNote                *string         `json:"budget_note"`
+	AttemptGeneration         int             `json:"attempt_generation"`
+	ReviewPostClaimedAt       *time.Time      `json:"review_post_claimed_at"`
+	ExpectedGithubInlineCount *int            `json:"expected_github_inline_count"`
 }
 
 type ReviewComment struct {
@@ -260,6 +437,39 @@ type ReviewComment struct {
 	State               string    `json:"state"`
 	GraphqlThreadNodeID *string   `json:"graphql_thread_node_id"`
 	ResolvedSHA         *string   `json:"resolved_sha"`
+	AttemptGeneration   int       `json:"attempt_generation"`
+	WasPostedInline     bool      `json:"was_posted_inline"`
+}
+
+type ReviewEvent struct {
+	ID                int64           `json:"id"`
+	ReviewID          uuid.UUID       `json:"review_id"`
+	AttemptGeneration *int            `json:"attempt_generation"`
+	EventType         string          `json:"event_type"`
+	Data              json.RawMessage `json:"data"`
+	CreatedAt         time.Time       `json:"created_at"`
+	SemanticKey       *string         `json:"semantic_key"`
+}
+
+type ReviewMinorNote struct {
+	ID                uuid.UUID `json:"id"`
+	ReviewID          uuid.UUID `json:"review_id"`
+	AttemptGeneration int       `json:"attempt_generation"`
+	FilePath          string    `json:"file_path"`
+	Line              int       `json:"line"`
+	Severity          string    `json:"severity"`
+	Title             string    `json:"title"`
+	CreatedAt         time.Time `json:"created_at"`
+}
+
+type ReviewSignal struct {
+	ID          uuid.UUID  `json:"id"`
+	RepoID      int64      `json:"repo_id"`
+	PRNumber    int        `json:"pr_number"`
+	Kind        string     `json:"kind"`
+	ClaimedAt   time.Time  `json:"claimed_at"`
+	DeliveredAt *time.Time `json:"delivered_at"`
+	CreatedAt   time.Time  `json:"created_at"`
 }
 
 type Rule struct {
@@ -297,7 +507,7 @@ type Scenario struct {
 	LastFix         *string        `json:"last_fix"`
 	LastPrNumber    *int           `json:"last_pr_number"`
 	LastReviewID    *uuid.UUID     `json:"last_review_id"`
-	SupermemoryID   *string        `json:"supermemory_id"`
+	MemoryDocID     *string        `json:"memory_doc_id"`
 }
 
 type ScenarioRun struct {
@@ -333,16 +543,16 @@ type VwMemoryAb struct {
 }
 
 type VwReviewGauge struct {
-	InstallationID       int64          `json:"installation_id"`
-	Category             string         `json:"category"`
-	ChangeClass          interface{}    `json:"change_class"`
-	PostedFindings       int64          `json:"posted_findings"`
-	AddressedHuman       int64          `json:"addressed_human"`
-	AddressedAgent       int64          `json:"addressed_agent"`
-	Dismissed            int64          `json:"dismissed"`
-	Ignored              int64          `json:"ignored"`
-	Deferred             int64          `json:"deferred"`
-	AddressRate          pgtype.Numeric `json:"address_rate"`
-	DismissRate          pgtype.Numeric `json:"dismiss_rate"`
-	MedianSecondsToMerge float64        `json:"median_seconds_to_merge"`
+	InstallationID       int64    `json:"installation_id"`
+	Category             string   `json:"category"`
+	ChangeClass          string   `json:"change_class"`
+	PostedFindings       int64    `json:"posted_findings"`
+	AddressedHuman       int64    `json:"addressed_human"`
+	AddressedAgent       int64    `json:"addressed_agent"`
+	Dismissed            int64    `json:"dismissed"`
+	Ignored              int64    `json:"ignored"`
+	Deferred             int64    `json:"deferred"`
+	AddressRate          *float64 `json:"address_rate"`
+	DismissRate          *float64 `json:"dismiss_rate"`
+	MedianSecondsToMerge *float64 `json:"median_seconds_to_merge"`
 }

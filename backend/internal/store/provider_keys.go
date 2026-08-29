@@ -2,127 +2,255 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/BeLazy167/argus/backend/internal/crypto"
+	"github.com/BeLazy167/argus/backend/internal/store/db"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func (s *Store) UpsertProviderKey(ctx context.Context, installationID int64, repoID *int64, provider, apiKey string, baseURL *string) (*ProviderKey, error) {
-	enc, err := crypto.Encrypt(apiKey)
-	if err != nil {
-		return nil, fmt.Errorf("encrypting api key: %w", err)
-	}
-	hint := ""
-	if len(apiKey) >= 4 {
-		raw := apiKey[len(apiKey)-4:]
-		hint, err = crypto.Encrypt(raw)
+// UpsertProviderKey creates or rotates a provider key. base_url/model use
+// PATCH semantics on conflict: omitting them (nil) PRESERVES the stored values
+// — a key-only rotation must never silently strip a custom endpoint or its
+// declared model (that would flip the row back to platform defaults and
+// fragment the embedding space). To clear them, delete and recreate the row.
+func (s *Store) UpsertProviderKey(ctx context.Context, installationID int64, repoID *int64, provider, apiKey string, baseURL, model *string) (storeResult0 *ProviderKey, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "UpsertProviderKey", "installation_id", storeLogValue(installationID), "repo_id", storeLogValue(repoID), "provider", storeLogValue(provider), "model", storeLogValue(
+			model,
+		))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
+	// Empty apiKey updates endpoint/model metadata without destroying a stored key.
+	enc, hint := "", ""
+	if apiKey != "" {
+		var err error
+		enc, err = crypto.Encrypt(apiKey)
 		if err != nil {
-			return nil, fmt.Errorf("encrypting key hint: %w", err)
+			return nil, fmt.Errorf("encrypting api key: %w", err)
+		}
+		if len(apiKey) >= 4 {
+			hint, err = crypto.Encrypt(apiKey[len(apiKey)-4:])
+			if err != nil {
+				return nil, fmt.Errorf("encrypting key hint: %w", err)
+			}
 		}
 	}
-	var pk ProviderKey
-	// Use appropriate ON CONFLICT target: partial index for org-level (repo_id IS NULL),
-	// composite unique for repo-level keys.
-	var query string
+
 	if repoID == nil {
-		query = `
-			INSERT INTO provider_keys (installation_id, repo_id, provider, api_key_enc, key_hint, base_url)
-			VALUES ($1, $2, $3, $4, $5, $6)
-			ON CONFLICT (installation_id, provider) WHERE repo_id IS NULL DO UPDATE SET
-				api_key_enc = EXCLUDED.api_key_enc,
-				key_hint = EXCLUDED.key_hint,
-				base_url = EXCLUDED.base_url,
-				updated_at = NOW()
-			RETURNING id, installation_id, repo_id, provider, api_key_enc, key_hint, base_url, created_at, updated_at`
-	} else {
-		query = `
-			INSERT INTO provider_keys (installation_id, repo_id, provider, api_key_enc, key_hint, base_url)
-			VALUES ($1, $2, $3, $4, $5, $6)
-			ON CONFLICT (installation_id, repo_id, provider) DO UPDATE SET
-				api_key_enc = EXCLUDED.api_key_enc,
-				key_hint = EXCLUDED.key_hint,
-				base_url = EXCLUDED.base_url,
-				updated_at = NOW()
-			RETURNING id, installation_id, repo_id, provider, api_key_enc, key_hint, base_url, created_at, updated_at`
+		row, err := s.q.UpsertProviderKeyOrgLevel(ctx, db.UpsertProviderKeyOrgLevelParams{InstallationID: installationID, Provider: provider, APIKeyEnc: enc, BaseURL: baseURL, KeyHint: &hint, Model: model})
+		if err != nil {
+			return nil, err
+		}
+		key := providerKeyFromValues(row.ID, row.InstallationID, row.RepoID, row.Provider, row.APIKeyEnc, row.BaseURL, row.Model, row.KeyHint, row.CreatedAt, row.UpdatedAt)
+		return &key, nil
 	}
-	err = s.Pool.QueryRow(ctx, query, installationID, repoID, provider, enc, hint, baseURL).Scan(
-		&pk.ID, &pk.InstallationID, &pk.RepoID, &pk.Provider, &pk.APIKeyEnc, &pk.KeyHint, &pk.BaseURL, &pk.CreatedAt, &pk.UpdatedAt)
+	row, err := s.q.UpsertProviderKeyRepoLevel(ctx, db.UpsertProviderKeyRepoLevelParams{InstallationID: installationID, RepoID: repoID, Provider: provider, APIKeyEnc: enc, BaseURL: baseURL, KeyHint: &hint, Model: model})
 	if err != nil {
 		return nil, err
 	}
-	return &pk, nil
+	key := providerKeyFromValues(row.ID, row.InstallationID, row.RepoID, row.Provider, row.APIKeyEnc, row.BaseURL, row.Model, row.KeyHint, row.CreatedAt, row.UpdatedAt)
+	return &key, nil
 }
 
-func (s *Store) ListProviderKeys(ctx context.Context, installationID int64) ([]ProviderKey, error) {
-	rows, err := s.Pool.Query(ctx, `
-		SELECT id, installation_id, repo_id, provider, api_key_enc, key_hint, base_url, created_at, updated_at
-		FROM provider_keys WHERE installation_id = $1 ORDER BY provider, repo_id NULLS FIRST
-	`, installationID)
+func (s *Store) ListProviderKeys(ctx context.Context, installationID int64) (storeResult0 []ProviderKey, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ListProviderKeys", "installation_id", storeLogValue(installationID))
+	defer func() {
+		if recovered :=
+			recover(); recovered != nil {
+			storeFinishPanic(storeFinish,
+				recovered,
+
+				storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
+	rows, err := s.q.ListProviderKeys(ctx, installationID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectOrEmpty(rows, pgx.RowToStructByPos[ProviderKey])
+	keys := make([]ProviderKey, 0, len(rows))
+	for _, row := range rows {
+		keys = append(keys, providerKeyFromValues(row.ID, row.InstallationID, row.RepoID, row.Provider, row.APIKeyEnc, row.BaseURL, row.Model, row.KeyHint, row.CreatedAt, row.UpdatedAt))
+	}
+	return keys, nil
 }
 
-func (s *Store) DeleteProviderKey(ctx context.Context, id int64, installationID int64) error {
-	ct, err := s.Pool.Exec(ctx, `DELETE FROM provider_keys WHERE id = $1 AND installation_id = $2`, id, installationID)
+func (s *Store) DeleteProviderKey(ctx context.Context, id int64, installationID int64) (storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "DeleteProviderKey", "id", storeLogValue(id), "installation_id",
+			storeLogValue(installationID))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered)
+			panic(recovered)
+		}
+		storeFinish(storeErr)
+	}()
+
+	_, err := s.DeleteProviderKeyReturningProvider(ctx, id, installationID)
+	return err
+}
+
+// DeleteProviderKeyReturningProvider atomically deletes a tenant-scoped key and
+// returns its provider slot so callers can trigger provider-specific cleanup.
+func (s *Store) DeleteProviderKeyReturningProvider(ctx context.Context, id int64, installationID int64) (storeResult0 string, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "DeleteProviderKeyReturningProvider", "id", storeLogValue(id), "installation_id", storeLogValue(installationID))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
+	provider, err := s.q.DeleteProviderKey(ctx, db.DeleteProviderKeyParams{ID: id, InstallationID: installationID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", fmt.Errorf("provider key %d not found", id)
+	}
 	if err != nil {
-		return err
+		return "", err
 	}
-	if ct.RowsAffected() == 0 {
-		return fmt.Errorf("provider key %d not found", id)
-	}
-	return nil
+	return provider, nil
 }
 
 // ResolveAPIKey resolves an API key for a provider: repo-level → org-level → env fallback.
 // Returns decrypted apiKey, baseURL, and whether a DB key was found.
 func (s *Store) ResolveAPIKey(ctx context.Context, installationID int64, repoID *int64, provider string) (apiKey string, baseURL string, found bool, err error) {
-	// Try repo-level first
+	storeFinish :=
+		beginStoreOperation(ctx, "ResolveAPIKey", "installation_id", storeLogValue(installationID), "repo_id", storeLogValue(repoID),
+			"provider", storeLogValue(provider))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish, recovered,
+				baseURL, found)
+			panic(recovered)
+		}
+		storeFinish(err, baseURL,
+			found)
+	}()
+
+	var enc string
+	var configuredBaseURL *string
+	resolved := false
 	if repoID != nil {
-		var pk ProviderKey
-		err = s.Pool.QueryRow(ctx, `
-			SELECT api_key_enc, base_url FROM provider_keys
-			WHERE installation_id = $1 AND repo_id = $2 AND provider = $3
-		`, installationID, *repoID, provider).Scan(&pk.APIKeyEnc, &pk.BaseURL)
-		if err == nil {
-			decrypted, dErr := crypto.Decrypt(pk.APIKeyEnc)
-			if dErr != nil {
-				return "", "", false, fmt.Errorf("decrypting key: %w", dErr)
-			}
-			bu := ""
-			if pk.BaseURL != nil {
-				bu = *pk.BaseURL
-			}
-			return decrypted, bu, true, nil
-		}
-		if err != pgx.ErrNoRows {
-			return "", "", false, err
+		row, rowErr := s.q.ResolveAPIKeyRepoLevel(ctx, db.ResolveAPIKeyRepoLevelParams{InstallationID: installationID, RepoID: repoID, Provider: provider})
+		if rowErr == nil {
+			enc, configuredBaseURL = row.APIKeyEnc, row.BaseURL
+			resolved = true
+		} else if !errors.Is(rowErr, pgx.ErrNoRows) {
+			return "", "", false, rowErr
 		}
 	}
+	if !resolved {
+		row, rowErr := s.q.ResolveAPIKeyOrgLevel(ctx, db.ResolveAPIKeyOrgLevelParams{InstallationID: installationID, Provider: provider})
+		if errors.Is(rowErr, pgx.ErrNoRows) {
+			return "", "", false, nil
+		}
+		if rowErr != nil {
+			return "", "", false, rowErr
+		}
+		enc, configuredBaseURL = row.APIKeyEnc, row.BaseURL
+	}
+	decrypted, err := crypto.Decrypt(enc)
+	if err != nil {
+		return "", "", false, fmt.Errorf("decrypting key: %w", err)
+	}
+	if configuredBaseURL != nil {
+		baseURL = *configuredBaseURL
+	}
+	return decrypted, baseURL, true, nil
+}
 
-	// Try org-level (repo_id IS NULL)
-	var pk ProviderKey
-	err = s.Pool.QueryRow(ctx, `
-		SELECT api_key_enc, base_url FROM provider_keys
-		WHERE installation_id = $1 AND repo_id IS NULL AND provider = $2
-	`, installationID, provider).Scan(&pk.APIKeyEnc, &pk.BaseURL)
-	if err == nil {
-		decrypted, dErr := crypto.Decrypt(pk.APIKeyEnc)
+// ResolveEmbeddingsKey resolves the installation-wide "embeddings" BYOK slot.
+// Embeddings are deliberately NOT repo-scoped: an installation has exactly one
+// embedding space (memories.embedding_model + the similarity floors are
+// calibrated per space), so per-repo keys would fragment retrieval. The API
+// rejects repo-scoped embeddings rows; this reads only the org-level row.
+// model is "" when the row leaves it NULL (caller applies the platform model).
+type embeddingKeyQuerier interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func resolveEmbeddingsKey(ctx context.Context, q embeddingKeyQuerier, installationID int64) (apiKey, baseURL, model string, found bool, err error) {
+	var enc string
+	var bu, m *string
+	err = q.QueryRow(ctx, `
+		SELECT api_key_enc, base_url, model FROM provider_keys
+		WHERE installation_id = $1 AND repo_id IS NULL AND provider = 'embeddings'
+	`, installationID).Scan(&enc, &bu, &m)
+	if err == pgx.ErrNoRows {
+		return "", "", "", false, nil
+	}
+	if err != nil {
+		return "", "", "", false, err
+	}
+	decrypted := ""
+	if enc != "" {
+		var dErr error
+		decrypted, dErr = crypto.Decrypt(enc)
 		if dErr != nil {
-			return "", "", false, fmt.Errorf("decrypting key: %w", dErr)
+			return "", "", "", false, fmt.Errorf("decrypting embeddings key: %w", dErr)
 		}
-		bu := ""
-		if pk.BaseURL != nil {
-			bu = *pk.BaseURL
-		}
-		return decrypted, bu, true, nil
 	}
-	if err != pgx.ErrNoRows {
-		return "", "", false, err
+	if bu != nil {
+		baseURL = *bu
 	}
+	if m != nil {
+		model = *m
+	}
+	return decrypted, baseURL, model, true, nil
+}
 
-	return "", "", false, nil
+func (s *Store) ResolveEmbeddingsKey(ctx context.Context, installationID int64) (apiKey, baseURL, model string, found bool, err error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ResolveEmbeddingsKey", "installation_id", storeLogValue(installationID))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish,
+
+				recovered, baseURL, model, found)
+			panic(recovered)
+		}
+		storeFinish(err, baseURL, model, found)
+	}()
+
+	return resolveEmbeddingsKey(ctx, s.Pool, installationID)
+}
+
+// ResolveEmbeddingsKeyFromConn is the connection-bound form used by memory
+// writers while they hold the tenant embedding-space advisory lock. Reading
+// the encrypted provider row and writing the resulting vector on the same
+// locked connection prevents a completed repair from being followed by a
+// stale, previously captured indexer write.
+func (s *Store) ResolveEmbeddingsKeyFromConn(ctx context.Context, conn *pgxpool.Conn, installationID int64) (apiKey, baseURL, model string, found bool, err error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "ResolveEmbeddingsKeyFromConn", "installation_id",
+			storeLogValue(installationID))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish,
+
+				recovered, baseURL, model, found)
+			panic(recovered)
+		}
+		storeFinish(err, baseURL, model, found)
+	}()
+
+	return resolveEmbeddingsKey(ctx, conn, installationID)
 }

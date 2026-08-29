@@ -17,7 +17,7 @@ SELECT
     COALESCE(SUM(github_api_calls), 0)::int     AS api_calls_total
 FROM auto_resolve_events
 WHERE installation_id = ANY(@installation_ids::bigint[])
-  AND created_at >= NOW() - @period::interval;
+  AND created_at >= NOW() - sqlc.arg(period)::text::interval;
 
 -- name: GetLearnLayerCounts :one
 -- Counts new rows across the learn-layer tables for an installation in a
@@ -29,18 +29,18 @@ SELECT
     COALESCE((
         SELECT COUNT(*) FROM patterns p
         WHERE p.installation_id = ANY(@installation_ids::bigint[])
-          AND p.created_at >= NOW() - @period::interval
+          AND p.created_at >= NOW() - sqlc.arg(period)::text::interval
     ), 0)::int AS patterns_learned,
     COALESCE((
         SELECT COUNT(*) FROM scenarios s
         WHERE s.installation_id = ANY(@installation_ids::bigint[])
-          AND s.created_at >= NOW() - @period::interval
+          AND s.created_at >= NOW() - sqlc.arg(period)::text::interval
     ), 0)::int AS scenarios_stored,
     COALESCE((
         SELECT COUNT(*) FROM decision_traces dt
         JOIN repos r ON dt.repo_id = r.id
         WHERE r.installation_id = ANY(@installation_ids::bigint[])
-          AND dt.created_at >= NOW() - @period::interval
+          AND dt.created_at >= NOW() - sqlc.arg(period)::text::interval
     ), 0)::int AS decision_traces,
     COALESCE((
         SELECT COUNT(*) FROM comment_outcomes co
@@ -48,5 +48,12 @@ SELECT
         JOIN reviews rv ON rc.review_id = rv.id
         JOIN repos r ON rv.repo_id = r.id
         WHERE r.installation_id = ANY(@installation_ids::bigint[])
-          AND co.created_at >= NOW() - @period::interval
+          AND rc.attempt_generation = rv.attempt_generation
+          AND co.created_at >= NOW() - sqlc.arg(period)::text::interval
     ), 0)::int AS feedback_indexed;
+
+-- name: ListPRAutoResolveEvents :many
+SELECT source_sha, resolved_count, attempted_count, created_at
+FROM auto_resolve_events
+WHERE repo_id = $1 AND pr_number = $2 AND resolved_count > 0
+ORDER BY created_at ASC;

@@ -12,13 +12,17 @@ import (
 	"github.com/google/uuid"
 )
 
-const createReviewComment = `-- name: CreateReviewComment :exec
-INSERT INTO review_comments (review_id, file_path, start_line, end_line, side, body, severity, category, specialist, confidence_score, code_snippet, github_comment_id, matched_pattern_id, matched_pattern_score, enforced_rule_content, is_new_finding)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+const createReviewComment = `-- name: CreateReviewComment :execrows
+INSERT INTO review_comments (review_id, attempt_generation, file_path, start_line, end_line, side, body, severity, category, specialist, confidence_score, code_snippet, github_comment_id, matched_pattern_id, matched_pattern_score, enforced_rule_content, is_new_finding, suppressed_reason, state, was_posted_inline)
+SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
+WHERE EXISTS (
+  SELECT 1 FROM reviews WHERE id = $1 AND attempt_generation = $2
+)
 `
 
 type CreateReviewCommentParams struct {
 	ReviewID            uuid.UUID `json:"review_id"`
+	AttemptGeneration   int       `json:"attempt_generation"`
 	FilePath            string    `json:"file_path"`
 	StartLine           *int      `json:"start_line"`
 	EndLine             *int      `json:"end_line"`
@@ -34,11 +38,15 @@ type CreateReviewCommentParams struct {
 	MatchedPatternScore *float32  `json:"matched_pattern_score"`
 	EnforcedRuleContent *string   `json:"enforced_rule_content"`
 	IsNewFinding        *bool     `json:"is_new_finding"`
+	SuppressedReason    *string   `json:"suppressed_reason"`
+	State               string    `json:"state"`
+	WasPostedInline     bool      `json:"was_posted_inline"`
 }
 
-func (q *Queries) CreateReviewComment(ctx context.Context, arg CreateReviewCommentParams) error {
-	_, err := q.db.Exec(ctx, createReviewComment,
+func (q *Queries) CreateReviewComment(ctx context.Context, arg CreateReviewCommentParams) (int64, error) {
+	result, err := q.db.Exec(ctx, createReviewComment,
 		arg.ReviewID,
+		arg.AttemptGeneration,
 		arg.FilePath,
 		arg.StartLine,
 		arg.EndLine,
@@ -54,16 +62,25 @@ func (q *Queries) CreateReviewComment(ctx context.Context, arg CreateReviewComme
 		arg.MatchedPatternScore,
 		arg.EnforcedRuleContent,
 		arg.IsNewFinding,
+		arg.SuppressedReason,
+		arg.State,
+		arg.WasPostedInline,
 	)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const getCommentByGithubID = `-- name: GetCommentByGithubID :one
-SELECT id, review_id, file_path, start_line, end_line, side, body, severity, category,
-       specialist, confidence_score, code_snippet, github_comment_id,
-       matched_pattern_id, matched_pattern_score, enforced_rule_content, is_new_finding,
-       created_at
-FROM review_comments WHERE github_comment_id = $1
+SELECT rc.id, rc.review_id, rc.file_path, rc.start_line, rc.end_line, rc.side, rc.body, rc.severity, rc.category,
+       rc.specialist, rc.confidence_score, rc.code_snippet, rc.github_comment_id,
+       rc.matched_pattern_id, rc.matched_pattern_score, rc.enforced_rule_content, rc.is_new_finding,
+       rc.created_at, rc.state, rc.suppressed_reason, rc.resolved_sha, rc.attempt_generation
+FROM review_comments rc
+JOIN reviews r ON r.id = rc.review_id
+WHERE rc.github_comment_id = $1
+  AND rc.attempt_generation = r.attempt_generation
 `
 
 type GetCommentByGithubIDRow struct {
@@ -85,6 +102,10 @@ type GetCommentByGithubIDRow struct {
 	EnforcedRuleContent *string   `json:"enforced_rule_content"`
 	IsNewFinding        *bool     `json:"is_new_finding"`
 	CreatedAt           time.Time `json:"created_at"`
+	State               string    `json:"state"`
+	SuppressedReason    *string   `json:"suppressed_reason"`
+	ResolvedSHA         *string   `json:"resolved_sha"`
+	AttemptGeneration   int       `json:"attempt_generation"`
 }
 
 func (q *Queries) GetCommentByGithubID(ctx context.Context, githubCommentID *int64) (GetCommentByGithubIDRow, error) {
@@ -109,6 +130,10 @@ func (q *Queries) GetCommentByGithubID(ctx context.Context, githubCommentID *int
 		&i.EnforcedRuleContent,
 		&i.IsNewFinding,
 		&i.CreatedAt,
+		&i.State,
+		&i.SuppressedReason,
+		&i.ResolvedSHA,
+		&i.AttemptGeneration,
 	)
 	return i, err
 }
@@ -150,12 +175,100 @@ func (q *Queries) GetCommentOutcomes(ctx context.Context, reviewCommentID uuid.U
 	return items, nil
 }
 
+const getPRCompletedReviewComments = `-- name: GetPRCompletedReviewComments :many
+SELECT rc.id, rc.review_id, rc.file_path, rc.start_line, rc.end_line, rc.side, rc.body, rc.severity, rc.category,
+       rc.specialist, rc.confidence_score, rc.code_snippet, rc.github_comment_id,
+       rc.matched_pattern_id, rc.matched_pattern_score, rc.enforced_rule_content, rc.is_new_finding,
+       rc.created_at, rc.state, rc.suppressed_reason, rc.resolved_sha, rc.attempt_generation
+FROM review_comments rc
+JOIN reviews r ON rc.review_id = r.id
+WHERE r.repo_id = $1 AND r.pr_number = $2 AND r.status = 'completed'
+  AND rc.attempt_generation = r.attempt_generation
+ORDER BY rc.file_path, rc.start_line, rc.created_at
+`
+
+type GetPRCompletedReviewCommentsParams struct {
+	RepoID   int64 `json:"repo_id"`
+	PRNumber int   `json:"pr_number"`
+}
+
+type GetPRCompletedReviewCommentsRow struct {
+	ID                  uuid.UUID `json:"id"`
+	ReviewID            uuid.UUID `json:"review_id"`
+	FilePath            string    `json:"file_path"`
+	StartLine           *int      `json:"start_line"`
+	EndLine             *int      `json:"end_line"`
+	Side                *string   `json:"side"`
+	Body                string    `json:"body"`
+	Severity            *string   `json:"severity"`
+	Category            *string   `json:"category"`
+	Specialist          *string   `json:"specialist"`
+	ConfidenceScore     *int      `json:"confidence_score"`
+	CodeSnippet         *string   `json:"code_snippet"`
+	GithubCommentID     *int64    `json:"github_comment_id"`
+	MatchedPatternID    *int64    `json:"matched_pattern_id"`
+	MatchedPatternScore *float32  `json:"matched_pattern_score"`
+	EnforcedRuleContent *string   `json:"enforced_rule_content"`
+	IsNewFinding        *bool     `json:"is_new_finding"`
+	CreatedAt           time.Time `json:"created_at"`
+	State               string    `json:"state"`
+	SuppressedReason    *string   `json:"suppressed_reason"`
+	ResolvedSHA         *string   `json:"resolved_sha"`
+	AttemptGeneration   int       `json:"attempt_generation"`
+}
+
+func (q *Queries) GetPRCompletedReviewComments(ctx context.Context, arg GetPRCompletedReviewCommentsParams) ([]GetPRCompletedReviewCommentsRow, error) {
+	rows, err := q.db.Query(ctx, getPRCompletedReviewComments, arg.RepoID, arg.PRNumber)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GetPRCompletedReviewCommentsRow
+	for rows.Next() {
+		var i GetPRCompletedReviewCommentsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ReviewID,
+			&i.FilePath,
+			&i.StartLine,
+			&i.EndLine,
+			&i.Side,
+			&i.Body,
+			&i.Severity,
+			&i.Category,
+			&i.Specialist,
+			&i.ConfidenceScore,
+			&i.CodeSnippet,
+			&i.GithubCommentID,
+			&i.MatchedPatternID,
+			&i.MatchedPatternScore,
+			&i.EnforcedRuleContent,
+			&i.IsNewFinding,
+			&i.CreatedAt,
+			&i.State,
+			&i.SuppressedReason,
+			&i.ResolvedSHA,
+			&i.AttemptGeneration,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getReviewComments = `-- name: GetReviewComments :many
 SELECT id, review_id, file_path, start_line, end_line, side, body, severity, category,
        specialist, confidence_score, code_snippet, github_comment_id,
        matched_pattern_id, matched_pattern_score, enforced_rule_content, is_new_finding,
-       created_at
-FROM review_comments WHERE review_id = $1 ORDER BY file_path, start_line
+       created_at, state, suppressed_reason, resolved_sha, attempt_generation
+FROM review_comments
+WHERE review_id = $1
+  AND attempt_generation = (SELECT attempt_generation FROM reviews WHERE id = $1)
+ORDER BY file_path, start_line
 `
 
 type GetReviewCommentsRow struct {
@@ -177,6 +290,10 @@ type GetReviewCommentsRow struct {
 	EnforcedRuleContent *string   `json:"enforced_rule_content"`
 	IsNewFinding        *bool     `json:"is_new_finding"`
 	CreatedAt           time.Time `json:"created_at"`
+	State               string    `json:"state"`
+	SuppressedReason    *string   `json:"suppressed_reason"`
+	ResolvedSHA         *string   `json:"resolved_sha"`
+	AttemptGeneration   int       `json:"attempt_generation"`
 }
 
 func (q *Queries) GetReviewComments(ctx context.Context, reviewID uuid.UUID) ([]GetReviewCommentsRow, error) {
@@ -207,6 +324,10 @@ func (q *Queries) GetReviewComments(ctx context.Context, reviewID uuid.UUID) ([]
 			&i.EnforcedRuleContent,
 			&i.IsNewFinding,
 			&i.CreatedAt,
+			&i.State,
+			&i.SuppressedReason,
+			&i.ResolvedSHA,
+			&i.AttemptGeneration,
 		); err != nil {
 			return nil, err
 		}
@@ -219,8 +340,10 @@ func (q *Queries) GetReviewComments(ctx context.Context, reviewID uuid.UUID) ([]
 }
 
 const getThreadLinkForComment = `-- name: GetThreadLinkForComment :one
-SELECT id, review_id, file_path, end_line, github_comment_id, graphql_thread_node_id
-FROM review_comments WHERE id = $1
+SELECT rc.id, rc.review_id, rc.file_path, rc.end_line, rc.github_comment_id, rc.graphql_thread_node_id
+FROM review_comments rc
+JOIN reviews r ON r.id = rc.review_id
+WHERE rc.id = $1 AND rc.attempt_generation = r.attempt_generation
 `
 
 type GetThreadLinkForCommentRow struct {
@@ -253,6 +376,7 @@ const hydrateThreadNodeID = `-- name: HydrateThreadNodeID :execrows
 UPDATE review_comments
 SET graphql_thread_node_id = $1
 WHERE review_id = $2 AND github_comment_id = $3 AND graphql_thread_node_id IS NULL
+  AND attempt_generation = (SELECT attempt_generation FROM reviews WHERE id = $2)
 `
 
 type HydrateThreadNodeIDParams struct {
@@ -274,11 +398,69 @@ func (q *Queries) HydrateThreadNodeID(ctx context.Context, arg HydrateThreadNode
 	return result.RowsAffected(), nil
 }
 
+const listPostedFindings = `-- name: ListPostedFindings :many
+SELECT rc.id, rc.file_path, COALESCE(rc.end_line, rc.start_line, 0)::int AS line,
+       rc.created_at AS posted_at, rv.head_sha
+FROM review_comments rc
+JOIN reviews rv ON rv.id = rc.review_id
+WHERE rv.repo_id = $1 AND rv.pr_number = $2 AND rv.status = 'completed'
+  AND rc.attempt_generation = rv.attempt_generation
+  AND rc.suppressed_reason IS NULL
+  AND rc.github_comment_id IS NOT NULL
+  AND NOT EXISTS (
+      SELECT 1 FROM comment_outcomes co
+      WHERE co.review_comment_id = rc.id
+        AND co.outcome IN ('addressed_human','addressed_agent','ignored','deferred')
+  )
+ORDER BY rc.created_at
+`
+
+type ListPostedFindingsParams struct {
+	RepoID   int64 `json:"repo_id"`
+	PRNumber int   `json:"pr_number"`
+}
+
+type ListPostedFindingsRow struct {
+	ID       uuid.UUID `json:"id"`
+	FilePath string    `json:"file_path"`
+	Line     int       `json:"line"`
+	PostedAt time.Time `json:"posted_at"`
+	HeadSHA  string    `json:"head_sha"`
+}
+
+func (q *Queries) ListPostedFindings(ctx context.Context, arg ListPostedFindingsParams) ([]ListPostedFindingsRow, error) {
+	rows, err := q.db.Query(ctx, listPostedFindings, arg.RepoID, arg.PRNumber)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListPostedFindingsRow
+	for rows.Next() {
+		var i ListPostedFindingsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.FilePath,
+			&i.Line,
+			&i.PostedAt,
+			&i.HeadSHA,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listThreadLinksForReview = `-- name: ListThreadLinksForReview :many
-SELECT id, review_id, file_path, end_line, github_comment_id, graphql_thread_node_id
-FROM review_comments
-WHERE review_id = $1 AND graphql_thread_node_id IS NOT NULL
-ORDER BY file_path, end_line
+SELECT rc.id, rc.review_id, rc.file_path, rc.end_line, rc.github_comment_id, rc.graphql_thread_node_id
+FROM review_comments rc
+JOIN reviews r ON r.id = rc.review_id
+WHERE rc.review_id = $1 AND rc.attempt_generation = r.attempt_generation
+  AND rc.graphql_thread_node_id IS NOT NULL
+ORDER BY rc.file_path, rc.end_line
 `
 
 type ListThreadLinksForReviewRow struct {
@@ -320,21 +502,27 @@ func (q *Queries) ListThreadLinksForReview(ctx context.Context, reviewID uuid.UU
 	return items, nil
 }
 
-const recordCommentOutcome = `-- name: RecordCommentOutcome :exec
+const recordCommentOutcome = `-- name: RecordCommentOutcome :execrows
 INSERT INTO comment_outcomes (review_comment_id, outcome)
-VALUES ($1, $2)
+SELECT rc.id, $1
+FROM review_comments rc
+JOIN reviews r ON r.id = rc.review_id
+WHERE rc.id = $2 AND rc.attempt_generation = r.attempt_generation
 ON CONFLICT (review_comment_id, outcome) DO NOTHING
 `
 
 type RecordCommentOutcomeParams struct {
-	ReviewCommentID uuid.UUID `json:"review_comment_id"`
 	Outcome         string    `json:"outcome"`
+	ReviewCommentID uuid.UUID `json:"review_comment_id"`
 }
 
 // Idempotent: webhook retries delivering the same reaction event produce no-op
 // second inserts instead of duplicate rows. Paired with the UNIQUE constraint
 // added in migration 037.
-func (q *Queries) RecordCommentOutcome(ctx context.Context, arg RecordCommentOutcomeParams) error {
-	_, err := q.db.Exec(ctx, recordCommentOutcome, arg.ReviewCommentID, arg.Outcome)
-	return err
+func (q *Queries) RecordCommentOutcome(ctx context.Context, arg RecordCommentOutcomeParams) (int64, error) {
+	result, err := q.db.Exec(ctx, recordCommentOutcome, arg.Outcome, arg.ReviewCommentID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

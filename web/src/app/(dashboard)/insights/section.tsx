@@ -7,7 +7,6 @@ import {
 	usePagination,
 	useSearchParamState,
 } from "@/components/dashboard/pagination";
-import { ProGate } from "@/components/dashboard/pro-gate";
 import { useActiveRepo } from "@/lib/hooks/use-active-repo";
 import { useRepoRisk, useTraces } from "@/lib/queries/insights";
 import { formatDistanceToNow } from "@/lib/time";
@@ -59,7 +58,7 @@ export function InsightsSection() {
 	} = usePagination(traces ?? [], undefined, "tracePage");
 
 	return (
-		<ProGate feature="Insights & risk analysis">
+		<>
 			{/* File search */}
 			<div className="mb-6">
 				<div className="relative">
@@ -68,6 +67,7 @@ export function InsightsSection() {
 						type="text"
 						value={fileFilter}
 						onChange={(e) => setFileFilter(e.target.value)}
+						aria-label="Filter by file path"
 						placeholder="Filter by file path…"
 						className="w-full border border-iron bg-charcoal pl-9 pr-4 py-2.5 text-xs font-mono text-foreground placeholder:text-slate-text/50 focus:outline-none focus:border-amber/50 transition-colors"
 					/>
@@ -264,6 +264,6 @@ export function InsightsSection() {
 					</div>
 				</div>
 			)}
-		</ProGate>
+		</>
 	);
 }

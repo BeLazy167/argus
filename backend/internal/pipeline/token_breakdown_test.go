@@ -11,11 +11,11 @@ import (
 // stage labels rather than exact string layout.
 func TestRenderTokenBreakdown(t *testing.T) {
 	tests := []struct {
-		name        string
-		tu          *RunTokenUsage
-		wantEmpty   bool
-		wantLabels  []string // rows that must be present
-		wantAbsent  []string // rows that must NOT be present
+		name       string
+		tu         *RunTokenUsage
+		wantEmpty  bool
+		wantLabels []string // rows that must be present
+		wantAbsent []string // rows that must NOT be present
 	}{
 		{
 			name:      "nil usage",
@@ -44,7 +44,7 @@ func TestRenderTokenBreakdown(t *testing.T) {
 			wantAbsent: []string{"Review · review", "Review · correctness", "Review · security"},
 		},
 		{
-			name: "deep review with 4 specialists — each shown separately",
+			name: "deep review with 4 specialists — grouped into one row",
 			tu: &RunTokenUsage{
 				Total: StageTokens{TotalTokens: 10_000, Cost: 0.25},
 				Review: []StageTokens{
@@ -54,13 +54,8 @@ func TestRenderTokenBreakdown(t *testing.T) {
 					{TotalTokens: 2500, Cost: 0.06, File: "a.go", Specialist: "regression"},
 				},
 			},
-			wantLabels: []string{
-				"Review · correctness",
-				"Review · security",
-				"Review · architecture",
-				"Review · regression",
-			},
-			wantAbsent: []string{"Review · review"},
+			wantLabels: []string{"Review specialists (4)"},
+			wantAbsent: []string{"Review · correctness", "Review · security", "Review · architecture", "Review · regression"},
 		},
 		{
 			name: "specialists aggregate across multiple files",
@@ -71,7 +66,7 @@ func TestRenderTokenBreakdown(t *testing.T) {
 					{TotalTokens: 3000, Cost: 0.075, File: "b.go", Specialist: "security"},
 				},
 			},
-			wantLabels: []string{"Review · security"},
+			wantLabels: []string{"Review specialists (2)"},
 			// aggregate: 4000 tokens, $0.1000 — check that the row renders
 			// with the summed numbers (4.0k)
 			// (We don't assert exact formatting; absence of '1000' and '3000'
@@ -86,7 +81,7 @@ func TestRenderTokenBreakdown(t *testing.T) {
 					{TotalTokens: 500, Cost: 0.01, File: "a.go", Specialist: "newthing"},
 				},
 			},
-			wantLabels: []string{"Review · newthing"},
+			wantLabels: []string{"Review specialists (1)"},
 		},
 		{
 			name: "zero-token stage is omitted",
@@ -115,7 +110,16 @@ func TestRenderTokenBreakdown(t *testing.T) {
 				Total:  StageTokens{TotalTokens: 1_234_567, Cost: 12.3456},
 				Triage: StageTokens{TotalTokens: 1_234_567, Cost: 12.3456},
 			},
-			wantLabels: []string{"1.2M tokens", "$12.3456 total"},
+			wantLabels: []string{"usage: 1.2M tokens", "$12.3456"},
+		},
+		{
+			name: "zero total cost omits the cost column",
+			tu: &RunTokenUsage{
+				Total:  StageTokens{TotalTokens: 270_700},
+				Triage: StageTokens{TotalTokens: 270_700, Model: "openai/luna"},
+			},
+			wantLabels: []string{"usage: 270.7k tokens · 1 stages", "| Stage | Model | Tokens |"},
+			wantAbsent: []string{"| Cost |", "$0.0000"},
 		},
 	}
 

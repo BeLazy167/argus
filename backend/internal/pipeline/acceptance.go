@@ -50,17 +50,36 @@ func loadFeatureFlags(ctx context.Context, st featureFlagReader, installationDBI
 		slog.Debug("feature flag load failed, using defaults", "error", err, "install_id", installationDBID)
 		return defaults
 	}
-	var flags FeatureFlags
-	if len(raw) == 0 || string(raw) == "{}" {
-		return defaults
+	// Pointer fields so an ABSENT key keeps its default while an explicitly
+	// stored false is preserved (migration 039 depends on that distinction).
+	//
+	// Decoding into FeatureFlags directly cannot tell those apart: a blob that
+	// omits the bools leaves them at Go's zero value — silently OFF. That was
+	// unreachable while feature_flags was either empty/"{}" or written by
+	// setFeatureFlags, which always emits all three keys. The column now also
+	// carries operator-written keys, so a blob like `{"some_flag":"x"}` is
+	// non-empty and not "{}": it would turn cross-PR checks and issue
+	// acceptance off for every subsequent review of that installation. The settings API reads the same column via parseFeatureFlags,
+	// which already defaults by pointer, so it would keep rendering both
+	// toggles ON and nothing would reveal the divergence.
+	var partial struct {
+		CrossPRChecks   *bool `json:"cross_pr_checks"`
+		IssueAcceptance *bool `json:"issue_acceptance"`
+		MaxLinkedPRs    *int  `json:"max_linked_prs"`
 	}
-	if err := json.Unmarshal(raw, &flags); err != nil {
+	if err := json.Unmarshal(raw, &partial); err != nil {
 		slog.Warn("feature flag unmarshal failed, using defaults", "error", err, "install_id", installationDBID)
 		return defaults
 	}
-	// Fill missing fields from defaults.
-	if flags.MaxLinkedPRs <= 0 {
-		flags.MaxLinkedPRs = defaults.MaxLinkedPRs
+	flags := defaults
+	if partial.CrossPRChecks != nil {
+		flags.CrossPRChecks = *partial.CrossPRChecks
+	}
+	if partial.IssueAcceptance != nil {
+		flags.IssueAcceptance = *partial.IssueAcceptance
+	}
+	if partial.MaxLinkedPRs != nil && *partial.MaxLinkedPRs > 0 {
+		flags.MaxLinkedPRs = *partial.MaxLinkedPRs
 	}
 	return flags
 }
@@ -113,6 +132,10 @@ var bulletRe = regexp.MustCompile(`(?m)^[\s]*[-*]\s+(?:\[[ xX]\]\s+)?(.+)$`)
 // Non-fatal: logs Warn and returns on any error. The caller wires this into
 // validateStage inside a goroutine with the standard defer-recover panic guard.
 func (o *Orchestrator) runIssueAcceptanceWorker(ctx context.Context, run *PipelineRun) {
+	opID, started := pipelineOperationStart(ctx, o.logger, "issue_acceptance_stage", "fetch judgeable linked issues, evaluate every explicit criterion against the changed code, and roll up issue-level acceptance verdicts", run)
+	defer func() {
+		pipelineOperationResult(ctx, o.logger, opID, "issue_acceptance_stage", "completed", started, run.IssueAcceptance, "issue_count", len(run.IssueAcceptance))
+	}()
 	if !run.FeatureFlags.IssueAcceptance {
 		o.logger.Info("[validate] issue acceptance skipped — disabled by feature flag", "pr", run.PREvent.PRNumber)
 		return
@@ -280,7 +303,7 @@ func judgeIssue(
 				rejected++
 			}
 		}
-		run.EventBus.Publish(run.ReviewID, EventAcceptanceChecked, map[string]any{
+		run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventAcceptanceChecked, map[string]any{
 			"issue":    link.Number,
 			"accepted": accepted,
 			"rejected": rejected,
@@ -431,6 +454,12 @@ func rollupVerdict(criteria []AcceptanceCriterion) AcceptanceStatus {
 
 // formatIssueCoverageSection builds the Markdown block inserted into the
 // synthesis summary when run.IssueAcceptance is non-empty.
+//
+// Title, criterion text and reason all quote a linked issue, which anyone can
+// open. They go through safeMarkdownField, not util.Truncate: truncation keeps
+// newlines, so "Fix parser\n## Verdict: approved" would forge a heading inside
+// Argus's own comment. Same defect and same treatment as
+// formatJointAcceptanceSection — the two render into the same comment.
 func formatIssueCoverageSection(results []AcceptanceResult) string {
 	if len(results) == 0 {
 		return ""
@@ -447,15 +476,15 @@ func formatIssueCoverageSection(results []AcceptanceResult) string {
 		icon := verdictIcon(string(r.Verdict))
 		sb.WriteString(fmt.Sprintf("- **[#%d](%s)** — *%s* — %s %s (%d/%d)\n",
 			r.IssueNumber, r.IssueURL,
-			util.Truncate(r.IssueTitle, 80, true),
+			safeMarkdownField(r.IssueTitle, 80),
 			icon, r.Verdict, addressed, len(r.Criteria)))
 		for _, c := range r.Criteria {
 			sb.WriteString(fmt.Sprintf("  - %s %s",
 				verdictIcon(string(c.Status)),
-				util.Truncate(c.Text, 200, true)))
+				safeMarkdownField(c.Text, 200)))
 			if c.Status != AcceptanceStatusAddressed && c.Reason != "" {
 				sb.WriteString(fmt.Sprintf(" — _%s_",
-					util.Truncate(c.Reason, 200, true)))
+					safeMarkdownField(c.Reason, 200)))
 			}
 			sb.WriteString("\n")
 		}

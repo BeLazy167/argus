@@ -4,15 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/rand/v2"
 	"strconv"
 	"strings"
 	"time"
 )
 
-// BackoffPolicy controls exponential-backoff retry behavior for the Supermemory
-// HTTP client. Delays grow by Multiplier each attempt, capped at MaxDelay,
-// with ±Jitter uniform randomness per sleep to avoid thundering herds.
+// BackoffPolicy controls exponential-backoff retry behavior for the outbound
+// HTTP clients in this package — today the embeddings client. Delays grow by
+// Multiplier each attempt, capped at MaxDelay, with ±Jitter uniform randomness
+// per sleep to avoid thundering herds.
 //
 // DefaultBackoff is tuned so the total retry budget fits inside the 5-second
 // search context used by SpecialistBlock / SearchPatternMatch: 250ms + 500ms +
@@ -25,9 +27,9 @@ type BackoffPolicy struct {
 	Jitter       time.Duration // max absolute jitter each way (±Jitter)
 }
 
-// DefaultBackoff is applied uniformly to reads and writes. Writes that fail
-// after exhausting retries are recovered by the reconciler (cmd/reconcile-memory),
-// which re-indexes PG rows whose supermemory_id is NULL.
+// DefaultBackoff is applied uniformly to reads and writes. An embedding call
+// that fails after exhausting retries is not fatal: the row is written with a
+// NULL embedding and stays full-text-searchable until it is backfilled.
 var DefaultBackoff = BackoffPolicy{
 	MaxAttempts:  3,
 	InitialDelay: 250 * time.Millisecond,
@@ -54,14 +56,14 @@ func (e *retryableError) Error() string {
 	if len(body) > 256 {
 		body = body[:256]
 	}
-	return fmt.Sprintf("supermemory retryable (status %d): %s", e.StatusCode, string(body))
+	return fmt.Sprintf("retryable (status %d): %s", e.StatusCode, string(body))
 }
 
 // isRetryableStatus returns true for HTTP status codes the policy should retry:
 // rate-limit (429), bad-gateway (502), unavailable (503), and gateway-timeout
 // (504). Application errors (4xx other than 429) short-circuit immediately.
-// 500 is treated as non-retryable because Supermemory uses it for caller-side
-// errors (e.g. malformed filter JSON) where retry just wastes the quota.
+// 500 is treated as non-retryable because servers commonly use it for
+// caller-side errors (a malformed request body), where retry only burns quota.
 func isRetryableStatus(code int) bool {
 	switch code {
 	case 429, 502, 503, 504:
@@ -88,8 +90,9 @@ const MaxRetryAfter = 30 * time.Second
 // A var (not const) so tests can shrink it without real multi-minute sleeps.
 var MaxCumulativeRetryWait = 2 * time.Minute
 
-// parseRetryAfter reads the Retry-After header per RFC 7231. Supermemory docs
-// specify seconds-integer format; we also accept HTTP-date as a fallback.
+// parseRetryAfter reads the Retry-After header per RFC 7231. The
+// seconds-integer format is the common case; HTTP-date is accepted as a
+// fallback.
 // Result is capped at MaxRetryAfter so a misconfigured server cannot stall
 // the retry loop indefinitely.
 //
@@ -140,7 +143,11 @@ func retryWithBackoff(ctx context.Context, policy BackoffPolicy, fn func(ctx con
 	var lastErr error
 	var totalSlept time.Duration
 	for attempt := 1; attempt <= policy.MaxAttempts; attempt++ {
+		attemptStarted := time.Now()
+		slog.DebugContext(ctx, "retry attempt started", "attempt", attempt, "max_attempts", policy.MaxAttempts)
 		if err := fn(ctx); err != nil {
+			slog.DebugContext(ctx, "retry attempt failed", "attempt", attempt,
+				"max_attempts", policy.MaxAttempts, "duration_ms", time.Since(attemptStarted).Milliseconds(), "error", err)
 			var retryable *retryableError
 			if !errors.As(err, &retryable) {
 				return err // non-retryable — short-circuit
@@ -176,6 +183,10 @@ func retryWithBackoff(ctx context.Context, policy BackoffPolicy, fn func(ctx con
 			if sleepFor <= 0 {
 				break
 			}
+			slog.InfoContext(ctx, "retry backoff scheduled", "attempt", attempt,
+				"next_attempt", attempt+1, "status_code", retryable.StatusCode,
+				"retry_after_ms", retryable.RetryAfter.Milliseconds(),
+				"sleep_ms", sleepFor.Milliseconds(), "cumulative_sleep_ms", totalSlept.Milliseconds())
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -188,7 +199,12 @@ func retryWithBackoff(ctx context.Context, policy BackoffPolicy, fn func(ctx con
 			}
 			continue
 		}
+		slog.DebugContext(ctx, "retry operation succeeded", "attempt", attempt,
+			"max_attempts", policy.MaxAttempts, "duration_ms", time.Since(attemptStarted).Milliseconds(),
+			"cumulative_sleep_ms", totalSlept.Milliseconds())
 		return nil
 	}
+	slog.ErrorContext(ctx, "retry attempts exhausted", "max_attempts", policy.MaxAttempts,
+		"cumulative_sleep_ms", totalSlept.Milliseconds(), "error", lastErr)
 	return lastErr
 }

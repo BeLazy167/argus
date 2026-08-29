@@ -57,6 +57,7 @@ func emitPipelinePanicEvent(ctx context.Context, logger *slog.Logger, stage stri
 	logger.ErrorContext(ctx, "pipeline panic recovered",
 		slog.String("event", "pipeline.panic_recovered"),
 		slog.String("stage", stage),
+		slog.String("kind", fmt.Sprintf("%T", r)),
 		slog.String("panic_msg_redacted", redactPanic(r)),
 		slog.String("trace_id", traceID),
 	)
@@ -69,4 +70,3 @@ func emitPipelinePanicEvent(ctx context.Context, logger *slog.Logger, stage stri
 func EmitPipelinePanicEvent(ctx context.Context, logger *slog.Logger, stage string, r any, traceID string) {
 	emitPipelinePanicEvent(ctx, logger, stage, r, traceID)
 }
-

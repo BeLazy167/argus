@@ -84,7 +84,7 @@ func (q *Queries) LinkUserInstallation(ctx context.Context, arg LinkUserInstalla
 }
 
 const listUserInstallations = `-- name: ListUserInstallations :many
-SELECT i.id, i.installation_id, i.org_login, i.clerk_org_id, i.plan_tier, i.created_at, i.suspended_at
+SELECT i.id, i.installation_id, i.org_login, i.clerk_org_id, i.created_at, i.suspended_at
 FROM installations i
 JOIN user_installations ui ON ui.installation_id = i.id
 WHERE ui.clerk_user_id = $1
@@ -96,7 +96,6 @@ type ListUserInstallationsRow struct {
 	InstallationID int64      `json:"installation_id"`
 	OrgLogin       string     `json:"org_login"`
 	ClerkOrgID     *string    `json:"clerk_org_id"`
-	PlanTier       string     `json:"plan_tier"`
 	CreatedAt      time.Time  `json:"created_at"`
 	SuspendedAt    *time.Time `json:"suspended_at"`
 }
@@ -115,7 +114,6 @@ func (q *Queries) ListUserInstallations(ctx context.Context, clerkUserID string)
 			&i.InstallationID,
 			&i.OrgLogin,
 			&i.ClerkOrgID,
-			&i.PlanTier,
 			&i.CreatedAt,
 			&i.SuspendedAt,
 		); err != nil {

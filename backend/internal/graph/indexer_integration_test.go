@@ -13,6 +13,7 @@ package graph
 
 import (
 	"context"
+	"slices"
 	"testing"
 
 	"github.com/BeLazy167/argus/backend/internal/store"
@@ -37,6 +38,20 @@ type fakeIndexerStore struct {
 	upsertEdges    []upsertEdgeCall
 	deletes        []deleteCall
 
+	// API-endpoint side of indexerStore. endpointRows is the fake's whole
+	// api_endpoints table, keyed by file, and installEndpoints is what a
+	// sibling repo in the same installation already has — the two together
+	// let a test drive the cross-repo linking pass with no database.
+	endpointRows     map[string][]store.APIEndpointRow
+	installEndpoints []store.APIEndpointRow
+	inferredEdges    []upsertEdgeCall
+	// nodeIDsByName is what the DB already knows about symbols this run did
+	// not parse — the fallback an incremental index depends on.
+	nodeIDsByName map[string]int64
+	// linkCalls counts how often the installation-wide re-derivation ran, so a
+	// test can assert the change gate actually gates.
+	linkCalls int
+
 	// nextID feeds monotonically increasing IDs to upsert returns.
 	// Seeded high enough that it cannot collide with seeded existing IDs.
 	nextID int64
@@ -59,6 +74,7 @@ type upsertFullCall struct {
 }
 
 type upsertPlainCall struct {
+	id       int64
 	repoID   int64
 	kind     string
 	name     string
@@ -80,8 +96,59 @@ type deleteCall struct {
 func newFakeIndexerStore() *fakeIndexerStore {
 	return &fakeIndexerStore{
 		hashesByFile: map[string][]store.NodeHashRow{},
+		endpointRows: map[string][]store.APIEndpointRow{},
 		nextID:       1000,
 	}
+}
+
+// ReplaceAPIEndpointsForFiles models the real store's equality gate: it reports
+// changed only when the rows for the visited files actually differ.
+func (f *fakeIndexerStore) ReplaceAPIEndpointsForFiles(_ context.Context, _ int64, filePaths []string, rows []store.APIEndpointRow) (bool, error) {
+	next := map[string][]store.APIEndpointRow{}
+	for _, p := range filePaths {
+		next[p] = nil
+	}
+	for _, r := range rows {
+		next[r.FilePath] = append(next[r.FilePath], r)
+	}
+	changed := false
+	for _, p := range filePaths {
+		if !slices.Equal(f.endpointRows[p], next[p]) {
+			changed = true
+		}
+		f.endpointRows[p] = next[p]
+	}
+	return changed, nil
+}
+
+func (f *fakeIndexerStore) LookupCodeNodeIDsByName(_ context.Context, _ int64, names []string) (map[string]int64, error) {
+	out := map[string]int64{}
+	for _, n := range names {
+		if id, ok := f.nodeIDsByName[n]; ok {
+			out[n] = id
+		}
+	}
+	return out, nil
+}
+
+// ListAPIEndpointsForInstallationOf returns what this repo just wrote plus what
+// the fake was seeded with for sibling repos — the same union the real query
+// produces from the installation join.
+func (f *fakeIndexerStore) ListAPIEndpointsForInstallationOf(_ context.Context, _ int64) ([]store.APIEndpointRow, bool, error) {
+	out := append([]store.APIEndpointRow{}, f.installEndpoints...)
+	for _, rows := range f.endpointRows {
+		out = append(out, rows...)
+	}
+	return out, false, nil
+}
+
+func (f *fakeIndexerStore) ReplaceInferredAPIEdges(_ context.Context, _ int64, edges []store.InferredEdgeRow) (int, error) {
+	f.linkCalls++
+	f.inferredEdges = nil
+	for _, e := range edges {
+		f.inferredEdges = append(f.inferredEdges, upsertEdgeCall{repoID: e.RepoID, sourceID: e.SourceID, targetID: e.TargetID, kind: e.Kind})
+	}
+	return len(edges), nil
 }
 
 func (f *fakeIndexerStore) GetNodesHashesForFile(_ context.Context, repoID int64, filePath string) ([]store.NodeHashRow, error) {
@@ -110,13 +177,21 @@ func (f *fakeIndexerStore) UpsertCodeNodeFullWithHash(_ context.Context, repoID 
 func (f *fakeIndexerStore) UpsertCodeNode(_ context.Context, repoID int64, kind, name, filePath string, _, _ int, _ string, _ int) (int64, error) {
 	f.nextID++
 	f.upsertPlain = append(f.upsertPlain, upsertPlainCall{
-		repoID: repoID, kind: kind, name: name, filePath: filePath,
+		id: f.nextID, repoID: repoID, kind: kind, name: name, filePath: filePath,
 	})
 	return f.nextID, nil
 }
 
 func (f *fakeIndexerStore) UpsertCodeEdge(_ context.Context, repoID, sourceID, targetID int64, kind string) error {
 	f.upsertEdges = append(f.upsertEdges, upsertEdgeCall{repoID: repoID, sourceID: sourceID, targetID: targetID, kind: kind})
+	return nil
+}
+
+func (f *fakeIndexerStore) ReplaceCodeEdgesForFiles(_ context.Context, repoID int64, _ []string, edges []store.CodeEdgeRow) error {
+	f.upsertEdges = nil
+	for _, edge := range edges {
+		f.upsertEdges = append(f.upsertEdges, upsertEdgeCall{repoID: repoID, sourceID: edge.SourceID, targetID: edge.TargetID, kind: edge.Kind})
+	}
 	return nil
 }
 
@@ -275,7 +350,246 @@ func TestIndexParsedSymbols_HashGatedDiff(t *testing.T) {
 
 // Static check: the real *store.Store must satisfy indexerStore. If this
 // ever fails to compile, we have a method-signature drift between the
-// two and the production call sites (IndexFiles/IndexRepo) will also
-// break — but having it here points at the cause in one line instead of
-// burying the error inside indexFileSet's call graph.
+// two; having it here points at interface drift in one line instead of
+// burying the error inside the symbol-diff helpers.
 var _ indexerStore = (*store.Store)(nil)
+
+func TestIndexParsedSymbolsReplacesEdgeSnapshotIncludingEmpty(t *testing.T) {
+	const repoID int64 = 42
+	foo := Symbol{Kind: KindFunction, Name: "Foo", FilePath: "a.go", LineStart: 1, LineEnd: 4}
+	bar := Symbol{Kind: KindFunction, Name: "Bar", FilePath: "a.go", LineStart: 6, LineEnd: 9}
+
+	tests := []struct {
+		name      string
+		edges     []Edge
+		wantEdges int
+	}{
+		{name: "current call is written", edges: []Edge{{SourceName: "Foo", TargetName: "Bar", Kind: "calls"}}, wantEdges: 1},
+		{name: "zero-edge snapshot clears removed call", edges: nil, wantEdges: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := newFakeIndexerStore()
+			st.upsertEdges = []upsertEdgeCall{{repoID: repoID, sourceID: 1, targetID: 2, kind: "calls"}}
+			err := indexParsedSymbols(context.Background(), st, repoID, map[string]fileResult{
+				"a.go": {symbols: []Symbol{foo, bar}, edges: tt.edges},
+			})
+			if err != nil {
+				t.Fatalf("indexParsedSymbols: %v", err)
+			}
+			if got := len(st.upsertEdges); got != tt.wantEdges {
+				t.Fatalf("replacement edge count = %d, want %d (%+v)", got, tt.wantEdges, st.upsertEdges)
+			}
+		})
+	}
+}
+
+func TestIndexParsedSymbolsResolvesEdgeTargetFromExistingRepoGraph(t *testing.T) {
+	const repoID int64 = 42
+	st := newFakeIndexerStore()
+	st.nodeIDsByName = map[string]int64{"UntouchedTarget": 77}
+
+	err := indexParsedSymbols(context.Background(), st, repoID, map[string]fileResult{
+		"changed.go": {
+			symbols: []Symbol{{Kind: KindFunction, Name: "ChangedCaller", FilePath: "changed.go", LineStart: 1, LineEnd: 4}},
+			edges:   []Edge{{SourceName: "ChangedCaller", TargetName: "UntouchedTarget", Kind: "calls"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("indexParsedSymbols: %v", err)
+	}
+	if len(st.upsertEdges) != 1 {
+		t.Fatalf("replacement edges = %+v, want one cross-file call", st.upsertEdges)
+	}
+	if got := st.upsertEdges[0].targetID; got != 77 {
+		t.Fatalf("target id = %d, want existing repo node 77", got)
+	}
+}
+
+func TestIndexParsedSymbolsResolvesTypeTargetFromExistingRepoGraph(t *testing.T) {
+	const repoID int64 = 42
+	st := newFakeIndexerStore()
+	st.nodeIDsByName = map[string]int64{"UntouchedType": 88}
+
+	err := indexParsedSymbols(context.Background(), st, repoID, map[string]fileResult{
+		"changed.go": {
+			symbols: []Symbol{{
+				Kind: KindFunction, Name: "ChangedCaller", FilePath: "changed.go",
+				LineStart: 1, LineEnd: 4, ReturnType: "*UntouchedType",
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("indexParsedSymbols: %v", err)
+	}
+	if len(st.upsertEdges) != 1 {
+		t.Fatalf("replacement edges = %+v, want one cross-file type edge", st.upsertEdges)
+	}
+	if got := st.upsertEdges[0]; got.targetID != 88 || got.kind != "uses_type" {
+		t.Fatalf("edge = %+v, want target 88 uses_type", got)
+	}
+}
+
+func TestIndexParsedSymbols_RecordsAmbiguousAndUnresolvedTargets(t *testing.T) {
+	const repoID int64 = 42
+	st := newFakeIndexerStore()
+	results := map[string]fileResult{
+		"caller.go": {
+			symbols: []Symbol{{Kind: KindFunction, Name: "Caller", FilePath: "caller.go", LineStart: 1, LineEnd: 5}},
+			edges: []Edge{
+				{SourceName: "Caller", TargetName: "Shared", Kind: EdgeCalls},
+				{SourceName: "Caller", TargetName: "Missing", Kind: EdgeCalls},
+			},
+		},
+		"a/shared.go": {symbols: []Symbol{{Kind: KindFunction, Name: "Shared", FilePath: "a/shared.go", LineStart: 1, LineEnd: 2}}},
+		"b/shared.go": {symbols: []Symbol{{Kind: KindFunction, Name: "Shared", FilePath: "b/shared.go", LineStart: 1, LineEnd: 2}}},
+	}
+
+	if err := indexParsedSymbols(context.Background(), st, repoID, results); err != nil {
+		t.Fatalf("indexParsedSymbols: %v", err)
+	}
+
+	gotNames := make([]string, 0, len(st.upsertPlain))
+	placeholderIDs := map[int64]bool{}
+	for _, call := range st.upsertPlain {
+		gotNames = append(gotNames, call.name)
+		placeholderIDs[call.id] = true
+		if call.kind != "module" || call.filePath != "caller.go" {
+			t.Fatalf("placeholder %+v is not an explicit caller-scoped module", call)
+		}
+	}
+	slices.Sort(gotNames)
+	wantNames := []string{"ambiguous:Shared", "unresolved:Missing"}
+	if !slices.Equal(gotNames, wantNames) {
+		t.Fatalf("placeholder names = %v, want %v", gotNames, wantNames)
+	}
+	if len(st.upsertEdges) != 2 {
+		t.Fatalf("edges = %+v, want two explicit placeholder edges", st.upsertEdges)
+	}
+	for _, edge := range st.upsertEdges {
+		if !placeholderIDs[edge.targetID] {
+			t.Fatalf("edge arbitrarily selected a same-name target instead of a placeholder: %+v", edge)
+		}
+	}
+}
+
+func TestIndexParsedSymbols_ImportUsesFileAndQualifiedModuleIdentity(t *testing.T) {
+	st := newFakeIndexerStore()
+	results := map[string]fileResult{
+		"a.go": {
+			symbols: []Symbol{
+				{Kind: KindFunction, Name: "A", FilePath: "a.go", LineStart: 1, LineEnd: 3},
+				{Kind: "file", Name: "a.go", FilePath: "a.go", LineStart: 1, LineEnd: 10},
+			},
+			edges: []Edge{{SourceName: "a.go", TargetName: "example.com/acme/lib", Kind: EdgeImports}},
+		},
+	}
+	if err := indexParsedSymbols(context.Background(), st, 42, results); err != nil {
+		t.Fatalf("indexParsedSymbols: %v", err)
+	}
+	if len(st.upsertPlain) != 1 || st.upsertPlain[0].name != "module:example.com/acme/lib" {
+		t.Fatalf("module identity = %+v", st.upsertPlain)
+	}
+	if len(st.upsertEdges) != 1 || st.upsertEdges[0].sourceID != 1002 || st.upsertEdges[0].targetID != st.upsertPlain[0].id {
+		t.Fatalf("import did not use file -> module identities: full=%+v plain=%+v edges=%+v", st.upsertFull, st.upsertPlain, st.upsertEdges)
+	}
+}
+
+func TestIndexParsedSymbols_PreservesQualifiedMethodsAndMarksUnqualifiedDuplicateAmbiguous(t *testing.T) {
+	st := newFakeIndexerStore()
+	results := map[string]fileResult{
+		"handlers.go": {
+			symbols: []Symbol{
+				{Kind: KindMethod, Name: "Alpha.Handle", Receiver: "Alpha", FilePath: "handlers.go", LineStart: 3, LineEnd: 3},
+				{Kind: KindMethod, Name: "Alpha.Done", Receiver: "Alpha", FilePath: "handlers.go", LineStart: 4, LineEnd: 4},
+				{Kind: KindMethod, Name: "Beta.Handle", Receiver: "Beta", FilePath: "handlers.go", LineStart: 6, LineEnd: 6},
+				{Kind: KindMethod, Name: "Beta.Done", Receiver: "Beta", FilePath: "handlers.go", LineStart: 7, LineEnd: 7},
+				{Kind: KindFunction, Name: "Caller", FilePath: "handlers.go", LineStart: 9, LineEnd: 9},
+			},
+			edges: []Edge{
+				{SourceName: "Alpha.Handle", TargetName: "Alpha.Done", Kind: EdgeCalls},
+				{SourceName: "Beta.Handle", TargetName: "Beta.Done", Kind: EdgeCalls},
+				{SourceName: "Caller", TargetName: "Handle", Kind: EdgeCalls},
+			},
+		},
+	}
+	if err := indexParsedSymbols(context.Background(), st, 42, results); err != nil {
+		t.Fatalf("indexParsedSymbols: %v", err)
+	}
+
+	gotMethods := []string{}
+	for _, call := range st.upsertFull {
+		if call.kind == KindMethod {
+			gotMethods = append(gotMethods, call.name)
+		}
+	}
+	slices.Sort(gotMethods)
+	wantMethods := []string{"Alpha.Done", "Alpha.Handle", "Beta.Done", "Beta.Handle"}
+	if !slices.Equal(gotMethods, wantMethods) {
+		t.Fatalf("stored methods = %v, want %v", gotMethods, wantMethods)
+	}
+	if len(st.upsertPlain) != 1 || st.upsertPlain[0].name != "ambiguous:Handle" {
+		t.Fatalf("unqualified duplicate target = %+v, want explicit ambiguous placeholder", st.upsertPlain)
+	}
+	if len(st.upsertEdges) != 3 {
+		t.Fatalf("edges = %+v, want two qualified calls and one ambiguous call", st.upsertEdges)
+	}
+}
+
+func TestIndexParsedSymbols_QualifiedClassesKeepTypeAmbiguityExplicit(t *testing.T) {
+	st := newFakeIndexerStore()
+	results := map[string]fileResult{
+		"models.py": {symbols: []Symbol{
+			{Kind: KindClass, Name: "Alpha.Item", FilePath: "models.py", LineStart: 2, LineEnd: 3},
+			{Kind: KindClass, Name: "Beta.Item", FilePath: "models.py", LineStart: 5, LineEnd: 6},
+			{Kind: KindFunction, Name: "make", FilePath: "models.py", LineStart: 8, LineEnd: 9, ReturnType: "Item"},
+		}},
+	}
+	if err := indexParsedSymbols(context.Background(), st, 42, results); err != nil {
+		t.Fatalf("indexParsedSymbols: %v", err)
+	}
+	if len(st.upsertPlain) != 1 || st.upsertPlain[0].name != "ambiguous:Item" {
+		t.Fatalf("type resolution = %+v, want explicit ambiguous class placeholder", st.upsertPlain)
+	}
+	if len(st.upsertEdges) != 1 || st.upsertEdges[0].kind != EdgeUsesType || st.upsertEdges[0].targetID != st.upsertPlain[0].id {
+		t.Fatalf("type edges = %+v, want make -> ambiguous:Item", st.upsertEdges)
+	}
+}
+
+func TestIndexParsedSymbols_IncrementalDBFallbackKeepsQualifiedAndAmbiguousMethodsDistinct(t *testing.T) {
+	st := newFakeIndexerStore()
+	st.nodeIDsByName = map[string]int64{
+		"Alpha.Handle": 77,
+		"Handle":       0, // store sentinel: more than one qualified alias exists
+	}
+	results := map[string]fileResult{
+		"caller.go": {
+			symbols: []Symbol{{Kind: KindFunction, Name: "Caller", FilePath: "caller.go", LineStart: 1, LineEnd: 2}},
+			edges: []Edge{
+				{SourceName: "Caller", TargetName: "Alpha.Handle", Kind: EdgeCalls},
+				{SourceName: "Caller", TargetName: "Handle", Kind: EdgeCalls},
+				{SourceName: "Caller", TargetName: "Missing.Handle", Kind: EdgeCalls},
+			},
+		},
+	}
+	if err := indexParsedSymbols(context.Background(), st, 42, results); err != nil {
+		t.Fatalf("indexParsedSymbols: %v", err)
+	}
+	placeholderIDs := map[string]int64{}
+	for _, placeholder := range st.upsertPlain {
+		placeholderIDs[placeholder.name] = placeholder.id
+	}
+	for _, name := range []string{"ambiguous:Handle", "unresolved:Missing.Handle"} {
+		if placeholderIDs[name] == 0 {
+			t.Fatalf("placeholders = %+v, missing %s", st.upsertPlain, name)
+		}
+	}
+	gotTargets := map[int64]bool{}
+	for _, edge := range st.upsertEdges {
+		gotTargets[edge.targetID] = true
+	}
+	if !gotTargets[77] || !gotTargets[placeholderIDs["ambiguous:Handle"]] ||
+		!gotTargets[placeholderIDs["unresolved:Missing.Handle"]] || len(gotTargets) != 3 {
+		t.Fatalf("incremental targets = %+v, want exact, ambiguous, and unresolved targets", st.upsertEdges)
+	}
+}

@@ -38,7 +38,7 @@ const statsQueryTimeout = 2 * time.Second
 //     last N completed reviews for repoID. Falls through on error — the
 //     resulting estimate simply omits the historical line.
 //   - Live: ghClient.GetPRFiles walks the PR's changed files to sum additions
-//     + deletions and refine the file count. Failure is logged at Warn and
+//   - deletions and refine the file count. Failure is logged at Warn and
 //     DiffLines stays 0; the caller's rendered comment skips that line.
 //
 // fileCountHint comes from the webhook PREvent payload so the estimate still

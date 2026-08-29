@@ -1,6 +1,7 @@
 package crypto
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -8,13 +9,23 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
+	"time"
 )
 
 var key []byte
 
 // Init loads the 32-byte AES key from ENCRYPTION_KEY env var (hex-encoded).
-func Init(envKey string) error {
+func Init(envKey string) (err error) {
+	started := time.Now()
+	defer func() {
+		level := slog.LevelInfo
+		if err != nil {
+			level = slog.LevelError
+		}
+		slog.Log(context.Background(), level, "encryption key initialization completed", "configured", err == nil, "duration_ms", time.Since(started).Milliseconds(), "error", err)
+	}()
 	if envKey == "" {
 		return fmt.Errorf("ENCRYPTION_KEY is not set")
 	}
@@ -39,7 +50,15 @@ func InitFromEnv() error {
 }
 
 // Encrypt encrypts plaintext with AES-256-GCM, returns base64-encoded ciphertext.
-func Encrypt(plaintext string) (string, error) {
+func Encrypt(plaintext string) (encoded string, err error) {
+	started := time.Now()
+	defer func() {
+		level := slog.LevelDebug
+		if err != nil {
+			level = slog.LevelError
+		}
+		slog.Log(context.Background(), level, "AES encryption completed", "plaintext_bytes", len(plaintext), "ciphertext_bytes", len(encoded), "duration_ms", time.Since(started).Milliseconds(), "error", err)
+	}()
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return "", err
@@ -57,7 +76,15 @@ func Encrypt(plaintext string) (string, error) {
 }
 
 // Decrypt decrypts a base64-encoded AES-256-GCM ciphertext.
-func Decrypt(encoded string) (string, error) {
+func Decrypt(encoded string) (plaintext string, err error) {
+	started := time.Now()
+	defer func() {
+		level := slog.LevelDebug
+		if err != nil {
+			level = slog.LevelError
+		}
+		slog.Log(context.Background(), level, "AES decryption completed", "ciphertext_bytes", len(encoded), "plaintext_bytes", len(plaintext), "duration_ms", time.Since(started).Milliseconds(), "error", err)
+	}()
 	data, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
 		return "", err
@@ -74,9 +101,10 @@ func Decrypt(encoded string) (string, error) {
 	if len(data) < nonceSize {
 		return "", fmt.Errorf("ciphertext too short")
 	}
-	plaintext, err := gcm.Open(nil, data[:nonceSize], data[nonceSize:], nil)
+	decrypted, err := gcm.Open(nil, data[:nonceSize], data[nonceSize:], nil)
 	if err != nil {
 		return "", err
 	}
-	return string(plaintext), nil
+	plaintext = string(decrypted)
+	return plaintext, nil
 }

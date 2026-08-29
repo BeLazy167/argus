@@ -11,26 +11,54 @@ import (
 	ghpkg "github.com/BeLazy167/argus/backend/internal/github"
 	"github.com/BeLazy167/argus/backend/internal/memory"
 	"github.com/BeLazy167/argus/backend/internal/store"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
+
+type patternOutcomeRecorder interface {
+	RecordPatternOutcome(context.Context, uuid.UUID, int64, bool) (float64, bool, error)
+}
+
+type reactionStore interface {
+	patternOutcomeRecorder
+	GetCommentByGithubID(context.Context, int64) (*store.ReviewComment, error)
+	RecordCommentOutcome(context.Context, uuid.UUID, string) (bool, error)
+	GetInstallationByGitHubID(context.Context, int64) (*store.Installation, error)
+	GetCommentChangeClass(context.Context, uuid.UUID) (string, error)
+	ListPRGithubCommentIDs(context.Context, string, int) ([]int64, error)
+}
+
+type reactionGitHubClient interface {
+	ListCommentReactions(context.Context, int64, string, string, int64) ([]ghpkg.CommentReaction, error)
+}
+
+type reactionMemoryRegistry interface {
+	GetIndexer(context.Context, int64) memory.Indexer
+}
+
+type reactionLifecycle interface {
+	Transition(context.Context, FindingTransition) (TransitionResult, error)
+}
 
 // ReactionAnalyzer checks reactions on Argus review comments and indexes
 // feedback signals. Thumbs-up = confirmed, thumbs-down = dismissed.
 type ReactionAnalyzer struct {
-	store       *store.Store
-	ghClient    *ghpkg.Client
-	memRegistry *memory.Registry
-	logger      *slog.Logger
-	lifecycle   *FindingLifecycle
+	store           reactionStore
+	ghClient        reactionGitHubClient
+	repoPermissions repoWriteAccessChecker
+	memRegistry     reactionMemoryRegistry
+	logger          *slog.Logger
+	lifecycle       reactionLifecycle
 }
 
 func NewReactionAnalyzer(st *store.Store, ghClient *ghpkg.Client, memRegistry *memory.Registry, logger *slog.Logger) *ReactionAnalyzer {
 	return &ReactionAnalyzer{
-		store:       st,
-		ghClient:    ghClient,
-		memRegistry: memRegistry,
-		logger:      logger,
-		lifecycle:   NewFindingLifecycle(st, ghClient, logger),
+		store:           st,
+		ghClient:        ghClient,
+		repoPermissions: ghClient,
+		memRegistry:     memRegistry,
+		logger:          logger,
+		lifecycle:       NewFindingLifecycle(st, ghClient, logger),
 	}
 }
 
@@ -69,9 +97,36 @@ func (s ReactionSignal) DominantSignal() string {
 	return "" // tied
 }
 
+const maxReactionPermissionLookupsPerSweep = 100
+
+type reactionPermissionVerdict struct {
+	allowed bool
+	err     error
+}
+
+type reactionPermissionCache struct {
+	verdicts map[string]reactionPermissionVerdict
+	lookups  int
+}
+
+func newReactionPermissionCache() *reactionPermissionCache {
+	return &reactionPermissionCache{verdicts: make(map[string]reactionPermissionVerdict)}
+}
+
 // HandleCommentReactions fetches reactions for a PR review comment, determines
-// the dominant signal, and indexes it as a feedback pattern.
+// the dominant authorized signal, and indexes it as a feedback pattern.
 func (ra *ReactionAnalyzer) HandleCommentReactions(ctx context.Context, event ghpkg.CommentEvent) error {
+	ra.logger.InfoContext(ctx, "reaction analysis started", "event", "pipeline.reaction.analysis_started", "repo", event.RepoFullName, "pr_number", event.PRNumber, "github_comment_id", event.CommentID)
+	err := ra.handleCommentReactions(ctx, event, newReactionPermissionCache())
+	if err != nil {
+		ra.logger.ErrorContext(ctx, "reaction analysis failed", "event", "pipeline.reaction.analysis_failed", "repo", event.RepoFullName, "pr_number", event.PRNumber, "github_comment_id", event.CommentID, "error", err)
+	} else {
+		ra.logger.InfoContext(ctx, "reaction analysis completed", "event", "pipeline.reaction.analysis_completed", "repo", event.RepoFullName, "pr_number", event.PRNumber, "github_comment_id", event.CommentID)
+	}
+	return err
+}
+
+func (ra *ReactionAnalyzer) handleCommentReactions(ctx context.Context, event ghpkg.CommentEvent, permissions *reactionPermissionCache) error {
 	// Only process comments on Argus-posted reviews
 	comment, err := ra.store.GetCommentByGithubID(ctx, event.CommentID)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -79,8 +134,7 @@ func (ra *ReactionAnalyzer) HandleCommentReactions(ctx context.Context, event gh
 		return nil
 	}
 	if err != nil {
-		ra.logger.Error("reaction: failed to look up comment", "error", err, "comment_id", event.CommentID)
-		return nil
+		return fmt.Errorf("looking up review comment %d: %w", event.CommentID, err)
 	}
 
 	owner, repo, err := splitRepoFullName(event.RepoFullName)
@@ -91,53 +145,65 @@ func (ra *ReactionAnalyzer) HandleCommentReactions(ctx context.Context, event gh
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
+	ra.logger.DebugContext(ctx, "GitHub comment reaction fetch started", "event", "pipeline.reaction.fetch_started", "github_comment_id", event.CommentID)
 	reactions, err := ra.ghClient.ListCommentReactions(ctx, event.InstallationID, owner, repo, event.CommentID)
 	if err != nil {
-		ra.logger.Warn("reaction: failed to fetch reactions", "error", err, "comment_id", event.CommentID)
-		return nil // non-fatal
+		if !errors.Is(err, ghpkg.ErrReviewCommentNotFound) {
+			return fmt.Errorf("fetching reactions for comment %d: %w", event.CommentID, err)
+		}
+		// GitHub keeps no reaction aggregate after a review comment is deleted.
+		// Reconcile the reversible reaction-owned memory to neutral, but retain
+		// the historical DB comment ID and append-only outcome/lifecycle audit.
+		ra.logger.Info("reaction: historical comment deleted; reconciling neutral",
+			"comment_id", event.CommentID)
+		reactions = nil
 	}
 
-	// Filter out bot reactions
-	var filtered []ghpkg.CommentReaction
-	for _, r := range reactions {
-		if !strings.HasSuffix(r.User, "[bot]") {
-			filtered = append(filtered, r)
-		}
+	// A reaction can change durable outcome, lifecycle, and suppression memory,
+	// so only the effective repository permission of its actual actor can make
+	// it authoritative. Cache verdicts by case-insensitive login for the whole
+	// sweep and cap unique lookups so a reaction swarm cannot amplify API calls.
+	ra.logger.InfoContext(ctx, "GitHub comment reactions fetched", "event", "pipeline.reaction.fetched", "github_comment_id", event.CommentID, "reaction_count", len(reactions))
+	filtered, signalUsable, err := ra.authorizedSignalReactions(ctx, event, owner, repo, reactions, permissions)
+	if err != nil {
+		return fmt.Errorf("authorizing reactors for comment %d: %w", event.CommentID, err)
+	}
+	if !signalUsable {
+		// The unverified tail must not combine with the verified prefix. Treat the
+		// whole comment as neutral and reconcile reversible reaction memory below.
+		// Budget exhaustion is attacker-controllable, so it must not block a review.
+		ra.logger.Warn("reaction: permission budget exhausted; ignoring comment signal",
+			"comment_id", event.CommentID,
+			"permission_lookups", permissions.lookups)
+		filtered = nil
 	}
 
 	signal := TallyReactions(filtered)
 	action := signal.DominantSignal()
-	if action == "" {
-		return nil
-	}
-
-	ra.logger.Info("reaction signal",
-		"action", action,
+	ra.logger.InfoContext(ctx, "reaction signal",
+		"event", "pipeline.reaction.signal_evaluated", "action", action,
 		"confirmed", signal.Confirmed,
 		"dismissed", signal.Dismissed,
 		"comment_id", event.CommentID,
 		"file", comment.FilePath,
 	)
 
-	// Record outcome in DB
-	inserted, err := ra.store.RecordCommentOutcome(ctx, comment.ID, action)
-	if err != nil {
-		ra.logger.Error("reaction: recording outcome", "error", err, "outcome", action)
+	if action != "" {
+		ra.logger.InfoContext(ctx, "reaction outcome mutation started", "event", "pipeline.reaction.outcome_started", "finding_id", comment.ID, "action", action)
+		inserted, recordErr := ra.store.RecordCommentOutcome(ctx, comment.ID, action)
+		if recordErr != nil {
+			ra.logger.Error("reaction: recording outcome", "error", recordErr, "outcome", action)
+		}
+		ra.logger.InfoContext(ctx, "reaction outcome mutation evaluated", "event", "pipeline.reaction.outcome_recorded", "finding_id", comment.ID, "action", action, "applied", inserted)
+		if inserted {
+			recordPatternOutcome(ctx, ra.store, ra.logger, comment.ID, comment.MatchedPatternID, action)
+		}
 	}
 
-	// Feed the outcome back into the matched pattern's empirical quality — but
-	// ONLY on first record. The sweep replays every PR event; RecordCommentOutcome
-	// is idempotent, so bumping stats unconditionally would inflate the counts.
-	if inserted {
-		recordPatternOutcome(ctx, ra.store, ra.logger, comment.MatchedPatternID, action)
-	}
-
-	// Finding lifecycle: a 👎-dominant comment is dismissed in the LEDGER ONLY
-	// (EventReactionDismissed → no thread resolution). A reaction is an untrusted,
-	// low-effort signal swept from any user on every PR event; letting it drive
-	// ResolveReviewThread would let a fork contributor clear a finding from the
-	// merge-gate view via the app's write token. state=dismissed still feeds
-	// suppression memory — the pre-#165 behavior. Non-fatal.
+	// A 👎-dominant comment is dismissed in the ledger only. Reaction removal
+	// retracts suppression below, but cannot safely rewrite this lifecycle row:
+	// the legacy ledger does not distinguish a reaction dismissal from a trusted
+	// reply dismissal.
 	if action == "dismissed" {
 		if _, err := ra.lifecycle.Transition(ctx, FindingTransition{
 			FindingID: comment.ID,
@@ -147,59 +213,147 @@ func (ra *ReactionAnalyzer) HandleCommentReactions(ctx context.Context, event gh
 		}
 	}
 
-	// Index feedback signal for pattern reinforcement/suppression
-	var indexer memory.Indexer
-	if ra.memRegistry != nil {
-		if inst, instErr := ra.store.GetInstallationByGitHubID(ctx, event.InstallationID); instErr == nil {
-			indexer = ra.memRegistry.GetIndexer(ctx, inst.ID)
+	// Reconcile current reaction feedback on every sweep, including the neutral
+	// (tied/removed) state. This retracts a stale dismissal rather than leaving
+	// an append-only suppression row behind.
+	if ra.memRegistry == nil || comment.Category == nil {
+		return nil
+	}
+	inst, err := ra.store.GetInstallationByGitHubID(ctx, event.InstallationID)
+	if err != nil {
+		return fmt.Errorf("resolving installation for reaction feedback: %w", err)
+	}
+	indexer := ra.memRegistry.GetIndexer(ctx, inst.ID)
+	if indexer == nil {
+		// The same registry supplies review retrieval. No indexer means memory is
+		// unavailable, so stale reaction feedback cannot be read by this process.
+		return nil
+	}
+	fb := memory.FeedbackMemory{
+		FilePath: comment.FilePath,
+		Category: *comment.Category,
+		// Store the finding statement because dismissal retrieval queries it.
+		OriginalBody: FindingTextFromPostedBody(comment.Body),
+		Action:       action,
+		PRNumber:     event.PRNumber,
+		Source:       memory.SourceReactionFeedback,
+	}
+	if action == "dismissed" {
+		fb.Repo = repo
+		if kind, kindErr := ra.store.GetCommentChangeClass(ctx, comment.ID); kindErr != nil {
+			ra.logger.Warn("reaction: comment change class lookup", "error", kindErr, "comment_id", comment.ID)
+		} else {
+			fb.ChangeKind = kind
 		}
 	}
-	if indexer != nil && comment.Category != nil {
-		fb := memory.FeedbackMemory{
-			FilePath:       comment.FilePath,
-			Category:       *comment.Category,
-			OriginalBody:   comment.Body,
-			Action:         action,
-			DeveloperReply: "", // no text reply, just a reaction
-			PRNumber:       event.PRNumber,
+	ra.logger.InfoContext(ctx, "reaction feedback reconciliation started", "event", "pipeline.reaction.memory_started", "finding_id", comment.ID, "action", action, "repo", event.RepoFullName, "pr_number", event.PRNumber)
+	if err := indexer.ReconcileFeedbackSignal(ctx, owner, repo, fb); err != nil {
+		return fmt.Errorf("reconciling feedback for comment %d: %w", event.CommentID, err)
+	}
+
+	ra.logger.InfoContext(ctx, "reaction feedback reconciled", "event", "pipeline.reaction.memory_reconciled", "finding_id", comment.ID, "action", action)
+	return nil
+}
+
+func (ra *ReactionAnalyzer) authorizedSignalReactions(
+	ctx context.Context,
+	event ghpkg.CommentEvent,
+	owner, repo string,
+	reactions []ghpkg.CommentReaction,
+	permissions *reactionPermissionCache,
+) ([]ghpkg.CommentReaction, bool, error) {
+	if permissions == nil {
+		return nil, false, fmt.Errorf("reaction permission cache is unavailable")
+	}
+
+	type signalReaction struct {
+		reaction ghpkg.CommentReaction
+		login    string
+		key      string
+	}
+	candidates := make([]signalReaction, 0, len(reactions))
+	uncached := make(map[string]struct{})
+	remaining := maxReactionPermissionLookupsPerSweep - permissions.lookups
+	if remaining < 0 {
+		remaining = 0
+	}
+	for _, reaction := range reactions {
+		if reaction.Content != "+1" && reaction.Content != "-1" {
+			continue
 		}
-		if action == "dismissed" {
-			fb.Repo = repo
-			if kind, kerr := ra.store.GetCommentChangeClass(ctx, comment.ID); kerr != nil {
-				ra.logger.Warn("reaction: comment change class lookup", "error", kerr, "comment_id", comment.ID)
-			} else {
-				fb.ChangeKind = kind
-			}
+		login := strings.TrimSpace(reaction.User)
+		key := strings.ToLower(login)
+		if key == "" || strings.HasSuffix(key, "[bot]") {
+			continue
 		}
-		if err := indexer.IndexFeedbackSignal(ctx, owner, repo, fb); err != nil {
-			ra.logger.Error("reaction: indexing feedback signal", "error", err, "action", action)
+		candidates = append(candidates, signalReaction{reaction: reaction, login: login, key: key})
+		if _, cached := permissions.verdicts[key]; cached {
+			continue
+		}
+		uncached[key] = struct{}{}
+		// Preflight the whole comment before making a new permission request.
+		// Reactor population is attacker-controlled; discovering overload only
+		// after 100 sequential GitHub calls would likely hit the comment deadline
+		// first and turn bounded degradation back into a review DoS.
+		if len(uncached) > remaining {
+			return nil, false, nil
 		}
 	}
 
-	return nil
+	var authorized []ghpkg.CommentReaction
+	for _, candidate := range candidates {
+		verdict, ok := permissions.verdicts[candidate.key]
+		if !ok {
+			if ra.repoPermissions == nil {
+				return nil, false, fmt.Errorf("repository permission checker is unavailable")
+			}
+			permissions.lookups++
+			allowed, err := ra.repoPermissions.HasRepoWriteAccess(
+				ctx, event.InstallationID, owner, repo, candidate.login,
+			)
+			verdict = reactionPermissionVerdict{allowed: allowed, err: err}
+			permissions.verdicts[candidate.key] = verdict
+		}
+		if verdict.err != nil {
+			return nil, false, fmt.Errorf("checking repository permission for %q: %w", candidate.login, verdict.err)
+		}
+		if verdict.allowed {
+			authorized = append(authorized, candidate.reaction)
+		}
+	}
+	return authorized, true, nil
 }
 
 // SweepPRReactions enumerates every Argus-posted comment on a PR and runs the
 // reaction-handling pipeline on each. Used to work around GitHub's lack of
-// webhook events for reactions on PR review comments — on each pull_request
-// event (synchronize/reopened/etc.) we best-effort re-check reactions.
+// webhook events for reactions on PR review comments. Review launches wait for
+// this sweep so reaction-owned feedback is current before dismissal retrieval.
 //
-// One bad comment shouldn't abort the sweep, but a systemic failure (auth,
-// permissions, rate-limit) will produce the same error for every remaining
-// comment, so we classify and short-circuit on fatal errors to avoid an
-// N-retry storm. Returns the terminating error (fatal) or nil on clean sweep.
+// Comment-local failures are accumulated while the sweep continues to converge
+// the remaining comments. Any observation/reconciliation failure is returned: a
+// caller must not run a review against potentially stale reaction trust. Actor
+// budget exhaustion is different because reactors control it; the overloaded
+// comment degrades to neutral after clearing reversible reaction-only memory.
+// Systemic auth, permission, and rate-limit failures abort immediately to avoid
+// an N-retry storm.
 func (ra *ReactionAnalyzer) SweepPRReactions(ctx context.Context, installationID int64, repoFullName string, prNumber int) error {
+	if ra != nil && ra.logger != nil {
+		ra.logger.InfoContext(ctx, "reaction sweep started", "event", "pipeline.reaction.sweep_started", "installation_id", installationID, "repo", repoFullName, "pr_number", prNumber)
+	}
 	if ra == nil || ra.store == nil {
-		return nil
+		return fmt.Errorf("reaction sweep is not configured")
 	}
 	ids, err := ra.store.ListPRGithubCommentIDs(ctx, repoFullName, prNumber)
 	if err != nil {
 		return fmt.Errorf("listing PR comment ids: %w", err)
 	}
 	if len(ids) == 0 {
+		ra.logger.InfoContext(ctx, "reaction sweep completed", "event", "pipeline.reaction.sweep_completed", "installation_id", installationID, "repo", repoFullName, "pr_number", prNumber, "comment_count", 0, "failure_count", 0)
 		return nil
 	}
 	ra.logger.Debug("reaction sweep", "pr", prNumber, "comment_count", len(ids))
+	permissions := newReactionPermissionCache()
+	var failures []error
 	for _, id := range ids {
 		select {
 		case <-ctx.Done():
@@ -212,14 +366,20 @@ func (ra *ReactionAnalyzer) SweepPRReactions(ctx context.Context, installationID
 			PRNumber:       prNumber,
 			CommentID:      id,
 		}
-		if err := ra.HandleCommentReactions(ctx, evt); err != nil {
+		if err := ra.handleCommentReactions(ctx, evt, permissions); err != nil {
 			ra.logger.Warn("reaction sweep: comment failed", "error", err, "comment_id", id)
 			if isSystemicSweepError(err) {
 				// Same error will repeat for every remaining comment. Stop.
 				return fmt.Errorf("reaction sweep aborted (systemic): %w", err)
 			}
+			failures = append(failures, fmt.Errorf("comment %d: %w", id, err))
 		}
 	}
+	if err := errors.Join(failures...); err != nil {
+		ra.logger.WarnContext(ctx, "reaction sweep incomplete", "event", "pipeline.reaction.sweep_failed", "installation_id", installationID, "repo", repoFullName, "pr_number", prNumber, "comment_count", len(ids), "failure_count", len(failures), "error", err)
+		return fmt.Errorf("reaction sweep incomplete: %w", err)
+	}
+	ra.logger.InfoContext(ctx, "reaction sweep completed", "event", "pipeline.reaction.sweep_completed", "installation_id", installationID, "repo", repoFullName, "pr_number", prNumber, "comment_count", len(ids), "failure_count", 0, "permission_lookups", permissions.lookups)
 	return nil
 }
 
@@ -229,11 +389,11 @@ func (ra *ReactionAnalyzer) SweepPRReactions(ctx context.Context, installationID
 // No-op when the comment matched no pattern (patternID nil) or the signal is
 // soft ("ignored"). Shared by the reaction and reply outcome paths. Every
 // failure is non-fatal Warn — outcome learning must never break the webhook.
-func recordPatternOutcome(ctx context.Context, st *store.Store, logger *slog.Logger, patternID *int64, action string) {
+func recordPatternOutcome(ctx context.Context, st patternOutcomeRecorder, logger *slog.Logger, commentID uuid.UUID, patternID *int64, action string) {
 	if patternID == nil || (action != "confirmed" && action != "dismissed") {
 		return
 	}
-	quality, ok, err := st.RecordPatternOutcome(ctx, *patternID, action == "confirmed")
+	quality, ok, err := st.RecordPatternOutcome(ctx, commentID, *patternID, action == "confirmed")
 	if err != nil {
 		logger.Warn("pattern outcome", "error", err, "pattern_id", *patternID, "action", action)
 		return

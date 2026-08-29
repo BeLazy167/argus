@@ -92,8 +92,8 @@ func TestApplyThresholdFilterNoResurrection(t *testing.T) {
 	run := &PipelineRun{
 		FileReviews: []FileReview{
 			{Path: "a.go", Comments: []FileComment{
-				{Line: 1, What: "near miss", Severity: SeverityWarning, Score: 40},  // 45-10 <= 40 < 45 → minor
-				{Line: 2, What: "way below", Severity: SeverityWarning, Score: 10},  // drop
+				{Line: 1, What: "near miss", Severity: SeverityWarning, Score: 40},     // 45-10 <= 40 < 45 → minor
+				{Line: 2, What: "way below", Severity: SeverityWarning, Score: 10},     // drop
 				{Line: 3, What: "also below", Severity: SeveritySuggestion, Score: 30}, // drop (55-10=45 > 30)
 			}},
 		},

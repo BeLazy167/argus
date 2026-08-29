@@ -106,7 +106,15 @@ func minorNoteFrom(path string, c FileComment) MinorNote {
 // Execute runs the judge + deterministic caps + threshold filter for EVERY
 // review (a single cheap LLM call). Pass2/validate/multi-pass remain gated
 // behind deep review elsewhere — only the earned-findings gate is always on.
-func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
+func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) (err error) {
+	opID, started := pipelineOperationStart(ctx, slog.Default(), "scoring_stage", "judge, deduplicate, calibrate, confidence-label, and threshold every review finding while degrading safely when scoring is unavailable", run)
+	defer func() {
+		if err != nil {
+			pipelineOperationFailure(ctx, slog.Default(), opID, "scoring_stage", started, err)
+			return
+		}
+		pipelineOperationResult(ctx, slog.Default(), opID, "scoring_stage", "success", started, map[string]any{"file_reviews": run.FileReviews, "all_file_reviews": run.AllFileReviews, "minor_notes": run.MinorNotes, "scoring_skipped": run.ScoringSkipped, "tokens": run.Tokens.Scoring}, "finding_count", countFlatComments(run))
+	}()
 	// Resolve the judge model: repo row → org row, else scoring is skipped.
 	// Configuration-gap skips are never silent — ScoringUnconfigured surfaces
 	// a setup notice in the posted summary (scoringSkippedNotice).
@@ -173,7 +181,7 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 	}
 	run.Tokens.addToTotal(run.Tokens.Scoring)
 	if run.EventBus != nil {
-		run.EventBus.Publish(run.ReviewID, EventTokenUpdate, map[string]any{
+		run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventTokenUpdate, map[string]any{
 			"total_tokens": run.Tokens.Total.TotalTokens,
 			"cost":         run.Tokens.Total.Cost,
 		})
@@ -307,7 +315,7 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) error {
 	})
 
 	if run.EventBus != nil {
-		run.EventBus.Publish(run.ReviewID, EventScoringUpdate, map[string]any{
+		run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventScoringUpdate, map[string]any{
 			"kept":        kept,
 			"dropped":     dropped,
 			"minor_notes": minor,
@@ -378,7 +386,7 @@ func applyThresholdFilter(run *PipelineRun, skip func(fi, ci int) bool) (kept, m
 func buildScoringPrompt(run *PipelineRun, memContext string) string {
 	var sb strings.Builder
 	if memContext != "" {
-		sb.WriteString(memContext)
+		sb.WriteString(wrapRetrievedMemory(memContext))
 		sb.WriteString("\n")
 	}
 	// Sanitize + truncate user-controlled fields
@@ -513,7 +521,7 @@ func buildPatternTrustCalibration(ctx context.Context, st *store.Store, installa
 	return fmt.Sprintf("\n\n## Pattern Trust\n%d learned pattern(s) have quality <%.1f — developers dismissed matching findings repeatedly. Score findings that match them lower.", len(low), patternTrustFloor)
 }
 
-// fetchScoringContext retrieves repo patterns + per-file synthesis from Supermemory to calibrate scoring.
+// fetchScoringContext retrieves repo patterns + per-file synthesis from memory to calibrate scoring.
 // Non-fatal: returns empty string on any error.
 func fetchScoringContext(ctx context.Context, indexer memory.Indexer, thresholds memory.Thresholds, owner, repo string, files []FileReview) string {
 	if indexer == nil || owner == "" || repo == "" {

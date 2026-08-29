@@ -252,3 +252,31 @@ func TestParseSimulationResponse_BackfillsWhyAndFix(t *testing.T) {
 		t.Errorf("Fix not backfilled from suggestion: %q", res.Fix)
 	}
 }
+
+func TestParseSimulationResponseRecoversCompletedFieldsFromTruncation(t *testing.T) {
+	t.Parallel()
+
+	content := `{"passes":false,"confidence":0.9,"verdict":"broken","why":"Token validation fails.","fix":"Validate before decoding.","root_cause":"Malformed tokens reach decoding.","impact":"truncated`
+	got, err := parseSimulationResponse(content, "token check")
+	if err != nil {
+		t.Fatalf("parseSimulationResponse() unexpected error: %v", err)
+	}
+	if got.Passes {
+		t.Fatal("passes = true, want false")
+	}
+	if got.Confidence != 0.9 || got.Verdict != "broken" {
+		t.Fatalf("confidence/verdict = %v/%q, want 0.9/broken", got.Confidence, got.Verdict)
+	}
+	if got.Why != "Token validation fails." || got.Fix != "Validate before decoding." {
+		t.Fatalf("why/fix = %q/%q", got.Why, got.Fix)
+	}
+}
+
+func TestParseSimulationResponseRejectsSalvagedIncompleteVerdict(t *testing.T) {
+	t.Parallel()
+
+	_, err := parseSimulationResponse(`{"passes":true,"confidence":`, "broken scenario")
+	if err == nil || !strings.Contains(err.Error(), "truncated verdict fields") {
+		t.Fatalf("parseSimulationResponse() error = %v, want truncated verdict fields", err)
+	}
+}

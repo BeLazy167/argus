@@ -10,8 +10,9 @@ import (
 	"time"
 )
 
-const deleteProviderKey = `-- name: DeleteProviderKey :execrows
+const deleteProviderKey = `-- name: DeleteProviderKey :one
 DELETE FROM provider_keys WHERE id = $1 AND installation_id = $2
+RETURNING provider
 `
 
 type DeleteProviderKeyParams struct {
@@ -19,16 +20,15 @@ type DeleteProviderKeyParams struct {
 	InstallationID int64 `json:"installation_id"`
 }
 
-func (q *Queries) DeleteProviderKey(ctx context.Context, arg DeleteProviderKeyParams) (int64, error) {
-	result, err := q.db.Exec(ctx, deleteProviderKey, arg.ID, arg.InstallationID)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
+func (q *Queries) DeleteProviderKey(ctx context.Context, arg DeleteProviderKeyParams) (string, error) {
+	row := q.db.QueryRow(ctx, deleteProviderKey, arg.ID, arg.InstallationID)
+	var provider string
+	err := row.Scan(&provider)
+	return provider, err
 }
 
 const listProviderKeys = `-- name: ListProviderKeys :many
-SELECT id, installation_id, repo_id, provider, api_key_enc, base_url, key_hint, created_at, updated_at
+SELECT id, installation_id, repo_id, provider, api_key_enc, base_url, model, key_hint, created_at, updated_at
 FROM provider_keys WHERE installation_id = $1 ORDER BY provider, repo_id NULLS FIRST
 `
 
@@ -39,6 +39,7 @@ type ListProviderKeysRow struct {
 	Provider       string    `json:"provider"`
 	APIKeyEnc      string    `json:"api_key_enc"`
 	BaseURL        *string   `json:"base_url"`
+	Model          *string   `json:"model"`
 	KeyHint        *string   `json:"key_hint"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
@@ -60,6 +61,7 @@ func (q *Queries) ListProviderKeys(ctx context.Context, installationID int64) ([
 			&i.Provider,
 			&i.APIKeyEnc,
 			&i.BaseURL,
+			&i.Model,
 			&i.KeyHint,
 			&i.CreatedAt,
 			&i.UpdatedAt,
@@ -120,14 +122,15 @@ func (q *Queries) ResolveAPIKeyRepoLevel(ctx context.Context, arg ResolveAPIKeyR
 }
 
 const upsertProviderKeyOrgLevel = `-- name: UpsertProviderKeyOrgLevel :one
-INSERT INTO provider_keys (installation_id, repo_id, provider, api_key_enc, base_url, key_hint)
-VALUES ($1, NULL, $2, $3, $4, $5)
+INSERT INTO provider_keys (installation_id, repo_id, provider, api_key_enc, base_url, key_hint, model)
+VALUES ($1, NULL, $2, $3, $4, $5, $6)
 ON CONFLICT (installation_id, provider) WHERE repo_id IS NULL DO UPDATE SET
-    api_key_enc = EXCLUDED.api_key_enc,
-    base_url = EXCLUDED.base_url,
-    key_hint = EXCLUDED.key_hint,
+    api_key_enc = COALESCE(NULLIF(EXCLUDED.api_key_enc, ''), provider_keys.api_key_enc),
+    key_hint = COALESCE(NULLIF(EXCLUDED.key_hint, ''), provider_keys.key_hint),
+    base_url = COALESCE(EXCLUDED.base_url, provider_keys.base_url),
+    model = COALESCE(EXCLUDED.model, provider_keys.model),
     updated_at = NOW()
-RETURNING id, installation_id, repo_id, provider, api_key_enc, base_url, key_hint, created_at, updated_at
+RETURNING id, installation_id, repo_id, provider, api_key_enc, base_url, model, key_hint, created_at, updated_at
 `
 
 type UpsertProviderKeyOrgLevelParams struct {
@@ -136,6 +139,7 @@ type UpsertProviderKeyOrgLevelParams struct {
 	APIKeyEnc      string  `json:"api_key_enc"`
 	BaseURL        *string `json:"base_url"`
 	KeyHint        *string `json:"key_hint"`
+	Model          *string `json:"model"`
 }
 
 type UpsertProviderKeyOrgLevelRow struct {
@@ -145,11 +149,15 @@ type UpsertProviderKeyOrgLevelRow struct {
 	Provider       string    `json:"provider"`
 	APIKeyEnc      string    `json:"api_key_enc"`
 	BaseURL        *string   `json:"base_url"`
+	Model          *string   `json:"model"`
 	KeyHint        *string   `json:"key_hint"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 }
 
+// PATCH semantics on conflict (Store.UpsertProviderKey delegates here):
+// omitted base_url/model preserve stored values; an empty api_key_enc preserves
+// the stored key (keyless config updates must not destroy a stored key).
 func (q *Queries) UpsertProviderKeyOrgLevel(ctx context.Context, arg UpsertProviderKeyOrgLevelParams) (UpsertProviderKeyOrgLevelRow, error) {
 	row := q.db.QueryRow(ctx, upsertProviderKeyOrgLevel,
 		arg.InstallationID,
@@ -157,6 +165,7 @@ func (q *Queries) UpsertProviderKeyOrgLevel(ctx context.Context, arg UpsertProvi
 		arg.APIKeyEnc,
 		arg.BaseURL,
 		arg.KeyHint,
+		arg.Model,
 	)
 	var i UpsertProviderKeyOrgLevelRow
 	err := row.Scan(
@@ -166,6 +175,7 @@ func (q *Queries) UpsertProviderKeyOrgLevel(ctx context.Context, arg UpsertProvi
 		&i.Provider,
 		&i.APIKeyEnc,
 		&i.BaseURL,
+		&i.Model,
 		&i.KeyHint,
 		&i.CreatedAt,
 		&i.UpdatedAt,
@@ -174,14 +184,15 @@ func (q *Queries) UpsertProviderKeyOrgLevel(ctx context.Context, arg UpsertProvi
 }
 
 const upsertProviderKeyRepoLevel = `-- name: UpsertProviderKeyRepoLevel :one
-INSERT INTO provider_keys (installation_id, repo_id, provider, api_key_enc, base_url, key_hint)
-VALUES ($1, $2, $3, $4, $5, $6)
+INSERT INTO provider_keys (installation_id, repo_id, provider, api_key_enc, base_url, key_hint, model)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
 ON CONFLICT (installation_id, repo_id, provider) DO UPDATE SET
-    api_key_enc = EXCLUDED.api_key_enc,
-    base_url = EXCLUDED.base_url,
-    key_hint = EXCLUDED.key_hint,
+    api_key_enc = COALESCE(NULLIF(EXCLUDED.api_key_enc, ''), provider_keys.api_key_enc),
+    key_hint = COALESCE(NULLIF(EXCLUDED.key_hint, ''), provider_keys.key_hint),
+    base_url = COALESCE(EXCLUDED.base_url, provider_keys.base_url),
+    model = COALESCE(EXCLUDED.model, provider_keys.model),
     updated_at = NOW()
-RETURNING id, installation_id, repo_id, provider, api_key_enc, base_url, key_hint, created_at, updated_at
+RETURNING id, installation_id, repo_id, provider, api_key_enc, base_url, model, key_hint, created_at, updated_at
 `
 
 type UpsertProviderKeyRepoLevelParams struct {
@@ -191,6 +202,7 @@ type UpsertProviderKeyRepoLevelParams struct {
 	APIKeyEnc      string  `json:"api_key_enc"`
 	BaseURL        *string `json:"base_url"`
 	KeyHint        *string `json:"key_hint"`
+	Model          *string `json:"model"`
 }
 
 type UpsertProviderKeyRepoLevelRow struct {
@@ -200,6 +212,7 @@ type UpsertProviderKeyRepoLevelRow struct {
 	Provider       string    `json:"provider"`
 	APIKeyEnc      string    `json:"api_key_enc"`
 	BaseURL        *string   `json:"base_url"`
+	Model          *string   `json:"model"`
 	KeyHint        *string   `json:"key_hint"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
@@ -213,6 +226,7 @@ func (q *Queries) UpsertProviderKeyRepoLevel(ctx context.Context, arg UpsertProv
 		arg.APIKeyEnc,
 		arg.BaseURL,
 		arg.KeyHint,
+		arg.Model,
 	)
 	var i UpsertProviderKeyRepoLevelRow
 	err := row.Scan(
@@ -222,6 +236,7 @@ func (q *Queries) UpsertProviderKeyRepoLevel(ctx context.Context, arg UpsertProv
 		&i.Provider,
 		&i.APIKeyEnc,
 		&i.BaseURL,
+		&i.Model,
 		&i.KeyHint,
 		&i.CreatedAt,
 		&i.UpdatedAt,

@@ -2,7 +2,9 @@
 
 Everything needed to run your own Argus: a GitHub App, Postgres, the Go backend, the Next.js dashboard, and a Clerk instance for dashboard auth. LLM keys are BYOK — added at runtime via the dashboard, never via env.
 
-Set `SELF_HOSTED=true` on the backend to disable plan gating (self-hosts have no billing; every installation gets pro features). The API reports the effective tier, so the dashboard reflects pro automatically — no web-side configuration needed. `SELF_HOSTED=true` also makes reviews **auto-run unconditionally**: with no billing to gate, a self-host reviews on every opened/pushed/reopened PR regardless of the stored `auto_run` setting (see [Auto-run & re-review](#auto-run--re-review)).
+Argus has no paid tier and no feature gating — every capability is available to every installation, hosted or self-hosted. Deep review, simulation, memory and diagrams are per-repo settings you turn on, not upsells.
+
+`SELF_HOSTED=true` remains meaningful for one behavioural default: a self-host reviews **unconditionally**, on every opened/pushed/reopened PR, regardless of the stored `auto_run` setting (see [Auto-run & re-review](#auto-run--re-review)).
 
 ## 1. Create the GitHub App
 
@@ -31,7 +33,8 @@ These match the API calls the backend actually makes:
 
 ### Subscribe to events
 
-- `pull_request` — triggers reviews
+- `pull_request` — triggers reviews and refreshes the graph after a merge
+- `push` — refreshes the graph when the default branch moves
 - `pull_request_review_comment` — reply analysis on inline comment threads
 - `issue_comment` — `@argus-eye` commands
 - `installation` — tracks installs/uninstalls
@@ -79,7 +82,9 @@ When `CLERK_JWKS_URL` is unset the backend cannot verify JWTs and every authenti
 ## 5. LLM provider (BYOK)
 
 1. Set `ENCRYPTION_KEY` on the backend (`openssl rand -hex 32`) — provider keys are encrypted at rest with it.
-2. Open the dashboard **Providers** page and add your key: OpenRouter or any OpenAI-compatible endpoint (OpenAI, Azure, Groq, Together, Ollama, vLLM, ...).
+2. Open the dashboard **Providers** page and add your key: OpenRouter, Vercel AI Gateway, or any OpenAI-compatible endpoint (OpenAI, Azure, Groq, Together, Ollama, vLLM, ...).
+
+   For Vercel AI Gateway, model IDs use `creator/model` form (e.g. `openai/gpt-5.6-sol`). Append `?only=<provider>` to the base URL — comma-separated for several — to pin which upstream serves the request, e.g. `https://ai-gateway.vercel.sh/v1?only=azure`. Without it the gateway chooses, and may fall back between your own BYOK credentials and Vercel-billed ones.
 3. Pick models per pipeline stage on the **Settings** page.
 
 Reviews fail with an onboarding comment ("configure your API key") until a provider key and model config exist.
@@ -94,6 +99,8 @@ pnpm dev
 ```
 
 Point `NEXT_PUBLIC_API_URL` at your backend and set `CORS_ALLOW_ORIGIN` on the backend to the dashboard origin.
+
+PR diagrams use the dashboard's server-side Mermaid parser before the backend stores a diagram or edits a PR description. Generate one shared value (`openssl rand -hex 32`) and set it as `MERMAID_VALIDATOR_SECRET` on **both** the backend and web deployment. Set `MERMAID_VALIDATOR_BASE_URL` on the backend to the explicit origin of that web deployment; it must be reachable from the backend. The backend has no validator-origin default and refuses an unpaired URL or secret, so it cannot send private diagram evidence or the shared secret to the vendor dashboard by accident. `DASHBOARD_BASE_URL` remains the link target for GitHub comments. Diagram generation fails closed when the parser service, shared secret, or deployed Mermaid version is unavailable; the rest of the review still completes.
 
 ## Auto-run & re-review
 

@@ -39,6 +39,8 @@ type meResponse struct {
 // user.Get(ctx, userID).ExternalAccounts to populate github_login +
 // email without a round-trip to the FE.
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.handleMe")
+	defer op.Finish(w)
 	userID := getUserID(r.Context())
 	if userID == "" {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})

@@ -143,6 +143,10 @@ func WeightedAddressRate(human, agent, posted int) float64 {
 //
 // Every failure is logged and skipped — this job must never fail the webhook.
 func (o *Orchestrator) detectFindingOutcomes(ctx context.Context, event ghpkg.PREvent, repoID int64) {
+	opID, started := pipelineOperationStart(ctx, o.logger, "gauge_outcome_detection", "classify every posted finding as addressed by a human, addressed by an agent, ignored, or deferred and reconcile the lifecycle ledger", map[string]any{"event": event, "repo_id": repoID})
+	defer func() {
+		pipelineOperationResult(ctx, o.logger, opID, "gauge_outcome_detection", "completed", started, map[string]any{"pr": event.PRNumber, "repo": event.RepoFullName})
+	}()
 	findings, err := o.st.ListPostedFindings(ctx, repoID, event.PRNumber)
 	if err != nil {
 		o.logger.Warn("[gauge] listing posted findings", "error", err, "pr", event.PRNumber, "repo", event.RepoFullName)

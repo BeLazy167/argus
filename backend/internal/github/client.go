@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"strings"
 	"time"
 
@@ -38,7 +39,7 @@ func NewClient(app *App, appSlug string) *Client {
 	return &Client{
 		app:           app,
 		appSlug:       appSlug,
-		restLimiter:   rate.NewLimiter(rate.Limit(20), 5),  // 20 req/s, burst 5
+		restLimiter:   rate.NewLimiter(rate.Limit(20), 5),            // 20 req/s, burst 5
 		searchLimiter: rate.NewLimiter(rate.Every(2*time.Second), 2), // 1 req/2s, burst 2
 	}
 }
@@ -53,21 +54,26 @@ type graphQLErrors struct {
 
 // doGraphQL executes a GraphQL request and checks for both HTTP and GraphQL errors.
 // It reads the raw response body to detect GraphQL errors that go-github's Do ignores.
-func doGraphQL(ctx context.Context, client *gh.Client, body any, result any) error {
+func doGraphQL(ctx context.Context, client *gh.Client, installationID int64, body any, result any) (err error) {
+	operation, owner, repo, prNumber, attrs := graphQLOperation(body)
+	call := beginAPICall(ctx, operation, installationID, owner, repo, prNumber, attrs...)
+	var response *gh.Response
+	defer func() { call.finish(response, err) }()
+
 	req, err := client.NewRequest("POST", "graphql", body)
 	if err != nil {
 		return fmt.Errorf("creating graphql request: %w", err)
 	}
 	// BareDo sends the request without reading/closing the body, so we can read it ourselves.
 	// client.Do(ctx, req, nil) reads and closes the body, making subsequent ReadAll fail.
-	resp, err := client.BareDo(ctx, req)
-	if resp != nil && resp.Body != nil {
-		defer resp.Body.Close()
+	response, err = client.BareDo(ctx, req)
+	if response != nil && response.Body != nil {
+		defer response.Body.Close()
 	}
 	if err != nil {
 		return err
 	}
-	raw, err := io.ReadAll(resp.Body)
+	raw, err := io.ReadAll(response.Body)
 	if err != nil {
 		return fmt.Errorf("reading graphql response: %w", err)
 	}
@@ -90,7 +96,8 @@ func doGraphQL(ctx context.Context, client *gh.Client, body any, result any) err
 }
 
 // GetPRDiff fetches the unified diff for a pull request.
-func (c *Client) GetPRDiff(ctx context.Context, installationID int64, owner, repo string, prNumber int) (string, error) {
+func (c *Client) getPRDiffLogged(ctx context.Context, installationID int64, owner, repo string, prNumber int) (string, error) {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return "", err
@@ -123,7 +130,8 @@ type PRCommit struct {
 //
 // Used by intent extraction to pull the author's per-commit narrative when
 // the PR description is thin.
-func (c *Client) ListPRCommits(ctx context.Context, installationID int64, owner, repo string, prNumber, maxCommits int) ([]PRCommit, error) {
+func (c *Client) listPRCommitsLogged(ctx context.Context, installationID int64, owner, repo string, prNumber, maxCommits int) ([]PRCommit, error) {
+
 	if maxCommits <= 0 {
 		return nil, nil
 	}
@@ -161,7 +169,8 @@ func (c *Client) ListPRCommits(ctx context.Context, installationID int64, owner,
 }
 
 // GetPRFiles fetches per-file change data for a pull request with pagination.
-func (c *Client) GetPRFiles(ctx context.Context, installationID int64, owner, repo string, prNumber int) ([]*gh.CommitFile, error) {
+func (c *Client) getPRFilesLogged(ctx context.Context, installationID int64, owner, repo string, prNumber int) ([]*gh.CommitFile, error) {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return nil, err
@@ -187,7 +196,8 @@ func (c *Client) GetPRFiles(ctx context.Context, installationID int64, owner, re
 }
 
 // UpdatePRDescription updates the body of a pull request.
-func (c *Client) UpdatePRDescription(ctx context.Context, installationID int64, owner, repo string, prNumber int, body string) error {
+func (c *Client) updatePRDescriptionLogged(ctx context.Context, installationID int64, owner, repo string, prNumber int, body string) error {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return err
@@ -202,8 +212,74 @@ func (c *Client) UpdatePRDescription(ctx context.Context, installationID int64, 
 	return nil
 }
 
+type permanentFileContentError struct {
+	err error
+}
+
+func (e *permanentFileContentError) Error() string { return e.err.Error() }
+func (e *permanentFileContentError) Unwrap() error { return e.err }
+
+// IsPermanentGitObjectError reports whether retrying the same immutable Git
+// object cannot succeed. Authentication, rate limits, transport failures, and
+// server errors are deliberately transient.
+func IsPermanentGitObjectError(err error) bool {
+	var permanent *permanentFileContentError
+	if errors.As(err, &permanent) {
+		return true
+	}
+	// go-github rejects literal catch-all directory names such as [...slug]
+	// before making a request because they contain "..". The immutable tree
+	// cannot change, so retrying that path representation can never succeed.
+	if strings.Contains(err.Error(), "path must not contain '..' due to auth vulnerability issue") {
+		return true
+	}
+	var responseErr *gh.ErrorResponse
+	if !errors.As(err, &responseErr) || responseErr.Response == nil {
+		return false
+	}
+	switch responseErr.Response.StatusCode {
+	case http.StatusBadRequest, http.StatusNotFound, http.StatusGone, http.StatusUnprocessableEntity:
+		return true
+	default:
+		return false
+	}
+}
+
+// maxFileContentBytes bounds the raw-blob fallback before parser and prompt
+// callers receive the content. The Contents API already inlines files up to
+// 1 MiB; 5 MiB covers unusually large source files without allowing one blob
+// to dominate a graph window's memory.
+const maxFileContentBytes = 5 << 20
+
+type rawBlobFetcher func(context.Context, string) ([]byte, error)
+
+func decodeRepositoryContent(ctx context.Context, content *gh.RepositoryContent, fetchRaw rawBlobFetcher) (string, error) {
+	decoded, err := content.GetContent()
+	if err == nil {
+		return decoded, nil
+	}
+	if content.GetEncoding() != "none" {
+		return "", &permanentFileContentError{err: fmt.Errorf("decoding content: %w", err)}
+	}
+	if content.GetSHA() == "" {
+		return "", &permanentFileContentError{err: errors.New("raw blob fallback requires a blob SHA")}
+	}
+	if content.GetSize() < 0 || content.GetSize() > maxFileContentBytes {
+		return "", &permanentFileContentError{err: fmt.Errorf("file size %d exceeds graph source limit %d", content.GetSize(), maxFileContentBytes)}
+	}
+	raw, err := fetchRaw(ctx, content.GetSHA())
+	if err != nil {
+		return "", fmt.Errorf("fetching raw blob: %w", err)
+	}
+	if len(raw) > maxFileContentBytes {
+		return "", &permanentFileContentError{err: fmt.Errorf("raw blob size %d exceeds graph source limit %d", len(raw), maxFileContentBytes)}
+	}
+	return string(raw), nil
+}
+
 // GetFileContent fetches the content of a file from a repo at a specific ref.
-func (c *Client) GetFileContent(ctx context.Context, installationID int64, owner, repo, path, ref string) (string, error) {
+func (c *Client) getFileContentLogged(ctx context.Context, installationID int64, owner, repo, path, ref string) (string, error) {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return "", err
@@ -217,23 +293,60 @@ func (c *Client) GetFileContent(ctx context.Context, installationID int64, owner
 		return "", fmt.Errorf("fetching file content: %w", err)
 	}
 	if content == nil {
-		return "", fmt.Errorf("file %s not found at ref %s", path, ref)
+		return "", &permanentFileContentError{err: fmt.Errorf("file %s is not a regular file at ref %s", path, ref)}
 	}
 
-	decoded, err := content.GetContent()
-	if err != nil {
-		return "", fmt.Errorf("decoding content: %w", err)
-	}
-	return decoded, nil
+	return decodeRepositoryContent(ctx, content, func(ctx context.Context, sha string) ([]byte, error) {
+		if err := c.restLimiter.Wait(ctx); err != nil {
+			return nil, fmt.Errorf("rate limit wait: %w", err)
+		}
+		raw, _, err := client.Git.GetBlobRaw(ctx, owner, repo, sha)
+		return raw, err
+	})
+}
+
+// reviewPostError carries the only safe automatic-retry fact: no CreateReview
+// request could have created a review. Every other failure remains ambiguous.
+type reviewPostError struct {
+	err                  error
+	definitelyNotCreated bool
+}
+
+func (e *reviewPostError) Error() string              { return e.err.Error() }
+func (e *reviewPostError) Unwrap() error              { return e.err }
+func (e *reviewPostError) DefinitelyNotCreated() bool { return e.definitelyNotCreated }
+
+// IsReviewDefinitelyNotCreated reports whether GitHub conclusively rejected the
+// mutation, or whether it failed before any CreateReview request was sent.
+func IsReviewDefinitelyNotCreated(err error) bool {
+	var certain interface{ DefinitelyNotCreated() bool }
+	return errors.As(err, &certain) && certain.DefinitelyNotCreated()
+}
+
+func definitelyNotCreated(err error) error {
+	return &reviewPostError{err: err, definitelyNotCreated: true}
+}
+
+func isConclusiveReview4xx(err error) bool {
+	var responseErr *gh.ErrorResponse
+	return errors.As(err, &responseErr) && responseErr.Response != nil &&
+		responseErr.Response.StatusCode >= http.StatusBadRequest && responseErr.Response.StatusCode < http.StatusInternalServerError
 }
 
 // PostReview creates a pull request review with all inline comments in one atomic API call.
 // Comments must be pre-validated — invalid lines should be folded into the summary body
 // by the caller, not included in the Comments slice.
-func (c *Client) PostReview(ctx context.Context, installationID int64, owner, repo string, prNumber int, review *ReviewSubmission) (int64, error) {
+func (c *Client) postReviewLogged(ctx context.Context, installationID int64, owner, repo string, prNumber int, review *ReviewSubmission) (int64, error) {
+
+	if review == nil {
+		return 0, definitelyNotCreated(errors.New("posting review: nil submission"))
+	}
+	if c == nil || c.app == nil {
+		return 0, definitelyNotCreated(errors.New("creating github client: GitHub App is not configured"))
+	}
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
-		return 0, fmt.Errorf("creating github client: %w", err)
+		return 0, definitelyNotCreated(fmt.Errorf("creating github client: %w", err))
 	}
 
 	comments := make([]*gh.DraftReviewComment, len(review.Comments))
@@ -264,11 +377,21 @@ func (c *Client) PostReview(ctx context.Context, installationID int64, owner, re
 		req.CommitID = gh.Ptr(review.HeadSHA)
 	}
 
-	// Single atomic call. Retry on transient errors.
+	// Single atomic call. Retry on transient errors. Once any request has an
+	// ambiguous outcome, a later conclusive response cannot erase that earlier
+	// uncertainty.
 	if err := c.restLimiter.Wait(ctx); err != nil {
-		return 0, fmt.Errorf("rate limit wait: %w", err)
+		return 0, definitelyNotCreated(fmt.Errorf("rate limit wait: %w", err))
 	}
-	ghReview, _, err := client.PullRequests.CreateReview(ctx, owner, repo, prNumber, req)
+	mutationUncertain := false
+	createReview := func() (*gh.PullRequestReview, error) {
+		created, _, createErr := client.PullRequests.CreateReview(ctx, owner, repo, prNumber, req)
+		if createErr != nil && !isConclusiveReview4xx(createErr) {
+			mutationUncertain = true
+		}
+		return created, createErr
+	}
+	ghReview, err := createReview()
 
 	// Handle secondary rate limit (403) — respect Retry-After and retry once.
 	if err != nil {
@@ -297,29 +420,33 @@ func (c *Client) PostReview(ctx context.Context, installationID int64, owner, re
 			select {
 			case <-time.After(wait):
 			case <-ctx.Done():
-				return 0, fmt.Errorf("context cancelled during rate limit wait: %w", ctx.Err())
+				waitErr := fmt.Errorf("context cancelled during rate limit wait: %w", ctx.Err())
+				if !mutationUncertain {
+					return 0, definitelyNotCreated(waitErr)
+				}
+				return 0, &reviewPostError{err: waitErr}
 			}
-			ghReview, _, err = client.PullRequests.CreateReview(ctx, owner, repo, prNumber, req)
+			ghReview, err = createReview()
 		}
 	}
 
-	// Retry once on 5xx (transient GitHub errors).
+	// A 5xx may mean GitHub committed the review and lost the response. Never
+	// repeat that mutation: an immediate negative list is not authoritative under
+	// eventual consistency. An exact marker match is positive evidence; every
+	// other result remains ambiguous for the durable dashboard reconciler.
 	if err != nil && isRetryable(err) {
-		slog.Warn("review post failed (5xx), checking if review was created anyway",
+		slog.Warn("review post failed (5xx), reconciling exact marker without retrying mutation",
 			"comments", len(comments), "error", err)
-		time.Sleep(2 * time.Second)
-
-		// GitHub 502s are phantom failures — the review may have been created
-		// despite the error response. Check before retrying to avoid duplicates.
-		existingID, checkErr := findBotReview(ctx, client, owner, repo, prNumber, c.appSlug)
-		if checkErr == nil && existingID > 0 {
-			slog.Info("review was created despite 5xx, skipping retry",
-				"github_review_id", existingID)
-			return existingID, nil
+		marker := reviewMarkerFromBody(review.Summary)
+		if marker != "" {
+			existingID, found, checkErr := c.FindReviewByMarker(ctx, installationID, owner, repo, prNumber, marker, review.HeadSHA)
+			if checkErr == nil && found {
+				slog.Info("review was created despite 5xx, recovered exact marker",
+					"github_review_id", existingID)
+				return existingID, nil
+			}
+			slog.Warn("exact review marker not yet observable after 5xx", "check_error", checkErr)
 		}
-
-		slog.Warn("no existing review found, retrying", "check_error", checkErr)
-		ghReview, _, err = client.PullRequests.CreateReview(ctx, owner, repo, prNumber, req)
 	}
 	if err != nil && is422(err) {
 		errStr := err.Error()
@@ -328,7 +455,7 @@ func (c *Client) PostReview(ctx context.Context, installationID int64, owner, re
 			slog.Warn("review post failed (422 submitted too quickly), waiting before retry",
 				"comments", len(comments), "error", err)
 			time.Sleep(10 * time.Second)
-			ghReview, _, err = client.PullRequests.CreateReview(ctx, owner, repo, prNumber, req)
+			ghReview, err = createReview()
 			// If still failing with position errors after the wait, fall through to start_line stripping.
 			if err != nil && is422(err) {
 				errStr = err.Error()
@@ -337,7 +464,7 @@ func (c *Client) PostReview(ctx context.Context, installationID int64, owner, re
 					slog.Warn("review post still too quick, waiting longer",
 						"comments", len(comments), "error", err)
 					time.Sleep(20 * time.Second)
-					ghReview, _, err = client.PullRequests.CreateReview(ctx, owner, repo, prNumber, req)
+					ghReview, err = createReview()
 				}
 			}
 		}
@@ -351,15 +478,83 @@ func (c *Client) PostReview(ctx context.Context, installationID int64, owner, re
 				comments[i].StartLine = nil
 				comments[i].StartSide = nil
 			}
-			ghReview, _, err = client.PullRequests.CreateReview(ctx, owner, repo, prNumber, req)
+			ghReview, err = createReview()
 		} else {
 			slog.Warn("review post failed (422 non-line)", "comments", len(comments), "error", err)
 		}
 	}
 	if err != nil {
-		return 0, fmt.Errorf("posting review: %w", err)
+		postErr := fmt.Errorf("posting review: %w", err)
+		if !mutationUncertain && isConclusiveReview4xx(err) {
+			return 0, definitelyNotCreated(postErr)
+		}
+		return 0, &reviewPostError{err: postErr}
+	}
+	if ghReview == nil || ghReview.GetID() <= 0 {
+		return 0, &reviewPostError{err: errors.New("posting review: GitHub returned no review id")}
 	}
 	return ghReview.GetID(), nil
+}
+
+func reviewMarkerFromBody(body string) string {
+	const prefix = "<!-- argus-review:"
+	start := strings.LastIndex(body, prefix)
+	if start < 0 {
+		return ""
+	}
+	end := strings.Index(body[start:], "-->")
+	if end < 0 {
+		return ""
+	}
+	return body[start : start+end+len("-->")]
+}
+
+// ReviewMarker is the stable, hidden identity embedded in one review attempt.
+// It contains no tenant data and is exact-matchable during remote reconciliation.
+func ReviewMarker(reviewID string, generation int) string {
+	return fmt.Sprintf("<!-- argus-review:%s:generation:%d -->", reviewID, generation)
+}
+
+// FindReviewByMarker performs a complete paginated lookup through the same
+// installation-scoped client used to post. A match must have the exact marker,
+// our bot identity, and (when supplied) the reviewed head commit.
+func (c *Client) findReviewByMarkerLogged(ctx context.Context, installationID int64, owner, repo string, prNumber int, marker, headSHA string) (int64, bool, error) {
+
+	if c == nil || c.app == nil {
+		return 0, false, errors.New("listing reviews: GitHub App is not configured")
+	}
+	if marker == "" {
+		return 0, false, errors.New("listing reviews: empty reconciliation marker")
+	}
+	client, err := c.app.ClientForInstallation(installationID)
+	if err != nil {
+		return 0, false, fmt.Errorf("creating github client: %w", err)
+	}
+	opts := &gh.ListOptions{PerPage: 100}
+	for {
+		if err := c.restLimiter.Wait(ctx); err != nil {
+			return 0, false, fmt.Errorf("rate limit wait: %w", err)
+		}
+		reviews, resp, err := client.PullRequests.ListReviews(ctx, owner, repo, prNumber, opts)
+		if err != nil {
+			return 0, false, fmt.Errorf("listing reviews for reconciliation: %w", err)
+		}
+		for _, review := range reviews {
+			if !strings.Contains(review.GetBody(), marker) ||
+				!IsArgusThread(review.GetUser().GetLogin(), c.appSlug) ||
+				(headSHA != "" && review.GetCommitID() != headSHA) {
+				continue
+			}
+			if review.GetID() <= 0 {
+				return 0, false, errors.New("reconciled GitHub review has no id")
+			}
+			return review.GetID(), true, nil
+		}
+		if resp == nil || resp.NextPage == 0 {
+			return 0, false, nil
+		}
+		opts.Page = resp.NextPage
+	}
 }
 
 func isRetryable(err error) bool {
@@ -379,26 +574,9 @@ func is422(err error) bool {
 	return false
 }
 
-// findBotReview checks if the App's bot login (<appSlug>[bot]) already has a
-// review on this PR created in the last 5 minutes. Handles GitHub phantom
-// 502s where the review was created server-side but the response was lost.
-func findBotReview(ctx context.Context, client *gh.Client, owner, repo string, prNumber int, appSlug string) (int64, error) {
-	reviews, _, err := client.PullRequests.ListReviews(ctx, owner, repo, prNumber, &gh.ListOptions{PerPage: 30})
-	if err != nil {
-		return 0, fmt.Errorf("listing reviews: %w", err)
-	}
-	cutoff := time.Now().Add(-5 * time.Minute)
-	for i := len(reviews) - 1; i >= 0; i-- {
-		r := reviews[i]
-		if IsArgusThread(r.GetUser().GetLogin(), appSlug) && r.GetSubmittedAt().Time.After(cutoff) {
-			return r.GetID(), nil
-		}
-	}
-	return 0, nil
-}
-
 // GetCompareCommitsDiff fetches the diff between two commits (for incremental re-review).
-func (c *Client) GetCompareCommitsDiff(ctx context.Context, installationID int64, owner, repo, base, head string) (string, error) {
+func (c *Client) getCompareCommitsDiffLogged(ctx context.Context, installationID int64, owner, repo, base, head string) (string, error) {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return "", err
@@ -435,7 +613,8 @@ type CommitTouch struct {
 // ListCommitsTouchingFile returns commits reachable from ref that modified
 // path since the given time, oldest first. One page (100 commits) is plenty
 // for the address-detection window between a review comment and the merge.
-func (c *Client) ListCommitsTouchingFile(ctx context.Context, installationID int64, owner, repo, path, ref string, since time.Time) ([]CommitTouch, error) {
+func (c *Client) listCommitsTouchingFileLogged(ctx context.Context, installationID int64, owner, repo, path, ref string, since time.Time) ([]CommitTouch, error) {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return nil, err
@@ -465,24 +644,31 @@ func (c *Client) ListCommitsTouchingFile(ctx context.Context, installationID int
 	return out, nil
 }
 
-// ListReviewComments returns all comments for a specific review, used to capture github_comment_ids after posting.
-func (c *Client) ListReviewComments(ctx context.Context, installationID int64, owner, repo string, prNumber int, reviewID int64) ([]*gh.PullRequestComment, error) {
+// ListReviewComments returns all comments for a specific review, used to capture
+// github_comment_ids after posting. It uses the PR-level endpoint because the
+// legacy per-review endpoint omits modern line anchor fields.
+func (c *Client) listReviewCommentsLogged(ctx context.Context, installationID int64, owner, repo string, prNumber int, reviewID int64) ([]*gh.PullRequestComment, error) {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return nil, err
 	}
 
 	var all []*gh.PullRequestComment
-	opts := &gh.ListOptions{PerPage: 100}
+	opts := &gh.PullRequestListCommentsOptions{ListOptions: gh.ListOptions{PerPage: 100}}
 	for {
 		if err := c.restLimiter.Wait(ctx); err != nil {
 			return nil, fmt.Errorf("rate limit wait: %w", err)
 		}
-		comments, resp, err := client.PullRequests.ListReviewComments(ctx, owner, repo, prNumber, reviewID, opts)
+		comments, resp, err := client.PullRequests.ListComments(ctx, owner, repo, prNumber, opts)
 		if err != nil {
 			return nil, fmt.Errorf("listing review comments: %w", err)
 		}
-		all = append(all, comments...)
+		for _, comment := range comments {
+			if comment.GetPullRequestReviewID() == reviewID {
+				all = append(all, comment)
+			}
+		}
 		if resp.NextPage == 0 {
 			break
 		}
@@ -492,7 +678,8 @@ func (c *Client) ListReviewComments(ctx context.Context, installationID int64, o
 }
 
 // ReplyToComment posts a reply to an existing PR review comment thread.
-func (c *Client) ReplyToComment(ctx context.Context, installationID int64, owner, repo string, prNumber int, commentID int64, body string) (*gh.PullRequestComment, error) {
+func (c *Client) replyToCommentLogged(ctx context.Context, installationID int64, owner, repo string, prNumber int, commentID int64, body string) (*gh.PullRequestComment, error) {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return nil, err
@@ -509,7 +696,8 @@ func (c *Client) ReplyToComment(ctx context.Context, installationID int64, owner
 }
 
 // GetPullRequest fetches full PR details (for constructing PREvent from issue_comment).
-func (c *Client) GetPullRequest(ctx context.Context, installationID int64, owner, repo string, prNumber int) (*PREvent, error) {
+func (c *Client) getPullRequestLogged(ctx context.Context, installationID int64, owner, repo string, prNumber int) (*PREvent, error) {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return nil, err
@@ -536,7 +724,8 @@ func (c *Client) GetPullRequest(ctx context.Context, installationID int64, owner
 }
 
 // AddReaction adds an emoji reaction to an issue comment.
-func (c *Client) AddReaction(ctx context.Context, installationID int64, owner, repo string, commentID int64, reaction string) error {
+func (c *Client) addReactionLogged(ctx context.Context, installationID int64, owner, repo string, commentID int64, reaction string) error {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return err
@@ -548,6 +737,45 @@ func (c *Client) AddReaction(ctx context.Context, installationID int64, owner, r
 	return err
 }
 
+// ErrReviewCommentNotFound means GitHub authoritatively reported that the referenced
+// pull request review comment no longer exists. Callers may treat its reaction
+// aggregate as neutral. Other API failures must remain fail-closed.
+var ErrReviewCommentNotFound = errors.New("GitHub review comment not found")
+
+type reviewCommentNotFoundError struct {
+	commentID int64
+	err       error
+}
+
+func (e *reviewCommentNotFoundError) Error() string {
+	return fmt.Sprintf("listing reactions on pull request review comment %d: %v", e.commentID, e.err)
+}
+func (e *reviewCommentNotFoundError) Unwrap() error { return e.err }
+func (e *reviewCommentNotFoundError) Is(target error) bool {
+	return target == ErrReviewCommentNotFound
+}
+
+// commentReactionListError translates only an endpoint-level 404 into the
+// deleted-comment type. The original GitHub error stays in the chain for
+// diagnostics; auth, rate-limit, transport, and server failures stay ordinary
+// errors so the mandatory pre-review sweep fails closed.
+func commentReactionListError(commentID int64, resp *gh.Response, err error) error {
+	status := 0
+	if resp != nil && resp.Response != nil {
+		status = resp.StatusCode
+	}
+	if status == 0 {
+		var responseErr *gh.ErrorResponse
+		if errors.As(err, &responseErr) && responseErr.Response != nil {
+			status = responseErr.Response.StatusCode
+		}
+	}
+	if status == http.StatusNotFound {
+		return &reviewCommentNotFoundError{commentID: commentID, err: err}
+	}
+	return fmt.Errorf("listing comment reactions: %w", err)
+}
+
 // CommentReaction represents a single reaction on a PR review comment.
 type CommentReaction struct {
 	ID      int64
@@ -556,7 +784,8 @@ type CommentReaction struct {
 }
 
 // ListCommentReactions fetches all reactions on a pull request review comment.
-func (c *Client) ListCommentReactions(ctx context.Context, installationID int64, owner, repo string, commentID int64) ([]CommentReaction, error) {
+func (c *Client) listCommentReactionsLogged(ctx context.Context, installationID int64, owner, repo string, commentID int64) ([]CommentReaction, error) {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return nil, err
@@ -570,7 +799,7 @@ func (c *Client) ListCommentReactions(ctx context.Context, installationID int64,
 		}
 		reactions, resp, err := client.Reactions.ListPullRequestCommentReactions(ctx, owner, repo, commentID, opts)
 		if err != nil {
-			return nil, fmt.Errorf("listing comment reactions: %w", err)
+			return nil, commentReactionListError(commentID, resp, err)
 		}
 		for _, r := range reactions {
 			all = append(all, CommentReaction{
@@ -588,7 +817,8 @@ func (c *Client) ListCommentReactions(ctx context.Context, installationID int64,
 }
 
 // CreateIssueComment posts a comment on an issue or PR.
-func (c *Client) CreateIssueComment(ctx context.Context, installationID int64, owner, repo string, number int, body string) error {
+func (c *Client) createIssueCommentLogged(ctx context.Context, installationID int64, owner, repo string, number int, body string) error {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return err
@@ -603,7 +833,8 @@ func (c *Client) CreateIssueComment(ctx context.Context, installationID int64, o
 // UpdateIssueComment edits the body of an existing issue comment by its REST
 // comment ID. Used e.g., to swap the "Trigger" checkbox line for a "Running"
 // marker once a checkbox-triggered review has been dispatched.
-func (c *Client) UpdateIssueComment(ctx context.Context, installationID int64, owner, repo string, commentID int64, body string) error {
+func (c *Client) updateIssueCommentLogged(ctx context.Context, installationID int64, owner, repo string, commentID int64, body string) error {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return err
@@ -616,23 +847,75 @@ func (c *Client) UpdateIssueComment(ctx context.Context, installationID int64, o
 }
 
 // CreateIssueCommentWithNodeID posts a comment and returns its GraphQL node ID (for minimizing later).
-func (c *Client) CreateIssueCommentWithNodeID(ctx context.Context, installationID int64, owner, repo string, number int, body string) (string, error) {
+func (c *Client) createIssueCommentWithNodeIDLogged(ctx context.Context, installationID int64, owner, repo string, number int, body string) (string, error) {
+
+	nodeID, _, err := c.CreateIssueCommentRef(ctx, installationID, owner, repo, number, body)
+	return nodeID, err
+}
+
+// CreateIssueCommentRef posts a comment and returns BOTH identities GitHub
+// assigns it: the GraphQL node id (minimize) and the REST id (edit). They are
+// not interchangeable — minimizeComment takes only the former and
+// Issues.EditComment only the latter — and a comment that must be rewritten
+// later from another process needs the REST id persisted.
+func (c *Client) createIssueCommentRefLogged(ctx context.Context, installationID int64, owner, repo string, number int, body string) (nodeID string, commentID int64, err error) {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	if err := c.restLimiter.Wait(ctx); err != nil {
-		return "", fmt.Errorf("rate limit wait: %w", err)
+		return "", 0, fmt.Errorf("rate limit wait: %w", err)
 	}
 	comment, _, err := client.Issues.CreateComment(ctx, owner, repo, number, &gh.IssueComment{Body: gh.Ptr(body)})
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
-	return comment.GetNodeID(), nil
+	return comment.GetNodeID(), comment.GetID(), nil
+}
+
+// HasRepoWriteAccess reports whether login can push to the repo.
+//
+// This is the authorization check for actions a webhook attributes to a user
+// who is NOT the comment author — notably ticking a task-list checkbox in a
+// bot-authored comment. author_association on such an event describes the
+// COMMENT's author (Argus), not the person who toggled the box, so it cannot
+// authorize them; only an explicit permission lookup on the actor can.
+//
+// "admin", "maintain" and "write" pass; "triage", "read" and "none" do not.
+// GitHub returns 404 for a user with no access at all, which is a denial, not
+// an error — but every other failure IS returned, so callers can fail closed
+// rather than treat an outage as permission.
+func (c *Client) hasRepoWriteAccessLogged(ctx context.Context, installationID int64, owner, repo, login string) (bool, error) {
+
+	if login == "" {
+		return false, nil
+	}
+	client, err := c.app.ClientForInstallation(installationID)
+	if err != nil {
+		return false, err
+	}
+	if err := c.restLimiter.Wait(ctx); err != nil {
+		return false, fmt.Errorf("rate limit wait: %w", err)
+	}
+	perm, resp, err := client.Repositories.GetPermissionLevel(ctx, owner, repo, login)
+	if err != nil {
+		if resp != nil && resp.StatusCode == http.StatusNotFound {
+			return false, nil
+		}
+		return false, err
+	}
+	switch perm.GetPermission() {
+	case "admin", "maintain", "write":
+		return true, nil
+	default:
+		return false, nil
+	}
 }
 
 // ListPRComments returns ALL review comments on a PR (across all reviews).
-func (c *Client) ListPRComments(ctx context.Context, installationID int64, owner, repo string, prNumber int) ([]*gh.PullRequestComment, error) {
+func (c *Client) listPRCommentsLogged(ctx context.Context, installationID int64, owner, repo string, prNumber int) ([]*gh.PullRequestComment, error) {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return nil, err
@@ -673,92 +956,111 @@ type ReviewThread struct {
 }
 
 // ListReviewThreads fetches unresolved review threads via GraphQL.
-func (c *Client) ListReviewThreads(ctx context.Context, installationID int64, owner, repo string, prNumber int) ([]ReviewThread, error) {
+func (c *Client) listReviewThreadsLogged(ctx context.Context, installationID int64, owner, repo string, prNumber int) ([]ReviewThread, error) {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return nil, err
 	}
 
-	body := map[string]any{
-		"query": `query($owner: String!, $repo: String!, $pr: Int!) {
-			repository(owner: $owner, name: $repo) {
-				pullRequest(number: $pr) {
-					reviewThreads(first: 100) {
-						nodes {
-							id
-							isResolved
-							comments(first: 1) {
-								nodes {
-									author { login }
-									databaseId
-									body
-									path
-									line
+	var threads []ReviewThread
+	var after *string
+	for {
+		body := map[string]any{
+			"query": `query($owner: String!, $repo: String!, $pr: Int!, $after: String) {
+				repository(owner: $owner, name: $repo) {
+					pullRequest(number: $pr) {
+						reviewThreads(first: 100, after: $after) {
+							nodes {
+								id
+								isResolved
+								comments(first: 1) {
+									nodes {
+										author { login }
+										databaseId
+										body
+										path
+										line
+									}
 								}
 							}
+							pageInfo { hasNextPage endCursor }
 						}
 					}
 				}
-			}
-		}`,
-		"variables": map[string]any{
-			"owner": owner,
-			"repo":  repo,
-			"pr":    prNumber,
-		},
-	}
-
-	var result struct {
-		Data struct {
-			Repository struct {
-				PullRequest struct {
-					ReviewThreads struct {
-						Nodes []struct {
-							ID         string `json:"id"`
-							IsResolved bool   `json:"isResolved"`
-							Comments   struct {
-								Nodes []struct {
-									Author struct {
-										Login string `json:"login"`
-									} `json:"author"`
-									DatabaseID int64  `json:"databaseId"`
-									Body       string `json:"body"`
-									Path       string `json:"path"`
-									Line       int    `json:"line"`
-								} `json:"nodes"`
-							} `json:"comments"`
-						} `json:"nodes"`
-					} `json:"reviewThreads"`
-				} `json:"pullRequest"`
-			} `json:"repository"`
-		} `json:"data"`
-	}
-
-	if err := c.restLimiter.Wait(ctx); err != nil {
-		return nil, fmt.Errorf("rate limit wait: %w", err)
-	}
-	if err := doGraphQL(ctx, client, body, &result); err != nil {
-		return nil, fmt.Errorf("graphql reviewThreads: %w", err)
-	}
-
-	var threads []ReviewThread
-	for _, n := range result.Data.Repository.PullRequest.ReviewThreads.Nodes {
-		t := ReviewThread{ID: n.ID, IsResolved: n.IsResolved}
-		if len(n.Comments.Nodes) > 0 {
-			c0 := n.Comments.Nodes[0]
-			t.AuthorLogin = c0.Author.Login
-			t.FirstCommentID = c0.DatabaseID
-			t.Body = c0.Body
-			t.Path = c0.Path
-			t.Line = c0.Line
+			}`,
+			"variables": map[string]any{
+				"owner": owner,
+				"repo":  repo,
+				"pr":    prNumber,
+				"after": after,
+			},
 		}
-		threads = append(threads, t)
+
+		var result struct {
+			Data struct {
+				Repository struct {
+					PullRequest struct {
+						ReviewThreads struct {
+							Nodes []struct {
+								ID         string `json:"id"`
+								IsResolved bool   `json:"isResolved"`
+								Comments   struct {
+									Nodes []struct {
+										Author struct {
+											Login string `json:"login"`
+										} `json:"author"`
+										DatabaseID int64  `json:"databaseId"`
+										Body       string `json:"body"`
+										Path       string `json:"path"`
+										Line       int    `json:"line"`
+									} `json:"nodes"`
+								} `json:"comments"`
+							} `json:"nodes"`
+							PageInfo struct {
+								HasNextPage bool   `json:"hasNextPage"`
+								EndCursor   string `json:"endCursor"`
+							} `json:"pageInfo"`
+						} `json:"reviewThreads"`
+					} `json:"pullRequest"`
+				} `json:"repository"`
+			} `json:"data"`
+		}
+
+		if err := c.restLimiter.Wait(ctx); err != nil {
+			return nil, fmt.Errorf("rate limit wait: %w", err)
+		}
+		if err := doGraphQL(ctx, client, installationID, body, &result); err != nil {
+			return nil, fmt.Errorf("graphql reviewThreads: %w", err)
+		}
+
+		page := result.Data.Repository.PullRequest.ReviewThreads
+		for _, n := range page.Nodes {
+			t := ReviewThread{ID: n.ID, IsResolved: n.IsResolved}
+			if len(n.Comments.Nodes) > 0 {
+				c0 := n.Comments.Nodes[0]
+				t.AuthorLogin = c0.Author.Login
+				t.FirstCommentID = c0.DatabaseID
+				t.Body = c0.Body
+				t.Path = c0.Path
+				t.Line = c0.Line
+			}
+			threads = append(threads, t)
+		}
+		if !page.PageInfo.HasNextPage {
+			return threads, nil
+		}
+		if page.PageInfo.EndCursor == "" {
+			return nil, fmt.Errorf("graphql reviewThreads: next page has empty cursor")
+		}
+		cursor := page.PageInfo.EndCursor
+		after = &cursor
 	}
-	return threads, nil
 }
 
 // ResolveReviewThread marks a review thread as resolved via GraphQL.
-func (c *Client) ResolveReviewThread(ctx context.Context, installationID int64, threadID string) error {
+func (c *Client) resolveReviewThreadLogged(ctx context.Context, installationID int64, threadID string) error {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return err
@@ -774,11 +1076,12 @@ func (c *Client) ResolveReviewThread(ctx context.Context, installationID int64, 
 	if err := c.restLimiter.Wait(ctx); err != nil {
 		return fmt.Errorf("rate limit wait: %w", err)
 	}
-	return doGraphQL(ctx, client, body, nil)
+	return doGraphQL(ctx, client, installationID, body, nil)
 }
 
 // FindThreadForComment returns the thread ID for a given review comment node ID.
-func (c *Client) FindThreadForComment(ctx context.Context, installationID int64, owner, repo string, prNumber int, commentNodeID string) (string, error) {
+func (c *Client) findThreadForCommentLogged(ctx context.Context, installationID int64, owner, repo string, prNumber int, commentNodeID string) (string, error) {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return "", err
@@ -824,7 +1127,7 @@ func (c *Client) FindThreadForComment(ctx context.Context, installationID int64,
 	if err := c.restLimiter.Wait(ctx); err != nil {
 		return "", fmt.Errorf("rate limit wait: %w", err)
 	}
-	if err := doGraphQL(ctx, client, body, &result); err != nil {
+	if err := doGraphQL(ctx, client, installationID, body, &result); err != nil {
 		return "", err
 	}
 
@@ -839,7 +1142,8 @@ func (c *Client) FindThreadForComment(ctx context.Context, installationID int64,
 }
 
 // MinimizeComment hides a comment via GraphQL minimizeComment mutation.
-func (c *Client) MinimizeComment(ctx context.Context, installationID int64, nodeID, reason string) error {
+func (c *Client) minimizeCommentLogged(ctx context.Context, installationID int64, nodeID, reason string) error {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return err
@@ -858,13 +1162,14 @@ func (c *Client) MinimizeComment(ctx context.Context, installationID int64, node
 	if err := c.restLimiter.Wait(ctx); err != nil {
 		return fmt.Errorf("rate limit wait: %w", err)
 	}
-	return doGraphQL(ctx, client, body, nil)
+	return doGraphQL(ctx, client, installationID, body, nil)
 }
 
 // --- Git Data API (for @argus-eye fix command) ---
 
 // CreateBlob creates a blob in the repo and returns its SHA.
-func (c *Client) CreateBlob(ctx context.Context, installationID int64, owner, repo, content, encoding string) (string, error) {
+func (c *Client) createBlobLogged(ctx context.Context, installationID int64, owner, repo, content, encoding string) (string, error) {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return "", err
@@ -883,7 +1188,8 @@ func (c *Client) CreateBlob(ctx context.Context, installationID int64, owner, re
 }
 
 // CreateTree creates a tree object from entries and returns its SHA.
-func (c *Client) CreateTree(ctx context.Context, installationID int64, owner, repo, baseTreeSHA string, entries []*gh.TreeEntry) (string, error) {
+func (c *Client) createTreeLogged(ctx context.Context, installationID int64, owner, repo, baseTreeSHA string, entries []*gh.TreeEntry) (string, error) {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return "", err
@@ -899,7 +1205,8 @@ func (c *Client) CreateTree(ctx context.Context, installationID int64, owner, re
 }
 
 // CreateCommit creates a commit object and returns its SHA.
-func (c *Client) CreateCommit(ctx context.Context, installationID int64, owner, repo, message, treeSHA string, parentSHAs []string) (string, error) {
+func (c *Client) createCommitLogged(ctx context.Context, installationID int64, owner, repo, message, treeSHA string, parentSHAs []string) (string, error) {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return "", err
@@ -923,7 +1230,8 @@ func (c *Client) CreateCommit(ctx context.Context, installationID int64, owner, 
 }
 
 // UpdateRef updates a git reference to point to a new SHA.
-func (c *Client) UpdateRef(ctx context.Context, installationID int64, owner, repo, ref, sha string) error {
+func (c *Client) updateRefLogged(ctx context.Context, installationID int64, owner, repo, ref, sha string) error {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return err
@@ -942,7 +1250,8 @@ func (c *Client) UpdateRef(ctx context.Context, installationID int64, owner, rep
 }
 
 // GetRef returns the SHA a ref points to.
-func (c *Client) GetRef(ctx context.Context, installationID int64, owner, repo, ref string) (string, error) {
+func (c *Client) getRefLogged(ctx context.Context, installationID int64, owner, repo, ref string) (string, error) {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return "", err
@@ -958,7 +1267,8 @@ func (c *Client) GetRef(ctx context.Context, installationID int64, owner, repo, 
 }
 
 // GetCommitTree returns the tree SHA for a given commit.
-func (c *Client) GetCommitTree(ctx context.Context, installationID int64, owner, repo, commitSHA string) (string, error) {
+func (c *Client) getCommitTreeLogged(ctx context.Context, installationID int64, owner, repo, commitSHA string) (string, error) {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return "", err
@@ -975,7 +1285,8 @@ func (c *Client) GetCommitTree(ctx context.Context, installationID int64, owner,
 
 // SearchCode searches for a symbol name in a repository and returns matching file paths.
 // Uses the GitHub code search API. Returns up to 5 unique file paths.
-func (c *Client) SearchCode(ctx context.Context, installationID int64, owner, repo, query string) ([]string, error) {
+func (c *Client) searchCodeLogged(ctx context.Context, installationID int64, owner, repo, query string) ([]string, error) {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return nil, err
@@ -1003,26 +1314,122 @@ func (c *Client) SearchCode(ctx context.Context, installationID int64, owner, re
 	return paths, nil
 }
 
-// GetRepoTree returns all file paths in a repo at a given ref using the Git Trees API (recursive).
-func (c *Client) GetRepoTree(ctx context.Context, installationID int64, owner, repo, ref string) ([]string, error) {
+// RepoTree is a recursive Git Trees response. Truncated means GitHub omitted
+// entries and callers must not treat Files as an authoritative repository view.
+type RepoTree struct {
+	Files     []RepoTreeFile
+	Truncated bool
+}
+
+// RepoTreeFile identifies one immutable blob returned by a recursive tree.
+// Size is used to reject oversized source files before spending a blob fetch.
+type RepoTreeFile struct {
+	Path string
+	SHA  string
+	Mode string
+	Size int64
+}
+
+// RepositoryMetadata is the repository identity and default branch needed to
+// arbitrate a branch-name mismatch from an out-of-order push webhook.
+type RepositoryMetadata struct {
+	ID            int64
+	FullName      string
+	DefaultBranch string
+}
+
+// GetRepositoryMetadata reads current repository authority with the target
+// installation's GitHub client. It deliberately returns only fields needed by
+// webhook arbitration.
+func (c *Client) getRepositoryMetadataLogged(ctx context.Context, installationID int64, owner, repo string) (RepositoryMetadata, error) {
+
+	if c.app == nil {
+		return RepositoryMetadata{}, errors.New("github app is unavailable")
+	}
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
-		return nil, err
+		return RepositoryMetadata{}, err
 	}
 	if err := c.restLimiter.Wait(ctx); err != nil {
-		return nil, fmt.Errorf("rate limit wait: %w", err)
+		return RepositoryMetadata{}, fmt.Errorf("rate limit wait: %w", err)
 	}
-	tree, _, err := client.Git.GetTree(ctx, owner, repo, ref, true)
+	repository, _, err := client.Repositories.Get(ctx, owner, repo)
 	if err != nil {
-		return nil, fmt.Errorf("fetching repo tree: %w", err)
+		return RepositoryMetadata{}, fmt.Errorf("fetching repository metadata: %w", err)
 	}
-	var paths []string
+	return RepositoryMetadata{
+		ID:            repository.GetID(),
+		FullName:      repository.GetFullName(),
+		DefaultBranch: repository.GetDefaultBranch(),
+	}, nil
+}
+
+// ResolveDefaultBranchCommit resolves a mutable branch name once. The returned
+// SHA is then used for both the tree and every file fetch in a full index.
+func (c *Client) resolveDefaultBranchCommitLogged(ctx context.Context, installationID int64, owner, repo, branch string) (string, error) {
+
+	return c.GetRef(ctx, installationID, owner, repo, "heads/"+strings.TrimPrefix(branch, "refs/heads/"))
+}
+
+// getRepoTreeLogged returns all immutable file blobs at a commit SHA.
+// The exported semantic wrapper is defined in client_logging.go.
+func (c *Client) getRepoTreeLogged(ctx context.Context, installationID int64, owner, repo, commitSHA string) (RepoTree, error) {
+
+	// The Git Trees endpoint is keyed by a tree object, not a commit object.
+	// Resolve the commit's root tree explicitly rather than relying on GitHub to
+	// accept a commit SHA as an undocumented shorthand.
+	treeSHA, err := c.GetCommitTree(ctx, installationID, owner, repo, commitSHA)
+	if err != nil {
+		return RepoTree{}, fmt.Errorf("resolving commit tree: %w", err)
+	}
+	client, err := c.app.ClientForInstallation(installationID)
+	if err != nil {
+		return RepoTree{}, err
+	}
+	if err := c.restLimiter.Wait(ctx); err != nil {
+		return RepoTree{}, fmt.Errorf("rate limit wait: %w", err)
+	}
+	tree, _, err := client.Git.GetTree(ctx, owner, repo, treeSHA, true)
+	if err != nil {
+		return RepoTree{}, fmt.Errorf("fetching repo tree: %w", err)
+	}
+	result := RepoTree{Truncated: tree.GetTruncated()}
 	for _, entry := range tree.Entries {
 		if entry.GetType() == "blob" {
-			paths = append(paths, entry.GetPath())
+			result.Files = append(result.Files, RepoTreeFile{
+				Path: entry.GetPath(),
+				SHA:  entry.GetSHA(),
+				Mode: entry.GetMode(),
+				Size: int64(entry.GetSize()),
+			})
 		}
 	}
-	return paths, nil
+	return result, nil
+}
+
+// GetBlobContent fetches one immutable tree blob in a single GitHub call.
+func (c *Client) getBlobContentLogged(ctx context.Context, installationID int64, owner, repo string, file RepoTreeFile) (string, error) {
+	if file.SHA == "" {
+		return "", &permanentFileContentError{err: fmt.Errorf("file %s has no blob SHA", file.Path)}
+	}
+	if file.Size < 0 || file.Size > maxFileContentBytes {
+		return "", &permanentFileContentError{err: fmt.Errorf("file size %d exceeds graph source limit %d", file.Size, maxFileContentBytes)}
+	}
+	client, err := c.app.ClientForInstallation(installationID)
+	if err != nil {
+		return "", err
+	}
+	if err := c.restLimiter.Wait(ctx); err != nil {
+		return "", fmt.Errorf("rate limit wait: %w", err)
+	}
+	raw, _, err := client.Git.GetBlobRaw(ctx, owner, repo, file.SHA)
+	if err != nil {
+		return "", fmt.Errorf("fetching raw blob: %w", err)
+	}
+	if len(raw) > maxFileContentBytes {
+		return "", &permanentFileContentError{err: fmt.Errorf("raw blob size %d exceeds graph source limit %d", len(raw), maxFileContentBytes)}
+	}
+	return string(raw), nil
 }
 
 // ReviewSubmission represents a formatted review ready to post to GitHub.
@@ -1059,7 +1466,8 @@ type Issue struct {
 // GetIssue fetches a single issue's title + body via the REST API.
 // Returns an *Issue (or error) for the given owner/repo/number. Used by the
 // acceptance worker to pull criteria from issue descriptions.
-func (c *Client) GetIssue(ctx context.Context, installationID int64, owner, repo string, number int) (*Issue, error) {
+func (c *Client) getIssueLogged(ctx context.Context, installationID int64, owner, repo string, number int) (*Issue, error) {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return nil, err
@@ -1104,7 +1512,8 @@ type ClosingIssueRef struct {
 // more than 50 issues are extremely rare; if they exist, we return the first
 // 50 GitHub serves. Pagination via pageInfo.endCursor is left as a future
 // upgrade when a real workload needs it.
-func (c *Client) GetClosingIssues(ctx context.Context, installationID int64, owner, repo string, prNumber int) ([]ClosingIssueRef, error) {
+func (c *Client) getClosingIssuesLogged(ctx context.Context, installationID int64, owner, repo string, prNumber int) ([]ClosingIssueRef, error) {
+
 	client, err := c.app.ClientForInstallation(installationID)
 	if err != nil {
 		return nil, err
@@ -1158,7 +1567,7 @@ func (c *Client) GetClosingIssues(ctx context.Context, installationID int64, own
 		} `json:"data"`
 	}
 
-	if err := doGraphQL(ctx, client, body, &resp); err != nil {
+	if err := doGraphQL(ctx, client, installationID, body, &resp); err != nil {
 		return nil, fmt.Errorf("closing issues graphql: %w", err)
 	}
 

@@ -1,9 +1,14 @@
 package sast
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -214,5 +219,44 @@ func TestSemgrepRunner_IntegrationJava(t *testing.T) {
 	}
 	if len(findings) == 0 {
 		t.Fatal("expected at least one finding for SQL concatenation")
+	}
+}
+
+func TestSemgrepRunner_FatalErrorIncludesStderr(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses executable shell scripts")
+	}
+	binDir := t.TempDir()
+	writeExecutable(t, filepath.Join(binDir, "semgrep"), "#!/bin/sh\necho 'invalid semgrep option' >&2\nexit 2\n")
+	t.Setenv("PATH", binDir)
+
+	_, err := (&SemgrepRunner{}).Run(context.Background(), map[string]string{"bad.py": "x = 1"})
+	if err == nil || !strings.Contains(err.Error(), "invalid semgrep option") {
+		t.Fatalf("expected stderr in fatal error, got: %v", err)
+	}
+}
+
+func TestSemgrepRunner_DoesNotLogMatchedSource(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses executable shell scripts")
+	}
+	var logs bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	const source = "PRIVATE_MATCHED_SOURCE_SECRET"
+	binDir := t.TempDir()
+	writeExecutable(t, filepath.Join(binDir, "semgrep"), `#!/bin/sh
+printf '%s' '{"results":[{"check_id":"test.rule","path":"bad.py","start":{"line":1,"col":1},"extra":{"message":"test finding","severity":"WARNING","lines":"PRIVATE_MATCHED_SOURCE_SECRET"}}]}'
+`)
+	t.Setenv("PATH", binDir)
+
+	findings, err := (&SemgrepRunner{}).Run(context.Background(), map[string]string{"bad.py": source})
+	if err != nil || len(findings) != 1 {
+		t.Fatalf("findings=%+v error=%v", findings, err)
+	}
+	if strings.Contains(logs.String(), source) {
+		t.Fatalf("matched source leaked into logs: %s", logs.String())
 	}
 }

@@ -54,15 +54,28 @@ type JudgeFinding struct {
 	DBRepoID         int64
 }
 
+// JudgeVerdict is one judgment: the answer plus what it cost.
+//
+// Tokens is populated whenever the provider actually completed a call — INCLUDING
+// the paths that then return an error, because a verdict we could not parse was
+// still billed. Callers accumulate it before acting on the error; dropping it is
+// exactly how auto-resolve spend went missing from /stats (#72).
+type JudgeVerdict struct {
+	Addressed bool
+	Reason    string
+	Tokens    StageTokens
+}
+
 // AddressedJudge decides whether an inter-diff actually ADDRESSED a finding —
 // the verification step (#166) that turns auto-resolve's proximity heuristic from
 // "these lines were touched" into "this finding was fixed". Swappable: prod uses
 // an LLM; tests use a fake with fixed verdicts.
 //
 // A non-nil error means the judge could not reach a verdict; callers MUST treat
-// it as "not confirmed" and leave the thread open (degrade safe).
+// it as "not confirmed" and leave the thread open (degrade safe). The returned
+// verdict still carries Tokens on those paths — see JudgeVerdict.
 type AddressedJudge interface {
-	Judge(ctx context.Context, finding JudgeFinding, interDiffPatch string) (addressed bool, reason string, err error)
+	Judge(ctx context.Context, finding JudgeFinding, interDiffPatch string) (JudgeVerdict, error)
 }
 
 // llmAddressedJudge is the production AddressedJudge: a focused LLM-as-judge over
@@ -101,14 +114,24 @@ Respond with ONLY a JSON object, no prose, no code fence:
 {"addressed": true|false, "reason": "<one short sentence>"}`
 
 // Judge resolves the review-stage provider for the finding's repo and asks it
-// whether interDiffPatch addresses the finding. Returns (false, "", err) on any
-// resolution/LLM/parse failure so the caller degrades safe.
-func (j *llmAddressedJudge) Judge(ctx context.Context, finding JudgeFinding, interDiffPatch string) (bool, string, error) {
+// whether interDiffPatch addresses the finding. Returns a not-addressed verdict
+// plus the error on any resolution/LLM/parse failure so the caller degrades safe.
+// The parse-failure path still returns the call's Tokens — the provider billed us
+// for a response we could not read, and that spend must still reach the stats.
+func (j *llmAddressedJudge) Judge(ctx context.Context, finding JudgeFinding, interDiffPatch string) (verdict JudgeVerdict, err error) {
+	opID, started := pipelineOperationStart(ctx, j.logger, "addressed_judge", "decide whether an inter-diff semantically fixed a proximity-selected finding; failures leave the finding open", map[string]any{"finding": finding, "inter_diff_patch": interDiffPatch})
+	defer func() {
+		if err != nil {
+			pipelineOperationFailure(ctx, j.logger, opID, "addressed_judge", started, err)
+			return
+		}
+		pipelineOperationResult(ctx, j.logger, opID, "addressed_judge", fmt.Sprintf("addressed=%t", verdict.Addressed), started, verdict)
+	}()
 	provider, cfg, err := j.registry.ResolveProvider(ctx,
 		storeConfigLister{st: j.store, installationID: finding.DBInstallationID},
 		finding.DBInstallationID, finding.DBRepoID, llm.StageReview)
 	if err != nil {
-		return false, "", fmt.Errorf("addressed-judge: resolve provider: %w", err)
+		return JudgeVerdict{}, fmt.Errorf("addressed-judge: resolve provider: %w", err)
 	}
 
 	resp, err := provider.Complete(ctx, llm.CompletionRequest{
@@ -121,13 +144,21 @@ func (j *llmAddressedJudge) Judge(ctx context.Context, finding JudgeFinding, int
 		Stage:       "addressed_judge",
 	})
 	if err != nil {
-		return false, "", fmt.Errorf("addressed-judge: llm: %w", err)
+		return JudgeVerdict{}, fmt.Errorf("addressed-judge: llm: %w", err)
+	}
+	spend := StageTokens{
+		PromptTokens:     resp.TokensUsed.PromptTokens,
+		CompletionTokens: resp.TokensUsed.CompletionTokens,
+		TotalTokens:      resp.TokensUsed.TotalTokens,
+		Cost:             resp.Cost,
+		Model:            cfg.Model,
+		Provider:         cfg.Provider,
 	}
 	addressed, reason, err := parseAddressedVerdict(resp.Content)
 	if err != nil {
-		return false, "", fmt.Errorf("addressed-judge: parse: %w", err)
+		return JudgeVerdict{Tokens: spend}, fmt.Errorf("addressed-judge: parse: %w", err)
 	}
-	return addressed, reason, nil
+	return JudgeVerdict{Addressed: addressed, Reason: reason, Tokens: spend}, nil
 }
 
 // buildAddressedJudgePrompt renders the user turn: the finding block and the

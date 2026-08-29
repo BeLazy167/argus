@@ -51,20 +51,20 @@ func TestPlanSymbolDiff(t *testing.T) {
 	fooMoved.LineEnd = 21
 
 	tests := []struct {
-		name            string
-		parsed          []Symbol
-		existing        []store.NodeHashRow
-		wantUnchanged   int
+		name             string
+		parsed           []Symbol
+		existing         []store.NodeHashRow
+		wantUnchanged    int
 		wantChangedNames []string
-		wantOrphanIDs   []int64
+		wantOrphanIDs    []int64
 	}{
 		{
-			name:            "empty DB → everything changed, no orphans",
-			parsed:          []Symbol{foo, bar},
-			existing:        nil,
-			wantUnchanged:   0,
+			name:             "empty DB → everything changed, no orphans",
+			parsed:           []Symbol{foo, bar},
+			existing:         nil,
+			wantUnchanged:    0,
 			wantChangedNames: []string{"Foo", "Bar"},
-			wantOrphanIDs:   nil,
+			wantOrphanIDs:    nil,
 		},
 		{
 			name:   "all hashes match → all unchanged, zero writes",
@@ -73,9 +73,9 @@ func TestPlanSymbolDiff(t *testing.T) {
 				{ID: 1, Kind: KindFunction, Name: "Foo", ContentHash: hashOf(foo)},
 				{ID: 2, Kind: KindFunction, Name: "Bar", ContentHash: hashOf(bar)},
 			},
-			wantUnchanged:   2,
+			wantUnchanged:    2,
 			wantChangedNames: []string{},
-			wantOrphanIDs:   nil,
+			wantOrphanIDs:    nil,
 		},
 		{
 			name:   "one hash drifted → that symbol upserts, other stays",
@@ -84,9 +84,9 @@ func TestPlanSymbolDiff(t *testing.T) {
 				{ID: 1, Kind: KindFunction, Name: "Foo", ContentHash: hashOf(foo)},
 				{ID: 2, Kind: KindFunction, Name: "Bar", ContentHash: hashOf(bar)},
 			},
-			wantUnchanged:   1,
+			wantUnchanged:    1,
 			wantChangedNames: []string{"Foo"},
-			wantOrphanIDs:   nil,
+			wantOrphanIDs:    nil,
 		},
 		{
 			name:   "symbol removed from parse → listed as orphan",
@@ -95,9 +95,9 @@ func TestPlanSymbolDiff(t *testing.T) {
 				{ID: 1, Kind: KindFunction, Name: "Foo", ContentHash: hashOf(foo)},
 				{ID: 2, Kind: KindFunction, Name: "Bar", ContentHash: hashOf(bar)},
 			},
-			wantUnchanged:   1,
+			wantUnchanged:    1,
 			wantChangedNames: []string{},
-			wantOrphanIDs:   []int64{2},
+			wantOrphanIDs:    []int64{2},
 		},
 		{
 			name:   "empty stored hash forces re-upsert (pre-migration row)",
@@ -105,9 +105,9 @@ func TestPlanSymbolDiff(t *testing.T) {
 			existing: []store.NodeHashRow{
 				{ID: 1, Kind: KindFunction, Name: "Foo", ContentHash: ""},
 			},
-			wantUnchanged:   0,
+			wantUnchanged:    0,
 			wantChangedNames: []string{"Foo"},
-			wantOrphanIDs:   nil,
+			wantOrphanIDs:    nil,
 		},
 	}
 
@@ -200,8 +200,8 @@ func TestComputeSymbolHashFieldChangesFlipHash(t *testing.T) {
 	baseHash := computeSymbolHash(base)
 
 	mutations := []struct {
-		name    string
-		mutate  func(*Symbol)
+		name     string
+		mutate   func(*Symbol)
 		mustFlip bool
 	}{
 		{"kind", func(s *Symbol) { s.Kind = KindFunction }, true},
@@ -398,6 +398,26 @@ func TestResolveTypeEdges(t *testing.T) {
 	}
 }
 
+func TestDescribeNodeResolutionNeverFallsBackFromQualifiedName(t *testing.T) {
+	keyToID := map[string]int64{}
+	nameToIDs := map[string][]int64{
+		"Handle":       {11},
+		"Alpha.Handle": {11},
+	}
+	if id, status := describeNodeResolution("caller.go", "Missing.Handle", keyToID, nameToIDs); id != 0 || status != resolutionUnresolved {
+		t.Fatalf("qualified miss = (%d, %s), want unresolved", id, status)
+	}
+	if id, status := describeNodeResolution("caller.go", "Missing::Handle", keyToID, nameToIDs); id != 0 || status != resolutionUnresolved {
+		t.Fatalf("Rust/C++ qualified miss = (%d, %s), want unresolved", id, status)
+	}
+	if id, status := describeNodeResolution("caller.go", "Handle", keyToID, nameToIDs); id != 11 || status != resolutionResolved {
+		t.Fatalf("unqualified alias = (%d, %s), want (11, resolved)", id, status)
+	}
+	if id, status := describeNodeResolution("caller.go", "Alpha.Handle", keyToID, nameToIDs); id != 11 || status != resolutionResolved {
+		t.Fatalf("qualified exact = (%d, %s), want (11, resolved)", id, status)
+	}
+}
+
 func sortEdgeSlice(edges []Edge) {
 	sort.Slice(edges, func(i, j int) bool {
 		if edges[i].SourceName != edges[j].SourceName {
@@ -405,4 +425,24 @@ func sortEdgeSlice(edges []Edge) {
 		}
 		return edges[i].TargetName < edges[j].TargetName
 	})
+}
+
+func TestFileSymbolUsesPhysicalFileLOC(t *testing.T) {
+	tests := []struct {
+		name, content string
+		wantLOC       int
+	}{
+		{name: "empty", content: "", wantLOC: 0},
+		{name: "one line", content: "package p", wantLOC: 1},
+		{name: "trailing newline", content: "package p\n", wantLOC: 1},
+		{name: "three lines", content: "package p\n\nfunc F() {}\n", wantLOC: 3},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sym := fileSymbol("a.go", tc.content)
+			if sym.Kind != "file" || sym.Name != "a.go" || sym.FilePath != "a.go" || sym.LineEnd != tc.wantLOC {
+				t.Fatalf("fileSymbol = %+v, want file identity with LOC %d", sym, tc.wantLOC)
+			}
+		})
+	}
 }

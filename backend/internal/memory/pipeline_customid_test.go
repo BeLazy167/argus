@@ -1,7 +1,6 @@
 package memory
 
 import (
-	"encoding/json"
 	"testing"
 )
 
@@ -52,41 +51,5 @@ func TestScenarioCustomID(t *testing.T) {
 	// Lossy repo names get the disambiguating hash on the segment.
 	if ScenarioCustomID("sdk.js", 1) == "sdk-js--scenario--1" {
 		t.Error("lossy repo name should carry a disambiguating hash, not bare sanitize")
-	}
-}
-
-func TestBatchAddResponse_DocIDs(t *testing.T) {
-	// Documented shape: results[].id in order.
-	var r BatchAddResponse
-	if err := json.Unmarshal([]byte(`{"results":[{"id":"a","status":"done"},{"id":"","status":"error"},{"id":"c","status":"queued"}],"success":2,"failed":1}`), &r); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	got := r.DocIDs()
-	want := []string{"a", "", "c"}
-	if len(got) != len(want) {
-		t.Fatalf("DocIDs len = %d, want %d", len(got), len(want))
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("DocIDs[%d] = %q, want %q", i, got[i], want[i])
-		}
-	}
-	// Legacy fallback: {ids:[...]} with no results.
-	var legacy BatchAddResponse
-	if err := json.Unmarshal([]byte(`{"ids":["x","y"]}`), &legacy); err != nil {
-		t.Fatalf("unmarshal legacy: %v", err)
-	}
-	if ids := legacy.DocIDs(); len(ids) != 2 || ids[0] != "x" || ids[1] != "y" {
-		t.Errorf("legacy DocIDs = %v, want [x y]", ids)
-	}
-}
-
-func TestListResponse_Pagination(t *testing.T) {
-	var r ListResponse
-	if err := json.Unmarshal([]byte(`{"memories":[],"pagination":{"currentPage":1,"totalItems":538,"totalPages":6,"limit":100}}`), &r); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if r.Pagination == nil || r.Pagination.TotalItems != 538 || r.Pagination.TotalPages != 6 {
-		t.Errorf("pagination = %+v, want totalItems=538 totalPages=6", r.Pagination)
 	}
 }

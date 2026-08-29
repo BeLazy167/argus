@@ -1,7 +1,6 @@
 "use client";
 
-import { memo, useMemo, useState, useCallback, useEffect, useRef } from "react";
-import DOMPurify from "dompurify";
+import { useMemo, useState, useCallback, useSyncExternalStore } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import dynamic from "next/dynamic";
@@ -11,7 +10,6 @@ import {
   FileCode,
   AlertTriangle,
   RotateCcw,
-  Loader2,
   Clock,
   GitPullRequest,
   Check,
@@ -40,6 +38,9 @@ import { formatDistanceToNow } from "@/lib/time";
 import { useReviewStream } from "@/lib/hooks/use-review-stream";
 import { PipelineProgress } from "./progress-bar";
 import { ActivityTimeline } from "./activity-timeline";
+import { LearnedMemories } from "./_components/learned-memory";
+import { MinorNotes } from "./_components/minor-notes";
+import { MermaidChart } from "./mermaid-chart";
 import type { AutoResolveSummary, FindingState, PRReviewSummary, Repo, ReviewComment, ReviewContract, StageTokens, TokenUsage } from "@/lib/types";
 import { STAGE_ORDER, stageLabel } from "@/lib/stage-labels";
 
@@ -240,6 +241,23 @@ function friendlyError(raw: string): {
   detail: string;
   action: string;
 } {
+  // A budget refusal is not a fault, so it must not read like one. Retry is
+  // also the wrong advice: the limits are what refused it, and they live in
+  // settings.
+  if (raw.includes("over the limit of")) {
+    return {
+      title: "Too large to review",
+      detail: raw,
+      action: "Split the pull request, or raise the limits in Settings \u2192 Limits.",
+    };
+  }
+  if (raw.includes("does not have write access")) {
+    return {
+      title: "Not permitted",
+      detail: raw,
+      action: "Only users with write access to the repository can trigger a review.",
+    };
+  }
   if (raw.includes("secondary rate limit")) {
     return {
       title: "GitHub rate limit reached",
@@ -297,85 +315,6 @@ function friendlyError(raw: string): {
     action: "Check your API key and provider settings, then click Retry.",
   };
 }
-
-/* ── Mermaid (chart) ─────────────────────────── */
-
-const MermaidChart = memo(function MermaidChart({ chart }: { chart: string }) {
-  const ref = useRef<HTMLDivElement>(null);
-  const [error, setError] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    // Stable id per render so the cleanup pass can locate any orphan node
-    // Mermaid leaves on document.body on a failure path (belt-and-suspenders
-    // on top of suppressErrorRendering).
-    const renderId = "mermaid-" + Math.random().toString(36).slice(2);
-    setError(false);
-
-    import("mermaid")
-      .then(async (m) => {
-        if (cancelled) return undefined;
-        m.default.initialize({
-          startOnLoad: false,
-          // Mermaid 11+ otherwise injects a bomb-icon "Syntax error in text"
-          // SVG into document.body on parse failure — outside our ref — and
-          // it sticks around even after our promise rejects. Kills it.
-          suppressErrorRendering: true,
-          theme: "dark",
-          themeVariables: {
-            primaryColor: "#44403c",
-            primaryTextColor: "#f5f0eb",
-            primaryBorderColor: "#57534e",
-            lineColor: "#78716c",
-            secondaryColor: "#292524",
-            tertiaryColor: "#1c1917",
-            nodeTextColor: "#f5f0eb",
-            nodeBorder: "#57534e",
-            mainBkg: "#44403c",
-            clusterBkg: "#292524",
-            clusterBorder: "#57534e",
-            titleColor: "#f5f0eb",
-            edgeLabelBackground: "#292524",
-            textColor: "#f5f0eb",
-          },
-        });
-        // Preflight: parse() returns false on invalid syntax with no DOM
-        // side effects. Catches LLM-emitted diagrams that pass the
-        // backend's coarse bracket-balance check but still fail Mermaid's
-        // grammar (reserved words, edge-label chars, unsupported nodes).
-        const parsed = await m.default.parse(chart, { suppressErrors: true });
-        if (cancelled || !ref.current) return undefined;
-        if (!parsed) {
-          setError(true);
-          return undefined;
-        }
-        ref.current.textContent = "";
-        return m.default.render(renderId, chart);
-      })
-      .then((result) => {
-        if (cancelled || !ref.current || !result) return;
-        const clean = DOMPurify.sanitize(result.svg, {
-          USE_PROFILES: { svg: true, svgFilters: true },
-          ADD_TAGS: ["foreignObject"],
-        });
-        ref.current.innerHTML = clean;
-      })
-      .catch(() => {
-        if (!cancelled) setError(true);
-      })
-      .finally(() => {
-        // Mermaid's temp render container lives at #${renderId}; some
-        // versions also create a `d${renderId}` measurement node.
-        // Remove either if it outlived the render. Cheap, runs once.
-        document.getElementById(renderId)?.remove();
-        document.getElementById("d" + renderId)?.remove();
-      });
-    return () => { cancelled = true; };
-  }, [chart]);
-
-  if (error) return <p className="text-[11px] font-mono text-slate-text">Diagram could not be rendered</p>;
-  return <div ref={ref} className="flex justify-center" />;
-});
 
 /* ── Sub-components ──────────────────────────── */
 
@@ -520,7 +459,7 @@ function CopyFixButton({
 
 function PatternDetail({ patternId }: { patternId: number }) {
   const { data: pattern, isLoading } = usePattern({ variables: { id: patternId } });
-  if (isLoading) return <div className="mt-2 text-[11px] font-mono text-slate-text">Loading pattern...</div>;
+  if (isLoading) return <div role="status" aria-live="polite" className="mt-2 text-[11px] font-mono text-slate-text">Loading pattern...</div>;
   if (!pattern) return <div className="mt-2 text-[11px] font-mono text-slate-text">Pattern not found</div>;
   return (
     <div className="mt-2 border border-iron bg-iron/10 p-3">
@@ -660,11 +599,9 @@ function FileGroup({
   /** comment.id → resolving commit, for the resolved-by-commit breadcrumb. */
   resolvedCommits?: Map<string, { sha: string; url?: string }>;
 }) {
-  const [expanded, setExpanded] = useState(true);
-
-  useEffect(() => {
-    if (forceExpanded !== undefined) setExpanded(forceExpanded);
-  }, [forceExpanded]);
+  // The parent includes its expand-toggle generation in this component's
+  // key, so a global expand/collapse action resets this local state by remount.
+  const [expanded, setExpanded] = useState(forceExpanded ?? true);
   const Chevron = expanded ? ChevronDown : ChevronRight;
   const contentId = `${id}-content`;
   const language = langFromPath(filePath);
@@ -1114,6 +1051,34 @@ function IncrementalHistory({
   );
 }
 
+function createActiveFileStore(fileCount: number) {
+  let activeFileId: string | null = null;
+  return {
+    getSnapshot: () => activeFileId,
+    getServerSnapshot: () => null,
+    subscribe: (onStoreChange: () => void) => {
+      if (fileCount === 0 || typeof IntersectionObserver === "undefined") return () => {};
+      const observer = new IntersectionObserver(
+        (entries) => {
+          const active = entries.find((entry) => entry.isIntersecting)?.target.id;
+          if (active && active !== activeFileId) {
+            activeFileId = active;
+            onStoreChange();
+          }
+        },
+        { rootMargin: "-10% 0px -60% 0px", threshold: 0 },
+      );
+      const timer = window.setTimeout(() => {
+        document.querySelectorAll("section[id^='file-']").forEach((element) => observer.observe(element));
+      }, 100);
+      return () => {
+        window.clearTimeout(timer);
+        observer.disconnect();
+      };
+    },
+  };
+}
+
 /* ── Main Page ───────────────────────────────── */
 
 export default function ReviewDetailPage() {
@@ -1231,33 +1196,14 @@ export default function ReviewDetailPage() {
     return { newFindings, patternMatches, rulesEnforced, memoryUsed, total: comments.length };
   }, [comments]);
 
-  // Scroll-aware active file tracking
-  const [activeFileId, setActiveFileId] = useState<string | null>(null);
-
-  useEffect(() => {
-    const observer = new IntersectionObserver(
-      (entries) => {
-        for (const entry of entries) {
-          if (entry.isIntersecting) {
-            setActiveFileId(entry.target.id);
-            break;
-          }
-        }
-      },
-      { rootMargin: "-10% 0px -60% 0px", threshold: 0 },
-    );
-
-    const timer = setTimeout(() => {
-      document.querySelectorAll("section[id^='file-']").forEach((el) => {
-        observer.observe(el);
-      });
-    }, 100);
-
-    return () => {
-      clearTimeout(timer);
-      observer.disconnect();
-    };
-  }, [grouped.length]);
+  // IntersectionObserver is an external store. Recreate it when the number
+  // of file sections changes; useSyncExternalStore owns subscribe/cleanup.
+  const activeFileStore = useMemo(() => createActiveFileStore(grouped.length), [grouped.length]);
+  const activeFileId = useSyncExternalStore(
+    activeFileStore.subscribe,
+    activeFileStore.getSnapshot,
+    activeFileStore.getServerSnapshot,
+  );
 
   if (isLoading) {
     return (
@@ -1382,7 +1328,7 @@ export default function ReviewDetailPage() {
                 <RotateCcw
                   className={`h-3.5 w-3.5 ${retryReview.isPending ? "animate-spin" : ""}`}
                 />
-                {retryReview.isPending ? "Retrying\u2026" : "Retry"}
+                <span role="status" aria-live="polite">{retryReview.isPending ? "Retrying\u2026" : "Retry"}</span>
               </button>
             )}
             {isLive && (
@@ -1393,7 +1339,7 @@ export default function ReviewDetailPage() {
                 className="inline-flex items-center gap-1.5 border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs font-mono text-red-400 hover:bg-red-500/20 transition-colors cursor-pointer"
               >
                 <Square className="h-3 w-3 fill-current" />
-                {cancelReview.isPending ? "Cancelling\u2026" : "Stop Review"}
+                <span role="status" aria-live="polite">{cancelReview.isPending ? "Cancelling\u2026" : "Stop Review"}</span>
               </button>
             )}
           </div>
@@ -1403,7 +1349,7 @@ export default function ReviewDetailPage() {
       {/* Retry / Stop action errors — surfaced inline so a failed mutation
           isn't swallowed by console.error alone. */}
       {(retryReview.isError || cancelReview.isError) && (
-        <div className="border border-red-400/30 bg-red-400/5 px-4 py-2.5 mb-6 flex items-center gap-2">
+        <div className="border border-red-400/30 bg-red-400/5 px-4 py-2.5 mb-6 flex items-center gap-2" role="alert">
           <AlertTriangle className="h-4 w-4 text-red-400 shrink-0" />
           <p className="text-xs font-mono text-red-400">
             {retryReview.isError ? "Retry failed" : "Stop failed"}
@@ -1443,7 +1389,7 @@ export default function ReviewDetailPage() {
             File Classification
           </h3>
           <div className="space-y-1">
-            {triageResults.map((t) => (
+            {triageResults.length > 0 ? triageResults.map((t) => (
               <div key={t.file} className="flex items-center gap-2 text-xs font-mono">
                 <span
                   className={`inline-flex items-center rounded-sm border px-2 py-0.5 text-[11px] ${
@@ -1460,7 +1406,24 @@ export default function ReviewDetailPage() {
                 </span>
                 <span className="text-foreground/70 truncate">{t.file}</span>
               </div>
-            ))}
+            )) : (
+              <p className="text-xs font-mono text-slate-text">
+                Nothing here yet.
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Budget note. A reduced review reads fewer files than the pull request
+          changed, so without this it looks merely quiet rather than narrowed
+          on purpose — the same silent outcome the refusal path avoids. */}
+      {review.budget_note && (
+        <div className="border border-amber/30 bg-amber/5 px-4 py-3 flex items-start gap-2.5">
+          <Gauge className="h-3.5 w-3.5 text-amber mt-0.5 shrink-0" />
+          <div className="space-y-0.5">
+            <p className="text-[11px] font-mono font-medium text-amber">Review was reduced</p>
+            <p className="text-[11px] font-mono text-amber/80">{review.budget_note}</p>
           </div>
         </div>
       )}
@@ -1495,7 +1458,7 @@ export default function ReviewDetailPage() {
                 <RotateCcw
                   className={`h-3.5 w-3.5 ${retryReview.isPending ? "animate-spin" : ""}`}
                 />
-                {retryReview.isPending ? "Retrying\u2026" : "Retry"}
+                <span role="status" aria-live="polite">{retryReview.isPending ? "Retrying\u2026" : "Retry"}</span>
               </button>
             </div>
             <details className="mt-3">
@@ -1648,6 +1611,19 @@ export default function ReviewDetailPage() {
         })()}
       </div>
 
+      <MinorNotes notes={data?.minor_notes ?? []} />
+
+      {/* What Argus learned — the memory rows this review wrote. Hidden while
+          live: the memory sinks run at the very end of the pipeline, so an empty
+          panel mid-review would report a failure that has not happened. */}
+      {!isLive && (
+        <LearnedMemories
+          memories={data?.memories ?? []}
+          counts={data?.memory_counts ?? []}
+          status={review.status}
+        />
+      )}
+
       {/* Incremental history — per-push passes + auto-resolves (re-reviewed PRs) */}
       {!isLive && (
         <IncrementalHistory
@@ -1793,7 +1769,7 @@ export default function ReviewDetailPage() {
 
               return (
                 <FileGroup
-                  key={filePath}
+                  key={`${filePath}:${expandToggle}`}
                   id={fid}
                   filePath={filePath}
                   fileComments={filtered}
@@ -1847,7 +1823,7 @@ export default function ReviewDetailPage() {
                 }}
                 className="px-3 py-1.5 text-xs font-mono text-red-400 border border-red-500/30 bg-red-500/10 hover:bg-red-500/20 transition-colors disabled:opacity-50"
               >
-                {cancelReview.isPending ? "Cancelling\u2026" : "Stop Review"}
+                <span role="status" aria-live="polite">{cancelReview.isPending ? "Cancelling\u2026" : "Stop Review"}</span>
               </button>
             </div>
           </div>

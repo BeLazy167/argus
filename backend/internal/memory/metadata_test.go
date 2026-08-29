@@ -1,7 +1,6 @@
 package memory
 
 import (
-	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -213,71 +212,6 @@ func TestMetadataToMap_ValidationFailures(t *testing.T) {
 	}
 }
 
-func TestBuildFiltersJSON(t *testing.T) {
-	t.Run("nil_filters", func(t *testing.T) {
-		got, err := BuildFiltersJSON(nil)
-		if err != nil {
-			t.Fatalf("BuildFiltersJSON(nil) err = %v", err)
-		}
-		if got != "" {
-			t.Errorf("BuildFiltersJSON(nil) = %q, want empty", got)
-		}
-	})
-
-	t.Run("empty_filters", func(t *testing.T) {
-		got, err := BuildFiltersJSON(&SearchFilters{})
-		if err != nil {
-			t.Fatalf("BuildFiltersJSON(empty) err = %v", err)
-		}
-		if got != "" {
-			t.Errorf("BuildFiltersJSON(empty) = %q, want empty", got)
-		}
-	})
-
-	t.Run("and_single_condition", func(t *testing.T) {
-		f := &SearchFilters{
-			AND: []FilterCondition{{Key: "type", Value: "pattern"}},
-		}
-		got, err := BuildFiltersJSON(f)
-		if err != nil {
-			t.Fatalf("err = %v", err)
-		}
-		// Round-trip: unmarshal back and assert shape matches docs example.
-		var parsed map[string][]map[string]any
-		if err := json.Unmarshal([]byte(got), &parsed); err != nil {
-			t.Fatalf("round-trip unmarshal: %v", err)
-		}
-		and, ok := parsed["AND"]
-		if !ok || len(and) != 1 {
-			t.Fatalf("expected single AND condition, got %v", parsed)
-		}
-		if and[0]["key"] != "type" || and[0]["value"] != "pattern" {
-			t.Errorf("condition = %v", and[0])
-		}
-	})
-
-	t.Run("or_multiple_conditions", func(t *testing.T) {
-		f := &SearchFilters{
-			OR: []FilterCondition{
-				{Key: "type", Value: "pattern"},
-				{Key: "type", Value: "scenario"},
-				{Key: "type", Value: "feedback"},
-			},
-		}
-		got, err := BuildFiltersJSON(f)
-		if err != nil {
-			t.Fatalf("err = %v", err)
-		}
-		var parsed map[string][]map[string]any
-		if err := json.Unmarshal([]byte(got), &parsed); err != nil {
-			t.Fatalf("round-trip: %v", err)
-		}
-		if len(parsed["OR"]) != 3 {
-			t.Errorf("OR len = %d, want 3", len(parsed["OR"]))
-		}
-	})
-}
-
 func TestFilterNumeric(t *testing.T) {
 	got := FilterNumeric("pr_number", ">=", "100")
 	if got.Key != "pr_number" || got.Value != "100" {
@@ -352,11 +286,11 @@ func TestRepoTagNew_CollisionSafe(t *testing.T) {
 		}
 	})
 	t.Run("collision_safe_tags_stay_valid", func(t *testing.T) {
-		// Disambiguated tags/IDs must still contain only Supermemory-legal chars.
-		if !supermemoryAllowedRe.MatchString(RepoTagNew("sdk.js")) {
+		// Disambiguated tags/IDs must still contain only legal customID chars.
+		if !customIDAllowedRe.MatchString(RepoTagNew("sdk.js")) {
 			t.Errorf("RepoTagNew(sdk.js) = %q contains illegal chars", RepoTagNew("sdk.js"))
 		}
-		if !supermemoryAllowedRe.MatchString(SynthesisCustomID("o", "sdk.js", "src/index.ts")) {
+		if !customIDAllowedRe.MatchString(SynthesisCustomID("o", "sdk.js", "src/index.ts")) {
 			t.Error("disambiguated SynthesisCustomID contains illegal chars")
 		}
 	})

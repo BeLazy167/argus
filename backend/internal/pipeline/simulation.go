@@ -2,7 +2,6 @@ package pipeline
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -82,7 +81,15 @@ func NewSimulationEngine(registry *llm.Registry, st *store.Store, ghClient *ghpk
 // RunSimulations executes scenario simulations for a PR and returns results.
 // Each scenario is simulated independently. Low-confidence results are still
 // returned but marked as uncertain.
-func (e *SimulationEngine) RunSimulations(ctx context.Context, req SimulationRequest) ([]SimulationResult, error) {
+func (e *SimulationEngine) RunSimulations(ctx context.Context, req SimulationRequest) (results []SimulationResult, err error) {
+	opID, started := pipelineOperationStart(ctx, e.logger, "simulation_stage", "run the highest-ranked bounded scenario set against changed code and persist each scenario verdict", req)
+	defer func() {
+		if err != nil {
+			pipelineOperationFailure(ctx, e.logger, opID, "simulation_stage", started, err)
+			return
+		}
+		pipelineOperationResult(ctx, e.logger, opID, "simulation_stage", "success", started, results, "result_count", len(results), "passed_count", countPassedSimulations(results))
+	}()
 	if len(req.Scenarios) == 0 {
 		return nil, nil
 	}
@@ -98,7 +105,6 @@ func (e *SimulationEngine) RunSimulations(ctx context.Context, req SimulationReq
 		}
 	}
 
-	var results []SimulationResult
 	// Simulate up to 5 scenarios per PR. The candidate list is already ranked by UCB1 score
 	// in SQL (see docs/plans/2026-04-17-ucb-scenario-selection.md) — the first 5 are the
 	// best balance of exploitation (scenarios that find real bugs) and exploration
@@ -122,7 +128,7 @@ func (e *SimulationEngine) RunSimulations(ctx context.Context, req SimulationReq
 
 	// Aggregate stream signal — silent when zero scenarios actually ran.
 	if len(results) > 0 && req.Run.EventBus != nil {
-		req.Run.EventBus.Publish(req.Run.ReviewID, EventSimulationsComplete, map[string]any{
+		req.Run.EventBus.PublishForAttempt(req.Run.ReviewID, req.Run.AttemptGeneration, EventSimulationsComplete, map[string]any{
 			"total":  len(results),
 			"passed": countPassedSimulations(results),
 		})
@@ -144,7 +150,7 @@ func countPassedSimulations(results []SimulationResult) int {
 }
 
 // persistScenarioRuns writes each simulation outcome to the DB. Any failure is logged at Warn
-// and the loop continues — same non-fatal pattern used for Supermemory indexing.
+// and the loop continues — same non-fatal pattern used for memory indexing.
 func (e *SimulationEngine) persistScenarioRuns(ctx context.Context, req SimulationRequest, results []SimulationResult) {
 	if e.store == nil || req.Run == nil {
 		return
@@ -198,16 +204,29 @@ Rules:
 - 'verdict' MUST be one of the four literal strings. Pick 'fixed' when passes is true, 'broken' when passes is false and confidence ≥ 0.8, 'partial' when passes is false and confidence ≥ 0.5, 'unclear' otherwise.
 - If you're unsure, set confidence < 0.5 and use 'unclear'. It's better to flag uncertainty than to miss a real issue or raise a false alarm.`
 
-func (e *SimulationEngine) simulateScenario(ctx context.Context, req SimulationRequest, scenario SimScenario, cfg llm.ModelConfig, provider llm.Provider) (SimulationResult, error) {
+func (e *SimulationEngine) simulateScenario(ctx context.Context, req SimulationRequest, scenario SimScenario, cfg llm.ModelConfig, provider llm.Provider) (result SimulationResult, err error) {
+	opID, started := pipelineOperationStart(ctx, e.logger, "scenario_simulation", "build a scenario-specific execution prompt, invoke the synthesis model, parse its verdict, and attach exact token usage", map[string]any{"request": req, "scenario": scenario, "model_config": cfg})
+	defer func() {
+		if err != nil {
+			pipelineOperationFailure(ctx, e.logger, opID, "scenario_simulation", started, err, "scenario_id", scenario.ID)
+			return
+		}
+		pipelineOperationResult(ctx, e.logger, opID, "scenario_simulation", result.Verdict, started, result, "scenario_id", scenario.ID)
+	}()
 	prompt := buildSimulationPrompt(req, scenario)
 
 	resp, err := provider.Complete(ctx, llm.CompletionRequest{
-		Model:       cfg.Model,
-		System:      simulationSystemPrompt,
-		Messages:    []llm.Message{{Role: "user", Content: prompt}},
-		MaxTokens:   600,
-		Temperature: 0.3, // low temp for more deterministic reasoning
-		Stage:       "simulation",
+		Model:    cfg.Model,
+		System:   simulationSystemPrompt,
+		Messages: []llm.Message{{Role: "user", Content: prompt}},
+		// gpt-5.x reasoning and visible output share MaxTokens. The response
+		// includes three paragraph fields, so reserve the same 4000-token
+		// reasoning-aware budget as other structured synthesis calls.
+		MaxTokens:       4000,
+		Temperature:     0.3, // low temp for more deterministic reasoning
+		JSONMode:        true,
+		ReasoningEffort: llm.ReasoningLow,
+		Stage:           "simulation",
 	})
 	if err != nil {
 		return SimulationResult{}, err
@@ -225,14 +244,14 @@ func (e *SimulationEngine) simulateScenario(ctx context.Context, req SimulationR
 		Provider:         cfg.Provider,
 	})
 
-	result, err := parseSimulationResponse(resp.Content, scenario.Description)
+	result, err = parseSimulationResponse(resp.Content, scenario.Description)
 	if err != nil {
 		return SimulationResult{}, err
 	}
 	result.ScenarioID = scenario.ID
 
 	if req.Run.EventBus != nil {
-		req.Run.EventBus.Publish(req.Run.ReviewID, EventScenarioSimulated, map[string]any{
+		req.Run.EventBus.PublishForAttempt(req.Run.ReviewID, req.Run.AttemptGeneration, EventScenarioSimulated, map[string]any{
 			"scenario_id": scenario.ID,
 			"verdict":     result.Verdict,
 			"files":       len(scenario.Files),
@@ -296,33 +315,41 @@ func parseSimulationResponse(content string, scenario string) (SimulationResult,
 	result := SimulationResult{Scenario: scenario}
 
 	var parsed struct {
-		Passes     bool    `json:"passes"`
-		Confidence float64 `json:"confidence"`
-		Verdict    string  `json:"verdict"`
-		Why        string  `json:"why"`
-		Fix        string  `json:"fix"`
-		RootCause  string  `json:"root_cause"`
-		Impact     string  `json:"impact"`
-		Suggestion string  `json:"suggestion"`
+		Passes     *bool    `json:"passes"`
+		Confidence *float64 `json:"confidence"`
+		Verdict    string   `json:"verdict"`
+		Why        string   `json:"why"`
+		Fix        string   `json:"fix"`
+		RootCause  *string  `json:"root_cause"`
+		Impact     string   `json:"impact"`
+		Suggestion string   `json:"suggestion"`
 	}
 
-	cleaned := extractJSON(content)
-	if err := json.Unmarshal([]byte(cleaned), &parsed); err != nil {
+	salvaged, err := unmarshalLLMObjectWithSalvage(content, &parsed)
+	if err != nil {
 		return result, fmt.Errorf("failed to parse simulation response: %w", err)
 	}
+	if salvaged && (parsed.Passes == nil || parsed.Confidence == nil || parsed.RootCause == nil) {
+		return result, fmt.Errorf("failed to parse simulation response: truncated verdict fields")
+	}
+	if parsed.Passes == nil || parsed.Confidence == nil {
+		return result, fmt.Errorf("failed to parse simulation response: missing verdict fields")
+	}
 
-	result.Passes = parsed.Passes
-	result.Confidence = max(0, min(1, parsed.Confidence))
-	result.Verdict = normalizeVerdict(parsed.Verdict, parsed.Passes, result.Confidence)
+	result.Passes = *parsed.Passes
+	result.Confidence = max(0, min(1, *parsed.Confidence))
+	result.Verdict = normalizeVerdict(parsed.Verdict, result.Passes, result.Confidence)
 	result.Why = parsed.Why
 	result.Fix = parsed.Fix
-	result.RootCause = parsed.RootCause
+	if parsed.RootCause != nil {
+		result.RootCause = *parsed.RootCause
+	}
 	result.Impact = parsed.Impact
 	result.Suggestion = parsed.Suggestion
 	// Backfill plain-English fields when the LLM forgot to populate them. Keeps the UI
 	// from rendering empty "Why:" lines when we still have the longer root_cause / suggestion.
 	if result.Why == "" {
-		result.Why = firstSentence(parsed.RootCause)
+		result.Why = firstSentence(result.RootCause)
 	}
 	if result.Fix == "" {
 		result.Fix = firstSentence(parsed.Suggestion)

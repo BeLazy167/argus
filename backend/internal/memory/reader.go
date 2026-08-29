@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/BeLazy167/argus/backend/internal/obs"
 	"github.com/BeLazy167/argus/backend/internal/util"
 )
 
@@ -32,10 +33,14 @@ type MemoryQuery struct {
 	Filters   []FilterCondition
 	Limit     int
 	Threshold float64
-	Rerank    bool
 	// Enrich requests related memories + summaries so each Match carries
 	// RichContent (the hint-render path); off keeps the response lean.
 	Enrich bool
+	// PointLookup declares that Filters UNIQUELY PIN a row, making this a
+	// lookup rather than a ranking read — see SearchRequest.PointLookup. Set
+	// it only when that is true: it licenses a predicate-scan fallback, and
+	// on a ranking read that returns arbitrary rows.
+	PointLookup bool
 }
 
 // containerTags resolves the query scope to concrete container tags. Returns
@@ -65,11 +70,10 @@ func (q MemoryQuery) containerTags() ([]string, error) {
 // stamps ContainerTag per leg. Type + Filters combine as a single AND group.
 func (q MemoryQuery) request() SearchRequest {
 	req := SearchRequest{
-		Query:      q.Query,
-		SearchMode: "hybrid",
-		Limit:      q.Limit,
-		Threshold:  q.Threshold,
-		Rerank:     q.Rerank,
+		Query:       q.Query,
+		Limit:       q.Limit,
+		Threshold:   q.Threshold,
+		PointLookup: q.PointLookup,
 	}
 	and := make([]FilterCondition, 0, len(q.Filters)+1)
 	if q.Type != "" {
@@ -85,99 +89,154 @@ func (q MemoryQuery) request() SearchRequest {
 	return req
 }
 
-// Search is the deep, error-honest read behind the memory reader seam. It owns
-// container-tag resolution, its own 5s timeout, and the retrieval → convert
-// path, returning the raw matches and any search error verbatim so each caller
-// decides the policy: propagate (enrich novelty gating must not confuse a broken
-// search with a genuine no-match) or degrade via BestEffort (briefing, hints,
-// suppression, scenario dedup). Returns (nil, nil) on a disabled indexer.
-func (idx *indexerImpl) Search(ctx context.Context, q MemoryQuery) ([]PatternMatch, error) {
-	if idx.client == nil {
-		return nil, nil
-	}
+// runSearchFn is the one transport-shaped hole in the shared read
+// orchestration: execute a single-container SearchRequest and convert to
+// matches. The Postgres backend satisfies it with memoRunSearch (hybrid SQL),
+// and tests satisfy it directly — so container resolution, timeouts, fan-out
+// merge, and leg-degradation policy are shared by construction, exactly like
+// the write path's Doc builders.
+//
+// Whether the read wants enriched content is carried by the request itself
+// (Include != nil), never as a second argument: a caller that set one and
+// forgot the other produced empty RichContent, which HintStrings then
+// filters out — a silently blank briefing section with no error anywhere.
+type runSearchFn func(ctx context.Context, req SearchRequest) ([]PatternMatch, error)
+
+// searchWith is the shared Search orchestration over a transport core.
+func searchWith(ctx context.Context, run runSearchFn, q MemoryQuery) (matches []PatternMatch, err error) {
+	operationID := obs.NewLogID()
+	started := time.Now()
+	logger := slog.Default()
+	logger.InfoContext(ctx, "memory search orchestration started",
+		"operation_id", operationID, "scope", q.Scope, "repo", q.Repo,
+		"memory_type", q.Type, "query_len", len(q.Query), "limit", q.Limit,
+		"threshold", q.Threshold, "enrich", q.Enrich, "point_lookup", q.PointLookup,
+		"filter_count", len(q.Filters))
+	defer func() {
+		attrs := []any{"operation_id", operationID, "scope", q.Scope, "memory_type", q.Type,
+			"result_count", len(matches), "duration_ms", time.Since(started).Milliseconds(), "error", err}
+		if err != nil {
+			logger.WarnContext(ctx, "memory search orchestration failed", attrs...)
+			return
+		}
+		logger.InfoContext(ctx, "memory search orchestration completed", attrs...)
+	}()
+
 	tags, err := q.containerTags()
 	if err != nil {
 		return nil, err
 	}
 	if len(tags) == 0 {
+		logger.InfoContext(ctx, "memory search skipped",
+			"operation_id", operationID, "reason", "scope_requires_repo", "scope", q.Scope)
 		return nil, nil
 	}
+	logger.DebugContext(ctx, "memory retrieval plan selected",
+		"operation_id", operationID, "strategy", map[bool]string{true: "fan_out", false: "single_container"}[len(tags) > 1],
+		"container_count", len(tags), "containers", tags)
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	req := q.request()
 	if len(tags) == 1 {
 		req.ContainerTag = tags[0]
-		return idx.runSearch(ctx, req, q.Enrich)
+		matches, err = run(ctx, req)
+		beforeFilter := len(matches)
+		matches = retrievableMatches(matches)
+		logger.DebugContext(ctx, "memory retrieval filtering completed", "operation_id", operationID,
+			"container", tags[0], "raw_count", beforeFilter, "retrievable_count", len(matches))
+		return matches, err
 	}
-	return idx.searchFanOut(ctx, req, tags, q.Enrich)
+	matches, err = searchFanOut(ctx, run, req, tags)
+	beforeFilter := len(matches)
+	matches = retrievableMatches(matches)
+	logger.DebugContext(ctx, "memory retrieval filtering completed", "operation_id", operationID,
+		"container_count", len(tags), "raw_count", beforeFilter, "retrievable_count", len(matches))
+	return matches, err
+}
+
+// retrievableMatches quarantines legacy reply-derived learnings. Unauthorized
+// legacy rows have SourceLegacyReplyFeedback. Pattern rows with the older
+// SourceTrustedReplyFeedback were authorized but incorrectly promoted to the
+// installation-wide container. Both remain stored for audit; current trusted
+// learnings use their repo-specific source and container. Trusted finding
+// feedback keeps the older source and remains retrievable because its type is
+// feedback, not pattern.
+func retrievableMatches(matches []PatternMatch) []PatternMatch {
+	out := matches[:0]
+	for _, match := range matches {
+		source := match.Metadata["source"]
+		legacySharedPattern := match.Metadata["type"] == string(TypePattern) && source == SourceTrustedReplyFeedback
+		if source != SourceLegacyReplyFeedback && !legacySharedPattern {
+			out = append(out, match)
+		}
+	}
+	return out
 }
 
 // searchFanOut runs one search per container concurrently (write-partitioned
 // slots; wg.Wait is the happens-before edge) and merges the hits best-first. A
 // single leg error fails the whole call — a partial merge would let a broken
 // container masquerade as a genuine no-match on the enrich novelty path.
-func (idx *indexerImpl) searchFanOut(ctx context.Context, base SearchRequest, tags []string, enrich bool) ([]PatternMatch, error) {
+func searchFanOut(ctx context.Context, run runSearchFn, base SearchRequest, tags []string) ([]PatternMatch, error) {
 	type legResult struct {
-		matches []PatternMatch
-		err     error
+		matches  []PatternMatch
+		err      error
+		duration time.Duration
 	}
+	operationID := obs.NewLogID()
+	started := time.Now()
+	slog.InfoContext(ctx, "memory search fan-out started", "operation_id", operationID,
+		"container_count", len(tags), "containers", tags, "query_len", len(base.Query))
 	legs := make([]legResult, len(tags))
 	var wg sync.WaitGroup
 	wg.Add(len(tags))
 	for i, tag := range tags {
 		go func(i int, tag string) {
 			defer wg.Done()
+			legStarted := time.Now()
 			req := base
 			req.ContainerTag = tag
-			m, err := idx.runSearch(ctx, req, enrich)
-			legs[i] = legResult{m, err}
+			slog.DebugContext(ctx, "memory search fan-out leg started", "operation_id", operationID, "container", tag)
+			m, err := run(ctx, req)
+			legs[i] = legResult{matches: m, err: err, duration: time.Since(legStarted)}
 		}(i, tag)
 	}
 	wg.Wait()
 
 	var out []PatternMatch
-	for _, leg := range legs {
+	for i, leg := range legs {
+		attrs := []any{"operation_id", operationID, "container", tags[i], "result_count", len(leg.matches),
+			"duration_ms", leg.duration.Milliseconds(), "error", leg.err}
 		if leg.err != nil {
+			slog.WarnContext(ctx, "memory search fan-out leg failed", attrs...)
+			slog.WarnContext(ctx, "memory search fan-out failed", "operation_id", operationID,
+				"failed_container", tags[i], "duration_ms", time.Since(started).Milliseconds(), "error", leg.err)
 			return nil, leg.err
 		}
+		slog.DebugContext(ctx, "memory search fan-out leg completed", attrs...)
 		out = append(out, leg.matches...)
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Score > out[j].Score })
+	slog.InfoContext(ctx, "memory search fan-out completed", "operation_id", operationID,
+		"container_count", len(tags), "result_count", len(out), "duration_ms", time.Since(started).Milliseconds())
 	return out, nil
 }
 
-// runSearch executes one SearchRequest and converts the results to
-// []PatternMatch, RETURNING the client error instead of swallowing it — the ONE
-// place a reader-path search error originates. When enrich is set each match
-// also carries RichContent(2) (summary + related memories) for the hint render
-// path. Result counts log at Debug (empty-vs-hit visibility, tagged by
-// container); the error path is the caller's to log (BestEffort on degrade, or
-// the enrich Warn on propagate) so the log-and-degrade policy stays single-owned.
-func (idx *indexerImpl) runSearch(ctx context.Context, req SearchRequest, enrich bool) ([]PatternMatch, error) {
-	resp, err := idx.client.Search(ctx, req)
-	if err != nil {
-		return nil, err
+// logSearchResult is the shared per-search Debug line both transport cores
+// emit (empty-vs-hit visibility, tagged by container) — one shape, like
+// logDegrade below on the degrade path.
+func logSearchResult(logger *slog.Logger, req SearchRequest, count int) {
+	if logger == nil {
+		return
 	}
-	if resp == nil {
-		return nil, nil
-	}
-	out := make([]PatternMatch, 0, len(resp.Results))
-	for _, r := range resp.Results {
-		pm := resultToPatternMatch(r)
-		if enrich {
-			pm.RichContent = r.RichContent(2)
-		}
-		out = append(out, pm)
-	}
-	idx.logger.Debug("memory search",
-		"container", req.ContainerTag, "query_len", len(req.Query), "count", len(out))
-	return out, nil
+	logger.Debug("memory search",
+		"container", req.ContainerTag, "query_len", len(req.Query), "count", count)
 }
 
 // logDegrade emits the single canonical "memory read degraded" Warn shared by
-// BestEffort (whole-read degradation) and warnLeg (per-leg degradation), so the
-// two paths can never drift in field shape. A nil logger is a no-op, keeping
+// BestEffort (whole-read degradation) and the per-leg degradation sites in the
+// shared briefing orchestration, so the paths can never drift in field shape. A nil logger is a no-op, keeping
 // bus-less/test paths silent.
 func logDegrade(logger *slog.Logger, caller, container string, queryLen int, err error) {
 	if logger != nil {

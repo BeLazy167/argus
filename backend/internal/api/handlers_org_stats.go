@@ -35,6 +35,8 @@ func parsePeriodInterval(r *http.Request) pgtype.Interval {
 }
 
 func (s *Server) statsOverview(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.statsOverview")
+	defer op.Finish(w)
 	q := db.New(s.store.Pool)
 	instIDs := getInstallationIDs(r.Context())
 	period, periodStr := parsePeriod(r)
@@ -44,7 +46,7 @@ func (s *Server) statsOverview(w http.ResponseWriter, r *http.Request) {
 		Period:          period,
 	})
 	if err != nil {
-		s.logger.Error("stats overview", "error", err)
+		s.logger.ErrorContext(r.Context(), "stats overview", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
@@ -57,11 +59,11 @@ func (s *Server) statsOverview(w http.ResponseWriter, r *http.Request) {
 	// as "all-zero metrics".
 	ar, arErr := s.store.GetAutoResolveStats(r.Context(), instIDs, periodStr)
 	if arErr != nil {
-		s.logger.Error("stats overview: auto-resolve stats", "error", arErr)
+		s.logger.ErrorContext(r.Context(), "stats overview: auto-resolve stats", "error", arErr)
 	}
 	ll, llErr := s.store.GetLearnLayerCounts(r.Context(), instIDs, periodStr)
 	if llErr != nil {
-		s.logger.Error("stats overview: learn-layer counts", "error", llErr)
+		s.logger.ErrorContext(r.Context(), "stats overview: learn-layer counts", "error", llErr)
 	}
 
 	writeJSON(w, http.StatusOK, StatsOverviewResponse{
@@ -87,13 +89,15 @@ func (s *Server) statsOverview(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) statsTimeseries(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.statsTimeseries")
+	defer op.Finish(w)
 	q := db.New(s.store.Pool)
 	rows, err := q.StatsTimeseries(r.Context(), db.StatsTimeseriesParams{
 		InstallationIds: getInstallationIDs(r.Context()),
 		Period:          parsePeriodInterval(r),
 	})
 	if err != nil {
-		s.logger.Error("stats timeseries", "error", err)
+		s.logger.ErrorContext(r.Context(), "stats timeseries", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
@@ -122,6 +126,8 @@ func (s *Server) statsTimeseries(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) statsUsers(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.statsUsers")
+	defer op.Finish(w)
 	q := db.New(s.store.Pool)
 	period := parsePeriodInterval(r)
 	instIDs := getInstallationIDs(r.Context())
@@ -131,7 +137,7 @@ func (s *Server) statsUsers(w http.ResponseWriter, r *http.Request) {
 		Period:          period,
 	})
 	if err != nil {
-		s.logger.Error("stats users", "error", err)
+		s.logger.ErrorContext(r.Context(), "stats users", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
@@ -141,7 +147,7 @@ func (s *Server) statsUsers(w http.ResponseWriter, r *http.Request) {
 		Period:          period,
 	})
 	if err != nil {
-		s.logger.Error("stats user criticals", "error", err)
+		s.logger.ErrorContext(r.Context(), "stats user criticals", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
@@ -173,13 +179,15 @@ func (s *Server) statsUsers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) statsModels(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.statsModels")
+	defer op.Finish(w)
 	q := db.New(s.store.Pool)
 	rawRows, err := q.StatsModelsRaw(r.Context(), db.StatsModelsRawParams{
 		InstallationIds: getInstallationIDs(r.Context()),
 		Period:          parsePeriodInterval(r),
 	})
 	if err != nil {
-		s.logger.Error("stats models", "error", err)
+		s.logger.ErrorContext(r.Context(), "stats models", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
@@ -195,7 +203,7 @@ func (s *Server) statsModels(w http.ResponseWriter, r *http.Request) {
 	for _, raw := range rawRows {
 		var usage pipeline.RunTokenUsage
 		if err := json.Unmarshal(raw, &usage); err != nil {
-			s.logger.Warn("skipping malformed token_usage in model stats", "error", err)
+			s.logger.WarnContext(r.Context(), "skipping malformed token_usage in model stats", "error", err)
 			continue
 		}
 		// Aggregate all stages that have a model set
@@ -254,6 +262,8 @@ func (s *Server) statsModels(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) statsFindings(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.statsFindings")
+	defer op.Finish(w)
 	q := db.New(s.store.Pool)
 	period := parsePeriodInterval(r)
 	instIDs := getInstallationIDs(r.Context())
@@ -262,7 +272,7 @@ func (s *Server) statsFindings(w http.ResponseWriter, r *http.Request) {
 		InstallationIds: instIDs, Period: period,
 	})
 	if err != nil {
-		s.logger.Error("stats findings severity", "error", err)
+		s.logger.ErrorContext(r.Context(), "stats findings severity", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
@@ -271,7 +281,7 @@ func (s *Server) statsFindings(w http.ResponseWriter, r *http.Request) {
 		InstallationIds: instIDs, Period: period,
 	})
 	if err != nil {
-		s.logger.Error("stats findings category", "error", err)
+		s.logger.ErrorContext(r.Context(), "stats findings category", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
@@ -280,7 +290,7 @@ func (s *Server) statsFindings(w http.ResponseWriter, r *http.Request) {
 		InstallationIds: instIDs, Period: period,
 	})
 	if err != nil {
-		s.logger.Error("stats findings new vs pattern", "error", err)
+		s.logger.ErrorContext(r.Context(), "stats findings new vs pattern", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
@@ -311,13 +321,15 @@ func (s *Server) statsFindings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) statsAdoption(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.statsAdoption")
+	defer op.Finish(w)
 	q := db.New(s.store.Pool)
 	row, err := q.StatsAdoption(r.Context(), db.StatsAdoptionParams{
 		InstallationIds: getInstallationIDs(r.Context()),
 		Period:          parsePeriodInterval(r),
 	})
 	if err != nil {
-		s.logger.Error("stats adoption", "error", err)
+		s.logger.ErrorContext(r.Context(), "stats adoption", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
@@ -332,13 +344,15 @@ func (s *Server) statsAdoption(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) statsRepos(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.statsRepos")
+	defer op.Finish(w)
 	q := db.New(s.store.Pool)
 	rows, err := q.StatsPerRepo(r.Context(), db.StatsPerRepoParams{
 		InstallationIds: getInstallationIDs(r.Context()),
 		Period:          parsePeriodInterval(r),
 	})
 	if err != nil {
-		s.logger.Error("stats per repo", "error", err)
+		s.logger.ErrorContext(r.Context(), "stats per repo", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
@@ -367,13 +381,15 @@ func (s *Server) statsRepos(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) statsReviewTimes(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.statsReviewTimes")
+	defer op.Finish(w)
 	q := db.New(s.store.Pool)
 	rows, err := q.StatsReviewTimes(r.Context(), db.StatsReviewTimesParams{
 		InstallationIds: getInstallationIDs(r.Context()),
 		Period:          parsePeriodInterval(r),
 	})
 	if err != nil {
-		s.logger.Error("stats review times", "error", err)
+		s.logger.ErrorContext(r.Context(), "stats review times", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
@@ -448,6 +464,7 @@ func aggregateStageCosts(rawRows [][]byte) ([]stageCostAgg, int) {
 		addStage("scoring", usage.Scoring)
 		addStage("synthesis", usage.Synthesis)
 		addStage("reply", usage.Reply)
+		addStage("auto_resolve", usage.AutoResolve)
 		// review[] — split by specialist into composite keys like
 		// "review.bug_hunter". Bounded at 4-5 values, high signal. An entry
 		// with empty Specialist (skim single-pass review) falls into the
@@ -480,13 +497,15 @@ func aggregateStageCosts(rawRows [][]byte) ([]stageCostAgg, int) {
 }
 
 func (s *Server) statsCostPerStage(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.statsCostPerStage")
+	defer op.Finish(w)
 	q := db.New(s.store.Pool)
 	rawRows, err := q.StatsModelsRaw(r.Context(), db.StatsModelsRawParams{
 		InstallationIds: getInstallationIDs(r.Context()),
 		Period:          parsePeriodInterval(r),
 	})
 	if err != nil {
-		s.logger.Error("stats cost per stage", "error", err)
+		s.logger.ErrorContext(r.Context(), "stats cost per stage", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
@@ -495,7 +514,7 @@ func (s *Server) statsCostPerStage(w http.ResponseWriter, r *http.Request) {
 	if unmarshalErrs > 0 {
 		// Billing-sensitive silent drop. Log so operators can spot schema
 		// drift or DB corruption before it hides meaningful spend.
-		s.logger.Warn("stats cost per stage: token_usage unmarshal failures",
+		s.logger.WarnContext(r.Context(), "stats cost per stage: token_usage unmarshal failures",
 			"failures", unmarshalErrs, "rows_total", len(rawRows))
 	}
 	writeJSON(w, http.StatusOK, out)

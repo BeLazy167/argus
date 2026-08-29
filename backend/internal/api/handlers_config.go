@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -11,8 +12,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/BeLazy167/argus/backend/internal/crypto"
 	"github.com/BeLazy167/argus/backend/internal/llm"
+	"github.com/BeLazy167/argus/backend/internal/memory"
 	"github.com/BeLazy167/argus/backend/internal/pipeline"
 )
 
@@ -33,13 +34,15 @@ func (s *Server) verifyRepoAccess(w http.ResponseWriter, r *http.Request) (int64
 // --- Model Config ---
 
 func (s *Server) getModelConfigs(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.getModelConfigs")
+	defer op.Finish(w)
 	repoID, ok := s.verifyRepoAccess(w, r)
 	if !ok {
 		return
 	}
 	configs, err := s.store.ListModelConfigs(r.Context(), repoID)
 	if err != nil {
-		s.logger.Error("list model configs", "error", err)
+		s.logger.ErrorContext(r.Context(), "list model configs", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
@@ -47,6 +50,8 @@ func (s *Server) getModelConfigs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) upsertModelConfig(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.upsertModelConfig")
+	defer op.Finish(w)
 	repoID, ok := s.verifyRepoAccess(w, r)
 	if !ok {
 		return
@@ -83,7 +88,7 @@ func (s *Server) upsertModelConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg, err := s.store.UpsertModelConfig(r.Context(), repoID, stage, body.Provider, body.Model, body.BaseURL, body.MaxTokens, body.Temperature)
 	if err != nil {
-		s.logger.Error("upsert model config", "error", err)
+		s.logger.ErrorContext(r.Context(), "upsert model config", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save config"})
 		return
 	}
@@ -92,6 +97,8 @@ func (s *Server) upsertModelConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteModelConfig(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.deleteModelConfig")
+	defer op.Finish(w)
 	repoID, ok := s.verifyRepoAccess(w, r)
 	if !ok {
 		return
@@ -107,6 +114,8 @@ func (s *Server) deleteModelConfig(w http.ResponseWriter, r *http.Request) {
 
 // testConfig sends a minimal LLM request to verify API key + model work end-to-end.
 func (s *Server) testConfig(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.testConfig")
+	defer op.Finish(w)
 	installationID, err := strconv.ParseInt(chi.URLParam(r, "installationID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid installation id"})
@@ -162,6 +171,8 @@ func (s *Server) testConfig(w http.ResponseWriter, r *http.Request) {
 // --- Org Model Config ---
 
 func (s *Server) getOrgModelConfigs(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.getOrgModelConfigs")
+	defer op.Finish(w)
 	installationID, err := strconv.ParseInt(chi.URLParam(r, "installationID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid installation id"})
@@ -173,7 +184,7 @@ func (s *Server) getOrgModelConfigs(w http.ResponseWriter, r *http.Request) {
 	}
 	configs, err := s.store.ListOrgModelConfigs(r.Context(), installationID)
 	if err != nil {
-		s.logger.Error("list org model configs", "error", err)
+		s.logger.ErrorContext(r.Context(), "list org model configs", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
@@ -181,6 +192,8 @@ func (s *Server) getOrgModelConfigs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) upsertOrgModelConfig(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.upsertOrgModelConfig")
+	defer op.Finish(w)
 	installationID, err := strconv.ParseInt(chi.URLParam(r, "installationID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid installation id"})
@@ -222,7 +235,7 @@ func (s *Server) upsertOrgModelConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg, err := s.store.UpsertOrgModelConfig(r.Context(), installationID, stage, body.Provider, body.Model, body.BaseURL, body.MaxTokens, body.Temperature)
 	if err != nil {
-		s.logger.Error("upsert org model config", "error", err)
+		s.logger.ErrorContext(r.Context(), "upsert org model config", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save config"})
 		return
 	}
@@ -231,6 +244,8 @@ func (s *Server) upsertOrgModelConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteOrgModelConfig(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.deleteOrgModelConfig")
+	defer op.Finish(w)
 	installationID, err := strconv.ParseInt(chi.URLParam(r, "installationID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid installation id"})
@@ -252,13 +267,15 @@ func (s *Server) deleteOrgModelConfig(w http.ResponseWriter, r *http.Request) {
 // --- Prompt Templates ---
 
 func (s *Server) listPromptTemplates(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.listPromptTemplates")
+	defer op.Finish(w)
 	repoID, ok := s.verifyRepoAccess(w, r)
 	if !ok {
 		return
 	}
 	customs, err := s.store.ListPromptTemplates(r.Context(), repoID)
 	if err != nil {
-		s.logger.Error("list prompt templates", "error", err)
+		s.logger.ErrorContext(r.Context(), "list prompt templates", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
@@ -284,6 +301,8 @@ func (s *Server) listPromptTemplates(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) upsertPromptTemplate(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.upsertPromptTemplate")
+	defer op.Finish(w)
 	repoID, ok := s.verifyRepoAccess(w, r)
 	if !ok {
 		return
@@ -314,14 +333,9 @@ func (s *Server) upsertPromptTemplate(w http.ResponseWriter, r *http.Request) {
 		s.handleDBError(w, repoErr, "repo not found")
 		return
 	}
-	tier, _ := s.store.GetPlanTier(r.Context(), repo.InstallationID)
-	if !s.cfg.IsPro(tier) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "Custom prompts require Pro plan."})
-		return
-	}
 	pt, err := s.store.UpsertPromptTemplate(r.Context(), repoID, stage, validated)
 	if err != nil {
-		s.logger.Error("upsert prompt template", "error", err)
+		s.logger.ErrorContext(r.Context(), "upsert prompt template", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save prompt"})
 		return
 	}
@@ -330,6 +344,8 @@ func (s *Server) upsertPromptTemplate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deletePromptTemplate(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.deletePromptTemplate")
+	defer op.Finish(w)
 	repoID, ok := s.verifyRepoAccess(w, r)
 	if !ok {
 		return
@@ -343,7 +359,9 @@ func (s *Server) deletePromptTemplate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
-func (s *Server) listDefaultPrompts(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) listDefaultPrompts(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.listDefaultPrompts")
+	defer op.Finish(w)
 	defaults := pipeline.DefaultPrompts()
 	type entry struct {
 		Stage      string `json:"stage"`
@@ -359,6 +377,8 @@ func (s *Server) listDefaultPrompts(w http.ResponseWriter, _ *http.Request) {
 // --- Provider Keys ---
 
 func (s *Server) listProviderKeys(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.listProviderKeys")
+	defer op.Finish(w)
 	installationID, err := strconv.ParseInt(chi.URLParam(r, "installationID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid installation id"})
@@ -372,7 +392,7 @@ func (s *Server) listProviderKeys(w http.ResponseWriter, r *http.Request) {
 	}
 	keys, err := s.store.ListProviderKeys(r.Context(), installationID)
 	if err != nil {
-		s.logger.Error("list provider keys", "error", err)
+		s.logger.ErrorContext(r.Context(), "list provider keys", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
@@ -385,6 +405,8 @@ func (s *Server) listProviderKeys(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) upsertProviderKey(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.upsertProviderKey")
+	defer op.Finish(w)
 	installationID, err := strconv.ParseInt(chi.URLParam(r, "installationID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid installation id"})
@@ -400,14 +422,81 @@ func (s *Server) upsertProviderKey(w http.ResponseWriter, r *http.Request) {
 		Provider string  `json:"provider"`
 		APIKey   string  `json:"api_key"`
 		BaseURL  *string `json:"base_url"`
+		Model    *string `json:"model"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
 		return
 	}
-	if body.Provider == "" || body.APIKey == "" {
+	if body.Provider == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "provider required"})
+		return
+	}
+	// Keyless rows are allowed ONLY for embeddings custom endpoints (a private
+	// TEI/Ollama server without auth is legitimate; the registry proceeds
+	// keyless off the hosted-base list). Every other provider requires a key.
+	keylessEmbeddings := body.Provider == memory.EmbeddingsProvider &&
+		body.BaseURL != nil && strings.TrimSpace(*body.BaseURL) != ""
+	if body.APIKey == "" && !keylessEmbeddings {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "provider and api_key required"})
 		return
+	}
+	if body.Provider == memory.EmbeddingsProvider {
+		// Normalize inputs (trimmed base_url is stored; padded URLs break
+		// request construction and dodge hosted-base matching), resolve the
+		// stored row, and delegate to the single validation authority shared
+		// with the catalog contract tests. Lookup errors fail closed.
+		req := memory.EmbedKeyRequest{RepoScoped: body.RepoID != nil, APIKey: body.APIKey}
+		if body.BaseURL != nil {
+			// Persist the same canonical form validation compares (case/slash
+			// variants otherwise drift into storage and the card misrenders
+			// them as custom endpoints).
+			norm := memory.NormalizeBaseURL(strings.TrimSpace(*body.BaseURL))
+			if norm == "" {
+				body.BaseURL = nil
+			} else {
+				body.BaseURL = &norm
+				req.BaseURL = norm
+			}
+		}
+		if body.Model != nil {
+			// Persist trimmed, like base_url: embedding spaces are keyed by the
+			// model STRING, so a stored "bge-m3 " vs a later "bge-m3" would read
+			// as a model change and trigger a spurious corpus re-embed.
+			req.Model = strings.TrimSpace(*body.Model)
+			if req.Model == "" {
+				body.Model = nil
+			} else {
+				body.Model = &req.Model
+			}
+		}
+		var stored memory.StoredEmbedKey
+		// Validation needs the stored row whenever a base travels: blank-key
+		// saves for the same-endpoint rotation check, keyed saves for the
+		// grandfathered-model check (a pre-catalog model stays saveable on its
+		// own endpoint). Blank-key saves fail CLOSED on lookup errors (a
+		// guessed-empty row could wave a blank-key save to the wrong endpoint)
+		// and as a server fault, not a 400; keyed saves proceed without the
+		// row — re-entering a key the request already carries cannot fix a
+		// lookup failure, and without grandfathering the validator only gets
+		// stricter.
+		if req.BaseURL != "" {
+			storedKey, storedBase, storedModel, found, kerr := s.store.ResolveEmbeddingsKey(r.Context(), installationID)
+			switch {
+			case kerr != nil && req.APIKey == "":
+				s.logger.ErrorContext(r.Context(), "resolve stored embeddings key", "error", kerr)
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not verify the stored embeddings key; try again"})
+				return
+			case kerr != nil:
+				s.logger.WarnContext(r.Context(), "resolve stored embeddings key failed; validating keyed save without stored row", "error", kerr)
+			default:
+				stored = memory.StoredEmbedKey{Found: found, HasKey: storedKey != "", BaseURL: storedBase, Model: storedModel}
+			}
+		}
+		if msg := memory.ValidateEmbedKeyRequest(req, stored); msg != "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": msg})
+			return
+		}
 	}
 	if body.Provider == "azure" || body.Provider == "gcp_vertex" || body.Provider == "aws_bedrock" {
 		if body.BaseURL != nil {
@@ -432,17 +521,26 @@ func (s *Server) upsertProviderKey(w http.ResponseWriter, r *http.Request) {
 		}
 		body.BaseURL = &u
 	}
-	pk, err := s.store.UpsertProviderKey(r.Context(), installationID, body.RepoID, body.Provider, body.APIKey, body.BaseURL)
+	pk, err := s.store.UpsertProviderKey(r.Context(), installationID, body.RepoID, body.Provider, body.APIKey, body.BaseURL, body.Model)
 	if err != nil {
-		s.logger.Error("upsert provider key", "error", err)
+		s.logger.ErrorContext(r.Context(), "upsert provider key", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save key"})
 		return
+	}
+	// An embeddings rotation changes the active coordinate space. Invalidate
+	// the cached client before scheduling a detached, advisory-lock-guarded
+	// repair; dense reads remain fail-closed to the new space while it runs.
+	if body.Provider == memory.EmbeddingsProvider && s.memRegistry != nil {
+		s.memRegistry.InvalidateEmbedder(installationID)
+		s.scheduleMemoryReembed(r.Context(), installationID)
 	}
 	s.auditSettings(r, installationID, "provider_key.upsert", map[string]interface{}{"provider": body.Provider})
 	writeJSON(w, http.StatusOK, newProviderKeyResponse(*pk))
 }
 
 func (s *Server) deleteProviderKey(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.deleteProviderKey")
+	defer op.Finish(w)
 	installationID, err := strconv.ParseInt(chi.URLParam(r, "installationID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid installation id"})
@@ -458,17 +556,45 @@ func (s *Server) deleteProviderKey(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid key id"})
 		return
 	}
-	if err := s.store.DeleteProviderKey(r.Context(), keyID, installationID); err != nil {
+	provider, err := s.store.DeleteProviderKeyReturningProvider(r.Context(), keyID, installationID)
+	if err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "key not found"})
 		return
+	}
+	if provider == memory.EmbeddingsProvider && s.memRegistry != nil {
+		s.memRegistry.InvalidateEmbedder(installationID)
+		s.scheduleMemoryReembed(r.Context(), installationID)
 	}
 	s.auditSettings(r, installationID, "provider_key.delete", map[string]interface{}{"key_id": keyID})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
+const memoryReembedTimeout = 30 * time.Minute
+
+// scheduleMemoryReembed detaches repair from the HTTP request but bounds its
+// lifetime. Registry-level advisory locking makes duplicate rotations and
+// cross-machine handlers converge without duplicate provider spend.
+func (s *Server) scheduleMemoryReembed(requestCtx context.Context, installationID int64) {
+	if s.reembedMemories == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(requestCtx), memoryReembedTimeout)
+	go func() {
+		defer cancel()
+		repaired, err := s.reembedMemories(ctx, installationID)
+		if err != nil {
+			s.logger.WarnContext(ctx, "memory reembed after provider rotation", "installation_id", installationID, "repaired", repaired, "error", err)
+			return
+		}
+		s.logger.InfoContext(ctx, "memory reembed after provider rotation complete", "installation_id", installationID, "repaired", repaired)
+	}()
+}
+
 // --- Org Default Settings ---
 
 func (s *Server) getOrgDefaults(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.getOrgDefaults")
+	defer op.Finish(w)
 	installationID, err := strconv.ParseInt(chi.URLParam(r, "installationID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid installation id"})
@@ -512,12 +638,28 @@ type orgDefaultsBody struct {
 	ArchitectureGraph   *bool  `json:"architecture_graph,omitempty"`
 	AutoRun             *bool  `json:"auto_run,omitempty"`
 
+	// Both were defined in repoSettings and missing here, so saving org
+	// defaults silently dropped them — the exact failure the drift guard now
+	// prevents. Found by TestOrgDefaultsBodyMatchesSettingKeys.
+	AutoResolveEnabled *bool    `json:"auto_resolve_enabled,omitempty"`
+	SkipBaseBranches   []string `json:"skip_base_branches,omitempty"`
+
 	// Memory thresholds + decay opt-out (Bundle 3/5). Mirror repoSettings.
 	ThresholdFindingEnrich   *float64 `json:"threshold_finding_enrich,omitempty"`
 	ThresholdSpecialistMin   *float64 `json:"threshold_specialist_min,omitempty"`
 	ThresholdScenarioTrigger *float64 `json:"threshold_scenario_trigger,omitempty"`
 	ThresholdScenarioDedupe  *float64 `json:"threshold_scenario_dedupe,omitempty"`
 	DisableSharedDecay       *bool    `json:"disable_shared_decay,omitempty"`
+
+	// Review budget limits. Mirror repoSettings; TestOrgDefaultsBodyMatchesSettingKeys
+	// fails if this struct falls behind it.
+	BudgetSoftFiles       *int   `json:"budget_soft_files,omitempty"`
+	BudgetHardFiles       *int   `json:"budget_hard_files,omitempty"`
+	BudgetSoftLines       *int   `json:"budget_soft_lines,omitempty"`
+	BudgetHardLines       *int   `json:"budget_hard_lines,omitempty"`
+	BudgetSoftTokens      *int64 `json:"budget_soft_tokens,omitempty"`
+	BudgetHardTokens      *int64 `json:"budget_hard_tokens,omitempty"`
+	BudgetReducedMaxFiles *int   `json:"budget_reduced_max_files,omitempty"`
 }
 
 // validate returns a field-specific error message and false when the body is
@@ -544,6 +686,8 @@ func (b orgDefaultsBody) validate() (string, bool) {
 }
 
 func (s *Server) setOrgDefaults(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.setOrgDefaults")
+	defer op.Finish(w)
 	installationID, err := strconv.ParseInt(chi.URLParam(r, "installationID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid installation id"})
@@ -577,23 +721,23 @@ func (s *Server) setOrgDefaults(w http.ResponseWriter, r *http.Request) {
 
 // deleteRepoSettingKey removes a single key from repo settings_json, reverting it to org default inheritance.
 func (s *Server) deleteRepoSettingKey(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.deleteRepoSettingKey")
+	defer op.Finish(w)
 	repoID, ok := s.verifyRepoAccess(w, r)
 	if !ok {
 		return
 	}
 	key := chi.URLParam(r, "key")
-	validKeys := map[string]bool{
-		"persona": true, "custom_persona_prompt": true, "deep_review": true,
-		"cross_file_context": true, "blast_radius": true, "scenario_memory": true,
-		"code_simulation": true, "pr_enrichment": true, "learn_patterns": true,
-		"learn_conventions": true, "file_synthesis": true, "architecture_graph": true,
-	}
-	if !validKeys[key] {
+	// Derived from repoSettings, not written out again. This list used to be a
+	// fourth hand-maintained copy and had already fallen behind: auto_run and
+	// every memory threshold were missing from it, so a repo could set them and
+	// never clear them.
+	if !pipeline.SettingKeys()[key] {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown setting key"})
 		return
 	}
 	if _, err := s.store.Pool.Exec(r.Context(), `UPDATE repos SET settings_json = settings_json - $2, updated_at = NOW() WHERE id = $1`, repoID, key); err != nil {
-		s.logger.Error("delete repo setting key", "error", err)
+		s.logger.ErrorContext(r.Context(), "delete repo setting key", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to remove key"})
 		return
 	}
@@ -601,80 +745,11 @@ func (s *Server) deleteRepoSettingKey(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted", "key": key})
 }
 
-// --- Supermemory Key ---
-
-func (s *Server) getSupermemoryKeyStatus(w http.ResponseWriter, r *http.Request) {
-	installationID, err := strconv.ParseInt(chi.URLParam(r, "installationID"), 10, 64)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid installation id"})
-		return
-	}
-	if !containsID(getInstallationIDs(r.Context()), installationID) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not authorized"})
-		return
-	}
-	enc, err := s.store.GetSupermemoryKey(r.Context(), installationID)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]bool{"configured": enc != ""})
-}
-
-func (s *Server) setSupermemoryKey(w http.ResponseWriter, r *http.Request) {
-	installationID, err := strconv.ParseInt(chi.URLParam(r, "installationID"), 10, 64)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid installation id"})
-		return
-	}
-	if !containsID(getInstallationIDs(r.Context()), installationID) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not authorized"})
-		return
-	}
-	var body struct {
-		APIKey string `json:"api_key"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
-		return
-	}
-	if body.APIKey == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "api_key required"})
-		return
-	}
-	enc, err := crypto.Encrypt(body.APIKey)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "encryption failed"})
-		return
-	}
-	if err := s.store.SetSupermemoryKey(r.Context(), installationID, enc); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "save failed"})
-		return
-	}
-	if s.memRegistry != nil {
-		s.memRegistry.InvalidateClient(installationID)
-	}
-	s.auditSettings(r, installationID, "supermemory_key.set", nil)
-	writeJSON(w, http.StatusOK, map[string]string{"status": "saved"})
-}
-
-func (s *Server) deleteSupermemoryKey(w http.ResponseWriter, r *http.Request) {
-	installationID, err := strconv.ParseInt(chi.URLParam(r, "installationID"), 10, 64)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid installation id"})
-		return
-	}
-	if !containsID(getInstallationIDs(r.Context()), installationID) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not authorized"})
-		return
-	}
-	if err := s.store.ClearSupermemoryKey(r.Context(), installationID); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delete failed"})
-		return
-	}
-	if s.memRegistry != nil {
-		s.memRegistry.InvalidateClient(installationID)
-	}
-	s.auditSettings(r, installationID, "supermemory_key.delete", nil)
-	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+// getEmbeddingsCatalog serves the curated embeddings provider/model menu the
+// settings UI renders. Static content, but served (not baked into the web
+// bundle) so self-hosted deployments always match their backend's catalog.
+func (s *Server) getEmbeddingsCatalog(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.getEmbeddingsCatalog")
+	defer op.Finish(w)
+	writeJSON(w, http.StatusOK, map[string]interface{}{"providers": memory.EmbedCatalog()})
 }

@@ -6,6 +6,8 @@ import (
 )
 
 func (s *Server) patternHealth(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.patternHealth")
+	defer op.Finish(w)
 	ids := getInstallationIDs(r.Context())
 	if len(ids) == 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no installation scope"})
@@ -16,7 +18,7 @@ func (s *Server) patternHealth(w http.ResponseWriter, r *http.Request) {
 	since := time.Now().Add(-48 * time.Hour)
 	stats, err := s.store.GetPatternHealthStats(r.Context(), installationID, since)
 	if err != nil {
-		s.logger.Error("pattern health", "error", err)
+		s.logger.ErrorContext(r.Context(), "pattern health", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}

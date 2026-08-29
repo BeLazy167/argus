@@ -526,3 +526,19 @@ func (q *Queries) UpdateScenarioLastRun(ctx context.Context, arg UpdateScenarioL
 	)
 	return err
 }
+
+const updateScenarioMemoryDocID = `-- name: UpdateScenarioMemoryDocID :exec
+UPDATE scenarios SET memory_doc_id = $1 WHERE id = $2
+`
+
+type UpdateScenarioMemoryDocIDParams struct {
+	MemoryDocID *string `json:"memory_doc_id"`
+	ID          int64   `json:"id"`
+}
+
+// Mirrors the memory row's deterministic customID onto the scenario so a
+// search hit resolves back to this row.
+func (q *Queries) UpdateScenarioMemoryDocID(ctx context.Context, arg UpdateScenarioMemoryDocIDParams) error {
+	_, err := q.db.Exec(ctx, updateScenarioMemoryDocID, arg.MemoryDocID, arg.ID)
+	return err
+}

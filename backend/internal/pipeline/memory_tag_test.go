@@ -140,15 +140,15 @@ func TestHumanAge(t *testing.T) {
 func TestInferMatchKind(t *testing.T) {
 	t.Parallel()
 	cases := map[string]string{
-		"scoring_confirmed":    "pattern",
-		"auto_learn":           "pattern",
+		"scoring_confirmed":     "pattern",
+		"auto_learn":            "pattern",
 		"convention_extraction": "convention",
-		"convention":           "convention",
-		"pr_summary":           "similarity",
-		"arch_summary":         "similarity",
-		"synthesis":            "similarity",
-		"unknown_source":       "similarity",
-		"":                     "similarity",
+		"convention":            "convention",
+		"pr_summary":            "similarity",
+		"arch_summary":          "similarity",
+		"synthesis":             "similarity",
+		"unknown_source":        "similarity",
+		"":                      "similarity",
 	}
 	for src, want := range cases {
 		md := map[string]string{"source": src}

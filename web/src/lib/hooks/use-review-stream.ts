@@ -1,10 +1,17 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
 import { useAuth } from "@clerk/nextjs";
 import { useQueryClient } from "@tanstack/react-query";
 import { useInstallation } from "@/providers/installation-provider";
 import type { Review, ReviewComment } from "../types";
+import { reconcileTerminalReview, reviewQueryKeys } from "../queries/reviews";
+import {
+  buildReviewStreamURL,
+  ReviewEventCursor,
+  shouldReconnectReviewStream,
+} from "./review-stream-cursor";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
+const connectionSnapshot = () => null;
 
 export type PipelineStage =
   | "pending"
@@ -21,13 +28,13 @@ export type PipelineStage =
   | "failed"
   | "cancelled";
 
-type TriageFile = {
+export type TriageFile = {
   file: string;
   action: string;
   reason: string;
 };
 
-type ScoringUpdate = {
+export type ScoringUpdate = {
   kept: number;
   dropped: number;
   /** Severity-tiered cutoffs the scorer applied. Backend emits this as
@@ -62,8 +69,11 @@ export type LiveTokens = {
   cost: number;
 };
 
-type WSEvent = {
+export type WSEvent = {
+  id?: number;
+  delivery_id?: string;
   type: string;
+  attempt_generation?: number;
   data: Record<string, unknown>;
 };
 
@@ -85,39 +95,27 @@ export function useReviewStream(reviewId: string, enabled: boolean) {
   const [connected, setConnected] = useState(false);
   const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
   const [liveTokens, setLiveTokens] = useState<LiveTokens | null>(null);
-  const seenStagesRef = useRef<Set<PipelineStage>>(new Set());
-  const backoffRef = useRef(1000);
-  // terminalRef captures "the review reached a terminal state during this session"
-  // so the reconnect loop stops even when outer state (e.g. `active` from
-  // useInstallation) produces a new reference and re-runs the effect. Without
-  // this, each re-run spins up a fresh WebSocket that the server immediately
-  // closes with 1000 ("review already completed"), flooding the console.
-  const terminalRef = useRef(false);
-  // synthesisSeenRef dedupes the `synthesis` timeline row. `synthesis` fires
-  // mid-pipeline (before `completed`), so `terminalRef` doesn't cover it. If
-  // the socket drops between synthesis and completed and the reconnect replays
-  // history, synthesis would otherwise add a second "Review complete" row.
-  const synthesisSeenRef = useRef(false);
-  const getTokenRef = useRef(getToken);
-  useEffect(() => { getTokenRef.current = getToken; }, [getToken]);
+  const activeID = active?.id;
+  // A keyed session resets terminal/dedupe/cursor state when reviewId changes
+  // without synchronizing React state from an effect.
+  const session = useMemo(() => ({
+    reviewID: reviewId,
+    terminal: false,
+    synthesisSeen: false,
+    cursor: new ReviewEventCursor(),
+    seenStages: new Set<PipelineStage>(),
+  }), [reviewId]);
 
-  // Reset refs when the target review changes — a fresh reviewId means
-  // a new session that needs its own WebSocket, even if the previous session
-  // completed on the same component instance.
-  useEffect(() => {
-    terminalRef.current = false;
-    synthesisSeenRef.current = false;
-  }, [reviewId]);
-
-  useEffect(() => {
-    if (!enabled || !reviewId || !active) return;
-    if (terminalRef.current) return;
+  const subscribeToReviewStream = useCallback((_notify: () => void) => {
+    if (!enabled || !reviewId || activeID == null || session.terminal) return () => {};
+    const installationID = activeID;
+    let backoff = 1000;
 
     let ws: WebSocket | null = null;
     let unmounted = false;
     let reconnectTimer: ReturnType<typeof setTimeout>;
 
-    const queryKey = ["review", reviewId, active.id];
+    const queryKey = reviewQueryKeys.detail(reviewId);
 
     const patchReview = (patch: Partial<Review>) => {
       qc.setQueryData(queryKey, (old: ReviewCache | undefined) => {
@@ -134,7 +132,7 @@ export function useReviewStream(reviewId: string, enabled: boolean) {
       switch (evt.type) {
         case "stage_changed":
           setStage(evt.data.stage as PipelineStage);
-          seenStagesRef.current.add(evt.data.stage as PipelineStage);
+          session.seenStages.add(evt.data.stage as PipelineStage);
           patchReview({ status: mapStageToStatus(evt.data.stage as string) });
           addEntry({ type: "stage", message: stageMessage(evt.data.stage as string), icon: "stage" });
           break;
@@ -154,6 +152,7 @@ export function useReviewStream(reviewId: string, enabled: boolean) {
             const comment: ReviewComment = {
               id: crypto.randomUUID(),
               review_id: reviewId,
+              attempt_generation: evt.attempt_generation ?? 0,
               file_path: evt.data.file_path as string,
               end_line: evt.data.line as number,
               body: evt.data.body as string,
@@ -198,41 +197,38 @@ export function useReviewStream(reviewId: string, enabled: boolean) {
             summary: evt.data.summary as string,
             score: evt.data.score as number,
           });
-          if (synthesisSeenRef.current) break;
+          if (session.synthesisSeen) break;
           addEntry({ type: "done", message: `Review complete \u2014 score ${evt.data.score}/10`, icon: "done" });
-          synthesisSeenRef.current = true;
+          session.synthesisSeen = true;
           break;
 
         // Terminal handlers: invalidation runs BEFORE the dedupe guard so
         // a replayed terminal event still refreshes caches (e.g. replica-lag
         // left stale data on the first delivery). Only the visible row add
-        // and the stage mutation are gated behind terminalRef.
+        // and the stage mutation are gated behind the terminal session flag.
         case "completed":
-          qc.invalidateQueries({ queryKey: ["review", reviewId] });
-          qc.invalidateQueries({ queryKey: ["reviews"] });
-          if (terminalRef.current) break;
+          reconcileTerminalReview(qc, reviewId);
+          if (session.terminal) break;
           setStage("completed");
           addEntry({ type: "done", message: "Posted to GitHub", icon: "done" });
-          terminalRef.current = true;
+          session.terminal = true;
           break;
 
         case "cancelled":
-          qc.invalidateQueries({ queryKey: ["review", reviewId] });
-          qc.invalidateQueries({ queryKey: ["reviews"] });
-          if (terminalRef.current) break;
+          reconcileTerminalReview(qc, reviewId);
+          if (session.terminal) break;
           setStage("cancelled");
           addEntry({ type: "stage", message: `Cancelled at ${evt.data.stage}`, icon: "error" });
-          terminalRef.current = true;
+          session.terminal = true;
           break;
 
         case "error":
-          qc.invalidateQueries({ queryKey: ["review", reviewId] });
-          qc.invalidateQueries({ queryKey: ["reviews"] });
-          if (terminalRef.current) break;
+          reconcileTerminalReview(qc, reviewId);
+          if (session.terminal) break;
           setFailedStage(evt.data.stage as string);
           setStage("failed");
           addEntry({ type: "error", message: `Failed at ${evt.data.stage}: ${evt.data.error}`, icon: "error" });
-          terminalRef.current = true;
+          session.terminal = true;
           break;
 
         // Per-sub-step events — backend emits one per distinct LLM call / memory
@@ -399,7 +395,7 @@ export function useReviewStream(reviewId: string, enabled: boolean) {
           break;
         }
         case "memory_matched": {
-          // Fired by enrichFindings when a finding matches a Supermemory-backed
+          // Fired by enrichFindings when a finding matches a memory-backed
           // pattern / convention / rule / similarity hit. Detail line carries
           // kind + source PR so authors can trace the attribution shown on the
           // inline comment body.
@@ -421,30 +417,27 @@ export function useReviewStream(reviewId: string, enabled: boolean) {
 
     const connect = async () => {
       if (unmounted) return;
-      // Terminal-state short-circuit. The effect-setup guard only fires on
-      // effect re-runs; this path reaches `connect` via `ws.onclose →
-      // setTimeout(connect, …)` which bypasses the effect, so we must
-      // re-check here. Otherwise a rewritten close code (Fly proxy flips
+      // This path also runs through `ws.onclose → setTimeout(connect, …)`,
+      // bypassing a new subscription, so re-check the terminal session here.
+      // Otherwise a rewritten close code (Fly proxy flips
       // 1000 → 1006) opens a fresh socket on a completed review and the
       // server replays terminal events forever.
-      if (terminalRef.current) return;
-      const token = await getTokenRef.current();
+      if (session.terminal) return;
+      const token = await getToken();
       if (unmounted || !token) return;
 
-      const wsBase = API_URL.replace(/^http/, "ws");
-      const url = `${wsBase}/api/v1/reviews/${reviewId}/stream?token=${encodeURIComponent(token)}&installation_id=${active.id}`;
-
+      const url = buildReviewStreamURL(API_URL, reviewId, token, installationID, session.cursor.after);
       ws = new WebSocket(url);
 
       ws.onopen = () => {
         setConnected(true);
-        backoffRef.current = 1000;
+        backoff = 1000;
       };
 
       ws.onmessage = (msg) => {
         try {
           const evt: WSEvent = JSON.parse(msg.data);
-          processEvent(evt);
+          session.cursor.process(evt, () => processEvent(evt));
         } catch (e) {
           console.error("WS parse error:", e);
         }
@@ -453,16 +446,13 @@ export function useReviewStream(reviewId: string, enabled: boolean) {
       ws.onclose = (e) => {
         setConnected(false);
         if (unmounted) return;
-        // Terminal-state short-circuit. Required because the Fly WS proxy
-        // can rewrite `StatusNormalClosure` (1000) to 1006, making the
-        // 1000-check below unreliable in production. Without this, a
-        // completed review keeps reopening sockets in a tight loop.
-        if (terminalRef.current) return;
-        // Don't reconnect on clean close (server sent terminal event)
-        if (e.code === 1000) return;
+        // Terminal state wins even when a proxy rewrites a clean 1000 close
+        // to 1006. Non-terminal abnormal closes (including backend 1013 after
+        // overflow/dedup exhaustion) reconnect and replay from the cursor.
+        if (!shouldReconnectReviewStream(e.code, session.terminal)) return;
         // Exponential backoff: 1s → 2s → 4s → 8s → 16s max
-        reconnectTimer = setTimeout(connect, backoffRef.current);
-        backoffRef.current = Math.min(backoffRef.current * 2, 16000);
+        reconnectTimer = setTimeout(connect, backoff);
+        backoff = Math.min(backoff * 2, 16000);
       };
 
       ws.onerror = () => {
@@ -477,9 +467,11 @@ export function useReviewStream(reviewId: string, enabled: boolean) {
       clearTimeout(reconnectTimer);
       if (ws) ws.close(1000, "unmount");
     };
-  }, [reviewId, enabled, active, qc]);
+  }, [activeID, enabled, getToken, qc, reviewId, session]);
 
-  return { stage, failedStage, triageResults, scoringUpdate, connected, timeline, liveTokens, seenStages: seenStagesRef.current };
+  useSyncExternalStore(subscribeToReviewStream, connectionSnapshot, connectionSnapshot);
+
+  return { stage, failedStage, triageResults, scoringUpdate, connected, timeline, liveTokens, seenStages: session.seenStages };
 }
 
 function mapStageToStatus(stage: string): Review["status"] {

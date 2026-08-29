@@ -731,13 +731,13 @@ func TestFormatIntentHeader(t *testing.T) {
 			AcceptanceCriteria: []string{"dedup"},
 		}}
 		got := FormatIntentHeader(run, nil)
-		if !strings.Contains(got, "🔍 PR intent vs diff (LLM analysis)") {
+		if !strings.Contains(got, "What this PR does") {
 			t.Errorf("missing header:\n%s", got)
 		}
-		if !strings.Contains(got, "not an execution log") {
+		if !strings.Contains(got, "Stated by the author — not verified by Argus") {
 			t.Errorf("missing disclaimer line — this guards against silent reversion to the pre-fix framing:\n%s", got)
 		}
-		if !strings.Contains(got, "**Goal:** Fix race") {
+		if !strings.Contains(got, "- Fix race") {
 			t.Errorf("missing goal line:\n%s", got)
 		}
 		if strings.Contains(got, "Verdict") {
@@ -749,7 +749,7 @@ func TestFormatIntentHeader(t *testing.T) {
 		t.Parallel()
 		run := &PipelineRun{PRIntent: &PRIntent{Source: IntentSourceAuthor, Goal: "Fix race"}}
 		got := FormatIntentHeader(run, &IntentVerdict{Delivers: true})
-		if !strings.Contains(got, "✅ Intent delivered") {
+		if !strings.Contains(got, "What this PR does") {
 			t.Errorf("missing delivers line:\n%s", got)
 		}
 		// Regression guard: must NOT reuse the word "Verdict" in the heading —
@@ -769,7 +769,7 @@ func TestFormatIntentHeader(t *testing.T) {
 			UnmetCriteria: []string{"dedup concurrent refreshes"},
 		}
 		got := FormatIntentHeader(run, verdict)
-		if !strings.Contains(got, "⚠️ Intent not delivered") {
+		if !strings.Contains(got, "The diff does not meet the stated intent.") {
 			t.Errorf("missing does-not-deliver header:\n%s", got)
 		}
 		if !strings.Contains(got, "only adds logging") {
@@ -784,7 +784,7 @@ func TestFormatIntentHeader(t *testing.T) {
 		t.Parallel()
 		run := &PipelineRun{PRIntent: &PRIntent{Source: IntentSourceInferred, Goal: "guess"}}
 		got := FormatIntentHeader(run, nil)
-		if !strings.Contains(got, "Argus inferred this goal") {
+		if !strings.Contains(got, "Argus inferred this purpose") {
 			t.Errorf("missing inferred annotation:\n%s", got)
 		}
 	})
@@ -804,7 +804,7 @@ func TestFormatIntentHeader(t *testing.T) {
 			},
 		}}
 		got := FormatIntentHeader(run, nil)
-		if !strings.Contains(got, "**Not in scope:**\n- Token storage refactor") {
+		if !strings.Contains(got, "- Excludes: Token storage refactor") {
 			t.Errorf("non-goals must render as bulleted list under **Not in scope:** header:\n%s", got)
 		}
 		if strings.Contains(got, "**Not in scope:** Token storage") {
@@ -966,9 +966,9 @@ func TestTrimStrings(t *testing.T) {
 func TestNoIntentCallout(t *testing.T) {
 	t.Parallel()
 	for _, must := range []string{
-		"No PR description or linked issue",
-		"Argus reviewed the diff in isolation",
-		`short "why" in the PR body`,
+		"Argus found no PR description or linked issue",
+		"Argus reviewed only the diff",
+		"Add the purpose to the PR body",
 	} {
 		if !strings.Contains(NoIntentCallout, must) {
 			t.Errorf("NoIntentCallout missing %q:\n%s", must, NoIntentCallout)
@@ -992,7 +992,7 @@ func TestIntentCompositionWithBrief(t *testing.T) {
 			t.Fatalf("expected header to render")
 		}
 		composed := header + "\n" + brief
-		headerIdx := strings.Index(composed, "PR intent vs diff (LLM analysis)")
+		headerIdx := strings.Index(composed, "What this PR does")
 		briefIdx := strings.Index(composed, "ships as-is")
 		if headerIdx < 0 || briefIdx < 0 || headerIdx > briefIdx {
 			t.Errorf("header must precede brief; header=%d brief=%d\n%s", headerIdx, briefIdx, composed)

@@ -4,6 +4,9 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
+
+	"github.com/BeLazy167/argus/backend/internal/obs"
 
 	"github.com/odvcencio/gotreesitter"
 	"github.com/odvcencio/gotreesitter/grammars"
@@ -20,11 +23,16 @@ var tsEngine struct {
 // gotreesitter pure-Go tree-sitter runtime. Returns nil, nil on failure
 // so the caller can fall back to regex parsing.
 func parseTreeSitter(filePath, content string) (syms []Symbol, edges []Edge) {
+	operationID := obs.NewLogID()
+	started := time.Now()
+	slog.Debug("graph tree-sitter parse started", "operation_id", operationID,
+		"file", filePath, "source_bytes", len(content))
 	// Recover from any panic in the tree-sitter parser so the caller can
 	// fall back to regex parsing instead of crashing.
 	defer func() {
 		if r := recover(); r != nil {
-			slog.Warn("graph: tree-sitter panic, falling back", "file", filePath, "panic", r)
+			slog.Warn("graph tree-sitter parse panicked; regex fallback selected", "operation_id", operationID, "file", filePath,
+				"fallback", "regex", "duration_ms", time.Since(started).Milliseconds(), "panic", r)
 			syms = nil
 			edges = nil
 		}
@@ -42,11 +50,15 @@ func parseTreeSitter(filePath, content string) (syms []Symbol, edges []Edge) {
 	// unsupported extensions, so we return silently without logging.
 	entry := grammars.DetectLanguage(filePath)
 	if entry == nil || entry.Language == nil {
+		slog.Debug("graph tree-sitter parse skipped", "operation_id", operationID, "file", filePath,
+			"reason", "unsupported_language", "fallback", "regex", "duration_ms", time.Since(started).Milliseconds())
 		return nil, nil
 	}
 
 	lang := entry.Language()
 	if lang == nil {
+		slog.Warn("graph tree-sitter language initialization failed; regex fallback selected", "operation_id", operationID,
+			"file", filePath, "duration_ms", time.Since(started).Milliseconds())
 		return nil, nil
 	}
 
@@ -63,18 +75,21 @@ func parseTreeSitter(filePath, content string) (syms []Symbol, edges []Edge) {
 		tree, err = p.Parse([]byte(content))
 	}
 	if err != nil {
-		slog.Debug("graph: tree-sitter parse error", "file", filePath, "error", err)
+		slog.Warn("graph tree-sitter parse failed; regex fallback selected", "operation_id", operationID, "file", filePath,
+			"fallback", "regex", "duration_ms", time.Since(started).Milliseconds(), "error", err)
 		return nil, nil
 	}
 	if tree == nil {
-		slog.Debug("graph: tree-sitter nil tree", "file", filePath)
+		slog.Warn("graph tree-sitter returned nil tree; regex fallback selected", "operation_id", operationID, "file", filePath,
+			"fallback", "regex", "duration_ms", time.Since(started).Milliseconds())
 		return nil, nil
 	}
 	defer tree.Release()
 
 	root := tree.RootNode()
 	if root == nil || root.IsError() {
-		slog.Debug("graph: tree-sitter AST error", "file", filePath)
+		slog.Warn("graph tree-sitter AST invalid; regex fallback selected", "operation_id", operationID, "file", filePath,
+			"fallback", "regex", "duration_ms", time.Since(started).Milliseconds())
 		return nil, nil
 	}
 
@@ -82,6 +97,9 @@ func parseTreeSitter(filePath, content string) (syms []Symbol, edges []Edge) {
 
 	// Walk the AST and extract symbols + edges
 	walkNode(root, lang, source, filePath, &syms, &edges)
+	slog.Debug("graph tree-sitter parse completed", "operation_id", operationID, "file", filePath,
+		"parser", "tree_sitter", "root_type", root.Type(lang), "symbol_count", len(syms), "edge_count", len(edges),
+		"duration_ms", time.Since(started).Milliseconds())
 
 	return syms, edges
 }
@@ -106,7 +124,7 @@ func walkNodeDepth(n *gotreesitter.Node, lang *gotreesitter.Language, source []b
 	case "function_declaration", "generator_function_declaration", "function",
 		"function_definition", "function_item":
 		// Python: function_definition with self/cls first param is a method
-		if kind == "function_definition" && isPythonMethod(n, lang, source) {
+		if kind == "function_definition" && isPythonMethod(n, lang) {
 			extractMethodSymbol(n, lang, source, filePath, syms, edges)
 		} else {
 			extractFuncSymbol(n, lang, source, filePath, "function", syms, edges)
@@ -191,7 +209,7 @@ func extractFuncSymbol(n *gotreesitter.Node, lang *gotreesitter.Language, source
 	}
 	*syms = append(*syms, sym)
 
-	extractBodyCallEdges(name, n, lang, source, edges)
+	extractBodyCallEdges(name, "", n, lang, source, edges)
 }
 
 // extractMethodSymbol extracts a method symbol.
@@ -200,6 +218,11 @@ func extractMethodSymbol(n *gotreesitter.Node, lang *gotreesitter.Language, sour
 	if name == "" {
 		return
 	}
+	owner := receiverIdentity(extractReceiver(n, lang, source))
+	if owner == "" {
+		owner = enclosingTypeName(n, lang, source)
+	}
+	name = qualifySymbolName(owner, name)
 
 	params := extractFieldText(n, lang, source, "parameters")
 	sym := Symbol{
@@ -212,12 +235,12 @@ func extractMethodSymbol(n *gotreesitter.Node, lang *gotreesitter.Language, sour
 		ParamCount: countParams(params),
 		ReturnType: returnTypeOf(n, lang, source),
 		Visibility: visibilityFromModifiers(n, lang, source),
-		Receiver:   extractReceiver(n, lang, source),
+		Receiver:   owner,
 		Scope:      "method",
 	}
 	*syms = append(*syms, sym)
 
-	extractBodyCallEdges(name, n, lang, source, edges)
+	extractBodyCallEdges(name, owner, n, lang, source, edges)
 }
 
 // extractClassSymbol extracts a class symbol and inheritance/implements edges.
@@ -230,6 +253,7 @@ func extractClassSymbol(n *gotreesitter.Node, lang *gotreesitter.Language, sourc
 	if name == "" {
 		return
 	}
+	name = qualifySymbolName(enclosingTypeName(n, lang, source), name)
 
 	vis := visibilityFromModifiers(n, lang, source)
 
@@ -351,7 +375,7 @@ func extractImplSymbol(n *gotreesitter.Node, lang *gotreesitter.Language, source
 	if typeNode == nil {
 		return
 	}
-	typeName := typeNode.Text(source)
+	typeName := receiverIdentity(rustTypeIdentity(typeNode, lang, source))
 	if typeName == "" {
 		return
 	}
@@ -389,7 +413,7 @@ func extractImplSymbol(n *gotreesitter.Node, lang *gotreesitter.Language, source
 		if nameNode == nil {
 			continue
 		}
-		name := nameNode.Text(source)
+		name := qualifySymbolName(typeName, nameNode.Text(source))
 		params := extractFieldText(child, lang, source, "parameters")
 		returnType := extractFieldText(child, lang, source, "return_type")
 
@@ -417,7 +441,7 @@ func extractImplSymbol(n *gotreesitter.Node, lang *gotreesitter.Language, source
 			bodyNode = child.ChildByFieldName("block", lang)
 		}
 		if bodyNode != nil {
-			extractCallEdges(name, bodyNode, lang, source, edges)
+			extractCallEdges(name, typeName, bodyNode, lang, source, edges)
 		}
 	}
 }
@@ -523,12 +547,12 @@ func extractIncludeEdges(n *gotreesitter.Node, lang *gotreesitter.Language, sour
 }
 
 // extractCallEdges walks a function body and extracts call edges.
-func extractCallEdges(sourceName string, body *gotreesitter.Node, lang *gotreesitter.Language, source []byte, edges *[]Edge) {
+func extractCallEdges(sourceName, owner string, body *gotreesitter.Node, lang *gotreesitter.Language, source []byte, edges *[]Edge) {
 	seen := make(map[string]bool)
-	extractCallsRecursive(sourceName, body, lang, source, edges, seen)
+	extractCallsRecursive(sourceName, owner, body, lang, source, edges, seen)
 }
 
-func extractCallsRecursive(sourceName string, n *gotreesitter.Node, lang *gotreesitter.Language, source []byte, edges *[]Edge, seen map[string]bool) {
+func extractCallsRecursive(sourceName, owner string, n *gotreesitter.Node, lang *gotreesitter.Language, source []byte, edges *[]Edge, seen map[string]bool) {
 	if n == nil {
 		return
 	}
@@ -554,7 +578,7 @@ func extractCallsRecursive(sourceName string, n *gotreesitter.Node, lang *gotree
 			}
 		}
 		if funcNode != nil {
-			target := resolveCallTarget(funcNode, lang, source)
+			target := qualifyScopedCall(resolveCallTarget(funcNode, lang, source), owner)
 			if target != "" && target != sourceName && !isBuiltin(target) && !seen[target] {
 				seen[target] = true
 				*edges = append(*edges, Edge{SourceName: sourceName, TargetName: target, Kind: "calls"})
@@ -565,19 +589,80 @@ func extractCallsRecursive(sourceName string, n *gotreesitter.Node, lang *gotree
 	// Recurse into children
 	for _, child := range n.Children() {
 		if child.IsNamed() {
-			extractCallsRecursive(sourceName, child, lang, source, edges, seen)
+			extractCallsRecursive(sourceName, owner, child, lang, source, edges, seen)
 		}
 	}
 }
 
+// rustTypeIdentity returns the declared type at the outside of a Rust impl
+// target. Generic arguments describe an instantiation, not a different graph
+// owner, so the grammar's type field is authoritative instead of the source
+// spelling between angle brackets.
+func rustTypeIdentity(n *gotreesitter.Node, lang *gotreesitter.Language, source []byte) string {
+	if n == nil {
+		return ""
+	}
+	switch n.Type(lang) {
+	case "generic_type":
+		return rustTypeIdentity(n.ChildByFieldName("type", lang), lang, source)
+	case "scoped_type_identifier":
+		if name := n.ChildByFieldName("name", lang); name != nil {
+			return rustTypeIdentity(name, lang, source)
+		}
+	case "reference_type", "pointer_type", "parenthesized_type":
+		if inner := n.ChildByFieldName("type", lang); inner != nil {
+			return rustTypeIdentity(inner, lang, source)
+		}
+	case "type_identifier", "identifier", "primitive_type", "self":
+		return n.Text(source)
+	}
+	return n.Text(source)
+}
+
 // resolveCallTarget resolves the target name from a call expression's function node.
 func resolveCallTarget(n *gotreesitter.Node, lang *gotreesitter.Language, source []byte) string {
+	if lang.Name == "rust" {
+		return resolveRustCallTarget(n, lang, source)
+	}
 	if n.Type(lang) == "parenthesized_expression" {
 		for _, child := range n.Children() {
 			if child.IsNamed() {
 				return resolveCallTarget(child, lang, source)
 			}
 		}
+	}
+	return n.Text(source)
+}
+
+// resolveRustCallTarget follows the Rust grammar's function, path, type, and
+// name fields. This drops only nodes that the grammar identified as generic
+// arguments; operators such as >, >>, and -> inside those arguments never
+// participate in delimiter matching.
+func resolveRustCallTarget(n *gotreesitter.Node, lang *gotreesitter.Language, source []byte) string {
+	if n == nil {
+		return ""
+	}
+	switch n.Type(lang) {
+	case "parenthesized_expression":
+		for _, child := range n.Children() {
+			if child.IsNamed() {
+				return resolveRustCallTarget(child, lang, source)
+			}
+		}
+	case "generic_function":
+		return resolveRustCallTarget(n.ChildByFieldName("function", lang), lang, source)
+	case "generic_type":
+		return resolveRustCallTarget(n.ChildByFieldName("type", lang), lang, source)
+	case "scoped_identifier", "scoped_type_identifier":
+		path := resolveRustCallTarget(n.ChildByFieldName("path", lang), lang, source)
+		name := resolveRustCallTarget(n.ChildByFieldName("name", lang), lang, source)
+		if path == "" {
+			return name
+		}
+		if name == "" {
+			return path
+		}
+		return path + "::" + name
 	}
 	return n.Text(source)
 }
@@ -596,6 +681,26 @@ func nodeName(n *gotreesitter.Node, lang *gotreesitter.Language, source []byte) 
 	return extractFieldText(n, lang, source, "name")
 }
 
+// enclosingTypeName returns the lexical receiver/scope for class methods and
+// nested classes. Walking parents makes the identity independent of traversal
+// order and works for Python, Java, TypeScript, C#, Ruby, and similar grammars.
+func enclosingTypeName(n *gotreesitter.Node, lang *gotreesitter.Language, source []byte) string {
+	var names []string
+	for parent := n.Parent(); parent != nil; parent = parent.Parent() {
+		switch parent.Type(lang) {
+		case "class_declaration", "class", "class_specifier", "class_definition",
+			"struct_declaration", "record_declaration", "module":
+			if name := nodeName(parent, lang, source); name != "" {
+				names = append(names, name)
+			}
+		}
+	}
+	for left, right := 0, len(names)-1; left < right; left, right = left+1, right-1 {
+		names[left], names[right] = names[right], names[left]
+	}
+	return strings.Join(names, ".")
+}
+
 // returnTypeOf returns the return type text, trying "return_type" then "type" fields.
 func returnTypeOf(n *gotreesitter.Node, lang *gotreesitter.Language, source []byte) string {
 	if rt := extractFieldText(n, lang, source, "return_type"); rt != "" {
@@ -605,10 +710,10 @@ func returnTypeOf(n *gotreesitter.Node, lang *gotreesitter.Language, source []by
 }
 
 // extractBodyCallEdges extracts call edges from a node's "body" field.
-func extractBodyCallEdges(name string, n *gotreesitter.Node, lang *gotreesitter.Language, source []byte, edges *[]Edge) {
+func extractBodyCallEdges(name, owner string, n *gotreesitter.Node, lang *gotreesitter.Language, source []byte, edges *[]Edge) {
 	bodyNode := n.ChildByFieldName("body", lang)
 	if bodyNode != nil {
-		extractCallEdges(name, bodyNode, lang, source, edges)
+		extractCallEdges(name, owner, bodyNode, lang, source, edges)
 	}
 }
 
@@ -716,7 +821,7 @@ func extractVariableDeclaratorSymbol(n *gotreesitter.Node, lang *gotreesitter.La
 
 	bodyNode := valueNode.ChildByFieldName("body", lang)
 	if bodyNode != nil {
-		extractCallEdges(name, bodyNode, lang, source, edges)
+		extractCallEdges(name, "", bodyNode, lang, source, edges)
 	}
 }
 
@@ -734,17 +839,18 @@ func countParams(paramsText string) int {
 	return strings.Count(t, ",") + 1
 }
 
-// isPythonMethod detects if a function_definition is a method by checking
-// if its first parameter is "self" or "cls" (Python convention).
-func isPythonMethod(n *gotreesitter.Node, lang *gotreesitter.Language, source []byte) bool {
-	paramsNode := n.ChildByFieldName("parameters", lang)
-	if paramsNode == nil {
-		return false
-	}
-	for _, child := range paramsNode.Children() {
-		if child.IsNamed() {
-			text := child.Text(source)
-			return text == "self" || text == "cls"
+// isPythonMethod classifies by lexical ownership, not by a conventional
+// receiver parameter. Static methods and methods with a nonstandard first
+// parameter are still methods; a top-level function named self is not.
+func isPythonMethod(n *gotreesitter.Node, lang *gotreesitter.Language) bool {
+	for parent := n.Parent(); parent != nil; parent = parent.Parent() {
+		switch parent.Type(lang) {
+		case "class_definition":
+			return true
+		case "function_definition", "lambda":
+			// The nearest declaration is another function, so n is a nested
+			// local function rather than a method of an outer class.
+			return false
 		}
 	}
 	return false

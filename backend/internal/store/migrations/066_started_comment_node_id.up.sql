@@ -1,0 +1,12 @@
+-- Identity of the "Argus is reviewing this PR — watch live" comment.
+--
+-- It was tracked only in memory on PipelineRun, reachable solely from the
+-- goroutine that posted it. That goroutine minimizes the comment on success
+-- and is gone on failure, and a cancel can arrive on a different machine
+-- entirely -- so a failed or cancelled review left a comment on the PR
+-- inviting people to "watch live" a run that had already stopped, forever.
+--
+-- The REST id (not the GraphQL node id) is stored because editing the body is
+-- what the terminal states need; the node id is only required for minimizing,
+-- which happens in-process on the success path.
+ALTER TABLE reviews ADD COLUMN IF NOT EXISTS started_comment_id BIGINT;

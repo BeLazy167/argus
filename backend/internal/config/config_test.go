@@ -114,6 +114,8 @@ func TestLoad(t *testing.T) {
 		t.Setenv("DATABASE_URL", "postgres://localhost/test")
 		t.Setenv("GITHUB_WEBHOOK_SECRET", "whsec_test")
 		t.Setenv("GITHUB_PRIVATE_KEY", "fake-key")
+		t.Setenv("MERMAID_VALIDATOR_BASE_URL", "")
+		t.Setenv("MERMAID_VALIDATOR_SECRET", "")
 	}
 
 	t.Run("all required vars set", func(t *testing.T) {
@@ -225,4 +227,58 @@ func TestLoad(t *testing.T) {
 			t.Errorf("error %q should mention GITHUB_APP_ID", err)
 		}
 	})
+	t.Run("mermaid validator may be intentionally disabled", func(t *testing.T) {
+		setRequired(t)
+
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load() with both validator vars unset: %v", err)
+		}
+		if cfg.MermaidValidatorEnabled() {
+			t.Fatal("MermaidValidatorEnabled() = true with both validator vars unset")
+		}
+		if cfg.MermaidValidatorBaseURL != "" || cfg.MermaidValidatorSecret != "" {
+			t.Fatalf("disabled validator unexpectedly has endpoint or secret")
+		}
+	})
+
+	t.Run("mermaid validator requires explicit paired origin and secret", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("DASHBOARD_BASE_URL", "https://argus.reviews")
+		t.Setenv("MERMAID_VALIDATOR_SECRET", "secret")
+
+		_, err := Load()
+		if err == nil || !strings.Contains(err.Error(), "MERMAID_VALIDATOR_BASE_URL") {
+			t.Fatalf("Load() error = %v, want explicit validator base URL error", err)
+		}
+	})
+
+	t.Run("mermaid validator rejects non-http origin", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("MERMAID_VALIDATOR_BASE_URL", "file:///tmp/parser")
+		t.Setenv("MERMAID_VALIDATOR_SECRET", "secret")
+
+		_, err := Load()
+		if err == nil || !strings.Contains(err.Error(), "absolute http(s) URL") {
+			t.Fatalf("Load() error = %v, want validator URL error", err)
+		}
+	})
+
+	t.Run("mermaid validator accepts explicit origin and secret", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("MERMAID_VALIDATOR_BASE_URL", "https://dashboard.example.test")
+		t.Setenv("MERMAID_VALIDATOR_SECRET", "secret")
+
+		cfg, err := Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.MermaidValidatorBaseURL != "https://dashboard.example.test" {
+			t.Fatalf("MermaidValidatorBaseURL = %q", cfg.MermaidValidatorBaseURL)
+		}
+		if !cfg.MermaidValidatorEnabled() {
+			t.Fatal("MermaidValidatorEnabled() = false with explicit origin and secret")
+		}
+	})
+
 }

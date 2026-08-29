@@ -34,6 +34,7 @@ export default function BlogPage() {
           <input
             type="email"
             name="email"
+            aria-label="Email address"
             placeholder="you@company.com"
             required
             className="flex-1 border border-iron bg-background px-3 py-2 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none"

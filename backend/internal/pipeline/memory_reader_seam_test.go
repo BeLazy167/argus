@@ -95,8 +95,8 @@ func TestSearchHints_ShapesOnSuccess(t *testing.T) {
 		t.Errorf("searchHints = %v, want %v (RichContent shaped, empties dropped)", got, want)
 	}
 	// searchHints stamps the hint retrieval knobs regardless of caller input.
-	if seen.Threshold != 0.5 || !seen.Rerank || !seen.Enrich {
-		t.Errorf("hint knobs not stamped: threshold=%v rerank=%v enrich=%v", seen.Threshold, seen.Rerank, seen.Enrich)
+	if seen.Threshold != memory.DefaultThresholdFindingEnrich || !seen.Enrich {
+		t.Errorf("hint knobs not stamped: threshold=%v enrich=%v", seen.Threshold, seen.Enrich)
 	}
 }
 

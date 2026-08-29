@@ -97,8 +97,8 @@ func TestUCBScore_ordering(t *testing.T) {
 func TestUCBScore_panicsOnInvalidInput(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name              string
-		wins, n, total    float64
+		name           string
+		wins, n, total float64
 	}{
 		{"negative n", 0, -1, 10},
 		{"negative wins", -1, 10, 10},

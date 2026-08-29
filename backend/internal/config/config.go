@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 )
@@ -27,23 +28,37 @@ type Config struct {
 	// Encryption
 	EncryptionKey string
 
-	// Supermemory
-	SupermemoryAPIKey string
+	// Embeddings (memory-in-Postgres program). The platform key makes memory
+	// work for every managed-tier installation; BYOK "embeddings" provider
+	// keys override per installation. Self-hosters may set only the base URL
+	// for a keyless local endpoint (Ollama/TEI).
+	//
+	// Default model: voyage-4 (native 1024 dims — the memories storage dim).
+	// OpenAI text-embedding-3-* BYOK models Matryoshka-truncate to
+	// EmbeddingsDimensions via their `dimensions` param; custom endpoints must
+	// serve 1024-dim models.
+	EmbeddingsAPIKey     string
+	EmbeddingsBaseURL    string
+	EmbeddingsModel      string
+	EmbeddingsDimensions int
 
 	// Worker
 	MaxConcurrentReviews int
 
 	// Deployment identity (self-hosting)
-	DashboardBaseURL string // web dashboard base URL, linked from GitHub comments
-	APIBaseURL       string // public API base URL, used for signed export links
-	GitHubAppSlug    string // GitHub App slug, used to build install URLs
-	SelfHosted       bool   // true disables plan gating (no billing on self-hosts)
+	DashboardBaseURL        string // web dashboard base URL, linked from GitHub comments
+	MermaidValidatorBaseURL string // explicit backend→dashboard parser origin; no vendor default
+	MermaidValidatorSecret  string // shared backend→dashboard validator credential
+	APIBaseURL              string // public API base URL, used for signed export links
+	GitHubAppSlug           string // GitHub App slug, used to build install URLs
+	SelfHosted              bool   // self-hosted deployment; affects auto-run defaults and install listing
 }
 
-// IsPro reports whether a plan tier unlocks pro-gated features. Self-hosted
-// deployments have no billing, so every installation passes plan gates.
-func (c *Config) IsPro(tier string) bool {
-	return c.SelfHosted || tier == "pro"
+// MermaidValidatorEnabled reports whether diagram generation has its explicit,
+// deployment-local parser endpoint and credential. Load guarantees the pair is
+// either fully configured or intentionally disabled.
+func (c *Config) MermaidValidatorEnabled() bool {
+	return c != nil && c.MermaidValidatorBaseURL != "" && c.MermaidValidatorSecret != ""
 }
 
 func Load() (*Config, error) {
@@ -59,6 +74,10 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid MAX_CONCURRENT_REVIEWS: %w", err)
 	}
+	embedDims, err := strconv.Atoi(getEnv("EMBEDDINGS_DIMENSIONS", "1024"))
+	if err != nil {
+		return nil, fmt.Errorf("invalid EMBEDDINGS_DIMENSIONS: %w", err)
+	}
 
 	privateKey, err := loadPrivateKey()
 	if err != nil {
@@ -72,6 +91,17 @@ func Load() (*Config, error) {
 	webhookSecret, err := requireEnv("GITHUB_WEBHOOK_SECRET")
 	if err != nil {
 		return nil, err
+	}
+	validatorBaseURL := os.Getenv("MERMAID_VALIDATOR_BASE_URL")
+	validatorSecret := os.Getenv("MERMAID_VALIDATOR_SECRET")
+	if (validatorBaseURL == "") != (validatorSecret == "") {
+		return nil, fmt.Errorf("MERMAID_VALIDATOR_BASE_URL and MERMAID_VALIDATOR_SECRET must be configured together")
+	}
+	if validatorBaseURL != "" {
+		parsed, parseErr := url.Parse(validatorBaseURL)
+		if parseErr != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+			return nil, fmt.Errorf("MERMAID_VALIDATOR_BASE_URL must be an absolute http(s) URL")
+		}
 	}
 
 	cfg := &Config{
@@ -89,14 +119,19 @@ func Load() (*Config, error) {
 
 		EncryptionKey: os.Getenv("ENCRYPTION_KEY"),
 
-		SupermemoryAPIKey: os.Getenv("SUPERMEMORY_API_KEY"),
+		EmbeddingsAPIKey:     os.Getenv("EMBEDDINGS_API_KEY"),
+		EmbeddingsBaseURL:    getEnv("EMBEDDINGS_BASE_URL", "https://api.voyageai.com/v1"),
+		EmbeddingsModel:      getEnv("EMBEDDINGS_MODEL", "voyage-4"),
+		EmbeddingsDimensions: embedDims,
 
 		MaxConcurrentReviews: maxWorkers,
 
-		DashboardBaseURL: getEnv("DASHBOARD_BASE_URL", "https://argus.reviews"),
-		APIBaseURL:       getEnv("API_BASE_URL", "https://api.argus.reviews"),
-		GitHubAppSlug:    getEnv("GITHUB_APP_SLUG", "argus-eye"),
-		SelfHosted:       getEnv("SELF_HOSTED", "false") == "true",
+		DashboardBaseURL:        getEnv("DASHBOARD_BASE_URL", "https://argus.reviews"),
+		MermaidValidatorBaseURL: validatorBaseURL,
+		MermaidValidatorSecret:  validatorSecret,
+		APIBaseURL:              getEnv("API_BASE_URL", "https://api.argus.reviews"),
+		GitHubAppSlug:           getEnv("GITHUB_APP_SLUG", "argus-eye"),
+		SelfHosted:              getEnv("SELF_HOSTED", "false") == "true",
 	}
 
 	return cfg, nil

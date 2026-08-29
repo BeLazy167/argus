@@ -27,10 +27,14 @@ export type {
   AutoResolveSummary,
   GaugeRow,
   Installation,
+  LearnedMemory,
+  LearnedMemoryCount,
   ModelConfig,
   Pattern,
   PatternStat,
+  Persona,
   PRReviewSummary,
+  ReviewMinorNote,
   Rule,
   ScenarioKPIs,
   ScenarioRun,
@@ -104,7 +108,7 @@ export type StageTokens = {
 };
 
 // MemoryIndexedKind is the closed set of values on the `kind` payload field of
-// memory_indexed events. One per distinct Supermemory upsert kind.
+// memory_indexed events. One per distinct memory upsert kind.
 export type MemoryIndexedKind =
   | "patterns"
   | "patterns_praise"
@@ -130,6 +134,8 @@ export type TokenUsage = {
   cross_pr?: StageTokens;
   simulation?: StageTokens[];
   reply?: StageTokens;
+  /** Auto-resolve judge spend, merged onto this review by a later push. */
+  auto_resolve?: StageTokens;
   total: StageTokens;
 };
 
@@ -148,6 +154,7 @@ export type ProviderKey = {
   provider: string;
   api_key_masked: string;
   base_url?: string;
+  model?: string;
   repo_id?: number;
   created_at: string;
   updated_at: string;
@@ -187,27 +194,4 @@ export type DecisionTrace = {
   pr_number?: number;
   author?: string;
   created_at: string;
-};
-
-export type GraphNode = {
-  id: number;
-  repo_id: number;
-  kind: string;
-  name: string;
-  file_path: string;
-  line_start: number;
-  line_end: number;
-  language: string;
-  pr_number: number | null;
-  is_merged: boolean;
-};
-
-export type GraphEdge = {
-  id: number;
-  repo_id: number;
-  source_id: number;
-  target_id: number;
-  kind: string;
-  source_name: string;
-  target_name: string;
 };

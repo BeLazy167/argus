@@ -1,0 +1,1 @@
+ALTER TABLE provider_keys DROP COLUMN IF EXISTS model;

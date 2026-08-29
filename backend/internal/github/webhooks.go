@@ -3,8 +3,12 @@ package github
 import (
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"strings"
+	"time"
 
+	"github.com/BeLazy167/argus/backend/internal/obs"
 	"github.com/BeLazy167/argus/backend/internal/util"
 	gh "github.com/google/go-github/v68/github"
 )
@@ -29,6 +33,9 @@ type PREvent struct {
 	BaseSHA        string
 	BaseRef        string
 	HeadRef        string
+	BaseRepoID     int64
+	MergeCommitSHA string
+	MergedAt       time.Time
 	PRBody         string // first ~8000 chars of PR description (feeds intent extraction)
 	// PRBodyBefore is populated only on action="edited" from payload.changes.body.from.
 	// Used by the cross-PR webhook handler to diff linked-PR refs between pre-
@@ -48,7 +55,16 @@ const (
 )
 
 // ParseWebhook validates the webhook signature and parses the event.
-func ParseWebhook(r *http.Request, secret []byte) (*WebhookEvent, error) {
+func ParseWebhook(r *http.Request, secret []byte) (result *WebhookEvent, err error) {
+	ctx := r.Context()
+	op := beginSemantic(ctx, "webhook.ParseWebhook", 0, "", "", 0, "event_type", r.Header.Get("X-GitHub-Event"))
+	defer func() {
+		if result != nil {
+			op.finish(err, "action", result.Action)
+		} else {
+			op.finish(err)
+		}
+	}()
 	// Limit webhook body to 10MB to prevent abuse
 	const maxBodySize = 10 << 20
 	defer r.Body.Close()
@@ -60,6 +76,10 @@ func ParseWebhook(r *http.Request, secret []byte) (*WebhookEvent, error) {
 	if err := gh.ValidateSignature(r.Header.Get("X-Hub-Signature-256"), payload, secret); err != nil {
 		return nil, fmt.Errorf("invalid signature: %w", err)
 	}
+	// Only verified webhook bodies reach stdout. This keeps complete signed
+	// inputs while preventing unauthenticated callers from forcing log floods.
+	obs.LogPayload(ctx, slog.Default(), "verified GitHub webhook body", obs.NewLogID(),
+		"request", r.Header.Get("Content-Type"), payload)
 
 	eventType := r.Header.Get("X-GitHub-Event")
 	event, err := gh.ParseWebHook(eventType, payload)
@@ -93,6 +113,9 @@ func ToPREvent(event *WebhookEvent) (*PREvent, error) {
 		BaseSHA:        prEvent.GetPullRequest().GetBase().GetSHA(),
 		BaseRef:        prEvent.GetPullRequest().GetBase().GetRef(),
 		HeadRef:        prEvent.GetPullRequest().GetHead().GetRef(),
+		BaseRepoID:     prEvent.GetPullRequest().GetBase().GetRepo().GetID(),
+		MergeCommitSHA: prEvent.GetPullRequest().GetMergeCommitSHA(),
+		MergedAt:       prEvent.GetPullRequest().GetMergedAt().Time,
 		PRBody:         util.Truncate(prEvent.GetPullRequest().GetBody(), 8000, false),
 		Merged:         prEvent.GetPullRequest().GetMerged(),
 		Draft:          prEvent.GetPullRequest().GetDraft(),
@@ -118,6 +141,73 @@ func ToPREvent(event *WebhookEvent) (*PREvent, error) {
 	return pe, nil
 }
 
+// DefaultBranchUpdate is a signed webhook observation suitable for the
+// tenant/repository-scoped graph refresh seam. CommitSHA is always the target
+// repository's default-branch commit, never a pull request head.
+type DefaultBranchUpdate struct {
+	InstallationID int64
+	RepoID         int64
+	RepoFullName   string
+	DefaultBranch  string
+	CommitSHA      string
+	ObservedAt     time.Time
+	// branchIdentityAuthoritative is true only when the signed payload itself
+	// declares the repository default branch. A merged PR identifies its target
+	// branch, but does not prove that branch is the repository default.
+	branchIdentityAuthoritative bool
+}
+
+// BranchIdentityIsAuthoritative reports whether this observation may replace
+// the stored repository default branch as well as refresh its head.
+func (u DefaultBranchUpdate) BranchIdentityIsAuthoritative() bool {
+	return u.branchIdentityAuthoritative
+}
+
+// DefaultBranchUpdateFromPR accepts only a verified merged-close transition on
+// the target repository. A fork PR is safe because its head is never consulted;
+// a closed-unmerged PR and every synchronize event are ignored.
+func DefaultBranchUpdateFromPR(event PREvent) (DefaultBranchUpdate, bool) {
+	if event.Action != "closed" || !event.Merged || event.RepoID <= 0 || event.BaseRepoID != event.RepoID || event.BaseRef == "" || invalidGitCommit(event.MergeCommitSHA) {
+		return DefaultBranchUpdate{}, false
+	}
+	return DefaultBranchUpdate{
+		InstallationID: event.InstallationID,
+		RepoID:         event.RepoID,
+		RepoFullName:   event.RepoFullName,
+		DefaultBranch:  event.BaseRef,
+		CommitSHA:      event.MergeCommitSHA,
+		ObservedAt:     event.MergedAt,
+	}, true
+}
+
+// DefaultBranchUpdateFromPush accepts only a non-delete push whose ref exactly
+// matches the repository-declared default branch.
+func DefaultBranchUpdateFromPush(event *WebhookEvent) (DefaultBranchUpdate, bool) {
+	push, ok := event.Payload.(*gh.PushEvent)
+	if !ok || push.GetDeleted() || push.GetInstallation().GetID() <= 0 {
+		return DefaultBranchUpdate{}, false
+	}
+	repo := push.GetRepo()
+	branch := repo.GetDefaultBranch()
+	if repo.GetID() <= 0 || branch == "" || push.GetRef() != "refs/heads/"+branch || invalidGitCommit(push.GetAfter()) {
+		return DefaultBranchUpdate{}, false
+	}
+	return DefaultBranchUpdate{
+		InstallationID:              push.GetInstallation().GetID(),
+		RepoID:                      repo.GetID(),
+		RepoFullName:                repo.GetFullName(),
+		DefaultBranch:               branch,
+		CommitSHA:                   push.GetAfter(),
+		ObservedAt:                  repo.GetPushedAt().Time,
+		branchIdentityAuthoritative: true,
+	}, true
+}
+
+func invalidGitCommit(sha string) bool {
+	trimmed := strings.TrimSpace(sha)
+	return trimmed == "" || len(trimmed) > 128 || strings.Trim(trimmed, "0") == ""
+}
+
 // CommentEvent holds parsed data from a pull_request_review_comment webhook event.
 type CommentEvent struct {
 	Action         string
@@ -130,10 +220,10 @@ type CommentEvent struct {
 	InReplyToID    int64
 	CommentBody    string
 	CommentAuthor  string
-	// AuthorAssociation is the replier's relationship to the repo (GitHub's
-	// author_association). Gates the reply path's privileged shortcut (resolving
-	// the thread / writing terminal ledger state) — a review-comment replier is
-	// the same untrusted population as a reactor.
+	// AuthorAssociation is the replier's coarse relationship to the repo
+	// (GitHub's author_association). It is attribution only on the reply path;
+	// derived writes require an effective repository permission lookup for
+	// CommentAuthor.
 	AuthorAssociation string
 	FilePath          string
 	DiffHunk          string

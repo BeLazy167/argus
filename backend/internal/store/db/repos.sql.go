@@ -8,6 +8,7 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"time"
 )
 
 const countEnabledRepos = `-- name: CountEnabledRepos :one
@@ -26,9 +27,21 @@ SELECT id, installation_id, github_id, full_name, default_branch, enabled, setti
 FROM repos WHERE id = $1
 `
 
-func (q *Queries) GetRepo(ctx context.Context, id int64) (Repo, error) {
+type GetRepoRow struct {
+	ID             int64           `json:"id"`
+	InstallationID int64           `json:"installation_id"`
+	GithubID       int64           `json:"github_id"`
+	FullName       string          `json:"full_name"`
+	DefaultBranch  string          `json:"default_branch"`
+	Enabled        bool            `json:"enabled"`
+	SettingsJSON   json.RawMessage `json:"settings_json"`
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
+}
+
+func (q *Queries) GetRepo(ctx context.Context, id int64) (GetRepoRow, error) {
 	row := q.db.QueryRow(ctx, getRepo, id)
-	var i Repo
+	var i GetRepoRow
 	err := row.Scan(
 		&i.ID,
 		&i.InstallationID,
@@ -48,9 +61,21 @@ SELECT id, installation_id, github_id, full_name, default_branch, enabled, setti
 FROM repos WHERE full_name = $1
 `
 
-func (q *Queries) GetRepoByFullName(ctx context.Context, fullName string) (Repo, error) {
+type GetRepoByFullNameRow struct {
+	ID             int64           `json:"id"`
+	InstallationID int64           `json:"installation_id"`
+	GithubID       int64           `json:"github_id"`
+	FullName       string          `json:"full_name"`
+	DefaultBranch  string          `json:"default_branch"`
+	Enabled        bool            `json:"enabled"`
+	SettingsJSON   json.RawMessage `json:"settings_json"`
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
+}
+
+func (q *Queries) GetRepoByFullName(ctx context.Context, fullName string) (GetRepoByFullNameRow, error) {
 	row := q.db.QueryRow(ctx, getRepoByFullName, fullName)
-	var i Repo
+	var i GetRepoByFullNameRow
 	err := row.Scan(
 		&i.ID,
 		&i.InstallationID,
@@ -75,9 +100,21 @@ type GetRepoScopedParams struct {
 	Column2 []int64 `json:"column_2"`
 }
 
-func (q *Queries) GetRepoScoped(ctx context.Context, arg GetRepoScopedParams) (Repo, error) {
+type GetRepoScopedRow struct {
+	ID             int64           `json:"id"`
+	InstallationID int64           `json:"installation_id"`
+	GithubID       int64           `json:"github_id"`
+	FullName       string          `json:"full_name"`
+	DefaultBranch  string          `json:"default_branch"`
+	Enabled        bool            `json:"enabled"`
+	SettingsJSON   json.RawMessage `json:"settings_json"`
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
+}
+
+func (q *Queries) GetRepoScoped(ctx context.Context, arg GetRepoScopedParams) (GetRepoScopedRow, error) {
 	row := q.db.QueryRow(ctx, getRepoScoped, arg.ID, arg.Column2)
-	var i Repo
+	var i GetRepoScopedRow
 	err := row.Scan(
 		&i.ID,
 		&i.InstallationID,
@@ -92,20 +129,129 @@ func (q *Queries) GetRepoScoped(ctx context.Context, arg GetRepoScopedParams) (R
 	return i, err
 }
 
+const listRepos = `-- name: ListRepos :many
+SELECT id, installation_id, github_id, full_name, default_branch, enabled, settings_json, created_at, updated_at
+FROM repos
+ORDER BY full_name
+`
+
+type ListReposRow struct {
+	ID             int64           `json:"id"`
+	InstallationID int64           `json:"installation_id"`
+	GithubID       int64           `json:"github_id"`
+	FullName       string          `json:"full_name"`
+	DefaultBranch  string          `json:"default_branch"`
+	Enabled        bool            `json:"enabled"`
+	SettingsJSON   json.RawMessage `json:"settings_json"`
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
+}
+
+func (q *Queries) ListRepos(ctx context.Context) ([]ListReposRow, error) {
+	rows, err := q.db.Query(ctx, listRepos)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListReposRow
+	for rows.Next() {
+		var i ListReposRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.InstallationID,
+			&i.GithubID,
+			&i.FullName,
+			&i.DefaultBranch,
+			&i.Enabled,
+			&i.SettingsJSON,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listReposByOwner = `-- name: ListReposByOwner :many
+SELECT id, installation_id, github_id, full_name, default_branch, enabled, settings_json, created_at, updated_at
+FROM repos
+WHERE full_name LIKE $1::text ESCAPE '\'
+ORDER BY full_name
+`
+
+type ListReposByOwnerRow struct {
+	ID             int64           `json:"id"`
+	InstallationID int64           `json:"installation_id"`
+	GithubID       int64           `json:"github_id"`
+	FullName       string          `json:"full_name"`
+	DefaultBranch  string          `json:"default_branch"`
+	Enabled        bool            `json:"enabled"`
+	SettingsJSON   json.RawMessage `json:"settings_json"`
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
+}
+
+func (q *Queries) ListReposByOwner(ctx context.Context, dollar_1 string) ([]ListReposByOwnerRow, error) {
+	rows, err := q.db.Query(ctx, listReposByOwner, dollar_1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListReposByOwnerRow
+	for rows.Next() {
+		var i ListReposByOwnerRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.InstallationID,
+			&i.GithubID,
+			&i.FullName,
+			&i.DefaultBranch,
+			&i.Enabled,
+			&i.SettingsJSON,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listReposScoped = `-- name: ListReposScoped :many
 SELECT id, installation_id, github_id, full_name, default_branch, enabled, settings_json, created_at, updated_at
 FROM repos WHERE installation_id = ANY($1::bigint[]) ORDER BY full_name
 `
 
-func (q *Queries) ListReposScoped(ctx context.Context, dollar_1 []int64) ([]Repo, error) {
+type ListReposScopedRow struct {
+	ID             int64           `json:"id"`
+	InstallationID int64           `json:"installation_id"`
+	GithubID       int64           `json:"github_id"`
+	FullName       string          `json:"full_name"`
+	DefaultBranch  string          `json:"default_branch"`
+	Enabled        bool            `json:"enabled"`
+	SettingsJSON   json.RawMessage `json:"settings_json"`
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
+}
+
+func (q *Queries) ListReposScoped(ctx context.Context, dollar_1 []int64) ([]ListReposScopedRow, error) {
 	rows, err := q.db.Query(ctx, listReposScoped, dollar_1)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []Repo
+	var items []ListReposScopedRow
 	for rows.Next() {
-		var i Repo
+		var i ListReposScopedRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.InstallationID,
@@ -129,29 +275,65 @@ func (q *Queries) ListReposScoped(ctx context.Context, dollar_1 []int64) ([]Repo
 
 const updateRepo = `-- name: UpdateRepo :one
 UPDATE repos SET
-    enabled = COALESCE($2, enabled),
-    default_branch = COALESCE($3, default_branch),
-    settings_json = CASE WHEN $4 IS NULL THEN settings_json ELSE settings_json || $4 END,
+    enabled = COALESCE($1::boolean, enabled),
+    default_branch = COALESCE($2::text, default_branch),
+    settings_json = CASE WHEN $3::jsonb IS NULL THEN settings_json ELSE settings_json || $3::jsonb END,
+    graph_default_head_sha = CASE
+        WHEN $2::text IS NOT NULL AND default_branch IS DISTINCT FROM $2::text THEN NULL
+        ELSE graph_default_head_sha END,
+    graph_default_head_observed_at = CASE
+        WHEN $2::text IS NOT NULL AND default_branch IS DISTINCT FROM $2::text THEN NULL
+        ELSE graph_default_head_observed_at END,
+    graph_default_head_event_at = CASE
+        WHEN $2::text IS NOT NULL AND default_branch IS DISTINCT FROM $2::text THEN NULL
+        ELSE graph_default_head_event_at END,
+    graph_refresh_requested_at = CASE
+        WHEN $2::text IS NOT NULL AND default_branch IS DISTINCT FROM $2::text THEN NOW()
+        ELSE graph_refresh_requested_at END,
+    graph_refresh_commit_sha = CASE
+        WHEN $2::text IS NOT NULL AND default_branch IS DISTINCT FROM $2::text THEN NULL
+        ELSE graph_refresh_commit_sha END,
+    graph_refresh_version = CASE
+        WHEN $2::text IS NOT NULL AND default_branch IS DISTINCT FROM $2::text THEN graph_refresh_version + 1
+        ELSE graph_refresh_version END,
+    graph_index_attempted_at = CASE
+        WHEN $2::text IS NOT NULL AND default_branch IS DISTINCT FROM $2::text THEN NULL
+        ELSE graph_index_attempted_at END,
+    graph_index_cursor = CASE
+        WHEN $2::text IS NOT NULL AND default_branch IS DISTINCT FROM $2::text THEN 0
+        ELSE graph_index_cursor END,
     updated_at = NOW()
-WHERE id = $1
+WHERE id = $4::bigint
 RETURNING id, installation_id, github_id, full_name, default_branch, enabled, settings_json, created_at, updated_at
 `
 
 type UpdateRepoParams struct {
-	ID            int64           `json:"id"`
-	Enabled       bool            `json:"enabled"`
-	DefaultBranch string          `json:"default_branch"`
-	SettingsJSON  json.RawMessage `json:"settings_json"`
+	Enabled       *bool   `json:"enabled"`
+	DefaultBranch *string `json:"default_branch"`
+	SettingsJSON  []byte  `json:"settings_json"`
+	ID            int64   `json:"id"`
 }
 
-func (q *Queries) UpdateRepo(ctx context.Context, arg UpdateRepoParams) (Repo, error) {
+type UpdateRepoRow struct {
+	ID             int64           `json:"id"`
+	InstallationID int64           `json:"installation_id"`
+	GithubID       int64           `json:"github_id"`
+	FullName       string          `json:"full_name"`
+	DefaultBranch  string          `json:"default_branch"`
+	Enabled        bool            `json:"enabled"`
+	SettingsJSON   json.RawMessage `json:"settings_json"`
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
+}
+
+func (q *Queries) UpdateRepo(ctx context.Context, arg UpdateRepoParams) (UpdateRepoRow, error) {
 	row := q.db.QueryRow(ctx, updateRepo,
-		arg.ID,
 		arg.Enabled,
 		arg.DefaultBranch,
 		arg.SettingsJSON,
+		arg.ID,
 	)
-	var i Repo
+	var i UpdateRepoRow
 	err := row.Scan(
 		&i.ID,
 		&i.InstallationID,
@@ -169,7 +351,18 @@ func (q *Queries) UpdateRepo(ctx context.Context, arg UpdateRepoParams) (Repo, e
 const upsertRepo = `-- name: UpsertRepo :one
 INSERT INTO repos (installation_id, github_id, full_name, default_branch)
 VALUES ($1, $2, $3, $4)
-ON CONFLICT (github_id) DO UPDATE SET full_name = $3, default_branch = $4, updated_at = NOW()
+ON CONFLICT (github_id) DO UPDATE SET
+    full_name = EXCLUDED.full_name,
+    default_branch = EXCLUDED.default_branch,
+    graph_default_head_sha = CASE WHEN repos.default_branch IS DISTINCT FROM EXCLUDED.default_branch THEN NULL ELSE repos.graph_default_head_sha END,
+    graph_default_head_observed_at = CASE WHEN repos.default_branch IS DISTINCT FROM EXCLUDED.default_branch THEN NULL ELSE repos.graph_default_head_observed_at END,
+    graph_default_head_event_at = CASE WHEN repos.default_branch IS DISTINCT FROM EXCLUDED.default_branch THEN NULL ELSE repos.graph_default_head_event_at END,
+    graph_refresh_requested_at = CASE WHEN repos.default_branch IS DISTINCT FROM EXCLUDED.default_branch THEN NOW() ELSE repos.graph_refresh_requested_at END,
+    graph_refresh_commit_sha = CASE WHEN repos.default_branch IS DISTINCT FROM EXCLUDED.default_branch THEN NULL ELSE repos.graph_refresh_commit_sha END,
+    graph_refresh_version = CASE WHEN repos.default_branch IS DISTINCT FROM EXCLUDED.default_branch THEN repos.graph_refresh_version + 1 ELSE repos.graph_refresh_version END,
+    graph_index_attempted_at = CASE WHEN repos.default_branch IS DISTINCT FROM EXCLUDED.default_branch THEN NULL ELSE repos.graph_index_attempted_at END,
+    graph_index_cursor = CASE WHEN repos.default_branch IS DISTINCT FROM EXCLUDED.default_branch THEN 0 ELSE repos.graph_index_cursor END,
+    updated_at = NOW()
 RETURNING id, installation_id, github_id, full_name, default_branch, enabled, settings_json, created_at, updated_at
 `
 
@@ -180,14 +373,26 @@ type UpsertRepoParams struct {
 	DefaultBranch  string `json:"default_branch"`
 }
 
-func (q *Queries) UpsertRepo(ctx context.Context, arg UpsertRepoParams) (Repo, error) {
+type UpsertRepoRow struct {
+	ID             int64           `json:"id"`
+	InstallationID int64           `json:"installation_id"`
+	GithubID       int64           `json:"github_id"`
+	FullName       string          `json:"full_name"`
+	DefaultBranch  string          `json:"default_branch"`
+	Enabled        bool            `json:"enabled"`
+	SettingsJSON   json.RawMessage `json:"settings_json"`
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
+}
+
+func (q *Queries) UpsertRepo(ctx context.Context, arg UpsertRepoParams) (UpsertRepoRow, error) {
 	row := q.db.QueryRow(ctx, upsertRepo,
 		arg.InstallationID,
 		arg.GithubID,
 		arg.FullName,
 		arg.DefaultBranch,
 	)
-	var i Repo
+	var i UpsertRepoRow
 	err := row.Scan(
 		&i.ID,
 		&i.InstallationID,

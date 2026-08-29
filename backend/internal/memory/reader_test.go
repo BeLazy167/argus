@@ -19,12 +19,11 @@ func TestMemoryQueryRequest(t *testing.T) {
 		Filters:   []FilterCondition{{Key: "action", Value: "dismissed"}},
 		Limit:     5,
 		Threshold: 0.5,
-		Rerank:    true,
 		Enrich:    true,
 	}
 	req := q.request()
 
-	if req.Query != "nil deref" || req.SearchMode != "hybrid" || req.Limit != 5 || req.Threshold != 0.5 || !req.Rerank {
+	if req.Query != "nil deref" || req.Limit != 5 || req.Threshold != 0.5 {
 		t.Fatalf("request knobs not passed through: %+v", req)
 	}
 	if req.Filters == nil || len(req.Filters.AND) != 2 {

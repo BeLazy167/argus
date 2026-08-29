@@ -1,8 +1,13 @@
 package sast
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
+	"os/exec"
+	"strings"
 	"testing"
 	"time"
 )
@@ -126,5 +131,65 @@ func TestRunAll_Timeout(t *testing.T) {
 	// The slow runner should have been cancelled, returning no findings.
 	if len(findings) != 0 {
 		t.Errorf("expected 0 findings from timed-out runner, got %d", len(findings))
+	}
+}
+
+func TestRunCommandDoesNotLogStdout(t *testing.T) {
+	for _, tool := range []string{"eslint", "semgrep", "staticcheck"} {
+		tool := tool
+		t.Run(tool, func(t *testing.T) {
+			var logs bytes.Buffer
+			old := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+			t.Cleanup(func() { slog.SetDefault(old) })
+
+			const source = "PRIVATE_MATCHED_SOURCE_SECRET"
+			cmd := exec.Command("sh", "-c", "printf %s \"$RUN_COMMAND_TEST_SOURCE\"")
+			cmd.Env = append(cmd.Environ(), "RUN_COMMAND_TEST_SOURCE="+source)
+			out, _, err := runCommand(context.Background(), tool, cmd)
+			if err != nil {
+				t.Fatalf("run command: %v", err)
+			}
+			if string(out) != source {
+				t.Fatalf("stdout = %q, want %q", out, source)
+			}
+			if strings.Contains(logs.String(), source) {
+				t.Fatalf("captured stdout leaked into logs: %s", logs.String())
+			}
+			if !strings.Contains(logs.String(), "stdout_bytes="+fmt.Sprint(len(source))) {
+				t.Fatalf("stdout byte count missing from logs: %s", logs.String())
+			}
+		})
+	}
+}
+
+func TestRunAllLogsFindingSummariesWithoutMessages(t *testing.T) {
+	var logs bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	const source = "PRIVATE_FINDING_MESSAGE_SECRET"
+	runner := &mockRunner{
+		name:  "mock-sast",
+		langs: []string{"go"},
+		findings: []Finding{
+			{File: "bad.go", Line: 1, Rule: "RULE-B", Message: source, Severity: "warning"},
+			{File: "bad.go", Line: 2, Rule: "RULE-A", Message: "another private expression", Severity: "error"},
+		},
+	}
+
+	findings, err := RunAll(context.Background(), []Runner{runner}, "go", nil)
+	if err != nil || len(findings) != 2 {
+		t.Fatalf("RunAll findings=%+v error=%v", findings, err)
+	}
+	got := logs.String()
+	if strings.Contains(got, source) || strings.Contains(got, "another private expression") || strings.Contains(got, "bad.go") {
+		t.Fatalf("finding source details leaked into logs: %s", got)
+	}
+	for _, want := range []string{"RULE-A", "RULE-B", "warning:1", "error:1"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("summary %q missing from logs: %s", want, got)
+		}
 	}
 }

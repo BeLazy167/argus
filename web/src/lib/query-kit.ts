@@ -31,7 +31,7 @@ export function getApi(ctx: { meta?: unknown }): AuthedApi {
  * createInfiniteQuery and createMutation variants — the runtime shape is the
  * same for all three; only the inner fetcher/mutationFn signature differs.
  */
-/* eslint-disable @typescript-eslint/no-explicit-any */
+// biome-ignore lint/suspicious/noExplicitAny: One middleware serves every query variable shape.
 export const withAuthQuery: Middleware<any> = (useNext) => (options: any) => {
   const api = useApi();
   return useNext({
@@ -41,6 +41,7 @@ export const withAuthQuery: Middleware<any> = (useNext) => (options: any) => {
   });
 };
 
+// biome-ignore lint/suspicious/noExplicitAny: One middleware serves every mutation variable shape.
 export const withAuthMutation: Middleware<any> = (useNext) => (options: any) => {
   const api = useApi();
   return useNext({
@@ -48,7 +49,6 @@ export const withAuthMutation: Middleware<any> = (useNext) => (options: any) => 
     meta: { ...(options.meta ?? {}), api, installationId: api.active?.id },
   });
 };
-/* eslint-enable @typescript-eslint/no-explicit-any */
 
 /** Factory helpers — same surface as react-query-kit but with auth wired in. */
 export const createAuthQuery: typeof createQuery = ((opts: Parameters<typeof createQuery>[0]) =>

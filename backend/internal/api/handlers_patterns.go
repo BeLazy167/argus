@@ -13,6 +13,8 @@ import (
 )
 
 func (s *Server) listPatterns(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.listPatterns")
+	defer op.Finish(w)
 	ids := getInstallationIDs(r.Context())
 	var patterns []store.Pattern
 	var err error
@@ -27,7 +29,7 @@ func (s *Server) listPatterns(w http.ResponseWriter, r *http.Request) {
 		patterns, err = s.store.ListPatterns(r.Context(), ids)
 	}
 	if err != nil {
-		s.logger.Error("list patterns", "error", err)
+		s.logger.ErrorContext(r.Context(), "list patterns", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
@@ -35,6 +37,8 @@ func (s *Server) listPatterns(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getPatternStats(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.getPatternStats")
+	defer op.Finish(w)
 	// Default is every installation the caller belongs to; an explicit
 	// installation_id narrows to one workspace so org-scoped pages don't mix
 	// another installation's history into the timeline.
@@ -53,7 +57,7 @@ func (s *Server) getPatternStats(w http.ResponseWriter, r *http.Request) {
 	}
 	stats, err := s.store.GetPatternStats(r.Context(), ids)
 	if err != nil {
-		s.logger.Error("get pattern stats", "error", err)
+		s.logger.ErrorContext(r.Context(), "get pattern stats", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
@@ -61,6 +65,8 @@ func (s *Server) getPatternStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getPattern(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.getPattern")
+	defer op.Finish(w)
 	id, err := strconv.ParseInt(chi.URLParam(r, "patternID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid pattern id"})
@@ -80,6 +86,8 @@ func (s *Server) getPattern(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) createPattern(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.createPattern")
+	defer op.Finish(w)
 	var body struct {
 		InstallationID int64  `json:"installation_id"`
 		RepoID         *int64 `json:"repo_id"`
@@ -99,40 +107,30 @@ func (s *Server) createPattern(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Index in Supermemory (respect repo scope)
-	var smID *string
-	if s.memRegistry != nil {
-		indexer := s.memRegistry.GetIndexer(r.Context(), body.InstallationID)
-		if indexer != nil {
-			pattern := memory.PatternMemory{Content: body.Content, Source: "dashboard"}
-			var resp *memory.AddResponse
-			var err error
-			if body.RepoID != nil {
-				dbRepo, repoErr := s.store.GetRepo(r.Context(), *body.RepoID)
-				if repoErr == nil {
-					parts := strings.SplitN(dbRepo.FullName, "/", 2)
-					if len(parts) == 2 {
-						resp, err = indexer.IndexPattern(r.Context(), parts[1], pattern)
-					}
-				}
-			} else {
-				resp, err = indexer.IndexSharedPattern(r.Context(), pattern)
-			}
-			if err != nil {
-				s.logger.Error("index pattern in supermemory", "error", err)
-			} else if resp != nil {
-				smID = &resp.ID
-			}
+	var repoName string
+	if body.RepoID != nil {
+		dbRepo, repoErr := s.store.GetRepoScoped(r.Context(), *body.RepoID, []int64{body.InstallationID})
+		if repoErr != nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "repo not found"})
+			return
 		}
+		parts := strings.SplitN(dbRepo.FullName, "/", 2)
+		if len(parts) != 2 || parts[1] == "" {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+			return
+		}
+		repoName = parts[1]
+	}
+	source := "manual"
+	customID := memory.SharedPatternCustomID(source, body.Content)
+	if body.RepoID != nil {
+		customID = memory.PatternCustomID("", repoName, source, body.Content)
 	}
 
 	createdBy := getUserID(r.Context())
-	// supermemory_custom_id is nil here: dashboard-created patterns rely on the
-	// supermemory_id match at read time. The per-finding enrich customId path is
-	// populated by the pipeline write paths (confirmed/auto_learn/convention).
-	pattern, err := s.store.CreatePattern(r.Context(), body.InstallationID, body.RepoID, body.Content, smID, &createdBy, nil, nil, nil, nil)
+	pattern, err := s.store.CreatePattern(r.Context(), body.InstallationID, body.RepoID, body.Content, nil, &createdBy, &source, nil, nil, &customID, nil)
 	if err != nil {
-		s.logger.Error("create pattern", "error", err)
+		s.logger.ErrorContext(r.Context(), "create pattern", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create pattern"})
 		return
 	}
@@ -140,29 +138,18 @@ func (s *Server) createPattern(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deletePattern(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.deletePattern")
+	defer op.Finish(w)
 	id, err := strconv.ParseInt(chi.URLParam(r, "patternID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid pattern id"})
 		return
 	}
 
-	// Fetch pattern for Supermemory cleanup (scoped to user's installations)
-	pattern, getErr := s.store.GetPattern(r.Context(), id)
-
-	// Delete from DB first (scoped auth check)
 	if err := s.store.DeletePattern(r.Context(), id, getInstallationIDs(r.Context())); err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "pattern not found"})
 		return
 	}
 
-	// Only delete from Supermemory after DB deletion succeeds (confirms authorization)
-	if getErr == nil && pattern.SupermemoryID != nil && s.memRegistry != nil {
-		indexer := s.memRegistry.GetIndexer(r.Context(), pattern.InstallationID)
-		if indexer != nil {
-			if err := indexer.DeleteDocument(r.Context(), *pattern.SupermemoryID); err != nil {
-				s.logger.Error("delete pattern from supermemory", "error", err)
-			}
-		}
-	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }

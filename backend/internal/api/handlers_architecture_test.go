@@ -3,6 +3,8 @@ package api
 import (
 	"math"
 	"testing"
+
+	"github.com/BeLazy167/argus/backend/internal/store/db"
 )
 
 func floatEq(a, b, tol float64) bool {
@@ -209,4 +211,48 @@ func TestAdaptiveWeights(t *testing.T) {
 			t.Fatalf("sum of weights = %v, want 1.0", sum)
 		}
 	})
+}
+
+func TestAdaptiveWeightsNormalizeMetricScales(t *testing.T) {
+	fanIn := []float64{0, 1}
+	bugDensity := []float64{0, 1000}
+	zeros := []float64{0, 0}
+
+	wFanIn, wBug, wChange, wCoupling := adaptiveWeights(fanIn, bugDensity, zeros, zeros)
+	if !floatEq(wFanIn, 0.5, 1e-9) || !floatEq(wBug, 0.5, 1e-9) || wChange != 0 || wCoupling != 0 {
+		t.Fatalf("scale-biased weights = %v %v %v %v, want 0.5 0.5 0 0", wFanIn, wBug, wChange, wCoupling)
+	}
+}
+
+func TestArchitectureInsightRequiresObservedSignal(t *testing.T) {
+	if got := architectureInsight(archFile{}, 0, 0, 0, 0); got != "" {
+		t.Fatalf("zero-data file received insight %q", got)
+	}
+}
+
+func TestAggregateArchEdgesCountsDistinctFilePairs(t *testing.T) {
+	rows := []db.ListArchFileEdgesRow{
+		{SourcePath: "a.go", TargetPath: "b.go", Kind: "calls"},
+		{SourcePath: "a.go", TargetPath: "b.go", Kind: "uses_type"},
+		{SourcePath: "c.go", TargetPath: "b.go", Kind: "calls"},
+	}
+	fanIn := map[string]int{}
+	fanOut := map[string]int{}
+	edges := map[string]*archEdgeAgg{}
+	aggregateArchEdges(rows, fanIn, fanOut, edges, func(a, b string) string { return a + "\x00" + b })
+	if fanIn["b.go"] != 2 || fanOut["a.go"] != 1 || fanOut["c.go"] != 1 {
+		t.Fatalf("fan metrics count symbol/kind rows instead of distinct file pairs: in=%v out=%v", fanIn, fanOut)
+	}
+	if edges["a.go\x00b.go"].count != 2 {
+		t.Fatalf("edge evidence weight = %d, want both observed kinds", edges["a.go\x00b.go"].count)
+	}
+}
+
+func TestBugDensityUsesPhysicalLOCWithoutSyntheticFloor(t *testing.T) {
+	if got := bugDensityPerHundredLines(1, 4); got != 25 {
+		t.Fatalf("one bug in four-line file = %v, want 25 per 100 LOC", got)
+	}
+	if got := bugDensityPerHundredLines(3, 0); got != 0 {
+		t.Fatalf("unknown LOC density = %v, want zero rather than fabricated denominator", got)
+	}
 }

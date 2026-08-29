@@ -18,7 +18,7 @@ func TestPipelineHasNoDirectMemoryClient(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read package dir: %v", err)
 	}
-	// Substrings that only appear when a raw Supermemory client leaks in.
+	// Substrings that only appear when a raw client escape hatch leaks in.
 	banned := []string{"memory.Client", ".Client()"}
 	for _, e := range entries {
 		name := e.Name()

@@ -12,8 +12,8 @@ func TestIsArgusThread(t *testing.T) {
 		login string
 		want  bool
 	}{
-		{"exact argus-eye login", "argus-eye", true},                  // GraphQL
-		{"argus-eye bot suffix", "argus-eye[bot]", true},              // REST
+		{"exact argus-eye login", "argus-eye", true},     // GraphQL
+		{"argus-eye bot suffix", "argus-eye[bot]", true}, // REST
 		{"dependabot is not argus", "dependabot[bot]", false},
 		{"codecov is not argus", "codecov[bot]", false},
 		{"renovate is not argus", "renovate[bot]", false},
@@ -41,10 +41,10 @@ func TestIsArgusThread(t *testing.T) {
 	}
 }
 
-// TestIsPrivilegedAssociation is the canonical truth-table for the
-// maintainer-trust gate used by `@argus resolve` and the reply-path shortcut:
-// only owner/member/collaborator; everyone else (and unknown/empty) is denied
-// fail-closed. Case-insensitive + whitespace-trimmed.
+// TestIsPrivilegedAssociation is the canonical truth-table for coarse
+// association policies such as `@argus resolve`: only owner/member/collaborator;
+// everyone else (and unknown/empty) is denied fail-closed. Reply-derived writes
+// use the effective repository-permission check instead.
 func TestIsPrivilegedAssociation(t *testing.T) {
 	tests := []struct {
 		assoc string

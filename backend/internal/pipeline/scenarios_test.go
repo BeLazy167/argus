@@ -46,8 +46,8 @@ func TestIsDuplicateScenario(t *testing.T) {
 	}{
 		{"no existing never dup", nil, 0.85, false},
 		{"zero threshold, low sim NOT dup (regression)", hit(0.50), 0, false},
-		{"zero threshold, high sim dup via default", hit(0.90), 0, true},
-		{"zero threshold, just below default not dup", hit(0.84), 0, false},
+		{"zero threshold, high sim dup via default", hit(memory.DefaultThresholdScenarioDedupe + 0.01), 0, true},
+		{"zero threshold, just below default not dup", hit(memory.DefaultThresholdScenarioDedupe - 0.01), 0, false},
 		{"explicit threshold met", hit(0.86), 0.85, true},
 		{"explicit threshold missed", hit(0.84), 0.85, false},
 		{"exact boundary is dup", hit(0.85), 0.85, true},
@@ -83,7 +83,7 @@ func (f *fakeScenarioStore) CreatePendingScenario(_ context.Context, _ int64, _ 
 	return int64(len(f.pending)), nil
 }
 
-func (f *fakeScenarioStore) SetScenarioSupermemoryID(_ context.Context, _ int64, _ string) error {
+func (f *fakeScenarioStore) SetScenarioMemoryDocID(_ context.Context, _ int64, _ string) error {
 	return nil
 }
 

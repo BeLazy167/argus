@@ -121,6 +121,14 @@ func (c *ReviewContract) HasSecurityFloor() bool {
 // tags "llm:default-production".
 const ContractSignalIntentUnresolved = "intent:unresolved"
 
+// ContractSignalResumeRebuild marks a contract the resume ingress recomputed
+// from the persisted PR event + diff because the original never survived
+// persistence (Contract is json:"-"). Such a contract carries the
+// DETERMINISTIC classification only — any intent-LLM refinement the first
+// attempt applied is gone — and prod diagnosis must be able to tell that apart
+// from a first-pass contract.
+const ContractSignalResumeRebuild = "contract:resume-rebuild"
+
 // ResolveFromLLM fills ChangeClass on an llm-pending contract from the intent
 // extraction output. Unknown classes or confidence below the floor default to
 // production. No-op unless Source == "llm-pending".

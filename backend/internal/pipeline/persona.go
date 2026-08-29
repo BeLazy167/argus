@@ -1,10 +1,15 @@
 package pipeline
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
+	"reflect"
+	"strings"
 
+	"github.com/BeLazy167/argus/backend/internal/admission"
 	"github.com/BeLazy167/argus/backend/internal/memory"
+	"github.com/BeLazy167/argus/backend/internal/store"
 )
 
 // Persona identifies a review style.
@@ -185,11 +190,19 @@ type repoSettings struct {
 	// retirement job (Bundle 5). Nil or false means decay is on.
 	DisableSharedDecay *bool `json:"disable_shared_decay,omitempty"`
 
-	// supermemory_qps / supermemory_burst intentionally omitted. Earlier
-	// iterations added these fields but the Registry.GetClient path never
-	// read them, making them dead code that misled operators. Tracked as
-	// follow-up: plumb per-installation QPS through GetClient then re-add
-	// here.
+	// Review budget limits. A soft limit reduces the review; a hard limit
+	// refuses it. Nil inherits admission.DefaultLimits; an explicit 0 turns
+	// that one measure off without touching the others.
+	BudgetSoftFiles  *int   `json:"budget_soft_files,omitempty"`
+	BudgetHardFiles  *int   `json:"budget_hard_files,omitempty"`
+	BudgetSoftLines  *int   `json:"budget_soft_lines,omitempty"`
+	BudgetHardLines  *int   `json:"budget_hard_lines,omitempty"`
+	BudgetSoftTokens *int64 `json:"budget_soft_tokens,omitempty"`
+	BudgetHardTokens *int64 `json:"budget_hard_tokens,omitempty"`
+	// BudgetReducedMaxFiles is the file cap a reduced review runs under. An
+	// operator who raises the soft limit needs this too, or the cap that fires
+	// when it trips stays where it was.
+	BudgetReducedMaxFiles *int `json:"budget_reduced_max_files,omitempty"`
 }
 
 func parseRepoSettings(settingsJSON json.RawMessage) (repoSettings, bool) {
@@ -302,22 +315,46 @@ func parseThresholds(settingsJSON json.RawMessage) memory.Thresholds {
 // on-by-default, mirroring the adjacent auto-resolve gate. When both levels are
 // genuinely unset and the loads succeeded, the default is ON (#161).
 func autoRunEnabled(repoSettingsJSON, orgDefaultsJSON json.RawMessage, orgLoadFailed bool) bool {
+	v, _ := autoRunSetting(repoSettingsJSON, orgDefaultsJSON, orgLoadFailed)
+	return v
+}
+
+// autoRunSetting resolves the stored flag and reports whether anything was
+// actually stored.
+//
+// The second return is what lets self-hosted be a DEFAULT rather than an
+// override. Collapsing "stored false" and "unset" into one bool is what made
+// SELF_HOSTED able to ignore an explicit auto_run=false — harmless while the
+// default was on, and a trap once it became off, because a self-hoster could
+// then never turn reviews off at all.
+//
+// Precedence: repo overrides org. A failed org-defaults load resolves to OFF
+// and counts as explicit, so a database problem cannot be read as "unset" and
+// quietly re-enable reviews.
+func autoRunSetting(repoSettingsJSON, orgDefaultsJSON json.RawMessage, orgLoadFailed bool) (value, explicit bool) {
 	if rs, ok := parseRepoSettings(repoSettingsJSON); ok && rs.AutoRun != nil {
-		return *rs.AutoRun
+		return *rs.AutoRun, true
 	}
 	if orgLoadFailed {
-		return false
+		return false, true
 	}
 	if os, ok := parseRepoSettings(orgDefaultsJSON); ok && os.AutoRun != nil {
-		return *os.AutoRun
+		return *os.AutoRun, true
 	}
-	return true
+	// Nothing stored. A review costs real money and, on a public repo, is
+	// triggerable by people the maintainers have not vetted — so the safe
+	// answer is to offer the trigger checkbox and let a maintainer decide.
+	return false, false
 }
 
 // IsAutoRunEnabled resolves the stored auto_run flag assuming both settings
 // blobs loaded cleanly. Deployment policy (self-hosted runs unconditionally)
 // and load-failure handling are layered on top in decideAutoRun.
 func IsAutoRunEnabled(repoSettingsJSON, orgDefaultsJSON json.RawMessage) bool {
+	// Delegates to the same rule decideAutoRun uses, minus self-hosted, which
+	// this caller (the incremental-plan decision) genuinely does not care
+	// about. It used to re-implement the check and could disagree with the gate
+	// that actually runs.
 	return autoRunEnabled(repoSettingsJSON, orgDefaultsJSON, false)
 }
 
@@ -346,7 +383,16 @@ const (
 //   - otherwise the stored flag decides (default ON; fail CLOSED when the org
 //     load errored). When off, emit the trigger affordance.
 func decideAutoRun(selfHosted bool, repoSettingsJSON, orgDefaultsJSON json.RawMessage, orgLoadFailed bool, action string) autoRunAction {
-	if action == "manual" || selfHosted || autoRunEnabled(repoSettingsJSON, orgDefaultsJSON, orgLoadFailed) {
+	// A manual action is a person asking, which Admission authorizes at the
+	// launch site — the repo's auto-run policy does not apply to it.
+	if action == "manual" {
+		return autoRunReview
+	}
+	// The rule itself lives in internal/admission, the one place that decides
+	// whether a review may run. This function is the adapter that resolves the
+	// stored settings into the two booleans the rule takes.
+	enabled, explicit := autoRunSetting(repoSettingsJSON, orgDefaultsJSON, orgLoadFailed)
+	if admission.AutoRun(selfHosted, enabled, explicit).Allowed() {
 		return autoRunReview
 	}
 	return autoRunSignal
@@ -413,4 +459,109 @@ func loadCustomPersonaPrompt(settingsJSON json.RawMessage) string {
 		return ""
 	}
 	return s.CustomPersonaPrompt
+}
+
+// SettingKeys returns every JSON key repoSettings defines.
+//
+// It is derived by reflection rather than written out, because this list used
+// to exist in three places — repoSettings itself, the org-defaults write
+// whitelist, and the repo-setting delete handler — and they drifted. A key
+// missing from the write whitelist is silently dropped on save, which is how
+// auto_run and the memory thresholds shipped as no-ops. One list cannot drift
+// from itself.
+func SettingKeys() map[string]bool {
+	keys := make(map[string]bool)
+	t := reflect.TypeOf(repoSettings{})
+	for i := range t.NumField() {
+		tag := t.Field(i).Tag.Get("json")
+		if tag == "" || tag == "-" {
+			continue
+		}
+		if comma := strings.Index(tag, ","); comma >= 0 {
+			tag = tag[:comma]
+		}
+		if tag != "" {
+			keys[tag] = true
+		}
+	}
+	return keys
+}
+
+// BudgetLimits resolves the review budget from merged settings, falling back to
+// the defaults for anything unset. An explicit 0 survives: it disables that one
+// measure, which is different from leaving it unset.
+func BudgetLimits(settingsJSON json.RawMessage) admission.Limits {
+	lim := admission.DefaultLimits
+	rs, ok := parseRepoSettings(settingsJSON)
+	if !ok {
+		return lim
+	}
+	if rs.BudgetSoftFiles != nil {
+		lim.SoftFiles = *rs.BudgetSoftFiles
+	}
+	if rs.BudgetHardFiles != nil {
+		lim.HardFiles = *rs.BudgetHardFiles
+	}
+	if rs.BudgetSoftLines != nil {
+		lim.SoftLines = *rs.BudgetSoftLines
+	}
+	if rs.BudgetHardLines != nil {
+		lim.HardLines = *rs.BudgetHardLines
+	}
+	if rs.BudgetSoftTokens != nil {
+		lim.SoftTokens = *rs.BudgetSoftTokens
+	}
+	if rs.BudgetHardTokens != nil {
+		lim.HardTokens = *rs.BudgetHardTokens
+	}
+	if rs.BudgetReducedMaxFiles != nil {
+		lim.ReducedMaxFiles = *rs.BudgetReducedMaxFiles
+	}
+	return lim
+}
+
+// ResolvedPersona is the overlay pair a run actually uses.
+//
+// Populated once per run from the personas table, falling back to the
+// compiled-in overlays. The fallback is what makes this behaviour-preserving:
+// before any row exists, and for any installation that never defines one, the
+// review reads exactly the text it read when these lived in a switch.
+type ResolvedPersona struct {
+	Overlay        string
+	SpecialistHint string
+}
+
+// personaReader is the narrow store surface persona resolution needs.
+type personaReader interface {
+	GetPersona(ctx context.Context, installationID int64, slug string) (*store.Persona, error)
+}
+
+// resolvePersona loads the overlay pair for a run.
+//
+// A stored persona wins over the compiled-in one of the same slug, which is how
+// an installation retunes a built-in without losing its name. A miss or a read
+// error falls back rather than failing: a review must not stop because somebody
+// renamed a persona, and the compiled-in text is always a valid answer.
+//
+// PersonaCustom keeps its own path — its text lives in settings, not in a row —
+// until the single custom slot is migrated into a named row of its own.
+func resolvePersona(ctx context.Context, r personaReader, installationID int64, p Persona, customPrompt string) ResolvedPersona {
+	fallback := ResolvedPersona{
+		Overlay:        PersonaPromptOverlay(p),
+		SpecialistHint: PersonaSpecialistHint(p),
+	}
+	if p == PersonaCustom {
+		return ResolvedPersona{
+			Overlay:        PersonaPromptOverlayCustom(customPrompt),
+			SpecialistHint: PersonaSpecialistHintCustom(customPrompt),
+		}
+	}
+	if r == nil || installationID == 0 {
+		return fallback
+	}
+	row, err := r.GetPersona(ctx, installationID, string(p))
+	if err != nil || row == nil {
+		return fallback
+	}
+	return ResolvedPersona{Overlay: row.PromptOverlay, SpecialistHint: row.SpecialistHint}
 }

@@ -15,32 +15,32 @@ import (
 
 const createTrace = `-- name: CreateTrace :exec
 INSERT INTO decision_traces (repo_id, file_path, symbol_name, trace_type, content, severity, review_id, pr_number, metadata)
-VALUES ($1, $2, NULLIF($3, ''), $4, $5, NULLIF($6, ''), $7, $8, $9)
+VALUES ($1, $2, NULLIF($8::text, ''), $3, $4, NULLIF($9::text, ''), $5, $6, $7)
 `
 
 type CreateTraceParams struct {
-	RepoID    int64       `json:"repo_id"`
-	FilePath  string      `json:"file_path"`
-	Column3   interface{} `json:"column_3"`
-	TraceType string      `json:"trace_type"`
-	Content   string      `json:"content"`
-	Column6   interface{} `json:"column_6"`
-	ReviewID  *uuid.UUID  `json:"review_id"`
-	PRNumber  *int        `json:"pr_number"`
-	Metadata  []byte      `json:"metadata"`
+	RepoID     int64      `json:"repo_id"`
+	FilePath   string     `json:"file_path"`
+	TraceType  string     `json:"trace_type"`
+	Content    string     `json:"content"`
+	ReviewID   *uuid.UUID `json:"review_id"`
+	PRNumber   *int       `json:"pr_number"`
+	Metadata   []byte     `json:"metadata"`
+	SymbolName string     `json:"symbol_name"`
+	Severity   string     `json:"severity"`
 }
 
 func (q *Queries) CreateTrace(ctx context.Context, arg CreateTraceParams) error {
 	_, err := q.db.Exec(ctx, createTrace,
 		arg.RepoID,
 		arg.FilePath,
-		arg.Column3,
 		arg.TraceType,
 		arg.Content,
-		arg.Column6,
 		arg.ReviewID,
 		arg.PRNumber,
 		arg.Metadata,
+		arg.SymbolName,
+		arg.Severity,
 	)
 	return err
 }
@@ -71,27 +71,27 @@ func (q *Queries) GetFileRiskScore(ctx context.Context, arg GetFileRiskScorePara
 }
 
 const getHotFiles = `-- name: GetHotFiles :many
-SELECT file_path, COUNT(*)::int AS trace_count, MAX(created_at) AS last_trace
+SELECT file_path, COUNT(*)::int AS trace_count, MAX(created_at)::timestamptz AS last_trace
 FROM decision_traces
 WHERE repo_id = $1 AND created_at > NOW() - INTERVAL '90 days'
 GROUP BY file_path
 ORDER BY trace_count DESC
-LIMIT $2
+LIMIT $2::bigint
 `
 
 type GetHotFilesParams struct {
-	RepoID int64 `json:"repo_id"`
-	Limit  int32 `json:"limit"`
+	RepoID   int64 `json:"repo_id"`
+	RowLimit int64 `json:"row_limit"`
 }
 
 type GetHotFilesRow struct {
-	FilePath   string      `json:"file_path"`
-	TraceCount int         `json:"trace_count"`
-	LastTrace  interface{} `json:"last_trace"`
+	FilePath   string    `json:"file_path"`
+	TraceCount int       `json:"trace_count"`
+	LastTrace  time.Time `json:"last_trace"`
 }
 
 func (q *Queries) GetHotFiles(ctx context.Context, arg GetHotFilesParams) ([]GetHotFilesRow, error) {
-	rows, err := q.db.Query(ctx, getHotFiles, arg.RepoID, arg.Limit)
+	rows, err := q.db.Query(ctx, getHotFiles, arg.RepoID, arg.RowLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -115,13 +115,13 @@ SELECT id, repo_id, file_path, COALESCE(symbol_name, '') as symbol_name, trace_t
 FROM decision_traces
 WHERE repo_id = $1 AND file_path = ANY($2::text[])
 ORDER BY created_at DESC
-LIMIT $3
+LIMIT $3::bigint
 `
 
 type ListTracesForFilesParams struct {
-	RepoID  int64    `json:"repo_id"`
-	Column2 []string `json:"column_2"`
-	Limit   int32    `json:"limit"`
+	RepoID   int64    `json:"repo_id"`
+	Column2  []string `json:"column_2"`
+	RowLimit int64    `json:"row_limit"`
 }
 
 type ListTracesForFilesRow struct {
@@ -139,7 +139,7 @@ type ListTracesForFilesRow struct {
 }
 
 func (q *Queries) ListTracesForFiles(ctx context.Context, arg ListTracesForFilesParams) ([]ListTracesForFilesRow, error) {
-	rows, err := q.db.Query(ctx, listTracesForFiles, arg.RepoID, arg.Column2, arg.Limit)
+	rows, err := q.db.Query(ctx, listTracesForFiles, arg.RepoID, arg.Column2, arg.RowLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -175,12 +175,12 @@ SELECT id, repo_id, file_path, COALESCE(symbol_name, '') as symbol_name, trace_t
 FROM decision_traces
 WHERE repo_id = $1
 ORDER BY created_at DESC
-LIMIT $2
+LIMIT $2::bigint
 `
 
 type ListTracesForRepoParams struct {
-	RepoID int64 `json:"repo_id"`
-	Limit  int32 `json:"limit"`
+	RepoID   int64 `json:"repo_id"`
+	RowLimit int64 `json:"row_limit"`
 }
 
 type ListTracesForRepoRow struct {
@@ -198,7 +198,7 @@ type ListTracesForRepoRow struct {
 }
 
 func (q *Queries) ListTracesForRepo(ctx context.Context, arg ListTracesForRepoParams) ([]ListTracesForRepoRow, error) {
-	rows, err := q.db.Query(ctx, listTracesForRepo, arg.RepoID, arg.Limit)
+	rows, err := q.db.Query(ctx, listTracesForRepo, arg.RepoID, arg.RowLimit)
 	if err != nil {
 		return nil, err
 	}

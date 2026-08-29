@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/BeLazy167/argus/backend/internal/admission"
 	"log/slog"
 	"math"
 	"net/http"
@@ -21,7 +22,6 @@ import (
 
 	"github.com/BeLazy167/argus/backend/internal/config"
 	ghpkg "github.com/BeLazy167/argus/backend/internal/github"
-	"github.com/BeLazy167/argus/backend/internal/graph"
 	"github.com/BeLazy167/argus/backend/internal/llm"
 	"github.com/BeLazy167/argus/backend/internal/memory"
 	"github.com/BeLazy167/argus/backend/internal/obs"
@@ -190,38 +190,39 @@ func (o *Orchestrator) buildRun(ctx context.Context, in buildRunInput) *Pipeline
 	}
 
 	run := &PipelineRun{
-		ID:                  uuid.New(),
-		ReviewID:            in.reviewID,
-		State:               StatePending,
-		PREvent:             in.event,
-		DBInstallationID:    in.dbInstallationID,
-		DBRepoID:            in.dbRepoID,
-		TraceID:             in.traceID,
-		Diff:                in.patchSet,
-		RawDiff:             in.rawDiff,
+		ID:                uuid.New(),
+		ReviewID:          in.reviewID,
+		AttemptGeneration: 1,
+		State:             StatePending,
+		PREvent:           in.event,
+		DBInstallationID:  in.dbInstallationID,
+		DBRepoID:          in.dbRepoID,
+		TraceID:           in.traceID,
+		Diff:              in.patchSet,
+		RawDiff:           in.rawDiff,
+		BudgetLimits:      BudgetLimits(mergedSettings),
+		ResolvedPersona: resolvePersona(ctx, o.st, in.dbInstallationID,
+			loadPersona(mergedSettings), loadCustomPersonaPrompt(mergedSettings)),
 		Persona:             loadPersona(mergedSettings),
 		CustomPersonaPrompt: loadCustomPersonaPrompt(mergedSettings),
-		DeepReview: isDeepReviewEnabled(mergedSettings) && func() bool {
-			tier, _ := o.st.GetPlanTier(ctx, in.dbInstallationID)
-			return o.cfg.IsPro(tier)
-		}(),
-		CrossFileContext:  isCrossFileContextEnabled(mergedSettings),
-		BlastRadius:       isBlastRadiusEnabled(mergedSettings),
-		ScenarioMemory:    isScenarioMemoryEnabled(mergedSettings),
-		CodeSimulation:    isCodeSimulationEnabled(mergedSettings),
-		PREnrichment:      isPREnrichmentEnabled(mergedSettings),
-		LearnPatterns:     isLearnPatternsEnabled(mergedSettings),
-		LearnConventions:  isLearnConventionsEnabled(mergedSettings),
-		FileSynthesis:     isFileSynthesisEnabled(mergedSettings),
-		ArchitectureGraph: isArchitectureGraphEnabled(mergedSettings),
-		Prompts:           o.loadPrompts(ctx, in.dbRepoID),
-		IsIncremental:     in.isIncremental,
-		PreviousReviewID:  in.previousReviewID,
-		Indexer:           in.indexer,
-		Thresholds:        parseThresholds(mergedSettings),
-		EventBus:          o.eventBus,
-		CreatedAt:         time.Now(),
-		UpdatedAt:         time.Now(),
+		DeepReview:          isDeepReviewEnabled(mergedSettings),
+		CrossFileContext:    isCrossFileContextEnabled(mergedSettings),
+		BlastRadius:         isBlastRadiusEnabled(mergedSettings),
+		ScenarioMemory:      isScenarioMemoryEnabled(mergedSettings),
+		CodeSimulation:      isCodeSimulationEnabled(mergedSettings),
+		PREnrichment:        isPREnrichmentEnabled(mergedSettings),
+		LearnPatterns:       isLearnPatternsEnabled(mergedSettings),
+		LearnConventions:    isLearnConventionsEnabled(mergedSettings),
+		FileSynthesis:       isFileSynthesisEnabled(mergedSettings),
+		ArchitectureGraph:   isArchitectureGraphEnabled(mergedSettings),
+		Prompts:             o.loadPrompts(ctx, in.dbRepoID),
+		IsIncremental:       in.isIncremental,
+		PreviousReviewID:    in.previousReviewID,
+		Indexer:             indexerForReview(in.indexer, in.reviewID),
+		Thresholds:          parseThresholds(mergedSettings),
+		EventBus:            o.eventBus,
+		CreatedAt:           time.Now(),
+		UpdatedAt:           time.Now(),
 	}
 	run.Contract = ComputeContract(&run.PREvent, in.patchSet.Files)
 	return run
@@ -234,6 +235,20 @@ func (o *Orchestrator) resolveIndexer(ctx context.Context, dbInstallationID int6
 		return nil
 	}
 	return o.memRegistry.GetIndexer(ctx, dbInstallationID)
+}
+
+// indexerForReview attributes a run's memory writes to its review, tolerating
+// the nil indexer that means "memory is unconfigured for this org".
+//
+// Every path that puts an Indexer on a PipelineRun must go through this — the
+// fresh run (buildRun), the terminal-run retry, and resume hydration. A path
+// that skips it writes memories that no review claims, and the review page for
+// that run reports "nothing learned" while the rows sit in the table.
+func indexerForReview(idx memory.Indexer, reviewID uuid.UUID) memory.Indexer {
+	if idx == nil {
+		return nil
+	}
+	return idx.ForReview(reviewID)
 }
 
 // buildPriorComments maps persisted review comments into the per-file
@@ -323,6 +338,17 @@ type Orchestrator struct {
 	// o.st. Tests assign an in-memory fake to exercise the DB-less enrich path
 	// (see enrich_deps.go and enrich_read_test.go).
 	enrichStoreOverride PatternLinker
+	// mermaidValidator is the backend persistence gate. Production calls the
+	// long-lived web service running the deployed Mermaid package; tests inject
+	// a fake. A nil or unavailable validator rejects every diagram.
+	mermaidValidator MermaidValidator
+	// sinkAuthority serializes detached memory mutations with attempt-generation
+	// advancement. Production uses st; tests can inject a deterministic fake.
+	sinkAuthority memorySinkAuthority
+	// reviewBindingClient is the narrow GitHub seam for binding a delivered
+	// review's REST comments to GraphQL threads. Production falls back to
+	// ghClient; recovery tests inject a deterministic implementation.
+	reviewBindingClient postedReviewBindingClient
 }
 
 // LLMRegistry is the subset of llm.Registry used by Orchestrator.
@@ -332,23 +358,33 @@ type LLMRegistry interface {
 
 func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, reviewStage *ReviewStage, triageStage *TriageStage, intentStage *IntentExtractionStage, scoringStage *ScoringStage, memRegistry *memory.Registry, registry LLMRegistry, eventBus *EventBus, logger *slog.Logger, cfg *config.Config) *Orchestrator {
 	sm := NewStateMachine(db, st, logger)
+	// Wired after construction because the callback closes over the
+	// orchestrator, which is not built yet at this point.
 	sm.eventBus = eventBus
 
 	o := &Orchestrator{
-		db:           db,
-		st:           st,
-		ghClient:     ghClient,
-		sm:           sm,
-		reviewStage:  reviewStage,
-		triageStage:  triageStage,
-		intentStage:  intentStage,
-		scoringStage: scoringStage,
-		memRegistry:  memRegistry,
-		registry:     registry,
-		eventBus:     eventBus,
-		logger:       logger,
-		cfg:          cfg,
+		db:               db,
+		st:               st,
+		ghClient:         ghClient,
+		sm:               sm,
+		reviewStage:      reviewStage,
+		triageStage:      triageStage,
+		intentStage:      intentStage,
+		scoringStage:     scoringStage,
+		memRegistry:      memRegistry,
+		registry:         registry,
+		eventBus:         eventBus,
+		logger:           logger,
+		cfg:              cfg,
+		mermaidValidator: NewHTTPMermaidValidator(cfg.MermaidValidatorBaseURL, cfg.MermaidValidatorSecret, nil),
+		sinkAuthority:    st,
 	}
+	sm.onTerminal = o.FinalizeStartedComment
+	// Same reason as onTerminal: the hook closes over the orchestrator (store +
+	// memory registry), so it can only be attached after construction. Without
+	// it every resumed and crash-recovered run continues with zero-valued
+	// feature flags, similarity thresholds and no indexer.
+	sm.hydrate = o.hydrateResumedRun
 	o.lifecycle = NewReviewLifecycle(db, st, sm, eventBus, logger)
 	o.incremental = NewIncrementalResolver(st, ghClient, logger)
 	o.findingLifecycle = NewFindingLifecycle(st, ghClient, logger)
@@ -430,6 +466,8 @@ func NewOrchestrator(db *pgxpool.Pool, st *store.Store, ghClient *ghpkg.Client, 
 
 // HandlePREvent processes a pull request webhook event.
 func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) error {
+	handleStartedAt := time.Now()
+	o.logger.InfoContext(ctx, "pull request pipeline trigger received", "event", "pipeline.review.triggered", "repo", event.RepoFullName, "pr_number", event.PRNumber, "action", event.Action, "installation_id", event.InstallationID)
 	// Only review on opened, synchronize, reopened, manual
 	switch event.Action {
 	case "opened", "synchronize", "reopened", "manual":
@@ -437,7 +475,7 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 	case "closed":
 		return o.handlePRClosed(ctx, event)
 	default:
-		o.logger.Info("ignoring PR action", "action", event.Action)
+		o.logger.InfoContext(ctx, "ignoring PR action", "event", "pipeline.review.trigger_skipped", "action", event.Action, "repo", event.RepoFullName, "pr_number", event.PRNumber, "reason", "unsupported_action")
 		return nil
 	}
 
@@ -631,8 +669,10 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', 'webhook', 0, $9)
 	`, reviewID, dbRepo.ID, event.PRNumber, event.PRTitle, event.PRAuthor, event.HeadSHA, event.BaseSHA, event.HeadRef, strPtrOrNil(traceID))
 	if err != nil {
+		o.logger.ErrorContext(ctx, "review record creation failed", "event", "pipeline.review.record_failed", "review_id", reviewID, "repo", event.RepoFullName, "pr_number", event.PRNumber, "error", err)
 		return fmt.Errorf("creating review record: %w", err)
 	}
+	o.logger.InfoContext(ctx, "review record created", "event", "pipeline.review.record_created", "review_id", reviewID, "repo_id", dbRepo.ID, "repo", event.RepoFullName, "pr_number", event.PRNumber, "status", "pending")
 
 	// Resolve per-org memory indexer
 	indexer := o.resolveIndexer(ctx, inst.ID)
@@ -653,6 +693,21 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		previousReviewID: previousReviewID,
 		indexer:          indexer,
 	})
+
+	// Budget. The review row exists, so a refusal is recorded, shows in the
+	// dashboard, and can be retried — and the diff is fetched, so the size is
+	// exact rather than a guess from the webhook payload.
+	//
+	// Applied here rather than at the launch sites because this is the first
+	// point where what the review will actually cost is known. Rate limits count
+	// launches, not spend: one launch is one token whether the pull request
+	// touches three files or three thousand.
+	if v := o.checkBudget(ctx, run, dbRepo); !v.Allowed() {
+		o.refuseForBudget(ctx, run, event, v)
+		return nil
+	} else if v.Outcome == admission.OutcomeReduce {
+		o.applyReduce(ctx, run, v)
+	}
 
 	// Contract was computed inside buildRun from deterministic metadata (draft
 	// flag, labels, branch prefix, changed paths, title, size). When metadata is
@@ -695,27 +750,6 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		}
 	}
 
-	// Incremental graph indexing for changed files (non-blocking, 10s timeout)
-	graphCtx, graphCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-	go func() {
-		defer graphCancel()
-		defer func() {
-			if r := recover(); r != nil {
-				o.logger.Error("[graph] incremental index panic", "recover", r, "pr", event.PRNumber)
-				emitPipelinePanicEvent(graphCtx, o.logger, "graph_incremental_index", r, obs.TraceID(graphCtx))
-			}
-		}()
-		changedFiles := diffFilePaths(patchSet)
-		if len(changedFiles) == 0 {
-			return
-		}
-		if err := graph.IndexFiles(graphCtx, o.st, o.ghClient, event.InstallationID, owner, repo, event.HeadSHA, dbRepo.ID, changedFiles); err != nil {
-			o.logger.Warn("[graph] incremental index failed", "error", err, "pr", event.PRNumber)
-		} else {
-			o.logger.Info("[graph] incremental index done", "files", len(changedFiles), "pr", event.PRNumber)
-		}
-	}()
-
 	// Pre-review context enrichers: SAST hints, architecture context, linked
 	// issues/PRs + feature flags, and author intent. Each is best-effort and
 	// writes onto run (see prereview.go). This is the SAME sequence the
@@ -732,15 +766,11 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		"incremental", isIncremental,
 	)
 
-	// Post "review started" comment to GitHub
-	var reviewModel string
-	for _, c := range dbConfigs {
-		if c.Stage == string(llm.StageReview) {
-			reviewModel = c.Provider + " / " + c.Model
-			break
-		}
-	}
-	o.postStartedComment(ctx, event, run, reviewModel)
+	// Post "review started" comment to GitHub. Every configured stage is listed,
+	// not just review: the pipeline bills triage, scoring and synthesis to
+	// their own models, and showing one name invited the reading that a single
+	// model did all the work — and that its price was the whole price.
+	o.postStartedComment(ctx, event, run, formatStageModels(dbConfigs))
 
 	trigger := deriveTrigger(event.Action, isIncremental)
 	o.logger.InfoContext(ctx, "review started",
@@ -752,6 +782,7 @@ func (o *Orchestrator) HandlePREvent(ctx context.Context, event ghpkg.PREvent) e
 		slog.Bool("deep_review", run.DeepReview),
 		slog.String("trigger", trigger),
 		slog.String("trace_id", run.TraceID),
+		slog.Int64("trigger_to_start_ms", time.Since(handleStartedAt).Milliseconds()),
 	)
 
 	startTime := time.Now()
@@ -848,40 +879,28 @@ func (o *Orchestrator) postTriggerComment(ctx context.Context, event ghpkg.PREve
 	return nil
 }
 
-// autoRunDisabledMarker is the reviews.error code recorded once per PR the
-// first time the trigger affordance is posted for an auto-run-disabled repo.
-// It is the dedup key (mirroring the no_api_key onboarding marker) that keeps
-// later events from re-posting the trigger comment. Marker rows are excluded
-// from dashboard list/stats reads — see isMarkerReview in the store.
-const autoRunDisabledMarker = "auto_run_disabled"
+// autoRunDisabledSignal is a CTA delivery outcome, not a review attempt.
+const autoRunDisabledSignal = "auto_run_disabled"
 
-// signalAutoRunDisabled emits the on-demand "Trigger review" affordance when
-// auto-run is off (#161), so a honored event (opened/synchronize/reopened) is a
-// visible signal rather than a silent no-op. It is idempotent: the comment is
-// posted at most once per PR, deduped on a recorded marker review row, so
-// opened + later pushes yield a single comment. Everything here is best-effort
-// — a GitHub or DB failure logs and returns without failing the webhook.
 func (o *Orchestrator) signalAutoRunDisabled(ctx context.Context, event ghpkg.PREvent, owner, repo string, dbRepo *store.Repo) {
-	already, err := o.st.HasFailedReviewWithError(ctx, dbRepo.ID, event.PRNumber, autoRunDisabledMarker)
+	claimID, claimed, err := o.st.ClaimReviewSignal(ctx, dbRepo.ID, event.PRNumber, autoRunDisabledSignal, 10*time.Minute)
 	if err != nil {
-		o.logger.Error("checking prior auto-run-disabled signal", "error", err, "repo", event.RepoFullName, "pr", event.PRNumber)
+		o.logger.Error("claiming auto-run-disabled signal", "error", err, "repo", event.RepoFullName, "pr", event.PRNumber)
+		return
 	}
-	if already {
-		o.logger.Info("auto-run disabled; trigger affordance already posted, skipping", "repo", event.RepoFullName, "pr", event.PRNumber, "action", event.Action)
+	if !claimed {
+		o.logger.Info("auto-run disabled; trigger affordance already claimed", "repo", event.RepoFullName, "pr", event.PRNumber, "action", event.Action)
 		return
 	}
 	if err := o.postTriggerComment(ctx, event, owner, repo, dbRepo); err != nil {
 		o.logger.Error("posting auto-run-disabled trigger affordance", "error", err, "repo", event.RepoFullName, "pr", event.PRNumber)
+		if released, releaseErr := o.st.ReleaseReviewSignal(context.WithoutCancel(ctx), claimID); releaseErr != nil || !released {
+			o.logger.Error("releasing auto-run-disabled claim", "error", releaseErr, "repo", event.RepoFullName, "pr", event.PRNumber)
+		}
 		return
 	}
-	// Record the marker only after the comment posts so a failed post retries
-	// on the next event instead of being permanently suppressed.
-	reviewID := uuid.New()
-	if _, err := o.db.Exec(ctx, `
-		INSERT INTO reviews (id, repo_id, pr_number, pr_title, pr_author, head_sha, base_sha, head_ref, status, trigger, error, trace_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'failed', 'webhook', $9, NULL)
-	`, reviewID, dbRepo.ID, event.PRNumber, event.PRTitle, event.PRAuthor, event.HeadSHA, event.BaseSHA, event.HeadRef, autoRunDisabledMarker); err != nil {
-		o.logger.Error("recording auto-run-disabled signal", "error", err, "repo", event.RepoFullName)
+	if completed, err := o.st.CompleteReviewSignal(context.WithoutCancel(ctx), claimID); err != nil || !completed {
+		o.logger.Error("completing auto-run-disabled signal", "error", err, "repo", event.RepoFullName, "pr", event.PRNumber)
 	}
 	o.logger.Info("auto-run disabled; posted trigger affordance", "repo", event.RepoFullName, "pr", event.PRNumber, "action", event.Action)
 }
@@ -944,7 +963,8 @@ func (o *Orchestrator) handlePRClosed(ctx context.Context, event ghpkg.PREvent) 
 // terminal state, so Resume would be a silent no-op and the review would sit
 // on "pending" forever. For those we rebuild a fresh run for the SAME review
 // and drive it from the initial state.
-func (o *Orchestrator) RetryReview(ctx context.Context, reviewID uuid.UUID) error {
+func (o *Orchestrator) RetryReview(ctx context.Context, reviewID uuid.UUID, attemptGeneration int) error {
+	o.logger.InfoContext(ctx, "review retry started", "event", "pipeline.review.retry_started", "review_id", reviewID, "attempt_generation", attemptGeneration)
 	// Topic may already be opened by the caller (retry handler opens it
 	// before spawning the goroutine so the WebSocket can subscribe immediately).
 	if o.eventBus != nil {
@@ -961,7 +981,7 @@ func (o *Orchestrator) RetryReview(ctx context.Context, reviewID uuid.UUID) erro
 		// persist (e.g. a restart during an early, non-persisted stage). There's
 		// nothing to rebuild from, so reconstruct a fresh run from the review +
 		// repo rows and fetch the diff fresh from GitHub.
-		return o.retryFromReviewRow(ctx, reviewID)
+		return o.retryFromReviewRow(ctx, reviewID, attemptGeneration)
 	}
 	if err != nil {
 		return fmt.Errorf("finding pipeline run for review %s: %w", reviewID, err)
@@ -971,13 +991,16 @@ func (o *Orchestrator) RetryReview(ctx context.Context, reviewID uuid.UUID) erro
 	if err != nil {
 		return fmt.Errorf("loading pipeline run %s: %w", runID, err)
 	}
+	prev.AttemptGeneration = attemptGeneration
 
-	// Non-terminal run: resume in place. KNOWN GAP: a resumed run still loses
-	// every json:"-" context field (intent/contract/SAST/arch/links/flags/
-	// thresholds) — enriching mid-flight risks double-charging the intent LLM
-	// call, so the resume ingress needs its own design (tracked follow-up).
+	// Non-terminal run: resume in place. Resume re-resolves the value-safe
+	// json:"-" context it lost (flags, thresholds, indexer, contract) via the
+	// hydrate hook — see resume_context.go. The enricher-backed fields
+	// (intent/SAST/arch/links) stay unresolved by design: re-running them
+	// mid-flight would re-charge the intent LLM call on every resume.
 	if !prev.State.IsTerminal() {
-		_, err = o.sm.Resume(ctx, runID)
+		o.logger.InfoContext(ctx, "review retry resuming non-terminal run", "event", "pipeline.review.retry_resume", "review_id", reviewID, "run_id", runID, "stage", string(prev.State), "attempt_generation", attemptGeneration)
+		_, err = o.sm.ResumeAttempt(ctx, runID, attemptGeneration)
 		return err
 	}
 
@@ -987,24 +1010,47 @@ func (o *Orchestrator) RetryReview(ctx context.Context, reviewID uuid.UUID) erro
 	if err != nil {
 		return err
 	}
+	fresh.AttemptGeneration = attemptGeneration
 	fresh.EventBus = o.eventBus
 	// Resolve the live-only dependencies the sibling no-run retry path gets from
 	// buildRun: the memory indexer never survives persistence (without it the
 	// retry silently runs memory-less), and buildRetryRun's WithDefaults
 	// fallback carries fixed-policy floors, not the org's settings-tuned ones —
 	// re-resolve from merged settings, keeping the fallback on error.
-	fresh.Indexer = o.resolveIndexer(ctx, fresh.DBInstallationID)
+	fresh.Indexer = indexerForReview(o.resolveIndexer(ctx, fresh.DBInstallationID), fresh.ReviewID)
 	if mergedSettings, msErr := o.st.GetMergedSettings(ctx, fresh.DBInstallationID, fresh.DBRepoID); msErr == nil {
 		fresh.Thresholds = parseThresholds(mergedSettings)
+		// CURRENT limits, not the ones the original run carried. buildRetryRun
+		// copies the previous run's BudgetLimits so a reduced review stays
+		// reduced, but on retry the operator may have lowered them since — and
+		// re-using the historical values would let a review that is now over
+		// the limit run anyway, indefinitely, by retrying.
+		fresh.BudgetLimits = BudgetLimits(mergedSettings)
 	} else {
 		o.logger.Error("retry: failed to load merged settings, using default thresholds",
 			"error", msErr, "installation", fresh.DBInstallationID, "repo", fresh.DBRepoID)
+	}
+
+	// Re-decide the Budget. Retry re-runs the whole pipeline at the cost of a
+	// fresh review, so skipping this made retry the documented bypass for the
+	// gate this package exists to add: a hard-limit refusal could simply be
+	// retried into running.
+	//
+	// Reset the previous verdict's caps first, or a re-allowed run would keep
+	// a stale reduction it no longer earns.
+	fresh.BudgetMaxFiles, fresh.BudgetNote = 0, ""
+	if v := o.checkBudget(ctx, fresh, &store.Repo{ID: fresh.DBRepoID}); !v.Allowed() {
+		o.refuseForBudget(ctx, fresh, fresh.PREvent, v)
+		return nil
+	} else if v.Outcome == admission.OutcomeReduce {
+		o.applyReduce(ctx, fresh, v)
 	}
 	// Re-run the pre-review enrichers so the retry resolves intent (and its
 	// change class) and re-attaches SAST/arch/link context — none of which
 	// survive persistence (all json:"-"). Without this a retried review posts
 	// against an empty contract and loses intent-aware review context.
 	o.enrichPreReview(ctx, fresh)
+	o.logger.InfoContext(ctx, "review retry rebuilt terminal run", "event", "pipeline.review.retry_rebuilt", "review_id", reviewID, "run_id", fresh.ID, "attempt_generation", attemptGeneration)
 	return o.sm.Run(ctx, fresh)
 }
 
@@ -1038,7 +1084,7 @@ func retryPREvent(livePR *ghpkg.PREvent, repo *store.Repo) ghpkg.PREvent {
 // the run uses the same cooperative-cancel / conditional-write machinery. On any
 // failure (including the metadata/diff fetch) the handler goroutine rolls the
 // review back to "failed" — we never proceed with mismatched SHAs.
-func (o *Orchestrator) retryFromReviewRow(ctx context.Context, reviewID uuid.UUID) error {
+func (o *Orchestrator) retryFromReviewRow(ctx context.Context, reviewID uuid.UUID, attemptGeneration int) error {
 	review, err := o.st.GetReview(ctx, reviewID)
 	if err != nil {
 		return fmt.Errorf("loading review %s for no-run retry: %w", reviewID, err)
@@ -1104,6 +1150,7 @@ func (o *Orchestrator) retryFromReviewRow(ctx context.Context, reviewID uuid.UUI
 		previousReviewID: previousReviewID,
 		indexer:          o.resolveIndexer(ctx, repo.InstallationID),
 	})
+	run.AttemptGeneration = attemptGeneration
 	run.PriorComments = priorComments
 	// Same pre-review enrichment the fresh webhook path runs, so a no-run retry
 	// resolves intent (+ change class) and re-attaches SAST/arch/link context
@@ -1164,6 +1211,14 @@ func buildRetryRun(prev *PipelineRun) (*PipelineRun, error) {
 		FileSynthesis:       prev.FileSynthesis,
 		ArchitectureGraph:   prev.ArchitectureGraph,
 
+		// Carried, or a reduced review runs unreduced on retry. The
+		// crash-recovery path was fixed by persisting these through JSON; this
+		// path rebuilds field by field, so it needs the same fix separately.
+		// Same defect, two call sites — one of them was easy to miss.
+		BudgetLimits:   prev.BudgetLimits,
+		BudgetMaxFiles: prev.BudgetMaxFiles,
+		BudgetNote:     prev.BudgetNote,
+
 		Prompts: prev.Prompts,
 		// Normalize the similarity gates at this single retry-construction ingress
 		// so value-level readers never see a zero Thresholds. prev.Thresholds is
@@ -1200,37 +1255,52 @@ func (o *Orchestrator) CancelStranded(ctx context.Context, reviewID uuid.UUID) e
 	return o.lifecycle.CancelStranded(ctx, reviewID)
 }
 
-func (o *Orchestrator) postStartedComment(ctx context.Context, event ghpkg.PREvent, run *PipelineRun, reviewModel string) {
+func (o *Orchestrator) postStartedComment(ctx context.Context, event ghpkg.PREvent, run *PipelineRun, stageModels string) {
+	o.logger.InfoContext(ctx, "review progress comment post started", "event", "pipeline.github.progress_post_started", "review_id", run.ReviewID, "repo", event.RepoFullName, "pr_number", event.PRNumber)
 	owner, repo, err := splitRepoFullName(event.RepoFullName)
 	if err != nil {
 		o.logger.Warn("failed to split repo name for started comment", "error", err)
 		return
 	}
 
-	var rows []string
-	if reviewModel != "" {
-		rows = append(rows, fmt.Sprintf("| **Model** | `%s` |", reviewModel))
+	mode := "review"
+	if run.DeepReview {
+		mode = "deep review"
+	} else if run.IsIncremental {
+		mode = "incremental review"
 	}
 	if run.Persona != "" && run.Persona != PersonaDefault {
-		rows = append(rows, fmt.Sprintf("| **Persona** | %s |", strings.ReplaceAll(string(run.Persona), "|", "\\|")))
+		mode += " · " + strings.ReplaceAll(string(run.Persona), "|", "\\|")
 	}
-	if run.DeepReview {
-		rows = append(rows, "| **Mode** | Deep review |")
-	} else if run.IsIncremental {
-		rows = append(rows, "| **Mode** | Incremental |")
+	scope := fmt.Sprintf("%d files ~%d lines", len(run.Diff.Files), run.Diff.TotalLinesChanged())
+
+	var estimate string
+	statsCtx, cancelStats := context.WithTimeout(ctx, statsQueryTimeout)
+	stats, statsErr := o.st.GetRepoReviewStats(statsCtx, run.DBRepoID, historicalReviewSampleLimit)
+	cancelStats()
+	if statsErr != nil {
+		o.logger.Warn("repo review stats for started comment", "error", statsErr, "repo_id", run.DBRepoID)
+	} else {
+		estimate = formatTokenEstimate(stats)
 	}
-	rows = append(rows, fmt.Sprintf("| **Scope** | %d files, ~%d lines |",
-		len(run.Diff.Files), run.Diff.TotalLinesChanged()))
 
-	body := fmt.Sprintf("> **Argus** is reviewing this PR — [watch live](%s/reviews/%s)\n\n| | |\n|---|---|\n%s",
-		o.cfg.DashboardBaseURL, run.ReviewID, strings.Join(rows, "\n"))
+	body := BuildStartedComment(o.cfg.DashboardBaseURL, run.ReviewID.String(), mode, scope, estimate, stageModels)
 
-	nodeID, err := o.ghClient.CreateIssueCommentWithNodeID(ctx, event.InstallationID, owner, repo, event.PRNumber, body)
+	nodeID, commentID, err := o.ghClient.CreateIssueCommentRef(ctx, event.InstallationID, owner, repo, event.PRNumber, body)
 	if err != nil {
 		o.logger.Warn("failed to post review-started comment", "error", err)
 		return
 	}
 	run.StartedCommentNodeID = nodeID
+	o.logger.InfoContext(ctx, "review progress comment posted", "event", "pipeline.github.progress_posted", "review_id", run.ReviewID, "repo", event.RepoFullName, "pr_number", event.PRNumber, "comment_id", commentID, "comment_node_id", nodeID)
+	// Persist the REST id so a failure or a cancel on another machine can
+	// rewrite this comment. Non-fatal: losing it costs a stale "watch live"
+	// on one PR, which is strictly better than failing the review over it.
+	if err := o.st.SetStartedCommentID(ctx, run.ReviewID, commentID); err != nil {
+		o.logger.WarnContext(ctx, "failed to persist started-comment id", "event", "pipeline.github.progress_ref_failed", "error", err, "review_id", run.ReviewID, "comment_id", commentID)
+	} else {
+		o.logger.InfoContext(ctx, "review progress comment reference persisted", "event", "pipeline.github.progress_ref_persisted", "review_id", run.ReviewID, "comment_id", commentID)
+	}
 }
 
 // autoResolveOnSynchronize fires fire-and-forget on every synchronize
@@ -1324,6 +1394,16 @@ func (o *Orchestrator) autoResolveOnSynchronize(
 			"error", err, "pr", event.PRNumber)
 	}
 
+	// Bill the judge's spend to the review whose threads it judged — the only
+	// review this pass relates to, and the row the dashboard already reads. No
+	// live PipelineRun exists here (that review finished on an earlier push), so
+	// the JSONB merge is the only route to /stats; nil run skips the in-memory
+	// half. Safe under the early return above: any push that reached the judge
+	// also listed threads, so apiCalls ≥ 1 whenever judgeTokens is non-zero.
+	if stats.judgeTokens.TotalTokens > 0 || stats.judgeTokens.Cost > 0 {
+		o.persistAsyncStageTokens(dbCtx, *plan.PreviousReviewID, stageKeyAutoResolve, stats.judgeTokens, nil)
+	}
+
 	// auto_resolve.evaluated fires on every sync where we actually touched
 	// GitHub — threads_checked is stale-comment pressure (every open Argus
 	// thread we considered), threads_attempted is how many we tried to
@@ -1347,6 +1427,12 @@ func (o *Orchestrator) autoResolveOnSynchronize(
 		slog.Int("threads_kept_open", stats.keptOpen),
 		slog.Int("threads_attempted", attempted),
 		slog.Int("threads_resolved", resolved),
+		// judge_tokens / judge_cost: what this push spent verifying threads.
+		// Same numbers the auto_resolve token bucket receives, emitted here so
+		// a cost question can be answered from the funnel without joining
+		// against reviews.token_usage.
+		slog.Int("judge_tokens", stats.judgeTokens.TotalTokens),
+		slog.Float64("judge_cost", stats.judgeTokens.Cost),
 		slog.String("trace_id", obs.TraceID(parent)),
 	)
 }
@@ -1439,6 +1525,12 @@ type autoResolveStats struct {
 	lineHits      int // proximity line-hit candidates (log-only)
 	fileHits      int // file-level fallback candidates (log-only)
 	resolvedKeys  []string
+	// judgeTokens is every AddressedJudge call this pass made, summed. Merged
+	// into the judged review's token_usage under "auto_resolve" so the spend
+	// appears on /stats Cost-by-Stage instead of vanishing (#72). A plain
+	// StageTokens, not a RunTokenUsage, because autoResolveStats is copied by
+	// value and RunTokenUsage carries a mutex.
+	judgeTokens StageTokens
 }
 
 // addressedVerdictKind is the outcome of verifyThreadAddressed for one proximity
@@ -1492,6 +1584,12 @@ func interDiffForFile(patchSet *diff.PatchSet, path string) string {
 // GitHub-reply-free by design: the caller posts the convergence breadcrumb after
 // a verdictResolved, which keeps this method testable through the fakeable
 // FindingLifecycle + AddressedJudge seams alone.
+//
+// tokens is the caller's spend accumulator for the whole push (never nil). The
+// judge's cost is recorded into it immediately, BEFORE the error/not-addressed
+// early returns — the provider bills for a keep-open verdict exactly as it does
+// for a resolve, so returning early without accumulating is how auto-resolve
+// spend disappeared from the dashboard (#72).
 func (o *Orchestrator) verifyThreadAddressed(
 	ctx context.Context,
 	event ghpkg.PREvent,
@@ -1500,6 +1598,7 @@ func (o *Orchestrator) verifyThreadAddressed(
 	threadID string,
 	interDiff string,
 	dbInstallationID, dbRepoID int64,
+	tokens *RunTokenUsage,
 ) (addressedVerdictKind, string) {
 	if o.addressedJudge == nil {
 		o.logger.Warn("auto-resolve: no addressed judge configured — leaving thread open (degrade-safe)",
@@ -1513,13 +1612,17 @@ func (o *Orchestrator) verifyThreadAddressed(
 	// these we make (see the caller).
 	judgeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), judgeCallTimeout)
 	defer cancel()
-	addressed, reason, jerr := o.addressedJudge.Judge(judgeCtx, JudgeFinding{
+	verdict, jerr := o.addressedJudge.Judge(judgeCtx, JudgeFinding{
 		Body:             t.Body,
 		Path:             t.Path,
 		Line:             t.Line,
 		DBInstallationID: dbInstallationID,
 		DBRepoID:         dbRepoID,
 	}, interDiff)
+	// Bill first, branch second: a judge that answered and then failed to parse
+	// still cost money, and every path below returns.
+	tokens.addAutoResolve(verdict.Tokens)
+	addressed, reason := verdict.Addressed, verdict.Reason
 	if jerr != nil {
 		// DEGRADE SAFE: never false-resolve on a judge failure/timeout.
 		o.logger.Warn("auto-resolve: judge error — leaving thread open (degrade-safe)",
@@ -1684,6 +1787,11 @@ func (o *Orchestrator) resolveCandidates(
 	}
 
 	stats := autoResolveStats{}
+	// Pass-local accumulator: every judge call adds into tokens.AutoResolve, and
+	// the caller merges that single sum into the reviews row. Using the same
+	// RunTokenUsage adder the inline stages use keeps bucket-vs-total arithmetic
+	// in one place instead of a second hand-rolled summation here.
+	var tokens RunTokenUsage
 	var replyTo []int64
 	for _, t := range threads {
 		if t.IsResolved || !ghpkg.IsArgusThread(t.AuthorLogin, o.cfg.GitHubAppSlug) {
@@ -1719,7 +1827,7 @@ func (o *Orchestrator) resolveCandidates(
 		// Verify the fix before resolving: proximity got us here, the judge decides.
 		stats.judged++
 		verdict, _ := o.verifyThreadAddressed(ctx, event, owner, repo, t, threadID,
-			interDiffForFile(patchSet, t.Path), dbInstallationID, dbRepoID)
+			interDiffForFile(patchSet, t.Path), dbInstallationID, dbRepoID, &tokens)
 		if verdict == verdictKeepOpen {
 			stats.keptOpen++
 			continue
@@ -1751,6 +1859,9 @@ func (o *Orchestrator) resolveCandidates(
 			slog.String("trace_id", obs.TraceID(ctx)),
 		)
 	}
+	// Only the bucket, never tokens.Total: MergeStageTokenEntry increments the
+	// stored total itself, so handing it a pre-summed total would double-count.
+	stats.judgeTokens = tokens.AutoResolve
 	return stats, replyTo
 }
 
@@ -1759,7 +1870,7 @@ func (o *Orchestrator) resolveCandidates(
 // suppression keys into the run, then logs + publishes the aggregate. Non-fatal
 // end-to-end — a disabled indexer or malformed repo name is a no-op, and the
 // Enricher leaves novelty unset on any search error. The per-finding fan-out,
-// self-match guard, pattern/rule linking, and suppression bookkeeping all live
+// same-PR exclusion, pattern/rule linking, and suppression bookkeeping all live
 // inside the Enricher (see enricher.go); this call site only builds deps and
 // applies the result.
 func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) error {
@@ -1790,13 +1901,14 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 		prNumber:     run.PREvent.PRNumber,
 		reviewID:     run.ReviewID,
 		repoID:       run.DBRepoID,
+		installID:    run.DBInstallationID,
 		changeClass:  changeClass,
 		traceID:      run.TraceID,
 		concurrency:  enrichConcurrency,
 	}
 	if run.EventBus != nil {
 		enricher.publish = func(evt EventType, data map[string]any) {
-			run.EventBus.Publish(run.ReviewID, evt, data)
+			run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, evt, data)
 		}
 	}
 
@@ -1825,7 +1937,7 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 		slog.Int("total", res.Total()))
 
 	if run.EventBus != nil {
-		run.EventBus.Publish(run.ReviewID, EventFindingsEnriched, map[string]any{
+		run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventFindingsEnriched, map[string]any{
 			"matched":    res.Matched,
 			"enforced":   res.Enforced,
 			"novel":      res.Novel,
@@ -1837,7 +1949,7 @@ func (o *Orchestrator) enrichFindings(ctx context.Context, run *PipelineRun) err
 	return nil
 }
 
-// inferMatchKind derives the MatchedPatternKind from Supermemory metadata. The
+// inferMatchKind derives the MatchedPatternKind from memory metadata. The
 // "source" key is stamped at index time and distinguishes what kind of document
 // produced the match. Falls through to "similarity" when metadata is absent —
 // e.g. older indexed docs pre-dating the metadata stamping.
@@ -1853,7 +1965,7 @@ func inferMatchKind(md map[string]string) string {
 	return "similarity"
 }
 
-// metaInt reads an integer value stamped in Supermemory metadata. Missing /
+// metaInt reads an integer value stamped in memory metadata. Missing /
 // malformed values return 0 so the caller renders without a PR reference.
 func metaInt(md map[string]string, key string) int {
 	if v, ok := md[key]; ok {
@@ -1992,16 +2104,14 @@ func (o *Orchestrator) synthesize(ctx context.Context, run *PipelineRun) error {
 		if n == 1 {
 			noun = "file"
 		}
-		brief = fmt.Sprintf("Argus reviewed %d %s and found no issues. Code looks good.", n, noun)
+		brief = fmt.Sprintf("### Findings summary\n\n- Argus reviewed %d %s. No blocking findings from Argus.", n, noun)
 	} else {
 		// Try LLM-generated conversational brief
 		brief = o.generateConversationalBrief(ctx, run, score)
 	}
 
-	// Capture the H2 headline BEFORE the intent header is prepended to brief —
-	// otherwise the posted comment's H2 would pull the first sentence of the
-	// intent disclaimer ("### 🔍 PR intent vs diff … _Argus read the diff …_")
-	// instead of the actual synthesis verdict.
+	// Capture the H2 headline before the purpose and acceptance sections are
+	// prepended to the findings summary.
 	//
 	// Preferred path: the synthesis LLM was prompted to emit a dedicated
 	// `**Headline:** …` line (≤100 chars, no markdown). When present we strip
@@ -2022,7 +2132,7 @@ func (o *Orchestrator) synthesize(ctx context.Context, run *PipelineRun) error {
 		brief = briefBody
 	}
 
-	// Prepend intent header + [INTENT] finding; both return "" when not applicable.
+	// Put the purpose and author checks before the findings summary.
 	if header := FormatIntentHeader(run, verdict); header != "" {
 		brief = header + "\n" + brief
 	}
@@ -2056,7 +2166,7 @@ func (o *Orchestrator) synthesize(ctx context.Context, run *PipelineRun) error {
 	}
 
 	if run.EventBus != nil {
-		run.EventBus.Publish(run.ReviewID, EventSynthesis, map[string]any{
+		run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventSynthesis, map[string]any{
 			"summary": run.Synthesis.Summary,
 			"score":   run.Synthesis.Score,
 		})
@@ -2146,7 +2256,7 @@ func (o *Orchestrator) verifyIntent(ctx context.Context, run *PipelineRun) *Inte
 		"pr", run.PREvent.PRNumber)
 
 	if run.EventBus != nil {
-		run.EventBus.Publish(run.ReviewID, EventIntentVerified, map[string]any{
+		run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventIntentVerified, map[string]any{
 			"delivers":     verdict.Delivers,
 			"unmet":        len(verdict.UnmetCriteria),
 			"out_of_scope": len(verdict.OutOfScopeFindings),
@@ -2155,37 +2265,31 @@ func (o *Orchestrator) verifyIntent(ctx context.Context, run *PipelineRun) *Inte
 	return verdict
 }
 
-const synthesisBriefSystemPrompt = `You are writing a concise verdict for a pull request review. Per-file inline comments are shown separately — do NOT repeat them.
+const synthesisBriefSystemPrompt = `Write a short pull request review summary in Simplified Technical English.
 
-Format (markdown) — emit EXACTLY these lines in this order:
+Return exactly this format:
 
-**Headline:** [Plain prose, MAX 100 CHARACTERS, no markdown, no trailing period. This is the one-liner shown in the posted H2; if it exceeds 100 chars it will be cut and look bad. Pick the single most important takeaway — e.g. "Ships the partner auth flow cleanly, but token storage still leaks identity into query strings".]
+**Headline:** [A factual verdict phrase. Use 10 words or fewer. Use active voice. Do not use marketing language.]
 
-**Verdict:** [1-2 sentences: what this PR does and whether it's ready to merge. Headline may repeat the gist; this line gives nuance.]
+### Findings summary
 
-[severity line — compact inline, only non-zero counts, e.g.:]
-🔴 4 P0 · 🟡 3 P1 · 💡 2 P2 · 64 files reviewed
-
-**Top priority:** [The single most important root cause to fix first.]
-
-**Fix order:** file1.ts → file2.ts → file3.ts
-[One line. Arrow-separated. Dependency order.]
-
-**Architecture:** [1 sentence — what's good, what to watch.]
+- [State the most important finding in 20 words or fewer.]
+- [State the next finding in 20 words or fewer. Omit this line when it adds no new fact.]
+- [State the final finding in 20 words or fewer. Omit this line when it adds no new fact.]
 
 Rules:
-- Headline is REQUIRED. Count characters carefully — the 100-char limit is hard.
-- Severity line: only include non-zero counts. Never show "0 suggestions" or "0 clean".
-- Do NOT use a markdown table. Use the compact inline format shown above.
-- If score >= 8, keep the verdict positive and brief. Omit fix order and top priority.
-- If critical issues exist, Top priority and Fix order are required.
-- If no critical issues, omit both.
-- Group related findings by ROOT CAUSE, then surface the root cause in Top priority.
-- Fix order: dependency order. If fixing file A changes the API file B uses, list A first.
-- Do NOT list individual findings — those are inline.
-- Use "we" not "you". Collaborative tone.
-- Argus advises, it never gates merges. When the PR is not ready, say it "needs work" and name what would change the verdict — never "blocked", "rejected", "do not merge", or similar denial language.
-- No greetings, no score, no link, no comment count — those are shown separately.`
+- Do not say that a pull request is ready to merge.
+- Do not decide whether to merge.
+- Do not repeat the score or the finding counts.
+- Use one topic in each sentence.
+- Use active voice.
+- Use simple present or simple past tense.
+- Do not use em dashes or semicolons.
+- Do not use these words: cleanly, comprehensive, seamless, robust.
+- Do not use greetings, links, tables, or decorative language.
+- Do not repeat individual inline comments.
+- If Argus found no blocking findings, write: No blocking findings from Argus.
+- If Argus found blocking findings, name the root cause first.`
 
 // generateConversationalBrief calls the LLM to produce a natural-language summary of the review.
 // Falls back to a deterministic brief on failure.
@@ -2207,8 +2311,8 @@ func (o *Orchestrator) generateConversationalBrief(ctx context.Context, run *Pip
 		}
 	}
 	top := topCategories(run, 2)
-	fallback := fmt.Sprintf("Argus found %d issues (%d critical, %d warnings) across %d files. Key concerns: %s.",
-		countComments(run), criticals, warnings, len(run.Diff.Files), strings.Join(top, ", "))
+	fallback := fmt.Sprintf("### Findings summary\n\n- Argus found %d findings in %d files.\n- The main categories are %s.\n- The review includes %d blocking findings and %d warnings.",
+		countComments(run), len(run.Diff.Files), strings.Join(top, ", "), criticals, warnings)
 
 	// Resolve synthesis provider (falls back to review provider)
 	lister := storeConfigLister{st: o.st, installationID: run.DBInstallationID}
@@ -2249,7 +2353,7 @@ func (o *Orchestrator) generateConversationalBrief(ctx context.Context, run *Pip
 	}
 	run.Tokens.addToTotal(run.Tokens.Synthesis)
 	if run.EventBus != nil {
-		run.EventBus.Publish(run.ReviewID, EventTokenUpdate, map[string]any{
+		run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventTokenUpdate, map[string]any{
 			"total_tokens": run.Tokens.Total.TotalTokens,
 			"cost":         run.Tokens.Total.Cost,
 		})
@@ -2258,7 +2362,7 @@ func (o *Orchestrator) generateConversationalBrief(ctx context.Context, run *Pip
 		// fallback = true when the LLM returned empty; the caller falls back
 		// to a deterministic template.
 		trimmedLen := len(strings.TrimSpace(resp.Content))
-		run.EventBus.Publish(run.ReviewID, EventBriefGenerated, map[string]any{
+		run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventBriefGenerated, map[string]any{
 			"length":   trimmedLen,
 			"fallback": trimmedLen == 0,
 		})
@@ -2285,7 +2389,23 @@ func (o *Orchestrator) generateConversationalBrief(ctx context.Context, run *Pip
 		}
 	}
 
-	return brief
+	return sanitizeSynthesisBrief(brief)
+}
+
+func sanitizeSynthesisBrief(brief string) string {
+	replacements := map[string]string{
+		"ready to merge": "has no blocking findings from Argus",
+		"Ready to merge": "No blocking findings from Argus",
+		"cleanly":        "",
+		"comprehensive":  "complete",
+		"seamless":       "direct",
+		"robust":         "reliable",
+		"—":              ".",
+	}
+	for old, replacement := range replacements {
+		brief = strings.ReplaceAll(brief, old, replacement)
+	}
+	return strings.TrimSpace(brief)
 }
 
 func extractFirstSentences(text string, n int) string {
@@ -2607,7 +2727,33 @@ func (o *Orchestrator) pass2(ctx context.Context, run *PipelineRun) error {
 	return nil
 }
 
+func durablePostSucceeded(githubReviewID int64, outcome store.ReviewPostOutcome, err error) bool {
+	if err == nil || githubReviewID <= 0 {
+		return false
+	}
+	return outcome == store.ReviewPostRecorded || outcome == store.ReviewPostAlreadyRecorded
+}
+
 func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
+	postStartedAt := time.Now()
+	o.logger.InfoContext(ctx, "review posting stage started", "event", "pipeline.github.review_post_started", "review_id", run.ReviewID, "attempt_generation", run.AttemptGeneration, "repo", run.PREvent.RepoFullName, "pr_number", run.PREvent.PRNumber)
+	current, err := o.st.IsReviewAttemptCurrent(ctx, run.ReviewID, run.AttemptGeneration)
+	if err != nil {
+		return fmt.Errorf("checking review attempt: %w", err)
+	}
+	if !current {
+		o.logger.InfoContext(ctx, "review posting cancelled for stale attempt", "event", "pipeline.github.review_post_skipped", "review_id", run.ReviewID, "attempt_generation", run.AttemptGeneration, "reason", "stale_attempt")
+		return context.Canceled
+	}
+
+	// Crash recovery must discover a durable GitHub id before repeating any
+	// pre-post LLM or memory mutation. This is read-only: the worker still joins
+	// CompletePostedReview below so exactly one contender wins every follow-up.
+	recordedReviewID, postAlreadyRecorded, err := o.st.GetRecordedReviewID(ctx, run.ReviewID, run.AttemptGeneration)
+	if err != nil {
+		return err
+	}
+
 	// Final cancel guard: a Stop that landed after the last stage-boundary
 	// cooperative check must still keep us from posting. Never post a review the
 	// user cancelled. Returning context.Canceled routes Run through
@@ -2616,14 +2762,6 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	if o.lifecycle.ShouldAbortPost(ctx, run.ReviewID, "post: review status check failed") {
 		o.logger.Info("post: review cancelled, skipping GitHub post", "review_id", run.ReviewID)
 		return context.Canceled
-	}
-
-	// Guard: don't re-post if this review was already posted (stale recovery)
-	var existingReviewID *int64
-	_ = o.db.QueryRow(ctx, `SELECT github_review_id FROM reviews WHERE id = $1`, run.ReviewID).Scan(&existingReviewID)
-	if existingReviewID != nil && *existingReviewID > 0 {
-		o.logger.Warn("skipping post — review already posted", "review_id", run.ReviewID, "github_review_id", *existingReviewID)
-		return nil
 	}
 
 	owner, repo, err := splitRepoFullName(run.PREvent.RepoFullName)
@@ -2675,78 +2813,114 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 			"total", counts.InlineCandidates, "cap", maxInlineComments, "dropped", counts.CapOverflow)
 	}
 
-	// Persist review data BEFORE posting to GitHub so a 502 doesn't lose results
-	var tokenUsageJSON []byte
-	if run.Tokens.Total.TotalTokens > 0 {
-		if b, err := json.Marshal(&run.Tokens); err != nil {
-			slog.Warn("failed to marshal token usage", "error", err)
-		} else {
-			tokenUsageJSON = b
+	if !postAlreadyRecorded {
+		// Persist review data BEFORE posting to GitHub so a 502 doesn't lose results
+		var tokenUsageJSON []byte
+		if run.Tokens.Total.TotalTokens > 0 {
+			if b, err := json.Marshal(&run.Tokens); err != nil {
+				slog.Warn("failed to marshal token usage", "error", err)
+			} else {
+				tokenUsageJSON = b
+			}
 		}
-	}
-	persona := strPtrOrNil(string(run.Persona))
-	simResultsJSON, simErr := json.Marshal(run.Synthesis.SimulationResults)
-	if simErr != nil {
-		o.logger.Warn("failed to marshal simulation results", "error", simErr)
-		simResultsJSON = nil
-	}
-	var truncatedFilesJSON []byte
-	if len(run.TruncatedFiles) > 0 {
-		truncatedFilesJSON, _ = json.Marshal(run.TruncatedFiles)
-	}
-	var contractJSON []byte
-	if run.Contract != nil {
-		// Resolve a still-pending contract (intent stage fast-exited) to the
-		// production default before persisting, so the stored value matches the
-		// treat-empty-as-production behavior consumers already assume.
-		run.Contract.Finalize()
-		if b, err := json.Marshal(run.Contract); err != nil {
-			o.logger.Warn("failed to marshal review contract", "error", err)
-		} else {
-			contractJSON = b
+		persona := strPtrOrNil(string(run.Persona))
+		simResultsJSON, simErr := json.Marshal(run.Synthesis.SimulationResults)
+		if simErr != nil {
+			o.logger.Warn("failed to marshal simulation results", "error", simErr)
+			simResultsJSON = nil
 		}
-	}
-	_, dbErr := o.db.Exec(ctx, `
+		var truncatedFilesJSON []byte
+		if len(run.TruncatedFiles) > 0 {
+			truncatedFilesJSON, _ = json.Marshal(run.TruncatedFiles)
+		}
+		var contractJSON []byte
+		if run.Contract != nil {
+			// Resolve a still-pending contract (intent stage fast-exited) to the
+			// production default before persisting, so the stored value matches the
+			// treat-empty-as-production behavior consumers already assume.
+			run.Contract.Finalize()
+			if b, err := json.Marshal(run.Contract); err != nil {
+				o.logger.Warn("failed to marshal review contract", "error", err)
+			} else {
+				contractJSON = b
+			}
+		}
+		_, dbErr := o.db.Exec(ctx, `
 		UPDATE reviews SET summary = $1, score = $2, token_usage = $3, file_count = $4,
 		       deep_review = $5, persona = $6, is_incremental = $7, simulation_results = $8,
 		       truncated_files = $9, brief = $10, review_contract = $11
-		WHERE id = $12
+		WHERE id = $12 AND attempt_generation = $13
 	`, run.Synthesis.Summary, run.Synthesis.Score, tokenUsageJSON, len(run.FileReviews),
-		run.DeepReview, persona, run.IsIncremental, simResultsJSON, truncatedFilesJSON,
-		run.Synthesis.Brief, contractJSON, run.ReviewID)
-	if dbErr != nil {
-		o.logger.Error("pre-post DB update failed — review data at risk if PostReview also fails",
-			"error", dbErr, "review_id", run.ReviewID)
-	}
+			run.DeepReview, persona, run.IsIncremental, simResultsJSON, truncatedFilesJSON,
+			run.Synthesis.Brief, contractJSON, run.ReviewID, run.AttemptGeneration)
+		if dbErr != nil {
+			o.logger.Error("pre-post DB update failed — review data at risk if PostReview also fails",
+				"error", dbErr, "review_id", run.ReviewID)
+		}
 
-	// Persist comments to DB BEFORE posting to GitHub.
-	// If PostReview fails (403 rate limit, 502, etc.), comments are still
-	// visible on the dashboard. ghReviewID=0 means github_comment_id is nil
-	// for now — backfilled after successful post.
-	// Guard: skip if comments already persisted (retry after post failure).
-	var existingComments int
-	_ = o.db.QueryRow(ctx, `SELECT COUNT(*) FROM review_comments WHERE review_id = $1`, run.ReviewID).Scan(&existingComments)
-	if existingComments == 0 {
-		o.indexComments(ctx, run, 0, owner, repo)
-	}
-	o.indexConfirmedPatterns(ctx, run, owner, repo)
+		minorNotes := make([]store.ReviewMinorNote, 0, len(run.MinorNotes))
+		for _, note := range run.MinorNotes {
+			minorNotes = append(minorNotes, store.ReviewMinorNote{FilePath: note.Path, Line: note.Line, Severity: string(note.Severity), Title: note.Title})
+		}
+		if err := o.st.ReplaceReviewMinorNotes(ctx, run.ReviewID, run.AttemptGeneration, minorNotes); err != nil {
+			if errors.Is(err, store.ErrReviewAttemptStale) {
+				return context.Canceled
+			}
+			o.logger.Error("persisting minor notes", "error", err, "review_id", run.ReviewID)
+		}
 
-	// Pre-post memory sinks: pattern learning, convention extraction, file-memory
-	// synthesis, and PR/architecture summary indexing. Run BEFORE PostReview so a
-	// 403/502 there doesn't lose them. Detached from ctx so a post-review cancel
-	// doesn't skip indexing; each sink is panic-isolated by RunAll (one exploding
-	// indexer must not abort the others or the completion write).
-	prePostCtx := context.WithoutCancel(ctx)
-	o.indexer().RunAll(prePostCtx, run, owner, repo, "pre_post", []memorySink{
-		{name: "autoLearnPatterns", enabled: func(r *PipelineRun) bool { return r.LearnPatterns }, run: o.autoLearnPatterns},
-		{name: "learnPositivePatterns", enabled: func(r *PipelineRun) bool { return r.LearnPatterns }, run: func(ctx context.Context, r *PipelineRun, owner, repo string) {
-			o.learnPositivePatterns(ctx, r, owner, repo)
-		}},
-		{name: "extractConventions", enabled: func(r *PipelineRun) bool { return r.LearnConventions }, run: o.extractConventions},
-		{name: "synthesizeFileMemories", enabled: func(r *PipelineRun) bool { return r.FileSynthesis }, run: o.synthesizeFileMemories},
-		{name: "indexPRSummary", run: o.indexPRSummary},
-		{name: "indexArchitectureSummary", run: o.indexArchitectureSummary},
-	})
+		// Persist comments to DB BEFORE posting to GitHub.
+		// If PostReview fails (403 rate limit, 502, etc.), comments are still
+		// visible on the dashboard. ghReviewID=0 means github_comment_id is nil
+		// for now — backfilled after successful post.
+		// Guard: skip if comments already persisted (retry after post failure).
+		var existingComments int
+		_ = o.db.QueryRow(ctx, `SELECT COUNT(*) FROM review_comments WHERE review_id = $1 AND attempt_generation = $2`, run.ReviewID, run.AttemptGeneration).Scan(&existingComments)
+		if existingComments == 0 {
+			if err := o.indexComments(ctx, run, 0, owner, repo, &submission); err != nil {
+				return err
+			}
+		}
+		if err := o.st.SaveExpectedReviewInlineCount(ctx, run.ReviewID, run.AttemptGeneration, len(submission.GitHub.Comments)); err != nil {
+			return err
+		}
+		current, err = o.st.IsReviewAttemptCurrent(ctx, run.ReviewID, run.AttemptGeneration)
+		if err != nil {
+			return fmt.Errorf("checking review attempt before learning: %w", err)
+		}
+		if !current {
+			return context.Canceled
+		}
+
+		// Pre-post memory sinks: pattern learning, convention extraction, file-memory
+		// synthesis, and PR/architecture summary indexing. Run BEFORE PostReview so a
+		// 403/502 there doesn't lose them. Detached from ctx so a post-review cancel
+		// doesn't skip indexing; each sink is panic-isolated by RunAll (one exploding
+		// indexer must not abort the others or the completion write).
+		prePostCtx := context.WithoutCancel(ctx)
+		o.indexer().RunAll(prePostCtx, run, owner, repo, "pre_post", []memorySink{
+			{name: "indexConfirmedPatterns", run: o.indexConfirmedPatterns},
+			{name: "autoLearnPatterns", enabled: func(r *PipelineRun) bool { return r.LearnPatterns }, run: o.autoLearnPatterns},
+			{name: "learnPositivePatterns", enabled: func(r *PipelineRun) bool { return r.LearnPatterns }, run: func(ctx context.Context, r *PipelineRun, owner, repo string) {
+				o.learnPositivePatterns(ctx, r, owner, repo)
+			}},
+			{name: "extractConventions", enabled: func(r *PipelineRun) bool { return r.LearnConventions }, run: o.extractConventions},
+			{name: "synthesizeFileMemories", enabled: func(r *PipelineRun) bool { return r.FileSynthesis }, run: o.synthesizeFileMemories},
+			{name: "indexPRSummary", run: o.indexPRSummary},
+			{name: "indexArchitectureSummary", run: o.indexArchitectureSummary},
+		})
+
+		// "Learned: …" footnote. Appended here rather than inside Compose because
+		// the memory sinks only just finished: Compose runs before them (it must,
+		// so the posted token breakdown reports the review's own spend), and a
+		// count taken there would always read zero. The tally is read BACK from the
+		// memories table, so the line reports rows that actually landed rather than
+		// writes that were attempted — which is the whole point, since a failed
+		// index only logs at Warn.
+		appendLearnedLine(prePostCtx, o.st, run, &submission, o.logger)
+	} else {
+		o.logger.Warn("review post id recovered before pre-post enrichment; skipping repeat sinks", "review_id", run.ReviewID, "attempt_generation", run.AttemptGeneration, "github_review_id", recordedReviewID)
+	}
 
 	// Final cancel guard, immediately before the GitHub post: the pre-post
 	// enrichment block above runs for seconds, and a cross-machine Stop landing
@@ -2758,36 +2932,84 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		return context.Canceled
 	}
 
-	ghReviewID, err := o.ghClient.PostReview(
-		ctx,
-		run.PREvent.InstallationID,
-		owner, repo,
-		run.PREvent.PRNumber,
-		&submission.GitHub,
-	)
+	// PostReview is non-idempotent, so a scalar generation check is not enough:
+	// retry/cancel could advance the row after the check but before GitHub returns.
+	// The store holds per-review session authority across its durable claim,
+	// external call, evidence write, and repair; its row lock spans the external
+	// call itself. Preparation and memory indexing remain outside that boundary.
+	ghReviewID := recordedReviewID
+	postOutcome := store.ReviewPostAlreadyRecorded
+	if !postAlreadyRecorded {
+		o.logger.InfoContext(ctx, "GitHub review mutation started", "event", "pipeline.github.review_mutation_started", "review_id", run.ReviewID, "attempt_generation", run.AttemptGeneration, "inline_count", len(submission.GitHub.Comments))
+		// The exact hidden marker is the remote idempotency key for crash and
+		// response-loss reconciliation. It is stable for this review generation.
+		submission.GitHub.Summary += "\n\n" + ghpkg.ReviewMarker(run.ReviewID.String(), run.AttemptGeneration)
+		ghReviewID, postOutcome, err = o.st.PostReviewForAttempt(ctx, run.ReviewID, run.AttemptGeneration, func(postCtx context.Context) (int64, error) {
+			return o.ghClient.PostReview(
+				postCtx,
+				run.PREvent.InstallationID,
+				owner, repo,
+				run.PREvent.PRNumber,
+				&submission.GitHub,
+			)
+		})
+	}
+	if durablePostSucceeded(ghReviewID, postOutcome, err) {
+		// The mutation id is durable; only bounded session unlock/quarantine
+		// cleanup failed. Keep the failure observable without false-failing the
+		// review or skipping completion and winner follow-ups.
+		o.logger.Error("review post cleanup failed after durable id; continuing completion",
+			"error", err, "review_id", run.ReviewID, "attempt_generation", run.AttemptGeneration, "github_review_id", ghReviewID)
+		err = nil
+	}
 	if err != nil {
+		if errors.Is(err, store.ErrReviewPostPersistenceAmbiguous) {
+			// Preserve the durable retry-block marker at the start of reviews.error.
+			// The store already includes the positive remote id and both persistence
+			// failures, so another wrapper would only obscure the recovery contract.
+			return err
+		}
+		if ghReviewID > 0 {
+			return fmt.Errorf("GitHub review %d was posted but recording it is ambiguous: %w", ghReviewID, err)
+		}
 		return fmt.Errorf("posting review: %w", err)
 	}
-
-	// Persist github_review_id UNCONDITIONALLY and immediately, separate from
-	// the status compare-and-set below. If a cross-machine Stop lands between
-	// here and the status write, that CAS no-ops (status already cancelled) and
-	// would leave github_review_id NULL — then a later retry's already-posted
-	// guard (keyed on github_review_id) wouldn't fire and we'd double-post to
-	// GitHub. Recording the id right after the post closes that window. Best
-	// effort: don't fail the review (it IS posted) if this write blips.
-	if _, idErr := o.db.Exec(ctx,
-		`UPDATE reviews SET github_review_id = $1 WHERE id = $2`,
-		ghReviewID, run.ReviewID,
-	); idErr != nil {
-		o.logger.Error("post: failed to persist github_review_id after PostReview", "error", idErr, "review_id", run.ReviewID, "github_review_id", ghReviewID)
+	o.logger.InfoContext(ctx, "GitHub review mutation evaluated", "event", "pipeline.github.review_mutation_completed", "review_id", run.ReviewID, "attempt_generation", run.AttemptGeneration, "github_review_id", ghReviewID, "post_outcome", string(postOutcome), "duration_ms", time.Since(postStartedAt).Milliseconds())
+	if postOutcome == store.ReviewPostRejected {
+		return context.Canceled
+	}
+	if postOutcome == store.ReviewPostAlreadyRecorded {
+		// A concurrent worker or crash-recovered run already made the remote id
+		// durable. Skip the non-idempotent mutation, but join the same completion
+		// CAS below: converging status here would steal the winner election and
+		// omit the winner-only follow-up block.
+		o.logger.Warn("review post already recorded by current attempt; joining completion election", "review_id", run.ReviewID, "github_review_id", ghReviewID)
 	}
 
-	// comment.posted is fired after the atomic PostReview landed so failures
-	// above produce review.failed instead. comment_count reflects what the
-	// author will actually see on GitHub: inline comments posted via the
-	// review submission. Folded-into-summary comments don't count — they're
-	// rendered as part of a single "summary" comment, not per-thread.
+	// The completion CAS is also the follow-up winner election. This includes
+	// workers that observed ReviewPostAlreadyRecorded: exactly one worker may
+	// perform every externally visible completion side effect below.
+	o.logger.InfoContext(ctx, "review completion mutation started", "event", "pipeline.review.completion_started", "review_id", run.ReviewID, "attempt_generation", run.AttemptGeneration, "github_review_id", ghReviewID)
+	completion, err := o.st.CompletePostedReview(ctx, run.ReviewID, run.AttemptGeneration, ghReviewID)
+	if err != nil {
+		return err
+	}
+	o.logger.InfoContext(ctx, "review completion mutation evaluated", "event", "pipeline.review.completion_evaluated", "review_id", run.ReviewID, "attempt_generation", run.AttemptGeneration, "github_review_id", ghReviewID, "completion_outcome", string(completion))
+	switch completion {
+	case store.ReviewCompletionAlreadyCompleted:
+		o.logger.Warn("post: another worker completed the recorded review; skipping winner followups", "review_id", run.ReviewID, "attempt_generation", run.AttemptGeneration, "github_review_id", ghReviewID)
+		return nil
+	case store.ReviewCompletionRejected:
+		o.logger.Warn("post: completion rejected — review attempt no longer current", "review_id", run.ReviewID, "attempt_generation", run.AttemptGeneration, "github_review_id", ghReviewID)
+		return context.Canceled
+	case store.ReviewCompletionWon:
+		// Continue through the complete winner-only follow-up block.
+	default:
+		return fmt.Errorf("unknown review completion outcome %q", completion)
+	}
+
+	// comment.posted is emitted by the completion winner. A same-generation
+	// loser observed the same remote post but must not duplicate lifecycle events.
 	o.logger.InfoContext(ctx, "comment posted",
 		slog.String("event", "comment.posted"),
 		slog.String("review_id", run.ReviewID.String()),
@@ -2797,31 +3019,14 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 		slog.String("trace_id", run.TraceID),
 	)
 
-	// Minimize the "review started" comment now that the full review is posted
+	// Minimize the "review started" comment only after winning completion.
 	if run.StartedCommentNodeID != "" {
+		o.logger.InfoContext(ctx, "review progress comment minimize started", "event", "pipeline.github.progress_minimize_started", "review_id", run.ReviewID, "comment_node_id", run.StartedCommentNodeID)
 		if err := o.ghClient.MinimizeComment(ctx, run.PREvent.InstallationID, run.StartedCommentNodeID, "RESOLVED"); err != nil {
-			o.logger.Warn("failed to minimize started comment", "error", err)
+			o.logger.WarnContext(ctx, "failed to minimize started comment", "event", "pipeline.github.progress_minimize_failed", "review_id", run.ReviewID, "comment_node_id", run.StartedCommentNodeID, "error", err)
+		} else {
+			o.logger.InfoContext(ctx, "review progress comment minimized", "event", "pipeline.github.progress_minimized", "review_id", run.ReviewID, "comment_node_id", run.StartedCommentNodeID)
 		}
-	}
-
-	// Mark completed + store github_review_id + clear any stale error.
-	// The error column gets set by RecoverStaleReviews ("review timed out —
-	// server restarted") if the recovery job ran before we finished posting.
-	// Clearing it prevents completed reviews from showing a ghost timeout error.
-	// Conditional on status='in_progress': a Stop that raced past the pre-post
-	// guards (marking the review cancelled) must not be clobbered back to
-	// completed. The GitHub review is already posted, so we don't roll it back;
-	// we just don't overwrite a terminal status another writer set.
-	tag, err := o.db.Exec(ctx, `
-		UPDATE reviews
-		SET status = 'completed', github_review_id = $1, completed_at = NOW(), error = NULL
-		WHERE id = $2 AND status = 'in_progress'
-	`, ghReviewID, run.ReviewID)
-	if err != nil {
-		return fmt.Errorf("updating review record: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		o.logger.Warn("post: completion write skipped — review no longer in_progress", "review_id", run.ReviewID)
 	}
 
 	// Persist linked_pr_refs BEFORE the EventReviewCompleted publish so the
@@ -2839,7 +3044,7 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	// Moving this inside the transaction would leak events on rollback —
 	// see cross-PR stage handler in crosspr_stage.go.
 	if run.EventBus != nil {
-		run.EventBus.Publish(run.ReviewID, EventReviewCompleted, ReviewCompletedPayload{
+		run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventReviewCompleted, ReviewCompletedPayload{
 			ReviewID:       run.ReviewID,
 			RepoID:         run.DBRepoID,
 			PRNumber:       run.PREvent.PRNumber,
@@ -2864,20 +3069,26 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	// pattern learning). This event marks the moment the author's PR gets the
 	// inline comments visible on GitHub.
 	if run.EventBus != nil {
-		run.EventBus.Publish(run.ReviewID, EventPostedToGitHub, map[string]any{
+		run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventPostedToGitHub, map[string]any{
 			"github_review_id": ghReviewID,
 			"inline":           len(submission.GitHub.Comments),
 			"folded":           counts.FoldedImportant + counts.FoldedMinor,
 		})
 	}
 
-	// Backfill github_comment_ids now that we have the ghReviewID
-	o.backfillGitHubCommentIDs(ctx, run, ghReviewID, owner, repo)
+	// Backfill github_comment_ids now that we have the ghReviewID. Normal posts
+	// keep this post-post work best-effort; recovery uses the same helpers but
+	// propagates their errors before it permits terminal completion.
+	if err := o.backfillGitHubCommentIDs(ctx, run, ghReviewID, owner, repo); err != nil {
+		o.logger.Error("backfilling GitHub comment IDs", "error", err, "review_id", run.ReviewID)
+	}
 
 	// ThreadRegistry (#162): bind each just-posted finding to its GraphQL
 	// review-thread node id. Runs AFTER the backfill above so the github_comment_id
 	// join key is present; authoritative one-shot hydrate off the fresh review.
-	o.hydrateThreadNodeIDs(ctx, run, owner, repo)
+	if err := o.hydrateThreadNodeIDs(ctx, run, owner, repo); err != nil {
+		o.logger.Warn("thread-registry: hydrating thread node IDs", "error", err, "review_id", run.ReviewID)
+	}
 
 	// Pattern learning, conventions, file synthesis, and PR summary now run
 	// BEFORE PostReview (see above). Only architecture graph + PR enrichment
@@ -2930,7 +3141,7 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	}
 
 	// Collect decision traces — persisted to Postgres only. Postgres
-	// decision_traces is the source of truth; Supermemory trace writes were
+	// decision_traces is the source of truth; memory trace writes were
 	// retired (observational, never read back into reviews, pure write noise).
 	traceSeeds := CollectReviewTraces(run)
 	var traceFails int
@@ -2950,13 +3161,14 @@ func (o *Orchestrator) post(ctx context.Context, run *PipelineRun) error {
 	}
 
 	if run.EventBus != nil {
-		run.EventBus.Publish(run.ReviewID, EventCompleted, map[string]any{
+		run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventCompleted, map[string]any{
 			"review_id":      run.ReviewID,
 			"total_comments": countComments(run),
 			"duration_ms":    time.Since(run.CreatedAt).Milliseconds(),
 		})
 	}
 
+	o.logger.InfoContext(ctx, "review posting stage completed", "event", "pipeline.github.review_post_completed", "review_id", run.ReviewID, "attempt_generation", run.AttemptGeneration, "github_review_id", ghReviewID, "duration_ms", time.Since(postStartedAt).Milliseconds())
 	return nil
 }
 
@@ -2970,7 +3182,8 @@ const enrichmentSystemPrompt = `You help complete a PR description by adding wha
 Rules:
 - If the PR description is EMPTY: write a complete summary of what this PR does (3-6 bullet points covering key changes).
 - If the PR description is PARTIAL: only add bullet points for features/changes the author didn't mention. Match their style and tone.
-- If the PR description already covers everything: return empty arrays.
+- If the PR description already covers everything: return an empty missing_points array.
+- Diagram output is independent: emit exactly the requested diagrams, or an empty array only when the prompt says no diagrams are needed.
 - Write from the author's perspective ("Adds...", "Updates...", "Introduces...") — NOT as a reviewer.
 - Focus on WHAT the code does, not bugs or issues. No security warnings, no criticism.
 - Keep each point to one concise sentence.
@@ -2981,7 +3194,7 @@ Respond with JSON only:
 {
   "missing_points": ["Adds batch processing with configurable concurrency and retry logic"],
   "diagrams": [
-    {"type": "sequence", "title": "Request Flow", "mermaid": "sequenceDiagram\n  Client->>API: fetch()\n  API->>Config: loadConfig()"}
+    {"type": "sequence", "title": "Request Flow", "mermaid": "sequenceDiagram\n  N1->>N2: calls", "evidence": ["edge:E1", "diff:D1"]}
   ]
 }`
 
@@ -3004,7 +3217,9 @@ func (o *Orchestrator) enrichPRDescription(ctx context.Context, run *PipelineRun
 		}
 	}
 
-	prompt := buildEnrichmentPrompt(run)
+	grounding := o.loadDiagramGrounding(ctx, run)
+	specs := selectDiagramTypes(run, grounding)
+	prompt := buildEnrichmentPrompt(run, grounding, specs)
 	resp, err := provider.Complete(ctx, llm.CompletionRequest{
 		Model:       cfg.Model,
 		System:      enrichmentSystemPrompt,
@@ -3032,11 +3247,6 @@ func (o *Orchestrator) enrichPRDescription(ctx context.Context, run *PipelineRun
 		return
 	}
 
-	type diagramResult struct {
-		Type    string `json:"type"`
-		Title   string `json:"title"`
-		Mermaid string `json:"mermaid"`
-	}
 	var result struct {
 		MissingPoints []string        `json:"missing_points"`
 		Diagrams      []diagramResult `json:"diagrams"`
@@ -3058,8 +3268,12 @@ func (o *Orchestrator) enrichPRDescription(ctx context.Context, run *PipelineRun
 		result.Diagrams = []diagramResult{{Type: "dependency", Title: title, Mermaid: result.Diagram}}
 	}
 
-	if len(result.MissingPoints) == 0 && len(result.Diagrams) == 0 {
-		o.logger.Info("enrichPRDescription: nothing missing, skipping")
+	validDiagrams := validateDiagrams(ctx, o.mermaidValidator, result.Diagrams, specs, grounding)
+	if len(result.Diagrams) > 0 && len(validDiagrams) == 0 {
+		o.logger.Warn("all generated diagrams failed grounding or Mermaid validation", "candidates", len(result.Diagrams))
+	}
+	if len(result.MissingPoints) == 0 && len(validDiagrams) == 0 {
+		o.logger.Info("enrichPRDescription: no validated enrichment, skipping")
 		return
 	}
 
@@ -3074,25 +3288,23 @@ func (o *Orchestrator) enrichPRDescription(ctx context.Context, run *PipelineRun
 		section.WriteString("\n")
 	}
 
-	var validDiagrams []diagramResult
-	for _, d := range result.Diagrams {
-		if d.Mermaid == "" || !isValidMermaid(d.Mermaid) {
-			o.logger.Warn("skipping invalid diagram", "type", d.Type, "title", d.Title)
-			continue
-		}
-		validDiagrams = append(validDiagrams, d)
-	}
 	if len(validDiagrams) > 0 {
 		diagramsJSON, marshalErr := json.Marshal(validDiagrams)
 		if marshalErr != nil {
 			o.logger.Warn("failed to marshal diagrams", "error", marshalErr)
-		} else if _, dbErr := o.db.Exec(ctx, `UPDATE reviews SET diagrams = $1 WHERE id = $2`,
-			diagramsJSON, run.ReviewID); dbErr != nil {
-			o.logger.Warn("failed to save diagrams", "error", dbErr)
+		} else {
+			tag, dbErr := o.db.Exec(ctx, `UPDATE reviews SET diagrams = $1 WHERE id = $2 AND attempt_generation = $3`, diagramsJSON, run.ReviewID, run.AttemptGeneration)
+			if dbErr != nil {
+				o.logger.Warn("failed to save diagrams", "error", dbErr)
+			} else if tag.RowsAffected() == 0 {
+				return
+			}
 		}
-		if _, dbErr := o.db.Exec(ctx, `UPDATE reviews SET diagram = $1, diagram_title = $2 WHERE id = $3`,
-			validDiagrams[0].Mermaid, validDiagrams[0].Title, run.ReviewID); dbErr != nil {
+		tag, dbErr := o.db.Exec(ctx, `UPDATE reviews SET diagram = $1, diagram_title = $2 WHERE id = $3 AND attempt_generation = $4`, validDiagrams[0].Mermaid, validDiagrams[0].Title, run.ReviewID, run.AttemptGeneration)
+		if dbErr != nil {
 			o.logger.Warn("failed to save legacy diagram", "error", dbErr)
+		} else if tag.RowsAffected() == 0 {
+			return
 		}
 	}
 	for _, d := range validDiagrams {
@@ -3119,8 +3331,14 @@ func (o *Orchestrator) enrichPRDescription(ctx context.Context, run *PipelineRun
 	// Replace existing enrichment or append
 	newBody := replaceOrAppendSection(body, enrichmentStartMarker, enrichmentEndMarker, section.String())
 
-	if err := o.ghClient.UpdatePRDescription(ctx, run.PREvent.InstallationID, owner, repo, run.PREvent.PRNumber, newBody); err != nil {
+	authorized, err := memorySinkWrite(ctx, "enrichPRDescription.github", func(writeCtx context.Context) error {
+		return o.ghClient.UpdatePRDescription(writeCtx, run.PREvent.InstallationID, owner, repo, run.PREvent.PRNumber, newBody)
+	})
+	if err != nil {
 		o.logger.Warn("enrichPRDescription: failed to update PR", "error", err)
+		return
+	}
+	if !authorized {
 		return
 	}
 	o.logger.Info("enriched PR description", "pr", run.PREvent.PRNumber)
@@ -3136,95 +3354,58 @@ func replaceOrAppendSection(body, startMarker, endMarker, section string) string
 	return strings.TrimRight(body, "\n") + "\n\n" + section
 }
 
-// isValidMermaid does a basic syntax check on mermaid diagram text.
-// Checks balanced brackets/pipes and rejects common LLM syntax errors.
-func isValidMermaid(diagram string) bool {
-	diagramLower := strings.ToLower(diagram)
-	validKeywords := []string{"sequencediagram", "graph ", "flowchart", "classdiagram", "erdiagram", "gantt", "pie", "statediagram", "journey", "gitgraph"}
-	hasKeyword := false
-	for _, kw := range validKeywords {
-		if strings.Contains(diagramLower, kw) {
-			hasKeyword = true
-			break
-		}
-	}
-	if !hasKeyword {
-		return false
-	}
-	var squares, parens, braces, pipes int
-	for _, c := range diagram {
-		switch c {
-		case '[':
-			squares++
-		case ']':
-			squares--
-		case '(':
-			parens++
-		case ')':
-			parens--
-		case '{':
-			braces++
-		case '}':
-			braces--
-		case '|':
-			pipes++
-		}
-		if squares < 0 || parens < 0 || braces < 0 {
-			return false
-		}
-	}
-	return squares == 0 && parens == 0 && braces == 0 && pipes%2 == 0
-}
-
-func buildEnrichmentPrompt(run *PipelineRun) string {
+func buildEnrichmentPrompt(run *PipelineRun, grounding diagramGrounding, specs []diagramSpec) string {
 	var sb strings.Builder
-	safeTitle := sanitizeUserInput(util.Truncate(run.PREvent.PRTitle, 200, false))
-	sb.WriteString(fmt.Sprintf("## PR #%d: %s\n\n", run.PREvent.PRNumber, safeTitle))
-
-	sb.WriteString("### PR Description (what the author says this PR does):\n")
+	sb.WriteString(fmt.Sprintf("## PR #%d\n", run.PREvent.PRNumber))
+	sb.WriteString(wrapSafeDelimiters("pr_title", sanitizeUserInput(util.Truncate(run.PREvent.PRTitle, 200, false))))
+	sb.WriteString("\n\n### PR Description (what the author says this PR does):\n")
 	if run.PREvent.PRBody != "" {
-		sb.WriteString(sanitizeUserInput(util.Truncate(run.PREvent.PRBody, 2000, false)))
+		body := sanitizeUserInput(util.Truncate(run.PREvent.PRBody, 2000, false))
+		sb.WriteString(wrapSafeDelimiters("pr_description", body))
 	} else {
 		sb.WriteString("(empty — no description provided)")
 	}
-	sb.WriteString("\n\n### Actual changes found by code review:\n")
 
-	for _, fr := range run.FileReviews {
-		sb.WriteString(fmt.Sprintf("**%s**\n", fr.Path))
-		for _, c := range fr.Comments {
-			what := c.What
+	var changes strings.Builder
+	for _, review := range run.FileReviews {
+		changes.WriteString(fmt.Sprintf("**%s**\n", sanitizeUserInput(review.Path)))
+		for _, comment := range review.Comments {
+			what := comment.What
 			if what == "" {
-				what = util.Truncate(c.Body, 100, true)
+				what = util.Truncate(comment.Body, 100, true)
 			}
-			sb.WriteString(fmt.Sprintf("- [%s] %s\n", c.Severity, what))
+			changes.WriteString(fmt.Sprintf("- [%s] %s\n", comment.Severity, sanitizeUserInput(what)))
 		}
 	}
+	sb.WriteString("\n\n### Actual changes found by code review:\n")
+	sb.WriteString(wrapSafeDelimiters("review_changes", changes.String()))
 
-	sb.WriteString("\n### Changed files:\n")
-	for _, f := range run.Diff.Files {
-		status := string(f.Status)
-		if f.LargeFile {
+	var changedFiles strings.Builder
+	for _, file := range run.Diff.Files {
+		status := string(file.Status)
+		if file.LargeFile {
 			status += " (large)"
 		}
-		sb.WriteString(fmt.Sprintf("- %s (%s)\n", f.NewName, status))
+		changedFiles.WriteString(fmt.Sprintf("- %s (%s)\n", sanitizeUserInput(file.NewName), status))
 	}
+	sb.WriteString("\n### Changed files:\n")
+	sb.WriteString(wrapSafeDelimiters("changed_files", changedFiles.String()))
 
-	// Diagram instructions (deterministic selection, LLM generates content)
-	specs := selectDiagramTypes(run)
 	if len(specs) > 0 {
 		sb.WriteString("\n### Diagram instructions:\n")
-		sb.WriteString("Generate the following diagrams in the `diagrams` array. Each must be valid Mermaid syntax.\n\n")
-		for _, s := range specs {
-			sb.WriteString(fmt.Sprintf("**%s** (max %d nodes):\n%s\n\n", s.Title, s.MaxNodes, s.Instruction))
+		sb.WriteString("Generate exactly the requested diagram types. Use only the listed N identifiers and directed edges. Every diagram must include matching `evidence` IDs for every drawn edge and at least one diff ID for a drawn node. Do not invent nodes or edges.\n\n")
+		sb.WriteString(formatDiagramGrounding(grounding))
+		sb.WriteString("\n")
+		for _, spec := range specs {
+			sb.WriteString(fmt.Sprintf("**%s** (`type`: `%s`, max %d nodes):\n%s\n\n", spec.Title, spec.Type, spec.MaxNodes, spec.Instruction))
 		}
 	} else {
 		sb.WriteString("\n### Diagram instructions:\nNo diagrams needed — return empty `diagrams` array.\n")
 	}
-
 	return sb.String()
 }
 
-// indexConfirmedPatterns saves high-confidence comments as confirmed repo patterns in Supermemory.
+// indexConfirmedPatterns saves high-confidence comments as confirmed repo patterns in memory.
 // When scoring is available, uses score ≥80 (deep) or ≥90 (non-deep). When skipped, falls back to critical+warning severity.
 func (o *Orchestrator) indexConfirmedPatterns(ctx context.Context, run *PipelineRun, owner, repo string) {
 	if run.Indexer == nil {
@@ -3263,20 +3444,28 @@ func (o *Orchestrator) indexConfirmedPatterns(ctx context.Context, run *Pipeline
 			indexed++
 			content := fmt.Sprintf("Confirmed pattern [%s]: %s (file: %s)", c.Category, c.Body, fr.Path)
 			customID := memory.PatternCustomID(owner, repo, "confirmed", content)
-			resp, err := run.Indexer.IndexPattern(ctx, repo, memory.PatternMemory{
-				Content:  content,
-				CustomID: customID,
-				Source:   "scoring_confirmed",
-				Score:    c.Score,
-				PRNumber: run.PREvent.PRNumber,
-				Category: string(c.Category),
+			var resp *memory.IndexResult
+			authorized, err := memorySinkWrite(ctx, "indexConfirmedPatterns.memory", func(writeCtx context.Context) error {
+				var writeErr error
+				resp, writeErr = run.Indexer.IndexPattern(writeCtx, repo, memory.PatternMemory{
+					Content:  content,
+					CustomID: customID,
+					Source:   "scoring_confirmed",
+					Score:    c.Score,
+					PRNumber: run.PREvent.PRNumber,
+					Category: string(c.Category),
+				})
+				return writeErr
 			})
 			if err != nil {
-				// Non-fatal, but the DB row below lands with a NULL supermemory_id —
+				// Non-fatal, but the DB row below lands with a NULL memory_doc_id —
 				// log the deterministic customID (never model-generated content,
 				// which can quote secrets) so silent write-failures are visible.
 				o.logger.Warn("indexing confirmed pattern", "error", err, "file", fr.Path,
 					"custom_id", customID)
+			}
+			if !authorized {
+				return
 			}
 			// Also persist to local DB so the patterns dashboard stays current
 			var smID *string
@@ -3286,8 +3475,15 @@ func (o *Orchestrator) indexConfirmedPatterns(ctx context.Context, run *Pipeline
 			src := "scoring_confirmed"
 			cat := string(c.Category)
 			prNum := run.PREvent.PRNumber
-			if _, dbErr := o.st.CreatePattern(ctx, run.DBInstallationID, &run.DBRepoID, content, smID, strPtrOrNil("argus:confirmed"), &src, &cat, &prNum, strPtrOrNil(customID)); dbErr != nil {
+			authorized, dbErr := memorySinkWrite(ctx, "indexConfirmedPatterns.pattern", func(writeCtx context.Context) error {
+				_, writeErr := o.st.CreatePattern(writeCtx, run.DBInstallationID, &run.DBRepoID, content, smID, strPtrOrNil("argus:confirmed"), &src, &cat, &prNum, strPtrOrNil(customID), nil)
+				return writeErr
+			})
+			if dbErr != nil {
 				o.logger.Warn("persisting confirmed pattern to DB", "error", dbErr, "file", fr.Path)
+			}
+			if !authorized {
+				return
 			}
 		}
 	}
@@ -3297,7 +3493,7 @@ func (o *Orchestrator) indexConfirmedPatterns(ctx context.Context, run *Pipeline
 	}
 }
 
-// learnPositivePatterns indexes praise comments as positive patterns in Supermemory.
+// learnPositivePatterns indexes praise comments as positive patterns in memory.
 // These patterns suppress future false positives on similar good code.
 func (o *Orchestrator) learnPositivePatterns(ctx context.Context, run *PipelineRun, owner, repo string) int {
 	if run.Indexer == nil || !run.LearnPatterns {
@@ -3322,17 +3518,29 @@ func (o *Orchestrator) learnPositivePatterns(ctx context.Context, run *PipelineR
 			}
 			// Route praise through IndexFeedbackSignal so the doc lands with
 			// type=feedback, polarity=positive, action=confirmed metadata —
-			// pure-prose content (c.Body), structured fields in metadata.
-			if err := run.Indexer.IndexFeedbackSignal(ctx, owner, repo, memory.FeedbackMemory{
-				FilePath:     fr.Path,
-				Category:     string(c.Category),
-				OriginalBody: c.Body,
-				Action:       "confirmed",
-				PRNumber:     run.PREvent.PRNumber,
-			}); err != nil {
+			// pure-prose content, structured fields in metadata.
+			authorized, err := memorySinkWrite(ctx, "learnPositivePatterns.feedback", func(writeCtx context.Context) error {
+				return run.Indexer.IndexFeedbackSignal(writeCtx, owner, repo, memory.FeedbackMemory{
+					FilePath: fr.Path,
+					Category: string(c.Category),
+					// commentTitle, not c.Body: every feedback document holds the
+					// finding STATEMENT, and c here is a live FileComment whose body
+					// may carry the multi-line "Context:\ndiff --git …" blob the LLM
+					// echoes into `what`. Storing that raw would put a diff-dominated
+					// embedding next to one-sentence documents.
+					OriginalBody: commentTitle(c),
+					Action:       "confirmed",
+					PRNumber:     run.PREvent.PRNumber,
+					Source:       memory.SourceAutomaticPraise,
+				})
+			})
+			if err != nil {
 				o.logger.Warn("positive pattern indexing failed", "error", err)
-			} else {
+			} else if authorized {
 				indexed++
+			}
+			if !authorized {
+				return indexed
 			}
 		}
 	}
@@ -3441,20 +3649,24 @@ Findings:
 Return JSON array: [{"pattern": "<concrete reusable pattern text>", "category": "bug|security|architecture|regression"}]
 The "pattern" value must be the actual pattern text, NOT the word "description". Return [] if no repo-specific patterns emerge. JSON array only.`, run.PREvent.RepoFullName, strings.Join(highConf, "\n"))
 
-	resp, err := provider.Complete(ctx, llm.CompletionRequest{
+	request := llm.CompletionRequest{
 		Model:       cfg.Model,
 		System:      "You extract reusable code review patterns from review findings. Be specific to this codebase.",
 		Messages:    []llm.Message{{Role: "user", Content: prompt}},
 		MaxTokens:   500,
 		Temperature: 0.3,
-		JSONMode:    true,
-		Stage:       "pattern_learning",
-	})
+		// This was already enabled when prose responses were observed. Some
+		// providers ignore response_format, and OpenAI-style JSON mode prefers
+		// an object even though this prompt asks for a bare array.
+		JSONMode: true,
+		Stage:    "pattern_learning",
+	}
+	resp, err := provider.Complete(ctx, request)
 	if err != nil {
 		o.logger.Warn("auto-learn LLM call failed", "error", err)
 		return
 	}
-	run.Tokens.Patterns = StageTokens{
+	patternTokens := StageTokens{
 		PromptTokens:     resp.TokensUsed.PromptTokens,
 		CompletionTokens: resp.TokensUsed.CompletionTokens,
 		TotalTokens:      resp.TokensUsed.TotalTokens,
@@ -3462,17 +3674,38 @@ The "pattern" value must be the actual pattern text, NOT the word "description".
 		Model:            cfg.Model,
 		Provider:         cfg.Provider,
 	}
-	run.Tokens.addToTotal(run.Tokens.Patterns)
 
 	type learnedPattern struct {
 		Pattern  string `json:"pattern"`
 		Category string `json:"category"`
 	}
-	patterns, err := unmarshalLLMArray[learnedPattern](resp.Content)
-	if err != nil {
-		o.logger.Warn("auto-learn parse failed", "error", err)
-		return
+	patterns, parseErr := unmarshalLLMArray[learnedPattern](resp.Content)
+	if parseErr != nil {
+		request.Messages = append(request.Messages,
+			llm.Message{Role: "assistant", Content: resp.Content},
+			llm.Message{Role: "user", Content: "Your previous reply was not a JSON array. Reply with ONLY the JSON array."},
+		)
+		retryResp, retryErr := provider.Complete(ctx, request)
+		if retryErr != nil {
+			o.logger.Warn("auto-learn retry failed", "error", retryErr, "parse_error", parseErr)
+			run.Tokens.Patterns = patternTokens
+			run.Tokens.addToTotal(run.Tokens.Patterns)
+			return
+		}
+		patternTokens.PromptTokens += retryResp.TokensUsed.PromptTokens
+		patternTokens.CompletionTokens += retryResp.TokensUsed.CompletionTokens
+		patternTokens.TotalTokens += retryResp.TokensUsed.TotalTokens
+		patternTokens.Cost += retryResp.Cost
+		patterns, parseErr = unmarshalLLMArray[learnedPattern](retryResp.Content)
+		if parseErr != nil {
+			o.logger.Warn("auto-learn parse failed after retry", "error", parseErr)
+			run.Tokens.Patterns = patternTokens
+			run.Tokens.addToTotal(run.Tokens.Patterns)
+			return
+		}
 	}
+	run.Tokens.Patterns = patternTokens
+	run.Tokens.addToTotal(run.Tokens.Patterns)
 	if len(patterns) > 3 {
 		patterns = patterns[:3]
 	}
@@ -3482,15 +3715,23 @@ The "pattern" value must be the actual pattern text, NOT the word "description".
 			continue
 		}
 		customID := memory.PatternCustomID(owner, repo, "learned", p.Pattern)
-		smResp, err := run.Indexer.IndexPattern(ctx, repo, memory.PatternMemory{
-			Content:  p.Pattern,
-			CustomID: customID,
-			Source:   "auto_learn",
-			PRNumber: run.PREvent.PRNumber,
-			Category: p.Category,
+		var smResp *memory.IndexResult
+		authorized, err := memorySinkWrite(ctx, "autoLearnPatterns.memory", func(writeCtx context.Context) error {
+			var writeErr error
+			smResp, writeErr = run.Indexer.IndexPattern(writeCtx, repo, memory.PatternMemory{
+				Content:  p.Pattern,
+				CustomID: customID,
+				Source:   "auto_learn",
+				PRNumber: run.PREvent.PRNumber,
+				Category: p.Category,
+			})
+			return writeErr
 		})
 		if err != nil {
 			o.logger.Warn("indexing auto-learned pattern", "error", err)
+		}
+		if !authorized {
+			return
 		}
 		var smID *string
 		if smResp != nil {
@@ -3499,29 +3740,51 @@ The "pattern" value must be the actual pattern text, NOT the word "description".
 		src := "auto_learn"
 		cat := strPtrOrNil(p.Category)
 		prNum := run.PREvent.PRNumber
-		if _, dbErr := o.st.CreatePattern(ctx, run.DBInstallationID, &run.DBRepoID, p.Pattern, smID, strPtrOrNil("argus:auto_learn"), &src, cat, &prNum, strPtrOrNil(customID)); dbErr != nil {
+		authorized, dbErr := memorySinkWrite(ctx, "autoLearnPatterns.pattern", func(writeCtx context.Context) error {
+			_, writeErr := o.st.CreatePattern(writeCtx, run.DBInstallationID, &run.DBRepoID, p.Pattern, smID, strPtrOrNil("argus:auto_learn"), &src, cat, &prNum, strPtrOrNil(customID), nil)
+			return writeErr
+		})
+		if dbErr != nil {
 			o.logger.Warn("persisting auto-learned pattern", "error", dbErr)
+		}
+		if !authorized {
+			return
 		}
 
 		// Also store as org-level if pattern is generic (doesn't reference repo-specific file paths)
 		if isGenericPattern(p.Pattern, run.Diff) {
 			orgCustomID := memory.PatternCustomID(owner, "", "org_learned", p.Pattern)
 			var orgSmID *string
-			orgResp, orgErr := run.Indexer.IndexSharedPattern(ctx, memory.PatternMemory{
-				Content:  p.Pattern,
-				CustomID: orgCustomID,
-				Source:   "auto_learn",
-				PRNumber: run.PREvent.PRNumber,
-				Category: p.Category,
-				Extra:    map[string]string{"repo": run.PREvent.RepoFullName},
+			var orgResp *memory.IndexResult
+			authorized, orgErr := memorySinkWrite(ctx, "autoLearnPatterns.shared_memory", func(writeCtx context.Context) error {
+				var writeErr error
+				orgResp, writeErr = run.Indexer.IndexSharedPattern(writeCtx, memory.PatternMemory{
+					Content:  p.Pattern,
+					CustomID: orgCustomID,
+					Source:   "auto_learn",
+					PRNumber: run.PREvent.PRNumber,
+					Category: p.Category,
+					Extra:    map[string]string{"repo": run.PREvent.RepoFullName},
+				})
+				return writeErr
 			})
 			if orgErr != nil {
 				o.logger.Warn("indexing org pattern", "error", orgErr)
 			} else if orgResp != nil {
 				orgSmID = &orgResp.ID
 			}
-			if _, dbErr := o.st.CreatePattern(ctx, run.DBInstallationID, nil, p.Pattern, orgSmID, strPtrOrNil("argus:auto_learn"), &src, cat, &prNum, strPtrOrNil(orgCustomID)); dbErr != nil {
+			if !authorized {
+				return
+			}
+			authorized, dbErr := memorySinkWrite(ctx, "autoLearnPatterns.shared_pattern", func(writeCtx context.Context) error {
+				_, writeErr := o.st.CreatePattern(writeCtx, run.DBInstallationID, nil, p.Pattern, orgSmID, strPtrOrNil("argus:auto_learn"), &src, cat, &prNum, strPtrOrNil(orgCustomID), map[string]string{"repo": run.PREvent.RepoFullName})
+				return writeErr
+			})
+			if dbErr != nil {
 				o.logger.Warn("persisting org-level pattern", "error", dbErr)
+			}
+			if !authorized {
+				return
 			}
 			o.logger.Info("promoted pattern to org level", "pattern", util.Truncate(p.Pattern, 80, true))
 		}
@@ -3530,7 +3793,7 @@ The "pattern" value must be the actual pattern text, NOT the word "description".
 	if len(patterns) > 0 {
 		if run.EventBus != nil {
 			for _, p := range patterns {
-				run.EventBus.Publish(run.ReviewID, EventPatternLearned, map[string]string{
+				run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventPatternLearned, map[string]string{
 					"pattern":  p.Pattern,
 					"category": p.Category,
 				})
@@ -3637,15 +3900,23 @@ Return [] if no clear conventions emerge. JSON array only.`, run.PREvent.RepoFul
 		}
 		content := fmt.Sprintf("Convention [%s]: %s", c.Category, c.Convention)
 		customID := memory.PatternCustomID(owner, repo, "convention", c.Convention)
-		smResp, err := run.Indexer.IndexPattern(ctx, repo, memory.PatternMemory{
-			Content:  content,
-			CustomID: customID,
-			Source:   "convention_extraction",
-			PRNumber: run.PREvent.PRNumber,
-			Category: c.Category,
+		var smResp *memory.IndexResult
+		authorized, err := memorySinkWrite(ctx, "extractConventions.memory", func(writeCtx context.Context) error {
+			var writeErr error
+			smResp, writeErr = run.Indexer.IndexPattern(writeCtx, repo, memory.PatternMemory{
+				Content:  content,
+				CustomID: customID,
+				Source:   "convention_extraction",
+				PRNumber: run.PREvent.PRNumber,
+				Category: c.Category,
+			})
+			return writeErr
 		})
 		if err != nil {
 			o.logger.Warn("indexing convention", "error", err)
+		}
+		if !authorized {
+			return
 		}
 		var smID *string
 		if smResp != nil {
@@ -3654,8 +3925,15 @@ Return [] if no clear conventions emerge. JSON array only.`, run.PREvent.RepoFul
 		src := "convention"
 		cat := strPtrOrNil(c.Category)
 		prNum := run.PREvent.PRNumber
-		if _, dbErr := o.st.CreatePattern(ctx, run.DBInstallationID, &run.DBRepoID, content, smID, strPtrOrNil("argus:convention"), &src, cat, &prNum, strPtrOrNil(customID)); dbErr != nil {
+		authorized, dbErr := memorySinkWrite(ctx, "extractConventions.pattern", func(writeCtx context.Context) error {
+			_, writeErr := o.st.CreatePattern(writeCtx, run.DBInstallationID, &run.DBRepoID, content, smID, strPtrOrNil("argus:convention"), &src, cat, &prNum, strPtrOrNil(customID), nil)
+			return writeErr
+		})
+		if dbErr != nil {
 			o.logger.Warn("persisting convention pattern", "error", dbErr)
+		}
+		if !authorized {
+			return
 		}
 	}
 
@@ -3790,17 +4068,26 @@ Max 200 words. Be concrete.`
 		run.Tokens.addToTotal(fileTok)
 
 		customID := memory.SynthesisCustomID(owner, repo, fc.path)
-		_, err = run.Indexer.IndexPattern(ctx, repo, memory.PatternMemory{
-			Content:  resp.Content,
-			CustomID: customID,
-			Source:   "synthesis",
-			PRNumber: run.PREvent.PRNumber,
-			FilePath: fc.path,
+		authorized, err := memorySinkWrite(ctx, "synthesizeFileMemories.memory", func(writeCtx context.Context) error {
+			_, writeErr := run.Indexer.IndexPattern(writeCtx, repo, memory.PatternMemory{
+				Content:  resp.Content,
+				CustomID: customID,
+				Source:   "synthesis",
+				PRNumber: run.PREvent.PRNumber,
+				FilePath: fc.path,
+			})
+			return writeErr
 		})
 		if err != nil {
 			o.logger.Warn("indexing file synthesis", "error", err, "file", fc.path)
 			failed++
+			if !authorized {
+				return
+			}
 			continue
+		}
+		if !authorized {
+			return
 		}
 		succeeded++
 	}
@@ -3811,7 +4098,7 @@ Max 200 words. Be concrete.`
 	}
 }
 
-// indexPRSummary stores a lightweight PR summary in Supermemory for cross-PR context.
+// indexPRSummary stores a lightweight PR summary in memory for cross-PR context.
 // No LLM call — built from existing synthesis output.
 func (o *Orchestrator) indexPRSummary(ctx context.Context, run *PipelineRun, owner, repo string) {
 	if run.Indexer == nil || run.Synthesis == nil {
@@ -3829,20 +4116,26 @@ func (o *Orchestrator) indexPRSummary(ctx context.Context, run *PipelineRun, own
 		util.Truncate(run.Synthesis.Summary, 800, false))
 
 	customID := memory.PRSummaryCustomID(owner, repo, run.PREvent.PRNumber)
-	_, err := run.Indexer.IndexPattern(ctx, repo, memory.PatternMemory{
-		Content:  content,
-		CustomID: customID,
-		Source:   "pr_summary",
-		PRNumber: run.PREvent.PRNumber,
-		PRAuthor: run.PREvent.PRAuthor,
+	authorized, err := memorySinkWrite(ctx, "indexPRSummary.memory", func(writeCtx context.Context) error {
+		_, writeErr := run.Indexer.IndexPattern(writeCtx, repo, memory.PatternMemory{
+			Content:  content,
+			CustomID: customID,
+			Source:   "pr_summary",
+			PRNumber: run.PREvent.PRNumber,
+			PRAuthor: run.PREvent.PRAuthor,
+		})
+		return writeErr
 	})
 	if err != nil {
 		o.logger.Warn("indexing PR summary", "error", err)
 	}
+	if !authorized {
+		return
+	}
 	publishMemoryIndexed(run, "pr_summary", err == nil, 1)
 }
 
-// indexArchitectureSummary indexes the repo's top choke points into Supermemory so
+// indexArchitectureSummary indexes the repo's top choke points into memory so
 // future reviews can surface architectural risk context. Idempotent (uses customID per repo).
 // Skips repos with fewer than 3 choke points.
 func (o *Orchestrator) indexArchitectureSummary(ctx context.Context, run *PipelineRun, owner, repo string) {
@@ -3870,20 +4163,28 @@ func (o *Orchestrator) indexArchitectureSummary(ctx context.Context, run *Pipeli
 	}
 	sb.WriteString("\nWhen reviewing changes to these files, apply extra scrutiny: defects propagate to all dependent modules.")
 
-	// Sanitize both segments individually so characters Supermemory rejects
+	// Sanitize both segments individually so characters the customID charset rejects
 	// on customId (`/`, `(`, `)`, `[`, `]`, `.`, etc.) can't sneak in via
 	// unusual owner/repo names. The literal format string uses `--` between
 	// them — not `/` — so the customId stays in the allowed char set.
 	customID := fmt.Sprintf("arch-summary:%s--%s", memory.CustomIDSanitize(owner), memory.CustomIDSanitize(repo))
-	_, err = run.Indexer.IndexPattern(chokeCtx, repo, memory.PatternMemory{
-		Content:  sb.String(),
-		CustomID: customID,
-		Source:   "arch_summary",
-		Extra:    map[string]string{"choke_points": fmt.Sprintf("%d", len(rows))},
+	authorized, err := memorySinkWrite(chokeCtx, "indexArchitectureSummary.memory", func(writeCtx context.Context) error {
+		_, writeErr := run.Indexer.IndexPattern(writeCtx, repo, memory.PatternMemory{
+			Content:  sb.String(),
+			CustomID: customID,
+			Source:   "arch_summary",
+			Extra:    map[string]string{"choke_points": fmt.Sprintf("%d", len(rows))},
+		})
+		return writeErr
 	})
 	if err != nil {
 		o.logger.Warn("indexing arch summary", "error", err)
-		publishMemoryIndexed(run, "arch_summary", false, 0)
+		if authorized {
+			publishMemoryIndexed(run, "arch_summary", false, 0)
+		}
+		return
+	}
+	if !authorized {
 		return
 	}
 	o.logger.Info("indexed architecture summary", "owner", owner, "repo", repo, "choke_points", len(rows))
@@ -3891,7 +4192,7 @@ func (o *Orchestrator) indexArchitectureSummary(ctx context.Context, run *Pipeli
 }
 
 // extractArchitectureGraph uses an LLM to identify architectural components from
-// changed files and upserts nodes/edges into the code graph.
+// changed files and stores them as a separate LLM annotation snapshot.
 func (o *Orchestrator) extractArchitectureGraph(ctx context.Context, run *PipelineRun, owner, repo string) {
 	if run.Diff == nil || len(run.Diff.Files) == 0 {
 		return
@@ -3943,9 +4244,14 @@ Rules:
 		Messages: []llm.Message{
 			{Role: "user", Content: prompt.String()},
 		},
-		MaxTokens:   600,
-		Temperature: 0.2,
-		Stage:       "arch_graph",
+		// gpt-5.x counts reasoning and visible JSON against MaxTokens. Budget
+		// 4000 so reasoning burn cannot consume the space needed for the
+		// documented maximum of 15 nodes plus their dependency edges.
+		MaxTokens:       4000,
+		Temperature:     0.2,
+		JSONMode:        true,
+		ReasoningEffort: llm.ReasoningLow,
+		Stage:           "arch_graph",
 	}
 
 	resp, err := provider.Complete(graphCtx, req)
@@ -3992,55 +4298,48 @@ Rules:
 		Edges []graphEdge `json:"edges"`
 	}
 
-	jsonStr := extractJSON(resp.Content)
 	var result graphResult
-	if err := json.Unmarshal([]byte(jsonStr), &result); err != nil {
-		o.logger.Warn("extractArchitectureGraph parse failed", "error", err, "response_prefix", util.Truncate(resp.Content, 200, true))
+	salvaged, parseErr := unmarshalLLMObjectWithSalvage(resp.Content, &result)
+	if parseErr != nil {
+		o.logger.Warn("extractArchitectureGraph parse failed", "error", parseErr, "response_prefix", util.Truncate(resp.Content, 200, true))
+		return
+	}
+	if salvaged && len(result.Nodes) == 0 {
+		// Never erase a prior graph snapshot with an empty partial response.
+		o.logger.Warn("extractArchitectureGraph salvage recovered no nodes", "response_prefix", util.Truncate(resp.Content, 200, true))
 		return
 	}
 
-	if len(result.Nodes) == 0 {
-		return
-	}
-
-	// Delete stale nodes for removed files
-	for _, f := range run.Diff.Files {
-		if f.Status == diff.FileDeleted {
-			if err := o.st.DeleteNodesByFile(ctx, run.DBRepoID, f.NewName); err != nil {
-				o.logger.Warn("deleteNodesByFile", "error", err, "file", f.NewName)
-			}
-		}
-	}
-
-	// Upsert nodes, collect name→ID
-	nodeIDs := make(map[string]int64, len(result.Nodes))
+	nodes := make([]store.ArchitectureAnnotationNode, 0, len(result.Nodes))
 	for _, n := range result.Nodes {
-		if n.Name == "" || n.FilePath == "" || n.Kind == "" {
-			continue
-		}
-		id, err := o.st.UpsertCodeNode(ctx, run.DBRepoID, n.Kind, n.Name, n.FilePath, 0, 0, n.Language, run.PREvent.PRNumber)
-		if err != nil {
-			o.logger.Warn("upsertCodeNode", "error", err, "name", n.Name)
-			continue
-		}
-		nodeIDs[n.Name] = id
+		nodes = append(nodes, store.ArchitectureAnnotationNode{
+			Name: n.Name, Kind: n.Kind, FilePath: n.FilePath, Language: n.Language,
+		})
 	}
-
-	// Upsert edges
+	edges := make([]store.ArchitectureAnnotationEdgeInput, 0, len(result.Edges))
 	for _, e := range result.Edges {
-		srcID, ok1 := nodeIDs[e.Source]
-		tgtID, ok2 := nodeIDs[e.Target]
-		if !ok1 || !ok2 {
-			o.logger.Debug("extractArchitectureGraph: skipping edge, unresolved name", "source", e.Source, "target", e.Target)
-			continue
-		}
-		if err := o.st.UpsertCodeEdge(ctx, run.DBRepoID, srcID, tgtID, e.Kind); err != nil {
-			o.logger.Warn("upsertCodeEdge", "error", err, "edge", e.Source+"->"+e.Target)
-		}
+		edges = append(edges, store.ArchitectureAnnotationEdgeInput{
+			Source: e.Source, Target: e.Target, Kind: e.Kind,
+		})
+	}
+	var writtenNodes, writtenEdges int
+	authorized, err := memorySinkWrite(ctx, "extractArchitectureGraph.annotations", func(writeCtx context.Context) error {
+		var writeErr error
+		writtenNodes, writtenEdges, writeErr = o.st.ReplaceArchitectureAnnotations(
+			writeCtx, run.DBRepoID, run.PREvent.PRNumber, nodes, edges,
+		)
+		return writeErr
+	})
+	if err != nil {
+		o.logger.Warn("replaceArchitectureAnnotations", "error", err)
+		return
+	}
+	if !authorized {
+		return
 	}
 
-	o.logger.Info("extracted architecture graph", "nodes", len(nodeIDs), "edges", len(result.Edges), "repo", run.PREvent.RepoFullName)
-	publishMemoryIndexed(run, "arch_graph", true, len(nodeIDs))
+	o.logger.Info("extracted architecture annotations", "nodes", writtenNodes, "edges", writtenEdges, "repo", run.PREvent.RepoFullName)
+	publishMemoryIndexed(run, "arch_graph", true, writtenNodes)
 }
 
 // ─── Lead Agent Helpers ──────────────────────────────────────────────────────
@@ -4065,6 +4364,33 @@ func diffFilePaths(d *diff.PatchSet) []string {
 	paths := make([]string, 0, len(d.Files))
 	for _, f := range d.Files {
 		paths = append(paths, f.NewName)
+	}
+	return paths
+}
+
+// blastRadiusBasePaths maps a PR diff onto the published default-branch
+// graph. Deleted and renamed files are represented by their old path because
+// that is where existing base dependents point; other changes use the current
+// path. The PR head itself is never projected into code_nodes/code_edges.
+func blastRadiusBasePaths(d *diff.PatchSet) []string {
+	if d == nil {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(d.Files))
+	paths := make([]string, 0, len(d.Files))
+	for _, f := range d.Files {
+		path := f.NewName
+		if (f.Status == diff.FileDeleted || f.Status == diff.FileRenamed) && f.OldName != "" {
+			path = f.OldName
+		}
+		if path == "" {
+			continue
+		}
+		if _, duplicate := seen[path]; duplicate {
+			continue
+		}
+		seen[path] = struct{}{}
+		paths = append(paths, path)
 	}
 	return paths
 }
@@ -4260,7 +4586,8 @@ func (o *Orchestrator) validateStage(ctx context.Context, run *PipelineRun) erro
 			for _, p := range changedPaths {
 				changedSet[p] = true
 			}
-			nodes, err := o.st.GetBlastRadius(ctx, run.DBRepoID, changedPaths, 2)
+			basePaths := blastRadiusBasePaths(run.Diff)
+			nodes, err := o.st.GetBlastRadius(ctx, run.DBInstallationID, run.DBRepoID, basePaths, 2)
 			if err != nil {
 				o.logger.Warn("[validate] blast radius query failed", "error", err, "pr", run.PREvent.PRNumber)
 				return
@@ -4269,15 +4596,19 @@ func (o *Orchestrator) validateStage(ctx context.Context, run *PipelineRun) erro
 				return
 			}
 			depContents := make(map[string]string)
-			seen := make(map[string]bool)
-			for _, n := range nodes {
-				if n.Depth != 1 || changedSet[n.FilePath] || seen[n.FilePath] || len(depContents) >= 3 {
-					continue
+			// Sibling-repository dependents are excluded from the fetch: their
+			// path resolved against THIS repository at HeadSHA is a different
+			// file, and analyzeBlastRadius would ask the lead model which
+			// assumptions the diff violates in source that never depended on it —
+			// inventing impacts that get stamped onto every comment's
+			// BlastRadius count.
+			for _, path := range dependentFetchPaths(nodes, run.DBRepoID, changedSet) {
+				if len(depContents) >= 3 {
+					break
 				}
-				seen[n.FilePath] = true
-				content, fetchErr := o.ghClient.GetFileContent(ctx, run.PREvent.InstallationID, owner, repo, n.FilePath, run.PREvent.HeadSHA)
+				content, fetchErr := o.ghClient.GetFileContent(ctx, run.PREvent.InstallationID, owner, repo, path, run.PREvent.HeadSHA)
 				if fetchErr == nil {
-					depContents[n.FilePath] = truncateLines(content, 200)
+					depContents[path] = truncateLines(content, 200)
 				}
 			}
 			if len(depContents) > 0 {
@@ -4408,10 +4739,21 @@ func (o *Orchestrator) validateStage(ctx context.Context, run *PipelineRun) erro
 // post() to run its pre-post and post-review memory sink clusters under one
 // panic-isolation loop.
 func (o *Orchestrator) indexer() *PostReviewIndexer {
-	return &PostReviewIndexer{o: o}
+	return &PostReviewIndexer{o: o, authority: o.sinkAuthority}
 }
 
-func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghReviewID int64, owner, repo string) {
+func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghReviewID int64, owner, repo string, submission *ComposedReview) error {
+	type inlineManifestKey struct {
+		Path, Body      string
+		Line, StartLine int
+	}
+	selected := make(map[inlineManifestKey]int)
+	if submission != nil {
+		for _, c := range submission.GitHub.Comments {
+			selected[inlineManifestKey{Path: c.Path, Body: c.Body, Line: c.Line, StartLine: c.StartLine}]++
+		}
+	}
+
 	// Fetch GitHub comment IDs for the review we just posted
 	type ghCommentKey struct {
 		Path string
@@ -4480,18 +4822,32 @@ func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghRe
 			}
 
 			formattedBody := formatCommentBody(c)
+			manifestKey := inlineManifestKey{Path: fr.Path, Body: formattedBody, Line: c.Line, StartLine: c.StartLine}
+			wasPostedInline := selected[manifestKey] > 0
+			if wasPostedInline {
+				selected[manifestKey]--
+			}
 			// Suppressed (dropped) comments are still persisted — flagged via
 			// suppressed_reason + state='suppressed' and with github_comment_id
 			// nil (never posted) — so the dashboard keeps the full record while
 			// the PR stays clean.
-			if err := o.st.CreateReviewComment(ctx, run.ReviewID, fr.Path, startLine, &line, &side, formattedBody, &sev, &cat, specialist, snippet, confidenceScore, ghCommentID, matchedPatternID, matchedPatternScore, enforcedRule, c.IsNewFinding, suppressedReason, state); err != nil {
+			if err := o.st.CreateReviewCommentWithInlineManifest(ctx, run.ReviewID, run.AttemptGeneration, fr.Path, startLine, &line, &side, formattedBody, &sev, &cat, specialist, snippet, confidenceScore, ghCommentID, matchedPatternID, matchedPatternScore, enforcedRule, c.IsNewFinding, suppressedReason, state, wasPostedInline); err != nil {
+				if errors.Is(err, store.ErrReviewAttemptStale) {
+					return context.Canceled
+				}
 				o.logger.Error("persisting review comment", "error", err, "file", fr.Path)
 			}
 
 		}
 	}
 
-	// Batch index all comments to Supermemory in a single API call. The write
+	for key, remaining := range selected {
+		if remaining != 0 {
+			return fmt.Errorf("persisting inline manifest: %d selected comments were not stored at %s:%d", remaining, key.Path, key.Line)
+		}
+	}
+
+	// Batch index all comments to memory in a single call. The write
 	// floor keeps low-signal findings out of the reviews container: critical/
 	// warning always, suggestions only when scored >= reviewSuggestionScoreFloor,
 	// praise never. (DB persistence above is unfiltered — the dashboard shows
@@ -4516,10 +4872,31 @@ func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghRe
 				})
 			}
 		}
-		if err := run.Indexer.IndexReviewCommentsBatch(ctx, owner, repo, batch); err != nil {
+
+		// The batch is fully prepared before the guard acquires the review-row
+		// lock. Only the mutation is linearized with BeginReviewRetry, closing
+		// the scalar check/write race without holding that lock across unrelated
+		// GitHub, comment-persistence, or batch-building work.
+		authority := o.sinkAuthority
+		if authority == nil {
+			authority = o.st
+		}
+		sinkCtx, _ := withMemorySinkAttempt(ctx, o, authority, run)
+		authorized, err := memorySinkWrite(sinkCtx, "indexComments.memory", func(writeCtx context.Context) error {
+			return run.Indexer.IndexReviewCommentsBatch(writeCtx, owner, repo, batch)
+		})
+		if err != nil {
 			o.logger.Error("batch indexing review comments", "error", err, "count", len(batch))
+			if !authorized {
+				return fmt.Errorf("checking review attempt before comment memory: %w", err)
+			}
+			return nil
+		}
+		if !authorized {
+			return context.Canceled
 		}
 	}
+	return nil
 }
 
 // backfillGitHubCommentIDs binds each just-posted GitHub review comment to its
@@ -4532,45 +4909,142 @@ func (o *Orchestrator) indexComments(ctx context.Context, run *PipelineRun, ghRe
 // Now the pairing runs in Go (pairCommentsToRows): each posted comment claims
 // exactly one row on its (path, line), preferring an exact body match, so
 // same-line findings bind to distinct rows and distinct threads.
-func (o *Orchestrator) backfillGitHubCommentIDs(ctx context.Context, run *PipelineRun, ghReviewID int64, owner, repo string) {
-	if ghReviewID == 0 {
-		return
+
+// postedReviewCommentLine returns the immutable post-time anchor used by the
+// persisted row. Reviews are pinned to the posting commit, while GitHub's line
+// can move as the PR head advances; original_line continues to match end_line.
+func postedReviewCommentLine(comment *gh.PullRequestComment) int {
+	if line := comment.GetOriginalLine(); line != 0 {
+		return line
 	}
-	ghComments, err := o.ghClient.ListReviewComments(ctx, run.PREvent.InstallationID, owner, repo, run.PREvent.PRNumber, ghReviewID)
+	if line := comment.GetLine(); line != 0 {
+		return line
+	}
+	return comment.GetPosition()
+}
+
+func (o *Orchestrator) backfillGitHubCommentIDs(ctx context.Context, run *PipelineRun, ghReviewID int64, owner, repo string) error {
+	if ghReviewID <= 0 {
+		return fmt.Errorf("backfilling GitHub comments: invalid review id %d", ghReviewID)
+	}
+	expected, hasManifest, err := o.st.ExpectedReviewInlineCount(ctx, run.ReviewID, run.AttemptGeneration)
 	if err != nil {
-		o.logger.Error("listing review comments for backfill", "error", err)
-		return
+		return err
 	}
+	if !hasManifest {
+		return errors.New("backfilling GitHub comments: exact inline manifest is unavailable")
+	}
+	client := o.postedReviewBindingClient()
+	if client == nil {
+		return errors.New("backfilling GitHub comments: client unavailable")
+	}
+	ghComments, err := client.ListReviewComments(ctx, run.PREvent.InstallationID, owner, repo, run.PREvent.PRNumber, ghReviewID)
+	if err != nil {
+		return fmt.Errorf("listing review comments for backfill: %w", err)
+	}
+	remoteByID := make(map[int64]*gh.PullRequestComment, len(ghComments))
+	for _, comment := range ghComments {
+		id := comment.GetID()
+		if id <= 0 {
+			return errors.New("backfilling GitHub comments: remote comment has no database id")
+		}
+		if _, duplicate := remoteByID[id]; duplicate {
+			return fmt.Errorf("backfilling GitHub comments: duplicate remote id %d", id)
+		}
+		remoteByID[id] = comment
+	}
+	if len(remoteByID) != expected {
+		return fmt.Errorf("backfilling GitHub comments: delivered=%d expected=%d", len(remoteByID), expected)
+	}
+
+	storedIDs, err := o.st.ListPostedReviewGitHubCommentIDs(ctx, run.ReviewID, run.AttemptGeneration)
+	if err != nil {
+		return err
+	}
+	bound := make(map[int64]struct{}, len(storedIDs))
+	for _, id := range storedIDs {
+		if _, duplicate := bound[id]; duplicate {
+			return fmt.Errorf("backfilling GitHub comments: duplicate stored binding %d", id)
+		}
+		if _, exists := remoteByID[id]; !exists {
+			return fmt.Errorf("backfilling GitHub comments: stored binding %d is not in delivered review", id)
+		}
+		bound[id] = struct{}{}
+	}
+
 	rows, err := o.st.ListUnboundReviewComments(ctx, run.ReviewID)
 	if err != nil {
-		o.logger.Error("loading unbound review comments for backfill", "error", err, "review_id", run.ReviewID)
-		return
+		return fmt.Errorf("loading unbound review comments for backfill: %w", err)
 	}
 	unbound := make([]unboundCommentRow, 0, len(rows))
 	for _, r := range rows {
 		unbound = append(unbound, unboundCommentRow{ID: r.ID, Path: r.FilePath, Line: r.Line, Body: r.Body})
 	}
-	posted := make([]postedComment, 0, len(ghComments))
+	posted := make([]postedComment, 0, len(remoteByID)-len(bound))
 	for _, gc := range ghComments {
-		line := gc.GetLine()
-		if line == 0 {
-			line = gc.GetPosition()
+		if _, alreadyBound := bound[gc.GetID()]; alreadyBound {
+			continue
 		}
-		posted = append(posted, postedComment{GithubID: gc.GetID(), Path: gc.GetPath(), Line: line, Body: gc.GetBody()})
+		posted = append(posted, postedComment{
+			GithubID:     gc.GetID(),
+			Path:         gc.GetPath(),
+			Line:         postedReviewCommentLine(gc),
+			GitHubLine:   gc.GetLine(),
+			OriginalLine: gc.GetOriginalLine(),
+			Position:     gc.GetPosition(),
+			Body:         gc.GetBody(),
+		})
 	}
-
+	if len(unbound) != len(posted) {
+		return fmt.Errorf("backfilling GitHub comments: unbound manifest rows=%d unbound remote comments=%d", len(unbound), len(posted))
+	}
+	pairs, pairErr := pairCommentsToRows(unbound, posted)
+	if pairErr != nil {
+		return fmt.Errorf("backfilling GitHub comments: %w", pairErr)
+	}
+	if len(pairs) != len(posted) {
+		return fmt.Errorf("backfilling GitHub comments: paired=%d unbound=%d", len(pairs), len(posted))
+	}
 	updated := 0
-	for commentID, ghID := range pairCommentsToRows(unbound, posted) {
-		ok, err := o.st.BindGitHubCommentID(ctx, commentID, ghID)
-		if err != nil {
-			o.logger.Error("backfilling github_comment_id", "error", err, "comment_id", commentID)
-		} else if ok {
+	var bindErrors []error
+	for commentID, ghID := range pairs {
+		ok, bindErr := o.st.BindGitHubCommentID(ctx, commentID, ghID)
+		if bindErr != nil {
+			bindErrors = append(bindErrors, fmt.Errorf("comment %s: %w", commentID, bindErr))
+		} else if !ok {
+			bindErrors = append(bindErrors, fmt.Errorf("comment %s: binding compare-and-set lost", commentID))
+		} else {
 			updated++
 		}
+	}
+	if err := errors.Join(bindErrors...); err != nil {
+		return fmt.Errorf("backfilling github_comment_id: %w", err)
 	}
 	if updated > 0 {
 		o.logger.Info("backfilled github comment IDs", "count", updated, "review_id", run.ReviewID)
 	}
+
+	storedIDs, err = o.st.ListPostedReviewGitHubCommentIDs(ctx, run.ReviewID, run.AttemptGeneration)
+	if err != nil {
+		return err
+	}
+	if len(storedIDs) != expected {
+		return fmt.Errorf("backfilling GitHub comments: bound=%d expected=%d", len(storedIDs), expected)
+	}
+	verified := make(map[int64]struct{}, len(storedIDs))
+	for _, id := range storedIDs {
+		if _, duplicate := verified[id]; duplicate {
+			return fmt.Errorf("backfilling GitHub comments: duplicate final binding %d", id)
+		}
+		if _, exists := remoteByID[id]; !exists {
+			return fmt.Errorf("backfilling GitHub comments: final binding %d is not remote", id)
+		}
+		verified[id] = struct{}{}
+	}
+	if len(verified) != len(remoteByID) {
+		return fmt.Errorf("backfilling GitHub comments: remote and stored id sets differ")
+	}
+	return nil
 }
 
 // loadPrompts fetches custom prompt templates for a repo and returns a stage→prompt_text map.
@@ -4596,7 +5070,36 @@ func (o *Orchestrator) resolveReviewProvider(ctx context.Context, run *PipelineR
 	return cfg, provider, nil
 }
 
-// publishMemoryIndexed emits an EventMemoryIndexed for the given Supermemory
+// learnedMemoryCounter reads back what a review actually wrote into memory.
+// Narrowed to the one method so the append below is testable without a
+// database — the store satisfies it.
+type learnedMemoryCounter interface {
+	CountReviewMemoriesByType(ctx context.Context, installationID int64, reviewID uuid.UUID) ([]store.LearnedMemoryCount, error)
+}
+
+// appendLearnedLine adds the one-line memory footnote to the summary body the
+// review is about to post.
+//
+// Best-effort by construction: the review itself is not at risk, so a failed or
+// slow count must never delay or fail the post — it just omits the line. The
+// 5s bound matches every other memory-path read for the same reason.
+func appendLearnedLine(ctx context.Context, counter learnedMemoryCounter, run *PipelineRun, submission *ComposedReview, logger *slog.Logger) {
+	if run.Indexer == nil {
+		return // memory unconfigured for this org: nothing to report
+	}
+	countCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	counts, err := counter.CountReviewMemoriesByType(countCtx, run.DBInstallationID, run.ReviewID)
+	if err != nil {
+		logger.Warn("counting learned memories for the review comment", "error", err, "review_id", run.ReviewID)
+		return
+	}
+	if line := RenderLearnedLine(counts); line != "" {
+		submission.GitHub.Summary += line
+	}
+}
+
+// publishMemoryIndexed emits an EventMemoryIndexed for the given memory
 // upsert. `kind` is one of the 7 closed values (patterns, patterns_praise,
 // conventions, file_synthesis, pr_summary, arch_summary, arch_graph). `success`
 // is false when the upsert returned an error — the UI renders failures with a
@@ -4605,7 +5108,7 @@ func publishMemoryIndexed(run *PipelineRun, kind string, success bool, count int
 	if run == nil || run.EventBus == nil {
 		return
 	}
-	run.EventBus.Publish(run.ReviewID, EventMemoryIndexed, map[string]any{
+	run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventMemoryIndexed, map[string]any{
 		"kind":    kind,
 		"success": success,
 		"count":   count,
@@ -4793,128 +5296,60 @@ func capitalizeCategory(cat string) string {
 // abbreviations like "Dr.", "i.e.") that plain `. ` split tripped on.
 var commentTitleSentenceRe = regexp.MustCompile(`[.!?]\s+[A-Z]`)
 
-// commentTitle returns the one-line headline for the comment.
-// The LLM is prompted to produce `what` as a single short sentence, but when
-// it emits multiple we take only the first. The sentence boundary is detected
-// via a regex that requires an uppercase letter after whitespace, which avoids
-// breaking on mid-word periods. Falls back to a 300-char rune-boundary-safe
-// truncation (via util.Truncate) when no sentence boundary is found.
+// statementMaxBytes caps a finding statement. The cap is a budget for the WHOLE
+// result: findingStatement leaves anything already within
+// statementMaxBytes+len("...") alone, so re-normalising an already-truncated
+// statement is a no-op instead of chewing three more bytes off it each pass.
+// That idempotence is what makes the round trip in
+// TestFindingTextRoundTripsThroughPostedBody exact.
+const statementMaxBytes = 300
+
+// findingStatement is THE normalisation of free finding text into the one-line
+// statement, and the single function both halves of the dismissal comparison
+// end with — commentTitle on the read/render side, FindingTextFromPostedBody on
+// the write side.
+//
+// WHY ONE FUNCTION: the two sides used to normalise differently.
+// FindingTextFromPostedBody cut at the first "\n"; commentTitle only truncated,
+// keeping newlines. For a finding whose `what` is multi-line — 6 of 200 live
+// findings carry a "Context:\ndiff --git a/…" blob the LLM echoed into `what` —
+// the read side then embedded ~300 bytes dominated by diff while the write side
+// stored the clean opening sentence. That is the same cross-shape mismatch this
+// whole path exists to eliminate, reintroduced on exactly the corpus slice that
+// needed it most. A single normaliser cannot drift from itself.
+//
+// The three steps, in order:
+//  1. first line only — everything after it is context the LLM appended to
+//     `what`, not part of the claim;
+//  2. first sentence, if a boundary exists before byte 280. The regex requires
+//     an uppercase letter after whitespace, which avoids splitting "v1.2",
+//     "e.g." and URLs the way a plain ". " split did;
+//  3. otherwise a rune-boundary-safe truncation to the byte budget.
+func findingStatement(src string) string {
+	s := strings.TrimSpace(src)
+	if line, _, multiline := strings.Cut(s, "\n"); multiline {
+		s = strings.TrimSpace(line)
+	}
+	if idx := commentTitleSentenceRe.FindStringIndex(s); idx != nil && idx[0] > 0 && idx[0] < 280 {
+		// idx[0] points at the terminal punctuation; include it.
+		return s[:idx[0]+1]
+	}
+	if len(s) <= statementMaxBytes+len("...") {
+		return s
+	}
+	return util.Truncate(s, statementMaxBytes, true)
+}
+
+// commentTitle returns the one-line headline for the comment — the statement
+// formatCommentBody renders into the header, the enricher queries dismissals
+// with, and FindingTextFromPostedBody recovers back out of a posted body.
+// `what` is the source when the LLM supplied one; otherwise the body.
 func commentTitle(c FileComment) string {
 	src := c.What
 	if src == "" {
 		src = c.Body
 	}
-	if idx := commentTitleSentenceRe.FindStringIndex(src); idx != nil && idx[0] > 0 && idx[0] < 280 {
-		// idx[0] points at the terminal punctuation; include it.
-		return src[:idx[0]+1]
-	}
-	return util.Truncate(src, 300, true)
-}
-
-type diagramSpec struct {
-	Type        string // "sequence", "dataflow", "dependency"
-	Title       string
-	Instruction string // LLM instruction for this diagram type
-	MaxNodes    int
-}
-
-// selectDiagramTypes picks up to 2 diagram types based on PR characteristics.
-// Priority: sequence > dataflow > dependency.
-func selectDiagramTypes(run *PipelineRun) []diagramSpec {
-	var specs []diagramSpec
-
-	fileCount := 0
-	if run.Diff != nil {
-		fileCount = len(run.Diff.Files)
-	}
-
-	// Sequence diagram: 3+ changed files
-	if fileCount >= 3 {
-		specs = append(specs, diagramSpec{
-			Type:  "sequence",
-			Title: "Call Sequence",
-			Instruction: "Generate a Mermaid sequenceDiagram showing which changed files/modules call each other. " +
-				"Annotate any participants involved in bugs with ⚠️. Max 12 participants.",
-			MaxNodes: 12,
-		})
-	}
-
-	// Data flow diagram: security findings, sensitive file paths, or injection-related content
-	dataflow := false
-	sensitivePaths := []string{
-		"auth", "token", "session", "fetch", "api", "login",
-		"oauth", "password", "credential", "validate", "input", "config",
-	}
-	contentKeywords := []string{
-		"injection", "xss", "ssrf", "redirect", "sanitiz", "escap",
-	}
-
-	for _, fr := range run.FileReviews {
-		if dataflow {
-			break
-		}
-		for _, c := range fr.Comments {
-			if strings.ToLower(string(c.Category)) == "security" {
-				dataflow = true
-				break
-			}
-			lower := strings.ToLower(c.What + " " + c.Body)
-			for _, kw := range contentKeywords {
-				if strings.Contains(lower, kw) {
-					dataflow = true
-					break
-				}
-			}
-			if dataflow {
-				break
-			}
-		}
-	}
-
-	if !dataflow && run.Diff != nil {
-		for _, f := range run.Diff.Files {
-			lowerPath := strings.ToLower(f.NewName)
-			for _, sp := range sensitivePaths {
-				if strings.Contains(lowerPath, sp) {
-					dataflow = true
-					break
-				}
-			}
-			if dataflow {
-				break
-			}
-		}
-	}
-
-	if dataflow {
-		specs = append(specs, diagramSpec{
-			Type:  "dataflow",
-			Title: "Data Flow",
-			Instruction: "Generate a Mermaid flowchart TD tracing untrusted input through the system. " +
-				"Mark tainted paths with ⚠️. Max 10 nodes.",
-			MaxNodes: 10,
-		})
-	}
-
-	// Dependency graph: 10+ changed files
-	if fileCount >= 10 {
-		specs = append(specs, diagramSpec{
-			Type:  "dependency",
-			Title: "Dependency Graph",
-			Instruction: "Generate a Mermaid graph LR showing import relationships between changed files. " +
-				"Max 12 nodes.",
-			MaxNodes: 12,
-		})
-	}
-
-	// Cap at 2 (priority order already correct: sequence > dataflow > dependency)
-	if len(specs) > 2 {
-		specs = specs[:2]
-	}
-	if len(specs) == 0 {
-		return nil
-	}
-	return specs
+	return findingStatement(src)
 }
 
 // rebalanceSeverity downgrades lowest-confidence critical findings to warning
@@ -5009,6 +5444,17 @@ func calculateScore(run *PipelineRun) int {
 	}
 	score := int(math.Round(10 - penalty))
 	return max(1, min(10, score))
+}
+
+// RecoveryReactionReconciler is the narrow pre-resume boundary needed to
+// refresh reaction-owned feedback without making StateMachine depend on the
+// concrete ReactionAnalyzer.
+type RecoveryReactionReconciler func(context.Context, int64, string, int) error
+
+// SetRecoveryReactionReconciler wires the app-created reaction analyzer into
+// crash recovery. The composition root must call this before RecoverIncomplete.
+func (o *Orchestrator) SetRecoveryReactionReconciler(reconcile RecoveryReactionReconciler) {
+	o.sm.reconcileRecoveryReactions = reconcile
 }
 
 // RecoverIncomplete resumes any in-flight pipeline runs after a restart.

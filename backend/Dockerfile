@@ -7,10 +7,11 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -o /argus ./cmd/argus
 # Embeds SQL files — no runtime volume needed.
 RUN CGO_ENABLED=0 GOOS=linux go build -o /migrate ./cmd/migrate
-# Ops binaries: nightly memory reconciler + one-off Supermemory backfill,
-# both run as Fly machines against this same image.
-RUN CGO_ENABLED=0 GOOS=linux go build -o /reconcile-memory ./cmd/reconcile-memory
-RUN CGO_ENABLED=0 GOOS=linux go build -o /migrate-memory ./cmd/migrate-memory
+# Ops binary: imports the memory export archive into Postgres. Runs against
+# this same image — either as a Fly machine or over `fly ssh console`, which is
+# what gives it DATABASE_URL and ENCRYPTION_KEY without a tunnel or a local
+# copy of either secret.
+RUN CGO_ENABLED=0 GOOS=linux go build -o /backfill-memory ./cmd/backfill-memory
 
 # Install staticcheck (Go SAST tool)
 RUN go install honnef.co/go/tools/cmd/staticcheck@2025.1.1
@@ -25,7 +26,7 @@ RUN apk --no-cache add universal-ctags || apk --no-cache add ctags || true
 
 # Node.js + eslint for TS/JS SAST (optional — graceful degradation if unavailable)
 RUN apk --no-cache add nodejs npm && \
-    npm install -g eslint@9.17.0 && \
+    npm install -g eslint@9.17.0 typescript@6.0.3 @typescript-eslint/parser@8.67.0 && \
     npm cache clean --force || true
 
 # Python + semgrep for universal SAST (optional — largest dependency)
@@ -38,8 +39,7 @@ COPY --from=builder /go/bin/staticcheck /usr/local/bin/staticcheck
 
 COPY --from=builder /argus /argus
 COPY --from=builder /migrate /migrate
-COPY --from=builder /reconcile-memory /reconcile-memory
-COPY --from=builder /migrate-memory /migrate-memory
+COPY --from=builder /backfill-memory /backfill-memory
 
 EXPOSE 8080
 # CMD, not ENTRYPOINT: Fly's release_command replaces CMD on the ephemeral release machine.

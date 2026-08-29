@@ -14,7 +14,9 @@ package inflight
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
+	"time"
 )
 
 // Registry is the process-wide set of in-flight reviews. The zero value is not
@@ -26,6 +28,7 @@ type Registry struct {
 
 // NewRegistry returns an empty Registry.
 func NewRegistry() *Registry {
+	slog.Info("in-flight registry configured")
 	return &Registry{slots: make(map[string]*Slot)}
 }
 
@@ -38,14 +41,17 @@ func key(repo string, pr int) string {
 // already in flight. The winner MUST eventually call Slot.Release (and normally
 // Slot.BindCancel right after, pairing the slot with a cancel func).
 func (r *Registry) Begin(repo string, pr int) (*Slot, bool) {
+	started := time.Now()
 	k := key(repo, pr)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, held := r.slots[k]; held {
+		slog.Info("in-flight slot acquire denied", "repo", repo, "pr_number", pr, "duration_ms", time.Since(started).Milliseconds())
 		return nil, false
 	}
 	slot := &Slot{r: r, key: k}
 	r.slots[k] = slot
+	slog.Info("in-flight slot acquired", "repo", repo, "pr_number", pr, "duration_ms", time.Since(started).Milliseconds())
 	return slot, true
 }
 
@@ -55,13 +61,17 @@ func (r *Registry) Begin(repo string, pr int) (*Slot, bool) {
 // PR on this process (a restart, or the cancel landed on a different machine),
 // so the caller should fall back to the DB-level stranded-cancel path.
 func (r *Registry) Cancel(repo string, pr int) bool {
+	started := time.Now()
 	r.mu.Lock()
 	slot := r.slots[key(repo, pr)]
 	r.mu.Unlock()
 	if slot == nil {
+		slog.Info("in-flight cancel missed", "repo", repo, "pr_number", pr, "duration_ms", time.Since(started).Milliseconds())
 		return false
 	}
-	return slot.invokeCancel()
+	cancelled := slot.invokeCancel()
+	slog.Info("in-flight cancel completed", "repo", repo, "pr_number", pr, "cancelled", cancelled, "duration_ms", time.Since(started).Milliseconds())
+	return cancelled
 }
 
 // Slot is a held in-flight review. Its cancel func and its registry lifetime are
@@ -83,9 +93,11 @@ func (s *Slot) BindCancel(fn context.CancelFunc) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.released {
+		slog.Info("in-flight cancel binding skipped", "slot", s.key, "reason", "released")
 		return
 	}
 	s.cancel = fn
+	slog.Info("in-flight cancel bound", "slot", s.key, "configured", fn != nil)
 }
 
 // Cancel invokes the bound cancel func. No-op if none is bound or the slot was
@@ -108,9 +120,11 @@ func (s *Slot) invokeCancel() bool {
 // Release frees the slot and drops its cancel binding. Idempotent — a second
 // call is a no-op. After Release, a Begin for the same repo + pr can win again.
 func (s *Slot) Release() {
+	started := time.Now()
 	s.mu.Lock()
 	if s.released {
 		s.mu.Unlock()
+		slog.Info("in-flight slot release skipped", "slot", s.key, "reason", "already_released")
 		return
 	}
 	s.released = true
@@ -125,4 +139,5 @@ func (s *Slot) Release() {
 		delete(s.r.slots, s.key)
 	}
 	s.r.mu.Unlock()
+	slog.Info("in-flight slot released", "slot", s.key, "duration_ms", time.Since(started).Milliseconds())
 }

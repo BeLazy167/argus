@@ -12,7 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
+	"strconv"
 	"sync"
 
 	"github.com/BeLazy167/argus/backend/internal/memory"
@@ -22,12 +22,12 @@ import (
 )
 
 // enrichConcurrency bounds the per-finding fan-out: at most this many
-// Supermemory reads run at once so a large review can't stampede the API.
+// memory reads run at once so a large review can't stampede the database.
 const enrichConcurrency = 5
 
 // Enricher annotates each finding with pattern/rule matches, a novelty flag,
 // and dismissal-suppression decisions. It owns the per-finding fan-out, the
-// self-match guard, and the suppression bookkeeping.
+// same-PR provenance guard, and the suppression bookkeeping.
 //
 // Non-fatal by contract: a pattern- OR rule-search error leaves a finding's
 // novelty UNSET (never novel-on-error, preserving the #128/#147 semantics), and
@@ -45,6 +45,7 @@ type Enricher struct {
 	prNumber     int       // for the suppression log
 	reviewID     uuid.UUID // for the suppression log
 	repoID       int64     // DB repo id for auto-suppressed categories; 0 => skip
+	installID    int64     // tenant scope for doc-id -> pattern-row resolution
 	changeClass  string    // contract change class for the dismissal lifecycle filter
 	traceID      string    // for the goroutine-panic event
 
@@ -73,11 +74,12 @@ func (r EnrichResult) Total() int { return r.Matched + r.Enforced + r.Novel }
 // Run enriches every comment in reviews IN PLACE, fanning out per finding under
 // the concurrency bound. It fetches the repo's auto-suppressed categories once
 // (memory-gated on repoID), then for each finding runs the pattern + rule reads
-// (errors gate novelty), applies the self-match guard, links + counts a pattern
+// (errors gate novelty), excludes same-PR provenance, links + counts a pattern
 // hit, records rule attribution, decides dismissal drop/downgrade, and publishes
 // EventMemoryMatched. Returns the aggregate counters + suppression keys; the
 // caller applies them.
 func (e *Enricher) Run(ctx context.Context, reviews []FileReview) EnrichResult {
+	opID, started := pipelineOperationStart(ctx, e.logger, "finding_enrichment_stage", "concurrently link findings to patterns and rules, determine novelty, and evaluate learned dismissal suppression", reviews)
 	// Suppression-v2 input shared by every goroutine (read-only): the categories
 	// this repo auto-suppressed via consecutive-ignore streaks.
 	autoSuppressed := map[string]bool{}
@@ -118,25 +120,24 @@ func (e *Enricher) Run(ctx context.Context, reviews []FileReview) EnrichResult {
 	}
 	wg.Wait()
 
-	return e.tally(reviews)
+	result := e.tally(reviews)
+	pipelineOperationResult(ctx, e.logger, opID, "finding_enrichment_stage", "success", started, map[string]any{"reviews": reviews, "summary": result}, "finding_count", result.Total(), "suppressed_count", result.Suppressed)
+	return result
 }
 
 // enrichComment runs the whole per-finding decision for a single comment,
 // mutating it in place. This is the body of the fan-out in Run: pattern + rule
-// reads, the self-match guard, pattern linking + stats, rule attribution,
+// reads, same-PR exclusion, pattern linking + stats, rule attribution,
 // novelty, then dismissal suppression.
 func (e *Enricher) enrichComment(ctx context.Context, c *FileComment, filePath string, autoSuppressed map[string]bool) {
-	// Build a richer query: category + file + body gives Supermemory more semantic signal.
+	// Build a richer query: category + file + body gives retrieval more semantic signal.
 	query := fmt.Sprintf("[%s|%s] %s:%d %s", c.Severity, c.Category, filePath, c.Line, c.Body)
 
-	// Pattern enrichment: best type=pattern match across repo + shared. Errors
-	// PROPAGATE — a broken/timed-out search must never mark a finding novel, so
-	// patErr gates the novel branch below rather than degrading to a zero match.
-	// Top-1 shaping across the two containers is the pure BestMatch adapter.
-	patternMatches, patErr := e.reader.Search(ctx, memory.MemoryQuery{
-		Query: query, Repo: e.repo, Scope: memory.ScopeBoth, Type: memory.TypePattern,
-		Limit: 1, Threshold: e.thresholds.FindingEnrich, Rerank: true,
-	})
+	// Pattern enrichment: best type=pattern match across repo + shared. Same-PR
+	// patterns are excluded in retrieval so a re-review cannot cite knowledge
+	// learned from an earlier review of itself, or let that hit crowd out older
+	// knowledge. Errors propagate to the novelty gate below.
+	patternMatches, patErr := e.searchPriorPatterns(ctx, query)
 	match := memory.BestMatch(patternMatches...)
 
 	// Rules live in the shared container under type=rule metadata. A rule-search
@@ -162,14 +163,11 @@ func (e *Enricher) enrichComment(ctx context.Context, c *FileComment, filePath s
 			"caller", "rule-enrich", "file", filePath, "line", c.Line, "query_len", len(query), "error", ruleErr)
 	}
 
-	// Self-match guard: a near-identical hit is this code's own prior review
-	// comment (re-review noise), not a learned pattern. Zero it so it neither
-	// persists, attributes, nor bumps stats.
+	// The query is type=pattern, so an identical hit is the strongest possible
+	// learned-pattern match, not this review's own type=review document. Treating
+	// high lexical overlap as a self-match discarded the common exact-pattern
+	// case before relational resolution and left pattern_stats almost empty.
 	score := match.Score
-	if score > 0 && match.Content != "" &&
-		wordOverlap(strings.ToLower(match.Content), strings.ToLower(c.Body)) > 0.7 {
-		score = 0
-	}
 
 	// Persist best-match pattern id + score for every hit at/above the
 	// FindingEnrich floor. Public footer attribution stays gated at the
@@ -223,24 +221,34 @@ func (e *Enricher) enrichComment(ctx context.Context, c *FileComment, filePath s
 		})
 	}
 	// Novel = SUCCESSFUL empty pattern search (score cleared to 0) and no rule.
-	// score>0 means a match at/above the FindingEnrich floor, so a 0.50–0.80 hit
-	// is a match, not a new finding. searchOK gates the branch: a failed/timed-out
+	// score>0 means a match at/above the FindingEnrich floor, so a hit in the
+	// enrich-but-don't-attribute band (0.70–0.80 at current defaults) is a
+	// match, not a new finding. searchOK gates the branch: a failed/timed-out
 	// search leaves IsNewFinding unset rather than conflating "search broke" with
 	// "no prior match".
 	if searchOK && score == 0 && ruleContent == "" {
 		c.IsNewFinding = true
 	}
 
-	// Dismissal suppression v2: retrieve the top dismissed-feedback matches (query
-	// by body — the dismissal doc content IS the finding text), lifecycle-filter
-	// by change kind, then decide drop (single exact match ≥ SuppressionDrop, a
-	// team-feedback streak of similar dismissals, or a category the repo
-	// auto-suppressed) vs downgrade (≥ SuppressionDowngrade). Security and Law-12
-	// permanent checks are exempt from drops — memory may downgrade, never silence
-	// them. Non-fatal; memory-gated.
-	dismissals := memory.BestEffort(e.logger, "dismissal", memory.RepoTagNew(e.repo), len(c.Body),
+	// Dismissal suppression v2: retrieve the top dismissed-feedback matches,
+	// lifecycle-filter by change kind, then decide drop (single match ≥
+	// SuppressionDrop, a team-feedback streak of similar dismissals, or a category
+	// the repo auto-suppressed) vs downgrade (≥ SuppressionDowngrade). Security
+	// and Law-12 permanent checks are exempt from drops — memory may downgrade,
+	// never silence them. Non-fatal; memory-gated.
+	//
+	// The query is commentTitle(c), NOT c.Body: a dismissal doc stores the
+	// statement FindingTextFromPostedBody recovers from the rendered comment, and
+	// commentTitle is the function that produced that same line when the comment
+	// was rendered. Querying with c.Body instead pairs an untruncated body — which
+	// occasionally carries a whole "Context:\ndiff --git ..." blob the LLM echoed
+	// into `what` — against a one-sentence document, and the diff then dominates
+	// the embedding: six such bodies in the live corpus scored 0.9455 against
+	// UNRELATED findings on the same file, including a praise against a bug.
+	dismissalQuery := commentTitle(*c)
+	dismissals := memory.BestEffort(e.logger, "dismissal", memory.RepoTagNew(e.repo), len(dismissalQuery),
 		func() ([]memory.PatternMatch, error) {
-			return dismissalSearch(ctx, e.reader, e.repo, c.Body, e.thresholds.FindingEnrich)
+			return dismissalSearch(ctx, e.reader, e.repo, dismissalQuery, e.thresholds.FindingEnrich)
 		})
 	eval := evaluateDismissals(dismissals, e.changeClass,
 		suppressionExempt(c.Category, c.Body), autoSuppressed[string(c.Category)], e.thresholds)
@@ -262,6 +270,66 @@ func (e *Enricher) enrichComment(ctx context.Context, c *FileComment, filePath s
 			"similar_dismissals", eval.similarCount,
 			"new_severity", c.Severity)
 	}
+}
+
+// searchPriorPatterns retrieves repo and shared patterns concurrently while
+// excluding this PR's own learnings before ranking. The repo container already
+// fixes repository identity, so PR number is sufficient there. Shared patterns
+// are the union of (a) a different full owner/repo and (b) a different PR. This
+// keeps a sibling repository's same-number PR eligible while rejecting current
+// PR rows whose repo provenance is full, short, or missing: only full names with
+// a slash can enter branch (a), and branch (b) still rejects the current number.
+func (e *Enricher) searchPriorPatterns(ctx context.Context, query string) ([]memory.PatternMatch, error) {
+	prNumber := strconv.Itoa(e.prNumber)
+	queries := []memory.MemoryQuery{
+		{
+			Query: query, Repo: e.repo, Scope: memory.ScopeRepo, Type: memory.TypePattern,
+			Filters: []memory.FilterCondition{{Key: "pr_number", Value: prNumber, Negate: true}},
+			Limit:   1, Threshold: e.thresholds.FindingEnrich,
+		},
+		// Shared branch (a): a fully-qualified sibling repository. Requiring '/'
+		// prevents a short-name mirror payload from evading same-repo exclusion.
+		{
+			Query: query, Scope: memory.ScopeShared, Type: memory.TypePattern,
+			Filters: []memory.FilterCondition{
+				{Key: "repo", Value: "/", FilterType: "string_contains"},
+				{Key: "repo", Value: e.repoFullName, Negate: true},
+			},
+			Limit: 1, Threshold: e.thresholds.FindingEnrich,
+		},
+		// Shared branch (b): any knowledge from a different PR, including manual
+		// rows with no repo/pr provenance (negation deliberately admits missing).
+		{
+			Query: query, Scope: memory.ScopeShared, Type: memory.TypePattern,
+			Filters: []memory.FilterCondition{{Key: "pr_number", Value: prNumber, Negate: true}},
+			Limit:   1, Threshold: e.thresholds.FindingEnrich,
+		},
+	}
+
+	type searchResult struct {
+		matches []memory.PatternMatch
+		err     error
+	}
+	results := make([]searchResult, len(queries))
+	var wg sync.WaitGroup
+	wg.Add(len(queries))
+	for i, q := range queries {
+		go func(i int, q memory.MemoryQuery) {
+			defer wg.Done()
+			results[i].matches, results[i].err = e.reader.Search(ctx, q)
+		}(i, q)
+	}
+	wg.Wait()
+
+	var matches []memory.PatternMatch
+	var errs []error
+	for _, result := range results {
+		matches = append(matches, result.matches...)
+		if result.err != nil {
+			errs = append(errs, result.err)
+		}
+	}
+	return matches, errors.Join(errs...)
 }
 
 // tally computes the aggregate counters over the enriched reviews and records a
@@ -302,28 +370,28 @@ func (e *Enricher) publishEvent(evt EventType, data map[string]any) {
 	}
 }
 
-// resolvePatternID maps a Supermemory pattern search hit back to its
+// resolvePatternID maps a pattern search hit back to its
 // patterns-table row id. It PREFERS the deterministic customId (round-tripped
 // through result metadata under "custom_id") because a hybrid-search hit's own
-// ID may be a chunk id that never equals the stored supermemory_id; it falls
-// back to matching match.ID against patterns.supermemory_id for legacy rows
+// ID may be a chunk id that never equals the stored memory_doc_id; it falls
+// back to matching match.ID against patterns.memory_doc_id for legacy rows
 // written before the customId mirror existed. Returns found=false (a non-fatal
 // miss — e.g. a synthesis/convention doc never mirrored to the patterns table)
 // when neither key resolves.
 func (e *Enricher) resolvePatternID(ctx context.Context, match memory.PatternMatch) (int64, bool) {
 	if customID := match.Metadata["custom_id"]; customID != "" {
-		if pid, err := e.linker.GetPatternIDByCustomID(ctx, customID); err == nil {
+		if pid, err := e.linker.GetPatternIDByCustomID(ctx, e.installID, customID); err == nil {
 			return pid, true
 		} else if !errors.Is(err, pgx.ErrNoRows) {
 			e.logger.Warn("pattern id lookup by custom_id", "error", err, "custom_id", customID)
 		}
 		// customId miss (legacy row / not mirrored) — fall through to the
-		// supermemory_id match on the result's own id.
+		// memory_doc_id match on the result's own id.
 	}
-	if pid, err := e.linker.GetPatternIDBySupermemoryID(ctx, match.ID); err == nil {
+	if pid, err := e.linker.GetPatternIDByMemoryDocID(ctx, e.installID, match.ID); err == nil {
 		return pid, true
 	} else if !errors.Is(err, pgx.ErrNoRows) {
-		e.logger.Warn("pattern id lookup", "error", err, "supermemory_id", match.ID)
+		e.logger.Warn("pattern id lookup", "error", err, "memory_doc_id", match.ID)
 	}
 	return 0, false
 }

@@ -11,7 +11,7 @@ export const useProviderKeys = createAuthQuery<ProviderKey[]>({
   staleTime: 5 * 60 * 1000,
 });
 
-type UpsertKeyVars = { provider: string; api_key: string; base_url?: string; repo_id?: number };
+type UpsertKeyVars = { provider: string; api_key: string; base_url?: string; model?: string; repo_id?: number };
 
 const useUpsertProviderKeyMutation = createAuthMutation<ProviderKey, UpsertKeyVars>({
   mutationFn: (body, ctx) => {

@@ -1,6 +1,9 @@
 package pipeline
 
 import (
+	"fmt"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/BeLazy167/argus/backend/internal/memory"
@@ -97,19 +100,30 @@ func TestRebalanceSeverityStillRebalancesVisible(t *testing.T) {
 	}
 }
 
+// Band edges for the suppression tests, read from the tuned defaults so the
+// cases keep meaning what their names say when the floors are recalibrated.
+const (
+	downgradeFloor = memory.DefaultThresholdSuppressionDowngrade
+	dropFloor      = memory.DefaultThresholdSuppressionDrop
+)
+
 func TestClassifyDismissal(t *testing.T) {
 	tests := []struct {
 		name  string
 		score float64
 		want  dismissalAction
 	}{
+		// Derived from the floors, not hard-coded: these cases assert the
+		// SHAPE of the bands (below / downgrade / drop), which must hold
+		// after any recalibration. Literals here silently became wrong
+		// assertions when the floors moved for the Postgres backend.
 		{"far_below_floor", 0.10, dismissalNone},
-		{"just_below_downgrade", 0.59, dismissalNone},
-		{"at_downgrade_floor", 0.60, dismissalDowngrade},
-		{"mid_downgrade_band", 0.72, dismissalDowngrade},
-		{"just_below_drop", 0.849, dismissalDowngrade},
-		{"at_drop_floor", 0.85, dismissalDrop},
-		{"above_drop", 0.97, dismissalDrop},
+		{"just_below_downgrade", downgradeFloor - 0.01, dismissalNone},
+		{"at_downgrade_floor", downgradeFloor, dismissalDowngrade},
+		{"mid_downgrade_band", (downgradeFloor + dropFloor) / 2, dismissalDowngrade},
+		{"just_below_drop", dropFloor - 0.001, dismissalDowngrade},
+		{"at_drop_floor", dropFloor, dismissalDrop},
+		{"above_drop", dropFloor + (1.0-dropFloor)/2, dismissalDrop},
 		{"perfect", 1.0, dismissalDrop},
 		{"zero", 0.0, dismissalNone},
 	}
@@ -161,23 +175,23 @@ func TestApplyDismissalMatch(t *testing.T) {
 			wantSeverity: SeverityCritical, wantDowngrade: false, wantPR: 0,
 		},
 		{
-			name: "downgrade_critical", score: 0.72, pr: 88, startSeverity: SeverityCritical,
+			name: "downgrade_critical", score: (downgradeFloor + dropFloor) / 2, pr: 88, startSeverity: SeverityCritical,
 			wantAction: dismissalDowngrade, wantSuppressed: false, wantReason: "",
 			wantSeverity: SeverityWarning, wantDowngrade: true, wantPR: 88,
 		},
 		{
-			name: "downgrade_warning", score: 0.60, pr: 0, startSeverity: SeverityWarning,
+			name: "downgrade_warning", score: downgradeFloor, pr: 0, startSeverity: SeverityWarning,
 			wantAction: dismissalDowngrade, wantSuppressed: false, wantReason: "",
 			wantSeverity: SeveritySuggestion, wantDowngrade: true, wantPR: 0,
 		},
 		{
-			name: "downgrade_suggestion_stays", score: 0.80, pr: 5, startSeverity: SeveritySuggestion,
+			name: "downgrade_suggestion_stays", score: dropFloor - 0.01, pr: 5, startSeverity: SeveritySuggestion,
 			wantAction: dismissalDowngrade, wantSuppressed: false, wantReason: "",
 			wantSeverity: SeveritySuggestion, wantDowngrade: true, wantPR: 5,
 		},
 		{
-			name: "drop_sets_reason", score: 0.91, pr: 7, startSeverity: SeverityCritical,
-			wantAction: dismissalDrop, wantSuppressed: true, wantReason: "dismissed_match:0.91",
+			name: "drop_sets_reason", score: 0.96, pr: 7, startSeverity: SeverityCritical,
+			wantAction: dismissalDrop, wantSuppressed: true, wantReason: "dismissed_match:0.96",
 			wantSeverity: SeverityCritical, wantDowngrade: false, wantPR: 0,
 		},
 	}
@@ -252,10 +266,10 @@ func mkDismissal(score float64, changeKind string, pr string) memory.PatternMatc
 }
 
 func TestFilterDismissalsForClass(t *testing.T) {
-	proto := mkDismissal(0.7, ChangeClassOneTimeScript, "")
-	protoLegacy := mkDismissal(0.7, "prototype", "")
-	prod := mkDismissal(0.7, ChangeClassProduction, "")
-	unstamped := mkDismissal(0.7, "", "")
+	proto := mkDismissal(midDowngradeBand, ChangeClassOneTimeScript, "")
+	protoLegacy := mkDismissal(midDowngradeBand, "prototype", "")
+	prod := mkDismissal(midDowngradeBand, ChangeClassProduction, "")
+	unstamped := mkDismissal(midDowngradeBand, "", "")
 
 	tests := []struct {
 		name         string
@@ -285,7 +299,7 @@ func TestEvaluateDismissals(t *testing.T) {
 	similar := func(n int) []memory.PatternMatch {
 		out := make([]memory.PatternMatch, n)
 		for i := range out {
-			out[i] = mkDismissal(0.65, "", "")
+			out[i] = mkDismissal(midDowngradeBand, "", "")
 		}
 		return out
 	}
@@ -301,17 +315,20 @@ func TestEvaluateDismissals(t *testing.T) {
 		wantSimilar      int
 	}{
 		{
-			name: "no matches, nothing suppressed",
+			name:       "no matches, nothing suppressed",
 			wantAction: dismissalNone,
 		},
 		{
-			name:       "single exact match drops (v1 behavior preserved)",
-			matches:    []memory.PatternMatch{mkDismissal(0.91, "", "7")},
-			wantAction: dismissalDrop, wantReasonPrefix: "dismissed_match:0.91", wantSimilar: 1,
+			name:    "single exact match drops (v1 behavior preserved)",
+			matches: []memory.PatternMatch{mkDismissal(dropFloor+0.01, "", "7")},
+			// Derived, not literal: the reason string carries the score, so a
+			// literal here silently stops describing the case when the floor moves.
+			wantAction: dismissalDrop, wantSimilar: 1,
+			wantReasonPrefix: fmt.Sprintf("dismissed_match:%.2f", dropFloor+0.01),
 		},
 		{
 			name:       "single mid match only downgrades",
-			matches:    []memory.PatternMatch{mkDismissal(0.70, "", "")},
+			matches:    []memory.PatternMatch{mkDismissal(midDowngradeBand, "", "")},
 			wantAction: dismissalDowngrade, wantSimilar: 1,
 		},
 		{
@@ -326,13 +343,13 @@ func TestEvaluateDismissals(t *testing.T) {
 		},
 		{
 			name:         "prototype-era dismissals do not count against a production PR",
-			matches:      []memory.PatternMatch{mkDismissal(0.9, ChangeClassOneTimeScript, ""), mkDismissal(0.65, ChangeClassOneTimeScript, ""), mkDismissal(0.65, ChangeClassOneTimeScript, "")},
+			matches:      []memory.PatternMatch{mkDismissal(dropFloor-0.01, ChangeClassOneTimeScript, ""), mkDismissal(midDowngradeBand, ChangeClassOneTimeScript, ""), mkDismissal(midDowngradeBand, ChangeClassOneTimeScript, "")},
 			currentClass: ChangeClassProduction,
 			wantAction:   dismissalNone, wantSimilar: 0,
 		},
 		{
 			name:         "prototype-era dismissals still suppress on a one-off script PR",
-			matches:      []memory.PatternMatch{mkDismissal(0.65, ChangeClassOneTimeScript, ""), mkDismissal(0.65, ChangeClassOneTimeScript, ""), mkDismissal(0.65, ChangeClassOneTimeScript, "")},
+			matches:      []memory.PatternMatch{mkDismissal(midDowngradeBand, ChangeClassOneTimeScript, ""), mkDismissal(midDowngradeBand, ChangeClassOneTimeScript, ""), mkDismissal(midDowngradeBand, ChangeClassOneTimeScript, "")},
 			currentClass: ChangeClassOneTimeScript,
 			wantAction:   dismissalDrop, wantReasonPrefix: "team_feedback:3", wantSimilar: 3,
 		},
@@ -343,7 +360,7 @@ func TestEvaluateDismissals(t *testing.T) {
 		},
 		{
 			name:       "exempt finding is never dropped by an exact match — capped at downgrade",
-			matches:    []memory.PatternMatch{mkDismissal(0.95, "", "")},
+			matches:    []memory.PatternMatch{mkDismissal(dropFloor, "", "")},
 			exempt:     true,
 			wantAction: dismissalDowngrade, wantSimilar: 1,
 		},
@@ -381,8 +398,8 @@ func TestEvaluateDismissals(t *testing.T) {
 
 func TestEvaluateDismissals_BestPRAttribution(t *testing.T) {
 	ev := evaluateDismissals([]memory.PatternMatch{
-		mkDismissal(0.62, "", "3"),
-		mkDismissal(0.78, "", "42"), // best
+		mkDismissal(downgradeFloor+0.01, "", "3"),
+		mkDismissal(dropFloor-0.01, "", "42"), // best
 	}, "", false, false, memory.NewThresholds())
 	if ev.action != dismissalDowngrade {
 		t.Fatalf("action = %v, want downgrade", ev.action)
@@ -411,11 +428,167 @@ func TestSuppressionExempt(t *testing.T) {
 		{"swallowed error body exempt", CategoryErrorHandling, "the error is swallowed and never surfaced", true},
 		{"plain perf finding not exempt", CategoryPerformance, "N+1 query in the loop", false},
 		{"plain testing finding not exempt", CategoryTesting, "missing test for the new branch", false},
+
+		// Law-12 unit-ambiguous numeric constants. Before this table gained a
+		// unit_ambiguity group these all scored false, so a dismissal match could
+		// mute a finding the rubric declares never-suppressed.
+		{"unit-ambiguous constant exempt", CategoryBug, "The retry delay `300` is unit-ambiguous — name it retryDelaySeconds.", true},
+		{"unitless constant exempt", CategoryReadability, "MaxWait is unitless; callers cannot tell what 5 means", true},
+		{"missing-unit wording exempt", CategoryBug, "sleep(5) has no unit in its name", true},
+		{"body naming both candidate units exempt", CategoryBug, "Is the 5000 in backoff() seconds or milliseconds?", true},
+		{"rubric-style unit question exempt", CategoryBug, "timeout = 5 — 5 what? seconds? ms?", true},
+		// The pair phrases must need BOTH units: "seconds" is a substring of
+		// "milliseconds", so a sloppy conjunction would exempt every finding that
+		// happens to measure something.
+		{"finding naming one unit stays suppressible", CategoryPerformance, "The poller sleeps 50 milliseconds between batches, which starves the worker", false},
+		// The trap the unit marker must not spring: "unit test" is the most common
+		// review phrase containing the word, and matching it would exempt the whole
+		// testing category from team feedback.
+		{"missing unit tests finding stays suppressible", CategoryTesting, "Missing unit tests for the new retry branch", false},
+		{"unit-testing wording stays suppressible", CategoryTesting, "Add unit-testing for the parser", false},
+		{"word merely containing 'unit' stays suppressible", CategoryStyle, "This is an opportunity to simplify the community feed loop", false},
+
+		// Law-12 refactor behavior-equivalence. "silently chang" alone caught only
+		// findings that used the word "silently".
+		{"refactor that changes behavior exempt", CategoryBug, "This refactor changes the behaviour of empty input: it now returns nil", true},
+		{"rename that is not behavior-preserving exempt", CategoryTypeDesign, "The rename is no longer behavior-preserving for callers of Foo", true},
+		{"non-equivalent rewrite exempt", CategoryBug, "The rewritten loop is not equivalent for nil slices", true},
+		{"behavior-differs wording exempt", CategoryBug, "Extracting the helper makes behavior differ on the error path", true},
+		{"semantics change exempt", CategoryBug, "Swapping the join changes the semantics for unmatched rows", true},
+		// Law 5 makes every finding request a change, so "change" on its own must
+		// not exempt — otherwise nothing is ever suppressible.
+		{"plain change request stays suppressible", CategoryPerformance, "Change the batch size to 100; the current value triples the query count", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := suppressionExempt(tt.category, tt.body); got != tt.want {
 				t.Errorf("suppressionExempt(%s, %q) = %v, want %v", tt.category, tt.body, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestPermanentCheckMarkersCoverRubric pins the marker table to the rubric it
+// implements. Law 12 promises five classes are never suppressed; if a class is
+// listed there but has no markers here, dismissal memory can drop findings of
+// that class silently — exactly how unit ambiguity and behavior equivalence went
+// unprotected. The clause count is parsed from reviewLaws so adding a sixth
+// permanent check to the prompt fails here instead of shipping unenforced.
+func TestPermanentCheckMarkersCoverRubric(t *testing.T) {
+	const header = "12. PERMANENT CHECKS"
+	law := reviewLaws[strings.Index(reviewLaws, header):]
+	if end := strings.IndexByte(law, '\n'); end >= 0 {
+		law = law[:end]
+	}
+	colon := strings.IndexByte(law, ':')
+	if colon < 0 {
+		t.Fatalf("Law 12 lost its %q clause list — the marker table can no longer be checked against the rubric", header)
+	}
+	if got, want := len(strings.Split(law[colon+1:], ";")), len(permanentChecks); got != want {
+		t.Errorf("Law 12 lists %d permanent checks but permanentChecks has %d — every rubric clause needs a markers group, or memory can mute findings of that class", got, want)
+	}
+
+	for _, check := range permanentChecks {
+		phrases, ok := permanentCheckMarkers[check]
+		if !ok || len(phrases) == 0 {
+			t.Errorf("permanent check %q has no markers — findings of that class are exempt in the rubric but suppressible in code", check)
+			continue
+		}
+		for _, phrase := range phrases {
+			if len(phrase) == 0 {
+				t.Errorf("permanent check %q has an empty marker phrase — it matches every finding and switches suppression off wholesale", check)
+			}
+			for _, part := range phrase {
+				if part != strings.ToLower(part) {
+					t.Errorf("marker %q for %q is not lowercase — it can never match the normalized body", part, check)
+				}
+			}
+		}
+	}
+	for check := range permanentCheckMarkers {
+		if !slices.Contains(permanentChecks, check) {
+			t.Errorf("markers exist for %q, which is not in permanentChecks — the closed Law-12 set and the table disagree", check)
+		}
+	}
+}
+
+// TestNormalizeForMarkers proves the token normalization the whole-word markers
+// depend on: punctuation and case must not decide whether a Law-12 finding is
+// exempt.
+func TestNormalizeForMarkers(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"punctuation becomes a single space", "DELETE  FROM\tusers;", " delete from users "},
+		{"hyphens split words", "behaviour-preserving", " behaviour preserving "},
+		{"backticks and underscores split", "`api_key`", " api key "},
+		{"empty body is a bare pad", "", "  "},
+		{"digits stay attached to their token", "sleep(300ms)", " sleep 300ms "},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := normalizeForMarkers(tt.body); got != tt.want {
+				t.Errorf("normalizeForMarkers(%q) = %q, want %q", tt.body, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestStripUnitTestNoise covers the one collision the unit-ambiguity marker has:
+// the word "unit" in "unit test". Repeat occurrences matter because the naive
+// string-replacement version misses every second hit (neighbouring matches share
+// a delimiter space), which would re-expose the testing category.
+func TestStripUnitTestNoise(t *testing.T) {
+	tests := []struct {
+		name string
+		norm string
+		want string
+	}{
+		{"singular", " add a unit test here ", " add a test here "},
+		{"plural", " missing unit tests ", " missing tests "},
+		{"gerund", " unit testing is absent ", " testing is absent "},
+		{"repeat occurrences all stripped", " unit test and unit test ", " test and test "},
+		{"measurement sense survives", " the unit is ambiguous ", " the unit is ambiguous "},
+		{"trailing unit survives", " name the unit ", " name the unit "},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := stripUnitTestNoise(tt.norm); got != tt.want {
+				t.Errorf("stripUnitTestNoise(%q) = %q, want %q", tt.norm, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestPermanentCheckSurvivesDismissalDrop is the end-to-end consequence of the
+// marker gap: run a finding of each newly covered class through the same
+// exempt→evaluate path the enricher uses, with a dismissal match well above the
+// drop floor. The verdict must be a downgrade — memory may lower the volume on a
+// Law-12 finding, never mute it.
+func TestPermanentCheckSurvivesDismissalDrop(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       string
+		wantAction dismissalAction
+	}{
+		{"unit-ambiguous constant", "The 300 in retry() is unit-ambiguous: seconds or milliseconds?", dismissalDowngrade},
+		{"refactor changes behavior", "This refactor changes the behavior of empty input", dismissalDowngrade},
+		{"control: ordinary finding is still dropped", "N+1 query in the loop", dismissalDrop},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			exempt := suppressionExempt(CategoryBug, tt.body)
+			matches := []memory.PatternMatch{mkDismissal(dropFloor+0.01, "", "9")}
+			ev := evaluateDismissals(matches, ChangeClassProduction, exempt, false, memory.NewThresholds())
+			if ev.action != tt.wantAction {
+				t.Errorf("action = %v, want %v — a Law-12 finding was dropped by dismissal memory", ev.action, tt.wantAction)
+			}
+			c := &FileComment{Severity: SeverityCritical, Category: CategoryBug, Body: tt.body}
+			applyDismissalEvaluation(c, ev)
+			if tt.wantAction == dismissalDowngrade && c.Suppressed {
+				t.Errorf("exempt finding was marked suppressed (reason %q) — it will never be posted", c.SuppressedReason)
 			}
 		})
 	}

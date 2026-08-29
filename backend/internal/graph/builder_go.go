@@ -4,21 +4,28 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"log/slog"
 	"strings"
+	"time"
 	"unicode"
+
+	"github.com/BeLazy167/argus/backend/internal/obs"
 )
 
 // parseGoAST extracts symbols and edges from Go source using the stdlib AST parser.
 // Returns nil, nil if parsing fails so the caller can fall back to regex.
-func parseGoAST(filePath, content string) ([]Symbol, []Edge) {
+func parseGoAST(filePath, content string) (syms []Symbol, edges []Edge) {
+	operationID := obs.NewLogID()
+	started := time.Now()
+	slog.Debug("graph Go AST parse started", "operation_id", operationID, "file", filePath, "source_bytes", len(content))
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, filePath, content, parser.ParseComments)
 	if err != nil {
+		slog.Warn("graph Go AST parse failed; regex fallback selected", "operation_id", operationID,
+			"file", filePath, "source_bytes", len(content), "parser", "go_ast", "fallback", "go_regex",
+			"duration_ms", time.Since(started).Milliseconds(), "error", err)
 		return nil, nil
 	}
-
-	var syms []Symbol
-	var edges []Edge
 
 	// Import edges
 	for _, imp := range f.Imports {
@@ -32,9 +39,15 @@ func parseGoAST(filePath, content string) ([]Symbol, []Edge) {
 			sym := funcDeclSymbol(fset, filePath, decl)
 			syms = append(syms, sym)
 
-			// Walk body for call edges
+			// Walk body for call edges. Receiver calls use the declared receiver
+			// type, so a.Handle resolves to Alpha.Handle rather than a name shared
+			// by every receiver in the file.
 			if decl.Body != nil {
-				edges = append(edges, extractCallEdgesAST(sym.Name, decl.Body)...)
+				receiverVar := ""
+				if decl.Recv != nil && decl.Recv.NumFields() > 0 && len(decl.Recv.List[0].Names) > 0 {
+					receiverVar = decl.Recv.List[0].Names[0].Name
+				}
+				edges = append(edges, extractCallEdgesAST(sym.Name, receiverVar, receiverIdentity(sym.Receiver), decl.Body)...)
 			}
 			return false
 
@@ -55,6 +68,9 @@ func parseGoAST(filePath, content string) ([]Symbol, []Edge) {
 		return true
 	})
 
+	slog.Debug("graph Go AST parse completed", "operation_id", operationID, "file", filePath,
+		"parser", "go_ast", "import_count", len(f.Imports), "symbol_count", len(syms), "edge_count", len(edges),
+		"duration_ms", time.Since(started).Milliseconds())
 	return syms, edges
 }
 
@@ -66,11 +82,14 @@ func funcDeclSymbol(fset *token.FileSet, filePath string, decl *ast.FuncDecl) Sy
 	if decl.Recv != nil && decl.Recv.NumFields() > 0 {
 		kind = "method"
 		receiver = receiverTypeName(decl.Recv.List[0].Type)
+		name = qualifySymbolName(receiverIdentity(receiver), name)
 	}
 
 	params := formatFieldList(decl.Type.Params)
 	returnType := formatResults(decl.Type.Results)
-	vis := visibility(name)
+	// Qualification adds the receiver before the declaration name. Go export
+	// visibility is defined only by the declaration identifier itself.
+	vis := visibility(decl.Name.Name)
 	scope := "package"
 	if decl.Recv != nil {
 		scope = "method"
@@ -205,7 +224,7 @@ func visibility(name string) string {
 	return "unexported"
 }
 
-func extractCallEdgesAST(sourceName string, body *ast.BlockStmt) []Edge {
+func extractCallEdgesAST(sourceName, receiverVar, receiverType string, body *ast.BlockStmt) []Edge {
 	var edges []Edge
 	seen := make(map[string]bool)
 
@@ -214,7 +233,7 @@ func extractCallEdgesAST(sourceName string, body *ast.BlockStmt) []Edge {
 		if !ok {
 			return true
 		}
-		target := callTargetName(call)
+		target := callTargetName(call, receiverVar, receiverType)
 		if target == "" || target == sourceName || isBuiltin(target) || seen[target] {
 			return true
 		}
@@ -225,15 +244,49 @@ func extractCallEdgesAST(sourceName string, body *ast.BlockStmt) []Edge {
 	return edges
 }
 
-func callTargetName(call *ast.CallExpr) string {
+func callTargetName(call *ast.CallExpr, receiverVar, receiverType string) string {
 	switch fn := call.Fun.(type) {
 	case *ast.Ident:
 		return fn.Name
 	case *ast.SelectorExpr:
-		if ident, ok := fn.X.(*ast.Ident); ok {
-			return ident.Name + "." + fn.Sel.Name
+		qualifier := selectorQualifier(fn.X)
+		if qualifier == receiverVar && receiverType != "" {
+			qualifier = receiverType
 		}
-		return fn.Sel.Name
+		if qualifier == "" {
+			return fn.Sel.Name
+		}
+		return qualifier + "." + fn.Sel.Name
+	default:
+		return ""
+	}
+}
+
+// selectorQualifier extracts the stable type/package portion of a selector.
+// Composite literals are important here: Alpha{}.Handle() must identify the
+// Alpha method even when Beta.Handle exists in the same file.
+func selectorQualifier(expr ast.Expr) string {
+	switch x := expr.(type) {
+	case *ast.Ident:
+		return x.Name
+	case *ast.SelectorExpr:
+		prefix := selectorQualifier(x.X)
+		if prefix == "" {
+			return x.Sel.Name
+		}
+		return prefix + "." + x.Sel.Name
+	case *ast.CompositeLit:
+		return receiverIdentity(exprName(x.Type))
+	case *ast.ParenExpr:
+		return selectorQualifier(x.X)
+	case *ast.UnaryExpr:
+		return selectorQualifier(x.X)
+	case *ast.IndexExpr:
+		return selectorQualifier(x.X)
+	case *ast.IndexListExpr:
+		return selectorQualifier(x.X)
+	case *ast.CallExpr:
+		return callTargetName(x, "", "")
 	default:
 		return ""
 	}

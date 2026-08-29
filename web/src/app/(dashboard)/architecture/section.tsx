@@ -1,11 +1,21 @@
 "use client";
 import { AlertTriangle, GitBranch, Info, Loader2, Network, Search, X } from "lucide-react";
-import { useMemo, useState } from "react";
-import ArchitectureCanvas, { type Lens } from "@/components/graph/ArchitectureCanvas";
+import { useMemo, useRef, useState } from "react";
+import ArchitectureCanvas, {
+	type ArchitectureSearchRequest,
+	type Lens,
+} from "@/components/graph/ArchitectureCanvas";
 import FileMemorySidebar from "@/components/graph/FileMemorySidebar";
+import GraphSnapshotStatus from "@/components/graph/GraphSnapshotStatus";
 import LensBar from "@/components/graph/LensBar";
 import { useActiveRepo } from "@/lib/hooks/use-active-repo";
 import { useArchitectureData } from "@/lib/queries/architecture";
+
+function searchStatusText(matchCount: number | null): string {
+	if (matchCount === null) return "";
+	if (matchCount === 0) return "No matching files.";
+	return `${matchCount} matching ${matchCount === 1 ? "file" : "files"}.`;
+}
 
 export function ArchitectureSection() {
 	const { activeId } = useActiveRepo();
@@ -19,7 +29,15 @@ function ArchitectureView({ activeId }: { activeId: number }) {
 	const { data: archData, isLoading, error } = useArchitectureData();
 	const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
 	const [lens, setLens] = useState<Lens>("risk");
-	const [searchQuery, setSearchQuery] = useState("");
+	// The input echoes keystrokes immediately; the graph-wide search request is
+	// committed on a short debounce so full-repo graphs (900+ nodes) don't
+	// re-decorate the whole element tree per keystroke.
+	const [searchInput, setSearchInput] = useState("");
+	const searchDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const [searchRequest, setSearchRequest] = useState<ArchitectureSearchRequest>({
+		id: 0,
+		query: "",
+	});
 	const [showGuide, setShowGuide] = useState(() =>
 		typeof window !== "undefined"
 			? localStorage.getItem("argus-arch-guide-dismissed") !== "1"
@@ -48,6 +66,16 @@ function ArchitectureView({ activeId }: { activeId: number }) {
 		};
 	}, [archData]);
 
+	const normalizedSearch = searchRequest.query.toLowerCase().trim();
+	// While the debounced request lags the input echo, the previous query's
+	// match count is stale for the visible text — announce indeterminate
+	// progress instead of a false result.
+	const searchPending = searchInput.toLowerCase().trim() !== normalizedSearch;
+	const searchMatchCount = normalizedSearch
+		? (archData?.files.filter((file) => file.path.toLowerCase().includes(normalizedSearch))
+				.length ?? 0)
+		: null;
+
 	return (
 		<div className="flex flex-col h-[calc(100vh-13rem)] min-h-[540px] bg-[var(--graph-bg)] border border-iron">
 			{/* Toolbar: lens switcher + search + stats */}
@@ -59,11 +87,29 @@ function ArchitectureView({ activeId }: { activeId: number }) {
 					<Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 text-slate-text" />
 					<input
 						type="text"
-						value={searchQuery}
-						onChange={(e) => setSearchQuery(e.target.value)}
+						value={searchInput}
+						onChange={(event) => {
+							const query = event.target.value;
+							setSearchInput(query);
+							if (searchDebounce.current) clearTimeout(searchDebounce.current);
+							searchDebounce.current = setTimeout(() => {
+								setSearchRequest((current) => ({ id: current.id + 1, query }));
+								setSelectedFilePath(null);
+							}, 150);
+						}}
+						aria-label="Find file"
+						aria-describedby="architecture-search-status"
 						placeholder="Find file..."
 						className="pl-7 pr-2 py-1.5 w-44 text-[11px] font-mono bg-card border border-iron text-foreground placeholder:text-slate-text focus:border-amber-500/50 focus:outline-none transition-colors"
 					/>
+					<span
+						id="architecture-search-status"
+						role="status"
+						aria-live="polite"
+						className="sr-only"
+					>
+						{searchPending ? "Searching…" : searchStatusText(searchMatchCount)}
+					</span>
 				</div>
 
 				<div className="flex-1" />
@@ -116,6 +162,8 @@ function ArchitectureView({ activeId }: { activeId: number }) {
 				)}
 			</div>
 
+			{archData && <GraphSnapshotStatus snapshot={archData.snapshot} />}
+
 			{/* Onboarding guide */}
 			{showGuide && archData && archData.files.length > 0 && (
 				<div className="px-5 py-2 border-b border-iron bg-card/50 flex items-start gap-3 shrink-0">
@@ -139,6 +187,7 @@ function ArchitectureView({ activeId }: { activeId: number }) {
 							setShowGuide(false);
 							localStorage.setItem("argus-arch-guide-dismissed", "1");
 						}}
+						aria-label="Dismiss guide"
 						className="text-slate-600 hover:text-slate-400 shrink-0 ml-auto"
 					>
 						<X className="h-3 w-3" />
@@ -159,7 +208,7 @@ function ArchitectureView({ activeId }: { activeId: number }) {
 						</div>
 					) : isLoading ? (
 						<div className="flex items-center justify-center h-full">
-							<div className="flex flex-col items-center gap-3">
+							<div role="status" aria-live="polite" className="flex flex-col items-center gap-3">
 								<Loader2 className="h-4 w-4 animate-spin text-slate-600" />
 								<p className="text-[11px] font-mono text-slate-500">
 									Computing architecture metrics...
@@ -185,8 +234,11 @@ function ArchitectureView({ activeId }: { activeId: number }) {
 									No architecture data yet
 								</h3>
 								<p className="text-[11px] font-mono text-slate-500 leading-relaxed">
-									Architecture metrics are computed from reviewed code. Trigger a review to start
-									building the dependency graph.
+									The dependency graph is indexed automatically from this repo&apos;s default
+									branch by a background indexer — no review required. If the repo was enabled
+									recently, the first index may still be in progress; the status line above
+									tracks it. Review-derived signals (bug density, change coupling) fill in as
+									reviews happen.
 								</p>
 							</div>
 						</div>
@@ -195,16 +247,16 @@ function ArchitectureView({ activeId }: { activeId: number }) {
 							files={archData.files}
 							edges={archData.edges}
 							lens={lens}
-							searchQuery={searchQuery}
+							searchRequest={searchRequest}
 							onSelectFile={setSelectedFilePath}
 						/>
 					)}
 				</div>
 
-				{selectedFilePath && (
+				{selectedFile && (
 					<div className="border-t md:border-t-0 md:border-l border-iron bg-[var(--graph-bg)] md:w-[320px] md:shrink-0 h-[50vh] md:h-auto overflow-hidden">
 						<FileMemorySidebar
-							filePath={selectedFilePath}
+							filePath={selectedFile.path}
 							archFile={selectedFile}
 							allFiles={archData?.files}
 							onClose={() => setSelectedFilePath(null)}

@@ -22,6 +22,10 @@ var StageOrder = []string{
 	"scoring",
 	"synthesis",
 	"reply",
+	// auto_resolve is post-review maintenance: its AddressedJudge calls fire on
+	// a LATER push and bill back to the review whose threads they judged. Last
+	// in the order because nothing in a run can precede it.
+	"auto_resolve",
 }
 
 // SpecialistOrder is the canonical render order for review specialists. Keeps
@@ -56,6 +60,7 @@ var stageLabels = map[string]string{
 	"scoring":        "Scoring",
 	"synthesis":      "Synthesis",
 	"reply":          "Reply",
+	"auto_resolve":   "Auto-resolve",
 }
 
 // StageLabel returns the human-readable label for a stage key. Composite keys

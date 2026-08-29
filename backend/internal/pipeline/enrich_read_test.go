@@ -13,7 +13,7 @@ import (
 )
 
 // errFakeSearch is the injected search failure for the enrich error-path tests.
-var errFakeSearch = errors.New("supermemory search failed")
+var errFakeSearch = errors.New("memory search failed")
 
 // patternLeg answers only the pattern leg (Scope=both, Type=pattern) with
 // (matches, err); the rule + dismissal legs return a successful empty result.
@@ -32,12 +32,28 @@ func patternLeg(matches []memory.PatternMatch, err error) func(memory.MemoryQuer
 // tests. Lookups miss with pgx.ErrNoRows (the non-fatal "no such row" the read
 // path treats as a benign miss); IncrementPatternMatch records its calls.
 type fakeEnrichStore struct {
-	byCustomID      map[string]int64
-	bySupermemoryID map[string]int64
-	autoSuppressed  map[string]bool // categories the repo auto-suppressed; nil = none
+	byCustomID     map[string]int64
+	byMemoryDocID  map[string]int64
+	autoSuppressed map[string]bool // categories the repo auto-suppressed; nil = none
 
-	mu          sync.Mutex
-	incremented []int64
+	mu            sync.Mutex
+	incremented   []int64
+	lastInstallID int64 // tenant scope the enricher passed to the lookups
+}
+
+// recordScope/scope go through the mutex the fake already holds for
+// incremented — Enricher.Run enriches comments concurrently, so an unguarded
+// write here is a real race, not a test artifact.
+func (f *fakeEnrichStore) recordScope(installID int64) {
+	f.mu.Lock()
+	f.lastInstallID = installID
+	f.mu.Unlock()
+}
+
+func (f *fakeEnrichStore) scope() int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastInstallID
 }
 
 func (f *fakeEnrichStore) GetAutoSuppressedCategories(context.Context, int64) (map[string]bool, error) {
@@ -47,15 +63,17 @@ func (f *fakeEnrichStore) GetAutoSuppressedCategories(context.Context, int64) (m
 	return map[string]bool{}, nil
 }
 
-func (f *fakeEnrichStore) GetPatternIDByCustomID(_ context.Context, customID string) (int64, error) {
+func (f *fakeEnrichStore) GetPatternIDByCustomID(_ context.Context, installID int64, customID string) (int64, error) {
+	f.recordScope(installID)
 	if id, ok := f.byCustomID[customID]; ok {
 		return id, nil
 	}
 	return 0, pgx.ErrNoRows
 }
 
-func (f *fakeEnrichStore) GetPatternIDBySupermemoryID(_ context.Context, smID string) (int64, error) {
-	if id, ok := f.bySupermemoryID[smID]; ok {
+func (f *fakeEnrichStore) GetPatternIDByMemoryDocID(_ context.Context, installID int64, smID string) (int64, error) {
+	f.recordScope(installID)
+	if id, ok := f.byMemoryDocID[smID]; ok {
 		return id, nil
 	}
 	return 0, pgx.ErrNoRows
@@ -81,6 +99,41 @@ func newTestEnricher(fake *memorytest.Fake, linker PatternLinker) *Enricher {
 		repo:         "widget",
 		repoFullName: "acme/widget",
 		prNumber:     1,
+		installID:    77,
+	}
+}
+
+// TestResolvePatternIDIsTenantScoped: the doc-id -> pattern-row lookups were
+// unscoped, which was safe only while the id came from a global server and
+// was globally unique. PGIndexer returns the DETERMINISTIC customId instead, so
+// two installations that learned the same pattern in same-named repos hold the
+// identical string — and an unscoped `LIMIT 1` with no ORDER BY can resolve one
+// tenant's search hit to another tenant's patterns row, persisting a foreign
+// matched_pattern_id and bumping its stats.
+//
+// Retrieval itself is tenant-scoped; this is the post-retrieval resolution.
+func TestResolvePatternIDIsTenantScoped(t *testing.T) {
+	store := &fakeEnrichStore{byCustomID: map[string]int64{"api--confirmed--abc": 5}}
+	e := newTestEnricher(&memorytest.Fake{}, store)
+
+	if _, ok := e.resolvePatternID(context.Background(), memory.PatternMatch{
+		ID:       "api--confirmed--abc",
+		Metadata: map[string]string{"custom_id": "api--confirmed--abc"},
+	}); !ok {
+		t.Fatal("lookup missed")
+	}
+	if store.scope() != 77 {
+		t.Errorf("lookup scoped to installation %d, want 77 — an unscoped query can resolve to another tenant's pattern row", store.scope())
+	}
+
+	// The memory_doc_id fallback must carry the scope too.
+	store2 := &fakeEnrichStore{byMemoryDocID: map[string]int64{"sm-1": 9}}
+	e2 := newTestEnricher(&memorytest.Fake{}, store2)
+	if _, ok := e2.resolvePatternID(context.Background(), memory.PatternMatch{ID: "sm-1"}); !ok {
+		t.Fatal("fallback lookup missed")
+	}
+	if store2.scope() != 77 {
+		t.Errorf("fallback lookup scoped to installation %d, want 77", store2.scope())
 	}
 }
 
@@ -108,7 +161,7 @@ func TestEnrichFindings_PositiveMatch(t *testing.T) {
 	fake := &memorytest.Fake{
 		SearchFn: patternLeg([]memory.PatternMatch{{Score: 0.7, ID: "doc1"}}, nil),
 	}
-	store := &fakeEnrichStore{bySupermemoryID: map[string]int64{"doc1": 99}}
+	store := &fakeEnrichStore{byMemoryDocID: map[string]int64{"doc1": 99}}
 	c := enrichOneComment(t, fake, store)
 
 	if c.IsNewFinding {
@@ -174,12 +227,12 @@ func TestEnrichFindings_RuleSearchError_NotNovel(t *testing.T) {
 }
 
 // (d) customId-preferred resolution: the hit's own ID is a chunk id that matches
-// no supermemory_id, but the mirrored custom_id resolves the patterns row.
+// no memory_doc_id, but the mirrored custom_id resolves the patterns row.
 func TestEnrichFindings_ResolveByCustomID(t *testing.T) {
 	fake := &memorytest.Fake{
 		SearchFn: patternLeg([]memory.PatternMatch{{
 			Score:    0.7,
-			ID:       "chunk_zzz", // not present in bySupermemoryID
+			ID:       "chunk_zzz", // not present in byMemoryDocID
 			Metadata: map[string]string{"custom_id": "cid-1"},
 		}}, nil),
 	}
@@ -195,8 +248,8 @@ func TestEnrichFindings_ResolveByCustomID(t *testing.T) {
 }
 
 // (d, fallback) custom_id present but not stored (legacy row) → resolution falls
-// back to matching the hit's own ID against supermemory_id.
-func TestEnrichFindings_ResolveFallbackToSupermemoryID(t *testing.T) {
+// back to matching the hit's own ID against memory_doc_id.
+func TestEnrichFindings_ResolveFallbackToMemoryDocID(t *testing.T) {
 	fake := &memorytest.Fake{
 		SearchFn: patternLeg([]memory.PatternMatch{{
 			Score:    0.7,
@@ -204,11 +257,11 @@ func TestEnrichFindings_ResolveFallbackToSupermemoryID(t *testing.T) {
 			Metadata: map[string]string{"custom_id": "cid-unknown"},
 		}}, nil),
 	}
-	store := &fakeEnrichStore{bySupermemoryID: map[string]int64{"mem_1": 7}}
+	store := &fakeEnrichStore{byMemoryDocID: map[string]int64{"mem_1": 7}}
 	c := enrichOneComment(t, fake, store)
 
 	if c.MatchedPatternID != 7 {
-		t.Errorf("MatchedPatternID = %d, want 7 (fallback to supermemory_id)", c.MatchedPatternID)
+		t.Errorf("MatchedPatternID = %d, want 7 (fallback to memory_doc_id)", c.MatchedPatternID)
 	}
 	if len(store.incremented) != 1 || store.incremented[0] != 7 {
 		t.Errorf("IncrementPatternMatch = %v, want [7]", store.incremented)

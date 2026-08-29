@@ -98,8 +98,8 @@ function SectionHeader({ title, tip }: { title: string; tip?: string }) {
   );
 }
 
-function Loading() { return <div className="flex items-center justify-center py-12"><Loader2 className="h-5 w-5 animate-spin text-muted-foreground" /></div>; }
-function Err({ label }: { label: string }) { return <div className="flex items-center justify-center py-12 text-xs font-mono text-destructive">Failed to load {label}</div>; }
+function Loading() { return <div role="status" aria-live="polite" className="flex items-center justify-center py-12"><Loader2 className="h-5 w-5 animate-spin text-muted-foreground" /></div>; }
+function Err({ label }: { label: string }) { return <div role="alert" aria-live="assertive" className="flex items-center justify-center py-12 text-xs font-mono text-destructive">Failed to load {label}</div>; }
 
 const tooltipStyle = { background: "hsl(var(--card))", border: "1px solid hsl(var(--border))", fontSize: 11, fontFamily: "monospace", color: "hsl(var(--foreground))" };
 
@@ -240,12 +240,11 @@ export default function StatsPage() {
         </section>
       )}
 
-      {/* Learn layer — BYOK-paid side effects of the memory pipeline.
-          Shown separately from the review cards because the cost lives
-          in your Supermemory bill, not the LLM bill. */}
+      {/* Learn layer — side effects of the memory pipeline. Shown separately
+          from the review cards because the cost is embeddings, not the LLM. */}
       {overview.data && (
         <section className="pt-4 mb-10">
-          <SectionHeader title="Learn layer" tip="Memory activity for this period. Each counter maps to a row your BYOK Supermemory account is storing." />
+          <SectionHeader title="Learn layer" tip="Memory activity for this period. Each counter maps to a row stored in the memory database." />
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <StatCard
               label="Patterns"

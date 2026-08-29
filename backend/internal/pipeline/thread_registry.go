@@ -2,6 +2,10 @@ package pipeline
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/BeLazy167/argus/backend/internal/store"
 	"github.com/google/uuid"
@@ -46,31 +50,43 @@ func threadNodeIDForFinding(ctx context.Context, r threadLinkReader, commentID u
 //
 // Threads from other reviews / sibling bots on the same PR are harmless: the
 // UPDATE is scoped to this review_id, so their FirstCommentIDs simply match no
-// row. Best-effort — a miss leaves graphql_thread_node_id NULL and consumers
-// fall back to the fuzzy path for that row.
-func (o *Orchestrator) hydrateThreadNodeIDs(ctx context.Context, run *PipelineRun, owner, repo string) {
-	threads, err := o.ghClient.ListReviewThreads(ctx, run.PREvent.InstallationID, owner, repo, run.PREvent.PRNumber)
-	if err != nil {
-		o.logger.Warn("thread-registry: listing threads to hydrate", "error", err, "review_id", run.ReviewID)
-		return
+// row. The helper reports API and persistence failures. Normal posting logs and
+// continues; crash recovery propagates them and withholds terminal completion.
+func (o *Orchestrator) hydrateThreadNodeIDs(ctx context.Context, run *PipelineRun, owner, repo string) error {
+	o.logger.InfoContext(ctx, "thread registry hydration started", "event", "pipeline.thread_registry.hydration_started", "review_id", run.ReviewID, "attempt_generation", run.AttemptGeneration, "repo", run.PREvent.RepoFullName, "pr_number", run.PREvent.PRNumber)
+	client := o.postedReviewBindingClient()
+	if client == nil {
+		return fmt.Errorf("thread-registry: binding client unavailable")
 	}
+	threads, err := client.ListReviewThreads(ctx, run.PREvent.InstallationID, owner, repo, run.PREvent.PRNumber)
+	if err != nil {
+		return fmt.Errorf("thread-registry: listing threads to hydrate: %w", err)
+	}
+	o.logger.InfoContext(ctx, "thread registry GitHub threads listed", "event", "pipeline.thread_registry.threads_listed", "review_id", run.ReviewID, "thread_count", len(threads))
 	hydrated := 0
+	skipped := 0
+	var hydrateErrors []error
 	for _, t := range threads {
 		// Need both handles to bind: the node id we store and the REST id we
 		// join on. GraphQL omits databaseId for some threads (FirstCommentID 0).
 		if t.ID == "" || t.FirstCommentID == 0 {
+			skipped++
 			continue
 		}
-		n, err := o.st.HydrateThreadNodeID(ctx, run.ReviewID, t.FirstCommentID, t.ID)
-		if err != nil {
-			o.logger.Warn("thread-registry: hydrating node id", "error", err, "thread_id", t.ID, "review_id", run.ReviewID)
+		n, hydrateErr := o.st.HydrateThreadNodeID(ctx, run.ReviewID, t.FirstCommentID, t.ID)
+		if hydrateErr != nil {
+			hydrateErrors = append(hydrateErrors, fmt.Errorf("thread %s: %w", t.ID, hydrateErr))
 			continue
 		}
 		hydrated += int(n)
 	}
-	if hydrated > 0 {
-		o.logger.Info("thread-registry: hydrated thread node ids", "count", hydrated, "review_id", run.ReviewID)
+	o.logger.InfoContext(ctx, "thread-registry: hydrated thread node ids", "event", "pipeline.thread_registry.hydrated", "count", hydrated, "skipped_count", skipped, "error_count", len(hydrateErrors), "review_id", run.ReviewID)
+	if err := errors.Join(hydrateErrors...); err != nil {
+		o.logger.WarnContext(ctx, "thread registry hydration incomplete", "event", "pipeline.thread_registry.hydration_failed", "review_id", run.ReviewID, "error_count", len(hydrateErrors), "error", err)
+		return fmt.Errorf("thread-registry: hydrating node ids: %w", err)
 	}
+	o.logger.InfoContext(ctx, "thread registry hydration completed", "event", "pipeline.thread_registry.hydration_completed", "review_id", run.ReviewID, "hydrated_count", hydrated)
+	return nil
 }
 
 // unboundCommentRow is a persisted review_comments row awaiting its GitHub REST
@@ -84,12 +100,16 @@ type unboundCommentRow struct {
 }
 
 // postedComment is one GitHub review comment ListReviewComments returned, to be
-// bound to exactly one unboundCommentRow.
+// bound to exactly one unboundCommentRow. The reported line fields are retained
+// so an anchor mismatch identifies the PR-level payload GitHub returned.
 type postedComment struct {
-	GithubID int64
-	Path     string
-	Line     int
-	Body     string
+	GithubID     int64
+	Path         string
+	Line         int
+	GitHubLine   int
+	OriginalLine int
+	Position     int
+	Body         string
 }
 
 // pairCommentsToRows binds each posted GitHub review comment to EXACTLY ONE
@@ -100,13 +120,22 @@ type postedComment struct {
 // finding B would resolve finding A's thread. Binding 1:1 keeps the
 // finding↔comment↔thread chain distinct even for same-line findings.
 //
-// Within a (path, line) group the preference is: an unclaimed EXACT body match
-// first (the posted body IS the stored body — formatCommentBody renders both),
-// then stable input order for the degenerate identical-body case. Each comment
-// claims its row, so the next same-line comment necessarily picks a different
-// row. Returns rowID → githubCommentID; a comment with no unclaimed row on its
-// (path, line) is skipped (leaves the row unbound, as before).
-func pairCommentsToRows(rows []unboundCommentRow, comments []postedComment) map[uuid.UUID]int64 {
+// Within a (path, line) group, an unclaimed exact body match is required (the
+// posted body is the stored body — formatCommentBody renders both). Multiple
+// matches fail closed because choosing one could cross-wire finding threads.
+// Zero matches also fail closed: the manifest and unbound-count checks require
+// a complete 1:1 binding, so skipping would only defer the same integrity error
+// and hide the mismatched GitHub anchor. Returns rowID → githubCommentID.
+func normalizePostedCommentBody(body string) string {
+	body = strings.ReplaceAll(body, "\r\n", "\n")
+	lines := strings.Split(body, "\n")
+	for i := range lines {
+		lines[i] = strings.TrimRight(lines[i], " \t")
+	}
+	return strings.TrimRight(strings.Join(lines, "\n"), "\n")
+}
+
+func pairCommentsToRows(rows []unboundCommentRow, comments []postedComment) (map[uuid.UUID]int64, error) {
 	type loc struct {
 		path string
 		line int
@@ -120,31 +149,28 @@ func pairCommentsToRows(rows []unboundCommentRow, comments []postedComment) map[
 	out := make(map[uuid.UUID]int64, len(comments))
 	for _, c := range comments {
 		group := byLoc[loc{c.Path, c.Line}]
-		picked := uuid.Nil
-		// Prefer an unclaimed exact body match — the authoritative 1:1 signal.
+		matches := make([]uuid.UUID, 0, 1)
 		for _, r := range group {
-			if !claimed[r.ID] && r.Body == c.Body {
-				picked = r.ID
-				break
+			if !claimed[r.ID] && normalizePostedCommentBody(r.Body) == normalizePostedCommentBody(c.Body) {
+				matches = append(matches, r.ID)
 			}
 		}
-		// Degenerate fallback (identical bodies, or GitHub normalised the body):
-		// first unclaimed row in insertion order.
-		if picked == uuid.Nil {
-			for _, r := range group {
-				if !claimed[r.ID] {
-					picked = r.ID
-					break
+		if len(matches) != 1 {
+			pathLines := make([]int, 0)
+			for candidateLoc := range byLoc {
+				if candidateLoc.path == c.Path {
+					pathLines = append(pathLines, candidateLoc.line)
 				}
 			}
+			slices.Sort(pathLines)
+			pathLines = slices.Compact(pathLines)
+			return nil, fmt.Errorf("comment binding at %s:%d has %d normalized body matches (github line=%d original_line=%d position=%d; stored candidate lines for path=%v)", c.Path, c.Line, len(matches), c.GitHubLine, c.OriginalLine, c.Position, pathLines)
 		}
-		if picked == uuid.Nil {
-			continue // no row left for this comment
-		}
+		picked := matches[0]
 		claimed[picked] = true
 		out[picked] = c.GithubID
 	}
-	return out
+	return out, nil
 }
 
 // storedThreadIDsForReview loads the ThreadRegistry links hydrated at post time
@@ -153,6 +179,7 @@ func pairCommentsToRows(rows []unboundCommentRow, comments []postedComment) map[
 // uses the live node id from ListReviewThreads. Best-effort: a load error logs
 // and yields nil (treated as "no stored links").
 func (o *Orchestrator) storedThreadIDsForReview(ctx context.Context, reviewID uuid.UUID) map[int64]string {
+	o.logger.DebugContext(ctx, "thread registry link load started", "event", "pipeline.thread_registry.links_started", "review_id", reviewID)
 	links, err := o.st.ListThreadLinksForReview(ctx, reviewID)
 	if err != nil {
 		o.logger.Warn("thread-registry: loading stored thread links", "error", err, "review_id", reviewID)
@@ -164,5 +191,6 @@ func (o *Orchestrator) storedThreadIDsForReview(ctx context.Context, reviewID uu
 			m[*l.RestCommentID] = *l.ThreadNodeID
 		}
 	}
+	o.logger.InfoContext(ctx, "thread registry links loaded", "event", "pipeline.thread_registry.links_loaded", "review_id", reviewID, "link_count", len(m), "row_count", len(links))
 	return m
 }

@@ -117,7 +117,6 @@ export function PostHogGroupAssociation() {
     if (!POSTHOG_KEY || !active) return;
     posthog.group("installation", String(active.id), {
       org_login: active.org_login,
-      plan_tier: active.plan_tier,
     });
   }, [active]);
 
@@ -158,7 +157,7 @@ export function PostHogProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <PHProvider client={posthog}>
-      <Suspense fallback={null}>
+      <Suspense fallback={<span aria-hidden className="sr-only" />}>
         <PostHogPageView />
       </Suspense>
       <SessionRecordingGate />

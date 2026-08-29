@@ -106,7 +106,7 @@ func (q *Queries) ListAllReviewsScopedByAuthor(ctx context.Context, arg ListAllR
 
 const statsAdoption = `-- name: StatsAdoption :one
 WITH scoped AS (
-    SELECT r.id, r.repo_id, r.pr_number, r.pr_title, r.pr_author, r.head_sha, r.base_sha, r.github_review_id, r.status, r.summary, r.score, r.token_usage, r.trigger, r.triggered_by, r.duration_ms, r.error, r.created_at, r.completed_at, r.file_count, r.deep_review, r.persona, r.is_incremental, r.resolved_stale_count, r.head_ref, r.simulation_results, r.diagram, r.diagram_title, r.diagrams, r.truncated_files, r.brief, r.memory_enabled, r.cross_pr_hash, r.linked_pr_refs, r.linked_issue_refs, r.trace_id, r.review_contract FROM reviews r
+    SELECT r.id, r.repo_id, r.pr_number, r.pr_title, r.pr_author, r.head_sha, r.base_sha, r.github_review_id, r.status, r.summary, r.score, r.token_usage, r.trigger, r.triggered_by, r.duration_ms, r.error, r.created_at, r.completed_at, r.file_count, r.deep_review, r.persona, r.is_incremental, r.resolved_stale_count, r.head_ref, r.simulation_results, r.diagram, r.diagram_title, r.diagrams, r.truncated_files, r.brief, r.memory_enabled, r.cross_pr_hash, r.linked_pr_refs, r.linked_issue_refs, r.trace_id, r.review_contract, r.started_comment_id, r.budget_note, r.attempt_generation, r.review_post_claimed_at, r.expected_github_inline_count FROM reviews r
     JOIN repos rp ON r.repo_id = rp.id
     WHERE rp.installation_id = ANY($1::bigint[])
       AND r.created_at >= NOW() - $2::interval
@@ -158,6 +158,8 @@ JOIN reviews r ON rc.review_id = r.id
 JOIN repos rp ON r.repo_id = rp.id
 WHERE rp.installation_id = ANY($1::bigint[])
   AND r.created_at >= NOW() - $2::interval
+  AND rc.attempt_generation = r.attempt_generation
+  AND rc.state <> 'suppressed'
 GROUP BY rc.category
 ORDER BY COUNT(*) DESC
 LIMIT 10
@@ -173,6 +175,8 @@ type StatsFindingsByCategoryRow struct {
 	Count    int     `json:"count"`
 }
 
+// Same claim as StatsFindingsBySeverity, sliced by category: suppressed rows
+// stay out so the two breakdowns can never disagree on the same total.
 func (q *Queries) StatsFindingsByCategory(ctx context.Context, arg StatsFindingsByCategoryParams) ([]StatsFindingsByCategoryRow, error) {
 	rows, err := q.db.Query(ctx, statsFindingsByCategory, arg.InstallationIds, arg.Period)
 	if err != nil {
@@ -202,6 +206,8 @@ JOIN reviews r ON rc.review_id = r.id
 JOIN repos rp ON r.repo_id = rp.id
 WHERE rp.installation_id = ANY($1::bigint[])
   AND r.created_at >= NOW() - $2::interval
+  AND rc.attempt_generation = r.attempt_generation
+  AND rc.state <> 'suppressed'
 GROUP BY rc.severity
 ORDER BY COUNT(*) DESC
 `
@@ -216,6 +222,9 @@ type StatsFindingsBySeverityRow struct {
 	Count    int     `json:"count"`
 }
 
+// The stats page renders this as "findings Argus reported". state <>
+// 'suppressed' keeps withheld findings out of that breakdown — they were never
+// reported to anyone.
 func (q *Queries) StatsFindingsBySeverity(ctx context.Context, arg StatsFindingsBySeverityParams) ([]StatsFindingsBySeverityRow, error) {
 	rows, err := q.db.Query(ctx, statsFindingsBySeverity, arg.InstallationIds, arg.Period)
 	if err != nil {
@@ -245,6 +254,8 @@ JOIN reviews r ON rc.review_id = r.id
 JOIN repos rp ON r.repo_id = rp.id
 WHERE rp.installation_id = ANY($1::bigint[])
   AND r.created_at >= NOW() - $2::interval
+  AND rc.attempt_generation = r.attempt_generation
+  AND rc.state <> 'suppressed'
 `
 
 type StatsFindingsNewVsPatternParams struct {
@@ -257,6 +268,10 @@ type StatsFindingsNewVsPatternRow struct {
 	PatternMatches int `json:"pattern_matches"`
 }
 
+// Memory-effectiveness split over delivered findings only. A suppressed row
+// carries is_new_finding / matched_pattern_score like any other, so without
+// state <> 'suppressed' the "memory caught this" ratio counts findings the
+// suppression pass had already thrown away.
 func (q *Queries) StatsFindingsNewVsPattern(ctx context.Context, arg StatsFindingsNewVsPatternParams) (StatsFindingsNewVsPatternRow, error) {
 	row := q.db.QueryRow(ctx, statsFindingsNewVsPattern, arg.InstallationIds, arg.Period)
 	var i StatsFindingsNewVsPatternRow
@@ -303,7 +318,7 @@ func (q *Queries) StatsModelsRaw(ctx context.Context, arg StatsModelsRawParams) 
 
 const statsOverview = `-- name: StatsOverview :one
 WITH scoped AS (
-    SELECT r.id, r.repo_id, r.pr_number, r.pr_title, r.pr_author, r.head_sha, r.base_sha, r.github_review_id, r.status, r.summary, r.score, r.token_usage, r.trigger, r.triggered_by, r.duration_ms, r.error, r.created_at, r.completed_at, r.file_count, r.deep_review, r.persona, r.is_incremental, r.resolved_stale_count, r.head_ref, r.simulation_results, r.diagram, r.diagram_title, r.diagrams, r.truncated_files, r.brief, r.memory_enabled, r.cross_pr_hash, r.linked_pr_refs, r.linked_issue_refs, r.trace_id, r.review_contract FROM reviews r
+    SELECT r.id, r.repo_id, r.pr_number, r.pr_title, r.pr_author, r.head_sha, r.base_sha, r.github_review_id, r.status, r.summary, r.score, r.token_usage, r.trigger, r.triggered_by, r.duration_ms, r.error, r.created_at, r.completed_at, r.file_count, r.deep_review, r.persona, r.is_incremental, r.resolved_stale_count, r.head_ref, r.simulation_results, r.diagram, r.diagram_title, r.diagrams, r.truncated_files, r.brief, r.memory_enabled, r.cross_pr_hash, r.linked_pr_refs, r.linked_issue_refs, r.trace_id, r.review_contract, r.started_comment_id, r.budget_note, r.attempt_generation, r.review_post_claimed_at, r.expected_github_inline_count FROM reviews r
     JOIN repos rp ON r.repo_id = rp.id
     WHERE rp.installation_id = ANY($1::bigint[])
       AND r.created_at >= NOW() - $2::interval
@@ -315,7 +330,10 @@ SELECT
     COALESCE((SELECT AVG(score) FROM scoped WHERE score IS NOT NULL), 0)::float8 AS avg_score,
     COALESCE((SELECT AVG(EXTRACT(EPOCH FROM (completed_at - created_at)))::int FROM scoped WHERE completed_at IS NOT NULL), 0)::int AS avg_review_secs,
     COALESCE((SELECT SUM((token_usage->'total'->>'total_tokens')::int) FROM scoped WHERE token_usage IS NOT NULL), 0)::int AS total_tokens,
-    (SELECT COUNT(*) FROM review_comments rc JOIN scoped s ON rc.review_id = s.id WHERE rc.severity = 'critical')::int AS critical_finds,
+    -- state <> 'suppressed': a suppressed finding was generated then withheld,
+    -- so the PR author never received it. Counting it inflates the org's
+    -- critical-finding headline with defects nobody was ever told about.
+    (SELECT COUNT(*) FROM review_comments rc JOIN scoped s ON rc.review_id = s.id WHERE rc.attempt_generation = s.attempt_generation AND rc.severity = 'critical' AND rc.state <> 'suppressed')::int AS critical_finds,
     COALESCE((SELECT (COUNT(*) FILTER (WHERE score < 10) * 100 / NULLIF(COUNT(*) FILTER (WHERE score IS NOT NULL), 0))::int FROM scoped), 0) AS catch_rate
 `
 
@@ -512,7 +530,9 @@ JOIN reviews r ON rc.review_id = r.id
 JOIN repos rp ON r.repo_id = rp.id
 WHERE rp.installation_id = ANY($1::bigint[])
   AND r.created_at >= NOW() - $2::interval
+  AND rc.attempt_generation = r.attempt_generation
   AND rc.severity = 'critical'
+  AND rc.state <> 'suppressed'
   AND r.pr_author IS NOT NULL AND r.pr_author != ''
 GROUP BY r.pr_author
 `
@@ -527,6 +547,9 @@ type StatsUserCriticalsRow struct {
 	CriticalCount int    `json:"critical_count"`
 }
 
+// Per-author critical count. state <> 'suppressed' keeps this a claim about
+// what the author was actually shown — attributing a withheld finding to a
+// developer charges them for a defect report they never saw.
 func (q *Queries) StatsUserCriticals(ctx context.Context, arg StatsUserCriticalsParams) ([]StatsUserCriticalsRow, error) {
 	rows, err := q.db.Query(ctx, statsUserCriticals, arg.InstallationIds, arg.Period)
 	if err != nil {

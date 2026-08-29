@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -24,6 +25,8 @@ type TraceSeed struct {
 
 // CollectReviewTraces extracts decision traces from a completed review run.
 func CollectReviewTraces(run *PipelineRun) []TraceSeed {
+	start := time.Now()
+	slog.Info("trace collection started", "operation", "collect_review_traces", "review_id", run.ReviewID, "pr", run.PREvent.PRNumber, "file_review_count", len(run.FileReviews), "semantics", "convert every review finding into a decision-trace seed")
 	var seeds []TraceSeed
 	for _, fr := range run.FileReviews {
 		for _, c := range fr.Comments {
@@ -41,27 +44,35 @@ func CollectReviewTraces(run *PipelineRun) []TraceSeed {
 			})
 		}
 	}
+	slog.Info("trace collection completed", "operation", "collect_review_traces", "review_id", run.ReviewID, "input_file_count", len(run.FileReviews), "result_count", len(seeds), "duration_ms", time.Since(start).Milliseconds())
 	return seeds
 }
 
 // CollectReplyTrace creates a trace from a developer's response to a review comment.
 func CollectReplyTrace(repoID int64, filePath string, reviewID uuid.UUID, prNumber int, outcome string, replyContent string) TraceSeed {
+	start := time.Now()
+	slog.Info("reply trace collection started", "operation", "collect_reply_trace", "repo_id", repoID, "file", filePath, "review_id", reviewID, "pr", prNumber, "outcome", outcome, "reply_content", replyContent, "semantics", "map a developer reply outcome to a durable decision trace")
 	traceType := "developer_agreed"
 	if outcome == "dismissed" || outcome == "ignored" {
 		traceType = "developer_dismissed"
 	}
-	return TraceSeed{
+	seed := TraceSeed{
 		FilePath:  filePath,
 		TraceType: traceType,
 		Content:   replyContent,
 		ReviewID:  &reviewID,
 		PRNumber:  prNumber,
 	}
+	slog.Info("reply trace collection completed", "operation", "collect_reply_trace", "repo_id", repoID, "review_id", reviewID, "trace_type", traceType, "result", seed, "duration_ms", time.Since(start).Milliseconds())
+	return seed
 }
 
 // FormatTracesForPrompt formats recent decision traces as context for the review prompt.
 func FormatTracesForPrompt(traces []store.DecisionTrace) string {
+	start := time.Now()
+	slog.Info("trace prompt formatting started", "operation", "format_traces_for_prompt", "trace_count", len(traces), "traces", traces, "semantics", "render recent decision traces as review-history prompt context")
 	if len(traces) == 0 {
+		slog.Info("trace prompt formatting skipped", "operation", "format_traces_for_prompt", "reason", "no_traces", "duration_ms", time.Since(start).Milliseconds())
 		return ""
 	}
 	var sb strings.Builder
@@ -74,5 +85,7 @@ func FormatTracesForPrompt(traces []store.DecisionTrace) string {
 	}
 	sb.WriteString("\nUse this history to inform your review — flag recurring issues, note if past concerns were addressed.\n")
 	sb.WriteString("</history>\n")
-	return sb.String()
+	result := sb.String()
+	slog.Info("trace prompt formatting completed", "operation", "format_traces_for_prompt", "trace_count", len(traces), "result_bytes", len(result), "result", result, "duration_ms", time.Since(start).Milliseconds())
+	return result
 }

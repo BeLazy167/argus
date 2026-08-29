@@ -12,7 +12,6 @@ type Installation struct {
 	InstallationID int64      `json:"installation_id"`
 	OrgLogin       string     `json:"org_login"`
 	ClerkOrgID     *string    `json:"clerk_org_id,omitempty"`
-	PlanTier       string     `json:"plan_tier"`
 	CreatedAt      time.Time  `json:"created_at"`
 	SuspendedAt    *time.Time `json:"suspended_at,omitempty"`
 }
@@ -45,18 +44,22 @@ type Review struct {
 	TokenUsage     *json.RawMessage `json:"token_usage,omitempty"`
 	Trigger        string           `json:"trigger"`
 	TriggeredBy    *string          `json:"triggered_by,omitempty"`
-	DurationMs     *int             `json:"duration_ms,omitempty"`
-	Error          *string          `json:"error,omitempty"`
-	DeepReview     bool             `json:"deep_review"`
-	Persona        *string          `json:"persona,omitempty"`
-	IsIncremental  bool             `json:"is_incremental"`
-	CreatedAt      time.Time        `json:"created_at"`
-	CompletedAt    *time.Time       `json:"completed_at,omitempty"`
-	Diagram        *string          `json:"diagram,omitempty"`
-	DiagramTitle   *string          `json:"diagram_title,omitempty"`
-	Diagrams       json.RawMessage  `json:"diagrams,omitempty"`
-	TruncatedFiles json.RawMessage  `json:"truncated_files,omitempty"`
-	Brief          *string          `json:"brief,omitempty"`
+	// BudgetNote explains why a review was narrowed by the cost limits. Nil on
+	// an ordinary review; set means fewer files were read than the pull request
+	// changed, and the dashboard says so rather than looking merely quiet.
+	BudgetNote     *string         `json:"budget_note,omitempty"`
+	DurationMs     *int            `json:"duration_ms,omitempty"`
+	Error          *string         `json:"error,omitempty"`
+	DeepReview     bool            `json:"deep_review"`
+	Persona        *string         `json:"persona,omitempty"`
+	IsIncremental  bool            `json:"is_incremental"`
+	CreatedAt      time.Time       `json:"created_at"`
+	CompletedAt    *time.Time      `json:"completed_at,omitempty"`
+	Diagram        *string         `json:"diagram,omitempty"`
+	DiagramTitle   *string         `json:"diagram_title,omitempty"`
+	Diagrams       json.RawMessage `json:"diagrams,omitempty"`
+	TruncatedFiles json.RawMessage `json:"truncated_files,omitempty"`
+	Brief          *string         `json:"brief,omitempty"`
 	// CrossPRHash is written by the async cross-PR stage (crosspr_stage.go)
 	// to short-circuit repeated LLM calls when the linked-PR findings bundle
 	// hasn't changed. nil means "never run".
@@ -105,6 +108,20 @@ type ReviewComment struct {
 	// at-merge) or still open — the viewer then shows the state pill with no
 	// resolved-by-commit breadcrumb.
 	ResolvedSHA *string `json:"resolved_sha,omitempty"`
+	// AttemptGeneration identifies the retry attempt that produced this finding.
+	AttemptGeneration int `json:"attempt_generation"`
+}
+
+// ReviewMinorNote is a structured near-miss finding folded into the review summary.
+type ReviewMinorNote struct {
+	ID                uuid.UUID `json:"id"`
+	ReviewID          uuid.UUID `json:"review_id"`
+	AttemptGeneration int       `json:"attempt_generation"`
+	FilePath          string    `json:"file_path"`
+	Line              int       `json:"line"`
+	Severity          string    `json:"severity"`
+	Title             string    `json:"title"`
+	CreatedAt         time.Time `json:"created_at"`
 }
 
 // PRReviewSummary is one review pass in a PR's incremental history. Reviews are
@@ -137,6 +154,44 @@ type AutoResolveSummary struct {
 	ResolvedCount  int       `json:"resolved_count"`
 	AttemptedCount int       `json:"attempted_count"`
 	CreatedAt      time.Time `json:"created_at"`
+}
+
+// LearnedMemory is one memory row a review wrote, shaped for display. The
+// excerpt is truncated in SQL, not here: memory content is derived from private
+// source code and can run to thousands of characters, and an unbounded excerpt
+// would both bloat the response and put more of the codebase on the wire than
+// the surface needs.
+type LearnedMemory struct {
+	// Type is the memory.MemoryType the row was stored under (pattern,
+	// pr_summary, synthesis, scenario, topology, feedback, rule, …).
+	Type string `json:"type"`
+	// Label is the human display noun for Type, from the one table in
+	// LearnedMemoryLabel. It rides on the wire so the dashboard renders the
+	// same noun the posted PR comment uses instead of keeping a second table
+	// in TypeScript that has to agree with this one.
+	Label string `json:"label"`
+	// ContainerTag is the repo tag the memory was filed under, or `_shared`
+	// for installation-wide knowledge — the distinction the user cares about
+	// ("did this teach only this repo, or the whole org?").
+	ContainerTag string `json:"container_tag"`
+	// Excerpt is the leading LearnedMemoryExcerptChars of the content.
+	Excerpt string `json:"excerpt"`
+	// WrittenAt is memory_review_attributions.attributed_at: the time this
+	// review learned the row. A later deterministic re-upsert updates current
+	// provenance without changing the earlier review's historical timestamp.
+	WrittenAt time.Time `json:"written_at"`
+}
+
+// LearnedMemoryCount is one (type, count) bucket of what a review wrote. Kept
+// separate from the excerpt list because the list is capped: the counts stay
+// truthful for a review that wrote more rows than the list returns.
+type LearnedMemoryCount struct {
+	Type  string `json:"type"`
+	Count int    `json:"count"`
+	// Label is the display noun for Count rows of Type, already singular or
+	// plural, from the one table in LearnedMemoryLabel. The dashboard renders
+	// it verbatim so its chips read exactly like the posted PR comment.
+	Label string `json:"label"`
 }
 
 type Rule struct {
@@ -182,6 +237,7 @@ type ProviderKey struct {
 	APIKeyEnc      string    `json:"-"`
 	KeyHint        string    `json:"key_hint,omitempty"`
 	BaseURL        *string   `json:"base_url,omitempty"`
+	Model          *string   `json:"model,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 }

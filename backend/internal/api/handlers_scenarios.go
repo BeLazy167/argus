@@ -14,6 +14,8 @@ import (
 )
 
 func (s *Server) listScenarios(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.listScenarios")
+	defer op.Finish(w)
 	repoID, err := strconv.ParseInt(chi.URLParam(r, "repoID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo id"})
@@ -25,7 +27,7 @@ func (s *Server) listScenarios(w http.ResponseWriter, r *http.Request) {
 	}
 	scenarios, err := s.store.ListScenariosForRepo(r.Context(), repoID, 100)
 	if err != nil {
-		s.logger.Error("list scenarios", "error", err)
+		s.logger.ErrorContext(r.Context(), "list scenarios", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
@@ -33,6 +35,8 @@ func (s *Server) listScenarios(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) createScenario(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.createScenario")
+	defer op.Finish(w)
 	repoID, err := strconv.ParseInt(chi.URLParam(r, "repoID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo id"})
@@ -75,7 +79,7 @@ func (s *Server) createScenario(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := s.store.CreateScenario(r.Context(), repo.InstallationID, &repoID, body.Description, body.Source, body.SourceRef, body.Files, body.Modules, body.Severity)
 	if err != nil {
-		s.logger.Error("create scenario", "error", err)
+		s.logger.ErrorContext(r.Context(), "create scenario", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create scenario"})
 		return
 	}
@@ -83,6 +87,8 @@ func (s *Server) createScenario(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deactivateScenario(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.deactivateScenario")
+	defer op.Finish(w)
 	id, err := strconv.ParseInt(chi.URLParam(r, "scenarioID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid scenario id"})
@@ -99,6 +105,8 @@ func (s *Server) deactivateScenario(w http.ResponseWriter, r *http.Request) {
 // getScenarioKPIs returns the 4-card summary counts for a repo's /scenarios page.
 // Scoped to the user's installations — repo_id is validated before counting.
 func (s *Server) getScenarioKPIs(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.getScenarioKPIs")
+	defer op.Finish(w)
 	repoID, err := strconv.ParseInt(chi.URLParam(r, "repoID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo id"})
@@ -110,7 +118,7 @@ func (s *Server) getScenarioKPIs(w http.ResponseWriter, r *http.Request) {
 	}
 	kpis, err := s.store.GetScenarioKPIs(r.Context(), repoID)
 	if err != nil {
-		s.logger.Error("scenario kpis", "error", err)
+		s.logger.ErrorContext(r.Context(), "scenario kpis", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
@@ -120,6 +128,8 @@ func (s *Server) getScenarioKPIs(w http.ResponseWriter, r *http.Request) {
 // listScenarioRuns returns the per-scenario simulation history (newest first).
 // Limit defaults to 20 and is capped at 100 to protect the API from abuse.
 func (s *Server) listScenarioRuns(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.listScenarioRuns")
+	defer op.Finish(w)
 	id, err := strconv.ParseInt(chi.URLParam(r, "scenarioID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid scenario id"})
@@ -138,7 +148,7 @@ func (s *Server) listScenarioRuns(w http.ResponseWriter, r *http.Request) {
 	limit := parseLimitParam(r.URL.Query().Get("limit"), 20, 100)
 	runs, err := s.store.GetScenarioRuns(r.Context(), id, limit)
 	if err != nil {
-		s.logger.Error("scenario runs", "error", err)
+		s.logger.ErrorContext(r.Context(), "scenario runs", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
@@ -163,6 +173,8 @@ func parseLimitParam(raw string, defaultVal, maxLimit int) int {
 }
 
 func (s *Server) getScenario(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.getScenario")
+	defer op.Finish(w)
 	id, err := strconv.ParseInt(chi.URLParam(r, "scenarioID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid scenario id"})
@@ -189,7 +201,7 @@ func (s *Server) generateScenarioFromIssue(ctx context.Context, event *gh.Issues
 
 	inst, err := s.store.GetInstallationByGitHubID(ctx, installationID)
 	if err != nil {
-		s.logger.Warn("issue scenario: installation lookup", "error", err, "gh_id", installationID)
+		s.logger.WarnContext(ctx, "issue scenario: installation lookup", "error", err, "gh_id", installationID)
 		return
 	}
 
@@ -219,10 +231,10 @@ func (s *Server) generateScenarioFromIssue(ctx context.Context, event *gh.Issues
 
 	_, err = s.store.CreateScenario(ctx, inst.ID, repoID, description, "issue", fmt.Sprintf("#%d", issue.GetNumber()), files, nil, severity)
 	if err != nil {
-		s.logger.Error("issue scenario: create failed", "error", err, "issue", issue.GetNumber())
+		s.logger.ErrorContext(ctx, "issue scenario: create failed", "error", err, "issue", issue.GetNumber())
 		return
 	}
-	s.logger.Info("auto-created scenario from issue", "issue", issue.GetNumber(), "repo", repoFullName)
+	s.logger.InfoContext(ctx, "auto-created scenario from issue", "issue", issue.GetNumber(), "repo", repoFullName)
 }
 
 // extractScenarioFromIssue builds a scenario description from issue title and body.

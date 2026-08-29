@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"slices"
 	"testing"
 )
 
@@ -34,8 +35,8 @@ export function add(a: number, b: number): number {
 	}
 
 	// Check method
-	if s, ok := symMap["greet"]; !ok || s.Kind != "method" {
-		t.Errorf("greet: got %+v", symMap["greet"])
+	if s, ok := symMap["App.greet"]; !ok || s.Kind != "method" {
+		t.Errorf("greet: got %+v", symMap["App.greet"])
 	}
 
 	// Check function
@@ -110,8 +111,8 @@ class Dog(Animal):
 	if classCount["Dog"] != 1 {
 		t.Errorf("expected 1 Dog class, got %d", classCount["Dog"])
 	}
-	if methodCount["speak"] != 2 {
-		t.Errorf("expected 2 speak methods, got %d", methodCount["speak"])
+	if methodCount["Animal.speak"] != 1 || methodCount["Dog.speak"] != 1 {
+		t.Errorf("expected receiver-qualified speak methods, got %+v", methodCount)
 	}
 
 	// Check inheritance
@@ -234,11 +235,11 @@ public interface Database {
 	if s, ok := symMap["Database"]; !ok || s.Kind != "interface" {
 		t.Errorf("Database: got %+v", symMap["Database"])
 	}
-	if s, ok := symMap["getUser"]; !ok || s.Kind != "method" {
-		t.Errorf("getUser: got %+v", symMap["getUser"])
+	if s, ok := symMap["UserService.getUser"]; !ok || s.Kind != "method" {
+		t.Errorf("getUser: got %+v", symMap["UserService.getUser"])
 	}
-	if s, ok := symMap["helper"]; !ok || s.Kind != "method" {
-		t.Errorf("helper: got %+v", symMap["helper"])
+	if s, ok := symMap["UserService.helper"]; !ok || s.Kind != "method" {
+		t.Errorf("helper: got %+v", symMap["UserService.helper"])
 	}
 
 	// Check import edges
@@ -285,11 +286,11 @@ public interface IUserService {
 	if s, ok := symMap["IUserService"]; !ok || s.Kind != "interface" {
 		t.Errorf("IUserService: got %+v", symMap["IUserService"])
 	}
-	if s, ok := symMap["GetUser"]; !ok || s.Kind != "method" {
-		t.Errorf("GetUser: got %+v", symMap["GetUser"])
+	if s, ok := symMap["UserController.GetUser"]; !ok || s.Kind != "method" {
+		t.Errorf("GetUser: got %+v", symMap["UserController.GetUser"])
 	}
-	if s, ok := symMap["Log"]; !ok || s.Kind != "method" {
-		t.Errorf("Log: got %+v", symMap["Log"])
+	if s, ok := symMap["UserController.Log"]; !ok || s.Kind != "method" {
+		t.Errorf("Log: got %+v", symMap["UserController.Log"])
 	}
 
 	// Check using/import edges
@@ -390,7 +391,7 @@ func (s *Server) Start() error {
 	if !names["NewServer"] {
 		t.Errorf("expected NewServer function symbol, got syms=%+v", syms)
 	}
-	if !names["Start"] {
+	if !names["Server.Start"] {
 		t.Errorf("expected Start method symbol, got syms=%+v", syms)
 	}
 }
@@ -460,11 +461,267 @@ impl Config {
 	// Count how many times "new" appears
 	count := 0
 	for _, s := range syms {
-		if s.Name == "new" {
+		if s.Name == "Config.new" {
 			count++
 		}
 	}
 	if count != 1 {
-		t.Errorf("expected exactly 1 'new' symbol, got %d", count)
+		t.Errorf("expected exactly 1 'Config.new' symbol, got %d", count)
+	}
+}
+
+func TestTreeSitterPythonPreservesClassQualifiedMethodsAndSources(t *testing.T) {
+	src := `class Alpha:
+    def handle(self):
+        self.done()
+    def done(self):
+        pass
+
+class Beta:
+    def handle(self):
+        self.done()
+    def done(self):
+        pass
+`
+	syms, edges := parseTreeSitter("handlers.py", src)
+	methods := map[string]bool{}
+	for _, sym := range syms {
+		if sym.Kind == KindMethod {
+			methods[sym.Name] = true
+		}
+	}
+	for _, name := range []string{"Alpha.handle", "Alpha.done", "Beta.handle", "Beta.done"} {
+		if !methods[name] {
+			t.Errorf("missing qualified Python method %q in %+v", name, syms)
+		}
+	}
+	for _, want := range []Edge{
+		{SourceName: "Alpha.handle", TargetName: "Alpha.done", Kind: EdgeCalls},
+		{SourceName: "Beta.handle", TargetName: "Beta.done", Kind: EdgeCalls},
+	} {
+		if !slices.Contains(edges, want) {
+			t.Errorf("missing edge %+v in %+v", want, edges)
+		}
+	}
+}
+
+func TestTreeSitterPythonPreservesNestedClassIdentity(t *testing.T) {
+	src := `class Alpha:
+    class Item:
+        pass
+class Beta:
+    class Item:
+        pass
+`
+	syms, _ := parseTreeSitter("nested.py", src)
+	names := map[string]bool{}
+	for _, sym := range syms {
+		if sym.Kind == KindClass {
+			names[sym.Name] = true
+		}
+	}
+	if !names["Alpha.Item"] || !names["Beta.Item"] {
+		t.Fatalf("nested class identities collapsed: %+v", syms)
+	}
+}
+
+func TestTreeSitterPythonUsesLexicalClassOwnershipForMethods(t *testing.T) {
+	src := `def top_level(self):
+    pass
+
+class Handler:
+    @staticmethod
+    def parse(value):
+        return Helper.build(value)
+
+    def dispatch(request):
+        return Worker.run(request)
+`
+	syms, edges := parseTreeSitter("handlers.py", src)
+	byName := make(map[string]Symbol, len(syms))
+	for _, sym := range syms {
+		byName[sym.Name] = sym
+	}
+	for _, name := range []string{"Handler.parse", "Handler.dispatch"} {
+		if sym, ok := byName[name]; !ok || sym.Kind != KindMethod || sym.Receiver != "Handler" {
+			t.Errorf("%s = %+v, want class-qualified method", name, sym)
+		}
+	}
+	if sym, ok := byName["top_level"]; !ok || sym.Kind != KindFunction || sym.Receiver != "" {
+		t.Errorf("top_level = %+v, want package function", sym)
+	}
+	if _, ok := byName["Handler.top_level"]; ok {
+		t.Fatal("top-level self parameter incorrectly created a method")
+	}
+	for _, want := range []Edge{
+		{SourceName: "Handler.parse", TargetName: "Helper.build", Kind: EdgeCalls},
+		{SourceName: "Handler.dispatch", TargetName: "Worker.run", Kind: EdgeCalls},
+	} {
+		if !slices.Contains(edges, want) {
+			t.Errorf("missing canonical qualified edge %+v in %+v", want, edges)
+		}
+	}
+}
+
+func TestTreeSitterCanonicalizesRustScopeResolutionCalls(t *testing.T) {
+	src := `struct Worker {}
+impl Worker {
+    fn run() { Worker::finish(); }
+    fn finish() {}
+}`
+	_, edges := parseTreeSitter("worker.rs", src)
+	want := Edge{SourceName: "Worker.run", TargetName: "Worker.finish", Kind: EdgeCalls}
+	if !slices.Contains(edges, want) {
+		t.Fatalf("missing canonical edge %+v in %+v", want, edges)
+	}
+}
+
+func TestTreeSitterCanonicalizesRustGenericImplAndTurbofishCalls(t *testing.T) {
+	src := `struct Worker<T>(T);
+impl<T> Worker<T> {
+    fn run() { Worker::<T>::finish(); }
+    fn finish() {}
+}`
+	syms, edges := parseTreeSitter("worker.rs", src)
+	methods := make(map[string]Symbol)
+	for _, sym := range syms {
+		if sym.Kind == KindMethod {
+			methods[sym.Name] = sym
+		}
+	}
+	for _, name := range []string{"Worker.run", "Worker.finish"} {
+		if sym, ok := methods[name]; !ok || sym.Receiver != "Worker" {
+			t.Errorf("%s = %+v, want canonical generic receiver", name, sym)
+		}
+	}
+	want := Edge{SourceName: "Worker.run", TargetName: "Worker.finish", Kind: EdgeCalls}
+	if !slices.Contains(edges, want) {
+		t.Fatalf("missing canonical generic edge %+v in %+v", want, edges)
+	}
+}
+
+func TestTreeSitterCanonicalizesNestedRustGenericArgumentsAndLifetimes(t *testing.T) {
+	src := `struct Pair<T, U>(T, U);
+struct Worker<'a, T, U>(&'a T, U);
+impl<'a, T, U> Worker<'a, Pair<T, U>, Vec<Result<T, U>>> {
+    fn run() {
+        Worker::<'a, Pair<T, U>, Vec<Result<T, U>>>::finish::<Result<T, U>>();
+    }
+    fn finish<V>() {}
+}`
+	syms, edges := parseTreeSitter("worker.rs", src)
+	methods := make(map[string]Symbol)
+	for _, sym := range syms {
+		if sym.Kind == KindMethod {
+			methods[sym.Name] = sym
+		}
+	}
+	for _, name := range []string{"Worker.run", "Worker.finish"} {
+		if sym, ok := methods[name]; !ok || sym.Receiver != "Worker" {
+			t.Errorf("%s = %+v, want canonical nested generic receiver", name, sym)
+		}
+	}
+	want := Edge{SourceName: "Worker.run", TargetName: "Worker.finish", Kind: EdgeCalls}
+	if !slices.Contains(edges, want) {
+		t.Fatalf("missing nested generic call %+v in %+v", want, edges)
+	}
+}
+
+func TestTreeSitterCanonicalizesRustGenericSyntaxByAST(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+	}{
+		{
+			name: "const generic comparison",
+			source: `struct Worker<const VALUE: bool>;
+impl<const N: usize> Worker<{N > 0}> {
+    fn run() { Worker::<{N > 0}>::finish(); }
+    fn finish() {}
+}`,
+		},
+		{
+			name: "const generic shift",
+			source: `struct Worker<const VALUE: usize>;
+impl Worker<{8 >> 1}> {
+    fn run() { Worker::<{8 >> 1}>::finish(); }
+    fn finish() {}
+}`,
+		},
+		{
+			name: "function type",
+			source: `struct Worker<T>(T);
+impl Worker<fn()->usize> {
+    fn run() { Worker::<fn()->usize>::finish(); }
+    fn finish() {}
+}`,
+		},
+		{
+			name: "nested types and lifetime",
+			source: `struct Worker<T>(T);
+impl<'a, T, E> Worker<Result<Vec<&'a T>, E>> {
+    fn run() { Worker::<Result<Vec<&'a T>, E>>::finish(); }
+    fn finish() {}
+}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			syms, edges := parseTreeSitter("worker.rs", tt.source)
+			for _, name := range []string{"Worker.run", "Worker.finish"} {
+				if !slices.ContainsFunc(syms, func(sym Symbol) bool {
+					return sym.Kind == KindMethod && sym.Name == name && sym.Receiver == "Worker"
+				}) {
+					t.Errorf("missing canonical method %q in %+v", name, syms)
+				}
+			}
+			want := Edge{SourceName: "Worker.run", TargetName: "Worker.finish", Kind: EdgeCalls}
+			if !slices.Contains(edges, want) {
+				t.Fatalf("missing canonical call edge %+v in %+v", want, edges)
+			}
+		})
+	}
+}
+
+func TestTreeSitterCanonicalizesNestedRustTurbofishCallByAST(t *testing.T) {
+	src := `struct Wrapper<T>(T);
+impl<T> Wrapper<T> {
+    fn run<U>() { Wrapper::<fn()->Vec<u8>>::convert::<U>(); }
+    fn convert<U>() {}
+}`
+	_, edges := parseTreeSitter("wrapper.rs", src)
+	want := Edge{SourceName: "Wrapper.run", TargetName: "Wrapper.convert", Kind: EdgeCalls}
+	if !slices.Contains(edges, want) {
+		t.Fatalf("missing AST-canonical call edge %+v in %+v", want, edges)
+	}
+}
+
+func TestRustGenericNormalizationDoesNotChangeCppOperatorsOrGoReceivers(t *testing.T) {
+	for target, want := range map[string]string{
+		"Worker<int>::finish": "Worker<int>.finish",
+		"Widget::operator<<":  "Widget.operator<<",
+		"Widget::operator>>":  "Widget.operator>>",
+	} {
+		if got := qualifyScopedCall(target, ""); got != want {
+			t.Errorf("qualifyScopedCall(%q) = %q, want %q", target, got, want)
+		}
+	}
+	if got := receiverIdentity("w *Worker[T]"); got != "Worker" {
+		t.Errorf("generic Go receiver = %q, want Worker", got)
+	}
+}
+
+func TestQualifyScopedCallCanonicalizesCppAndRustQualifiers(t *testing.T) {
+	for target, want := range map[string]string{
+		"Worker::finish":         "Worker.finish",
+		"namespace::Worker::run": "namespace.Worker.run",
+	} {
+		if got := qualifyScopedCall(target, ""); got != want {
+			t.Errorf("qualifyScopedCall(%q) = %q, want %q", target, got, want)
+		}
+	}
+	if got := qualifyScopedCall("Self::finish", "Worker"); got != "Worker.finish" {
+		t.Errorf("Self::finish = %q, want Worker.finish", got)
 	}
 }

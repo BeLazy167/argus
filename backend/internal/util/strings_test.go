@@ -21,7 +21,7 @@ func TestTruncate(t *testing.T) {
 		{"empty string", "", 10, false, ""},
 		{"maxLen zero", "hello", 0, false, ""},
 		{"maxLen zero with ellipsis", "hello", 0, true, "..."},
-		{"utf8 multibyte no split", "héllo wörld", 6, false, "héllo"},       // "héllo" = 6 bytes (é=2), fits exactly
+		{"utf8 multibyte no split", "héllo wörld", 6, false, "héllo"},        // "héllo" = 6 bytes (é=2), fits exactly
 		{"utf8 multibyte with ellipsis", "héllo wörld", 6, true, "héllo..."}, // same — 6 bytes + ellipsis
 		{"utf8 mid-rune cut", "héllo wörld", 2, false, "h"},                  // 2 bytes: é(2) won't fit at pos 1, backs up to "h"
 		{"emoji no split", "hi\U0001F600there", 4, false, "hi"},

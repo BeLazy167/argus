@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/BeLazy167/argus/backend/internal/admission"
 	"log/slog"
 	"net/http"
 	"runtime/debug"
@@ -17,6 +18,7 @@ import (
 	ghpkg "github.com/BeLazy167/argus/backend/internal/github"
 	"github.com/BeLazy167/argus/backend/internal/obs"
 	"github.com/BeLazy167/argus/backend/internal/pipeline"
+	"github.com/BeLazy167/argus/backend/internal/store"
 )
 
 // issueLabelsForScenario are labels that trigger auto-scenario creation from issues.
@@ -28,12 +30,18 @@ var issueLabelsForScenario = map[string]bool{"argus": true, "bug": true}
 var (
 	errServerBusy  = errors.New("webhook semaphore full")
 	errRateLimited = errors.New("review rate limit exceeded")
+	// errReviewRefused is a verdict refusal — permission, rate or budget. It is
+	// distinct from errRateLimited so a caller can tell "not allowed" from
+	// "not now"; the reason itself travels on the Verdict, not the error.
+	errReviewRefused = errors.New("review refused by admission")
 )
 
 func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
+	op := s.beginOperation(r.Context(), "api.handleWebhook")
+	defer op.Finish(w)
 	event, err := ghpkg.ParseWebhook(r, s.webhookSecret)
 	if err != nil {
-		s.logger.Error("webhook parse failed", "error", err)
+		s.logger.ErrorContext(r.Context(), "webhook parse failed", "error", err)
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid webhook"})
 		return
 	}
@@ -44,7 +52,7 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	case "pull_request":
 		prEvent, err := ghpkg.ToPREvent(event)
 		if err != nil {
-			s.logger.Error("parsing PR event", "error", err)
+			s.logger.ErrorContext(r.Context(), "parsing PR event", "error", err)
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
@@ -60,6 +68,12 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			slog.String("delivery_id", deliveryID),
 			slog.String("trace_id", obs.TraceID(r.Context())),
 		)
+		if update, ok := ghpkg.DefaultBranchUpdateFromPR(*prEvent); ok {
+			if err := s.scheduleGraphRefresh(r.Context(), update); err != nil {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "failed to schedule graph refresh"})
+				return
+			}
+		}
 		// pull_request.edited: the author tweaked the PR body (or title/base).
 		// We don't want to re-review on body edits, but we DO want to refresh
 		// the cross-PR section when the set of linked-PR refs changes — a
@@ -69,29 +83,19 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			s.handlePREdited(r.Context(), prEvent)
 			break
 		}
-		orgLogin := strings.SplitN(prEvent.RepoFullName, "/", 2)[0]
-		if !s.allowReview(r.Context(), prEvent.RepoFullName, orgLogin, false, prEvent.InstallationID) {
-			s.logger.Warn("rate limited", "repo", prEvent.RepoFullName)
+		// Through Admission, like every other launch site. The actor is
+		// ActorSystem: nobody asked, and auto_run — decided later, inside
+		// HandlePREvent, where the repo settings are loaded — is the authority.
+		// The PR author rides along for attribution and is never authorized,
+		// or a fork pull request would authorize its own review.
+		orgLogin, _, _ := strings.Cut(prEvent.RepoFullName, "/")
+		if verdict := s.admissionFor(prEvent.InstallationID).Decide(r.Context(), admission.Request{
+			Actor:        admission.SystemActor(prEvent.PRAuthor),
+			RepoFullName: prEvent.RepoFullName,
+			OrgLogin:     orgLogin,
+		}); !verdict.Allowed() {
+			s.logger.WarnContext(r.Context(), "webhook review refused", "repo", prEvent.RepoFullName, "reason", verdict.Reason)
 			break
-		}
-		// Check review limit for this installation
-		inst, instErr := s.store.GetInstallationByGitHubID(r.Context(), prEvent.InstallationID)
-		if instErr != nil {
-			s.logger.Warn("installation lookup for plan check", "error", instErr)
-		} else {
-			reviewCount, countErr := s.store.CountReviewsThisMonth(r.Context(), inst.ID)
-			if countErr != nil {
-				s.logger.Warn("review count check failed", "error", countErr)
-			} else {
-				limit := 50 // free tier
-				if s.cfg.IsPro(inst.PlanTier) {
-					limit = 500
-				}
-				if reviewCount >= limit {
-					s.logger.Info("review limit reached", "installation", inst.ID, "count", reviewCount, "limit", limit)
-					break
-				}
-			}
 		}
 
 		// The launcher owns slot + cancel + spawn. The webhook semaphore (a
@@ -101,7 +105,7 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		// is preserved onto the detached BaseCtx so every stage event carries the
 		// id the FE/webhook-ingress saw.
 		prEvt := *prEvent
-		launchErr := s.launcher.Launch(pipeline.LaunchSpec{
+		launchErr := s.launchPREvent(pipeline.LaunchSpec{
 			Repo:    prEvt.RepoFullName,
 			PR:      prEvt.PRNumber,
 			BaseCtx: obs.SetTraceID(context.Background(), obs.TraceID(r.Context())),
@@ -112,52 +116,33 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 				return nil
 			},
 			Cleanup: s.releaseSem,
-			Run:     func(ctx context.Context) error { return s.orchestrator.HandlePREvent(ctx, prEvt) },
 			OnDone: func(err error) {
 				if err != nil && !errors.Is(err, context.Canceled) {
-					s.logger.Error("review pipeline failed", "error", err, "pr", prEvt.PRNumber)
+					s.logger.ErrorContext(r.Context(), "review pipeline failed", "error", err, "pr", prEvt.PRNumber)
 				}
 			},
-		})
+		}, prEvt)
 		if errors.Is(launchErr, pipeline.ErrInFlight) {
-			s.logger.Info("review already in-flight", "repo", prEvt.RepoFullName, "pr", prEvt.PRNumber)
+			s.logger.InfoContext(r.Context(), "review already in-flight", "repo", prEvt.RepoFullName, "pr", prEvt.PRNumber)
 			break
 		}
 		if errors.Is(launchErr, errServerBusy) {
-			s.logger.Warn("webhook semaphore full")
+			s.logger.WarnContext(r.Context(), "webhook semaphore full")
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "server busy"})
 			return
 		}
+		if launchErr != nil {
+			s.logger.ErrorContext(r.Context(), "webhook review: launch failed", "error", launchErr, "repo", prEvt.RepoFullName, "pr", prEvt.PRNumber)
+			if writeReviewLaunchUnavailable(w, launchErr) {
+				return
+			}
+		}
 
-		// Fire-and-forget reaction sweep. GitHub doesn't webhook reactions on
-		// PR review comments, so we opportunistically re-check reactions on
-		// every pull_request event. Decoupled from the review goroutine so a
-		// slow sweep doesn't delay the review pipeline. Guarded by the same
-		// webhook semaphore as every other handler goroutine so a burst of
-		// PR events can't spawn unbounded sweepers.
-		if s.reactionAnalyzer != nil {
-			if s.acquireSem() {
-				traceID := obs.TraceID(r.Context())
-				go func(installationID int64, fullName string, pr int) {
-					defer s.releaseSem()
-					// Propagate installation_id onto the detached ctx so slog
-					// records fired before the analyzer resolves the DB inst
-					// still carry attribution. Downstream resolve overwrites
-					// this with the DB id (inner-ctx wins).
-					sweepCtx, cancel := context.WithTimeout(
-						obs.SetInstallationID(
-							obs.SetTraceID(context.Background(), traceID),
-							installationID,
-						),
-						60*time.Second,
-					)
-					defer cancel()
-					if err := s.reactionAnalyzer.SweepPRReactions(sweepCtx, installationID, fullName, pr); err != nil {
-						s.logger.Warn("reaction sweep failed", "error", err, "pr", pr)
-					}
-				}(prEvent.InstallationID, prEvent.RepoFullName, prEvent.PRNumber)
-			} else {
-				s.logger.Warn("webhook semaphore full for reaction sweep", "pr", prEvent.PRNumber)
+	case "push":
+		if update, ok := ghpkg.DefaultBranchUpdateFromPush(event); ok {
+			if err := s.scheduleGraphRefresh(r.Context(), update); err != nil {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "failed to schedule graph refresh"})
+				return
 			}
 		}
 
@@ -165,7 +150,7 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		if event.Action == "created" {
 			commentEvent, err := ghpkg.ToCommentEvent(event)
 			if err != nil {
-				s.logger.Error("parsing comment event", "error", err)
+				s.logger.ErrorContext(r.Context(), "parsing comment event", "error", err)
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 				return
 			}
@@ -185,11 +170,11 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 							installationID,
 						)
 						if err := s.replyAnalyzer.Analyze(ctx, *commentEvent); err != nil {
-							s.logger.Error("reply analysis failed", "error", err, "comment_id", commentEvent.CommentID)
+							s.logger.ErrorContext(r.Context(), "reply analysis failed", "error", err, "comment_id", commentEvent.CommentID)
 						}
 					}()
 				} else {
-					s.logger.Warn("webhook semaphore full for reply analysis")
+					s.logger.WarnContext(r.Context(), "webhook semaphore full for reply analysis")
 				}
 			}
 			// Reaction analysis: check reactions on the parent Argus comment
@@ -205,11 +190,11 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 							installationID,
 						)
 						if err := s.reactionAnalyzer.HandleCommentReactions(ctx, parentEvent); err != nil {
-							s.logger.Error("reaction analysis failed", "error", err, "comment_id", parentEvent.CommentID)
+							s.logger.ErrorContext(r.Context(), "reaction analysis failed", "error", err, "comment_id", parentEvent.CommentID)
 						}
 					}()
 				} else {
-					s.logger.Warn("webhook semaphore full for reaction analysis")
+					s.logger.WarnContext(r.Context(), "webhook semaphore full for reaction analysis")
 				}
 			}
 		}
@@ -219,14 +204,14 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		case "created":
 			issueEvent, err := ghpkg.ToIssueCommentEvent(event)
 			if err != nil {
-				s.logger.Error("parsing issue comment event", "error", err)
+				s.logger.ErrorContext(r.Context(), "parsing issue comment event", "error", err)
 				break
 			}
 			if issueEvent == nil || strings.HasSuffix(issueEvent.CommentAuthor, "[bot]") {
 				break
 			}
 			if !s.acquireSem() {
-				s.logger.Warn("webhook semaphore full for command dispatch")
+				s.logger.WarnContext(r.Context(), "webhook semaphore full for command dispatch")
 				break
 			}
 			traceID := obs.TraceID(r.Context())
@@ -249,7 +234,7 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			//   - checkbox transitioned [ ] -> [x]
 			issueEvent, err := ghpkg.ToIssueCommentEvent(event)
 			if err != nil {
-				s.logger.Error("parsing issue comment edited event", "error", err)
+				s.logger.ErrorContext(r.Context(), "parsing issue comment edited event", "error", err)
 				break
 			}
 			if issueEvent == nil {
@@ -265,7 +250,7 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 			if !s.acquireSem() {
-				s.logger.Warn("webhook semaphore full for checkbox trigger")
+				s.logger.WarnContext(r.Context(), "webhook semaphore full for checkbox trigger")
 				break
 			}
 			traceID := obs.TraceID(r.Context())
@@ -300,7 +285,7 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		if !s.acquireSem() {
-			s.logger.Warn("webhook semaphore full for issue scenario")
+			s.logger.WarnContext(r.Context(), "webhook semaphore full for issue scenario")
 			break
 		}
 		go func() {
@@ -309,10 +294,10 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		}()
 
 	case "installation":
-		s.logger.Info("installation event", "action", event.Action)
+		s.logger.InfoContext(r.Context(), "installation event", "action", event.Action)
 		instEvent, ok := event.Payload.(*gh.InstallationEvent)
 		if !ok {
-			s.logger.Error("unexpected installation event payload type")
+			s.logger.ErrorContext(r.Context(), "unexpected installation event payload type")
 			break
 		}
 		ghInstID := instEvent.GetInstallation().GetID()
@@ -322,40 +307,99 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		case "created":
 			inst, err := s.store.CreateInstallation(r.Context(), ghInstID, accountLogin)
 			if err != nil {
-				s.logger.Error("create installation", "error", err, "gh_id", ghInstID)
+				s.logger.ErrorContext(r.Context(), "create installation", "error", err, "gh_id", ghInstID)
 				break
 			}
 			var synced int
 			for _, repo := range instEvent.Repositories {
 				_, err := s.store.UpsertRepo(r.Context(), inst.ID, repo.GetID(), repo.GetFullName(), repo.GetDefaultBranch())
 				if err != nil {
-					s.logger.Warn("upsert repo from installation event", "error", err, "repo", repo.GetFullName())
+					s.logger.WarnContext(r.Context(), "upsert repo from installation event", "error", err, "repo", repo.GetFullName())
 					continue
 				}
 				synced++
 			}
-			s.logger.Info("installation created", "gh_id", ghInstID, "account", accountLogin, "repos_synced", synced)
+			s.logger.InfoContext(r.Context(), "installation created", "gh_id", ghInstID, "account", accountLogin, "repos_synced", synced)
 
 		case "deleted", "suspend":
 			inst, err := s.store.GetInstallationByGitHubID(r.Context(), ghInstID)
 			if err != nil {
-				s.logger.Warn("installation lookup for suspend/delete", "error", err, "gh_id", ghInstID)
+				s.logger.WarnContext(r.Context(), "installation lookup for suspend/delete", "error", err, "gh_id", ghInstID)
 				break
 			}
 			if err := s.store.SuspendInstallation(r.Context(), inst.ID); err != nil {
-				s.logger.Error("suspend installation", "error", err, "gh_id", ghInstID)
+				s.logger.ErrorContext(r.Context(), "suspend installation", "error", err, "gh_id", ghInstID)
 			}
 
 		case "unsuspend":
 			// Re-create clears suspended_at via ON CONFLICT
 			_, err := s.store.CreateInstallation(r.Context(), ghInstID, accountLogin)
 			if err != nil {
-				s.logger.Error("unsuspend installation", "error", err, "gh_id", ghInstID)
+				s.logger.ErrorContext(r.Context(), "unsuspend installation", "error", err, "gh_id", ghInstID)
 			}
 		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "accepted"})
+}
+
+func (s *Server) scheduleGraphRefresh(ctx context.Context, update ghpkg.DefaultBranchUpdate) error {
+	var scheduled bool
+	var err error
+	if update.BranchIdentityIsAuthoritative() {
+		scheduled, err = s.store.ScheduleGraphIndexRefreshFromPush(ctx, update.InstallationID, update.RepoID,
+			update.RepoFullName, update.DefaultBranch, update.CommitSHA, update.ObservedAt)
+		var conflict *store.GraphDefaultBranchMismatchError
+		if errors.As(err, &conflict) {
+			verified, verifyErr := verifyCurrentDefaultHead(ctx, s.repoMetadata, update)
+			if verifyErr != nil {
+				err = verifyErr
+			} else if !verified {
+				return nil
+			} else {
+				scheduled, err = s.store.ScheduleGraphIndexRefreshFromVerifiedPush(ctx,
+					update.InstallationID, update.RepoID, update.RepoFullName, update.DefaultBranch,
+					update.CommitSHA, update.ObservedAt, update.DefaultBranch, update.CommitSHA,
+					conflict.ConflictToken)
+			}
+		}
+	} else {
+		scheduled, err = s.store.ScheduleGraphIndexRefresh(ctx, update.InstallationID, update.RepoID,
+			update.RepoFullName, update.DefaultBranch, update.CommitSHA, update.ObservedAt)
+	}
+	if err != nil {
+		s.logger.WarnContext(ctx, "graph refresh: schedule default branch", "repo", update.RepoFullName,
+			"commit", update.CommitSHA, "error", err)
+		return err
+	}
+	if scheduled {
+		s.logger.InfoContext(ctx, "graph refresh: default branch changed", "repo", update.RepoFullName,
+			"commit", update.CommitSHA)
+	}
+	return nil
+}
+
+func verifyCurrentDefaultHead(ctx context.Context, client repoMetadataClient, update ghpkg.DefaultBranchUpdate) (bool, error) {
+	if client == nil {
+		return false, errors.New("repository metadata client is unavailable")
+	}
+	owner, repo, ok := strings.Cut(update.RepoFullName, "/")
+	if !ok || owner == "" || repo == "" || strings.Contains(repo, "/") {
+		return false, errors.New("invalid repository full name")
+	}
+	metadata, err := client.GetRepositoryMetadata(ctx, update.InstallationID, owner, repo)
+	if err != nil {
+		return false, fmt.Errorf("verify current default head metadata: %w", err)
+	}
+	if metadata.ID != update.RepoID || metadata.FullName != update.RepoFullName ||
+		metadata.DefaultBranch != update.DefaultBranch {
+		return false, nil
+	}
+	headSHA, err := client.ResolveDefaultBranchCommit(ctx, update.InstallationID, owner, repo, metadata.DefaultBranch)
+	if err != nil {
+		return false, fmt.Errorf("verify current default head commit: %w", err)
+	}
+	return headSHA != "" && headSHA == update.CommitSHA, nil
 }
 
 // handleCheckboxTrigger dispatches a review when a user toggles the "Trigger
@@ -379,6 +423,8 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 //     race doesn't leave the checkbox stuck.
 //   - The OnDone failure path restores the checkbox to unchecked with an error
 //     suffix so the user can click again to retry.
+//   - A synchronous failure after the Running swap restores the exact pre-click
+//     body once because OnDone never runs when the pipeline did not spawn.
 func (s *Server) handleCheckboxTrigger(ctx context.Context, evt ghpkg.IssueCommentEvent) {
 	parts := strings.SplitN(evt.RepoFullName, "/", 2)
 	if len(parts) != 2 {
@@ -387,6 +433,43 @@ func (s *Server) handleCheckboxTrigger(ctx context.Context, evt ghpkg.IssueComme
 	owner, repoName := parts[0], parts[1]
 	ghClient := ghpkg.NewClient(s.ghApp, s.cfg.GitHubAppSlug)
 
+	// AUTHORIZE THE TICKER, NOT THE COMMENT AUTHOR.
+	//
+	// Through Admission. On a public repo anyone can toggle a task-list
+	// checkbox in someone else's comment, so without a check on the TICKER an
+	// outside contributor could open a large pull request and spend the
+	// maintainer's budget with no sign-off.
+	//
+	// The actor is evt.EditorLogin. evt.AuthorAssociation cannot gate this: on
+	// an issue_comment edit it describes the COMMENT's author — Argus — and
+	// reads as privileged for every click.
+	//
+	// The rate limit rides along, from the tighter force bucket, so this path
+	// no longer reserves separately below.
+	permCtx, cancelPerm := context.WithTimeout(ctx, 10*time.Second)
+	verdict := s.admissionFor(evt.InstallationID).Decide(permCtx, admission.Request{
+		Actor:        admission.GitHubActor(evt.EditorLogin),
+		RepoFullName: evt.RepoFullName,
+		OrgLogin:     owner,
+		Force:        true,
+	})
+	cancelPerm()
+	if !verdict.Allowed() {
+		s.logger.WarnContext(ctx, "checkbox trigger refused",
+			"repo", evt.RepoFullName, "pr", evt.PRNumber, "actor", evt.EditorLogin, "reason", verdict.Reason)
+		// Reset the box so the state on screen matches reality — a box left
+		// ticked reads as "queued" and invites a wait for a review that will
+		// never start.
+		if reset := pipeline.ResetTriggerCheckbox(evt.CommentBody); reset != evt.CommentBody {
+			if err := ghClient.UpdateIssueComment(ctx, evt.InstallationID, owner, repoName, evt.CommentID, reset); err != nil {
+				s.logger.WarnContext(ctx, "checkbox trigger: reset after refusal", "error", err, "comment_id", evt.CommentID)
+			}
+		}
+		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repoName, evt.CommentID, "-1")
+		s.replyRefused(ctx, evt, verdict)
+		return
+	}
+
 	// Acknowledge the click with a reaction before doing any heavy work.
 	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repoName, evt.CommentID, "eyes")
 
@@ -394,7 +477,7 @@ func (s *Server) handleCheckboxTrigger(ctx context.Context, evt ghpkg.IssueComme
 	prEvent, err := ghClient.GetPullRequest(prCtx, evt.InstallationID, owner, repoName, evt.PRNumber)
 	cancelPR()
 	if err != nil {
-		s.logger.Error("checkbox trigger: fetch PR failed", "error", err, "pr", evt.PRNumber)
+		s.logger.ErrorContext(ctx, "checkbox trigger: fetch PR failed", "error", err, "pr", evt.PRNumber)
 		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repoName, evt.CommentID, "confused")
 		return
 	}
@@ -408,9 +491,10 @@ func (s *Server) handleCheckboxTrigger(ctx context.Context, evt ghpkg.IssueComme
 	// preserved via BeforeSpawn, which runs AFTER the slot is won: allowReview
 	// stays post-acquire (a losing double-click must not burn a force-hourly
 	// token) and the "Running…" swap follows it. `runningBody` is written by
-	// BeforeSpawn before the goroutine spawns, so OnDone reads it safely.
+	// BeforeSpawn before the goroutine spawns, so both OnDone and the synchronous
+	// launch-error path read it safely.
 	var runningBody string
-	launchErr := s.launcher.Launch(pipeline.LaunchSpec{
+	launchErr := s.launchPREvent(pipeline.LaunchSpec{
 		Repo:    evt.RepoFullName,
 		PR:      evt.PRNumber,
 		BaseCtx: ctx,
@@ -425,51 +509,62 @@ func (s *Server) handleCheckboxTrigger(ctx context.Context, evt ghpkg.IssueComme
 			if !s.acquireSem() {
 				return errServerBusy
 			}
-			if !s.allowReview(ctx, evt.RepoFullName, owner, true, evt.InstallationID) {
-				s.releaseSem()
-				return errRateLimited
-			}
+			// No allowReview here: Admission already reserved from the force
+			// bucket above. Reserving twice would charge one click two tokens.
 			// Swap the checkbox line for a "Running..." marker so the user sees
 			// immediate feedback. Failure here is non-fatal.
 			runningBody = pipeline.ReplaceTriggerWithRunning(evt.CommentBody)
 			if runningBody != evt.CommentBody {
 				if err := ghClient.UpdateIssueComment(ctx, evt.InstallationID, owner, repoName, evt.CommentID, runningBody); err != nil {
-					s.logger.Warn("checkbox trigger: update comment body", "error", err, "comment_id", evt.CommentID)
+					s.logger.WarnContext(ctx, "checkbox trigger: update comment body", "error", err, "comment_id", evt.CommentID)
 				}
 			}
-			s.logger.Info("checkbox-triggered review", "repo", evt.RepoFullName, "pr", evt.PRNumber, "by", evt.EditorLogin)
+			s.logger.InfoContext(ctx, "checkbox-triggered review", "repo", evt.RepoFullName, "pr", evt.PRNumber, "by", evt.EditorLogin)
 			return nil
 		},
 		Cleanup: s.releaseSem,
-		Run:     func(runCtx context.Context) error { return s.orchestrator.HandlePREvent(runCtx, *prEvent) },
 		OnDone: func(err error) {
 			if err != nil {
-				s.logger.Error("checkbox trigger: pipeline failed", "error", err, "pr", evt.PRNumber)
+				s.logger.ErrorContext(ctx, "checkbox trigger: pipeline failed", "error", err, "pr", evt.PRNumber)
 				_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repoName, evt.CommentID, "confused")
 				// Restore the checkbox so the user can click again to retry;
 				// best-effort (failure here is worse than leaving the marker).
 				if restored := pipeline.RestoreTriggerAfterFailure(runningBody); restored != runningBody {
 					if uerr := ghClient.UpdateIssueComment(ctx, evt.InstallationID, owner, repoName, evt.CommentID, restored); uerr != nil {
-						s.logger.Warn("checkbox trigger: restore comment body", "error", uerr, "comment_id", evt.CommentID)
+						s.logger.WarnContext(ctx, "checkbox trigger: restore comment body", "error", uerr, "comment_id", evt.CommentID)
 					}
 				}
 				return
 			}
 			_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repoName, evt.CommentID, "rocket")
 		},
-	})
+	}, *prEvent)
 	switch {
 	case errors.Is(launchErr, pipeline.ErrInFlight):
-		s.logger.Info("checkbox trigger: review already in progress", "repo", evt.RepoFullName, "pr", evt.PRNumber)
+		s.logger.InfoContext(ctx, "checkbox trigger: review already in progress", "repo", evt.RepoFullName, "pr", evt.PRNumber)
 	case errors.Is(launchErr, errRateLimited):
 		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repoName, evt.PRNumber,
 			fmt.Sprintf("Rate limit exceeded for on-demand reviews (%d/hour). Try again later.", forceHourlyLimit))
 		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repoName, evt.CommentID, "confused")
 	case errors.Is(launchErr, errServerBusy):
-		s.logger.Warn("checkbox trigger: webhook semaphore full", "repo", evt.RepoFullName, "pr", evt.PRNumber)
+		s.logger.WarnContext(ctx, "checkbox trigger: webhook semaphore full", "repo", evt.RepoFullName, "pr", evt.PRNumber)
 		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repoName, evt.PRNumber,
 			"Argus is at capacity right now. Try again in a few minutes.")
 		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repoName, evt.CommentID, "confused")
+	case launchErr != nil:
+		s.logger.ErrorContext(ctx, "checkbox trigger: launch failed", "error", launchErr, "repo", evt.RepoFullName, "pr", evt.PRNumber)
+		_, restoreErr := restoreCheckboxAfterSynchronousLaunchFailure(
+			launchErr, runningBody, evt.CommentBody, evt.CommentBodyBefore,
+			func(restored string) error {
+				return ghClient.UpdateIssueComment(ctx, evt.InstallationID, owner, repoName, evt.CommentID, restored)
+			},
+		)
+		if restoreErr != nil {
+			s.logger.WarnContext(ctx, "checkbox trigger: restore after launch failure", "error", restoreErr, "comment_id", evt.CommentID)
+		}
+		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repoName, evt.CommentID, "confused")
+		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repoName, evt.PRNumber,
+			"Review could not start because its pre-review checks failed. Try again later.")
 	}
 }
 
@@ -532,20 +627,20 @@ func (s *Server) handlePREdited(ctx context.Context, prEvent *ghpkg.PREvent) {
 		if errors.Is(err, pgx.ErrNoRows) {
 			// No completed review yet — first-time PRs are handled by the
 			// normal review pipeline on opened/synchronize, not by an edit.
-			s.logger.Info("pr.edited: no review for cross-PR refresh",
+			s.logger.InfoContext(ctx, "pr.edited: no review for cross-PR refresh",
 				"repo", prEvent.RepoFullName, "pr", prEvent.PRNumber)
 			return
 		}
 		// Anything else (DB outage, connection error) is a real failure.
 		// Logging Info would hide it in the noise of routine pr.edited
 		// events; log Error with full context so on-call notices.
-		s.logger.Error("pr.edited: GetLatestReviewByPR failed",
+		s.logger.ErrorContext(ctx, "pr.edited: GetLatestReviewByPR failed",
 			"repo", prEvent.RepoFullName,
 			"pr", prEvent.PRNumber,
 			"error", err)
 		return
 	}
-	s.logger.Info("pr.edited: linked-PR delta detected, refreshing",
+	s.logger.InfoContext(ctx, "pr.edited: linked-PR delta detected, refreshing",
 		"repo", prEvent.RepoFullName, "pr", prEvent.PRNumber, "review_id", review.ID,
 		"added", len(after)-len(before), "removed", len(before)-len(after))
 	// Fire-and-forget. OnReviewCompleted internally debounces + re-enters
@@ -560,7 +655,7 @@ func (s *Server) handlePREdited(ctx context.Context, prEvent *ghpkg.PREvent) {
 	go func(reviewID uuid.UUID) {
 		defer func() {
 			if r := recover(); r != nil {
-				s.logger.Error("pr.edited: cross-PR refresh panic",
+				s.logger.ErrorContext(ctx, "pr.edited: cross-PR refresh panic",
 					"review_id", reviewID,
 					"recover", r,
 					"stack", string(debug.Stack()))

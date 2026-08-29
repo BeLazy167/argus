@@ -3,10 +3,13 @@ package sast
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // staticcheckOutput is the JSON structure emitted by `staticcheck -f json`.
@@ -32,7 +35,15 @@ func (s *StaticcheckRunner) CanRun(language string) bool {
 
 // Run writes the provided Go files to a temp directory and invokes staticcheck.
 // Returns empty findings (not an error) if the staticcheck binary is not installed.
-func (s *StaticcheckRunner) Run(ctx context.Context, files map[string]string) ([]Finding, error) {
+func (s *StaticcheckRunner) Run(ctx context.Context, files map[string]string) (findings []Finding, err error) {
+	started := time.Now()
+	defer func() {
+		level := slog.LevelInfo
+		if err != nil {
+			level = slog.LevelError
+		}
+		slog.Log(ctx, level, "SAST tool run completed", "tool", "staticcheck", "file_count", len(files), "finding_count", len(findings), "duration_ms", time.Since(started).Milliseconds(), "error", err)
+	}()
 	if _, err := exec.LookPath("staticcheck"); err != nil {
 		return nil, nil
 	}
@@ -66,15 +77,21 @@ func (s *StaticcheckRunner) Run(ctx context.Context, files map[string]string) ([
 	cmd := exec.CommandContext(ctx, "staticcheck", "-f", "json", "./...")
 	cmd.Dir = dir
 
-	out, runErr := cmd.Output()
-	// staticcheck exits non-zero when findings exist — that's expected.
+	out, stderr, runErr := runCommand(ctx, "staticcheck", cmd)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, fmt.Errorf("staticcheck interrupted: %w", ctxErr)
+	}
+	// staticcheck exits non-zero when findings exist — that's expected when output is present.
 	if runErr != nil {
 		if _, ok := runErr.(*exec.ExitError); !ok {
 			return nil, runErr
 		}
+		if len(strings.TrimSpace(string(out))) == 0 {
+			return nil, fmt.Errorf("staticcheck failed with no output: %s: %w", strings.TrimSpace(string(stderr)), runErr)
+		}
 	}
 
-	var findings []Finding
+	parsedRecords := 0
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		if line == "" {
 			continue
@@ -83,6 +100,10 @@ func (s *StaticcheckRunner) Run(ctx context.Context, files map[string]string) ([
 		if err := json.Unmarshal([]byte(line), &sc); err != nil {
 			continue
 		}
+		if sc.Code == "" || sc.Message == "" || sc.Location.File == "" {
+			continue
+		}
+		parsedRecords++
 		// Make path relative to temp dir so callers see the original file name.
 		rel, _ := filepath.Rel(dir, sc.Location.File)
 		sev := sc.Severity
@@ -97,6 +118,9 @@ func (s *StaticcheckRunner) Run(ctx context.Context, files map[string]string) ([
 			Message:  sc.Message,
 			Severity: sev,
 		})
+	}
+	if runErr != nil && parsedRecords == 0 {
+		return nil, fmt.Errorf("staticcheck failed without valid output: %s: %w", strings.TrimSpace(string(stderr)), runErr)
 	}
 	return findings, nil
 }

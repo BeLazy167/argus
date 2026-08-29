@@ -28,9 +28,9 @@ func TestPprofRoutes_RequiresToken(t *testing.T) {
 	registerPprofRoutes(r)
 
 	tests := []struct {
-		name   string
-		token  string
-		want   int
+		name      string
+		token     string
+		want      int
 		checkBody bool
 	}{
 		{"missing token", "", http.StatusNotFound, false},

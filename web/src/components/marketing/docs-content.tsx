@@ -2,7 +2,6 @@
 
 import { useEffect, useRef, useState } from "react";
 import {
-  GitPullRequest,
   Zap,
   FileSearch,
   MessageSquare,
@@ -17,7 +16,6 @@ import {
   FlaskConical,
   Layers,
   RefreshCw,
-  Play,
   SlidersHorizontal,
   Brain,
   Key,
@@ -46,6 +44,12 @@ import {
   Flag,
   Info,
 } from "lucide-react";
+import {
+  PipelineDiagram,
+  DeepReviewDiagram,
+  LifecycleDiagram,
+  MemoryDiagram,
+} from "@/components/marketing/docs-diagrams";
 
 /* ── Section data ── */
 
@@ -54,12 +58,12 @@ const SECTIONS = [
   { id: "pipeline", label: "The Review Pipeline" },
   { id: "review-contract", label: "The Review Contract" },
   { id: "review-laws", label: "Review Laws" },
-  { id: "deep-review", label: "Deep Review", pro: true },
+  { id: "deep-review", label: "Deep Review" },
   { id: "incremental-reviews", label: "Incremental Reviews" },
   { id: "what-argus-sees", label: "What Argus Sees" },
-  { id: "architecture-viz", label: "Architecture Visualization", pro: true },
-  { id: "code-simulation", label: "Code Simulation", pro: true },
-  { id: "pr-enrichment", label: "PR Enrichment & Diagrams", pro: true },
+  { id: "architecture-viz", label: "Architecture Visualization" },
+  { id: "code-simulation", label: "Code Simulation" },
+  { id: "pr-enrichment", label: "PR Enrichment & Diagrams" },
   { id: "conversational-review", label: "Conversational Review" },
   { id: "live-timeline", label: "Live Activity Timeline" },
   { id: "severities", label: "Severities" },
@@ -67,12 +71,12 @@ const SECTIONS = [
   { id: "rules", label: "Review Rules" },
   { id: "models", label: "Model Config" },
   { id: "api-keys", label: "API Keys (BYOK)" },
-  { id: "supermemory", label: "BYOT Supermemory" },
+  { id: "memory-storage", label: "Memory storage" },
   { id: "personas", label: "Review Personas" },
   { id: "auto-review", label: "Auto-review & Triggers" },
   { id: "commands", label: "Bot Commands" },
   { id: "test-generation", label: "Test Generation" },
-  { id: "memory", label: "Memory & Learning", pro: true },
+  { id: "memory", label: "Memory & Learning" },
   { id: "glass-box", label: "Glass Box & Gauge" },
   { id: "insights", label: "Insights & Risk" },
   { id: "token-tracking", label: "Token & Cost Tracking" },
@@ -214,15 +218,10 @@ function SidebarLink({
   id,
   label,
   active,
-  pro,
 }: {
   id: string;
   label: string;
   active: boolean;
-  /** Renders a compact "Pro" dot after the label — small enough not to
-   * compete with the link itself but visible enough to communicate the
-   * plan gate before the user clicks through. */
-  pro?: boolean;
 }) {
   return (
     <a
@@ -234,15 +233,6 @@ function SidebarLink({
       }`}
     >
       <span className="truncate">{label}</span>
-      {pro ? (
-        <span
-          className="shrink-0 text-[8px] font-mono font-semibold uppercase tracking-[0.14em] text-amber/80"
-          aria-label="Pro plan only"
-          title="Pro plan only"
-        >
-          PRO
-        </span>
-      ) : null}
     </a>
   );
 }
@@ -250,36 +240,17 @@ function SidebarLink({
 function SectionHeader({
   id,
   title,
-  pro,
 }: {
   id: string;
   title: string;
-  /** When true, inline a PRO tag next to the title so readers on Free see
-   * upfront that the section describes a paid-plan feature. */
-  pro?: boolean;
 }) {
   return (
     <div id={id} className="scroll-mt-24">
       <h2 className="font-mono text-xl font-bold text-foreground mb-1 inline-flex items-baseline gap-2.5 flex-wrap">
         <span>{title}</span>
-        {pro ? <ProTag /> : null}
       </h2>
       <div className="h-px bg-iron mb-6" />
     </div>
-  );
-}
-
-/** Inline PRO tag. Shares aesthetic with the one in docs/features/memory-tuning:
- * amber-on-dark, mono, uppercase, tight tracking. Marked as aria-label so
- * screen readers say "Pro plan only" instead of just reading "Pro". */
-function ProTag() {
-  return (
-    <span
-      className="relative -top-0.5 inline-flex items-center border border-amber/50 bg-amber/10 px-1.5 py-0.5 text-[9px] font-mono font-semibold uppercase tracking-[0.16em] text-amber"
-      aria-label="Pro plan only"
-    >
-      Pro
-    </span>
   );
 }
 
@@ -409,7 +380,6 @@ export function DocsContent() {
                 id={s.id}
                 label={s.label}
                 active={activeSection === s.id}
-                pro={"pro" in s ? s.pro : false}
               />
             ))}
           </div>
@@ -476,6 +446,7 @@ export function DocsContent() {
               use a different model, configurable per-repo. The sequence
               typically completes in a couple of minutes.
             </p>
+            <PipelineDiagram />
             <div className="space-y-1">
               {PIPELINE_STAGES.map((stage, i) => {
                 const Icon = stage.icon;
@@ -734,7 +705,7 @@ export function DocsContent() {
 
           {/* ── Deep Review ── */}
           <div>
-            <SectionHeader id="deep-review" title="Deep Review" pro />
+            <SectionHeader id="deep-review" title="Deep Review" />
             <p className="text-xs font-mono text-slate-text mb-3 leading-relaxed">
               Four specialist agents review every file in parallel.
             </p>
@@ -743,6 +714,8 @@ export function DocsContent() {
               per file. Each brings a different lens &mdash; and they run
               concurrently, so it doesn&apos;t slow you down.
             </p>
+
+            <DeepReviewDiagram />
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               {[
@@ -812,6 +785,8 @@ export function DocsContent() {
               delta. Previous findings that are still relevant are preserved.
               Resolved findings are dropped.
             </p>
+
+            <LifecycleDiagram />
 
             <div className="space-y-3">
               {[
@@ -926,7 +901,7 @@ export function DocsContent() {
 
           {/* ── Architecture Visualization ── */}
           <div>
-            <SectionHeader id="architecture-viz" title="Architecture Visualization" pro />
+            <SectionHeader id="architecture-viz" title="Architecture Visualization" />
             <p className="text-xs font-mono text-slate-text mb-3 leading-relaxed">
               See your codebase as a dependency graph.
             </p>
@@ -1029,7 +1004,7 @@ export function DocsContent() {
 
           {/* ── Code Simulation ── */}
           <div>
-            <SectionHeader id="code-simulation" title="Code Simulation" pro />
+            <SectionHeader id="code-simulation" title="Code Simulation" />
             <p className="text-xs font-mono text-slate-text mb-3 leading-relaxed">
               Before you merge, Argus imagines what happens.
             </p>
@@ -1134,7 +1109,7 @@ export function DocsContent() {
 
           {/* ── PR Enrichment & Diagrams ── */}
           <div>
-            <SectionHeader id="pr-enrichment" title="PR Enrichment & Mermaid Diagrams" pro />
+            <SectionHeader id="pr-enrichment" title="PR Enrichment & Mermaid Diagrams" />
             <p className="text-xs font-mono text-slate-text mb-3 leading-relaxed">
               Argus writes the context your PR description forgot.
             </p>
@@ -1563,8 +1538,9 @@ export function DocsContent() {
 
             <p className="text-[11px] font-mono text-iron mt-3">
               Supported providers: OpenRouter, OpenAI, Anthropic, Azure OpenAI,
-              GCP Vertex AI, AWS Bedrock, and Zhipu AI. Custom model names are
-              supported &mdash; enter any model identifier your provider accepts.
+              GCP Vertex AI, AWS Bedrock, Zhipu AI, and Vercel AI Gateway.
+              Custom model names are supported &mdash; enter any model
+              identifier your provider accepts.
             </p>
           </div>
 
@@ -1617,55 +1593,51 @@ export function DocsContent() {
             </p>
           </div>
 
-          {/* ── BYOT Supermemory ── */}
+          {/* ── Memory storage ── */}
           <div>
-            <SectionHeader id="supermemory" title="BYOT Supermemory" />
+            <SectionHeader id="memory-storage" title="Memory storage" />
             <p className="text-xs font-mono text-slate-text mb-3 leading-relaxed">
-              Bring Your Own Token for Supermemory.
+              Where review patterns, conventions and scenario history live.
             </p>
             <p className="text-xs font-mono text-slate-text mb-8 leading-relaxed">
-              Argus uses{" "}
-              <a
-                href="https://supermemory.com"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-amber hover:text-foreground transition-colors"
-              >
-                Supermemory
-              </a>{" "}
-              for RAG-powered memory &mdash; storing review patterns,
-              codebase conventions, and scenario history. You can bring your
-              own Supermemory API key for full control over your data.
+              Memory is stored in Argus&apos;s own Postgres database as
+              ordinary rows, each with an embedding alongside it. Retrieval
+              is a hybrid of vector similarity and full-text search, fused and
+              scoped to your installation. Self-host Argus and none of it
+              leaves your infrastructure.
             </p>
 
             <div className="border border-iron bg-charcoal p-4 mb-4">
               <div className="flex items-center gap-3 mb-3">
                 <Database className="h-4 w-4 text-amber" />
                 <span className="text-xs font-mono font-bold text-foreground">
-                  Setup
+                  What you configure
                 </span>
               </div>
               <ol className="list-decimal list-inside space-y-1.5 text-xs font-mono text-slate-text leading-relaxed">
                 <li>
                   Go to{" "}
                   <span className="text-amber">
-                    Integrations
+                    Providers
                   </span>{" "}
                   in the dashboard
                 </li>
                 <li>
-                  Enter your Supermemory API key under the Supermemory section
+                  Pick an embeddings provider and model under{" "}
+                  <span className="text-amber">Memory</span> &mdash; Voyage by
+                  default, OpenAI, or any OpenAI-compatible endpoint
                 </li>
                 <li>
-                  Key is scoped per-org &mdash; all repos in the org share
-                  the same memory backend
+                  Settings are scoped per-org &mdash; all repos in the org
+                  share one memory space
                 </li>
               </ol>
             </div>
 
             <p className="text-[11px] font-mono text-iron">
-              Without a custom key, Argus uses its shared Supermemory
-              instance. Your data is isolated per-installation regardless.
+              Changing the embedding model changes the vector space. Existing
+              rows keep the model they were written with, and are only
+              retrieved by a query embedded in the same space.
             </p>
           </div>
 
@@ -2041,7 +2013,7 @@ export function DocsContent() {
 
           {/* ── Memory & Learning ── */}
           <div>
-            <SectionHeader id="memory" title="Memory & Learning" pro />
+            <SectionHeader id="memory" title="Memory & Learning" />
             <p className="text-xs font-mono text-slate-text mb-3 leading-relaxed">
               Most tools forget between PRs. Argus remembers everything.
             </p>
@@ -2051,6 +2023,8 @@ export function DocsContent() {
               review code — it accumulates institutional memory that survives
               team turnover.
             </p>
+
+            <MemoryDiagram />
 
             <div className="space-y-4">
               {[

@@ -8,13 +8,13 @@ import (
 	"sort"
 	"strings"
 
-	gh "github.com/google/go-github/v68/github"
-
+	"github.com/BeLazy167/argus/backend/internal/admission"
 	ghpkg "github.com/BeLazy167/argus/backend/internal/github"
 	"github.com/BeLazy167/argus/backend/internal/llm"
 	"github.com/BeLazy167/argus/backend/internal/memory"
 	"github.com/BeLazy167/argus/backend/internal/pipeline"
 	"github.com/BeLazy167/argus/backend/internal/store"
+	gh "github.com/google/go-github/v68/github"
 )
 
 // --- Command Dispatch ---
@@ -27,6 +27,8 @@ func commandRe(appSlug string) *regexp.Regexp {
 }
 
 func (s *Server) dispatchCommand(ctx context.Context, evt ghpkg.IssueCommentEvent) {
+	op := s.beginOperation(ctx, "command.dispatchCommand")
+	defer op.Complete()
 	match := s.commandRe.FindStringSubmatch(strings.TrimSpace(evt.CommentBody))
 	if match == nil {
 		return
@@ -59,6 +61,8 @@ func (s *Server) dispatchCommand(ctx context.Context, evt ghpkg.IssueCommentEven
 }
 
 func (s *Server) handleReviewCommand(ctx context.Context, evt ghpkg.IssueCommentEvent, owner, repo string, ghClient *ghpkg.Client, args string) {
+	op := s.beginOperation(ctx, "command.handleReviewCommand")
+	defer op.Complete()
 	force := strings.Contains(args, "--force")
 	var personaOverride string
 	if idx := strings.Index(args, "--persona"); idx >= 0 {
@@ -72,7 +76,7 @@ func (s *Server) handleReviewCommand(ctx context.Context, evt ghpkg.IssueComment
 
 	prEvent, err := ghClient.GetPullRequest(ctx, evt.InstallationID, owner, repo, evt.PRNumber)
 	if err != nil {
-		s.logger.Error("review command: fetch PR failed", "error", err, "pr", evt.PRNumber)
+		s.logger.ErrorContext(ctx, "review command: fetch PR failed", "error", err, "pr", evt.PRNumber)
 		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
 		return
 	}
@@ -99,7 +103,7 @@ func (s *Server) handleReviewCommand(ctx context.Context, evt ghpkg.IssueComment
 	// what lets the dashboard Stop button abort a slash-command review (this path
 	// used to be the one missing it). BaseCtx is the dispatch ctx (trace +
 	// installation already tagged).
-	launchErr := s.launcher.Launch(pipeline.LaunchSpec{
+	launchErr := s.launchPREvent(pipeline.LaunchSpec{
 		Repo:    evt.RepoFullName,
 		PR:      evt.PRNumber,
 		BaseCtx: ctx,
@@ -115,18 +119,34 @@ func (s *Server) handleReviewCommand(ctx context.Context, evt ghpkg.IssueComment
 			if !s.acquireSem() {
 				return errServerBusy
 			}
-			if !s.allowReview(ctx, evt.RepoFullName, owner, force, evt.InstallationID) {
+			// Admission owns permission and the rate limit. This path had
+			// NEITHER: anyone who could comment on the pull request could spend
+			// the repo's review budget, including the author of a fork pull
+			// request. `@argus-eye resolve`, four functions away in this same
+			// file, has been permission-gated the whole time.
+			verdict := s.admissionFor(evt.InstallationID).Decide(ctx, admission.Request{
+				Actor:        admission.GitHubActor(evt.CommentAuthor),
+				RepoFullName: evt.RepoFullName,
+				OrgLogin:     owner,
+				Force:        force,
+				// Size and Limits are zero here: the diff is not fetched yet, so
+				// the Budget arm abstains and re-runs inside the pipeline where
+				// the real size is known.
+			})
+			if !verdict.Allowed() {
 				s.releaseSem()
-				return errRateLimited
+				s.logger.InfoContext(ctx, "review command refused", "repo", evt.RepoFullName, "pr", evt.PRNumber,
+					"by", evt.CommentAuthor, "reason", verdict.Reason)
+				s.replyRefused(ctx, evt, verdict)
+				return errReviewRefused
 			}
-			s.logger.Info("review command triggered", "repo", evt.RepoFullName, "pr", evt.PRNumber, "force", force, "by", evt.CommentAuthor)
+			s.logger.InfoContext(ctx, "review command triggered", "repo", evt.RepoFullName, "pr", evt.PRNumber, "force", force, "by", evt.CommentAuthor)
 			return nil
 		},
 		Cleanup: s.releaseSem,
-		Run:     func(runCtx context.Context) error { return s.orchestrator.HandlePREvent(runCtx, *prEvent) },
 		OnDone: func(err error) {
 			if err != nil {
-				s.logger.Error("review command: pipeline failed", "error", err, "pr", evt.PRNumber)
+				s.logger.ErrorContext(ctx, "review command: pipeline failed", "error", err, "pr", evt.PRNumber)
 				_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
 				_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
 					"Review failed. Check the Argus dashboard for details.")
@@ -134,25 +154,44 @@ func (s *Server) handleReviewCommand(ctx context.Context, evt ghpkg.IssueComment
 			}
 			_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "rocket")
 		},
-	})
+	}, *prEvent)
+	message, confused := reviewCommandLaunchFailureFeedback(launchErr)
+	if launchErr != nil && !errors.Is(launchErr, pipeline.ErrInFlight) &&
+		!errors.Is(launchErr, errRateLimited) && !errors.Is(launchErr, errServerBusy) &&
+		!errors.Is(launchErr, errReviewRefused) {
+		s.logger.ErrorContext(ctx, "review command: launch failed", "error", launchErr, "repo", evt.RepoFullName, "pr", evt.PRNumber)
+	}
+	if errors.Is(launchErr, errServerBusy) {
+		s.logger.WarnContext(ctx, "review command: webhook semaphore full", "repo", evt.RepoFullName, "pr", evt.PRNumber)
+	}
+	if message != "" {
+		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber, message)
+	}
+	if confused {
+		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
+	}
+}
+
+func reviewCommandLaunchFailureFeedback(launchErr error) (message string, confused bool) {
 	switch {
+	case launchErr == nil, errors.Is(launchErr, errReviewRefused):
+		// Admission already posted its path-specific refusal.
+		return "", false
 	case errors.Is(launchErr, pipeline.ErrInFlight):
-		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
-			"A review is already in progress for this PR.")
+		return "A review is already in progress for this PR.", false
 	case errors.Is(launchErr, errRateLimited):
-		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
-			"Rate limit exceeded. Try again later.")
-		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
+		return "Rate limit exceeded. Try again later.", true
 	case errors.Is(launchErr, errServerBusy):
-		s.logger.Warn("review command: webhook semaphore full", "repo", evt.RepoFullName, "pr", evt.PRNumber)
-		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
-			"Argus is at capacity right now. Try again in a few minutes.")
-		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
+		return "Argus is at capacity right now. Try again in a few minutes.", true
+	default:
+		return "Review could not start because its pre-review checks failed. Try again later.", true
 	}
 }
 
 // handleHelpCommand posts available commands and usage.
 func (s *Server) handleHelpCommand(ctx context.Context, evt ghpkg.IssueCommentEvent, owner, repo string, ghClient *ghpkg.Client) {
+	op := s.beginOperation(ctx, "command.handleHelpCommand")
+	defer op.Complete()
 	help := `### Argus Commands
 
 | Command | Description |
@@ -177,10 +216,35 @@ func (s *Server) handleHelpCommand(ctx context.Context, evt ghpkg.IssueCommentEv
 	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "rocket")
 }
 
-// handleRememberCommand parses @argus-eye remember, stores the pattern in DB
-// (and optionally Supermemory), and posts confirmation.
+type repoWritePermissionChecker interface {
+	HasRepoWriteAccess(ctx context.Context, installationID int64, owner, repo, login string) (bool, error)
+}
+
+type rememberAuthorization struct {
+	InstallationID    int64
+	Owner             string
+	Repo              string
+	CommentAuthor     string
+	AuthorAssociation string
+	OrgWide           bool
+}
+
+// authorizeRemember reports whether an issue commenter may persist review
+// memory. Repository memory uses GitHub's effective permission for the actual
+// commenter. Org-wide memory intentionally retains its separate, narrower
+// trusted-author policy.
+func authorizeRemember(ctx context.Context, permissions repoWritePermissionChecker, auth rememberAuthorization) (bool, error) {
+	if auth.OrgWide {
+		association := strings.ToUpper(strings.TrimSpace(auth.AuthorAssociation))
+		return association == "OWNER" || association == "MEMBER", nil
+	}
+	return permissions.HasRepoWriteAccess(ctx, auth.InstallationID, auth.Owner, auth.Repo, auth.CommentAuthor)
+}
+
+// handleRememberCommand parses @argus-eye remember and persists a pattern.
 func (s *Server) handleRememberCommand(ctx context.Context, evt ghpkg.IssueCommentEvent, owner, repo string, ghClient *ghpkg.Client, args string) {
-	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "eyes")
+	op := s.beginOperation(ctx, "command.handleRememberCommand")
+	defer op.Complete()
 
 	// Parse --org flag as discrete token to avoid matching substrings like --org-prefix
 	var isOrg bool
@@ -198,39 +262,46 @@ func (s *Server) handleRememberCommand(ctx context.Context, evt ghpkg.IssueComme
 			fmt.Sprintf("Usage: `@%s remember <pattern>` or `@%s remember --org <pattern>`", s.cfg.GitHubAppSlug, s.cfg.GitHubAppSlug))
 		return
 	}
+	authorized := func() bool {
+		allowed, err := authorizeRemember(ctx, ghClient, rememberAuthorization{
+			InstallationID:    evt.InstallationID,
+			Owner:             owner,
+			Repo:              repo,
+			CommentAuthor:     evt.CommentAuthor,
+			AuthorAssociation: evt.AuthorAssociation,
+			OrgWide:           isOrg,
+		})
+		if err != nil {
+			s.logger.WarnContext(ctx, "remember: permission lookup failed", "error", err, "author", evt.CommentAuthor,
+				"repo", evt.RepoFullName, "pr", evt.PRNumber)
+			_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
+			return false
+		}
+		if allowed {
+			return true
+		}
+		s.logger.InfoContext(ctx, "remember: unauthorized commenter", "author", evt.CommentAuthor,
+			"association", evt.AuthorAssociation, "org_wide", isOrg, "pr", evt.PRNumber)
+		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
+		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
+			"Only trusted repository maintainers can persist Argus memory; org-wide memory requires an owner or organization member.")
+		return false
+	}
+
+	// Org-wide memory intentionally keeps its trusted-author policy and does
+	// not depend on permission to this one repository.
+	if isOrg && !authorized() {
+		return
+	}
+
+	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "eyes")
 
 	// Look up installation
 	inst, err := s.store.GetInstallationByGitHubID(ctx, evt.InstallationID)
 	if err != nil {
-		s.logger.Error("remember: lookup installation", "error", err)
+		s.logger.ErrorContext(ctx, "remember: lookup installation", "error", err)
 		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
 		return
-	}
-
-	// Index in Supermemory
-	var smID *string
-	var smWarning string
-	if s.memRegistry != nil {
-		indexer := s.memRegistry.GetIndexer(ctx, inst.ID)
-		if indexer != nil {
-			pattern := memory.PatternMemory{
-				Content: content,
-				Source:  "remember_command",
-				Extra:   map[string]string{"created_by": evt.CommentAuthor},
-			}
-			var resp *memory.AddResponse
-			if isOrg {
-				resp, err = indexer.IndexSharedPattern(ctx, pattern)
-			} else {
-				resp, err = indexer.IndexPattern(ctx, repo, pattern)
-			}
-			if err != nil {
-				s.logger.Error("remember: index in supermemory", "error", err)
-				smWarning = "\n\n_Warning: semantic search indexing failed. Pattern saved to DB only._"
-			} else if resp != nil {
-				smID = &resp.ID
-			}
-		}
 	}
 
 	// Look up repo for DB write
@@ -238,7 +309,7 @@ func (s *Server) handleRememberCommand(ctx context.Context, evt ghpkg.IssueComme
 	if !isOrg {
 		dbRepo, err := s.store.GetRepoByFullName(ctx, evt.RepoFullName)
 		if err != nil {
-			s.logger.Error("remember: lookup repo for scoping", "error", err, "repo", evt.RepoFullName)
+			s.logger.ErrorContext(ctx, "remember: lookup repo for scoping", "error", err, "repo", evt.RepoFullName)
 			_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
 			_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
 				"Failed to scope pattern to this repo. Please try again.")
@@ -248,11 +319,21 @@ func (s *Server) handleRememberCommand(ctx context.Context, evt ghpkg.IssueComme
 	}
 
 	createdBy := evt.CommentAuthor
-	// supermemory_custom_id is nil here (see handlers_patterns.go): `remember`
-	// patterns rely on the supermemory_id match at read time.
-	_, err = s.store.CreatePattern(ctx, inst.ID, repoID, content, smID, &createdBy, nil, nil, nil, nil)
+	source := "remember_command"
+	customID := memory.SharedPatternCustomID(source, content)
+	if !isOrg {
+		customID = memory.PatternCustomID(owner, repo, source, content)
+	}
+
+	// Keep the effective-permission lookup adjacent to the write. GitHub does
+	// not offer an atomic permission-check-and-write operation, so this is the
+	// narrowest practical TOCTOU window.
+	if !isOrg && !authorized() {
+		return
+	}
+	_, err = s.store.CreatePattern(ctx, inst.ID, repoID, content, nil, &createdBy, &source, nil, nil, &customID, nil)
 	if err != nil {
-		s.logger.Error("remember: save to db", "error", err)
+		s.logger.ErrorContext(ctx, "remember: save to db", "error", err)
 		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
 		return
 	}
@@ -266,7 +347,7 @@ func (s *Server) handleRememberCommand(ctx context.Context, evt ghpkg.IssueComme
 		truncated = truncated[:100] + "..."
 	}
 	_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
-		fmt.Sprintf("Remembered (%s): %s%s", scope, truncated, smWarning))
+		fmt.Sprintf("Remembered (%s): %s", scope, truncated))
 	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "rocket")
 }
 
@@ -321,12 +402,14 @@ func classifyResolveError(err error) (phrase string, fatal bool) {
 // Auto-resolve on push (orchestrator.autoResolveOnSynchronize)
 // stays the cautious path; manual invocation is the trust-the-operator path.
 func (s *Server) handleResolveCommand(ctx context.Context, evt ghpkg.IssueCommentEvent, owner, repo string, ghClient *ghpkg.Client) {
+	op := s.beginOperation(ctx, "command.handleResolveCommand")
+	defer op.Complete()
 	// Authorization: `@argus resolve` writes the terminal 'resolved' ledger state
 	// and closes threads (clearing them from the merge-gate view), so it is
 	// maintainer-only. Issue comments come from the same untrusted population as
 	// reactions — a drive-by fork contributor must not resolve findings.
 	if !ghpkg.IsPrivilegedAssociation(evt.AuthorAssociation) {
-		s.logger.Info("resolve: unauthorized commenter", "author", evt.CommentAuthor, "association", evt.AuthorAssociation, "pr", evt.PRNumber)
+		s.logger.InfoContext(ctx, "resolve: unauthorized commenter", "author", evt.CommentAuthor, "association", evt.AuthorAssociation, "pr", evt.PRNumber)
 		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
 		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
 			"Only repository maintainers (owner, member, or collaborator) can resolve Argus threads.")
@@ -337,7 +420,7 @@ func (s *Server) handleResolveCommand(ctx context.Context, evt ghpkg.IssueCommen
 
 	threads, err := ghClient.ListReviewThreads(ctx, evt.InstallationID, owner, repo, evt.PRNumber)
 	if err != nil {
-		s.logger.Error("resolve: list threads", "error", err)
+		s.logger.ErrorContext(ctx, "resolve: list threads", "error", err)
 		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
 		return
 	}
@@ -383,7 +466,7 @@ func (s *Server) handleResolveCommand(ctx context.Context, evt ghpkg.IssueCommen
 		if resolveErr == nil {
 			resolveErr = errors.New("thread not resolved")
 		}
-		s.logger.Error("resolve: resolve thread", "error", resolveErr, "thread_id", t.ID)
+		s.logger.ErrorContext(ctx, "resolve: resolve thread", "error", resolveErr, "thread_id", t.ID)
 		failed++
 		phrase, fatal := classifyResolveError(resolveErr)
 		if firstErrPhrase == "" && phrase != "" {
@@ -421,19 +504,21 @@ type fileFix struct {
 
 // handleFixCommand applies suggestion blocks from bot review comments as a commit.
 func (s *Server) handleFixCommand(ctx context.Context, evt ghpkg.IssueCommentEvent, owner, repo string, ghClient *ghpkg.Client) {
+	op := s.beginOperation(ctx, "command.handleFixCommand")
+	defer op.Complete()
 	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "eyes")
 
 	// Get PR details for head ref
 	pr, err := ghClient.GetPullRequest(ctx, evt.InstallationID, owner, repo, evt.PRNumber)
 	if err != nil {
-		s.logger.Error("fix: getting PR", "error", err)
+		s.logger.ErrorContext(ctx, "fix: getting PR", "error", err)
 		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber, "Failed to get PR details: "+err.Error())
 		return
 	}
 
 	fixes, err := collectBotFixes(ctx, evt, owner, repo, ghClient)
 	if err != nil {
-		s.logger.Error("fix: listing comments", "error", err)
+		s.logger.ErrorContext(ctx, "fix: listing comments", "error", err)
 		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber, "Failed to list review comments: "+err.Error())
 		return
 	}
@@ -452,13 +537,13 @@ func (s *Server) handleFixCommand(ctx context.Context, evt ghpkg.IssueCommentEve
 	// Get current head SHA and tree
 	headSHA, err := ghClient.GetRef(ctx, evt.InstallationID, owner, repo, "heads/"+pr.HeadRef)
 	if err != nil {
-		s.logger.Error("fix: getting ref", "error", err)
+		s.logger.ErrorContext(ctx, "fix: getting ref", "error", err)
 		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber, "Failed to get branch head: "+err.Error())
 		return
 	}
 	baseTreeSHA, err := ghClient.GetCommitTree(ctx, evt.InstallationID, owner, repo, headSHA)
 	if err != nil {
-		s.logger.Error("fix: getting tree", "error", err)
+		s.logger.ErrorContext(ctx, "fix: getting tree", "error", err)
 		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber, "Failed to read commit tree: "+err.Error())
 		return
 	}
@@ -469,7 +554,7 @@ func (s *Server) handleFixCommand(ctx context.Context, evt ghpkg.IssueCommentEve
 	for path, pathFixes := range fileFixMap {
 		content, err := ghClient.GetFileContent(ctx, evt.InstallationID, owner, repo, path, headSHA)
 		if err != nil {
-			s.logger.Warn("fix: fetching file", "path", path, "error", err)
+			s.logger.WarnContext(ctx, "fix: fetching file", "path", path, "error", err)
 			continue
 		}
 
@@ -482,11 +567,11 @@ func (s *Server) handleFixCommand(ctx context.Context, evt ghpkg.IssueCommentEve
 		lowestModified := len(lines) + 1
 		for _, fix := range pathFixes {
 			if fix.startLine < 1 || fix.line > len(lines) {
-				s.logger.Warn("fix: skipping out-of-range suggestion", "path", path, "startLine", fix.startLine, "line", fix.line, "fileLines", len(lines))
+				s.logger.WarnContext(ctx, "fix: skipping out-of-range suggestion", "path", path, "startLine", fix.startLine, "line", fix.line, "fileLines", len(lines))
 				continue
 			}
 			if fix.line >= lowestModified {
-				s.logger.Warn("fix: skipping overlapping suggestion", "path", path, "line", fix.line, "lowestModified", lowestModified)
+				s.logger.WarnContext(ctx, "fix: skipping overlapping suggestion", "path", path, "line", fix.line, "lowestModified", lowestModified)
 				continue
 			}
 			suggestionLines := strings.Split(fix.suggestion, "\n")
@@ -502,7 +587,7 @@ func (s *Server) handleFixCommand(ctx context.Context, evt ghpkg.IssueCommentEve
 		newContent := strings.Join(lines, "\n")
 		blobSHA, err := ghClient.CreateBlob(ctx, evt.InstallationID, owner, repo, newContent, "utf-8")
 		if err != nil {
-			s.logger.Error("fix: creating blob", "path", path, "error", err)
+			s.logger.ErrorContext(ctx, "fix: creating blob", "path", path, "error", err)
 			continue
 		}
 		appliedCount += fileApplied
@@ -523,7 +608,7 @@ func (s *Server) handleFixCommand(ctx context.Context, evt ghpkg.IssueCommentEve
 	// Atomic commit
 	treeSHA, err := ghClient.CreateTree(ctx, evt.InstallationID, owner, repo, baseTreeSHA, treeEntries)
 	if err != nil {
-		s.logger.Error("fix: creating tree", "error", err)
+		s.logger.ErrorContext(ctx, "fix: creating tree", "error", err)
 		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber, "Failed to create fix commit tree: "+err.Error())
 		return
 	}
@@ -531,13 +616,13 @@ func (s *Server) handleFixCommand(ctx context.Context, evt ghpkg.IssueCommentEve
 	commitMsg := fmt.Sprintf("fix: apply %d Argus suggestions", appliedCount)
 	commitSHA, err := ghClient.CreateCommit(ctx, evt.InstallationID, owner, repo, commitMsg, treeSHA, []string{headSHA})
 	if err != nil {
-		s.logger.Error("fix: creating commit", "error", err)
+		s.logger.ErrorContext(ctx, "fix: creating commit", "error", err)
 		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber, "Failed to create fix commit: "+err.Error())
 		return
 	}
 
 	if err := ghClient.UpdateRef(ctx, evt.InstallationID, owner, repo, "heads/"+pr.HeadRef, commitSHA); err != nil {
-		s.logger.Error("fix: updating ref", "error", err)
+		s.logger.ErrorContext(ctx, "fix: updating ref", "error", err)
 		_ = ghClient.CreateIssueComment(ctx, evt.InstallationID, owner, repo, evt.PRNumber,
 			"Failed to push fix commit. Argus needs write access to create commits. Check your GitHub App permissions at https://github.com/settings/installations")
 		return
@@ -600,6 +685,8 @@ func parseSuggestionBlock(body string) string {
 
 // handleTestCommand generates a test plan or draft test code from review findings.
 func (s *Server) handleTestCommand(ctx context.Context, evt ghpkg.IssueCommentEvent, owner, repo string, ghClient *ghpkg.Client, args string) {
+	op := s.beginOperation(ctx, "command.handleTestCommand")
+	defer op.Complete()
 	_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "eyes")
 
 	review, err := s.store.GetLatestReviewByPR(ctx, fmt.Sprintf("%s/%s", owner, repo), evt.PRNumber)
@@ -659,7 +746,7 @@ func (s *Server) handleTestCommand(ctx context.Context, evt ghpkg.IssueCommentEv
 		Stage:       "test_gen",
 	})
 	if err != nil {
-		s.logger.Error("test generation failed", "error", err)
+		s.logger.ErrorContext(ctx, "test generation failed", "error", err)
 		_ = ghClient.AddReaction(ctx, evt.InstallationID, owner, repo, evt.CommentID, "confused")
 		return
 	}

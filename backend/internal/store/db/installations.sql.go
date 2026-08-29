@@ -14,8 +14,8 @@ import (
 const createInstallation = `-- name: CreateInstallation :one
 INSERT INTO installations (installation_id, org_login)
 VALUES ($1, $2)
-ON CONFLICT (installation_id) DO UPDATE SET org_login = $2
-RETURNING id, installation_id, org_login, clerk_org_id, plan_tier, created_at, suspended_at
+ON CONFLICT (installation_id) DO UPDATE SET org_login = $2, suspended_at = NULL
+RETURNING id, installation_id, org_login, clerk_org_id, created_at, suspended_at
 `
 
 type CreateInstallationParams struct {
@@ -28,7 +28,6 @@ type CreateInstallationRow struct {
 	InstallationID int64      `json:"installation_id"`
 	OrgLogin       string     `json:"org_login"`
 	ClerkOrgID     *string    `json:"clerk_org_id"`
-	PlanTier       string     `json:"plan_tier"`
 	CreatedAt      time.Time  `json:"created_at"`
 	SuspendedAt    *time.Time `json:"suspended_at"`
 }
@@ -41,7 +40,6 @@ func (q *Queries) CreateInstallation(ctx context.Context, arg CreateInstallation
 		&i.InstallationID,
 		&i.OrgLogin,
 		&i.ClerkOrgID,
-		&i.PlanTier,
 		&i.CreatedAt,
 		&i.SuspendedAt,
 	)
@@ -49,7 +47,7 @@ func (q *Queries) CreateInstallation(ctx context.Context, arg CreateInstallation
 }
 
 const getInstallation = `-- name: GetInstallation :one
-SELECT id, installation_id, org_login, clerk_org_id, plan_tier, created_at, suspended_at
+SELECT id, installation_id, org_login, clerk_org_id, created_at, suspended_at
 FROM installations WHERE id = $1
 `
 
@@ -58,7 +56,6 @@ type GetInstallationRow struct {
 	InstallationID int64      `json:"installation_id"`
 	OrgLogin       string     `json:"org_login"`
 	ClerkOrgID     *string    `json:"clerk_org_id"`
-	PlanTier       string     `json:"plan_tier"`
 	CreatedAt      time.Time  `json:"created_at"`
 	SuspendedAt    *time.Time `json:"suspended_at"`
 }
@@ -71,7 +68,6 @@ func (q *Queries) GetInstallation(ctx context.Context, id int64) (GetInstallatio
 		&i.InstallationID,
 		&i.OrgLogin,
 		&i.ClerkOrgID,
-		&i.PlanTier,
 		&i.CreatedAt,
 		&i.SuspendedAt,
 	)
@@ -79,7 +75,7 @@ func (q *Queries) GetInstallation(ctx context.Context, id int64) (GetInstallatio
 }
 
 const getInstallationByClerkOrgID = `-- name: GetInstallationByClerkOrgID :one
-SELECT id, installation_id, org_login, clerk_org_id, plan_tier, created_at, suspended_at
+SELECT id, installation_id, org_login, clerk_org_id, created_at, suspended_at
 FROM installations WHERE clerk_org_id = $1
 `
 
@@ -88,7 +84,6 @@ type GetInstallationByClerkOrgIDRow struct {
 	InstallationID int64      `json:"installation_id"`
 	OrgLogin       string     `json:"org_login"`
 	ClerkOrgID     *string    `json:"clerk_org_id"`
-	PlanTier       string     `json:"plan_tier"`
 	CreatedAt      time.Time  `json:"created_at"`
 	SuspendedAt    *time.Time `json:"suspended_at"`
 }
@@ -101,7 +96,6 @@ func (q *Queries) GetInstallationByClerkOrgID(ctx context.Context, clerkOrgID *s
 		&i.InstallationID,
 		&i.OrgLogin,
 		&i.ClerkOrgID,
-		&i.PlanTier,
 		&i.CreatedAt,
 		&i.SuspendedAt,
 	)
@@ -109,7 +103,7 @@ func (q *Queries) GetInstallationByClerkOrgID(ctx context.Context, clerkOrgID *s
 }
 
 const getInstallationByGitHubID = `-- name: GetInstallationByGitHubID :one
-SELECT id, installation_id, org_login, clerk_org_id, plan_tier, created_at, suspended_at
+SELECT id, installation_id, org_login, clerk_org_id, created_at, suspended_at
 FROM installations WHERE installation_id = $1
 `
 
@@ -118,7 +112,6 @@ type GetInstallationByGitHubIDRow struct {
 	InstallationID int64      `json:"installation_id"`
 	OrgLogin       string     `json:"org_login"`
 	ClerkOrgID     *string    `json:"clerk_org_id"`
-	PlanTier       string     `json:"plan_tier"`
 	CreatedAt      time.Time  `json:"created_at"`
 	SuspendedAt    *time.Time `json:"suspended_at"`
 }
@@ -131,7 +124,6 @@ func (q *Queries) GetInstallationByGitHubID(ctx context.Context, installationID 
 		&i.InstallationID,
 		&i.OrgLogin,
 		&i.ClerkOrgID,
-		&i.PlanTier,
 		&i.CreatedAt,
 		&i.SuspendedAt,
 	)
@@ -160,15 +152,66 @@ func (q *Queries) GetOrgDefaults(ctx context.Context, id int64) (json.RawMessage
 	return column_1, err
 }
 
-const getPlanTier = `-- name: GetPlanTier :one
-SELECT plan_tier FROM installations WHERE id = $1
+const listInstallations = `-- name: ListInstallations :many
+SELECT id, installation_id, org_login, clerk_org_id, created_at, suspended_at
+FROM installations
+ORDER BY created_at DESC
 `
 
-func (q *Queries) GetPlanTier(ctx context.Context, id int64) (string, error) {
-	row := q.db.QueryRow(ctx, getPlanTier, id)
-	var plan_tier string
-	err := row.Scan(&plan_tier)
-	return plan_tier, err
+type ListInstallationsRow struct {
+	ID             int64      `json:"id"`
+	InstallationID int64      `json:"installation_id"`
+	OrgLogin       string     `json:"org_login"`
+	ClerkOrgID     *string    `json:"clerk_org_id"`
+	CreatedAt      time.Time  `json:"created_at"`
+	SuspendedAt    *time.Time `json:"suspended_at"`
+}
+
+func (q *Queries) ListInstallations(ctx context.Context) ([]ListInstallationsRow, error) {
+	rows, err := q.db.Query(ctx, listInstallations)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListInstallationsRow
+	for rows.Next() {
+		var i ListInstallationsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.InstallationID,
+			&i.OrgLogin,
+			&i.ClerkOrgID,
+			&i.CreatedAt,
+			&i.SuspendedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const mergeInstallationFeatureFlags = `-- name: MergeInstallationFeatureFlags :exec
+UPDATE installations SET feature_flags = feature_flags || $1::jsonb WHERE id = $2
+`
+
+type MergeInstallationFeatureFlagsParams struct {
+	Patch json.RawMessage `json:"patch"`
+	ID    int64           `json:"id"`
+}
+
+// Merge the given keys into feature_flags, leaving every other key intact.
+// jsonb || jsonb is a right-biased top-level merge applied inside the UPDATE,
+// so there is no read-modify-write window: an operator setting another key
+// by hand cannot be silently reverted by a concurrent settings save. The
+// column is NOT NULL (migration 030) with a jsonb_typeof = 'object' CHECK
+// (032), so both operands are always objects.
+func (q *Queries) MergeInstallationFeatureFlags(ctx context.Context, arg MergeInstallationFeatureFlagsParams) error {
+	_, err := q.db.Exec(ctx, mergeInstallationFeatureFlags, arg.Patch, arg.ID)
+	return err
 }
 
 const setInstallationClerkOrgID = `-- name: SetInstallationClerkOrgID :exec
@@ -199,39 +242,11 @@ func (q *Queries) SetOrgDefaults(ctx context.Context, arg SetOrgDefaultsParams) 
 	return err
 }
 
-const setPlanTier = `-- name: SetPlanTier :exec
-UPDATE installations SET plan_tier = $1 WHERE id = $2
-`
-
-type SetPlanTierParams struct {
-	PlanTier string `json:"plan_tier"`
-	ID       int64  `json:"id"`
-}
-
-func (q *Queries) SetPlanTier(ctx context.Context, arg SetPlanTierParams) error {
-	_, err := q.db.Exec(ctx, setPlanTier, arg.PlanTier, arg.ID)
-	return err
-}
-
 const suspendInstallation = `-- name: SuspendInstallation :exec
-UPDATE installations SET suspended_at = NOW() WHERE installation_id = $1
+UPDATE installations SET suspended_at = NOW() WHERE id = $1
 `
 
-func (q *Queries) SuspendInstallation(ctx context.Context, installationID int64) error {
-	_, err := q.db.Exec(ctx, suspendInstallation, installationID)
-	return err
-}
-
-const updateInstallationFeatureFlags = `-- name: UpdateInstallationFeatureFlags :exec
-UPDATE installations SET feature_flags = $2 WHERE id = $1
-`
-
-type UpdateInstallationFeatureFlagsParams struct {
-	ID           int64           `json:"id"`
-	FeatureFlags json.RawMessage `json:"feature_flags"`
-}
-
-func (q *Queries) UpdateInstallationFeatureFlags(ctx context.Context, arg UpdateInstallationFeatureFlagsParams) error {
-	_, err := q.db.Exec(ctx, updateInstallationFeatureFlags, arg.ID, arg.FeatureFlags)
+func (q *Queries) SuspendInstallation(ctx context.Context, id int64) error {
+	_, err := q.db.Exec(ctx, suspendInstallation, id)
 	return err
 }

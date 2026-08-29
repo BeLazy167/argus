@@ -6,26 +6,21 @@ import Link from "next/link";
 import { OnboardingChecklist } from "@/components/dashboard/onboarding-checklist";
 import { usePathname } from "next/navigation";
 import {
-  LayoutGrid,
-  GitBranch,
-  BarChart3,
-  MessageSquare,
-  Brain,
-  Users,
-  Puzzle,
-  CreditCard,
-  Settings,
   Menu,
   X,
   PanelLeftClose,
   PanelLeftOpen,
+  Loader2,
 } from "lucide-react";
 import { Suspense, useEffect, useRef, useState } from "react";
 import { QueryProvider } from "@/providers/query-provider";
-import { InstallationProvider, useInstallation } from "@/providers/installation-provider";
+import { InstallationProvider } from "@/providers/installation-provider";
 import { ActiveRepoProvider, useActiveRepo } from "@/providers/active-repo-provider";
 import { RepoSelect } from "@/components/dashboard/repo-select";
 import { ThemeToggle } from "@/components/dashboard/theme-toggle";
+import { DashboardTheme } from "@/components/dashboard/dashboard-theme";
+import { ThemeHotkey } from "@/components/dashboard/theme-hotkey";
+import { NAV_PRIMARY, NAV_GROUPS } from "@/components/dashboard/nav-items";
 import { useSidebarCollapsed } from "@/components/dashboard/sidebar-collapse";
 import { PostHogGroupAssociation } from "@/providers/posthog-provider";
 import { useReviews } from "@/lib/queries/reviews";
@@ -61,34 +56,6 @@ function SidebarRepoSelector({ collapsed }: { collapsed: boolean }) {
     </div>
   );
 }
-
-type NavItem = { href: string; label: string; icon: React.ComponentType<{ className?: string }> };
-
-// Design dashboardv3.pen#C1rzA — icon choices match the design spec.
-const NAV_PRIMARY: NavItem[] = [
-  { href: "/dashboard", label: "Overview", icon: LayoutGrid },
-  { href: "/repos", label: "Repos", icon: GitBranch },
-  { href: "/stats", label: "Stats", icon: BarChart3 },
-];
-
-const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
-  {
-    label: "Analysis",
-    items: [
-      { href: "/memory", label: "Memory", icon: Brain },
-      { href: "/reviews", label: "Reviews", icon: MessageSquare },
-    ],
-  },
-  {
-    label: "Workspace",
-    items: [
-      { href: "/team", label: "Team", icon: Users },
-      { href: "/providers", label: "Integrations", icon: Puzzle },
-      { href: "/billing", label: "Billing", icon: CreditCard },
-      { href: "/settings", label: "Settings", icon: Settings },
-    ],
-  },
-];
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
@@ -141,10 +108,7 @@ function SidebarLink({
 
 function UserFooter({ collapsed }: { collapsed: boolean }) {
   const { user } = useUser();
-  const { active: installation } = useInstallation();
   const displayName = user?.fullName ?? user?.primaryEmailAddress?.emailAddress ?? "Account";
-  const planTier = installation?.plan_tier ?? "Free";
-  const planLabel = planTier.charAt(0).toUpperCase() + planTier.slice(1) + " Plan";
 
   return (
     <div className={`border-t border-sidebar-border ${collapsed ? "px-2 py-3" : "px-4 py-3"}`}>
@@ -169,7 +133,6 @@ function UserFooter({ collapsed }: { collapsed: boolean }) {
           <>
             <div className="min-w-0 flex-1">
               <p className="truncate text-[13px] font-medium text-foreground">{displayName}</p>
-              <p className="truncate text-[11px] text-slate-text">{planLabel}</p>
             </div>
             <ThemeToggle />
           </>
@@ -302,6 +265,8 @@ export default function DashboardLayout({
   return (
     <QueryProvider>
       <InstallationProvider>
+        <DashboardTheme />
+        <ThemeHotkey />
         <PostHogGroupAssociation />
         <FirstReviewProbe />
         <ActiveRepoProvider>
@@ -321,7 +286,12 @@ export default function DashboardLayout({
           {/* Mobile overlay + drawer — always expanded on mobile */}
           {mobileOpen && (
             <>
-              <div className="fixed inset-0 z-40 bg-black/60 md:hidden" onClick={() => setMobileOpen(false)} />
+              <button
+                type="button"
+                aria-label="Close navigation"
+                className="fixed inset-0 z-40 bg-black/60 md:hidden"
+                onClick={() => setMobileOpen(false)}
+              />
               <aside className="fixed inset-y-0 left-0 z-50 flex w-64 flex-col border-r border-sidebar-border bg-sidebar md:hidden">
                 <button
                   onClick={() => setMobileOpen(false)}
@@ -348,7 +318,13 @@ export default function DashboardLayout({
           {/* Main content */}
           <main id="main-content" className="flex-1 overflow-y-auto scroll-smooth bg-background bg-noise">
             <OnboardingChecklist />
-            <Suspense>
+            <Suspense
+              fallback={
+                <div className="flex items-center justify-center py-20">
+                  <Loader2 className="h-6 w-6 animate-spin text-slate-text" aria-hidden />
+                </div>
+              }
+            >
               <div className="px-4 py-8 pt-16 md:px-8 md:pt-8">{children}</div>
             </Suspense>
           </main>

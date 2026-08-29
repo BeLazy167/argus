@@ -13,9 +13,9 @@ func TestPluralize(t *testing.T) {
 		n    int
 		want string
 	}{
-		{"file", 0, "files"},    // zero uses plural (standard English)
-		{"file", 1, "file"},     // the specific regression case from PR #335
-		{"file", 2, "files"},    // plain plural path
+		{"file", 0, "files"}, // zero uses plural (standard English)
+		{"file", 1, "file"},  // the specific regression case from PR #335
+		{"file", 2, "files"}, // plain plural path
 		{"comment", 1, "comment"},
 		{"finding", 10, "findings"},
 		// Negative counts are not expected in practice but must not panic or

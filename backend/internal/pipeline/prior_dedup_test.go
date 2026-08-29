@@ -81,10 +81,10 @@ func TestDropPriorDuplicates(t *testing.T) {
 	}
 
 	tests := []struct {
-		name           string
-		run            *PipelineRun
-		wantDropped    int
-		wantRemaining  map[string]int // file path -> expected comment count after dedup
+		name          string
+		run           *PipelineRun
+		wantDropped   int
+		wantRemaining map[string]int // file path -> expected comment count after dedup
 	}{
 		{
 			name:          "nil run — no-op",
@@ -171,9 +171,9 @@ func TestDropPriorDuplicates(t *testing.T) {
 			run: mkRun(
 				map[string][]PriorComment{"a.go": {{Line: 10, Category: "bug"}}},
 				[]FileReview{{Path: "a.go", Comments: []FileComment{
-					{Line: 12, Category: "bug"},    // dropped (near prior)
-					{Line: 200, Category: "bug"},   // kept (far from prior)
-					{Line: 10, Category: "style"},  // kept (different category)
+					{Line: 12, Category: "bug"},   // dropped (near prior)
+					{Line: 200, Category: "bug"},  // kept (far from prior)
+					{Line: 10, Category: "style"}, // kept (different category)
 				}}},
 			),
 			wantDropped:   1,

@@ -114,7 +114,7 @@ func TestComposeCapAndOverflow(t *testing.T) {
 	if n := len(sub.GitHub.Comments); n != 10 {
 		t.Fatalf("inline comment count = %d, want 10 (cap)", n)
 	}
-	if !strings.Contains(sub.GitHub.Summary, "plus 5 similar findings not shown inline") {
+	if !strings.Contains(sub.GitHub.Summary, "dashboard shows 5 more similar findings") {
 		t.Errorf("summary missing overflow line for 5 hidden findings:\n%s", sub.GitHub.Summary)
 	}
 	// Observability counts surfaced for post()'s consolidated log line.
@@ -310,5 +310,83 @@ func TestComposeEmptyFindings(t *testing.T) {
 	}
 	if strings.Contains(s, "Affected code outside the diff") || strings.Contains(s, "Minor notes (") {
 		t.Errorf("clean PR should have no folded/minor sections:\n%s", s)
+	}
+}
+
+func TestComposeReviewSummaryUsesSTEOrderAndLabels(t *testing.T) {
+	run := composeRun([]FileReview{{Path: "consent.ts", Comments: []FileComment{
+		mkComment(10, SeveritySuggestion, 80, "Add the exact expiry boundary test"),
+	}}}, []diff.FileDiff{mkDiffFile("consent.ts", 10)})
+	run.Synthesis = &SynthesisResult{
+		Score:    9,
+		Headline: "Server-side consent expiry is centralized and ready to merge with follow-up",
+		Brief:    "### What this PR does\n\n- Derive cookie consent expiry at the API response boundary.\n\n### Check before merge\n\n**Stated by the author — not verified by Argus**\n\n- Make sure that expired grants disable analytics.\n\n### Findings summary\n\n- Add a test for the exact expiry boundary.",
+	}
+	run.Tokens = RunTokenUsage{
+		Total:  StageTokens{TotalTokens: 270_700},
+		Intent: StageTokens{TotalTokens: 2_800, Model: "openai/gpt-5.6-luna"},
+		Triage: StageTokens{TotalTokens: 3_300, Model: "openai/gpt-5.6-luna"},
+		Review: []StageTokens{
+			{TotalTokens: 58_500, Model: "openai/gpt-5.6-sol", Specialist: "bug_hunter"},
+			{TotalTokens: 57_100, Model: "openai/gpt-5.6-sol", Specialist: "security"},
+			{TotalTokens: 57_400, Model: "openai/gpt-5.6-sol", Specialist: "architecture"},
+			{TotalTokens: 58_800, Model: "openai/gpt-5.6-sol", Specialist: "regression"},
+		},
+		Scoring:   StageTokens{TotalTokens: 2_200, Model: "openai/gpt-5.6-terra"},
+		Synthesis: StageTokens{TotalTokens: 1_200, Model: "openai/gpt-5.6-terra"},
+	}
+
+	got := Compose(run, 90*time.Second, "https://argus.reviews", "argus-eye").GitHub.Summary
+	wantOrder := []string{
+		"## Argus · 9/10 — Server-side consent expiry is centralized and has no blocking",
+		"**Verdict:** No blocking findings from Argus.",
+		"**Findings:** 0 blocking · 0 warning · 1 suggestion",
+		"### What this PR does",
+		"### Check before merge",
+		"Stated by the author — not verified by Argus",
+		"### Findings summary",
+		"usage: 270.7k tokens",
+	}
+	last := -1
+	for _, want := range wantOrder {
+		index := strings.Index(got, want)
+		if index < 0 {
+			t.Fatalf("summary missing %q:\n%s", want, got)
+		}
+		if index < last {
+			t.Fatalf("summary section %q is out of order:\n%s", want, got)
+		}
+		last = index
+	}
+	if count := strings.Count(got, "Unverified: Argus did not compile or run this suggestion."); count != 1 {
+		t.Errorf("unverified label count = %d, want 1:\n%s", count, got)
+	}
+	for _, banned := range []string{"ready to merge", "cleanly", "comprehensive", "seamless", "robust", "🔎"} {
+		if strings.Contains(strings.ToLower(got), banned) {
+			t.Errorf("summary contains banned phrase %q:\n%s", banned, got)
+		}
+	}
+}
+
+func TestComposeSummaryDoesNotChangeInlineCommentShape(t *testing.T) {
+	comment := mkComment(12, SeveritySuggestion, 80, "Keep the comment binding body stable")
+	comment.Suggestion = "return stable"
+	wantBody := formatCommentBody(comment)
+	run := composeRun([]FileReview{{Path: "stable.go", Comments: []FileComment{comment}}}, []diff.FileDiff{mkDiffFile("stable.go", 12)})
+	got := Compose(run, 0, "https://argus.reviews", "argus-eye")
+	if len(got.GitHub.Comments) != 1 {
+		t.Fatalf("inline comment count = %d, want 1", len(got.GitHub.Comments))
+	}
+	if got.GitHub.Comments[0].Body != wantBody {
+		t.Fatalf("summary redesign changed formatCommentBody output:\nwant:\n%s\n\ngot:\n%s", wantBody, got.GitHub.Comments[0].Body)
+	}
+	if normalizePostedCommentBody(got.GitHub.Comments[0].Body) != normalizePostedCommentBody(wantBody) {
+		t.Fatal("comment binding normalization changed the inline comment body")
+	}
+	rows := []unboundCommentRow{{ID: uuid.New(), Path: "stable.go", Line: 12, Body: wantBody}}
+	posted := []postedComment{{GithubID: 42, Path: "stable.go", Line: 12, OriginalLine: 12, Body: got.GitHub.Comments[0].Body}}
+	pairs, err := pairCommentsToRows(rows, posted)
+	if err != nil || len(pairs) != 1 {
+		t.Fatalf("inline body no longer binds to its review_comments row: pairs=%v err=%v", pairs, err)
 	}
 }

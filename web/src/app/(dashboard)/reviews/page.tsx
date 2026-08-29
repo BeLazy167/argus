@@ -136,12 +136,13 @@ function PRAccordionRow({
   return (
     <div className="border-b border-iron/50 last:border-0">
       {/* PR header row */}
-      <button
-        type="button"
-        onClick={onToggle}
-        className="flex items-center justify-between w-full py-3 -mx-5 px-5 hover:bg-iron/15 transition-colors text-left cursor-pointer"
-      >
-        <div className="flex items-center gap-4 min-w-0">
+      <div className="flex items-center justify-between w-full py-3 -mx-5 px-5 hover:bg-iron/15 transition-colors">
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-expanded={expanded}
+          className="flex items-center gap-4 min-w-0 flex-1 text-left cursor-pointer"
+        >
           <ScoreBadge score={group.latestScore} />
           <div className="min-w-0">
             <p className="text-xs font-mono text-foreground truncate max-w-md">
@@ -152,25 +153,31 @@ function PRAccordionRow({
               {group.author} &middot; {group.reviews.length} review{group.reviews.length !== 1 ? "s" : ""}
             </p>
           </div>
-        </div>
+        </button>
         <div className="flex items-center gap-3 shrink-0">
           {githubUrl && (
             <a
               href={githubUrl}
               target="_blank"
               rel="noopener noreferrer"
-              onClick={(e) => e.stopPropagation()}
               className="text-slate-text hover:text-amber transition-colors"
               title="View on GitHub"
             >
               <ExternalLink className="h-3.5 w-3.5" />
             </a>
           )}
-          <ChevronDown
-            className={`h-4 w-4 text-slate-text transition-transform duration-200 ${expanded ? "rotate-0" : "-rotate-90"}`}
-          />
+          <button
+            type="button"
+            onClick={onToggle}
+            aria-label={expanded ? "Collapse reviews" : "Expand reviews"}
+            className="text-slate-text hover:text-amber transition-colors cursor-pointer"
+          >
+            <ChevronDown
+              className={`h-4 w-4 transition-transform duration-200 ${expanded ? "rotate-0" : "-rotate-90"}`}
+            />
+          </button>
         </div>
-      </button>
+      </div>
 
       {/* Expanded reviews */}
       {expanded && (
@@ -196,7 +203,7 @@ function PRAccordionRow({
 }
 
 export default function ReviewsPage() {
-  const { repos, activeId, setSelectedId, isLoading: reposLoading } = useActiveRepo();
+  const { repos, activeId, isLoading: reposLoading } = useActiveRepo();
   const [statusFilter] = useSearchParamState("status", "all");
   const updateParams = useUpdateSearchParams();
   const [expandedPR, setExpandedPR] = useState<string | null>(null);

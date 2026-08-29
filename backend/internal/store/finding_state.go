@@ -82,6 +82,20 @@ func CanTransitionFindingState(from, to FindingState) bool {
 // silent no-op (updated=false), never an error. A missing row is likewise a
 // non-fatal no-op.
 func (s *Store) UpdateFindingStateFrom(ctx context.Context, commentID uuid.UUID, to FindingState, allowedFrom []FindingState) (updated bool, err error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "UpdateFindingStateFrom",
+
+			"comment_id", storeLogValue(commentID), "allowed_from_count",
+			len(allowedFrom))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered, updated)
+			panic(recovered)
+		}
+		storeFinish(err, updated)
+	}()
+
 	if len(allowedFrom) == 0 {
 		return false, nil
 	}
@@ -90,8 +104,11 @@ func (s *Store) UpdateFindingStateFrom(ctx context.Context, commentID uuid.UUID,
 		sources[i] = string(st)
 	}
 	tag, err := s.Pool.Exec(ctx, `
-		UPDATE review_comments SET state = $2
-		WHERE id = $1 AND state = ANY($3::text[]) AND state <> $2
+		UPDATE review_comments rc SET state = $2
+		FROM reviews r
+		WHERE rc.id = $1 AND rc.review_id = r.id
+		  AND rc.attempt_generation = r.attempt_generation
+		  AND rc.state = ANY($3::text[]) AND rc.state <> $2
 	`, commentID, string(to), sources)
 	if err != nil {
 		return false, fmt.Errorf("updating finding state: %w", err)
@@ -103,13 +120,28 @@ func (s *Store) UpdateFindingStateFrom(ctx context.Context, commentID uuid.UUID,
 // that produced the given comment ("" when the review predates contracts).
 // Feedback indexers stamp it on dismissal memories so retrieval can ignore
 // prototype-era dismissals during production review.
-func (s *Store) GetCommentChangeClass(ctx context.Context, commentID uuid.UUID) (string, error) {
+func (s *Store) GetCommentChangeClass(ctx context.Context, commentID uuid.UUID) (storeResult0 string, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetCommentChangeClass",
+
+			"comment_id", storeLogValue(commentID))
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			storeFinishPanic(storeFinish,
+
+				recovered,
+				storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr, storeResult0)
+	}()
+
 	var class string
 	err := s.Pool.QueryRow(ctx, `
 		SELECT COALESCE(rv.review_contract->>'change_class', '')
 		FROM review_comments rc
 		JOIN reviews rv ON rc.review_id = rv.id
-		WHERE rc.id = $1
+		WHERE rc.id = $1 AND rc.attempt_generation = rv.attempt_generation
 	`, commentID).Scan(&class)
 	if err != nil {
 		return "", fmt.Errorf("getting comment change class: %w", err)

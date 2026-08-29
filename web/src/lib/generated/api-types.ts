@@ -52,7 +52,6 @@ export interface Installation {
   installation_id: number /* int64 */;
   org_login: string;
   clerk_org_id?: string;
-  plan_tier: string;
   created_at: string;
   suspended_at?: string;
 }
@@ -83,6 +82,12 @@ export interface Review {
   token_usage?: unknown;
   trigger: string;
   triggered_by?: string;
+  /**
+   * BudgetNote explains why a review was narrowed by the cost limits. Nil on
+   * an ordinary review; set means fewer files were read than the pull request
+   * changed, and the dashboard says so rather than looking merely quiet.
+   */
+  budget_note?: string;
   duration_ms?: number /* int */;
   error?: string;
   deep_review: boolean;
@@ -154,6 +159,23 @@ export interface ReviewComment {
    * resolved-by-commit breadcrumb.
    */
   resolved_sha?: string;
+  /**
+   * AttemptGeneration identifies the retry attempt that produced this finding.
+   */
+  attempt_generation: number /* int */;
+}
+/**
+ * ReviewMinorNote is a structured near-miss finding folded into the review summary.
+ */
+export interface ReviewMinorNote {
+  id: string;
+  review_id: string;
+  attempt_generation: number /* int */;
+  file_path: string;
+  line: number /* int */;
+  severity: string;
+  title: string;
+  created_at: string;
 }
 /**
  * PRReviewSummary is one review pass in a PR's incremental history. Reviews are
@@ -188,6 +210,58 @@ export interface AutoResolveSummary {
   resolved_count: number /* int */;
   attempted_count: number /* int */;
   created_at: string;
+}
+/**
+ * LearnedMemory is one memory row a review wrote, shaped for display. The
+ * excerpt is truncated in SQL, not here: memory content is derived from private
+ * source code and can run to thousands of characters, and an unbounded excerpt
+ * would both bloat the response and put more of the codebase on the wire than
+ * the surface needs.
+ */
+export interface LearnedMemory {
+  /**
+   * Type is the memory.MemoryType the row was stored under (pattern,
+   * pr_summary, synthesis, scenario, topology, feedback, rule, …).
+   */
+  type: string;
+  /**
+   * Label is the human display noun for Type, from the one table in
+   * LearnedMemoryLabel. It rides on the wire so the dashboard renders the
+   * same noun the posted PR comment uses instead of keeping a second table
+   * in TypeScript that has to agree with this one.
+   */
+  label: string;
+  /**
+   * ContainerTag is the repo tag the memory was filed under, or `_shared`
+   * for installation-wide knowledge — the distinction the user cares about
+   * ("did this teach only this repo, or the whole org?").
+   */
+  container_tag: string;
+  /**
+   * Excerpt is the leading LearnedMemoryExcerptChars of the content.
+   */
+  excerpt: string;
+  /**
+   * WrittenAt is memory_review_attributions.attributed_at: the time this
+   * review learned the row. A later deterministic re-upsert updates current
+   * provenance without changing the earlier review's historical timestamp.
+   */
+  written_at: string;
+}
+/**
+ * LearnedMemoryCount is one (type, count) bucket of what a review wrote. Kept
+ * separate from the excerpt list because the list is capped: the counts stay
+ * truthful for a review that wrote more rows than the list returns.
+ */
+export interface LearnedMemoryCount {
+  type: string;
+  count: number /* int */;
+  /**
+   * Label is the display noun for Count rows of Type, already singular or
+   * plural, from the one table in LearnedMemoryLabel. The dashboard renders
+   * it verbatim so its chips read exactly like the posted PR comment.
+   */
+  label: string;
 }
 export interface Rule {
   id: number /* int64 */;
@@ -228,6 +302,7 @@ export interface ProviderKey {
   provider: string;
   key_hint?: string;
   base_url?: string;
+  model?: string;
   created_at: string;
   updated_at: string;
 }
@@ -383,7 +458,7 @@ export interface Pattern {
   installation_id: number /* int64 */;
   repo_id?: number /* int64 */;
   content: string;
-  supermemory_id?: string;
+  memory_doc_id?: string;
   created_by?: string;
   source: string;
   category?: string;
@@ -395,4 +470,33 @@ export interface PatternStat {
   week: string;
   source: string;
   count: number /* int */;
+}
+
+//////////
+// source: personas.go
+
+/**
+ * Persona is a review style: a prompt overlay appended to the review system
+ * prompt, plus a shorter hint for the specialist path.
+ * It is not a prompt override. prompt_templates REPLACES a stage's system
+ * prompt and is unique per (repo, stage); a persona is appended, carries two
+ * strings, and is chosen by name from a set.
+ */
+export interface Persona {
+  id: number /* int64 */;
+  installation_id?: number /* int64 */;
+  slug: string;
+  name: string;
+  prompt_overlay: string;
+  specialist_hint: string;
+  is_builtin: boolean;
+  /**
+   * ShadowsBuiltin marks an installation's row that overrides a built-in of
+   * the same slug. It cannot be derived client-side: an installation row
+   * always has is_builtin FALSE, so nothing on the row itself distinguishes a
+   * brand-new persona from a retuned shipped one — and the difference matters,
+   * because deleting a shadow RESTORES the built-in rather than removing a
+   * name that repos already select.
+   */
+  shadows_builtin: boolean;
 }

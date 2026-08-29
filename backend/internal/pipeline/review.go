@@ -46,7 +46,15 @@ type workUnit struct {
 	specialist Specialist // empty for skim single-pass
 }
 
-func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
+func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) (err error) {
+	opID, started := pipelineOperationStart(ctx, slog.Default(), "review_stage", "route triaged files into bounded parallel specialist review units, invoke review tools/models, and merge findings by file", run)
+	defer func() {
+		if err != nil {
+			pipelineOperationFailure(ctx, slog.Default(), opID, "review_stage", started, err)
+			return
+		}
+		pipelineOperationResult(ctx, slog.Default(), opID, "review_stage", "success", started, map[string]any{"file_reviews": run.FileReviews, "review_tokens": run.Tokens.Review}, "reviewed_file_count", len(run.FileReviews), "finding_count", countFlatComments(run))
+	}()
 	if run.Diff == nil || len(run.Diff.Files) == 0 {
 		return nil
 	}
@@ -57,9 +65,15 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 		triageLookup[t.File] = t.Action
 	}
 
+	// Budget cap. Reducing depth alone does not bound a large pull request:
+	// six hundred files at one call each is still six hundred calls. Files are
+	// kept in triage-risk order so the cap drops the least interesting work,
+	// not an arbitrary tail of the diff.
+	files := budgetCapFiles(run, triageLookup)
+
 	// Filter files and build work units
 	var units []workUnit
-	for _, f := range run.Diff.Files {
+	for _, f := range files {
 		action := triageLookup[f.NewName]
 		if action == TriageSkip {
 			continue
@@ -153,22 +167,16 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 				if u.specialist != "" {
 					p.systemBase = specialistPrompt(u.specialist, run.Prompts)
 					p.memoryBriefing = specialistBriefing(ctx, indexer, owner, repo, u.specialist, u.file.NewName, run.Thresholds)
-					if run.Persona == PersonaCustom {
-						p.promptExtra = PersonaSpecialistHintCustom(run.CustomPersonaPrompt)
-					} else {
-						p.promptExtra = PersonaSpecialistHint(run.Persona)
-					}
+					// Resolved once in buildRun: a stored persona wins over the
+					// compiled-in one, and a miss falls back to it.
+					p.promptExtra = run.ResolvedPersona.SpecialistHint
 				} else {
 					p.systemBase = customOrDefault(run.Prompts, "review_system", baseSystemPrompt)
 					p.memoryBriefing = reviewBriefing(ctx, indexer, owner, repo, u.file.NewName, run.Thresholds)
-					if run.Persona == PersonaCustom {
-						p.promptExtra = PersonaPromptOverlayCustom(run.CustomPersonaPrompt)
-					} else {
-						p.promptExtra = PersonaPromptOverlay(run.Persona)
-					}
+					p.promptExtra = run.ResolvedPersona.Overlay
 				}
 				if run.EventBus != nil {
-					run.EventBus.Publish(run.ReviewID, EventFileReviewStarted, map[string]any{
+					run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventFileReviewStarted, map[string]any{
 						"file_path":  p.file.NewName,
 						"specialist": string(p.specialist),
 						"action":     string(p.action),
@@ -202,7 +210,7 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 		run.Tokens.Review = append(run.Tokens.Review, r.tokens)
 		run.Tokens.addToTotal(r.tokens)
 		if run.EventBus != nil {
-			run.EventBus.Publish(run.ReviewID, EventTokenUpdate, map[string]any{
+			run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventTokenUpdate, map[string]any{
 				"total_tokens": run.Tokens.Total.TotalTokens,
 				"cost":         run.Tokens.Total.Cost,
 			})
@@ -217,7 +225,7 @@ func (rs *ReviewStage) Execute(ctx context.Context, run *PipelineRun) error {
 			// Stream each comment as it arrives
 			if run.EventBus != nil {
 				for _, c := range r.review.Comments {
-					run.EventBus.Publish(run.ReviewID, EventComment, map[string]any{
+					run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventComment, map[string]any{
 						"file_path":  r.review.Path,
 						"line":       c.Line,
 						"severity":   c.Severity,
@@ -289,14 +297,21 @@ type reviewParams struct {
 	deepReview     bool       // controls agentic memory access for deep files
 }
 
-func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p reviewParams, fileContents map[string]string, owner, repo string, cfg llm.ModelConfig, provider llm.Provider) (FileReview, StageTokens, error) {
+func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p reviewParams, fileContents map[string]string, owner, repo string, cfg llm.ModelConfig, provider llm.Provider) (review FileReview, tokens StageTokens, err error) {
+	opID, started := pipelineOperationStart(ctx, slog.Default(), "file_review_analysis", "assemble complete per-file context, run the configured general or specialist reviewer including agentic tool iterations, parse and validate findings, and account token spend", map[string]any{"run": run, "params": p, "file_contents": fileContents, "owner": owner, "repo": repo, "model_config": cfg})
+	defer func() {
+		if err != nil {
+			pipelineOperationFailure(ctx, slog.Default(), opID, "file_review_analysis", started, err, "file", p.file.NewName, "specialist", p.specialist)
+			return
+		}
+		pipelineOperationResult(ctx, slog.Default(), opID, "file_review_analysis", "success", started, map[string]any{"review": review, "tokens": tokens}, "file", p.file.NewName, "specialist", p.specialist, "finding_count", len(review.Comments))
+	}()
 	var indexer memory.Indexer
 	if rs.memRegistry != nil {
 		indexer = rs.memRegistry.GetIndexer(ctx, run.DBInstallationID)
 	}
 
-	review := FileReview{Path: p.file.NewName}
-	var tokens StageTokens
+	review = FileReview{Path: p.file.NewName}
 	tokens.Model = cfg.Model
 	tokens.Provider = cfg.Provider
 	tokens.File = p.file.NewName
@@ -312,31 +327,30 @@ func (rs *ReviewStage) reviewFile(ctx context.Context, run *PipelineRun, p revie
 	// Query blast radius from code graph + fetch dependent file contents
 	var blastContext string
 	if run.BlastRadius && rs.store != nil && rs.ghClient != nil {
-		changedPaths := make([]string, 0, len(run.Diff.Files))
 		changedSet := make(map[string]bool, len(run.Diff.Files))
 		for _, f := range run.Diff.Files {
-			changedPaths = append(changedPaths, f.NewName)
 			changedSet[f.NewName] = true
 		}
-		nodes, err := rs.store.GetBlastRadius(ctx, run.DBRepoID, changedPaths, 2)
+		basePaths := blastRadiusBasePaths(run.Diff)
+		nodes, err := rs.store.GetBlastRadius(ctx, run.DBInstallationID, run.DBRepoID, basePaths, 2)
 		if err != nil {
 			slog.Warn("blast radius query failed", "error", err)
 		} else {
 			// Fetch content of depth-1 dependents NOT in the diff (max 3 files, 200 lines each)
 			depContents := make(map[string]string)
-			seen := make(map[string]bool)
-			for _, n := range nodes {
-				if n.Depth != 1 || changedSet[n.FilePath] || seen[n.FilePath] || len(depContents) >= 3 {
-					continue
+			// Sibling-repository dependents are listed but their source is never
+			// fetched — owner/repo/HeadSHA below name only this PR's repository.
+			for _, path := range dependentFetchPaths(nodes, run.DBRepoID, changedSet) {
+				if len(depContents) >= 3 {
+					break
 				}
-				seen[n.FilePath] = true
-				content, fetchErr := rs.ghClient.GetFileContent(ctx, run.PREvent.InstallationID, owner, repo, n.FilePath, run.PREvent.HeadSHA)
+				content, fetchErr := rs.ghClient.GetFileContent(ctx, run.PREvent.InstallationID, owner, repo, path, run.PREvent.HeadSHA)
 				if fetchErr != nil {
 					continue
 				}
-				depContents[n.FilePath] = truncateLines(content, 200)
+				depContents[path] = truncateLines(content, 200)
 			}
-			blastContext = FormatBlastRadius(nodes, depContents)
+			blastContext = FormatBlastRadius(nodes, depContents, run.DBRepoID)
 		}
 	}
 
@@ -476,10 +490,17 @@ func composeReviewSystemPrompt(systemBase, owner, repo string, specialist Specia
 			sys += specialistOverlay(specialist)
 		}
 	}
+	// Keep the established memory_context contract while applying the same
+	// unanchored sanitizer and explicit data-only boundary as every other
+	// retrieved-memory consumer.
+	memoryContext := ""
+	if memoryBriefing != "" {
+		memoryContext = "\n\n" + wrapUntrustedRetrievedMemory("memory_context", memoryBriefing)
+	}
 	// reviewLaws is injected exactly once here — the single severity/scope
 	// rubric for every review call. Base prompts, specialist overlays, and
 	// personas are focus/tone lenses only and must not restate severity rules.
-	return sys + reviewLaws + memoryBriefing + promptExtra
+	return sys + reviewLaws + memoryContext + promptExtra
 }
 
 // reviewLaws is the single review rubric injected once into every review
@@ -579,19 +600,20 @@ func buildFileReviewPrompt(run *PipelineRun, file diff.FileDiff, fileContent str
 		sb.WriteString(typeContext)
 	}
 
-	// Inject SAST findings as hints for the reviewer to verify
+	// Inject SAST findings as hints for the reviewer to verify.
 	if run.SastFindings != nil {
 		if fileSast, ok := run.SastFindings[file.NewName]; ok && len(fileSast) > 0 {
-			sb.WriteString("\n<sast_findings>\n")
-			sb.WriteString("Static analysis tools found these issues in this file. Verify each and include in your review if valid:\n")
+			var sast strings.Builder
+			sast.WriteString("Static analysis tools found these issues in this file. Verify each and include in your review if valid:\n")
 			for i, f := range fileSast {
 				if i >= 10 {
-					sb.WriteString(fmt.Sprintf("... and %d more SAST findings\n", len(fileSast)-10))
+					sast.WriteString(fmt.Sprintf("... and %d more SAST findings\n", len(fileSast)-10))
 					break
 				}
-				sb.WriteString(fmt.Sprintf("- Line %d: [%s] %s (%s)\n", f.Line, f.Rule, f.Message, f.Severity))
+				sast.WriteString(fmt.Sprintf("- Line %d: [%s] %s (%s)\n",
+					f.Line, sanitizeUserInput(f.Rule), sanitizeUserInput(f.Message), f.Severity))
 			}
-			sb.WriteString("</sast_findings>\n")
+			sb.WriteString("\n" + wrapSafeDelimiters("sast_findings", sast.String()) + "\n")
 		}
 	}
 

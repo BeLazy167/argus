@@ -44,7 +44,15 @@ func NewTriageStage(registry *llm.Registry, st *store.Store) *TriageStage {
 	return &TriageStage{registry: registry, store: st}
 }
 
-func (ts *TriageStage) Execute(ctx context.Context, run *PipelineRun) error {
+func (ts *TriageStage) Execute(ctx context.Context, run *PipelineRun) (err error) {
+	opID, started := pipelineOperationStart(ctx, slog.Default(), "triage_stage", "classify every changed file, refine manageable risk sets with the triage model, and apply review-contract routing overrides", run)
+	defer func() {
+		if err != nil {
+			pipelineOperationFailure(ctx, slog.Default(), opID, "triage_stage", started, err)
+			return
+		}
+		pipelineOperationResult(ctx, slog.Default(), opID, "triage_stage", "success", started, map[string]any{"triage_results": run.TriageResults, "tokens": run.Tokens.Triage}, "result_count", len(run.TriageResults))
+	}()
 	if run.Diff == nil || len(run.Diff.Files) == 0 {
 		return nil
 	}
@@ -97,14 +105,14 @@ func (ts *TriageStage) Execute(ctx context.Context, run *PipelineRun) error {
 	run.TriageResults = triageSlice
 
 	if run.EventBus != nil {
-		run.EventBus.Publish(run.ReviewID, EventTriageComplete, map[string]any{
+		run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventTriageComplete, map[string]any{
 			"files": triageSlice,
 		})
 	}
 
 	// Token usage is accumulated inside llmTriage if it ran
 	if run.EventBus != nil {
-		run.EventBus.Publish(run.ReviewID, EventTokenUpdate, map[string]any{
+		run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventTokenUpdate, map[string]any{
 			"total_tokens": run.Tokens.Total.TotalTokens,
 			"cost":         run.Tokens.Total.Cost,
 		})
@@ -113,7 +121,7 @@ func (ts *TriageStage) Execute(ctx context.Context, run *PipelineRun) error {
 	return nil
 }
 
-func buildTriagePrompt(files []diff.FileDiff) string {
+func buildTriagePrompt(files []diff.FileDiff, memoryHints string) string {
 	var sb strings.Builder
 	sb.WriteString("Classify each file for code review depth.\n\nFiles changed:\n")
 	for _, f := range files {
@@ -127,12 +135,24 @@ func buildTriagePrompt(files []diff.FileDiff) string {
 			sb.WriteString(fmt.Sprintf("\n... (%d more lines)\n", len(lines)-maxDiffLines))
 		}
 	}
+	if memoryHints != "" {
+		sb.WriteString("\n\n")
+		sb.WriteString(wrapRetrievedMemory(memoryHints))
+	}
 	return sb.String()
 }
 
 // llmTriage runs the existing LLM-based triage as an optional refinement step.
 // Returns a map of file → TriageResult. Non-fatal — returns error if LLM fails.
-func (ts *TriageStage) llmTriage(ctx context.Context, run *PipelineRun) (map[string]TriageResult, error) {
+func (ts *TriageStage) llmTriage(ctx context.Context, run *PipelineRun) (results map[string]TriageResult, err error) {
+	opID, started := pipelineOperationStart(ctx, slog.Default(), "triage_model_analysis", "resolve the triage provider, retrieve relevant memory hints, classify all changed files, parse the model response, and account token spend", run)
+	defer func() {
+		if err != nil {
+			pipelineOperationFailure(ctx, slog.Default(), opID, "triage_model_analysis", started, err)
+			return
+		}
+		pipelineOperationResult(ctx, slog.Default(), opID, "triage_model_analysis", "success", started, results, "result_count", len(results))
+	}()
 	provider, cfg, err := ts.registry.ResolveProvider(ctx, storeConfigLister{st: ts.store, installationID: run.DBInstallationID}, run.DBInstallationID, run.DBRepoID, llm.StageTriage)
 	if err != nil {
 		return nil, fmt.Errorf("resolve triage provider: %w", err)
@@ -142,10 +162,8 @@ func (ts *TriageStage) llmTriage(ctx context.Context, run *PipelineRun) (map[str
 	if splitErr != nil {
 		slog.Warn("triage: invalid repo name, skipping memory hints", "error", splitErr)
 	}
-	prompt := buildTriagePrompt(run.Diff.Files)
-	if hints := triageMemoryHints(ctx, run.Indexer, run.Thresholds, owner, repo, run.Diff.Files); hints != "" {
-		prompt += "\n" + hints
-	}
+	hints := triageMemoryHints(ctx, run.Indexer, run.Thresholds, owner, repo, run.Diff.Files)
+	prompt := buildTriagePrompt(run.Diff.Files, hints)
 
 	resp, err := provider.Complete(ctx, llm.CompletionRequest{
 		Model:       cfg.Model,
@@ -170,7 +188,7 @@ func (ts *TriageStage) llmTriage(ctx context.Context, run *PipelineRun) (map[str
 	}
 	run.Tokens.addToTotal(run.Tokens.Triage)
 
-	results, err := parseTriageResponse(resp.Content)
+	parsedResults, err := parseTriageResponse(resp.Content)
 	if err != nil {
 		slog.Warn("LLM triage parse failed",
 			"error", err,
@@ -182,11 +200,12 @@ func (ts *TriageStage) llmTriage(ctx context.Context, run *PipelineRun) (map[str
 		return nil, fmt.Errorf("parsing triage: %w", err)
 	}
 
-	m := make(map[string]TriageResult, len(results))
-	for _, r := range results {
+	m := make(map[string]TriageResult, len(parsedResults))
+	for _, r := range parsedResults {
 		m[r.File] = r
 	}
-	return m, nil
+	results = m
+	return results, nil
 }
 
 // applyContractOverrides mutates triage results per the review contract:
@@ -416,7 +435,6 @@ func (s storeConfigLister) ListLLMConfigs(ctx context.Context, repoID int64) ([]
 // zero struct still floors at the default instead of 0.
 func searchHints(ctx context.Context, indexer memory.Indexer, caller, container string, thresholds memory.Thresholds, q memory.MemoryQuery) []string {
 	q.Threshold = thresholds.WithDefaults().FindingEnrich
-	q.Rerank = true
 	q.Enrich = true
 	return memory.BestEffort(slog.Default(), caller, container, len(q.Query),
 		func() ([]string, error) {
@@ -425,7 +443,7 @@ func searchHints(ctx context.Context, indexer memory.Indexer, caller, container 
 		})
 }
 
-// triageMemoryHints searches Supermemory for file synthesis docs, repo patterns,
+// triageMemoryHints searches memory for file synthesis docs, repo patterns,
 // owner patterns, and rules matching changed files.
 // Returns a hint block for the triage prompt, or empty string if no history found.
 func triageMemoryHints(ctx context.Context, indexer memory.Indexer, thresholds memory.Thresholds, owner, repo string, files []diff.FileDiff) string {

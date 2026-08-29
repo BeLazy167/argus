@@ -21,6 +21,7 @@ Workflow({ name: "adversarial-verify", args: { pr: <number> } })
 - Real gates: `build`, `lint`, `test` GitHub checks.
 - Backend: `cd backend && go build ./... && go vet ./... && go test ./...` must pass before pushing.
 - Web: `cd web && pnpm lint && pnpm typecheck && pnpm build` must pass before pushing.
+- Gate on the child process exit status. Run the command directly or through `rtk proxy`; filtered `rtk test`, `rtk go`, and `rtk pnpm` summaries are diagnostic output, not a pass signal.
 - PRs adding store migrations must take the next free `NNN_` number at push time — parallel PRs have collided on this (see #116); golang-migrate errors on duplicate versions and the release `/migrate` fails the deploy.
 
 ## Prompt-safety idiom

@@ -12,13 +12,13 @@ import (
 )
 
 // scenarioStore is the narrow store surface the scenario persistence helpers
-// consume: create an active/pending scenario, mirror its Supermemory id, and
+// consume: create an active/pending scenario, mirror its memory doc id, and
 // list active scenarios matching a file set. *store.Store satisfies it, so
 // callers pass their concrete store through; tests substitute a fake.
 type scenarioStore interface {
 	CreateScenario(ctx context.Context, installationID int64, repoID *int64, description, source, sourceRef string, files, modules []string, severity string) (int64, error)
 	CreatePendingScenario(ctx context.Context, installationID int64, repoID *int64, description, source, sourceRef string, files, modules []string, severity string) (int64, error)
-	SetScenarioSupermemoryID(ctx context.Context, id int64, supermemoryID string) error
+	SetScenarioMemoryDocID(ctx context.Context, id int64, memoryDocID string) error
 	ListScenariosForFiles(ctx context.Context, repoID int64, filePaths []string) ([]store.Scenario, error)
 }
 
@@ -28,7 +28,11 @@ type scenarioStore interface {
 // scenario dedup/trigger just proceed as if nothing matched. severity="" leaves
 // the search severity-agnostic. Retrieval is threshold-free (the caller applies
 // the dedupe/trigger threshold to the returned similarities).
-func scenarioSearch(ctx context.Context, indexer memory.Indexer, logger *slog.Logger, repo, query, severity string, limit int) []memory.ScenarioSearchResult {
+func scenarioSearch(ctx context.Context, indexer memory.Indexer, logger *slog.Logger, repo, query, severity string, limit int) (results []memory.ScenarioSearchResult) {
+	opID, started := pipelineOperationStart(ctx, logger, "scenario_memory_search", "retrieve, threshold, parse, and deduplicate scenario memories relevant to a semantic query", map[string]any{"repo": repo, "query": query, "severity": severity, "limit": limit})
+	defer func() {
+		pipelineOperationResult(ctx, logger, opID, "scenario_memory_search", "completed", started, results, "result_count", len(results))
+	}()
 	var filters []memory.FilterCondition
 	if severity != "" {
 		filters = append(filters, memory.FilterCondition{Key: "severity", Value: severity})
@@ -42,7 +46,6 @@ func scenarioSearch(ctx context.Context, indexer memory.Indexer, logger *slog.Lo
 				Type:    memory.TypeScenario,
 				Filters: filters,
 				Limit:   limit,
-				Rerank:  true,
 			})
 		})
 	return memory.ScenarioResults(matches, limit)
@@ -106,14 +109,18 @@ func scenarioSeverity(s Severity) string {
 //	seeds := pipeline.ExtractScenariosFromReview(run)
 //	pipeline.StoreScenarioSeeds(ctx, st, run.DBInstallationID, &run.DBRepoID, seeds)
 //
-// StoreScenarioSeeds persists seeds, deduping via Supermemory similarity. A new
+// StoreScenarioSeeds persists seeds, deduping via memory similarity. A new
 // seed is skipped only when the top existing scenario matches it at or above
-// the dedupe threshold (memory.Thresholds.ScenarioDedupe, default 0.85). This
+// the dedupe threshold (memory.Thresholds.ScenarioDedupe, default 0.95). This
 // mirrors the scenario_trigger gate in the orchestrator: an ungated top-1 hit no
 // longer suppresses distinct seeds, so the operator-tunable threshold actually
 // applies. A non-positive threshold is clamped to the default so a misconfigured
 // 0 can never collapse every distinct seed into "duplicate".
 func StoreScenarioSeeds(ctx context.Context, st scenarioStore, indexer memory.Indexer, owner, repo string, installationID int64, repoID *int64, dedupeThreshold float64, seeds []ScenarioSeed) {
+	opID, started := pipelineOperationStart(ctx, slog.Default(), "store_scenario_seeds", "deduplicate, persist, index, and link active scenarios extracted from accepted findings", map[string]any{"owner": owner, "repo": repo, "installation_id": installationID, "repo_id": repoID, "seeds": seeds})
+	defer func() {
+		pipelineOperationResult(ctx, slog.Default(), opID, "store_scenario_seeds", "completed", started, map[string]any{"seed_count": len(seeds), "repo": repo})
+	}()
 	for _, seed := range seeds {
 		if indexer != nil {
 			existing := scenarioSearch(ctx, indexer, slog.Default(), repo, seed.Description, "", 1)
@@ -133,11 +140,11 @@ func StoreScenarioSeeds(ctx context.Context, st scenarioStore, indexer memory.In
 				// Record the deterministic customID (single-sourced via
 				// memory.ScenarioCustomID — same repoIDSegment collision-hash the
 				// real SM write uses) into 045's mirror column so a NULL
-				// supermemory_id means the write failed, not that the pipeline
+				// memory_doc_id means the write failed, not that the pipeline
 				// never attempted it. A bare CustomIDSanitize here would drift from
 				// the actual doc ID for lossy repo names (e.g. "a.b", "_shared").
 				customID := memory.ScenarioCustomID(repo, id)
-				if err := st.SetScenarioSupermemoryID(ctx, id, customID); err != nil {
+				if err := st.SetScenarioMemoryDocID(ctx, id, customID); err != nil {
 					slog.Warn("write-back scenario SM id", "error", err, "id", id)
 				}
 			}
@@ -173,6 +180,10 @@ func isDuplicateScenario(existing []memory.ScenarioSearchResult, dedupeThreshold
 
 // StorePendingScenarioSeeds stores scenarios as inactive (pending dev approval via reaction).
 func StorePendingScenarioSeeds(ctx context.Context, st scenarioStore, installationID int64, repoID *int64, seeds []ScenarioSeed) {
+	opID, started := pipelineOperationStart(ctx, slog.Default(), "store_pending_scenario_seeds", "persist low-confidence scenario candidates for later approval without indexing them as active", map[string]any{"installation_id": installationID, "repo_id": repoID, "seeds": seeds})
+	defer func() {
+		pipelineOperationResult(ctx, slog.Default(), opID, "store_pending_scenario_seeds", "completed", started, map[string]any{"seed_count": len(seeds)})
+	}()
 	for _, seed := range seeds {
 		_, _ = st.CreatePendingScenario(ctx, installationID, repoID, seed.Description, seed.Source, seed.SourceRef, seed.Files, nil, seed.Severity)
 	}

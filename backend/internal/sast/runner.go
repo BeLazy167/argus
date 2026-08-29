@@ -1,10 +1,15 @@
 package sast
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
+	"os/exec"
+	"sort"
 	"sync"
 	"time"
 
+	"github.com/BeLazy167/argus/backend/internal/obs"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -27,17 +32,51 @@ type Runner interface {
 
 // DefaultRunners returns all available SAST runners.
 func DefaultRunners() []Runner {
-	return []Runner{
+	runners := []Runner{
 		&StaticcheckRunner{},
 		&ESLintRunner{},
 		&SemgrepRunner{},
 	}
+	slog.Info("SAST runners registered", "runner_count", len(runners))
+	return runners
+}
+
+// runCommand is the single subprocess boundary for SAST integrations. It captures
+// complete stdout/stderr but never payload-logs stdout because tool output may embed
+// private source code. Completion logs retain byte counts for diagnostics.
+func runCommand(ctx context.Context, tool string, cmd *exec.Cmd) ([]byte, []byte, error) {
+	operationID := obs.NewLogID()
+	started := time.Now()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	slog.InfoContext(ctx, "SAST subprocess started",
+		"operation_id", operationID, "tool", tool, "command", cmd.Args, "working_directory", cmd.Dir)
+	err := cmd.Run()
+	obs.LogPayload(ctx, slog.Default(), "SAST subprocess stderr", operationID, "stderr", "text/plain", stderr.Bytes())
+	exitCode := 0
+	if cmd.ProcessState != nil {
+		exitCode = cmd.ProcessState.ExitCode()
+	}
+	slog.InfoContext(ctx, "SAST subprocess completed",
+		"operation_id", operationID, "tool", tool, "exit_code", exitCode,
+		"duration_ms", time.Since(started).Milliseconds(), "stdout_bytes", stdout.Len(),
+		"stderr_bytes", stderr.Len(), "error", err)
+	return stdout.Bytes(), stderr.Bytes(), err
 }
 
 // RunAll executes all eligible runners in parallel, collecting their findings.
 // Each runner gets a 15-second timeout. Runners that error are skipped;
 // findings from successful runners are still returned.
-func RunAll(ctx context.Context, runners []Runner, language string, files map[string]string) ([]Finding, error) {
+func RunAll(ctx context.Context, runners []Runner, language string, files map[string]string) (all []Finding, err error) {
+	started := time.Now()
+	defer func() {
+		level := slog.LevelInfo
+		if err != nil {
+			level = slog.LevelError
+		}
+		slog.Log(ctx, level, "SAST run-all completed", "language", language, "runner_count", len(runners), "file_count", len(files), "finding_count", len(all), "duration_ms", time.Since(started).Milliseconds(), "error", err)
+	}()
 	var eligible []Runner
 	for _, r := range runners {
 		if r.CanRun(language) {
@@ -45,23 +84,36 @@ func RunAll(ctx context.Context, runners []Runner, language string, files map[st
 		}
 	}
 	if len(eligible) == 0 {
+		slog.InfoContext(ctx, "SAST run-all skipped", "language", language, "reason", "no_eligible_runners", "file_count", len(files))
 		return nil, nil
 	}
+	slog.InfoContext(ctx, "SAST runners selected", "language", language, "eligible_count", len(eligible), "runner_count", len(runners))
 
 	var mu sync.Mutex
-	var all []Finding
 
 	g, gctx := errgroup.WithContext(ctx)
 	for _, r := range eligible {
 		g.Go(func() error {
+			operationID := obs.NewLogID()
+			started := time.Now()
 			rctx, cancel := context.WithTimeout(gctx, 15*time.Second)
 			defer cancel()
+			slog.InfoContext(rctx, "SAST runner started", "operation_id", operationID,
+				"tool", r.Name(), "language", language, "file_count", len(files))
 
 			findings, err := r.Run(rctx, files)
 			if err != nil {
+				slog.ErrorContext(rctx, "SAST runner failed", "operation_id", operationID,
+					"tool", r.Name(), "language", language,
+					"duration_ms", time.Since(started).Milliseconds(), "error", err)
 				// Graceful degradation: skip failed runners.
 				return nil
 			}
+			severityCounts, ruleIDs := summarizeFindings(findings)
+			slog.InfoContext(rctx, "SAST runner completed", "operation_id", operationID,
+				"tool", r.Name(), "language", language, "finding_count", len(findings),
+				"severity_counts", severityCounts, "rule_ids", ruleIDs,
+				"duration_ms", time.Since(started).Milliseconds())
 			mu.Lock()
 			all = append(all, findings...)
 			mu.Unlock()
@@ -73,4 +125,21 @@ func RunAll(ctx context.Context, runners []Runner, language string, files map[st
 		return all, err
 	}
 	return all, nil
+}
+
+func summarizeFindings(findings []Finding) (map[string]int, []string) {
+	severityCounts := make(map[string]int)
+	ruleSet := make(map[string]struct{})
+	for _, finding := range findings {
+		severityCounts[finding.Severity]++
+		if finding.Rule != "" {
+			ruleSet[finding.Rule] = struct{}{}
+		}
+	}
+	ruleIDs := make([]string, 0, len(ruleSet))
+	for rule := range ruleSet {
+		ruleIDs = append(ruleIDs, rule)
+	}
+	sort.Strings(ruleIDs)
+	return severityCounts, ruleIDs
 }

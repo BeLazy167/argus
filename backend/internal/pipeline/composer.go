@@ -7,6 +7,7 @@ import (
 	"time"
 
 	ghpkg "github.com/BeLazy167/argus/backend/internal/github"
+	"github.com/BeLazy167/argus/backend/internal/store"
 	"github.com/BeLazy167/argus/backend/internal/util"
 )
 
@@ -69,21 +70,80 @@ const maxInlineComments = 10
 // dashboardBaseURL is the web dashboard origin (cfg.DashboardBaseURL) used for
 // the audit and dashboard links in the summary body. appSlug is the GitHub App
 // slug (cfg.GitHubAppSlug) used for the @mention in the footer.
+const maxVerdictWords = 10
+
+func renderVerdictPhrase(headline string) string {
+	replacer := strings.NewReplacer(
+		"ready to merge", "has no blocking findings",
+		"Ready to merge", "Has no blocking findings",
+		"cleanly", "",
+		"comprehensive", "complete",
+		"seamless", "direct",
+		"robust", "reliable",
+		"—", ".",
+	)
+	headline = replacer.Replace(headline)
+	words := strings.Fields(strings.TrimSpace(headline))
+	if len(words) <= maxVerdictWords {
+		return strings.Join(words, " ")
+	}
+	return strings.Join(words[:maxVerdictWords], " ")
+}
+
+func renderReviewVerdict(run *PipelineRun) string {
+	criticals, warnings, suggestions, _ := findingCounts(run)
+	switch {
+	case criticals > 0:
+		return fmt.Sprintf("**Verdict:** Argus found %d blocking %s. Fix the findings before you merge.", criticals, pluralize("finding", criticals))
+	case warnings > 0:
+		return fmt.Sprintf("**Verdict:** Argus found %d warning %s. Check the findings before you merge.", warnings, pluralize("finding", warnings))
+	case suggestions > 0:
+		return "**Verdict:** No blocking findings from Argus. Check the unverified suggestions before you merge."
+	default:
+		return "**Verdict:** No blocking findings from Argus. Test the behavior before you merge."
+	}
+}
+
+func renderFindingCounts(run *PipelineRun) string {
+	criticals, warnings, suggestions, praise := findingCounts(run)
+	files := len(run.Diff.Files)
+	return fmt.Sprintf("**Findings:** %d blocking · %d warning · %d suggestion · %d praise · %d %s reviewed",
+		criticals, warnings, suggestions, praise, files, pluralize("file", files))
+}
+
+func findingCounts(run *PipelineRun) (criticals, warnings, suggestions, praise int) {
+	for _, fr := range run.FileReviews {
+		for _, c := range fr.Comments {
+			if c.Suppressed {
+				continue
+			}
+			switch c.Severity {
+			case SeverityCritical:
+				criticals++
+			case SeverityWarning:
+				warnings++
+			case SeveritySuggestion:
+				suggestions++
+			case SeverityPraise:
+				praise++
+			}
+		}
+	}
+	return criticals, warnings, suggestions, praise
+}
+
 func Compose(run *PipelineRun, took time.Duration, dashboardBaseURL, appSlug string) ComposedReview {
 	// Rebalance severity: if >50% critical, downgrade lowest-confidence criticals.
 	rebalanceSeverity(run.FileReviews)
 
-	// Header format: `## 🔎 Argus · 8/10 — <verdict one-liner>`. One-liner comes
-	// from Synthesis.Headline, captured in synthesize() before FormatIntentHeader
-	// mutates Brief — using Brief directly here would bleed the intent disclaimer
-	// text into the H2.
+	// Keep the headline short. The body gives the evidence and acceptance checks.
 	headerPrefix := "Argus"
 	if run.IsIncremental {
 		headerPrefix = "Argus (Incremental)"
 	}
-	reviewHeader := fmt.Sprintf("## 🔎 %s · %d/10", headerPrefix, run.Synthesis.Score)
-	if run.Synthesis.Headline != "" {
-		reviewHeader += " — " + run.Synthesis.Headline
+	reviewHeader := fmt.Sprintf("## %s · %d/10", headerPrefix, run.Synthesis.Score)
+	if headline := renderVerdictPhrase(run.Synthesis.Headline); headline != "" {
+		reviewHeader += " — " + headline
 	}
 	reviewHeader += "\n\n"
 
@@ -179,17 +239,28 @@ func Compose(run *PipelineRun, took time.Duration, dashboardBaseURL, appSlug str
 		inlineComments[i] = rc.comment
 	}
 
-	// Build summary: header + brief + scope warning + affected-file findings + score.
+	// Build the review summary. The order supports a quick merge check:
+	// verdict, counts, purpose, author checks, findings, and optional details.
 	var summaryBody strings.Builder
 	summaryBody.WriteString(reviewHeader)
-	summaryBody.WriteString(run.Synthesis.Brief)
-	// The full contract line moved into the Glass Box footer below; only the
-	// unreviewable-size warning stays up top where it can't be missed.
+	summaryBody.WriteString(renderReviewVerdict(run))
+	summaryBody.WriteString("\n\n")
+	summaryBody.WriteString(renderFindingCounts(run))
+	if _, _, suggestions, _ := findingCounts(run); suggestions > 0 {
+		summaryBody.WriteString("\n\nUnverified: Argus did not compile or run this suggestion.")
+	}
+
+	if brief := strings.TrimSpace(run.Synthesis.Brief); brief != "" {
+		summaryBody.WriteString("\n\n")
+		summaryBody.WriteString(brief)
+	}
+
+	// The full contract line moved into the footer. Keep size warnings near the
+	// author checks because a truncated review has an important evidence limit.
 	if note := run.Contract.UnreviewableNote(); note != "" {
 		summaryBody.WriteString("\n\n")
 		summaryBody.WriteString(note)
 	}
-	// Team-feedback suppression audit line: one line, never per-finding noise.
 	if n := countSuppressedFindings(run.FileReviews); n > 0 {
 		summaryBody.WriteString(fmt.Sprintf(
 			"\n\n_%d %s suppressed by team feedback ([audit](%s/reviews/%s))_",
@@ -200,52 +271,49 @@ func Compose(run *PipelineRun, took time.Duration, dashboardBaseURL, appSlug str
 		summaryBody.WriteString(scopeNote)
 	}
 	if len(run.TruncatedFiles) > 0 {
-		summaryBody.WriteString("\n\n> ⚠️ Review for ")
+		summaryBody.WriteString("\n\n> ⚠️ Argus truncated the review for ")
 		for i, f := range run.TruncatedFiles {
 			if i > 0 {
 				summaryBody.WriteString(", ")
 			}
 			summaryBody.WriteString(fmt.Sprintf("`%s`", f))
 		}
-		summaryBody.WriteString(" was truncated — additional findings may exist.\n")
+		summaryBody.WriteString(". More findings can exist.\n")
 	}
-	// Unconfigured-scoring notice: appended once at synthesis (it rides in on
-	// run.Synthesis.Brief above) — do NOT append again here.
+
 	totalFolded := len(importantFolded) + len(minorFolded)
-	// Important findings (critical/warning) shown visibly — cap at 10 to prevent summary bloat.
 	totalImportant := len(importantFolded)
 	if totalImportant > 10 {
 		importantFolded = importantFolded[:10]
 	}
 	if len(importantFolded) > 0 {
-		header := fmt.Sprintf("\n\n### Affected code outside the diff (%d", totalImportant)
+		header := fmt.Sprintf("\n\n### Findings outside the diff (%d", totalImportant)
 		if totalImportant > 10 {
-			header += ", showing top 10"
+			header += ", top 10 shown"
 		}
 		header += ")\n\n"
 		summaryBody.WriteString(header)
-		summaryBody.WriteString("_These findings are on lines not in the diff but may be impacted by this change._\n\n")
+		summaryBody.WriteString("_These findings refer to lines outside the diff._\n\n")
+		summaryBody.WriteString("Unverified: Argus did not compile or run this suggestion.\n\n")
 		summaryBody.WriteString(strings.Join(importantFolded, "\n"))
 	}
-	// Minor findings (suggestion/praise) collapsed — cap at 10.
+
 	totalMinor := len(minorFolded)
 	if totalMinor > 10 {
 		minorFolded = minorFolded[:10]
 	}
 	if len(minorFolded) > 0 {
 		summaryBody.WriteString("\n\n<details><summary>")
-		summaryBody.WriteString(fmt.Sprintf("%d additional findings on lines outside the diff", len(minorFolded)))
+		summaryBody.WriteString(fmt.Sprintf("Additional findings outside the diff (%d)", totalMinor))
 		summaryBody.WriteString("</summary>\n\n")
+		summaryBody.WriteString("Unverified: Argus did not compile or run this suggestion.\n\n")
 		summaryBody.WriteString(strings.Join(minorFolded, "\n"))
 		summaryBody.WriteString("\n\n</details>")
 	}
-	// Overflow beyond the inline cap: one line, not more comments.
 	if inlineOverflow > 0 {
-		summaryBody.WriteString(fmt.Sprintf("\n\n_…plus %d similar %s not shown inline — the full list is on the dashboard._",
+		summaryBody.WriteString(fmt.Sprintf("\n\n_The dashboard shows %d more similar %s._",
 			inlineOverflow, pluralize("finding", inlineOverflow)))
 	}
-	// Minor notes: near-miss findings from scoring plus nits demoted from files
-	// carrying a blocking finding. Collapsed, capped, never inline.
 	if len(run.MinorNotes) > 0 {
 		notes := run.MinorNotes
 		total := len(notes)
@@ -253,37 +321,33 @@ func Compose(run *PipelineRun, took time.Duration, dashboardBaseURL, appSlug str
 			notes = notes[:15]
 		}
 		summaryBody.WriteString(fmt.Sprintf("\n\n<details><summary>Minor notes (%d)</summary>\n\n", total))
-		summaryBody.WriteString("_Low-confidence or minor observations — safe to ignore._\n\n")
+		summaryBody.WriteString("Unverified: Argus did not compile or run this suggestion.\n\n")
 		for _, n := range notes {
 			summaryBody.WriteString(fmt.Sprintf("- `%s:L%d` [%s] %s\n", n.Path, n.Line, n.Severity, n.Title))
 		}
 		summaryBody.WriteString("\n</details>")
 	}
-	// Findings pill: single scan-line showing totals and inline/folded split.
-	// Omitted when there are no findings at all — keeps the summary terse on
-	// clean PRs.
-	totalFindings := countComments(run)
-	if totalFindings > 0 {
-		summaryBody.WriteString(fmt.Sprintf("\n\n**%d %s** · %d inline · %d folded",
-			totalFindings, pluralize("finding", totalFindings),
-			len(inlineComments), totalFolded))
-	}
 
-	// Token/cost breakdown per stage and per specialist (collapsible).
+	// totalFolded stays part of the returned render counts and the visible
+	// findings line. The counts line above is the primary summary for readers.
+	_ = totalFolded
+
 	if breakdown := renderTokenBreakdown(&run.Tokens); breakdown != "" {
 		summaryBody.WriteString("\n\n")
 		summaryBody.WriteString(breakdown)
 	}
+	if run.BudgetNote != "" {
+		summaryBody.WriteString("\n\n> [!NOTE]\n> ")
+		summaryBody.WriteString(strings.ReplaceAll(run.BudgetNote, "\n", " "))
+	}
 
-	// Footer: Glass Box line (contract/depth, reviewers, suppression count,
-	// duration) + single dashboard link + engagement tips in <sub> blocks.
 	summaryBody.WriteString("\n\n---\n<sub>")
 	summaryBody.WriteString(BuildGlassBoxLine(run.Contract, checkedReviewers(run), countSuppressed(run), took))
 	summaryBody.WriteString("</sub><br>\n")
 	summaryBody.WriteString(fmt.Sprintf(
 		"<sub>[Dashboard →](%s/reviews/%s) · "+
 			"React 👎 to dismiss · "+
-			"Reply to any inline comment or use `@%s help` to chat</sub>",
+			"Reply to an inline comment or use `@%s help`</sub>",
 		dashboardBaseURL, run.ReviewID.String(), appSlug))
 
 	return ComposedReview{
@@ -300,6 +364,45 @@ func Compose(run *PipelineRun, took time.Duration, dashboardBaseURL, appSlug str
 			DedupRemoved:     dedupRemoved,
 		},
 	}
+}
+
+// maxLearnedBuckets caps how many type buckets the footnote names. The sticky
+// comment is already dense — a previous fix existed purely to stop one of its
+// rows wrapping to three lines — so an unusual run that touched every memory
+// type must not be able to grow this into a paragraph.
+const maxLearnedBuckets = 4
+
+// RenderLearnedLine renders the one-line "what Argus learned" footnote for the
+// posted review, or "" when the review wrote no memory.
+//
+// It exists because memory writes were completely invisible: indexing failures
+// are non-fatal and log at Warn, so an org whose memory had silently stopped
+// working saw exactly the same review comment as one whose memory was healthy.
+// One line, appended after the footer, is the whole budget — the detail belongs
+// on the dashboard, which links from the same footer.
+//
+// counts must be the tally read back from the memories table AFTER the writes,
+// not the intent to write: reporting what was attempted would reintroduce the
+// silence this line exists to break.
+func RenderLearnedLine(counts []store.LearnedMemoryCount) string {
+	parts := make([]string, 0, maxLearnedBuckets)
+	for _, c := range counts {
+		if c.Count <= 0 {
+			continue
+		}
+		if len(parts) == maxLearnedBuckets {
+			parts = append(parts, "…")
+			break
+		}
+		// store.LearnedMemoryLabel is the single noun table, shared with the
+		// dashboard panel through the `label` field on the wire, so the comment
+		// and the page cannot describe the same review differently.
+		parts = append(parts, fmt.Sprintf("%d %s", c.Count, store.LearnedMemoryLabel(c.Type, c.Count)))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "<br>\n<sub>🧠 Learned: " + strings.Join(parts, " · ") + "</sub>"
 }
 
 type rankedComment struct {
@@ -381,7 +484,7 @@ func assessPRScope(run *PipelineRun) string {
 		reasons = append(reasons, fmt.Sprintf("touches **%d top-level areas** (`%s`)", len(topDirs), strings.Join(dirs, "`, `")))
 	}
 	return "> ⚠️ **Scope concern:** This PR " + strings.Join(reasons, " and ") +
-		". Consider splitting into focused PRs — bundled changes are harder to review, harder to revert, and can mask regressions in unrelated areas."
+		". Split unrelated changes into separate pull requests. Smaller changes are easier to review and revert."
 }
 
 // formatCommentBody builds the GitHub review comment body.
@@ -417,7 +520,9 @@ func formatCommentBody(c FileComment) string {
 	}
 
 	// Dismissal-downgrade attribution: the finding matched a previously-dismissed
-	// similar finding (0.60–0.85) so its severity was lowered. Idiom-matched to
+	// similar finding (the [SuppressionDowngrade, SuppressionDrop) band) so its
+	// severity was lowered. No literal band here — it moved twice already and the
+	// comment did not follow. Idiom-matched to
 	// renderMemoryTag (italic, em-dash lead-in).
 	if c.DismissedDowngrade {
 		note := "_— Previously dismissed a similar finding"
@@ -492,85 +597,70 @@ func postSelectionDedup(selected []rankedComment) []rankedComment {
 	return result
 }
 
-// renderTokenBreakdown returns a collapsible markdown block showing token and
-// cost consumption per pipeline stage, with the review stage broken down by
-// specialist (correctness, security, architecture, regression). Returns ""
-// when no tokens were consumed (e.g., skipped review, cancelled early).
-//
-// Format: `<details>` block so it doesn't dominate the review summary unless
-// the reader wants to inspect costs.
+// joinModels renders the distinct models behind an aggregated row, in first-
+// seen order. Stages fan out (four specialists, N file syntheses, N
+// simulations) and an installation can point different stages — or different
+// specialists — at different models, so collapsing to a single name would
+// misreport which model produced the spend. Blank entries are dropped rather
+// than rendered as gaps; more than two names collapse to a count, because the
+// table lives inside a PR comment.
+func joinModels(models []string) string {
+	seen := make(map[string]bool, len(models))
+	distinct := make([]string, 0, len(models))
+	for _, m := range models {
+		if m == "" || seen[m] {
+			continue
+		}
+		seen[m] = true
+		distinct = append(distinct, m)
+	}
+	switch len(distinct) {
+	case 0:
+		return ""
+	case 1, 2:
+		return strings.Join(distinct, ", ")
+	default:
+		return fmt.Sprintf("%s +%d more", distinct[0], len(distinct)-1)
+	}
+}
+
+// renderTokenBreakdown returns a compact usage summary with a full table.
 func renderTokenBreakdown(tu *RunTokenUsage) string {
 	if tu == nil || tu.Total.TotalTokens == 0 {
 		return ""
 	}
 
-	// Aggregate review-stage tokens per specialist. Empty specialist means a
-	// skim single-pass (no deep review); we bucket those under "review".
-	type agg struct {
+	type row struct {
+		label  string
+		model  string
 		tokens int
 		cost   float64
 	}
-	bySpecialist := make(map[string]*agg)
-	for _, t := range tu.Review {
-		key := t.Specialist
-		if key == "" {
-			key = "review"
-		}
-		a, ok := bySpecialist[key]
-		if !ok {
-			a = &agg{}
-			bySpecialist[key] = a
-		}
-		a.tokens += t.TotalTokens
-		a.cost += t.Cost
-	}
-	// Build final specialist render order: canonical first (in SpecialistOrder),
-	// then any unknown keys appended (future-proof for new specialists shipped
-	// without a labels.go update). Dropping duplicates via a seen-set.
-	specialistOrder := make([]string, 0, len(bySpecialist))
-	seen := make(map[string]bool, len(bySpecialist))
-	for _, key := range SpecialistOrder {
-		if _, ok := bySpecialist[key]; ok {
-			specialistOrder = append(specialistOrder, key)
-			seen[key] = true
-		}
-	}
-	for key := range bySpecialist {
-		if !seen[key] {
-			specialistOrder = append(specialistOrder, key)
-		}
-	}
-
-	var rows []string
-	addRow := func(label string, tokens int, cost float64) {
-		// Gate on tokens AND cost: some providers (gpt-5.x reasoning path,
-		// see commit 1070dac) return cost without token counts, so a bare
-		// `tokens == 0` guard would drop real spend AND leave the header
-		// "Total" misaligned with the sum of visible rows.
+	var rows []row
+	addRow := func(label string, tokens int, cost float64, model string) {
 		if tokens == 0 && cost == 0 {
 			return
 		}
-		rows = append(rows, fmt.Sprintf("| %s | %s | $%.4f |", label, formatTokens(tokens), cost))
+		if model == "" {
+			model = "—"
+		}
+		rows = append(rows, row{label: label, model: model, tokens: tokens, cost: cost})
 	}
 	addStage := func(key string, st StageTokens) {
-		addRow(StageLabel(key), st.TotalTokens, st.Cost)
+		addRow(StageLabel(key), st.TotalTokens, st.Cost, st.Model)
 	}
-	// sumArray collapses an array-valued stage (file_synthesis, simulation)
-	// into a single row — PR comment stays curated; per-entry rows live on
-	// the web dashboard's review detail page.
 	sumArray := func(key string, arr []StageTokens) {
 		var tokens int
 		var cost float64
+		models := make([]string, 0, len(arr))
 		for _, t := range arr {
 			tokens += t.TotalTokens
 			cost += t.Cost
+			models = append(models, t.Model)
 		}
-		addRow(StageLabel(key), tokens, cost)
+		addRow(StageLabel(key), tokens, cost, joinModels(models))
 	}
 
-	// Non-review stages rendered in StageOrder sequence so the PR comment
-	// table matches the dashboard's stage ordering. `graph` runs early in
-	// the pipeline (before review), not at the end.
 	addStage("intent", tu.Intent)
 	addStage("triage", tu.Triage)
 	addStage("enrichment", tu.Enrichment)
@@ -580,12 +670,29 @@ func renderTokenBreakdown(tu *RunTokenUsage) string {
 	addStage("graph", tu.Graph)
 	sumArray("file_synthesis", tu.FileSynthesis)
 
-	// Review stage — per-specialist sub-rows. StageLabel handles the
-	// "review.review" suppression (skim fallback renders as plain "Review").
-	for _, key := range specialistOrder {
-		a := bySpecialist[key]
-		addRow(StageLabel("review."+key), a.tokens, a.cost)
+	var specialistTokens int
+	var specialistCost float64
+	var specialistModels []string
+	var specialistCount int
+	var reviewTokens int
+	var reviewCost float64
+	var reviewModels []string
+	for _, t := range tu.Review {
+		if t.Specialist == "" {
+			reviewTokens += t.TotalTokens
+			reviewCost += t.Cost
+			reviewModels = append(reviewModels, t.Model)
+			continue
+		}
+		specialistTokens += t.TotalTokens
+		specialistCost += t.Cost
+		specialistModels = append(specialistModels, t.Model)
+		specialistCount++
 	}
+	if specialistCount > 0 {
+		addRow(fmt.Sprintf("Review specialists (%d)", specialistCount), specialistTokens, specialistCost, joinModels(specialistModels))
+	}
+	addRow("Review", reviewTokens, reviewCost, joinModels(reviewModels))
 
 	addStage("acceptance", tu.Acceptance)
 	addStage("cross_pr", tu.CrossPR)
@@ -597,15 +704,26 @@ func renderTokenBreakdown(tu *RunTokenUsage) string {
 	if len(rows) == 0 {
 		return ""
 	}
-
+	showCost := tu.Total.Cost != 0
+	stageCount := len(rows)
+	if specialistCount > 1 {
+		stageCount += specialistCount - 1
+	}
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("<details><summary><sub>🔢 %s tokens · $%.4f total</sub></summary>\n\n",
-		formatTokens(tu.Total.TotalTokens), tu.Total.Cost))
-	sb.WriteString("| Stage | Tokens | Cost |\n")
-	sb.WriteString("|---|---:|---:|\n")
-	for _, r := range rows {
-		sb.WriteString(r)
-		sb.WriteString("\n")
+	sb.WriteString(fmt.Sprintf("<details><summary><sub>usage: %s tokens · %d stages</sub></summary>\n\n",
+		formatTokens(tu.Total.TotalTokens), stageCount))
+	if showCost {
+		sb.WriteString("| Stage | Model | Tokens | Cost |\n")
+		sb.WriteString("|---|---|---:|---:|\n")
+		for _, r := range rows {
+			sb.WriteString(fmt.Sprintf("| %s | `%s` | %s | $%.4f |\n", r.label, r.model, formatTokens(r.tokens), r.cost))
+		}
+	} else {
+		sb.WriteString("| Stage | Model | Tokens |\n")
+		sb.WriteString("|---|---|---:|\n")
+		for _, r := range rows {
+			sb.WriteString(fmt.Sprintf("| %s | `%s` | %s |\n", r.label, r.model, formatTokens(r.tokens)))
+		}
 	}
 	sb.WriteString("\n</details>")
 	return sb.String()

@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // semgrepOutput is the top-level JSON structure from `semgrep scan --json`.
@@ -46,7 +48,15 @@ func (s *SemgrepRunner) CanRun(language string) bool {
 
 // Run writes files to a temp directory and invokes semgrep with auto-detected rules.
 // Returns empty findings (not an error) if semgrep is not installed.
-func (s *SemgrepRunner) Run(ctx context.Context, files map[string]string) ([]Finding, error) {
+func (s *SemgrepRunner) Run(ctx context.Context, files map[string]string) (findings []Finding, err error) {
+	started := time.Now()
+	defer func() {
+		level := slog.LevelInfo
+		if err != nil {
+			level = slog.LevelError
+		}
+		slog.Log(ctx, level, "SAST tool run completed", "tool", "semgrep", "file_count", len(files), "finding_count", len(findings), "duration_ms", time.Since(started).Milliseconds(), "error", err)
+	}()
 	if _, err := exec.LookPath("semgrep"); err != nil {
 		return nil, nil
 	}
@@ -72,7 +82,10 @@ func (s *SemgrepRunner) Run(ctx context.Context, files map[string]string) ([]Fin
 
 	cmd := exec.CommandContext(ctx, "semgrep", "scan", "--config", "auto", "--json", "--quiet", dir)
 
-	out, runErr := cmd.Output()
+	out, stderr, runErr := runCommand(ctx, "semgrep", cmd)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, fmt.Errorf("semgrep interrupted: %w", ctxErr)
+	}
 	if runErr != nil {
 		var exitErr *exec.ExitError
 		if !errors.As(runErr, &exitErr) {
@@ -82,9 +95,9 @@ func (s *SemgrepRunner) Run(ctx context.Context, files map[string]string) ([]Fin
 		if exitErr.ExitCode() == 1 && len(out) > 0 {
 			// fall through to parse findings
 		} else if exitErr.ExitCode() == 1 {
-			return nil, fmt.Errorf("semgrep failed with no output: %w", runErr)
+			return nil, fmt.Errorf("semgrep failed with no output: %s: %w", strings.TrimSpace(string(stderr)), runErr)
 		} else {
-			return nil, fmt.Errorf("semgrep error (exit %d): %w", exitErr.ExitCode(), runErr)
+			return nil, fmt.Errorf("semgrep error (exit %d): %s: %w", exitErr.ExitCode(), strings.TrimSpace(string(stderr)), runErr)
 		}
 	}
 
@@ -97,7 +110,6 @@ func (s *SemgrepRunner) Run(ctx context.Context, files map[string]string) ([]Fin
 		return nil, err
 	}
 
-	var findings []Finding
 	for _, r := range parsed.Results {
 		rel, _ := filepath.Rel(dir, r.Path)
 		findings = append(findings, Finding{

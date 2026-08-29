@@ -13,6 +13,7 @@ const isPublicRoute = createRouteMatcher([
   "/sign-in(.*)",
   "/sign-up(.*)",
   "/api/webhooks(.*)",
+  "/api/internal/mermaid/validate",
   "/robots.txt",
   "/sitemap.xml",
   "/icon.svg",

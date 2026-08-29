@@ -54,6 +54,7 @@ func TestLaunch_RetryRollbackOnError(t *testing.T) {
 	l, _, bus := newTestLauncher(store)
 
 	id := uuid.New()
+	generation := 1
 	store.set(id, "pending") // BeforeSpawn would set this; seed it directly.
 
 	var gotErrEvent bool
@@ -69,12 +70,13 @@ func TestLaunch_RetryRollbackOnError(t *testing.T) {
 	done := make(chan struct{})
 	boom := errors.New("stage reviewing failed")
 	err := l.Launch(LaunchSpec{
-		Repo:     "o/r",
-		PR:       1,
-		BaseCtx:  context.Background(),
-		ReviewID: &id,
-		Run:      func(context.Context) error { return boom },
-		OnDone:   func(error) { close(done) },
+		Repo:              "o/r",
+		PR:                1,
+		BaseCtx:           context.Background(),
+		ReviewID:          &id,
+		AttemptGeneration: &generation,
+		Run:               func(context.Context) error { return boom },
+		OnDone:            func(error) { close(done) },
 	})
 	if err != nil {
 		t.Fatalf("Launch returned %v, want nil", err)
@@ -89,8 +91,8 @@ func TestLaunch_RetryRollbackOnError(t *testing.T) {
 		t.Fatalf("status writes = %d, want 1", len(store.writes))
 	}
 	w := store.writes[0]
-	if w.status != "failed" || !equalStrings(w.allowed, []string{"pending", "in_progress"}) {
-		t.Errorf("rollback write = %+v, want failed with allowed [pending in_progress]", w)
+	if w.generation != generation || w.status != "failed" || !equalStrings(w.allowed, []string{"pending", "in_progress"}) {
+		t.Errorf("rollback write = %+v, want generation %d failed with allowed [pending in_progress]", w, generation)
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -198,6 +200,40 @@ func TestLaunch_BeforeSpawnErrorReleasesSlot(t *testing.T) {
 	}
 }
 
+// TestLaunch_RejectsZeroRetryGeneration proves a retry cannot spawn with the
+// zero value generation, which would otherwise bypass attempt ownership.
+func TestLaunch_RejectsZeroRetryGeneration(t *testing.T) {
+	store := newFakeReviewStore()
+	l, reg, _ := newTestLauncher(store)
+	id := uuid.New()
+	generation := 0
+	ran := false
+
+	err := l.Launch(LaunchSpec{
+		Repo:              "o/r",
+		PR:                8,
+		BaseCtx:           context.Background(),
+		ReviewID:          &id,
+		AttemptGeneration: &generation,
+		BeforeSpawn:       func(context.Context) error { return nil },
+		Run:               func(context.Context) error { ran = true; return nil },
+	})
+	if !errors.Is(err, ErrInvalidAttemptGeneration) {
+		t.Fatalf("Launch error = %v, want ErrInvalidAttemptGeneration", err)
+	}
+	if ran {
+		t.Fatal("Run executed with generation 0")
+	}
+	if len(store.writes) != 0 {
+		t.Fatalf("generation-0 launch wrote status %d times", len(store.writes))
+	}
+	if slot, ok := reg.Begin("o/r", 8); !ok {
+		t.Fatal("slot not released after invalid generation")
+	} else {
+		slot.Release()
+	}
+}
+
 // TestLaunch_RunPanicRollsBackAndReleases proves a panic inside Run is recovered
 // (no process crash), drives the retry rollback (pending → failed), and frees the
 // slot — the backstop the raw launch goroutines never had.
@@ -205,16 +241,18 @@ func TestLaunch_RunPanicRollsBackAndReleases(t *testing.T) {
 	store := newFakeReviewStore()
 	l, reg, _ := newTestLauncher(store)
 	id := uuid.New()
+	generation := 1
 	store.set(id, "pending")
 
 	done := make(chan struct{})
 	if err := l.Launch(LaunchSpec{
-		Repo:     "o/r",
-		PR:       6,
-		BaseCtx:  context.Background(),
-		ReviewID: &id,
-		Run:      func(context.Context) error { panic("kaboom") },
-		OnDone:   func(error) { close(done) },
+		Repo:              "o/r",
+		PR:                6,
+		BaseCtx:           context.Background(),
+		ReviewID:          &id,
+		AttemptGeneration: &generation,
+		Run:               func(context.Context) error { panic("kaboom") },
+		OnDone:            func(error) { close(done) },
 	}); err != nil {
 		t.Fatalf("Launch: %v", err)
 	}

@@ -27,6 +27,9 @@ export const STAGE_ORDER = [
   "scoring",
   "synthesis",
   "reply",
+  // Post-review maintenance: the auto-resolve judge runs on a LATER push and
+  // merges its spend back onto this review. Last, because nothing follows it.
+  "auto_resolve",
 ] as const;
 
 /** Canonical render order for review specialists. Matches Go
@@ -57,6 +60,7 @@ const STAGE_LABELS: Record<string, string> = {
   scoring: "Scoring",
   synthesis: "Synthesis",
   reply: "Reply",
+  auto_resolve: "Auto-resolve",
 };
 
 /**
@@ -96,6 +100,9 @@ const BASE_COLORS: Record<string, string> = {
   scoring: "#f59e0b",
   synthesis: "#8b5cf6",
   reply: "#f472b6",
+  // Lime rather than orange: `graph` already owns #f97316, and two identical
+  // bars in one Cost-by-Stage chart are unreadable.
+  auto_resolve: "#84cc16",
 };
 
 /** djb2-ish string hash; deterministic so `bug_hunter` always picks the

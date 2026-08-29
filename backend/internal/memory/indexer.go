@@ -5,16 +5,16 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/BeLazy167/argus/backend/internal/obs"
 	"github.com/BeLazy167/argus/backend/internal/util"
+	"github.com/google/uuid"
 )
 
 // ScenarioSearchResult holds a semantic search result with the parsed Postgres scenario ID.
@@ -45,16 +45,25 @@ type MemoryBlock struct {
 // no raw *Client escape hatch — so the retrieval + prompt-render seam lives
 // entirely inside this module (see Briefing).
 type Indexer interface {
-	// Settings / lifecycle.
-	DisableLLMFilter(ctx context.Context) error
-
 	// Writers.
 	IndexReviewCommentsBatch(ctx context.Context, owner, repo string, comments []ReviewMemory) error
 	IndexRule(ctx context.Context, owner string, rule RuleMemory) error
-	IndexPattern(ctx context.Context, repo string, pattern PatternMemory) (*AddResponse, error)
-	IndexSharedPattern(ctx context.Context, pattern PatternMemory) (*AddResponse, error)
+	IndexPattern(ctx context.Context, repo string, pattern PatternMemory) (*IndexResult, error)
+	IndexSharedPattern(ctx context.Context, pattern PatternMemory) (*IndexResult, error)
 	IndexFeedbackSignal(ctx context.Context, owner, repo string, feedback FeedbackMemory) error
+	// ReconcileFeedbackSignal makes reaction feedback a current state rather
+	// than append-only history. An empty Action retracts only reaction-owned
+	// signals; trusted replies and automatic praise have separate identities.
+	ReconcileFeedbackSignal(ctx context.Context, owner, repo string, feedback FeedbackMemory) error
 	IndexScenario(ctx context.Context, owner, repo string, scenarioID int64, description, severity string, files []string) error
+
+	// ForReview returns an Indexer that attributes everything it writes to one
+	// review run. memories.review_id keeps current provenance, while
+	// memory_review_attributions retains every review that learned the row.
+	// Returns the receiver unchanged for the nil UUID. Attribution is a
+	// property of the writer, not each document, because one run's writes all
+	// belong to the same review.
+	ForReview(reviewID uuid.UUID) Indexer
 
 	// Readers. The reader seam is two deep, error-honest methods: Search (typed
 	// retrieval) + Briefing (assembled review-prompt block). Every value-level
@@ -78,51 +87,44 @@ type Indexer interface {
 	// verbatim. Defined in briefing.go.
 	Briefing(ctx context.Context, q BriefingQuery) (string, error)
 
-	// Maintenance.
+	// Maintenance. Invalidation and supersession preserve history while making
+	// knowledge unavailable to every live-row reader. SupersedeDocument links
+	// documentID to a live replacement in the same installation.
+	InvalidateDocument(ctx context.Context, documentID string) error
+	SupersedeDocument(ctx context.Context, documentID, replacementID string) error
 	DeleteDocument(ctx context.Context, documentID string) error
 }
 
-// indexerImpl is the concrete Indexer backed by a Supermemory Client.
-type indexerImpl struct {
-	client *Client
-	logger *slog.Logger
+const (
+	// SourceLegacyReplyFeedback identifies reply-derived rows written before the
+	// author authorization boundary existed. Readers quarantine this source
+	// non-destructively because those rows carry no provenance to audit trust.
+	SourceLegacyReplyFeedback = "reply_feedback"
+	// SourceTrustedReplyFeedback identifies repo-scoped finding feedback whose
+	// author had effective repository write access. Pattern rows with this older
+	// source were incorrectly written installation-wide and are quarantined.
+	SourceTrustedReplyFeedback = "trusted_reply_feedback"
+	// SourceTrustedReplyLearning identifies repo-specific pattern learning from
+	// a reply author with effective repository write access. Its distinct source
+	// keeps new repo-scoped rows distinguishable from legacy shared pattern rows.
+	SourceTrustedReplyLearning = "trusted_repo_reply_learning"
+	// SourceReactionFeedback identifies reversible feedback derived from the
+	// current aggregate GitHub reaction tally.
+	SourceReactionFeedback = "reaction_feedback"
+	// SourceAutomaticPraise identifies positive feedback learned from an Argus
+	// praise finding rather than from a developer action.
+	SourceAutomaticPraise = "automatic_praise"
+)
+
+// IndexResult identifies the row a write landed on. ID is the deterministic
+// customID: in the Postgres store the document id and the customID are the
+// same value by construction, so a caller can mirror it into patterns.
+// memory_doc_id and later resolve a search hit straight back to its row.
+type IndexResult struct {
+	ID string
 }
 
-// NewIndexer returns an Indexer writing to the unified container shape. A nil
-// client produces an Indexer that silently no-ops every operation — used when
-// an installation has no Supermemory key configured.
-func NewIndexer(client *Client, logger *slog.Logger) Indexer {
-	return &indexerImpl{client: client, logger: logger}
-}
-
-// DisableLLMFilter turns off Supermemory's server-side LLM filter. Argus
-// pre-filters all content at the application layer, so the server-side filter
-// only adds latency and non-determinism. Safe to call repeatedly; idempotent.
-// Returns the underlying UpdateSettings error so the caller (Registry) can
-// decide whether to retry on the next GetIndexer.
-func (idx *indexerImpl) DisableLLMFilter(ctx context.Context) error {
-	if idx.client == nil {
-		return nil
-	}
-	// The LLM filter is an ACCOUNT-level setting on the customer's BYOK
-	// Supermemory org, not container-scoped — PATCHing it mutates behavior for
-	// every other tool sharing that key. Read the current value first and skip
-	// the write when it's already disabled: makes repeated calls idempotent-cheap
-	// and avoids re-mutating an account that's already configured. A read failure
-	// is non-fatal — fall through to the PATCH so a genuinely-enabled filter still
-	// gets disabled.
-	if current, err := idx.client.GetSettings(ctx); err == nil {
-		if filtering, ok := current["shouldLLMFilter"].(bool); ok && !filtering {
-			return nil
-		}
-	}
-	if err := idx.client.UpdateSettings(ctx, map[string]any{"shouldLLMFilter": false}); err != nil {
-		return fmt.Errorf("disabling supermemory LLM filter: %w", err)
-	}
-	return nil
-}
-
-// PatternMatch is one search hit — content, similarity, Supermemory document
+// PatternMatch is one search hit — content, similarity, memory document
 // ID, and raw metadata map. Callers read provenance fields (pr, pr_author,
 // source, created_at) off Metadata, stamped at index time. RichContent carries
 // summary + related-memory context and is populated only when the query set
@@ -133,25 +135,6 @@ type PatternMatch struct {
 	ID          string
 	Metadata    map[string]string
 	RichContent string
-}
-
-// resultToPatternMatch converts a Supermemory SearchResult into the lighter
-// PatternMatch shape. Unmarshals the raw metadata JSON into a map[string]string
-// for cheap key lookups — metadata is always flat key/string values at index
-// time (see Metadata.ToMap).
-func resultToPatternMatch(r SearchResult) PatternMatch {
-	pm := PatternMatch{
-		Content: r.Content(),
-		Score:   r.Similarity,
-		ID:      r.ID,
-	}
-	if len(r.Metadata) > 0 {
-		var md map[string]string
-		if err := json.Unmarshal(r.Metadata, &md); err == nil {
-			pm.Metadata = md
-		}
-	}
-	return pm
 }
 
 var lineNumRegex = regexp.MustCompile(`(?i)\b(?:line|L)\s*\d+`)
@@ -198,7 +181,7 @@ func FindingFingerprint(owner, repo, filePath, category, body string) string {
 
 // The customID builders below stay EXPORTED deliberately: the deterministic
 // customId is a cross-package contract, not a test affordance. The pipeline
-// computes it to mirror supermemory_id into the patterns/scenarios tables and to
+// computes it to mirror memory_doc_id into the patterns/scenarios tables and to
 // resolve a search hit back to its row; cmd/migrate-memory and
 // cmd/reconcile-memory reconstruct the SAME id to back-fill / sync legacy docs;
 // internal/api derives it to delete a rule's doc. Un-exporting any of these
@@ -263,7 +246,15 @@ func RuleCustomID(ruleID int64) string {
 // writer is IndexFeedbackSignal below; its invariants are round-tripped in
 // dismissal_id_test.go through that write path.
 func dismissalCustomID(repo, category, body string) string {
-	h := sha256.Sum256([]byte(category + "|" + normalizeBody(body)))
+	return dismissalCustomIDForSource(repo, category, body, "")
+}
+
+func dismissalCustomIDForSource(repo, category, body, source string) string {
+	identity := category + "|" + normalizeBody(body)
+	if source != "" {
+		identity += "|" + source
+	}
+	h := sha256.Sum256([]byte(identity))
 	hash := hex.EncodeToString(h[:6])
 	prefix := fmt.Sprintf("%s--dismissal", repoIDSegment(repo))
 	return truncateIDWithSuffix(prefix, hash)
@@ -271,16 +262,25 @@ func dismissalCustomID(repo, category, body string) string {
 
 // FeedbackCustomID returns a stable customId for a feedback signal on a finding.
 // Includes `action` in the hash so confirmed and dismissed signals for the
-// same finding coexist instead of silently overwriting each other.
+// same finding coexist instead of silently overwriting each other. Production
+// feedback writers also add Source through feedbackCustomIDForSource.
 func FeedbackCustomID(owner, repo, filePath, category, body, action string) string {
+	return feedbackCustomIDForSource(owner, repo, filePath, category, body, action, "")
+}
+
+func feedbackCustomIDForSource(owner, repo, filePath, category, body, action, source string) string {
 	_ = owner
-	h := sha256.Sum256([]byte(filePath + "|" + category + "|" + normalizeBody(body) + "|" + action))
+	identity := filePath + "|" + category + "|" + normalizeBody(body) + "|" + action
+	if source != "" {
+		identity += "|" + source
+	}
+	h := sha256.Sum256([]byte(identity))
 	hash := hex.EncodeToString(h[:6])
 	prefix := fmt.Sprintf("%s--feedback", repoIDSegment(repo))
 	return truncateIDWithSuffix(prefix, hash)
 }
 
-// ReviewMemory represents a review comment to be stored in Supermemory.
+// ReviewMemory represents a review comment to be stored in memory.
 type ReviewMemory struct {
 	ReviewID string
 	PRNumber int
@@ -290,7 +290,7 @@ type ReviewMemory struct {
 	Category string
 }
 
-// RuleMemory represents a rule to be stored in Supermemory.
+// RuleMemory represents a rule to be stored in memory.
 type RuleMemory struct {
 	RuleID   int64
 	Category string
@@ -315,57 +315,9 @@ type FeedbackMemory struct {
 	// Repo is the repo short name, mirrored into dismissal metadata for
 	// post-hoc audits (the container tag already scopes retrieval).
 	Repo string
-}
-
-// IndexReviewCommentsBatch stores multiple review comments in one API call.
-// Uses v3/documents/batch (max 600 per call, counts as 1 request for rate limiting).
-func (idx *indexerImpl) IndexReviewCommentsBatch(ctx context.Context, owner, repo string, comments []ReviewMemory) error {
-	if idx.client == nil || len(comments) == 0 {
-		return nil
-	}
-	docs := make([]BatchDocument, 0, len(comments))
-	skipped := 0
-	for _, c := range comments {
-		meta, err := Metadata{
-			Type:     TypeReview,
-			FilePath: c.FilePath,
-			Severity: c.Severity,
-			Category: c.Category,
-			PRNumber: c.PRNumber,
-			Extra:    map[string]string{"review_id": c.ReviewID},
-		}.ToMap()
-		if err != nil {
-			idx.logger.Warn("skipping review comment with invalid metadata", "error", err, "file", c.FilePath)
-			skipped++
-			continue
-		}
-		docs = append(docs, BatchDocument{
-			Content:  buildReviewContent(c),
-			CustomID: FindingFingerprint(owner, repo, c.FilePath, c.Category, c.Body),
-			Metadata: meta,
-		})
-	}
-	// Surface all-dropped as an error so the caller can retry / alert. Silent
-	// success on a fully-skipped batch masked reconcile-job data loss.
-	if len(docs) == 0 {
-		if skipped > 0 {
-			return fmt.Errorf("batch indexing review comments: all %d docs dropped (invalid metadata)", skipped)
-		}
-		return nil
-	}
-	_, err := idx.client.AddMemoryBatch(ctx, BatchAddRequest{
-		ContainerTag: RepoTagNew(repo),
-		Documents:    docs,
-	})
-	if err != nil {
-		return fmt.Errorf("batch indexing review comments: %w", err)
-	}
-	if skipped > 0 {
-		idx.logger.Error("batch indexed review comments with drops", "repo", repo, "indexed", len(docs), "skipped", skipped)
-	} else {
-		idx.logger.Info("batch indexed review comments", "repo", repo, "count", len(docs))
-	}
-	return nil
+	// Source owns the feedback document identity. Reaction feedback is
+	// reversible without deleting trusted-reply or automatic-praise knowledge.
+	Source string
 }
 
 // buildReviewContent keeps content pure-prose: the finding body only. No
@@ -374,33 +326,6 @@ func (idx *indexerImpl) IndexReviewCommentsBatch(ctx context.Context, owner, rep
 // bloated the document.
 func buildReviewContent(c ReviewMemory) string {
 	return c.Body
-}
-
-// IndexRule stores an owner-scoped rule for semantic matching during review.
-// Writes to `_shared` with type=rule. owner is accepted for back-compat.
-func (idx *indexerImpl) IndexRule(ctx context.Context, owner string, rule RuleMemory) error {
-	_ = owner
-	if idx.client == nil {
-		return nil
-	}
-	meta, err := Metadata{
-		Type:     TypeRule,
-		Category: rule.Category,
-		Extra:    map[string]string{"rule_id": strconv.FormatInt(rule.RuleID, 10), "priority": strconv.Itoa(rule.Priority)},
-	}.ToMap()
-	if err != nil {
-		return fmt.Errorf("rule metadata: %w", err)
-	}
-	_, err = idx.client.AddMemory(ctx, AddRequest{
-		Content:       rule.Content,
-		CustomID:      RuleCustomID(rule.RuleID),
-		ContainerTags: []string{SharedTag},
-		Metadata:      meta,
-	})
-	if err != nil {
-		return fmt.Errorf("indexing rule: %w", err)
-	}
-	return nil
 }
 
 // PatternMemory is the typed input for IndexPattern / IndexSharedPattern. The
@@ -452,143 +377,6 @@ func (p PatternMemory) metadata() Metadata {
 	return m
 }
 
-// IndexPattern stores a pattern scoped to a specific repo. Writes to `{repo}`
-// with the Source-derived type; a deterministic PatternCustomID is derived from
-// source+content when CustomID is empty (upsert-dedup).
-func (idx *indexerImpl) IndexPattern(ctx context.Context, repo string, p PatternMemory) (*AddResponse, error) {
-	if idx.client == nil {
-		return nil, nil
-	}
-	if p.CustomID == "" {
-		source := p.Source
-		if source == "" {
-			source = "pattern"
-		}
-		p.CustomID = PatternCustomID("", repo, source, p.Content)
-	}
-	flat, err := p.metadata().ToMap()
-	if err != nil {
-		return nil, fmt.Errorf("pattern metadata: %w", err)
-	}
-	// Mirror the deterministic customId into searchable metadata under
-	// "custom_id" so the per-finding enrich read can resolve a search hit back
-	// to its patterns row by customId — /v4/search results carry metadata but no
-	// top-level customId, and the result's own ID may be a chunk id that never
-	// matches the stored supermemory_id.
-	flat["custom_id"] = p.CustomID
-	resp, err := idx.client.AddMemory(ctx, AddRequest{
-		Content:       p.Content,
-		CustomID:      p.CustomID,
-		ContainerTags: []string{RepoTagNew(repo)},
-		Metadata:      flat,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("indexing repo pattern: %w", err)
-	}
-	idx.logger.Info("indexed repo pattern", "repo", repo, "source", p.Source)
-	return resp, nil
-}
-
-// IndexSharedPattern stores a pattern in the cross-repo `_shared` container.
-// Every write pins confidence=1.00 — successful re-learning is the signal that
-// the pattern is still live; the reconciler decays dormant docs and deletes
-// below the retirement floor. A deterministic SharedPatternCustomID is derived
-// from source+content when CustomID is empty. Source-trace provenance
-// (origin_pr / origin_author) flows through Extra for post-hoc auditability.
-func (idx *indexerImpl) IndexSharedPattern(ctx context.Context, p PatternMemory) (*AddResponse, error) {
-	if idx.client == nil {
-		return nil, nil
-	}
-	if p.CustomID == "" {
-		source := p.Source
-		if source == "" {
-			source = "pattern"
-		}
-		p.CustomID = SharedPatternCustomID(source, p.Content)
-	}
-	m := p.metadata()
-	// Copy Extra before pinning confidence so we never mutate the caller's map.
-	extra := make(map[string]string, len(m.Extra)+1)
-	for k, v := range m.Extra {
-		extra[k] = v
-	}
-	extra["confidence"] = "1.00"
-	m.Extra = extra
-	flat, err := m.ToMap()
-	if err != nil {
-		return nil, fmt.Errorf("shared pattern metadata: %w", err)
-	}
-	// Mirror the customId into metadata (see IndexPattern) so shared-pattern
-	// search hits are resolvable back to their patterns row by customId.
-	flat["custom_id"] = p.CustomID
-	resp, err := idx.client.AddMemory(ctx, AddRequest{
-		Content:       p.Content,
-		CustomID:      p.CustomID,
-		ContainerTags: []string{SharedTag},
-		Metadata:      flat,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("indexing shared pattern: %w", err)
-	}
-	idx.logger.Info("indexed shared pattern", "source", p.Source)
-	return resp, nil
-}
-
-// IndexFeedbackSignal stores a single feedback event with action + polarity
-// metadata. Confirmed, dismissed, and ignored share the same customID space via
-// distinct `action` hashing, so all coexist per-finding.
-//
-// Returns an error on unrecognized Action — the valid set ("confirmed",
-// "dismissed", "ignored") is small and stable; anything else is a caller bug
-// that should surface, not silently drop.
-func (idx *indexerImpl) IndexFeedbackSignal(ctx context.Context, owner, repo string, fb FeedbackMemory) error {
-	if idx.client == nil {
-		return nil
-	}
-	polarity, content, ok := feedbackShape(fb)
-	if !ok {
-		return fmt.Errorf("indexing feedback signal: unsupported action %q (want confirmed|dismissed|ignored)", fb.Action)
-	}
-
-	m := Metadata{
-		Type:     TypeFeedback,
-		FilePath: fb.FilePath,
-		Category: fb.Category,
-		Polarity: polarity,
-		Action:   fb.Action,
-		PRNumber: fb.PRNumber,
-	}
-	customID := FeedbackCustomID(owner, repo, fb.FilePath, fb.Category, fb.OriginalBody, fb.Action)
-	// Dismissals are keyed by category + semantic content (file-path-free) and
-	// carry change-kind provenance so retrieval can lifecycle-filter them.
-	if fb.Action == "dismissed" {
-		customID = dismissalCustomID(repo, fb.Category, fb.OriginalBody)
-		extra := map[string]string{"repo": repo}
-		if fb.ChangeKind != "" {
-			extra["change_kind"] = fb.ChangeKind
-		}
-		if fb.Reason != "" {
-			extra["reason"] = util.Truncate(fb.Reason, 300, false)
-		}
-		m.Extra = extra
-	}
-	meta, err := m.ToMap()
-	if err != nil {
-		return fmt.Errorf("feedback metadata: %w", err)
-	}
-	_, err = idx.client.AddMemory(ctx, AddRequest{
-		Content:       content,
-		CustomID:      customID,
-		ContainerTags: []string{RepoTagNew(repo)},
-		Metadata:      meta,
-	})
-	if err != nil {
-		return fmt.Errorf("indexing feedback signal: %w", err)
-	}
-	idx.logger.Info("indexed feedback signal", "action", fb.Action, "repo", repo, "file", fb.FilePath)
-	return nil
-}
-
 // feedbackShape derives polarity + content from a FeedbackMemory. Returns
 // ok=false for unrecognized actions.
 func feedbackShape(fb FeedbackMemory) (Polarity, string, bool) {
@@ -619,57 +407,46 @@ func feedbackShape(fb FeedbackMemory) (Polarity, string, bool) {
 	}
 }
 
-// IndexScenario stores a scenario in the unified `{repo}` container with
-// type=scenario and scenario_id in metadata (no more [scenario_id:N] prefix
-// in content).
-func (idx *indexerImpl) IndexScenario(ctx context.Context, owner, repo string, scenarioID int64, description, severity string, files []string) error {
-	_ = owner
-	if idx.client == nil {
-		return nil
+// specialistBlockWith is the shared specialist-block orchestration over a
+// transport core: three concurrent legs whose REQUESTS are identical across
+// backends by construction (same filters, floors, limits), with the shared
+// keep-what-succeeded degradation policy. The legs fetch (1) file-scoped
+// synthesis via exact metadata lookup, (2) repo-scoped semantic hits across
+// patterns/scenarios/feedback, (3) shared semantic hits over patterns —
+// replacing the legacy 5-parallel-query block (5xN searches per PR down to
+// 2xN plus one list call). Owns its own 5s timeout; consumed only by
+// assembleBriefingWith. The repo (OR-of-types) and shared (numeric
+// confidence) legs keep bespoke SearchRequests the single-type MemoryQuery
+// does not model.
+func specialistBlockWith(ctx context.Context, run runSearchFn, logger *slog.Logger, repo, filePath, specialistQuery string, thresholds Thresholds) (block MemoryBlock, err error) {
+	if logger == nil {
+		logger = slog.Default()
 	}
-	content := description
-	if len(files) > 0 {
-		content += "\n\nRelated files: " + strings.Join(files, ", ")
-	}
-	meta, err := Metadata{
-		Type:       TypeScenario,
-		ScenarioID: scenarioID,
-		Severity:   severity,
-	}.ToMap()
-	if err != nil {
-		return fmt.Errorf("scenario metadata: %w", err)
-	}
-	_, err = idx.client.AddMemory(ctx, AddRequest{
-		Content:       content,
-		CustomID:      ScenarioCustomID(repo, scenarioID),
-		ContainerTags: []string{RepoTagNew(repo)},
-		Metadata:      meta,
-	})
-	if err != nil {
-		idx.logger.Warn("indexing scenario in supermemory", "error", err)
-		return fmt.Errorf("indexing scenario: %w", err)
-	}
-	return nil
-}
-
-// specialistBlock fetches (1) file-scoped synthesis via exact metadata lookup,
-// (2) repo-scoped semantic hits across patterns/scenarios/feedback, (3) shared
-// semantic hits over patterns. Replaces the legacy 5-parallel-query block — cuts
-// 5×N searches per PR to 2×N plus one list call. Owns its own 5s timeout;
-// consumed only by Briefing (assembleBriefing) inside this module. Returns the
-// first leg error so Briefing can surface a broken retrieval instead of silently
-// serving a partial block; the repo (OR-of-types) and shared (numeric
-// confidence) legs keep bespoke SearchRequests the single-type MemoryQuery does
-// not model, but route through the shared error-honest runSearch core.
-func (idx *indexerImpl) specialistBlock(ctx context.Context, repo, filePath, specialistQuery string, thresholds Thresholds) (MemoryBlock, error) {
-	if idx.client == nil || repo == "" {
+	operationID := obs.NewLogID()
+	started := time.Now()
+	logger.InfoContext(ctx, "memory specialist retrieval started", "operation_id", operationID,
+		"repo", repo, "file", filePath, "query_len", len(specialistQuery))
+	defer func() {
+		attrs := []any{"operation_id", operationID, "repo", repo, "file", filePath,
+			"has_synthesis", block.Synthesis != "", "repo_count", len(block.Repo), "shared_count", len(block.Shared),
+			"duration_ms", time.Since(started).Milliseconds(), "error", err}
+		if err != nil {
+			logger.WarnContext(ctx, "memory specialist retrieval failed", attrs...)
+		} else {
+			logger.InfoContext(ctx, "memory specialist retrieval completed", attrs...)
+		}
+	}()
+	if repo == "" {
+		// Every leg is repo-scoped. briefingWith already guards this for the
+		// briefing path; keeping it here too means a direct caller cannot
+		// issue three searches against RepoTagNew("") and then read the
+		// all-legs-failed error as "no institutional memory available".
 		return MemoryBlock{}, nil
 	}
 	thresholds = thresholds.WithDefaults()
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	var block MemoryBlock
 	var synthErr, repoErr, sharedErr error
 	var wg sync.WaitGroup
 	wg.Add(3)
@@ -680,22 +457,27 @@ func (idx *indexerImpl) specialistBlock(ctx context.Context, repo, filePath, spe
 	// the AND filter is what actually narrows results to this file's synthesis.
 	go func() {
 		defer wg.Done()
+		legStarted := time.Now()
+		defer func() {
+			logger.DebugContext(ctx, "memory specialist retrieval leg completed", "operation_id", operationID,
+				"leg", "synthesis", "result_count", map[bool]int{true: 1, false: 0}[block.Synthesis != ""],
+				"duration_ms", time.Since(legStarted).Milliseconds(), "error", synthErr)
+		}()
 		if filePath == "" {
 			return
 		}
 		var matches []PatternMatch
-		matches, synthErr = idx.runSearch(ctx, SearchRequest{
+		matches, synthErr = run(ctx, SearchRequest{
 			Query:        "file synthesis",
 			ContainerTag: RepoTagNew(repo),
-			SearchMode:   "hybrid",
 			Limit:        1,
-			Threshold:    0, // accept any hit — the metadata filter already pins it.
-			Rerank:       false,
+			Threshold:    0,    // accept any hit — the metadata filter already pins it.
+			PointLookup:  true, // (type, file_path) pins at most one synthesis doc
 			Filters: &SearchFilters{AND: []FilterCondition{
 				{Key: "type", Value: string(TypeSynthesis)},
 				{Key: "file_path", Value: filePath},
 			}},
-		}, false)
+		})
 		if len(matches) > 0 {
 			block.Synthesis = matches[0].Content
 		}
@@ -704,43 +486,53 @@ func (idx *indexerImpl) specialistBlock(ctx context.Context, repo, filePath, spe
 	// 2. Repo signal — semantic, type IN {pattern, scenario, feedback}.
 	go func() {
 		defer wg.Done()
-		block.Repo, repoErr = idx.runSearch(ctx, SearchRequest{
+		legStarted := time.Now()
+		defer func() {
+			logger.DebugContext(ctx, "memory specialist retrieval leg completed", "operation_id", operationID,
+				"leg", "repo_patterns", "result_count", len(block.Repo),
+				"duration_ms", time.Since(legStarted).Milliseconds(), "error", repoErr)
+		}()
+		block.Repo, repoErr = run(ctx, SearchRequest{
 			Query:        specialistQuery,
 			ContainerTag: RepoTagNew(repo),
-			SearchMode:   "hybrid",
 			Limit:        5,
 			Threshold:    thresholds.SpecialistMin,
-			Rerank:       true,
 			Filters: &SearchFilters{OR: []FilterCondition{
 				{Key: "type", Value: string(TypePattern)},
 				{Key: "type", Value: string(TypeScenario)},
 				{Key: "type", Value: string(TypeFeedback)},
 			}},
-		}, false)
+		})
 	}()
 
 	// 3. Shared patterns — semantic against `_shared`. The AND filter excludes
 	// already-fading docs (confidence < SharedConfidenceFloor) so decayed
 	// patterns stop influencing reviews before the reconciler deletes them.
-	// numeric compare required: FilterNumeric ensures supermemory interprets
+	// numeric compare required: FilterNumeric ensures the reader interprets
 	// the threshold as a float, not a lexicographic string.
 	go func() {
 		defer wg.Done()
-		block.Shared, sharedErr = idx.runSearch(ctx, SearchRequest{
+		legStarted := time.Now()
+		defer func() {
+			logger.DebugContext(ctx, "memory specialist retrieval leg completed", "operation_id", operationID,
+				"leg", "shared_patterns", "result_count", len(block.Shared),
+				"duration_ms", time.Since(legStarted).Milliseconds(), "error", sharedErr)
+		}()
+		block.Shared, sharedErr = run(ctx, SearchRequest{
 			Query:        specialistQuery,
 			ContainerTag: SharedTag,
-			SearchMode:   "hybrid",
 			Limit:        3,
 			Threshold:    thresholds.SpecialistMin,
-			Rerank:       true,
 			Filters: &SearchFilters{AND: []FilterCondition{
 				{Key: "type", Value: string(TypePattern)},
 				FilterNumeric("confidence", ">=", SharedConfidenceFloorStr),
 			}},
-		}, false)
+		})
 	}()
 
 	wg.Wait()
+	block.Repo = retrievableMatches(block.Repo)
+	block.Shared = retrievableMatches(block.Shared)
 	// Per-leg degradation: keep whatever legs succeeded, Warn the failures,
 	// and error only when ALL legs failed (nothing usable). Callers treat the
 	// returned error as "no institutional memory available at all".
@@ -751,25 +543,16 @@ func (idx *indexerImpl) specialistBlock(ctx context.Context, repo, filePath, spe
 	}{{"specialist.synthesis", synthErr}, {"specialist.repo_patterns", repoErr}, {"specialist.shared_patterns", sharedErr}} {
 		if l.err != nil {
 			failures++
-			idx.warnLeg(l.name, RepoTagNew(repo), 0, l.err)
+			logDegrade(logger, l.name, RepoTagNew(repo), 0, l.err)
 		}
 	}
 	if failures == 3 {
-		return MemoryBlock{}, cmp.Or(synthErr, repoErr, sharedErr)
+		err = cmp.Or(synthErr, repoErr, sharedErr)
+		return MemoryBlock{}, err
 	}
+	logger.DebugContext(ctx, "memory specialist retrieval policy selected", "operation_id", operationID,
+		"policy", "keep_successful_legs", "failed_legs", failures, "successful_legs", 3-failures)
 	return block, nil
-}
-
-// DeleteDocument removes a document from Supermemory by ID.
-func (idx *indexerImpl) DeleteDocument(ctx context.Context, documentID string) error {
-	if idx.client == nil {
-		return nil
-	}
-	if err := idx.client.DeleteMemory(ctx, documentID); err != nil {
-		return fmt.Errorf("deleting document: %w", err)
-	}
-	idx.logger.Debug("deleted document", "id", documentID)
-	return nil
 }
 
 // FormatPositivePattern builds a structured positive pattern string from review data.

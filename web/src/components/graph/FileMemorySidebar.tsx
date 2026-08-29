@@ -6,6 +6,7 @@ import {
   ChevronDown,
   Shield,
   Bug,
+  EyeOff,
   GitBranch,
   AlertTriangle,
   Loader2,
@@ -13,7 +14,7 @@ import {
   Zap,
   Network,
 } from "lucide-react";
-import { useFileMemory } from "@/lib/queries/graph";
+import { useFileMemory, type FileMemoryComment } from "@/lib/queries/graph";
 import { useActiveRepo } from "@/lib/hooks/use-active-repo";
 import { formatDistanceToNow } from "@/lib/time";
 import type { ArchFile } from "@/lib/queries/architecture";
@@ -107,6 +108,84 @@ function MetricRow({ label, value, pct }: { label: string; value: number | strin
   );
 }
 
+/** Findings the suppression pass dropped before posting: generated, never shown
+ *  on the pull request. They stay in the payload as an audit record. */
+const isSuppressed = (c: FileMemoryComment) => c.state === "suppressed";
+
+/** One finding card. A suppressed finding is muted and carries an explicit
+ *  badge — without it a developer reads a finding the PR author never saw as
+ *  feedback Argus actually delivered, and "we already flagged that" becomes
+ *  wrong. */
+function FindingCard({ comment }: { comment: FileMemoryComment }) {
+  const suppressed = isSuppressed(comment);
+  return (
+    <div
+      className={`rounded border border-[var(--graph-border)] bg-[var(--graph-bg)]/30 px-3 py-2 ${
+        suppressed ? "opacity-60" : ""
+      }`}
+    >
+      <div className="flex flex-wrap items-center gap-2 mb-1">
+        <span
+          className={`inline-block rounded border px-1.5 py-0.5 text-[9px] font-mono ${
+            SEVERITY_STYLES[comment.severity] ?? SEVERITY_STYLES.suggestion
+          }`}
+        >
+          {comment.severity}
+        </span>
+        {comment.category && (
+          <span className="text-[9px] font-mono text-[var(--graph-text-muted)]">{comment.category}</span>
+        )}
+        {suppressed && (
+          <span
+            title={
+              comment.suppressed_reason
+                ? `Never posted to the PR — ${comment.suppressed_reason}`
+                : "Never posted to the PR"
+            }
+            className="inline-flex items-center gap-1 rounded border border-[var(--graph-border)] px-1.5 py-0.5 text-[9px] font-mono uppercase tracking-wider text-[var(--graph-text-muted)]"
+          >
+            <EyeOff className="h-2.5 w-2.5" />
+            Suppressed
+          </span>
+        )}
+      </div>
+      <p className="text-[10px] font-mono text-[var(--graph-text-dim)] leading-relaxed line-clamp-3">
+        {comment.body}
+      </p>
+      {suppressed && comment.suppressed_reason && (
+        <p className="mt-1 text-[9px] font-mono text-[var(--graph-text-muted)]">{comment.suppressed_reason}</p>
+      )}
+    </div>
+  );
+}
+
+/** Findings body, split into what the PR author actually received and what was
+ *  suppressed. The two groups are never interleaved, so the distinction
+ *  survives even when a reader skims. */
+function FindingsList({ comments }: { comments: FileMemoryComment[] }) {
+  const posted = comments.filter((c) => !isSuppressed(c));
+  const suppressed = comments.filter(isSuppressed);
+  return (
+    <div className="space-y-2">
+      {posted.length > 0 ? (
+        posted.map((c, i) => <FindingCard key={`posted-${c.body.slice(0, 32)}-${i}`} comment={c} />)
+      ) : (
+        <EmptyState text="No posted findings yet." />
+      )}
+      {suppressed.length > 0 && (
+        <div className="space-y-2 pt-1">
+          <p className="text-[9px] font-mono uppercase tracking-wider text-[var(--graph-text-muted)]">
+            Suppressed — never posted ({suppressed.length})
+          </p>
+          {suppressed.map((c, i) => (
+            <FindingCard key={`suppressed-${c.body.slice(0, 32)}-${i}`} comment={c} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 type FileMemorySidebarProps = {
   filePath: string;
   onClose: () => void;
@@ -164,6 +243,7 @@ export default function FileMemorySidebar({ filePath, onClose, archFile, allFile
         </div>
         <button
           onClick={onClose}
+          aria-label="Close file memory"
           className="p-1 rounded hover:bg-[var(--graph-control-bg)] text-[var(--graph-text-muted)] hover:text-[var(--graph-text-dim)] transition-colors shrink-0"
         >
           <X className="h-3.5 w-3.5" />
@@ -173,7 +253,12 @@ export default function FileMemorySidebar({ filePath, onClose, archFile, allFile
       {/* Content */}
       <div className="flex-1 overflow-y-auto">
         {isLoading ? (
-          <div className="flex items-center justify-center py-12">
+          <div
+            className="flex items-center justify-center py-12"
+            role="status"
+            aria-live="polite"
+            aria-label="Loading file memory"
+          >
             <Loader2 className="h-4 w-4 animate-spin text-[var(--graph-text-muted)]" />
           </div>
         ) : !data ? (
@@ -369,43 +454,18 @@ export default function FileMemorySidebar({ filePath, onClose, archFile, allFile
               )}
             </Section>
 
-            {/* Findings Section */}
+            {/* Findings Section — the header count is POSTED findings only:
+                counting suppressions here would advertise review coverage the
+                PR author never actually received. */}
             <Section
               id="findings"
               icon={<Bug className="h-3 w-3 text-[var(--graph-text-muted)]" />}
               title="Findings"
-              count={data.recent_comments?.length ?? 0}
+              count={(data.recent_comments ?? []).filter((c) => !isSuppressed(c)).length}
               expanded={expanded.findings}
               onToggle={() => toggle("findings")}
             >
-              {data.recent_comments && data.recent_comments.length > 0 ? (
-                <div className="space-y-2">
-                  {data.recent_comments.slice(0, 5).map((c, i) => (
-                    <div
-                      key={`${c.severity}-${c.body.slice(0, 32)}-${i}`}
-                      className="rounded border border-[var(--graph-border)] bg-[var(--graph-bg)]/30 px-3 py-2"
-                    >
-                      <div className="flex items-center gap-2 mb-1">
-                        <span
-                          className={`inline-block rounded border px-1.5 py-0.5 text-[9px] font-mono ${
-                            SEVERITY_STYLES[c.severity] ?? SEVERITY_STYLES.suggestion
-                          }`}
-                        >
-                          {c.severity}
-                        </span>
-                        {c.category && (
-                          <span className="text-[9px] font-mono text-[var(--graph-text-muted)]">{c.category}</span>
-                        )}
-                      </div>
-                      <p className="text-[10px] font-mono text-[var(--graph-text-dim)] leading-relaxed line-clamp-3">
-                        {c.body}
-                      </p>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <EmptyState text="No findings yet." />
-              )}
+              <FindingsList comments={data.recent_comments ?? []} />
             </Section>
 
             {/* Traces Section */}

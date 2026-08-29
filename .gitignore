@@ -27,6 +27,7 @@ dogfood-output/
 .soulforge/
 .forge/
 .serena/
+.impeccable/
 
 # Agent workspaces (keep the tracked merge-gate workflow)
 .claude/*

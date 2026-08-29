@@ -11,23 +11,47 @@ import {
 export const metadata: Metadata = {
   title: "Argus vs Alternatives — AI Code Review Comparison",
   description:
-    "Side-by-side feature comparison of Argus and other AI code review tools: CodeRabbit, SonarQube, GitHub Copilot, Codacy, Sourcery, Qodo, Semgrep, Greptile, Cubic.",
+    "Side-by-side feature comparison of Argus and other AI code review tools: CodeRabbit, SonarQube, GitHub Copilot, Codacy, Sourcery, Qodo, Semgrep, Greptile, Cubic, Macroscope.",
   alternates: { canonical: "https://argus.reviews/compare" },
 };
 
 type FeatureKey = keyof Competitor["features"];
 
-const featureOrder: FeatureKey[] = [
+// Rows where Argus leads or holds its own against strong peers.
+const featureOrderCore: FeatureKey[] = [
+  "reviewContract",
   "memory",
   "patternLearning",
-  "reviewContract",
-  "multiPass",
-  "architectureAnalysis",
-  "diagramGeneration",
   "codeSimulation",
+  "architectureAnalysis",
+  "multiPass",
+  "diagramGeneration",
   "byok",
   "selfHosted",
 ];
+
+// Capabilities several competitors ship today that Argus does not have yet.
+const featureOrderGaps: FeatureKey[] = [
+  "multiPlatform",
+  "staticAnalysis",
+  "testGeneration",
+  "ideIntegration",
+  "ticketing",
+  "complianceCert",
+];
+
+/**
+ * A short "starting price" for the compact comparison cards. The full pricing
+ * strings are long (e.g. "Free (public repos); Pro $24/mo/user; …") and would
+ * overflow the card header, so collapse to the entry tier: "Free" when the
+ * first listed tier is free, else "from $<first listed price>".
+ */
+function startingPrice(pricing: string): string {
+  const entry = pricing.split(";")[0] ?? pricing;
+  if (/\bfree\b/i.test(entry)) return "Free";
+  const dollar = pricing.match(/\$[\d.]+(?:\/[a-z]+)*/i);
+  return dollar ? `from ${dollar[0]}` : entry.trim();
+}
 
 function Mark({ on }: { on: boolean }) {
   const Icon = on ? Check : Minus;
@@ -36,6 +60,24 @@ function Mark({ on }: { on: boolean }) {
       className={`h-4 w-4 mx-auto ${on ? "text-amber" : "text-iron"}`}
       aria-label={on ? "yes" : "no"}
     />
+  );
+}
+
+function FeatureRow({ f }: { f: FeatureKey }) {
+  return (
+    <tr className="border-b border-iron/60 hover:bg-iron/10">
+      <td className="sticky left-0 z-10 bg-background px-4 py-3 text-foreground">
+        {featureLabels[f]}
+      </td>
+      <td className="text-center px-3 py-3 bg-amber/5">
+        <Mark on={argusFeatures[f]} />
+      </td>
+      {competitors.map((c) => (
+        <td key={c.slug} className="text-center px-3 py-3">
+          <Mark on={c.features[f]} />
+        </td>
+      ))}
+    </tr>
   );
 }
 
@@ -59,13 +101,16 @@ export default function CompareHubPage() {
         pick which tool.
       </p>
       <p className="text-[11px] font-mono text-slate-text/70 mb-10 max-w-2xl">
-        Features verified against each vendor&rsquo;s public docs. Many tools have closed
-        gaps on memory, architecture, and multi-agent review recently — the matrix
-        reflects that. Argus&rsquo;s distinct bets today: a computed per-PR review
-        contract (depth routing without hand-written config), failure scenario
-        simulation, BYOK in the managed tier, and judge-filtered findings on every
-        plan — no minimum-comment behavior, and a Glass Box footer that shows what
-        was checked and what was suppressed.
+        Every cell is verified against each vendor&rsquo;s own public docs and marked
+        conservatively &mdash; if a capability couldn&rsquo;t be confirmed from an
+        authoritative source, it&rsquo;s left blank. The strong peers have closed real
+        gaps on memory, architecture, simulation, and self-hosting, and several lead
+        Argus outright on platform breadth, static analysis, IDE extensions,
+        ticketing, and compliance &mdash; the lower rows show exactly where.
+        Argus&rsquo;s one genuinely unique bet is the computed per-PR review contract
+        that routes depth automatically; alongside failure-scenario simulation,
+        judge-filtered findings with a hard comment cap, BYOK in the managed tier,
+        and a Glass Box footer that shows what was checked and what was suppressed.
       </p>
 
       {/* Main comparison table — sticky first column + horizontal scroll on mobile */}
@@ -95,20 +140,19 @@ export default function CompareHubPage() {
             </tr>
           </thead>
           <tbody>
-            {featureOrder.map((f) => (
-              <tr key={f} className="border-b border-iron/60 hover:bg-iron/10">
-                <td className="sticky left-0 z-10 bg-background px-4 py-3 text-foreground">
-                  {featureLabels[f]}
-                </td>
-                <td className="text-center px-3 py-3 bg-amber/5">
-                  <Mark on={argusFeatures[f]} />
-                </td>
-                {competitors.map((c) => (
-                  <td key={c.slug} className="text-center px-3 py-3">
-                    <Mark on={c.features[f]} />
-                  </td>
-                ))}
-              </tr>
+            {featureOrderCore.map((f) => (
+              <FeatureRow key={f} f={f} />
+            ))}
+            <tr className="border-y border-iron bg-iron/10">
+              <td
+                colSpan={2 + competitors.length}
+                className="px-4 py-2 text-[10px] font-mono uppercase tracking-[0.2em] text-slate-text/70"
+              >
+                Where competitors currently lead &mdash; capabilities Argus doesn&rsquo;t have yet
+              </td>
+            </tr>
+            {featureOrderGaps.map((f) => (
+              <FeatureRow key={f} f={f} />
             ))}
 
             {/* Pricing row */}
@@ -150,8 +194,8 @@ export default function CompareHubPage() {
                 <h3 className="font-mono text-sm font-bold text-foreground">
                   Argus vs {c.name}
                 </h3>
-                <span className="text-[11px] font-mono text-iron whitespace-nowrap">
-                  {(c.pricing.split("–")[0] ?? c.pricing).trim()}
+                <span className="shrink-0 text-[11px] font-mono text-iron whitespace-nowrap">
+                  {startingPrice(c.pricing)}
                 </span>
               </div>
               <p className="text-xs font-sans text-slate-text line-clamp-2">
