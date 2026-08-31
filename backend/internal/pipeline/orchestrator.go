@@ -998,6 +998,29 @@ func (o *Orchestrator) RetryReview(ctx context.Context, reviewID uuid.UUID, atte
 	// hydrate hook — see resume_context.go. The enricher-backed fields
 	// (intent/SAST/arch/links) stay unresolved by design: re-running them
 	// mid-flight would re-charge the intent LLM call on every resume.
+	// A run that died in TRIAGE rebuilds rather than resumes. Persisting at
+	// triaging (which is what makes a triage crash visible to recovery at all)
+	// would otherwise reroute these retries onto the resume path, and resume
+	// keeps neither the pre-review enrichers — intent, SAST, arch context,
+	// linked issues, all json:"-" — nor a fresh diff and head SHA. The retried
+	// review would run its specialists without that context and post against
+	// stale SHAs. Triage is cheap to redo; the rebuild path re-fetches from
+	// GitHub and re-enriches, which is what this retry did before the row
+	// existed.
+	if prev.State == StateTriaging {
+		o.logger.InfoContext(ctx, "review retry rebuilding triage-stage run", "event", "pipeline.review.retry_rebuild_triage", "review_id", reviewID, "run_id", runID, "attempt_generation", attemptGeneration)
+		// Retire the row being superseded. The rebuild runs under a NEW run id,
+		// so leaving this one non-terminal hands the sweeper an orphan it will
+		// claim 30 minutes later, fail the generation CAS on, and log twice at
+		// ERROR — paging a human for routine bookkeeping.
+		prev.State = StateCancelled
+		prev.Error = "superseded by a rebuilt retry"
+		if err := o.sm.persist(ctx, prev); err != nil {
+			o.logger.WarnContext(ctx, "review retry could not retire superseded run", "event", "pipeline.review.retry_retire_failed", "review_id", reviewID, "run_id", runID, "error", err)
+		}
+		return o.retryFromReviewRow(ctx, reviewID, attemptGeneration)
+	}
+
 	if !prev.State.IsTerminal() {
 		o.logger.InfoContext(ctx, "review retry resuming non-terminal run", "event", "pipeline.review.retry_resume", "review_id", reviewID, "run_id", runID, "stage", string(prev.State), "attempt_generation", attemptGeneration)
 		_, err = o.sm.ResumeAttempt(ctx, runID, attemptGeneration)

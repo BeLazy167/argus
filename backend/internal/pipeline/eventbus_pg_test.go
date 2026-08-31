@@ -117,7 +117,7 @@ func TestRecoveryClaimIsAtomicAcrossMachines(t *testing.T) {
 	for _, sm := range machines {
 		go func(sm *StateMachine) {
 			<-start
-			id, claimed, err := sm.claimIncomplete(context.Background(), uuid.New())
+			id, claimed, err := sm.claimIncomplete(context.Background(), uuid.New(), nil)
 			results <- result{id, claimed, err}
 		}(sm)
 	}

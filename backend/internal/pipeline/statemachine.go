@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/BeLazy167/argus/backend/internal/obs"
@@ -64,6 +65,14 @@ type StateMachine struct {
 	releaseRecoveryLeaseFn func(context.Context, uuid.UUID, uuid.UUID) (bool, error)
 	resumeRecoveryFn       func(context.Context, uuid.UUID) (*PipelineRun, error)
 	recoveryHeartbeat      <-chan time.Time
+
+	// touchRun and stageHeartbeat are narrow seams so the stage freshness
+	// heartbeat is testable without a database or real timers.
+	touchRun       func(ctx context.Context, runID uuid.UUID) error
+	stageHeartbeat <-chan time.Time
+
+	recoveryBackoffMu sync.Mutex
+	recoveryBackoff   map[uuid.UUID]time.Time
 }
 
 func NewStateMachine(db *pgxpool.Pool, st *store.Store, logger *slog.Logger) *StateMachine {
@@ -184,7 +193,17 @@ func (sm *StateMachine) Run(ctx context.Context, run *PipelineRun) error {
 		}
 		stageStart := time.Now()
 
-		if err := stage(ctx, run); err != nil {
+		// Deferred inside a per-iteration closure: a panicking stage must not
+		// leak the heartbeat goroutine. A leaked heartbeat keeps refreshing
+		// updated_at for the process lifetime, so the row never crosses the
+		// claim floor and the run is stranded exactly as in the incident this
+		// change exists to fix.
+		err := func() error {
+			stopFresh := sm.keepRunFresh(ctx, run.ID)
+			defer stopFresh()
+			return stage(ctx, run)
+		}()
+		if err != nil {
 			if payload, marshalErr := json.Marshal(run); marshalErr == nil {
 				obs.LogPayload(ctx, sm.logger, "pipeline stage output", stageOperationID, "error_result", "application/json", payload)
 			}
@@ -375,10 +394,15 @@ func (sm *StateMachine) handleCancelled(ctx context.Context, run *PipelineRun) e
 }
 
 // shouldPersist returns true for states worth persisting to DB.
-// Triage is fast -- just re-run on recovery. Everything after review is persisted.
+//
+// Triaging is included not because triage is worth resuming — it is fast and
+// simply re-runs — but because the row's EXISTENCE is what makes a crashed run
+// visible to recovery at all: claimIncomplete reads only pipeline_states, so a
+// run that dies before its first persist strands its review as in_progress
+// with nothing left to rescue it.
 func shouldPersist(state PipelineState) bool {
 	switch state {
-	case StateReviewing, StateBriefing, StateDeduping, StateValidating, StateScoring, StatePass2, StateSynthesizing, StatePosting, StateCompleted, StateFailed, StateCancelled:
+	case StateTriaging, StateReviewing, StateBriefing, StateDeduping, StateValidating, StateScoring, StatePass2, StateSynthesizing, StatePosting, StateCompleted, StateFailed, StateCancelled:
 		return true
 	}
 	return false
@@ -483,19 +507,81 @@ func (sm *StateMachine) loadState(ctx context.Context, runID uuid.UUID) (*Pipeli
 	return &run, nil
 }
 
-// recoverStaleAfter is the minimum updated_at age before RecoverIncomplete
-// will claim a non-terminal run. Shorter = faster crash recovery but higher
-// risk of picking up a run another machine is actively processing. Longer =
-// safer against duplicate execution (observed in production: a
-// Fly standby auto-started to serve a dashboard burst, called
-// RecoverIncomplete, claimed a live review, and posted a second GitHub
-// review 32 s after the first). Observed longest legitimate stage
-// turnaround is ~2 min; 10 min gives a ~5× margin while still recovering
-// truly-crashed runs within the fly health-check deploy-rollback window.
+// stageHeartbeatInterval is how often an executing stage refreshes its run's
+// updated_at, so a long stage never looks crashed to the recovery sweeper.
+const stageHeartbeatInterval = 2 * time.Minute
+
+// keepRunFresh touches the run's row while a stage executes. Failures are
+// LOG-ONLY by design: freshness is an optimization against being mistaken for
+// a crash, never a reason to abort a review, and recoveryClaimStaleAfter
+// leaves a wide margin for missed touches. The returned stop func waits for
+// the goroutine so no touch lands after the caller persists a terminal state.
+func (sm *StateMachine) keepRunFresh(ctx context.Context, runID uuid.UUID) func() {
+	ticks := sm.stageHeartbeat
+	var ticker *time.Ticker
+	if ticks == nil {
+		ticker = time.NewTicker(stageHeartbeatInterval)
+		ticks = ticker.C
+	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if ticker != nil {
+			defer ticker.Stop()
+		}
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-stop:
+				return
+			case <-ticks:
+				if err := sm.touchRunFreshness(ctx, runID); err != nil {
+					sm.logger.WarnContext(ctx, "pipeline run freshness heartbeat failed",
+						"event", "pipeline.state.touch_failed", "run_id", runID, "error", err)
+				}
+			}
+		}
+	}()
+	return func() {
+		close(stop)
+		<-done
+	}
+}
+
+func (sm *StateMachine) touchRunFreshness(ctx context.Context, runID uuid.UUID) error {
+	if sm.touchRun != nil {
+		return sm.touchRun(ctx, runID)
+	}
+	if sm.db == nil {
+		return nil
+	}
+	_, err := sm.db.Exec(ctx,
+		`UPDATE pipeline_states SET updated_at = NOW() WHERE id = $1 AND state NOT IN ($2,$3,$4)`,
+		runID, StateCompleted, StateFailed, StateCancelled)
+	return err
+}
+
+// recoveryClaimStaleAfter is the age a run must reach before RECOVERY may
+// claim it. It is deliberately larger than recoverStaleAfter (which gates the
+// retry-liveness check): with a 2-minute heartbeat a live run must miss
+// fifteen consecutive touches before another machine may take it, which is the
+// cheap way to keep periodic scanning from ever stealing live work. Recovery
+// of a genuinely crashed run is correspondingly delayed, which is a good trade
+// against posting a duplicate review.
+const recoveryClaimStaleAfter = 30 * time.Minute
+
+// recoverStaleAfter is the age at which a non-terminal run is presumed crashed
+// for the RETRY-liveness check (see lifecycle.latestRunLiveness). It no longer
+// gates recovery: claiming uses the wider recoveryClaimStaleAfter, so the two
+// windows are independent and tuning this one moves only the retry 409
+// threshold. Shorter = a human may retry sooner but is likelier to collide
+// with a run that is still alive.
 const recoverStaleAfter = 10 * time.Minute
 
 // RecoverIncomplete resumes non-terminal pipeline runs whose updated_at is
-// older than recoverStaleAfter. Rows updated more recently are assumed to
+// older than recoveryClaimStaleAfter. Rows updated more recently are assumed to
 // be owned by another live process; taking them over would double-execute
 // the pipeline and post a duplicate GitHub review.
 func (sm *StateMachine) RecoverIncomplete(ctx context.Context) error {
@@ -503,7 +589,7 @@ func (sm *StateMachine) RecoverIncomplete(ctx context.Context) error {
 	var firstErr error
 	for ctx.Err() == nil {
 		owner := uuid.New()
-		runID, claimed, err := sm.claimIncomplete(ctx, owner)
+		runID, claimed, err := sm.claimIncomplete(ctx, owner, sm.recoveryBackoffSkipList(time.Now()))
 		if err != nil {
 			return fmt.Errorf("claiming incomplete run: %w", err)
 		}
@@ -513,7 +599,7 @@ func (sm *StateMachine) RecoverIncomplete(ctx context.Context) error {
 		}
 
 		sm.logger.InfoContext(ctx, "recovering pipeline run", "event", "pipeline.recovery.claimed", "run_id", runID, "recovery_owner", owner)
-		if err := sm.recoverClaimed(ctx, runID, owner); err != nil {
+		if err := sm.recoverClaimedDamped(ctx, runID, owner); err != nil {
 			sm.logger.Error("failed to recover run", "run_id", runID, "error", err)
 			if firstErr == nil {
 				firstErr = err
@@ -531,7 +617,10 @@ func (sm *StateMachine) RecoverIncomplete(ctx context.Context) error {
 
 const recoveryLeaseDuration = 2 * time.Minute
 
-func (sm *StateMachine) claimIncomplete(ctx context.Context, owner uuid.UUID) (uuid.UUID, bool, error) {
+func (sm *StateMachine) claimIncomplete(ctx context.Context, owner uuid.UUID, skip []string) (uuid.UUID, bool, error) {
+	if skip == nil {
+		skip = []string{}
+	}
 	var id uuid.UUID
 	err := sm.db.QueryRow(ctx, `
 		WITH candidate AS (
@@ -539,6 +628,7 @@ func (sm *StateMachine) claimIncomplete(ctx context.Context, owner uuid.UUID) (u
 			WHERE state NOT IN ($1,$2,$3)
 			  AND updated_at < NOW() - make_interval(secs => $4)
 			  AND (recovery_lease_until IS NULL OR recovery_lease_until < NOW())
+			  AND NOT (id = ANY($7::uuid[]))
 			ORDER BY updated_at
 			FOR UPDATE SKIP LOCKED
 			LIMIT 1
@@ -546,7 +636,7 @@ func (sm *StateMachine) claimIncomplete(ctx context.Context, owner uuid.UUID) (u
 		UPDATE pipeline_states ps
 		SET recovery_owner=$5, recovery_lease_until=NOW() + make_interval(secs => $6)
 		FROM candidate WHERE ps.id=candidate.id
-		RETURNING ps.id`, StateCompleted, StateFailed, StateCancelled, recoverStaleAfter.Seconds(), owner, recoveryLeaseDuration.Seconds()).Scan(&id)
+		RETURNING ps.id`, StateCompleted, StateFailed, StateCancelled, recoveryClaimStaleAfter.Seconds(), owner, recoveryLeaseDuration.Seconds(), skip).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return uuid.Nil, false, nil
 	}
@@ -566,6 +656,25 @@ func (sm *StateMachine) recoverClaimed(ctx context.Context, runID, owner uuid.UU
 	go func() {
 		heartbeatDone <- sm.holdRecoveryLease(leaseCtx, runID, owner, stopHeartbeat, cancelLease)
 	}()
+	// Deferred, not inline: a panic in the resume path must not leak the
+	// lease-renewal goroutine. leaseCtx descends from the process-lifetime
+	// appCtx, so a leaked renewer pushes recovery_lease_until forward every
+	// ~40s forever and claimIncomplete then excludes the run on EVERY machine
+	// — a permanent strand, the exact failure this change exists to remove.
+	// Boot-only recovery leaked at most once per process; a 5-minute sweep
+	// that survives the panic makes it durable.
+	var heartbeatErr error
+	heartbeatStopped := false
+	stopHeartbeatAndWait := func() {
+		if heartbeatStopped {
+			return
+		}
+		heartbeatStopped = true
+		close(stopHeartbeat)
+		heartbeatErr = <-heartbeatDone
+		cancelLease(context.Canceled)
+	}
+	defer stopHeartbeatAndWait()
 
 	// Loading the persisted identity is intentionally separate from Resume:
 	// loadState only decodes the run payload, while Resume is the boundary that
@@ -592,9 +701,7 @@ func (sm *StateMachine) recoverClaimed(ctx context.Context, runID, owner uuid.UU
 		}
 		_, recoveryErr = resume(leaseCtx, runID)
 	}
-	close(stopHeartbeat)
-	heartbeatErr := <-heartbeatDone
-	cancelLease(context.Canceled)
+	stopHeartbeatAndWait()
 
 	if heartbeatErr != nil {
 		return heartbeatErr
@@ -667,4 +774,62 @@ func (sm *StateMachine) releaseRecoveryLease(ctx context.Context, runID, owner u
 		return false, err
 	}
 	return tag.RowsAffected() == 1, nil
+}
+
+// recoveryRetryBackoff is how long THIS process skips a run whose recovery just
+// failed. Without it a permanently poisoned run — an uninstalled app, a
+// deleted repo — is re-claimed and re-attempted on every 5-minute sweep for
+// the process lifetime, where boot-only recovery attempted it once.
+//
+// Deliberately in-process and deliberately NOT parked on any database column:
+// a lease-shaped backoff reads as "owned elsewhere" to other code paths, and a
+// durable budget that survives SIGKILL is a schema change worth doing on its
+// own (see the follow-up issue). Forgetting the backoff on restart is
+// acceptable — a restart re-attempts once, which is the pre-existing behavior.
+const recoveryRetryBackoff = 30 * time.Minute
+
+// recoverClaimedDamped records a backoff for a run whose recovery failed OR
+// panicked. The panic path matters: it unwinds past any plain statement, so
+// the bookkeeping has to be deferred or a panicking run is re-claimed first on
+// every sweep and starves every other stranded run.
+func (sm *StateMachine) recoverClaimedDamped(ctx context.Context, runID, owner uuid.UUID) error {
+	damp := true
+	defer func() {
+		if damp {
+			sm.recordRecoveryBackoff(runID, time.Now().Add(recoveryRetryBackoff))
+		}
+	}()
+	err := sm.recoverClaimed(ctx, runID, owner)
+	// Key the exemption on a REAL shutdown, not on the error's shape. A
+	// cooperative cancel also returns context.Canceled, and handleCancelled
+	// only logs a failed persist — so a run that repeatedly fails to persist
+	// as cancelled would otherwise be re-claimed every sweep with no backoff,
+	// which is the loop this damping exists to prevent.
+	damp = err != nil && ctx.Err() == nil
+	return err
+}
+
+func (sm *StateMachine) recordRecoveryBackoff(runID uuid.UUID, until time.Time) {
+	sm.recoveryBackoffMu.Lock()
+	defer sm.recoveryBackoffMu.Unlock()
+	if sm.recoveryBackoff == nil {
+		sm.recoveryBackoff = make(map[uuid.UUID]time.Time)
+	}
+	sm.recoveryBackoff[runID] = until
+}
+
+// recoveryBackoffSkipList returns the runs still inside their backoff window,
+// pruning expired entries so the map cannot grow without bound.
+func (sm *StateMachine) recoveryBackoffSkipList(now time.Time) []string {
+	sm.recoveryBackoffMu.Lock()
+	defer sm.recoveryBackoffMu.Unlock()
+	var skip []string
+	for id, until := range sm.recoveryBackoff {
+		if now.Before(until) {
+			skip = append(skip, id.String())
+		} else {
+			delete(sm.recoveryBackoff, id)
+		}
+	}
+	return skip
 }

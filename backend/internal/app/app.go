@@ -251,21 +251,7 @@ func Run() error {
 	go mirrorWorker.Run(appCtx, time.Second)
 	logger.InfoContext(appCtx, "memory mirror worker launched", "poll_interval", time.Second)
 
-	go func() {
-		operationID := obs.NewLogID()
-		started := time.Now()
-		logger.InfoContext(appCtx, "pipeline recovery worker started", "operation_id", operationID)
-		defer func() {
-			if r := recover(); r != nil {
-				logger.ErrorContext(appCtx, "pipeline recovery worker panic", "operation_id", operationID, "recover", r)
-			}
-			logger.InfoContext(context.WithoutCancel(appCtx), "pipeline recovery worker stopped",
-				"operation_id", operationID, "duration_ms", time.Since(started).Milliseconds())
-		}()
-		if err := orchestrator.RecoverIncomplete(appCtx); err != nil {
-			logger.ErrorContext(appCtx, "recovering incomplete pipelines", "operation_id", operationID, "error", err)
-		}
-	}()
+	go runPipelineRecoverySweeper(appCtx, logger, pipelineRecoveryFirstSweepDelay, pipelineRecoverySweepInterval, orchestrator.RecoverIncomplete)
 
 	// Pattern decay goroutine — runs daily, cleans stale low-quality patterns
 	go func() {

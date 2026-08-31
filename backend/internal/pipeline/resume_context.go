@@ -175,4 +175,27 @@ func (d defaultResumeDeps) ResolveIndexer(ctx context.Context, installationID in
 // NewOrchestrator can hand the state machine one function value.
 func (o *Orchestrator) hydrateResumedRun(ctx context.Context, run *PipelineRun) {
 	hydrateResumeContext(ctx, run, defaultResumeDeps{st: o.st, indexer: o.resolveIndexer}, o.logger)
+	// One exception to the "enrichers are not re-run on resume" rule above,
+	// and it exists because triaging now persists a row. The recovery sweeper
+	// is the ingress that row was added to serve, so it is the COMMON path
+	// here, not a rare one. A run resumed from triage has not reached any
+	// consumer of the enrichers yet, so the review it goes on to post would
+	// carry no intent, no SAST, no arch context and no linked issues — a
+	// full-price review missing whole sections, posted automatically with
+	// nothing to signal why. Later stages have already consumed them, where
+	// re-running would re-spend the intent call to make prompts slightly
+	// thicker; at triage the spend buys back the entire review.
+	if !shouldReenrichOnResume(run) {
+		return
+	}
+	o.logger.InfoContext(ctx, "re-enriching triage-stage resumed run", "event", "pipeline.recovery.reenrich_started",
+		"run_id", run.ID, "review_id", run.ReviewID, "attempt_generation", run.AttemptGeneration)
+	o.enrichPreReview(ctx, run)
+}
+
+// shouldReenrichOnResume reports whether a resumed run still needs its
+// pre-review enrichers. Only a run resumed at triage does: nothing has
+// consumed them yet, so the review it posts would be missing whole sections.
+func shouldReenrichOnResume(run *PipelineRun) bool {
+	return run != nil && run.State == StateTriaging && run.PRIntent == nil
 }
