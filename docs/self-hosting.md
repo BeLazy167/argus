@@ -6,6 +6,21 @@ Argus has no paid tier and no feature gating — every capability is available t
 
 `SELF_HOSTED=true` remains meaningful for one behavioural default: a self-host reviews **unconditionally**, on every opened/pushed/reopened PR, regardless of the stored `auto_run` setting (see [Auto-run & re-review](#auto-run--re-review)).
 
+## 0. Postgres requirements
+
+Argus stores everything in one Postgres database and the migrations install two
+extensions:
+
+- **pgvector >= 0.8.2** — required. Migration `057` fails fast on anything older
+  (iterative index scans and the parallel-HNSW-build fix are both assumed), so a
+  managed Postgres shipping an older `vector` extension aborts the migration
+  rather than breaking memory search later. `docker compose up` uses
+  `pgvector/pgvector:pg16`, which satisfies this.
+- **pgcontext** — optional. Installed when the server has it, skipped with a
+  NOTICE everywhere else (no managed Postgres can install it).
+
+The migrating role needs `CREATE EXTENSION` privileges.
+
 ## 1. Create the GitHub App
 
 Go to **GitHub → Settings → Developer settings → GitHub Apps → New GitHub App** (use an org account if the app should live under an org).
@@ -62,6 +77,11 @@ go run ./cmd/migrate   # apply DB migrations
 go run ./cmd/argus     # start the server
 ```
 
+`.env.example` defaults `DASHBOARD_BASE_URL` / `API_BASE_URL` to localhost and
+`GITHUB_APP_SLUG` to a placeholder on purpose: unset, the backend falls back to
+the hosted `argus.reviews` origins and the `argus-eye` slug, and your install
+would post GitHub comments linking to a dashboard you don't run.
+
 Or `docker compose up` from the repo root (Postgres + migrations + server). Compose mounts `backend/secrets/` into the container read-only and expects the GitHub App PEM at `backend/secrets/github-app.pem` — `GITHUB_PRIVATE_KEY_PATH` from `backend/.env` is overridden inside the container.
 
 Deploying on Fly.io: change the `app` name in `backend/fly.toml`, then `fly deploy` from `backend/`.
@@ -99,6 +119,10 @@ pnpm dev
 ```
 
 Point `NEXT_PUBLIC_API_URL` at your backend and set `CORS_ALLOW_ORIGIN` on the backend to the dashboard origin.
+
+Diagrams are optional and off by default — leave both `MERMAID_VALIDATOR_*` vars
+unset and the rest of the review works unchanged. Setting only one of the pair is
+a startup error (`must be configured together`), not a warning.
 
 PR diagrams use the dashboard's server-side Mermaid parser before the backend stores a diagram or edits a PR description. Generate one shared value (`openssl rand -hex 32`) and set it as `MERMAID_VALIDATOR_SECRET` on **both** the backend and web deployment. Set `MERMAID_VALIDATOR_BASE_URL` on the backend to the explicit origin of that web deployment; it must be reachable from the backend. The backend has no validator-origin default and refuses an unpaired URL or secret, so it cannot send private diagram evidence or the shared secret to the vendor dashboard by accident. `DASHBOARD_BASE_URL` remains the link target for GitHub comments. Diagram generation fails closed when the parser service, shared secret, or deployed Mermaid version is unavailable; the rest of the review still completes.
 
