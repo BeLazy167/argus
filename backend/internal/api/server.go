@@ -43,11 +43,14 @@ type reviewBindingRecoverer interface {
 }
 
 type Server struct {
-	router                 chi.Router
-	store                  *store.Store
-	memoryLister           memoryListStore
-	ghApp                  *ghpkg.App
-	repoMetadata           repoMetadataClient
+	router         chi.Router
+	store          *store.Store
+	memoryLister   memoryListStore
+	ghApp          *ghpkg.App
+	repoMetadata   repoMetadataClient
+	repoPermission interface {
+		HasRepoWriteAccess(context.Context, int64, string, string, string) (bool, error)
+	}
 	reviewPostLookup       reviewPostLookup
 	reviewRetrier          reviewRetryRunner
 	reviewBindingRecoverer reviewBindingRecoverer
@@ -78,6 +81,7 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 		memoryLister:           st,
 		ghApp:                  ghApp,
 		repoMetadata:           githubClient,
+		repoPermission:         githubClient,
 		reviewPostLookup:       githubClient,
 		reviewRetrier:          orchestrator,
 		reviewBindingRecoverer: orchestrator,

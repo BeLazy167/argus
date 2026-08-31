@@ -632,6 +632,11 @@ func (idx *PGIndexer) Briefing(ctx context.Context, q BriefingQuery) (string, er
 	if payload, err := json.Marshal(q); err == nil {
 		obs.LogPayload(ctx, idx.logger, "memory briefing request", operationID, "request", "application/json", payload)
 	}
+	conflicts, conflictErr := idx.OpenConventionConflicts(ctx, q.Repo)
+	if conflictErr != nil {
+		return "", conflictErr
+	}
+	q.Disputed = conflicts
 	briefing, err := briefingWith(ctx, idx.memoRunSearch(), idx.logger, q)
 	obs.LogPayload(ctx, idx.logger, "memory briefing result", operationID, "result", "text/markdown", []byte(briefing))
 	level := slog.LevelInfo

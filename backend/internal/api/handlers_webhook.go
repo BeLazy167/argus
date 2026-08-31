@@ -246,6 +246,21 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			if !s.isArgusCommentAuthor(issueEvent.CommentAuthor) {
 				break
 			}
+			if keepNew, resolved := pipeline.ConventionConflictCheckboxResolution(issueEvent.CommentBodyBefore, issueEvent.CommentBody); resolved {
+				parts := strings.SplitN(issueEvent.RepoFullName, "/", 2)
+				if len(parts) != 2 {
+					break
+				}
+				owner, repo := parts[0], parts[1]
+				allowed, permErr := s.repoPermission.HasRepoWriteAccess(r.Context(), issueEvent.InstallationID, owner, repo, issueEvent.EditorLogin)
+				if permErr != nil || !allowed {
+					break
+				}
+				if resolveErr := s.store.ResolveConventionConflict(r.Context(), issueEvent.InstallationID, issueEvent.CommentID, keepNew); resolveErr != nil {
+					s.logger.WarnContext(r.Context(), "resolving convention conflict", "error", resolveErr)
+				}
+				break
+			}
 			if !pipeline.CheckboxToggled(issueEvent.CommentBodyBefore, issueEvent.CommentBody) {
 				break
 			}

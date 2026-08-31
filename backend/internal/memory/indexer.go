@@ -87,6 +87,15 @@ type Indexer interface {
 	// verbatim. Defined in briefing.go.
 	Briefing(ctx context.Context, q BriefingQuery) (string, error)
 
+	// Convention lifecycle. SimilarConventions embeds the candidate in the active
+	// installation space and returns same-scope/category convention neighbors.
+	// OpenConventionConflicts returns pairs excluded from ordinary retrieval so
+	// prompt rendering can surface them as explicitly non-enforceable.
+	SimilarConventions(ctx context.Context, repo, category, content string, limit int) ([]PatternMatch, error)
+	RecordConventionEvidence(ctx context.Context, documentID string, repoID int64, prNumber int) (int, error)
+	SetConventionDisputed(ctx context.Context, leftID, rightID string, repoID int64, category string, prNumber int) error
+	OpenConventionConflicts(ctx context.Context, repo string) ([]ConventionConflict, error)
+
 	// Maintenance. Invalidation and supersession preserve history while making
 	// knowledge unavailable to every live-row reader. SupersedeDocument links
 	// documentID to a live replacement in the same installation.
@@ -129,6 +138,12 @@ type IndexResult struct {
 // source, created_at) off Metadata, stamped at index time. RichContent carries
 // summary + related-memory context and is populated only when the query set
 // MemoryQuery.Enrich (the hint-render path); it is "" otherwise.
+type ConventionConflict struct {
+	LeftID, LeftContent, RightID, RightContent string
+	Category                                   string
+	IntroducingPR                              int
+}
+
 type PatternMatch struct {
 	Content     string
 	Score       float64

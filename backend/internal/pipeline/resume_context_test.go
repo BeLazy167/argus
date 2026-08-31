@@ -74,7 +74,7 @@ func midFlightRun() *PipelineRun {
 		DBInstallationID: 7,
 		DBRepoID:         9,
 		Diff:             &diff.PatchSet{Files: []diff.FileDiff{{NewName: "README.md"}}},
-		FeatureFlags:     FeatureFlags{IssueAcceptance: true, CrossPRChecks: true, MaxLinkedPRs: 5},
+		FeatureFlags:     FeatureFlags{IssueAcceptance: true, CrossPRChecks: true, ConventionConflictChecks: true, MaxLinkedPRs: 5},
 		Thresholds:       memory.NewThresholds(),
 		Indexer:          &memorytest.Fake{},
 		Contract:         &ReviewContract{ChangeClass: ChangeClassDocs, Depth: DepthFull, Source: ContractSourceDeterministic},
@@ -138,7 +138,7 @@ func TestHydrateResumeContext_RoundTrippedRunRegainsContext(t *testing.T) {
 		settings: json.RawMessage(`{"threshold_scenario_trigger":0.42}`),
 		indexer:  &memorytest.Fake{},
 	}
-	storedFlags := FeatureFlags{CrossPRChecks: false, IssueAcceptance: false, MaxLinkedPRs: 3}
+	storedFlags := FeatureFlags{CrossPRChecks: false, IssueAcceptance: false, ConventionConflictChecks: true, MaxLinkedPRs: 3}
 	if storedFlags == DefaultFeatureFlags() {
 		t.Fatalf("the stored-flags fixture now equals DefaultFeatureFlags() (%+v) — the assertion below can no longer tell an applied blob from a fallback; pick differing values",
 			DefaultFeatureFlags())

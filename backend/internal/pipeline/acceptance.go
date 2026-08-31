@@ -63,9 +63,10 @@ func loadFeatureFlags(ctx context.Context, st featureFlagReader, installationDBI
 	// which already defaults by pointer, so it would keep rendering both
 	// toggles ON and nothing would reveal the divergence.
 	var partial struct {
-		CrossPRChecks   *bool `json:"cross_pr_checks"`
-		IssueAcceptance *bool `json:"issue_acceptance"`
-		MaxLinkedPRs    *int  `json:"max_linked_prs"`
+		CrossPRChecks            *bool `json:"cross_pr_checks"`
+		IssueAcceptance          *bool `json:"issue_acceptance"`
+		ConventionConflictChecks *bool `json:"convention_conflict_checks"`
+		MaxLinkedPRs             *int  `json:"max_linked_prs"`
 	}
 	if err := json.Unmarshal(raw, &partial); err != nil {
 		slog.Warn("feature flag unmarshal failed, using defaults", "error", err, "install_id", installationDBID)
@@ -77,6 +78,9 @@ func loadFeatureFlags(ctx context.Context, st featureFlagReader, installationDBI
 	}
 	if partial.IssueAcceptance != nil {
 		flags.IssueAcceptance = *partial.IssueAcceptance
+	}
+	if partial.ConventionConflictChecks != nil {
+		flags.ConventionConflictChecks = *partial.ConventionConflictChecks
 	}
 	if partial.MaxLinkedPRs != nil && *partial.MaxLinkedPRs > 0 {
 		flags.MaxLinkedPRs = *partial.MaxLinkedPRs

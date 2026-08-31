@@ -2,6 +2,19 @@
 app = 'argus-ai'
 primary_region = 'iad'
 
+# Swap absorbs brief allocation spikes that would otherwise OOM-kill the
+# machine mid-review (exit_code=137 observed 2026-08-29, killing a run at the
+# synthesis stage). Swap is a spike buffer, not extra capacity — if
+# steady-state RSS approaches the VM size, scale memory instead.
+#
+# MUST stay above the first table header: TOML assigns any key after a header
+# to that table, and flyctl silently drops unknown [[vm]] fields.
+#
+# Tradeoff accepted: swap makes in-memory secrets (the GitHub App RSA key, the
+# AES master key) eligible to be paged to the machine filesystem, where an OOM
+# kill previously left no residue.
+swap_size_mb = 512
+
 [build]
   dockerfile = 'Dockerfile'
 

@@ -107,7 +107,10 @@ func NewReviewLifecycle(db *pgxpool.Pool, st lifecycleStore, sm *StateMachine, e
 // shouldRefuseRetry decides whether retrying is unsafe: the latest run is
 // non-terminal AND was updated recently enough that a process is likely still
 // driving it (possibly on another machine). A stale non-terminal run is treated
-// as crashed and is retryable — RecoverIncomplete uses the same window.
+// as crashed and is retryable. Recovery uses a WIDER window
+// (recoveryClaimStaleAfter), so between the two there is a band where a run is
+// retryable by a human but not yet claimable by the sweeper — deliberate, so a
+// person gets first refusal on a run that may still be alive.
 func shouldRefuseRetry(state PipelineState, fresh bool) bool {
 	return !state.IsTerminal() && fresh
 }

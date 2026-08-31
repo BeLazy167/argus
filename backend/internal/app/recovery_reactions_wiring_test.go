@@ -52,6 +52,22 @@ func TestProductionWiresReactionAnalyzerIntoCrashRecovery(t *testing.T) {
 		case *ast.CallExpr:
 			sel, ok := node.Fun.(*ast.SelectorExpr)
 			if !ok {
+				// Recovery runs via the periodic sweeper, which receives
+				// orchestrator.RecoverIncomplete as its sweep function.
+				fun, isIdent := node.Fun.(*ast.Ident)
+				if !isIdent || fun.Name != "runPipelineRecoverySweeper" {
+					return true
+				}
+				for _, arg := range node.Args {
+					argSel, isSel := arg.(*ast.SelectorExpr)
+					if !isSel {
+						continue
+					}
+					argReceiver, _ := argSel.X.(*ast.Ident)
+					if argReceiver != nil && argReceiver.Name == "orchestrator" && argSel.Sel.Name == "RecoverIncomplete" {
+						recoveryStarted = node.Pos()
+					}
+				}
 				return true
 			}
 			receiver, _ := sel.X.(*ast.Ident)
