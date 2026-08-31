@@ -72,9 +72,10 @@ cd backend && make smee
 
 ```bash
 cd backend
-cp .env.example .env   # fill in the REQUIRED section
-go run ./cmd/migrate   # apply DB migrations
-go run ./cmd/argus     # start the server
+cp .env.example .env      # fill in the REQUIRED section
+set -a; source .env; set +a   # the Go binaries read the process env, not .env
+go run ./cmd/migrate      # apply DB migrations
+go run ./cmd/argus        # start the server
 ```
 
 `.env.example` defaults `DASHBOARD_BASE_URL` / `API_BASE_URL` to localhost and
@@ -82,7 +83,7 @@ go run ./cmd/argus     # start the server
 the hosted `argus.reviews` origins and the `argus-eye` slug, and your install
 would post GitHub comments linking to a dashboard you don't run.
 
-Or `docker compose up` from the repo root (Postgres + migrations + server). Compose mounts `backend/secrets/` into the container read-only and expects the GitHub App PEM at `backend/secrets/github-app.pem` — `GITHUB_PRIVATE_KEY_PATH` from `backend/.env` is overridden inside the container.
+Or `docker compose up` from the repo root (Postgres + migrations + server) — Compose loads `backend/.env` for you, no export needed. Compose mounts `backend/secrets/` into the container read-only and expects the GitHub App PEM at `backend/secrets/github-app.pem` — `GITHUB_PRIVATE_KEY_PATH` from `backend/.env` is overridden inside the container.
 
 Deploying on Fly.io: change the `app` name in `backend/fly.toml`, then `fly deploy` from `backend/`.
 
