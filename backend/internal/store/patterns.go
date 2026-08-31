@@ -24,6 +24,8 @@ type Pattern struct {
 	PRNumber       *int      `json:"pr_number,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
+	Status         string    `json:"status"`
+	EvidenceCount  int       `json:"evidence_count"`
 }
 
 type PatternStat struct {
@@ -59,6 +61,7 @@ func (s *Store) ListPatterns(ctx context.Context, installationIDs []int64) (stor
 		if err != nil {
 			return nil, err
 		}
+		pattern.Status, pattern.EvidenceCount = row.Status, row.EvidenceCount
 		patterns = append(patterns, pattern)
 	}
 	return patterns, nil
@@ -91,6 +94,7 @@ func (s *Store) ListPatternsForRepo(ctx context.Context, installationIDs []int64
 		if err != nil {
 			return nil, err
 		}
+		pattern.Status, pattern.EvidenceCount = row.Status, row.EvidenceCount
 		patterns = append(patterns, pattern)
 	}
 	return patterns, nil

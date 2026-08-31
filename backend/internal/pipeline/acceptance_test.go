@@ -44,13 +44,13 @@ func TestLoadFeatureFlags(t *testing.T) {
 			"stored flags parsed",
 			fakeFlagReader{raw: json.RawMessage(`{"cross_pr_checks":false,"issue_acceptance":true,"max_linked_prs":9}`)},
 			42,
-			FeatureFlags{CrossPRChecks: false, IssueAcceptance: true, MaxLinkedPRs: 9},
+			FeatureFlags{CrossPRChecks: false, IssueAcceptance: true, ConventionConflictChecks: defaults.ConventionConflictChecks, MaxLinkedPRs: 9},
 		},
 		{
 			"missing max_linked_prs backfilled from defaults",
 			fakeFlagReader{raw: json.RawMessage(`{"cross_pr_checks":true,"issue_acceptance":false}`)},
 			42,
-			FeatureFlags{CrossPRChecks: true, IssueAcceptance: false, MaxLinkedPRs: defaults.MaxLinkedPRs},
+			FeatureFlags{CrossPRChecks: true, IssueAcceptance: false, ConventionConflictChecks: defaults.ConventionConflictChecks, MaxLinkedPRs: defaults.MaxLinkedPRs},
 		},
 		// A blob carrying ONLY a key this loader does not know. Decoding
 		// straight into FeatureFlags leaves both bools at Go's zero value, so
@@ -69,7 +69,7 @@ func TestLoadFeatureFlags(t *testing.T) {
 			"foreign key alongside a partial save",
 			fakeFlagReader{raw: json.RawMessage(`{"operator_only_flag":"set","max_linked_prs":9}`)},
 			42,
-			FeatureFlags{CrossPRChecks: defaults.CrossPRChecks, IssueAcceptance: defaults.IssueAcceptance, MaxLinkedPRs: 9},
+			FeatureFlags{CrossPRChecks: defaults.CrossPRChecks, IssueAcceptance: defaults.IssueAcceptance, ConventionConflictChecks: defaults.ConventionConflictChecks, MaxLinkedPRs: 9},
 		},
 		// Explicitly-stored false must still beat the default (migration 039
 		// depends on that distinction), which is why the loader defaults by
@@ -78,7 +78,7 @@ func TestLoadFeatureFlags(t *testing.T) {
 			"explicit false preserved next to a foreign key",
 			fakeFlagReader{raw: json.RawMessage(`{"operator_only_flag":"set","cross_pr_checks":false}`)},
 			42,
-			FeatureFlags{CrossPRChecks: false, IssueAcceptance: defaults.IssueAcceptance, MaxLinkedPRs: defaults.MaxLinkedPRs},
+			FeatureFlags{CrossPRChecks: false, IssueAcceptance: defaults.IssueAcceptance, ConventionConflictChecks: defaults.ConventionConflictChecks, MaxLinkedPRs: defaults.MaxLinkedPRs},
 		},
 	}
 	for _, tc := range tests {

@@ -1,0 +1,737 @@
+[
+  {
+    "a": "Convention [architecture]: The MCP public surface is hosted in-process by the existing qbraid-api Cloud Run service; additional MCP hostnames map to that same service rather than creating a separate deployment.",
+    "b": "Convention [architecture]: The MCP public surface is hosted in-process by the existing qbraid-api Cloud Run service; its dedicated hostname maps to that same service rather than a separate deployment.",
+    "repo": "qBraid/qbraid-infrastructure",
+    "category": "architecture",
+    "cosine": 0.9707237482070924,
+    "label": "duplicate",
+    "rationale": "Both state that the MCP hostname maps to the existing qbraid-api Cloud Run service rather than a separate deployment."
+  },
+  {
+    "a": "Convention [error_handling]: Shell scripts use explicit exit-code checks after external commands, treating core backup steps as fatal (`exit 1`) while allowing secondary uploads to fail with `WARNING` messages and continue.",
+    "b": "Convention [error_handling]: Shell scripts use explicit exit-code checks after external commands, treating core backup steps as fatal (`echo \"ERROR: ...\"` then `exit 1`) while allowing secondary uploads to fail as non-fatal warnings.",
+    "repo": "qBraid/jupyterhub-spawners",
+    "category": "error_handling",
+    "cosine": 0.9579525589942932,
+    "label": "duplicate",
+    "rationale": "Both prescribe fatal exit handling for core backup steps and warning-only continuation for secondary uploads."
+  },
+  {
+    "a": "Convention [testing]: Unit tests include explicit regression cases with descriptive `it(...)` names that document the prior bug and expected fixed behavior, rather than only testing the happy path.",
+    "b": "Convention [testing]: Unit tests include narrowly scoped regression cases with descriptive `it(...)` names that explain the specific bug being prevented, often accompanied by detailed comments documenting the failure path.",
+    "repo": "qBraid/qbraid-api",
+    "category": "testing",
+    "cosine": 0.9420156478881836,
+    "label": "duplicate",
+    "rationale": "Both require narrowly scoped regression tests whose descriptive names document the bug being prevented."
+  },
+  {
+    "a": "Convention [architecture]: Concurrent pool maintenance uses database row locking with `FOR UPDATE SKIP LOCKED` (`with_for_update(skip_locked=True)`) to serialize replenishment and prevent overshooting shared pool targets.",
+    "b": "Convention [architecture]: Concurrent pool-maintenance operations use database row locking with `FOR UPDATE SKIP LOCKED` to serialize replenishment and prevent overshooting shared pool targets.",
+    "repo": "qBraid/jupyterhub-spawners",
+    "category": "architecture",
+    "cosine": 0.9415189623832704,
+    "label": "duplicate",
+    "rationale": "Both prescribe FOR UPDATE SKIP LOCKED to serialize concurrent pool replenishment."
+  },
+  {
+    "a": "Convention [style]: Lists are copied before sorting (`[...array].sort(...)`) and use explicit multi-step comparator logic with deterministic tie-breakers such as `localeCompare` on display fields.",
+    "b": "Convention [style]: Lists are sorted via copied arrays (`[...items].sort(...)`) to avoid mutating source data, with explicit secondary tie-breakers using `localeCompare` for stable alphabetical ordering.",
+    "repo": "qBraid/qbook",
+    "category": "style",
+    "cosine": 0.889768660068512,
+    "label": "duplicate",
+    "rationale": "Both require sorting a copied array with deterministic localeCompare tie-breakers."
+  },
+  {
+    "a": "Convention [architecture]: Feature-specific React context providers and hooks are colocated under feature context modules and exposed as `Provider`/`use...` pairs, e.g. `ArticleKernelProvider` with `useArticleKernel`, alongside optional variants like `useKernelContextOptional`.",
+    "b": "Convention [architecture]: Feature-scoped React context providers and hooks are used to expose shared state/actions. This appears in the article feature with `ArticleKernelProvider`, `ArticleKernelContext`, and a dedicated `useArticleKernel()` hook consumed from multiple components instead of passing kernel startup props down the tree.",
+    "repo": "qBraid/qbook",
+    "category": "architecture",
+    "cosine": 0.8857397437095642,
+    "label": "duplicate",
+    "rationale": "Both describe feature-scoped React Provider/hook pairs for exposing shared state."
+  },
+  {
+    "a": "Convention [error_handling]: API route error handling is done with a top-level `try/catch`, converting thrown/unknown errors into `NextResponse.json` error responses. The code defensively narrows `unknown` errors to extract a numeric `status`, falls back to a default message, and sanitizes the final status to a valid HTTP range before responding.",
+    "b": "Convention [error_handling]: API route handlers return JSON error payloads via NextResponse.json with explicit HTTP status codes (e.g. 400, 502) instead of throwing for request/remote-service failures.",
+    "repo": "qBraid/qbraid-account",
+    "category": "error_handling",
+    "cosine": 0.8558453321456909,
+    "label": "duplicate",
+    "rationale": "Both require route errors to be caught and returned as NextResponse JSON with explicit status codes."
+  },
+  {
+    "a": "Convention [architecture]: The command flow follows a layered pipeline: `qbraid <command> -> typer handler -> qbraid-core client method -> qBraid API`. This indicates Typer-based handlers as the CLI boundary and qbraid-core as the service/client layer.",
+    "b": "Convention [architecture]: CLI commands are intentionally thin wrappers: they parse arguments, call qbraid-core client methods, and format output, while business logic is kept in qbraid-core rather than the CLI layer.",
+    "repo": "qBraid/qBraid-CLI",
+    "category": "architecture",
+    "cosine": 0.853217601776123,
+    "label": "duplicate",
+    "rationale": "Both define CLI handlers as thin boundaries that delegate business logic to qbraid-core clients."
+  },
+  {
+    "a": "Convention [naming]: React context modules follow a provider-plus-typed-value pattern: define a `...ContextValue` interface, create the context with `null` default, define `...ProviderProps`, and export a `...Provider` component. Names are consistently suffixed with `Context`, `ContextValue`, `ProviderProps`, and `Provider`.",
+    "b": "Convention [naming]: React context value types and provider prop types are explicitly declared as `...ContextValue` and `...ProviderProps`, as seen with `ArticleKernelContextValue` and `ArticleKernelProviderProps`.",
+    "repo": "qBraid/qbook",
+    "category": "naming",
+    "cosine": 0.8403042554855347,
+    "label": "duplicate",
+    "rationale": "Both prescribe ContextValue and ProviderProps suffixes for React context types."
+  },
+  {
+    "a": "Convention [architecture]: Resource creation is ordered to avoid orphaned state: external K8s PVCs are created before corresponding database rows, and replenishment is deferred until after a successful spawn.",
+    "b": "Convention [architecture]: When coordinating Kubernetes PVC creation with database persistence, the code creates the K8s resource first and only inserts/flushes the DB row after external creation succeeds, explicitly to avoid orphaned database records.",
+    "repo": "qBraid/jupyterhub-spawners",
+    "category": "architecture",
+    "cosine": 0.8375571966171265,
+    "label": "duplicate",
+    "rationale": "Both require creating the Kubernetes resource before its database row to avoid orphaned records."
+  },
+  {
+    "a": "Convention [error_handling]: API route handlers return JSON error payloads with a consistent `{ error: string }` shape and explicit HTTP status codes for expected failures such as permission errors (403) and not found (404).",
+    "b": "Convention [error_handling]: API route handlers return JSON error payloads via NextResponse.json with explicit HTTP status codes (e.g. 400, 502) instead of throwing for request/remote-service failures.",
+    "repo": "qBraid/qbraid-account",
+    "category": "error_handling",
+    "cosine": 0.8154078722000122,
+    "label": "duplicate",
+    "rationale": "Both require JSON error responses with explicit HTTP status codes from API routes."
+  },
+  {
+    "a": "Convention [architecture]: Route definitions place request validation middleware directly before the controller handler, using `validate({ params: ...Schema })` with typed schema objects such as `UserParamsSchema` for path parameters.",
+    "b": "Convention [architecture]: Request validation is applied at the route layer with `validate(...)`, and controllers read typed validated values via helpers like `getValidatedParams<T>(req)` instead of parsing raw request data directly.",
+    "repo": "qBraid/qbraid-api",
+    "category": "architecture",
+    "cosine": 0.8139652609825134,
+    "label": "duplicate",
+    "rationale": "Both place request validation at the route layer and consume typed validated params in controllers."
+  },
+  {
+    "a": "Convention [style]: Operational logging in scripts is plain `echo`-based with severity prefixes embedded in the message text (`ERROR:`, `WARNING:`) and explanatory status messages for each backup decision point.",
+    "b": "Convention [style]: Operational logging in scripts is done with plain `echo` messages prefixed by severity words like `ERROR:` and `WARNING:`, with informational progress messages left unprefixed.",
+    "repo": "qBraid/jupyterhub-spawners",
+    "category": "style",
+    "cosine": 0.7919518947601318,
+    "label": "duplicate",
+    "rationale": "Both prescribe echo-based shell logging with ERROR and WARNING severity prefixes."
+  },
+  {
+    "a": "Convention [architecture]: Sensitive secrets are masked before being returned or logged by creating a copied object and conditionally replacing secret fields (e.g. jwtSecret) with maskSecret(...).",
+    "b": "Convention [architecture]: Sensitive secrets are masked before returning admin API responses. Controller code applies a reusable helper (e.g. `maskPartner`) to both single objects and collections before passing data to `sendSuccess`.",
+    "repo": "qBraid/qbraid-api",
+    "category": "architecture",
+    "cosine": 0.6639331579208374,
+    "label": "duplicate",
+    "rationale": "Both require secrets to be masked in copied response payloads before sendSuccess."
+  },
+  {
+    "a": "Convention [testing]: Admin/frontend tests mock data hooks directly (e.g. `useCourseUsers`) and override implementations per test with `mockReset`/`mockImplementation` to drive component state.",
+    "b": "Convention [testing]: Admin/frontend tests mock data hooks directly (e.g. `useCourseUsers`) and vary returned payloads based on hook params to exercise component state and ordering behavior.",
+    "repo": "qBraid/qbook",
+    "category": "testing",
+    "cosine": 0.9152407050132751,
+    "label": "refines",
+    "rationale": "The second keeps direct hook mocking but adds parameter-sensitive payloads as a more specific technique."
+  },
+  {
+    "a": "Convention [architecture]: The MCP public surface is hosted in-process by the existing qbraid-api Cloud Run service; additional MCP hostnames map to that same service rather than creating a separate deployment.",
+    "b": "Convention [architecture]: The MCP public surface is hosted in-process by qbraid-api and exposed through a dedicated hostname/path matcher on the existing backend, preventing the MCP hostname from becoming an alternate entry point to the broader /api/v1 surface.",
+    "repo": "qBraid/qbraid-infrastructure",
+    "category": "architecture",
+    "cosine": 0.8981505632400513,
+    "label": "refines",
+    "rationale": "The second adds path-matcher isolation to the shared-service deployment rule."
+  },
+  {
+    "a": "Convention [architecture]: Client-side feature state is composed by wrapping lower-level API/store hooks inside feature-specific context providers. `ArticleKernelProvider` integrates `useKernelStartup`, `useKernelContextOptional`, and `useKernelStore`, indicating a layering pattern where feature contexts orchestrate API hooks and shared stores rather than calling raw APIs directly from leaf components.",
+    "b": "Convention [architecture]: Feature-scoped React context providers and hooks are used to expose shared state/actions. This appears in the article feature with `ArticleKernelProvider`, `ArticleKernelContext`, and a dedicated `useArticleKernel()` hook consumed from multiple components instead of passing kernel startup props down the tree.",
+    "repo": "qBraid/qbook",
+    "category": "architecture",
+    "cosine": 0.8908728361129761,
+    "label": "refines",
+    "rationale": "The first explains how the provider composes lower-level hooks, refining the broader provider pattern."
+  },
+  {
+    "a": "Convention [architecture]: Feature-specific React context providers and hooks are colocated under feature context modules and exposed as `Provider`/`use...` pairs, e.g. `ArticleKernelProvider` with `useArticleKernel`, alongside optional variants like `useKernelContextOptional`.",
+    "b": "Convention [architecture]: Context accessors are exposed in paired strict/optional hook variants, e.g. `useArticleKernel` and `useArticleKernelOptional`, mirroring `useKernelContextOptional`. This suggests a project pattern where consumers choose between required context access and nullable/optional access depending on component usage.",
+    "repo": "qBraid/qbook",
+    "category": "architecture",
+    "cosine": 0.8537176251411438,
+    "label": "refines",
+    "rationale": "The second narrows the Provider/hook convention by specifying strict and optional accessor variants."
+  },
+  {
+    "a": "Convention [architecture]: Controllers use class property handlers wrapped in `asyncHandler`, then extract validated route params via `getValidatedParams<T>(req)` and return responses through `sendSuccess(res, result)` rather than handling async errors or response formatting inline.",
+    "b": "Convention [architecture]: Controllers use shared request/response helpers and validation middleware rather than inline handling: validated input is read via getValidatedBody/getValidatedQuery/getValidatedParams, handlers are wrapped with asyncHandler, and responses use shared sendSuccess/sendPaginated/getPagination utilities.",
+    "repo": "qBraid/qbraid-api",
+    "category": "architecture",
+    "cosine": 0.8249961137771606,
+    "label": "refines",
+    "rationale": "The first gives a concrete subset and handler shape within the broader shared-helper convention."
+  },
+  {
+    "a": "Convention [error_handling]: For fallback/unexpected API failures, route handlers derive the response message from `error.message` and fall back to a fixed user-facing string using the `error.message ?? '...'` pattern.",
+    "b": "Convention [error_handling]: API route error handling is done with a top-level `try/catch`, converting thrown/unknown errors into `NextResponse.json` error responses. The code defensively narrows `unknown` errors to extract a numeric `status`, falls back to a default message, and sanitizes the final status to a valid HTTP range before responding.",
+    "repo": "qBraid/qbraid-account",
+    "category": "error_handling",
+    "cosine": 0.7893872261047363,
+    "label": "refines",
+    "rationale": "The first specifies the fallback-message expression used inside the broader top-level error conversion rule."
+  },
+  {
+    "a": "Convention [architecture]: Feature-scoped React context providers and hooks are used to expose shared state/actions. This appears in the article feature with `ArticleKernelProvider`, `ArticleKernelContext`, and a dedicated `useArticleKernel()` hook consumed from multiple components instead of passing kernel startup props down the tree.",
+    "b": "Convention [architecture]: Context accessors are exposed in paired strict/optional hook variants, e.g. `useArticleKernel` and `useArticleKernelOptional`, mirroring `useKernelContextOptional`. This suggests a project pattern where consumers choose between required context access and nullable/optional access depending on component usage.",
+    "repo": "qBraid/qbook",
+    "category": "architecture",
+    "cosine": 0.7665109634399414,
+    "label": "refines",
+    "rationale": "The second adds strict versus optional accessor variants to the shared context-provider convention."
+  },
+  {
+    "a": "Convention [error_handling]: API route handlers return JSON error payloads with a consistent `{ error: string }` shape and explicit HTTP status codes for expected failures such as permission errors (403) and not found (404).",
+    "b": "Convention [error_handling]: API route error handling is done with a top-level `try/catch`, converting thrown/unknown errors into `NextResponse.json` error responses. The code defensively narrows `unknown` errors to extract a numeric `status`, falls back to a default message, and sanitizes the final status to a valid HTTP range before responding.",
+    "repo": "qBraid/qbraid-account",
+    "category": "error_handling",
+    "cosine": 0.762817919254303,
+    "label": "refines",
+    "rationale": "The first adds the stable error-body shape and expected status examples to the general conversion rule."
+  },
+  {
+    "a": "Convention [testing]: Unit tests mock chained query-builder/database calls by returning nested mock objects for each step (e.g., sort().populate()), rather than using integration-style database fixtures.",
+    "b": "Convention [testing]: Service-layer unit tests mock model methods directly (e.g. `findById`, `findOne`, `findOneAndUpdate`, `findByIdAndUpdate`) and use helper utilities like `leanChain(...)` to simulate chained query behavior, indicating model-level mocking rather than integration-style DB tests.",
+    "repo": "qBraid/qbraid-api",
+    "category": "testing",
+    "cosine": 0.7578577995300293,
+    "label": "refines",
+    "rationale": "The second adds named model mocks and leanChain to the broader chained-query mocking practice."
+  },
+  {
+    "a": "Convention [testing]: Shell scripts are treated as testable units with dedicated CI coverage: a GitHub Actions workflow runs both shellcheck and a script-specific test runner under tests/<area>/run-*-tests.sh.",
+    "b": "Convention [testing]: Shell-based test fixtures are used for script validation: the repo adds a dedicated GitHub Actions workflow that runs a Bash test runner (`tests/run-redaction-tests.sh`) against fixture files under `tests/redaction-fixtures/**`.",
+    "repo": "qBraid/qbraid-infrastructure",
+    "category": "testing",
+    "cosine": 0.7487577795982361,
+    "label": "refines",
+    "rationale": "The second supplies the fixture layout and Bash runner within the broader shell-script CI testing rule."
+  },
+  {
+    "a": "Convention [architecture]: Controllers use shared request/response helpers and validation middleware rather than inline handling: validated input is read via getValidatedBody/getValidatedQuery/getValidatedParams, handlers are wrapped with asyncHandler, and responses use shared sendSuccess/sendPaginated/getPagination utilities.",
+    "b": "Convention [architecture]: Route handlers consistently use a controller/service split: routes wire validation and controller methods, controllers extract validated params/request context and delegate business logic to services, and services coordinate models/external systems.",
+    "repo": "qBraid/qbraid-api",
+    "category": "architecture",
+    "cosine": 0.7486457824707031,
+    "label": "refines",
+    "rationale": "The first enumerates shared helpers used inside the broader route/controller/service layering rule."
+  },
+  {
+    "a": "Convention [error_handling]: GitHub Actions bash steps use strict shell error handling with `set -euo pipefail` at the start of inline scripts.",
+    "b": "Convention [error_handling]: Bash scripts use strict mode via `set -euo pipefail` and define immutable configuration with `readonly` constants for project-specific values.",
+    "repo": "qBraid/qbraid-infrastructure",
+    "category": "error_handling",
+    "cosine": 0.7334058880805969,
+    "label": "refines",
+    "rationale": "The second adds readonly constants while retaining the strict-mode rule."
+  },
+  {
+    "a": "Convention [error_handling]: Error detail propagation is explicitly allowlisted rather than forwarding upstream error payloads wholesale; only specific known fields are exposed after filtering.",
+    "b": "Convention [error_handling]: Broker error details are type-gated before exposure: only numeric values from the allowlisted keys are included in the returned `details` object, and `details` is omitted when empty.",
+    "repo": "qBraid/qbraid-account",
+    "category": "error_handling",
+    "cosine": 0.7025339007377625,
+    "label": "refines",
+    "rationale": "The second narrows allowlisted propagation to numeric broker fields and omission of empty details."
+  },
+  {
+    "a": "Convention [architecture]: Controllers remain thin and delegate business logic to feature services (for example, controller calling `quantumJobService.getTrendingQpus(...)`), indicating a controller/service separation pattern.",
+    "b": "Convention [architecture]: Route handlers consistently use a controller/service split: routes wire validation and controller methods, controllers extract validated params/request context and delegate business logic to services, and services coordinate models/external systems.",
+    "repo": "qBraid/qbraid-api",
+    "category": "architecture",
+    "cosine": 0.7007679343223572,
+    "label": "refines",
+    "rationale": "The second expands thin controllers into the complete route/controller/service responsibility split."
+  },
+  {
+    "a": "Convention [architecture]: Feature code appears organized by domain-specific modules under @/features/..., with related model and type definitions colocated in feature folders such as '@/features/job/group/model' and '@/features/job/group/types'.",
+    "b": "Convention [architecture]: Feature-module architecture is used under `src/features/`, with each domain grouped into its own module (for example `environments`, `user`, `billing`). Within a feature, code is further split by subdomain such as `core`, `groups`, and `shared`.",
+    "repo": "qBraid/qbraid-api",
+    "category": "architecture",
+    "cosine": 0.698921799659729,
+    "label": "refines",
+    "rationale": "The second generalizes concrete feature paths into the repository-wide feature-module hierarchy."
+  },
+  {
+    "a": "Convention [architecture]: Provider-specific billing logic is centralized in a shared runtime helper (for example, `app.runtime.rigetti.cost_estimation.estimate_duration_minutes`) and reused by both quote-time and submit-time cost estimation paths to keep estimates consistent.",
+    "b": "Convention [architecture]: Provider-specific behavior is selected using the device QRN namespace prefix (for example, `device_qrn.startswith(\"rigetti:\")`), with generic estimation retained as the fallback.",
+    "repo": "qBraid/qbraid-runtime-api",
+    "category": "architecture",
+    "cosine": 0.6901158690452576,
+    "label": "refines",
+    "rationale": "Prefix-based provider selection is the dispatch condition around the centralized provider billing helper."
+  },
+  {
+    "a": "Convention [architecture]: Repository scripts are organized by domain under `scripts/iac/`, and related CI/workflow triggers target those exact paths, indicating an infrastructure-script grouping pattern rather than placing utility scripts at the repo root.",
+    "b": "Convention [architecture]: Operational scripts and tests are organized by feature area under parallel `scripts/<feature>/` and `tests/<feature>/` directories, with test runner names mirroring the script they validate.",
+    "repo": "qBraid/qbraid-infrastructure",
+    "category": "architecture",
+    "cosine": 0.6743793487548828,
+    "label": "refines",
+    "rationale": "The second broadens scripts/iac organization into parallel feature-scoped script and test directories."
+  },
+  {
+    "a": "Convention [architecture]: Route handlers consistently use a controller/service split: routes wire validation and controller methods, controllers extract validated params/request context and delegate business logic to services, and services coordinate models/external systems.",
+    "b": "Convention [architecture]: A layered route/controller/service structure is established for feature endpoints, as shown by files like `environment.routes.ts`, `environment.controller.ts`, `environment.service.ts`, and `environment.validators.ts` living together within a feature submodule.",
+    "repo": "qBraid/qbraid-api",
+    "category": "architecture",
+    "cosine": 0.6738250255584717,
+    "label": "refines",
+    "rationale": "The second supplies a concrete file layout for the broader route/controller/service split."
+  },
+  {
+    "a": "Convention [architecture]: Environment-dependent request origin resolution follows a centralized fallback chain in helper functions: prefer explicit env configuration, then forwarded proxy headers, then request-derived origin as a last resort.",
+    "b": "Convention [architecture]: Request handlers derive a canonical application base URL via a shared helper (`getAppOrigin(request)`) and build all redirects with `new URL(path, appUrl)` instead of hardcoding origins.",
+    "repo": "qBraid/qbraid-account",
+    "category": "architecture",
+    "cosine": 0.6666747331619263,
+    "label": "refines",
+    "rationale": "The second names getAppOrigin and URL construction used by the broader origin fallback-chain rule."
+  },
+  {
+    "a": "Convention [error_handling]: Service errors wrap transport failures with raise ... from err; HTTP status is recovered by walking __cause__ (via status_code property) rather than threading status through every raise site",
+    "b": "Convention [error_handling]: HTTP status on API errors stored as private _status_code so it does not shadow the inherited status_code property; callers use status_code to distinguish expected 404s from real failures without parsing messages",
+    "repo": "qBraid/qbraid-core",
+    "category": "error_handling",
+    "cosine": 0.6340259909629822,
+    "label": "refines",
+    "rationale": "The second explains the private status storage that supports status recovery through chained exceptions."
+  },
+  {
+    "a": "Convention [architecture]: JupyterHub Helm values favor additive mutation of shared config collections (for example, using `c.JupyterHub.load_roles.append(...)`) instead of reassignment when extending chart-managed settings, to avoid overwriting roles or services registered by other `extraConfig` blocks or the base chart.",
+    "b": "Convention [architecture]: Responsibility for JupyterHub features is explicitly assigned to a single config source: if a capability is owned by a numbered `hub.extraConfig` block (such as `70_idle_culler`), the corresponding chart-level feature is disabled to prevent duplicate service registration and config drift.",
+    "repo": "qBraid/qbraid-infrastructure",
+    "category": "architecture",
+    "cosine": 0.7831658124923706,
+    "label": "unrelated",
+    "rationale": "Additive Helm collection mutation and single-source feature ownership solve different configuration problems."
+  },
+  {
+    "a": "Convention [architecture]: Repository scripts are organized by domain under `scripts/iac/`, and related CI/workflow triggers target those exact paths, indicating an infrastructure-script grouping pattern rather than placing utility scripts at the repo root.",
+    "b": "Convention [architecture]: Repository automation is path-scoped in GitHub Actions workflows: CI jobs are triggered only when relevant infrastructure files, docs, or validation scripts change (for example terraform/providers/gcp/modules/**/main.tf, drift-noise catalog docs, and the checker script).",
+    "repo": "qBraid/qbraid-infrastructure",
+    "category": "architecture",
+    "cosine": 0.755896270275116,
+    "label": "unrelated",
+    "rationale": "Script directory organization and path-filtered workflow triggers are independent conventions."
+  },
+  {
+    "a": "Convention [naming]: Partner-related identifiers are consistently named with an `oauth`-qualified prefix in shared auth/session code, e.g. `oauthPartnerId`, to distinguish OAuth flow state from generic `partnerId` route params.",
+    "b": "Convention [naming]: Partner auth routes follow dynamic route naming with bracketed path params like `[partnerId]`, and the parameter name `partnerId` is reused consistently in redirect paths and welcome routes.",
+    "repo": "qBraid/qbraid-account",
+    "category": "naming",
+    "cosine": 0.7444795966148376,
+    "label": "unrelated",
+    "rationale": "OAuth-qualified identifiers and dynamic route parameter naming govern different names."
+  },
+  {
+    "a": "Convention [architecture]: High-risk remediation follows a human-in-the-loop approval architecture: alerts are classified, persisted to MongoDB with pending/decision status, sent to Slack as interactive approval cards, and only executed after explicit Slack approval.",
+    "b": "Convention [architecture]: MongoDB is used as an audit/source-of-record layer for the remediation flow: every alert is persisted, decisions are updated with status and actor/timestamp details, and past decisions are retained for audit and pattern recognition.",
+    "repo": "qBraid/docker-stacks",
+    "category": "architecture",
+    "cosine": 0.7376355528831482,
+    "label": "unrelated",
+    "rationale": "Human approval before remediation and MongoDB audit persistence are complementary but not refinements of one another."
+  },
+  {
+    "a": "Convention [architecture]: Multi-tenant data mutations are explicitly scoped by `organizationId` in persistence queries to prevent cross-organization side effects, even when processing legacy or potentially inconsistent stored data.",
+    "b": "Convention [architecture]: Backward-compatible schema evolution is handled with explicit legacy-field support and dual-write behavior. The model documents `lastOrganizationId` as a legacy pointer, while newer per-tenant state lives in `lastOrganizationIds`, and service logic clears both representations when they may reference stale data.",
+    "repo": "qBraid/qbraid-api",
+    "category": "architecture",
+    "cosine": 0.7342560887336731,
+    "label": "unrelated",
+    "rationale": "Tenant-scoped mutation queries and dual-write legacy schema evolution address different invariants."
+  },
+  {
+    "a": "Convention [architecture]: Shared URL-building logic is extracted into small library utilities under `src/lib/...` and reused across route handlers via imports (e.g. `buildPartnerRedirectUri` used in multiple routes instead of duplicating redirect construction).",
+    "b": "Convention [architecture]: Request handlers derive a canonical application base URL via a shared helper (`getAppOrigin(request)`) and build all redirects with `new URL(path, appUrl)` instead of hardcoding origins.",
+    "repo": "qBraid/qbraid-account",
+    "category": "architecture",
+    "cosine": 0.7248548269271851,
+    "label": "unrelated",
+    "rationale": "Extracting URL utilities and deriving canonical redirect origins are separate architectural choices."
+  },
+  {
+    "a": "Convention [testing]: Tests use pytest parameterization to cover the same failure path across multiple inputs, e.g. one test iterates over each required environment variable being absent instead of writing separate test cases.",
+    "b": "Convention [testing]: Environment-dependent code is tested by replacing `os.environ` with `monkeypatch` and asserting logged output via `caplog`, indicating a pattern of validating both process exit behavior and emitted error logs in failure-path tests.",
+    "repo": "qBraid/jupyterhub-spawners",
+    "category": "testing",
+    "cosine": 0.6964874863624573,
+    "label": "unrelated",
+    "rationale": "Pytest parameterization and monkeypatch/caplog environment testing are different testing techniques."
+  },
+  {
+    "a": "Convention [architecture]: Terraform drift suppressions via lifecycle.ignore_changes are governed by a documentation-and-CI policy: any added or removed ignore_changes field must be reflected in docs/terraform/drift-noise-catalog.md, justified in the PR, and validated by a dedicated GitHub Actions check script.",
+    "b": "Convention [architecture]: Repository automation is path-scoped in GitHub Actions workflows: CI jobs are triggered only when relevant infrastructure files, docs, or validation scripts change (for example terraform/providers/gcp/modules/**/main.tf, drift-noise catalog docs, and the checker script).",
+    "repo": "qBraid/qbraid-infrastructure",
+    "category": "architecture",
+    "cosine": 0.6839935779571533,
+    "label": "unrelated",
+    "rationale": "Drift-suppression documentation policy and workflow path scoping are separate rules."
+  },
+  {
+    "a": "Convention [testing]: Unit tests include explicit regression cases with descriptive `it(...)` names that document the prior bug and expected fixed behavior, rather than only testing the happy path.",
+    "b": "Convention [testing]: Tests document backward-compatibility behavior with explicit scenario names and inline legacy-data rationale, e.g. `it(...)` cases describing 'lenient legacy mode' for preserving editability of pre-validation records.",
+    "repo": "qBraid/qbraid-api",
+    "category": "testing",
+    "cosine": 0.6583893895149231,
+    "label": "unrelated",
+    "rationale": "Descriptive regression tests and legacy-compatibility scenarios overlap in testing vocabulary but govern different cases."
+  },
+  {
+    "a": "Convention [architecture]: The project uses a client/session layered architecture, with base classes in top-level modules (`client.py`, `sessions.py`) and domain-specific clients organized under `services/` (for example `EnvironmentManagerClient`, `QuantumRuntimeClient`, `MCPWebSocketClient`).",
+    "b": "Convention [architecture]: qbraid-core is the centralized business-logic layer shared by multiple frontends: JupyterLab handlers and CLI both call into this library, while UI concerns, CLI parsing/formatting, and API service behavior are kept in separate repositories.",
+    "repo": "qBraid/qbraid-core",
+    "category": "architecture",
+    "cosine": 0.6458007097244263,
+    "label": "unrelated",
+    "rationale": "Internal client/session layering and qbraid-core ownership across repositories describe different architectural scopes."
+  },
+  {
+    "a": "Convention [testing]: Depth behavior is tested with pytest-style parameterized cases, using QASM fixture constants and explicit expected depth values before and after decomposition.",
+    "b": "Convention [testing]: Use `pytest.mark.parametrize` to cover the same QASM validation behavior across multiple operation forms (gate, measurement, reset, and barrier) with one test.",
+    "repo": "qBraid/pyqasm",
+    "category": "testing",
+    "cosine": 0.6275156140327454,
+    "label": "unrelated",
+    "rationale": "Depth assertions and parameterizing QASM operation forms test different behaviors."
+  },
+  {
+    "a": "Convention [architecture]: Queue names are centralized in a shared `QUEUES` constants module and instantiated separately in a queue instances module, indicating a constants-plus-instance pattern for queue infrastructure.",
+    "b": "Convention [architecture]: BullMQ queues are configured with a standard retry/cleanup profile: `removeOnComplete: true`, bounded failed-job retention via `removeOnFail`, and retry with exponential backoff.",
+    "repo": "qBraid/qbraid-worker-service",
+    "category": "architecture",
+    "cosine": 0.6231768131256104,
+    "label": "unrelated",
+    "rationale": "Queue-name module organization and BullMQ retry/retention defaults are independent queue conventions."
+  },
+  {
+    "a": "Convention [architecture]: Cross-service data access is designed around minimal billing state fields and compare-and-set style updates for settlement watermarks/pointers. The comments describe using `findOneAndUpdate` against the prior value to advance billing markers exactly once per period, mirroring other settlement CAS paths.",
+    "b": "Convention [architecture]: Multi-step financial updates are executed within a shared MongoDB transaction/session so dependent operations commit or roll back together; downstream helpers are passed the same session for atomicity.",
+    "repo": "qBraid/qbraid-worker-service",
+    "category": "architecture",
+    "cosine": 0.6222579479217529,
+    "label": "unrelated",
+    "rationale": "Compare-and-set settlement pointers and multi-operation Mongo transactions are distinct consistency patterns."
+  },
+  {
+    "a": "Convention [error_handling]: UnrecoverableError thrown for unknown or unexpected job types, using the pattern `throw new UnrecoverableError('Unknown <context> job type: ${job.name}')`",
+    "b": "Convention [error_handling]: Original errors preserved via error cause chaining when wrapping in UnrecoverableError: `throw new UnrecoverableError(err.message, { cause: err })`",
+    "repo": "qBraid/qbraid-worker-service",
+    "category": "error_handling",
+    "cosine": 0.618038535118103,
+    "label": "unrelated",
+    "rationale": "Throwing UnrecoverableError for unknown job types and preserving causes when wrapping errors are separate error rules."
+  },
+  {
+    "a": "Convention [style]: Successful API responses are returned as JSON envelopes with a consistent shape including `success: true`, `data`, and sometimes `meta` fields.",
+    "b": "Convention [style]: Sensitive secrets are masked before success responses are returned; response shaping happens in controllers using a masked copy of the payload before calling sendSuccess.",
+    "repo": "qBraid/qbraid-api",
+    "category": "style",
+    "cosine": 0.5502125024795532,
+    "label": "unrelated",
+    "rationale": "Success response envelopes and secret masking can coexist but neither entails the other."
+  },
+  {
+    "a": "Convention [architecture]: Analytics DetailCards consistently expose week-over-week metrics via thisWeek/lastWeek props, with optional subRows arrays of {label, thisWeek, lastWeek} for breakdowns",
+    "b": "Convention [architecture]: Small UI-specific formatting and label helpers are defined as local pure functions/constants near the page component (e.g. period options, `periodLabel`, `formatTokens`, `formatCost`) instead of being abstracted prematurely.",
+    "repo": "qBraid/qbraid-admin",
+    "category": "architecture",
+    "cosine": 0.5298827886581421,
+    "label": "unrelated",
+    "rationale": "DetailCard metric props and colocated formatting helpers govern unrelated UI concerns."
+  },
+  {
+    "a": "Convention [style]: Terraform files use large sectioned comment banners with repeated separator lines and scoped headings to organize infrastructure by service/resource group (e.g., dedicated blocks for qbraid-admin repo link, secrets, and triggers).",
+    "b": "Convention [style]: Manifest metadata labels follow a consistent application labeling scheme with `app`, `component`, and `environment` keys on Kubernetes resources.",
+    "repo": "qBraid/qbraid-infrastructure",
+    "category": "style",
+    "cosine": 0.5088350772857666,
+    "label": "unrelated",
+    "rationale": "Terraform section banners and Kubernetes metadata labels are unrelated style rules."
+  },
+  {
+    "a": "Convention [architecture]: Producer-only, fire-and-forget queue usage is explicitly documented for cross-service event emission; failures are intended to be logged and not block core billing flows.",
+    "b": "Convention [architecture]: Credit-processing idempotency uses two processor-specific patterns: Stripe webhook processors perform a read-before-write existence check, while admin grant processors write directly and treat duplicate-key error E11000 from a unique sparse `metadata.grantKey` index as a successful no-op.",
+    "repo": "qBraid/qbraid-worker-service",
+    "category": "architecture",
+    "cosine": 0.4581683874130249,
+    "label": "unrelated",
+    "rationale": "Fire-and-forget event emission and idempotent credit processors govern different worker flows."
+  },
+  {
+    "a": "Convention [architecture]: Cognito client configuration updates are performed by reading the current AWS response JSON and transforming it with jq rather than constructing request payloads from scratch. The pattern preserves existing fields, removes AWS-managed fields (for example ClientId, ClientSecret, UserPoolId, CreationDate, LastModifiedDate), merges in the desired values, and filters out nulls before passing the result back to the AWS CLI.",
+    "b": "Convention [architecture]: Repository automation is path-scoped in GitHub Actions workflows: CI jobs are triggered only when relevant infrastructure files, docs, or validation scripts change (for example terraform/providers/gcp/modules/**/main.tf, drift-noise catalog docs, and the checker script).",
+    "repo": "qBraid/qbraid-infrastructure",
+    "category": "architecture",
+    "cosine": 0.3893271684646606,
+    "label": "unrelated",
+    "rationale": "AWS JSON transformation and GitHub Actions path scoping are unrelated infrastructure practices."
+  },
+  {
+    "a": "Convention [style]: Shared context value types are explicitly defined as `...ContextValue` interfaces and React contexts are initialized as nullable via `createContext<... | null>(null)`.",
+    "b": "Convention [style]: Lists are copied before sorting (`[...array].sort(...)`) and use explicit multi-step comparator logic with deterministic tie-breakers such as `localeCompare` on display fields.",
+    "repo": "qBraid/qbook",
+    "category": "style",
+    "cosine": 0.3583526611328125,
+    "label": "unrelated",
+    "rationale": "Nullable React contexts and copied-array sorting are unrelated style conventions."
+  },
+  {
+    "a": "Convention [architecture]: Billing/invoice data access is scope-based and encapsulated behind shared hooks/utilities. The UI uses `useInvoicesForScope(scope, ...)` with values like `'personal'` and `'organization'`, while separate API routes proxy to matching backend endpoints for each scope.",
+    "b": "Convention [architecture]: Security-sensitive auth flows use defensive validation patterns, including production-only HTTPS enforcement for OAuth URLs, timeout-bounded external fetches with AbortSignal.timeout, and constant-time signature comparison via crypto.timingSafeEqual.",
+    "repo": "qBraid/qbraid-account",
+    "category": "architecture",
+    "cosine": 0.3254992961883545,
+    "label": "unrelated",
+    "rationale": "Invoice scope hooks and OAuth transport hardening address unrelated architectural concerns."
+  },
+  {
+    "a": "Convention [architecture]: Sensitive secrets are masked before being returned or logged by creating a copied object and conditionally replacing secret fields (e.g. jwtSecret) with maskSecret(...).",
+    "b": "Convention [architecture]: Environment and group listing/order logic uses an explicit numeric `priority` field, with higher values sorted first (`.sort({ priority: -1 })`) and a model-level default of 0 for display ordering.",
+    "repo": "qBraid/qbraid-api",
+    "category": "architecture",
+    "cosine": 0.2589871883392334,
+    "label": "unrelated",
+    "rationale": "Secret masking and numeric display priority address unrelated architecture concerns."
+  },
+  {
+    "a": "Convention [naming]: Interfaces use descriptive suffixes matching their domain role (e.g., ReviewerScore, ConsensusResult) without prefixes like 'I'",
+    "b": "Convention [naming]: Interfaces are prefixed with `I` (e.g. `IReviewerScore`, `IConsensusResult`) rather than using plain descriptive names.",
+    "repo": "BeLazy167/agentmd-scorer",
+    "category": "naming",
+    "cosine": 0.5253725025316933,
+    "label": "contradicts",
+    "rationale": "This directly reverses whether interfaces use an I prefix.",
+    "synthetic": true
+  },
+  {
+    "a": "Convention [naming]: Interfaces are prefixed with 'I' (e.g., IDimensionScore, IScoringResult, ILLMProvider, IResultStore, ICache) while plain option/config types omit the prefix (e.g., LLMOptions, ResultFilter)",
+    "b": "Convention [naming]: Interfaces use plain PascalCase names without an `I` prefix (e.g. `DimensionScore`, `ScoringResult`, `LLMProvider`).",
+    "repo": "BeLazy167/agentmd-scorer",
+    "category": "naming",
+    "cosine": 0.4952949388934101,
+    "label": "contradicts",
+    "rationale": "This directly reverses the required interface prefix.",
+    "synthetic": true
+  },
+  {
+    "a": "Convention [style]: Modules use a file-level JSDoc block comment describing the module's purpose and scope, followed by individual JSDoc single-line comments (/** ... */) on each exported function",
+    "b": "Convention [style]: Modules must not use file-level JSDoc blocks or JSDoc comments on exported functions.",
+    "repo": "BeLazy167/agentmd-scorer",
+    "category": "style",
+    "cosine": 0.6068340469451404,
+    "label": "contradicts",
+    "rationale": "This forbids the JSDoc documentation the source convention requires.",
+    "synthetic": true
+  },
+  {
+    "a": "Convention [style]: Non-null assertion operator (!) used when accessing array elements by index, even when bounds are logically guaranteed",
+    "b": "Convention [style]: Never use the non-null assertion operator (`!`) for array indexing; use bounds checks or fallback values instead.",
+    "repo": "BeLazy167/agentmd-scorer",
+    "category": "style",
+    "cosine": 0.46383105899814,
+    "label": "contradicts",
+    "rationale": "This bans the non-null assertions the source rule prescribes.",
+    "synthetic": true
+  },
+  {
+    "a": "Convention [error_handling]: Required environment variables are validated at module load time with thrown errors (e.g., `if (!SESSION_SECRET) throw new Error(\"... is required\")`)",
+    "b": "Convention [error_handling]: Required environment variables must not be validated at module load; validate lazily when the feature is invoked.",
+    "repo": "BeLazy167/agentmd-scorer",
+    "category": "error_handling",
+    "cosine": 0.5614703282714046,
+    "label": "contradicts",
+    "rationale": "This reverses eager module-load validation into lazy validation.",
+    "synthetic": true
+  },
+  {
+    "a": "Convention [style]: Functions use Google-style docstrings as the first line of every function body to describe purpose",
+    "b": "Convention [style]: Functions must not contain docstrings; document behavior only in external module documentation.",
+    "repo": "BeLazy167/agentmd-scorer",
+    "category": "style",
+    "cosine": 0.4034024849095741,
+    "label": "contradicts",
+    "rationale": "This forbids the per-function Google-style docstrings the source requires.",
+    "synthetic": true
+  },
+  {
+    "a": "Convention [naming]: Interfaces are prefixed with 'I' (e.g., IDimensionScore, IScoringResult, ILLMProvider, IResultStore, ICache) while plain option/config types omit the prefix (e.g., LLMOptions, ResultFilter)",
+    "b": "Convention [naming]: Interfaces and option/config types are all prefixed with `I` (e.g. `IDimensionScore`, `ILLMOptions`).",
+    "repo": "BeLazy167/agentmd-scorer",
+    "category": "naming",
+    "cosine": 0.566378254794331,
+    "label": "contradicts",
+    "rationale": "This contradicts the exemption for option and config types.",
+    "synthetic": true
+  },
+  {
+    "a": "Convention [naming]: Interfaces are defined without prefix/suffix (e.g., EmailConfig, EmailMessage) using plain descriptive names matching their domain concept",
+    "b": "Convention [naming]: Interfaces must use an `I` prefix (e.g. `IEmailConfig`, `IEmailMessage`) instead of plain domain names.",
+    "repo": "BeLazy167/agentmd-scorer",
+    "category": "naming",
+    "cosine": 0.5224011222084574,
+    "label": "contradicts",
+    "rationale": "This reverses the plain, unprefixed interface naming rule.",
+    "synthetic": true
+  },
+  {
+    "a": "Convention [error_handling]: Configuration validation is fail-fast at module initialization: required secrets/env vars are checked when the module loads and missing values cause an immediate thrown Error with a descriptive message.",
+    "b": "Convention [error_handling]: Missing required secrets and environment variables are tolerated at module initialization and checked only when a request needs them.",
+    "repo": "qBraid/qbraid-account",
+    "category": "error_handling",
+    "cosine": 0.5353846607729321,
+    "label": "contradicts",
+    "rationale": "This reverses fail-fast module initialization into deferred validation.",
+    "synthetic": true
+  },
+  {
+    "a": "Convention [error_handling]: Controllers use shared async/error-response wrappers and helpers, with async endpoints wrapped in `asyncHandler(...)` and successful responses returned through `sendSuccess(...)` rather than calling `res` methods directly.",
+    "b": "Convention [error_handling]: Controllers must call `res` methods directly and must not use `asyncHandler` or shared response helpers.",
+    "repo": "qBraid/qbraid-api",
+    "category": "error_handling",
+    "cosine": 0.5495013130161855,
+    "label": "contradicts",
+    "rationale": "This directly forbids the wrappers and helpers required by the source convention.",
+    "synthetic": true
+  },
+  {
+    "a": "Convention [error_handling]: Request authorization failures are handled by throwing framework-level AppError variants (for example AppError.unauthorized and AppError.badRequest) directly from controllers/services instead of returning ad hoc error responses.",
+    "b": "Convention [error_handling]: Authorization failures return ad hoc response objects directly from controllers and services rather than throwing `AppError` variants.",
+    "repo": "qBraid/qbraid-api",
+    "category": "error_handling",
+    "cosine": 0.6084237843938974,
+    "label": "contradicts",
+    "rationale": "This reverses throwing standardized AppError variants into direct ad hoc responses.",
+    "synthetic": true
+  },
+  {
+    "a": "Convention [style]: Logging uses structured logger calls with a metadata object as the first argument and a tagged message string second, e.g. logger.info({ removedSlugs }, '[EVENTS] ...') and logger.error({ challengeId, error }, '...').",
+    "b": "Convention [style]: Logger calls put the message string first and interpolate all context into it rather than passing a metadata object.",
+    "repo": "qBraid/qbraid-api",
+    "category": "style",
+    "cosine": 0.4313242130362123,
+    "label": "contradicts",
+    "rationale": "This reverses the structured metadata-first logger call shape.",
+    "synthetic": true
+  },
+  {
+    "a": "Convention [style]: Loading UX is handled with explicit derived booleans (for example, combining persisted arrival state with multiple async flags like `isOrgHydrating`, `isLoading`, and `isFetching`) and early-return render branches, rather than inline conditional fragments.",
+    "b": "Convention [style]: Loading states are rendered with inline conditional fragments rather than derived booleans and early-return branches.",
+    "repo": "qBraid/qbraid-account",
+    "category": "style",
+    "cosine": 0.5999406996418378,
+    "label": "contradicts",
+    "rationale": "This directly reverses the prescribed loading-render style.",
+    "synthetic": true
+  },
+  {
+    "a": "Convention [error_handling]: GitHub Actions bash steps use strict shell error handling with `set -euo pipefail` at the start of inline scripts.",
+    "b": "Convention [error_handling]: GitHub Actions bash steps avoid `set -euo pipefail` so later cleanup commands continue after failures.",
+    "repo": "qBraid/qbraid-infrastructure",
+    "category": "error_handling",
+    "cosine": 0.5544339827098683,
+    "label": "contradicts",
+    "rationale": "This directly contradicts strict shell error handling.",
+    "synthetic": true
+  },
+  {
+    "a": "Convention [style]: Lists are copied before sorting (`[...array].sort(...)`) and use explicit multi-step comparator logic with deterministic tie-breakers such as `localeCompare` on display fields.",
+    "b": "Convention [style]: Lists are sorted in place with `array.sort(...)`; do not copy them before sorting or add deterministic tie-breakers.",
+    "repo": "qBraid/qbook",
+    "category": "style",
+    "cosine": 0.5122693076525485,
+    "label": "contradicts",
+    "rationale": "This directly reverses both copied sorting and deterministic tie-breaking.",
+    "synthetic": true
+  },
+  {
+    "a": "Convention [error_handling]: GitHub Actions bash steps use strict shell error handling with `set -euo pipefail` at the start of inline scripts.",
+    "b": "Convention [error_handling]: Failure handling in CI shell steps is tolerant and inline: commands use `&& ... || { ...; }` blocks to log a plain `echo` warning and clean up temporary artifacts instead of hard-failing immediately.",
+    "repo": "qBraid/qbraid-infrastructure",
+    "category": "error_handling",
+    "cosine": 0.682320773601532,
+    "label": "contradicts",
+    "rationale": "One says inline GitHub Actions bash steps fail fast under strict mode, while the other says failures are handled tolerantly without immediate failure."
+  },
+  {
+    "a": "Convention [error_handling]: Express controller methods use a try/catch and delegate failures to Express error middleware via `next(error)` rather than handling errors inline.",
+    "b": "Convention [error_handling]: Controllers use shared async/error-response wrappers and helpers, with async endpoints wrapped in `asyncHandler(...)` and successful responses returned through `sendSuccess(...)` rather than calling `res` methods directly.",
+    "repo": "qBraid/qbraid-api",
+    "category": "error_handling",
+    "cosine": 0.6747415661811829,
+    "label": "contradicts",
+    "rationale": "One requires controller try/catch with next(error), while the other requires asyncHandler wrappers instead of controller-local async error handling."
+  },
+  {
+    "a": "Convention [architecture]: The MCP public surface is hosted in-process by qbraid-api and exposed through a dedicated hostname/path matcher on the existing backend, preventing the MCP hostname from becoming an alternate entry point to the broader /api/v1 surface.",
+    "b": "Convention [architecture]: The MCP public surface is hosted in-process by the existing qbraid-api Cloud Run service; its dedicated hostname maps to that same service rather than a separate deployment.",
+    "repo": "qBraid/qbraid-infrastructure",
+    "category": "architecture",
+    "cosine": 0.8935432434082031,
+    "label": "duplicate",
+    "rationale": "Both say the MCP surface remains in qbraid-api behind its dedicated hostname instead of a separate service."
+  },
+  {
+    "a": "Convention [architecture]: Feature-specific React context providers and hooks are colocated under feature context modules and exposed as `Provider`/`use...` pairs, e.g. `ArticleKernelProvider` with `useArticleKernel`, alongside optional variants like `useKernelContextOptional`.",
+    "b": "Convention [architecture]: Client-side feature state is composed by wrapping lower-level API/store hooks inside feature-specific context providers. `ArticleKernelProvider` integrates `useKernelStartup`, `useKernelContextOptional`, and `useKernelStore`, indicating a layering pattern where feature contexts orchestrate API hooks and shared stores rather than calling raw APIs directly from leaf components.",
+    "repo": "qBraid/qbook",
+    "category": "architecture",
+    "cosine": 0.8414092063903809,
+    "label": "duplicate",
+    "rationale": "Both describe feature context providers composing shared hooks and exposing provider/hook pairs."
+  },
+  {
+    "a": "Convention [testing]: Tests document backward-compatibility behavior with explicit scenario names and inline legacy-data rationale, e.g. `it(...)` cases describing 'lenient legacy mode' for preserving editability of pre-validation records.",
+    "b": "Convention [testing]: Unit tests include narrowly scoped regression cases with descriptive `it(...)` names that explain the specific bug being prevented, often accompanied by detailed comments documenting the failure path.",
+    "repo": "qBraid/qbraid-api",
+    "category": "testing",
+    "cosine": 0.6367650032043457,
+    "label": "duplicate",
+    "rationale": "Both require regression tests whose names and comments document the specific legacy bug behavior."
+  },
+  {
+    "a": "Convention [error_handling]: Missing-entity cases are handled with application-specific factory errors such as `AppError.notFound(...)`, indicating a standardized custom error abstraction for service-layer validation.",
+    "b": "Convention [error_handling]: Service-layer failures are surfaced with a custom AppError carrying three fields: a human-readable message, an HTTP status code (e.g. 503), and a machine-readable error code string such as 'CACHE_INVALIDATION_FAILED'.",
+    "repo": "qBraid/qbraid-api",
+    "category": "error_handling",
+    "cosine": 0.6326560378074646,
+    "label": "refines",
+    "rationale": "The first names the not-found factory specialization within the broader custom AppError convention."
+  },
+  {
+    "a": "Convention [architecture]: Cloud Run services are modeled with a primary container plus optional sidecar containers, with explicit dependency wiring via `primary_container_depends_on` and a dynamic `sidecars` collection.",
+    "b": "Convention [architecture]: Terraform service/container configuration uses optional attributes with `try(...)` fallbacks rather than duplicating resource definitions, e.g. `vpc_egress`, primary container settings, startup probe values, and `sidecars` defaulting to `[]`.",
+    "repo": "qBraid/qbraid-infrastructure",
+    "category": "architecture",
+    "cosine": 0.6206303238868713,
+    "label": "refines",
+    "rationale": "The second details optional Terraform attributes and defaults within the broader primary-container/sidecar model."
+  },
+  {
+    "a": "Convention [naming]: Interfaces use descriptive suffixes matching their domain role (e.g., ReviewerScore, ConsensusResult) without prefixes like 'I'",
+    "b": "Convention [naming]: Interfaces are prefixed with 'I' (e.g., IDimensionScore, IScoringResult, ILLMProvider, IResultStore, ICache) while plain option/config types omit the prefix (e.g., LLMOptions, ResultFilter)",
+    "repo": "BeLazy167/agentmd-scorer",
+    "category": "naming",
+    "cosine": 0.3893732104385695,
+    "label": "contradicts",
+    "rationale": "One convention forbids interface prefixes while the other requires the `I` prefix for interfaces."
+  },
+  {
+    "a": "Convention [naming]: Interfaces are prefixed with 'I' (e.g., IDimensionScore, IScoringResult, ILLMProvider, IResultStore, ICache) while plain option/config types omit the prefix (e.g., LLMOptions, ResultFilter)",
+    "b": "Convention [naming]: Interfaces are defined without prefix/suffix (e.g., EmailConfig, EmailMessage) using plain descriptive names matching their domain concept",
+    "repo": "BeLazy167/agentmd-scorer",
+    "category": "naming",
+    "cosine": 0.3450619209135983,
+    "label": "contradicts",
+    "rationale": "One convention requires an `I` prefix while the other requires plain unprefixed PascalCase interface names."
+  }
+]

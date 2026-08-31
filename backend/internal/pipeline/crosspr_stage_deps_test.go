@@ -72,7 +72,7 @@ func TestDefaultCrossPRStore_LoadFeatureFlags(t *testing.T) {
 	defaults := DefaultFeatureFlags()
 	// Every field is the opposite of its default. Without this the assertions
 	// below hold whether the adapter applies the blob or ignores it.
-	stored := FeatureFlags{CrossPRChecks: false, IssueAcceptance: false, MaxLinkedPRs: 3}
+	stored := FeatureFlags{CrossPRChecks: false, IssueAcceptance: false, ConventionConflictChecks: true, MaxLinkedPRs: 3}
 	if stored == defaults {
 		t.Fatalf("fixture equals DefaultFeatureFlags() %+v — this test could not fail", defaults)
 	}

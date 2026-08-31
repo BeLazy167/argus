@@ -785,6 +785,103 @@ func (idx *PGIndexer) IndexScenario(ctx context.Context, owner, repo string, sce
 	return idx.upsertOne(ctx, "indexing scenario", doc)
 }
 
+// SimilarConventions retrieves a small same-repository/category cohort. The
+// production corpus shows contradiction cosine scores down to 0.345 while hard
+// unrelated negatives reach 0.783, so cosine is candidate generation only:
+// top-K (currently at most five) is classified by the LLM.
+func (idx *PGIndexer) SimilarConventions(ctx context.Context, repo, category, content string, limit int) ([]PatternMatch, error) {
+	if limit <= 0 || limit > 5 {
+		limit = 5
+	}
+	qv, err := idx.embedQuery(ctx, content)
+	if err != nil {
+		return nil, err
+	}
+	if qv == nil {
+		return nil, nil
+	}
+	pgctx := usesPGContextVector(ctx, idx.pool, idx.logger)
+	categoryClause := "AND metadata->>'category' = $4"
+	args := []any{idx.installationID, RepoTagNew(repo), qv, category, idx.embeddingSpaceID(), limit}
+	if category == "unknown" {
+		categoryClause = ""
+		args = []any{idx.installationID, RepoTagNew(repo), qv, idx.embeddingSpaceID(), limit}
+	}
+	var query string
+	if category == "unknown" {
+		query = fmt.Sprintf(`SELECT custom_id, content, metadata,
+			LEAST(GREATEST(1 - (embedding %s %s)::float8, 0), 1)
+			FROM live_memories WHERE installation_id=$1 AND container_tag=$2
+			AND type='pattern' AND metadata->>'source'='convention_extraction'
+			AND embedding IS NOT NULL AND embedding_space=$4
+			ORDER BY embedding %s %s, id LIMIT $5`, cosineOp(pgctx), vectorParam("$3", pgctx), cosineOp(pgctx), vectorParam("$3", pgctx))
+	} else {
+		query = fmt.Sprintf(`SELECT custom_id, content, metadata,
+			LEAST(GREATEST(1 - (embedding %s %s)::float8, 0), 1)
+			FROM live_memories WHERE installation_id=$1 AND container_tag=$2
+			AND type='pattern' AND metadata->>'source'='convention_extraction' %s
+			AND embedding IS NOT NULL AND embedding_space=$5
+			ORDER BY embedding %s %s, id LIMIT $6`, cosineOp(pgctx), vectorParam("$3", pgctx), categoryClause, cosineOp(pgctx), vectorParam("$3", pgctx))
+	}
+	rows, err := idx.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("similar conventions: %w", err)
+	}
+	defer rows.Close()
+	return scanMatches(rows, SearchRequest{}, "similar conventions")
+}
+
+func (idx *PGIndexer) RecordConventionEvidence(ctx context.Context, documentID string, repoID int64, prNumber int) (int, error) {
+	var count int
+	err := idx.pool.QueryRow(ctx, `WITH target AS (
+		SELECT id FROM memories WHERE installation_id=$1 AND custom_id=$2 AND deleted_at IS NULL
+	), ins AS (
+		INSERT INTO convention_evidence (convention_memory_id, repo_id, pr_number)
+		SELECT id,$3,$4 FROM target ON CONFLICT DO NOTHING
+	)
+	SELECT count(*) FROM convention_evidence WHERE convention_memory_id=(SELECT id FROM target)`, idx.installationID, documentID, repoID, prNumber).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("record convention evidence: %w", err)
+	}
+	return count, nil
+}
+
+func (idx *PGIndexer) SetConventionDisputed(ctx context.Context, leftID, rightID string, repoID int64, category string, prNumber int) error {
+	_, err := idx.pool.Exec(ctx, `WITH pair AS (
+		SELECT LEAST(a.id,b.id) lo, GREATEST(a.id,b.id) hi
+		FROM memories a JOIN memories b ON b.installation_id=a.installation_id
+		WHERE a.installation_id=$1 AND a.custom_id=$2 AND b.custom_id=$3
+	)
+	INSERT INTO convention_conflicts (installation_id,repo_id,category,memory_low_id,memory_high_id,introducing_memory_id,introducing_pr)
+	SELECT $1,$4,$5,lo,hi,(SELECT id FROM memories WHERE installation_id=$1 AND custom_id=$3),$6 FROM pair
+	ON CONFLICT (memory_low_id,memory_high_id) DO NOTHING`, idx.installationID, leftID, rightID, repoID, category, prNumber)
+	if err != nil {
+		return fmt.Errorf("set convention disputed: %w", err)
+	}
+	return nil
+}
+
+func (idx *PGIndexer) OpenConventionConflicts(ctx context.Context, repo string) ([]ConventionConflict, error) {
+	rows, err := idx.pool.Query(ctx, `SELECT l.custom_id,l.content,r.custom_id,r.content,c.category,c.introducing_pr
+		FROM convention_conflicts c
+		JOIN memories l ON l.id=c.memory_low_id JOIN memories r ON r.id=c.memory_high_id
+		WHERE c.installation_id=$1 AND c.state='open' AND l.container_tag=$2
+		ORDER BY c.id`, idx.installationID, RepoTagNew(repo))
+	if err != nil {
+		return nil, fmt.Errorf("open convention conflicts: %w", err)
+	}
+	defer rows.Close()
+	var out []ConventionConflict
+	for rows.Next() {
+		var c ConventionConflict
+		if err := rows.Scan(&c.LeftID, &c.LeftContent, &c.RightID, &c.RightContent, &c.Category, &c.IntroducingPR); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
 // InvalidateDocument records that a memory is no longer valid without deleting
 // its content or attribution history. Repeating the same transition is a
 // successful no-op; a deleted or unknown document returns an explicit error.

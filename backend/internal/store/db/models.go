@@ -110,6 +110,31 @@ type CommentOutcome struct {
 	AddressedAt     *time.Time `json:"addressed_at"`
 }
 
+type ConventionConflict struct {
+	ID                  int64      `json:"id"`
+	InstallationID      int64      `json:"installation_id"`
+	RepoID              *int64     `json:"repo_id"`
+	Category            string     `json:"category"`
+	MemoryLowID         int64      `json:"memory_low_id"`
+	MemoryHighID        int64      `json:"memory_high_id"`
+	IntroducingMemoryID int64      `json:"introducing_memory_id"`
+	State               string     `json:"state"`
+	IntroducingPr       int        `json:"introducing_pr"`
+	ArtifactNodeID      *string    `json:"artifact_node_id"`
+	ArtifactCommentID   *int64     `json:"artifact_comment_id"`
+	DeliveredAt         *time.Time `json:"delivered_at"`
+	ClaimedAt           *time.Time `json:"claimed_at"`
+	CreatedAt           time.Time  `json:"created_at"`
+	UpdatedAt           time.Time  `json:"updated_at"`
+}
+
+type ConventionEvidence struct {
+	ConventionMemoryID int64     `json:"convention_memory_id"`
+	RepoID             int64     `json:"repo_id"`
+	PRNumber           int       `json:"pr_number"`
+	CreatedAt          time.Time `json:"created_at"`
+}
+
 type DecisionTrace struct {
 	ID         int64      `json:"id"`
 	RepoID     int64      `json:"repo_id"`

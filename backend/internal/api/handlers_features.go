@@ -16,17 +16,19 @@ import (
 // featureFlagsResponse is what the settings page consumes. Includes the
 // computed/defaulted values so the UI never has to remember defaults.
 type featureFlagsResponse struct {
-	IssueAcceptance bool `json:"issue_acceptance"`
-	CrossPRChecks   bool `json:"cross_pr_checks"`
-	MaxLinkedPRs    int  `json:"max_linked_prs"`
+	IssueAcceptance          bool `json:"issue_acceptance"`
+	CrossPRChecks            bool `json:"cross_pr_checks"`
+	ConventionConflictChecks bool `json:"convention_conflict_checks"`
+	MaxLinkedPRs             int  `json:"max_linked_prs"`
 }
 
 func defaultFeatureFlags() featureFlagsResponse {
 	d := pipeline.DefaultFeatureFlags()
 	return featureFlagsResponse{
-		IssueAcceptance: d.IssueAcceptance,
-		CrossPRChecks:   d.CrossPRChecks,
-		MaxLinkedPRs:    d.MaxLinkedPRs,
+		IssueAcceptance:          d.IssueAcceptance,
+		CrossPRChecks:            d.CrossPRChecks,
+		ConventionConflictChecks: d.ConventionConflictChecks,
+		MaxLinkedPRs:             d.MaxLinkedPRs,
 	}
 }
 
@@ -37,9 +39,10 @@ func parseFeatureFlags(raw json.RawMessage) featureFlagsResponse {
 	}
 	// Structural unmarshal into a generic map so missing fields keep defaults.
 	var partial struct {
-		IssueAcceptance *bool `json:"issue_acceptance"`
-		CrossPRChecks   *bool `json:"cross_pr_checks"`
-		MaxLinkedPRs    *int  `json:"max_linked_prs"`
+		IssueAcceptance          *bool `json:"issue_acceptance"`
+		CrossPRChecks            *bool `json:"cross_pr_checks"`
+		ConventionConflictChecks *bool `json:"convention_conflict_checks"`
+		MaxLinkedPRs             *int  `json:"max_linked_prs"`
 	}
 	if err := json.Unmarshal(raw, &partial); err != nil {
 		return out
@@ -49,6 +52,9 @@ func parseFeatureFlags(raw json.RawMessage) featureFlagsResponse {
 	}
 	if partial.CrossPRChecks != nil {
 		out.CrossPRChecks = *partial.CrossPRChecks
+	}
+	if partial.ConventionConflictChecks != nil {
+		out.ConventionConflictChecks = *partial.ConventionConflictChecks
 	}
 	if partial.MaxLinkedPRs != nil && *partial.MaxLinkedPRs > 0 {
 		out.MaxLinkedPRs = *partial.MaxLinkedPRs
@@ -123,7 +129,7 @@ func (s *Server) setFeatureFlags(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.auditSettings(r, installationID, "feature_flags.update", map[string]interface{}{
-		"issue_acceptance": body.IssueAcceptance, "cross_pr_checks": body.CrossPRChecks, "max_linked_prs": body.MaxLinkedPRs,
+		"issue_acceptance": body.IssueAcceptance, "cross_pr_checks": body.CrossPRChecks, "convention_conflict_checks": body.ConventionConflictChecks, "max_linked_prs": body.MaxLinkedPRs,
 	})
 	writeJSON(w, http.StatusOK, body)
 }

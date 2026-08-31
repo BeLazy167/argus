@@ -13,6 +13,15 @@ import (
 const createPattern = `-- name: CreatePattern :one
 INSERT INTO patterns (installation_id, repo_id, content, memory_doc_id, created_by, source, category, pr_number, memory_custom_id)
 VALUES ($1, $2, $3, $4, $5, COALESCE($8::text, 'manual'), $6, $7, $9::text)
+ON CONFLICT (installation_id, memory_custom_id) WHERE memory_custom_id IS NOT NULL DO UPDATE
+SET repo_id = EXCLUDED.repo_id,
+    content = EXCLUDED.content,
+    memory_doc_id = COALESCE(EXCLUDED.memory_doc_id, patterns.memory_doc_id),
+    created_by = COALESCE(EXCLUDED.created_by, patterns.created_by),
+    source = EXCLUDED.source,
+    category = EXCLUDED.category,
+    pr_number = EXCLUDED.pr_number,
+    updated_at = now()
 RETURNING id, installation_id, repo_id, content, memory_doc_id, created_by, COALESCE(source, 'manual') as source, category, pr_number, created_at, updated_at
 `
 
@@ -231,8 +240,10 @@ func (q *Queries) GetPatternStats(ctx context.Context, dollar_1 []int64) ([]GetP
 }
 
 const listPatterns = `-- name: ListPatterns :many
-SELECT id, installation_id, repo_id, content, memory_doc_id, created_by, COALESCE(source, 'manual') as source, category, pr_number, created_at, updated_at
-FROM patterns WHERE installation_id = ANY($1::bigint[]) ORDER BY created_at DESC
+SELECT p.id, p.installation_id, p.repo_id, p.content, p.memory_doc_id, p.created_by, COALESCE(p.source, 'manual') as source, p.category, p.pr_number, p.created_at, p.updated_at,
+CASE WHEN m.id IS NULL THEN 'unmirrored' WHEN m.deleted_at IS NOT NULL THEN 'deleted' WHEN m.invalidated_at IS NOT NULL OR m.superseded_by IS NOT NULL THEN 'superseded' WHEN EXISTS (SELECT 1 FROM convention_conflicts c WHERE c.state='open' AND (c.memory_low_id=m.id OR c.memory_high_id=m.id)) THEN 'disputed' ELSE 'active' END::text AS status,
+COALESCE((SELECT count(*) FROM convention_evidence e WHERE e.convention_memory_id=m.id), 1)::int AS evidence_count
+FROM patterns p LEFT JOIN memories m ON m.installation_id=p.installation_id AND m.custom_id=p.memory_custom_id WHERE p.installation_id = ANY($1::bigint[]) ORDER BY p.created_at DESC
 `
 
 type ListPatternsRow struct {
@@ -247,6 +258,8 @@ type ListPatternsRow struct {
 	PRNumber       *int       `json:"pr_number"`
 	CreatedAt      *time.Time `json:"created_at"`
 	UpdatedAt      *time.Time `json:"updated_at"`
+	Status         string     `json:"status"`
+	EvidenceCount  int        `json:"evidence_count"`
 }
 
 func (q *Queries) ListPatterns(ctx context.Context, dollar_1 []int64) ([]ListPatternsRow, error) {
@@ -270,6 +283,8 @@ func (q *Queries) ListPatterns(ctx context.Context, dollar_1 []int64) ([]ListPat
 			&i.PRNumber,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.Status,
+			&i.EvidenceCount,
 		); err != nil {
 			return nil, err
 		}
@@ -282,8 +297,10 @@ func (q *Queries) ListPatterns(ctx context.Context, dollar_1 []int64) ([]ListPat
 }
 
 const listPatternsForRepo = `-- name: ListPatternsForRepo :many
-SELECT id, installation_id, repo_id, content, memory_doc_id, created_by, COALESCE(source, 'manual') as source, category, pr_number, created_at, updated_at
-FROM patterns WHERE installation_id = ANY($1::bigint[]) AND (repo_id IS NULL OR repo_id = $2) ORDER BY created_at DESC
+SELECT p.id, p.installation_id, p.repo_id, p.content, p.memory_doc_id, p.created_by, COALESCE(p.source, 'manual') as source, p.category, p.pr_number, p.created_at, p.updated_at,
+CASE WHEN m.id IS NULL THEN 'unmirrored' WHEN m.deleted_at IS NOT NULL THEN 'deleted' WHEN m.invalidated_at IS NOT NULL OR m.superseded_by IS NOT NULL THEN 'superseded' WHEN EXISTS (SELECT 1 FROM convention_conflicts c WHERE c.state='open' AND (c.memory_low_id=m.id OR c.memory_high_id=m.id)) THEN 'disputed' ELSE 'active' END::text AS status,
+COALESCE((SELECT count(*) FROM convention_evidence e WHERE e.convention_memory_id=m.id), 1)::int AS evidence_count
+FROM patterns p LEFT JOIN memories m ON m.installation_id=p.installation_id AND m.custom_id=p.memory_custom_id WHERE p.installation_id = ANY($1::bigint[]) AND (p.repo_id IS NULL OR p.repo_id = $2) ORDER BY p.created_at DESC
 `
 
 type ListPatternsForRepoParams struct {
@@ -303,6 +320,8 @@ type ListPatternsForRepoRow struct {
 	PRNumber       *int       `json:"pr_number"`
 	CreatedAt      *time.Time `json:"created_at"`
 	UpdatedAt      *time.Time `json:"updated_at"`
+	Status         string     `json:"status"`
+	EvidenceCount  int        `json:"evidence_count"`
 }
 
 func (q *Queries) ListPatternsForRepo(ctx context.Context, arg ListPatternsForRepoParams) ([]ListPatternsForRepoRow, error) {
@@ -326,6 +345,8 @@ func (q *Queries) ListPatternsForRepo(ctx context.Context, arg ListPatternsForRe
 			&i.PRNumber,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.Status,
+			&i.EvidenceCount,
 		); err != nil {
 			return nil, err
 		}

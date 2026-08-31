@@ -50,6 +50,9 @@ type Briefing struct {
 	// Patterns is repo-scoped patterns/scenarios (non-feedback) followed by
 	// shared org patterns, in that order, each ≤500 chars.
 	Patterns []string
+	// Disputed conventions are excluded from ordinary live retrieval and rendered
+	// separately so neither side is enforced while the team decides.
+	Disputed []string
 	// FalsePositives is type=feedback action=dismissed content.
 	FalsePositives []string
 	// Reinforced is confirmed-finding feedback that raises the priority of recurrences.
@@ -69,6 +72,7 @@ type BriefingQuery struct {
 	FilePath string
 	Query    string
 	Options  BriefingOptions
+	Disputed []ConventionConflict
 }
 
 // briefingWith is the shared Briefing pipeline over a transport core:
@@ -104,6 +108,9 @@ func briefingWith(ctx context.Context, run runSearchFn, logger *slog.Logger, q B
 	b, err := assembleBriefingWith(ctx, run, logger, q)
 	if err != nil {
 		return "", err
+	}
+	for _, conflict := range q.Disputed {
+		b.Disputed = append(b.Disputed, fmt.Sprintf("team is split on %s vs %s — do not enforce either side", conflict.LeftContent, conflict.RightContent))
 	}
 	logger.DebugContext(ctx, "memory briefing sections assembled", "operation_id", operationID,
 		"has_synthesis", b.Synthesis != "", "pattern_count", len(b.Patterns),
@@ -262,6 +269,13 @@ func (b Briefing) renderSpecialist(filePath string, charCap int, emphasizeFalseP
 		sb.WriteString(b.Synthesis + "\n")
 	}
 
+	if len(b.Disputed) > 0 {
+		sb.WriteString("\n\n## Disputed — do not enforce\n")
+		for _, d := range b.Disputed {
+			sb.WriteString("- " + d + "\n")
+		}
+	}
+
 	if len(b.Patterns) > 0 {
 		if b.Synthesis == "" {
 			sb.WriteString("\n\n## Repo Memory (patterns from past reviews)\n\n")
@@ -314,6 +328,13 @@ func (b Briefing) renderReview(charCap int) string {
 		sb.WriteString("\n## Review Rules\n")
 		for i, r := range b.Rules {
 			sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, r))
+		}
+	}
+
+	if len(b.Disputed) > 0 {
+		sb.WriteString("\n## Disputed — do not enforce\n")
+		for _, d := range b.Disputed {
+			sb.WriteString("- " + d + "\n")
 		}
 	}
 

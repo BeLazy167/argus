@@ -1247,9 +1247,10 @@ type CombinationRisk struct {
 
 // FeatureFlags captures per-installation feature gates loaded once per run.
 type FeatureFlags struct {
-	CrossPRChecks   bool `json:"cross_pr_checks"`
-	IssueAcceptance bool `json:"issue_acceptance"`
-	MaxLinkedPRs    int  `json:"max_linked_prs"`
+	CrossPRChecks            bool `json:"cross_pr_checks"`
+	IssueAcceptance          bool `json:"issue_acceptance"`
+	ConventionConflictChecks bool `json:"convention_conflict_checks"`
+	MaxLinkedPRs             int  `json:"max_linked_prs"`
 }
 
 // DefaultFeatureFlags returns the backfill defaults for new installations:
@@ -1261,8 +1262,9 @@ type FeatureFlags struct {
 // an empty feature_flags blob or a missing cross_pr_checks key flip to on.
 func DefaultFeatureFlags() FeatureFlags {
 	return FeatureFlags{
-		CrossPRChecks:   true,
-		IssueAcceptance: true,
-		MaxLinkedPRs:    5,
+		CrossPRChecks:            true,
+		IssueAcceptance:          true,
+		ConventionConflictChecks: true,
+		MaxLinkedPRs:             5,
 	}
 }

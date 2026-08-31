@@ -23,25 +23,29 @@ type Fake struct {
 	// drive every value-level read the pipeline performs; both carry an error
 	// return so a test can inject a failed search (propagate vs degrade coverage)
 	// and switch behavior on the query (q.Type / q.Scope) per call site.
-	SearchFn   func(q memory.MemoryQuery) ([]memory.PatternMatch, error)
-	BriefingFn func(q memory.BriefingQuery) (string, error)
+	SearchFn                  func(q memory.MemoryQuery) ([]memory.PatternMatch, error)
+	BriefingFn                func(q memory.BriefingQuery) (string, error)
+	SimilarConventionsFn      func(repo, category, content string, limit int) ([]memory.PatternMatch, error)
+	OpenConventionConflictsFn func(repo string) ([]memory.ConventionConflict, error)
 
 	// ReviewID records the attribution ForReview was called with, so a test can
 	// assert the pipeline stamped its writes with the run's review. uuid.Nil
 	// means ForReview was never called (or was called with Nil).
 	ReviewID uuid.UUID
 
-	mu          sync.Mutex
-	Feedback    []memory.FeedbackMemory // IndexFeedbackSignal
-	Reconciled  []memory.FeedbackMemory // ReconcileFeedbackSignal
-	Patterns    []memory.PatternMemory  // IndexPattern
-	SharedPats  []memory.PatternMemory  // IndexSharedPattern
-	Rules       []memory.RuleMemory     // IndexRule
-	ReviewBatch [][]memory.ReviewMemory // IndexReviewCommentsBatch
-	Scenarios   []FakeScenario          // IndexScenario
-	Invalidated []string                // InvalidateDocument
-	Superseded  [][2]string             // SupersedeDocument
-	Deleted     []string                // DeleteDocument
+	mu                 sync.Mutex
+	Feedback           []memory.FeedbackMemory // IndexFeedbackSignal
+	Reconciled         []memory.FeedbackMemory // ReconcileFeedbackSignal
+	Patterns           []memory.PatternMemory  // IndexPattern
+	SharedPats         []memory.PatternMemory  // IndexSharedPattern
+	Rules              []memory.RuleMemory     // IndexRule
+	ReviewBatch        [][]memory.ReviewMemory // IndexReviewCommentsBatch
+	Scenarios          []FakeScenario          // IndexScenario
+	Invalidated        []string                // InvalidateDocument
+	Superseded         [][2]string             // SupersedeDocument
+	Deleted            []string                // DeleteDocument
+	ConventionEvidence [][3]any
+	Disputed           [][5]any
 }
 
 // FakeScenario records one IndexScenario call.
@@ -126,6 +130,31 @@ func (f *Fake) Briefing(_ context.Context, q memory.BriefingQuery) (string, erro
 		return f.BriefingFn(q)
 	}
 	return "", nil
+}
+
+func (f *Fake) SimilarConventions(_ context.Context, repo, category, content string, limit int) ([]memory.PatternMatch, error) {
+	if f.SimilarConventionsFn != nil {
+		return f.SimilarConventionsFn(repo, category, content, limit)
+	}
+	return nil, nil
+}
+func (f *Fake) RecordConventionEvidence(_ context.Context, documentID string, repoID int64, prNumber int) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ConventionEvidence = append(f.ConventionEvidence, [3]any{documentID, repoID, prNumber})
+	return len(f.ConventionEvidence), nil
+}
+func (f *Fake) SetConventionDisputed(_ context.Context, leftID, rightID string, repoID int64, category string, prNumber int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Disputed = append(f.Disputed, [5]any{leftID, rightID, repoID, category, prNumber})
+	return nil
+}
+func (f *Fake) OpenConventionConflicts(_ context.Context, repo string) ([]memory.ConventionConflict, error) {
+	if f.OpenConventionConflictsFn != nil {
+		return f.OpenConventionConflictsFn(repo)
+	}
+	return nil, nil
 }
 
 func (f *Fake) InvalidateDocument(_ context.Context, documentID string) error {
