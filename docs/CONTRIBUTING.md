@@ -72,6 +72,14 @@ Run `pnpm lint` and `pnpm typecheck` before submitting PRs that touch `web/`.
 6. Commit with a descriptive message following the convention below
 7. Push and open a PR against `main`
 
+## Review gate
+
+Beyond CI, maintainers run an adversarial verification workflow
+(`.claude/workflows/adversarial-verify.js`, described in `CLAUDE.md`) over every
+PR before merge. It needs maintainer-side agent tooling — external contributors
+are not expected to run it, only to have `make test`, `make lint`, and the
+frontend checks green.
+
 ## Commit Messages
 
 Use conventional commit prefixes:

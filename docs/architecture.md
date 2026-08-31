@@ -380,7 +380,7 @@ Outcomes land in the comment outcome vocabulary (`comment_outcomes`, migration 0
 
 ## Command Dispatch Flow
 
-Commands are triggered by `@argus-eye <command>` in PR issue comments. The webhook handler dispatches to `dispatchCommand()` which parses the command with regex `(?i)@argus-eye\s+(review|remember|resolve|fix|help)(.*)` and routes to the appropriate handler.
+Commands are triggered by `@argus-eye <command>` in PR issue comments. The webhook handler dispatches to `dispatchCommand()` which parses the command with regex `(?i)@<app-slug>\s+(review|remember|resolve|fix|test|help)(.*)` and routes to the appropriate handler.
 
 ```mermaid
 flowchart TD
@@ -392,6 +392,7 @@ flowchart TD
     PARSE --> |"remember"| REM["handleRememberCommand()"]
     PARSE --> |"resolve"| RES["handleResolveCommand()"]
     PARSE --> |"fix"| FIX["handleFixCommand()"]
+    PARSE --> |"test"| TEST["handleTestCommand()"]
     PARSE --> |"help"| HELP["handleHelpCommand()"]
     PARSE --> |"no match"| DROP["silently ignored"]
 
@@ -426,6 +427,7 @@ flowchart TD
 | `remember` | `@argus-eye remember [--org] <pattern>` | Stores a pattern in memory. `--org` scopes to the installation-wide `_shared` container, otherwise the repo container. Also persists to the `patterns` table |
 | `resolve` | `@argus-eye resolve` | Resolves all unresolved Argus review threads on the PR via GraphQL and marks each finding `state=resolved`. Maintainer-only — a non-privileged commenter (not owner/member/collaborator) is refused |
 | `fix` | `@argus-eye fix` | Auto-applies suggested fixes from unresolved Argus comments. Creates a commit on the PR branch via Git Data API |
+| `test` | `@argus-eye test [--code]` | Generates a test plan from the latest review's findings; `--code` drafts executable test code |
 | `help` | `@argus-eye help` | Posts a help table listing all available commands |
 
 ---
@@ -590,20 +592,13 @@ All IDs are truncated to 100 characters max via `truncateIDWithSuffix()`. Hashes
 
 ## Licensing
 
-Argus follows the **Sustainable Use License** model (similar to n8n):
+Argus is licensed under [AGPL-3.0](../LICENSE) in full. There is no separate
+enterprise tier, no `.ee` directory, and no feature gating: every capability in
+this repository is available to every installation, hosted or self-hosted.
 
-- **Core**: Licensed under the [Sustainable Use License](../LICENSE). Free for internal business use and non-commercial/personal use. Self-hosting is allowed.
-- **Enterprise**: Files containing `.ee.` in their filename or `.ee/` in their directory path require a commercial Argus Enterprise License.
+The practical obligation the AGPL adds over a permissive license: if you run a
+modified Argus as a network service, you must offer your users the modified
+source.
 
-**What the Sustainable Use License allows:**
-- Self-host Argus for your internal code reviews
-- Modify and customize for your own use
-- Free for personal and non-commercial projects
-
-**What it restricts:**
-- Cannot offer Argus as a competing hosted/SaaS service
-- Cannot remove licensing notices
-
-The hosted service at [argus.reviews](https://argus.reviews) offers managed hosting with both core and enterprise features, which funds ongoing development.
-
-Examples of this model: n8n, Cal.com
+The hosted service at [argus.reviews](https://argus.reviews) runs this same code
+and offers managed hosting, which funds ongoing development.

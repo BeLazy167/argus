@@ -137,7 +137,7 @@ Running Argus against your own repos means creating a GitHub App and pointing a 
 ### Prerequisites
 
 - Go 1.24+
-- PostgreSQL (or a serverless Postgres like [Neon](https://neon.tech))
+- PostgreSQL with the **pgvector >= 0.8.2** extension available (`docker compose up` ships it; on a managed/serverless Postgres like [Neon](https://neon.tech), check the version — the migration fails fast on anything older)
 - A [GitHub App](docs/self-hosting.md) — Argus receives its webhooks and posts as it
 
 ### External services
@@ -202,8 +202,8 @@ Key environment variables — see [`backend/.env.example`](backend/.env.example)
 | `MERMAID_VALIDATOR_SECRET` | Shared backend/dashboard secret for Mermaid parser requests; configure with the validator base URL |
 | `SELF_HOSTED` | `true` applies self-host defaults (reviews auto-run unconditionally) |
 | `EMBEDDINGS_API_KEY` | Embeddings key for memory (optional; without it rows are full-text-searchable only) |
-| `EMBEDDINGS_BASE_URL` | Embeddings endpoint (OpenAI-compatible), default Voyage via the AI gateway |
-| `EMBEDDINGS_MODEL` | Embedding model, default `voyage/voyage-4-large` (1024 dims) |
+| `EMBEDDINGS_BASE_URL` | Embeddings endpoint (OpenAI-compatible), default `https://api.voyageai.com/v1`; `.env.example` uses the Vercel AI Gateway instead |
+| `EMBEDDINGS_MODEL` | Embedding model, default `voyage-4` (`voyage/voyage-4-large` in gateway form); must serve `EMBEDDINGS_DIMENSIONS` (1024) dims |
 
 ---
 
