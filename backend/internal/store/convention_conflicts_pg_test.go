@@ -90,7 +90,7 @@ func TestConventionEvidenceAndResolutionLifecycle(t *testing.T) {
 }
 
 func TestConventionConflictDeliveryRetriesAfterFailure(t *testing.T){
- pool,ctx:=fileMemoryTestPool(t);install,_,_:=seedLearnTenant(t,ctx,pool,"conflict-delivery");var repo int64;pool.QueryRow(ctx,`SELECT id FROM repos WHERE installation_id=$1`,install).Scan(&repo)
+ pool,ctx:=fileMemoryTestPool(t);install,_,_:=seedLearnTenant(t,ctx,pool,"conflict-delivery");var repo int64;if err:=pool.QueryRow(ctx,`SELECT id FROM repos WHERE installation_id=$1`,install).Scan(&repo);err!=nil{t.Fatal(err)}
  var a,b int64;for id,c:=range map[*int64]string{&a:"delivery-a",&b:"delivery-b"}{if err:=pool.QueryRow(ctx,`INSERT INTO memories(installation_id,container_tag,custom_id,type,content) VALUES($1,'conflict-delivery',$2,'pattern',$2) RETURNING id`,install,c).Scan(id);err!=nil{t.Fatal(err)}}
  var cid int64;if err:=pool.QueryRow(ctx,`INSERT INTO convention_conflicts(installation_id,repo_id,category,memory_low_id,memory_high_id,introducing_memory_id,introducing_pr) VALUES($1,$2,'testing',LEAST($3::bigint,$4::bigint),GREATEST($3::bigint,$4::bigint),$4,7) RETURNING id`,install,repo,a,b).Scan(&cid);err!=nil{t.Fatal(err)}
  st:=NewWithDB(pool);calls:=0;post:=func(context.Context)(string,int64,error){calls++;if calls==1{return "",0,errors.New("502")};return "node",99,nil}
