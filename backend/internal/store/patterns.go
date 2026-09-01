@@ -107,6 +107,21 @@ func (s *Store) ListPatternsForRepo(ctx context.Context, installationIDs []int64
 // repaired memory document still needs (for example a shared pattern's full
 // owner/repo origin).
 func (s *Store) CreatePattern(ctx context.Context, installationID int64, repoID *int64, content string, memoryDocID *string, createdBy *string, source *string, category *string, prNumber *int, memoryCustomID *string, mirrorExtra map[string]string) (storeResult0 *Pattern, storeErr error) {
+	return s.createPattern(ctx, false, installationID, repoID, content, memoryDocID, createdBy, source, category, prNumber, memoryCustomID, mirrorExtra)
+}
+
+// CreatePatternUpsert is used only by enabled convention conflict handling.
+func (s *Store) CreatePatternUpsert(ctx context.Context, installationID int64, repoID *int64, content string, memoryDocID *string, createdBy *string, source *string, category *string, prNumber *int, memoryCustomID *string, mirrorExtra map[string]string) (*Pattern, error) {
+	return s.createPattern(ctx, true, installationID, repoID, content, memoryDocID, createdBy, source, category, prNumber, memoryCustomID, mirrorExtra)
+}
+
+// CreatePatternAppend preserves the pre-conflict-check append semantics for
+// installations that explicitly disable convention conflict handling.
+func (s *Store) CreatePatternAppend(ctx context.Context, installationID int64, repoID *int64, content string, memoryDocID *string, createdBy *string, source *string, category *string, prNumber *int, memoryCustomID *string, mirrorExtra map[string]string) (*Pattern, error) {
+	return s.createPattern(ctx, false, installationID, repoID, content, memoryDocID, createdBy, source, category, prNumber, memoryCustomID, mirrorExtra)
+}
+
+func (s *Store) createPattern(ctx context.Context, upsert bool, installationID int64, repoID *int64, content string, memoryDocID *string, createdBy *string, source *string, category *string, prNumber *int, memoryCustomID *string, mirrorExtra map[string]string) (storeResult0 *Pattern, storeErr error) {
 	storeFinish :=
 		beginStoreOperation(ctx, "CreatePattern",
 
@@ -147,11 +162,14 @@ func (s *Store) CreatePattern(ctx context.Context, installationID int64, repoID 
 			}
 		}
 
-		row, err := q.CreatePattern(ctx, db.CreatePatternParams{
-			InstallationID: installationID, RepoID: repoID, Content: content,
-			MemoryDocID: memoryDocID, CreatedBy: createdBy, Source: source,
-			Category: category, PRNumber: prNumber, MemoryCustomID: memoryCustomID,
-		})
+		var row db.CreatePatternRow
+		var err error
+		params := db.CreatePatternParams{InstallationID: installationID, RepoID: repoID, Content: content, MemoryDocID: memoryDocID, CreatedBy: createdBy, Source: source, Category: category, PRNumber: prNumber, MemoryCustomID: memoryCustomID}
+		if upsert {
+			row, err = q.CreatePattern(ctx, params)
+		} else {
+			err = tx.QueryRow(ctx, `INSERT INTO patterns (installation_id,repo_id,content,memory_doc_id,created_by,source,category,pr_number,memory_custom_id) VALUES($1,$2,$3,$4,$5,COALESCE($6,'manual'),$7,$8,$9) RETURNING id,installation_id,repo_id,content,memory_doc_id,created_by,COALESCE(source,'manual'),category,pr_number,created_at,updated_at`, installationID, repoID, content, memoryDocID, createdBy, source, category, prNumber, memoryCustomID).Scan(&row.ID, &row.InstallationID, &row.RepoID, &row.Content, &row.MemoryDocID, &row.CreatedBy, &row.Source, &row.Category, &row.PRNumber, &row.CreatedAt, &row.UpdatedAt)
+		}
 		if err != nil {
 			return MemoryMirrorEvent{}, err
 		}

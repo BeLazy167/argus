@@ -13,7 +13,7 @@ FROM patterns p LEFT JOIN memories m ON m.installation_id=p.installation_id AND 
 -- name: CreatePattern :one
 INSERT INTO patterns (installation_id, repo_id, content, memory_doc_id, created_by, source, category, pr_number, memory_custom_id)
 VALUES ($1, $2, $3, $4, $5, COALESCE(sqlc.narg(source)::text, 'manual'), $6, $7, sqlc.narg(memory_custom_id)::text)
-ON CONFLICT (installation_id, memory_custom_id) WHERE memory_custom_id IS NOT NULL DO UPDATE
+ON CONFLICT (installation_id, memory_custom_id) WHERE memory_custom_id IS NOT NULL AND source = 'convention' DO UPDATE
 SET repo_id = EXCLUDED.repo_id,
     content = EXCLUDED.content,
     memory_doc_id = COALESCE(EXCLUDED.memory_doc_id, patterns.memory_doc_id),

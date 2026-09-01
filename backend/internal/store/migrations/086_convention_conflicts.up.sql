@@ -1,8 +1,28 @@
 -- Convention lifecycle state is authoritative in memories. These tables add
 -- idempotent evidence, open-conflict edges, and post-review artifact delivery.
-CREATE UNIQUE INDEX patterns_installation_memory_custom_uniq
+-- Historical pattern writes appended rows under a non-unique custom-id index.
+-- Converge duplicates before installing the upsert arbiter. Preserve finding
+-- attribution by repointing matched_pattern_id to the newest surviving row.
+WITH ranked AS (
+  SELECT id, first_value(id) OVER (
+    PARTITION BY installation_id, memory_custom_id
+    ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST, id DESC
+  ) AS keep_id,
+  row_number() OVER (
+    PARTITION BY installation_id, memory_custom_id
+    ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST, id DESC
+  ) AS rn
+  FROM patterns WHERE memory_custom_id IS NOT NULL AND source = 'convention'
+), moved AS (
+  UPDATE review_comments rc SET matched_pattern_id = ranked.keep_id
+  FROM ranked WHERE ranked.rn > 1 AND rc.matched_pattern_id = ranked.id
+)
+DELETE FROM patterns p USING ranked
+WHERE ranked.rn > 1 AND p.id = ranked.id;
+
+CREATE UNIQUE INDEX patterns_convention_memory_custom_uniq
   ON patterns (installation_id, memory_custom_id)
-  WHERE memory_custom_id IS NOT NULL;
+  WHERE memory_custom_id IS NOT NULL AND source = 'convention';
 
 CREATE TABLE convention_evidence (
   convention_memory_id bigint NOT NULL REFERENCES memories(id) ON DELETE CASCADE,

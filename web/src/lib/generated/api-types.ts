@@ -465,6 +465,8 @@ export interface Pattern {
   pr_number?: number /* int */;
   created_at: string;
   updated_at: string;
+  status: string;
+  evidence_count: number /* int */;
 }
 export interface PatternStat {
   week: string;
