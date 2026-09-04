@@ -63,7 +63,23 @@ func TestSuppressionKeySeparatorStaysUnambiguous(t *testing.T) {
 	if len(suppressionSeparator) != 1 {
 		t.Fatalf("separator %q is %d bytes, want a single control byte", suppressionSeparator, len(suppressionSeparator))
 	}
-	if b := suppressionSeparator[0]; b == 0x00 || b >= 0x20 {
-		t.Fatalf("separator byte %#x must be a C0 control other than NUL: NUL breaks jsonb (SQLSTATE 22P05), and anything >= 0x20 is printable and can appear in a path or review body", b)
+	switch b := suppressionSeparator[0]; {
+	case b == 0x00:
+		t.Fatal("separator is NUL: jsonb rejects it with SQLSTATE 22P05 and the run becomes unrecoverable")
+	case b >= 0x20:
+		t.Fatalf("separator byte %#x is printable and can appear in a file path or review body", b)
+	case b == 0x09 || b == 0x0a || b == 0x0d:
+		// Caught by the gate on #287: the byte-class check alone admits tab, LF
+		// and CR. Review bodies are multi-line markdown, so LF is the ordinary
+		// case, and it collides exactly like a printable separator would:
+		//   suppressionKey("a.go", 1, "b\n2\nc") == suppressionKey("a.go\n1\nb", 2, "c")
+		t.Fatalf("separator byte %#x is whitespace that review bodies contain routinely", b)
+	}
+
+	// Assert the property directly against a body shaped like a real finding,
+	// rather than trusting the byte class to imply it.
+	body := "Guard the write.\n\n| file | line |\n| --- | --- |\n| a.go | 12 |\n\n\tindented\r\n"
+	if strings.Contains(body, suppressionSeparator) {
+		t.Fatalf("separator %q occurs in a representative review body, so keys are ambiguous", suppressionSeparator)
 	}
 }
