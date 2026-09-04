@@ -170,6 +170,7 @@ type GraphIndexGeneration struct {
 	PublishedAt      *time.Time `json:"published_at"`
 	RefreshVersion   int64      `json:"refresh_version"`
 	UnavailableFiles int        `json:"unavailable_files"`
+	ContentHash      string     `json:"content_hash"`
 }
 
 type GraphIndexGenerationFile struct {
