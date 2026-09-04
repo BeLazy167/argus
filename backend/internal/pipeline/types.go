@@ -125,7 +125,7 @@ type PipelineRun struct {
 	// below their severity threshold) plus nits demoted from files that carry a
 	// blocking finding. Rendered collapsed in the summary, never inline.
 	MinorNotes          []MinorNote         `json:"minor_notes,omitempty"`
-	SuppressedKeys      map[string]struct{} // path\x00line\x00body of dismissal-dropped findings; gates pattern-learning that reads the pre-enrich AllFileReviews snapshot
+	SuppressedKeys      map[string]struct{} // path\x1fline\x1fbody of dismissal-dropped findings; gates pattern-learning that reads the pre-enrich AllFileReviews snapshot. Separator must stay jsonb-safe: see suppressionSeparator
 	Synthesis           *SynthesisResult
 	Tokens              RunTokenUsage
 	Persona             Persona
