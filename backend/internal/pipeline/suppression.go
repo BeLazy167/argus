@@ -473,13 +473,28 @@ func countSuppressedFindings(reviews []FileReview) int {
 	return n
 }
 
+// suppressionSeparator joins the fields of a suppression key. It is U+001F
+// (Unit Separator), not NUL.
+//
+// NUL cannot be used here. These keys are map keys on PipelineRun.SuppressedKeys,
+// which persistState marshals into the jsonb pipeline_states.payload column, and
+// jsonb cannot represent a NUL — Postgres rejects the whole upsert with
+// SQLSTATE 22P05. Because the payload is how a run resumes, such a run can never
+// persist and never recover: recovery re-reads it, fails identically, and backs
+// off for 30 minutes forever. Six production runs stranded that way between
+// 2026-08-21 and 2026-09-02.
+//
+// U+001F keeps the property NUL was chosen for — a control character no file
+// path or review body carries — while remaining representable in jsonb.
+const suppressionSeparator = "\x1f"
+
 // suppressionKey identifies a finding across the FileReviews and AllFileReviews
 // snapshots. Path/Line/Body are value-copied identically into both (scoring
 // snapshots FileReviews by copy BEFORE enrichment sets the Suppressed flag), so
-// the same key resolves the finding in either snapshot. The \x00 separators keep
-// the key unambiguous even when a body contains delimiters.
+// the same key resolves the finding in either snapshot. The separators keep the
+// key unambiguous even when a body contains delimiters.
 func suppressionKey(path string, line int, body string) string {
-	return path + "\x00" + strconv.Itoa(line) + "\x00" + body
+	return path + suppressionSeparator + strconv.Itoa(line) + suppressionSeparator + body
 }
 
 // isSuppressed reports whether a finding (path/line/body) was dropped by the

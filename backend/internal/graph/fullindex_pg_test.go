@@ -1635,3 +1635,88 @@ func TestListReposDueForGraphIndexSelectsLegacyRecentTimestampWithoutPublishedAu
 		t.Fatalf("legacy repo with recent timestamp and null generation authority not immediately due: %+v", targets)
 	}
 }
+
+// generationNodeIDs returns the repo's published node IDs in a stable order.
+// Identity matters here: the publish swap deletes and re-inserts, so surviving
+// IDs are proof the swap did not run.
+func generationNodeIDs(t *testing.T, ctx context.Context, pool *pgxpool.Pool, repoID int64) []int64 {
+	t.Helper()
+	rows, err := pool.Query(ctx, `SELECT id FROM code_nodes WHERE repo_id = $1 ORDER BY id`, repoID)
+	if err != nil {
+		t.Fatalf("read node ids: %v", err)
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			t.Fatalf("scan node id: %v", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate node ids: %v", err)
+	}
+	return ids
+}
+
+// A commit that touches no indexed symbol still resolves to a new head and
+// still builds a generation. Publishing it must advance the repo's bookkeeping
+// without rewriting code_nodes, because the swap would delete and re-insert
+// every row to arrive at the graph already there. That churn is what filled
+// the pggraph CDC log and the database volume on 2026-09-03.
+func TestPublishSkipsSwapWhenGenerationMatchesLiveGraph(t *testing.T) {
+	pool, ctx := generationTestPool(t)
+	st := store.NewWithDB(pool)
+	installationID := generationSeedInstallation(t, ctx, pool, "{}")
+	repoID := generationSeedRepo(t, ctx, pool, installationID, "generation/noop-publish")
+
+	gh := &fakeFullIndexGitHub{
+		sha:      "1111111111111111111111111111111111111111",
+		tree:     ghpkg.RepoTree{Files: []ghpkg.RepoTreeFile{{Path: "a.go", SHA: "sha-a.go"}, {Path: "b.go", SHA: "sha-b.go"}}},
+		contents: map[string]string{"a.go": "package p\nfunc Alpha() { Beta() }\n", "b.go": "package p\nfunc Beta() {}\n"},
+		fetchErr: map[string]error{},
+	}
+	first, err := IndexRepoBounded(ctx, st, gh, 1, "o", "r", "main", repoID, 10, 0)
+	if err != nil {
+		t.Fatalf("first index: %v", err)
+	}
+	if !first.Published {
+		t.Fatalf("first index did not publish: %+v", first)
+	}
+	before := generationNodeIDs(t, ctx, pool, repoID)
+	if len(before) == 0 {
+		t.Fatal("first publish wrote no nodes")
+	}
+
+	// New head, byte-identical sources: the generation hashes to what is live.
+	const secondSHA = "2222222222222222222222222222222222222222"
+	gh.sha = secondSHA
+	second, err := IndexRepoBounded(ctx, st, gh, 1, "o", "r", "main", repoID, 10, 0)
+	if err != nil {
+		t.Fatalf("second index: %v", err)
+	}
+	if !second.Published {
+		t.Fatalf("second index did not publish: %+v", second)
+	}
+
+	if after := generationNodeIDs(t, ctx, pool, repoID); !slices.Equal(before, after) {
+		t.Fatalf("identical generation rewrote code_nodes: %v -> %v", before, after)
+	}
+
+	// Bookkeeping still has to advance, or the repo re-indexes this head forever.
+	var publishedSHA string
+	var status string
+	if err := pool.QueryRow(ctx, `
+		SELECT r.graph_index_commit_sha, g.status
+		FROM repos r JOIN graph_index_generations g ON g.id = r.graph_published_generation_id
+		WHERE r.id = $1`, repoID).Scan(&publishedSHA, &status); err != nil {
+		t.Fatalf("read repo graph pointers: %v", err)
+	}
+	if publishedSHA != secondSHA {
+		t.Fatalf("graph_index_commit_sha = %q, want %q", publishedSHA, secondSHA)
+	}
+	if status != "published" {
+		t.Fatalf("published generation status = %q, want published", status)
+	}
+}
