@@ -39,14 +39,31 @@ func TestSuppressionKeyIsRepresentableInJSONB(t *testing.T) {
 }
 
 // The separator only works as a delimiter if it cannot appear in the fields it
-// joins, which is why NUL was chosen originally. Keep that property explicit so
-// a future move to a printable separator has to confront it.
+// joins, which is why NUL was chosen originally.
+//
+// Asserted as a character-class property, not a blacklist. An earlier version
+// of this test scanned `strings.ContainsAny(sep, "abc...0123/.-_ ")`, which let
+// through every uppercase letter and every punctuation mark outside that short
+// list. Swapping the separator to "|" or "A" kept it green even though both
+// appear constantly in review bodies -- "|" in every markdown table -- and
+// either makes suppressionKey ambiguous: with "|",
+//
+//	suppressionKey("a", 1, "b|2|c") == suppressionKey("a|1|b", 2, "c") == "a|1|b|2|c"
+//
+// so one dismissal suppresses an unrelated live finding and pattern-learning
+// silently skips it.
+//
+// A single C0 control byte other than NUL is the property that actually holds:
+// no file path or LLM-authored review body carries one, and jsonb represents it.
 func TestSuppressionKeySeparatorStaysUnambiguous(t *testing.T) {
 	key := suppressionKey("a.go", 12, "body")
 	if got := strings.Count(key, suppressionSeparator); got != 2 {
 		t.Fatalf("separator count = %d, want 2 (path/line/body must stay distinguishable)", got)
 	}
-	if strings.ContainsAny(suppressionSeparator, "abcdefghijklmnopqrstuvwxyz0123456789/.-_ ") {
-		t.Fatalf("separator %q is a character review bodies and file paths can contain", suppressionSeparator)
+	if len(suppressionSeparator) != 1 {
+		t.Fatalf("separator %q is %d bytes, want a single control byte", suppressionSeparator, len(suppressionSeparator))
+	}
+	if b := suppressionSeparator[0]; b == 0x00 || b >= 0x20 {
+		t.Fatalf("separator byte %#x must be a C0 control other than NUL: NUL breaks jsonb (SQLSTATE 22P05), and anything >= 0x20 is printable and can appear in a path or review body", b)
 	}
 }
