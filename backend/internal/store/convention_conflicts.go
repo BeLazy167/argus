@@ -38,7 +38,7 @@ func (s *Store) DeliverConventionConflict(ctx context.Context, id int64, post fu
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	var delivered *time.Time
 	if err := tx.QueryRow(ctx, `SELECT delivered_at FROM convention_conflicts WHERE id=$1 FOR UPDATE`, id).Scan(&delivered); err != nil {
 		return err
@@ -65,7 +65,7 @@ func (s *Store) ResolveConventionConflict(ctx context.Context, installationID in
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	var conflictID int64
 	if err := tx.QueryRow(ctx, `SELECT id FROM convention_conflicts WHERE installation_id=$1 AND artifact_comment_id=$2 AND state='open' FOR UPDATE`, installationID, artifactCommentID).Scan(&conflictID); err != nil {
 		return fmt.Errorf("open convention conflict not found: %w", err)

@@ -122,9 +122,26 @@ func TestMirrorWorkerPreservesPipelinePatternProvenanceAndMetadata(t *testing.T)
 	}
 }
 
-// Two relational pattern rows may intentionally converge on the same
-// deterministic memory custom ID. Removing either projection must not remove
-// the shared memory while the other projection remains authoritative.
+// Two co-existing pattern rows can still share one deterministic memory
+// identity, and deleting either must not tombstone the memory the other owns.
+//
+// This case survives migration 086 because that index is PARTIAL:
+//
+//	CREATE UNIQUE INDEX patterns_installation_memory_custom_uniq
+//	  ON patterns (installation_id, memory_custom_id)
+//	  WHERE memory_custom_id IS NOT NULL;
+//
+// Rows carrying only a legacy memory_doc_id leave memory_custom_id NULL, so the
+// index never applies and CreatePattern's ON CONFLICT (which targets the same
+// predicate) never fires. Both DeletePattern (firstNonEmpty(MemoryCustomID,
+// MemoryDocID)) and patternMirrorDeleteAuthorized (COALESCE over the same two
+// columns) resolve identity through memory_doc_id, so the duplicate-owner guard
+// is live for exactly these rows.
+//
+// The custom_id spelling of this test is what 086 made unconstructible: with
+// memory_custom_id set, a second CreatePattern upserts and returns the SAME row
+// (verified on PG 19beta2: id 11 twice, one row in the table), so it deleted the
+// only owner and asserted a memory nothing owned would survive.
 func TestMirrorWorkerDeleteKeepsMemoryOwnedByDuplicatePattern(t *testing.T) {
 	pool, install := pgTestPool(t)
 	ctx := context.Background()
@@ -138,19 +155,20 @@ func TestMirrorWorkerDeleteKeepsMemoryOwnedByDuplicatePattern(t *testing.T) {
 	var repoID int64
 	if err := pool.QueryRow(ctx, `
 		INSERT INTO repos (installation_id, github_id, full_name)
-		VALUES ($1, (random() * 1000000000)::bigint, 'acme/mirror-owner-duplicate')
+		VALUES ($1, (random() * 1000000000)::bigint, 'acme/mirror-owner-legacy-dup')
 		RETURNING id`, install).Scan(&repoID); err != nil {
 		t.Fatalf("seed repo: %v", err)
 	}
 	source := "manual"
-	customID := PatternCustomID("", "mirror-owner-duplicate", source, "guard shared writes")
-	first, err := st.CreatePattern(ctx, install, &repoID, "guard shared writes", nil, nil, &source, nil, nil, stringPointer(customID), nil)
+	// Legacy identity: memory_doc_id set, memory_custom_id left NULL.
+	docID := fmt.Sprintf("sm_legacy_dup_%d", time.Now().UnixNano())
+	first, err := st.CreatePattern(ctx, install, &repoID, "guard shared writes", stringPointer(docID), nil, &source, nil, nil, nil, nil)
 	if err != nil {
-		t.Fatalf("create first pattern: %v", err)
+		t.Fatalf("create first legacy pattern: %v", err)
 	}
-	second, err := st.CreatePattern(ctx, install, &repoID, "guard shared writes", nil, nil, &source, nil, nil, stringPointer(customID), nil)
+	second, err := st.CreatePattern(ctx, install, &repoID, "guard shared writes", stringPointer(docID), nil, &source, nil, nil, nil, nil)
 	if err != nil {
-		t.Fatalf("create duplicate pattern: %v", err)
+		t.Fatalf("create duplicate legacy pattern: %v", err)
 	}
 	t.Cleanup(func() {
 		bg := context.Background()
@@ -158,9 +176,12 @@ func TestMirrorWorkerDeleteKeepsMemoryOwnedByDuplicatePattern(t *testing.T) {
 		_, _ = pool.Exec(bg, `DELETE FROM patterns WHERE id=ANY($1::bigint[])`, []int64{first.ID, second.ID})
 		_, _ = pool.Exec(bg, `DELETE FROM repos WHERE id=$1`, repoID)
 	})
+	if first.ID == second.ID {
+		t.Fatalf("legacy duplicates collapsed to one row (id %d): the partial index now covers memory_doc_id, so this scenario is gone", first.ID)
+	}
 
-	if _, err := idx.IndexPattern(ctx, "mirror-owner-duplicate", PatternMemory{
-		Content: "guard shared writes", CustomID: customID, Source: source,
+	if _, err := idx.IndexPattern(ctx, "mirror-owner-legacy-dup", PatternMemory{
+		Content: "guard shared writes", CustomID: docID, Source: source,
 	}); err != nil {
 		t.Fatalf("seed memory: %v", err)
 	}
@@ -178,8 +199,88 @@ func TestMirrorWorkerDeleteKeepsMemoryOwnedByDuplicatePattern(t *testing.T) {
 			break
 		}
 	}
-	if row := readRow(t, pool, install, customID); row.deletedAt != nil {
+	if row := readRow(t, pool, install, docID); row.deletedAt != nil {
 		t.Fatal("deleting one duplicate pattern tombstoned memory still owned by the other pattern")
+	}
+}
+
+// The sequential counterpart: a live row owns the custom ID and a superseded
+// row's delete arrives afterwards. patternMirrorDeleteAuthorized must see the
+// live owner and skip the tombstone.
+func TestMirrorWorkerDeleteKeepsMemoryOwnedByLivePattern(t *testing.T) {
+	pool, install := pgTestPool(t)
+	ctx := context.Background()
+	lockMirrorOutboxPGTests(t, pool, ctx)
+	st := store.NewWithDB(pool)
+	if _, err := pool.Exec(ctx, `DELETE FROM memory_mirror_outbox`); err != nil {
+		t.Fatalf("clear mirror outbox: %v", err)
+	}
+	idx := NewPGIndexer(pool, nil, install, pgTestDims, slog.New(slog.DiscardHandler))
+
+	var repoID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO repos (installation_id, github_id, full_name)
+		VALUES ($1, (random() * 1000000000)::bigint, 'acme/mirror-owner-duplicate')
+		RETURNING id`, install).Scan(&repoID); err != nil {
+		t.Fatalf("seed repo: %v", err)
+	}
+	patternIDs := []int64{}
+	t.Cleanup(func() {
+		bg := context.Background()
+		_, _ = pool.Exec(bg, `DELETE FROM memory_mirror_outbox WHERE installation_id=$1 AND aggregate_type='pattern' AND aggregate_id=ANY($2::bigint[])`, install, patternIDs)
+		_, _ = pool.Exec(bg, `DELETE FROM patterns WHERE id=ANY($1::bigint[])`, patternIDs)
+		_, _ = pool.Exec(bg, `DELETE FROM repos WHERE id=$1`, repoID)
+	})
+
+	source := "manual"
+	customID := PatternCustomID("", "mirror-owner-duplicate", source, "guard shared writes")
+	first, err := st.CreatePattern(ctx, install, &repoID, "guard shared writes", nil, nil, &source, nil, nil, stringPointer(customID), nil)
+	if err != nil {
+		t.Fatalf("create first pattern: %v", err)
+	}
+	patternIDs = append(patternIDs, first.ID)
+
+	if _, err := idx.IndexPattern(ctx, "mirror-owner-duplicate", PatternMemory{
+		Content: "guard shared writes", CustomID: customID, Source: source,
+	}); err != nil {
+		t.Fatalf("seed memory: %v", err)
+	}
+
+	// A superseded row's delete, arriving after the live row already owns the
+	// custom ID. It has to be enqueued directly: the delete must be the LAST
+	// event drained, and calling DeletePattern then CreatePattern would order a
+	// reviving upsert behind it, which masks a tombstone rather than preventing
+	// one.
+	stalePayload, err := NewDeleteMirrorPayload(customID)
+	if err != nil {
+		t.Fatalf("build delete payload: %v", err)
+	}
+	staleAggregateID := first.ID + 1_000_000
+	if err := st.WithMemoryMirrorTx(ctx, func(pgx.Tx) (store.MemoryMirrorEvent, error) {
+		return store.MemoryMirrorEvent{
+			InstallationID: install, AggregateType: store.MemoryMirrorPattern,
+			AggregateID: staleAggregateID, Operation: store.MemoryMirrorDelete,
+			Payload: stalePayload,
+		}, nil
+	}); err != nil {
+		t.Fatalf("enqueue stale delete: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM memory_mirror_outbox WHERE installation_id=$1 AND aggregate_id=$2`, install, staleAggregateID)
+	})
+
+	worker := NewMirrorWorker(st, func(context.Context, int64) MirrorIndexer { return idx }, slog.New(slog.DiscardHandler))
+	for {
+		processed, err := worker.RunOnce(ctx, 50)
+		if err != nil {
+			t.Fatalf("drain mirror events: %v", err)
+		}
+		if processed == 0 {
+			break
+		}
+	}
+	if row := readRow(t, pool, install, customID); row.deletedAt != nil {
+		t.Fatal("a superseded pattern's delete tombstoned memory the live pattern still owns")
 	}
 }
 
