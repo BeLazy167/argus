@@ -1,0 +1,12 @@
+-- A full graph publish deletes every code_node for the repo and re-inserts the
+-- staged generation. That swap is the visibility boundary, so it cannot be made
+-- incremental -- but when the staged generation reproduces the live graph
+-- exactly, the swap rewrites every row for no change at all.
+--
+-- Between 2026-08-12 and 2026-09-03 that churn wrote 10.2M rows into the
+-- pggraph CDC log (graph._sync_log, 5.9GB) and filled the database volume.
+--
+-- content_hash fingerprints a generation's staged file payloads so publish can
+-- recognise a no-op and skip the swap. Empty means "not yet computed", which
+-- always publishes.
+ALTER TABLE graph_index_generations ADD COLUMN content_hash TEXT NOT NULL DEFAULT '';
