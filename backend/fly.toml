@@ -46,6 +46,18 @@ swap_size_mb = 512
   size = 'shared-cpu-1x'
   memory = '1024mb'
 
+# Two checks, two questions. `health` asks "is the process alive?" and hits
+# /healthz, which returns a constant 200 and touches nothing. `ready` asks "can
+# this machine actually serve?" and hits /readyz, which pings the store pool.
+#
+# Only /healthz was wired up until 2026-09-03. That day argus-db filled its
+# volume and Postgres crash-looped for three days; /healthz kept returning
+# {"status":"ok"} the whole time, so Fly reported the app healthy while every
+# data request failed. A dead database must turn a check red.
+#
+# `ready` carries the longer grace_period because a booting machine opens the
+# pool after the listener, and the longer interval because each probe costs a
+# round trip to Postgres.
 [checks]
   [checks.health]
     port = 8080
@@ -53,3 +65,11 @@ swap_size_mb = 512
     interval = '15s'
     timeout = '2s'
     path = '/healthz'
+
+  [checks.ready]
+    port = 8080
+    type = 'http'
+    interval = '30s'
+    timeout = '5s'
+    grace_period = '20s'
+    path = '/readyz'
