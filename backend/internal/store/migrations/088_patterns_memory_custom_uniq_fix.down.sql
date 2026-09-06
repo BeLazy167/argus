@@ -1,0 +1,11 @@
+-- Deliberately a no-op.
+--
+-- The up migration has no faithful inverse:
+--   * patterns_installation_memory_custom_uniq is owned by 086, whose down
+--     migration drops it; dropping it here would double-own the index.
+--   * patterns_convention_memory_custom_uniq was never a legitimate schema
+--     state — it is the production drift that caused the pattern-write outage.
+--     Recreating it on rollback would reproduce SQLSTATE 42P10 in every
+--     environment, including dev and CI where it never existed.
+--   * The deleted duplicate identity rows are not recoverable.
+SELECT 1;
