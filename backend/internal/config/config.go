@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 )
 
 // Config holds all application configuration loaded from environment variables.
@@ -24,6 +25,15 @@ type Config struct {
 	// Clerk (auth)
 	ClerkJWKSURL    string
 	CORSAllowOrigin string
+
+	// MCP (team memory + review access over Model Context Protocol). Clerk is
+	// the OAuth authorization server; this backend is a resource server. The
+	// issuer is pinned as `iss` and advertised in RFC 9728 metadata. The
+	// resource URL is the canonical public HTTPS URL of the endpoint, ending in
+	// /mcp; tokens must carry it as `aud`.
+	ClerkIssuerURL string
+	MCPEnabled     bool
+	MCPResourceURL string
 
 	// Encryption
 	EncryptionKey string
@@ -59,6 +69,46 @@ type Config struct {
 // either fully configured or intentionally disabled.
 func (c *Config) MermaidValidatorEnabled() bool {
 	return c != nil && c.MermaidValidatorBaseURL != "" && c.MermaidValidatorSecret != ""
+}
+
+// isAbsoluteHTTPURL reports whether raw parses as an absolute http(s) URL with
+// a host. A non-empty string is not enough for any of these settings: each one
+// is fetched or compared as a URL, so a bare host or a path-only value is a
+// misconfiguration that only surfaces at request time.
+func isAbsoluteHTTPURL(raw string) bool {
+	if raw == "" {
+		return false
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	return u.Scheme == "http" || u.Scheme == "https"
+}
+
+// ValidateMCP checks the configuration the MCP route depends on. It runs only
+// when the route is enabled, so a deployment without MCP needs none of it.
+//
+// The issuer is what protected-resource metadata advertises and what the token
+// verifier pins `iss` to; the JWKS URL is what signatures are checked against;
+// the resource URL is the required `aud` and the identifier clients see. A gap
+// in any of them produces an /mcp that 401s every request with a challenge
+// pointing nowhere, so fail at boot instead.
+func (c *Config) ValidateMCP() error {
+	if !c.MCPEnabled {
+		return nil
+	}
+	if !isAbsoluteHTTPURL(c.ClerkJWKSURL) {
+		return fmt.Errorf("MCP_ENABLED requires CLERK_JWKS_URL to be an absolute http(s) URL")
+	}
+	if !isAbsoluteHTTPURL(c.ClerkIssuerURL) {
+		return fmt.Errorf("MCP_ENABLED requires CLERK_ISSUER_URL to be an absolute http(s) URL")
+	}
+	resource, err := url.Parse(c.MCPResourceURL)
+	if c.MCPResourceURL == "" || err != nil || resource.Host == "" || resource.Scheme != "https" || !strings.HasSuffix(resource.Path, "/mcp") {
+		return fmt.Errorf("MCP_ENABLED requires MCP_RESOURCE_URL to be an absolute https URL ending in /mcp")
+	}
+	return nil
 }
 
 func Load() (*Config, error) {
@@ -117,6 +167,10 @@ func Load() (*Config, error) {
 		ClerkJWKSURL:    os.Getenv("CLERK_JWKS_URL"),
 		CORSAllowOrigin: getEnv("CORS_ALLOW_ORIGIN", "http://localhost:3000"),
 
+		ClerkIssuerURL: os.Getenv("CLERK_ISSUER_URL"),
+		MCPEnabled:     getEnv("MCP_ENABLED", "false") == "true",
+		MCPResourceURL: os.Getenv("MCP_RESOURCE_URL"),
+
 		EncryptionKey: os.Getenv("ENCRYPTION_KEY"),
 
 		EmbeddingsAPIKey:     os.Getenv("EMBEDDINGS_API_KEY"),
@@ -134,6 +188,9 @@ func Load() (*Config, error) {
 		SelfHosted:              getEnv("SELF_HOSTED", "false") == "true",
 	}
 
+	if err := cfg.ValidateMCP(); err != nil {
+		return nil, err
+	}
 	return cfg, nil
 }
 

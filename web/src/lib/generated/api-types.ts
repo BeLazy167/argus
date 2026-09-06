@@ -459,6 +459,12 @@ export interface Pattern {
   repo_id?: number /* int64 */;
   content: string;
   memory_doc_id?: string;
+  /**
+   * MemoryCustomID is the deterministic memory identity for rows written with
+   * one (every path since the custom-id migration). Legacy rows carry only
+   * MemoryDocID. Populated by GetPattern.
+   */
+  memory_custom_id?: string;
   created_by?: string;
   source: string;
   category?: string;
@@ -472,6 +478,17 @@ export interface PatternStat {
   week: string;
   source: string;
   count: number /* int */;
+}
+/**
+ * PatternDeletion is what DeletePatternGuarded observed inside its
+ * transaction. SiblingsAtDelete counts the OTHER rows still carrying the same
+ * identity after the delete; it is a snapshot, not the mirror worker's later
+ * decision — a concurrent writer can change ownership before the worker runs.
+ */
+export interface PatternDeletion {
+  CustomID: string;
+  Source: string;
+  SiblingsAtDelete: number /* int */;
 }
 
 //////////

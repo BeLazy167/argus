@@ -896,3 +896,57 @@ func TestPGSearchDirectlyQuarantinesLegacyReplyLearnings(t *testing.T) {
 		t.Fatalf("direct repo Search omitted current trusted reply learning: %#v", repo)
 	}
 }
+
+// TestPGSearchMatchCarriesContainerTag: every match's Metadata carries the
+// container it actually came from. This is load-bearing for ScopeBoth: the
+// fan-out merge (searchFanOut) discards which leg a match came from, so
+// Metadata["container_tag"] is the only way a caller can tell a repo hit
+// from a shared hit apart once they're merged.
+func TestPGSearchMatchCarriesContainerTag(t *testing.T) {
+	idx, ctx := searchTestIndexer(t)
+	if _, err := idx.IndexSharedPattern(ctx, PatternMemory{
+		Content: "goroutine leak shared convention", Source: "pattern", Category: "bug_risk",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	repoMatches, err := idx.Search(ctx, MemoryQuery{
+		Query: "goroutine leak risk", Repo: "api", Scope: ScopeRepo, Type: TypePattern,
+		Limit: 5, Threshold: 0.5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repoMatches) != 1 || repoMatches[0].Metadata["container_tag"] != RepoTagNew("api") {
+		t.Fatalf("repo-scoped match container_tag: got %+v, want %q", repoMatches, RepoTagNew("api"))
+	}
+
+	sharedMatches, err := idx.Search(ctx, MemoryQuery{
+		Query: "goroutine leak risk", Scope: ScopeShared, Type: TypePattern,
+		Limit: 5, Threshold: 0.5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sharedMatches) != 1 || sharedMatches[0].Metadata["container_tag"] != SharedTag {
+		t.Fatalf("shared-scoped match container_tag: got %+v, want %q", sharedMatches, SharedTag)
+	}
+
+	both, err := idx.Search(ctx, MemoryQuery{
+		Query: "goroutine leak risk", Repo: "api", Scope: ScopeBoth, Type: TypePattern,
+		Limit: 5, Threshold: 0.5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(both) != 2 {
+		t.Fatalf("ScopeBoth merge: got %d, want repo + shared", len(both))
+	}
+	tags := map[string]bool{}
+	for _, m := range both {
+		tags[m.Metadata["container_tag"]] = true
+	}
+	if !tags[RepoTagNew("api")] || !tags[SharedTag] {
+		t.Fatalf("ScopeBoth matches must be distinguishable by container_tag: %+v", both)
+	}
+}

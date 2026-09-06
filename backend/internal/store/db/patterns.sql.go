@@ -170,7 +170,7 @@ func (q *Queries) GetLowQualityPatterns(ctx context.Context, arg GetLowQualityPa
 }
 
 const getPattern = `-- name: GetPattern :one
-SELECT id, installation_id, repo_id, content, memory_doc_id, created_by, COALESCE(source, 'manual') as source, category, pr_number, created_at, updated_at
+SELECT id, installation_id, repo_id, content, memory_doc_id, memory_custom_id, created_by, COALESCE(source, 'manual') as source, category, pr_number, created_at, updated_at
 FROM patterns WHERE id = $1::bigint
 `
 
@@ -180,6 +180,7 @@ type GetPatternRow struct {
 	RepoID         *int64     `json:"repo_id"`
 	Content        string     `json:"content"`
 	MemoryDocID    *string    `json:"memory_doc_id"`
+	MemoryCustomID *string    `json:"memory_custom_id"`
 	CreatedBy      *string    `json:"created_by"`
 	Source         string     `json:"source"`
 	Category       *string    `json:"category"`
@@ -197,6 +198,7 @@ func (q *Queries) GetPattern(ctx context.Context, id int64) (GetPatternRow, erro
 		&i.RepoID,
 		&i.Content,
 		&i.MemoryDocID,
+		&i.MemoryCustomID,
 		&i.CreatedBy,
 		&i.Source,
 		&i.Category,

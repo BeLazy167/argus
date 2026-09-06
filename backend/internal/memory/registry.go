@@ -124,6 +124,34 @@ func (r *Registry) GetIndexer(ctx context.Context, installationID int64) Indexer
 	return idx
 }
 
+// EmbedderAvailable reports whether searches for this installation will use
+// vectors. With the embedder off, every positive-threshold Search returns
+// (nil, nil) — indistinguishable from "nothing matched" — so callers that show
+// results to a person need this to say "embeddings are not configured" instead
+// of "no results". Resolution is cached by the EmbedderRegistry, so this is
+// cheap to call per request.
+func (r *Registry) EmbedderAvailable(ctx context.Context, installationID int64) bool {
+	if r.pool == nil || r.embedders == nil {
+		return false
+	}
+	embedder, _ := r.embedders.GetEmbedder(ctx, installationID)
+	return embedder != nil
+}
+
+// WarmVectorProbe latches usesPGContextVector from a long-lived context.
+//
+// The probe is a process-wide sync.Once that runs on the FIRST search using
+// THAT caller's context. If the first search in a process arrives with a short
+// or already-cancelled deadline, the probe errors, latches "pgvector", and on a
+// pgcontext column every later vector operation in the process fails until
+// restart. Boot warms it so no request can be the first.
+func (r *Registry) WarmVectorProbe(ctx context.Context) {
+	if r.pool == nil {
+		return
+	}
+	usesPGContextVector(ctx, r.pool, r.log())
+}
+
 // InvalidateEmbedder drops the cached embedder for an installation. Call after
 // any provider-key write that could have touched the "embeddings" slot: the
 // delete path identifies keys by id and cannot tell which provider it removed,

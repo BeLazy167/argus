@@ -22,6 +22,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 type repoMetadataClient interface {
@@ -69,9 +70,17 @@ type Server struct {
 	webhookSem             chan struct{}      // bounded concurrency for webhook goroutines
 	audit                  *auditLogger
 	memRegistry            *memory.Registry
-	reembedMemories        func(context.Context, int64) (int, error)
-	cfg                    *config.Config
-	commandRe              *regexp.Regexp // "@<app-slug> <command>" matcher, built from cfg.GitHubAppSlug
+	// indexers is the seam MCP tools use to reach memory; nil means memory is
+	// off. Production sets it to memRegistry; tests set a stub.
+	indexers indexerSource
+	// reviewSidecarStore is the seam for get_review's four degradable reads;
+	// nil falls back to store. Production sets it to store; tests set a double.
+	reviewSidecarStore reviewSidecarSource
+	// mcpSchemaCache is shared across MCP requests on purpose — see schemaCache.
+	mcpSchemaCache  *mcp.SchemaCache
+	reembedMemories func(context.Context, int64) (int, error)
+	cfg             *config.Config
+	commandRe       *regexp.Regexp // "@<app-slug> <command>" matcher, built from cfg.GitHubAppSlug
 }
 
 func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchestrator, replyAnalyzer *pipeline.ReplyAnalyzer, reactionAnalyzer *pipeline.ReactionAnalyzer, registry *llm.Registry, eventBus *pipeline.EventBus, cfg *config.Config, logger *slog.Logger, memRegistry *memory.Registry) *Server {
@@ -96,6 +105,8 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 		webhookSem:             make(chan struct{}, 50),
 		audit:                  newAuditLogger(logger),
 		memRegistry:            memRegistry,
+		reviewSidecarStore:     st,
+		mcpSchemaCache:         mcp.NewSchemaCache(),
 		cfg:                    cfg,
 		commandRe:              commandRe(cfg.GitHubAppSlug),
 	}
@@ -110,6 +121,7 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 	s.inflight = inflight.NewRegistry()
 	s.launcher = pipeline.NewLauncher(s.inflight, eventBus, st, logger)
 	if memRegistry != nil {
+		s.indexers = memRegistry
 		s.reembedMemories = func(ctx context.Context, installationID int64) (int, error) {
 			return memRegistry.ReembedCurrentSpace(ctx, installationID, 100)
 		}
@@ -143,6 +155,10 @@ func NewServer(st *store.Store, ghApp *ghpkg.App, orchestrator *pipeline.Orchest
 
 	// Public export — verified via HMAC signature in URL (linked from GitHub comments)
 	r.Get("/api/v1/reviews/{reviewID}/export", s.exportReviewPublic)
+
+	// MCP — team memory + review access. Own auth chain (Clerk OAuth resource
+	// server); deliberately outside /api/v1's timeout and body logging.
+	s.registerMCPRoutes(r)
 
 	// API v1 (authenticated via JWT)
 	r.Route("/api/v1", func(r chi.Router) {

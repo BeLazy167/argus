@@ -41,6 +41,16 @@ func (s *Server) panicRecovery(next http.Handler) http.Handler {
 	})
 }
 
+// skipBodyLogging names the paths whose request AND response bodies must not
+// reach the payload log. /webhooks/github was excluded on the request side
+// already. /mcp carries memory content and review findings derived from
+// private source code in both directions — including 401 challenges and tool
+// error bodies — and the previous unconditional response tee would have
+// written customer code to Fly logs on the first call.
+func skipBodyLogging(path string) bool {
+	return path == "/webhooks/github" || path == "/mcp" || strings.HasPrefix(path, "/mcp/")
+}
+
 // requestLogging records every inbound request and response as structured JSON
 // on stdout. Bodies are streamed into small records so large webhooks and
 // exports do not create one Fly-truncated line or a second in-memory copy.
@@ -59,7 +69,7 @@ func (s *Server) requestLogging(next http.Handler) http.Handler {
 		)
 
 		var requestBody requestBodyLogger
-		if r.Body != nil && r.Body != http.NoBody && r.ContentLength != 0 && r.URL.Path != "/webhooks/github" {
+		if r.Body != nil && r.Body != http.NoBody && r.ContentLength != 0 && !skipBodyLogging(r.URL.Path) {
 			if strings.Contains(r.URL.Path, "/provider-keys") {
 				// This endpoint carries usable provider credentials. Buffer its small
 				// JSON body so structural redaction happens before the log write.
@@ -73,9 +83,12 @@ func (s *Server) requestLogging(next http.Handler) http.Handler {
 			r.Body = requestBody
 		}
 
-		responseBody := obs.NewPayloadStream(r.Context(), s.logger, "inbound HTTP response body", operationID, "response", "")
+		var responseBody *obs.PayloadStream
 		ww := chimiddleware.NewWrapResponseWriter(w, r.ProtoMajor)
-		ww.Tee(responseBody)
+		if !skipBodyLogging(r.URL.Path) {
+			responseBody = obs.NewPayloadStream(r.Context(), s.logger, "inbound HTTP response body", operationID, "response", "")
+			ww.Tee(responseBody)
+		}
 
 		next.ServeHTTP(ww, r)
 
@@ -83,7 +96,10 @@ func (s *Server) requestLogging(next http.Handler) http.Handler {
 		if requestBody != nil {
 			requestBytes, requestChunks = requestBody.Finish()
 		}
-		responseBytes, responseChunks := responseBody.Finish()
+		responseBytes, responseChunks := int64(0), 0
+		if responseBody != nil {
+			responseBytes, responseChunks = responseBody.Finish()
+		}
 		status := ww.Status()
 		if status == 0 {
 			status = http.StatusOK

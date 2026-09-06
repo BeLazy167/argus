@@ -25,7 +25,7 @@ SET repo_id = EXCLUDED.repo_id,
 RETURNING id, installation_id, repo_id, content, memory_doc_id, created_by, COALESCE(source, 'manual') as source, category, pr_number, created_at, updated_at;
 
 -- name: GetPattern :one
-SELECT id, installation_id, repo_id, content, memory_doc_id, created_by, COALESCE(source, 'manual') as source, category, pr_number, created_at, updated_at
+SELECT id, installation_id, repo_id, content, memory_doc_id, memory_custom_id, created_by, COALESCE(source, 'manual') as source, category, pr_number, created_at, updated_at
 FROM patterns WHERE id = sqlc.arg(id)::bigint;
 
 -- name: DeletePattern :one

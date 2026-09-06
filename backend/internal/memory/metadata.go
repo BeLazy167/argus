@@ -2,6 +2,7 @@ package memory
 
 import (
 	"fmt"
+	"sort"
 	"time"
 )
 
@@ -111,6 +112,27 @@ var validMemoryTypes = map[MemoryType]struct{}{
 	TypeRule:      {},
 }
 
+// IsValidMemoryType reports whether t is one of the MemoryType constants.
+// Callers that accept a type from outside the process — an API request, an MCP
+// tool argument — must gate on this: an unknown value compiles into the reader's
+// `type = $1` predicate and returns an empty result set, which is
+// indistinguishable from a genuine no-hit.
+func IsValidMemoryType(t MemoryType) bool {
+	_, ok := validMemoryTypes[t]
+	return ok
+}
+
+// MemoryTypeNames lists every valid MemoryType, sorted, for validation error
+// messages that have to enumerate the allowed values.
+func MemoryTypeNames() []string {
+	names := make([]string, 0, len(validMemoryTypes))
+	for t := range validMemoryTypes {
+		names = append(names, string(t))
+	}
+	sort.Strings(names)
+	return names
+}
+
 // ToMap validates Metadata's type-specific required fields and flattens every
 // non-zero field into the string-keyed map stored alongside the row.
 //
@@ -127,7 +149,7 @@ func (m Metadata) ToMap() (map[string]string, error) {
 	if m.Type == "" {
 		return nil, fmt.Errorf("metadata: Type is required")
 	}
-	if _, ok := validMemoryTypes[m.Type]; !ok {
+	if !IsValidMemoryType(m.Type) {
 		return nil, fmt.Errorf("metadata: unknown Type %q", m.Type)
 	}
 

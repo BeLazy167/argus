@@ -267,6 +267,18 @@ func mirrorEventCustomID(payload json.RawMessage) string {
 	return identity.CustomID
 }
 
+// lockMemoryMirrorCustomID takes the per-identity producer key for one tenant.
+//
+// INVARIANT for every producer: acquire this key BEFORE any patterns row write
+// for that identity — insert, upsert or delete. A producer that writes the row
+// first and takes the key afterwards inverts the order against one that does
+// not, and the two deadlock (SQLSTATE 40P01) on a delete racing a re-learn of
+// the same content-derived identity. CreatePattern, CreateOrGetPattern,
+// DeletePattern and DeletePatternGuarded all lock first — the last of those
+// before the row lock its source check needs, not after. Any new producer must
+// too, and a row lock counts as a row write for this ordering. Re-acquiring the
+// key later in the same transaction (enqueueMemoryMirrorEvent does) is a
+// reentrant no-op.
 func lockMemoryMirrorCustomID(ctx context.Context, tx pgx.Tx, installationID int64, customID string) error {
 	if _, err := tx.Exec(ctx,
 		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,

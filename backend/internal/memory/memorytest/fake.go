@@ -27,6 +27,7 @@ type Fake struct {
 	BriefingFn                func(q memory.BriefingQuery) (string, error)
 	SimilarConventionsFn      func(repo, category, content string, limit int) ([]memory.PatternMatch, error)
 	OpenConventionConflictsFn func(repo string) ([]memory.ConventionConflict, error)
+	RetireFn                  func(req memory.RetireRequest) (memory.RetireResult, error)
 
 	// ReviewID records the attribution ForReview was called with, so a test can
 	// assert the pipeline stamped its writes with the run's review. uuid.Nil
@@ -43,6 +44,7 @@ type Fake struct {
 	Scenarios          []FakeScenario          // IndexScenario
 	Invalidated        []string                // InvalidateDocument
 	Superseded         [][2]string             // SupersedeDocument
+	Retired            []memory.RetireRequest  // RetireDocument
 	Deleted            []string                // DeleteDocument
 	ConventionEvidence [][3]any
 	Disputed           [][5]any
@@ -169,6 +171,20 @@ func (f *Fake) SupersedeDocument(_ context.Context, documentID, replacementID st
 	defer f.mu.Unlock()
 	f.Superseded = append(f.Superseded, [2]string{documentID, replacementID})
 	return nil
+}
+
+func (f *Fake) RetireDocument(_ context.Context, req memory.RetireRequest) (memory.RetireResult, error) {
+	f.mu.Lock()
+	f.Retired = append(f.Retired, req)
+	f.mu.Unlock()
+	if f.RetireFn != nil {
+		return f.RetireFn(req)
+	}
+	mode := memory.RetireModeInvalidated
+	if req.ReplacementCustomID != "" {
+		mode = memory.RetireModeSuperseded
+	}
+	return memory.RetireResult{Mode: mode, Source: "manual"}, nil
 }
 
 func (f *Fake) DeleteDocument(_ context.Context, documentID string) error {

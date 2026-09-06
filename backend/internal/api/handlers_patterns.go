@@ -128,7 +128,7 @@ func (s *Server) createPattern(w http.ResponseWriter, r *http.Request) {
 	}
 
 	createdBy := getUserID(r.Context())
-	pattern, err := s.store.CreatePattern(r.Context(), body.InstallationID, body.RepoID, body.Content, nil, &createdBy, &source, nil, nil, &customID, nil)
+	pattern, _, err := s.store.CreateOrGetPattern(r.Context(), body.InstallationID, body.RepoID, body.Content, &createdBy, &source, nil, customID, nil)
 	if err != nil {
 		s.logger.ErrorContext(r.Context(), "create pattern", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create pattern"})

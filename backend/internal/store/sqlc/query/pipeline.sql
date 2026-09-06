@@ -16,6 +16,12 @@ SELECT id FROM pipeline_states WHERE state NOT IN ($1, $2) ORDER BY updated_at;
 -- name: GetLatestRunForReview :one
 SELECT id FROM pipeline_states WHERE review_id = $1 ORDER BY updated_at DESC LIMIT 1;
 
+-- name: GetLatestRunStateForReview :one
+-- Stage of the most recently touched run for a review. "Latest" means
+-- updated_at, matching GetLatestRunForReview: a recovered run that resumed is
+-- the current one even if an older row was created later.
+SELECT state FROM pipeline_states WHERE review_id = $1 ORDER BY updated_at DESC LIMIT 1;
+
 -- name: GetAllFileReviewsForReview :one
 -- Returns the unfiltered comments (before dedup/scoring) from the latest pipeline run for a review.
 -- Used by the export endpoint to surface dropped findings.

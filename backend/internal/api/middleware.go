@@ -133,45 +133,113 @@ type jwtClaims struct {
 	OrgRole string
 }
 
-// validateToken parses and verifies a JWT, returning claims.
-func validateToken(raw string) (jwtClaims, error) {
+// decodedClaims is everything verifyJWT reads from a verified payload. The
+// dashboard path (validateToken) uses sub/org_id/org_role; the MCP path
+// additionally pins iss/aud, checks nbf, and reads sid and the scope claims.
+// Decoding is shared; policy is not — the dashboard's acceptance rules are
+// deliberately unchanged.
+type decodedClaims struct {
+	Sub     string
+	Iss     string
+	Aud     []string
+	OrgID   string
+	OrgRole string
+	Sid     string
+	Scope   string
+	Scp     []string
+	Exp     float64
+	Nbf     float64
+	// Malformed names the MCP-only claims that were present in the payload
+	// but failed to decode, in a fixed field order. Each such claim is left
+	// at its zero value, which is indistinguishable from an absent claim —
+	// so without this record a non-string `sid` would read as "no session
+	// token" and a non-numeric `nbf` as "no not-before", turning a malformed
+	// credential into a more permissive one. The MCP path rejects on any
+	// entry; the dashboard path ignores it, keeping validateToken's
+	// acceptance rules unchanged.
+	Malformed []string
+}
+
+// stringOrArray accepts a JSON string or array of strings (RFC 7519 `aud`;
+// also the `scp`/`scopes` claim shapes). JSON null and empty strings never
+// produce an element: unmarshaling a plain string field from JSON null
+// leaves it at its zero value ("") without an error, so without this a
+// null-valued claim would decode as [""] instead of an absent claim — and an
+// empty string in an array would defeat an emptiness check the same way.
+type stringOrArray []string
+
+func (a *stringOrArray) UnmarshalJSON(b []byte) error {
+	if string(b) == "null" {
+		*a = nil
+		return nil
+	}
+	var one string
+	if err := json.Unmarshal(b, &one); err == nil {
+		if one == "" {
+			*a = nil
+			return nil
+		}
+		*a = stringOrArray{one}
+		return nil
+	}
+	var many []string
+	if err := json.Unmarshal(b, &many); err != nil {
+		return err
+	}
+	out := make(stringOrArray, 0, len(many))
+	for _, s := range many {
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	*a = out
+	return nil
+}
+
+// verifyJWT checks the token's structure, RS256 signature against the JWKS
+// cache, and expiry, then returns the decoded claims. Every error string is a
+// fixed literal — jwtAuth echoes them to the client.
+func verifyJWT(raw string) (decodedClaims, error) {
 	if cache == nil || cache.url == "" {
-		return jwtClaims{}, fmt.Errorf("JWKS not configured")
+		return decodedClaims{}, fmt.Errorf("JWKS not configured")
 	}
 	parts := strings.Split(raw, ".")
 	if len(parts) != 3 {
-		return jwtClaims{}, fmt.Errorf("invalid token format")
+		return decodedClaims{}, fmt.Errorf("invalid token format")
 	}
 	headerBytes, err := base64.RawURLEncoding.DecodeString(parts[0])
 	if err != nil {
-		return jwtClaims{}, fmt.Errorf("invalid token header")
+		return decodedClaims{}, fmt.Errorf("invalid token header")
 	}
 	var header struct {
 		Kid string `json:"kid"`
 		Alg string `json:"alg"`
 	}
 	if err := json.Unmarshal(headerBytes, &header); err != nil {
-		return jwtClaims{}, fmt.Errorf("invalid token header")
+		return decodedClaims{}, fmt.Errorf("invalid token header")
 	}
 	if header.Alg != "RS256" {
-		return jwtClaims{}, fmt.Errorf("unsupported signing algorithm")
+		return decodedClaims{}, fmt.Errorf("unsupported signing algorithm")
 	}
 	pubKey, err := cache.getKey(header.Kid)
 	if err != nil {
-		return jwtClaims{}, fmt.Errorf("unknown signing key")
+		return decodedClaims{}, fmt.Errorf("unknown signing key")
 	}
 	sigBytes, err := base64.RawURLEncoding.DecodeString(parts[2])
 	if err != nil {
-		return jwtClaims{}, fmt.Errorf("invalid signature")
+		return decodedClaims{}, fmt.Errorf("invalid signature")
 	}
 	hash := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
 	if err := rsa.VerifyPKCS1v15(pubKey, crypto.SHA256, hash[:], sigBytes); err != nil {
-		return jwtClaims{}, fmt.Errorf("invalid signature")
+		return decodedClaims{}, fmt.Errorf("invalid signature")
 	}
 	payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return jwtClaims{}, fmt.Errorf("invalid token payload")
+		return decodedClaims{}, fmt.Errorf("invalid token payload")
 	}
+	// The four dashboard claims decode with the same struct and the same
+	// hard failure validateToken has always had: a badly-typed sub, exp,
+	// org_id, or org_role is a real "invalid claims" rejection.
 	var claims struct {
 		Sub     string  `json:"sub"`
 		Exp     float64 `json:"exp"`
@@ -179,12 +247,77 @@ func validateToken(raw string) (jwtClaims, error) {
 		OrgRole string  `json:"org_role"`
 	}
 	if err := json.Unmarshal(payloadBytes, &claims); err != nil {
-		return jwtClaims{}, fmt.Errorf("invalid claims")
+		return decodedClaims{}, fmt.Errorf("invalid claims")
 	}
 	if time.Now().Unix() > int64(claims.Exp) {
-		return jwtClaims{}, fmt.Errorf("token expired")
+		return decodedClaims{}, fmt.Errorf("token expired")
 	}
-	return jwtClaims{Sub: claims.Sub, OrgID: claims.OrgID, OrgRole: claims.OrgRole}, nil
+
+	// The MCP-only claims are decoded one field at a time from the same
+	// payload, not as a second struct decoded in one call: json.Unmarshal
+	// stops decoding a struct's remaining fields as soon as one field's
+	// UnmarshalJSON returns an error, so a single malformed claim (say a
+	// non-string aud) would otherwise blank out every sibling claim that
+	// happens to sit later in the token's byte order too — not just the bad
+	// one. Decoding each claim from its own isolated raw slice makes a
+	// malformed claim's failure affect only that claim: it is simply left at
+	// its zero value.
+	//
+	// A zero value is not "absent", though, so each failure is also recorded
+	// by name in Malformed. The MCP path refuses a token with any entry: for
+	// sid and nbf a silent zero value is strictly more permissive than the
+	// real claim, so treating a decode failure as absence would let a
+	// malformed token past a check a well-formed one fails. The dashboard
+	// path never reads Malformed, so its acceptance rules are unchanged.
+	var fields map[string]json.RawMessage
+	_ = json.Unmarshal(payloadBytes, &fields)
+	var mcp struct {
+		Iss    string
+		Aud    stringOrArray
+		Nbf    float64
+		Sid    string
+		Scope  string
+		Scp    stringOrArray
+		Scopes stringOrArray
+	}
+	var malformed []string
+	decodeClaim := func(name string, dst any) {
+		v, ok := fields[name]
+		if !ok {
+			return
+		}
+		if err := json.Unmarshal(v, dst); err != nil {
+			malformed = append(malformed, name)
+		}
+	}
+	decodeClaim("iss", &mcp.Iss)
+	decodeClaim("aud", &mcp.Aud)
+	decodeClaim("nbf", &mcp.Nbf)
+	decodeClaim("sid", &mcp.Sid)
+	decodeClaim("scope", &mcp.Scope)
+	decodeClaim("scp", &mcp.Scp)
+	decodeClaim("scopes", &mcp.Scopes)
+
+	scp := []string(mcp.Scp)
+	if len(scp) == 0 {
+		scp = []string(mcp.Scopes)
+	}
+	return decodedClaims{
+		Sub: claims.Sub, Iss: mcp.Iss, Aud: []string(mcp.Aud), OrgID: claims.OrgID, OrgRole: claims.OrgRole,
+		Sid: mcp.Sid, Scope: mcp.Scope, Scp: scp, Exp: claims.Exp, Nbf: mcp.Nbf,
+		Malformed: malformed,
+	}, nil
+}
+
+// validateToken parses and verifies a JWT, returning the claims the dashboard
+// API uses. It is verifyJWT minus the MCP-only fields; its checks and error
+// strings are unchanged.
+func validateToken(raw string) (jwtClaims, error) {
+	c, err := verifyJWT(raw)
+	if err != nil {
+		return jwtClaims{}, err
+	}
+	return jwtClaims{Sub: c.Sub, OrgID: c.OrgID, OrgRole: c.OrgRole}, nil
 }
 
 // resolveInstallationIDs resolves the installation IDs a user has access to.

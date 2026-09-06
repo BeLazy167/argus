@@ -269,13 +269,13 @@ WITH vec AS (
          (COALESCE(1.0/(60+v.rnk), 0) + COALESCE(1.0/(60+f.rnk), 0)) / (2.0/61.0) AS rrf
   FROM vec v FULL OUTER JOIN fts f USING (id)
 ), scored AS (
-  SELECT m.custom_id, m.content, m.metadata, u.rrf,
+  SELECT m.custom_id, m.content, m.metadata, m.container_tag, u.rrf,
          CASE WHEN m.embedding IS NOT NULL AND m.embedding_space = $%[2]d
                    AND NOT ((m.embedding %[8]s $%[1]d%[9]s)::float8 = 'NaN'::float8)
               THEN LEAST(GREATEST(1 - (m.embedding %[8]s $%[1]d%[9]s)::float8, 0::float8), 1::float8) ELSE 0 END AS score
   FROM fused u JOIN live_memories m ON m.id = u.id
 )
-SELECT custom_id, content, metadata, score
+SELECT custom_id, content, metadata, container_tag, score
 FROM scored
 WHERE score >= $%[5]d::float8
 ORDER BY score DESC, rrf DESC, custom_id
@@ -303,7 +303,7 @@ LIMIT $%[6]d`,
 		args = append(args, req.Query, limit)
 		n := len(args)
 		q := fmt.Sprintf(`
-SELECT custom_id, content, metadata, 0::float8 AS score
+SELECT custom_id, content, metadata, container_tag, 0::float8 AS score
 FROM live_memories
 WHERE %[3]s AND content_tsv @@ websearch_to_tsquery('english', $%[1]d)
 ORDER BY ts_rank_cd(content_tsv, websearch_to_tsquery('english', $%[1]d)) DESC, id
@@ -365,7 +365,7 @@ type pgQuerier interface {
 func pinnedScan(ctx context.Context, q pgQuerier, where string, args []any, req SearchRequest, limit int) ([]PatternMatch, error) {
 	args = append(args, limit)
 	sql := fmt.Sprintf(`
-SELECT custom_id, content, metadata, 0::float8 AS score
+SELECT custom_id, content, metadata, container_tag, 0::float8 AS score
 FROM live_memories
 WHERE %s
 ORDER BY updated_at DESC, id DESC
@@ -378,17 +378,27 @@ LIMIT $%d`, where, len(args))
 	return scanMatches(rows, req, "memory pinned scan")
 }
 
-// scanMatches converts the shared 4-column projection (custom_id, content,
-// metadata, score) into matches. Both SQL shapes and the pinned fallback
-// project identically, so the row->match contract lives here once: a
-// malformed metadata blob degrades to nil Metadata rather than failing the
-// read, and enrichment (no related-memories graph in PG) carries Content.
+// scanMatches converts the shared 5-column projection (custom_id, content,
+// metadata, container_tag, score) into matches. Both SQL shapes and the
+// pinned fallback project identically, so the row->match contract lives here
+// once: a malformed metadata blob degrades to nil Metadata rather than
+// failing the read, and enrichment (no related-memories graph in PG) carries
+// Content.
+//
+// container_tag is copied into Metadata["container_tag"] rather than left as
+// a bare column: it is the only way a ScopeBoth caller (searchFanOut merges
+// legs from multiple containers and discards which one a match came from)
+// can tell a repo hit from a shared hit. Every row already satisfies this
+// query's `container_tag = req.ContainerTag` predicate, so the column always
+// agrees with req.ContainerTag for that leg — reading it off the row keeps
+// the row->match contract self-contained instead of implicit in the caller.
 func scanMatches(rows pgx.Rows, req SearchRequest, op string) ([]PatternMatch, error) {
 	var out []PatternMatch
 	for rows.Next() {
 		var pm PatternMatch
 		var metaJSON []byte
-		if err := rows.Scan(&pm.ID, &pm.Content, &metaJSON, &pm.Score); err != nil {
+		var containerTag string
+		if err := rows.Scan(&pm.ID, &pm.Content, &metaJSON, &containerTag, &pm.Score); err != nil {
 			return nil, fmt.Errorf("%s: %w", op, err)
 		}
 		if len(metaJSON) > 0 {
@@ -397,6 +407,10 @@ func scanMatches(rows pgx.Rows, req SearchRequest, op string) ([]PatternMatch, e
 				pm.Metadata = md
 			}
 		}
+		if pm.Metadata == nil {
+			pm.Metadata = map[string]string{}
+		}
+		pm.Metadata["container_tag"] = containerTag
 		if req.Include != nil {
 			pm.RichContent = pm.Content
 		}

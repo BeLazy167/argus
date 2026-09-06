@@ -174,6 +174,9 @@ func Run() error {
 	}, logger)
 	memRegistry := memory.NewRegistry(logger).
 		WithPostgresBackend(db.Pool, embedRegistry)
+	// Latch the vector-type probe from a boot context. Left to the first search,
+	// a short-deadline request could latch it wrong for the whole process.
+	memRegistry.WarmVectorProbe(ctx)
 	logger.InfoContext(ctx, "memory registry initialization completed",
 		"platform_provider_configured", cfg.EmbeddingsAPIKey != "", "model", cfg.EmbeddingsModel,
 		"dimensions", cfg.EmbeddingsDimensions)

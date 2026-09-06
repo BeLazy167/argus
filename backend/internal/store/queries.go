@@ -3807,6 +3807,29 @@ func (s *Store) GetLatestRunForReview(ctx context.Context, reviewID uuid.UUID) (
 	return s.q.GetLatestRunForReview(ctx, reviewID)
 }
 
+// GetLatestRunStateForReview returns pipeline_states.state for the review's
+// most recently updated run. pgx.ErrNoRows means no run exists yet — a review
+// can sit at status pending before its first persist.
+func (s *Store) GetLatestRunStateForReview(ctx context.Context, reviewID uuid.UUID) (storeResult0 string, storeErr error) {
+	storeFinish :=
+		beginStoreOperation(ctx, "GetLatestRunStateForReview",
+
+			"review_id",
+
+			storeLogValue(reviewID))
+	defer func() {
+		if recovered := recover(); recovered !=
+			nil {
+			storeFinishPanic(storeFinish, recovered, storeResult0)
+			panic(recovered)
+		}
+		storeFinish(storeErr,
+			storeResult0)
+	}()
+
+	return s.q.GetLatestRunStateForReview(ctx, reviewID)
+}
+
 func (s *Store) FindReviewsLinkingToPR(ctx context.Context, arg db.FindReviewsLinkingToPRParams) (storeResult0 []db.FindReviewsLinkingToPRRow, storeErr error) {
 	storeFinish :=
 		beginStoreOperation(ctx, "FindReviewsLinkingToPR")

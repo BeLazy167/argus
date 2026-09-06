@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/BeLazy167/argus/backend/internal/obs"
+	"github.com/BeLazy167/argus/backend/internal/store"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -809,14 +811,14 @@ func (idx *PGIndexer) SimilarConventions(ctx context.Context, repo, category, co
 	}
 	var query string
 	if category == "unknown" {
-		query = fmt.Sprintf(`SELECT custom_id, content, metadata,
+		query = fmt.Sprintf(`SELECT custom_id, content, metadata, container_tag,
 			LEAST(GREATEST(1 - (embedding %s %s)::float8, 0), 1)
 			FROM live_memories WHERE installation_id=$1 AND container_tag=$2
 			AND type='pattern' AND metadata->>'source'='convention_extraction'
 			AND embedding IS NOT NULL AND embedding_space=$4
 			ORDER BY embedding %s %s, id LIMIT $5`, cosineOp(pgctx), vectorParam("$3", pgctx), cosineOp(pgctx), vectorParam("$3", pgctx))
 	} else {
-		query = fmt.Sprintf(`SELECT custom_id, content, metadata,
+		query = fmt.Sprintf(`SELECT custom_id, content, metadata, container_tag,
 			LEAST(GREATEST(1 - (embedding %s %s)::float8, 0), 1)
 			FROM live_memories WHERE installation_id=$1 AND container_tag=$2
 			AND type='pattern' AND metadata->>'source'='convention_extraction' %s
@@ -882,21 +884,41 @@ func (idx *PGIndexer) OpenConventionConflicts(ctx context.Context, repo string) 
 	return out, rows.Err()
 }
 
+// invalidateMemorySQL and supersedeMemorySQL are the two lifecycle transitions,
+// shared verbatim by the single-purpose methods and by RetireDocument so the
+// guarded path can never drift from the unguarded one.
+const invalidateMemorySQL = `
+	UPDATE memories
+	SET invalidated_at = COALESCE(invalidated_at, now()),
+	    updated_at = CASE WHEN invalidated_at IS NULL THEN now() ELSE updated_at END
+	WHERE installation_id = $1 AND custom_id = $2 AND deleted_at IS NULL`
+
+const supersedeMemorySQL = `
+	UPDATE memories AS source
+	SET invalidated_at = COALESCE(source.invalidated_at, now()),
+	    superseded_by = replacement.id,
+	    updated_at = CASE
+	      WHEN source.invalidated_at IS NULL OR source.superseded_by IS DISTINCT FROM replacement.id THEN now()
+	      ELSE source.updated_at
+	    END
+	FROM live_memories AS replacement
+	WHERE source.installation_id = $1
+	  AND source.custom_id = $2
+	  AND source.deleted_at IS NULL
+	  AND (source.superseded_by IS NULL OR source.superseded_by = replacement.id)
+	  AND replacement.installation_id = source.installation_id
+	  AND replacement.custom_id = $3`
+
 // InvalidateDocument records that a memory is no longer valid without deleting
 // its content or attribution history. Repeating the same transition is a
 // successful no-op; a deleted or unknown document returns an explicit error.
 func (idx *PGIndexer) InvalidateDocument(ctx context.Context, documentID string) error {
-	tag, err := idx.pool.Exec(ctx, `
-		UPDATE memories
-		SET invalidated_at = COALESCE(invalidated_at, now()),
-		    updated_at = CASE WHEN invalidated_at IS NULL THEN now() ELSE updated_at END
-		WHERE installation_id = $1 AND custom_id = $2 AND deleted_at IS NULL`,
-		idx.installationID, documentID)
+	tag, err := idx.pool.Exec(ctx, invalidateMemorySQL, idx.installationID, documentID)
 	if err != nil {
 		return fmt.Errorf("invalidating memory %s: %w", documentID, err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("invalidating memory %s: document not found", documentID)
+		return fmt.Errorf("invalidating memory %s: %w", documentID, ErrDocumentNotFound)
 	}
 	return nil
 }
@@ -910,29 +932,92 @@ func (idx *PGIndexer) SupersedeDocument(ctx context.Context, documentID, replace
 	if documentID == replacementID {
 		return fmt.Errorf("superseding memory %s: replacement must be a different document", documentID)
 	}
-	tag, err := idx.pool.Exec(ctx, `
-		UPDATE memories AS source
-		SET invalidated_at = COALESCE(source.invalidated_at, now()),
-		    superseded_by = replacement.id,
-		    updated_at = CASE
-		      WHEN source.invalidated_at IS NULL OR source.superseded_by IS DISTINCT FROM replacement.id THEN now()
-		      ELSE source.updated_at
-		    END
-		FROM live_memories AS replacement
-		WHERE source.installation_id = $1
-		  AND source.custom_id = $2
-		  AND source.deleted_at IS NULL
-		  AND (source.superseded_by IS NULL OR source.superseded_by = replacement.id)
-		  AND replacement.installation_id = source.installation_id
-		  AND replacement.custom_id = $3`,
-		idx.installationID, documentID, replacementID)
+	tag, err := idx.pool.Exec(ctx, supersedeMemorySQL, idx.installationID, documentID, replacementID)
 	if err != nil {
 		return fmt.Errorf("superseding memory %s with %s: %w", documentID, replacementID, err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("superseding memory %s with %s: source or live replacement not found", documentID, replacementID)
+		return fmt.Errorf("superseding memory %s with %s: %w", documentID, replacementID, ErrDocumentNotFound)
 	}
 	return nil
+}
+
+// RetireDocument implements the guarded transition. Provenance comes from the
+// locked memory row's metadata — never from the caller or a patterns row, so
+// it works for memories the pipeline wrote directly — and the guard and the
+// transition commit together, so a concurrent metadata change cannot slip a
+// pipeline-learned row past an unacknowledged caller.
+func (idx *PGIndexer) RetireDocument(ctx context.Context, req RetireRequest) (RetireResult, error) {
+	if req.CustomID == "" {
+		return RetireResult{}, fmt.Errorf("retiring memory: custom id is required")
+	}
+	tx, err := idx.pool.Begin(ctx)
+	if err != nil {
+		return RetireResult{}, fmt.Errorf("retiring memory %s: begin: %w", req.CustomID, err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var source string
+	err = tx.QueryRow(ctx, `
+		SELECT COALESCE(metadata->>'source', '')
+		FROM memories
+		WHERE installation_id = $1 AND custom_id = $2 AND deleted_at IS NULL
+		FOR UPDATE`, idx.installationID, req.CustomID).Scan(&source)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return RetireResult{}, fmt.Errorf("retiring memory %s: %w", req.CustomID, ErrDocumentNotFound)
+	}
+	if err != nil {
+		return RetireResult{}, fmt.Errorf("retiring memory %s: lock: %w", req.CustomID, err)
+	}
+	if !knownMemorySources[source] {
+		return RetireResult{}, fmt.Errorf("retiring memory %s (source %q): %w", req.CustomID, source, ErrUnknownProvenance)
+	}
+	if !store.IsHumanAuthoredSource(source) && !req.AllowPipelineLearned {
+		return RetireResult{}, fmt.Errorf("retiring memory %s (source %q): %w", req.CustomID, source, ErrPipelineLearnedMemory)
+	}
+
+	mode := RetireModeInvalidated
+	if req.ReplacementCustomID != "" {
+		if req.ReplacementCustomID == req.CustomID {
+			return RetireResult{}, fmt.Errorf("retiring memory %s: %w", req.CustomID, ErrReplacementNotLive)
+		}
+		// Lock the replacement's live state for the rest of the transaction.
+		// The probe reads live_memories — the same view supersedeMemorySQL
+		// joins — so the two agree on what "live" means. Spelling the
+		// predicate out here instead would miss the view's extra exclusion of
+		// both ends of an open convention_conflicts row (migration 086), and a
+		// conflicted replacement would pass the probe, update zero rows, and be
+		// reported as "already superseded" — false about the source row.
+		// FOR SHARE on the view locks the underlying memories row; the
+		// anti-joined convention_conflicts side emits no row to lock.
+		var replacementID int64
+		err := tx.QueryRow(ctx, `
+			SELECT id FROM live_memories
+			WHERE installation_id = $1 AND custom_id = $2
+			FOR SHARE`, idx.installationID, req.ReplacementCustomID).Scan(&replacementID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return RetireResult{}, fmt.Errorf("retiring memory %s with %s: %w", req.CustomID, req.ReplacementCustomID, ErrReplacementNotLive)
+		}
+		if err != nil {
+			return RetireResult{}, fmt.Errorf("retiring memory %s: replacement lookup: %w", req.CustomID, err)
+		}
+		tag, err := tx.Exec(ctx, supersedeMemorySQL, idx.installationID, req.CustomID, req.ReplacementCustomID)
+		if err != nil {
+			return RetireResult{}, fmt.Errorf("superseding memory %s with %s: %w", req.CustomID, req.ReplacementCustomID, err)
+		}
+		if tag.RowsAffected() == 0 {
+			// Already superseded by a DIFFERENT memory: rewriting history needs
+			// a separate policy decision, not a silent overwrite.
+			return RetireResult{}, fmt.Errorf("retiring memory %s: already superseded by another memory: %w", req.CustomID, ErrReplacementNotLive)
+		}
+		mode = RetireModeSuperseded
+	} else if _, err := tx.Exec(ctx, invalidateMemorySQL, idx.installationID, req.CustomID); err != nil {
+		return RetireResult{}, fmt.Errorf("invalidating memory %s: %w", req.CustomID, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return RetireResult{}, fmt.Errorf("retiring memory %s: commit: %w", req.CustomID, err)
+	}
+	return RetireResult{Mode: mode, Source: source}, nil
 }
 
 // DeleteDocument soft-deletes by customId. In the PG store doc id == customId

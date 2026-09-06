@@ -43,6 +43,20 @@ func (q *Queries) GetLatestRunForReview(ctx context.Context, reviewID uuid.UUID)
 	return id, err
 }
 
+const getLatestRunStateForReview = `-- name: GetLatestRunStateForReview :one
+SELECT state FROM pipeline_states WHERE review_id = $1 ORDER BY updated_at DESC LIMIT 1
+`
+
+// Stage of the most recently touched run for a review. "Latest" means
+// updated_at, matching GetLatestRunForReview: a recovered run that resumed is
+// the current one even if an older row was created later.
+func (q *Queries) GetLatestRunStateForReview(ctx context.Context, reviewID uuid.UUID) (string, error) {
+	row := q.db.QueryRow(ctx, getLatestRunStateForReview, reviewID)
+	var state string
+	err := row.Scan(&state)
+	return state, err
+}
+
 const listIncompleteRuns = `-- name: ListIncompleteRuns :many
 SELECT id FROM pipeline_states WHERE state NOT IN ($1, $2) ORDER BY updated_at
 `

@@ -268,11 +268,32 @@ docs/               # architecture, self-hosting, contributing
 - GitLab and Bitbucket support
 - Migrate the tree-sitter engine to a WASM build for broader language coverage without CGO
 - Review profiles / tone control
-- MCP server for IDE integration
 
 ## Contributing
 
 Issues and pull requests are welcome — start with [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md). Security reports go through [GitHub private advisories](docs/SECURITY.md).
+
+## MCP: use Argus's memory and reviews from your own agent
+
+Argus exposes its team memory and review results over the Model Context Protocol. Any MCP client that supports remote servers with OAuth (Claude Code, Cursor, Claude Desktop) can connect.
+
+**Server:** `https://api.argus.reviews/mcp` (self-hosted: your `MCP_RESOURCE_URL`).
+
+**Auth:** Clerk is the OAuth authorization server. The client discovers it from `/.well-known/oauth-protected-resource`, runs a browser login once, and asks you to pick **one organization** — the connection sees only that org's repos and memory. Switching orgs means authorizing again. Tokens refresh automatically; there are no API keys.
+
+**Scopes:** `argus:read` for every read tool; `argus:memory:write` for `create_memory`, `delete_memory`, `retire_memory`. A read-only grant cannot mutate memory, whatever flags a call sets.
+
+**Tools:** `list_repos` (call first — resolves the local `repo_id` / `installation_id` every other tool takes), `search_memory`, `get_memory_briefing`, `create_memory`, `delete_memory`, `retire_memory`, `list_reviews`, `get_review_status`, `get_review`.
+
+**Guard rails:** deleting or retiring a memory the review pipeline learned requires `confirm_pipeline_learned=true`; writing an org-wide memory requires `confirm_shared=true`. Neither can be undone. To stop a memory influencing reviews, use `retire_memory` — `delete_memory` removes one contributing record and the memory may remain searchable.
+
+**Self-hosting — backend env:** `MCP_ENABLED=true`, `CLERK_ISSUER_URL` (your Clerk Frontend API origin, e.g. `https://<slug>.clerk.accounts.dev`), `MCP_RESOURCE_URL` (the public `https://…/mcp` URL). `CLERK_JWKS_URL` must already be set. The route 404s when disabled.
+
+**Request limits:** `/mcp` caps each request body at 1 MiB and each request at 60 seconds, both applied before authentication; a normal tool call is a few KB.
+
+**Self-hosting — Clerk dashboard:** under *OAuth applications*: create the custom scopes `argus:read` and `argus:memory:write` and assign them; enable *Advertise CIMD support* (preferred) or *Dynamic client registration* for clients that discover the server; keep the consent screen on; set *Default scopes* to `argus:read argus:memory:write user:org:read` for clients that omit `scope`; leave *Generate access tokens as JWTs* on (opaque tokens are rejected). Organizations must be enabled so `user:org:read` is available.
+
+**Acceptance run before production:** with a staging Clerk instance and a real MCP client, complete discovery → registration → PKCE authorization with org selection → `tools/list` → `list_repos` → `create_memory` → `retire_memory` as a regular member; repeat with a read-only grant and with a second org. Record the client version and non-secret config used. If the token's scope claim is not `scope`/`scp`/`scopes`, adjust `grantedScopes` in `backend/internal/api/mcp_auth.go`.
 
 ## License
 

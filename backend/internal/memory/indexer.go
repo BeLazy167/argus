@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -101,6 +102,12 @@ type Indexer interface {
 	// documentID to a live replacement in the same installation.
 	InvalidateDocument(ctx context.Context, documentID string) error
 	SupersedeDocument(ctx context.Context, documentID, replacementID string) error
+	// RetireDocument is the guarded lifecycle transition for callers acting on
+	// behalf of a person: it reads provenance from the memory row itself,
+	// enforces the human-authored/acknowledged rule, validates a replacement,
+	// and applies invalidate-or-supersede in ONE transaction. MCP must use this
+	// rather than the unguarded methods above.
+	RetireDocument(ctx context.Context, req RetireRequest) (RetireResult, error)
 	DeleteDocument(ctx context.Context, documentID string) error
 }
 
@@ -124,6 +131,58 @@ const (
 	// praise finding rather than from a developer action.
 	SourceAutomaticPraise = "automatic_praise"
 )
+
+// RetireRequest names one memory to retire. ReplacementCustomID empty means
+// plain invalidation; set, the memory is superseded by that replacement.
+type RetireRequest struct {
+	CustomID             string
+	ReplacementCustomID  string
+	AllowPipelineLearned bool
+}
+
+// RetireResult reports what happened and the provenance the guard read.
+type RetireResult struct {
+	Mode   string // RetireModeInvalidated | RetireModeSuperseded
+	Source string
+}
+
+const (
+	RetireModeInvalidated = "invalidated"
+	RetireModeSuperseded  = "superseded"
+)
+
+var (
+	// ErrDocumentNotFound: no live memory row for (installation, custom_id).
+	ErrDocumentNotFound = errors.New("document not found")
+	// ErrPipelineLearnedMemory: the row's source is not human-authored and the
+	// caller did not acknowledge retiring pipeline-learned knowledge.
+	ErrPipelineLearnedMemory = errors.New("memory was learned by the review pipeline")
+	// ErrUnknownProvenance: metadata carries no source, or one this build does
+	// not recognize. Refused even with acknowledgment — resolve provenance first.
+	ErrUnknownProvenance = errors.New("memory provenance is unknown")
+	// ErrReplacementNotLive: the replacement is missing, retired, deleted, in
+	// another installation, or is the source itself.
+	ErrReplacementNotLive = errors.New("replacement must be a distinct live memory in the same installation")
+)
+
+// knownMemorySources is every `source` value a writer in this codebase stamps
+// into memory metadata. Retirement refuses a source outside this set because
+// it cannot classify the knowledge. When adding a writer with a new source,
+// add it here; verify with:
+//
+//	grep -rhoE 'Source: *"[a-z_]+"|source *[:=]+ *"[a-z_]+"' internal --include='*.go' | sort -u
+var knownMemorySources = map[string]bool{
+	"manual": true, "remember_command": true,
+	"auto_learn": true, "org_learned": true, "convention_extraction": true,
+	// The convention writer in the pipeline stamps the mirrored pattern row
+	// with source "convention" (orchestrator extractConventions), a distinct
+	// value from the "convention_extraction" the memory document carries.
+	"convention": true,
+	"synthesis":  true, "scoring_confirmed": true, "pr_summary": true, "arch_summary": true,
+	"pattern": true, "author": true, "dashboard": true, "vendors": true, "review": true,
+	SourceLegacyReplyFeedback: true, SourceTrustedReplyFeedback: true, SourceTrustedReplyLearning: true,
+	SourceReactionFeedback: true, SourceAutomaticPraise: true,
+}
 
 // IndexResult identifies the row a write landed on. ID is the deterministic
 // customID: in the Postgres store the document id and the customID are the
