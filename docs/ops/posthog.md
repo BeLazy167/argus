@@ -84,19 +84,24 @@ Filter: `$groups.installation` != `null` (only installed users count).
 ### `log.error` spike
 Insights → new trend → `log.error` count, last 1h. Save as alert: **notify when > 20 in 1h**, email channel.
 
-### Backend handler drop counter
-Expose via `/healthz`:
-```json
-{
-  "posthog": {
-    "sent": 12405,
-    "dropped_buffer": 0,
-    "dropped_unattributed": 3,
-    "breaker_open": false
-  }
-}
+### Backend handler drop counters
+The counters live on the handler and reach you through logs, not an endpoint.
+`/healthz` returns `{"status":"ok"}` and nothing else.
+
+Every drop logs a line as it happens:
 ```
-Fly alerting rule (optional): page on `dropped_buffer > 0 for > 5m` — signals PostHog outage exceeding our buffer.
+{"level":"WARN","msg":"PostHog event dropped","event":"log.error","reason":"unattributed"}
+```
+`reason` is one of `unattributed`, `buffer_full`, `circuit_breaker_open`,
+`handler_closed`. Read them with `fly logs -a argus-ai | grep 'PostHog event dropped'`.
+
+Totals are emitted once at shutdown as `posthog forwarding totals`, carrying
+`sent`, `dropped_buffer`, `dropped_breaker`, `dropped_enqueue`,
+`dropped_unattributed` and `breaker_open`.
+
+Alerting (optional): alert on the rate of `PostHog event dropped` with
+`reason=buffer_full` sustained over 5m — that signals a PostHog outage
+outlasting our buffer.
 
 ## Session recording
 
@@ -136,7 +141,7 @@ The allowlist of attribute keys is enforced by `backend/internal/obs/allowlist_t
 **"My event isn't showing up in PostHog Live Events"**
 1. Confirm `POSTHOG_API_KEY` is set on Fly: `fly secrets list -a <your-app> | grep POSTHOG`
 2. Confirm the event has an `event=` slog attr: `grep -n 'event=".event_name"' backend/`
-3. Check `/healthz` — `dropped_unattributed > 0` means ctx is missing user/installation attribution
+3. Grep logs for `PostHog event dropped` with `reason=unattributed` — means ctx is missing user/installation attribution
 4. Check for allowlist drop: run `go test -run TestSlogAttrsOnAllowlist -v ./internal/obs/...`
 
 **"Session recording shows `*****` where content should be visible"**

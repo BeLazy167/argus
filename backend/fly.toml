@@ -46,6 +46,28 @@ swap_size_mb = 512
   size = 'shared-cpu-1x'
   memory = '1024mb'
 
+# Two checks, two questions. `health` asks "is the process alive?" and hits
+# /healthz, which returns a constant 200 and touches nothing. `ready` asks "is
+# the database reachable from this machine?" and hits /readyz, which pings the
+# store pool.
+#
+# Only /healthz was wired up until 2026-09-03. That day argus-db filled its
+# volume and Postgres crash-looped for three days; /healthz kept returning
+# {"status":"ok"} the whole time, so Fly reported the app healthy while every
+# data request failed. A dead database must turn a check red.
+#
+# Scope, so the next reader does not over-trust this: these are top-level
+# [checks], which Fly documents as observability only. A red `ready` does not
+# pull the machine out of proxy rotation and does not restart it — it colors
+# `fly status` / `fly checks list` and blocks a rolling deploy from proceeding
+# past a broken machine. Actually being told about an outage needs an external
+# probe or an alert on check state, tracked in issue #294.
+#
+# `ready` carries the longer interval because each probe costs a round trip to
+# Postgres. The grace_period is not about pool startup order — boot opens and
+# pings the pool (app.go store.New) before the listener accepts (ListenAndServe),
+# so /readyz is never reachable with an unopened pool. It simply keeps the first
+# probes from counting against a machine that is still coming up.
 [checks]
   [checks.health]
     port = 8080
@@ -53,3 +75,11 @@ swap_size_mb = 512
     interval = '15s'
     timeout = '2s'
     path = '/healthz'
+
+  [checks.ready]
+    port = 8080
+    type = 'http'
+    interval = '30s'
+    timeout = '5s'
+    grace_period = '20s'
+    path = '/readyz'
