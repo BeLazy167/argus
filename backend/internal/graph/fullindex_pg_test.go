@@ -1635,3 +1635,225 @@ func TestListReposDueForGraphIndexSelectsLegacyRecentTimestampWithoutPublishedAu
 		t.Fatalf("legacy repo with recent timestamp and null generation authority not immediately due: %+v", targets)
 	}
 }
+
+// generationNodeIDs returns the repo's published node IDs in a stable order.
+// Identity matters here: the publish swap deletes and re-inserts, so surviving
+// IDs are proof the swap did not run.
+func generationNodeIDs(t *testing.T, ctx context.Context, pool *pgxpool.Pool, repoID int64) []int64 {
+	t.Helper()
+	rows, err := pool.Query(ctx, `SELECT id FROM code_nodes WHERE repo_id = $1 ORDER BY id`, repoID)
+	if err != nil {
+		t.Fatalf("read node ids: %v", err)
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			t.Fatalf("scan node id: %v", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate node ids: %v", err)
+	}
+	return ids
+}
+
+// A commit that touches no indexed symbol still resolves to a new head and
+// still builds a generation. Publishing it must advance the repo's bookkeeping
+// without rewriting code_nodes, because the swap would delete and re-insert
+// every row to arrive at the graph already there. That churn is what filled
+// the pggraph CDC log and the database volume on 2026-09-03.
+func TestPublishSkipsSwapWhenGenerationMatchesLiveGraph(t *testing.T) {
+	pool, ctx := generationTestPool(t)
+	st := store.NewWithDB(pool)
+	installationID := generationSeedInstallation(t, ctx, pool, "{}")
+	repoID := generationSeedRepo(t, ctx, pool, installationID, "generation/noop-publish")
+
+	gh := &fakeFullIndexGitHub{
+		sha:      "1111111111111111111111111111111111111111",
+		tree:     ghpkg.RepoTree{Files: []ghpkg.RepoTreeFile{{Path: "a.go", SHA: "sha-a.go"}, {Path: "b.go", SHA: "sha-b.go"}}},
+		contents: map[string]string{"a.go": "package p\nfunc Alpha() { Beta() }\n", "b.go": "package p\nfunc Beta() {}\n"},
+		fetchErr: map[string]error{},
+	}
+	first, err := IndexRepoBounded(ctx, st, gh, 1, "o", "r", "main", repoID, 10, 0)
+	if err != nil {
+		t.Fatalf("first index: %v", err)
+	}
+	if !first.Published {
+		t.Fatalf("first index did not publish: %+v", first)
+	}
+	before := generationNodeIDs(t, ctx, pool, repoID)
+	if len(before) == 0 {
+		t.Fatal("first publish wrote no nodes")
+	}
+
+	// New head, byte-identical sources: the generation hashes to what is live.
+	const secondSHA = "2222222222222222222222222222222222222222"
+	gh.sha = secondSHA
+	second, err := IndexRepoBounded(ctx, st, gh, 1, "o", "r", "main", repoID, 10, 0)
+	if err != nil {
+		t.Fatalf("second index: %v", err)
+	}
+	if !second.Published {
+		t.Fatalf("second index did not publish: %+v", second)
+	}
+
+	if after := generationNodeIDs(t, ctx, pool, repoID); !slices.Equal(before, after) {
+		t.Fatalf("identical generation rewrote code_nodes: %v -> %v", before, after)
+	}
+
+	// Bookkeeping still has to advance, or the repo re-indexes this head forever.
+	var publishedSHA string
+	var status string
+	if err := pool.QueryRow(ctx, `
+		SELECT r.graph_index_commit_sha, g.status
+		FROM repos r JOIN graph_index_generations g ON g.id = r.graph_published_generation_id
+		WHERE r.id = $1`, repoID).Scan(&publishedSHA, &status); err != nil {
+		t.Fatalf("read repo graph pointers: %v", err)
+	}
+	if publishedSHA != secondSHA {
+		t.Fatalf("graph_index_commit_sha = %q, want %q", publishedSHA, secondSHA)
+	}
+	if status != "published" {
+		t.Fatalf("published generation status = %q, want published", status)
+	}
+}
+
+// TestPublishSkipStillFiresWithInferredAPIEdges pins the exclusion of inferred
+// cross-repo `calls_api` edges from the no-op guard.
+//
+// LinkAPIEndpoints runs after every publish commits and, through
+// ReplaceInferredAPIEdges, deletes and re-inserts those edges for every repo in
+// the installation with a fresh updated_at — always newer than the publish it
+// follows. A guard that counted them would see "something was written since
+// publish" after every publish and never skip again, so the optimization would
+// be silently inert for any installation with a cross-repo API link. That is
+// the shape of a real installation, so the guard must ignore them.
+func TestPublishSkipStillFiresWithInferredAPIEdges(t *testing.T) {
+	pool, ctx := generationTestPool(t)
+	st := store.NewWithDB(pool)
+	installationID := generationSeedInstallation(t, ctx, pool, "{}")
+	repoID := generationSeedRepo(t, ctx, pool, installationID, "generation/noop-inferred-edges")
+
+	gh := &fakeFullIndexGitHub{
+		sha:      "1111111111111111111111111111111111111111",
+		tree:     ghpkg.RepoTree{Files: []ghpkg.RepoTreeFile{{Path: "a.go", SHA: "sha-a.go"}, {Path: "b.go", SHA: "sha-b.go"}}},
+		contents: map[string]string{"a.go": "package p\nfunc Alpha() { Beta() }\n", "b.go": "package p\nfunc Beta() {}\n"},
+		fetchErr: map[string]error{},
+	}
+	if _, err := IndexRepoBounded(ctx, st, gh, 1, "o", "r", "main", repoID, 10, 0); err != nil {
+		t.Fatalf("first index: %v", err)
+	}
+	before := generationNodeIDs(t, ctx, pool, repoID)
+	if len(before) < 2 {
+		t.Fatalf("first publish wrote %d nodes, want at least 2", len(before))
+	}
+
+	// Exactly what LinkAPIEndpoints leaves behind: an inferred calls_api edge
+	// stamped after the publish it followed.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO code_edges (repo_id, source_id, target_id, kind, inferred, updated_at)
+		VALUES ($1, $2, $3, 'calls_api', true, NOW())`, repoID, before[0], before[1]); err != nil {
+		t.Fatalf("seed inferred calls_api edge: %v", err)
+	}
+
+	gh.sha = "2222222222222222222222222222222222222222"
+	if _, err := IndexRepoBounded(ctx, st, gh, 1, "o", "r", "main", repoID, 10, 0); err != nil {
+		t.Fatalf("second index: %v", err)
+	}
+	if after := generationNodeIDs(t, ctx, pool, repoID); !slices.Equal(before, after) {
+		t.Fatalf("inferred calls_api edge defeated the skip and rewrote code_nodes: %v -> %v", before, after)
+	}
+}
+
+// TestPublishSwapsAfterNodeDeletion pins deletion detection.
+//
+// The timestamp half of the guard asks whether anything was written since the
+// publish. A deletion writes nothing, so an emptied or partially emptied graph
+// answers "no" just as loudly as an untouched one. The PR indexer really does
+// delete orphaned nodes between full publishes, so without the count check a
+// repo could keep serving a graph missing rows the published generation claims
+// to contain, and never repair it while the sources hash the same.
+func TestPublishSwapsAfterNodeDeletion(t *testing.T) {
+	pool, ctx := generationTestPool(t)
+	st := store.NewWithDB(pool)
+	installationID := generationSeedInstallation(t, ctx, pool, "{}")
+	repoID := generationSeedRepo(t, ctx, pool, installationID, "generation/noop-deletion")
+
+	gh := &fakeFullIndexGitHub{
+		sha:      "1111111111111111111111111111111111111111",
+		tree:     ghpkg.RepoTree{Files: []ghpkg.RepoTreeFile{{Path: "a.go", SHA: "sha-a.go"}, {Path: "b.go", SHA: "sha-b.go"}}},
+		contents: map[string]string{"a.go": "package p\nfunc Alpha() { Beta() }\n", "b.go": "package p\nfunc Beta() {}\n"},
+		fetchErr: map[string]error{},
+	}
+	if _, err := IndexRepoBounded(ctx, st, gh, 1, "o", "r", "main", repoID, 10, 0); err != nil {
+		t.Fatalf("first index: %v", err)
+	}
+	before := generationNodeIDs(t, ctx, pool, repoID)
+	if len(before) < 2 {
+		t.Fatalf("first publish wrote %d nodes, want at least 2", len(before))
+	}
+
+	// What DeleteNodesByIDs does to an orphan: the row goes, and no surviving
+	// row's updated_at moves.
+	if _, err := pool.Exec(ctx, `DELETE FROM code_nodes WHERE id = $1`, before[len(before)-1]); err != nil {
+		t.Fatalf("delete a node: %v", err)
+	}
+
+	gh.sha = "2222222222222222222222222222222222222222"
+	if _, err := IndexRepoBounded(ctx, st, gh, 1, "o", "r", "main", repoID, 10, 0); err != nil {
+		t.Fatalf("second index: %v", err)
+	}
+
+	after := generationNodeIDs(t, ctx, pool, repoID)
+	if len(after) != len(before) {
+		t.Fatalf("graph not repaired after deletion: %d nodes, want %d", len(after), len(before))
+	}
+	if slices.Equal(before, after) {
+		t.Fatalf("node ids unchanged (%v), so no swap ran — the deletion was skipped over", after)
+	}
+}
+
+// TestPublishSwapsAfterDerivationVersionBump pins the derivation salt.
+//
+// The hash covers staged payloads, not the code that turns them into rows. A
+// deploy that changes derivation would otherwise never reach a repo whose head
+// moves without a symbol change: same payloads, same hash, swap skipped, graph
+// still built by the old code. Bumping the salt has to force one republish.
+func TestPublishSwapsAfterDerivationVersionBump(t *testing.T) {
+	pool, ctx := generationTestPool(t)
+	st := store.NewWithDB(pool)
+	installationID := generationSeedInstallation(t, ctx, pool, "{}")
+	repoID := generationSeedRepo(t, ctx, pool, installationID, "generation/noop-derivation")
+
+	gh := &fakeFullIndexGitHub{
+		sha:      "1111111111111111111111111111111111111111",
+		tree:     ghpkg.RepoTree{Files: []ghpkg.RepoTreeFile{{Path: "a.go", SHA: "sha-a.go"}}},
+		contents: map[string]string{"a.go": "package p\nfunc Alpha() {}\n"},
+		fetchErr: map[string]error{},
+	}
+	if _, err := IndexRepoBounded(ctx, st, gh, 1, "o", "r", "main", repoID, 10, 0); err != nil {
+		t.Fatalf("first index: %v", err)
+	}
+	before := generationNodeIDs(t, ctx, pool, repoID)
+	if len(before) == 0 {
+		t.Fatal("first publish wrote no nodes")
+	}
+
+	// A deploy that changed derivation, modelled at the salt rather than by
+	// editing the stored hash — editing the hash would force a swap whether or
+	// not the salt exists, and prove nothing about it.
+	original := graphDerivationVersion
+	t.Cleanup(func() { graphDerivationVersion = original })
+	graphDerivationVersion = "graph-derivation-test-v2"
+
+	gh.sha = "2222222222222222222222222222222222222222"
+	if _, err := IndexRepoBounded(ctx, st, gh, 1, "o", "r", "main", repoID, 10, 0); err != nil {
+		t.Fatalf("second index: %v", err)
+	}
+	if after := generationNodeIDs(t, ctx, pool, repoID); slices.Equal(before, after) {
+		t.Fatalf("stale derivation hash still skipped the swap: node ids unchanged %v", after)
+	}
+}

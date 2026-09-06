@@ -498,6 +498,103 @@ func failGraphPublishLimit(ctx context.Context, st *store.Store, tx pgx.Tx, repo
 	return limitErr
 }
 
+// graphDerivationVersion salts the staged-content hash so that changing how the
+// graph is derived invalidates every stored hash.
+//
+// The hash covers the staged payloads, but the published graph is a function of
+// those payloads AND the code that turns them into rows: langForFile,
+// computeSymbolHash, extractTypeNames, nodeKey, resolveEndpointNode and their
+// neighbours. Without this salt, a deploy that fixes any of them would never
+// reach a repo whose head moves without a symbol change — the payloads hash
+// equal, the swap is skipped, and the repo keeps a graph built by the old code
+// until some source symbol happens to change.
+//
+// Bump this whenever derivation changes shape. Every repo then republishes once.
+// A var, not a const, only so tests can vary it and observe the republish.
+var graphDerivationVersion = "graph-derivation-v1"
+
+// stageGenerationIsNoOp reports whether publishing this generation would leave
+// code_nodes and code_edges exactly as they already are, making the
+// delete-and-reinsert swap pure churn. It also records this generation's
+// content hash, so the next publish has something to compare against.
+//
+// Two conditions must hold together:
+//
+//   - The staged payloads hash identical to the generation currently published
+//     for this repo. Same staged input, same derived graph.
+//   - Nothing has written to code_nodes or code_edges since that publish. The
+//     PR indexer mutates both between full publishes, and a swap removes the
+//     rows it added. Skipping while they exist would leave the live graph
+//     diverged from the generation that claims to describe it.
+//
+// An unset hash on either side reads as unknown and publishes. Every uncertain
+// case falls through to the swap, so this can only skip work it has proven is
+// redundant.
+func stageGenerationIsNoOp(ctx context.Context, tx pgx.Tx, repoID, generationID int64) (bool, error) {
+	// Hashing each row first keeps the aggregate to 32 bytes per file instead of
+	// concatenating every staged payload into one value.
+	var hash string
+	if err := tx.QueryRow(ctx, `
+		SELECT COALESCE(md5($2 || string_agg(h, '' ORDER BY file_path)), '')
+		FROM (
+		  SELECT file_path,
+		         md5(file_path || symbols::text || edges::text || endpoints::text) AS h
+		  FROM graph_index_generation_files
+		  WHERE generation_id = $1 AND status = 'ready'
+		) staged`, generationID, graphDerivationVersion).Scan(&hash); err != nil {
+		return false, fmt.Errorf("publish graph generation: hash staged files: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE graph_index_generations SET content_hash = $3
+		WHERE id = $1 AND repo_id = $2`, generationID, repoID, hash); err != nil {
+		return false, fmt.Errorf("publish graph generation: record content hash: %w", err)
+	}
+	if hash == "" {
+		return false, nil
+	}
+
+	// A NULL updated_at counts as modified: it cannot be ordered against
+	// published_at, and guessing "untouched" would skip a swap that was needed.
+	//
+	// Inferred cross-repo `calls_api` edges are excluded throughout. The publish
+	// path writes them itself: LinkAPIEndpoints runs after the commit and, via
+	// ReplaceInferredAPIEdges, deletes and re-inserts them for every repo in the
+	// installation with a fresh updated_at. Counting them here would leave rows
+	// newer than published_at after every single publish, so the guard could
+	// never pass again for any installation that has a cross-repo API link —
+	// exactly the busy installations this optimization is for.
+	//
+	// The counts are the other half. Timestamps catch inserts and updates but
+	// not deletions: the PR indexer removes orphaned nodes between publishes and
+	// a deleted row moves no timestamp, so "nothing written since publish" is
+	// also true of a graph that has silently lost rows. Comparing against what
+	// the last publish left behind catches that. NULL counts read as unknown and
+	// publish.
+	var noOp bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+		  SELECT 1 FROM repos r
+		  JOIN graph_index_generations g ON g.id = r.graph_published_generation_id
+		    AND g.repo_id = r.id AND g.status = 'published'
+		  WHERE r.id = $1 AND g.content_hash = $2 AND g.published_at IS NOT NULL
+		    AND g.published_node_count IS NOT NULL AND g.published_edge_count IS NOT NULL
+		    AND g.published_node_count = (
+		      SELECT count(*) FROM code_nodes n WHERE n.repo_id = $1)
+		    AND g.published_edge_count = (
+		      SELECT count(*) FROM code_edges e WHERE e.repo_id = $1
+		        AND NOT (e.inferred AND e.kind = 'calls_api'))
+		    AND NOT EXISTS (
+		      SELECT 1 FROM code_nodes n WHERE n.repo_id = $1
+		        AND (n.updated_at IS NULL OR n.updated_at > g.published_at))
+		    AND NOT EXISTS (
+		      SELECT 1 FROM code_edges e WHERE e.repo_id = $1
+		        AND NOT (e.inferred AND e.kind = 'calls_api')
+		        AND (e.updated_at IS NULL OR e.updated_at > g.published_at))
+		)`, repoID, hash).Scan(&noOp); err != nil {
+		return false, fmt.Errorf("publish graph generation: compare published hash: %w", err)
+	}
+	return noOp, nil
+}
+
 func publishGraphGeneration(ctx context.Context, st *store.Store, repoID, generationID int64) error {
 	tx, err := st.Pool.Begin(ctx)
 	if err != nil {
@@ -548,6 +645,14 @@ func publishGraphGeneration(ctx context.Context, st *store.Store, repoID, genera
 	}
 	if limitErr := defaultGraphGenerationPublishLimits.validate(stats); limitErr != nil {
 		return commitGraphPublishPreflightFailure(ctx, tx, repoID, generationID, limitErr)
+	}
+
+	noOp, err := stageGenerationIsNoOp(ctx, tx, repoID, generationID)
+	if err != nil {
+		return err
+	}
+	if noOp {
+		return finishGraphGenerationPublish(ctx, st, tx, repoID, generationID)
 	}
 
 	// This transaction is the visibility boundary. Any later limit or decoding
@@ -791,6 +896,31 @@ func publishGraphGeneration(ctx context.Context, st *store.Store, repoID, genera
 		return err
 	}
 
+	return finishGraphGenerationPublish(ctx, st, tx, repoID, generationID)
+}
+
+// finishGraphGenerationPublish commits the bookkeeping half of a publish: mark
+// the generation published, advance the repo's graph pointers, drop the staging
+// payloads, commit, then relink cross-repo API endpoints.
+//
+// Both publish paths end here. The swap path runs it after rewriting
+// code_nodes; the no-op path runs it instead of rewriting anything. The repo
+// pointers must advance either way — they record which commit the graph now
+// reflects and clear the refresh request that triggered this generation.
+func finishGraphGenerationPublish(ctx context.Context, st *store.Store, tx pgx.Tx, repoID, generationID int64) error {
+	// Record what this publish leaves live, so the next one can tell a graph
+	// that is genuinely untouched from one that has lost rows to a deletion.
+	// Runs on both paths: after a swap the inserts are visible in this same
+	// transaction, and on a skip the counts describe the graph the guard just
+	// verified. Inferred cross-repo calls_api edges are excluded because
+	// LinkAPIEndpoints rewrites them after this transaction commits.
+	if _, err := tx.Exec(ctx, `UPDATE graph_index_generations SET
+		  published_node_count = (SELECT count(*) FROM code_nodes n WHERE n.repo_id = $2),
+		  published_edge_count = (SELECT count(*) FROM code_edges e WHERE e.repo_id = $2
+		    AND NOT (e.inferred AND e.kind = 'calls_api'))
+		WHERE id = $1 AND repo_id = $2`, generationID, repoID); err != nil {
+		return fmt.Errorf("publish graph generation: record published counts: %w", err)
+	}
 	if _, err := tx.Exec(ctx, `UPDATE graph_index_generations
 		SET status = 'published', published_at = NOW(), updated_at = NOW()
 		WHERE id = $1 AND repo_id = $2`, generationID, repoID); err != nil {
