@@ -52,6 +52,42 @@ jobs:
         run: go vet ./...
       - name: Test
         run: go test -race -count=1 ./...
+      # Postgres-side evidence for any failure above. The Start step already
+      # dumps this when the server never comes up, but a server that dies LATER
+      # left nothing behind: golang-migrate reports only its client view, so a
+      # backend crash during Migrate surfaced as "driver: bad connection" with
+      # the whole failing statement echoed and no cause. Runs on 2026-09-04 and
+      # 2026-09-06 failed that way on migration 057's HNSW index -- built over
+      # an empty table, so not memory pressure -- and none could be diagnosed
+      # from CI, because this log was discarded.
+      #
+      # That particular crash is gone: it was PostgreSQL 19beta2 plus pgvector
+      # built from master, and CI now runs the versions production runs (#293).
+      # The diagnostic gap it exposed is what this step closes, so the next
+      # server-side death is readable on the first failure rather than the
+      # sixth.
+      - name: Postgres logs on failure
+        if: failure()
+        # Never let the diagnostic fail the job it is diagnosing. GitHub runs
+        # this under `bash -e`, so a bare docker call against a container that
+        # was never created (checkout, buildx, or the image build failed before
+        # Start Postgres ran) would abort the step, drop the sections below it,
+        # and show a second red step pointing away from the real cause.
+        run: |
+          if ! docker inspect ci-pg >/dev/null 2>&1; then
+            echo "no ci-pg container — it never started, so there is nothing to dump"
+            exit 0
+          fi
+          echo "=== docker logs ci-pg ==="
+          docker logs ci-pg 2>&1 | tail -300 || true
+          echo "=== container state ==="
+          docker inspect ci-pg --format 'Status={{.State.Status}} ExitCode={{.State.ExitCode}} OOMKilled={{.State.OOMKilled}} Error={{.State.Error}}' || true
+          echo "=== pgvector / server version ==="
+          # Bounded: a hung postmaster accepts the connection and never answers,
+          # and an unbounded psql would burn the job's full 6h default timeout.
+          timeout 30 docker exec ci-pg psql -U postgres -d argus_test \
+            -c "SELECT version()" \
+            -c "SELECT extname, extversion FROM pg_extension" || true
 
   lint:
     runs-on: ubuntu-latest
