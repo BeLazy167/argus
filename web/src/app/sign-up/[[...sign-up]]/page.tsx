@@ -368,7 +368,7 @@ function CreateForm({
       <button
         type="submit"
         disabled={submitting || !canSubmit}
-        className="inline-flex h-10 items-center justify-center rounded-md bg-amber px-4 font-mono text-[13px] font-semibold text-primary-foreground transition-colors hover:bg-amber-glow disabled:opacity-50 active:scale-[0.98]"
+        className="inline-flex h-10 items-center justify-center rounded-md bg-amber px-4 font-mono text-[13px] font-semibold text-void transition-colors hover:bg-amber-glow disabled:opacity-50 active:scale-[0.98]"
         style={{ transition: "transform 160ms cubic-bezier(0.23,1,0.32,1), background-color 150ms" }}
       >
         {submitting ? (
@@ -445,7 +445,7 @@ function VerifyForm({
       <button
         type="submit"
         disabled={submitting || code.length !== 6}
-        className="inline-flex h-10 items-center justify-center rounded-md bg-amber px-4 font-mono text-[13px] font-semibold text-primary-foreground transition-colors hover:bg-amber-glow disabled:opacity-50 active:scale-[0.98]"
+        className="inline-flex h-10 items-center justify-center rounded-md bg-amber px-4 font-mono text-[13px] font-semibold text-void transition-colors hover:bg-amber-glow disabled:opacity-50 active:scale-[0.98]"
         style={{ transition: "transform 160ms cubic-bezier(0.23,1,0.32,1), background-color 150ms" }}
       >
         {submitting ? (

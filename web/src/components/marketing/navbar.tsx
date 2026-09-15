@@ -173,7 +173,7 @@ export function Navbar() {
             <motion.div whileTap={{ scale: 0.96 }}>
               <Link
                 href="/dashboard"
-                className="inline-flex items-center rounded-full bg-amber px-5 py-2 font-mono text-[12px] font-semibold text-primary-foreground transition-colors duration-150 hover:bg-amber-glow"
+                className="inline-flex items-center rounded-full bg-amber px-5 py-2 font-mono text-[12px] font-semibold text-void transition-colors duration-150 hover:bg-amber-glow"
               >
                 Dashboard
               </Link>
@@ -245,7 +245,7 @@ export function Navbar() {
                 <Link
                   href="/dashboard"
                   onClick={closeMenu}
-                  className="inline-flex items-center justify-center rounded-full bg-amber py-3 font-mono text-[13px] font-semibold text-primary-foreground"
+                  className="inline-flex items-center justify-center rounded-full bg-amber py-3 font-mono text-[13px] font-semibold text-void"
                 >
                   Dashboard
                 </Link>

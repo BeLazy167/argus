@@ -108,12 +108,12 @@ function HeroHeadline() {
               target="_blank"
               rel="noreferrer"
               onClick={() => track("marketing.github_clicked", { source: "hero" })}
-              className={`group relative inline-flex h-12 items-center gap-2.5 bg-amber px-6 font-mono text-[13px] font-semibold uppercase tracking-[0.12em] text-primary-foreground transition-[transform,background-color] duration-150 ease-[cubic-bezier(0.23,1,0.32,1)] hover:bg-amber-glow active:scale-[0.98] ${focusRingAmber}`}
+              className={`group relative inline-flex h-12 items-center gap-2.5 bg-amber px-6 font-mono text-[13px] font-semibold uppercase tracking-[0.12em] text-void transition-[transform,background-color] duration-150 ease-[cubic-bezier(0.23,1,0.32,1)] hover:bg-amber-glow active:scale-[0.98] ${focusRingAmber}`}
             >
               <GithubMark />
               View on GitHub
               <span className="mx-1 h-3 w-px bg-primary-foreground/40" aria-hidden="true" />
-              <span className="text-[11px] tracking-[0.14em] text-primary-foreground/80">AGPL</span>
+              <span className="text-[11px] tracking-[0.14em] text-void/80">AGPL</span>
               <CaretRight />
             </Link>
             <Link
@@ -328,7 +328,7 @@ function ScanCommandLine() {
       <span className="text-ash/70">--pr=#1047</span>
       <span aria-hidden="true" className="mx-1 text-iron/70">→</span>
       <span className="text-foreground">
-        matched <span className="text-amber">Feb 14 rounding regression</span>
+        matched <span className="text-amber">Jan 24 rounding regression</span>
       </span>
       <span aria-hidden="true" className="text-iron/60">·</span>
       <span className="text-slate-text">3 scenarios reproduced</span>
@@ -486,13 +486,13 @@ function ArgusReviewCard() {
           bug
         </span>
         <span className="ml-auto font-mono text-[10px] text-slate-text/70">
-          seen in PR #927 — rounding bug
+          seen in PR #412 — rounding bug
         </span>
       </div>
 
       <p className="mt-3 max-w-[720px] font-mono text-[12px] leading-[1.7] text-ash/85">
         <span className="text-foreground">mixedCurrency</span> cases banker&rsquo;s
-        rounding for EUR — our tests still expect half-up. Last time (Feb 14),
+        rounding for EUR — our tests still expect half-up. Last time (Jan 24),
         <span className="text-foreground"> @jordan</span> merged a near-identical
         change and it caused{" "}
         <span className="text-amber">0.01 drift on 2,113 invoices</span>.
@@ -501,25 +501,22 @@ function ArgusReviewCard() {
       <FailureSimStrip />
 
       <div className="mt-4 flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          className="inline-flex h-8 items-center gap-2 bg-amber px-3 font-mono text-[11px] font-semibold uppercase tracking-[0.1em] text-primary-foreground transition-colors duration-150 hover:bg-amber-glow"
+        <span
+          className="inline-flex h-8 items-center gap-2 bg-amber px-3 font-mono text-[11px] font-semibold uppercase tracking-[0.1em] text-void"
         >
           <CheckMark />
           apply
-        </button>
-        <button
-          type="button"
-          className="inline-flex h-8 items-center border border-iron/70 bg-transparent px-3 font-mono text-[11px] text-slate-text transition-colors duration-150 hover:border-iron hover:text-foreground"
+        </span>
+        <span
+          className="inline-flex h-8 items-center border border-iron/70 bg-transparent px-3 font-mono text-[11px] text-slate-text"
         >
           flash fixes
-        </button>
-        <button
-          type="button"
-          className="inline-flex h-8 items-center border border-iron/70 bg-transparent px-3 font-mono text-[11px] text-slate-text transition-colors duration-150 hover:border-iron hover:text-foreground"
+        </span>
+        <span
+          className="inline-flex h-8 items-center border border-iron/70 bg-transparent px-3 font-mono text-[11px] text-slate-text"
         >
           dismiss
-        </button>
+        </span>
         <div className="ml-auto flex items-center gap-3 font-mono text-[10px] text-slate-text/70">
           <span>
             <span className="text-foreground">2,147 tokens</span>

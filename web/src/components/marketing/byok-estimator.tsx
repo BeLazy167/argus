@@ -308,7 +308,7 @@ function ByokEstimatorInner() {
         </div>
         <div className="text-right font-mono text-[10px] tabular-nums leading-relaxed text-slate-text">
           <div>~${perReview.toFixed(4)} / review</div>
-          <div className="text-slate-text/60">Argus: $0&ndash;$19/mo flat</div>
+          <div className="text-slate-text/60">Argus: $0 &ndash; self-hosted</div>
         </div>
       </div>
 
