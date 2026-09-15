@@ -91,10 +91,12 @@ export default function PricingPage() {
 						))}
 					</ul>
 					<Link
-						href="/sign-up"
+						href="https://github.com/BeLazy167/argus"
+						target="_blank"
+						rel="noreferrer"
 						className="block w-full border border-iron bg-iron/30 py-2.5 text-center text-xs font-mono text-foreground transition-colors hover:bg-iron/50"
 					>
-						Get started
+						Self-host on GitHub
 					</Link>
 				</div>
 				<p className="mt-4 text-center text-[11px] font-mono text-slate-text">
