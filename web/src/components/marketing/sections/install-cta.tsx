@@ -194,8 +194,8 @@ export function InstallCta() {
               </h2>
 
               <p className="mx-auto mt-6 max-w-[600px] text-center text-[13px] leading-relaxed text-slate-text sm:text-[15px]">
-                One-click GitHub App. Bring your own LLM key. See every token
-                spent. Free tier — 50 reviews/month on 3 repos, no credit card.
+                Open source (AGPL). Bring your own LLM key. See every token
+                spent. Self-host in minutes — no paid tier, no feature gating.
               </p>
 
               <div className="mt-10 flex flex-col items-center justify-center gap-3 sm:flex-row sm:gap-4">
@@ -203,7 +203,7 @@ export function InstallCta() {
                   href="https://github.com/BeLazy167/argus"
                   target="_blank"
                   rel="noreferrer"
-                  onClick={() => track("onboarding.install_clicked", { source: "install_cta" })}
+                  onClick={() => track("marketing.github_clicked", { source: "install_cta" })}
                   className={`group relative inline-flex items-center justify-center gap-2 overflow-hidden bg-amber px-8 py-4 font-mono text-sm font-semibold uppercase tracking-[0.1em] text-primary-foreground shadow-[0_0_48px_color-mix(in_oklch,var(--color-amber-glow)_34%,transparent)] transition-[transform,background-color] hover:bg-amber-glow active:scale-[0.98] ${focusRingAmber}`}
                 >
                   <span aria-hidden className="relative">{"\u25B8"}</span>
@@ -232,7 +232,7 @@ export function InstallCta() {
                   <span aria-hidden className="text-amber">
                     {"\u2192"}
                   </span>
-                  No credit card
+                  No per-seat pricing
                 </span>
                 <span aria-hidden className="hidden h-[10px] w-px bg-iron/70 sm:inline-block" />
                 <span className="flex items-center gap-1.5">
@@ -246,14 +246,14 @@ export function InstallCta() {
                   <span aria-hidden className="text-amber">
                     {"\u2192"}
                   </span>
-                  Free tier · 50 reviews/mo
+                  No usage caps
                 </span>
                 <span aria-hidden className="hidden h-[10px] w-px bg-iron/70 sm:inline-block" />
                 <span className="flex items-center gap-1.5">
                   <span aria-hidden className="text-amber">
                     {"\u2192"}
                   </span>
-                  $19/mo on Pro
+                  No feature gating
                 </span>
               </div>
             </div>

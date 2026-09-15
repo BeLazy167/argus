@@ -20,7 +20,6 @@ export default function DocsLayout({ children }: { children: ReactNode }) {
             <DocLink href="/docs/features/issue-acceptance">Issue acceptance</DocLink>
             <DocLink href="/docs/features/cross-pr-checks">Cross-repo PR checks</DocLink>
             <DocLink href="/docs/features/memory-tuning">Memory tuning</DocLink>
-            <DocLink href="/docs/mcp">MCP server</DocLink>
             <DocLink href="/docs/faq">FAQ</DocLink>
           </nav>
         </div>

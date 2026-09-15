@@ -15,13 +15,9 @@ import {
   Check,
   Plus,
   Database,
-  Workflow,
   ScanSearch,
   Terminal,
   Target,
-  Globe,
-  KeyRound,
-  Users,
   GitMerge,
   type LucideIcon,
 } from "lucide-react";
@@ -498,7 +494,10 @@ export function ContextDiagram() {
         <div className="flex shrink-0 items-center">
           <Node icon={GitPullRequest} label="PR diff" sub="the changed lines" />
         </div>
-        <span aria-hidden className="font-mono text-sm text-amber/50">
+        <span
+          aria-hidden
+          className="inline-block rotate-90 font-mono text-sm text-amber/50 lg:rotate-0"
+        >
           {"→"}
         </span>
         <div className="flex flex-1 flex-col gap-2">
@@ -522,7 +521,10 @@ export function ContextDiagram() {
             );
           })}
         </div>
-        <span aria-hidden className="font-mono text-sm text-amber/50">
+        <span
+          aria-hidden
+          className="inline-block rotate-90 font-mono text-sm text-amber/50 lg:rotate-0"
+        >
           {"→"}
         </span>
         <div className="flex shrink-0 items-center">
@@ -667,123 +669,3 @@ export function GaugeDiagram() {
   );
 }
 
-/* ── MCP — connect your own agent ── */
-
-const MCP_STEPS = [
-  {
-    icon: Globe,
-    name: "discover",
-    desc: "GET /.well-known/oauth-protected-resource",
-  },
-  {
-    icon: Users,
-    name: "authorize",
-    desc: "Clerk OAuth · pick ONE organization",
-  },
-  {
-    icon: KeyRound,
-    name: "call",
-    desc: "POST /mcp · bearer verified (iss · aud · scopes)",
-  },
-] as const;
-
-const MCP_READ_TOOLS = [
-  "list_repos",
-  "search_memory",
-  "get_memory_briefing",
-  "list_reviews",
-  "get_review_status",
-  "get_review",
-] as const;
-
-const MCP_WRITE_TOOLS = [
-  "create_memory",
-  "delete_memory",
-  "retire_memory",
-] as const;
-
-export function MCPDiagram() {
-  return (
-    <DiagramFrame
-      label="MCP server · your agent ↔ Argus memory and reviews"
-      caption="Any MCP client that supports remote servers with OAuth connects to https://api.argus.reviews/mcp. One browser login, one organization per connection — the token only ever sees that org's repos and memory."
-    >
-      <div className="flex flex-col items-center gap-4">
-        <div className="flex flex-col items-center gap-3 lg:flex-row">
-          <Node icon={Workflow} label="MCP client" sub="Claude Code · Cursor" />
-          {MCP_STEPS.map((s) => {
-            const Icon = s.icon;
-            return (
-              <div key={s.name} className="flex items-center gap-3">
-                <span aria-hidden className="font-mono text-sm text-amber/50">
-                  {"→"}
-                </span>
-                <div className="flex items-center gap-2.5 border border-iron bg-void/60 px-3 py-2">
-                  <span className="flex h-6 w-6 shrink-0 items-center justify-center border border-amber/40 bg-amber/[0.07]">
-                    <Icon className="h-3 w-3 text-amber" />
-                  </span>
-                  <span>
-                    <span className="block font-mono text-[10.5px] font-bold uppercase tracking-wide text-foreground">
-                      {s.name}
-                    </span>
-                    <span className="block font-mono text-[9.5px] text-slate-text">
-                      {s.desc}
-                    </span>
-                  </span>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-
-        <div className="grid w-full grid-cols-1 gap-3 lg:grid-cols-2">
-          <div className="border border-iron bg-charcoal/60 p-3">
-            <div className="mb-2 font-mono text-[9px] uppercase tracking-[0.2em] text-amber-glow/60">
-              argus:read
-            </div>
-            <div className="flex flex-wrap gap-1.5">
-              {MCP_READ_TOOLS.map((t) => (
-                <span
-                  key={t}
-                  className="border border-iron bg-void/60 px-1.5 py-0.5 font-mono text-[9.5px] text-slate-text"
-                >
-                  {t}
-                </span>
-              ))}
-            </div>
-          </div>
-          <div className="border border-amber/30 bg-amber/[0.04] p-3">
-            <div className="mb-2 font-mono text-[9px] uppercase tracking-[0.2em] text-amber-glow/80">
-              argus:memory:write
-            </div>
-            <div className="flex flex-wrap gap-1.5">
-              {MCP_WRITE_TOOLS.map((t) => (
-                <span
-                  key={t}
-                  className="border border-amber/40 bg-void/60 px-1.5 py-0.5 font-mono text-[9.5px] text-amber"
-                >
-                  {t}
-                </span>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        <div className="flex flex-wrap justify-center gap-2">
-          {[
-            "start with list_repos → repo_id / installation_id",
-            "retire_memory stops influence · delete_memory removes one record",
-            "confirm_pipeline_learned guards learned memory",
-          ].map((s) => (
-            <span
-              key={s}
-              className="border border-iron bg-void/60 px-2 py-1 font-mono text-[9.5px] text-slate-text"
-            >
-              {s}
-            </span>
-          ))}
-        </div>
-      </div>
-    </DiagramFrame>
-  );
-}

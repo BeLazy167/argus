@@ -160,20 +160,6 @@ Comment on any PR:
 
 ---
 
-## MCP Server
-
-Use Argus's memory and reviews from your own agent over the Model Context Protocol — Claude Code, Cursor, Claude Desktop, or any MCP client that supports remote servers with OAuth.
-
-**Connect:** `https://api.argus.reviews/mcp`. One browser login, then pick **one organization** — the connection sees only that org's repos and memory. No API keys; tokens refresh automatically.
-
-**Tools:** `list_repos` (call first — resolves the `repo_id`/`installation_id` the others take), `search_memory`, `get_memory_briefing`, `list_reviews`, `get_review_status`, `get_review` (read scope `argus:read`), plus `create_memory`, `delete_memory`, `retire_memory` (write scope `argus:memory:write`).
-
-**Guard rails:** pipeline-learned memory requires `confirm_pipeline_learned=true`; org-wide writes require `confirm_shared=true`. To stop a memory influencing reviews, use `retire_memory` — `delete_memory` removes one contributing record and the memory may remain searchable.
-
-Self-hosted deployments: `MCP_ENABLED=true` + `CLERK_ISSUER_URL` + `MCP_RESOURCE_URL`; the route 404s while off.
-
----
-
 ## Review Rules
 
 Create rules Argus enforces on every review:

@@ -87,7 +87,7 @@ export default async function ComparePage({
           Trusted by engineering teams
         </span>
         <span className="text-iron">|</span>
-        <span>Free for 3 repos</span>
+        <span>Open source — AGPL</span>
         <span className="text-iron">|</span>
         <span>Installs in 60 seconds</span>
       </div>
@@ -184,7 +184,7 @@ export default async function ComparePage({
           Stop shipping bugs {c.name} can&apos;t catch.
         </p>
         <p className="text-xs font-sans text-slate-text mb-4">
-          Free for up to 3 repos. No credit card required.
+          Open source (AGPL) — self-host it. No paid tier, no feature gating.
         </p>
         <Link
           href="https://github.com/BeLazy167/argus"

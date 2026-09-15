@@ -106,7 +106,7 @@ export default async function PersonaPage({
           Don&apos;t let another risky PR merge without the review your team needs.
         </p>
         <p className="text-xs font-sans text-slate-text mb-4">
-          Free for up to 3 repos. Institutional memory starts on your first PR.
+          Open source (AGPL) — self-host it. Institutional memory starts on your first PR.
         </p>
         <Link
           href="https://github.com/BeLazy167/argus"

@@ -100,16 +100,6 @@ Argus uses [Clerk](https://clerk.com) for dashboard sign-in and API auth.
 
 When `CLERK_JWKS_URL` is unset the backend cannot verify JWTs and every authenticated API route returns `503 authentication not configured` — webhooks and reviews still work, but the dashboard API is unusable. There is no auth bypass mode.
 
-### MCP server (optional, off by default)
-
-The `/mcp` route lets your own agent read Argus memory and reviews. It is disabled unless you turn it on, and 404s while off.
-
-- `MCP_ENABLED` — `true` mounts `/mcp`. Defaults to `false`.
-- `CLERK_ISSUER_URL` — your Clerk Frontend API origin, e.g. `https://<your-subdomain>.clerk.accounts.dev`. Pinned as the token issuer.
-- `MCP_RESOURCE_URL` — the public `https://…/mcp` URL of this server. Every token must carry it as the audience, so it has to match what clients connect to.
-
-Setting `MCP_ENABLED=true` without `CLERK_JWKS_URL` and both of these is a startup error, not a silent downgrade. See the MCP section of the README for the Clerk dashboard setup and the tool list, and [docs/architecture.md](architecture.md#mcp-server) for the internals.
-
 ## 5. LLM provider (BYOK)
 
 1. Set `ENCRYPTION_KEY` on the backend (`openssl rand -hex 32`) — provider keys are encrypted at rest with it.

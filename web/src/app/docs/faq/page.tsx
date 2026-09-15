@@ -17,14 +17,16 @@ export default function FAQPage() {
           Why doesn&apos;t Argus review my PR automatically?
         </h2>
         <p className="text-slate-400">
-          Auto-review is on by default — every opened, pushed, or reopened PR
-          reviews itself. If Argus stayed silent, likely causes: auto-review was
-          turned off for the repo or org (Argus posts a one-shot{" "}
+          On the hosted service, auto-review is off until you enable it — a fresh
+          repo gets a one-shot{" "}
           <strong className="text-slate-200">Trigger Argus review</strong>{" "}
-          checkbox with a token + cost preview instead — tick it to run on
-          demand), the PR opened before Argus was installed, a webhook delivery
-          failed, no API key is configured (you&apos;ll see an onboarding
-          comment), or the base branch matches a Branch Filters skip pattern.
+          checkbox with a token + cost preview instead of an automatic run
+          (tick it to run on demand). Self-hosted installs review every PR by
+          default and still respect an explicit off. If Argus stayed silent,
+          other likely causes: the PR opened before Argus was installed, a
+          webhook delivery failed, no API key is configured (you&apos;ll see an
+          onboarding comment), or the base branch matches a Branch Filters skip
+          pattern.
         </p>
         <p className="text-slate-400 mt-2">
           To change the default: <strong className="text-slate-200">Settings →
@@ -117,7 +119,7 @@ export default function FAQPage() {
           Yes. Go to <strong className="text-slate-200">Settings → Features</strong>:
         </p>
         <ul className="list-disc pl-5 mt-2 space-y-1 text-slate-400">
-          <li><strong className="text-slate-200">Auto-review</strong> — when off, opened PRs get a trigger checkbox instead of running automatically (default: on).</li>
+          <li><strong className="text-slate-200">Auto-review</strong> — when off, opened PRs get a trigger checkbox instead of running automatically (default: off on hosted, on when self-hosted).</li>
           <li><strong className="text-slate-200">Issue acceptance check</strong> — toggles the issue verification worker (default: on).</li>
           <li><strong className="text-slate-200">Cross-repo PR checks</strong> — toggles the cross-PR worker (default: on for new installations).</li>
           <li><strong className="text-slate-200">Max linked PRs per review</strong> — caps how many PRs the cross-PR worker fetches (default: 5).</li>

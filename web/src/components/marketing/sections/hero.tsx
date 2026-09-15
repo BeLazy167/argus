@@ -107,7 +107,7 @@ function HeroHeadline() {
               href="https://github.com/BeLazy167/argus"
               target="_blank"
               rel="noreferrer"
-              onClick={() => track("onboarding.install_clicked", { source: "hero" })}
+              onClick={() => track("marketing.github_clicked", { source: "hero" })}
               className={`group relative inline-flex h-12 items-center gap-2.5 bg-amber px-6 font-mono text-[13px] font-semibold uppercase tracking-[0.12em] text-primary-foreground transition-[transform,background-color] duration-150 ease-[cubic-bezier(0.23,1,0.32,1)] hover:bg-amber-glow active:scale-[0.98] ${focusRingAmber}`}
             >
               <GithubMark />
