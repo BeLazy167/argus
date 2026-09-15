@@ -202,8 +202,8 @@ Key environment variables — see [`backend/.env.example`](backend/.env.example)
 | `MERMAID_VALIDATOR_SECRET` | Shared backend/dashboard secret for Mermaid parser requests; configure with the validator base URL |
 | `SELF_HOSTED` | `true` applies self-host defaults (reviews auto-run unconditionally) |
 | `EMBEDDINGS_API_KEY` | Embeddings key for memory (optional; without it rows are full-text-searchable only) |
-| `EMBEDDINGS_BASE_URL` | Embeddings endpoint (OpenAI-compatible), default Voyage via the AI gateway |
-| `EMBEDDINGS_MODEL` | Embedding model, default `voyage/voyage-4-large` (1024 dims) |
+| `EMBEDDINGS_BASE_URL` | Embeddings endpoint (OpenAI-compatible); default `https://api.voyageai.com/v1` — `.env.example` ships the Vercel AI gateway |
+| `EMBEDDINGS_MODEL` | Embedding model; default `voyage-4` (native 1024 dims) — `.env.example` ships `voyage/voyage-4-large` |
 
 ---
 

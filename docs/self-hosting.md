@@ -87,7 +87,7 @@ The `/mcp` route lets your own agent read Argus memory and reviews. It is disabl
 - `CLERK_ISSUER_URL` — your Clerk Frontend API origin, e.g. `https://<your-subdomain>.clerk.accounts.dev`. Pinned as the token issuer.
 - `MCP_RESOURCE_URL` — the public `https://…/mcp` URL of this server. Every token must carry it as the audience, so it has to match what clients connect to.
 
-Setting `MCP_ENABLED=true` without `CLERK_JWKS_URL` and both of these is a startup error, not a silent downgrade. See the MCP section of the README for the Clerk dashboard setup and the tool list.
+Setting `MCP_ENABLED=true` without `CLERK_JWKS_URL` and both of these is a startup error, not a silent downgrade. See the MCP section of the README for the Clerk dashboard setup and the tool list, and [docs/architecture.md](architecture.md#mcp-server) for the internals.
 
 ## 5. LLM provider (BYOK)
 

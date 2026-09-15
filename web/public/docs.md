@@ -74,7 +74,7 @@ Every comment with a fix includes a GitHub "Apply suggestion" button — one cli
 | 🔴 | **Blocker** | Will crash, corrupt data, or create a security hole. Blocks merge. |
 | 🟡 | **Should fix** | Won't cause immediate harm but should fix before merge. |
 | 💡 | **Suggestion** | Nice to have. Improve later. |
-| ✅ | **Praise** | Good code acknowledged. |
+| ✅ | **Praise** | At most one genuine line in the summary — never an inline comment. |
 
 When everything is critical, nothing is. Argus calibrates severity so blockers mean something.
 
@@ -157,6 +157,20 @@ Comment on any PR:
 | `@argus-eye resolve` | Resolve all open Argus threads on this PR |
 | `@argus-eye fix` | Apply suggestion blocks as a commit |
 | `@argus-eye help` | Show available commands |
+
+---
+
+## MCP Server
+
+Use Argus's memory and reviews from your own agent over the Model Context Protocol — Claude Code, Cursor, Claude Desktop, or any MCP client that supports remote servers with OAuth.
+
+**Connect:** `https://api.argus.reviews/mcp`. One browser login, then pick **one organization** — the connection sees only that org's repos and memory. No API keys; tokens refresh automatically.
+
+**Tools:** `list_repos` (call first — resolves the `repo_id`/`installation_id` the others take), `search_memory`, `get_memory_briefing`, `list_reviews`, `get_review_status`, `get_review` (read scope `argus:read`), plus `create_memory`, `delete_memory`, `retire_memory` (write scope `argus:memory:write`).
+
+**Guard rails:** pipeline-learned memory requires `confirm_pipeline_learned=true`; org-wide writes require `confirm_shared=true`. To stop a memory influencing reviews, use `retire_memory` — `delete_memory` removes one contributing record and the memory may remain searchable.
+
+Self-hosted deployments: `MCP_ENABLED=true` + `CLERK_ISSUER_URL` + `MCP_RESOURCE_URL`; the route 404s while off.
 
 ---
 

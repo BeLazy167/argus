@@ -29,6 +29,7 @@ Argus is an AI-powered code review bot that installs as a GitHub App. When a pul
 | Component | Path | Purpose |
 |-----------|------|---------|
 | **API Server** | `internal/api/` | HTTP server (Chi router). Handles GitHub webhooks, REST API for dashboard, Clerk JWT auth, rate limiting, semaphore-based concurrency control |
+| **MCP Server** | `internal/api/mcp_*.go` | Stateless MCP-over-HTTP surface at `/mcp` (off by default): RFC 9728 discovery, Clerk OAuth bearer verification pinned to org + resource audience, 9 scope-gated tools over memory and reviews |
 | **GitHub App** | `internal/github/` | GitHub App authentication (JWT + installation tokens), PR diff fetching, review posting, GraphQL thread resolution, Git data API for `@argus-eye fix` |
 | **Pipeline** | `internal/pipeline/` | State machine orchestrator with 9 stages: Triage → Briefing → Review → Dedup → Validate → Scoring → Pass2 → Synthesis → Post (memory indexing is part of Post). ReviewContract computation and intent extraction run pre-pipeline in `HandlePREvent`. Gauge detector runs on PR close |
 | **LLM Registry** | `internal/llm/` | Multi-provider LLM abstraction (OpenRouter, OpenAI, Anthropic, Groq, etc.). BYOK key resolution, per-repo model configs, tool-use support |
@@ -380,7 +381,7 @@ Outcomes land in the comment outcome vocabulary (`comment_outcomes`, migration 0
 
 ## Command Dispatch Flow
 
-Commands are triggered by `@argus-eye <command>` in PR issue comments. The webhook handler dispatches to `dispatchCommand()` which parses the command with regex `(?i)@argus-eye\s+(review|remember|resolve|fix|help)(.*)` and routes to the appropriate handler.
+Commands are triggered by `@argus-eye <command>` in PR issue comments. The webhook handler dispatches to `dispatchCommand()` which parses the command with regex `(?i)@<slug>\s+(review|remember|resolve|fix|test|help)(.*)` (built from `commandRe(appSlug)`) and routes to the appropriate handler.
 
 ```mermaid
 flowchart TD
@@ -392,6 +393,7 @@ flowchart TD
     PARSE --> |"remember"| REM["handleRememberCommand()"]
     PARSE --> |"resolve"| RES["handleResolveCommand()"]
     PARSE --> |"fix"| FIX["handleFixCommand()"]
+    PARSE --> |"test"| TEST["handleTestCommand()"]
     PARSE --> |"help"| HELP["handleHelpCommand()"]
     PARSE --> |"no match"| DROP["silently ignored"]
 
@@ -415,6 +417,9 @@ flowchart TD
     FIX3 --> FIX4["Apply fixes per file\n(reverse line order)"]
     FIX4 --> FIX5["Git Data API:\nCreateBlob → CreateTree\n→ CreateCommit → UpdateRef"]
 
+    TEST --> TEST2["GetLatestReviewByPR\nfindings + diff"]
+    TEST2 --> TEST3["LLM test plan\n(--code → runnable tests)"]
+
     HELP --> HELP2["Post help table\nas issue comment"]
 ```
 
@@ -426,6 +431,7 @@ flowchart TD
 | `remember` | `@argus-eye remember [--org] <pattern>` | Stores a pattern in memory. `--org` scopes to the installation-wide `_shared` container, otherwise the repo container. Also persists to the `patterns` table |
 | `resolve` | `@argus-eye resolve` | Resolves all unresolved Argus review threads on the PR via GraphQL and marks each finding `state=resolved`. Maintainer-only — a non-privileged commenter (not owner/member/collaborator) is refused |
 | `fix` | `@argus-eye fix` | Auto-applies suggested fixes from unresolved Argus comments. Creates a commit on the PR branch via Git Data API |
+| `test` | `@argus-eye test [--code]` | Generates a test plan from the latest review's findings; `--code` drafts executable test code matching the project's framework |
 | `help` | `@argus-eye help` | Posts a help table listing all available commands |
 
 ---
@@ -528,6 +534,7 @@ flowchart LR
 | **Feedback Loop** | Developer reply → `review_comment` webhook (includes `NodeID` for thread lookup) → `ReplyAnalyzer.Analyze` → LLM decides action → `IndexFeedbackSignal` → memory (confirmed / dismissal keyed by category+content with change_kind) + `ReplyToComment` on GitHub. On `resolve`: also calls `FindThreadForComment()` + `ResolveReviewThread()` |
 | **Gauge** | PR close → detector diffs commits after each comment (±3-line proximity) → outcomes `addressed_human`/`addressed_agent`/`ignored` (merged, untouched)/`deferred` (closed unmerged) → `vw_review_gauge` → `GET /api/v1/stats/gauge` |
 | **Dashboard SSE** | `StateMachine` publishes events → `EventBus` → SSE endpoint `/reviews/{id}/stream` → Next.js dashboard real-time updates |
+| **MCP tool call** | `POST /mcp` → body cap (1 MiB) + 60s timeout → `RequireBearerToken` (`mcpTokenVerifier`) → `mcpClaimsToContext` → `requireMCPInstallationScope` → per-request stateless server → tool handler under frozen `tenantScope` → `Indexer`/store |
 
 ---
 
@@ -574,6 +581,55 @@ All IDs are truncated to 100 characters max via `truncateIDWithSuffix()`. Hashes
 
 ---
 
+## MCP Server
+
+`/mcp` exposes team memory and review results to external MCP clients over the Model Context Protocol (`internal/api/mcp_server.go`, `mcp_*.go`). `registerMCPRoutes` mounts it only when `MCP_ENABLED=true` — otherwise nothing is registered and every path 404s, the same "don't advertise" shape as the pprof routes. It is a sibling of `/api/v1`, not a child: that group's request logger would tee memory content and review findings into the payload log, so `/mcp` carries its own middleware stack.
+
+`Config.ValidateMCP()` runs at boot when the route is enabled: `CLERK_JWKS_URL` and `CLERK_ISSUER_URL` must be absolute http(s) URLs, and `MCP_RESOURCE_URL` an absolute https URL ending in `/mcp`. A gap is a startup error, not a silent downgrade.
+
+### Transport and discovery
+
+- `mcp.NewStreamableHTTPHandler` in **stateless** mode with `JSONResponse` — replicas share no session state, and a stateless server cannot leak the initialize request's tenant into later calls.
+- `GET /.well-known/oauth-protected-resource` (plus the `/mcp`-suffixed form, RFC 9728 §3) serves the discovery document: `resource` = `MCP_RESOURCE_URL`, `authorization_servers` = [`CLERK_ISSUER_URL`], `scopes_supported` = `argus:read`, `argus:memory:write`, `user:org:read`.
+- Request limits apply **before auth**: a declared Content-Length over 1 MiB gets a 413, `MaxBytesReader` caps the actual read regardless, and a 60s timeout bounds the whole request.
+
+### Auth chain
+
+`mcpLimitRequestBody` → `Timeout(60s)` → `auth.RequireBearerToken(mcpTokenVerifier)` → `mcpClaimsToContext` → `requireMCPInstallationScope` → handler.
+
+`mcpTokenVerifier` (`mcp_auth.go`) adapts the shared JWKS JWT verifier with MCP-specific policy, rejecting (401 + `resource_metadata` challenge) on:
+
+- malformed or undecodable claims — a claim that fails to decode must not read as absent;
+- a `sid` claim — Clerk session tokens are not MCP credentials;
+- missing `sub`; `iss` ≠ `CLERK_ISSUER_URL`; `aud` lacking `MCP_RESOURCE_URL` (confused-deputy protection — a token minted for another API must not work here);
+- `nbf` in the future (5s skew); missing `org_id` (org selection is what scopes a token to one tenant); zero granted scopes.
+
+Granted scopes come from the `scope` claim, falling back to an `scp`/`scopes` array (`grantedScopes`).
+
+`requireMCPInstallationScope` maps the token's `org_id` to its linked installation ids via the org branch of `resolveInstallationIDs` — never the user-wide fallback, so a missing org claim is a 401, not a widening. An `X-Installation-ID` header is a hint that can only narrow within that set; the hint is parsed *before* resolution so an unparsable one is refused without triggering resolution's auto-link side effect.
+
+### Tenant scope and tools
+
+`mcpGetServer` is the only hook with the `*http.Request`; it freezes `tenantScope{userID, orgID, installationIDs, grantedScopes}` **by value** into the closures of a per-request `*mcp.Server`. Tool handlers are methods on `mcpTools{srv, scope}` and never read scope back out of `ctx`, so one request can never inherit another tenant's scope. A process-wide `SchemaCache` keeps per-request `AddTool` schema resolution cheap.
+
+Nine tools, each opening with `requireScope`:
+
+| Tool | Scope | Notes |
+|------|-------|-------|
+| `list_repos` | `argus:read` | Resolves the local `repo_id` / `installation_id` every other tool takes — call first |
+| `search_memory` | `argus:read` | Hybrid search over repo memory (or org-wide with `scope=shared`); matches carry `custom_id` (for `retire_memory`) and `pattern_ids` (for `delete_memory`); `embeddings_available=false` means similarity search is off |
+| `get_memory_briefing` | `argus:read` | The reviewer briefing for a repo as markdown, optionally focused on one file |
+| `create_memory` | `argus:memory:write` | `shared=true` + `confirm_shared=true` writes org-wide; similar-memory collisions return `confirmation_required` until retried with `confirm_duplicate=true` |
+| `delete_memory` | `argus:memory:write` | Deletes ONE contributing pattern row; the mirror removes the memory later only if no siblings remain (`siblings_at_delete`, `retention_expected`); pipeline-learned rows need `confirm_pipeline_learned=true` |
+| `retire_memory` | `argus:memory:write` | Invalidate (or supersede via `replaced_by_custom_id`) — the way to stop a memory influencing reviews; memories without recorded provenance are refused; irreversible, `reason` required |
+| `list_reviews` | `argus:read` | Reviews newest first, optional repo filter |
+| `get_review_status` | `argus:read` | Cheap poll: status, current stage, score, error, timings, PR link |
+| `get_review` | `argus:read` | The full review page in one call; `include_suppressed=true` adds never-posted findings |
+
+Two error conventions: `errNotAccessible` conflates missing and cross-tenant ids (the REST API's 404 conflation, applied to tools), and `internalErr` logs the real error while returning a fixed `"{tool} failed"` — tool errors land verbatim in an agent's transcript, so wrapped DB errors never echo.
+
+---
+
 ## Additional API Endpoints
 
 | Endpoint | Method | Purpose |
@@ -581,6 +637,8 @@ All IDs are truncated to 100 characters max via `truncateIDWithSuffix()`. Hashes
 | `/api/v1/installations/{id}/test-config` | POST | Sends a ping/ok round-trip to verify API key + model work. Returns `{success, response, latency_ms, tokens}` |
 | `/api/v1/activity` | GET | Returns logged activity events (`manual_review_triggered`, `rule_created`, `rule_deleted`) via `store.LogActivity()` |
 | `/api/v1/stats/gauge` | GET | Internal gauge telemetry from `vw_review_gauge`: address-rate per category per change_class, dismiss rate, median time-to-merge |
+| `/.well-known/oauth-protected-resource` | GET | RFC 9728 discovery document for the MCP resource (also served at the `/mcp`-suffixed path); unauthenticated. Mounted only when `MCP_ENABLED=true` |
+| `/mcp` | POST | MCP JSON-RPC endpoint (stateless streamable HTTP, 1 MiB body cap, 60s timeout, OAuth bearer auth). Mounted only when `MCP_ENABLED=true`, 404s otherwise |
 
 ### Unwired Functions
 
@@ -590,20 +648,4 @@ All IDs are truncated to 100 characters max via `truncateIDWithSuffix()`. Hashes
 
 ## Licensing
 
-Argus follows the **Sustainable Use License** model (similar to n8n):
-
-- **Core**: Licensed under the [Sustainable Use License](../LICENSE). Free for internal business use and non-commercial/personal use. Self-hosting is allowed.
-- **Enterprise**: Files containing `.ee.` in their filename or `.ee/` in their directory path require a commercial Argus Enterprise License.
-
-**What the Sustainable Use License allows:**
-- Self-host Argus for your internal code reviews
-- Modify and customize for your own use
-- Free for personal and non-commercial projects
-
-**What it restricts:**
-- Cannot offer Argus as a competing hosted/SaaS service
-- Cannot remove licensing notices
-
-The hosted service at [argus.reviews](https://argus.reviews) offers managed hosting with both core and enterprise features, which funds ongoing development.
-
-Examples of this model: n8n, Cal.com
+Argus is licensed under [AGPL-3.0](../LICENSE). Self-hosting is allowed; if you run a modified Argus as a network service, you must share your changes (AGPL §13).

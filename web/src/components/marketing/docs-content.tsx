@@ -19,6 +19,7 @@ import {
   SlidersHorizontal,
   Brain,
   Key,
+  KeyRound,
   UserCog,
   Sparkles,
   Terminal,
@@ -49,6 +50,11 @@ import {
   DeepReviewDiagram,
   LifecycleDiagram,
   MemoryDiagram,
+  ContractDiagram,
+  ContextDiagram,
+  CommandsDiagram,
+  GaugeDiagram,
+  MCPDiagram,
 } from "@/components/marketing/docs-diagrams";
 
 /* ── Section data ── */
@@ -83,6 +89,7 @@ const SECTIONS = [
   { id: "light-mode", label: "Light Mode" },
   { id: "feature-flags", label: "Feature Flags" },
   { id: "settings", label: "Settings & Controls" },
+  { id: "mcp", label: "MCP Server" },
 ] as const;
 
 const SEVERITIES = [
@@ -547,6 +554,8 @@ export function DocsContent() {
               ))}
             </div>
 
+            <ContractDiagram />
+
             <h3 className="text-sm font-bold text-foreground mb-3">
               Depth follows the contract
             </h3>
@@ -846,6 +855,8 @@ export function DocsContent() {
               model of your codebase that evolves with every review. This is
               what separates a linter from an engineer.
             </p>
+
+            <ContextDiagram />
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               {[
@@ -1890,6 +1901,9 @@ export function DocsContent() {
               </code>{" "}
               followed by a command and it responds in seconds.
             </p>
+
+            <CommandsDiagram />
+
             <div className="space-y-3">
               {[
                 {
@@ -2117,6 +2131,9 @@ export function DocsContent() {
               Comment volume is a vanity metric. Gauge tracks whether Argus
               comments actually led to code changes.
             </p>
+
+            <GaugeDiagram />
+
             <div className="space-y-3">
               {[
                 {
@@ -2478,6 +2495,83 @@ export function DocsContent() {
               All toggles are accessible from{" "}
               <span className="text-amber">Settings</span> in the dashboard.
               Changes take effect on the next review.
+            </p>
+          </div>
+
+          {/* ── MCP Server ── */}
+          <div>
+            <SectionHeader id="mcp" title="MCP Server" />
+            <p className="text-xs font-mono text-slate-text mb-3 leading-relaxed">
+              Use Argus&apos;s memory and reviews from your own agent.
+            </p>
+            <p className="text-xs font-mono text-slate-text mb-8 leading-relaxed">
+              Argus exposes team memory and review results over the Model
+              Context Protocol. Any MCP client that supports remote servers
+              with OAuth — Claude Code, Cursor, Claude Desktop — can connect
+              to{" "}
+              <code className="text-amber bg-iron/40 rounded px-1.5 py-0.5">
+                https://api.argus.reviews/mcp
+              </code>
+              . One browser login, then pick{" "}
+              <strong className="text-foreground">one organization</strong>:
+              the connection sees only that org&apos;s repos and memory.
+              Switching orgs means authorizing again. No API keys — tokens
+              refresh automatically.
+            </p>
+
+            <MCPDiagram />
+
+            <div className="space-y-3">
+              {[
+                {
+                  icon: KeyRound,
+                  title: "Scoped by grant",
+                  desc: "argus:read covers every read tool; argus:memory:write covers create_memory, delete_memory, and retire_memory. A read-only grant cannot mutate memory, whatever flags a call sets.",
+                },
+                {
+                  icon: Shield,
+                  title: "Guard rails on writes",
+                  desc: "Deleting or retiring a memory the review pipeline learned requires confirm_pipeline_learned=true; writing an org-wide memory requires confirm_shared=true. Neither can be undone.",
+                },
+                {
+                  icon: RefreshCw,
+                  title: "retire beats delete",
+                  desc: "To stop a memory influencing reviews, use retire_memory — delete_memory removes one contributing record and the memory may remain searchable.",
+                },
+              ].map((item) => {
+                const Icon = item.icon;
+                return (
+                  <div
+                    key={item.title}
+                    className="border border-iron bg-charcoal p-4"
+                  >
+                    <div className="flex items-center gap-3 mb-2">
+                      <Icon className="h-4 w-4 text-amber" />
+                      <span className="text-xs font-mono font-bold text-foreground">
+                        {item.title}
+                      </span>
+                    </div>
+                    <p className="text-[11px] font-mono text-slate-text leading-relaxed">
+                      {item.desc}
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+
+            <p className="text-[11px] font-mono text-iron mt-4">
+              Self-hosting? Set{" "}
+              <code className="text-amber">MCP_ENABLED=true</code>,{" "}
+              <code className="text-amber">CLERK_ISSUER_URL</code>, and{" "}
+              <code className="text-amber">MCP_RESOURCE_URL</code> — the route
+              404s while disabled. Full setup:{" "}
+              <a
+                href="https://github.com/BeLazy167/argus#mcp-use-arguss-memory-and-reviews-from-your-own-agent"
+                className="text-amber hover:text-foreground transition-colors"
+              >
+                README § MCP
+              </a>
+              .
             </p>
           </div>
         </div>
