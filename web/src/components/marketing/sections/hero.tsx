@@ -104,14 +104,16 @@ function HeroHeadline() {
         <FadeIn delay={260}>
           <div className="mt-10 flex flex-col items-start gap-5 sm:flex-row sm:items-center sm:gap-6">
             <Link
-              href="/sign-up"
+              href="https://github.com/BeLazy167/argus"
+              target="_blank"
+              rel="noreferrer"
               onClick={() => track("onboarding.install_clicked", { source: "hero" })}
               className={`group relative inline-flex h-12 items-center gap-2.5 bg-amber px-6 font-mono text-[13px] font-semibold uppercase tracking-[0.12em] text-primary-foreground transition-[transform,background-color] duration-150 ease-[cubic-bezier(0.23,1,0.32,1)] hover:bg-amber-glow active:scale-[0.98] ${focusRingAmber}`}
             >
               <GithubMark />
-              Install GitHub App
+              View on GitHub
               <span className="mx-1 h-3 w-px bg-primary-foreground/40" aria-hidden="true" />
-              <span className="text-[11px] tracking-[0.14em] text-primary-foreground/80">free</span>
+              <span className="text-[11px] tracking-[0.14em] text-primary-foreground/80">AGPL</span>
               <CaretRight />
             </Link>
             <Link

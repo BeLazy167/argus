@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
-import { SignedIn, SignedOut } from "@clerk/nextjs";
+import { SignedIn } from "@clerk/nextjs";
 import { AnimatePresence, motion } from "motion/react";
 import { Github, Menu, X } from "lucide-react";
 
@@ -169,22 +169,6 @@ export function Navbar() {
           >
             <Github className="h-[18px] w-[18px]" />
           </a>
-          <SignedOut>
-            <Link
-              href="/sign-in"
-              className="font-mono text-[12px] text-slate-text transition-colors hover:text-foreground"
-            >
-              Sign in
-            </Link>
-            <motion.div whileTap={{ scale: 0.96 }}>
-              <Link
-                href="/sign-up"
-                className="inline-flex items-center rounded-full bg-amber px-5 py-2 font-mono text-[12px] font-semibold text-primary-foreground transition-colors duration-150 hover:bg-amber-glow"
-              >
-                Get started
-              </Link>
-            </motion.div>
-          </SignedOut>
           <SignedIn>
             <motion.div whileTap={{ scale: 0.96 }}>
               <Link
@@ -257,22 +241,6 @@ export function Navbar() {
                 <Github className="h-4 w-4" />
                 <span>Open source on GitHub</span>
               </a>
-              <SignedOut>
-                <Link
-                  href="/sign-in"
-                  onClick={closeMenu}
-                  className="inline-flex items-center justify-center rounded-full border border-iron py-3 font-mono text-[13px] text-foreground transition-colors hover:border-amber/50"
-                >
-                  Sign in
-                </Link>
-                <Link
-                  href="/sign-up"
-                  onClick={closeMenu}
-                  className="inline-flex items-center justify-center rounded-full bg-amber py-3 font-mono text-[13px] font-semibold text-primary-foreground"
-                >
-                  Get started
-                </Link>
-              </SignedOut>
               <SignedIn>
                 <Link
                   href="/dashboard"

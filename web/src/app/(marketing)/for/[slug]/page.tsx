@@ -109,10 +109,12 @@ export default async function PersonaPage({
           Free for up to 3 repos. Institutional memory starts on your first PR.
         </p>
         <Link
-          href="/sign-up"
+          href="https://github.com/BeLazy167/argus"
+          target="_blank"
+          rel="noreferrer"
           className="inline-flex items-center border bg-amber px-6 py-2.5 text-xs font-mono font-medium text-void transition-[transform,filter] duration-150 ease-out hover:brightness-110 active:scale-[0.97]"
         >
-          Install Argus on GitHub
+          Self-host Argus on GitHub
         </Link>
       </div>
 
