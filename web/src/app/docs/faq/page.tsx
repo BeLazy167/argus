@@ -10,22 +10,24 @@ export default function FAQPage() {
   return (
     <article className="space-y-8">
       <h1 className="text-2xl font-mono text-slate-100">FAQ</h1>
-      <LastUpdated date="2026-04-17" />
+      <LastUpdated date="2026-09-14" />
 
       <section>
         <h2 className="text-base font-mono text-slate-100 mb-2">
           Why doesn&apos;t Argus review my PR automatically?
         </h2>
         <p className="text-slate-400">
-          Auto-review is off by default. When a PR opens, Argus posts a{" "}
-          <strong className="text-slate-200">Trigger Argus review</strong> checkbox
-          comment with an estimated token + cost preview. Tick the box to run a
-          review on demand. The default is off because large PRs (50+ files) can
-          cost several dollars per review on paid providers, and we want
-          reviewers to see the estimate first.
+          Auto-review is on by default — every opened, pushed, or reopened PR
+          reviews itself. If Argus stayed silent, likely causes: auto-review was
+          turned off for the repo or org (Argus posts a one-shot{" "}
+          <strong className="text-slate-200">Trigger Argus review</strong>{" "}
+          checkbox with a token + cost preview instead — tick it to run on
+          demand), the PR opened before Argus was installed, a webhook delivery
+          failed, no API key is configured (you&apos;ll see an onboarding
+          comment), or the base branch matches a Branch Filters skip pattern.
         </p>
         <p className="text-slate-400 mt-2">
-          To flip the default: <strong className="text-slate-200">Settings →
+          To change the default: <strong className="text-slate-200">Settings →
           Org Defaults → Auto-review</strong> (org-wide) or{" "}
           <strong className="text-slate-200">Repo Overrides → Auto-review</strong>{" "}
           (per-repo). Repo setting beats org default.
@@ -115,7 +117,7 @@ export default function FAQPage() {
           Yes. Go to <strong className="text-slate-200">Settings → Features</strong>:
         </p>
         <ul className="list-disc pl-5 mt-2 space-y-1 text-slate-400">
-          <li><strong className="text-slate-200">Auto-review</strong> — when off, opened PRs get a trigger checkbox instead of running automatically (default: off).</li>
+          <li><strong className="text-slate-200">Auto-review</strong> — when off, opened PRs get a trigger checkbox instead of running automatically (default: on).</li>
           <li><strong className="text-slate-200">Issue acceptance check</strong> — toggles the issue verification worker (default: on).</li>
           <li><strong className="text-slate-200">Cross-repo PR checks</strong> — toggles the cross-PR worker (default: on for new installations).</li>
           <li><strong className="text-slate-200">Max linked PRs per review</strong> — caps how many PRs the cross-PR worker fetches (default: 5).</li>

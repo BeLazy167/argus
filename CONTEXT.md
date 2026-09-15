@@ -228,6 +228,26 @@ poisons the gauge's rates. Maintainer-only: the command checks
 
 ---
 
+## MCP surface
+
+### tenantScope
+
+What one verified `/mcp` request may touch (`internal/api/mcp_server.go`): the
+user id, the Clerk organization selected at OAuth consent, the installation ids
+that org resolves to, and the granted OAuth scopes. Built once per request and
+captured **by value** in the tool closures — handlers never read scope back out
+of a context, so one request can never inherit another tenant's scope.
+
+### Granted scopes
+
+The OAuth scopes a token carries: `argus:read` (every read tool),
+`argus:memory:write` (`create_memory`, `delete_memory`, `retire_memory`), and
+Clerk's `user:org:read` (drives org selection at consent). Confirmation flags
+(`confirm_shared`, `confirm_pipeline_learned`, `confirm_duplicate`) never
+substitute for a granted scope.
+
+---
+
 ## A note on GitHub permissions
 
 "Write access" on GitHub means push permission. Argus reads it two ways, and
