@@ -161,7 +161,7 @@ export default function CompareHubPage() {
                 Pricing
               </td>
               <td className="text-center px-3 py-3 bg-amber/5 text-amber font-bold whitespace-nowrap">
-                Free – $19/mo
+                Free — AGPL
               </td>
               {competitors.map((c) => (
                 <td key={c.slug} className="text-center px-3 py-3 text-slate-text text-[11px] leading-snug">

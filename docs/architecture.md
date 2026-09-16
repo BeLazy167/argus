@@ -416,6 +416,9 @@ flowchart TD
     FIX3 --> FIX4["Apply fixes per file\n(reverse line order)"]
     FIX4 --> FIX5["Git Data API:\nCreateBlob → CreateTree\n→ CreateCommit → UpdateRef"]
 
+    TEST --> TEST2["GetLatestReviewByPR\nfindings + diff"]
+    TEST2 --> TEST3["LLM test plan\n(--code → runnable tests)"]
+
     HELP --> HELP2["Post help table\nas issue comment"]
 ```
 

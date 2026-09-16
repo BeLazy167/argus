@@ -17,14 +17,6 @@ import { focusRing } from "@/components/marketing/focus-ring";
 export function Memory() {
   const timeline: TimelineRowData[] = [
     {
-      month: "Dec",
-      day: "12",
-      year: "2024",
-      pr: "#388",
-      title: "Race condition in webhook retry logic",
-      tag: "race",
-    },
-    {
       month: "Jan",
       day: "24",
       year: "2025",
@@ -35,6 +27,14 @@ export function Memory() {
       active: true,
       reactions: 12,
       replies: 11,
+    },
+    {
+      month: "Dec",
+      day: "12",
+      year: "2024",
+      pr: "#388",
+      title: "Race condition in webhook retry logic",
+      tag: "race",
     },
     {
       month: "Nov",

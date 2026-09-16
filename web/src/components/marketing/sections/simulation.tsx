@@ -457,15 +457,14 @@ function EdgeSurfaceGauge() {
             Edge surface
           </h3>
         </div>
-        <button
-          type="button"
-          aria-label="Expand edge surface"
-          className="flex h-8 w-8 items-center justify-center border border-iron/70 text-amber-glow/80 transition-colors hover:border-amber-glow/50 hover:text-amber-glow"
+        <span
+          aria-hidden
+          className="flex h-8 w-8 items-center justify-center border border-iron/70 text-amber-glow/80"
         >
           <svg viewBox="0 0 14 14" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.4">
             <path d="M4 10 L10 4 M6 4 H10 V8" strokeLinecap="square" />
           </svg>
-        </button>
+        </span>
       </div>
 
       {/* gauge */}
@@ -624,7 +623,7 @@ function EdgeSurfaceGauge() {
             T+0.42s
           </span>
           <span className="mt-0.5 font-mono text-[26px] font-bold tracking-[0.22em] text-foreground">
-            LIVE
+            DONE
           </span>
           <span className="mt-0.5 font-mono text-[9px] uppercase tracking-[0.28em] text-slate-text/55">
             sim &middot; 87/100

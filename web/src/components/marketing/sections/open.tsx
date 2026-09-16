@@ -32,19 +32,20 @@ function getRowValues(features: Competitor["features"]): {
   };
 }
 
-const ARGUS_PRICE = "$19";
-const ARGUS_PRICE_UNIT = "/mo";
+const ARGUS_PRICE = "$0";
+const ARGUS_PRICE_UNIT = "· AGPL";
 
+/* List price/dev normalized to a 20-dev team's monthly bill. */
 const COMPETITOR_PRICES: Record<string, { value: string; unit: string }> = {
-  coderabbit: { value: "$24", unit: "/dev" },
-  greptile: { value: "$30", unit: "/dev" },
-  cubic: { value: "$30", unit: "/dev" },
-  sourcery: { value: "$24", unit: "/dev" },
-  qodo: { value: "$38", unit: "/dev" },
-  semgrep: { value: "$40", unit: "/dev" },
-  codacy: { value: "$25", unit: "/dev" },
-  sonarqube: { value: "$32", unit: "/dev" },
-  "github-copilot": { value: "$19", unit: "/dev" },
+  coderabbit: { value: "$480", unit: "/mo" },
+  greptile: { value: "$600", unit: "/mo" },
+  cubic: { value: "$600", unit: "/mo" },
+  sourcery: { value: "$480", unit: "/mo" },
+  qodo: { value: "$760", unit: "/mo" },
+  semgrep: { value: "$800", unit: "/mo" },
+  codacy: { value: "$500", unit: "/mo" },
+  sonarqube: { value: "$640", unit: "/mo" },
+  "github-copilot": { value: "$380", unit: "/mo" },
 };
 
 const DISPLAY_ORDER = [
@@ -455,90 +456,94 @@ await retryWithBackoff(() => handler(event), {
             </div>
 
             <div className="mt-0 overflow-x-auto border-x border-b border-iron">
-              <div className="min-w-[720px]">
-              {/* Column header — Tool widest, feature columns narrow, price right-aligned */}
-              <div className="grid grid-cols-[minmax(240px,2.4fr)_80px_96px_80px_120px_minmax(120px,1fr)] border-b border-iron bg-charcoal/50 font-mono text-[10px] uppercase tracking-[0.18em] text-slate-text/70">
-                <div className="px-4 py-3">Tool</div>
-                <div className="px-3 py-3 text-center">Memory</div>
-                <div className="px-3 py-3 text-center">Failure sim</div>
-                <div className="px-3 py-3 text-center">BYOK</div>
-                <div className="px-3 py-3 text-center">Transparency</div>
-                <div className="px-4 py-3 text-right">
-                  <span>Price</span>
-                  <span className="text-slate-text/40"> · </span>
-                  <span className="normal-case tracking-normal text-slate-text/50">
-                    20-dev team
-                  </span>
-                </div>
-              </div>
+              <table className="w-full min-w-[720px] border-collapse font-mono">
+                <thead>
+                  <tr className="border-b border-iron bg-charcoal/50 text-[10px] uppercase tracking-[0.18em] text-slate-text/70">
+                    <th scope="col" className="w-[34%] px-4 py-3 text-left font-normal">Tool</th>
+                    <th scope="col" className="px-3 py-3 text-center font-normal">Memory</th>
+                    <th scope="col" className="px-3 py-3 text-center font-normal">Failure sim</th>
+                    <th scope="col" className="px-3 py-3 text-center font-normal">BYOK</th>
+                    <th scope="col" className="px-3 py-3 text-center font-normal">Transparency</th>
+                    <th scope="col" className="px-4 py-3 text-right font-normal">
+                      <span>Price</span>
+                      <span className="text-slate-text/40"> · </span>
+                      <span className="normal-case tracking-normal text-slate-text/50">
+                        20-dev team
+                      </span>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="text-[12.5px]">
+                  {/* Argus row (highlighted) */}
+                  <tr className="border-b border-iron bg-amber/[0.05]">
+                    <th scope="row" className="px-4 py-4 text-left font-normal">
+                      <div className="relative flex items-center gap-3 pl-3">
+                        <span aria-hidden className="absolute inset-y-0 -left-4 w-[3px] bg-amber" />
+                        <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center border border-amber/40 bg-amber/[0.08] font-mono text-[10px] text-amber">
+                          A
+                        </span>
+                        <span className="flex min-w-0 flex-col">
+                          <span className="flex items-center gap-2">
+                            <span className="font-medium text-foreground">Argus</span>
+                            <span className="inline-flex items-center border border-amber/40 bg-amber/[0.08] px-1.5 py-px text-[9px] uppercase tracking-[0.14em] text-amber">
+                              You are here
+                            </span>
+                          </span>
+                          <span className="truncate text-[11px] text-slate-text/70">
+                            AI code reviewer with memory
+                          </span>
+                        </span>
+                      </div>
+                    </th>
+                    <td className="px-3 py-4 text-center"><Cell value={argusRowValues.memory} /></td>
+                    <td className="px-3 py-4 text-center"><Cell value={argusRowValues.failureSim} /></td>
+                    <td className="px-3 py-4 text-center"><Cell value={argusRowValues.byok} /></td>
+                    <td className="px-3 py-4 text-center"><Cell value={argusRowValues.transparency} /></td>
+                    <td className="px-4 py-4 text-right tabular-nums">
+                      <span className="font-medium text-amber">{ARGUS_PRICE}</span>
+                      <span className="text-amber/60"> {ARGUS_PRICE_UNIT}</span>
+                    </td>
+                  </tr>
 
-              {/* Argus row (highlighted) */}
-              <div className="relative grid grid-cols-[minmax(240px,2.4fr)_80px_96px_80px_120px_minmax(120px,1fr)] items-center border-b border-iron bg-amber/[0.05] font-mono text-[12.5px]">
-                <div className="absolute inset-y-0 left-0 w-[3px] bg-amber" />
-                <div className="flex items-center gap-3 px-4 py-4">
-                  <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center border border-amber/40 bg-amber/[0.08] font-mono text-[10px] text-amber">
-                    A
-                  </span>
-                  <div className="flex min-w-0 flex-col">
-                    <div className="flex items-center gap-2">
-                      <span className="font-medium text-foreground">Argus</span>
-                      <span className="inline-flex items-center border border-amber/40 bg-amber/[0.08] px-1.5 py-px text-[9px] uppercase tracking-[0.14em] text-amber">
-                        You are here
-                      </span>
-                    </div>
-                    <span className="truncate text-[11px] text-slate-text/70">
-                      AI code reviewer with memory
-                    </span>
-                  </div>
-                </div>
-                <div className="px-3 py-4 text-center"><Cell value={argusRowValues.memory} /></div>
-                <div className="px-3 py-4 text-center"><Cell value={argusRowValues.failureSim} /></div>
-                <div className="px-3 py-4 text-center"><Cell value={argusRowValues.byok} /></div>
-                <div className="px-3 py-4 text-center"><Cell value={argusRowValues.transparency} /></div>
-                <div className="px-4 py-4 text-right tabular-nums">
-                  <span className="font-medium text-amber">{ARGUS_PRICE}</span>
-                  <span className="text-amber/60">{ARGUS_PRICE_UNIT}</span>
-                </div>
-              </div>
-
-              {/* Competitor rows */}
-              {highlighted.map((c, i) => {
-                const v = getRowValues(c.features);
-                const isLast = i === highlighted.length - 1;
-                const price = COMPETITOR_PRICES[c.slug];
-                return (
-                  <div
-                    key={c.slug}
-                    className={`grid grid-cols-[minmax(240px,2.4fr)_80px_96px_80px_120px_minmax(120px,1fr)] items-center font-mono text-[12.5px] ${
-                      isLast ? "" : "border-b border-iron/60"
-                    } hover:bg-charcoal/40`}
-                  >
-                    <div className="flex items-center gap-3 px-4 py-4">
-                      <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center border border-iron bg-void/60 font-mono text-[10px] text-slate-text/70">
-                        {COMPETITOR_MARKS[c.slug]}
-                      </span>
-                      <span className="truncate text-ash/90">
-                        {COMPETITOR_DISPLAY_NAMES[c.slug] ?? c.name}
-                      </span>
-                    </div>
-                    <div className="px-3 py-4 text-center"><Cell value={v.memory} /></div>
-                    <div className="px-3 py-4 text-center"><Cell value={v.failureSim} /></div>
-                    <div className="px-3 py-4 text-center"><Cell value={v.byok} /></div>
-                    <div className="px-3 py-4 text-center"><Cell value={v.transparency} /></div>
-                    <div className="px-4 py-4 text-right tabular-nums text-slate-text/80">
-                      {price ? (
-                        <>
-                          <span className="text-ash/90">{price.value}</span>
-                          <span className="text-slate-text/50">{price.unit}</span>
-                        </>
-                      ) : (
-                        c.pricing
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-              </div>
+                  {/* Competitor rows */}
+                  {highlighted.map((c, i) => {
+                    const v = getRowValues(c.features);
+                    const isLast = i === highlighted.length - 1;
+                    const price = COMPETITOR_PRICES[c.slug];
+                    return (
+                      <tr
+                        key={c.slug}
+                        className={`${isLast ? "" : "border-b border-iron/60"} hover:bg-charcoal/40`}
+                      >
+                        <th scope="row" className="px-4 py-4 text-left font-normal">
+                          <span className="flex items-center gap-3">
+                            <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center border border-iron bg-void/60 font-mono text-[10px] text-slate-text/70">
+                              {COMPETITOR_MARKS[c.slug]}
+                            </span>
+                            <span className="truncate text-ash/90">
+                              {COMPETITOR_DISPLAY_NAMES[c.slug] ?? c.name}
+                            </span>
+                          </span>
+                        </th>
+                        <td className="px-3 py-4 text-center"><Cell value={v.memory} /></td>
+                        <td className="px-3 py-4 text-center"><Cell value={v.failureSim} /></td>
+                        <td className="px-3 py-4 text-center"><Cell value={v.byok} /></td>
+                        <td className="px-3 py-4 text-center"><Cell value={v.transparency} /></td>
+                        <td className="px-4 py-4 text-right tabular-nums text-slate-text/80">
+                          {price ? (
+                            <>
+                              <span className="text-ash/90">{price.value}</span>
+                              <span className="text-slate-text/50">{price.unit}</span>
+                            </>
+                          ) : (
+                            c.pricing
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
             </div>
 
             {/* Legend + audit line */}
@@ -558,14 +563,6 @@ await retryWithBackoff(() => handler(event), {
                 <span>self-host only</span>
               </span>
               <span className="ml-auto flex items-center gap-2 normal-case tracking-normal text-slate-text/50">
-                <span className="h-1 w-1 rounded-full bg-slate-text/30" />
-                <span>
-                  Last audited{" "}
-                  <span className="tabular-nums text-slate-text/70">
-                    2026-04-16
-                  </span>
-                </span>
-                <span className="text-iron">·</span>
                 <a
                   href="/compare"
                   className={`underline-offset-4 hover:text-amber hover:underline ${focusRing}`}

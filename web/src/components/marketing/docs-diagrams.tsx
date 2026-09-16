@@ -15,6 +15,10 @@ import {
   Check,
   Plus,
   Database,
+  ScanSearch,
+  Terminal,
+  Target,
+  GitMerge,
   type LucideIcon,
 } from "lucide-react";
 
@@ -382,3 +386,286 @@ export function MemoryDiagram() {
     </DiagramFrame>
   );
 }
+
+/* ── Review Contract — signals → contract → gates ── */
+
+const CONTRACT_SIGNALS = [
+  "draft flag",
+  "labels",
+  "branch prefix",
+  "path globs",
+  "size",
+] as const;
+
+const CONTRACT_GATES = [
+  { name: "reviewer routing", desc: "squad vs single reviewer" },
+  { name: "evidence floor", desc: "never relaxes for security/migrations" },
+  { name: "pass-2 eligibility", desc: "scripts/docs/generated skip" },
+  { name: "judge thresholds", desc: "class-aware posting bar" },
+  { name: "glass box footer", desc: "contract printed on the review" },
+] as const;
+
+export function ContractDiagram() {
+  return (
+    <DiagramFrame
+      label="Review contract · computed before review"
+      caption="Deterministic signals set the contract first — an LLM fills the change class only when metadata is silent. The contract then gates routing, floors, Pass 2, and judge thresholds, and is printed in the Glass Box footer."
+    >
+      <div className="flex flex-col items-center gap-4">
+        <div className="flex flex-wrap justify-center gap-2">
+          {CONTRACT_SIGNALS.map((s) => (
+            <span
+              key={s}
+              className="border border-iron bg-void/60 px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.14em] text-slate-text"
+            >
+              {s}
+            </span>
+          ))}
+        </div>
+        <span
+          aria-hidden
+          className="font-mono text-[10px] uppercase tracking-[0.2em] text-amber-glow/70"
+        >
+          {"↓ deterministic first · LLM fills class only when silent ↓"}
+        </span>
+        <div className="border border-amber/40 bg-amber/[0.06] px-4 py-3 text-center">
+          <div className="font-mono text-[11px] font-bold uppercase tracking-wider text-amber">
+            ReviewContract
+          </div>
+          <div className="mt-1 font-mono text-[10px] text-slate-text">
+            {"{ change_class · evidence_bar · depth · signals }"}
+          </div>
+        </div>
+        <span aria-hidden className="font-mono text-sm text-amber/50">
+          {"↓"}
+        </span>
+        <div className="grid w-full grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
+          {CONTRACT_GATES.map((g) => (
+            <div
+              key={g.name}
+              className="border border-iron bg-void/60 px-2.5 py-2"
+            >
+              <div className="font-mono text-[10px] font-bold uppercase tracking-wide text-foreground">
+                {g.name}
+              </div>
+              <div className="font-mono text-[9.5px] leading-snug text-slate-text">
+                {g.desc}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </DiagramFrame>
+  );
+}
+
+/* ── What Argus Sees — context fan-in ── */
+
+const CONTEXT_SOURCES = [
+  {
+    icon: ScanSearch,
+    name: "Call graph",
+    desc: "callers, shared types, blast radius to depth 2",
+  },
+  {
+    icon: Database,
+    name: "Memory",
+    desc: "repo patterns, past reviews, file synthesis",
+  },
+  {
+    icon: BookOpen,
+    name: "Org rules",
+    desc: "custom rules your team wrote in plain language",
+  },
+  {
+    icon: History,
+    name: "Scenarios",
+    desc: "known failure modes attached to these files",
+  },
+] as const;
+
+export function ContextDiagram() {
+  return (
+    <DiagramFrame
+      label="What the reviewer sees · context fan-in"
+      caption="A finding is only as good as its context. Before a reviewer reads the diff, Argus assembles callers, blast radius, memory, rules, and scenarios — so a change is judged against the system it lands in."
+    >
+      <div className="flex flex-col items-center gap-4 lg:flex-row lg:items-stretch">
+        <div className="flex shrink-0 items-center">
+          <Node icon={GitPullRequest} label="PR diff" sub="the changed lines" />
+        </div>
+        <span
+          aria-hidden
+          className="inline-block rotate-90 font-mono text-sm text-amber/50 lg:rotate-0"
+        >
+          {"→"}
+        </span>
+        <div className="flex flex-1 flex-col gap-2">
+          {CONTEXT_SOURCES.map((s) => {
+            const Icon = s.icon;
+            return (
+              <div
+                key={s.name}
+                className="flex items-center gap-3 border border-iron bg-void/60 px-3 py-2"
+              >
+                <span className="flex h-6 w-6 shrink-0 items-center justify-center border border-amber/40 bg-amber/[0.07]">
+                  <Icon className="h-3 w-3 text-amber" />
+                </span>
+                <span className="font-mono text-[10.5px] font-bold text-foreground">
+                  {s.name}
+                </span>
+                <span className="font-mono text-[10px] text-slate-text">
+                  {s.desc}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+        <span
+          aria-hidden
+          className="inline-block rotate-90 font-mono text-sm text-amber/50 lg:rotate-0"
+        >
+          {"→"}
+        </span>
+        <div className="flex shrink-0 items-center">
+          <Node
+            icon={MessageSquare}
+            label="Reviewer context"
+            sub="injected into every prompt"
+          />
+        </div>
+      </div>
+    </DiagramFrame>
+  );
+}
+
+/* ── Bot commands — mention → dispatch → effect ── */
+
+const COMMAND_EFFECTS = [
+  { cmd: "review", effect: "run a review · --force · --persona" },
+  { cmd: "remember", effect: "store a pattern · --org for org-wide" },
+  { cmd: "resolve", effect: "close open threads · maintainer-only" },
+  { cmd: "fix", effect: "commit suggestion blocks to the branch" },
+  { cmd: "test", effect: "test plan · --code drafts runnable tests" },
+  { cmd: "help", effect: "post the command table" },
+] as const;
+
+export function CommandsDiagram() {
+  return (
+    <DiagramFrame
+      label="Bot commands · mention → dispatch → effect"
+      caption="One mention, six verbs. Dispatch parses @argus-eye <command>, checks permission where it matters (resolve is maintainer-only), and answers in seconds."
+    >
+      <div className="flex flex-col items-center gap-4">
+        <div className="flex flex-wrap items-center justify-center gap-3">
+          <Node icon={Terminal} label="@argus-eye <command>" sub="PR comment" />
+          <span aria-hidden className="font-mono text-sm text-amber/50">
+            {"→"}
+          </span>
+          <span className="border border-amber/40 bg-amber/[0.07] px-2.5 py-1.5 font-mono text-[10px] uppercase tracking-[0.16em] text-amber">
+            dispatch
+          </span>
+          <span aria-hidden className="font-mono text-sm text-amber/50">
+            {"→"}
+          </span>
+        </div>
+        <div className="grid w-full grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+          {COMMAND_EFFECTS.map((c) => (
+            <div
+              key={c.cmd}
+              className="flex items-center gap-3 border border-iron bg-void/60 px-3 py-2"
+            >
+              <span className="border border-amber/40 bg-amber/[0.07] px-1.5 py-0.5 font-mono text-[10px] font-bold text-amber">
+                {c.cmd}
+              </span>
+              <span className="font-mono text-[10px] text-slate-text">
+                {c.effect}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </DiagramFrame>
+  );
+}
+
+/* ── Gauge — did the comments change the code ── */
+
+const GAUGE_OUTCOMES = [
+  {
+    name: "addressed_human",
+    desc: "a human commit touched the flagged lines",
+    weight: "full weight",
+    tone: "text-emerald-400/90",
+  },
+  {
+    name: "addressed_agent",
+    desc: "a bot-pattern author touched the flagged lines",
+    weight: "×0.5",
+    tone: "text-emerald-400/90",
+  },
+  {
+    name: "ignored",
+    desc: "merged with the flagged lines untouched",
+    weight: "zero",
+    tone: "text-amber",
+  },
+  {
+    name: "deferred",
+    desc: "PR closed without merging",
+    weight: "out of scope",
+    tone: "text-slate-text",
+  },
+] as const;
+
+export function GaugeDiagram() {
+  return (
+    <DiagramFrame
+      label="Gauge · did the comments change the code"
+      caption="On PR close, the gauge diffs the commits pushed after each comment (±3 lines) and records one outcome per finding — the ground truth behind suppression and calibration."
+    >
+      <div className="flex flex-col items-center gap-4">
+        <div className="flex flex-wrap items-center justify-center gap-3">
+          <Node icon={GitMerge} label="PR closes" sub="merged or not" />
+          <span aria-hidden className="font-mono text-sm text-amber/50">
+            {"→"}
+          </span>
+          <span className="border border-iron bg-void/60 px-2.5 py-1.5 font-mono text-[10px] uppercase tracking-[0.14em] text-slate-text">
+            diff commits after each comment · ±3 lines
+          </span>
+          <span aria-hidden className="font-mono text-sm text-amber/50">
+            {"→"}
+          </span>
+        </div>
+        <div className="grid w-full grid-cols-1 gap-2 sm:grid-cols-2">
+          {GAUGE_OUTCOMES.map((o) => (
+            <div
+              key={o.name}
+              className="flex items-center gap-3 border border-iron bg-void/60 px-3 py-2"
+            >
+              <Target className="h-3.5 w-3.5 shrink-0 text-amber" />
+              <span className={`font-mono text-[10.5px] font-bold ${o.tone}`}>
+                {o.name}
+              </span>
+              <span className="font-mono text-[10px] text-slate-text">
+                {o.desc}
+              </span>
+              <span className="ml-auto shrink-0 font-mono text-[9px] uppercase tracking-wider text-amber-glow/70">
+                {o.weight}
+              </span>
+            </div>
+          ))}
+        </div>
+        <span aria-hidden className="font-mono text-sm text-amber/50">
+          {"↓"}
+        </span>
+        <Node
+          icon={Gauge}
+          label="vw_review_gauge"
+          sub="address rate per category × change class"
+        />
+      </div>
+    </DiagramFrame>
+  );
+}
+

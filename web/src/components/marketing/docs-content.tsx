@@ -49,6 +49,10 @@ import {
   DeepReviewDiagram,
   LifecycleDiagram,
   MemoryDiagram,
+  ContractDiagram,
+  ContextDiagram,
+  CommandsDiagram,
+  GaugeDiagram,
 } from "@/components/marketing/docs-diagrams";
 
 /* ── Section data ── */
@@ -547,6 +551,8 @@ export function DocsContent() {
               ))}
             </div>
 
+            <ContractDiagram />
+
             <h3 className="text-sm font-bold text-foreground mb-3">
               Depth follows the contract
             </h3>
@@ -846,6 +852,8 @@ export function DocsContent() {
               model of your codebase that evolves with every review. This is
               what separates a linter from an engineer.
             </p>
+
+            <ContextDiagram />
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               {[
@@ -1890,6 +1898,9 @@ export function DocsContent() {
               </code>{" "}
               followed by a command and it responds in seconds.
             </p>
+
+            <CommandsDiagram />
+
             <div className="space-y-3">
               {[
                 {
@@ -2117,6 +2128,9 @@ export function DocsContent() {
               Comment volume is a vanity metric. Gauge tracks whether Argus
               comments actually led to code changes.
             </p>
+
+            <GaugeDiagram />
+
             <div className="space-y-3">
               {[
                 {
@@ -2480,6 +2494,7 @@ export function DocsContent() {
               Changes take effect on the next review.
             </p>
           </div>
+
         </div>
       </div>
     </section>

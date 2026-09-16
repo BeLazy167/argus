@@ -10,7 +10,7 @@ import { track } from "@/lib/analytics";
    Chip row — engraved plaques, not pills. Mono text, amber dots.
    ──────────────────────────────────────────────────────────── */
 function ChipRow() {
-  const chips = ["50 FREE REVIEWS / MONTH", "2-MIN INSTALL", "BYOK — YOUR KEY, YOUR BILL"];
+  const chips = ["OPEN SOURCE — AGPL", "SELF-HOST IN MINUTES", "BYOK — YOUR KEY, YOUR BILL"];
   return (
     <div className="flex flex-wrap items-center justify-center gap-x-0 gap-y-2 text-[10.5px] font-mono uppercase tracking-[0.2em]">
       {chips.map((c, i) => (
@@ -67,7 +67,7 @@ function ArgusEchoWordmark() {
       className="relative w-full py-12 sm:py-16"
     >
       <div className="select-none px-4" aria-hidden>
-        <div className="font-display uppercase tracking-[0.04em] text-center block text-[15.5vw] leading-[0.85] text-amber">
+        <div className="font-display uppercase tracking-[0.04em] text-center block text-[15.5vw] leading-[0.85] text-amber/15">
           ARGUS
         </div>
       </div>
@@ -194,18 +194,20 @@ export function InstallCta() {
               </h2>
 
               <p className="mx-auto mt-6 max-w-[600px] text-center text-[13px] leading-relaxed text-slate-text sm:text-[15px]">
-                One-click GitHub App. Bring your own LLM key. See every token
-                spent. Free tier — 50 reviews/month on 3 repos, no credit card.
+                Open source (AGPL). Bring your own LLM key. See every token
+                spent. Self-host in minutes — no paid tier, no feature gating.
               </p>
 
               <div className="mt-10 flex flex-col items-center justify-center gap-3 sm:flex-row sm:gap-4">
                 <Link
-                  href="/sign-up"
-                  onClick={() => track("onboarding.install_clicked", { source: "install_cta" })}
-                  className={`group relative inline-flex items-center justify-center gap-2 overflow-hidden bg-amber px-8 py-4 font-mono text-sm font-semibold uppercase tracking-[0.1em] text-primary-foreground shadow-[0_0_48px_color-mix(in_oklch,var(--color-amber-glow)_34%,transparent)] transition-[transform,background-color] hover:bg-amber-glow active:scale-[0.98] ${focusRingAmber}`}
+                  href="https://github.com/BeLazy167/argus"
+                  target="_blank"
+                  rel="noreferrer"
+                  onClick={() => track("marketing.github_clicked", { source: "install_cta" })}
+                  className={`group relative inline-flex items-center justify-center gap-2 overflow-hidden bg-amber px-8 py-4 font-mono text-sm font-semibold uppercase tracking-[0.1em] text-void shadow-[0_0_48px_color-mix(in_oklch,var(--color-amber-glow)_34%,transparent)] transition-[transform,background-color] hover:bg-amber-glow active:scale-[0.98] ${focusRingAmber}`}
                 >
                   <span aria-hidden className="relative">{"\u25B8"}</span>
-                  <span className="relative">Install GitHub App — Free</span>
+                  <span className="relative">Self-host it — GitHub</span>
                   {/* subtle inner highlight */}
                   <span
                     aria-hidden
@@ -230,7 +232,7 @@ export function InstallCta() {
                   <span aria-hidden className="text-amber">
                     {"\u2192"}
                   </span>
-                  No credit card
+                  No per-seat pricing
                 </span>
                 <span aria-hidden className="hidden h-[10px] w-px bg-iron/70 sm:inline-block" />
                 <span className="flex items-center gap-1.5">
@@ -244,14 +246,14 @@ export function InstallCta() {
                   <span aria-hidden className="text-amber">
                     {"\u2192"}
                   </span>
-                  Free tier · 50 reviews/mo
+                  No usage caps
                 </span>
                 <span aria-hidden className="hidden h-[10px] w-px bg-iron/70 sm:inline-block" />
                 <span className="flex items-center gap-1.5">
                   <span aria-hidden className="text-amber">
                     {"\u2192"}
                   </span>
-                  $19/mo on Pro
+                  No feature gating
                 </span>
               </div>
             </div>
@@ -394,13 +396,6 @@ export function InstallCta() {
           {/* Row 3 — copyright + status */}
           <div className="mt-6 flex flex-col items-start justify-between gap-2 border-t border-iron pt-6 font-mono text-[10.5px] uppercase tracking-[0.22em] text-slate-text sm:flex-row sm:items-center">
             <span>&copy; 2026 Argus</span>
-            <span className="flex items-center gap-2">
-              <span
-                aria-hidden
-                className="argus-ops-dot h-1.5 w-1.5 rounded-full bg-amber shadow-[0_0_6px_color-mix(in_oklch,var(--color-amber-glow)_80%,transparent)]"
-              />
-              <span>All systems operational</span>
-            </span>
           </div>
         </FadeIn>
       </div>

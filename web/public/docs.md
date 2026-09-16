@@ -74,7 +74,7 @@ Every comment with a fix includes a GitHub "Apply suggestion" button — one cli
 | 🔴 | **Blocker** | Will crash, corrupt data, or create a security hole. Blocks merge. |
 | 🟡 | **Should fix** | Won't cause immediate harm but should fix before merge. |
 | 💡 | **Suggestion** | Nice to have. Improve later. |
-| ✅ | **Praise** | Good code acknowledged. |
+| ✅ | **Praise** | At most one genuine line in the summary — never an inline comment. |
 
 When everything is critical, nothing is. Argus calibrates severity so blockers mean something.
 

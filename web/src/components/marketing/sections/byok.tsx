@@ -183,16 +183,13 @@ function ProvidersCard() {
 
 function CostCard() {
   return (
-    <CardShell eyebrow="Live cost breakdown" title="Per agent. Per review.">
+    <CardShell eyebrow="Cost breakdown" title="Per agent. Per review.">
       <div className="flex items-center justify-between font-mono text-[10px] tracking-[0.24em] uppercase">
         <span className="inline-flex items-center gap-2 text-amber-glow">
-          <span className="relative flex h-1.5 w-1.5">
-            <span className="absolute inset-0 bg-amber-glow rounded-full animate-ping opacity-70" />
-            <span className="relative h-1.5 w-1.5 bg-amber-glow rounded-full" />
-          </span>
-          Streaming
+          <span className="h-1.5 w-1.5 bg-amber-glow rounded-full" />
+          Example run
         </span>
-        <span className="text-slate-text/60">pr #4128 · main</span>
+        <span className="text-slate-text/60">pr #412 · main</span>
       </div>
 
       {/* Hero total */}

@@ -89,13 +89,15 @@ export default async function GlossaryTermPage({
           {t.term} starts working on your very first PR.
         </p>
         <p className="text-xs font-sans text-slate-text mb-4">
-          Free for up to 3 repos. No credit card required.
+          Open source (AGPL) — self-host it. No paid tier, no feature gating.
         </p>
         <Link
-          href="/sign-up"
+          href="https://github.com/BeLazy167/argus"
+          target="_blank"
+          rel="noreferrer"
           className="inline-flex items-center border bg-amber px-6 py-2.5 text-xs font-mono font-medium text-void transition-[transform,filter] duration-150 ease-out hover:brightness-110 active:scale-[0.97]"
         >
-          Install Argus on GitHub
+          Self-host Argus on GitHub
         </Link>
       </div>
 
