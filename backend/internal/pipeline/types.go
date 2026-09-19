@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/BeLazy167/argus/backend/internal/github"
+	"github.com/BeLazy167/argus/backend/internal/jev"
 	"github.com/BeLazy167/argus/backend/internal/memory"
 	"github.com/BeLazy167/argus/backend/internal/util"
 	"github.com/BeLazy167/argus/backend/pkg/diff"
@@ -520,8 +521,10 @@ func (r *RunTokenUsage) addCrossPR(s StageTokens) {
 // providers: numerics fold into the bucket (it stays the stage total) and
 // the leg appends itself to Aux with its own model/provider, so per-model
 // attribution survives the fold. The headline Model/Provider is a display
-// label — an empty bucket takes the leg's stamp; a set one is left alone
-// (callers overwrite it explicitly when their leg is the decider).
+// label naming the substantive model: an empty bucket takes the leg's
+// stamp, and a non-Jev leg takes the headline from a Jev holder — Jev
+// spend is auxiliary provenance and only labels a bucket when it did all
+// the work (callers may still restamp explicitly for non-Jev deciders).
 func foldAuxTokens(bucket *StageTokens, spend StageTokens) {
 	bucket.PromptTokens += spend.PromptTokens
 	bucket.CompletionTokens += spend.CompletionTokens
@@ -538,7 +541,7 @@ func foldAuxTokens(bucket *StageTokens, spend StageTokens) {
 	} else {
 		bucket.Aux = append(bucket.Aux, spend)
 	}
-	if bucket.Model == "" {
+	if bucket.Model == "" || (bucket.Provider == jev.ProviderName && spend.Provider != jev.ProviderName) {
 		bucket.Model = spend.Model
 		bucket.Provider = spend.Provider
 	}
@@ -550,9 +553,10 @@ func foldAuxTokens(bucket *StageTokens, spend StageTokens) {
 // would cost up to maxJudgeCallsPerPush UPDATEs per push for the same total.
 func (r *RunTokenUsage) addAutoResolve(s StageTokens) {
 	r.mu.Lock()
-	// First-writer headline (matches the MergeStageTokenEntry COALESCE): the
-	// bucket label names a deciding leg, and Aux records every call's
-	// provenance so a Jev+LLM mix never misattributes either side's spend.
+	// Headline semantics match foldAuxTokens (and the MergeStageTokenEntry
+	// merge): the label names the substantive leg — a non-Jev leg takes it
+	// from a Jev holder — and Aux records every call's provenance so a
+	// Jev+LLM mix never misattributes either side's spend.
 	foldAuxTokens(&r.AutoResolve, s)
 	r.Total.PromptTokens += s.PromptTokens
 	r.Total.CompletionTokens += s.CompletionTokens

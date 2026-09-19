@@ -235,11 +235,15 @@ HAVING count(DISTINCT r.id) >= 2;
 --   $2 stage_key  — 'cross_pr' | 'acceptance' (or any scalar bucket)
 --   $3 entry_json — a single StageTokens JSON object
 --
--- Merge semantics (matches RunTokenUsage.addCrossPR / addAcceptance):
+-- Merge semantics (matches foldAuxTokens):
 --   prompt_tokens/completion_tokens/total_tokens/cost  → summed
---   model/provider                                     → stamped only
---                                                        if currently
---                                                        missing
+--   model/provider                                     → incoming wins when
+--                                                        the bucket has none,
+--                                                        or when the stored
+--                                                        stamp is Jev and the
+--                                                        incoming spend leg
+--                                                        is not (Jev stays
+--                                                        aux-only provenance)
 --   aux                                                → every model-bearing
 --                                                        entry appends itself,
 --                                                        so mixed Jev+LLM
@@ -272,17 +276,42 @@ SET token_usage = jsonb_set(
                 COALESCE((token_usage -> sqlc.arg(stage_key)::text ->> 'cost')::float8, 0)
                 + COALESCE((sqlc.arg(entry)::jsonb ->> 'cost')::float8, 0),
             'model',
-                COALESCE(
-                    NULLIF(token_usage -> sqlc.arg(stage_key)::text ->> 'model', ''),
-                    NULLIF(sqlc.arg(entry)::jsonb ->> 'model', ''),
-                    ''
-                ),
+                -- Headline names the substantive model: incoming wins when
+                -- the bucket has none yet, or when the stored stamp is Jev
+                -- (aux-only provenance) and the incoming leg is not.
+                CASE
+                    WHEN NULLIF(sqlc.arg(entry)::jsonb ->> 'model', '') IS NOT NULL
+                     AND (
+                        COALESCE((sqlc.arg(entry)::jsonb ->> 'total_tokens')::bigint, 0) <> 0
+                        OR COALESCE((sqlc.arg(entry)::jsonb ->> 'cost')::float8, 0) <> 0
+                     )
+                     AND (
+                        NULLIF(token_usage -> sqlc.arg(stage_key)::text ->> 'model', '') IS NULL
+                        OR (
+                            COALESCE(NULLIF(token_usage -> sqlc.arg(stage_key)::text ->> 'provider', ''), '') = 'typesafe'
+                            AND COALESCE(NULLIF(sqlc.arg(entry)::jsonb ->> 'provider', ''), '') <> 'typesafe'
+                        )
+                     )
+                    THEN sqlc.arg(entry)::jsonb ->> 'model'
+                    ELSE COALESCE(NULLIF(token_usage -> sqlc.arg(stage_key)::text ->> 'model', ''), '')
+                END,
             'provider',
-                COALESCE(
-                    NULLIF(token_usage -> sqlc.arg(stage_key)::text ->> 'provider', ''),
-                    NULLIF(sqlc.arg(entry)::jsonb ->> 'provider', ''),
-                    ''
-                ),
+                CASE
+                    WHEN NULLIF(sqlc.arg(entry)::jsonb ->> 'model', '') IS NOT NULL
+                     AND (
+                        COALESCE((sqlc.arg(entry)::jsonb ->> 'total_tokens')::bigint, 0) <> 0
+                        OR COALESCE((sqlc.arg(entry)::jsonb ->> 'cost')::float8, 0) <> 0
+                     )
+                     AND (
+                        NULLIF(token_usage -> sqlc.arg(stage_key)::text ->> 'model', '') IS NULL
+                        OR (
+                            COALESCE(NULLIF(token_usage -> sqlc.arg(stage_key)::text ->> 'provider', ''), '') = 'typesafe'
+                            AND COALESCE(NULLIF(sqlc.arg(entry)::jsonb ->> 'provider', ''), '') <> 'typesafe'
+                        )
+                     )
+                    THEN COALESCE(sqlc.arg(entry)::jsonb ->> 'provider', '')
+                    ELSE COALESCE(NULLIF(token_usage -> sqlc.arg(stage_key)::text ->> 'provider', ''), '')
+                END,
             'aux',
                 CASE
                     -- Model-bearing spend joins the per-leg ledger; a

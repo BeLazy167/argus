@@ -154,18 +154,18 @@ func TestFoldAuxTokens_MixedBucketSemantics(t *testing.T) {
 	jevLeg := StageTokens{PromptTokens: 400, TotalTokens: 400, Cost: 0.0001, Model: "jev-1.13.0", Provider: "typesafe"}
 	llmLeg := StageTokens{PromptTokens: 1000, CompletionTokens: 100, TotalTokens: 1100, Cost: 0.002, Model: "gpt-x", Provider: "openrouter"}
 
-	// Jev leg first (pre-filter/shadow order): provisional headline.
+	// Jev leg first (pre-filter/shadow order): provisional headline — Jev
+	// labels the bucket only until a substantive leg arrives.
 	foldAuxTokens(&bucket, jevLeg)
 	if bucket.Model != "jev-1.13.0" || bucket.Provider != "typesafe" {
 		t.Fatalf("empty bucket must take the first leg's stamp: %+v", bucket)
 	}
-	// Deciding LLM leg folds in: the fold must leave the first-writer stamp
-	// alone — callers overwrite the headline explicitly.
+	// Deciding LLM leg folds in: a non-Jev leg takes the headline from a
+	// Jev holder — the label names the substantive model, Jev is aux-only.
 	foldAuxTokens(&bucket, llmLeg)
-	if bucket.Model != "jev-1.13.0" || bucket.Provider != "typesafe" {
-		t.Fatalf("fold must not overwrite a set headline: %+v", bucket)
+	if bucket.Model != "gpt-x" || bucket.Provider != "openrouter" {
+		t.Fatalf("non-Jev leg must take the headline from a Jev holder: %+v", bucket)
 	}
-	bucket.Model, bucket.Provider = llmLeg.Model, llmLeg.Provider
 
 	if bucket.TotalTokens != 1500 || bucket.Cost < 0.0021-1e-9 || bucket.Cost > 0.0021+1e-9 {
 		t.Fatalf("bucket numerics must be the stage total: %+v", bucket)
@@ -173,14 +173,17 @@ func TestFoldAuxTokens_MixedBucketSemantics(t *testing.T) {
 	if len(bucket.Aux) != 2 || bucket.Aux[0].Model != "jev-1.13.0" || bucket.Aux[1].Model != "gpt-x" {
 		t.Fatalf("aux ledger must carry both legs' provenance: %+v", bucket.Aux)
 	}
-	if bucket.Model != "gpt-x" {
-		t.Fatalf("deciding leg must own the headline: %+v", bucket)
+
+	// A second Jev leg must NOT take the headline back from the LLM holder.
+	foldAuxTokens(&bucket, jevLeg)
+	if bucket.Model != "gpt-x" || bucket.Provider != "openrouter" {
+		t.Fatalf("Jev leg must not overwrite a non-Jev headline: %+v", bucket)
 	}
 
 	// Zero-spend entries (failed evals) fold nothing and record no aux row.
 	before := len(bucket.Aux)
 	foldAuxTokens(&bucket, StageTokens{Model: "jev-1.13.0", Provider: "typesafe"})
-	if len(bucket.Aux) != before || bucket.TotalTokens != 1500 {
+	if len(bucket.Aux) != before || bucket.TotalTokens != 1900 {
 		t.Fatalf("zero-spend fold must be a no-op: %+v", bucket)
 	}
 }
