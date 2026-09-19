@@ -950,17 +950,34 @@ SET token_usage = jsonb_set(
                 COALESCE((token_usage -> $1::text ->> 'cost')::float8, 0)
                 + COALESCE(($2::jsonb ->> 'cost')::float8, 0),
             'model',
-                COALESCE(
-                    NULLIF(token_usage -> $1::text ->> 'model', ''),
-                    NULLIF($2::jsonb ->> 'model', ''),
-                    ''
-                ),
+                -- Headline names the substantive model: incoming wins when
+                -- the bucket has none yet, or when the stored stamp is Jev
+                -- (aux-only provenance) and the incoming leg is not.
+                CASE
+                    WHEN NULLIF($2::jsonb ->> 'model', '') IS NOT NULL
+                     AND (
+                        NULLIF(token_usage -> $1::text ->> 'model', '') IS NULL
+                        OR (
+                            COALESCE(NULLIF(token_usage -> $1::text ->> 'provider', ''), '') = 'typesafe'
+                            AND COALESCE(NULLIF($2::jsonb ->> 'provider', ''), '') <> 'typesafe'
+                        )
+                     )
+                    THEN $2::jsonb ->> 'model'
+                    ELSE COALESCE(NULLIF(token_usage -> $1::text ->> 'model', ''), '')
+                END,
             'provider',
-                COALESCE(
-                    NULLIF(token_usage -> $1::text ->> 'provider', ''),
-                    NULLIF($2::jsonb ->> 'provider', ''),
-                    ''
-                ),
+                CASE
+                    WHEN NULLIF($2::jsonb ->> 'model', '') IS NOT NULL
+                     AND (
+                        NULLIF(token_usage -> $1::text ->> 'model', '') IS NULL
+                        OR (
+                            COALESCE(NULLIF(token_usage -> $1::text ->> 'provider', ''), '') = 'typesafe'
+                            AND COALESCE(NULLIF($2::jsonb ->> 'provider', ''), '') <> 'typesafe'
+                        )
+                     )
+                    THEN COALESCE($2::jsonb ->> 'provider', '')
+                    ELSE COALESCE(NULLIF(token_usage -> $1::text ->> 'provider', ''), '')
+                END,
             'aux',
                 CASE
                     -- Model-bearing spend joins the per-leg ledger; a

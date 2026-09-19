@@ -272,17 +272,34 @@ SET token_usage = jsonb_set(
                 COALESCE((token_usage -> sqlc.arg(stage_key)::text ->> 'cost')::float8, 0)
                 + COALESCE((sqlc.arg(entry)::jsonb ->> 'cost')::float8, 0),
             'model',
-                COALESCE(
-                    NULLIF(token_usage -> sqlc.arg(stage_key)::text ->> 'model', ''),
-                    NULLIF(sqlc.arg(entry)::jsonb ->> 'model', ''),
-                    ''
-                ),
+                -- Headline names the substantive model: incoming wins when
+                -- the bucket has none yet, or when the stored stamp is Jev
+                -- (aux-only provenance) and the incoming leg is not.
+                CASE
+                    WHEN NULLIF(sqlc.arg(entry)::jsonb ->> 'model', '') IS NOT NULL
+                     AND (
+                        NULLIF(token_usage -> sqlc.arg(stage_key)::text ->> 'model', '') IS NULL
+                        OR (
+                            COALESCE(NULLIF(token_usage -> sqlc.arg(stage_key)::text ->> 'provider', ''), '') = 'typesafe'
+                            AND COALESCE(NULLIF(sqlc.arg(entry)::jsonb ->> 'provider', ''), '') <> 'typesafe'
+                        )
+                     )
+                    THEN sqlc.arg(entry)::jsonb ->> 'model'
+                    ELSE COALESCE(NULLIF(token_usage -> sqlc.arg(stage_key)::text ->> 'model', ''), '')
+                END,
             'provider',
-                COALESCE(
-                    NULLIF(token_usage -> sqlc.arg(stage_key)::text ->> 'provider', ''),
-                    NULLIF(sqlc.arg(entry)::jsonb ->> 'provider', ''),
-                    ''
-                ),
+                CASE
+                    WHEN NULLIF(sqlc.arg(entry)::jsonb ->> 'model', '') IS NOT NULL
+                     AND (
+                        NULLIF(token_usage -> sqlc.arg(stage_key)::text ->> 'model', '') IS NULL
+                        OR (
+                            COALESCE(NULLIF(token_usage -> sqlc.arg(stage_key)::text ->> 'provider', ''), '') = 'typesafe'
+                            AND COALESCE(NULLIF(sqlc.arg(entry)::jsonb ->> 'provider', ''), '') <> 'typesafe'
+                        )
+                     )
+                    THEN COALESCE(sqlc.arg(entry)::jsonb ->> 'provider', '')
+                    ELSE COALESCE(NULLIF(token_usage -> sqlc.arg(stage_key)::text ->> 'provider', ''), '')
+                END,
             'aux',
                 CASE
                     -- Model-bearing spend joins the per-leg ledger; a

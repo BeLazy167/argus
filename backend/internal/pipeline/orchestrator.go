@@ -2319,12 +2319,12 @@ func (o *Orchestrator) verifyIntent(ctx context.Context, run *PipelineRun) *Inte
 }
 
 // recordIntentTokens bills one intent-stage call (LLM or Jev) into the Intent
-// bucket and the run total. Each leg lands in the aux ledger; Model/Provider
-// re-stamp on every call that carries them — the deciding leg always bills
-// last, so the bucket names whoever did the work, not whoever ran first.
+// bucket and the run total. Each leg lands in the aux ledger; a non-Jev leg
+// re-stamps Model/Provider — the deciding LLM leg bills last and names the
+// bucket, while Jev stays aux-only provenance.
 func (o *Orchestrator) recordIntentTokens(run *PipelineRun, tokens StageTokens) {
 	foldAuxTokens(&run.Tokens.Intent, tokens)
-	if tokens.Model != "" {
+	if tokens.Model != "" && tokens.Provider != jev.ProviderName {
 		run.Tokens.Intent.Model = tokens.Model
 		run.Tokens.Intent.Provider = tokens.Provider
 	}
@@ -2333,11 +2333,11 @@ func (o *Orchestrator) recordIntentTokens(run *PipelineRun, tokens StageTokens) 
 
 // recordConventionTokens bills one convention-classifier call (LLM or Jev)
 // into the Conventions bucket — accumulates onto the extraction spend already
-// billed there; Model/Provider re-stamp per call (same last-writer rule) and
-// every leg joins the aux ledger.
+// billed there; a non-Jev leg re-stamps Model/Provider and every leg joins
+// the aux ledger (Jev stays aux-only provenance).
 func (o *Orchestrator) recordConventionTokens(run *PipelineRun, tokens StageTokens) {
 	foldAuxTokens(&run.Tokens.Conventions, tokens)
-	if tokens.Model != "" {
+	if tokens.Model != "" && tokens.Provider != jev.ProviderName {
 		run.Tokens.Conventions.Model = tokens.Model
 		run.Tokens.Conventions.Provider = tokens.Provider
 	}
