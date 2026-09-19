@@ -66,6 +66,7 @@ func loadFeatureFlags(ctx context.Context, st featureFlagReader, installationDBI
 		CrossPRChecks            *bool `json:"cross_pr_checks"`
 		IssueAcceptance          *bool `json:"issue_acceptance"`
 		ConventionConflictChecks *bool `json:"convention_conflict_checks"`
+		JevClassifier            *bool `json:"jev_classifier"`
 		MaxLinkedPRs             *int  `json:"max_linked_prs"`
 	}
 	if err := json.Unmarshal(raw, &partial); err != nil {
@@ -81,6 +82,9 @@ func loadFeatureFlags(ctx context.Context, st featureFlagReader, installationDBI
 	}
 	if partial.ConventionConflictChecks != nil {
 		flags.ConventionConflictChecks = *partial.ConventionConflictChecks
+	}
+	if partial.JevClassifier != nil {
+		flags.JevClassifier = *partial.JevClassifier
 	}
 	if partial.MaxLinkedPRs != nil && *partial.MaxLinkedPRs > 0 {
 		flags.MaxLinkedPRs = *partial.MaxLinkedPRs

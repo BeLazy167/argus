@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/BeLazy167/argus/backend/internal/llm"
 	"github.com/BeLazy167/argus/backend/internal/memory"
@@ -38,6 +39,13 @@ type TriageResult struct {
 type TriageStage struct {
 	registry *llm.Registry
 	store    *store.Store
+	// jev, when non-nil, runs a shadow eval that logs agreement with the
+	// pipeline's final triage decisions — observe-only, never routes files.
+	jev jevEvaluator
+	// joinBudget/drainBudget override the shadow join windows — tests set
+	// millisecond values so they don't pay the production budgets.
+	joinBudget  time.Duration
+	drainBudget time.Duration
 }
 
 func NewTriageStage(registry *llm.Registry, st *store.Store) *TriageStage {
@@ -68,6 +76,10 @@ func (ts *TriageStage) Execute(ctx context.Context, run *PipelineRun) (err error
 	slog.Info("heuristic triage",
 		"total", len(run.Diff.Files), "deep", deepCount,
 		"pr", run.PREvent.PRNumber)
+
+	// Shadow Jev eval — fires in parallel with the LLM leg, joined below.
+	// Observe-only: its answers are logged, never used for routing.
+	shadow := ts.startJevTriageShadow(ctx, run)
 
 	// Phase 2: LLM refinement — only for manageable file counts
 	if deepCount > 0 && deepCount <= 20 {
@@ -109,6 +121,10 @@ func (ts *TriageStage) Execute(ctx context.Context, run *PipelineRun) (err error
 			"files": triageSlice,
 		})
 	}
+
+	// Join the Jev shadow: bills its spend and logs agreement vs the final
+	// (post-override) routing decisions before the token update publishes.
+	ts.finishJevTriageShadow(ctx, run, shadow, results)
 
 	// Token usage is accumulated inside llmTriage if it ran
 	if run.EventBus != nil {
@@ -177,8 +193,9 @@ func (ts *TriageStage) llmTriage(ctx context.Context, run *PipelineRun) (results
 		return nil, fmt.Errorf("triage LLM: %w", err)
 	}
 
-	// Accumulate token usage
-	run.Tokens.Triage = StageTokens{
+	// Accumulate token usage — fold rather than overwrite so the Jev shadow's
+	// aux entry survives; the LLM leg is the deciding leg and owns the stamp.
+	tokens := StageTokens{
 		PromptTokens:     resp.TokensUsed.PromptTokens,
 		CompletionTokens: resp.TokensUsed.CompletionTokens,
 		TotalTokens:      resp.TokensUsed.TotalTokens,
@@ -186,7 +203,10 @@ func (ts *TriageStage) llmTriage(ctx context.Context, run *PipelineRun) (results
 		Model:            cfg.Model,
 		Provider:         cfg.Provider,
 	}
-	run.Tokens.addToTotal(run.Tokens.Triage)
+	foldAuxTokens(&run.Tokens.Triage, tokens)
+	run.Tokens.Triage.Model = cfg.Model
+	run.Tokens.Triage.Provider = cfg.Provider
+	run.Tokens.addToTotal(tokens)
 
 	parsedResults, err := parseTriageResponse(resp.Content)
 	if err != nil {

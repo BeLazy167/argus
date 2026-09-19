@@ -960,7 +960,29 @@ SET token_usage = jsonb_set(
                     NULLIF(token_usage -> $1::text ->> 'provider', ''),
                     NULLIF($2::jsonb ->> 'provider', ''),
                     ''
-                )
+                ),
+            'aux',
+                CASE
+                    -- Model-bearing spend joins the per-leg ledger; a
+                    -- model-less or zero-spend entry leaves aux untouched.
+                    WHEN NULLIF($2::jsonb ->> 'model', '') IS NOT NULL
+                     AND (
+                        COALESCE(($2::jsonb ->> 'total_tokens')::bigint, 0) <> 0
+                        OR COALESCE(($2::jsonb ->> 'cost')::float8, 0) <> 0
+                     )
+                    THEN COALESCE(
+                        CASE WHEN jsonb_typeof(token_usage -> $1::text -> 'aux') = 'array'
+                             THEN token_usage -> $1::text -> 'aux'
+                        END,
+                        '[]'::jsonb
+                    ) || jsonb_build_array($2::jsonb - 'aux')
+                    ELSE COALESCE(
+                        CASE WHEN jsonb_typeof(token_usage -> $1::text -> 'aux') = 'array'
+                             THEN token_usage -> $1::text -> 'aux'
+                        END,
+                        '[]'::jsonb
+                    )
+                END
         ),
         true
     ),
@@ -1008,6 +1030,12 @@ type MergeStageTokenEntryParams struct {
 //	model/provider                                     → stamped only
 //	                                                     if currently
 //	                                                     missing
+//	aux                                                → every model-bearing
+//	                                                     entry appends itself,
+//	                                                     so mixed Jev+LLM
+//	                                                     buckets keep per-leg
+//	                                                     provenance for the
+//	                                                     stats/models view
 //
 // Invariants:
 //   - If token_usage is NULL it's initialized to '{}'.

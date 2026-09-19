@@ -1227,11 +1227,13 @@ export default function SettingsPage() {
 
 	const loading = reposLoading || keysLoading || (activeId > 0 && configsLoading);
 	const configMap = new Map(configs?.map((c) => [c.stage, c]));
-	// Embeddings is a provider_keys row but not an LLM provider — exclude it
-	// from the LLM key counts (mirrors providers/page.tsx; an embeddings-only
-	// install must still see the "no API keys" empty states).
+	// Embeddings and the TypeSafe Jev slot are provider_keys rows but not LLM
+	// providers — whitelist the known provider ids (mirrors providers/page.tsx;
+	// an embeddings/Jev-only install must still see the "no API keys" states).
 	const savedProviders =
-		providerKeys?.filter((k) => k.provider !== "embeddings").map((k) => k.provider) ?? [];
+		providerKeys
+			?.filter((k) => (PROVIDERS as readonly string[]).includes(k.provider))
+			.map((k) => k.provider) ?? [];
 	const configuredCount = savedProviders.length;
 
 	return (

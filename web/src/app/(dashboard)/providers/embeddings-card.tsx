@@ -230,7 +230,7 @@ function EmbeddingsForm({
 								value={baseURL}
 								onChange={(e) => setBaseURL(e.target.value)}
 								placeholder="http://tei.internal:8080/v1"
-								className="w-full border border-iron bg-background px-2 py-1.5 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none"
+								className="w-full border border-iron bg-background px-2 py-1.5 text-xs font-mono text-foreground placeholder:text-slate-text/50 focus:border-amber focus:outline-none"
 							/>
 						</div>
 						<div>
@@ -246,7 +246,7 @@ function EmbeddingsForm({
 								value={model}
 								onChange={(e) => setModel(e.target.value)}
 								placeholder="bge-m3"
-								className="w-full border border-iron bg-background px-2 py-1.5 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none"
+								className="w-full border border-iron bg-background px-2 py-1.5 text-xs font-mono text-foreground placeholder:text-slate-text/50 focus:border-amber focus:outline-none"
 							/>
 						</div>
 					</>
@@ -267,7 +267,7 @@ function EmbeddingsForm({
 							value={apiKey}
 							onChange={(e) => setApiKey(e.target.value)}
 							placeholder={selected.requires_key ? "sk-..." : "leave blank if unauthenticated"}
-							className="w-full border border-iron bg-background px-2 py-1.5 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none"
+							className="w-full border border-iron bg-background px-2 py-1.5 text-xs font-mono text-foreground placeholder:text-slate-text/50 focus:border-amber focus:outline-none"
 						/>
 					</div>
 				)}

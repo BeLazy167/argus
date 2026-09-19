@@ -12,6 +12,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/BeLazy167/argus/backend/internal/jev"
 	"github.com/BeLazy167/argus/backend/internal/llm"
 	"github.com/BeLazy167/argus/backend/internal/memory"
 	"github.com/BeLazy167/argus/backend/internal/pipeline"
@@ -496,6 +497,24 @@ func (s *Server) upsertProviderKey(w http.ResponseWriter, r *http.Request) {
 		if msg := memory.ValidateEmbedKeyRequest(req, stored); msg != "" {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": msg})
 			return
+		}
+	}
+	if body.Provider == jev.ProviderName && body.BaseURL != nil {
+		// A padded or trailing-slashed endpoint builds //v1/systemone or an
+		// unparseable URL — every eval then errors and silently escalates, so
+		// BYOK Jev is dead for that install. Persist the canonical form, and
+		// reject a non-URL outright instead of saving a dead endpoint.
+		trimmed := strings.TrimRight(strings.TrimSpace(*body.BaseURL), "/")
+		switch {
+		case trimmed == "":
+			body.BaseURL = nil
+		case !jev.ValidBaseURL(trimmed):
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "invalid base URL — must be an absolute http(s) URL, e.g. https://api.typesafe.ai",
+			})
+			return
+		default:
+			body.BaseURL = &trimmed
 		}
 	}
 	if body.Provider == "azure" || body.Provider == "gcp_vertex" || body.Provider == "aws_bedrock" {

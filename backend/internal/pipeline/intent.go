@@ -155,14 +155,7 @@ func (ie *IntentExtractionStage) Execute(ctx context.Context, run *PipelineRun) 
 		Model:            cfg.Model,
 		Provider:         cfg.Provider,
 	}
-	run.Tokens.Intent.PromptTokens += tokens.PromptTokens
-	run.Tokens.Intent.CompletionTokens += tokens.CompletionTokens
-	run.Tokens.Intent.TotalTokens += tokens.TotalTokens
-	run.Tokens.Intent.Cost += tokens.Cost
-	if run.Tokens.Intent.Model == "" {
-		run.Tokens.Intent.Model = cfg.Model
-		run.Tokens.Intent.Provider = cfg.Provider
-	}
+	foldAuxTokens(&run.Tokens.Intent, tokens)
 	run.Tokens.addToTotal(tokens)
 
 	parsed, unknownSource, err := parseIntent(resp.Content)

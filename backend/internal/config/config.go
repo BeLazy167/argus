@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 )
 
 // Config holds all application configuration loaded from environment variables.
@@ -41,6 +42,22 @@ type Config struct {
 	EmbeddingsBaseURL    string
 	EmbeddingsModel      string
 	EmbeddingsDimensions int
+
+	// TypeSafe (Jev) classifier key. When set, five surfaces consult Jev:
+	// addressed judge, convention relations, intent verification, scoring FP
+	// pre-filter, and an observe-only triage shadow. Confident answers skip the
+	// LLM; the uncertain band escalates to the configured models as before.
+	// Empty disables every Jev call. Egress also requires each installation's
+	// jev_classifier feature flag (default OFF): the key alone never sends
+	// finding text, PR metadata/body, intent, diff hunks, or stored
+	// conventions to api.typesafe.ai.
+	TypeSafeAPIKey string
+
+	// OpenRouterPricingEnabled gates the model_pricing miss fallback to
+	// OpenRouter's public model catalog. The fetch is a bare GET for a public
+	// list — no keys, no tenant content — but installs with restricted egress
+	// can disable it; lookups then resolve manual rows only.
+	OpenRouterPricingEnabled bool
 
 	// Worker
 	MaxConcurrentReviews int
@@ -119,10 +136,20 @@ func Load() (*Config, error) {
 
 		EncryptionKey: os.Getenv("ENCRYPTION_KEY"),
 
+		// The TypeSafe SDK spells the var TYPESAFE_AI_API_KEY; accept both so
+		// an operator copying either doc gets a working config. Trim before
+		// the fallback check — a whitespace-only primary must not shadow a
+		// valid TYPESAFE_AI_API_KEY.
+		TypeSafeAPIKey: firstNonBlankEnv("TYPESAFE_API_KEY", "TYPESAFE_AI_API_KEY"),
+
 		EmbeddingsAPIKey:     os.Getenv("EMBEDDINGS_API_KEY"),
 		EmbeddingsBaseURL:    getEnv("EMBEDDINGS_BASE_URL", "https://api.voyageai.com/v1"),
 		EmbeddingsModel:      getEnv("EMBEDDINGS_MODEL", "voyage-4"),
 		EmbeddingsDimensions: embedDims,
+
+		// Default ON: the catalog GET carries no tenant data or keys — it is
+		// a public model list. Restricted-egress installs set it to "false".
+		OpenRouterPricingEnabled: getEnv("OPENROUTER_PRICING_ENABLED", "true") == "true",
 
 		MaxConcurrentReviews: maxWorkers,
 
@@ -147,6 +174,17 @@ func loadPrivateKey() ([]byte, error) {
 		return []byte(key), nil
 	}
 	return nil, fmt.Errorf("set GITHUB_PRIVATE_KEY_PATH or GITHUB_PRIVATE_KEY")
+}
+
+// firstNonBlankEnv returns the first env var whose trimmed value is
+// non-empty — a whitespace-only value must not shadow later candidates.
+func firstNonBlankEnv(names ...string) string {
+	for _, n := range names {
+		if v := strings.TrimSpace(os.Getenv(n)); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func getEnv(key, fallback string) string {

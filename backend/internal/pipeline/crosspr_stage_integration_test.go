@@ -403,6 +403,7 @@ type fakeLLMProvider struct {
 	tokens  llm.TokenUsage
 	cost    float64
 	calls   int32
+	lastReq llm.CompletionRequest
 }
 
 func newFakeLLMProvider() *fakeLLMProvider {
@@ -421,6 +422,7 @@ func (p *fakeLLMProvider) Complete(ctx context.Context, req llm.CompletionReques
 	atomic.AddInt32(&p.calls, 1)
 	p.m.Lock()
 	defer p.m.Unlock()
+	p.lastReq = req
 	if p.err != nil {
 		return llm.CompletionResponse{}, p.err
 	}
@@ -768,6 +770,7 @@ func TestHandlePREdited_AddedLinkFiresRefresh(t *testing.T) {
 	// that outlives test cleanup and races resetCrossPRGlobals; the
 	// debounce-timer contract here is exactly what OnReviewCompleted
 	// exposes, so we scope the assertion to that surface.
+	before := atomic.LoadInt32(&h.store.siblingLookups)
 	h.o.OnReviewCompleted(context.Background(), h.reviewID)
 
 	// A debounce timer must now exist for the reviewID. We don't wait for
@@ -781,7 +784,7 @@ func TestHandlePREdited_AddedLinkFiresRefresh(t *testing.T) {
 	}
 	// Let the sibling-fanout goroutine drain so it doesn't race the
 	// resetCrossPRGlobals cleanup that runs on test exit.
-	waitSiblingFanoutSettled(t, h)
+	waitSiblingFanoutSettled(t, h, before)
 }
 
 // TestHandlePREdited_RemovedLink mirrors the added-link case from the
@@ -792,6 +795,7 @@ func TestHandlePREdited_RemovedLink(t *testing.T) {
 	t.Cleanup(resetCrossPRGlobals)
 	h := newHarness(t)
 
+	before := atomic.LoadInt32(&h.store.siblingLookups)
 	h.o.OnReviewCompleted(context.Background(), h.reviewID)
 
 	crossPRDebounceMu.Lock()
@@ -800,7 +804,7 @@ func TestHandlePREdited_RemovedLink(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected debounce timer after removed-link OnReviewCompleted")
 	}
-	waitSiblingFanoutSettled(t, h)
+	waitSiblingFanoutSettled(t, h, before)
 }
 
 // TestHandlePREdited_NoChangeNoOp documents the set-diff no-op invariant
@@ -1199,16 +1203,15 @@ type linkKey struct {
 // has run. Without this sync, resetCrossPRGlobals (in t.Cleanup) races
 // the goroutine's reads of the global maps.
 //
-// Strategy: wait up to 2s for the counter to reach the expected post-call
-// value (pre-call reading + 1). If it doesn't increment we fail the test —
-// a true deadlock here would indicate a regression in OnReviewCompleted's
-// fanout contract.
-func waitSiblingFanoutSettled(t *testing.T, h *harness) {
+// Strategy: the caller captures `before` BEFORE triggering the fanout, then
+// we wait up to 2s for the counter to pass it. Reading the baseline inside
+// this helper races the spawned goroutine — if its lookup lands first, the
+// wait targets a count that already passed and burns the whole deadline.
+func waitSiblingFanoutSettled(t *testing.T, h *harness, before int32) {
 	t.Helper()
-	start := atomic.LoadInt32(&h.store.siblingLookups)
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if atomic.LoadInt32(&h.store.siblingLookups) > start {
+		if atomic.LoadInt32(&h.store.siblingLookups) > before {
 			return
 		}
 		time.Sleep(time.Millisecond)

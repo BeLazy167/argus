@@ -37,6 +37,12 @@ var AllowedKeys = map[string]struct{}{
 	// "what did auto-resolve cost" without joining reviews.token_usage.
 	"judge_tokens": {}, "judge_cost": {},
 	"issues_evaluated": {}, "reason": {}, "primary_review_id": {},
+	// jev shadow-mode agreement (jev.shadow.* events) — per-file classifier
+	// agreement counts with the production pipeline. Non-PII scalars.
+	"agreed": {}, "disagreed": {}, "unanswered": {},
+	// jev.state.oversized — Jev request state exceeded the size cap. Counts
+	// only; no prompt content.
+	"state_bytes": {}, "cap_bytes": {}, "question_count": {},
 	// incremental re-review fallback signal (incremental.fallback event) — commit
 	// SHAs are non-PII and pin which push turned an incremental into a full run.
 	"previous_head": {}, "new_head": {},

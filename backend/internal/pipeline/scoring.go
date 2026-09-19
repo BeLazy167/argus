@@ -25,6 +25,9 @@ type ScoringStage struct {
 	// cfgLister, when non-nil, overrides the store-backed model-config lister
 	// (test seam). Production resolution builds a per-run storeConfigLister.
 	cfgLister llm.ModelConfigLister
+	// jev, when non-nil, runs the false-positive pre-filter that removes
+	// confident FPs from the judge prompt (see jev_scoring.go).
+	jev jevEvaluator
 }
 
 func NewScoringStage(registry *llm.Registry, st *store.Store) *ScoringStage {
@@ -147,6 +150,23 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) (err erro
 		return nil
 	}
 
+	// Jev false-positive pre-filter: confident FPs leave the judge prompt and
+	// re-enter below as low-scored synthetic groups (audit trail preserved).
+	// Fail-open: a Jev error or uncertain answer drops nothing. Spend is billed
+	// to the Scoring bucket now so the LLM-error paths stay accurate — fold
+	// into the bucket's aux ledger so typesafe spend stays attributable even
+	// when the judge leg stamps the headline next.
+	jevDropped, jevSpend := ss.jevScoringPreFilter(ctx, run, allComments)
+	foldAuxTokens(&run.Tokens.Scoring, jevSpend)
+	run.Tokens.addToTotal(jevSpend)
+	if run.EventBus != nil && jevSpend.TotalTokens > 0 {
+		run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventTokenUpdate, map[string]any{
+			"total_tokens": run.Tokens.Total.TotalTokens,
+			"cost":         run.Tokens.Total.Cost,
+		})
+	}
+	survReviews, survivors := survivingFileReviews(run, allComments, jevDropped)
+
 	// Fetch repo memory context for scoring calibration
 	owner, repo, err := splitRepoFullName(run.PREvent.RepoFullName)
 	if err != nil {
@@ -155,62 +175,78 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) (err erro
 	memContext := fetchScoringContext(ctx, run.Indexer, run.Thresholds, owner, repo, run.FileReviews)
 	memContext += buildPatternTrustCalibration(ctx, ss.store, run.DBInstallationID)
 
-	prompt := buildScoringPrompt(run, memContext)
-	resp, err := provider.Complete(ctx, llm.CompletionRequest{
-		Model:       cfg.Model,
-		System:      customOrDefault(run.Prompts, "scoring_system", scoringSystemPrompt),
-		Messages:    []llm.Message{{Role: "user", Content: prompt}},
-		MaxTokens:   cfg.MaxTokens,
-		Temperature: cfg.Temperature,
-		Stage:       "scoring",
-	})
-	if err != nil {
-		slog.Error("scoring LLM call failed, keeping all comments", "error", err)
-		run.ScoringSkipped = true
-		return nil // non-fatal
-	}
-
-	// Track scoring tokens
-	run.Tokens.Scoring = StageTokens{
-		PromptTokens:     resp.TokensUsed.PromptTokens,
-		CompletionTokens: resp.TokensUsed.CompletionTokens,
-		TotalTokens:      resp.TokensUsed.TotalTokens,
-		Cost:             resp.Cost,
-		Model:            cfg.Model,
-		Provider:         cfg.Provider,
-	}
-	run.Tokens.addToTotal(run.Tokens.Scoring)
-	if run.EventBus != nil {
-		run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventTokenUpdate, map[string]any{
-			"total_tokens": run.Tokens.Total.TotalTokens,
-			"cost":         run.Tokens.Total.Cost,
+	var groups []judgeGroup
+	if len(survivors) > 0 {
+		// Judge sees the survivor view so prompt indices stay contiguous.
+		prompt := buildScoringPromptFor(run, survReviews, memContext)
+		resp, err := provider.Complete(ctx, llm.CompletionRequest{
+			Model:       cfg.Model,
+			System:      customOrDefault(run.Prompts, "scoring_system", scoringSystemPrompt),
+			Messages:    []llm.Message{{Role: "user", Content: prompt}},
+			MaxTokens:   cfg.MaxTokens,
+			Temperature: cfg.Temperature,
+			Stage:       "scoring",
 		})
-	}
+		if err != nil {
+			slog.Error("scoring LLM call failed, keeping all comments", "error", err)
+			run.ScoringSkipped = true
+			return nil // non-fatal
+		}
 
-	// Parse judge output (Layer 4: LLM sweeper)
-	groups, err := unmarshalLLMArray[judgeGroup](resp.Content)
-	if err != nil {
-		slog.Error("failed to parse judge response, keeping deterministic results",
-			"error", err,
-			"model", cfg.Model,
-			"provider", cfg.Provider,
-			"finish_reason", resp.FinishReason,
-			"response_len", len(resp.Content),
-			"response_prefix", util.Truncate(resp.Content, 300, true))
-		run.ScoringSkipped = true
-		return nil // non-fatal — deterministic dedup results stand
-	}
+		// Track scoring tokens — fold onto the bucket so the Jev pre-filter's
+		// aux entry survives; the judge is the deciding leg and owns the stamp.
+		tokens := StageTokens{
+			PromptTokens:     resp.TokensUsed.PromptTokens,
+			CompletionTokens: resp.TokensUsed.CompletionTokens,
+			TotalTokens:      resp.TokensUsed.TotalTokens,
+			Cost:             resp.Cost,
+			Model:            cfg.Model,
+			Provider:         cfg.Provider,
+		}
+		foldAuxTokens(&run.Tokens.Scoring, tokens)
+		run.Tokens.Scoring.Model = cfg.Model
+		run.Tokens.Scoring.Provider = cfg.Provider
+		run.Tokens.addToTotal(tokens)
+		if run.EventBus != nil {
+			run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventTokenUpdate, map[string]any{
+				"total_tokens": run.Tokens.Total.TotalTokens,
+				"cost":         run.Tokens.Total.Cost,
+			})
+		}
 
-	// Validate structural integrity
-	if vErr := validateJudgeOutput(groups, len(allComments)); vErr != nil {
-		slog.Warn("judge output invalid, keeping deterministic results",
-			"error", vErr,
-			"groups", len(groups),
-			"total_findings", len(allComments))
-		run.ScoringSkipped = true
-		return nil // non-fatal — deterministic dedup results stand
-	}
+		// Parse judge output (Layer 4: LLM sweeper)
+		groups, err = unmarshalLLMArray[judgeGroup](resp.Content)
+		if err != nil {
+			slog.Error("failed to parse judge response, keeping deterministic results",
+				"error", err,
+				"model", cfg.Model,
+				"provider", cfg.Provider,
+				"finish_reason", resp.FinishReason,
+				"response_len", len(resp.Content),
+				"response_prefix", util.Truncate(resp.Content, 300, true))
+			run.ScoringSkipped = true
+			return nil // non-fatal — deterministic dedup results stand
+		}
 
+		// Validate structural integrity against the survivor index space.
+		if vErr := validateJudgeOutput(groups, len(survivors)); vErr != nil {
+			slog.Warn("judge output invalid, keeping deterministic results",
+				"error", vErr,
+				"groups", len(groups),
+				"total_findings", len(survivors))
+			run.ScoringSkipped = true
+			return nil // non-fatal — deterministic dedup results stand
+		}
+
+		// Translate prompt indices back to the original flat index space so the
+		// apply loop, adjustScores, and allComments stay consistent.
+		for gi := range groups {
+			groups[gi].Representative = survivors[groups[gi].Representative]
+			for di, d := range groups[gi].Duplicates {
+				groups[gi].Duplicates[di] = survivors[d]
+			}
+		}
+	}
 	// Clamp scores to [0, 100] — LLMs don't reliably respect numeric ranges
 	for i := range groups {
 		if groups[i].Score < 0 {
@@ -221,8 +257,17 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) (err erro
 		}
 	}
 
-	// Deterministic FP caps / TP floors — post-LLM, pre-threshold
+	// Deterministic FP caps / TP floors — post-LLM, pre-threshold. Runs BEFORE
+	// the Jev groups are appended so corroboration/SAST floors can never
+	// resurrect a confident Jev drop.
 	adjustScores(run, groups, allComments)
+
+	// Jev-dropped findings re-enter as synthetic groups scored far below every
+	// survival threshold — the existing filter drops them, deterministically.
+	// repSet membership also keeps them out of the judge-omitted default score.
+	for idx, reason := range jevDropped {
+		groups = append(groups, judgeGroup{Representative: idx, Score: jevScoringDropScore, Reason: reason})
+	}
 
 	// Apply scores and mark duplicates
 	dupSet := make(map[int]bool)
@@ -384,6 +429,13 @@ func applyThresholdFilter(run *PipelineRun, skip func(fi, ci int) bool) (kept, m
 }
 
 func buildScoringPrompt(run *PipelineRun, memContext string) string {
+	return buildScoringPromptFor(run, run.FileReviews, memContext)
+}
+
+// buildScoringPromptFor renders the judge prompt over an explicit FileReviews
+// view — the Jev pre-filter passes a survivor-filtered view so prompt indices
+// stay contiguous without touching run.FileReviews.
+func buildScoringPromptFor(run *PipelineRun, reviews []FileReview, memContext string) string {
 	var sb strings.Builder
 	if memContext != "" {
 		sb.WriteString(wrapRetrievedMemory(memContext))
@@ -394,38 +446,50 @@ func buildScoringPrompt(run *PipelineRun, memContext string) string {
 	safeAuthor := sanitizeUserInput(util.Truncate(run.PREvent.PRAuthor, 100, false))
 	sb.WriteString(fmt.Sprintf("PR #%d: \"%s\" by %s\n", run.PREvent.PRNumber, safeTitle, safeAuthor))
 	if run.PREvent.PRBody != "" {
-		sb.WriteString("\n" + wrapInDelimiters("pr_description", sanitizeUserInput(util.Truncate(run.PREvent.PRBody, 1500, false))) + "\n")
+		sb.WriteString("\n" + wrapSafeDelimiters("pr_description", sanitizeUserInput(util.Truncate(run.PREvent.PRBody, 1500, false))) + "\n")
 	}
 	if run.Contract != nil {
-		sb.WriteString("\n" + wrapInDelimiters("review_contract", run.Contract.SummaryLine()) + "\n")
+		sb.WriteString("\n" + wrapSafeDelimiters("review_contract", run.Contract.SummaryLine()) + "\n")
 		sb.WriteString("Survival thresholds are class-aware: throwaway/docs/generated changes need near-certain findings; migration/security changes are judged MORE sensitively for critical findings. Weigh plausibility against this contract.\n")
 	}
 	sb.WriteString("\nScore each comment 0-100:\n\n")
 	idx := 0
-	for _, fr := range run.FileReviews {
+	for _, fr := range reviews {
 		for _, c := range fr.Comments {
-			specialist := ""
-			if c.Specialist != "" {
-				specialist = fmt.Sprintf(" [%s]", c.Specialist)
-			}
-			desc := c.What
-			if desc == "" {
-				desc = c.Body
-			}
-			sb.WriteString(fmt.Sprintf("[%d] %s:%d%s — [%s|%s] %s\n", idx, fr.Path, c.Line, specialist, c.Severity, c.Category, desc))
-			if c.Suggestion != "" {
-				sb.WriteString(fmt.Sprintf("    suggestion: %s\n", c.Suggestion))
-			}
-			if c.BlastRadius > 0 {
-				sb.WriteString(fmt.Sprintf("    blast_radius: This finding affects %d downstream dependents\n", c.BlastRadius))
-			}
-			if c.Corroboration >= 2 {
-				sb.WriteString(fmt.Sprintf("    corroboration: %d specialists independently flagged this (positive signal, context only)\n", c.Corroboration))
-			}
+			sb.WriteString(scoringFindingText(idx, fr.Path, c))
 			idx++
 		}
 	}
 	sb.WriteString("\nGroup duplicates and score each group. JSON array only:\n[{\"representative\": 0, \"score\": 85, \"severity\": \"critical\", \"duplicates\": [3], \"reason\": \"...\"}]")
+	return sb.String()
+}
+
+// scoringFindingText renders one finding line (plus suggestion, blast_radius,
+// and corroboration annotations) — shared by the judge prompt and the Jev
+// pre-filter state so the two see identical finding text.
+func scoringFindingText(idx int, path string, c FileComment) string {
+	var sb strings.Builder
+	specialist := ""
+	if c.Specialist != "" {
+		specialist = fmt.Sprintf(" [%s]", sanitizeUserInput(string(c.Specialist)))
+	}
+	desc := c.What
+	if desc == "" {
+		desc = c.Body
+	}
+	// Finding text is second-order untrusted — the reviewer may quote injected
+	// instructions straight out of the diff. Sanitize + delimiter-wrap so the
+	// quoted text can't pose as prompt directives.
+	sb.WriteString(fmt.Sprintf("[%d] %s:%d%s — [%s|%s] %s\n", idx, sanitizeUserInput(path), c.Line, specialist, c.Severity, c.Category, wrapSafeDelimiters("finding_text", sanitizeUserInput(desc))))
+	if c.Suggestion != "" {
+		sb.WriteString(fmt.Sprintf("    suggestion: %s\n", wrapSafeDelimiters("suggestion_text", sanitizeUserInput(c.Suggestion))))
+	}
+	if c.BlastRadius > 0 {
+		sb.WriteString(fmt.Sprintf("    blast_radius: This finding affects %d downstream dependents\n", c.BlastRadius))
+	}
+	if c.Corroboration >= 2 {
+		sb.WriteString(fmt.Sprintf("    corroboration: %d specialists independently flagged this (positive signal, context only)\n", c.Corroboration))
+	}
 	return sb.String()
 }
 
