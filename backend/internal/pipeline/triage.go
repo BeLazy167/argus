@@ -74,7 +74,7 @@ func (ts *TriageStage) Execute(ctx context.Context, run *PipelineRun) (err error
 
 	// Shadow Jev eval — fires in parallel with the LLM leg, joined below.
 	// Observe-only: its answers are logged, never used for routing.
-	shadowCh := ts.startJevTriageShadow(ctx, run)
+	shadow := ts.startJevTriageShadow(ctx, run)
 
 	// Phase 2: LLM refinement — only for manageable file counts
 	if deepCount > 0 && deepCount <= 20 {
@@ -119,7 +119,7 @@ func (ts *TriageStage) Execute(ctx context.Context, run *PipelineRun) (err error
 
 	// Join the Jev shadow: bills its spend and logs agreement vs the final
 	// (post-override) routing decisions before the token update publishes.
-	ts.finishJevTriageShadow(ctx, run, shadowCh, results)
+	ts.finishJevTriageShadow(ctx, run, shadow, results)
 
 	// Token usage is accumulated inside llmTriage if it ran
 	if run.EventBus != nil {
