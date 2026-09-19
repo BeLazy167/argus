@@ -159,8 +159,11 @@ func TestEvaluate_OversizedResponseErrors(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient("k", WithBaseURL(srv.URL), WithHTTPClient(srv.Client()))
-	if _, err := c.Evaluate(context.Background(), "s", map[string]Question{}, "s"); err == nil {
-		t.Fatal("response past maxResponseBytes must error")
+	// Pin the bounded-read path: a truncated body would also fail
+	// json.Unmarshal, so only the explicit size error proves the cap ran.
+	_, err := c.Evaluate(context.Background(), "s", map[string]Question{}, "s")
+	if err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("err = %v, want the maxResponseBytes size error", err)
 	}
 }
 

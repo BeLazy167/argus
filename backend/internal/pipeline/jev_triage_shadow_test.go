@@ -208,10 +208,11 @@ func TestJevTriageShadow_LateResultStillBilled(t *testing.T) {
 	run := triageShadowRun(1)
 	s := &jevTriageShadow{ch: make(chan jevTriageShadowResult, 1), cancel: func() {}}
 
-	// Deliver just past the join budget: finish's first select times out,
-	// the cancel fires, and the drain window catches the landed answer.
+	// Deliver exactly at the join budget: whichever select branch wins
+	// (channel ready, or timer + instant drain receive) bills the spend —
+	// a "+Nms" offset would force the fragile timer-first path.
 	go func() {
-		time.Sleep(join + 10*time.Millisecond)
+		time.Sleep(join)
 		s.ch <- jevTriageShadowResult{res: triageChoiceResult(1, "deep")}
 	}()
 	ts.finishJevTriageShadow(context.Background(), run, s,

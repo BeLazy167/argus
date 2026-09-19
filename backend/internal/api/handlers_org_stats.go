@@ -219,7 +219,7 @@ func (s *Server) statsModels(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
-		if st.Model == "" || st.TotalTokens == 0 {
+		if st.Model == "" || (st.TotalTokens == 0 && st.Cost == 0) {
 			return
 		}
 		a, ok := agg[st.Model]

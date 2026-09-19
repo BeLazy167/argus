@@ -403,6 +403,7 @@ type fakeLLMProvider struct {
 	tokens  llm.TokenUsage
 	cost    float64
 	calls   int32
+	lastReq llm.CompletionRequest
 }
 
 func newFakeLLMProvider() *fakeLLMProvider {
@@ -421,6 +422,7 @@ func (p *fakeLLMProvider) Complete(ctx context.Context, req llm.CompletionReques
 	atomic.AddInt32(&p.calls, 1)
 	p.m.Lock()
 	defer p.m.Unlock()
+	p.lastReq = req
 	if p.err != nil {
 		return llm.CompletionResponse{}, p.err
 	}

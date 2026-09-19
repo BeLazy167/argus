@@ -156,17 +156,26 @@ func Run() error {
 
 	// Pricing: manual model_pricing rows win; models absent there fall back
 	// to OpenRouter's public catalog so OpenRouter-listed models price
-	// without manual rows. Both sides are cached.
+	// without manual rows. Both sides are cached; the catalog fetch runs in
+	// the background and is opt-out via OPENROUTER_PRICING_ENABLED=false for
+	// restricted-egress installs.
 	logger.InfoContext(ctx, "pricing cache initialization started")
 	pricingCache := store.NewPricingCache(db)
-	openRouterPricing := llm.NewOpenRouterPricing()
+	var openRouterPricing *llm.OpenRouterPricing
+	if cfg.OpenRouterPricingEnabled {
+		openRouterPricing = llm.NewOpenRouterPricing()
+		openRouterPricing.Warm(ctx) // async — the lookup path never blocks on it
+	}
 	llm.SetPricingLookup(func(model string) (float64, float64, bool) {
 		if in, out, ok := pricingCache.Lookup(ctx, model); ok {
 			return in, out, true
 		}
-		return openRouterPricing.Lookup(model)
+		if openRouterPricing == nil {
+			return 0, 0, false
+		}
+		return openRouterPricing.LookupCtx(ctx, model)
 	})
-	logger.InfoContext(ctx, "pricing cache initialization completed", "cache_ttl", 10*time.Minute)
+	logger.InfoContext(ctx, "pricing cache initialization completed", "cache_ttl", 10*time.Minute, "openrouter_fallback", cfg.OpenRouterPricingEnabled)
 
 	// Memory / RAG (per-org via registry). Memory lives in Postgres; wiring it
 	// here — rather than leaving the constructors referenced only by tests —

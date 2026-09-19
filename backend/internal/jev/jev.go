@@ -20,6 +20,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"time"
@@ -278,10 +279,30 @@ func (c *Client) Evaluate(ctx context.Context, state any, questions map[string]Q
 
 // ValidBaseURL accepts only absolute http(s) URLs with a host — the stored
 // value names an egress endpoint for tenant code, so anything else (bare
-// hosts, paths without scheme, non-http schemes) is rejected.
+// hosts, paths without scheme, non-http schemes) is rejected. Query,
+// fragment, and userinfo components are rejected: evaluate appends
+// /v1/systemone to the raw URL, so a stored query or fragment would retarget
+// the request (and userinfo would smuggle credentials into the Host header).
+// Plain http is restricted to loopback/private/link-local hosts — the URL
+// receives a Bearer credential plus tenant PR content, so plaintext may only
+// reach endpoints that cannot route off the LAN.
 func ValidBaseURL(raw string) bool {
 	u, err := url.Parse(raw)
-	return err == nil && (u.Scheme == "https" || u.Scheme == "http") && u.Host != ""
+	if err != nil || u.Host == "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
+		return false
+	}
+	if u.Scheme == "https" {
+		return true
+	}
+	if u.Scheme != "http" {
+		return false
+	}
+	host := u.Hostname()
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && (ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast())
 }
 
 // evaluate is the untyped inner call (telemetry lives in Evaluate; the body
@@ -306,11 +327,13 @@ func (c *Client) evaluate(ctx context.Context, operationID string, jsonBody []by
 	if err != nil {
 		return Result{}, resp.StatusCode, fmt.Errorf("reading response: %w", err)
 	}
-	if len(respBody) > maxResponseBytes {
-		return Result{}, resp.StatusCode, fmt.Errorf("jev response too large: > %d bytes", maxResponseBytes)
-	}
+	// Status first: a large error body must surface the API's real message
+	// (already bounded by LimitReader), not a generic size error.
 	if resp.StatusCode != http.StatusOK {
 		return Result{}, resp.StatusCode, fmt.Errorf("jev API error (status %d): %s", resp.StatusCode, util.Truncate(string(respBody), 500, true))
+	}
+	if len(respBody) > maxResponseBytes {
+		return Result{}, resp.StatusCode, fmt.Errorf("jev response too large: > %d bytes", maxResponseBytes)
 	}
 
 	var parsed evalResponse

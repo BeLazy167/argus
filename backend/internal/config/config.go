@@ -53,6 +53,12 @@ type Config struct {
 	// conventions to api.typesafe.ai.
 	TypeSafeAPIKey string
 
+	// OpenRouterPricingEnabled gates the model_pricing miss fallback to
+	// OpenRouter's public model catalog. The fetch is a bare GET for a public
+	// list — no keys, no tenant content — but installs with restricted egress
+	// can disable it; lookups then resolve manual rows only.
+	OpenRouterPricingEnabled bool
+
 	// Worker
 	MaxConcurrentReviews int
 
@@ -140,6 +146,10 @@ func Load() (*Config, error) {
 		EmbeddingsBaseURL:    getEnv("EMBEDDINGS_BASE_URL", "https://api.voyageai.com/v1"),
 		EmbeddingsModel:      getEnv("EMBEDDINGS_MODEL", "voyage-4"),
 		EmbeddingsDimensions: embedDims,
+
+		// Default ON: the catalog GET carries no tenant data or keys — it is
+		// a public model list. Restricted-egress installs set it to "false".
+		OpenRouterPricingEnabled: getEnv("OPENROUTER_PRICING_ENABLED", "true") == "true",
 
 		MaxConcurrentReviews: maxWorkers,
 

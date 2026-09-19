@@ -55,14 +55,16 @@ func resolveJevEvaluator(ctx context.Context, keys jevKeyResolver, env jevEvalua
 				"error", err, "installation_id", installationID, "repo_id", rid, "provider", jev.ProviderName)
 		case found && key != "":
 			if baseURL != "" {
-				if jev.ValidBaseURL(baseURL) {
-					return jev.NewClient(key, jev.WithBaseURL(baseURL))
+				if !jev.ValidBaseURL(baseURL) {
+					// Fail closed: the tenant configured an endpoint we will
+					// not egress to — silently rerouting their key and PR
+					// content to the default host would send data somewhere
+					// they never chose and hide the misconfiguration.
+					slog.WarnContext(ctx, "jev stored base_url invalid, evaluator disabled",
+						"base_url", baseURL, "installation_id", installationID, "provider", jev.ProviderName)
+					return nil
 				}
-				// A malformed stored endpoint (typo, scheme-less host) would
-				// fail every eval — keep the key, fall back to the default
-				// API root, and make the bad row visible.
-				slog.WarnContext(ctx, "jev stored base_url invalid, using default endpoint",
-					"base_url", baseURL, "installation_id", installationID, "provider", jev.ProviderName)
+				return jev.NewClient(key, jev.WithBaseURL(baseURL))
 			}
 			return jev.NewClient(key)
 		}

@@ -109,6 +109,46 @@ func TestJevConventions_MissingAnswerEscalatesWholeBatch(t *testing.T) {
 	}
 }
 
+// A convention over jevConventionFieldCap would be truncated in state — a
+// confident verdict on partial text could supersede/conflict on an incomplete
+// rule. The oversize path must skip Jev entirely and send FULL text to the LLM.
+func TestJevConventions_OversizedFieldEscalatesWithFullText(t *testing.T) {
+	oversized := "Convention [style]: " + strings.Repeat("x", jevConventionFieldCap)
+	fj := &fakeJev{result: choiceResult(
+		choiceAnswer("duplicate", map[string]float64{"duplicate": 0.99}),
+	)}
+	fp := newFakeLLMProvider()
+	fp.SetContent(`[{"existing_id":"old-1","relation":"unrelated","confidence":0.9}]`)
+	o := &Orchestrator{jev: fj, logger: slog.New(slog.DiscardHandler)}
+
+	// Oversized CANDIDATE.
+	rel, spend := o.classifyConventionRelations(context.Background(), fp, llm.ModelConfig{Model: "fake"}, oversized, conventionNeighbors()[:1], fj)
+	if fj.calls != 0 {
+		t.Fatalf("jev ran on an oversized candidate: %d calls", fj.calls)
+	}
+	if fp.calls != 1 || len(rel) != 1 || rel[0].Relation != conventionUnrelated {
+		t.Fatalf("escalation failed: calls=%d rel=%+v", fp.calls, rel)
+	}
+	if spend.PromptTokens != 123 || len(spend.Aux) != 1 || spend.Aux[0].Model != "fake" {
+		t.Fatalf("oversize must bill only the LLM leg, no jev spend: %+v", spend)
+	}
+	if !strings.Contains(fp.lastReq.Messages[0].Content, oversized) {
+		t.Fatal("LLM prompt must carry the FULL convention text, not the truncated state copy")
+	}
+
+	// Oversized NEIGHBOR.
+	fj.calls = 0
+	fp.calls = 0
+	neighbors := append(conventionNeighbors(), memory.PatternMatch{ID: "big", Content: oversized})
+	_, spend = o.classifyConventionRelations(context.Background(), fp, llm.ModelConfig{Model: "fake"}, "cand", neighbors, fj)
+	if fj.calls != 0 {
+		t.Fatalf("jev ran on an oversized neighbor: %d calls", fj.calls)
+	}
+	if len(spend.Aux) != 1 || spend.Aux[0].Model != "fake" {
+		t.Fatalf("oversize must bill only the LLM leg: %+v", spend)
+	}
+}
+
 func TestJevConventions_ErrorEscalates(t *testing.T) {
 	fj := &fakeJev{err: errors.New("jev down")}
 	fp := newFakeLLMProvider()

@@ -159,8 +159,12 @@ func TestFoldAuxTokens_MixedBucketSemantics(t *testing.T) {
 	if bucket.Model != "jev-1.13.0" || bucket.Provider != "typesafe" {
 		t.Fatalf("empty bucket must take the first leg's stamp: %+v", bucket)
 	}
-	// Deciding LLM leg folds in and takes the headline explicitly.
+	// Deciding LLM leg folds in: the fold must leave the first-writer stamp
+	// alone — callers overwrite the headline explicitly.
 	foldAuxTokens(&bucket, llmLeg)
+	if bucket.Model != "jev-1.13.0" || bucket.Provider != "typesafe" {
+		t.Fatalf("fold must not overwrite a set headline: %+v", bucket)
+	}
 	bucket.Model, bucket.Provider = llmLeg.Model, llmLeg.Provider
 
 	if bucket.TotalTokens != 1500 || bucket.Cost < 0.0021-1e-9 || bucket.Cost > 0.0021+1e-9 {

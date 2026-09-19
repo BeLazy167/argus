@@ -530,8 +530,14 @@ func foldAuxTokens(bucket *StageTokens, spend StageTokens) {
 	if spend.Model == "" || (spend.TotalTokens == 0 && spend.Cost == 0) {
 		return
 	}
-	spend.Aux = nil // legs enter the ledger flat; a nested ledger is dead weight
-	bucket.Aux = append(bucket.Aux, spend)
+	// A bucket folded into a bucket flattens its legs — a caller that already
+	// mixed providers (Jev leg + LLM escalation) returns per-leg provenance
+	// that must survive, not collapse into one headline-stamped entry.
+	if len(spend.Aux) > 0 {
+		bucket.Aux = append(bucket.Aux, spend.Aux...)
+	} else {
+		bucket.Aux = append(bucket.Aux, spend)
+	}
 	if bucket.Model == "" {
 		bucket.Model = spend.Model
 		bucket.Provider = spend.Provider
