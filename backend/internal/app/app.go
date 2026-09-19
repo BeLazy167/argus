@@ -154,11 +154,17 @@ func Run() error {
 	registry.SetReferer(cfg.DashboardBaseURL)
 	logger.InfoContext(ctx, "llm registry initialization completed")
 
-	// Pricing (DB-backed, cached 10min)
+	// Pricing: manual model_pricing rows win; models absent there fall back
+	// to OpenRouter's public catalog so OpenRouter-listed models price
+	// without manual rows. Both sides are cached.
 	logger.InfoContext(ctx, "pricing cache initialization started")
 	pricingCache := store.NewPricingCache(db)
+	openRouterPricing := llm.NewOpenRouterPricing()
 	llm.SetPricingLookup(func(model string) (float64, float64, bool) {
-		return pricingCache.Lookup(ctx, model)
+		if in, out, ok := pricingCache.Lookup(ctx, model); ok {
+			return in, out, true
+		}
+		return openRouterPricing.Lookup(model)
 	})
 	logger.InfoContext(ctx, "pricing cache initialization completed", "cache_ttl", 10*time.Minute)
 
