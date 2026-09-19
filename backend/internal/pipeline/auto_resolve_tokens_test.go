@@ -176,7 +176,7 @@ func TestFoldAuxTokens_MixedBucketSemantics(t *testing.T) {
 
 	// A second Jev leg must NOT take the headline back from the LLM holder.
 	foldAuxTokens(&bucket, jevLeg)
-	if bucket.Model != "gpt-x" {
+	if bucket.Model != "gpt-x" || bucket.Provider != "openrouter" {
 		t.Fatalf("Jev leg must not overwrite a non-Jev headline: %+v", bucket)
 	}
 

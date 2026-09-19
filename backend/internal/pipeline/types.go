@@ -553,9 +553,10 @@ func foldAuxTokens(bucket *StageTokens, spend StageTokens) {
 // would cost up to maxJudgeCallsPerPush UPDATEs per push for the same total.
 func (r *RunTokenUsage) addAutoResolve(s StageTokens) {
 	r.mu.Lock()
-	// First-writer headline (matches the MergeStageTokenEntry COALESCE): the
-	// bucket label names a deciding leg, and Aux records every call's
-	// provenance so a Jev+LLM mix never misattributes either side's spend.
+	// Headline semantics match foldAuxTokens (and the MergeStageTokenEntry
+	// merge): the label names the substantive leg — a non-Jev leg takes it
+	// from a Jev holder — and Aux records every call's provenance so a
+	// Jev+LLM mix never misattributes either side's spend.
 	foldAuxTokens(&r.AutoResolve, s)
 	r.Total.PromptTokens += s.PromptTokens
 	r.Total.CompletionTokens += s.CompletionTokens
