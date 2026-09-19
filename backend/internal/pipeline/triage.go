@@ -38,6 +38,9 @@ type TriageResult struct {
 type TriageStage struct {
 	registry *llm.Registry
 	store    *store.Store
+	// jev, when non-nil, runs a shadow eval that logs agreement with the
+	// pipeline's final triage decisions — observe-only, never routes files.
+	jev jevEvaluator
 }
 
 func NewTriageStage(registry *llm.Registry, st *store.Store) *TriageStage {
@@ -68,6 +71,10 @@ func (ts *TriageStage) Execute(ctx context.Context, run *PipelineRun) (err error
 	slog.Info("heuristic triage",
 		"total", len(run.Diff.Files), "deep", deepCount,
 		"pr", run.PREvent.PRNumber)
+
+	// Shadow Jev eval — fires in parallel with the LLM leg, joined below.
+	// Observe-only: its answers are logged, never used for routing.
+	shadowCh := ts.startJevTriageShadow(ctx, run)
 
 	// Phase 2: LLM refinement — only for manageable file counts
 	if deepCount > 0 && deepCount <= 20 {
@@ -109,6 +116,10 @@ func (ts *TriageStage) Execute(ctx context.Context, run *PipelineRun) (err error
 			"files": triageSlice,
 		})
 	}
+
+	// Join the Jev shadow: bills its spend and logs agreement vs the final
+	// (post-override) routing decisions before the token update publishes.
+	ts.finishJevTriageShadow(ctx, run, shadowCh, results)
 
 	// Token usage is accumulated inside llmTriage if it ran
 	if run.EventBus != nil {

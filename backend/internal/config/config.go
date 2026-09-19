@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 )
 
 // Config holds all application configuration loaded from environment variables.
@@ -41,6 +42,16 @@ type Config struct {
 	EmbeddingsBaseURL    string
 	EmbeddingsModel      string
 	EmbeddingsDimensions int
+
+	// TypeSafe (Jev) classifier key. When set, five surfaces consult Jev:
+	// addressed judge, convention relations, intent verification, scoring FP
+	// pre-filter, and an observe-only triage shadow. Confident answers skip the
+	// LLM; the uncertain band escalates to the configured models as before.
+	// Empty disables every Jev call. Egress also requires each installation's
+	// jev_classifier feature flag (default OFF): the key alone never sends
+	// finding text, PR metadata/body, intent, diff hunks, or stored
+	// conventions to api.typesafe.ai.
+	TypeSafeAPIKey string
 
 	// Worker
 	MaxConcurrentReviews int
@@ -118,6 +129,10 @@ func Load() (*Config, error) {
 		CORSAllowOrigin: getEnv("CORS_ALLOW_ORIGIN", "http://localhost:3000"),
 
 		EncryptionKey: os.Getenv("ENCRYPTION_KEY"),
+
+		// The TypeSafe SDK spells the var TYPESAFE_AI_API_KEY; accept both so
+		// an operator copying either doc gets a working config.
+		TypeSafeAPIKey: strings.TrimSpace(getEnv("TYPESAFE_API_KEY", os.Getenv("TYPESAFE_AI_API_KEY"))),
 
 		EmbeddingsAPIKey:     os.Getenv("EMBEDDINGS_API_KEY"),
 		EmbeddingsBaseURL:    getEnv("EMBEDDINGS_BASE_URL", "https://api.voyageai.com/v1"),

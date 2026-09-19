@@ -151,6 +151,42 @@ finding (proximity alone never resolves). It runs independently of auto-run, so 
 manual-review repo still gets stale comments cleared when a fix lands. Set
 `auto_resolve_enabled: false` for manual-only thread control.
 
+**Optional: Jev classifier front-runner.** Setting `TYPESAFE_API_KEY` on the
+backend puts TypeSafe's System One model in front of five typed-decision
+surfaces:
+
+- **Addressed judge** (auto-resolve on push) — finding text + the inter-diff hunk
+- **Convention-relation classifier** (memory write gate) — candidate + stored conventions
+- **Intent verification** — the extracted PR-intent block (goal, non-goals, acceptance criteria) + file list + finding summaries
+- **Scoring false-positive pre-filter** — PR title, author, up to 1500 chars of PR body, the review-contract summary, and every finding
+- **Triage shadow** (observe-only calibration) — path, status, and up to ~2400 chars of raw diff for up to 40 files, on every review
+
+Confident Jev answers skip or shrink the LLM call; anything uncertain
+escalates to the configured model unchanged (the triage shadow never changes
+behavior).
+
+Jev egress requires BOTH gates open:
+
+1. `TYPESAFE_API_KEY` set on the backend, and
+2. per-installation opt-in — `installations.feature_flags` containing
+   `"jev_classifier": true`. The flag defaults OFF, so the env key alone never
+   sends tenant code to TypeSafe. Opt in per installation (or fleet-wide) via
+   SQL:
+
+   ```sql
+   UPDATE installations
+   SET feature_flags = feature_flags || '{"jev_classifier": true}'::jsonb;
+   ```
+
+Opting in sends the data listed above to `api.typesafe.ai` for that
+installation only; every other installation's reviews stay fully in-model.
+
+**Per-installation BYOK.** An installation can instead set its own TypeSafe
+key in Settings → Providers ("TypeSafe Jev"). A stored key takes precedence
+over `TYPESAFE_API_KEY` for that installation and does not require the
+`jev_classifier` flag — adding the key is the installation's consent to
+egress. A custom base URL can be stored alongside the key.
+
 ## Reference
 
 - `backend/.env.example` — every env var, annotated

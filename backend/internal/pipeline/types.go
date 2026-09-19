@@ -533,7 +533,9 @@ func (r *RunTokenUsage) addAutoResolve(s StageTokens) {
 	r.AutoResolve.CompletionTokens += s.CompletionTokens
 	r.AutoResolve.TotalTokens += s.TotalTokens
 	r.AutoResolve.Cost += s.Cost
-	if r.AutoResolve.Model == "" {
+	// Re-stamp per call: each thread is decided by one leg (Jev or LLM), and a
+	// mixed bucket should name a deciding model, not whichever ran first.
+	if s.Model != "" {
 		r.AutoResolve.Model = s.Model
 		r.AutoResolve.Provider = s.Provider
 	}
@@ -1250,7 +1252,11 @@ type FeatureFlags struct {
 	CrossPRChecks            bool `json:"cross_pr_checks"`
 	IssueAcceptance          bool `json:"issue_acceptance"`
 	ConventionConflictChecks bool `json:"convention_conflict_checks"`
-	MaxLinkedPRs             int  `json:"max_linked_prs"`
+	// JevClassifier opts the installation into TypeSafe Jev egress (PR body,
+	// intent, finding text, diff hunks, stored conventions). Default OFF —
+	// TYPESAFE_API_KEY alone never sends tenant code to a third party.
+	JevClassifier bool `json:"jev_classifier"`
+	MaxLinkedPRs  int  `json:"max_linked_prs"`
 }
 
 // DefaultFeatureFlags returns the backfill defaults for new installations:

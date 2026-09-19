@@ -113,14 +113,13 @@ func TestVerifyThreadAddressed(t *testing.T) {
 		},
 	}
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			o, ledger, gh := newVerifyHarness(t, tc.judge, restID, store.FindingStatePosted)
 			thread, node := verifyTestThread(restID)
 			tc.judge.tokens = StageTokens{PromptTokens: 700, CompletionTokens: 40, TotalTokens: 740, Cost: 0.0003, Model: "m", Provider: "p"}
 			var tokens RunTokenUsage
 
-			got, _ := o.verifyThreadAddressed(ctx, event, "o", "r", thread, node, "@@ -1 +1 @@\n-x\n+y\n", 1, 2, &tokens)
+			got, _ := o.verifyThreadAddressed(ctx, event, "o", "r", thread, node, "@@ -1 +1 @@\n-x\n+y\n", 1, 2, &tokens, tc.judge)
 
 			// The caller must accumulate whatever spend the judge reports on
 			// EVERY path — a confirmed fix, a kept-open verdict, and an error
@@ -159,7 +158,7 @@ func TestVerifyThreadAddressed_NilJudge(t *testing.T) {
 
 	var tokens RunTokenUsage
 	got, reason := o.verifyThreadAddressed(context.Background(),
-		ghpkg.PREvent{InstallationID: 99, PRNumber: 7}, "o", "r", thread, node, "diff", 1, 2, &tokens)
+		ghpkg.PREvent{InstallationID: 99, PRNumber: 7}, "o", "r", thread, node, "diff", 1, 2, &tokens, nil)
 
 	if tokens.AutoResolve.TotalTokens != 0 || tokens.AutoResolve.Cost != 0 {
 		t.Errorf("nil judge booked spend it never made: %+v", tokens.AutoResolve)
@@ -178,17 +177,33 @@ func TestVerifyThreadAddressed_NilJudge(t *testing.T) {
 	}
 }
 
+// verifyThreadAddressed runs whatever judge the caller resolved — the
+// per-push Jev/env decision lives in resolveCandidates, not here.
+func TestVerifyThreadAddressed_UsesGivenJudge(t *testing.T) {
+	judge := &fakeAddressedJudge{addressed: false, reason: "still broken"}
+	o, _, _ := newVerifyHarness(t, nil, 555, store.FindingStatePosted)
+	thread, node := verifyTestThread(555)
+	var tokens RunTokenUsage
+
+	got, _ := o.verifyThreadAddressed(context.Background(),
+		ghpkg.PREvent{InstallationID: 99, PRNumber: 7}, "o", "r", thread, node, "diff", 1, 2, &tokens, judge)
+	if judge.calls != 1 || got != verdictKeepOpen {
+		t.Fatalf("judge calls=%d verdict=%v", judge.calls, got)
+	}
+}
+
 // TestVerifyThreadAddressed_ResolveFailurePropagates: judge confirms but GitHub
 // resolve fails → verdictResolveFailed and the ledger does NOT assert addressed
 // (EventAddressed is an assertion — under-claims on a failed resolve).
 func TestVerifyThreadAddressed_ResolveFailurePropagates(t *testing.T) {
-	o, ledger, gh := newVerifyHarness(t, &fakeAddressedJudge{addressed: true}, 555, store.FindingStatePosted)
+	judge := &fakeAddressedJudge{addressed: true}
+	o, ledger, gh := newVerifyHarness(t, judge, 555, store.FindingStatePosted)
 	gh.resolveErr = errors.New("502 from github")
 	thread, node := verifyTestThread(555)
 
 	var tokens RunTokenUsage
 	got, _ := o.verifyThreadAddressed(context.Background(),
-		ghpkg.PREvent{InstallationID: 99, PRNumber: 7}, "o", "r", thread, node, "diff", 1, 2, &tokens)
+		ghpkg.PREvent{InstallationID: 99, PRNumber: 7}, "o", "r", thread, node, "diff", 1, 2, &tokens, judge)
 
 	if got != verdictResolveFailed {
 		t.Fatalf("verdict = %v, want verdictResolveFailed", got)

@@ -2,11 +2,12 @@ export type BadgeVariant = "active" | "inactive";
 
 const BADGE_STYLES: Record<BadgeVariant, string> = {
 	active: "border-green-400/20 bg-green-400/10 text-green-400",
-	inactive: "border-iron bg-iron/30 text-slate-text/60",
+	inactive: "border-iron bg-iron/30 text-slate-text",
 };
 
 /** Providers-page config badge, shared by the LLM key cards and the
- * embeddings card. (Distinct from the dashboard review StatusBadge.) */
+ * integration cards (embeddings, TypeSafe Jev). (Distinct from the dashboard
+ * review StatusBadge.) */
 export function StatusBadge({ variant, label }: { variant: BadgeVariant; label: string }) {
 	return (
 		<span

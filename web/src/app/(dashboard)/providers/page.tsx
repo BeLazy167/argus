@@ -10,6 +10,7 @@ import {
 import type { ProviderKey } from "@/lib/types";
 import { useInstallation } from "@/providers/installation-provider";
 import { EmbeddingsCard } from "./embeddings-card";
+import { JevCard } from "./jev-card";
 import { StatusBadge } from "./status-badge";
 
 const PROVIDERS = [
@@ -69,17 +70,29 @@ const ProviderKeyCard = memo(function ProviderKeyCard({
 }) {
 	const [apiKey, setApiKey] = useState("");
 	const [baseUrl, setBaseUrl] = useState(existing?.base_url ?? "");
+	const [error, setError] = useState("");
 	const upsert = useUpsertProviderKey();
 	const del = useDeleteProviderKey();
+	const busy = upsert.isPending || del.isPending;
 
 	const handleSave = () => {
-		if (!apiKey && !existing) return;
-		upsert.mutate({
-			provider,
-			api_key: apiKey,
-			base_url: baseUrl || undefined,
-		});
-		setApiKey("");
+		// The API requires a key on every save (blank-key updates are an
+		// embeddings-only path), so a stored row still needs the key re-entered.
+		if (!apiKey.trim()) return;
+		upsert.mutate(
+			{
+				provider,
+				api_key: apiKey,
+				base_url: baseUrl || undefined,
+			},
+			{
+				onSuccess: () => {
+					setApiKey("");
+					setError("");
+				},
+				onError: (err) => setError(err instanceof Error ? err.message : "Save failed"),
+			},
+		);
 	};
 
 	return (
@@ -116,7 +129,7 @@ const ProviderKeyCard = memo(function ProviderKeyCard({
 						value={apiKey}
 						onChange={(e) => setApiKey(e.target.value)}
 						placeholder={existing ? "Enter new key to replace" : "sk-..."}
-						className="w-full border border-iron bg-background px-2 py-1.5 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none"
+						className="w-full border border-iron bg-background px-2 py-1.5 text-xs font-mono text-foreground placeholder:text-slate-text/50 focus:border-amber focus:outline-none"
 					/>
 				</div>
 				<div>
@@ -132,7 +145,7 @@ const ProviderKeyCard = memo(function ProviderKeyCard({
 						value={baseUrl}
 						onChange={(e) => setBaseUrl(e.target.value)}
 						placeholder={PROVIDER_BASE_URLS[provider]}
-						className="w-full border border-iron bg-background px-2 py-1.5 text-xs font-mono text-foreground placeholder:text-iron focus:border-amber focus:outline-none"
+						className="w-full border border-iron bg-background px-2 py-1.5 text-xs font-mono text-foreground placeholder:text-slate-text/50 focus:border-amber focus:outline-none"
 					/>
 				</div>
 				{provider === "azure" && (
@@ -164,28 +177,49 @@ const ProviderKeyCard = memo(function ProviderKeyCard({
 				)}
 			</div>
 
+			{error && (
+				<p role="alert" className="text-[10px] font-mono text-red-400 mb-2">
+					{error}
+				</p>
+			)}
+
 			<div className="flex items-center gap-2">
 				<button
 					type="button"
 					onClick={handleSave}
-					disabled={upsert.isPending || (!apiKey && !existing)}
-					className="flex items-center gap-2 rounded border border-amber/30 bg-amber/10 px-3 py-1 text-[11px] font-mono text-amber hover:bg-amber/20 transition-colors disabled:opacity-50"
+					disabled={busy || !apiKey.trim()}
+					className="flex items-center gap-2 border border-amber/30 bg-amber/10 px-3 py-1 text-[11px] font-mono text-amber hover:bg-amber/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
 				>
-					<Save className="h-3 w-3" />
-					<span role="status" aria-live="polite">
-						{upsert.isPending ? "Saving..." : "Save"}
+					<span role="status" aria-live="polite" className="inline-flex items-center gap-1.5">
+						{upsert.isPending ? (
+							<>
+								<Loader2 className="h-3 w-3 animate-spin" /> Saving...
+							</>
+						) : (
+							<>
+								<Save className="h-3 w-3" /> Save
+							</>
+						)}
 					</span>
 				</button>
 				{existing && (
 					<button
 						type="button"
-						onClick={() => del.mutate(existing!.id)}
-						disabled={del.isPending}
-						className="flex items-center gap-2 rounded border border-red-400/30 px-3 py-1 text-[11px] font-mono text-red-400 hover:bg-red-400/10 transition-colors disabled:opacity-50"
+						onClick={() => del.mutate(existing.id)}
+						disabled={busy}
+						aria-label={`Remove ${PROVIDER_LABELS[provider]} key`}
+						className="flex items-center gap-1.5 border border-iron px-3 py-1 text-[11px] font-mono text-slate-text hover:text-red-400 hover:border-red-400/40 transition-colors disabled:opacity-50"
 					>
-						<Trash2 className="h-3 w-3" />
-						<span role="status" aria-live="polite">
-							{del.isPending ? "Deleting..." : "Delete"}
+						<span role="status" aria-live="polite" className="inline-flex items-center gap-1.5">
+							{del.isPending ? (
+								<>
+									<Loader2 className="h-3 w-3 animate-spin" /> Removing...
+								</>
+							) : (
+								<>
+									<Trash2 className="h-3 w-3" /> Remove key
+								</>
+							)}
 						</span>
 					</button>
 				)}
@@ -225,39 +259,52 @@ export default function ProvidersPage() {
 				</p>
 			</div>
 
-			<div className="flex items-center gap-3 mb-4">
-				<div className="flex items-center gap-2">
-					<Brain className="h-4 w-4 text-amber" />
-					<h2 className="font-mono text-lg font-semibold text-foreground">Memory</h2>
+			<section aria-labelledby="integrations-heading" className="mb-10">
+				<div className="flex items-center gap-3 mb-4">
+					<div className="flex items-center gap-2">
+						<Brain className="h-4 w-4 text-amber" />
+						<h2 id="integrations-heading" className="font-mono text-lg font-semibold text-foreground">
+							Memory &amp; classifiers
+						</h2>
+					</div>
 				</div>
-			</div>
-			<p className="text-[11px] font-mono text-slate-text mb-4">
-				Institutional memory. Embeddings configure how reviews, patterns and
-				dismissals are indexed for retrieval.
-			</p>
-			<div className="mb-10 max-w-sm space-y-4">
-				<EmbeddingsCard />
-			</div>
+				<p className="text-[11px] font-mono text-slate-text mb-4">
+					Auxiliary services, not review providers: embeddings index institutional memory for
+					retrieval, and the Jev classifier pre-filters narrow typed decisions ahead of the LLM.
+				</p>
+				<div className="grid gap-4 grid-cols-1 lg:grid-cols-2 max-w-4xl">
+					<EmbeddingsCard />
+					<JevCard />
+				</div>
+			</section>
 
-			<div className="flex items-center gap-3 mb-4">
-				<div className="flex items-center gap-2">
-					<Key className="h-4 w-4 text-amber" />
-					<h2 className="font-mono text-lg font-semibold text-foreground">LLM Providers</h2>
+			<section aria-labelledby="llm-providers-heading">
+				<div className="flex items-center gap-3 mb-4">
+					<div className="flex items-center gap-2">
+						<Key className="h-4 w-4 text-amber" />
+						<h2
+							id="llm-providers-heading"
+							className="font-mono text-lg font-semibold text-foreground"
+						>
+							LLM Providers
+						</h2>
+					</div>
+					<span className="text-[10px] font-mono text-slate-text">
+						{configuredCount}/{PROVIDERS.length} configured
+					</span>
 				</div>
-				<span className="text-[10px] font-mono text-slate-text">
-					{configuredCount}/{PROVIDERS.length} configured
-				</span>
-			</div>
-			<p className="text-[11px] font-mono text-slate-text mb-4 break-words">
-				Bring your own API keys. Keys are scoped to{" "}
-				<span className="text-foreground">{active?.org_login ?? "your org"}</span>. Providers
-				configured here become available for model selection in settings.
-			</p>
-			<div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-				{PROVIDERS.map((p) => (
-					<ProviderKeyCard key={p} provider={p} existing={keyMap.get(p)} />
-				))}
-			</div>
+				<p className="text-[11px] font-mono text-slate-text mb-4 break-words">
+					Generative providers for the review pipeline — these power every stage&apos;s model
+					picker. Keys are scoped to{" "}
+					<span className="text-foreground">{active?.org_login ?? "your org"}</span> and configured
+					providers become selectable in Settings.
+				</p>
+				<div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+					{PROVIDERS.map((p) => (
+						<ProviderKeyCard key={p} provider={p} existing={keyMap.get(p)} />
+					))}
+				</div>
+			</section>
 		</>
 	);
 }
